@@ -245,6 +245,23 @@ inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
         conds.volume.sign &= !long_blocked;
     }
 
+    // R² floor: don't enter momentum trades in choppy markets
+    // low R² means the trend is inconsistent — breakout entries have inverted R:R
+    {
+        int r2_enabled = !FPN_IsZero(cfg->momentum_r2_min);
+        int r2_pass = FPN_GreaterThanOrEqual(rolling->price_r_squared, cfg->momentum_r2_min);
+        int r2_blocked = r2_enabled & !r2_pass;
+
+        uint64_t r2_mask = -(uint64_t)r2_blocked;
+        constexpr unsigned N3 = FPN<F>::N;
+        for (unsigned i = 0; i < N3; i++) {
+            conds.price.w[i]  &= ~r2_mask;
+            conds.volume.w[i] &= ~r2_mask;
+        }
+        conds.price.sign  &= !r2_blocked;
+        conds.volume.sign &= !r2_blocked;
+    }
+
     return conds;
 }
 

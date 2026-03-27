@@ -213,6 +213,15 @@ inline int Regime_Classify(RegimeState<F> *state,
     up_signals += long_slope_strong & long_up;
     down_signals += long_slope_strong & long_down;
 
+    // hidden downtrend: long slope strongly negative + short slope flat
+    // catches macro downtrends disguised as ranging (short window mean-reverts inside the trend)
+    // uses 2x threshold to avoid false positives from mild consolidation
+    int long_down_only = long_has_data
+        & FPN_GreaterThan(abs_long_slope, FPN_Mul(cfg->regime_slope_threshold, FPN_FromDouble<F>(2.0)))
+        & long_down & !short_slope_strong;
+    down_signals += long_down_only;
+    trending_score += long_down_only;
+
     // price movement is consistent (high R²)
     int consistent = FPN_GreaterThan(sig->short_r2, cfg->regime_r2_threshold);
     trending_score += consistent;

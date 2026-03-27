@@ -427,10 +427,17 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     int under_limit =
         FPN_LessThan(FPN_AddSat(deployed, total_cost), max_deployed);
 
+    // min volatility filter: skip trades when stddev is too small relative to price
+    // prevents entries where fee-floored TP is unreachable by stddev-based SL
+    FPN<F> stddev_ratio = FPN_IsZero(fill_price) ? FPN_Zero<F>()
+        : FPN_DivNoAssert(ctrl->rolling.price_stddev, fill_price);
+    int vol_sufficient = FPN_IsZero(ctrl->config.min_stddev_pct) |
+                         FPN_GreaterThanOrEqual(stddev_ratio, ctrl->config.min_stddev_pct);
+
     // new position: room AND spacing AND balance AND not blown AND under
-    // exposure limit
+    // exposure limit AND sufficient volatility
     int is_new = !found & (Portfolio_CountActive(&ctrl->portfolio) < (int)ctrl->config.max_positions) & !too_close &
-                 can_afford & not_blown & under_limit;
+                 can_afford & not_blown & under_limit & vol_sufficient;
     if (is_new) {
       // volatility-based TP/SL with fee floor
       FPN<F> stddev = ctrl->rolling.price_stddev;
@@ -797,6 +804,8 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
     ctrl->config.offset_stddev_max   = new_cfg.offset_stddev_max;
     ctrl->config.min_long_slope      = new_cfg.min_long_slope;
     ctrl->config.min_buy_delta       = new_cfg.min_buy_delta;
+    ctrl->config.min_stddev_pct      = new_cfg.min_stddev_pct;
+    ctrl->config.momentum_r2_min     = new_cfg.momentum_r2_min;
     ctrl->config.tp_hold_score       = new_cfg.tp_hold_score;
     ctrl->config.tp_trail_mult       = new_cfg.tp_trail_mult;
     ctrl->config.sl_trail_mult       = new_cfg.sl_trail_mult;
