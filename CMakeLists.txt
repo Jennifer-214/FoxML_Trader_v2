@@ -26,7 +26,7 @@ endif()
 # engine binary
 #===============================================================================
 add_executable(engine main.cpp)
-target_compile_options(engine PRIVATE -O2)
+target_compile_options(engine PRIVATE -O3 -march=native -funroll-loops -flto)
 
 if(USE_NOTCURSES)
     target_compile_definitions(engine PRIVATE MULTICORE_TUI USE_NOTCURSES)
@@ -70,7 +70,7 @@ endif()
 # tests
 #===============================================================================
 add_executable(controller_test tests/controller_test.cpp)
-target_compile_options(controller_test PRIVATE -O2)
+target_compile_options(controller_test PRIVATE -O3 -march=native -funroll-loops -flto)
 target_include_directories(controller_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
 
 enable_testing()

@@ -67,11 +67,23 @@ template <unsigned F> struct SellSideGateConditions {
 // so im probably gonna keep this as a struct to import conditions to actually trigger placing and selling orders, after thinking about it some more, it would probably be best to create like a standardized struct for a model to pass outputs to as a conditional price and volume threshhold, like, not the current way where its buy when below x value, but something thats more like a gradient or something, it probably wont be a rework of the Condition structs, probably more like code thats within the actual gates that parses the data stream and finds favorable conditions based on the target profit and Condition structs, this only works because the features and stuff are just about optimizing the relationships between raw inputs and target conditions, its just an easier way for the model to learn patters, so based on that it can essentially be boiled down to something as simple as raw OHCLV inference, but that would be handled by a watcher header file, and that would set the conditions, so maybe strict conditions are the correct approach, idk more testing is needed, this will probably be lke the watcher header or module analyzes the data stream, and protfolio performance and dynamically updates as needed based on current microstructure trends, because the inference for parsing raw ohclv and making decisions at run time is way too heavy of a compute cost, so this is probably the correct way, like if drawdone exceeds x% over y time, then update conditions to z0 and z1 price and volume as a basic sketched out idea, im pretty sure i referenced this ina  different file, but it never hurts to rethink through the actual architectural decisions and overall design, because when i said it there i was probably thinking about making it a main function within the same file, but it should probably run on a seperate core, or ideally a seperate server, and the decisions and conditions should be sent over netwrok, idk, i have no formal training or mentoring or whatever so i could be wrong and there are probably better ways of doing this, idk, keeping the gates this simple is still probably a better idea, because it reduces hotpath cycle counts heavily
 //======================================================================================================
 template <unsigned F> inline void BuyGate(const BuySideGateConditions<F> *conditions, const DataStream<F> *stream, OrderPool<F> *pool) {
-    // direction-aware price gate: branchless select between buy-below (MR) and buy-above (momentum)
-    int below = FPN_LessThanOrEqual(stream->price, conditions->price);
-    int above = FPN_GreaterThanOrEqual(stream->price, conditions->price);
+    // inline positive-FPN comparisons: skip sign machinery (crypto prices always positive)
+    // same pattern as PositionExitGate — saves ~70ns vs FPN_LessThanOrEqual
+    constexpr unsigned NW = FPN<F>::N;
+
+    // below: price <= gate  (equivalent to gate >= price for positive values)
+    int below = (conditions->price.w[NW-1] > stream->price.w[NW-1]) |
+                ((conditions->price.w[NW-1] == stream->price.w[NW-1]) & (conditions->price.w[0] >= stream->price.w[0]));
+
+    // above: price >= gate
+    int above = (stream->price.w[NW-1] > conditions->price.w[NW-1]) |
+                ((stream->price.w[NW-1] == conditions->price.w[NW-1]) & (stream->price.w[0] >= conditions->price.w[0]));
+
     int price_pass  = (below & !conditions->gate_direction) | (above & conditions->gate_direction);
-    int volume_pass = FPN_GreaterThanOrEqual(stream->volume, conditions->volume);
+
+    // volume: stream volume >= threshold
+    int volume_pass = (stream->volume.w[NW-1] > conditions->volume.w[NW-1]) |
+                      ((stream->volume.w[NW-1] == conditions->volume.w[NW-1]) & (stream->volume.w[0] >= conditions->volume.w[0]));
 
     int pass = price_pass & volume_pass;
 

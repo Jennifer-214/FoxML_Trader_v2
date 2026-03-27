@@ -206,10 +206,10 @@ inline void PositionExitGate(Portfolio<F> *portfolio, FPN<F> current_price, Exit
         constexpr unsigned NW = FPN<F>::N;
         const FPN<F> &tp = portfolio->positions[idx].take_profit_price;
         const FPN<F> &sl = portfolio->positions[idx].stop_loss_price;
-        int hit_tp = (current_price.w[NW-1] > tp.w[NW-1]) ||
-                     (current_price.w[NW-1] == tp.w[NW-1] && current_price.w[0] >= tp.w[0]);
-        int hit_sl = (current_price.w[NW-1] < sl.w[NW-1]) ||
-                     (current_price.w[NW-1] == sl.w[NW-1] && current_price.w[0] <= sl.w[0]);
+        int hit_tp = (current_price.w[NW-1] > tp.w[NW-1]) |
+                     ((current_price.w[NW-1] == tp.w[NW-1]) & (current_price.w[0] >= tp.w[0]));
+        int hit_sl = (current_price.w[NW-1] < sl.w[NW-1]) |
+                     ((current_price.w[NW-1] == sl.w[NW-1]) & (current_price.w[0] <= sl.w[0]));
 
         // skip positions with no exit prices set (legacy adds, zero TP/SL)
         int has_exits = (tp.w[NW-1] | tp.w[0]) != 0; // faster than FPN_IsZero (no sign check, normalized to 0/1)
