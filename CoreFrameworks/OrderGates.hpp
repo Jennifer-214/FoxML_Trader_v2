@@ -30,6 +30,7 @@ template <unsigned F> struct DataStream {
     FPN<F> volume;
     double price_d;    // stashed from parse for TUI display (no FPN_ToDouble on hot path)
     double volume_d;
+    int is_buyer_maker; // 1 = buyer was maker (seller-initiated), 0 = buyer was taker (buyer-initiated)
 };
 
 template <unsigned F> struct ProfitTarget {

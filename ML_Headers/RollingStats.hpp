@@ -51,6 +51,12 @@ template <unsigned F, unsigned W = 128> struct RollingStats {
     FPN<F> volume_avg;         // mean volume over window
     FPN<F> volume_slope;       // least-squares regression slope of volume
     FPN<F> volume_max;         // max volume in window (for spike detection)
+
+    // directional volume tracking (buy/sell pressure)
+    FPN<F> buy_volume_sum;     // sum of buyer-initiated volume in window
+    FPN<F> sell_volume_sum;    // sum of seller-initiated volume in window
+    FPN<F> volume_delta;       // (buy - sell) / (buy + sell), range [-1.0, +1.0]
+    int side_buf[W];           // ring buffer of is_buyer_maker flags for eviction
 };
 
 //======================================================================================================
@@ -74,6 +80,10 @@ template <unsigned F, unsigned W = 128> inline RollingStats<F, W> RollingStats_I
     rs.volume_avg      = FPN_Zero<F>();
     rs.volume_slope    = FPN_Zero<F>();
     rs.volume_max      = FPN_Zero<F>();
+    rs.buy_volume_sum  = FPN_Zero<F>();
+    rs.sell_volume_sum = FPN_Zero<F>();
+    rs.volume_delta    = FPN_Zero<F>();
+    for (int i = 0; i < (int)W; i++) rs.side_buf[i] = 0;
     return rs;
 }
 
@@ -89,12 +99,32 @@ template <unsigned F, unsigned W = 128> inline RollingStats<F, W> RollingStats_I
 // x-values are time indices 0..count-1, so sum_x and sum_x2 are computed from count alone
 //======================================================================================================
 template <unsigned F, unsigned W>
-inline void RollingStats_Push(RollingStats<F, W> *rs, FPN<F> price, FPN<F> volume) {
+inline void RollingStats_Push(RollingStats<F, W> *rs, FPN<F> price, FPN<F> volume, int is_buyer_maker = 0) {
+    // evict oldest directional volume before overwriting ring buffer slot
+    if (rs->count >= (int)W) {
+        int old_side = rs->side_buf[rs->head];
+        FPN<F> old_vol = rs->volume_buf[rs->head];
+        if (old_side) rs->sell_volume_sum = FPN_SubSat(rs->sell_volume_sum, old_vol);
+        else          rs->buy_volume_sum  = FPN_SubSat(rs->buy_volume_sum,  old_vol);
+    }
+
+    // accumulate new directional volume
+    if (is_buyer_maker) rs->sell_volume_sum = FPN_AddSat(rs->sell_volume_sum, volume);
+    else                rs->buy_volume_sum  = FPN_AddSat(rs->buy_volume_sum,  volume);
+    rs->side_buf[rs->head] = is_buyer_maker;
+
     // write to ring buffer
     rs->price_buf[rs->head]  = price;
     rs->volume_buf[rs->head] = volume;
     rs->head  = (rs->head + 1) & ((int)W - 1);
     rs->count += (rs->count < (int)W);
+
+    // compute volume delta: (buy - sell) / (buy + sell), range [-1.0, +1.0]
+    FPN<F> total_dir_vol = FPN_AddSat(rs->buy_volume_sum, rs->sell_volume_sum);
+    if (!FPN_IsZero(total_dir_vol))
+        rs->volume_delta = FPN_DivNoAssert(FPN_Sub(rs->buy_volume_sum, rs->sell_volume_sum), total_dir_vol);
+    else
+        rs->volume_delta = FPN_Zero<F>();
 
     if (rs->count < 2) return; // need at least 2 samples for meaningful stats
 

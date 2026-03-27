@@ -261,7 +261,8 @@ template <unsigned F>
 inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
                                      OrderPool<F> *pool, FPN<F> current_price,
                                      FPN<F> current_volume,
-                                     TradeLog *trade_log) {
+                                     TradeLog *trade_log,
+                                     int is_buyer_maker = 0) {
   // always increment tick counter (branchless, single add)
   ctrl->total_ticks++;
   ctrl->tick_count++;
@@ -288,8 +289,8 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       if (pd < ctrl->session_low) ctrl->session_low = pd;
       ctrl->price_sum = FPN_AddSat(ctrl->price_sum, current_price);
       ctrl->volume_sum = FPN_AddSat(ctrl->volume_sum, current_volume);
-      RollingStats_Push(&ctrl->rolling, current_price, current_volume);
-      RollingStats_Push(ctrl->rolling_long, current_price, current_volume);
+      RollingStats_Push(&ctrl->rolling, current_price, current_volume, is_buyer_maker);
+      RollingStats_Push(ctrl->rolling_long, current_price, current_volume, is_buyer_maker);
       ctrl->tick_count = 0; // Reset for main.cpp slow-path detection
     }
 
@@ -639,8 +640,8 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
 
   // update rolling market stats - tracks price/volume trends for dynamic gate
   // adjustment
-  RollingStats_Push(&ctrl->rolling, current_price, current_volume);
-  RollingStats_Push(ctrl->rolling_long, current_price, current_volume);
+  RollingStats_Push(&ctrl->rolling, current_price, current_volume, is_buyer_maker);
+  RollingStats_Push(ctrl->rolling_long, current_price, current_volume, is_buyer_maker);
 
   // compute unrealized P&L and estimate exit fees on open positions
   // gross P&L is what Portfolio_ComputePnL returns (price delta * qty)
@@ -795,6 +796,7 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
     ctrl->config.offset_stddev_min   = new_cfg.offset_stddev_min;
     ctrl->config.offset_stddev_max   = new_cfg.offset_stddev_max;
     ctrl->config.min_long_slope      = new_cfg.min_long_slope;
+    ctrl->config.min_buy_delta       = new_cfg.min_buy_delta;
     ctrl->config.tp_hold_score       = new_cfg.tp_hold_score;
     ctrl->config.tp_trail_mult       = new_cfg.tp_trail_mult;
     ctrl->config.sl_trail_mult       = new_cfg.sl_trail_mult;

@@ -65,13 +65,13 @@ template <unsigned F> struct RegimeSignals {
     FPN<F> vol_ratio;         // short_variance / long_variance (volatility spike)
     FPN<F> ror_slope;         // slope-of-slopes (trend acceleration)
     FPN<F> volume_slope;      // volume trend (confirmation)
+    FPN<F> volume_delta;      // net buy/sell pressure [-1.0, +1.0] (from Binance "m" field)
     // data sufficiency flags
     int short_count;
     int long_count;
     int ror_ready;            // 1 if ROR has enough data for meaningful output
     // future extensibility:
     // FPN<F> model_score;    // ← FoxML model output
-    // FPN<F> order_flow;     // ← microstructure signal
 };
 
 //======================================================================================================
@@ -126,6 +126,9 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
     } else {
         sig->ror_slope = FPN_Zero<F>();
     }
+
+    // volume delta: net buy/sell pressure from short window
+    sig->volume_delta = rolling->volume_delta;
 }
 
 //======================================================================================================

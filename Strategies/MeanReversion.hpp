@@ -362,6 +362,24 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(MeanReversionState<F> *s
         conds.price.sign &= long_ok;
     }
 
+    //==================================================================================================
+    // VOLUME DELTA GATE: block MR buys when heavy selling pressure (falling knife)
+    // volume_delta = (buy_vol - sell_vol) / total_vol, range [-1.0, +1.0]
+    // when delta is deeply negative (heavy selling), MR dip buys are catching a falling knife
+    // when disabled (min_buy_delta = 0), gate always passes
+    //==================================================================================================
+    {
+        int delta_enabled = !FPN_IsZero(cfg->min_buy_delta);
+        int delta_pass = FPN_GreaterThanOrEqual(rolling->volume_delta, cfg->min_buy_delta);
+        int delta_ok = delta_pass | !delta_enabled;
+
+        uint64_t delta_mask = -(uint64_t)delta_ok;
+        for (unsigned i = 0; i < N; i++) {
+            conds.price.w[i] &= delta_mask;
+        }
+        conds.price.sign &= delta_ok;
+    }
+
     return conds;
 }
 

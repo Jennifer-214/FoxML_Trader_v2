@@ -415,7 +415,7 @@ static inline int binance_ws_send_close(BinanceStream *bs) {
 // no allocations, no recursion, no tree building - just two string scans
 // returns 1 if both fields found, 0 otherwise
 //======================================================================================================
-static inline int binance_parse_trade(const char *json, int len, char *price_str, char *qty_str) {
+static inline int binance_parse_trade(const char *json, int len, char *price_str, char *qty_str, int *is_buyer_maker) {
     // find "p":" - the price field
     const char *p_key = "\"p\":\"";
     const char *p_pos = strstr(json, p_key);
@@ -443,6 +443,16 @@ static inline int binance_parse_trade(const char *json, int len, char *price_str
     if (q_len >= 64) return 0;
     memcpy(qty_str, q_start, q_len);
     qty_str[q_len] = '\0';
+
+    // find "m": - the is_buyer_maker field (boolean, not quoted)
+    // true = buyer was maker (seller-initiated), false = buyer was taker (buyer-initiated)
+    *is_buyer_maker = 0;
+    const char *m_key = "\"m\":";
+    const char *m_pos = strstr(json, m_key);
+    if (m_pos) {
+        const char *m_val = m_pos + strlen(m_key);
+        *is_buyer_maker = (*m_val == 't') ? 1 : 0;
+    }
 
     return 1;
 }
@@ -662,7 +672,8 @@ static inline int BinanceStream_ReadTick(BinanceStream *bs, DataStream<F> *out) 
         if (opcode == 0x1) {
             // text frame - trade data JSON
             char price_str[64], qty_str[64];
-            if (!binance_parse_trade(frame_buf, payload_len, price_str, qty_str)) {
+            int is_buyer_maker = 0;
+            if (!binance_parse_trade(frame_buf, payload_len, price_str, qty_str, &is_buyer_maker)) {
                 // not a trade message (could be a subscription confirmation or error)
                 // skip it and read next frame
                 continue;
@@ -672,6 +683,7 @@ static inline int BinanceStream_ReadTick(BinanceStream *bs, DataStream<F> *out) 
             out->volume = FPN_FromString<F>(qty_str);
             out->price_d  = atof(price_str);   // stash double for TUI (hidden in I/O path)
             out->volume_d = atof(qty_str);
+            out->is_buyer_maker = is_buyer_maker;
             bs->tick_count++;
             return 1;
         }
