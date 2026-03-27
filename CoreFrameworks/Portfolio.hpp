@@ -20,10 +20,14 @@
 // Im not sure how many positions i really want to track here but for now im just gonna leave it at like 16 i think, there will probably be more advanced logic added later to have a model that watches performace and dynamically updates or something like i attempted to do in FoxML core, but this is a deepr dive so i can actually learn and understand the logic behind stuff, and i just think its cool as shit, like why learn java when stuff lke this exists lmao, also i get to make my own library so im not functioning off blackbox implementations where the end of the documentation is lke "Trust me bro", and i hate reading documentation, so id rather build my own
 //======================================================================================================
 template <unsigned F> struct Position {
-    FPN<F> quantity;          // positive for long, negative for short
-    FPN<F> entry_price;
+    // hot-path fields first: ExitGate reads ONLY these two every tick
+    // packing them in cache line 0 eliminates a cache miss per position
     FPN<F> take_profit_price; // LIVE — modified by trailing TP on slow path
     FPN<F> stop_loss_price;   // LIVE — modified by trailing SL on slow path
+    // warm-path fields: read at fill time and P&L computation
+    FPN<F> quantity;          // positive for long, negative for short
+    FPN<F> entry_price;
+    // cold fields: only read by trailing logic on slow path
     FPN<F> original_tp;       // set at fill, never modified — used to detect "running" positions
     FPN<F> original_sl;       // set at fill, never modified — baseline for trailing SL
 };
@@ -248,7 +252,7 @@ inline void PositionExitGate(Portfolio<F> *portfolio, FPN<F> current_price, Exit
 //   [sizeof(FPN<F>)] balance
 //======================================================================================================
 #define PORTFOLIO_SNAPSHOT_MAGIC 0x4B434954  // "TICK" in little-endian
-#define PORTFOLIO_SNAPSHOT_VERSION 4
+#define PORTFOLIO_SNAPSHOT_VERSION 5
 
 template <unsigned F>
 static inline int Portfolio_Save(const Portfolio<F> *portfolio, FPN<F> realized_pnl,
