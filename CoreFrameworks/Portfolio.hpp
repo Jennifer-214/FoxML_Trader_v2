@@ -39,10 +39,11 @@ static_assert(sizeof(Position<64>) == 6 * sizeof(FPN<64>), "Position size mismat
 // hot-path exit gate only walks set bits so cleared positions are skipped automatically
 //======================================================================================================
 template <unsigned F> struct Portfolio {
+    uint16_t active_bitmap; // hot: read first every tick by ExitGate (cache line 0)
+    uint16_t _pad0;
+    uint32_t _pad1;         // align positions to 8 bytes
     Position<F> positions[16];
-    uint16_t active_bitmap; // one bit per slot, same pattern as OrderPool
 };
-// sizeof includes padding after uint16_t to align the struct - thats fine, the bitmap is what matters
 //======================================================================================================
 // [EXIT STRUCTS]
 //======================================================================================================
@@ -57,8 +58,9 @@ template <unsigned F> struct ExitRecord {
 };
 
 template <unsigned F> struct ExitBuffer {
+    uint32_t count;             // hot: read first every tick (cache line 0 with records[0])
+    uint32_t _pad0;             // align records to 8 bytes
     ExitRecord<F> records[16];
-    uint32_t count;
 };
 
 template <unsigned F> inline void ExitBuffer_Init(ExitBuffer<F> *buf) {

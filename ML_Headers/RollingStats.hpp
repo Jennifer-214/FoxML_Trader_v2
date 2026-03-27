@@ -35,12 +35,14 @@
 template <unsigned F, unsigned W = 128> struct RollingStats {
     static_assert(W > 0 && (W & (W - 1)) == 0, "W must be power of 2");
 
+    // ring buffers — iterated on push (slow path)
     FPN<F> price_buf[W];
     FPN<F> volume_buf[W];
+    int side_buf[W];           // is_buyer_maker flags for directional volume eviction
     int head;
     int count;
 
-    // cached outputs - recomputed every push
+    // cached outputs — recomputed every push, read by strategies and regime detector
     FPN<F> price_avg;          // mean price over window
     FPN<F> price_slope;        // least-squares regression slope (positive = rising)
     FPN<F> price_r_squared;    // regression R² (0-1, trend consistency)
@@ -56,7 +58,6 @@ template <unsigned F, unsigned W = 128> struct RollingStats {
     FPN<F> buy_volume_sum;     // sum of buyer-initiated volume in window
     FPN<F> sell_volume_sum;    // sum of seller-initiated volume in window
     FPN<F> volume_delta;       // (buy - sell) / (buy + sell), range [-1.0, +1.0]
-    int side_buf[W];           // ring buffer of is_buyer_maker flags for eviction
 };
 
 //======================================================================================================
