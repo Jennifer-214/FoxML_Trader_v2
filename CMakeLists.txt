@@ -5,41 +5,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 #===============================================================================
-# TUI backend: ANSI (default), FTXUI (opt-in), or notcurses (opt-in)
-#===============================================================================
-option(USE_NOTCURSES "Use notcurses for TUI (requires system lib)" OFF)
-option(USE_FTXUI "Use FTXUI for TUI (auto-fetched)" OFF)
-
-if(USE_FTXUI)
-    include(FetchContent)
-    FetchContent_Declare(ftxui
-        GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI
-        GIT_TAG v5.0.0
-    )
-    set(FTXUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(FTXUI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(FTXUI_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(ftxui)
-endif()
-
-#===============================================================================
-# engine binary
+# engine binary — ANSI TUI (zero deps, diff-based rendering)
 #===============================================================================
 add_executable(engine main.cpp)
 target_compile_options(engine PRIVATE -O3 -march=native -funroll-loops -flto)
-
-if(USE_NOTCURSES)
-    target_compile_definitions(engine PRIVATE MULTICORE_TUI USE_NOTCURSES)
-    target_link_libraries(engine PRIVATE notcurses notcurses-core ssl crypto pthread)
-elseif(USE_FTXUI)
-    target_compile_definitions(engine PRIVATE MULTICORE_TUI USE_FTXUI)
-    target_link_libraries(engine PRIVATE
-        ftxui::screen ftxui::dom ftxui::component
-        ssl crypto pthread)
-else()
-    target_compile_definitions(engine PRIVATE MULTICORE_TUI USE_ANSI_TUI)
-    target_link_libraries(engine PRIVATE ssl crypto pthread)
-endif()
+target_compile_definitions(engine PRIVATE MULTICORE_TUI USE_ANSI_TUI)
+target_link_libraries(engine PRIVATE ssl crypto pthread)
 
 #===============================================================================
 # build options

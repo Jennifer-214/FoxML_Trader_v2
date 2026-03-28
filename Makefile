@@ -11,12 +11,6 @@ run: all
 	cd $(BUILD_DIR) && ./engine
 
 # build variants
-ftxui:
-	cmake -B $(BUILD_DIR) -DUSE_FTXUI=ON && cmake --build $(BUILD_DIR) -j$$(nproc)
-
-notcurses:
-	cmake -B $(BUILD_DIR) -DUSE_NOTCURSES=ON && cmake --build $(BUILD_DIR) -j$$(nproc)
-
 profile:
 	cmake -B $(BUILD_DIR) -DLATENCY_PROFILING=ON && cmake --build $(BUILD_DIR) -j$$(nproc)
 
@@ -42,4 +36,4 @@ clean:
 reconfigure:
 	rm -rf $(BUILD_DIR) && cmake -B $(BUILD_DIR)
 
-.PHONY: all run ftxui notcurses profile profile-lite bench test clean reconfigure
+.PHONY: all run profile profile-lite bench test clean reconfigure
