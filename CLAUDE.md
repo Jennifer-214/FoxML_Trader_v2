@@ -235,6 +235,22 @@ Only 1 TUI renderer (TUIAnsi.hpp). FTXUI/notcurses were removed.
 - TUIAnsi.hpp (1×)
 - EngineTUI.hpp (2×)
 
+### Adding a RollingStats field
+1. **RollingStats struct** (ML_Headers/RollingStats.hpp): add `FPN<F> my_field;`
+2. **RollingStats_Init()**: add `rs.my_field = FPN_Zero<F>();`
+3. **RollingStats_Push()**: compute it (runs on slow path, O(W) budget is fine)
+4. Field is now readable from any strategy or regime detector via `rolling->my_field`
+
+For running-sum fields (like VWAP), use the evict-old/add-new pattern with a `pv_buf[W]` ring buffer. For single-pass fields, compute inline in the existing loop.
+
+### Adding a new exit reason
+Rare — only needed for fundamentally new exit types (not TP/SL variants):
+1. **Portfolio.hpp PositionExitGate**: add comparison logic + exit buffer record
+2. **Portfolio.hpp ExitBufferRecord**: add reason constant
+3. **PortfolioController.hpp DrainExits**: handle the new reason in P&L booking
+4. **TUIAnsi.hpp**: display if needed
+5. **tests/controller_test.cpp**: regression test
+
 ## Adding a New Strategy
 
 Every strategy follows the same 4-function pattern. All logic runs on the slow path; the hot path only reads `buy_conds`.
