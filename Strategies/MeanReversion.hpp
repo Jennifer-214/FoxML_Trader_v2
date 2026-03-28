@@ -394,12 +394,7 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(
     int long_pass =
         FPN_GreaterThanOrEqual(relative_long_slope, cfg->min_long_slope);
     int long_ok = long_pass | !long_enabled;
-
-    uint64_t signal_mask = -(uint64_t)long_ok;
-    for (unsigned i = 0; i < N; i++) {
-      conds.price.w[i] &= signal_mask;
-    }
-    conds.price.sign &= long_ok;
+    Gate_Zero(&conds, long_ok);
   }
 
   //==================================================================================================
@@ -413,12 +408,7 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(
     int delta_pass =
         FPN_GreaterThanOrEqual(rolling->volume_delta, cfg->min_buy_delta);
     int delta_ok = delta_pass | !delta_enabled;
-
-    uint64_t delta_mask = -(uint64_t)delta_ok;
-    for (unsigned i = 0; i < N; i++) {
-      conds.price.w[i] &= delta_mask;
-    }
-    conds.price.sign &= delta_ok;
+    Gate_Zero(&conds, delta_ok);
   }
 
   //==================================================================================================
@@ -434,12 +424,7 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(
     int vwap_pass =
         FPN_LessThanOrEqual(rolling->vwap_deviation, neg_offset);
     int vwap_ok = vwap_pass | !vwap_enabled;
-
-    uint64_t vwap_mask = -(uint64_t)vwap_ok;
-    for (unsigned i = 0; i < N; i++) {
-      conds.price.w[i] &= vwap_mask;
-    }
-    conds.price.sign &= vwap_ok;
+    Gate_Zero(&conds, vwap_ok);
   }
 
   return conds;

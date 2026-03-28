@@ -50,6 +50,23 @@ template <unsigned F> struct SellSideGateConditions {
 };
 
 //======================================================================================================
+// [GATE HELPERS]
+//======================================================================================================
+// branchless gate: zeros buy conditions when gate fails (pass=0)
+// replaces the 5-line mask pattern used across all strategy buy signals
+//======================================================================================================
+template <unsigned F>
+inline void Gate_Zero(BuySideGateConditions<F> *conds, int pass) {
+    uint64_t mask = -(uint64_t)pass;
+    for (unsigned w = 0; w < FPN<F>::N; w++) {
+        conds->price.w[w]  &= mask;
+        conds->volume.w[w] &= mask;
+    }
+    conds->price.sign  &= pass;
+    conds->volume.sign &= pass;
+}
+
+//======================================================================================================
 //[ORDER GATES]
 //======================================================================================================
 // no more packing/unpacking - compare FPN fields directly (already branchless)

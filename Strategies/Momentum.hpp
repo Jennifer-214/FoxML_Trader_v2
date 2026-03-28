@@ -234,15 +234,8 @@ inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
             : FPN_DivNoAssert(rolling_long->price_slope, rolling_long->price_avg);
         int long_pass = FPN_GreaterThanOrEqual(relative_long_slope, cfg->min_long_slope);
 
-        int long_blocked = long_enabled & !long_pass;
-        uint64_t block_mask = -(uint64_t)long_blocked;
-        constexpr unsigned N2 = FPN<F>::N;
-        for (unsigned i = 0; i < N2; i++) {
-            conds.price.w[i]  &= ~block_mask;
-            conds.volume.w[i] &= ~block_mask;
-        }
-        conds.price.sign  &= !long_blocked;
-        conds.volume.sign &= !long_blocked;
+        int long_ok = long_pass | !long_enabled;
+        Gate_Zero(&conds, long_ok);
     }
 
     // R² floor: don't enter momentum trades in choppy markets
@@ -250,16 +243,8 @@ inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
     {
         int r2_enabled = !FPN_IsZero(cfg->momentum_r2_min);
         int r2_pass = FPN_GreaterThanOrEqual(rolling->price_r_squared, cfg->momentum_r2_min);
-        int r2_blocked = r2_enabled & !r2_pass;
-
-        uint64_t r2_mask = -(uint64_t)r2_blocked;
-        constexpr unsigned N3 = FPN<F>::N;
-        for (unsigned i = 0; i < N3; i++) {
-            conds.price.w[i]  &= ~r2_mask;
-            conds.volume.w[i] &= ~r2_mask;
-        }
-        conds.price.sign  &= !r2_blocked;
-        conds.volume.sign &= !r2_blocked;
+        int r2_ok = r2_pass | !r2_enabled;
+        Gate_Zero(&conds, r2_ok);
     }
 
     return conds;

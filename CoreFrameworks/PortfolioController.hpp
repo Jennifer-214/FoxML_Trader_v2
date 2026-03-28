@@ -814,74 +814,26 @@ inline void PortfolioController_CycleRegime(PortfolioController<F> *ctrl) {
     fprintf(stderr, "[ENGINE] regime manually set to %s\n", names[next]);
 }
 
-// config hot-reload: one function for all fields, called from both TUI paths
+// config hot-reload: bulk copy all fields, then restore protected startup-only fields
+// new config fields automatically hot-reload without touching this function
 template <unsigned F>
 inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
                                            const ControllerConfig<F> &new_cfg) {
-    ctrl->config.poll_interval       = new_cfg.poll_interval;
-    ctrl->config.r2_threshold        = new_cfg.r2_threshold;
-    ctrl->config.slope_scale_buy     = new_cfg.slope_scale_buy;
-    ctrl->config.max_shift           = new_cfg.max_shift;
-    ctrl->config.take_profit_pct     = new_cfg.take_profit_pct;
-    ctrl->config.stop_loss_pct       = new_cfg.stop_loss_pct;
-    ctrl->config.fee_rate            = new_cfg.fee_rate;
-    ctrl->config.risk_pct            = new_cfg.risk_pct;
-    ctrl->config.volume_multiplier   = new_cfg.volume_multiplier;
-    ctrl->config.entry_offset_pct    = new_cfg.entry_offset_pct;
-    ctrl->config.spacing_multiplier  = new_cfg.spacing_multiplier;
-    ctrl->config.offset_min          = new_cfg.offset_min;
-    ctrl->config.offset_max          = new_cfg.offset_max;
-    ctrl->config.vol_mult_min        = new_cfg.vol_mult_min;
-    ctrl->config.vol_mult_max        = new_cfg.vol_mult_max;
-    ctrl->config.filter_scale        = new_cfg.filter_scale;
-    ctrl->config.max_drawdown_pct    = new_cfg.max_drawdown_pct;
-    ctrl->config.max_exposure_pct    = new_cfg.max_exposure_pct;
-    ctrl->config.max_positions       = new_cfg.max_positions;
-    ctrl->config.offset_stddev_mult  = new_cfg.offset_stddev_mult;
-    ctrl->config.offset_stddev_min   = new_cfg.offset_stddev_min;
-    ctrl->config.offset_stddev_max   = new_cfg.offset_stddev_max;
-    ctrl->config.min_long_slope      = new_cfg.min_long_slope;
-    ctrl->config.min_buy_delta       = new_cfg.min_buy_delta;
-    ctrl->config.vwap_offset         = new_cfg.vwap_offset;
-    ctrl->config.session_filter_enabled = new_cfg.session_filter_enabled;
-    ctrl->config.session_asian_mult  = new_cfg.session_asian_mult;
-    ctrl->config.session_european_mult = new_cfg.session_european_mult;
-    ctrl->config.session_us_mult     = new_cfg.session_us_mult;
-    ctrl->config.session_overnight_mult = new_cfg.session_overnight_mult;
-    ctrl->config.min_stddev_pct      = new_cfg.min_stddev_pct;
-    ctrl->config.momentum_r2_min     = new_cfg.momentum_r2_min;
-    ctrl->config.tp_hold_score       = new_cfg.tp_hold_score;
-    ctrl->config.tp_trail_mult       = new_cfg.tp_trail_mult;
-    ctrl->config.sl_trail_mult       = new_cfg.sl_trail_mult;
-    ctrl->config.fee_floor_mult      = new_cfg.fee_floor_mult;
-    ctrl->config.min_sl_tp_ratio     = new_cfg.min_sl_tp_ratio;
-    ctrl->config.ror_tp_bonus        = new_cfg.ror_tp_bonus;
-    ctrl->config.momentum_tp_r2_min  = new_cfg.momentum_tp_r2_min;
-    ctrl->config.momentum_sl_r2_max  = new_cfg.momentum_sl_r2_max;
-    ctrl->config.squeeze_decay       = new_cfg.squeeze_decay;
-    ctrl->config.offset_adapt_scale  = new_cfg.offset_adapt_scale;
-    ctrl->config.stddev_adapt_scale  = new_cfg.stddev_adapt_scale;
-    ctrl->config.vol_adapt_scale     = new_cfg.vol_adapt_scale;
-    ctrl->config.breakout_min        = new_cfg.breakout_min;
-    ctrl->config.slow_path_max_secs  = new_cfg.slow_path_max_secs;
-    ctrl->config.max_hold_ticks      = new_cfg.max_hold_ticks;
-    ctrl->config.min_hold_gain_pct   = new_cfg.min_hold_gain_pct;
-    // regime + momentum
-    ctrl->config.regime_slope_threshold = new_cfg.regime_slope_threshold;
-    ctrl->config.regime_r2_threshold    = new_cfg.regime_r2_threshold;
-    ctrl->config.regime_volatile_stddev = new_cfg.regime_volatile_stddev;
-    ctrl->config.regime_vol_spike_ratio = new_cfg.regime_vol_spike_ratio;
-    ctrl->config.regime_hysteresis      = new_cfg.regime_hysteresis;
-    ctrl->config.momentum_breakout_mult = new_cfg.momentum_breakout_mult;
-    ctrl->config.momentum_tp_mult       = new_cfg.momentum_tp_mult;
-    ctrl->config.momentum_sl_mult       = new_cfg.momentum_sl_mult;
-    ctrl->config.spike_threshold         = new_cfg.spike_threshold;
-    ctrl->config.spike_spacing_reduction = new_cfg.spike_spacing_reduction;
-    ctrl->config.sl_cooldown_cycles      = new_cfg.sl_cooldown_cycles;
-    ctrl->config.sl_cooldown_adaptive    = new_cfg.sl_cooldown_adaptive;
-    ctrl->config.sl_cooldown_base        = new_cfg.sl_cooldown_base;
-    ctrl->config.sl_cooldown_extra       = new_cfg.sl_cooldown_extra;
-    ctrl->config.slippage_pct            = new_cfg.slippage_pct;
+    // save startup-only fields that should survive hot-reload
+    FPN<F> saved_starting_balance = ctrl->config.starting_balance;
+    uint32_t saved_warmup_ticks = ctrl->config.warmup_ticks;
+    uint32_t saved_min_warmup = ctrl->config.min_warmup_samples;
+    int saved_use_real_money = ctrl->config.use_real_money;
+
+    // bulk copy — every field updates automatically
+    ctrl->config = new_cfg;
+
+    // restore protected fields
+    ctrl->config.starting_balance = saved_starting_balance;
+    ctrl->config.warmup_ticks = saved_warmup_ticks;
+    ctrl->config.min_warmup_samples = saved_min_warmup;
+    ctrl->config.use_real_money = saved_use_real_money;
+
     // reset adaptive filters to new values
     ctrl->mean_rev.live_offset_pct    = new_cfg.entry_offset_pct;
     ctrl->mean_rev.live_vol_mult      = new_cfg.volume_multiplier;
