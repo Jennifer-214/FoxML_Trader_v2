@@ -88,6 +88,9 @@ template <unsigned F> struct ControllerConfig {
   uint32_t min_warmup_samples;   // min rolling stats samples before trading (0 = use warmup_ticks only)
   // post-SL cooldown
   uint32_t sl_cooldown_cycles;   // slow-path cycles to pause buying after SL (0 = disabled)
+  int sl_cooldown_adaptive;      // 0 = fixed cycles, 1 = scale by trend confidence at SL time
+  uint32_t sl_cooldown_base;     // minimum cooldown cycles (even on spikes)
+  uint32_t sl_cooldown_extra;    // max additional cycles (scaled by trend confidence)
   // momentum strategy
   FPN<F> momentum_breakout_mult;  // buy when price > avg + stddev * this (e.g. 1.5)
   FPN<F> momentum_tp_mult;        // TP multiplier for momentum (e.g. 3.0 stddevs)
@@ -164,6 +167,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.regime_vol_spike_ratio = FPN_FromDouble<F>(2.0);   // variance spike: 2x baseline = volatile
   cfg.regime_hysteresis      = 5;                          // 5 slow-path cycles before switch
   cfg.sl_cooldown_cycles     = 5;                          // 5 slow-path cycles pause after SL
+  cfg.sl_cooldown_adaptive   = 0;                          // 0 = fixed, 1 = adaptive (backward compat)
+  cfg.sl_cooldown_base       = 2;                          // min cooldown (spike recovery)
+  cfg.sl_cooldown_extra      = 8;                          // max extra (strong downtrend)
   // momentum strategy
   cfg.momentum_breakout_mult = FPN_FromDouble<F>(1.5);    // buy 1.5σ above avg
   cfg.momentum_tp_mult       = FPN_FromDouble<F>(3.0);    // wider TP for trends
@@ -345,6 +351,12 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       cfg.min_warmup_samples = (uint32_t)atol(val);
     else if (strcmp(key, "sl_cooldown_cycles") == 0)
       cfg.sl_cooldown_cycles = (uint32_t)atol(val);
+    else if (strcmp(key, "sl_cooldown_adaptive") == 0)
+      cfg.sl_cooldown_adaptive = atoi(val);
+    else if (strcmp(key, "sl_cooldown_base") == 0)
+      cfg.sl_cooldown_base = (uint32_t)atol(val);
+    else if (strcmp(key, "sl_cooldown_extra") == 0)
+      cfg.sl_cooldown_extra = (uint32_t)atol(val);
     // momentum strategy
     else if (strcmp(key, "momentum_breakout_mult") == 0)
       cfg.momentum_breakout_mult = FPN_FromDouble<F>(atof(val));

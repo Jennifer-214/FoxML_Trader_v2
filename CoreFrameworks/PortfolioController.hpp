@@ -223,8 +223,19 @@ inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
     const char *reason = (rec->reason == 0) ? "TP" : "SL";
     ctrl->wins += (rec->reason == 0);
     ctrl->losses += (rec->reason == 1);
-    if (rec->reason == 1 && ctrl->config.sl_cooldown_cycles > 0)
-        ctrl->sl_cooldown_counter = ctrl->config.sl_cooldown_cycles;
+    if (rec->reason == 1) {
+        if (ctrl->config.sl_cooldown_adaptive) {
+            // adaptive: scale by trend confidence (R² * negative slope direction)
+            // high R² downtrend = long cooldown, low R² spike = short cooldown
+            double r2 = FPN_ToDouble(ctrl->rolling.price_r_squared);
+            double slope = FPN_ToDouble(ctrl->rolling.price_slope);
+            double confidence = r2 * (slope < 0.0 ? 1.0 : 0.0);
+            ctrl->sl_cooldown_counter = ctrl->config.sl_cooldown_base +
+                (uint32_t)(ctrl->config.sl_cooldown_extra * confidence);
+        } else if (ctrl->config.sl_cooldown_cycles > 0) {
+            ctrl->sl_cooldown_counter = ctrl->config.sl_cooldown_cycles;
+        }
+    }
 
     int is_win = !pos_pnl.sign & !FPN_IsZero(pos_pnl);
     int is_loss = pos_pnl.sign;
@@ -867,6 +878,9 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
     ctrl->config.spike_threshold         = new_cfg.spike_threshold;
     ctrl->config.spike_spacing_reduction = new_cfg.spike_spacing_reduction;
     ctrl->config.sl_cooldown_cycles      = new_cfg.sl_cooldown_cycles;
+    ctrl->config.sl_cooldown_adaptive    = new_cfg.sl_cooldown_adaptive;
+    ctrl->config.sl_cooldown_base        = new_cfg.sl_cooldown_base;
+    ctrl->config.sl_cooldown_extra       = new_cfg.sl_cooldown_extra;
     ctrl->config.slippage_pct            = new_cfg.slippage_pct;
     // reset adaptive filters to new values
     ctrl->mean_rev.live_offset_pct    = new_cfg.entry_offset_pct;
