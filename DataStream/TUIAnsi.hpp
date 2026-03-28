@@ -522,6 +522,13 @@ static inline int ANSI_Section_Regime(AnsiBuf *ab, const TUISnapshot *s, int y, 
         ab_goto(ab, y, 3);
         ab_printf(ab, A_SAND "vwap: " A_FG "$%.2f" A_DIM "  dev: "
                   "%s%+.3f%%" A_RESET, s->vwap, vwap_color, s->vwap_dev * 100.0);
+        // book imbalance on same line if available
+        if (s->book_imbalance != 0.0) {
+            const char *book_color = (s->book_imbalance > 0.1) ? A_GREEN :
+                                     (s->book_imbalance < -0.1) ? A_RED : A_FG;
+            ab_printf(ab, A_DIM "  " A_SAND "book: " "%s%+.2f" A_RESET,
+                      book_color, s->book_imbalance);
+        }
         y++;
     }
 

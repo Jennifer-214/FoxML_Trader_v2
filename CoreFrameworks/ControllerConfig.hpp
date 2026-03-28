@@ -111,6 +111,9 @@ template <unsigned F> struct ControllerConfig {
   FPN<F> session_european_mult;  // gate multiplier during European session (07-13 UTC)
   FPN<F> session_us_mult;        // gate multiplier during US session (13-20 UTC)
   FPN<F> session_overnight_mult; // gate multiplier during overnight (20-00 UTC)
+  // order book (L2 depth)
+  int depth_enabled;             // 0 = trade stream only, 1 = also subscribe to depth
+  FPN<F> min_book_imbalance;     // require bid bias to buy (0 = disabled, 0.10 = 10% bid excess)
   // live trading
   int use_real_money;            // 0=paper (default), 1=real orders via REST API
 };
@@ -192,6 +195,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.session_european_mult  = FPN_FromDouble<F>(1.0);     // normal during European
   cfg.session_us_mult        = FPN_FromDouble<F>(0.8);     // tighter gates, best liquidity
   cfg.session_overnight_mult = FPN_FromDouble<F>(1.3);     // wider gates, declining volume
+  cfg.depth_enabled = 0;                                    // 0 = disabled (backward compat)
+  cfg.min_book_imbalance = FPN_Zero<F>();                   // 0 = disabled
   cfg.use_real_money = 0;                                  // 0 = paper trading (default safe)
   return cfg;
 }
@@ -340,12 +345,14 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(sl_cooldown_adaptive)
     CFG_PARSE_INT(partial_exit_enabled)
     CFG_PARSE_INT(breakeven_on_partial)
+    CFG_PARSE_INT(depth_enabled)
     CFG_PARSE_INT(use_real_money)
     CFG_PARSE_INT(session_filter_enabled)
 
-    //--- partial exit FPN ---
+    //--- partial exit + depth FPN ---
     CFG_PARSE_FPN(partial_exit_pct)
     CFG_PARSE_FPN(tp2_mult)
+    CFG_PARSE_FPN(min_book_imbalance)
 
     #undef CFG_PARSE_FPN
     #undef CFG_PARSE_PCT

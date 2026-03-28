@@ -669,6 +669,8 @@ struct TUISnapshot {
     double volume_spike_ratio; // current volume / rolling max (spike detection)
     int spike_active;     // 1 if spike_ratio >= threshold
     double vwap, vwap_dev; // VWAP and deviation from it
+    double book_imbalance; // bid/ask imbalance [-1, +1] (0 = no depth data)
+    double book_spread;    // bid-ask spread
     int current_session;   // 0=asian, 1=european, 2=us, 3=overnight (-1=disabled)
     double session_mult;   // current session gate multiplier
     int sl_cooldown;      // remaining slow-path cycles in post-SL cooldown
@@ -850,6 +852,8 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
                                                  ctrl->config.spike_threshold);
     snap->vwap = FPN_ToDouble(ctrl->rolling.vwap);
     snap->vwap_dev = FPN_ToDouble(ctrl->rolling.vwap_deviation);
+    snap->book_imbalance = FPN_ToDouble(ctrl->book_imbalance);
+    snap->book_spread = 0.0; // populated from depth thread if available
     snap->current_session = ctrl->current_session;
     snap->session_mult = FPN_ToDouble(ctrl->session_mult);
     snap->sl_cooldown = (int)ctrl->sl_cooldown_counter;

@@ -84,6 +84,7 @@ template <unsigned F> struct PortfolioController {
   double session_low;          // lowest price since startup
   int current_session;          // 0=asian, 1=european, 2=us, 3=overnight
   FPN<F> session_mult;          // current session gate multiplier
+  FPN<F> book_imbalance;        // bid/ask imbalance from depth stream [-1, +1] (updated externally)
   uint32_t fills_rejected;     // total fills rejected since startup
   int last_reject_reason;      // 0=none, 1=spacing, 2=balance, 3=exposure, 4=breaker, 5=full, 6=dup
   TradeLogBuffer trade_buf;    // buffered trade log — hot path pushes, slow path drains
@@ -153,6 +154,7 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->session_low = 0.0;
   ctrl->current_session = -1;  // unset until first slow path
   ctrl->session_mult = FPN_FromDouble<F>(1.0);
+  ctrl->book_imbalance = FPN_Zero<F>();
   ctrl->fills_rejected = 0;
   ctrl->last_reject_reason = 0;
 
@@ -802,6 +804,13 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // wider mult = more volume required = fewer entries during low-liquidity sessions
   if (ctrl->config.session_filter_enabled) {
     ctrl->buy_conds.volume = FPN_Mul(ctrl->buy_conds.volume, ctrl->session_mult);
+  }
+
+  // book imbalance gate: require bid excess before buying
+  // book_imbalance is updated externally from depth thread (zero if no depth data)
+  if (!FPN_IsZero(ctrl->config.min_book_imbalance)) {
+    int book_ok = FPN_GreaterThanOrEqual(ctrl->book_imbalance, ctrl->config.min_book_imbalance);
+    Gate_Zero(&ctrl->buy_conds, book_ok);
   }
 
   // volatile / downtrend: pause buying entirely (existing positions keep running)
