@@ -1,4 +1,5 @@
 build/
+build_latency/
 *.o
 *.d
 plans/
