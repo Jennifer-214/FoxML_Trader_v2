@@ -228,160 +228,115 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     char *key = line;
     char *val = &line[eq_pos + 1];
 
-    if (strcmp(key, "poll_interval") == 0)
-      cfg.poll_interval = (uint32_t)atol(val);
-    else if (strcmp(key, "warmup_ticks") == 0)
-      cfg.warmup_ticks = (uint32_t)atol(val);
-    else if (strcmp(key, "r2_threshold") == 0)
-      cfg.r2_threshold = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "slope_scale_buy") == 0)
-      cfg.slope_scale_buy = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "max_shift") == 0)
-      cfg.max_shift = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "take_profit_pct") == 0)
-      cfg.take_profit_pct = FPN_FromDouble<F>(atof(val) / 100.0);
-    else if (strcmp(key, "stop_loss_pct") == 0)
-      cfg.stop_loss_pct = FPN_FromDouble<F>(atof(val) / 100.0);
-    else if (strcmp(key, "starting_balance") == 0)
-      cfg.starting_balance = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "fee_rate") == 0)
-      cfg.fee_rate = FPN_FromDouble<F>(atof(val) / 100.0);
-    else if (strcmp(key, "risk_pct") == 0)
-      cfg.risk_pct = FPN_FromDouble<F>(
-          atof(val) / 100.0); // needs to be current portfolio value, or total
-                              // equity holding it goes 1000 -> 900 -> 800
-    else if (strcmp(key, "volume_multiplier") == 0)
-      cfg.volume_multiplier = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "entry_offset_pct") == 0)
-      cfg.entry_offset_pct = FPN_FromDouble<F>(atof(val) / 100.0);
-    else if (strcmp(key, "spacing_multiplier") == 0)
-      cfg.spacing_multiplier = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "offset_min") == 0)
-      cfg.offset_min = FPN_FromDouble<F>(atof(val) / 100.0);
-    else if (strcmp(key, "offset_max") == 0)
-      cfg.offset_max = FPN_FromDouble<F>(atof(val) / 100.0);
-    else if (strcmp(key, "vol_mult_min") == 0)
-      cfg.vol_mult_min = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "vol_mult_max") == 0)
-      cfg.vol_mult_max = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "filter_scale") == 0)
-      cfg.filter_scale = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "max_drawdown_pct") == 0)
-      cfg.max_drawdown_pct = FPN_FromDouble<F>(atof(val) / 100.0);
-    else if (strcmp(key, "max_exposure_pct") == 0)
-      cfg.max_exposure_pct = FPN_FromDouble<F>(atof(val) / 100.0);
-    else if (strcmp(key, "max_positions") == 0) {
-      int v = atoi(val); if (v < 1) v = 1; if (v > 16) v = 16;
-      cfg.max_positions = (uint32_t)v;
-    }
-    else if (strcmp(key, "offset_stddev_mult") == 0) {
-      double v = atof(val); if (v < 0) v = 0;
-      cfg.offset_stddev_mult = FPN_FromDouble<F>(v);
-    }
-    else if (strcmp(key, "offset_stddev_min") == 0) {
-      double v = atof(val); if (v < 0) v = 0;
-      cfg.offset_stddev_min = FPN_FromDouble<F>(v);
-    }
-    else if (strcmp(key, "offset_stddev_max") == 0) {
-      double v = atof(val); if (v < 0) v = 0;
-      cfg.offset_stddev_max = FPN_FromDouble<F>(v);
-    }
-    else if (strcmp(key, "min_long_slope") == 0)
-      cfg.min_long_slope = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "min_buy_delta") == 0)
-      cfg.min_buy_delta = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "vwap_offset") == 0)
-      cfg.vwap_offset = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "min_stddev_pct") == 0)
-      cfg.min_stddev_pct = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "momentum_r2_min") == 0)
-      cfg.momentum_r2_min = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "tp_hold_score") == 0) {
-      double v = atof(val); if (v < 0) v = 0;
-      cfg.tp_hold_score = FPN_FromDouble<F>(v);
-    }
-    else if (strcmp(key, "tp_trail_mult") == 0) {
-      double v = atof(val); if (v < 0) v = 0;
-      cfg.tp_trail_mult = FPN_FromDouble<F>(v);
-    }
-    else if (strcmp(key, "sl_trail_mult") == 0) {
-      double v = atof(val); if (v < 0) v = 0;
-      cfg.sl_trail_mult = FPN_FromDouble<F>(v);
-    }
-    else if (strcmp(key, "fee_floor_mult") == 0) {
-      double v = atof(val); if (v < 1) v = 1;
-      cfg.fee_floor_mult = FPN_FromDouble<F>(v);
-    }
-    else if (strcmp(key, "min_sl_tp_ratio") == 0)
-      cfg.min_sl_tp_ratio = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "ror_tp_bonus") == 0)
-      cfg.ror_tp_bonus = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "momentum_tp_r2_min") == 0)
-      cfg.momentum_tp_r2_min = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "momentum_sl_r2_max") == 0)
-      cfg.momentum_sl_r2_max = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "squeeze_decay") == 0)
-      cfg.squeeze_decay = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "offset_adapt_scale") == 0)
-      cfg.offset_adapt_scale = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "stddev_adapt_scale") == 0)
-      cfg.stddev_adapt_scale = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "vol_adapt_scale") == 0)
-      cfg.vol_adapt_scale = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "breakout_min") == 0)
-      cfg.breakout_min = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "slow_path_max_secs") == 0)
-      cfg.slow_path_max_secs = (uint32_t)atol(val);
-    else if (strcmp(key, "max_hold_ticks") == 0)
-      cfg.max_hold_ticks = (uint32_t)atol(val);
-    else if (strcmp(key, "min_hold_gain_pct") == 0)
-      cfg.min_hold_gain_pct = FPN_FromDouble<F>(atof(val) / 100.0);
-    // regime detection
-    else if (strcmp(key, "regime_slope_threshold") == 0)
-      cfg.regime_slope_threshold = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "regime_r2_threshold") == 0)
-      cfg.regime_r2_threshold = FPN_FromDouble<F>(atof(val) / 100.0);
-    else if (strcmp(key, "regime_volatile_stddev") == 0)
-      cfg.regime_volatile_stddev = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "regime_vol_spike_ratio") == 0)
-      cfg.regime_vol_spike_ratio = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "regime_hysteresis") == 0)
-      cfg.regime_hysteresis = (uint32_t)atol(val);
-    else if (strcmp(key, "min_warmup_samples") == 0)
-      cfg.min_warmup_samples = (uint32_t)atol(val);
-    else if (strcmp(key, "sl_cooldown_cycles") == 0)
-      cfg.sl_cooldown_cycles = (uint32_t)atol(val);
-    else if (strcmp(key, "sl_cooldown_adaptive") == 0)
-      cfg.sl_cooldown_adaptive = atoi(val);
-    else if (strcmp(key, "sl_cooldown_base") == 0)
-      cfg.sl_cooldown_base = (uint32_t)atol(val);
-    else if (strcmp(key, "sl_cooldown_extra") == 0)
-      cfg.sl_cooldown_extra = (uint32_t)atol(val);
-    // momentum strategy
-    else if (strcmp(key, "momentum_breakout_mult") == 0)
-      cfg.momentum_breakout_mult = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "momentum_tp_mult") == 0)
-      cfg.momentum_tp_mult = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "momentum_sl_mult") == 0)
-      cfg.momentum_sl_mult = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "spike_threshold") == 0)
-      cfg.spike_threshold = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "spike_spacing_reduction") == 0)
-      cfg.spike_spacing_reduction = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "slippage_pct") == 0)
-      cfg.slippage_pct = FPN_FromDouble<F>(atof(val) / 100.0);
-    else if (strcmp(key, "use_real_money") == 0)
-      cfg.use_real_money = atoi(val);
-    else if (strcmp(key, "session_filter_enabled") == 0)
-      cfg.session_filter_enabled = atoi(val);
-    else if (strcmp(key, "session_asian_mult") == 0)
-      cfg.session_asian_mult = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "session_european_mult") == 0)
-      cfg.session_european_mult = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "session_us_mult") == 0)
-      cfg.session_us_mult = FPN_FromDouble<F>(atof(val));
-    else if (strcmp(key, "session_overnight_mult") == 0)
-      cfg.session_overnight_mult = FPN_FromDouble<F>(atof(val));
+    // table-driven parser: FPN fields parsed as atof(val) directly
+    // adding a new field = add ONE line to the matching table below
+    #define CFG_PARSE_FPN(name) \
+      if (strcmp(key, #name) == 0) { cfg.name = FPN_FromDouble<F>(atof(val)); continue; }
+
+    // FPN fields parsed as atof(val) / 100.0 (percentage: config says 15.0, stored as 0.15)
+    #define CFG_PARSE_PCT(name) \
+      if (strcmp(key, #name) == 0) { cfg.name = FPN_FromDouble<F>(atof(val) / 100.0); continue; }
+
+    // uint32_t fields
+    #define CFG_PARSE_U32(name) \
+      if (strcmp(key, #name) == 0) { cfg.name = (uint32_t)atol(val); continue; }
+
+    // int fields
+    #define CFG_PARSE_INT(name) \
+      if (strcmp(key, #name) == 0) { cfg.name = atoi(val); continue; }
+
+    // FPN fields with min-zero clamp
+    #define CFG_PARSE_FPN_POS(name) \
+      if (strcmp(key, #name) == 0) { double v = atof(val); if (v < 0) v = 0; \
+        cfg.name = FPN_FromDouble<F>(v); continue; }
+
+    //--- FPN raw (value used directly) ---
+    CFG_PARSE_FPN(r2_threshold)
+    CFG_PARSE_FPN(slope_scale_buy)
+    CFG_PARSE_FPN(max_shift)
+    CFG_PARSE_FPN(starting_balance)
+    CFG_PARSE_FPN(volume_multiplier)
+    CFG_PARSE_FPN(spacing_multiplier)
+    CFG_PARSE_FPN(vol_mult_min)
+    CFG_PARSE_FPN(vol_mult_max)
+    CFG_PARSE_FPN(filter_scale)
+    CFG_PARSE_FPN(min_long_slope)
+    CFG_PARSE_FPN(min_buy_delta)
+    CFG_PARSE_FPN(vwap_offset)
+    CFG_PARSE_FPN(min_stddev_pct)
+    CFG_PARSE_FPN(momentum_r2_min)
+    CFG_PARSE_FPN(min_sl_tp_ratio)
+    CFG_PARSE_FPN(ror_tp_bonus)
+    CFG_PARSE_FPN(momentum_tp_r2_min)
+    CFG_PARSE_FPN(momentum_sl_r2_max)
+    CFG_PARSE_FPN(squeeze_decay)
+    CFG_PARSE_FPN(offset_adapt_scale)
+    CFG_PARSE_FPN(stddev_adapt_scale)
+    CFG_PARSE_FPN(vol_adapt_scale)
+    CFG_PARSE_FPN(breakout_min)
+    CFG_PARSE_FPN(regime_slope_threshold)
+    CFG_PARSE_FPN(regime_volatile_stddev)
+    CFG_PARSE_FPN(regime_vol_spike_ratio)
+    CFG_PARSE_FPN(momentum_breakout_mult)
+    CFG_PARSE_FPN(momentum_tp_mult)
+    CFG_PARSE_FPN(momentum_sl_mult)
+    CFG_PARSE_FPN(spike_threshold)
+    CFG_PARSE_FPN(spike_spacing_reduction)
+    CFG_PARSE_FPN(session_asian_mult)
+    CFG_PARSE_FPN(session_european_mult)
+    CFG_PARSE_FPN(session_us_mult)
+    CFG_PARSE_FPN(session_overnight_mult)
+
+    //--- FPN percentage (config says 15.0, stored as 0.15) ---
+    CFG_PARSE_PCT(take_profit_pct)
+    CFG_PARSE_PCT(stop_loss_pct)
+    CFG_PARSE_PCT(fee_rate)
+    CFG_PARSE_PCT(risk_pct)
+    CFG_PARSE_PCT(entry_offset_pct)
+    CFG_PARSE_PCT(offset_min)
+    CFG_PARSE_PCT(offset_max)
+    CFG_PARSE_PCT(max_drawdown_pct)
+    CFG_PARSE_PCT(max_exposure_pct)
+    CFG_PARSE_PCT(min_hold_gain_pct)
+    CFG_PARSE_PCT(regime_r2_threshold)
+    CFG_PARSE_PCT(slippage_pct)
+
+    //--- FPN with min-zero clamp ---
+    CFG_PARSE_FPN_POS(offset_stddev_mult)
+    CFG_PARSE_FPN_POS(offset_stddev_min)
+    CFG_PARSE_FPN_POS(offset_stddev_max)
+    CFG_PARSE_FPN_POS(tp_hold_score)
+    CFG_PARSE_FPN_POS(tp_trail_mult)
+    CFG_PARSE_FPN_POS(sl_trail_mult)
+    // fee_floor_mult: min 1.0 (special case)
+    if (strcmp(key, "fee_floor_mult") == 0) { double v = atof(val); if (v < 1) v = 1;
+      cfg.fee_floor_mult = FPN_FromDouble<F>(v); continue; }
+
+    //--- uint32_t ---
+    CFG_PARSE_U32(poll_interval)
+    CFG_PARSE_U32(warmup_ticks)
+    CFG_PARSE_U32(slow_path_max_secs)
+    CFG_PARSE_U32(max_hold_ticks)
+    CFG_PARSE_U32(regime_hysteresis)
+    CFG_PARSE_U32(min_warmup_samples)
+    CFG_PARSE_U32(sl_cooldown_cycles)
+    CFG_PARSE_U32(sl_cooldown_base)
+    CFG_PARSE_U32(sl_cooldown_extra)
+    // max_positions: clamped 1-16 (special case)
+    if (strcmp(key, "max_positions") == 0) { int v = atoi(val);
+      if (v < 1) v = 1; if (v > 16) v = 16;
+      cfg.max_positions = (uint32_t)v; continue; }
+
+    //--- int ---
+    CFG_PARSE_INT(sl_cooldown_adaptive)
+    CFG_PARSE_INT(use_real_money)
+    CFG_PARSE_INT(session_filter_enabled)
+
+    #undef CFG_PARSE_FPN
+    #undef CFG_PARSE_PCT
+    #undef CFG_PARSE_U32
+    #undef CFG_PARSE_INT
+    #undef CFG_PARSE_FPN_POS
   }
 
   fclose(f);
