@@ -82,6 +82,8 @@ template <unsigned F> struct PortfolioController {
   uint32_t sl_cooldown_counter; // remaining slow-path cycles before buy gate re-enables
   double session_high;         // highest price since startup
   double session_low;          // lowest price since startup
+  int current_session;          // 0=asian, 1=european, 2=us, 3=overnight
+  FPN<F> session_mult;          // current session gate multiplier
   uint32_t fills_rejected;     // total fills rejected since startup
   int last_reject_reason;      // 0=none, 1=spacing, 2=balance, 3=exposure, 4=breaker, 5=full, 6=dup
   TradeLogBuffer trade_buf;    // buffered trade log — hot path pushes, slow path drains
@@ -149,6 +151,8 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->sl_cooldown_counter = 0;
   ctrl->session_high = 0.0;
   ctrl->session_low = 0.0;
+  ctrl->current_session = -1;  // unset until first slow path
+  ctrl->session_mult = FPN_FromDouble<F>(1.0);
   ctrl->fills_rejected = 0;
   ctrl->last_reject_reason = 0;
 
@@ -585,6 +589,18 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   ctrl->tick_count = 0;
   ctrl->last_slow_time = (uint64_t)time(NULL);
 
+  // session awareness: classify UTC hour and set gate multiplier
+  // reuses last_slow_time — no extra syscall
+  if (ctrl->config.session_filter_enabled) {
+    time_t st = (time_t)ctrl->last_slow_time;
+    struct tm *utc = gmtime(&st);
+    int h = utc->tm_hour;
+    if (h < 7)       { ctrl->current_session = 0; ctrl->session_mult = ctrl->config.session_asian_mult; }
+    else if (h < 13)  { ctrl->current_session = 1; ctrl->session_mult = ctrl->config.session_european_mult; }
+    else if (h < 20)  { ctrl->current_session = 2; ctrl->session_mult = ctrl->config.session_us_mult; }
+    else              { ctrl->current_session = 3; ctrl->session_mult = ctrl->config.session_overnight_mult; }
+  }
+
   // drain exit buffer — books P&L, updates balance, logs trades
   if (ctrl->exit_buf.count > 0)
     PortfolioController_DrainExits(ctrl);
@@ -720,6 +736,12 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     break;
   }
 
+  // session awareness: scale volume gate by session multiplier
+  // wider mult = more volume required = fewer entries during low-liquidity sessions
+  if (ctrl->config.session_filter_enabled) {
+    ctrl->buy_conds.volume = FPN_Mul(ctrl->buy_conds.volume, ctrl->session_mult);
+  }
+
   // volatile / downtrend: pause buying entirely (existing positions keep running)
   // TRENDING_DOWN: momentum only trades long, so no entries in downtrends
   // future: replace with short strategy dispatch
@@ -810,6 +832,11 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
     ctrl->config.min_long_slope      = new_cfg.min_long_slope;
     ctrl->config.min_buy_delta       = new_cfg.min_buy_delta;
     ctrl->config.vwap_offset         = new_cfg.vwap_offset;
+    ctrl->config.session_filter_enabled = new_cfg.session_filter_enabled;
+    ctrl->config.session_asian_mult  = new_cfg.session_asian_mult;
+    ctrl->config.session_european_mult = new_cfg.session_european_mult;
+    ctrl->config.session_us_mult     = new_cfg.session_us_mult;
+    ctrl->config.session_overnight_mult = new_cfg.session_overnight_mult;
     ctrl->config.min_stddev_pct      = new_cfg.min_stddev_pct;
     ctrl->config.momentum_r2_min     = new_cfg.momentum_r2_min;
     ctrl->config.tp_hold_score       = new_cfg.tp_hold_score;

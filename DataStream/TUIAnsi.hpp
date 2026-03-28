@@ -359,6 +359,11 @@ static inline int ANSI_Section_Header(AnsiBuf *ab, const TUISnapshot *s,
               state_str, hours, mins, secs);
     if (s->is_paused)
         ab_printf(ab, A_DIM "  │  " A_BOLD A_YELLOW "PAUSED" A_RESET);
+    if (s->current_session >= 0) {
+        static const char *sess_names[] = {"ASIA", "EU", "US", "OVERNIGHT"};
+        ab_printf(ab, A_DIM "  │  " A_SAND "%s" A_DIM " (%.1fx)" A_RESET,
+                  sess_names[s->current_session], s->session_mult);
+    }
     ab_append(ab, A_RESET);
     y++;
 
