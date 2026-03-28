@@ -34,15 +34,19 @@
 //======================================================================================================
 template <unsigned F> struct PortfolioController {
   //================================================================================================
-  // HOT — touched every tick, grouped for L1 cache locality
-  // target: all hot fields within first ~3KB so they share cache lines
+  // HOTTEST — BuyGate reads buy_conds every tick. offset 0 = cache line 0.
+  // separated from Portfolio so ExitGate walking positions doesn't evict buy_conds.
   //================================================================================================
-  Portfolio<F> portfolio;
+  BuySideGateConditions<F> buy_conds;  // 56 bytes, CL 0
   uint64_t prev_bitmap;   // fill detection: pool->bitmap & ~prev_bitmap
   uint64_t tick_count;    // slow-path gate: tick_count < config.poll_interval
   uint64_t last_slow_time; // wall-time floor: run slow path if this many seconds elapsed
   uint64_t total_ticks;
-  BuySideGateConditions<F> buy_conds;
+
+  //================================================================================================
+  // HOT — ExitGate walks positions every tick, starts at its own cache line zone
+  //================================================================================================
+  Portfolio<F> portfolio;
   ExitBuffer<F> exit_buf;
 
   //================================================================================================
@@ -571,18 +575,24 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
 
   //==================================================================================================
   // ACTIVE PHASE - EVERY N TICKS OR 3 SECONDS: slow-path operations
-  // tick gate handles normal/high volume; time floor handles low-volume periods
-  // where 100 ticks could take 60+ seconds (crypto off-hours, weekends)
+  // tick gate: cheap integer compare, skips time() syscall on 99/100 ticks
+  // time floor: catches low-volume periods where tick gate takes too long
   //==================================================================================================
-  uint64_t now = (uint64_t)time(NULL);
-  int time_floor_hit = (now - ctrl->last_slow_time >= ctrl->config.slow_path_max_secs);
-  if (ctrl->tick_count < ctrl->config.poll_interval && !time_floor_hit)
-    return;
-  ctrl->tick_count = 0;
-  ctrl->last_slow_time = now;
+  {
+    int tick_gate = (ctrl->tick_count >= ctrl->config.poll_interval);
+    if (!tick_gate) {
+      // tick gate not reached — check time floor (pays syscall only during low volume)
+      uint64_t now = (uint64_t)time(NULL);
+      int time_floor = (now - ctrl->last_slow_time >= ctrl->config.slow_path_max_secs);
+      if (!time_floor) return;  // fast path: skip slow path entirely
+    }
+    ctrl->tick_count = 0;
+    ctrl->last_slow_time = (uint64_t)time(NULL);
+  }
 
   // drain exit buffer — books P&L, updates balance, logs trades
-  PortfolioController_DrainExits(ctrl);
+  if (ctrl->exit_buf.count > 0)
+    PortfolioController_DrainExits(ctrl);
 
   // TIME-BASED EXIT: close positions held too long with insufficient gain
   // frees capital trapped in positions where TP became unreachable (e.g. volatility
