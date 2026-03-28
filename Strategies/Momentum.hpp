@@ -235,7 +235,7 @@ inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
         int long_pass = FPN_GreaterThanOrEqual(relative_long_slope, cfg->min_long_slope);
 
         int long_ok = long_pass | !long_enabled;
-        Gate_Zero(&conds, long_ok);
+        Gate_ZeroAll(&conds, long_ok);
     }
 
     // R² floor: don't enter momentum trades in choppy markets
@@ -244,7 +244,7 @@ inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
         int r2_enabled = !FPN_IsZero(cfg->momentum_r2_min);
         int r2_pass = FPN_GreaterThanOrEqual(rolling->price_r_squared, cfg->momentum_r2_min);
         int r2_ok = r2_pass | !r2_enabled;
-        Gate_Zero(&conds, r2_ok);
+        Gate_ZeroAll(&conds, r2_ok);
     }
 
     return conds;

@@ -55,8 +55,21 @@ template <unsigned F> struct SellSideGateConditions {
 // branchless gate: zeros buy conditions when gate fails (pass=0)
 // replaces the 5-line mask pattern used across all strategy buy signals
 //======================================================================================================
+// Gate_Zero: zeros price condition when gate fails (pass=0)
+// volume is left intact — the BuyGate checks price first, so zeroed price blocks fills.
+// keeping volume lets the TUI display the actual volume threshold for diagnostics.
 template <unsigned F>
 inline void Gate_Zero(BuySideGateConditions<F> *conds, int pass) {
+    uint64_t mask = -(uint64_t)pass;
+    for (unsigned w = 0; w < FPN<F>::N; w++) {
+        conds->price.w[w] &= mask;
+    }
+    conds->price.sign &= pass;
+}
+
+// Gate_ZeroAll: zeros both price AND volume (used by momentum where both must block)
+template <unsigned F>
+inline void Gate_ZeroAll(BuySideGateConditions<F> *conds, int pass) {
     uint64_t mask = -(uint64_t)pass;
     for (unsigned w = 0; w < FPN<F>::N; w++) {
         conds->price.w[w]  &= mask;

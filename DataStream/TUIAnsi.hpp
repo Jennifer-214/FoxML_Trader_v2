@@ -357,8 +357,14 @@ static inline int ANSI_Section_Header(AnsiBuf *ab, const TUISnapshot *s,
     ab_printf(ab, A_SAND " STATE: " A_FG "%-8s" A_DIM "  │  "
               A_SAND "UPTIME: " A_FG "%02u:%02u:%02u",
               state_str, hours, mins, secs);
-    if (s->is_paused)
-        ab_printf(ab, A_DIM "  │  " A_BOLD A_YELLOW "PAUSED" A_RESET);
+    if (s->is_paused) {
+        const char *reason = "wait";
+        if (s->sl_cooldown > 0) reason = "cooldown";
+        else if (s->breaker_tripped) reason = "breaker";
+        else if (s->current_regime == 2) reason = "volatile";
+        else if (s->current_regime == 3) reason = "downtrend";
+        ab_printf(ab, A_DIM "  │  " A_BOLD A_YELLOW "PAUSED" A_DIM " (%s)" A_RESET, reason);
+    }
     if (s->current_session >= 0) {
         static const char *sess_names[] = {"ASIA", "EU", "US", "OVERNIGHT"};
         ab_printf(ab, A_DIM "  │  " A_SAND "%s" A_DIM " (%.1fx)" A_RESET,
