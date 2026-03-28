@@ -574,15 +574,20 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // tick gate handles normal/high volume; time floor handles low-volume periods
   // where 100 ticks could take 60+ seconds (crypto off-hours, weekends)
   //==================================================================================================
-  uint64_t now = (uint64_t)time(NULL);
-  int time_floor_hit = (now - ctrl->last_slow_time >= ctrl->config.slow_path_max_secs);
-  if (ctrl->tick_count < ctrl->config.poll_interval && !time_floor_hit)
-    return;
+  // tick gate: most ticks return here with zero syscalls
+  if (ctrl->tick_count < ctrl->config.poll_interval) {
+    // time floor: check every 16 ticks to catch low-volume stalls (~0.3ns bitmask vs ~500ns syscall)
+    if (ctrl->tick_count & 0xF) return;
+    uint64_t now = (uint64_t)time(NULL);
+    if (now - ctrl->last_slow_time < ctrl->config.slow_path_max_secs) return;
+    // time floor hit — fall through to slow path
+  }
   ctrl->tick_count = 0;
-  ctrl->last_slow_time = now;
+  ctrl->last_slow_time = (uint64_t)time(NULL);
 
   // drain exit buffer — books P&L, updates balance, logs trades
-  PortfolioController_DrainExits(ctrl);
+  if (ctrl->exit_buf.count > 0)
+    PortfolioController_DrainExits(ctrl);
 
   // TIME-BASED EXIT: close positions held too long with insufficient gain
   // frees capital trapped in positions where TP became unreachable (e.g. volatility
