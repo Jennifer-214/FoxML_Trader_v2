@@ -254,7 +254,7 @@ inline void PositionExitGate(Portfolio<F> *portfolio, FPN<F> current_price, Exit
 //   [sizeof(FPN<F>)] balance
 //======================================================================================================
 #define PORTFOLIO_SNAPSHOT_MAGIC 0x4B434954  // "TICK" in little-endian
-#define PORTFOLIO_SNAPSHOT_VERSION 6
+#define PORTFOLIO_SNAPSHOT_VERSION 5
 
 template <unsigned F>
 static inline int Portfolio_Save(const Portfolio<F> *portfolio, FPN<F> realized_pnl,

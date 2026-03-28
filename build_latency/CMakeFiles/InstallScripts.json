@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/jennifer/tick_trader_private/build_latency/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
