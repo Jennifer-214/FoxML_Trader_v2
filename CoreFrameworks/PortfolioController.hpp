@@ -558,6 +558,8 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       int do_split = ctrl->config.partial_exit_enabled &&
           (Portfolio_CountActive(&ctrl->portfolio) + 2 <= (int)ctrl->config.max_positions);
 
+      int fill_ok = 0; // track whether any position was actually created
+
       if (do_split) {
         FPN<F> qty_a = FPN_Mul(sized_qty, ctrl->config.partial_exit_pct);
         FPN<F> qty_b = FPN_Sub(sized_qty, qty_a);
@@ -586,25 +588,36 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
           ctrl->portfolio.positions[slot_a].original_sl = sl_price;
           ctrl->portfolio.positions[slot_b].original_tp = tp2_price;
           ctrl->portfolio.positions[slot_b].original_sl = sl_price;
+          fill_ok = 1;
+        } else {
+          // rollback: if one slot succeeded but the other failed, remove it
+          if (slot_a >= 0) {
+            ctrl->portfolio.active_bitmap &= ~(1 << slot_a);
+          }
+          if (slot_b >= 0) {
+            ctrl->portfolio.active_bitmap &= ~(1 << slot_b);
+          }
         }
-        ctrl->total_buys++;
       } else {
         // single position (original behavior)
         int slot = Portfolio_AddPositionWithExits(&ctrl->portfolio, sized_qty,
                                                   fill_price, tp_price, sl_price);
-        ctrl->total_buys++;
         if (slot >= 0) {
           ctrl->entry_ticks[slot] = ctrl->total_ticks;
           ctrl->entry_time[slot] = time(NULL);
           ctrl->entry_strategy[slot] = (uint8_t)ctrl->strategy_id;
           ctrl->portfolio.positions[slot].original_tp = tp_price;
           ctrl->portfolio.positions[slot].original_sl = sl_price;
+          fill_ok = 1;
         }
       }
 
-      // deduct cost + entry fee from balance
-      ctrl->balance = FPN_SubSat(ctrl->balance, total_cost);
-      ctrl->total_fees = FPN_AddSat(ctrl->total_fees, entry_fee);
+      // only deduct balance and count the buy if a position was actually created
+      if (fill_ok) {
+        ctrl->total_buys++;
+        ctrl->balance = FPN_SubSat(ctrl->balance, total_cost);
+        ctrl->total_fees = FPN_AddSat(ctrl->total_fees, entry_fee);
+      }
 
       // buffer buy record (no file I/O on hot path)
       { double _avg = FPN_ToDouble(ctrl->rolling.price_avg);
@@ -627,6 +640,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       else if (!under_limit) ctrl->last_reject_reason = 3; // exposure
       else if (found) ctrl->last_reject_reason = 6;        // duplicate
       else if (too_close) ctrl->last_reject_reason = 1;    // spacing
+      else if (!vol_sufficient) ctrl->last_reject_reason = 7; // min volatility
       else ctrl->last_reject_reason = 5;                    // full
     }
 
