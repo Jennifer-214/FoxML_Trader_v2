@@ -98,6 +98,11 @@ template <unsigned F> struct ControllerConfig {
   // volume spike detection
   FPN<F> spike_threshold;         // volume spike ratio (current/max) to trigger (e.g. 5.0 = 5x)
   FPN<F> spike_spacing_reduction; // spacing multiplier during spike (e.g. 0.5 = half normal)
+  // partial exits (scaling out)
+  int partial_exit_enabled;      // 0 = full exits only, 1 = split into two legs at fill time
+  FPN<F> partial_exit_pct;       // fraction to exit at TP1 (0.5 = 50%, rest rides TP2)
+  FPN<F> tp2_mult;               // TP2 = TP1_distance * this (2.0 = double the TP distance)
+  int breakeven_on_partial;      // 1 = move remaining SL to entry after TP1 hit
   // slippage simulation
   FPN<F> slippage_pct;           // simulated slippage on entry/exit (e.g. 0.0005 = 0.05%)
   // session awareness
@@ -177,6 +182,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // volume spike detection
   cfg.spike_threshold         = FPN_FromDouble<F>(5.0);    // 5x rolling max triggers spike
   cfg.spike_spacing_reduction = FPN_FromDouble<F>(0.5);    // half spacing on spike
+  cfg.partial_exit_enabled = 0;                            // 0 = disabled (backward compat)
+  cfg.partial_exit_pct = FPN_FromDouble<F>(0.5);           // 50% at TP1, 50% rides
+  cfg.tp2_mult = FPN_FromDouble<F>(2.0);                   // TP2 = 2x TP1 distance
+  cfg.breakeven_on_partial = 1;                            // move SL to entry after TP1 hit
   cfg.slippage_pct = FPN_Zero<F>();                        // 0 = disabled (backward compat)
   cfg.session_filter_enabled = 0;                          // 0 = disabled (backward compat)
   cfg.session_asian_mult     = FPN_FromDouble<F>(1.5);     // wider gates in low-vol Asian session
@@ -329,8 +338,14 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 
     //--- int ---
     CFG_PARSE_INT(sl_cooldown_adaptive)
+    CFG_PARSE_INT(partial_exit_enabled)
+    CFG_PARSE_INT(breakeven_on_partial)
     CFG_PARSE_INT(use_real_money)
     CFG_PARSE_INT(session_filter_enabled)
+
+    //--- partial exit FPN ---
+    CFG_PARSE_FPN(partial_exit_pct)
+    CFG_PARSE_FPN(tp2_mult)
 
     #undef CFG_PARSE_FPN
     #undef CFG_PARSE_PCT

@@ -237,6 +237,18 @@ inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
         }
     }
 
+    // partial exit: if this was a TP exit and the position has a paired leg,
+    // ratchet the pair's SL to breakeven (entry price) — makes it a "free trade"
+    int8_t pair_idx = ctrl->portfolio.positions[rec->position_index].pair_index;
+    if (rec->reason == 0 && pair_idx >= 0 && ctrl->config.breakeven_on_partial &&
+        (ctrl->portfolio.active_bitmap & (1 << pair_idx))) {
+        ctrl->portfolio.positions[pair_idx].stop_loss_price =
+            FPN_Max(ctrl->portfolio.positions[pair_idx].stop_loss_price,
+                    ctrl->portfolio.positions[pair_idx].entry_price);
+        ctrl->portfolio.positions[pair_idx].pair_index = -1; // unpair
+    }
+    ctrl->portfolio.positions[rec->position_index].pair_index = -1; // clear exited slot
+
     int is_win = !pos_pnl.sign & !FPN_IsZero(pos_pnl);
     int is_loss = pos_pnl.sign;
     {
@@ -538,15 +550,54 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       sl_price = FPN_Min(
           sl_price, sl_floor); // Min because SL is below entry (lower = wider)
 
-      int slot = Portfolio_AddPositionWithExits(&ctrl->portfolio, sized_qty,
-                                                fill_price, tp_price, sl_price);
-      ctrl->total_buys++;
-      if (slot >= 0) {
-        ctrl->entry_ticks[slot] = ctrl->total_ticks;
-        ctrl->entry_time[slot] = time(NULL);
-        ctrl->entry_strategy[slot] = (uint8_t)ctrl->strategy_id;
-        ctrl->portfolio.positions[slot].original_tp = tp_price;
-        ctrl->portfolio.positions[slot].original_sl = sl_price;
+      // partial exits: split into two legs with different TP levels
+      // leg A exits at TP1 (conservative), leg B rides to TP2 (extended)
+      // when disabled or not enough room for 2 slots, falls back to single position
+      int do_split = ctrl->config.partial_exit_enabled &&
+          (Portfolio_CountActive(&ctrl->portfolio) + 2 <= (int)ctrl->config.max_positions);
+
+      if (do_split) {
+        FPN<F> qty_a = FPN_Mul(sized_qty, ctrl->config.partial_exit_pct);
+        FPN<F> qty_b = FPN_Sub(sized_qty, qty_a);
+
+        // TP2 = entry + (tp_dist * tp2_mult)
+        FPN<F> tp_dist_2 = FPN_Mul(FPN_Sub(tp_price, fill_price), ctrl->config.tp2_mult);
+        FPN<F> tp2_price = FPN_AddSat(fill_price, tp_dist_2);
+
+        int slot_a = Portfolio_AddPositionWithExits(&ctrl->portfolio, qty_a,
+                                                    fill_price, tp_price, sl_price);
+        int slot_b = Portfolio_AddPositionWithExits(&ctrl->portfolio, qty_b,
+                                                    fill_price, tp2_price, sl_price);
+        if (slot_a >= 0 && slot_b >= 0) {
+          // link them as a pair
+          ctrl->portfolio.positions[slot_a].pair_index = (int8_t)slot_b;
+          ctrl->portfolio.positions[slot_b].pair_index = (int8_t)slot_a;
+          // metadata for both slots
+          time_t now = time(NULL);
+          ctrl->entry_ticks[slot_a] = ctrl->total_ticks;
+          ctrl->entry_ticks[slot_b] = ctrl->total_ticks;
+          ctrl->entry_time[slot_a] = now;
+          ctrl->entry_time[slot_b] = now;
+          ctrl->entry_strategy[slot_a] = (uint8_t)ctrl->strategy_id;
+          ctrl->entry_strategy[slot_b] = (uint8_t)ctrl->strategy_id;
+          ctrl->portfolio.positions[slot_a].original_tp = tp_price;
+          ctrl->portfolio.positions[slot_a].original_sl = sl_price;
+          ctrl->portfolio.positions[slot_b].original_tp = tp2_price;
+          ctrl->portfolio.positions[slot_b].original_sl = sl_price;
+        }
+        ctrl->total_buys++;
+      } else {
+        // single position (original behavior)
+        int slot = Portfolio_AddPositionWithExits(&ctrl->portfolio, sized_qty,
+                                                  fill_price, tp_price, sl_price);
+        ctrl->total_buys++;
+        if (slot >= 0) {
+          ctrl->entry_ticks[slot] = ctrl->total_ticks;
+          ctrl->entry_time[slot] = time(NULL);
+          ctrl->entry_strategy[slot] = (uint8_t)ctrl->strategy_id;
+          ctrl->portfolio.positions[slot].original_tp = tp_price;
+          ctrl->portfolio.positions[slot].original_sl = sl_price;
+        }
       }
 
       // deduct cost + entry fee from balance

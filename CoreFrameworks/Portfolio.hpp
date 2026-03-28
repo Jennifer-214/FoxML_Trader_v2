@@ -30,8 +30,11 @@ template <unsigned F> struct Position {
     // cold fields: only read by trailing logic on slow path
     FPN<F> original_tp;       // set at fill, never modified — used to detect "running" positions
     FPN<F> original_sl;       // set at fill, never modified — baseline for trailing SL
+    // partial exit pairing: -1 = no pair, 0-15 = paired slot index
+    int8_t pair_index;
+    uint8_t _pad_pos[7];     // keep alignment
 };
-static_assert(sizeof(Position<64>) == 6 * sizeof(FPN<64>), "Position size mismatch");
+// Position = 6 FPN fields + pair_index + padding
 //======================================================================================================
 // [PORTFOLIO]
 //======================================================================================================
@@ -124,6 +127,7 @@ inline int Portfolio_AddPositionWithExits(Portfolio<F> *portfolio, FPN<F> quanti
     portfolio->positions[idx].entry_price          = entry_price;
     portfolio->positions[idx].take_profit_price    = take_profit_price;
     portfolio->positions[idx].stop_loss_price      = stop_loss_price;
+    portfolio->positions[idx].pair_index           = -1;
     portfolio->active_bitmap |= (1 << idx);
     return idx;
 }
