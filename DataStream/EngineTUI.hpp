@@ -371,8 +371,7 @@ static inline void TUI_Render(EngineTUI *tui, const PortfolioController<F> *ctrl
 
     // ==== PORTFOLIO section ====
     double equity = balance + total_value;
-    double deployed = starting - balance;
-    double exposure_pct = (starting != 0.0) ? (deployed / starting) * 100.0 : 0.0;
+    double exposure_pct = (starting != 0.0) ? (total_value / starting) * 100.0 : 0.0;
     double max_exp = FPN_ToDouble(ctrl->config.max_exposure_pct) * 100.0;
 
     printf(C_BOLD C_PEACH "  PORTFOLIO:" C_RESET "\n"); row++;
@@ -671,6 +670,7 @@ struct TUISnapshot {
     double ror_slope;     // slope-of-slopes (trend acceleration)
     double volume_spike_ratio; // current volume / rolling max (spike detection)
     int spike_active;     // 1 if spike_ratio >= threshold
+    double vwap, vwap_dev; // VWAP and deviation from it
     int sl_cooldown;      // remaining slow-path cycles in post-SL cooldown
     int min_warmup_samples; // configured minimum for warmup display
     int engine_state;     // 0=warmup, 1=active, 2=closing
@@ -818,7 +818,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->equity     = balance + snap->total_value;
     snap->total_pnl  = snap->equity - starting; // derive from equity (always correct)
     snap->return_pct = (starting != 0.0) ? (snap->total_pnl / starting) * 100.0 : 0.0;
-    snap->exposure_pct = (starting != 0.0) ? ((starting - balance) / starting) * 100.0 : 0.0;
+    snap->exposure_pct = (starting != 0.0) ? (snap->total_value / starting) * 100.0 : 0.0;
     snap->max_exp    = FPN_ToDouble(ctrl->config.max_exposure_pct) * 100.0;
     snap->fees       = FPN_ToDouble(ctrl->total_fees);
     snap->fee_rate_pct = fee_r * 100.0;
@@ -848,6 +848,8 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->volume_spike_ratio = FPN_ToDouble(ctrl->volume_spike_ratio);
     snap->spike_active = FPN_GreaterThanOrEqual(ctrl->volume_spike_ratio,
                                                  ctrl->config.spike_threshold);
+    snap->vwap = FPN_ToDouble(ctrl->rolling.vwap);
+    snap->vwap_dev = FPN_ToDouble(ctrl->rolling.vwap_deviation);
     snap->sl_cooldown = (int)ctrl->sl_cooldown_counter;
     snap->min_warmup_samples = (int)ctrl->config.min_warmup_samples;
     // session stats + fill diagnostics

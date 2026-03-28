@@ -510,6 +510,16 @@ static inline int ANSI_Section_Regime(AnsiBuf *ab, const TUISnapshot *s, int y, 
         ab_printf(ab, A_DIM "  vol:%.1fx" A_RESET, s->volume_spike_ratio);
     y++;
 
+    // VWAP: volume-weighted average price and deviation
+    if (s->vwap > 0.0) {
+        const char *vwap_color = (s->vwap_dev < -0.001) ? A_GREEN :
+                                 (s->vwap_dev > 0.001) ? A_RED : A_FG;
+        ab_goto(ab, y, 3);
+        ab_printf(ab, A_SAND "vwap: " A_FG "$%.2f" A_DIM "  dev: "
+                  "%s%+.3f%%" A_RESET, s->vwap, vwap_color, s->vwap_dev * 100.0);
+        y++;
+    }
+
     return y;
 }
 

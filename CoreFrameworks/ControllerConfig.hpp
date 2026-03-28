@@ -56,6 +56,7 @@ template <unsigned F> struct ControllerConfig {
   FPN<F> offset_stddev_max;   // adaptation upper bound for stddev mode (e.g. 4.0)
   FPN<F> min_long_slope;      // min long-window price slope to allow buys (0 = disabled)
   FPN<F> min_buy_delta;       // min volume delta for MR buys (-0.3 = allow mild selling, block heavy)
+  FPN<F> vwap_offset;          // buy below VWAP - (VWAP * this) (0 = disabled, 0.001 = 0.1% below)
   FPN<F> min_stddev_pct;      // skip trades when stddev/price < this (0 = disabled, 0.0003 = 0.03%)
   FPN<F> momentum_r2_min;    // min R² to enter momentum trades (0 = disabled, 0.4 recommended)
   // trailing take-profit (disabled by default)
@@ -137,6 +138,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.tp_trail_mult = FPN_FromDouble<F>(1.0);     // trail 1 stddev below price
   cfg.sl_trail_mult = FPN_FromDouble<F>(2.0);     // trail SL 2 stddevs below price
   cfg.fee_floor_mult = FPN_FromDouble<F>(3.0);    // TP floor = entry × fee_rate × 3
+  cfg.vwap_offset = FPN_Zero<F>();                 // 0 = disabled (backward compat)
   cfg.min_sl_tp_ratio = FPN_FromDouble<F>(0.5);   // 2:1 reward/risk floor
   cfg.ror_tp_bonus = FPN_FromDouble<F>(1.2);      // 20% wider TP on accelerating trend
   cfg.momentum_tp_r2_min = FPN_FromDouble<F>(0.5); // TP scale at R²=0
@@ -271,6 +273,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       cfg.min_long_slope = FPN_FromDouble<F>(atof(val));
     else if (strcmp(key, "min_buy_delta") == 0)
       cfg.min_buy_delta = FPN_FromDouble<F>(atof(val));
+    else if (strcmp(key, "vwap_offset") == 0)
+      cfg.vwap_offset = FPN_FromDouble<F>(atof(val));
     else if (strcmp(key, "min_stddev_pct") == 0)
       cfg.min_stddev_pct = FPN_FromDouble<F>(atof(val));
     else if (strcmp(key, "momentum_r2_min") == 0)

@@ -419,9 +419,9 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     int not_blown = FPN_GreaterThan(total_pnl_check, drawdown_limit);
 
     // EXPOSURE LIMIT: cap total deployed capital at max_exposure_pct of
-    // starting balance deployed = starting_balance - current_balance (how much
-    // is in positions)
-    FPN<F> deployed = FPN_Sub(ctrl->config.starting_balance, ctrl->balance);
+    // starting balance. deployed = market value of open positions at fill price
+    // (NOT starting - balance, which includes realized losses/fees as phantom exposure)
+    FPN<F> deployed = Portfolio_ComputeValue(&ctrl->portfolio, fill_price);
     FPN<F> max_deployed =
         FPN_Mul(ctrl->config.starting_balance, ctrl->config.max_exposure_pct);
     int under_limit =
@@ -809,6 +809,7 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
     ctrl->config.offset_stddev_max   = new_cfg.offset_stddev_max;
     ctrl->config.min_long_slope      = new_cfg.min_long_slope;
     ctrl->config.min_buy_delta       = new_cfg.min_buy_delta;
+    ctrl->config.vwap_offset         = new_cfg.vwap_offset;
     ctrl->config.min_stddev_pct      = new_cfg.min_stddev_pct;
     ctrl->config.momentum_r2_min     = new_cfg.momentum_r2_min;
     ctrl->config.tp_hold_score       = new_cfg.tp_hold_score;

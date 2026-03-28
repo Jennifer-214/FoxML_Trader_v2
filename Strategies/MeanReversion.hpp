@@ -421,6 +421,27 @@ inline BuySideGateConditions<F> MeanReversion_BuySignal(
     conds.price.sign &= delta_ok;
   }
 
+  //==================================================================================================
+  // VWAP GATE: block buys when price is above VWAP (buying at a premium)
+  // only buy at or below VWAP - vwap_offset (discount to volume-weighted avg)
+  // when disabled (vwap_offset = 0), gate always passes
+  //==================================================================================================
+  {
+    int vwap_enabled = !FPN_IsZero(cfg->vwap_offset);
+    // vwap_deviation is (price - vwap) / vwap — negative means below VWAP
+    // pass when deviation <= -vwap_offset (price is sufficiently below VWAP)
+    FPN<F> neg_offset = FPN_Negate(cfg->vwap_offset);
+    int vwap_pass =
+        FPN_LessThanOrEqual(rolling->vwap_deviation, neg_offset);
+    int vwap_ok = vwap_pass | !vwap_enabled;
+
+    uint64_t vwap_mask = -(uint64_t)vwap_ok;
+    for (unsigned i = 0; i < N; i++) {
+      conds.price.w[i] &= vwap_mask;
+    }
+    conds.price.sign &= vwap_ok;
+  }
+
   return conds;
 }
 
