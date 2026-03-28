@@ -312,6 +312,16 @@ inline void Momentum_ExitAdjust(Portfolio<F> *portfolio, FPN<F> current_price,
             FPN<F> sl_offset = FPN_Mul(rolling->price_stddev, cfg->momentum_sl_mult);
             FPN<F> trailing_sl = FPN_Sub(current_price, sl_offset);
             pos->stop_loss_price = FPN_Max(pos->stop_loss_price, trailing_sl);
+
+            // SL floor: enforce 2:1 min reward/risk after trailing adjustments
+            // only applies when SL is still below entry (at-risk position).
+            // once SL trails above entry, the position is a guaranteed win — no floor needed
+            if (FPN_LessThan(pos->stop_loss_price, pos->entry_price)) {
+              FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+              FPN<F> min_sl_dist = FPN_Mul(tp_dist, FPN_FromDouble<F>(0.5));
+              FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
+              pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
+            }
         }
 
         active &= active - 1;
