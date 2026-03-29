@@ -6,12 +6,10 @@ Tick-level crypto trading engine in C++. Branchless fixed-point arithmetic, bitm
 
 ## Build
 
-CMake with zero-dependency ANSI TUI (default):
+CMake with zero-dependency ANSI TUI:
 ```bash
 cmake -B build && cmake --build build         # production (ANSI TUI, no deps)
-cmake -B build -DUSE_FTXUI=ON && cmake --build build      # FTXUI TUI (auto-fetched)
-cmake -B build -DUSE_NOTCURSES=ON && cmake --build build  # notcurses TUI (experimental)
-./build/controller_test                        # run tests (134 assertions)
+./build/controller_test                        # run tests (166 assertions)
 cd build && ./engine                           # run engine (needs engine.cfg symlink)
 ```
 
@@ -75,16 +73,16 @@ Strategy dispatch → position adjustment on regime switch
 
 - **CoreFrameworks/** - OrderGates (buy gate), Portfolio (bitmap positions, exit gate), PortfolioController (feedback loop, regime wiring)
 - **Strategies/** - RegimeDetector (RegimeSignals, score-based classify, position adjustment), MeanReversion, Momentum, StrategyInterface
-- **DataStream/** - FauxFIX, MockGenerator, TradeLog, BinanceCrypto (websocket), BinanceOrderAPI (REST orders), EngineTUI (snapshot, thread), TUIAnsi (default, zero-dep), TUIWidgets/TUILayout (FTXUI opt-in), TUINotcurses (notcurses, experimental)
+- **DataStream/** - FauxFIX, MockGenerator, TradeLog, BinanceCrypto (websocket), BinanceOrderAPI (REST orders), EngineTUI (snapshot, thread), TUIAnsi (ANSI terminal renderer, zero deps)
 - **FixedPoint/** - FPN arbitrary-width fixed-point arithmetic library
 - **MemHeaders/** - PoolAllocator (bitmap order pool), BuddyAllocator
 - **ML_Headers/** - RollingStats (regression + R²), LinearRegression3X, ROR_regressor (slope-of-slopes), GateControlNetwork
-- **tests/** - controller_test.cpp (134 assertions)
+- **tests/** - controller_test.cpp (166 assertions)
 - **plans/** - implementation plans (gitignored)
 
 ## Versioning
 
-Version string: `engine vX.Y.Z` — hardcoded in 4 TUI files (TUIAnsi.hpp, EngineTUI.hpp ×2, TUINotcurses.hpp). Update ALL four when bumping.
+Version string: `engine vX.Y.Z` — hardcoded in 3 locations: TUIAnsi.hpp (1×), EngineTUI.hpp (2×). Update all three when bumping.
 
 - **X.Y.Z** follows changelog version in `DOCS/CHANGELOG.md` (version summary table, top row)
 - **Patch (Z)**: bug fixes, guards, config changes, TUI tweaks
@@ -92,7 +90,7 @@ Version string: `engine vX.Y.Z` — hardcoded in 4 TUI files (TUIAnsi.hpp, Engin
 - **Major (X)**: architectural rewrites (FPN width change, new hot-path design)
 
 ### Release process
-1. Update version string in all 4 TUI files (search for `engine v`)
+1. Update version string in TUIAnsi.hpp and EngineTUI.hpp (search for `engine v`, 3 locations)
 2. Update `DOCS/CHANGELOG.md` version summary table
 3. Create detailed changelog in `DOCS/changelogs/YYYY-MM-DD-X.md`
 4. Commit, push to main
@@ -164,16 +162,19 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
 
 ## Current State
 
-- Portfolio controller: COMPLETE (140/140 tests passing)
-- Post-SL cooldown: pauses buying for N cycles after stop loss (anti-falling-knife)
+- Portfolio controller: COMPLETE (166/166 tests passing)
+- Post-SL cooldown: adaptive (scales by trend confidence at SL time) or fixed cycle count
 - Regime detection: score-based with 7 signals, extensible RegimeSignals struct
 - Volume spike detection: current/max ratio, spacing relaxation on 5x+ spikes
-- RollingStats: real least-squares regression (slope, R², variance)
+- RollingStats: real least-squares regression (slope, R², variance) + VWAP
+- VWAP gate: buy signal gates on price being below volume-weighted average price
+- Session awareness: per-session (Asian/EU/US/overnight) volume gate multiplier
 - Snapshot persistence: v7 (entry_time + session stats survive restarts)
 - Binance websocket: WORKING (live market data)
-- TUI: ANSI TUI is default (zero deps, diff-based rendering, foxml palette), FTXUI/notcurses opt-in
+- TUI: ANSI only (zero deps, diff-based rendering, foxml palette). FTXUI/notcurses removed.
 - TUI snapshot: zero-pollution (full copy on slow path, live price/volume/active_count every tick)
 - Momentum TP/SL: adaptive (R²-scaled + ROR acceleration bonus at fill time)
+- Trailing TP/SL: SL floor invariant enforced (only when SL below entry — free trades exempt)
 - Slippage simulation: configurable entry/exit price adjustment (slippage_pct in engine.cfg)
 - Single-slot mode: max_positions=1 (default), sells entire BTC balance on exit (no dust)
 - Paper/live sync: unbacked paper positions are undone, startup recovers orphaned BTC
@@ -199,6 +200,56 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
 - **New strategy**: follow the checklist below
 - **New regime**: new constant + new mapping + optional position adjustment case
 - **Lookup table**: RegimeSignals fields map to table indices naturally
+
+## How To: Common Changes
+
+### Adding a new config field
+3 lines total, hot-reload is automatic:
+1. **ControllerConfig.hpp struct**: add `FPN<F> my_field;` (or `uint32_t`, `int`)
+2. **ControllerConfig_Default()**: add `cfg.my_field = FPN_FromDouble<F>(1.0);`
+3. **ControllerConfig_Load() parser table**: add one macro line in the right category:
+   - `CFG_PARSE_FPN(my_field)` — raw value (atof)
+   - `CFG_PARSE_PCT(my_field)` — percentage (config says 15.0, stored as 0.15)
+   - `CFG_PARSE_FPN_POS(my_field)` — clamped to >= 0
+   - `CFG_PARSE_U32(my_field)` — unsigned int
+   - `CFG_PARSE_INT(my_field)` — int
+
+Hot-reload: **automatic** — `PortfolioController_HotReload` does bulk struct copy. To protect a field from reload (startup-only), save/restore it in HotReload.
+
+### Adding a new buy gate
+2 lines using Gate_Zero helper (OrderGates.hpp):
+```cpp
+int my_gate_ok = my_condition | !my_enabled;
+Gate_Zero(&conds, my_gate_ok);  // zeros price+volume if gate fails
+```
+
+### Adding a TUI display field
+1. **EngineTUI.hpp TUISnapshot struct**: add `double my_field;`
+2. **EngineTUI.hpp TUI_CopySnapshot()**: add `snap->my_field = FPN_ToDouble(source);`
+3. **TUIAnsi.hpp**: add display in the appropriate ANSI_Section_* function
+
+Only 1 TUI renderer (TUIAnsi.hpp). FTXUI/notcurses were removed.
+
+### Version bump
+3 locations in 2 files (search for `engine v`):
+- TUIAnsi.hpp (1×)
+- EngineTUI.hpp (2×)
+
+### Adding a RollingStats field
+1. **RollingStats struct** (ML_Headers/RollingStats.hpp): add `FPN<F> my_field;`
+2. **RollingStats_Init()**: add `rs.my_field = FPN_Zero<F>();`
+3. **RollingStats_Push()**: compute it (runs on slow path, O(W) budget is fine)
+4. Field is now readable from any strategy or regime detector via `rolling->my_field`
+
+For running-sum fields (like VWAP), use the evict-old/add-new pattern with a `pv_buf[W]` ring buffer. For single-pass fields, compute inline in the existing loop.
+
+### Adding a new exit reason
+Rare — only needed for fundamentally new exit types (not TP/SL variants):
+1. **Portfolio.hpp PositionExitGate**: add comparison logic + exit buffer record
+2. **Portfolio.hpp ExitBufferRecord**: add reason constant
+3. **PortfolioController.hpp DrainExits**: handle the new reason in P&L booking
+4. **TUIAnsi.hpp**: display if needed
+5. **tests/controller_test.cpp**: regression test
 
 ## Adding a New Strategy
 

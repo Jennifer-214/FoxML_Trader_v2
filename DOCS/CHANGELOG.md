@@ -4,6 +4,7 @@
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| 3.2.0 | 2026-03-28 | **v4 signals + refactor** — VWAP gate, session awareness, adaptive cooldown, partial exits, L2 order book, Gate_Zero helper, table-driven config, bulk hot-reload, remove FTXUI/notcurses. Live-testing fixes: Gate_Zero scope, split rollback, min_vol reject reason, PAUSED display |
 | 3.1.0 | 2026-03-27 | **Profitability + latency overhaul** — volume delta signal, hidden downtrend detection, min vol filter, momentum R² floor, cache-aligned structs, -O3 -march=native, time() syscall gated (84/100 ticks skip), BuyGate 102→53ns, p95 4069→936ns |
 | 3.0.27 | 2026-03-25 | Extract 10 hardcoded constants to engine.cfg (squeeze_decay, adapt scales, risk ratios), revert to sparkline charts |
 | 3.0.26 | 2026-03-25 | **P&L accounting fix** — total P&L derived from equity, force-close/undo/orphan sell properly book balance+fees, configurable fee_floor_mult |

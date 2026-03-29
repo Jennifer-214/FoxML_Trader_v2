@@ -82,6 +82,9 @@ template <unsigned F> struct PortfolioController {
   uint32_t sl_cooldown_counter; // remaining slow-path cycles before buy gate re-enables
   double session_high;         // highest price since startup
   double session_low;          // lowest price since startup
+  int current_session;          // 0=asian, 1=european, 2=us, 3=overnight
+  FPN<F> session_mult;          // current session gate multiplier
+  FPN<F> book_imbalance;        // bid/ask imbalance from depth stream [-1, +1] (updated externally)
   uint32_t fills_rejected;     // total fills rejected since startup
   int last_reject_reason;      // 0=none, 1=spacing, 2=balance, 3=exposure, 4=breaker, 5=full, 6=dup
   TradeLogBuffer trade_buf;    // buffered trade log — hot path pushes, slow path drains
@@ -149,6 +152,9 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->sl_cooldown_counter = 0;
   ctrl->session_high = 0.0;
   ctrl->session_low = 0.0;
+  ctrl->current_session = -1;  // unset until first slow path
+  ctrl->session_mult = FPN_FromDouble<F>(1.0);
+  ctrl->book_imbalance = FPN_Zero<F>();
   ctrl->fills_rejected = 0;
   ctrl->last_reject_reason = 0;
 
@@ -219,8 +225,31 @@ inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
     const char *reason = (rec->reason == 0) ? "TP" : "SL";
     ctrl->wins += (rec->reason == 0);
     ctrl->losses += (rec->reason == 1);
-    if (rec->reason == 1 && ctrl->config.sl_cooldown_cycles > 0)
-        ctrl->sl_cooldown_counter = ctrl->config.sl_cooldown_cycles;
+    if (rec->reason == 1) {
+        if (ctrl->config.sl_cooldown_adaptive) {
+            // adaptive: scale by trend confidence (R² * negative slope direction)
+            // high R² downtrend = long cooldown, low R² spike = short cooldown
+            double r2 = FPN_ToDouble(ctrl->rolling.price_r_squared);
+            double slope = FPN_ToDouble(ctrl->rolling.price_slope);
+            double confidence = r2 * (slope < 0.0 ? 1.0 : 0.0);
+            ctrl->sl_cooldown_counter = ctrl->config.sl_cooldown_base +
+                (uint32_t)(ctrl->config.sl_cooldown_extra * confidence);
+        } else if (ctrl->config.sl_cooldown_cycles > 0) {
+            ctrl->sl_cooldown_counter = ctrl->config.sl_cooldown_cycles;
+        }
+    }
+
+    // partial exit: if this was a TP exit and the position has a paired leg,
+    // ratchet the pair's SL to breakeven (entry price) — makes it a "free trade"
+    int8_t pair_idx = ctrl->portfolio.positions[rec->position_index].pair_index;
+    if (rec->reason == 0 && pair_idx >= 0 && ctrl->config.breakeven_on_partial &&
+        (ctrl->portfolio.active_bitmap & (1 << pair_idx))) {
+        ctrl->portfolio.positions[pair_idx].stop_loss_price =
+            FPN_Max(ctrl->portfolio.positions[pair_idx].stop_loss_price,
+                    ctrl->portfolio.positions[pair_idx].entry_price);
+        ctrl->portfolio.positions[pair_idx].pair_index = -1; // unpair
+    }
+    ctrl->portfolio.positions[rec->position_index].pair_index = -1; // clear exited slot
 
     int is_win = !pos_pnl.sign & !FPN_IsZero(pos_pnl);
     int is_loss = pos_pnl.sign;
@@ -419,9 +448,9 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     int not_blown = FPN_GreaterThan(total_pnl_check, drawdown_limit);
 
     // EXPOSURE LIMIT: cap total deployed capital at max_exposure_pct of
-    // starting balance deployed = starting_balance - current_balance (how much
-    // is in positions)
-    FPN<F> deployed = FPN_Sub(ctrl->config.starting_balance, ctrl->balance);
+    // starting balance. deployed = market value of open positions at fill price
+    // (NOT starting - balance, which includes realized losses/fees as phantom exposure)
+    FPN<F> deployed = Portfolio_ComputeValue(&ctrl->portfolio, fill_price);
     FPN<F> max_deployed =
         FPN_Mul(ctrl->config.starting_balance, ctrl->config.max_exposure_pct);
     int under_limit =
@@ -523,20 +552,72 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       sl_price = FPN_Min(
           sl_price, sl_floor); // Min because SL is below entry (lower = wider)
 
-      int slot = Portfolio_AddPositionWithExits(&ctrl->portfolio, sized_qty,
-                                                fill_price, tp_price, sl_price);
-      ctrl->total_buys++;
-      if (slot >= 0) {
-        ctrl->entry_ticks[slot] = ctrl->total_ticks;
-        ctrl->entry_time[slot] = time(NULL);
-        ctrl->entry_strategy[slot] = (uint8_t)ctrl->strategy_id;
-        ctrl->portfolio.positions[slot].original_tp = tp_price;
-        ctrl->portfolio.positions[slot].original_sl = sl_price;
+      // partial exits: split into two legs with different TP levels
+      // leg A exits at TP1 (conservative), leg B rides to TP2 (extended)
+      // when disabled or not enough room for 2 slots, falls back to single position
+      int do_split = ctrl->config.partial_exit_enabled &&
+          (Portfolio_CountActive(&ctrl->portfolio) + 2 <= (int)ctrl->config.max_positions);
+
+      int fill_ok = 0; // track whether any position was actually created
+
+      if (do_split) {
+        FPN<F> qty_a = FPN_Mul(sized_qty, ctrl->config.partial_exit_pct);
+        FPN<F> qty_b = FPN_Sub(sized_qty, qty_a);
+
+        // TP2 = entry + (tp_dist * tp2_mult)
+        FPN<F> tp_dist_2 = FPN_Mul(FPN_Sub(tp_price, fill_price), ctrl->config.tp2_mult);
+        FPN<F> tp2_price = FPN_AddSat(fill_price, tp_dist_2);
+
+        int slot_a = Portfolio_AddPositionWithExits(&ctrl->portfolio, qty_a,
+                                                    fill_price, tp_price, sl_price);
+        int slot_b = Portfolio_AddPositionWithExits(&ctrl->portfolio, qty_b,
+                                                    fill_price, tp2_price, sl_price);
+        if (slot_a >= 0 && slot_b >= 0) {
+          // link them as a pair
+          ctrl->portfolio.positions[slot_a].pair_index = (int8_t)slot_b;
+          ctrl->portfolio.positions[slot_b].pair_index = (int8_t)slot_a;
+          // metadata for both slots
+          time_t now = time(NULL);
+          ctrl->entry_ticks[slot_a] = ctrl->total_ticks;
+          ctrl->entry_ticks[slot_b] = ctrl->total_ticks;
+          ctrl->entry_time[slot_a] = now;
+          ctrl->entry_time[slot_b] = now;
+          ctrl->entry_strategy[slot_a] = (uint8_t)ctrl->strategy_id;
+          ctrl->entry_strategy[slot_b] = (uint8_t)ctrl->strategy_id;
+          ctrl->portfolio.positions[slot_a].original_tp = tp_price;
+          ctrl->portfolio.positions[slot_a].original_sl = sl_price;
+          ctrl->portfolio.positions[slot_b].original_tp = tp2_price;
+          ctrl->portfolio.positions[slot_b].original_sl = sl_price;
+          fill_ok = 1;
+        } else {
+          // rollback: if one slot succeeded but the other failed, remove it
+          if (slot_a >= 0) {
+            ctrl->portfolio.active_bitmap &= ~(1 << slot_a);
+          }
+          if (slot_b >= 0) {
+            ctrl->portfolio.active_bitmap &= ~(1 << slot_b);
+          }
+        }
+      } else {
+        // single position (original behavior)
+        int slot = Portfolio_AddPositionWithExits(&ctrl->portfolio, sized_qty,
+                                                  fill_price, tp_price, sl_price);
+        if (slot >= 0) {
+          ctrl->entry_ticks[slot] = ctrl->total_ticks;
+          ctrl->entry_time[slot] = time(NULL);
+          ctrl->entry_strategy[slot] = (uint8_t)ctrl->strategy_id;
+          ctrl->portfolio.positions[slot].original_tp = tp_price;
+          ctrl->portfolio.positions[slot].original_sl = sl_price;
+          fill_ok = 1;
+        }
       }
 
-      // deduct cost + entry fee from balance
-      ctrl->balance = FPN_SubSat(ctrl->balance, total_cost);
-      ctrl->total_fees = FPN_AddSat(ctrl->total_fees, entry_fee);
+      // only deduct balance and count the buy if a position was actually created
+      if (fill_ok) {
+        ctrl->total_buys++;
+        ctrl->balance = FPN_SubSat(ctrl->balance, total_cost);
+        ctrl->total_fees = FPN_AddSat(ctrl->total_fees, entry_fee);
+      }
 
       // buffer buy record (no file I/O on hot path)
       { double _avg = FPN_ToDouble(ctrl->rolling.price_avg);
@@ -559,6 +640,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       else if (!under_limit) ctrl->last_reject_reason = 3; // exposure
       else if (found) ctrl->last_reject_reason = 6;        // duplicate
       else if (too_close) ctrl->last_reject_reason = 1;    // spacing
+      else if (!vol_sufficient) ctrl->last_reject_reason = 7; // min volatility
       else ctrl->last_reject_reason = 5;                    // full
     }
 
@@ -584,6 +666,18 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   }
   ctrl->tick_count = 0;
   ctrl->last_slow_time = (uint64_t)time(NULL);
+
+  // session awareness: classify UTC hour and set gate multiplier
+  // reuses last_slow_time — no extra syscall
+  if (ctrl->config.session_filter_enabled) {
+    time_t st = (time_t)ctrl->last_slow_time;
+    struct tm *utc = gmtime(&st);
+    int h = utc->tm_hour;
+    if (h < 7)       { ctrl->current_session = 0; ctrl->session_mult = ctrl->config.session_asian_mult; }
+    else if (h < 13)  { ctrl->current_session = 1; ctrl->session_mult = ctrl->config.session_european_mult; }
+    else if (h < 20)  { ctrl->current_session = 2; ctrl->session_mult = ctrl->config.session_us_mult; }
+    else              { ctrl->current_session = 3; ctrl->session_mult = ctrl->config.session_overnight_mult; }
+  }
 
   // drain exit buffer — books P&L, updates balance, logs trades
   if (ctrl->exit_buf.count > 0)
@@ -720,6 +814,19 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     break;
   }
 
+  // session awareness: scale volume gate by session multiplier
+  // wider mult = more volume required = fewer entries during low-liquidity sessions
+  if (ctrl->config.session_filter_enabled) {
+    ctrl->buy_conds.volume = FPN_Mul(ctrl->buy_conds.volume, ctrl->session_mult);
+  }
+
+  // book imbalance gate: require bid excess before buying
+  // book_imbalance is updated externally from depth thread (zero if no depth data)
+  if (!FPN_IsZero(ctrl->config.min_book_imbalance)) {
+    int book_ok = FPN_GreaterThanOrEqual(ctrl->book_imbalance, ctrl->config.min_book_imbalance);
+    Gate_Zero(&ctrl->buy_conds, book_ok);
+  }
+
   // volatile / downtrend: pause buying entirely (existing positions keep running)
   // TRENDING_DOWN: momentum only trades long, so no entries in downtrends
   // future: replace with short strategy dispatch
@@ -781,65 +888,26 @@ inline void PortfolioController_CycleRegime(PortfolioController<F> *ctrl) {
     fprintf(stderr, "[ENGINE] regime manually set to %s\n", names[next]);
 }
 
-// config hot-reload: one function for all fields, called from both TUI paths
+// config hot-reload: bulk copy all fields, then restore protected startup-only fields
+// new config fields automatically hot-reload without touching this function
 template <unsigned F>
 inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
                                            const ControllerConfig<F> &new_cfg) {
-    ctrl->config.poll_interval       = new_cfg.poll_interval;
-    ctrl->config.r2_threshold        = new_cfg.r2_threshold;
-    ctrl->config.slope_scale_buy     = new_cfg.slope_scale_buy;
-    ctrl->config.max_shift           = new_cfg.max_shift;
-    ctrl->config.take_profit_pct     = new_cfg.take_profit_pct;
-    ctrl->config.stop_loss_pct       = new_cfg.stop_loss_pct;
-    ctrl->config.fee_rate            = new_cfg.fee_rate;
-    ctrl->config.risk_pct            = new_cfg.risk_pct;
-    ctrl->config.volume_multiplier   = new_cfg.volume_multiplier;
-    ctrl->config.entry_offset_pct    = new_cfg.entry_offset_pct;
-    ctrl->config.spacing_multiplier  = new_cfg.spacing_multiplier;
-    ctrl->config.offset_min          = new_cfg.offset_min;
-    ctrl->config.offset_max          = new_cfg.offset_max;
-    ctrl->config.vol_mult_min        = new_cfg.vol_mult_min;
-    ctrl->config.vol_mult_max        = new_cfg.vol_mult_max;
-    ctrl->config.filter_scale        = new_cfg.filter_scale;
-    ctrl->config.max_drawdown_pct    = new_cfg.max_drawdown_pct;
-    ctrl->config.max_exposure_pct    = new_cfg.max_exposure_pct;
-    ctrl->config.max_positions       = new_cfg.max_positions;
-    ctrl->config.offset_stddev_mult  = new_cfg.offset_stddev_mult;
-    ctrl->config.offset_stddev_min   = new_cfg.offset_stddev_min;
-    ctrl->config.offset_stddev_max   = new_cfg.offset_stddev_max;
-    ctrl->config.min_long_slope      = new_cfg.min_long_slope;
-    ctrl->config.min_buy_delta       = new_cfg.min_buy_delta;
-    ctrl->config.min_stddev_pct      = new_cfg.min_stddev_pct;
-    ctrl->config.momentum_r2_min     = new_cfg.momentum_r2_min;
-    ctrl->config.tp_hold_score       = new_cfg.tp_hold_score;
-    ctrl->config.tp_trail_mult       = new_cfg.tp_trail_mult;
-    ctrl->config.sl_trail_mult       = new_cfg.sl_trail_mult;
-    ctrl->config.fee_floor_mult      = new_cfg.fee_floor_mult;
-    ctrl->config.min_sl_tp_ratio     = new_cfg.min_sl_tp_ratio;
-    ctrl->config.ror_tp_bonus        = new_cfg.ror_tp_bonus;
-    ctrl->config.momentum_tp_r2_min  = new_cfg.momentum_tp_r2_min;
-    ctrl->config.momentum_sl_r2_max  = new_cfg.momentum_sl_r2_max;
-    ctrl->config.squeeze_decay       = new_cfg.squeeze_decay;
-    ctrl->config.offset_adapt_scale  = new_cfg.offset_adapt_scale;
-    ctrl->config.stddev_adapt_scale  = new_cfg.stddev_adapt_scale;
-    ctrl->config.vol_adapt_scale     = new_cfg.vol_adapt_scale;
-    ctrl->config.breakout_min        = new_cfg.breakout_min;
-    ctrl->config.slow_path_max_secs  = new_cfg.slow_path_max_secs;
-    ctrl->config.max_hold_ticks      = new_cfg.max_hold_ticks;
-    ctrl->config.min_hold_gain_pct   = new_cfg.min_hold_gain_pct;
-    // regime + momentum
-    ctrl->config.regime_slope_threshold = new_cfg.regime_slope_threshold;
-    ctrl->config.regime_r2_threshold    = new_cfg.regime_r2_threshold;
-    ctrl->config.regime_volatile_stddev = new_cfg.regime_volatile_stddev;
-    ctrl->config.regime_vol_spike_ratio = new_cfg.regime_vol_spike_ratio;
-    ctrl->config.regime_hysteresis      = new_cfg.regime_hysteresis;
-    ctrl->config.momentum_breakout_mult = new_cfg.momentum_breakout_mult;
-    ctrl->config.momentum_tp_mult       = new_cfg.momentum_tp_mult;
-    ctrl->config.momentum_sl_mult       = new_cfg.momentum_sl_mult;
-    ctrl->config.spike_threshold         = new_cfg.spike_threshold;
-    ctrl->config.spike_spacing_reduction = new_cfg.spike_spacing_reduction;
-    ctrl->config.sl_cooldown_cycles      = new_cfg.sl_cooldown_cycles;
-    ctrl->config.slippage_pct            = new_cfg.slippage_pct;
+    // save startup-only fields that should survive hot-reload
+    FPN<F> saved_starting_balance = ctrl->config.starting_balance;
+    uint32_t saved_warmup_ticks = ctrl->config.warmup_ticks;
+    uint32_t saved_min_warmup = ctrl->config.min_warmup_samples;
+    int saved_use_real_money = ctrl->config.use_real_money;
+
+    // bulk copy — every field updates automatically
+    ctrl->config = new_cfg;
+
+    // restore protected fields
+    ctrl->config.starting_balance = saved_starting_balance;
+    ctrl->config.warmup_ticks = saved_warmup_ticks;
+    ctrl->config.min_warmup_samples = saved_min_warmup;
+    ctrl->config.use_real_money = saved_use_real_money;
+
     // reset adaptive filters to new values
     ctrl->mean_rev.live_offset_pct    = new_cfg.entry_offset_pct;
     ctrl->mean_rev.live_vol_mult      = new_cfg.volume_multiplier;

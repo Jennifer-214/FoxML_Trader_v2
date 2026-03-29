@@ -234,15 +234,8 @@ inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
             : FPN_DivNoAssert(rolling_long->price_slope, rolling_long->price_avg);
         int long_pass = FPN_GreaterThanOrEqual(relative_long_slope, cfg->min_long_slope);
 
-        int long_blocked = long_enabled & !long_pass;
-        uint64_t block_mask = -(uint64_t)long_blocked;
-        constexpr unsigned N2 = FPN<F>::N;
-        for (unsigned i = 0; i < N2; i++) {
-            conds.price.w[i]  &= ~block_mask;
-            conds.volume.w[i] &= ~block_mask;
-        }
-        conds.price.sign  &= !long_blocked;
-        conds.volume.sign &= !long_blocked;
+        int long_ok = long_pass | !long_enabled;
+        Gate_ZeroAll(&conds, long_ok);
     }
 
     // R² floor: don't enter momentum trades in choppy markets
@@ -250,16 +243,8 @@ inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
     {
         int r2_enabled = !FPN_IsZero(cfg->momentum_r2_min);
         int r2_pass = FPN_GreaterThanOrEqual(rolling->price_r_squared, cfg->momentum_r2_min);
-        int r2_blocked = r2_enabled & !r2_pass;
-
-        uint64_t r2_mask = -(uint64_t)r2_blocked;
-        constexpr unsigned N3 = FPN<F>::N;
-        for (unsigned i = 0; i < N3; i++) {
-            conds.price.w[i]  &= ~r2_mask;
-            conds.volume.w[i] &= ~r2_mask;
-        }
-        conds.price.sign  &= !r2_blocked;
-        conds.volume.sign &= !r2_blocked;
+        int r2_ok = r2_pass | !r2_enabled;
+        Gate_ZeroAll(&conds, r2_ok);
     }
 
     return conds;
@@ -312,6 +297,16 @@ inline void Momentum_ExitAdjust(Portfolio<F> *portfolio, FPN<F> current_price,
             FPN<F> sl_offset = FPN_Mul(rolling->price_stddev, cfg->momentum_sl_mult);
             FPN<F> trailing_sl = FPN_Sub(current_price, sl_offset);
             pos->stop_loss_price = FPN_Max(pos->stop_loss_price, trailing_sl);
+
+            // SL floor: enforce 2:1 min reward/risk after trailing adjustments
+            // only applies when SL is still below entry (at-risk position).
+            // once SL trails above entry, the position is a guaranteed win — no floor needed
+            if (FPN_LessThan(pos->stop_loss_price, pos->entry_price)) {
+              FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+              FPN<F> min_sl_dist = FPN_Mul(tp_dist, FPN_FromDouble<F>(0.5));
+              FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
+              pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
+            }
         }
 
         active &= active - 1;

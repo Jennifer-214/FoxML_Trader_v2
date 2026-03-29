@@ -26,10 +26,8 @@
 
 #include "../CoreFrameworks/PortfolioController.hpp"
 #include "../CoreFrameworks/OrderGates.hpp"
-#if defined(USE_FTXUI) || defined(USE_ANSI_TUI)
 #include <fcntl.h>
 #include <sys/ioctl.h>
-#endif
 
 using namespace std;
 
@@ -286,7 +284,7 @@ static inline void TUI_Render(EngineTUI *tui, const PortfolioController<F> *ctrl
     printf(C_SAND "  ================================================================" C_RESET "\n"); row++;
     printf(C_BOLD C_PEACH "     /\\_/\\   FOXML TRADER" C_RESET
            C_RESET "\n"); row++;
-    printf(C_BOLD C_PEACH "    ( o.o )  " C_WHEAT "engine v3.0.27" C_RESET "\n"); row++;
+    printf(C_BOLD C_PEACH "    ( o.o )  " C_WHEAT "engine v3.2.0" C_RESET "\n"); row++;
     printf(C_BOLD C_PEACH "     > ^ <" C_RESET "\n"); row++;
     printf(C_SAND "  ================================================================" C_RESET "\n"); row++;
     int is_paused = FPN_IsZero(ctrl->buy_conds.price) && (ctrl->state == CONTROLLER_ACTIVE);
@@ -371,8 +369,7 @@ static inline void TUI_Render(EngineTUI *tui, const PortfolioController<F> *ctrl
 
     // ==== PORTFOLIO section ====
     double equity = balance + total_value;
-    double deployed = starting - balance;
-    double exposure_pct = (starting != 0.0) ? (deployed / starting) * 100.0 : 0.0;
+    double exposure_pct = (starting != 0.0) ? (total_value / starting) * 100.0 : 0.0;
     double max_exp = FPN_ToDouble(ctrl->config.max_exposure_pct) * 100.0;
 
     printf(C_BOLD C_PEACH "  PORTFOLIO:" C_RESET "\n"); row++;
@@ -671,6 +668,11 @@ struct TUISnapshot {
     double ror_slope;     // slope-of-slopes (trend acceleration)
     double volume_spike_ratio; // current volume / rolling max (spike detection)
     int spike_active;     // 1 if spike_ratio >= threshold
+    double vwap, vwap_dev; // VWAP and deviation from it
+    double book_imbalance; // bid/ask imbalance [-1, +1] (0 = no depth data)
+    double book_spread;    // bid-ask spread
+    int current_session;   // 0=asian, 1=european, 2=us, 3=overnight (-1=disabled)
+    double session_mult;   // current session gate multiplier
     int sl_cooldown;      // remaining slow-path cycles in post-SL cooldown
     int min_warmup_samples; // configured minimum for warmup display
     int engine_state;     // 0=warmup, 1=active, 2=closing
@@ -818,7 +820,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->equity     = balance + snap->total_value;
     snap->total_pnl  = snap->equity - starting; // derive from equity (always correct)
     snap->return_pct = (starting != 0.0) ? (snap->total_pnl / starting) * 100.0 : 0.0;
-    snap->exposure_pct = (starting != 0.0) ? ((starting - balance) / starting) * 100.0 : 0.0;
+    snap->exposure_pct = (starting != 0.0) ? (snap->total_value / starting) * 100.0 : 0.0;
     snap->max_exp    = FPN_ToDouble(ctrl->config.max_exposure_pct) * 100.0;
     snap->fees       = FPN_ToDouble(ctrl->total_fees);
     snap->fee_rate_pct = fee_r * 100.0;
@@ -848,6 +850,12 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->volume_spike_ratio = FPN_ToDouble(ctrl->volume_spike_ratio);
     snap->spike_active = FPN_GreaterThanOrEqual(ctrl->volume_spike_ratio,
                                                  ctrl->config.spike_threshold);
+    snap->vwap = FPN_ToDouble(ctrl->rolling.vwap);
+    snap->vwap_dev = FPN_ToDouble(ctrl->rolling.vwap_deviation);
+    snap->book_imbalance = FPN_ToDouble(ctrl->book_imbalance);
+    snap->book_spread = 0.0; // populated from depth thread if available
+    snap->current_session = ctrl->current_session;
+    snap->session_mult = FPN_ToDouble(ctrl->session_mult);
     snap->sl_cooldown = (int)ctrl->sl_cooldown_counter;
     snap->min_warmup_samples = (int)ctrl->config.min_warmup_samples;
     // session stats + fill diagnostics
@@ -938,7 +946,7 @@ static inline void TUI_Render_Snapshot(EngineTUI *tui, const TUISnapshot *s) {
     int row = 1;
     printf(C_SAND "  ================================================================" C_RESET "\n"); row++;
     printf(C_BOLD C_PEACH "     /\\_/\\   FOXML TRADER" C_RESET "\n"); row++;
-    printf(C_BOLD C_PEACH "    ( o.o )  " C_WHEAT "engine v3.0.27" C_RESET "\n"); row++;
+    printf(C_BOLD C_PEACH "    ( o.o )  " C_WHEAT "engine v3.2.0" C_RESET "\n"); row++;
     printf(C_BOLD C_PEACH "     > ^ <" C_RESET "\n"); row++;
     printf(C_SAND "  ================================================================" C_RESET "\n"); row++;
     printf(C_SAND "  STATE: " C_FG "%-8s" C_RESET C_DIM "  |  " C_SAND "UPTIME: " C_FG "%02u:%02u:%02u" C_RESET "%s\n",
@@ -1110,96 +1118,13 @@ static inline char TUI_ReadKey(EngineTUI *tui) {
 //======================================================================================================
 // [TUI THREAD FUNCTION]
 //======================================================================================================
-#ifdef USE_NOTCURSES
-#include "TUINotcurses.hpp"
-#elif defined(USE_ANSI_TUI)
 #include "TUIAnsi.hpp"
-#elif defined(USE_FTXUI)
-#include <ftxui/component/component.hpp>
-#include <ftxui/component/screen_interactive.hpp>
-#include <ftxui/component/loop.hpp>
-#include "TUILayout.hpp"
-#endif
 
 static inline void *tui_thread_fn(void *arg) {
     TUISharedState *shared = (TUISharedState *)arg;
 
-#ifdef USE_NOTCURSES
-    // notcurses manages terminal state internally (raw mode, cursor, resize)
-    setlocale(LC_ALL, "");
-
-    notcurses_options nc_opts = {};
-    nc_opts.flags = NCOPTION_SUPPRESS_BANNERS | NCOPTION_NO_ALTERNATE_SCREEN
-                  | NCOPTION_NO_FONT_CHANGES | NCOPTION_DRAIN_INPUT
-                  | NCOPTION_NO_QUIT_SIGHANDLERS | NCOPTION_INHIBIT_SETLOCALE;
-    struct notcurses *nc = notcurses_core_init(&nc_opts, stdout);
-    if (!nc) {
-        fprintf(stderr, "[TUI] notcurses_init failed\n");
-        return NULL;
-    }
-
-    struct ncplane *stdp = notcurses_stdplane(nc);
-    unsigned term_h, term_w;
-    ncplane_dim_yx(stdp, &term_h, &term_w);
-    fprintf(stderr, "[TUI] notcurses init OK: %ux%u, TERM=%s\n",
-            term_w, term_h, getenv("TERM") ? getenv("TERM") : "(null)");
-
-    int current_layout = NC_LAYOUT_STANDARD;
-
-    // create chart planes (for CHARTS layout)
-    NCCharts charts = NC_Charts_Create(stdp, term_h, term_w);
-
-    while (!__atomic_load_n(&shared->quit_requested, __ATOMIC_ACQUIRE)) {
-        // read snapshot
-        int idx = __atomic_load_n(&shared->active_idx, __ATOMIC_ACQUIRE);
-        const TUISnapshot *s = &shared->snapshots[idx];
-
-        // check for terminal resize
-        unsigned new_h, new_w;
-        ncplane_dim_yx(stdp, &new_h, &new_w);
-        if (new_h != term_h || new_w != term_w) {
-            term_h = new_h;
-            term_w = new_w;
-            NC_Charts_Destroy(&charts);
-            charts = NC_Charts_Create(stdp, term_h, term_w);
-        }
-
-        // clear and render
-        ncplane_erase(stdp);
-        NC_Layout_Render(stdp, s, charts.price_plot, charts.pnl_plot,
-                         current_layout, term_h, term_w);
-
-        // update chart data (only visible in CHARTS layout but always fed)
-        NC_Charts_Update(&charts, s);
-
-        notcurses_render(nc);
-
-        // non-blocking input
-        struct ncinput ni;
-        uint32_t key = notcurses_get_nblock(nc, &ni);
-        if (key == (uint32_t)'q' || key == (uint32_t)'Q')
-            __atomic_store_n(&shared->quit_requested, 1, __ATOMIC_RELEASE);
-        else if (key == (uint32_t)'p' || key == (uint32_t)'P')
-            __atomic_store_n(&shared->pause_requested, 1, __ATOMIC_RELEASE);
-        else if (key == (uint32_t)'r' || key == (uint32_t)'R')
-            __atomic_store_n(&shared->reload_requested, 1, __ATOMIC_RELEASE);
-        else if (key == (uint32_t)'s' || key == (uint32_t)'S')
-            __atomic_store_n(&shared->regime_cycle_requested, 1, __ATOMIC_RELEASE);
-        else if (key == (uint32_t)'l' || key == (uint32_t)'L') {
-            current_layout = (current_layout + 1) % NC_LAYOUT_COUNT;
-            NC_Charts_Destroy(&charts);
-            charts = NC_Charts_Create(stdp, term_h, term_w);
-        }
-
-        usleep(100000); // 10 FPS
-    }
-
-    NC_Charts_Destroy(&charts);
-    notcurses_stop(nc);
-
-#elif defined(USE_ANSI_TUI)
-    // raw ANSI TUI — zero library dependencies
-    // same terminal management as FTXUI path: raw mode + non-blocking stdin
+    // ANSI TUI — zero library dependencies, diff-based rendering
+    // raw mode + non-blocking stdin for input handling
     struct termios old_term, raw_term;
     tcgetattr(STDIN_FILENO, &old_term);
     raw_term = old_term;
@@ -1258,117 +1183,6 @@ static inline void *tui_thread_fn(void *arg) {
     tcsetattr(STDIN_FILENO, TCSANOW, &old_term);
     printf("\033[?25h\033[H\033[J");  // show cursor, home, clear below (not full screen wipe)
     fflush(stdout);
-
-#elif defined(USE_FTXUI)
-    // DOM-only FTXUI rendering with manual terminal management
-    // set terminal to raw mode + non-blocking stdin
-    struct termios old_term, raw_term;
-    tcgetattr(STDIN_FILENO, &old_term);
-    raw_term = old_term;
-    raw_term.c_lflag &= ~(ICANON | ECHO);
-    raw_term.c_cc[VMIN] = 0;
-    raw_term.c_cc[VTIME] = 0;
-    tcsetattr(STDIN_FILENO, TCSANOW, &raw_term);
-
-    // make stdin non-blocking with fcntl (belt + suspenders)
-    int stdin_flags = fcntl(STDIN_FILENO, F_GETFL, 0);
-    fcntl(STDIN_FILENO, F_SETFL, stdin_flags | O_NONBLOCK);
-
-    // hide cursor, clear screen
-    printf("\033[?25l\033[2J");
-    fflush(stdout);
-
-    int current_layout = LAYOUT_STANDARD;
-
-    // cache terminal size — only update on change to prevent jitter
-    struct winsize ws;
-    ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
-    int term_w = ws.ws_col, term_h = ws.ws_row;
-    int frame_count = 0;
-
-    while (!__atomic_load_n(&shared->quit_requested, __ATOMIC_ACQUIRE)) {
-        // re-check terminal size every 20 frames (~2 sec) to handle resize
-        if (++frame_count % 20 == 0) {
-            struct winsize ws2;
-            if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws2) == 0) {
-                if (ws2.ws_col != term_w || ws2.ws_row != term_h) {
-                    term_w = ws2.ws_col;
-                    term_h = ws2.ws_row;
-                    printf("\033[2J"); // clear on resize
-                }
-            }
-        }
-
-        // read snapshot
-        int idx = __atomic_load_n(&shared->active_idx, __ATOMIC_ACQUIRE);
-        const TUISnapshot *s = &shared->snapshots[idx];
-
-        // render FTXUI element tree to a fixed-size screen buffer
-        auto element = Layout_Render(s, current_layout, term_w, term_h);
-        auto screen = ftxui::Screen::Create(
-            ftxui::Dimension::Fixed(term_w),
-            ftxui::Dimension::Fixed(term_h));
-        ftxui::Render(screen, element);
-
-        // synchronized output: terminal buffers everything and paints in one pass
-        // clear entire screen inside sync block so no stale content interferes
-        std::string content = screen.ToString();
-        std::string output;
-        output.reserve(content.size() + 64);
-        output += "\033[?2026h";  // begin synchronized output
-        output += "\033[2J";      // clear entire screen
-        output += "\033[H";       // cursor home
-        output += content;
-        output += "\033[?2026l";  // end synchronized output
-        write(STDOUT_FILENO, output.data(), output.size());
-
-        // non-blocking keyboard read
-        char c = 0;
-        if (read(STDIN_FILENO, &c, 1) == 1) {
-            if (c == 'q' || c == 'Q')
-                __atomic_store_n(&shared->quit_requested, 1, __ATOMIC_RELEASE);
-            else if (c == 'p' || c == 'P')
-                __atomic_store_n(&shared->pause_requested, 1, __ATOMIC_RELEASE);
-            else if (c == 'r' || c == 'R')
-                __atomic_store_n(&shared->reload_requested, 1, __ATOMIC_RELEASE);
-            else if (c == 's' || c == 'S')
-                __atomic_store_n(&shared->regime_cycle_requested, 1, __ATOMIC_RELEASE);
-            else if (c == 'l' || c == 'L')
-                current_layout = (current_layout + 1) % LAYOUT_COUNT;
-        }
-
-        usleep(100000); // 10 FPS
-    }
-
-    // restore terminal
-    fcntl(STDIN_FILENO, F_SETFL, stdin_flags);
-    tcsetattr(STDIN_FILENO, TCSANOW, &old_term);
-    printf("\033[?25h\033[2J"); // show cursor, clear screen
-    fflush(stdout);
-
-#else
-    // legacy printf TUI
-    TUI_Init(&shared->tui, 1, 10);
-
-    while (!__atomic_load_n(&shared->quit_requested, __ATOMIC_ACQUIRE)) {
-        int idx = __atomic_load_n(&shared->active_idx, __ATOMIC_ACQUIRE);
-        TUI_Render_Snapshot(&shared->tui, &shared->snapshots[idx]);
-
-        char c = TUI_ReadKey(&shared->tui);
-        if (c == 'q' || c == 'Q')
-            __atomic_store_n(&shared->quit_requested, 1, __ATOMIC_RELEASE);
-        else if (c == 'p' || c == 'P')
-            __atomic_store_n(&shared->pause_requested, 1, __ATOMIC_RELEASE);
-        else if (c == 'r' || c == 'R')
-            __atomic_store_n(&shared->reload_requested, 1, __ATOMIC_RELEASE);
-        else if (c == 's' || c == 'S')
-            __atomic_store_n(&shared->regime_cycle_requested, 1, __ATOMIC_RELEASE);
-
-        usleep(100000); // 10 FPS
-    }
-
-    TUI_Cleanup(&shared->tui);
-#endif // USE_FTXUI
 
     return NULL;
 }

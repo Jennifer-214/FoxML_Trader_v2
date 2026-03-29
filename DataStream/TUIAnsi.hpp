@@ -331,7 +331,7 @@ static inline int ANSI_Section_Header(AnsiBuf *ab, const TUISnapshot *s,
     y++;
     ab_goto(ab, y, 3);
     ab_printf(ab, A_BOLD A_PEACH "( °_ ° 7" A_RESET);
-    ab_printf(ab, "\033[20G" A_WHEAT "engine v3.0.27" A_RESET);
+    ab_printf(ab, "\033[20G" A_WHEAT "engine v3.2.0" A_RESET);
     y++;
     ab_goto(ab, y, 4);
     ab_printf(ab, A_BOLD A_PEACH "ド  ヘ" A_RESET);
@@ -357,8 +357,19 @@ static inline int ANSI_Section_Header(AnsiBuf *ab, const TUISnapshot *s,
     ab_printf(ab, A_SAND " STATE: " A_FG "%-8s" A_DIM "  │  "
               A_SAND "UPTIME: " A_FG "%02u:%02u:%02u",
               state_str, hours, mins, secs);
-    if (s->is_paused)
-        ab_printf(ab, A_DIM "  │  " A_BOLD A_YELLOW "PAUSED" A_RESET);
+    if (s->is_paused) {
+        const char *reason = "wait";
+        if (s->sl_cooldown > 0) reason = "cooldown";
+        else if (s->breaker_tripped) reason = "breaker";
+        else if (s->current_regime == 2) reason = "volatile";
+        else if (s->current_regime == 3) reason = "downtrend";
+        ab_printf(ab, A_DIM "  │  " A_BOLD A_YELLOW "PAUSED" A_DIM " (%s)" A_RESET, reason);
+    }
+    if (s->current_session >= 0) {
+        static const char *sess_names[] = {"ASIA", "EU", "US", "OVERNIGHT"};
+        ab_printf(ab, A_DIM "  │  " A_SAND "%s" A_DIM " (%.1fx)" A_RESET,
+                  sess_names[s->current_session], s->session_mult);
+    }
     ab_append(ab, A_RESET);
     y++;
 
@@ -510,6 +521,23 @@ static inline int ANSI_Section_Regime(AnsiBuf *ab, const TUISnapshot *s, int y, 
         ab_printf(ab, A_DIM "  vol:%.1fx" A_RESET, s->volume_spike_ratio);
     y++;
 
+    // VWAP: volume-weighted average price and deviation
+    if (s->vwap > 0.0) {
+        const char *vwap_color = (s->vwap_dev < -0.001) ? A_GREEN :
+                                 (s->vwap_dev > 0.001) ? A_RED : A_FG;
+        ab_goto(ab, y, 3);
+        ab_printf(ab, A_SAND "vwap: " A_FG "$%.2f" A_DIM "  dev: "
+                  "%s%+.3f%%" A_RESET, s->vwap, vwap_color, s->vwap_dev * 100.0);
+        // book imbalance on same line if available
+        if (s->book_imbalance != 0.0) {
+            const char *book_color = (s->book_imbalance > 0.1) ? A_GREEN :
+                                     (s->book_imbalance < -0.1) ? A_RED : A_FG;
+            ab_printf(ab, A_DIM "  " A_SAND "book: " "%s%+.2f" A_RESET,
+                      book_color, s->book_imbalance);
+        }
+        y++;
+    }
+
     return y;
 }
 
@@ -575,9 +603,9 @@ static inline int ANSI_Section_BuyGate(AnsiBuf *ab, const TUISnapshot *s, int y,
     y++;
 
     // fill rejection diagnostics
-    if (s->fills_rejected > 0 && s->last_reject_reason > 0 && s->last_reject_reason <= 6) {
+    if (s->fills_rejected > 0 && s->last_reject_reason > 0 && s->last_reject_reason <= 7) {
         static const char *reasons[] = {"", "spacing", "balance", "exposure",
-                                         "breaker", "max_pos", "duplicate"};
+                                         "breaker", "max_pos", "duplicate", "min_vol"};
         ab_goto(ab, y, 3);
         ab_printf(ab, A_DIM "fills " A_FG "%u" A_DIM "/" A_FG "%u"
                   A_DIM "  last reject: " A_YELLOW "%s" A_RESET,
@@ -928,9 +956,9 @@ static inline void ANSI_Section_RightPanel(AnsiBuf *ab, const TUISnapshot *s,
     ab_printf(ab, A_SAND "accepted: " A_FG "%u" A_RESET, s->total_buys);
     ab_goto_right(ab, 15, rc);
     ab_printf(ab, A_SAND "rejected: " A_FG "%u" A_RESET, s->fills_rejected);
-    if (s->last_reject_reason > 0 && s->last_reject_reason <= 6) {
+    if (s->last_reject_reason > 0 && s->last_reject_reason <= 7) {
         static const char *reasons[] = {"", "spacing", "balance", "exposure",
-                                         "breaker", "max_pos", "duplicate"};
+                                         "breaker", "max_pos", "duplicate", "min_vol"};
         ab_goto_right(ab, 16, rc);
         ab_printf(ab, A_SAND "last: " A_YELLOW "%s" A_RESET,
                   reasons[s->last_reject_reason]);

@@ -58,6 +58,14 @@ template <unsigned F, unsigned W = 128> struct RollingStats {
     FPN<F> buy_volume_sum;     // sum of buyer-initiated volume in window
     FPN<F> sell_volume_sum;    // sum of seller-initiated volume in window
     FPN<F> volume_delta;       // (buy - sell) / (buy + sell), range [-1.0, +1.0]
+
+    // VWAP: volume-weighted average price over window
+    // maintained via running sums with eviction (same pattern as directional volume)
+    FPN<F> pv_buf[W];          // price*volume per sample (for eviction)
+    FPN<F> pv_sum;             // running sum(price * volume)
+    FPN<F> vol_sum;            // running sum(volume) — separate from volume_sum in loop
+    FPN<F> vwap;               // pv_sum / vol_sum
+    FPN<F> vwap_deviation;     // (price - vwap) / vwap (negative = below VWAP)
 };
 
 //======================================================================================================
@@ -85,6 +93,11 @@ template <unsigned F, unsigned W = 128> inline RollingStats<F, W> RollingStats_I
     rs.sell_volume_sum = FPN_Zero<F>();
     rs.volume_delta    = FPN_Zero<F>();
     for (int i = 0; i < (int)W; i++) rs.side_buf[i] = 0;
+    for (int i = 0; i < (int)W; i++) rs.pv_buf[i] = FPN_Zero<F>();
+    rs.pv_sum          = FPN_Zero<F>();
+    rs.vol_sum         = FPN_Zero<F>();
+    rs.vwap            = FPN_Zero<F>();
+    rs.vwap_deviation  = FPN_Zero<F>();
     return rs;
 }
 
@@ -113,6 +126,22 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN<F> price, FPN<F> volum
     if (is_buyer_maker) rs->sell_volume_sum = FPN_AddSat(rs->sell_volume_sum, volume);
     else                rs->buy_volume_sum  = FPN_AddSat(rs->buy_volume_sum,  volume);
     rs->side_buf[rs->head] = is_buyer_maker;
+
+    // VWAP running sums: evict oldest pv, accumulate new
+    if (rs->count >= (int)W) {
+        rs->pv_sum  = FPN_SubSat(rs->pv_sum, rs->pv_buf[rs->head]);
+        rs->vol_sum = FPN_SubSat(rs->vol_sum, rs->volume_buf[rs->head]);
+    }
+    FPN<F> pv = FPN_Mul(price, volume);
+    rs->pv_buf[rs->head] = pv;
+    rs->pv_sum  = FPN_AddSat(rs->pv_sum, pv);
+    rs->vol_sum = FPN_AddSat(rs->vol_sum, volume);
+
+    // recompute VWAP and deviation
+    if (!FPN_IsZero(rs->vol_sum)) {
+        rs->vwap = FPN_DivNoAssert(rs->pv_sum, rs->vol_sum);
+        rs->vwap_deviation = FPN_DivNoAssert(FPN_Sub(price, rs->vwap), rs->vwap);
+    }
 
     // write to ring buffer
     rs->price_buf[rs->head]  = price;
