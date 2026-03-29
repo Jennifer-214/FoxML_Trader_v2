@@ -23,12 +23,13 @@ fi
 
 # run engine with CPU pinning + realtime priority + inhibit sleep
 cd build
+touch engine.log 2>/dev/null
 sudo systemd-inhibit \
     --what=idle:sleep:handle-lid-switch \
     --who="fox_ml" \
     --why="trader running" \
     --mode=block \
-    taskset -c 1 chrt -f 99 ./engine 2>engine.log
+    taskset -c 1 chrt -f 99 sh -c './engine 2>>engine.log'
 
 # cleanup chart if running
 if [ -n "$CHART_PID" ]; then
