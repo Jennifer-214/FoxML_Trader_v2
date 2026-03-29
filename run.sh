@@ -21,9 +21,12 @@ if [[ "$1" == "--chart" ]]; then
     echo "[foxml] chart window launched (pid $CHART_PID)"
 fi
 
-# run engine with CPU pinning + realtime priority + inhibit sleep
+# rotate engine.log — previous session becomes engine.log.prev
 cd build
-touch engine.log 2>/dev/null
+[ -f engine.log ] && mv engine.log "engine.log.prev"
+touch engine.log
+
+# run engine with CPU pinning + realtime priority + inhibit sleep
 sudo systemd-inhibit \
     --what=idle:sleep:handle-lid-switch \
     --who="fox_ml" \
