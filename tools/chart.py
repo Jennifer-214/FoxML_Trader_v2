@@ -301,7 +301,7 @@ class FoxmlChart:
                                 zorder=10)
 
         self.ax_price.set_ylabel('Price ($)', color=C['text'])
-        self.ax_price.yaxis.set_major_formatter(mticker.FormatStrFormatter('$%,.0f'))
+        self.ax_price.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f'${x:,.0f}'))
         self.ax_price.grid(True, alpha=0.3)
         self.ax_price.set_xlim(-0.5, n - 0.5)
 
@@ -350,7 +350,7 @@ class FoxmlChart:
                                           edgecolors=C['text'], linewidths=0.3, zorder=10)
 
             self.ax_equity.set_ylabel('P&L ($)', color=C['text'])
-            self.ax_equity.yaxis.set_major_formatter(mticker.FormatStrFormatter('$%+,.2f'))
+            self.ax_equity.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f'${x:+,.2f}'))
         else:
             self.ax_equity.text(0.5, 0.5, 'waiting for trades...',
                                transform=self.ax_equity.transAxes,
