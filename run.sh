@@ -17,15 +17,12 @@ fi
 # ensure config symlink
 ln -sf "$(pwd)/engine.cfg" build/engine.cfg 2>/dev/null
 
-# rotate engine.log — previous session becomes engine.log.prev
+# rotate engine.log
 cd build
 [ -f engine.log ] && mv -f engine.log engine.log.prev 2>/dev/null
 touch engine.log 2>/dev/null
 
-# cache sudo credentials before launching anything
-sudo -v || exit 1
-
-# NOW launch chart (after sudo prompt is done, no terminal fighting)
+# launch chart if requested
 cd "$(dirname "$0")"
 CHART_PID=""
 if [[ "$WANT_CHART" == "1" ]]; then
@@ -34,14 +31,9 @@ if [[ "$WANT_CHART" == "1" ]]; then
     echo "[foxml] chart window launched (pid $CHART_PID)"
 fi
 
-# run engine with CPU pinning + realtime priority + inhibit sleep
+# run engine
 cd build
-sudo systemd-inhibit \
-    --what=idle:sleep:handle-lid-switch \
-    --who="fox_ml" \
-    --why="trader running" \
-    --mode=block \
-    taskset -c 1 chrt -f 99 sh -c './engine 2>>engine.log'
+./engine 2>>engine.log
 
 # cleanup chart on exit
 [ -n "$CHART_PID" ] && kill $CHART_PID 2>/dev/null
