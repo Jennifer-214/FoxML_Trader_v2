@@ -91,6 +91,8 @@ template <unsigned F> struct ControllerConfig {
   int sl_cooldown_adaptive;      // 0 = fixed cycles, 1 = scale by trend confidence at SL time
   uint32_t sl_cooldown_base;     // minimum cooldown cycles (even on spikes)
   uint32_t sl_cooldown_extra;    // max additional cycles (scaled by trend confidence)
+  // gate death spiral recovery
+  uint32_t idle_reset_cycles;    // slow-path cycles with no fill before gate decay (0 = disabled)
   // momentum strategy
   FPN<F> momentum_breakout_mult;  // buy when price > avg + stddev * this (e.g. 1.5)
   FPN<F> momentum_tp_mult;        // TP multiplier for momentum (e.g. 3.0 stddevs)
@@ -174,6 +176,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.regime_volatile_stddev = FPN_FromDouble<F>(0.0005); // 0.05% stddev/price (legacy compat)
   cfg.regime_vol_spike_ratio = FPN_FromDouble<F>(2.0);   // variance spike: 2x baseline = volatile
   cfg.regime_hysteresis      = 5;                          // 5 slow-path cycles before switch
+  cfg.idle_reset_cycles      = 30;                          // ~90s idle before gate decay to initial
   cfg.sl_cooldown_cycles     = 5;                          // 5 slow-path cycles pause after SL
   cfg.sl_cooldown_adaptive   = 0;                          // 0 = fixed, 1 = adaptive (backward compat)
   cfg.sl_cooldown_base       = 2;                          // min cooldown (spike recovery)
@@ -333,6 +336,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_U32(max_hold_ticks)
     CFG_PARSE_U32(regime_hysteresis)
     CFG_PARSE_U32(min_warmup_samples)
+    CFG_PARSE_U32(idle_reset_cycles)
     CFG_PARSE_U32(sl_cooldown_cycles)
     CFG_PARSE_U32(sl_cooldown_base)
     CFG_PARSE_U32(sl_cooldown_extra)

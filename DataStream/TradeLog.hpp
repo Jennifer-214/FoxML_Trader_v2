@@ -100,7 +100,7 @@ static inline void TradeLog_Sell(TradeLog *log, TradeLogRecord *r) {
     if (!log->file) return;
     fprintf(log->file, "%lu,SELL,%.4f,%.6f,%.4f,%.4f,%s,"
             ",,,,,"
-            ",,,%.4f,%.4f,,,%s,%s\n",
+            ",%.4f,%.4f,,,%s,%s\n",
             (unsigned long)r->tick, r->price, r->quantity, r->entry_price, r->delta_pct, r->reason,
             r->balance, r->fee_cost,
             _strategy_str(r->strategy_id), _regime_str(r->regime));

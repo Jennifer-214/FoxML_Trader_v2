@@ -87,6 +87,7 @@ template <unsigned F> struct PortfolioController {
   int current_session;          // 0=asian, 1=european, 2=us, 3=overnight
   FPN<F> session_mult;          // current session gate multiplier
   FPN<F> book_imbalance;        // bid/ask imbalance from depth stream [-1, +1] (updated externally)
+  uint32_t idle_cycles;         // slow-path cycles since last fill (gate death spiral recovery)
   uint32_t fills_rejected;     // total fills rejected since startup
   int last_reject_reason;      // 0=none, 1=spacing, 2=balance, 3=exposure, 4=breaker, 5=full, 6=dup
   TradeLogBuffer trade_buf;    // buffered trade log — hot path pushes, slow path drains
@@ -159,6 +160,7 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->current_session = -1;  // unset until first slow path
   ctrl->session_mult = FPN_FromDouble<F>(1.0);
   ctrl->book_imbalance = FPN_Zero<F>();
+  ctrl->idle_cycles = 0;
   ctrl->fills_rejected = 0;
   ctrl->last_reject_reason = 0;
 
@@ -619,6 +621,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       // only deduct balance and count the buy if a position was actually created
       if (fill_ok) {
         ctrl->total_buys++;
+        ctrl->idle_cycles = 0;  // reset gate death spiral counter
         ctrl->balance = FPN_SubSat(ctrl->balance, total_cost);
         ctrl->total_fees = FPN_AddSat(ctrl->total_fees, entry_fee);
       }
@@ -824,6 +827,26 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
                                           ctrl->rolling_long, &ctrl->config);
     ctrl->buy_conds.gate_direction = 1;  // buy above (breakouts)
     break;
+  }
+
+  // gate death spiral recovery: if no fills for idle_reset_cycles, decay gates
+  // back toward initial config values to prevent permanent lockout after losses
+  ctrl->idle_cycles++;
+  if (ctrl->config.idle_reset_cycles > 0 && ctrl->idle_cycles >= ctrl->config.idle_reset_cycles) {
+    FPN<F> decay = ctrl->config.squeeze_decay; // 10% of gap per cycle
+    // MR: decay offset and volume mult toward initial config
+    FPN<F> off_gap = FPN_Sub(ctrl->mean_rev.live_offset_pct, ctrl->config.entry_offset_pct);
+    ctrl->mean_rev.live_offset_pct = FPN_Sub(ctrl->mean_rev.live_offset_pct, FPN_Mul(off_gap, decay));
+    FPN<F> vol_gap = FPN_Sub(ctrl->mean_rev.live_vol_mult, ctrl->config.volume_multiplier);
+    ctrl->mean_rev.live_vol_mult = FPN_Sub(ctrl->mean_rev.live_vol_mult, FPN_Mul(vol_gap, decay));
+    FPN<F> sm_gap = FPN_Sub(ctrl->mean_rev.live_stddev_mult, ctrl->config.offset_stddev_mult);
+    ctrl->mean_rev.live_stddev_mult = FPN_Sub(ctrl->mean_rev.live_stddev_mult, FPN_Mul(sm_gap, decay));
+    // Momentum: decay breakout mult toward initial config
+    FPN<F> bk_gap = FPN_Sub(ctrl->momentum.live_breakout_mult, ctrl->config.momentum_breakout_mult);
+    ctrl->momentum.live_breakout_mult = FPN_Sub(ctrl->momentum.live_breakout_mult, FPN_Mul(bk_gap, decay));
+    // clear stale regression so it doesn't re-tighten immediately
+    ctrl->mean_rev.has_regression = 0;
+    ctrl->momentum.has_regression = 0;
   }
 
   // session awareness: scale volume gate by session multiplier
