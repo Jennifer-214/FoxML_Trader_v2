@@ -684,7 +684,7 @@ struct TUISnapshot {
     double cfg_offset_val; // offset pct or stddev mult depending on mode
     // stats
     uint32_t total_buys, wins, losses;
-    double win_rate, profit_factor, avg_win, avg_loss, avg_hold;
+    double win_rate, profit_factor, avg_win, avg_loss, avg_loss_market, avg_hold;
     // latency
 #ifdef LATENCY_PROFILING
     double hot_avg_ns, hot_min_ns, hot_max_ns, hot_p50_ns, hot_p95_ns;
@@ -890,6 +890,15 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->profit_factor = (g_losses > 0.001) ? g_wins / g_losses : 0.0;
     snap->avg_win  = (ctrl->wins > 0)  ? g_wins / ctrl->wins : 0.0;
     snap->avg_loss = (ctrl->losses > 0) ? g_losses / ctrl->losses : 0.0;
+    // market-only avg loss: subtract estimated round-trip fees per losing exit
+    // fee_per_exit ≈ avg_position_cost * fee_rate * 2 (entry + exit)
+    // use total_fees / total_exits as a simpler proxy
+    {
+      uint32_t tex = ctrl->wins + ctrl->losses;
+      double fee_per_exit = (tex > 0) ? FPN_ToDouble(ctrl->total_fees) / tex : 0.0;
+      snap->avg_loss_market = (ctrl->losses > 0) ? snap->avg_loss - fee_per_exit : 0.0;
+      if (snap->avg_loss_market < 0.0) snap->avg_loss_market = 0.0; // clamp (loss was entirely fees)
+    }
     snap->avg_hold = (total_exits > 0)  ? (double)ctrl->total_hold_ticks / total_exits : 0.0;
 }
 

@@ -735,6 +735,9 @@ static inline int ANSI_Section_Stats(AnsiBuf *ab, const TUISnapshot *s, int y, i
               A_PNL(s->win_rate - 50.0), s->win_rate,
               A_PNL(s->profit_factor - 1.0), s->profit_factor,
               s->avg_win, s->avg_loss);
+    if (s->losses > 0 && s->avg_loss_market < s->avg_loss) {
+        ab_printf(ab, A_DIM " (mkt: " A_FG "$%.2f" A_DIM ")" A_RESET, s->avg_loss_market);
+    }
     y++;
 
     return y;
