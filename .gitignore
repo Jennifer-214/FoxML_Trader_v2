@@ -4,3 +4,4 @@ build_latency/
 *.d
 plans/
 .claude/
+.chart-venv/
