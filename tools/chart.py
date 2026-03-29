@@ -312,21 +312,25 @@ class FoxmlChart:
                                 zorder=10)
 
         # active position lines: entry (wheat), TP (green dashed), SL (red dashed)
-        for entry_price, tp, sl in self.trades.active_positions:
+        # numbered markers to differentiate which TP/SL belongs to which entry
+        pos_styles = ['-', '-.', ':', (0, (5, 1))]  # different line styles per position
+        for pi, (entry_price, tp, sl) in enumerate(self.trades.active_positions):
+            style = pos_styles[pi % len(pos_styles)]
+            tag = f'#{pi+1}'
             if entry_price > 0:
                 self.ax_price.axhline(y=entry_price, color=C['wheat'], linewidth=1,
-                                      linestyle='-', alpha=0.7)
-                self.ax_price.text(n - 0.3, entry_price, f' entry ${entry_price:,.0f}',
+                                      linestyle=style, alpha=0.7)
+                self.ax_price.text(n - 0.3, entry_price, f' {tag} ${entry_price:,.0f}',
                                    fontsize=7, color=C['wheat'], va='bottom')
             if tp > 0:
                 self.ax_price.axhline(y=tp, color=C['green_b'], linewidth=0.8,
-                                      linestyle='--', alpha=0.5)
-                self.ax_price.text(n - 0.3, tp, f' TP ${tp:,.0f}',
+                                      linestyle=style, alpha=0.5)
+                self.ax_price.text(n - 0.3, tp, f' {tag} TP',
                                    fontsize=7, color=C['green_b'], va='bottom')
             if sl > 0:
                 self.ax_price.axhline(y=sl, color=C['red'], linewidth=0.8,
-                                      linestyle='--', alpha=0.5)
-                self.ax_price.text(n - 0.3, sl, f' SL ${sl:,.0f}',
+                                      linestyle=style, alpha=0.5)
+                self.ax_price.text(n - 0.3, sl, f' {tag} SL',
                                    fontsize=7, color=C['red'], va='bottom')
 
         self.ax_price.set_ylabel('Price ($)', color=C['text'])
