@@ -178,7 +178,7 @@ def start_ws(symbol, accumulator):
         run()
 
     def run():
-        url = f"wss://stream.binance.com:9443/ws/{symbol}@trade"
+        url = f"wss://data-stream.binance.vision:443/ws/{symbol}@trade"
         ws = websocket.WebSocketApp(url,
             on_message=on_message, on_error=on_error, on_close=on_close)
         ws.run_forever()
