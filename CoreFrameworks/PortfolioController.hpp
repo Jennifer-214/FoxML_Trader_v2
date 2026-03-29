@@ -82,6 +82,8 @@ template <unsigned F> struct PortfolioController {
   uint32_t sl_cooldown_counter; // remaining slow-path cycles before buy gate re-enables
   double session_high;         // highest price since startup
   double session_low;          // lowest price since startup
+  double peak_equity;          // highest equity seen (for max drawdown tracking)
+  double max_drawdown;         // largest peak-to-trough equity drop ($)
   int current_session;          // 0=asian, 1=european, 2=us, 3=overnight
   FPN<F> session_mult;          // current session gate multiplier
   FPN<F> book_imbalance;        // bid/ask imbalance from depth stream [-1, +1] (updated externally)
@@ -152,6 +154,8 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->sl_cooldown_counter = 0;
   ctrl->session_high = 0.0;
   ctrl->session_low = 0.0;
+  ctrl->peak_equity = FPN_ToDouble(config.starting_balance);
+  ctrl->max_drawdown = 0.0;
   ctrl->current_session = -1;  // unset until first slow path
   ctrl->session_mult = FPN_FromDouble<F>(1.0);
   ctrl->book_imbalance = FPN_Zero<F>();
@@ -758,6 +762,14 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       Portfolio_ComputeValue(&ctrl->portfolio, current_price);
   FPN<F> estimated_exit_fees = FPN_Mul(portfolio_value, ctrl->config.fee_rate);
   ctrl->portfolio_delta = FPN_Sub(gross_pnl, estimated_exit_fees);
+
+  // track peak equity and max drawdown
+  {
+    double equity = FPN_ToDouble(ctrl->balance) + FPN_ToDouble(portfolio_value);
+    if (equity > ctrl->peak_equity) ctrl->peak_equity = equity;
+    double dd = ctrl->peak_equity - equity;
+    if (dd > ctrl->max_drawdown) ctrl->max_drawdown = dd;
+  }
 
   // feed rolling price slope to ROR for trend acceleration detection
   // ROR gives us slope-of-slopes: is the trend getting steeper or flattening?
