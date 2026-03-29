@@ -215,9 +215,7 @@ class FoxmlChart:
             gridspec_kw={'height_ratios': [4, 1, 2], 'hspace': 0.08},
             sharex=False
         )
-        self.fig.patch.set_alpha(0.85)
-        for ax in (self.ax_price, self.ax_vol, self.ax_equity):
-            ax.patch.set_alpha(0.75)
+        # transparency handled by Hyprland compositor rule, not matplotlib
         self.fig.canvas.manager.set_window_title('foxml chart')
 
         # title
