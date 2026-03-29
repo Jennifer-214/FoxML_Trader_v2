@@ -118,6 +118,7 @@ class TradeReader:
         self.buys = []   # [(price, tick)]
         self.sells = []  # [(price, tick, reason)]
         self.equity = [] # [(tick, cumulative_pnl)]
+        self.active_positions = []  # [(entry_price, tp, sl)]
         self.cumulative_pnl = 0.0
 
     def refresh(self):
@@ -132,27 +133,37 @@ class TradeReader:
         self.sells.clear()
         self.equity.clear()
         self.cumulative_pnl = 0.0
+        open_positions = []  # [(entry_price, tp, sl)]
 
         try:
-            df = pd.read_csv(self.csv_path)
+            df = pd.read_csv(self.csv_path, on_bad_lines='skip')
             for _, row in df.iterrows():
                 tick = row.get('tick', 0)
                 price = row.get('price', 0)
                 side = str(row.get('side', ''))
 
                 if side == 'BUY':
+                    tp = float(row.get('take_profit', 0) or 0)
+                    sl = float(row.get('stop_loss', 0) or 0)
+                    open_positions.append((float(price), tp, sl))
                     self.buys.append((float(price), int(tick)))
                 elif side == 'SELL':
                     reason = str(row.get('exit_reason', ''))
-                    delta = float(row.get('delta_pct', 0))
-                    entry = float(row.get('entry_price', price))
-                    qty = float(row.get('quantity', 0))
+                    entry = float(row.get('entry_price', price) or price)
+                    qty = float(row.get('quantity', 0) or 0)
                     pnl = (float(price) - entry) * qty
                     self.cumulative_pnl += pnl
                     self.sells.append((float(price), int(tick), reason))
                     self.equity.append((int(tick), self.cumulative_pnl))
-        except Exception:
-            pass
+                    # remove matching open position
+                    for i, (ep, _, _) in enumerate(open_positions):
+                        if abs(ep - entry) < 0.01:
+                            open_positions.pop(i)
+                            break
+        except Exception as e:
+            print(f'[foxml chart] CSV parse error: {e}')
+
+        self.active_positions = open_positions
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -299,6 +310,24 @@ class FoxmlChart:
             self.ax_price.scatter(xs[best_i], sell_price, marker='v', s=80,
                                 color=color, edgecolors=C['text'], linewidths=0.5,
                                 zorder=10)
+
+        # active position lines: entry (wheat), TP (green dashed), SL (red dashed)
+        for entry_price, tp, sl in self.trades.active_positions:
+            if entry_price > 0:
+                self.ax_price.axhline(y=entry_price, color=C['wheat'], linewidth=1,
+                                      linestyle='-', alpha=0.7)
+                self.ax_price.text(n - 0.3, entry_price, f' entry ${entry_price:,.0f}',
+                                   fontsize=7, color=C['wheat'], va='bottom')
+            if tp > 0:
+                self.ax_price.axhline(y=tp, color=C['green_b'], linewidth=0.8,
+                                      linestyle='--', alpha=0.5)
+                self.ax_price.text(n - 0.3, tp, f' TP ${tp:,.0f}',
+                                   fontsize=7, color=C['green_b'], va='bottom')
+            if sl > 0:
+                self.ax_price.axhline(y=sl, color=C['red'], linewidth=0.8,
+                                      linestyle='--', alpha=0.5)
+                self.ax_price.text(n - 0.3, sl, f' SL ${sl:,.0f}',
+                                   fontsize=7, color=C['red'], va='bottom')
 
         self.ax_price.set_ylabel('Price ($)', color=C['text'])
         self.ax_price.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f'${x:,.0f}'))
