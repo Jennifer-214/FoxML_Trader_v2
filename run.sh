@@ -26,7 +26,7 @@ touch engine.log 2>/dev/null
 cd "$(dirname "$0")"
 CHART_PID=""
 if [[ "$WANT_CHART" == "1" ]]; then
-    .chart-venv/bin/python tools/chart.py >/dev/null 2>&1 &
+    .chart-venv/bin/python tools/chart.py &
     CHART_PID=$!
     echo "[foxml] chart window launched (pid $CHART_PID)"
 fi

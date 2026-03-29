@@ -159,29 +159,36 @@ class TradeReader:
 # WEBSOCKET THREAD
 # ═══════════════════════════════════════════════════════════════════════════════
 def start_ws(symbol, accumulator):
+    import ssl
+
+    def on_open(ws):
+        print(f'[foxml chart] websocket connected')
+
     def on_message(ws, msg):
         try:
             d = json.loads(msg)
             price = float(d['p'])
             volume = float(d['q'])
-            is_seller = d['m']  # true = buyer is maker = seller initiated
+            is_seller = d['m']
             ts = int(d['T'])
             accumulator.push(price, volume, is_seller, ts)
-        except (KeyError, ValueError):
-            pass
+        except (KeyError, ValueError) as e:
+            print(f'[foxml chart] parse error: {e}')
 
     def on_error(ws, err):
-        pass
+        print(f'[foxml chart] ws error: {err}')
 
     def on_close(ws, code, msg):
+        print(f'[foxml chart] ws closed ({code}), reconnecting...')
         time.sleep(3)
         run()
 
     def run():
         url = f"wss://data-stream.binance.vision:443/ws/{symbol}@trade"
         ws = websocket.WebSocketApp(url,
-            on_message=on_message, on_error=on_error, on_close=on_close)
-        ws.run_forever()
+            on_open=on_open, on_message=on_message,
+            on_error=on_error, on_close=on_close)
+        ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
