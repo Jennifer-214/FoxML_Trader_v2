@@ -685,6 +685,10 @@ struct TUISnapshot {
     // stats
     uint32_t total_buys, wins, losses;
     double win_rate, profit_factor, avg_win, avg_loss, avg_loss_market, avg_hold;
+    double expectancy;       // (win_rate * avg_win) - (loss_rate * avg_loss)
+    double max_drawdown;     // peak-to-trough equity drop ($)
+    double max_drawdown_pct; // peak-to-trough as % of peak
+    double fee_ratio;        // total_fees / gross_wins (% of gains eaten by fees)
     // latency
 #ifdef LATENCY_PROFILING
     double hot_avg_ns, hot_min_ns, hot_max_ns, hot_p50_ns, hot_p95_ns;
@@ -900,6 +904,22 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
       if (snap->avg_loss_market < 0.0) snap->avg_loss_market = 0.0; // clamp (loss was entirely fees)
     }
     snap->avg_hold = (total_exits > 0)  ? (double)ctrl->total_hold_ticks / total_exits : 0.0;
+
+    // expectancy: expected $ per trade
+    if (total_exits > 0) {
+      double wr = (double)ctrl->wins / total_exits;
+      double lr = (double)ctrl->losses / total_exits;
+      snap->expectancy = (wr * snap->avg_win) - (lr * snap->avg_loss);
+    } else snap->expectancy = 0.0;
+
+    // max drawdown
+    snap->max_drawdown = ctrl->max_drawdown;
+    snap->max_drawdown_pct = (ctrl->peak_equity > 0.0) ?
+        (ctrl->max_drawdown / ctrl->peak_equity) * 100.0 : 0.0;
+
+    // fee ratio: what % of gross wins go to fees
+    snap->fee_ratio = (g_wins > 0.001) ?
+        (FPN_ToDouble(ctrl->total_fees) / g_wins) * 100.0 : 0.0;
 }
 
 //======================================================================================================

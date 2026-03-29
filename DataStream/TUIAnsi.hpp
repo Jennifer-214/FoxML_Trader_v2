@@ -406,6 +406,7 @@ static inline int ANSI_Section_TopBar(AnsiBuf *ab, const TUISnapshot *s, int y, 
 
     ab_goto(ab, y, 2);
     ab_printf(ab, A_SAND " PRICE " A_BOLD A_WHEAT "$%.2f" A_RESET, s->price);
+    ab_printf(ab, A_DIM " (%.6f)" A_RESET, s->volume);
     ab_printf(ab, A_DIM "  │ " A_SAND "P&L " A_BOLD "%s$%+.2f" A_RESET,
               A_PNL(s->total_pnl), s->total_pnl);
 
@@ -739,6 +740,17 @@ static inline int ANSI_Section_Stats(AnsiBuf *ab, const TUISnapshot *s, int y, i
         ab_printf(ab, A_DIM " (mkt: " A_FG "$%.2f" A_DIM ")" A_RESET, s->avg_loss_market);
     }
     y++;
+
+    // expectancy, drawdown, fee ratio
+    if (total_exits > 0) {
+        ab_goto(ab, y, 3);
+        ab_printf(ab, A_SAND "E[trade]: " "%s$%+.2f" A_RESET, A_PNL(s->expectancy), s->expectancy);
+        ab_printf(ab, A_SAND "  maxDD: " A_RED "$%.2f" A_DIM " (%.2f%%)" A_RESET,
+                  s->max_drawdown, s->max_drawdown_pct);
+        if (s->fee_ratio > 0.0)
+            ab_printf(ab, A_SAND "  fees/wins: " A_DIM "%.0f%%" A_RESET, s->fee_ratio);
+        y++;
+    }
 
     return y;
 }
