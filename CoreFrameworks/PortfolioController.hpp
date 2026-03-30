@@ -22,6 +22,7 @@
 #include "Portfolio.hpp"
 #include "../DataStream/TradeLog.hpp"
 #include "../ML_Headers/RollingStats.hpp"
+#include "../ML_Headers/WelfordStats.hpp"
 #include "../Strategies/MeanReversion.hpp"
 #include "../Strategies/Momentum.hpp"
 #include "../Strategies/SimpleDip.hpp"
@@ -119,6 +120,10 @@ template <unsigned F> struct PortfolioController {
   //================================================================================================
   RollingStats<F> rolling;
   RollingStats<F, 512> *rolling_long;  // heap-allocated (24KB), slow path only
+
+  // Welford online trackers (unbounded stream, O(1) push)
+  WelfordTracker<F> pnl_tracker;      // per-exit P&L distribution
+  WelfordTracker<F> signal_tracker;   // buy signal strength distribution
 };
 //======================================================================================================
 // [INIT]
@@ -198,6 +203,9 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
     ctrl->strategy_stats[i].total_trades = 0;
   }
 
+  ctrl->pnl_tracker = Welford_Init<F>();
+  ctrl->signal_tracker = Welford_Init<F>();
+
   ExitBuffer_Init(&ctrl->exit_buf);
   TradeLogBuffer_Init(&ctrl->trade_buf);
 
@@ -259,6 +267,7 @@ inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
     FPN<F> pos_pnl = FPN_Sub(net_proceeds, total_entry_cost);
     ctrl->realized_pnl = FPN_AddSat(ctrl->realized_pnl, pos_pnl);
     ctrl->daily_realized_pnl = FPN_AddSat(ctrl->daily_realized_pnl, pos_pnl);
+    Welford_Push(&ctrl->pnl_tracker, pos_pnl);
 
     // per-strategy reward attribution
     {
@@ -369,6 +378,18 @@ inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) 
                                            ctrl->rolling_long, &ctrl->config);
     ctrl->buy_conds.gate_direction = 0;
     break;
+  }
+
+  // feed signal strength to Welford tracker (before no-trade band may zero it)
+  if (!FPN_IsZero(ctrl->buy_conds.price) && !FPN_IsZero(ctrl->rolling.price_avg)) {
+    FPN<F> sd = FPN_Sub(ctrl->buy_conds.price, ctrl->rolling.price_avg);
+    FPN<F> neg = FPN_Negate(sd);
+    uint64_t m = -(uint64_t)(sd.sign);
+    FPN<F> abs_s;
+    for (unsigned w = 0; w < FPN<F>::N; w++)
+      abs_s.w[w] = (neg.w[w] & m) | (sd.w[w] & ~m);
+    abs_s.sign = 0;
+    Welford_Push(&ctrl->signal_tracker, FPN_DivNoAssert(abs_s, ctrl->rolling.price_avg));
   }
 
   // NO-TRADE BAND: suppress entries when signal strength < fee breakeven
