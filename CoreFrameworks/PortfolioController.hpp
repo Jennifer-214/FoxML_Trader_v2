@@ -1171,11 +1171,20 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
     ctrl->momentum.live_vol_mult      = new_cfg.volume_multiplier;
     ctrl->regime.hysteresis_threshold = new_cfg.regime_hysteresis;
 
-    // live strategy switch — if default_strategy changed and is valid, switch now
+    // live strategy switch
+    // default_strategy >= 0: explicit strategy selection (0=MR, 1=Momentum, 2=SimpleDip)
+    // default_strategy == -1: regime auto mode (regime detector picks the strategy)
     if (new_cfg.default_strategy >= 0 && new_cfg.default_strategy != ctrl->strategy_id) {
         ctrl->strategy_id = new_cfg.default_strategy;
         PortfolioController_StrategyBuySignal(ctrl);
         fprintf(stderr, "[ENGINE] strategy switched to %d via hot-reload\n", ctrl->strategy_id);
+    } else if (new_cfg.default_strategy < 0) {
+        // regime auto: let Regime_ToStrategy pick on next slow path
+        // force a re-evaluation now so it takes effect immediately
+        ctrl->strategy_id = Regime_ToStrategy(ctrl->regime.current_regime);
+        PortfolioController_StrategyBuySignal(ctrl);
+        fprintf(stderr, "[ENGINE] regime auto enabled — strategy=%d (from regime %d)\n",
+                ctrl->strategy_id, ctrl->regime.current_regime);
     }
 }
 
