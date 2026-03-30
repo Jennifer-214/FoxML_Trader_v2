@@ -571,6 +571,21 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     FPN<F> risk_amount = FPN_Mul(ctrl->balance, ctrl->config.risk_pct);
     FPN<F> sized_qty = FPN_DivNoAssert(risk_amount, fill_price);
 
+    // VOL-SCALED SIZING: scale qty inversely with volatility
+    // high vol → smaller position, low vol → larger (consistent risk per trade)
+    // uses long-window stddev as baseline so it self-calibrates
+    ctrl->last_vol_scale = 1.0;
+    if (ctrl->config.vol_sizing_enabled
+        && !FPN_IsZero(ctrl->rolling.price_stddev)
+        && !FPN_IsZero(ctrl->rolling_long->price_stddev)) {
+      FPN<F> vol_ratio = FPN_DivNoAssert(ctrl->rolling_long->price_stddev,
+                                          ctrl->rolling.price_stddev);
+      vol_ratio = FPN_Max(vol_ratio, ctrl->config.vol_scale_min);
+      vol_ratio = FPN_Min(vol_ratio, ctrl->config.vol_scale_max);
+      sized_qty = FPN_Mul(sized_qty, vol_ratio);
+      ctrl->last_vol_scale = FPN_ToDouble(vol_ratio);
+    }
+
     // balance check: can we afford this position + entry fee? (branchless)
     FPN<F> cost = FPN_Mul(fill_price, sized_qty);
     FPN<F> entry_fee = FPN_Mul(cost, ctrl->config.fee_rate);
