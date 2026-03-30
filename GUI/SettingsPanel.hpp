@@ -52,6 +52,18 @@ static const CfgFieldDef field_defs[] = {
     {"max_drawdown_pct",      "Max DD %%",    "Risk Management", CFG_FLOAT, "%.1f"},
     {"max_exposure_pct",      "Max Exp %%",   "Risk Management", CFG_FLOAT, "%.0f"},
     {"max_positions",         "Max Pos",      "Risk Management", CFG_INT,   "%d"},
+    // Kill Switch
+    {"kill_switch_enabled",   "Enabled",      "Kill Switch",     CFG_BOOL,  NULL},
+    {"kill_switch_daily_loss_pct","Daily Loss %%","Kill Switch",  CFG_FLOAT, "%.2f"},
+    {"kill_switch_drawdown_pct","Drawdown %%", "Kill Switch",     CFG_FLOAT, "%.2f"},
+    {"kill_recovery_warmup",  "Recovery",     "Kill Switch",      CFG_INT,   "%d"},
+    // Vol Sizing
+    {"vol_sizing_enabled",    "Enabled",      "Vol Sizing",      CFG_BOOL,  NULL},
+    {"vol_scale_min",         "Scale Min",    "Vol Sizing",      CFG_FLOAT, "%.2f"},
+    {"vol_scale_max",         "Scale Max",    "Vol Sizing",      CFG_FLOAT, "%.2f"},
+    // No-Trade Band
+    {"no_trade_band_enabled", "Enabled",      "No-Trade Band",   CFG_BOOL,  NULL},
+    {"no_trade_band_mult",    "Fee Mult",     "No-Trade Band",   CFG_FLOAT, "%.2f"},
     // Momentum
     {"momentum_breakout_mult","Breakout",     "Momentum",        CFG_FLOAT, "%.2f"},
     {"momentum_tp_mult",      "Mom TP",       "Momentum",        CFG_FLOAT, "%.2f"},
