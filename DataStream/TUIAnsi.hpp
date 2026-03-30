@@ -494,8 +494,11 @@ static inline int ANSI_Section_Regime(AnsiBuf *ab, const TUISnapshot *s, int y, 
 
     ab_goto(ab, y, 3);
     ab_printf(ab, A_SAND "regime: " A_BOLD "%s%s" A_RESET A_DIM " (%.0fm)"
-              A_RESET A_DIM "     " A_SAND "strategy: " A_BOLD A_FG "%s" A_RESET,
-              regime_color, regime_name, s->regime_duration_min, strat_name);
+              A_RESET A_DIM "     " A_SAND "strategy: ",
+              regime_color, regime_name, s->regime_duration_min);
+    if (s->regime_auto)
+        ab_printf(ab, A_BOLD A_PEACH "AUTO" A_DIM " > ");
+    ab_printf(ab, A_BOLD A_FG "%s" A_RESET, strat_name);
     y++;
 
     // R² short + long with visual bars

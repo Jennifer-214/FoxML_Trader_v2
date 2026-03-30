@@ -674,6 +674,7 @@ struct TUISnapshot {
     // regime
     int current_regime;   // REGIME_RANGING, REGIME_TRENDING, REGIME_VOLATILE
     int strategy_id;      // STRATEGY_MEAN_REVERSION or STRATEGY_MOMENTUM
+    int regime_auto;      // 1 = regime auto mode (default_strategy=-1)
     double regime_duration_min; // minutes in current regime
     double short_r2;      // price regression R² (short window)
     double long_r2;       // price regression R² (long window)
@@ -867,6 +868,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     // regime
     snap->current_regime = ctrl->regime.current_regime;
     snap->strategy_id    = ctrl->strategy_id;
+    snap->regime_auto    = (ctrl->config.default_strategy < 0);
     snap->regime_duration_min = difftime(time(NULL), ctrl->regime.regime_start_time) / 60.0;
     snap->short_r2   = FPN_ToDouble(ctrl->rolling.price_r_squared);
     snap->long_r2    = FPN_ToDouble(ctrl->rolling_long->price_r_squared);

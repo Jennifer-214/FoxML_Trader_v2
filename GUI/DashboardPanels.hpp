@@ -259,6 +259,12 @@ static inline void GUI_Panel_Regime(const TUISnapshot *s) {
     ImGui::SameLine(0, 20);
     ImGui::TextColored(FoxmlColors::sand, "strategy:");
     ImGui::SameLine();
+    if (s->regime_auto) {
+        ImGui::TextColored(FoxmlColors::peach, "AUTO");
+        ImGui::SameLine();
+        ImGui::TextColored(FoxmlColors::comment, ">");
+        ImGui::SameLine();
+    }
     ImGui::Text("%s", strat_name);
 
     // R² short + long
