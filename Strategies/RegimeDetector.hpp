@@ -76,8 +76,8 @@ template <unsigned F> struct RegimeSignals {
     int short_count;
     int long_count;
     int ror_ready;            // 1 if ROR has enough data for meaningful output
-    // future extensibility:
-    // FPN<F> model_score;    // ← FoxML model output
+    // ML model output (populated by ModelInference if model loaded, zero otherwise)
+    FPN<F> model_score;       // raw model prediction [0, 1] — higher = more likely trending
 };
 
 //======================================================================================================
@@ -136,6 +136,10 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
 
     // volume delta: net buy/sell pressure from short window
     sig->volume_delta = rolling->volume_delta;
+
+    // model score: initialized to zero, populated externally by PortfolioController
+    // if a regime enrichment model is loaded
+    sig->model_score = FPN_Zero<F>();
 
     // EMA/SMA crossover: (ema - sma) / sma
     // normalized so threshold is asset-independent (same value works for BTC and ETH)
@@ -256,6 +260,14 @@ inline int Regime_Classify(RegimeState<F> *state,
     // signal 6: volume rising in direction of crossover (confirmation)
     int vol_confirms = FPN_GreaterThan(sig->volume_slope, FPN_Zero<F>()) & crossover_strong;
     trending_score += vol_confirms;
+
+    // signal 7: ML model regime enrichment (Mode A)
+    // model_score > 0.5 = model predicts trending, weighted by regime_model_weight
+    if (!FPN_IsZero(sig->model_score)) {
+        int model_trending = FPN_GreaterThan(sig->model_score, FPN_FromDouble<F>(0.5));
+        int weight = (int)FPN_ToDouble(cfg->regime_model_weight);
+        trending_score += model_trending * weight;
+    }
 
     // --- volatile score (unchanged — vol_ratio based) ---
     int volatile_score = 0;

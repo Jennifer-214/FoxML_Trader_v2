@@ -137,6 +137,15 @@ template <unsigned F> struct ControllerConfig {
   // no-trade band (cost-aware signal strength gate)
   int no_trade_band_enabled;     // 0=disabled, 1=suppress entries when signal < fee_rate * mult
   FPN<F> no_trade_band_mult;     // signal must exceed fee_rate * this to trade (e.g. 3.0)
+  // ML inference
+  int ml_backend;                // 0=disabled, 1=xgboost, 2=lightgbm
+  char ml_model_path[256];       // path to buy-signal model file
+  FPN<F> ml_buy_threshold;       // prediction > this = buy signal (e.g. 0.6)
+  FPN<F> ml_tp_pct;              // TP % for ML positions (e.g. 0.015 = 1.5%)
+  FPN<F> ml_sl_pct;              // SL % for ML positions (e.g. 0.008 = 0.8%)
+  int regime_model_backend;      // 0=disabled, 1=xgboost, 2=lightgbm
+  char regime_model_path[256];   // path to regime enrichment model
+  FPN<F> regime_model_weight;    // score weight in Regime_Classify (e.g. 2)
 };
 //======================================================================================================
 template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
@@ -238,6 +247,15 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // no-trade band
   cfg.no_trade_band_enabled = 0;                           // off by default (backward compat)
   cfg.no_trade_band_mult = FPN_FromDouble<F>(3.0);
+  // ML inference (disabled by default — zero overhead when off)
+  cfg.ml_backend = 0;
+  cfg.ml_model_path[0] = '\0';
+  cfg.ml_buy_threshold = FPN_FromDouble<F>(0.6);
+  cfg.ml_tp_pct = FPN_FromDouble<F>(0.015);                // 1.5% TP
+  cfg.ml_sl_pct = FPN_FromDouble<F>(0.008);                // 0.8% SL
+  cfg.regime_model_backend = 0;
+  cfg.regime_model_path[0] = '\0';
+  cfg.regime_model_weight = FPN_FromDouble<F>(2.0);
   return cfg;
 }
 //======================================================================================================
@@ -357,6 +375,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_PCT(slippage_pct)
     CFG_PARSE_PCT(kill_switch_daily_loss_pct)
     CFG_PARSE_PCT(kill_switch_drawdown_pct)
+    CFG_PARSE_PCT(ml_tp_pct)
+    CFG_PARSE_PCT(ml_sl_pct)
 
     //--- FPN with min-zero clamp ---
     CFG_PARSE_FPN_POS(offset_stddev_mult)
@@ -398,6 +418,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(kill_switch_enabled)
     CFG_PARSE_INT(vol_sizing_enabled)
     CFG_PARSE_INT(no_trade_band_enabled)
+    CFG_PARSE_INT(ml_backend)
+    CFG_PARSE_INT(regime_model_backend)
 
     //--- partial exit + depth + EMA FPN ---
     CFG_PARSE_FPN(partial_exit_pct)
@@ -406,6 +428,20 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(vol_scale_min)
     CFG_PARSE_FPN(vol_scale_max)
     CFG_PARSE_FPN(no_trade_band_mult)
+    CFG_PARSE_FPN(ml_buy_threshold)
+    CFG_PARSE_FPN(regime_model_weight)
+
+    // ML model paths (string fields — not atof)
+    if (strcmp(key, "ml_model_path") == 0) {
+      strncpy(cfg.ml_model_path, val, sizeof(cfg.ml_model_path) - 1);
+      cfg.ml_model_path[sizeof(cfg.ml_model_path) - 1] = '\0';
+      continue;
+    }
+    if (strcmp(key, "regime_model_path") == 0) {
+      strncpy(cfg.regime_model_path, val, sizeof(cfg.regime_model_path) - 1);
+      cfg.regime_model_path[sizeof(cfg.regime_model_path) - 1] = '\0';
+      continue;
+    }
 
     // EMA alpha: parse alpha and precompute 1-alpha
     if (strcmp(key, "gate_ema_alpha") == 0) {

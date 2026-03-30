@@ -26,6 +26,7 @@
 #include "../Strategies/MeanReversion.hpp"
 #include "../Strategies/Momentum.hpp"
 #include "../Strategies/SimpleDip.hpp"
+#include "../Strategies/MLStrategy.hpp"
 #include "../Strategies/RegimeDetector.hpp"
 #include <stdio.h>
 //======================================================================================================
@@ -93,7 +94,10 @@ template <unsigned F> struct PortfolioController {
   MeanReversionState<F> mean_rev;
   MomentumState<F> momentum;
   SimpleDipState<F> simple_dip;
+  MLStrategyState<F> ml_strategy;
   RegimeState<F> regime;
+  ModelHandle<F> regime_model;       // Mode A: regime signal enrichment model
+  RegimeSignals<F> last_signals;     // cached for ML strategy BuySignal access
 
   RORRegressor<F> regime_ror;  // slope-of-slopes for trend acceleration detection
   FPN<F> volume_spike_ratio;   // current_volume / rolling.volume_max (spike detection)
@@ -175,6 +179,17 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->momentum.live_vol_mult = config.volume_multiplier;
   ctrl->momentum.buy_conds_initial = ctrl->buy_conds;
   ctrl->momentum.has_regression = 0;
+  // ML strategy
+  Model_Init(&ctrl->ml_strategy.buy_model);
+  ctrl->ml_strategy.model_ready = 0;
+  ctrl->ml_strategy.last_prediction = FPN_Zero<F>();
+  memset(ctrl->ml_strategy.feature_buf, 0, sizeof(ctrl->ml_strategy.feature_buf));
+  // load ML models if configured
+  if (config.ml_backend != 0)
+    Model_Load(&ctrl->ml_strategy.buy_model, config.ml_model_path, config.ml_backend);
+  Model_Init(&ctrl->regime_model);
+  if (config.regime_model_backend != 0)
+    Model_Load(&ctrl->regime_model, config.regime_model_path, config.regime_model_backend);
   // regime detector
   Regime_Init(&ctrl->regime, config.regime_hysteresis);
   ctrl->regime_ror = RORRegressor_Init<F>();
@@ -378,6 +393,12 @@ inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) 
                                            ctrl->rolling_long, &ctrl->config);
     ctrl->buy_conds.gate_direction = 0;
     break;
+  case STRATEGY_ML:
+    ctrl->buy_conds = MLStrategy_BuySignal(&ctrl->ml_strategy, &ctrl->rolling,
+                                            ctrl->rolling_long, (const void*)&ctrl->config,
+                                            &ctrl->last_signals);
+    ctrl->buy_conds.gate_direction = 0;
+    break;
   }
 
   // feed signal strength to Welford tracker (before no-trade band may zero it)
@@ -433,6 +454,11 @@ inline void PortfolioController_StrategyDispatch(PortfolioController<F> *ctrl,
     SimpleDip_Adapt(&ctrl->simple_dip, current_price, ctrl->portfolio_delta,
                      ctrl->portfolio.active_bitmap, &ctrl->buy_conds,
                      &ctrl->config);
+    break;
+  case STRATEGY_ML:
+    MLStrategy_Adapt(&ctrl->ml_strategy, current_price, ctrl->portfolio_delta,
+                      ctrl->portfolio.active_bitmap, &ctrl->buy_conds,
+                      (const void*)&ctrl->config);
     break;
   }
   PortfolioController_StrategyBuySignal(ctrl);
@@ -509,6 +535,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       MeanReversion_Init(&ctrl->mean_rev, &ctrl->rolling, &ctrl->buy_conds);
       Momentum_Init(&ctrl->momentum, &ctrl->rolling, &ctrl->buy_conds);
       SimpleDip_Init(&ctrl->simple_dip, &ctrl->rolling, &ctrl->buy_conds);
+      MLStrategy_Init(&ctrl->ml_strategy, &ctrl->rolling, &ctrl->buy_conds);
       // use configured default strategy (0=MR, 1=Momentum, 2=SimpleDip)
       if (ctrl->config.default_strategy >= 0)
           ctrl->strategy_id = ctrl->config.default_strategy;
@@ -1022,6 +1049,16 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   {
     RegimeSignals<F> signals;
     Regime_ComputeSignals(&signals, &ctrl->rolling, ctrl->rolling_long, &ctrl->regime_ror, ctrl->ema_price);
+
+    // Mode A: regime model enrichment — add model_score to classification
+    if (Model_IsLoaded(&ctrl->regime_model)) {
+      float feat_buf[MODEL_MAX_FEATURES];
+      int n = ModelFeatures_Pack(feat_buf, &signals, &ctrl->rolling, ctrl->rolling_long);
+      signals.model_score = FPN_FromDouble<F>(
+          (double)Model_Predict(&ctrl->regime_model, feat_buf, n));
+    }
+
+    ctrl->last_signals = signals; // cache for MLStrategy_BuySignal
 
     int old_regime = ctrl->regime.current_regime;
     Regime_Classify(&ctrl->regime, &signals, &ctrl->config);

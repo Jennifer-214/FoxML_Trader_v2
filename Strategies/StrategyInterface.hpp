@@ -57,5 +57,6 @@
 #define STRATEGY_MEAN_REVERSION 0
 #define STRATEGY_MOMENTUM      1
 #define STRATEGY_SIMPLE_DIP    2
+#define STRATEGY_ML            3
 
 #endif // STRATEGY_INTERFACE_HPP
