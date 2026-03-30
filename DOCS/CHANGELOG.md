@@ -4,6 +4,7 @@
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| 3.5.0 | 2026-03-30 | **Risk infrastructure + ML harness design** — Sticky kill switch (daily loss + drawdown limits, crash-proof), vol-scaled position sizing, no-trade band (cost-aware), per-strategy reward attribution, Welford online stats tracker. Complete GUI settings panel (68 fields, all runtime-tunable). Regime auto hot-reload fix. Snapshot v9. ML inference harness design doc (XGBoost/LightGBM). |
 | 3.4.0 | 2026-03-30 | **P&L audit + EMA/SMA crossover + tooltips** — 5 P&L tracking bugs fixed (fee-blind equity curve, dual total_pnl formulas, starting_balance persistence, gross_losses, entry fee reconstruction). Regime detector replaced regression slope with EMA/SMA crossover for faster trend detection. Settings panel hover tooltips. Snapshot v8. |
 | 3.3.0 | 2026-03-28/29 | **ImGui GUI + EMA gate + tech debt** — Native GUI (SDL2/OpenGL3, slate theme, dockable panels, candlestick chart, settings editor, trade history, log viewer). EMA gate for faster entries (~2ns branchless). Version.hpp, Limits.hpp, strategy dispatch consolidation, data-driven settings. See changelogs/2026-03-28-gui.md + 2026-03-29-polish.md |
 | 3.2.0 | 2026-03-28 | **v4 signals + refactor** — VWAP gate, session awareness, adaptive cooldown, partial exits, L2 order book, Gate_Zero helper, table-driven config, bulk hot-reload, remove FTXUI/notcurses. Live-testing fixes: Gate_Zero scope, split rollback, min_vol reject reason, PAUSED display |
