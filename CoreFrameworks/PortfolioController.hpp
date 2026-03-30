@@ -1239,10 +1239,12 @@ inline void PortfolioController_SaveSnapshot(const PortfolioController<F> *ctrl,
   // v8: starting_balance (survives config changes between sessions)
   fwrite(&ctrl->config.starting_balance, sizeof(FPN<F>), 1, f);
 
-  // v9: kill switch state + per-strategy stats
+  // v9: kill switch state + per-strategy stats + session equity baseline
   fwrite(&ctrl->kill_switch_active, sizeof(int), 1, f);
   fwrite(&ctrl->kill_reason, sizeof(int), 1, f);
   fwrite(&ctrl->daily_realized_pnl, sizeof(FPN<F>), 1, f);
+  fwrite(&ctrl->session_start_equity, sizeof(double), 1, f);
+  fwrite(&ctrl->peak_equity, sizeof(double), 1, f);
   for (int i = 0; i < 4; i++) {
     fwrite(&ctrl->strategy_stats[i].realized_pnl, sizeof(FPN<F>), 1, f);
     fwrite(&ctrl->strategy_stats[i].wins, sizeof(uint32_t), 1, f);
@@ -1332,11 +1334,13 @@ inline int PortfolioController_LoadSnapshot(PortfolioController<F> *ctrl,
       if (fread(&ctrl->config.starting_balance, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
     }
 
-    // v9: kill switch state + per-strategy stats
+    // v9: kill switch state + per-strategy stats + session equity baseline
     if (version >= 9) {
       if (fread(&ctrl->kill_switch_active, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
       if (fread(&ctrl->kill_reason, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
       if (fread(&ctrl->daily_realized_pnl, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+      if (fread(&ctrl->session_start_equity, sizeof(double), 1, f) != 1) { fclose(f); return 0; }
+      if (fread(&ctrl->peak_equity, sizeof(double), 1, f) != 1) { fclose(f); return 0; }
       for (int i = 0; i < 4; i++) {
         if (fread(&ctrl->strategy_stats[i].realized_pnl, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&ctrl->strategy_stats[i].wins, sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }
