@@ -260,7 +260,7 @@ static inline void GUI_Panel_Regime(const TUISnapshot *s) {
     ImGui::TextColored(FoxmlColors::sand, "strategy:");
     ImGui::SameLine();
     if (s->regime_auto) {
-        ImGui::TextColored(FoxmlColors::peach, "AUTO");
+        ImGui::TextColored(FoxmlColors::primary, "AUTO");
         ImGui::SameLine();
         ImGui::TextColored(FoxmlColors::comment, ">");
         ImGui::SameLine();
