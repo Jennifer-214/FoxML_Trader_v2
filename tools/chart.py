@@ -214,6 +214,7 @@ class FoxmlChart:
         self.acc = accumulator
         self.trades = trade_reader
 
+        plt.rcParams['toolbar'] = 'None'
         plt.rcParams.update({
             'figure.facecolor': C['bg'],
             'axes.facecolor': C['bg_dark'],

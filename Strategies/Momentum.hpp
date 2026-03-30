@@ -183,12 +183,16 @@ template <unsigned F>
 inline BuySideGateConditions<F> Momentum_BuySignal(MomentumState<F> *state,
                                                      const RollingStats<F> *rolling,
                                                      const RollingStats<F, 512> *rolling_long,
-                                                     const ControllerConfig<F> *cfg) {
+                                                     const ControllerConfig<F> *cfg,
+                                                     FPN<F> ema_price = FPN_Zero<F>()) {
     BuySideGateConditions<F> conds;
 
-    // breakout price: avg + stddev * live_breakout_mult
+    // base average: EMA when provided (nonzero), rolling avg otherwise
+    FPN<F> base_avg = FPN_IsZero(ema_price) ? rolling->price_avg : ema_price;
+
+    // breakout price: base + stddev * live_breakout_mult
     FPN<F> breakout_offset = FPN_Mul(rolling->price_stddev, state->live_breakout_mult);
-    conds.price = FPN_AddSat(rolling->price_avg, breakout_offset);
+    conds.price = FPN_AddSat(base_avg, breakout_offset);
 
     // volume: same pattern as MR
     conds.volume = FPN_Mul(rolling->volume_avg, state->live_vol_mult);

@@ -77,12 +77,79 @@ Strategy dispatch → position adjustment on regime switch
 - **FixedPoint/** - FPN arbitrary-width fixed-point arithmetic library
 - **MemHeaders/** - PoolAllocator (bitmap order pool), BuddyAllocator
 - **ML_Headers/** - RollingStats (regression + R²), LinearRegression3X, ROR_regressor (slope-of-slopes), GateControlNetwork
+- **GUI/** - Dear ImGui native GUI: FoxmlTheme, DashboardPanels, ChartPanel (price/volume/equity), CandleAccumulator, TradeReader, SettingsPanel, TradeHistoryPanel, LogViewerPanel, GuiThread
 - **tests/** - controller_test.cpp (166 assertions)
 - **plans/** - implementation plans (gitignored)
+- **vendor/** - vendored imgui (docking branch) + implot v0.18 (gitignored)
+- **Version.hpp** - single source of truth for version string
+- **Limits.hpp** - centralized compile-time constants (MAX_POSITIONS, CANDLE_MAX, etc.)
+
+## Integration Contracts
+
+When changing something, here's exactly what to update:
+
+### Adding a new signal to RegimeDetector
+1. `Strategies/RegimeDetector.hpp`: add field to `RegimeSignals<F>` struct
+2. `Strategies/RegimeDetector.hpp`: populate it in `RegimeSignals_Compute()`
+3. `Strategies/RegimeDetector.hpp`: use it in `Regime_Classify()` scoring
+4. Done — RegimeSignals is the single extensibility point
+
+### Adding a new config field
+1. `CoreFrameworks/ControllerConfig.hpp`: add to struct + default + parser macro
+2. `engine.cfg`: add with comment
+3. Done — hot-reload is automatic via bulk struct copy
+
+### Adding a GUI-editable config field (above + settings panel)
+4. `GUI/SettingsPanel.hpp`: add ONE line to `field_defs[]` array — loading, UI, and saving are automatic
+
+### Adding a new TUI/GUI display field
+1. `DataStream/EngineTUI.hpp`: add to `TUISnapshot` struct
+2. `DataStream/EngineTUI.hpp`: populate in `TUI_CopySnapshot()`
+3. `DataStream/TUIAnsi.hpp`: display in appropriate `ANSI_Section_*` (if ANSI TUI needed)
+4. `GUI/DashboardPanels.hpp`: display in appropriate `GUI_Panel_*`
+
+### Adding a new chart overlay
+1. `GUI/ChartPanel.hpp`: add to `ChartState` if new data needed, add render call in `GUI_PriceChart()`
+2. If data comes from engine: also update `TUISnapshot` + `TUI_CopySnapshot()`
+
+### Adding a new strategy
+1. `Strategies/StrategyInterface.hpp`: add `#define STRATEGY_YOUR_NAME N`
+2. `Strategies/YourName.hpp`: create with _Init, _Adapt, _BuySignal, _ExitAdjust
+3. `CoreFrameworks/PortfolioController.hpp`: add state field + ONE case in `PortfolioController_StrategyDispatch()` (single dispatch — no duplicate switches)
+4. `Strategies/RegimeDetector.hpp`: add Regime_ToStrategy mapping + Regime_AdjustPositions cases
+5. `tests/controller_test.cpp`: regression tests
+
+### Bumping version
+1. `Version.hpp`: update `ENGINE_VERSION_STRING` (one file, one location)
+2. `DOCS/CHANGELOG.md`: update version summary table
+3. `DOCS/changelogs/`: create dated changelog
+
+### Centralized constants
+- `Version.hpp`: ENGINE_VERSION_STRING — included by all renderers
+- `Limits.hpp`: MAX_PORTFOLIO_POSITIONS, CANDLE_HISTORY_MAX — included by Portfolio, TUISnapshot, ChartPanel
+
+## Build
+
+### ANSI TUI (zero deps)
+```bash
+cmake -B build && cmake --build build
+```
+
+### ImGui GUI (SDL2 + OpenGL3)
+```bash
+cmake -B build_gui -DUSE_IMGUI_GUI=ON [-DLATENCY_PROFILING=ON]
+cmake --build build_gui
+cd build_gui && ./engine_gui
+```
+
+### Tests
+```bash
+./build/controller_test  # 166 assertions
+```
 
 ## Versioning
 
-Version string: `engine vX.Y.Z` — hardcoded in 3 locations: TUIAnsi.hpp (1×), EngineTUI.hpp (2×). Update all three when bumping.
+Version string: `engine vX.Y.Z` — defined ONCE in `Version.hpp` as `ENGINE_VERSION_STRING`. Included by TUIAnsi.hpp, EngineTUI.hpp, and DashboardPanels.hpp. **Update Version.hpp only.**
 
 - **X.Y.Z** follows changelog version in `DOCS/CHANGELOG.md` (version summary table, top row)
 - **Patch (Z)**: bug fixes, guards, config changes, TUI tweaks
@@ -90,7 +157,7 @@ Version string: `engine vX.Y.Z` — hardcoded in 3 locations: TUIAnsi.hpp (1×),
 - **Major (X)**: architectural rewrites (FPN width change, new hot-path design)
 
 ### Release process
-1. Update version string in TUIAnsi.hpp and EngineTUI.hpp (search for `engine v`, 3 locations)
+1. Update `Version.hpp` (one file, one location)
 2. Update `DOCS/CHANGELOG.md` version summary table
 3. Create detailed changelog in `DOCS/changelogs/YYYY-MM-DD-X.md`
 4. Commit, push to main

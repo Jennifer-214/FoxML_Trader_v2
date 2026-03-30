@@ -26,6 +26,12 @@
 #include "DataStream/TradeLog.hpp"
 #include "DataStream/MetricsLog.hpp"
 
+#ifdef USE_IMGUI_GUI
+#include "GUI/CandleAccumulator.hpp"
+#include "GUI/GuiThread.hpp"
+#endif
+
+#include "Licensing.hpp"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -119,6 +125,19 @@ int main(int argc, char *argv[]) {
             setvbuf(stderr, NULL, _IOLBF, 0); // line-buffered so tail -f works
         }
     }
+
+    //==================================================================================================
+    // license check — before connecting to exchange
+    //==================================================================================================
+#ifndef LICENSE_BYPASS
+    LicenseInfo license;
+    if (!License_Validate(&license)) {
+        fprintf(stderr, "\n[ENGINE] license validation failed.\n");
+        fprintf(stderr, "[ENGINE] place your license key in ~/.foxml/license.key\n");
+        fprintf(stderr, "[ENGINE] get a key at https://foxml.dev\n\n");
+        return 1;
+    }
+#endif
 
     //==================================================================================================
     // init stream
@@ -248,9 +267,20 @@ int main(int argc, char *argv[]) {
     shared.quit_requested = 0;
     shared.pause_requested = 0;
     shared.reload_requested = 0;
+    shared.candle_acc = NULL;
+
+#ifdef USE_IMGUI_GUI
+    CandleAccumulator candle_acc;
+    CandleAccumulator_Init(&candle_acc, 60);  // 60-second candles
+    shared.candle_acc = &candle_acc;
+#endif
 
     pthread_t tui_tid;
+#ifdef USE_IMGUI_GUI
+    pthread_create(&tui_tid, NULL, gui_thread_fn, &shared);
+#else
     pthread_create(&tui_tid, NULL, tui_thread_fn, &shared);
+#endif
 
 #ifdef __linux__
     // pin engine to Core 3 (usually quieter), TUI to Core 2
@@ -337,6 +367,9 @@ int main(int argc, char *argv[]) {
                 }
                 last_stream = tick;
                 has_data = 1;
+#ifdef USE_IMGUI_GUI
+                CandleAccumulator_Push(&candle_acc, tick.price_d, tick.volume_d, tick.is_buyer_maker);
+#endif
 
             // exit gate on EVERY tick in the burst
             if (ctrl.portfolio.active_bitmap) {

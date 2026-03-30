@@ -28,6 +28,7 @@
 #include <cstdarg>
 #include <ctime>
 #include <cmath>
+#include "../Version.hpp"
 #include <unistd.h>
 
 // TUISnapshot and TUIPositionSnap defined in EngineTUI.hpp (included before this)
@@ -331,7 +332,7 @@ static inline int ANSI_Section_Header(AnsiBuf *ab, const TUISnapshot *s,
     y++;
     ab_goto(ab, y, 3);
     ab_printf(ab, A_BOLD A_PEACH "( °_ ° 7" A_RESET);
-    ab_printf(ab, "\033[20G" A_WHEAT "engine v3.2.0" A_RESET);
+    ab_printf(ab, "\033[20G" A_WHEAT "engine v" ENGINE_VERSION_STRING A_RESET);
     y++;
     ab_goto(ab, y, 4);
     ab_printf(ab, A_BOLD A_PEACH "ド  ヘ" A_RESET);
@@ -488,7 +489,8 @@ static inline int ANSI_Section_Regime(AnsiBuf *ab, const TUISnapshot *s, int y, 
                               (s->current_regime == 3) ? "TRENDING_DOWN" : "RANGING";
     const char *regime_color = (s->current_regime == 1) ? A_GREEN :
                                (s->current_regime == 2 || s->current_regime == 3) ? A_RED : A_DIM;
-    const char *strat_name = (s->strategy_id == 1) ? "MOMENTUM" : "MEAN REVERSION";
+    const char *strat_name = (s->strategy_id == 2) ? "SIMPLE DIP" :
+                              (s->strategy_id == 1) ? "MOMENTUM" : "MEAN REVERSION";
 
     ab_goto(ab, y, 3);
     ab_printf(ab, A_SAND "regime: " A_BOLD "%s%s" A_RESET A_DIM " (%.0fm)"
@@ -520,6 +522,16 @@ static inline int ANSI_Section_Regime(AnsiBuf *ab, const TUISnapshot *s, int y, 
         ab_printf(ab, A_DIM "  " A_BOLD A_YELLOW "SPIKE %.1fx" A_RESET, s->volume_spike_ratio);
     else if (s->volume_spike_ratio > 1.0)
         ab_printf(ab, A_DIM "  vol:%.1fx" A_RESET, s->volume_spike_ratio);
+    y++;
+
+    // EMA/SMA crossover spread (primary trending signal)
+    const char *xo_arrow = (s->ema_sma_spread > 0.0001) ? "↗" :
+                           (s->ema_sma_spread < -0.0001) ? "↘" : "→";
+    const char *xo_color = (s->ema_sma_spread > 0.0005) ? A_GREEN :
+                           (s->ema_sma_spread < -0.0005) ? A_RED : A_DIM;
+    ab_goto(ab, y, 3);
+    ab_printf(ab, A_SAND "ema/sma:  " "%s%+.4f%% %s" A_RESET,
+              xo_color, s->ema_sma_spread * 100.0, xo_arrow);
     y++;
 
     // VWAP: volume-weighted average price and deviation
@@ -1021,8 +1033,6 @@ static inline void ANSI_Layout_Standard(AnsiBuf *ab, const TUISnapshot *s,
     y = ANSI_Section_Positions(ab, s, y, w, h - 8);
     ab_divider(ab, y++, w, false);
     y = ANSI_Section_Stats(ab, s, y, w);
-    ab_divider(ab, y++, w, false);
-    y = ANSI_Section_Charts(ab, s, y, w);
 #ifdef LATENCY_PROFILING
     ab_divider(ab, y++, w, false);
     y = ANSI_Section_Latency(ab, s, y, w);
@@ -1057,9 +1067,6 @@ static inline void ANSI_Layout_Charts(AnsiBuf *ab, const TUISnapshot *s, int h, 
     ab_printf(ab, A_DIM " │ " A_SAND "POS %d/%d" A_RESET, s->active_count, s->max_positions);
     y++;
     ab_divider(ab, y++, w, false);
-
-    // sparkline charts
-    y = ANSI_Section_Charts(ab, s, y, w);
 
     // regime signals (compact)
     ab_divider(ab, y++, w, false);

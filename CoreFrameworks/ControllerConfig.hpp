@@ -80,7 +80,8 @@ template <unsigned F> struct ControllerConfig {
   uint32_t max_hold_ticks;    // close position if held longer than this (0 = disabled)
   FPN<F> min_hold_gain_pct;   // only time-exit if gain < this % (e.g. 0.001 = 0.1%)
   // regime detection
-  FPN<F> regime_slope_threshold;  // relative slope magnitude for TRENDING (e.g. 0.001 = 0.1%/tick)
+  FPN<F> regime_slope_threshold;  // relative slope magnitude for TRENDING (legacy, kept for compat)
+  FPN<F> regime_crossover_threshold; // EMA/SMA spread magnitude for TRENDING (e.g. 0.0005 = 0.05%)
   FPN<F> regime_r2_threshold;     // min R² for TRENDING (e.g. 0.70)
   FPN<F> regime_volatile_stddev;  // stddev/price ratio for VOLATILE (legacy, kept for compat)
   FPN<F> regime_vol_spike_ratio;  // variance ratio threshold: short/long variance > this = volatile spike
@@ -116,6 +117,12 @@ template <unsigned F> struct ControllerConfig {
   // order book (L2 depth)
   int depth_enabled;             // 0 = trade stream only, 1 = also subscribe to depth
   FPN<F> min_book_imbalance;     // require bid bias to buy (0 = disabled, 0.10 = 10% bid excess)
+  // EMA gate (proactive entry — reacts in 1-2s instead of 5s)
+  int gate_ema_enabled;          // 0=use rolling avg (legacy), 1=use EMA for gate price
+  FPN<F> gate_ema_alpha;         // EMA smoothing factor (0.997 = ~333 tick window)
+  FPN<F> gate_ema_one_minus_alpha; // precomputed 1.0 - alpha (avoid subtraction on hot path)
+  // strategy selection
+  int default_strategy;          // -1=regime auto, 0=MR, 1=Momentum, 2=SimpleDip
   // live trading
   int use_real_money;            // 0=paper (default), 1=real orders via REST API
 };
@@ -171,7 +178,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.max_hold_ticks = 0;                          // 0 = disabled
   cfg.min_hold_gain_pct = FPN_FromDouble<F>(0.001); // 0.1% — only time-exit if below this gain
   // regime detection
-  cfg.regime_slope_threshold = FPN_FromDouble<F>(0.00002); // 0.002%/tick ≈ $180 move over 128-tick window at BTC $70k
+  cfg.regime_slope_threshold = FPN_FromDouble<F>(0.00002); // legacy (unused by crossover classifier)
+  cfg.regime_crossover_threshold = FPN_FromDouble<F>(0.0005); // 0.05% EMA-SMA gap = trending (~$35 at BTC $70k)
   cfg.regime_r2_threshold    = FPN_FromDouble<F>(0.70);   // 70% consistency for trending
   cfg.regime_volatile_stddev = FPN_FromDouble<F>(0.0005); // 0.05% stddev/price (legacy compat)
   cfg.regime_vol_spike_ratio = FPN_FromDouble<F>(2.0);   // variance spike: 2x baseline = volatile
@@ -200,6 +208,11 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.session_overnight_mult = FPN_FromDouble<F>(1.3);     // wider gates, declining volume
   cfg.depth_enabled = 0;                                    // 0 = disabled (backward compat)
   cfg.min_book_imbalance = FPN_Zero<F>();                   // 0 = disabled
+  // EMA gate
+  cfg.gate_ema_enabled = 0;                                // 0 = disabled (backward compat)
+  cfg.gate_ema_alpha = FPN_FromDouble<F>(0.997);           // ~333-tick effective window
+  cfg.gate_ema_one_minus_alpha = FPN_FromDouble<F>(0.003); // 1.0 - 0.997
+  cfg.default_strategy = -1;                                // -1 = regime auto (backward compat)
   cfg.use_real_money = 0;                                  // 0 = paper trading (default safe)
   return cfg;
 }
@@ -292,6 +305,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(vol_adapt_scale)
     CFG_PARSE_FPN(breakout_min)
     CFG_PARSE_FPN(regime_slope_threshold)
+    CFG_PARSE_FPN(regime_crossover_threshold)
     CFG_PARSE_FPN(regime_volatile_stddev)
     CFG_PARSE_FPN(regime_vol_spike_ratio)
     CFG_PARSE_FPN(momentum_breakout_mult)
@@ -352,11 +366,21 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(depth_enabled)
     CFG_PARSE_INT(use_real_money)
     CFG_PARSE_INT(session_filter_enabled)
+    CFG_PARSE_INT(gate_ema_enabled)
+    CFG_PARSE_INT(default_strategy)
 
-    //--- partial exit + depth FPN ---
+    //--- partial exit + depth + EMA FPN ---
     CFG_PARSE_FPN(partial_exit_pct)
     CFG_PARSE_FPN(tp2_mult)
     CFG_PARSE_FPN(min_book_imbalance)
+
+    // EMA alpha: parse alpha and precompute 1-alpha
+    if (strcmp(key, "gate_ema_alpha") == 0) {
+      double a = atof(val);
+      cfg.gate_ema_alpha = FPN_FromDouble<F>(a);
+      cfg.gate_ema_one_minus_alpha = FPN_FromDouble<F>(1.0 - a);
+      continue;
+    }
 
     #undef CFG_PARSE_FPN
     #undef CFG_PARSE_PCT

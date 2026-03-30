@@ -3,6 +3,7 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
+#include "../Limits.hpp"
 // [PORTFOLIO MANAGER]
 //======================================================================================================
 // this is basically just gonna track positions and stuff and be the core portfolio managment system, im not sure if ill actually add the rebaalncing logic and stuff here, but it should eventually just serve as the API call to get position deltas and stuff, it will be more robust that just the simple pool allocator i was attempting earlier
@@ -27,6 +28,7 @@ template <unsigned F> struct Position {
     // warm-path fields: read at fill time and P&L computation
     FPN<F> quantity;          // positive for long, negative for short
     FPN<F> entry_price;
+    FPN<F> entry_fee;         // actual fee paid at fill time (not reconstructed)
     // cold fields: only read by trailing logic on slow path
     FPN<F> original_tp;       // set at fill, never modified — used to detect "running" positions
     FPN<F> original_sl;       // set at fill, never modified — baseline for trailing SL
@@ -45,7 +47,7 @@ template <unsigned F> struct Portfolio {
     uint16_t active_bitmap; // hot: read first every tick by ExitGate (cache line 0)
     uint16_t _pad0;
     uint32_t _pad1;         // align positions to 8 bytes
-    Position<F> positions[16];
+    Position<F> positions[MAX_PORTFOLIO_POSITIONS];
 };
 //======================================================================================================
 // [EXIT STRUCTS]
@@ -82,6 +84,7 @@ template <unsigned F> inline void Portfolio_Init(Portfolio<F> *portfolio) {
     for (int i = 0; i < 16; i++) {
         portfolio->positions[i].quantity          = FPN_Zero<F>();
         portfolio->positions[i].entry_price       = FPN_Zero<F>();
+        portfolio->positions[i].entry_fee         = FPN_Zero<F>();
         portfolio->positions[i].take_profit_price = FPN_Zero<F>();
         portfolio->positions[i].stop_loss_price   = FPN_Zero<F>();
     }
@@ -120,11 +123,13 @@ template <unsigned F> inline void Portfolio_AddQuantity(Portfolio<F> *portfolio,
 //======================================================================================================
 template <unsigned F>
 inline int Portfolio_AddPositionWithExits(Portfolio<F> *portfolio, FPN<F> quantity, FPN<F> entry_price,
-                                          FPN<F> take_profit_price, FPN<F> stop_loss_price) {
+                                          FPN<F> take_profit_price, FPN<F> stop_loss_price,
+                                          FPN<F> entry_fee = FPN_Zero<F>()) {
     if (portfolio->active_bitmap == 0xFFFF) return -1;
     int idx                                       = __builtin_ctz(~portfolio->active_bitmap);
     portfolio->positions[idx].quantity             = quantity;
     portfolio->positions[idx].entry_price          = entry_price;
+    portfolio->positions[idx].entry_fee            = entry_fee;
     portfolio->positions[idx].take_profit_price    = take_profit_price;
     portfolio->positions[idx].stop_loss_price      = stop_loss_price;
     portfolio->positions[idx].pair_index           = -1;
@@ -139,6 +144,7 @@ template <unsigned F> inline void Portfolio_AddPosition(Portfolio<F> *portfolio,
     int idx                                       = __builtin_ctz(~portfolio->active_bitmap);
     portfolio->positions[idx].quantity             = quantity;
     portfolio->positions[idx].entry_price          = entry_price;
+    portfolio->positions[idx].entry_fee            = FPN_Zero<F>();
     portfolio->positions[idx].take_profit_price    = FPN_Zero<F>();
     portfolio->positions[idx].stop_loss_price      = FPN_Zero<F>();
     portfolio->active_bitmap |= (1 << idx);
@@ -154,6 +160,7 @@ template <unsigned F> inline void Portfolio_ClearPositions(Portfolio<F> *portfol
     for (int i = 0; i < 16; i++) {
         portfolio->positions[i].quantity          = FPN_Zero<F>();
         portfolio->positions[i].entry_price       = FPN_Zero<F>();
+        portfolio->positions[i].entry_fee         = FPN_Zero<F>();
         portfolio->positions[i].take_profit_price = FPN_Zero<F>();
         portfolio->positions[i].stop_loss_price   = FPN_Zero<F>();
     }

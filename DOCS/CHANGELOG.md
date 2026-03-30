@@ -4,6 +4,8 @@
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| 3.4.0 | 2026-03-30 | **P&L audit + EMA/SMA crossover + tooltips** — 5 P&L tracking bugs fixed (fee-blind equity curve, dual total_pnl formulas, starting_balance persistence, gross_losses, entry fee reconstruction). Regime detector replaced regression slope with EMA/SMA crossover for faster trend detection. Settings panel hover tooltips. Snapshot v8. |
+| 3.3.0 | 2026-03-28/29 | **ImGui GUI + EMA gate + tech debt** — Native GUI (SDL2/OpenGL3, slate theme, dockable panels, candlestick chart, settings editor, trade history, log viewer). EMA gate for faster entries (~2ns branchless). Version.hpp, Limits.hpp, strategy dispatch consolidation, data-driven settings. See changelogs/2026-03-28-gui.md + 2026-03-29-polish.md |
 | 3.2.0 | 2026-03-28 | **v4 signals + refactor** — VWAP gate, session awareness, adaptive cooldown, partial exits, L2 order book, Gate_Zero helper, table-driven config, bulk hot-reload, remove FTXUI/notcurses. Live-testing fixes: Gate_Zero scope, split rollback, min_vol reject reason, PAUSED display |
 | 3.1.0 | 2026-03-27 | **Profitability + latency overhaul** — volume delta signal, hidden downtrend detection, min vol filter, momentum R² floor, cache-aligned structs, -O3 -march=native, time() syscall gated (84/100 ticks skip), BuyGate 102→53ns, p95 4069→936ns |
 | 3.0.27 | 2026-03-25 | Extract 10 hardcoded constants to engine.cfg (squeeze_decay, adapt scales, risk ratios), revert to sparkline charts |
@@ -56,6 +58,7 @@
 
 ## Detailed Changelogs
 
+- [2026-03-30](changelogs/2026-03-30-pnl-regime.md) — v3.4.0 (P&L audit fix, EMA/SMA crossover regime detection, snapshot v8)
 - [2026-03-24 (d)](changelogs/2026-03-24-d.md) — v3.0.21 (TP/SL audit fix, braille charts, auto-logging, wall-time slow-path floor)
 - [2026-03-24](changelogs/2026-03-24.md) — v3.0.18 (single-slot position management, paper/live sync, BTC dust elimination)
 - [2026-03-22](changelogs/2026-03-22.md) — v3.0.7 through v3.0.12 (warmup fix, fill diagnostics, snapshot warmup, public release)

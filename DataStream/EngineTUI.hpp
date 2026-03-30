@@ -19,6 +19,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include "../Version.hpp"
 #include <unistd.h>
 #include <termios.h>
 #include <signal.h>
@@ -284,7 +285,7 @@ static inline void TUI_Render(EngineTUI *tui, const PortfolioController<F> *ctrl
     printf(C_SAND "  ================================================================" C_RESET "\n"); row++;
     printf(C_BOLD C_PEACH "     /\\_/\\   FOXML TRADER" C_RESET
            C_RESET "\n"); row++;
-    printf(C_BOLD C_PEACH "    ( o.o )  " C_WHEAT "engine v3.2.0" C_RESET "\n"); row++;
+    printf(C_BOLD C_PEACH "    ( o.o )  " C_WHEAT "engine v" ENGINE_VERSION_STRING C_RESET "\n"); row++;
     printf(C_BOLD C_PEACH "     > ^ <" C_RESET "\n"); row++;
     printf(C_SAND "  ================================================================" C_RESET "\n"); row++;
     int is_paused = FPN_IsZero(ctrl->buy_conds.price) && (ctrl->state == CONTROLLER_ACTIVE);
@@ -363,12 +364,13 @@ static inline void TUI_Render(EngineTUI *tui, const PortfolioController<F> *ctrl
     double balance  = FPN_ToDouble(ctrl->balance);
     double starting = FPN_ToDouble(ctrl->config.starting_balance);
     double fees     = FPN_ToDouble(ctrl->total_fees);
-    double total_pnl = realized + pnl;
-    double return_pct = (starting != 0.0) ? (total_pnl / starting) * 100.0 : 0.0;
     double risk_amt = FPN_ToDouble(ctrl->config.risk_pct) * 100.0;
 
     // ==== PORTFOLIO section ====
     double equity = balance + total_value;
+    // single source of truth: derive total P&L from equity (same as snapshot path)
+    double total_pnl = equity - starting;
+    double return_pct = (starting != 0.0) ? (total_pnl / starting) * 100.0 : 0.0;
     double exposure_pct = (starting != 0.0) ? (total_value / starting) * 100.0 : 0.0;
     double max_exp = FPN_ToDouble(ctrl->config.max_exposure_pct) * 100.0;
 
@@ -645,7 +647,7 @@ struct TUISnapshot {
     double exposure_pct, max_exp;
     double fees, fee_rate_pct;
     // positions
-    TUIPositionSnap positions[16];
+    TUIPositionSnap positions[MAX_PORTFOLIO_POSITIONS];
     // P&L
     double realized, unrealized, total_pnl, return_pct;
     // graph history (ring buffers, updated every snapshot copy)
@@ -666,9 +668,11 @@ struct TUISnapshot {
     double long_r2;       // price regression R² (long window)
     double vol_ratio;     // short/long variance ratio (volatility spike)
     double ror_slope;     // slope-of-slopes (trend acceleration)
+    double ema_sma_spread; // EMA/SMA crossover spread (primary trending signal)
     double volume_spike_ratio; // current volume / rolling max (spike detection)
     int spike_active;     // 1 if spike_ratio >= threshold
     double vwap, vwap_dev; // VWAP and deviation from it
+    double ema_price;      // EMA price for proactive gate (0 = disabled)
     double book_imbalance; // bid/ask imbalance [-1, +1] (0 = no depth data)
     double book_spread;    // bid-ask spread
     int current_session;   // 0=asian, 1=european, 2=us, 3=overnight (-1=disabled)
@@ -725,6 +729,7 @@ struct TUISharedState {
     volatile sig_atomic_t regime_cycle_requested;
     EngineTUI tui;
     const char *config_path;
+    void *candle_acc;  // CandleAccumulator* (GUI build only, NULL for ANSI)
 };
 
 //======================================================================================================
@@ -850,12 +855,19 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
             const_cast<RORRegressor<F>*>(&ctrl->regime_ror));
         snap->ror_slope = FPN_ToDouble(ror_r.model.slope);
     }
+    // EMA/SMA crossover spread
+    {
+        double ema = FPN_ToDouble(ctrl->ema_price);
+        double sma = FPN_ToDouble(ctrl->rolling.price_avg);
+        snap->ema_sma_spread = (sma > 1e-15) ? (ema - sma) / sma : 0.0;
+    }
     // volume spike
     snap->volume_spike_ratio = FPN_ToDouble(ctrl->volume_spike_ratio);
     snap->spike_active = FPN_GreaterThanOrEqual(ctrl->volume_spike_ratio,
                                                  ctrl->config.spike_threshold);
     snap->vwap = FPN_ToDouble(ctrl->rolling.vwap);
     snap->vwap_dev = FPN_ToDouble(ctrl->rolling.vwap_deviation);
+    snap->ema_price = FPN_ToDouble(ctrl->ema_price);
     snap->book_imbalance = FPN_ToDouble(ctrl->book_imbalance);
     snap->book_spread = 0.0; // populated from depth thread if available
     snap->current_session = ctrl->current_session;
@@ -975,7 +987,7 @@ static inline void TUI_Render_Snapshot(EngineTUI *tui, const TUISnapshot *s) {
     int row = 1;
     printf(C_SAND "  ================================================================" C_RESET "\n"); row++;
     printf(C_BOLD C_PEACH "     /\\_/\\   FOXML TRADER" C_RESET "\n"); row++;
-    printf(C_BOLD C_PEACH "    ( o.o )  " C_WHEAT "engine v3.2.0" C_RESET "\n"); row++;
+    printf(C_BOLD C_PEACH "    ( o.o )  " C_WHEAT "engine v" ENGINE_VERSION_STRING C_RESET "\n"); row++;
     printf(C_BOLD C_PEACH "     > ^ <" C_RESET "\n"); row++;
     printf(C_SAND "  ================================================================" C_RESET "\n"); row++;
     printf(C_SAND "  STATE: " C_FG "%-8s" C_RESET C_DIM "  |  " C_SAND "UPTIME: " C_FG "%02u:%02u:%02u" C_RESET "%s\n",

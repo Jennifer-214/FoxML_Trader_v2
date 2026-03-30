@@ -1,5 +1,7 @@
 build/
+build_gui/
 build_latency/
+vendor/
 *.o
 *.d
 plans/

@@ -66,6 +66,12 @@ template <unsigned F> struct RegimeSignals {
     FPN<F> ror_slope;         // slope-of-slopes (trend acceleration)
     FPN<F> volume_slope;      // volume trend (confirmation)
     FPN<F> volume_delta;      // net buy/sell pressure [-1.0, +1.0] (from Binance "m" field)
+    // EMA/SMA crossover signals — primary trending/ranging indicator
+    // EMA reacts every tick (~333-tick window), SMA lags (128/512 samples at slow-path rate)
+    // spread = (ema - sma) / sma: positive = EMA above SMA = bullish, magnitude = strength
+    FPN<F> ema_sma_spread;    // normalized spread vs 128-sample SMA
+    FPN<F> ema_sma_spread_long; // normalized spread vs 512-sample SMA (multi-timeframe)
+    int    ema_above_sma;     // 1 if ema > short SMA (bullish crossover state)
     // data sufficiency flags
     int short_count;
     int long_count;
@@ -84,7 +90,8 @@ template <unsigned F>
 inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
                                    const RollingStats<F> *rolling,
                                    const RollingStats<F, 512> *rolling_long,
-                                   const RORRegressor<F> *ror) {
+                                   const RORRegressor<F> *ror,
+                                   FPN<F> ema_price) {
     // short window signals
     sig->short_count    = rolling->count;
     sig->short_r2       = rolling->price_r_squared;
@@ -129,6 +136,24 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
 
     // volume delta: net buy/sell pressure from short window
     sig->volume_delta = rolling->volume_delta;
+
+    // EMA/SMA crossover: (ema - sma) / sma
+    // normalized so threshold is asset-independent (same value works for BTC and ETH)
+    if (!FPN_IsZero(rolling->price_avg) && !FPN_IsZero(ema_price)) {
+        sig->ema_sma_spread = FPN_DivNoAssert(
+            FPN_Sub(ema_price, rolling->price_avg), rolling->price_avg);
+        sig->ema_above_sma = !sig->ema_sma_spread.sign & !FPN_IsZero(sig->ema_sma_spread);
+    } else {
+        sig->ema_sma_spread = FPN_Zero<F>();
+        sig->ema_above_sma = 0;
+    }
+
+    if (!FPN_IsZero(rolling_long->price_avg) && !FPN_IsZero(ema_price)) {
+        sig->ema_sma_spread_long = FPN_DivNoAssert(
+            FPN_Sub(ema_price, rolling_long->price_avg), rolling_long->price_avg);
+    } else {
+        sig->ema_sma_spread_long = FPN_Zero<F>();
+    }
 }
 
 //======================================================================================================
@@ -185,59 +210,54 @@ inline int Regime_Classify(RegimeState<F> *state,
     if (sig->short_count < 64)
         return state->current_regime;
 
-    FPN<F> abs_short_slope = FPN_Abs(sig->short_slope);
-    FPN<F> abs_long_slope  = FPN_Abs(sig->long_slope);
-
-    // slope direction: 0 = positive (up), 1 = negative (down)
-    int short_up = !sig->short_slope.sign;
-    int short_down = sig->short_slope.sign;
-    int long_up = !sig->long_slope.sign;
-    int long_down = sig->long_slope.sign;
-
-    // --- trending score (direction-aware) ---
-    // magnitude checks use abs, direction splits into up/down scores
+    // --- trending score (EMA/SMA crossover-based) ---
+    // EMA reacts every tick, SMA lags — crossover detects trends as they start
+    // spread = (ema - sma) / sma: magnitude = trend strength, sign = direction
     int trending_score = 0;
     int up_signals = 0;
     int down_signals = 0;
 
-    // short window slope strong enough
-    int short_slope_strong = FPN_GreaterThan(abs_short_slope, cfg->regime_slope_threshold);
-    trending_score += short_slope_strong;
-    up_signals += short_slope_strong & short_up;
-    down_signals += short_slope_strong & short_down;
+    // signal 1: short crossover — EMA vs 128-sample SMA
+    FPN<F> abs_spread = FPN_Abs(sig->ema_sma_spread);
+    int crossover_strong = FPN_GreaterThan(abs_spread, cfg->regime_crossover_threshold);
+    trending_score += crossover_strong;
+    up_signals += crossover_strong & sig->ema_above_sma;
+    down_signals += crossover_strong & !sig->ema_above_sma;
 
-    // long window confirms (multi-timeframe agreement)
+    // signal 2: long crossover — EMA vs 512-sample SMA (multi-timeframe confirmation)
+    FPN<F> abs_spread_long = FPN_Abs(sig->ema_sma_spread_long);
     int long_has_data = (sig->long_count >= 64);
-    int long_slope_strong = long_has_data & FPN_GreaterThan(abs_long_slope, cfg->regime_slope_threshold);
-    trending_score += long_slope_strong;
-    up_signals += long_slope_strong & long_up;
-    down_signals += long_slope_strong & long_down;
+    int long_ema_above = !sig->ema_sma_spread_long.sign & !FPN_IsZero(sig->ema_sma_spread_long);
+    int long_crossover_strong = long_has_data &
+        FPN_GreaterThan(abs_spread_long, cfg->regime_crossover_threshold);
+    trending_score += long_crossover_strong;
+    up_signals += long_crossover_strong & long_ema_above;
+    down_signals += long_crossover_strong & !long_ema_above;
 
-    // hidden downtrend: long slope strongly negative + short slope flat
-    // catches macro downtrends disguised as ranging (short window mean-reverts inside the trend)
-    // uses 2x threshold to avoid false positives from mild consolidation
+    // hidden downtrend: EMA far below long SMA + short crossover neutral
+    // catches macro downtrends where short window mean-reverts inside the trend
     int long_down_only = long_has_data
-        & FPN_GreaterThan(abs_long_slope, FPN_Mul(cfg->regime_slope_threshold, FPN_FromDouble<F>(2.0)))
-        & long_down & !short_slope_strong;
+        & FPN_GreaterThan(abs_spread_long, FPN_Mul(cfg->regime_crossover_threshold, FPN_FromDouble<F>(2.0)))
+        & !long_ema_above & !crossover_strong;
     down_signals += long_down_only;
     trending_score += long_down_only;
 
-    // price movement is consistent (high R²)
+    // signal 4: price movement is consistent (high R² — orthogonal to crossover)
     int consistent = FPN_GreaterThan(sig->short_r2, cfg->regime_r2_threshold);
     trending_score += consistent;
 
-    // trend is accelerating (ROR positive = upward acceleration, negative = downward)
+    // signal 5: trend is accelerating (ROR — orthogonal, catches steepening trends)
     int ror_positive = sig->ror_ready & FPN_GreaterThan(sig->ror_slope, FPN_Zero<F>());
     int ror_negative = sig->ror_ready & FPN_LessThan(sig->ror_slope, FPN_Zero<F>());
-    trending_score += (ror_positive | ror_negative); // either direction counts for trending
+    trending_score += (ror_positive | ror_negative);
     up_signals += ror_positive;
     down_signals += ror_negative;
 
-    // volume rising in direction of trend (confirmation)
-    int vol_confirms = FPN_GreaterThan(sig->volume_slope, FPN_Zero<F>()) & short_slope_strong;
+    // signal 6: volume rising in direction of crossover (confirmation)
+    int vol_confirms = FPN_GreaterThan(sig->volume_slope, FPN_Zero<F>()) & crossover_strong;
     trending_score += vol_confirms;
 
-    // --- volatile score ---
+    // --- volatile score (unchanged — vol_ratio based) ---
     int volatile_score = 0;
 
     // variance spike relative to longer-term baseline (self-adapting)
@@ -249,12 +269,12 @@ inline int Regime_Classify(RegimeState<F> *state,
     volatile_score += vol_spike & inconsistent;
 
     // --- classify ---
-    // trending needs at least 2 signals AND at least one slope signal (short or long)
+    // trending needs at least 2 signals AND at least one crossover signal
     // volatile needs at least 2 signals (spike + no direction)
     // direction: more down signals = TRENDING_DOWN, otherwise TRENDING (up)
-    int has_slope = short_slope_strong | long_slope_strong;
+    int has_crossover = crossover_strong | long_crossover_strong;
     int detected;
-    if (trending_score >= 2 && has_slope && consistent && trending_score > volatile_score) {
+    if (trending_score >= 2 && has_crossover && consistent && trending_score > volatile_score) {
         detected = (down_signals > up_signals) ? REGIME_TRENDING_DOWN : REGIME_TRENDING;
     } else if (volatile_score >= 2 && volatile_score > trending_score)
         detected = REGIME_VOLATILE;

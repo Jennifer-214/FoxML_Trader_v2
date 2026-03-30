@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 #===============================================================================
 add_executable(engine main.cpp)
 target_compile_options(engine PRIVATE -O3 -march=native -funroll-loops -flto)
-target_compile_definitions(engine PRIVATE MULTICORE_TUI USE_ANSI_TUI)
+target_compile_definitions(engine PRIVATE MULTICORE_TUI USE_ANSI_TUI LICENSE_BYPASS)
 target_link_libraries(engine PRIVATE ssl crypto pthread)
 
 #===============================================================================
@@ -35,6 +35,77 @@ if(USE_NATIVE_128)
 endif()
 if(BUSY_POLL)
     target_compile_definitions(engine PRIVATE BUSY_POLL)
+endif()
+
+#===============================================================================
+# engine_gui binary — Dear ImGui + implot (SDL2 + OpenGL3)
+#===============================================================================
+option(USE_IMGUI_GUI "Build engine_gui with Dear ImGui + implot (requires SDL2, OpenGL)" OFF)
+
+if(USE_IMGUI_GUI)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SDL2 REQUIRED sdl2)
+    find_package(OpenGL REQUIRED)
+
+    # imgui core sources
+    set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/vendor/imgui)
+    set(IMGUI_SOURCES
+        ${IMGUI_DIR}/imgui.cpp
+        ${IMGUI_DIR}/imgui_draw.cpp
+        ${IMGUI_DIR}/imgui_tables.cpp
+        ${IMGUI_DIR}/imgui_widgets.cpp
+        ${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
+        ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+    )
+
+    # implot sources
+    set(IMPLOT_DIR ${CMAKE_SOURCE_DIR}/vendor/implot)
+    set(IMPLOT_SOURCES
+        ${IMPLOT_DIR}/implot.cpp
+        ${IMPLOT_DIR}/implot_items.cpp
+    )
+
+    # compile vendored libs as a static lib without LTO (fast compile)
+    add_library(imgui_lib STATIC ${IMGUI_SOURCES} ${IMPLOT_SOURCES})
+    target_compile_options(imgui_lib PRIVATE -O2)
+    target_include_directories(imgui_lib PUBLIC
+        ${IMGUI_DIR}
+        ${IMGUI_DIR}/backends
+        ${IMPLOT_DIR}
+        ${SDL2_INCLUDE_DIRS}
+    )
+
+    add_executable(engine_gui main.cpp)
+    target_compile_options(engine_gui PRIVATE -O3 -march=native -funroll-loops -flto)
+    target_compile_definitions(engine_gui PRIVATE
+        MULTICORE_TUI USE_IMGUI_GUI LICENSE_BYPASS
+    )
+    target_include_directories(engine_gui PRIVATE
+        ${IMGUI_DIR}
+        ${IMGUI_DIR}/backends
+        ${IMPLOT_DIR}
+        ${SDL2_INCLUDE_DIRS}
+    )
+    target_link_libraries(engine_gui PRIVATE
+        imgui_lib
+        ${SDL2_LIBRARIES}
+        OpenGL::GL
+        ssl crypto pthread
+    )
+
+    # propagate profiling options to GUI build
+    if(LATENCY_PROFILING)
+        target_compile_definitions(engine_gui PRIVATE LATENCY_PROFILING)
+    endif()
+    if(LATENCY_LITE)
+        target_compile_definitions(engine_gui PRIVATE LATENCY_PROFILING LATENCY_LITE)
+    endif()
+    if(USE_NATIVE_128)
+        target_compile_definitions(engine_gui PRIVATE USE_NATIVE_128)
+    endif()
+    if(BUSY_POLL)
+        target_compile_definitions(engine_gui PRIVATE BUSY_POLL)
+    endif()
 endif()
 
 #===============================================================================

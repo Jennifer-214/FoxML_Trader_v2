@@ -308,20 +308,26 @@ inline void MeanReversion_Adapt(MeanReversionState<F> *state,
 template <unsigned F>
 inline BuySideGateConditions<F> MeanReversion_BuySignal(
     MeanReversionState<F> *state, const RollingStats<F> *rolling,
-    const RollingStats<F, 512> *rolling_long, const ControllerConfig<F> *cfg) {
+    const RollingStats<F, 512> *rolling_long, const ControllerConfig<F> *cfg,
+    FPN<F> ema_price = FPN_Zero<F>()) {
   constexpr unsigned N = FPN<F>::N;
   BuySideGateConditions<F> conds;
 
+  // base average: EMA when provided (nonzero), rolling avg otherwise
+  // no branch — caller passes rolling_avg when EMA is disabled
+  FPN<F> base_avg = FPN_IsZero(ema_price) ? rolling->price_avg : ema_price;
+
   // compute base buy price in both modes, branchless select the active one
-  // percentage mode: buy_price = avg - (avg * offset_pct)
-  // stddev mode:     buy_price = avg - (stddev * offset_mult) — scales with
+  // percentage mode: buy_price = base - (base * offset_pct)
+  // stddev mode:     buy_price = base - (stddev * offset_mult) — scales with
   // volatility
   int use_stddev = !FPN_IsZero(cfg->offset_stddev_mult);
 
-  FPN<F> pct_price = RollingStats_BuyPrice(rolling, state->live_offset_pct);
+  FPN<F> pct_offset = FPN_Mul(base_avg, state->live_offset_pct);
+  FPN<F> pct_price = FPN_Sub(base_avg, pct_offset);
   FPN<F> stddev_offset =
       FPN_Mul(rolling->price_stddev, state->live_stddev_mult);
-  FPN<F> stddev_price = FPN_Sub(rolling->price_avg, stddev_offset);
+  FPN<F> stddev_price = FPN_Sub(base_avg, stddev_offset);
 
   uint64_t sm = -(uint64_t)use_stddev;
   for (unsigned i = 0; i < N; i++) {
