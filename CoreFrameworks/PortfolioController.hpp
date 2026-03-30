@@ -370,6 +370,25 @@ inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) 
     ctrl->buy_conds.gate_direction = 0;
     break;
   }
+
+  // NO-TRADE BAND: suppress entries when signal strength < fee breakeven
+  // cost-aware: signal must exceed fee_rate × no_trade_band_mult to justify trade
+  if (ctrl->config.no_trade_band_enabled && !FPN_IsZero(ctrl->rolling.price_avg)) {
+    FPN<F> min_signal = FPN_Mul(ctrl->config.fee_rate, ctrl->config.no_trade_band_mult);
+    FPN<F> signal_dist = FPN_Sub(ctrl->buy_conds.price, ctrl->rolling.price_avg);
+    // absolute value
+    FPN<F> neg_sd = FPN_Negate(signal_dist);
+    uint64_t neg_m = -(uint64_t)(signal_dist.sign);
+    FPN<F> abs_sd;
+    for (unsigned w = 0; w < FPN<F>::N; w++)
+      abs_sd.w[w] = (neg_sd.w[w] & neg_m) | (signal_dist.w[w] & ~neg_m);
+    abs_sd.sign = 0;
+    FPN<F> signal_pct = FPN_DivNoAssert(abs_sd, ctrl->rolling.price_avg);
+    if (FPN_LessThan(signal_pct, min_signal)) {
+      ctrl->buy_conds.price = FPN_Zero<F>();
+      ctrl->buy_conds.volume = FPN_Zero<F>();
+    }
+  }
 }
 
 // full dispatch: adapt regression + exit adjust + buy signal (slow path only)
