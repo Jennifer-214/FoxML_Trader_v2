@@ -141,14 +141,20 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         ImPlot::SetupAxes(NULL, NULL, ImPlotAxisFlags_NoLabel, ImPlotAxisFlags_Opposite);
         ImPlot::SetupAxisLimits(ImAxis_X1, cs->x_lo, cs->x_hi, ImPlotCond_Always);
 
-        // time tick labels
+        // time tick labels — spaced to prevent overlap
         if (vc > 0) {
-            int step = vc > 8 ? vc / 8 : 1;
+            float cw = ImPlot::GetPlotSize().x;
+            float label_px = ImGui::CalcTextSize("00:00").x + 20.0f;
+            int max_fit = (cw > 0 && label_px > 0) ? (int)(cw / label_px) : 6;
+            if (max_fit < 2) max_fit = 2;
+            if (max_fit > 12) max_fit = 12;
+            int step = vc > max_fit ? vc / max_fit : 1;
             double tick_pos[16];
             const char *tick_labels[16];
             char tick_bufs[16][8];
             int tick_n = 0;
             for (int i = 0; i < vc && tick_n < 16; i += step) {
+                if (cs->times_sec[i] < 1.0) continue;
                 tick_pos[tick_n] = cs->xs[i];
                 time_t t = (time_t)cs->times_sec[i];
                 struct tm *tm = localtime(&t);
@@ -298,12 +304,11 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         double drawn_entries[16] = {};
         int drawn_entry_count = 0;
 
+        // entry lines (grouped by price)
         for (int pi = 0; pi < 16; pi++) {
             const TUIPositionSnap *ps = &snap->positions[pi];
             if (ps->idx < 0 || ps->entry <= 0) continue;
-            int di = display_idx[pi];
 
-            // check if this entry price was already drawn (partial exit pair)
             bool already_drawn = false;
             for (int j = 0; j < drawn_entry_count; j++) {
                 if (fabs(drawn_entries[j] - ps->entry) < 0.01) {
@@ -313,7 +318,6 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             }
 
             if (!already_drawn) {
-                // find all display indices at this entry price
                 char group_ids[32] = {};
                 int group_len = 0;
                 for (int j = 0; j < 16; j++) {
@@ -327,7 +331,6 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 }
                 group_ids[group_len] = '\0';
 
-                // entry line — solid, thick, wheat
                 double y[2] = {ps->entry, ps->entry};
                 double lx[2] = {cs->x_lo, cs->x_hi};
                 ImPlotSpec s; s.LineColor = FoxmlColors::wheat; s.LineWeight = 2.0f;
@@ -338,42 +341,94 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                                    ImVec2(5, 0), true, "#%s $%.0f", group_ids, ps->entry);
                 drawn_entries[drawn_entry_count++] = ps->entry;
             }
+        }
 
-            // TP line — dashed via DrawList, green
-            if (ps->tp > 0) {
-                ImVec2 left  = ImPlot::PlotToPixels(cs->x_lo, ps->tp);
-                ImVec2 right = ImPlot::PlotToPixels(cs->x_hi, ps->tp);
-                ImU32 tp_col = ImGui::GetColorU32(ImVec4(
-                    FoxmlColors::green_b.x, FoxmlColors::green_b.y, FoxmlColors::green_b.z, 0.6f));
-                // dashed line (8px on, 6px off)
-                float dash = 8.0f, gap = 6.0f;
-                float total = right.x - left.x;
-                for (float x = 0; x < total; x += dash + gap) {
-                    float x1 = left.x + x;
-                    float x2 = left.x + x + dash;
-                    if (x2 > right.x) x2 = right.x;
-                    dl->AddLine(ImVec2(x1, left.y), ImVec2(x2, left.y), tp_col, 1.0f);
+        // TP/SL lines — collision-aware label stagger + per-position dash patterns
+        {
+            struct PosLabel { double price; float y_px; int di, pi; bool is_tp; };
+            PosLabel plabels[32];
+            int plabel_n = 0;
+
+            for (int pi = 0; pi < 16; pi++) {
+                const TUIPositionSnap *ps = &snap->positions[pi];
+                if (ps->idx < 0) continue;
+                int di = display_idx[pi];
+                if (ps->tp > 0) {
+                    float yp = ImPlot::PlotToPixels(0.0, ps->tp).y;
+                    plabels[plabel_n++] = {ps->tp, yp, di, pi, true};
                 }
-                ImPlot::Annotation(cs->x_hi - 1, ps->tp, FoxmlColors::green_b,
-                                   ImVec2(5, 0), true, "#%d TP", di);
+                if (ps->sl > 0) {
+                    float yp = ImPlot::PlotToPixels(0.0, ps->sl).y;
+                    plabels[plabel_n++] = {ps->sl, yp, di, pi, false};
+                }
             }
 
-            // SL line — dashed via DrawList, red
-            if (ps->sl > 0) {
-                ImVec2 left  = ImPlot::PlotToPixels(cs->x_lo, ps->sl);
-                ImVec2 right = ImPlot::PlotToPixels(cs->x_hi, ps->sl);
-                ImU32 sl_col = ImGui::GetColorU32(ImVec4(
-                    FoxmlColors::red_b.x, FoxmlColors::red_b.y, FoxmlColors::red_b.z, 0.6f));
-                float dash = 8.0f, gap = 6.0f;
-                float total = right.x - left.x;
-                for (float x = 0; x < total; x += dash + gap) {
-                    float x1 = left.x + x;
-                    float x2 = left.x + x + dash;
-                    if (x2 > right.x) x2 = right.x;
-                    dl->AddLine(ImVec2(x1, left.y), ImVec2(x2, left.y), sl_col, 1.0f);
+            // sort by screen Y (insertion sort, max 32 elements)
+            for (int i = 1; i < plabel_n; i++) {
+                PosLabel tmp = plabels[i];
+                int j = i - 1;
+                while (j >= 0 && plabels[j].y_px > tmp.y_px) {
+                    plabels[j + 1] = plabels[j];
+                    j--;
                 }
-                ImPlot::Annotation(cs->x_hi - 1, ps->sl, FoxmlColors::red,
-                                   ImVec2(5, 0), true, "#%d SL", di);
+                plabels[j + 1] = tmp;
+            }
+
+            // detect collision groups (within 20px) and assign horizontal stagger
+            float x_offsets[32] = {};
+            for (int i = 0; i < plabel_n; ) {
+                int ge = i + 1;
+                while (ge < plabel_n && (plabels[ge].y_px - plabels[i].y_px) < 20.0f)
+                    ge++;
+                for (int g = 0; g < ge - i; g++)
+                    x_offsets[i + g] = (float)g * 60.0f;
+                i = ge;
+            }
+
+            // dash patterns indexed by display_idx % 4:
+            //   0: normal (8on 6off)  1: short (4on 4off)
+            //   2: dot-dash (3on 3off 10on 3off)  3: long (14on 5off)
+            static const float dp[][4] = {
+                {8,6,8,6}, {4,4,4,4}, {3,3,10,3}, {14,5,14,5}
+            };
+
+            for (int li = 0; li < plabel_n; li++) {
+                const PosLabel &lb = plabels[li];
+                ImVec2 left  = ImPlot::PlotToPixels(cs->x_lo, lb.price);
+                ImVec2 right = ImPlot::PlotToPixels(cs->x_hi, lb.price);
+
+                ImVec4 lcol_v, acol_v;
+                if (lb.is_tp) {
+                    lcol_v = {FoxmlColors::green_b.x, FoxmlColors::green_b.y,
+                              FoxmlColors::green_b.z, 0.6f};
+                    acol_v = FoxmlColors::green_b;
+                } else {
+                    lcol_v = {FoxmlColors::red_b.x, FoxmlColors::red_b.y,
+                              FoxmlColors::red_b.z, 0.6f};
+                    acol_v = FoxmlColors::red;
+                }
+                ImU32 lcol = ImGui::GetColorU32(lcol_v);
+
+                // dashed line with pattern keyed to display index
+                const float *pat = dp[lb.di % 4];
+                float total = right.x - left.x;
+                int si = 0;
+                for (float x = 0; x < total; ) {
+                    float seg = pat[si % 4];
+                    if ((si & 1) == 0) {
+                        float x1 = left.x + x;
+                        float x2 = left.x + x + seg;
+                        if (x2 > right.x) x2 = right.x;
+                        dl->AddLine(ImVec2(x1, left.y), ImVec2(x2, left.y), lcol, 1.0f);
+                    }
+                    x += seg;
+                    si++;
+                }
+
+                // annotation with horizontal stagger when labels collide
+                ImPlot::Annotation(cs->x_hi - 1, lb.price, acol_v,
+                                   ImVec2(5 + x_offsets[li], 0), true,
+                                   "#%d %s", lb.di, lb.is_tp ? "TP" : "SL");
             }
         }
 
