@@ -921,6 +921,7 @@ static inline int ANSI_Section_Controls(AnsiBuf *ab, int y, int w) {
               A_PINK "[p]" A_DIM "ause  "
               A_PINK "[r]" A_DIM "eload  "
               A_PINK "[s]" A_DIM "witch  "
+              A_PINK "[k]" A_DIM "ill reset  "
               A_PINK "[l]" A_DIM "ayout" A_RESET);
     y++;
     return y;
