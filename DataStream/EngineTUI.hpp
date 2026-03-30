@@ -587,6 +587,17 @@ static inline char TUI_HandleInput(EngineTUI *tui, PortfolioController<F> *ctrl,
         return 's';
     }
 
+    if (c == 'k' || c == 'K') {
+        if (ctrl->kill_switch_active) {
+            ctrl->kill_switch_active = 0;
+            ctrl->kill_reason = 0;
+            ctrl->kill_recovery_counter = ctrl->config.kill_recovery_warmup;
+            fprintf(stderr, "[TUI] kill switch reset — observing for %u cycles before trading\n",
+                    ctrl->config.kill_recovery_warmup);
+        }
+        return 'k';
+    }
+
     return 0;
 }
 
@@ -710,6 +721,21 @@ struct TUISnapshot {
     double pc_nofill_avg_ns, pc_nofill_max_ns;
     uint64_t pc_nofill_count;
 #endif
+    // kill switch
+    int kill_switch_active;
+    int kill_reason;        // 0=none, 1=daily_loss, 2=drawdown
+    int kill_recovery;      // remaining warmup cycles after kill reset
+    // vol-scaled sizing
+    double vol_scale;       // last applied vol scale factor
+    // no-trade band
+    int no_trade_band_blocked; // 1 if last signal was suppressed by no-trade band
+    double signal_strength;    // |price - avg| / avg as percentage
+    // per-strategy stats
+    struct StrategyStatsSnap {
+      double pnl;
+      uint32_t wins, losses, total;
+    };
+    StrategyStatsSnap strat_stats[4];
     // right panel: session stats + fill diagnostics
     double session_high, session_low;
     double tick_rate;
@@ -727,6 +753,7 @@ struct TUISharedState {
     volatile sig_atomic_t pause_requested;
     volatile sig_atomic_t reload_requested;
     volatile sig_atomic_t regime_cycle_requested;
+    volatile sig_atomic_t kill_reset_requested;
     EngineTUI tui;
     const char *config_path;
     void *candle_acc;  // CandleAccumulator* (GUI build only, NULL for ANSI)
@@ -874,6 +901,28 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->session_mult = FPN_ToDouble(ctrl->session_mult);
     snap->sl_cooldown = (int)ctrl->sl_cooldown_counter;
     snap->min_warmup_samples = (int)ctrl->config.min_warmup_samples;
+    // kill switch
+    snap->kill_switch_active = ctrl->kill_switch_active;
+    snap->kill_reason = ctrl->kill_reason;
+    snap->kill_recovery = (int)ctrl->kill_recovery_counter;
+    // vol scale
+    snap->vol_scale = ctrl->last_vol_scale;
+    // no-trade band (signal strength computed relative to rolling avg)
+    {
+      double bavg = FPN_ToDouble(ctrl->rolling.price_avg);
+      double bprice = FPN_ToDouble(ctrl->buy_conds.price);
+      snap->signal_strength = (bavg > 1e-15) ? fabs(bprice - bavg) / bavg * 100.0 : 0.0;
+      double min_signal = FPN_ToDouble(ctrl->config.fee_rate) * FPN_ToDouble(ctrl->config.no_trade_band_mult) * 100.0;
+      snap->no_trade_band_blocked = ctrl->config.no_trade_band_enabled &&
+          (snap->signal_strength < min_signal) && !snap->state_warmup;
+    }
+    // per-strategy reward attribution
+    for (int i = 0; i < 4; i++) {
+      snap->strat_stats[i].pnl   = FPN_ToDouble(ctrl->strategy_stats[i].realized_pnl);
+      snap->strat_stats[i].wins  = ctrl->strategy_stats[i].wins;
+      snap->strat_stats[i].losses = ctrl->strategy_stats[i].losses;
+      snap->strat_stats[i].total = ctrl->strategy_stats[i].total_trades;
+    }
     // session stats + fill diagnostics
     snap->session_high = ctrl->session_high;
     snap->session_low = ctrl->session_low;
@@ -1213,6 +1262,8 @@ static inline void *tui_thread_fn(void *arg) {
                 __atomic_store_n(&shared->reload_requested, 1, __ATOMIC_RELEASE);
             else if (c == 's' || c == 'S')
                 __atomic_store_n(&shared->regime_cycle_requested, 1, __ATOMIC_RELEASE);
+            else if (c == 'k' || c == 'K')
+                __atomic_store_n(&shared->kill_reset_requested, 1, __ATOMIC_RELEASE);
             else if (c == 'l' || c == 'L')
                 current_layout = (current_layout + 1) % ANSI_LAYOUT_COUNT;
         }

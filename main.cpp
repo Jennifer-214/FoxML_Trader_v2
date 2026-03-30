@@ -409,6 +409,15 @@ int main(int argc, char *argv[]) {
         }
         if (__atomic_exchange_n(&shared.regime_cycle_requested, 0, __ATOMIC_ACQ_REL))
             PortfolioController_CycleRegime(&ctrl);
+        if (__atomic_exchange_n(&shared.kill_reset_requested, 0, __ATOMIC_ACQ_REL)) {
+            if (ctrl.kill_switch_active) {
+                ctrl.kill_switch_active = 0;
+                ctrl.kill_reason = 0;
+                ctrl.kill_recovery_counter = ctrl.config.kill_recovery_warmup;
+                fprintf(stderr, "[ENGINE] kill switch reset — observing for %u cycles\n",
+                        ctrl.config.kill_recovery_warmup);
+            }
+        }
         if (__atomic_exchange_n(&shared.reload_requested, 0, __ATOMIC_ACQ_REL)) {
             ControllerConfig<FP> new_cfg = ControllerConfig_Load<FP>(cfg_path);
             PortfolioController_HotReload(&ctrl, new_cfg);

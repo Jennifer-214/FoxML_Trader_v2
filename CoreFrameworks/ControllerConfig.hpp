@@ -125,6 +125,18 @@ template <unsigned F> struct ControllerConfig {
   int default_strategy;          // -1=regime auto, 0=MR, 1=Momentum, 2=SimpleDip
   // live trading
   int use_real_money;            // 0=paper (default), 1=real orders via REST API
+  // kill switch (sticky — stays active until session reset or manual TUI 'k')
+  int kill_switch_enabled;       // 0=disabled, 1=enabled
+  FPN<F> kill_switch_daily_loss_pct; // max daily loss before kill (e.g. 0.03 = 3%)
+  FPN<F> kill_switch_drawdown_pct;   // max drawdown from session peak before kill (e.g. 0.05 = 5%)
+  uint32_t kill_recovery_warmup;     // slow-path cycles to observe after kill reset before trading
+  // vol-scaled position sizing
+  int vol_sizing_enabled;        // 0=disabled, 1=scale qty inversely with volatility
+  FPN<F> vol_scale_min;          // min scale factor (e.g. 0.25 = never less than 25% of base qty)
+  FPN<F> vol_scale_max;          // max scale factor (e.g. 2.0 = never more than 200% of base qty)
+  // no-trade band (cost-aware signal strength gate)
+  int no_trade_band_enabled;     // 0=disabled, 1=suppress entries when signal < fee_rate * mult
+  FPN<F> no_trade_band_mult;     // signal must exceed fee_rate * this to trade (e.g. 3.0)
 };
 //======================================================================================================
 template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
@@ -214,6 +226,18 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.gate_ema_one_minus_alpha = FPN_FromDouble<F>(0.003); // 1.0 - 0.997
   cfg.default_strategy = -1;                                // -1 = regime auto (backward compat)
   cfg.use_real_money = 0;                                  // 0 = paper trading (default safe)
+  // kill switch
+  cfg.kill_switch_enabled = 1;                             // on by default — safety first
+  cfg.kill_switch_daily_loss_pct = FPN_FromDouble<F>(0.03); // 3% daily loss triggers kill
+  cfg.kill_switch_drawdown_pct = FPN_FromDouble<F>(0.05);   // 5% drawdown from session peak
+  cfg.kill_recovery_warmup = 50;                            // 50 slow-path cycles observation after kill reset
+  // vol-scaled sizing
+  cfg.vol_sizing_enabled = 0;                              // off by default (backward compat)
+  cfg.vol_scale_min = FPN_FromDouble<F>(0.25);
+  cfg.vol_scale_max = FPN_FromDouble<F>(2.0);
+  // no-trade band
+  cfg.no_trade_band_enabled = 0;                           // off by default (backward compat)
+  cfg.no_trade_band_mult = FPN_FromDouble<F>(3.0);
   return cfg;
 }
 //======================================================================================================
@@ -331,6 +355,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_PCT(min_hold_gain_pct)
     CFG_PARSE_PCT(regime_r2_threshold)
     CFG_PARSE_PCT(slippage_pct)
+    CFG_PARSE_PCT(kill_switch_daily_loss_pct)
+    CFG_PARSE_PCT(kill_switch_drawdown_pct)
 
     //--- FPN with min-zero clamp ---
     CFG_PARSE_FPN_POS(offset_stddev_mult)
@@ -354,6 +380,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_U32(sl_cooldown_cycles)
     CFG_PARSE_U32(sl_cooldown_base)
     CFG_PARSE_U32(sl_cooldown_extra)
+    CFG_PARSE_U32(kill_recovery_warmup)
     // max_positions: clamped 1-16 (special case)
     if (strcmp(key, "max_positions") == 0) { int v = atoi(val);
       if (v < 1) v = 1; if (v > 16) v = 16;
@@ -368,11 +395,17 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(session_filter_enabled)
     CFG_PARSE_INT(gate_ema_enabled)
     CFG_PARSE_INT(default_strategy)
+    CFG_PARSE_INT(kill_switch_enabled)
+    CFG_PARSE_INT(vol_sizing_enabled)
+    CFG_PARSE_INT(no_trade_band_enabled)
 
     //--- partial exit + depth + EMA FPN ---
     CFG_PARSE_FPN(partial_exit_pct)
     CFG_PARSE_FPN(tp2_mult)
     CFG_PARSE_FPN(min_book_imbalance)
+    CFG_PARSE_FPN(vol_scale_min)
+    CFG_PARSE_FPN(vol_scale_max)
+    CFG_PARSE_FPN(no_trade_band_mult)
 
     // EMA alpha: parse alpha and precompute 1-alpha
     if (strcmp(key, "gate_ema_alpha") == 0) {

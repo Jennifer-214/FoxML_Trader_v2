@@ -693,6 +693,14 @@ static inline int ANSI_Section_Risk(AnsiBuf *ab, const TUISnapshot *s, int y, in
         ab_printf(ab, A_BOLD A_RED "TRIPPED" A_RESET);
     else
         ab_printf(ab, A_GREEN "OK" A_RESET);
+    // kill switch status
+    if (s->kill_switch_active) {
+        const char *reasons[] = {"", "DAILY LOSS", "DRAWDOWN"};
+        const char *r = (s->kill_reason >= 1 && s->kill_reason <= 2) ? reasons[s->kill_reason] : "UNKNOWN";
+        ab_printf(ab, A_DIM "  │  " A_BOLD A_RED "KILL: %s" A_RESET, r);
+    } else if (s->kill_recovery > 0) {
+        ab_printf(ab, A_DIM "  │  " A_YELLOW "RECOVERING (%d)" A_RESET, s->kill_recovery);
+    }
     y++;
 
     return y;
@@ -762,6 +770,26 @@ static inline int ANSI_Section_Stats(AnsiBuf *ab, const TUISnapshot *s, int y, i
         if (s->fee_ratio > 0.0)
             ab_printf(ab, A_SAND "  fees/wins: " A_DIM "%.0f%%" A_RESET, s->fee_ratio);
         y++;
+    }
+
+    // per-strategy P&L attribution
+    {
+        const char *snames[] = {"MR", "Mom", "Dip", "ML"};
+        int any = 0;
+        for (int i = 0; i < 4; i++) any |= (s->strat_stats[i].total > 0);
+        if (any) {
+            ab_goto(ab, y, 3);
+            for (int i = 0; i < 4; i++) {
+                if (s->strat_stats[i].total == 0) continue;
+                double pnl = s->strat_stats[i].pnl;
+                uint32_t w = s->strat_stats[i].wins, l = s->strat_stats[i].losses;
+                uint32_t t = w + l;
+                double wr = (t > 0) ? (double)w / t * 100.0 : 0.0;
+                ab_printf(ab, "%s%s: " "%s$%+.2f" A_RESET A_DIM " (%uW/%uL %.0f%%)" A_RESET "  ",
+                          A_SAND, snames[i], A_PNL(pnl), pnl, w, l, wr);
+            }
+            y++;
+        }
     }
 
     return y;

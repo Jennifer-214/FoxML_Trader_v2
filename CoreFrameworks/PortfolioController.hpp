@@ -67,6 +67,22 @@ template <unsigned F> struct PortfolioController {
   time_t entry_time[MAX_PORTFOLIO_POSITIONS];    // wall clock time at entry
   uint8_t entry_strategy[MAX_PORTFOLIO_POSITIONS]; // which strategy_id entered each position
 
+  // kill switch state (sticky — survives until session reset or manual 'k')
+  int kill_switch_active;           // 1 = all buying halted
+  int kill_reason;                  // 0=none, 1=daily_loss, 2=drawdown
+  FPN<F> daily_realized_pnl;        // accumulated realized P&L this session (resets on 24h boundary)
+  uint32_t kill_recovery_counter;   // slow-path cycles remaining after kill reset before trading resumes
+  double last_vol_scale;            // most recent vol scale factor applied (for TUI display)
+
+  // per-strategy reward attribution
+  struct StrategyStats {
+    FPN<F> realized_pnl;
+    uint32_t wins;
+    uint32_t losses;
+    uint32_t total_trades;
+  };
+  StrategyStats strategy_stats[4]; // 0=MR, 1=Momentum, 2=SimpleDip, 3=ML(future)
+
   int state;
   FPN<F> price_sum;
   FPN<F> volume_sum;
@@ -170,6 +186,17 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->idle_cycles = 0;
   ctrl->fills_rejected = 0;
   ctrl->last_reject_reason = 0;
+  ctrl->kill_switch_active = 0;
+  ctrl->kill_reason = 0;
+  ctrl->daily_realized_pnl = FPN_Zero<F>();
+  ctrl->kill_recovery_counter = 0;
+  ctrl->last_vol_scale = 1.0;
+  for (int i = 0; i < 4; i++) {
+    ctrl->strategy_stats[i].realized_pnl = FPN_Zero<F>();
+    ctrl->strategy_stats[i].wins = 0;
+    ctrl->strategy_stats[i].losses = 0;
+    ctrl->strategy_stats[i].total_trades = 0;
+  }
 
   ExitBuffer_Init(&ctrl->exit_buf);
   TradeLogBuffer_Init(&ctrl->trade_buf);
@@ -231,6 +258,17 @@ inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
     FPN<F> total_entry_cost = FPN_AddSat(entry_cost, pos->entry_fee);
     FPN<F> pos_pnl = FPN_Sub(net_proceeds, total_entry_cost);
     ctrl->realized_pnl = FPN_AddSat(ctrl->realized_pnl, pos_pnl);
+    ctrl->daily_realized_pnl = FPN_AddSat(ctrl->daily_realized_pnl, pos_pnl);
+
+    // per-strategy reward attribution
+    {
+      int strat = ctrl->entry_strategy[rec->position_index];
+      if (strat >= 0 && strat < 4) {
+        ctrl->strategy_stats[strat].total_trades++;
+        ctrl->strategy_stats[strat].realized_pnl = FPN_AddSat(
+            ctrl->strategy_stats[strat].realized_pnl, pos_pnl);
+      }
+    }
 
     ctrl->balance = FPN_AddSat(ctrl->balance, net_proceeds);
     ctrl->total_fees = FPN_AddSat(ctrl->total_fees, exit_fee);
@@ -280,6 +318,12 @@ inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
       loss_add.sign = 0;
       ctrl->gross_wins = FPN_AddSat(ctrl->gross_wins, win_add);
       ctrl->gross_losses = FPN_AddSat(ctrl->gross_losses, loss_add);
+      // per-strategy win/loss
+      int strat = ctrl->entry_strategy[rec->position_index];
+      if (strat >= 0 && strat < 4) {
+        ctrl->strategy_stats[strat].wins += (1 & (uint32_t)is_win);
+        ctrl->strategy_stats[strat].losses += (1 & (uint32_t)is_loss);
+      }
     }
 
     uint64_t entry_tick = ctrl->entry_ticks[rec->position_index];
@@ -873,9 +917,38 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // track peak equity and max drawdown
   {
     double equity = FPN_ToDouble(ctrl->balance) + FPN_ToDouble(portfolio_value);
+    if (ctrl->session_start_equity == 0.0) ctrl->session_start_equity = equity;
     if (equity > ctrl->peak_equity) ctrl->peak_equity = equity;
     double dd = ctrl->peak_equity - equity;
     if (dd > ctrl->max_drawdown) ctrl->max_drawdown = dd;
+  }
+
+  // KILL SWITCH: check daily loss and drawdown limits
+  // sticky — once triggered, stays active until session reset or manual 'k'
+  if (ctrl->config.kill_switch_enabled && !ctrl->kill_switch_active) {
+    double equity = FPN_ToDouble(ctrl->balance) + FPN_ToDouble(portfolio_value);
+    // daily loss check: (equity - session_start) / session_start < -threshold
+    if (ctrl->session_start_equity > 0.0) {
+      double daily_return = (equity - ctrl->session_start_equity) / ctrl->session_start_equity;
+      double loss_threshold = -FPN_ToDouble(ctrl->config.kill_switch_daily_loss_pct);
+      if (daily_return < loss_threshold) {
+        ctrl->kill_switch_active = 1;
+        ctrl->kill_reason = 1;
+        fprintf(stderr, "[KILL] daily loss %.2f%% exceeded limit %.2f%% — trading halted\n",
+                daily_return * 100.0, loss_threshold * 100.0);
+      }
+    }
+    // drawdown check: (peak - equity) / peak > threshold
+    if (!ctrl->kill_switch_active && ctrl->peak_equity > 0.0) {
+      double dd_pct = (ctrl->peak_equity - equity) / ctrl->peak_equity;
+      double dd_threshold = FPN_ToDouble(ctrl->config.kill_switch_drawdown_pct);
+      if (dd_pct > dd_threshold) {
+        ctrl->kill_switch_active = 1;
+        ctrl->kill_reason = 2;
+        fprintf(stderr, "[KILL] drawdown %.2f%% exceeded limit %.2f%% — trading halted\n",
+                dd_pct * 100.0, dd_threshold * 100.0);
+      }
+    }
   }
 
   // feed rolling price slope to ROR for trend acceleration detection
@@ -966,6 +1039,18 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     ctrl->buy_conds.price = FPN_Zero<F>();
     ctrl->buy_conds.volume = FPN_Zero<F>();
   }
+
+  // KILL SWITCH: suppress all buying when active (sticky — overrides everything above)
+  if (ctrl->kill_switch_active) {
+    ctrl->buy_conds.price = FPN_Zero<F>();
+    ctrl->buy_conds.volume = FPN_Zero<F>();
+  }
+  // kill recovery warmup: after kill resets, observe for N cycles before trading
+  if (ctrl->kill_recovery_counter > 0) {
+    ctrl->kill_recovery_counter--;
+    ctrl->buy_conds.price = FPN_Zero<F>();
+    ctrl->buy_conds.volume = FPN_Zero<F>();
+  }
 }
 //======================================================================================================
 // [SHARED FUNCTIONS — used by both multicore and single-threaded TUI paths]
@@ -1048,7 +1133,7 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
 // v5 adds: entry_ticks, entry_strategy, strategy_id, regime, momentum state
 // backward compatible: v4/v5/v6 load gracefully (missing fields get defaults)
 //======================================================================================================
-#define CONTROLLER_SNAPSHOT_VERSION 8
+#define CONTROLLER_SNAPSHOT_VERSION 9
 
 template <unsigned F>
 inline void PortfolioController_SaveSnapshot(const PortfolioController<F> *ctrl,
@@ -1098,6 +1183,17 @@ inline void PortfolioController_SaveSnapshot(const PortfolioController<F> *ctrl,
 
   // v8: starting_balance (survives config changes between sessions)
   fwrite(&ctrl->config.starting_balance, sizeof(FPN<F>), 1, f);
+
+  // v9: kill switch state + per-strategy stats
+  fwrite(&ctrl->kill_switch_active, sizeof(int), 1, f);
+  fwrite(&ctrl->kill_reason, sizeof(int), 1, f);
+  fwrite(&ctrl->daily_realized_pnl, sizeof(FPN<F>), 1, f);
+  for (int i = 0; i < 4; i++) {
+    fwrite(&ctrl->strategy_stats[i].realized_pnl, sizeof(FPN<F>), 1, f);
+    fwrite(&ctrl->strategy_stats[i].wins, sizeof(uint32_t), 1, f);
+    fwrite(&ctrl->strategy_stats[i].losses, sizeof(uint32_t), 1, f);
+    fwrite(&ctrl->strategy_stats[i].total_trades, sizeof(uint32_t), 1, f);
+  }
 
   fflush(f);
   fclose(f);
@@ -1179,6 +1275,22 @@ inline int PortfolioController_LoadSnapshot(PortfolioController<F> *ctrl,
     // v8: starting_balance persisted (immune to config edits between sessions)
     if (version >= 8) {
       if (fread(&ctrl->config.starting_balance, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+    }
+
+    // v9: kill switch state + per-strategy stats
+    if (version >= 9) {
+      if (fread(&ctrl->kill_switch_active, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
+      if (fread(&ctrl->kill_reason, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
+      if (fread(&ctrl->daily_realized_pnl, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+      for (int i = 0; i < 4; i++) {
+        if (fread(&ctrl->strategy_stats[i].realized_pnl, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&ctrl->strategy_stats[i].wins, sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&ctrl->strategy_stats[i].losses, sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&ctrl->strategy_stats[i].total_trades, sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }
+      }
+      if (ctrl->kill_switch_active)
+        fprintf(stderr, "[SNAPSHOT] kill switch ACTIVE (reason=%d) — trading halted. press 'k' to reset\n",
+                ctrl->kill_reason);
     }
   }
 
