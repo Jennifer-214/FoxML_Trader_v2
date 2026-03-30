@@ -39,15 +39,34 @@ static const CfgFieldDef field_defs[] = {
     {"fee_rate",              "Fee %%",       "Trading",         CFG_FLOAT, "%.2f"},
     {"slippage_pct",          "Slippage %%",  "Trading",         CFG_FLOAT, "%.2f"},
     {"risk_pct",              "Risk/Pos %%",  "Trading",         CFG_FLOAT, "%.1f"},
+    {"fee_floor_mult",        "Fee Floor",    "Trading",         CFG_FLOAT, "%.1f"},
     // Entry Filters
     {"entry_offset_pct",      "Offset %%",    "Entry Filters",   CFG_FLOAT, "%.3f"},
     {"volume_multiplier",     "Vol Mult",     "Entry Filters",   CFG_FLOAT, "%.2f"},
     {"spacing_multiplier",    "Spacing",      "Entry Filters",   CFG_FLOAT, "%.2f"},
     {"offset_stddev_mult",    "Stddev Mult",  "Entry Filters",   CFG_FLOAT, "%.2f"},
+    {"offset_stddev_min",     "Stddev Min",   "Entry Filters",   CFG_FLOAT, "%.2f"},
+    {"offset_stddev_max",     "Stddev Max",   "Entry Filters",   CFG_FLOAT, "%.2f"},
+    {"min_stddev_pct",        "Min Stddev %%","Entry Filters",   CFG_FLOAT, "%.5f"},
+    {"min_long_slope",        "Min Long Slope","Entry Filters",  CFG_FLOAT, "%.6f"},
+    {"min_buy_delta",         "Min Buy Delta","Entry Filters",   CFG_FLOAT, "%.2f"},
+    {"vwap_offset",           "VWAP Offset",  "Entry Filters",   CFG_FLOAT, "%.4f"},
+    // Adaptation
+    {"filter_scale",          "Filter Scale", "Adaptation",      CFG_FLOAT, "%.2f"},
+    {"offset_min",            "Offset Min %%","Adaptation",      CFG_FLOAT, "%.2f"},
+    {"offset_max",            "Offset Max %%","Adaptation",      CFG_FLOAT, "%.2f"},
+    {"vol_mult_min",          "Vol Min",      "Adaptation",      CFG_FLOAT, "%.2f"},
+    {"vol_mult_max",          "Vol Max",      "Adaptation",      CFG_FLOAT, "%.2f"},
+    {"r2_threshold",          "R² Threshold", "Adaptation",      CFG_FLOAT, "%.2f"},
+    {"slope_scale_buy",       "Slope Scale",  "Adaptation",      CFG_FLOAT, "%.2f"},
+    {"max_shift",             "Max Shift",    "Adaptation",      CFG_FLOAT, "%.4f"},
     // Trailing TP/SL
     {"tp_hold_score",         "Hold Score",   "Trailing TP/SL",  CFG_FLOAT, "%.2f"},
     {"tp_trail_mult",         "Trail TP",     "Trailing TP/SL",  CFG_FLOAT, "%.2f"},
     {"sl_trail_mult",         "Trail SL",     "Trailing TP/SL",  CFG_FLOAT, "%.2f"},
+    // Time-Based Exit
+    {"max_hold_ticks",        "Max Hold",     "Time-Based Exit", CFG_INT,   "%d"},
+    {"min_hold_gain_pct",     "Min Gain %%",  "Time-Based Exit", CFG_FLOAT, "%.2f"},
     // Risk Management
     {"max_drawdown_pct",      "Max DD %%",    "Risk Management", CFG_FLOAT, "%.1f"},
     {"max_exposure_pct",      "Max Exp %%",   "Risk Management", CFG_FLOAT, "%.0f"},
@@ -64,10 +83,29 @@ static const CfgFieldDef field_defs[] = {
     // No-Trade Band
     {"no_trade_band_enabled", "Enabled",      "No-Trade Band",   CFG_BOOL,  NULL},
     {"no_trade_band_mult",    "Fee Mult",     "No-Trade Band",   CFG_FLOAT, "%.2f"},
+    // Regime Detection
+    {"regime_crossover_threshold","EMA/SMA Gap","Regime Detection",CFG_FLOAT,"%.5f"},
+    {"regime_r2_threshold",   "R² Threshold", "Regime Detection", CFG_FLOAT, "%.1f"},
+    {"regime_vol_spike_ratio","Vol Spike",    "Regime Detection", CFG_FLOAT, "%.1f"},
+    {"regime_hysteresis",     "Hysteresis",   "Regime Detection", CFG_INT,   "%d"},
     // Momentum
     {"momentum_breakout_mult","Breakout",     "Momentum",        CFG_FLOAT, "%.2f"},
     {"momentum_tp_mult",      "Mom TP",       "Momentum",        CFG_FLOAT, "%.2f"},
     {"momentum_sl_mult",      "Mom SL",       "Momentum",        CFG_FLOAT, "%.2f"},
+    {"momentum_r2_min",       "R² Min",       "Momentum",        CFG_FLOAT, "%.2f"},
+    // Partial Exits
+    {"partial_exit_pct",      "TP1 Split %%", "Partial Exits",   CFG_FLOAT, "%.2f"},
+    {"tp2_mult",              "TP2 Mult",     "Partial Exits",   CFG_FLOAT, "%.2f"},
+    {"breakeven_on_partial",  "Breakeven SL", "Partial Exits",   CFG_BOOL,  NULL},
+    // Gate Recovery
+    {"idle_reset_cycles",     "Idle Reset",   "Gate Recovery",   CFG_INT,   "%d"},
+    {"sl_cooldown_cycles",    "SL Cooldown",  "Gate Recovery",   CFG_INT,   "%d"},
+    {"sl_cooldown_adaptive",  "Adaptive CD",  "Gate Recovery",   CFG_BOOL,  NULL},
+    // Session Filters
+    {"session_asian_mult",    "Asian",        "Session Filters",  CFG_FLOAT, "%.2f"},
+    {"session_european_mult", "European",     "Session Filters",  CFG_FLOAT, "%.2f"},
+    {"session_us_mult",       "US",           "Session Filters",  CFG_FLOAT, "%.2f"},
+    {"session_overnight_mult","Overnight",    "Session Filters",  CFG_FLOAT, "%.2f"},
     // Strategy
     {"default_strategy",      "Default##strat","Strategy",       CFG_INT,   "%d"},
     // EMA Gate
@@ -77,6 +115,8 @@ static const CfgFieldDef field_defs[] = {
     {"use_real_money",        "LIVE Trading", "Toggles",         CFG_BOOL,  NULL},
     {"partial_exit_enabled",  "Partial Exits","Toggles",         CFG_BOOL,  NULL},
     {"session_filter_enabled","Session Filter","Toggles",        CFG_BOOL,  NULL},
+    {"depth_enabled",         "Order Book",   "Toggles",         CFG_BOOL,  NULL},
+    {"min_book_imbalance",    "Book Imbal",   "Toggles",         CFG_FLOAT, "%.2f"},
 };
 static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 
@@ -251,6 +291,62 @@ static inline void GUI_Panel_Settings(SettingsState *s, volatile sig_atomic_t *r
                 ImGui::SetItemTooltip("Momentum SL distance in stddev units\nscaled by R-squared at fill time");
             else if (strcmp(k, "gate_ema_alpha") == 0)
                 ImGui::SetItemTooltip("EMA smoothing factor\n0.99 = fast (responsive)\n0.997 = default\n0.999 = slow (stable)");
+            // regime detection
+            else if (strcmp(k, "regime_crossover_threshold") == 0)
+                ImGui::SetItemTooltip("EMA/SMA spread to classify TRENDING\n0.0005 = 0.05%% gap (~$35 at BTC $70k)");
+            else if (strcmp(k, "regime_r2_threshold") == 0)
+                ImGui::SetItemTooltip("Min R-squared consistency for TRENDING\n70 = 70%% of price variance explained by trend");
+            else if (strcmp(k, "regime_vol_spike_ratio") == 0)
+                ImGui::SetItemTooltip("Short/long variance ratio for VOLATILE\n2.0 = short-window variance is 2x long-window");
+            else if (strcmp(k, "regime_hysteresis") == 0)
+                ImGui::SetItemTooltip("Slow-path cycles before regime switch\nprevents rapid flipping between strategies");
+            // risk infrastructure
+            else if (strcmp(k, "kill_switch_daily_loss_pct") == 0)
+                ImGui::SetItemTooltip("Max session loss before kill switch triggers\n3.0 = halt if equity drops 3%% from session start");
+            else if (strcmp(k, "kill_switch_drawdown_pct") == 0)
+                ImGui::SetItemTooltip("Max drawdown from session peak before kill\n5.0 = halt if 5%% below intra-session high");
+            else if (strcmp(k, "kill_recovery_warmup") == 0)
+                ImGui::SetItemTooltip("Slow-path cycles to observe after kill reset\nbefore trading resumes (prevents immediate re-entry)");
+            else if (strcmp(k, "vol_scale_min") == 0)
+                ImGui::SetItemTooltip("Minimum position scale factor\n0.25 = never less than 25%% of base qty");
+            else if (strcmp(k, "vol_scale_max") == 0)
+                ImGui::SetItemTooltip("Maximum position scale factor\n2.0 = never more than 200%% of base qty");
+            else if (strcmp(k, "no_trade_band_mult") == 0)
+                ImGui::SetItemTooltip("Signal must exceed fee_rate * this to trade\n3.0 = dip must be 3x round-trip fee cost");
+            // entry filters
+            else if (strcmp(k, "min_stddev_pct") == 0)
+                ImGui::SetItemTooltip("Skip trades when stddev/price below this\nprevents entries in dead-flat markets");
+            else if (strcmp(k, "min_long_slope") == 0)
+                ImGui::SetItemTooltip("Block MR buys when 512-tick slope below this\nnegative = allow mild dips, 0 = disabled");
+            else if (strcmp(k, "min_buy_delta") == 0)
+                ImGui::SetItemTooltip("Min volume delta for MR buys\n-0.3 = allow mild selling, block heavy dumps");
+            else if (strcmp(k, "momentum_r2_min") == 0)
+                ImGui::SetItemTooltip("Min R-squared to enter momentum trades\n0.4 = require 40%% trend consistency");
+            // time-based exit
+            else if (strcmp(k, "max_hold_ticks") == 0)
+                ImGui::SetItemTooltip("Close position after this many ticks\n0 = disabled, 75000 ≈ 4-5 hours");
+            else if (strcmp(k, "min_hold_gain_pct") == 0)
+                ImGui::SetItemTooltip("Only time-exit if gain below this %%\nprotects profitable positions from time exit");
+            // gate recovery
+            else if (strcmp(k, "idle_reset_cycles") == 0)
+                ImGui::SetItemTooltip("Cycles with no fill before gate decay\nprevents permanent lockout after losses");
+            else if (strcmp(k, "sl_cooldown_cycles") == 0)
+                ImGui::SetItemTooltip("Slow-path cycles to pause after stop loss\nlets market settle before re-entry");
+            // partial exits
+            else if (strcmp(k, "partial_exit_pct") == 0)
+                ImGui::SetItemTooltip("Fraction to exit at TP1\n0.5 = 50%% exits early, 50%% rides TP2");
+            else if (strcmp(k, "tp2_mult") == 0)
+                ImGui::SetItemTooltip("TP2 distance = TP1 distance * this\n2.0 = second leg targets double the gain");
+            // session filters
+            else if (strcmp(k, "session_asian_mult") == 0)
+                ImGui::SetItemTooltip("Volume gate multiplier 00-07 UTC\nhigher = more selective (fewer entries)");
+            else if (strcmp(k, "session_us_mult") == 0)
+                ImGui::SetItemTooltip("Volume gate multiplier 13-20 UTC\nlower = less selective (best liquidity)");
+            // adaptation
+            else if (strcmp(k, "filter_scale") == 0)
+                ImGui::SetItemTooltip("How fast filters adapt to P&L regression\nhigher = more reactive to recent performance");
+            else if (strcmp(k, "fee_floor_mult") == 0)
+                ImGui::SetItemTooltip("TP floor = entry * fee_rate * this\n3.0 = TP must clear round-trip fees + margin");
         }
     }
 
