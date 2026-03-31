@@ -332,8 +332,8 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 // determine dominant color from current state
                 bool ema_above = (snap->ema_price > cs->sma[vc - 1]);
                 ImVec4 fill_col = ema_above
-                    ? ImVec4(FoxmlColors::green.x, FoxmlColors::green.y, FoxmlColors::green.z, 0.08f)
-                    : ImVec4(FoxmlColors::red.x, FoxmlColors::red.y, FoxmlColors::red.z, 0.08f);
+                    ? ImVec4(FoxmlColors::green.x, FoxmlColors::green.y, FoxmlColors::green.z, 0.20f)
+                    : ImVec4(FoxmlColors::red.x, FoxmlColors::red.y, FoxmlColors::red.z, 0.20f);
                 ImPlotSpec rs;
                 rs.FillColor = fill_col;
                 rs.FillAlpha = fill_col.w;
