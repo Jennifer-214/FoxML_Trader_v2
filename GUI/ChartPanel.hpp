@@ -427,7 +427,9 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                              FoxmlColors::green_b.z, age_alpha)
                     : ImVec4(FoxmlColors::red.x, FoxmlColors::red.y,
                              FoxmlColors::red.z, age_alpha);
-                snprintf(cl.text, 32, "#%d %s $%.0f", di, is_tp ? "TP" : "SL", price);
+                // show P&L at this exit level
+                double pnl = price - ps->entry;
+                snprintf(cl.text, 32, "#%d %s %+.0f", di, is_tp ? "TP" : "SL", pnl);
             }
         }
 
@@ -463,7 +465,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         for (int i = 0; i < clabel_n; i++) {
             ImVec2 anchor = ImPlot::PlotToPixels(0, clabels[i].price);
             float box_r = right_edge - lbl_offsets[i];
-            float box_l = box_r - lbl_widths[i] - icon_w;
+            float box_l = box_r - lbl_widths[i];
             ImVec2 tsz = ImGui::CalcTextSize(clabels[i].text);
             float cy = anchor.y;
             ImVec2 tl(box_l, cy - tsz.y * 0.5f - lpad);
@@ -737,6 +739,30 @@ static inline void GUI_EquityChart(TradeData *trades) {
             si++;
         }
         ImPlot::PopPlotClipRect();
+
+        // hover crosshair + P&L readout
+        if (ImPlot::IsPlotHovered()) {
+            ImPlotPoint mouse = ImPlot::GetPlotMousePos();
+            ImVec2 ch_l = ImPlot::PlotToPixels(-0.5, mouse.y);
+            ImVec2 ch_r = ImPlot::PlotToPixels(en - 0.5, mouse.y);
+            ImU32 ch_col = ImGui::GetColorU32(ImVec4(
+                FoxmlColors::comment.x, FoxmlColors::comment.y,
+                FoxmlColors::comment.z, 0.35f));
+            for (float x = ch_l.x; x < ch_r.x; x += 6.0f) {
+                float x2 = x + 2.0f;
+                if (x2 > ch_r.x) x2 = ch_r.x;
+                dl->AddLine(ImVec2(x, ch_l.y), ImVec2(x2, ch_l.y), ch_col, 1.0f);
+            }
+            char pnl_buf[16];
+            snprintf(pnl_buf, 16, "$%+.2f", mouse.y);
+            ImVec2 psz = ImGui::CalcTextSize(pnl_buf);
+            float pr = ch_r.x - 4;
+            float pl = pr - psz.x - 8.0f;
+            ImVec2 ptl(pl, ch_l.y - psz.y * 0.5f - 2);
+            ImVec2 pbr(pr, ch_l.y + psz.y * 0.5f + 2);
+            dl->AddRectFilled(ptl, pbr, ImGui::GetColorU32(FoxmlColors::surface), 2.0f);
+            dl->AddText(ImVec2(pl + 4, ptl.y + 2), ImGui::GetColorU32(FoxmlColors::wheat), pnl_buf);
+        }
 
         ImPlot::EndPlot();
     }
