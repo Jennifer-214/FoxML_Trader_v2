@@ -755,6 +755,10 @@ struct TUISharedState {
     volatile sig_atomic_t reload_requested;
     volatile sig_atomic_t regime_cycle_requested;
     volatile sig_atomic_t kill_reset_requested;
+    // GUI drag-TP/SL: slot index + new price (engine clears after pickup)
+    volatile int drag_slot;       // -1 = no drag, 0-15 = position slot
+    volatile int drag_is_tp;      // 1 = TP, 0 = SL
+    volatile double drag_price;   // new price value
     EngineTUI tui;
     const char *config_path;
     void *candle_acc;  // CandleAccumulator* (GUI build only, NULL for ANSI)

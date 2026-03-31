@@ -335,7 +335,7 @@ static inline void *gui_thread_fn(void *arg) {
         ChartState cs = {};
         ChartState_Prepare(&cs, &csnap, &chart_settings);
         CandleAccumulator *ca = shared->candle_acc ? (CandleAccumulator *)shared->candle_acc : NULL;
-        GUI_PriceChart(&cs, snap, &trades, &chart_settings, ca);
+        GUI_PriceChart(&cs, snap, &trades, &chart_settings, ca, (void *)shared);
         GUI_VolumeChart(&cs, snap, &chart_settings);
         GUI_EquityChart(&trades);
 

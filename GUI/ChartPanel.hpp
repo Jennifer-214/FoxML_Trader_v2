@@ -84,9 +84,17 @@ static inline void ChartState_Prepare(ChartState *cs, const CandleSnapshot *csna
 //==========================================================================
 // PRICE CHART — candlesticks + overlays
 //==========================================================================
+struct DragState {
+    int active;       // currently dragging
+    int slot;         // position bitmap slot
+    int is_tp;        // 1=TP, 0=SL
+    double price;     // current drag price
+};
+
 static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                                    TradeData *trades, ChartSettings *settings,
-                                   CandleAccumulator *candle_acc) {
+                                   CandleAccumulator *candle_acc,
+                                   void *shared_state_ptr = NULL) {
     ImGui::Begin("Price Chart");
     if (!cs->ready) {
         ImGui::TextColored(FoxmlColors::comment, "waiting for candle data...");
@@ -241,11 +249,12 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         for (int mi = 0; mi < trades->marker_count; mi++) {
             const TradeMarker *m = &trades->markers[mi];
             int best_i = -1;
-            for (int i = 0; i < vc; i++) {
+            for (int i = vc - 1; i >= 0; i--) {
                 // trade price must be within this candle's wick range
+                // take most recent match (scan right-to-left)
                 if (m->price >= cs->lows[i] && m->price <= cs->highs[i]) {
                     best_i = i;
-                    break;  // take first match (oldest visible candle)
+                    break;
                 }
             }
             if (best_i < 0) continue;
@@ -430,6 +439,93 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 // show P&L at this exit level
                 double pnl = price - ps->entry;
                 snprintf(cl.text, 32, "#%d %s %+.0f", di, is_tp ? "TP" : "SL", pnl);
+            }
+        }
+
+        // draggable TP/SL lines
+        static DragState drag = {0, -1, 0, 0};
+        if (ImPlot::IsPlotHovered() || drag.active) {
+            ImPlotPoint mouse = ImPlot::GetPlotMousePos();
+            ImVec2 mouse_px = ImGui::GetMousePos();
+            bool mouse_down = ImGui::IsMouseDown(0);
+
+            if (!drag.active) {
+                // hover detection: find nearest TP/SL line within 5px
+                float best_dist = 6.0f;
+                int best_slot = -1, best_tp = 0;
+                for (int pi = 0; pi < 16; pi++) {
+                    const TUIPositionSnap *ps = &snap->positions[pi];
+                    if (ps->idx < 0) continue;
+                    for (int t = 0; t < 2; t++) {
+                        double p = t == 0 ? ps->tp : ps->sl;
+                        if (p <= 0) continue;
+                        float py = ImPlot::PlotToPixels(0, p).y;
+                        float d = fabs(mouse_px.y - py);
+                        if (d < best_dist) {
+                            best_dist = d; best_slot = pi; best_tp = (t == 0);
+                        }
+                    }
+                }
+                if (best_slot >= 0) {
+                    // highlight the hovered line
+                    double hp = best_tp ? snap->positions[best_slot].tp
+                                        : snap->positions[best_slot].sl;
+                    ImVec2 hl = ImPlot::PlotToPixels(cs->x_lo, hp);
+                    ImVec2 hr = ImPlot::PlotToPixels(cs->x_hi, hp);
+                    dl->AddLine(hl, hr, IM_COL32(255,255,255,80), 2.0f);
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+
+                    if (mouse_down) {
+                        drag.active = 1; drag.slot = best_slot;
+                        drag.is_tp = best_tp; drag.price = hp;
+                    }
+                }
+            } else {
+                // dragging — update price from mouse Y
+                drag.price = mouse.y;
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+
+                // draw drag preview line
+                ImVec2 dl_l = ImPlot::PlotToPixels(cs->x_lo, drag.price);
+                ImVec2 dl_r = ImPlot::PlotToPixels(cs->x_hi, drag.price);
+                ImU32 dcol = drag.is_tp ? IM_COL32(100, 220, 100, 180)
+                                        : IM_COL32(220, 100, 100, 180);
+                dl->AddLine(dl_l, dl_r, dcol, 2.0f);
+
+                // draw live P&L preview tag
+                double entry = snap->positions[drag.slot].entry;
+                double pnl = drag.price - entry;
+                char drag_buf[32];
+                snprintf(drag_buf, 32, "%s %+.0f ($%.0f)",
+                         drag.is_tp ? "TP" : "SL", pnl, drag.price);
+                ImVec2 dsz = ImGui::CalcTextSize(drag_buf);
+                float dx = dl_r.x - dsz.x - 14;
+                float dy = dl_l.y - dsz.y - 8;
+                dl->AddRectFilled(ImVec2(dx, dy), ImVec2(dx + dsz.x + 10, dy + dsz.y + 6),
+                                  ImGui::GetColorU32(ImVec4(0.15f, 0.15f, 0.15f, 0.9f)), 3.0f);
+                dl->AddText(ImVec2(dx + 5, dy + 3), IM_COL32(255, 255, 255, 240), drag_buf);
+
+                // update the label in clabels so stagger reflects drag position
+                for (int li = 0; li < clabel_n; li++) {
+                    if (fabs(clabels[li].price - (drag.is_tp ? snap->positions[drag.slot].tp
+                                                             : snap->positions[drag.slot].sl)) < 0.01) {
+                        clabels[li].price = drag.price;
+                        clabels[li].y_px = dl_l.y;
+                        snprintf(clabels[li].text, 32, "#%d %s %+.0f",
+                                 display_idx[drag.slot], drag.is_tp ? "TP" : "SL", pnl);
+                    }
+                }
+
+                if (!mouse_down) {
+                    // release — send to engine
+                    if (shared_state_ptr) {
+                        TUISharedState *ss = (TUISharedState *)shared_state_ptr;
+                        ss->drag_price = drag.price;
+                        ss->drag_is_tp = drag.is_tp;
+                        __atomic_store_n(&ss->drag_slot, drag.slot, __ATOMIC_RELEASE);
+                    }
+                    drag.active = 0; drag.slot = -1;
+                }
             }
         }
 
