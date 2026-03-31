@@ -14,6 +14,13 @@
 struct ChartSettings {
     int visible_candles = 60;
     int candle_interval = 60;  // seconds
+    // overlay toggles
+    bool show_ribbon = true;
+    bool show_price_tag = true;
+    bool show_session_hl = true;
+    bool show_session_div = true;
+    bool show_spread = true;
+    bool show_crosshair = true;
 };
 
 //==========================================================================
@@ -114,7 +121,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         ImGui::TextColored(FoxmlColors::comment, "VWAP $%.2f", cs->vwap);
     }
     // EMA-SMA spread readout
-    if (snap->ema_price > 0 && snap->roll_stddev > 0.01) {
+    if (settings->show_spread && snap->ema_price > 0 && snap->roll_stddev > 0.01) {
         double avg = snap->roll_price_avg;
         double spread_sigma = (avg > 0) ? (snap->ema_price - avg) / snap->roll_stddev : 0;
         ImGui::SameLine(0, 20);
@@ -152,6 +159,13 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
     if (ImGui::Combo("##window", &cur_window, windows, 4)) {
         settings->visible_candles = window_vals[cur_window];
     }
+
+    // overlay toggles
+    ImGui::SameLine(0, 20);
+    ImGui::Checkbox("Ribbon", &settings->show_ribbon);
+    ImGui::SameLine(); ImGui::Checkbox("Sessions", &settings->show_session_div);
+    ImGui::SameLine(); ImGui::Checkbox("H/L", &settings->show_session_hl);
+    ImGui::SameLine(); ImGui::Checkbox("Tag", &settings->show_price_tag);
 
     ImPlot::PushStyleColor(ImPlotCol_PlotBg, FoxmlColors::bg_dark);
     // subtle Y grid lines for price readability
@@ -309,8 +323,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         }
 
         // === EMA/SMA shaded ribbon ===
-        // green fill when EMA > SMA (uptrend/gate open), red when below
-        if (snap->ema_price > 0 && cs->sma_first >= 0) {
+        if (settings->show_ribbon && snap->ema_price > 0 && cs->sma_first >= 0) {
             double ema_y[CANDLE_MAX + 1];
             for (int i = 0; i < vc; i++) ema_y[i] = snap->ema_price;
             int sf = cs->sma_first;
@@ -331,7 +344,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         }
 
         // === live price tag on Y-axis ===
-        {
+        if (settings->show_price_tag) {
             ImVec2 price_px = ImPlot::PlotToPixels(cs->x_hi, cs->last_price);
             ImVec2 plot_r = ImPlot::PlotToPixels(cs->x_hi, 0);
             char ptag[16];
@@ -349,7 +362,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         }
 
         // === session high/low markers ===
-        if (snap->session_high > 0 && snap->session_low > 0) {
+        if (settings->show_session_hl && snap->session_high > 0 && snap->session_low > 0) {
             ImU32 sess_col = ImGui::GetColorU32(ImVec4(
                 FoxmlColors::comment.x, FoxmlColors::comment.y,
                 FoxmlColors::comment.z, 0.25f));
@@ -370,7 +383,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         }
 
         // === session dividers (vertical lines at UTC hour boundaries) ===
-        if (vc > 1) {
+        if (settings->show_session_div && vc > 1) {
             // session hours (UTC): Asian 0-8, EU 8-13, US 13-21, Overnight 21-24
             static const int boundaries[] = {0, 8, 13, 21};
             static const char *sess_labels[] = {"ASIA", "EU", "US", "OVER"};
@@ -727,7 +740,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         }
 
         // hover crosshair + tooltip
-        if (ImPlot::IsPlotHovered()) {
+        if (settings->show_crosshair && ImPlot::IsPlotHovered()) {
             ImPlotPoint mouse = ImPlot::GetPlotMousePos();
 
             // horizontal crosshair line
