@@ -135,34 +135,33 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
     }
 
     ImPlot::PushStyleColor(ImPlotCol_PlotBg, FoxmlColors::bg_dark);
+    // subtle Y grid lines for price readability
+    ImPlot::PushStyleColor(ImPlotCol_AxisGrid, ImVec4(1, 1, 1, 0.06f));
     if (ImPlot::BeginPlot("##price", ImVec2(-1, -1),
                            ImPlotFlags_NoTitle | ImPlotFlags_NoMouseText)) {
 
-        ImPlot::SetupAxes(NULL, NULL, ImPlotAxisFlags_NoLabel, ImPlotAxisFlags_Opposite);
+        ImPlot::SetupAxes(NULL, NULL,
+                          ImPlotAxisFlags_NoLabel | ImPlotAxisFlags_NoGridLines,
+                          ImPlotAxisFlags_Opposite);
         ImPlot::SetupAxisLimits(ImAxis_X1, cs->x_lo, cs->x_hi, ImPlotCond_Always);
 
-        // time tick labels — spaced to prevent overlap
+        // time tick labels — static buffers so pointers survive until EndPlot
+        static double tick_pos[16];
+        static char tick_bufs[16][8];
+        static const char *tick_labels_p[16];
+        int tick_n = 0;
         if (vc > 0) {
-            float cw = ImPlot::GetPlotSize().x;
-            float label_px = ImGui::CalcTextSize("00:00").x + 20.0f;
-            int max_fit = (cw > 0 && label_px > 0) ? (int)(cw / label_px) : 6;
-            if (max_fit < 2) max_fit = 2;
-            if (max_fit > 12) max_fit = 12;
-            int step = vc > max_fit ? vc / max_fit : 1;
-            double tick_pos[16];
-            const char *tick_labels[16];
-            char tick_bufs[16][8];
-            int tick_n = 0;
+            int step = vc > 5 ? vc / 5 : 1;
             for (int i = 0; i < vc && tick_n < 16; i += step) {
                 if (cs->times_sec[i] < 1.0) continue;
                 tick_pos[tick_n] = cs->xs[i];
                 time_t t = (time_t)cs->times_sec[i];
                 struct tm *tm = localtime(&t);
                 snprintf(tick_bufs[tick_n], 8, "%02d:%02d", tm->tm_hour, tm->tm_min);
-                tick_labels[tick_n] = tick_bufs[tick_n];
+                tick_labels_p[tick_n] = tick_bufs[tick_n];
                 tick_n++;
             }
-            ImPlot::SetupAxisTicks(ImAxis_X1, tick_pos, tick_n, tick_labels);
+            ImPlot::SetupAxisTicks(ImAxis_X1, tick_pos, tick_n, tick_labels_p);
         }
 
         // Y limits with padding + TP/SL expansion
@@ -289,8 +288,8 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             ImPlot::PlotLine("EMA", ex, ey, 2, s);
         }
 
-        // position overlays — grouped partial exit pairs, display-numbered
-        // build display index map: bitmap slot → display number (matching positions table)
+        // position overlays — unified collision-aware label system
+        // all labels (entry, TP, SL) collected first, then sorted and staggered
         int display_idx[16];
         int display_count = 0;
         for (int i = 0; i < 16; i++) {
@@ -300,11 +299,26 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 display_idx[i] = -1;
         }
 
-        // collect unique entry prices and group display indices
+        struct ChartLabel { double price; float y_px; ImVec4 color; char text[32]; };
+        ChartLabel clabels[48];
+        int clabel_n = 0;
+
+        // dash patterns: 0=normal 1=short 2=dot-dash 3=long
+        static const float dp[][4] = {
+            {8,6,8,6}, {4,4,4,4}, {3,3,10,3}, {14,5,14,5}
+        };
+
+        // TP/SL lines start at the right 35% of the chart
+        float line_start_x = cs->x_lo + (cs->x_hi - cs->x_lo) * 0.65;
+        ImVec2 plot_right = ImPlot::PlotToPixels(cs->x_hi, 0);
+        float right_edge = plot_right.x - 4;
+
+        // newest position index for fade effect
+        int newest_di = display_count - 1;
+
+        // draw entry lines + collect entry labels
         double drawn_entries[16] = {};
         int drawn_entry_count = 0;
-
-        // entry lines (grouped by price)
         for (int pi = 0; pi < 16; pi++) {
             const TUIPositionSnap *ps = &snap->positions[pi];
             if (ps->idx < 0 || ps->entry <= 0) continue;
@@ -316,120 +330,142 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                     break;
                 }
             }
+            if (already_drawn) continue;
 
-            if (!already_drawn) {
-                char group_ids[32] = {};
-                int group_len = 0;
-                for (int j = 0; j < 16; j++) {
-                    if (snap->positions[j].idx < 0) continue;
-                    if (fabs(snap->positions[j].entry - ps->entry) < 0.01) {
-                        if (group_len > 0) { group_ids[group_len++] = ','; }
-                        int dj = display_idx[j];
-                        if (dj < 10) group_ids[group_len++] = '0' + dj;
-                        else { group_ids[group_len++] = '1'; group_ids[group_len++] = '0' + (dj - 10); }
-                    }
+            // find highest di in this entry group for fade
+            int max_di = 0;
+            char group_ids[32] = {};
+            int group_len = 0;
+            for (int j = 0; j < 16; j++) {
+                if (snap->positions[j].idx < 0) continue;
+                if (fabs(snap->positions[j].entry - ps->entry) < 0.01) {
+                    if (group_len > 0) { group_ids[group_len++] = ','; }
+                    int dj = display_idx[j];
+                    if (dj < 10) group_ids[group_len++] = '0' + dj;
+                    else { group_ids[group_len++] = '1'; group_ids[group_len++] = '0' + (dj - 10); }
+                    if (dj > max_di) max_di = dj;
                 }
-                group_ids[group_len] = '\0';
-
-                double y[2] = {ps->entry, ps->entry};
-                double lx[2] = {cs->x_lo, cs->x_hi};
-                ImPlotSpec s; s.LineColor = FoxmlColors::wheat; s.LineWeight = 2.0f;
-                char lbl[16];
-                snprintf(lbl, 16, "##e%d", pi);
-                ImPlot::PlotLine(lbl, lx, y, 2, s);
-                ImPlot::Annotation(cs->x_hi - 1, ps->entry, FoxmlColors::wheat,
-                                   ImVec2(5, 0), true, "#%s $%.0f", group_ids, ps->entry);
-                drawn_entries[drawn_entry_count++] = ps->entry;
             }
+            group_ids[group_len] = '\0';
+
+            // fade older positions (newest=full, oldest=40%)
+            float age_alpha = (display_count <= 1) ? 1.0f :
+                0.4f + 0.6f * ((float)max_di / newest_di);
+
+            // entry line — full width, solid
+            double y[2] = {ps->entry, ps->entry};
+            double lx[2] = {cs->x_lo, cs->x_hi};
+            ImPlotSpec s;
+            s.LineColor = {FoxmlColors::wheat.x, FoxmlColors::wheat.y,
+                           FoxmlColors::wheat.z, age_alpha};
+            s.LineWeight = 1.5f;
+            char lbl[16]; snprintf(lbl, 16, "##e%d", pi);
+            ImPlot::PlotLine(lbl, lx, y, 2, s);
+
+            ChartLabel &cl = clabels[clabel_n++];
+            cl.price = ps->entry;
+            cl.y_px = ImPlot::PlotToPixels(0.0, ps->entry).y;
+            cl.color = {FoxmlColors::wheat.x, FoxmlColors::wheat.y,
+                        FoxmlColors::wheat.z, age_alpha};
+            snprintf(cl.text, 32, "#%s $%.0f", group_ids, ps->entry);
+            drawn_entries[drawn_entry_count++] = ps->entry;
         }
 
-        // TP/SL lines — collision-aware label stagger + per-position dash patterns
-        {
-            struct PosLabel { double price; float y_px; int di, pi; bool is_tp; };
-            PosLabel plabels[32];
-            int plabel_n = 0;
+        // draw TP/SL dashed lines (right 35% only) + connector brackets + labels
+        for (int pi = 0; pi < 16; pi++) {
+            const TUIPositionSnap *ps = &snap->positions[pi];
+            if (ps->idx < 0) continue;
+            int di = display_idx[pi];
+            float age_alpha = (display_count <= 1) ? 1.0f :
+                0.4f + 0.6f * ((float)di / newest_di);
 
-            for (int pi = 0; pi < 16; pi++) {
-                const TUIPositionSnap *ps = &snap->positions[pi];
-                if (ps->idx < 0) continue;
-                int di = display_idx[pi];
-                if (ps->tp > 0) {
-                    float yp = ImPlot::PlotToPixels(0.0, ps->tp).y;
-                    plabels[plabel_n++] = {ps->tp, yp, di, pi, true};
-                }
-                if (ps->sl > 0) {
-                    float yp = ImPlot::PlotToPixels(0.0, ps->sl).y;
-                    plabels[plabel_n++] = {ps->sl, yp, di, pi, false};
-                }
+            // connector bracket: thin vertical line from TP to SL
+            if (ps->tp > 0 && ps->sl > 0) {
+                float conn_x_plot = cs->x_hi - (cs->x_hi - cs->x_lo) * 0.03 * (di + 1);
+                ImVec2 conn_tp = ImPlot::PlotToPixels(conn_x_plot, ps->tp);
+                ImVec2 conn_sl = ImPlot::PlotToPixels(conn_x_plot, ps->sl);
+                ImU32 conn_col = ImGui::GetColorU32(ImVec4(
+                    FoxmlColors::comment.x, FoxmlColors::comment.y,
+                    FoxmlColors::comment.z, 0.25f * age_alpha));
+                dl->AddLine(conn_tp, conn_sl, conn_col, 1.0f);
             }
 
-            // sort by screen Y (insertion sort, max 32 elements)
-            for (int i = 1; i < plabel_n; i++) {
-                PosLabel tmp = plabels[i];
-                int j = i - 1;
-                while (j >= 0 && plabels[j].y_px > tmp.y_px) {
-                    plabels[j + 1] = plabels[j];
-                    j--;
-                }
-                plabels[j + 1] = tmp;
-            }
+            for (int tp_pass = 0; tp_pass < 2; tp_pass++) {
+                double price = tp_pass == 0 ? ps->tp : ps->sl;
+                if (price <= 0) continue;
+                bool is_tp = (tp_pass == 0);
 
-            // detect collision groups (within 20px) and assign horizontal stagger
-            float x_offsets[32] = {};
-            for (int i = 0; i < plabel_n; ) {
-                int ge = i + 1;
-                while (ge < plabel_n && (plabels[ge].y_px - plabels[i].y_px) < 20.0f)
-                    ge++;
-                for (int g = 0; g < ge - i; g++)
-                    x_offsets[i + g] = (float)g * 60.0f;
-                i = ge;
-            }
+                // right 35% only
+                ImVec2 left  = ImPlot::PlotToPixels(line_start_x, price);
+                ImVec2 right = ImPlot::PlotToPixels(cs->x_hi, price);
+                ImVec4 base_col = is_tp
+                    ? ImVec4(FoxmlColors::green_b.x, FoxmlColors::green_b.y,
+                             FoxmlColors::green_b.z, 0.6f * age_alpha)
+                    : ImVec4(FoxmlColors::red_b.x, FoxmlColors::red_b.y,
+                             FoxmlColors::red_b.z, 0.6f * age_alpha);
+                ImU32 lcol = ImGui::GetColorU32(base_col);
 
-            // dash patterns indexed by display_idx % 4:
-            //   0: normal (8on 6off)  1: short (4on 4off)
-            //   2: dot-dash (3on 3off 10on 3off)  3: long (14on 5off)
-            static const float dp[][4] = {
-                {8,6,8,6}, {4,4,4,4}, {3,3,10,3}, {14,5,14,5}
-            };
-
-            for (int li = 0; li < plabel_n; li++) {
-                const PosLabel &lb = plabels[li];
-                ImVec2 left  = ImPlot::PlotToPixels(cs->x_lo, lb.price);
-                ImVec2 right = ImPlot::PlotToPixels(cs->x_hi, lb.price);
-
-                ImVec4 lcol_v, acol_v;
-                if (lb.is_tp) {
-                    lcol_v = {FoxmlColors::green_b.x, FoxmlColors::green_b.y,
-                              FoxmlColors::green_b.z, 0.6f};
-                    acol_v = FoxmlColors::green_b;
-                } else {
-                    lcol_v = {FoxmlColors::red_b.x, FoxmlColors::red_b.y,
-                              FoxmlColors::red_b.z, 0.6f};
-                    acol_v = FoxmlColors::red;
-                }
-                ImU32 lcol = ImGui::GetColorU32(lcol_v);
-
-                // dashed line with pattern keyed to display index
-                const float *pat = dp[lb.di % 4];
+                const float *pat = dp[di % 4];
                 float total = right.x - left.x;
                 int si = 0;
                 for (float x = 0; x < total; ) {
                     float seg = pat[si % 4];
                     if ((si & 1) == 0) {
-                        float x1 = left.x + x;
-                        float x2 = left.x + x + seg;
+                        float x1 = left.x + x, x2 = left.x + x + seg;
                         if (x2 > right.x) x2 = right.x;
                         dl->AddLine(ImVec2(x1, left.y), ImVec2(x2, left.y), lcol, 1.0f);
                     }
-                    x += seg;
-                    si++;
+                    x += seg; si++;
                 }
 
-                // annotation with horizontal stagger when labels collide
-                ImPlot::Annotation(cs->x_hi - 1, lb.price, acol_v,
-                                   ImVec2(5 + x_offsets[li], 0), true,
-                                   "#%d %s", lb.di, lb.is_tp ? "TP" : "SL");
+                ChartLabel &cl = clabels[clabel_n++];
+                cl.price = price;
+                cl.y_px = left.y;
+                cl.color = is_tp
+                    ? ImVec4(FoxmlColors::green_b.x, FoxmlColors::green_b.y,
+                             FoxmlColors::green_b.z, age_alpha)
+                    : ImVec4(FoxmlColors::red.x, FoxmlColors::red.y,
+                             FoxmlColors::red.z, age_alpha);
+                snprintf(cl.text, 32, "#%d %s $%.0f", di, is_tp ? "TP" : "SL", price);
             }
+        }
+
+        // sort labels by screen Y, detect collisions, stagger right-to-left
+        for (int i = 1; i < clabel_n; i++) {
+            ChartLabel tmp = clabels[i];
+            int j = i - 1;
+            while (j >= 0 && clabels[j].y_px > tmp.y_px) {
+                clabels[j + 1] = clabels[j]; j--;
+            }
+            clabels[j + 1] = tmp;
+        }
+        float lbl_offsets[48] = {};
+        float lbl_widths[48] = {};
+        for (int i = 0; i < clabel_n; i++)
+            lbl_widths[i] = ImGui::CalcTextSize(clabels[i].text).x + 10.0f;
+        for (int i = 0; i < clabel_n; ) {
+            int ge = i + 1;
+            while (ge < clabel_n && (clabels[ge].y_px - clabels[ge - 1].y_px) < 26.0f)
+                ge++;
+            float running = 0;
+            for (int g = i; g < ge; g++) {
+                lbl_offsets[g] = running;
+                running += lbl_widths[g] + 3.0f;
+            }
+            i = ge;
+        }
+        // draw labels extending leftward from right edge
+        float lpad = 3.0f;
+        for (int i = 0; i < clabel_n; i++) {
+            ImVec2 anchor = ImPlot::PlotToPixels(0, clabels[i].price);
+            float box_r = right_edge - lbl_offsets[i];
+            float box_l = box_r - lbl_widths[i];
+            ImVec2 tsz = ImGui::CalcTextSize(clabels[i].text);
+            ImVec2 tl(box_l, anchor.y - tsz.y * 0.5f - lpad);
+            ImVec2 br(box_r, anchor.y + tsz.y * 0.5f + lpad);
+            ImVec4 &c = clabels[i].color;
+            dl->AddRectFilled(tl, br, ImGui::GetColorU32(ImVec4(c.x, c.y, c.z, 0.85f)), 3.0f);
+            dl->AddText(ImVec2(box_l + 5, tl.y + lpad), IM_COL32(255,255,255,230), clabels[i].text);
         }
 
         // buy gate threshold — cyan, thick dotted, distinct from entry/TP/SL
@@ -460,9 +496,35 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                                ImVec2(5, 0), true, "GATE $%.0f", snap->buy_p);
         }
 
-        // hover tooltip
+        // hover crosshair + tooltip
         if (ImPlot::IsPlotHovered()) {
             ImPlotPoint mouse = ImPlot::GetPlotMousePos();
+
+            // horizontal crosshair line
+            ImVec2 ch_l = ImPlot::PlotToPixels(cs->x_lo, mouse.y);
+            ImVec2 ch_r = ImPlot::PlotToPixels(cs->x_hi, mouse.y);
+            ImU32 ch_col = ImGui::GetColorU32(ImVec4(
+                FoxmlColors::comment.x, FoxmlColors::comment.y,
+                FoxmlColors::comment.z, 0.35f));
+            // dotted line (2px on, 4px off)
+            for (float x = ch_l.x; x < ch_r.x; x += 6.0f) {
+                float x2 = x + 2.0f;
+                if (x2 > ch_r.x) x2 = ch_r.x;
+                dl->AddLine(ImVec2(x, ch_l.y), ImVec2(x2, ch_l.y), ch_col, 1.0f);
+            }
+
+            // price tag at right edge
+            char price_buf[16];
+            snprintf(price_buf, 16, "$%.0f", mouse.y);
+            ImVec2 psz = ImGui::CalcTextSize(price_buf);
+            float pr = right_edge;
+            float pl = pr - psz.x - 8.0f;
+            ImVec2 ptl(pl, ch_l.y - psz.y * 0.5f - 2);
+            ImVec2 pbr(pr, ch_l.y + psz.y * 0.5f + 2);
+            dl->AddRectFilled(ptl, pbr, ImGui::GetColorU32(FoxmlColors::surface), 2.0f);
+            dl->AddText(ImVec2(pl + 4, ptl.y + 2), ImGui::GetColorU32(FoxmlColors::wheat), price_buf);
+
+            // OHLCV tooltip
             int idx = (int)(mouse.x + 0.5);
             if (idx >= 0 && idx < vc) {
                 ImGui::BeginTooltip();
@@ -476,7 +538,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
 
         ImPlot::EndPlot();
     }
-    ImPlot::PopStyleColor();
+    ImPlot::PopStyleColor(2);  // PlotBg + AxisGrid
     ImGui::End();
 }
 
@@ -580,8 +642,18 @@ static inline void GUI_EquityChart(TradeData *trades) {
                            ImPlotFlags_NoTitle | ImPlotFlags_NoMouseText)) {
         ImPlot::SetupAxes(NULL, "P&L",
                           ImPlotAxisFlags_NoLabel | ImPlotAxisFlags_NoTickLabels,
-                          ImPlotAxisFlags_AutoFit | ImPlotAxisFlags_Opposite);
+                          ImPlotAxisFlags_Opposite);
         ImPlot::SetupAxisLimits(ImAxis_X1, -0.5, en - 0.5, ImPlotCond_Always);
+        // Y padding so the curve doesn't slam into top/bottom edges
+        double eq_min = 0, eq_max = 0;
+        for (int i = 0; i < en; i++) {
+            if (eq_ys[i] < eq_min) eq_min = eq_ys[i];
+            if (eq_ys[i] > eq_max) eq_max = eq_ys[i];
+        }
+        double eq_range = eq_max - eq_min;
+        if (eq_range < 0.01) eq_range = 1.0;
+        double eq_pad = eq_range * 0.15;
+        ImPlot::SetupAxisLimits(ImAxis_Y1, eq_min - eq_pad, eq_max + eq_pad, ImPlotCond_Always);
         ImPlot::SetupAxisFormat(ImAxis_Y1, "$%+.2f");
 
         // zero line
