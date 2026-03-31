@@ -58,5 +58,6 @@
 #define STRATEGY_MOMENTUM      1
 #define STRATEGY_SIMPLE_DIP    2
 #define STRATEGY_ML            3
+#define STRATEGY_EMA_CROSS     4
 
 #endif // STRATEGY_INTERFACE_HPP

@@ -28,6 +28,9 @@
 #include "../Strategies/SimpleDip.hpp"
 #include "../Strategies/MLStrategy.hpp"
 #include "../Strategies/RegimeDetector.hpp"
+#if __has_include("../Strategies/private/EmaCross.hpp")
+#include "../Strategies/private/EmaCross.hpp"
+#endif
 #include <stdio.h>
 //======================================================================================================
 // [CONTROLLER STRUCT]
@@ -83,7 +86,7 @@ template <unsigned F> struct PortfolioController {
     uint32_t losses;
     uint32_t total_trades;
   };
-  StrategyStats strategy_stats[4]; // 0=MR, 1=Momentum, 2=SimpleDip, 3=ML(future)
+  StrategyStats strategy_stats[5]; // 0=MR, 1=Momentum, 2=SimpleDip, 3=ML, 4=EmaCross
 
   int state;
   FPN<F> price_sum;
@@ -95,6 +98,9 @@ template <unsigned F> struct PortfolioController {
   MomentumState<F> momentum;
   SimpleDipState<F> simple_dip;
   MLStrategyState<F> ml_strategy;
+#ifdef STRATEGY_EMA_CROSS
+  EmaCrossState<F> ema_cross;
+#endif
   RegimeState<F> regime;
   ModelHandle<F> regime_model;       // Mode A: regime signal enrichment model
   RegimeSignals<F> last_signals;     // cached for ML strategy BuySignal access
@@ -211,7 +217,7 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->daily_realized_pnl = FPN_Zero<F>();
   ctrl->kill_recovery_counter = 0;
   ctrl->last_vol_scale = 1.0;
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 5; i++) {
     ctrl->strategy_stats[i].realized_pnl = FPN_Zero<F>();
     ctrl->strategy_stats[i].wins = 0;
     ctrl->strategy_stats[i].losses = 0;
@@ -393,6 +399,14 @@ inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) 
                                            ctrl->rolling_long, &ctrl->config);
     ctrl->buy_conds.gate_direction = 0;
     break;
+#ifdef STRATEGY_EMA_CROSS
+  case STRATEGY_EMA_CROSS:
+    ctrl->buy_conds = EmaCross_BuySignal(&ctrl->ema_cross, &ctrl->rolling,
+                                          ctrl->rolling_long, &ctrl->config,
+                                          gate_avg);
+    ctrl->buy_conds.gate_direction = 0;
+    break;
+#endif
   case STRATEGY_ML:
     ctrl->buy_conds = MLStrategy_BuySignal(&ctrl->ml_strategy, &ctrl->rolling,
                                             ctrl->rolling_long, (const void*)&ctrl->config,
@@ -455,6 +469,14 @@ inline void PortfolioController_StrategyDispatch(PortfolioController<F> *ctrl,
                      ctrl->portfolio.active_bitmap, &ctrl->buy_conds,
                      &ctrl->config);
     break;
+#ifdef STRATEGY_EMA_CROSS
+  case STRATEGY_EMA_CROSS:
+    EmaCross_Adapt(&ctrl->ema_cross, current_price, ctrl->portfolio_delta,
+                    ctrl->portfolio.active_bitmap, &ctrl->buy_conds, &ctrl->config);
+    EmaCross_ExitAdjust(&ctrl->portfolio, current_price, &ctrl->rolling,
+                         &ctrl->ema_cross, &ctrl->config);
+    break;
+#endif
   case STRATEGY_ML:
     MLStrategy_Adapt(&ctrl->ml_strategy, current_price, ctrl->portfolio_delta,
                       ctrl->portfolio.active_bitmap, &ctrl->buy_conds,
@@ -536,6 +558,9 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       Momentum_Init(&ctrl->momentum, &ctrl->rolling, &ctrl->buy_conds);
       SimpleDip_Init(&ctrl->simple_dip, &ctrl->rolling, &ctrl->buy_conds);
       MLStrategy_Init(&ctrl->ml_strategy, &ctrl->rolling, &ctrl->buy_conds);
+#ifdef STRATEGY_EMA_CROSS
+      EmaCross_Init(&ctrl->ema_cross, &ctrl->rolling, &ctrl->buy_conds);
+#endif
       // use configured default strategy (0=MR, 1=Momentum, 2=SimpleDip)
       if (ctrl->config.default_strategy >= 0)
           ctrl->strategy_id = ctrl->config.default_strategy;
@@ -1291,7 +1316,7 @@ inline void PortfolioController_SaveSnapshot(const PortfolioController<F> *ctrl,
   fwrite(&ctrl->daily_realized_pnl, sizeof(FPN<F>), 1, f);
   fwrite(&ctrl->session_start_equity, sizeof(double), 1, f);
   fwrite(&ctrl->peak_equity, sizeof(double), 1, f);
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 5; i++) {
     fwrite(&ctrl->strategy_stats[i].realized_pnl, sizeof(FPN<F>), 1, f);
     fwrite(&ctrl->strategy_stats[i].wins, sizeof(uint32_t), 1, f);
     fwrite(&ctrl->strategy_stats[i].losses, sizeof(uint32_t), 1, f);
@@ -1387,7 +1412,9 @@ inline int PortfolioController_LoadSnapshot(PortfolioController<F> *ctrl,
       if (fread(&ctrl->daily_realized_pnl, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
       if (fread(&ctrl->session_start_equity, sizeof(double), 1, f) != 1) { fclose(f); return 0; }
       if (fread(&ctrl->peak_equity, sizeof(double), 1, f) != 1) { fclose(f); return 0; }
-      for (int i = 0; i < 4; i++) {
+      // v9 snapshots have 4 strategy_stats, v10+ have 5
+      int n_strats = 4;  // backward compat: v9 wrote 4
+      for (int i = 0; i < n_strats; i++) {
         if (fread(&ctrl->strategy_stats[i].realized_pnl, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&ctrl->strategy_stats[i].wins, sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&ctrl->strategy_stats[i].losses, sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }

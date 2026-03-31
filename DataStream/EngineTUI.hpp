@@ -736,7 +736,7 @@ struct TUISnapshot {
       double pnl;
       uint32_t wins, losses, total;
     };
-    StrategyStatsSnap strat_stats[4];
+    StrategyStatsSnap strat_stats[5];
     // right panel: session stats + fill diagnostics
     double session_high, session_low;
     double tick_rate;
@@ -923,7 +923,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
           (snap->signal_strength < min_signal) && !snap->state_warmup;
     }
     // per-strategy reward attribution
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
       snap->strat_stats[i].pnl   = FPN_ToDouble(ctrl->strategy_stats[i].realized_pnl);
       snap->strat_stats[i].wins  = ctrl->strategy_stats[i].wins;
       snap->strat_stats[i].losses = ctrl->strategy_stats[i].losses;

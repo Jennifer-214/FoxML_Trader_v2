@@ -100,11 +100,21 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
     ImGui::Text("%02u:%02u:%02u", hours, mins, secs);
 
     if (s->is_paused) {
-        const char *reason = "wait";
+        const char *reason = "gate";
         if (s->sl_cooldown > 0) reason = "cooldown";
         else if (s->breaker_tripped) reason = "breaker";
         else if (s->current_regime == 2) reason = "volatile";
         else if (s->current_regime == 3) reason = "downtrend";
+        else if (s->engine_state == 0) reason = "warmup";
+        else if (s->long_gate_enabled && !s->long_gate_ok) reason = "long trend";
+        else if (s->buy_p > 0.01) {
+            int price_ok = s->gate_direction
+                ? (s->price >= s->buy_p) : (s->price <= s->buy_p);
+            int vol_ok = (s->volume >= s->buy_v);
+            if (!price_ok && !vol_ok) reason = "price+vol";
+            else if (!price_ok) reason = "price";
+            else if (!vol_ok) reason = "volume";
+        }
         ImGui::SameLine();
         ImGui::TextColored(FoxmlColors::comment, "|");
         ImGui::SameLine();
@@ -248,7 +258,8 @@ static inline void GUI_Panel_Regime(const TUISnapshot *s) {
                               (s->current_regime == 3) ? "TRENDING_DOWN" : "RANGING";
     ImVec4 regime_color = (s->current_regime == 1) ? FoxmlColors::green :
                           (s->current_regime == 2 || s->current_regime == 3) ? FoxmlColors::red : FoxmlColors::comment;
-    const char *strat_name = (s->strategy_id == 2) ? "SIMPLE DIP" :
+    const char *strat_name = (s->strategy_id == 4) ? "EMA CROSS" :
+                              (s->strategy_id == 2) ? "SIMPLE DIP" :
                               (s->strategy_id == 1) ? "MOMENTUM" : "MEAN REVERSION";
 
     ImGui::TextColored(FoxmlColors::sand, "regime:");

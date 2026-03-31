@@ -489,7 +489,8 @@ static inline int ANSI_Section_Regime(AnsiBuf *ab, const TUISnapshot *s, int y, 
                               (s->current_regime == 3) ? "TRENDING_DOWN" : "RANGING";
     const char *regime_color = (s->current_regime == 1) ? A_GREEN :
                                (s->current_regime == 2 || s->current_regime == 3) ? A_RED : A_DIM;
-    const char *strat_name = (s->strategy_id == 2) ? "SIMPLE DIP" :
+    const char *strat_name = (s->strategy_id == 4) ? "EMA CROSS" :
+                              (s->strategy_id == 2) ? "SIMPLE DIP" :
                               (s->strategy_id == 1) ? "MOMENTUM" : "MEAN REVERSION";
 
     ab_goto(ab, y, 3);
@@ -777,12 +778,12 @@ static inline int ANSI_Section_Stats(AnsiBuf *ab, const TUISnapshot *s, int y, i
 
     // per-strategy P&L attribution
     {
-        const char *snames[] = {"MR", "Mom", "Dip", "ML"};
+        const char *snames[] = {"MR", "Mom", "Dip", "ML", "EMA"};
         int any = 0;
-        for (int i = 0; i < 4; i++) any |= (s->strat_stats[i].total > 0);
+        for (int i = 0; i < 5; i++) any |= (s->strat_stats[i].total > 0);
         if (any) {
             ab_goto(ab, y, 3);
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < 5; i++) {
                 if (s->strat_stats[i].total == 0) continue;
                 double pnl = s->strat_stats[i].pnl;
                 uint32_t w = s->strat_stats[i].wins, l = s->strat_stats[i].losses;

@@ -98,6 +98,10 @@ template <unsigned F> struct ControllerConfig {
   FPN<F> momentum_breakout_mult;  // buy when price > avg + stddev * this (e.g. 1.5)
   FPN<F> momentum_tp_mult;        // TP multiplier for momentum (e.g. 3.0 stddevs)
   FPN<F> momentum_sl_mult;        // SL multiplier for momentum (e.g. 1.0 stddevs)
+  // EMA cross strategy
+  FPN<F> emacross_dip_mult;       // buy this many stddevs below EMA (e.g. 0.5)
+  FPN<F> emacross_crossover_min;  // min EMA-SMA spread for uptrend confirmation
+  FPN<F> emacross_trail_mult;     // trailing TP factor when EMA rising
   // volume spike detection
   FPN<F> spike_threshold;         // volume spike ratio (current/max) to trigger (e.g. 5.0 = 5x)
   FPN<F> spike_spacing_reduction; // spacing multiplier during spike (e.g. 0.5 = half normal)
@@ -214,6 +218,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.momentum_breakout_mult = FPN_FromDouble<F>(1.5);    // buy 1.5σ above avg
   cfg.momentum_tp_mult       = FPN_FromDouble<F>(3.0);    // wider TP for trends
   cfg.momentum_sl_mult       = FPN_FromDouble<F>(1.0);    // tighter SL than MR
+  // EMA cross strategy
+  cfg.emacross_dip_mult      = FPN_FromDouble<F>(0.5);    // buy 0.5σ below EMA
+  cfg.emacross_crossover_min = FPN_FromDouble<F>(0.0003);  // 0.03% min spread
+  cfg.emacross_trail_mult    = FPN_FromDouble<F>(1.5);    // 1.5x trail when EMA rising
   // volume spike detection
   cfg.spike_threshold         = FPN_FromDouble<F>(5.0);    // 5x rolling max triggers spike
   cfg.spike_spacing_reduction = FPN_FromDouble<F>(0.5);    // half spacing on spike
@@ -353,6 +361,9 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(momentum_breakout_mult)
     CFG_PARSE_FPN(momentum_tp_mult)
     CFG_PARSE_FPN(momentum_sl_mult)
+    CFG_PARSE_FPN(emacross_dip_mult)
+    CFG_PARSE_FPN(emacross_crossover_min)
+    CFG_PARSE_FPN(emacross_trail_mult)
     CFG_PARSE_FPN(spike_threshold)
     CFG_PARSE_FPN(spike_spacing_reduction)
     CFG_PARSE_FPN(session_asian_mult)
