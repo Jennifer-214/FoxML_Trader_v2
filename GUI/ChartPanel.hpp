@@ -557,10 +557,11 @@ static inline void GUI_VolumeChart(const ChartState *cs, const TUISnapshot *snap
     int vc = cs->vis_count;
     int vis = settings->visible_candles;
     ImPlot::PushStyleColor(ImPlotCol_PlotBg, FoxmlColors::bg_dark);
+    ImPlot::PushStyleColor(ImPlotCol_AxisGrid, ImVec4(1, 1, 1, 0.06f));
     if (ImPlot::BeginPlot("##vol", ImVec2(-1, -1),
                            ImPlotFlags_NoTitle | ImPlotFlags_NoMouseText)) {
         ImPlot::SetupAxes(NULL, "Vol",
-                          ImPlotAxisFlags_NoLabel | ImPlotAxisFlags_NoTickLabels,
+                          ImPlotAxisFlags_NoLabel | ImPlotAxisFlags_NoTickLabels | ImPlotAxisFlags_NoGridLines,
                           ImPlotAxisFlags_Opposite);
         ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_Log10);
         ImPlot::SetupAxisLimits(ImAxis_X1, cs->x_lo, cs->x_hi, ImPlotCond_Always);
@@ -613,9 +614,36 @@ static inline void GUI_VolumeChart(const ChartState *cs, const TUISnapshot *snap
         }
 
         ImPlot::PopPlotClipRect();
+
+        // hover crosshair + volume readout
+        if (ImPlot::IsPlotHovered()) {
+            ImPlotPoint mouse = ImPlot::GetPlotMousePos();
+            ImVec2 ch_l = ImPlot::PlotToPixels(cs->x_lo, mouse.y);
+            ImVec2 ch_r = ImPlot::PlotToPixels(cs->x_hi, mouse.y);
+            ImU32 ch_col = ImGui::GetColorU32(ImVec4(
+                FoxmlColors::comment.x, FoxmlColors::comment.y,
+                FoxmlColors::comment.z, 0.35f));
+            for (float x = ch_l.x; x < ch_r.x; x += 6.0f) {
+                float x2 = x + 2.0f;
+                if (x2 > ch_r.x) x2 = ch_r.x;
+                dl->AddLine(ImVec2(x, ch_l.y), ImVec2(x2, ch_l.y), ch_col, 1.0f);
+            }
+            // volume tag at right edge
+            char vol_buf[16];
+            snprintf(vol_buf, 16, "%.4f", mouse.y);
+            ImVec2 vsz = ImGui::CalcTextSize(vol_buf);
+            ImVec2 vr_px = ImPlot::PlotToPixels(cs->x_hi, 0);
+            float vr = vr_px.x - 4;
+            float vl = vr - vsz.x - 8.0f;
+            ImVec2 vtl(vl, ch_l.y - vsz.y * 0.5f - 2);
+            ImVec2 vbr(vr, ch_l.y + vsz.y * 0.5f + 2);
+            dl->AddRectFilled(vtl, vbr, ImGui::GetColorU32(FoxmlColors::surface), 2.0f);
+            dl->AddText(ImVec2(vl + 4, vtl.y + 2), ImGui::GetColorU32(FoxmlColors::wheat), vol_buf);
+        }
+
         ImPlot::EndPlot();
     }
-    ImPlot::PopStyleColor();
+    ImPlot::PopStyleColor(2);  // PlotBg + AxisGrid
     ImGui::End();
 }
 
