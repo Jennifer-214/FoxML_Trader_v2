@@ -299,7 +299,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 display_idx[i] = -1;
         }
 
-        struct ChartLabel { double price; float y_px; ImVec4 color; char text[32]; };
+        struct ChartLabel { double price; float y_px; ImVec4 color; int di; char text[32]; };
         ChartLabel clabels[48];
         int clabel_n = 0;
 
@@ -308,8 +308,17 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             {8,6,8,6}, {4,4,4,4}, {3,3,10,3}, {14,5,14,5}
         };
 
-        // TP/SL lines start at the right 35% of the chart
-        float line_start_x = cs->x_lo + (cs->x_hi - cs->x_lo) * 0.65;
+        // per-position accent colors (icon + line tint)
+        static const ImVec4 pos_accent[] = {
+            {0.40f, 0.85f, 0.85f, 1.0f},  // cyan
+            {0.95f, 0.75f, 0.35f, 1.0f},  // gold
+            {0.70f, 0.50f, 0.90f, 1.0f},  // purple
+            {0.90f, 0.55f, 0.65f, 1.0f},  // rose
+            {0.50f, 0.85f, 0.50f, 1.0f},  // lime
+            {0.85f, 0.60f, 0.40f, 1.0f},  // coral
+            {0.55f, 0.75f, 0.95f, 1.0f},  // sky
+            {0.90f, 0.80f, 0.50f, 1.0f},  // butter
+        };
         ImVec2 plot_right = ImPlot::PlotToPixels(cs->x_hi, 0);
         float right_edge = plot_right.x - 4;
 
@@ -367,43 +376,34 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             cl.y_px = ImPlot::PlotToPixels(0.0, ps->entry).y;
             cl.color = {FoxmlColors::wheat.x, FoxmlColors::wheat.y,
                         FoxmlColors::wheat.z, age_alpha};
+            cl.di = max_di;  // use highest di in group for icon
             snprintf(cl.text, 32, "#%s $%.0f", group_ids, ps->entry);
             drawn_entries[drawn_entry_count++] = ps->entry;
         }
 
-        // draw TP/SL dashed lines (right 35% only) + connector brackets + labels
+        // draw TP/SL dashed lines with per-position accent colors
         for (int pi = 0; pi < 16; pi++) {
             const TUIPositionSnap *ps = &snap->positions[pi];
             if (ps->idx < 0) continue;
             int di = display_idx[pi];
             float age_alpha = (display_count <= 1) ? 1.0f :
                 0.4f + 0.6f * ((float)di / newest_di);
-
-            // connector bracket: thin vertical line from TP to SL
-            if (ps->tp > 0 && ps->sl > 0) {
-                float conn_x_plot = cs->x_hi - (cs->x_hi - cs->x_lo) * 0.03 * (di + 1);
-                ImVec2 conn_tp = ImPlot::PlotToPixels(conn_x_plot, ps->tp);
-                ImVec2 conn_sl = ImPlot::PlotToPixels(conn_x_plot, ps->sl);
-                ImU32 conn_col = ImGui::GetColorU32(ImVec4(
-                    FoxmlColors::comment.x, FoxmlColors::comment.y,
-                    FoxmlColors::comment.z, 0.25f * age_alpha));
-                dl->AddLine(conn_tp, conn_sl, conn_col, 1.0f);
-            }
+            const ImVec4 &accent = pos_accent[di % 8];
 
             for (int tp_pass = 0; tp_pass < 2; tp_pass++) {
                 double price = tp_pass == 0 ? ps->tp : ps->sl;
                 if (price <= 0) continue;
                 bool is_tp = (tp_pass == 0);
 
-                // right 35% only
-                ImVec2 left  = ImPlot::PlotToPixels(line_start_x, price);
+                ImVec2 left  = ImPlot::PlotToPixels(cs->x_lo, price);
                 ImVec2 right = ImPlot::PlotToPixels(cs->x_hi, price);
-                ImVec4 base_col = is_tp
-                    ? ImVec4(FoxmlColors::green_b.x, FoxmlColors::green_b.y,
-                             FoxmlColors::green_b.z, 0.6f * age_alpha)
-                    : ImVec4(FoxmlColors::red_b.x, FoxmlColors::red_b.y,
-                             FoxmlColors::red_b.z, 0.6f * age_alpha);
-                ImU32 lcol = ImGui::GetColorU32(base_col);
+                // blend accent with green/red so lines stay distinguishable
+                ImVec4 base = is_tp
+                    ? ImVec4(accent.x * 0.5f + 0.2f, accent.y * 0.3f + 0.5f,
+                             accent.z * 0.3f + 0.2f, 0.6f * age_alpha)
+                    : ImVec4(accent.x * 0.3f + 0.55f, accent.y * 0.3f + 0.1f,
+                             accent.z * 0.3f + 0.1f, 0.6f * age_alpha);
+                ImU32 lcol = ImGui::GetColorU32(base);
 
                 const float *pat = dp[di % 4];
                 float total = right.x - left.x;
@@ -421,6 +421,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 ChartLabel &cl = clabels[clabel_n++];
                 cl.price = price;
                 cl.y_px = left.y;
+                cl.di = di;
                 cl.color = is_tp
                     ? ImVec4(FoxmlColors::green_b.x, FoxmlColors::green_b.y,
                              FoxmlColors::green_b.z, age_alpha)
@@ -441,8 +442,9 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         }
         float lbl_offsets[48] = {};
         float lbl_widths[48] = {};
+        float icon_total = 4.0f * 2 + 4;  // icon_sz*2 + gap (matches icon_w below)
         for (int i = 0; i < clabel_n; i++)
-            lbl_widths[i] = ImGui::CalcTextSize(clabels[i].text).x + 10.0f;
+            lbl_widths[i] = ImGui::CalcTextSize(clabels[i].text).x + 10.0f + icon_total;
         for (int i = 0; i < clabel_n; ) {
             int ge = i + 1;
             while (ge < clabel_n && (clabels[ge].y_px - clabels[ge - 1].y_px) < 26.0f)
@@ -454,18 +456,42 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             }
             i = ge;
         }
-        // draw labels extending leftward from right edge
+        // draw labels with per-position shape icons, extending leftward
         float lpad = 3.0f;
+        float icon_sz = 4.0f;
+        float icon_w = icon_sz * 2 + 4;  // icon width + gap
         for (int i = 0; i < clabel_n; i++) {
             ImVec2 anchor = ImPlot::PlotToPixels(0, clabels[i].price);
             float box_r = right_edge - lbl_offsets[i];
-            float box_l = box_r - lbl_widths[i];
+            float box_l = box_r - lbl_widths[i] - icon_w;
             ImVec2 tsz = ImGui::CalcTextSize(clabels[i].text);
-            ImVec2 tl(box_l, anchor.y - tsz.y * 0.5f - lpad);
-            ImVec2 br(box_r, anchor.y + tsz.y * 0.5f + lpad);
+            float cy = anchor.y;
+            ImVec2 tl(box_l, cy - tsz.y * 0.5f - lpad);
+            ImVec2 br(box_r, cy + tsz.y * 0.5f + lpad);
             ImVec4 &c = clabels[i].color;
             dl->AddRectFilled(tl, br, ImGui::GetColorU32(ImVec4(c.x, c.y, c.z, 0.85f)), 3.0f);
-            dl->AddText(ImVec2(box_l + 5, tl.y + lpad), IM_COL32(255,255,255,230), clabels[i].text);
+
+            // shape icon keyed to position index
+            int di = clabels[i].di;
+            const ImVec4 &ac = pos_accent[di % 8];
+            ImU32 ic = ImGui::GetColorU32(ac);
+            float ix = box_l + icon_sz + 2;
+            switch (di % 4) {
+                case 0: dl->AddCircleFilled(ImVec2(ix, cy), icon_sz, ic); break;
+                case 1: dl->AddRectFilled(ImVec2(ix-icon_sz, cy-icon_sz),
+                                           ImVec2(ix+icon_sz, cy+icon_sz), ic); break;
+                case 2: dl->AddTriangleFilled(ImVec2(ix, cy-icon_sz),
+                                               ImVec2(ix-icon_sz, cy+icon_sz),
+                                               ImVec2(ix+icon_sz, cy+icon_sz), ic); break;
+                case 3: dl->AddTriangleFilled(ImVec2(ix, cy-icon_sz),  // diamond
+                                               ImVec2(ix-icon_sz, cy),
+                                               ImVec2(ix, cy+icon_sz), ic);
+                         dl->AddTriangleFilled(ImVec2(ix, cy-icon_sz),
+                                               ImVec2(ix+icon_sz, cy),
+                                               ImVec2(ix, cy+icon_sz), ic); break;
+            }
+
+            dl->AddText(ImVec2(box_l + icon_w, tl.y + lpad), IM_COL32(255,255,255,230), clabels[i].text);
         }
 
         // buy gate threshold — cyan, thick dotted, distinct from entry/TP/SL
