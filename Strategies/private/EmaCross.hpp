@@ -68,22 +68,21 @@ inline BuySideGateConditions<F> EmaCross_BuySignal(
     state->last_ema_slope = FPN_Sub(ref, state->prev_ema);
     state->prev_ema = ref;
 
-    // crossover check: EMA must be above both short SMA (128-tick) and long SMA (512-tick)
-    // normalized spread = (ema - sma) / sma
+    // crossover check: EMA must be above short SMA (128-tick)
+    // use absolute difference vs stddev instead of normalized spread
+    // (normalized spread is too tiny when EMA and SMA converge in ranging markets)
     FPN<F> short_sma = rolling->price_avg;
     int short_cross = 0;
-    if (!FPN_IsZero(short_sma)) {
-        FPN<F> spread = FPN_DivNoAssert(FPN_Sub(ref, short_sma), short_sma);
-        short_cross = FPN_GreaterThan(spread, cfg->emacross_crossover_min);
+    if (!FPN_IsZero(short_sma) && !FPN_IsZero(rolling->price_stddev)) {
+        FPN<F> diff = FPN_Sub(ref, short_sma);
+        // EMA must be above SMA (positive diff = sign==0 and not zero)
+        int ema_above = (diff.sign == 0) && !FPN_IsZero(diff);
+        // spread as fraction of stddev — more meaningful than % of price
+        FPN<F> spread_stddevs = FPN_DivNoAssert(diff, rolling->price_stddev);
+        short_cross = ema_above & FPN_GreaterThan(spread_stddevs, cfg->emacross_crossover_min);
     }
 
-    int long_cross = 0;
-    if (rolling_long && !FPN_IsZero(rolling_long->price_avg)) {
-        long_cross = FPN_GreaterThan(ref, rolling_long->price_avg);
-    }
-
-    // both timeframes must confirm uptrend
-    int uptrend = short_cross & long_cross;
+    int uptrend = short_cross;
 
     // buy price = EMA - (stddev * dip_mult)
     FPN<F> dip = FPN_Mul(rolling->price_stddev, cfg->emacross_dip_mult);
