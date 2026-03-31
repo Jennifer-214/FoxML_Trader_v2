@@ -113,10 +113,20 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         ImGui::SameLine(0, 20);
         ImGui::TextColored(FoxmlColors::comment, "VWAP $%.2f", cs->vwap);
     }
+    // EMA-SMA spread readout
+    if (snap->ema_price > 0 && snap->roll_stddev > 0.01) {
+        double avg = snap->roll_price_avg;
+        double spread_sigma = (avg > 0) ? (snap->ema_price - avg) / snap->roll_stddev : 0;
+        ImGui::SameLine(0, 20);
+        ImVec4 spread_col = (spread_sigma > 0) ? FoxmlColors::green_b : FoxmlColors::red;
+        ImGui::TextColored(spread_col, "spread: %+.2f\xcf\x83", spread_sigma);
+    }
 
     // candle interval selector
     ImGui::SameLine(0, 20);
-    ImGui::SetNextItemWidth(55);
+    ImGui::TextColored(FoxmlColors::comment, "interval");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(65);
     const char *intervals[] = {"15s", "30s", "1m", "5m"};
     int interval_secs[] = {15, 30, 60, 300};
     int cur_interval = 2;  // default 1m
@@ -131,9 +141,10 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
     }
 
     // visible candles selector
-    ImGui::SameLine(0, 10);
-    ImGui::SetNextItemWidth(55);
-    const char *windows[] = {"30", "60", "120", "240"};
+    ImGui::SameLine(0, 15);
+    ImGui::SameLine(0, 15);
+    ImGui::SetNextItemWidth(90);
+    const char *windows[] = {"30 bars", "60 bars", "120 bars", "240 bars"};
     int window_vals[] = {30, 60, 120, 240};
     int cur_window = 1;
     for (int i = 0; i < 4; i++)
@@ -295,6 +306,101 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             s.LineColor = FoxmlColors::cyan;
             s.LineWeight = 1.0f;
             ImPlot::PlotLine("EMA", ex, ey, 2, s);
+        }
+
+        // === EMA/SMA shaded ribbon ===
+        // green fill when EMA > SMA (uptrend/gate open), red when below
+        if (snap->ema_price > 0 && cs->sma_first >= 0) {
+            double ema_y[CANDLE_MAX + 1];
+            for (int i = 0; i < vc; i++) ema_y[i] = snap->ema_price;
+            int sf = cs->sma_first;
+            int n = vc - sf;
+            if (n > 1) {
+                // determine dominant color from current state
+                bool ema_above = (snap->ema_price > cs->sma[vc - 1]);
+                ImVec4 fill_col = ema_above
+                    ? ImVec4(FoxmlColors::green.x, FoxmlColors::green.y, FoxmlColors::green.z, 0.08f)
+                    : ImVec4(FoxmlColors::red.x, FoxmlColors::red.y, FoxmlColors::red.z, 0.08f);
+                ImPlotSpec rs;
+                rs.FillColor = fill_col;
+                rs.FillAlpha = fill_col.w;
+                rs.LineColor = {0, 0, 0, 0};
+                ImPlot::PlotShaded("##ema_sma_fill", cs->xs + sf, ema_y + sf,
+                                    cs->sma + sf, n, rs);
+            }
+        }
+
+        // === live price tag on Y-axis ===
+        {
+            ImVec2 price_px = ImPlot::PlotToPixels(cs->x_hi, cs->last_price);
+            ImVec2 plot_r = ImPlot::PlotToPixels(cs->x_hi, 0);
+            char ptag[16];
+            snprintf(ptag, 16, "$%.0f", cs->last_price);
+            ImVec2 tsz = ImGui::CalcTextSize(ptag);
+            float pr = plot_r.x - 2;
+            float pl = pr - tsz.x - 8;
+            bool bull = (vc >= 2 && cs->closes[vc-1] >= cs->closes[vc-2]);
+            ImVec4 tag_col = bull ? FoxmlColors::green_b : FoxmlColors::red;
+            dl->AddRectFilled(ImVec2(pl, price_px.y - tsz.y * 0.5f - 2),
+                              ImVec2(pr, price_px.y + tsz.y * 0.5f + 2),
+                              ImGui::GetColorU32(tag_col), 2.0f);
+            dl->AddText(ImVec2(pl + 4, price_px.y - tsz.y * 0.5f),
+                        IM_COL32(255, 255, 255, 240), ptag);
+        }
+
+        // === session high/low markers ===
+        if (snap->session_high > 0 && snap->session_low > 0) {
+            ImU32 sess_col = ImGui::GetColorU32(ImVec4(
+                FoxmlColors::comment.x, FoxmlColors::comment.y,
+                FoxmlColors::comment.z, 0.25f));
+            // session high
+            ImVec2 sh_l = ImPlot::PlotToPixels(cs->x_lo, snap->session_high);
+            ImVec2 sh_r = ImPlot::PlotToPixels(cs->x_hi, snap->session_high);
+            for (float x = sh_l.x; x < sh_r.x; x += 8.0f) {
+                float x2 = x + 3.0f; if (x2 > sh_r.x) x2 = sh_r.x;
+                dl->AddLine(ImVec2(x, sh_l.y), ImVec2(x2, sh_l.y), sess_col, 1.0f);
+            }
+            // session low
+            ImVec2 sl_l = ImPlot::PlotToPixels(cs->x_lo, snap->session_low);
+            ImVec2 sl_r = ImPlot::PlotToPixels(cs->x_hi, snap->session_low);
+            for (float x = sl_l.x; x < sl_r.x; x += 8.0f) {
+                float x2 = x + 3.0f; if (x2 > sl_r.x) x2 = sl_r.x;
+                dl->AddLine(ImVec2(x, sl_l.y), ImVec2(x2, sl_l.y), sess_col, 1.0f);
+            }
+        }
+
+        // === session dividers (vertical lines at UTC hour boundaries) ===
+        if (vc > 1) {
+            // session hours (UTC): Asian 0-8, EU 8-13, US 13-21, Overnight 21-24
+            static const int boundaries[] = {0, 8, 13, 21};
+            static const char *sess_labels[] = {"ASIA", "EU", "US", "OVER"};
+            ImU32 div_col = ImGui::GetColorU32(ImVec4(1, 1, 1, 0.06f));
+            ImVec2 plot_tl = ImPlot::GetPlotPos();
+            for (int i = 0; i < vc - 1; i++) {
+                if (cs->times_sec[i] < 1.0 || cs->times_sec[i+1] < 1.0) continue;
+                time_t t0 = (time_t)cs->times_sec[i];
+                time_t t1 = (time_t)cs->times_sec[i+1];
+                struct tm *tm0 = gmtime(&t0);
+                int h0 = tm0->tm_hour;
+                struct tm *tm1 = gmtime(&t1);
+                int h1 = tm1->tm_hour;
+                // check if any session boundary was crossed
+                for (int b = 0; b < 4; b++) {
+                    int bh = boundaries[b];
+                    if ((h0 < bh && h1 >= bh) || (h0 > h1 && bh <= h1)) {
+                        ImVec2 top = ImPlot::PlotToPixels(cs->xs[i+1], 0);
+                        ImVec2 bot_px = ImPlot::PlotToPixels(cs->xs[i+1], 0);
+                        float px_x = top.x;
+                        dl->AddLine(ImVec2(px_x, plot_tl.y),
+                                    ImVec2(px_x, plot_tl.y + ImPlot::GetPlotSize().y),
+                                    div_col, 1.0f);
+                        // label at top
+                        dl->AddText(ImVec2(px_x + 3, plot_tl.y + 2),
+                                    ImGui::GetColorU32(ImVec4(1, 1, 1, 0.15f)),
+                                    sess_labels[b]);
+                    }
+                }
+            }
         }
 
         // position overlays — unified collision-aware label system
