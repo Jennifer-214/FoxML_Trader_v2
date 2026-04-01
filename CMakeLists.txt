@@ -18,7 +18,7 @@ target_link_libraries(engine PRIVATE ssl crypto pthread)
 option(LATENCY_PROFILING "Enable RDTSCP latency profiling in TUI" OFF)
 option(LATENCY_LITE "Lite profiling: 2 rdtscp instead of 4" OFF)
 option(LATENCY_BENCH "Headless profiling to stderr" OFF)
-option(USE_NATIVE_128 "FPN<64> forwards to FP64 __uint128_t (experimental)" OFF)
+option(USE_NATIVE_128 "FPN<64> forwards to FP64 __uint128_t" ON)
 option(BUSY_POLL "Spin-poll instead of sleeping in poll() (experimental)" OFF)
 option(USE_XGBOOST "Link XGBoost C API for ML inference" OFF)
 option(USE_LIGHTGBM "Link LightGBM C API for ML inference" OFF)
@@ -54,7 +54,7 @@ endif()
 #===============================================================================
 # engine_gui binary — Dear ImGui + implot (SDL2 + OpenGL3)
 #===============================================================================
-option(USE_IMGUI_GUI "Build engine_gui with Dear ImGui + implot (requires SDL2, OpenGL)" OFF)
+option(USE_IMGUI_GUI "Build engine_gui with Dear ImGui + implot (requires SDL2, OpenGL)" ON)
 
 if(USE_IMGUI_GUI)
     find_package(PkgConfig REQUIRED)
