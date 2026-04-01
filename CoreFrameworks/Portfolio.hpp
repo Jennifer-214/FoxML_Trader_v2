@@ -218,18 +218,33 @@ inline void PositionExitGate(Portfolio<F> *portfolio, FPN<F> current_price, Exit
     while (active) {
         int idx = __builtin_ctz(active);
 
-        // inline positive-FPN comparison: skip sign check (crypto prices always positive)
-        // compares raw words directly — saves ~7ns per comparison vs FPN_GreaterThanOrEqual
+        // full multi-word positive-FPN comparison (MSW to LSW, short-circuit on first difference)
+        // crypto prices always positive so sign check skipped
         constexpr unsigned NW = FPN<F>::N;
         const FPN<F> &tp = portfolio->positions[idx].take_profit_price;
         const FPN<F> &sl = portfolio->positions[idx].stop_loss_price;
-        int hit_tp = (current_price.w[NW-1] > tp.w[NW-1]) |
-                     ((current_price.w[NW-1] == tp.w[NW-1]) & (current_price.w[0] >= tp.w[0]));
-        int hit_sl = (current_price.w[NW-1] < sl.w[NW-1]) |
-                     ((current_price.w[NW-1] == sl.w[NW-1]) & (current_price.w[0] <= sl.w[0]));
+        // hit_tp: price >= TP, hit_sl: price <= SL
+        int hit_tp = 0, hit_sl = 0;
+        {
+          int decided_tp = 0, decided_sl = 0;
+          for (int w = NW - 1; w >= 0; w--) {
+            if (!decided_tp) {
+              if (current_price.w[w] > tp.w[w]) { hit_tp = 1; decided_tp = 1; }
+              else if (current_price.w[w] < tp.w[w]) { decided_tp = 1; }
+            }
+            if (!decided_sl) {
+              if (current_price.w[w] < sl.w[w]) { hit_sl = 1; decided_sl = 1; }
+              else if (current_price.w[w] > sl.w[w]) { decided_sl = 1; }
+            }
+            if (decided_tp & decided_sl) break;
+          }
+          // all words equal → price == TP/SL → triggers exit
+          if (!decided_tp) hit_tp = 1;
+          if (!decided_sl) hit_sl = 1;
+        }
 
         // skip positions with no exit prices set (legacy adds, zero TP/SL)
-        int has_exits = (tp.w[NW-1] | tp.w[0]) != 0; // faster than FPN_IsZero (no sign check, normalized to 0/1)
+        int has_exits = !FPN_IsZero(tp);
         int should_exit = (hit_tp | hit_sl) & has_exits;
 
         // conditional write: exits are rare (~1/1000 ticks), well-predicted branch

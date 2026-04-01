@@ -2376,6 +2376,71 @@ int main() {
         remove("PUSHBUY_TEST_order_history.csv");
     }
 
+    //======================================================================================================
+    // FPN EXIT GATE COMPARISON
+    //======================================================================================================
+    printf("\n--- FPN EXIT GATE COMPARISON ---\n");
+    {
+        Portfolio<FP> port = {};
+        Portfolio_Init(&port);
+        ExitBuffer<FP> ebuf = {};
+        ExitBuffer_Init(&ebuf);
+
+        // add position: entry=100, TP=105, SL=95
+        FPN<FP> entry = FPN_FromDouble<FP>(100.0);
+        FPN<FP> tp = FPN_FromDouble<FP>(105.0);
+        FPN<FP> sl = FPN_FromDouble<FP>(95.0);
+        Portfolio_AddPositionWithExits(&port, FPN_FromDouble<FP>(1.0), entry, tp, sl);
+
+        // price at 94 (below SL) — must trigger exit
+        PositionExitGate(&port, FPN_FromDouble<FP>(94.0), &ebuf, 1);
+        check("exit gate: SL triggers at price below SL",
+              ebuf.count == 1);
+        check("exit gate: reason is SL (1)",
+              ebuf.records[0].reason == 1);
+        check("exit gate: bitmap cleared",
+              port.active_bitmap == 0);
+
+        // reset, test TP
+        ExitBuffer_Init(&ebuf);
+        Portfolio_AddPositionWithExits(&port, FPN_FromDouble<FP>(1.0), entry, tp, sl);
+        PositionExitGate(&port, FPN_FromDouble<FP>(106.0), &ebuf, 2);
+        check("exit gate: TP triggers at price above TP",
+              ebuf.count == 1);
+        check("exit gate: reason is TP (0)",
+              ebuf.records[0].reason == 0);
+
+        // reset, test price between SL and TP — no exit
+        ExitBuffer_Init(&ebuf);
+        Portfolio_AddPositionWithExits(&port, FPN_FromDouble<FP>(1.0), entry, tp, sl);
+        PositionExitGate(&port, FPN_FromDouble<FP>(100.0), &ebuf, 3);
+        check("exit gate: no exit when price between SL and TP",
+              ebuf.count == 0);
+        check("exit gate: bitmap still active",
+              port.active_bitmap != 0);
+
+        // test tight boundary: SL=95.001, price=95.0005 (just below SL)
+        // this exercises middle FPN words — the old 2-word comparison could miss this
+        ExitBuffer_Init(&ebuf);
+        Portfolio_Init(&port);
+        FPN<FP> tight_sl = FPN_FromDouble<FP>(95.001);
+        FPN<FP> tight_tp = FPN_FromDouble<FP>(105.0);
+        Portfolio_AddPositionWithExits(&port, FPN_FromDouble<FP>(1.0), entry, tight_tp, tight_sl);
+        FPN<FP> just_below = FPN_FromDouble<FP>(95.0005);
+        PositionExitGate(&port, just_below, &ebuf, 4);
+        check("exit gate: tight SL boundary triggers correctly",
+              ebuf.count == 1);
+
+        // price just above SL — no exit
+        ExitBuffer_Init(&ebuf);
+        Portfolio_Init(&port);
+        Portfolio_AddPositionWithExits(&port, FPN_FromDouble<FP>(1.0), entry, tight_tp, tight_sl);
+        FPN<FP> just_above = FPN_FromDouble<FP>(95.0015);
+        PositionExitGate(&port, just_above, &ebuf, 5);
+        check("exit gate: price just above SL does not trigger",
+              ebuf.count == 0);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
