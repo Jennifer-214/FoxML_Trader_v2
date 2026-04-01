@@ -986,9 +986,10 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     } else snap->expectancy = 0.0;
 
     // max drawdown
-    snap->max_drawdown = ctrl->max_drawdown;
-    snap->max_drawdown_pct = (ctrl->peak_equity > 0.0) ?
-        (ctrl->max_drawdown / ctrl->peak_equity) * 100.0 : 0.0;
+    snap->max_drawdown = FPN_ToDouble(ctrl->max_drawdown);
+    double pe = FPN_ToDouble(ctrl->peak_equity);
+    snap->max_drawdown_pct = (pe > 0.0) ?
+        (snap->max_drawdown / pe) * 100.0 : 0.0;
 
     // fee ratio: what % of gross wins go to fees
     snap->fee_ratio = (g_wins > 0.001) ?

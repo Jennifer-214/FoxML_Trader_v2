@@ -110,9 +110,9 @@ template <unsigned F> struct PortfolioController {
   uint32_t sl_cooldown_counter; // remaining slow-path cycles before buy gate re-enables
   double session_high;         // highest price since startup
   double session_low;          // lowest price since startup
-  double peak_equity;          // highest equity seen (for max drawdown tracking)
-  double max_drawdown;         // largest peak-to-trough equity drop ($)
-  double session_start_equity; // equity at engine startup (for session P&L)
+  FPN<F> peak_equity;          // highest equity seen (for max drawdown tracking)
+  FPN<F> max_drawdown;         // largest peak-to-trough equity drop ($)
+  FPN<F> session_start_equity; // equity at engine startup (for session P&L)
   int current_session;          // 0=asian, 1=european, 2=us, 3=overnight
   FPN<F> session_mult;          // current session gate multiplier
   FPN<F> book_imbalance;        // bid/ask imbalance from depth stream [-1, +1] (updated externally)
@@ -212,9 +212,9 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->sl_cooldown_counter = 0;
   ctrl->session_high = 0.0;
   ctrl->session_low = 0.0;
-  ctrl->peak_equity = FPN_ToDouble(config.starting_balance);
-  ctrl->max_drawdown = 0.0;
-  ctrl->session_start_equity = 0.0;  // set on first slow-path equity calc
+  ctrl->peak_equity = config.starting_balance;
+  ctrl->max_drawdown = FPN_Zero<F>();
+  ctrl->session_start_equity = FPN_Zero<F>();  // set on first slow-path equity calc
   ctrl->current_session = -1;  // unset until first slow path
   ctrl->session_mult = FPN_FromDouble<F>(1.0);
   ctrl->book_imbalance = FPN_Zero<F>();
@@ -557,18 +557,22 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // Portfolio_ComputeValue is O(popcount) — 1 multiply for single-slot mode
   if (ctrl->config.kill_switch_enabled && !ctrl->buying_halted) {
     FPN<F> pv = Portfolio_ComputeValue(&ctrl->portfolio, current_price);
-    double equity = FPN_ToDouble(ctrl->balance) + FPN_ToDouble(pv);
+    FPN<F> equity = FPN_AddSat(ctrl->balance, pv);
     int tripped = 0;
-    if (ctrl->session_start_equity > 0.0) {
-      double daily_ret = (equity - ctrl->session_start_equity) / ctrl->session_start_equity;
-      if (daily_ret < -FPN_ToDouble(ctrl->config.kill_switch_daily_loss_pct)) {
+    // daily loss: (equity - start) / start < -threshold
+    if (!FPN_IsZero(ctrl->session_start_equity)) {
+      FPN<F> loss = FPN_Sub(ctrl->session_start_equity, equity); // positive when equity dropped
+      FPN<F> limit = FPN_Mul(ctrl->session_start_equity, ctrl->config.kill_switch_daily_loss_pct);
+      if (FPN_GreaterThan(loss, limit)) {
         ctrl->kill_reason = 1;
         tripped = 1;
       }
     }
-    if (!tripped && ctrl->peak_equity > 0.0) {
-      double dd_pct = (ctrl->peak_equity - equity) / ctrl->peak_equity;
-      if (dd_pct > FPN_ToDouble(ctrl->config.kill_switch_drawdown_pct)) {
+    // drawdown: (peak - equity) / peak > threshold
+    if (!tripped && !FPN_IsZero(ctrl->peak_equity)) {
+      FPN<F> dd = FPN_SubSat(ctrl->peak_equity, equity);
+      FPN<F> limit = FPN_Mul(ctrl->peak_equity, ctrl->config.kill_switch_drawdown_pct);
+      if (FPN_GreaterThan(dd, limit)) {
         ctrl->kill_reason = 2;
         tripped = 1;
       }
@@ -1141,39 +1145,45 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   FPN<F> estimated_exit_fees = FPN_Mul(portfolio_value, ctrl->config.fee_rate);
   ctrl->portfolio_delta = FPN_Sub(gross_pnl, estimated_exit_fees);
 
-  // track peak equity and max drawdown
+  // track peak equity and max drawdown (branchless, all FPN)
   {
-    double equity = FPN_ToDouble(ctrl->balance) + FPN_ToDouble(portfolio_value);
-    if (ctrl->session_start_equity == 0.0) ctrl->session_start_equity = equity;
-    if (equity > ctrl->peak_equity) ctrl->peak_equity = equity;
-    double dd = ctrl->peak_equity - equity;
-    if (dd > ctrl->max_drawdown) ctrl->max_drawdown = dd;
+    FPN<F> equity = FPN_AddSat(ctrl->balance, portfolio_value);
+    // branchless first-tick select: zero → set to equity, nonzero → keep
+    uint64_t first = -(uint64_t)FPN_IsZero(ctrl->session_start_equity);
+    FPN<F> sse;
+    for (unsigned w = 0; w < FPN<F>::N; w++)
+      sse.w[w] = (equity.w[w] & first) | (ctrl->session_start_equity.w[w] & ~first);
+    sse.sign = (equity.sign & (int)first) | (ctrl->session_start_equity.sign & (int)~first);
+    ctrl->session_start_equity = sse;
+    ctrl->peak_equity = FPN_Max(ctrl->peak_equity, equity);
+    FPN<F> dd = FPN_SubSat(ctrl->peak_equity, equity);
+    ctrl->max_drawdown = FPN_Max(ctrl->max_drawdown, dd);
   }
 
-  // KILL SWITCH: check daily loss and drawdown limits
+  // KILL SWITCH: check daily loss and drawdown limits (all FPN)
   // sticky — once triggered, stays active until session reset or manual 'k'
   if (ctrl->config.kill_switch_enabled && !ctrl->kill_switch_active) {
-    double equity = FPN_ToDouble(ctrl->balance) + FPN_ToDouble(portfolio_value);
-    // daily loss check: (equity - session_start) / session_start < -threshold
-    if (ctrl->session_start_equity > 0.0) {
-      double daily_return = (equity - ctrl->session_start_equity) / ctrl->session_start_equity;
-      double loss_threshold = -FPN_ToDouble(ctrl->config.kill_switch_daily_loss_pct);
-      if (daily_return < loss_threshold) {
+    FPN<F> equity = FPN_AddSat(ctrl->balance, portfolio_value);
+    // daily loss: loss = start - equity, limit = start * threshold
+    if (!FPN_IsZero(ctrl->session_start_equity)) {
+      FPN<F> loss = FPN_Sub(ctrl->session_start_equity, equity);
+      FPN<F> limit = FPN_Mul(ctrl->session_start_equity, ctrl->config.kill_switch_daily_loss_pct);
+      if (FPN_GreaterThan(loss, limit)) {
         ctrl->kill_switch_active = 1;
         ctrl->kill_reason = 1;
-        fprintf(stderr, "[KILL] daily loss %.2f%% exceeded limit %.2f%% — trading halted\n",
-                daily_return * 100.0, loss_threshold * 100.0);
+        double pct = (FPN_ToDouble(loss) / FPN_ToDouble(ctrl->session_start_equity)) * 100.0;
+        fprintf(stderr, "[KILL] daily loss %.2f%% exceeded limit — trading halted\n", pct);
       }
     }
-    // drawdown check: (peak - equity) / peak > threshold
-    if (!ctrl->kill_switch_active && ctrl->peak_equity > 0.0) {
-      double dd_pct = (ctrl->peak_equity - equity) / ctrl->peak_equity;
-      double dd_threshold = FPN_ToDouble(ctrl->config.kill_switch_drawdown_pct);
-      if (dd_pct > dd_threshold) {
+    // drawdown: dd = peak - equity, limit = peak * threshold
+    if (!ctrl->kill_switch_active && !FPN_IsZero(ctrl->peak_equity)) {
+      FPN<F> dd = FPN_SubSat(ctrl->peak_equity, equity);
+      FPN<F> limit = FPN_Mul(ctrl->peak_equity, ctrl->config.kill_switch_drawdown_pct);
+      if (FPN_GreaterThan(dd, limit)) {
         ctrl->kill_switch_active = 1;
         ctrl->kill_reason = 2;
-        fprintf(stderr, "[KILL] drawdown %.2f%% exceeded limit %.2f%% — trading halted\n",
-                dd_pct * 100.0, dd_threshold * 100.0);
+        double pct = (FPN_ToDouble(dd) / FPN_ToDouble(ctrl->peak_equity)) * 100.0;
+        fprintf(stderr, "[KILL] drawdown %.2f%% exceeded limit — trading halted\n", pct);
       }
     }
   }
@@ -1438,8 +1448,8 @@ inline void PortfolioController_SaveSnapshot(const PortfolioController<F> *ctrl,
   fwrite(&ctrl->kill_switch_active, sizeof(int), 1, f);
   fwrite(&ctrl->kill_reason, sizeof(int), 1, f);
   fwrite(&ctrl->daily_realized_pnl, sizeof(FPN<F>), 1, f);
-  fwrite(&ctrl->session_start_equity, sizeof(double), 1, f);
-  fwrite(&ctrl->peak_equity, sizeof(double), 1, f);
+  fwrite(&ctrl->session_start_equity, sizeof(FPN<F>), 1, f);
+  fwrite(&ctrl->peak_equity, sizeof(FPN<F>), 1, f);
   for (int i = 0; i < 5; i++) {
     fwrite(&ctrl->strategy_stats[i].realized_pnl, sizeof(FPN<F>), 1, f);
     fwrite(&ctrl->strategy_stats[i].wins, sizeof(uint32_t), 1, f);
@@ -1534,8 +1544,8 @@ inline int PortfolioController_LoadSnapshot(PortfolioController<F> *ctrl,
       if (fread(&ctrl->kill_switch_active, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
       if (fread(&ctrl->kill_reason, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
       if (fread(&ctrl->daily_realized_pnl, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-      if (fread(&ctrl->session_start_equity, sizeof(double), 1, f) != 1) { fclose(f); return 0; }
-      if (fread(&ctrl->peak_equity, sizeof(double), 1, f) != 1) { fclose(f); return 0; }
+      if (fread(&ctrl->session_start_equity, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+      if (fread(&ctrl->peak_equity, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
       // v9 snapshots have 4 strategy_stats, v10+ have 5
       int n_strats = 4;  // backward compat: v9 wrote 4
       for (int i = 0; i < n_strats; i++) {

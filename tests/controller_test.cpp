@@ -2248,8 +2248,8 @@ int main() {
         PortfolioController<FP> ctrl2 = {};
         PortfolioController_Init(&ctrl2, cfg);
         test_warmup_ctrl(&ctrl2, &pool, &log, 100.0, 500.0);
-        ctrl2.session_start_equity = 10000.0;
-        ctrl2.peak_equity = 10000.0;
+        ctrl2.session_start_equity = FPN_FromDouble<FP>(10000.0);
+        ctrl2.peak_equity = FPN_FromDouble<FP>(10000.0);
         // manually place a position at 100, then crash price to 50
         Portfolio_AddPositionWithExits(&ctrl2.portfolio, FPN_FromDouble<FP>(1.0),
             FPN_FromDouble<FP>(100.0), FPN_FromDouble<FP>(110.0),
@@ -2272,8 +2272,8 @@ int main() {
         PortfolioController<FP> ctrl3 = {};
         PortfolioController_Init(&ctrl3, cfg);
         test_warmup_ctrl(&ctrl3, &pool, &log, 100.0, 500.0);
-        ctrl3.session_start_equity = 10000.0;
-        ctrl3.peak_equity = 12000.0;  // was at 12k, now crashed
+        ctrl3.session_start_equity = FPN_FromDouble<FP>(10000.0);
+        ctrl3.peak_equity = FPN_FromDouble<FP>(12000.0);  // was at 12k, now crashed
         ctrl3.balance = FPN_FromDouble<FP>(10000.0);
         // position worth 100, equity = 10100, dd = (12000-10100)/12000 = 15.8% > 5% limit
         Portfolio_AddPositionWithExits(&ctrl3.portfolio, FPN_FromDouble<FP>(1.0),
