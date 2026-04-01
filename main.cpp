@@ -406,6 +406,9 @@ int main(int argc, char *argv[]) {
             else {
                 ctrl.buy_conds.price  = FPN_Zero<FP>();
                 ctrl.buy_conds.volume = FPN_Zero<FP>();
+                ctrl.buying_halted = 1;
+                ctrl.halt_reason = 6;
+                ctrl.gate_offset = FPN_Zero<FP>();
             }
         }
         if (__atomic_exchange_n(&shared.regime_cycle_requested, 0, __ATOMIC_ACQ_REL))
@@ -455,6 +458,9 @@ int main(int argc, char *argv[]) {
             // disable buy gate during wind-down
             ctrl.buy_conds.price  = FPN_Zero<FP>();
             ctrl.buy_conds.volume = FPN_Zero<FP>();
+            ctrl.buying_halted = 1;
+            ctrl.halt_reason = 5;
+            ctrl.gate_offset = FPN_Zero<FP>();
         }
 
         if (BinanceStream_ShouldReconnect(&bs)) {
@@ -990,6 +996,7 @@ int main(int argc, char *argv[]) {
 #else
     TUI_Cleanup(&tui);
 #endif
+    TradeLogBuffer_Drain(&ctrl.trade_buf, &log);
     TradeLog_Close(&log);
     MetricsLog_Close(&metrics);
     BinanceStream_Close(&bs);

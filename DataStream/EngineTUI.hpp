@@ -671,6 +671,8 @@ struct TUISnapshot {
     // risk
     double risk_amt, max_dd;
     int breaker_tripped;
+    int buying_halted;
+    int halt_reason;
     // regime
     int current_regime;   // REGIME_RANGING, REGIME_TRENDING, REGIME_VOLATILE
     int strategy_id;      // STRATEGY_MEAN_REVERSION or STRATEGY_MOMENTUM
@@ -869,6 +871,8 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->risk_amt   = FPN_ToDouble(ctrl->config.risk_pct) * 100.0;
     snap->max_dd     = FPN_ToDouble(ctrl->config.max_drawdown_pct) * 100.0;
     snap->breaker_tripped = (snap->total_pnl < -(starting * FPN_ToDouble(ctrl->config.max_drawdown_pct)));
+    snap->buying_halted = ctrl->buying_halted;
+    snap->halt_reason = ctrl->halt_reason;
 
     // regime
     snap->current_regime = ctrl->regime.current_regime;

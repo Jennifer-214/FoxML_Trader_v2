@@ -28,6 +28,8 @@ struct TradeData {
     EquityPoint equity[MAX_TRADES];
     int equity_count;
 
+    int max_visible_markers;  // cap to recent trades (0 = no cap)
+
     // for tracking file changes
     char csv_path[256];
     long last_size;
@@ -153,4 +155,14 @@ static inline void TradeData_Refresh(TradeData *td) {
     }
 
     fclose(f);
+
+    // cap markers to recent trades — older ones have scrolled off the chart
+    // 2× visible candles ≈ visible time window (single-slot: ~1 trade per 1-2 candles)
+    // caller can set max_visible_markers before refresh; default 120
+    if (td->max_visible_markers > 0 && td->marker_count > td->max_visible_markers) {
+        int skip = td->marker_count - td->max_visible_markers;
+        memmove(td->markers, td->markers + skip,
+                td->max_visible_markers * sizeof(TradeMarker));
+        td->marker_count = td->max_visible_markers;
+    }
 }

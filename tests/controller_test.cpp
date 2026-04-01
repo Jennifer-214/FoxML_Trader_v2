@@ -2197,6 +2197,185 @@ int main() {
               mild_s == STRATEGY_EMA_CROSS);
     }
 
+    //======================================================================================================
+    // CENTRALIZED HALT FLAG
+    //======================================================================================================
+    printf("\n--- CENTRALIZED HALT FLAG ---\n");
+    {
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.warmup_ticks = 10;
+        cfg.poll_interval = 1;
+        cfg.min_warmup_samples = 10;
+        cfg.kill_switch_enabled = 1;
+        cfg.kill_switch_daily_loss_pct = FPN_FromDouble<FP>(0.03); // 3%
+        cfg.kill_switch_drawdown_pct = FPN_FromDouble<FP>(0.05);   // 5%
+
+        PortfolioController<FP> ctrl = {};
+        PortfolioController_Init(&ctrl, cfg);
+        OrderPool<FP> pool;
+        OrderPool_init(&pool, 64);
+        TradeLog log;
+        TradeLog_Init(&log, "HALT_TEST");
+        test_warmup_ctrl(&ctrl, &pool, &log, 100.0, 500.0);
+
+        // 1. halt enforcement clears gate_offset and buy_conds
+        // use kill_switch_active to create a real halt condition
+        ctrl.kill_switch_active = 1;
+        ctrl.gate_offset = FPN_FromDouble<FP>(5.0);
+        ctrl.buy_conds.price = FPN_FromDouble<FP>(95.0);
+        ctrl.buy_conds.volume = FPN_FromDouble<FP>(100.0);
+        ctrl.ema_price = FPN_FromDouble<FP>(100.0); // needed for gate tracking
+        PortfolioController_Tick(&ctrl, &pool, FPN_FromDouble<FP>(100.0),
+                                  FPN_FromDouble<FP>(500.0), &log);
+        check("halt enforcement: buy_conds.price zeroed",
+              FPN_IsZero(ctrl.buy_conds.price));
+        check("halt enforcement: buy_conds.volume zeroed",
+              FPN_IsZero(ctrl.buy_conds.volume));
+        check("halt enforcement: gate_offset zeroed",
+              FPN_IsZero(ctrl.gate_offset));
+
+        // 2. halt persists across multiple ticks (gate tracking can't resurrect)
+        ctrl.gate_offset = FPN_FromDouble<FP>(3.0); // try to set it again
+        PortfolioController_Tick(&ctrl, &pool, FPN_FromDouble<FP>(100.0),
+                                  FPN_FromDouble<FP>(500.0), &log);
+        check("halt persists: gate_offset re-zeroed on next tick",
+              FPN_IsZero(ctrl.gate_offset));
+        check("halt persists: buy_conds.price still zero",
+              FPN_IsZero(ctrl.buy_conds.price));
+        ctrl.kill_switch_active = 0; // clean up for remaining tests
+
+        // 3. hot-path kill fires on equity crash
+        PortfolioController<FP> ctrl2 = {};
+        PortfolioController_Init(&ctrl2, cfg);
+        test_warmup_ctrl(&ctrl2, &pool, &log, 100.0, 500.0);
+        ctrl2.session_start_equity = 10000.0;
+        ctrl2.peak_equity = 10000.0;
+        // manually place a position at 100, then crash price to 50
+        Portfolio_AddPositionWithExits(&ctrl2.portfolio, FPN_FromDouble<FP>(1.0),
+            FPN_FromDouble<FP>(100.0), FPN_FromDouble<FP>(110.0),
+            FPN_FromDouble<FP>(90.0));
+        ctrl2.balance = FPN_FromDouble<FP>(9900.0); // $100 deducted for the position
+        // crash to 50: position value = 50, equity = 9900+50 = 9950, daily return = -0.5%
+        // not enough for 3% kill, let's use a bigger crash
+        ctrl2.balance = FPN_FromDouble<FP>(9000.0); // simulate earlier losses
+        // equity = 9000 + 50 = 9050, return = (9050-10000)/10000 = -9.5% > 3% limit
+        PortfolioController_Tick(&ctrl2, &pool, FPN_FromDouble<FP>(50.0),
+                                  FPN_FromDouble<FP>(500.0), &log);
+        check("hot-path kill: kill_switch_active set on equity crash",
+              ctrl2.kill_switch_active == 1);
+        check("hot-path kill: buying_halted set",
+              ctrl2.buying_halted == 1);
+        check("hot-path kill: halt_reason is 1 (kill)",
+              ctrl2.halt_reason == 1);
+
+        // 4. hot-path kill fires on drawdown
+        PortfolioController<FP> ctrl3 = {};
+        PortfolioController_Init(&ctrl3, cfg);
+        test_warmup_ctrl(&ctrl3, &pool, &log, 100.0, 500.0);
+        ctrl3.session_start_equity = 10000.0;
+        ctrl3.peak_equity = 12000.0;  // was at 12k, now crashed
+        ctrl3.balance = FPN_FromDouble<FP>(10000.0);
+        // position worth 100, equity = 10100, dd = (12000-10100)/12000 = 15.8% > 5% limit
+        Portfolio_AddPositionWithExits(&ctrl3.portfolio, FPN_FromDouble<FP>(1.0),
+            FPN_FromDouble<FP>(100.0), FPN_FromDouble<FP>(110.0),
+            FPN_FromDouble<FP>(90.0));
+        PortfolioController_Tick(&ctrl3, &pool, FPN_FromDouble<FP>(100.0),
+                                  FPN_FromDouble<FP>(500.0), &log);
+        check("hot-path kill: drawdown triggers kill switch",
+              ctrl3.kill_switch_active == 1);
+        check("hot-path kill: drawdown kill_reason is 2",
+              ctrl3.kill_reason == 2);
+
+        // 5. unpause blocked by active kill switch
+        PortfolioController<FP> ctrl4 = {};
+        PortfolioController_Init(&ctrl4, cfg);
+        test_warmup_ctrl(&ctrl4, &pool, &log, 100.0, 500.0);
+        ctrl4.kill_switch_active = 1;
+        ctrl4.buying_halted = 1;
+        ctrl4.halt_reason = 1;
+        ctrl4.buy_conds.price = FPN_Zero<FP>(); // simulate halted state
+        ctrl4.buy_conds.volume = FPN_Zero<FP>();
+        PortfolioController_Unpause(&ctrl4);
+        check("unpause blocked: buying_halted stays 1 when kill active",
+              ctrl4.buying_halted == 1);
+        check("unpause blocked: buy_conds.price stays zero",
+              FPN_IsZero(ctrl4.buy_conds.price));
+
+        // 6. centralized halt: volatile regime sets halted
+        PortfolioController<FP> ctrl5 = {};
+        PortfolioController_Init(&ctrl5, cfg);
+        cfg.kill_switch_enabled = 0; // disable kill so it doesn't interfere
+        PortfolioController_Init(&ctrl5, cfg);
+        test_warmup_ctrl(&ctrl5, &pool, &log, 100.0, 500.0);
+        ctrl5.regime.current_regime = REGIME_VOLATILE;
+        // run a slow-path tick to trigger centralized halt
+        ctrl5.tick_count = ctrl5.config.poll_interval; // force slow path
+        PortfolioController_Tick(&ctrl5, &pool, FPN_FromDouble<FP>(100.0),
+                                  FPN_FromDouble<FP>(500.0), &log);
+        check("volatile halt: buying_halted set",
+              ctrl5.buying_halted == 1);
+        check("volatile halt: halt_reason is 3 (volatile)",
+              ctrl5.halt_reason == 3);
+
+        // 7. SL cooldown decrements independently during volatile
+        ctrl5.sl_cooldown_counter = 5;
+        ctrl5.tick_count = ctrl5.config.poll_interval;
+        PortfolioController_Tick(&ctrl5, &pool, FPN_FromDouble<FP>(100.0),
+                                  FPN_FromDouble<FP>(500.0), &log);
+        check("cooldown decrement: counter decremented during volatile",
+              ctrl5.sl_cooldown_counter == 4);
+        check("cooldown decrement: halt_reason still volatile (higher priority)",
+              ctrl5.halt_reason == 3);
+
+        TradeLog_Close(&log);
+        free(pool.slots);
+        remove("HALT_TEST_order_history.csv");
+    }
+
+    //======================================================================================================
+    // PUSHBUY GUARD
+    //======================================================================================================
+    printf("\n--- PUSHBUY GUARD ---\n");
+    {
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.warmup_ticks = 10;
+        cfg.poll_interval = 1;
+        cfg.min_warmup_samples = 10;
+        cfg.starting_balance = FPN_FromDouble<FP>(10000.0);
+        cfg.max_positions = 1;
+
+        PortfolioController<FP> ctrl = {};
+        PortfolioController_Init(&ctrl, cfg);
+        OrderPool<FP> pool;
+        OrderPool_init(&pool, 64);
+        TradeLog log;
+        TradeLog_Init(&log, "PUSHBUY_TEST");
+        test_warmup_ctrl(&ctrl, &pool, &log, 100.0, 500.0);
+
+        // fill slot 0 so portfolio is full (max_positions=1)
+        Portfolio_AddPositionWithExits(&ctrl.portfolio, FPN_FromDouble<FP>(0.1),
+            FPN_FromDouble<FP>(100.0), FPN_FromDouble<FP>(110.0), FPN_FromDouble<FP>(90.0));
+
+        // set up buy conditions and put a fill in the pool
+        ctrl.buy_conds.price = FPN_FromDouble<FP>(95.0);
+        ctrl.buy_conds.volume = FPN_FromDouble<FP>(100.0);
+        DataStream<FP> ds_push = {};
+        ds_push.price = FPN_FromDouble<FP>(94.0);
+        ds_push.volume = FPN_FromDouble<FP>(200.0);
+        BuyGate(&ctrl.buy_conds, &ds_push, &pool);
+        int buf_before = ctrl.trade_buf.count;
+        PortfolioController_Tick(&ctrl, &pool, FPN_FromDouble<FP>(94.0),
+                                  FPN_FromDouble<FP>(200.0), &log);
+        check("pushbuy guard: trade_buf.count unchanged on rejected fill",
+              ctrl.trade_buf.count == buf_before);
+        check("pushbuy guard: still only 1 position (full)",
+              Portfolio_CountActive(&ctrl.portfolio) == 1);
+
+        TradeLog_Close(&log);
+        free(pool.slots);
+        remove("PUSHBUY_TEST_order_history.csv");
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

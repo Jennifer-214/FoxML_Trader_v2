@@ -9,7 +9,7 @@ Tick-level crypto trading engine in C++. Branchless fixed-point arithmetic, bitm
 CMake with zero-dependency ANSI TUI:
 ```bash
 cmake -B build && cmake --build build         # production (ANSI TUI, no deps)
-./build/controller_test                        # run tests (166 assertions)
+./build/controller_test                        # run tests (236 assertions)
 cd build && ./engine                           # run engine (needs engine.cfg symlink)
 ```
 
@@ -78,7 +78,7 @@ Strategy dispatch → position adjustment on regime switch
 - **MemHeaders/** - PoolAllocator (bitmap order pool), BuddyAllocator
 - **ML_Headers/** - RollingStats (regression + R²), LinearRegression3X, ROR_regressor (slope-of-slopes), GateControlNetwork
 - **GUI/** - Dear ImGui native GUI: FoxmlTheme, DashboardPanels, ChartPanel (price/volume/equity), CandleAccumulator, TradeReader, SettingsPanel, TradeHistoryPanel, LogViewerPanel, GuiThread
-- **tests/** - controller_test.cpp (166 assertions)
+- **tests/** - controller_test.cpp (236 assertions)
 - **plans/** - implementation plans (gitignored)
 - **vendor/** - vendored imgui (docking branch) + implot v0.18 (gitignored)
 - **Version.hpp** - single source of truth for version string
@@ -163,7 +163,7 @@ cd build_gui && ./engine_gui
 
 ### Tests
 ```bash
-./build/controller_test  # 166 assertions
+./build/controller_test  # 236 assertions
 ```
 
 ## Versioning
@@ -233,6 +233,24 @@ Two types of numeric config fields exist. Never mix them:
 When adjusting momentum positions, use `momentum_tp_mult` / `momentum_sl_mult`.
 When adjusting MR positions, use `take_profit_pct × 100` / `stop_loss_pct × 100`.
 Never cross these — MR config on momentum positions (or vice versa) creates asymmetric exits.
+
+### FPN-Only Accounting
+Any code path that touches balance, P&L, fees, equity, or position pricing MUST use `FPN<F>` — never `double` or `float` for intermediate calculations. `double` is only acceptable at system boundaries:
+- **OK**: `FPN_ToDouble` for display, logging, CSV output, printf
+- **OK**: `FPN_FromDouble` at exchange API boundary (Binance returns doubles)
+- **NOT OK**: `double equity = FPN_ToDouble(balance) + FPN_ToDouble(value)` for decision logic
+- **NOT OK**: `double product = price_d * qty_d` before converting to FPN (precision loss in product)
+
+**Known violations to fix** (as of 2026-04-01):
+- `peak_equity`, `session_start_equity`, `max_drawdown` (PortfolioController struct) — double fields used by kill switch
+- Kill switch equity/drawdown computation (PortfolioController.hpp ~line 1103-1135) — all double arithmetic
+- Orphan recovery proceeds (main.cpp ~line 766) — `fp * fq` in double before FPN conversion
+
+### FPN Comparison Completeness
+When comparing FPN values, use `FPN_LessThan`, `FPN_GreaterThanOrEqual`, etc. — never partial word comparisons. The inline optimization in `PositionExitGate` (Portfolio.hpp:226-229) only compares MSW and LSW, skipping middle words — this is a known bug that can miss exits near price boundaries.
+
+### Halt Flag Invariant
+Every code path that suppresses buying MUST set `ctrl->buying_halted = 1` and zero `ctrl->gate_offset`. Ad-hoc zeroing of `buy_conds` alone is insufficient — hot-path gate tracking will restore it from `gate_offset` on the next tick.
 
 ### Regime Adjustment Checklist
 When adding a new regime transition case in `Regime_AdjustPositions`:

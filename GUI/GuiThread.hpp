@@ -330,6 +330,7 @@ static inline void *gui_thread_fn(void *arg) {
         if (shared->candle_acc) {
             CandleAccumulator_Snapshot((CandleAccumulator *)shared->candle_acc, &csnap);
         }
+        trades.max_visible_markers = chart_settings.visible_candles * 2;
         TradeData_Refresh(&trades);
 
         ChartState cs = {};

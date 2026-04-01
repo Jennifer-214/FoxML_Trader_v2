@@ -126,6 +126,8 @@ template <unsigned F> struct PortfolioController {
   FPN<F> danger_crash;          // price threshold where gate zeroes (avg - crash_stddevs * σ)
   FPN<F> danger_range_inv;      // 1 / (warn - crash), precomputed for hot-path multiply
   FPN<F> danger_score;          // current danger score [0, 1] — computed every tick
+  int buying_halted;            // centralized halt — checked every tick after gate tracking
+  int halt_reason;              // 0=none, 1=kill, 2=recovery, 3=volatile, 4=cooldown, 5=wind_down, 6=paused
 
   uint32_t idle_cycles;         // slow-path cycles since last fill (gate death spiral recovery)
   uint32_t fills_rejected;     // total fills rejected since startup
@@ -223,6 +225,8 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->kill_reason = 0;
   ctrl->daily_realized_pnl = FPN_Zero<F>();
   ctrl->kill_recovery_counter = 0;
+  ctrl->buying_halted = 0;
+  ctrl->halt_reason = 0;
   ctrl->last_vol_scale = 1.0;
   for (int i = 0; i < 5; i++) {
     ctrl->strategy_stats[i].realized_pnl = FPN_Zero<F>();
@@ -549,6 +553,38 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     ctrl->ema_price = selected;
   }
 
+  // hot-path kill: catches equity drops between slow-path cycles
+  // Portfolio_ComputeValue is O(popcount) — 1 multiply for single-slot mode
+  if (ctrl->config.kill_switch_enabled && !ctrl->buying_halted) {
+    FPN<F> pv = Portfolio_ComputeValue(&ctrl->portfolio, current_price);
+    double equity = FPN_ToDouble(ctrl->balance) + FPN_ToDouble(pv);
+    int tripped = 0;
+    if (ctrl->session_start_equity > 0.0) {
+      double daily_ret = (equity - ctrl->session_start_equity) / ctrl->session_start_equity;
+      if (daily_ret < -FPN_ToDouble(ctrl->config.kill_switch_daily_loss_pct)) {
+        ctrl->kill_reason = 1;
+        tripped = 1;
+      }
+    }
+    if (!tripped && ctrl->peak_equity > 0.0) {
+      double dd_pct = (ctrl->peak_equity - equity) / ctrl->peak_equity;
+      if (dd_pct > FPN_ToDouble(ctrl->config.kill_switch_drawdown_pct)) {
+        ctrl->kill_reason = 2;
+        tripped = 1;
+      }
+    }
+    if (tripped) {
+      ctrl->kill_switch_active = 1;
+      ctrl->buying_halted = 1;
+      ctrl->halt_reason = 1;
+      ctrl->buy_conds.price = FPN_Zero<F>();
+      ctrl->buy_conds.volume = FPN_Zero<F>();
+      ctrl->gate_offset = FPN_Zero<F>();
+      fprintf(stderr, "[KILL] hot-path: equity %.2f — trading halted (reason %d)\n",
+              equity, ctrl->kill_reason);
+    }
+  }
+
   // hot-path gate tracking: recompute gate price from live EMA + stored offset
   // gate_offset is set on slow path by strategy BuySignal; EMA updates every tick above
   // result: gate naturally tracks live price — dips relative to CURRENT price are caught
@@ -572,6 +608,13 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     // scale gate: harder to buy as danger increases
     FPN<F> gate_scale = FPN_SubSat(one, ctrl->danger_score);
     ctrl->buy_conds.price = FPN_Mul(ctrl->buy_conds.price, gate_scale);
+  }
+
+  // halt enforcement: squash any gate resurrection from gate tracking or danger gradient
+  if (ctrl->buying_halted) {
+    ctrl->buy_conds.price = FPN_Zero<F>();
+    ctrl->buy_conds.volume = FPN_Zero<F>();
+    ctrl->gate_offset = FPN_Zero<F>();
   }
 
   //==================================================================================================
@@ -921,21 +964,21 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
         ctrl->idle_cycles = 0;  // reset gate death spiral counter
         ctrl->balance = FPN_SubSat(ctrl->balance, total_cost);
         ctrl->total_fees = FPN_AddSat(ctrl->total_fees, entry_fee);
-      }
 
-      // buffer buy record (no file I/O on hot path)
-      { double _avg = FPN_ToDouble(ctrl->rolling.price_avg);
-        double _stddev = FPN_ToDouble(ctrl->rolling.price_stddev);
-        double _spacing = FPN_ToDouble(RollingStats_EntrySpacing(&ctrl->rolling, ctrl->config.spacing_multiplier));
-        double _bp = FPN_ToDouble(ctrl->buy_conds.price);
-        double _gdist = (_avg != 0.0) ? ((FPN_ToDouble(fill_price) - _bp) / _avg) * 100.0 : 0.0;
-        TradeLogBuffer_PushBuy(&ctrl->trade_buf, ctrl->total_ticks,
-                              FPN_ToDouble(fill_price), FPN_ToDouble(sized_qty),
-                              FPN_ToDouble(tp_price), FPN_ToDouble(sl_price),
-                              _bp, FPN_ToDouble(ctrl->buy_conds.volume),
-                              _stddev, _avg, FPN_ToDouble(ctrl->balance),
-                              FPN_ToDouble(entry_fee), _spacing, _gdist,
-                              ctrl->strategy_id, ctrl->regime.current_regime); }
+        // buffer buy record (no file I/O on hot path)
+        { double _avg = FPN_ToDouble(ctrl->rolling.price_avg);
+          double _stddev = FPN_ToDouble(ctrl->rolling.price_stddev);
+          double _spacing = FPN_ToDouble(RollingStats_EntrySpacing(&ctrl->rolling, ctrl->config.spacing_multiplier));
+          double _bp = FPN_ToDouble(ctrl->buy_conds.price);
+          double _gdist = (_avg != 0.0) ? ((FPN_ToDouble(fill_price) - _bp) / _avg) * 100.0 : 0.0;
+          TradeLogBuffer_PushBuy(&ctrl->trade_buf, ctrl->total_ticks,
+                                FPN_ToDouble(fill_price), FPN_ToDouble(sized_qty),
+                                FPN_ToDouble(tp_price), FPN_ToDouble(sl_price),
+                                _bp, FPN_ToDouble(ctrl->buy_conds.volume),
+                                _stddev, _avg, FPN_ToDouble(ctrl->balance),
+                                FPN_ToDouble(entry_fee), _spacing, _gdist,
+                                ctrl->strategy_id, ctrl->regime.current_regime); }
+      }
     } else {
       // fill rejected — track reason for TUI diagnostics
       ctrl->fills_rejected++;
@@ -1226,33 +1269,24 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     Gate_Zero(&ctrl->buy_conds, book_ok);
   }
 
-  // volatile: pause buying entirely (chaotic, not tradeable)
-  // TRENDING_DOWN: allow MR to trade the bounces — regime adjustment already
-  // tightens TP/SL for counter-trend entries. the staircase pattern in downtrends
-  // has $300+ bounces that are tradeable with adjusted exits.
-  if (ctrl->regime.current_regime == REGIME_VOLATILE) {
-    ctrl->buy_conds.price = FPN_Zero<F>();
-    ctrl->buy_conds.volume = FPN_Zero<F>();
-  }
+  // CENTRALIZED HALT: single location for all halt conditions
+  // counters decrement unconditionally — only the flag/reason uses priority
+  {
+    if (ctrl->sl_cooldown_counter > 0) ctrl->sl_cooldown_counter--;
+    if (ctrl->kill_recovery_counter > 0) ctrl->kill_recovery_counter--;
 
-  // post-SL cooldown: pause buying after stop loss to let market settle
-  // during cooldown, RollingStats keep updating so regression adapts to new price level
-  if (ctrl->sl_cooldown_counter > 0) {
-    ctrl->sl_cooldown_counter--;
-    ctrl->buy_conds.price = FPN_Zero<F>();
-    ctrl->buy_conds.volume = FPN_Zero<F>();
-  }
-
-  // KILL SWITCH: suppress all buying when active (sticky — overrides everything above)
-  if (ctrl->kill_switch_active) {
-    ctrl->buy_conds.price = FPN_Zero<F>();
-    ctrl->buy_conds.volume = FPN_Zero<F>();
-  }
-  // kill recovery warmup: after kill resets, observe for N cycles before trading
-  if (ctrl->kill_recovery_counter > 0) {
-    ctrl->kill_recovery_counter--;
-    ctrl->buy_conds.price = FPN_Zero<F>();
-    ctrl->buy_conds.volume = FPN_Zero<F>();
+    int halted = 0, reason = 0;
+    if (ctrl->kill_switch_active)                            { halted = 1; reason = 1; }
+    else if (ctrl->kill_recovery_counter > 0)                { halted = 1; reason = 2; }
+    else if (ctrl->regime.current_regime == REGIME_VOLATILE) { halted = 1; reason = 3; }
+    else if (ctrl->sl_cooldown_counter > 0)                  { halted = 1; reason = 4; }
+    ctrl->buying_halted = halted;
+    ctrl->halt_reason = reason;
+    if (halted) {
+      ctrl->buy_conds.price = FPN_Zero<F>();
+      ctrl->buy_conds.volume = FPN_Zero<F>();
+      ctrl->gate_offset = FPN_Zero<F>();
+    }
   }
 }
 //======================================================================================================
@@ -1265,6 +1299,10 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
 // unpause: dispatch to active strategy's BuySignal
 template <unsigned F>
 inline void PortfolioController_Unpause(PortfolioController<F> *ctrl) {
+    // don't unpause if a higher-priority halt is active
+    if (ctrl->kill_switch_active || ctrl->kill_recovery_counter > 0) return;
+    ctrl->buying_halted = 0;
+    ctrl->halt_reason = 0;
     // signal-only — don't feed regression on unpause
     PortfolioController_StrategyBuySignal(ctrl);
 }
