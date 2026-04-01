@@ -589,36 +589,29 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     }
   }
 
-  // hot-path gate tracking: recompute gate price from live EMA + stored offset
-  // gate_offset is set on slow path by strategy BuySignal; EMA updates every tick above
-  // result: gate naturally tracks live price — dips relative to CURRENT price are caught
-  if (!FPN_IsZero(ctrl->gate_offset)) {
-    if (ctrl->buy_conds.gate_direction == 0)
-      ctrl->buy_conds.price = FPN_SubSat(ctrl->ema_price, ctrl->gate_offset);
-    else
-      ctrl->buy_conds.price = FPN_AddSat(ctrl->ema_price, ctrl->gate_offset);
-  }
+  // hot-path gate tracking + danger gradient — SKIPPED when halted
+  // no ordering dependency: halted = nothing modifies buy_conds, gate_offset stays zero
+  if (!ctrl->buying_halted) {
+    // gate tracking: recompute gate price from live EMA + stored offset
+    // gate_offset is set on slow path by strategy BuySignal; EMA updates every tick above
+    if (!FPN_IsZero(ctrl->gate_offset)) {
+      if (ctrl->buy_conds.gate_direction == 0)
+        ctrl->buy_conds.price = FPN_SubSat(ctrl->ema_price, ctrl->gate_offset);
+      else
+        ctrl->buy_conds.price = FPN_AddSat(ctrl->ema_price, ctrl->gate_offset);
+    }
 
-  // danger gradient: proportional crash protection between slow-path cycles
-  // danger_score ∈ [0, 1]: 0 = safe, 1 = crash. scales gate price toward zero.
-  // precomputed thresholds (danger_warn, danger_crash, danger_range_inv) set on slow path
-  if (ctrl->config.danger_enabled && !FPN_IsZero(ctrl->danger_range_inv)) {
-    FPN<F> depth = FPN_SubSat(ctrl->danger_warn, current_price); // 0 if safe, + if in zone
-    FPN<F> raw = FPN_Mul(depth, ctrl->danger_range_inv);
-    FPN<F> one = FPN_FromDouble<F>(1.0);
-    FPN<F> zero = FPN_Zero<F>();
-    ctrl->danger_score = FPN_Min(FPN_Max(raw, zero), one); // clamp [0, 1]
-
-    // scale gate: harder to buy as danger increases
-    FPN<F> gate_scale = FPN_SubSat(one, ctrl->danger_score);
-    ctrl->buy_conds.price = FPN_Mul(ctrl->buy_conds.price, gate_scale);
-  }
-
-  // halt enforcement: squash any gate resurrection from gate tracking or danger gradient
-  if (ctrl->buying_halted) {
-    ctrl->buy_conds.price = FPN_Zero<F>();
-    ctrl->buy_conds.volume = FPN_Zero<F>();
-    ctrl->gate_offset = FPN_Zero<F>();
+    // danger gradient: proportional crash protection between slow-path cycles
+    // danger_score ∈ [0, 1]: 0 = safe, 1 = crash. scales gate price toward zero.
+    if (ctrl->config.danger_enabled && !FPN_IsZero(ctrl->danger_range_inv)) {
+      FPN<F> depth = FPN_SubSat(ctrl->danger_warn, current_price);
+      FPN<F> raw = FPN_Mul(depth, ctrl->danger_range_inv);
+      FPN<F> one = FPN_FromDouble<F>(1.0);
+      FPN<F> zero = FPN_Zero<F>();
+      ctrl->danger_score = FPN_Min(FPN_Max(raw, zero), one);
+      FPN<F> gate_scale = FPN_SubSat(one, ctrl->danger_score);
+      ctrl->buy_conds.price = FPN_Mul(ctrl->buy_conds.price, gate_scale);
+    }
   }
 
   //==================================================================================================
