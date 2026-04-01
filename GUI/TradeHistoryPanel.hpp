@@ -41,36 +41,56 @@ static inline void TradeHistory_Refresh(TradeHistory *th) {
 
     char line[1024];
     int first = 1;
-    // CSV: tick,side,price,quantity,entry_price,delta_pct,exit_reason,...
+    // CSV: tick,side,price,quantity,entry_price,delta_pct,exit_reason,...,fee_cost(14),...
+    // BUY rows: fee_cost = entry fee. SELL rows: fee_cost = exit fee.
+    // pair entry fees with sells FIFO to compute total round-trip fees.
+    double pending_entry_fees[MAX_HISTORY];
+    int pending_count = 0;
+
     while (fgets(line, sizeof(line), f)) {
         if (first) { first = 0; continue; }
 
-        char side[16], price_s[32], qty_s[32], entry_s[32], reason_s[16];
+        char side[16];
         csv_field(line, 1, side, sizeof(side));
+
+        char fee_s[32];
+        csv_field(line, 14, fee_s, sizeof(fee_s));
+
+        if (strcmp(side, "BUY") == 0) {
+            if (pending_count < MAX_HISTORY)
+                pending_entry_fees[pending_count++] = atof(fee_s);
+            continue;
+        }
         if (strcmp(side, "SELL") != 0) continue;
         if (th->count >= MAX_HISTORY) break;
 
+        char price_s[32], qty_s[32], entry_s[32], reason_s[16], tick_s[16];
         csv_field(line, 2, price_s, sizeof(price_s));
         csv_field(line, 3, qty_s, sizeof(qty_s));
         csv_field(line, 4, entry_s, sizeof(entry_s));
         csv_field(line, 6, reason_s, sizeof(reason_s));
-
-        char tick_s[16];
         csv_field(line, 0, tick_s, sizeof(tick_s));
+
+        // pop matching entry fee (FIFO)
+        double entry_fee = 0.0;
+        if (pending_count > 0) {
+            entry_fee = pending_entry_fees[0];
+            for (int j = 1; j < pending_count; j++)
+                pending_entry_fees[j-1] = pending_entry_fees[j];
+            pending_count--;
+        }
+        double exit_fee = atof(fee_s);
 
         TradeHistoryEntry *e = &th->entries[th->count++];
         e->exit_price = atof(price_s);
         e->entry_price = atof(entry_s);
         if (e->entry_price < 1.0) e->entry_price = e->exit_price;
         e->qty = atof(qty_s);
-        e->pnl = (e->exit_price - e->entry_price) * e->qty;
+        e->fee = entry_fee + exit_fee;
+        e->pnl = (e->exit_price - e->entry_price) * e->qty - e->fee;
         e->tick = atoi(tick_s);
         strncpy(e->reason, reason_s, 7);
         e->reason[7] = '\0';
-
-        char fee_s[32];
-        csv_field(line, 14, fee_s, sizeof(fee_s));
-        e->fee = atof(fee_s);
 
         char strat_s[32];
         csv_field(line, 17, strat_s, sizeof(strat_s));
@@ -108,8 +128,8 @@ static inline void GUI_Panel_TradeHistory(TradeHistory *th) {
         ImGui::TableSetupColumn("Exit",   ImGuiTableColumnFlags_WidthFixed, 70);
         ImGui::TableSetupColumn("P&L",    ImGuiTableColumnFlags_WidthFixed, 70);
         ImGui::TableSetupColumn("Fee",    ImGuiTableColumnFlags_WidthFixed, 55);
-        ImGui::TableSetupColumn("Re..." , ImGuiTableColumnFlags_WidthFixed, 35);
-        ImGui::TableSetupColumn("Strat",  ImGuiTableColumnFlags_WidthFixed, 40);
+        ImGui::TableSetupColumn("Reason", ImGuiTableColumnFlags_WidthFixed, 45);
+        ImGui::TableSetupColumn("Strat",  ImGuiTableColumnFlags_WidthFixed, 45);
         ImGui::TableSetupColumn("In",     ImGuiTableColumnFlags_WidthFixed, 65);
         ImGui::TableSetupColumn("Out",    ImGuiTableColumnFlags_WidthFixed, 65);
         ImGui::TableSetupScrollFreeze(0, 1);
