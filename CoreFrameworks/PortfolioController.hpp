@@ -120,6 +120,13 @@ template <unsigned F> struct PortfolioController {
   FPN<F> ema_price;             // exponential moving average of price (hot path, ~2ns per tick)
   int ema_initialized;          // 0 until first tick sets it to current price
 
+  // hot-path fast-react layer — precomputed on slow path, applied every tick
+  FPN<F> gate_offset;           // distance from EMA to gate price (set on slow path)
+  FPN<F> danger_warn;           // price threshold where gradient starts (avg - warn_stddevs * σ)
+  FPN<F> danger_crash;          // price threshold where gate zeroes (avg - crash_stddevs * σ)
+  FPN<F> danger_range_inv;      // 1 / (warn - crash), precomputed for hot-path multiply
+  FPN<F> danger_score;          // current danger score [0, 1] — computed every tick
+
   uint32_t idle_cycles;         // slow-path cycles since last fill (gate death spiral recovery)
   uint32_t fills_rejected;     // total fills rejected since startup
   int last_reject_reason;      // 0=none, 1=spacing, 2=balance, 3=exposure, 4=breaker, 5=full, 6=dup
@@ -303,6 +310,18 @@ inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
     ctrl->balance = FPN_AddSat(ctrl->balance, net_proceeds);
     ctrl->total_fees = FPN_AddSat(ctrl->total_fees, exit_fee);
 
+    // balance reconciliation: check that balance tracks realized_pnl
+    // if these diverge, there's a balance leak
+    if (Portfolio_CountActive(&ctrl->portfolio) == 0) {
+      double bal = FPN_ToDouble(ctrl->balance);
+      double expected = FPN_ToDouble(ctrl->config.starting_balance) + FPN_ToDouble(ctrl->realized_pnl);
+      double drift = bal - expected;
+      if (drift < -0.10 || drift > 0.10) {
+        fprintf(stderr, "[BALANCE DRIFT] bal=%.2f expected=%.2f drift=%.2f realized=%.4f fees=%.4f\n",
+                bal, expected, drift, FPN_ToDouble(ctrl->realized_pnl), FPN_ToDouble(ctrl->total_fees));
+      }
+    }
+
     const char *reason = (rec->reason == 0) ? "TP" : "SL";
     ctrl->wins += (rec->reason == 0);
     ctrl->losses += (rec->reason == 1);
@@ -415,6 +434,15 @@ inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) 
     break;
   }
 
+  // capture gate offset for hot-path EMA tracking
+  // offset = distance from EMA to gate price (strategy-specific, reapplied every tick to live EMA)
+  if (!FPN_IsZero(ctrl->buy_conds.price) && !FPN_IsZero(ctrl->ema_price)) {
+    if (ctrl->buy_conds.gate_direction == 0)
+      ctrl->gate_offset = FPN_SubSat(ctrl->ema_price, ctrl->buy_conds.price);
+    else
+      ctrl->gate_offset = FPN_SubSat(ctrl->buy_conds.price, ctrl->ema_price);
+  }
+
   // feed signal strength to Welford tracker (before no-trade band may zero it)
   if (!FPN_IsZero(ctrl->buy_conds.price) && !FPN_IsZero(ctrl->rolling.price_avg)) {
     FPN<F> sd = FPN_Sub(ctrl->buy_conds.price, ctrl->rolling.price_avg);
@@ -519,6 +547,31 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       selected.w[i] = (current_price.w[i] & first_tick) | (ema_new.w[i] & ~first_tick);
     selected.sign = (current_price.sign & (int)first_tick) | (ema_new.sign & (int)~first_tick);
     ctrl->ema_price = selected;
+  }
+
+  // hot-path gate tracking: recompute gate price from live EMA + stored offset
+  // gate_offset is set on slow path by strategy BuySignal; EMA updates every tick above
+  // result: gate naturally tracks live price — dips relative to CURRENT price are caught
+  if (!FPN_IsZero(ctrl->gate_offset)) {
+    if (ctrl->buy_conds.gate_direction == 0)
+      ctrl->buy_conds.price = FPN_SubSat(ctrl->ema_price, ctrl->gate_offset);
+    else
+      ctrl->buy_conds.price = FPN_AddSat(ctrl->ema_price, ctrl->gate_offset);
+  }
+
+  // danger gradient: proportional crash protection between slow-path cycles
+  // danger_score ∈ [0, 1]: 0 = safe, 1 = crash. scales gate price toward zero.
+  // precomputed thresholds (danger_warn, danger_crash, danger_range_inv) set on slow path
+  if (ctrl->config.danger_enabled && !FPN_IsZero(ctrl->danger_range_inv)) {
+    FPN<F> depth = FPN_SubSat(ctrl->danger_warn, current_price); // 0 if safe, + if in zone
+    FPN<F> raw = FPN_Mul(depth, ctrl->danger_range_inv);
+    FPN<F> one = FPN_FromDouble<F>(1.0);
+    FPN<F> zero = FPN_Zero<F>();
+    ctrl->danger_score = FPN_Min(FPN_Max(raw, zero), one); // clamp [0, 1]
+
+    // scale gate: harder to buy as danger increases
+    FPN<F> gate_scale = FPN_SubSat(one, ctrl->danger_score);
+    ctrl->buy_conds.price = FPN_Mul(ctrl->buy_conds.price, gate_scale);
   }
 
   //==================================================================================================
@@ -977,6 +1030,18 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
 
           ctrl->balance = FPN_AddSat(ctrl->balance, net_proceeds);
           ctrl->total_fees = FPN_AddSat(ctrl->total_fees, exit_fee);
+
+          // balance reconciliation (same check as DrainExits)
+          if (Portfolio_CountActive(&ctrl->portfolio) <= 1) { // this position is about to be removed
+            double bal = FPN_ToDouble(ctrl->balance);
+            double expected = FPN_ToDouble(ctrl->config.starting_balance) + FPN_ToDouble(ctrl->realized_pnl);
+            double drift = bal - expected;
+            if (drift < -0.10 || drift > 0.10) {
+              fprintf(stderr, "[BALANCE DRIFT TIME] bal=%.2f expected=%.2f drift=%.2f\n",
+                      bal, expected, drift);
+            }
+          }
+
           ctrl->losses++;
           // branchless win/loss accounting (same pattern as DrainExits)
           {
@@ -1010,6 +1075,18 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // adjustment
   RollingStats_Push(&ctrl->rolling, current_price, current_volume, is_buyer_maker);
   RollingStats_Push(ctrl->rolling_long, current_price, current_volume, is_buyer_maker);
+
+  // precompute danger gradient thresholds for hot-path use
+  // warn = avg - warn_stddevs * σ, crash = avg - crash_stddevs * σ
+  if (ctrl->config.danger_enabled && !FPN_IsZero(ctrl->rolling.price_stddev)) {
+    FPN<F> avg = ctrl->rolling.price_avg;
+    FPN<F> sd = ctrl->rolling.price_stddev;
+    ctrl->danger_warn = FPN_SubSat(avg, FPN_Mul(sd, ctrl->config.danger_warn_stddevs));
+    ctrl->danger_crash = FPN_SubSat(avg, FPN_Mul(sd, ctrl->config.danger_crash_stddevs));
+    FPN<F> range = FPN_SubSat(ctrl->danger_warn, ctrl->danger_crash);
+    if (!FPN_IsZero(range))
+      ctrl->danger_range_inv = FPN_DivNoAssert(FPN_FromDouble<F>(1.0), range);
+  }
 
   // compute unrealized P&L and estimate exit fees on open positions
   // gross P&L is what Portfolio_ComputePnL returns (price delta * qty)
@@ -1094,7 +1171,16 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       // only auto-switch strategy when default_strategy=-1 (regime auto mode)
       // when a specific strategy is selected, regime detection still runs
       // (for display/signals) but doesn't override the strategy
-      if (ctrl->config.default_strategy < 0) {
+      if (ctrl->config.default_strategy == -1) {
+        // legacy 2-strategy auto: MR + Momentum only
+        int old_strategy = ctrl->strategy_id;
+        ctrl->strategy_id = (new_regime == REGIME_TRENDING)
+            ? STRATEGY_MOMENTUM : STRATEGY_MEAN_REVERSION;
+        if (ctrl->strategy_id != old_strategy)
+          Regime_AdjustPositions(&ctrl->portfolio, &ctrl->rolling,
+                                  old_regime, new_regime, ctrl->entry_strategy, &ctrl->config);
+      } else if (ctrl->config.default_strategy <= -2) {
+        // full 4-strategy auto: MR + EMA Cross + Momentum + SimpleDip
         int old_strategy = ctrl->strategy_id;
         ctrl->strategy_id = Regime_ToStrategy(new_regime);
         if (ctrl->strategy_id != old_strategy)

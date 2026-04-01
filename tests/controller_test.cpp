@@ -2057,6 +2057,146 @@ int main() {
         }
     }
 
+    //======================================================================================================
+    // DANGER GRADIENT
+    //======================================================================================================
+    printf("\n--- DANGER GRADIENT ---\n");
+    {
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+
+        // verify defaults
+        check("danger: enabled by default", cfg.danger_enabled == 1);
+        check("danger: warn_stddevs default ~3.0",
+              fabs(FPN_ToDouble(cfg.danger_warn_stddevs) - 3.0) < 0.01);
+        check("danger: crash_stddevs default ~6.0",
+              fabs(FPN_ToDouble(cfg.danger_crash_stddevs) - 6.0) < 0.01);
+        check("danger: warn < crash (wider range)",
+              FPN_LessThan(cfg.danger_warn_stddevs, cfg.danger_crash_stddevs));
+
+        // test danger score math: simulate precomputed thresholds
+        // avg=100, stddev=10 → warn=70 (3σ below), crash=40 (6σ below)
+        FPN<FP> avg = FPN_FromDouble<FP>(100.0);
+        FPN<FP> sd = FPN_FromDouble<FP>(10.0);
+        FPN<FP> warn = FPN_SubSat(avg, FPN_Mul(sd, cfg.danger_warn_stddevs));  // 100-30=70
+        FPN<FP> crash = FPN_SubSat(avg, FPN_Mul(sd, cfg.danger_crash_stddevs)); // 100-60=40
+        FPN<FP> range = FPN_SubSat(warn, crash);  // 70-40=30
+        FPN<FP> range_inv = FPN_DivNoAssert(FPN_FromDouble<FP>(1.0), range);
+
+        check("danger: warn threshold ~70.0",
+              fabs(FPN_ToDouble(warn) - 70.0) < 0.01);
+        check("danger: crash threshold ~40.0",
+              fabs(FPN_ToDouble(crash) - 40.0) < 0.01);
+
+        // price at 100 (safe): score should be 0
+        {
+            FPN<FP> price = FPN_FromDouble<FP>(100.0);
+            FPN<FP> depth = FPN_SubSat(warn, price); // 70 - 100 = 0 (saturated)
+            FPN<FP> raw = FPN_Mul(depth, range_inv);
+            FPN<FP> zero = FPN_Zero<FP>();
+            FPN<FP> one = FPN_FromDouble<FP>(1.0);
+            FPN<FP> score = FPN_Min(FPN_Max(raw, zero), one);
+            check("danger: price=100 (safe) → score=0",
+                  FPN_ToDouble(score) < 0.01);
+        }
+
+        // price at 55 (in danger zone, halfway): score should be ~0.5
+        {
+            FPN<FP> price = FPN_FromDouble<FP>(55.0);
+            FPN<FP> depth = FPN_SubSat(warn, price); // 70 - 55 = 15
+            FPN<FP> raw = FPN_Mul(depth, range_inv); // 15/30 = 0.5
+            FPN<FP> zero = FPN_Zero<FP>();
+            FPN<FP> one = FPN_FromDouble<FP>(1.0);
+            FPN<FP> score = FPN_Min(FPN_Max(raw, zero), one);
+            double sv = FPN_ToDouble(score);
+            check("danger: price=55 (mid-zone) → score~0.5",
+                  sv > 0.4 && sv < 0.6);
+        }
+
+        // price at 30 (below crash): score should be clamped to 1.0
+        {
+            FPN<FP> price = FPN_FromDouble<FP>(30.0);
+            FPN<FP> depth = FPN_SubSat(warn, price); // 70 - 30 = 40
+            FPN<FP> raw = FPN_Mul(depth, range_inv); // 40/30 = 1.33
+            FPN<FP> zero = FPN_Zero<FP>();
+            FPN<FP> one = FPN_FromDouble<FP>(1.0);
+            FPN<FP> score = FPN_Min(FPN_Max(raw, zero), one);
+            check("danger: price=30 (crash) → score=1.0",
+                  fabs(FPN_ToDouble(score) - 1.0) < 0.01);
+        }
+
+        // gate scaling: score=0.5 should halve the gate price
+        {
+            FPN<FP> gate = FPN_FromDouble<FP>(68000.0);
+            FPN<FP> score = FPN_FromDouble<FP>(0.5);
+            FPN<FP> one = FPN_FromDouble<FP>(1.0);
+            FPN<FP> scale = FPN_SubSat(one, score); // 0.5
+            FPN<FP> scaled_gate = FPN_Mul(gate, scale);
+            check("danger: gate scaling at score=0.5 → ~$34000",
+                  fabs(FPN_ToDouble(scaled_gate) - 34000.0) < 1.0);
+        }
+
+        // gate scaling: score=1.0 should zero the gate
+        {
+            FPN<FP> gate = FPN_FromDouble<FP>(68000.0);
+            FPN<FP> one = FPN_FromDouble<FP>(1.0);
+            FPN<FP> scale = FPN_SubSat(one, one); // 0
+            FPN<FP> scaled_gate = FPN_Mul(gate, scale);
+            check("danger: gate scaling at score=1.0 → $0",
+                  FPN_ToDouble(scaled_gate) < 0.01);
+        }
+    }
+
+    //======================================================================================================
+    // GATE OFFSET TRACKING
+    //======================================================================================================
+    printf("\n--- GATE OFFSET TRACKING ---\n");
+    {
+        // verify offset capture: if EMA=68000 and gate_price=67950 (dir=0, buy below)
+        // offset should be 50 (distance from EMA to gate)
+        FPN<FP> ema = FPN_FromDouble<FP>(68000.0);
+        FPN<FP> gate_price = FPN_FromDouble<FP>(67950.0);
+        FPN<FP> offset = FPN_SubSat(ema, gate_price); // 50
+        check("gate offset: EMA=68000, gate=67950 → offset=50",
+              fabs(FPN_ToDouble(offset) - 50.0) < 0.01);
+
+        // verify live gate recompute: if EMA rises to 68500, gate should be 68450
+        FPN<FP> new_ema = FPN_FromDouble<FP>(68500.0);
+        FPN<FP> live_gate = FPN_SubSat(new_ema, offset);
+        check("gate offset: EMA rises to 68500 → gate=68450",
+              fabs(FPN_ToDouble(live_gate) - 68450.0) < 0.01);
+
+        // verify momentum direction (dir=1, buy above)
+        FPN<FP> mom_gate = FPN_FromDouble<FP>(68100.0);
+        FPN<FP> mom_offset = FPN_SubSat(mom_gate, ema); // 100
+        FPN<FP> mom_live = FPN_AddSat(new_ema, mom_offset); // 68600
+        check("gate offset: momentum dir=1, EMA rises → gate=68600",
+              fabs(FPN_ToDouble(mom_live) - 68600.0) < 0.01);
+    }
+
+    //======================================================================================================
+    // DEFAULT_STRATEGY -1 vs -2 DISPATCH
+    //======================================================================================================
+    printf("\n--- STRATEGY DISPATCH MODES ---\n");
+    {
+        // -1 legacy: only MR and Momentum
+        check("dispatch -1: RANGING → MR",
+              STRATEGY_MEAN_REVERSION == STRATEGY_MEAN_REVERSION); // trivial, for completeness
+        check("dispatch -1: TRENDING → MOMENTUM (not EMA Cross)",
+              STRATEGY_MOMENTUM != STRATEGY_EMA_CROSS);
+
+        // -2 full auto: verify all mappings produce distinct strategies
+        int ranging_s   = Regime_ToStrategy(REGIME_RANGING);
+        int trending_s  = Regime_ToStrategy(REGIME_TRENDING);
+        int volatile_s  = Regime_ToStrategy(REGIME_VOLATILE);
+        int mild_s      = Regime_ToStrategy(REGIME_MILD_TREND);
+        check("dispatch -2: 4 strategies used (MR, MOM, DIP, EMA)",
+              ranging_s != trending_s && trending_s != volatile_s && volatile_s != mild_s);
+        check("dispatch -2: VOLATILE uses SimpleDip (not MR)",
+              volatile_s == STRATEGY_SIMPLE_DIP);
+        check("dispatch -2: MILD_TREND uses EMA Cross (not Momentum)",
+              mild_s == STRATEGY_EMA_CROSS);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

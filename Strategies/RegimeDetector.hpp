@@ -372,7 +372,36 @@ inline void Regime_AdjustPositions(Portfolio<F> *portfolio,
                 FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
                 pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
             }
-            else if ((old_regime == REGIME_TRENDING || old_regime == REGIME_TRENDING_DOWN)
+            // RANGING → MILD_TREND: both buy dips, widen TP slightly (uptrend confirmed)
+            else if (old_regime == REGIME_RANGING && new_regime == REGIME_MILD_TREND) {
+                FPN<F> mr_tp_offset = FPN_Mul(stddev, FPN_Mul(cfg->take_profit_pct, hundred));
+                FPN<F> mild_widen = FPN_Mul(mr_tp_offset, FPN_FromDouble<F>(1.3));
+                FPN<F> wider_tp = FPN_AddSat(pos->entry_price, mild_widen);
+                pos->take_profit_price = FPN_Max(pos->take_profit_price, wider_tp);
+
+                FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+                FPN<F> min_sl_dist = FPN_Mul(tp_dist, half);
+                FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
+                pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
+            }
+            // MILD_TREND → TRENDING: uptrend strengthening, widen TP to momentum levels
+            else if (old_regime == REGIME_MILD_TREND && new_regime == REGIME_TRENDING) {
+                FPN<F> wide_tp_offset = FPN_Mul(stddev, cfg->momentum_tp_mult);
+                FPN<F> wide_tp = FPN_AddSat(pos->entry_price, wide_tp_offset);
+                pos->take_profit_price = FPN_Max(pos->take_profit_price, wide_tp);
+
+                FPN<F> tight_sl_offset = FPN_Mul(stddev, cfg->momentum_sl_mult);
+                FPN<F> tight_sl = FPN_SubSat(pos->entry_price, tight_sl_offset);
+                pos->stop_loss_price = FPN_Max(pos->stop_loss_price, tight_sl);
+
+                FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+                FPN<F> min_sl_dist = FPN_Mul(tp_dist, half);
+                FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
+                pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
+            }
+            // TRENDING/TRENDING_DOWN/MILD_TREND → RANGING: tighten TP, widen SL for chop
+            else if ((old_regime == REGIME_TRENDING || old_regime == REGIME_TRENDING_DOWN
+                      || old_regime == REGIME_MILD_TREND)
                      && new_regime == REGIME_RANGING) {
                 FPN<F> tight_tp_offset = FPN_Mul(stddev, FPN_Mul(cfg->take_profit_pct, hundred));
                 FPN<F> tight_tp = FPN_AddSat(pos->entry_price, tight_tp_offset);
@@ -395,8 +424,22 @@ inline void Regime_AdjustPositions(Portfolio<F> *portfolio,
                 FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
                 pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
             }
+            // TRENDING → MILD_TREND: trend weakening, tighten TP moderately
+            else if (old_regime == REGIME_TRENDING && new_regime == REGIME_MILD_TREND) {
+                FPN<F> mr_tp_offset = FPN_Mul(stddev, FPN_Mul(cfg->take_profit_pct, hundred));
+                FPN<F> mild_tp = FPN_Mul(mr_tp_offset, FPN_FromDouble<F>(1.3));
+                FPN<F> tighter_tp = FPN_AddSat(pos->entry_price, mild_tp);
+                pos->take_profit_price = FPN_Min(pos->take_profit_price, tighter_tp);
+
+                // SL ceiling + floor
+                FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+                FPN<F> sl_ceiling = FPN_SubSat(pos->entry_price, tp_dist);
+                pos->stop_loss_price = FPN_Max(pos->stop_loss_price, sl_ceiling);
+                FPN<F> min_sl_dist = FPN_Mul(tp_dist, half);
+                FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
+                pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
+            }
             // entering downtrend: tighten TP (take profits), tighten SL (cut losses)
-            // uses momentum_tp_mult (not take_profit_pct×100) — these are momentum positions
             else if (new_regime == REGIME_TRENDING_DOWN) {
                 FPN<F> tight_tp_offset = FPN_Mul(stddev, cfg->momentum_tp_mult);
                 FPN<F> tight_tp = FPN_AddSat(pos->entry_price, tight_tp_offset);

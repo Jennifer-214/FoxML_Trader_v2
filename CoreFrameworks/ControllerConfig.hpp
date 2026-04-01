@@ -151,6 +151,10 @@ template <unsigned F> struct ControllerConfig {
   int regime_model_backend;      // 0=disabled, 1=xgboost, 2=lightgbm
   char regime_model_path[256];   // path to regime enrichment model
   FPN<F> regime_model_weight;    // score weight in Regime_Classify (e.g. 2)
+  // danger gradient (hot-path crash protection)
+  int danger_enabled;            // 0=disabled, 1=enabled
+  FPN<F> danger_warn_stddevs;    // gradient starts at this many stddevs below avg (e.g. 3.0)
+  FPN<F> danger_crash_stddevs;   // full gate kill at this many stddevs below avg (e.g. 6.0)
 };
 //======================================================================================================
 template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
@@ -266,6 +270,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.regime_model_backend = 0;
   cfg.regime_model_path[0] = '\0';
   cfg.regime_model_weight = FPN_FromDouble<F>(2.0);
+  // danger gradient
+  cfg.danger_enabled = 1;
+  cfg.danger_warn_stddevs = FPN_FromDouble<F>(3.0);    // gradient starts at 3σ below avg
+  cfg.danger_crash_stddevs = FPN_FromDouble<F>(6.0);   // full gate kill at 6σ below avg
   return cfg;
 }
 //======================================================================================================
@@ -444,6 +452,9 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(no_trade_band_mult)
     CFG_PARSE_FPN(ml_buy_threshold)
     CFG_PARSE_FPN(regime_model_weight)
+    CFG_PARSE_INT(danger_enabled)
+    CFG_PARSE_FPN(danger_warn_stddevs)
+    CFG_PARSE_FPN(danger_crash_stddevs)
 
     // ML model paths (string fields — not atof)
     if (strcmp(key, "ml_model_path") == 0) {

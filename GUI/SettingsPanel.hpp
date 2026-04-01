@@ -116,6 +116,10 @@ static const CfgFieldDef field_defs[] = {
     // EMA Gate
     {"gate_ema_enabled",      "EMA Enabled",  "EMA Gate",        CFG_BOOL,  NULL},
     {"gate_ema_alpha",        "Alpha",        "EMA Gate",        CFG_FLOAT, "%.4f"},
+    // Danger Gradient
+    {"danger_enabled",        "Enabled",      "Danger Gradient",  CFG_BOOL,  NULL},
+    {"danger_warn_stddevs",   "Warn σ",       "Danger Gradient",  CFG_FLOAT, "%.1f"},
+    {"danger_crash_stddevs",  "Crash σ",      "Danger Gradient",  CFG_FLOAT, "%.1f"},
     // Toggles
     {"use_real_money",        "LIVE Trading", "Toggles",         CFG_BOOL,  NULL},
     {"partial_exit_enabled",  "Partial Exits","Toggles",         CFG_BOOL,  NULL},
@@ -271,7 +275,7 @@ static inline void GUI_Panel_Settings(SettingsState *s, volatile sig_atomic_t *r
         {
             const char *k = fd->key;
             if      (strcmp(k, "default_strategy") == 0)
-                ImGui::SetItemTooltip("-1 = Regime Auto (MR + Momentum)\n 0 = Mean Reversion\n 1 = Momentum\n 2 = Simple Dip\n 3 = ML (model-driven)\n 4 = EMA Cross (dip below EMA in uptrend)");
+                ImGui::SetItemTooltip("-2 = Full Auto (MR+EMA Cross+Momentum+SimpleDip)\n-1 = Legacy Auto (MR+Momentum only)\n 0 = Mean Reversion\n 1 = Momentum\n 2 = Simple Dip\n 3 = ML\n 4 = EMA Cross");
             else if (strcmp(k, "entry_offset_pct") == 0)
                 ImGui::SetItemTooltip("Buy gate offset below avg/EMA price\nhigher = deeper dip required to enter");
             else if (strcmp(k, "volume_multiplier") == 0)
@@ -302,6 +306,11 @@ static inline void GUI_Panel_Settings(SettingsState *s, volatile sig_atomic_t *r
                 ImGui::SetItemTooltip("Trailing TP factor when EMA rising\n1.5 = 50%% wider trail");
             else if (strcmp(k, "gate_ema_alpha") == 0)
                 ImGui::SetItemTooltip("EMA smoothing factor\n0.99 = fast (responsive)\n0.997 = default\n0.999 = slow (stable)");
+            // danger gradient
+            else if (strcmp(k, "danger_warn_stddevs") == 0)
+                ImGui::SetItemTooltip("Danger gradient starts at this many σ below avg\n3.0 = gate begins tightening at 3σ drop");
+            else if (strcmp(k, "danger_crash_stddevs") == 0)
+                ImGui::SetItemTooltip("Full gate kill at this many σ below avg\n6.0 = gate zeroed at 6σ drop (crash protection)");
             // regime detection
             else if (strcmp(k, "regime_crossover_threshold") == 0)
                 ImGui::SetItemTooltip("EMA/SMA spread for MILD_TREND (EMA Cross)\n0.0005 = 0.05%% gap (~$35 at BTC $68k)\nbelow = RANGING, above = mild uptrend");

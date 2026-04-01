@@ -551,6 +551,12 @@ static inline int ANSI_Section_Regime(AnsiBuf *ab, const TUISnapshot *s, int y, 
             ab_printf(ab, A_DIM "  " A_SAND "book: " "%s%+.2f" A_RESET,
                       book_color, s->book_imbalance);
         }
+        if (s->danger_score > 0.01) {
+            const char *dng_color = (s->danger_score > 0.5) ? A_RED :
+                                    (s->danger_score > 0.2) ? A_YELLOW : A_DIM;
+            ab_printf(ab, A_DIM "  " A_SAND "danger: " "%s%.0f%%" A_RESET,
+                      dng_color, s->danger_score * 100.0);
+        }
         y++;
     }
 
