@@ -554,8 +554,9 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   }
 
   // hot-path kill: catches equity drops between slow-path cycles
+  // runs every 16th tick (~5s at 300ms/tick) — fast enough for 3% daily loss detection
   // Portfolio_ComputeValue is O(popcount) — 1 multiply for single-slot mode
-  if (ctrl->config.kill_switch_enabled && !ctrl->buying_halted) {
+  if ((ctrl->total_ticks & 0xF) == 0 && ctrl->config.kill_switch_enabled && !ctrl->buying_halted) {
     FPN<F> pv = Portfolio_ComputeValue(&ctrl->portfolio, current_price);
     FPN<F> equity = FPN_AddSat(ctrl->balance, pv);
     int tripped = 0;
