@@ -854,16 +854,19 @@ int main(int argc, char *argv[]) {
                         bs->hot_count  = tui.hot_count;
                         // percentiles from log2 histogram
                         {
-                            uint64_t p50t = tui.hot_count / 2, p95t = tui.hot_count * 95 / 100;
+                            uint64_t p50t = tui.hot_count / 2, p95t = tui.hot_count * 95 / 100, p99t = tui.hot_count * 99 / 100;
                             uint64_t cum = 0;
                             bs->hot_p50_ns = 0;
                             bs->hot_p95_ns = 0;
+                            bs->hot_p99_ns = 0;
                             for (int i = 0; i <= 20; i++) {
                                 cum += tui.hot_hist[i];
                                 if (!bs->hot_p50_ns && cum >= p50t)
                                     bs->hot_p50_ns = (1.5 * (1ULL << i)) / tui.tsc_per_ns;
                                 if (!bs->hot_p95_ns && cum >= p95t)
                                     bs->hot_p95_ns = (1.5 * (1ULL << i)) / tui.tsc_per_ns;
+                                if (!bs->hot_p99_ns && cum >= p99t)
+                                    bs->hot_p99_ns = (1.5 * (1ULL << i)) / tui.tsc_per_ns;
                             }
                         }
                         // per-component breakdown

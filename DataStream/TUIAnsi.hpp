@@ -948,8 +948,8 @@ static inline int ANSI_Section_Latency(AnsiBuf *ab, const TUISnapshot *s, int y,
     if (s->hot_count > 0) {
         ab_goto(ab, y, 3);
         ab_printf(ab, A_SAND "hot:  " A_FG "avg %.0fns" A_DIM "  p50 " A_FG "%.0fns"
-                  A_DIM "  p95 " A_FG "%.0fns" A_DIM "  (%lu)" A_RESET,
-                  s->hot_avg_ns, s->hot_p50_ns, s->hot_p95_ns,
+                  A_DIM "  p95 " A_FG "%.0fns" A_DIM "  p99 " A_FG "%.0fns" A_DIM "  (%lu)" A_RESET,
+                  s->hot_avg_ns, s->hot_p50_ns, s->hot_p95_ns, s->hot_p99_ns,
                   (unsigned long)s->hot_count);
         y++;
         ab_goto(ab, y, 3);

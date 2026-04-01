@@ -472,15 +472,16 @@ static inline void TUI_Render(EngineTUI *tui, const PortfolioController<F> *ctrl
         double hot_min_ns = (double)tui->hot_min / tui->tsc_per_ns;
         double hot_max_ns = (double)tui->hot_max / tui->tsc_per_ns;
         // percentiles from log2 histogram
-        double hot_p50 = 0, hot_p95 = 0;
-        { uint64_t p50t = tui->hot_count/2, p95t = tui->hot_count*95/100, cum = 0;
+        double hot_p50 = 0, hot_p95 = 0, hot_p99 = 0;
+        { uint64_t p50t = tui->hot_count/2, p95t = tui->hot_count*95/100, p99t = tui->hot_count*99/100, cum = 0;
           for (int i = 0; i <= 20; i++) { cum += tui->hot_hist[i];
             if (!hot_p50 && cum >= p50t) hot_p50 = (1.5*(1ULL<<i))/tui->tsc_per_ns;
-            if (!hot_p95 && cum >= p95t) hot_p95 = (1.5*(1ULL<<i))/tui->tsc_per_ns; } }
-        printf(C_SAND "    hot path:  " C_FG "avg %.0fns" C_DIM "  min " C_FG "%.0fns"
-               C_DIM "  max " C_FG "%.0fns" C_DIM "  p50 " C_FG "%.0fns" C_DIM "  p95 " C_FG "%.0fns"
-               C_DIM "  (%lu ticks)" C_RESET "\n",
-               hot_avg, hot_min_ns, hot_max_ns, hot_p50, hot_p95, (unsigned long)tui->hot_count); row++;
+            if (!hot_p95 && cum >= p95t) hot_p95 = (1.5*(1ULL<<i))/tui->tsc_per_ns;
+            if (!hot_p99 && cum >= p99t) hot_p99 = (1.5*(1ULL<<i))/tui->tsc_per_ns; } }
+        printf(C_SAND "    hot path:  " C_FG "avg %.0fns" C_DIM "  p50 " C_FG "%.0fns"
+               C_DIM "  p95 " C_FG "%.0fns" C_DIM "  p99 " C_FG "%.0fns"
+               C_DIM "  (%lu)" C_RESET "\n",
+               hot_avg, hot_p50, hot_p95, hot_p99, (unsigned long)tui->hot_count); row++;
         double bg_avg = (double)tui->bg_sum / tui->hot_count / tui->tsc_per_ns;
         double bg_max_ns = (double)tui->bg_max / tui->tsc_per_ns;
         double eg_avg = (double)tui->eg_sum / tui->hot_count / tui->tsc_per_ns;
@@ -710,7 +711,7 @@ struct TUISnapshot {
     double fee_ratio;        // total_fees / gross_wins (% of gains eaten by fees)
     // latency
 #ifdef LATENCY_PROFILING
-    double hot_avg_ns, hot_min_ns, hot_max_ns, hot_p50_ns, hot_p95_ns;
+    double hot_avg_ns, hot_min_ns, hot_max_ns, hot_p50_ns, hot_p95_ns, hot_p99_ns;
     uint64_t hot_count;
     double slow_avg_ns, slow_min_ns, slow_max_ns;
     uint64_t slow_count;
@@ -1172,8 +1173,8 @@ static inline void TUI_Render_Snapshot(EngineTUI *tui, const TUISnapshot *s) {
         printf(C_SAND "    hot path:  " C_FG "avg %.0fns" C_DIM "  min " C_FG "%.0fns" C_DIM "  max " C_FG "%.0fns"
                C_DIM "  (%lu ticks)" C_RESET "\n", s->hot_avg_ns, s->hot_min_ns, s->hot_max_ns,
                (unsigned long)s->hot_count); row++;
-        printf(C_DIM "               p50 " C_FG "%.0fns" C_DIM "  p95 " C_FG "%.0fns" C_RESET "\n",
-               s->hot_p50_ns, s->hot_p95_ns); row++;
+        printf(C_DIM "               p50 " C_FG "%.0fns" C_DIM "  p95 " C_FG "%.0fns" C_DIM "  p99 " C_FG "%.0fns" C_RESET "\n",
+               s->hot_p50_ns, s->hot_p95_ns, s->hot_p99_ns); row++;
         printf(C_DIM "      buygate:  " C_FG "avg %.0fns" C_DIM "  max " C_FG "%.0fns" C_RESET "\n", s->bg_avg_ns, s->bg_max_ns); row++;
         printf(C_DIM "      exitgate: " C_FG "avg %.0fns" C_DIM "  max " C_FG "%.0fns"
                C_DIM "  (%.0fns/pos)" C_RESET "\n", s->eg_avg_ns, s->eg_max_ns, s->eg_per_pos_ns); row++;

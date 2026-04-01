@@ -733,6 +733,10 @@ static inline void GUI_Panel_Latency(const TUISnapshot *s) {
         ImGui::TextColored(FoxmlColors::comment, "p95");
         ImGui::SameLine();
         ImGui::Text("%.0fns", s->hot_p95_ns);
+        ImGui::SameLine(0, 10);
+        ImGui::TextColored(FoxmlColors::comment, "p99");
+        ImGui::SameLine();
+        ImGui::Text("%.0fns", s->hot_p99_ns);
         ImGui::SameLine();
         ImGui::TextColored(FoxmlColors::comment, "(%lu)", (unsigned long)s->hot_count);
 
