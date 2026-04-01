@@ -63,8 +63,8 @@ The engine connects to Binance's public websocket, receives real-time BTC/USDT t
 ## Architecture
 
 ```
-HOT PATH (every tick, p50 ~950ns, min ~62ns):
-  BuyGate          branchless price+volume gate           (~62ns min)
+HOT PATH (every tick, p50 ~1-2μs, p99 ~8μs, BuyGate min ~40ns):
+  BuyGate          branchless price+volume gate           (~40ns min)
   PositionExitGate bitmap walk, per-position TP/SL        (~130ns/pos)
   FillConsumption  sizing, spacing, risk checks            (~750ns avg)
 
@@ -193,11 +193,11 @@ See `DOCS/CONTRIBUTING.md` for the full guide.
 
 ## Latency Tuning
 
-The hot path (BuyGate → ExitGate → PortfolioController_Tick) achieves ~300-400ns total with warm caches:
+The hot path (BuyGate → ExitGate → PortfolioController_Tick) achieves p50 ~1-2μs, p99 ~8μs:
 
 | Component | Typical | What it does |
 |-----------|---------|-------------|
-| BuyGate | ~50ns | Branchless price+volume compare, pool write |
+| BuyGate | ~40ns | Branchless price+volume compare, pool write |
 | ExitGate | ~80ns/pos | Bitmap walk, TP/SL compare per position |
 | PCTick | ~200ns | Fill consumption, bitmap ops |
 
