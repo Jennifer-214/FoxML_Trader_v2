@@ -1114,10 +1114,11 @@ static inline void TUI_Render_Snapshot(EngineTUI *tui, const TUISnapshot *s) {
            s->risk_amt, s->breaker_tripped ? C_BOLD C_RED : C_GREEN, s->breaker_tripped ? "TRIPPED" : "OK", s->max_dd); row++;
     {
         const char *strat_name = (s->strategy_id == STRATEGY_MOMENTUM) ? "MOMENTUM" : "MEAN REVERSION";
-        const char *regime_name = (s->current_regime == REGIME_TRENDING) ? "TRENDING" :
-                                  (s->current_regime == REGIME_VOLATILE) ? "VOLATILE" : "RANGING";
-        const char *regime_color = (s->current_regime == REGIME_TRENDING) ? C_GREEN :
-                                   (s->current_regime == REGIME_VOLATILE) ? C_RED : C_DIM;
+        int rk = s->current_regime;
+        if (rk < 0 || rk >= NUM_REGIMES) rk = 0;
+        const char *regime_name = REGIME_INFO[rk].full_name;
+        const char *regime_color = (rk == REGIME_TRENDING || rk == REGIME_MILD_TREND) ? C_GREEN :
+                                   (rk == REGIME_VOLATILE || rk == REGIME_TRENDING_DOWN) ? C_RED : C_DIM;
         printf(C_SAND "    strategy:   " C_FG "%s" C_RESET C_DIM " (%s)  |  " C_YELLOW "PAPER" C_RESET "\n",
                strat_name, s->stddev_mode ? "stddev" : "pct"); row++;
         printf(C_SAND "    regime:     %s%s" C_RESET C_DIM " (%.0fm)" C_RESET "\n",

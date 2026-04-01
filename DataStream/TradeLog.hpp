@@ -16,10 +16,16 @@
 
 // string helpers for CSV output (also used by MetricsLog)
 static inline const char *_strategy_str(int sid) {
-    return (sid == STRATEGY_MOMENTUM) ? "MOMENTUM" : "MEAN_REVERSION";
+    switch (sid) {
+        case STRATEGY_MOMENTUM:   return "MOMENTUM";
+        case STRATEGY_SIMPLE_DIP: return "SIMPLE_DIP";
+        case STRATEGY_EMA_CROSS:  return "EMA_CROSS";
+        case STRATEGY_ML:         return "ML";
+        default:                  return "MEAN_REVERSION";
+    }
 }
 static inline const char *_regime_str(int rid) {
-    switch (rid) { case 1: return "TRENDING"; case 2: return "VOLATILE"; case 3: return "TRENDING_DOWN"; default: return "RANGING"; }
+    return (rid >= 0 && rid < NUM_REGIMES) ? REGIME_INFO[rid].full_name : "RANGING";
 }
 
 #include <stdio.h>

@@ -1948,6 +1948,115 @@ int main() {
         ctrl.rolling_long = NULL;
     }
 
+    //======================================================================================================
+    // REGIME MAPPING + CLASSIFICATION
+    //======================================================================================================
+    printf("\n--- REGIME MAPPING + CLASSIFICATION ---\n");
+    {
+        // Regime_ToStrategy mapping
+        check("ToStrategy: RANGING -> MR",
+              Regime_ToStrategy(REGIME_RANGING) == STRATEGY_MEAN_REVERSION);
+        check("ToStrategy: TRENDING -> MOMENTUM",
+              Regime_ToStrategy(REGIME_TRENDING) == STRATEGY_MOMENTUM);
+        check("ToStrategy: VOLATILE -> SIMPLE_DIP",
+              Regime_ToStrategy(REGIME_VOLATILE) == STRATEGY_SIMPLE_DIP);
+        check("ToStrategy: TRENDING_DOWN -> MR",
+              Regime_ToStrategy(REGIME_TRENDING_DOWN) == STRATEGY_MEAN_REVERSION);
+        check("ToStrategy: MILD_TREND -> EMA_CROSS",
+              Regime_ToStrategy(REGIME_MILD_TREND) == STRATEGY_EMA_CROSS);
+        check("ToStrategy: out-of-range -> MR",
+              Regime_ToStrategy(99) == STRATEGY_MEAN_REVERSION);
+
+        // RegimeInfo table
+        check("RegimeInfo: RANGING short_name",
+              strcmp(REGIME_INFO[REGIME_RANGING].short_name, "RANGE") == 0);
+        check("RegimeInfo: MILD_TREND short_name",
+              strcmp(REGIME_INFO[REGIME_MILD_TREND].short_name, "EMACR") == 0);
+        check("RegimeInfo: NUM_REGIMES == 5", NUM_REGIMES == 5);
+        check("NUM_STRATEGIES == 5", NUM_STRATEGIES == 5);
+
+        // Regime_Classify integration is tested via the full controller path
+        // (SL floor tests above exercise actual regime transitions)
+        // Here we verify the config fields that drive the MILD_TREND/TRENDING split
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        check("Classify: strong_crossover > crossover_threshold",
+              FPN_GreaterThan(cfg.regime_strong_crossover, cfg.regime_crossover_threshold));
+        check("Classify: strong_crossover default ~0.0015",
+              fabs(FPN_ToDouble(cfg.regime_strong_crossover) - 0.0015) < 0.0001);
+        check("Classify: crossover_threshold default ~0.0005",
+              fabs(FPN_ToDouble(cfg.regime_crossover_threshold) - 0.0005) < 0.0001);
+    }
+
+    //======================================================================================================
+    // SL FLOOR: MILD_TREND TRANSITIONS
+    //======================================================================================================
+    printf("\n--- SL FLOOR: MILD_TREND TRANSITIONS ---\n");
+    {
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+
+        Portfolio<FP> portfolio;
+        Portfolio_Init(&portfolio);
+        RollingStats<FP> rolling;
+        memset(&rolling, 0, sizeof(rolling));
+
+        FPN<FP> entry = FPN_FromDouble<FP>(70000.0);
+        FPN<FP> stddev = FPN_FromDouble<FP>(50.0);
+        rolling.price_stddev = stddev;
+
+        // transitions to test
+        int transitions[][2] = {
+            {REGIME_RANGING,    REGIME_MILD_TREND},
+            {REGIME_MILD_TREND, REGIME_TRENDING},
+            {REGIME_TRENDING,   REGIME_MILD_TREND},
+            {REGIME_MILD_TREND, REGIME_RANGING},
+            {REGIME_MILD_TREND, REGIME_TRENDING_DOWN},
+        };
+        const char *names[] = {
+            "RANGING->MILD_TREND", "MILD_TREND->TRENDING",
+            "TRENDING->MILD_TREND", "MILD_TREND->RANGING",
+            "MILD_TREND->TRENDING_DOWN",
+        };
+        int strategies[] = {
+            STRATEGY_MEAN_REVERSION, STRATEGY_EMA_CROSS,
+            STRATEGY_MOMENTUM, STRATEGY_EMA_CROSS,
+            STRATEGY_EMA_CROSS,
+        };
+
+        for (int t = 0; t < 5; t++) {
+            Portfolio_Init(&portfolio);
+            FPN<FP> tp = FPN_AddSat(entry, FPN_FromDouble<FP>(300.0));
+            FPN<FP> sl = FPN_SubSat(entry, FPN_FromDouble<FP>(150.0));
+            FPN<FP> qty = FPN_FromDouble<FP>(0.01);
+            int slot = Portfolio_AddPositionWithExits(&portfolio, qty, entry, tp, sl, FPN_Zero<FP>());
+
+            uint8_t entry_strat[16] = {};
+            entry_strat[slot] = (uint8_t)strategies[t];
+
+            Regime_AdjustPositions(&portfolio, &rolling,
+                                   transitions[t][0], transitions[t][1],
+                                   entry_strat, &cfg);
+
+            double tp_a = FPN_ToDouble(portfolio.positions[slot].take_profit_price);
+            double sl_a = FPN_ToDouble(portfolio.positions[slot].stop_loss_price);
+            double entry_d = FPN_ToDouble(entry);
+            double tp_dist = tp_a - entry_d;
+            double sl_dist = entry_d - sl_a;
+
+            char msg[128];
+            snprintf(msg, sizeof(msg), "SL floor %s: SL <= TP (no inverted risk)", names[t]);
+            check(msg, sl_dist <= tp_dist + 0.01);
+
+            snprintf(msg, sizeof(msg), "SL floor %s: SL >= 0.5*TP (2:1 min)", names[t]);
+            check(msg, sl_dist >= tp_dist * 0.49);
+
+            snprintf(msg, sizeof(msg), "SL floor %s: TP > entry", names[t]);
+            check(msg, tp_a > entry_d - 0.01);
+
+            snprintf(msg, sizeof(msg), "SL floor %s: SL < entry", names[t]);
+            check(msg, sl_a < entry_d + 0.01);
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

@@ -81,7 +81,8 @@ template <unsigned F> struct ControllerConfig {
   FPN<F> min_hold_gain_pct;   // only time-exit if gain < this % (e.g. 0.001 = 0.1%)
   // regime detection
   FPN<F> regime_slope_threshold;  // relative slope magnitude for TRENDING (legacy, kept for compat)
-  FPN<F> regime_crossover_threshold; // EMA/SMA spread magnitude for TRENDING (e.g. 0.0005 = 0.05%)
+  FPN<F> regime_crossover_threshold; // EMA/SMA spread for mild trend (e.g. 0.0005 = EMA Cross)
+  FPN<F> regime_strong_crossover;   // EMA/SMA spread for strong trend (e.g. 0.0015 = Momentum)
   FPN<F> regime_r2_threshold;     // min R² for TRENDING (e.g. 0.70)
   FPN<F> regime_volatile_stddev;  // stddev/price ratio for VOLATILE (legacy, kept for compat)
   FPN<F> regime_vol_spike_ratio;  // variance ratio threshold: short/long variance > this = volatile spike
@@ -204,7 +205,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.min_hold_gain_pct = FPN_FromDouble<F>(0.001); // 0.1% — only time-exit if below this gain
   // regime detection
   cfg.regime_slope_threshold = FPN_FromDouble<F>(0.00002); // legacy (unused by crossover classifier)
-  cfg.regime_crossover_threshold = FPN_FromDouble<F>(0.0005); // 0.05% EMA-SMA gap = trending (~$35 at BTC $70k)
+  cfg.regime_crossover_threshold = FPN_FromDouble<F>(0.0005); // 0.05% EMA-SMA gap = mild trend (~$35 at BTC $70k)
+  cfg.regime_strong_crossover = FPN_FromDouble<F>(0.0015);   // 0.15% EMA-SMA gap = strong trend (~$102 at BTC $68k)
   cfg.regime_r2_threshold    = FPN_FromDouble<F>(0.70);   // 70% consistency for trending
   cfg.regime_volatile_stddev = FPN_FromDouble<F>(0.0005); // 0.05% stddev/price (legacy compat)
   cfg.regime_vol_spike_ratio = FPN_FromDouble<F>(2.0);   // variance spike: 2x baseline = volatile
@@ -356,6 +358,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(breakout_min)
     CFG_PARSE_FPN(regime_slope_threshold)
     CFG_PARSE_FPN(regime_crossover_threshold)
+    CFG_PARSE_FPN(regime_strong_crossover)
     CFG_PARSE_FPN(regime_volatile_stddev)
     CFG_PARSE_FPN(regime_vol_spike_ratio)
     CFG_PARSE_FPN(momentum_breakout_mult)

@@ -40,10 +40,7 @@
 #include "../ML_Headers/ROR_regressor.hpp"
 #include <time.h>
 
-#define REGIME_RANGING       0
-#define REGIME_TRENDING      1  // uptrend — momentum (buy breakouts above)
-#define REGIME_VOLATILE      2
-#define REGIME_TRENDING_DOWN 3  // downtrend — pause buying (future: short strategy)
+// regime constants, RegimeInfo, and REGIME_STRATEGY_TABLE are in StrategyInterface.hpp
 
 //======================================================================================================
 // [REGIME SIGNALS]
@@ -284,10 +281,18 @@ inline int Regime_Classify(RegimeState<F> *state,
     // trending needs at least 2 signals AND at least one crossover signal
     // volatile needs at least 2 signals (spike + no direction)
     // direction: more down signals = TRENDING_DOWN, otherwise TRENDING (up)
+    // uptrend split: strong crossover = TRENDING (momentum), mild = MILD_TREND (EMA Cross)
     int has_crossover = crossover_strong | long_crossover_strong;
     int detected;
     if (trending_score >= 2 && has_crossover && consistent && trending_score > volatile_score) {
-        detected = (down_signals > up_signals) ? REGIME_TRENDING_DOWN : REGIME_TRENDING;
+        if (down_signals > up_signals) {
+            detected = REGIME_TRENDING_DOWN;
+        } else {
+            // split uptrend: use max of short/long spread for strength assessment
+            FPN<F> max_spread = FPN_Max(abs_spread, abs_spread_long);
+            int strong = FPN_GreaterThan(max_spread, cfg->regime_strong_crossover);
+            detected = strong ? REGIME_TRENDING : REGIME_MILD_TREND;
+        }
     } else if (volatile_score >= 2 && volatile_score > trending_score)
         detected = REGIME_VOLATILE;
     else
@@ -313,13 +318,8 @@ inline int Regime_Classify(RegimeState<F> *state,
 // [STRATEGY MAPPING]
 //======================================================================================================
 static inline int Regime_ToStrategy(int regime) {
-    switch (regime) {
-        case REGIME_TRENDING:      return STRATEGY_MOMENTUM;
-        case REGIME_TRENDING_DOWN: return STRATEGY_MEAN_REVERSION; // pause buying, future: short
-        case REGIME_VOLATILE:      return STRATEGY_MEAN_REVERSION;
-        case REGIME_RANGING:
-        default:                   return STRATEGY_MEAN_REVERSION;
-    }
+    return (regime >= 0 && regime < NUM_REGIMES)
+        ? REGIME_STRATEGY_TABLE[regime] : STRATEGY_MEAN_REVERSION;
 }
 
 //======================================================================================================
@@ -382,8 +382,15 @@ inline void Regime_AdjustPositions(Portfolio<F> *portfolio,
                 FPN<F> wide_sl = FPN_SubSat(pos->entry_price, wide_sl_offset);
                 pos->stop_loss_price = FPN_Min(pos->stop_loss_price, wide_sl);
 
-                // SL floor: ensure SL distance >= 0.5 × TP distance (2:1 min reward/risk)
+                // SL ceiling: if TP was tightened (vol dropped since fill), don't let SL
+                // stay at the old high-vol width. SL distance must not exceed TP distance.
+                // without this, a fill at high σ followed by regime switch at low σ
+                // produces SL > TP (inverted risk/reward)
                 FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+                FPN<F> sl_ceiling = FPN_SubSat(pos->entry_price, tp_dist);
+                pos->stop_loss_price = FPN_Max(pos->stop_loss_price, sl_ceiling);
+
+                // SL floor: ensure SL distance >= 0.5 × TP distance (2:1 min reward/risk)
                 FPN<F> min_sl_dist = FPN_Mul(tp_dist, half);
                 FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
                 pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
@@ -399,8 +406,12 @@ inline void Regime_AdjustPositions(Portfolio<F> *portfolio,
                 FPN<F> tight_sl = FPN_SubSat(pos->entry_price, tight_sl_offset);
                 pos->stop_loss_price = FPN_Max(pos->stop_loss_price, tight_sl);
 
-                // SL floor: ensure SL distance >= 0.5 × TP distance (2:1 min reward/risk)
+                // SL ceiling: SL distance must not exceed TP distance (no inverted risk/reward)
                 FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+                FPN<F> sl_ceiling = FPN_SubSat(pos->entry_price, tp_dist);
+                pos->stop_loss_price = FPN_Max(pos->stop_loss_price, sl_ceiling);
+
+                // SL floor: ensure SL distance >= 0.5 × TP distance (2:1 min reward/risk)
                 FPN<F> min_sl_dist = FPN_Mul(tp_dist, half);
                 FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
                 pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);

@@ -809,9 +809,7 @@ int main(int argc, char *argv[]) {
                     // lightweight status line — shows real equity (USDT + BTC)
                     fprintf(stderr, "[LIVE] $%.2f %s pos:%d/%d live:%d bal:$%.2f btc:%.8f equity:$%.2f W:%d L:%d\n",
                             last_stream.price_d,
-                            ctrl.regime.current_regime == 1 ? "TREND" :
-                            ctrl.regime.current_regime == 2 ? "VOLAT" :
-                            ctrl.regime.current_regime == 3 ? "TR_DN" : "RANGE",
+                            REGIME_INFO[ctrl.regime.current_regime < NUM_REGIMES ? ctrl.regime.current_regime : 0].short_name,
                             __builtin_popcount(ctrl.portfolio.active_bitmap), 16,
                             __builtin_popcount(live_position_bitmap),
                             usdt_bal, btc_bal, usdt_bal + btc_value,

@@ -12,6 +12,7 @@
 #include "implot.h"
 #include "FoxmlTheme.hpp"
 #include "../Version.hpp"
+#include "../Strategies/StrategyInterface.hpp"
 #include <ctime>
 
 // ── helper: colored value text (green if positive, red if negative) ──
@@ -103,8 +104,8 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
         const char *reason = "gate";
         if (s->sl_cooldown > 0) reason = "cooldown";
         else if (s->breaker_tripped) reason = "breaker";
-        else if (s->current_regime == 2) reason = "volatile";
-        else if (s->current_regime == 3) reason = "downtrend";
+        else if (s->current_regime == REGIME_VOLATILE) reason = "volatile";
+        else if (s->current_regime == REGIME_TRENDING_DOWN) reason = "downtrend";
         else if (s->engine_state == 0) reason = "warmup";
         else if (s->long_gate_enabled && !s->long_gate_ok) reason = "long trend";
         else if (s->buy_p > 0.01) {
@@ -139,10 +140,10 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
         ImGui::TextColored(FoxmlColors::yellow, "BUYING PAUSED");
         ImGui::SameLine();
         ImGui::TextColored(FoxmlColors::comment, "post-SL cooldown (%d cycles remaining)", s->sl_cooldown);
-    } else if (s->current_regime == 2 || s->current_regime == 3) {
+    } else if (s->current_regime == REGIME_VOLATILE || s->current_regime == REGIME_TRENDING_DOWN) {
         ImGui::TextColored(FoxmlColors::yellow, "BUYING PAUSED");
         ImGui::SameLine();
-        const char *r = (s->current_regime == 3) ? "downtrend" : "volatile regime";
+        const char *r = (s->current_regime == REGIME_TRENDING_DOWN) ? "downtrend" : "volatile regime";
         ImGui::TextColored(FoxmlColors::comment, "%s — buying paused", r);
     } else if (s->breaker_tripped) {
         ImGui::TextColored(FoxmlColors::red, "BUYING PAUSED");
@@ -173,12 +174,12 @@ static inline void GUI_Panel_TopBar(const TUISnapshot *s) {
     ImGui::TextColored(FoxmlColors::comment, "|");
     ImGui::SameLine();
 
-    ImVec4 regime_color = (s->current_regime == 1) ? FoxmlColors::green :
-                          (s->current_regime == 2 || s->current_regime == 3) ? FoxmlColors::red : FoxmlColors::comment;
-    const char *regime_str = (s->current_regime == 1) ? "TREND" :
-                             (s->current_regime == 2) ? "VOLAT" :
-                             (s->current_regime == 3) ? "TR_DN" : "RANGE";
-    ImGui::TextColored(regime_color, "%s", regime_str);
+    int ri = s->current_regime;
+    if (ri < 0 || ri >= NUM_REGIMES) ri = 0;
+    ImVec4 regime_color = (ri == REGIME_TRENDING) ? FoxmlColors::green :
+                          (ri == REGIME_MILD_TREND) ? FoxmlColors::sand :
+                          (ri == REGIME_VOLATILE || ri == REGIME_TRENDING_DOWN) ? FoxmlColors::red : FoxmlColors::comment;
+    ImGui::TextColored(regime_color, "%s", REGIME_INFO[ri].short_name);
 
     ImGui::SameLine();
     ImGui::TextColored(FoxmlColors::comment, "|");
@@ -253,11 +254,12 @@ static inline void GUI_Panel_Regime(const TUISnapshot *s) {
     ImGui::Begin("Regime Signals");
     SectionHeader("REGIME SIGNALS");
 
-    const char *regime_name = (s->current_regime == 1) ? "TRENDING" :
-                              (s->current_regime == 2) ? "VOLATILE" :
-                              (s->current_regime == 3) ? "TRENDING_DOWN" : "RANGING";
-    ImVec4 regime_color = (s->current_regime == 1) ? FoxmlColors::green :
-                          (s->current_regime == 2 || s->current_regime == 3) ? FoxmlColors::red : FoxmlColors::comment;
+    int rj = s->current_regime;
+    if (rj < 0 || rj >= NUM_REGIMES) rj = 0;
+    const char *regime_name = REGIME_INFO[rj].full_name;
+    ImVec4 regime_color = (rj == REGIME_TRENDING) ? FoxmlColors::green :
+                          (rj == REGIME_MILD_TREND) ? FoxmlColors::sand :
+                          (rj == REGIME_VOLATILE || rj == REGIME_TRENDING_DOWN) ? FoxmlColors::red : FoxmlColors::comment;
     const char *strat_name = (s->strategy_id == 4) ? "EMA CROSS" :
                               (s->strategy_id == 2) ? "SIMPLE DIP" :
                               (s->strategy_id == 1) ? "MOMENTUM" : "MEAN REVERSION";

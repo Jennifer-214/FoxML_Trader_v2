@@ -9,8 +9,9 @@
 // extended trade info parsed from CSV for the history table
 struct TradeHistoryEntry {
     double entry_price, exit_price;
-    double qty, pnl;
+    double qty, pnl, fee;
     char reason[8];  // "TP", "SL", "TIME", etc.
+    char strategy[8]; // "MR", "MOM", "DIP", "EMA"
     int tick;
 };
 
@@ -66,6 +67,18 @@ static inline void TradeHistory_Refresh(TradeHistory *th) {
         e->tick = atoi(tick_s);
         strncpy(e->reason, reason_s, 7);
         e->reason[7] = '\0';
+
+        char fee_s[32];
+        csv_field(line, 14, fee_s, sizeof(fee_s));
+        e->fee = atof(fee_s);
+
+        char strat_s[32];
+        csv_field(line, 17, strat_s, sizeof(strat_s));
+        if (strstr(strat_s, "MOMENTUM"))         strncpy(e->strategy, "MOM", 7);
+        else if (strstr(strat_s, "SIMPLE"))       strncpy(e->strategy, "DIP", 7);
+        else if (strstr(strat_s, "EMA"))          strncpy(e->strategy, "EMA", 7);
+        else                                      strncpy(e->strategy, "MR", 7);
+        e->strategy[7] = '\0';
     }
     fclose(f);
 }
@@ -89,13 +102,16 @@ static inline void GUI_Panel_TradeHistory(TradeHistory *th) {
     ImGuiTableFlags flags = ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
                             ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable;
 
-    if (ImGui::BeginTable("##trades", 6, flags, ImVec2(0, -1))) {
+    if (ImGui::BeginTable("##trades", 9, flags, ImVec2(0, -1))) {
         ImGui::TableSetupColumn("#",      ImGuiTableColumnFlags_WidthFixed, 30);
         ImGui::TableSetupColumn("Entry",  ImGuiTableColumnFlags_WidthFixed, 70);
         ImGui::TableSetupColumn("Exit",   ImGuiTableColumnFlags_WidthFixed, 70);
         ImGui::TableSetupColumn("P&L",    ImGuiTableColumnFlags_WidthFixed, 70);
-        ImGui::TableSetupColumn("Reason", ImGuiTableColumnFlags_WidthFixed, 45);
-        ImGui::TableSetupColumn("Qty",    ImGuiTableColumnFlags_WidthFixed, 70);
+        ImGui::TableSetupColumn("Fee",    ImGuiTableColumnFlags_WidthFixed, 55);
+        ImGui::TableSetupColumn("Re..." , ImGuiTableColumnFlags_WidthFixed, 35);
+        ImGui::TableSetupColumn("Strat",  ImGuiTableColumnFlags_WidthFixed, 40);
+        ImGui::TableSetupColumn("In",     ImGuiTableColumnFlags_WidthFixed, 65);
+        ImGui::TableSetupColumn("Out",    ImGuiTableColumnFlags_WidthFixed, 65);
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
 
@@ -118,11 +134,20 @@ static inline void GUI_Panel_TradeHistory(TradeHistory *th) {
             ImGui::TextColored(pnl_col, "$%+.2f", e->pnl);
 
             ImGui::TableNextColumn();
+            ImGui::TextColored(FoxmlColors::comment, "$%.2f", e->fee);
+
+            ImGui::TableNextColumn();
             ImVec4 reason_col = (strcmp(e->reason, "TP") == 0) ? FoxmlColors::green_b : FoxmlColors::red;
             ImGui::TextColored(reason_col, "%s", e->reason);
 
             ImGui::TableNextColumn();
-            ImGui::Text("%.6f", e->qty);
+            ImGui::TextColored(FoxmlColors::comment, "%s", e->strategy);
+
+            ImGui::TableNextColumn();
+            ImGui::Text("$%.0f", e->entry_price * e->qty);
+
+            ImGui::TableNextColumn();
+            ImGui::Text("$%.0f", e->exit_price * e->qty);
         }
 
         ImGui::EndTable();

@@ -101,6 +101,8 @@ When changing something, here's exactly what to update:
 
 ### Adding a GUI-editable config field (above + settings panel)
 4. `GUI/SettingsPanel.hpp`: add ONE line to `field_defs[]` array — loading, UI, and saving are automatic
+5. `GUI/SettingsPanel.hpp`: add tooltip in the `SetItemTooltip` section (ALWAYS — fields without tooltips are confusing)
+6. If adding a new strategy: update the `default_strategy` tooltip to include the new ID and name
 
 ### Adding a new TUI/GUI display field
 1. `DataStream/EngineTUI.hpp`: add to `TUISnapshot` struct
@@ -123,6 +125,23 @@ When changing something, here's exactly what to update:
 1. `Version.hpp`: update `ENGINE_VERSION_STRING` (one file, one location)
 2. `DOCS/CHANGELOG.md`: update version summary table
 3. `DOCS/changelogs/`: create dated changelog
+
+### Public release (FoxML_Trader)
+Public repo: `Jennyfirrr/FoxML_Trader` (remote: `git@github.com:Jennyfirrr/FoxML_Trader.git`)
+Uses its own version numbering (v1.0.x), separate from the internal engine version.
+
+1. Copy changed files from `tick_trader_private` to `~/FoxML_Trader/`
+2. Commit + push to `main`
+3. Tag: `git tag v1.0.N && git push origin v1.0.N`
+4. Create GitHub release: `gh release create v1.0.N --title "v1.0.N — Title <3" --notes "..."`
+
+Rules:
+- **Always include `<3` in the release title**
+- **NEVER push private configs** — `engine.cfg`, `controller.cfg`, `.env`, API keys, plans/
+- Update `CHANGELOG.md` in FoxML_Trader with each release
+- Keep release notes short and human — bullet the actual changes
+- Patch (Z): bug fixes, visual tweaks, overlaps, spacing
+- Minor (Y): new features, new panels, new chart overlays
 
 ### Centralized constants
 - `Version.hpp`: ENGINE_VERSION_STRING — included by all renderers

@@ -9,6 +9,7 @@
 #include "FoxmlTheme.hpp"
 #include "CandleAccumulator.hpp"
 #include "TradeReader.hpp"
+#include "../Strategies/StrategyInterface.hpp"
 
 // chart display settings (mutable — controlled by GUI dropdowns)
 struct ChartSettings {
@@ -227,11 +228,13 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             ImVec2 plot_tl = ImPlot::GetPlotPos();
             ImVec2 plot_sz = ImPlot::GetPlotSize();
             ImVec4 regime_col = {0, 0, 0, 0};
-            if (snap->current_regime == 1)       // TRENDING — faint green
+            if (snap->current_regime == REGIME_TRENDING)
                 regime_col = {FoxmlColors::green.x, FoxmlColors::green.y, FoxmlColors::green.z, 0.04f};
-            else if (snap->current_regime == 2)  // VOLATILE — faint red
+            else if (snap->current_regime == REGIME_MILD_TREND)
+                regime_col = {FoxmlColors::sand.x, FoxmlColors::sand.y, FoxmlColors::sand.z, 0.04f};
+            else if (snap->current_regime == REGIME_VOLATILE)
                 regime_col = {FoxmlColors::red.x, FoxmlColors::red.y, FoxmlColors::red.z, 0.06f};
-            else if (snap->current_regime == 3)  // TRENDING_DOWN — faint red
+            else if (snap->current_regime == REGIME_TRENDING_DOWN)
                 regime_col = {FoxmlColors::red.x, FoxmlColors::red.y, FoxmlColors::red.z, 0.04f};
             if (regime_col.w > 0)
                 dl->AddRectFilled(plot_tl, ImVec2(plot_tl.x + plot_sz.x, plot_tl.y + plot_sz.y),

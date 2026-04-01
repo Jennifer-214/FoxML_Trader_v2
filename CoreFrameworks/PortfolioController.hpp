@@ -293,7 +293,7 @@ inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
     // per-strategy reward attribution
     {
       int strat = ctrl->entry_strategy[rec->position_index];
-      if (strat >= 0 && strat < 4) {
+      if (strat >= 0 && strat < NUM_STRATEGIES) {
         ctrl->strategy_stats[strat].total_trades++;
         ctrl->strategy_stats[strat].realized_pnl = FPN_AddSat(
             ctrl->strategy_stats[strat].realized_pnl, pos_pnl);
@@ -350,7 +350,7 @@ inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
       ctrl->gross_losses = FPN_AddSat(ctrl->gross_losses, loss_add);
       // per-strategy win/loss
       int strat = ctrl->entry_strategy[rec->position_index];
-      if (strat >= 0 && strat < 4) {
+      if (strat >= 0 && strat < NUM_STRATEGIES) {
         ctrl->strategy_stats[strat].wins += (1 & (uint32_t)is_win);
         ctrl->strategy_stats[strat].losses += (1 & (uint32_t)is_loss);
       }
@@ -1187,7 +1187,7 @@ inline void PortfolioController_Unpause(PortfolioController<F> *ctrl) {
 template <unsigned F>
 inline void PortfolioController_CycleRegime(PortfolioController<F> *ctrl) {
     int old = ctrl->regime.current_regime;
-    int next = (old + 1) % 4;
+    int next = (old + 1) % NUM_REGIMES;
     ctrl->regime.current_regime = next;
     ctrl->regime.proposed_regime = next;
     ctrl->regime.regime_start_tick = ctrl->total_ticks;
@@ -1201,7 +1201,7 @@ inline void PortfolioController_CycleRegime(PortfolioController<F> *ctrl) {
         ctrl->buy_conds.price = FPN_Zero<F>();
         ctrl->buy_conds.volume = FPN_Zero<F>();
     }
-    const char *names[] = {"RANGING", "TRENDING", "VOLATILE", "TRENDING_DOWN"};
+    const char *names[] = {"RANGING", "TRENDING", "VOLATILE", "TRENDING_DOWN", "MILD_TREND"};
     fprintf(stderr, "[ENGINE] regime manually set to %s\n", names[next]);
 }
 
