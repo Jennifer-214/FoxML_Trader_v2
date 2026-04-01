@@ -590,9 +590,7 @@ static inline char TUI_HandleInput(EngineTUI *tui, PortfolioController<F> *ctrl,
 
     if (c == 'k' || c == 'K') {
         if (ctrl->kill_switch_active) {
-            ctrl->kill_switch_active = 0;
-            ctrl->kill_reason = 0;
-            ctrl->kill_recovery_counter = ctrl->config.kill_recovery_warmup;
+            KillSwitch_Reset(ctrl);
             fprintf(stderr, "[TUI] kill switch reset — observing for %u cycles before trading\n",
                     ctrl->config.kill_recovery_warmup);
         }

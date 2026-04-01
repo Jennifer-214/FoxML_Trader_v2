@@ -35,14 +35,10 @@
 template <unsigned F, unsigned W = 128> struct RollingStats {
     static_assert(W > 0 && (W & (W - 1)) == 0, "W must be power of 2");
 
-    // ring buffers — iterated on push (slow path)
-    FPN<F> price_buf[W];
-    FPN<F> volume_buf[W];
-    int side_buf[W];           // is_buyer_maker flags for directional volume eviction
+    // OUTPUTS FIRST — read by strategies, regime detector, and TUI every slow-path cycle
+    // these were at offset 6,664 (behind 6.6KB of ring buffers) — now at offset 0
     int head;
     int count;
-
-    // cached outputs — recomputed every push, read by strategies and regime detector
     FPN<F> price_avg;          // mean price over window
     FPN<F> price_slope;        // least-squares regression slope (positive = rising)
     FPN<F> price_r_squared;    // regression R² (0-1, trend consistency)
@@ -59,13 +55,17 @@ template <unsigned F, unsigned W = 128> struct RollingStats {
     FPN<F> sell_volume_sum;    // sum of seller-initiated volume in window
     FPN<F> volume_delta;       // (buy - sell) / (buy + sell), range [-1.0, +1.0]
 
-    // VWAP: volume-weighted average price over window
-    // maintained via running sums with eviction (same pattern as directional volume)
-    FPN<F> pv_buf[W];          // price*volume per sample (for eviction)
+    // VWAP running sums (read by strategies)
     FPN<F> pv_sum;             // running sum(price * volume)
     FPN<F> vol_sum;            // running sum(volume) — separate from volume_sum in loop
     FPN<F> vwap;               // pv_sum / vol_sum
     FPN<F> vwap_deviation;     // (price - vwap) / vwap (negative = below VWAP)
+
+    // RING BUFFERS — only iterated during RollingStats_Push (slow path)
+    FPN<F> price_buf[W];
+    FPN<F> volume_buf[W];
+    FPN<F> pv_buf[W];          // price*volume per sample (for eviction)
+    int side_buf[W];           // is_buyer_maker flags for directional volume eviction
 };
 
 //======================================================================================================

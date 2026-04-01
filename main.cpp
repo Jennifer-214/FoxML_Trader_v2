@@ -54,25 +54,15 @@ static inline void engine_force_close_all(PortfolioController<FP> *ctrl, TradeLo
         int idx = __builtin_ctz(active);
         Position<FP> *pos = &ctrl->portfolio.positions[idx];
 
+        // grab display values before RecordExit for direct CSV write
         double entry_d   = FPN_ToDouble(pos->entry_price);
         double exit_d    = FPN_ToDouble(last_price);
         double qty_d     = FPN_ToDouble(pos->quantity);
-        double delta_pct = 0.0;
-        if (entry_d != 0.0) delta_pct = ((exit_d - entry_d) / entry_d) * 100.0;
+        double delta_pct = (entry_d != 0.0) ? ((exit_d - entry_d) / entry_d) * 100.0 : 0.0;
 
-        // book P&L, balance, and fees (same accounting as DrainExits)
-        FPN<FP> gross_proceeds = FPN_Mul(last_price, pos->quantity);
-        FPN<FP> exit_fee = FPN_Mul(gross_proceeds, ctrl->config.fee_rate);
-        FPN<FP> net_proceeds = FPN_SubSat(gross_proceeds, exit_fee);
-        FPN<FP> entry_cost = FPN_Mul(pos->entry_price, pos->quantity);
-        // use actual entry fee stored at fill time (not reconstructed from current fee_rate)
-        FPN<FP> pos_pnl = FPN_Sub(net_proceeds, FPN_AddSat(entry_cost, pos->entry_fee));
+        RecordExit(ctrl, idx, last_price, ctrl->total_ticks, 3); // reason 3 = SESSION_CLOSE
 
-        ctrl->balance = FPN_AddSat(ctrl->balance, net_proceeds);
-        ctrl->realized_pnl = FPN_AddSat(ctrl->realized_pnl, pos_pnl);
-        ctrl->total_fees = FPN_AddSat(ctrl->total_fees, exit_fee);
-        ctrl->losses++;
-
+        // direct CSV write — trade_buf will be cleared on reinit, this persists
         { TradeLogRecord r = {};
           r.tick = ctrl->total_ticks; r.price = exit_d; r.quantity = qty_d;
           r.entry_price = entry_d; r.delta_pct = delta_pct;
@@ -403,21 +393,14 @@ int main(int argc, char *argv[]) {
             int is_paused = FPN_IsZero(ctrl.buy_conds.price);
             if (is_paused)
                 PortfolioController_Unpause(&ctrl);
-            else {
-                ctrl.buy_conds.price  = FPN_Zero<FP>();
-                ctrl.buy_conds.volume = FPN_Zero<FP>();
-                ctrl.buying_halted = 1;
-                ctrl.halt_reason = 6;
-                ctrl.gate_offset = FPN_Zero<FP>();
-            }
+            else
+                Buying_Halt(&ctrl, 6);
         }
         if (__atomic_exchange_n(&shared.regime_cycle_requested, 0, __ATOMIC_ACQ_REL))
             PortfolioController_CycleRegime(&ctrl);
         if (__atomic_exchange_n(&shared.kill_reset_requested, 0, __ATOMIC_ACQ_REL)) {
             if (ctrl.kill_switch_active) {
-                ctrl.kill_switch_active = 0;
-                ctrl.kill_reason = 0;
-                ctrl.kill_recovery_counter = ctrl.config.kill_recovery_warmup;
+                KillSwitch_Reset(&ctrl);
                 fprintf(stderr, "[ENGINE] kill switch reset — observing for %u cycles\n",
                         ctrl.config.kill_recovery_warmup);
             }
@@ -455,12 +438,7 @@ int main(int argc, char *argv[]) {
         // SESSION LIFECYCLE
         //==============================================================================================
         if (BinanceStream_InWindDown(&bs, bcfg.wind_down_minutes)) {
-            // disable buy gate during wind-down
-            ctrl.buy_conds.price  = FPN_Zero<FP>();
-            ctrl.buy_conds.volume = FPN_Zero<FP>();
-            ctrl.buying_halted = 1;
-            ctrl.halt_reason = 5;
-            ctrl.gate_offset = FPN_Zero<FP>();
+            Buying_Halt(&ctrl, 5); // wind-down
         }
 
         if (BinanceStream_ShouldReconnect(&bs)) {

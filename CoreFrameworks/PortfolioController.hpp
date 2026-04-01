@@ -40,19 +40,36 @@
 //======================================================================================================
 template <unsigned F> struct PortfolioController {
   //================================================================================================
-  // HOT — touched every tick, grouped for L1 cache locality
-  // target: all hot fields within first ~3KB so they share cache lines
+  // HOT CORE — touched every tick, packed into first ~256 bytes for L1 cache
+  // ema_price/gate_offset/danger_* were at offset 10,672+ (167 cache lines deep)
+  // moving them here eliminates L2 cache misses on every tick
+  //================================================================================================
+  uint64_t tick_count;    // slow-path gate: tick_count < config.poll_interval
+  uint64_t total_ticks;
+  uint64_t prev_bitmap;   // fill detection: pool->bitmap & ~prev_bitmap
+  uint64_t last_slow_time; // wall-time floor: run slow path if this many seconds elapsed
+  BuySideGateConditions<F> buy_conds;
+  FPN<F> ema_price;             // exponential moving average of price (hot path, ~2ns per tick)
+  int ema_initialized;          // 0 until first tick sets it to current price
+  int _hot_pad0;                // align gate_offset to 8 bytes
+  FPN<F> gate_offset;           // distance from EMA to gate price (set on slow path)
+  FPN<F> danger_warn;           // price threshold where gradient starts (avg - warn_stddevs * σ)
+  FPN<F> danger_crash;          // price threshold where gate zeroes (avg - crash_stddevs * σ)
+  FPN<F> danger_range_inv;      // 1 / (warn - crash), precomputed for hot-path multiply
+  FPN<F> danger_score;          // current danger score [0, 1] — computed every tick
+  int buying_halted;            // centralized halt — checked every tick after gate tracking
+  int halt_reason;              // 0=none, 1=kill, 2=recovery, 3=volatile, 4=cooldown, 5=wind_down, 6=paused
+  int kill_switch_active;       // 1 = all buying halted (checked every 16th tick)
+  int kill_reason;              // 0=none, 1=daily_loss, 2=drawdown
+
+  //================================================================================================
+  // POSITION DATA — exit gate reads portfolio every tick
   //================================================================================================
   Portfolio<F> portfolio;
-  uint64_t prev_bitmap;   // fill detection: pool->bitmap & ~prev_bitmap
-  uint64_t tick_count;    // slow-path gate: tick_count < config.poll_interval
-  uint64_t last_slow_time; // wall-time floor: run slow path if this many seconds elapsed
-  uint64_t total_ticks;
-  BuySideGateConditions<F> buy_conds;
   ExitBuffer<F> exit_buf;
 
   //================================================================================================
-  // WARM — accessed on fills or slow path, but not every tick
+  // WARM — accessed on fills or slow path, not every tick
   //================================================================================================
   ControllerConfig<F> config;
   FPN<F> portfolio_delta; // unrealized P&L (current open positions)
@@ -64,17 +81,12 @@ template <unsigned F> struct PortfolioController {
   uint32_t losses;     // SL exits
   uint32_t total_buys; // total entries
   FPN<F> gross_wins;   // cumulative dollar gains from TP exits
-  FPN<F>
-      gross_losses; // cumulative dollar losses from SL exits (positive number)
-  uint64_t
-      total_hold_ticks;     // cumulative ticks held across all closed positions
+  FPN<F> gross_losses; // cumulative dollar losses from SL exits (positive number)
+  uint64_t total_hold_ticks;     // cumulative ticks held across all closed positions
   uint64_t entry_ticks[MAX_PORTFOLIO_POSITIONS]; // tick at which each position was entered
   time_t entry_time[MAX_PORTFOLIO_POSITIONS];    // wall clock time at entry
   uint8_t entry_strategy[MAX_PORTFOLIO_POSITIONS]; // which strategy_id entered each position
 
-  // kill switch state (sticky — survives until session reset or manual 'k')
-  int kill_switch_active;           // 1 = all buying halted
-  int kill_reason;                  // 0=none, 1=daily_loss, 2=drawdown
   FPN<F> daily_realized_pnl;        // accumulated realized P&L this session (resets on 24h boundary)
   uint32_t kill_recovery_counter;   // slow-path cycles remaining after kill reset before trading resumes
   double last_vol_scale;            // most recent vol scale factor applied (for TUI display)
@@ -116,18 +128,6 @@ template <unsigned F> struct PortfolioController {
   int current_session;          // 0=asian, 1=european, 2=us, 3=overnight
   FPN<F> session_mult;          // current session gate multiplier
   FPN<F> book_imbalance;        // bid/ask imbalance from depth stream [-1, +1] (updated externally)
-  // EMA price tracker — updates every tick on hot path for responsive gate
-  FPN<F> ema_price;             // exponential moving average of price (hot path, ~2ns per tick)
-  int ema_initialized;          // 0 until first tick sets it to current price
-
-  // hot-path fast-react layer — precomputed on slow path, applied every tick
-  FPN<F> gate_offset;           // distance from EMA to gate price (set on slow path)
-  FPN<F> danger_warn;           // price threshold where gradient starts (avg - warn_stddevs * σ)
-  FPN<F> danger_crash;          // price threshold where gate zeroes (avg - crash_stddevs * σ)
-  FPN<F> danger_range_inv;      // 1 / (warn - crash), precomputed for hot-path multiply
-  FPN<F> danger_score;          // current danger score [0, 1] — computed every tick
-  int buying_halted;            // centralized halt — checked every tick after gate tracking
-  int halt_reason;              // 0=none, 1=kill, 2=recovery, 3=volatile, 4=cooldown, 5=wind_down, 6=paused
 
   uint32_t idle_cycles;         // slow-path cycles since last fill (gate death spiral recovery)
   uint32_t fills_rejected;     // total fills rejected since startup
@@ -263,76 +263,87 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   *ctrl->rolling_long = RollingStats_Init<F, 512>();
 }
 //======================================================================================================
-// [EXIT BUFFER DRAIN]
+// [CENTRALIZED STATE MUTATIONS]
 //======================================================================================================
-// processes TP/SL exits: books P&L, updates balance, logs trades, triggers cooldown
-// called from both warmup (loaded positions can exit) and slow path
+// single-site functions for state transitions that have mandatory side effects.
+// every kill/halt/exit path goes through these — no scattered field assignments.
 //======================================================================================================
+
+// KillSwitch_Activate: halt all buying immediately, zero gate state
+// called from: hot-path equity crash, slow-path daily loss, slow-path drawdown
 template <unsigned F>
-inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
-  for (uint32_t i = 0; i < ctrl->exit_buf.count; i++) {
-    ExitRecord<F> *rec = &ctrl->exit_buf.records[i];
-    if (rec->position_index >= 16) continue; // bounds guard
-    Position<F> *pos = &ctrl->portfolio.positions[rec->position_index];
+inline void KillSwitch_Activate(PortfolioController<F> *ctrl, int reason) {
+    ctrl->kill_switch_active = 1;
+    ctrl->kill_reason = reason;
+    ctrl->buying_halted = 1;
+    ctrl->halt_reason = 1;
+    ctrl->buy_conds.price = FPN_Zero<F>();
+    ctrl->buy_conds.volume = FPN_Zero<F>();
+    ctrl->gate_offset = FPN_Zero<F>();
+}
 
-    // slippage: simulate worse fill on exit (sell at lower price than market)
-    FPN<F> exit_price = rec->exit_price;
-    if (!FPN_IsZero(ctrl->config.slippage_pct)) {
-        FPN<F> slip = FPN_Mul(exit_price, ctrl->config.slippage_pct);
-        exit_price = FPN_SubSat(exit_price, slip);
-    }
+// KillSwitch_Reset: clear kill state, enter recovery observation period
+// called from: 'k' key (main.cpp + EngineTUI)
+template <unsigned F>
+inline void KillSwitch_Reset(PortfolioController<F> *ctrl) {
+    ctrl->kill_switch_active = 0;
+    ctrl->kill_reason = 0;
+    ctrl->kill_recovery_counter = ctrl->config.kill_recovery_warmup;
+}
 
-    double entry_d = FPN_ToDouble(pos->entry_price);
-    double exit_d = FPN_ToDouble(exit_price);
-    double qty_d = FPN_ToDouble(pos->quantity);
-    double delta_pct = 0.0;
-    if (entry_d != 0.0)
-      delta_pct = ((exit_d - entry_d) / entry_d) * 100.0;
+// Buying_Halt: disable buying with reason code, zero gate state
+// called from: pause toggle, wind-down, centralized halt block
+template <unsigned F>
+inline void Buying_Halt(PortfolioController<F> *ctrl, int reason) {
+    ctrl->buying_halted = 1;
+    ctrl->halt_reason = reason;
+    ctrl->buy_conds.price = FPN_Zero<F>();
+    ctrl->buy_conds.volume = FPN_Zero<F>();
+    ctrl->gate_offset = FPN_Zero<F>();
+}
 
+// RecordExit: centralized P&L accounting for all exit paths
+// handles: realized_pnl, daily_realized_pnl, balance, fees, wins/losses,
+//          strategy attribution, Welford tracking, gross_wins/losses,
+//          SL cooldown, paired SL ratchet, hold ticks, trade log buffer
+// caller is responsible for: slippage (apply before calling), position removal,
+//          direct CSV logging if needed (session close)
+// reason: 0 = TP, 1 = SL, 2 = TIME, 3 = SESSION_CLOSE
+template <unsigned F>
+inline void RecordExit(PortfolioController<F> *ctrl, int slot, FPN<F> exit_price,
+                       uint64_t tick, int reason) {
+    Position<F> *pos = &ctrl->portfolio.positions[slot];
+
+    // P&L computation (FPN-only, no doubles until display boundary)
     FPN<F> gross_proceeds = FPN_Mul(exit_price, pos->quantity);
     FPN<F> exit_fee = FPN_Mul(gross_proceeds, ctrl->config.fee_rate);
     FPN<F> net_proceeds = FPN_SubSat(gross_proceeds, exit_fee);
-
     FPN<F> entry_cost = FPN_Mul(pos->entry_price, pos->quantity);
-    // use actual entry fee stored at fill time (not reconstructed from current fee_rate)
     FPN<F> total_entry_cost = FPN_AddSat(entry_cost, pos->entry_fee);
     FPN<F> pos_pnl = FPN_Sub(net_proceeds, total_entry_cost);
+
+    // state updates — complete set, no omissions
     ctrl->realized_pnl = FPN_AddSat(ctrl->realized_pnl, pos_pnl);
     ctrl->daily_realized_pnl = FPN_AddSat(ctrl->daily_realized_pnl, pos_pnl);
+    ctrl->balance = FPN_AddSat(ctrl->balance, net_proceeds);
+    ctrl->total_fees = FPN_AddSat(ctrl->total_fees, exit_fee);
     Welford_Push(&ctrl->pnl_tracker, pos_pnl);
 
     // per-strategy reward attribution
-    {
-      int strat = ctrl->entry_strategy[rec->position_index];
-      if (strat >= 0 && strat < NUM_STRATEGIES) {
+    int strat = ctrl->entry_strategy[slot];
+    if (strat >= 0 && strat < NUM_STRATEGIES) {
         ctrl->strategy_stats[strat].total_trades++;
         ctrl->strategy_stats[strat].realized_pnl = FPN_AddSat(
             ctrl->strategy_stats[strat].realized_pnl, pos_pnl);
-      }
     }
 
-    ctrl->balance = FPN_AddSat(ctrl->balance, net_proceeds);
-    ctrl->total_fees = FPN_AddSat(ctrl->total_fees, exit_fee);
+    // win/loss counters: TP with positive P&L = win, everything else = loss
+    ctrl->wins += (reason == 0);
+    ctrl->losses += (reason != 0);
 
-    // balance reconciliation: check that balance tracks realized_pnl
-    // if these diverge, there's a balance leak
-    if (Portfolio_CountActive(&ctrl->portfolio) == 0) {
-      double bal = FPN_ToDouble(ctrl->balance);
-      double expected = FPN_ToDouble(ctrl->config.starting_balance) + FPN_ToDouble(ctrl->realized_pnl);
-      double drift = bal - expected;
-      if (drift < -0.10 || drift > 0.10) {
-        fprintf(stderr, "[BALANCE DRIFT] bal=%.2f expected=%.2f drift=%.2f realized=%.4f fees=%.4f\n",
-                bal, expected, drift, FPN_ToDouble(ctrl->realized_pnl), FPN_ToDouble(ctrl->total_fees));
-      }
-    }
-
-    const char *reason = (rec->reason == 0) ? "TP" : "SL";
-    ctrl->wins += (rec->reason == 0);
-    ctrl->losses += (rec->reason == 1);
-    if (rec->reason == 1) {
+    // SL cooldown: adaptive or fixed, only on SL exits
+    if (reason == 1) {
         if (ctrl->config.sl_cooldown_adaptive) {
-            // adaptive: scale by trend confidence (R² * negative slope direction)
-            // high R² downtrend = long cooldown, low R² spike = short cooldown
             double r2 = FPN_ToDouble(ctrl->rolling.price_r_squared);
             double slope = FPN_ToDouble(ctrl->rolling.price_slope);
             double confidence = r2 * (slope < 0.0 ? 1.0 : 0.0);
@@ -343,50 +354,88 @@ inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
         }
     }
 
-    // partial exit: if this was a TP exit and the position has a paired leg,
-    // ratchet the pair's SL to breakeven (entry price) — makes it a "free trade"
-    int8_t pair_idx = ctrl->portfolio.positions[rec->position_index].pair_index;
-    if (rec->reason == 0 && pair_idx >= 0 && ctrl->config.breakeven_on_partial &&
-        (ctrl->portfolio.active_bitmap & (1 << pair_idx))) {
-        ctrl->portfolio.positions[pair_idx].stop_loss_price =
-            FPN_Max(ctrl->portfolio.positions[pair_idx].stop_loss_price,
-                    ctrl->portfolio.positions[pair_idx].entry_price);
-        ctrl->portfolio.positions[pair_idx].pair_index = -1; // unpair
+    // partial exit: TP exits ratchet paired position's SL to breakeven
+    if (reason == 0) {
+        int8_t pair_idx = pos->pair_index;
+        if (pair_idx >= 0 && ctrl->config.breakeven_on_partial &&
+            (ctrl->portfolio.active_bitmap & (1 << pair_idx))) {
+            ctrl->portfolio.positions[pair_idx].stop_loss_price =
+                FPN_Max(ctrl->portfolio.positions[pair_idx].stop_loss_price,
+                        ctrl->portfolio.positions[pair_idx].entry_price);
+            ctrl->portfolio.positions[pair_idx].pair_index = -1;
+        }
     }
-    ctrl->portfolio.positions[rec->position_index].pair_index = -1; // clear exited slot
+    pos->pair_index = -1; // clear exited slot
 
-    int is_win = !pos_pnl.sign & !FPN_IsZero(pos_pnl);
-    int is_loss = pos_pnl.sign;
+    // branchless gross win/loss accumulation
     {
-      constexpr unsigned N2 = FPN<F>::N;
-      uint64_t win_mask = -(uint64_t)is_win;
-      uint64_t loss_mask = -(uint64_t)is_loss;
-      FPN<F> neg_pnl = FPN_Negate(pos_pnl);
-      FPN<F> win_add, loss_add;
-      for (unsigned w = 0; w < N2; w++) {
-        win_add.w[w] = pos_pnl.w[w] & win_mask;
-        loss_add.w[w] = neg_pnl.w[w] & loss_mask;
-      }
-      win_add.sign = 0;
-      loss_add.sign = 0;
-      ctrl->gross_wins = FPN_AddSat(ctrl->gross_wins, win_add);
-      ctrl->gross_losses = FPN_AddSat(ctrl->gross_losses, loss_add);
-      // per-strategy win/loss
-      int strat = ctrl->entry_strategy[rec->position_index];
-      if (strat >= 0 && strat < NUM_STRATEGIES) {
-        ctrl->strategy_stats[strat].wins += (1 & (uint32_t)is_win);
-        ctrl->strategy_stats[strat].losses += (1 & (uint32_t)is_loss);
-      }
+        int is_win = !pos_pnl.sign & !FPN_IsZero(pos_pnl);
+        int is_loss = pos_pnl.sign;
+        constexpr unsigned N2 = FPN<F>::N;
+        uint64_t win_mask = -(uint64_t)is_win;
+        uint64_t loss_mask = -(uint64_t)is_loss;
+        FPN<F> neg_pnl = FPN_Negate(pos_pnl);
+        FPN<F> win_add, loss_add;
+        for (unsigned w = 0; w < N2; w++) {
+            win_add.w[w] = pos_pnl.w[w] & win_mask;
+            loss_add.w[w] = neg_pnl.w[w] & loss_mask;
+        }
+        win_add.sign = 0;
+        loss_add.sign = 0;
+        ctrl->gross_wins = FPN_AddSat(ctrl->gross_wins, win_add);
+        ctrl->gross_losses = FPN_AddSat(ctrl->gross_losses, loss_add);
+        if (strat >= 0 && strat < NUM_STRATEGIES) {
+            ctrl->strategy_stats[strat].wins += (1 & (uint32_t)is_win);
+            ctrl->strategy_stats[strat].losses += (1 & (uint32_t)is_loss);
+        }
     }
 
-    uint64_t entry_tick = ctrl->entry_ticks[rec->position_index];
-    ctrl->total_hold_ticks +=
-        (rec->tick > entry_tick) ? (rec->tick - entry_tick) : 0;
-    TradeLogBuffer_PushSell(&ctrl->trade_buf, rec->tick, exit_d, qty_d, entry_d,
-                            delta_pct, reason,
-                            FPN_ToDouble(ctrl->balance), FPN_ToDouble(exit_fee),
-                            ctrl->entry_strategy[rec->position_index],
-                            ctrl->regime.current_regime);
+    // hold time tracking
+    uint64_t entry_tick = ctrl->entry_ticks[slot];
+    ctrl->total_hold_ticks += (tick > entry_tick) ? (tick - entry_tick) : 0;
+
+    // trade log buffer (drained on slow path — caller flushes if needed for shutdown)
+    double exit_d = FPN_ToDouble(exit_price);
+    double entry_d = FPN_ToDouble(pos->entry_price);
+    double qty_d = FPN_ToDouble(pos->quantity);
+    double delta_pct = (entry_d != 0.0) ? ((exit_d - entry_d) / entry_d) * 100.0 : 0.0;
+    const char *reasons[] = {"TP", "SL", "TIME", "SESSION_CLOSE"};
+    TradeLogBuffer_PushSell(&ctrl->trade_buf, tick, exit_d, qty_d, entry_d, delta_pct,
+                            reasons[reason], FPN_ToDouble(ctrl->balance),
+                            FPN_ToDouble(exit_fee), strat, ctrl->regime.current_regime);
+
+    // balance reconciliation when last position closes
+    int remaining = Portfolio_CountActive(&ctrl->portfolio);
+    if (remaining <= 1) { // this position may still be counted
+        double bal = FPN_ToDouble(ctrl->balance);
+        double expected = FPN_ToDouble(ctrl->config.starting_balance) + FPN_ToDouble(ctrl->realized_pnl);
+        double drift = bal - expected;
+        if (drift < -0.10 || drift > 0.10) {
+            fprintf(stderr, "[BALANCE DRIFT] bal=%.2f expected=%.2f drift=%.2f\n",
+                    bal, expected, drift);
+        }
+    }
+}
+//======================================================================================================
+// [EXIT BUFFER DRAIN]
+//======================================================================================================
+// processes TP/SL exits: books P&L, updates balance, logs trades, triggers cooldown
+// called from both warmup (loaded positions can exit) and slow path
+//======================================================================================================
+template <unsigned F>
+inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
+  for (uint32_t i = 0; i < ctrl->exit_buf.count; i++) {
+    ExitRecord<F> *rec = &ctrl->exit_buf.records[i];
+    if (rec->position_index >= 16) continue; // bounds guard
+
+    // slippage: simulate worse fill on exit (sell at lower price than market)
+    FPN<F> exit_price = rec->exit_price;
+    if (!FPN_IsZero(ctrl->config.slippage_pct)) {
+        FPN<F> slip = FPN_Mul(exit_price, ctrl->config.slippage_pct);
+        exit_price = FPN_SubSat(exit_price, slip);
+    }
+
+    RecordExit(ctrl, rec->position_index, exit_price, rec->tick, rec->reason);
   }
   ExitBuffer_Clear(&ctrl->exit_buf);
 }
@@ -579,12 +628,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       }
     }
     if (tripped) {
-      ctrl->kill_switch_active = 1;
-      ctrl->buying_halted = 1;
-      ctrl->halt_reason = 1;
-      ctrl->buy_conds.price = FPN_Zero<F>();
-      ctrl->buy_conds.volume = FPN_Zero<F>();
-      ctrl->gate_offset = FPN_Zero<F>();
+      KillSwitch_Activate(ctrl, ctrl->kill_reason);
       fprintf(stderr, "[KILL] hot-path: equity %.2f — trading halted (reason %d)\n",
               equity, ctrl->kill_reason);
     }
@@ -1053,55 +1097,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
               FPN<F> slip = FPN_Mul(sell_price, ctrl->config.slippage_pct);
               sell_price = FPN_SubSat(sell_price, slip);
           }
-          double entry_d = FPN_ToDouble(pos->entry_price);
-          double exit_d  = FPN_ToDouble(sell_price);
-          double qty_d   = FPN_ToDouble(pos->quantity);
-          double delta_pct = 0.0;
-          if (entry_d != 0.0) delta_pct = ((exit_d - entry_d) / entry_d) * 100.0;
-
-          // compute realized P&L with fees (same as exit buffer drain)
-          FPN<F> gross_proceeds = FPN_Mul(sell_price, pos->quantity);
-          FPN<F> exit_fee = FPN_Mul(gross_proceeds, ctrl->config.fee_rate);
-          FPN<F> net_proceeds = FPN_SubSat(gross_proceeds, exit_fee);
-          FPN<F> entry_cost = FPN_Mul(pos->entry_price, pos->quantity);
-          // use actual entry fee stored at fill time (not reconstructed)
-          FPN<F> total_entry_cost = FPN_AddSat(entry_cost, pos->entry_fee);
-          FPN<F> pos_pnl = FPN_Sub(net_proceeds, total_entry_cost);
-          ctrl->realized_pnl = FPN_AddSat(ctrl->realized_pnl, pos_pnl);
-
-          ctrl->balance = FPN_AddSat(ctrl->balance, net_proceeds);
-          ctrl->total_fees = FPN_AddSat(ctrl->total_fees, exit_fee);
-
-          // balance reconciliation (same check as DrainExits)
-          if (Portfolio_CountActive(&ctrl->portfolio) <= 1) { // this position is about to be removed
-            double bal = FPN_ToDouble(ctrl->balance);
-            double expected = FPN_ToDouble(ctrl->config.starting_balance) + FPN_ToDouble(ctrl->realized_pnl);
-            double drift = bal - expected;
-            if (drift < -0.10 || drift > 0.10) {
-              fprintf(stderr, "[BALANCE DRIFT TIME] bal=%.2f expected=%.2f drift=%.2f\n",
-                      bal, expected, drift);
-            }
-          }
-
-          ctrl->losses++;
-          // branchless win/loss accounting (same pattern as DrainExits)
-          {
-            int is_loss = pos_pnl.sign;
-            constexpr unsigned N2 = FPN<F>::N;
-            uint64_t loss_mask = -(uint64_t)is_loss;
-            FPN<F> neg_pnl = FPN_Negate(pos_pnl);
-            FPN<F> loss_add;
-            for (unsigned w = 0; w < N2; w++)
-              loss_add.w[w] = neg_pnl.w[w] & loss_mask;
-            loss_add.sign = 0;
-            ctrl->gross_losses = FPN_AddSat(ctrl->gross_losses, loss_add);
-          }
-          ctrl->total_hold_ticks += held;
-
-          TradeLogBuffer_PushSell(&ctrl->trade_buf, ctrl->total_ticks, exit_d, qty_d,
-                                  entry_d, delta_pct, "TIME",
-                                  FPN_ToDouble(ctrl->balance), FPN_ToDouble(exit_fee),
-                                  ctrl->entry_strategy[idx], ctrl->regime.current_regime);
+          RecordExit(ctrl, idx, sell_price, ctrl->total_ticks, 2); // reason 2 = TIME
           Portfolio_RemovePosition(&ctrl->portfolio, idx);
         }
       }
@@ -1163,8 +1159,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       FPN<F> loss = FPN_Sub(ctrl->session_start_equity, equity);
       FPN<F> limit = FPN_Mul(ctrl->session_start_equity, ctrl->config.kill_switch_daily_loss_pct);
       if (FPN_GreaterThan(loss, limit)) {
-        ctrl->kill_switch_active = 1;
-        ctrl->kill_reason = 1;
+        KillSwitch_Activate(ctrl, 1);
         double pct = (FPN_ToDouble(loss) / FPN_ToDouble(ctrl->session_start_equity)) * 100.0;
         fprintf(stderr, "[KILL] daily loss %.2f%% exceeded limit — trading halted\n", pct);
       }
@@ -1174,8 +1169,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       FPN<F> dd = FPN_SubSat(ctrl->peak_equity, equity);
       FPN<F> limit = FPN_Mul(ctrl->peak_equity, ctrl->config.kill_switch_drawdown_pct);
       if (FPN_GreaterThan(dd, limit)) {
-        ctrl->kill_switch_active = 1;
-        ctrl->kill_reason = 2;
+        KillSwitch_Activate(ctrl, 2);
         double pct = (FPN_ToDouble(dd) / FPN_ToDouble(ctrl->peak_equity)) * 100.0;
         fprintf(stderr, "[KILL] drawdown %.2f%% exceeded limit — trading halted\n", pct);
       }
@@ -1284,12 +1278,11 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     else if (ctrl->kill_recovery_counter > 0)                { halted = 1; reason = 2; }
     else if (ctrl->regime.current_regime == REGIME_VOLATILE) { halted = 1; reason = 3; }
     else if (ctrl->sl_cooldown_counter > 0)                  { halted = 1; reason = 4; }
-    ctrl->buying_halted = halted;
-    ctrl->halt_reason = reason;
     if (halted) {
-      ctrl->buy_conds.price = FPN_Zero<F>();
-      ctrl->buy_conds.volume = FPN_Zero<F>();
-      ctrl->gate_offset = FPN_Zero<F>();
+      Buying_Halt(ctrl, reason);
+    } else {
+      ctrl->buying_halted = 0;
+      ctrl->halt_reason = 0;
     }
   }
 }
