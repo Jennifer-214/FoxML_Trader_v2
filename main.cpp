@@ -65,8 +65,8 @@ static inline void engine_force_close_all(PortfolioController<FP> *ctrl, TradeLo
         FPN<FP> exit_fee = FPN_Mul(gross_proceeds, ctrl->config.fee_rate);
         FPN<FP> net_proceeds = FPN_SubSat(gross_proceeds, exit_fee);
         FPN<FP> entry_cost = FPN_Mul(pos->entry_price, pos->quantity);
-        FPN<FP> entry_fee = FPN_Mul(entry_cost, ctrl->config.fee_rate);
-        FPN<FP> pos_pnl = FPN_Sub(net_proceeds, FPN_AddSat(entry_cost, entry_fee));
+        // use actual entry fee stored at fill time (not reconstructed from current fee_rate)
+        FPN<FP> pos_pnl = FPN_Sub(net_proceeds, FPN_AddSat(entry_cost, pos->entry_fee));
 
         ctrl->balance = FPN_AddSat(ctrl->balance, net_proceeds);
         ctrl->realized_pnl = FPN_AddSat(ctrl->realized_pnl, pos_pnl);
