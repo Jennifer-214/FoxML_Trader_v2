@@ -1386,7 +1386,7 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
 // v5 adds: entry_ticks, entry_strategy, strategy_id, regime, momentum state
 // backward compatible: v4/v5/v6 load gracefully (missing fields get defaults)
 //======================================================================================================
-#define CONTROLLER_SNAPSHOT_VERSION 9
+#define CONTROLLER_SNAPSHOT_VERSION 10
 
 template <unsigned F>
 inline void PortfolioController_SaveSnapshot(const PortfolioController<F> *ctrl,
@@ -1537,10 +1537,19 @@ inline int PortfolioController_LoadSnapshot(PortfolioController<F> *ctrl,
       if (fread(&ctrl->kill_switch_active, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
       if (fread(&ctrl->kill_reason, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
       if (fread(&ctrl->daily_realized_pnl, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-      if (fread(&ctrl->session_start_equity, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-      if (fread(&ctrl->peak_equity, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-      // v9 snapshots have 4 strategy_stats, v10+ have 5
-      int n_strats = 4;  // backward compat: v9 wrote 4
+      if (version == 9) {
+        // v9 stored equity fields as double (8 bytes) — convert to FPN
+        double sse_d, pe_d;
+        if (fread(&sse_d, sizeof(double), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&pe_d, sizeof(double), 1, f) != 1) { fclose(f); return 0; }
+        ctrl->session_start_equity = FPN_FromDouble<F>(sse_d);
+        ctrl->peak_equity = FPN_FromDouble<F>(pe_d);
+      } else {
+        // v10+: FPN fields
+        if (fread(&ctrl->session_start_equity, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&ctrl->peak_equity, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+      }
+      int n_strats = (version == 9) ? 4 : 5;
       for (int i = 0; i < n_strats; i++) {
         if (fread(&ctrl->strategy_stats[i].realized_pnl, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&ctrl->strategy_stats[i].wins, sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }
