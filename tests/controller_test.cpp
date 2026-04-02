@@ -2747,8 +2747,8 @@ int main() {
         FPN<FP> naive_equity = FPN_AddSat(ctrl.balance, pv_after);
 
         // correct equity: balance + pv + pending proceeds
-        FPN<FP> pending = ExitBuffer_PendingProceeds(&ctrl.exit_buf, ctrl.portfolio.positions,
-                                                      cfg.fee_rate, cfg.slippage_pct, (int)cfg.max_positions);
+        FPN<FP> pending = ExitBuffer_PendingProceeds(&ctrl.exit_buf,
+                                                      cfg.fee_rate, cfg.slippage_pct);
         FPN<FP> correct_equity = FPN_AddSat(FPN_AddSat(ctrl.balance, pv_after), pending);
 
         // pending should be close to gross - fees: 105 * 1.0 - 105 * 1.0 * 0.001 = 104.895
@@ -2795,10 +2795,25 @@ int main() {
             FPN_FromDouble<FP>(101.0), FPN_FromDouble<FP>(95.0));
         ctrl.portfolio.positions[0].entry_fee = FPN_FromDouble<FP>(0.50); // $0.50 entry fee
 
+        // helper: build ExitRecord from position slot (slot is still valid in tests)
+        auto make_rec = [](Portfolio<FP> *p, int slot, FPN<FP> exit_price, uint64_t tick, int reason) {
+            ExitRecord<FP> rec;
+            rec.position_index = slot;
+            rec.exit_price = exit_price;
+            rec.tick = tick;
+            rec.reason = reason;
+            rec.entry_price = p->positions[slot].entry_price;
+            rec.quantity = p->positions[slot].quantity;
+            rec.entry_fee = p->positions[slot].entry_fee;
+            rec.pair_index = p->positions[slot].pair_index;
+            return rec;
+        };
+
         // exit at TP $101: gross = 0.5 × (101-100) = $0.50
         // exit fee = 0.5 × 101 × 0.01 = $0.505
         // net P&L = 0.50 - 0.505 - 0.50 = -$0.505 (loss despite TP exit)
-        RecordExit(&ctrl, 0, FPN_FromDouble<FP>(101.0), 100, 0); // reason 0 = TP
+        { ExitRecord<FP> rec = make_rec(&ctrl.portfolio, 0, FPN_FromDouble<FP>(101.0), 100, 0);
+          RecordExit(&ctrl, &rec); }
         check("win/loss: TP exit with fee-dominated P&L counts as loss",
               ctrl.losses == 1 && ctrl.wins == 0);
 
@@ -2809,7 +2824,8 @@ int main() {
         // exit at $110: gross = 0.5 × (110-100) = $5.00
         // exit fee = 0.5 × 110 × 0.01 = $0.55
         // net P&L = 5.00 - 0.55 - 0.50 = $3.95 (genuine win)
-        RecordExit(&ctrl, 0, FPN_FromDouble<FP>(110.0), 200, 0);
+        { ExitRecord<FP> rec = make_rec(&ctrl.portfolio, 0, FPN_FromDouble<FP>(110.0), 200, 0);
+          RecordExit(&ctrl, &rec); }
         check("win/loss: TP exit with genuine profit counts as win",
               ctrl.wins == 1);
 
@@ -2817,7 +2833,8 @@ int main() {
         Portfolio_AddPositionWithExits(&ctrl.portfolio, qty, entry,
             FPN_FromDouble<FP>(110.0), FPN_FromDouble<FP>(95.0));
         ctrl.portfolio.positions[0].entry_fee = FPN_FromDouble<FP>(0.50);
-        RecordExit(&ctrl, 0, FPN_FromDouble<FP>(95.0), 300, 1); // reason 1 = SL
+        { ExitRecord<FP> rec = make_rec(&ctrl.portfolio, 0, FPN_FromDouble<FP>(95.0), 300, 1);
+          RecordExit(&ctrl, &rec); }
         check("win/loss: SL exit counts as loss",
               ctrl.losses == 2); // fee-dominated TP loss + this SL
     }
@@ -2888,6 +2905,80 @@ int main() {
         double tp_down_dist = tp_down - entry_d;
         check("fee floor: →TRENDING_DOWN TP above fee breakeven",
               tp_down_dist >= fee_floor_d - 0.01);
+    }
+
+    //======================================================================================================
+    // SLOT REUSE REGRESSION (the root cause of phantom drawdown)
+    //======================================================================================================
+    printf("\n--- SLOT REUSE REGRESSION ---\n");
+    {
+        // reproduces the exact race: position A exits, position B fills same slot,
+        // DrainExits must use A's data (from ExitRecord), not B's (from slot)
+
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.starting_balance = FPN_FromDouble<FP>(10000.0);
+        cfg.fee_rate = FPN_FromDouble<FP>(0.001);
+        cfg.slippage_pct = FPN_Zero<FP>();
+        cfg.max_positions = 1;
+
+        PortfolioController<FP> ctrl = {};
+        PortfolioController_Init(&ctrl, cfg);
+
+        // position A at slot 0: entry $100, qty 1.0, TP $110, SL $90
+        FPN<FP> entry_a = FPN_FromDouble<FP>(100.0);
+        FPN<FP> qty_a = FPN_FromDouble<FP>(1.0);
+        Portfolio_AddPositionWithExits(&ctrl.portfolio, qty_a, entry_a,
+            FPN_FromDouble<FP>(110.0), FPN_FromDouble<FP>(90.0));
+        ctrl.portfolio.positions[0].entry_fee = FPN_FromDouble<FP>(0.10);
+        ctrl.balance = FPN_FromDouble<FP>(9899.90); // 10000 - 100 - 0.10 fee
+
+        // exit gate: price hits SL at $90
+        PositionExitGate(&ctrl.portfolio, FPN_FromDouble<FP>(90.0), &ctrl.exit_buf, 100);
+        check("slot reuse: A exited", ctrl.exit_buf.count == 1);
+        check("slot reuse: bitmap cleared", ctrl.portfolio.active_bitmap == 0);
+
+        // verify ExitRecord captured A's data
+        check("slot reuse: record has A's entry",
+              fabs(FPN_ToDouble(ctrl.exit_buf.records[0].entry_price) - 100.0) < 0.01);
+        check("slot reuse: record has A's quantity",
+              fabs(FPN_ToDouble(ctrl.exit_buf.records[0].quantity) - 1.0) < 0.01);
+
+        // NOW: position B fills into slot 0 (overwrites slot data)
+        FPN<FP> entry_b = FPN_FromDouble<FP>(200.0);
+        FPN<FP> qty_b = FPN_FromDouble<FP>(0.5);
+        Portfolio_AddPositionWithExits(&ctrl.portfolio, qty_b, entry_b,
+            FPN_FromDouble<FP>(220.0), FPN_FromDouble<FP>(180.0));
+        ctrl.portfolio.positions[0].entry_fee = FPN_FromDouble<FP>(0.20);
+
+        // slot 0 now has B's data — entry $200, qty 0.5
+        check("slot reuse: slot has B's entry",
+              fabs(FPN_ToDouble(ctrl.portfolio.positions[0].entry_price) - 200.0) < 0.01);
+
+        // PendingProceeds must use A's quantity (1.0), not B's (0.5)
+        FPN<FP> pending = ExitBuffer_PendingProceeds(&ctrl.exit_buf,
+                                                      cfg.fee_rate, cfg.slippage_pct);
+        double pending_d = FPN_ToDouble(pending);
+        // A exited at $90, qty 1.0: gross=$90, fee=$0.09, net=$89.91
+        check("slot reuse: pending uses A's qty (not B's)",
+              pending_d > 89.8 && pending_d < 90.0);
+
+        // DrainExits must compute P&L against A's entry ($100), not B's ($200)
+        double bal_before = FPN_ToDouble(ctrl.balance);
+        PortfolioController_DrainExits(&ctrl);
+        double bal_after = FPN_ToDouble(ctrl.balance);
+        double credited = bal_after - bal_before;
+
+        // A's net proceeds: $90 × 1.0 - fee = $89.91
+        check("slot reuse: drain credited A's proceeds (not B's)",
+              credited > 89.8 && credited < 90.0);
+
+        // P&L should be against A's entry: $89.91 - ($100 × 1.0 + $0.10) = -$10.19
+        double realized = FPN_ToDouble(ctrl.realized_pnl);
+        check("slot reuse: P&L computed against A's entry",
+              realized < -10.0 && realized > -10.5);
+
+        printf("    pending=%.2f credited=%.2f realized=%.2f\n",
+               pending_d, credited, realized);
     }
 
     printf("\n======================================\n");

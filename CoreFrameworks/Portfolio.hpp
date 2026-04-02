@@ -52,14 +52,20 @@ template <unsigned F> struct Portfolio {
 //======================================================================================================
 // [EXIT STRUCTS]
 //======================================================================================================
-// ExitRecord stores position index for O(1) lookup - the position data stays in the slot
-// after the bit is cleared, so the controller can read entry_price/quantity directly
+// ExitRecord snapshots all position data at exit time — slot may be reused by a
+// new fill before DrainExits runs, so nothing downstream should read from the slot
 //======================================================================================================
 template <unsigned F> struct ExitRecord {
-    uint32_t position_index;
-    FPN<F> exit_price;
+    uint32_t position_index;    // slot index (for entry_ticks/entry_strategy lookup only)
+    int reason;                 // 0 = take profit, 1 = stop loss
     uint64_t tick;
-    int reason; // 0 = take profit, 1 = stop loss
+    FPN<F> exit_price;
+    // position data snapshot — captured at exit time, immune to slot reuse
+    FPN<F> entry_price;
+    FPN<F> quantity;
+    FPN<F> entry_fee;
+    int8_t pair_index;
+    uint8_t _pad_rec[7];
 };
 
 template <unsigned F> struct ExitBuffer {
@@ -77,22 +83,18 @@ template <unsigned F> inline void ExitBuffer_Clear(ExitBuffer<F> *buf) {
 }
 
 // exact net proceeds pending in exit buffer — matches what DrainExits/RecordExit will credit
-// accounts for slippage and fees so equity = balance + portfolio_value + this
-// position data survives bitmap clear so quantity/entry reads are safe here
+// reads ALL data from ExitRecord (not position slots — those may have been reused)
 template <unsigned F>
-inline FPN<F> ExitBuffer_PendingProceeds(const ExitBuffer<F> *buf, const Position<F> *positions,
-                                          FPN<F> fee_rate, FPN<F> slippage_pct, int max_positions) {
+inline FPN<F> ExitBuffer_PendingProceeds(const ExitBuffer<F> *buf,
+                                          FPN<F> fee_rate, FPN<F> slippage_pct) {
     FPN<F> total = FPN_Zero<F>();
     for (uint32_t i = 0; i < buf->count; i++) {
-        int idx = buf->records[i].position_index;
-        if (idx < 0 || idx >= max_positions) continue;
-        // apply slippage to exit price (same as DrainExits)
         FPN<F> exit_price = buf->records[i].exit_price;
         if (!FPN_IsZero(slippage_pct)) {
             FPN<F> slip = FPN_Mul(exit_price, slippage_pct);
             exit_price = FPN_SubSat(exit_price, slip);
         }
-        FPN<F> gross = FPN_Mul(exit_price, positions[idx].quantity);
+        FPN<F> gross = FPN_Mul(exit_price, buf->records[i].quantity);
         FPN<F> fee = FPN_Mul(gross, fee_rate);
         total = FPN_AddSat(total, FPN_SubSat(gross, fee));
     }
@@ -273,10 +275,16 @@ inline void PositionExitGate(Portfolio<F> *portfolio, FPN<F> current_price, Exit
         // conditional write: exits are rare (~1/1000 ticks), well-predicted branch
         // saves ~8ns/position vs unconditional 24-byte write every tick
         if (should_exit && exit_buf->count < 16) {
-            exit_buf->records[exit_buf->count].position_index = idx;
-            exit_buf->records[exit_buf->count].exit_price     = current_price;
-            exit_buf->records[exit_buf->count].tick            = tick;
-            exit_buf->records[exit_buf->count].reason          = hit_sl & (!hit_tp); // 0=TP, 1=SL (TP takes priority)
+            ExitRecord<F> *rec = &exit_buf->records[exit_buf->count];
+            rec->position_index = idx;
+            rec->exit_price     = current_price;
+            rec->tick            = tick;
+            rec->reason          = hit_sl & (!hit_tp); // 0=TP, 1=SL (TP takes priority)
+            // snapshot position data BEFORE clearing bitmap — slot may be reused
+            rec->entry_price     = portfolio->positions[idx].entry_price;
+            rec->quantity        = portfolio->positions[idx].quantity;
+            rec->entry_fee       = portfolio->positions[idx].entry_fee;
+            rec->pair_index      = portfolio->positions[idx].pair_index;
             exit_buf->count++;
             portfolio->active_bitmap &= ~(1 << idx);
         }
