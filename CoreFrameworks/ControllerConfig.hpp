@@ -111,6 +111,8 @@ template <unsigned F> struct ControllerConfig {
   FPN<F> partial_exit_pct;       // fraction to exit at TP1 (0.5 = 50%, rest rides TP2)
   FPN<F> tp2_mult;               // TP2 = TP1_distance * this (2.0 = double the TP distance)
   int breakeven_on_partial;      // 1 = move remaining SL to entry after TP1 hit
+  int breakeven_on_profit;       // 1 = ratchet SL to breakeven when position crosses net profit
+  FPN<F> breakeven_buffer_pct;   // SL offset from entry once breakeven ratchet fires (0.001 = +0.1% above entry, -0.001 = allow 0.1% loss)
   // slippage simulation
   FPN<F> slippage_pct;           // simulated slippage on entry/exit (e.g. 0.0005 = 0.05%)
   // session awareness
@@ -235,6 +237,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.partial_exit_pct = FPN_FromDouble<F>(0.5);           // 50% at TP1, 50% rides
   cfg.tp2_mult = FPN_FromDouble<F>(2.0);                   // TP2 = 2x TP1 distance
   cfg.breakeven_on_partial = 1;                            // move SL to entry after TP1 hit
+  cfg.breakeven_on_profit = 0;                             // 0 = disabled, 1 = ratchet SL to breakeven on profit
+  cfg.breakeven_buffer_pct = FPN_FromDouble<F>(0.0005);    // +0.05% above entry (lock in tiny profit)
   cfg.slippage_pct = FPN_Zero<F>();                        // 0 = disabled (backward compat)
   cfg.session_filter_enabled = 0;                          // 0 = disabled (backward compat)
   cfg.session_asian_mult     = FPN_FromDouble<F>(1.5);     // wider gates in low-vol Asian session
@@ -432,6 +436,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(sl_cooldown_adaptive)
     CFG_PARSE_INT(partial_exit_enabled)
     CFG_PARSE_INT(breakeven_on_partial)
+    CFG_PARSE_INT(breakeven_on_profit)
+    CFG_PARSE_PCT(breakeven_buffer_pct)
     CFG_PARSE_INT(depth_enabled)
     CFG_PARSE_INT(use_real_money)
     CFG_PARSE_INT(session_filter_enabled)

@@ -650,7 +650,15 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // Portfolio_ComputeValue is O(popcount) — 1 multiply for single-slot mode
   if ((ctrl->total_ticks & 0xF) == 0 && ctrl->config.kill_switch_enabled && !ctrl->buying_halted) {
     FPN<F> pv = Portfolio_ComputeValue(&ctrl->portfolio, current_price);
-    FPN<F> equity = FPN_AddSat(ctrl->balance, pv);
+    // include pending exit proceeds — exit gate clears bitmap before DrainExits credits balance
+    // without this, equity appears crashed between exit gate and drain (false kill trigger)
+    FPN<F> pending = FPN_Zero<F>();
+    for (int ei = 0; ei < ctrl->exit_buf.count; ei++) {
+      int idx = ctrl->exit_buf.records[ei].position_index;
+      if (idx >= 0 && idx < (int)ctrl->config.max_positions)
+        pending = FPN_AddSat(pending, FPN_Mul(current_price, ctrl->portfolio.positions[idx].quantity));
+    }
+    FPN<F> equity = FPN_AddSat(FPN_AddSat(ctrl->balance, pv), pending);
     int tripped = 0;
     // daily loss: (equity - start) / start < -threshold
     if (!FPN_IsZero(ctrl->session_start_equity)) {
