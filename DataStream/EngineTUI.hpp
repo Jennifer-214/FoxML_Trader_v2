@@ -623,6 +623,7 @@ struct TUIPositionSnap {
     int is_trailing, above_orig_tp;
     uint64_t ticks_held;
     double hold_minutes;  // wall clock hold duration
+    time_t entry_time;    // wall clock entry timestamp (for chart markers)
 };
 
 struct TUISnapshot {
@@ -847,6 +848,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
         ps->ticks_held   = ctrl->total_ticks - ctrl->entry_ticks[idx];
         ps->hold_minutes = (ctrl->entry_time[idx] > 0)
             ? difftime(time(NULL), ctrl->entry_time[idx]) / 60.0 : 0.0;
+        ps->entry_time = ctrl->entry_time[idx];
         snap->total_value += ps->value;
         snap->total_qty   += ps->qty;
         active &= active - 1;

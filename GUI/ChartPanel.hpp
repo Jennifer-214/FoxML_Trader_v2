@@ -272,9 +272,26 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             dl->AddRectFilled(ImVec2(cx - hw, top), ImVec2(cx + hw, bot), bc);
         }
 
-        // trade markers disabled — TP/SL lines + position table are sufficient
-        // timestamps don't align with candles and old sessions bleed through
-        // TODO: re-enable if TradeMarker gets timestamps + visible-range filtering
+        // entry markers — drawn from live position data (not CSV), keyed by entry_time
+        // only active positions get markers, they disappear on close — no persistence/drift
+        for (int pi = 0; pi < 16; pi++) {
+            const TUIPositionSnap *ps = &snap->positions[pi];
+            if (ps->idx < 0 || ps->entry_time == 0) continue;
+            double et = (double)ps->entry_time;
+            // find candle containing this entry time
+            int best_i = -1;
+            for (int i = vc - 1; i >= 0; i--) {
+                if (cs->times_sec[i] <= et && (i == vc - 1 || cs->times_sec[i + 1] > et)) {
+                    best_i = i;
+                    break;
+                }
+            }
+            if (best_i < 0) continue;
+            ImVec2 pos = ImPlot::PlotToPixels(cs->xs[best_i], ps->entry);
+            ImU32 col = ImGui::GetColorU32(ImVec4(FoxmlColors::green_b.x, FoxmlColors::green_b.y,
+                                                    FoxmlColors::green_b.z, 0.8f));
+            dl->AddCircleFilled(pos, 3.5f, col);
+        }
         ImPlot::PopPlotClipRect();
 
         // VWAP
