@@ -619,23 +619,6 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s) {
         ImGui::EndTable();
     }
 
-    // position progress — subtle text indicator instead of bar
-    for (int i = 0; i < 16; i++) {
-        const TUIPositionSnap *ps = &s->positions[i];
-        if (ps->idx < 0) continue;
-        double range = ps->tp - ps->sl;
-        if (range < 0.01) continue;
-        float progress = (float)((s->price - ps->sl) / range);
-        if (progress < 0.0f) progress = 0.0f;
-        if (progress > 1.0f) progress = 1.0f;
-        ImVec4 col = (progress < 0.3f) ? FoxmlColors::red :
-                     (progress < 0.6f) ? FoxmlColors::comment : FoxmlColors::green;
-        ImGui::TextColored(FoxmlColors::sand, "SL");
-        ImGui::SameLine();
-        ImGui::TextColored(col, "%.0f%%", progress * 100.0f);
-        ImGui::SameLine();
-        ImGui::TextColored(FoxmlColors::sand, "TP");
-    }
 
     ImGui::End();
 }
