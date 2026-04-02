@@ -1,4 +1,13 @@
-# 2026-04-02 — v3.6.0: Gate Reason Codes + Structured Logging
+# 2026-04-02 — v3.6.0: Dashboard Polish + Gate Reasons + Structured Logging
+
+## GUI Dashboard Polish
+- Panel reorganization: 10 panels → 7 (merged Portfolio+P&L+Risk → Account, Market Structure+Regime → Market)
+- Removed Config panel (duplicated by Settings tab) and W/L from TopBar (duplicated by Stats)
+- Position progress bar: colored SL→TP bar per open position (red near SL, yellow middle, green near TP)
+- Danger meter: gradient bar in Buy Gate panel when crash protection activates (green → yellow → red)
+- Live P&L chart: streaming implot chart from pnl_history ring buffer, docked alongside Volume
+- Live entry markers: green dot on chart at exact entry candle from position timestamps (no CSV drift)
+- Gross/net P&L in Account panel with color coding
 
 ## Gate Reason Codes
 - 13 `GATE_REASON_*` constants covering every path that zeros the buy gate
