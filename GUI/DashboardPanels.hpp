@@ -445,18 +445,28 @@ static inline void GUI_Panel_Portfolio(const TUISnapshot *s) {
     ImGui::TextColored(FoxmlColors::sand, "equity:");
     ImGui::SameLine();
     ImGui::Text("$%.2f", s->equity);
-    ImGui::SameLine(0, 30);
+    ImGui::SameLine(0, 20);
     ImGui::TextColored(FoxmlColors::sand, "balance:");
     ImGui::SameLine();
     ImGui::Text("$%.2f", s->balance);
 
+    double gross = s->total_pnl + s->fees;
+    double net = s->total_pnl;
+    ImGui::TextColored(FoxmlColors::sand, "gross:");
+    ImGui::SameLine();
+    ImGui::TextColored(PnlColor(gross), "$%+.2f", gross);
+    ImGui::SameLine(0, 20);
+    ImGui::TextColored(FoxmlColors::sand, "net:");
+    ImGui::SameLine();
+    ImGui::TextColored(PnlColor(net), "$%+.2f", net);
+    ImGui::SameLine(0, 20);
+    ImGui::TextColored(FoxmlColors::sand, "fees:");
+    ImGui::SameLine();
+    ImGui::Text("$%.2f", s->fees);
+
     ImGui::TextColored(FoxmlColors::sand, "exposure:");
     ImGui::SameLine();
     ImGui::Text("%.1f%%/%.0f%%", s->exposure_pct, s->max_exp);
-    ImGui::SameLine(0, 30);
-    ImGui::TextColored(FoxmlColors::sand, "fees:");
-    ImGui::SameLine();
-    ImGui::Text("$%.4f", s->fees);
 
     ImGui::End();
 }
