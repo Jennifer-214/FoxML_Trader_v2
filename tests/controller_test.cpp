@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <sys/stat.h>
 #include "../DataStream/MockGenerator.hpp"
 #include "../CoreFrameworks/PortfolioController.hpp"
 
@@ -485,7 +486,7 @@ static void test_regression_feedback() {
 static void test_trade_log() {
     printf("\n--- Trade Log ---\n");
 
-    remove("TEST_order_history.csv");
+    remove("logging/TEST_order_history.csv");
 
     TradeLog log;
     int ok = TradeLog_Init(&log, "TEST");
@@ -504,7 +505,7 @@ static void test_trade_log() {
     TradeLog_Close(&log);
 
     // read back and verify
-    FILE *f = fopen("TEST_order_history.csv", "r");
+    FILE *f = fopen("logging/TEST_order_history.csv", "r");
     check("file created", f != 0);
     if (f) {
         char line[512];
@@ -521,7 +522,7 @@ static void test_trade_log() {
 
         fclose(f);
     }
-    remove("TEST_order_history.csv");
+    remove("logging/TEST_order_history.csv");
 }
 
 //======================================================================================================
@@ -706,7 +707,7 @@ static void test_tick_counter() {
 static void test_full_pipeline() {
     printf("\n--- Full Pipeline Integration ---\n");
 
-    remove("INTG_order_history.csv");
+    remove("logging/INTG_order_history.csv");
 
     ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
     cfg.warmup_ticks  = 20;
@@ -773,7 +774,7 @@ static void test_full_pipeline() {
     free(pool.slots);
 
     // check log file exists and has content
-    FILE *f = fopen("INTG_order_history.csv", "r");
+    FILE *f = fopen("logging/INTG_order_history.csv", "r");
     check("trade log file created", f != 0);
     if (f) {
         int lines = 0;
@@ -783,7 +784,7 @@ static void test_full_pipeline() {
         printf("  trade log lines: %d\n", lines);
         fclose(f);
     }
-    remove("INTG_order_history.csv");
+    remove("logging/INTG_order_history.csv");
 }
 
 //======================================================================================================
@@ -1396,6 +1397,7 @@ static void test_max_positions() {
 // [MAIN]
 //======================================================================================================
 int main() {
+    mkdir("logging", 0755); // tests write trade logs here now
     printf("======================================\n");
     printf("  CONTROLLER TEST SUITE\n");
     printf("======================================\n");
@@ -2389,12 +2391,12 @@ int main() {
 
             TradeLog_Close(&sl);
             free(sp.slots);
-            remove("KILL_SMALL_TEST_order_history.csv");
+            remove("logging/KILL_SMALL_TEST_order_history.csv");
         }
 
         TradeLog_Close(&log);
         free(pool.slots);
-        remove("HALT_TEST_order_history.csv");
+        remove("logging/HALT_TEST_order_history.csv");
     }
 
     //======================================================================================================
@@ -2438,7 +2440,7 @@ int main() {
 
         TradeLog_Close(&log);
         free(pool.slots);
-        remove("PUSHBUY_TEST_order_history.csv");
+        remove("logging/PUSHBUY_TEST_order_history.csv");
     }
 
     //======================================================================================================
@@ -2589,7 +2591,7 @@ int main() {
 
             TradeLog_Close(&log);
             free(pool.slots);
-            remove("DRIFT_TEST1_order_history.csv");
+            remove("logging/DRIFT_TEST1_order_history.csv");
         }
 
         // TEST 3: equity consistency during open position at different prices
@@ -2650,7 +2652,7 @@ int main() {
 
             TradeLog_Close(&log);
             free(pool.slots);
-            remove("DRIFT_TEST2_order_history.csv");
+            remove("logging/DRIFT_TEST2_order_history.csv");
         }
 
         // TEST 5: full pipeline round trip through PortfolioController_Tick
@@ -2693,7 +2695,7 @@ int main() {
 
             TradeLog_Close(&log);
             free(pool.slots);
-            remove("DRIFT_TEST3_order_history.csv");
+            remove("logging/DRIFT_TEST3_order_history.csv");
         }
     }
 

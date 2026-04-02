@@ -55,15 +55,13 @@ struct TradeLogRecord {
 // [FUNCTIONS]
 //======================================================================================================
 static inline int TradeLog_Init(TradeLog *log, const char *symbol) {
-    char filename[128];
+    char filename[256];
+    const char *prefix = "logging/";
     int pos = 0;
-    while (*symbol && pos < 119) {
-        filename[pos++] = *symbol++;
-    }
+    while (*prefix && pos < 245) filename[pos++] = *prefix++;
+    while (*symbol && pos < 245) filename[pos++] = *symbol++;
     const char *suffix = "_order_history.csv";
-    while (*suffix && pos < 127) {
-        filename[pos++] = *suffix++;
-    }
+    while (*suffix && pos < 255) filename[pos++] = *suffix++;
     filename[pos] = '\0';
 
     // check if file already has content (so we don't double-write the header)

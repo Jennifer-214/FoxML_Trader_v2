@@ -462,7 +462,7 @@ static inline void TUI_Render(EngineTUI *tui, const PortfolioController<F> *ctrl
     printf(C_SAND "    avg win: " C_GREEN "$%.4f" C_RESET
            C_SAND "  avg loss: " C_RED "$%.4f" C_RESET "\n",
            avg_win, avg_loss); row++;
-    printf(C_DIM "    log: btcusdt_order_history.csv" C_RESET "\n"); row++;
+    printf(C_DIM "    log: logging/btcusdt_order_history.csv" C_RESET "\n"); row++;
     printf(C_SAND "  ================================================" C_RESET "\n"); row++;
 #ifdef LATENCY_PROFILING
     printf(C_SURF "  ----------------------------------------------------------------" C_RESET "\n"); row++;
@@ -1163,7 +1163,7 @@ static inline void TUI_Render_Snapshot(EngineTUI *tui, const TUISnapshot *s) {
            (s->profit_factor >= 1.0) ? C_GREEN : (total_exits > 0 ? C_RED : C_DIM), s->profit_factor); row++;
     printf(C_SAND "    avg win: " C_GREEN "$%.4f" C_RESET C_SAND "  avg loss: " C_RED "$%.4f" C_RESET "\n",
            s->avg_win, s->avg_loss); row++;
-    printf(C_DIM "    log: btcusdt_order_history.csv" C_RESET "\n"); row++;
+    printf(C_DIM "    log: logging/btcusdt_order_history.csv" C_RESET "\n"); row++;
     printf(C_SAND "  ================================================" C_RESET "\n"); row++;
 
 #ifdef LATENCY_PROFILING

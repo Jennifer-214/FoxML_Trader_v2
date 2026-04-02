@@ -280,7 +280,7 @@ static inline void *gui_thread_fn(void *arg) {
 
     // trade CSV reader for chart markers + equity curve
     TradeData trades;
-    TradeData_Init(&trades, "btcusdt_order_history.csv");
+    TradeData_Init(&trades, "logging/btcusdt_order_history.csv");
 
     // chart display settings
     ChartSettings chart_settings;
@@ -291,9 +291,9 @@ static inline void *gui_thread_fn(void *arg) {
 
     // trade history + log viewer
     TradeHistory trade_history;
-    TradeHistory_Init(&trade_history, "btcusdt_order_history.csv");
+    TradeHistory_Init(&trade_history, "logging/btcusdt_order_history.csv");
     LogViewer log_viewer;
-    LogViewer_Init(&log_viewer, "engine.log");
+    LogViewer_Init(&log_viewer, "logging/engine.log");
 
     while (gui.running && !__atomic_load_n(&shared->quit_requested, __ATOMIC_ACQUIRE)) {
         if (!Gui_BeginFrame(&gui)) break;
