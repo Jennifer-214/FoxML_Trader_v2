@@ -32,6 +32,14 @@
 #include "../Strategies/private/EmaCross.hpp"
 #endif
 #include <stdio.h>
+#include <time.h>
+
+// timestamp helper for structured log output — HH:MM:SS UTC
+static inline void log_ts(char *buf, size_t len) {
+    time_t t = time(NULL);
+    struct tm *utc = gmtime(&t);
+    snprintf(buf, len, "%02d:%02d:%02d", utc->tm_hour, utc->tm_min, utc->tm_sec);
+}
 //======================================================================================================
 // [CONTROLLER STRUCT]
 //======================================================================================================
@@ -435,8 +443,9 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
     {
       double pnl_d = FPN_ToDouble(pos_pnl);
       static const char *sn[] = {"MR", "MOM", "DIP", "ML", "EMA"};
-      fprintf(stderr, "[TRADE] SELL $%.2f × %.6f %s %s$%.2f %s bal=$%.2f\n",
-              exit_d, qty_d, reasons[reason],
+      char ts[16]; log_ts(ts, sizeof(ts));
+      fprintf(stderr, "[%s] [TRADE] SELL $%.2f × %.6f %s %s$%.2f %s bal=$%.2f\n",
+              ts, exit_d, qty_d, reasons[reason],
               pnl_d >= 0 ? "+" : "", pnl_d,
               (strat >= 0 && strat < 5) ? sn[strat] : "?",
               FPN_ToDouble(ctrl->balance));
@@ -685,8 +694,9 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       double eq_d = FPN_ToDouble(equity);
       uint16_t bmp = ctrl->portfolio.active_bitmap;
       int npos = __builtin_popcount(bmp);
-      fprintf(stderr, "[KILL] TRIGGER tick=%lu reason=%d bitmap=0x%04X npos=%d\n",
-              ctrl->total_ticks, ctrl->kill_reason, bmp, npos);
+      char ts[16]; log_ts(ts, sizeof(ts));
+      fprintf(stderr, "[%s] [KILL] TRIGGER tick=%lu reason=%d bitmap=0x%04X npos=%d\n",
+              ts, ctrl->total_ticks, ctrl->kill_reason, bmp, npos);
       fprintf(stderr, "[KILL]   price=%.2f pv=%.6f bal=%.2f equity=%.2f\n",
               price_d, pv_d, bal_d, eq_d);
       fprintf(stderr, "[KILL]   start=%.2f peak=%.2f daily_pct=%.4f dd_pct=%.4f\n",
@@ -787,9 +797,10 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       ctrl->state = CONTROLLER_ACTIVE;
       static const char *strat_names[] = {"MR", "Momentum", "SimpleDip", "ML", "EmaCross"};
       int sid = ctrl->strategy_id;
-      fprintf(stderr, "[SESSION] warmup complete — %d samples, strategy=%s, price=$%.2f\n",
-              ctrl->rolling.count, (sid >= 0 && sid < 5) ? strat_names[sid] : "?",
-              FPN_ToDouble(current_price));
+      { char ts[16]; log_ts(ts, sizeof(ts));
+      fprintf(stderr, "[%s] [SESSION] warmup complete — %d samples, strategy=%s, price=$%.2f\n",
+              ts, ctrl->rolling.count, (sid >= 0 && sid < 5) ? strat_names[sid] : "?",
+              FPN_ToDouble(current_price)); }
     }
 
     // drain exits during warmup — loaded positions need TP/SL processed
@@ -1093,8 +1104,9 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
         {
           static const char *sn[] = {"MR", "MOM", "DIP", "ML", "EMA"};
           int si = ctrl->strategy_id;
-          fprintf(stderr, "[TRADE] BUY $%.2f × %.6f ($%.2f) %s tp=$%.2f sl=$%.2f bal=$%.2f\n",
-                  FPN_ToDouble(fill_price), FPN_ToDouble(sized_qty), FPN_ToDouble(cost),
+          char ts[16]; log_ts(ts, sizeof(ts));
+          fprintf(stderr, "[%s] [TRADE] BUY $%.2f × %.6f ($%.2f) %s tp=$%.2f sl=$%.2f bal=$%.2f\n",
+                  ts, FPN_ToDouble(fill_price), FPN_ToDouble(sized_qty), FPN_ToDouble(cost),
                   (si >= 0 && si < 5) ? sn[si] : "?",
                   FPN_ToDouble(tp_price), FPN_ToDouble(sl_price),
                   FPN_ToDouble(FPN_SubSat(ctrl->balance, total_cost)));
@@ -1266,7 +1278,8 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       if (FPN_GreaterThan(loss, limit)) {
         KillSwitch_Activate(ctrl, 1);
         double pct = (FPN_ToDouble(loss) / FPN_ToDouble(ctrl->session_start_equity)) * 100.0;
-        fprintf(stderr, "[KILL] daily loss %.2f%% exceeded limit — trading halted\n", pct);
+        { char ts[16]; log_ts(ts, sizeof(ts));
+        fprintf(stderr, "[%s] [KILL] daily loss %.2f%% exceeded limit — trading halted\n", ts, pct); }
       }
     }
     // drawdown: dd = peak - equity, limit = peak * threshold
@@ -1276,7 +1289,8 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       if (FPN_GreaterThan(dd, limit)) {
         KillSwitch_Activate(ctrl, 2);
         double pct = (FPN_ToDouble(dd) / FPN_ToDouble(ctrl->peak_equity)) * 100.0;
-        fprintf(stderr, "[KILL] drawdown %.2f%% exceeded limit — trading halted\n", pct);
+        { char ts[16]; log_ts(ts, sizeof(ts));
+        fprintf(stderr, "[%s] [KILL] drawdown %.2f%% exceeded limit — trading halted\n", ts, pct); }
       }
     }
   }
@@ -1312,13 +1326,19 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     Regime_Classify(&ctrl->regime, &signals, &ctrl->config);
     int new_regime = ctrl->regime.current_regime;
     if (new_regime != old_regime) {
+      // compute duration before updating start time
+      double dur_min = difftime(time(NULL), ctrl->regime.regime_start_time) / 60.0;
       ctrl->regime.regime_start_tick = ctrl->total_ticks;
       ctrl->regime.regime_start_time = time(NULL);
       {
+        char ts[16]; log_ts(ts, sizeof(ts));
         static const char *rn[] = {"RANGING", "TRENDING", "VOLATILE", "DOWNTREND", "MILD_TREND"};
         int or_ = (old_regime >= 0 && old_regime < 5) ? old_regime : 0;
         int nr_ = (new_regime >= 0 && new_regime < 5) ? new_regime : 0;
-        fprintf(stderr, "[REGIME] %s → %s\n", rn[or_], rn[nr_]);
+        if (dur_min >= 1.0)
+          fprintf(stderr, "[%s] [REGIME] %s → %s (was %s for %.0fm)\n", ts, rn[or_], rn[nr_], rn[or_], dur_min);
+        else
+          fprintf(stderr, "[%s] [REGIME] %s → %s (was %s for %.0fs)\n", ts, rn[or_], rn[nr_], rn[or_], dur_min * 60.0);
       }
       // only auto-switch strategy when default_strategy=-1 (regime auto mode)
       // when a specific strategy is selected, regime detection still runs
@@ -1406,7 +1426,8 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       };
       int gi = (ctrl->gate_reason >= 0 && ctrl->gate_reason < NUM_GATE_REASONS) ? ctrl->gate_reason : 0;
       int pi = (prev_gate >= 0 && prev_gate < NUM_GATE_REASONS) ? prev_gate : 0;
-      fprintf(stderr, "[GATE] %s → %s\n", gr[pi], gr[gi]);
+      char ts[16]; log_ts(ts, sizeof(ts));
+      fprintf(stderr, "[%s] [GATE] %s → %s\n", ts, gr[pi], gr[gi]);
     }
   }
 }
