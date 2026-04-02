@@ -428,6 +428,16 @@ inline void RecordExit(PortfolioController<F> *ctrl, int slot, FPN<F> exit_price
     double qty_d = FPN_ToDouble(pos->quantity);
     double delta_pct = (entry_d != 0.0) ? ((exit_d - entry_d) / entry_d) * 100.0 : 0.0;
     const char *reasons[] = {"TP", "SL", "TIME", "SESSION_CLOSE"};
+    {
+      double pnl_d = FPN_ToDouble(pos_pnl);
+      double hold_sec = (tick > entry_tick) ? (double)(tick - entry_tick) * 0.001 : 0.0;
+      static const char *sn[] = {"MR", "MOM", "DIP", "ML", "EMA"};
+      fprintf(stderr, "[TRADE] SELL $%.2f × %.6f %s %s$%.2f %s bal=$%.2f\n",
+              exit_d, qty_d, reasons[reason],
+              pnl_d >= 0 ? "+" : "", pnl_d,
+              (strat >= 0 && strat < 5) ? sn[strat] : "?",
+              FPN_ToDouble(ctrl->balance));
+    }
     TradeLogBuffer_PushSell(&ctrl->trade_buf, tick, exit_d, qty_d, entry_d, delta_pct,
                             reasons[reason], FPN_ToDouble(ctrl->balance),
                             FPN_ToDouble(exit_fee), strat, ctrl->regime.current_regime);
@@ -768,6 +778,11 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
           ctrl->strategy_id = ctrl->config.default_strategy;
       PortfolioController_StrategyDispatch(ctrl, current_price);
       ctrl->state = CONTROLLER_ACTIVE;
+      static const char *strat_names[] = {"MR", "Momentum", "SimpleDip", "ML", "EmaCross"};
+      int sid = ctrl->strategy_id;
+      fprintf(stderr, "[SESSION] warmup complete — %d samples, strategy=%s, price=$%.2f\n",
+              ctrl->rolling.count, (sid >= 0 && sid < 5) ? strat_names[sid] : "?",
+              FPN_ToDouble(current_price));
     }
 
     // drain exits during warmup — loaded positions need TP/SL processed
@@ -1068,6 +1083,15 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       if (fill_ok) {
         ctrl->total_buys++;
         ctrl->idle_cycles = 0;  // reset gate death spiral counter
+        {
+          static const char *sn[] = {"MR", "MOM", "DIP", "ML", "EMA"};
+          int si = ctrl->strategy_id;
+          fprintf(stderr, "[TRADE] BUY $%.2f × %.6f ($%.2f) %s tp=$%.2f sl=$%.2f bal=$%.2f\n",
+                  FPN_ToDouble(fill_price), FPN_ToDouble(sized_qty), FPN_ToDouble(cost),
+                  (si >= 0 && si < 5) ? sn[si] : "?",
+                  FPN_ToDouble(tp_price), FPN_ToDouble(sl_price),
+                  FPN_ToDouble(FPN_SubSat(ctrl->balance, total_cost)));
+        }
         ctrl->balance = FPN_SubSat(ctrl->balance, total_cost);
         ctrl->total_fees = FPN_AddSat(ctrl->total_fees, entry_fee);
 
@@ -1273,6 +1297,12 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     if (new_regime != old_regime) {
       ctrl->regime.regime_start_tick = ctrl->total_ticks;
       ctrl->regime.regime_start_time = time(NULL);
+      {
+        static const char *rn[] = {"RANGING", "TRENDING", "VOLATILE", "DOWNTREND", "MILD_TREND"};
+        int or_ = (old_regime >= 0 && old_regime < 5) ? old_regime : 0;
+        int nr_ = (new_regime >= 0 && new_regime < 5) ? new_regime : 0;
+        fprintf(stderr, "[REGIME] %s → %s\n", rn[or_], rn[nr_]);
+      }
       // only auto-switch strategy when default_strategy=-1 (regime auto mode)
       // when a specific strategy is selected, regime detection still runs
       // (for display/signals) but doesn't override the strategy
@@ -1343,11 +1373,23 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     else if (ctrl->kill_recovery_counter > 0)                { halted = 1; reason = 2; }
     else if (ctrl->regime.current_regime == REGIME_VOLATILE) { halted = 1; reason = 3; }
     else if (ctrl->sl_cooldown_counter > 0)                  { halted = 1; reason = 4; }
+    int prev_gate = ctrl->gate_reason;
     if (halted) {
       Buying_Halt(ctrl, reason);
     } else {
       ctrl->buying_halted = 0;
       ctrl->halt_reason = 0;
+    }
+    // log gate state transitions (slow path only, ~1 per state change)
+    if (ctrl->gate_reason != prev_gate) {
+      static const char *gr[] = {
+        "ok", "warmup", "no_signal", "no_trade", "book",
+        "danger", "kill", "recovery", "volatile", "cooldown",
+        "wind_down", "paused", "downtrend"
+      };
+      int gi = (ctrl->gate_reason >= 0 && ctrl->gate_reason < NUM_GATE_REASONS) ? ctrl->gate_reason : 0;
+      int pi = (prev_gate >= 0 && prev_gate < NUM_GATE_REASONS) ? prev_gate : 0;
+      fprintf(stderr, "[GATE] %s → %s\n", gr[pi], gr[gi]);
     }
   }
 }
