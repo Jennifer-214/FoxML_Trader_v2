@@ -365,9 +365,11 @@ inline void RecordExit(PortfolioController<F> *ctrl, int slot, FPN<F> exit_price
             ctrl->strategy_stats[strat].realized_pnl, pos_pnl);
     }
 
-    // win/loss counters: TP with positive P&L = win, everything else = loss
-    ctrl->wins += (reason == 0);
-    ctrl->losses += (reason != 0);
+    // win/loss counters: TP exit with positive P&L = win, everything else = loss
+    // a TP exit where fees ate the profit is still a loss, not a win
+    int is_profitable = !pos_pnl.sign & !FPN_IsZero(pos_pnl);
+    ctrl->wins += ((reason == 0) & is_profitable);
+    ctrl->losses += !((reason == 0) & is_profitable);
 
     // SL cooldown: adaptive or fixed, only on SL exits
     if (reason == 1) {
@@ -652,12 +654,10 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     FPN<F> pv = Portfolio_ComputeValue(&ctrl->portfolio, current_price);
     // include pending exit proceeds — exit gate clears bitmap before DrainExits credits balance
     // without this, equity appears crashed between exit gate and drain (false kill trigger)
-    FPN<F> pending = FPN_Zero<F>();
-    for (int ei = 0; ei < ctrl->exit_buf.count; ei++) {
-      int idx = ctrl->exit_buf.records[ei].position_index;
-      if (idx >= 0 && idx < (int)ctrl->config.max_positions)
-        pending = FPN_AddSat(pending, FPN_Mul(current_price, ctrl->portfolio.positions[idx].quantity));
-    }
+    // uses exact exit_price × qty - slippage - fees (matches what RecordExit will credit)
+    FPN<F> pending = ExitBuffer_PendingProceeds(&ctrl->exit_buf, ctrl->portfolio.positions,
+                                                 ctrl->config.fee_rate, ctrl->config.slippage_pct,
+                                                 (int)ctrl->config.max_positions);
     FPN<F> equity = FPN_AddSat(FPN_AddSat(ctrl->balance, pv), pending);
     int tripped = 0;
     // daily loss: (equity - start) / start < -threshold
