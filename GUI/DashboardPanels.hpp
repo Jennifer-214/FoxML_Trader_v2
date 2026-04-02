@@ -397,22 +397,6 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
         ImGui::TextColored(FoxmlColors::yellow, "%s", reasons[s->last_reject_reason]);
     }
 
-    // danger meter — crash protection gradient
-    if (s->danger_score > 0.001) {
-        float ds = (float)s->danger_score;
-        ImVec4 danger_color;
-        if (ds < 0.3f)
-            danger_color = FoxmlColors::green;
-        else if (ds < 0.7f)
-            danger_color = FoxmlColors::yellow;
-        else
-            danger_color = FoxmlColors::red;
-        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, danger_color);
-        char overlay[32];
-        snprintf(overlay, sizeof(overlay), "danger: %.0f%%", ds * 100.0f);
-        ImGui::ProgressBar(ds, ImVec2(-1, 12), overlay);
-        ImGui::PopStyleColor();
-    }
 
     ImGui::End();
 }

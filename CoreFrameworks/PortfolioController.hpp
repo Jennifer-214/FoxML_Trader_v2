@@ -334,20 +334,23 @@ inline void Buying_Halt(PortfolioController<F> *ctrl, int reason) {
 // handles: realized_pnl, daily_realized_pnl, balance, fees, wins/losses,
 //          strategy attribution, Welford tracking, gross_wins/losses,
 //          SL cooldown, paired SL ratchet, hold ticks, trade log buffer
-// caller is responsible for: slippage (apply before calling), position removal,
-//          direct CSV logging if needed (session close)
-// reason: 0 = TP, 1 = SL, 2 = TIME, 3 = SESSION_CLOSE
+// ALL position data comes from the ExitRecord — never reads from position slot
+// (slot may have been reused by a new fill between exit gate and drain)
+// caller is responsible for: slippage (apply to rec->exit_price before calling),
+//          position removal, direct CSV logging if needed (session close)
 template <unsigned F>
-inline void RecordExit(PortfolioController<F> *ctrl, int slot, FPN<F> exit_price,
-                       uint64_t tick, int reason) {
-    Position<F> *pos = &ctrl->portfolio.positions[slot];
+inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
+    int slot = rec->position_index;
+    int reason = rec->reason;
+    FPN<F> exit_price = rec->exit_price;
 
     // P&L computation (FPN-only, no doubles until display boundary)
-    FPN<F> gross_proceeds = FPN_Mul(exit_price, pos->quantity);
+    // all position data from record — immune to slot reuse
+    FPN<F> gross_proceeds = FPN_Mul(exit_price, rec->quantity);
     FPN<F> exit_fee = FPN_Mul(gross_proceeds, ctrl->config.fee_rate);
     FPN<F> net_proceeds = FPN_SubSat(gross_proceeds, exit_fee);
-    FPN<F> entry_cost = FPN_Mul(pos->entry_price, pos->quantity);
-    FPN<F> total_entry_cost = FPN_AddSat(entry_cost, pos->entry_fee);
+    FPN<F> entry_cost = FPN_Mul(rec->entry_price, rec->quantity);
+    FPN<F> total_entry_cost = FPN_AddSat(entry_cost, rec->entry_fee);
     FPN<F> pos_pnl = FPN_Sub(net_proceeds, total_entry_cost);
 
     // state updates — complete set, no omissions
@@ -357,7 +360,7 @@ inline void RecordExit(PortfolioController<F> *ctrl, int slot, FPN<F> exit_price
     ctrl->total_fees = FPN_AddSat(ctrl->total_fees, exit_fee);
     Welford_Push(&ctrl->pnl_tracker, pos_pnl);
 
-    // per-strategy reward attribution
+    // per-strategy reward attribution (entry_strategy is a separate array, safe)
     int strat = ctrl->entry_strategy[slot];
     if (strat >= 0 && strat < NUM_STRATEGIES) {
         ctrl->strategy_stats[strat].total_trades++;
@@ -386,7 +389,7 @@ inline void RecordExit(PortfolioController<F> *ctrl, int slot, FPN<F> exit_price
 
     // partial exit: TP exits ratchet paired position's SL to breakeven
     if (reason == 0) {
-        int8_t pair_idx = pos->pair_index;
+        int8_t pair_idx = rec->pair_index;
         if (pair_idx >= 0 && ctrl->config.breakeven_on_partial &&
             (ctrl->portfolio.active_bitmap & (1 << pair_idx))) {
             ctrl->portfolio.positions[pair_idx].stop_loss_price =
@@ -395,7 +398,6 @@ inline void RecordExit(PortfolioController<F> *ctrl, int slot, FPN<F> exit_price
             ctrl->portfolio.positions[pair_idx].pair_index = -1;
         }
     }
-    pos->pair_index = -1; // clear exited slot
 
     // branchless gross win/loss accumulation
     {
@@ -420,19 +422,18 @@ inline void RecordExit(PortfolioController<F> *ctrl, int slot, FPN<F> exit_price
         }
     }
 
-    // hold time tracking
+    // hold time tracking (entry_ticks is a separate array, safe)
     uint64_t entry_tick = ctrl->entry_ticks[slot];
-    ctrl->total_hold_ticks += (tick > entry_tick) ? (tick - entry_tick) : 0;
+    ctrl->total_hold_ticks += (rec->tick > entry_tick) ? (rec->tick - entry_tick) : 0;
 
     // trade log buffer (drained on slow path — caller flushes if needed for shutdown)
     double exit_d = FPN_ToDouble(exit_price);
-    double entry_d = FPN_ToDouble(pos->entry_price);
-    double qty_d = FPN_ToDouble(pos->quantity);
+    double entry_d = FPN_ToDouble(rec->entry_price);
+    double qty_d = FPN_ToDouble(rec->quantity);
     double delta_pct = (entry_d != 0.0) ? ((exit_d - entry_d) / entry_d) * 100.0 : 0.0;
     const char *reasons[] = {"TP", "SL", "TIME", "SESSION_CLOSE"};
     {
       double pnl_d = FPN_ToDouble(pos_pnl);
-      double hold_sec = (tick > entry_tick) ? (double)(tick - entry_tick) * 0.001 : 0.0;
       static const char *sn[] = {"MR", "MOM", "DIP", "ML", "EMA"};
       fprintf(stderr, "[TRADE] SELL $%.2f × %.6f %s %s$%.2f %s bal=$%.2f\n",
               exit_d, qty_d, reasons[reason],
@@ -440,7 +441,7 @@ inline void RecordExit(PortfolioController<F> *ctrl, int slot, FPN<F> exit_price
               (strat >= 0 && strat < 5) ? sn[strat] : "?",
               FPN_ToDouble(ctrl->balance));
     }
-    TradeLogBuffer_PushSell(&ctrl->trade_buf, tick, exit_d, qty_d, entry_d, delta_pct,
+    TradeLogBuffer_PushSell(&ctrl->trade_buf, rec->tick, exit_d, qty_d, entry_d, delta_pct,
                             reasons[reason], FPN_ToDouble(ctrl->balance),
                             FPN_ToDouble(exit_fee), strat, ctrl->regime.current_regime);
 
@@ -470,13 +471,12 @@ inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
     if (rec->position_index >= 16) continue; // bounds guard
 
     // slippage: simulate worse fill on exit (sell at lower price than market)
-    FPN<F> exit_price = rec->exit_price;
     if (!FPN_IsZero(ctrl->config.slippage_pct)) {
-        FPN<F> slip = FPN_Mul(exit_price, ctrl->config.slippage_pct);
-        exit_price = FPN_SubSat(exit_price, slip);
+        FPN<F> slip = FPN_Mul(rec->exit_price, ctrl->config.slippage_pct);
+        rec->exit_price = FPN_SubSat(rec->exit_price, slip);
     }
 
-    RecordExit(ctrl, rec->position_index, exit_price, rec->tick, rec->reason);
+    RecordExit(ctrl, rec);
   }
   ExitBuffer_Clear(&ctrl->exit_buf);
 }
@@ -655,9 +655,8 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     // include pending exit proceeds — exit gate clears bitmap before DrainExits credits balance
     // without this, equity appears crashed between exit gate and drain (false kill trigger)
     // uses exact exit_price × qty - slippage - fees (matches what RecordExit will credit)
-    FPN<F> pending = ExitBuffer_PendingProceeds(&ctrl->exit_buf, ctrl->portfolio.positions,
-                                                 ctrl->config.fee_rate, ctrl->config.slippage_pct,
-                                                 (int)ctrl->config.max_positions);
+    FPN<F> pending = ExitBuffer_PendingProceeds(&ctrl->exit_buf,
+                                                 ctrl->config.fee_rate, ctrl->config.slippage_pct);
     FPN<F> equity = FPN_AddSat(FPN_AddSat(ctrl->balance, pv), pending);
     int tripped = 0;
     // daily loss: (equity - start) / start < -threshold
@@ -1193,7 +1192,17 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
               FPN<F> slip = FPN_Mul(sell_price, ctrl->config.slippage_pct);
               sell_price = FPN_SubSat(sell_price, slip);
           }
-          RecordExit(ctrl, idx, sell_price, ctrl->total_ticks, 2); // reason 2 = TIME
+          // build ExitRecord from live position data (slot is still valid here)
+          ExitRecord<F> time_rec;
+          time_rec.position_index = idx;
+          time_rec.exit_price = sell_price;
+          time_rec.tick = ctrl->total_ticks;
+          time_rec.reason = 2; // TIME
+          time_rec.entry_price = pos->entry_price;
+          time_rec.quantity = pos->quantity;
+          time_rec.entry_fee = pos->entry_fee;
+          time_rec.pair_index = pos->pair_index;
+          RecordExit(ctrl, &time_rec);
           Portfolio_RemovePosition(&ctrl->portfolio, idx);
         }
       }

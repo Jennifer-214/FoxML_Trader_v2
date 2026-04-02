@@ -61,7 +61,17 @@ static inline void engine_force_close_all(PortfolioController<FP> *ctrl, TradeLo
         double qty_d     = FPN_ToDouble(pos->quantity);
         double delta_pct = (entry_d != 0.0) ? ((exit_d - entry_d) / entry_d) * 100.0 : 0.0;
 
-        RecordExit(ctrl, idx, last_price, ctrl->total_ticks, 3); // reason 3 = SESSION_CLOSE
+        // build ExitRecord from live position data (slot is valid — we're iterating active bitmap)
+        ExitRecord<FP> close_rec;
+        close_rec.position_index = idx;
+        close_rec.exit_price = last_price;
+        close_rec.tick = ctrl->total_ticks;
+        close_rec.reason = 3; // SESSION_CLOSE
+        close_rec.entry_price = pos->entry_price;
+        close_rec.quantity = pos->quantity;
+        close_rec.entry_fee = pos->entry_fee;
+        close_rec.pair_index = pos->pair_index;
+        RecordExit(ctrl, &close_rec);
 
         // direct CSV write — trade_buf will be cleared on reinit, this persists
         { TradeLogRecord r = {};
