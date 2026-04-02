@@ -407,6 +407,11 @@ inline void Regime_AdjustPositions(Portfolio<F> *portfolio,
                 FPN<F> tight_tp = FPN_AddSat(pos->entry_price, tight_tp_offset);
                 pos->take_profit_price = FPN_Min(pos->take_profit_price, tight_tp);
 
+                // fee floor: TP must cover round-trip fees even after tightening
+                FPN<F> fee_floor = FPN_AddSat(pos->entry_price,
+                    FPN_Mul(FPN_Mul(pos->entry_price, cfg->fee_rate), cfg->fee_floor_mult));
+                pos->take_profit_price = FPN_Max(pos->take_profit_price, fee_floor);
+
                 FPN<F> wide_sl_offset = FPN_Mul(stddev, FPN_Mul(cfg->stop_loss_pct, hundred));
                 FPN<F> wide_sl = FPN_SubSat(pos->entry_price, wide_sl_offset);
                 pos->stop_loss_price = FPN_Min(pos->stop_loss_price, wide_sl);
@@ -431,6 +436,11 @@ inline void Regime_AdjustPositions(Portfolio<F> *portfolio,
                 FPN<F> tighter_tp = FPN_AddSat(pos->entry_price, mild_tp);
                 pos->take_profit_price = FPN_Min(pos->take_profit_price, tighter_tp);
 
+                // fee floor: TP must cover round-trip fees even after tightening
+                FPN<F> fee_floor = FPN_AddSat(pos->entry_price,
+                    FPN_Mul(FPN_Mul(pos->entry_price, cfg->fee_rate), cfg->fee_floor_mult));
+                pos->take_profit_price = FPN_Max(pos->take_profit_price, fee_floor);
+
                 // SL ceiling + floor
                 FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
                 FPN<F> sl_ceiling = FPN_SubSat(pos->entry_price, tp_dist);
@@ -444,6 +454,11 @@ inline void Regime_AdjustPositions(Portfolio<F> *portfolio,
                 FPN<F> tight_tp_offset = FPN_Mul(stddev, cfg->momentum_tp_mult);
                 FPN<F> tight_tp = FPN_AddSat(pos->entry_price, tight_tp_offset);
                 pos->take_profit_price = FPN_Min(pos->take_profit_price, tight_tp);
+
+                // fee floor: TP must cover round-trip fees even after tightening
+                FPN<F> fee_floor = FPN_AddSat(pos->entry_price,
+                    FPN_Mul(FPN_Mul(pos->entry_price, cfg->fee_rate), cfg->fee_floor_mult));
+                pos->take_profit_price = FPN_Max(pos->take_profit_price, fee_floor);
 
                 FPN<F> tight_sl_offset = FPN_Mul(stddev, cfg->momentum_sl_mult);
                 FPN<F> tight_sl = FPN_SubSat(pos->entry_price, tight_sl_offset);
