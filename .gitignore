@@ -3,6 +3,7 @@ build_gui/
 build_latency/
 vendor/
 logging/
+paper_runs/
 *.o
 *.d
 plans/
