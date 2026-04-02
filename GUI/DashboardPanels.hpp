@@ -100,26 +100,18 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
     ImGui::SameLine();
     ImGui::Text("%02u:%02u:%02u", hours, mins, secs);
 
-    if (s->is_paused) {
-        const char *reason = "gate";
-        if (s->sl_cooldown > 0) reason = "cooldown";
-        else if (s->breaker_tripped) reason = "breaker";
-        else if (s->current_regime == REGIME_VOLATILE) reason = "volatile";
-        else if (s->current_regime == REGIME_TRENDING_DOWN) reason = "downtrend";
-        else if (s->engine_state == 0) reason = "warmup";
-        else if (s->long_gate_enabled && !s->long_gate_ok) reason = "long trend";
-        else if (s->buy_p > 0.01) {
-            int price_ok = s->gate_direction
-                ? (s->price >= s->buy_p) : (s->price <= s->buy_p);
-            int vol_ok = (s->volume >= s->buy_v);
-            if (!price_ok && !vol_ok) reason = "price+vol";
-            else if (!price_ok) reason = "price";
-            else if (!vol_ok) reason = "volume";
-        }
+    if (s->is_paused && s->gate_reason > 0) {
+        static const char *gate_reasons[] = {
+            "ok", "warmup", "no_signal", "no_trade", "book",
+            "danger", "kill", "recovery", "volatile", "cooldown",
+            "wind_down", "paused", "downtrend"
+        };
+        int ri = (s->gate_reason >= 0 && s->gate_reason < NUM_GATE_REASONS) ? s->gate_reason : 0;
+        ImVec4 color = (ri == GATE_REASON_KILL || ri == GATE_REASON_DANGER) ? FoxmlColors::red : FoxmlColors::yellow;
         ImGui::SameLine();
         ImGui::TextColored(FoxmlColors::comment, "|");
         ImGui::SameLine();
-        ImGui::TextColored(FoxmlColors::yellow, "PAUSED (%s)", reason);
+        ImGui::TextColored(color, "PAUSED (%s)", gate_reasons[ri]);
     }
 
     if (s->current_session >= 0) {
@@ -130,25 +122,40 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
         ImGui::TextColored(FoxmlColors::sand, "%s (%.1fx)", sess_names[s->current_session], s->session_mult);
     }
 
-    // trading blocked indicator
-    if (s->engine_state == 0) {
-        ImGui::TextColored(FoxmlColors::yellow, "BUYING PAUSED");
+    // trading blocked indicator — detailed reason from gate_reason code
+    if (s->gate_reason > 0 && s->is_paused) {
+        ImVec4 hdr = (s->gate_reason == GATE_REASON_KILL || s->gate_reason == GATE_REASON_DANGER)
+                     ? FoxmlColors::red : FoxmlColors::yellow;
+        ImGui::TextColored(hdr, "BUYING PAUSED");
         ImGui::SameLine();
-        ImGui::TextColored(FoxmlColors::comment, "warmup — waiting for market data (%d/%d samples)",
-                          s->roll_count, s->min_warmup_samples);
-    } else if (s->sl_cooldown > 0) {
-        ImGui::TextColored(FoxmlColors::yellow, "BUYING PAUSED");
-        ImGui::SameLine();
-        ImGui::TextColored(FoxmlColors::comment, "post-SL cooldown (%d cycles remaining)", s->sl_cooldown);
-    } else if (s->current_regime == REGIME_VOLATILE || s->current_regime == REGIME_TRENDING_DOWN) {
-        ImGui::TextColored(FoxmlColors::yellow, "BUYING PAUSED");
-        ImGui::SameLine();
-        const char *r = (s->current_regime == REGIME_TRENDING_DOWN) ? "downtrend" : "volatile regime";
-        ImGui::TextColored(FoxmlColors::comment, "%s — buying paused", r);
-    } else if (s->breaker_tripped) {
-        ImGui::TextColored(FoxmlColors::red, "BUYING PAUSED");
-        ImGui::SameLine();
-        ImGui::TextColored(FoxmlColors::comment, "circuit breaker — max drawdown hit");
+        switch (s->gate_reason) {
+        case GATE_REASON_WARMUP:
+            ImGui::TextColored(FoxmlColors::comment, "warmup — waiting for market data (%d/%d samples)",
+                              s->roll_count, s->min_warmup_samples); break;
+        case GATE_REASON_NO_SIGNAL:
+            ImGui::TextColored(FoxmlColors::comment, "no signal — strategy returned no buy price"); break;
+        case GATE_REASON_NO_TRADE:
+            ImGui::TextColored(FoxmlColors::comment, "no-trade band — signal too weak for fees"); break;
+        case GATE_REASON_BOOK:
+            ImGui::TextColored(FoxmlColors::comment, "book imbalance — insufficient bid pressure"); break;
+        case GATE_REASON_DANGER:
+            ImGui::TextColored(FoxmlColors::comment, "danger gradient — crash protection (score: %.0f%%)",
+                              s->danger_score * 100.0); break;
+        case GATE_REASON_KILL:
+            ImGui::TextColored(FoxmlColors::comment, "kill switch — max drawdown hit"); break;
+        case GATE_REASON_RECOVERY:
+            ImGui::TextColored(FoxmlColors::comment, "kill recovery — observation period"); break;
+        case GATE_REASON_VOLATILE:
+            ImGui::TextColored(FoxmlColors::comment, "volatile regime — buying paused"); break;
+        case GATE_REASON_COOLDOWN:
+            ImGui::TextColored(FoxmlColors::comment, "post-SL cooldown (%d cycles remaining)", s->sl_cooldown); break;
+        case GATE_REASON_WIND_DOWN:
+            ImGui::TextColored(FoxmlColors::comment, "session wind-down — closing time"); break;
+        case GATE_REASON_PAUSED:
+            ImGui::TextColored(FoxmlColors::comment, "manual pause"); break;
+        case GATE_REASON_DOWNTREND:
+            ImGui::TextColored(FoxmlColors::comment, "downtrend — buying paused"); break;
+        }
     }
 
     ImGui::End();
@@ -372,7 +379,13 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
 
     ImGui::SameLine(0, 10);
     if (s->buy_p < 0.01) {
-        ImGui::TextColored(FoxmlColors::yellow, "GATE OFF");
+        static const char *gate_short[] = {
+            "ok", "warmup", "no_signal", "no_trade", "book",
+            "danger", "kill", "recovery", "volatile", "cooldown",
+            "wind_down", "paused", "downtrend"
+        };
+        int gi = (s->gate_reason >= 0 && s->gate_reason < NUM_GATE_REASONS) ? s->gate_reason : 0;
+        ImGui::TextColored(FoxmlColors::yellow, "GATE OFF (%s)", gate_short[gi]);
     } else {
         int price_ok = s->gate_direction
             ? (s->price >= s->buy_p)
@@ -701,7 +714,7 @@ static inline void GUI_Panel_Stats(const TUISnapshot *s) {
         ImGui::SameLine();
         ImGui::TextColored(FoxmlColors::red, "$%.2f", s->max_drawdown);
         ImGui::SameLine();
-        ImGui::TextColored(FoxmlColors::comment, "(%.2f%%)", s->max_drawdown_pct);
+        ImGui::TextColored(FoxmlColors::comment, "(%.2f%% / %.1f%%)", s->max_drawdown_pct, s->max_dd);
         if (s->fee_ratio > 0.0) {
             ImGui::SameLine(0, 10);
             ImGui::TextColored(FoxmlColors::sand, "fees/wins:");

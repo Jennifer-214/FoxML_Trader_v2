@@ -358,13 +358,15 @@ static inline int ANSI_Section_Header(AnsiBuf *ab, const TUISnapshot *s,
     ab_printf(ab, A_SAND " STATE: " A_FG "%-8s" A_DIM "  │  "
               A_SAND "UPTIME: " A_FG "%02u:%02u:%02u",
               state_str, hours, mins, secs);
-    if (s->is_paused) {
-        const char *reason = "wait";
-        if (s->sl_cooldown > 0) reason = "cooldown";
-        else if (s->breaker_tripped) reason = "breaker";
-        else if (s->current_regime == REGIME_VOLATILE) reason = "volatile";
-        else if (s->current_regime == REGIME_TRENDING_DOWN) reason = "downtrend";
-        ab_printf(ab, A_DIM "  │  " A_BOLD A_YELLOW "PAUSED" A_DIM " (%s)" A_RESET, reason);
+    if (s->is_paused && s->gate_reason > 0) {
+        static const char *gate_reasons[] = {
+            "ok", "warmup", "no_signal", "no_trade", "book",
+            "danger", "kill", "recovery", "volatile", "cooldown",
+            "wind_down", "paused", "downtrend"
+        };
+        int ri = (s->gate_reason >= 0 && s->gate_reason < NUM_GATE_REASONS) ? s->gate_reason : 0;
+        const char *color = (ri == GATE_REASON_KILL || ri == GATE_REASON_DANGER) ? A_RED : A_YELLOW;
+        ab_printf(ab, A_DIM "  │  " A_BOLD "%s" "PAUSED" A_DIM " (%s)" A_RESET, color, gate_reasons[ri]);
     }
     if (s->current_session >= 0) {
         static const char *sess_names[] = {"ASIA", "EU", "US", "OVERNIGHT"};
@@ -374,25 +376,52 @@ static inline int ANSI_Section_Header(AnsiBuf *ab, const TUISnapshot *s,
     ab_append(ab, A_RESET);
     y++;
 
-    // trading blocked indicator — show reason when buy gate is disabled
-    if (s->engine_state == 0) {
+    // trading blocked indicator — show detailed reason when buy gate is disabled
+    if (s->gate_reason > 0 && s->is_paused) {
         ab_goto(ab, y, 2);
-        ab_printf(ab, A_BOLD A_YELLOW " ▌ BUYING PAUSED" A_DIM "  warmup — waiting for market data (%d/%d samples)" A_RESET,
-                  s->roll_count, s->min_warmup_samples);
-        y++;
-    } else if (s->sl_cooldown > 0) {
-        ab_goto(ab, y, 2);
-        ab_printf(ab, A_BOLD A_YELLOW " ▌ BUYING PAUSED" A_DIM "  post-SL cooldown (%d cycles remaining)" A_RESET,
-                  s->sl_cooldown);
-        y++;
-    } else if (s->current_regime == REGIME_VOLATILE || s->current_regime == REGIME_TRENDING_DOWN) {
-        ab_goto(ab, y, 2);
-        const char *pause_reason = (s->current_regime == REGIME_TRENDING_DOWN) ? "downtrend — buying paused" : "volatile regime — buying paused";
-        ab_printf(ab, A_BOLD A_YELLOW " ▌ BUYING PAUSED" A_DIM "  %s" A_RESET, pause_reason);
-        y++;
-    } else if (s->breaker_tripped) {
-        ab_goto(ab, y, 2);
-        ab_printf(ab, A_BOLD A_RED " ▌ BUYING PAUSED" A_DIM "  circuit breaker — max drawdown hit" A_RESET);
+        const char *hdr_color = (s->gate_reason == GATE_REASON_KILL || s->gate_reason == GATE_REASON_DANGER)
+                                ? A_RED : A_YELLOW;
+        switch (s->gate_reason) {
+        case GATE_REASON_WARMUP:
+            ab_printf(ab, A_BOLD "%s ▌ BUYING PAUSED" A_DIM "  warmup — waiting for market data (%d/%d samples)" A_RESET,
+                      hdr_color, s->roll_count, s->min_warmup_samples);
+            break;
+        case GATE_REASON_NO_SIGNAL:
+            ab_printf(ab, A_BOLD "%s ▌ BUYING PAUSED" A_DIM "  no signal — strategy returned no buy price" A_RESET, hdr_color);
+            break;
+        case GATE_REASON_NO_TRADE:
+            ab_printf(ab, A_BOLD "%s ▌ BUYING PAUSED" A_DIM "  no-trade band — signal too weak for fees" A_RESET, hdr_color);
+            break;
+        case GATE_REASON_BOOK:
+            ab_printf(ab, A_BOLD "%s ▌ BUYING PAUSED" A_DIM "  book imbalance — insufficient bid pressure" A_RESET, hdr_color);
+            break;
+        case GATE_REASON_DANGER:
+            ab_printf(ab, A_BOLD "%s ▌ BUYING PAUSED" A_DIM "  danger gradient — crash protection active (score: %.0f%%)" A_RESET,
+                      hdr_color, s->danger_score * 100.0);
+            break;
+        case GATE_REASON_KILL:
+            ab_printf(ab, A_BOLD "%s ▌ BUYING PAUSED" A_DIM "  kill switch — max drawdown hit" A_RESET, hdr_color);
+            break;
+        case GATE_REASON_RECOVERY:
+            ab_printf(ab, A_BOLD "%s ▌ BUYING PAUSED" A_DIM "  kill recovery — observation period" A_RESET, hdr_color);
+            break;
+        case GATE_REASON_VOLATILE:
+            ab_printf(ab, A_BOLD "%s ▌ BUYING PAUSED" A_DIM "  volatile regime — buying paused" A_RESET, hdr_color);
+            break;
+        case GATE_REASON_COOLDOWN:
+            ab_printf(ab, A_BOLD "%s ▌ BUYING PAUSED" A_DIM "  post-SL cooldown (%d cycles remaining)" A_RESET,
+                      hdr_color, s->sl_cooldown);
+            break;
+        case GATE_REASON_WIND_DOWN:
+            ab_printf(ab, A_BOLD "%s ▌ BUYING PAUSED" A_DIM "  session wind-down — closing time" A_RESET, hdr_color);
+            break;
+        case GATE_REASON_PAUSED:
+            ab_printf(ab, A_BOLD "%s ▌ BUYING PAUSED" A_DIM "  manual pause" A_RESET, hdr_color);
+            break;
+        case GATE_REASON_DOWNTREND:
+            ab_printf(ab, A_BOLD "%s ▌ BUYING PAUSED" A_DIM "  downtrend — buying paused" A_RESET, hdr_color);
+            break;
+        }
         y++;
     }
 
@@ -593,7 +622,13 @@ static inline int ANSI_Section_BuyGate(AnsiBuf *ab, const TUISnapshot *s, int y,
               gate_op, s->buy_v, s->live_vmult);
     // show what's blocking the buy right now
     if (s->buy_p < 0.01) {
-        ab_printf(ab, A_DIM "   " A_BOLD A_YELLOW "GATE OFF" A_RESET);
+        static const char *gate_short[] = {
+            "ok", "warmup", "no_signal", "no_trade", "book",
+            "danger", "kill", "recovery", "volatile", "cooldown",
+            "wind_down", "paused", "downtrend"
+        };
+        int gi = (s->gate_reason >= 0 && s->gate_reason < NUM_GATE_REASONS) ? s->gate_reason : 0;
+        ab_printf(ab, A_DIM "   " A_BOLD A_YELLOW "GATE OFF" A_DIM " (%s)" A_RESET, gate_short[gi]);
     } else {
         int price_ok = s->gate_direction
             ? (s->price >= s->buy_p)   // momentum: price >= gate
@@ -774,8 +809,8 @@ static inline int ANSI_Section_Stats(AnsiBuf *ab, const TUISnapshot *s, int y, i
     if (total_exits > 0) {
         ab_goto(ab, y, 3);
         ab_printf(ab, A_SAND "E[trade]: " "%s$%+.2f" A_RESET, A_PNL(s->expectancy), s->expectancy);
-        ab_printf(ab, A_SAND "  maxDD: " A_RED "$%.2f" A_DIM " (%.2f%%)" A_RESET,
-                  s->max_drawdown, s->max_drawdown_pct);
+        ab_printf(ab, A_SAND "  maxDD: " A_RED "$%.2f" A_DIM " (%.2f%% / %.1f%%)" A_RESET,
+                  s->max_drawdown, s->max_drawdown_pct, s->max_dd);
         if (s->fee_ratio > 0.0)
             ab_printf(ab, A_SAND "  fees/wins: " A_DIM "%.0f%%" A_RESET, s->fee_ratio);
         y++;

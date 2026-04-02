@@ -2327,6 +2327,71 @@ int main() {
         check("cooldown decrement: halt_reason still volatile (higher priority)",
               ctrl5.halt_reason == 3);
 
+        // 8. kill switch does NOT fire on small loss (regression: $6.75 on $10k tripped kill)
+        {
+            ControllerConfig<FP> small_cfg = ControllerConfig_Default<FP>();
+            small_cfg.warmup_ticks = 10;
+            small_cfg.poll_interval = 1;
+            small_cfg.min_warmup_samples = 10;
+            small_cfg.starting_balance = FPN_FromDouble<FP>(10000.0);
+            small_cfg.kill_switch_enabled = 1;
+            small_cfg.kill_switch_daily_loss_pct = FPN_FromDouble<FP>(0.03);  // 3%
+            small_cfg.kill_switch_drawdown_pct = FPN_FromDouble<FP>(0.05);    // 5%
+            small_cfg.max_positions = 1;
+
+            PortfolioController<FP> sk = {};
+            PortfolioController_Init(&sk, small_cfg);
+            OrderPool<FP> sp;
+            OrderPool_init(&sp, 64);
+            TradeLog sl;
+            TradeLog_Init(&sl, "KILL_SMALL_TEST");
+            test_warmup_ctrl(&sk, &sp, &sl, 66000.0, 500.0);
+
+            // simulate a small loss: balance drops by $6.75 (0.07%)
+            sk.session_start_equity = FPN_FromDouble<FP>(10000.0);
+            sk.peak_equity = FPN_FromDouble<FP>(10000.0);
+            sk.balance = FPN_FromDouble<FP>(9993.25);  // $6.75 loss
+            // no open positions — equity = balance = $9993.25
+            // daily loss: (10000 - 9993.25) / 10000 = 0.07% — below 3% threshold
+            // drawdown: (10000 - 9993.25) / 10000 = 0.07% — below 5% threshold
+
+            // run enough ticks to hit the kill check (every 16th tick)
+            for (int i = 0; i < 32; i++) {
+                PortfolioController_Tick(&sk, &sp, FPN_FromDouble<FP>(66000.0),
+                                          FPN_FromDouble<FP>(500.0), &sl);
+            }
+            check("small loss: kill switch should NOT fire on $6.75 loss (0.07%)",
+                  sk.kill_switch_active == 0);
+            check("small loss: buying_halted should be 0",
+                  sk.buying_halted == 0 || sk.halt_reason != 1);
+
+            // verify the thresholds are correct
+            double daily_pct = FPN_ToDouble(sk.config.kill_switch_daily_loss_pct);
+            double dd_pct = FPN_ToDouble(sk.config.kill_switch_drawdown_pct);
+            check("small loss: daily_loss_pct is 0.03 (3%)",
+                  daily_pct > 0.029 && daily_pct < 0.031);
+            check("small loss: drawdown_pct is 0.05 (5%)",
+                  dd_pct > 0.049 && dd_pct < 0.051);
+
+            // now verify kill DOES fire on a real 4% loss
+            sk.kill_switch_active = 0;
+            sk.buying_halted = 0;
+            sk.halt_reason = 0;
+            sk.balance = FPN_FromDouble<FP>(9600.0);  // $400 loss = 4% > 3% daily limit
+            for (int i = 0; i < 32; i++) {
+                PortfolioController_Tick(&sk, &sp, FPN_FromDouble<FP>(66000.0),
+                                          FPN_FromDouble<FP>(500.0), &sl);
+            }
+            check("real loss: kill switch fires on $400 loss (4%)",
+                  sk.kill_switch_active == 1);
+            check("real loss: kill_reason is 1 (daily_loss)",
+                  sk.kill_reason == 1);
+
+            TradeLog_Close(&sl);
+            free(sp.slots);
+            remove("KILL_SMALL_TEST_order_history.csv");
+        }
+
         TradeLog_Close(&log);
         free(pool.slots);
         remove("HALT_TEST_order_history.csv");

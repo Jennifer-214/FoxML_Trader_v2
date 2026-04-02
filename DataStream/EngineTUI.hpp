@@ -672,6 +672,7 @@ struct TUISnapshot {
     int breaker_tripped;
     int buying_halted;
     int halt_reason;
+    int gate_reason;            // GATE_REASON_* — specific reason gate is off
     // regime
     int current_regime;   // REGIME_RANGING, REGIME_TRENDING, REGIME_VOLATILE
     int strategy_id;      // STRATEGY_MEAN_REVERSION or STRATEGY_MOMENTUM
@@ -872,6 +873,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->breaker_tripped = (snap->total_pnl < -(starting * FPN_ToDouble(ctrl->config.max_drawdown_pct)));
     snap->buying_halted = ctrl->buying_halted;
     snap->halt_reason = ctrl->halt_reason;
+    snap->gate_reason = ctrl->gate_reason;
 
     // regime
     snap->current_regime = ctrl->regime.current_regime;

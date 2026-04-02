@@ -259,6 +259,8 @@ static inline void Gui_HandleKeys(TUISharedState *shared) {
         __atomic_store_n(&shared->reload_requested, 1, __ATOMIC_RELEASE);
     if (ImGui::IsKeyPressed(ImGuiKey_S))
         __atomic_store_n(&shared->regime_cycle_requested, 1, __ATOMIC_RELEASE);
+    if (ImGui::IsKeyPressed(ImGuiKey_K))
+        __atomic_store_n(&shared->kill_reset_requested, 1, __ATOMIC_RELEASE);
 }
 
 //==========================================================================
