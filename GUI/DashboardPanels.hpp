@@ -230,7 +230,7 @@ static inline void GUI_Panel_Market(const TUISnapshot *s) {
     }
     ImGui::Text("%s", strat_name);
 
-    // avg + stddev + R²
+    // avg + stddev
     ImGui::TextColored(FoxmlColors::sand, "avg:");
     ImGui::SameLine();
     ImGui::Text("%.2f", s->roll_price_avg);
@@ -238,8 +238,6 @@ static inline void GUI_Panel_Market(const TUISnapshot *s) {
     ImGui::TextColored(FoxmlColors::sand, "stddev:");
     ImGui::SameLine();
     ImGui::Text("%.2f", s->roll_stddev);
-    ImGui::SameLine(0, 20);
-    GUI_R2Bar("R\xc2\xb2:", s->short_r2, 80.0f, s->slope_pct);
 
     // slopes
     const char *trend_arrow = (s->slope_pct > 0.001) ? "^" :
