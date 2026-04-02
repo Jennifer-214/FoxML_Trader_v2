@@ -195,85 +195,28 @@ static inline void GUI_Panel_TopBar(const TUISnapshot *s) {
     ImGui::SameLine();
     ImGui::Text("%d/%d", s->active_count, s->max_positions);
 
-    uint32_t total_exits = s->wins + s->losses;
-    if (total_exits > 0) {
-        ImGui::SameLine();
-        ImGui::TextColored(FoxmlColors::comment, "|");
-        ImGui::SameLine();
-        ImGui::TextColored(FoxmlColors::green, "W:%u", s->wins);
-        ImGui::SameLine();
-        ImGui::TextColored(FoxmlColors::red, "L:%u", s->losses);
-        ImGui::SameLine();
-        ImGui::TextColored((s->win_rate >= 50.0) ? FoxmlColors::green : FoxmlColors::red,
-                          "%.0f%%", s->win_rate);
-    }
-
     ImGui::End();
 }
 
 //==========================================================================
-// PANEL: MARKET STRUCTURE
+// PANEL: MARKET (merged Market Structure + Regime Signals)
 //==========================================================================
 static inline void GUI_Panel_Market(const TUISnapshot *s) {
-    ImGui::Begin("Market Structure");
-    SectionHeader("MARKET STRUCTURE");
+    ImGui::Begin("Market");
+    SectionHeader("MARKET");
 
-    // avg + stddev + R²
-    ImGui::TextColored(FoxmlColors::sand, "avg:");
-    ImGui::SameLine();
-    ImGui::Text("%.2f", s->roll_price_avg);
-    ImGui::SameLine(0, 20);
-    ImGui::TextColored(FoxmlColors::sand, "stddev:");
-    ImGui::SameLine();
-    ImGui::Text("%.2f", s->roll_stddev);
-    ImGui::SameLine(0, 20);
-    GUI_R2Bar("R²:", s->short_r2, 80.0f, s->slope_pct);
-
-    // short slope + arrow
-    const char *trend_arrow = (s->slope_pct > 0.001) ? "^" :
-                              (s->slope_pct < -0.001) ? "v" : ">";
-    ImVec4 trend_color = (s->slope_pct > 0.001) ? FoxmlColors::green :
-                         (s->slope_pct < -0.001) ? FoxmlColors::red : FoxmlColors::comment;
-    ImGui::TextColored(FoxmlColors::sand, "slope:");
-    ImGui::SameLine();
-    ImGui::TextColored(trend_color, "%+.6f%%/tick %s", s->slope_pct, trend_arrow);
-
-    // long slope
-    const char *lt_arrow = (s->long_slope_pct > 0.001) ? "^" :
-                           (s->long_slope_pct < -0.001) ? "v" : ">";
-    ImVec4 lt_color = (s->long_slope_pct > 0.001) ? FoxmlColors::green :
-                      (s->long_slope_pct < -0.001) ? FoxmlColors::red : FoxmlColors::comment;
-    ImGui::TextColored(FoxmlColors::sand, "long:");
-    ImGui::SameLine();
-    ImGui::TextColored(lt_color, "%+.6f%%/tick", s->long_slope_pct);
-    ImGui::SameLine();
-    ImGui::TextColored(FoxmlColors::comment, "(%d-tick)", s->long_count);
-    ImGui::SameLine();
-    ImGui::TextColored(lt_color, "%s", lt_arrow);
-
-    ImGui::End();
-}
-
-//==========================================================================
-// PANEL: REGIME SIGNALS
-//==========================================================================
-static inline void GUI_Panel_Regime(const TUISnapshot *s) {
-    ImGui::Begin("Regime Signals");
-    SectionHeader("REGIME SIGNALS");
-
+    // regime + strategy
     int rj = s->current_regime;
     if (rj < 0 || rj >= NUM_REGIMES) rj = 0;
-    const char *regime_name = REGIME_INFO[rj].full_name;
     ImVec4 regime_color = (rj == REGIME_TRENDING) ? FoxmlColors::green :
                           (rj == REGIME_MILD_TREND) ? FoxmlColors::sand :
                           (rj == REGIME_VOLATILE || rj == REGIME_TRENDING_DOWN) ? FoxmlColors::red : FoxmlColors::comment;
     const char *strat_name = (s->strategy_id == 4) ? "EMA CROSS" :
                               (s->strategy_id == 2) ? "SIMPLE DIP" :
                               (s->strategy_id == 1) ? "MOMENTUM" : "MEAN REVERSION";
-
     ImGui::TextColored(FoxmlColors::sand, "regime:");
     ImGui::SameLine();
-    ImGui::TextColored(regime_color, "%s", regime_name);
+    ImGui::TextColored(regime_color, "%s", REGIME_INFO[rj].full_name);
     ImGui::SameLine();
     ImGui::TextColored(FoxmlColors::comment, "(%.0fm)", s->regime_duration_min);
     ImGui::SameLine(0, 20);
@@ -287,19 +230,45 @@ static inline void GUI_Panel_Regime(const TUISnapshot *s) {
     }
     ImGui::Text("%s", strat_name);
 
-    // R² short + long
+    // avg + stddev + R²
+    ImGui::TextColored(FoxmlColors::sand, "avg:");
+    ImGui::SameLine();
+    ImGui::Text("%.2f", s->roll_price_avg);
+    ImGui::SameLine(0, 20);
+    ImGui::TextColored(FoxmlColors::sand, "stddev:");
+    ImGui::SameLine();
+    ImGui::Text("%.2f", s->roll_stddev);
+    ImGui::SameLine(0, 20);
+    GUI_R2Bar("R\xc2\xb2:", s->short_r2, 80.0f, s->slope_pct);
+
+    // slopes
+    const char *trend_arrow = (s->slope_pct > 0.001) ? "^" :
+                              (s->slope_pct < -0.001) ? "v" : ">";
+    ImVec4 trend_color = (s->slope_pct > 0.001) ? FoxmlColors::green :
+                         (s->slope_pct < -0.001) ? FoxmlColors::red : FoxmlColors::comment;
+    ImGui::TextColored(FoxmlColors::sand, "slope:");
+    ImGui::SameLine();
+    ImGui::TextColored(trend_color, "%+.6f%%/tick %s", s->slope_pct, trend_arrow);
+    const char *lt_arrow = (s->long_slope_pct > 0.001) ? "^" :
+                           (s->long_slope_pct < -0.001) ? "v" : ">";
+    ImVec4 lt_color = (s->long_slope_pct > 0.001) ? FoxmlColors::green :
+                      (s->long_slope_pct < -0.001) ? FoxmlColors::red : FoxmlColors::comment;
+    ImGui::TextColored(FoxmlColors::sand, "long:");
+    ImGui::SameLine();
+    ImGui::TextColored(lt_color, "%+.6f%%/tick (%d-tick) %s", s->long_slope_pct, s->long_count, lt_arrow);
+
+    // R² bars + signals
     GUI_R2Bar("short:", s->short_r2, 80.0f, s->slope_pct);
     ImGui::SameLine(0, 20);
     GUI_R2Bar("long:", s->long_r2, 80.0f, s->long_slope_pct);
 
-    // vol ratio + ROR
+    // vol ratio + ROR + spike
     ImVec4 vr_color = (s->vol_ratio > 2.0) ? FoxmlColors::red :
                       (s->vol_ratio > 1.5) ? FoxmlColors::yellow : FoxmlColors::text;
     ImVec4 ror_color = (s->ror_slope > 0.0001) ? FoxmlColors::green :
                        (s->ror_slope < -0.0001) ? FoxmlColors::red : FoxmlColors::comment;
     const char *ror_arrow = (s->ror_slope > 0.0001) ? "^" :
                             (s->ror_slope < -0.0001) ? "v" : ">";
-
     ImGui::TextColored(FoxmlColors::sand, "vol ratio:");
     ImGui::SameLine();
     ImGui::TextColored(vr_color, "%.2f", s->vol_ratio);
@@ -307,7 +276,6 @@ static inline void GUI_Panel_Regime(const TUISnapshot *s) {
     ImGui::TextColored(FoxmlColors::sand, "ror:");
     ImGui::SameLine();
     ImGui::TextColored(ror_color, "%+.6f %s", s->ror_slope, ror_arrow);
-
     if (s->spike_active) {
         ImGui::SameLine(0, 10);
         ImGui::TextColored(FoxmlColors::yellow, "SPIKE %.1fx", s->volume_spike_ratio);
@@ -316,7 +284,7 @@ static inline void GUI_Panel_Regime(const TUISnapshot *s) {
         ImGui::TextColored(FoxmlColors::comment, "vol:%.1fx", s->volume_spike_ratio);
     }
 
-    // VWAP
+    // VWAP + book
     if (s->vwap > 0.0) {
         ImVec4 vwap_color = (s->vwap_dev < -0.001) ? FoxmlColors::green :
                             (s->vwap_dev > 0.001) ? FoxmlColors::red : FoxmlColors::text;
@@ -327,7 +295,6 @@ static inline void GUI_Panel_Regime(const TUISnapshot *s) {
         ImGui::TextColored(FoxmlColors::sand, "dev:");
         ImGui::SameLine();
         ImGui::TextColored(vwap_color, "%+.3f%%", s->vwap_dev * 100.0);
-
         if (s->book_imbalance != 0.0) {
             ImVec4 book_color = (s->book_imbalance > 0.1) ? FoxmlColors::green :
                                 (s->book_imbalance < -0.1) ? FoxmlColors::red : FoxmlColors::text;
@@ -432,15 +399,32 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
         ImGui::TextColored(FoxmlColors::yellow, "%s", reasons[s->last_reject_reason]);
     }
 
+    // danger meter — crash protection gradient
+    if (s->danger_score > 0.001) {
+        float ds = (float)s->danger_score;
+        ImVec4 danger_color;
+        if (ds < 0.3f)
+            danger_color = FoxmlColors::green;
+        else if (ds < 0.7f)
+            danger_color = FoxmlColors::yellow;
+        else
+            danger_color = FoxmlColors::red;
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, danger_color);
+        char overlay[32];
+        snprintf(overlay, sizeof(overlay), "danger: %.0f%%", ds * 100.0f);
+        ImGui::ProgressBar(ds, ImVec2(-1, 12), overlay);
+        ImGui::PopStyleColor();
+    }
+
     ImGui::End();
 }
 
 //==========================================================================
-// PANEL: PORTFOLIO
+// PANEL: ACCOUNT (merged Portfolio + P&L + Risk)
 //==========================================================================
-static inline void GUI_Panel_Portfolio(const TUISnapshot *s) {
-    ImGui::Begin("Portfolio");
-    SectionHeader("PORTFOLIO");
+static inline void GUI_Panel_Account(const TUISnapshot *s) {
+    ImGui::Begin("Account");
+    SectionHeader("ACCOUNT");
 
     ImGui::TextColored(FoxmlColors::sand, "equity:");
     ImGui::SameLine();
@@ -450,15 +434,26 @@ static inline void GUI_Panel_Portfolio(const TUISnapshot *s) {
     ImGui::SameLine();
     ImGui::Text("$%.2f", s->balance);
 
+    ImGui::TextColored(FoxmlColors::sand, "realized:");
+    ImGui::SameLine();
+    ImGui::TextColored(PnlColor(s->realized), "$%+.2f", s->realized);
+    ImGui::SameLine(0, 20);
+    ImGui::TextColored(FoxmlColors::sand, "unrealized:");
+    ImGui::SameLine();
+    ImGui::TextColored(PnlColor(s->unrealized), "$%+.2f", s->unrealized);
+    ImGui::SameLine(0, 20);
+    ImGui::TextColored(FoxmlColors::sand, "return:");
+    ImGui::SameLine();
+    ImGui::TextColored(PnlColor(s->return_pct), "%+.2f%%", s->return_pct);
+
     double gross = s->total_pnl + s->fees;
-    double net = s->total_pnl;
     ImGui::TextColored(FoxmlColors::sand, "gross:");
     ImGui::SameLine();
     ImGui::TextColored(PnlColor(gross), "$%+.2f", gross);
     ImGui::SameLine(0, 20);
     ImGui::TextColored(FoxmlColors::sand, "net:");
     ImGui::SameLine();
-    ImGui::TextColored(PnlColor(net), "$%+.2f", net);
+    ImGui::TextColored(PnlColor(s->total_pnl), "$%+.2f", s->total_pnl);
     ImGui::SameLine(0, 20);
     ImGui::TextColored(FoxmlColors::sand, "fees:");
     ImGui::SameLine();
@@ -467,51 +462,11 @@ static inline void GUI_Panel_Portfolio(const TUISnapshot *s) {
     ImGui::TextColored(FoxmlColors::sand, "exposure:");
     ImGui::SameLine();
     ImGui::Text("%.1f%%/%.0f%%", s->exposure_pct, s->max_exp);
-
-    ImGui::End();
-}
-
-//==========================================================================
-// PANEL: P&L
-//==========================================================================
-static inline void GUI_Panel_PnL(const TUISnapshot *s) {
-    ImGui::Begin("P&L");
-    SectionHeader("P&L");
-
-    ImGui::TextColored(FoxmlColors::sand, "realized:");
-    ImGui::SameLine();
-    ImGui::TextColored(PnlColor(s->realized), "$%+.4f", s->realized);
     ImGui::SameLine(0, 20);
-    ImGui::TextColored(FoxmlColors::sand, "unrealized:");
-    ImGui::SameLine();
-    ImGui::TextColored(PnlColor(s->unrealized), "$%+.4f", s->unrealized);
-
-    ImGui::TextColored(FoxmlColors::sand, "total:");
-    ImGui::SameLine();
-    ImGui::TextColored(PnlColor(s->total_pnl), "$%+.4f", s->total_pnl);
-    ImGui::SameLine(0, 30);
-    ImGui::TextColored(FoxmlColors::comment, "(");
-    ImGui::SameLine(0, 0);
-    ImGui::TextColored(PnlColor(s->return_pct), "%+.2f%%", s->return_pct);
-    ImGui::SameLine(0, 0);
-    ImGui::TextColored(FoxmlColors::comment, ")");
-
-    ImGui::End();
-}
-
-//==========================================================================
-// PANEL: RISK
-//==========================================================================
-static inline void GUI_Panel_Risk(const TUISnapshot *s) {
-    ImGui::Begin("Risk");
-    SectionHeader("RISK");
-
     ImGui::TextColored(FoxmlColors::sand, "risk/pos:");
     ImGui::SameLine();
     ImGui::Text("%.1f%%", s->risk_amt);
-    ImGui::SameLine(0, 10);
-    ImGui::TextColored(FoxmlColors::comment, "|");
-    ImGui::SameLine(0, 10);
+    ImGui::SameLine(0, 20);
     ImGui::TextColored(FoxmlColors::sand, "breaker:");
     ImGui::SameLine();
     if (s->breaker_tripped)
@@ -666,6 +621,32 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s) {
         ImGui::EndTable();
     }
 
+    // position progress bars — where is price between SL and TP?
+    for (int i = 0; i < 16; i++) {
+        const TUIPositionSnap *ps = &s->positions[i];
+        if (ps->idx < 0) continue;
+        double range = ps->tp - ps->sl;
+        if (range < 0.01) continue;
+        float progress = (float)((s->price - ps->sl) / range);
+        if (progress < 0.0f) progress = 0.0f;
+        if (progress > 1.0f) progress = 1.0f;
+
+        // color: red near SL, yellow middle, green near TP
+        ImVec4 bar_color;
+        if (progress < 0.3f)
+            bar_color = FoxmlColors::red;
+        else if (progress < 0.6f)
+            bar_color = FoxmlColors::yellow;
+        else
+            bar_color = FoxmlColors::green;
+
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, bar_color);
+        char overlay[32];
+        snprintf(overlay, sizeof(overlay), "%.0f%%", progress * 100.0f);
+        ImGui::ProgressBar(progress, ImVec2(-1, 14), overlay);
+        ImGui::PopStyleColor();
+    }
+
     ImGui::End();
 }
 
@@ -797,12 +778,8 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
     GUI_Panel_Header(s, start_time);
     GUI_Panel_TopBar(s);
     GUI_Panel_Market(s);
-    GUI_Panel_Regime(s);
     GUI_Panel_BuyGate(s);
-    GUI_Panel_Portfolio(s);
-    GUI_Panel_PnL(s);
-    GUI_Panel_Risk(s);
-    GUI_Panel_Config(s);
+    GUI_Panel_Account(s);
     GUI_Panel_Positions(s);
     GUI_Panel_Stats(s);
 #ifdef LATENCY_PROFILING

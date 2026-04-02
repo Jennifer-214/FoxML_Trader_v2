@@ -213,6 +213,7 @@ static inline void Gui_SetupDefaultLayout(ImGuiID dockspace_id) {
     ImGui::DockBuilderSplitNode(dock_left, ImGuiDir_Up, 0.70f, &dock_left_top, &dock_left_bottom);
     ImGui::DockBuilderDockWindow("Price Chart", dock_left_top);
     ImGui::DockBuilderDockWindow("Volume", dock_left_bottom);
+    ImGui::DockBuilderDockWindow("Live P&L", dock_left_bottom);
     ImGui::DockBuilderDockWindow("Equity Curve", dock_left_bottom);
 
     // stack all dashboard panels into right side
@@ -223,13 +224,9 @@ static inline void Gui_SetupDefaultLayout(ImGuiID dockspace_id) {
     // top-right: main dashboard panels (tabbed/stacked)
     ImGui::DockBuilderDockWindow("Header", dock_right_top);
     ImGui::DockBuilderDockWindow("Top Bar", dock_right_top);
-    ImGui::DockBuilderDockWindow("Market Structure", dock_right_top);
-    ImGui::DockBuilderDockWindow("Regime Signals", dock_right_top);
+    ImGui::DockBuilderDockWindow("Market", dock_right_top);
     ImGui::DockBuilderDockWindow("Buy Gate", dock_right_top);
-    ImGui::DockBuilderDockWindow("Portfolio", dock_right_top);
-    ImGui::DockBuilderDockWindow("P&L", dock_right_top);
-    ImGui::DockBuilderDockWindow("Risk", dock_right_top);
-    ImGui::DockBuilderDockWindow("Config", dock_right_top);
+    ImGui::DockBuilderDockWindow("Account", dock_right_top);
     ImGui::DockBuilderDockWindow("Positions", dock_right_top);
 
     // bottom-right: stats + settings + trade history + log (tabbed)
@@ -340,6 +337,7 @@ static inline void *gui_thread_fn(void *arg) {
         CandleAccumulator *ca = shared->candle_acc ? (CandleAccumulator *)shared->candle_acc : NULL;
         GUI_PriceChart(&cs, snap, &trades, &chart_settings, ca, (void *)shared);
         GUI_VolumeChart(&cs, snap, &chart_settings);
+        GUI_LivePnLChart(snap);
         GUI_EquityChart(&trades);
 
         // settings, trade history, log viewer

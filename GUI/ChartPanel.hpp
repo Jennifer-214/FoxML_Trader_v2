@@ -888,6 +888,66 @@ static inline void GUI_VolumeChart(const ChartState *cs, const TUISnapshot *snap
 }
 
 //==========================================================================
+// LIVE P&L — streaming chart from pnl_history ring buffer
+//==========================================================================
+static inline void GUI_LivePnLChart(const TUISnapshot *s) {
+    ImGui::Begin("Live P&L");
+    if (s->graph_count < 2) {
+        ImGui::TextColored(FoxmlColors::comment, "collecting data...");
+        ImGui::End();
+        return;
+    }
+
+    // unroll ring buffer into linear array
+    int n = s->graph_count;
+    int len = TUISnapshot::GRAPH_LEN;
+    double xs[TUISnapshot::GRAPH_LEN], ys[TUISnapshot::GRAPH_LEN], zeros[TUISnapshot::GRAPH_LEN] = {};
+    for (int i = 0; i < n; i++) {
+        int ri = (s->graph_head - n + i + len) % len;
+        xs[i] = (double)i;
+        ys[i] = s->pnl_history[ri];
+    }
+
+    ImPlot::PushStyleColor(ImPlotCol_PlotBg, FoxmlColors::bg_dark);
+    if (ImPlot::BeginPlot("##live_pnl", ImVec2(-1, -1),
+                           ImPlotFlags_NoTitle | ImPlotFlags_NoMouseText)) {
+        ImPlot::SetupAxes(NULL, "P&L",
+                          ImPlotAxisFlags_NoLabel | ImPlotAxisFlags_NoTickLabels,
+                          ImPlotAxisFlags_Opposite);
+        ImPlot::SetupAxisLimits(ImAxis_X1, -0.5, n - 0.5, ImPlotCond_Always);
+
+        double ymin = 0, ymax = 0;
+        for (int i = 0; i < n; i++) {
+            if (ys[i] < ymin) ymin = ys[i];
+            if (ys[i] > ymax) ymax = ys[i];
+        }
+        double yrange = ymax - ymin;
+        if (yrange < 0.01) yrange = 1.0;
+        double ypad = yrange * 0.15;
+        ImPlot::SetupAxisLimits(ImAxis_Y1, ymin - ypad, ymax + ypad, ImPlotCond_Always);
+        ImPlot::SetupAxisFormat(ImAxis_Y1, "$%+.2f");
+
+        // zero line
+        double zy[2] = {0, 0}, zx[2] = {-0.5, (double)(n - 0.5)};
+        ImPlotSpec zs; zs.LineColor = FoxmlColors::surface; zs.LineWeight = 1.0f;
+        ImPlot::PlotLine("##zero", zx, zy, 2, zs);
+
+        // P&L line
+        ImPlotSpec ls; ls.LineColor = FoxmlColors::primary; ls.LineWeight = 1.5f;
+        ImPlot::PlotLine("P&L", xs, ys, n, ls);
+
+        // shaded fill — green above zero, red below
+        ImPlotSpec gs; gs.FillColor = FoxmlColors::green; gs.FillAlpha = 0.12f;
+        gs.LineColor = {0,0,0,0};
+        ImPlot::PlotShaded("##fill", xs, ys, zeros, n, gs);
+
+        ImPlot::EndPlot();
+    }
+    ImPlot::PopStyleColor();
+    ImGui::End();
+}
+
+//==========================================================================
 // EQUITY CURVE — separate dockable window (only renders with trade data)
 //==========================================================================
 static inline void GUI_EquityChart(TradeData *trades) {
