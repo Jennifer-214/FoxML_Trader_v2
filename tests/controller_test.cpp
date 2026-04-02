@@ -2699,6 +2699,197 @@ int main() {
         }
     }
 
+    //======================================================================================================
+    // EXIT BUFFER EQUITY GAP
+    //======================================================================================================
+    printf("\n--- EXIT BUFFER EQUITY GAP ---\n");
+    {
+        // verify equity stays consistent between exit gate (bitmap clear) and DrainExits (balance credit)
+        // the gap: position value disappears from Portfolio_ComputeValue but isn't in balance yet
+        // ExitBuffer_PendingProceeds must bridge the gap exactly
+
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.warmup_ticks = 0;
+        cfg.poll_interval = 1000; // large poll so slow path doesn't run
+        cfg.starting_balance = FPN_FromDouble<FP>(10000.0);
+        cfg.max_positions = 1;
+        cfg.fee_rate = FPN_FromDouble<FP>(0.001);  // 0.1%
+        cfg.slippage_pct = FPN_Zero<FP>();          // no slippage for exact math
+
+        PortfolioController<FP> ctrl = {};
+        PortfolioController_Init(&ctrl, cfg);
+        ctrl.state = CONTROLLER_ACTIVE;
+
+        // manually add a position: entry $100, qty 1.0, TP $105, SL $95
+        FPN<FP> entry = FPN_FromDouble<FP>(100.0);
+        FPN<FP> qty = FPN_FromDouble<FP>(1.0);
+        FPN<FP> tp = FPN_FromDouble<FP>(105.0);
+        FPN<FP> sl = FPN_FromDouble<FP>(95.0);
+        Portfolio_AddPositionWithExits(&ctrl.portfolio, qty, entry, tp, sl);
+        ctrl.balance = FPN_FromDouble<FP>(9900.0); // $100 deducted for position
+
+        // equity before exit: balance + position_value = 9900 + 105 = 10005 (at TP price)
+        FPN<FP> price_at_tp = FPN_FromDouble<FP>(105.0);
+        FPN<FP> pv_before = Portfolio_ComputeValue(&ctrl.portfolio, price_at_tp);
+        FPN<FP> equity_before = FPN_AddSat(ctrl.balance, pv_before);
+
+        // trigger exit gate — clears bitmap, writes to exit buffer
+        PositionExitGate(&ctrl.portfolio, price_at_tp, &ctrl.exit_buf, 1);
+        check("equity gap: exit buffered", ctrl.exit_buf.count == 1);
+        check("equity gap: bitmap cleared", ctrl.portfolio.active_bitmap == 0);
+
+        // portfolio value is now 0 (position cleared from bitmap)
+        FPN<FP> pv_after = Portfolio_ComputeValue(&ctrl.portfolio, price_at_tp);
+        check("equity gap: portfolio value is zero after exit gate",
+              FPN_IsZero(pv_after));
+
+        // naive equity (the bug): balance + pv = 9900 + 0 = 9900 — $105 phantom crash
+        FPN<FP> naive_equity = FPN_AddSat(ctrl.balance, pv_after);
+
+        // correct equity: balance + pv + pending proceeds
+        FPN<FP> pending = ExitBuffer_PendingProceeds(&ctrl.exit_buf, ctrl.portfolio.positions,
+                                                      cfg.fee_rate, cfg.slippage_pct, (int)cfg.max_positions);
+        FPN<FP> correct_equity = FPN_AddSat(FPN_AddSat(ctrl.balance, pv_after), pending);
+
+        // pending should be close to gross - fees: 105 * 1.0 - 105 * 1.0 * 0.001 = 104.895
+        double pending_d = FPN_ToDouble(pending);
+        check("equity gap: pending proceeds ~$104.90",
+              pending_d > 104.8 && pending_d < 105.0);
+
+        // naive equity has the phantom crash
+        double naive_d = FPN_ToDouble(naive_equity);
+        double before_d = FPN_ToDouble(equity_before);
+        check("equity gap: naive equity shows phantom $105 drop",
+              (before_d - naive_d) > 100.0);
+
+        // correct equity is close to before (within fee difference)
+        double correct_d = FPN_ToDouble(correct_equity);
+        double gap = fabs(before_d - correct_d);
+        check("equity gap: correct equity within $0.20 of pre-exit",
+              gap < 0.20);
+
+        printf("    before=%.2f naive=%.2f correct=%.2f pending=%.4f gap=%.4f\n",
+               before_d, naive_d, correct_d, pending_d, gap);
+    }
+
+    //======================================================================================================
+    // WIN/LOSS CLASSIFICATION BY P&L SIGN
+    //======================================================================================================
+    printf("\n--- WIN/LOSS BY P&L SIGN ---\n");
+    {
+        // a TP exit where fees exceed gross profit should count as a loss, not a win
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.starting_balance = FPN_FromDouble<FP>(10000.0);
+        cfg.fee_rate = FPN_FromDouble<FP>(0.01); // 1% fee to make fee > gross easy
+        cfg.slippage_pct = FPN_Zero<FP>();
+
+        PortfolioController<FP> ctrl = {};
+        PortfolioController_Init(&ctrl, cfg);
+        ctrl.rolling = RollingStats_Init<FP>();
+        ctrl.rolling.price_stddev = FPN_FromDouble<FP>(50.0);
+
+        // add position: entry $100, qty 0.5, small gross profit
+        FPN<FP> entry = FPN_FromDouble<FP>(100.0);
+        FPN<FP> qty = FPN_FromDouble<FP>(0.5);
+        Portfolio_AddPositionWithExits(&ctrl.portfolio, qty, entry,
+            FPN_FromDouble<FP>(101.0), FPN_FromDouble<FP>(95.0));
+        ctrl.portfolio.positions[0].entry_fee = FPN_FromDouble<FP>(0.50); // $0.50 entry fee
+
+        // exit at TP $101: gross = 0.5 × (101-100) = $0.50
+        // exit fee = 0.5 × 101 × 0.01 = $0.505
+        // net P&L = 0.50 - 0.505 - 0.50 = -$0.505 (loss despite TP exit)
+        RecordExit(&ctrl, 0, FPN_FromDouble<FP>(101.0), 100, 0); // reason 0 = TP
+        check("win/loss: TP exit with fee-dominated P&L counts as loss",
+              ctrl.losses == 1 && ctrl.wins == 0);
+
+        // now test a genuine winning TP exit
+        Portfolio_AddPositionWithExits(&ctrl.portfolio, qty, entry,
+            FPN_FromDouble<FP>(110.0), FPN_FromDouble<FP>(95.0));
+        ctrl.portfolio.positions[0].entry_fee = FPN_FromDouble<FP>(0.50);
+        // exit at $110: gross = 0.5 × (110-100) = $5.00
+        // exit fee = 0.5 × 110 × 0.01 = $0.55
+        // net P&L = 5.00 - 0.55 - 0.50 = $3.95 (genuine win)
+        RecordExit(&ctrl, 0, FPN_FromDouble<FP>(110.0), 200, 0);
+        check("win/loss: TP exit with genuine profit counts as win",
+              ctrl.wins == 1);
+
+        // SL exit always counts as loss regardless of P&L
+        Portfolio_AddPositionWithExits(&ctrl.portfolio, qty, entry,
+            FPN_FromDouble<FP>(110.0), FPN_FromDouble<FP>(95.0));
+        ctrl.portfolio.positions[0].entry_fee = FPN_FromDouble<FP>(0.50);
+        RecordExit(&ctrl, 0, FPN_FromDouble<FP>(95.0), 300, 1); // reason 1 = SL
+        check("win/loss: SL exit counts as loss",
+              ctrl.losses == 2); // fee-dominated TP loss + this SL
+    }
+
+    //======================================================================================================
+    // FEE FLOOR ENFORCEMENT AFTER REGIME TP TIGHTENING
+    //======================================================================================================
+    printf("\n--- FEE FLOOR AFTER REGIME TIGHTENING ---\n");
+    {
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.fee_rate = FPN_FromDouble<FP>(0.001);      // 0.1%
+        cfg.fee_floor_mult = FPN_FromDouble<FP>(3.0);   // TP floor = 3× round-trip fees
+        cfg.take_profit_pct = FPN_FromDouble<FP>(0.01);  // 1% TP offset for MR (used as stddev mult × 100)
+        cfg.stop_loss_pct = FPN_FromDouble<FP>(0.01);    // 1% SL
+        cfg.momentum_tp_mult = FPN_FromDouble<FP>(3.0);  // 3 stddev TP for momentum
+        cfg.momentum_sl_mult = FPN_FromDouble<FP>(1.0);  // 1 stddev SL
+        cfg.min_sl_tp_ratio = FPN_FromDouble<FP>(0.5);
+        cfg.max_positions = 1;
+
+        // setup: position at $66000, wide TP from momentum (stddev × 3 = $30 at σ=10)
+        Portfolio<FP> port = {};
+        Portfolio_Init(&port);
+        FPN<FP> entry = FPN_FromDouble<FP>(66000.0);
+        FPN<FP> wide_tp = FPN_FromDouble<FP>(66500.0);  // $500 above entry (momentum)
+        FPN<FP> sl = FPN_FromDouble<FP>(65800.0);
+        Portfolio_AddPositionWithExits(&port, FPN_FromDouble<FP>(0.05), entry, wide_tp, sl);
+
+        // rolling stats with VERY low stddev (simulates volatility crash after fill)
+        RollingStats<FP> rolling = RollingStats_Init<FP>();
+        rolling.price_stddev = FPN_FromDouble<FP>(5.0); // tiny stddev
+
+        // regime: TRENDING → RANGING — tightens TP using FPN_Min
+        // tight_tp = entry + stddev × (take_profit_pct × 100) = 66000 + 5 × 1.0 = 66005
+        // that's $5 above entry — way below fee floor of $198
+        uint8_t entry_strat[16] = {};
+        entry_strat[0] = Regime_ToStrategy(REGIME_TRENDING);
+        Regime_AdjustPositions(&port, &rolling, REGIME_TRENDING, REGIME_RANGING, entry_strat, &cfg);
+
+        double tp_after = FPN_ToDouble(port.positions[0].take_profit_price);
+        double entry_d = FPN_ToDouble(entry);
+        double tp_dist = tp_after - entry_d;
+
+        // fee floor = entry × fee_rate × fee_floor_mult = 66000 × 0.001 × 3 = $198
+        double fee_floor_d = entry_d * 0.001 * 3.0;
+        check("fee floor: TP not below fee breakeven after regime tighten",
+              tp_dist >= fee_floor_d - 0.01);
+        printf("    tp=%.2f entry=%.2f tp_dist=%.2f fee_floor=%.2f\n",
+               tp_after, entry_d, tp_dist, fee_floor_d);
+
+        // test TRENDING → MILD_TREND too
+        Portfolio_Init(&port);
+        Portfolio_AddPositionWithExits(&port, FPN_FromDouble<FP>(0.05), entry, wide_tp, sl);
+        entry_strat[0] = Regime_ToStrategy(REGIME_TRENDING);
+        Regime_AdjustPositions(&port, &rolling, REGIME_TRENDING, REGIME_MILD_TREND, entry_strat, &cfg);
+
+        double tp_mild = FPN_ToDouble(port.positions[0].take_profit_price);
+        double tp_mild_dist = tp_mild - entry_d;
+        check("fee floor: TRENDING→MILD_TREND TP above fee breakeven",
+              tp_mild_dist >= fee_floor_d - 0.01);
+
+        // test → TRENDING_DOWN
+        Portfolio_Init(&port);
+        Portfolio_AddPositionWithExits(&port, FPN_FromDouble<FP>(0.05), entry, wide_tp, sl);
+        entry_strat[0] = Regime_ToStrategy(REGIME_TRENDING);
+        Regime_AdjustPositions(&port, &rolling, REGIME_TRENDING, REGIME_TRENDING_DOWN, entry_strat, &cfg);
+
+        double tp_down = FPN_ToDouble(port.positions[0].take_profit_price);
+        double tp_down_dist = tp_down - entry_d;
+        check("fee floor: →TRENDING_DOWN TP above fee breakeven",
+              tp_down_dist >= fee_floor_d - 0.01);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
