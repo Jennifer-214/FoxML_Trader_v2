@@ -619,7 +619,7 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s) {
         ImGui::EndTable();
     }
 
-    // position progress bars — where is price between SL and TP?
+    // position progress — subtle text indicator instead of bar
     for (int i = 0; i < 16; i++) {
         const TUIPositionSnap *ps = &s->positions[i];
         if (ps->idx < 0) continue;
@@ -628,21 +628,13 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s) {
         float progress = (float)((s->price - ps->sl) / range);
         if (progress < 0.0f) progress = 0.0f;
         if (progress > 1.0f) progress = 1.0f;
-
-        // color: red near SL, yellow middle, green near TP
-        ImVec4 bar_color;
-        if (progress < 0.3f)
-            bar_color = FoxmlColors::red;
-        else if (progress < 0.6f)
-            bar_color = FoxmlColors::yellow;
-        else
-            bar_color = FoxmlColors::green;
-
-        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, bar_color);
-        char overlay[32];
-        snprintf(overlay, sizeof(overlay), "%.0f%%", progress * 100.0f);
-        ImGui::ProgressBar(progress, ImVec2(-1, 14), overlay);
-        ImGui::PopStyleColor();
+        ImVec4 col = (progress < 0.3f) ? FoxmlColors::red :
+                     (progress < 0.6f) ? FoxmlColors::comment : FoxmlColors::green;
+        ImGui::TextColored(FoxmlColors::sand, "SL");
+        ImGui::SameLine();
+        ImGui::TextColored(col, "%.0f%%", progress * 100.0f);
+        ImGui::SameLine();
+        ImGui::TextColored(FoxmlColors::sand, "TP");
     }
 
     ImGui::End();
