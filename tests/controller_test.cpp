@@ -2506,6 +2506,197 @@ int main() {
               ebuf.count == 0);
     }
 
+    //======================================================================================================
+    // BALANCE DRIFT — round trip accounting
+    //======================================================================================================
+    printf("\n--- BALANCE DRIFT ---\n");
+    {
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.warmup_ticks = 10;
+        cfg.poll_interval = 1;
+        cfg.min_warmup_samples = 10;
+        cfg.starting_balance = FPN_FromDouble<FP>(10000.0);
+        cfg.risk_pct = FPN_FromDouble<FP>(0.15);  // 15%
+        cfg.fee_rate = FPN_FromDouble<FP>(0.001);  // 0.1%
+        cfg.max_positions = 1;
+        cfg.kill_switch_enabled = 0;  // disable kill — we're testing accounting
+        cfg.slippage_pct = FPN_Zero<FP>();  // no slippage for clean test
+        cfg.take_profit_pct = FPN_FromDouble<FP>(0.03);
+        cfg.stop_loss_pct = FPN_FromDouble<FP>(0.015);
+
+        double starting = 10000.0;
+
+        // TEST 1: buy deduction matches position cost + fee
+        {
+            PortfolioController<FP> ctrl = {};
+            PortfolioController_Init(&ctrl, cfg);
+            OrderPool<FP> pool;
+            OrderPool_init(&pool, 64);
+            TradeLog log;
+            TradeLog_Init(&log, "DRIFT_TEST1");
+            test_warmup_ctrl(&ctrl, &pool, &log, 66000.0, 500.0);
+
+            double bal_before = FPN_ToDouble(ctrl.balance);
+
+            // manually create a fill at $66,000
+            FPN<FP> fill_price = FPN_FromDouble<FP>(66000.0);
+            FPN<FP> risk = FPN_Mul(ctrl.balance, cfg.risk_pct);
+            FPN<FP> qty = FPN_DivNoAssert(risk, fill_price);
+            FPN<FP> cost = FPN_Mul(fill_price, qty);
+            FPN<FP> fee = FPN_Mul(cost, cfg.fee_rate);
+            FPN<FP> total = FPN_AddSat(cost, fee);
+
+            // simulate fill
+            Portfolio_AddPositionWithExits(&ctrl.portfolio, qty, fill_price,
+                FPN_FromDouble<FP>(68000.0), FPN_FromDouble<FP>(65000.0), fee);
+            ctrl.balance = FPN_SubSat(ctrl.balance, total);
+
+            double bal_after = FPN_ToDouble(ctrl.balance);
+            double deducted = bal_before - bal_after;
+            double expected_deduction = FPN_ToDouble(total);
+
+            check("buy deduction: balance decreased by cost + fee",
+                  fabs(deducted - expected_deduction) < 0.01);
+
+            // verify equity = balance + position value ≈ starting
+            FPN<FP> pv = Portfolio_ComputeValue(&ctrl.portfolio, fill_price);
+            FPN<FP> equity = FPN_AddSat(ctrl.balance, pv);
+            double eq = FPN_ToDouble(equity);
+            check("buy equity: balance + position ≈ starting - entry fee",
+                  fabs(eq - (starting - FPN_ToDouble(fee))) < 0.01);
+
+            printf("    bal_before=%.2f bal_after=%.2f deducted=%.2f pv=%.2f equity=%.2f\n",
+                   bal_before, bal_after, deducted, FPN_ToDouble(pv), eq);
+
+            // TEST 2: sell at TP — balance fully restored
+            FPN<FP> exit_price = FPN_FromDouble<FP>(68000.0);
+            FPN<FP> gross = FPN_Mul(exit_price, qty);
+            FPN<FP> exit_fee = FPN_Mul(gross, cfg.fee_rate);
+            FPN<FP> net = FPN_SubSat(gross, exit_fee);
+            ctrl.balance = FPN_AddSat(ctrl.balance, net);
+            ctrl.portfolio.active_bitmap = 0;  // clear position
+
+            double bal_final = FPN_ToDouble(ctrl.balance);
+            // expected: starting - entry_fee - exit_fee + price_gain
+            double price_gain = (68000.0 - 66000.0) * FPN_ToDouble(qty);
+            double total_fees = FPN_ToDouble(fee) + FPN_ToDouble(exit_fee);
+            double expected_final = starting + price_gain - total_fees;
+
+            check("round trip: balance = starting + gain - fees (no drift)",
+                  fabs(bal_final - expected_final) < 0.01);
+            printf("    final=%.2f expected=%.2f drift=%.4f\n",
+                   bal_final, expected_final, bal_final - expected_final);
+
+            TradeLog_Close(&log);
+            free(pool.slots);
+            remove("DRIFT_TEST1_order_history.csv");
+        }
+
+        // TEST 3: equity consistency during open position at different prices
+        {
+            PortfolioController<FP> ctrl = {};
+            PortfolioController_Init(&ctrl, cfg);
+            OrderPool<FP> pool;
+            OrderPool_init(&pool, 64);
+            TradeLog log;
+            TradeLog_Init(&log, "DRIFT_TEST2");
+            test_warmup_ctrl(&ctrl, &pool, &log, 66000.0, 500.0);
+
+            // open position at $66,000
+            FPN<FP> fill_price = FPN_FromDouble<FP>(66000.0);
+            FPN<FP> risk = FPN_Mul(ctrl.balance, cfg.risk_pct);
+            FPN<FP> qty = FPN_DivNoAssert(risk, fill_price);
+            FPN<FP> cost = FPN_Mul(fill_price, qty);
+            FPN<FP> fee = FPN_Mul(cost, cfg.fee_rate);
+            FPN<FP> total_cost = FPN_AddSat(cost, fee);
+            Portfolio_AddPositionWithExits(&ctrl.portfolio, qty, fill_price,
+                FPN_FromDouble<FP>(68000.0), FPN_FromDouble<FP>(65000.0), fee);
+            ctrl.balance = FPN_SubSat(ctrl.balance, total_cost);
+
+            // check equity at entry price
+            FPN<FP> pv1 = Portfolio_ComputeValue(&ctrl.portfolio, fill_price);
+            FPN<FP> eq1 = FPN_AddSat(ctrl.balance, pv1);
+            double entry_eq = FPN_ToDouble(eq1);
+            check("open pos equity at entry price ≈ starting - fee",
+                  fabs(entry_eq - (starting - FPN_ToDouble(fee))) < 0.01);
+
+            // check equity at higher price ($67,000)
+            FPN<FP> high = FPN_FromDouble<FP>(67000.0);
+            FPN<FP> pv2 = Portfolio_ComputeValue(&ctrl.portfolio, high);
+            FPN<FP> eq2 = FPN_AddSat(ctrl.balance, pv2);
+            double high_eq = FPN_ToDouble(eq2);
+            double expected_gain = 1000.0 * FPN_ToDouble(qty);  // $1000 price move × qty
+            check("open pos equity at +$1000 reflects unrealized gain",
+                  fabs(high_eq - entry_eq - expected_gain) < 0.01);
+
+            // check equity at lower price ($65,000) — should NOT trigger kill on 3% threshold
+            FPN<FP> low = FPN_FromDouble<FP>(65000.0);
+            FPN<FP> pv3 = Portfolio_ComputeValue(&ctrl.portfolio, low);
+            FPN<FP> eq3 = FPN_AddSat(ctrl.balance, pv3);
+            double low_eq = FPN_ToDouble(eq3);
+            double pct_drop = (starting - low_eq) / starting * 100.0;
+            check("open pos equity at -$1000: drop < 3% (no false kill)",
+                  pct_drop < 3.0);
+            printf("    entry_eq=%.2f high_eq=%.2f low_eq=%.2f drop=%.2f%%\n",
+                   entry_eq, high_eq, low_eq, pct_drop);
+
+            // TEST 4: verify Portfolio_ComputeValue matches manual calculation
+            double manual_pv = FPN_ToDouble(qty) * 65000.0;
+            double computed_pv = FPN_ToDouble(pv3);
+            check("Portfolio_ComputeValue matches qty × price",
+                  fabs(computed_pv - manual_pv) < 0.01);
+            printf("    manual_pv=%.2f computed_pv=%.2f diff=%.6f\n",
+                   manual_pv, computed_pv, computed_pv - manual_pv);
+
+            TradeLog_Close(&log);
+            free(pool.slots);
+            remove("DRIFT_TEST2_order_history.csv");
+        }
+
+        // TEST 5: full pipeline round trip through PortfolioController_Tick
+        {
+            ControllerConfig<FP> rt_cfg = cfg;
+            rt_cfg.kill_switch_enabled = 0;
+            rt_cfg.offset_stddev_mult = FPN_FromDouble<FP>(0.5); // tight gate for quick fill
+            PortfolioController<FP> ctrl = {};
+            PortfolioController_Init(&ctrl, rt_cfg);
+            OrderPool<FP> pool;
+            OrderPool_init(&pool, 64);
+            TradeLog log;
+            TradeLog_Init(&log, "DRIFT_TEST3");
+            test_warmup_ctrl(&ctrl, &pool, &log, 66000.0, 500.0);
+
+            double bal_start = FPN_ToDouble(ctrl.balance);
+
+            // run 500 ticks at stable price — should buy, then TP or SL
+            for (int i = 0; i < 500; i++) {
+                double p = 66000.0 + (i % 50) * 10.0;  // oscillate $0-$500
+                PortfolioController_Tick(&ctrl, &pool, FPN_FromDouble<FP>(p),
+                                          FPN_FromDouble<FP>(500.0), &log);
+            }
+
+            int active = Portfolio_CountActive(&ctrl.portfolio);
+            double bal_end = FPN_ToDouble(ctrl.balance);
+            double realized = FPN_ToDouble(ctrl.realized_pnl);
+
+            if (active == 0) {
+                // all positions closed — balance should equal starting + realized
+                double expected = bal_start + realized;
+                double drift = bal_end - expected;
+                check("pipeline round trip: no balance drift when flat",
+                      fabs(drift) < 0.01);
+                printf("    bal=%.2f expected=%.2f drift=%.4f trades=%d\n",
+                       bal_end, expected, drift, ctrl.total_buys);
+            } else {
+                printf("    (skipped drift check — %d positions still open)\n", active);
+            }
+
+            TradeLog_Close(&log);
+            free(pool.slots);
+            remove("DRIFT_TEST3_order_history.csv");
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

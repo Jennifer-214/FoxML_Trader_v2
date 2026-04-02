@@ -432,9 +432,10 @@ inline void RecordExit(PortfolioController<F> *ctrl, int slot, FPN<F> exit_price
                             reasons[reason], FPN_ToDouble(ctrl->balance),
                             FPN_ToDouble(exit_fee), strat, ctrl->regime.current_regime);
 
-    // balance reconciliation when last position closes
+    // balance reconciliation — only valid when fully flat (no open positions)
+    // with open positions, balance is correctly lower by position cost
     int remaining = Portfolio_CountActive(&ctrl->portfolio);
-    if (remaining <= 1) { // this position may still be counted
+    if (remaining == 0) {
         double bal = FPN_ToDouble(ctrl->balance);
         double expected = FPN_ToDouble(ctrl->config.starting_balance) + FPN_ToDouble(ctrl->realized_pnl);
         double drift = bal - expected;
@@ -660,13 +661,35 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       }
     }
     if (tripped) {
-      KillSwitch_Activate(ctrl, ctrl->kill_reason);
-      fprintf(stderr, "[KILL] hot-path: equity=%.2f peak=%.2f start=%.2f reason=%d "
-              "daily_pct=%.4f dd_pct=%.4f — trading halted\n",
-              FPN_ToDouble(equity), FPN_ToDouble(ctrl->peak_equity),
-              FPN_ToDouble(ctrl->session_start_equity), ctrl->kill_reason,
+      // dump EVERYTHING before activating kill so we can find the root cause
+      double price_d = FPN_ToDouble(current_price);
+      double pv_d = FPN_ToDouble(pv);
+      double bal_d = FPN_ToDouble(ctrl->balance);
+      double eq_d = FPN_ToDouble(equity);
+      uint16_t bmp = ctrl->portfolio.active_bitmap;
+      int npos = __builtin_popcount(bmp);
+      fprintf(stderr, "[KILL] TRIGGER tick=%lu reason=%d bitmap=0x%04X npos=%d\n",
+              ctrl->total_ticks, ctrl->kill_reason, bmp, npos);
+      fprintf(stderr, "[KILL]   price=%.2f pv=%.6f bal=%.2f equity=%.2f\n",
+              price_d, pv_d, bal_d, eq_d);
+      fprintf(stderr, "[KILL]   start=%.2f peak=%.2f daily_pct=%.4f dd_pct=%.4f\n",
+              FPN_ToDouble(ctrl->session_start_equity),
+              FPN_ToDouble(ctrl->peak_equity),
               FPN_ToDouble(ctrl->config.kill_switch_daily_loss_pct),
               FPN_ToDouble(ctrl->config.kill_switch_drawdown_pct));
+      // dump each active position
+      uint16_t scan = bmp;
+      while (scan) {
+        int idx = __builtin_ctz(scan);
+        fprintf(stderr, "[KILL]   pos[%d] entry=%.2f qty=%.10f val=%.2f tp=%.2f sl=%.2f\n",
+                idx, FPN_ToDouble(ctrl->portfolio.positions[idx].entry_price),
+                FPN_ToDouble(ctrl->portfolio.positions[idx].quantity),
+                FPN_ToDouble(FPN_Mul(current_price, ctrl->portfolio.positions[idx].quantity)),
+                FPN_ToDouble(ctrl->portfolio.positions[idx].take_profit_price),
+                FPN_ToDouble(ctrl->portfolio.positions[idx].stop_loss_price));
+        scan &= scan - 1;
+      }
+      KillSwitch_Activate(ctrl, ctrl->kill_reason);
     }
   }
 

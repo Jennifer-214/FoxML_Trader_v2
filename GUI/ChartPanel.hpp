@@ -272,32 +272,9 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             dl->AddRectFilled(ImVec2(cx - hw, top), ImVec2(cx + hw, bot), bc);
         }
 
-        // trade markers — only show if price falls within a candle's high-low range
-        // prevents old trades from snapping to unrelated candles as ghosts
-        for (int mi = 0; mi < trades->marker_count; mi++) {
-            const TradeMarker *m = &trades->markers[mi];
-            int best_i = -1;
-            for (int i = vc - 1; i >= 0; i--) {
-                // trade price must be within this candle's wick range
-                // take most recent match (scan right-to-left)
-                if (m->price >= cs->lows[i] && m->price <= cs->highs[i]) {
-                    best_i = i;
-                    break;
-                }
-            }
-            if (best_i < 0) continue;
-            ImVec2 pos = ImPlot::PlotToPixels(cs->xs[best_i], m->price);
-            float sz = 6.0f;
-            if (m->is_sell) {
-                ImU32 col = ImGui::GetColorU32(m->is_tp ? FoxmlColors::green_b : FoxmlColors::red_b);
-                dl->AddTriangleFilled(ImVec2(pos.x-sz, pos.y-sz), ImVec2(pos.x+sz, pos.y-sz),
-                                      ImVec2(pos.x, pos.y+sz), col);
-            } else {
-                ImU32 col = ImGui::GetColorU32(FoxmlColors::green_b);
-                dl->AddTriangleFilled(ImVec2(pos.x, pos.y-sz), ImVec2(pos.x-sz, pos.y+sz),
-                                      ImVec2(pos.x+sz, pos.y+sz), col);
-            }
-        }
+        // trade markers disabled — TP/SL lines + position table are sufficient
+        // timestamps don't align with candles and old sessions bleed through
+        // TODO: re-enable if TradeMarker gets timestamps + visible-range filtering
         ImPlot::PopPlotClipRect();
 
         // VWAP
