@@ -1686,7 +1686,7 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
 // v5 adds: entry_ticks, entry_strategy, strategy_id, regime, momentum state
 // backward compatible: v4/v5/v6 load gracefully (missing fields get defaults)
 //======================================================================================================
-#define CONTROLLER_SNAPSHOT_VERSION 10
+#define CONTROLLER_SNAPSHOT_VERSION 11
 
 template <unsigned F>
 inline void PortfolioController_SaveSnapshot(const PortfolioController<F> *ctrl,
@@ -1749,6 +1749,10 @@ inline void PortfolioController_SaveSnapshot(const PortfolioController<F> *ctrl,
     fwrite(&ctrl->strategy_stats[i].losses, sizeof(uint32_t), 1, f);
     fwrite(&ctrl->strategy_stats[i].total_trades, sizeof(uint32_t), 1, f);
   }
+
+  // v11: FoxML learned state (BanditState + ConfidenceScorer survive restarts)
+  fwrite(&ctrl->bandit, sizeof(BanditState), 1, f);
+  fwrite(&ctrl->confidence, sizeof(ConfidenceScorer), 1, f);
 
   fflush(f);
   fclose(f);
@@ -1859,6 +1863,14 @@ inline int PortfolioController_LoadSnapshot(PortfolioController<F> *ctrl,
       if (ctrl->kill_switch_active)
         fprintf(stderr, "[SNAPSHOT] kill switch ACTIVE (reason=%d) — trading halted. press 'k' to reset\n",
                 ctrl->kill_reason);
+    }
+
+    // v11: FoxML learned state (BanditState + ConfidenceScorer)
+    if (version >= 11) {
+      if (fread(&ctrl->bandit, sizeof(BanditState), 1, f) != 1) { fclose(f); return 0; }
+      if (fread(&ctrl->confidence, sizeof(ConfidenceScorer), 1, f) != 1) { fclose(f); return 0; }
+      fprintf(stderr, "[SNAPSHOT] restored bandit state (%d steps) + confidence scorer\n",
+              ctrl->bandit.total_steps);
     }
   }
 

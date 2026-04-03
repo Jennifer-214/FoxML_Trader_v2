@@ -939,6 +939,18 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         char ver_s[8]; snprintf(ver_s, 8, "%d", MODEL_FORMAT_VERSION);
         XGBoosterSetAttr(booster, "foxml_version", ver_s);
 
+        // embed config+data fingerprint for train-serve parity verification
+        {
+            const char *fp_paths[16];
+            for (int i = 0; i < run_control->run_config.num_data_files && i < 16; i++)
+                fp_paths[i] = run_control->run_config.data_paths[i];
+            char fp_hex[65];
+            Fingerprint_Compute<BACKTEST_FP>(fp_hex, &results->config_used,
+                sizeof(results->config_used), fp_paths, run_control->run_config.num_data_files);
+            XGBoosterSetAttr(booster, "foxml_fingerprint", fp_hex);
+            fprintf(stderr, "[TRAIN] model fingerprint: %.12s...\n", fp_hex);
+        }
+
         // save model
         XGBoosterSaveModel(booster, state->model_path);
 

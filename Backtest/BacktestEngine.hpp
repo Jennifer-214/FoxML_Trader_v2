@@ -262,6 +262,11 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
     } else {
         cfg = ControllerConfig_Load<BACKTEST_FP>(run_cfg->config_path);
     }
+    // train-serve parity: disable wall-clock time floor so backtest is purely
+    // tick-driven.  live engine uses slow_path_max_secs to trigger RollingStats_Push
+    // during sparse markets — backtest must NOT do this or features diverge.
+    cfg.slow_path_max_secs = 999999;
+
     results->config_used = cfg;
 
     // init controller (same as main.cpp:159-161)
