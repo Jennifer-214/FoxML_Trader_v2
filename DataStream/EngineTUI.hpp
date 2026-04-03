@@ -891,12 +891,26 @@ struct TUISharedState {
 //======================================================================================================
 // runs on engine thread, every slow-path cycle. converts FPN→double.
 //======================================================================================================
+// overload: explicit price/volume (used by backtest — no DataStream available)
+template <unsigned F>
+static inline void TUI_CopySnapshot(TUISnapshot *snap,
+                                      const PortfolioController<F> *ctrl,
+                                      double price_d, double volume_d);
+
+// overload: DataStream (used by live engine)
 template <unsigned F>
 static inline void TUI_CopySnapshot(TUISnapshot *snap,
                                       const PortfolioController<F> *ctrl,
                                       const DataStream<F> *stream) {
-    snap->price  = stream->price_d;   // use stashed double (no FPN_ToDouble)
-    snap->volume = stream->volume_d;
+    TUI_CopySnapshot(snap, ctrl, stream->price_d, stream->volume_d);
+}
+
+template <unsigned F>
+static inline void TUI_CopySnapshot(TUISnapshot *snap,
+                                      const PortfolioController<F> *ctrl,
+                                      double price_d, double volume_d) {
+    snap->price  = price_d;
+    snap->volume = volume_d;
     snap->state_warmup = (ctrl->state == CONTROLLER_WARMUP);
     snap->is_paused = FPN_IsZero(ctrl->buy_conds.price) && !snap->state_warmup;
     snap->start_time = 0; // TUI thread computes uptime from its own start_time
@@ -940,7 +954,6 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->long_gate_ok = !snap->long_gate_enabled || (snap->long_rel_slope >= min_ls);
 
     // portfolio + positions
-    double price_d = snap->price;
     double fee_r = FPN_ToDouble(ctrl->config.fee_rate);
     snap->active_count = Portfolio_CountActive(&ctrl->portfolio);
     snap->max_positions = (int)ctrl->config.max_positions;

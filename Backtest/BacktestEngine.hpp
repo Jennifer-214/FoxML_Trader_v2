@@ -43,11 +43,11 @@
 // loads Binance aggTrades CSV format:
 //   id,price,qty,first_id,last_id,timestamp,is_buyer_maker
 // or TickRecorder format:
-//   timestamp_ms,price,quantity,is_buyer_maker
+//   timestamp_us,price,quantity,is_buyer_maker
 //======================================================================================================
 static inline int BacktestData_DetectFormat(const char *header) {
-    // TickRecorder format starts with "timestamp_ms"
-    if (strncmp(header, "timestamp_ms", 12) == 0) return 1;
+    // TickRecorder format starts with "timestamp_us"
+    if (strncmp(header, "timestamp_us", 12) == 0) return 1;
     // Binance aggTrades has 7 fields starting with numeric ID
     return 0;
 }
@@ -70,9 +70,9 @@ static inline int BacktestData_Load(HistoricalTick *ticks, int *count, int max_t
         HistoricalTick *t = &ticks[*count];
 
         if (format == 1) {
-            // TickRecorder: timestamp_ms,price,quantity,is_buyer_maker
+            // TickRecorder: timestamp_us,price,quantity,is_buyer_maker
             char *p = line;
-            t->timestamp_ms = strtoll(p, &p, 10); if (*p == ',') p++;
+            t->timestamp_us = strtoll(p, &p, 10); if (*p == ',') p++;
             t->price = strtod(p, &p); if (*p == ',') p++;
             t->qty = strtod(p, &p); if (*p == ',') p++;
             t->is_buyer_maker = (int)strtol(p, &p, 10);
@@ -84,7 +84,7 @@ static inline int BacktestData_Load(HistoricalTick *ticks, int *count, int max_t
             t->qty = strtod(p, &p); if (*p == ',') p++;
             strtoll(p, &p, 10); if (*p == ',') p++;                     // skip first_id
             strtoll(p, &p, 10); if (*p == ',') p++;                     // skip last_id
-            t->timestamp_ms = strtoll(p, &p, 10); if (*p == ',') p++;
+            t->timestamp_us = strtoll(p, &p, 10); if (*p == ',') p++;
             // is_buyer_maker can be "true"/"false" or 1/0
             if (*p == 't' || *p == 'T') t->is_buyer_maker = 1;
             else if (*p == 'f' || *p == 'F') t->is_buyer_maker = 0;
@@ -334,8 +334,8 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
 
             // day boundary: mirrors live engine 24h reconnect
             // force-close all positions, reset session state, clear kill switch
-            // timestamp_ms is actually microseconds — convert to day boundary in μs
-            int64_t tick_day = (ticks[i].timestamp_ms / 86400000000LL) * 86400000000LL;
+            // timestamp_us is actually microseconds — convert to day boundary in μs
+            int64_t tick_day = (ticks[i].timestamp_us / 86400000000LL) * 86400000000LL;
             if (tick_day != last_day_ms && last_day_ms != 0) {
                 time_t day_ts = (time_t)(tick_day / 1000000);
                 struct tm *dt = gmtime(&day_ts);
@@ -403,8 +403,8 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
             price_d_last = ticks[i].price;
 
             // set simulated clock from historical timestamp
-            // timestamp_ms is actually microseconds in Binance aggTrades format
-            ctrl.sim_time = (time_t)(ticks[i].timestamp_ms / 1000000);
+            // timestamp_us is actually microseconds in Binance aggTrades format
+            ctrl.sim_time = (time_t)(ticks[i].timestamp_us / 1000000);
             // seed time state on first tick of each file (avoids clock gaps between files)
             if (i == 0 || total_processed == 0) {
                 ctrl.last_slow_time = (uint64_t)ctrl.sim_time;
@@ -426,7 +426,7 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
             if (candle_acc)
                 CandleAccumulator_PushWithTime(candle_acc, tick.price_d, tick.volume_d,
                                                tick.is_buyer_maker,
-                                               (double)(ticks[i].timestamp_ms / 1000));
+                                               (double)(ticks[i].timestamp_us / 1000));
 
             // track equity curve (on each trade completion)
             if (ctrl.total_buys > 0 && (ctrl.wins + ctrl.losses) > (uint32_t)results->equity_count) {

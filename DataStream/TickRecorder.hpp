@@ -6,7 +6,7 @@
 // [TICK RECORDER]
 //======================================================================================================
 // records raw tick data to CSV for building historical datasets for backtesting and ML training.
-// outputs Binance aggTrades-compatible format: timestamp_ms,price,quantity,is_buyer_maker
+// outputs Binance aggTrades-compatible format: timestamp_us,price,quantity,is_buyer_maker
 //
 // features:
 //   - daily file rotation: data/{symbol}/YYYY-MM-DD.csv
@@ -54,8 +54,8 @@ static inline void TickRecorder_MkdirP(const char *path) {
 }
 
 //======================================================================================================
-static inline int TickRecorder_DateInt(int64_t timestamp_ms) {
-    time_t t = (time_t)(timestamp_ms / 1000);
+static inline int TickRecorder_DateInt(int64_t timestamp_us) {
+    time_t t = (time_t)(timestamp_us / 1000);
     struct tm tm;
     gmtime_r(&t, &tm);
     return (tm.tm_year + 1900) * 10000 + (tm.tm_mon + 1) * 100 + tm.tm_mday;
@@ -88,7 +88,7 @@ static inline void TickRecorder_OpenFile(TickRecorder *rec, int date_int) {
     }
 
     if (is_new) {
-        fprintf(rec->file, "timestamp_ms,price,quantity,is_buyer_maker\n");
+        fprintf(rec->file, "timestamp_us,price,quantity,is_buyer_maker\n");
         fflush(rec->file);
     }
 
@@ -159,11 +159,11 @@ static inline void TickRecorder_Init(TickRecorder *rec, const char *symbol,
 
 //======================================================================================================
 static inline void TickRecorder_Push(TickRecorder *rec, double price, double qty,
-                                      int64_t timestamp_ms, int is_buyer_maker) {
+                                      int64_t timestamp_us, int is_buyer_maker) {
     if (!rec->enabled) return;
 
     // daily rotation
-    int today = TickRecorder_DateInt(timestamp_ms);
+    int today = TickRecorder_DateInt(timestamp_us);
     if (today != rec->current_day) {
         TickRecorder_OpenFile(rec, today);
         // prune on rotation (once per day)
@@ -173,7 +173,7 @@ static inline void TickRecorder_Push(TickRecorder *rec, double price, double qty
     if (!rec->file) return;
 
     fprintf(rec->file, "%lld,%.8f,%.8f,%d\n",
-            (long long)timestamp_ms, price, qty, is_buyer_maker);
+            (long long)timestamp_us, price, qty, is_buyer_maker);
     rec->count++;
 
     // flush every 1000 ticks (balance I/O and data safety)

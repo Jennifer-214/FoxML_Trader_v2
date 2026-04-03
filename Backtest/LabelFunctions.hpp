@@ -25,7 +25,7 @@
 struct HistoricalTick {
     double price;
     double qty;
-    int64_t timestamp_ms;
+    int64_t timestamp_us;
     int is_buyer_maker;
 };
 
