@@ -25,6 +25,7 @@
 #include "MemHeaders/PoolAllocator.hpp"
 #include "DataStream/TradeLog.hpp"
 #include "DataStream/MetricsLog.hpp"
+#include "DataStream/TickRecorder.hpp"
 
 #ifdef USE_IMGUI_GUI
 #include "GUI/CandleAccumulator.hpp"
@@ -179,6 +180,10 @@ int main(int argc, char *argv[]) {
     //==================================================================================================
     TradeLog log;
     TradeLog_Init(&log, bcfg.symbol);
+
+    // init tick recorder (writes raw ticks to CSV for backtesting/ML training)
+    TickRecorder tick_rec;
+    TickRecorder_Init(&tick_rec, bcfg.symbol, ccfg.record_ticks, ccfg.record_max_days);
 
     // metrics log — diagnostics for verifying regime switching, strategy behavior
     MetricsLog metrics;
@@ -364,6 +369,8 @@ int main(int argc, char *argv[]) {
             while (1) {
                 DataStream<FP> tick;
                 int ok = BinanceStream_ReadTick(&bs, &tick);
+                TickRecorder_Push(&tick_rec, tick.price_d, tick.volume_d,
+                                  (int64_t)time(NULL) * 1000, tick.is_buyer_maker);
                 if (!ok) {
                     // save snapshot before reconnect - positions survive
                     PortfolioController_SaveSnapshot(&ctrl, snapshot_path);
@@ -995,6 +1002,7 @@ int main(int argc, char *argv[]) {
     TradeLogBuffer_Drain(&ctrl.trade_buf, &log);
     TradeLog_Close(&log);
     MetricsLog_Close(&metrics);
+    TickRecorder_Close(&tick_rec);
     BinanceStream_Close(&bs);
     free(pool.slots);
     free(ctrl.rolling_long);

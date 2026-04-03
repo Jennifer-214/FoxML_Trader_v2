@@ -1,0 +1,404 @@
+// Copyright (c) 2026 Jennifer Lewis. All rights reserved.
+// Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+// See LICENSE file in the project root for full license text.
+
+//======================================================================================================
+// [BACKTEST ENGINE]
+//======================================================================================================
+// replay loop for historical tick data through the identical engine code path.
+// produces the exact same trade results as live — same BuyGate, ExitGate,
+// PortfolioController_Tick calls in the same order.
+//
+// mirrors main.cpp:363-547 — if main.cpp's tick loop changes, update this.
+//======================================================================================================
+#ifndef BACKTEST_ENGINE_HPP
+#define BACKTEST_ENGINE_HPP
+
+#include "../CoreFrameworks/PortfolioController.hpp"
+#include "../CoreFrameworks/OrderGates.hpp"
+#include "../DataStream/TradeLog.hpp"
+#include "../ML_Headers/ModelInference.hpp"
+#include "../GUI/CandleAccumulator.hpp"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <sys/time.h>
+#include <sys/stat.h>
+
+// FPN width — must match the engine build
+#ifndef BACKTEST_FP
+#define BACKTEST_FP 64
+#endif
+
+//======================================================================================================
+// [HISTORICAL TICK]
+//======================================================================================================
+struct HistoricalTick {
+    double price;
+    double qty;
+    int64_t timestamp_ms;
+    int is_buyer_maker;
+};
+
+//======================================================================================================
+// [DATA LOADER]
+//======================================================================================================
+// loads Binance aggTrades CSV format:
+//   id,price,qty,first_id,last_id,timestamp,is_buyer_maker
+// or TickRecorder format:
+//   timestamp_ms,price,quantity,is_buyer_maker
+//======================================================================================================
+static inline int BacktestData_DetectFormat(const char *header) {
+    // TickRecorder format starts with "timestamp_ms"
+    if (strncmp(header, "timestamp_ms", 12) == 0) return 1;
+    // Binance aggTrades has 7 fields starting with numeric ID
+    return 0;
+}
+
+static inline int BacktestData_Load(HistoricalTick *ticks, int *count, int max_ticks,
+                                     const char *csv_path) {
+    FILE *f = fopen(csv_path, "r");
+    if (!f) {
+        fprintf(stderr, "[backtest] failed to open %s\n", csv_path);
+        return 0;
+    }
+
+    char line[512];
+    // read header to detect format
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return 0; }
+    int format = BacktestData_DetectFormat(line);
+
+    *count = 0;
+    while (fgets(line, sizeof(line), f) && *count < max_ticks) {
+        HistoricalTick *t = &ticks[*count];
+
+        if (format == 1) {
+            // TickRecorder: timestamp_ms,price,quantity,is_buyer_maker
+            char *p = line;
+            t->timestamp_ms = strtoll(p, &p, 10); if (*p == ',') p++;
+            t->price = strtod(p, &p); if (*p == ',') p++;
+            t->qty = strtod(p, &p); if (*p == ',') p++;
+            t->is_buyer_maker = (int)strtol(p, &p, 10);
+        } else {
+            // Binance aggTrades: id,price,qty,first_id,last_id,timestamp,is_buyer_maker
+            char *p = line;
+            strtoll(p, &p, 10); if (*p == ',') p++;                     // skip id
+            t->price = strtod(p, &p); if (*p == ',') p++;
+            t->qty = strtod(p, &p); if (*p == ',') p++;
+            strtoll(p, &p, 10); if (*p == ',') p++;                     // skip first_id
+            strtoll(p, &p, 10); if (*p == ',') p++;                     // skip last_id
+            t->timestamp_ms = strtoll(p, &p, 10); if (*p == ',') p++;
+            // is_buyer_maker can be "true"/"false" or 1/0
+            if (*p == 't' || *p == 'T') t->is_buyer_maker = 1;
+            else if (*p == 'f' || *p == 'F') t->is_buyer_maker = 0;
+            else t->is_buyer_maker = (int)strtol(p, &p, 10);
+        }
+
+        if (t->price > 0.0 && t->qty > 0.0)
+            (*count)++;
+    }
+
+    fclose(f);
+    fprintf(stderr, "[backtest] loaded %d ticks from %s\n", *count, csv_path);
+    return 1;
+}
+
+//======================================================================================================
+// [RUN CONFIG]
+//======================================================================================================
+struct BacktestRunConfig {
+    char data_paths[16][256];
+    int num_data_files;
+    char config_path[256];
+    ControllerConfig<BACKTEST_FP> config_override;
+    int use_config_override;
+    int collect_features;
+    int label_type;
+};
+
+//======================================================================================================
+// [STATS]
+//======================================================================================================
+struct BacktestStats {
+    double sharpe_ratio;
+    double profit_factor;
+    double expectancy;
+    double max_drawdown;
+    double max_drawdown_pct;
+    double win_rate;
+    double total_pnl;
+    double total_fees;
+    double return_pct;
+    uint32_t total_trades;
+    uint32_t wins, losses;
+    double avg_win, avg_loss;
+    double avg_hold_ticks;
+    double elapsed_ms;
+    uint64_t ticks_processed;
+};
+
+//======================================================================================================
+// [RESULTS]
+//======================================================================================================
+#define BACKTEST_MAX_EQUITY    8192
+#define BACKTEST_MAX_SAMPLES   50000
+
+struct BacktestResults {
+    BacktestStats stats;
+    double equity_curve[BACKTEST_MAX_EQUITY];
+    int equity_count;
+    char trade_csv_path[256];
+    // ML features (populated when collect_features=1)
+    float feature_matrix[BACKTEST_MAX_SAMPLES * MODEL_MAX_FEATURES];
+    float labels[BACKTEST_MAX_SAMPLES];
+    int sample_count;
+    // config used (for comparison)
+    ControllerConfig<BACKTEST_FP> config_used;
+};
+
+//======================================================================================================
+// [STATS COMPUTE]
+//======================================================================================================
+static inline void BacktestStats_Compute(BacktestStats *stats,
+                                          const PortfolioController<BACKTEST_FP> *ctrl,
+                                          double starting_balance,
+                                          double elapsed_ms) {
+    stats->total_trades = ctrl->total_buys;
+    stats->wins = ctrl->wins;
+    stats->losses = ctrl->losses;
+    stats->total_pnl = FPN_ToDouble(ctrl->realized_pnl);
+    stats->total_fees = FPN_ToDouble(ctrl->total_fees);
+    stats->ticks_processed = ctrl->total_ticks;
+    stats->elapsed_ms = elapsed_ms;
+
+    // win rate
+    stats->win_rate = (stats->total_trades > 0)
+        ? (double)stats->wins / stats->total_trades * 100.0
+        : 0.0;
+
+    // averages
+    double gw = FPN_ToDouble(ctrl->gross_wins);
+    double gl = FPN_ToDouble(ctrl->gross_losses);
+    stats->avg_win  = (stats->wins > 0)   ? gw / stats->wins   : 0.0;
+    stats->avg_loss = (stats->losses > 0) ? gl / stats->losses : 0.0;
+
+    // profit factor
+    stats->profit_factor = (gl > 0.0001) ? gw / gl : 0.0;
+
+    // expectancy: (win_rate * avg_win) - (loss_rate * avg_loss)
+    double wr = stats->wins > 0 ? (double)stats->wins / stats->total_trades : 0.0;
+    double lr = 1.0 - wr;
+    stats->expectancy = (wr * stats->avg_win) - (lr * fabs(stats->avg_loss));
+
+    // return %
+    stats->return_pct = (starting_balance > 0.0)
+        ? stats->total_pnl / starting_balance * 100.0
+        : 0.0;
+
+    // avg hold ticks
+    stats->avg_hold_ticks = (stats->total_trades > 0)
+        ? (double)ctrl->total_hold_ticks / stats->total_trades
+        : 0.0;
+
+    // max drawdown — compute from equity curve in results (caller's job)
+    // sharpe — needs equity curve data too
+}
+
+//======================================================================================================
+// [MAX DRAWDOWN + SHARPE from equity curve]
+//======================================================================================================
+static inline void BacktestStats_ComputeFromEquity(BacktestStats *stats,
+                                                    const double *equity, int count) {
+    // max drawdown
+    double peak = equity[0];
+    double max_dd = 0.0;
+    double max_dd_pct = 0.0;
+    for (int i = 1; i < count; i++) {
+        if (equity[i] > peak) peak = equity[i];
+        double dd = peak - equity[i];
+        if (dd > max_dd) max_dd = dd;
+        double dd_pct = (peak > 0.0) ? dd / peak : 0.0;
+        if (dd_pct > max_dd_pct) max_dd_pct = dd_pct;
+    }
+    stats->max_drawdown = max_dd;
+    stats->max_drawdown_pct = max_dd_pct * 100.0;
+
+    // sharpe ratio (annualized, assuming ~365 trading days)
+    if (count < 2) { stats->sharpe_ratio = 0.0; return; }
+    // compute returns between equity points
+    double sum_r = 0.0, sum_r2 = 0.0;
+    int n = count - 1;
+    for (int i = 1; i < count; i++) {
+        double r = (equity[i - 1] != 0.0) ? (equity[i] - equity[i - 1]) / fabs(equity[i - 1]) : 0.0;
+        sum_r += r;
+        sum_r2 += r * r;
+    }
+    double mean = sum_r / n;
+    double var = (sum_r2 / n) - (mean * mean);
+    double stddev = (var > 0.0) ? sqrt(var) : 0.0;
+    // annualize: assume each equity point is ~1 trade, scale by sqrt(trades/year)
+    // rough: if 30 trades/day, 365 days = 10950 trades/year
+    stats->sharpe_ratio = (stddev > 1e-12) ? mean / stddev * sqrt((double)n) : 0.0;
+}
+
+//======================================================================================================
+// [RUN]
+//======================================================================================================
+// the core replay loop — mirrors main.cpp:363-547
+//======================================================================================================
+static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfig *run_cfg,
+                                 volatile int *progress_pct, volatile int *cancel_flag,
+                                 CandleAccumulator *candle_acc) {
+    memset(results, 0, sizeof(*results));
+
+    // load config
+    ControllerConfig<BACKTEST_FP> cfg;
+    if (run_cfg->use_config_override) {
+        cfg = run_cfg->config_override;
+    } else {
+        cfg = ControllerConfig_Load<BACKTEST_FP>(run_cfg->config_path);
+    }
+    results->config_used = cfg;
+
+    // init controller (same as main.cpp:159-161)
+    PortfolioController<BACKTEST_FP> ctrl;
+    ctrl.rolling_long = NULL;
+    PortfolioController_Init(&ctrl, cfg);
+
+    // init order pool (same as main.cpp:174)
+    OrderPool<BACKTEST_FP> pool;
+    OrderPool_init(&pool, 64);
+
+    // init trade log — write to backtest output
+    mkdir("logging", 0755);
+    TradeLog log;
+    snprintf(results->trade_csv_path, sizeof(results->trade_csv_path),
+             "logging/backtest_order_history.csv");
+    TradeLog_Init(&log, "BACKTEST");
+
+    // load all data files
+    // allocate on heap — tick data can be large (~40MB per day)
+    int max_ticks = 2000000; // 2M ticks per file
+    HistoricalTick *ticks = (HistoricalTick *)malloc(max_ticks * sizeof(HistoricalTick));
+    if (!ticks) {
+        fprintf(stderr, "[backtest] failed to allocate tick buffer\n");
+        return;
+    }
+
+    struct timeval t_start, t_end;
+    gettimeofday(&t_start, NULL);
+
+    int total_processed = 0;
+    int total_ticks_all_files = 0;
+
+    // first pass: count total ticks for progress bar
+    for (int f = 0; f < run_cfg->num_data_files; f++) {
+        FILE *fp = fopen(run_cfg->data_paths[f], "r");
+        if (!fp) continue;
+        int lines = 0;
+        char buf[512];
+        while (fgets(buf, sizeof(buf), fp)) lines++;
+        fclose(fp);
+        total_ticks_all_files += lines - 1; // subtract header
+    }
+    if (total_ticks_all_files <= 0) total_ticks_all_files = 1; // avoid div by zero
+
+    // replay each file
+    for (int f = 0; f < run_cfg->num_data_files; f++) {
+        int count = 0;
+        if (!BacktestData_Load(ticks, &count, max_ticks, run_cfg->data_paths[f]))
+            continue;
+
+        //==========================================================================================
+        // REPLAY LOOP — mirrors main.cpp:363-547
+        // if main.cpp's tick processing order changes, update this to match
+        //==========================================================================================
+        for (int i = 0; i < count; i++) {
+            if (*cancel_flag) goto done;
+
+            // build DataStream (same struct as live)
+            DataStream<BACKTEST_FP> tick;
+            tick.price = FPN_FromDouble<BACKTEST_FP>(ticks[i].price);
+            tick.volume = FPN_FromDouble<BACKTEST_FP>(ticks[i].qty);
+            tick.price_d = ticks[i].price;
+            tick.volume_d = ticks[i].qty;
+            tick.is_buyer_maker = ticks[i].is_buyer_maker;
+
+            // exit gate on EVERY tick (same as main.cpp:381-392)
+            if (ctrl.portfolio.active_bitmap)
+                PositionExitGate(&ctrl.portfolio, tick.price, &ctrl.exit_buf, ctrl.total_ticks);
+
+            // buy gate (same as main.cpp BuyGate call after burst drain)
+            BuyGate(&ctrl.buy_conds, &tick, &pool);
+
+            // core tick processing (same as main.cpp PortfolioController_Tick call)
+            PortfolioController_Tick(&ctrl, &pool, tick.price, tick.volume,
+                                     &log, tick.is_buyer_maker);
+
+            // feed candle accumulator for chart (if provided)
+            if (candle_acc)
+                CandleAccumulator_Push(candle_acc, tick.price_d, tick.volume_d,
+                                       tick.is_buyer_maker);
+
+            // track equity curve (on each trade completion)
+            if (ctrl.total_buys > 0 && (ctrl.wins + ctrl.losses) > (uint32_t)results->equity_count) {
+                if (results->equity_count < BACKTEST_MAX_EQUITY) {
+                    double bal = FPN_ToDouble(ctrl.balance);
+                    double rpnl = FPN_ToDouble(ctrl.realized_pnl);
+                    results->equity_curve[results->equity_count] = bal + rpnl;
+                    results->equity_count++;
+                }
+            }
+
+            // feature collection (on slow path only, when enabled)
+            if (run_cfg->collect_features && ctrl.tick_count == 0 &&
+                results->sample_count < BACKTEST_MAX_SAMPLES) {
+                // features are computed inside PortfolioController_Tick on slow path
+                // pack them into the feature matrix
+                ModelFeatures_Pack<BACKTEST_FP>(
+                    &results->feature_matrix[results->sample_count * MODEL_NUM_FEATURES],
+                    &ctrl.last_signals,
+                    &ctrl.rolling,
+                    ctrl.rolling_long);
+                // TODO: label computation (phase 5 — LabelFunctions.hpp)
+                results->labels[results->sample_count] = 0.0f;
+                results->sample_count++;
+            }
+
+            total_processed++;
+            // update progress every 10K ticks (avoid atomic contention)
+            if ((total_processed & 0x3FFF) == 0)
+                *progress_pct = (int)(100.0 * total_processed / total_ticks_all_files);
+        }
+    }
+
+done:
+    *progress_pct = 100;
+
+    gettimeofday(&t_end, NULL);
+    double elapsed = (t_end.tv_sec - t_start.tv_sec) * 1000.0
+                   + (t_end.tv_usec - t_start.tv_usec) / 1000.0;
+
+    // force-drain remaining trade log entries
+    TradeLogBuffer_Drain(&ctrl.trade_buf, &log);
+    TradeLog_Close(&log);
+
+    // compute stats
+    double start_bal = FPN_ToDouble(cfg.starting_balance);
+    BacktestStats_Compute(&results->stats, &ctrl, start_bal, elapsed);
+
+    // compute drawdown + sharpe from equity curve
+    if (results->equity_count > 1)
+        BacktestStats_ComputeFromEquity(&results->stats, results->equity_curve, results->equity_count);
+
+    // cleanup
+    free(ticks);
+    free(ctrl.rolling_long);
+
+    fprintf(stderr, "[backtest] completed: %lu ticks in %.1fms, %u trades, P&L $%.2f\n",
+            results->stats.ticks_processed, elapsed,
+            results->stats.total_trades, results->stats.total_pnl);
+}
+
+#endif // BACKTEST_ENGINE_HPP

@@ -154,7 +154,10 @@ static inline void GUI_Panel_TradeHistory(TradeHistory *th) {
             ImGui::TextColored(pnl_col, "$%+.2f", e->pnl);
 
             ImGui::TableNextColumn();
-            ImGui::TextColored(FoxmlColors::comment, "$%.2f", e->fee);
+            // red fee = fees killed an otherwise profitable trade
+            double gross = (e->exit_price - e->entry_price) * e->qty;
+            ImVec4 fee_col = (gross > 0 && e->pnl < 0) ? FoxmlColors::red : FoxmlColors::comment;
+            ImGui::TextColored(fee_col, "$%.2f", e->fee);
 
             ImGui::TableNextColumn();
             ImVec4 reason_col = (strcmp(e->reason, "TP") == 0) ? FoxmlColors::green_b : FoxmlColors::red;

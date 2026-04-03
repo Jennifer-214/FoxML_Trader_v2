@@ -157,6 +157,9 @@ template <unsigned F> struct ControllerConfig {
   int danger_enabled;            // 0=disabled, 1=enabled
   FPN<F> danger_warn_stddevs;    // gradient starts at this many stddevs below avg (e.g. 3.0)
   FPN<F> danger_crash_stddevs;   // full gate kill at this many stddevs below avg (e.g. 6.0)
+  // tick recording (writes raw ticks to CSV for backtesting/ML training)
+  int record_ticks;              // 0=disabled (default), 1=record to data/{symbol}/YYYY-MM-DD.csv
+  uint32_t record_max_days;      // auto-prune CSVs older than this (default 30, ~2GB cap)
 };
 //======================================================================================================
 template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
@@ -278,6 +281,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.danger_enabled = 1;
   cfg.danger_warn_stddevs = FPN_FromDouble<F>(3.0);    // gradient starts at 3σ below avg
   cfg.danger_crash_stddevs = FPN_FromDouble<F>(6.0);   // full gate kill at 6σ below avg
+  // tick recording (disabled by default — no disk usage unless explicitly enabled)
+  cfg.record_ticks = 0;
+  cfg.record_max_days = 30;
   return cfg;
 }
 //======================================================================================================
@@ -461,6 +467,10 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(danger_enabled)
     CFG_PARSE_FPN(danger_warn_stddevs)
     CFG_PARSE_FPN(danger_crash_stddevs)
+
+    //--- tick recording ---
+    CFG_PARSE_INT(record_ticks)
+    CFG_PARSE_U32(record_max_days)
 
     // ML model paths (string fields — not atof)
     if (strcmp(key, "ml_model_path") == 0) {

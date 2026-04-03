@@ -78,7 +78,8 @@ Strategy dispatch → position adjustment on regime switch
 - **MemHeaders/** - PoolAllocator (bitmap order pool), BuddyAllocator
 - **ML_Headers/** - RollingStats (regression + R²), LinearRegression3X, ROR_regressor (slope-of-slopes), GateControlNetwork
 - **GUI/** - Dear ImGui native GUI: FoxmlTheme, DashboardPanels, ChartPanel (price/volume/equity), CandleAccumulator, TradeReader, SettingsPanel, TradeHistoryPanel, LogViewerPanel, GuiThread
-- **tests/** - controller_test.cpp (236 assertions)
+- **Backtest/** - BacktestEngine (replay loop), BacktestPanels (suite GUI), LabelFunctions (ML targets)
+- **tests/** - controller_test.cpp (279 assertions)
 - **plans/** - implementation plans (gitignored)
 - **vendor/** - vendored imgui (docking branch) + implot v0.18 (gitignored)
 - **Version.hpp** - single source of truth for version string
@@ -107,8 +108,9 @@ When changing something, here's exactly what to update:
 ### Adding a new TUI/GUI display field
 1. `DataStream/EngineTUI.hpp`: add to `TUISnapshot` struct
 2. `DataStream/EngineTUI.hpp`: populate in `TUI_CopySnapshot()`
-3. `DataStream/TUIAnsi.hpp`: display in appropriate `ANSI_Section_*` (if ANSI TUI needed)
-4. `GUI/DashboardPanels.hpp`: display in appropriate `GUI_Panel_*`
+3. `Backtest/BacktestSnapshot.hpp`: populate in `BacktestSnapshot_Copy()` (when it exists)
+4. `DataStream/TUIAnsi.hpp`: display in appropriate `ANSI_Section_*` (if ANSI TUI needed)
+5. `GUI/DashboardPanels.hpp`: display in appropriate `GUI_Panel_*`
 
 ### Adding a new chart overlay
 1. `GUI/ChartPanel.hpp`: add to `ChartState` if new data needed, add render call in `GUI_PriceChart()`
@@ -143,6 +145,22 @@ Rules:
 - Patch (Z): bug fixes, visual tweaks, overlaps, spacing
 - Minor (Y): new features, new panels, new chart overlays
 
+### Adding a new ML feature
+1. `ML_Headers/ModelInference.hpp`: add `FEAT_NEW_NAME` at current MODEL_NUM_FEATURES value
+2. `ML_Headers/ModelInference.hpp`: increment MODEL_NUM_FEATURES
+3. `ML_Headers/ModelInference.hpp`: increment MODEL_FORMAT_VERSION
+4. `ML_Headers/ModelInference.hpp`: add packing line in `ModelFeatures_Pack()`
+5. Retrain all models (old models will fail version check at load time)
+6. If field comes from a new signal: also follow "Adding a new signal to RegimeDetector"
+
+FEAT_* constants are **append-only** — never reorder, never remove.
+
+### Keeping foxml_suite in sync
+No manual sync needed — same repo, same headers. Both build targets must compile clean:
+```bash
+cmake --build build && cmake --build build_suite
+```
+
 ### Centralized constants
 - `Version.hpp`: ENGINE_VERSION_STRING — included by all renderers
 - `Limits.hpp`: MAX_PORTFOLIO_POSITIONS, CANDLE_HISTORY_MAX — included by Portfolio, TUISnapshot, ChartPanel
@@ -161,9 +179,16 @@ cmake --build build_gui
 cd build_gui && ./engine_gui
 ```
 
+### Backtest Suite (SDL2 + OpenGL3)
+```bash
+cmake -B build_suite -DUSE_IMGUI_GUI=ON [-DUSE_XGBOOST=ON]
+cmake --build build_suite --target foxml_suite
+cd build_suite && ./foxml_suite
+```
+
 ### Tests
 ```bash
-./build/controller_test  # 236 assertions
+./build/controller_test  # 279 assertions
 ```
 
 ## Versioning

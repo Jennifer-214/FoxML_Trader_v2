@@ -52,6 +52,12 @@
 // max features buffer (room for future expansion)
 #define MODEL_MAX_FEATURES   32
 
+// model format version — increment when FEAT_* indices or count changes.
+// embedded in trained models, checked at load time. old models with wrong
+// version fail loudly instead of producing silent garbage predictions.
+// FEAT_* constants are APPEND-ONLY — never reorder, never remove.
+#define MODEL_FORMAT_VERSION 1
+
 //======================================================================================================
 // conditional includes — only pull in headers when backend is enabled
 //======================================================================================================
@@ -112,10 +118,23 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
         }
         // set single-threaded for deterministic latency
         XGBoosterSetParam(booster, "nthread", "1");
+        // version check — reject models trained with a different feature set
+        const char *ver = NULL;
+        int got_ver = XGBoosterGetAttr(booster, "foxml_version", &ver, (int[]){0});
+        if (got_ver == 0 && ver) {
+            int model_ver = atoi(ver);
+            if (model_ver != MODEL_FORMAT_VERSION) {
+                fprintf(stderr, "[ML] XGBoost: model %s was trained with format v%d, engine expects v%d — retrain required\n",
+                        path, model_ver, MODEL_FORMAT_VERSION);
+                XGBoosterFree(booster);
+                return 0;
+            }
+        }
         m->handle = (void*)booster;
         m->backend = MODEL_BACKEND_XGBOOST;
         m->num_features = MODEL_NUM_FEATURES;
-        fprintf(stderr, "[ML] XGBoost model loaded: %s (%d features)\n", path, m->num_features);
+        fprintf(stderr, "[ML] XGBoost model loaded: %s (%d features, format v%d)\n",
+                path, m->num_features, MODEL_FORMAT_VERSION);
         return 1;
     }
 #endif

@@ -123,6 +123,40 @@ if(USE_IMGUI_GUI)
 endif()
 
 #===============================================================================
+# foxml_suite — backtesting + ML training workstation
+#===============================================================================
+if(USE_IMGUI_GUI)
+    add_executable(foxml_suite foxml_suite.cpp)
+    target_compile_options(foxml_suite PRIVATE -O3 -march=native -funroll-loops -flto)
+    target_compile_definitions(foxml_suite PRIVATE
+        FOXML_SUITE LICENSE_BYPASS MULTICORE_TUI
+    )
+    target_include_directories(foxml_suite PRIVATE
+        ${IMGUI_DIR}
+        ${IMGUI_DIR}/backends
+        ${IMPLOT_DIR}
+        ${SDL2_INCLUDE_DIRS}
+    )
+    target_link_libraries(foxml_suite PRIVATE
+        imgui_lib
+        ${SDL2_LIBRARIES}
+        OpenGL::GL
+        pthread
+    )
+    if(USE_NATIVE_128)
+        target_compile_definitions(foxml_suite PRIVATE USE_NATIVE_128)
+    endif()
+    if(USE_XGBOOST)
+        target_compile_definitions(foxml_suite PRIVATE USE_XGBOOST)
+        target_link_libraries(foxml_suite PRIVATE xgboost::xgboost)
+    endif()
+    if(USE_LIGHTGBM)
+        target_compile_definitions(foxml_suite PRIVATE USE_LIGHTGBM)
+        target_link_libraries(foxml_suite PRIVATE ${LIGHTGBM_LIB})
+    endif()
+endif()
+
+#===============================================================================
 # tests
 #===============================================================================
 add_executable(controller_test tests/controller_test.cpp)

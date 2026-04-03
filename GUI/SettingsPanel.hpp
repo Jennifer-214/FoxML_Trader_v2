@@ -120,6 +120,9 @@ static const CfgFieldDef field_defs[] = {
     {"danger_enabled",        "Enabled",      "Danger Gradient",  CFG_BOOL,  NULL},
     {"danger_warn_stddevs",   "Warn σ",       "Danger Gradient",  CFG_FLOAT, "%.1f"},
     {"danger_crash_stddevs",  "Crash σ",      "Danger Gradient",  CFG_FLOAT, "%.1f"},
+    // Tick Recording
+    {"record_ticks",          "Record Ticks", "Tick Recording",  CFG_BOOL,  NULL},
+    {"record_max_days",       "Max Days",     "Tick Recording",  CFG_FLOAT, "%.0f"},
     // Toggles
     {"use_real_money",        "LIVE Trading", "Toggles",         CFG_BOOL,  NULL},
     {"partial_exit_enabled",  "Partial Exits","Toggles",         CFG_BOOL,  NULL},
@@ -311,6 +314,11 @@ static inline void GUI_Panel_Settings(SettingsState *s, volatile sig_atomic_t *r
                 ImGui::SetItemTooltip("Danger gradient starts at this many σ below avg\n3.0 = gate begins tightening at 3σ drop");
             else if (strcmp(k, "danger_crash_stddevs") == 0)
                 ImGui::SetItemTooltip("Full gate kill at this many σ below avg\n6.0 = gate zeroed at 6σ drop (crash protection)");
+            // tick recording
+            else if (strcmp(k, "record_ticks") == 0)
+                ImGui::SetItemTooltip("Record raw ticks to CSV for backtesting/ML training\nOutput: data/{SYMBOL}/YYYY-MM-DD.csv\n~30-70MB/day for BTCUSDT");
+            else if (strcmp(k, "record_max_days") == 0)
+                ImGui::SetItemTooltip("Auto-delete tick CSVs older than this many days\n30 = ~1-2GB cap on disk usage");
             // regime detection
             else if (strcmp(k, "regime_crossover_threshold") == 0)
                 ImGui::SetItemTooltip("EMA/SMA spread for MILD_TREND (EMA Cross)\n0.0005 = 0.05%% gap (~$35 at BTC $68k)\nbelow = RANGING, above = mild uptrend");
