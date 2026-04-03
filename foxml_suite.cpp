@@ -62,6 +62,7 @@ static void Suite_SetupDefaultLayout(ImGuiID dockspace_id) {
     ImGui::DockBuilderDockWindow("Settings", dock_right_top);
 
     ImGui::DockBuilderDockWindow("Results", dock_right_bottom);
+    ImGui::DockBuilderDockWindow("Comparison", dock_right_bottom);
     ImGui::DockBuilderDockWindow("Trade History", dock_right_bottom);
     ImGui::DockBuilderDockWindow("Market", dock_right_bottom);
     ImGui::DockBuilderDockWindow("Account", dock_right_bottom);
@@ -176,6 +177,10 @@ int main(int argc, char *argv[]) {
     static TUISnapshot suite_snap = {};
     run_control.snapshot = &suite_snap;
 
+    // comparison state (overlay multiple runs)
+    ComparisonState comparison;
+    Comparison_Init(&comparison);
+
     // trade CSV reader for chart markers
     TradeData trades;
     TradeData_Init(&trades, "logging/backtest_order_history.csv");
@@ -236,6 +241,7 @@ int main(int argc, char *argv[]) {
         GUI_Panel_DataBrowser(&data_panel);
         GUI_Panel_RunControl(&run_control, &data_panel);
         GUI_Panel_Results(&run_control.results);
+        GUI_Panel_Comparison(&comparison, &run_control.results);
 
         // dashboard panels — show backtest engine state (reuse from live GUI)
         if (run_control.complete) {

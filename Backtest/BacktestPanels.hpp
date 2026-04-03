@@ -341,4 +341,170 @@ static inline void GUI_Panel_Results(const BacktestResults *results) {
     ImGui::End();
 }
 
+//======================================================================================================
+// [COMPARISON STATE]
+//======================================================================================================
+#define COMPARISON_MAX_RUNS 8
+
+struct ComparisonState {
+    BacktestStats stats[COMPARISON_MAX_RUNS];
+    double equity_curves[COMPARISON_MAX_RUNS][BACKTEST_MAX_EQUITY];
+    int equity_counts[COMPARISON_MAX_RUNS];
+    char labels[COMPARISON_MAX_RUNS][64];
+    int run_count;
+};
+
+static inline void Comparison_Init(ComparisonState *state) {
+    memset(state, 0, sizeof(*state));
+}
+
+static inline void Comparison_SaveRun(ComparisonState *state, const BacktestResults *results,
+                                       const char *label) {
+    if (state->run_count >= COMPARISON_MAX_RUNS) {
+        // shift everything down, drop oldest
+        memmove(&state->stats[0], &state->stats[1],
+                (COMPARISON_MAX_RUNS - 1) * sizeof(BacktestStats));
+        memmove(&state->equity_curves[0], &state->equity_curves[1],
+                (COMPARISON_MAX_RUNS - 1) * sizeof(state->equity_curves[0]));
+        memmove(&state->equity_counts[0], &state->equity_counts[1],
+                (COMPARISON_MAX_RUNS - 1) * sizeof(int));
+        memmove(&state->labels[0], &state->labels[1],
+                (COMPARISON_MAX_RUNS - 1) * sizeof(state->labels[0]));
+        state->run_count = COMPARISON_MAX_RUNS - 1;
+    }
+    int idx = state->run_count;
+    state->stats[idx] = results->stats;
+    int ec = results->equity_count;
+    if (ec > BACKTEST_MAX_EQUITY) ec = BACKTEST_MAX_EQUITY;
+    memcpy(state->equity_curves[idx], results->equity_curve, ec * sizeof(double));
+    state->equity_counts[idx] = ec;
+    strncpy(state->labels[idx], label, 63);
+    state->labels[idx][63] = '\0';
+    state->run_count++;
+}
+
+//======================================================================================================
+// [PANEL: COMPARISON]
+//======================================================================================================
+static inline void GUI_Panel_Comparison(ComparisonState *state, const BacktestResults *current) {
+    ImGui::Begin("Comparison");
+
+    // save current run
+    if (current->stats.total_trades > 0) {
+        static char save_label[64] = "Run";
+        ImGui::InputText("Label", save_label, sizeof(save_label));
+        ImGui::SameLine();
+        if (ImGui::Button("Save Run")) {
+            // auto-number if label is default
+            char label[64];
+            if (strcmp(save_label, "Run") == 0)
+                snprintf(label, sizeof(label), "Run %d", state->run_count + 1);
+            else
+                strncpy(label, save_label, sizeof(label) - 1);
+            Comparison_SaveRun(state, current, label);
+        }
+    }
+
+    if (state->run_count == 0) {
+        ImGui::TextDisabled("No saved runs yet. Complete a backtest and click Save Run.");
+        ImGui::End();
+        return;
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("Clear All")) {
+        Comparison_Init(state);
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Separator();
+
+    // equity curve overlay
+    static const ImVec4 run_colors[] = {
+        {0.55f, 0.76f, 0.51f, 1.0f},  // green
+        {0.53f, 0.66f, 0.82f, 1.0f},  // blue
+        {0.82f, 0.62f, 0.47f, 1.0f},  // orange
+        {0.76f, 0.51f, 0.76f, 1.0f},  // purple
+        {0.82f, 0.82f, 0.47f, 1.0f},  // yellow
+        {0.47f, 0.82f, 0.82f, 1.0f},  // cyan
+        {0.82f, 0.47f, 0.47f, 1.0f},  // red
+        {0.75f, 0.75f, 0.55f, 1.0f},  // sand
+    };
+
+    if (ImPlot::BeginPlot("Equity Comparison", ImVec2(-1, 200))) {
+        ImPlot::SetupAxes("Trade #", "$");
+        for (int r = 0; r < state->run_count; r++) {
+            int n = state->equity_counts[r];
+            if (n < 2) continue;
+            // build x-axis (trade index)
+            double xs[BACKTEST_MAX_EQUITY];
+            for (int i = 0; i < n; i++) xs[i] = (double)i;
+
+            ImPlotSpec ls;
+            ls.LineColor = run_colors[r % 8];
+            ls.LineWeight = 2.0f;
+            ImPlot::PlotLine(state->labels[r], xs, state->equity_curves[r], n, ls);
+        }
+        ImPlot::EndPlot();
+    }
+
+    ImGui::Separator();
+
+    // stats comparison table
+    if (ImGui::BeginTable("cmp", state->run_count + 1,
+                          ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersV |
+                          ImGuiTableFlags_ScrollX)) {
+        ImGui::TableSetupColumn("Metric", ImGuiTableColumnFlags_WidthFixed, 110);
+        for (int r = 0; r < state->run_count; r++)
+            ImGui::TableSetupColumn(state->labels[r], ImGuiTableColumnFlags_WidthFixed, 90);
+        ImGui::TableHeadersRow();
+
+        auto cmp_row = [&](const char *label, auto fn) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::Text("%s", label);
+            for (int r = 0; r < state->run_count; r++) {
+                ImGui::TableNextColumn();
+                fn(r);
+            }
+        };
+
+        cmp_row("P&L", [&](int r) {
+            ImGui::TextColored(ResultsPnlColor(state->stats[r].total_pnl),
+                               "$%.2f", state->stats[r].total_pnl);
+        });
+        cmp_row("Return %", [&](int r) {
+            ImGui::TextColored(ResultsPnlColor(state->stats[r].return_pct),
+                               "%.2f%%", state->stats[r].return_pct);
+        });
+        cmp_row("Trades", [&](int r) {
+            ImGui::Text("%u", state->stats[r].total_trades);
+        });
+        cmp_row("Win Rate", [&](int r) {
+            ImGui::Text("%.1f%%", state->stats[r].win_rate);
+        });
+        cmp_row("PF", [&](int r) {
+            ImGui::Text("%.2f", state->stats[r].profit_factor);
+        });
+        cmp_row("Expectancy", [&](int r) {
+            ImGui::TextColored(ResultsPnlColor(state->stats[r].expectancy),
+                               "$%.2f", state->stats[r].expectancy);
+        });
+        cmp_row("Max DD", [&](int r) {
+            ImGui::Text("%.2f%%", state->stats[r].max_drawdown_pct);
+        });
+        cmp_row("Sharpe", [&](int r) {
+            ImGui::Text("%.2f", state->stats[r].sharpe_ratio);
+        });
+        cmp_row("Fees", [&](int r) {
+            ImGui::Text("$%.2f", state->stats[r].total_fees);
+        });
+
+        ImGui::EndTable();
+    }
+
+    ImGui::End();
+}
+
 #endif // BACKTEST_PANELS_HPP
