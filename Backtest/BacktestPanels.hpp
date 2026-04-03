@@ -507,4 +507,215 @@ static inline void GUI_Panel_Comparison(ComparisonState *state, const BacktestRe
     ImGui::End();
 }
 
+//======================================================================================================
+// [OPTIMIZER PANEL STATE]
+//======================================================================================================
+struct OptimizerPanelState {
+    OptimizerRange ranges[OPT_MAX_PARAMS];
+    int num_params;
+    int metric_idx;
+    OptimizerResults results;
+    volatile int running;
+    volatile int current_run;
+    volatile int total_runs;
+    volatile int cancel_flag;
+    volatile int complete;
+    pthread_t worker_tid;
+    // copies for the worker thread
+    BacktestRunConfig run_config;
+    char config_path[256];
+};
+
+static inline void OptimizerPanel_Init(OptimizerPanelState *state) {
+    memset(state, 0, sizeof(*state));
+    state->num_params = 1;
+    state->metric_idx = OPT_METRIC_PNL;
+    strncpy(state->ranges[0].key, "take_profit_pct", 31);
+    state->ranges[0].lo = 1.0; state->ranges[0].hi = 5.0; state->ranges[0].step = 0.5;
+    strncpy(state->ranges[1].key, "stop_loss_pct", 31);
+    state->ranges[1].lo = 0.5; state->ranges[1].hi = 3.0; state->ranges[1].step = 0.5;
+    strncpy(state->config_path, "engine.cfg", sizeof(state->config_path) - 1);
+}
+
+struct OptWorkerArgs {
+    OptimizerPanelState *state;
+};
+
+static inline void *optimizer_worker_fn(void *arg) {
+    OptWorkerArgs *args = (OptWorkerArgs *)arg;
+    OptimizerPanelState *state = args->state;
+    free(args);
+
+    Backtest_RunSweep(&state->results, &state->run_config,
+                       state->ranges, state->num_params, state->metric_idx,
+                       &state->current_run, &state->total_runs, &state->cancel_flag);
+
+    state->complete = 1;
+    state->running = 0;
+    return NULL;
+}
+
+//======================================================================================================
+// [PANEL: OPTIMIZER]
+//======================================================================================================
+static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelState *data) {
+    ImGui::Begin("Optimizer");
+
+    // parameter config
+    static const char *metric_names[] = {"Sharpe", "Profit Factor", "Expectancy", "Return %", "P&L $"};
+    ImGui::Combo("Metric", &state->metric_idx, metric_names, 5);
+
+    ImGui::SliderInt("Parameters", &state->num_params, 1, 2);
+
+    for (int p = 0; p < state->num_params; p++) {
+        ImGui::PushID(p);
+        char hdr[32]; snprintf(hdr, sizeof(hdr), "Param %d", p + 1);
+        if (ImGui::CollapsingHeader(hdr, ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::InputText("Key", state->ranges[p].key, 32);
+            ImGui::InputDouble("Min", &state->ranges[p].lo, 0.1, 1.0, "%.2f");
+            ImGui::InputDouble("Max", &state->ranges[p].hi, 0.1, 1.0, "%.2f");
+            ImGui::InputDouble("Step", &state->ranges[p].step, 0.1, 0.5, "%.2f");
+            int steps = state->ranges[p].steps();
+            ImGui::Text("%d steps", steps);
+        }
+        ImGui::PopID();
+    }
+
+    int total_combos = state->ranges[0].steps() * (state->num_params > 1 ? state->ranges[1].steps() : 1);
+    ImGui::Text("Total combinations: %d", total_combos);
+
+    ImGui::Separator();
+
+    if (state->running) {
+        float pct = state->total_runs > 0 ? (float)state->current_run / state->total_runs : 0.0f;
+        char overlay[64];
+        snprintf(overlay, sizeof(overlay), "%d / %d", (int)state->current_run, (int)state->total_runs);
+        ImGui::ProgressBar(pct, ImVec2(-1, 0), overlay);
+        if (ImGui::Button("Cancel"))
+            state->cancel_flag = 1;
+    } else {
+        bool can_run = data->selected_count > 0 && total_combos > 0 && total_combos <= OPT_MAX_GRID;
+        if (!can_run) ImGui::BeginDisabled();
+        if (ImGui::Button("Run Grid Search")) {
+            // build run config from data selection
+            state->run_config.num_data_files = 0;
+            for (int i = 0; i < data->file_count && state->run_config.num_data_files < 16; i++) {
+                if (data->selected[i]) {
+                    strncpy(state->run_config.data_paths[state->run_config.num_data_files],
+                            data->files[i], 255);
+                    state->run_config.num_data_files++;
+                }
+            }
+            strncpy(state->run_config.config_path, state->config_path, 255);
+            state->run_config.use_config_override = 0;
+            state->run_config.collect_features = 0;
+
+            state->cancel_flag = 0;
+            state->complete = 0;
+            state->running = 1;
+
+            OptWorkerArgs *args = (OptWorkerArgs *)malloc(sizeof(OptWorkerArgs));
+            args->state = state;
+            pthread_create(&state->worker_tid, NULL, optimizer_worker_fn, args);
+            pthread_detach(state->worker_tid);
+        }
+        if (!can_run) {
+            ImGui::EndDisabled();
+            if (data->selected_count == 0)
+                ImGui::SameLine(), ImGui::TextDisabled("Select data files first");
+            else if (total_combos > OPT_MAX_GRID)
+                ImGui::SameLine(), ImGui::TextDisabled("Too many combos (max %d)", OPT_MAX_GRID);
+        }
+    }
+
+    // results
+    if (state->complete && state->results.total_runs > 0) {
+        ImGui::Separator();
+        OptimizerResults *r = &state->results;
+
+        // best result header
+        int bi = r->best_idx;
+        ImGui::TextColored(ResultsPnlColor(r->stats[bi].total_pnl),
+                           "Best: %s=%.2f", state->ranges[0].key,
+                           r->param_vals[0][bi / r->dims[1]]);
+        if (r->num_params > 1)
+            ImGui::SameLine(), ImGui::Text(" %s=%.2f", state->ranges[1].key,
+                                            r->param_vals[1][bi % r->dims[1]]);
+        ImGui::Text("P&L $%.2f  |  Sharpe %.2f  |  WR %.1f%%  |  PF %.2f",
+                     r->stats[bi].total_pnl, r->stats[bi].sharpe_ratio,
+                     r->stats[bi].win_rate, r->stats[bi].profit_factor);
+
+        // 1D: bar chart
+        if (r->num_params == 1) {
+            if (ImPlot::BeginPlot("Sweep", ImVec2(-1, 200))) {
+                ImPlot::SetupAxes(state->ranges[0].key, metric_names[state->metric_idx]);
+                ImPlot::PlotBars("##metric", r->param_vals[0], r->metric, r->dims[0], 0.6);
+                ImPlot::EndPlot();
+            }
+        }
+
+        // 2D: heatmap
+        if (r->num_params == 2) {
+            if (ImPlot::BeginPlot("Heatmap", ImVec2(-1, 250))) {
+                ImPlot::SetupAxes(state->ranges[0].key, state->ranges[1].key);
+                ImPlot::PlotHeatmap("##heat", r->metric, r->dims[1], r->dims[0],
+                                     0, 0, NULL,
+                                     ImPlotPoint(r->param_vals[0][0], r->param_vals[1][0]),
+                                     ImPlotPoint(r->param_vals[0][r->dims[0]-1],
+                                                 r->param_vals[1][r->dims[1]-1]));
+                ImPlot::EndPlot();
+            }
+        }
+
+        // top-N table
+        ImGui::Separator();
+        ImGui::Text("Top Results:");
+        if (ImGui::BeginTable("opt_results", 5 + r->num_params,
+                              ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersV |
+                              ImGuiTableFlags_Sortable | ImGuiTableFlags_ScrollY,
+                              ImVec2(0, 200))) {
+            ImGui::TableSetupColumn(state->ranges[0].key, ImGuiTableColumnFlags_WidthFixed, 70);
+            if (r->num_params > 1)
+                ImGui::TableSetupColumn(state->ranges[1].key, ImGuiTableColumnFlags_WidthFixed, 70);
+            ImGui::TableSetupColumn("P&L", ImGuiTableColumnFlags_WidthFixed, 70);
+            ImGui::TableSetupColumn("WR%", ImGuiTableColumnFlags_WidthFixed, 50);
+            ImGui::TableSetupColumn("PF", ImGuiTableColumnFlags_WidthFixed, 50);
+            ImGui::TableSetupColumn("Sharpe", ImGuiTableColumnFlags_WidthFixed, 55);
+            ImGui::TableSetupColumn("Trades", ImGuiTableColumnFlags_WidthFixed, 50);
+            ImGui::TableHeadersRow();
+
+            // sort by metric (descending)
+            int sorted[OPT_MAX_GRID];
+            for (int i = 0; i < r->total_runs; i++) sorted[i] = i;
+            for (int i = 0; i < r->total_runs - 1; i++)
+                for (int j = i + 1; j < r->total_runs; j++)
+                    if (r->metric[sorted[j]] > r->metric[sorted[i]]) {
+                        int tmp = sorted[i]; sorted[i] = sorted[j]; sorted[j] = tmp;
+                    }
+
+            int show = r->total_runs < 20 ? r->total_runs : 20;
+            for (int si = 0; si < show; si++) {
+                int idx = sorted[si];
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%.2f", r->param_vals[0][idx / r->dims[1]]);
+                if (r->num_params > 1) {
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%.2f", r->param_vals[1][idx % r->dims[1]]);
+                }
+                ImGui::TableNextColumn();
+                ImGui::TextColored(ResultsPnlColor(r->stats[idx].total_pnl),
+                                   "$%.2f", r->stats[idx].total_pnl);
+                ImGui::TableNextColumn(); ImGui::Text("%.1f", r->stats[idx].win_rate);
+                ImGui::TableNextColumn(); ImGui::Text("%.2f", r->stats[idx].profit_factor);
+                ImGui::TableNextColumn(); ImGui::Text("%.2f", r->stats[idx].sharpe_ratio);
+                ImGui::TableNextColumn(); ImGui::Text("%u", r->stats[idx].total_trades);
+            }
+            ImGui::EndTable();
+        }
+    }
+
+    ImGui::End();
+}
+
 #endif // BACKTEST_PANELS_HPP

@@ -412,4 +412,153 @@ done:
             results->stats.total_trades, results->stats.total_pnl);
 }
 
+//======================================================================================================
+// [CONFIG FIELD SETTER]
+//======================================================================================================
+// sets a config field by key name + double value. used by optimizer to sweep parameters.
+// returns 1 if field was found and set, 0 if unknown key.
+// handles both FPN and PCT fields (PCT keys are stored as decimal, value comes in as %).
+//======================================================================================================
+static inline int ConfigField_Set(ControllerConfig<BACKTEST_FP> *cfg, const char *key, double value) {
+    // percentage fields (config says 4.0, stored as 0.04)
+    #define OPT_SET_PCT(name) \
+        if (strcmp(key, #name) == 0) { cfg->name = FPN_FromDouble<BACKTEST_FP>(value / 100.0); return 1; }
+    // raw FPN fields
+    #define OPT_SET_FPN(name) \
+        if (strcmp(key, #name) == 0) { cfg->name = FPN_FromDouble<BACKTEST_FP>(value); return 1; }
+    // uint32 fields
+    #define OPT_SET_U32(name) \
+        if (strcmp(key, #name) == 0) { cfg->name = (uint32_t)value; return 1; }
+
+    OPT_SET_PCT(take_profit_pct)
+    OPT_SET_PCT(stop_loss_pct)
+    OPT_SET_PCT(fee_rate)
+    OPT_SET_PCT(entry_offset_pct)
+    OPT_SET_PCT(slippage_pct)
+    OPT_SET_PCT(max_exposure_pct)
+    OPT_SET_PCT(risk_pct)
+    OPT_SET_PCT(max_drawdown_pct)
+    OPT_SET_FPN(offset_stddev_mult)
+    OPT_SET_FPN(spacing_multiplier)
+    OPT_SET_FPN(momentum_breakout_mult)
+    OPT_SET_FPN(momentum_tp_mult)
+    OPT_SET_FPN(momentum_sl_mult)
+    OPT_SET_FPN(tp_hold_score)
+    OPT_SET_FPN(tp_trail_mult)
+    OPT_SET_FPN(sl_trail_mult)
+    OPT_SET_FPN(no_trade_band_mult)
+    OPT_SET_FPN(ml_buy_threshold)
+    OPT_SET_FPN(danger_warn_stddevs)
+    OPT_SET_FPN(danger_crash_stddevs)
+    OPT_SET_U32(poll_interval)
+    OPT_SET_U32(warmup_ticks)
+    OPT_SET_U32(max_hold_ticks)
+    OPT_SET_U32(sl_cooldown_base)
+
+    #undef OPT_SET_PCT
+    #undef OPT_SET_FPN
+    #undef OPT_SET_U32
+    return 0;
+}
+
+//======================================================================================================
+// [OPTIMIZER]
+//======================================================================================================
+#define OPT_MAX_PARAMS 2
+#define OPT_MAX_STEPS  50
+#define OPT_MAX_GRID   (OPT_MAX_STEPS * OPT_MAX_STEPS)
+
+struct OptimizerRange {
+    char key[32];
+    double lo, hi, step;
+    int steps() const { return (step > 1e-12) ? (int)((hi - lo) / step) + 1 : 1; }
+};
+
+struct OptimizerResults {
+    double metric[OPT_MAX_GRID];       // selected metric per cell
+    BacktestStats stats[OPT_MAX_GRID]; // full stats per cell
+    double param_vals[OPT_MAX_PARAMS][OPT_MAX_STEPS]; // actual parameter values
+    int dims[OPT_MAX_PARAMS];          // steps per dimension
+    int num_params;
+    int total_runs;
+    int best_idx;
+};
+
+// metric selector
+#define OPT_METRIC_SHARPE      0
+#define OPT_METRIC_PF          1
+#define OPT_METRIC_EXPECTANCY  2
+#define OPT_METRIC_RETURN      3
+#define OPT_METRIC_PNL         4
+
+static inline double OptimizerMetric(const BacktestStats *s, int metric) {
+    switch (metric) {
+        case OPT_METRIC_SHARPE:     return s->sharpe_ratio;
+        case OPT_METRIC_PF:         return s->profit_factor;
+        case OPT_METRIC_EXPECTANCY: return s->expectancy;
+        case OPT_METRIC_RETURN:     return s->return_pct;
+        case OPT_METRIC_PNL:        return s->total_pnl;
+        default:                    return s->total_pnl;
+    }
+}
+
+static inline void Backtest_RunSweep(OptimizerResults *opt,
+                                      const BacktestRunConfig *base_cfg,
+                                      const OptimizerRange *ranges, int num_params,
+                                      int metric_idx,
+                                      volatile int *current_run, volatile int *total_runs,
+                                      volatile int *cancel_flag) {
+    opt->num_params = num_params;
+    opt->dims[0] = ranges[0].steps();
+    opt->dims[1] = (num_params > 1) ? ranges[1].steps() : 1;
+    opt->total_runs = opt->dims[0] * opt->dims[1];
+    *total_runs = opt->total_runs;
+    *current_run = 0;
+    opt->best_idx = 0;
+    double best_metric = -1e30;
+
+    // store parameter values
+    for (int i = 0; i < opt->dims[0]; i++)
+        opt->param_vals[0][i] = ranges[0].lo + i * ranges[0].step;
+    if (num_params > 1)
+        for (int i = 0; i < opt->dims[1]; i++)
+            opt->param_vals[1][i] = ranges[1].lo + i * ranges[1].step;
+
+    // load base config once
+    ControllerConfig<BACKTEST_FP> base = ControllerConfig_Load<BACKTEST_FP>(base_cfg->config_path);
+
+    for (int i0 = 0; i0 < opt->dims[0]; i0++) {
+        for (int i1 = 0; i1 < opt->dims[1]; i1++) {
+            if (*cancel_flag) return;
+
+            int idx = i0 * opt->dims[1] + i1;
+            *current_run = idx + 1;
+
+            // apply parameter overrides
+            ControllerConfig<BACKTEST_FP> cfg = base;
+            ConfigField_Set(&cfg, ranges[0].key, opt->param_vals[0][i0]);
+            if (num_params > 1)
+                ConfigField_Set(&cfg, ranges[1].key, opt->param_vals[1][i1]);
+
+            // run backtest with this config
+            BacktestRunConfig run = *base_cfg;
+            run.config_override = cfg;
+            run.use_config_override = 1;
+            run.collect_features = 0;
+
+            BacktestResults results;
+            int dummy_progress = 0;
+            Backtest_Run(&results, &run, &dummy_progress, cancel_flag, NULL);
+
+            opt->stats[idx] = results.stats;
+            opt->metric[idx] = OptimizerMetric(&results.stats, metric_idx);
+
+            if (opt->metric[idx] > best_metric) {
+                best_metric = opt->metric[idx];
+                opt->best_idx = idx;
+            }
+        }
+    }
+}
+
 #endif // BACKTEST_ENGINE_HPP
