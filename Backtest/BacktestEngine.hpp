@@ -273,6 +273,8 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
     PortfolioController<BACKTEST_FP> ctrl;
     ctrl.rolling_long = NULL;
     PortfolioController_Init(&ctrl, cfg);
+    ctrl.sim_time = 0;          // will be set from first tick timestamp
+    ctrl.last_slow_time = 0;    // triggers time seed on first tick
 
     // init order pool (same as main.cpp:174)
     OrderPool<BACKTEST_FP> pool;
@@ -280,9 +282,11 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
 
     // init trade log — write to backtest output
     mkdir("logging", 0755);
+    // truncate trade log for each run (live engine appends, but backtest should start fresh)
+    remove("logging/BACKTEST_order_history.csv");
     TradeLog log;
     snprintf(results->trade_csv_path, sizeof(results->trade_csv_path),
-             "logging/backtest_order_history.csv");
+             "logging/BACKTEST_order_history.csv");
     TradeLog_Init(&log, "BACKTEST");
 
     // load all data files
@@ -313,6 +317,7 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
     if (total_ticks_all_files <= 0) total_ticks_all_files = 1; // avoid div by zero
 
     double price_d_last = 0.0; // track last price for snapshot
+    int64_t last_day_ms = 0;  // day boundary detection (ms timestamp of last midnight)
 
     // replay each file
     for (int f = 0; f < run_cfg->num_data_files; f++) {
@@ -327,6 +332,67 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
         for (int i = 0; i < count; i++) {
             if (*cancel_flag) goto done;
 
+            // day boundary: mirrors live engine 24h reconnect
+            // force-close all positions, reset session state, clear kill switch
+            // timestamp_ms is actually microseconds — convert to day boundary in μs
+            int64_t tick_day = (ticks[i].timestamp_ms / 86400000000LL) * 86400000000LL;
+            if (tick_day != last_day_ms && last_day_ms != 0) {
+                time_t day_ts = (time_t)(tick_day / 1000000);
+                struct tm *dt = gmtime(&day_ts);
+                fprintf(stderr, "[backtest] day boundary: %04d-%02d-%02d | positions=%d kill=%d bal=%.2f\n",
+                    dt->tm_year+1900, dt->tm_mon+1, dt->tm_mday,
+                    __builtin_popcount(ctrl.portfolio.active_bitmap),
+                    ctrl.kill_switch_active, FPN_ToDouble(ctrl.balance));
+                FPN<BACKTEST_FP> last_price_fpn = FPN_FromDouble<BACKTEST_FP>(price_d_last);
+
+                // force-close all active positions at last known price
+                uint16_t bmp = ctrl.portfolio.active_bitmap;
+                while (bmp) {
+                    int idx = __builtin_ctz(bmp);
+                    if (ctrl.exit_buf.count < 16) {
+                        ExitRecord<BACKTEST_FP> *rec = &ctrl.exit_buf.records[ctrl.exit_buf.count];
+                        rec->position_index = idx;
+                        rec->exit_price     = last_price_fpn;
+                        rec->tick           = ctrl.total_ticks;
+                        rec->entry_price    = ctrl.portfolio.positions[idx].entry_price;
+                        rec->quantity       = ctrl.portfolio.positions[idx].quantity;
+                        rec->entry_fee      = ctrl.portfolio.positions[idx].entry_fee;
+                        rec->pair_index     = ctrl.portfolio.positions[idx].pair_index;
+                        // use TP/SL reason based on P&L so wins/losses count correctly
+                        int profitable = FPN_GreaterThan(last_price_fpn, rec->entry_price);
+                        rec->reason = profitable ? 0 : 1; // 0=TP, 1=SL
+                        ctrl.exit_buf.count++;
+                        ctrl.portfolio.active_bitmap &= ~(1 << idx);
+                    }
+                    bmp &= bmp - 1;
+                }
+                // drain exits — P&L accounting for forced closes
+                if (ctrl.exit_buf.count > 0) {
+                    PortfolioController_DrainExits(&ctrl);
+                    TradeLogBuffer_Drain(&ctrl.trade_buf, &log);
+                    ExitBuffer_Clear(&ctrl.exit_buf);
+                }
+
+                // reset session state
+                FPN<BACKTEST_FP> equity = ctrl.balance; // no positions after force-close
+                ctrl.session_start_equity = equity;
+                ctrl.peak_equity = equity;
+                ctrl.daily_realized_pnl = FPN_Zero<BACKTEST_FP>();
+                ctrl.sl_cooldown_counter = 0;
+                ctrl.idle_cycles = 0;
+
+                // clear kill switch + all halts
+                ctrl.kill_switch_active = 0;
+                ctrl.kill_reason = 0;
+                ctrl.buying_halted = 0;
+                ctrl.halt_reason = 0;
+                ctrl.kill_recovery_counter = 0;
+
+                ctrl.session_high = price_d_last;
+                ctrl.session_low = price_d_last;
+            }
+            last_day_ms = tick_day;
+
             // build DataStream (same struct as live)
             DataStream<BACKTEST_FP> tick;
             tick.price = FPN_FromDouble<BACKTEST_FP>(ticks[i].price);
@@ -335,6 +401,15 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
             tick.volume_d = ticks[i].qty;
             tick.is_buyer_maker = ticks[i].is_buyer_maker;
             price_d_last = ticks[i].price;
+
+            // set simulated clock from historical timestamp
+            // timestamp_ms is actually microseconds in Binance aggTrades format
+            ctrl.sim_time = (time_t)(ticks[i].timestamp_ms / 1000000);
+            // seed time state on first tick of each file (avoids clock gaps between files)
+            if (i == 0 || total_processed == 0) {
+                ctrl.last_slow_time = (uint64_t)ctrl.sim_time;
+                ctrl.regime.regime_start_time = ctrl.sim_time;
+            }
 
             // exit gate on EVERY tick (same as main.cpp:381-392)
             if (ctrl.portfolio.active_bitmap)
@@ -402,6 +477,7 @@ done:
     // compute stats
     double start_bal = FPN_ToDouble(cfg.starting_balance);
     BacktestStats_Compute(&results->stats, &ctrl, start_bal, elapsed);
+    results->stats.ticks_processed = total_processed; // override: use actual file tick count
 
     // compute drawdown + sharpe from equity curve
     if (results->equity_count > 1)
@@ -417,11 +493,15 @@ done:
     if (run_cfg->collect_features && results->sample_count > 0 && run_cfg->num_data_files > 0) {
         // reload the last file (or all files concatenated for multi-file)
         int label_count = 0;
-        HistoricalTick *label_ticks = (HistoricalTick *)malloc(2000000 * sizeof(HistoricalTick));
+        int label_max = (total_processed < 20000000) ? (int)total_processed + 1 : 20000000;
+        HistoricalTick *label_ticks = (HistoricalTick *)malloc((size_t)label_max * sizeof(HistoricalTick));
         if (label_ticks) {
-            for (int f = 0; f < run_cfg->num_data_files; f++)
-                BacktestData_Load(label_ticks + label_count, &label_count, 2000000 - label_count,
+            for (int f = 0; f < run_cfg->num_data_files; f++) {
+                if (label_count >= label_max) break;
+                int before = label_count;
+                BacktestData_Load(label_ticks + label_count, &label_count, label_max - label_count,
                                   run_cfg->data_paths[f]);
+            }
 
             // get label function from table
             LabelFn label_fn = NULL;

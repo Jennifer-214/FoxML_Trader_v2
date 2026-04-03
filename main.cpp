@@ -551,6 +551,7 @@ int main(int argc, char *argv[]) {
                     saved_exit_count++;
                 }
             }
+            ctrl.sim_time = time(NULL); // live engine: wall clock
             PortfolioController_Tick(&ctrl, &pool, last_stream.price, last_stream.volume, &log, last_stream.is_buyer_maker);
 #ifdef LATENCY_PROFILING
             uint64_t t3 = __rdtscp(&tsc_aux);

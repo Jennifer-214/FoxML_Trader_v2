@@ -50,7 +50,9 @@ template <unsigned F> inline void OrderPool_init(OrderPool<F> *pool, uint32_t ca
 }
 
 template <unsigned F> inline CurrentOrder<F> *OrderPool_Allocate(OrderPool<F> *pool) {
-    uint32_t index = __builtin_ctzll(~pool->bitmap);
+    uint64_t free_mask = ~pool->bitmap;
+    if (!free_mask) return NULL; // pool full
+    uint32_t index = __builtin_ctzll(free_mask);
     pool->bitmap |= (1ULL << index);
     return &pool->slots[index];
 }

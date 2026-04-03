@@ -63,10 +63,26 @@ static inline void BacktestSnapshot_Copy(TUISnapshot *snap,
     snap->buy_v = FPN_ToDouble(ctrl->buy_conds.volume);
     snap->gate_dist     = price - buy_p;
     snap->gate_dist_pct = (avg > 1e-15) ? (snap->gate_dist / avg) * 100.0 : 0.0;
+    double spacing_val = FPN_ToDouble(RollingStats_EntrySpacing(&ctrl->rolling, ctrl->config.spacing_multiplier));
+    snap->spacing     = spacing_val;
+    snap->spacing_pct = (avg > 1e-15) ? (spacing_val / avg) * 100.0 : 0.0;
+    snap->stddev_mode = !FPN_IsZero(ctrl->config.offset_stddev_mult);
     snap->gate_direction = ctrl->buy_conds.gate_direction;
+    snap->live_offset = FPN_ToDouble(ctrl->mean_rev.live_offset_pct) * 100.0;
+    snap->live_vmult  = FPN_ToDouble(ctrl->mean_rev.live_vol_mult);
+    snap->live_sm     = FPN_ToDouble(ctrl->mean_rev.live_stddev_mult);
+    snap->long_gate_enabled = !FPN_IsZero(ctrl->config.min_long_slope);
+    double min_ls = FPN_ToDouble(ctrl->config.min_long_slope);
+    snap->long_min_ls = min_ls;
+    double long_avg_val = ctrl->rolling_long ? FPN_ToDouble(ctrl->rolling_long->price_avg) : 0.0;
+    double long_slope_val = ctrl->rolling_long ? FPN_ToDouble(ctrl->rolling_long->price_slope) : 0.0;
+    snap->long_rel_slope = (long_avg_val > 1e-15) ? long_slope_val / long_avg_val : 0.0;
+    snap->long_gate_ok = !snap->long_gate_enabled || (snap->long_rel_slope >= min_ls);
     snap->buying_halted = ctrl->buying_halted;
     snap->halt_reason = ctrl->halt_reason;
     snap->gate_reason = ctrl->gate_reason;
+    snap->fills_rejected = ctrl->fills_rejected;
+    snap->last_reject_reason = ctrl->last_reject_reason;
 
     // portfolio + positions
     double fee_r = FPN_ToDouble(ctrl->config.fee_rate);
@@ -116,12 +132,31 @@ static inline void BacktestSnapshot_Copy(TUISnapshot *snap,
     snap->current_regime = ctrl->regime.current_regime;
     snap->strategy_id    = ctrl->strategy_id;
     snap->regime_auto    = (ctrl->config.default_strategy < 0);
+    snap->regime_duration_min = 0.0; // no wall-clock in backtest
     snap->short_r2   = FPN_ToDouble(ctrl->rolling.price_r_squared);
     snap->ema_price  = FPN_ToDouble(ctrl->ema_price);
+    // ROR slope
+    snap->ror_slope  = 0.0;
+    if (ctrl->regime_ror.count >= MAX_WINDOW) {
+        LinearRegression3XResult<F> ror_r = RORRegressor_Compute(
+            const_cast<RORRegressor<F>*>(&ctrl->regime_ror));
+        snap->ror_slope = FPN_ToDouble(ror_r.model.slope);
+    }
+    // volume spike
+    snap->volume_spike_ratio = FPN_ToDouble(ctrl->volume_spike_ratio);
+    snap->spike_active = FPN_GreaterThanOrEqual(ctrl->volume_spike_ratio,
+                                                 ctrl->config.spike_threshold);
     snap->vwap       = FPN_ToDouble(ctrl->rolling.vwap);
     snap->vwap_dev   = FPN_ToDouble(ctrl->rolling.vwap_deviation);
+    snap->book_imbalance = FPN_ToDouble(ctrl->book_imbalance);
     snap->danger_score = FPN_ToDouble(ctrl->danger_score);
+    snap->current_session = ctrl->current_session;
+    snap->session_mult = FPN_ToDouble(ctrl->session_mult);
     snap->sl_cooldown = (int)ctrl->sl_cooldown_counter;
+    snap->min_warmup_samples = (int)ctrl->config.min_warmup_samples;
+    snap->kill_switch_active = ctrl->kill_switch_active;
+    snap->kill_reason = ctrl->kill_reason;
+    snap->kill_recovery = (int)ctrl->kill_recovery_counter;
 
     // EMA/SMA spread
     {
@@ -143,6 +178,28 @@ static inline void BacktestSnapshot_Copy(TUISnapshot *snap,
     // FoxML integration (Phase 6C) — single populate function
     MLSnapshot_Populate(&snap->ml, ctrl);
 
+    // no-trade band
+    {
+        double bavg = FPN_ToDouble(ctrl->rolling.price_avg);
+        double bprice = FPN_ToDouble(ctrl->buy_conds.price);
+        snap->signal_strength = (bavg > 1e-15) ? fabs(bprice - bavg) / bavg * 100.0 : 0.0;
+        double min_signal = FPN_ToDouble(ctrl->config.fee_rate) * FPN_ToDouble(ctrl->config.no_trade_band_mult) * 100.0;
+        snap->no_trade_band_blocked = ctrl->config.no_trade_band_enabled &&
+            (snap->signal_strength < min_signal) && !snap->state_warmup;
+    }
+
+    // per-strategy reward attribution
+    for (int i = 0; i < 5; i++) {
+        snap->strat_stats[i].pnl   = FPN_ToDouble(ctrl->strategy_stats[i].realized_pnl);
+        snap->strat_stats[i].wins  = ctrl->strategy_stats[i].wins;
+        snap->strat_stats[i].losses = ctrl->strategy_stats[i].losses;
+        snap->strat_stats[i].total = ctrl->strategy_stats[i].total_trades;
+    }
+
+    // session stats
+    snap->session_high = ctrl->session_high;
+    snap->session_low = ctrl->session_low;
+
     // config display
     snap->cfg_tp  = FPN_ToDouble(ctrl->config.take_profit_pct) * 100.0;
     snap->cfg_sl  = FPN_ToDouble(ctrl->config.stop_loss_pct) * 100.0;
@@ -150,6 +207,15 @@ static inline void BacktestSnapshot_Copy(TUISnapshot *snap,
     snap->cfg_slippage = FPN_ToDouble(ctrl->config.slippage_pct) * 100.0;
     snap->live_trading = 0; // always paper in backtest
     snap->trailing_enabled = !FPN_IsZero(ctrl->config.tp_hold_score);
+    snap->cfg_hold_score   = FPN_ToDouble(ctrl->config.tp_hold_score);
+    snap->cfg_trail_mult   = FPN_ToDouble(ctrl->config.tp_trail_mult);
+    snap->cfg_sl_trail_mult = FPN_ToDouble(ctrl->config.sl_trail_mult);
+    snap->cfg_offset_val = snap->stddev_mode
+        ? FPN_ToDouble(ctrl->config.offset_stddev_mult)
+        : FPN_ToDouble(ctrl->config.entry_offset_pct) * 100.0;
+    snap->risk_amt   = FPN_ToDouble(ctrl->config.risk_pct) * 100.0;
+    snap->max_dd     = FPN_ToDouble(ctrl->config.max_drawdown_pct) * 100.0;
+    snap->breaker_tripped = (snap->total_pnl < -(starting * FPN_ToDouble(ctrl->config.max_drawdown_pct)));
 
     // stats
     snap->total_buys = ctrl->total_buys;
@@ -162,12 +228,20 @@ static inline void BacktestSnapshot_Copy(TUISnapshot *snap,
     snap->profit_factor = (g_losses > 0.001) ? g_wins / g_losses : 0.0;
     snap->avg_win  = (ctrl->wins > 0)  ? g_wins / ctrl->wins : 0.0;
     snap->avg_loss = (ctrl->losses > 0) ? g_losses / ctrl->losses : 0.0;
+    {
+        double fee_per_exit = (total_exits > 0) ? FPN_ToDouble(ctrl->total_fees) / total_exits : 0.0;
+        snap->avg_loss_market = (ctrl->losses > 0) ? snap->avg_loss - fee_per_exit : 0.0;
+        if (snap->avg_loss_market < 0.0) snap->avg_loss_market = 0.0;
+    }
     snap->avg_hold = (total_exits > 0)  ? (double)ctrl->total_hold_ticks / total_exits : 0.0;
     if (total_exits > 0) {
         double wr = (double)ctrl->wins / total_exits;
         double lr = (double)ctrl->losses / total_exits;
         snap->expectancy = (wr * snap->avg_win) - (lr * snap->avg_loss);
     }
+    snap->max_drawdown = FPN_ToDouble(ctrl->max_drawdown);
+    double pe = FPN_ToDouble(ctrl->peak_equity);
+    snap->max_drawdown_pct = (pe > 0.0) ? (snap->max_drawdown / pe) * 100.0 : 0.0;
     snap->fee_ratio = (g_wins > 0.001) ?
         (FPN_ToDouble(ctrl->total_fees) / g_wins) * 100.0 : 0.0;
 }

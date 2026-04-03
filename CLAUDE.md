@@ -15,6 +15,23 @@ cd build && ./engine                           # run engine (needs engine.cfg sy
 
 Build options: `-DLATENCY_PROFILING=ON`, `-DLATENCY_LITE=ON`, `-DLATENCY_BENCH=ON`, `-DBUSY_POLL=ON`, `-DUSE_NATIVE_128=ON`. See README.md for details.
 
+### Dependencies
+
+| Target | Dependencies |
+|--------|-------------|
+| ANSI TUI (`build/engine`) | None (zero-dependency) |
+| ImGui GUI (`build_gui/engine_gui`) | SDL2, OpenGL3 |
+| FoxML Suite (`build_suite/foxml_suite`) | SDL2, OpenGL3, XGBoost C library (for ML training) |
+
+**XGBoost C library** (required for `-DUSE_XGBOOST=ON`):
+```bash
+# build from source (not in most package managers)
+git clone --recurse-submodules https://github.com/dmlc/xgboost.git /tmp/xgboost
+cd /tmp/xgboost && mkdir build && cd build
+cmake .. -DBUILD_STATIC_LIB=OFF && make -j$(nproc)
+sudo make install && sudo ldconfig
+```
+
 ## Architecture
 
 ```
@@ -161,6 +178,48 @@ No manual sync needed — same repo, same headers. Both build targets must compi
 cmake --build build && cmake --build build_suite
 ```
 
+### FoxML Suite Code Key
+
+**Data flow: Backtest → GUI panels**
+```
+BacktestEngine.hpp (Backtest_Run)
+  → PortfolioController<64> ctrl    (engine state, on worker thread stack)
+  → BacktestResults results          (stats + ML features, static in RunControlState)
+  → BacktestSnapshot_Copy()          (copies ctrl → TUISnapshot for dashboard)
+  → TradeLog CSV                     (logging/BACKTEST_order_history.csv)
+
+GUI reads from:
+  TUISnapshot (suite_snap)  → Market, Account, Stats, Positions, Buy Gate panels
+  BacktestResults           → Results panel, Training panel (ML samples)
+  Trade CSV                 → Trade History panel (TradeHistoryPanel.hpp)
+```
+
+**Panel → source mapping:**
+| Panel | Source | File |
+|-------|--------|------|
+| Data | filesystem scan | BacktestPanels.hpp:DataPanelState |
+| Run Control | RunControlState | BacktestPanels.hpp:RunControlState |
+| Results | BacktestResults.stats | BacktestPanels.hpp:GUI_Panel_Results |
+| Trade History | logging/BACKTEST_order_history.csv | TradeHistoryPanel.hpp |
+| Training | BacktestResults.feature_matrix | BacktestPanels.hpp:GUI_Panel_Training |
+| Comparison | saved BacktestResults snapshots | BacktestPanels.hpp:ComparisonState |
+| Market/Account/Stats/Positions/Buy Gate | TUISnapshot (suite_snap) | DashboardPanels.hpp |
+| Chart | CandleAccumulator | ChartPanel.hpp |
+| Settings | ControllerConfig via backtest.cfg | SettingsPanel.hpp |
+
+**Snapshot sync rule:**
+When adding a field to TUISnapshot, update BOTH:
+1. `DataStream/EngineTUI.hpp` → `TUI_CopySnapshot()` (live engine)
+2. `Backtest/BacktestSnapshot.hpp` → `BacktestSnapshot_Copy()` (backtest suite)
+
+**Config:**
+- Live engine: `engine.cfg`
+- Backtest suite: `backtest.cfg` (copy of engine.cfg, loaded by Run Control)
+- `default_strategy`: -2 = full 4-strat auto (MR+MOM+DIP+EMA), -1 = legacy 2-strat, 0-4 = fixed
+
+**Trade log naming:**
+`TradeLog_Init(&log, "SYMBOL")` creates `logging/SYMBOL_order_history.csv` (case-sensitive)
+
 ### Centralized constants
 - `Version.hpp`: ENGINE_VERSION_STRING — included by all renderers
 - `Limits.hpp`: MAX_PORTFOLIO_POSITIONS, CANDLE_HISTORY_MAX — included by Portfolio, TUISnapshot, ChartPanel
@@ -179,12 +238,13 @@ cmake --build build_gui
 cd build_gui && ./engine_gui
 ```
 
-### Backtest Suite (SDL2 + OpenGL3)
+### Backtest Suite (SDL2 + OpenGL3 + XGBoost)
 ```bash
-cmake -B build_suite -DUSE_IMGUI_GUI=ON [-DUSE_XGBOOST=ON]
+cmake -B build_suite -DUSE_IMGUI_GUI=ON -DUSE_XGBOOST=ON
 cmake --build build_suite --target foxml_suite
 cd build_suite && ./foxml_suite
 ```
+**Note**: `-DUSE_XGBOOST=ON` requires the XGBoost C library installed (see Dependencies above). Without it, the suite runs but Train Model and Walk-Forward buttons are disabled.
 
 ### Tests
 ```bash

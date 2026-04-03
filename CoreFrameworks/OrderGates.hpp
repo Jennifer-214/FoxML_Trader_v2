@@ -122,7 +122,9 @@ template <unsigned F> inline void BuyGate(const BuySideGateConditions<F> *condit
     // conditional write: fills are rare (~1/1000 ticks), branch predictor handles this
     // better than unconditional 48-byte write every tick
     if (pass) {
-        uint32_t index = __builtin_ctzll(~pool->bitmap);
+        uint64_t free_mask = ~pool->bitmap;
+        if (!free_mask) return; // pool full — drop order
+        uint32_t index = __builtin_ctzll(free_mask);
         pool->bitmap |= (1ULL << index);
         pool->slots[index].price    = stream->price;
         pool->slots[index].quantity = stream->volume;

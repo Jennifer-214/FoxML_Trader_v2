@@ -194,7 +194,7 @@ int main(int argc, char *argv[]) {
 
     // trade CSV reader for chart markers
     TradeData trades;
-    TradeData_Init(&trades, "logging/backtest_order_history.csv");
+    TradeData_Init(&trades, "logging/BACKTEST_order_history.csv");
 
     // chart settings
     ChartSettings chart_settings;
@@ -225,7 +225,7 @@ int main(int argc, char *argv[]) {
 
     // trade history
     TradeHistory trade_history;
-    TradeHistory_Init(&trade_history, "logging/backtest_order_history.csv");
+    TradeHistory_Init(&trade_history, "logging/BACKTEST_order_history.csv");
 
     bool first_frame = true;
     bool running = true;
@@ -304,6 +304,7 @@ int main(int argc, char *argv[]) {
         GUI_PriceChart(&cs, &suite_snap, &trades, &chart_settings, &candle_acc, NULL);
         GUI_VolumeChart(&cs, &suite_snap, &chart_settings);
         GUI_EquityChart(&trades);
+        GUI_LivePnLChart(&suite_snap);
 
         // update window title with backtest status
         if (run_control.running) {

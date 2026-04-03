@@ -204,6 +204,9 @@ template <unsigned F> struct PortfolioController {
   FPN<F> session_mult;          // current session gate multiplier
   FPN<F> book_imbalance;        // bid/ask imbalance from depth stream [-1, +1] (updated externally)
 
+  time_t sim_time;              // simulated clock: live=time(NULL), backtest=tick timestamp
+                                // use this instead of time(NULL) for all time-dependent logic
+
   uint32_t idle_cycles;         // slow-path cycles since last fill (gate death spiral recovery)
   uint32_t fills_rejected;     // total fills rejected since startup
   int last_reject_reason;      // 0=none, 1=spacing, 2=balance, 3=exposure, 4=breaker, 5=full, 6=dup
@@ -350,7 +353,8 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
 
   ctrl->prev_bitmap = 0;
   ctrl->tick_count = 0;
-  ctrl->last_slow_time = (uint64_t)time(NULL);
+  ctrl->sim_time = time(NULL);  // default to wall clock, backtest overrides per-tick
+  ctrl->last_slow_time = (uint64_t)ctrl->sim_time;
   ctrl->total_ticks = 0;
 
   ctrl->state = CONTROLLER_WARMUP;
@@ -894,7 +898,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     // represents a different point in time (real price diversity, not 128 copies
     // of the same second). tests use poll_interval=1 so every tick IS a sample.
     // time floor: also push if 3+ seconds have passed (low-volume periods)
-    uint64_t warmup_now = (uint64_t)time(NULL);
+    uint64_t warmup_now = (uint64_t)ctrl->sim_time;
     int warmup_time_floor = (warmup_now - ctrl->last_slow_time >= ctrl->config.slow_path_max_secs);
     if ((ctrl->warmup_count % ctrl->config.poll_interval == 0) || warmup_time_floor) {
       ctrl->last_slow_time = warmup_now;
@@ -1201,11 +1205,10 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
           ctrl->portfolio.positions[slot_a].pair_index = (int8_t)slot_b;
           ctrl->portfolio.positions[slot_b].pair_index = (int8_t)slot_a;
           // metadata for both slots
-          time_t now = time(NULL);
           ctrl->entry_ticks[slot_a] = ctrl->total_ticks;
           ctrl->entry_ticks[slot_b] = ctrl->total_ticks;
-          ctrl->entry_time[slot_a] = now;
-          ctrl->entry_time[slot_b] = now;
+          ctrl->entry_time[slot_a] = ctrl->sim_time;
+          ctrl->entry_time[slot_b] = ctrl->sim_time;
           ctrl->entry_strategy[slot_a] = (uint8_t)ctrl->strategy_id;
           ctrl->entry_strategy[slot_b] = (uint8_t)ctrl->strategy_id;
           ctrl->entry_prediction[slot_a] = FPN_ToDouble(ctrl->ml_strategy.last_prediction);
@@ -1230,7 +1233,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
                                                   fill_price, tp_price, sl_price, entry_fee);
         if (slot >= 0) {
           ctrl->entry_ticks[slot] = ctrl->total_ticks;
-          ctrl->entry_time[slot] = time(NULL);
+          ctrl->entry_time[slot] = ctrl->sim_time;
           ctrl->entry_strategy[slot] = (uint8_t)ctrl->strategy_id;
           ctrl->entry_prediction[slot] = FPN_ToDouble(ctrl->ml_strategy.last_prediction);
           ctrl->portfolio.positions[slot].original_tp = tp_price;
@@ -1298,12 +1301,12 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   if (ctrl->tick_count < ctrl->config.poll_interval) {
     // time floor: check every 16 ticks to catch low-volume stalls (~0.3ns bitmask vs ~500ns syscall)
     if (ctrl->tick_count & 0xF) return;
-    uint64_t now = (uint64_t)time(NULL);
+    uint64_t now = (uint64_t)ctrl->sim_time;
     if (now - ctrl->last_slow_time < ctrl->config.slow_path_max_secs) return;
     // time floor hit — fall through to slow path
   }
   ctrl->tick_count = 0;
-  ctrl->last_slow_time = (uint64_t)time(NULL);
+  ctrl->last_slow_time = (uint64_t)ctrl->sim_time;
 
   // session awareness: classify UTC hour and set gate multiplier
   // reuses last_slow_time — no extra syscall
@@ -1473,9 +1476,9 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     int new_regime = ctrl->regime.current_regime;
     if (new_regime != old_regime) {
       // compute duration before updating start time
-      double dur_min = difftime(time(NULL), ctrl->regime.regime_start_time) / 60.0;
+      double dur_min = difftime(ctrl->sim_time, ctrl->regime.regime_start_time) / 60.0;
       ctrl->regime.regime_start_tick = ctrl->total_ticks;
-      ctrl->regime.regime_start_time = time(NULL);
+      ctrl->regime.regime_start_time = ctrl->sim_time;
       {
         char ts[16]; log_ts(ts, sizeof(ts));
         static const char *rn[] = {"RANGING", "TRENDING", "VOLATILE", "DOWNTREND", "MILD_TREND"};
