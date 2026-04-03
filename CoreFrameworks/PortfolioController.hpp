@@ -280,7 +280,9 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   Bandit_SetArmName(&ctrl->bandit, STRATEGY_MOMENTUM, "Momentum");
   Bandit_SetArmName(&ctrl->bandit, STRATEGY_SIMPLE_DIP, "SimpleDip");
   Bandit_SetArmName(&ctrl->bandit, STRATEGY_ML, "ML");
+#ifdef STRATEGY_EMA_CROSS
   Bandit_SetArmName(&ctrl->bandit, STRATEGY_EMA_CROSS, "EmaCross");
+#endif
   for (int i = 0; i < 5; i++) {
     ctrl->strategy_stats[i].realized_pnl = FPN_Zero<F>();
     ctrl->strategy_stats[i].wins = 0;
