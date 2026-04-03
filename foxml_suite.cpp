@@ -199,9 +199,29 @@ int main(int argc, char *argv[]) {
     // chart settings
     ChartSettings chart_settings;
 
-    // settings panel
+    // settings panel — suite uses its own config so experiments don't affect live trading
     static SettingsState settings = {};
-    strncpy(settings.cfg_path, "engine.cfg", 255);
+    {
+        const char *suite_cfg = "backtest.cfg";
+        FILE *check = fopen(suite_cfg, "r");
+        if (!check) {
+            // first run: copy from engine.cfg as starting point
+            FILE *src = fopen("engine.cfg", "r");
+            if (src) {
+                FILE *dst = fopen(suite_cfg, "w");
+                if (dst) {
+                    char buf[4096]; size_t n;
+                    while ((n = fread(buf, 1, sizeof(buf), src)) > 0) fwrite(buf, 1, n, dst);
+                    fclose(dst);
+                    fprintf(stderr, "[suite] created backtest.cfg from engine.cfg\n");
+                }
+                fclose(src);
+            }
+        } else {
+            fclose(check);
+        }
+        strncpy(settings.cfg_path, suite_cfg, 255);
+    }
 
     // trade history
     TradeHistory trade_history;

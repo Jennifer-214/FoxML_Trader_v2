@@ -109,7 +109,7 @@ struct RunControlState {
 
 static inline void RunControl_Init(RunControlState *state) {
     memset(state, 0, sizeof(*state));
-    strncpy(state->config_path, "engine.cfg", sizeof(state->config_path) - 1);
+    strncpy(state->config_path, "backtest.cfg", sizeof(state->config_path) - 1);
 }
 
 // worker thread function
@@ -751,6 +751,9 @@ struct TrainingPanelState {
     pthread_t wf_tid;
     WalkForwardResults wf_results;
     bool wf_has_results;      // true after first completed walk-forward run
+    // save run (bundles config + model for deployment)
+    char run_name[64];
+    char save_msg[128];
 };
 
 static inline void TrainingPanel_Init(TrainingPanelState *state) {
@@ -761,6 +764,7 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->label_type = LABEL_WIN_LOSS;
     state->label_tp_pct = 1.5f;
     state->label_sl_pct = 1.0f;
+    strncpy(state->run_name, "run_01", sizeof(state->run_name) - 1);
     state->label_forward_ticks = 1000;
     strncpy(state->model_path, "models/buy_signal.json", sizeof(state->model_path) - 1);
     // feature names from ModelInference.hpp constants
@@ -1002,8 +1006,63 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         ImGui::Separator();
         ImGui::TextColored(ImVec4(0.55f, 0.76f, 0.51f, 1.0f), "%s", state->status_msg);
         ImGui::Text("Train Accuracy: %.1f%% (in-sample)", state->train_accuracy);
-        ImGui::Text("Load in live engine: ml_model_path=%s", state->model_path);
-        ImGui::Text("                     ml_backend=1");
+
+        // save run: bundle config + model into models/{run_name}/
+        ImGui::Separator();
+        ImGui::InputText("Run Name", state->run_name, sizeof(state->run_name));
+        if (ImGui::Button("Save Run")) {
+            char run_dir[320];
+            snprintf(run_dir, sizeof(run_dir), "models/%s", state->run_name);
+            mkdir("models", 0755);
+            mkdir(run_dir, 0755);
+
+            // copy model
+            char dst_model[384];
+            snprintf(dst_model, sizeof(dst_model), "%s/model.xgb", run_dir);
+            FILE *msrc = fopen(state->model_path, "rb");
+            FILE *mdst = fopen(dst_model, "wb");
+            if (msrc && mdst) {
+                char buf[4096]; size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), msrc)) > 0) fwrite(buf, 1, n, mdst);
+            }
+            if (msrc) fclose(msrc);
+            if (mdst) fclose(mdst);
+
+            // copy config
+            char dst_cfg[384];
+            snprintf(dst_cfg, sizeof(dst_cfg), "%s/engine.cfg", run_dir);
+            FILE *csrc = fopen("backtest.cfg", "r");
+            FILE *cdst = fopen(dst_cfg, "w");
+            if (csrc && cdst) {
+                char buf[4096]; size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), csrc)) > 0) fwrite(buf, 1, n, cdst);
+            }
+            if (csrc) fclose(csrc);
+            if (cdst) fclose(cdst);
+
+            // write results summary
+            char dst_summary[384];
+            snprintf(dst_summary, sizeof(dst_summary), "%s/summary.txt", run_dir);
+            FILE *sf = fopen(dst_summary, "w");
+            if (sf) {
+                fprintf(sf, "run: %s\n", state->run_name);
+                fprintf(sf, "accuracy: %.1f%%\n", state->train_accuracy);
+                fprintf(sf, "model: %s\n", dst_model);
+                fprintf(sf, "config: %s\n", dst_cfg);
+                fprintf(sf, "label_type: %d\n", state->label_type);
+                fprintf(sf, "max_depth: %d\n", state->max_depth);
+                fprintf(sf, "learning_rate: %.3f\n", state->learning_rate);
+                fprintf(sf, "n_estimators: %d\n", state->n_estimators);
+                fclose(sf);
+            }
+
+            snprintf(state->save_msg, sizeof(state->save_msg),
+                     "Saved to %s/ (model + config + summary)", run_dir);
+        }
+        if (state->save_msg[0])
+            ImGui::TextColored(FoxmlColors::green, "%s", state->save_msg);
+        ImGui::SetItemTooltip("Bundles model + backtest.cfg + summary into models/{name}/\n"
+                              "Deploy: copy engine.cfg to live, set ml_model_path to model.xgb");
     }
 
     //==================================================================
