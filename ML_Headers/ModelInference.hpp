@@ -169,6 +169,22 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
 
     if (!path || path[0] == '\0') return 0; // no path = disabled
 
+    // compute simple file checksum for logging (FNV-1a, fast and dependency-free)
+    // full SHA256 available via Fingerprint.hpp but would create circular include
+    {
+        FILE *cf = fopen(path, "rb");
+        if (cf) {
+            uint64_t hash = 14695981039346656037ULL; // FNV offset basis
+            uint8_t buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), cf)) > 0)
+                for (size_t i = 0; i < n; i++)
+                    hash = (hash ^ buf[i]) * 1099511628211ULL;
+            fclose(cf);
+            fprintf(stderr, "[ML] model checksum: %016lx (%s)\n", (unsigned long)hash, path);
+        }
+    }
+
     // stash path for logging
     strncpy(m->model_path, path, sizeof(m->model_path) - 1);
     m->model_path[sizeof(m->model_path) - 1] = '\0';

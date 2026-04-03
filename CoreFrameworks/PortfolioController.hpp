@@ -186,6 +186,10 @@ template <unsigned F> struct PortfolioController {
   ModelHandle<F> peak_model;         // barrier gate: P(will_peak) model
   ModelHandle<F> valley_model;       // barrier gate: P(will_valley) model
   RewardTracker reward_tracker;      // per-trade reward attribution for bandit analysis
+  // prediction z-score normalizer (Phase 7F)
+  uint64_t pred_norm_count;
+  double pred_norm_mean;
+  double pred_norm_m2;               // Welford M2 for variance
   RegimeSignals<F> last_signals;     // cached for ML strategy BuySignal access
 
   RORRegressor<F> regime_ror;  // slope-of-slopes for trend acceleration detection
@@ -313,6 +317,9 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->last_cost_bps = 0.0;
   memset(&ctrl->last_costs, 0, sizeof(ctrl->last_costs));
   RewardTracker_Init(&ctrl->reward_tracker);
+  ctrl->pred_norm_count = 0;
+  ctrl->pred_norm_mean = 0.0;
+  ctrl->pred_norm_m2 = 0.0;
   ctrl->foxml_vol_scale = 1.0;
   ctrl->last_confidence = 0.0;
   for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; i++)
@@ -641,6 +648,23 @@ inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) 
                                             ctrl->rolling_long, (const void*)&ctrl->config,
                                             &ctrl->last_signals);
     ctrl->buy_conds.gate_direction = 0;
+    // prediction z-score normalization (Phase 7F)
+    if (ctrl->config.prediction_normalize && !FPN_IsZero(ctrl->ml_strategy.last_prediction)) {
+        double raw = FPN_ToDouble(ctrl->ml_strategy.last_prediction);
+        ctrl->pred_norm_count++;
+        double delta = raw - ctrl->pred_norm_mean;
+        ctrl->pred_norm_mean += delta / (double)ctrl->pred_norm_count;
+        ctrl->pred_norm_m2 += delta * (raw - ctrl->pred_norm_mean);
+        // normalize after 100 predictions (enough for stable variance estimate)
+        if (ctrl->pred_norm_count >= 100) {
+            double variance = ctrl->pred_norm_m2 / (double)ctrl->pred_norm_count;
+            double stddev = (variance > 1e-15) ? sqrt(variance) : 1.0;
+            double z = (raw - ctrl->pred_norm_mean) / stddev;
+            // sigmoid transform: map z-score to [0, 1] for threshold comparison
+            double normalized = 1.0 / (1.0 + exp(-z));
+            ctrl->ml_strategy.last_prediction = FPN_FromDouble<F>(normalized);
+        }
+    }
     break;
   }
 

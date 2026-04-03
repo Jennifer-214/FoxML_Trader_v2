@@ -167,6 +167,8 @@ template <unsigned F> struct ControllerConfig {
   int bandit_enabled;               // 0=disabled, 1=blend regime strategy with Exp3-IX bandit weights
   FPN<F> bandit_blend_ratio;        // bandit influence fraction at full ramp (default 0.30)
   int confidence_enabled;           // 0=disabled, 1=dynamic ml_buy_threshold from confidence scoring
+  // Prediction normalization — Phase 7F (default OFF)
+  int prediction_normalize;         // 0=disabled, 1=z-score normalize predictions (activates after 100)
   // Barrier gate — Phase 7E (default OFF)
   int barrier_gate_enabled;         // 0=disabled, 1=block entries before predicted price peaks
   char peak_model_path[256];        // path to P(will_peak) model
@@ -302,6 +304,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.bandit_enabled = 0;
   cfg.bandit_blend_ratio = FPN_FromDouble<F>(0.30);
   cfg.confidence_enabled = 0;
+  cfg.prediction_normalize = 0;
   cfg.barrier_gate_enabled = 0;
   cfg.peak_model_path[0] = '\0';
   cfg.valley_model_path[0] = '\0';
@@ -500,6 +503,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(bandit_enabled)
     CFG_PARSE_FPN(bandit_blend_ratio)
     CFG_PARSE_INT(confidence_enabled)
+    CFG_PARSE_INT(prediction_normalize)
     CFG_PARSE_INT(barrier_gate_enabled)
 
     // ML model paths (string fields — not atof)
