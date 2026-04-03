@@ -33,6 +33,7 @@ struct HistoricalTick {
 #define LABEL_BARRIER      1   // 1 = price hits +tp% before -sl% (first-passage)
 #define LABEL_FORWARD_PNL  2   // continuous: forward return over N ticks (regression target)
 #define LABEL_REGIME       3   // regime that was active (multi-class)
+#define LABEL_VOL_BARRIER  4   // vol-scaled barrier: k * rolling_vol (from FoxML barrier.py)
 
 //======================================================================================================
 // [WIN/LOSS]
@@ -105,6 +106,79 @@ static inline float Label_Regime(const HistoricalTick * /* ticks */, int /* tick
 }
 
 //======================================================================================================
+// [VOL-SCALED BARRIER]
+// port of FoxML/private barrier.py compute_barrier_targets().
+// barriers scale with rolling volatility instead of fixed percentage.
+// adapts to market conditions: wider barriers in high-vol, tighter in low-vol.
+//
+// algorithm (from FoxML barrier.py):
+//   1. compute returns: r[i] = (price[i] - price[i-1]) / price[i-1]
+//   2. rolling vol: stddev(returns[i-vol_window : i])
+//   3. up barrier: price * (1 + barrier_k * vol)
+//   4. down barrier: price * (1 - barrier_k * vol)
+//   5. scan forward from t+1: which barrier hits first? (time contract preserved)
+//
+// FoxML constants: barrier_size = 0.5 (k*sigma), vol_window = 20, min_periods = 5
+// source: ~/FoxML/private/DATA_PROCESSING/targets/barrier.py
+//======================================================================================================
+static inline float Label_VolBarrier(const HistoricalTick *ticks, int tick_idx, int total_ticks,
+                                      double sample_price, double barrier_k, double /* sl_pct */,
+                                      int vol_window) {
+    // parameter defaults (from FoxML barrier.py)
+    if (barrier_k <= 0.0) barrier_k = 0.5;   // FoxML: barrier_size = 0.5
+    if (vol_window <= 0) vol_window = 20;     // FoxML: vol_window = 20
+
+    // need at least min_periods returns to compute vol (FoxML: min_periods = 5)
+    int min_periods = 5;
+    if (tick_idx < min_periods + 1) return 0.5f; // not enough history, neutral
+
+    // compute rolling volatility (stddev of returns over last vol_window ticks)
+    // uses a ring of returns ending at tick_idx
+    int start = tick_idx - vol_window;
+    if (start < 1) start = 1; // need at least 1 prior tick for returns
+    int n_returns = tick_idx - start;
+    if (n_returns < min_periods) return 0.5f; // not enough data for reliable vol
+
+    // single-pass mean + variance (Welford-style for numerical stability)
+    double sum = 0.0, sum_sq = 0.0;
+    for (int j = start; j < tick_idx; j++) {
+        if (ticks[j - 1].price <= 0.0) continue;
+        double r = (ticks[j].price - ticks[j - 1].price) / ticks[j - 1].price;
+        sum += r;
+        sum_sq += r * r;
+    }
+
+    double mean = sum / n_returns;
+    double variance = (sum_sq / n_returns) - (mean * mean);
+    if (variance <= 0.0) return 0.5f; // zero vol = no signal
+
+    double vol = 0.0;
+    // manual sqrt to avoid pulling in math.h just for this
+    // Newton's method: 4 iterations is plenty for double precision
+    {
+        double x = variance;
+        double guess = x * 0.5;
+        if (guess <= 0.0) guess = 1e-10;
+        for (int iter = 0; iter < 8; iter++)
+            guess = 0.5 * (guess + x / guess);
+        vol = guess;
+    }
+
+    if (vol <= 1e-15) return 0.5f; // degenerate
+
+    // vol-scaled barriers (from FoxML: barrier = k * rolling_vol)
+    double up_barrier   = sample_price * (1.0 + barrier_k * vol);
+    double down_barrier = sample_price * (1.0 - barrier_k * vol);
+
+    // first-passage scan from t+1 (time contract: label never includes current tick)
+    for (int j = tick_idx + 1; j < total_ticks; j++) {
+        if (ticks[j].price >= up_barrier)   return 1.0f;  // hit up barrier first
+        if (ticks[j].price <= down_barrier) return 0.0f;   // hit down barrier first
+    }
+    return 0.5f; // neither hit = neutral
+}
+
+//======================================================================================================
 // [LABEL TABLE]
 // table-driven: add new label = add 1 entry here + 1 function above
 //======================================================================================================
@@ -120,10 +194,11 @@ struct LabelDef {
 };
 
 static const LabelDef label_table[] = {
-    { LABEL_WIN_LOSS,    "win_loss",    "Binary: 1=profitable entry, 0=loss",       Label_WinLoss    },
-    { LABEL_BARRIER,     "barrier",     "First-passage: +tp% before -sl%",          Label_Barrier    },
-    { LABEL_FORWARD_PNL, "forward_pnl", "Continuous: % return over N ticks",        Label_ForwardPnl },
-    { LABEL_REGIME,      "regime",      "Multi-class: regime at sample point",      Label_Regime     },
+    { LABEL_WIN_LOSS,    "win_loss",      "Binary: 1=profitable entry, 0=loss",       Label_WinLoss    },
+    { LABEL_BARRIER,     "barrier",       "First-passage: +tp% before -sl%",          Label_Barrier    },
+    { LABEL_FORWARD_PNL, "forward_pnl",   "Continuous: % return over N ticks",        Label_ForwardPnl },
+    { LABEL_REGIME,      "regime",        "Multi-class: regime at sample point",      Label_Regime     },
+    { LABEL_VOL_BARRIER, "vol_barrier",   "Vol-scaled: k*sigma barrier (FoxML)",      Label_VolBarrier },
 };
 
 static const int LABEL_COUNT = sizeof(label_table) / sizeof(label_table[0]);
