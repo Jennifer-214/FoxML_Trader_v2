@@ -21,6 +21,8 @@
 #include "../GUI/CandleAccumulator.hpp"
 #include "LabelFunctions.hpp"
 #include "BacktestSnapshot.hpp"
+#include "ValidationSplit.hpp"
+#include "OverfitDetection.hpp"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -452,6 +454,281 @@ done:
     fprintf(stderr, "[backtest] completed: %lu ticks in %.1fms, %u trades, P&L $%.2f\n",
             results->stats.ticks_processed, elapsed,
             results->stats.total_trades, results->stats.total_pnl);
+}
+
+//======================================================================================================
+// [WALK-FORWARD VALIDATION]
+//======================================================================================================
+// uses purged temporal CV from ValidationSplit.hpp to train + evaluate per fold.
+// this is the REAL performance metric — in-sample accuracy is meaningless for financial ML.
+//
+// flow:
+//   1. caller runs Backtest_Run with collect_features=1 → features + labels in BacktestResults
+//   2. Backtest_RunWalkForward operates on that feature matrix
+//   3. per fold: train XGBoost on train slice → predict test slice → compute accuracy
+//   4. OverfitDetection_Check per fold
+//   5. report mean ± std validation accuracy across folds
+//
+// requires USE_XGBOOST to be defined (suite build has -DUSE_XGBOOST=ON).
+// without XGBoost, returns immediately with num_folds=0.
+//
+// source: FoxML intelligent_trainer.py walk-forward loop pattern
+//======================================================================================================
+
+#define WALKFORWARD_MAX_FOLDS VALIDATION_MAX_FOLDS
+
+struct WalkForwardFoldResult {
+    float train_accuracy;
+    float val_accuracy;
+    int train_samples;
+    int test_samples;
+    OverfitReport overfit;
+    float feature_importances[MODEL_MAX_FEATURES]; // from XGBoost (stability tracking hook)
+    int valid;
+};
+
+struct WalkForwardResults {
+    WalkForwardFoldResult folds[WALKFORWARD_MAX_FOLDS];
+    PurgedSplit splits[WALKFORWARD_MAX_FOLDS];
+    int num_folds;          // total folds requested
+    int valid_folds;        // folds that had enough data
+    float mean_val_accuracy;
+    float std_val_accuracy;
+    float mean_train_accuracy;
+    int overfit_count;      // folds flagged as overfit
+    double elapsed_ms;
+    char fingerprint[65];   // SHA256 of config + data (empty if not computed)
+};
+
+// compute accuracy: fraction of predictions matching labels (for classification)
+// threshold: prediction >= thresh → class 1, else class 0
+static inline float WalkForward_ComputeAccuracy(const float *predictions, const float *labels,
+                                                  int count, float threshold) {
+    if (count <= 0) return 0.0f;
+    int correct = 0;
+    for (int i = 0; i < count; i++) {
+        int pred_class = (predictions[i] >= threshold) ? 1 : 0;
+        int true_class = (labels[i] >= 0.5f) ? 1 : 0;
+        if (pred_class == true_class) correct++;
+    }
+    return (float)correct / count;
+}
+
+static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
+                                            const BacktestResults *data,
+                                            int n_splits, int horizon_ticks,
+                                            int buffer_ticks, int min_train_samples,
+                                            volatile int *progress_pct,
+                                            volatile int *cancel_flag) {
+    memset(wf, 0, sizeof(*wf));
+    *progress_pct = 0;
+
+#ifndef USE_XGBOOST
+    fprintf(stderr, "[walkforward] XGBoost not compiled in — cannot train. "
+            "rebuild with -DUSE_XGBOOST=ON\n");
+    *progress_pct = 100;
+    return;
+#else
+    if (data->sample_count < 100) {
+        fprintf(stderr, "[walkforward] only %d samples — need at least 100 for walk-forward\n",
+                data->sample_count);
+        *progress_pct = 100;
+        return;
+    }
+
+    struct timeval t_start, t_end;
+    gettimeofday(&t_start, NULL);
+
+    // generate purged folds
+    if (n_splits < 2) n_splits = 5;
+    if (buffer_ticks <= 0) buffer_ticks = PURGE_BUFFER_DEFAULT;
+    if (min_train_samples < 50) min_train_samples = 50;
+    wf->num_folds = n_splits;
+
+    int valid = ValidationSplit_Generate(wf->splits, data->sample_count,
+                                          n_splits, horizon_ticks,
+                                          buffer_ticks, min_train_samples);
+    wf->valid_folds = valid;
+
+    if (valid == 0) {
+        fprintf(stderr, "[walkforward] no valid folds — aborting\n");
+        *progress_pct = 100;
+        return;
+    }
+
+    ValidationSplit_Print(wf->splits, n_splits);
+
+    // allocate prediction buffer (reused per fold)
+    float *predictions = (float *)malloc(data->sample_count * sizeof(float));
+    if (!predictions) {
+        fprintf(stderr, "[walkforward] failed to allocate prediction buffer\n");
+        *progress_pct = 100;
+        return;
+    }
+
+    float sum_val = 0.0f, sum_val_sq = 0.0f, sum_train = 0.0f;
+    int counted_folds = 0;
+
+    for (int f = 0; f < n_splits; f++) {
+        if (*cancel_flag) break;
+
+        PurgedSplit *sp = &wf->splits[f];
+        WalkForwardFoldResult *fr = &wf->folds[f];
+        memset(fr, 0, sizeof(*fr));
+
+        if (!sp->valid) {
+            fr->valid = 0;
+            continue;
+        }
+
+        fprintf(stderr, "[walkforward] fold %d/%d: training on %d samples, testing on %d...\n",
+                f + 1, n_splits, sp->train_count, sp->test_count);
+
+        // build XGBoost DMatrix for train set
+        const float *train_features = &data->feature_matrix[sp->train_start * MODEL_NUM_FEATURES];
+        const float *train_labels = &data->labels[sp->train_start];
+        const float *test_features = &data->feature_matrix[sp->test_start * MODEL_NUM_FEATURES];
+        const float *test_labels = &data->labels[sp->test_start];
+
+        DMatrixHandle dtrain = NULL, dtest = NULL;
+        BoosterHandle booster = NULL;
+
+        // create train DMatrix
+        int ret = XGDMatrixCreateFromMat(train_features, sp->train_count,
+                                          MODEL_NUM_FEATURES, -1.0f, &dtrain);
+        if (ret != 0) {
+            fprintf(stderr, "[walkforward] fold %d: failed to create train DMatrix: %s\n",
+                    f + 1, XGBGetLastError());
+            fr->valid = 0;
+            continue;
+        }
+        XGDMatrixSetFloatInfo(dtrain, "label", train_labels, sp->train_count);
+
+        // create test DMatrix
+        ret = XGDMatrixCreateFromMat(test_features, sp->test_count,
+                                      MODEL_NUM_FEATURES, -1.0f, &dtest);
+        if (ret != 0) {
+            fprintf(stderr, "[walkforward] fold %d: failed to create test DMatrix: %s\n",
+                    f + 1, XGBGetLastError());
+            XGDMatrixFree(dtrain);
+            fr->valid = 0;
+            continue;
+        }
+        XGDMatrixSetFloatInfo(dtest, "label", test_labels, sp->test_count);
+
+        // create and train booster
+        ret = XGBoosterCreate(&dtrain, 1, &booster);
+        if (ret != 0) {
+            XGDMatrixFree(dtrain);
+            XGDMatrixFree(dtest);
+            fr->valid = 0;
+            continue;
+        }
+
+        // training params — match the suite's existing training config
+        XGBoosterSetParam(booster, "objective", "binary:logistic");
+        XGBoosterSetParam(booster, "max_depth", "6");
+        XGBoosterSetParam(booster, "eta", "0.1");
+        XGBoosterSetParam(booster, "subsample", "0.8");
+        XGBoosterSetParam(booster, "colsample_bytree", "0.8");
+        XGBoosterSetParam(booster, "min_child_weight", "5");
+        XGBoosterSetParam(booster, "nthread", "1");
+        XGBoosterSetParam(booster, "verbosity", "0");
+        XGBoosterSetParam(booster, "seed", "42");
+
+        // train with early stopping eval on test set
+        DMatrixHandle evals[] = { dtrain, dtest };
+        const char *eval_names[] = { "train", "val" };
+        int n_rounds = 200;
+
+        for (int r = 0; r < n_rounds; r++) {
+            ret = XGBoosterUpdateOneIter(booster, r, dtrain);
+            if (ret != 0) break;
+        }
+
+        // predict on train set (for overfit detection)
+        {
+            bst_ulong out_len;
+            const float *out_result;
+            ret = XGBoosterPredict(booster, dtrain, 0, 0, 0, &out_len, &out_result);
+            if (ret == 0 && (int)out_len == sp->train_count) {
+                fr->train_accuracy = WalkForward_ComputeAccuracy(
+                    out_result, train_labels, sp->train_count, 0.5f);
+            }
+        }
+
+        // predict on test set (the metric that matters)
+        {
+            bst_ulong out_len;
+            const float *out_result;
+            ret = XGBoosterPredict(booster, dtest, 0, 0, 0, &out_len, &out_result);
+            if (ret == 0 && (int)out_len == sp->test_count) {
+                fr->val_accuracy = WalkForward_ComputeAccuracy(
+                    out_result, test_labels, sp->test_count, 0.5f);
+            }
+        }
+
+        // feature importances (stability tracking hook)
+        // XGBoost importance via dump → we use a simpler approach: score type
+        // for now, zero-fill — populated when we add importance extraction
+        memset(fr->feature_importances, 0, sizeof(fr->feature_importances));
+
+        fr->train_samples = sp->train_count;
+        fr->test_samples = sp->test_count;
+        fr->valid = 1;
+
+        // overfit detection per fold
+        fr->overfit = OverfitDetection_CheckDefaults(
+            fr->train_accuracy, -1.0f, fr->val_accuracy, MODEL_NUM_FEATURES);
+        OverfitDetection_Print(&fr->overfit, f);
+
+        // accumulate stats
+        sum_val += fr->val_accuracy;
+        sum_val_sq += fr->val_accuracy * fr->val_accuracy;
+        sum_train += fr->train_accuracy;
+        if (fr->overfit.is_overfit) wf->overfit_count++;
+        counted_folds++;
+
+        // cleanup
+        XGBoosterFree(booster);
+        XGDMatrixFree(dtrain);
+        XGDMatrixFree(dtest);
+
+        *progress_pct = (int)(100.0 * (f + 1) / n_splits);
+
+        fprintf(stderr, "[walkforward] fold %d/%d: train_acc=%.4f, val_acc=%.4f%s\n",
+                f + 1, n_splits, fr->train_accuracy, fr->val_accuracy,
+                fr->overfit.is_overfit ? " [OVERFIT]" : "");
+    }
+
+    free(predictions);
+
+    // compute aggregate stats
+    if (counted_folds > 0) {
+        wf->mean_val_accuracy = sum_val / counted_folds;
+        wf->mean_train_accuracy = sum_train / counted_folds;
+        float var = (sum_val_sq / counted_folds) - (wf->mean_val_accuracy * wf->mean_val_accuracy);
+        wf->std_val_accuracy = (var > 0.0f) ? (float)sqrt((double)var) : 0.0f;
+    }
+
+    gettimeofday(&t_end, NULL);
+    wf->elapsed_ms = (t_end.tv_sec - t_start.tv_sec) * 1000.0
+                   + (t_end.tv_usec - t_start.tv_usec) / 1000.0;
+
+    *progress_pct = 100;
+
+    fprintf(stderr, "\n[walkforward] === RESULTS ===\n");
+    fprintf(stderr, "  valid folds: %d/%d\n", counted_folds, n_splits);
+    fprintf(stderr, "  mean val accuracy:   %.4f +/- %.4f\n",
+            wf->mean_val_accuracy, wf->std_val_accuracy);
+    fprintf(stderr, "  mean train accuracy: %.4f\n", wf->mean_train_accuracy);
+    fprintf(stderr, "  train/val gap:       %.4f\n",
+            wf->mean_train_accuracy - wf->mean_val_accuracy);
+    fprintf(stderr, "  overfit folds:       %d/%d\n", wf->overfit_count, counted_folds);
+    fprintf(stderr, "  elapsed:             %.1f ms\n", wf->elapsed_ms);
+    fprintf(stderr, "==============================\n\n");
+
+#endif // USE_XGBOOST
 }
 
 //======================================================================================================
