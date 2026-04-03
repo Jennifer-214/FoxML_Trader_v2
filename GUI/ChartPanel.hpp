@@ -22,6 +22,7 @@ struct ChartSettings {
     bool show_session_div = true;
     bool show_spread = true;
     bool show_crosshair = true;
+    bool show_ml_overlay = false;  // prediction probability + confidence band
 };
 
 //==========================================================================
@@ -167,6 +168,9 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
     ImGui::SameLine(); ImGui::Checkbox("Sessions", &settings->show_session_div);
     ImGui::SameLine(); ImGui::Checkbox("H/L", &settings->show_session_hl);
     ImGui::SameLine(); ImGui::Checkbox("Tag", &settings->show_price_tag);
+    if (snap->ml.ml_model_loaded) {
+        ImGui::SameLine(); ImGui::Checkbox("ML", &settings->show_ml_overlay);
+    }
 
     ImPlot::PushStyleColor(ImPlotCol_PlotBg, FoxmlColors::bg_dark);
     // subtle Y grid lines for price readability
@@ -178,6 +182,11 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                           ImPlotAxisFlags_NoLabel | ImPlotAxisFlags_NoGridLines,
                           ImPlotAxisFlags_Opposite);
         ImPlot::SetupAxisLimits(ImAxis_X1, cs->x_lo, cs->x_hi, ImPlotCond_Always);
+        // secondary Y-axis for ML prediction overlay (0-1 range)
+        if (settings->show_ml_overlay && snap->ml.pred_count > 1) {
+            ImPlot::SetupAxis(ImAxis_Y2, NULL, ImPlotAxisFlags_NoGridLines | ImPlotAxisFlags_NoLabel);
+            ImPlot::SetupAxisLimits(ImAxis_Y2, 0.0, 1.0, ImPlotCond_Always);
+        }
 
         // time tick labels — static buffers so pointers survive until EndPlot
         static double tick_pos[16];
@@ -774,6 +783,32 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 ImGui::TextColored(FoxmlColors::comment, "Vol: %.4f", cs->volumes[idx]);
                 ImGui::EndTooltip();
             }
+        }
+
+        // ML prediction overlay (secondary Y-axis, 0-1 range)
+        if (settings->show_ml_overlay && snap->ml.pred_count > 1) {
+            ImPlot::SetAxes(ImAxis_X1, ImAxis_Y2);
+            int n = snap->ml.pred_count;
+            int len = MLSnapshot::PRED_HISTORY_LEN;
+            int plot_n = (n < vc) ? n : vc;
+            double xs[240], pred_ys[240], conf_ys[240];
+            for (int i = 0; i < plot_n; i++) {
+                int ring_idx = ((snap->ml.pred_head - plot_n + i) % len + len) % len;
+                xs[i] = vc - plot_n + i;
+                pred_ys[i] = snap->ml.pred_history[ring_idx];
+                conf_ys[i] = snap->ml.conf_history[ring_idx];
+            }
+            ImVec4 pred_col = (snap->ml.ml_last_prediction >= 0.5)
+                ? ImVec4(0.42f, 0.60f, 0.48f, 0.8f)
+                : ImVec4(0.69f, 0.33f, 0.33f, 0.8f);
+            ImPlotSpec ps; ps.LineColor = pred_col; ps.LineWeight = 1.5f;
+            ImPlot::PlotLine("Prediction", xs, pred_ys, plot_n, ps);
+            ImPlotSpec cs2; cs2.FillColor = ImVec4(0.5f, 0.5f, 0.5f, 0.15f);
+            ImPlot::PlotShaded("Confidence", xs, conf_ys, plot_n, 0.0, cs2);
+            double thresh_x[2] = {0, (double)(vc - 1)};
+            double thresh_y[2] = {0.5, 0.5};
+            ImPlotSpec ts; ts.LineColor = ImVec4(1, 1, 1, 0.2f); ts.LineWeight = 1.0f;
+            ImPlot::PlotLine("##thresh", thresh_x, thresh_y, 2, ts);
         }
 
         ImPlot::EndPlot();

@@ -661,6 +661,12 @@ struct MLSnapshot {
     double ml_last_prediction; // most recent model output
     char regime_model_path[256];
     int regime_model_loaded;   // 1 if regime model active
+    // prediction history ring buffer (Phase 7D)
+    static constexpr int PRED_HISTORY_LEN = 240;
+    double pred_history[PRED_HISTORY_LEN];
+    double conf_history[PRED_HISTORY_LEN];
+    int pred_head;
+    int pred_count;
 };
 
 // populates MLSnapshot from controller state.
@@ -725,6 +731,15 @@ static inline void MLSnapshot_Populate(MLSnapshot *snap, const PortfolioControll
     snap->regime_model_loaded = Model_IsLoaded(&ctrl->regime_model);
     strncpy(snap->regime_model_path, ctrl->regime_model.model_path, 255);
     snap->regime_model_path[255] = '\0';
+
+    // push prediction into ring buffer (accumulates across calls)
+    if (snap->ml_model_loaded) {
+        snap->pred_history[snap->pred_head] = snap->ml_last_prediction;
+        snap->conf_history[snap->pred_head] = snap->confidence;
+        snap->pred_head = (snap->pred_head + 1) % MLSnapshot::PRED_HISTORY_LEN;
+        if (snap->pred_count < MLSnapshot::PRED_HISTORY_LEN)
+            snap->pred_count++;
+    }
 }
 
 struct TUISnapshot {
