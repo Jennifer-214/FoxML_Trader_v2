@@ -28,6 +28,10 @@
 #include "../Strategies/SimpleDip.hpp"
 #include "../Strategies/MLStrategy.hpp"
 #include "../Strategies/RegimeDetector.hpp"
+#include "../ML_Headers/CostModel.hpp"
+#include "../ML_Headers/VolScaler.hpp"
+#include "../ML_Headers/ConfidenceScore.hpp"
+#include "../ML_Headers/BanditLearning.hpp"
 #if __has_include("../Strategies/private/EmaCross.hpp")
 #include "../Strategies/private/EmaCross.hpp"
 #endif
@@ -60,7 +64,8 @@ static inline void log_ts(char *buf, size_t len) {
 #define GATE_REASON_WIND_DOWN  10  // session wind-down
 #define GATE_REASON_PAUSED     11  // manual pause
 #define GATE_REASON_DOWNTREND  12  // downtrend regime
-#define NUM_GATE_REASONS       13
+#define GATE_REASON_COST       13  // cost gate (trade cost exceeds breakeven alpha)
+#define NUM_GATE_REASONS       14
 //======================================================================================================
 template <unsigned F> struct PortfolioController {
   //================================================================================================
@@ -116,6 +121,12 @@ template <unsigned F> struct PortfolioController {
   FPN<F> daily_realized_pnl;        // accumulated realized P&L this session (resets on 24h boundary)
   uint32_t kill_recovery_counter;   // slow-path cycles remaining after kill reset before trading resumes
   double last_vol_scale;            // most recent vol scale factor applied (for TUI display)
+  double last_cost_bps;             // most recent trade cost estimate in bps (for TUI display)
+  double foxml_vol_scale;           // FoxML VolScaler output: inverse-vol position scale [0.1, 1.0]
+  double last_confidence;           // most recent prediction confidence from ConfidenceScorer [0, 1]
+  double entry_prediction[MAX_PORTFOLIO_POSITIONS]; // ML prediction at entry time (for confidence tracking)
+  ConfidenceScorer confidence;      // FoxML confidence scorer (IC × freshness × stability)
+  BanditState bandit;               // FoxML Exp3-IX bandit for strategy selection (survives hot-reload)
 
   // per-strategy reward attribution
   struct StrategyStats {
@@ -256,6 +267,20 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->halt_reason = 0;
   ctrl->gate_reason = GATE_REASON_WARMUP;
   ctrl->last_vol_scale = 1.0;
+  ctrl->last_cost_bps = 0.0;
+  ctrl->foxml_vol_scale = 1.0;
+  ctrl->last_confidence = 0.0;
+  for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; i++)
+    ctrl->entry_prediction[i] = 0.0;
+  ConfidenceScorer_Init(&ctrl->confidence, CONFIDENCE_IC_WINDOW_DEFAULT,
+                          CONFIDENCE_FRESHNESS_TAU_DEFAULT);
+  Bandit_Init(&ctrl->bandit, NUM_STRATEGIES, BANDIT_GAMMA_DEFAULT, BANDIT_ETA_MAX_DEFAULT,
+              FPN_ToDouble(config.bandit_blend_ratio), BANDIT_MIN_SAMPLES_DEFAULT, BANDIT_RAMP_UP_DEFAULT);
+  Bandit_SetArmName(&ctrl->bandit, STRATEGY_MEAN_REVERSION, "MR");
+  Bandit_SetArmName(&ctrl->bandit, STRATEGY_MOMENTUM, "Momentum");
+  Bandit_SetArmName(&ctrl->bandit, STRATEGY_SIMPLE_DIP, "SimpleDip");
+  Bandit_SetArmName(&ctrl->bandit, STRATEGY_ML, "ML");
+  Bandit_SetArmName(&ctrl->bandit, STRATEGY_EMA_CROSS, "EmaCross");
   for (int i = 0; i < 5; i++) {
     ctrl->strategy_stats[i].realized_pnl = FPN_Zero<F>();
     ctrl->strategy_stats[i].wins = 0;
@@ -289,6 +314,17 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
     return;
   }
   *ctrl->rolling_long = RollingStats_Init<F, 512>();
+
+  // warmup validation: ensure warmup_ticks >= max feature lookback
+  // features read N ticks back — if warmup is shorter, features see uninitialized data
+  {
+    int max_lookback = FeatureLookback_Max();
+    if (max_lookback > 0 && (int)ctrl->config.warmup_ticks < max_lookback) {
+      fprintf(stderr, "[WARN] warmup_ticks=%u < max feature lookback=%d — "
+              "features may use uninitialized data. recommend warmup_ticks >= %d\n",
+              ctrl->config.warmup_ticks, max_lookback, max_lookback);
+    }
+  }
 }
 //======================================================================================================
 // [CENTRALIZED STATE MUTATIONS]
@@ -374,6 +410,21 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
         ctrl->strategy_stats[strat].total_trades++;
         ctrl->strategy_stats[strat].realized_pnl = FPN_AddSat(
             ctrl->strategy_stats[strat].realized_pnl, pos_pnl);
+    }
+
+    // feed confidence scorer: (entry_prediction, actual_outcome)
+    // actual = 1.0 if profitable, 0.0 if not (matches binary classification target)
+    if (ctrl->config.confidence_enabled && strat == STRATEGY_ML) {
+        double pred = ctrl->entry_prediction[slot];
+        double actual = (!pos_pnl.sign & !FPN_IsZero(pos_pnl)) ? 1.0 : 0.0;
+        ConfidenceScorer_Update(&ctrl->confidence, pred, actual);
+    }
+
+    // feed bandit learner: update arm = entry strategy, reward = P&L in bps
+    if (ctrl->config.bandit_enabled && strat >= 0 && strat < NUM_STRATEGIES) {
+        double entry_d = FPN_ToDouble(rec->entry_price);
+        double reward_bps = (entry_d > 0.0) ? (FPN_ToDouble(pos_pnl) / entry_d) * 10000.0 : 0.0;
+        Bandit_Update(&ctrl->bandit, strat, reward_bps);
     }
 
     // win/loss counters: TP exit with positive P&L = win, everything else = loss
@@ -913,6 +964,12 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       ctrl->last_vol_scale = FPN_ToDouble(vol_ratio);
     }
 
+    // FOXML VOL SCALER: apply slow-path precomputed inverse-vol scale
+    // separate from vol_sizing — uses VolScaler's alpha/vol formula instead of stddev ratio
+    if (ctrl->config.foxml_vol_scaling_enabled) {
+      sized_qty = FPN_Mul(sized_qty, FPN_FromDouble<F>(ctrl->foxml_vol_scale));
+    }
+
     // balance check: can we afford this position + entry fee? (branchless)
     FPN<F> cost = FPN_Mul(fill_price, sized_qty);
     FPN<F> entry_fee = FPN_Mul(cost, ctrl->config.fee_rate);
@@ -1069,6 +1126,8 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
           ctrl->entry_time[slot_b] = now;
           ctrl->entry_strategy[slot_a] = (uint8_t)ctrl->strategy_id;
           ctrl->entry_strategy[slot_b] = (uint8_t)ctrl->strategy_id;
+          ctrl->entry_prediction[slot_a] = FPN_ToDouble(ctrl->ml_strategy.last_prediction);
+          ctrl->entry_prediction[slot_b] = FPN_ToDouble(ctrl->ml_strategy.last_prediction);
           ctrl->portfolio.positions[slot_a].original_tp = tp_price;
           ctrl->portfolio.positions[slot_a].original_sl = sl_price;
           ctrl->portfolio.positions[slot_b].original_tp = tp2_price;
@@ -1091,6 +1150,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
           ctrl->entry_ticks[slot] = ctrl->total_ticks;
           ctrl->entry_time[slot] = time(NULL);
           ctrl->entry_strategy[slot] = (uint8_t)ctrl->strategy_id;
+          ctrl->entry_prediction[slot] = FPN_ToDouble(ctrl->ml_strategy.last_prediction);
           ctrl->portfolio.positions[slot].original_tp = tp_price;
           ctrl->portfolio.positions[slot].original_sl = sl_price;
           fill_ok = 1;
@@ -1354,7 +1414,27 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       } else if (ctrl->config.default_strategy <= -2) {
         // full 4-strategy auto: MR + EMA Cross + Momentum + SimpleDip
         int old_strategy = ctrl->strategy_id;
-        ctrl->strategy_id = Regime_ToStrategy(new_regime);
+        int regime_pick = Regime_ToStrategy(new_regime);
+
+        // bandit blending: blend regime's one-hot pick with learned weights
+        // argmax of blended weights = final strategy choice
+        if (ctrl->config.bandit_enabled && Bandit_EffectiveBlend(&ctrl->bandit) > 0.0) {
+          double static_w[BANDIT_MAX_ARMS] = {0};
+          if (regime_pick >= 0 && regime_pick < NUM_STRATEGIES)
+            static_w[regime_pick] = 1.0;
+          double blended[BANDIT_MAX_ARMS];
+          Bandit_BlendWeights(&ctrl->bandit, static_w, blended);
+          // argmax: pick strategy with highest blended weight
+          int best = regime_pick;
+          double best_w = -1.0;
+          for (int a = 0; a < ctrl->bandit.n_arms; a++) {
+            if (blended[a] > best_w) { best_w = blended[a]; best = a; }
+          }
+          ctrl->strategy_id = best;
+        } else {
+          ctrl->strategy_id = regime_pick;
+        }
+
         if (ctrl->strategy_id != old_strategy)
           Regime_AdjustPositions(&ctrl->portfolio, &ctrl->rolling,
                                   old_regime, new_regime, ctrl->entry_strategy, &ctrl->config);
@@ -1391,12 +1471,62 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     ctrl->buy_conds.volume = FPN_Mul(ctrl->buy_conds.volume, ctrl->session_mult);
   }
 
+  // CONFIDENCE GATE: raise ML threshold when prediction quality is low
+  // effective_threshold = base * (2 - confidence) — high confidence = same threshold,
+  // low confidence = up to 2x threshold (suppresses marginal signals)
+  if (ctrl->config.confidence_enabled && ctrl->strategy_id == STRATEGY_ML
+      && !FPN_IsZero(ctrl->buy_conds.price)) {
+    double conf = ConfidenceScorer_Compute(&ctrl->confidence, 0.0); // data_age=0 (live)
+    ctrl->last_confidence = conf;
+    double base_thr = FPN_ToDouble(ctrl->config.ml_buy_threshold);
+    double effective_thr = base_thr * (2.0 - conf);
+    if (effective_thr > 1.0) effective_thr = 1.0;
+    double pred = FPN_ToDouble(ctrl->ml_strategy.last_prediction);
+    if (pred > 0.0 && pred < effective_thr) {
+      ctrl->buy_conds.price = FPN_Zero<F>();
+      ctrl->buy_conds.volume = FPN_Zero<F>();
+      ctrl->gate_reason = GATE_REASON_NO_SIGNAL;
+    }
+  }
+
   // book imbalance gate: require bid excess before buying
   // book_imbalance is updated externally from depth thread (zero if no depth data)
   if (!FPN_IsZero(ctrl->config.min_book_imbalance)) {
     int book_ok = FPN_GreaterThanOrEqual(ctrl->book_imbalance, ctrl->config.min_book_imbalance);
     Gate_Zero(&ctrl->buy_conds, book_ok);
     if (!book_ok) ctrl->gate_reason = GATE_REASON_BOOK;
+  }
+
+  // COST GATE: suppress entries when estimated trade cost exceeds TP target
+  // uses CostModel from FoxML — accounts for spread, volatility timing, and market impact
+  if (ctrl->config.cost_gate_enabled && !FPN_IsZero(ctrl->buy_conds.price)
+      && !FPN_IsZero(ctrl->rolling.price_avg)) {
+    double price_d = FPN_ToDouble(ctrl->rolling.price_avg);
+    double spread_bps = FPN_ToDouble(ctrl->config.fee_rate) * 10000.0 * 2.0; // round-trip fee as spread proxy
+    double vol = (price_d > 0.0) ? FPN_ToDouble(ctrl->rolling.price_stddev) / price_d : 0.0;
+    double order_sz = FPN_ToDouble(FPN_Mul(ctrl->balance, ctrl->config.risk_pct));
+    double adv = FPN_ToDouble(ctrl->rolling.volume_avg) * price_d; // ADV in quote currency
+    TradingCosts tc = CostModel_EstimateDefault(spread_bps, vol, 5.0, order_sz,
+                                                 (adv > 0.0) ? adv : 1.0);
+    ctrl->last_cost_bps = tc.total_cost;
+    double breakeven_bps = CostModel_Breakeven(tc.total_cost);
+    double tp_bps = FPN_ToDouble(ctrl->config.take_profit_pct) * 10000.0;
+    if (breakeven_bps > tp_bps) {
+      Gate_Zero(&ctrl->buy_conds, 0);
+      ctrl->gate_reason = GATE_REASON_COST;
+    }
+  }
+
+  // VOL SCALER: precompute inverse-vol position scale factor for fill-time use
+  // VolScaler_Size(alpha, vol, z_max, max_weight) — alpha/vol clipped to z_max, scaled to [0, max_weight]
+  // uses TP target as alpha proxy: high vol relative to TP = smaller position
+  if (ctrl->config.foxml_vol_scaling_enabled
+      && !FPN_IsZero(ctrl->rolling.price_avg) && !FPN_IsZero(ctrl->rolling.price_stddev)) {
+    double vol = FPN_ToDouble(ctrl->rolling.price_stddev) / FPN_ToDouble(ctrl->rolling.price_avg);
+    double alpha = FPN_ToDouble(ctrl->config.take_profit_pct); // TP target as expected return
+    double z_max = FPN_ToDouble(ctrl->config.foxml_vol_scaling_z_max);
+    double weight = VolScaler_Size(alpha, vol, z_max, 1.0);
+    ctrl->foxml_vol_scale = (weight > 0.1) ? weight : 0.1; // floor at 10% to avoid zero sizing
   }
 
   // CENTRALIZED HALT: single location for all halt conditions
@@ -1422,7 +1552,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       static const char *gr[] = {
         "ok", "warmup", "no_signal", "no_trade", "book",
         "danger", "kill", "recovery", "volatile", "cooldown",
-        "wind_down", "paused", "downtrend"
+        "wind_down", "paused", "downtrend", "cost"
       };
       int gi = (ctrl->gate_reason >= 0 && ctrl->gate_reason < NUM_GATE_REASONS) ? ctrl->gate_reason : 0;
       int pi = (prev_gate >= 0 && prev_gate < NUM_GATE_REASONS) ? prev_gate : 0;

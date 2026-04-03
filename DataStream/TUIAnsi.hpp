@@ -362,7 +362,7 @@ static inline int ANSI_Section_Header(AnsiBuf *ab, const TUISnapshot *s,
         static const char *gate_reasons[] = {
             "ok", "warmup", "no_signal", "no_trade", "book",
             "danger", "kill", "recovery", "volatile", "cooldown",
-            "wind_down", "paused", "downtrend"
+            "wind_down", "paused", "downtrend", "cost"
         };
         int ri = (s->gate_reason >= 0 && s->gate_reason < NUM_GATE_REASONS) ? s->gate_reason : 0;
         const char *color = (ri == GATE_REASON_KILL || ri == GATE_REASON_DANGER) ? A_RED : A_YELLOW;
@@ -589,6 +589,28 @@ static inline int ANSI_Section_Regime(AnsiBuf *ab, const TUISnapshot *s, int y, 
         y++;
     }
 
+    // FoxML integration status (Phase 6C) — compact single line
+    {
+        int any_active = s->cost_gate_enabled | s->foxml_vol_scaling_enabled |
+                         s->confidence_enabled | s->bandit_enabled;
+        if (any_active) {
+            ab_goto(ab, y, 3);
+            ab_printf(ab, A_DIM "foxml:" A_RESET);
+            if (s->cost_gate_enabled)
+                ab_printf(ab, A_SAND " cost:" A_FG "%.1fbps" A_RESET, s->cost_bps);
+            if (s->foxml_vol_scaling_enabled)
+                ab_printf(ab, A_SAND " vsz:" A_FG "%.0f%%" A_RESET, s->foxml_vol_scale * 100.0);
+            if (s->confidence_enabled)
+                ab_printf(ab, A_SAND " conf:" A_FG "%.2f" A_RESET, s->confidence);
+            if (s->bandit_enabled) {
+                ab_printf(ab, A_SAND " bandit:" A_FG "%.0f%%" A_RESET, s->bandit_blend * 100.0);
+                if (s->bandit_active) ab_printf(ab, A_GREEN " ON" A_RESET);
+                else ab_printf(ab, A_DIM " ramp" A_RESET);
+            }
+            y++;
+        }
+    }
+
     return y;
 }
 
@@ -625,7 +647,7 @@ static inline int ANSI_Section_BuyGate(AnsiBuf *ab, const TUISnapshot *s, int y,
         static const char *gate_short[] = {
             "ok", "warmup", "no_signal", "no_trade", "book",
             "danger", "kill", "recovery", "volatile", "cooldown",
-            "wind_down", "paused", "downtrend"
+            "wind_down", "paused", "downtrend", "cost"
         };
         int gi = (s->gate_reason >= 0 && s->gate_reason < NUM_GATE_REASONS) ? s->gate_reason : 0;
         ab_printf(ab, A_DIM "   " A_BOLD A_YELLOW "GATE OFF" A_DIM " (%s)" A_RESET, gate_short[gi]);

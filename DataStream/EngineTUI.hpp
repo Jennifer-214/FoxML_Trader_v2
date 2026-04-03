@@ -735,6 +735,17 @@ struct TUISnapshot {
     // no-trade band
     int no_trade_band_blocked; // 1 if last signal was suppressed by no-trade band
     double signal_strength;    // |price - avg| / avg as percentage
+    // FoxML integration (Phase 6C)
+    double cost_bps;           // estimated trade cost in bps (CostModel)
+    double foxml_vol_scale;    // inverse-vol position scale factor (VolScaler)
+    double confidence;         // prediction confidence [0, 1] (ConfidenceScorer)
+    double bandit_blend;       // bandit effective blend ratio [0, blend_ratio]
+    double bandit_weights[5];  // per-strategy bandit weights (normalized)
+    int bandit_active;         // 1 if bandit has enough samples to influence
+    int cost_gate_enabled;     // config mirror for display
+    int foxml_vol_scaling_enabled;
+    int confidence_enabled;
+    int bandit_enabled;
     // per-strategy stats
     struct StrategyStatsSnap {
       double pnl;
@@ -930,6 +941,25 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
       double min_signal = FPN_ToDouble(ctrl->config.fee_rate) * FPN_ToDouble(ctrl->config.no_trade_band_mult) * 100.0;
       snap->no_trade_band_blocked = ctrl->config.no_trade_band_enabled &&
           (snap->signal_strength < min_signal) && !snap->state_warmup;
+    }
+    // FoxML integration (Phase 6C)
+    snap->cost_bps = ctrl->last_cost_bps;
+    snap->foxml_vol_scale = ctrl->foxml_vol_scale;
+    snap->confidence = ctrl->last_confidence;
+    snap->cost_gate_enabled = ctrl->config.cost_gate_enabled;
+    snap->foxml_vol_scaling_enabled = ctrl->config.foxml_vol_scaling_enabled;
+    snap->confidence_enabled = ctrl->config.confidence_enabled;
+    snap->bandit_enabled = ctrl->config.bandit_enabled;
+    if (ctrl->config.bandit_enabled) {
+      snap->bandit_blend = Bandit_EffectiveBlend(&ctrl->bandit);
+      snap->bandit_active = (ctrl->bandit.total_steps >= ctrl->bandit.min_samples) ? 1 : 0;
+      double bw[BANDIT_MAX_ARMS];
+      Bandit_GetWeights(&ctrl->bandit, bw);
+      for (int i = 0; i < 5; i++) snap->bandit_weights[i] = bw[i];
+    } else {
+      snap->bandit_blend = 0.0;
+      snap->bandit_active = 0;
+      for (int i = 0; i < 5; i++) snap->bandit_weights[i] = 0.0;
     }
     // per-strategy reward attribution
     for (int i = 0; i < 5; i++) {

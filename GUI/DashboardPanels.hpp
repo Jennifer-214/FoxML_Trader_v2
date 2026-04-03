@@ -104,7 +104,7 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
         static const char *gate_reasons[] = {
             "ok", "warmup", "no_signal", "no_trade", "book",
             "danger", "kill", "recovery", "volatile", "cooldown",
-            "wind_down", "paused", "downtrend"
+            "wind_down", "paused", "downtrend", "cost"
         };
         int ri = (s->gate_reason >= 0 && s->gate_reason < NUM_GATE_REASONS) ? s->gate_reason : 0;
         ImVec4 color = (ri == GATE_REASON_KILL || ri == GATE_REASON_DANGER) ? FoxmlColors::red : FoxmlColors::yellow;
@@ -303,6 +303,42 @@ static inline void GUI_Panel_Market(const TUISnapshot *s) {
         }
     }
 
+    // FoxML integration status (Phase 6C)
+    {
+        int any_active = s->cost_gate_enabled | s->foxml_vol_scaling_enabled |
+                         s->confidence_enabled | s->bandit_enabled;
+        if (any_active) {
+            ImGui::Separator();
+            ImGui::TextColored(FoxmlColors::sand, "FoxML:");
+            if (s->cost_gate_enabled) {
+                ImGui::SameLine(0, 10);
+                ImGui::TextColored(FoxmlColors::sand, "cost:");
+                ImGui::SameLine();
+                ImGui::Text("%.1f bps", s->cost_bps);
+            }
+            if (s->foxml_vol_scaling_enabled) {
+                ImGui::SameLine(0, 10);
+                ImGui::TextColored(FoxmlColors::sand, "vsz:");
+                ImGui::SameLine();
+                ImGui::Text("%.0f%%", s->foxml_vol_scale * 100.0);
+            }
+            if (s->confidence_enabled) {
+                ImGui::SameLine(0, 10);
+                ImGui::TextColored(FoxmlColors::sand, "conf:");
+                ImGui::SameLine();
+                ImGui::Text("%.2f", s->confidence);
+            }
+            if (s->bandit_enabled) {
+                ImGui::SameLine(0, 10);
+                ImGui::TextColored(FoxmlColors::sand, "bandit:");
+                ImGui::SameLine();
+                ImVec4 bc = s->bandit_active ? FoxmlColors::green : FoxmlColors::comment;
+                ImGui::TextColored(bc, "%.0f%% %s",
+                    s->bandit_blend * 100.0, s->bandit_active ? "ON" : "ramp");
+            }
+        }
+    }
+
     ImGui::End();
 }
 
@@ -347,7 +383,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
         static const char *gate_short[] = {
             "ok", "warmup", "no_signal", "no_trade", "book",
             "danger", "kill", "recovery", "volatile", "cooldown",
-            "wind_down", "paused", "downtrend"
+            "wind_down", "paused", "downtrend", "cost"
         };
         int gi = (s->gate_reason >= 0 && s->gate_reason < NUM_GATE_REASONS) ? s->gate_reason : 0;
         ImGui::TextColored(FoxmlColors::yellow, "GATE OFF (%s)", gate_short[gi]);

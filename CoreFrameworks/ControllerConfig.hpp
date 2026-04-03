@@ -160,6 +160,13 @@ template <unsigned F> struct ControllerConfig {
   // tick recording (writes raw ticks to CSV for backtesting/ML training)
   int record_ticks;              // 0=disabled (default), 1=record to data/{symbol}/YYYY-MM-DD.csv
   uint32_t record_max_days;      // auto-prune CSVs older than this (default 30, ~2GB cap)
+  // FoxML integration — Phase 6C (all default OFF, zero behavior change when disabled)
+  int cost_gate_enabled;            // 0=disabled, 1=estimate trade cost via CostModel, suppress if unprofitable
+  int foxml_vol_scaling_enabled;    // 0=disabled, 1=scale risk_pct by VolScaler inverse-vol on slow path
+  FPN<F> foxml_vol_scaling_z_max;   // z-score clipping threshold for VolScaler (default 3.0)
+  int bandit_enabled;               // 0=disabled, 1=blend regime strategy with Exp3-IX bandit weights
+  FPN<F> bandit_blend_ratio;        // bandit influence fraction at full ramp (default 0.30)
+  int confidence_enabled;           // 0=disabled, 1=dynamic ml_buy_threshold from confidence scoring
 };
 //======================================================================================================
 template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
@@ -284,6 +291,13 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // tick recording (disabled by default — no disk usage unless explicitly enabled)
   cfg.record_ticks = 0;
   cfg.record_max_days = 30;
+  // FoxML integration — Phase 6C (all OFF by default, zero behavior change)
+  cfg.cost_gate_enabled = 0;
+  cfg.foxml_vol_scaling_enabled = 0;
+  cfg.foxml_vol_scaling_z_max = FPN_FromDouble<F>(3.0);
+  cfg.bandit_enabled = 0;
+  cfg.bandit_blend_ratio = FPN_FromDouble<F>(0.30);
+  cfg.confidence_enabled = 0;
   return cfg;
 }
 //======================================================================================================
@@ -471,6 +485,14 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     //--- tick recording ---
     CFG_PARSE_INT(record_ticks)
     CFG_PARSE_U32(record_max_days)
+
+    //--- FoxML integration (Phase 6C) ---
+    CFG_PARSE_INT(cost_gate_enabled)
+    CFG_PARSE_INT(foxml_vol_scaling_enabled)
+    CFG_PARSE_FPN(foxml_vol_scaling_z_max)
+    CFG_PARSE_INT(bandit_enabled)
+    CFG_PARSE_FPN(bandit_blend_ratio)
+    CFG_PARSE_INT(confidence_enabled)
 
     // ML model paths (string fields — not atof)
     if (strcmp(key, "ml_model_path") == 0) {
