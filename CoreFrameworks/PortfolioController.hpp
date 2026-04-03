@@ -29,6 +29,8 @@
 #include "../Strategies/MLStrategy.hpp"
 #include "../Strategies/RegimeDetector.hpp"
 #include "../ML_Headers/CostModel.hpp"
+#include "../ML_Headers/BarrierGate.hpp"
+#include "../ML_Headers/RewardTracker.hpp"
 #include "../ML_Headers/VolScaler.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"
 #include "../ML_Headers/BanditLearning.hpp"
@@ -65,7 +67,8 @@ static inline void log_ts(char *buf, size_t len) {
 #define GATE_REASON_PAUSED     11  // manual pause
 #define GATE_REASON_DOWNTREND  12  // downtrend regime
 #define GATE_REASON_COST       13  // cost gate (trade cost exceeds breakeven alpha)
-#define NUM_GATE_REASONS       14
+#define GATE_REASON_BARRIER    14  // barrier gate (peak probability too high)
+#define NUM_GATE_REASONS       15
 
 // centralized gate reason metadata — renderers look up name/description here.
 // add new gate reasons: one #define above + one row below.
@@ -90,6 +93,7 @@ static const GateReasonDef GATE_REASON_TABLE[NUM_GATE_REASONS] = {
     {"paused",     "manual pause",                                      0},
     {"downtrend",  "downtrend — buying paused",                         0},
     {"cost",       "cost gate — trade cost > TP target",                0},
+    {"barrier",    "barrier gate — peak probability too high",           0},
 };
 
 //======================================================================================================
@@ -179,6 +183,9 @@ template <unsigned F> struct PortfolioController {
 #endif
   RegimeState<F> regime;
   ModelHandle<F> regime_model;       // Mode A: regime signal enrichment model
+  ModelHandle<F> peak_model;         // barrier gate: P(will_peak) model
+  ModelHandle<F> valley_model;       // barrier gate: P(will_valley) model
+  RewardTracker reward_tracker;      // per-trade reward attribution for bandit analysis
   RegimeSignals<F> last_signals;     // cached for ML strategy BuySignal access
 
   RORRegressor<F> regime_ror;  // slope-of-slopes for trend acceleration detection
@@ -269,6 +276,15 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   Model_Init(&ctrl->regime_model);
   if (config.regime_model_backend != 0)
     Model_Load(&ctrl->regime_model, config.regime_model_path, config.regime_model_backend);
+  // barrier gate models (peak/valley classifiers)
+  Model_Init(&ctrl->peak_model);
+  Model_Init(&ctrl->valley_model);
+  if (config.barrier_gate_enabled) {
+    if (config.peak_model_path[0])
+      Model_Load(&ctrl->peak_model, config.peak_model_path, config.ml_backend ? config.ml_backend : 1);
+    if (config.valley_model_path[0])
+      Model_Load(&ctrl->valley_model, config.valley_model_path, config.ml_backend ? config.ml_backend : 1);
+  }
   // regime detector
   Regime_Init(&ctrl->regime, config.regime_hysteresis);
   ctrl->regime_ror = RORRegressor_Init<F>();
@@ -296,6 +312,7 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->last_vol_scale = 1.0;
   ctrl->last_cost_bps = 0.0;
   memset(&ctrl->last_costs, 0, sizeof(ctrl->last_costs));
+  RewardTracker_Init(&ctrl->reward_tracker);
   ctrl->foxml_vol_scale = 1.0;
   ctrl->last_confidence = 0.0;
   for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; i++)
@@ -462,6 +479,15 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
     int is_profitable = !pos_pnl.sign & !FPN_IsZero(pos_pnl);
     ctrl->wins += ((reason == 0) & is_profitable);
     ctrl->losses += !((reason == 0) & is_profitable);
+
+    // reward attribution tracker: per-trade CSV for bandit analysis
+    {
+        double entry_d = FPN_ToDouble(rec->entry_price);
+        double exit_d = FPN_ToDouble(rec->exit_price);
+        double reward = (entry_d > 0.0) ? (exit_d - entry_d) / entry_d * 10000.0 : 0.0;
+        RewardTracker_Push(&ctrl->reward_tracker, strat, reward, entry_d, exit_d,
+                            ctrl->entry_ticks[slot], reason);
+    }
 
     // SL cooldown: adaptive or fixed, only on SL exits
     if (reason == 1) {
@@ -697,6 +723,8 @@ inline void PortfolioController_StrategyDispatch(PortfolioController<F> *ctrl,
     MLStrategy_Adapt(&ctrl->ml_strategy, current_price, ctrl->portfolio_delta,
                       ctrl->portfolio.active_bitmap, &ctrl->buy_conds,
                       (const void*)&ctrl->config);
+    MLStrategy_ExitAdjust(&ctrl->portfolio, current_price, &ctrl->rolling,
+                           &ctrl->ml_strategy, &ctrl->config);
     break;
   }
   PortfolioController_StrategyBuySignal(ctrl);
@@ -1269,6 +1297,10 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   if (ctrl->exit_buf.count > 0)
     PortfolioController_DrainExits(ctrl);
 
+  // drain reward attribution to CSV (append mode, ~1 write per trade)
+  if (ctrl->reward_tracker.count > 0)
+    RewardTracker_DrainCSV(&ctrl->reward_tracker, "logging/reward_attribution.csv");
+
   // TIME-BASED EXIT: close positions held too long with insufficient gain
   // frees capital trapped in positions where TP became unreachable (e.g. volatility
   // dropped after entry, making the stddev-based TP too far away)
@@ -1545,6 +1577,22 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     if (breakeven_bps > tp_bps) {
       Gate_Zero(&ctrl->buy_conds, 0);
       ctrl->gate_reason = GATE_REASON_COST;
+    }
+  }
+
+  // BARRIER GATE: block entries before predicted price peaks
+  // uses last_signals (already computed in regime detection above)
+  if (ctrl->config.barrier_gate_enabled && !FPN_IsZero(ctrl->buy_conds.price)
+      && Model_IsLoaded(&ctrl->peak_model)) {
+    float features[MODEL_MAX_FEATURES];
+    int n = ModelFeatures_Pack(features, &ctrl->last_signals, &ctrl->rolling, ctrl->rolling_long);
+    double p_peak = Model_Predict(&ctrl->peak_model, features, n);
+    double p_valley = Model_IsLoaded(&ctrl->valley_model)
+        ? Model_Predict(&ctrl->valley_model, features, n) : 0.5;
+    BarrierGateResult bg = BarrierGate_Compute(p_peak, p_valley);
+    if (bg.blocked) {
+      Gate_Zero(&ctrl->buy_conds, 0);
+      ctrl->gate_reason = GATE_REASON_BARRIER;
     }
   }
 

@@ -193,6 +193,13 @@ static const CfgFieldDef field_defs[] = {
         "Path to XGBoost/LightGBM buy-signal model\ntrain in foxml_suite, load here"},
     {"regime_model_path",        "Regime Model",      "Models", CFG_PATH,  NULL,
         "Path to regime enrichment model\nMode A: regime signal enhancement"},
+    // Barrier Gate (Phase 7E)
+    {"barrier_gate_enabled",     "Barrier Gate",      "Barrier", CFG_BOOL, NULL,
+        "Block entries before predicted price peaks\nrequires trained peak/valley models"},
+    {"peak_model_path",          "Peak Model",        "Barrier", CFG_PATH, NULL,
+        "Path to P(will_peak) model\ntrain with LABEL_WILL_PEAK in foxml_suite"},
+    {"valley_model_path",        "Valley Model",      "Barrier", CFG_PATH, NULL,
+        "Path to P(will_valley) model\ntrain with LABEL_WILL_VALLEY in foxml_suite"},
 };
 static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 

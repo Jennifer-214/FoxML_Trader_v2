@@ -34,6 +34,8 @@ struct HistoricalTick {
 #define LABEL_FORWARD_PNL  2   // continuous: forward return over N ticks (regression target)
 #define LABEL_REGIME       3   // regime that was active (multi-class)
 #define LABEL_VOL_BARRIER  4   // vol-scaled barrier: k * rolling_vol (from FoxML barrier.py)
+#define LABEL_WILL_PEAK    5   // 1 = price peaks within N ticks (barrier gate training)
+#define LABEL_WILL_VALLEY  6   // 1 = price valleys within N ticks (barrier gate training)
 
 //======================================================================================================
 // [WIN/LOSS]
@@ -179,6 +181,49 @@ static inline float Label_VolBarrier(const HistoricalTick *ticks, int tick_idx, 
 }
 
 //======================================================================================================
+// [WILL_PEAK / WILL_VALLEY]
+// binary labels for barrier gate model training.
+// WILL_PEAK: 1 if price reaches a local max within N ticks (extra_param = lookahead)
+// WILL_VALLEY: 1 if price reaches a local min within N ticks
+// "local max/min" = price is highest/lowest in a symmetric window around it
+//======================================================================================================
+static float Label_WillPeak(const HistoricalTick *ticks, int tick_idx, int total_ticks,
+                             double sample_price, double tp_pct, double sl_pct,
+                             int extra_param) {
+    (void)tp_pct; (void)sl_pct;
+    int lookahead = (extra_param > 0) ? extra_param : 500;
+    int end = tick_idx + lookahead;
+    if (end > total_ticks) end = total_ticks;
+    // find max price in lookahead window
+    double peak = sample_price;
+    int peak_idx = tick_idx;
+    for (int j = tick_idx + 1; j < end; j++) {
+        if (ticks[j].price > peak) { peak = ticks[j].price; peak_idx = j; }
+    }
+    // peak near start = we're about to peak
+    int near_start = (peak_idx - tick_idx) < (lookahead / 4);
+    double rise_pct = (peak - sample_price) / sample_price;
+    return (near_start && rise_pct > 0.001) ? 1.0f : 0.0f;
+}
+
+static float Label_WillValley(const HistoricalTick *ticks, int tick_idx, int total_ticks,
+                               double sample_price, double tp_pct, double sl_pct,
+                               int extra_param) {
+    (void)tp_pct; (void)sl_pct;
+    int lookahead = (extra_param > 0) ? extra_param : 500;
+    int end = tick_idx + lookahead;
+    if (end > total_ticks) end = total_ticks;
+    double valley = sample_price;
+    int valley_idx = tick_idx;
+    for (int j = tick_idx + 1; j < end; j++) {
+        if (ticks[j].price < valley) { valley = ticks[j].price; valley_idx = j; }
+    }
+    int near_start = (valley_idx - tick_idx) < (lookahead / 4);
+    double drop_pct = (sample_price - valley) / sample_price;
+    return (near_start && drop_pct > 0.001) ? 1.0f : 0.0f;
+}
+
+//======================================================================================================
 // [LABEL TABLE]
 // table-driven: add new label = add 1 entry here + 1 function above
 //======================================================================================================
@@ -199,6 +244,8 @@ static const LabelDef label_table[] = {
     { LABEL_FORWARD_PNL, "forward_pnl",   "Continuous: % return over N ticks",        Label_ForwardPnl },
     { LABEL_REGIME,      "regime",        "Multi-class: regime at sample point",      Label_Regime     },
     { LABEL_VOL_BARRIER, "vol_barrier",   "Vol-scaled: k*sigma barrier (FoxML)",      Label_VolBarrier },
+    { LABEL_WILL_PEAK,   "will_peak",    "Binary: 1=price peaks within N ticks",     Label_WillPeak   },
+    { LABEL_WILL_VALLEY, "will_valley",  "Binary: 1=price valleys within N ticks",   Label_WillValley },
 };
 
 static const int LABEL_COUNT = sizeof(label_table) / sizeof(label_table[0]);

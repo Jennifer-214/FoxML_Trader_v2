@@ -123,13 +123,48 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
 // no trailing — keep it simple until we have exit models.
 // TP/SL are set at fill time by the controller, not here.
 //======================================================================================================
+// R²-scaled trailing TP/SL (same pattern as Momentum_ExitAdjust).
+// ratchets TP/SL upward when price runs past original TP in a strong trend.
+// uses tp_trail_mult / sl_trail_mult from config with R² gating.
 template <unsigned F>
-inline void MLStrategy_ExitAdjust(void *portfolio, FPN<F> current_price,
+inline void MLStrategy_ExitAdjust(Portfolio<F> *portfolio, FPN<F> current_price,
                                    const RollingStats<F> *rolling,
-                                   MLStrategyState<F> *state, const void *cfg) {
-    // no per-position trailing for ML strategy (fixed TP/SL from config)
-    // future: run exit model per position, adjust TP/SL based on prediction
-    (void)portfolio; (void)current_price; (void)rolling; (void)state; (void)cfg;
+                                   MLStrategyState<F> *state,
+                                   const ControllerConfig<F> *cfg) {
+    if (FPN_IsZero(cfg->tp_hold_score)) return;
+    if (FPN_IsZero(rolling->price_stddev)) return;
+
+    // R² from rolling stats (no separate feeder needed — rolling already has it)
+    FPN<F> r_squared = rolling->price_r_squared;
+    int r2_ok = FPN_GreaterThan(r_squared, FPN_FromDouble<F>(0.5));
+
+    uint16_t active = portfolio->active_bitmap;
+    while (active) {
+        int idx = __builtin_ctz(active);
+        Position<F> *pos = &portfolio->positions[idx];
+
+        int above_tp = FPN_GreaterThan(current_price, pos->original_tp);
+
+        if (above_tp & r2_ok) {
+            FPN<F> tp_offset = FPN_Mul(rolling->price_stddev, cfg->tp_trail_mult);
+            FPN<F> trailing_tp = FPN_Sub(current_price, tp_offset);
+            pos->take_profit_price = FPN_Max(pos->take_profit_price, trailing_tp);
+
+            FPN<F> sl_offset = FPN_Mul(rolling->price_stddev, cfg->sl_trail_mult);
+            FPN<F> trailing_sl = FPN_Sub(current_price, sl_offset);
+            pos->stop_loss_price = FPN_Max(pos->stop_loss_price, trailing_sl);
+
+            // SL floor: 2:1 min reward/risk (only when SL below entry)
+            if (FPN_LessThan(pos->stop_loss_price, pos->entry_price)) {
+                FPN<F> tp_dist = FPN_Sub(pos->take_profit_price, pos->entry_price);
+                FPN<F> min_sl_dist = FPN_Mul(tp_dist, FPN_FromDouble<F>(0.5));
+                FPN<F> sl_floor = FPN_SubSat(pos->entry_price, min_sl_dist);
+                pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
+            }
+        }
+
+        active &= active - 1;
+    }
 }
 
 #endif // ML_STRATEGY_HPP
