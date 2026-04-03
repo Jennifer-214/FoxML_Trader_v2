@@ -16,6 +16,7 @@
 
 #include "imgui.h"
 #include "BacktestEngine.hpp"
+#include "Fingerprint.hpp"
 #include <dirent.h>
 #include <sys/stat.h>
 #include <pthread.h>
@@ -738,6 +739,18 @@ struct TrainingPanelState {
     float train_accuracy;
     int positive_count, negative_count;
     char status_msg[128];
+    // walk-forward validation (Phase 6A — A7 GUI rework)
+    int wf_n_splits;          // number of temporal folds (default 5)
+    int wf_horizon_ticks;     // label horizon for purge gap calc (default 1000)
+    int wf_buffer_ticks;      // extra purge buffer (default 512)
+    int wf_min_train;         // min training samples per fold (default 500)
+    volatile int wf_running;  // 1 = walk-forward in progress
+    volatile int wf_progress; // 0-100 progress
+    volatile int wf_cancel;   // 1 = user requested cancel
+    volatile int wf_complete; // 1 = run finished
+    pthread_t wf_tid;
+    WalkForwardResults wf_results;
+    bool wf_has_results;      // true after first completed walk-forward run
 };
 
 static inline void TrainingPanel_Init(TrainingPanelState *state) {
@@ -767,6 +780,40 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     strncpy(state->feature_names[FEAT_PRICE_AVG],      "price_avg", 31);
     strncpy(state->feature_names[FEAT_VOLUME_AVG],     "vol_avg", 31);
     strncpy(state->feature_names[FEAT_EMA_ABOVE_SMA],  "ema>sma", 31);
+    // walk-forward defaults (FoxML battle-tested values)
+    state->wf_n_splits = 5;
+    state->wf_horizon_ticks = 1000;
+    state->wf_buffer_ticks = PURGE_BUFFER_DEFAULT;
+    state->wf_min_train = 500;
+    state->wf_running = 0;
+    state->wf_progress = 0;
+    state->wf_cancel = 0;
+    state->wf_complete = 0;
+    state->wf_has_results = false;
+    memset(&state->wf_results, 0, sizeof(state->wf_results));
+}
+
+// walk-forward worker thread
+struct WalkForwardWorkerArgs {
+    TrainingPanelState *state;
+    const BacktestResults *data;
+};
+
+static inline void *walkforward_worker_fn(void *arg) {
+    WalkForwardWorkerArgs *args = (WalkForwardWorkerArgs *)arg;
+    TrainingPanelState *state = args->state;
+    const BacktestResults *data = args->data;
+    free(args);
+
+    Backtest_RunWalkForward(&state->wf_results, data,
+                             state->wf_n_splits, state->wf_horizon_ticks,
+                             state->wf_buffer_ticks, state->wf_min_train,
+                             &state->wf_progress, &state->wf_cancel);
+
+    state->wf_has_results = true;
+    state->wf_complete = 1;
+    state->wf_running = 0;
+    return NULL;
 }
 
 //======================================================================================================
@@ -945,6 +992,138 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         ImGui::Text("Train Accuracy: %.1f%% (in-sample)", state->train_accuracy);
         ImGui::Text("Load in live engine: ml_model_path=%s", state->model_path);
         ImGui::Text("                     ml_backend=1");
+    }
+
+    //==================================================================
+    // WALK-FORWARD VALIDATION (Phase 6A — the REAL performance metric)
+    //==================================================================
+    ImGui::Separator();
+    ImGui::Text("Walk-Forward Validation");
+
+    // parameters
+    ImGui::InputInt("Folds", &state->wf_n_splits, 1, 2);
+    if (state->wf_n_splits < 2) state->wf_n_splits = 2;
+    if (state->wf_n_splits > 20) state->wf_n_splits = 20;
+    ImGui::InputInt("Horizon Ticks", &state->wf_horizon_ticks, 100, 500);
+    ImGui::SetItemTooltip("Label forward window for purge gap calculation");
+    ImGui::InputInt("Purge Buffer", &state->wf_buffer_ticks, 64, 256);
+    ImGui::SetItemTooltip("Extra purge gap beyond max(horizon, feature_lookback)\ndefault 512 ticks");
+    ImGui::InputInt("Min Train", &state->wf_min_train, 100, 500);
+    ImGui::SetItemTooltip("Minimum samples per training fold\nfolds with fewer are skipped");
+
+    // run / cancel button
+    {
+        bool can_wf = results->sample_count >= 50;
+#ifndef USE_XGBOOST
+        can_wf = false;
+#endif
+        if (state->wf_running) {
+            ImGui::ProgressBar(state->wf_progress / 100.0f, ImVec2(-1, 0), "Walk-forward...");
+            if (ImGui::Button("Cancel Walk-Forward"))
+                state->wf_cancel = 1;
+        } else {
+            if (!can_wf) ImGui::BeginDisabled();
+            if (ImGui::Button("Run Walk-Forward")) {
+                state->wf_running = 1;
+                state->wf_progress = 0;
+                state->wf_cancel = 0;
+                state->wf_complete = 0;
+                state->wf_has_results = false;
+
+                WalkForwardWorkerArgs *wf_args = (WalkForwardWorkerArgs *)malloc(sizeof(WalkForwardWorkerArgs));
+                wf_args->state = state;
+                wf_args->data = results;
+                pthread_create(&state->wf_tid, NULL, walkforward_worker_fn, wf_args);
+                pthread_detach(state->wf_tid);
+            }
+            if (!can_wf) {
+                ImGui::EndDisabled();
+#ifndef USE_XGBOOST
+                ImGui::SameLine();
+                ImGui::TextDisabled("Build with -DUSE_XGBOOST=ON");
+#else
+                if (results->sample_count < 50) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("Need 50+ samples");
+                }
+#endif
+            }
+        }
+    }
+
+    // walk-forward results display
+    if (state->wf_has_results) {
+        WalkForwardResults *wf = &state->wf_results;
+
+        // aggregate metrics — the metrics that actually matter
+        ImGui::Separator();
+        {
+            // mean ± std validation accuracy (green if reasonable, red if overfit)
+            ImVec4 val_color = (wf->overfit_count > 0)
+                ? ImVec4(0.95f, 0.35f, 0.35f, 1.0f)   // red: overfit detected
+                : ImVec4(0.55f, 0.76f, 0.51f, 1.0f);   // green: clean
+            ImGui::TextColored(val_color, "Val Accuracy: %.1f%% +/- %.1f%%",
+                               wf->mean_val_accuracy * 100.0f, wf->std_val_accuracy * 100.0f);
+            ImGui::SameLine();
+            ImGui::TextDisabled("(train: %.1f%%)", wf->mean_train_accuracy * 100.0f);
+        }
+
+        // overfit warning
+        if (wf->overfit_count > 0) {
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f),
+                "WARNING: %d/%d folds flagged as overfit", wf->overfit_count, wf->valid_folds);
+        }
+
+        // fingerprint
+        if (wf->fingerprint[0] != '\0') {
+            char short_fp[13];
+            Fingerprint_Short(wf->fingerprint, short_fp, 12);
+            ImGui::TextDisabled("Fingerprint: %s  (%.0f ms)", short_fp, wf->elapsed_ms);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Full: %s\nReproducible: same config + data = same hash", wf->fingerprint);
+        }
+
+        // per-fold table
+        if (wf->valid_folds > 0 && ImGui::TreeNode("Per-Fold Results")) {
+            ImGui::BeginTable("folds", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg);
+            ImGui::TableSetupColumn("Fold", ImGuiTableColumnFlags_WidthFixed, 40);
+            ImGui::TableSetupColumn("Train", ImGuiTableColumnFlags_WidthFixed, 80);
+            ImGui::TableSetupColumn("Val", ImGuiTableColumnFlags_WidthFixed, 80);
+            ImGui::TableSetupColumn("Gap", ImGuiTableColumnFlags_WidthFixed, 60);
+            ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableHeadersRow();
+
+            for (int i = 0; i < wf->num_folds; i++) {
+                if (!wf->folds[i].valid) continue;
+                ImGui::TableNextRow();
+
+                ImGui::TableSetColumnIndex(0);
+                ImGui::Text("%d", i + 1);
+
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Text("%.1f%%", wf->folds[i].train_accuracy * 100.0f);
+
+                ImGui::TableSetColumnIndex(2);
+                ImGui::Text("%.1f%%", wf->folds[i].val_accuracy * 100.0f);
+
+                ImGui::TableSetColumnIndex(3);
+                float gap = wf->folds[i].train_accuracy - wf->folds[i].val_accuracy;
+                ImVec4 gap_color = (gap > 0.20f) ? ImVec4(0.95f, 0.35f, 0.35f, 1.0f)
+                                 : (gap > 0.10f) ? ImVec4(0.95f, 0.75f, 0.30f, 1.0f)
+                                                  : ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
+                ImGui::TextColored(gap_color, "%.1f%%", gap * 100.0f);
+
+                ImGui::TableSetColumnIndex(4);
+                if (wf->folds[i].overfit.is_overfit) {
+                    ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "%s",
+                                       wf->folds[i].overfit.reason);
+                } else {
+                    ImGui::TextColored(ImVec4(0.55f, 0.76f, 0.51f, 1.0f), "clean");
+                }
+            }
+            ImGui::EndTable();
+            ImGui::TreePop();
+        }
     }
 
     ImGui::End();
