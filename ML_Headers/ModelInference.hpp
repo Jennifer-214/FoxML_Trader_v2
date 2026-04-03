@@ -59,6 +59,75 @@
 #define MODEL_FORMAT_VERSION 1
 
 //======================================================================================================
+// [FEATURE LOOKBACK REGISTRY]
+//======================================================================================================
+// per-feature metadata: how many ticks back each feature reads.
+// used by:
+//   - ValidationSplit (purge gap = max lookback across features + buffer)
+//   - PortfolioController (warmup validation: warmup_ticks >= max lookback)
+//
+// when adding a new FEAT_* constant, add a matching entry here with its lookback.
+// this is the single source of truth for feature temporal reach.
+//
+// FUTURE HOOKS:
+//   multi-symbol: add symbol_id field when trading multiple pairs
+//   feature growth: use 'enabled' field to toggle features without recompiling
+//   feature selection: filter by enabled==1 before packing
+//   stability tracking: save XGBoost importances per fold, compare across runs
+//     → see ~/FoxML/private/TRAINING/stability/feature_importance/analysis.py
+//     → thresholds: min_top_k_overlap=0.7, min_kendall_tau=0.6 (safety.yaml:157)
+//======================================================================================================
+struct FeatureLookback {
+    int feat_idx;           // FEAT_* constant
+    const char *name;       // human-readable name (for display/debugging)
+    int lookback_ticks;     // how many ticks back this feature reads (from RollingStats window)
+    int enabled;            // 1 = active, 0 = disabled (future: feature toggling)
+};
+
+// default lookbacks for current features (from RollingStats 128-tick + 512-tick windows)
+// table is append-only — matches FEAT_* ordering for direct indexing
+static const FeatureLookback FEATURE_LOOKBACKS[] = {
+    { FEAT_SHORT_SLOPE,    "short_slope",    128, 1 },  // 128-tick rolling window
+    { FEAT_SHORT_R2,       "short_r2",       128, 1 },
+    { FEAT_SHORT_VARIANCE, "short_variance", 128, 1 },
+    { FEAT_LONG_SLOPE,     "long_slope",     512, 1 },  // 512-tick rolling window
+    { FEAT_LONG_R2,        "long_r2",        512, 1 },
+    { FEAT_LONG_VARIANCE,  "long_variance",  512, 1 },
+    { FEAT_VOL_RATIO,      "vol_ratio",      512, 1 },  // uses both windows
+    { FEAT_ROR_SLOPE,      "ror_slope",      512, 1 },  // ROR regressor lookback
+    { FEAT_VOLUME_SLOPE,   "volume_slope",   128, 1 },
+    { FEAT_VOLUME_DELTA,   "volume_delta",   128, 1 },
+    { FEAT_EMA_SMA_SPREAD, "ema_sma_spread", 512, 1 },  // EMA + SMA comparison
+    { FEAT_VWAP_DEV,       "vwap_dev",       128, 1 },
+    { FEAT_PRICE_STDDEV,   "price_stddev",   128, 1 },
+    { FEAT_PRICE_AVG,      "price_avg",      128, 1 },
+    { FEAT_VOLUME_AVG,     "volume_avg",     128, 1 },
+    { FEAT_EMA_ABOVE_SMA,  "ema_above_sma",  512, 1 },
+};
+
+static const int FEATURE_LOOKBACK_COUNT = sizeof(FEATURE_LOOKBACKS) / sizeof(FEATURE_LOOKBACKS[0]);
+
+// compute max lookback across all enabled features
+// used by: ValidationSplit (purge gap), PortfolioController (warmup check)
+static inline int FeatureLookback_Max(void) {
+    int max_lb = 0;
+    for (int i = 0; i < FEATURE_LOOKBACK_COUNT; i++) {
+        if (FEATURE_LOOKBACKS[i].enabled && FEATURE_LOOKBACKS[i].lookback_ticks > max_lb)
+            max_lb = FEATURE_LOOKBACKS[i].lookback_ticks;
+    }
+    return max_lb;
+}
+
+// count enabled features (for validation)
+static inline int FeatureLookback_CountEnabled(void) {
+    int count = 0;
+    for (int i = 0; i < FEATURE_LOOKBACK_COUNT; i++) {
+        if (FEATURE_LOOKBACKS[i].enabled) count++;
+    }
+    return count;
+}
+
+//======================================================================================================
 // conditional includes — only pull in headers when backend is enabled
 //======================================================================================================
 #ifdef USE_XGBOOST
