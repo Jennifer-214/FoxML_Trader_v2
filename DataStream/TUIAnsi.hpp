@@ -421,6 +421,9 @@ static inline int ANSI_Section_Header(AnsiBuf *ab, const TUISnapshot *s,
         case GATE_REASON_DOWNTREND:
             ab_printf(ab, A_BOLD "%s ▌ BUYING PAUSED" A_DIM "  downtrend — buying paused" A_RESET, hdr_color);
             break;
+        case GATE_REASON_COST:
+            ab_printf(ab, A_BOLD "%s ▌ BUYING PAUSED" A_DIM "  cost gate — trade cost > TP target" A_RESET, hdr_color);
+            break;
         }
         y++;
     }

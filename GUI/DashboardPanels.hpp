@@ -155,6 +155,8 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
             ImGui::TextColored(FoxmlColors::comment, "manual pause"); break;
         case GATE_REASON_DOWNTREND:
             ImGui::TextColored(FoxmlColors::comment, "downtrend — buying paused"); break;
+        case GATE_REASON_COST:
+            ImGui::TextColored(FoxmlColors::comment, "cost gate — trade cost > TP target"); break;
         }
     }
 
