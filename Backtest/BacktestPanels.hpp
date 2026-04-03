@@ -102,6 +102,7 @@ struct RunControlState {
     BacktestRunConfig run_config;
     BacktestResults results;
     CandleAccumulator *candle_acc;
+    TUISnapshot *snapshot;       // populated by worker after run completes
     char config_path[256];
 };
 
@@ -122,7 +123,7 @@ static inline void *backtest_worker_fn(void *arg) {
 
     Backtest_Run(&state->results, &state->run_config,
                  &state->progress_pct, &state->cancel_flag,
-                 state->candle_acc);
+                 state->candle_acc, state->snapshot);
 
     state->complete = 1;
     state->running = 0;

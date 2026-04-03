@@ -27,6 +27,7 @@
 #include "GUI/TradeReader.hpp"
 #include "GUI/TradeHistoryPanel.hpp"
 #include "GUI/SettingsPanel.hpp"
+#include "GUI/DashboardPanels.hpp"
 
 #include "Backtest/BacktestPanels.hpp"
 
@@ -62,6 +63,9 @@ static void Suite_SetupDefaultLayout(ImGuiID dockspace_id) {
 
     ImGui::DockBuilderDockWindow("Results", dock_right_bottom);
     ImGui::DockBuilderDockWindow("Trade History", dock_right_bottom);
+    ImGui::DockBuilderDockWindow("Market", dock_right_bottom);
+    ImGui::DockBuilderDockWindow("Account", dock_right_bottom);
+    ImGui::DockBuilderDockWindow("Stats", dock_right_bottom);
 
     ImGui::DockBuilderFinish(dockspace_id);
 }
@@ -168,6 +172,10 @@ int main(int argc, char *argv[]) {
     CandleAccumulator_Init(&candle_acc, 60);
     run_control.candle_acc = &candle_acc;
 
+    // snapshot populated by backtest worker — dashboard panels read this
+    static TUISnapshot suite_snap = {};
+    run_control.snapshot = &suite_snap;
+
     // trade CSV reader for chart markers
     TradeData trades;
     TradeData_Init(&trades, "logging/backtest_order_history.csv");
@@ -229,6 +237,12 @@ int main(int argc, char *argv[]) {
         GUI_Panel_RunControl(&run_control, &data_panel);
         GUI_Panel_Results(&run_control.results);
 
+        // dashboard panels — show backtest engine state (reuse from live GUI)
+        if (run_control.complete) {
+            uint64_t suite_start = (uint64_t)time(NULL); // just for uptime display
+            GUI_RenderDashboard(&suite_snap, suite_start);
+        }
+
         // settings (config editing — reuse existing panel)
         GUI_Panel_Settings(&settings, NULL);
 
@@ -245,8 +259,6 @@ int main(int argc, char *argv[]) {
             TradeData_Refresh(&trades);
         trades.max_visible_markers = chart_settings.visible_candles * 2;
 
-        // empty snapshot for chart overlays (Phase 2: BacktestSnapshot will populate this)
-        static TUISnapshot suite_snap = {};
         ChartState cs = {};
         ChartState_Prepare(&cs, &csnap, &chart_settings);
         // price chart without live drag (pass NULL for shared state pointer)

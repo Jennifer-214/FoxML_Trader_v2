@@ -19,6 +19,7 @@
 #include "../DataStream/TradeLog.hpp"
 #include "../ML_Headers/ModelInference.hpp"
 #include "../GUI/CandleAccumulator.hpp"
+#include "BacktestSnapshot.hpp"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -249,7 +250,8 @@ static inline void BacktestStats_ComputeFromEquity(BacktestStats *stats,
 //======================================================================================================
 static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfig *run_cfg,
                                  volatile int *progress_pct, volatile int *cancel_flag,
-                                 CandleAccumulator *candle_acc) {
+                                 CandleAccumulator *candle_acc,
+                                 TUISnapshot *out_snapshot = NULL) {
     memset(results, 0, sizeof(*results));
 
     // load config
@@ -304,6 +306,8 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
     }
     if (total_ticks_all_files <= 0) total_ticks_all_files = 1; // avoid div by zero
 
+    double price_d_last = 0.0; // track last price for snapshot
+
     // replay each file
     for (int f = 0; f < run_cfg->num_data_files; f++) {
         int count = 0;
@@ -324,6 +328,7 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
             tick.price_d = ticks[i].price;
             tick.volume_d = ticks[i].qty;
             tick.is_buyer_maker = ticks[i].is_buyer_maker;
+            price_d_last = ticks[i].price;
 
             // exit gate on EVERY tick (same as main.cpp:381-392)
             if (ctrl.portfolio.active_bitmap)
@@ -336,10 +341,11 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
             PortfolioController_Tick(&ctrl, &pool, tick.price, tick.volume,
                                      &log, tick.is_buyer_maker);
 
-            // feed candle accumulator for chart (if provided)
+            // feed candle accumulator for chart (with historical timestamps)
             if (candle_acc)
-                CandleAccumulator_Push(candle_acc, tick.price_d, tick.volume_d,
-                                       tick.is_buyer_maker);
+                CandleAccumulator_PushWithTime(candle_acc, tick.price_d, tick.volume_d,
+                                               tick.is_buyer_maker,
+                                               (double)(ticks[i].timestamp_ms / 1000));
 
             // track equity curve (on each trade completion)
             if (ctrl.total_buys > 0 && (ctrl.wins + ctrl.losses) > (uint32_t)results->equity_count) {
@@ -391,6 +397,11 @@ done:
     // compute drawdown + sharpe from equity curve
     if (results->equity_count > 1)
         BacktestStats_ComputeFromEquity(&results->stats, results->equity_curve, results->equity_count);
+
+    // populate TUISnapshot for dashboard panels (if requested)
+    if (out_snapshot) {
+        BacktestSnapshot_Copy<BACKTEST_FP>(out_snapshot, &ctrl, price_d_last, 0.0);
+    }
 
     // cleanup
     free(ticks);

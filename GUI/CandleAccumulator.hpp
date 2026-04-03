@@ -81,6 +81,47 @@ static inline void CandleAccumulator_Push(CandleAccumulator *ca,
     pthread_mutex_unlock(&ca->lock);
 }
 
+// variant for backtest replay: caller provides the tick timestamp
+// instead of using wall-clock time(NULL)
+static inline void CandleAccumulator_PushWithTime(CandleAccumulator *ca,
+                                                    double price, double volume,
+                                                    int is_seller, double tick_time_sec) {
+    double bucket = (double)((int64_t)(tick_time_sec / ca->interval_sec) * ca->interval_sec);
+
+    pthread_mutex_lock(&ca->lock);
+
+    if (!ca->has_current || bucket > ca->current.time_sec) {
+        if (ca->has_current) {
+            ca->candles[ca->head] = ca->current;
+            ca->head = (ca->head + 1) % CANDLE_MAX;
+            if (ca->count < CANDLE_MAX) ca->count++;
+        }
+        ca->current.time_sec = bucket;
+        ca->current.open = price;
+        ca->current.high = price;
+        ca->current.low  = price;
+        ca->current.close = price;
+        ca->current.volume = 0.0;
+        ca->current.buy_vol = 0.0;
+        ca->current.sell_vol = 0.0;
+        ca->has_current = 1;
+    }
+
+    ca->current.close = price;
+    if (price > ca->current.high) ca->current.high = price;
+    if (price < ca->current.low)  ca->current.low  = price;
+    ca->current.volume += volume;
+    if (is_seller)
+        ca->current.sell_vol += volume;
+    else
+        ca->current.buy_vol += volume;
+
+    ca->vwap_pv  += price * volume;
+    ca->vwap_vol += volume;
+
+    pthread_mutex_unlock(&ca->lock);
+}
+
 // snapshot for GUI thread — copies ring buffer + current candle
 struct CandleSnapshot {
     Candle candles[CANDLE_MAX + 1];  // +1 for the in-progress candle
