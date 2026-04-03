@@ -20,7 +20,7 @@
 //==========================================================================
 // FIELD DESCRIPTOR — one entry per editable config field
 //==========================================================================
-enum CfgFieldType { CFG_FLOAT, CFG_INT, CFG_BOOL };
+enum CfgFieldType { CFG_FLOAT, CFG_INT, CFG_BOOL, CFG_PATH };
 
 struct CfgFieldDef {
     const char *key;       // engine.cfg key name (e.g. "take_profit_pct")
@@ -188,6 +188,11 @@ static const CfgFieldDef field_defs[] = {
         "Max bandit influence fraction (0.30 = 30%%)\nramps from 0%% to this over first 200 trades"},
     {"confidence_enabled",       "Confidence",        "FoxML",  CFG_BOOL,  NULL,
         "Dynamic ML threshold based on prediction quality\nraises threshold when IC/freshness/stability are low"},
+    // Model Paths (Phase 7C)
+    {"ml_model_path",            "Buy Model",         "Models", CFG_PATH,  NULL,
+        "Path to XGBoost/LightGBM buy-signal model\ntrain in foxml_suite, load here"},
+    {"regime_model_path",        "Regime Model",      "Models", CFG_PATH,  NULL,
+        "Path to regime enrichment model\nMode A: regime signal enhancement"},
 };
 static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 
@@ -197,6 +202,7 @@ static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 struct SettingsState {
     float float_vals[NUM_FIELDS];  // storage for float/int fields
     int   bool_vals[NUM_FIELDS];   // storage for bool fields
+    char  path_vals[NUM_FIELDS][256]; // storage for path fields
     bool  loaded;
     char  cfg_path[256];
 };
@@ -247,7 +253,13 @@ static inline void Settings_Load(SettingsState *s) {
             size_t klen = strlen(field_defs[i].key);
             if (strncmp(p, field_defs[i].key, klen) == 0 && p[klen] == '=') {
                 const char *val = p + klen + 1;
-                if (field_defs[i].type == CFG_BOOL)
+                if (field_defs[i].type == CFG_PATH) {
+                    // strip trailing whitespace/newline
+                    strncpy(s->path_vals[i], val, 255);
+                    s->path_vals[i][255] = '\0';
+                    char *end = s->path_vals[i] + strlen(s->path_vals[i]) - 1;
+                    while (end > s->path_vals[i] && (*end == '\n' || *end == '\r' || *end == ' ')) *end-- = '\0';
+                } else if (field_defs[i].type == CFG_BOOL)
                     s->bool_vals[i] = atoi(val);
                 else if (field_defs[i].type == CFG_INT)
                     s->float_vals[i] = (float)atoi(val);
@@ -330,6 +342,13 @@ static inline void GUI_Panel_Settings(SettingsState *s, volatile sig_atomic_t *r
             if (bv && strcmp(fd->key, "gate_ema_enabled") == 0) {
                 ImGui::SameLine();
                 ImGui::TextColored(FoxmlColors::green_b, "ACTIVE");
+            }
+        } else if (fd->type == CFG_PATH) {
+            ImGui::SetNextItemWidth(200);
+            ImGui::InputText(fd->label, s->path_vals[i], 256);
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                cfg_write_field(s->cfg_path, fd->key, s->path_vals[i]);
+                changed = true;
             }
         }
 

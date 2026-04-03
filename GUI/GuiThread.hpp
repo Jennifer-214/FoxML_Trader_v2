@@ -231,6 +231,7 @@ static inline void Gui_SetupDefaultLayout(ImGuiID dockspace_id) {
 
     // bottom-right: stats + settings + trade history + log (tabbed)
     ImGui::DockBuilderDockWindow("Stats", dock_right_bottom);
+    ImGui::DockBuilderDockWindow("ML Intelligence", dock_right_bottom);
     ImGui::DockBuilderDockWindow("Latency", dock_right_bottom);
     ImGui::DockBuilderDockWindow("Settings", dock_right_bottom);
     ImGui::DockBuilderDockWindow("Trade History", dock_right_bottom);

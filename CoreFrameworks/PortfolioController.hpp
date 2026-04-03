@@ -148,6 +148,7 @@ template <unsigned F> struct PortfolioController {
   uint32_t kill_recovery_counter;   // slow-path cycles remaining after kill reset before trading resumes
   double last_vol_scale;            // most recent vol scale factor applied (for TUI display)
   double last_cost_bps;             // most recent trade cost estimate in bps (for TUI display)
+  TradingCosts last_costs;          // full cost breakdown for ML Intelligence Panel
   double foxml_vol_scale;           // FoxML VolScaler output: inverse-vol position scale [0.1, 1.0]
   double last_confidence;           // most recent prediction confidence from ConfidenceScorer [0, 1]
   double entry_prediction[MAX_PORTFOLIO_POSITIONS]; // ML prediction at entry time (for confidence tracking)
@@ -294,6 +295,7 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->gate_reason = GATE_REASON_WARMUP;
   ctrl->last_vol_scale = 1.0;
   ctrl->last_cost_bps = 0.0;
+  memset(&ctrl->last_costs, 0, sizeof(ctrl->last_costs));
   ctrl->foxml_vol_scale = 1.0;
   ctrl->last_confidence = 0.0;
   for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; i++)
@@ -1536,6 +1538,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     double adv = FPN_ToDouble(ctrl->rolling.volume_avg) * price_d; // ADV in quote currency
     TradingCosts tc = CostModel_EstimateDefault(spread_bps, vol, 5.0, order_sz,
                                                  (adv > 0.0) ? adv : 1.0);
+    ctrl->last_costs = tc;
     ctrl->last_cost_bps = tc.total_cost;
     double breakeven_bps = CostModel_Breakeven(tc.total_cost);
     double tp_bps = FPN_ToDouble(ctrl->config.take_profit_pct) * 10000.0;

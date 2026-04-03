@@ -69,6 +69,7 @@ static void Suite_SetupDefaultLayout(ImGuiID dockspace_id) {
     ImGui::DockBuilderDockWindow("Market", dock_right_bottom);
     ImGui::DockBuilderDockWindow("Account", dock_right_bottom);
     ImGui::DockBuilderDockWindow("Stats", dock_right_bottom);
+    ImGui::DockBuilderDockWindow("ML Intelligence", dock_right_bottom);
 
     ImGui::DockBuilderFinish(dockspace_id);
 }
