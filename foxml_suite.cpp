@@ -165,10 +165,10 @@ int main(int argc, char *argv[]) {
     //==================================================================================================
     // panel state init
     //==================================================================================================
-    DataPanelState data_panel;
+    static DataPanelState data_panel;
     DataPanel_Init(&data_panel);
 
-    RunControlState run_control;
+    static RunControlState run_control;
     RunControl_Init(&run_control);
 
     // candle accumulator for chart visualization
@@ -181,15 +181,15 @@ int main(int argc, char *argv[]) {
     run_control.snapshot = &suite_snap;
 
     // comparison state (overlay multiple runs)
-    ComparisonState comparison;
+    static ComparisonState comparison;
     Comparison_Init(&comparison);
 
     // optimizer state
-    OptimizerPanelState optimizer;
+    static OptimizerPanelState optimizer;
     OptimizerPanel_Init(&optimizer);
 
     // training state
-    TrainingPanelState training;
+    static TrainingPanelState training;
     TrainingPanel_Init(&training);
 
     // trade CSV reader for chart markers
@@ -200,7 +200,7 @@ int main(int argc, char *argv[]) {
     ChartSettings chart_settings;
 
     // settings panel
-    SettingsState settings = {};
+    static SettingsState settings = {};
     strncpy(settings.cfg_path, "engine.cfg", 255);
 
     // trade history
