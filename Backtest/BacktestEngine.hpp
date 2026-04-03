@@ -141,7 +141,7 @@ struct BacktestStats {
 // [RESULTS]
 //======================================================================================================
 #define BACKTEST_MAX_EQUITY    8192
-#define BACKTEST_MAX_SAMPLES   50000
+#define BACKTEST_MAX_SAMPLES   500000
 
 struct BacktestResults {
     BacktestStats stats;
