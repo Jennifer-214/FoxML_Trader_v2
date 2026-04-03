@@ -479,9 +479,14 @@ done:
     BacktestStats_Compute(&results->stats, &ctrl, start_bal, elapsed);
     results->stats.ticks_processed = total_processed; // override: use actual file tick count
 
-    // compute drawdown + sharpe from equity curve
+    // sharpe from equity curve, drawdown from controller (equity = balance + positions)
     if (results->equity_count > 1)
         BacktestStats_ComputeFromEquity(&results->stats, results->equity_curve, results->equity_count);
+    // override equity-curve drawdown with controller's (tracks true equity, not just balance)
+    results->stats.max_drawdown = FPN_ToDouble(ctrl.max_drawdown);
+    double pe = FPN_ToDouble(ctrl.peak_equity);
+    results->stats.max_drawdown_pct = (pe > 0.0)
+        ? (results->stats.max_drawdown / pe) * 100.0 : 0.0;
 
     // populate TUISnapshot for dashboard panels (if requested)
     if (out_snapshot) {
