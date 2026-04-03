@@ -61,6 +61,7 @@ static void Suite_SetupDefaultLayout(ImGuiID dockspace_id) {
     ImGui::DockBuilderDockWindow("Run Control", dock_right_top);
     ImGui::DockBuilderDockWindow("Settings", dock_right_top);
     ImGui::DockBuilderDockWindow("Optimizer", dock_right_top);
+    ImGui::DockBuilderDockWindow("Training", dock_right_top);
 
     ImGui::DockBuilderDockWindow("Results", dock_right_bottom);
     ImGui::DockBuilderDockWindow("Comparison", dock_right_bottom);
@@ -186,6 +187,10 @@ int main(int argc, char *argv[]) {
     OptimizerPanelState optimizer;
     OptimizerPanel_Init(&optimizer);
 
+    // training state
+    TrainingPanelState training;
+    TrainingPanel_Init(&training);
+
     // trade CSV reader for chart markers
     TradeData trades;
     TradeData_Init(&trades, "logging/backtest_order_history.csv");
@@ -248,6 +253,7 @@ int main(int argc, char *argv[]) {
         GUI_Panel_Results(&run_control.results);
         GUI_Panel_Comparison(&comparison, &run_control.results);
         GUI_Panel_Optimizer(&optimizer, &data_panel);
+        GUI_Panel_Training(&training, &run_control, &data_panel);
 
         // dashboard panels — show backtest engine state (reuse from live GUI)
         if (run_control.complete) {

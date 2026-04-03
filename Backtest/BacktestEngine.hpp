@@ -19,6 +19,7 @@
 #include "../DataStream/TradeLog.hpp"
 #include "../ML_Headers/ModelInference.hpp"
 #include "../GUI/CandleAccumulator.hpp"
+#include "LabelFunctions.hpp"
 #include "BacktestSnapshot.hpp"
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,15 +33,7 @@
 #define BACKTEST_FP 64
 #endif
 
-//======================================================================================================
-// [HISTORICAL TICK]
-//======================================================================================================
-struct HistoricalTick {
-    double price;
-    double qty;
-    int64_t timestamp_ms;
-    int is_buyer_maker;
-};
+// HistoricalTick is defined in LabelFunctions.hpp (single definition point)
 
 //======================================================================================================
 // [DATA LOADER]
@@ -115,7 +108,10 @@ struct BacktestRunConfig {
     ControllerConfig<BACKTEST_FP> config_override;
     int use_config_override;
     int collect_features;
-    int label_type;
+    int label_type;         // LABEL_WIN_LOSS, LABEL_BARRIER, etc.
+    double label_tp_pct;    // TP barrier for win/loss and barrier labels (e.g. 1.5 = 1.5%)
+    double label_sl_pct;    // SL barrier (e.g. 1.0 = 1.0%)
+    int label_forward_ticks; // forward window for forward_pnl label (e.g. 1000)
 };
 
 //======================================================================================================
@@ -153,6 +149,9 @@ struct BacktestResults {
     // ML features (populated when collect_features=1)
     float feature_matrix[BACKTEST_MAX_SAMPLES * MODEL_MAX_FEATURES];
     float labels[BACKTEST_MAX_SAMPLES];
+    int sample_tick_indices[BACKTEST_MAX_SAMPLES]; // tick index of each sample (for label computation)
+    double sample_prices[BACKTEST_MAX_SAMPLES];     // price at each sample point
+    int sample_regimes[BACKTEST_MAX_SAMPLES];       // regime at each sample point
     int sample_count;
     // config used (for comparison)
     ControllerConfig<BACKTEST_FP> config_used;
@@ -358,17 +357,20 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
             }
 
             // feature collection (on slow path only, when enabled)
+            // labels are computed in a post-processing pass after replay
+            // (they need forward-looking data that hasn't been seen yet)
             if (run_cfg->collect_features && ctrl.tick_count == 0 &&
-                results->sample_count < BACKTEST_MAX_SAMPLES) {
-                // features are computed inside PortfolioController_Tick on slow path
-                // pack them into the feature matrix
+                results->sample_count < BACKTEST_MAX_SAMPLES &&
+                ctrl.state != CONTROLLER_WARMUP) {
                 ModelFeatures_Pack<BACKTEST_FP>(
                     &results->feature_matrix[results->sample_count * MODEL_NUM_FEATURES],
                     &ctrl.last_signals,
                     &ctrl.rolling,
                     ctrl.rolling_long);
-                // TODO: label computation (phase 5 — LabelFunctions.hpp)
-                results->labels[results->sample_count] = 0.0f;
+                results->sample_tick_indices[results->sample_count] = total_processed;
+                results->sample_prices[results->sample_count] = ticks[i].price;
+                results->sample_regimes[results->sample_count] = ctrl.regime.current_regime;
+                results->labels[results->sample_count] = 0.0f; // filled in post-pass
                 results->sample_count++;
             }
 
@@ -401,6 +403,46 @@ done:
     // populate TUISnapshot for dashboard panels (if requested)
     if (out_snapshot) {
         BacktestSnapshot_Copy<BACKTEST_FP>(out_snapshot, &ctrl, price_d_last, 0.0);
+    }
+
+    // post-processing: compute labels (needs forward-looking tick data)
+    // reload last data file for label computation (labels look forward within this file)
+    if (run_cfg->collect_features && results->sample_count > 0 && run_cfg->num_data_files > 0) {
+        // reload the last file (or all files concatenated for multi-file)
+        int label_count = 0;
+        HistoricalTick *label_ticks = (HistoricalTick *)malloc(2000000 * sizeof(HistoricalTick));
+        if (label_ticks) {
+            for (int f = 0; f < run_cfg->num_data_files; f++)
+                BacktestData_Load(label_ticks + label_count, &label_count, 2000000 - label_count,
+                                  run_cfg->data_paths[f]);
+
+            // get label function from table
+            LabelFn label_fn = NULL;
+            for (int l = 0; l < LABEL_COUNT; l++) {
+                if (label_table[l].id == run_cfg->label_type) {
+                    label_fn = label_table[l].fn;
+                    break;
+                }
+            }
+            if (!label_fn) label_fn = Label_WinLoss; // fallback
+
+            double tp = run_cfg->label_tp_pct > 0 ? run_cfg->label_tp_pct : 1.5;
+            double sl = run_cfg->label_sl_pct > 0 ? run_cfg->label_sl_pct : 1.0;
+            int fwd = run_cfg->label_forward_ticks > 0 ? run_cfg->label_forward_ticks : 1000;
+
+            for (int s = 0; s < results->sample_count; s++) {
+                int tidx = results->sample_tick_indices[s];
+                if (tidx >= label_count) tidx = label_count - 1;
+                int extra = (run_cfg->label_type == LABEL_REGIME)
+                    ? results->sample_regimes[s] : fwd;
+                results->labels[s] = label_fn(label_ticks, tidx, label_count,
+                                               results->sample_prices[s], tp, sl, extra);
+            }
+            free(label_ticks);
+
+            fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.1f%%, sl=%.1f%%)\n",
+                    results->sample_count, run_cfg->label_type, tp, sl);
+        }
     }
 
     // cleanup

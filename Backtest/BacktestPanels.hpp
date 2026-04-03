@@ -718,4 +718,236 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
     ImGui::End();
 }
 
+//======================================================================================================
+// [TRAINING PANEL STATE]
+//======================================================================================================
+struct TrainingPanelState {
+    // XGBoost hyperparameters
+    int max_depth;
+    float learning_rate;
+    int n_estimators;
+    int label_type;
+    float label_tp_pct;
+    float label_sl_pct;
+    int label_forward_ticks;
+    // results
+    float feature_importance[MODEL_MAX_FEATURES];
+    char feature_names[MODEL_MAX_FEATURES][32];
+    char model_path[256];
+    bool model_trained;
+    float train_accuracy;
+    int positive_count, negative_count;
+    char status_msg[128];
+};
+
+static inline void TrainingPanel_Init(TrainingPanelState *state) {
+    memset(state, 0, sizeof(*state));
+    state->max_depth = 4;
+    state->learning_rate = 0.1f;
+    state->n_estimators = 100;
+    state->label_type = LABEL_WIN_LOSS;
+    state->label_tp_pct = 1.5f;
+    state->label_sl_pct = 1.0f;
+    state->label_forward_ticks = 1000;
+    strncpy(state->model_path, "models/buy_signal.json", sizeof(state->model_path) - 1);
+    // feature names from ModelInference.hpp constants
+    strncpy(state->feature_names[FEAT_SHORT_SLOPE],    "short_slope", 31);
+    strncpy(state->feature_names[FEAT_SHORT_R2],       "short_r2", 31);
+    strncpy(state->feature_names[FEAT_SHORT_VARIANCE], "short_var", 31);
+    strncpy(state->feature_names[FEAT_LONG_SLOPE],     "long_slope", 31);
+    strncpy(state->feature_names[FEAT_LONG_R2],        "long_r2", 31);
+    strncpy(state->feature_names[FEAT_LONG_VARIANCE],  "long_var", 31);
+    strncpy(state->feature_names[FEAT_VOL_RATIO],      "vol_ratio", 31);
+    strncpy(state->feature_names[FEAT_ROR_SLOPE],      "ror_slope", 31);
+    strncpy(state->feature_names[FEAT_VOLUME_SLOPE],   "vol_slope", 31);
+    strncpy(state->feature_names[FEAT_VOLUME_DELTA],   "vol_delta", 31);
+    strncpy(state->feature_names[FEAT_EMA_SMA_SPREAD], "ema_sma", 31);
+    strncpy(state->feature_names[FEAT_VWAP_DEV],       "vwap_dev", 31);
+    strncpy(state->feature_names[FEAT_PRICE_STDDEV],   "stddev", 31);
+    strncpy(state->feature_names[FEAT_PRICE_AVG],      "price_avg", 31);
+    strncpy(state->feature_names[FEAT_VOLUME_AVG],     "vol_avg", 31);
+    strncpy(state->feature_names[FEAT_EMA_ABOVE_SMA],  "ema>sma", 31);
+}
+
+//======================================================================================================
+// [PANEL: TRAINING]
+//======================================================================================================
+static inline void GUI_Panel_Training(TrainingPanelState *state,
+                                       RunControlState *run_control,
+                                       DataPanelState *data) {
+    ImGui::Begin("Training");
+
+    // label config
+    static const char *label_names[] = {"Win/Loss", "Barrier", "Forward P&L", "Regime"};
+    ImGui::Combo("Label Type", &state->label_type, label_names, LABEL_COUNT);
+
+    if (state->label_type == LABEL_WIN_LOSS || state->label_type == LABEL_BARRIER) {
+        ImGui::InputFloat("TP Barrier %", &state->label_tp_pct, 0.1f, 0.5f, "%.1f");
+        ImGui::InputFloat("SL Barrier %", &state->label_sl_pct, 0.1f, 0.5f, "%.1f");
+    }
+    if (state->label_type == LABEL_FORWARD_PNL) {
+        ImGui::InputInt("Forward Ticks", &state->label_forward_ticks, 100, 1000);
+    }
+
+    ImGui::Separator();
+
+    // collect features button
+    bool has_data = data->selected_count > 0;
+    if (!has_data) ImGui::BeginDisabled();
+    if (ImGui::Button("Collect Features")) {
+        // set up run config with feature collection enabled
+        run_control->run_config.num_data_files = 0;
+        for (int i = 0; i < data->file_count && run_control->run_config.num_data_files < 16; i++) {
+            if (data->selected[i]) {
+                strncpy(run_control->run_config.data_paths[run_control->run_config.num_data_files],
+                        data->files[i], 255);
+                run_control->run_config.num_data_files++;
+            }
+        }
+        strncpy(run_control->run_config.config_path, run_control->config_path, 255);
+        run_control->run_config.use_config_override = 0;
+        run_control->run_config.collect_features = 1;
+        run_control->run_config.label_type = state->label_type;
+        run_control->run_config.label_tp_pct = state->label_tp_pct;
+        run_control->run_config.label_sl_pct = state->label_sl_pct;
+        run_control->run_config.label_forward_ticks = state->label_forward_ticks;
+
+        // start the run
+        run_control->progress_pct = 0;
+        run_control->cancel_flag = 0;
+        run_control->complete = 0;
+        run_control->running = 1;
+
+        if (run_control->candle_acc)
+            CandleAccumulator_Init(run_control->candle_acc, 60);
+
+        BacktestWorkerArgs *args = (BacktestWorkerArgs *)malloc(sizeof(BacktestWorkerArgs));
+        args->state = run_control;
+        pthread_create(&run_control->worker_tid, NULL, backtest_worker_fn, args);
+        pthread_detach(run_control->worker_tid);
+    }
+    if (!has_data) {
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled("Select data files first");
+    }
+
+    // show feature collection status
+    BacktestResults *results = &run_control->results;
+    if (results->sample_count > 0) {
+        // count label distribution
+        state->positive_count = 0;
+        state->negative_count = 0;
+        for (int i = 0; i < results->sample_count; i++) {
+            if (results->labels[i] >= 0.5f) state->positive_count++;
+            else state->negative_count++;
+        }
+
+        ImGui::Text("Samples: %d  |  +: %d  |  -: %d  |  Ratio: %.1f%%",
+                     results->sample_count, state->positive_count, state->negative_count,
+                     results->sample_count > 0
+                         ? (float)state->positive_count / results->sample_count * 100.0f : 0.0f);
+    }
+
+    ImGui::Separator();
+
+    // XGBoost hyperparameters
+    ImGui::Text("XGBoost Parameters");
+    ImGui::InputInt("Max Depth", &state->max_depth, 1, 2);
+    ImGui::InputFloat("Learning Rate", &state->learning_rate, 0.01f, 0.1f, "%.3f");
+    ImGui::InputInt("Estimators", &state->n_estimators, 10, 50);
+    ImGui::InputText("Model Path", state->model_path, sizeof(state->model_path));
+
+    // train button
+    bool can_train = results->sample_count >= 10;
+#ifndef USE_XGBOOST
+    can_train = false;
+#endif
+    if (!can_train) ImGui::BeginDisabled();
+    if (ImGui::Button("Train Model")) {
+#ifdef USE_XGBOOST
+        // create output directory
+        mkdir("models", 0755);
+
+        DMatrixHandle dtrain;
+        XGDMatrixCreateFromMat(results->feature_matrix, results->sample_count,
+                               MODEL_NUM_FEATURES, NAN, &dtrain);
+        XGDMatrixSetFloatInfo(dtrain, "label", results->labels, results->sample_count);
+
+        BoosterHandle booster;
+        XGBoosterCreate(&dtrain, 1, &booster);
+
+        char depth_s[8]; snprintf(depth_s, 8, "%d", state->max_depth);
+        char lr_s[16]; snprintf(lr_s, 16, "%f", state->learning_rate);
+        XGBoosterSetParam(booster, "max_depth", depth_s);
+        XGBoosterSetParam(booster, "eta", lr_s);
+        XGBoosterSetParam(booster, "objective", "binary:logistic");
+        XGBoosterSetParam(booster, "nthread", "4");
+        XGBoosterSetParam(booster, "verbosity", "0");
+
+        for (int i = 0; i < state->n_estimators; i++)
+            XGBoosterUpdateOneIter(booster, i, dtrain);
+
+        // embed model format version for compatibility check
+        char ver_s[8]; snprintf(ver_s, 8, "%d", MODEL_FORMAT_VERSION);
+        XGBoosterSetAttr(booster, "foxml_version", ver_s);
+
+        // save model
+        XGBoosterSaveModel(booster, state->model_path);
+
+        // compute training accuracy (in-sample — just for sanity check)
+        bst_ulong out_len;
+        const float *out_result;
+        DMatrixHandle dpred;
+        XGDMatrixCreateFromMat(results->feature_matrix, results->sample_count,
+                               MODEL_NUM_FEATURES, NAN, &dpred);
+        XGBoosterPredict(booster, dpred, 0, 0, 0, &out_len, &out_result);
+        int correct = 0;
+        for (int i = 0; i < results->sample_count; i++) {
+            int pred = out_result[i] >= 0.5f ? 1 : 0;
+            int truth = results->labels[i] >= 0.5f ? 1 : 0;
+            if (pred == truth) correct++;
+        }
+        state->train_accuracy = (float)correct / results->sample_count * 100.0f;
+        XGDMatrixFree(dpred);
+
+        // feature importance (gain-based)
+        memset(state->feature_importance, 0, sizeof(state->feature_importance));
+        // XGBoost doesn't have a simple GetScore in C API for all features
+        // use prediction contribution as a proxy: not available in all versions
+        // for now, zero-importance displayed (Phase 6: implement via dump/parse)
+
+        XGDMatrixFree(dtrain);
+        XGBoosterFree(booster);
+
+        state->model_trained = true;
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Model saved to %s (accuracy: %.1f%%)", state->model_path, state->train_accuracy);
+#endif
+    }
+    if (!can_train) {
+        ImGui::EndDisabled();
+#ifndef USE_XGBOOST
+        ImGui::SameLine();
+        ImGui::TextDisabled("Build with -DUSE_XGBOOST=ON");
+#else
+        if (results->sample_count < 10) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("Collect features first (need 10+ samples)");
+        }
+#endif
+    }
+
+    // training results
+    if (state->model_trained) {
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.55f, 0.76f, 0.51f, 1.0f), "%s", state->status_msg);
+        ImGui::Text("Train Accuracy: %.1f%% (in-sample)", state->train_accuracy);
+        ImGui::Text("Load in live engine: ml_model_path=%s", state->model_path);
+        ImGui::Text("                     ml_backend=1");
+    }
+
+    ImGui::End();
+}
+
 #endif // BACKTEST_PANELS_HPP
