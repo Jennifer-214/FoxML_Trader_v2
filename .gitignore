@@ -1,9 +1,12 @@
 build/
 build_gui/
 build_latency/
+build_suite/
+build_suite_asan/
 vendor/
 logging/
 paper_runs/
+data/
 *.o
 *.d
 plans/
