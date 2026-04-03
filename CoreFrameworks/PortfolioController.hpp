@@ -66,6 +66,32 @@ static inline void log_ts(char *buf, size_t len) {
 #define GATE_REASON_DOWNTREND  12  // downtrend regime
 #define GATE_REASON_COST       13  // cost gate (trade cost exceeds breakeven alpha)
 #define NUM_GATE_REASONS       14
+
+// centralized gate reason metadata — renderers look up name/description here.
+// add new gate reasons: one #define above + one row below.
+struct GateReasonDef {
+    const char *name;        // short label: "warmup", "kill"
+    const char *description; // detail text (may be printf format string for dynamic data)
+    int is_danger;           // 1 for KILL/DANGER (red color), 0 for others (yellow)
+};
+
+static const GateReasonDef GATE_REASON_TABLE[NUM_GATE_REASONS] = {
+    {"ok",         "",                                                  0},
+    {"warmup",     "warmup — waiting for market data (%d/%d samples)",  0},
+    {"no_signal",  "no signal — strategy returned no buy price",        0},
+    {"no_trade",   "no-trade band — signal too weak for fees",          0},
+    {"book",       "book imbalance — insufficient bid pressure",        0},
+    {"danger",     "danger gradient — crash protection (score: %.0f%%)", 1},
+    {"kill",       "kill switch — max drawdown hit",                    1},
+    {"recovery",   "kill recovery — observation period",                0},
+    {"volatile",   "volatile regime — buying paused",                   0},
+    {"cooldown",   "post-SL cooldown (%d cycles remaining)",            0},
+    {"wind_down",  "session wind-down — closing time",                  0},
+    {"paused",     "manual pause",                                      0},
+    {"downtrend",  "downtrend — buying paused",                         0},
+    {"cost",       "cost gate — trade cost > TP target",                0},
+};
+
 //======================================================================================================
 template <unsigned F> struct PortfolioController {
   //================================================================================================
