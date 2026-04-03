@@ -137,6 +137,25 @@ static inline void BacktestSnapshot_Copy(TUISnapshot *snap,
         snap->vol_ratio = (lv > 1e-15) ? sv / lv : 1.0;
     }
 
+    // vol-scaled sizing
+    snap->vol_scale = ctrl->last_vol_scale;
+
+    // FoxML integration (Phase 6C)
+    snap->cost_bps = ctrl->last_cost_bps;
+    snap->foxml_vol_scale = ctrl->foxml_vol_scale;
+    snap->confidence = ctrl->last_confidence;
+    snap->cost_gate_enabled = ctrl->config.cost_gate_enabled;
+    snap->foxml_vol_scaling_enabled = ctrl->config.foxml_vol_scaling_enabled;
+    snap->confidence_enabled = ctrl->config.confidence_enabled;
+    snap->bandit_enabled = ctrl->config.bandit_enabled;
+    if (ctrl->config.bandit_enabled) {
+        snap->bandit_blend = Bandit_EffectiveBlend(&ctrl->bandit);
+        snap->bandit_active = (ctrl->bandit.total_steps >= ctrl->bandit.min_samples) ? 1 : 0;
+        double bw[BANDIT_MAX_ARMS];
+        Bandit_GetWeights(&ctrl->bandit, bw);
+        for (int i = 0; i < 5; i++) snap->bandit_weights[i] = bw[i];
+    }
+
     // config display
     snap->cfg_tp  = FPN_ToDouble(ctrl->config.take_profit_pct) * 100.0;
     snap->cfg_sl  = FPN_ToDouble(ctrl->config.stop_loss_pct) * 100.0;
