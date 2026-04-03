@@ -25,7 +25,7 @@
 struct HistoricalTick {
     double price;
     double qty;
-    int64_t timestamp_us;
+    int64_t timestamp_us; // Binance aggTrades: microseconds since epoch (NOT milliseconds)
     int is_buyer_maker;
 };
 

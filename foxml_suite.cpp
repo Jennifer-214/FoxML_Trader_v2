@@ -194,7 +194,7 @@ int main(int argc, char *argv[]) {
 
     // trade CSV reader for chart markers
     TradeData trades;
-    TradeData_Init(&trades, "logging/BACKTEST_order_history.csv");
+    TradeData_Init(&trades, BACKTEST_TRADE_CSV);
 
     // chart settings
     ChartSettings chart_settings;
@@ -225,7 +225,7 @@ int main(int argc, char *argv[]) {
 
     // trade history
     TradeHistory trade_history;
-    TradeHistory_Init(&trade_history, "logging/BACKTEST_order_history.csv");
+    TradeHistory_Init(&trade_history, BACKTEST_TRADE_CSV);
 
     bool first_frame = true;
     bool running = true;

@@ -142,6 +142,7 @@ struct BacktestStats {
 //======================================================================================================
 #define BACKTEST_MAX_EQUITY    8192
 #define BACKTEST_MAX_SAMPLES   500000
+#define BACKTEST_TRADE_CSV     "logging/BACKTEST_order_history.csv"
 
 struct BacktestResults {
     BacktestStats stats;
@@ -283,10 +284,10 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
     // init trade log — write to backtest output
     mkdir("logging", 0755);
     // truncate trade log for each run (live engine appends, but backtest should start fresh)
-    remove("logging/BACKTEST_order_history.csv");
+    remove(BACKTEST_TRADE_CSV);
     TradeLog log;
     snprintf(results->trade_csv_path, sizeof(results->trade_csv_path),
-             "logging/BACKTEST_order_history.csv");
+             BACKTEST_TRADE_CSV);
     TradeLog_Init(&log, "BACKTEST");
 
     // load all data files
@@ -592,13 +593,14 @@ struct WalkForwardResults {
 
 // compute accuracy: fraction of predictions matching labels (for classification)
 // threshold: prediction >= thresh → class 1, else class 0
+// uses > 0.5f for truth so neutral (0.5) labels are never counted as positive
 static inline float WalkForward_ComputeAccuracy(const float *predictions, const float *labels,
                                                   int count, float threshold) {
     if (count <= 0) return 0.0f;
     int correct = 0;
     for (int i = 0; i < count; i++) {
         int pred_class = (predictions[i] >= threshold) ? 1 : 0;
-        int true_class = (labels[i] >= 0.5f) ? 1 : 0;
+        int true_class = (labels[i] > 0.5f) ? 1 : 0;
         if (pred_class == true_class) correct++;
     }
     return (float)correct / count;
@@ -656,6 +658,21 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         return;
     }
 
+    // allocate compaction buffers for neutral filtering (reused per fold)
+    // neutral labels (== 0.5f) are excluded — XGBoost binary needs 0 or 1 only
+    float *train_feat_buf = (float *)malloc(data->sample_count * MODEL_NUM_FEATURES * sizeof(float));
+    float *train_lbl_buf  = (float *)malloc(data->sample_count * sizeof(float));
+    float *test_feat_buf  = (float *)malloc(data->sample_count * MODEL_NUM_FEATURES * sizeof(float));
+    float *test_lbl_buf   = (float *)malloc(data->sample_count * sizeof(float));
+    if (!train_feat_buf || !train_lbl_buf || !test_feat_buf || !test_lbl_buf) {
+        fprintf(stderr, "[walkforward] failed to allocate compaction buffers\n");
+        free(predictions);
+        free(train_feat_buf); free(train_lbl_buf);
+        free(test_feat_buf);  free(test_lbl_buf);
+        *progress_pct = 100;
+        return;
+    }
+
     float sum_val = 0.0f, sum_val_sq = 0.0f, sum_train = 0.0f;
     int counted_folds = 0;
 
@@ -674,17 +691,48 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         fprintf(stderr, "[walkforward] fold %d/%d: training on %d samples, testing on %d...\n",
                 f + 1, n_splits, sp->train_count, sp->test_count);
 
-        // build XGBoost DMatrix for train set
-        const float *train_features = &data->feature_matrix[sp->train_start * MODEL_NUM_FEATURES];
-        const float *train_labels = &data->labels[sp->train_start];
-        const float *test_features = &data->feature_matrix[sp->test_start * MODEL_NUM_FEATURES];
-        const float *test_labels = &data->labels[sp->test_start];
+        // compact train split — skip neutral labels (== 0.5f)
+        // XGBoost binary:logistic requires 0 or 1 only; 0.5 from Barrier labels must be excluded
+        int n_train = 0;
+        for (int i = 0; i < sp->train_count; i++) {
+            float lbl = data->labels[sp->train_start + i];
+            if (lbl == 0.5f) continue;
+            memcpy(&train_feat_buf[n_train * MODEL_NUM_FEATURES],
+                   &data->feature_matrix[(sp->train_start + i) * MODEL_NUM_FEATURES],
+                   MODEL_NUM_FEATURES * sizeof(float));
+            train_lbl_buf[n_train] = lbl;
+            n_train++;
+        }
+
+        // compact test split — skip neutral labels (== 0.5f)
+        int n_test = 0;
+        for (int i = 0; i < sp->test_count; i++) {
+            float lbl = data->labels[sp->test_start + i];
+            if (lbl == 0.5f) continue;
+            memcpy(&test_feat_buf[n_test * MODEL_NUM_FEATURES],
+                   &data->feature_matrix[(sp->test_start + i) * MODEL_NUM_FEATURES],
+                   MODEL_NUM_FEATURES * sizeof(float));
+            test_lbl_buf[n_test] = lbl;
+            n_test++;
+        }
+
+        fprintf(stderr, "[walkforward] fold %d/%d: after neutral filter — train %d→%d, test %d→%d\n",
+                f + 1, n_splits, sp->train_count, n_train, sp->test_count, n_test);
+
+        if (n_train < 10 || n_test < 5) {
+            fprintf(stderr, "[walkforward] fold %d: too few non-neutral samples — skipping\n", f + 1);
+            fr->valid = 0;
+            continue;
+        }
+
+        const float *train_labels = train_lbl_buf;
+        const float *test_labels  = test_lbl_buf;
 
         DMatrixHandle dtrain = NULL, dtest = NULL;
         BoosterHandle booster = NULL;
 
-        // create train DMatrix
-        int ret = XGDMatrixCreateFromMat(train_features, sp->train_count,
+        // create train DMatrix from compacted (neutral-free) data
+        int ret = XGDMatrixCreateFromMat(train_feat_buf, n_train,
                                           MODEL_NUM_FEATURES, -1.0f, &dtrain);
         if (ret != 0) {
             fprintf(stderr, "[walkforward] fold %d: failed to create train DMatrix: %s\n",
@@ -692,10 +740,10 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             fr->valid = 0;
             continue;
         }
-        XGDMatrixSetFloatInfo(dtrain, "label", train_labels, sp->train_count);
+        XGDMatrixSetFloatInfo(dtrain, "label", train_labels, n_train);
 
-        // create test DMatrix
-        ret = XGDMatrixCreateFromMat(test_features, sp->test_count,
+        // create test DMatrix from compacted (neutral-free) data
+        ret = XGDMatrixCreateFromMat(test_feat_buf, n_test,
                                       MODEL_NUM_FEATURES, -1.0f, &dtest);
         if (ret != 0) {
             fprintf(stderr, "[walkforward] fold %d: failed to create test DMatrix: %s\n",
@@ -704,7 +752,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             fr->valid = 0;
             continue;
         }
-        XGDMatrixSetFloatInfo(dtest, "label", test_labels, sp->test_count);
+        XGDMatrixSetFloatInfo(dtest, "label", test_labels, n_test);
 
         // create and train booster
         ret = XGBoosterCreate(&dtrain, 1, &booster);
@@ -741,9 +789,9 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             bst_ulong out_len;
             const float *out_result;
             ret = XGBoosterPredict(booster, dtrain, 0, 0, 0, &out_len, &out_result);
-            if (ret == 0 && (int)out_len == sp->train_count) {
+            if (ret == 0 && (int)out_len == n_train) {
                 fr->train_accuracy = WalkForward_ComputeAccuracy(
-                    out_result, train_labels, sp->train_count, 0.5f);
+                    out_result, train_labels, n_train, 0.5f);
             }
         }
 
@@ -752,9 +800,9 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             bst_ulong out_len;
             const float *out_result;
             ret = XGBoosterPredict(booster, dtest, 0, 0, 0, &out_len, &out_result);
-            if (ret == 0 && (int)out_len == sp->test_count) {
+            if (ret == 0 && (int)out_len == n_test) {
                 fr->val_accuracy = WalkForward_ComputeAccuracy(
-                    out_result, test_labels, sp->test_count, 0.5f);
+                    out_result, test_labels, n_test, 0.5f);
             }
         }
 
@@ -763,8 +811,8 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         // for now, zero-fill — populated when we add importance extraction
         memset(fr->feature_importances, 0, sizeof(fr->feature_importances));
 
-        fr->train_samples = sp->train_count;
-        fr->test_samples = sp->test_count;
+        fr->train_samples = n_train;
+        fr->test_samples = n_test;
         fr->valid = 1;
 
         // overfit detection per fold
@@ -792,6 +840,10 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     }
 
     free(predictions);
+    free(train_feat_buf);
+    free(train_lbl_buf);
+    free(test_feat_buf);
+    free(test_lbl_buf);
 
     // compute aggregate stats
     if (counted_folds > 0) {

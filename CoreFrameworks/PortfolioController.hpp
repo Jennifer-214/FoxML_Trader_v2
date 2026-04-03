@@ -487,6 +487,10 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
 
     // win/loss counters: TP exit with positive P&L = win, everything else = loss
     // a TP exit where fees ate the profit is still a loss, not a win
+    //
+    // NOTE: paired positions (pair_index >= 0) count as separate wins/losses.
+    // total_buys counts each buy event (1 buy = 2 paired positions = 2 exits).
+    // trade count in stats = total_buys, not wins + losses.
     int is_profitable = !pos_pnl.sign & !FPN_IsZero(pos_pnl);
     ctrl->wins += ((reason == 0) & is_profitable);
     ctrl->losses += !((reason == 0) & is_profitable);
