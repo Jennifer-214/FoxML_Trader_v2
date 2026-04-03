@@ -889,15 +889,19 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // count label distribution
         state->positive_count = 0;
         state->negative_count = 0;
+        int neutral_count = 0;
         for (int i = 0; i < results->sample_count; i++) {
-            if (results->labels[i] >= 0.5f) state->positive_count++;
-            else state->negative_count++;
+            if (results->labels[i] > 0.5f) state->positive_count++;
+            else if (results->labels[i] < 0.5f) state->negative_count++;
+            else neutral_count++;
         }
 
-        ImGui::Text("Samples: %d  |  +: %d  |  -: %d  |  Ratio: %.1f%%",
+        int labeled = state->positive_count + state->negative_count;
+        ImGui::Text("Samples: %d  |  +: %d  |  -: %d  |  neutral: %d  |  Ratio: %.1f%%",
                      results->sample_count, state->positive_count, state->negative_count,
-                     results->sample_count > 0
-                         ? (float)state->positive_count / results->sample_count * 100.0f : 0.0f);
+                     neutral_count,
+                     labeled > 0
+                         ? (float)state->positive_count / labeled * 100.0f : 0.0f);
     }
 
     ImGui::Separator();
@@ -920,10 +924,24 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // create output directory
         mkdir("models", 0755);
 
+        // filter out neutral labels (0.5) — XGBoost binary needs 0 or 1
+        // compact features + labels into contiguous arrays without neutrals
+        int n_valid = 0;
+        for (int i = 0; i < results->sample_count; i++) {
+            if (results->labels[i] == 0.5f) continue;
+            if (n_valid != i) {
+                memcpy(&results->feature_matrix[n_valid * MODEL_NUM_FEATURES],
+                       &results->feature_matrix[i * MODEL_NUM_FEATURES],
+                       MODEL_NUM_FEATURES * sizeof(float));
+                results->labels[n_valid] = results->labels[i];
+            }
+            n_valid++;
+        }
+
         DMatrixHandle dtrain;
-        XGDMatrixCreateFromMat(results->feature_matrix, results->sample_count,
+        XGDMatrixCreateFromMat(results->feature_matrix, n_valid,
                                MODEL_NUM_FEATURES, NAN, &dtrain);
-        XGDMatrixSetFloatInfo(dtrain, "label", results->labels, results->sample_count);
+        XGDMatrixSetFloatInfo(dtrain, "label", results->labels, n_valid);
 
         BoosterHandle booster;
         XGBoosterCreate(&dtrain, 1, &booster);
@@ -962,16 +980,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         bst_ulong out_len;
         const float *out_result;
         DMatrixHandle dpred;
-        XGDMatrixCreateFromMat(results->feature_matrix, results->sample_count,
+        XGDMatrixCreateFromMat(results->feature_matrix, n_valid,
                                MODEL_NUM_FEATURES, NAN, &dpred);
         XGBoosterPredict(booster, dpred, 0, 0, 0, &out_len, &out_result);
         int correct = 0;
-        for (int i = 0; i < results->sample_count; i++) {
+        for (int i = 0; i < n_valid; i++) {
             int pred = out_result[i] >= 0.5f ? 1 : 0;
-            int truth = results->labels[i] >= 0.5f ? 1 : 0;
+            int truth = results->labels[i] > 0.5f ? 1 : 0;
             if (pred == truth) correct++;
         }
-        state->train_accuracy = (float)correct / results->sample_count * 100.0f;
+        state->train_accuracy = (n_valid > 0) ? (float)correct / n_valid * 100.0f : 0.0f;
         XGDMatrixFree(dpred);
 
         // feature importance (gain-based)
