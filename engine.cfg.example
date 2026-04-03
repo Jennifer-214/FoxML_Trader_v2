@@ -169,3 +169,104 @@ log_file=engine.log             # stderr redirect when tui_enabled=0 (append mod
 
 use_real_money=0                # 0 = paper trading (default safe), 1 = real orders via REST API
 # use_binance_us=1              # uncomment for Binance US (required for US-based users)
+
+#==============================================================================
+# KILL SWITCH
+#==============================================================================
+# halts trading when session losses exceed threshold. resets at session boundary.
+# press 'k' in TUI to manually reset.
+
+kill_switch_enabled=1           # 0 = disabled, 1 = active
+kill_switch_daily_loss_pct=3.00 # halt if equity drops this % from session start
+kill_switch_drawdown_pct=5.00   # halt if this % below intra-session peak
+kill_recovery_warmup=10         # slow-path cycles to observe after kill reset before re-entering
+
+#==============================================================================
+# EMA GATE
+#==============================================================================
+# optional proactive buy gate: smooths price into an EMA, only buys below it.
+# prevents buying into extended rallies. disabled by default.
+
+gate_ema_enabled=0              # 0 = disabled, 1 = gate buys below EMA
+gate_ema_alpha=0.997            # EMA smoothing (0.99 = fast, 0.999 = slow)
+
+#==============================================================================
+# DANGER GRADIENT
+#==============================================================================
+# tightens buy gate proportionally as price drops below rolling avg.
+# at crash_stddevs, gate is fully zeroed (no buys during crashes).
+
+danger_enabled=1                # 0 = disabled, 1 = active
+danger_warn_stddevs=3.0         # gate begins tightening at this σ below avg
+danger_crash_stddevs=6.0        # gate fully zeroed at this σ (crash protection)
+
+#==============================================================================
+# VOL-SCALED SIZING
+#==============================================================================
+# scales position size inversely with volatility — smaller in volatile markets,
+# larger in calm ones. targets consistent risk per trade.
+
+vol_sizing_enabled=0            # 0 = fixed risk_pct, 1 = vol-scaled
+vol_scale_min=0.25              # minimum scale factor (0.25 = at least 25% of base qty)
+vol_scale_max=2.00              # maximum scale factor (2.0 = at most 200% of base qty)
+
+#==============================================================================
+# NO-TRADE BAND
+#==============================================================================
+# suppresses entries when the buy signal is too weak to clear round-trip fees.
+
+no_trade_band_enabled=1         # 0 = disabled, 1 = active
+no_trade_band_mult=3.00         # signal must exceed fee_rate × this to trade
+
+#==============================================================================
+# SESSION FILTERS
+#==============================================================================
+# per-session volume gate multipliers (UTC). higher = more selective.
+# liquidity varies by session — US has deepest books, Asian thinnest.
+
+session_filter_enabled=0        # 0 = disabled, 1 = apply session multipliers
+session_asian_mult=1.50         # 00-07 UTC
+session_european_mult=1.20      # 07-13 UTC
+session_us_mult=0.80            # 13-20 UTC
+session_overnight_mult=1.30     # 20-00 UTC
+
+#==============================================================================
+# GATE RECOVERY
+#==============================================================================
+# prevents permanent lockout after consecutive losses
+
+idle_reset_cycles=50            # slow-path cycles with no fill before gate decay
+sl_cooldown_cycles=5            # slow-path cycles to pause after stop loss
+sl_cooldown_adaptive=1          # 0 = fixed cycles, 1 = scale by trend confidence at SL time
+
+#==============================================================================
+# PARTIAL EXITS
+#==============================================================================
+# split exits: take partial profit at TP1, ride remainder to TP2
+
+partial_exit_enabled=0          # 0 = single exit at TP, 1 = split exits
+partial_exit_pct=0.50           # fraction to exit at TP1 (0.50 = 50%)
+tp2_mult=2.00                   # TP2 = TP1 distance × this
+breakeven_on_partial=1          # move SL to breakeven after TP1 hit
+
+#==============================================================================
+# ML INFERENCE
+#==============================================================================
+# XGBoost or LightGBM model for buy signals. train in foxml_suite, load here.
+# model must match current MODEL_FORMAT_VERSION or it will be rejected.
+
+ml_backend=0                    # 0 = disabled, 1 = xgboost, 2 = lightgbm
+ml_model_path=                  # path to buy-signal model file (e.g. models/buy_signal.xgb)
+ml_buy_threshold=0.50           # prediction threshold for buy signal (0.50 = 50% confidence)
+
+#==============================================================================
+# FOXML INTEGRATION
+#==============================================================================
+# shared ML modules ported from FoxML Python stack. all default OFF.
+
+cost_gate_enabled=0             # suppress entries when estimated trade cost > TP target
+foxml_vol_scaling_enabled=0     # scale position size inversely with volatility
+foxml_vol_scaling_z_max=3.0     # z-score clipping threshold for vol scaler
+bandit_enabled=0                # blend regime strategy with Exp3-IX bandit weights
+bandit_blend_ratio=0.30         # max bandit influence fraction (ramps from 0% to this)
+confidence_enabled=0            # dynamic buy threshold from prediction quality scoring
