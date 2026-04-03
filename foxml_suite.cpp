@@ -283,7 +283,10 @@ int main(int argc, char *argv[]) {
         }
 
         // settings (config editing — reuse existing panel)
-        GUI_Panel_Settings(&settings, NULL);
+        // suite doesn't hot-reload mid-backtest, but needs a valid pointer (NULL = crash)
+        static volatile sig_atomic_t suite_reload_flag = 0;
+        GUI_Panel_Settings(&settings, &suite_reload_flag);
+        suite_reload_flag = 0; // consume — config takes effect on next run
 
         // trade history (reuse existing panel — reads backtest CSV)
         if (run_control.complete) {
