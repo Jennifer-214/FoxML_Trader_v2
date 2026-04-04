@@ -283,6 +283,18 @@ Version string: `engine vX.Y.Z` — defined ONCE in `Version.hpp` as `ENGINE_VER
 - Inline comments explain reasoning and learning insights
 - User's voice/comments must be preserved exactly when editing existing files
 
+### Dynamic Sizing (Backtest Suite ONLY)
+Backtest buffers MUST NOT use compile-time caps that silently truncate data. Use dynamic allocation with growth:
+- **Sample buffers** (`BacktestResults`): start at `BACKTEST_SAMPLES_INIT`, grow via `BacktestResults_EnsureCapacity()` (2x realloc)
+- **Tick buffers**: sized from first-pass line count (no fixed max_ticks)
+- **Label reload**: sized to `total_processed` (no arbitrary cap)
+- **Data files**: `MAX_DATA_FILES` in Limits.hpp (256), not hardcoded 16
+- **Init/Free**: always call `BacktestResults_Init()` before use, `BacktestResults_Free()` after (optimizer included)
+
+When adding new backtest buffers, prefer `malloc` + `realloc` over static arrays. Log allocation failures and degrade gracefully (stop collecting, don't crash).
+
+**Live engine is the opposite** — zero dynamic allocation on the hot path. All live buffers are fixed-size, pre-allocated at startup. No malloc, no realloc, no syscalls in the tick loop. This is a hard rule for the execution engine (`build/engine`, `build_gui/engine_gui`).
+
 ## Safety Invariants
 
 Rules that MUST be followed when writing or modifying trading logic. These prevent the classes of bugs found in the March 2026 audit.

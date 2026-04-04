@@ -200,6 +200,68 @@ static inline int ValidationSplit_Generate(PurgedSplit *folds, int total_samples
     return valid_count;
 }
 
+// overload: caller provides an explicit purge gap (already computed, no PurgeGap_Compute call)
+// used by walk-forward when splitting in non-neutral sample space where raw lookback doesn't apply
+static inline int ValidationSplit_GenerateExplicit(PurgedSplit *folds, int total_samples,
+                                                    int n_splits, int explicit_purge_gap,
+                                                    int min_train) {
+    if (n_splits < 2) n_splits = 2;
+    if (n_splits > VALIDATION_MAX_FOLDS) n_splits = VALIDATION_MAX_FOLDS;
+    if (total_samples < n_splits * 2) return 0;
+
+    int purge_gap = explicit_purge_gap;
+    int fold_size = total_samples / n_splits;
+    int remainder = total_samples % n_splits;
+
+    int valid_count = 0;
+    int current = 0;
+
+    for (int i = 0; i < n_splits; i++) {
+        int this_fold_size = fold_size + (i < remainder ? 1 : 0);
+        int test_start = current;
+        int test_end = current + this_fold_size;
+        if (test_end > total_samples) test_end = total_samples;
+
+        int train_end = test_start - purge_gap;
+        int train_start = 0;
+
+        PurgedSplit *f = &folds[i];
+        f->purge_gap = purge_gap;
+
+        if (train_end <= train_start || (train_end - train_start) < min_train) {
+            f->train_start = 0;
+            f->train_end = 0;
+            f->test_start = test_start;
+            f->test_end = test_end;
+            f->train_count = 0;
+            f->test_count = test_end - test_start;
+            f->valid = 0;
+        } else {
+            f->train_start = train_start;
+            f->train_end = train_end;
+            f->test_start = test_start;
+            f->test_end = test_end;
+            f->train_count = train_end - train_start;
+            f->test_count = test_end - test_start;
+            f->valid = 1;
+            valid_count++;
+        }
+
+        current = test_end;
+    }
+
+    if (valid_count == 0) {
+        fprintf(stderr, "[validation] WARNING: all %d folds skipped — purge_gap=%d "
+                "is too large for %d samples.\n", n_splits, purge_gap, total_samples);
+    } else {
+        fprintf(stderr, "[validation] generated %d/%d valid folds "
+                "(explicit purge_gap=%d, total=%d)\n",
+                valid_count, n_splits, purge_gap, total_samples);
+    }
+
+    return valid_count;
+}
+
 //======================================================================================================
 // [VALIDATION HELPERS]
 //======================================================================================================

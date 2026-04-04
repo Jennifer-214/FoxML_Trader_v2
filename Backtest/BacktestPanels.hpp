@@ -110,6 +110,7 @@ struct RunControlState {
 static inline void RunControl_Init(RunControlState *state) {
     memset(state, 0, sizeof(*state));
     strncpy(state->config_path, "backtest.cfg", sizeof(state->config_path) - 1);
+    BacktestResults_Init(&state->results);
 }
 
 // worker thread function
@@ -136,7 +137,7 @@ static inline void RunControl_Start(RunControlState *state, DataPanelState *data
 
     // build run config from data panel selection
     state->run_config.num_data_files = 0;
-    for (int i = 0; i < data->file_count && state->run_config.num_data_files < 16; i++) {
+    for (int i = 0; i < data->file_count && state->run_config.num_data_files < MAX_DATA_FILES; i++) {
         if (data->selected[i]) {
             strncpy(state->run_config.data_paths[state->run_config.num_data_files],
                     data->files[i], 255);
@@ -600,7 +601,7 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
         if (ImGui::Button("Run Grid Search")) {
             // build run config from data selection
             state->run_config.num_data_files = 0;
-            for (int i = 0; i < data->file_count && state->run_config.num_data_files < 16; i++) {
+            for (int i = 0; i < data->file_count && state->run_config.num_data_files < MAX_DATA_FILES; i++) {
                 if (data->selected[i]) {
                     strncpy(state->run_config.data_paths[state->run_config.num_data_files],
                             data->files[i], 255);
@@ -831,13 +832,26 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // label config
     static const char *label_names[] = {"Win/Loss", "Barrier", "Forward P&L", "Regime"};
     ImGui::Combo("Label Type", &state->label_type, label_names, LABEL_COUNT);
+    ImGui::SetItemTooltip("How to label each sample for ML training:\n"
+                          "  Win/Loss: 1 if price hits TP%% first, 0 if SL%% first\n"
+                          "  Barrier: same but returns 0.5 (neutral) if neither hit within horizon\n"
+                          "  Forward P&L: 1 if price is higher N ticks later, 0 if lower\n"
+                          "  Regime: labels by detected regime (not for buy signal)");
 
     if (state->label_type == LABEL_WIN_LOSS || state->label_type == LABEL_BARRIER) {
         ImGui::InputFloat("TP Barrier %", &state->label_tp_pct, 0.1f, 0.5f, "%.1f");
+        ImGui::SetItemTooltip("Take-profit barrier as %% of price\n"
+                              "label = 1 if price moves up this much before SL is hit\n"
+                              "wider = fewer but higher-confidence labels");
         ImGui::InputFloat("SL Barrier %", &state->label_sl_pct, 0.1f, 0.5f, "%.1f");
+        ImGui::SetItemTooltip("Stop-loss barrier as %% of price\n"
+                              "label = 0 if price drops this much before TP is hit\n"
+                              "wider = fewer but higher-confidence labels");
     }
     if (state->label_type == LABEL_FORWARD_PNL) {
         ImGui::InputInt("Forward Ticks", &state->label_forward_ticks, 100, 1000);
+        ImGui::SetItemTooltip("How many ticks to look ahead\n"
+                              "label = 1 if price is higher, 0 if lower");
     }
 
     ImGui::Separator();
@@ -846,9 +860,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     bool has_data = data->selected_count > 0;
     if (!has_data) ImGui::BeginDisabled();
     if (ImGui::Button("Collect Features")) {
+        // clear previous training/walk-forward results on re-collect
+        state->model_trained = false;
+        state->status_msg[0] = '\0';
+        state->wf_has_results = false;
         // set up run config with feature collection enabled
         run_control->run_config.num_data_files = 0;
-        for (int i = 0; i < data->file_count && run_control->run_config.num_data_files < 16; i++) {
+        for (int i = 0; i < data->file_count && run_control->run_config.num_data_files < MAX_DATA_FILES; i++) {
             if (data->selected[i]) {
                 strncpy(run_control->run_config.data_paths[run_control->run_config.num_data_files],
                         data->files[i], 255);
@@ -902,6 +920,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                      neutral_count,
                      labeled > 0
                          ? (float)state->positive_count / labeled * 100.0f : 0.0f);
+        ImGui::SetItemTooltip("Samples: total feature vectors collected (one per slow-path cycle)\n"
+                              "+: labeled as buy signal (price hit TP barrier)\n"
+                              "-: labeled as no-buy (price hit SL barrier)\n"
+                              "neutral: neither barrier hit within horizon (excluded from training)\n"
+                              "Ratio: +/(+ + -) — class balance among non-neutral labels\n\n"
+                              "50%% ratio is ideal for balanced training\n"
+                              "high neutral %% is normal with barrier labels + tight barriers");
     }
 
     ImGui::Separator();
@@ -909,9 +934,20 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // XGBoost hyperparameters
     ImGui::Text("XGBoost Parameters");
     ImGui::InputInt("Max Depth", &state->max_depth, 1, 2);
+    ImGui::SetItemTooltip("Max tree depth — controls model complexity\n"
+                          "lower = simpler model, less overfitting\n"
+                          "2-3: conservative, 4-6: moderate, 8+: high risk of memorization");
     ImGui::InputFloat("Learning Rate", &state->learning_rate, 0.01f, 0.1f, "%.3f");
+    ImGui::SetItemTooltip("How much each tree contributes (eta)\n"
+                          "lower = needs more estimators but generalizes better\n"
+                          "0.01-0.05: conservative, 0.1: moderate, 0.3+: aggressive");
     ImGui::InputInt("Estimators", &state->n_estimators, 10, 50);
+    ImGui::SetItemTooltip("Number of boosting rounds (trees)\n"
+                          "more trees + low learning rate = better but slower\n"
+                          "too many = overfitting (check walk-forward gap)");
     ImGui::InputText("Model Path", state->model_path, sizeof(state->model_path));
+    ImGui::SetItemTooltip("Where to save the trained model\n"
+                          "used by the engine at runtime for ML buy signals");
 
     // train button
     bool can_train = results->sample_count >= 10;
@@ -920,28 +956,37 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 #endif
     if (!can_train) ImGui::BeginDisabled();
     if (ImGui::Button("Train Model")) {
+        // clear previous results on re-run
+        state->model_trained = false;
+        state->status_msg[0] = '\0';
+        state->wf_has_results = false;
 #ifdef USE_XGBOOST
         // create output directory
         mkdir("models", 0755);
 
         // filter out neutral labels (0.5) — XGBoost binary needs 0 or 1
-        // compact features + labels into contiguous arrays without neutrals
+        // compact into separate buffers so results->feature_matrix stays intact for walk-forward
         int n_valid = 0;
+        float *train_features = (float *)malloc(results->sample_count * MODEL_NUM_FEATURES * sizeof(float));
+        float *train_labels   = (float *)malloc(results->sample_count * sizeof(float));
+        if (!train_features || !train_labels) {
+            free(train_features); free(train_labels);
+            snprintf(state->status_msg, sizeof(state->status_msg), "Failed to allocate training buffers");
+            state->model_trained = true; // show the error message
+        } else {
         for (int i = 0; i < results->sample_count; i++) {
             if (results->labels[i] == 0.5f) continue;
-            if (n_valid != i) {
-                memcpy(&results->feature_matrix[n_valid * MODEL_NUM_FEATURES],
-                       &results->feature_matrix[i * MODEL_NUM_FEATURES],
-                       MODEL_NUM_FEATURES * sizeof(float));
-                results->labels[n_valid] = results->labels[i];
-            }
+            memcpy(&train_features[n_valid * MODEL_NUM_FEATURES],
+                   &results->feature_matrix[i * MODEL_NUM_FEATURES],
+                   MODEL_NUM_FEATURES * sizeof(float));
+            train_labels[n_valid] = results->labels[i];
             n_valid++;
         }
 
         DMatrixHandle dtrain;
-        XGDMatrixCreateFromMat(results->feature_matrix, n_valid,
+        XGDMatrixCreateFromMat(train_features, n_valid,
                                MODEL_NUM_FEATURES, NAN, &dtrain);
-        XGDMatrixSetFloatInfo(dtrain, "label", results->labels, n_valid);
+        XGDMatrixSetFloatInfo(dtrain, "label", train_labels, n_valid);
 
         BoosterHandle booster;
         XGBoosterCreate(&dtrain, 1, &booster);
@@ -963,8 +1008,8 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
         // embed config+data fingerprint for train-serve parity verification
         {
-            const char *fp_paths[16];
-            for (int i = 0; i < run_control->run_config.num_data_files && i < 16; i++)
+            const char *fp_paths[MAX_DATA_FILES];
+            for (int i = 0; i < run_control->run_config.num_data_files && i < MAX_DATA_FILES; i++)
                 fp_paths[i] = run_control->run_config.data_paths[i];
             char fp_hex[65];
             Fingerprint_Compute<BACKTEST_FP>(fp_hex, &results->config_used,
@@ -980,13 +1025,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         bst_ulong out_len;
         const float *out_result;
         DMatrixHandle dpred;
-        XGDMatrixCreateFromMat(results->feature_matrix, n_valid,
+        XGDMatrixCreateFromMat(train_features, n_valid,
                                MODEL_NUM_FEATURES, NAN, &dpred);
         XGBoosterPredict(booster, dpred, 0, 0, 0, &out_len, &out_result);
         int correct = 0;
         for (int i = 0; i < n_valid; i++) {
             int pred = out_result[i] >= 0.5f ? 1 : 0;
-            int truth = results->labels[i] > 0.5f ? 1 : 0;
+            int truth = train_labels[i] > 0.5f ? 1 : 0;
             if (pred == truth) correct++;
         }
         state->train_accuracy = (n_valid > 0) ? (float)correct / n_valid * 100.0f : 0.0f;
@@ -1000,10 +1045,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
         XGDMatrixFree(dtrain);
         XGBoosterFree(booster);
+        free(train_features);
+        free(train_labels);
 
         state->model_trained = true;
         snprintf(state->status_msg, sizeof(state->status_msg),
                  "Model saved to %s (accuracy: %.1f%%)", state->model_path, state->train_accuracy);
+        } // end malloc success block
 #endif
     }
     if (!can_train) {
@@ -1088,17 +1136,33 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     //==================================================================
     ImGui::Separator();
     ImGui::Text("Walk-Forward Validation");
+    ImGui::SetItemTooltip("Tests if the model generalizes to unseen data\n"
+                          "splits data chronologically into train/test folds\n"
+                          "trains a fresh model per fold and measures accuracy on the test portion\n\n"
+                          "this is the REAL performance metric — train accuracy means nothing\n"
+                          "val > 55%% with low gap = real signal, val ~50%% = coin flip");
 
     // parameters
     ImGui::InputInt("Folds", &state->wf_n_splits, 1, 2);
     if (state->wf_n_splits < 2) state->wf_n_splits = 2;
     if (state->wf_n_splits > 20) state->wf_n_splits = 20;
+    ImGui::SetItemTooltip("Number of temporal train/test splits\n"
+                          "each fold trains on earlier data, tests on later data\n"
+                          "more folds = more reliable estimate but slower\n"
+                          "5 is standard, 3 for fast iteration");
     ImGui::InputInt("Horizon Ticks", &state->wf_horizon_ticks, 100, 500);
-    ImGui::SetItemTooltip("Label forward window for purge gap calculation");
+    ImGui::SetItemTooltip("Label forward window in ticks\n"
+                          "controls the purge gap between train and test sets\n"
+                          "prevents data leakage from labels that look into the future\n"
+                          "should match the label horizon used during feature collection");
     ImGui::InputInt("Purge Buffer", &state->wf_buffer_ticks, 64, 256);
-    ImGui::SetItemTooltip("Extra purge gap beyond max(horizon, feature_lookback)\ndefault 512 ticks");
+    ImGui::SetItemTooltip("Extra safety margin added to the purge gap\n"
+                          "accounts for feature lookback windows (rolling stats etc.)\n"
+                          "default 512 — increase if features use long lookback periods");
     ImGui::InputInt("Min Train", &state->wf_min_train, 100, 500);
-    ImGui::SetItemTooltip("Minimum samples per training fold\nfolds with fewer are skipped");
+    ImGui::SetItemTooltip("Minimum training samples required per fold\n"
+                          "folds with fewer are skipped (usually fold 1)\n"
+                          "higher = more reliable per-fold training but may skip more folds");
 
     // run / cancel button
     {
@@ -1153,14 +1217,26 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 : ImVec4(0.55f, 0.76f, 0.51f, 1.0f);   // green: clean
             ImGui::TextColored(val_color, "Val Accuracy: %.1f%% +/- %.1f%%",
                                wf->mean_val_accuracy * 100.0f, wf->std_val_accuracy * 100.0f);
+            ImGui::SetItemTooltip("Mean accuracy on unseen test data across all folds\n"
+                                  "+/- shows consistency (lower = more stable)\n\n"
+                                  "> 55%%: model has real predictive signal\n"
+                                  "~ 50%%: no better than random (coin flip)\n"
+                                  "< 50%%: model is anti-predictive (inverted signal)");
             ImGui::SameLine();
             ImGui::TextDisabled("(train: %.1f%%)", wf->mean_train_accuracy * 100.0f);
+            ImGui::SetItemTooltip("Training accuracy — how well the model fits the data it trained on\n"
+                                  "high train + low val = overfitting (memorizing noise)\n"
+                                  "the gap between train and val is what matters");
         }
 
         // overfit warning
         if (wf->overfit_count > 0) {
             ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f),
                 "WARNING: %d/%d folds flagged as overfit", wf->overfit_count, wf->valid_folds);
+            ImGui::SetItemTooltip("Folds where the model memorized training data\n"
+                                  "flagged when train accuracy >= 99%% (memorization)\n"
+                                  "or train-val gap is extreme\n\n"
+                                  "try: fewer estimators, lower max depth, more data");
         }
 
         // fingerprint
@@ -1181,6 +1257,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             ImGui::TableSetupColumn("Gap", ImGuiTableColumnFlags_WidthFixed, 60);
             ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableHeadersRow();
+            ImGui::SetItemTooltip("Train: accuracy on data the model saw during training\n"
+                                  "Val: accuracy on future data it never saw (the real test)\n"
+                                  "Gap: train - val (lower is better, >20%% = overfitting)\n"
+                                  "Status: overfit detection (memorization, high gap, etc.)");
 
             for (int i = 0; i < wf->num_folds; i++) {
                 if (!wf->folds[i].valid) continue;
