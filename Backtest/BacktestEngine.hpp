@@ -342,6 +342,10 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
     ctrl.sim_time = 0;          // will be set from first tick timestamp
     ctrl.last_slow_time = 0;    // triggers time seed on first tick
 
+    // gate reason diagnostics — count slow-path cycles per gate reason
+    int gate_counts[NUM_GATE_REASONS] = {};
+    int total_slow_cycles = 0;
+
     // init order pool (same as main.cpp:174)
     OrderPool<BACKTEST_FP> pool;
     OrderPool_init(&pool, 64);
@@ -534,6 +538,13 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
                 results->sample_count++;
             }
 
+            // gate reason diagnostics (every slow-path cycle)
+            if (ctrl.tick_count == 0 && ctrl.state != CONTROLLER_WARMUP) {
+                int gr = ctrl.gate_reason;
+                if (gr >= 0 && gr < NUM_GATE_REASONS) gate_counts[gr]++;
+                total_slow_cycles++;
+            }
+
             total_processed++;
             // update progress every 10K ticks (avoid atomic contention)
             if ((total_processed & 0x3FFF) == 0)
@@ -625,6 +636,23 @@ done:
     fprintf(stderr, "[backtest] completed: %lu ticks in %.1fms, %u trades, P&L $%.2f\n",
             results->stats.ticks_processed, elapsed,
             results->stats.total_trades, results->stats.total_pnl);
+
+    // gate reason breakdown — shows WHY the engine isn't trading
+    if (total_slow_cycles > 0) {
+        static const char *gr_names[] = {
+            "ok", "warmup", "no_signal", "no_trade", "book",
+            "danger", "kill", "recovery", "volatile", "cooldown",
+            "wind_down", "paused", "downtrend", "cost", "barrier"
+        };
+        fprintf(stderr, "[backtest] gate reason breakdown (%d slow-path cycles):\n", total_slow_cycles);
+        for (int g = 0; g < NUM_GATE_REASONS; g++) {
+            if (gate_counts[g] > 0) {
+                fprintf(stderr, "  %-12s %7d  (%5.1f%%)\n",
+                        gr_names[g], gate_counts[g],
+                        100.0 * gate_counts[g] / total_slow_cycles);
+            }
+        }
+    }
 }
 
 //======================================================================================================
