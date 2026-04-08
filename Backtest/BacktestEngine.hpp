@@ -295,15 +295,49 @@ static inline void BacktestStats_ComputeFromEquity(BacktestStats *stats,
     stats->sharpe_ratio = (stddev > 1e-12) ? mean / stddev * sqrt((double)n) : 0.0;
 }
 
+// Forward decl for the sharded backtest path. The actual implementation lives
+// in Backtest/BacktestSharded.hpp which is included AFTER this declaration so
+// the dispatcher can call it. Both functions share the BacktestRunConfig +
+// BacktestResults shape so the suite GUI doesn't care which path produced the
+// results.
+namespace tt {
+static inline void BacktestSharded_Run(BacktestResults *results,
+                                        const BacktestRunConfig *run_cfg,
+                                        volatile int *progress_pct,
+                                        volatile int *cancel_flag,
+                                        CandleAccumulator *candle_acc,
+                                        TUISnapshot *out_snapshot);
+}
+
 //======================================================================================================
 // [RUN]
 //======================================================================================================
 // the core replay loop — mirrors main.cpp:363-547
+//
+// Phase 13 dispatch: peek at engine_mode at the top. If sharded, route to the
+// per-core path in BacktestSharded.hpp and return. Otherwise fall through to
+// the legacy single-threaded code below, which is unchanged.
 //======================================================================================================
 static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfig *run_cfg,
                                  volatile int *progress_pct, volatile int *cancel_flag,
                                  CandleAccumulator *candle_acc,
                                  TUISnapshot *out_snapshot = NULL) {
+    // Phase 13 dispatch: peek at engine_mode WITHOUT touching results yet,
+    // so the sharded path's own reset is honored.
+    {
+        ControllerConfig<BACKTEST_FP> peek;
+        if (run_cfg->use_config_override) {
+            peek = run_cfg->config_override;
+        } else {
+            peek = ControllerConfig_Load<BACKTEST_FP>(run_cfg->config_path);
+        }
+        if (peek.engine_mode == ENGINE_MODE_SHARDED) {
+            tt::BacktestSharded_Run(results, run_cfg, progress_pct, cancel_flag,
+                                     candle_acc, out_snapshot);
+            return;
+        }
+    }
+
     // reset results — preserve dynamic allocations, just reset counts
     {
         float *fm = results->feature_matrix;

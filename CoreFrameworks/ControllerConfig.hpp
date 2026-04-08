@@ -16,6 +16,26 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+//======================================================================================================
+// [ENGINE MODE]
+//======================================================================================================
+// Phase 13 of the per-core sharding migration. Selects which hot-path
+// architecture the engine runs:
+//   ENGINE_MODE_SINGLE_CORE (default): legacy single-threaded engine. all
+//     existing behavior unchanged. PortfolioController_Tick walks the
+//     portfolio bitmap on every tick.
+//   ENGINE_MODE_SHARDED: experimental per-core risk-sharded engine. one
+//     position per pinned cpu core, controller core drains events on its
+//     own thread. branchless ~60ns hot path. requires num_execution_cores
+//     to be set; defaults to 4.
+//
+// engine_mode is STARTUP-ONLY — changes via hot reload are ignored. switching
+// modes requires a restart so the thread layout can be torn down and rebuilt.
+//======================================================================================================
+constexpr uint8_t ENGINE_MODE_SINGLE_CORE = 0;
+constexpr uint8_t ENGINE_MODE_SHARDED     = 1;
+
 //======================================================================================================
 // [CONFIG]
 //======================================================================================================
@@ -173,6 +193,14 @@ template <unsigned F> struct ControllerConfig {
   int barrier_gate_enabled;         // 0=disabled, 1=block entries before predicted price peaks
   char peak_model_path[256];        // path to P(will_peak) model
   char valley_model_path[256];      // path to P(will_valley) model
+  // Per-core sharding (Phase 13) — STARTUP-ONLY, ignored by hot reload
+  uint8_t engine_mode;              // ENGINE_MODE_SINGLE_CORE (default) or ENGINE_MODE_SHARDED
+  uint16_t num_execution_cores;     // sharded mode only, ignored in single_core mode (default 4, cap 16)
+  // Phase 14: when 1, sharded mode forces the synthetic tick generator
+  // (sawtooth around $60k) instead of connecting to Binance. Useful for
+  // latency demos that need reliable trade firing without depending on
+  // current market volatility. Default 0 = use real Binance feed.
+  uint8_t sharded_force_synthetic;
 };
 //======================================================================================================
 template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
@@ -308,6 +336,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.barrier_gate_enabled = 0;
   cfg.peak_model_path[0] = '\0';
   cfg.valley_model_path[0] = '\0';
+  // Per-core sharding (Phase 13) — safe defaults: legacy mode, 4 cores if opted in
+  cfg.engine_mode = ENGINE_MODE_SINGLE_CORE;
+  cfg.num_execution_cores = 4;
+  cfg.sharded_force_synthetic = 0;
   return cfg;
 }
 //======================================================================================================
@@ -505,6 +537,29 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(confidence_enabled)
     CFG_PARSE_INT(prediction_normalize)
     CFG_PARSE_INT(barrier_gate_enabled)
+
+    // Per-core sharding (Phase 13) — engine_mode accepts both string and int
+    // forms. The GUI SettingsPanel uses CFG_BOOL which writes "0"/"1"; manual
+    // edits to engine.cfg can use "single_core"/"sharded" for clarity.
+    if (strcmp(key, "engine_mode") == 0) {
+      if (strcmp(val, "sharded") == 0 || strcmp(val, "1") == 0)
+        cfg.engine_mode = ENGINE_MODE_SHARDED;
+      else
+        cfg.engine_mode = ENGINE_MODE_SINGLE_CORE;
+      continue;
+    }
+    // num_execution_cores: clamped to [1, 16] (special case to enforce the cap)
+    if (strcmp(key, "num_execution_cores") == 0) {
+      int v = atoi(val);
+      if (v < 1) v = 1;
+      if (v > 16) v = 16;
+      cfg.num_execution_cores = (uint16_t)v;
+      continue;
+    }
+    if (strcmp(key, "sharded_force_synthetic") == 0) {
+      cfg.sharded_force_synthetic = (uint8_t)(atoi(val) != 0 ? 1 : 0);
+      continue;
+    }
 
     // ML model paths (string fields — not atof)
     if (strcmp(key, "ml_model_path") == 0) {

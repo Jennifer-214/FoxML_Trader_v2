@@ -61,6 +61,12 @@
 #define STRATEGY_EMA_CROSS     4
 #define NUM_STRATEGIES         5
 
+// Per-core sharding (phase 06+) sentinel: a core with strategy_id ==
+// STRATEGY_NONE has no strategy assigned, parameter pushes are skipped, and
+// permission stays at 0. Value chosen so it can never collide with a real
+// strategy ID added in the future. See pitfall P6.5.
+#define STRATEGY_NONE          0xFF
+
 // strategy short names for display (indexed by strategy ID)
 static const char *STRATEGY_SHORT_NAMES[] = {"MR", "MOM", "DIP", "ML", "EMA"};
 

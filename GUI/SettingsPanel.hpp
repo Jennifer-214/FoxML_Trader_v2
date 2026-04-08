@@ -200,6 +200,20 @@ static const CfgFieldDef field_defs[] = {
         "Path to P(will_peak) model\ntrain with LABEL_WILL_PEAK in foxml_suite"},
     {"valley_model_path",        "Valley Model",      "Barrier", CFG_PATH, NULL,
         "Path to P(will_valley) model\ntrain with LABEL_WILL_VALLEY in foxml_suite"},
+    // Per-core sharded engine (Phase 14 — experimental)
+    {"engine_mode",              "Sharded Mode",      "Per-Core (Experimental)", CFG_BOOL, NULL,
+        "Per-core risk-sharded execution (experimental).\n"
+        "OFF (default): legacy single-threaded engine.\n"
+        "ON: per-core architecture, controller core owns the portfolio,\n"
+        "    each execution core is a mini-portfolio of one position.\n"
+        "    Uses synthetic ticks until Binance feed wiring lands.\n"
+        "RESTART REQUIRED to take effect."},
+    {"num_execution_cores",      "Cores",             "Per-Core (Experimental)", CFG_INT,  "%d",
+        "Number of execution cores in sharded mode (1-16).\n"
+        "Each core handles one position at a time.\n"
+        "Recommended: physical core count - 2 (one for controller, one for OS).\n"
+        "On AMD: pin all cores to the same CCD to avoid cross-die latency.\n"
+        "RESTART REQUIRED to take effect."},
 };
 static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 

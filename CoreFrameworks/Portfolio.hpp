@@ -181,6 +181,51 @@ template <unsigned F> inline void Portfolio_RemovePosition(Portfolio<F> *portfol
     portfolio->active_bitmap &= ~(1 << index);
 }
 //======================================================================================================
+// [PER-CORE SHARDING SLOT HELPERS]
+//======================================================================================================
+// per-core sharding (phase 04+) binds each execution core to a fixed portfolio
+// slot. slot index == core_id directly. these helpers open and close a slot by
+// index instead of the auto-assigning __builtin_ctz path used by the legacy
+// hot path. controller core calls these from PortfolioController_OnEvent when
+// it processes a TradeEvent from a per-core event ring.
+//
+// open: writes the position fields and sets the active bit. caller must
+//   ensure the slot isn't already active (assertion in debug, undefined in
+//   release — controller's job to track per-core state).
+//
+// close: clears the active bit and returns gross P&L = (exit - entry) * qty.
+//   does NOT touch balance or fees — controller's OnEvent does that, this
+//   function just snapshots the gross.
+//======================================================================================================
+template <unsigned F>
+inline void Portfolio_OpenSlot(Portfolio<F> *portfolio, int slot,
+                                FPN<F> entry_price, FPN<F> quantity,
+                                FPN<F> take_profit_price, FPN<F> stop_loss_price,
+                                FPN<F> entry_fee = FPN_Zero<F>()) {
+    portfolio->positions[slot].entry_price       = entry_price;
+    portfolio->positions[slot].quantity          = quantity;
+    portfolio->positions[slot].entry_fee         = entry_fee;
+    portfolio->positions[slot].take_profit_price = take_profit_price;
+    portfolio->positions[slot].stop_loss_price   = stop_loss_price;
+    portfolio->positions[slot].original_tp       = take_profit_price;
+    portfolio->positions[slot].original_sl       = stop_loss_price;
+    portfolio->positions[slot].pair_index        = -1;
+    portfolio->active_bitmap |= (uint16_t)(1 << slot);
+}
+
+template <unsigned F>
+inline FPN<F> Portfolio_CloseSlot(Portfolio<F> *portfolio, int slot, FPN<F> exit_price) {
+    FPN<F> diff = FPN_Sub(exit_price, portfolio->positions[slot].entry_price);
+    FPN<F> gross = FPN_Mul(diff, portfolio->positions[slot].quantity);
+    portfolio->active_bitmap &= ~(uint16_t)(1 << slot);
+    return gross;
+}
+
+template <unsigned F>
+inline int Portfolio_SlotActive(const Portfolio<F> *portfolio, int slot) {
+    return (portfolio->active_bitmap >> slot) & 1;
+}
+//======================================================================================================
 template <unsigned F> inline void Portfolio_ClearPositions(Portfolio<F> *portfolio) {
     for (int i = 0; i < 16; i++) {
         portfolio->positions[i].quantity          = FPN_Zero<F>();

@@ -27,6 +27,7 @@
 
 #include "../CoreFrameworks/PortfolioController.hpp"
 #include "../CoreFrameworks/OrderGates.hpp"
+#include "../CoreFrameworks/CoreLatencyStats.hpp"
 #include <fcntl.h>
 #include <sys/ioctl.h>
 
@@ -864,6 +865,21 @@ struct TUISnapshot {
     double tick_rate;
     uint32_t fills_rejected;
     int last_reject_reason;  // 0=none, 1=spacing, 2=balance, 3=exposure, 4=breaker, 5=full, 6=dup
+    // Phase 14: per-core latency stats. Populated only when engine_mode ==
+    // sharded AND CoreLatencyStats are enabled. Display panel renders only
+    // when sharded_mode_active is set.
+    int sharded_mode_active;       // 1 = sharded engine running, 0 = legacy
+    int per_core_count;            // number of cores actively reporting
+    struct PerCoreSnap {
+        uint64_t samples;
+        double   min_ns;
+        double   p50_ns;
+        double   p95_ns;
+        double   p99_ns;
+        double   max_ns;
+        double   avg_ns;
+    };
+    PerCoreSnap per_core[16];      // up to MAX_EXECUTION_CORES
 };
 
 //======================================================================================================
@@ -909,6 +925,13 @@ template <unsigned F>
 static inline void TUI_CopySnapshot(TUISnapshot *snap,
                                       const PortfolioController<F> *ctrl,
                                       double price_d, double volume_d) {
+    // Phase 14: per-core stats default to "not active". A separate
+    // populator (TUI_CopySnapshotPerCore) writes the actual values when
+    // sharded mode is running. Legacy mode leaves these zeroed and the
+    // TUI panel just doesn't render the per-core section.
+    snap->sharded_mode_active = 0;
+    snap->per_core_count = 0;
+
     snap->price  = price_d;
     snap->volume = volume_d;
     snap->state_warmup = (ctrl->state == CONTROLLER_WARMUP);
@@ -1130,6 +1153,51 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     // fee ratio: what % of gross wins go to fees
     snap->fee_ratio = (g_wins > 0.001) ?
         (FPN_ToDouble(ctrl->total_fees) / g_wins) * 100.0 : 0.0;
+}
+
+//======================================================================================================
+// [PER-CORE LATENCY POPULATOR — Phase 14, sharded mode only]
+//======================================================================================================
+// Called from the sharded engine's controller core. Walks the registered
+// execution cores, snapshots each one's CoreLatencyStats, and writes the
+// per-core fields into the TUISnapshot. The render path checks
+// snap->sharded_mode_active to decide whether to render the panel.
+//
+// CoresT is templated so this header doesn't need to know about the
+// ExecutionCore type. The caller passes a pointer to the core array and
+// num_cores; the lambda accesses each core's latency_stats by index.
+//======================================================================================================
+template <typename CoresT>
+static inline void TUI_PopulatePerCoreLatency(TUISnapshot *snap,
+                                                CoresT *cores,
+                                                int num_cores,
+                                                double tsc_ghz) {
+    snap->sharded_mode_active = 1;
+    if (num_cores < 0) num_cores = 0;
+    if (num_cores > 16) num_cores = 16;
+    snap->per_core_count = num_cores;
+    for (int i = 0; i < num_cores; ++i) {
+        tt::CoreLatencySnapshot ls = tt::CoreLatencyStats_Snapshot(
+            &cores[i].latency_stats, tsc_ghz);
+        snap->per_core[i].samples = ls.total_count;
+        snap->per_core[i].min_ns  = ls.min_ns;
+        snap->per_core[i].p50_ns  = ls.p50_ns;
+        snap->per_core[i].p95_ns  = ls.p95_ns;
+        snap->per_core[i].p99_ns  = ls.p99_ns;
+        snap->per_core[i].max_ns  = ls.max_ns;
+        snap->per_core[i].avg_ns  = ls.avg_ns;
+    }
+    // Zero unused slots so renderer doesn't show stale data from a previous
+    // tick when num_cores changes
+    for (int i = num_cores; i < 16; ++i) {
+        snap->per_core[i].samples = 0;
+        snap->per_core[i].min_ns  = 0;
+        snap->per_core[i].p50_ns  = 0;
+        snap->per_core[i].p95_ns  = 0;
+        snap->per_core[i].p99_ns  = 0;
+        snap->per_core[i].max_ns  = 0;
+        snap->per_core[i].avg_ns  = 0;
+    }
 }
 
 //======================================================================================================

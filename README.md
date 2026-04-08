@@ -153,6 +153,31 @@ cmake -B build -DUSE_FTXUI=ON && cmake --build build        # FTXUI
 cmake -B build -DUSE_NOTCURSES=ON && cmake --build build    # notcurses
 ```
 
+### Per-core sharded experiment worktree
+
+The per-core architecture lives on the `experiment/per-core-sharding` git
+worktree at `~/tick-trader-percore`. To build the GUI variants from that
+worktree, the vendored ImGui sources must be reachable. The simplest setup
+is a symlink to the main checkout's `vendor/`:
+
+```bash
+ln -s /home/jennifer/tick_trader_private/vendor /home/jennifer/tick-trader-percore/vendor
+```
+
+Then the standard CMake commands work in the worktree:
+
+```bash
+cd ~/tick-trader-percore
+cmake -B build && cmake --build build                                # ANSI engine + controller_test
+cmake -B build_gui -DUSE_IMGUI_GUI=ON && cmake --build build_gui     # ImGui live engine
+cmake -B build_suite -DUSE_IMGUI_GUI=ON && cmake --build build_suite --target foxml_suite
+```
+
+Sharded mode is opt-in via `engine_mode=sharded` in the cfg file (or the
+"Sharded Mode" toggle in the GUI Settings panel — restart required). It
+currently runs against synthetic ticks as a latency testbed; real Binance
+feed integration is in progress. See `plans/per_core_sharding/14_production_migration/plan.md`.
+
 ## Configuration
 
 Copy `engine.cfg.example` to `engine.cfg` and edit. All parameters are documented in the file. Hot-reloadable with `r` in the TUI (except symbol, warmup_ticks).

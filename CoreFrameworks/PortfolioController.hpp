@@ -1724,6 +1724,11 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
     uint32_t saved_warmup_ticks = ctrl->config.warmup_ticks;
     uint32_t saved_min_warmup = ctrl->config.min_warmup_samples;
     int saved_use_real_money = ctrl->config.use_real_money;
+    // Per-core sharding (Phase 13): engine_mode and num_execution_cores
+    // are STARTUP-ONLY because they determine the thread layout. Switching
+    // modes mid-session would tear down half the engine.
+    uint8_t  saved_engine_mode = ctrl->config.engine_mode;
+    uint16_t saved_num_execution_cores = ctrl->config.num_execution_cores;
 
     // bulk copy — every field updates automatically
     ctrl->config = new_cfg;
@@ -1733,6 +1738,11 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
     ctrl->config.warmup_ticks = saved_warmup_ticks;
     ctrl->config.min_warmup_samples = saved_min_warmup;
     ctrl->config.use_real_money = saved_use_real_money;
+    ctrl->config.engine_mode = saved_engine_mode;
+    ctrl->config.num_execution_cores = saved_num_execution_cores;
+    if (new_cfg.engine_mode != saved_engine_mode) {
+        fprintf(stderr, "[ENGINE] engine_mode change in hot reload ignored — restart required\n");
+    }
 
     // reset adaptive filters to new values
     ctrl->mean_rev.live_offset_pct    = new_cfg.entry_offset_pct;

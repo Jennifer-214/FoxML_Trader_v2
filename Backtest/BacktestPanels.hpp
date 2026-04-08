@@ -16,6 +16,7 @@
 
 #include "imgui.h"
 #include "BacktestEngine.hpp"
+#include "BacktestSharded.hpp"  // phase 13: per-core sharded backtest path
 #include "Fingerprint.hpp"
 #include <dirent.h>
 #include <sys/stat.h>

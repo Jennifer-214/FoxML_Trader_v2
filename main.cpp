@@ -21,6 +21,7 @@
 #include "DataStream/BinanceCrypto.hpp"
 #include "DataStream/BinanceOrderAPI.hpp"
 #include "DataStream/EngineTUI.hpp"
+#include "CoreFrameworks/EngineSharded.hpp"
 #include "CoreFrameworks/PortfolioController.hpp"
 #include "MemHeaders/PoolAllocator.hpp"
 #include "DataStream/TradeLog.hpp"
@@ -114,6 +115,17 @@ int main(int argc, char *argv[]) {
 
     // create logging directory — all runtime files go here (rm -rf logging/* for clean start)
     mkdir("logging", 0755); // silently succeeds if already exists
+
+    //==================================================================================================
+    // Phase 13 dispatch: per-core sharded mode is a separate entry point that
+    // bypasses the legacy single-threaded engine entirely. Set engine_mode =
+    // sharded in engine.cfg to land here. This is currently a latency testbed
+    // (synthetic ticks, no exchange) — see CoreFrameworks/EngineSharded.hpp.
+    //==================================================================================================
+    if (ccfg.engine_mode == ENGINE_MODE_SHARDED) {
+        tt::EngineSharded_Run(ccfg, bcfg);
+        return 0;
+    }
 
     // auto-redirect stderr to log file — always when log_file is set
     // rotates on startup: engine.log → engine.log.1 (keeps one previous session)
