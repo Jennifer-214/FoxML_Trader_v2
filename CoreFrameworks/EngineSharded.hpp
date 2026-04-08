@@ -39,6 +39,7 @@
 #pragma once
 
 #include "../DataStream/BinanceCrypto.hpp"
+#include "../DataStream/BinanceOrderAPI.hpp"
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/StrategyParameters.hpp"
@@ -70,6 +71,54 @@ namespace tt {
 // only while EngineSharded_Run is active, so this flag is only set when the
 // sharded engine is the one that wants to know about it.
 static volatile std::sig_atomic_t g_engine_sharded_shutdown = 0;
+
+//======================================================================================================
+// [ORDER LATENCY STATS]
+//======================================================================================================
+// drainer-thread metrics for the BinanceOrderAPI submission cost. brackets
+// each MarketBuy/MarketSell with steady_clock and accumulates min/avg/max in
+// microseconds. NOT a percentile (the order rate is too low to bother), just
+// running scalars displayed in the live TUI.
+//
+// in paper mode this stays at zero. in live mode it shows the network round
+// trip to binance, typically 50-200 ms on a US connection. that latency is
+// the gap between "executor decided" and "order acknowledged" — separate from
+// the per-core ExecutionCore_Tick latency which is unaffected.
+//
+// atomic because the drainer thread writes and the TUI render loop reads.
+//======================================================================================================
+struct ShardedOrderLatency {
+    std::atomic<uint64_t> count;       // total orders submitted
+    std::atomic<uint64_t> failures;    // count of REST failures
+    std::atomic<uint64_t> total_us;    // running sum for avg
+    std::atomic<uint64_t> min_us;
+    std::atomic<uint64_t> max_us;
+};
+static ShardedOrderLatency g_sharded_order_lat;
+
+static inline void ShardedOrderLatency_Reset() {
+    g_sharded_order_lat.count.store(0, std::memory_order_relaxed);
+    g_sharded_order_lat.failures.store(0, std::memory_order_relaxed);
+    g_sharded_order_lat.total_us.store(0, std::memory_order_relaxed);
+    g_sharded_order_lat.min_us.store(UINT64_MAX, std::memory_order_relaxed);
+    g_sharded_order_lat.max_us.store(0, std::memory_order_relaxed);
+}
+
+static inline void ShardedOrderLatency_Sample(uint64_t elapsed_us, int success) {
+    g_sharded_order_lat.count.fetch_add(1, std::memory_order_relaxed);
+    if (!success) g_sharded_order_lat.failures.fetch_add(1, std::memory_order_relaxed);
+    g_sharded_order_lat.total_us.fetch_add(elapsed_us, std::memory_order_relaxed);
+    uint64_t cur_min = g_sharded_order_lat.min_us.load(std::memory_order_relaxed);
+    while (elapsed_us < cur_min) {
+        if (g_sharded_order_lat.min_us.compare_exchange_weak(
+                cur_min, elapsed_us, std::memory_order_relaxed)) break;
+    }
+    uint64_t cur_max = g_sharded_order_lat.max_us.load(std::memory_order_relaxed);
+    while (elapsed_us > cur_max) {
+        if (g_sharded_order_lat.max_us.compare_exchange_weak(
+                cur_max, elapsed_us, std::memory_order_relaxed)) break;
+    }
+}
 
 extern "C" inline void EngineSharded_SignalHandler(int sig) {
     (void)sig;
@@ -209,11 +258,53 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
         fprintf(stderr, "[sharded] Binance stream connected — using REAL market ticks\n");
         fprintf(stderr, "[sharded] symbol: %s\n", bcfg.symbol);
     }
-    fprintf(stderr, "[sharded] WARNING: this is a latency testbed.\n");
-    fprintf(stderr, "[sharded] Trade events update internal state ONLY.\n");
-    fprintf(stderr, "[sharded] No orders are submitted to the exchange.\n");
+
+    // === Live trading setup (use_real_money) ===
+    // Mirrors the legacy engine pattern in main.cpp:212-237. Loads secrets,
+    // initializes the REST client, prints a 10-second warning if running
+    // against PRODUCTION (not testnet). The order_api is static so the
+    // drainer thread lambda can capture it across the function scope.
+    static BinanceOrderAPI g_sharded_order_api;
+    bool live_trading = (cfg.use_real_money != 0);
+    if (live_trading) {
+        char api_key[128] = {}, api_secret[128] = {};
+        if (!LoadSecrets("secrets.cfg", api_key, api_secret)) {
+            fprintf(stderr, "[sharded] ERROR: use_real_money=1 but secrets.cfg missing or incomplete\n");
+            std::signal(SIGINT, prev_int);
+            std::signal(SIGTERM, prev_term);
+            return;
+        }
+        const char *rest_host = bcfg.use_testnet ? "testnet.binance.vision" : "api.binance.us";
+        if (!BinanceOrderAPI_Init(&g_sharded_order_api, rest_host, api_key, api_secret, bcfg.symbol)) {
+            fprintf(stderr, "[sharded] ERROR: failed to connect to REST API at %s\n", rest_host);
+            std::signal(SIGINT, prev_int);
+            std::signal(SIGTERM, prev_term);
+            return;
+        }
+        fprintf(stderr, "[sharded] LIVE TRADING ENABLED on %s — real orders will be placed\n",
+                bcfg.use_testnet ? "TESTNET" : "PRODUCTION");
+        if (!bcfg.use_testnet) {
+            fprintf(stderr, "[sharded] SAFETY: real money. Starting in 10 seconds... (Ctrl+C to abort)\n");
+            for (int i = 0; i < 10 && !g_engine_sharded_shutdown; ++i) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            if (g_engine_sharded_shutdown) {
+                fprintf(stderr, "[sharded] aborted before start.\n");
+                BinanceOrderAPI_Cleanup(&g_sharded_order_api);
+                std::signal(SIGINT, prev_int);
+                std::signal(SIGTERM, prev_term);
+                return;
+            }
+        }
+        fprintf(stderr, "[sharded] mode: LIVE — orders to %s\n",
+                bcfg.use_testnet ? "TESTNET" : "PRODUCTION");
+    } else {
+        fprintf(stderr, "[sharded] mode: PAPER — internal state only, no orders submitted.\n");
+    }
     fprintf(stderr, "[sharded] Press Ctrl+C to stop and dump per-core stats.\n");
     fprintf(stderr, "================================================================\n");
+
+    ShardedOrderLatency_Reset();
 
     double tsc_ghz = EngineSharded_CalibrateTscGhz();
     fprintf(stderr, "[sharded] TSC calibrated at %.4f GHz\n", tsc_ghz);
@@ -408,13 +499,76 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     //----------------------------------------------------------------------
     // Drainer thread — controller side
     //----------------------------------------------------------------------
-    std::thread drainer([&state, &producer_done, num_cores] {
+    // open-coded drain so we can hook order submission AFTER each event.
+    // identical structure to EventLoop_DrainEvents but with the BinanceOrderAPI
+    // call inserted between OnEvent and the loop continue. paper mode skips
+    // the order call entirely; live mode brackets it with steady_clock for
+    // the order latency stats.
+    //
+    // why open-code instead of adding a hook to ControllerEventLoop.hpp:
+    // keeps the generic event loop free of REST dependencies (it stays
+    // testable in isolation), and the live trading concern is contained
+    // in this file where it belongs.
+    //
+    // qty source rule:
+    //   entry: read from cores[slot].intended_qty (matches what OnEvent will
+    //          write into portfolio.positions[slot].quantity via OpenSlot)
+    //   exit:  read from portfolio.positions[slot].quantity BEFORE OnEvent,
+    //          since CloseSlot inside OnEvent clears the slot
+    std::thread drainer([&state, &producer_done, num_cores, live_trading] {
         EngineSharded_PinThread(num_cores + 1);  // dedicated controller CPU
         while (!g_engine_sharded_shutdown) {
-            int drained = EventLoop_DrainEvents(&state);
-            if (drained == 0) {
-                std::this_thread::yield();
+            int total_drained = 0;
+            for (int slot = 0; slot < state.registered_count; ++slot) {
+                ExecutionCore<F>* core = state.cores[slot].core;
+                if (core == nullptr) continue;
+                for (int i = 0; i < MAX_EVENTS_PER_DRAIN_PER_CORE; ++i) {
+                    TradeEvent<F> event;
+                    if (!SPSCRing_TryPop(&core->event_ring, &event)) break;
+
+                    bool is_entry = (event.type & TRADE_EVENT_ENTRY) != 0;
+                    bool is_exit  = (event.type & TRADE_EVENT_EXIT)  != 0;
+
+                    // snapshot exit qty BEFORE OnEvent because CloseSlot clears it
+                    double order_qty_d = 0.0;
+                    if (is_exit) {
+                        order_qty_d = FPN_ToDouble(state.portfolio.positions[slot].quantity);
+                    } else if (is_entry) {
+                        order_qty_d = FPN_ToDouble(state.cores[slot].intended_qty);
+                    }
+
+                    EventLoop_OnEvent(&state, event);
+                    ++total_drained;
+
+                    // === LIVE ORDER SUBMISSION ===
+                    // only when use_real_money=1. blocking REST call (~50-200 ms
+                    // network round trip). bracketed for the latency timer.
+                    // failures are logged but recovery (resetting executor state)
+                    // is left to the slow-path parameter rebuild for now.
+                    if (live_trading && (is_entry || is_exit) && order_qty_d > 0.0) {
+                        char order_id[32] = {};
+                        double fill_price = 0.0, fill_qty = 0.0;
+                        auto ts0 = std::chrono::steady_clock::now();
+                        int ok = is_entry
+                            ? BinanceOrderAPI_MarketBuy(&g_sharded_order_api, order_qty_d,
+                                                         order_id, &fill_price, &fill_qty)
+                            : BinanceOrderAPI_MarketSell(&g_sharded_order_api, order_qty_d,
+                                                          order_id, &fill_price, &fill_qty);
+                        auto ts1 = std::chrono::steady_clock::now();
+                        uint64_t elapsed_us = (uint64_t)
+                            std::chrono::duration_cast<std::chrono::microseconds>(ts1 - ts0).count();
+                        ShardedOrderLatency_Sample(elapsed_us, ok);
+                        if (!ok) {
+                            // TODO (phase 2): reset core->active to 0 + push parameter
+                            // update so the executor unlatches. for now log and
+                            // rely on the next slow-path rebuild to reconcile.
+                            fprintf(stderr, "[sharded] ORDER FAIL core=%d %s qty=%.8f — TODO reset path\n",
+                                    slot, is_entry ? "BUY" : "SELL", order_qty_d);
+                        }
+                    }
+                }
             }
+            if (total_drained == 0) std::this_thread::yield();
             if (producer_done.load(std::memory_order_acquire)) {
                 // After producer is done, drain a few more times then exit
                 for (int k = 0; k < 16; ++k) EventLoop_DrainEvents(&state);
@@ -512,6 +666,32 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
             }
         }
 
+        // Order latency line — only meaningful in live mode, but always shown
+        // so paper users see the placeholder. all values in microseconds.
+        uint64_t ord_count    = g_sharded_order_lat.count.load(std::memory_order_relaxed);
+        uint64_t ord_failures = g_sharded_order_lat.failures.load(std::memory_order_relaxed);
+        uint64_t ord_total_us = g_sharded_order_lat.total_us.load(std::memory_order_relaxed);
+        uint64_t ord_min_us   = g_sharded_order_lat.min_us.load(std::memory_order_relaxed);
+        uint64_t ord_max_us   = g_sharded_order_lat.max_us.load(std::memory_order_relaxed);
+        fprintf(stdout, "\033[K\n");
+        if (live_trading) {
+            if (ord_count > 0) {
+                double ord_avg_us = (double)ord_total_us / (double)ord_count;
+                fprintf(stdout, " " SH_BOLD SH_PEACH "ORDER LATENCY" SH_RESET SH_DIM " (live)" SH_RESET
+                        "  " SH_DIM "orders" SH_RESET " " SH_FG "%lu" SH_RESET
+                        "  " SH_DIM "fail" SH_RESET " " SH_FG "%lu" SH_RESET
+                        "  " SH_DIM "min" SH_RESET " " SH_FG "%lu µs" SH_RESET
+                        "  " SH_DIM "avg" SH_RESET " " SH_FG "%.0f µs" SH_RESET
+                        "  " SH_DIM "max" SH_RESET " " SH_FG "%lu µs" SH_RESET "\033[K\n",
+                        (unsigned long)ord_count, (unsigned long)ord_failures,
+                        (unsigned long)ord_min_us, ord_avg_us, (unsigned long)ord_max_us);
+            } else {
+                fprintf(stdout, " " SH_BOLD SH_PEACH "ORDER LATENCY" SH_RESET SH_DIM " (live, no orders yet)" SH_RESET "\033[K\n");
+            }
+        } else {
+            fprintf(stdout, " " SH_DIM "ORDER LATENCY: paper mode (no orders submitted)" SH_RESET "\033[K\n");
+        }
+
         // Footer
         fprintf(stdout, "\033[K\n");
         fprintf(stdout, " " SH_DIM "Press Ctrl+C to stop and dump final stats. Subtract ~25-30ns rdtsc floor for actual work cost." SH_RESET "\033[K\n");
@@ -549,6 +729,32 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
             FPN_ToDouble(state.balance));
 
     EngineSharded_DumpLatency<F>(cores, num_cores, tsc_ghz);
+
+    // Order latency final dump (only meaningful in live mode)
+    if (live_trading) {
+        uint64_t ord_count    = g_sharded_order_lat.count.load(std::memory_order_relaxed);
+        uint64_t ord_failures = g_sharded_order_lat.failures.load(std::memory_order_relaxed);
+        uint64_t ord_total_us = g_sharded_order_lat.total_us.load(std::memory_order_relaxed);
+        uint64_t ord_min_us   = g_sharded_order_lat.min_us.load(std::memory_order_relaxed);
+        uint64_t ord_max_us   = g_sharded_order_lat.max_us.load(std::memory_order_relaxed);
+        fprintf(stderr, "\n");
+        fprintf(stderr, "================================================================\n");
+        fprintf(stderr, "[sharded] ORDER LATENCY (BinanceOrderAPI round trip, microseconds)\n");
+        fprintf(stderr, "================================================================\n");
+        if (ord_count > 0) {
+            double ord_avg_us = (double)ord_total_us / (double)ord_count;
+            fprintf(stderr, "  orders submitted : %lu\n", (unsigned long)ord_count);
+            fprintf(stderr, "  failures         : %lu\n", (unsigned long)ord_failures);
+            fprintf(stderr, "  min              : %lu µs\n", (unsigned long)ord_min_us);
+            fprintf(stderr, "  avg              : %.0f µs\n", ord_avg_us);
+            fprintf(stderr, "  max              : %lu µs\n", (unsigned long)ord_max_us);
+        } else {
+            fprintf(stderr, "  no orders submitted during this run.\n");
+        }
+        fprintf(stderr, "================================================================\n");
+
+        BinanceOrderAPI_Cleanup(&g_sharded_order_api);
+    }
 
     // Restore previous signal handlers so subsequent code paths see the
     // original behavior (legacy engine doesn't install one, so this resets
