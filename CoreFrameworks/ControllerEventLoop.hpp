@@ -47,6 +47,7 @@
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/StrategyParameters.hpp"
 #include "ExecutionCore.hpp"
+#include "OrderManager.hpp"
 #include "Portfolio.hpp"
 #include "ShardedTradeLog.hpp"
 #include "TradeEvent.hpp"
@@ -126,6 +127,13 @@ struct alignas(64) EventLoopState {
     uint8_t kill_switch_tripped;  // 1 once tripped (idempotent)
     uint8_t _pad_ks[7];
     uint64_t ks_trips_total;      // count of trip events (observability)
+    // Phase 03 chunk 1A: OMS back-pointer. nullptr in chunk 1A — the
+    // accessors below ignore it and read directly from this struct's
+    // fields. Chunk 1B will move balance/portfolio/fee_rate/ks_*/trade_log
+    // into OrderManagerState and have the accessors forward to oms->.
+    // Hold a non-null pointer here once the OMS is constructed (engine
+    // startup or test setup) via EventLoopState_AttachOms.
+    OrderManagerState<F>* oms;
 };
 
 //======================================================================================================
@@ -153,6 +161,7 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
     state->ks_peak_balance     = starting_balance;  // initial peak = start
     state->kill_switch_tripped = 0;
     state->ks_trips_total      = 0;
+    state->oms                 = nullptr;  // phase 03 chunk 1A: not wired by default
     Portfolio_Init(&state->portfolio);
     for (int i = 0; i < MAX_EXECUTION_CORES; i++) {
         state->cores[i].core = nullptr;
@@ -238,6 +247,101 @@ template <unsigned F>
 inline void EventLoopState_AttachTradeLog(EventLoopState<F>* state,
                                           ShardedTradeLog* log) {
     state->trade_log = log;
+}
+
+//======================================================================================================
+// [ATTACH OMS — phase 03 chunk 1A]
+//======================================================================================================
+// Hook the OMS into the EventLoopState. ownership stays with the caller —
+// the OMS lifetime must outlast the EventLoopState. nullptr to detach
+// (back to "no OMS attached" state).
+//
+// Chunk 1A semantics: the pointer is stored but the rest of the
+// EventLoopState (balance, portfolio, etc.) keeps living in this struct.
+// the accessor functions below ignore the OMS pointer in chunk 1A.
+//
+// Chunk 1B will move the bank state into OrderManagerState and have the
+// accessors forward to oms->. AttachOms then becomes the only correct way
+// to wire up an EventLoopState — call sites that skip it will get nullptr
+// dereferences inside the accessors. document this loudly when chunk 1B
+// lands.
+//======================================================================================================
+template <unsigned F>
+inline void EventLoopState_AttachOms(EventLoopState<F>* state,
+                                      OrderManagerState<F>* oms) {
+    state->oms = oms;
+}
+
+//======================================================================================================
+// [BANK ACCESSORS — phase 03 chunk 1A]
+//======================================================================================================
+// Forwarding accessors for the financial fields. Chunk 1A: passthrough to
+// the existing EventLoopState fields. Chunk 1B: forwards to state->oms->
+// fields once the move is done.
+//
+// All future call sites that need balance/portfolio/fee_rate/ks_*/trade_log
+// should go through these instead of reading the fields directly. Direct
+// field reads will break in chunk 1B when the fields move.
+//
+// Convention: each accessor is named EventLoopState_<Field> and takes a
+// const-pointer for read accessors, a non-const-pointer for mutators.
+// Mutators are intentionally limited to the small set of operations
+// EventLoop code actually performs (Init/AttachTradeLog/Configure /Trip/etc.) —
+// callers should not freely write to balance/portfolio from the outside.
+//======================================================================================================
+template <unsigned F>
+inline FPN<F> EventLoopState_Balance(const EventLoopState<F>* state) {
+    return state->balance;
+}
+
+template <unsigned F>
+inline FPN<F> EventLoopState_RealizedPnl(const EventLoopState<F>* state) {
+    return state->realized_pnl;
+}
+
+template <unsigned F>
+inline FPN<F> EventLoopState_FeeRate(const EventLoopState<F>* state) {
+    return state->fee_rate;
+}
+
+template <unsigned F>
+inline const Portfolio<F>* EventLoopState_Portfolio(const EventLoopState<F>* state) {
+    return &state->portfolio;
+}
+
+template <unsigned F>
+inline Portfolio<F>* EventLoopState_PortfolioMut(EventLoopState<F>* state) {
+    return &state->portfolio;
+}
+
+template <unsigned F>
+inline FPN<F> EventLoopState_KsMinBalance(const EventLoopState<F>* state) {
+    return state->ks_min_balance;
+}
+
+template <unsigned F>
+inline FPN<F> EventLoopState_KsMaxDrawdownPct(const EventLoopState<F>* state) {
+    return state->ks_max_drawdown_pct;
+}
+
+template <unsigned F>
+inline FPN<F> EventLoopState_KsPeakBalance(const EventLoopState<F>* state) {
+    return state->ks_peak_balance;
+}
+
+template <unsigned F>
+inline uint8_t EventLoopState_KillSwitchTripped(const EventLoopState<F>* state) {
+    return state->kill_switch_tripped;
+}
+
+template <unsigned F>
+inline uint64_t EventLoopState_KsTripsTotal(const EventLoopState<F>* state) {
+    return state->ks_trips_total;
+}
+
+template <unsigned F>
+inline ShardedTradeLog* EventLoopState_TradeLog(const EventLoopState<F>* state) {
+    return state->trade_log;
 }
 
 //======================================================================================================

@@ -201,6 +201,15 @@ template <unsigned F> struct ControllerConfig {
   // latency demos that need reliable trade firing without depending on
   // current market volatility. Default 0 = use real Binance feed.
   uint8_t sharded_force_synthetic;
+  // OMS phase 03: which path EventLoop_OnEvent takes when a TradeEvent
+  // arrives. mode 0 (legacy): OnEvent mutates the portfolio + balance
+  // directly, same as phase 02. mode 1 (event log): OnEvent just bumps
+  // total_events_processed and routes to OMS, the OMS callback does the
+  // portfolio mutation + balance update + kill switch peak + trade log
+  // write. mode 1 is what the head-to-head test exercises and what
+  // production runs after the soak. default 0 so existing tests stay
+  // green during the migration window.
+  uint32_t oms_event_log_mode;      // 0 = legacy (default), 1 = event log
 };
 //======================================================================================================
 template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
@@ -340,6 +349,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.engine_mode = ENGINE_MODE_SINGLE_CORE;
   cfg.num_execution_cores = 4;
   cfg.sharded_force_synthetic = 0;
+  // OMS phase 03 — default to legacy OnEvent path so existing tests and
+  // the production engine before the migration soak stay on the known-good code.
+  cfg.oms_event_log_mode = 0;
   return cfg;
 }
 //======================================================================================================
@@ -558,6 +570,13 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     if (strcmp(key, "sharded_force_synthetic") == 0) {
       cfg.sharded_force_synthetic = (uint8_t)(atoi(val) != 0 ? 1 : 0);
+      continue;
+    }
+    // OMS phase 03 — accept both string and int values for clarity in cfg files
+    if (strcmp(key, "oms_event_log_mode") == 0) {
+      if (strcmp(val, "legacy") == 0)         cfg.oms_event_log_mode = 0;
+      else if (strcmp(val, "event_log") == 0) cfg.oms_event_log_mode = 1;
+      else                                     cfg.oms_event_log_mode = (uint32_t)atoi(val);
       continue;
     }
 

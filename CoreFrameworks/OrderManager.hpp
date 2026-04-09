@@ -61,6 +61,8 @@
 #include "../Limits.hpp"
 #include "ExchangeAdapter.hpp"
 #include "Order.hpp"
+#include "Portfolio.hpp"
+#include "ShardedTradeLog.hpp"
 #include "SPSCRing.hpp"
 
 #include <atomic>
@@ -97,6 +99,23 @@ constexpr size_t OMS_RESULT_QUEUE_SIZE = 256;
 //======================================================================================================
 // [ORDER MANAGER STATE]
 //======================================================================================================
+// Phase 03 (option D — facade): the OMS now owns all the financial state
+// that used to live in EventLoopState. EventLoopState becomes a thin
+// dispatcher with a pointer back to here.
+//
+// Field groups:
+//   - order table (orders[], order_bitmap, next_order_id)
+//   - exchange wiring (adapter, live_trading, result_queue)
+//   - bank state (portfolio, balance, realized_pnl, fee_rate) — phase 03
+//   - kill switch (ks_*, kill_switch_tripped, ks_trips_total) — phase 03
+//   - trade log pointer (not owned, points at the engine's CSV writer) — phase 03
+//   - observability counters (total_submitted/filled/rejected)
+//
+// The bank state and kill switch fields used to live in EventLoopState.
+// Moved here in phase 03 chunk 1 so the OMS is the single source of truth
+// for everything money-related. EventLoopState_Balance and friends are
+// the forwarding accessors that let existing call sites keep working.
+//======================================================================================================
 template <unsigned F>
 struct OrderManagerState {
     Order<F> orders[MAX_INFLIGHT_ORDERS];
@@ -119,6 +138,34 @@ struct OrderManagerState {
     // completes. Drainer thread (single consumer) drains it from
     // OrderManager_Tick. SPSC contract relies on worker_count==1.
     SPSCRing<Command, OMS_RESULT_QUEUE_SIZE> result_queue;
+
+    // === BANK STATE (moved from EventLoopState in phase 03 chunk 1) ===
+    // Canonical portfolio + balance. After phase 03 mode 1 ships, these
+    // are derived from the order event log. In mode 0 (legacy) and during
+    // chunk 1 itself, EventLoop_OnEvent still mutates them directly.
+    Portfolio<F> portfolio;
+    FPN<F>       balance;
+    FPN<F>       realized_pnl;
+    FPN<F>       fee_rate;
+
+    // === KILL SWITCH STATE (moved from EventLoopState in phase 03 chunk 1) ===
+    // Configured by EventLoopState_ConfigureKillSwitch (which now writes
+    // here through the OMS pointer). Disabled by default (both thresholds
+    // zero). Tripping clears every registered core's permission with
+    // RELEASE; resume via EventLoop_Unpause.
+    FPN<F>  ks_min_balance;       // trip if balance < this
+    FPN<F>  ks_max_drawdown_pct;  // trip if (peak - balance) / peak > this (0 = disabled)
+    FPN<F>  ks_peak_balance;      // running max of balance, updated on exits
+    uint8_t kill_switch_tripped;  // 1 once tripped (idempotent)
+    uint8_t _pad_ks[7];
+    uint64_t ks_trips_total;      // count of trip events (observability)
+
+    // === TRADE LOG (moved from EventLoopState in phase 03 chunk 1) ===
+    // Optional CSV trade log. nullptr → no logging (default). Not owned —
+    // the engine main owns the ShardedTradeLog object and passes a pointer
+    // here via EventLoopState_AttachTradeLog (which now writes through to
+    // the OMS).
+    ShardedTradeLog* trade_log;
 
     // Observability counters. Atomic so the TUI render loop on a different
     // core can read them without locks. Relaxed ordering throughout —
@@ -169,6 +216,15 @@ static void OrderManager_FillResultCallback(void* user_ctx,
 // In paper mode the caller passes a default-constructed (zero-initialized)
 // adapter — all function pointers null. The OMS will short-circuit Submit
 // to FILLED before touching them.
+//
+// Phase 03 chunk 1A note: the new bank-state fields (portfolio, balance,
+// realized_pnl, fee_rate, ks_*, trade_log) added to OrderManagerState are
+// initialized to zero/default here but NOT YET POPULATED with the engine's
+// real starting balance. EventLoopState_Init still owns that. Chunk 1B
+// will change OrderManager_Init to take starting_balance + fee_rate as
+// parameters and remove them from EventLoopState_Init. For chunk 1A the
+// fields exist but are unused — keeps the 3-arg signature so existing
+// tests stay green.
 //======================================================================================================
 template <unsigned F>
 inline void OrderManager_Init(OrderManagerState<F>* oms,
@@ -183,6 +239,20 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     oms->adapter        = adapter;
     oms->live_trading   = live_trading;
     SPSCRing_Init(&oms->result_queue);
+
+    // Phase 03 chunk 1A: new bank-state fields zeroed but unused.
+    // Chunk 1B will populate these from caller-supplied starting_balance/fee_rate.
+    Portfolio_Init(&oms->portfolio);
+    oms->balance             = FPN_Zero<F>();
+    oms->realized_pnl        = FPN_Zero<F>();
+    oms->fee_rate            = FPN_Zero<F>();
+    oms->ks_min_balance      = FPN_Zero<F>();
+    oms->ks_max_drawdown_pct = FPN_Zero<F>();
+    oms->ks_peak_balance     = FPN_Zero<F>();
+    oms->kill_switch_tripped = 0;
+    oms->ks_trips_total      = 0;
+    oms->trade_log           = nullptr;
+
     oms->total_submitted.store(0, std::memory_order_relaxed);
     oms->total_filled.store(0, std::memory_order_relaxed);
     oms->total_rejected.store(0, std::memory_order_relaxed);
