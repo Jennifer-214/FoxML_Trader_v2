@@ -489,9 +489,23 @@ inline void OrderManager_Tick(OrderManagerState<F>* oms) {
                     Portfolio_OpenSlot(&oms->portfolio, (int)o->core_id,
                                       fill_price, fill_qty,
                                       o->intended_tp, o->intended_sl, entry_fee);
+                    // Trade log CSV — construct a synthetic TradeEvent so
+                    // the existing RecordEntry function works unchanged.
+                    if (oms->trade_log) {
+                        TradeEvent<F> synth{};
+                        synth.price     = fill_price;
+                        synth.timestamp = o->submitted_at_us;
+                        synth.core_id   = (uint16_t)o->core_id;
+                        synth.type      = TRADE_EVENT_ENTRY;
+                        ShardedTradeLog_RecordEntry(oms->trade_log, synth,
+                                                    o->strategy_id,
+                                                    fill_price, fill_qty,
+                                                    entry_fee, oms->balance);
+                    }
                 } else if (o->type == (uint8_t)ORDER_MARKET_SELL) {
                     // Exit fill: close portfolio slot, compute P&L, update balance.
                     int pslot = (int)o->core_id;
+                    FPN<F> entry_price_snap = oms->portfolio.positions[pslot].entry_price;
                     FPN<F> entry_fee = oms->portfolio.positions[pslot].entry_fee;
                     FPN<F> qty_snap  = oms->portfolio.positions[pslot].quantity;
                     FPN<F> gross     = Portfolio_CloseSlot(&oms->portfolio, pslot, fill_price);
@@ -503,6 +517,19 @@ inline void OrderManager_Tick(OrderManagerState<F>* oms) {
                     oms->realized_pnl = FPN_Add(oms->realized_pnl, net);
                     if (FPN_GreaterThan(oms->balance, oms->ks_peak_balance)) {
                         oms->ks_peak_balance = oms->balance;
+                    }
+                    // Trade log CSV.
+                    if (oms->trade_log) {
+                        TradeEvent<F> synth{};
+                        synth.price     = fill_price;
+                        synth.timestamp = o->submitted_at_us;
+                        synth.core_id   = (uint16_t)o->core_id;
+                        synth.type      = TRADE_EVENT_EXIT;
+                        ShardedTradeLog_RecordExit(oms->trade_log, synth,
+                                                   o->strategy_id,
+                                                   entry_price_snap, fill_price,
+                                                   qty_snap, net, total_fee,
+                                                   oms->balance);
                     }
                 }
             } else {
