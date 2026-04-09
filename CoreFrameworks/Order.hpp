@@ -79,10 +79,19 @@ struct Order {
     FPN<F>    requested_price;     // limit only, ignored for MARKET
     FPN<F>    filled_qty;          // running total across partials
     FPN<F>    avg_fill_price;      // weighted across partials
+    // phase 03 chunk 3: context fields for the OMS fill handler. when
+    // event_log_mode == 1, the OMS opens portfolio slots on fill and
+    // needs the TP/SL/strategy the controller intended at entry time.
+    // also carries event_price for paper mode fills (no adapter callback
+    // to supply a fill price, so we use the market price at submit time).
+    FPN<F>    intended_tp;         // TP to apply when this order fills (entry only)
+    FPN<F>    intended_sl;         // SL to apply when this order fills (entry only)
+    FPN<F>    event_price;         // market price at submit time (paper fill price)
     uint64_t  submitted_at_us;     // wall-clock microseconds since epoch
     uint64_t  last_update_us;      // last state transition timestamp
     uint8_t   retry_count;         // bumped on each retry attempt
-    uint8_t   _pad[7];
+    uint8_t   strategy_id;         // STRATEGY_* constant, for trade log CSV
+    uint8_t   _pad[6];
 };
 
 // Initialize an order to PENDING state with the given identifying fields.
@@ -104,9 +113,13 @@ inline void Order_Init(Order<F>* o, uint64_t id, int16_t core_id, OrderType type
     o->requested_price = FPN_Zero<F>();
     o->filled_qty      = FPN_Zero<F>();
     o->avg_fill_price  = FPN_Zero<F>();
+    o->intended_tp     = FPN_Zero<F>();
+    o->intended_sl     = FPN_Zero<F>();
+    o->event_price     = FPN_Zero<F>();
     o->submitted_at_us = 0;
     o->last_update_us  = 0;
     o->retry_count     = 0;
+    o->strategy_id     = 0xFF;  // STRATEGY_NONE
 }
 
 // Predicate: is this order in a terminal state (no further transitions)?

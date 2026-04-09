@@ -301,7 +301,8 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     }
     OrderManagerState<F> oms;
     OrderManager_Init(&oms, exchange_adapter, live_trading ? 1 : 0,
-                      cfg.starting_balance, cfg.fee_rate);
+                      cfg.starting_balance, cfg.fee_rate,
+                      (int)cfg.oms_event_log_mode);
 
     EventLoopState<F> state;
     EventLoopState_Init(&state, &oms);
@@ -545,7 +546,11 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
                         OrderManager_Submit(&oms,
                             (int16_t)slot,
                             is_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
-                            FPN_FromDouble<F>(order_qty_d));
+                            FPN_FromDouble<F>(order_qty_d),
+                            state.cores[slot].intended_tp,
+                            state.cores[slot].intended_sl,
+                            state.cores[slot].strategy_id,
+                            event.price);
                     }
                 }
             }

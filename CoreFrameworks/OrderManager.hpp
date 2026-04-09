@@ -61,6 +61,7 @@
 #include "../Limits.hpp"
 #include "ExchangeAdapter.hpp"
 #include "Order.hpp"
+#include "OrderEventLog.hpp"
 #include "Portfolio.hpp"
 #include "ShardedTradeLog.hpp"
 #include "SPSCRing.hpp"
@@ -167,6 +168,20 @@ struct OrderManagerState {
     // the OMS).
     ShardedTradeLog* trade_log;
 
+    // === EVENT LOG MODE (phase 03 chunk 3) ===
+    // 0 = legacy: OMS_Tick only marks FILLED/REJECTED and frees slots.
+    //     OnEvent in ControllerEventLoop does the portfolio mutation.
+    // 1 = event log: OMS_Tick runs the fill handler which opens/closes
+    //     portfolio slots, updates balance, appends to the event log.
+    //     OnEvent just bumps counters.
+    int event_log_mode;
+
+    // === ORDER EVENT LOG (phase 03 chunk 3) ===
+    // append-only log of order lifecycle events. populated in mode 1 by
+    // the fill handler inside OMS_Tick. the portfolio can be reconstructed
+    // from this log at any time via Portfolio_FromEventLog.
+    OrderEventLog<F> event_log;
+
     // Observability counters. Atomic so the TUI render loop on a different
     // core can read them without locks. Relaxed ordering throughout —
     // these are display-only.
@@ -222,13 +237,21 @@ static void OrderManager_FillResultCallback(void* user_ctx,
 // from init onwards. EventLoopState_Init takes an OMS pointer instead of
 // its own balance/fee_rate and forwards all financial reads through the
 // OMS.
+//
+// Phase 03 chunk 3: event_log_mode parameter (default 0):
+//   0 = legacy mode. OMS_Tick only marks orders FILLED/REJECTED and frees
+//       slots. Portfolio mutation happens in EventLoop_OnEvent (unchanged).
+//   1 = event log mode. OMS_Tick runs a fill handler that opens/closes
+//       portfolio slots, updates balance, and appends to the event log.
+//       EventLoop_OnEvent just bumps counters.
 //======================================================================================================
 template <unsigned F>
 inline void OrderManager_Init(OrderManagerState<F>* oms,
                               const ExchangeAdapter<F>& adapter,
                               int live_trading,
                               FPN<F> starting_balance,
-                              FPN<F> fee_rate) {
+                              FPN<F> fee_rate,
+                              int event_log_mode = 0) {
     for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
         Order_Init(&oms->orders[i], 0, -1, ORDER_MARKET_BUY);
         oms->orders[i].state = ORDER_FILLED;  // mark as inactive (terminal)
@@ -254,16 +277,25 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     oms->total_submitted.store(0, std::memory_order_relaxed);
     oms->total_filled.store(0, std::memory_order_relaxed);
     oms->total_rejected.store(0, std::memory_order_relaxed);
+
+    // Phase 03 chunk 3: event log mode + log allocation.
+    oms->event_log_mode = event_log_mode;
+    OrderEventLog_Init(&oms->event_log);
 }
 
 //======================================================================================================
 // [SUBMIT — async via adapter, returns immediately]
 //======================================================================================================
 // Paper mode:
-//   Bump total_submitted and total_filled, return the next id. No slot
-//   allocation, no adapter call, no result queue traffic. Symmetric with
-//   the legacy fire-and-forget pattern but routed through the OMS so the
-//   counters are consistent across paper and live.
+//   Mode 0 (legacy): Bump total_submitted and total_filled, return the next
+//   id. No slot allocation, no adapter call, no result queue traffic.
+//   Symmetric with the legacy fire-and-forget pattern but routed through the
+//   OMS so the counters are consistent across paper and live.
+//
+//   Mode 1 (event log): allocate a slot, mark ORDER_SUBMITTED, push a
+//   synthetic CMD_FILL_RESULT into the result queue so OMS_Tick handles
+//   it uniformly. The fill handler then opens/closes portfolio slots and
+//   appends to the event log, just like in live mode.
 //
 // Live mode:
 //   1. Allocate a free slot from the bitmap. Drop on full (logged).
@@ -276,16 +308,28 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
 //      the slot REJECTED and free it.
 //
 // qty is FPN<F> per the FPN-only-accounting rule in CLAUDE.md.
+//
+// Phase 03 chunk 3: extra context parameters for the fill handler.
+//   intended_tp / intended_sl: TP/SL to apply at fill time (entry only).
+//   strategy_id: STRATEGY_* constant for trade log CSV.
+//   event_price: market price at submit time; used as the fill price in
+//     paper mode (no adapter callback to supply one).
 //======================================================================================================
 template <unsigned F>
 inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms,
                                     int16_t core_id,
                                     OrderType type,
-                                    FPN<F> qty) {
+                                    FPN<F> qty,
+                                    FPN<F> intended_tp = FPN_Zero<F>(),
+                                    FPN<F> intended_sl = FPN_Zero<F>(),
+                                    uint8_t strategy_id = 0xFF,
+                                    FPN<F> event_price = FPN_Zero<F>()) {
     uint64_t id = oms->next_order_id++;
 
-    // Paper mode: count and return. Never touch the table or the adapter.
-    if (!oms->live_trading) {
+    // Paper mode + legacy (mode 0): count and return. Never touch the
+    // table or the adapter. Mode 1 paper falls through to the slot
+    // allocation path below so the fill handler runs in OMS_Tick.
+    if (!oms->live_trading && oms->event_log_mode == 0) {
         oms->total_submitted.fetch_add(1, std::memory_order_relaxed);
         oms->total_filled.fetch_add(1, std::memory_order_relaxed);
         return id;
@@ -305,8 +349,33 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms,
 
     Order_Init(&oms->orders[slot], id, core_id, type);
     oms->orders[slot].requested_qty = qty;
+    oms->orders[slot].intended_tp   = intended_tp;
+    oms->orders[slot].intended_sl   = intended_sl;
+    oms->orders[slot].strategy_id   = strategy_id;
+    oms->orders[slot].event_price   = event_price;
     oms->orders[slot].state         = ORDER_SUBMITTED;
     oms->total_submitted.fetch_add(1, std::memory_order_relaxed);
+
+    // Paper mode + event log (mode 1): push a synthetic fill result so
+    // OMS_Tick runs the fill handler uniformly. The fill price is the
+    // event_price captured at submit time. No adapter call needed.
+    if (!oms->live_trading) {
+        Command cmd;
+        cmd.type     = (uint8_t)CMD_FILL_RESULT;
+        cmd.order_id = id;
+        std::memset(&cmd.result, 0, sizeof(cmd.result));
+        cmd.result.success        = 1;
+        cmd.result.avg_fill_price = FPN_ToDouble(event_price);
+        cmd.result.fill_qty       = FPN_ToDouble(qty);
+        std::strncpy(cmd.result.exchange_id, "PAPER",
+                     sizeof(cmd.result.exchange_id) - 1);
+        if (!SPSCRing_TryPush(&oms->result_queue, cmd)) {
+            std::fprintf(stderr,
+                         "[OMS] result queue full on paper submit for order %llu\n",
+                         (unsigned long long)id);
+        }
+        return id;
+    }
 
     // Defensive: live mode requires a wired adapter.
     if (oms->adapter.submit_market_buy == nullptr ||
@@ -397,8 +466,56 @@ inline void OrderManager_Tick(OrderManagerState<F>* oms) {
             oms->total_rejected.fetch_add(1, std::memory_order_relaxed);
         }
 
-        // Phase 02: free the slot on terminal transition. Phase 03 will
-        // keep terminal orders around longer for the event log audit trail.
+        // === EVENT LOG MODE 1: fill handler ===
+        // In mode 1 the OMS owns portfolio mutation. On a successful fill
+        // we open/close the portfolio slot and update balance. On rejection
+        // we append a rejection event to the log for the audit trail.
+        if (oms->event_log_mode == 1) {
+            if (cmd.result.success) {
+                // Append fill event to the audit log.
+                FPN<F> fill_price = FPN_FromDouble<F>(cmd.result.avg_fill_price);
+                FPN<F> fill_qty   = FPN_FromDouble<F>(cmd.result.fill_qty);
+                OrderEventLog_Append(&oms->event_log,
+                    OrderEvent_MakeFill<F>(
+                        o->id, o->submitted_at_us,
+                        (OrderType)o->type, o->core_id,
+                        fill_price, fill_qty,
+                        o->intended_tp, o->intended_sl));
+
+                if (o->type == (uint8_t)ORDER_MARKET_BUY) {
+                    // Entry fill: open portfolio slot.
+                    FPN<F> notional  = FPN_Mul(fill_price, fill_qty);
+                    FPN<F> entry_fee = FPN_Mul(notional, oms->fee_rate);
+                    Portfolio_OpenSlot(&oms->portfolio, (int)o->core_id,
+                                      fill_price, fill_qty,
+                                      o->intended_tp, o->intended_sl, entry_fee);
+                } else if (o->type == (uint8_t)ORDER_MARKET_SELL) {
+                    // Exit fill: close portfolio slot, compute P&L, update balance.
+                    int pslot = (int)o->core_id;
+                    FPN<F> entry_fee = oms->portfolio.positions[pslot].entry_fee;
+                    FPN<F> qty_snap  = oms->portfolio.positions[pslot].quantity;
+                    FPN<F> gross     = Portfolio_CloseSlot(&oms->portfolio, pslot, fill_price);
+                    FPN<F> exit_notional = FPN_Mul(fill_price, qty_snap);
+                    FPN<F> exit_fee      = FPN_Mul(exit_notional, oms->fee_rate);
+                    FPN<F> total_fee     = FPN_Add(entry_fee, exit_fee);
+                    FPN<F> net           = FPN_Sub(gross, total_fee);
+                    oms->balance      = FPN_Add(oms->balance, net);
+                    oms->realized_pnl = FPN_Add(oms->realized_pnl, net);
+                    if (FPN_GreaterThan(oms->balance, oms->ks_peak_balance)) {
+                        oms->ks_peak_balance = oms->balance;
+                    }
+                }
+            } else {
+                // Rejection: append to event log for the audit trail.
+                OrderEventLog_Append(&oms->event_log,
+                    OrderEvent_MakeRejection<F>(
+                        o->id, o->submitted_at_us,
+                        (OrderType)o->type, o->core_id,
+                        cmd.result.error_message));
+            }
+        }
+
+        // Free the slot on terminal transition.
         oms->order_bitmap &= (uint16_t)~(1u << slot);
     }
 }
@@ -413,7 +530,7 @@ inline void OrderManager_Tick(OrderManagerState<F>* oms) {
 //======================================================================================================
 template <unsigned F>
 inline void OrderManager_Shutdown(OrderManagerState<F>* oms) {
-    (void)oms;
+    OrderEventLog_Free(&oms->event_log);
 }
 
 //======================================================================================================

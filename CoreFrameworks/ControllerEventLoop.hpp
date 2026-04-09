@@ -373,6 +373,24 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
     // test or future bug can't sneak through.
     if (is_entry && is_exit) return;
 
+    // === EVENT LOG MODE 1: OMS owns portfolio mutation ===
+    // In mode 1 the fill handler inside OMS_Tick opens/closes portfolio
+    // slots and updates balance. OnEvent just bumps counters so the
+    // statistics stay correct for the TUI and the drainer loop.
+    if (state->oms->event_log_mode == 1) {
+        if (is_entry) {
+            ctx->entries_processed++;
+            state->total_entries++;
+        }
+        if (is_exit) {
+            ctx->exits_processed++;
+            state->total_exits++;
+        }
+        state->total_events_processed++;
+        return;
+    }
+
+    // === MODE 0: legacy OnEvent path (unchanged) ===
     if (is_entry) {
         // Compute entry fee = entry_price * qty * fee_rate (matches existing fee model)
         FPN<F> notional = FPN_Mul(event.price, ctx->intended_qty);
