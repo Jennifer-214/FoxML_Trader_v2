@@ -157,6 +157,13 @@ add_executable(test_oms test_oms.cpp)
 target_compile_definitions(test_oms PRIVATE USE_NATIVE_128)
 target_link_libraries(test_oms PRIVATE pthread)
 
+# OMS phase 03 chunk 2: OrderEventLog + Portfolio_FromEventLog fold tests.
+# Validates append-only semantics, monotonic event_ids, fold determinism,
+# correct fee accounting across entry/exit pairs, and non-fill event filtering.
+add_executable(test_order_event_log test_order_event_log.cpp)
+target_compile_definitions(test_order_event_log PRIVATE USE_NATIVE_128)
+target_link_libraries(test_order_event_log PRIVATE pthread)
+
 # OMS phase 02 concurrent stress test. Spawns a worker thread that mimics
 # the BinanceAdapter's submission queue → callback flow, then a drainer-
 # simulating thread that does Submit + Tick in a loop. Validates the SPSC
