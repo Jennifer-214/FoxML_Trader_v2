@@ -173,3 +173,11 @@ target_link_libraries(test_order_event_log PRIVATE pthread)
 add_executable(test_oms_concurrent test_oms_concurrent.cpp)
 target_compile_definitions(test_oms_concurrent PRIVATE USE_NATIVE_128)
 target_link_libraries(test_oms_concurrent PRIVATE pthread)
+
+# Phase 03 chunk 5: head-to-head comparison of event_log_mode 0 (legacy) vs
+# mode 1 (event log). Runs the same synthetic tick stream through both modes
+# and asserts byte-identical final balance + portfolio state. This is the
+# acceptance criterion for the phase 03 OMS event log migration.
+add_executable(test_event_log_head_to_head test_event_log_head_to_head.cpp)
+target_compile_definitions(test_event_log_head_to_head PRIVATE USE_NATIVE_128)
+target_link_libraries(test_event_log_head_to_head PRIVATE pthread)
