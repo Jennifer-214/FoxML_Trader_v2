@@ -104,27 +104,27 @@ inline EventLoopAggregates EventLoop_GetAggregates(const EventLoopState<F>* stat
                                                     FPN<F> mark_price) {
     EventLoopAggregates agg;
 
-    // realized side from EventLoopState fields
-    agg.balance      = FPN_ToDouble(state->balance);
-    agg.realized_pnl = FPN_ToDouble(state->realized_pnl);
-    agg.peak_balance = FPN_ToDouble(state->ks_peak_balance);
+    // realized side from OMS (financial state lives there since chunk 1B)
+    agg.balance      = FPN_ToDouble(state->oms->balance);
+    agg.realized_pnl = FPN_ToDouble(state->oms->realized_pnl);
+    agg.peak_balance = FPN_ToDouble(state->oms->ks_peak_balance);
 
     // counts
     agg.registered_cores = state->registered_count;
     agg.total_entries    = state->total_entries;
     agg.total_exits      = state->total_exits;
-    agg.kill_switch_tripped = state->kill_switch_tripped;
+    agg.kill_switch_tripped = state->oms->kill_switch_tripped;
 
     // walk the active bitmap once for unrealized P&L and active count
     FPN<F> unreal = FPN_Zero<F>();
     int active = 0;
-    uint16_t bm = state->portfolio.active_bitmap;
+    uint16_t bm = state->oms->portfolio.active_bitmap;
     bool have_mark = !FPN_IsZero(mark_price);
     for (int slot = 0; slot < MAX_PORTFOLIO_POSITIONS; ++slot) {
         if (((bm >> slot) & 1) == 0) continue;
         ++active;
         if (have_mark) {
-            const Position<F>* pos = &state->portfolio.positions[slot];
+            const Position<F>* pos = &state->oms->portfolio.positions[slot];
             // unrealized = qty * (mark - entry). Long-only for now; if quantity
             // were ever negative this still produces the correct sign.
             FPN<F> diff = FPN_Sub(mark_price, pos->entry_price);

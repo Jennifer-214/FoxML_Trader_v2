@@ -62,22 +62,24 @@ static void init_test_core(ExecutionCore<64>* core,
 // test 1: init produces clean state
 //======================================================================================================
 static void test_init() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     EXPECT(state.registered_count == 0, "init: no cores registered");
-    EXPECT(FPN_ToDouble(state.balance) == 10000.0, "init: balance == starting");
-    EXPECT(FPN_ToDouble(state.realized_pnl) == 0.0, "init: realized_pnl == 0");
+    EXPECT(FPN_ToDouble(state.oms->balance) == 10000.0, "init: balance == starting");
+    EXPECT(FPN_ToDouble(state.oms->realized_pnl) == 0.0, "init: realized_pnl == 0");
     EXPECT(state.total_events_processed == 0, "init: events == 0");
-    EXPECT(state.portfolio.active_bitmap == 0, "init: portfolio empty");
+    EXPECT(state.oms->portfolio.active_bitmap == 0, "init: portfolio empty");
 }
 
 //======================================================================================================
 // test 2: register core assigns slot == core_id
 //======================================================================================================
 static void test_register_core() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
     SPSCRing_Init(&tick_ring);
@@ -112,8 +114,9 @@ static void test_register_core() {
 // test 3: single entry event opens the slot
 //======================================================================================================
 static void test_single_entry() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
     SPSCRing_Init(&tick_ring);
@@ -126,17 +129,17 @@ static void test_single_entry() {
     TradeEvent<64> entry = make_event((uint16_t)slot, TRADE_EVENT_ENTRY, 60000.0, 1'000'000);
     EventLoop_OnEvent(&state, entry);
 
-    EXPECT(Portfolio_SlotActive(&state.portfolio, slot) == 1, "slot active after entry");
-    EXPECT(FPN_ToDouble(state.portfolio.positions[slot].entry_price) == 60000.0, "entry_price recorded");
-    EXPECT(FPN_ToDouble(state.portfolio.positions[slot].take_profit_price) == 60100.0, "tp from intended");
-    EXPECT(FPN_ToDouble(state.portfolio.positions[slot].stop_loss_price) == 59900.0, "sl from intended");
-    EXPECT(FPN_ToDouble(state.portfolio.positions[slot].quantity) == 0.01, "qty from intended");
+    EXPECT(Portfolio_SlotActive(&state.oms->portfolio, slot) == 1, "slot active after entry");
+    EXPECT(FPN_ToDouble(state.oms->portfolio.positions[slot].entry_price) == 60000.0, "entry_price recorded");
+    EXPECT(FPN_ToDouble(state.oms->portfolio.positions[slot].take_profit_price) == 60100.0, "tp from intended");
+    EXPECT(FPN_ToDouble(state.oms->portfolio.positions[slot].stop_loss_price) == 59900.0, "sl from intended");
+    EXPECT(FPN_ToDouble(state.oms->portfolio.positions[slot].quantity) == 0.01, "qty from intended");
     EXPECT(state.cores[slot].entries_processed == 1, "core entries++");
     EXPECT(state.total_entries == 1, "global entries++");
     EXPECT(state.total_events_processed == 1, "events++");
 
     // entry fee = 60000 * 0.01 * 0.001 = 0.6
-    double recorded_fee = FPN_ToDouble(state.portfolio.positions[slot].entry_fee);
+    double recorded_fee = FPN_ToDouble(state.oms->portfolio.positions[slot].entry_fee);
     EXPECT(recorded_fee > 0.59 && recorded_fee < 0.61, "entry fee = price * qty * rate");
 }
 
@@ -144,8 +147,9 @@ static void test_single_entry() {
 // test 4: single exit event closes the slot and updates balance
 //======================================================================================================
 static void test_single_exit() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
     SPSCRing_Init(&tick_ring);
@@ -160,7 +164,7 @@ static void test_single_exit() {
     // exit at 60100 (TP hit)
     EventLoop_OnEvent(&state, make_event((uint16_t)slot, TRADE_EVENT_EXIT,  60100.0, 1'000'001));
 
-    EXPECT(Portfolio_SlotActive(&state.portfolio, slot) == 0, "slot inactive after exit");
+    EXPECT(Portfolio_SlotActive(&state.oms->portfolio, slot) == 0, "slot inactive after exit");
     EXPECT(state.cores[slot].exits_processed == 1, "core exits++");
     EXPECT(state.total_exits == 1, "global exits++");
     EXPECT(state.total_events_processed == 2, "events == 2");
@@ -169,8 +173,8 @@ static void test_single_exit() {
     // entry_fee = 60000 * 0.01 * 0.001 = 0.60
     // exit_fee  = 60100 * 0.01 * 0.001 = 0.601
     // net = 1.00 - 1.201 = -0.201   (small loss due to fees > gross profit)
-    double balance = FPN_ToDouble(state.balance);
-    double pnl = FPN_ToDouble(state.realized_pnl);
+    double balance = FPN_ToDouble(state.oms->balance);
+    double pnl = FPN_ToDouble(state.oms->realized_pnl);
     double expected_net = 1.00 - 0.60 - 0.601;
     EXPECT(pnl < expected_net + 0.01 && pnl > expected_net - 0.01, "net P&L matches gross - fees");
     EXPECT(balance > 9999.5 && balance < 10000.0, "balance updated by net");
@@ -180,8 +184,9 @@ static void test_single_exit() {
 // test 5: profitable trade nets positive P&L
 //======================================================================================================
 static void test_profitable_trade() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
     SPSCRing_Init(&tick_ring);
@@ -198,17 +203,18 @@ static void test_profitable_trade() {
     EventLoop_OnEvent(&state, make_event((uint16_t)slot, TRADE_EVENT_ENTRY, 60000.0, 1'000'000));
     EventLoop_OnEvent(&state, make_event((uint16_t)slot, TRADE_EVENT_EXIT,  61000.0, 1'000'100));
 
-    double pnl = FPN_ToDouble(state.realized_pnl);
+    double pnl = FPN_ToDouble(state.oms->realized_pnl);
     EXPECT(pnl > 439.0 && pnl < 440.0, "profitable trade nets ~439.5");
-    EXPECT(FPN_ToDouble(state.balance) > 10439.0, "balance grew");
+    EXPECT(FPN_ToDouble(state.oms->balance) > 10439.0, "balance grew");
 }
 
 //======================================================================================================
 // test 6: entry+exit across multiple cores produces correct balance
 //======================================================================================================
 static void test_multi_core_pairs() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr_a, tr_b, tr_c;
     SPSCRing_Init(&tr_a); SPSCRing_Init(&tr_b); SPSCRing_Init(&tr_c);
@@ -227,17 +233,17 @@ static void test_multi_core_pairs() {
     EventLoop_OnEvent(&state, make_event((uint16_t)sb, TRADE_EVENT_ENTRY, 60100.0, 101));
     EventLoop_OnEvent(&state, make_event((uint16_t)sc, TRADE_EVENT_ENTRY, 59900.0, 102));
 
-    EXPECT(state.portfolio.active_bitmap == 0b111, "three slots active");
+    EXPECT(state.oms->portfolio.active_bitmap == 0b111, "three slots active");
     EXPECT(state.total_entries == 3, "3 entries");
 
     EventLoop_OnEvent(&state, make_event((uint16_t)sa, TRADE_EVENT_EXIT, 61000.0, 200));
     EventLoop_OnEvent(&state, make_event((uint16_t)sb, TRADE_EVENT_EXIT, 60500.0, 201));
     EventLoop_OnEvent(&state, make_event((uint16_t)sc, TRADE_EVENT_EXIT, 60800.0, 202));
 
-    EXPECT(state.portfolio.active_bitmap == 0, "all slots closed");
+    EXPECT(state.oms->portfolio.active_bitmap == 0, "all slots closed");
     EXPECT(state.total_exits == 3, "3 exits");
     EXPECT(state.total_events_processed == 6, "6 events processed");
-    EXPECT(FPN_ToDouble(state.realized_pnl) > 0.0, "net P&L positive");
+    EXPECT(FPN_ToDouble(state.oms->realized_pnl) > 0.0, "net P&L positive");
 
     // each core has 1 entry + 1 exit
     EXPECT(state.cores[sa].entries_processed == 1 && state.cores[sa].exits_processed == 1, "core a: 1+1");
@@ -249,8 +255,9 @@ static void test_multi_core_pairs() {
 // test 7: drain loop processes events from event rings (round-robin)
 //======================================================================================================
 static void test_drain_loop() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr_a, tr_b;
     SPSCRing_Init(&tr_a); SPSCRing_Init(&tr_b);
@@ -275,15 +282,16 @@ static void test_drain_loop() {
     EXPECT(drained == 5, "drained all 5 events in one pass");
     EXPECT(state.total_entries == 3, "3 entries");
     EXPECT(state.total_exits  == 2, "2 exits");
-    EXPECT(state.portfolio.active_bitmap == (1 << sb), "only core b's second entry left active");
+    EXPECT(state.oms->portfolio.active_bitmap == (1 << sb), "only core b's second entry left active");
 }
 
 //======================================================================================================
 // test 8: per-core drain cap prevents one core from monopolizing
 //======================================================================================================
 static void test_drain_cap() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr_a, tr_b;
     SPSCRing_Init(&tr_a); SPSCRing_Init(&tr_b);
@@ -320,8 +328,9 @@ static void test_drain_cap() {
 // test 9: RunController exits cleanly on shutdown flag
 //======================================================================================================
 static void test_run_controller_shutdown() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
@@ -355,8 +364,9 @@ static void test_run_controller_shutdown() {
 // test 10: invalid event types are silently ignored
 //======================================================================================================
 static void test_invalid_event_type() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
@@ -373,7 +383,7 @@ static void test_invalid_event_type() {
     EventLoop_OnEvent(&state, make_event(99, TRADE_EVENT_ENTRY, 60000.0, 102));
 
     EXPECT(state.total_events_processed == 0, "all 3 invalid events ignored");
-    EXPECT(state.portfolio.active_bitmap == 0, "no slots opened");
+    EXPECT(state.oms->portfolio.active_bitmap == 0, "no slots opened");
 }
 
 //======================================================================================================

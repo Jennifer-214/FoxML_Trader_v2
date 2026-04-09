@@ -65,8 +65,9 @@ static std::vector<Tick<64>> make_dip_stream(int num_ticks, double base_price) {
 // test 1: empty stream is a no-op
 //======================================================================================================
 static void test_empty_stream() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     ShardedBacktestDriver<64> drv;
     ShardedBacktestDriver_Init(&drv, &state, (RollingStats<64>*)nullptr,
@@ -83,8 +84,9 @@ static void test_empty_stream() {
 // test 2: cores with no strategy assigned → no trades
 //======================================================================================================
 static void test_no_strategy_no_trades() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
@@ -113,8 +115,9 @@ static void test_no_strategy_no_trades() {
 // test 3: SimpleDip strategy entries fire on the dip half of the sawtooth
 //======================================================================================================
 static void test_simpledip_trades() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
@@ -148,8 +151,9 @@ static void test_simpledip_trades() {
 // test 4: slow path cadence is exactly tick_count / interval
 //======================================================================================================
 static void test_slow_path_cadence() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     auto rolling = RollingStats_Init<64, 128>();
     ControllerConfig<64> config = ControllerConfig_Default<64>();
@@ -169,8 +173,9 @@ static void test_slow_path_cadence() {
 //======================================================================================================
 static void test_determinism() {
     auto run_one = [](double& balance_out, uint64_t& entries_out, uint64_t& exits_out) {
+        OrderManagerState<64> oms;
         EventLoopState<64> state;
-        EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+        EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
         SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
         SPSCRing_Init(&tr);
@@ -194,7 +199,7 @@ static void test_determinism() {
         auto ticks = make_dip_stream(500, 60000.0);
         ShardedBacktest_Run(&drv, ticks.data(), (int)ticks.size());
 
-        balance_out = FPN_ToDouble(state.balance);
+        balance_out = FPN_ToDouble(state.oms->balance);
         entries_out = state.total_entries;
         exits_out   = state.total_exits;
     };
@@ -215,8 +220,9 @@ static void test_determinism() {
 // test 6: multi-core fan out — 3 cores all see the same tick stream
 //======================================================================================================
 static void test_multi_core_fan_out() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> rings[3];
     ExecutionCore<64> cores[3];
@@ -255,8 +261,9 @@ static void test_multi_core_fan_out() {
 // test 7: kill switch trip mid-run blocks new entries
 //======================================================================================================
 static void test_kill_switch_mid_run() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
@@ -296,7 +303,7 @@ static void test_kill_switch_mid_run() {
     }
     EventLoop_DrainEvents(&state);
 
-    EXPECT(state.kill_switch_tripped == 1, "kill switch still tripped");
+    EXPECT(state.oms->kill_switch_tripped == 1, "kill switch still tripped");
     // Entries after trip should equal entries before trip — no new ones.
     EXPECT(state.total_entries == entries_before,
            "no new entries after kill switch trip");
@@ -306,8 +313,9 @@ static void test_kill_switch_mid_run() {
 // test 8: final drain catches the last tick's events
 //======================================================================================================
 static void test_final_drain() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);

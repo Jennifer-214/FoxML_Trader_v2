@@ -59,8 +59,9 @@ static int failures = 0;
 static void test_full_pipeline_stress() {
     constexpr int NUM_TICKS = 100'000;
 
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
@@ -215,8 +216,9 @@ static void test_full_pipeline_stress() {
 // entry. Verifies the acquire/release pairing actually flushes through.
 //======================================================================================================
 static void test_kill_switch_observed_quickly() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
@@ -277,7 +279,7 @@ static void test_kill_switch_observed_quickly() {
     // After the trip, the core's permission should be 0 (atomic).
     uint8_t perm = __atomic_load_n(&core.permission, __ATOMIC_ACQUIRE);
     EXPECT(perm == 0, "permission cleared after kill switch trip");
-    EXPECT(state.kill_switch_tripped == 1, "state shows tripped");
+    EXPECT(state.oms->kill_switch_tripped == 1, "state shows tripped");
     EXPECT(ticks_total.load() > 0, "executor processed at least some ticks");
     EXPECT(ticks_after_trip.load() > 0,
            "executor processed ticks AFTER the trip — proves permission load was observed");

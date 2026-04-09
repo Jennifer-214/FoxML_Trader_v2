@@ -217,19 +217,18 @@ static void OrderManager_FillResultCallback(void* user_ctx,
 // adapter — all function pointers null. The OMS will short-circuit Submit
 // to FILLED before touching them.
 //
-// Phase 03 chunk 1A note: the new bank-state fields (portfolio, balance,
-// realized_pnl, fee_rate, ks_*, trade_log) added to OrderManagerState are
-// initialized to zero/default here but NOT YET POPULATED with the engine's
-// real starting balance. EventLoopState_Init still owns that. Chunk 1B
-// will change OrderManager_Init to take starting_balance + fee_rate as
-// parameters and remove them from EventLoopState_Init. For chunk 1A the
-// fields exist but are unused — keeps the 3-arg signature so existing
-// tests stay green.
+// Phase 03 chunk 1B: the OMS now owns the bank state. OrderManager_Init
+// takes starting_balance + fee_rate so the OMS is fully self-contained
+// from init onwards. EventLoopState_Init takes an OMS pointer instead of
+// its own balance/fee_rate and forwards all financial reads through the
+// OMS.
 //======================================================================================================
 template <unsigned F>
 inline void OrderManager_Init(OrderManagerState<F>* oms,
                               const ExchangeAdapter<F>& adapter,
-                              int live_trading) {
+                              int live_trading,
+                              FPN<F> starting_balance,
+                              FPN<F> fee_rate) {
     for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
         Order_Init(&oms->orders[i], 0, -1, ORDER_MARKET_BUY);
         oms->orders[i].state = ORDER_FILLED;  // mark as inactive (terminal)
@@ -240,15 +239,14 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     oms->live_trading   = live_trading;
     SPSCRing_Init(&oms->result_queue);
 
-    // Phase 03 chunk 1A: new bank-state fields zeroed but unused.
-    // Chunk 1B will populate these from caller-supplied starting_balance/fee_rate.
+    // Phase 03 chunk 1B: bank state lives here now.
     Portfolio_Init(&oms->portfolio);
-    oms->balance             = FPN_Zero<F>();
+    oms->balance             = starting_balance;
     oms->realized_pnl        = FPN_Zero<F>();
-    oms->fee_rate            = FPN_Zero<F>();
+    oms->fee_rate            = fee_rate;
     oms->ks_min_balance      = FPN_Zero<F>();
     oms->ks_max_drawdown_pct = FPN_Zero<F>();
-    oms->ks_peak_balance     = FPN_Zero<F>();
+    oms->ks_peak_balance     = starting_balance;  // initial peak = start
     oms->kill_switch_tripped = 0;
     oms->ks_trips_total      = 0;
     oms->trade_log           = nullptr;

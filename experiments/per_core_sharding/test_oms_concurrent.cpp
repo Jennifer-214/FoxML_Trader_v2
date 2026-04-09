@@ -200,7 +200,7 @@ static void test_sustained_happy_path() {
 
     OrderManagerState<64> oms;
     ExchangeAdapter<64> adapter = async_adapter_get(&mock);
-    OrderManager_Init(&oms, adapter, /*live_trading=*/1);
+    OrderManager_Init(&oms, adapter, /*live_trading=*/1, FPN_Zero<64>(), FPN_Zero<64>());
 
     int submitted = 0;
     int tries = 0;
@@ -258,7 +258,7 @@ static void test_sustained_rejection_path() {
 
     OrderManagerState<64> oms;
     ExchangeAdapter<64> adapter = async_adapter_get(&mock);
-    OrderManager_Init(&oms, adapter, /*live_trading=*/1);
+    OrderManager_Init(&oms, adapter, /*live_trading=*/1, FPN_Zero<64>(), FPN_Zero<64>());
 
     int submitted = 0;
     int tries = 0;
@@ -311,7 +311,7 @@ static void test_burst_with_table_pressure() {
 
     OrderManagerState<64> oms;
     ExchangeAdapter<64> adapter = async_adapter_get(&mock);
-    OrderManager_Init(&oms, adapter, /*live_trading=*/1);
+    OrderManager_Init(&oms, adapter, /*live_trading=*/1, FPN_Zero<64>(), FPN_Zero<64>());
 
     // Burst BURST_TRIES submissions without ticking between them — most will
     // fail with table-full after the first 16 (since theres no Tick to free
@@ -375,7 +375,7 @@ static void test_no_intermediate_tick() {
 
     OrderManagerState<64> oms;
     ExchangeAdapter<64> adapter = async_adapter_get(&mock);
-    OrderManager_Init(&oms, adapter, /*live_trading=*/1);
+    OrderManager_Init(&oms, adapter, /*live_trading=*/1, FPN_Zero<64>(), FPN_Zero<64>());
 
     int submitted = 0;
     for (int i = 0; i < NUM_ORDERS; ++i) {

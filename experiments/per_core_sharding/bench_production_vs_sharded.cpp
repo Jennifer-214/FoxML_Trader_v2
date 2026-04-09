@@ -213,8 +213,9 @@ static Stats bench_legacy(const std::vector<SyntheticTick>& ticks, int max_posit
 //======================================================================================================
 static Stats bench_sharded(const std::vector<SyntheticTick>& ticks, int num_cores, double ghz) {
     (void)ghz;
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(100000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(100000.0), FPN_FromDouble<64>(0.001));
 
     static SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tick_rings[16];
     static ExecutionCore<64> cores[16];
@@ -284,8 +285,9 @@ static Stats bench_sharded(const std::vector<SyntheticTick>& ticks, int num_core
 //======================================================================================================
 static Stats bench_sharded_one_core(const std::vector<SyntheticTick>& ticks, double ghz) {
     (void)ghz;
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(100000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(100000.0), FPN_FromDouble<64>(0.001));
 
     static SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);

@@ -292,22 +292,19 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     if (num_cores < 1) num_cores = 1;
     if (num_cores > MAX_EXECUTION_CORES) num_cores = MAX_EXECUTION_CORES;
 
-    EventLoopState<F> state;
-    EventLoopState_Init(&state, cfg.starting_balance, cfg.fee_rate);
-
-    // OMS phase 02: route live orders through OrderManager which submits
-    // them async via the BinanceAdapter. paper mode short-circuits in
-    // OrderManager_Submit and never touches the adapter. live mode passes
-    // a wired adapter constructed via BinanceAdapter_Get<F>. Drainer no
-    // longer blocks on REST — adapter worker thread handles the round trip
-    // and pushes a CMD_FILL_RESULT into the OMS result queue, which the
-    // drainer drains via OrderManager_Tick on each pass.
+    // OMS phase 03 chunk 1B: construct the OMS first with the bank state,
+    // then wire the EventLoopState to point at it. Financial state lives
+    // in OrderManagerState; EventLoopState is a thin dispatcher.
     ExchangeAdapter<F> exchange_adapter{};  // value-init: all pointers null (paper mode default)
     if (live_trading) {
         exchange_adapter = BinanceAdapter_Get<F>(&g_sharded_binance_adapter);
     }
     OrderManagerState<F> oms;
-    OrderManager_Init(&oms, exchange_adapter, live_trading ? 1 : 0);
+    OrderManager_Init(&oms, exchange_adapter, live_trading ? 1 : 0,
+                      cfg.starting_balance, cfg.fee_rate);
+
+    EventLoopState<F> state;
+    EventLoopState_Init(&state, &oms);
 
     // Per-core resources. Static so they live in BSS, not the stack —
     // ExecutionCore is ~66KB and num_cores * size could blow the stack.
@@ -530,7 +527,7 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
                     // snapshot exit qty BEFORE OnEvent because CloseSlot clears it
                     double order_qty_d = 0.0;
                     if (is_exit) {
-                        order_qty_d = FPN_ToDouble(state.portfolio.positions[slot].quantity);
+                        order_qty_d = FPN_ToDouble(state.oms->portfolio.positions[slot].quantity);
                     } else if (is_entry) {
                         order_qty_d = FPN_ToDouble(state.cores[slot].intended_qty);
                     }
@@ -616,9 +613,9 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
         // Top bar
         auto now = std::chrono::steady_clock::now();
         long uptime = std::chrono::duration_cast<std::chrono::seconds>(now - t_start).count();
-        double bal = FPN_ToDouble(state.balance);
-        double pnl = FPN_ToDouble(state.realized_pnl);
-        int active = __builtin_popcount(state.portfolio.active_bitmap);
+        double bal = FPN_ToDouble(state.oms->balance);
+        double pnl = FPN_ToDouble(state.oms->realized_pnl);
+        int active = __builtin_popcount(state.oms->portfolio.active_bitmap);
         fprintf(stdout, " " SH_DIM "STATE: " SH_RESET SH_FG "ACTIVE" SH_RESET
                 "  " SH_DIM "│" SH_RESET "  " SH_DIM "UPTIME: " SH_RESET SH_FG "%02ld:%02ld:%02ld" SH_RESET
                 "  " SH_DIM "│" SH_RESET "  " SH_DIM "MODE: " SH_RESET SH_PEACH "SHARDED" SH_RESET "\033[K\n",
@@ -740,7 +737,7 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
             (unsigned long)ticks_consumed_total.load(),
             (unsigned long)state.total_entries,
             (unsigned long)state.total_exits,
-            FPN_ToDouble(state.balance));
+            FPN_ToDouble(state.oms->balance));
 
     EngineSharded_DumpLatency<F>(cores, num_cores, tsc_ghz);
 

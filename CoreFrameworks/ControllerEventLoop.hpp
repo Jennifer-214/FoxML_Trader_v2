@@ -93,9 +93,10 @@ struct CoreContext {
 // is registered its slot index is its core_id forever (no compaction on
 // unregister, just mark inactive).
 //
-// portfolio is the canonical position state — Portfolio_OpenSlot and
-// Portfolio_CloseSlot operate on it directly. balance and realized_pnl are
-// updated from exit events. fee_rate is read at exit time to compute net P&L.
+// Phase 03 chunk 1B: all financial state (portfolio, balance, realized_pnl,
+// fee_rate, kill switch, trade log) now lives in OrderManagerState. the OMS
+// pointer is the ONLY path to reach them. EventLoopState is a thin dispatcher
+// that owns per-core contexts, event counters, and the OMS back-pointer.
 //
 // total_events_processed is a heartbeat / liveness counter useful for
 // detecting a stalled controller (TUI shows it growing each frame).
@@ -104,65 +105,32 @@ template <unsigned F>
 struct alignas(64) EventLoopState {
     CoreContext<F> cores[MAX_EXECUTION_CORES];
     int registered_count;
-    Portfolio<F> portfolio;
-    FPN<F> balance;
-    FPN<F> realized_pnl;
-    FPN<F> fee_rate;
     uint64_t total_events_processed;
     uint64_t total_entries;
     uint64_t total_exits;
-    // Optional CSV trade log. nullptr → no logging (default). Phase 08 wires
-    // this to a ShardedTradeLog living on the controller core. _OnEvent emits
-    // one row per event in arrival order (pitfall P8.1).
-    ShardedTradeLog* trade_log;
-    // Phase 09 — kill switch state. Disabled by default (both thresholds zero).
-    // Configure via EventLoopState_ConfigureKillSwitch. When tripped, every
-    // registered core's permission is cleared with RELEASE; active positions
-    // continue to exit normally via SG → event ring → OnEvent. Resume by
-    // calling EventLoop_Unpause, which restores permission only on cores with
-    // strategy_id != STRATEGY_NONE (pitfall P9.7).
-    FPN<F>  ks_min_balance;       // trip if balance < this
-    FPN<F>  ks_max_drawdown_pct;  // trip if (peak - balance) / peak > this (0 = disabled)
-    FPN<F>  ks_peak_balance;      // running max of balance, updated on exits
-    uint8_t kill_switch_tripped;  // 1 once tripped (idempotent)
-    uint8_t _pad_ks[7];
-    uint64_t ks_trips_total;      // count of trip events (observability)
-    // Phase 03 chunk 1A: OMS back-pointer. nullptr in chunk 1A — the
-    // accessors below ignore it and read directly from this struct's
-    // fields. Chunk 1B will move balance/portfolio/fee_rate/ks_*/trade_log
-    // into OrderManagerState and have the accessors forward to oms->.
-    // Hold a non-null pointer here once the OMS is constructed (engine
-    // startup or test setup) via EventLoopState_AttachOms.
+    // Phase 03 chunk 1B: OMS back-pointer. MUST be non-null after Init —
+    // all financial state reads go through oms->. EventLoopState_Init takes
+    // the OMS pointer as its second argument and stores it here. callers that
+    // pass nullptr will get crashes in any accessor or OnEvent call.
     OrderManagerState<F>* oms;
 };
 
 //======================================================================================================
 // [INIT]
 //======================================================================================================
-// zero everything, install the configured fee rate and starting balance. the
-// portfolio is cleared. no cores are registered yet — call _RegisterCore for
-// each execution core after init.
+// zero the dispatcher state, install the OMS back-pointer. all financial
+// state (portfolio, balance, fee_rate, kill switch, trade log) lives in the
+// OMS — EventLoopState just holds per-core contexts and event counters.
+// the OMS must be initialized via OrderManager_Init BEFORE calling this.
 //======================================================================================================
 template <unsigned F>
 inline void EventLoopState_Init(EventLoopState<F>* state,
-                                FPN<F> starting_balance,
-                                FPN<F> fee_rate) {
+                                OrderManagerState<F>* oms) {
     state->registered_count = 0;
-    state->balance = starting_balance;
-    state->realized_pnl = FPN_Zero<F>();
-    state->fee_rate = fee_rate;
     state->total_events_processed = 0;
     state->total_entries = 0;
     state->total_exits = 0;
-    state->trade_log = nullptr;  // logging off by default; opt in via _AttachTradeLog
-    // Phase 09 kill switch — disabled until ConfigureKillSwitch is called.
-    state->ks_min_balance      = FPN_Zero<F>();
-    state->ks_max_drawdown_pct = FPN_Zero<F>();
-    state->ks_peak_balance     = starting_balance;  // initial peak = start
-    state->kill_switch_tripped = 0;
-    state->ks_trips_total      = 0;
-    state->oms                 = nullptr;  // phase 03 chunk 1A: not wired by default
-    Portfolio_Init(&state->portfolio);
+    state->oms = oms;
     for (int i = 0; i < MAX_EXECUTION_CORES; i++) {
         state->cores[i].core = nullptr;
         state->cores[i].intended_tp = FPN_Zero<F>();
@@ -175,6 +143,23 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].entries_processed = 0;
         state->cores[i].exits_processed = 0;
     }
+}
+
+//======================================================================================================
+// [INIT LEGACY — convenience for tests]
+//======================================================================================================
+// test helper that creates an OMS + wires it into the EventLoopState in one
+// call. the caller provides the OMS on the stack alongside the state. uses a
+// default-constructed (zeroed) ExchangeAdapter and live_trading=0 (paper mode).
+//======================================================================================================
+template <unsigned F>
+inline void EventLoopState_InitLegacy(EventLoopState<F>* state,
+                                       OrderManagerState<F>* oms,
+                                       FPN<F> starting_balance,
+                                       FPN<F> fee_rate) {
+    ExchangeAdapter<F> empty{};
+    OrderManager_Init(oms, empty, 0, starting_balance, fee_rate);
+    EventLoopState_Init(state, oms);
 }
 
 //======================================================================================================
@@ -246,25 +231,16 @@ inline void EventLoopState_SetCoreStrategy(EventLoopState<F>* state, int slot,
 template <unsigned F>
 inline void EventLoopState_AttachTradeLog(EventLoopState<F>* state,
                                           ShardedTradeLog* log) {
-    state->trade_log = log;
+    state->oms->trade_log = log;
 }
 
 //======================================================================================================
-// [ATTACH OMS — phase 03 chunk 1A]
+// [ATTACH OMS — phase 03 chunk 1B]
 //======================================================================================================
-// Hook the OMS into the EventLoopState. ownership stays with the caller —
-// the OMS lifetime must outlast the EventLoopState. nullptr to detach
-// (back to "no OMS attached" state).
-//
-// Chunk 1A semantics: the pointer is stored but the rest of the
-// EventLoopState (balance, portfolio, etc.) keeps living in this struct.
-// the accessor functions below ignore the OMS pointer in chunk 1A.
-//
-// Chunk 1B will move the bank state into OrderManagerState and have the
-// accessors forward to oms->. AttachOms then becomes the only correct way
-// to wire up an EventLoopState — call sites that skip it will get nullptr
-// dereferences inside the accessors. document this loudly when chunk 1B
-// lands.
+// Replace the OMS pointer. Mainly useful for re-wiring after Init if the
+// OMS was constructed separately (e.g. EngineSharded.hpp pre-1B callers).
+// EventLoopState_Init already wires the OMS pointer, so most call sites
+// don't need this anymore.
 //======================================================================================================
 template <unsigned F>
 inline void EventLoopState_AttachOms(EventLoopState<F>* state,
@@ -273,75 +249,70 @@ inline void EventLoopState_AttachOms(EventLoopState<F>* state,
 }
 
 //======================================================================================================
-// [BANK ACCESSORS — phase 03 chunk 1A]
+// [BANK ACCESSORS — phase 03 chunk 1B]
 //======================================================================================================
-// Forwarding accessors for the financial fields. Chunk 1A: passthrough to
-// the existing EventLoopState fields. Chunk 1B: forwards to state->oms->
-// fields once the move is done.
-//
-// All future call sites that need balance/portfolio/fee_rate/ks_*/trade_log
-// should go through these instead of reading the fields directly. Direct
-// field reads will break in chunk 1B when the fields move.
+// Forwarding accessors for the financial fields. All forward to state->oms->
+// since the bank state now lives in OrderManagerState.
 //
 // Convention: each accessor is named EventLoopState_<Field> and takes a
 // const-pointer for read accessors, a non-const-pointer for mutators.
 // Mutators are intentionally limited to the small set of operations
-// EventLoop code actually performs (Init/AttachTradeLog/Configure /Trip/etc.) —
+// EventLoop code actually performs (Init/AttachTradeLog/Configure/Trip/etc.) —
 // callers should not freely write to balance/portfolio from the outside.
 //======================================================================================================
 template <unsigned F>
 inline FPN<F> EventLoopState_Balance(const EventLoopState<F>* state) {
-    return state->balance;
+    return state->oms->balance;
 }
 
 template <unsigned F>
 inline FPN<F> EventLoopState_RealizedPnl(const EventLoopState<F>* state) {
-    return state->realized_pnl;
+    return state->oms->realized_pnl;
 }
 
 template <unsigned F>
 inline FPN<F> EventLoopState_FeeRate(const EventLoopState<F>* state) {
-    return state->fee_rate;
+    return state->oms->fee_rate;
 }
 
 template <unsigned F>
 inline const Portfolio<F>* EventLoopState_Portfolio(const EventLoopState<F>* state) {
-    return &state->portfolio;
+    return &state->oms->portfolio;
 }
 
 template <unsigned F>
 inline Portfolio<F>* EventLoopState_PortfolioMut(EventLoopState<F>* state) {
-    return &state->portfolio;
+    return &state->oms->portfolio;
 }
 
 template <unsigned F>
 inline FPN<F> EventLoopState_KsMinBalance(const EventLoopState<F>* state) {
-    return state->ks_min_balance;
+    return state->oms->ks_min_balance;
 }
 
 template <unsigned F>
 inline FPN<F> EventLoopState_KsMaxDrawdownPct(const EventLoopState<F>* state) {
-    return state->ks_max_drawdown_pct;
+    return state->oms->ks_max_drawdown_pct;
 }
 
 template <unsigned F>
 inline FPN<F> EventLoopState_KsPeakBalance(const EventLoopState<F>* state) {
-    return state->ks_peak_balance;
+    return state->oms->ks_peak_balance;
 }
 
 template <unsigned F>
 inline uint8_t EventLoopState_KillSwitchTripped(const EventLoopState<F>* state) {
-    return state->kill_switch_tripped;
+    return state->oms->kill_switch_tripped;
 }
 
 template <unsigned F>
 inline uint64_t EventLoopState_KsTripsTotal(const EventLoopState<F>* state) {
-    return state->ks_trips_total;
+    return state->oms->ks_trips_total;
 }
 
 template <unsigned F>
 inline ShardedTradeLog* EventLoopState_TradeLog(const EventLoopState<F>* state) {
-    return state->trade_log;
+    return state->oms->trade_log;
 }
 
 //======================================================================================================
@@ -405,8 +376,8 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
     if (is_entry) {
         // Compute entry fee = entry_price * qty * fee_rate (matches existing fee model)
         FPN<F> notional = FPN_Mul(event.price, ctx->intended_qty);
-        FPN<F> entry_fee = FPN_Mul(notional, state->fee_rate);
-        Portfolio_OpenSlot(&state->portfolio, slot,
+        FPN<F> entry_fee = FPN_Mul(notional, state->oms->fee_rate);
+        Portfolio_OpenSlot(&state->oms->portfolio, slot,
                            event.price,
                            ctx->intended_qty,
                            ctx->intended_tp,
@@ -417,13 +388,13 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         state->total_events_processed++;
         // CSV: record AFTER portfolio mutation so the slot is consistent if the
         // log call inspects it (currently it doesn't, but kept defensive).
-        if (state->trade_log) {
-            ShardedTradeLog_RecordEntry(state->trade_log, event,
+        if (state->oms->trade_log) {
+            ShardedTradeLog_RecordEntry(state->oms->trade_log, event,
                                         ctx->strategy_id,
                                         event.price,
                                         ctx->intended_qty,
                                         entry_fee,
-                                        state->balance);
+                                        state->oms->balance);
         }
         return;
     }
@@ -433,34 +404,34 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         // time, recorded in position) and exit fee (computed from exit notional).
         // Snapshot the position fields BEFORE CloseSlot clears the bit, so the
         // CSV row sees the entry_price + qty even though the slot is "closed".
-        FPN<F> entry_price_snap = state->portfolio.positions[slot].entry_price;
-        FPN<F> qty_snap = state->portfolio.positions[slot].quantity;
-        FPN<F> entry_fee = state->portfolio.positions[slot].entry_fee;
-        FPN<F> gross = Portfolio_CloseSlot(&state->portfolio, slot, event.price);
+        FPN<F> entry_price_snap = state->oms->portfolio.positions[slot].entry_price;
+        FPN<F> qty_snap = state->oms->portfolio.positions[slot].quantity;
+        FPN<F> entry_fee = state->oms->portfolio.positions[slot].entry_fee;
+        FPN<F> gross = Portfolio_CloseSlot(&state->oms->portfolio, slot, event.price);
         FPN<F> exit_notional = FPN_Mul(event.price, qty_snap);
-        FPN<F> exit_fee = FPN_Mul(exit_notional, state->fee_rate);
+        FPN<F> exit_fee = FPN_Mul(exit_notional, state->oms->fee_rate);
         FPN<F> total_fee = FPN_Add(entry_fee, exit_fee);
         FPN<F> net = FPN_Sub(gross, total_fee);
-        state->balance = FPN_Add(state->balance, net);
-        state->realized_pnl = FPN_Add(state->realized_pnl, net);
+        state->oms->balance = FPN_Add(state->oms->balance, net);
+        state->oms->realized_pnl = FPN_Add(state->oms->realized_pnl, net);
         // Phase 09: track peak balance for drawdown-based kill switch.
         // Cheap on the slow path; the comparison is one FPN compare per exit.
-        if (FPN_GreaterThan(state->balance, state->ks_peak_balance)) {
-            state->ks_peak_balance = state->balance;
+        if (FPN_GreaterThan(state->oms->balance, state->oms->ks_peak_balance)) {
+            state->oms->ks_peak_balance = state->oms->balance;
         }
         ctx->exits_processed++;
         state->total_exits++;
         state->total_events_processed++;
         // CSV: pitfall P8.7 — log AFTER net/total_fee/balance are computed.
-        if (state->trade_log) {
-            ShardedTradeLog_RecordExit(state->trade_log, event,
+        if (state->oms->trade_log) {
+            ShardedTradeLog_RecordExit(state->oms->trade_log, event,
                                        ctx->strategy_id,
                                        entry_price_snap,
                                        event.price,
                                        qty_snap,
                                        net,
                                        total_fee,
-                                       state->balance);
+                                       state->oms->balance);
         }
         return;
     }
@@ -627,8 +598,8 @@ template <unsigned F>
 inline void EventLoopState_ConfigureKillSwitch(EventLoopState<F>* state,
                                                 FPN<F> min_balance,
                                                 FPN<F> max_drawdown_pct) {
-    state->ks_min_balance      = min_balance;
-    state->ks_max_drawdown_pct = max_drawdown_pct;
+    state->oms->ks_min_balance      = min_balance;
+    state->oms->ks_max_drawdown_pct = max_drawdown_pct;
 }
 
 // helper: clear permission on every registered core. used by both
@@ -646,9 +617,9 @@ inline void EventLoop_ClearAllPermissions(EventLoopState<F>* state) {
 // idempotent: trips_total only bumps on a state transition.
 template <unsigned F>
 inline void EventLoop_KillSwitchTrip(EventLoopState<F>* state) {
-    if (state->kill_switch_tripped == 0) {
-        state->kill_switch_tripped = 1;
-        state->ks_trips_total++;
+    if (state->oms->kill_switch_tripped == 0) {
+        state->oms->kill_switch_tripped = 1;
+        state->oms->ks_trips_total++;
     }
     EventLoop_ClearAllPermissions(state);
 }
@@ -674,34 +645,34 @@ inline void EventLoop_KillSwitchTrip(EventLoopState<F>* state) {
 //======================================================================================================
 template <unsigned F>
 inline int EventLoop_KillSwitchEvaluate(EventLoopState<F>* state) {
-    if (state->kill_switch_tripped) return 0;  // already tripped, no double-action
+    if (state->oms->kill_switch_tripped) return 0;  // already tripped, no double-action
 
     int trip = 0;
 
     // condition 1: hard balance floor
-    if (!FPN_IsZero(state->ks_min_balance) &&
-        FPN_LessThan(state->balance, state->ks_min_balance)) {
+    if (!FPN_IsZero(state->oms->ks_min_balance) &&
+        FPN_LessThan(state->oms->balance, state->oms->ks_min_balance)) {
         trip = 1;
     }
 
     // condition 2: drawdown from peak
-    if (!FPN_IsZero(state->ks_max_drawdown_pct) &&
-        !FPN_IsZero(state->ks_peak_balance)) {
-        FPN<F> drop = FPN_Sub(state->ks_peak_balance, state->balance);
+    if (!FPN_IsZero(state->oms->ks_max_drawdown_pct) &&
+        !FPN_IsZero(state->oms->ks_peak_balance)) {
+        FPN<F> drop = FPN_Sub(state->oms->ks_peak_balance, state->oms->balance);
         // only consider positive drops (balance below peak)
         if (FPN_GreaterThan(drop, FPN_Zero<F>())) {
             // drawdown = drop / peak. NoAssert variant: peak is non-zero per
             // the guard above so this can't trip the production assert path.
-            FPN<F> dd = FPN_DivNoAssert(drop, state->ks_peak_balance);
-            if (FPN_GreaterThan(dd, state->ks_max_drawdown_pct)) trip = 1;
+            FPN<F> dd = FPN_DivNoAssert(drop, state->oms->ks_peak_balance);
+            if (FPN_GreaterThan(dd, state->oms->ks_max_drawdown_pct)) trip = 1;
         }
     }
 
     if (!trip) return 0;
 
     // Trip: clear permission on every core. This is the primary action.
-    state->kill_switch_tripped = 1;
-    state->ks_trips_total++;
+    state->oms->kill_switch_tripped = 1;
+    state->oms->ks_trips_total++;
     EventLoop_ClearAllPermissions(state);
     return 1;
 }
@@ -722,7 +693,7 @@ inline int EventLoop_KillSwitchEvaluate(EventLoopState<F>* state) {
 //======================================================================================================
 template <unsigned F>
 inline int EventLoop_Unpause(EventLoopState<F>* state) {
-    state->kill_switch_tripped = 0;
+    state->oms->kill_switch_tripped = 0;
     int resumed = 0;
     for (int slot = 0; slot < state->registered_count; ++slot) {
         ExecutionCore<F>* core = state->cores[slot].core;

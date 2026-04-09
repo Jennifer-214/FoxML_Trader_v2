@@ -52,25 +52,27 @@ static void register_n_cores(EventLoopState<64>& state,
 // test 1: default state has kill switch disabled
 //======================================================================================================
 static void test_default_disabled() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
-    EXPECT(state.kill_switch_tripped == 0, "default not tripped");
-    EXPECT(state.ks_trips_total == 0, "no trips counted");
-    EXPECT(FPN_IsZero(state.ks_min_balance), "min balance unset");
-    EXPECT(FPN_IsZero(state.ks_max_drawdown_pct), "max drawdown unset");
+    EXPECT(state.oms->kill_switch_tripped == 0, "default not tripped");
+    EXPECT(state.oms->ks_trips_total == 0, "no trips counted");
+    EXPECT(FPN_IsZero(state.oms->ks_min_balance), "min balance unset");
+    EXPECT(FPN_IsZero(state.oms->ks_max_drawdown_pct), "max drawdown unset");
 
     int tripped = EventLoop_KillSwitchEvaluate(&state);
     EXPECT(tripped == 0, "default evaluate is no-op");
-    EXPECT(state.kill_switch_tripped == 0, "still not tripped after evaluate");
+    EXPECT(state.oms->kill_switch_tripped == 0, "still not tripped after evaluate");
 }
 
 //======================================================================================================
 // test 2: balance below min_balance trips the switch
 //======================================================================================================
 static void test_balance_floor_trip() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
     EventLoopState_ConfigureKillSwitch(&state,
         FPN_FromDouble<64>(5000.0),    // min_balance
         FPN_Zero<64>());               // dd disabled
@@ -80,19 +82,20 @@ static void test_balance_floor_trip() {
     EXPECT(t1 == 0, "above floor: no trip");
 
     // Drop balance to 4999 — below floor, should trip.
-    state.balance = FPN_FromDouble<64>(4999.0);
+    state.oms->balance = FPN_FromDouble<64>(4999.0);
     int t2 = EventLoop_KillSwitchEvaluate(&state);
     EXPECT(t2 == 1, "below floor: trip fires");
-    EXPECT(state.kill_switch_tripped == 1, "state shows tripped");
-    EXPECT(state.ks_trips_total == 1, "trips counter bumped once");
+    EXPECT(state.oms->kill_switch_tripped == 1, "state shows tripped");
+    EXPECT(state.oms->ks_trips_total == 1, "trips counter bumped once");
 }
 
 //======================================================================================================
 // test 3: drawdown from peak trips the switch
 //======================================================================================================
 static void test_drawdown_trip() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
     EventLoopState_ConfigureKillSwitch(&state,
         FPN_Zero<64>(),                 // floor disabled
         FPN_FromDouble<64>(0.20));      // 20% max drawdown
@@ -102,24 +105,25 @@ static void test_drawdown_trip() {
     EXPECT(t1 == 0, "0% drawdown: no trip");
 
     // Push peak up to 12k via a synthetic exit accounting.
-    state.balance = FPN_FromDouble<64>(12000.0);
-    if (FPN_GreaterThan(state.balance, state.ks_peak_balance)) {
-        state.ks_peak_balance = state.balance;
+    state.oms->balance = FPN_FromDouble<64>(12000.0);
+    if (FPN_GreaterThan(state.oms->balance, state.oms->ks_peak_balance)) {
+        state.oms->ks_peak_balance = state.oms->balance;
     }
 
     // Drop balance to 9500 — drawdown = 2500/12000 = ~20.83% > 20% → trip.
-    state.balance = FPN_FromDouble<64>(9500.0);
+    state.oms->balance = FPN_FromDouble<64>(9500.0);
     int t2 = EventLoop_KillSwitchEvaluate(&state);
     EXPECT(t2 == 1, "20.83% drawdown: trip fires");
-    EXPECT(state.kill_switch_tripped == 1, "state shows tripped");
+    EXPECT(state.oms->kill_switch_tripped == 1, "state shows tripped");
 }
 
 //======================================================================================================
 // test 4: trip clears every core's permission
 //======================================================================================================
 static void test_trip_clears_permissions() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     constexpr int N = 4;
     ExecutionCore<64> cores[N];
@@ -134,7 +138,7 @@ static void test_trip_clears_permissions() {
 
     // Manual trip via helper.
     EventLoop_KillSwitchTrip(&state);
-    EXPECT(state.kill_switch_tripped == 1, "tripped");
+    EXPECT(state.oms->kill_switch_tripped == 1, "tripped");
 
     // All four should now be cleared.
     for (int i = 0; i < N; ++i) {
@@ -147,10 +151,11 @@ static void test_trip_clears_permissions() {
 // test 5: trip is idempotent — second call returns 0
 //======================================================================================================
 static void test_trip_idempotent() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
     EventLoopState_ConfigureKillSwitch(&state, FPN_FromDouble<64>(5000.0), FPN_Zero<64>());
-    state.balance = FPN_FromDouble<64>(4000.0);  // below floor
+    state.oms->balance = FPN_FromDouble<64>(4000.0);  // below floor
 
     int t1 = EventLoop_KillSwitchEvaluate(&state);
     int t2 = EventLoop_KillSwitchEvaluate(&state);
@@ -158,7 +163,7 @@ static void test_trip_idempotent() {
     EXPECT(t1 == 1, "first call trips");
     EXPECT(t2 == 0, "second call returns 0");
     EXPECT(t3 == 0, "third call returns 0");
-    EXPECT(state.ks_trips_total == 1, "trips counted exactly once");
+    EXPECT(state.oms->ks_trips_total == 1, "trips counted exactly once");
 }
 
 //======================================================================================================
@@ -169,8 +174,9 @@ static void test_trip_idempotent() {
 // resulting exit event still flows through OnEvent and updates balance.
 //======================================================================================================
 static void test_active_position_can_exit_after_trip() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
@@ -189,12 +195,12 @@ static void test_active_position_can_exit_after_trip() {
     entry.price = FPN_FromDouble<64>(60100.0);
     entry.timestamp = 1000;
     EventLoop_OnEvent(&state, entry);
-    EXPECT(Portfolio_SlotActive(&state.portfolio, slot) == 1, "position open");
+    EXPECT(Portfolio_SlotActive(&state.oms->portfolio, slot) == 1, "position open");
     EXPECT(state.total_entries == 1, "entry counted");
 
     // Trip the kill switch.
     EventLoop_KillSwitchTrip(&state);
-    EXPECT(state.kill_switch_tripped == 1, "tripped");
+    EXPECT(state.oms->kill_switch_tripped == 1, "tripped");
     EXPECT(__atomic_load_n(&core.permission, __ATOMIC_ACQUIRE) == 0, "permission cleared");
 
     // Now an exit event should still be processable — SG fired on the hot path
@@ -207,11 +213,11 @@ static void test_active_position_can_exit_after_trip() {
     exit.timestamp = 2000;
     EventLoop_OnEvent(&state, exit);
 
-    EXPECT(Portfolio_SlotActive(&state.portfolio, slot) == 0, "position closed");
+    EXPECT(Portfolio_SlotActive(&state.oms->portfolio, slot) == 0, "position closed");
     EXPECT(state.total_exits == 1, "exit processed even with kill switch tripped");
     // P&L was credited: entry 60100, exit 60500, qty 0.01 → gross +4.0,
     // minus fees ~1.205 → net positive. Just sanity check balance moved.
-    double final_balance = FPN_ToDouble(state.balance);
+    double final_balance = FPN_ToDouble(state.oms->balance);
     EXPECT(final_balance > 10000.0, "balance updated from exit P&L");
 }
 
@@ -219,8 +225,9 @@ static void test_active_position_can_exit_after_trip() {
 // test 7: Unpause restores permission only on cores with strategy != NONE (P9.7)
 //======================================================================================================
 static void test_unpause_skips_none_cores() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> rings[3];
     ExecutionCore<64> cores[3];
@@ -250,15 +257,16 @@ static void test_unpause_skips_none_cores() {
     EXPECT(__atomic_load_n(&cores[0].permission, __ATOMIC_ACQUIRE) == 1, "core 0 resumed");
     EXPECT(__atomic_load_n(&cores[1].permission, __ATOMIC_ACQUIRE) == 0, "core 1 (NONE) stays paused");
     EXPECT(__atomic_load_n(&cores[2].permission, __ATOMIC_ACQUIRE) == 1, "core 2 resumed");
-    EXPECT(state.kill_switch_tripped == 0, "tripped flag cleared");
+    EXPECT(state.oms->kill_switch_tripped == 0, "tripped flag cleared");
 }
 
 //======================================================================================================
 // test 8: Unpause re-arms the switch — second trip can fire after unpause
 //======================================================================================================
 static void test_unpause_rearms_switch() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
     EventLoopState_ConfigureKillSwitch(&state, FPN_FromDouble<64>(5000.0), FPN_Zero<64>());
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
@@ -270,22 +278,22 @@ static void test_unpause_rearms_switch() {
     EventLoopState_SetCoreStrategy(&state, 0, STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(1000.0));
 
     // Trip 1.
-    state.balance = FPN_FromDouble<64>(4000.0);
+    state.oms->balance = FPN_FromDouble<64>(4000.0);
     int t1 = EventLoop_KillSwitchEvaluate(&state);
     EXPECT(t1 == 1, "first trip fires");
 
     // Unpause (would normally happen after balance was restored externally).
-    state.balance = FPN_FromDouble<64>(8000.0);
+    state.oms->balance = FPN_FromDouble<64>(8000.0);
     int resumed = EventLoop_Unpause(&state);
     EXPECT(resumed == 1, "core resumed");
-    EXPECT(state.kill_switch_tripped == 0, "tripped flag cleared");
+    EXPECT(state.oms->kill_switch_tripped == 0, "tripped flag cleared");
     EXPECT(__atomic_load_n(&core.permission, __ATOMIC_ACQUIRE) == 1, "core armed again");
 
     // Drop balance again — switch should fire a second time.
-    state.balance = FPN_FromDouble<64>(3000.0);
+    state.oms->balance = FPN_FromDouble<64>(3000.0);
     int t2 = EventLoop_KillSwitchEvaluate(&state);
     EXPECT(t2 == 1, "second trip fires after unpause");
-    EXPECT(state.ks_trips_total == 2, "trips counter shows two");
+    EXPECT(state.oms->ks_trips_total == 2, "trips counter shows two");
 }
 
 //======================================================================================================

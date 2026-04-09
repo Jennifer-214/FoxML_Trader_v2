@@ -133,8 +133,12 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     //----------------------------------------------------------------------
     // Set up the per-core engine
     //----------------------------------------------------------------------
+    // Phase 03 chunk 1B: construct OMS first, then wire EventLoopState to it.
+    ExchangeAdapter<BACKTEST_FP> empty_adapter{};
+    OrderManagerState<BACKTEST_FP> oms;
+    OrderManager_Init(&oms, empty_adapter, 0, cfg.starting_balance, cfg.fee_rate);
     EventLoopState<BACKTEST_FP> state;
-    EventLoopState_Init(&state, cfg.starting_balance, cfg.fee_rate);
+    EventLoopState_Init(&state, &oms);
 
     // Configure kill switch from the existing config fields. The drawdown
     // field in cfg is already a fraction (parsed via CFG_PARSE_PCT) so it
@@ -284,7 +288,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             // After the drain, check if any new exits happened by comparing
             // realized_pnl. If it changed, classify as win/loss and bump the
             // equity curve.
-            double current_realized = FPN_ToDouble(state.realized_pnl);
+            double current_realized = FPN_ToDouble(state.oms->realized_pnl);
             if (current_realized != last_realized_pnl) {
                 double trade_pnl = current_realized - last_realized_pnl;
                 if (trade_pnl > 0.0) {
@@ -298,7 +302,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
 
                 // Equity curve sample (one per completed trade)
                 if (results->equity_count < BACKTEST_MAX_EQUITY) {
-                    double bal = FPN_ToDouble(state.balance);
+                    double bal = FPN_ToDouble(state.oms->balance);
                     results->equity_curve[results->equity_count] = bal;
                     results->equity_count++;
                 }
@@ -306,7 +310,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
 
             // Track peak equity + max drawdown using EventLoopAggregates
             // (no current price snapshot needed here, balance is enough)
-            double cur_equity = FPN_ToDouble(state.balance);
+            double cur_equity = FPN_ToDouble(state.oms->balance);
             if (cur_equity > peak_equity) peak_equity = cur_equity;
             double dd = peak_equity - cur_equity;
             if (dd > max_drawdown) max_drawdown = dd;
@@ -334,8 +338,8 @@ done:
     BacktestStats *stats = &results->stats;
     memset(stats, 0, sizeof(*stats));
 
-    double final_balance = FPN_ToDouble(state.balance);
-    double final_pnl = FPN_ToDouble(state.realized_pnl);
+    double final_balance = FPN_ToDouble(state.oms->balance);
+    double final_pnl = FPN_ToDouble(state.oms->realized_pnl);
 
     stats->total_pnl = final_pnl;
     stats->total_trades = (uint32_t)(state.total_entries + state.total_exits) / 2;

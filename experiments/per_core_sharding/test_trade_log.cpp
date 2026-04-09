@@ -202,8 +202,9 @@ static void test_eventloop_entry_exit_pair() {
     ShardedTradeLog log;
     ShardedTradeLog_Init(&log, "TEST5");
 
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
     EventLoopState_AttachTradeLog(&state, &log);
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
@@ -243,8 +244,9 @@ static void test_multiple_cores_interleave() {
     ShardedTradeLog log;
     ShardedTradeLog_Init(&log, "TEST6");
 
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
     EventLoopState_AttachTradeLog(&state, &log);
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr_a, tr_b;
@@ -314,9 +316,10 @@ static void test_truncation_guard() {
 // test 8: Zero log pointer means no-op
 //======================================================================================================
 static void test_no_log_no_op() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
-    EXPECT(state.trade_log == nullptr, "default trade_log is nullptr");
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EXPECT(state.oms->trade_log == nullptr, "default trade_log is nullptr");
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);

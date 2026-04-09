@@ -147,8 +147,9 @@ static void test_strategy_none() {
 // test 4: EventLoop_RebuildAllParameters fills pending_params for all cores
 //======================================================================================================
 static void test_rebuild_all_parameters() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr_a, tr_b;
     SPSCRing_Init(&tr_a); SPSCRing_Init(&tr_b);
@@ -194,8 +195,9 @@ static void test_rebuild_all_parameters() {
 // test 5: STRATEGY_NONE cores are skipped by RebuildAll
 //======================================================================================================
 static void test_rebuild_skips_none() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
@@ -219,8 +221,9 @@ static void test_rebuild_skips_none() {
 // test 6: end-to-end pipeline — rebuild, push, verify execution core sees params
 //======================================================================================================
 static void test_end_to_end_pipeline() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);

@@ -61,8 +61,9 @@ static TradeEvent<64> make_exit(int slot, double price, uint64_t ts) {
 // test 1: empty state has zero aggregates
 //======================================================================================================
 static void test_empty_state() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     EventLoopAggregates agg = EventLoop_GetAggregates(&state, FPN_Zero<64>());
     EXPECT(approx(agg.balance, 10000.0), "balance == starting");
@@ -80,8 +81,9 @@ static void test_empty_state() {
 // test 2: register + entry → active count goes up, balance unchanged
 //======================================================================================================
 static void test_after_entry() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
@@ -110,8 +112,9 @@ static void test_after_entry() {
 // test 3: mark_price = 0 → unrealized stays at 0
 //======================================================================================================
 static void test_unrealized_zero_when_no_mark() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
@@ -131,8 +134,9 @@ static void test_unrealized_zero_when_no_mark() {
 // test 4: unrealized = qty * (mark - entry)
 //======================================================================================================
 static void test_unrealized_with_mark() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
@@ -153,8 +157,9 @@ static void test_unrealized_with_mark() {
 // test 5: after exit, balance + realized update, unrealized goes back to 0
 //======================================================================================================
 static void test_after_exit() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
@@ -183,8 +188,9 @@ static void test_after_exit() {
 // test 6: kill switch trip is reflected
 //======================================================================================================
 static void test_kill_switch_in_aggregates() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     EventLoop_KillSwitchTrip(&state);
     EventLoopAggregates agg = EventLoop_GetAggregates(&state, FPN_Zero<64>());
@@ -195,8 +201,9 @@ static void test_kill_switch_in_aggregates() {
 // test 7: drawdown is computed against equity (mark to market)
 //======================================================================================================
 static void test_drawdown_against_equity() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
@@ -207,7 +214,7 @@ static void test_drawdown_against_equity() {
     EventLoopState_SetCoreStrategy(&state, slot, STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(1000.0));
 
     // Push peak balance up by hand (would normally come from prior trades)
-    state.ks_peak_balance = FPN_FromDouble<64>(12000.0);
+    state.oms->ks_peak_balance = FPN_FromDouble<64>(12000.0);
 
     // Open a position at 60000 with qty 1.0
     EventLoop_OnEvent(&state, make_entry(slot, 60000.0, 1000));
@@ -226,8 +233,9 @@ static void test_drawdown_against_equity() {
 // test 8: multi-core multi-position aggregation
 //======================================================================================================
 static void test_multi_core_aggregation() {
+    OrderManagerState<64> oms;
     EventLoopState<64> state;
-    EventLoopState_Init(&state, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> rings[3];
     ExecutionCore<64> cores[3];

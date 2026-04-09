@@ -109,8 +109,9 @@ static void test_head_to_head_single_slot() {
     }
 
     // ----- SHARDED PATH -----
+    OrderManagerState<64> sharded_oms;
     EventLoopState<64> sharded;
-    EventLoopState_Init(&sharded, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&sharded, &sharded_oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
@@ -133,9 +134,9 @@ static void test_head_to_head_single_slot() {
 
     // ----- COMPARE -----
     double leg_balance = FPN_ToDouble(legacy.balance);
-    double sh_balance  = FPN_ToDouble(sharded.balance);
+    double sh_balance  = FPN_ToDouble(sharded.oms->balance);
     double leg_pnl = FPN_ToDouble(legacy.realized_pnl);
-    double sh_pnl  = FPN_ToDouble(sharded.realized_pnl);
+    double sh_pnl  = FPN_ToDouble(sharded.oms->realized_pnl);
 
     printf("\n  --- single-slot head to head ---\n");
     printf("  legacy:  entries=%lu exits=%lu balance=%.6f pnl=%.6f\n",
@@ -182,8 +183,9 @@ static void test_head_to_head_multi_slot() {
     }
 
     // ----- SHARDED PATH -----
+    OrderManagerState<64> sharded_oms;
     EventLoopState<64> sharded;
-    EventLoopState_Init(&sharded, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&sharded, &sharded_oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> rings[N];
     ExecutionCore<64> cores[N];
@@ -205,9 +207,9 @@ static void test_head_to_head_multi_slot() {
 
     // ----- COMPARE -----
     double leg_balance = FPN_ToDouble(legacy.balance);
-    double sh_balance  = FPN_ToDouble(sharded.balance);
+    double sh_balance  = FPN_ToDouble(sharded.oms->balance);
     double leg_pnl = FPN_ToDouble(legacy.realized_pnl);
-    double sh_pnl  = FPN_ToDouble(sharded.realized_pnl);
+    double sh_pnl  = FPN_ToDouble(sharded.oms->realized_pnl);
 
     printf("\n  --- %d-slot head to head ---\n", N);
     printf("  legacy:  entries=%lu exits=%lu balance=%.6f pnl=%.6f\n",
@@ -245,8 +247,9 @@ static void test_head_to_head_no_trades() {
     legacy.slots[leg_slot].params = params;
     for (auto& t : ticks) LegacyReference_Tick(&legacy, t);
 
+    OrderManagerState<64> sharded_oms;
     EventLoopState<64> sharded;
-    EventLoopState_Init(&sharded, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&sharded, &sharded_oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
     ExecutionCore<64> core;
@@ -264,7 +267,7 @@ static void test_head_to_head_no_trades() {
 
     EXPECT(legacy.total_entries == 0 && sharded.total_entries == 0,
            "neither path traded");
-    EXPECT(FPN_ToDouble(legacy.balance) == FPN_ToDouble(sharded.balance),
+    EXPECT(FPN_ToDouble(legacy.balance) == FPN_ToDouble(sharded.oms->balance),
            "balances unchanged in both paths");
 }
 
@@ -286,8 +289,9 @@ static void test_head_to_head_always_fires() {
     legacy.slots[leg_slot].params = params;
     for (auto& t : ticks) LegacyReference_Tick(&legacy, t);
 
+    OrderManagerState<64> sharded_oms;
     EventLoopState<64> sharded;
-    EventLoopState_Init(&sharded, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+    EventLoopState_InitLegacy(&sharded, &sharded_oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
     SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> tr;
     SPSCRing_Init(&tr);
     ExecutionCore<64> core;
@@ -313,7 +317,7 @@ static void test_head_to_head_always_fires() {
            "always-fires entry count matches");
     EXPECT(legacy.total_exits == sharded.total_exits,
            "always-fires exit count matches");
-    EXPECT(approx(FPN_ToDouble(legacy.balance), FPN_ToDouble(sharded.balance), 1e-4),
+    EXPECT(approx(FPN_ToDouble(legacy.balance), FPN_ToDouble(sharded.oms->balance), 1e-4),
            "always-fires balance matches");
 }
 

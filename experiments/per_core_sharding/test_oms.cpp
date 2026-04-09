@@ -139,7 +139,7 @@ static ExchangeAdapter<64> mock_adapter_get(MockAdapter* state) {
 static void test_init() {
     OrderManagerState<64> oms;
     ExchangeAdapter<64> empty{};
-    OrderManager_Init(&oms, empty, /*live_trading=*/0);
+    OrderManager_Init(&oms, empty, /*live_trading=*/0, FPN_Zero<64>(), FPN_Zero<64>());
 
     EXPECT(oms.order_bitmap == 0, "init: bitmap empty");
     EXPECT(oms.next_order_id == 1, "init: next_order_id starts at 1");
@@ -175,7 +175,7 @@ static void test_submit_paper_mode() {
     OrderManagerState<64> oms;
     MockAdapter mock{};
     ExchangeAdapter<64> adapter = mock_adapter_get(&mock);
-    OrderManager_Init(&oms, adapter, /*live_trading=*/0);
+    OrderManager_Init(&oms, adapter, /*live_trading=*/0, FPN_Zero<64>(), FPN_Zero<64>());
 
     uint64_t id = OrderManager_Submit(&oms, /*core_id=*/0,
                                        ORDER_MARKET_BUY,
@@ -195,7 +195,7 @@ static void test_submit_paper_mode() {
 static void test_submit_live_null_adapter() {
     OrderManagerState<64> oms;
     ExchangeAdapter<64> empty{};
-    OrderManager_Init(&oms, empty, /*live_trading=*/1);
+    OrderManager_Init(&oms, empty, /*live_trading=*/1, FPN_Zero<64>(), FPN_Zero<64>());
 
     uint64_t id = OrderManager_Submit(&oms, /*core_id=*/0,
                                        ORDER_MARKET_BUY,
@@ -218,7 +218,7 @@ static void test_submit_live_success() {
     mock.next_fill_price = 60000.0;
     mock.next_fill_qty   = 0;  // use requested
     ExchangeAdapter<64> adapter = mock_adapter_get(&mock);
-    OrderManager_Init(&oms, adapter, /*live_trading=*/1);
+    OrderManager_Init(&oms, adapter, /*live_trading=*/1, FPN_Zero<64>(), FPN_Zero<64>());
 
     uint64_t id = OrderManager_Submit(&oms, /*core_id=*/2,
                                        ORDER_MARKET_BUY,
@@ -245,7 +245,7 @@ static void test_submit_live_rejection() {
     MockAdapter mock{};
     mock.next_success = 0;  // adapter will fail
     ExchangeAdapter<64> adapter = mock_adapter_get(&mock);
-    OrderManager_Init(&oms, adapter, /*live_trading=*/1);
+    OrderManager_Init(&oms, adapter, /*live_trading=*/1, FPN_Zero<64>(), FPN_Zero<64>());
 
     uint64_t id = OrderManager_Submit(&oms, /*core_id=*/3,
                                        ORDER_MARKET_SELL,
@@ -271,7 +271,7 @@ static void test_submit_table_full() {
     mock.next_success    = 1;
     mock.next_fill_price = 60000.0;
     ExchangeAdapter<64> adapter = mock_adapter_get(&mock);
-    OrderManager_Init(&oms, adapter, /*live_trading=*/1);
+    OrderManager_Init(&oms, adapter, /*live_trading=*/1, FPN_Zero<64>(), FPN_Zero<64>());
 
     // Fill the order table without ticking. Each Submit allocates a slot
     // and the synchronous mock callback pushes a CMD_FILL_RESULT, but
@@ -313,7 +313,7 @@ static void test_submit_table_full() {
 static void test_tick_empty() {
     OrderManagerState<64> oms;
     ExchangeAdapter<64> empty{};
-    OrderManager_Init(&oms, empty, /*live_trading=*/0);
+    OrderManager_Init(&oms, empty, /*live_trading=*/0, FPN_Zero<64>(), FPN_Zero<64>());
 
     // Tick on fresh OMS — should not crash, should not change counters.
     OrderManager_Tick(&oms);
@@ -331,7 +331,7 @@ static void test_mixed_live_submissions() {
     mock.next_success    = 1;
     mock.next_fill_price = 60000.0;
     ExchangeAdapter<64> adapter = mock_adapter_get(&mock);
-    OrderManager_Init(&oms, adapter, /*live_trading=*/1);
+    OrderManager_Init(&oms, adapter, /*live_trading=*/1, FPN_Zero<64>(), FPN_Zero<64>());
 
     // 3 successful submissions + tick
     OrderManager_Submit(&oms, 0, ORDER_MARKET_BUY,  FPN_FromDouble<64>(0.001));
