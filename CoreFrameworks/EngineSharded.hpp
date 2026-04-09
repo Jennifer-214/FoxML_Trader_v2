@@ -688,6 +688,23 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
             fprintf(stdout, " " SH_DIM "ORDER LATENCY: paper mode (no orders submitted)" SH_RESET "\033[K\n");
         }
 
+        // OMS counter line. shows the OrderManager-side view: submissions
+        // it received from the drainer, fills it observed (paper mode bumps
+        // both immediately, live mode bumps filled when the adapter callback
+        // comes back), rejections, and how many orders are still in flight
+        // in the OMS table. orthogonal to the per-core latency above.
+        uint64_t oms_sub      = OrderManager_TotalSubmitted(&oms);
+        uint64_t oms_fill     = OrderManager_TotalFilled(&oms);
+        uint64_t oms_rej      = OrderManager_TotalRejected(&oms);
+        int      oms_inflight = OrderManager_InflightCount(&oms);
+        fprintf(stdout, " " SH_BOLD SH_PEACH "OMS" SH_RESET
+                "          " SH_DIM "submitted" SH_RESET " " SH_FG "%lu" SH_RESET
+                "  " SH_DIM "filled" SH_RESET " " SH_FG "%lu" SH_RESET
+                "  " SH_DIM "rejected" SH_RESET " " SH_FG "%lu" SH_RESET
+                "  " SH_DIM "inflight" SH_RESET " " SH_FG "%d" SH_RESET "\033[K\n",
+                (unsigned long)oms_sub, (unsigned long)oms_fill,
+                (unsigned long)oms_rej, oms_inflight);
+
         // Footer
         fprintf(stdout, "\033[K\n");
         fprintf(stdout, " " SH_DIM "Press Ctrl+C to stop and dump final stats. Subtract ~25-30ns rdtsc floor for actual work cost." SH_RESET "\033[K\n");
@@ -748,6 +765,24 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
         } else {
             fprintf(stderr, "  no orders submitted during this run.\n");
         }
+        fprintf(stderr, "================================================================\n");
+    }
+
+    // OMS counter final dump. always shown (paper mode + live mode both
+    // bump these). zero in paper mode if no entries fired during the run.
+    {
+        uint64_t oms_sub      = OrderManager_TotalSubmitted(&oms);
+        uint64_t oms_fill     = OrderManager_TotalFilled(&oms);
+        uint64_t oms_rej      = OrderManager_TotalRejected(&oms);
+        int      oms_inflight = OrderManager_InflightCount(&oms);
+        fprintf(stderr, "\n");
+        fprintf(stderr, "================================================================\n");
+        fprintf(stderr, "[sharded] OMS COUNTERS (OrderManager state at shutdown)\n");
+        fprintf(stderr, "================================================================\n");
+        fprintf(stderr, "  total submitted  : %lu\n", (unsigned long)oms_sub);
+        fprintf(stderr, "  total filled     : %lu\n", (unsigned long)oms_fill);
+        fprintf(stderr, "  total rejected   : %lu\n", (unsigned long)oms_rej);
+        fprintf(stderr, "  in-flight at end : %d\n", oms_inflight);
         fprintf(stderr, "================================================================\n");
     }
 
