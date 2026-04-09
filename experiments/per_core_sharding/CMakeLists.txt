@@ -152,7 +152,17 @@ target_link_libraries(bench_production_vs_sharded PRIVATE pthread)
 # machine, the paper-mode short-circuit, the adapter callback flow, and
 # the table-full / rejection paths via a synchronous MockAdapter that
 # fires the OMS callback inline. No real threading — concurrent stress
-# testing for the OMS will live in test_oms_concurrent.cpp under TSan.
+# testing for the OMS lives in test_oms_concurrent.cpp under TSan.
 add_executable(test_oms test_oms.cpp)
 target_compile_definitions(test_oms PRIVATE USE_NATIVE_128)
 target_link_libraries(test_oms PRIVATE pthread)
+
+# OMS phase 02 concurrent stress test. Spawns a worker thread that mimics
+# the BinanceAdapter's submission queue → callback flow, then a drainer-
+# simulating thread that does Submit + Tick in a loop. Validates the SPSC
+# contracts on both submission_queue (drainer→worker) and result_queue
+# (worker→drainer-via-Tick) under realistic concurrency. Run under TSan
+# to catch any unsynchronized access.
+add_executable(test_oms_concurrent test_oms_concurrent.cpp)
+target_compile_definitions(test_oms_concurrent PRIVATE USE_NATIVE_128)
+target_link_libraries(test_oms_concurrent PRIVATE pthread)
