@@ -189,7 +189,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     rolling_long = RollingStats_Init<BACKTEST_FP, 512>(); // explicit reset each run
 
     ShardedBacktestDriver<BACKTEST_FP, 128, 512> drv;
-    ShardedBacktestDriver_Init(&drv, &state, &rolling, &cfg, (int)cfg.poll_interval, &rolling_long);
+    ShardedBacktestDriver_Init(&drv, &state, &rolling, &cfg, (int)cfg.poll_interval, &rolling_long, &oms);
 
     //----------------------------------------------------------------------
     // Replay loop

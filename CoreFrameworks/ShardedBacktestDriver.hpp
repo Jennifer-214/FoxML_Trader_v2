@@ -49,6 +49,7 @@
 #include "../ML_Headers/RollingStats.hpp"
 #include "ControllerEventLoop.hpp"
 #include "ExecutionCore.hpp"
+#include "OrderManager.hpp"
 #include "Tick.hpp"
 
 #include <cstdint>
@@ -74,6 +75,7 @@ struct ShardedBacktestDriver {
     RollingStats<F, W>*      rolling;       // short window, nullptr = no strategy rebuild
     RollingStats<F, WL>*     rolling_long;  // long window (W=512), optional, fed in step alongside short
     const ControllerConfig<F>* config;      // optional, must be set if rolling is set
+    OrderManagerState<F>*    oms;           // optional, nullptr = no OMS tick after drain
     int slow_path_interval;                 // ticks between slow-path firings (e.g. 64)
     uint64_t slow_path_runs;                // observability counter
 };
@@ -92,11 +94,13 @@ inline void ShardedBacktestDriver_Init(ShardedBacktestDriver<F, W, WL>* drv,
                                         RollingStats<F, W>* rolling,
                                         const ControllerConfig<F>* config,
                                         int slow_path_interval,
-                                        RollingStats<F, WL>* rolling_long = nullptr) {
+                                        RollingStats<F, WL>* rolling_long = nullptr,
+                                        OrderManagerState<F>* oms = nullptr) {
     drv->state              = state;
     drv->rolling            = rolling;
     drv->rolling_long       = rolling_long;
     drv->config             = config;
+    drv->oms                = oms;
     drv->slow_path_interval = slow_path_interval > 0 ? slow_path_interval : 64;
     drv->slow_path_runs     = 0;
 }
@@ -125,6 +129,11 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
 
     // 2. Drain any trade events the cores fired this tick.
     EventLoop_DrainEvents(drv->state);
+
+    // 2b. In event_log_mode=1, portfolio mutation happens in OMS_Tick
+    //     (the fill handler), not in OnEvent. Tick the OMS so the fill
+    //     handler runs after the drain enqueued synthetic results.
+    if (drv->oms) OrderManager_Tick(drv->oms);
 
     // 3. Slow path on cadence. tick_index is 0-based so we fire every
     //    slow_path_interval ticks starting from interval-1.
@@ -168,6 +177,7 @@ inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
     // Final drain — catches anything the last tick fired that the slow path
     // didn't have time to process.
     EventLoop_DrainEvents(drv->state);
+    if (drv->oms) OrderManager_Tick(drv->oms);
 }
 
 }  // namespace tt

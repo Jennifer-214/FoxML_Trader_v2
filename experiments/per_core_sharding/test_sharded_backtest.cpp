@@ -71,7 +71,8 @@ static void test_empty_stream() {
 
     ShardedBacktestDriver<64> drv;
     ShardedBacktestDriver_Init(&drv, &state, (RollingStats<64>*)nullptr,
-                                (const ControllerConfig<64>*)nullptr, 64);
+                                (const ControllerConfig<64>*)nullptr, 64,
+                                (RollingStats<64, 512>*)nullptr, &oms);
 
     ShardedBacktest_Run(&drv, (Tick<64>*)nullptr, 0);
 
@@ -101,7 +102,8 @@ static void test_no_strategy_no_trades() {
     ControllerConfig<64> config = ControllerConfig_Default<64>();
 
     ShardedBacktestDriver<64> drv;
-    ShardedBacktestDriver_Init(&drv, &state, &rolling, &config, 64);
+    ShardedBacktestDriver_Init(&drv, &state, &rolling, &config, 64,
+                                (RollingStats<64, 512>*)nullptr, &oms);
 
     auto ticks = make_dip_stream(200, 60000.0);
     ShardedBacktest_Run(&drv, ticks.data(), (int)ticks.size());
@@ -138,7 +140,8 @@ static void test_simpledip_trades() {
     config.stop_loss_pct     = FPN_FromDouble<64>(0.0025);
 
     ShardedBacktestDriver<64> drv;
-    ShardedBacktestDriver_Init(&drv, &state, &rolling, &config, 64);
+    ShardedBacktestDriver_Init(&drv, &state, &rolling, &config, 64,
+                                (RollingStats<64, 512>*)nullptr, &oms);
 
     auto ticks = make_dip_stream(500, 60000.0);
     ShardedBacktest_Run(&drv, ticks.data(), (int)ticks.size());
@@ -159,7 +162,8 @@ static void test_slow_path_cadence() {
     ControllerConfig<64> config = ControllerConfig_Default<64>();
 
     ShardedBacktestDriver<64> drv;
-    ShardedBacktestDriver_Init(&drv, &state, &rolling, &config, 64);
+    ShardedBacktestDriver_Init(&drv, &state, &rolling, &config, 64,
+                                (RollingStats<64, 512>*)nullptr, &oms);
 
     auto ticks = make_dip_stream(256, 60000.0);
     ShardedBacktest_Run(&drv, ticks.data(), (int)ticks.size());
@@ -194,7 +198,8 @@ static void test_determinism() {
         config.stop_loss_pct     = FPN_FromDouble<64>(0.0025);
 
         ShardedBacktestDriver<64> drv;
-        ShardedBacktestDriver_Init(&drv, &state, &rolling, &config, 64);
+        ShardedBacktestDriver_Init(&drv, &state, &rolling, &config, 64,
+                                    (RollingStats<64, 512>*)nullptr, &oms);
 
         auto ticks = make_dip_stream(500, 60000.0);
         ShardedBacktest_Run(&drv, ticks.data(), (int)ticks.size());
@@ -243,7 +248,8 @@ static void test_multi_core_fan_out() {
     config.stop_loss_pct     = FPN_FromDouble<64>(0.0025);
 
     ShardedBacktestDriver<64> drv;
-    ShardedBacktestDriver_Init(&drv, &state, &rolling, &config, 64);
+    ShardedBacktestDriver_Init(&drv, &state, &rolling, &config, 64,
+                                (RollingStats<64, 512>*)nullptr, &oms);
 
     auto ticks = make_dip_stream(500, 60000.0);
     ShardedBacktest_Run(&drv, ticks.data(), (int)ticks.size());
@@ -282,7 +288,8 @@ static void test_kill_switch_mid_run() {
     config.stop_loss_pct     = FPN_FromDouble<64>(0.0025);
 
     ShardedBacktestDriver<64> drv;
-    ShardedBacktestDriver_Init(&drv, &state, &rolling, &config, 64);
+    ShardedBacktestDriver_Init(&drv, &state, &rolling, &config, 64,
+                                (RollingStats<64, 512>*)nullptr, &oms);
 
     auto ticks = make_dip_stream(1000, 60000.0);
 
@@ -336,7 +343,8 @@ static void test_final_drain() {
     ShardedBacktestDriver<64> drv;
     // slow_path_interval intentionally HUGE so the slow path never runs
     // and the only drain is the per-tick + final.
-    ShardedBacktestDriver_Init(&drv, &state, &rolling, &config, 1000000);
+    ShardedBacktestDriver_Init(&drv, &state, &rolling, &config, 1000000,
+                                (RollingStats<64, 512>*)nullptr, &oms);
 
     auto ticks = make_dip_stream(500, 60000.0);
     ShardedBacktest_Run(&drv, ticks.data(), (int)ticks.size());

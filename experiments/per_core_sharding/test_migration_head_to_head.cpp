@@ -128,7 +128,8 @@ static void test_head_to_head_single_slot() {
     // overwrite the fixed pack we set above. We're comparing the gate logic,
     // not the strategy rebuild logic.
     ShardedBacktestDriver_Init(&drv, &sharded, (RollingStats<64>*)nullptr,
-                                (const ControllerConfig<64>*)nullptr, 1000000);
+                                (const ControllerConfig<64>*)nullptr, 1000000,
+                                (RollingStats<64, 512>*)nullptr, &sharded_oms);
 
     ShardedBacktest_Run(&drv, ticks.data(), (int)ticks.size());
 
@@ -201,7 +202,8 @@ static void test_head_to_head_multi_slot() {
 
     ShardedBacktestDriver<64> drv;
     ShardedBacktestDriver_Init(&drv, &sharded, (RollingStats<64>*)nullptr,
-                                (const ControllerConfig<64>*)nullptr, 1000000);
+                                (const ControllerConfig<64>*)nullptr, 1000000,
+                                (RollingStats<64, 512>*)nullptr, &sharded_oms);
 
     ShardedBacktest_Run(&drv, ticks.data(), (int)ticks.size());
 
@@ -262,7 +264,8 @@ static void test_head_to_head_no_trades() {
 
     ShardedBacktestDriver<64> drv;
     ShardedBacktestDriver_Init(&drv, &sharded, (RollingStats<64>*)nullptr,
-                                (const ControllerConfig<64>*)nullptr, 1000000);
+                                (const ControllerConfig<64>*)nullptr, 1000000,
+                                (RollingStats<64, 512>*)nullptr, &sharded_oms);
     ShardedBacktest_Run(&drv, ticks.data(), (int)ticks.size());
 
     EXPECT(legacy.total_entries == 0 && sharded.total_entries == 0,
@@ -304,7 +307,8 @@ static void test_head_to_head_always_fires() {
 
     ShardedBacktestDriver<64> drv;
     ShardedBacktestDriver_Init(&drv, &sharded, (RollingStats<64>*)nullptr,
-                                (const ControllerConfig<64>*)nullptr, 1000000);
+                                (const ControllerConfig<64>*)nullptr, 1000000,
+                                (RollingStats<64, 512>*)nullptr, &sharded_oms);
     ShardedBacktest_Run(&drv, ticks.data(), (int)ticks.size());
 
     printf("\n  --- always-fires head to head ---\n");
