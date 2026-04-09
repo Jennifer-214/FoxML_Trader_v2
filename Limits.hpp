@@ -17,3 +17,13 @@
 // chatty core from starving the others (pitfall P4.1).
 #define MAX_EXECUTION_CORES 16
 #define MAX_EVENTS_PER_DRAIN_PER_CORE 16
+
+// OMS (Order Management System, phase 01+)
+// MAX_INFLIGHT_ORDERS caps the OrderManager in-flight order table. orders
+// occupy a slot from submit until terminal state (FILLED / REJECTED /
+// CANCELED / TIMEOUT). pinned at 16 so the bitmap stays uint16_t.
+// MAX_BINANCE_WORKERS caps the BinanceAdapter worker thread pool. each
+// worker owns its own BinanceOrderAPI instance (per-thread, not shared)
+// because BinanceOrderAPI is not thread-safe — see plans/oms/master.md.
+#define MAX_INFLIGHT_ORDERS 16
+#define MAX_BINANCE_WORKERS 4

@@ -1,0 +1,374 @@
+// Copyright (c) 2026 Jennifer Lewis. All rights reserved.
+// Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+// See LICENSE file in the project root for full license text.
+
+//======================================================================================================
+// [ORDER MANAGER]
+//
+// Single-owner OMS for the per-core sharded engine. Owns the in-flight
+// order table and routes submissions through an ExchangeAdapter.
+//
+// Phase 02 architecture (this file):
+//
+//   drainer thread                          adapter worker thread(s)
+//   ──────────────                          ────────────────────────
+//   OrderManager_Submit                     pop from adapter queue
+//      ├─> allocate slot                    ├─> call BinanceOrderAPI on
+//      ├─> mark ORDER_SUBMITTED             │   per-thread instance
+//      └─> adapter.submit_market_*          ├─> bracket with steady_clock
+//          (returns immediately)            ├─> build OrderResult
+//                                           └─> invoke callback
+//                                                ├─> push CMD_FILL_RESULT
+//                                                │   into oms->result_queue
+//                                                └─> return immediately
+//
+//   OrderManager_Tick (drainer)             (worker keeps looping)
+//      └─> drain result_queue
+//          ├─> look up order by id
+//          ├─> mark FILLED or REJECTED
+//          └─> free slot
+//
+// The drainer never blocks on the network. The worker thread (or thread
+// pool) handles all REST traffic. Drainer cycle drops from worst case
+// ~800 ms (4 cores × 200 ms blocking REST in phase 01) to sub-µs
+// (drainer just enqueues to the adapter and returns).
+//
+// CONCURRENCY MODEL:
+//   The order table is owned by exactly one thread — the drainer thread,
+//   which is the only caller of Submit and Tick. The result_queue is
+//   SPSC: the adapter worker is the sole producer (with worker_count==1)
+//   and the drainer's Tick is the sole consumer. No locks anywhere.
+//
+//   When scaling to worker_count > 1, replace result_queue with a real
+//   MPSC ring or per-worker queues. The current SPSCRing breaks under
+//   multiple producers. See plans/oms/02_async_submission/plan.md.
+//
+// PAPER MODE:
+//   Submit short-circuits — bumps total_submitted and total_filled, never
+//   touches the order table or the adapter, returns the next id. The
+//   result_queue stays empty so Tick is a no-op. Zero adapter cost in
+//   paper mode.
+//
+// Naming clarification:
+//   This is the OMS for live exchange orders. It has nothing to do with
+//   MemHeaders/PoolAllocator.hpp:OrderPool, which is the buy gate's order
+//   intent pool from the legacy single-core engine.
+//======================================================================================================
+
+#pragma once
+
+#include "../FixedPoint/FixedPointN.hpp"
+#include "../Limits.hpp"
+#include "ExchangeAdapter.hpp"
+#include "Order.hpp"
+#include "SPSCRing.hpp"
+
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+
+namespace tt {
+
+//======================================================================================================
+// [COMMAND QUEUE]
+//======================================================================================================
+// External threads push state updates as Commands; OrderManager_Tick
+// drains them on the drainer thread. Phase 02 only uses CMD_FILL_RESULT
+// (from the adapter worker thread). Phase 03 will add CMD_RECONCILE
+// (from the reconciliation poller). Phase 04 may add CMD_USER_FILL
+// (from the user-data websocket).
+//======================================================================================================
+enum CommandType : uint8_t {
+    CMD_FILL_RESULT = 0,
+};
+
+// Non-templated POD so the SPSCRing slots stay self-contained regardless
+// of FPN<F> width.
+struct Command {
+    uint8_t      type;
+    uint8_t      _pad0[7];
+    uint64_t     order_id;
+    OrderResult  result;
+};
+
+constexpr size_t OMS_RESULT_QUEUE_SIZE = 256;
+
+//======================================================================================================
+// [ORDER MANAGER STATE]
+//======================================================================================================
+template <unsigned F>
+struct OrderManagerState {
+    Order<F> orders[MAX_INFLIGHT_ORDERS];
+    uint16_t order_bitmap;       // 1 = slot in use, 0 = free. uint16_t caps at 16 slots.
+    uint16_t _pad0;
+    uint32_t _pad1;
+    uint64_t next_order_id;      // monotonic id counter; 0 reserved for "no id"
+
+    // Exchange adapter (by value). In paper mode all function pointers
+    // are null and the OMS short-circuits before touching them. In live
+    // mode the OMS calls submit_market_buy / submit_market_sell from
+    // OrderManager_Submit and the adapter callback fires later from a
+    // worker thread.
+    ExchangeAdapter<F> adapter;
+
+    int live_trading;            // 0 = paper, 1 = live (adapter required)
+
+    // Result queue: adapter worker thread (single producer with
+    // worker_count==1) pushes CMD_FILL_RESULT here when an order
+    // completes. Drainer thread (single consumer) drains it from
+    // OrderManager_Tick. SPSC contract relies on worker_count==1.
+    SPSCRing<Command, OMS_RESULT_QUEUE_SIZE> result_queue;
+
+    // Observability counters. Atomic so the TUI render loop on a different
+    // core can read them without locks. Relaxed ordering throughout —
+    // these are display-only.
+    std::atomic<uint64_t> total_submitted;
+    std::atomic<uint64_t> total_filled;
+    std::atomic<uint64_t> total_rejected;
+};
+
+//======================================================================================================
+// [FILL RESULT CALLBACK — invoked by the adapter worker thread]
+//======================================================================================================
+// Templated on F so it matches the OrderManagerState<F>* user_ctx. Each F
+// instantiation produces a distinct function pointer, which the adapter
+// stores type-erased as `OrderCallback`. The callback is the only path
+// by which the worker thread mutates OMS state — it pushes a Command
+// into the result_queue and returns. The drainer thread later picks it
+// up via OrderManager_Tick.
+//
+// Pushing into the SPSC ring is wait-free. If the queue is full (should
+// never happen with size 256 unless something is very wrong), the result
+// is dropped with a log message.
+//======================================================================================================
+template <unsigned F>
+static void OrderManager_FillResultCallback(void* user_ctx,
+                                             uint64_t client_id,
+                                             const OrderResult* result) {
+    OrderManagerState<F>* oms = (OrderManagerState<F>*)user_ctx;
+    Command cmd;
+    cmd.type     = (uint8_t)CMD_FILL_RESULT;
+    cmd.order_id = client_id;
+    cmd.result   = *result;
+    if (!SPSCRing_TryPush(&oms->result_queue, cmd)) {
+        std::fprintf(stderr,
+                     "[OMS] result queue full, dropping fill result for order %llu\n",
+                     (unsigned long long)client_id);
+    }
+}
+
+//======================================================================================================
+// [INIT]
+//======================================================================================================
+// Zero the order table, clear the bitmap, install the adapter and the
+// live_trading flag. The adapter is copied by value — the caller still
+// owns whatever the adapter.ctx points at, but the function pointers
+// and the ctx pointer are captured into the OMS for its lifetime.
+//
+// In paper mode the caller passes a default-constructed (zero-initialized)
+// adapter — all function pointers null. The OMS will short-circuit Submit
+// to FILLED before touching them.
+//======================================================================================================
+template <unsigned F>
+inline void OrderManager_Init(OrderManagerState<F>* oms,
+                              const ExchangeAdapter<F>& adapter,
+                              int live_trading) {
+    for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
+        Order_Init(&oms->orders[i], 0, -1, ORDER_MARKET_BUY);
+        oms->orders[i].state = ORDER_FILLED;  // mark as inactive (terminal)
+    }
+    oms->order_bitmap   = 0;
+    oms->next_order_id  = 1;
+    oms->adapter        = adapter;
+    oms->live_trading   = live_trading;
+    SPSCRing_Init(&oms->result_queue);
+    oms->total_submitted.store(0, std::memory_order_relaxed);
+    oms->total_filled.store(0, std::memory_order_relaxed);
+    oms->total_rejected.store(0, std::memory_order_relaxed);
+}
+
+//======================================================================================================
+// [SUBMIT — async via adapter, returns immediately]
+//======================================================================================================
+// Paper mode:
+//   Bump total_submitted and total_filled, return the next id. No slot
+//   allocation, no adapter call, no result queue traffic. Symmetric with
+//   the legacy fire-and-forget pattern but routed through the OMS so the
+//   counters are consistent across paper and live.
+//
+// Live mode:
+//   1. Allocate a free slot from the bitmap. Drop on full (logged).
+//   2. Populate the Order with id, type, qty, mark ORDER_SUBMITTED.
+//   3. Call adapter.submit_market_buy or _market_sell with the OMS
+//      pointer as user_ctx and OrderManager_FillResultCallback<F> as
+//      the callback. The adapter enqueues to its worker thread and
+//      returns immediately — Submit does NOT block.
+//   4. If the adapter rejects the enqueue (its queue is full), mark
+//      the slot REJECTED and free it.
+//
+// qty is FPN<F> per the FPN-only-accounting rule in CLAUDE.md.
+//======================================================================================================
+template <unsigned F>
+inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms,
+                                    int16_t core_id,
+                                    OrderType type,
+                                    FPN<F> qty) {
+    uint64_t id = oms->next_order_id++;
+
+    // Paper mode: count and return. Never touch the table or the adapter.
+    if (!oms->live_trading) {
+        oms->total_submitted.fetch_add(1, std::memory_order_relaxed);
+        oms->total_filled.fetch_add(1, std::memory_order_relaxed);
+        return id;
+    }
+
+    // Live mode: allocate a slot.
+    uint16_t free_mask = (uint16_t)~oms->order_bitmap;
+    if (free_mask == 0) {
+        std::fprintf(stderr,
+                     "[OMS] order table full (%d slots), dropping submission "
+                     "for core=%d type=%u\n",
+                     MAX_INFLIGHT_ORDERS, (int)core_id, (unsigned)type);
+        return 0;
+    }
+    int slot = __builtin_ctz((unsigned int)free_mask);
+    oms->order_bitmap |= (uint16_t)(1u << slot);
+
+    Order_Init(&oms->orders[slot], id, core_id, type);
+    oms->orders[slot].requested_qty = qty;
+    oms->orders[slot].state         = ORDER_SUBMITTED;
+    oms->total_submitted.fetch_add(1, std::memory_order_relaxed);
+
+    // Defensive: live mode requires a wired adapter.
+    if (oms->adapter.submit_market_buy == nullptr ||
+        oms->adapter.submit_market_sell == nullptr) {
+        std::fprintf(stderr,
+                     "[OMS] live mode but adapter is not wired, rejecting order %llu\n",
+                     (unsigned long long)id);
+        oms->orders[slot].state = ORDER_REJECTED;
+        oms->total_rejected.fetch_add(1, std::memory_order_relaxed);
+        oms->order_bitmap &= (uint16_t)~(1u << slot);
+        return 0;
+    }
+
+    // Async submit to the adapter. The callback fires later from the
+    // worker thread once the REST round trip completes.
+    double qty_d = FPN_ToDouble(qty);
+    int submit_ok = (type == ORDER_MARKET_BUY)
+        ? oms->adapter.submit_market_buy(oms->adapter.ctx, id, qty_d,
+                                          OrderManager_FillResultCallback<F>,
+                                          (void*)oms)
+        : oms->adapter.submit_market_sell(oms->adapter.ctx, id, qty_d,
+                                           OrderManager_FillResultCallback<F>,
+                                           (void*)oms);
+    if (!submit_ok) {
+        std::fprintf(stderr,
+                     "[OMS] adapter rejected enqueue for order %llu, freeing slot\n",
+                     (unsigned long long)id);
+        oms->orders[slot].state = ORDER_REJECTED;
+        oms->total_rejected.fetch_add(1, std::memory_order_relaxed);
+        oms->order_bitmap &= (uint16_t)~(1u << slot);
+        return 0;
+    }
+    return id;
+}
+
+//======================================================================================================
+// [TICK — drain the result queue]
+//======================================================================================================
+// Drainer thread calls this on every drain pass. Pops every CMD_FILL_RESULT
+// from the result queue and applies it to the matching order. The matching
+// uses linear search across MAX_INFLIGHT_ORDERS slots, which is fine for
+// 16 slots — O(16) per result is trivial.
+//
+// On a successful fill: mark FILLED, copy exchange_id and fill price/qty
+// out of the result, free the slot.
+// On a rejection: log, mark REJECTED, free the slot. The "TODO reset path"
+// problem (executor still thinks it's active after a failure) is documented
+// at EngineSharded.hpp's drainer comment and is properly fixed in phase 03
+// (event log) which routes events through the OMS instead of optimistically
+// updating portfolio in OnEvent.
+//======================================================================================================
+template <unsigned F>
+inline void OrderManager_Tick(OrderManagerState<F>* oms) {
+    Command cmd;
+    while (SPSCRing_TryPop(&oms->result_queue, &cmd)) {
+        if (cmd.type != (uint8_t)CMD_FILL_RESULT) continue;
+
+        // Linear search for the matching order. 16 slots max.
+        int slot = -1;
+        for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
+            if ((oms->order_bitmap & (uint16_t)(1u << i)) == 0) continue;
+            if (oms->orders[i].id == cmd.order_id) { slot = i; break; }
+        }
+        if (slot < 0) {
+            std::fprintf(stderr,
+                         "[OMS] result for unknown order %llu (slot freed already?), ignoring\n",
+                         (unsigned long long)cmd.order_id);
+            continue;
+        }
+
+        Order<F>* o = &oms->orders[slot];
+        if (cmd.result.success) {
+            std::strncpy(o->exchange_id, cmd.result.exchange_id,
+                         sizeof(o->exchange_id) - 1);
+            o->exchange_id[sizeof(o->exchange_id) - 1] = '\0';
+            o->avg_fill_price = FPN_FromDouble<F>(cmd.result.avg_fill_price);
+            o->filled_qty     = FPN_FromDouble<F>(cmd.result.fill_qty);
+            o->state          = ORDER_FILLED;
+            oms->total_filled.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            std::fprintf(stderr,
+                         "[OMS] order %llu FAIL core=%d code=%d msg=%s — TODO reset path\n",
+                         (unsigned long long)o->id,
+                         (int)o->core_id,
+                         cmd.result.error_code,
+                         cmd.result.error_message);
+            o->state = ORDER_REJECTED;
+            oms->total_rejected.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        // Phase 02: free the slot on terminal transition. Phase 03 will
+        // keep terminal orders around longer for the event log audit trail.
+        oms->order_bitmap &= (uint16_t)~(1u << slot);
+    }
+}
+
+//======================================================================================================
+// [SHUTDOWN]
+//======================================================================================================
+// The OMS itself owns no threads or sockets — adapter lifetime is managed
+// externally (the caller calls adapter.shutdown after joining the drainer).
+// This function is a no-op kept for symmetry with Init and so a future
+// phase can hook in additional cleanup without breaking the API.
+//======================================================================================================
+template <unsigned F>
+inline void OrderManager_Shutdown(OrderManagerState<F>* oms) {
+    (void)oms;
+}
+
+//======================================================================================================
+// [INTROSPECTION HELPERS — for tests and TUI]
+//======================================================================================================
+template <unsigned F>
+inline uint64_t OrderManager_TotalSubmitted(const OrderManagerState<F>* oms) {
+    return oms->total_submitted.load(std::memory_order_relaxed);
+}
+
+template <unsigned F>
+inline uint64_t OrderManager_TotalFilled(const OrderManagerState<F>* oms) {
+    return oms->total_filled.load(std::memory_order_relaxed);
+}
+
+template <unsigned F>
+inline uint64_t OrderManager_TotalRejected(const OrderManagerState<F>* oms) {
+    return oms->total_rejected.load(std::memory_order_relaxed);
+}
+
+template <unsigned F>
+inline int OrderManager_InflightCount(const OrderManagerState<F>* oms) {
+    return __builtin_popcount((unsigned int)oms->order_bitmap);
+}
+
+}  // namespace tt

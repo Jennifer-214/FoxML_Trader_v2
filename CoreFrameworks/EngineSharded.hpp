@@ -43,11 +43,15 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/StrategyParameters.hpp"
+#include "BinanceAdapter.hpp"
 #include "ControllerEventLoop.hpp"
 #include "CoreLatencyStats.hpp"
 #include "ControllerConfig.hpp"
+#include "ExchangeAdapter.hpp"
 #include "ExecutionCore.hpp"
 #include "GateParameters.hpp"
+#include "OrderManager.hpp"
+#include "ShardedOrderLatency.hpp"
 #include "SPSCRing.hpp"
 #include "Tick.hpp"
 
@@ -73,52 +77,16 @@ namespace tt {
 static volatile std::sig_atomic_t g_engine_sharded_shutdown = 0;
 
 //======================================================================================================
-// [ORDER LATENCY STATS]
+// [ORDER LATENCY STATS — file-static instance]
 //======================================================================================================
-// drainer-thread metrics for the BinanceOrderAPI submission cost. brackets
-// each MarketBuy/MarketSell with steady_clock and accumulates min/avg/max in
-// microseconds. NOT a percentile (the order rate is too low to bother), just
-// running scalars displayed in the live TUI.
-//
-// in paper mode this stays at zero. in live mode it shows the network round
-// trip to binance, typically 50-200 ms on a US connection. that latency is
-// the gap between "executor decided" and "order acknowledged" — separate from
-// the per-core ExecutionCore_Tick latency which is unaffected.
-//
-// atomic because the drainer thread writes and the TUI render loop reads.
+// the type and helper functions live in CoreFrameworks/ShardedOrderLatency.hpp
+// (extracted during the OMS phase 01 refactor so OrderManager.hpp can call
+// Sample without circular includes). this file just owns the singleton instance
+// the TUI render loop reads from. OrderManager_Init takes a pointer to it so
+// the OMS can sample each REST round trip into the same counters the TUI
+// already displays.
 //======================================================================================================
-struct ShardedOrderLatency {
-    std::atomic<uint64_t> count;       // total orders submitted
-    std::atomic<uint64_t> failures;    // count of REST failures
-    std::atomic<uint64_t> total_us;    // running sum for avg
-    std::atomic<uint64_t> min_us;
-    std::atomic<uint64_t> max_us;
-};
 static ShardedOrderLatency g_sharded_order_lat;
-
-static inline void ShardedOrderLatency_Reset() {
-    g_sharded_order_lat.count.store(0, std::memory_order_relaxed);
-    g_sharded_order_lat.failures.store(0, std::memory_order_relaxed);
-    g_sharded_order_lat.total_us.store(0, std::memory_order_relaxed);
-    g_sharded_order_lat.min_us.store(UINT64_MAX, std::memory_order_relaxed);
-    g_sharded_order_lat.max_us.store(0, std::memory_order_relaxed);
-}
-
-static inline void ShardedOrderLatency_Sample(uint64_t elapsed_us, int success) {
-    g_sharded_order_lat.count.fetch_add(1, std::memory_order_relaxed);
-    if (!success) g_sharded_order_lat.failures.fetch_add(1, std::memory_order_relaxed);
-    g_sharded_order_lat.total_us.fetch_add(elapsed_us, std::memory_order_relaxed);
-    uint64_t cur_min = g_sharded_order_lat.min_us.load(std::memory_order_relaxed);
-    while (elapsed_us < cur_min) {
-        if (g_sharded_order_lat.min_us.compare_exchange_weak(
-                cur_min, elapsed_us, std::memory_order_relaxed)) break;
-    }
-    uint64_t cur_max = g_sharded_order_lat.max_us.load(std::memory_order_relaxed);
-    while (elapsed_us > cur_max) {
-        if (g_sharded_order_lat.max_us.compare_exchange_weak(
-                cur_max, elapsed_us, std::memory_order_relaxed)) break;
-    }
-}
 
 extern "C" inline void EngineSharded_SignalHandler(int sig) {
     (void)sig;
@@ -261,10 +229,17 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
 
     // === Live trading setup (use_real_money) ===
     // Mirrors the legacy engine pattern in main.cpp:212-237. Loads secrets,
-    // initializes the REST client, prints a 10-second warning if running
-    // against PRODUCTION (not testnet). The order_api is static so the
-    // drainer thread lambda can capture it across the function scope.
-    static BinanceOrderAPI g_sharded_order_api;
+    // initializes the BinanceAdapter (which spawns one worker thread per
+    // BinanceOrderAPI instance — currently 1 worker for phase 02), prints
+    // a 10-second warning if running against PRODUCTION (not testnet).
+    // The adapter state is static so the drainer lambda can capture it
+    // across the function scope.
+    //
+    // Phase 02 changed this from a single BinanceOrderAPI to a
+    // BinanceAdapterState because the underlying BinanceOrderAPI is not
+    // thread-safe. The adapter owns one BinanceOrderAPI instance per
+    // worker thread (per-thread, not shared). See BinanceAdapter.hpp.
+    static BinanceAdapterState g_sharded_binance_adapter;
     bool live_trading = (cfg.use_real_money != 0);
     if (live_trading) {
         char api_key[128] = {}, api_secret[128] = {};
@@ -275,8 +250,12 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
             return;
         }
         const char *rest_host = bcfg.use_testnet ? "testnet.binance.vision" : "api.binance.us";
-        if (!BinanceOrderAPI_Init(&g_sharded_order_api, rest_host, api_key, api_secret, bcfg.symbol)) {
-            fprintf(stderr, "[sharded] ERROR: failed to connect to REST API at %s\n", rest_host);
+        // Phase 02 ships with worker_count = 1. Scale up to 2-4 in a
+        // follow-on commit after the back-to-back stress test passes.
+        if (!BinanceAdapter_Init(&g_sharded_binance_adapter, rest_host,
+                                  api_key, api_secret, bcfg.symbol,
+                                  &g_sharded_order_lat, /*worker_count=*/1)) {
+            fprintf(stderr, "[sharded] ERROR: failed to init BinanceAdapter at %s\n", rest_host);
             std::signal(SIGINT, prev_int);
             std::signal(SIGTERM, prev_term);
             return;
@@ -290,7 +269,7 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
             }
             if (g_engine_sharded_shutdown) {
                 fprintf(stderr, "[sharded] aborted before start.\n");
-                BinanceOrderAPI_Cleanup(&g_sharded_order_api);
+                BinanceAdapter_ShutdownState(&g_sharded_binance_adapter);
                 std::signal(SIGINT, prev_int);
                 std::signal(SIGTERM, prev_term);
                 return;
@@ -304,7 +283,7 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     fprintf(stderr, "[sharded] Press Ctrl+C to stop and dump per-core stats.\n");
     fprintf(stderr, "================================================================\n");
 
-    ShardedOrderLatency_Reset();
+    ShardedOrderLatency_Reset(&g_sharded_order_lat);
 
     double tsc_ghz = EngineSharded_CalibrateTscGhz();
     fprintf(stderr, "[sharded] TSC calibrated at %.4f GHz\n", tsc_ghz);
@@ -315,6 +294,20 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
 
     EventLoopState<F> state;
     EventLoopState_Init(&state, cfg.starting_balance, cfg.fee_rate);
+
+    // OMS phase 02: route live orders through OrderManager which submits
+    // them async via the BinanceAdapter. paper mode short-circuits in
+    // OrderManager_Submit and never touches the adapter. live mode passes
+    // a wired adapter constructed via BinanceAdapter_Get<F>. Drainer no
+    // longer blocks on REST — adapter worker thread handles the round trip
+    // and pushes a CMD_FILL_RESULT into the OMS result queue, which the
+    // drainer drains via OrderManager_Tick on each pass.
+    ExchangeAdapter<F> exchange_adapter{};  // value-init: all pointers null (paper mode default)
+    if (live_trading) {
+        exchange_adapter = BinanceAdapter_Get<F>(&g_sharded_binance_adapter);
+    }
+    OrderManagerState<F> oms;
+    OrderManager_Init(&oms, exchange_adapter, live_trading ? 1 : 0);
 
     // Per-core resources. Static so they live in BSS, not the stack —
     // ExecutionCore is ~66KB and num_cores * size could blow the stack.
@@ -500,22 +493,27 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     // Drainer thread — controller side
     //----------------------------------------------------------------------
     // open-coded drain so we can hook order submission AFTER each event.
-    // identical structure to EventLoop_DrainEvents but with the BinanceOrderAPI
-    // call inserted between OnEvent and the loop continue. paper mode skips
-    // the order call entirely; live mode brackets it with steady_clock for
-    // the order latency stats.
+    // identical structure to EventLoop_DrainEvents but with an OrderManager_Submit
+    // call inserted between OnEvent and the loop continue, then a single
+    // OrderManager_Tick at the end of each pass. paper mode passes through
+    // the OMS as a no-op (OrderManager_Tick marks orders FILLED immediately
+    // without touching the api); live mode does the synchronous REST call
+    // inside OrderManager_Tick and brackets it with steady_clock for the
+    // order latency stats. phase 02 will move the REST call to a worker
+    // thread so the drainer no longer blocks.
     //
     // why open-code instead of adding a hook to ControllerEventLoop.hpp:
     // keeps the generic event loop free of REST dependencies (it stays
     // testable in isolation), and the live trading concern is contained
-    // in this file where it belongs.
+    // in this file where it belongs. the OMS itself is generic — the
+    // file-specific concern is wiring it into the per-tick drain pattern.
     //
     // qty source rule:
     //   entry: read from cores[slot].intended_qty (matches what OnEvent will
     //          write into portfolio.positions[slot].quantity via OpenSlot)
     //   exit:  read from portfolio.positions[slot].quantity BEFORE OnEvent,
     //          since CloseSlot inside OnEvent clears the slot
-    std::thread drainer([&state, &producer_done, num_cores, live_trading] {
+    std::thread drainer([&state, &oms, &producer_done, num_cores] {
         EngineSharded_PinThread(num_cores + 1);  // dedicated controller CPU
         while (!g_engine_sharded_shutdown) {
             int total_drained = 0;
@@ -540,38 +538,36 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
                     EventLoop_OnEvent(&state, event);
                     ++total_drained;
 
-                    // === LIVE ORDER SUBMISSION ===
-                    // only when use_real_money=1. blocking REST call (~50-200 ms
-                    // network round trip). bracketed for the latency timer.
-                    // failures are logged but recovery (resetting executor state)
-                    // is left to the slow-path parameter rebuild for now.
-                    if (live_trading && (is_entry || is_exit) && order_qty_d > 0.0) {
-                        char order_id[32] = {};
-                        double fill_price = 0.0, fill_qty = 0.0;
-                        auto ts0 = std::chrono::steady_clock::now();
-                        int ok = is_entry
-                            ? BinanceOrderAPI_MarketBuy(&g_sharded_order_api, order_qty_d,
-                                                         order_id, &fill_price, &fill_qty)
-                            : BinanceOrderAPI_MarketSell(&g_sharded_order_api, order_qty_d,
-                                                          order_id, &fill_price, &fill_qty);
-                        auto ts1 = std::chrono::steady_clock::now();
-                        uint64_t elapsed_us = (uint64_t)
-                            std::chrono::duration_cast<std::chrono::microseconds>(ts1 - ts0).count();
-                        ShardedOrderLatency_Sample(elapsed_us, ok);
-                        if (!ok) {
-                            // TODO (phase 2): reset core->active to 0 + push parameter
-                            // update so the executor unlatches. for now log and
-                            // rely on the next slow-path rebuild to reconcile.
-                            fprintf(stderr, "[sharded] ORDER FAIL core=%d %s qty=%.8f — TODO reset path\n",
-                                    slot, is_entry ? "BUY" : "SELL", order_qty_d);
-                        }
+                    // === ROUTE TO OMS ===
+                    // every entry/exit becomes an OrderManager_Submit. paper mode
+                    // marks the order FILLED on the next OMS Tick without ever
+                    // touching the REST api; live mode runs the synchronous REST
+                    // call inside OMS Tick. the qty is converted to FPN<F> per
+                    // the FPN-only-accounting rule in CLAUDE.md.
+                    if ((is_entry || is_exit) && order_qty_d > 0.0) {
+                        OrderManager_Submit(&oms,
+                            (int16_t)slot,
+                            is_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
+                            FPN_FromDouble<F>(order_qty_d));
                     }
                 }
             }
+            // Process all PENDING orders the per-core drain just produced.
+            // Phase 01: this BLOCKS for the duration of each REST call. With 4
+            // cores firing simultaneously, worst case is ~800 ms drainer cycle.
+            // Phase 02 moves the REST call to a worker thread so this returns
+            // sub-µs again.
+            OrderManager_Tick(&oms);
+
             if (total_drained == 0) std::this_thread::yield();
             if (producer_done.load(std::memory_order_acquire)) {
-                // After producer is done, drain a few more times then exit
-                for (int k = 0; k < 16; ++k) EventLoop_DrainEvents(&state);
+                // After producer is done, drain a few more times then exit.
+                // Each pass also ticks the OMS so any final orders submitted
+                // by the trailing exits get processed before shutdown.
+                for (int k = 0; k < 16; ++k) {
+                    EventLoop_DrainEvents(&state);
+                    OrderManager_Tick(&oms);
+                }
                 break;
             }
         }
@@ -719,6 +715,7 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     producer.join();
     for (auto& e : executors) e.join();
     drainer.join();
+    OrderManager_Shutdown(&oms);
 
     fprintf(stderr, "[sharded] all threads joined.\n");
     fprintf(stderr, "[sharded] final: produced=%lu consumed=%lu entries=%lu exits=%lu balance=%.4f\n",
@@ -752,8 +749,13 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
             fprintf(stderr, "  no orders submitted during this run.\n");
         }
         fprintf(stderr, "================================================================\n");
+    }
 
-        BinanceOrderAPI_Cleanup(&g_sharded_order_api);
+    // Tear down the BinanceAdapter (joins worker threads, cleans up each
+    // worker's BinanceOrderAPI instance). No-op if live_trading was 0
+    // since BinanceAdapter_Init was never called — worker_count stays 0.
+    if (live_trading) {
+        BinanceAdapter_ShutdownState(&g_sharded_binance_adapter);
     }
 
     // Restore previous signal handlers so subsequent code paths see the
