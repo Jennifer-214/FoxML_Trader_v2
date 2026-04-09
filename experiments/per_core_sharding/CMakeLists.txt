@@ -147,3 +147,12 @@ target_link_libraries(run_backtest_dispatch PRIVATE pthread)
 add_executable(bench_production_vs_sharded bench_production_vs_sharded.cpp)
 target_compile_definitions(bench_production_vs_sharded PRIVATE MULTICORE_TUI LICENSE_BYPASS USE_ANSI_TUI)
 target_link_libraries(bench_production_vs_sharded PRIVATE pthread)
+
+# OMS phase 01+02 functional tests. Validates the OrderManager state
+# machine, the paper-mode short-circuit, the adapter callback flow, and
+# the table-full / rejection paths via a synchronous MockAdapter that
+# fires the OMS callback inline. No real threading — concurrent stress
+# testing for the OMS will live in test_oms_concurrent.cpp under TSan.
+add_executable(test_oms test_oms.cpp)
+target_compile_definitions(test_oms PRIVATE USE_NATIVE_128)
+target_link_libraries(test_oms PRIVATE pthread)
