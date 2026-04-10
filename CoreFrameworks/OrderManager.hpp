@@ -296,7 +296,30 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
 
     // Phase 03 chunk 3: event log mode + log allocation.
     oms->event_log_mode = event_log_mode;
-    OrderEventLog_Init(&oms->event_log);
+    // Phase 07: disk persistence. In mode 1, load previous events from
+    // disk (reconstructs next_event_id), then open the file for append
+    // so new events write through. On first run the load returns 0 (no
+    // file) and InitWithFile creates a fresh one with a header.
+    if (event_log_mode == 1) {
+        OrderEventLog_Init(&oms->event_log);  // allocate buffer first
+        int loaded = OrderEventLog_LoadFromDisk(&oms->event_log, "logging/order_events.bin");
+        if (loaded > 0) {
+            // replay the loaded events to reconstruct portfolio + balance
+            FoldResult<F> fold = Portfolio_FromEventLog(&oms->event_log,
+                                                         starting_balance, fee_rate);
+            oms->portfolio    = fold.portfolio;
+            oms->balance      = fold.balance;
+            oms->realized_pnl = fold.realized_pnl;
+            if (FPN_GreaterThan(oms->balance, oms->ks_peak_balance))
+                oms->ks_peak_balance = oms->balance;
+            std::fprintf(stderr, "[OMS] replayed %d events from disk, "
+                         "balance=$%.2f\n", loaded, FPN_ToDouble(oms->balance));
+        }
+        // open for append (writes new events through to disk)
+        OrderEventLog_InitWithFile(&oms->event_log, "logging/order_events.bin");
+    } else {
+        OrderEventLog_Init(&oms->event_log);
+    }
 }
 
 //======================================================================================================

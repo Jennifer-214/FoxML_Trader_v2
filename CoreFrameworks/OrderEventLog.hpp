@@ -214,7 +214,9 @@ inline int OrderEventLog_Append(OrderEventLog<F>* log, OrderEvent<F> event) {
 //======================================================================================================
 template <unsigned F>
 inline void OrderEventLog_InitWithFile(OrderEventLog<F>* log, const char* path) {
-    OrderEventLog_Init(log);
+    // only init the buffer if not already allocated (LoadFromDisk may have
+    // populated it before this call)
+    if (!log->entries) OrderEventLog_Init(log);
     std::strncpy(log->disk_path, path, sizeof(log->disk_path) - 1);
     log->disk_path[sizeof(log->disk_path) - 1] = '\0';
 
