@@ -561,7 +561,13 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
             while (!g_engine_sharded_shutdown) {
                 double phase = (double)(seq % 200);
                 double price = 60050.0 + (phase < 100.0 ? phase : (200.0 - phase));
-                if (!fan_out(price, 2.0, (uint64_t)(seq * 1000))) break;
+                // small random volume variation for realistic candle rendering
+                double vol = 1.5 + (double)((seq * 7 + 13) % 100) / 100.0;
+                if (!fan_out(price, vol, (uint64_t)(seq * 1000))) break;
+                // throttle to ~3 ticks/sec to match real BTC feed cadence.
+                // without this the chart gets one massive candle and the
+                // GUI oscillates wildly from millions of ticks/sec.
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
             }
         } else {
             // REAL BINANCE FEED — same poll/drain pattern as the legacy

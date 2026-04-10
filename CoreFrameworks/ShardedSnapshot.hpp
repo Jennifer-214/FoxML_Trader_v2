@@ -129,19 +129,33 @@ static inline void TUI_CopySnapshotSharded(
     snap->cfg_tp  = FPN_ToDouble(cfg->take_profit_pct) * 100.0;
     snap->cfg_sl  = FPN_ToDouble(cfg->stop_loss_pct) * 100.0;
     snap->cfg_fee = FPN_ToDouble(cfg->fee_rate) * 100.0;
+    snap->cfg_slippage = FPN_ToDouble(cfg->slippage_pct) * 100.0;
     snap->live_trading = cfg->use_real_money;
 
-    // per-core details (strategy assignment + buy gate levels)
+    // per-core details (strategy assignment + buy gate levels).
+    // use core 0's strategy as the "headline" strategy for the Market panel,
+    // and core 0's gate parameters for the Buy Gate panel.
     snap->sharded_mode_active = 1;
     snap->per_core_count = state->registered_count;
+    if (state->registered_count > 0) {
+        snap->strategy_id = state->cores[0].strategy_id;
+    }
     for (int i = 0; i < state->registered_count && i < 16; ++i) {
         snap->per_core[i].strategy_id_display = state->cores[i].strategy_id;
-        // read buy gate price from the core's parameter slot
         tt::ExecutionCore<F>* core = state->cores[i].core;
         if (core) {
             tt::GateParameters<F> params;
             tt::ParameterSlot_Read(&core->param_slot, &params);
             snap->per_core[i].buy_gate_price = FPN_ToDouble(params.bg_price_threshold);
+            // populate headline buy gate from core 0
+            if (i == 0) {
+                snap->buy_p = FPN_ToDouble(params.bg_price_threshold);
+                snap->buy_v = FPN_ToDouble(params.bg_volume_threshold);
+                if (snap->buy_p > 0.01 && price_d > 0.01) {
+                    snap->gate_dist = price_d - snap->buy_p;
+                    snap->gate_dist_pct = (snap->gate_dist / price_d) * 100.0;
+                }
+            }
         }
     }
 }
