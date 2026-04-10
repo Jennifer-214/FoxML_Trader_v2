@@ -1,4 +1,4 @@
-# 2026-04-09 — Sharded Engine GUI Wiring + Per-Strategy Config
+# 2026-04-09 — Sharded Engine GUI Wiring + Per-Strategy Config + Paper Reset
 
 scope: experimental branch `experiment/per-core-sharding`. wires the
 per-core sharded engine into the existing ImGui GUI so all existing panels
@@ -78,6 +78,21 @@ cmake -B build_gui -DUSE_IMGUI_GUI=ON && cmake --build build_gui  # ImGui GUI
 - `cmake --build build_gui` — engine_gui + foxml_suite clean
 - controller_test: 279/279
 - all OMS tests: 9/9 + 27/27 + 31/31
+
+## Paper Reset Button
+
+`DataStream/EngineTUI.hpp`:
+- `paper_reset_requested` flag added to `TUISharedState`
+
+`GUI/DashboardPanels.hpp`:
+- "Reset Paper" button in Account panel (paper mode only, hidden in live)
+- `GUI_Panel_Account` and `GUI_RenderDashboard` gained optional
+  `TUISharedState*` parameter for the button to set the flag
+
+`CoreFrameworks/EngineSharded.hpp`:
+- producer thread handles reset on next slow-path cycle: zeroes balance
+  back to `starting_balance`, clears portfolio bitmap, resets realized P&L,
+  kill switch, per-core entry/exit counters
 
 ## Rollback tags
 
