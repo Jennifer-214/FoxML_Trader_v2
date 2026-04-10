@@ -40,6 +40,8 @@ static inline void TUI_CopySnapshotSharded(
     double price_d, double volume_d)
 {
     memset(snap, 0, sizeof(*snap));
+    // mark all position slots as empty so the GUI doesn't render them
+    for (int i = 0; i < 16; ++i) snap->positions[i].idx = -1;
 
     // market data
     snap->price  = price_d;
