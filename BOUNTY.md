@@ -16,10 +16,14 @@ open-sourced their modifications — contact:
 ## finder's fee
 
 tips that lead to a successful licensing settlement or legal enforcement
-are eligible for a finder's fee of up to 100% of gross revenue derived
-from the unlicensed use. the exact amount is determined on a case-by-case
-basis depending on the quality of evidence provided and the outcome of
-enforcement.
+are eligible for:
+
+- **50% of total settlement or judgment winnings**
+- enforcement seeks **100% of gross revenue** derived from the unlicensed
+  use over the full period of infringement (up to 10-15 years)
+
+the exact amount is determined on a case-by-case basis depending on the
+quality of evidence provided and the outcome of enforcement.
 
 ## what counts as evidence
 

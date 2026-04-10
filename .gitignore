@@ -12,3 +12,4 @@ data/
 plans/
 .claude/
 .chart-venv/
+secrets.cfg
