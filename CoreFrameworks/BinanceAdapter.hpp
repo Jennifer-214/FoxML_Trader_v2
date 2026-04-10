@@ -114,6 +114,15 @@ struct BinanceAdapterState {
     // the producer side (drainer thread). Atomic so the TUI / tests can
     // read without ordering surprises.
     std::atomic<uint64_t> dropped_submissions;
+
+    // Phase 04: when ws_active == 1, the user data websocket is receiving
+    // real-time fills. The worker loop's callback changes behavior: it
+    // sends an ACK (exchange_id only, no fill data) instead of a full
+    // fill result. The order transitions to ORDER_ACKNOWLEDGED, and the
+    // actual fill comes later via the WS queue. When ws_active == 0
+    // (WS disconnected or not started), existing phase-02 behavior is
+    // preserved — full fill data in the callback.
+    std::atomic<int> ws_active;
 };
 
 //======================================================================================================
@@ -153,9 +162,9 @@ static inline void BinanceAdapter_WorkerLoop(BinanceAdapterState* state, int wor
         auto ts0 = std::chrono::steady_clock::now();
         int ok = (p.type == ORDER_MARKET_BUY)
             ? BinanceOrderAPI_MarketBuy(api, p.qty, order_id_buf,
-                                         &fill_price, &fill_qty)
+                                         &fill_price, &fill_qty, p.client_id)
             : BinanceOrderAPI_MarketSell(api, p.qty, order_id_buf,
-                                          &fill_price, &fill_qty);
+                                          &fill_price, &fill_qty, p.client_id);
         auto ts1 = std::chrono::steady_clock::now();
         if (state->latency) {
             uint64_t elapsed_us = (uint64_t)
@@ -168,16 +177,23 @@ static inline void BinanceAdapter_WorkerLoop(BinanceAdapterState* state, int wor
             std::strncpy(result.exchange_id, order_id_buf,
                          sizeof(result.exchange_id) - 1);
             result.exchange_id[sizeof(result.exchange_id) - 1] = '\0';
-            result.avg_fill_price = fill_price;
-            result.fill_qty       = fill_qty;
-            result.error_code     = 0;
+            result.error_code = 0;
+            // Phase 04: when ws_active, send ACK only (exchange_id populated
+            // but no fill data). The actual fill comes via the WS queue.
+            // When ws is inactive, send the full fill data (phase 02 behavior).
+            if (state->ws_active.load(std::memory_order_relaxed)) {
+                result.avg_fill_price = 0.0;
+                result.fill_qty       = 0.0;
+            } else {
+                result.avg_fill_price = fill_price;
+                result.fill_qty       = fill_qty;
+            }
         } else {
             result.success = 0;
-            result.error_code = -1;  // TODO phase 06: parse REST error code
-            std::strncpy(result.error_message,
-                         "BinanceOrderAPI returned 0 (REST error or rejection)",
-                         sizeof(result.error_message) - 1);
-            result.error_message[sizeof(result.error_message) - 1] = '\0';
+            result.error_code = api->last_error_code;  // actual Binance error code
+            std::snprintf(result.error_message, sizeof(result.error_message),
+                          "REST error (binance code %d, weight %d)",
+                          api->last_error_code, api->rate_limit_weight);
         }
 
         // Fire the callback. The OMS's callback pushes a CMD_FILL_RESULT
@@ -220,6 +236,7 @@ static inline int BinanceAdapter_Init(BinanceAdapterState* state,
     SPSCRing_Init(&state->submission_queue);
     state->shutdown_requested.store(0, std::memory_order_relaxed);
     state->dropped_submissions.store(0, std::memory_order_relaxed);
+    state->ws_active.store(0, std::memory_order_relaxed);
     state->latency = latency;
 
     if (worker_count < 1) worker_count = 1;

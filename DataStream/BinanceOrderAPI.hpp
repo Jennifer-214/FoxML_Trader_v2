@@ -52,6 +52,20 @@
 //======================================================================================================
 // [SYMBOL FILTERS] — queried from /api/v3/exchangeInfo at init
 //======================================================================================================
+// Binance error codes (subset that affects order routing decisions).
+// Full list at https://binance-docs.github.io/apidocs/spot/en/#error-codes
+enum BinanceErrorCode {
+    BINANCE_OK               =     0,
+    BINANCE_RATE_LIMIT       = -1003,  // too many requests
+    BINANCE_LOT_SIZE         = -1013,  // invalid quantity (step size or min/max)
+    BINANCE_TIMESTAMP        = -1021,  // timestamp for this request is outside recvWindow
+    BINANCE_SIGNATURE        = -1022,  // signature verification failed
+    BINANCE_INSUFFICIENT_BAL = -2010,  // insufficient balance
+    BINANCE_DUPLICATE_ORDER  = -2010,  // same code as insufficient (context-dependent)
+    BINANCE_UNKNOWN_ORDER    = -2013,  // order does not exist
+    BINANCE_NOTIONAL         = -1013,  // below MIN_NOTIONAL (same code as LOT_SIZE)
+};
+
 struct SymbolFilters {
     double lot_step_size;    // BTC: 0.00000100 — quantity must be multiple of this
     double lot_min_qty;      // minimum order quantity
@@ -77,6 +91,8 @@ struct BinanceOrderAPI {
     SymbolFilters filters;
     int64_t last_reconnect_ms; // rate-limit reconnects to once per 5s
     int64_t last_request_ms;   // timestamp of last successful REST request (staleness detection)
+    int last_error_code;       // Binance error code from last failed request (0 = none)
+    int rate_limit_weight;     // X-MBX-USED-WEIGHT-1m from last response
 };
 
 //======================================================================================================
@@ -338,6 +354,13 @@ static inline int binance_rest_request(BinanceOrderAPI *api,
         response_buf[0] = '\0';
     }
 
+    // Parse rate limit weight from response headers (before discarding them).
+    // Binance sends: X-MBX-USED-WEIGHT-1m: 42
+    const char* weight_hdr = strstr(raw, "X-MBX-USED-WEIGHT-1m: ");
+    if (weight_hdr && weight_hdr < body) {
+        api->rate_limit_weight = atoi(weight_hdr + 22);
+    }
+
     // close connection after each request — ssl_ctx persists, only SSL object cycles
     // the same-tick guard in main.cpp prevents back-to-back calls that caused heap corruption
     if (api->ssl) { SSL_shutdown(api->ssl); SSL_free(api->ssl); api->ssl = NULL; }
@@ -386,18 +409,36 @@ static inline int binance_retry_request(BinanceOrderAPI *api,
                                              response_buf, buf_size);
         if (status == 200) return status;
         if (status >= 400 && status < 500 && status != 418 && status != 429) {
-            // client error (bad qty, bad signature, etc.) — don't retry
-            // try to parse Binance error code
+            // client error — parse Binance error code for classification
             char msg[128];
             binance_json_extract_str(response_buf, "msg", msg, sizeof(msg));
             int code = (int)binance_json_extract_double(response_buf, "code");
+            api->last_error_code = code;
             if (code != 0)
                 fprintf(stderr, "[REST] Binance error %d: %s\n", code, msg);
+            // timestamp errors are retryable (clock drift) — re-fetch
+            // server time inline to resync. full SyncClock is defined later
+            // in the file so we use the server time endpoint directly.
+            if (code == BINANCE_TIMESTAMP) {
+                fprintf(stderr, "[REST] timestamp error, resync + retry\n");
+                char time_body[256];
+                int ts = binance_rest_request(api, "GET", "/api/v3/time", "",
+                                               time_body, sizeof(time_body));
+                if (ts == 200) {
+                    int64_t server_ms = (int64_t)binance_json_extract_double(time_body, "serverTime");
+                    api->time_offset_ms = binance_current_ms() - server_ms;
+                }
+                continue;
+            }
+            // all other 4xx: don't retry (LOT_SIZE, insufficient balance, etc.)
             return status;
         }
-        // 418/429 (rate limit) or 5xx (server error): retry
-        if (status == 418 || status == 429)
-            fprintf(stderr, "[REST] rate limited (HTTP %d)\n", status);
+        // 418/429 (rate limit): wait longer before retry
+        if (status == 418 || status == 429) {
+            fprintf(stderr, "[REST] rate limited (HTTP %d), weight=%d\n",
+                    status, api->rate_limit_weight);
+            sleep(delays[attempt] + 5);  // extra penalty for rate limit
+        }
     }
     fprintf(stderr, "[REST] all retries failed\n");
     return -1;
@@ -421,7 +462,8 @@ static inline int BinanceOrderAPI_MarketBuy(BinanceOrderAPI *api,
                                              double quantity,
                                              char *order_id_out,
                                              double *fill_price_out = NULL,
-                                             double *fill_qty_out = NULL) {
+                                             double *fill_qty_out = NULL,
+                                             uint64_t client_order_id = 0) {
     // round quantity to exchange step size
     if (api->filters.loaded)
         quantity = binance_round_qty(quantity, api->filters.lot_step_size);
@@ -430,9 +472,15 @@ static inline int BinanceOrderAPI_MarketBuy(BinanceOrderAPI *api,
     snprintf(qty_str, sizeof(qty_str), "%.*f", api->filters.qty_decimals, quantity);
 
     char params[256];
-    snprintf(params, sizeof(params),
-             "symbol=%s&side=BUY&type=MARKET&quantity=%s",
-             api->symbol, qty_str);
+    if (client_order_id != 0) {
+        snprintf(params, sizeof(params),
+                 "symbol=%s&side=BUY&type=MARKET&quantity=%s&newClientOrderId=oms_%llu",
+                 api->symbol, qty_str, (unsigned long long)client_order_id);
+    } else {
+        snprintf(params, sizeof(params),
+                 "symbol=%s&side=BUY&type=MARKET&quantity=%s",
+                 api->symbol, qty_str);
+    }
 
     char body[2048];
     int status = binance_retry_request(api, "POST", "/api/v3/order", params,
@@ -460,7 +508,8 @@ static inline int BinanceOrderAPI_MarketSell(BinanceOrderAPI *api,
                                               double quantity,
                                               char *order_id_out,
                                               double *fill_price_out = NULL,
-                                              double *fill_qty_out = NULL) {
+                                              double *fill_qty_out = NULL,
+                                              uint64_t client_order_id = 0) {
     if (api->filters.loaded)
         quantity = binance_round_qty(quantity, api->filters.lot_step_size);
 
@@ -468,9 +517,15 @@ static inline int BinanceOrderAPI_MarketSell(BinanceOrderAPI *api,
     snprintf(qty_str, sizeof(qty_str), "%.*f", api->filters.qty_decimals, quantity);
 
     char params[256];
-    snprintf(params, sizeof(params),
-             "symbol=%s&side=SELL&type=MARKET&quantity=%s",
-             api->symbol, qty_str);
+    if (client_order_id != 0) {
+        snprintf(params, sizeof(params),
+                 "symbol=%s&side=SELL&type=MARKET&quantity=%s&newClientOrderId=oms_%llu",
+                 api->symbol, qty_str, (unsigned long long)client_order_id);
+    } else {
+        snprintf(params, sizeof(params),
+                 "symbol=%s&side=SELL&type=MARKET&quantity=%s",
+                 api->symbol, qty_str);
+    }
 
     char body[2048];
     int status = binance_retry_request(api, "POST", "/api/v3/order", params,

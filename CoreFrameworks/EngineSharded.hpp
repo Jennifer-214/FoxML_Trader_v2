@@ -43,7 +43,9 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/StrategyParameters.hpp"
+#include "../DataStream/BinanceUserData.hpp"
 #include "BinanceAdapter.hpp"
+#include "ReconciliationLoop.hpp"
 #include "ControllerEventLoop.hpp"
 #include "CoreLatencyStats.hpp"
 #include "ControllerConfig.hpp"
@@ -307,6 +309,45 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     EventLoopState<F> state;
     EventLoopState_Init(&state, &oms);
 
+    // Phase 04: start the user data websocket for real-time fills.
+    // Uses its own BinanceOrderAPI instance for listen key REST calls.
+    // The ws_result_queue is a dedicated SPSC ring inside the OMS.
+    static BinanceUserDataState g_user_data;
+    if (live_trading) {
+        char ud_api_key[128] = {}, ud_api_secret[128] = {};
+        LoadSecrets("secrets.cfg", ud_api_key, ud_api_secret);
+        const char* ws_host = bcfg.use_testnet
+            ? "testnet.binance.vision" : "stream.binance.com";
+        const char* rest_host = bcfg.use_testnet
+            ? "testnet.binance.vision" : "api.binance.us";
+        if (BinanceUserData_Init(&g_user_data, ws_host, rest_host,
+                                  ud_api_key, ud_api_secret, bcfg.symbol,
+                                  &oms.ws_result_queue)) {
+            BinanceUserData_Start(&g_user_data);
+            g_sharded_binance_adapter.ws_active.store(1, std::memory_order_release);
+            fprintf(stderr, "[sharded] user data websocket started\n");
+        } else {
+            fprintf(stderr, "[sharded] user data websocket init failed, "
+                             "falling back to REST-only fills\n");
+        }
+    }
+
+    // Phase 05: reconciliation poller — own REST instance, periodic
+    // balance check, pushes CMD_RECONCILE to oms.reconcile_queue.
+    static ReconciliationLoopState<F> g_reconciler;
+    if (live_trading) {
+        char rc_key[128] = {}, rc_secret[128] = {};
+        LoadSecrets("secrets.cfg", rc_key, rc_secret);
+        const char* rc_host = bcfg.use_testnet
+            ? "testnet.binance.vision" : "api.binance.us";
+        if (ReconciliationLoop_Init(&g_reconciler, rc_host, rc_key, rc_secret,
+                                     bcfg.symbol, &oms, 30, 0.01)) {
+            ReconciliationLoop_Start(&g_reconciler);
+        } else {
+            fprintf(stderr, "[sharded] reconciler init failed\n");
+        }
+    }
+
     // Per-core resources. Static so they live in BSS, not the stack —
     // ExecutionCore is ~66KB and num_cores * size could blow the stack.
     static SPSCRing<Tick<F>, EXECUTION_CORE_TICK_RING_SIZE> tick_rings[MAX_EXECUTION_CORES];
@@ -405,6 +446,17 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
                 RollingStats_Push(&rolling_long,  t.price, t.volume);
                 EventLoop_RebuildAllParameters(&state, &rolling_short, &cfg, &rolling_long);
                 EventLoop_PushParameters(&state);
+                // KNOWN RACE (audit 2026-04-09): KillSwitchEvaluate reads
+                // oms->balance from this (producer) thread while the drainer
+                // thread writes it via OnEvent / OMS_Tick fill handler.
+                // FPN<64> is 64 words — torn reads are possible under
+                // concurrent writes. Probability is low at current event
+                // rates (~1 exit/sec vs 5 Hz slow path). Consequence:
+                // false-positive or missed kill switch trip from a garbage
+                // FPN comparison. Pre-existing race (sharded engine always
+                // had producer + drainer on separate threads).
+                // TODO: move kill switch eval to drainer thread, or use an
+                // atomic balance snapshot for the comparison.
                 EventLoop_KillSwitchEvaluate(&state);
                 // Grant permission as soon as the rolling stats have any
                 // data at all — the first sample gives us a meaningful
@@ -564,10 +616,35 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
             if (total_drained == 0) std::this_thread::yield();
             if (producer_done.load(std::memory_order_acquire)) {
                 // After producer is done, drain a few more times then exit.
-                // Each pass also ticks the OMS so any final orders submitted
-                // by the trailing exits get processed before shutdown.
+                // Uses the same open-coded drain with OMS Submit as the main
+                // loop so mode 1 late events get proper portfolio mutation
+                // (not just counter bumps). Without this, mode 1 would lose
+                // the last few fills at shutdown.
                 for (int k = 0; k < 16; ++k) {
-                    EventLoop_DrainEvents(&state);
+                    for (int s = 0; s < state.registered_count; ++s) {
+                        ExecutionCore<F>* c = state.cores[s].core;
+                        if (!c) continue;
+                        for (int j = 0; j < MAX_EVENTS_PER_DRAIN_PER_CORE; ++j) {
+                            TradeEvent<F> ev;
+                            if (!SPSCRing_TryPop(&c->event_ring, &ev)) break;
+                            bool e_entry = (ev.type & TRADE_EVENT_ENTRY) != 0;
+                            bool e_exit  = (ev.type & TRADE_EVENT_EXIT)  != 0;
+                            double eq = 0.0;
+                            if (e_exit)
+                                eq = FPN_ToDouble(state.oms->portfolio.positions[s].quantity);
+                            else if (e_entry)
+                                eq = FPN_ToDouble(state.cores[s].intended_qty);
+                            EventLoop_OnEvent(&state, ev);
+                            if ((e_entry || e_exit) && eq > 0.0) {
+                                OrderManager_Submit(&oms, (int16_t)s,
+                                    e_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
+                                    FPN_FromDouble<F>(eq),
+                                    state.cores[s].intended_tp,
+                                    state.cores[s].intended_sl,
+                                    state.cores[s].strategy_id, ev.price);
+                            }
+                        }
+                    }
                     OrderManager_Tick(&oms);
                 }
                 break;
@@ -751,6 +828,30 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
                 (unsigned long)oms_sub, (unsigned long)oms_fill,
                 (unsigned long)oms_rej, oms_inflight);
 
+        // User data WS status line (phase 04)
+        if (live_trading) {
+            int ws_conn = g_user_data.ws_connected.load(std::memory_order_relaxed);
+            uint64_t ws_fills = g_user_data.fills_received.load(std::memory_order_relaxed);
+            uint64_t ws_events = g_user_data.events_received.load(std::memory_order_relaxed);
+            fprintf(stdout, " " SH_BOLD SH_PEACH "WS FILLS" SH_RESET
+                    "     " SH_DIM "status" SH_RESET " %s"
+                    "  " SH_DIM "fills" SH_RESET " " SH_FG "%lu" SH_RESET
+                    "  " SH_DIM "events" SH_RESET " " SH_FG "%lu" SH_RESET "\033[K\n",
+                    ws_conn ? (SH_GREEN "CONNECTED" SH_RESET)
+                            : (SH_RED "DISCONNECTED" SH_RESET),
+                    (unsigned long)ws_fills, (unsigned long)ws_events);
+            // Reconciler status
+            uint64_t rc_polls = g_reconciler.total_polls.load(std::memory_order_relaxed);
+            uint64_t rc_corr  = g_reconciler.drift_corrections.load(std::memory_order_relaxed);
+            double   rc_drift = g_reconciler.last_drift_usdt.load(std::memory_order_relaxed);
+            fprintf(stdout, " " SH_BOLD SH_PEACH "RECONCILE" SH_RESET
+                    "    " SH_DIM "polls" SH_RESET " " SH_FG "%lu" SH_RESET
+                    "  " SH_DIM "corrections" SH_RESET " " SH_FG "%lu" SH_RESET
+                    "  " SH_DIM "drift" SH_RESET " %s$%.4f" SH_RESET "\033[K\n",
+                    (unsigned long)rc_polls, (unsigned long)rc_corr,
+                    SH_PNL(rc_drift), rc_drift);
+        }
+
         // Footer
         fprintf(stdout, "\033[K\n");
         fprintf(stdout, " " SH_DIM "Press Ctrl+C to stop and dump final stats. Subtract ~25-30ns rdtsc floor for actual work cost." SH_RESET "\033[K\n");
@@ -830,6 +931,19 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
         fprintf(stderr, "  total rejected   : %lu\n", (unsigned long)oms_rej);
         fprintf(stderr, "  in-flight at end : %d\n", oms_inflight);
         fprintf(stderr, "================================================================\n");
+    }
+
+    // Shut down the reconciler first (it queries balances via REST — needs
+    // to stop before the REST instances are cleaned up).
+    if (live_trading) {
+        ReconciliationLoop_Shutdown(&g_reconciler);
+    }
+
+    // Shut down the user data websocket BEFORE the adapter (the WS thread
+    // may still be issuing REST calls for listen key refresh).
+    if (live_trading) {
+        g_sharded_binance_adapter.ws_active.store(0, std::memory_order_relaxed);
+        BinanceUserData_Shutdown(&g_user_data);
     }
 
     // Tear down the BinanceAdapter (joins worker threads, cleans up each
