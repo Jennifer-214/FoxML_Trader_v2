@@ -824,6 +824,10 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             };
             const char *strat_labels[] = {"MR", "MOM", "DIP", "ML", "EMA"};
             for (int ci = 0; ci < snap->per_core_count && ci < 16; ++ci) {
+                // skip cores that have an active position — their gate
+                // is irrelevant while holding, and the line overlaps
+                // with the position's TP/SL labels
+                if (ci < 16 && snap->positions[ci].idx >= 0) continue;
                 double bg_price = snap->per_core[ci].buy_gate_price;
                 if (bg_price <= 0.0) continue;
                 uint8_t sid = snap->per_core[ci].strategy_id_display;
@@ -835,8 +839,9 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 char lbl[32]; snprintf(lbl, 32, "##bg%d", ci);
                 ImPlotSpec bgs; bgs.LineColor = col; bgs.LineWeight = 1.0f;
                 ImPlot::PlotLine(lbl, lx, ly, 2, bgs);
-                ImPlot::Annotation(cs->x_hi - 2, bg_price, col,
-                                    ImVec2(5, -5), false, "C%d %s", ci, sname);
+                // label on the left edge to avoid overlapping TP/SL labels
+                ImPlot::Annotation(cs->x_lo + 2, bg_price, col,
+                                    ImVec2(-5, -5), false, "C%d %s", ci, sname);
             }
         }
 
