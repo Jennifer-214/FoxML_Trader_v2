@@ -6,7 +6,7 @@ This software is dual-licensed: [AGPL-3.0-or-later](LICENSE) or Commercial. If y
 
 **Personal use, learning, and paper trading are welcome and encouraged.** Commercial use or deployment for profit requires a commercial license — contact [jenn.lewis5789@gmail.com](mailto:jenn.lewis5789@gmail.com).
 
-**Unauthorized Use — Settlement Terms:** 10% of gross revenue from date of first unauthorized use + flat fee TBD. Full statutory damages under 17 U.S.C. § 504 (up to $150,000 per work for willful infringement). **Bounty:** 33% of net recovery for reports leading to successful settlement. Contact: [jenn.lewis5789@gmail.com](mailto:jenn.lewis5789@gmail.com)
+**Unauthorized Use — Settlement Terms:** 100% of gross revenue from date of first unauthorized use (up to 10-15 years). Full statutory damages under 17 U.S.C. § 504 (up to $150,000 per work for willful infringement). **Bounty:** 50% of total settlement for reports leading to successful enforcement. See [BOUNTY.md](BOUNTY.md). Contact: [jenn.lewis5789@gmail.com](mailto:jenn.lewis5789@gmail.com)
 
 ---
 
