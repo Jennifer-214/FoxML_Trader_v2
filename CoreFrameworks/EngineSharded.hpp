@@ -377,7 +377,7 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
             FPN_Zero<F>(),  // intended_sl ditto
             FPN_Zero<F>()); // intended_qty ditto
         EventLoopState_SetCoreStrategy(&state, i,
-            (uint8_t)STRATEGY_SIMPLE_DIP,
+            cfg.core_strategies[i],
             FPN_FromDouble<F>(per_core_balance));
 
         // Cores start permission=0. The slow-path rebuild grants permission
@@ -563,88 +563,57 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     //          write into portfolio.positions[slot].quantity via OpenSlot)
     //   exit:  read from portfolio.positions[slot].quantity BEFORE OnEvent,
     //          since CloseSlot inside OnEvent clears the slot
-    std::thread drainer([&state, &oms, &producer_done, num_cores] {
-        EngineSharded_PinThread(num_cores + 1);  // dedicated controller CPU
-        while (!g_engine_sharded_shutdown) {
-            int total_drained = 0;
-            for (int slot = 0; slot < state.registered_count; ++slot) {
-                ExecutionCore<F>* core = state.cores[slot].core;
-                if (core == nullptr) continue;
-                for (int i = 0; i < MAX_EVENTS_PER_DRAIN_PER_CORE; ++i) {
-                    TradeEvent<F> event;
-                    if (!SPSCRing_TryPop(&core->event_ring, &event)) break;
+    // Extracted drain+Submit helper. Called from both the main drainer loop
+    // and the trailing shutdown drain. One site to update when adding new
+    // Submit parameters or event types.
+    auto drain_with_submit = [&state, &oms]() -> int {
+        int total_drained = 0;
+        for (int slot = 0; slot < state.registered_count; ++slot) {
+            ExecutionCore<F>* core = state.cores[slot].core;
+            if (core == nullptr) continue;
+            for (int i = 0; i < MAX_EVENTS_PER_DRAIN_PER_CORE; ++i) {
+                TradeEvent<F> event;
+                if (!SPSCRing_TryPop(&core->event_ring, &event)) break;
 
-                    bool is_entry = (event.type & TRADE_EVENT_ENTRY) != 0;
-                    bool is_exit  = (event.type & TRADE_EVENT_EXIT)  != 0;
+                bool is_entry = (event.type & TRADE_EVENT_ENTRY) != 0;
+                bool is_exit  = (event.type & TRADE_EVENT_EXIT)  != 0;
 
-                    // snapshot exit qty BEFORE OnEvent because CloseSlot clears it
-                    double order_qty_d = 0.0;
-                    if (is_exit) {
-                        order_qty_d = FPN_ToDouble(state.oms->portfolio.positions[slot].quantity);
-                    } else if (is_entry) {
-                        order_qty_d = FPN_ToDouble(state.cores[slot].intended_qty);
-                    }
+                // snapshot exit qty BEFORE OnEvent because CloseSlot clears it
+                double order_qty_d = 0.0;
+                if (is_exit) {
+                    order_qty_d = FPN_ToDouble(state.oms->portfolio.positions[slot].quantity);
+                } else if (is_entry) {
+                    order_qty_d = FPN_ToDouble(state.cores[slot].intended_qty);
+                }
 
-                    EventLoop_OnEvent(&state, event);
-                    ++total_drained;
+                EventLoop_OnEvent(&state, event);
+                ++total_drained;
 
-                    // === ROUTE TO OMS ===
-                    // every entry/exit becomes an OrderManager_Submit. paper mode
-                    // marks the order FILLED on the next OMS Tick without ever
-                    // touching the REST api; live mode runs the synchronous REST
-                    // call inside OMS Tick. the qty is converted to FPN<F> per
-                    // the FPN-only-accounting rule in CLAUDE.md.
-                    if ((is_entry || is_exit) && order_qty_d > 0.0) {
-                        OrderManager_Submit(&oms,
-                            (int16_t)slot,
-                            is_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
-                            FPN_FromDouble<F>(order_qty_d),
-                            state.cores[slot].intended_tp,
-                            state.cores[slot].intended_sl,
-                            state.cores[slot].strategy_id,
-                            event.price);
-                    }
+                if ((is_entry || is_exit) && order_qty_d > 0.0) {
+                    OrderManager_Submit(&oms,
+                        (int16_t)slot,
+                        is_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
+                        FPN_FromDouble<F>(order_qty_d),
+                        state.cores[slot].intended_tp,
+                        state.cores[slot].intended_sl,
+                        state.cores[slot].strategy_id,
+                        event.price);
                 }
             }
-            // Process all PENDING orders the per-core drain just produced.
-            // Phase 01: this BLOCKS for the duration of each REST call. With 4
-            // cores firing simultaneously, worst case is ~800 ms drainer cycle.
-            // Phase 02 moves the REST call to a worker thread so this returns
-            // sub-µs again.
+        }
+        return total_drained;
+    };
+
+    std::thread drainer([&state, &oms, &producer_done, &drain_with_submit] {
+        EngineSharded_PinThread(state.registered_count + 1);
+        while (!g_engine_sharded_shutdown) {
+            int total_drained = drain_with_submit();
             OrderManager_Tick(&oms);
 
             if (total_drained == 0) std::this_thread::yield();
             if (producer_done.load(std::memory_order_acquire)) {
-                // After producer is done, drain a few more times then exit.
-                // Uses the same open-coded drain with OMS Submit as the main
-                // loop so mode 1 late events get proper portfolio mutation
-                // (not just counter bumps). Without this, mode 1 would lose
-                // the last few fills at shutdown.
                 for (int k = 0; k < 16; ++k) {
-                    for (int s = 0; s < state.registered_count; ++s) {
-                        ExecutionCore<F>* c = state.cores[s].core;
-                        if (!c) continue;
-                        for (int j = 0; j < MAX_EVENTS_PER_DRAIN_PER_CORE; ++j) {
-                            TradeEvent<F> ev;
-                            if (!SPSCRing_TryPop(&c->event_ring, &ev)) break;
-                            bool e_entry = (ev.type & TRADE_EVENT_ENTRY) != 0;
-                            bool e_exit  = (ev.type & TRADE_EVENT_EXIT)  != 0;
-                            double eq = 0.0;
-                            if (e_exit)
-                                eq = FPN_ToDouble(state.oms->portfolio.positions[s].quantity);
-                            else if (e_entry)
-                                eq = FPN_ToDouble(state.cores[s].intended_qty);
-                            EventLoop_OnEvent(&state, ev);
-                            if ((e_entry || e_exit) && eq > 0.0) {
-                                OrderManager_Submit(&oms, (int16_t)s,
-                                    e_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
-                                    FPN_FromDouble<F>(eq),
-                                    state.cores[s].intended_tp,
-                                    state.cores[s].intended_sl,
-                                    state.cores[s].strategy_id, ev.price);
-                            }
-                        }
-                    }
+                    drain_with_submit();
                     OrderManager_Tick(&oms);
                 }
                 break;

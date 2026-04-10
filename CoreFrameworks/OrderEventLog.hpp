@@ -98,12 +98,26 @@ struct OrderEvent {
 //======================================================================================================
 constexpr size_t ORDER_EVENT_LOG_INIT_CAPACITY = 16384;
 
+// Phase 07 file header — written at the start of the event log file.
+// Carries the FPN width and entry size for forward compatibility.
+struct OrderEventLogFileHeader {
+    char     magic[8];       // "OMSEL01\0"
+    uint32_t fpn_width;      // F template parameter (e.g. 64)
+    uint32_t entry_size;     // sizeof(OrderEvent<F>) for this build
+    uint64_t reserved[2];    // future: checksum, version
+};
+
 template <unsigned F>
 struct OrderEventLog {
     OrderEvent<F>* entries;
     size_t         capacity;
     size_t         count;
     uint64_t       next_event_id;
+    // Phase 07: optional disk persistence. When non-null, every Append
+    // also fwrites the event to this file. Opened by InitWithFile,
+    // flushed periodically, closed by Free.
+    FILE*          disk_file;
+    char           disk_path[256];
 };
 
 //======================================================================================================
@@ -116,6 +130,8 @@ inline void OrderEventLog_Init(OrderEventLog<F>* log) {
     log->capacity      = log->entries ? ORDER_EVENT_LOG_INIT_CAPACITY : 0;
     log->count         = 0;
     log->next_event_id = 1;
+    log->disk_file     = nullptr;
+    log->disk_path[0]  = '\0';
     if (!log->entries) {
         std::fprintf(stderr, "[OrderEventLog] WARN: initial malloc failed, "
                      "event logging disabled\n");
@@ -127,6 +143,11 @@ inline void OrderEventLog_Init(OrderEventLog<F>* log) {
 //======================================================================================================
 template <unsigned F>
 inline void OrderEventLog_Free(OrderEventLog<F>* log) {
+    if (log->disk_file) {
+        std::fflush(log->disk_file);
+        std::fclose(log->disk_file);
+        log->disk_file = nullptr;
+    }
     if (log->entries) {
         std::free(log->entries);
         log->entries = nullptr;
@@ -166,7 +187,133 @@ inline int OrderEventLog_Append(OrderEventLog<F>* log, OrderEvent<F> event) {
 
     event.event_id = log->next_event_id++;
     log->entries[log->count++] = event;
+
+    // Phase 07: write-through to disk. Best-effort — a failed fwrite
+    // loses the disk copy but the in-memory log is still correct.
+    if (log->disk_file) {
+        if (std::fwrite(&event, sizeof(event), 1, log->disk_file) != 1) {
+            std::fprintf(stderr, "[OrderEventLog] WARN: disk write failed for "
+                         "event %llu\n", (unsigned long long)event.event_id);
+        }
+        // Flush every 16 events to balance durability vs throughput.
+        if ((log->count & 15) == 0) std::fflush(log->disk_file);
+    }
     return 1;
+}
+
+//======================================================================================================
+// [INIT WITH FILE — phase 07 disk persistence]
+//======================================================================================================
+// Like Init, but also opens a binary file for write-through. Events are
+// appended to disk on every OrderEventLog_Append call. The file carries a
+// small header for forward compatibility (magic + FPN width + entry size).
+//
+// If the file already exists, LoadFromDisk should be called BEFORE this to
+// replay the events into memory. This function opens the file in append
+// mode so existing data is preserved.
+//======================================================================================================
+template <unsigned F>
+inline void OrderEventLog_InitWithFile(OrderEventLog<F>* log, const char* path) {
+    OrderEventLog_Init(log);
+    std::strncpy(log->disk_path, path, sizeof(log->disk_path) - 1);
+    log->disk_path[sizeof(log->disk_path) - 1] = '\0';
+
+    // Check if the file exists (for the header write decision).
+    bool file_exists = false;
+    FILE* probe = std::fopen(path, "rb");
+    if (probe) { file_exists = true; std::fclose(probe); }
+
+    log->disk_file = std::fopen(path, "ab");
+    if (!log->disk_file) {
+        std::fprintf(stderr, "[OrderEventLog] WARN: could not open %s for writing, "
+                     "disk persistence disabled\n", path);
+        return;
+    }
+
+    // Write the header only if this is a new file.
+    if (!file_exists) {
+        OrderEventLogFileHeader hdr;
+        std::memset(&hdr, 0, sizeof(hdr));
+        std::memcpy(hdr.magic, "OMSEL01", 8);
+        hdr.fpn_width  = F;
+        hdr.entry_size = (uint32_t)sizeof(OrderEvent<F>);
+        std::fwrite(&hdr, sizeof(hdr), 1, log->disk_file);
+        std::fflush(log->disk_file);
+    }
+
+    std::fprintf(stderr, "[OrderEventLog] disk persistence: %s (%s)\n",
+                 path, file_exists ? "appending" : "new file");
+}
+
+//======================================================================================================
+// [LOAD FROM DISK — phase 07 replay on startup]
+//======================================================================================================
+// Reads events from a previously-written event log file and populates the
+// in-memory buffer. Validates the file header for magic + FPN width match.
+// Returns the number of events loaded, or -1 on error.
+//
+// Call this BEFORE InitWithFile if the file already exists. The loaded
+// events are available for Portfolio_FromEventLog replay.
+//======================================================================================================
+template <unsigned F>
+inline int OrderEventLog_LoadFromDisk(OrderEventLog<F>* log, const char* path) {
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return 0;  // no file = nothing to load (not an error)
+
+    // Read and validate the header.
+    OrderEventLogFileHeader hdr;
+    if (std::fread(&hdr, sizeof(hdr), 1, f) != 1) {
+        std::fprintf(stderr, "[OrderEventLog] WARN: %s too small for header\n", path);
+        std::fclose(f);
+        return -1;
+    }
+    if (std::memcmp(hdr.magic, "OMSEL01", 8) != 0) {
+        std::fprintf(stderr, "[OrderEventLog] WARN: %s bad magic\n", path);
+        std::fclose(f);
+        return -1;
+    }
+    if (hdr.fpn_width != F) {
+        std::fprintf(stderr, "[OrderEventLog] WARN: %s FPN width mismatch "
+                     "(file=%u, build=%u)\n", path, hdr.fpn_width, F);
+        std::fclose(f);
+        return -1;
+    }
+    if (hdr.entry_size != (uint32_t)sizeof(OrderEvent<F>)) {
+        std::fprintf(stderr, "[OrderEventLog] WARN: %s entry size mismatch "
+                     "(file=%u, build=%u)\n", path, hdr.entry_size,
+                     (uint32_t)sizeof(OrderEvent<F>));
+        std::fclose(f);
+        return -1;
+    }
+
+    // Read events one at a time until EOF.
+    int loaded = 0;
+    OrderEvent<F> event;
+    while (std::fread(&event, sizeof(event), 1, f) == 1) {
+        // Append to the in-memory buffer (bypasses disk write since
+        // we're reading FROM disk). Manually grow if needed.
+        if (log->count >= log->capacity) {
+            size_t new_cap = log->capacity * 2;
+            if (new_cap < 256) new_cap = 256;
+            OrderEvent<F>* new_buf = (OrderEvent<F>*)std::realloc(
+                log->entries, new_cap * sizeof(OrderEvent<F>));
+            if (!new_buf) {
+                std::fprintf(stderr, "[OrderEventLog] WARN: realloc failed during load\n");
+                break;
+            }
+            log->entries  = new_buf;
+            log->capacity = new_cap;
+        }
+        log->entries[log->count++] = event;
+        if (event.event_id >= log->next_event_id) {
+            log->next_event_id = event.event_id + 1;
+        }
+        loaded++;
+    }
+
+    std::fclose(f);
+    std::fprintf(stderr, "[OrderEventLog] loaded %d events from %s\n", loaded, path);
+    return loaded;
 }
 
 //======================================================================================================

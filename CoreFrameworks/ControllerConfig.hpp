@@ -257,6 +257,11 @@ template <unsigned F> struct ControllerConfig {
   // latency demos that need reliable trade firing without depending on
   // current market volatility. Default 0 = use real Binance feed.
   uint8_t sharded_force_synthetic;
+  // Per-core strategy assignment for sharded mode. core_strategies[i] is the
+  // STRATEGY_* constant for execution core i. Default: all STRATEGY_SIMPLE_DIP.
+  // Config syntax: core_0_strategy=simple_dip, core_1_strategy=ema_cross, etc.
+  // Accepted names: mr, momentum, simple_dip, ml, ema_cross, none.
+  uint8_t core_strategies[16]; // MAX_EXECUTION_CORES
   // OMS phase 03: which path EventLoop_OnEvent takes when a TradeEvent
   // arrives. mode 0 (legacy): OnEvent mutates the portfolio + balance
   // directly, same as phase 02. mode 1 (event log): OnEvent just bumps
@@ -432,6 +437,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.engine_mode = ENGINE_MODE_SINGLE_CORE;
   cfg.num_execution_cores = 4;
   cfg.sharded_force_synthetic = 0;
+  for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
   // OMS phase 03 — default to legacy OnEvent path so existing tests and
   // the production engine before the migration soak stay on the known-good
   // code.
@@ -685,6 +691,22 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     if (strcmp(key, "sharded_force_synthetic") == 0) {
       cfg.sharded_force_synthetic = (uint8_t)(atoi(val) != 0 ? 1 : 0);
+      continue;
+    }
+    // Per-core strategy: core_0_strategy=simple_dip, core_1_strategy=none, etc.
+    if (strncmp(key, "core_", 5) == 0 && strstr(key, "_strategy")) {
+      int core_idx = atoi(key + 5);
+      if (core_idx >= 0 && core_idx < 16) {
+        uint8_t sid = 0xFF; // STRATEGY_NONE
+        if (strcmp(val, "mr") == 0 || strcmp(val, "mean_reversion") == 0) sid = 0;
+        else if (strcmp(val, "momentum") == 0 || strcmp(val, "mom") == 0) sid = 1;
+        else if (strcmp(val, "simple_dip") == 0 || strcmp(val, "dip") == 0) sid = 2;
+        else if (strcmp(val, "ml") == 0) sid = 3;
+        else if (strcmp(val, "ema_cross") == 0 || strcmp(val, "ema") == 0) sid = 4;
+        else if (strcmp(val, "none") == 0) sid = 0xFF;
+        else sid = (uint8_t)atoi(val);  // numeric fallback
+        cfg.core_strategies[core_idx] = sid;
+      }
       continue;
     }
     // OMS phase 03 — accept both string and int values for clarity in cfg files

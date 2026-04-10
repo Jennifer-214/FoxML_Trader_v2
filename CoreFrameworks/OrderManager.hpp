@@ -431,310 +431,244 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms,
 }
 
 //======================================================================================================
-// [TICK — drain the result queue]
+// [FILL HANDLER — single source of truth for portfolio mutation]
 //======================================================================================================
-// Drainer thread calls this on every drain pass. Pops every CMD_FILL_RESULT
-// from the result queue and applies it to the matching order. The matching
-// uses linear search across MAX_INFLIGHT_ORDERS slots, which is fine for
-// 16 slots — O(16) per result is trivial.
+// Extracted from OrderManager_Tick to eliminate duplication across REST fill,
+// WS fill, and any future fill source. Handles:
+//   - core_id bounds check
+//   - event log append (OEVT_FULL_FILL)
+//   - portfolio open (entry) / close + P&L (exit)
+//   - fee computation (entry_fee + exit_fee)
+//   - balance + realized_pnl update
+//   - kill switch peak tracking
+//   - trade log CSV
 //
-// On a successful fill: mark FILLED, copy exchange_id and fill price/qty
-// out of the result, free the slot.
-// On a rejection: log, mark REJECTED, free the slot. The "TODO reset path"
-// problem (executor still thinks it's active after a failure) is documented
-// at EngineSharded.hpp's drainer comment and is properly fixed in phase 03
-// (event log) which routes events through the OMS instead of optimistically
-// updating portfolio in OnEvent.
+// This is the ONE place to update when the fee model or portfolio mutation
+// logic changes. Portfolio_FromEventLog in OrderEventLog.hpp is the only
+// other fee computation site (the replay fold), and it should mirror this.
 //======================================================================================================
 template <unsigned F>
-inline void OrderManager_Tick(OrderManagerState<F>* oms) {
-    Command cmd;
-    while (SPSCRing_TryPop(&oms->result_queue, &cmd)) {
-        if (cmd.type != (uint8_t)CMD_FILL_RESULT) continue;
-
-        // Linear search for the matching order. 16 slots max.
-        int slot = -1;
-        for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
-            if ((oms->order_bitmap & (uint16_t)(1u << i)) == 0) continue;
-            if (oms->orders[i].id == cmd.order_id) { slot = i; break; }
-        }
-        if (slot < 0) {
-            std::fprintf(stderr,
-                         "[OMS] result for unknown order %llu (slot freed already?), ignoring\n",
-                         (unsigned long long)cmd.order_id);
-            continue;
-        }
-
-        Order<F>* o = &oms->orders[slot];
-        if (cmd.result.success) {
-            std::strncpy(o->exchange_id, cmd.result.exchange_id,
-                         sizeof(o->exchange_id) - 1);
-            o->exchange_id[sizeof(o->exchange_id) - 1] = '\0';
-            // Phase 04: ACK-only results have fill_qty == 0 (WS is active,
-            // adapter sends exchange_id but no fill data). Transition to
-            // ACKNOWLEDGED and keep the slot open — the WS fill queue will
-            // supply the actual fill later. Don't free the slot.
-            if (cmd.result.fill_qty == 0.0 && cmd.result.avg_fill_price == 0.0) {
-                o->state = ORDER_ACKNOWLEDGED;
-                continue;  // skip fill handler + slot free — WS fill will handle it
-            }
-            o->avg_fill_price = FPN_FromDouble<F>(cmd.result.avg_fill_price);
-            o->filled_qty     = FPN_FromDouble<F>(cmd.result.fill_qty);
-            o->state          = ORDER_FILLED;
-            oms->total_filled.fetch_add(1, std::memory_order_relaxed);
-        } else {
-            std::fprintf(stderr,
-                         "[OMS] order %llu FAIL core=%d code=%d msg=%s — TODO reset path\n",
-                         (unsigned long long)o->id,
-                         (int)o->core_id,
-                         cmd.result.error_code,
-                         cmd.result.error_message);
-            o->state = ORDER_REJECTED;
-            oms->total_rejected.fetch_add(1, std::memory_order_relaxed);
-        }
-
-        // === EVENT LOG MODE 1: fill handler ===
-        // In mode 1 the OMS owns portfolio mutation. On a successful fill
-        // we open/close the portfolio slot and update balance. On rejection
-        // we append a rejection event to the log for the audit trail.
-        if (oms->event_log_mode == 1) {
-            if (cmd.result.success) {
-                // Guard: core_id must be a valid portfolio slot index.
-                if (o->core_id < 0 || o->core_id >= MAX_PORTFOLIO_POSITIONS) {
-                    std::fprintf(stderr,
-                                 "[OMS] fill handler: core_id %d out of range [0,%d), "
-                                 "skipping order %llu\n",
-                                 (int)o->core_id, MAX_PORTFOLIO_POSITIONS,
-                                 (unsigned long long)o->id);
-                    oms->order_bitmap &= (uint16_t)~(1u << slot);
-                    continue;
-                }
-                // Append fill event to the audit log.
-                FPN<F> fill_price = FPN_FromDouble<F>(cmd.result.avg_fill_price);
-                FPN<F> fill_qty   = FPN_FromDouble<F>(cmd.result.fill_qty);
-                OrderEventLog_Append(&oms->event_log,
-                    OrderEvent_MakeFill<F>(
-                        o->id, o->submitted_at_us,
-                        (OrderType)o->type, o->core_id,
-                        fill_price, fill_qty,
-                        o->intended_tp, o->intended_sl));
-
-                if (o->type == (uint8_t)ORDER_MARKET_BUY) {
-                    // Entry fill: open portfolio slot.
-                    FPN<F> notional  = FPN_Mul(fill_price, fill_qty);
-                    FPN<F> entry_fee = FPN_Mul(notional, oms->fee_rate);
-                    Portfolio_OpenSlot(&oms->portfolio, (int)o->core_id,
-                                      fill_price, fill_qty,
-                                      o->intended_tp, o->intended_sl, entry_fee);
-                    // Trade log CSV — construct a synthetic TradeEvent so
-                    // the existing RecordEntry function works unchanged.
-                    if (oms->trade_log) {
-                        TradeEvent<F> synth{};
-                        synth.price     = fill_price;
-                        synth.timestamp = o->submitted_at_us;
-                        synth.core_id   = (uint16_t)o->core_id;
-                        synth.type      = TRADE_EVENT_ENTRY;
-                        ShardedTradeLog_RecordEntry(oms->trade_log, synth,
-                                                    o->strategy_id,
-                                                    fill_price, fill_qty,
-                                                    entry_fee, oms->balance);
-                    }
-                } else if (o->type == (uint8_t)ORDER_MARKET_SELL) {
-                    // Exit fill: close portfolio slot, compute P&L, update balance.
-                    int pslot = (int)o->core_id;
-                    FPN<F> entry_price_snap = oms->portfolio.positions[pslot].entry_price;
-                    FPN<F> entry_fee = oms->portfolio.positions[pslot].entry_fee;
-                    FPN<F> qty_snap  = oms->portfolio.positions[pslot].quantity;
-                    FPN<F> gross     = Portfolio_CloseSlot(&oms->portfolio, pslot, fill_price);
-                    FPN<F> exit_notional = FPN_Mul(fill_price, qty_snap);
-                    FPN<F> exit_fee      = FPN_Mul(exit_notional, oms->fee_rate);
-                    FPN<F> total_fee     = FPN_Add(entry_fee, exit_fee);
-                    FPN<F> net           = FPN_Sub(gross, total_fee);
-                    oms->balance      = FPN_Add(oms->balance, net);
-                    oms->realized_pnl = FPN_Add(oms->realized_pnl, net);
-                    if (FPN_GreaterThan(oms->balance, oms->ks_peak_balance)) {
-                        oms->ks_peak_balance = oms->balance;
-                    }
-                    // Trade log CSV.
-                    if (oms->trade_log) {
-                        TradeEvent<F> synth{};
-                        synth.price     = fill_price;
-                        synth.timestamp = o->submitted_at_us;
-                        synth.core_id   = (uint16_t)o->core_id;
-                        synth.type      = TRADE_EVENT_EXIT;
-                        ShardedTradeLog_RecordExit(oms->trade_log, synth,
-                                                   o->strategy_id,
-                                                   entry_price_snap, fill_price,
-                                                   qty_snap, net, total_fee,
-                                                   oms->balance);
-                    }
-                }
-            } else {
-                // Rejection: append to event log for the audit trail.
-                OrderEventLog_Append(&oms->event_log,
-                    OrderEvent_MakeRejection<F>(
-                        o->id, o->submitted_at_us,
-                        (OrderType)o->type, o->core_id,
-                        cmd.result.error_message));
-            }
-        }
-
-        // Free the slot on terminal transition.
-        oms->order_bitmap &= (uint16_t)~(1u << slot);
-    }
-
-    // === PHASE 04: drain WS fill queue ===
-    // Same handling as REST fills. The WS thread pushes CMD_WS_FILL with
-    // the same OrderResult format. Dedup: if the order is already FILLED
-    // (REST callback beat the WS), skip silently.
-    Command ws_cmd;
-    while (SPSCRing_TryPop(&oms->ws_result_queue, &ws_cmd)) {
-        if (ws_cmd.type != (uint8_t)CMD_WS_FILL) continue;
-
-        // Find the matching order by id.
-        int ws_slot = -1;
-        for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
-            if ((oms->order_bitmap & (uint16_t)(1u << i)) == 0) continue;
-            if (oms->orders[i].id == ws_cmd.order_id) { ws_slot = i; break; }
-        }
-
-        // If order_id == 0, this is a surprise fill (order we didn't submit).
-        // Log it but don't process — reconciliation (phase 05) handles these.
-        if (ws_cmd.order_id == 0) {
-            std::fprintf(stderr,
-                         "[OMS] WS surprise fill (no clientOrderId), ignoring — "
-                         "reconciliation will catch it\n");
-            continue;
-        }
-
-        if (ws_slot < 0) {
-            // Order not found in the table. Either already processed by REST
-            // callback, or the WS fill arrived before the REST ACK allocated
-            // the slot. In paper mode or fast markets this shouldn't happen
-            // because REST fires synchronously. Log and move on — the REST
-            // path already handled it.
-            continue;
-        }
-
-        Order<F>* wo = &oms->orders[ws_slot];
-
-        // Dedup: if already FILLED, the REST callback beat us. Skip.
-        if (wo->state == ORDER_FILLED) continue;
-
-        // Apply the fill.
-        if (ws_cmd.result.success) {
-            std::strncpy(wo->exchange_id, ws_cmd.result.exchange_id,
-                         sizeof(wo->exchange_id) - 1);
-            wo->exchange_id[sizeof(wo->exchange_id) - 1] = '\0';
-            wo->avg_fill_price = FPN_FromDouble<F>(ws_cmd.result.avg_fill_price);
-            wo->filled_qty     = FPN_FromDouble<F>(ws_cmd.result.fill_qty);
-            wo->state          = ORDER_FILLED;
-            oms->total_filled.fetch_add(1, std::memory_order_relaxed);
-        }
-
-        // Run the same mode 1 fill handler as the REST path.
-        if (oms->event_log_mode == 1) {
-            if (ws_cmd.result.success) {
-                if (wo->core_id < 0 || wo->core_id >= MAX_PORTFOLIO_POSITIONS) {
-                    oms->order_bitmap &= (uint16_t)~(1u << ws_slot);
-                    continue;
-                }
-                FPN<F> fill_price = FPN_FromDouble<F>(ws_cmd.result.avg_fill_price);
-                FPN<F> fill_qty   = FPN_FromDouble<F>(ws_cmd.result.fill_qty);
-                OrderEventLog_Append(&oms->event_log,
-                    OrderEvent_MakeFill<F>(
-                        wo->id, wo->submitted_at_us,
-                        (OrderType)wo->type, wo->core_id,
-                        fill_price, fill_qty,
-                        wo->intended_tp, wo->intended_sl));
-
-                if (wo->type == (uint8_t)ORDER_MARKET_BUY) {
-                    FPN<F> notional  = FPN_Mul(fill_price, fill_qty);
-                    FPN<F> entry_fee = FPN_Mul(notional, oms->fee_rate);
-                    Portfolio_OpenSlot(&oms->portfolio, (int)wo->core_id,
-                                      fill_price, fill_qty,
-                                      wo->intended_tp, wo->intended_sl, entry_fee);
-                    if (oms->trade_log) {
-                        TradeEvent<F> synth{};
-                        synth.price     = fill_price;
-                        synth.timestamp = wo->submitted_at_us;
-                        synth.core_id   = (uint16_t)wo->core_id;
-                        synth.type      = TRADE_EVENT_ENTRY;
-                        ShardedTradeLog_RecordEntry(oms->trade_log, synth,
-                                                    wo->strategy_id,
-                                                    fill_price, fill_qty,
-                                                    entry_fee, oms->balance);
-                    }
-                } else if (wo->type == (uint8_t)ORDER_MARKET_SELL) {
-                    int pslot = (int)wo->core_id;
-                    FPN<F> entry_price_snap = oms->portfolio.positions[pslot].entry_price;
-                    FPN<F> entry_fee = oms->portfolio.positions[pslot].entry_fee;
-                    FPN<F> qty_snap  = oms->portfolio.positions[pslot].quantity;
-                    FPN<F> gross     = Portfolio_CloseSlot(&oms->portfolio, pslot, fill_price);
-                    FPN<F> exit_notional = FPN_Mul(fill_price, qty_snap);
-                    FPN<F> exit_fee      = FPN_Mul(exit_notional, oms->fee_rate);
-                    FPN<F> total_fee     = FPN_Add(entry_fee, exit_fee);
-                    FPN<F> net           = FPN_Sub(gross, total_fee);
-                    oms->balance      = FPN_Add(oms->balance, net);
-                    oms->realized_pnl = FPN_Add(oms->realized_pnl, net);
-                    if (FPN_GreaterThan(oms->balance, oms->ks_peak_balance)) {
-                        oms->ks_peak_balance = oms->balance;
-                    }
-                    if (oms->trade_log) {
-                        TradeEvent<F> synth{};
-                        synth.price     = fill_price;
-                        synth.timestamp = wo->submitted_at_us;
-                        synth.core_id   = (uint16_t)wo->core_id;
-                        synth.type      = TRADE_EVENT_EXIT;
-                        ShardedTradeLog_RecordExit(oms->trade_log, synth,
-                                                   wo->strategy_id,
-                                                   entry_price_snap, fill_price,
-                                                   qty_snap, net, total_fee,
-                                                   oms->balance);
-                    }
-                }
-            }
-        }
-
-        // Free the slot.
-        oms->order_bitmap &= (uint16_t)~(1u << ws_slot);
-    }
-
-    // === PHASE 05: drain reconcile queue ===
-    // The reconciler pushes CMD_RECONCILE with drift info. The drainer
-    // applies the correction to balance and logs to the event log.
-    Command recon_cmd;
-    while (SPSCRing_TryPop(&oms->reconcile_queue, &recon_cmd)) {
-        if (recon_cmd.type != (uint8_t)CMD_RECONCILE) continue;
-
-        double drift = recon_cmd.result.avg_fill_price;  // repurposed field
-        double exchange_balance = recon_cmd.result.fill_qty;  // repurposed field
-
+inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
+                                     FPN<F> fill_price, FPN<F> fill_qty) {
+    // Guard: core_id must be a valid portfolio slot index.
+    if (o->core_id < 0 || o->core_id >= MAX_PORTFOLIO_POSITIONS) {
         std::fprintf(stderr,
-                     "[OMS] RECONCILE: drift=$%.4f, correcting balance to match "
-                     "exchange ($%.4f)\n", drift, exchange_balance);
+                     "[OMS] fill handler: core_id %d out of range [0,%d), "
+                     "skipping order %llu\n",
+                     (int)o->core_id, MAX_PORTFOLIO_POSITIONS,
+                     (unsigned long long)o->id);
+        return;
+    }
 
-        // Apply the correction: set balance to the exchange's reported value.
-        oms->balance = FPN_FromDouble<F>(exchange_balance);
+    // Append fill event to the audit log.
+    OrderEventLog_Append(&oms->event_log,
+        OrderEvent_MakeFill<F>(
+            o->id, o->submitted_at_us,
+            (OrderType)o->type, o->core_id,
+            fill_price, fill_qty,
+            o->intended_tp, o->intended_sl));
 
-        // Update peak balance if the corrected balance exceeds it.
+    if (o->type == (uint8_t)ORDER_MARKET_BUY) {
+        // Entry fill: open portfolio slot.
+        FPN<F> notional  = FPN_Mul(fill_price, fill_qty);
+        FPN<F> entry_fee = FPN_Mul(notional, oms->fee_rate);
+        Portfolio_OpenSlot(&oms->portfolio, (int)o->core_id,
+                           fill_price, fill_qty,
+                           o->intended_tp, o->intended_sl, entry_fee);
+        if (oms->trade_log) {
+            TradeEvent<F> synth{};
+            synth.price     = fill_price;
+            synth.timestamp = o->submitted_at_us;
+            synth.core_id   = (uint16_t)o->core_id;
+            synth.type      = TRADE_EVENT_ENTRY;
+            ShardedTradeLog_RecordEntry(oms->trade_log, synth,
+                                        o->strategy_id,
+                                        fill_price, fill_qty,
+                                        entry_fee, oms->balance);
+        }
+    } else if (o->type == (uint8_t)ORDER_MARKET_SELL) {
+        // Exit fill: close portfolio slot, compute P&L, update balance.
+        int pslot = (int)o->core_id;
+        FPN<F> entry_price_snap = oms->portfolio.positions[pslot].entry_price;
+        FPN<F> entry_fee = oms->portfolio.positions[pslot].entry_fee;
+        FPN<F> qty_snap  = oms->portfolio.positions[pslot].quantity;
+        FPN<F> gross     = Portfolio_CloseSlot(&oms->portfolio, pslot, fill_price);
+        FPN<F> exit_notional = FPN_Mul(fill_price, qty_snap);
+        FPN<F> exit_fee      = FPN_Mul(exit_notional, oms->fee_rate);
+        FPN<F> total_fee     = FPN_Add(entry_fee, exit_fee);
+        FPN<F> net           = FPN_Sub(gross, total_fee);
+        oms->balance      = FPN_Add(oms->balance, net);
+        oms->realized_pnl = FPN_Add(oms->realized_pnl, net);
         if (FPN_GreaterThan(oms->balance, oms->ks_peak_balance)) {
             oms->ks_peak_balance = oms->balance;
         }
-
-        // Append to the event log for audit trail (if mode 1).
-        if (oms->event_log_mode == 1) {
-            OrderEvent<F> recon_event;
-            std::memset(&recon_event, 0, sizeof(recon_event));
-            recon_event.type       = OEVT_RECONCILED;
-            recon_event.order_type = ORDER_MARKET_BUY;  // placeholder
-            recon_event.core_id    = -1;  // not core-specific
-            recon_event.price      = FPN_FromDouble<F>(drift);
-            std::strncpy(recon_event.reason, recon_cmd.result.error_message,
-                         sizeof(recon_event.reason) - 1);
-            recon_event.reason[sizeof(recon_event.reason) - 1] = '\0';
-            OrderEventLog_Append(&oms->event_log, recon_event);
+        if (oms->trade_log) {
+            TradeEvent<F> synth{};
+            synth.price     = fill_price;
+            synth.timestamp = o->submitted_at_us;
+            synth.core_id   = (uint16_t)o->core_id;
+            synth.type      = TRADE_EVENT_EXIT;
+            ShardedTradeLog_RecordExit(oms->trade_log, synth,
+                                       o->strategy_id,
+                                       entry_price_snap, fill_price,
+                                       qty_snap, net, total_fee,
+                                       oms->balance);
         }
+    }
+}
+
+//======================================================================================================
+// [PROCESS ONE FILL COMMAND — unified handler for REST and WS fills]
+//======================================================================================================
+// Looks up the order by id, applies the fill or rejection, runs the mode 1
+// fill handler if applicable, frees the slot. Called from the unified drain
+// loop in OrderManager_Tick for both CMD_FILL_RESULT and CMD_WS_FILL.
+//
+// Returns 1 if the command was processed, 0 if skipped (dedup, not found, etc.)
+//======================================================================================================
+template <unsigned F>
+inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Command& cmd) {
+    // Find the matching order by id.
+    int slot = -1;
+    for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
+        if ((oms->order_bitmap & (uint16_t)(1u << i)) == 0) continue;
+        if (oms->orders[i].id == cmd.order_id) { slot = i; break; }
+    }
+
+    // WS surprise fill (order_id == 0): log and skip.
+    if (cmd.order_id == 0 && cmd.type == (uint8_t)CMD_WS_FILL) {
+        std::fprintf(stderr,
+                     "[OMS] WS surprise fill (no clientOrderId), ignoring — "
+                     "reconciliation will catch it\n");
+        return 0;
+    }
+
+    if (slot < 0) {
+        // Order not found. For REST: slot freed already. For WS: REST beat us
+        // (order already processed and freed). Either way, skip silently.
+        if (cmd.type == (uint8_t)CMD_FILL_RESULT) {
+            std::fprintf(stderr,
+                         "[OMS] result for unknown order %llu (slot freed already?), ignoring\n",
+                         (unsigned long long)cmd.order_id);
+        }
+        return 0;
+    }
+
+    Order<F>* o = &oms->orders[slot];
+
+    // Dedup: if order is already FILLED (another source beat us), skip.
+    if (o->state == ORDER_FILLED) return 0;
+
+    if (cmd.result.success) {
+        std::strncpy(o->exchange_id, cmd.result.exchange_id,
+                     sizeof(o->exchange_id) - 1);
+        o->exchange_id[sizeof(o->exchange_id) - 1] = '\0';
+
+        // ACK-only results (from REST when WS is active): fill_qty == 0.
+        // Transition to ACKNOWLEDGED, keep the slot open for the WS fill.
+        if (cmd.result.fill_qty == 0.0 && cmd.result.avg_fill_price == 0.0) {
+            o->state = ORDER_ACKNOWLEDGED;
+            return 1;  // slot stays open — don't free
+        }
+
+        o->avg_fill_price = FPN_FromDouble<F>(cmd.result.avg_fill_price);
+        o->filled_qty     = FPN_FromDouble<F>(cmd.result.fill_qty);
+        o->state          = ORDER_FILLED;
+        oms->total_filled.fetch_add(1, std::memory_order_relaxed);
+
+        // Mode 1 fill handler: portfolio mutation + event log.
+        if (oms->event_log_mode == 1) {
+            FPN<F> fill_price = o->avg_fill_price;
+            FPN<F> fill_qty   = o->filled_qty;
+            OrderManager_HandleFill(oms, o, fill_price, fill_qty);
+        }
+    } else {
+        std::fprintf(stderr,
+                     "[OMS] order %llu FAIL core=%d code=%d msg=%s\n",
+                     (unsigned long long)o->id,
+                     (int)o->core_id,
+                     cmd.result.error_code,
+                     cmd.result.error_message);
+        o->state = ORDER_REJECTED;
+        oms->total_rejected.fetch_add(1, std::memory_order_relaxed);
+
+        // Mode 1: append rejection to event log for the audit trail.
+        if (oms->event_log_mode == 1) {
+            OrderEventLog_Append(&oms->event_log,
+                OrderEvent_MakeRejection<F>(
+                    o->id, o->submitted_at_us,
+                    (OrderType)o->type, o->core_id,
+                    cmd.result.error_message));
+        }
+    }
+
+    // Free the slot on terminal transition.
+    oms->order_bitmap &= (uint16_t)~(1u << slot);
+    return 1;
+}
+
+//======================================================================================================
+// [PROCESS ONE RECONCILE COMMAND]
+//======================================================================================================
+template <unsigned F>
+inline void OrderManager_ProcessReconcile(OrderManagerState<F>* oms, const Command& cmd) {
+    double drift = cmd.result.avg_fill_price;           // repurposed field
+    double exchange_balance = cmd.result.fill_qty;      // repurposed field
+
+    std::fprintf(stderr,
+                 "[OMS] RECONCILE: drift=$%.4f, correcting balance to match "
+                 "exchange ($%.4f)\n", drift, exchange_balance);
+
+    oms->balance = FPN_FromDouble<F>(exchange_balance);
+    if (FPN_GreaterThan(oms->balance, oms->ks_peak_balance)) {
+        oms->ks_peak_balance = oms->balance;
+    }
+
+    if (oms->event_log_mode == 1) {
+        OrderEvent<F> recon_event;
+        std::memset(&recon_event, 0, sizeof(recon_event));
+        recon_event.type       = OEVT_RECONCILED;
+        recon_event.order_type = ORDER_MARKET_BUY;  // placeholder
+        recon_event.core_id    = -1;
+        recon_event.price      = FPN_FromDouble<F>(drift);
+        std::strncpy(recon_event.reason, cmd.result.error_message,
+                     sizeof(recon_event.reason) - 1);
+        recon_event.reason[sizeof(recon_event.reason) - 1] = '\0';
+        OrderEventLog_Append(&oms->event_log, recon_event);
+    }
+}
+
+//======================================================================================================
+// [TICK — drain all command queues]
+//======================================================================================================
+// Drainer thread calls this on every drain pass. Drains three SPSC rings
+// sequentially (REST fills, WS fills, reconcile corrections) and dispatches
+// each command to the appropriate handler. Adding a new command source is
+// one new SPSCRing field + one drain call here + one handler function.
+//======================================================================================================
+template <unsigned F>
+inline void OrderManager_Tick(OrderManagerState<F>* oms) {
+    // Drain all three command queues through the unified dispatcher.
+    // Adding a new command source: add one SPSCRing field, one drain
+    // call here, one handler function. No duplication.
+    Command cmd;
+
+    // 1. REST fills (adapter worker thread)
+    while (SPSCRing_TryPop(&oms->result_queue, &cmd)) {
+        if (cmd.type == (uint8_t)CMD_FILL_RESULT)
+            OrderManager_ProcessFillCommand(oms, cmd);
+    }
+
+    // 2. WS fills (user data websocket thread)
+    while (SPSCRing_TryPop(&oms->ws_result_queue, &cmd)) {
+        if (cmd.type == (uint8_t)CMD_WS_FILL)
+            OrderManager_ProcessFillCommand(oms, cmd);
+    }
+
+    // 3. Reconciliation corrections (reconciler thread)
+    while (SPSCRing_TryPop(&oms->reconcile_queue, &cmd)) {
+        if (cmd.type == (uint8_t)CMD_RECONCILE)
+            OrderManager_ProcessReconcile(oms, cmd);
     }
 }
 

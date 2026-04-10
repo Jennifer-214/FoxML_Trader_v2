@@ -181,3 +181,8 @@ target_link_libraries(test_oms_concurrent PRIVATE pthread)
 add_executable(test_event_log_head_to_head test_event_log_head_to_head.cpp)
 target_compile_definitions(test_event_log_head_to_head PRIVATE USE_NATIVE_128)
 target_link_libraries(test_event_log_head_to_head PRIVATE pthread)
+
+# OMS phases 04-06: WS fills, ACK-only, dedup, reconcile, unified dispatch.
+add_executable(test_oms_phase04_06 test_oms_phase04_06.cpp)
+target_compile_definitions(test_oms_phase04_06 PRIVATE USE_NATIVE_128)
+target_link_libraries(test_oms_phase04_06 PRIVATE pthread)
