@@ -413,7 +413,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
 //==========================================================================
 // PANEL: ACCOUNT (merged Portfolio + P&L + Risk)
 //==========================================================================
-static inline void GUI_Panel_Account(const TUISnapshot *s) {
+static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *shared = NULL) {
     ImGui::Begin("Account");
     SectionHeader("ACCOUNT");
 
@@ -464,6 +464,19 @@ static inline void GUI_Panel_Account(const TUISnapshot *s) {
         ImGui::TextColored(FoxmlColors::red, "TRIPPED");
     else
         ImGui::TextColored(FoxmlColors::green, "OK");
+
+    // Paper reset button — only shown when not live trading
+    if (shared && !s->live_trading) {
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.3f, 0.3f, 0.7f));
+        if (ImGui::Button("Reset Paper")) {
+            shared->paper_reset_requested = 1;
+        }
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Reset balance, positions, and counters\nto starting state (paper mode only)");
+        }
+    }
 
     ImGui::End();
 }
@@ -841,12 +854,13 @@ static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
     ImGui::End();
 }
 
-static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time) {
+static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time,
+                                        TUISharedState *shared = NULL) {
     GUI_Panel_Header(s, start_time);
     GUI_Panel_TopBar(s);
     GUI_Panel_Market(s);
     GUI_Panel_BuyGate(s);
-    GUI_Panel_Account(s);
+    GUI_Panel_Account(s, shared);
     GUI_Panel_Positions(s);
     GUI_Panel_Stats(s);
     GUI_Panel_MLIntelligence(s);

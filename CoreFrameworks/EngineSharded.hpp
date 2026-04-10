@@ -531,6 +531,24 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
                 if (g_shared.quit_requested) {
                     g_engine_sharded_shutdown = 1;
                 }
+                // paper reset: zero balance, clear positions, reset counters
+                if (g_shared.paper_reset_requested && !cfg.use_real_money) {
+                    g_shared.paper_reset_requested = 0;
+                    state.oms->balance      = cfg.starting_balance;
+                    state.oms->realized_pnl = FPN_Zero<F>();
+                    state.oms->ks_peak_balance = cfg.starting_balance;
+                    state.oms->kill_switch_tripped = 0;
+                    Portfolio_Init(&state.oms->portfolio);
+                    state.total_entries = 0;
+                    state.total_exits   = 0;
+                    state.total_events_processed = 0;
+                    for (int c = 0; c < num_cores; ++c) {
+                        state.cores[c].entries_processed = 0;
+                        state.cores[c].exits_processed   = 0;
+                    }
+                    fprintf(stderr, "[sharded] paper reset: balance=$%.2f\n",
+                            FPN_ToDouble(cfg.starting_balance));
+                }
 #endif
             }
             return true;

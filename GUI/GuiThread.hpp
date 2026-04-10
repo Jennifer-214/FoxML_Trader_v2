@@ -323,7 +323,7 @@ static inline void *gui_thread_fn(void *arg) {
         }
 
         // dashboard panels (right side)
-        GUI_RenderDashboard(snap, snap->start_time ? snap->start_time : gui_start);
+        GUI_RenderDashboard(snap, snap->start_time ? snap->start_time : gui_start, shared);
 
         // charts — 3 separate dockable windows
         CandleSnapshot csnap = {};
