@@ -262,6 +262,15 @@ template <unsigned F> struct ControllerConfig {
   // Config syntax: core_0_strategy=simple_dip, core_1_strategy=ema_cross, etc.
   // Accepted names: mr, momentum, simple_dip, ml, ema_cross, none.
   uint8_t core_strategies[16]; // MAX_EXECUTION_CORES
+  // Per-strategy TP/SL overrides. Default 0 = fall back to the shared
+  // take_profit_pct / stop_loss_pct. Non-zero = use this instead.
+  // Momentum already has momentum_tp_mult / momentum_sl_mult (stddev mults).
+  FPN<F> simpledip_tp_pct;    // SimpleDip TP override (%, stored as decimal)
+  FPN<F> simpledip_sl_pct;    // SimpleDip SL override
+  FPN<F> mr_tp_pct;           // MeanReversion TP override
+  FPN<F> mr_sl_pct;           // MeanReversion SL override
+  FPN<F> emacross_tp_pct;     // EMA Cross TP override
+  FPN<F> emacross_sl_pct;     // EMA Cross SL override
   // OMS phase 03: which path EventLoop_OnEvent takes when a TradeEvent
   // arrives. mode 0 (legacy): OnEvent mutates the portfolio + balance
   // directly, same as phase 02. mode 1 (event log): OnEvent just bumps
@@ -438,6 +447,12 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.num_execution_cores = 4;
   cfg.sharded_force_synthetic = 0;
   for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
+  cfg.simpledip_tp_pct  = FPN_Zero<F>();  // 0 = use shared take_profit_pct
+  cfg.simpledip_sl_pct  = FPN_Zero<F>();
+  cfg.mr_tp_pct         = FPN_Zero<F>();
+  cfg.mr_sl_pct         = FPN_Zero<F>();
+  cfg.emacross_tp_pct   = FPN_Zero<F>();
+  cfg.emacross_sl_pct   = FPN_Zero<F>();
   // OMS phase 03 — default to legacy OnEvent path so existing tests and
   // the production engine before the migration soak stay on the known-good
   // code.
@@ -709,6 +724,13 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       }
       continue;
     }
+    // Per-strategy TP/SL overrides (percentage, parsed with /100)
+    CFG_PARSE_PCT(simpledip_tp_pct)
+    CFG_PARSE_PCT(simpledip_sl_pct)
+    CFG_PARSE_PCT(mr_tp_pct)
+    CFG_PARSE_PCT(mr_sl_pct)
+    CFG_PARSE_PCT(emacross_tp_pct)
+    CFG_PARSE_PCT(emacross_sl_pct)
     // OMS phase 03 — accept both string and int values for clarity in cfg files
     if (strcmp(key, "oms_event_log_mode") == 0) {
       if (strcmp(val, "legacy") == 0)

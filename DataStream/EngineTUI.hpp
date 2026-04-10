@@ -878,6 +878,8 @@ struct TUISnapshot {
         double   p99_ns;
         double   max_ns;
         double   avg_ns;
+        uint8_t  strategy_id_display;  // STRATEGY_* constant for this core
+        double   buy_gate_price;       // current buy gate threshold (for chart overlay)
     };
     PerCoreSnap per_core[16];      // up to MAX_EXECUTION_CORES
 };
@@ -1199,6 +1201,15 @@ static inline void TUI_PopulatePerCoreLatency(TUISnapshot *snap,
         snap->per_core[i].avg_ns  = 0;
     }
 }
+
+//======================================================================================================
+// [SHARDED SNAPSHOT COPY — lives in CoreFrameworks/ShardedSnapshot.hpp]
+//======================================================================================================
+// TUI_CopySnapshotSharded is in a separate header because it depends on
+// EventLoopState and EventLoopAggregates (OMS headers) which EngineTUI.hpp
+// doesn't include. EngineSharded.hpp includes ShardedSnapshot.hpp after
+// both dependencies are available.
+//======================================================================================================
 
 //======================================================================================================
 // [RENDER FROM SNAPSHOT]

@@ -106,12 +106,16 @@ inline void SimpleDip_BuildParameters(
     FPN<F> dip_offset = FPN_Mul(recent_high, config->entry_offset_pct);
     FPN<F> expected_entry = FPN_Sub(recent_high, dip_offset);
 
-    // tp = expected_entry * (1 + take_profit_pct)
-    FPN<F> tp_amount = FPN_Mul(expected_entry, config->take_profit_pct);
+    // Per-strategy TP/SL: use simpledip-specific override if set, else shared
+    FPN<F> tp_pct = !FPN_IsZero(config->simpledip_tp_pct) ? config->simpledip_tp_pct : config->take_profit_pct;
+    FPN<F> sl_pct = !FPN_IsZero(config->simpledip_sl_pct) ? config->simpledip_sl_pct : config->stop_loss_pct;
+
+    // tp = expected_entry * (1 + tp_pct)
+    FPN<F> tp_amount = FPN_Mul(expected_entry, tp_pct);
     FPN<F> take_profit_price = FPN_Add(expected_entry, tp_amount);
 
-    // sl = expected_entry * (1 - stop_loss_pct)
-    FPN<F> sl_amount = FPN_Mul(expected_entry, config->stop_loss_pct);
+    // sl = expected_entry * (1 - sl_pct)
+    FPN<F> sl_amount = FPN_Mul(expected_entry, sl_pct);
     FPN<F> stop_loss_price = FPN_Sub(expected_entry, sl_amount);
 
     // volume gate: tick volume must exceed rolling avg * multiplier
@@ -133,8 +137,8 @@ inline void SimpleDip_BuildParameters(
     // Phase 14 per-fill: the execution core will compute live TP/SL from
     // the actual fill price using these percentages, overriding the legacy
     // absolute prices above. Removes the structural loss bias.
-    out->tp_pct               = config->take_profit_pct;
-    out->sl_pct               = config->stop_loss_pct;
+    out->tp_pct               = tp_pct;
+    out->sl_pct               = sl_pct;
     out->trade_size           = trade_size;
     out->strategy_id          = STRATEGY_SIMPLE_DIP;
     out->flags                = GATE_FLAG_TP_ENABLED | GATE_FLAG_SL_ENABLED;
@@ -167,8 +171,10 @@ inline void MeanReversion_BuildParameters(
     FPN<F> entry_price = rolling->price_avg;
     if (FPN_IsZero(entry_price)) entry_price = rolling->price_max;
 
-    FPN<F> tp_amount = FPN_Mul(entry_price, config->take_profit_pct);
-    FPN<F> sl_amount = FPN_Mul(entry_price, config->stop_loss_pct);
+    FPN<F> tp_pct = !FPN_IsZero(config->mr_tp_pct) ? config->mr_tp_pct : config->take_profit_pct;
+    FPN<F> sl_pct = !FPN_IsZero(config->mr_sl_pct) ? config->mr_sl_pct : config->stop_loss_pct;
+    FPN<F> tp_amount = FPN_Mul(entry_price, tp_pct);
+    FPN<F> sl_amount = FPN_Mul(entry_price, sl_pct);
     FPN<F> volume_threshold = FPN_Mul(rolling->volume_avg, config->volume_multiplier);
 
     FPN<F> trade_size = FPN_Zero<F>();
@@ -180,6 +186,8 @@ inline void MeanReversion_BuildParameters(
     out->bg_volume_threshold  = volume_threshold;
     out->sg_take_profit_price = FPN_Add(entry_price, tp_amount);
     out->sg_stop_loss_price   = FPN_Sub(entry_price, sl_amount);
+    out->tp_pct               = tp_pct;
+    out->sl_pct               = sl_pct;
     out->trade_size           = trade_size;
     out->strategy_id          = STRATEGY_MEAN_REVERSION;
     out->flags                = GATE_FLAG_TP_ENABLED | GATE_FLAG_SL_ENABLED;
@@ -203,12 +211,20 @@ inline void Momentum_BuildParameters(
     GateParameters<F>* out
 ) {
     // TODO(phase06-followup): full port with ROR and R² gates.
-    // For phase 06 stub: buy above the rolling avg, fixed TP/SL offsets.
+    // For phase 06 stub: buy above the rolling avg.
+    // Momentum uses stddev multipliers (momentum_tp_mult / momentum_sl_mult)
+    // rather than percentage TP/SL. Falls back to shared percentage if not set.
     FPN<F> entry_price = rolling->price_avg;
     if (FPN_IsZero(entry_price)) entry_price = rolling->price_max;
 
-    FPN<F> tp_amount = FPN_Mul(entry_price, config->take_profit_pct);
-    FPN<F> sl_amount = FPN_Mul(entry_price, config->stop_loss_pct);
+    FPN<F> tp_amount, sl_amount;
+    if (!FPN_IsZero(config->momentum_tp_mult) && !FPN_IsZero(rolling->price_stddev)) {
+        tp_amount = FPN_Mul(rolling->price_stddev, config->momentum_tp_mult);
+        sl_amount = FPN_Mul(rolling->price_stddev, config->momentum_sl_mult);
+    } else {
+        tp_amount = FPN_Mul(entry_price, config->take_profit_pct);
+        sl_amount = FPN_Mul(entry_price, config->stop_loss_pct);
+    }
     FPN<F> volume_threshold = FPN_Mul(rolling->volume_avg, config->volume_multiplier);
 
     FPN<F> trade_size = FPN_Zero<F>();
@@ -220,6 +236,8 @@ inline void Momentum_BuildParameters(
     out->bg_volume_threshold  = volume_threshold;
     out->sg_take_profit_price = FPN_Add(entry_price, tp_amount);
     out->sg_stop_loss_price   = FPN_Sub(entry_price, sl_amount);
+    out->tp_pct               = config->take_profit_pct;  // fallback for per-fill
+    out->sl_pct               = config->stop_loss_pct;
     out->trade_size           = trade_size;
     out->strategy_id          = STRATEGY_MOMENTUM;
     out->flags                = GATE_FLAG_TP_ENABLED | GATE_FLAG_SL_ENABLED;
@@ -242,10 +260,21 @@ inline void EmaCross_BuildParameters(
     GateParameters<F>* out
 ) {
     // TODO(phase06-followup): full port with EMA crossover trigger.
-    // For phase 06 stub: behave like SimpleDip but with EMA_CROSS strategy_id
-    // so the dispatcher routes correctly.
+    // For phase 06 stub: same entry logic as SimpleDip but uses EMA Cross
+    // specific TP/SL overrides if set.
     SimpleDip_BuildParameters(rolling, config, allocated_balance, out);
     out->strategy_id = STRATEGY_EMA_CROSS;
+    // Override TP/SL with EMA Cross specific values if set
+    if (!FPN_IsZero(config->emacross_tp_pct)) {
+        out->tp_pct = config->emacross_tp_pct;
+        FPN<F> entry = out->bg_price_threshold;
+        out->sg_take_profit_price = FPN_Add(entry, FPN_Mul(entry, config->emacross_tp_pct));
+    }
+    if (!FPN_IsZero(config->emacross_sl_pct)) {
+        out->sl_pct = config->emacross_sl_pct;
+        FPN<F> entry = out->bg_price_threshold;
+        out->sg_stop_loss_price = FPN_Sub(entry, FPN_Mul(entry, config->emacross_sl_pct));
+    }
 }
 
 //======================================================================================================

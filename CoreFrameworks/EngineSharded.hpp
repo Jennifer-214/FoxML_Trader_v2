@@ -46,6 +46,7 @@
 #include "../DataStream/BinanceUserData.hpp"
 #include "BinanceAdapter.hpp"
 #include "ReconciliationLoop.hpp"
+#include "ShardedSnapshot.hpp"
 #include "ControllerEventLoop.hpp"
 #include "CoreLatencyStats.hpp"
 #include "ControllerConfig.hpp"
