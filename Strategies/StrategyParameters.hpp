@@ -47,7 +47,9 @@
 #include "../CoreFrameworks/ControllerConfig.hpp"
 #include "../CoreFrameworks/GateParameters.hpp"
 #include "../FixedPoint/FixedPointN.hpp"
+#include "../ML_Headers/ModelInference.hpp"
 #include "../ML_Headers/RollingStats.hpp"
+#include "../Strategies/RegimeDetector.hpp"
 #include "StrategyInterface.hpp"
 
 #include <cstdint>
@@ -278,6 +280,100 @@ inline void EmaCross_BuildParameters(
 }
 
 //======================================================================================================
+// [ML — model-driven buy signals]
+//======================================================================================================
+// Packs features from rolling stats, runs inference on the loaded model,
+// and produces gate parameters if prediction > threshold. Each core can
+// load a different model via core_N_model_path config.
+//
+// The model_handle pointer is passed through the dispatcher's model_ctx
+// parameter. If null or no model loaded, falls back to SimpleDip behavior.
+//======================================================================================================
+template <unsigned F, unsigned W = 128, unsigned WL = 512>
+inline void ML_BuildParameters(
+    const RollingStats<F, W>* rolling,
+    const RollingStats<F, WL>* rolling_long,
+    const ControllerConfig<F>* config,
+    FPN<F> allocated_balance,
+    GateParameters<F>* out,
+    void* model_handle_ptr
+) {
+    ModelHandle<F>* model = (ModelHandle<F>*)model_handle_ptr;
+
+    // if no model loaded, fall back to SimpleDip
+    if (!model || model->backend == MODEL_BACKEND_NONE) {
+        SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
+        out->strategy_id = STRATEGY_ML;
+        return;
+    }
+
+    // compute entry price (same as SimpleDip for sizing)
+    FPN<F> recent_high = rolling->price_max;
+    if (rolling_long && FPN_GreaterThan(rolling_long->price_max, recent_high)) {
+        recent_high = rolling_long->price_max;
+    }
+    FPN<F> entry_price = rolling->price_avg;
+    if (FPN_IsZero(entry_price)) entry_price = recent_high;
+
+    // pack features from rolling stats into a minimal RegimeSignals
+    RegimeSignals<F> sig;
+    memset(&sig, 0, sizeof(sig));
+    sig.short_slope    = FPN_IsZero(rolling->price_avg) ? FPN_Zero<F>()
+                         : FPN_DivNoAssert(rolling->price_slope, rolling->price_avg);
+    sig.short_r2       = rolling->price_r_squared;
+    sig.short_variance = rolling->price_variance;
+    sig.volume_slope   = rolling->volume_slope;
+    sig.volume_delta   = rolling->volume_delta;
+    if (rolling_long && rolling_long->count > 0) {
+        sig.long_slope    = FPN_IsZero(rolling_long->price_avg) ? FPN_Zero<F>()
+                            : FPN_DivNoAssert(rolling_long->price_slope, rolling_long->price_avg);
+        sig.long_r2       = rolling_long->price_r_squared;
+        sig.long_variance = rolling_long->price_variance;
+        if (!FPN_IsZero(rolling_long->price_variance))
+            sig.vol_ratio = FPN_DivNoAssert(rolling->price_variance, rolling_long->price_variance);
+        else
+            sig.vol_ratio = FPN_FromDouble<F>(1.0);
+    }
+
+    // pack features + run inference
+    float features[MODEL_MAX_FEATURES];
+    int n = ModelFeatures_Pack(features, &sig, rolling, rolling_long);
+    float prediction = Model_Predict(model, features, n);
+
+    // TP/SL from ML-specific config
+    FPN<F> tp_pct = config->ml_tp_pct;
+    FPN<F> sl_pct = config->ml_sl_pct;
+    FPN<F> tp_amount = FPN_Mul(entry_price, tp_pct);
+    FPN<F> sl_amount = FPN_Mul(entry_price, sl_pct);
+
+    // volume gate
+    FPN<F> volume_threshold = FPN_Mul(rolling->volume_avg, config->volume_multiplier);
+
+    // sizing
+    FPN<F> trade_size = FPN_Zero<F>();
+    if (!FPN_IsZero(entry_price)) {
+        trade_size = FPN_DivNoAssert(allocated_balance, entry_price);
+    }
+
+    // only enter if prediction exceeds threshold
+    double threshold = FPN_ToDouble(config->ml_buy_threshold);
+    FPN<F> gate_price = (prediction >= threshold)
+        ? entry_price  // signal is hot — set gate at current price level
+        : FPN_Zero<F>();  // signal is cold — zero gate blocks entry
+
+    out->bg_price_threshold   = gate_price;
+    out->bg_volume_threshold  = volume_threshold;
+    out->sg_take_profit_price = FPN_Add(entry_price, tp_amount);
+    out->sg_stop_loss_price   = FPN_Sub(entry_price, sl_amount);
+    out->tp_pct               = tp_pct;
+    out->sl_pct               = sl_pct;
+    out->trade_size           = trade_size;
+    out->strategy_id          = STRATEGY_ML;
+    out->flags                = GATE_FLAG_TP_ENABLED | GATE_FLAG_SL_ENABLED;
+    for (int i = 0; i < 6; ++i) out->_pad[i] = 0;
+}
+
+//======================================================================================================
 // [STRATEGY DISPATCHER]
 //======================================================================================================
 // the slow path calls this once per registered execution core. dispatches to
@@ -299,7 +395,8 @@ inline void Strategy_BuildParameters(
     const ControllerConfig<F>* config,
     FPN<F> allocated_balance,
     GateParameters<F>* out,
-    const RollingStats<F, WL>* rolling_long = nullptr
+    const RollingStats<F, WL>* rolling_long = nullptr,
+    void* model_ctx = nullptr
 ) {
     switch (strategy_id) {
         case STRATEGY_SIMPLE_DIP:
@@ -314,8 +411,10 @@ inline void Strategy_BuildParameters(
         case STRATEGY_EMA_CROSS:
             EmaCross_BuildParameters(rolling, config, allocated_balance, out);
             return;
+        case STRATEGY_ML:
+            ML_BuildParameters(rolling, rolling_long, config, allocated_balance, out, model_ctx);
+            return;
         default:
-            // STRATEGY_NONE and any unknown id: safe zero pack, no trading.
             GateParameters_Init(out);
             return;
     }

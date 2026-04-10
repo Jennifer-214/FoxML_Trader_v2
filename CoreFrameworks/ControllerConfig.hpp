@@ -267,6 +267,10 @@ template <unsigned F> struct ControllerConfig {
   // shared risk_pct / num_cores. Non-zero = use this specific percentage.
   // Config syntax: core_0_risk_pct=20.0 (stored as 0.20).
   FPN<F> core_risk_pct[16];    // MAX_EXECUTION_CORES
+  // Per-core ML model path. Each core running STRATEGY_ML can load its
+  // own model. Default empty = use shared ml_model_path. Config syntax:
+  // core_0_model_path=models/aggressive.xgb
+  char core_model_path[16][256];
   // Per-strategy TP/SL overrides. Default 0 = fall back to the shared
   // take_profit_pct / stop_loss_pct. Non-zero = use this instead.
   // Momentum already has momentum_tp_mult / momentum_sl_mult (stddev mults).
@@ -453,6 +457,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.sharded_force_synthetic = 0;
   for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
   for (int i = 0; i < 16; ++i) cfg.core_risk_pct[i] = FPN_Zero<F>();  // 0 = shared
+  for (int i = 0; i < 16; ++i) cfg.core_model_path[i][0] = '\0';    // empty = shared
   cfg.simpledip_tp_pct  = FPN_Zero<F>();  // 0 = use shared take_profit_pct
   cfg.simpledip_sl_pct  = FPN_Zero<F>();
   cfg.mr_tp_pct         = FPN_Zero<F>();
@@ -719,6 +724,16 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       int core_idx = atoi(key + 5);
       if (core_idx >= 0 && core_idx < 16) {
         cfg.core_risk_pct[core_idx] = FPN_FromDouble<F>(atof(val) / 100.0);
+      }
+      continue;
+    }
+    // Per-core model path: core_0_model_path=models/aggressive.xgb
+    if (strncmp(key, "core_", 5) == 0 && strstr(key, "_model_path")) {
+      int core_idx = atoi(key + 5);
+      if (core_idx >= 0 && core_idx < 16) {
+        strncpy(cfg.core_model_path[core_idx], val,
+                sizeof(cfg.core_model_path[core_idx]) - 1);
+        cfg.core_model_path[core_idx][sizeof(cfg.core_model_path[core_idx]) - 1] = '\0';
       }
       continue;
     }

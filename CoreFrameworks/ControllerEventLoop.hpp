@@ -81,6 +81,7 @@ struct CoreContext {
     uint8_t  strategy_id;          // STRATEGY_* constant; STRATEGY_NONE means "do not trade"
     uint8_t  dirty;                // 1 = pending_params should be pushed to the core
     uint8_t  _pad[6];
+    void*    model_handle;         // ModelHandle<F>* for STRATEGY_ML cores (nullptr for others)
     uint64_t entries_processed;    // bumped on entry event
     uint64_t exits_processed;      // bumped on exit event
 };
@@ -140,6 +141,7 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         GateParameters_Init(&state->cores[i].pending_params);
         state->cores[i].strategy_id = STRATEGY_NONE;  // pitfall P6.5: explicit init
         state->cores[i].dirty = 0;
+        state->cores[i].model_handle = nullptr;
         state->cores[i].entries_processed = 0;
         state->cores[i].exits_processed = 0;
     }
@@ -551,7 +553,8 @@ inline int EventLoop_RebuildAllParameters(
             config,
             state->cores[slot].allocated_balance,
             &state->cores[slot].pending_params,
-            rolling_long
+            rolling_long,
+            state->cores[slot].model_handle
         );
         // Mirror the pack's TP/SL/qty into the controller-side intended_*
         // fields so OnEvent uses the freshly computed values when the next

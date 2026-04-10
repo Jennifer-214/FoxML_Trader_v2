@@ -392,6 +392,25 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
             cfg.core_strategies[i],
             FPN_FromDouble<F>(core_balance));
 
+        // Load ML model for STRATEGY_ML cores
+        if (cfg.core_strategies[i] == STRATEGY_ML) {
+            static ModelHandle<F> ml_models[MAX_EXECUTION_CORES];
+            Model_Init(&ml_models[i]);
+            const char* model_path = cfg.core_model_path[i][0]
+                ? cfg.core_model_path[i] : cfg.ml_model_path;
+            if (model_path[0]) {
+                int backend = cfg.ml_backend ? cfg.ml_backend : MODEL_BACKEND_XGBOOST;
+                if (Model_Load(&ml_models[i], model_path, backend)) {
+                    state.cores[i].model_handle = &ml_models[i];
+                    fprintf(stderr, "[sharded] core %d: ML model loaded from %s\n",
+                            i, model_path);
+                } else {
+                    fprintf(stderr, "[sharded] core %d: ML model load FAILED (%s), "
+                                     "falling back to SimpleDip\n", i, model_path);
+                }
+            }
+        }
+
         // Cores start permission=0. The slow-path rebuild grants permission
         // once it has enough rolling-stats samples to compute meaningful
         // gate thresholds.
