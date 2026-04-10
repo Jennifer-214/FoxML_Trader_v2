@@ -312,6 +312,11 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
                       cfg.starting_balance, cfg.fee_rate,
                       (int)cfg.oms_event_log_mode);
 
+    // Trade log CSV — same pattern as legacy engine in main.cpp
+    static ShardedTradeLog g_sharded_trade_log;
+    ShardedTradeLog_Init(&g_sharded_trade_log, bcfg.symbol);
+    oms.trade_log = &g_sharded_trade_log;
+
     EventLoopState<F> state;
     EventLoopState_Init(&state, &oms);
 
