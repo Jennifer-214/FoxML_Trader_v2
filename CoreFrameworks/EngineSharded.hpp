@@ -630,12 +630,28 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
         // Market + account
         double price_d = last_price.load(std::memory_order_relaxed);
         double vol_d = last_volume.load(std::memory_order_relaxed);
+        // compute equity = balance + unrealized P&L across all open positions
+        double unrealized = 0.0;
+        {
+            uint16_t bm = state.oms->portfolio.active_bitmap;
+            while (bm) {
+                int s = __builtin_ctz(bm);
+                bm &= (uint16_t)(bm - 1);
+                double entry = FPN_ToDouble(state.oms->portfolio.positions[s].entry_price);
+                double qty   = FPN_ToDouble(state.oms->portfolio.positions[s].quantity);
+                unrealized += (price_d - entry) * qty;
+            }
+        }
+        double equity = bal + unrealized;
         fprintf(stdout, " " SH_DIM " PRICE " SH_RESET SH_BOLD SH_WHEAT "$%.2f" SH_RESET
                 "  " SH_DIM "│" SH_RESET " " SH_DIM "VOL " SH_RESET SH_FG "%.4f" SH_RESET
                 "  " SH_DIM "│" SH_RESET " " SH_DIM "BAL " SH_RESET SH_FG "$%.2f" SH_RESET
-                "  " SH_DIM "│" SH_RESET " " SH_DIM "P&L " SH_RESET SH_BOLD "%s$%+.4f" SH_RESET
+                "  " SH_DIM "│" SH_RESET " " SH_DIM "EQUITY " SH_RESET SH_BOLD "%s$%.2f" SH_RESET
                 "  " SH_DIM "│" SH_RESET " " SH_DIM "POS " SH_RESET SH_FG "%d/%u" SH_RESET "\033[K\n",
-                price_d, vol_d, bal, SH_PNL(pnl), pnl, active, (unsigned)num_cores);
+                price_d, vol_d, bal, SH_PNL(equity - 10000.0), equity, active, (unsigned)num_cores);
+        fprintf(stdout, " " SH_DIM " P&L " SH_RESET SH_BOLD "%s$%+.4f" SH_RESET
+                "  " SH_DIM "│" SH_RESET " " SH_DIM "UNREAL " SH_RESET SH_BOLD "%s$%+.4f" SH_RESET "\033[K\n",
+                SH_PNL(pnl), pnl, SH_PNL(unrealized), unrealized);
         fprintf(stdout, "\033[K\n");
 
         // Counters
@@ -651,18 +667,46 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
 
         // Per-core latency table — the headline
         fprintf(stdout, SH_BOLD SH_PEACH " PER-CORE LATENCY" SH_RESET SH_DIM "  (last 256 samples per core)" SH_RESET "\033[K\n");
-        fprintf(stdout, "  " SH_DIM "core      samples       min       p50       p95       p99       max       avg" SH_RESET "\033[K\n");
+        fprintf(stdout, "  " SH_DIM "core   samples       min        p50        p95        p99        max        avg" SH_RESET "\033[K\n");
         for (int i = 0; i < num_cores; ++i) {
             CoreLatencySnapshot ls = CoreLatencyStats_Snapshot(&cores[i].latency_stats, tsc_ghz);
             if (ls.total_count == 0) {
-                fprintf(stdout, "  " SH_FG " %2d  " SH_DIM "%10s   %6s   %6s   %6s   %6s   %6s   %6s" SH_RESET "\033[K\n",
+                fprintf(stdout, "  " SH_FG " %2d   " SH_DIM "%8s   %6s ns   %6s ns   %6s ns   %6s ns   %6s ns   %6s ns" SH_RESET "\033[K\n",
                         i, "0", "-", "-", "-", "-", "-", "-");
             } else {
-                fprintf(stdout, "  " SH_FG " %2d  " SH_DIM "%10lu  " SH_FG "%5.0fns  %5.0fns  %5.0fns  %5.0fns  %5.0fns  %5.0fns" SH_RESET "\033[K\n",
+                fprintf(stdout, "  " SH_FG " %2d   " SH_DIM "%8lu   " SH_FG "%6.0f ns   %6.0f ns   %6.0f ns   %6.0f ns   %6.0f ns   %6.0f ns" SH_RESET "\033[K\n",
                         i, (unsigned long)ls.total_count,
                         ls.min_ns, ls.p50_ns, ls.p95_ns, ls.p99_ns, ls.max_ns, ls.avg_ns);
             }
         }
+
+        // Per-core position details — shows which core has a position,
+        // entry price, quantity, unrealized P&L, and TP/SL levels.
+        // only renders rows for active positions to keep the display compact.
+        if (active > 0) {
+            fprintf(stdout, "\033[K\n");
+            fprintf(stdout, SH_BOLD SH_PEACH " POSITIONS" SH_RESET "\033[K\n");
+            fprintf(stdout, "  " SH_DIM "core   strategy     entry          qty       unreal         TP             SL" SH_RESET "\033[K\n");
+            uint16_t bm = state.oms->portfolio.active_bitmap;
+            while (bm) {
+                int s = __builtin_ctz(bm);
+                bm &= (uint16_t)(bm - 1);
+                double entry_d = FPN_ToDouble(state.oms->portfolio.positions[s].entry_price);
+                double qty_d   = FPN_ToDouble(state.oms->portfolio.positions[s].quantity);
+                double tp_d    = FPN_ToDouble(state.oms->portfolio.positions[s].take_profit_price);
+                double sl_d    = FPN_ToDouble(state.oms->portfolio.positions[s].stop_loss_price);
+                double unreal_d = (price_d - entry_d) * qty_d;
+                const char* strat = (s < state.registered_count && state.cores[s].strategy_id < NUM_STRATEGIES)
+                    ? STRATEGY_SHORT_NAMES[state.cores[s].strategy_id] : "?";
+                fprintf(stdout, "  " SH_FG " %2d    " SH_PEACH "%-5s" SH_RESET
+                        "  " SH_FG "$%10.2f   %10.6f   " SH_BOLD "%s$%+8.4f" SH_RESET
+                        "   " SH_GREEN "$%.2f" SH_RESET "   " SH_RED "$%.2f" SH_RESET "\033[K\n",
+                        s, strat, entry_d, qty_d,
+                        SH_PNL(unreal_d), unreal_d,
+                        tp_d, sl_d);
+            }
+        }
+        fprintf(stdout, "\033[K\n");
 
         // Order latency line — only meaningful in live mode, but always shown
         // so paper users see the placeholder. all values in microseconds.
