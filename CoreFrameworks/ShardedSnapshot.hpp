@@ -134,5 +134,12 @@ static inline void TUI_CopySnapshotSharded(
     snap->per_core_count = state->registered_count;
     for (int i = 0; i < state->registered_count && i < 16; ++i) {
         snap->per_core[i].strategy_id_display = state->cores[i].strategy_id;
+        // read buy gate price from the core's parameter slot
+        tt::ExecutionCore<F>* core = state->cores[i].core;
+        if (core) {
+            tt::GateParameters<F> params;
+            tt::ParameterSlot_Read(&core->param_slot, &params);
+            snap->per_core[i].buy_gate_price = FPN_ToDouble(params.bg_price_threshold);
+        }
     }
 }

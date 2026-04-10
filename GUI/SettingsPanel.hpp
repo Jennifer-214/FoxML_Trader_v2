@@ -214,6 +214,35 @@ static const CfgFieldDef field_defs[] = {
         "Recommended: physical core count - 2 (one for controller, one for OS).\n"
         "On AMD: pin all cores to the same CCD to avoid cross-die latency.\n"
         "RESTART REQUIRED to take effect."},
+    // Per-core strategy assignment
+    {"core_0_strategy",          "Core 0",            "Core Strategies",  CFG_INT, "%d",
+        "0=MR 1=Momentum 2=SimpleDip 3=ML 4=EMA Cross 255=None\nHot-swappable while running"},
+    {"core_1_strategy",          "Core 1",            "Core Strategies",  CFG_INT, "%d", NULL},
+    {"core_2_strategy",          "Core 2",            "Core Strategies",  CFG_INT, "%d", NULL},
+    {"core_3_strategy",          "Core 3",            "Core Strategies",  CFG_INT, "%d", NULL},
+    // Per-strategy TP/SL overrides (0 = use shared take_profit_pct / stop_loss_pct)
+    {"simpledip_tp_pct",         "DIP TP %%",         "SimpleDip Tuning", CFG_FLOAT, "%.2f",
+        "SimpleDip-specific take profit %%\n0 = use shared TP %%"},
+    {"simpledip_sl_pct",         "DIP SL %%",         "SimpleDip Tuning", CFG_FLOAT, "%.2f",
+        "SimpleDip-specific stop loss %%\n0 = use shared SL %%"},
+    {"mr_tp_pct",                "MR TP %%",          "MeanReversion Tuning", CFG_FLOAT, "%.2f",
+        "MeanReversion-specific take profit %%\n0 = use shared TP %%"},
+    {"mr_sl_pct",                "MR SL %%",          "MeanReversion Tuning", CFG_FLOAT, "%.2f",
+        "MeanReversion-specific stop loss %%\n0 = use shared SL %%"},
+    {"momentum_tp_mult",         "MOM TP σ",          "Momentum Tuning",  CFG_FLOAT, "%.1f",
+        "Momentum TP distance in stddevs\n3.0 = TP at entry + 3σ"},
+    {"momentum_sl_mult",         "MOM SL σ",          "Momentum Tuning",  CFG_FLOAT, "%.1f",
+        "Momentum SL distance in stddevs\n2.0 = SL at entry - 2σ"},
+    {"momentum_breakout_mult",   "MOM Breakout",      "Momentum Tuning",  CFG_FLOAT, "%.2f",
+        "Buy when price > avg + stddev * this"},
+    {"emacross_tp_pct",          "EMA TP %%",         "EMA Cross Tuning", CFG_FLOAT, "%.2f",
+        "EMA Cross-specific take profit %%\n0 = use shared TP %%"},
+    {"emacross_sl_pct",          "EMA SL %%",         "EMA Cross Tuning", CFG_FLOAT, "%.2f",
+        "EMA Cross-specific stop loss %%\n0 = use shared SL %%"},
+    {"emacross_dip_mult",        "EMA Dip σ",         "EMA Cross Tuning", CFG_FLOAT, "%.2f",
+        "Buy this many stddevs below EMA in uptrends"},
+    {"emacross_crossover_min",   "EMA Cross Min",     "EMA Cross Tuning", CFG_FLOAT, "%.4f",
+        "Min EMA-SMA spread for uptrend confirmation"},
 };
 static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 

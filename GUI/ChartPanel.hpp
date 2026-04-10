@@ -811,6 +811,35 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             ImPlot::PlotLine("##thresh", thresh_x, thresh_y, 2, ts);
         }
 
+        // Per-core buy gate overlays (sharded mode only). One dashed
+        // horizontal line per core at the buy gate price threshold,
+        // color-coded by strategy. Only drawn when the price is non-zero.
+        if (snap->sharded_mode_active) {
+            ImVec4 strat_colors[] = {
+                {0.40f, 0.60f, 0.85f, 0.6f},  // MR — blue
+                {0.85f, 0.55f, 0.25f, 0.6f},  // MOM — orange
+                {0.45f, 0.75f, 0.45f, 0.6f},  // DIP — green
+                {0.65f, 0.45f, 0.80f, 0.6f},  // ML — purple
+                {0.35f, 0.75f, 0.80f, 0.6f},  // EMA — cyan
+            };
+            const char *strat_labels[] = {"MR", "MOM", "DIP", "ML", "EMA"};
+            for (int ci = 0; ci < snap->per_core_count && ci < 16; ++ci) {
+                double bg_price = snap->per_core[ci].buy_gate_price;
+                if (bg_price <= 0.0) continue;
+                uint8_t sid = snap->per_core[ci].strategy_id_display;
+                ImVec4 col = (sid < 5) ? strat_colors[sid]
+                                        : ImVec4(0.5f, 0.5f, 0.5f, 0.4f);
+                const char *sname = (sid < 5) ? strat_labels[sid] : "?";
+                double lx[2] = {cs->x_lo, cs->x_hi};
+                double ly[2] = {bg_price, bg_price};
+                char lbl[32]; snprintf(lbl, 32, "##bg%d", ci);
+                ImPlotSpec bgs; bgs.LineColor = col; bgs.LineWeight = 1.0f;
+                ImPlot::PlotLine(lbl, lx, ly, 2, bgs);
+                ImPlot::Annotation(cs->x_hi - 2, bg_price, col,
+                                    ImVec2(5, -5), false, "C%d %s", ci, sname);
+            }
+        }
+
         ImPlot::EndPlot();
     }
     ImPlot::PopStyleColor(2);  // PlotBg + AxisGrid
