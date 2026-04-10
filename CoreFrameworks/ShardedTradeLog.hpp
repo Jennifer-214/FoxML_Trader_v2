@@ -73,10 +73,11 @@ inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol) {
     log->row_count = 0;
     log->writes_truncated = 0;
 
-    // Build filename: logging/SYMBOL_sharded_order_history.csv
+    // Build filename: logging/SYMBOL_order_history.csv
+    // matches the path the GUI's TradeReader expects
     char filename[256];
     int n = snprintf(filename, sizeof(filename),
-                     "logging/%s_sharded_order_history.csv", symbol);
+                     "logging/%s_order_history.csv", symbol);
     if (n < 0 || (size_t)n >= sizeof(filename)) return 0;
 
     // Detect existing content so we don't double-write the header. fopen("a")
