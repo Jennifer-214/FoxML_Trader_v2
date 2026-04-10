@@ -58,6 +58,11 @@
 #include "SPSCRing.hpp"
 #include "Tick.hpp"
 
+#ifdef USE_IMGUI_GUI
+#include "../GUI/CandleAccumulator.hpp"
+#include "../GUI/GuiThread.hpp"
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -401,9 +406,31 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     std::atomic<double> last_volume{0.0};
 
     //----------------------------------------------------------------------
+    // GUI thread (ImGui build only)
+    //----------------------------------------------------------------------
+    // Same double-buffered TUISharedState pattern as the legacy engine in
+    // main.cpp. The producer thread's slow-path populates TUISnapshot via
+    // TUI_CopySnapshotSharded. The GUI thread reads the front buffer.
+#ifdef USE_IMGUI_GUI
+    static TUISharedState g_shared;
+    memset(&g_shared, 0, sizeof(g_shared));
+    g_shared.config_path = "engine_sharded.cfg";
+    g_shared.active_idx = 0;
+    g_shared.quit_requested = 0;
+    g_shared.pause_requested = 0;
+    g_shared.reload_requested = 0;
+    g_shared.drag_slot = -1;
+    static CandleAccumulator g_candle_acc;
+    CandleAccumulator_Init(&g_candle_acc, 60);
+    g_shared.candle_acc = &g_candle_acc;
+    pthread_t gui_tid;
+    pthread_create(&gui_tid, NULL, gui_thread_fn, &g_shared);
+#endif
+
+    //----------------------------------------------------------------------
     // Producer thread — generates synthetic ticks and fans out to all cores
     //----------------------------------------------------------------------
-    std::thread producer([&producer_done, &ticks_produced, &bcfg, &last_price, &last_volume, &cfg, &state, num_cores, use_synthetic] {
+    std::thread producer([&producer_done, &ticks_produced, &bcfg, &last_price, &last_volume, &cfg, &state, num_cores, use_synthetic, tsc_ghz] {
         EngineSharded_PinThread(0);  // best-effort pin to CPU 0
         uint64_t seq = 0;
         // Sharded mode uses a much shorter slow_path_interval than legacy
@@ -416,7 +443,7 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
         // Helper that fans a single tick out to every core's tick ring,
         // updates rolling stats, and runs the slow-path rebuild on cadence.
         auto fan_out = [num_cores, &seq, &ticks_produced, &last_price, &last_volume,
-                        &cfg, &state, &slow_path_counter, slow_path_interval]
+                        &cfg, &state, &slow_path_counter, slow_path_interval, tsc_ghz]
                        (double price_d, double volume_d, uint64_t ts_us) {
             Tick<F> t;
             memset(&t, 0, sizeof(t));
@@ -431,10 +458,13 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
                 if (g_engine_sharded_shutdown) return false;
             }
             ticks_produced.fetch_add(1, std::memory_order_relaxed);
-            // Update last-seen price/volume for the TUI panel. Relaxed
-            // because TUI is informational and races are tolerable.
             last_price.store(price_d, std::memory_order_relaxed);
             last_volume.store(volume_d, std::memory_order_relaxed);
+
+#ifdef USE_IMGUI_GUI
+            // Feed candles for the chart panel (same pattern as main.cpp:396)
+            CandleAccumulator_Push(&g_candle_acc, price_d, volume_d, 0);
+#endif
 
             // Slow path: feed rolling stats and rebuild gate parameters
             // every poll_interval ticks. Matches the legacy controller's
@@ -470,6 +500,38 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
                         }
                     }
                 }
+
+#ifdef USE_IMGUI_GUI
+                // Populate TUISnapshot for the GUI — same double-buffered
+                // pattern as legacy engine in main.cpp:845-912.
+                {
+                    int back = !__atomic_load_n(&g_shared.active_idx, __ATOMIC_ACQUIRE);
+                    int front = !back;
+                    TUISnapshot *bs = &g_shared.snapshots[back];
+                    const TUISnapshot *fs = &g_shared.snapshots[front];
+                    // carry graph history ring buffers from front buffer
+                    memcpy(bs->price_history, fs->price_history, sizeof(bs->price_history));
+                    memcpy(bs->volume_history, fs->volume_history, sizeof(bs->volume_history));
+                    memcpy(bs->pnl_history, fs->pnl_history, sizeof(bs->pnl_history));
+                    bs->graph_head = fs->graph_head;
+                    bs->graph_count = fs->graph_count;
+                    // populate from sharded state
+                    TUI_CopySnapshotSharded(bs, &state, &rolling_short, &rolling_long,
+                                             &cfg, price_d, volume_d);
+                    TUI_PopulatePerCoreLatency(bs, cores, num_cores, tsc_ghz);
+                    // append current data point to graph ring buffers
+                    bs->price_history[bs->graph_head] = bs->price;
+                    bs->volume_history[bs->graph_head] = bs->volume;
+                    bs->pnl_history[bs->graph_head] = bs->total_pnl;
+                    bs->graph_head = (bs->graph_head + 1) % TUISnapshot::GRAPH_LEN;
+                    if (bs->graph_count < TUISnapshot::GRAPH_LEN) bs->graph_count++;
+                    __atomic_store_n(&g_shared.active_idx, back, __ATOMIC_RELEASE);
+                }
+                // check GUI quit request
+                if (g_shared.quit_requested) {
+                    g_engine_sharded_shutdown = 1;
+                }
+#endif
             }
             return true;
         };
@@ -622,6 +684,13 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
         }
     });
 
+#ifdef USE_IMGUI_GUI
+    // GUI mode: the GUI thread handles rendering. Just wait for shutdown.
+    while (!g_engine_sharded_shutdown) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (g_shared.quit_requested) g_engine_sharded_shutdown = 1;
+    }
+#else
     // Live TUI render loop. Refreshes ~5x/sec on stdout with the per-core
     // latency table front and center. Uses the same warm color palette as
     // the legacy TUI for visual consistency. Hides the cursor while running
@@ -844,11 +913,16 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     #undef SH_GREEN
     #undef SH_RED
     #undef SH_PNL
+#endif  // USE_IMGUI_GUI else (ANSI TUI)
 
     fprintf(stderr, "[sharded] shutdown requested, joining threads...\n");
     producer.join();
     for (auto& e : executors) e.join();
     drainer.join();
+#ifdef USE_IMGUI_GUI
+    g_shared.quit_requested = 1;
+    pthread_join(gui_tid, NULL);
+#endif
     OrderManager_Shutdown(&oms);
 
     fprintf(stderr, "[sharded] all threads joined.\n");
