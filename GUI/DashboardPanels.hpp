@@ -136,6 +136,26 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
         ImGui::TextColored(FoxmlColors::comment, "%s", detail);
     }
 
+    // per-core strategy overview (sharded mode)
+    if (s->sharded_mode_active && s->per_core_count > 0) {
+        static const char *sn[] = {"MR", "MOM", "DIP", "ML", "EMA"};
+        static const ImVec4 sc[] = {
+            {0.40f, 0.60f, 0.85f, 1.0f},  // MR blue
+            {0.85f, 0.55f, 0.25f, 1.0f},  // MOM orange
+            {0.45f, 0.75f, 0.45f, 1.0f},  // DIP green
+            {0.65f, 0.45f, 0.80f, 1.0f},  // ML purple
+            {0.35f, 0.75f, 0.80f, 1.0f},  // EMA cyan
+        };
+        ImGui::TextColored(FoxmlColors::sand, "CORES:");
+        for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+            ImGui::SameLine();
+            uint8_t sid = s->per_core[i].strategy_id_display;
+            ImVec4 col = (sid < 5) ? sc[sid] : FoxmlColors::comment;
+            const char *name = (sid < 5) ? sn[sid] : (sid == 0xFF ? "OFF" : "?");
+            ImGui::TextColored(col, "C%d:%s", i, name);
+        }
+    }
+
     ImGui::End();
 }
 
@@ -867,4 +887,49 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
 #ifdef LATENCY_PROFILING
     GUI_Panel_Latency(s);
 #endif
+    // Per-core latency panel (sharded mode only)
+    if (s->sharded_mode_active && s->per_core_count > 0) {
+        ImGui::Begin("Per-Core Latency");
+        SectionHeader("PER-CORE LATENCY");
+        ImGui::TextColored(FoxmlColors::comment, "(last 256 samples, subtract ~25-30ns rdtsc floor)");
+
+        ImGuiTableFlags tf = ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_SizingStretchProp;
+        if (ImGui::BeginTable("##percore", 8, tf)) {
+            ImGui::TableSetupColumn("Core",    ImGuiTableColumnFlags_WidthFixed, 35);
+            ImGui::TableSetupColumn("Strat",   ImGuiTableColumnFlags_WidthFixed, 35);
+            ImGui::TableSetupColumn("Samples", ImGuiTableColumnFlags_WidthFixed, 55);
+            ImGui::TableSetupColumn("Min",     ImGuiTableColumnFlags_WidthFixed, 50);
+            ImGui::TableSetupColumn("p50",     ImGuiTableColumnFlags_WidthFixed, 50);
+            ImGui::TableSetupColumn("p95",     ImGuiTableColumnFlags_WidthFixed, 50);
+            ImGui::TableSetupColumn("p99",     ImGuiTableColumnFlags_WidthFixed, 50);
+            ImGui::TableSetupColumn("Max",     ImGuiTableColumnFlags_WidthFixed, 50);
+            ImGui::TableHeadersRow();
+
+            const char *snames[] = {"MR", "MOM", "DIP", "ML", "EMA"};
+            for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+                const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%d", i);
+                ImGui::TableNextColumn();
+                uint8_t sid = pc->strategy_id_display;
+                ImGui::TextColored(FoxmlColors::primary, "%s", sid < 5 ? snames[sid] : "?");
+                ImGui::TableNextColumn();
+                if (pc->samples == 0) {
+                    ImGui::TextColored(FoxmlColors::comment, "-");
+                    for (int j = 0; j < 5; ++j) { ImGui::TableNextColumn(); ImGui::TextColored(FoxmlColors::comment, "-"); }
+                } else {
+                    ImGui::Text("%lu", (unsigned long)pc->samples);
+                    ImGui::TableNextColumn(); ImGui::Text("%.0f", pc->min_ns);
+                    ImGui::TableNextColumn(); ImGui::Text("%.0f", pc->p50_ns);
+                    ImGui::TableNextColumn(); ImGui::Text("%.0f", pc->p95_ns);
+                    ImGui::TableNextColumn(); ImGui::Text("%.0f", pc->p99_ns);
+                    ImGui::TableNextColumn(); ImGui::Text("%.0f", pc->max_ns);
+                }
+            }
+            ImGui::EndTable();
+        }
+        ImGui::End();
+    }
 }
