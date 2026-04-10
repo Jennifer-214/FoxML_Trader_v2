@@ -116,21 +116,8 @@ int main(int argc, char *argv[]) {
     // create logging directory — all runtime files go here (rm -rf logging/* for clean start)
     mkdir("logging", 0755); // silently succeeds if already exists
 
-    //==================================================================================================
-    // Phase 13 dispatch: per-core sharded mode is a separate entry point that
-    // bypasses the legacy single-threaded engine entirely. Set engine_mode =
-    // sharded in engine.cfg to land here. This is currently a latency testbed
-    // (synthetic ticks, no exchange) — see CoreFrameworks/EngineSharded.hpp.
-    //==================================================================================================
-    if (ccfg.engine_mode == ENGINE_MODE_SHARDED) {
-        tt::EngineSharded_Run(ccfg, bcfg);
-        return 0;
-    }
-
-    // auto-redirect stderr to log file — always when log_file is set
-    // rotates on startup: engine.log → engine.log.1 (keeps one previous session)
-    // in TUI mode: diagnostics go to file instead of being eaten by screen redraws
-    // in headless mode: no manual 2>engine.log needed
+    // auto-redirect stderr to log file — must happen BEFORE sharded dispatch
+    // so the Engine Log panel can read from logging/engine.log
     if (bcfg.log_file[0]) {
         char log_path[300], prev[304];
         snprintf(log_path, sizeof(log_path), "logging/%s", bcfg.log_file);
@@ -142,6 +129,16 @@ int main(int argc, char *argv[]) {
         } else {
             setvbuf(stderr, NULL, _IOLBF, 0); // line-buffered so tail -f works
         }
+    }
+
+    //==================================================================================================
+    // Phase 13 dispatch: per-core sharded mode is a separate entry point that
+    // bypasses the legacy single-threaded engine entirely. Set engine_mode =
+    // sharded in engine.cfg to land here.
+    //==================================================================================================
+    if (ccfg.engine_mode == ENGINE_MODE_SHARDED) {
+        tt::EngineSharded_Run(ccfg, bcfg);
+        return 0;
     }
 
     //==================================================================================================
