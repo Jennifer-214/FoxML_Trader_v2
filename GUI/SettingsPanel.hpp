@@ -220,6 +220,12 @@ static const CfgFieldDef field_defs[] = {
     {"core_1_strategy",          "Core 1",            "Core Strategies",  CFG_INT, "%d", NULL},
     {"core_2_strategy",          "Core 2",            "Core Strategies",  CFG_INT, "%d", NULL},
     {"core_3_strategy",          "Core 3",            "Core Strategies",  CFG_INT, "%d", NULL},
+    // Per-core risk allocation (0 = use shared risk_pct / num_cores)
+    {"core_0_risk_pct",          "Core 0 Risk %%",    "Core Risk",        CFG_FLOAT, "%.1f",
+        "Risk %% of total balance for core 0\n0 = use shared risk_pct / num_cores"},
+    {"core_1_risk_pct",          "Core 1 Risk %%",    "Core Risk",        CFG_FLOAT, "%.1f", NULL},
+    {"core_2_risk_pct",          "Core 2 Risk %%",    "Core Risk",        CFG_FLOAT, "%.1f", NULL},
+    {"core_3_risk_pct",          "Core 3 Risk %%",    "Core Risk",        CFG_FLOAT, "%.1f", NULL},
     // Per-strategy TP/SL overrides (0 = use shared take_profit_pct / stop_loss_pct)
     {"simpledip_tp_pct",         "DIP TP %%",         "SimpleDip Tuning", CFG_FLOAT, "%.2f",
         "SimpleDip-specific take profit %%\n0 = use shared TP %%"},

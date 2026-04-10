@@ -370,10 +370,10 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     // total. With risk_pct=10% and 4 cores starting at $10k, each core gets
     // $250 to risk on a single trade.
     double total_balance = FPN_ToDouble(cfg.starting_balance);
-    double risk_fraction = FPN_ToDouble(cfg.risk_pct);
-    if (risk_fraction <= 0.0) risk_fraction = 0.10;
-    double per_core_balance = (total_balance * risk_fraction) / (double)num_cores;
-    if (per_core_balance < 1.0) per_core_balance = 1.0;
+    double default_risk = FPN_ToDouble(cfg.risk_pct);
+    if (default_risk <= 0.0) default_risk = 0.10;
+    double default_per_core = (total_balance * default_risk) / (double)num_cores;
+    if (default_per_core < 1.0) default_per_core = 1.0;
 
     for (int i = 0; i < num_cores; ++i) {
         SPSCRing_Init(&tick_rings[i]);
@@ -382,9 +382,15 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
             FPN_Zero<F>(),  // intended_tp will be set by slow-path rebuild
             FPN_Zero<F>(),  // intended_sl ditto
             FPN_Zero<F>()); // intended_qty ditto
+        // per-core risk: use core-specific override if set, else shared/even split
+        double core_balance = default_per_core;
+        if (!FPN_IsZero(cfg.core_risk_pct[i])) {
+            core_balance = total_balance * FPN_ToDouble(cfg.core_risk_pct[i]);
+            if (core_balance < 1.0) core_balance = 1.0;
+        }
         EventLoopState_SetCoreStrategy(&state, i,
             cfg.core_strategies[i],
-            FPN_FromDouble<F>(per_core_balance));
+            FPN_FromDouble<F>(core_balance));
 
         // Cores start permission=0. The slow-path rebuild grants permission
         // once it has enough rolling-stats samples to compute meaningful

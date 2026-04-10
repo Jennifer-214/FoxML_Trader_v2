@@ -262,6 +262,11 @@ template <unsigned F> struct ControllerConfig {
   // Config syntax: core_0_strategy=simple_dip, core_1_strategy=ema_cross, etc.
   // Accepted names: mr, momentum, simple_dip, ml, ema_cross, none.
   uint8_t core_strategies[16]; // MAX_EXECUTION_CORES
+  // Per-core risk allocation. core_risk_pct[i] is the fraction of total
+  // balance this core can risk on a single trade. Default 0 = use the
+  // shared risk_pct / num_cores. Non-zero = use this specific percentage.
+  // Config syntax: core_0_risk_pct=20.0 (stored as 0.20).
+  FPN<F> core_risk_pct[16];    // MAX_EXECUTION_CORES
   // Per-strategy TP/SL overrides. Default 0 = fall back to the shared
   // take_profit_pct / stop_loss_pct. Non-zero = use this instead.
   // Momentum already has momentum_tp_mult / momentum_sl_mult (stddev mults).
@@ -447,6 +452,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.num_execution_cores = 4;
   cfg.sharded_force_synthetic = 0;
   for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
+  for (int i = 0; i < 16; ++i) cfg.core_risk_pct[i] = FPN_Zero<F>();  // 0 = shared
   cfg.simpledip_tp_pct  = FPN_Zero<F>();  // 0 = use shared take_profit_pct
   cfg.simpledip_sl_pct  = FPN_Zero<F>();
   cfg.mr_tp_pct         = FPN_Zero<F>();
@@ -706,6 +712,14 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     if (strcmp(key, "sharded_force_synthetic") == 0) {
       cfg.sharded_force_synthetic = (uint8_t)(atoi(val) != 0 ? 1 : 0);
+      continue;
+    }
+    // Per-core risk: core_0_risk_pct=20.0 means core 0 risks 20% of balance
+    if (strncmp(key, "core_", 5) == 0 && strstr(key, "_risk_pct")) {
+      int core_idx = atoi(key + 5);
+      if (core_idx >= 0 && core_idx < 16) {
+        cfg.core_risk_pct[core_idx] = FPN_FromDouble<F>(atof(val) / 100.0);
+      }
       continue;
     }
     // Per-core strategy: core_0_strategy=simple_dip, core_1_strategy=none, etc.
