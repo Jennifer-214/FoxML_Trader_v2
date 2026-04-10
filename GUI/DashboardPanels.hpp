@@ -573,8 +573,9 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s) {
     ImGuiTableFlags flags = ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
                             ImGuiTableFlags_SizingStretchProp;
 
-    if (ImGui::BeginTable("##positions", 10, flags)) {
+    if (ImGui::BeginTable("##positions", 11, flags)) {
         ImGui::TableSetupColumn("#",      ImGuiTableColumnFlags_WidthFixed, 25);
+        ImGui::TableSetupColumn("Strat",  ImGuiTableColumnFlags_WidthFixed, 35);
         ImGui::TableSetupColumn("Entry",  ImGuiTableColumnFlags_WidthFixed, 60);
         ImGui::TableSetupColumn("Now",    ImGuiTableColumnFlags_WidthFixed, 60);
         ImGui::TableSetupColumn("Diff",   ImGuiTableColumnFlags_WidthFixed, 50);
@@ -596,7 +597,25 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s) {
 
             // # column
             ImGui::TableNextColumn();
-            ImGui::TextColored(FoxmlColors::wheat, "#%d", displayed);
+            ImGui::TextColored(FoxmlColors::wheat, "#%d", ps->idx);
+
+            // strategy (color-coded)
+            ImGui::TableNextColumn();
+            {
+                static const char *sn[] = {"MR", "MOM", "DIP", "ML", "EMA"};
+                static const ImVec4 sc[] = {
+                    {0.40f, 0.60f, 0.85f, 1.0f},
+                    {0.85f, 0.55f, 0.25f, 1.0f},
+                    {0.45f, 0.75f, 0.45f, 1.0f},
+                    {0.65f, 0.45f, 0.80f, 1.0f},
+                    {0.35f, 0.75f, 0.80f, 1.0f},
+                };
+                uint8_t sid = (ps->idx < 16 && s->sharded_mode_active)
+                    ? s->per_core[ps->idx].strategy_id_display : 0xFF;
+                ImVec4 col = (sid < 5) ? sc[sid] : FoxmlColors::comment;
+                const char *name = (sid < 5) ? sn[sid] : "?";
+                ImGui::TextColored(col, "%s", name);
+            }
 
             // entry
             ImGui::TableNextColumn();
