@@ -953,9 +953,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
     ImGui::Separator();
 
-    // collect features button
+    // collect features button — disabled if no data selected OR a backtest is
+    // already running (mirrors the Walk-Forward pattern). prevents the
+    // "click button N times because nothing visibly happens" UX trap that
+    // fires N parallel backtests each writing to the same log file.
     bool has_data = data->selected_count > 0;
-    if (!has_data) ImGui::BeginDisabled();
+    bool can_collect = has_data && !run_control->running;
+    if (!can_collect) ImGui::BeginDisabled();
     if (ImGui::Button("Collect Features")) {
         // clear previous training/walk-forward results on re-collect
         state->model_trained = false;
@@ -992,10 +996,18 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         pthread_create(&run_control->worker_tid, NULL, backtest_worker_fn, args);
         pthread_detach(run_control->worker_tid);
     }
-    if (!has_data) {
+    if (!can_collect) {
         ImGui::EndDisabled();
         ImGui::SameLine();
-        ImGui::TextDisabled("Select data files first");
+        if (run_control->running) {
+            ImGui::TextColored(FoxmlColors::yellow, "running... (%d%%)", run_control->progress_pct);
+        } else {
+            ImGui::TextDisabled("Select data files first");
+        }
+    } else if (run_control->running) {
+        // safety belt: if running flag flipped while button was enabled (race), still warn
+        ImGui::SameLine();
+        ImGui::TextColored(FoxmlColors::yellow, "running... (%d%%)", run_control->progress_pct);
     }
 
     // show feature collection status
@@ -1046,7 +1058,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     ImGui::SetItemTooltip("Where to save the trained model\n"
                           "used by the engine at runtime for ML buy signals");
 
-    // train button
+    // synchronous-train warning — sets expectations before the freeze
+    ImGui::TextColored(FoxmlColors::comment,
+        "(Train Model runs synchronously — GUI may freeze 5-30s. Watch the Log panel for progress.)");
+
+    // train button. NOTE: Train Model runs SYNCHRONOUSLY on the UI thread
+    // (no worker thread). the GUI will freeze for 5-30 seconds during XGBoost
+    // training. the tooltip warns the user so it doesn't feel broken.
     bool can_train = results->sample_count >= 10;
 #ifndef USE_XGBOOST
     can_train = false;
@@ -1058,6 +1076,15 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         state->status_msg[0] = '\0';
         state->wf_has_results = false;
 #ifdef USE_XGBOOST
+        // log to stderr so the Log panel shows the user "training started"
+        // before XGBoost grabs the UI thread for 5-30s. without this, the
+        // Train Model button looks frozen (because it IS — synchronous).
+        fprintf(stderr, "[TRAIN] starting on %d samples (label_type=%d, "
+                        "max_depth=%d, lr=%.3f, n_est=%d)...\n",
+                results->sample_count, state->label_type,
+                state->max_depth, state->learning_rate, state->n_estimators);
+        fflush(stderr);
+
         // create output directory
         mkdir("models", 0755);
 

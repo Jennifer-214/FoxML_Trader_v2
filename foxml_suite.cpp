@@ -28,8 +28,11 @@
 #include "GUI/TradeHistoryPanel.hpp"
 #include "GUI/SettingsPanel.hpp"
 #include "GUI/DashboardPanels.hpp"
+#include "GUI/LogViewerPanel.hpp"
 
 #include "Backtest/BacktestPanels.hpp"
+
+#include <sys/stat.h>  // mkdir
 
 //======================================================================================================
 // [SUITE DOCK LAYOUT]
@@ -80,6 +83,20 @@ static void Suite_SetupDefaultLayout(ImGuiID dockspace_id) {
 int main(int argc, char *argv[]) {
     fprintf(stderr, "foxml suite — backtesting + ML training workstation\n");
     fprintf(stderr, "Copyright (c) 2026 Jennifer Lewis. All rights reserved.\n\n");
+
+    // ensure logging dir exists, then redirect stderr to logging/foxml_suite.log
+    // so the in-app Log panel can tail it. mirrors main.cpp:117-132 pattern.
+    mkdir("logging", 0755);
+    {
+        const char *log_path = "logging/foxml_suite.log";
+        const char *prev_path = "logging/foxml_suite.log.1";
+        rename(log_path, prev_path);  // rotate previous run, silently fails if absent
+        FILE *lf = freopen(log_path, "w", stderr);
+        if (lf) {
+            setvbuf(stderr, NULL, _IOLBF, 0);  // line-buffered so the Log panel tails cleanly
+            fprintf(stderr, "[suite] stderr → %s\n", log_path);
+        }
+    }
 
     //==================================================================================================
     // SDL2 + ImGui init (same pattern as GUI/GuiThread.hpp)
@@ -192,6 +209,12 @@ int main(int argc, char *argv[]) {
     static TrainingPanelState training;
     TrainingPanel_Init(&training);
 
+    // log viewer — tails logging/foxml_suite.log so the user can see backtest
+    // progress in real time without flipping to a terminal. backtest worker
+    // thread fprintf's go through stderr → the log file → this panel.
+    static LogViewer log_viewer;
+    LogViewer_Init(&log_viewer, "logging/foxml_suite.log");
+
     // trade CSV reader for chart markers
     TradeData trades;
     TradeData_Init(&trades, BACKTEST_TRADE_CSV);
@@ -275,6 +298,7 @@ int main(int argc, char *argv[]) {
         GUI_Panel_Comparison(&comparison, &run_control.results);
         GUI_Panel_Optimizer(&optimizer, &data_panel);
         GUI_Panel_Training(&training, &run_control, &data_panel);
+        GUI_Panel_LogViewer(&log_viewer);
 
         // dashboard panels — show backtest engine state (reuse from live GUI)
         if (run_control.complete) {
