@@ -17,6 +17,7 @@
 #include "../DataStream/MockGenerator.hpp"
 #include "../CoreFrameworks/PortfolioController.hpp"
 #include "../Backtest/BacktestEngine.hpp"
+#include "../Backtest/HeldOutSplit.hpp"
 
 using namespace std;
 
@@ -3466,7 +3467,157 @@ int main() {
               fabs(effective_thr(0.6, 2.0, 0.0) - 1.0) < 1e-9);
     }
 
-    // ----- Group 4: Backward compat — cfg parsing (2 assertions) -------------------------------------
+    //======================================================================================================
+    // [PHASE 7prep TESTS — HeldOutSplit + Backtest_RunFullValidation framework]
+    //======================================================================================================
+    // see plans/phase7-prep-validation-infrastructure-tests.md. 12 assertions
+    // across 4 groups. Tests pin the lock-token discipline + slice math + gap
+    // computation framework. Held-out training itself is Phase 7 finalize work.
+    //======================================================================================================
+
+    // ----- Group 1: HeldOutSplit math (4 assertions) ---------------------------------------------------
+    printf("\n--- Phase 7prep: HeldOutSplit math ---\n");
+    {
+        // 20% on 1000 samples → trainval=[0, 800), test=[800, 1000)
+        HeldOutSplit s = HeldOutSplit_Make(1000, 0.20);
+        check("Make: 20% split → trainval=800, test=[800,1000), locked=1",
+              s.total_samples == 1000 && s.trainval_end_idx == 800 &&
+              s.test_start_idx == 800 && s.locked == 1);
+    }
+    {
+        // 5% — minimum allowed (clamped if smaller)
+        HeldOutSplit s = HeldOutSplit_Make(1000, 0.05);
+        check("Make: 5% split → trainval=950 (lower bound)",
+              s.trainval_end_idx == 950);
+    }
+    {
+        // Out-of-range fraction (60%) clamps to 30% max — not rejected
+        HeldOutSplit s = HeldOutSplit_Make(1000, 0.60);
+        check("Make: out-of-range fraction (60%) clamps to 30% max",
+              s.trainval_end_idx == 700 && s.test_start_idx == 700);
+    }
+    {
+        // Token is non-empty 32-char hex
+        HeldOutSplit s = HeldOutSplit_Make(1000, 0.20);
+        check("Make: lock_token is 32 hex chars + null",
+              strlen(s.lock_token) == 32);
+    }
+
+    // ----- Group 2: Lock-token discipline (3 assertions) -----------------------------------------------
+    printf("\n--- Phase 7prep: Lock-token discipline ---\n");
+    {
+        // TestAccessAllowed returns 0 when locked
+        HeldOutSplit s = HeldOutSplit_Make(1000, 0.20);
+        check("TestAccessAllowed: 0 when locked", HeldOutSplit_TestAccessAllowed(&s) == 0);
+    }
+    {
+        // Unlock with correct token → access allowed
+        HeldOutSplit s = HeldOutSplit_Make(1000, 0.20);
+        char saved[33];
+        strncpy(saved, s.lock_token, sizeof(saved));
+        int ok = HeldOutSplit_Unlock(&s, saved);
+        check("Unlock with correct token → access allowed",
+              ok == 1 && HeldOutSplit_TestAccessAllowed(&s) == 1);
+    }
+    {
+        // Unlock with wrong token → still locked
+        HeldOutSplit s = HeldOutSplit_Make(1000, 0.20);
+        int ok = HeldOutSplit_Unlock(&s, "deadbeefcafebabe1234567890abcdef");
+        check("Unlock with wrong token → refused, still locked",
+              ok == 0 && HeldOutSplit_TestAccessAllowed(&s) == 0);
+    }
+
+    // ----- Group 3: Backtest_RunFullValidation framework (3 assertions) -------------------------------
+    // Per Tier 2 amendment to phase7prep plan: verify the framework logic
+    // (lock check, slice view, gap math) without driving actual XGBoost
+    // training (Phase 7 finalize work). Pass an empty BacktestResults so
+    // Backtest_RunWalkForward returns early — we just exercise the
+    // framework dispatch in Backtest_RunFullValidation itself.
+    printf("\n--- Phase 7prep: RunFullValidation framework ---\n");
+    {
+        // Locked split → function refuses to run, ran_held_out stays 0
+        HeldOutSplit s = HeldOutSplit_Make(1000, 0.20); // locked by default
+        BacktestResults dummy;
+        BacktestResults_Init(&dummy);
+        FullValidationResults out = {};
+        volatile int prog = 0, cancel = 0;
+        Backtest_RunFullValidation(&out, &dummy, &s,
+                                    /*n_splits=*/3, /*horizon=*/100, /*buffer=*/10,
+                                    /*min_train=*/100, &prog, &cancel,
+                                    LABEL_WIN_LOSS, /*gap_threshold=*/0.05f);
+        check("RunFullValidation refuses on locked split (gap_acceptable=0)",
+              out.gap_acceptable == 0 && out.ran_held_out == 0);
+        BacktestResults_Free(&dummy);
+    }
+    {
+        // Unlocked + empty data → still doesn't crash; slice math handles 0
+        HeldOutSplit s = HeldOutSplit_Make(1000, 0.20);
+        HeldOutSplit_Unlock(&s, s.lock_token);
+        BacktestResults dummy;
+        BacktestResults_Init(&dummy);
+        // sample_count stays 0 — Backtest_RunWalkForward returns early
+        FullValidationResults out = {};
+        volatile int prog = 0, cancel = 0;
+        Backtest_RunFullValidation(&out, &dummy, &s,
+                                    /*n_splits=*/3, /*horizon=*/100, /*buffer=*/10,
+                                    /*min_train=*/100, &prog, &cancel,
+                                    LABEL_WIN_LOSS, /*gap_threshold=*/0.05f);
+        check("RunFullValidation: unlocked + zero samples → no crash, gap_threshold preserved",
+              fabs(out.gap_threshold - 0.05f) < 1e-7f && out.ran_held_out == 0);
+        BacktestResults_Free(&dummy);
+    }
+    {
+        // Gap math sanity: when WF mean and held_out are both 0, gap is 0,
+        // gap_acceptable is 0 (because ran_held_out=0 in stub mode — signals
+        // "not yet validated" rather than "validated OK")
+        HeldOutSplit s = HeldOutSplit_Make(1000, 0.20);
+        HeldOutSplit_Unlock(&s, s.lock_token);
+        BacktestResults dummy;
+        BacktestResults_Init(&dummy);
+        FullValidationResults out = {};
+        volatile int prog = 0, cancel = 0;
+        Backtest_RunFullValidation(&out, &dummy, &s,
+                                    /*n_splits=*/3, /*horizon=*/100, /*buffer=*/10,
+                                    /*min_train=*/100, &prog, &cancel,
+                                    LABEL_WIN_LOSS, /*gap_threshold=*/0.05f);
+        check("RunFullValidation stub: gap_acceptable=0 even with zero gap (signals not-yet-validated)",
+              out.gap_acceptable == 0);
+        BacktestResults_Free(&dummy);
+    }
+
+    // ----- Group 4: Cfg parsing (2 assertions) -------------------------------
+    printf("\n--- Phase 7prep: Cfg backward compat ---\n");
+    {
+        // Defaults: held_out_fraction=0.20, gap_acceptable_threshold=0.05
+        char path[] = "/tmp/test_heldout_default_XXXXXX";
+        int fd = mkstemp(path);
+        if (fd >= 0) {
+            dprintf(fd, "# empty cfg\n");
+            close(fd);
+            ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(path);
+            check("default cfg: held_out_fraction=0.20, gap_threshold=0.05",
+                  fabs(FPN_ToDouble(cfg.held_out_fraction) - 0.20) < 1e-6 &&
+                  fabs(FPN_ToDouble(cfg.gap_acceptable_threshold) - 0.05) < 1e-6);
+            unlink(path);
+        }
+    }
+    {
+        // Explicit values
+        char path[] = "/tmp/test_heldout_explicit_XXXXXX";
+        int fd = mkstemp(path);
+        if (fd >= 0) {
+            dprintf(fd, "held_out_fraction=0.25\n"
+                        "gap_acceptable_threshold=0.10\n");
+            close(fd);
+            ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(path);
+            check("explicit cfg: held_out=0.25, gap_threshold=0.10",
+                  fabs(FPN_ToDouble(cfg.held_out_fraction) - 0.25) < 1e-6 &&
+                  fabs(FPN_ToDouble(cfg.gap_acceptable_threshold) - 0.10) < 1e-6);
+            unlink(path);
+        }
+    }
+
+    // ----- Group 4 (Phase 6prep): Backward compat — cfg parsing (2 assertions) -------------------------------------
     printf("\n--- Phase 6prep: Cfg backward compat ---\n");
     {
         // Old cfg without confidence_threshold_scale — defaults to 2.0
