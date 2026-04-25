@@ -14,6 +14,7 @@
 
 #include "../FixedPoint/FixedPointN.hpp"
 #include "WebSocketUtil.hpp"
+#include "../CoreFrameworks/Notify.hpp"  // Phase 8b — disconnect alerts
 #include <stdlib.h>
 #include <time.h>
 
@@ -263,6 +264,13 @@ static inline void *depth_thread_fn(void *arg) {
                 clock_gettime(CLOCK_REALTIME, &ts);
                 uint64_t at_us = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
                 DepthRecorder_LogGap(shared->recorder, at_us, "disconnect");
+            }
+            // Phase 8b: alert. Cooldown collapses repeated disconnect storms.
+            if (g_notify) {
+                Notify_Send(g_notify, NOTIFY_WARN, NK_DISCONNECT_DEPTH,
+                            "Binance depth WS disconnected",
+                            "book_imbalance gate is reading stale data until "
+                            "reconnect succeeds. Check if frequent or persistent.");
             }
             ds->connected = 0;
             continue;

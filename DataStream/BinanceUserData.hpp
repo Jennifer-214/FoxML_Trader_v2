@@ -46,6 +46,7 @@
 #include "../CoreFrameworks/ExchangeAdapter.hpp"
 #include "../CoreFrameworks/SPSCRing.hpp"
 #include "../CoreFrameworks/OrderManager.hpp"
+#include "../CoreFrameworks/Notify.hpp"  // Phase 8b — disconnect alerts
 #include "BinanceOrderAPI.hpp"
 
 #include <atomic>
@@ -463,6 +464,15 @@ static inline void ud_ws_thread(BinanceUserDataState* s) {
         if (s->shutdown_requested.load(std::memory_order_acquire)) break;
 
         fprintf(stderr, "[UserData] disconnected, reconnecting in 2s\n");
+        // Phase 8b: alert. Cooldown collapses the keepalive/frame-read/disconnect
+        // log triplet into one alert per cooldown window — this is the convergence
+        // point that always runs on disconnect, so a single Send here is enough.
+        if (g_notify) {
+            Notify_Send(g_notify, NOTIFY_WARN, NK_DISCONNECT_USERDATA,
+                        "Binance user-data WS disconnected",
+                        "Reconnecting automatically in 2 seconds. "
+                        "Investigate if disconnects are frequent or persistent.");
+        }
         for (int i = 0; i < 20 && !s->shutdown_requested.load(std::memory_order_acquire); ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }

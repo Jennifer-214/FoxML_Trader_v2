@@ -23,12 +23,9 @@
 #include "DataStream/BinanceDepth.hpp"
 #include "DataStream/EngineTUI.hpp"
 #include "CoreFrameworks/Notify.hpp"
-
-// Phase 8b — global notifier pointer storage. Declared extern in Notify.hpp.
-// nullptr by default (backtest, or live with notify_enabled=0). Caller-side
-// guards must check `if (g_notify) Notify_Send(...)`. Initialized in main()
-// after cfg load if cfg.notify_enabled=1.
-NotifyState *g_notify = nullptr;
+// Phase 8b — g_notify is a C++17 inline variable defined in Notify.hpp,
+// nullptr by default. Live engine assigns &g_notify_state in main() after
+// NotifyState_Init when cfg.notify_enabled=1 (lands in c3+c4).
 #include "CoreFrameworks/EngineSharded.hpp"
 #include "CoreFrameworks/PortfolioController.hpp"
 #include "MemHeaders/PoolAllocator.hpp"
@@ -102,6 +99,16 @@ static inline void engine_force_close_all(PortfolioController<FP> *ctrl, TradeLo
         fprintf(stderr, "[ENGINE] FATAL: bitmap not zero after force-close: 0x%04X\n",
                 ctrl->portfolio.active_bitmap);
         fprintf(stderr, "[ENGINE] halting - refusing to reconnect with orphaned positions\n");
+        if (g_notify) {
+            char body[256];
+            snprintf(body, sizeof(body),
+                     "Bitmap nonzero (0x%04X) after force-close — engine halted "
+                     "to avoid reconnecting with orphaned positions. Manual "
+                     "reconciliation required.",
+                     ctrl->portfolio.active_bitmap);
+            Notify_Send(g_notify, NOTIFY_CRITICAL, NK_ORPHAN_HALT,
+                        "Engine halted — orphan detection at force-close", body);
+        }
         exit(1);
     }
 }
@@ -276,6 +283,15 @@ int main(int argc, char *argv[]) {
                 double qty_d = binance_round_qty(btc_start, order_api.filters.lot_step_size);
                 if (qty_d >= order_api.filters.lot_min_qty) {
                     fprintf(stderr, "[LIVE] orphaned BTC %.8f — selling to recover USDT\n", qty_d);
+                    if (g_notify) {
+                        char body[256];
+                        snprintf(body, sizeof(body),
+                                 "Orphaned BTC balance %.8f detected at startup. "
+                                 "Engine is auto-selling to recover USDT.",
+                                 qty_d);
+                        Notify_Send(g_notify, NOTIFY_WARN, NK_ORPHAN_DETECTED,
+                                    "Orphan recovery at startup", body);
+                    }
                     char oid[32]; double fp = 0, fq = 0;
                     BinanceOrderAPI_MarketSell(&order_api, qty_d, oid, &fp, &fq);
                     // re-query USDT balance after sell
@@ -830,6 +846,15 @@ int main(int argc, char *argv[]) {
                         if (orphans) {
                             fprintf(stderr, "[LIVE] WARNING: %d orphaned real positions — selling\n",
                                     __builtin_popcount(orphans));
+                            if (g_notify) {
+                                char body[256];
+                                snprintf(body, sizeof(body),
+                                         "%d real positions detected without paper backing "
+                                         "(bitmap mismatch). Engine is auto-selling to recover.",
+                                         __builtin_popcount(orphans));
+                                Notify_Send(g_notify, NOTIFY_ALERT, NK_ORPHAN_DETECTED,
+                                            "Orphaned real positions detected", body);
+                            }
                             while (orphans) {
                                 int idx = __builtin_ctz(orphans);
                                 double qty_d = FPN_ToDouble(ctrl.portfolio.positions[idx].quantity);

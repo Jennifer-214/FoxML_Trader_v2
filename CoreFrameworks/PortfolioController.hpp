@@ -20,6 +20,7 @@
 #include "ControllerConfig.hpp"
 #include "OrderGates.hpp"
 #include "Portfolio.hpp"
+#include "Notify.hpp"  // Phase 8b — operational alerts at kill switch sites
 #include "../DataStream/TradeLog.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/WelfordStats.hpp"
@@ -871,6 +872,17 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
                 FPN_ToDouble(ctrl->portfolio.positions[idx].stop_loss_price));
         scan &= scan - 1;
       }
+      // Phase 8b: alert. Subject is short for SMS-style backends; body has
+      // the operational detail. Uses NOTIFY_ALERT (attention required).
+      if (g_notify) {
+        char body[256];
+        snprintf(body, sizeof(body),
+                 "Kill switch triggered (reason=%d). Equity=%.2f, balance=%.2f, "
+                 "%d open position(s). All buying halted.",
+                 ctrl->kill_reason, eq_d, bal_d, npos);
+        Notify_Send(g_notify, NOTIFY_ALERT, NK_KILL_TRIGGER,
+                    "Engine kill switch triggered", body);
+      }
       KillSwitch_Activate(ctrl, ctrl->kill_reason);
     }
   }
@@ -1446,6 +1458,15 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
         double pct = (FPN_ToDouble(loss) / FPN_ToDouble(ctrl->session_start_equity)) * 100.0;
         { char ts[16]; log_ts(ts, sizeof(ts));
         fprintf(stderr, "[%s] [KILL] daily loss %.2f%% exceeded limit — trading halted\n", ts, pct); }
+        if (g_notify) {
+          char body[256];
+          snprintf(body, sizeof(body),
+                   "Daily loss %.2f%% exceeded the configured limit (%.2f%%). "
+                   "Engine has halted all buying. Investigate immediately.",
+                   pct, FPN_ToDouble(ctrl->config.kill_switch_daily_loss_pct) * 100.0);
+          Notify_Send(g_notify, NOTIFY_ALERT, NK_KILL_DAILY_LOSS,
+                      "Engine kill switch — daily loss", body);
+        }
       }
     }
     // drawdown: dd = peak - equity, limit = peak * threshold
@@ -1457,6 +1478,15 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
         double pct = (FPN_ToDouble(dd) / FPN_ToDouble(ctrl->peak_equity)) * 100.0;
         { char ts[16]; log_ts(ts, sizeof(ts));
         fprintf(stderr, "[%s] [KILL] drawdown %.2f%% exceeded limit — trading halted\n", ts, pct); }
+        if (g_notify) {
+          char body[256];
+          snprintf(body, sizeof(body),
+                   "Drawdown %.2f%% from peak equity exceeded the configured limit (%.2f%%). "
+                   "Engine has halted all buying. Investigate immediately.",
+                   pct, FPN_ToDouble(ctrl->config.kill_switch_drawdown_pct) * 100.0);
+          Notify_Send(g_notify, NOTIFY_ALERT, NK_KILL_DRAWDOWN,
+                      "Engine kill switch — drawdown", body);
+        }
       }
     }
   }

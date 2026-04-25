@@ -107,9 +107,12 @@ struct NotifyState {
     int             worker_started;
 };
 
-// Global notifier pointer. extern here; storage in main.cpp.
-// Backtest leaves it null → callers must guard `if (g_notify) Notify_Send(...)`.
-extern NotifyState *g_notify;
+// Global notifier pointer. C++17 inline variable — single definition across
+// translation units (avoids needing a Notify.cpp). Initialized to nullptr.
+// Live engine assigns &g_notify_state to it after NotifyState_Init when
+// cfg.notify_enabled=1. Backtest, controller_test, foxml_suite all leave it
+// null → callers must guard `if (g_notify) Notify_Send(...)`.
+inline NotifyState *g_notify = nullptr;
 
 //======================================================================================================
 // [INTERNAL HELPERS]
