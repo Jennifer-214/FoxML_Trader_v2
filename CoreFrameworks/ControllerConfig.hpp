@@ -49,6 +49,15 @@ template <unsigned F> struct ControllerConfig {
   FPN<F> stop_loss_pct;    // per-position stop loss (e.g. 0.015 = 1.5%)
   FPN<F> starting_balance; // paper trading starting balance (e.g. 10000.0)
   FPN<F> fee_rate;         // per-trade fee rate (e.g. 0.001 = 0.1% for Binance)
+                           // Phase 8: legacy field. Pre-Phase-8 behavior preserved
+                           // when fee_rate_maker == fee_rate_taker == fee_rate.
+                           // Backtest fingerprint hashes this field (NOT the new
+                           // maker/taker fields) — preserves bundle compatibility.
+  // Phase 8 — bifurcated maker/taker fee rates. Live engine uses these per fill
+  // based on order->is_maker (set from Binance executionReport "m" field).
+  // Backtest simulates as all-taker (is_maker=0 always). Documented divergence.
+  FPN<F> fee_rate_maker;   // maker fill fee rate (e.g. 0.00075 = 0.075% Binance tier 0)
+  FPN<F> fee_rate_taker;   // taker fill fee rate (e.g. 0.00100 = 0.100% Binance tier 0)
   FPN<F> risk_pct; // fraction of balance to risk per position (e.g. 0.02 = 2%)
   // market microstructure filters (initial values - adapted at runtime by P&L
   // regression)
@@ -352,6 +361,11 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.starting_balance =
       FPN_FromDouble<F>(1000000.0); // 1M default so tests arent balance-limited
   cfg.fee_rate = FPN_FromDouble<F>(0.001); // 0.1% per trade (Binance default)
+  // Phase 8 — Binance tier 0 BNB-discount default rates. Live engine uses
+  // these per-fill based on order->is_maker. If user sets only fee_rate
+  // (legacy mode), backward-compat clause below mirrors to both.
+  cfg.fee_rate_maker = FPN_FromDouble<F>(0.00075); // 0.075% maker tier 0
+  cfg.fee_rate_taker = FPN_FromDouble<F>(0.00100); // 0.100% taker tier 0
   cfg.risk_pct = FPN_FromDouble<F>(0.02);  // risk 2% of balance per position
   cfg.volume_multiplier = FPN_FromDouble<F>(3.0);
   cfg.entry_offset_pct = FPN_FromDouble<F>(0.0015);
@@ -659,6 +673,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_PCT(take_profit_pct)
     CFG_PARSE_PCT(stop_loss_pct)
     CFG_PARSE_PCT(fee_rate)
+    CFG_PARSE_PCT(fee_rate_maker)
+    CFG_PARSE_PCT(fee_rate_taker)
     CFG_PARSE_PCT(risk_pct)
     CFG_PARSE_PCT(entry_offset_pct)
     CFG_PARSE_PCT(offset_min)
@@ -908,6 +924,49 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   }
 
   fclose(f);
+
+  // Phase 8 — backward-compat for fee_rate_maker / fee_rate_taker.
+  //
+  // Three valid cfg shapes:
+  //   1. Only fee_rate set (legacy): mirror to both maker + taker.
+  //      Live engine effectively becomes "all-fee_rate" — same as pre-Phase-8.
+  //   2. fee_rate_maker + fee_rate_taker set explicitly: live engine uses
+  //      per-fill rates based on order->is_maker.
+  //   3. Mixed: fee_rate set AND exactly ONE of maker/taker explicitly set.
+  //      The other stays at its DEFAULT, which is almost certainly wrong —
+  //      WARN loudly so the user can fix.
+  //
+  // Detect "explicitly set" by comparing against Default()'s values.
+  {
+    FPN<F> default_maker = FPN_FromDouble<F>(0.00075);
+    FPN<F> default_taker = FPN_FromDouble<F>(0.00100);
+    int maker_at_default = FPN_Equal(cfg.fee_rate_maker, default_maker);
+    int taker_at_default = FPN_Equal(cfg.fee_rate_taker, default_taker);
+    int legacy_set       = !FPN_IsZero(cfg.fee_rate);
+
+    if (maker_at_default && taker_at_default && legacy_set) {
+      // Legacy mode: only fee_rate set, mirror to both. Live + backtest
+      // behave identically to pre-Phase-8.
+      cfg.fee_rate_maker = cfg.fee_rate;
+      cfg.fee_rate_taker = cfg.fee_rate;
+      fprintf(stderr,
+              "[CFG] fee_rate=%.5f → mirrored to maker+taker (legacy mode)\n",
+              FPN_ToDouble(cfg.fee_rate));
+    } else if (legacy_set && (maker_at_default ^ taker_at_default)) {
+      // Mixed-cfg WARNING — almost certainly user error.
+      fprintf(stderr,
+              "[CFG] WARNING: fee_rate=%.5f set, but only one of "
+              "fee_rate_maker (%.5f) / fee_rate_taker (%.5f) explicitly set. "
+              "The other stayed at its default. If you meant to set both, "
+              "set both explicitly. If you meant legacy mode, remove the "
+              "explicitly-set one.\n",
+              FPN_ToDouble(cfg.fee_rate),
+              FPN_ToDouble(cfg.fee_rate_maker),
+              FPN_ToDouble(cfg.fee_rate_taker));
+    }
+    // else: case 2 (both maker+taker set, legacy fee_rate may also be set
+    // for fingerprint compat) — silent, working as intended.
+  }
 
   // post-load validation/clamping. min_warmup_samples gates on rolling.count
   // which caps at the short rolling window size (W=128). Values above 128
