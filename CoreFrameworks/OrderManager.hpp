@@ -167,6 +167,17 @@ struct OrderManagerState {
     // any fills arrive. HandleFill picks per Order's is_maker field.
     FPN<F>       fee_rate_maker;
     FPN<F>       fee_rate_taker;
+    // Phase 8 (post-coding c10) — maker/taker accounting counters parallel
+    // to PortfolioController's (which only fire in legacy mode). HandleFill
+    // increments these per fill so sharded mode has correct accounting.
+    // Sanity invariant: total_fees == total_maker_fees + total_taker_fees
+    // after every fill.
+    uint32_t     maker_fills_count;
+    uint32_t     taker_fills_count;
+    FPN<F>       total_maker_fees;
+    FPN<F>       total_taker_fees;
+    FPN<F>       total_fees;       // mirrors PortfolioController.total_fees
+                                    // for sanity invariant; OMS-side aggregate.
 
     // === KILL SWITCH STATE (moved from EventLoopState in phase 03 chunk 1) ===
     // Configured by EventLoopState_ConfigureKillSwitch (which now writes
@@ -290,6 +301,12 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     oms->fee_rate            = fee_rate;
     oms->fee_rate_maker      = fee_rate; // Phase 8: legacy default = same rate
     oms->fee_rate_taker      = fee_rate; // engine sets per-cfg after Init
+    // Phase 8 (post-coding c10) — counter init
+    oms->maker_fills_count   = 0;
+    oms->taker_fills_count   = 0;
+    oms->total_maker_fees    = FPN_Zero<F>();
+    oms->total_taker_fees    = FPN_Zero<F>();
+    oms->total_fees          = FPN_Zero<F>();
     oms->ks_min_balance      = FPN_Zero<F>();
     oms->ks_max_drawdown_pct = FPN_Zero<F>();
     oms->ks_peak_balance     = starting_balance;  // initial peak = start
@@ -506,6 +523,15 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         // For legacy / backtest paths, fee_rate_maker == fee_rate_taker → same rate.
         FPN<F> entry_rate = o->is_maker ? oms->fee_rate_maker : oms->fee_rate_taker;
         FPN<F> entry_fee  = FPN_Mul(notional, entry_rate);
+        // Phase 8 (post-coding c10) — accounting counters
+        oms->total_fees = FPN_AddSat(oms->total_fees, entry_fee);
+        if (o->is_maker) {
+            oms->maker_fills_count++;
+            oms->total_maker_fees = FPN_AddSat(oms->total_maker_fees, entry_fee);
+        } else {
+            oms->taker_fills_count++;
+            oms->total_taker_fees = FPN_AddSat(oms->total_taker_fees, entry_fee);
+        }
         Portfolio_OpenSlot(&oms->portfolio, (int)o->core_id,
                            fill_price, fill_qty,
                            o->intended_tp, o->intended_sl, entry_fee);
@@ -533,6 +559,15 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         // hybrid execution (Phase 9 POST_ONLY limit sells = potential maker).
         FPN<F> exit_rate = o->is_maker ? oms->fee_rate_maker : oms->fee_rate_taker;
         FPN<F> exit_fee  = FPN_Mul(exit_notional, exit_rate);
+        // Phase 8 (post-coding c10) — accounting counters on exit
+        oms->total_fees = FPN_AddSat(oms->total_fees, exit_fee);
+        if (o->is_maker) {
+            oms->maker_fills_count++;
+            oms->total_maker_fees = FPN_AddSat(oms->total_maker_fees, exit_fee);
+        } else {
+            oms->taker_fills_count++;
+            oms->total_taker_fees = FPN_AddSat(oms->total_taker_fees, exit_fee);
+        }
         FPN<F> total_fee     = FPN_Add(entry_fee, exit_fee);
         FPN<F> net           = FPN_Sub(gross, total_fee);
         oms->balance      = FPN_Add(oms->balance, net);
