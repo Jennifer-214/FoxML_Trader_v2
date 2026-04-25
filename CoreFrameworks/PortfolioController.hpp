@@ -237,6 +237,16 @@ template <unsigned F> struct PortfolioController {
   // Welford online trackers (unbounded stream, O(1) push)
   WelfordTracker<F> pnl_tracker;      // per-exit P&L distribution
   WelfordTracker<F> signal_tracker;   // buy signal strength distribution
+
+  // Phase 8 — maker/taker accounting. PLACED AT END OF STRUCT per cross-plan
+  // amendment #6: 2× FPN<F=64> = ~1KB; placing earlier could push hot-path
+  // fields (portfolio.active_bitmap, buying_halted, gate_offset) off their
+  // cache lines. Confirmed warm-path-only — incremented on fill consumption,
+  // read for stats display.
+  uint32_t maker_fills_count;
+  uint32_t taker_fills_count;
+  FPN<F> total_maker_fees;
+  FPN<F> total_taker_fees;
 };
 //======================================================================================================
 // [INIT]
@@ -249,6 +259,11 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->realized_pnl = FPN_Zero<F>();
   ctrl->balance = config.starting_balance;
   ctrl->total_fees = FPN_Zero<F>();
+  // Phase 8 — maker/taker accounting (placed at struct end, init at struct end)
+  ctrl->maker_fills_count = 0;
+  ctrl->taker_fills_count = 0;
+  ctrl->total_maker_fees = FPN_Zero<F>();
+  ctrl->total_taker_fees = FPN_Zero<F>();
   ctrl->wins = 0;
   ctrl->losses = 0;
   ctrl->total_buys = 0;
@@ -483,6 +498,14 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
     ctrl->daily_realized_pnl = FPN_AddSat(ctrl->daily_realized_pnl, pos_pnl);
     ctrl->balance = FPN_AddSat(ctrl->balance, net_proceeds);
     ctrl->total_fees = FPN_AddSat(ctrl->total_fees, exit_fee);
+    // Phase 8: TP/SL exits are market sells = taker. Synchronous path
+    // doesn't see WS executionReport, so attribute the fee bookkeeping
+    // to taker. For OMS event_log_mode=1 paths, the OMS books fees
+    // independently with real is_maker — that path doesn't update these
+    // counters (separation of concerns; counters track the controller's
+    // own synchronous accounting).
+    ctrl->taker_fills_count++;
+    ctrl->total_taker_fees = FPN_AddSat(ctrl->total_taker_fees, exit_fee);
     Welford_Push(&ctrl->pnl_tracker, pos_pnl);
 
     // per-strategy reward attribution (entry_strategy is a separate array, safe)
@@ -1304,6 +1327,10 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
         }
         ctrl->balance = FPN_SubSat(ctrl->balance, total_cost);
         ctrl->total_fees = FPN_AddSat(ctrl->total_fees, entry_fee);
+        // Phase 8: synchronous market BUY entry = taker. Same reasoning
+        // as the exit-fee site above.
+        ctrl->taker_fills_count++;
+        ctrl->total_taker_fees = FPN_AddSat(ctrl->total_taker_fees, entry_fee);
 
         // buffer buy record (no file I/O on hot path)
         { double _avg = FPN_ToDouble(ctrl->rolling.price_avg);

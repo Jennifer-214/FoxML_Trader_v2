@@ -840,6 +840,14 @@ struct TUISnapshot {
     double max_drawdown;     // peak-to-trough equity drop ($)
     double max_drawdown_pct; // peak-to-trough as % of peak
     double fee_ratio;        // total_fees / gross_wins (% of gains eaten by fees)
+    // Phase 8 — maker/taker breakdown. Sum of maker_fees + taker_fees should
+    // equal total_fees (sanity invariant). maker_fills_count is 0 in legacy /
+    // backtest paths (all-taker accounting). Phase 9 hybrid execution will
+    // produce non-zero maker counts when POST_ONLY limit fills land.
+    uint32_t maker_fills_count;
+    uint32_t taker_fills_count;
+    double total_maker_fees;
+    double total_taker_fees;
     // latency
 #ifdef LATENCY_PROFILING
     double hot_avg_ns, hot_min_ns, hot_max_ns, hot_p50_ns, hot_p95_ns, hot_p99_ns;
@@ -1136,6 +1144,13 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->total_buys = ctrl->total_buys;
     snap->wins       = ctrl->wins;
     snap->losses     = ctrl->losses;
+    // Phase 8 — maker/taker counters + fees. BacktestSnapshot_Copy is a thin
+    // wrapper around TUI_CopySnapshot per CLAUDE.md "Snapshot sync rule
+    // (simplified 2026-04)" — backtest gets these for free, no second update site.
+    snap->maker_fills_count = ctrl->maker_fills_count;
+    snap->taker_fills_count = ctrl->taker_fills_count;
+    snap->total_maker_fees  = FPN_ToDouble(ctrl->total_maker_fees);
+    snap->total_taker_fees  = FPN_ToDouble(ctrl->total_taker_fees);
     uint32_t total_exits = ctrl->wins + ctrl->losses;
     snap->win_rate      = (total_exits > 0) ? ((double)ctrl->wins / total_exits) * 100.0 : 0.0;
     double g_wins  = FPN_ToDouble(ctrl->gross_wins);
