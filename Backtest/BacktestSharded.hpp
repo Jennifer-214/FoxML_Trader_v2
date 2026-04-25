@@ -123,6 +123,13 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     ExchangeAdapter<BACKTEST_FP> empty_adapter{};
     OrderManagerState<BACKTEST_FP> oms;
     OrderManager_Init(&oms, empty_adapter, 0, cfg.starting_balance, cfg.fee_rate);
+    // Phase 8: backtest is all-taker. Set OMS rates explicitly so HandleFill's
+    // is_maker branch picks the right rate. Both = fee_rate_taker → backtest
+    // numerics unchanged from pre-Phase-8 (cfg legacy mirroring already set
+    // fee_rate_taker = fee_rate). Documented divergence from live (which has
+    // real per-fill maker/taker tagging from Binance executionReport).
+    oms.fee_rate_maker = cfg.fee_rate_taker; // backtest = all-taker semantics
+    oms.fee_rate_taker = cfg.fee_rate_taker;
     EventLoopState<BACKTEST_FP> state;
     EventLoopState_Init(&state, &oms);
 

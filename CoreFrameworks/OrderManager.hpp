@@ -162,6 +162,11 @@ struct OrderManagerState {
     FPN<F>       balance;
     FPN<F>       realized_pnl;
     FPN<F>       fee_rate;
+    // Phase 8 — maker/taker rates. Init sets both = fee_rate for backward
+    // compat; engine main.cpp sets them from cfg.fee_rate_maker/taker before
+    // any fills arrive. HandleFill picks per Order's is_maker field.
+    FPN<F>       fee_rate_maker;
+    FPN<F>       fee_rate_taker;
 
     // === KILL SWITCH STATE (moved from EventLoopState in phase 03 chunk 1) ===
     // Configured by EventLoopState_ConfigureKillSwitch (which now writes
@@ -283,6 +288,8 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     oms->balance             = starting_balance;
     oms->realized_pnl        = FPN_Zero<F>();
     oms->fee_rate            = fee_rate;
+    oms->fee_rate_maker      = fee_rate; // Phase 8: legacy default = same rate
+    oms->fee_rate_taker      = fee_rate; // engine sets per-cfg after Init
     oms->ks_min_balance      = FPN_Zero<F>();
     oms->ks_max_drawdown_pct = FPN_Zero<F>();
     oms->ks_peak_balance     = starting_balance;  // initial peak = start
@@ -494,7 +501,11 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
     if (o->type == (uint8_t)ORDER_MARKET_BUY) {
         // Entry fill: open portfolio slot.
         FPN<F> notional  = FPN_Mul(fill_price, fill_qty);
-        FPN<F> entry_fee = FPN_Mul(notional, oms->fee_rate);
+        // Phase 8: maker/taker fee on entry. o->is_maker comes from Binance
+        // executionReport "m" field (parsed in c3, written by the OMS dispatch).
+        // For legacy / backtest paths, fee_rate_maker == fee_rate_taker → same rate.
+        FPN<F> entry_rate = o->is_maker ? oms->fee_rate_maker : oms->fee_rate_taker;
+        FPN<F> entry_fee  = FPN_Mul(notional, entry_rate);
         Portfolio_OpenSlot(&oms->portfolio, (int)o->core_id,
                            fill_price, fill_qty,
                            o->intended_tp, o->intended_sl, entry_fee);
@@ -517,7 +528,11 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         FPN<F> qty_snap  = oms->portfolio.positions[pslot].quantity;
         FPN<F> gross     = Portfolio_CloseSlot(&oms->portfolio, pslot, fill_price);
         FPN<F> exit_notional = FPN_Mul(fill_price, qty_snap);
-        FPN<F> exit_fee      = FPN_Mul(exit_notional, oms->fee_rate);
+        // Phase 8: maker/taker fee on exit. ORDER_MARKET_SELL is taker by
+        // exchange definition, but read o->is_maker for forward-compat with
+        // hybrid execution (Phase 9 POST_ONLY limit sells = potential maker).
+        FPN<F> exit_rate = o->is_maker ? oms->fee_rate_maker : oms->fee_rate_taker;
+        FPN<F> exit_fee  = FPN_Mul(exit_notional, exit_rate);
         FPN<F> total_fee     = FPN_Add(entry_fee, exit_fee);
         FPN<F> net           = FPN_Sub(gross, total_fee);
         oms->balance      = FPN_Add(oms->balance, net);
@@ -596,8 +611,22 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
 
         o->avg_fill_price = FPN_FromDouble<F>(cmd.result.avg_fill_price);
         o->filled_qty     = FPN_FromDouble<F>(cmd.result.fill_qty);
-        o->state          = ORDER_FILLED;
-        oms->total_filled.fetch_add(1, std::memory_order_relaxed);
+        // Phase 8: maker/taker flag from Binance executionReport, parsed in c3.
+        // Fee_Compute reads this for entry-fee math when the controller books
+        // the fill. is_maker stays at Order_Init's 0 (taker) for synchronous
+        // REST fills (Phase 02 path) — Binance market orders are taker by def.
+        o->is_maker = cmd.result.is_maker;
+        // Phase 8: pick FILLED vs PARTIAL based on Binance "X" field (parsed
+        // in c3 as order_complete). For ACK-only paths above we already
+        // returned with ORDER_ACKNOWLEDGED, so reaching here means an actual
+        // fill (full or partial) happened. order_complete=0 = PARTIALLY_FILLED.
+        // Defensive: if order_complete is missing from the event (parser sets
+        // 0 in that case), we err toward PARTIAL — keeps the order alive in
+        // the OMS, won't lose track. Subsequent fill events resolve to FILLED.
+        o->state = cmd.result.order_complete ? ORDER_FILLED : ORDER_PARTIAL;
+        if (o->state == ORDER_FILLED) {
+            oms->total_filled.fetch_add(1, std::memory_order_relaxed);
+        }
 
         // Mode 1 fill handler: portfolio mutation + event log.
         if (oms->event_log_mode == 1) {

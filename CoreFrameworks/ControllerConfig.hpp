@@ -58,6 +58,8 @@ template <unsigned F> struct ControllerConfig {
   // Backtest simulates as all-taker (is_maker=0 always). Documented divergence.
   FPN<F> fee_rate_maker;   // maker fill fee rate (e.g. 0.00075 = 0.075% Binance tier 0)
   FPN<F> fee_rate_taker;   // taker fill fee rate (e.g. 0.00100 = 0.100% Binance tier 0)
+  // Fee_Compute helper — defined after the struct so all fee math sites
+  // share one implementation. See note in main file just below struct.
   FPN<F> risk_pct; // fraction of balance to risk per position (e.g. 0.02 = 2%)
   // market microstructure filters (initial values - adapted at runtime by P&L
   // regression)
@@ -345,6 +347,30 @@ template <unsigned F> struct ControllerConfig {
   // green during the migration window.
   uint32_t oms_event_log_mode; // 0 = legacy (default), 1 = event log
 };
+
+//======================================================================================================
+// [FEE_COMPUTE — Phase 8 maker/taker helper]
+//======================================================================================================
+// Apply the correct fee rate based on whether the fill was a maker or taker.
+// Single source of truth for fee math on a per-fill basis.
+//
+// Caller-side discipline (CLAUDE.md "Maker/Taker Accuracy" invariant in c7):
+//   - ENTRY fees: pass order->is_maker from the matching fill
+//   - EXIT fees from market sells (TP/SL hits): pass is_maker=0 (always taker)
+//   - EXIT fees from limit sells (Phase 9 hybrid execution, deferred): pass
+//     order->is_maker from the matching exit fill
+//
+// Backtest path: pass is_maker=0 always — backtest simulates as all-taker
+// (documented divergence; backtest maker simulation is Phase 9 work).
+//
+// In legacy cfg mode (only fee_rate set, mirrored to maker+taker), both
+// branches return identical values → behavior matches pre-Phase-8.
+template <unsigned F>
+inline FPN<F> Fee_Compute(const ControllerConfig<F>* cfg, FPN<F> notional, int is_maker) {
+    FPN<F> rate = is_maker ? cfg->fee_rate_maker : cfg->fee_rate_taker;
+    return FPN_Mul(notional, rate);
+}
+
 //======================================================================================================
 template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   ControllerConfig<F> cfg;

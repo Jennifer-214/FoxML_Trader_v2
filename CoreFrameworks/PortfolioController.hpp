@@ -469,7 +469,10 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
     // P&L computation (FPN-only, no doubles until display boundary)
     // all position data from record — immune to slot reuse
     FPN<F> gross_proceeds = FPN_Mul(exit_price, rec->quantity);
-    FPN<F> exit_fee = FPN_Mul(gross_proceeds, ctrl->config.fee_rate);
+    // Phase 8: TP/SL exits = market sell = always taker by exchange
+    // definition. Use fee_rate_taker. Hybrid execution (Phase 9) would add
+    // limit-order exits that need ExitRecord.is_maker; for now, taker.
+    FPN<F> exit_fee = FPN_Mul(gross_proceeds, ctrl->config.fee_rate_taker);
     FPN<F> net_proceeds = FPN_SubSat(gross_proceeds, exit_fee);
     FPN<F> entry_cost = FPN_Mul(rec->entry_price, rec->quantity);
     FPN<F> total_entry_cost = FPN_AddSat(entry_cost, rec->entry_fee);
@@ -722,6 +725,8 @@ inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) 
   // NO-TRADE BAND: suppress entries when signal strength < fee breakeven
   // cost-aware: signal must exceed fee_rate × no_trade_band_mult to justify trade
   if (ctrl->config.no_trade_band_enabled && !FPN_IsZero(ctrl->rolling.price_avg)) {
+    // Phase 8: pre-trade gate threshold — fee_rate as a quantity, not a fee
+    // charge on a fill. Leave as fee_rate (not fee_rate_taker) intentionally.
     FPN<F> min_signal = FPN_Mul(ctrl->config.fee_rate, ctrl->config.no_trade_band_mult);
     FPN<F> signal_dist = FPN_Sub(ctrl->buy_conds.price, ctrl->rolling.price_avg);
     // absolute value
@@ -824,8 +829,9 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     // include pending exit proceeds — exit gate clears bitmap before DrainExits credits balance
     // without this, equity appears crashed between exit gate and drain (false kill trigger)
     // uses exact exit_price × qty - slippage - fees (matches what RecordExit will credit)
+    // Phase 8: pending proceeds use taker rate (TP/SL exits are market sells).
     FPN<F> pending = ExitBuffer_PendingProceeds(&ctrl->exit_buf,
-                                                 ctrl->config.fee_rate, ctrl->config.slippage_pct);
+                                                 ctrl->config.fee_rate_taker, ctrl->config.slippage_pct);
     FPN<F> equity = FPN_AddSat(FPN_AddSat(ctrl->balance, pv), pending);
     int tripped = 0;
     // daily loss: (equity - start) / start < -threshold
@@ -1092,7 +1098,11 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
 
     // balance check: can we afford this position + entry fee? (branchless)
     FPN<F> cost = FPN_Mul(fill_price, sized_qty);
-    FPN<F> entry_fee = FPN_Mul(cost, ctrl->config.fee_rate);
+    // Phase 8: synchronous market BUY entry = taker by exchange definition.
+    // Live engine's WS executionReport will book the actual fee with the
+    // real is_maker value via the OMS HandleFill path. This synchronous
+    // accounting is optimistic — converges to actual on WS confirmation.
+    FPN<F> entry_fee = FPN_Mul(cost, ctrl->config.fee_rate_taker);
     FPN<F> total_cost = FPN_AddSat(cost, entry_fee);
     int can_afford = FPN_GreaterThanOrEqual(ctrl->balance, total_cost);
 
@@ -1193,6 +1203,9 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       // TP FLOOR: ensure TP is above the round-trip fee breakeven point
       // min_tp = entry + entry * fee_rate * fee_floor_mult
       // default 3.0 = 2x round-trip fees + 1x safety margin
+      // Phase 8: pre-trade fee-floor quantity — uses single fee_rate
+      // intentionally (not fee_rate_taker), as this is a conservative
+      // round-trip estimate that should hold under either fill type.
       FPN<F> fee_floor_offset =
           FPN_Mul(fill_price, FPN_Mul(ctrl->config.fee_rate, ctrl->config.fee_floor_mult));
       FPN<F> tp_floor = FPN_AddSat(fill_price, fee_floor_offset);
@@ -1431,6 +1444,8 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   FPN<F> gross_pnl = Portfolio_ComputePnL(&ctrl->portfolio, current_price);
   FPN<F> portfolio_value =
       Portfolio_ComputeValue(&ctrl->portfolio, current_price);
+  // Phase 8: pre-trade kill-switch estimate — fee_rate as quantity, not a
+  // fee charge on a fill. Leave as fee_rate (conservative round-trip).
   FPN<F> estimated_exit_fees = FPN_Mul(portfolio_value, ctrl->config.fee_rate);
   ctrl->portfolio_delta = FPN_Sub(gross_pnl, estimated_exit_fees);
 
