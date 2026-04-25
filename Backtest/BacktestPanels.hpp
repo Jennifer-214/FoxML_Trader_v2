@@ -291,6 +291,12 @@ static inline void GUI_Panel_RunControl(RunControlState *state, DataPanelState *
         if (ImGui::Button("Run Backtest")) {
             RunControl_Start(state, data);
         }
+        ImGui::SetItemTooltip(
+            "Replays selected files through the engine, computes stats only.\n"
+            "Use this for quick performance evaluation (Sharpe, DD, win rate).\n\n"
+            "If you want to TRAIN an ML model, use \"Collect Features\" in the\n"
+            "Training panel instead — it runs the same backtest plus gathers\n"
+            "the feature/label samples XGBoost needs.");
         if (!can_run) {
             ImGui::EndDisabled();
             ImGui::SameLine();
@@ -996,6 +1002,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         pthread_create(&run_control->worker_tid, NULL, backtest_worker_fn, args);
         pthread_detach(run_control->worker_tid);
     }
+    ImGui::SetItemTooltip(
+        "Runs a backtest AND gathers ML training samples (features + labels)\n"
+        "for every slow-path cycle. Required before Train Model.\n\n"
+        "Output goes to results->feature_matrix (in-memory). The dataset\n"
+        "rebuilds every time you click — use Run Control's Run Backtest if\n"
+        "you only need stats and want to skip the sample collection cost.");
     if (!can_collect) {
         ImGui::EndDisabled();
         ImGui::SameLine();
