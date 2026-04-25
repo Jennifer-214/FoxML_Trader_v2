@@ -392,7 +392,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         if (settings->show_session_div && vc > 1) {
             // session hours (UTC): Asian 0-8, EU 8-13, US 13-21, Overnight 21-24
             static const int boundaries[] = {0, 8, 13, 21};
-            static const char *sess_labels[] = {"ASIA", "EU", "US", "OVER"};
+            // use shared SESSION_NAMES — drops the OVER/OVERNIGHT inconsistency
             ImU32 div_col = ImGui::GetColorU32(ImVec4(1, 1, 1, 0.06f));
             ImVec2 plot_tl = ImPlot::GetPlotPos();
             for (int i = 0; i < vc - 1; i++) {
@@ -416,7 +416,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                         // label at top
                         dl->AddText(ImVec2(px_x + 3, plot_tl.y + 2),
                                     ImGui::GetColorU32(ImVec4(1, 1, 1, 0.15f)),
-                                    sess_labels[b]);
+                                    SESSION_NAMES[b]);
                     }
                 }
             }

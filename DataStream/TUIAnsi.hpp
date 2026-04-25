@@ -363,10 +363,9 @@ static inline int ANSI_Section_Header(AnsiBuf *ab, const TUISnapshot *s,
         const char *color = GATE_REASON_TABLE[ri].is_danger ? A_RED : A_YELLOW;
         ab_printf(ab, A_DIM "  │  " A_BOLD "%s" "PAUSED" A_DIM " (%s)" A_RESET, color, GATE_REASON_TABLE[ri].name);
     }
-    if (s->current_session >= 0) {
-        static const char *sess_names[] = {"ASIA", "EU", "US", "OVERNIGHT"};
+    if (s->current_session >= 0 && s->current_session < NUM_SESSIONS) {
         ab_printf(ab, A_DIM "  │  " A_SAND "%s" A_DIM " (%.1fx)" A_RESET,
-                  sess_names[s->current_session], s->session_mult);
+                  SESSION_NAMES[s->current_session], s->session_mult);
     }
     ab_append(ab, A_RESET);
     y++;

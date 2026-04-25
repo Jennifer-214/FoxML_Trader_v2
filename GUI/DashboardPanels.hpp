@@ -109,12 +109,11 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
         ImGui::TextColored(color, "PAUSED (%s)", GATE_REASON_TABLE[ri].name);
     }
 
-    if (s->current_session >= 0) {
-        static const char *sess_names[] = {"ASIA", "EU", "US", "OVERNIGHT"};
+    if (s->current_session >= 0 && s->current_session < NUM_SESSIONS) {
         ImGui::SameLine();
         ImGui::TextColored(FoxmlColors::comment, "|");
         ImGui::SameLine();
-        ImGui::TextColored(FoxmlColors::sand, "%s (%.1fx)", sess_names[s->current_session], s->session_mult);
+        ImGui::TextColored(FoxmlColors::sand, "%s (%.1fx)", SESSION_NAMES[s->current_session], s->session_mult);
     }
 
     // trading blocked indicator — detailed reason from gate_reason table
