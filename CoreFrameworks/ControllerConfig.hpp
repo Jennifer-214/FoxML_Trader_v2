@@ -550,9 +550,14 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.model_verify_strict = 0;  // 0=warn, 1=strict (fail on mismatch), -1=skip
   cfg.peak_model_path[0] = '\0';
   cfg.valley_model_path[0] = '\0';
-  // Per-core sharding (Phase 13) — safe defaults: legacy mode, 4 cores if opted
-  // in
-  cfg.engine_mode = ENGINE_MODE_SINGLE_CORE;
+  // Per-core sharding (Phase 13+) — DEFAULT IS SHARDED. Sharded is the
+  // production engine: per-core ExecutionCore + per-core PortfolioController
+  // + central OMS, branchless ~60ns hot path, risk distributed across cores.
+  // ENGINE_MODE_SINGLE_CORE remains available for benchmark/regression
+  // baselines but is DEPRECATED and emits a runtime warning at startup.
+  // Adding new features in legacy-only paths = silent production gap;
+  // see CLAUDE.md "Cross-Mode Init Placement" invariant.
+  cfg.engine_mode = ENGINE_MODE_SHARDED;
   cfg.num_execution_cores = 4;
   cfg.sharded_force_synthetic = 0;
   for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP

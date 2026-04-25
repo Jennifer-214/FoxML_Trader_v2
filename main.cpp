@@ -147,14 +147,31 @@ int main(int argc, char *argv[]) {
     }
 
     //==================================================================================================
-    // Phase 13 dispatch: per-core sharded mode is a separate entry point that
-    // bypasses the legacy single-threaded engine entirely. Set engine_mode =
-    // sharded in engine.cfg to land here.
+    // Phase 13+ dispatch: SHARDED is the production engine and is now the DEFAULT.
+    // Legacy single-threaded mode is kept as a benchmark/regression baseline but is
+    // DEPRECATED — see CLAUDE.md "Cross-Mode Init Placement" invariant. Adding
+    // features in main.cpp's post-dispatch loop = silent production gap (the
+    // sharded path won't see them). New features should land in:
+    //   - EngineSharded.hpp (sharded-only setup / per-core init)
+    //   - CoreFrameworks/EventLoopState (cross-core dispatch)
+    //   - CoreFrameworks/OrderManager (OMS HandleFill — fee math + counters)
     //==================================================================================================
     if (ccfg.engine_mode == ENGINE_MODE_SHARDED) {
         tt::EngineSharded_Run(ccfg, bcfg);
         return 0;
     }
+
+    // Runtime deprecation warning for legacy single-threaded mode.
+    fprintf(stderr,
+            "================================================================\n"
+            "[ENGINE] WARNING: engine_mode=single_core is the LEGACY benchmark\n"
+            "[ENGINE]   path and is DEPRECATED as of 2026-04-25. Phase 8+\n"
+            "[ENGINE]   features (depth feed, notify, recorders, maker/taker\n"
+            "[ENGINE]   accounting) are wired in the sharded path and may be\n"
+            "[ENGINE]   incomplete here. For production trading set:\n"
+            "[ENGINE]     engine_mode=sharded\n"
+            "[ENGINE]   in engine.cfg. Continuing in legacy mode for now.\n"
+            "================================================================\n");
 
     //==================================================================================================
     // license check — before connecting to exchange

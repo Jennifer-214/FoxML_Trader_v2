@@ -50,7 +50,31 @@ sudo make install && sudo ldconfig
 
 ## Architecture
 
+**Default engine mode: SHARDED (per-core).** N execution cores (default 4,
+cap 16), each with its own ExecutionCore + parameters + tick ring + slot
+in the central OMS portfolio. Branchless ~60ns hot path per core. Producer
+thread pinned to one CPU, fans real Binance ticks (or synthetic for
+offline benchmark) across SPSC rings to per-core consumer threads.
+
+**Sharded mode key properties:**
+- Per-core strategy (`core_N_strategy=simple_dip|momentum|ema_cross|ml`)
+- Per-core ML model (`core_N_model_path=...` or `core_N_model_dir=...` for
+  a CoreModelZoo with auto-discovered roles barrier/buy_signal/regime/exit)
+- Per-core risk allocation (`core_N_risk_pct=...`, default = `risk_pct / N`)
+- Per-core ConfidenceScorer (when STRATEGY_ML in use, Phase 6prep wiring per controller)
+- Risk distributed: a single bad core can lose its allocation, not the account
+- Hot path p99 target: ≤500ns per core
+- No portfolio walk on the hot path — each core only owns its slot
+
+**Legacy single-threaded mode** (`engine_mode=single_core`) remains
+available as a benchmark + regression baseline but is **DEPRECATED**.
+A runtime warning fires at startup. Phase 8+ features may be incomplete
+in legacy mode (see "Cross-Mode Init Placement" invariant under Safety
+Invariants — adding init in main.cpp post-dispatch silently skips the
+sharded path).
+
 ```
+LEGACY MODE (deprecated benchmark path):
 HOT PATH (every tick):
   BuyGate (branchless) -> OrderPool
   PositionExitGate (branchless bitmap walk) -> ExitBuffer
@@ -367,6 +391,54 @@ When adjusting momentum positions, use `momentum_tp_mult` / `momentum_sl_mult`.
 When adjusting MR positions, use `take_profit_pct × 100` / `stop_loss_pct × 100`.
 Never cross these — MR config on momentum positions (or vice versa) creates asymmetric exits.
 
+### Cross-Mode Init Placement (load-bearing — Phase 13+)
+
+**Sharded is the production engine mode; single_core is deprecated.** This
+shapes how new code lands.
+
+`main.cpp` dispatches to `tt::EngineSharded_Run` near the top (~line 154)
+and **returns** from `main()`. Code AFTER the dispatch only runs in legacy
+mode. Code that should run in BOTH modes MUST be:
+
+  (a) initialized BEFORE the dispatch in `main.cpp`, OR
+  (b) called from inside `EngineSharded_Run` (in `EngineSharded.hpp`) too
+
+**Verification gate**: when adding init code in `main.cpp`, ASK "does this
+need to run in sharded mode?" — if yes, place above the
+`engine_mode == ENGINE_MODE_SHARDED` dispatch. Quick check:
+
+```bash
+grep -n "engine_mode == ENGINE_MODE_SHARDED" main.cpp
+# Your new init: line number must be ≤ that line, OR also called inside
+# EngineSharded_Run.
+```
+
+**Things this affects** (must work in both modes):
+- Depth WS thread + DepthRecorder (Phase 8a)
+- TickRecorder
+- NotifyState + g_notify (Phase 8b)
+- book_imbalance feed into per-core controllers
+- Any new background thread, shared global, or recorder
+
+**Why this is load-bearing.** Phase 8a/8b shipped initialization in
+`main.cpp` AFTER the sharded dispatch — meaning sharded mode silently had
+none of those features. Caught by direct observation (latency numbers +
+missing panels) at the end of live-readiness coding, fixed retroactively.
+The rule is now in code: doctrine in this file + the runtime warning when
+legacy mode boots.
+
+**Cross-architecture features** (not just init placement): some Phase
+features are wired on `PortfolioController` (legacy controller) but need
+equivalent wiring on `OrderManager_HandleFill` / `EventLoop_OnEvent`
+(sharded controllers). Examples:
+- Phase 8 c5 maker/taker counters — port from `PortfolioController_DrainExits`
+  to `OrderManager_HandleFill`
+- Phase 6prep confidence gate — port from `PortfolioController_Tick` to
+  the ML strategy slow-path rebuild in EngineSharded
+
+When porting between architectures: same logic, different host struct.
+Keep tests in both modes' code paths so regressions are visible.
+
 ### FPN-Only Accounting
 Any code path that touches balance, P&L, fees, equity, or position pricing MUST use `FPN<F>` — never `double` or `float` for intermediate calculations. `double` is only acceptable at system boundaries:
 - **OK**: `FPN_ToDouble` for display, logging, CSV output, printf
@@ -504,6 +576,12 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
 - Label-type-aware metrics (every metric site consults `label_table[t].num_classes`) — see "Label-type-aware metric invariant"
 
 **Engine subsystem state:**
+- **Default mode: SHARDED** (Phase 13+). Per-core ExecutionCore + per-core
+  PortfolioController state slot in central OMS, branchless ~60ns hot path.
+  Legacy `engine_mode=single_core` deprecated, runtime warning at startup.
+- Per-core strategy + ML model + risk allocation (Phase 13). 4 cores default
+  (cap 16). Each core can run a different strategy + load its own
+  CoreModelZoo (auto-discovered roles: barrier, buy_signal, regime, exit).
 - Post-SL cooldown: adaptive (scales by trend confidence at SL time) or fixed cycle count
 - Regime detection: score-based with 7 signals, extensible RegimeSignals struct
 - Volume spike detection: current/max ratio, spacing relaxation on 5x+ spikes
