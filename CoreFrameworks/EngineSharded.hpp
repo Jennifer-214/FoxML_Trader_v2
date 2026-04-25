@@ -343,6 +343,35 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
         }
     }
 
+    // Phase 8a (post-coding c6) — depth feed + DepthRecorder.
+    // Same setup as main.cpp's legacy path, runs only when depth_enabled=1.
+    // Per-core controllers can read shared->snapshots[active].imbalance later
+    // (book_imbalance feed in EngineSharded slow path lands in post-coding c14).
+    static DepthRecorder g_depth_rec;
+    static DepthSharedState<F> g_depth_shared;
+    static pthread_t g_depth_tid = 0;
+    DepthRecorder_Init(&g_depth_rec, bcfg.symbol, "data", cfg.record_max_days,
+                       cfg.record_depth && cfg.depth_enabled);
+    if (cfg.depth_enabled) {
+        const char *depth_host;
+        int depth_port;
+        if (bcfg.use_testnet)         { depth_host = "testnet.binance.vision";   depth_port = 443; }
+        else if (bcfg.use_binance_us) { depth_host = "stream.binance.us";        depth_port = 9443; }
+        else                          { depth_host = "data-stream.binance.vision"; depth_port = 443; }
+
+        if (DepthStream_Init<F>(&g_depth_shared, bcfg.symbol,
+                                 depth_host, depth_port,
+                                 /*reconnect_delay=*/2) == 0) {
+            g_depth_shared.recorder = cfg.record_depth ? &g_depth_rec : NULL;
+            pthread_create(&g_depth_tid, NULL, depth_thread_fn<F>, &g_depth_shared);
+            fprintf(stderr, "[sharded] depth feed active (%s:%d %s@depth5@100ms)%s\n",
+                    depth_host, depth_port, bcfg.symbol,
+                    cfg.record_depth ? " — recording" : "");
+        } else {
+            fprintf(stderr, "[sharded] depth feed init failed — continuing without depth\n");
+        }
+    }
+
     // Phase 05: reconciliation poller — own REST instance, periodic
     // balance check, pushes CMD_RECONCILE to oms.reconcile_queue.
     static ReconciliationLoopState<F> g_reconciler;
@@ -1013,6 +1042,14 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     g_shared.quit_requested = 1;
     pthread_join(gui_tid, NULL);
 #endif
+    // Phase 8a (post-coding c6) — depth thread shutdown + recorder close.
+    // depth_thread_fn polls quit_requested at top of loop; next 200ms cycle
+    // picks it up. g_depth_tid==0 when depth_enabled was off or init failed.
+    if (g_depth_tid != 0) {
+        __atomic_store_n(&g_depth_shared.quit_requested, 1, __ATOMIC_RELEASE);
+        pthread_join(g_depth_tid, NULL);
+    }
+    DepthRecorder_Close(&g_depth_rec);
     OrderManager_Shutdown(&oms);
 
     fprintf(stderr, "[sharded] all threads joined.\n");
