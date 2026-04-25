@@ -1,53 +1,125 @@
 # Tick Trader — Per-Core Sharded Engine
 
-**Copyright (c) 2026 Jennifer Lewis. All rights reserved.**
+per-core risk-sharded crypto trading engine in C++17. one position per pinned CPU, branchless fixed-point math, lock-free queues, seqlock-cached parameters. the hot path runs at single-digit ns/tick algorithmic floor — the slow path can do whatever (ML inference, regression, regime detection) without the executors ever paying for it.
 
-This software is dual-licensed: [AGPL-3.0-or-later](LICENSE) or Commercial. If you use this software without complying with the AGPL (including the requirement to publish your source code for any network-accessible deployment) and without a commercial license, you are infringing copyright.
+![per-core latency panel](assets/per-core-latency.png)
 
-**Personal use, learning, and paper trading are welcome and encouraged.** Commercial use or deployment for profit requires a commercial license — contact [jenn.lewis5789@gmail.com](mailto:jenn.lewis5789@gmail.com).
+> **measured on i9-9980HK, 4 cores, GUI running, no isolcpus, no chrt:**
+> min 40 ns · p50 73-196 ns · p95 261-538 ns · **p99 494-912 ns** · max 1.0-4.9 µs
+>
+> rdtsc bracket overhead is ~8 ns on this CPU, so real per-tick work sits around **32-40 ns** in live multi-threaded execution. single-thread cache-resident algorithmic floor is **11.56 ns/tick** (see bench table below).
 
-**Unauthorized Use — Settlement Terms:** 100% of gross revenue from date of first unauthorized use (up to 10-15 years). Full statutory damages under 17 U.S.C. § 504 (up to $150,000 per work for willful infringement). **Bounty:** 50% of total settlement for reports leading to successful enforcement. See [BOUNTY.md](BOUNTY.md). Contact: [jenn.lewis5789@gmail.com](mailto:jenn.lewis5789@gmail.com)
+built from scratch, self-taught, ~60k lines across engine + backtest suite + ML pipeline. reusable primitives extracted as a public C++20 header-only library: [**FoxLIB**](https://github.com/Jennyfirrr/FoxLIB).
+
+[![Donate](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.com/ncp/payment/8M6XLK7M8569C) [![Discord](https://img.shields.io/badge/Discord-Community-5865F2.svg)](https://discord.gg/asSDcYwPz)
+
+> **paper trading by default.** live trading via Binance REST API is supported but experimental — use at your own risk. set `use_real_money=1` and add API keys to `secrets.cfg`. no API key needed for market data feeds.
 
 ---
 
-per-core risk-sharded crypto trading engine in C++17. each execution core runs its own strategy on its own pinned CPU at ~57-120ns per tick. branchless fixed-point arithmetic, bitmap portfolio management, full order management system with real-time websocket fills.
+## why these numbers matter
 
-built from scratch, self-taught, ~60k lines across engine + backtest suite + ML pipeline.
+raw nanoseconds are abstract. context for what 500 ns p99 buys you:
 
-> **paper trading by default.** live trading via Binance REST API is supported. set `use_real_money=1` in engine.cfg and add API keys to `secrets.cfg`. no API key needed for market data — the public websocket is always used for price feeds.
+| operation | latency |
+|---|---:|
+| `getpid()` syscall | 50–100 ns |
+| memory barrier (`mfence`) | 30–50 ns |
+| cross-core cache line bounce (HITM) | 50–100 ns |
+| L3 cache hit | 10–15 ns |
+| local DRAM access | 80–100 ns |
+| **this engine, full gate eval p99 (no isolation)** | **500–900 ns** |
+| TCP loopback round-trip | ~10–20 µs |
+| `recvmsg()` through kernel network stack | 1–5 µs |
+| DPDK userspace networking | 1–3 µs |
+| typical exchange round-trip (colocated) | 20–100 µs |
 
-> **WARNING: live trading is experimental.** use at your own risk. this software is provided as-is with no warranty.
-
-[![Donate](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.com/ncp/payment/8M6XLK7M8569C) [![Discord](https://img.shields.io/badge/Discord-Community-5865F2.svg)](https://discord.gg/asSDcYwPz)
+end-to-end gate evaluation p99 in 500–900 ns on a desktop laptop with no kernel bypass is in the same neighborhood as commercial HFT engines. the p99 tail is mostly kernel preemption (scheduler stealing timeslices), not the algorithm — `chrt -f 90 taskset -c 4-7` would flatten it into the low-100s.
 
 ## architecture
 
 ```
-EXECUTION CORES (one per pinned CPU, ~57-120ns/tick):
-  each core runs one strategy independently
-  branchless gate evaluation → trade event → SPSC ring
+HOT PATH (every tick, per-core, ~30-40 ns measured work):
+  ExecutionCore_Tick (pinned to one CPU)
+    ↓ acquire-load: ParameterSlot.seq
+    ↓ if cached_seq matches → skip the 192B parameter memcpy
+    ↓ branchless BG/SG evaluation (4 FPN comparisons)
+    ↓ on entry/exit: push TradeEvent → SPSC ring
+
+SLOW PATH (every ~256 ticks, controller core):
+  ↓ RollingStats (least-squares regression, R², variance)
+  ↓ RegimeSignals (7 features, score-based classifier)
+  ↓ ML inference (XGBoost/LightGBM single-row, ~1-5 µs)
+  ↓ Strategy_BuildParameters → GateParameters
+  ↓ ParameterSlot_Write (seqlock, wait-free producer)
 
 CONTROLLER (drainer thread):
-  pops trade events from all cores
-  routes through Order Management System
-  portfolio mutation via extracted fill handler
+  ↓ pops trade events from all cores' SPSC rings
+  ↓ routes through Order Management System
+  ↓ portfolio mutation via extracted fill handler
 
 ORDER MANAGEMENT SYSTEM:
-  3 SPSC rings: REST fills, WebSocket fills, reconciliation
+  three SPSC rings: REST fills, WebSocket fills, reconciliation
   async submission via BinanceAdapter worker thread
   idempotency keys, error-aware retry, rate limit tracking
-  event log with disk persistence + deterministic fold
+  binary event log with disk persistence + deterministic fold
 
-GUI (ImGui, SDL2/OpenGL3):
+GUI (Dear ImGui, SDL2/OpenGL3):
   double-buffered TUISnapshot from producer thread
   per-core buy gate overlays on price chart
   per-strategy settings panel with hot-swap
-  paper reset button
 ```
+
+the key insight: **the hot path is immune to model complexity.** XGBoost, LightGBM, LSTM, no model — the executor cores see only the resulting `GateParameters` struct. swap the model, the per-tick cost is unchanged.
+
+## the seqlock postmortem (one war story)
+
+the original design called for a triple buffer between the slow-path producer and the per-core executors. wait-free, lock-free, three slots, atomic index swap. textbook.
+
+then phase 5 stress test produced torn reads at high producer rate. wrote the test, expected it to pass, didn't. the triple buffer had a race window when the producer wrote a new slot while a consumer was mid-read of the slot the producer was about to claim. classic ABA-adjacent.
+
+switched to a [seqlock](https://en.wikipedia.org/wiki/Seqlock) — same pattern Linux kernel uses for `seqcount_t`. wait-free producer increments the seq counter, writes the payload, increments again. lock-free consumer reads seq, reads payload, re-reads seq, retries on mismatch.
+
+the catch: on a 192-byte payload, the byte-level read during a producer write IS technically a data race. ThreadSanitizer correctly flags it. the fix is `__attribute__((no_sanitize("thread")))` on the read path — same annotation Linux uses, because that race is the whole point of the seqlock invariant.
+
+```cpp
+// see ParameterSlot.hpp comment block for the full reasoning
+__attribute__((no_sanitize("thread")))
+static inline bool ParameterSlot_Read(...) {
+    uint32_t seq1 = atomic_load(&slot->seq, memory_order_acquire);
+    if (seq1 & 1) return false;       // producer mid-write
+    memcpy(out, &slot->params, sizeof(*out));
+    uint32_t seq2 = atomic_load(&slot->seq, memory_order_acquire);
+    return seq1 == seq2;              // retry if changed
+}
+```
+
+then we cached the parameter snapshot in the executor itself — every tick does one acquire-load of `seq`, compares against `cached_seq`, skips the memcpy on match. steady-state cost: **~1 ns**. miss path: ~6 ns. inferring a 192-byte cache miss out of the per-tick budget unless parameters actually changed.
+
+moral: trust the stress test over the plan. the plan said triple buffer, the test said torn reads, the test won.
+
+## measurement methodology
+
+per-call `rdtsc` has a structural overhead — the bracket itself costs more than what you're measuring on a fast hot path. on this i9-9980HK, the rdtsc bracket overhead is **~8 ns** (it was ~27 ns on the older Ice Lake i5). a per-tick latency number that doesn't subtract this is wrong by 25–60%.
+
+`bench_batch_floor.cpp` brackets `rdtsc` ONCE around N=1M iterations of `ExecutionCore_Tick` and divides. amortizes the rdtsc tax to ~0 and reports the actual steady-state per-tick work in nanoseconds:
+
+| variant | ns/tick (i9-9980HK, perf governor) |
+|---|---:|
+| orig (full 192B memcpy every tick) | 13.35 |
+| cached (skip memcpy on seq match) | 15.04 |
+| cached_v2 (no local copy) | 13.08 |
+| cached_v3 (branch for active state) | 12.95 |
+| **floor (gates + permission load only)** | **11.56** |
+| **abs floor (1 cmp + 1 atomic load)** | **2.94** |
+
+the `floor` is the algorithmic limit — what the gate evaluation itself costs without parameter caching, exit overrides, or the active-state branch. the `abs floor` is the loop infrastructure ceiling: 14.7 cycles at 5 GHz for 1 FPN compare + 1 acquire load + loop overhead. the CPU isn't going to do this faster.
+
+at 5 GHz, the 192-byte memcpy is basically free, so the cache optimization barely shows on this hardware. the wins compound on slower CPUs or under cache pressure — on the older Ice Lake i5, the same optimization saved ~10 ns/tick.
 
 ## per-core strategies
 
-each execution core can run a different strategy with independent tuning:
+each execution core runs a different strategy with independent tuning:
 
 ```
 core_0_strategy = simple_dip
@@ -74,11 +146,15 @@ momentum_sl_mult = 1.5
 emacross_tp_pct = 0.20
 ```
 
+risk allocation is per-core — one position per pinned CPU, no contention, no shared bitmap. portfolio aggregation is a slow-path concern, not a hot-path one.
+
 ## ML inference
 
-cores running `strategy = ml` load an XGBoost or LightGBM model and run single-row inference on every slow-path cycle (~1-5us). 16 features packed from rolling stats (slope, R², variance, volume delta, VWAP deviation, etc.). train models in the foxml_suite backtest GUI, export to `.xgb`, point config at them.
+cores running `strategy = ml` load an XGBoost or LightGBM model and run single-row inference on every slow-path cycle (~1–5 µs). 16 features packed from rolling stats: short/long slopes, R², variance, volume delta, VWAP deviation, regime signals.
 
-each core can load a different model — run an aggressive model on one core and a conservative model on another, each with its own risk allocation.
+train models in the foxml_suite backtest GUI, export to `.xgb`, point config at them. each core can load a different model — run an aggressive model on one core and a conservative model on another, each with its own risk allocation.
+
+**ML never runs on the hot path.** the model produces gate parameters, the parameter slot ferries them across, the executor consumes them in single-digit ns. swap the model class entirely (XGBoost → LSTM → transformer → none) and the executor's per-tick cost doesn't change.
 
 ## order management system (OMS)
 
@@ -89,11 +165,13 @@ each core can load a different model — run an aggressive model on one core and
 | 01 | order state machine (PENDING → SUBMITTED → FILLED/REJECTED) |
 | 02 | async REST submission via BinanceAdapter (drainer never blocks) |
 | 03 | order event log + portfolio fold (deterministic replay) |
-| 04 | user data websocket (real-time fills, 10-50ms instead of REST 50-200ms) |
+| 04 | user data websocket (real-time fills, 10–50 ms instead of REST 50–200 ms) |
 | 05 | reconciliation poller (self-healing balance verification) |
 | 06 | idempotency keys, error codes, rate limits, listen key hardening |
 | 07 | disk persistence (binary event log, survives restarts) |
 | 08 | per-core strategy config |
+
+three concurrent SPSC rings feed the OMS drainer: REST results, WebSocket fills, reconciliation corrections. each has exactly one producer and one consumer. no MPSC needed. drainer drains all three sequentially in `OrderManager_Tick`.
 
 ## build
 
@@ -107,11 +185,10 @@ cmake -B build_gui -DUSE_IMGUI_GUI=ON -DUSE_NATIVE_128=ON && cmake --build build
 # with ML model support
 cmake -B build_gui -DUSE_IMGUI_GUI=ON -DUSE_NATIVE_128=ON -DUSE_XGBOOST=ON && cmake --build build_gui
 
-# run
 cd build_gui && ./engine_gui
 ```
 
-requires: g++ (C++17), OpenSSL, CMake 3.14+. GUI adds SDL2 + OpenGL3. ML adds XGBoost C library.
+requires: g++ (C++17), OpenSSL, CMake 3.14+. GUI adds SDL2 + OpenGL3. ML adds XGBoost C library (build from source — see [DOCS](DOCS/)).
 
 ## config
 
@@ -142,11 +219,30 @@ hot-reloadable with `R` in the GUI. per-core strategy and risk can be changed at
 ./experiments/per_core_sharding/build/test_order_event_log           # 8 event log fold tests
 ./experiments/per_core_sharding/build/test_event_log_head_to_head    # 27 mode 0 vs mode 1 assertions
 ./experiments/per_core_sharding/build/test_oms_phase04_06            # 31 WS fill + reconcile tests
+./experiments/per_core_sharding/build/bench_batch_floor              # latency bench
 ```
+
+concurrent tests run under `-DTSAN=ON` (separate build dir) to validate the lock-free patterns. the seqlock test catches torn reads at high producer rate; that's how the original triple buffer plan got rejected.
+
+## what's still raw
+
+honest TODOs:
+
+- **strategy stubs in sharded mode** — only `simple_dip` is fully ported to `Strategy_BuildParameters`. MR / Momentum / EmaCross fall back to SimpleDip until ported (mechanical work, follows the SimpleDip pattern).
+- **snapshot v11** — per-core state persistence across restarts. single-core snapshots load fine; sharded mode loses per-core fill state on restart.
+- **testnet soak** — 24-hour live run with `use_real_money=1, use_testnet=1` to verify WS fills + reconciler drift + listen key refresh hasn't been done yet.
+- **partial fills** — `ORDER_PARTIAL` state exists in the enum but the code goes straight to `FILLED`.
+- **rejection reset** — executor stays in optimistic state after a failed order; needs a `CMD_REJECT` path to release the slot.
 
 ## license
 
-AGPL-3.0-or-later or Commercial. See [BOUNTY.md](BOUNTY.md) for enforcement terms.
+dual-licensed: **AGPL-3.0-or-later** (see [LICENSE](LICENSE)) **or Commercial**.
+
+personal use, learning, and paper trading are welcome and encouraged. commercial use, network-accessible deployment, or use for profit requires a commercial license — contact [jenn.lewis5789@gmail.com](mailto:jenn.lewis5789@gmail.com).
+
+unauthorized use settlement: 100% of gross revenue from date of first unauthorized use (up to 10–15 years), full statutory damages under 17 U.S.C. § 504 (up to $150,000 per work for willful infringement). bounty: 50% of total settlement for reports leading to successful enforcement. see [BOUNTY.md](BOUNTY.md).
+
+**copyright (c) 2026 Jennifer Lewis. all rights reserved.**
 
 ---
 
