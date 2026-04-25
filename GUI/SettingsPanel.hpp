@@ -167,8 +167,14 @@ static const CfgFieldDef field_defs[] = {
     // Tick Recording
     {"record_ticks",          "Record Ticks", "Tick Recording",  CFG_BOOL,  NULL,
         "Record raw ticks to CSV for backtesting/ML training\nOutput: data/{SYMBOL}/YYYY-MM-DD.csv\n~30-70MB/day for BTCUSDT"},
+    {"record_depth",          "Record Depth", "Tick Recording",  CFG_BOOL,  NULL,
+        "Record @depth5@100ms snapshots to CSV (top-of-book + lastUpdateId)\n"
+        "Output: data/{SYMBOL}/depth/YYYY-MM-DD.csv\n"
+        "Requires depth_enabled=1. Daily rotation, auto-pruned by record_max_days.\n"
+        "Gap markers (# GAP) on backward last_update_id, wallclock >2s, or disconnect.\n"
+        "~50 MB/day for BTCUSDT. Required for future backtest replay of book state."},
     {"record_max_days",       "Max Days",     "Tick Recording",  CFG_FLOAT, "%.0f",
-        "Auto-delete tick CSVs older than this many days\n30 = ~1-2GB cap on disk usage"},
+        "Auto-delete tick + depth CSVs older than this many days\n30 = ~1-2GB cap on disk usage (more if depth recording is on)"},
     // Toggles
     {"use_real_money",        "LIVE Trading", "Toggles",         CFG_BOOL,  NULL,   NULL},
     {"partial_exit_enabled",  "Partial Exits","Toggles",         CFG_BOOL,  NULL,   NULL},

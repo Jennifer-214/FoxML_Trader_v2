@@ -455,7 +455,10 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
 - VWAP gate: buy signal gates on price being below volume-weighted average price
 - Session awareness: per-session (Asian/EU/US/overnight) volume gate multiplier
 - Snapshot persistence: v7 (entry_time + session stats survive restarts)
-- Binance websocket: WORKING (live market data + depth + user data)
+- Binance trade websocket: ACTIVE (live market data, runs on every engine startup)
+- Binance depth websocket (Phase 8a): ACTIVE when `depth_enabled=1`. Pre-Phase-8a the thread function existed but was never started — `book_imbalance` always read 0 and the gate at PortfolioController.hpp:1600 was dead. Now the thread starts when cfg flag is set and `book_imbalance` is fed from `DepthSharedState.snapshots[active].imbalance` on every tick. Default `min_book_imbalance=0` keeps the gate inert unless user opts in.
+- Binance user-data websocket: defined but not started in main.cpp (parallel pattern to pre-Phase-8a depth — wiring exists but no `pthread_create`)
+- DepthRecorder (Phase 8a): writes top-of-book to `data/{SYMBOL}/depth/YYYY-MM-DD.csv` when `record_depth=1 && depth_enabled=1`. Daily rotation, auto-prune via `record_max_days`. Gap markers on backward `last_update_id`, wallclock >2s silence, or explicit disconnect. Crash-window gaps are NOT marked (recorder state in memory only — restart resets gap tracking).
 - Confidence loop: WIRED (multiplier path + display) — confidence_enabled cfg gate, defaults off
 - TUI: ANSI only (zero deps, diff-based rendering, foxml palette). FTXUI/notcurses removed.
 - TUI snapshot: zero-pollution (full copy on slow path, live price/volume/active_count every tick)
