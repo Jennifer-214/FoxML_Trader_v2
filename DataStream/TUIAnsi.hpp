@@ -800,19 +800,18 @@ static inline int ANSI_Section_Stats(AnsiBuf *ab, const TUISnapshot *s, int y, i
 
     // per-strategy P&L attribution
     {
-        const char *snames[] = {"MR", "Mom", "Dip", "ML", "EMA"};
         int any = 0;
-        for (int i = 0; i < 5; i++) any |= (s->strat_stats[i].total > 0);
+        for (int i = 0; i < NUM_STRATEGIES; i++) any |= (s->strat_stats[i].total > 0);
         if (any) {
             ab_goto(ab, y, 3);
-            for (int i = 0; i < 5; i++) {
+            for (int i = 0; i < NUM_STRATEGIES; i++) {
                 if (s->strat_stats[i].total == 0) continue;
                 double pnl = s->strat_stats[i].pnl;
                 uint32_t w = s->strat_stats[i].wins, l = s->strat_stats[i].losses;
                 uint32_t t = w + l;
                 double wr = (t > 0) ? (double)w / t * 100.0 : 0.0;
                 ab_printf(ab, "%s%s: " "%s$%+.2f" A_RESET A_DIM " (%uW/%uL %.0f%%)" A_RESET "  ",
-                          A_SAND, snames[i], A_PNL(pnl), pnl, w, l, wr);
+                          A_SAND, STRATEGY_SHORT_NAMES[i], A_PNL(pnl), pnl, w, l, wr);
             }
             y++;
         }

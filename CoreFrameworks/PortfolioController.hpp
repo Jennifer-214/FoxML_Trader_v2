@@ -564,12 +564,11 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
     const char *reasons[] = {"TP", "SL", "TIME", "SESSION_CLOSE"};
     {
       double pnl_d = FPN_ToDouble(pos_pnl);
-      static const char *sn[] = {"MR", "MOM", "DIP", "ML", "EMA"};
       char ts[16]; log_ts(ts, sizeof(ts));
       fprintf(stderr, "[%s] [TRADE] SELL $%.2f × %.6f %s %s$%.2f %s bal=$%.2f\n",
               ts, exit_d, qty_d, reasons[reason],
               pnl_d >= 0 ? "+" : "", pnl_d,
-              (strat >= 0 && strat < 5) ? sn[strat] : "?",
+              (strat >= 0 && strat < NUM_STRATEGIES) ? STRATEGY_SHORT_NAMES[strat] : "?",
               FPN_ToDouble(ctrl->balance));
     }
     TradeLogBuffer_PushSell(&ctrl->trade_buf, rec->tick, exit_d, qty_d, entry_d, delta_pct,
@@ -1251,12 +1250,11 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
         ctrl->total_buys++;
         ctrl->idle_cycles = 0;  // reset gate death spiral counter
         {
-          static const char *sn[] = {"MR", "MOM", "DIP", "ML", "EMA"};
           int si = ctrl->strategy_id;
           char ts[16]; log_ts(ts, sizeof(ts));
           fprintf(stderr, "[%s] [TRADE] BUY $%.2f × %.6f ($%.2f) %s tp=$%.2f sl=$%.2f bal=$%.2f\n",
                   ts, FPN_ToDouble(fill_price), FPN_ToDouble(sized_qty), FPN_ToDouble(cost),
-                  (si >= 0 && si < 5) ? sn[si] : "?",
+                  (si >= 0 && si < NUM_STRATEGIES) ? STRATEGY_SHORT_NAMES[si] : "?",
                   FPN_ToDouble(tp_price), FPN_ToDouble(sl_price),
                   FPN_ToDouble(FPN_SubSat(ctrl->balance, total_cost)));
         }
