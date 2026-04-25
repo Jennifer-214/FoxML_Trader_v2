@@ -229,6 +229,10 @@ template <unsigned F> struct ControllerConfig {
   // tick recording (writes raw ticks to CSV for backtesting/ML training)
   int record_ticks; // 0=disabled (default), 1=record to
                     // data/{symbol}/YYYY-MM-DD.csv
+  // depth recording (Phase 8a c5): writes @depth5@100ms snapshots to
+  // data/{symbol}/depth/YYYY-MM-DD.csv. Requires depth_enabled=1 (recorder
+  // is fed by depth_thread_fn). Off by default — opt-in for replay/audit.
+  int record_depth; // 0=disabled (default), 1=record depth snapshots
   uint32_t
       record_max_days; // auto-prune CSVs older than this (default 30, ~2GB cap)
   // FoxML integration — Phase 6C (all default OFF, zero behavior change when
@@ -459,6 +463,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // tick recording (disabled by default — no disk usage unless explicitly
   // enabled)
   cfg.record_ticks = 0;
+  cfg.record_depth = 0; // Phase 8a c5 — opt-in
   cfg.record_max_days = 30;
   // FoxML integration — Phase 6C (all OFF by default, zero behavior change)
   cfg.cost_gate_enabled = 0;
@@ -706,6 +711,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 
     //--- tick recording ---
     CFG_PARSE_INT(record_ticks)
+    CFG_PARSE_INT(record_depth)
     CFG_PARSE_U32(record_max_days)
 
     //--- FoxML integration (Phase 6C) ---

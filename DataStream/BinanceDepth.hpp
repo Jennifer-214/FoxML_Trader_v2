@@ -71,6 +71,11 @@ struct DepthStream {
 //======================================================================================================
 // [SHARED STATE] — engine reads, depth thread writes
 //======================================================================================================
+// Forward decl for the recorder pointer field. Full definition in
+// DepthRecorder.hpp, included near the bottom of this header (just before
+// depth_thread_fn) so it can call the templated DepthRecorder_Write.
+struct DepthRecorder;
+
 template <unsigned F> struct DepthSharedState {
     BookSnapshot<F> snapshots[2];
     int active_idx;              // atomic: index the engine reads
@@ -80,6 +85,7 @@ template <unsigned F> struct DepthSharedState {
     char host[128];
     int port;
     int reconnect_delay;
+    DepthRecorder *recorder;     // null = recording disabled (Phase 8a c5)
 };
 
 //======================================================================================================
@@ -217,6 +223,13 @@ static inline int DepthStream_Init(DepthSharedState<F> *shared, const char *symb
 //======================================================================================================
 // [THREAD FUNCTION]
 //======================================================================================================
+// DepthRecorder.hpp includes this header for BookSnapshot<F>. Including it
+// HERE (after BookSnapshot + DepthSharedState are fully defined, before
+// depth_thread_fn) breaks the include cycle: the include guard short-circuits
+// the inner BinanceDepth.hpp include in DepthRecorder.hpp, but BookSnapshot
+// is already in scope so DepthRecorder_Write's template body resolves.
+#include "DepthRecorder.hpp"
+
 template <unsigned F>
 static inline void *depth_thread_fn(void *arg) {
     DepthSharedState<F> *shared = (DepthSharedState<F> *)arg;
@@ -241,7 +254,19 @@ static inline void *depth_thread_fn(void *arg) {
 
         int opcode;
         int plen = ws_read_frame(ds->ssl, frame_buf, sizeof(frame_buf) - 1, &opcode);
-        if (plen < 0) { ds->connected = 0; continue; }
+        if (plen < 0) {
+            // Phase 8a c5: log explicit gap on disconnect. _LogGap zeros
+            // last_seen_id so the post-reconnect first _Write skips its
+            // internal gap check (no double-flagging).
+            if (shared->recorder) {
+                struct timespec ts;
+                clock_gettime(CLOCK_REALTIME, &ts);
+                uint64_t at_us = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+                DepthRecorder_LogGap(shared->recorder, at_us, "disconnect");
+            }
+            ds->connected = 0;
+            continue;
+        }
 
         if (opcode == 0x9) { ws_send_pong(ds->ssl); continue; }
         if (opcode == 0x8) { ds->connected = 0; continue; }
@@ -259,6 +284,12 @@ static inline void *depth_thread_fn(void *arg) {
             shared->snapshots[back].timestamp_us =
                 (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
             __atomic_store_n(&shared->active_idx, back, __ATOMIC_RELEASE);
+
+            // Phase 8a c5: persist snapshot. Recorder does its own gap
+            // detection internally (backward last_update_id OR wallclock >2s).
+            if (shared->recorder) {
+                DepthRecorder_Write(shared->recorder, &shared->snapshots[back]);
+            }
         }
     }
 

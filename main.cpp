@@ -195,6 +195,13 @@ int main(int argc, char *argv[]) {
     TickRecorder tick_rec;
     TickRecorder_Init(&tick_rec, bcfg.symbol, ccfg.record_ticks, ccfg.record_max_days);
 
+    // init depth recorder (Phase 8a c5) — writes @depth5@100ms snapshots to CSV
+    // when record_depth=1 AND depth_enabled=1 (recorder is fed by depth_thread_fn).
+    // Recorder pointer is wired into depth_shared below the depth-thread block.
+    DepthRecorder depth_rec;
+    DepthRecorder_Init(&depth_rec, bcfg.symbol, "data", ccfg.record_max_days,
+                       ccfg.record_depth && ccfg.depth_enabled);
+
     // metrics log — diagnostics for verifying regime switching, strategy behavior
     MetricsLog metrics;
     char metrics_path[128];
@@ -370,9 +377,14 @@ int main(int argc, char *argv[]) {
         if (DepthStream_Init<FP>(&depth_shared, bcfg.symbol,
                                   depth_host, depth_port,
                                   /*reconnect_delay=*/2) == 0) {
+            // Wire recorder if record_depth was set (DepthRecorder_Init handled
+            // the enabled flag — null-out the pointer when disabled to skip the
+            // per-snapshot enabled check on the depth thread).
+            depth_shared.recorder = ccfg.record_depth ? &depth_rec : NULL;
             pthread_create(&depth_tid, NULL, depth_thread_fn<FP>, &depth_shared);
-            fprintf(stderr, "[ENGINE] depth feed active (%s:%d %s@depth5@100ms)\n",
-                    depth_host, depth_port, bcfg.symbol);
+            fprintf(stderr, "[ENGINE] depth feed active (%s:%d %s@depth5@100ms)%s\n",
+                    depth_host, depth_port, bcfg.symbol,
+                    ccfg.record_depth ? " — recording" : "");
         } else {
             fprintf(stderr, "[ENGINE] depth feed init failed — continuing without depth\n");
         }
@@ -1062,6 +1074,7 @@ int main(int argc, char *argv[]) {
     TradeLog_Close(&log);
     MetricsLog_Close(&metrics);
     TickRecorder_Close(&tick_rec);
+    DepthRecorder_Close(&depth_rec);
     BinanceStream_Close(&bs);
     free(pool.slots);
     free(ctrl.rolling_long);
