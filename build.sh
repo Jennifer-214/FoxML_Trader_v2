@@ -5,18 +5,26 @@
 #   ./build.sh [target] [--clean]
 #
 # Targets:
-#   engine      ANSI engine + controller_test (build/)
-#   gui         engine_gui + foxml_suite (build_gui/, with ImGui+SDL2)
-#   suite       foxml_suite with XGBoost (build_suite/, requires libxgboost)
-#   all         engine + gui (skips suite — opt-in)
+#   engine      ANSI engine + controller_test (build/) — minimal, no ImGui
+#   gui         engine_gui + foxml_suite (build_gui/, ImGui+SDL2 + LATENCY +
+#               XGBoost) — the "everything on" build with ALL panels visible
+#               (Latency, Per-Core, ML Intelligence). Requires libxgboost
+#               headers at /usr/local/include/xgboost.
+#   gui-lite    engine_gui + foxml_suite (build_gui_lite/, ImGui+SDL2 only,
+#               no profiling/XGBoost) — minimal GUI, fastest hot path
+#   suite       alias for gui (kept for backward compat)
+#   all         engine + gui (skips gui-lite — opt-in)
 #   test        engine + run controller_test
-#   latency     engine with -DLATENCY_PROFILING=ON (build_lat/)
+#   latency     engine with -DLATENCY_PROFILING=ON (build_lat/, ANSI only,
+#               for raw latency benchmarks without ImGui overhead)
 #   clean       wipe all build directories
 #
 # Examples:
 #   ./build.sh                # default: 'all' (engine + gui)
 #   ./build.sh test           # build engine + run tests
-#   ./build.sh suite          # build XGBoost variant
+#   ./build.sh gui            # full GUI with all panels visible
+#   ./build.sh gui-lite       # minimal GUI (no Latency / no XGBoost)
+#   ./build.sh latency        # pure-ANSI latency bench
 #   ./build.sh clean          # remove all build dirs
 #   ./build.sh engine --clean # clean rebuild of engine
 
@@ -39,13 +47,28 @@ build_engine() {
 
 build_gui() {
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_gui
-    cmake -B build_gui -DUSE_IMGUI_GUI=ON
+    # Default GUI build = "everything on": ImGui + Latency profiling + XGBoost.
+    # All dashboard panels visible (Latency, ML Intelligence, Per-Core when
+    # engine_mode=sharded). Slight per-tick instrumentation cost from
+    # LATENCY_PROFILING (~10-20ns) — acceptable for observation/dev. For
+    # raw production performance use `./build.sh gui-lite` instead.
+    cmake -B build_gui -DUSE_IMGUI_GUI=ON -DLATENCY_PROFILING=ON -DUSE_XGBOOST=ON
     cmake --build build_gui -j"$JOBS"
 }
 
+build_gui_lite() {
+    [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_gui_lite
+    # Minimal GUI: ImGui only, no profiling instrumentation, no XGBoost.
+    # No Latency panel, no ML training paths. Use when production perf
+    # is the goal and you've already validated latency in build_lat.
+    cmake -B build_gui_lite -DUSE_IMGUI_GUI=ON
+    cmake --build build_gui_lite -j"$JOBS"
+}
+
 build_suite() {
+    # Backward-compat alias — build_suite is now the same as build_gui.
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_suite
-    cmake -B build_suite -DUSE_IMGUI_GUI=ON -DUSE_XGBOOST=ON
+    cmake -B build_suite -DUSE_IMGUI_GUI=ON -DLATENCY_PROFILING=ON -DUSE_XGBOOST=ON
     cmake --build build_suite -j"$JOBS" --target foxml_suite
 }
 
@@ -68,6 +91,9 @@ case "$TARGET" in
     gui)
         build_gui
         ;;
+    gui-lite)
+        build_gui_lite
+        ;;
     suite)
         build_suite
         ;;
@@ -82,12 +108,12 @@ case "$TARGET" in
         build_latency
         ;;
     clean)
-        rm -rf build build_gui build_suite build_lat
+        rm -rf build build_gui build_gui_lite build_suite build_lat
         echo "all build dirs removed"
         ;;
     *)
         echo "unknown target: $TARGET" >&2
-        echo "usage: $0 {engine|gui|suite|all|test|latency|clean} [--clean]" >&2
+        echo "usage: $0 {engine|gui|gui-lite|suite|all|test|latency|clean} [--clean]" >&2
         exit 1
         ;;
 esac
