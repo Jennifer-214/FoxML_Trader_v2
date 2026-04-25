@@ -313,6 +313,13 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     OrderManager_Init(&oms, exchange_adapter, live_trading ? 1 : 0,
                       cfg.starting_balance, cfg.fee_rate,
                       (int)cfg.oms_event_log_mode);
+    // Phase 8 (post-coding c9) — explicit maker/taker rates so HandleFill's
+    // per-fill rate selection actually works. Init defaults both = fee_rate
+    // (legacy compat); engine layer sets the real values from cfg here.
+    // For live mode, this picks up the cfg-loaded maker/taker rates. For
+    // backtest sharded, these are also set explicitly there (BacktestSharded.hpp).
+    oms.fee_rate_maker = cfg.fee_rate_maker;
+    oms.fee_rate_taker = cfg.fee_rate_taker;
 
     // Trade log CSV — same pattern as legacy engine in main.cpp
     static ShardedTradeLog g_sharded_trade_log;
