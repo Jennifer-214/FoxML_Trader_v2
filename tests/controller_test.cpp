@@ -9,11 +9,14 @@
 // compile: g++ -std=c++17 -O2 -I.. -o controller_test controller_test.cpp
 //======================================================================================================
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include "../DataStream/MockGenerator.hpp"
 #include "../CoreFrameworks/PortfolioController.hpp"
+#include "../Backtest/BacktestEngine.hpp"
 
 using namespace std;
 
@@ -2979,6 +2982,189 @@ int main() {
 
         printf("    pending=%.2f credited=%.2f realized=%.2f\n",
                pending_d, credited, realized);
+    }
+
+    //======================================================================================================
+    // [PHASE 5d REGRESSION TESTS — locking in 2026-04-25 weekend bug fixes]
+    //======================================================================================================
+    // see plans/phase5d-regression-tests.md. each block guards a specific
+    // re-introducible bug class. failure = real regression, not flakiness.
+    //======================================================================================================
+
+    // ----- Group 1: Dynamic-buffer lifecycle ------------------------------------------------------------
+    // bug class: adding a new heap field to BacktestResults but missing _Reset
+    // (ff9ac48 added equity_curve, _Reset zeroed cap → first EnsureEquityCapacity
+    // call hit `while (0 < needed) cap *= 2` infinite spin at 100% CPU)
+    printf("\n--- Phase 5d: Dynamic-buffer lifecycle ---\n");
+    {
+        // Reset must preserve every dynamic allocation + its capacity (zeroes counts only)
+        BacktestResults r;
+        BacktestResults_Init(&r);
+        double *original_curve = r.equity_curve;
+        int original_eq_cap    = r.equity_capacity;
+        float *original_fm     = r.feature_matrix;
+        int original_sm_cap    = r.sample_capacity;
+        r.equity_count = 5;
+        r.sample_count = 100;
+        BacktestResults_Reset(&r);
+        check("Reset preserves equity_curve + sample buffers (ptrs + caps), zeroes counts",
+              r.equity_count == 0 && r.sample_count == 0 &&
+              r.equity_curve == original_curve && r.equity_capacity == original_eq_cap &&
+              r.feature_matrix == original_fm && r.sample_capacity == original_sm_cap);
+        BacktestResults_Free(&r);
+    }
+    {
+        // EnsureEquityCapacity floor: capacity=0 → INIT_CAP (no infinite spin)
+        BacktestResults r = {};
+        int ok = BacktestResults_EnsureEquityCapacity(&r, 1);
+        check("EnsureEquityCapacity floor: cap=0 seeds to BACKTEST_EQUITY_INIT (no spin)",
+              ok == 1 && r.equity_capacity >= BACKTEST_EQUITY_INIT &&
+              r.equity_curve != NULL);
+        free(r.equity_curve);
+    }
+    {
+        // EnsureCapacity (samples) floor: same zero-capacity guard
+        BacktestResults r = {};
+        int ok = BacktestResults_EnsureCapacity(&r, 1);
+        check("EnsureCapacity (samples) floor: cap=0 seeds to BACKTEST_SAMPLES_INIT",
+              ok == 1 && r.sample_capacity >= BACKTEST_SAMPLES_INIT &&
+              r.feature_matrix != NULL && r.labels != NULL);
+        free(r.feature_matrix);
+        free(r.labels);
+        free(r.sample_tick_indices);
+        free(r.sample_prices);
+        free(r.sample_regimes);
+    }
+
+    // ----- Group 2: Label-type-aware metric dispatch ----------------------------------------------------
+    // bug class: hardcoding binary classification on regression labels (4-25 morning:
+    // Forward P&L sample panel showed +:0/-:2.25M, walk-forward 0.0% every fold —
+    // continuous labels binarized at 0.5, model trained with binary:logistic)
+    printf("\n--- Phase 5d: Label-type-aware metric dispatch ---\n");
+    {
+        check("LabelType_NumClasses: WIN_LOSS=0, FORWARD_PNL=1, PEAK_VALLEY_STABLE=3, REGIME=4",
+              LabelType_NumClasses(LABEL_WIN_LOSS) == 0 &&
+              LabelType_NumClasses(LABEL_FORWARD_PNL) == 1 &&
+              LabelType_NumClasses(LABEL_PEAK_VALLEY_STABLE) == 3 &&
+              LabelType_NumClasses(LABEL_REGIME) == 4);
+        check("LabelType_IsBinary identifies WIN_LOSS",
+              LabelType_IsBinary(LABEL_WIN_LOSS) == 1 &&
+              LabelType_IsBinary(LABEL_FORWARD_PNL) == 0);
+        check("LabelType_IsRegression identifies FORWARD_PNL",
+              LabelType_IsRegression(LABEL_FORWARD_PNL) == 1 &&
+              LabelType_IsRegression(LABEL_WIN_LOSS) == 0);
+        check("LabelType_IsMulticlass identifies PEAK_VALLEY_STABLE + REGIME",
+              LabelType_IsMulticlass(LABEL_PEAK_VALLEY_STABLE) == 1 &&
+              LabelType_IsMulticlass(LABEL_REGIME) == 1 &&
+              LabelType_IsMulticlass(LABEL_WIN_LOSS) == 0);
+        check("LabelType_* out-of-bounds defaults to safe binary kind",
+              LabelType_IsBinary(999) == 1 && LabelType_IsRegression(-1) == 0 &&
+              LabelType_IsMulticlass(999) == 0);
+    }
+
+    // ----- Group 3: Class-balance helpers ---------------------------------------------------------------
+    // bug class: divide-by-zero on degenerate datasets, missing multiclass weight
+    // compensation (38ab41d added inverse-frequency weights for skewed multiclass)
+    printf("\n--- Phase 5d: Class-balance helpers ---\n");
+    {
+        // scale_pos_weight: 2 pos / 4 neg → 2.0
+        float labels[] = {1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        int n_pos = 0, n_neg = 0;
+        double w = XGBoost_ComputeScalePosWeight(labels, 6, &n_pos, &n_neg);
+        check("XGBoost_ComputeScalePosWeight basic: n_pos=2, n_neg=4, w=2.0",
+              n_pos == 2 && n_neg == 4 && fabs(w - 2.0) < 1e-6);
+    }
+    {
+        // scale_pos_weight zero-positive guard (degenerate dataset → no NaN, no div-by-zero)
+        float labels[] = {0.0f, 0.0f, 0.0f};
+        int n_pos = 0, n_neg = 0;
+        double w = XGBoost_ComputeScalePosWeight(labels, 3, &n_pos, &n_neg);
+        check("XGBoost_ComputeScalePosWeight zero-positive guard returns 1.0",
+              n_pos == 0 && n_neg == 3 && fabs(w - 1.0) < 1e-6);
+    }
+    {
+        // multiclass inverse-frequency: 4 of class 0, 1 of class 1, 1 of class 2 (K=3)
+        // weight[i] = total / (K * count[label[i]])
+        //   class 0 sample: 6 / (3 * 4) = 0.5
+        //   class 1 sample: 6 / (3 * 1) = 2.0
+        //   class 2 sample: 6 / (3 * 1) = 2.0
+        float labels[] = {0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 2.0f};
+        float weights[6] = {0};
+        int counts[16] = {0};
+        XGBoost_ComputeMulticlassWeights(labels, 6, 3, weights, counts);
+        check("XGBoost_ComputeMulticlassWeights: per-class counts {4,1,1}",
+              counts[0] == 4 && counts[1] == 1 && counts[2] == 1);
+        check("XGBoost_ComputeMulticlassWeights: inverse-frequency weights {0.5, 2.0, 2.0}",
+              fabs(weights[0] - 0.5f)  < 1e-5 &&
+              fabs(weights[4] - 2.0f)  < 1e-5 &&
+              fabs(weights[5] - 2.0f)  < 1e-5);
+    }
+    {
+        // Pearson correlation: perfectly linear (labels = 2 * pred) → r = 1.0
+        float pred[]   = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
+        float labels[] = {2.0f, 4.0f, 6.0f, 8.0f, 10.0f};
+        float r = WalkForward_ComputeCorrelation(pred, labels, 5);
+        check("WalkForward_ComputeCorrelation: perfect linear → r=1.0",
+              fabs(r - 1.0f) < 1e-4);
+    }
+
+    // ----- Group 4: Config validation/clamping ----------------------------------------------------------
+    // bug class: silent never-completing warmup (c6aa0cc — min_warmup_samples > 128
+    // gates on rolling.count which caps at 128; user-hostile silent failure)
+    printf("\n--- Phase 5d: Config validation ---\n");
+    {
+        char path[] = "/tmp/test_min_warmup_XXXXXX";
+        int fd = mkstemp(path);
+        if (fd >= 0) {
+            dprintf(fd, "min_warmup_samples=512\n");
+            close(fd);
+            ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(path);
+            check("min_warmup_samples=512 clamps to 128 (rolling window cap)",
+                  cfg.min_warmup_samples == 128u);
+            unlink(path);
+        }
+    }
+    {
+        // fee_rate parses as percentage (CFG_PARSE_PCT divides by 100)
+        // 0.10 in cfg → 0.001 fraction (legacy mode, before Phase 8 maker/taker split)
+        char path[] = "/tmp/test_fee_rate_XXXXXX";
+        int fd = mkstemp(path);
+        if (fd >= 0) {
+            dprintf(fd, "fee_rate=0.10\n");
+            close(fd);
+            ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(path);
+            check("fee_rate=0.10 parses to 0.001 fraction (CFG_PARSE_PCT)",
+                  fabs(FPN_ToDouble(cfg.fee_rate) - 0.001) < 1e-6);
+            unlink(path);
+        }
+    }
+
+    // ----- Group 5: Coverage tables ---------------------------------------------------------------------
+    // bug class: adding a new GATE_REASON_* / REJECT_REASON_* without the matching
+    // name-table entry (c95ef3f stamped this for the first round; lock it in to
+    // catch the next mismatch at test-time, not via a NULL-deref in the TUI)
+    printf("\n--- Phase 5d: Reason-table coverage ---\n");
+    {
+        int ok = 1;
+        for (int i = 0; i < NUM_GATE_REASONS; i++) {
+            if (!GATE_REASON_TABLE[i].name || GATE_REASON_TABLE[i].name[0] == '\0') {
+                printf("    [missing] GATE_REASON_TABLE[%d] has empty name\n", i);
+                ok = 0;
+            }
+        }
+        check("GATE_REASON_TABLE: every entry has a non-empty name", ok);
+    }
+    {
+        // REJECT_REASON_NAMES[0] is intentionally "" (REJECT_REASON_NONE — no name).
+        // Every other index must be non-empty.
+        int ok = 1;
+        for (int i = 1; i < NUM_REJECT_REASONS; i++) {
+            if (!REJECT_REASON_NAMES[i] || REJECT_REASON_NAMES[i][0] == '\0') {
+                printf("    [missing] REJECT_REASON_NAMES[%d] is empty\n", i);
+                ok = 0;
+            }
+        }
+        check("REJECT_REASON_NAMES: every non-zero index has a non-empty name", ok);
     }
 
     printf("\n======================================\n");

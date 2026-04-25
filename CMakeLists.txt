@@ -170,6 +170,13 @@ endif()
 add_executable(controller_test tests/controller_test.cpp)
 target_compile_options(controller_test PRIVATE -O3 -march=native -funroll-loops -flto)
 target_include_directories(controller_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
+# Phase 5d regression tests pull in Backtest/BacktestEngine.hpp for BacktestResults
+# helpers, XGBoost weight helpers, and LabelType_* helpers. BacktestEngine.hpp
+# unconditionally references TUISnapshot, which is only defined under
+# MULTICORE_TUI. Match the production engine target.
+target_compile_definitions(controller_test PRIVATE MULTICORE_TUI)
+find_package(Threads REQUIRED)
+target_link_libraries(controller_test PRIVATE Threads::Threads)
 
 enable_testing()
 add_test(NAME controller_test COMMAND controller_test)
