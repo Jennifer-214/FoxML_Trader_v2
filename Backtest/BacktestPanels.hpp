@@ -353,9 +353,9 @@ static inline void GUI_Panel_Results(const BacktestResults *results) {
 
 struct ComparisonState {
     BacktestStats stats[COMPARISON_MAX_RUNS];
-    double equity_curves[COMPARISON_MAX_RUNS][BACKTEST_MAX_EQUITY];
-    int equity_counts[COMPARISON_MAX_RUNS];
-    char labels[COMPARISON_MAX_RUNS][64];
+    double *equity_curves[COMPARISON_MAX_RUNS];   // dynamic per-run snapshots
+    int     equity_counts[COMPARISON_MAX_RUNS];
+    char    labels[COMPARISON_MAX_RUNS][64];
     int run_count;
 };
 
@@ -363,10 +363,19 @@ static inline void Comparison_Init(ComparisonState *state) {
     memset(state, 0, sizeof(*state));
 }
 
+static inline void Comparison_Free(ComparisonState *state) {
+    for (int i = 0; i < COMPARISON_MAX_RUNS; i++) {
+        free(state->equity_curves[i]);
+        state->equity_curves[i] = NULL;
+    }
+}
+
 static inline void Comparison_SaveRun(ComparisonState *state, const BacktestResults *results,
                                        const char *label) {
     if (state->run_count >= COMPARISON_MAX_RUNS) {
-        // shift everything down, drop oldest
+        // drop oldest, shift the rest down. free the oldest's buffer first
+        // so we don't leak when the slot gets overwritten.
+        free(state->equity_curves[0]);
         memmove(&state->stats[0], &state->stats[1],
                 (COMPARISON_MAX_RUNS - 1) * sizeof(BacktestStats));
         memmove(&state->equity_curves[0], &state->equity_curves[1],
@@ -375,13 +384,24 @@ static inline void Comparison_SaveRun(ComparisonState *state, const BacktestResu
                 (COMPARISON_MAX_RUNS - 1) * sizeof(int));
         memmove(&state->labels[0], &state->labels[1],
                 (COMPARISON_MAX_RUNS - 1) * sizeof(state->labels[0]));
+        // tail is now duplicated by the memmove; clear the old tail pointer
+        state->equity_curves[COMPARISON_MAX_RUNS - 1] = NULL;
         state->run_count = COMPARISON_MAX_RUNS - 1;
     }
     int idx = state->run_count;
     state->stats[idx] = results->stats;
     int ec = results->equity_count;
-    if (ec > BACKTEST_MAX_EQUITY) ec = BACKTEST_MAX_EQUITY;
-    memcpy(state->equity_curves[idx], results->equity_curve, ec * sizeof(double));
+    // free any previous snapshot in this slot, then allocate fresh of exact size
+    free(state->equity_curves[idx]);
+    state->equity_curves[idx] = NULL;
+    if (ec > 0) {
+        state->equity_curves[idx] = (double *)malloc(ec * sizeof(double));
+        if (state->equity_curves[idx]) {
+            memcpy(state->equity_curves[idx], results->equity_curve, ec * sizeof(double));
+        } else {
+            ec = 0;
+        }
+    }
     state->equity_counts[idx] = ec;
     strncpy(state->labels[idx], label, 63);
     state->labels[idx][63] = '\0';
@@ -439,13 +459,23 @@ static inline void GUI_Panel_Comparison(ComparisonState *state, const BacktestRe
 
     if (ImPlot::BeginPlot("Equity Comparison", ImVec2(-1, 200))) {
         ImPlot::SetupAxes("Trade #", "$");
+        // single reusable x-axis buffer — sized to the largest run, grown as needed.
+        // static so we don't malloc/free on every redraw frame.
+        static double *xs = NULL;
+        static int xs_capacity = 0;
+        int xs_needed = 0;
+        for (int r = 0; r < state->run_count; r++) {
+            if (state->equity_counts[r] > xs_needed) xs_needed = state->equity_counts[r];
+        }
+        if (xs_needed > xs_capacity) {
+            xs = (double *)realloc(xs, xs_needed * sizeof(double));
+            xs_capacity = xs ? xs_needed : 0;
+            // (re)fill x-axis identity values up to new capacity
+            for (int i = 0; i < xs_capacity; i++) xs[i] = (double)i;
+        }
         for (int r = 0; r < state->run_count; r++) {
             int n = state->equity_counts[r];
-            if (n < 2) continue;
-            // build x-axis (trade index)
-            double xs[BACKTEST_MAX_EQUITY];
-            for (int i = 0; i < n; i++) xs[i] = (double)i;
-
+            if (n < 2 || !state->equity_curves[r] || !xs) continue;
             ImPlotSpec ls;
             ls.LineColor = run_colors[r % 8];
             ls.LineWeight = 2.0f;

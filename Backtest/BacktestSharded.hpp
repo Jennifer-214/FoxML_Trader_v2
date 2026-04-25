@@ -300,8 +300,9 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 }
                 last_realized_pnl = current_realized;
 
-                // Equity curve sample (one per completed trade)
-                if (results->equity_count < BACKTEST_MAX_EQUITY) {
+                // Equity curve sample (one per completed trade).
+                // dynamic growth — capping silently contaminates stats.
+                if (BacktestResults_EnsureEquityCapacity(results, results->equity_count + 1)) {
                     double bal = FPN_ToDouble(state.oms->balance);
                     results->equity_curve[results->equity_count] = bal;
                     results->equity_count++;

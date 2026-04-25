@@ -140,14 +140,19 @@ struct BacktestStats {
 //======================================================================================================
 // [RESULTS]
 //======================================================================================================
-#define BACKTEST_MAX_EQUITY    8192
-#define BACKTEST_SAMPLES_INIT  500000  // initial allocation, grows as needed
+#define BACKTEST_EQUITY_INIT   8192    // initial equity_curve allocation, grows 2x as needed
+#define BACKTEST_SAMPLES_INIT  500000  // initial sample buffer allocation, grows as needed
 #define BACKTEST_TRADE_CSV     "logging/BACKTEST_order_history.csv"
 
 struct BacktestResults {
     BacktestStats stats;
-    double equity_curve[BACKTEST_MAX_EQUITY];
+    // equity curve — recorded per completed trade. Long backtests at 50-200
+    // trades/day across multi-year datasets exceed any small fixed cap, so
+    // this is dynamic. Stats (Sharpe / max DD / return) compute from this
+    // array — silent truncation = wrong stats. NEVER cap this silently.
+    double *equity_curve;
     int equity_count;
+    int equity_capacity;
     char trade_csv_path[256];
     // ML features (dynamically allocated, grows as needed)
     float *feature_matrix;   // [sample_capacity * MODEL_MAX_FEATURES]
@@ -169,6 +174,8 @@ static inline void BacktestResults_Init(BacktestResults *r) {
     r->sample_tick_indices = (int *)malloc(r->sample_capacity * sizeof(int));
     r->sample_prices       = (double *)malloc(r->sample_capacity * sizeof(double));
     r->sample_regimes      = (int *)malloc(r->sample_capacity * sizeof(int));
+    r->equity_capacity = BACKTEST_EQUITY_INIT;
+    r->equity_curve    = (double *)malloc(r->equity_capacity * sizeof(double));
 }
 
 static inline void BacktestResults_Free(BacktestResults *r) {
@@ -177,13 +184,17 @@ static inline void BacktestResults_Free(BacktestResults *r) {
     free(r->sample_tick_indices);
     free(r->sample_prices);
     free(r->sample_regimes);
+    free(r->equity_curve);
     r->feature_matrix = NULL;
     r->labels = NULL;
     r->sample_tick_indices = NULL;
     r->sample_prices = NULL;
     r->sample_regimes = NULL;
+    r->equity_curve = NULL;
     r->sample_count = 0;
     r->sample_capacity = 0;
+    r->equity_count = 0;
+    r->equity_capacity = 0;
 }
 
 // grow sample buffers by 2x when full
@@ -207,6 +218,23 @@ static inline int BacktestResults_EnsureCapacity(BacktestResults *r, int needed)
     r->sample_prices = sp;
     r->sample_regimes = sr;
     r->sample_capacity = new_cap;
+    return 1;
+}
+
+// grow equity_curve by 2x when full. CRITICAL — stats compute from this
+// array, so silent truncation produces wrong Sharpe / max DD / return.
+static inline int BacktestResults_EnsureEquityCapacity(BacktestResults *r, int needed) {
+    if (needed <= r->equity_capacity) return 1;
+    int new_cap = r->equity_capacity * 2;
+    while (new_cap < needed) new_cap *= 2;
+    double *ec = (double *)realloc(r->equity_curve, new_cap * sizeof(double));
+    if (!ec) {
+        fprintf(stderr, "[backtest] failed to grow equity_curve to %d (%.0f MB) — stats will be partial\n",
+                new_cap, new_cap * 8.0 / 1e6);
+        return 0;
+    }
+    r->equity_curve = ec;
+    r->equity_capacity = new_cap;
     return 1;
 }
 
@@ -544,9 +572,10 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
                                                tick.is_buyer_maker,
                                                (double)(ticks[i].timestamp_us / 1000000));
 
-            // track equity curve (on each trade completion)
+            // track equity curve (on each trade completion).
+            // grows dynamically — CAPPING THIS CONTAMINATES STATS (Sharpe/DD/return).
             if (ctrl.total_buys > 0 && (ctrl.wins + ctrl.losses) > (uint32_t)results->equity_count) {
-                if (results->equity_count < BACKTEST_MAX_EQUITY) {
+                if (BacktestResults_EnsureEquityCapacity(results, results->equity_count + 1)) {
                     double bal = FPN_ToDouble(ctrl.balance);
                     double rpnl = FPN_ToDouble(ctrl.realized_pnl);
                     results->equity_curve[results->equity_count] = bal + rpnl;
