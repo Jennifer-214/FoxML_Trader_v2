@@ -22,6 +22,13 @@
 #include "DataStream/BinanceOrderAPI.hpp"
 #include "DataStream/BinanceDepth.hpp"
 #include "DataStream/EngineTUI.hpp"
+#include "CoreFrameworks/Notify.hpp"
+
+// Phase 8b — global notifier pointer storage. Declared extern in Notify.hpp.
+// nullptr by default (backtest, or live with notify_enabled=0). Caller-side
+// guards must check `if (g_notify) Notify_Send(...)`. Initialized in main()
+// after cfg load if cfg.notify_enabled=1.
+NotifyState *g_notify = nullptr;
 #include "CoreFrameworks/EngineSharded.hpp"
 #include "CoreFrameworks/PortfolioController.hpp"
 #include "MemHeaders/PoolAllocator.hpp"
