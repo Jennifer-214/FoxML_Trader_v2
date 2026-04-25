@@ -33,6 +33,10 @@ template <unsigned F> struct BookSnapshot {
     FPN<F> imbalance;        // (total_bid_qty - total_ask_qty) / (total_bid_qty + total_ask_qty)
     FPN<F> top_imbalance;    // same but just top level
     uint64_t update_count;
+    uint64_t last_update_id; // Binance "lastUpdateId" — monotonic per-symbol update sequence
+                             // (0 if missing from message; set by depth_parse_json)
+    uint64_t timestamp_us;   // local CLOCK_REALTIME microseconds when snapshot landed
+                             // (set by depth_thread_fn after successful parse)
 };
 
 template <unsigned F> inline BookSnapshot<F> BookSnapshot_Init() {
@@ -48,6 +52,8 @@ template <unsigned F> inline BookSnapshot<F> BookSnapshot_Init() {
     snap.imbalance = FPN_Zero<F>();
     snap.top_imbalance = FPN_Zero<F>();
     snap.update_count = 0;
+    snap.last_update_id = 0;
+    snap.timestamp_us = 0;
     return snap;
 }
 
@@ -84,6 +90,17 @@ template <unsigned F> struct DepthSharedState {
 //======================================================================================================
 template <unsigned F>
 static inline int depth_parse_json(const char *json, int len, BookSnapshot<F> *snap) {
+    // lastUpdateId — monotonic per-symbol update id from Binance.
+    // If absent (shouldn't be on @depth5@100ms but defensive), stays 0.
+    // Recorder uses a backward jump in this id (0 sentinel excluded) as one
+    // signal of a real gap; same-snapshot jumps of 50-500 are NORMAL between
+    // 100ms windows and not flagged.
+    const char *id_start = strstr(json, "\"lastUpdateId\"");
+    if (id_start) {
+        const char *colon = strchr(id_start, ':');
+        if (colon) snap->last_update_id = strtoull(colon + 1, NULL, 10);
+    }
+
     const char *bids_start = strstr(json, "\"bids\"");
     const char *asks_start = strstr(json, "\"asks\"");
     if (!bids_start || !asks_start) return 0;
@@ -234,6 +251,13 @@ static inline void *depth_thread_fn(void *arg) {
         int back = 1 - __atomic_load_n(&shared->active_idx, __ATOMIC_ACQUIRE);
         shared->snapshots[back] = shared->snapshots[shared->active_idx];
         if (depth_parse_json<F>(frame_buf, plen, &shared->snapshots[back])) {
+            // Stamp local landing time for the recorder (Phase 8a). CLOCK_REALTIME
+            // matches the wallclock used by gap-detection thresholds in
+            // DepthRecorder_Write (>2s wallclock silence = real gap).
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            shared->snapshots[back].timestamp_us =
+                (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
             __atomic_store_n(&shared->active_idx, back, __ATOMIC_RELEASE);
         }
     }
