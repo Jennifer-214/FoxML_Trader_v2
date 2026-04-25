@@ -286,12 +286,24 @@ Version string: `engine vX.Y.Z` — defined ONCE in `Version.hpp` as `ENGINE_VER
 ### Dynamic Sizing (Backtest Suite ONLY)
 Backtest buffers MUST NOT use compile-time caps that silently truncate data. Use dynamic allocation with growth:
 - **Sample buffers** (`BacktestResults`): start at `BACKTEST_SAMPLES_INIT`, grow via `BacktestResults_EnsureCapacity()` (2x realloc)
+- **Equity curve** (`BacktestResults`): start at `BACKTEST_EQUITY_INIT`, grow via `BacktestResults_EnsureEquityCapacity()` — stats (Sharpe/DD/return) compute from this, silent truncation = wrong stats
 - **Tick buffers**: sized from first-pass line count (no fixed max_ticks)
 - **Label reload**: sized to `total_processed` (no arbitrary cap)
-- **Data files**: `MAX_DATA_FILES` in Limits.hpp (256), not hardcoded 16
-- **Init/Free**: always call `BacktestResults_Init()` before use, `BacktestResults_Free()` after (optimizer included)
+- **Data files**: `MAX_DATA_FILES` in Limits.hpp (2048), not hardcoded 16
+- **Init/Reset/Free**: call `BacktestResults_Init()` before use, `BacktestResults_Reset()` between runs, `BacktestResults_Free()` at shutdown (optimizer included)
 
 When adding new backtest buffers, prefer `malloc` + `realloc` over static arrays. Log allocation failures and degrade gracefully (stop collecting, don't crash).
+
+#### Dynamic-buffer lifecycle invariant (load-bearing)
+
+When you add a new heap-allocated field to `BacktestResults` (or any struct with a `_Reset` helper), update **all four** sites:
+
+1. `_Init` — `malloc` the buffer, set `field_capacity = INIT_CAP`
+2. `_Reset` — save pointer + capacity, then re-restore them after `memset(0)` (so counts reset, allocations survive)
+3. `_Free` — `free` and NULL the pointer, zero the capacity
+4. `_EnsureCapacity` — defensive `cap > 0 ? cap*2 : INIT_CAP` floor, never `0 *= 2`
+
+**Why this is load-bearing.** ff9ac48 (Apr 2026) added `equity_curve` as a dynamic field but only updated _Init/_Free, not the hand-rolled save/restore inside `Backtest_Run`. The next run had `equity_capacity=0`. The first trade exit called `EnsureEquityCapacity(needed=1)` which executed `while (0 < 1) cap *= 2` — infinite spin at 100% CPU on the worker thread, no stderr output, GUI sees "still running" forever. Took a session to find. The `_Reset` helper exists so the knowledge of "which fields are dynamic" lives in exactly one place; the EnsureCapacity floor is belt-and-suspenders against the next time someone adds a field and forgets to extend `_Reset`.
 
 **Live engine is the opposite** — zero dynamic allocation on the hot path. All live buffers are fixed-size, pre-allocated at startup. No malloc, no realloc, no syscalls in the tick loop. This is a hard rule for the execution engine (`build/engine`, `build_gui/engine_gui`).
 

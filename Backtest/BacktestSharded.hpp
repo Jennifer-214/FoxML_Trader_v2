@@ -91,21 +91,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     (void)out_snapshot; // not yet wired in sharded path
 
     // Reset results — preserve dynamic allocations like the legacy path does
-    {
-        float *fm = results->feature_matrix;
-        float *lb = results->labels;
-        int   *ti = results->sample_tick_indices;
-        double *sp = results->sample_prices;
-        int   *sr = results->sample_regimes;
-        int cap = results->sample_capacity;
-        memset(results, 0, sizeof(*results));
-        results->feature_matrix = fm;
-        results->labels = lb;
-        results->sample_tick_indices = ti;
-        results->sample_prices = sp;
-        results->sample_regimes = sr;
-        results->sample_capacity = cap;
-    }
+    BacktestResults_Reset(results);
 
     // Load config (or use override)
     ControllerConfig<BACKTEST_FP> cfg;

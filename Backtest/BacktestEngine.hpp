@@ -197,10 +197,43 @@ static inline void BacktestResults_Free(BacktestResults *r) {
     r->equity_capacity = 0;
 }
 
+// Reset counts/scalars while PRESERVING heap allocations + their capacities.
+// Hand-rolled save/restore blocks in the run paths missed equity_curve when
+// it became dynamic (ff9ac48), which caused the first trade exit to call
+// EnsureEquityCapacity with capacity=0, hitting `while (0 < needed) cap *= 2`
+// — infinite spin at 100% CPU on the worker thread.
+//
+// When extending BacktestResults with a new dynamic field: update _Init,
+// _Free, AND this _Reset. The Ensure*Capacity helpers are also defended
+// against zero capacity (defense-in-depth) but this is the load-bearing fix.
+static inline void BacktestResults_Reset(BacktestResults *r) {
+    float *fm  = r->feature_matrix;
+    float *lb  = r->labels;
+    int   *ti  = r->sample_tick_indices;
+    double *sp = r->sample_prices;
+    int   *sr  = r->sample_regimes;
+    int    sample_cap = r->sample_capacity;
+    double *ec = r->equity_curve;
+    int    eq_cap = r->equity_capacity;
+
+    memset(r, 0, sizeof(*r));
+
+    r->feature_matrix      = fm;
+    r->labels              = lb;
+    r->sample_tick_indices = ti;
+    r->sample_prices       = sp;
+    r->sample_regimes      = sr;
+    r->sample_capacity     = sample_cap;
+    r->equity_curve        = ec;
+    r->equity_capacity     = eq_cap;
+}
+
 // grow sample buffers by 2x when full
 static inline int BacktestResults_EnsureCapacity(BacktestResults *r, int needed) {
     if (needed <= r->sample_capacity) return 1;
-    int new_cap = r->sample_capacity * 2;
+    // floor: if capacity leaked to 0 (forgot to preserve in a reset path),
+    // seed from BACKTEST_SAMPLES_INIT instead of spinning on `0 *= 2`.
+    int new_cap = r->sample_capacity > 0 ? r->sample_capacity * 2 : BACKTEST_SAMPLES_INIT;
     while (new_cap < needed) new_cap *= 2;
     float *fm  = (float *)realloc(r->feature_matrix, new_cap * MODEL_MAX_FEATURES * sizeof(float));
     float *lb  = (float *)realloc(r->labels, new_cap * sizeof(float));
@@ -225,7 +258,8 @@ static inline int BacktestResults_EnsureCapacity(BacktestResults *r, int needed)
 // array, so silent truncation produces wrong Sharpe / max DD / return.
 static inline int BacktestResults_EnsureEquityCapacity(BacktestResults *r, int needed) {
     if (needed <= r->equity_capacity) return 1;
-    int new_cap = r->equity_capacity * 2;
+    // floor: see BacktestResults_EnsureCapacity — same zero-capacity spin guard.
+    int new_cap = r->equity_capacity > 0 ? r->equity_capacity * 2 : BACKTEST_EQUITY_INIT;
     while (new_cap < needed) new_cap *= 2;
     double *ec = (double *)realloc(r->equity_curve, new_cap * sizeof(double));
     if (!ec) {
@@ -367,21 +401,7 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
     }
 
     // reset results — preserve dynamic allocations, just reset counts
-    {
-        float *fm = results->feature_matrix;
-        float *lb = results->labels;
-        int   *ti = results->sample_tick_indices;
-        double *sp = results->sample_prices;
-        int   *sr = results->sample_regimes;
-        int cap = results->sample_capacity;
-        memset(results, 0, sizeof(*results));
-        results->feature_matrix = fm;
-        results->labels = lb;
-        results->sample_tick_indices = ti;
-        results->sample_prices = sp;
-        results->sample_regimes = sr;
-        results->sample_capacity = cap;
-    }
+    BacktestResults_Reset(results);
 
     // load config
     ControllerConfig<BACKTEST_FP> cfg;
