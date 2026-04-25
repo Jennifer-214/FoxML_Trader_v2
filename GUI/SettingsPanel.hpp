@@ -223,6 +223,12 @@ static const CfgFieldDef field_defs[] = {
         "Max bandit influence fraction (0.30 = 30%%)\nramps from 0%% to this over first 200 trades"},
     {"confidence_enabled",       "Confidence",        "FoxML",  CFG_BOOL,  NULL,
         "Dynamic ML threshold based on prediction quality\nraises threshold when IC/freshness/stability are low"},
+    {"confidence_window",        "Conf Window",       "FoxML",  CFG_INT,   "%d",
+        "RollingIC + RollingRMSE window size (default 32)\nlarger = smoother but slower to react to model changes\ncapped at ROLLING_IC_MAX_WINDOW=64"},
+    {"confidence_freshness_tau", "Conf Tau (s)",      "FoxML",  CFG_FLOAT, "%.0f",
+        "Freshness decay constant in seconds (default 300 = 5min)\ne^(-data_age/tau): data_age=tau gives 0.37 freshness"},
+    {"confidence_threshold_scale","Conf Scale",        "FoxML",  CFG_FLOAT, "%.2f",
+        "Gate formula: effective_thr = base * (this - conf)\ndefault 2.0 — conf=0 → 2x base (suppresses marginal signals)\nconf=1 → 1x base (full signal). Clamps at 1.0."},
     // Model Paths (Phase 7C)
     {"ml_model_path",            "Buy Model",         "Models", CFG_PATH,  NULL,
         "Path to XGBoost/LightGBM buy-signal model\ntrain in foxml_suite, load here"},

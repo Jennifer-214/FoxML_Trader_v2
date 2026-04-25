@@ -257,6 +257,12 @@ template <unsigned F> struct ControllerConfig {
                              // 0.30)
   int confidence_enabled;    // 0=disabled, 1=dynamic ml_buy_threshold from
                              // confidence scoring
+  // Phase 6 prep — tunable confidence loop parameters. Defaults preserve the
+  // pre-Phase-6prep hardcoded values. Only consulted when confidence_enabled=1.
+  uint32_t confidence_window;       // RollingIC + RollingRMSE window (default 32)
+  FPN<F>   confidence_freshness_tau; // freshness decay constant in seconds (default 300)
+  FPN<F>   confidence_threshold_scale; // gate formula: effective_thr = base * (this - conf)
+                                       // (default 2.0 — clamps at 1.0 in code)
   // Prediction normalization — Phase 7F (default OFF)
   int prediction_normalize; // 0=disabled, 1=z-score normalize predictions
                             // (activates after 100)
@@ -485,6 +491,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.bandit_enabled = 0;
   cfg.bandit_blend_ratio = FPN_FromDouble<F>(0.30);
   cfg.confidence_enabled = 0;
+  // Phase 6 prep — defaults match the pre-amend hardcoded values
+  cfg.confidence_window           = 32;                          // CONFIDENCE_IC_WINDOW_DEFAULT
+  cfg.confidence_freshness_tau    = FPN_FromDouble<F>(300.0);    // CONFIDENCE_FRESHNESS_TAU_DEFAULT
+  cfg.confidence_threshold_scale  = FPN_FromDouble<F>(2.0);      // hardcoded `2.0` in gate formula
   cfg.prediction_normalize = 0;
   cfg.barrier_gate_enabled = 0;
   cfg.model_verify_strict = 0;  // 0=warn, 1=strict (fail on mismatch), -1=skip
@@ -752,6 +762,9 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(bandit_enabled)
     CFG_PARSE_FPN(bandit_blend_ratio)
     CFG_PARSE_INT(confidence_enabled)
+    CFG_PARSE_U32(confidence_window)
+    CFG_PARSE_FPN(confidence_freshness_tau)
+    CFG_PARSE_FPN(confidence_threshold_scale)
     CFG_PARSE_INT(prediction_normalize)
     CFG_PARSE_INT(barrier_gate_enabled)
     CFG_PARSE_INT(model_verify_strict)

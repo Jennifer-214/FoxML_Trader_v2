@@ -343,8 +343,12 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->last_confidence = 0.0;
   for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; i++)
     ctrl->entry_prediction[i] = 0.0;
-  ConfidenceScorer_Init(&ctrl->confidence, CONFIDENCE_IC_WINDOW_DEFAULT,
-                          CONFIDENCE_FRESHNESS_TAU_DEFAULT);
+  // Phase 6 prep: read tunables from cfg. ConfidenceScorer_Init falls back to
+  // CONFIDENCE_IC_WINDOW_DEFAULT / CONFIDENCE_FRESHNESS_TAU_DEFAULT when the
+  // cfg values are 0/non-positive — defaults preserve pre-amend behavior.
+  ConfidenceScorer_Init(&ctrl->confidence,
+                          (int)config.confidence_window,
+                          FPN_ToDouble(config.confidence_freshness_tau));
   Bandit_Init(&ctrl->bandit, NUM_STRATEGIES, BANDIT_GAMMA_DEFAULT, BANDIT_ETA_MAX_DEFAULT,
               FPN_ToDouble(config.bandit_blend_ratio), BANDIT_MIN_SAMPLES_DEFAULT, BANDIT_RAMP_UP_DEFAULT);
   Bandit_SetArmName(&ctrl->bandit, STRATEGY_MEAN_REVERSION, "MR");
@@ -1607,15 +1611,20 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     ctrl->buy_conds.volume = FPN_Mul(ctrl->buy_conds.volume, ctrl->session_mult);
   }
 
-  // CONFIDENCE GATE: raise ML threshold when prediction quality is low
-  // effective_threshold = base * (2 - confidence) — high confidence = same threshold,
-  // low confidence = up to 2x threshold (suppresses marginal signals)
+  // CONFIDENCE GATE: raise ML threshold when prediction quality is low.
+  // effective_threshold = base * (scale - confidence)
+  //   scale=2.0 (default): high conf=base, conf=0 means up to 2x (clamp at 1.0)
+  //   scale tunable via cfg.confidence_threshold_scale (Phase 6 prep)
+  // KNOWN FPN-only violation: this formula is in `double` because the existing
+  // ConfidenceScorer is double-only. Documented in CLAUDE.md "FPN-Only
+  // Accounting / Known violations to fix".
   if (ctrl->config.confidence_enabled && ctrl->strategy_id == STRATEGY_ML
       && !FPN_IsZero(ctrl->buy_conds.price)) {
     double conf = ConfidenceScorer_Compute(&ctrl->confidence, 0.0); // data_age=0 (live)
     ctrl->last_confidence = conf;
     double base_thr = FPN_ToDouble(ctrl->config.ml_buy_threshold);
-    double effective_thr = base_thr * (2.0 - conf);
+    double scale = FPN_ToDouble(ctrl->config.confidence_threshold_scale);
+    double effective_thr = base_thr * (scale - conf);
     if (effective_thr > 1.0) effective_thr = 1.0;
     double pred = FPN_ToDouble(ctrl->ml_strategy.last_prediction);
     if (pred > 0.0 && pred < effective_thr) {
