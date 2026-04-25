@@ -432,6 +432,23 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
 
             if (loaded) {
                 state.cores[i].model_handle = &ml_zoos[i];
+                // stupid-proof verification: read expected.cfg from the run
+                // bundle and warn (or fail in strict mode) on any mismatch
+                // between the model's training config and the live engine.cfg.
+                if (cfg.core_model_dir[i][0]) {
+                    int verify_ok = CoreModelZoo_VerifyExpected(&ml_zoos[i],
+                        cfg.core_model_dir[i],
+                        cfg.barrier_gate_enabled,
+                        FPN_ToDouble(cfg.ml_buy_threshold),
+                        cfg.model_verify_strict, i);
+                    if (!verify_ok && cfg.model_verify_strict > 0) {
+                        // strict mode + mismatch: detach model, treat as "no model loaded"
+                        // (executor falls back to SimpleDip per ML_BuildParameters)
+                        fprintf(stderr, "[sharded] core %d: ML model UNLOADED due to strict verify failure\n", i);
+                        CoreModelZoo_Free(&ml_zoos[i]);
+                        state.cores[i].model_handle = NULL;
+                    }
+                }
             }
         }
 

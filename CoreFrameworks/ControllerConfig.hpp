@@ -247,6 +247,13 @@ template <unsigned F> struct ControllerConfig {
                                // price peaks
   char peak_model_path[256];   // path to P(will_peak) model
   char valley_model_path[256]; // path to P(will_valley) model
+  // Phase 5c stupid-proofing: when a model is loaded from a run bundle
+  // (core_N_model_dir), the engine reads models/{dir}/expected.cfg and
+  // compares ML-relevant fields against the live config. mismatches are
+  // a) warnings (default), b) load failures (strict=1), or c) ignored (=-1).
+  // strict mode is recommended for production deployment; default mode
+  // for development so a single missing expected.cfg doesn't break startup.
+  int model_verify_strict;     // 0=warn (default), 1=strict, -1=skip
   // Per-core sharding (Phase 13) — STARTUP-ONLY, ignored by hot reload
   uint8_t
       engine_mode; // ENGINE_MODE_SINGLE_CORE (default) or ENGINE_MODE_SHARDED
@@ -456,6 +463,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.confidence_enabled = 0;
   cfg.prediction_normalize = 0;
   cfg.barrier_gate_enabled = 0;
+  cfg.model_verify_strict = 0;  // 0=warn, 1=strict (fail on mismatch), -1=skip
   cfg.peak_model_path[0] = '\0';
   cfg.valley_model_path[0] = '\0';
   // Per-core sharding (Phase 13) — safe defaults: legacy mode, 4 cores if opted
@@ -703,6 +711,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(confidence_enabled)
     CFG_PARSE_INT(prediction_normalize)
     CFG_PARSE_INT(barrier_gate_enabled)
+    CFG_PARSE_INT(model_verify_strict)
 
     // Per-core sharding (Phase 13) — engine_mode accepts both string and int
     // forms. The GUI SettingsPanel uses CFG_BOOL which writes "0"/"1"; manual

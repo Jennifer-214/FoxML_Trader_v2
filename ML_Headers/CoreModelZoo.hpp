@@ -157,4 +157,129 @@ inline int CoreModelZoo_HasAny(const CoreModelZoo<F> *zoo) {
     return zoo->loaded_mask != 0;
 }
 
+//======================================================================================================
+// [STUPID-PROOF VERIFY]
+//======================================================================================================
+// reads <dir>/expected.cfg (written by foxml_suite Save Run) and verifies
+// the live ML config matches what the model was trained against. mismatches
+// are logged as warnings; if strict_mode is set, returns 0 to fail load.
+//
+// returns:
+//   1 = no expected.cfg present (silent pass — backward compat with old runs)
+//   1 = expected.cfg present and all fields match
+//   1 = expected.cfg present, mismatches exist, strict_mode=0 (warn but ok)
+//   0 = expected.cfg present, mismatches exist, strict_mode=1 (fail load)
+//
+// also runs a structural check — if any model in the zoo has 3+ outputs
+// (multiclass softmax) but barrier_gate_enabled=0, warn that the engine
+// will only use one class and the model is being underutilized.
+//======================================================================================================
+template <unsigned F>
+inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *dir,
+                                       int live_barrier_gate_enabled,
+                                       double live_ml_buy_threshold,
+                                       int strict_mode, int core_id) {
+    // structural check: multiclass model + barrier_gate_enabled=0 → warn
+    int has_multiclass = (zoo->loaded_mask & CORE_MODEL_BARRIER) && zoo->barrier.num_outputs >= 2;
+    if (has_multiclass && !live_barrier_gate_enabled) {
+        fprintf(stderr, "[ML] core %d: WARNING — model has %d output classes (multiclass softmax)\n"
+                        "                  but barrier_gate_enabled=0. only P(valley) used,\n"
+                        "                  P(peak)/P(stable) ignored. set barrier_gate_enabled=1\n"
+                        "                  to use the full model.\n",
+                core_id, zoo->barrier.num_outputs);
+    }
+
+    // read expected.cfg if present
+    if (!dir || dir[0] == '\0') return 1;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/expected.cfg", dir);
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        // no expected.cfg = old run bundle, silent pass for backward compat
+        return 1;
+    }
+
+    int expected_barrier_gate = -1;       // -1 = not specified in file
+    double expected_threshold = -1.0;
+    int expected_num_classes = -1;
+    char expected_role[64] = "";
+    int mismatches = 0;
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        // strip leading whitespace + skip comments + blank
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == '\n' || *p == '\0') continue;
+        // split on '='
+        char *eq = strchr(p, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        char *key = p;
+        char *val = eq + 1;
+        // trim trailing whitespace on key
+        char *kend = key + strlen(key) - 1;
+        while (kend > key && (*kend == ' ' || *kend == '\t')) { *kend-- = '\0'; }
+        // trim leading whitespace on val
+        while (*val == ' ' || *val == '\t') val++;
+        // strip trailing newline + comment from val
+        char *vend = val + strcspn(val, "\r\n#");
+        *vend = '\0';
+        // trim trailing whitespace on val
+        while (vend > val && (*(vend-1) == ' ' || *(vend-1) == '\t')) { *(--vend) = '\0'; }
+
+        if (strcmp(key, "barrier_gate_enabled") == 0)        expected_barrier_gate = atoi(val);
+        else if (strcmp(key, "ml_buy_threshold") == 0)       expected_threshold = atof(val);
+        else if (strcmp(key, "expected_num_classes") == 0)   expected_num_classes = atoi(val);
+        else if (strcmp(key, "expected_role") == 0) {
+            strncpy(expected_role, val, sizeof(expected_role) - 1);
+            expected_role[sizeof(expected_role) - 1] = '\0';
+        }
+    }
+    fclose(f);
+
+    // compare each field, log mismatches
+    if (expected_barrier_gate >= 0 && expected_barrier_gate != live_barrier_gate_enabled) {
+        fprintf(stderr, "[ML] core %d: MISMATCH — expected.cfg says barrier_gate_enabled=%d, "
+                        "engine.cfg has %d\n",
+                core_id, expected_barrier_gate, live_barrier_gate_enabled);
+        mismatches++;
+    }
+    if (expected_threshold >= 0.0 &&
+        (live_ml_buy_threshold < expected_threshold - 0.001 ||
+         live_ml_buy_threshold > expected_threshold + 0.001)) {
+        fprintf(stderr, "[ML] core %d: MISMATCH — expected.cfg says ml_buy_threshold=%.3f, "
+                        "engine.cfg has %.3f\n",
+                core_id, expected_threshold, live_ml_buy_threshold);
+        mismatches++;
+    }
+    if (expected_num_classes >= 2 && (zoo->loaded_mask & CORE_MODEL_BARRIER) &&
+        zoo->barrier.num_outputs != expected_num_classes) {
+        fprintf(stderr, "[ML] core %d: MISMATCH — expected.cfg says %d classes, "
+                        "loaded model has %d outputs\n",
+                core_id, expected_num_classes, zoo->barrier.num_outputs);
+        mismatches++;
+    }
+
+    if (mismatches == 0) {
+        fprintf(stderr, "[ML] core %d: expected.cfg verified (role=%s, %d classes) ✓\n",
+                core_id, expected_role[0] ? expected_role : "?",
+                expected_num_classes >= 0 ? expected_num_classes : 0);
+        return 1;
+    }
+
+    if (strict_mode > 0) {
+        fprintf(stderr, "[ML] core %d: %d MISMATCH(ES) — STRICT MODE refusing to load.\n"
+                        "                update engine.cfg to match expected.cfg, or set\n"
+                        "                model_verify_strict=0 to override.\n",
+                core_id, mismatches);
+        return 0;
+    } else {
+        fprintf(stderr, "[ML] core %d: %d mismatch(es) — model may not behave as trained.\n"
+                        "                fix engine.cfg to silence these warnings.\n",
+                core_id, mismatches);
+        return 1;
+    }
+}
+
 #endif // CORE_MODEL_ZOO_HPP

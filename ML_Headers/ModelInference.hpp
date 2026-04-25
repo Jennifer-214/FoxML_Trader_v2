@@ -146,6 +146,9 @@ struct ModelHandle {
     void *handle;           // opaque: BoosterHandle (XGB) or BoosterHandle (LGBM)
     int backend;            // MODEL_BACKEND_NONE / XGBOOST / LIGHTGBM
     int num_features;       // expected input dimension
+    int num_outputs;        // 1 = binary/regression, ≥2 = multiclass softmax.
+                            // detected at load time. enables stupid-proof check
+                            // "model is 3-class but barrier_gate_enabled=0".
     char model_path[256];   // path for display/logging
     char training_fingerprint[65]; // SHA256 of config+data used to train this model (empty if unknown)
 };
@@ -156,6 +159,7 @@ inline void Model_Init(ModelHandle<F> *m) {
     m->handle = NULL;
     m->backend = MODEL_BACKEND_NONE;
     m->num_features = 0;
+    m->num_outputs = 0;
     m->model_path[0] = '\0';
 }
 
@@ -227,8 +231,26 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
         m->handle = (void*)booster;
         m->backend = MODEL_BACKEND_XGBOOST;
         m->num_features = MODEL_NUM_FEATURES;
-        fprintf(stderr, "[ML] XGBoost model loaded: %s (%d features, format v%d%s%s)\n",
-                path, m->num_features, MODEL_FORMAT_VERSION,
+        // detect num_outputs by running a single-row prediction with zeros.
+        // for binary models out_len = 1; for multi:softprob out_len = num_class.
+        // this is the stupid-proof check: lets the engine warn when a 3-class
+        // model is loaded into a binary-config core (or vice versa).
+        m->num_outputs = 1;
+        {
+            float zero_row[MODEL_MAX_FEATURES] = {0};
+            DMatrixHandle probe;
+            if (XGDMatrixCreateFromMat(zero_row, 1, MODEL_NUM_FEATURES, -1.0f, &probe) == 0) {
+                bst_ulong out_len = 0;
+                const float *out_result = NULL;
+                if (XGBoosterPredict(booster, probe, 0, 0, 0, &out_len, &out_result) == 0) {
+                    if (out_len > 0) m->num_outputs = (int)out_len;
+                }
+                XGDMatrixFree(probe);
+            }
+        }
+        fprintf(stderr, "[ML] XGBoost model loaded: %s (%d features, %d output%s, format v%d%s%s)\n",
+                path, m->num_features, m->num_outputs, m->num_outputs == 1 ? "" : "s",
+                MODEL_FORMAT_VERSION,
                 m->training_fingerprint[0] ? ", fingerprint: " : "",
                 m->training_fingerprint[0] ? m->training_fingerprint : "");
         return 1;
@@ -247,8 +269,10 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
         m->handle = (void*)booster;
         m->backend = MODEL_BACKEND_LIGHTGBM;
         m->num_features = MODEL_NUM_FEATURES;
-        fprintf(stderr, "[ML] LightGBM model loaded: %s (%d features, %d iterations)\n",
-                path, m->num_features, num_iterations);
+        m->num_outputs = 1;
+        LGBM_BoosterGetNumClasses(booster, &m->num_outputs);
+        fprintf(stderr, "[ML] LightGBM model loaded: %s (%d features, %d output%s, %d iterations)\n",
+                path, m->num_features, m->num_outputs, m->num_outputs == 1 ? "" : "s", num_iterations);
         return 1;
     }
 #endif
