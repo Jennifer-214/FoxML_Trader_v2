@@ -41,6 +41,7 @@
 #include "../DataStream/BinanceCrypto.hpp"
 #include "../DataStream/BinanceOrderAPI.hpp"
 #include "../DataStream/TickRecorder.hpp"  // Phase 8a (post-coding c7)
+#include "Notify.hpp"                     // Phase 8b (post-coding c8)
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/StrategyParameters.hpp"
@@ -341,6 +342,43 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
         } else {
             fprintf(stderr, "[sharded] user data websocket init failed, "
                              "falling back to REST-only fills\n");
+        }
+    }
+
+    // Phase 8b (post-coding c8) — NotifyState for operational alerts.
+    // Same setup as legacy path: stderr backend by default, command backend
+    // (popen) for dunst/Discord/Slack/Telegram/etc when configured. Off by
+    // default (notify_enabled=0). Notify_Send call sites in
+    // PortfolioController + BinanceCrypto/Depth/UserData are shared headers
+    // — they fire in both modes; g_notify being non-null is what gates
+    // actual delivery.
+    static NotifyState g_notify_state;
+    static NotifyCommandState g_notify_cmd_state;
+    if (cfg.notify_enabled) {
+        NotifyBackendFn backend = NotifyBackend_Stderr;
+        void *backend_state = nullptr;
+        if (cfg.notify_backend == 1) {
+            if (cfg.notify_command[0] == '\0') {
+                fprintf(stderr, "[sharded] notify backend=command but notify_command "
+                                "is empty — falling back to stderr\n");
+            } else {
+                strncpy(g_notify_cmd_state.template_str, cfg.notify_command,
+                        sizeof(g_notify_cmd_state.template_str) - 1);
+                g_notify_cmd_state.template_str[sizeof(g_notify_cmd_state.template_str) - 1] = '\0';
+                backend = NotifyBackend_Command;
+                backend_state = &g_notify_cmd_state;
+            }
+        } else if (cfg.notify_backend != 0) {
+            fprintf(stderr, "[sharded] notify backend=%d not recognized — "
+                            "falling back to stderr\n", cfg.notify_backend);
+        }
+        NotifyState_Init(&g_notify_state, backend, backend_state,
+                         (uint64_t)cfg.notify_cooldown_secs * 1000000ULL);
+        if (g_notify_state.worker_started) {
+            g_notify = &g_notify_state;
+            fprintf(stderr, "[sharded] notify enabled (backend=%s, cooldown=%us)\n",
+                    backend == NotifyBackend_Stderr ? "stderr" : "command",
+                    cfg.notify_cooldown_secs);
         }
     }
 
@@ -1063,6 +1101,11 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     }
     DepthRecorder_Close(&g_depth_rec);
     TickRecorder_Close(&g_tick_rec);  // Phase 8a (post-coding c7)
+    // Phase 8b (post-coding c8) — drain notify queue + join worker.
+    if (g_notify) {
+        NotifyState_Shutdown(g_notify);
+        g_notify = nullptr;
+    }
     OrderManager_Shutdown(&oms);
 
     fprintf(stderr, "[sharded] all threads joined.\n");
