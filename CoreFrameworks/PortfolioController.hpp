@@ -11,6 +11,15 @@
 // configrurebale parameters for polling rates and stuff, this should be a
 // seperate module from the actual order engine, as it shouldnt interfere with
 // the order execution, this simply pipes conditions to the gates
+//
+// ============================================================
+// LEGACY CONTROLLER (Phase 13+): used by single-threaded engine mode +
+// controller_test. Sharded mode (production default) uses
+// CoreFrameworks/OrderManager.hpp (OrderManagerState + EventLoop_OnEvent
+// + ExecutionCore<F>) instead. Features added HERE only fire when
+// engine_mode=single_core OR in unit tests. For sharded-also wiring, port
+// to the OMS path. See CLAUDE.md "Cross-Mode Init Placement" invariant.
+// ============================================================
 //======================================================================================================
 // [INCLUDE]
 //======================================================================================================

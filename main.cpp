@@ -174,6 +174,23 @@ int main(int argc, char *argv[]) {
             "================================================================\n");
 
     //==================================================================================================
+    // ============================================================
+    // LEGACY ENGINE PATH — single-threaded, deprecated as of 2026-04-25
+    // ============================================================
+    // Everything below this line runs ONLY in legacy single-threaded mode.
+    // New features go in:
+    //   - CoreFrameworks/EngineSharded.hpp        (sharded-mode init/teardown)
+    //   - CoreFrameworks/EventLoopState           (cross-core dispatch)
+    //   - CoreFrameworks/OrderManager.hpp         (OMS HandleFill — fee math + counters)
+    //   - CoreFrameworks/ExecutionCore.hpp        (per-core hot path)
+    // Adding init/runtime code here = silent production gap (sharded won't see it).
+    // See CLAUDE.md "Cross-Mode Init Placement" invariant.
+    //
+    // This path remains live for benchmark/regression comparisons + controller_test
+    // (which exercises PortfolioController, the legacy controller). Production
+    // trading uses the sharded path above.
+    // ============================================================
+    //==================================================================================================
     // license check — before connecting to exchange
     //==================================================================================================
 #ifndef LICENSE_BYPASS
