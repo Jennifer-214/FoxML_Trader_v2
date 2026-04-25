@@ -25,7 +25,9 @@
 //======================================================================================================
 // [DATA PANEL STATE]
 //======================================================================================================
-#define DATA_MAX_FILES 256
+// scan cap for the Data panel — must be ≥ MAX_DATA_FILES so the GUI doesn't
+// silently truncate before the run_config buffer fills. paired with Limits.hpp.
+#define DATA_MAX_FILES 2048
 
 struct DataPanelState {
     char data_dir[256];
