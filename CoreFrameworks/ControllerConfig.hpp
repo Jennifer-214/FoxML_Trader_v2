@@ -581,6 +581,12 @@ template <unsigned F>
 inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   ControllerConfig<F> cfg = ControllerConfig_Default<F>();
 
+  // Phase 8: track whether the user explicitly set maker/taker rates in
+  // the cfg file. Can't infer from value comparison alone — explicit
+  // values matching defaults would falsely trigger legacy-mirroring.
+  int maker_explicitly_set = 0;
+  int taker_explicitly_set = 0;
+
   FILE *f = fopen(filepath, "r");
   if (!f)
     return cfg;
@@ -699,8 +705,19 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_PCT(take_profit_pct)
     CFG_PARSE_PCT(stop_loss_pct)
     CFG_PARSE_PCT(fee_rate)
-    CFG_PARSE_PCT(fee_rate_maker)
-    CFG_PARSE_PCT(fee_rate_taker)
+    // Phase 8: track explicit-set for the post-parse legacy-mirror decision.
+    // Inline parse instead of CFG_PARSE_PCT macro (which would `continue;`
+    // before setting the flag). Same divide-by-100 semantics.
+    if (strcmp(key, "fee_rate_maker") == 0) {
+        cfg.fee_rate_maker = FPN_FromDouble<F>(atof(val) / 100.0);
+        maker_explicitly_set = 1;
+        continue;
+    }
+    if (strcmp(key, "fee_rate_taker") == 0) {
+        cfg.fee_rate_taker = FPN_FromDouble<F>(atof(val) / 100.0);
+        taker_explicitly_set = 1;
+        continue;
+    }
     CFG_PARSE_PCT(risk_pct)
     CFG_PARSE_PCT(entry_offset_pct)
     CFG_PARSE_PCT(offset_min)
@@ -962,23 +979,20 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   //      The other stays at its DEFAULT, which is almost certainly wrong —
   //      WARN loudly so the user can fix.
   //
-  // Detect "explicitly set" by comparing against Default()'s values.
+  // Use the explicit-set flags tracked during parse (above). This handles
+  // the case where the user explicitly sets maker/taker to values that
+  // happen to equal Default() — value-comparison can't distinguish.
   {
-    FPN<F> default_maker = FPN_FromDouble<F>(0.00075);
-    FPN<F> default_taker = FPN_FromDouble<F>(0.00100);
-    int maker_at_default = FPN_Equal(cfg.fee_rate_maker, default_maker);
-    int taker_at_default = FPN_Equal(cfg.fee_rate_taker, default_taker);
-    int legacy_set       = !FPN_IsZero(cfg.fee_rate);
+    int legacy_set = !FPN_IsZero(cfg.fee_rate);
 
-    if (maker_at_default && taker_at_default && legacy_set) {
-      // Legacy mode: only fee_rate set, mirror to both. Live + backtest
-      // behave identically to pre-Phase-8.
+    if (!maker_explicitly_set && !taker_explicitly_set && legacy_set) {
+      // Legacy mode: only fee_rate set in cfg, mirror to both.
       cfg.fee_rate_maker = cfg.fee_rate;
       cfg.fee_rate_taker = cfg.fee_rate;
       fprintf(stderr,
               "[CFG] fee_rate=%.5f → mirrored to maker+taker (legacy mode)\n",
               FPN_ToDouble(cfg.fee_rate));
-    } else if (legacy_set && (maker_at_default ^ taker_at_default)) {
+    } else if (legacy_set && (maker_explicitly_set ^ taker_explicitly_set)) {
       // Mixed-cfg WARNING — almost certainly user error.
       fprintf(stderr,
               "[CFG] WARNING: fee_rate=%.5f set, but only one of "
@@ -990,8 +1004,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
               FPN_ToDouble(cfg.fee_rate_maker),
               FPN_ToDouble(cfg.fee_rate_taker));
     }
-    // else: case 2 (both maker+taker set, legacy fee_rate may also be set
-    // for fingerprint compat) — silent, working as intended.
+    // else: both maker+taker set explicitly (case 2 — silent, working as
+    // intended) OR neither set + no legacy fee_rate (zero everywhere, fine).
   }
 
   // post-load validation/clamping. min_warmup_samples gates on rolling.count

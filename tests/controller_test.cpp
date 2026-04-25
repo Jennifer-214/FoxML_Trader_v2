@@ -16,6 +16,9 @@
 #include <unistd.h>
 #include "../DataStream/MockGenerator.hpp"
 #include "../CoreFrameworks/PortfolioController.hpp"
+#include "../CoreFrameworks/Order.hpp"
+#include "../CoreFrameworks/OrderManager.hpp"
+#include "../DataStream/BinanceUserData.hpp"
 #include "../Backtest/BacktestEngine.hpp"
 #include "../Backtest/HeldOutSplit.hpp"
 
@@ -3615,6 +3618,202 @@ int main() {
                   fabs(FPN_ToDouble(cfg.gap_acceptable_threshold) - 0.10) < 1e-6);
             unlink(path);
         }
+    }
+
+    //======================================================================================================
+    // [PHASE 8 TESTS — maker/taker fee accounting + ORDER_PARTIAL state machine]
+    //======================================================================================================
+    // see plans/phase8-maker-taker-tests.md. ~17 assertions across 6 groups
+    // (trimmed from the sidecar's ~32 — heavy infrastructure tests like real
+    // OMS state-machine drives or full Binance JSON corpus replay are
+    // deferred to Phase 8.x integration testing).
+    //======================================================================================================
+
+    // ----- Group 1: Fee_Compute helper (3 assertions) --------------------------------------------------
+    printf("\n--- Phase 8: Fee_Compute helper ---\n");
+    {
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.fee_rate_maker = FPN_FromDouble<FP>(0.00075);
+        cfg.fee_rate_taker = FPN_FromDouble<FP>(0.00100);
+        FPN<FP> notional = FPN_FromDouble<FP>(1000.0);
+
+        FPN<FP> fee_maker = Fee_Compute(&cfg, notional, /*is_maker=*/1);
+        FPN<FP> fee_taker = Fee_Compute(&cfg, notional, /*is_maker=*/0);
+
+        check("Fee_Compute is_maker=1 → 1000 * 0.075% = 0.75",
+              fabs(FPN_ToDouble(fee_maker) - 0.75) < 1e-4);
+        check("Fee_Compute is_maker=0 → 1000 * 0.100% = 1.00",
+              fabs(FPN_ToDouble(fee_taker) - 1.00) < 1e-4);
+        check("maker fee strictly less than taker fee at same notional",
+              FPN_ToDouble(fee_maker) < FPN_ToDouble(fee_taker));
+    }
+
+    // ----- Group 4: Backward compat — legacy fee_rate path (4 assertions) -----------------------------
+    // Land this group EARLY to anchor the legacy mirroring before later groups
+    // exercise the maker/taker code paths that depend on it.
+    printf("\n--- Phase 8: Legacy fee_rate backward compat ---\n");
+    {
+        // Old cfg with only fee_rate set: maker AND taker mirror it
+        char path[] = "/tmp/test_fee_legacy_XXXXXX";
+        int fd = mkstemp(path);
+        if (fd >= 0) {
+            dprintf(fd, "fee_rate=0.10\n");  // legacy 0.10% format
+            close(fd);
+            ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(path);
+            check("legacy: fee_rate=0.10 → fee_rate=0.001 (CFG_PARSE_PCT)",
+                  fabs(FPN_ToDouble(cfg.fee_rate) - 0.001) < 1e-6);
+            check("legacy mirroring: fee_rate_maker == fee_rate",
+                  fabs(FPN_ToDouble(cfg.fee_rate_maker) - 0.001) < 1e-6);
+            check("legacy mirroring: fee_rate_taker == fee_rate",
+                  fabs(FPN_ToDouble(cfg.fee_rate_taker) - 0.001) < 1e-6);
+            unlink(path);
+        }
+    }
+    {
+        // New cfg with all three set: each is independent
+        char path[] = "/tmp/test_fee_explicit_XXXXXX";
+        int fd = mkstemp(path);
+        if (fd >= 0) {
+            dprintf(fd, "fee_rate=0.10\nfee_rate_maker=0.075\nfee_rate_taker=0.100\n");
+            close(fd);
+            ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(path);
+            check("explicit cfg: maker=0.00075 + taker=0.00100 parsed independently",
+                  fabs(FPN_ToDouble(cfg.fee_rate_maker) - 0.00075) < 1e-7 &&
+                  fabs(FPN_ToDouble(cfg.fee_rate_taker) - 0.00100) < 1e-7);
+            unlink(path);
+        }
+    }
+
+    // ----- Group 2: ORDER_PARTIAL state transitions (3 assertions) -------------------------------------
+    // Order_IsTerminal correctness for the new ORDER_PARTIAL state.
+    printf("\n--- Phase 8: ORDER_PARTIAL state ---\n");
+    {
+        tt::Order<FP> o;
+        tt::Order_Init(&o, 1, /*core_id=*/0, tt::ORDER_MARKET_BUY);
+
+        // Default state after Init
+        check("Order_Init: default state = ORDER_PENDING, is_maker=0",
+              o.state == tt::ORDER_PENDING && o.is_maker == 0);
+
+        // ORDER_PARTIAL is non-terminal — order stays alive in OMS
+        o.state = tt::ORDER_PARTIAL;
+        check("Order_IsTerminal returns false for ORDER_PARTIAL",
+              tt::Order_IsTerminal(&o) == false);
+
+        // ORDER_FILLED is terminal — slot can be freed
+        o.state = tt::ORDER_FILLED;
+        check("Order_IsTerminal returns true for ORDER_FILLED",
+              tt::Order_IsTerminal(&o) == true);
+    }
+
+    // ----- Group 3: executionReport parser — m/X/n/N fields (3 assertions) ----------------------------
+    printf("\n--- Phase 8: executionReport parser ---\n");
+    {
+        // Simulated Binance executionReport with m=true (maker fill)
+        const char json_maker[] =
+            "{\"e\":\"executionReport\",\"x\":\"TRADE\",\"X\":\"FILLED\","
+            "\"c\":\"oms_42\",\"i\":\"99\","
+            "\"L\":\"60100.5\",\"l\":\"0.001\","
+            "\"m\":true,\"n\":\"0.045\",\"N\":\"USDT\","
+            "\"t\":12345,\"T\":1234567890123}";
+        tt::Command cmd;
+        uint64_t trade_id;
+        int is_fill = tt::ud_parse_execution_report(json_maker, sizeof(json_maker) - 1, &cmd, &trade_id);
+        check("parser: maker fill (m=true) → cmd.result.is_maker=1",
+              is_fill == 1 && cmd.result.is_maker == 1 && cmd.result.order_complete == 1);
+    }
+    {
+        // Same shape but m=false (taker fill) and X=PARTIALLY_FILLED
+        const char json_taker_partial[] =
+            "{\"e\":\"executionReport\",\"x\":\"TRADE\",\"X\":\"PARTIALLY_FILLED\","
+            "\"c\":\"oms_43\",\"i\":\"100\","
+            "\"L\":\"60100.5\",\"l\":\"0.0005\","
+            "\"m\":false,\"n\":\"0.06\",\"N\":\"USDT\","
+            "\"t\":12346,\"T\":1234567890124}";
+        tt::Command cmd;
+        uint64_t trade_id;
+        int is_fill = tt::ud_parse_execution_report(json_taker_partial, sizeof(json_taker_partial) - 1, &cmd, &trade_id);
+        check("parser: taker partial (m=false, X=PARTIALLY_FILLED) → "
+              "is_maker=0, order_complete=0",
+              is_fill == 1 && cmd.result.is_maker == 0 && cmd.result.order_complete == 0);
+    }
+    {
+        // Defensive default: missing "m" → is_maker=0 (taker, conservative)
+        const char json_no_m[] =
+            "{\"e\":\"executionReport\",\"x\":\"TRADE\",\"X\":\"FILLED\","
+            "\"c\":\"oms_44\",\"i\":\"101\","
+            "\"L\":\"60100.5\",\"l\":\"0.001\","
+            "\"n\":\"0.06\",\"N\":\"USDT\","
+            "\"t\":12347,\"T\":1234567890125}";
+        tt::Command cmd;
+        uint64_t trade_id;
+        int is_fill = tt::ud_parse_execution_report(json_no_m, sizeof(json_no_m) - 1, &cmd, &trade_id);
+        check("parser: missing 'm' field defaults to is_maker=0 (taker, conservative)",
+              is_fill == 1 && cmd.result.is_maker == 0);
+    }
+
+    // ----- Group 5: Maker/taker accounting invariant (2 assertions) -----------------------------------
+    // total_fees == total_maker_fees + total_taker_fees after fills.
+    // Drives the synchronous path via PortfolioController_Tick to populate counters.
+    printf("\n--- Phase 8: Maker/taker accounting invariant ---\n");
+    {
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.starting_balance = FPN_FromDouble<FP>(10000.0);
+        // legacy: fee_rate=0.001, mirrored to maker+taker
+        cfg.fee_rate = FPN_FromDouble<FP>(0.001);
+        cfg.fee_rate_maker = cfg.fee_rate;
+        cfg.fee_rate_taker = cfg.fee_rate;
+        cfg.slippage_pct = FPN_Zero<FP>();
+        cfg.max_positions = 1;
+
+        PortfolioController<FP> ctrl = {};
+        PortfolioController_Init(&ctrl, cfg);
+
+        // Counters start at 0
+        check("counters initialized to 0",
+              ctrl.maker_fills_count == 0 && ctrl.taker_fills_count == 0 &&
+              FPN_ToDouble(ctrl.total_maker_fees) == 0.0 &&
+              FPN_ToDouble(ctrl.total_taker_fees) == 0.0);
+
+        // Drive a synthetic exit (RecordExit increments taker counter — TP/SL = market sell)
+        FPN<FP> entry = FPN_FromDouble<FP>(100.0);
+        FPN<FP> qty   = FPN_FromDouble<FP>(1.0);
+        Portfolio_AddPositionWithExits(&ctrl.portfolio, qty, entry,
+            FPN_FromDouble<FP>(110.0), FPN_FromDouble<FP>(90.0));
+        ctrl.portfolio.positions[0].entry_fee = FPN_FromDouble<FP>(0.10);
+        ctrl.balance = FPN_FromDouble<FP>(9899.90);
+
+        PositionExitGate(&ctrl.portfolio, FPN_FromDouble<FP>(110.0), &ctrl.exit_buf, 100);
+        PortfolioController_DrainExits(&ctrl);
+
+        // After one TP hit + drain: 1 taker fill, 0 maker fills
+        check("after sync exit: 1 taker fill, 0 maker, total_fees == total_taker_fees",
+              ctrl.taker_fills_count == 1 && ctrl.maker_fills_count == 0 &&
+              fabs(FPN_ToDouble(ctrl.total_fees) - FPN_ToDouble(ctrl.total_taker_fees)) < 1e-9 &&
+              FPN_ToDouble(ctrl.total_maker_fees) == 0.0);
+    }
+
+    // ----- Group 6: Snapshot sync — TUISnapshot has new fields (2 assertions) -------------------------
+    printf("\n--- Phase 8: TUISnapshot maker/taker fields ---\n");
+    {
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.starting_balance = FPN_FromDouble<FP>(10000.0);
+        PortfolioController<FP> ctrl = {};
+        PortfolioController_Init(&ctrl, cfg);
+
+        // Manually set counter values
+        ctrl.maker_fills_count = 3;
+        ctrl.taker_fills_count = 7;
+        ctrl.total_maker_fees  = FPN_FromDouble<FP>(0.5);
+        ctrl.total_taker_fees  = FPN_FromDouble<FP>(2.0);
+
+        TUISnapshot snap = {};
+        TUI_CopySnapshot<FP>(&snap, &ctrl, /*price=*/60000.0, /*volume=*/0.0);
+        check("TUISnapshot: maker_fills + taker_fills counters populated",
+              snap.maker_fills_count == 3 && snap.taker_fills_count == 7);
+        check("TUISnapshot: total_maker_fees + total_taker_fees populated",
+              fabs(snap.total_maker_fees - 0.5) < 1e-6 &&
+              fabs(snap.total_taker_fees - 2.0) < 1e-6);
     }
 
     // ----- Group 4 (Phase 6prep): Backward compat — cfg parsing (2 assertions) -------------------------------------
