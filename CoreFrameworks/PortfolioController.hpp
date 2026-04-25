@@ -935,11 +935,11 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
           ctrl->strategy_id = ctrl->config.default_strategy;
       PortfolioController_StrategyDispatch(ctrl, current_price);
       ctrl->state = CONTROLLER_ACTIVE;
-      static const char *strat_names[] = {"MR", "Momentum", "SimpleDip", "ML", "EmaCross"};
       int sid = ctrl->strategy_id;
       { char ts[16]; log_ts(ts, sizeof(ts));
       fprintf(stderr, "[%s] [SESSION] warmup complete — %d samples, strategy=%s, price=$%.2f\n",
-              ts, ctrl->rolling.count, (sid >= 0 && sid < 5) ? strat_names[sid] : "?",
+              ts, ctrl->rolling.count,
+              (sid >= 0 && sid < NUM_STRATEGIES) ? STRATEGY_FULL_NAMES[sid] : "?",
               FPN_ToDouble(current_price)); }
     }
 
