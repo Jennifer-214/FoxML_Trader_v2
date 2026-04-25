@@ -1,12 +1,12 @@
-# 2026-04-25 (later) — Label-type-aware metrics: primitives + sample panel + Train Model
+# 2026-04-25 (later) — Label-type-aware metrics across the validation/display stack
 
 Branch: `experiment/phase5-zoo`. Continuing from `2b27707` (changelog) +
 `fcf9616` (equity_curve fix). Rollback tag `pre-label-type-fix` set before
 this work began.
 
-This is **part 1 of 2** of a structural fix for "every metric/display site
-assumed binary classification." Walk-Forward path, Overfit detector, and
-docs land in part 2.
+Shipped in two commits:
+- **Part 1** (`cd2936d`): primitives + sample panel + Train Model
+- **Part 2** (this commit): Walk-Forward path + Overfit detector + display + CLAUDE.md doc
 
 ---
 
@@ -94,26 +94,88 @@ and multiclass keep the existing accuracy-based display.
 
 ---
 
-## Part 2 (still to ship)
+## Part 2 (shipped in second commit)
 
-These are partially scoped but not yet implemented. Doing them in a separate
-commit so part 1 lands as a coherent self-contained unit.
+### Walk-Forward path (`Backtest/BacktestEngine.hpp`)
 
-- **Walk-Forward path** (`Backtest/BacktestEngine.hpp` ~line 961): currently
-  hardcodes `binary:logistic` and runs `WalkForward_ComputeAccuracy` per fold.
-  Needs to pick objective by label kind, skip the neutral-filter when not
-  binary (regression labels can legitimately be ~0.5), and compute appropriate
-  metric per fold. Will require extending `WalkForwardFoldResult` to hold
-  metric-kind-aware fields.
-- **Overfit detector** (`Backtest/OverfitDetection.hpp`): accuracy-threshold
-  memorization checks don't apply to regression. Either compute via train_MSE
-  / val_MSE divergence ratio, or skip with `kind=regression: not applicable`
-  status. Decision pending.
-- **Walk-Forward results display panel**: read kind, format Acc% / MSE / Corr
-  appropriately, update column headers.
-- **CLAUDE.md "Label-type-aware metric invariant"**: doc the rule explicitly,
-  with the 2026-04-25 postmortem inline so the next person extending labels
-  sees what to do.
+`Backtest_RunWalkForward` now takes a `label_type` parameter (default
+`LABEL_WIN_LOSS` for backward compat) and branches throughout:
+
+- **Neutral filter at start** — only runs when label kind is binary. Regression
+  labels can legitimately be ~0.5 (it's a valid continuous value, not a
+  sentinel) and would have been incorrectly stripped before. Multiclass labels
+  are integers, never 0.5, so the filter was harmless but cleared anyway for
+  clarity.
+- **XGBoost objective + `num_class`** — picked by kind:
+  - Binary → `binary:logistic` + per-fold `scale_pos_weight`
+  - Multiclass → `multi:softprob` + `num_class=K`
+  - Regression → `reg:squarederror`, no class-weight concept
+- **Per-fold metric** — picked by kind. Binary uses `WalkForward_ComputeAccuracy`,
+  multiclass uses `WalkForward_ComputeMulticlassAccuracy` (argmax over softmax
+  probs), regression uses `WalkForward_ComputeMSE` + `WalkForward_ComputeCorrelation`.
+- **Per-fold log line** — format reflects kind: `train_acc/val_acc` for
+  classification, `train_mse/val_mse | corr train/val` for regression.
+- **Aggregate results** — `WalkForwardResults` extended with
+  `mean_val_mse`, `mean_val_correlation`, `mean_train_correlation`,
+  `label_kind`, `num_classes`. Accuracy aggregates stay populated for
+  classification; correlation/MSE aggregates populate for regression.
+
+`WalkForwardFoldResult` extended with `train_mse`, `val_mse`,
+`train_correlation`, `val_correlation`. Existing `train_accuracy`/`val_accuracy`
+fields continue to hold accuracy for classification (zero for regression).
+
+### Overfit detector (`Backtest/OverfitDetection.hpp`)
+
+Added `OverfitDetection_CheckRegression` and
+`OverfitDetection_CheckRegressionDefaults`. Reuses the `OverfitReport` struct
+but interprets `train_accuracy`/`val_accuracy` fields as Pearson correlations
+when label kind is regression. Two checks:
+
+- **Memorization**: `|train_corr| >= 0.99` → flagged. Tick-scale BTC
+  prediction never legitimately produces train correlation that high.
+- **Train/val correlation gap**: `train_corr - val_corr >= 0.20` → flagged.
+  Analog of the binary "20% accuracy gap" check.
+
+New thresholds `OVERFIT_TRAIN_CORR_THRESHOLD` / `OVERFIT_TRAIN_VAL_CORR_GAP`
+match the binary thresholds' shape. Tunable separately.
+
+Walk-Forward dispatches by kind: regression folds go through the new
+correlation-based detector; classification folds use the existing
+accuracy-based one. Both populate the same `fr->overfit` struct, so the
+display layer reads `wf->label_kind` to know how to format the reason text.
+
+### Walk-Forward results display panel (`Backtest/BacktestPanels.hpp`)
+
+Reads `wf->label_kind` and formats accordingly:
+
+- **Aggregate row**:
+  - Classification: `Val Accuracy: NN.N% +/- M.M% (train: NN.N%)` — existing
+  - Regression: `Val Pearson r: 0.NNNN (train: 0.NNNN, MSE: 0.NNNNNN)` —
+    Pearson r is the load-bearing metric; MSE is contextual.
+- **Tooltips** — kind-specific. Regression tooltip explicitly explains the
+  signal-vs-noise scale (`|r| < 0.05` = no signal, `0.05–0.2` = weak, `> 0.2`
+  = strong at tick scale).
+- **Per-fold table** — column headers and content:
+  - Classification: `Train | Val | Gap | Status` (existing)
+  - Regression: `Train r | Val r | Val MSE | Status` with `Val r` colored by
+    magnitude (green > 0.20, yellow 0.05–0.20, red < 0.05).
+- **Overfit warning text** — same structure for both kinds; reason text comes
+  from the kind-specific detector and is displayed verbatim.
+
+### CLAUDE.md "Label-type-aware metric invariant" (Safety Invariants section)
+
+New subsection codifies the rule explicitly:
+
+> Every metric, display, training, or validation site that touches label
+> values MUST consult `label_table[t].num_classes` (via `LabelType_*` helpers)
+> and branch on the kind.
+
+Includes the 2026-04-25 postmortem inline (regression labels through binary
+display = nonsense numbers), a table of the four label kinds with their
+metric semantics, and the six concrete sites that must branch on kind. Notes
+that enforcement is still on the human — the compiler doesn't catch a new
+metric site that simply doesn't call the helpers — and flags `enum class
+LabelKind` as deferred future hardening for compile-time exhaustive checks.
 
 ---
 

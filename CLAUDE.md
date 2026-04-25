@@ -373,6 +373,36 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
    - **Widen SL** (further from entry) = FPN_Min (pick lower)
 5. Add a regression test for the new transition
 
+### Label-type-aware metric invariant (load-bearing — Backtest Suite)
+
+**Rule:** every metric, display, training, or validation site that touches label values MUST consult `label_table[t].num_classes` (via `LabelType_IsBinary` / `LabelType_IsRegression` / `LabelType_IsMulticlass` helpers in `LabelFunctions.hpp`) and branch on the kind. Never hardcode binary classification assumptions.
+
+**The four label kinds and their metric semantics:**
+
+| `num_classes` | Kind | Label values | XGBoost objective | Primary metric | Overfit detector |
+|---|---|---|---|---|---|
+| 0 | binary | {0.0, 1.0}, optionally 0.5=neutral (filtered) | `binary:logistic` + `scale_pos_weight` | accuracy [0,1] | `OverfitDetection_CheckDefaults` (acc thresholds) |
+| 1 | regression | continuous (any range) | `reg:squarederror` | Pearson correlation r | `OverfitDetection_CheckRegressionDefaults` (corr thresholds) |
+| ≥2 | multiclass | integer class ids 0..K-1 (as float) | `multi:softprob` + `num_class=K` | argmax accuracy | `OverfitDetection_CheckDefaults` (acc thresholds — same as binary) |
+
+**Sites that must branch on label kind** (verify when adding new metric/display code):
+
+1. Sample panel display in `BacktestPanels.hpp` (`GUI_Panel_Training` collection summary) — kind determines whether to show +/-/neutral, per-class histogram, or min/max/mean/stddev.
+2. Train Model in-sample metric in `BacktestPanels.hpp` (post-training prediction loop) — kind determines whether to compute accuracy, multiclass-accuracy, or MSE+correlation.
+3. Walk-Forward `Backtest_RunWalkForward` in `BacktestEngine.hpp`:
+   - Neutral filter at start: only run for binary (regression `0.5` is a real value, not a sentinel).
+   - XGBoost objective + `num_class` param: select by kind.
+   - `scale_pos_weight`: binary only (multiclass uses per-sample weights, regression doesn't have the concept).
+   - Per-fold metric: pick `WalkForward_ComputeAccuracy` / `ComputeMulticlassAccuracy` / `ComputeMSE`+`ComputeCorrelation`.
+   - Aggregate `WalkForwardResults`: write `mean_val_accuracy` for classification or `mean_val_correlation`+`mean_val_mse` for regression. Set `wf->label_kind` so display layer knows what to format.
+4. Walk-Forward result display in `BacktestPanels.hpp` — read `wf->label_kind` and pick column headers + formatting (Acc% vs r vs MSE).
+5. Overfit detection — pick `OverfitDetection_CheckDefaults` (classification) or `OverfitDetection_CheckRegressionDefaults` (regression). The `OverfitReport` struct fields are reused; field semantics depend on kind.
+6. Save Run / `expected.cfg` writer — already records `expected_num_classes`. Verify on load.
+
+**Why this is load-bearing.** 2026-04-25 morning session — ran Forward P&L (regression label) and got `+: 0 / -: 2,254,869 / Ratio: 0.0%` in the sample panel, `Train Accuracy: 0.2%`, and walk-forward `0.0%/0.0%/0.0%` for every fold. None of those numbers were meaningful — they were binary-classification metrics computed on continuous regression labels (every label below the binary 0.5 threshold → counted as "negative"; predictions binarized at 0.5 → useless on continuous output; walk-forward hardcoded `binary:logistic` so it actively trained nonsense models). Same shape as the equity_curve spinner from the previous day: a primitive existed (`label_table.num_classes`), a few sites consulted it (training-side objective), but the rest of the codebase still assumed binary. The fix wired all six sites above to branch on kind. The helpers + this rule make the next regression-vs-classification metric drift hard to write accidentally — **but enforcement is on the human**, the compiler doesn't catch a new metric site that simply doesn't call the helpers.
+
+**Future hardening (deferred):** turn `num_classes` into `enum class LabelKind { Binary, Regression, Multiclass }` so the compiler exhaustive-checks switches. Larger surgery — touches every existing site again. Reasonable v2 once the current convention has settled.
+
 ## Current State
 
 - Portfolio controller: COMPLETE (166/166 tests passing)

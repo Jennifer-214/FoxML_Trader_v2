@@ -900,7 +900,8 @@ static inline void *walkforward_worker_fn(void *arg) {
     Backtest_RunWalkForward(&state->wf_results, data,
                              state->wf_n_splits, state->wf_horizon_ticks,
                              state->wf_buffer_ticks, state->wf_min_train,
-                             &state->wf_progress, &state->wf_cancel);
+                             &state->wf_progress, &state->wf_cancel,
+                             state->label_type);
 
     state->wf_has_results = true;
     state->wf_complete = 1;
@@ -1528,39 +1529,66 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         }
     }
 
-    // walk-forward results display
+    // walk-forward results display — kind-aware (label-type-aware metric invariant)
     if (state->wf_has_results) {
         WalkForwardResults *wf = &state->wf_results;
+        bool wf_is_regression = (wf->label_kind == 1);
 
         // aggregate metrics — the metrics that actually matter
         ImGui::Separator();
         {
-            // mean ± std validation accuracy (green if reasonable, red if overfit)
             ImVec4 val_color = (wf->overfit_count > 0)
                 ? ImVec4(0.95f, 0.35f, 0.35f, 1.0f)   // red: overfit detected
                 : ImVec4(0.55f, 0.76f, 0.51f, 1.0f);   // green: clean
-            ImGui::TextColored(val_color, "Val Accuracy: %.1f%% +/- %.1f%%",
-                               wf->mean_val_accuracy * 100.0f, wf->std_val_accuracy * 100.0f);
-            ImGui::SetItemTooltip("Mean accuracy on unseen test data across all folds\n"
-                                  "+/- shows consistency (lower = more stable)\n\n"
-                                  "> 55%%: model has real predictive signal\n"
-                                  "~ 50%%: no better than random (coin flip)\n"
-                                  "< 50%%: model is anti-predictive (inverted signal)");
-            ImGui::SameLine();
-            ImGui::TextDisabled("(train: %.1f%%)", wf->mean_train_accuracy * 100.0f);
-            ImGui::SetItemTooltip("Training accuracy — how well the model fits the data it trained on\n"
-                                  "high train + low val = overfitting (memorizing noise)\n"
-                                  "the gap between train and val is what matters");
+
+            if (wf_is_regression) {
+                // load-bearing metric for regression: mean Pearson r across folds.
+                // MSE is shown alongside but doesn't tell you if the model has signal —
+                // a model predicting always-zero gets low MSE on small targets.
+                ImGui::TextColored(val_color, "Val Pearson r: %.4f",
+                                   wf->mean_val_correlation);
+                ImGui::SetItemTooltip("Mean Pearson correlation between predictions and labels\n"
+                                      "across all walk-forward folds. THIS is the metric that\n"
+                                      "tells you if the model has signal:\n\n"
+                                      "  |r| < 0.05 → no signal (predictions uncorrelated with truth)\n"
+                                      "  |r| 0.05-0.2 → weak but real signal\n"
+                                      "  |r| > 0.2 → strong signal at tick scale\n"
+                                      "  |r| > 0.99 → memorization (flagged as overfit)\n\n"
+                                      "Negative r means the model is anti-predictive — fitting\n"
+                                      "noise that happens to be inverted. Still a memorization risk.");
+                ImGui::SameLine();
+                ImGui::TextDisabled("(train: %.4f, MSE: %.6f)",
+                                    wf->mean_train_correlation, wf->mean_val_mse);
+                ImGui::SetItemTooltip("train: in-sample correlation\n"
+                                      "MSE: mean squared error on validation\n"
+                                      "MSE alone is not a signal indicator — read it alongside r.");
+            } else {
+                ImGui::TextColored(val_color, "Val Accuracy: %.1f%% +/- %.1f%%",
+                                   wf->mean_val_accuracy * 100.0f, wf->std_val_accuracy * 100.0f);
+                ImGui::SetItemTooltip("Mean accuracy on unseen test data across all folds\n"
+                                      "+/- shows consistency (lower = more stable)\n\n"
+                                      "> 55%%: model has real predictive signal\n"
+                                      "~ 50%%: no better than random (coin flip)\n"
+                                      "< 50%%: model is anti-predictive (inverted signal)");
+                ImGui::SameLine();
+                ImGui::TextDisabled("(train: %.1f%%)", wf->mean_train_accuracy * 100.0f);
+                ImGui::SetItemTooltip("Training accuracy — how well the model fits the data it trained on\n"
+                                      "high train + low val = overfitting (memorizing noise)\n"
+                                      "the gap between train and val is what matters");
+            }
         }
 
-        // overfit warning
+        // overfit warning — same structure for both kinds, reason text is kind-specific
         if (wf->overfit_count > 0) {
             ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f),
                 "WARNING: %d/%d folds flagged as overfit", wf->overfit_count, wf->valid_folds);
             ImGui::SetItemTooltip("Folds where the model memorized training data\n"
-                                  "flagged when train accuracy >= 99%% (memorization)\n"
-                                  "or train-val gap is extreme\n\n"
-                                  "try: fewer estimators, lower max depth, more data");
+                                  "Classification: flagged when train accuracy >= 99%% or\n"
+                                  "  train-val gap >= 20%%\n"
+                                  "Regression: flagged when |train_corr| >= 0.99 or\n"
+                                  "  train_corr - val_corr >= 0.20\n\n"
+                                  "try: fewer estimators, lower max depth, more data,\n"
+                                  "different label parameters (barriers, lookahead)");
         }
 
         // fingerprint
@@ -1572,39 +1600,64 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 ImGui::SetTooltip("Full: %s\nReproducible: same config + data = same hash", wf->fingerprint);
         }
 
-        // per-fold table
+        // per-fold table — column headers + values depend on label kind
         if (wf->valid_folds > 0 && ImGui::TreeNode("Per-Fold Results")) {
             ImGui::BeginTable("folds", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg);
             ImGui::TableSetupColumn("Fold", ImGuiTableColumnFlags_WidthFixed, 40);
-            ImGui::TableSetupColumn("Train", ImGuiTableColumnFlags_WidthFixed, 80);
-            ImGui::TableSetupColumn("Val", ImGuiTableColumnFlags_WidthFixed, 80);
-            ImGui::TableSetupColumn("Gap", ImGuiTableColumnFlags_WidthFixed, 60);
+            if (wf_is_regression) {
+                ImGui::TableSetupColumn("Train r",  ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Val r",    ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Val MSE",  ImGuiTableColumnFlags_WidthFixed, 90);
+            } else {
+                ImGui::TableSetupColumn("Train",    ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Val",      ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Gap",      ImGuiTableColumnFlags_WidthFixed, 60);
+            }
             ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableHeadersRow();
-            ImGui::SetItemTooltip("Train: accuracy on data the model saw during training\n"
-                                  "Val: accuracy on future data it never saw (the real test)\n"
-                                  "Gap: train - val (lower is better, >20%% = overfitting)\n"
-                                  "Status: overfit detection (memorization, high gap, etc.)");
+            if (wf_is_regression) {
+                ImGui::SetItemTooltip("Train r: in-sample Pearson correlation\n"
+                                      "Val r: out-of-sample correlation (the real test)\n"
+                                      "Val MSE: mean squared error on validation\n"
+                                      "Status: overfit detection (corr-based for regression)");
+            } else {
+                ImGui::SetItemTooltip("Train: accuracy on data the model saw during training\n"
+                                      "Val: accuracy on future data it never saw (the real test)\n"
+                                      "Gap: train - val (lower is better, >20%% = overfitting)\n"
+                                      "Status: overfit detection (memorization, high gap, etc.)");
+            }
 
             for (int i = 0; i < wf->num_folds; i++) {
                 if (!wf->folds[i].valid) continue;
                 ImGui::TableNextRow();
-
                 ImGui::TableSetColumnIndex(0);
                 ImGui::Text("%d", i + 1);
 
-                ImGui::TableSetColumnIndex(1);
-                ImGui::Text("%.1f%%", wf->folds[i].train_accuracy * 100.0f);
-
-                ImGui::TableSetColumnIndex(2);
-                ImGui::Text("%.1f%%", wf->folds[i].val_accuracy * 100.0f);
-
-                ImGui::TableSetColumnIndex(3);
-                float gap = wf->folds[i].train_accuracy - wf->folds[i].val_accuracy;
-                ImVec4 gap_color = (gap > 0.20f) ? ImVec4(0.95f, 0.35f, 0.35f, 1.0f)
-                                 : (gap > 0.10f) ? ImVec4(0.95f, 0.75f, 0.30f, 1.0f)
-                                                  : ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
-                ImGui::TextColored(gap_color, "%.1f%%", gap * 100.0f);
+                if (wf_is_regression) {
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%.4f", wf->folds[i].train_correlation);
+                    ImGui::TableSetColumnIndex(2);
+                    // color val_r: green if signal-like, yellow weak, red near zero or memorized
+                    float vr = wf->folds[i].val_correlation;
+                    float abs_vr = vr < 0 ? -vr : vr;
+                    ImVec4 vr_color = (abs_vr > 0.20f) ? ImVec4(0.55f, 0.76f, 0.51f, 1.0f)
+                                    : (abs_vr > 0.05f) ? ImVec4(0.95f, 0.75f, 0.30f, 1.0f)
+                                                       : ImVec4(0.95f, 0.35f, 0.35f, 1.0f);
+                    ImGui::TextColored(vr_color, "%.4f", vr);
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::Text("%.6f", wf->folds[i].val_mse);
+                } else {
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%.1f%%", wf->folds[i].train_accuracy * 100.0f);
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("%.1f%%", wf->folds[i].val_accuracy * 100.0f);
+                    ImGui::TableSetColumnIndex(3);
+                    float gap = wf->folds[i].train_accuracy - wf->folds[i].val_accuracy;
+                    ImVec4 gap_color = (gap > 0.20f) ? ImVec4(0.95f, 0.35f, 0.35f, 1.0f)
+                                     : (gap > 0.10f) ? ImVec4(0.95f, 0.75f, 0.30f, 1.0f)
+                                                      : ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
+                    ImGui::TextColored(gap_color, "%.1f%%", gap * 100.0f);
+                }
 
                 ImGui::TableSetColumnIndex(4);
                 if (wf->folds[i].overfit.is_overfit) {

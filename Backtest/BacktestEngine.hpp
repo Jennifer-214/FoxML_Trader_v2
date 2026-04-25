@@ -789,8 +789,14 @@ done:
 #define WALKFORWARD_MAX_FOLDS VALIDATION_MAX_FOLDS
 
 struct WalkForwardFoldResult {
-    float train_accuracy;
-    float val_accuracy;
+    // classification metrics — populated for binary + multiclass label kinds
+    float train_accuracy;     // [0..1]
+    float val_accuracy;       // [0..1]
+    // regression metrics — populated for regression label kind
+    float train_mse;
+    float val_mse;
+    float train_correlation;  // Pearson r in [-1, +1]
+    float val_correlation;
     int train_samples;
     int test_samples;
     OverfitReport overfit;
@@ -803,10 +809,16 @@ struct WalkForwardResults {
     PurgedSplit splits[WALKFORWARD_MAX_FOLDS];
     int num_folds;          // total folds requested
     int valid_folds;        // folds that had enough data
-    float mean_val_accuracy;
-    float std_val_accuracy;
-    float mean_train_accuracy;
-    int overfit_count;      // folds flagged as overfit
+    // metric aggregates — interpretation depends on label_kind
+    float mean_val_accuracy;       // binary/multiclass
+    float std_val_accuracy;        // binary/multiclass
+    float mean_train_accuracy;     // binary/multiclass
+    float mean_val_mse;            // regression
+    float mean_val_correlation;    // regression — load-bearing: signal vs noise
+    float mean_train_correlation;  // regression
+    int overfit_count;      // folds flagged as overfit (binary/multiclass only)
+    int label_kind;         // 0=binary, 1=regression, ≥2=multiclass — display reads this
+    int num_classes;        // ≥2 for multiclass; 0 for binary; 1 for regression
     double elapsed_ms;
     char fingerprint[65];   // SHA256 of config + data (empty if not computed)
 };
@@ -892,9 +904,18 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                                             int n_splits, int horizon_ticks,
                                             int buffer_ticks, int min_train_samples,
                                             volatile int *progress_pct,
-                                            volatile int *cancel_flag) {
+                                            volatile int *cancel_flag,
+                                            int label_type = LABEL_WIN_LOSS) {
     memset(wf, 0, sizeof(*wf));
     *progress_pct = 0;
+
+    // label-type-aware: pick objective + metric kind once, branch downstream.
+    // Defaults to binary if caller didn't specify (backward compat).
+    int num_classes_lt = LabelType_NumClasses(label_type);
+    int is_regression  = LabelType_IsRegression(label_type);
+    int is_multiclass  = LabelType_IsMulticlass(label_type);
+    wf->label_kind   = num_classes_lt;
+    wf->num_classes  = num_classes_lt;
 
 #ifndef USE_XGBOOST
     fprintf(stderr, "[walkforward] XGBoost not compiled in — cannot train. "
@@ -918,21 +939,33 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     if (min_train_samples < 50) min_train_samples = 50;
     wf->num_folds = n_splits;
 
-    // pre-compact: extract non-neutral samples into contiguous arrays
-    // barrier labels produce ~97% neutrals, so we must split over non-neutrals only
-    // otherwise later folds' test sets land in the all-neutral tail and get 0 samples
-    int nn_count = 0; // non-neutral count
-    for (int i = 0; i < data->sample_count; i++) {
-        if (data->labels[i] != 0.5f) nn_count++;
+    // pre-compact: for binary labels, extract non-neutral samples (label != 0.5)
+    // because barrier labels produce ~97% neutrals and splitting over the full
+    // sample range puts later folds' test sets in the all-neutral tail.
+    //
+    // For regression, every sample is a valid label (0.5 is a legitimate value,
+    // not a sentinel). Don't filter — copy all samples through.
+    // For multiclass, labels are integer class ids 0..K-1, never 0.5 — no filter
+    // is needed but harmless. Skip the filter for clarity + correctness.
+    int filter_neutrals = LabelType_IsBinary(label_type);
+
+    int nn_count = 0;
+    if (filter_neutrals) {
+        for (int i = 0; i < data->sample_count; i++) {
+            if (data->labels[i] != 0.5f) nn_count++;
+        }
+    } else {
+        nn_count = data->sample_count;
     }
 
     if (nn_count < 100) {
-        fprintf(stderr, "[walkforward] only %d non-neutral samples — need at least 100\n", nn_count);
+        fprintf(stderr, "[walkforward] only %d %s samples — need at least 100\n",
+                nn_count, filter_neutrals ? "non-neutral" : "labeled");
         *progress_pct = 100;
         return;
     }
 
-    // allocate compacted non-neutral data (features + labels + original indices for purge)
+    // allocate compacted data (features + labels + original indices for purge)
     float *nn_features = (float *)malloc(nn_count * MODEL_NUM_FEATURES * sizeof(float));
     float *nn_labels   = (float *)malloc(nn_count * sizeof(float));
     int   *nn_indices  = (int *)malloc(nn_count * sizeof(int)); // original sample index
@@ -945,7 +978,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
 
     int j = 0;
     for (int i = 0; i < data->sample_count; i++) {
-        if (data->labels[i] == 0.5f) continue;
+        if (filter_neutrals && data->labels[i] == 0.5f) continue;
         memcpy(&nn_features[j * MODEL_NUM_FEATURES],
                &data->feature_matrix[i * MODEL_NUM_FEATURES],
                MODEL_NUM_FEATURES * sizeof(float));
@@ -954,8 +987,10 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         j++;
     }
 
-    fprintf(stderr, "[walkforward] non-neutral samples: %d / %d total (%.1f%%)\n",
-            nn_count, data->sample_count, 100.0 * nn_count / data->sample_count);
+    fprintf(stderr, "[walkforward] %s samples: %d / %d total (%.1f%%) — kind=%s\n",
+            filter_neutrals ? "non-neutral" : "labeled",
+            nn_count, data->sample_count, 100.0 * nn_count / data->sample_count,
+            LabelType_KindName(label_type));
 
     // compute purge gap in non-neutral index space
     // original purge_gap is in sample indices; scale by non-neutral density
@@ -1051,8 +1086,20 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             continue;
         }
 
-        // training params — match the suite's existing training config
-        XGBoosterSetParam(booster, "objective", "binary:logistic");
+        // training params — kind-aware objective (label-type-aware metric invariant).
+        // Binary classification: binary:logistic + scale_pos_weight for class balance.
+        // Multiclass: multi:softprob + num_class. scale_pos_weight is binary-only;
+        //   multiclass class imbalance needs per-sample weights (deferred).
+        // Regression: reg:squarederror, no class-weight concept.
+        if (is_regression) {
+            XGBoosterSetParam(booster, "objective", "reg:squarederror");
+        } else if (is_multiclass) {
+            XGBoosterSetParam(booster, "objective", "multi:softprob");
+            char nc_s[8]; snprintf(nc_s, 8, "%d", num_classes_lt);
+            XGBoosterSetParam(booster, "num_class", nc_s);
+        } else {
+            XGBoosterSetParam(booster, "objective", "binary:logistic");
+        }
         XGBoosterSetParam(booster, "max_depth", "6");
         XGBoosterSetParam(booster, "eta", "0.1");
         XGBoosterSetParam(booster, "subsample", "0.8");
@@ -1061,11 +1108,8 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         XGBoosterSetParam(booster, "nthread", "1");
         XGBoosterSetParam(booster, "verbosity", "0");
         XGBoosterSetParam(booster, "seed", "42");
-        // class-balance: per-fold scale_pos_weight matches the suite's
-        // Train Model path (see BacktestPanels.hpp). Train/test splits
-        // can have wildly different class ratios on tick data, so this
-        // is computed per-fold from the actual train_labels we just set.
-        {
+        // class balance (binary only — see comment above on objective selection)
+        if (!is_regression && !is_multiclass) {
             int n_pos = 0, n_neg = 0;
             double spw = XGBoost_ComputeScalePosWeight(train_labels, n_train, &n_pos, &n_neg);
             char spw_s[24]; snprintf(spw_s, sizeof(spw_s), "%.4f", spw);
@@ -1074,57 +1118,84 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                     f + 1, n_pos, n_neg, spw_s);
         }
 
-        // train with early stopping eval on test set
-        DMatrixHandle evals[] = { dtrain, dtest };
-        const char *eval_names[] = { "train", "val" };
+        // train (no early stopping yet — full n_rounds always)
         int n_rounds = 200;
-
         for (int r = 0; r < n_rounds; r++) {
             ret = XGBoosterUpdateOneIter(booster, r, dtrain);
             if (ret != 0) break;
         }
 
-        // predict on train set (for overfit detection)
+        // predict on train + test, compute kind-appropriate metric
         {
-            bst_ulong out_len;
-            const float *out_result;
-            ret = XGBoosterPredict(booster, dtrain, 0, 0, 0, &out_len, &out_result);
-            if (ret == 0 && (int)out_len == n_train) {
-                fr->train_accuracy = WalkForward_ComputeAccuracy(
-                    out_result, train_labels, n_train, 0.5f);
+            bst_ulong out_len_tr = 0, out_len_te = 0;
+            const float *pred_tr = nullptr, *pred_te = nullptr;
+            int pred_tr_ok = (XGBoosterPredict(booster, dtrain, 0, 0, 0, &out_len_tr, &pred_tr) == 0);
+            int pred_te_ok = (XGBoosterPredict(booster, dtest,  0, 0, 0, &out_len_te, &pred_te) == 0);
+
+            if (is_regression) {
+                if (pred_tr_ok && (int)out_len_tr == n_train) {
+                    fr->train_mse         = WalkForward_ComputeMSE(pred_tr, train_labels, n_train);
+                    fr->train_correlation = WalkForward_ComputeCorrelation(pred_tr, train_labels, n_train);
+                }
+                if (pred_te_ok && (int)out_len_te == n_test) {
+                    fr->val_mse         = WalkForward_ComputeMSE(pred_te, test_labels, n_test);
+                    fr->val_correlation = WalkForward_ComputeCorrelation(pred_te, test_labels, n_test);
+                }
+            } else if (is_multiclass) {
+                int K = num_classes_lt;
+                if (pred_tr_ok && (int)out_len_tr == n_train * K) {
+                    fr->train_accuracy = WalkForward_ComputeMulticlassAccuracy(
+                        pred_tr, train_labels, n_train, K);
+                }
+                if (pred_te_ok && (int)out_len_te == n_test * K) {
+                    fr->val_accuracy = WalkForward_ComputeMulticlassAccuracy(
+                        pred_te, test_labels, n_test, K);
+                }
+            } else {
+                if (pred_tr_ok && (int)out_len_tr == n_train) {
+                    fr->train_accuracy = WalkForward_ComputeAccuracy(
+                        pred_tr, train_labels, n_train, 0.5f);
+                }
+                if (pred_te_ok && (int)out_len_te == n_test) {
+                    fr->val_accuracy = WalkForward_ComputeAccuracy(
+                        pred_te, test_labels, n_test, 0.5f);
+                }
             }
         }
 
-        // predict on test set (the metric that matters)
-        {
-            bst_ulong out_len;
-            const float *out_result;
-            ret = XGBoosterPredict(booster, dtest, 0, 0, 0, &out_len, &out_result);
-            if (ret == 0 && (int)out_len == n_test) {
-                fr->val_accuracy = WalkForward_ComputeAccuracy(
-                    out_result, test_labels, n_test, 0.5f);
-            }
-        }
-
-        // feature importances (stability tracking hook)
-        // XGBoost importance via dump → we use a simpler approach: score type
-        // for now, zero-fill — populated when we add importance extraction
+        // feature importances (stability tracking hook) — zero-filled until
+        // we wire XGBoost importance extraction
         memset(fr->feature_importances, 0, sizeof(fr->feature_importances));
 
         fr->train_samples = n_train;
-        fr->test_samples = n_test;
+        fr->test_samples  = n_test;
         fr->valid = 1;
 
-        // overfit detection per fold
-        fr->overfit = OverfitDetection_CheckDefaults(
-            fr->train_accuracy, -1.0f, fr->val_accuracy, MODEL_NUM_FEATURES);
+        // overfit detection — kind-appropriate. Classification uses accuracy
+        // thresholds (binary + multiclass). Regression uses Pearson correlation
+        // thresholds — see OverfitDetection_CheckRegression for rationale.
+        if (is_regression) {
+            fr->overfit = OverfitDetection_CheckRegressionDefaults(
+                fr->train_correlation, fr->val_correlation, MODEL_NUM_FEATURES);
+        } else {
+            fr->overfit = OverfitDetection_CheckDefaults(
+                fr->train_accuracy, -1.0f, fr->val_accuracy, MODEL_NUM_FEATURES);
+        }
         OverfitDetection_Print(&fr->overfit, f);
-
-        // accumulate stats
-        sum_val += fr->val_accuracy;
-        sum_val_sq += fr->val_accuracy * fr->val_accuracy;
-        sum_train += fr->train_accuracy;
         if (fr->overfit.is_overfit) wf->overfit_count++;
+
+        // accumulate aggregates — kind-appropriate
+        if (is_regression) {
+            sum_val      += fr->val_mse;          // MSE for "lower=better" aggregate
+            sum_val_sq   += fr->val_mse * fr->val_mse;
+            sum_train    += fr->train_mse;
+            wf->mean_val_correlation   += fr->val_correlation;   // mean of fold rs
+            wf->mean_train_correlation += fr->train_correlation;
+        } else {
+            sum_val    += fr->val_accuracy;
+            sum_val_sq += fr->val_accuracy * fr->val_accuracy;
+            sum_train  += fr->train_accuracy;
+        }
         counted_folds++;
 
         // cleanup
@@ -1134,21 +1205,35 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
 
         *progress_pct = (int)(100.0 * (f + 1) / n_splits);
 
-        fprintf(stderr, "[walkforward] fold %d/%d: train_acc=%.4f, val_acc=%.4f%s\n",
-                f + 1, n_splits, fr->train_accuracy, fr->val_accuracy,
-                fr->overfit.is_overfit ? " [OVERFIT]" : "");
+        // log per-fold result — kind-appropriate
+        if (is_regression) {
+            fprintf(stderr, "[walkforward] fold %d/%d: train_mse=%.6f val_mse=%.6f | corr train=%.4f val=%.4f\n",
+                    f + 1, n_splits, fr->train_mse, fr->val_mse,
+                    fr->train_correlation, fr->val_correlation);
+        } else {
+            fprintf(stderr, "[walkforward] fold %d/%d: train_acc=%.4f, val_acc=%.4f%s\n",
+                    f + 1, n_splits, fr->train_accuracy, fr->val_accuracy,
+                    fr->overfit.is_overfit ? " [OVERFIT]" : "");
+        }
     }
 
     free(nn_features);
     free(nn_labels);
     free(nn_indices);
 
-    // compute aggregate stats
+    // compute aggregate stats — kind-appropriate
     if (counted_folds > 0) {
-        wf->mean_val_accuracy = sum_val / counted_folds;
-        wf->mean_train_accuracy = sum_train / counted_folds;
-        float var = (sum_val_sq / counted_folds) - (wf->mean_val_accuracy * wf->mean_val_accuracy);
-        wf->std_val_accuracy = (var > 0.0f) ? (float)sqrt((double)var) : 0.0f;
+        if (is_regression) {
+            wf->mean_val_mse           = sum_val   / counted_folds;
+            wf->mean_val_correlation  /= counted_folds;
+            wf->mean_train_correlation /= counted_folds;
+            // mean_val/train_accuracy stay 0 — display reads label_kind to pick
+        } else {
+            wf->mean_val_accuracy   = sum_val / counted_folds;
+            wf->mean_train_accuracy = sum_train / counted_folds;
+            float var = (sum_val_sq / counted_folds) - (wf->mean_val_accuracy * wf->mean_val_accuracy);
+            wf->std_val_accuracy = (var > 0.0f) ? (float)sqrt((double)var) : 0.0f;
+        }
     }
 
     gettimeofday(&t_end, NULL);
