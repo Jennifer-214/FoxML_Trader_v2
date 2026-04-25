@@ -6,7 +6,8 @@
 #define CANDLE_HISTORY_MAX 4096
 #define CANDLE_INTERVAL_DEFAULT 60
 #define MAX_TRADE_HISTORY 512
-#define MAX_DATA_FILES 256
+#define MAX_DATA_FILES 2048  // multi-year tick datasets — 730 days/yr × 3 yr fits with headroom
+                              // FUTURE: dynamic allocation per CLAUDE.md "Dynamic Sizing" rule
 #define LOG_BUFFER_SIZE 32768
 
 // per-core sharding (phase 04+)
