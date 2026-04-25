@@ -830,29 +830,53 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                        DataPanelState *data) {
     ImGui::Begin("Training");
 
-    // label config
-    static const char *label_names[] = {"Win/Loss", "Barrier", "Forward P&L", "Regime"};
+    // label config — full set from LabelFunctions.hpp
+    static const char *label_names[] = {
+        "Win/Loss",            // LABEL_WIN_LOSS = 0
+        "Barrier",             // LABEL_BARRIER = 1
+        "Forward P&L",         // LABEL_FORWARD_PNL = 2
+        "Regime",              // LABEL_REGIME = 3
+        "Vol Barrier",         // LABEL_VOL_BARRIER = 4
+        "Will Peak",           // LABEL_WILL_PEAK = 5
+        "Will Valley",         // LABEL_WILL_VALLEY = 6
+        "Peak/Valley/Stable",  // LABEL_PEAK_VALLEY_STABLE = 7 — 3-class softmax
+    };
     ImGui::Combo("Label Type", &state->label_type, label_names, LABEL_COUNT);
     ImGui::SetItemTooltip("How to label each sample for ML training:\n"
                           "  Win/Loss: 1 if price hits TP%% first, 0 if SL%% first\n"
                           "  Barrier: same but returns 0.5 (neutral) if neither hit within horizon\n"
                           "  Forward P&L: 1 if price is higher N ticks later, 0 if lower\n"
-                          "  Regime: labels by detected regime (not for buy signal)");
+                          "  Regime: labels by detected regime (multi-class)\n"
+                          "  Vol Barrier: k * rolling_vol barriers (FoxML formulation)\n"
+                          "  Will Peak / Will Valley: binary classifiers for legacy 2-model BarrierGate\n"
+                          "  Peak/Valley/Stable: 3-class softmax (PRIMARY for BarrierGate) —\n"
+                          "    saves to barrier.json for zoo auto-discovery");
 
-    if (state->label_type == LABEL_WIN_LOSS || state->label_type == LABEL_BARRIER) {
+    // TP/SL barriers — used by win_loss, barrier, vol_barrier, peak_valley_stable
+    if (state->label_type == LABEL_WIN_LOSS || state->label_type == LABEL_BARRIER ||
+        state->label_type == LABEL_VOL_BARRIER || state->label_type == LABEL_PEAK_VALLEY_STABLE) {
         ImGui::InputFloat("TP Barrier %", &state->label_tp_pct, 0.1f, 0.5f, "%.1f");
         ImGui::SetItemTooltip("Take-profit barrier as %% of price\n"
-                              "label = 1 if price moves up this much before SL is hit\n"
+                              "label = 1 (or VALLEY for 3-class) if price moves up this much before SL is hit\n"
                               "wider = fewer but higher-confidence labels");
         ImGui::InputFloat("SL Barrier %", &state->label_sl_pct, 0.1f, 0.5f, "%.1f");
         ImGui::SetItemTooltip("Stop-loss barrier as %% of price\n"
-                              "label = 0 if price drops this much before TP is hit\n"
+                              "label = 0 (or PEAK for 3-class) if price drops this much before TP is hit\n"
                               "wider = fewer but higher-confidence labels");
     }
     if (state->label_type == LABEL_FORWARD_PNL) {
         ImGui::InputInt("Forward Ticks", &state->label_forward_ticks, 100, 1000);
         ImGui::SetItemTooltip("How many ticks to look ahead\n"
                               "label = 1 if price is higher, 0 if lower");
+    }
+    // Lookahead horizon for multiclass and peak/valley labels
+    if (state->label_type == LABEL_PEAK_VALLEY_STABLE ||
+        state->label_type == LABEL_WILL_PEAK || state->label_type == LABEL_WILL_VALLEY) {
+        ImGui::InputInt("Lookahead Ticks", &state->label_forward_ticks, 100, 1000);
+        ImGui::SetItemTooltip("How many ticks forward to scan for the barrier hit\n"
+                              "0 = scan to end of data. Default 500.\n"
+                              "Larger = more confident labels, fewer stable cases\n"
+                              "Smaller = more stable cases, sharper peak/valley signal");
     }
 
     ImGui::Separator();
@@ -996,7 +1020,26 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         char lr_s[16]; snprintf(lr_s, 16, "%f", state->learning_rate);
         XGBoosterSetParam(booster, "max_depth", depth_s);
         XGBoosterSetParam(booster, "eta", lr_s);
-        XGBoosterSetParam(booster, "objective", "binary:logistic");
+
+        // objective + num_class depend on label type
+        // Multiclass: REGIME (4 classes) or PEAK_VALLEY_STABLE (3 classes) → multi:softprob
+        // Continuous regression: FORWARD_PNL → reg:squarederror
+        // Everything else: binary classification → binary:logistic
+        int is_multiclass = (state->label_type == LABEL_REGIME ||
+                              state->label_type == LABEL_PEAK_VALLEY_STABLE);
+        int num_classes = 0;
+        if (state->label_type == LABEL_REGIME) num_classes = 4;
+        else if (state->label_type == LABEL_PEAK_VALLEY_STABLE) num_classes = 3;
+
+        if (is_multiclass) {
+            XGBoosterSetParam(booster, "objective", "multi:softprob");
+            char nc_s[8]; snprintf(nc_s, 8, "%d", num_classes);
+            XGBoosterSetParam(booster, "num_class", nc_s);
+        } else if (state->label_type == LABEL_FORWARD_PNL) {
+            XGBoosterSetParam(booster, "objective", "reg:squarederror");
+        } else {
+            XGBoosterSetParam(booster, "objective", "binary:logistic");
+        }
         XGBoosterSetParam(booster, "nthread", "4");
         XGBoosterSetParam(booster, "verbosity", "0");
 
@@ -1030,10 +1073,32 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                MODEL_NUM_FEATURES, NAN, &dpred);
         XGBoosterPredict(booster, dpred, 0, 0, 0, &out_len, &out_result);
         int correct = 0;
-        for (int i = 0; i < n_valid; i++) {
-            int pred = out_result[i] >= 0.5f ? 1 : 0;
-            int truth = train_labels[i] > 0.5f ? 1 : 0;
-            if (pred == truth) correct++;
+        if (is_multiclass) {
+            // multiclass: out_result is n_valid × num_classes flat array, argmax → class
+            for (int i = 0; i < n_valid; i++) {
+                int best = 0;
+                float best_p = out_result[i * num_classes];
+                for (int k = 1; k < num_classes; k++) {
+                    float p = out_result[i * num_classes + k];
+                    if (p > best_p) { best_p = p; best = k; }
+                }
+                int truth = (int)(train_labels[i] + 0.5f);  // rounded class id
+                if (best == truth) correct++;
+            }
+        } else if (state->label_type == LABEL_FORWARD_PNL) {
+            // regression: count "directionally correct" (sign agreement) as a proxy
+            for (int i = 0; i < n_valid; i++) {
+                int pred_sign = out_result[i] > 0.0f ? 1 : (out_result[i] < 0.0f ? -1 : 0);
+                int truth_sign = train_labels[i] > 0.0f ? 1 : (train_labels[i] < 0.0f ? -1 : 0);
+                if (pred_sign == truth_sign && pred_sign != 0) correct++;
+            }
+        } else {
+            // binary classification (existing logic)
+            for (int i = 0; i < n_valid; i++) {
+                int pred = out_result[i] >= 0.5f ? 1 : 0;
+                int truth = train_labels[i] > 0.5f ? 1 : 0;
+                if (pred == truth) correct++;
+            }
         }
         state->train_accuracy = (n_valid > 0) ? (float)correct / n_valid * 100.0f : 0.0f;
         XGDMatrixFree(dpred);

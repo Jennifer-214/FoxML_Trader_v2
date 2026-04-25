@@ -311,6 +311,69 @@ inline float Model_Predict(ModelHandle<F> *m, const float *features, int num_fea
 }
 
 //======================================================================================================
+// [PREDICT MULTI — multi-class softmax output]
+//======================================================================================================
+// fills `out_buf` with up to max_outputs class probabilities. returns the number
+// of class outputs actually written (== num_class for the loaded model). on
+// failure or no model loaded, returns 0 and leaves buf undisturbed.
+//
+// for binary classifiers, prefer Model_Predict — this works for them too but
+// returns 1 output. the function is intended for models trained with
+// objective=multi:softprob (XGBoost) or objective=multiclass (LightGBM).
+//======================================================================================================
+template <unsigned F>
+inline int Model_PredictMulti(ModelHandle<F> *m, const float *features, int num_features,
+                               float *out_buf, int max_outputs) {
+    if (!m->handle || max_outputs <= 0) return 0;
+
+#ifdef USE_XGBOOST
+    if (m->backend == MODEL_BACKEND_XGBOOST) {
+        BoosterHandle booster = (BoosterHandle)m->handle;
+        DMatrixHandle dmat;
+        int ret = XGDMatrixCreateFromMat(features, 1, num_features, -1.0f, &dmat);
+        if (ret != 0) return 0;
+
+        bst_ulong out_len;
+        const float *out_result;
+        // XGBoost returns N×K floats for multi:softprob (N=1 row, K=num_class)
+        // for binary objective, returns N floats (same as Model_Predict)
+        ret = XGBoosterPredict(booster, dmat, 0, 0, 0, &out_len, &out_result);
+        XGDMatrixFree(dmat);
+
+        if (ret != 0 || out_len == 0) return 0;
+        int n = (int)out_len < max_outputs ? (int)out_len : max_outputs;
+        for (int i = 0; i < n; i++) out_buf[i] = out_result[i];
+        return n;
+    }
+#endif
+
+#ifdef USE_LIGHTGBM
+    if (m->backend == MODEL_BACKEND_LIGHTGBM) {
+        BoosterHandle booster = (BoosterHandle)m->handle;
+        // need to know num_class first — query the booster
+        int num_class = 1;
+        LGBM_BoosterGetNumClasses(booster, &num_class);
+        int n = num_class < max_outputs ? num_class : max_outputs;
+        // LightGBM returns doubles, need a temp buffer
+        double tmp[32];
+        if (n > 32) n = 32; // safety clamp
+        int64_t out_len;
+        int ret = LGBM_BoosterPredictForMatSingleRow(
+            booster, features, C_API_DTYPE_FLOAT32,
+            num_features, 1,
+            C_API_PREDICT_NORMAL, 0, -1, "",
+            &out_len, tmp);
+        if (ret != 0) return 0;
+        int written = (int)out_len < n ? (int)out_len : n;
+        for (int i = 0; i < written; i++) out_buf[i] = (float)tmp[i];
+        return written;
+    }
+#endif
+
+    return 0;
+}
+
+//======================================================================================================
 // [FREE]
 //======================================================================================================
 template <unsigned F>

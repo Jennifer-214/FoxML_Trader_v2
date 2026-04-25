@@ -271,6 +271,14 @@ template <unsigned F> struct ControllerConfig {
   // own model. Default empty = use shared ml_model_path. Config syntax:
   // core_0_model_path=models/aggressive.xgb
   char core_model_path[16][256];
+  // Per-core ML model directory. When set, the engine auto-discovers
+  // role-specific models in this directory (barrier.json/.xgb,
+  // buy_signal.json/.xgb, regime.json/.xgb, exit.json/.xgb) and loads
+  // them into a CoreModelZoo. Missing files = role disabled.
+  // When BOTH model_dir and model_path are set, model_dir wins (zoo
+  // supersedes legacy single-model). Config syntax:
+  // core_0_model_dir=models/aggressive/
+  char core_model_dir[16][256];
   // Per-strategy TP/SL overrides. Default 0 = fall back to the shared
   // take_profit_pct / stop_loss_pct. Non-zero = use this instead.
   // Momentum already has momentum_tp_mult / momentum_sl_mult (stddev mults).
@@ -458,6 +466,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
   for (int i = 0; i < 16; ++i) cfg.core_risk_pct[i] = FPN_Zero<F>();  // 0 = shared
   for (int i = 0; i < 16; ++i) cfg.core_model_path[i][0] = '\0';    // empty = shared
+  for (int i = 0; i < 16; ++i) cfg.core_model_dir[i][0] = '\0';     // empty = use model_path or shared
   cfg.simpledip_tp_pct  = FPN_Zero<F>();  // 0 = use shared take_profit_pct
   cfg.simpledip_sl_pct  = FPN_Zero<F>();
   cfg.mr_tp_pct         = FPN_Zero<F>();
@@ -734,6 +743,19 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         strncpy(cfg.core_model_path[core_idx], val,
                 sizeof(cfg.core_model_path[core_idx]) - 1);
         cfg.core_model_path[core_idx][sizeof(cfg.core_model_path[core_idx]) - 1] = '\0';
+      }
+      continue;
+    }
+    // Per-core model dir: core_0_model_dir=models/aggressive/
+    // when set, engine auto-discovers role-specific models in the directory
+    // (barrier.json, buy_signal.json, regime.json, exit.json) and loads each
+    // present file into the per-core CoreModelZoo.
+    if (strncmp(key, "core_", 5) == 0 && strstr(key, "_model_dir")) {
+      int core_idx = atoi(key + 5);
+      if (core_idx >= 0 && core_idx < 16) {
+        strncpy(cfg.core_model_dir[core_idx], val,
+                sizeof(cfg.core_model_dir[core_idx]) - 1);
+        cfg.core_model_dir[core_idx][sizeof(cfg.core_model_dir[core_idx]) - 1] = '\0';
       }
       continue;
     }

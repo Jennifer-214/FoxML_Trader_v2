@@ -397,22 +397,41 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
             cfg.core_strategies[i],
             FPN_FromDouble<F>(core_balance));
 
-        // Load ML model for STRATEGY_ML cores
+        // Load ML model zoo for STRATEGY_ML cores. Three resolution paths:
+        //   1. core_N_model_dir set → auto-discover all roles in directory
+        //      (barrier.json, buy_signal.json, regime.json, exit.json)
+        //   2. core_N_model_path set → load single buy_signal model (legacy)
+        //   3. ml_model_path set globally → load single buy_signal (legacy fallback)
+        // The dispatcher passes model_handle as void* — we point it at the zoo.
         if (cfg.core_strategies[i] == STRATEGY_ML) {
-            static ModelHandle<F> ml_models[MAX_EXECUTION_CORES];
-            Model_Init(&ml_models[i]);
-            const char* model_path = cfg.core_model_path[i][0]
-                ? cfg.core_model_path[i] : cfg.ml_model_path;
-            if (model_path[0]) {
-                int backend = cfg.ml_backend ? cfg.ml_backend : MODEL_BACKEND_XGBOOST;
-                if (Model_Load(&ml_models[i], model_path, backend)) {
-                    state.cores[i].model_handle = &ml_models[i];
-                    fprintf(stderr, "[sharded] core %d: ML model loaded from %s\n",
-                            i, model_path);
-                } else {
-                    fprintf(stderr, "[sharded] core %d: ML model load FAILED (%s), "
-                                     "falling back to SimpleDip\n", i, model_path);
+            static CoreModelZoo<F> ml_zoos[MAX_EXECUTION_CORES];
+            CoreModelZoo_Init(&ml_zoos[i]);
+            int backend = cfg.ml_backend ? cfg.ml_backend : MODEL_BACKEND_XGBOOST;
+
+            int loaded = 0;
+            if (cfg.core_model_dir[i][0]) {
+                // path 1: zoo from directory (auto-discovered roles)
+                loaded = CoreModelZoo_LoadFromDir(&ml_zoos[i], cfg.core_model_dir[i], backend);
+                fprintf(stderr, "[sharded] core %d: zoo from %s, %d role(s) loaded\n",
+                        i, cfg.core_model_dir[i], loaded);
+            } else {
+                // paths 2-3: legacy single buy_signal model
+                const char* model_path = cfg.core_model_path[i][0]
+                    ? cfg.core_model_path[i] : cfg.ml_model_path;
+                if (model_path[0]) {
+                    loaded = CoreModelZoo_LoadLegacy(&ml_zoos[i], model_path, backend);
+                    if (loaded) {
+                        fprintf(stderr, "[sharded] core %d: legacy buy_signal model loaded from %s\n",
+                                i, model_path);
+                    } else {
+                        fprintf(stderr, "[sharded] core %d: ML model load FAILED (%s), "
+                                         "falling back to SimpleDip\n", i, model_path);
+                    }
                 }
+            }
+
+            if (loaded) {
+                state.cores[i].model_handle = &ml_zoos[i];
             }
         }
 

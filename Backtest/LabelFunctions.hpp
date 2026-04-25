@@ -36,6 +36,7 @@ struct HistoricalTick {
 #define LABEL_VOL_BARRIER  4   // vol-scaled barrier: k * rolling_vol (from FoxML barrier.py)
 #define LABEL_WILL_PEAK    5   // 1 = price peaks within N ticks (barrier gate training)
 #define LABEL_WILL_VALLEY  6   // 1 = price valleys within N ticks (barrier gate training)
+#define LABEL_PEAK_VALLEY_STABLE 7  // 3-class softmax: 0=stable, 1=peak, 2=valley (BarrierGate primary)
 
 //======================================================================================================
 // [WIN/LOSS]
@@ -224,6 +225,34 @@ static float Label_WillValley(const HistoricalTick *ticks, int tick_idx, int tot
 }
 
 //======================================================================================================
+// [PEAK_VALLEY_STABLE] — 3-class softmax target for BarrierGate primary path
+// Returns: 0 = stable (neither barrier hit), 1 = peak (down barrier hit first),
+//          2 = valley (up barrier hit first)
+// Used to train an XGBoost multi:softprob model that outputs P(stable)/P(peak)/P(valley).
+// Same first-passage scan as Label_Barrier but with explicit stable class (returns
+// the third bucket as a proper class instead of the 0.5 neutral float).
+//
+// tp_pct = up barrier (price reaches +tp% → "valley" since the entry was at a low)
+// sl_pct = down barrier (price reaches -sl% → "peak" since the entry was at a high)
+// extra_param = lookahead ticks (default 500). 0 means "scan to end of data."
+//======================================================================================================
+static float Label_PeakValleyStable(const HistoricalTick *ticks, int tick_idx, int total_ticks,
+                                    double sample_price, double tp_pct, double sl_pct,
+                                    int extra_param) {
+    double up_barrier   = sample_price * (1.0 + tp_pct / 100.0);
+    double down_barrier = sample_price * (1.0 - sl_pct / 100.0);
+    int lookahead = (extra_param > 0) ? extra_param : 500;
+    int end = tick_idx + lookahead;
+    if (end > total_ticks) end = total_ticks;
+
+    for (int j = tick_idx + 1; j < end; j++) {
+        if (ticks[j].price >= up_barrier)   return 2.0f;  // up first → was at valley → good entry
+        if (ticks[j].price <= down_barrier) return 1.0f;  // down first → was at peak → bad entry
+    }
+    return 0.0f;  // neither hit within lookahead → stable
+}
+
+//======================================================================================================
 // [LABEL TABLE]
 // table-driven: add new label = add 1 entry here + 1 function above
 //======================================================================================================
@@ -246,6 +275,8 @@ static const LabelDef label_table[] = {
     { LABEL_VOL_BARRIER, "vol_barrier",   "Vol-scaled: k*sigma barrier (FoxML)",      Label_VolBarrier },
     { LABEL_WILL_PEAK,   "will_peak",    "Binary: 1=price peaks within N ticks",     Label_WillPeak   },
     { LABEL_WILL_VALLEY, "will_valley",  "Binary: 1=price valleys within N ticks",   Label_WillValley },
+    { LABEL_PEAK_VALLEY_STABLE, "peak_valley_stable",
+                                          "3-class: 0=stable, 1=peak, 2=valley (softmax)", Label_PeakValleyStable },
 };
 
 static const int LABEL_COUNT = sizeof(label_table) / sizeof(label_table[0]);
