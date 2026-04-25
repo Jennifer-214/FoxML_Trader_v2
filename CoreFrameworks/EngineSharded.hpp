@@ -40,6 +40,7 @@
 
 #include "../DataStream/BinanceCrypto.hpp"
 #include "../DataStream/BinanceOrderAPI.hpp"
+#include "../DataStream/TickRecorder.hpp"  // Phase 8a (post-coding c7)
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/StrategyParameters.hpp"
@@ -343,6 +344,11 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
         }
     }
 
+    // Phase 8a (post-coding c7) — TickRecorder for raw market tick CSV audit.
+    // Same pattern as legacy path. Off by default (record_ticks=0).
+    static TickRecorder g_tick_rec;
+    TickRecorder_Init(&g_tick_rec, bcfg.symbol, cfg.record_ticks, cfg.record_max_days);
+
     // Phase 8a (post-coding c6) — depth feed + DepthRecorder.
     // Same setup as main.cpp's legacy path, runs only when depth_enabled=1.
     // Per-core controllers can read shared->snapshots[active].imbalance later
@@ -555,6 +561,12 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
             ticks_produced.fetch_add(1, std::memory_order_relaxed);
             last_price.store(price_d, std::memory_order_relaxed);
             last_volume.store(volume_d, std::memory_order_relaxed);
+
+            // Phase 8a (post-coding c7) — record raw tick to CSV when enabled.
+            // No-op when record_ticks=0 (the gate is inside TickRecorder_Push).
+            // is_buyer_maker not available from the sharded fan_out yet; pass 0.
+            // (Legacy path passes the real value from BinanceStream tick read.)
+            TickRecorder_Push(&g_tick_rec, price_d, volume_d, (int64_t)ts_us, 0);
 
 #ifdef USE_IMGUI_GUI
             // Feed candles for the chart panel (same pattern as main.cpp:396)
@@ -1050,6 +1062,7 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
         pthread_join(g_depth_tid, NULL);
     }
     DepthRecorder_Close(&g_depth_rec);
+    TickRecorder_Close(&g_tick_rec);  // Phase 8a (post-coding c7)
     OrderManager_Shutdown(&oms);
 
     fprintf(stderr, "[sharded] all threads joined.\n");
