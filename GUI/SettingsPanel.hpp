@@ -37,7 +37,20 @@ static const CfgFieldDef field_defs[] = {
     // Trading
     {"take_profit_pct",       "TP %%",        "Trading",         CFG_FLOAT, "%.2f", NULL},
     {"stop_loss_pct",         "SL %%",        "Trading",         CFG_FLOAT, "%.2f", NULL},
-    {"fee_rate",              "Fee %%",       "Trading",         CFG_FLOAT, "%.2f", NULL},
+    {"fee_rate",              "Fee %%",       "Trading",         CFG_FLOAT, "%.2f",
+        "Legacy fee rate (% per trade) — used for pre-trade quantity computations\n"
+        "(no-trade band, fee floor for TP, kill switch estimate, spread display)\n"
+        "and as the default for fee_rate_maker / fee_rate_taker if those aren't set."},
+    {"fee_rate_maker",        "Maker %%",     "Trading",         CFG_FLOAT, "%.3f",
+        "Maker fee rate (% per fill) — applied when order->is_maker=1 (POST_ONLY\n"
+        "limit fill). Default 0.075 (Binance tier 0 BNB-discount). If not set,\n"
+        "mirrors fee_rate. Setting ONLY this without fee_rate_taker triggers a\n"
+        "[CFG] warning — both should be set explicitly or neither."},
+    {"fee_rate_taker",        "Taker %%",     "Trading",         CFG_FLOAT, "%.3f",
+        "Taker fee rate (% per fill) — applied when order->is_maker=0 (market\n"
+        "fill, default for synchronous orders, or POST_ONLY limit that crossed\n"
+        "the spread). Default 0.100 (Binance tier 0 BNB-discount). Backtest\n"
+        "uses this rate exclusively (all-taker simulation)."},
     {"slippage_pct",          "Slippage %%",  "Trading",         CFG_FLOAT, "%.2f", NULL},
     {"risk_pct",              "Risk/Pos %%",  "Trading",         CFG_FLOAT, "%.1f", NULL},
     {"fee_floor_mult",        "Fee Floor",    "Trading",         CFG_FLOAT, "%.1f",

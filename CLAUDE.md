@@ -397,6 +397,23 @@ When `confidence_enabled=1` AND `strategy_id == STRATEGY_ML`:
 5. **Confidence is read on slow path, displayed via `last_confidence`.** `last_confidence` is updated on every gate decision; TUI/GUI read the snapshot field. **NEVER read `last_confidence` from the hot path.**
 6. **Tunables (Phase 6prep):** `cfg.confidence_window` (default 32, max 64), `cfg.confidence_freshness_tau` (default 300s = 5min), `cfg.confidence_threshold_scale` (default 2.0). All preserve pre-Phase-6prep hardcoded behavior at default values. Tuning these requires an actual signal to A/B against — meaningless on noise-floor models.
 
+### Maker/Taker Fee Accuracy (Phase 8)
+
+When applying fees in any code path:
+
+1. **Fee charge sites** (booking the fee on a real fill) MUST use the per-fill rate. Either:
+   - At the cfg layer: `Fee_Compute(cfg, notional, is_maker)` in `ControllerConfig.hpp` reads `cfg->fee_rate_maker` or `cfg->fee_rate_taker` based on the flag.
+   - At the OMS layer: `oms->fee_rate_maker` / `oms->fee_rate_taker` directly (engine sets these from cfg after `OrderManager_Init`).
+   Never `FPN_Mul(notional, cfg.fee_rate)` for an actual fee charge — that's the legacy single-rate path.
+2. **Source `is_maker` from the order that produced the fill**, not from a heuristic. For:
+   - Live executionReport WS fills: parsed from Binance "m" field by `ud_parse_execution_report`.
+   - Synchronous market BUY/SELL: hardcoded `is_maker=0` (market orders are taker by exchange definition).
+   - Backtest: hardcoded `is_maker=0` (all-taker simulation, documented divergence).
+3. **Pre-trade quantity sites** (no-trade band, fee floor for TP, kill-switch estimate, spread_bps display) intentionally use the LEGACY `fee_rate` field, NOT the maker/taker fields. They use fee_rate as a quantity in pre-trade computation, not as a fee charge on a real fill. Each such site has a `// Phase 8: pre-trade ... — leave as fee_rate` comment.
+4. **Sanity invariant**: after every fill that goes through the synchronous path, `total_fees == total_maker_fees + total_taker_fees` on the controller. The OMS event-log path books fees independently and doesn't update these counters.
+5. **Cfg backward compat**: if user sets only `fee_rate` (legacy), it mirrors to both maker and taker at load time. If user sets fee_rate AND only ONE of maker/taker, a `[CFG] WARNING` fires (mixed-cfg = almost certainly an error). The mirroring uses parse-time explicit-set flags, NOT value comparison — explicit values matching defaults still count as explicit.
+6. **`ORDER_PARTIAL` is no longer a dead enum.** Adding code that does `if (state == ORDER_FILLED)` should consider whether `ORDER_PARTIAL` should also be handled (e.g., partial-fill bookkeeping). `Order_IsTerminal` correctly returns false for PARTIAL.
+
 ### Held-Out Validation Discipline (Phase 7prep)
 
 When training/evaluating an ML model in foxml_suite:
