@@ -63,6 +63,13 @@ static inline void log_ts(char *buf, size_t len) {
 #define GATE_REASON_RECOVERY   7   // kill switch recovery period
 #define GATE_REASON_VOLATILE   8   // volatile regime
 #define GATE_REASON_COOLDOWN   9   // post-SL cooldown
+#define GATE_REASON_WIND_DOWN  10  // session wind-down
+#define GATE_REASON_PAUSED     11  // manual pause
+#define GATE_REASON_DOWNTREND  12  // downtrend regime
+#define GATE_REASON_COST       13  // cost gate (trade cost exceeds breakeven alpha)
+#define GATE_REASON_BARRIER    14  // barrier gate (peak probability too high)
+#define NUM_GATE_REASONS       15
+
 // Fill rejection reasons — set in last_reject_reason when a buy attempt fails
 #define REJECT_REASON_NONE       0
 #define REJECT_REASON_SPACING    1   // too close to last buy (anti-spam)
@@ -74,16 +81,9 @@ static inline void log_ts(char *buf, size_t len) {
 #define REJECT_REASON_MIN_VOL    7   // volatility below threshold
 #define NUM_REJECT_REASONS       8
 
-// shared name tables (single source of truth for display)
 static const char *REJECT_REASON_NAMES[NUM_REJECT_REASONS] = {
     "", "spacing", "balance", "exposure", "breaker", "max_pos", "duplicate", "min_vol"
 };
-#define GATE_REASON_WIND_DOWN  10  // session wind-down
-#define GATE_REASON_PAUSED     11  // manual pause
-#define GATE_REASON_DOWNTREND  12  // downtrend regime
-#define GATE_REASON_COST       13  // cost gate (trade cost exceeds breakeven alpha)
-#define GATE_REASON_BARRIER    14  // barrier gate (peak probability too high)
-#define NUM_GATE_REASONS       15
 
 // centralized gate reason metadata — renderers look up name/description here.
 // add new gate reasons: one #define above + one row below.
@@ -1671,16 +1671,15 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       ctrl->halt_reason = 0;
     }
     // log gate state transitions (slow path only, ~1 per state change)
+    // names come from GATE_REASON_TABLE — single source of truth, prevents
+    // the local-array-falls-out-of-sync bug class (had 14 entries when
+    // NUM_GATE_REASONS=15 → OOB read for GATE_REASON_BARRIER).
     if (ctrl->gate_reason != prev_gate) {
-      static const char *gr[] = {
-        "ok", "warmup", "no_signal", "no_trade", "book",
-        "danger", "kill", "recovery", "volatile", "cooldown",
-        "wind_down", "paused", "downtrend", "cost"
-      };
       int gi = (ctrl->gate_reason >= 0 && ctrl->gate_reason < NUM_GATE_REASONS) ? ctrl->gate_reason : 0;
       int pi = (prev_gate >= 0 && prev_gate < NUM_GATE_REASONS) ? prev_gate : 0;
       char ts[16]; log_ts(ts, sizeof(ts));
-      fprintf(stderr, "[%s] [GATE] %s → %s\n", ts, gr[pi], gr[gi]);
+      fprintf(stderr, "[%s] [GATE] %s → %s\n", ts,
+              GATE_REASON_TABLE[pi].name, GATE_REASON_TABLE[gi].name);
     }
   }
 }
