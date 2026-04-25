@@ -397,6 +397,17 @@ When `confidence_enabled=1` AND `strategy_id == STRATEGY_ML`:
 5. **Confidence is read on slow path, displayed via `last_confidence`.** `last_confidence` is updated on every gate decision; TUI/GUI read the snapshot field. **NEVER read `last_confidence` from the hot path.**
 6. **Tunables (Phase 6prep):** `cfg.confidence_window` (default 32, max 64), `cfg.confidence_freshness_tau` (default 300s = 5min), `cfg.confidence_threshold_scale` (default 2.0). All preserve pre-Phase-6prep hardcoded behavior at default values. Tuning these requires an actual signal to A/B against — meaningless on noise-floor models.
 
+### Held-Out Validation Discipline (Phase 7prep)
+
+When training/evaluating an ML model in foxml_suite:
+
+1. **Held-out test set is locked by default.** `HeldOutSplit_Make(total, fraction)` returns a struct with `locked=1`. `HeldOutSplit_TestAccessAllowed` returns 0 until `HeldOutSplit_Unlock(s, token)` is called with the correct token. Use this when you want a final unbiased generalization estimate that hyperparameter selection didn't peek at.
+2. **Walk-forward CV runs ONLY on `[0, trainval_end_idx)`.** `Backtest_RunFullValidation` enforces this by passing a sliced view of `BacktestResults` with `sample_count` capped at `trainval_end_idx`. Don't access test indices `[test_start_idx, total_samples)` from training/tuning code.
+3. **Held-out evaluation runs ONCE per locked split.** After unlock, run final eval, record gap. Don't iterate on hyperparameters using held-out feedback — that defeats the whole purpose. If you need a second evaluation, `HeldOutSplit_Relock` generates a new token (old token can't unlock).
+4. **Generalization gap is the WAS-IT-REAL test:** `|WF_mean_val - held_out|`. Default threshold (`cfg.gap_acceptable_threshold`, default 0.05) means gap above 5% = walk-forward was overfit despite per-fold OK numbers. **Models with gap > threshold should not ship.**
+5. **`expected.cfg` saves the discipline values** (`held_out_fraction`, `gap_acceptable_threshold`) alongside the model bundle. Live engine logs these at model load time so future devs see what regime the model was trained under. Mismatch with current engine cfg is currently informational; tighten to enforced-mismatch later if drift becomes a real concern.
+6. **Token is friction not security.** Determined peeker can edit memory or read source. The goal is "make accidental peeking impossible, intentional peeking auditable" — discipline mechanism for ML training, not a permission system. Resist any "ergonomic" change that weakens the lock (auto-unlock-after-timeout, default-unlocked-in-development-mode) — they defeat the purpose.
+
 ### Operational Alerting (Phase 8b)
 
 When adding a new alertable event:
