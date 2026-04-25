@@ -830,17 +830,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                        DataPanelState *data) {
     ImGui::Begin("Training");
 
-    // label config — full set from LabelFunctions.hpp
-    static const char *label_names[] = {
-        "Win/Loss",            // LABEL_WIN_LOSS = 0
-        "Barrier",             // LABEL_BARRIER = 1
-        "Forward P&L",         // LABEL_FORWARD_PNL = 2
-        "Regime",              // LABEL_REGIME = 3
-        "Vol Barrier",         // LABEL_VOL_BARRIER = 4
-        "Will Peak",           // LABEL_WILL_PEAK = 5
-        "Will Valley",         // LABEL_WILL_VALLEY = 6
-        "Peak/Valley/Stable",  // LABEL_PEAK_VALLEY_STABLE = 7 — 3-class softmax
-    };
+    // label config — display names derived from label_table (single source of truth).
+    // adding a label = 1 entry in LabelFunctions.hpp::label_table[]; this dropdown auto-updates.
+    static const char *label_names[LABEL_COUNT];
+    static bool label_names_built = false;
+    if (!label_names_built) {
+        for (int i = 0; i < LABEL_COUNT; i++) {
+            label_names[i] = label_table[i].display_name;
+        }
+        label_names_built = true;
+    }
     ImGui::Combo("Label Type", &state->label_type, label_names, LABEL_COUNT);
     ImGui::SetItemTooltip("How to label each sample for ML training:\n"
                           "  Win/Loss: 1 if price hits TP%% first, 0 if SL%% first\n"
@@ -1021,21 +1020,20 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         XGBoosterSetParam(booster, "max_depth", depth_s);
         XGBoosterSetParam(booster, "eta", lr_s);
 
-        // objective + num_class depend on label type
-        // Multiclass: REGIME (4 classes) or PEAK_VALLEY_STABLE (3 classes) → multi:softprob
-        // Continuous regression: FORWARD_PNL → reg:squarederror
-        // Everything else: binary classification → binary:logistic
-        int is_multiclass = (state->label_type == LABEL_REGIME ||
-                              state->label_type == LABEL_PEAK_VALLEY_STABLE);
-        int num_classes = 0;
-        if (state->label_type == LABEL_REGIME) num_classes = 4;
-        else if (state->label_type == LABEL_PEAK_VALLEY_STABLE) num_classes = 3;
+        // objective + num_class read from label_table (single source of truth)
+        //   num_classes  0 = binary classification
+        //   num_classes  1 = continuous regression
+        //   num_classes >=2 = multiclass softmax
+        int num_classes = (state->label_type >= 0 && state->label_type < LABEL_COUNT)
+                          ? label_table[state->label_type].num_classes : 0;
+        int is_multiclass  = (num_classes >= 2);
+        int is_regression  = (num_classes == 1);
 
         if (is_multiclass) {
             XGBoosterSetParam(booster, "objective", "multi:softprob");
             char nc_s[8]; snprintf(nc_s, 8, "%d", num_classes);
             XGBoosterSetParam(booster, "num_class", nc_s);
-        } else if (state->label_type == LABEL_FORWARD_PNL) {
+        } else if (is_regression) {
             XGBoosterSetParam(booster, "objective", "reg:squarederror");
         } else {
             XGBoosterSetParam(booster, "objective", "binary:logistic");
@@ -1085,7 +1083,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 int truth = (int)(train_labels[i] + 0.5f);  // rounded class id
                 if (best == truth) correct++;
             }
-        } else if (state->label_type == LABEL_FORWARD_PNL) {
+        } else if (is_regression) {
             // regression: count "directionally correct" (sign agreement) as a proxy
             for (int i = 0; i < n_valid; i++) {
                 int pred_sign = out_result[i] > 0.0f ? 1 : (out_result[i] < 0.0f ? -1 : 0);

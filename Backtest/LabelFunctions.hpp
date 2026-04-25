@@ -260,23 +260,36 @@ typedef float (*LabelFn)(const HistoricalTick *ticks, int tick_idx, int total_ti
                            double sample_price, double tp_pct, double sl_pct,
                            int extra_param);
 
+// num_classes:
+//   0 = binary classification (output is single P(class=1))
+//   1 = regression (output is continuous value)
+//  ≥2 = multiclass (output is K class probabilities, softmax-trained)
 struct LabelDef {
     int id;
-    const char *name;
+    const char *name;          // snake_case for config / programmatic use
+    const char *display_name;  // human-readable for GUI dropdown
     const char *description;
     LabelFn fn;
+    int num_classes;
 };
 
 static const LabelDef label_table[] = {
-    { LABEL_WIN_LOSS,    "win_loss",      "Binary: 1=profitable entry, 0=loss",       Label_WinLoss    },
-    { LABEL_BARRIER,     "barrier",       "First-passage: +tp% before -sl%",          Label_Barrier    },
-    { LABEL_FORWARD_PNL, "forward_pnl",   "Continuous: % return over N ticks",        Label_ForwardPnl },
-    { LABEL_REGIME,      "regime",        "Multi-class: regime at sample point",      Label_Regime     },
-    { LABEL_VOL_BARRIER, "vol_barrier",   "Vol-scaled: k*sigma barrier (FoxML)",      Label_VolBarrier },
-    { LABEL_WILL_PEAK,   "will_peak",    "Binary: 1=price peaks within N ticks",     Label_WillPeak   },
-    { LABEL_WILL_VALLEY, "will_valley",  "Binary: 1=price valleys within N ticks",   Label_WillValley },
-    { LABEL_PEAK_VALLEY_STABLE, "peak_valley_stable",
-                                          "3-class: 0=stable, 1=peak, 2=valley (softmax)", Label_PeakValleyStable },
+    { LABEL_WIN_LOSS,    "win_loss",     "Win/Loss",
+      "Binary: 1=profitable entry, 0=loss",                 Label_WinLoss,    0 },
+    { LABEL_BARRIER,     "barrier",      "Barrier",
+      "First-passage: +tp% before -sl% (0.5=neutral)",      Label_Barrier,    0 },
+    { LABEL_FORWARD_PNL, "forward_pnl",  "Forward P&L",
+      "Continuous: % return over N ticks",                  Label_ForwardPnl, 1 },
+    { LABEL_REGIME,      "regime",       "Regime",
+      "Multi-class: regime at sample point",                Label_Regime,     4 },
+    { LABEL_VOL_BARRIER, "vol_barrier",  "Vol Barrier",
+      "Vol-scaled: k*sigma barrier (FoxML)",                Label_VolBarrier, 0 },
+    { LABEL_WILL_PEAK,   "will_peak",    "Will Peak",
+      "Binary: 1=price peaks within N ticks",               Label_WillPeak,   0 },
+    { LABEL_WILL_VALLEY, "will_valley",  "Will Valley",
+      "Binary: 1=price valleys within N ticks",             Label_WillValley, 0 },
+    { LABEL_PEAK_VALLEY_STABLE, "peak_valley_stable", "Peak/Valley/Stable",
+      "3-class: 0=stable, 1=peak, 2=valley (softmax)",      Label_PeakValleyStable, 3 },
 };
 
 static const int LABEL_COUNT = sizeof(label_table) / sizeof(label_table[0]);
