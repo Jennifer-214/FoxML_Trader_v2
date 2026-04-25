@@ -750,12 +750,24 @@ done:
         fprintf(stderr, "[backtest] allocating label buffer: %d ticks (%.0f MB)\n",
                 label_max, (double)label_max * sizeof(HistoricalTick) / 1e6);
         if (label_ticks) {
+            // CRITICAL: BacktestData_Load resets *count to 0 each call (see line ~68),
+            // so passing &label_count caused each file to overwrite the previous
+            // file's count rather than accumulate. The data writes overlapped and
+            // label_count ended up = size_of_last_file rather than sum_of_files.
+            // Then sample_tick_indices (set during replay using global total_processed)
+            // would all clamp to label_count-1, pointing into a garbage region of
+            // the corrupted buffer. Every multi-file label run was on noise.
+            // Fix: use a per-file local count, accumulate into label_count manually.
             for (int f = 0; f < run_cfg->num_data_files; f++) {
                 if (label_count >= label_max) break;
-                int before = label_count;
-                BacktestData_Load(label_ticks + label_count, &label_count, label_max - label_count,
+                int per_file_count = 0;
+                BacktestData_Load(label_ticks + label_count, &per_file_count,
+                                  label_max - label_count,
                                   run_cfg->data_paths[f]);
+                label_count += per_file_count;
             }
+            fprintf(stderr, "[backtest] label buffer: %d total ticks across %d files\n",
+                    label_count, run_cfg->num_data_files);
 
             // get label function from table
             LabelFn label_fn = NULL;
