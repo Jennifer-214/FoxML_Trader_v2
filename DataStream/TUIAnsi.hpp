@@ -241,6 +241,12 @@ static inline void ab_halfblock_chart(AnsiBuf *ab, const double *data, int head,
     }
 }
 
+// 8-level sparkline blocks shared by ab_sparkline + ab_sparkline_pnl
+// (each character is half a block taller than the previous — gives clean vertical resolution)
+static const char *SPARKLINE_BLOCKS[8] = {
+    "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"
+};
+
 // sparkline chart from ring buffer data (▁▂▃▄▅▆▇█)
 static inline void ab_sparkline(AnsiBuf *ab, const double *data, int head,
                                  int count, int max_len, int width,
@@ -268,7 +274,7 @@ static inline void ab_sparkline(AnsiBuf *ab, const double *data, int head,
         return;
     }
 
-    static const char *blocks[] = { "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█" };
+    // blocks → file-scope SPARKLINE_BLOCKS
 
     ab_append(ab, color);
     for (int i = 0; i < vis; i++) {
@@ -276,7 +282,7 @@ static inline void ab_sparkline(AnsiBuf *ab, const double *data, int head,
         int level = (int)((data[idx] - vmin) / range * 7.0);
         if (level < 0) level = 0;
         if (level > 7) level = 7;
-        ab_append(ab, blocks[level]);
+        ab_append(ab, SPARKLINE_BLOCKS[level]);
     }
     ab_append(ab, A_RESET);
 }
@@ -306,14 +312,14 @@ static inline void ab_sparkline_pnl(AnsiBuf *ab, const double *data, int head,
         return;
     }
 
-    static const char *blocks[] = { "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█" };
+    // blocks → file-scope SPARKLINE_BLOCKS
     for (int i = 0; i < vis; i++) {
         int idx = (start + start_offset + i) % max_len;
         ab_append(ab, data[idx] >= 0.0 ? A_GREEN : A_RED);
         int level = (int)((data[idx] - vmin) / range * 7.0);
         if (level < 0) level = 0;
         if (level > 7) level = 7;
-        ab_append(ab, blocks[level]);
+        ab_append(ab, SPARKLINE_BLOCKS[level]);
     }
     ab_append(ab, A_RESET);
 }
