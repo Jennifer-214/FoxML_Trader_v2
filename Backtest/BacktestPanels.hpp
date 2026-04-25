@@ -1032,8 +1032,20 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
     // show feature collection status — display depends on label kind.
     // (label-type-aware metric invariant — see CLAUDE.md)
+    //
+    // GATED ON !running: results->labels (and sample_count, sample_capacity)
+    // are written by the worker thread during collection. The GUI thread
+    // reading them mid-realloc was a latent race for the entire history of
+    // this code; manifested as a segfault when the regression diagnosis
+    // path (added 2026-04-25) iterated a 2.25M-sample buffer that was
+    // simultaneously realloc'ing 2× → use-after-free on the old pointer.
+    //
+    // Long-term fix is mutex / atomic snapshot. Pragmatic fix: don't
+    // display partial stats while collecting. The progress bar already
+    // tells the user something's happening; detailed stats land when the
+    // run completes.
     BacktestResults *results = &run_control->results;
-    if (results->sample_count > 0) {
+    if (results->sample_count > 0 && !run_control->running) {
         // FoxML colors for diagnostics
         const ImVec4 diag_green  = ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
         const ImVec4 diag_yellow = ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
