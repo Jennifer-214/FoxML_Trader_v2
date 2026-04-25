@@ -263,6 +263,13 @@ template <unsigned F> struct ControllerConfig {
   FPN<F>   confidence_freshness_tau; // freshness decay constant in seconds (default 300)
   FPN<F>   confidence_threshold_scale; // gate formula: effective_thr = base * (this - conf)
                                        // (default 2.0 — clamps at 1.0 in code)
+  // Phase 7 prep — held-out validation infrastructure. Used by foxml_suite
+  // when training/evaluating a model. Live engine reads via expected.cfg
+  // mismatch checks (CoreModelZoo).
+  FPN<F>   held_out_fraction;        // 0.20 = 20% of data reserved for final-test
+                                     // (clamped to [0.05, 0.30] in HeldOutSplit_Make)
+  FPN<F>   gap_acceptable_threshold; // max acceptable |WF mean - held_out| gap
+                                     // (default 0.05 — gap above this = poor generalization)
   // Prediction normalization — Phase 7F (default OFF)
   int prediction_normalize; // 0=disabled, 1=z-score normalize predictions
                             // (activates after 100)
@@ -495,6 +502,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.confidence_window           = 32;                          // CONFIDENCE_IC_WINDOW_DEFAULT
   cfg.confidence_freshness_tau    = FPN_FromDouble<F>(300.0);    // CONFIDENCE_FRESHNESS_TAU_DEFAULT
   cfg.confidence_threshold_scale  = FPN_FromDouble<F>(2.0);      // hardcoded `2.0` in gate formula
+  // Phase 7 prep — held-out validation defaults
+  cfg.held_out_fraction           = FPN_FromDouble<F>(0.20);     // 20% reserved
+  cfg.gap_acceptable_threshold    = FPN_FromDouble<F>(0.05);     // 5% max gap for "OK"
   cfg.prediction_normalize = 0;
   cfg.barrier_gate_enabled = 0;
   cfg.model_verify_strict = 0;  // 0=warn, 1=strict (fail on mismatch), -1=skip
@@ -765,6 +775,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_U32(confidence_window)
     CFG_PARSE_FPN(confidence_freshness_tau)
     CFG_PARSE_FPN(confidence_threshold_scale)
+    CFG_PARSE_FPN(held_out_fraction)
+    CFG_PARSE_FPN(gap_acceptable_threshold)
     CFG_PARSE_INT(prediction_normalize)
     CFG_PARSE_INT(barrier_gate_enabled)
     CFG_PARSE_INT(model_verify_strict)

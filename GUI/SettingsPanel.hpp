@@ -229,6 +229,18 @@ static const CfgFieldDef field_defs[] = {
         "Freshness decay constant in seconds (default 300 = 5min)\ne^(-data_age/tau): data_age=tau gives 0.37 freshness"},
     {"confidence_threshold_scale","Conf Scale",        "FoxML",  CFG_FLOAT, "%.2f",
         "Gate formula: effective_thr = base * (this - conf)\ndefault 2.0 — conf=0 → 2x base (suppresses marginal signals)\nconf=1 → 1x base (full signal). Clamps at 1.0."},
+    // Validation (Phase 7prep) — held-out test set + generalization gap
+    {"held_out_fraction",        "Held-Out %",         "Validation", CFG_FLOAT, "%.2f",
+        "Fraction of data reserved as held-out test set\n"
+        "default 0.20 (20%% — last 2 months of 12-month dataset)\n"
+        "code refuses to peek at this set during training/tuning\n"
+        "explicit unlock required for final evaluation\n"
+        "clamped to [0.05, 0.30] in HeldOutSplit_Make"},
+    {"gap_acceptable_threshold", "Gap Threshold",      "Validation", CFG_FLOAT, "%.3f",
+        "Max acceptable |walk-forward - held-out| generalization gap\n"
+        "default 0.05 — gap above this = poor generalization (not OK)\n"
+        "applied to both classification accuracy and regression Pearson r\n"
+        "load-bearing: this is the WAS-IT-REAL test for trained models"},
     // Model Paths (Phase 7C)
     {"ml_model_path",            "Buy Model",         "Models", CFG_PATH,  NULL,
         "Path to XGBoost/LightGBM buy-signal model\ntrain in foxml_suite, load here"},
