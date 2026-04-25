@@ -91,7 +91,12 @@ struct Order {
     uint64_t  last_update_us;      // last state transition timestamp
     uint8_t   retry_count;         // bumped on each retry attempt
     uint8_t   strategy_id;         // STRATEGY_* constant, for trade log CSV
-    uint8_t   _pad[6];
+    // Phase 8 — fill type for maker/taker fee accounting. Set from Binance
+    // executionReport "m" field by ud_parse_execution_report (c3). Valid
+    // only when state == ORDER_FILLED or ORDER_PARTIAL; 0 (taker) until
+    // first fill event arrives. Backtest path keeps is_maker=0 always.
+    uint8_t   is_maker;
+    uint8_t   _pad[5];             // adjusted from 6 to keep struct size stable
 };
 
 // Initialize an order to PENDING state with the given identifying fields.
@@ -120,7 +125,20 @@ inline void Order_Init(Order<F>* o, uint64_t id, int16_t core_id, OrderType type
     o->last_update_us  = 0;
     o->retry_count     = 0;
     o->strategy_id     = 0xFF;  // STRATEGY_NONE
+    o->is_maker        = 0;     // assume taker until executionReport says otherwise
 }
+
+// Phase 8 anti-drift guard: pin Order<F> size to catch silent ABI breakage
+// from future field additions. If you add a field and this fails, decide
+// CONSCIOUSLY whether the change is acceptable (and update the constant)
+// or pack into existing _pad. OrderPool slots are sized for this struct;
+// growing it changes the pool's memory footprint.
+//
+// Per-instantiation: F=64 is the live-engine + suite default. Other widths
+// would have different sizes and don't get a static_assert (yet).
+static_assert(sizeof(Order<64>) == 280,
+              "Order<64> size changed — verify OrderPool slot assumptions, "
+              "then update this assertion to the new size.");
 
 // Predicate: is this order in a terminal state (no further transitions)?
 // Used by OrderManager_Tick to decide whether to free the slot. Phase 03
