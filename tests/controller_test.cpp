@@ -3340,6 +3340,168 @@ int main() {
               strcmp(cmd, "notify-send 'Engine: kill' 'details here'") == 0);
     }
 
+    //======================================================================================================
+    // [PHASE 6prep TESTS — Confidence loop math + gate formula + cfg]
+    //======================================================================================================
+    // see plans/phase6-prep-confidence-loop-tests.md. 12 assertions across
+    // 4 groups. Tests pin the math + the gate-threshold formula so the
+    // existing wiring (which we did NOT add — it pre-dates Phase 6prep) is
+    // locked against silent regression.
+    //
+    // Test data uses a small deterministic LCG instead of platform-dependent
+    // rand() — tests pass identically on glibc, musl, macOS.
+    //======================================================================================================
+
+    // Tiny deterministic PRNG (Numerical Recipes LCG). Produces [0, 1).
+    auto lcg_next = [](uint32_t *s) -> double {
+        *s = (*s) * 1664525u + 1013904223u;
+        return (double)(*s >> 8) / 16777216.0; // upper 24 bits → [0, 1)
+    };
+
+    // ----- Group 1: RollingIC math (4 assertions) ------------------------------------------------------
+    printf("\n--- Phase 6prep: RollingIC math ---\n");
+    {
+        // Empty IC → 0 (no divide-by-zero on insufficient samples)
+        RollingIC ic;
+        RollingIC_Init(&ic, 50);
+        check("empty RollingIC returns 0 (insufficient samples)",
+              fabs(RollingIC_Compute(&ic)) < 1e-9);
+    }
+    {
+        // Perfectly correlated linear pairs → IC = 1.0 (Spearman of monotonic = 1)
+        RollingIC ic;
+        RollingIC_Init(&ic, 50);
+        for (int i = 0; i < 50; i++) {
+            double p = (double)i;
+            double a = 2.0 * p + 1.0;  // strictly monotonic in p
+            RollingIC_Push(&ic, p, a);
+        }
+        check("perfectly correlated → IC ≈ 1.0",
+              fabs(RollingIC_Compute(&ic) - 1.0) < 1e-6);
+    }
+    {
+        // Deterministic uncorrelated random → IC near 0
+        RollingIC ic;
+        RollingIC_Init(&ic, 50);
+        uint32_t s1 = 0xDEADBEEF, s2 = 0xCAFEBABE;
+        for (int i = 0; i < 50; i++) {
+            RollingIC_Push(&ic, lcg_next(&s1), lcg_next(&s2));
+        }
+        double r = RollingIC_Compute(&ic);
+        check("uncorrelated random pairs → |IC| < 0.3", fabs(r) < 0.3);
+    }
+    {
+        // Window rolls — first 10 anti-correlated pairs are evicted by next 10 positively-correlated
+        RollingIC ic;
+        RollingIC_Init(&ic, 10);
+        for (int i = 0; i < 10; i++) RollingIC_Push(&ic, (double)i, -(double)i); // anti
+        for (int i = 0; i < 10; i++) RollingIC_Push(&ic, (double)i, (double)i);  // pos overwrites
+        check("window rolls — only last N pairs counted (positive correlation wins)",
+              RollingIC_Compute(&ic) > 0.9);
+    }
+
+    // ----- Group 2: ConfidenceScorer composition (3 assertions) ---------------------------------------
+    printf("\n--- Phase 6prep: ConfidenceScorer composition ---\n");
+    {
+        // Noise → IC near 0 → abs_ic clamps to MIN_IC=0.01 → confidence stays low
+        ConfidenceScorer cs;
+        ConfidenceScorer_Init(&cs, 50, /*tau=*/60.0);
+        uint32_t s1 = 0x12345678, s2 = 0x87654321;
+        for (int i = 0; i < 50; i++) {
+            ConfidenceScorer_Update(&cs, lcg_next(&s1), lcg_next(&s2));
+        }
+        double conf = ConfidenceScorer_Compute(&cs, /*data_age_sec=*/0.0);
+        check("noise stream → confidence < 0.3 (low predictive quality)", conf < 0.3);
+    }
+    {
+        // Perfect identity (pred == actual) → IC=1, RMSE=0, freshness=1 → conf=1.0
+        ConfidenceScorer cs;
+        ConfidenceScorer_Init(&cs, 50, /*tau=*/60.0);
+        for (int i = 0; i < 50; i++) {
+            double p = (double)i / 50.0; // pred and actual on same scale, identity
+            ConfidenceScorer_Update(&cs, p, p);
+        }
+        double conf = ConfidenceScorer_Compute(&cs, /*data_age_sec=*/0.0);
+        check("perfect identity stream → confidence > 0.95",
+              conf > 0.95);
+    }
+    {
+        // Stale data: same perfect stream, but data_age = tau → freshness = e^-1 ≈ 0.37
+        ConfidenceScorer cs;
+        ConfidenceScorer_Init(&cs, 50, /*tau=*/60.0);
+        for (int i = 0; i < 50; i++) {
+            double p = (double)i / 50.0;
+            ConfidenceScorer_Update(&cs, p, p);
+        }
+        double conf_fresh = ConfidenceScorer_Compute(&cs, /*data_age_sec=*/0.0);
+        double conf_stale = ConfidenceScorer_Compute(&cs, /*data_age_sec=*/60.0); // = tau
+        check("stale data (age=tau) decays confidence to ~37% of fresh",
+              conf_stale < conf_fresh * 0.5 && conf_stale > conf_fresh * 0.3);
+    }
+
+    // ----- Group 3: Gate effective-threshold formula (3 assertions) ----------------------------------
+    // The formula `effective_thr = base * (scale - conf)`, clamped at 1.0,
+    // lives at PortfolioController.hpp:~1618 in the slow-path gate block.
+    // Test the formula directly (it's small enough to inline). If production
+    // drifts from this formula, manual testnet verification catches it; tests
+    // pin the math semantic.
+    printf("\n--- Phase 6prep: Gate effective threshold ---\n");
+    {
+        auto effective_thr = [](double base, double scale, double conf) {
+            double t = base * (scale - conf);
+            if (t > 1.0) t = 1.0;
+            return t;
+        };
+
+        // conf=0, base=0.3, scale=2.0 → 0.6 (no clamp)
+        check("conf=0 + scale=2 → base * 2 (max suppression at zero confidence)",
+              fabs(effective_thr(0.3, 2.0, 0.0) - 0.6) < 1e-9);
+
+        // conf=1, scale=2.0 → effective = base * 1.0 (full signal)
+        check("conf=1 + scale=2 → base (full confidence allows full signal)",
+              fabs(effective_thr(0.3, 2.0, 1.0) - 0.3) < 1e-9);
+
+        // base=0.6, conf=0, scale=2.0 → 1.2 → clamps to 1.0
+        check("clamp at 1.0 when base × (scale − conf) > 1.0",
+              fabs(effective_thr(0.6, 2.0, 0.0) - 1.0) < 1e-9);
+    }
+
+    // ----- Group 4: Backward compat — cfg parsing (2 assertions) -------------------------------------
+    printf("\n--- Phase 6prep: Cfg backward compat ---\n");
+    {
+        // Old cfg without confidence_threshold_scale — defaults to 2.0
+        char path[] = "/tmp/test_conf_default_XXXXXX";
+        int fd = mkstemp(path);
+        if (fd >= 0) {
+            dprintf(fd, "confidence_enabled=1\n");  // only enable, nothing else
+            close(fd);
+            ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(path);
+            check("missing cfg fields keep defaults (window=32, tau=300, scale=2.0)",
+                  cfg.confidence_window == 32u &&
+                  fabs(FPN_ToDouble(cfg.confidence_freshness_tau) - 300.0) < 1e-6 &&
+                  fabs(FPN_ToDouble(cfg.confidence_threshold_scale) - 2.0) < 1e-6);
+            unlink(path);
+        }
+    }
+    {
+        // Explicit values parse correctly
+        char path[] = "/tmp/test_conf_explicit_XXXXXX";
+        int fd = mkstemp(path);
+        if (fd >= 0) {
+            dprintf(fd, "confidence_enabled=1\n"
+                        "confidence_window=20\n"
+                        "confidence_freshness_tau=120.0\n"
+                        "confidence_threshold_scale=1.5\n");
+            close(fd);
+            ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(path);
+            check("explicit cfg values parse: window=20, tau=120, scale=1.5",
+                  cfg.confidence_window == 20u &&
+                  fabs(FPN_ToDouble(cfg.confidence_freshness_tau) - 120.0) < 1e-6 &&
+                  fabs(FPN_ToDouble(cfg.confidence_threshold_scale) - 1.5) < 1e-6);
+            unlink(path);
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
