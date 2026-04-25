@@ -592,6 +592,16 @@ int main(int argc, char *argv[]) {
                 }
             }
             ctrl.sim_time = time(NULL); // live engine: wall clock
+            // Phase 8a c4: pull latest book imbalance from depth thread (if running).
+            // Pairs with depth_thread_fn's RELEASE on active_idx after writing the
+            // snapshot — ACQUIRE here makes the snapshot's contents visible.
+            // Slow-path read inside PortfolioController_Tick uses ctrl.book_imbalance.
+            // depth_tid == 0 path (depth_enabled=0 or Init failed) leaves book_imbalance
+            // at its _Init value (0) — pre-Phase-8a behavior preserved.
+            if (depth_tid != 0) {
+                int dactive = __atomic_load_n(&depth_shared.active_idx, __ATOMIC_ACQUIRE);
+                ctrl.book_imbalance = depth_shared.snapshots[dactive].imbalance;
+            }
             PortfolioController_Tick(&ctrl, &pool, last_stream.price, last_stream.volume, &log, last_stream.is_buyer_maker);
 #ifdef LATENCY_PROFILING
             uint64_t t3 = __rdtscp(&tsc_aux);
