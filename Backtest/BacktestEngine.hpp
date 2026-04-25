@@ -672,17 +672,13 @@ done:
             results->stats.total_trades, results->stats.total_pnl);
 
     // gate reason breakdown — shows WHY the engine isn't trading
+    // names come from GATE_REASON_TABLE[] (single source of truth in PortfolioController.hpp)
     if (total_slow_cycles > 0) {
-        static const char *gr_names[] = {
-            "ok", "warmup", "no_signal", "no_trade", "book",
-            "danger", "kill", "recovery", "volatile", "cooldown",
-            "wind_down", "paused", "downtrend", "cost", "barrier"
-        };
         fprintf(stderr, "[backtest] gate reason breakdown (%d slow-path cycles):\n", total_slow_cycles);
         for (int g = 0; g < NUM_GATE_REASONS; g++) {
             if (gate_counts[g] > 0) {
                 fprintf(stderr, "  %-12s %7d  (%5.1f%%)\n",
-                        gr_names[g], gate_counts[g],
+                        GATE_REASON_TABLE[g].name, gate_counts[g],
                         100.0 * gate_counts[g] / total_slow_cycles);
             }
         }

@@ -640,15 +640,14 @@ static inline int ANSI_Section_BuyGate(AnsiBuf *ab, const TUISnapshot *s, int y,
         ab_printf(ab, A_DIM "  " A_BOLD A_YELLOW "COOLDOWN (%d)" A_RESET, s->sl_cooldown);
     y++;
 
-    // fill rejection diagnostics
-    if (s->fills_rejected > 0 && s->last_reject_reason > 0 && s->last_reject_reason <= 7) {
-        static const char *reasons[] = {"", "spacing", "balance", "exposure",
-                                         "breaker", "max_pos", "duplicate", "min_vol"};
+    // fill rejection diagnostics — names from REJECT_REASON_NAMES (PortfolioController.hpp)
+    if (s->fills_rejected > 0 && s->last_reject_reason > 0 &&
+        s->last_reject_reason < NUM_REJECT_REASONS) {
         ab_goto(ab, y, 3);
         ab_printf(ab, A_DIM "fills " A_FG "%u" A_DIM "/" A_FG "%u"
                   A_DIM "  last reject: " A_YELLOW "%s" A_RESET,
                   s->total_buys, s->total_buys + s->fills_rejected,
-                  reasons[s->last_reject_reason]);
+                  REJECT_REASON_NAMES[s->last_reject_reason]);
         y++;
     }
 
@@ -1069,12 +1068,10 @@ static inline void ANSI_Section_RightPanel(AnsiBuf *ab, const TUISnapshot *s,
     ab_printf(ab, A_SAND "accepted: " A_FG "%u" A_RESET, s->total_buys);
     ab_goto_right(ab, 15, rc);
     ab_printf(ab, A_SAND "rejected: " A_FG "%u" A_RESET, s->fills_rejected);
-    if (s->last_reject_reason > 0 && s->last_reject_reason <= 7) {
-        static const char *reasons[] = {"", "spacing", "balance", "exposure",
-                                         "breaker", "max_pos", "duplicate", "min_vol"};
+    if (s->last_reject_reason > 0 && s->last_reject_reason < NUM_REJECT_REASONS) {
         ab_goto_right(ab, 16, rc);
         ab_printf(ab, A_SAND "last: " A_YELLOW "%s" A_RESET,
-                  reasons[s->last_reject_reason]);
+                  REJECT_REASON_NAMES[s->last_reject_reason]);
     }
 
     // TRADES

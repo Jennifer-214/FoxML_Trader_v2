@@ -63,6 +63,21 @@ static inline void log_ts(char *buf, size_t len) {
 #define GATE_REASON_RECOVERY   7   // kill switch recovery period
 #define GATE_REASON_VOLATILE   8   // volatile regime
 #define GATE_REASON_COOLDOWN   9   // post-SL cooldown
+// Fill rejection reasons — set in last_reject_reason when a buy attempt fails
+#define REJECT_REASON_NONE       0
+#define REJECT_REASON_SPACING    1   // too close to last buy (anti-spam)
+#define REJECT_REASON_BALANCE    2   // insufficient balance for trade
+#define REJECT_REASON_EXPOSURE   3   // would exceed max exposure cap
+#define REJECT_REASON_BREAKER    4   // circuit breaker / blown account
+#define REJECT_REASON_FULL       5   // portfolio at max_positions
+#define REJECT_REASON_DUPLICATE  6   // identical price already held
+#define REJECT_REASON_MIN_VOL    7   // volatility below threshold
+#define NUM_REJECT_REASONS       8
+
+// shared name tables (single source of truth for display)
+static const char *REJECT_REASON_NAMES[NUM_REJECT_REASONS] = {
+    "", "spacing", "balance", "exposure", "breaker", "max_pos", "duplicate", "min_vol"
+};
 #define GATE_REASON_WIND_DOWN  10  // session wind-down
 #define GATE_REASON_PAUSED     11  // manual pause
 #define GATE_REASON_DOWNTREND  12  // downtrend regime

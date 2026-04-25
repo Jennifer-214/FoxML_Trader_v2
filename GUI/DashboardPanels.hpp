@@ -412,17 +412,17 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
         ImGui::TextColored(FoxmlColors::yellow, "COOLDOWN (%d)", s->sl_cooldown);
     }
 
-    // fill rejection diagnostics
-    if (s->fills_rejected > 0 && s->last_reject_reason > 0 && s->last_reject_reason <= 7) {
-        static const char *reasons[] = {"", "spacing", "balance", "exposure",
-                                         "breaker", "max_pos", "duplicate", "min_vol"};
+    // fill rejection diagnostics — names from REJECT_REASON_NAMES (PortfolioController.hpp)
+    if (s->fills_rejected > 0 && s->last_reject_reason > 0 &&
+        s->last_reject_reason < NUM_REJECT_REASONS) {
         ImGui::TextColored(FoxmlColors::comment, "fills");
         ImGui::SameLine();
         ImGui::Text("%u/%u", s->total_buys, s->total_buys + s->fills_rejected);
         ImGui::SameLine(0, 10);
         ImGui::TextColored(FoxmlColors::comment, "last reject:");
         ImGui::SameLine();
-        ImGui::TextColored(FoxmlColors::yellow, "%s", reasons[s->last_reject_reason]);
+        ImGui::TextColored(FoxmlColors::yellow, "%s",
+                           REJECT_REASON_NAMES[s->last_reject_reason]);
     }
 
 
