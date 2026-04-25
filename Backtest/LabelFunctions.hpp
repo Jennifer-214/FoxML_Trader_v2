@@ -294,4 +294,41 @@ static const LabelDef label_table[] = {
 
 static const int LABEL_COUNT = sizeof(label_table) / sizeof(label_table[0]);
 
+//======================================================================================================
+// [LABEL KIND HELPERS]
+//======================================================================================================
+// Single source of truth for "what kind of label is this." Reads num_classes
+// from label_table[]. Every metric/display site that touches label values
+// MUST branch on these — see "Label-type-aware metric invariant" in CLAUDE.md.
+//
+// num_classes encoding:
+//   0  = binary classification    (label values 0.0, 1.0, optionally 0.5=neutral)
+//   1  = regression               (label values continuous, any range)
+//   ≥2 = multiclass softmax       (label values 0..K-1 as floats)
+
+static inline int LabelType_NumClasses(int label_type) {
+    if (label_type < 0 || label_type >= LABEL_COUNT) return 0; // safe default = binary
+    return label_table[label_type].num_classes;
+}
+
+static inline int LabelType_IsBinary(int label_type) {
+    return LabelType_NumClasses(label_type) == 0;
+}
+
+static inline int LabelType_IsRegression(int label_type) {
+    return LabelType_NumClasses(label_type) == 1;
+}
+
+static inline int LabelType_IsMulticlass(int label_type) {
+    return LabelType_NumClasses(label_type) >= 2;
+}
+
+// Display name for the kind itself ("binary" / "regression" / "multiclass").
+// Used in log lines and tooltips.
+static inline const char *LabelType_KindName(int label_type) {
+    if (LabelType_IsRegression(label_type)) return "regression";
+    if (LabelType_IsMulticlass(label_type)) return "multiclass";
+    return "binary";
+}
+
 #endif // LABEL_FUNCTIONS_HPP

@@ -273,6 +273,39 @@ static inline int BacktestResults_EnsureEquityCapacity(BacktestResults *r, int n
 }
 
 //======================================================================================================
+// [TRAINING HELPERS]
+//======================================================================================================
+// XGBoost binary `scale_pos_weight` compensates for class imbalance.
+// At ratio 0.2% positive (typical for tight-barrier label sets on BTC),
+// the trivial "predict majority class" baseline gets >99% accuracy and
+// the loss function has zero pressure to learn the minority class —
+// every walk-forward fold flags as memorization. scale_pos_weight =
+// n_neg/n_pos rebalances the loss so positives count equally per-class.
+//
+// Multiclass (multi:softprob) ignores scale_pos_weight; use per-sample
+// weights via XGDMatrixSetFloatInfo("weight", ...) for those.
+// Regression (reg:squarederror) doesn't need it.
+//
+// Threshold for "positive": label >= 0.5f. Matches the convention used
+// in WalkForward_ComputeAccuracy and the binary-classifier label values
+// (0.0 = negative, 1.0 = positive, 0.5 = neutral and already filtered).
+static inline double XGBoost_ComputeScalePosWeight(const float *labels, int n,
+                                                     int *out_n_pos = nullptr,
+                                                     int *out_n_neg = nullptr) {
+    int n_pos = 0, n_neg = 0;
+    for (int i = 0; i < n; i++) {
+        if (labels[i] >= 0.5f) n_pos++;
+        else n_neg++;
+    }
+    if (out_n_pos) *out_n_pos = n_pos;
+    if (out_n_neg) *out_n_neg = n_neg;
+    // guard against zero-positive (degenerate dataset) — return 1.0 so
+    // XGBoost doesn't divide by zero. caller should also surface this.
+    if (n_pos == 0) return 1.0;
+    return (double)n_neg / (double)n_pos;
+}
+
+//======================================================================================================
 // [STATS COMPUTE]
 //======================================================================================================
 static inline void BacktestStats_Compute(BacktestStats *stats,
@@ -793,6 +826,67 @@ static inline float WalkForward_ComputeAccuracy(const float *predictions, const 
     return (float)correct / count;
 }
 
+// multiclass accuracy: predictions is count × num_classes flat array (softmax probs).
+// argmax over each row, compare to integer truth (rounded from label float).
+static inline float WalkForward_ComputeMulticlassAccuracy(const float *predictions,
+                                                            const float *labels,
+                                                            int count, int num_classes) {
+    if (count <= 0 || num_classes < 2) return 0.0f;
+    int correct = 0;
+    for (int i = 0; i < count; i++) {
+        int best = 0;
+        float best_p = predictions[i * num_classes];
+        for (int k = 1; k < num_classes; k++) {
+            float p = predictions[i * num_classes + k];
+            if (p > best_p) { best_p = p; best = k; }
+        }
+        int truth = (int)(labels[i] + 0.5f);
+        if (best == truth) correct++;
+    }
+    return (float)correct / count;
+}
+
+// regression: mean squared error. Lower = better. Sensitive to outliers.
+static inline float WalkForward_ComputeMSE(const float *predictions, const float *labels,
+                                             int count) {
+    if (count <= 0) return 0.0f;
+    double sum_sq = 0.0;
+    for (int i = 0; i < count; i++) {
+        double d = (double)predictions[i] - (double)labels[i];
+        sum_sq += d * d;
+    }
+    return (float)(sum_sq / count);
+}
+
+// regression: Pearson correlation between predictions and labels in [-1, +1].
+// 0 ≈ no signal. >0.05 ≈ weak but real signal. >0.2 ≈ meaningful for tick-scale.
+// This is the metric that matters for "did the model learn anything" in
+// regression — MSE alone can be misleading (a model predicting always-zero
+// gets low MSE on small-magnitude targets while having zero predictive power).
+static inline float WalkForward_ComputeCorrelation(const float *predictions,
+                                                      const float *labels, int count) {
+    if (count < 2) return 0.0f;
+    double mean_p = 0.0, mean_l = 0.0;
+    for (int i = 0; i < count; i++) {
+        mean_p += predictions[i];
+        mean_l += labels[i];
+    }
+    mean_p /= count;
+    mean_l /= count;
+
+    double sum_pl = 0.0, sum_pp = 0.0, sum_ll = 0.0;
+    for (int i = 0; i < count; i++) {
+        double dp = (double)predictions[i] - mean_p;
+        double dl = (double)labels[i] - mean_l;
+        sum_pl += dp * dl;
+        sum_pp += dp * dp;
+        sum_ll += dl * dl;
+    }
+    double denom = sqrt(sum_pp * sum_ll);
+    if (denom <= 0.0) return 0.0f;
+    return (float)(sum_pl / denom);
+}
+
 static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                                             const BacktestResults *data,
                                             int n_splits, int horizon_ticks,
@@ -967,6 +1061,18 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         XGBoosterSetParam(booster, "nthread", "1");
         XGBoosterSetParam(booster, "verbosity", "0");
         XGBoosterSetParam(booster, "seed", "42");
+        // class-balance: per-fold scale_pos_weight matches the suite's
+        // Train Model path (see BacktestPanels.hpp). Train/test splits
+        // can have wildly different class ratios on tick data, so this
+        // is computed per-fold from the actual train_labels we just set.
+        {
+            int n_pos = 0, n_neg = 0;
+            double spw = XGBoost_ComputeScalePosWeight(train_labels, n_train, &n_pos, &n_neg);
+            char spw_s[24]; snprintf(spw_s, sizeof(spw_s), "%.4f", spw);
+            XGBoosterSetParam(booster, "scale_pos_weight", spw_s);
+            fprintf(stderr, "[walkforward] fold %d: class balance +%d / -%d → scale_pos_weight=%s\n",
+                    f + 1, n_pos, n_neg, spw_s);
+        }
 
         // train with early stopping eval on test set
         DMatrixHandle evals[] = { dtrain, dtest };

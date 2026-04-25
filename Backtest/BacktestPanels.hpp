@@ -817,7 +817,14 @@ struct TrainingPanelState {
     char feature_names[MODEL_MAX_FEATURES][32];
     char model_path[256];
     bool model_trained;
-    float train_accuracy;
+    float train_accuracy;            // binary/multiclass: classification accuracy (0..1)
+    // regression-only metrics (valid when label kind == regression)
+    float train_mse;                 // mean squared error
+    float train_correlation;         // Pearson r between predictions and labels
+    float train_label_min;           // observed label min/max for context
+    float train_label_max;
+    float train_label_mean;
+    float train_label_stddev;
     int positive_count, negative_count;
     char status_msg[128];
     // walk-forward validation (Phase 6A — A7 GUI rework)
@@ -1022,32 +1029,90 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         ImGui::TextColored(FoxmlColors::yellow, "running... (%d%%)", run_control->progress_pct);
     }
 
-    // show feature collection status
+    // show feature collection status — display depends on label kind.
+    // (label-type-aware metric invariant — see CLAUDE.md)
     BacktestResults *results = &run_control->results;
     if (results->sample_count > 0) {
-        // count label distribution
-        state->positive_count = 0;
-        state->negative_count = 0;
-        int neutral_count = 0;
-        for (int i = 0; i < results->sample_count; i++) {
-            if (results->labels[i] > 0.5f) state->positive_count++;
-            else if (results->labels[i] < 0.5f) state->negative_count++;
-            else neutral_count++;
+        if (LabelType_IsRegression(state->label_type)) {
+            // regression: continuous labels — show distribution stats, not +/- counts.
+            // labels here are forward returns (or similar continuous targets).
+            double sum = 0.0, sum_sq = 0.0;
+            float lmin = results->labels[0], lmax = results->labels[0];
+            for (int i = 0; i < results->sample_count; i++) {
+                float v = results->labels[i];
+                sum += v; sum_sq += (double)v * v;
+                if (v < lmin) lmin = v;
+                if (v > lmax) lmax = v;
+            }
+            double mean = sum / results->sample_count;
+            double var = (sum_sq / results->sample_count) - mean * mean;
+            double stddev = (var > 0.0) ? sqrt(var) : 0.0;
+            // store on state for later display + post-train context
+            state->train_label_min    = lmin;
+            state->train_label_max    = lmax;
+            state->train_label_mean   = (float)mean;
+            state->train_label_stddev = (float)stddev;
+            ImGui::Text("Samples: %d  |  range: [%.4f, %.4f]  |  mean: %.4f  |  σ: %.4f",
+                         results->sample_count, lmin, lmax, mean, stddev);
+            ImGui::SetItemTooltip("Regression labels — continuous target (e.g. forward %% return).\n"
+                                  "range: min and max observed values\n"
+                                  "mean: average label value (close to 0 for return-style targets)\n"
+                                  "σ: standard deviation — wider σ = more spread, more learnable signal\n\n"
+                                  "If σ ≈ 0, all samples have nearly the same label and the model\n"
+                                  "has nothing to predict. Larger σ relative to typical XGBoost\n"
+                                  "step size (~eta × leaf_value) means the model can fit something.");
+        } else if (LabelType_IsMulticlass(state->label_type)) {
+            // multiclass: per-class histogram. labels are float-encoded class ids (0, 1, 2, ...).
+            int K = LabelType_NumClasses(state->label_type);
+            if (K > 16) K = 16; // safety
+            int counts[16] = {0};
+            for (int i = 0; i < results->sample_count; i++) {
+                int c = (int)(results->labels[i] + 0.5f);
+                if (c >= 0 && c < K) counts[c]++;
+            }
+            // build display string: "Samples: N  |  c0: X (Y%)  |  c1: ..."
+            char buf[256];
+            int off = snprintf(buf, sizeof(buf), "Samples: %d  ", results->sample_count);
+            for (int k = 0; k < K && off < (int)sizeof(buf) - 1; k++) {
+                off += snprintf(buf + off, sizeof(buf) - off, "|  c%d: %d (%.1f%%)  ",
+                                k, counts[k],
+                                results->sample_count > 0
+                                    ? 100.0f * counts[k] / results->sample_count : 0.0f);
+            }
+            ImGui::TextUnformatted(buf);
+            ImGui::SetItemTooltip("Multiclass labels — per-class sample counts.\n"
+                                  "c0..cK-1 = class index (e.g. for Peak/Valley/Stable:\n"
+                                  "  c0=stable, c1=peak, c2=valley)\n\n"
+                                  "Heavy imbalance (one class >90%%) means the model can\n"
+                                  "trivially predict that class for high accuracy. Consider\n"
+                                  "class-rebalanced training (per-sample weights) or different\n"
+                                  "label parameters (barrier widths, lookahead horizon).");
+        } else {
+            // binary: existing +/- ratio with neutral filter
+            state->positive_count = 0;
+            state->negative_count = 0;
+            int neutral_count = 0;
+            for (int i = 0; i < results->sample_count; i++) {
+                if (results->labels[i] > 0.5f) state->positive_count++;
+                else if (results->labels[i] < 0.5f) state->negative_count++;
+                else neutral_count++;
+            }
+            int labeled = state->positive_count + state->negative_count;
+            ImGui::Text("Samples: %d  |  +: %d  |  -: %d  |  neutral: %d  |  Ratio: %.1f%%",
+                         results->sample_count, state->positive_count, state->negative_count,
+                         neutral_count,
+                         labeled > 0
+                             ? (float)state->positive_count / labeled * 100.0f : 0.0f);
+            ImGui::SetItemTooltip("Binary labels.\n"
+                                  "+: labeled as buy signal (price hit TP barrier first)\n"
+                                  "-: labeled as no-buy (price hit SL barrier first)\n"
+                                  "neutral: neither barrier hit within horizon (excluded from training)\n"
+                                  "Ratio: +/(+ + -) — class balance among non-neutral labels\n\n"
+                                  "50%% ratio is ideal for balanced training\n"
+                                  "high neutral %% is normal with barrier labels + tight barriers\n"
+                                  "extreme imbalance (<5%%) → classifier trivially predicts majority,\n"
+                                  "scale_pos_weight is auto-applied to compensate.");
         }
-
-        int labeled = state->positive_count + state->negative_count;
-        ImGui::Text("Samples: %d  |  +: %d  |  -: %d  |  neutral: %d  |  Ratio: %.1f%%",
-                     results->sample_count, state->positive_count, state->negative_count,
-                     neutral_count,
-                     labeled > 0
-                         ? (float)state->positive_count / labeled * 100.0f : 0.0f);
-        ImGui::SetItemTooltip("Samples: total feature vectors collected (one per slow-path cycle)\n"
-                              "+: labeled as buy signal (price hit TP barrier)\n"
-                              "-: labeled as no-buy (price hit SL barrier)\n"
-                              "neutral: neither barrier hit within horizon (excluded from training)\n"
-                              "Ratio: +/(+ + -) — class balance among non-neutral labels\n\n"
-                              "50%% ratio is ideal for balanced training\n"
-                              "high neutral %% is normal with barrier labels + tight barriers");
     }
 
     ImGui::Separator();
@@ -1149,6 +1214,17 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             XGBoosterSetParam(booster, "objective", "reg:squarederror");
         } else {
             XGBoosterSetParam(booster, "objective", "binary:logistic");
+            // class-balance: scale_pos_weight = n_neg/n_pos. Without this,
+            // imbalanced datasets (typical for tight-barrier label sets)
+            // train a model that trivially predicts the majority class.
+            int n_pos = 0, n_neg = 0;
+            double spw = XGBoost_ComputeScalePosWeight(train_labels, n_valid, &n_pos, &n_neg);
+            char spw_s[24]; snprintf(spw_s, sizeof(spw_s), "%.4f", spw);
+            XGBoosterSetParam(booster, "scale_pos_weight", spw_s);
+            fprintf(stderr, "[TRAIN] class balance: +%d / -%d → scale_pos_weight=%s%s\n",
+                    n_pos, n_neg, spw_s,
+                    n_pos == 0 ? "  WARNING: zero positives, model cannot learn" : "");
+            fflush(stderr);
         }
         XGBoosterSetParam(booster, "nthread", "4");
         XGBoosterSetParam(booster, "verbosity", "0");
@@ -1175,42 +1251,32 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // save model
         XGBoosterSaveModel(booster, state->model_path);
 
-        // compute training accuracy (in-sample — just for sanity check)
+        // compute in-sample training metric — kind-appropriate (label-type-aware
+        // metric invariant). For binary/multiclass this is accuracy; for
+        // regression we report MSE + Pearson correlation (sign-agreement was
+        // a poor proxy that didn't distinguish "predicting all-zero" from
+        // "actually learning small but real signal").
         bst_ulong out_len;
         const float *out_result;
         DMatrixHandle dpred;
         XGDMatrixCreateFromMat(train_features, n_valid,
                                MODEL_NUM_FEATURES, NAN, &dpred);
         XGBoosterPredict(booster, dpred, 0, 0, 0, &out_len, &out_result);
-        int correct = 0;
         if (is_multiclass) {
-            // multiclass: out_result is n_valid × num_classes flat array, argmax → class
-            for (int i = 0; i < n_valid; i++) {
-                int best = 0;
-                float best_p = out_result[i * num_classes];
-                for (int k = 1; k < num_classes; k++) {
-                    float p = out_result[i * num_classes + k];
-                    if (p > best_p) { best_p = p; best = k; }
-                }
-                int truth = (int)(train_labels[i] + 0.5f);  // rounded class id
-                if (best == truth) correct++;
-            }
+            state->train_accuracy = WalkForward_ComputeMulticlassAccuracy(
+                out_result, train_labels, n_valid, num_classes) * 100.0f;
+            state->train_mse = 0.0f;
+            state->train_correlation = 0.0f;
         } else if (is_regression) {
-            // regression: count "directionally correct" (sign agreement) as a proxy
-            for (int i = 0; i < n_valid; i++) {
-                int pred_sign = out_result[i] > 0.0f ? 1 : (out_result[i] < 0.0f ? -1 : 0);
-                int truth_sign = train_labels[i] > 0.0f ? 1 : (train_labels[i] < 0.0f ? -1 : 0);
-                if (pred_sign == truth_sign && pred_sign != 0) correct++;
-            }
+            state->train_mse         = WalkForward_ComputeMSE(out_result, train_labels, n_valid);
+            state->train_correlation = WalkForward_ComputeCorrelation(out_result, train_labels, n_valid);
+            state->train_accuracy    = 0.0f;  // not meaningful for regression
         } else {
-            // binary classification (existing logic)
-            for (int i = 0; i < n_valid; i++) {
-                int pred = out_result[i] >= 0.5f ? 1 : 0;
-                int truth = train_labels[i] > 0.5f ? 1 : 0;
-                if (pred == truth) correct++;
-            }
+            state->train_accuracy = WalkForward_ComputeAccuracy(
+                out_result, train_labels, n_valid, 0.5f) * 100.0f;
+            state->train_mse = 0.0f;
+            state->train_correlation = 0.0f;
         }
-        state->train_accuracy = (n_valid > 0) ? (float)correct / n_valid * 100.0f : 0.0f;
         XGDMatrixFree(dpred);
 
         // feature importance (gain-based)
@@ -1225,8 +1291,15 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         free(train_labels);
 
         state->model_trained = true;
-        snprintf(state->status_msg, sizeof(state->status_msg),
-                 "Model saved to %s (accuracy: %.1f%%)", state->model_path, state->train_accuracy);
+        if (is_regression) {
+            snprintf(state->status_msg, sizeof(state->status_msg),
+                     "Model saved to %s (MSE: %.6f, corr: %.4f)",
+                     state->model_path, state->train_mse, state->train_correlation);
+        } else {
+            snprintf(state->status_msg, sizeof(state->status_msg),
+                     "Model saved to %s (accuracy: %.1f%%)",
+                     state->model_path, state->train_accuracy);
+        }
         } // end malloc success block
 #endif
     }
@@ -1243,11 +1316,23 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 #endif
     }
 
-    // training results
+    // training results — kind-appropriate display.
     if (state->model_trained) {
         ImGui::Separator();
         ImGui::TextColored(ImVec4(0.55f, 0.76f, 0.51f, 1.0f), "%s", state->status_msg);
-        ImGui::Text("Train Accuracy: %.1f%% (in-sample)", state->train_accuracy);
+        if (LabelType_IsRegression(state->label_type)) {
+            ImGui::Text("Train MSE: %.6f  |  Pearson r: %.4f  (in-sample)",
+                         state->train_mse, state->train_correlation);
+            ImGui::SetItemTooltip("Pearson r is the load-bearing metric for regression.\n"
+                                  "  |r| < 0.05  → no signal (model didn't learn)\n"
+                                  "  |r| 0.05-0.2 → weak but real signal\n"
+                                  "  |r| > 0.2   → strong signal for tick-scale prediction\n\n"
+                                  "MSE alone can be misleading: a model predicting always-zero\n"
+                                  "gets low MSE on small-magnitude targets while having zero\n"
+                                  "predictive power. Always read r alongside MSE.");
+        } else {
+            ImGui::Text("Train Accuracy: %.1f%% (in-sample)", state->train_accuracy);
+        }
 
         // save run: bundle config + model into models/{run_name}/
         ImGui::Separator();
