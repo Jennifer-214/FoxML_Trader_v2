@@ -1034,6 +1034,11 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // (label-type-aware metric invariant — see CLAUDE.md)
     BacktestResults *results = &run_control->results;
     if (results->sample_count > 0) {
+        // FoxML colors for diagnostics
+        const ImVec4 diag_green  = ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
+        const ImVec4 diag_yellow = ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
+        const ImVec4 diag_red    = ImVec4(0.95f, 0.35f, 0.35f, 1.0f);
+
         if (LabelType_IsRegression(state->label_type)) {
             // regression: continuous labels — show distribution stats, not +/- counts.
             // labels here are forward returns (or similar continuous targets).
@@ -1062,6 +1067,44 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                   "If σ ≈ 0, all samples have nearly the same label and the model\n"
                                   "has nothing to predict. Larger σ relative to typical XGBoost\n"
                                   "step size (~eta × leaf_value) means the model can fit something.");
+
+            // Diagnosis: interpret the distribution for the user
+            const ImVec4 *dcol = &diag_green;
+            const char *dtext = "looks normal — distribution shape is reasonable for continuous returns";
+            const char *dtip  = "Sanity checks all pass: σ is meaningful, range isn't pathological,\n"
+                                "and the asymmetry isn't extreme. Move on to training and read the\n"
+                                "Pearson r in walk-forward.";
+            if (stddev < 0.0001) {
+                dcol = &diag_red;
+                dtext = "σ ≈ 0 — labels are essentially constant, nothing for model to predict";
+                dtip  = "All samples have nearly the same label. The model can only output a\n"
+                        "single constant value, which is useless. Check the label generator —\n"
+                        "this is usually a bug (e.g. all samples computed against the same\n"
+                        "reference price).";
+            } else {
+                float abs_min = lmin < 0 ? -lmin : lmin;
+                float abs_max = lmax < 0 ? -lmax : lmax;
+                float asym = (abs_max > 0.001f && abs_min > 0.001f)
+                             ? (abs_min > abs_max ? abs_min / abs_max : abs_max / abs_min)
+                             : 1.0f;
+                if (asym > 10.0f) {
+                    dcol = &diag_red;
+                    dtext = "range is wildly asymmetric — likely a label-generator bug";
+                    dtip  = "abs(min) and abs(max) differ by >10x. For unbiased forward returns\n"
+                            "on a roughly stationary asset, this should not happen. Most common\n"
+                            "cause: label generator with a reference-price bug, file-boundary\n"
+                            "edge case, or division-by-near-zero. Check label_table[t].fn.";
+                } else if (abs_min > 50.0f || abs_max > 50.0f) {
+                    dcol = &diag_yellow;
+                    dtext = "range has very large values — verify label units (% vs raw)";
+                    dtip  = "Label values exceed ±50. If labels are %% returns, BTC moving 50%%\n"
+                            "in the lookahead window is implausible at tick scale → likely a bug.\n"
+                            "If labels are raw $ deltas, this is fine but XGBoost may want a\n"
+                            "scaled feature.";
+                }
+            }
+            ImGui::TextColored(*dcol, "Diagnosis: %s", dtext);
+            ImGui::SetItemTooltip("%s", dtip);
         } else if (LabelType_IsMulticlass(state->label_type)) {
             // multiclass: per-class histogram. labels are float-encoded class ids (0, 1, 2, ...).
             int K = LabelType_NumClasses(state->label_type);
@@ -1088,6 +1131,49 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                   "trivially predict that class for high accuracy. Consider\n"
                                   "class-rebalanced training (per-sample weights) or different\n"
                                   "label parameters (barrier widths, lookahead horizon).");
+
+            // Diagnosis for multiclass: check imbalance
+            const ImVec4 *mc_col = &diag_green;
+            const char *mc_text = "balanced — classes have similar populations, model can learn each";
+            const char *mc_tip  = "No class dominates >70%%. The per-sample inverse-frequency\n"
+                                  "weights (already applied during training) should let the model\n"
+                                  "differentiate. Read multiclass accuracy + per-class precision\n"
+                                  "carefully.";
+            int max_count = 0;
+            int max_class = 0;
+            int counts_used = 0;
+            for (int k = 0; k < K; k++) {
+                if (counts[k] > max_count) { max_count = counts[k]; max_class = k; }
+                if (counts[k] > 0) counts_used++;
+            }
+            float max_pct = results->sample_count > 0
+                ? 100.0f * max_count / results->sample_count : 0.0f;
+            if (counts_used <= 1) {
+                mc_col = &diag_red;
+                mc_text = "all samples in one class — labels are degenerate";
+                mc_tip  = "Every sample got the same class. Likely a label-generator bug or\n"
+                          "extreme barrier widths / horizons that prevent any other class\n"
+                          "from triggering. Try different label parameters or check the\n"
+                          "label function.";
+            } else if (max_pct > 95.0f) {
+                mc_col = &diag_red;
+                mc_text = "extreme imbalance — model will trivially predict majority class";
+                mc_tip  = "One class is >95%% of samples. Per-sample weights help but the\n"
+                          "model has very few minority-class samples to actually learn from.\n"
+                          "Consider tighter barrier widths (more decisive labels), longer\n"
+                          "lookahead, or a different label scheme entirely (try Forward P&L\n"
+                          "regression — sidesteps class imbalance).";
+            } else if (max_pct > 70.0f) {
+                mc_col = &diag_yellow;
+                mc_text = "moderate imbalance — minority classes underrepresented";
+                mc_tip  = "Largest class is >70%%. Per-sample weights compensate in the loss,\n"
+                          "but if minority-class signal is what you want to capture, fewer\n"
+                          "training examples = noisier learning. Watch the per-class accuracy\n"
+                          "after training, not just overall.";
+            }
+            ImGui::TextColored(*mc_col, "Diagnosis: c%d dominates at %.1f%% — %s",
+                               max_class, max_pct, mc_text);
+            ImGui::SetItemTooltip("%s", mc_tip);
         } else {
             // binary: existing +/- ratio with neutral filter
             state->positive_count = 0;
@@ -1113,6 +1199,44 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                   "high neutral %% is normal with barrier labels + tight barriers\n"
                                   "extreme imbalance (<5%%) → classifier trivially predicts majority,\n"
                                   "scale_pos_weight is auto-applied to compensate.");
+
+            // Diagnosis for binary: check ratio + neutral fraction
+            const ImVec4 *bn_col = &diag_green;
+            const char *bn_text = "well-balanced for training — model has both classes to learn from";
+            const char *bn_tip  = "Ratio is in [30%%, 70%%] and neutral fraction is reasonable.\n"
+                                  "Ready to train. After training, read walk-forward val accuracy.";
+            float ratio = labeled > 0 ? 100.0f * state->positive_count / labeled : 0.0f;
+            float neutral_pct = results->sample_count > 0
+                ? 100.0f * neutral_count / results->sample_count : 0.0f;
+            if (labeled == 0) {
+                bn_col = &diag_red;
+                bn_text = "all samples are neutral — no class labels to train on";
+                bn_tip  = "100%% neutral means neither TP nor SL was hit within the horizon\n"
+                          "for any sample. Either widen the horizon (Lookahead Ticks), tighten\n"
+                          "the barriers (TP%% / SL%%), or check the label generator.";
+            } else if (ratio < 5.0f || ratio > 95.0f) {
+                bn_col = &diag_red;
+                bn_text = "extreme imbalance — scale_pos_weight will compensate but minority class is sparse";
+                bn_tip  = "+/(+ + -) is outside [5%%, 95%%]. The auto-applied scale_pos_weight\n"
+                          "rebalances the loss, but the minority class still has very few\n"
+                          "training examples. Consider symmetric barriers (TP=SL) or a\n"
+                          "different label.";
+            } else if (ratio < 20.0f || ratio > 80.0f) {
+                bn_col = &diag_yellow;
+                bn_text = "skewed — scale_pos_weight active, watch val accuracy";
+                bn_tip  = "Ratio outside [20%%, 80%%]. scale_pos_weight is doing real work\n"
+                          "here. Walk-forward val_accuracy is more meaningful than raw\n"
+                          "training accuracy in this regime.";
+            } else if (neutral_pct > 95.0f) {
+                bn_col = &diag_yellow;
+                bn_text = "very high neutral fraction — most samples excluded from training";
+                bn_tip  = "Less than 5%% of samples got a definitive label. The model only\n"
+                          "trains on the resolved minority. Ratio looks OK but n_valid is\n"
+                          "small. Consider longer horizon or wider barriers if walk-forward\n"
+                          "shows high variance across folds.";
+            }
+            ImGui::TextColored(*bn_col, "Diagnosis: %s", bn_text);
+            ImGui::SetItemTooltip("%s", bn_tip);
         }
     }
 
@@ -1607,6 +1731,102 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                   "  train_corr - val_corr >= 0.20\n\n"
                                   "try: fewer estimators, lower max depth, more data,\n"
                                   "different label parameters (barriers, lookahead)");
+        }
+
+        // Walk-Forward diagnosis — interpret the result for the user.
+        // This is the load-bearing line: it tells you what just happened
+        // in plain language so you don't have to mentally translate metrics.
+        {
+            const ImVec4 wf_green  = ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
+            const ImVec4 wf_yellow = ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
+            const ImVec4 wf_red    = ImVec4(0.95f, 0.35f, 0.35f, 1.0f);
+            const ImVec4 *wd_col = &wf_yellow;
+            const char *wd_text = "result unclear";
+            const char *wd_tip  = "Couldn't classify the result. Check per-fold table for details.";
+
+            if (wf_is_regression) {
+                float val_r = wf->mean_val_correlation;
+                float train_r = wf->mean_train_correlation;
+                float abs_val_r = val_r < 0 ? -val_r : val_r;
+                float abs_train_r = train_r < 0 ? -train_r : train_r;
+                if (wf->overfit_count > 0 && abs_val_r < 0.05f) {
+                    wd_col = &wf_red;
+                    wd_text = "memorization without generalization — model learned training noise";
+                    wd_tip  = "Train correlation is high (the overfit detector flagged it),\n"
+                              "but val correlation is ~0. Model memorized training samples\n"
+                              "without learning anything that transfers. Reduce capacity:\n"
+                              "lower max_depth (try 2-3), fewer estimators, or more data.";
+                } else if (abs_val_r < 0.05f && abs_train_r < 0.05f) {
+                    wd_col = &wf_red;
+                    wd_text = "no signal — features don't predict returns at this horizon";
+                    wd_tip  = "Both train and val correlations are near zero. The model\n"
+                              "couldn't learn anything from the features even on training data.\n"
+                              "This means: features genuinely lack predictive content for this\n"
+                              "label, OR the labels are degenerate (check sample-panel\n"
+                              "Diagnosis for label sanity), OR the horizon is wrong (try\n"
+                              "shorter or longer Forward Ticks).";
+                } else if (abs_val_r >= 0.20f) {
+                    wd_col = &wf_green;
+                    wd_text = "STRONG signal — verify no leakage before trusting";
+                    wd_tip  = "Mean val Pearson r >= 0.20 is unusually strong for tick-scale\n"
+                              "BTC prediction. Before celebrating: check that purge gap is\n"
+                              "respected (no train/test temporal overlap), that labels don't\n"
+                              "leak future info into features, and that the fingerprint matches\n"
+                              "expected. If it survives those checks, this is real edge.";
+                } else if (abs_val_r >= 0.05f) {
+                    wd_col = &wf_green;
+                    wd_text = "weak but real signal — worth optimizing";
+                    wd_tip  = "Mean val Pearson r in [0.05, 0.20]. Real edge but small.\n"
+                              "Hyperparameter sweep can extract more (longer training,\n"
+                              "different max_depth, different label horizons). Compare\n"
+                              "across folds for stability — high variance = brittle.";
+                } else {
+                    wd_col = &wf_yellow;
+                    wd_text = "marginal — barely above noise";
+                    wd_tip  = "abs(val r) is between 0.0 and 0.05. Could be real weak signal\n"
+                              "or just noise. Run again with different folds or longer training\n"
+                              "to see if it's stable.";
+                }
+            } else {
+                // binary or multiclass — both report accuracy
+                float val_acc = wf->mean_val_accuracy;
+                float train_acc = wf->mean_train_accuracy;
+                if (wf->overfit_count >= wf->valid_folds && wf->valid_folds > 0) {
+                    wd_col = &wf_red;
+                    wd_text = "every fold flagged as memorization — model trivially fits training";
+                    wd_tip  = "All valid folds were flagged. Most common cause: extreme class\n"
+                              "imbalance where 'predict majority' gets 99%+ training accuracy\n"
+                              "but val accuracy converges to the prior rate — looks high\n"
+                              "but means nothing. Check sample panel ratio. Or reduce\n"
+                              "model capacity (max_depth 2-3).";
+                } else if (val_acc < 0.52f) {
+                    wd_col = &wf_red;
+                    wd_text = "no edge — val accuracy at or below random chance";
+                    wd_tip  = "Mean val accuracy < 52%%. With binary fee-bearing trades,\n"
+                              "you typically need >55%% to overcome fees + slippage. The\n"
+                              "features aren't separating the classes at this label/horizon.\n"
+                              "Try a different label (Forward P&L regression sidesteps\n"
+                              "class-balance issues), or tighter barriers, or different\n"
+                              "lookahead.";
+                } else if (val_acc >= 0.55f) {
+                    wd_col = &wf_green;
+                    wd_text = "real edge — val accuracy above the fee-overhead threshold";
+                    wd_tip  = "Mean val accuracy >= 55%%. After fees of ~0.1%% × 2 sides,\n"
+                              "this regime can plausibly produce positive expectancy. Verify\n"
+                              "fold-to-fold stability (low std), no leakage, and that the\n"
+                              "training distribution matches the deployment regime.";
+                } else {
+                    wd_col = &wf_yellow;
+                    wd_text = "marginal — val accuracy between 52-55%%, may not survive fees";
+                    wd_tip  = "Mean val accuracy is in the 52-55%% band. This is real signal\n"
+                              "but might not overcome fees + slippage in live trading. Worth\n"
+                              "optimizing if you can also reduce trading costs (maker rebates,\n"
+                              "longer holding period to amortize fees).";
+                }
+                (void)train_acc; // available for future train/val gap diagnostics
+            }
+            ImGui::TextColored(*wd_col, "Diagnosis: %s", wd_text);
+            ImGui::SetItemTooltip("%s", wd_tip);
         }
 
         // fingerprint
