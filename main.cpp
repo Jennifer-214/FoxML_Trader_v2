@@ -20,6 +20,7 @@
 //======================================================================================================
 #include "DataStream/BinanceCrypto.hpp"
 #include "DataStream/BinanceOrderAPI.hpp"
+#include "DataStream/BinanceDepth.hpp"
 #include "DataStream/EngineTUI.hpp"
 #include "CoreFrameworks/EngineSharded.hpp"
 #include "CoreFrameworks/PortfolioController.hpp"
@@ -346,6 +347,36 @@ int main(int argc, char *argv[]) {
                 tui.tsc_per_ns, tui.tsc_per_ns);
     }
 #endif
+
+    //==================================================================================================
+    // depth feed (Phase 8a c3) — activate the @depth5@100ms WS thread when
+    // depth_enabled=1. The thread populates DepthSharedState<F>; the slow path
+    // pulls book_imbalance from there each tick (Phase 8a c4). When disabled,
+    // depth_tid stays 0 and ctrl.book_imbalance remains at its _Init value (0)
+    // — the existing book-imbalance gate is dead unless min_book_imbalance>0.
+    //
+    // Init failure is non-fatal: log + continue without depth. Trading still
+    // works, the book gate just stays inert (same as depth_enabled=0).
+    //==================================================================================================
+    DepthSharedState<FP> depth_shared = {};
+    pthread_t depth_tid = 0;
+    if (ccfg.depth_enabled) {
+        const char *depth_host;
+        int depth_port;
+        if (bcfg.use_testnet)         { depth_host = "testnet.binance.vision";   depth_port = 443; }
+        else if (bcfg.use_binance_us) { depth_host = "stream.binance.us";        depth_port = 9443; }
+        else                          { depth_host = "data-stream.binance.vision"; depth_port = 443; }
+
+        if (DepthStream_Init<FP>(&depth_shared, bcfg.symbol,
+                                  depth_host, depth_port,
+                                  /*reconnect_delay=*/2) == 0) {
+            pthread_create(&depth_tid, NULL, depth_thread_fn<FP>, &depth_shared);
+            fprintf(stderr, "[ENGINE] depth feed active (%s:%d %s@depth5@100ms)\n",
+                    depth_host, depth_port, bcfg.symbol);
+        } else {
+            fprintf(stderr, "[ENGINE] depth feed init failed — continuing without depth\n");
+        }
+    }
 
     //==================================================================================================
     // main loop
@@ -1009,6 +1040,14 @@ int main(int argc, char *argv[]) {
 #else
     TUI_Cleanup(&tui);
 #endif
+
+    // depth feed shutdown (Phase 8a c3) — depth_thread_fn polls quit_requested
+    // at the top of its loop with ACQUIRE; the next 200ms poll cycle picks up
+    // the signal. depth_tid==0 when depth_enabled was off or init failed.
+    if (depth_tid != 0) {
+        __atomic_store_n(&depth_shared.quit_requested, 1, __ATOMIC_RELEASE);
+        pthread_join(depth_tid, NULL);
+    }
     TradeLogBuffer_Drain(&ctrl.trade_buf, &log);
     TradeLog_Close(&log);
     MetricsLog_Close(&metrics);
