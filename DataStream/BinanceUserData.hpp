@@ -339,6 +339,29 @@ static inline int ud_parse_execution_report(const char* json, int len,
     double fill_qty   = binance_json_extract_double(json, "l");
     *trade_id_out     = (uint64_t)binance_json_extract_double(json, "t");
 
+    // Phase 8 — maker/taker + order status + commission.
+    // "m": Binance encodes booleans as bare true / false in JSON. The
+    // existing extract_str returns the literal text — we check the first char.
+    // Defensive default: missing "m" → is_maker=0 (taker, slightly overstates
+    // fees, conservative) per master plan.
+    char m_str[8] = {};
+    binance_json_extract_str(json, "m", m_str, sizeof(m_str));
+    int is_maker = (m_str[0] == 't' || m_str[0] == 'T') ? 1 : 0;
+
+    // "X": order status. "FILLED" → terminal; anything else (including
+    // "PARTIALLY_FILLED") is non-terminal. Defensive default: missing "X"
+    // → order_complete=0 (assume partial — keeps order alive in OMS,
+    // worst case we wait for next event to confirm).
+    char order_status[24] = {};
+    binance_json_extract_str(json, "X", order_status, sizeof(order_status));
+    int order_complete = (strcmp(order_status, "FILLED") == 0) ? 1 : 0;
+
+    // Commission: "n" amount + "N" asset. Recorded for audit; not the
+    // authoritative fee number (Fee_Compute computes from cfg rates).
+    double commission_amt = binance_json_extract_double(json, "n");
+    char comm_asset[8] = {};
+    binance_json_extract_str(json, "N", comm_asset, sizeof(comm_asset));
+
     // build the Command
     memset(cmd_out, 0, sizeof(*cmd_out));
     cmd_out->type     = CMD_WS_FILL;
@@ -349,6 +372,12 @@ static inline int ud_parse_execution_report(const char* json, int len,
     cmd_out->result.error_code     = 0;
     strncpy(cmd_out->result.exchange_id, exchange_oid,
             sizeof(cmd_out->result.exchange_id) - 1);
+    // Phase 8 fields
+    cmd_out->result.is_maker       = (uint8_t)is_maker;
+    cmd_out->result.order_complete = (uint8_t)order_complete;
+    cmd_out->result.commission     = commission_amt;
+    strncpy(cmd_out->result.commission_asset, comm_asset,
+            sizeof(cmd_out->result.commission_asset) - 1);
 
     return 1;
 }
