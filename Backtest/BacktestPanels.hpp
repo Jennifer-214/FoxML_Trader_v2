@@ -189,13 +189,54 @@ static inline void GUI_Panel_DataBrowser(DataPanelState *state) {
         return;
     }
 
-    // select all / none
+    // basic select / clear
     if (ImGui::Button("Select All")) {
         for (int i = 0; i < state->file_count; i++) state->selected[i] = true;
     }
     ImGui::SameLine();
     if (ImGui::Button("Select None")) {
         for (int i = 0; i < state->file_count; i++) state->selected[i] = false;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Invert")) {
+        for (int i = 0; i < state->file_count; i++) state->selected[i] = !state->selected[i];
+    }
+
+    // quick presets — files are sorted alphabetically (YYYY-MM-DD), so
+    // "Last N" = N most recent days. fast iteration patterns:
+    //   Last 30   = single month for fast smoke test
+    //   Last 90   = quarter, typical first training run
+    //   Last 365  = full year for production training
+    auto select_last_n = [&](int n) {
+        for (int i = 0; i < state->file_count; i++) state->selected[i] = false;
+        int start = state->file_count - n;
+        if (start < 0) start = 0;
+        for (int i = start; i < state->file_count; i++) state->selected[i] = true;
+    };
+    auto select_first_n = [&](int n) {
+        for (int i = 0; i < state->file_count; i++) state->selected[i] = false;
+        int end = n < state->file_count ? n : state->file_count;
+        for (int i = 0; i < end; i++) state->selected[i] = true;
+    };
+    if (ImGui::Button("Last 30"))   select_last_n(30);
+    ImGui::SameLine(); if (ImGui::Button("Last 90"))   select_last_n(90);
+    ImGui::SameLine(); if (ImGui::Button("Last 180"))  select_last_n(180);
+    ImGui::SameLine(); if (ImGui::Button("Last 365"))  select_last_n(365);
+    ImGui::SameLine(); if (ImGui::Button("Last 730"))  select_last_n(730);
+
+    // custom range — input N, Apply selects last N or first N
+    static int n_custom = 90;
+    static bool from_end = true;
+    ImGui::SetNextItemWidth(80);
+    ImGui::InputInt("##n_custom", &n_custom, 0, 0);
+    if (n_custom < 1) n_custom = 1;
+    if (n_custom > state->file_count) n_custom = state->file_count;
+    ImGui::SameLine();
+    ImGui::Checkbox("from end (newest)", &from_end);
+    ImGui::SameLine();
+    if (ImGui::Button("Apply")) {
+        if (from_end) select_last_n(n_custom);
+        else          select_first_n(n_custom);
     }
 
     // count selected
