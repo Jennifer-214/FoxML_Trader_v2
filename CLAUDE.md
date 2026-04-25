@@ -385,6 +385,22 @@ When comparing FPN values, use `FPN_LessThan`, `FPN_GreaterThanOrEqual`, etc. �
 ### Halt Flag Invariant
 Every code path that suppresses buying MUST set `ctrl->buying_halted = 1` and zero `ctrl->gate_offset`. Ad-hoc zeroing of `buy_conds` alone is insufficient — hot-path gate tracking will restore it from `gate_offset` on the next tick.
 
+### Operational Alerting (Phase 8b)
+
+When adding a new alertable event:
+
+1. Add a new `NK_*` kind to the `NotifyKind` enum in `Notify.hpp`. **Append-only** — never reorder existing values; cooldown indexes are stable per-kind.
+2. Call `Notify_Send(g_notify, level, kind, subject, body)` alongside the existing `fprintf` at the event site. Keep the `fprintf` (file logs are the forensic record).
+3. Choose the level:
+   - `NOTIFY_INFO` — status updates, session start
+   - `NOTIFY_WARN` — recoverable issues (reconnect, transient errors)
+   - `NOTIFY_ALERT` — user attention required (kill switch trip, orphan)
+   - `NOTIFY_CRITICAL` — engine cannot continue safely
+4. Use the SAME `NK_*` kind for the same logical event everywhere — cooldown is per-kind, so a disconnect storm collapses to one alert per cooldown window.
+5. **NEVER call `Notify_Send` from the hot path.** Slow path / dedicated threads only. The Notify worker thread runs the backend; callers enqueue and return immediately.
+6. Subject ≤ 128 chars, body ≤ 512 chars. Both are shell-escaped (internal `'` → `'\''`) when the Command backend is in use, but `"` and `\` are NOT JSON-escaped — keep alert text plain ASCII to be safe across Discord/Slack/dunst/email backends.
+7. Guard call sites with `if (g_notify)` — backtest and tests leave it null, all calls become no-ops.
+
 ### Regime Adjustment Checklist
 When adding a new regime transition case in `Regime_AdjustPositions`:
 1. Guard stddev != 0 at function entry
