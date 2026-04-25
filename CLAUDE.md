@@ -378,12 +378,24 @@ Any code path that touches balance, P&L, fees, equity, or position pricing MUST 
 - `peak_equity`, `session_start_equity`, `max_drawdown` (PortfolioController struct) — double fields used by kill switch
 - Kill switch equity/drawdown computation (PortfolioController.hpp ~line 1103-1135) — all double arithmetic
 - Orphan recovery proceeds (main.cpp ~line 766) — `fp * fq` in double before FPN conversion
+- **Confidence loop gate decision** (PortfolioController.hpp:~1618, added 2026-04-25 Phase 6prep doc): `effective_thr = base * (scale - conf)` with `base`, `scale`, `conf` all in `double`. The `ConfidenceScorer` (`ML_Headers/ConfidenceScore.hpp`) uses double throughout (IC, RMSE, freshness all double-valued metrics). Pre-existing — Phase 6prep just made `scale` cfg-tunable, didn't change the type. Fix would require turning ConfidenceScorer math into FPN throughout, out of scope.
 
 ### FPN Comparison Completeness
 When comparing FPN values, use `FPN_LessThan`, `FPN_GreaterThanOrEqual`, etc. — never partial word comparisons. The inline optimization in `PositionExitGate` (Portfolio.hpp:226-229) only compares MSW and LSW, skipping middle words — this is a known bug that can miss exits near price boundaries.
 
 ### Halt Flag Invariant
 Every code path that suppresses buying MUST set `ctrl->buying_halted = 1` and zero `ctrl->gate_offset`. Ad-hoc zeroing of `buy_conds` alone is insufficient — hot-path gate tracking will restore it from `gate_offset` on the next tick.
+
+### Confidence Loop Invariant (Phase 6prep)
+
+When `confidence_enabled=1` AND `strategy_id == STRATEGY_ML`:
+
+1. **Every fill MUST push `(prediction, realized_return)` into `RollingIC` + `RollingRMSE`** via `ConfidenceScorer_Update`. Already wired in `PortfolioController_HandleFill` at the post-exit accounting block. Don't add second update sites — IC contamination = wrong confidence.
+2. **Confidence MUST be computed inside the slow-path gate block at `PortfolioController.hpp:~1614`**, before the buy-gate decision. Hot path may not call `ConfidenceScorer_Compute` (does Spearman ranking — O(W²) on rank computation; fine on slow path, not on every tick).
+3. **Effective-threshold formula:** `effective_thr = base * (scale - conf)`, clamped to `≤ 1.0`. `scale` is `cfg.confidence_threshold_scale` (default 2.0). `base` is `cfg.ml_buy_threshold`. Modifying the formula = update the test in `controller_test.cpp` Group "Phase 6prep: Gate effective threshold" in the same commit.
+4. **Safe-by-default behavior on noise-floor models:** when IC is near zero (no real signal), `abs_ic` clamps to `CONFIDENCE_MIN_IC_DEFAULT = 0.01`, freshness/stability stay near 1.0, so conf ≈ 0.01. Effective threshold ≈ `2.0 * base` — gate effectively never fires. **This is desirable** — ML strategy stays armed-but-inactive until real signal materializes.
+5. **Confidence is read on slow path, displayed via `last_confidence`.** `last_confidence` is updated on every gate decision; TUI/GUI read the snapshot field. **NEVER read `last_confidence` from the hot path.**
+6. **Tunables (Phase 6prep):** `cfg.confidence_window` (default 32, max 64), `cfg.confidence_freshness_tau` (default 300s = 5min), `cfg.confidence_threshold_scale` (default 2.0). All preserve pre-Phase-6prep hardcoded behavior at default values. Tuning these requires an actual signal to A/B against — meaningless on noise-floor models.
 
 ### Operational Alerting (Phase 8b)
 
