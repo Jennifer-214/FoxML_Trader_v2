@@ -263,7 +263,8 @@ hot-reloadable with `R` in the GUI. per-core strategy and risk can be changed at
 ## tests
 
 ```bash
-./build/controller_test                                              # 279 assertions
+./build/controller_test                                              # 351 assertions
+./build/depth_recorder_test                                          # 17 assertions (Phase 8a — depth recorder)
 ./experiments/per_core_sharding/build/test_oms                       # 9 OMS state machine tests
 ./experiments/per_core_sharding/build/test_oms_concurrent            # 4 TSan-validated stress tests
 ./experiments/per_core_sharding/build/test_order_event_log           # 8 event log fold tests

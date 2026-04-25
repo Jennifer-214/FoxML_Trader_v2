@@ -1,8 +1,18 @@
 #==============================================================================
-# ENGINE CONFIG
+# ENGINE CONFIG (template — STARTING-DEFAULTS REFERENCE)
 #==============================================================================
 # hot-reload: press 'r' in the TUI to apply changes without restarting
 # (except symbol, testnet, warmup_ticks — those need a restart)
+#
+# NOTE (2026-04-25): this template is a starting-defaults reference and may
+# lag behind engine.cfg. Phase 8 added: fee_rate_maker / fee_rate_taker.
+# Phase 8a: depth_enabled + record_depth. Phase 8b: notify_enabled +
+# notify_backend + notify_command + notify_cooldown_secs. Phase 6prep:
+# confidence_window + confidence_freshness_tau + confidence_threshold_scale.
+# Phase 7prep: held_out_fraction + gap_acceptable_threshold. The live
+# engine.cfg has these documented; copy from there if you need a current
+# template. Defaults in code are the source of truth — see
+# `ControllerConfig_Default` in `CoreFrameworks/ControllerConfig.hpp`.
 #==============================================================================
 
 # data source
