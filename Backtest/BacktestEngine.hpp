@@ -305,6 +305,48 @@ static inline double XGBoost_ComputeScalePosWeight(const float *labels, int n,
     return (double)n_neg / (double)n_pos;
 }
 
+// Multiclass: scale_pos_weight is binary-only. For multiclass softmax we use
+// per-sample weights via XGDMatrixSetFloatInfo(d, "weight", ...). Inverse-
+// frequency formula:
+//
+//   weight[i] = total / (K * count[label[i]])
+//
+// Each class contributes equally to the loss regardless of frequency. A class
+// with 95% of samples gets weight ~0.21 per sample; a class with 1% gets
+// weight ~33.0 per sample. Without this, multiclass with skewed distribution
+// (e.g. PEAK_VALLEY_STABLE typically ~95% stable on tick-scale BTC) trains
+// a model that trivially predicts the majority class for high accuracy but
+// zero predictive value for the minority classes — same failure mode as
+// binary class imbalance with no scale_pos_weight.
+//
+// out_weights buffer must be `count` floats. out_counts (optional, [num_classes])
+// receives per-class sample counts so caller can log them.
+static inline void XGBoost_ComputeMulticlassWeights(const float *labels, int count,
+                                                      int num_classes, float *out_weights,
+                                                      int *out_counts = nullptr) {
+    if (num_classes < 2 || count <= 0) {
+        for (int i = 0; i < count; i++) out_weights[i] = 1.0f;
+        return;
+    }
+    int K = num_classes > 16 ? 16 : num_classes;
+    int counts[16] = {0};
+    for (int i = 0; i < count; i++) {
+        int c = (int)(labels[i] + 0.5f);
+        if (c >= 0 && c < K) counts[c]++;
+    }
+    for (int i = 0; i < count; i++) {
+        int c = (int)(labels[i] + 0.5f);
+        if (c >= 0 && c < K && counts[c] > 0) {
+            out_weights[i] = (float)count / ((float)K * (float)counts[c]);
+        } else {
+            out_weights[i] = 1.0f;
+        }
+    }
+    if (out_counts) {
+        for (int k = 0; k < K; k++) out_counts[k] = counts[k];
+    }
+}
+
 //======================================================================================================
 // [STATS COMPUTE]
 //======================================================================================================
@@ -1108,7 +1150,10 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         XGBoosterSetParam(booster, "nthread", "1");
         XGBoosterSetParam(booster, "verbosity", "0");
         XGBoosterSetParam(booster, "seed", "42");
-        // class balance (binary only — see comment above on objective selection)
+        // class balance — kind-specific.
+        // Binary: scale_pos_weight = n_neg/n_pos (single param).
+        // Multiclass: per-sample inverse-frequency weights via DMatrix info.
+        // Regression: no class-imbalance concept.
         if (!is_regression && !is_multiclass) {
             int n_pos = 0, n_neg = 0;
             double spw = XGBoost_ComputeScalePosWeight(train_labels, n_train, &n_pos, &n_neg);
@@ -1116,6 +1161,21 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             XGBoosterSetParam(booster, "scale_pos_weight", spw_s);
             fprintf(stderr, "[walkforward] fold %d: class balance +%d / -%d → scale_pos_weight=%s\n",
                     f + 1, n_pos, n_neg, spw_s);
+        } else if (is_multiclass) {
+            float *mc_weights = (float *)malloc(n_train * sizeof(float));
+            int   mc_counts[16] = {0};
+            if (mc_weights) {
+                XGBoost_ComputeMulticlassWeights(train_labels, n_train, num_classes_lt,
+                                                  mc_weights, mc_counts);
+                XGDMatrixSetFloatInfo(dtrain, "weight", mc_weights, n_train);
+                fprintf(stderr, "[walkforward] fold %d: multiclass class counts:", f + 1);
+                for (int k = 0; k < num_classes_lt && k < 16; k++) {
+                    fprintf(stderr, " c%d=%d (%.1f%%)", k, mc_counts[k],
+                            n_train > 0 ? 100.0f * mc_counts[k] / n_train : 0.0f);
+                }
+                fprintf(stderr, " — per-sample weights applied\n");
+                free(mc_weights);
+            }
         }
 
         // train (no early stopping yet — full n_rounds always)

@@ -1211,6 +1211,24 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             XGBoosterSetParam(booster, "objective", "multi:softprob");
             char nc_s[8]; snprintf(nc_s, 8, "%d", num_classes);
             XGBoosterSetParam(booster, "num_class", nc_s);
+            // class-balance via per-sample weights (scale_pos_weight is binary-only).
+            // Without this, multiclass with skewed distribution trains a majority
+            // predictor — same failure mode as binary imbalance.
+            float *mc_weights = (float *)malloc(n_valid * sizeof(float));
+            int   mc_counts[16] = {0};
+            if (mc_weights) {
+                XGBoost_ComputeMulticlassWeights(train_labels, n_valid, num_classes,
+                                                  mc_weights, mc_counts);
+                XGDMatrixSetFloatInfo(dtrain, "weight", mc_weights, n_valid);
+                fprintf(stderr, "[TRAIN] multiclass class counts:");
+                for (int k = 0; k < num_classes && k < 16; k++) {
+                    fprintf(stderr, " c%d=%d (%.1f%%)", k, mc_counts[k],
+                            n_valid > 0 ? 100.0f * mc_counts[k] / n_valid : 0.0f);
+                }
+                fprintf(stderr, " — per-sample weights applied\n");
+                fflush(stderr);
+                free(mc_weights);
+            }
         } else if (is_regression) {
             XGBoosterSetParam(booster, "objective", "reg:squarederror");
         } else {
