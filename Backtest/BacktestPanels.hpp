@@ -95,6 +95,42 @@ static inline void DataPanel_Scan(DataPanelState *state) {
 }
 
 //======================================================================================================
+// [SAMPLES SNAPSHOT — thread-safe display struct]
+//======================================================================================================
+// Worker thread writes to this ONCE at end of Backtest_Run (after the label
+// post-pass populates results->labels[]). GUI thread reads from this when
+// rendering — never iterates results->labels[] directly, eliminating the
+// realloc-race that crashed the suite on 2026-04-25.
+//
+// Thread safety: worker writes all fields, then sets running=0 last.
+// GUI reads only when running==0. The volatile running flag prevents
+// compiler reordering of the loads/stores around it on x86.
+//
+// All three label-kind branches (binary/multiclass/regression) populate
+// the appropriate subset; the rest stay zero. label_kind tells the GUI
+// which subset to display.
+struct SamplesSnapshot {
+    int sample_count;        // 0 = no completed run yet
+    int label_type;          // LABEL_* id used during the run
+    int label_kind;          // 0 = binary, 1 = regression, 2 = multiclass
+    int num_classes;         // ≥2 for multiclass; 0 otherwise
+
+    // binary
+    int pos_count;
+    int neg_count;
+    int neutral_count;
+
+    // multiclass — class_counts[c] = number of samples in class c
+    int class_counts[16];
+
+    // regression
+    float lmin;
+    float lmax;
+    float lmean;
+    float lstddev;
+};
+
+//======================================================================================================
 // [RUN CONTROL STATE]
 //======================================================================================================
 struct RunControlState {
@@ -107,6 +143,7 @@ struct RunControlState {
     BacktestResults results;
     CandleAccumulator *candle_acc;
     TUISnapshot *snapshot;       // populated by worker after run completes
+    SamplesSnapshot stats_snapshot; // distribution stats — see comment above struct
     char config_path[256];
 };
 
@@ -114,6 +151,57 @@ static inline void RunControl_Init(RunControlState *state) {
     memset(state, 0, sizeof(*state));
     strncpy(state->config_path, "backtest.cfg", sizeof(state->config_path) - 1);
     BacktestResults_Init(&state->results);
+}
+
+// Compute distribution stats from results->labels[] into a SamplesSnapshot.
+// MUST only be called when no other thread is writing to results->labels —
+// i.e. by the worker thread AFTER Backtest_Run has populated labels in the
+// post-pass, BEFORE running=0 is set. The GUI thread reads the snapshot
+// only when running==0, giving a safe happens-before relationship.
+static inline void SamplesSnapshot_Compute(SamplesSnapshot *snap,
+                                             const BacktestResults *r,
+                                             int label_type) {
+    memset(snap, 0, sizeof(*snap));
+    snap->label_type = label_type;
+    int K = LabelType_NumClasses(label_type);
+    snap->num_classes = K;
+    snap->label_kind  = (K == 0) ? 0 : (K == 1 ? 1 : 2);
+
+    if (r->sample_count <= 0 || !r->labels) return;
+    snap->sample_count = r->sample_count;
+
+    if (snap->label_kind == 1) {
+        // regression: range / mean / σ
+        float lmin = r->labels[0], lmax = r->labels[0];
+        double sum = 0.0, sum_sq = 0.0;
+        for (int i = 0; i < r->sample_count; i++) {
+            float v = r->labels[i];
+            sum += v; sum_sq += (double)v * v;
+            if (v < lmin) lmin = v;
+            if (v > lmax) lmax = v;
+        }
+        double mean = sum / r->sample_count;
+        double var  = (sum_sq / r->sample_count) - mean * mean;
+        snap->lmin    = lmin;
+        snap->lmax    = lmax;
+        snap->lmean   = (float)mean;
+        snap->lstddev = (var > 0.0) ? (float)sqrt(var) : 0.0f;
+    } else if (snap->label_kind == 2) {
+        // multiclass: per-class histogram
+        int Kc = K > 16 ? 16 : K;
+        for (int i = 0; i < r->sample_count; i++) {
+            int c = (int)(r->labels[i] + 0.5f);
+            if (c >= 0 && c < Kc) snap->class_counts[c]++;
+        }
+    } else {
+        // binary: +/-/neutral
+        for (int i = 0; i < r->sample_count; i++) {
+            float v = r->labels[i];
+            if (v > 0.5f) snap->pos_count++;
+            else if (v < 0.5f) snap->neg_count++;
+            else snap->neutral_count++;
+        }
+    }
 }
 
 // worker thread function
@@ -129,6 +217,12 @@ static inline void *backtest_worker_fn(void *arg) {
     Backtest_Run(&state->results, &state->run_config,
                  &state->progress_pct, &state->cancel_flag,
                  state->candle_acc, state->snapshot);
+
+    // Compute display snapshot after labels are populated by Backtest_Run's
+    // post-pass. Done BEFORE running=0 so the GUI never sees a stale
+    // snapshot when it next reads (running=0 is the happens-before edge).
+    SamplesSnapshot_Compute(&state->stats_snapshot, &state->results,
+                              state->run_config.label_type);
 
     state->complete = 1;
     state->running = 0;
@@ -158,6 +252,7 @@ static inline void RunControl_Start(RunControlState *state, DataPanelState *data
     state->progress_pct = 0;
     state->cancel_flag = 0;
     state->complete = 0;
+    memset(&state->stats_snapshot, 0, sizeof(state->stats_snapshot));
     state->running = 1;
 
     // reset candle accumulator if present
@@ -1000,6 +1095,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         run_control->progress_pct = 0;
         run_control->cancel_flag = 0;
         run_control->complete = 0;
+        memset(&run_control->stats_snapshot, 0, sizeof(run_control->stats_snapshot));
         run_control->running = 1;
 
         if (run_control->candle_acc)
@@ -1030,48 +1126,47 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         ImGui::TextColored(FoxmlColors::yellow, "running... (%d%%)", run_control->progress_pct);
     }
 
-    // show feature collection status — display depends on label kind.
-    // (label-type-aware metric invariant — see CLAUDE.md)
-    //
-    // GATED ON !running: results->labels (and sample_count, sample_capacity)
-    // are written by the worker thread during collection. The GUI thread
-    // reading them mid-realloc was a latent race for the entire history of
-    // this code; manifested as a segfault when the regression diagnosis
-    // path (added 2026-04-25) iterated a 2.25M-sample buffer that was
-    // simultaneously realloc'ing 2× → use-after-free on the old pointer.
-    //
-    // Long-term fix is mutex / atomic snapshot. Pragmatic fix: don't
-    // display partial stats while collecting. The progress bar already
-    // tells the user something's happening; detailed stats land when the
-    // run completes.
+    // results pointer for Train Model + Walk-Forward sections below — they
+    // need sample_count + feature_matrix + labels, all of which are safe to
+    // read by the time those sections run (Train Model runs synchronously
+    // on the UI thread; Walk-Forward worker is its own thread that doesn't
+    // collide with backtest_worker_fn).
     BacktestResults *results = &run_control->results;
-    if (results->sample_count > 0 && !run_control->running) {
+
+    // show feature collection status — display reads from a worker-written
+    // snapshot, NOT from results->labels[] directly.
+    //
+    // Why: results->labels (+ sample_count, sample_capacity) is written by
+    // the worker thread during collection and realloc'd as the buffer grows.
+    // GUI rendering at 60fps that iterated those buffers raced with worker
+    // reallocs → use-after-free → segfault on a 2.25M-sample run on
+    // 2026-04-25. Snapshot pattern: worker computes the distribution stats
+    // ONCE after Backtest_Run completes (in backtest_worker_fn) and sets
+    // running=0 last. GUI reads the snapshot when running==0. The volatile
+    // flag prevents compiler reordering of the loads/stores, giving a
+    // happens-before edge.
+    //
+    // Bonus: the diagnostic compute happens once per run, not every render
+    // frame. Iterating millions of labels every frame was wasteful even
+    // when it didn't crash.
+    const SamplesSnapshot *snap = &run_control->stats_snapshot;
+    if (snap->sample_count > 0) {
         // FoxML colors for diagnostics
         const ImVec4 diag_green  = ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
         const ImVec4 diag_yellow = ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
         const ImVec4 diag_red    = ImVec4(0.95f, 0.35f, 0.35f, 1.0f);
 
-        if (LabelType_IsRegression(state->label_type)) {
+        if (snap->label_kind == 1) {
             // regression: continuous labels — show distribution stats, not +/- counts.
-            // labels here are forward returns (or similar continuous targets).
-            double sum = 0.0, sum_sq = 0.0;
-            float lmin = results->labels[0], lmax = results->labels[0];
-            for (int i = 0; i < results->sample_count; i++) {
-                float v = results->labels[i];
-                sum += v; sum_sq += (double)v * v;
-                if (v < lmin) lmin = v;
-                if (v > lmax) lmax = v;
-            }
-            double mean = sum / results->sample_count;
-            double var = (sum_sq / results->sample_count) - mean * mean;
-            double stddev = (var > 0.0) ? sqrt(var) : 0.0;
-            // store on state for later display + post-train context
+            float lmin = snap->lmin, lmax = snap->lmax;
+            float mean = snap->lmean, stddev = snap->lstddev;
+            // expose to state for downstream display
             state->train_label_min    = lmin;
             state->train_label_max    = lmax;
-            state->train_label_mean   = (float)mean;
-            state->train_label_stddev = (float)stddev;
+            state->train_label_mean   = mean;
+            state->train_label_stddev = stddev;
             ImGui::Text("Samples: %d  |  range: [%.4f, %.4f]  |  mean: %.4f  |  σ: %.4f",
-                         results->sample_count, lmin, lmax, mean, stddev);
+                         snap->sample_count, lmin, lmax, mean, stddev);
             ImGui::SetItemTooltip("Regression labels — continuous target (e.g. forward %% return).\n"
                                   "range: min and max observed values\n"
                                   "mean: average label value (close to 0 for return-style targets)\n"
@@ -1117,23 +1212,17 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             }
             ImGui::TextColored(*dcol, "Diagnosis: %s", dtext);
             ImGui::SetItemTooltip("%s", dtip);
-        } else if (LabelType_IsMulticlass(state->label_type)) {
-            // multiclass: per-class histogram. labels are float-encoded class ids (0, 1, 2, ...).
-            int K = LabelType_NumClasses(state->label_type);
-            if (K > 16) K = 16; // safety
-            int counts[16] = {0};
-            for (int i = 0; i < results->sample_count; i++) {
-                int c = (int)(results->labels[i] + 0.5f);
-                if (c >= 0 && c < K) counts[c]++;
-            }
+        } else if (snap->label_kind == 2) {
+            // multiclass: per-class histogram from snapshot.
+            int K = snap->num_classes > 16 ? 16 : snap->num_classes;
             // build display string: "Samples: N  |  c0: X (Y%)  |  c1: ..."
             char buf[256];
-            int off = snprintf(buf, sizeof(buf), "Samples: %d  ", results->sample_count);
+            int off = snprintf(buf, sizeof(buf), "Samples: %d  ", snap->sample_count);
             for (int k = 0; k < K && off < (int)sizeof(buf) - 1; k++) {
                 off += snprintf(buf + off, sizeof(buf) - off, "|  c%d: %d (%.1f%%)  ",
-                                k, counts[k],
-                                results->sample_count > 0
-                                    ? 100.0f * counts[k] / results->sample_count : 0.0f);
+                                k, snap->class_counts[k],
+                                snap->sample_count > 0
+                                    ? 100.0f * snap->class_counts[k] / snap->sample_count : 0.0f);
             }
             ImGui::TextUnformatted(buf);
             ImGui::SetItemTooltip("Multiclass labels — per-class sample counts.\n"
@@ -1155,11 +1244,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             int max_class = 0;
             int counts_used = 0;
             for (int k = 0; k < K; k++) {
-                if (counts[k] > max_count) { max_count = counts[k]; max_class = k; }
-                if (counts[k] > 0) counts_used++;
+                if (snap->class_counts[k] > max_count) {
+                    max_count = snap->class_counts[k]; max_class = k;
+                }
+                if (snap->class_counts[k] > 0) counts_used++;
             }
-            float max_pct = results->sample_count > 0
-                ? 100.0f * max_count / results->sample_count : 0.0f;
+            float max_pct = snap->sample_count > 0
+                ? 100.0f * max_count / snap->sample_count : 0.0f;
             if (counts_used <= 1) {
                 mc_col = &diag_red;
                 mc_text = "all samples in one class — labels are degenerate";
@@ -1187,21 +1278,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                max_class, max_pct, mc_text);
             ImGui::SetItemTooltip("%s", mc_tip);
         } else {
-            // binary: existing +/- ratio with neutral filter
-            state->positive_count = 0;
-            state->negative_count = 0;
-            int neutral_count = 0;
-            for (int i = 0; i < results->sample_count; i++) {
-                if (results->labels[i] > 0.5f) state->positive_count++;
-                else if (results->labels[i] < 0.5f) state->negative_count++;
-                else neutral_count++;
-            }
-            int labeled = state->positive_count + state->negative_count;
+            // binary: +/-/neutral counts from snapshot
+            state->positive_count = snap->pos_count;
+            state->negative_count = snap->neg_count;
+            int neutral_count = snap->neutral_count;
+            int labeled = snap->pos_count + snap->neg_count;
             ImGui::Text("Samples: %d  |  +: %d  |  -: %d  |  neutral: %d  |  Ratio: %.1f%%",
-                         results->sample_count, state->positive_count, state->negative_count,
+                         snap->sample_count, snap->pos_count, snap->neg_count,
                          neutral_count,
                          labeled > 0
-                             ? (float)state->positive_count / labeled * 100.0f : 0.0f);
+                             ? (float)snap->pos_count / labeled * 100.0f : 0.0f);
             ImGui::SetItemTooltip("Binary labels.\n"
                                   "+: labeled as buy signal (price hit TP barrier first)\n"
                                   "-: labeled as no-buy (price hit SL barrier first)\n"
@@ -1217,9 +1303,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             const char *bn_text = "well-balanced for training — model has both classes to learn from";
             const char *bn_tip  = "Ratio is in [30%%, 70%%] and neutral fraction is reasonable.\n"
                                   "Ready to train. After training, read walk-forward val accuracy.";
-            float ratio = labeled > 0 ? 100.0f * state->positive_count / labeled : 0.0f;
-            float neutral_pct = results->sample_count > 0
-                ? 100.0f * neutral_count / results->sample_count : 0.0f;
+            float ratio = labeled > 0 ? 100.0f * snap->pos_count / labeled : 0.0f;
+            float neutral_pct = snap->sample_count > 0
+                ? 100.0f * neutral_count / snap->sample_count : 0.0f;
             if (labeled == 0) {
                 bn_col = &diag_red;
                 bn_text = "all samples are neutral — no class labels to train on";
