@@ -6,14 +6,30 @@ Tick-level crypto trading engine in C++. Branchless fixed-point arithmetic, bitm
 
 ## Build
 
-CMake with zero-dependency ANSI TUI:
+**Wrapper script (preferred):** `./build.sh` provides single entry point for all build variants.
+
+```bash
+./build.sh test    # build engine + run controller_test (279 assertions)
+./build.sh gui     # build engine_gui + foxml_suite
+./build.sh suite   # build foxml_suite with XGBoost (requires libxgboost)
+./build.sh all     # build engine + gui (skip suite by default)
+./build.sh clean   # wipe all build dirs
+```
+
+**Direct cmake (if you need it):**
 ```bash
 cmake -B build && cmake --build build         # production (ANSI TUI, no deps)
-./build/controller_test                        # run tests (236 assertions)
+./build/controller_test                        # run tests
 cd build && ./engine                           # run engine (needs engine.cfg symlink)
 ```
 
 Build options: `-DLATENCY_PROFILING=ON`, `-DLATENCY_LITE=ON`, `-DLATENCY_BENCH=ON`, `-DBUSY_POLL=ON`, `-DUSE_NATIVE_128=ON`. See README.md for details.
+
+**Build directory layout** (intentional — different compile flags require different outputs):
+- `build/` — ANSI engine + tests (no GUI deps, no XGBoost)
+- `build_gui/` — engine_gui + foxml_suite (ImGui + SDL2 + OpenGL3)
+- `build_suite/` — same as build_gui + XGBoost-linked variant of foxml_suite
+- `build_lat/` — latency-profiling variant (with `-DLATENCY_PROFILING=ON`)
 
 ### Dependencies
 
@@ -124,8 +140,8 @@ When changing something, here's exactly what to update:
 
 ### Adding a new TUI/GUI display field
 1. `DataStream/EngineTUI.hpp`: add to `TUISnapshot` struct
-2. `DataStream/EngineTUI.hpp`: populate in `TUI_CopySnapshot()`
-3. `Backtest/BacktestSnapshot.hpp`: populate in `BacktestSnapshot_Copy()` (when it exists)
+2. `DataStream/EngineTUI.hpp`: populate in `TUI_CopySnapshot()` (live engine path)
+3. **Backtest auto-syncs** — `Backtest/BacktestSnapshot.hpp::BacktestSnapshot_Copy()` is a thin wrapper that calls `TUI_CopySnapshot` and overrides only `live_trading=0`. New fields are inherited automatically.
 4. `DataStream/TUIAnsi.hpp`: display in appropriate `ANSI_Section_*` (if ANSI TUI needed)
 5. `GUI/DashboardPanels.hpp`: display in appropriate `GUI_Panel_*`
 
@@ -207,10 +223,11 @@ GUI reads from:
 | Chart | CandleAccumulator | ChartPanel.hpp |
 | Settings | ControllerConfig via backtest.cfg | SettingsPanel.hpp |
 
-**Snapshot sync rule:**
-When adding a field to TUISnapshot, update BOTH:
-1. `DataStream/EngineTUI.hpp` → `TUI_CopySnapshot()` (live engine)
-2. `Backtest/BacktestSnapshot.hpp` → `BacktestSnapshot_Copy()` (backtest suite)
+**Snapshot sync rule (simplified 2026-04):**
+`BacktestSnapshot_Copy` is now a thin wrapper around `TUI_CopySnapshot`. Adding a field to `TUISnapshot` requires updating ONE function:
+- `DataStream/EngineTUI.hpp` → `TUI_CopySnapshot()` (live engine path)
+
+The backtest path inherits automatically via the wrapper. The previous "update both" rule is obsolete — historical changelogs may still reference it.
 
 **Config:**
 - Live engine: `engine.cfg`
@@ -272,6 +289,13 @@ Version string: `engine vX.Y.Z` — defined ONCE in `Version.hpp` as `ENGINE_VER
 - `pre-*` — rollback points before risky changes (local)
 - `rollback-*` — named rollback points (local)
 - `backup/*` — branch backups (local)
+
+### Active rollback tags (as of 2026-04-25)
+- `pre-zoo` (`46b5a25`) — before all Phase 5 ML zoo work
+- `pre-label-type-fix` (`2b27707`) — Saturday evening, before Sunday's label-type-aware metric overhaul
+- `pre-hardening` (`8d175b1`) — Sunday morning, before afternoon hardening pass
+
+After Phase 6 merge: `main-backup-2026-04-25`, `phase5d-merged`. Subsequent phase tags per `plans/live-readiness-master.md`.
 
 ## Code Conventions
 
@@ -403,9 +427,27 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
 
 **Future hardening (deferred):** turn `num_classes` into `enum class LabelKind { Binary, Regression, Multiclass }` so the compiler exhaustive-checks switches. Larger surgery — touches every existing site again. Reasonable v2 once the current convention has settled.
 
-## Current State
+## Current State (2026-04-25 afternoon)
 
-- Portfolio controller: COMPLETE (166/166 tests passing)
+**Branch:** `experiment/phase5-zoo`, 27 commits ahead of `experiment/per-core-sharding` (main). Pending merge into main as Phase 6 (live-readiness) prep.
+
+**Tests:** controller_test 279/279 passing.
+
+**Build state:** `build/` (ANSI), `build_gui/` (ImGui) clean. `build_suite/` (XGBoost) NOT currently set up — will be brought online as part of live-readiness work. See `build.sh` helper.
+
+**Active phase:** Phase 6 live-readiness — see `plans/live-readiness-master.md` and 6 subplans + 6 test sidecars + 1 regression-test sidecar. Goal: take engine from "research-grade" to "operational live trader on Binance." Pivot from "find ML signal" to "ship live, ML when signal exists."
+
+**Engine capability summary:**
+- Portfolio controller: stable. 279/279 tests cover slot reuse, fee floors, SL invariants, regime adjustment, OMS basics.
+- ML pipeline: end-to-end working (backtest → labels → features → train → walk-forward → overfit detection). Model at calibrated noise floor on current 16 features — confirmed "no signal" answer, not bug-induced. See `DOCS/changelogs/2026-04-25-*.md`.
+- Phase 5 (CoreModelZoo + 3-class softmax + label-type-aware metrics + multiclass weights): SHIPPED. Includes 8 fixes for bugs that surfaced during validation.
+- Live trading: architecturally capable (full OMS, paper/live sync, kill switch, orphan recovery, reconnect handling). Operational gaps: maker/taker accounting, depth persistence, alerting — addressed by Phase 8 / 8a / 8b.
+
+**Recent invariants (added during Phase 5):**
+- Dynamic-buffer lifecycle (Init/Reset/Free/EnsureCapacity must update together) — see "Dynamic Sizing" section
+- Label-type-aware metrics (every metric site consults `label_table[t].num_classes`) — see "Label-type-aware metric invariant"
+
+**Engine subsystem state:**
 - Post-SL cooldown: adaptive (scales by trend confidence at SL time) or fixed cycle count
 - Regime detection: score-based with 7 signals, extensible RegimeSignals struct
 - Volume spike detection: current/max ratio, spacing relaxation on 5x+ spikes
@@ -413,7 +455,8 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
 - VWAP gate: buy signal gates on price being below volume-weighted average price
 - Session awareness: per-session (Asian/EU/US/overnight) volume gate multiplier
 - Snapshot persistence: v7 (entry_time + session stats survive restarts)
-- Binance websocket: WORKING (live market data)
+- Binance websocket: WORKING (live market data + depth + user data)
+- Confidence loop: WIRED (multiplier path + display) — confidence_enabled cfg gate, defaults off
 - TUI: ANSI only (zero deps, diff-based rendering, foxml palette). FTXUI/notcurses removed.
 - TUI snapshot: zero-pollution (full copy on slow path, live price/volume/active_count every tick)
 - Momentum TP/SL: adaptive (R²-scaled + ROR acceleration bonus at fill time)
@@ -421,6 +464,7 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
 - Slippage simulation: configurable entry/exit price adjustment (slippage_pct in engine.cfg)
 - Single-slot mode: max_positions=1 (default), sells entire BTC balance on exit (no dust)
 - Paper/live sync: unbacked paper positions are undone, startup recovers orphaned BTC
+- foxml_suite: SamplesSnapshot pattern eliminates GUI/worker race on results->labels (post-2026-04-25)
 
 ## Key Design Decisions
 
