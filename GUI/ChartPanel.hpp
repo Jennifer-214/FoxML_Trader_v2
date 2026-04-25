@@ -392,7 +392,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         if (settings->show_session_div && vc > 1) {
             // session hours (UTC): Asian 0-8, EU 8-13, US 13-21, Overnight 21-24
             static const int boundaries[] = {0, 8, 13, 21};
-            static const char *sess_labels[] = {"ASIA", "EU", "US", "OVER"};
+            // use shared SESSION_NAMES — drops the OVER/OVERNIGHT inconsistency
             ImU32 div_col = ImGui::GetColorU32(ImVec4(1, 1, 1, 0.06f));
             ImVec2 plot_tl = ImPlot::GetPlotPos();
             for (int i = 0; i < vc - 1; i++) {
@@ -416,7 +416,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                         // label at top
                         dl->AddText(ImVec2(px_x + 3, plot_tl.y + 2),
                                     ImGui::GetColorU32(ImVec4(1, 1, 1, 0.15f)),
-                                    sess_labels[b]);
+                                    SESSION_NAMES[b]);
                     }
                 }
             }
@@ -822,7 +822,6 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 {0.65f, 0.45f, 0.80f, 0.6f},  // ML — purple
                 {0.35f, 0.75f, 0.80f, 0.6f},  // EMA — cyan
             };
-            const char *strat_labels[] = {"MR", "MOM", "DIP", "ML", "EMA"};
             for (int ci = 0; ci < snap->per_core_count && ci < 16; ++ci) {
                 // skip cores that have an active position — their gate
                 // is irrelevant while holding, and the line overlaps
@@ -831,9 +830,9 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 double bg_price = snap->per_core[ci].buy_gate_price;
                 if (bg_price <= 0.0) continue;
                 uint8_t sid = snap->per_core[ci].strategy_id_display;
-                ImVec4 col = (sid < 5) ? strat_colors[sid]
+                ImVec4 col = (sid < NUM_STRATEGIES) ? strat_colors[sid]
                                         : ImVec4(0.5f, 0.5f, 0.5f, 0.4f);
-                const char *sname = (sid < 5) ? strat_labels[sid] : "?";
+                const char *sname = (sid < NUM_STRATEGIES) ? STRATEGY_SHORT_NAMES[sid] : "?";
                 double lx[2] = {cs->x_lo, cs->x_hi};
                 double ly[2] = {bg_price, bg_price};
                 char lbl[32]; snprintf(lbl, 32, "##bg%d", ci);

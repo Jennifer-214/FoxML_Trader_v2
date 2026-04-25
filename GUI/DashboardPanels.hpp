@@ -109,12 +109,11 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
         ImGui::TextColored(color, "PAUSED (%s)", GATE_REASON_TABLE[ri].name);
     }
 
-    if (s->current_session >= 0) {
-        static const char *sess_names[] = {"ASIA", "EU", "US", "OVERNIGHT"};
+    if (s->current_session >= 0 && s->current_session < NUM_SESSIONS) {
         ImGui::SameLine();
         ImGui::TextColored(FoxmlColors::comment, "|");
         ImGui::SameLine();
-        ImGui::TextColored(FoxmlColors::sand, "%s (%.1fx)", sess_names[s->current_session], s->session_mult);
+        ImGui::TextColored(FoxmlColors::sand, "%s (%.1fx)", SESSION_NAMES[s->current_session], s->session_mult);
     }
 
     // trading blocked indicator — detailed reason from gate_reason table
@@ -138,7 +137,6 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
 
     // per-core strategy overview (sharded mode)
     if (s->sharded_mode_active && s->per_core_count > 0) {
-        static const char *sn[] = {"MR", "MOM", "DIP", "ML", "EMA"};
         static const ImVec4 sc[] = {
             {0.40f, 0.60f, 0.85f, 1.0f},  // MR blue
             {0.85f, 0.55f, 0.25f, 1.0f},  // MOM orange
@@ -150,8 +148,9 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
         for (int i = 0; i < s->per_core_count && i < 16; ++i) {
             ImGui::SameLine();
             uint8_t sid = s->per_core[i].strategy_id_display;
-            ImVec4 col = (sid < 5) ? sc[sid] : FoxmlColors::comment;
-            const char *name = (sid < 5) ? sn[sid] : (sid == 0xFF ? "OFF" : "?");
+            ImVec4 col = (sid < NUM_STRATEGIES) ? sc[sid] : FoxmlColors::comment;
+            const char *name = (sid < NUM_STRATEGIES) ? STRATEGY_SHORT_NAMES[sid]
+                               : (sid == 0xFF ? "OFF" : "?");
             ImGui::TextColored(col, "C%d:%s", i, name);
         }
     }
@@ -413,17 +412,17 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
         ImGui::TextColored(FoxmlColors::yellow, "COOLDOWN (%d)", s->sl_cooldown);
     }
 
-    // fill rejection diagnostics
-    if (s->fills_rejected > 0 && s->last_reject_reason > 0 && s->last_reject_reason <= 7) {
-        static const char *reasons[] = {"", "spacing", "balance", "exposure",
-                                         "breaker", "max_pos", "duplicate", "min_vol"};
+    // fill rejection diagnostics — names from REJECT_REASON_NAMES (PortfolioController.hpp)
+    if (s->fills_rejected > 0 && s->last_reject_reason > 0 &&
+        s->last_reject_reason < NUM_REJECT_REASONS) {
         ImGui::TextColored(FoxmlColors::comment, "fills");
         ImGui::SameLine();
         ImGui::Text("%u/%u", s->total_buys, s->total_buys + s->fills_rejected);
         ImGui::SameLine(0, 10);
         ImGui::TextColored(FoxmlColors::comment, "last reject:");
         ImGui::SameLine();
-        ImGui::TextColored(FoxmlColors::yellow, "%s", reasons[s->last_reject_reason]);
+        ImGui::TextColored(FoxmlColors::yellow, "%s",
+                           REJECT_REASON_NAMES[s->last_reject_reason]);
     }
 
 
@@ -602,7 +601,6 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s) {
             // strategy (color-coded)
             ImGui::TableNextColumn();
             {
-                static const char *sn[] = {"MR", "MOM", "DIP", "ML", "EMA"};
                 static const ImVec4 sc[] = {
                     {0.40f, 0.60f, 0.85f, 1.0f},
                     {0.85f, 0.55f, 0.25f, 1.0f},
@@ -612,8 +610,8 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s) {
                 };
                 uint8_t sid = (ps->idx < 16 && s->sharded_mode_active)
                     ? s->per_core[ps->idx].strategy_id_display : 0xFF;
-                ImVec4 col = (sid < 5) ? sc[sid] : FoxmlColors::comment;
-                const char *name = (sid < 5) ? sn[sid] : "?";
+                ImVec4 col = (sid < NUM_STRATEGIES) ? sc[sid] : FoxmlColors::comment;
+                const char *name = (sid < NUM_STRATEGIES) ? STRATEGY_SHORT_NAMES[sid] : "?";
                 ImGui::TextColored(col, "%s", name);
             }
 
@@ -925,7 +923,6 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
             ImGui::TableSetupColumn("Max",     ImGuiTableColumnFlags_WidthFixed, 50);
             ImGui::TableHeadersRow();
 
-            const char *snames[] = {"MR", "MOM", "DIP", "ML", "EMA"};
             for (int i = 0; i < s->per_core_count && i < 16; ++i) {
                 const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
                 ImGui::TableNextRow();
@@ -933,7 +930,8 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                 ImGui::Text("%d", i);
                 ImGui::TableNextColumn();
                 uint8_t sid = pc->strategy_id_display;
-                ImGui::TextColored(FoxmlColors::primary, "%s", sid < 5 ? snames[sid] : "?");
+                ImGui::TextColored(FoxmlColors::primary, "%s",
+                                   sid < NUM_STRATEGIES ? STRATEGY_SHORT_NAMES[sid] : "?");
                 ImGui::TableNextColumn();
                 if (pc->samples == 0) {
                     ImGui::TextColored(FoxmlColors::comment, "-");

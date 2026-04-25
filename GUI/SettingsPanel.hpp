@@ -249,6 +249,21 @@ static const CfgFieldDef field_defs[] = {
         "Buy this many stddevs below EMA in uptrends"},
     {"emacross_crossover_min",   "EMA Cross Min",     "EMA Cross Tuning", CFG_FLOAT, "%.4f",
         "Min EMA-SMA spread for uptrend confirmation"},
+    // Engine Timing — knobs that control sample cadence + warmup
+    // (added 2026-04-25 — these matter for ML training experiments and were
+    // previously cfg-only edits)
+    {"poll_interval",            "Poll Interval",     "Engine Timing",   CFG_INT,   "%d",
+        "Ticks between slow-path runs (regression, adaptation, sample collection)\n"
+        "default 100. ML training note: with poll_interval << forward_ticks,\n"
+        "consecutive samples have heavily-overlapping forward windows → label\n"
+        "autocorrelation. For independent samples set poll_interval = forward_ticks."},
+    {"warmup_ticks",             "Warmup Ticks",      "Engine Timing",   CFG_INT,   "%d",
+        "Minimum raw ticks before trading starts. Counts every tick.\n"
+        "Use this when you want a longer total-tick warmup. No upper bound."},
+    {"min_warmup_samples",       "Min Rolling Samples","Engine Timing",  CFG_INT,   "%d",
+        "Min rolling-stats samples before trading. CAPS at 128 (rolling window\n"
+        "size). Values >128 are clamped at config load with a warning. Use\n"
+        "warmup_ticks for longer raw-tick warmup."},
 };
 static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 

@@ -241,6 +241,12 @@ static inline void ab_halfblock_chart(AnsiBuf *ab, const double *data, int head,
     }
 }
 
+// 8-level sparkline blocks shared by ab_sparkline + ab_sparkline_pnl
+// (each character is half a block taller than the previous — gives clean vertical resolution)
+static const char *SPARKLINE_BLOCKS[8] = {
+    "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"
+};
+
 // sparkline chart from ring buffer data (▁▂▃▄▅▆▇█)
 static inline void ab_sparkline(AnsiBuf *ab, const double *data, int head,
                                  int count, int max_len, int width,
@@ -268,7 +274,7 @@ static inline void ab_sparkline(AnsiBuf *ab, const double *data, int head,
         return;
     }
 
-    static const char *blocks[] = { "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█" };
+    // blocks → file-scope SPARKLINE_BLOCKS
 
     ab_append(ab, color);
     for (int i = 0; i < vis; i++) {
@@ -276,7 +282,7 @@ static inline void ab_sparkline(AnsiBuf *ab, const double *data, int head,
         int level = (int)((data[idx] - vmin) / range * 7.0);
         if (level < 0) level = 0;
         if (level > 7) level = 7;
-        ab_append(ab, blocks[level]);
+        ab_append(ab, SPARKLINE_BLOCKS[level]);
     }
     ab_append(ab, A_RESET);
 }
@@ -306,14 +312,14 @@ static inline void ab_sparkline_pnl(AnsiBuf *ab, const double *data, int head,
         return;
     }
 
-    static const char *blocks[] = { "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█" };
+    // blocks → file-scope SPARKLINE_BLOCKS
     for (int i = 0; i < vis; i++) {
         int idx = (start + start_offset + i) % max_len;
         ab_append(ab, data[idx] >= 0.0 ? A_GREEN : A_RED);
         int level = (int)((data[idx] - vmin) / range * 7.0);
         if (level < 0) level = 0;
         if (level > 7) level = 7;
-        ab_append(ab, blocks[level]);
+        ab_append(ab, SPARKLINE_BLOCKS[level]);
     }
     ab_append(ab, A_RESET);
 }
@@ -363,10 +369,9 @@ static inline int ANSI_Section_Header(AnsiBuf *ab, const TUISnapshot *s,
         const char *color = GATE_REASON_TABLE[ri].is_danger ? A_RED : A_YELLOW;
         ab_printf(ab, A_DIM "  │  " A_BOLD "%s" "PAUSED" A_DIM " (%s)" A_RESET, color, GATE_REASON_TABLE[ri].name);
     }
-    if (s->current_session >= 0) {
-        static const char *sess_names[] = {"ASIA", "EU", "US", "OVERNIGHT"};
+    if (s->current_session >= 0 && s->current_session < NUM_SESSIONS) {
         ab_printf(ab, A_DIM "  │  " A_SAND "%s" A_DIM " (%.1fx)" A_RESET,
-                  sess_names[s->current_session], s->session_mult);
+                  SESSION_NAMES[s->current_session], s->session_mult);
     }
     ab_append(ab, A_RESET);
     y++;
@@ -641,15 +646,14 @@ static inline int ANSI_Section_BuyGate(AnsiBuf *ab, const TUISnapshot *s, int y,
         ab_printf(ab, A_DIM "  " A_BOLD A_YELLOW "COOLDOWN (%d)" A_RESET, s->sl_cooldown);
     y++;
 
-    // fill rejection diagnostics
-    if (s->fills_rejected > 0 && s->last_reject_reason > 0 && s->last_reject_reason <= 7) {
-        static const char *reasons[] = {"", "spacing", "balance", "exposure",
-                                         "breaker", "max_pos", "duplicate", "min_vol"};
+    // fill rejection diagnostics — names from REJECT_REASON_NAMES (PortfolioController.hpp)
+    if (s->fills_rejected > 0 && s->last_reject_reason > 0 &&
+        s->last_reject_reason < NUM_REJECT_REASONS) {
         ab_goto(ab, y, 3);
         ab_printf(ab, A_DIM "fills " A_FG "%u" A_DIM "/" A_FG "%u"
                   A_DIM "  last reject: " A_YELLOW "%s" A_RESET,
                   s->total_buys, s->total_buys + s->fills_rejected,
-                  reasons[s->last_reject_reason]);
+                  REJECT_REASON_NAMES[s->last_reject_reason]);
         y++;
     }
 
@@ -800,19 +804,18 @@ static inline int ANSI_Section_Stats(AnsiBuf *ab, const TUISnapshot *s, int y, i
 
     // per-strategy P&L attribution
     {
-        const char *snames[] = {"MR", "Mom", "Dip", "ML", "EMA"};
         int any = 0;
-        for (int i = 0; i < 5; i++) any |= (s->strat_stats[i].total > 0);
+        for (int i = 0; i < NUM_STRATEGIES; i++) any |= (s->strat_stats[i].total > 0);
         if (any) {
             ab_goto(ab, y, 3);
-            for (int i = 0; i < 5; i++) {
+            for (int i = 0; i < NUM_STRATEGIES; i++) {
                 if (s->strat_stats[i].total == 0) continue;
                 double pnl = s->strat_stats[i].pnl;
                 uint32_t w = s->strat_stats[i].wins, l = s->strat_stats[i].losses;
                 uint32_t t = w + l;
                 double wr = (t > 0) ? (double)w / t * 100.0 : 0.0;
                 ab_printf(ab, "%s%s: " "%s$%+.2f" A_RESET A_DIM " (%uW/%uL %.0f%%)" A_RESET "  ",
-                          A_SAND, snames[i], A_PNL(pnl), pnl, w, l, wr);
+                          A_SAND, STRATEGY_SHORT_NAMES[i], A_PNL(pnl), pnl, w, l, wr);
             }
             y++;
         }
@@ -1071,12 +1074,10 @@ static inline void ANSI_Section_RightPanel(AnsiBuf *ab, const TUISnapshot *s,
     ab_printf(ab, A_SAND "accepted: " A_FG "%u" A_RESET, s->total_buys);
     ab_goto_right(ab, 15, rc);
     ab_printf(ab, A_SAND "rejected: " A_FG "%u" A_RESET, s->fills_rejected);
-    if (s->last_reject_reason > 0 && s->last_reject_reason <= 7) {
-        static const char *reasons[] = {"", "spacing", "balance", "exposure",
-                                         "breaker", "max_pos", "duplicate", "min_vol"};
+    if (s->last_reject_reason > 0 && s->last_reject_reason < NUM_REJECT_REASONS) {
         ab_goto_right(ab, 16, rc);
         ab_printf(ab, A_SAND "last: " A_YELLOW "%s" A_RESET,
-                  reasons[s->last_reject_reason]);
+                  REJECT_REASON_NAMES[s->last_reject_reason]);
     }
 
     // TRADES

@@ -146,6 +146,9 @@ struct ModelHandle {
     void *handle;           // opaque: BoosterHandle (XGB) or BoosterHandle (LGBM)
     int backend;            // MODEL_BACKEND_NONE / XGBOOST / LIGHTGBM
     int num_features;       // expected input dimension
+    int num_outputs;        // 1 = binary/regression, ≥2 = multiclass softmax.
+                            // detected at load time. enables stupid-proof check
+                            // "model is 3-class but barrier_gate_enabled=0".
     char model_path[256];   // path for display/logging
     char training_fingerprint[65]; // SHA256 of config+data used to train this model (empty if unknown)
 };
@@ -156,6 +159,7 @@ inline void Model_Init(ModelHandle<F> *m) {
     m->handle = NULL;
     m->backend = MODEL_BACKEND_NONE;
     m->num_features = 0;
+    m->num_outputs = 0;
     m->model_path[0] = '\0';
 }
 
@@ -227,8 +231,26 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
         m->handle = (void*)booster;
         m->backend = MODEL_BACKEND_XGBOOST;
         m->num_features = MODEL_NUM_FEATURES;
-        fprintf(stderr, "[ML] XGBoost model loaded: %s (%d features, format v%d%s%s)\n",
-                path, m->num_features, MODEL_FORMAT_VERSION,
+        // detect num_outputs by running a single-row prediction with zeros.
+        // for binary models out_len = 1; for multi:softprob out_len = num_class.
+        // this is the stupid-proof check: lets the engine warn when a 3-class
+        // model is loaded into a binary-config core (or vice versa).
+        m->num_outputs = 1;
+        {
+            float zero_row[MODEL_MAX_FEATURES] = {0};
+            DMatrixHandle probe;
+            if (XGDMatrixCreateFromMat(zero_row, 1, MODEL_NUM_FEATURES, -1.0f, &probe) == 0) {
+                bst_ulong out_len = 0;
+                const float *out_result = NULL;
+                if (XGBoosterPredict(booster, probe, 0, 0, 0, &out_len, &out_result) == 0) {
+                    if (out_len > 0) m->num_outputs = (int)out_len;
+                }
+                XGDMatrixFree(probe);
+            }
+        }
+        fprintf(stderr, "[ML] XGBoost model loaded: %s (%d features, %d output%s, format v%d%s%s)\n",
+                path, m->num_features, m->num_outputs, m->num_outputs == 1 ? "" : "s",
+                MODEL_FORMAT_VERSION,
                 m->training_fingerprint[0] ? ", fingerprint: " : "",
                 m->training_fingerprint[0] ? m->training_fingerprint : "");
         return 1;
@@ -247,8 +269,10 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
         m->handle = (void*)booster;
         m->backend = MODEL_BACKEND_LIGHTGBM;
         m->num_features = MODEL_NUM_FEATURES;
-        fprintf(stderr, "[ML] LightGBM model loaded: %s (%d features, %d iterations)\n",
-                path, m->num_features, num_iterations);
+        m->num_outputs = 1;
+        LGBM_BoosterGetNumClasses(booster, &m->num_outputs);
+        fprintf(stderr, "[ML] LightGBM model loaded: %s (%d features, %d output%s, %d iterations)\n",
+                path, m->num_features, m->num_outputs, m->num_outputs == 1 ? "" : "s", num_iterations);
         return 1;
     }
 #endif
@@ -308,6 +332,69 @@ inline float Model_Predict(ModelHandle<F> *m, const float *features, int num_fea
 #endif
 
     return 0.0f;
+}
+
+//======================================================================================================
+// [PREDICT MULTI — multi-class softmax output]
+//======================================================================================================
+// fills `out_buf` with up to max_outputs class probabilities. returns the number
+// of class outputs actually written (== num_class for the loaded model). on
+// failure or no model loaded, returns 0 and leaves buf undisturbed.
+//
+// for binary classifiers, prefer Model_Predict — this works for them too but
+// returns 1 output. the function is intended for models trained with
+// objective=multi:softprob (XGBoost) or objective=multiclass (LightGBM).
+//======================================================================================================
+template <unsigned F>
+inline int Model_PredictMulti(ModelHandle<F> *m, const float *features, int num_features,
+                               float *out_buf, int max_outputs) {
+    if (!m->handle || max_outputs <= 0) return 0;
+
+#ifdef USE_XGBOOST
+    if (m->backend == MODEL_BACKEND_XGBOOST) {
+        BoosterHandle booster = (BoosterHandle)m->handle;
+        DMatrixHandle dmat;
+        int ret = XGDMatrixCreateFromMat(features, 1, num_features, -1.0f, &dmat);
+        if (ret != 0) return 0;
+
+        bst_ulong out_len;
+        const float *out_result;
+        // XGBoost returns N×K floats for multi:softprob (N=1 row, K=num_class)
+        // for binary objective, returns N floats (same as Model_Predict)
+        ret = XGBoosterPredict(booster, dmat, 0, 0, 0, &out_len, &out_result);
+        XGDMatrixFree(dmat);
+
+        if (ret != 0 || out_len == 0) return 0;
+        int n = (int)out_len < max_outputs ? (int)out_len : max_outputs;
+        for (int i = 0; i < n; i++) out_buf[i] = out_result[i];
+        return n;
+    }
+#endif
+
+#ifdef USE_LIGHTGBM
+    if (m->backend == MODEL_BACKEND_LIGHTGBM) {
+        BoosterHandle booster = (BoosterHandle)m->handle;
+        // need to know num_class first — query the booster
+        int num_class = 1;
+        LGBM_BoosterGetNumClasses(booster, &num_class);
+        int n = num_class < max_outputs ? num_class : max_outputs;
+        // LightGBM returns doubles, need a temp buffer
+        double tmp[32];
+        if (n > 32) n = 32; // safety clamp
+        int64_t out_len;
+        int ret = LGBM_BoosterPredictForMatSingleRow(
+            booster, features, C_API_DTYPE_FLOAT32,
+            num_features, 1,
+            C_API_PREDICT_NORMAL, 0, -1, "",
+            &out_len, tmp);
+        if (ret != 0) return 0;
+        int written = (int)out_len < n ? (int)out_len : n;
+        for (int i = 0; i < written; i++) out_buf[i] = (float)tmp[i];
+        return written;
+    }
+#endif
+
+    return 0;
 }
 
 //======================================================================================================

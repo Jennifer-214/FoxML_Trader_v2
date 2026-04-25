@@ -34,6 +34,20 @@
 using namespace std;
 
 //======================================================================================================
+// [SESSION CONSTANTS]
+// session IDs match the partitioning in PortfolioController slow-path session detection.
+// adding a new session = update this and the bounds in the detection logic.
+//======================================================================================================
+#define SESSION_ASIAN     0
+#define SESSION_EU        1
+#define SESSION_US        2
+#define SESSION_OVERNIGHT 3
+#define NUM_SESSIONS      4
+
+// session names for display (indexed by session id; -1 = no session, render as "")
+static const char *SESSION_NAMES[] = {"ASIA", "EU", "US", "OVERNIGHT"};
+
+//======================================================================================================
 // [FOXML THEME - truecolor ANSI]
 //======================================================================================================
 // colors pulled from the FoxML neovim colorscheme palette

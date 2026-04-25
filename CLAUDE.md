@@ -6,14 +6,30 @@ Tick-level crypto trading engine in C++. Branchless fixed-point arithmetic, bitm
 
 ## Build
 
-CMake with zero-dependency ANSI TUI:
+**Wrapper script (preferred):** `./build.sh` provides single entry point for all build variants.
+
+```bash
+./build.sh test    # build engine + run controller_test (279 assertions)
+./build.sh gui     # build engine_gui + foxml_suite
+./build.sh suite   # build foxml_suite with XGBoost (requires libxgboost)
+./build.sh all     # build engine + gui (skip suite by default)
+./build.sh clean   # wipe all build dirs
+```
+
+**Direct cmake (if you need it):**
 ```bash
 cmake -B build && cmake --build build         # production (ANSI TUI, no deps)
-./build/controller_test                        # run tests (236 assertions)
+./build/controller_test                        # run tests
 cd build && ./engine                           # run engine (needs engine.cfg symlink)
 ```
 
 Build options: `-DLATENCY_PROFILING=ON`, `-DLATENCY_LITE=ON`, `-DLATENCY_BENCH=ON`, `-DBUSY_POLL=ON`, `-DUSE_NATIVE_128=ON`. See README.md for details.
+
+**Build directory layout** (intentional — different compile flags require different outputs):
+- `build/` — ANSI engine + tests (no GUI deps, no XGBoost)
+- `build_gui/` — engine_gui + foxml_suite (ImGui + SDL2 + OpenGL3)
+- `build_suite/` — same as build_gui + XGBoost-linked variant of foxml_suite
+- `build_lat/` — latency-profiling variant (with `-DLATENCY_PROFILING=ON`)
 
 ### Dependencies
 
@@ -124,8 +140,8 @@ When changing something, here's exactly what to update:
 
 ### Adding a new TUI/GUI display field
 1. `DataStream/EngineTUI.hpp`: add to `TUISnapshot` struct
-2. `DataStream/EngineTUI.hpp`: populate in `TUI_CopySnapshot()`
-3. `Backtest/BacktestSnapshot.hpp`: populate in `BacktestSnapshot_Copy()` (when it exists)
+2. `DataStream/EngineTUI.hpp`: populate in `TUI_CopySnapshot()` (live engine path)
+3. **Backtest auto-syncs** — `Backtest/BacktestSnapshot.hpp::BacktestSnapshot_Copy()` is a thin wrapper that calls `TUI_CopySnapshot` and overrides only `live_trading=0`. New fields are inherited automatically.
 4. `DataStream/TUIAnsi.hpp`: display in appropriate `ANSI_Section_*` (if ANSI TUI needed)
 5. `GUI/DashboardPanels.hpp`: display in appropriate `GUI_Panel_*`
 
@@ -207,10 +223,11 @@ GUI reads from:
 | Chart | CandleAccumulator | ChartPanel.hpp |
 | Settings | ControllerConfig via backtest.cfg | SettingsPanel.hpp |
 
-**Snapshot sync rule:**
-When adding a field to TUISnapshot, update BOTH:
-1. `DataStream/EngineTUI.hpp` → `TUI_CopySnapshot()` (live engine)
-2. `Backtest/BacktestSnapshot.hpp` → `BacktestSnapshot_Copy()` (backtest suite)
+**Snapshot sync rule (simplified 2026-04):**
+`BacktestSnapshot_Copy` is now a thin wrapper around `TUI_CopySnapshot`. Adding a field to `TUISnapshot` requires updating ONE function:
+- `DataStream/EngineTUI.hpp` → `TUI_CopySnapshot()` (live engine path)
+
+The backtest path inherits automatically via the wrapper. The previous "update both" rule is obsolete — historical changelogs may still reference it.
 
 **Config:**
 - Live engine: `engine.cfg`
@@ -273,6 +290,13 @@ Version string: `engine vX.Y.Z` — defined ONCE in `Version.hpp` as `ENGINE_VER
 - `rollback-*` — named rollback points (local)
 - `backup/*` — branch backups (local)
 
+### Active rollback tags (as of 2026-04-25)
+- `pre-zoo` (`46b5a25`) — before all Phase 5 ML zoo work
+- `pre-label-type-fix` (`2b27707`) — Saturday evening, before Sunday's label-type-aware metric overhaul
+- `pre-hardening` (`8d175b1`) — Sunday morning, before afternoon hardening pass
+
+After Phase 6 merge: `main-backup-2026-04-25`, `phase5d-merged`. Subsequent phase tags per `plans/live-readiness-master.md`.
+
 ## Code Conventions
 
 - `using namespace std;` used throughout
@@ -286,12 +310,24 @@ Version string: `engine vX.Y.Z` — defined ONCE in `Version.hpp` as `ENGINE_VER
 ### Dynamic Sizing (Backtest Suite ONLY)
 Backtest buffers MUST NOT use compile-time caps that silently truncate data. Use dynamic allocation with growth:
 - **Sample buffers** (`BacktestResults`): start at `BACKTEST_SAMPLES_INIT`, grow via `BacktestResults_EnsureCapacity()` (2x realloc)
+- **Equity curve** (`BacktestResults`): start at `BACKTEST_EQUITY_INIT`, grow via `BacktestResults_EnsureEquityCapacity()` — stats (Sharpe/DD/return) compute from this, silent truncation = wrong stats
 - **Tick buffers**: sized from first-pass line count (no fixed max_ticks)
 - **Label reload**: sized to `total_processed` (no arbitrary cap)
-- **Data files**: `MAX_DATA_FILES` in Limits.hpp (256), not hardcoded 16
-- **Init/Free**: always call `BacktestResults_Init()` before use, `BacktestResults_Free()` after (optimizer included)
+- **Data files**: `MAX_DATA_FILES` in Limits.hpp (2048), not hardcoded 16
+- **Init/Reset/Free**: call `BacktestResults_Init()` before use, `BacktestResults_Reset()` between runs, `BacktestResults_Free()` at shutdown (optimizer included)
 
 When adding new backtest buffers, prefer `malloc` + `realloc` over static arrays. Log allocation failures and degrade gracefully (stop collecting, don't crash).
+
+#### Dynamic-buffer lifecycle invariant (load-bearing)
+
+When you add a new heap-allocated field to `BacktestResults` (or any struct with a `_Reset` helper), update **all four** sites:
+
+1. `_Init` — `malloc` the buffer, set `field_capacity = INIT_CAP`
+2. `_Reset` — save pointer + capacity, then re-restore them after `memset(0)` (so counts reset, allocations survive)
+3. `_Free` — `free` and NULL the pointer, zero the capacity
+4. `_EnsureCapacity` — defensive `cap > 0 ? cap*2 : INIT_CAP` floor, never `0 *= 2`
+
+**Why this is load-bearing.** ff9ac48 (Apr 2026) added `equity_curve` as a dynamic field but only updated _Init/_Free, not the hand-rolled save/restore inside `Backtest_Run`. The next run had `equity_capacity=0`. The first trade exit called `EnsureEquityCapacity(needed=1)` which executed `while (0 < 1) cap *= 2` — infinite spin at 100% CPU on the worker thread, no stderr output, GUI sees "still running" forever. Took a session to find. The `_Reset` helper exists so the knowledge of "which fields are dynamic" lives in exactly one place; the EnsureCapacity floor is belt-and-suspenders against the next time someone adds a field and forgets to extend `_Reset`.
 
 **Live engine is the opposite** — zero dynamic allocation on the hot path. All live buffers are fixed-size, pre-allocated at startup. No malloc, no realloc, no syscalls in the tick loop. This is a hard rule for the execution engine (`build/engine`, `build_gui/engine_gui`).
 
@@ -361,9 +397,57 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
    - **Widen SL** (further from entry) = FPN_Min (pick lower)
 5. Add a regression test for the new transition
 
-## Current State
+### Label-type-aware metric invariant (load-bearing — Backtest Suite)
 
-- Portfolio controller: COMPLETE (166/166 tests passing)
+**Rule:** every metric, display, training, or validation site that touches label values MUST consult `label_table[t].num_classes` (via `LabelType_IsBinary` / `LabelType_IsRegression` / `LabelType_IsMulticlass` helpers in `LabelFunctions.hpp`) and branch on the kind. Never hardcode binary classification assumptions.
+
+**The four label kinds and their metric semantics:**
+
+| `num_classes` | Kind | Label values | XGBoost objective | Primary metric | Overfit detector |
+|---|---|---|---|---|---|
+| 0 | binary | {0.0, 1.0}, optionally 0.5=neutral (filtered) | `binary:logistic` + `scale_pos_weight` | accuracy [0,1] | `OverfitDetection_CheckDefaults` (acc thresholds) |
+| 1 | regression | continuous (any range) | `reg:squarederror` | Pearson correlation r | `OverfitDetection_CheckRegressionDefaults` (corr thresholds) |
+| ≥2 | multiclass | integer class ids 0..K-1 (as float) | `multi:softprob` + `num_class=K` | argmax accuracy | `OverfitDetection_CheckDefaults` (acc thresholds — same as binary) |
+
+**Sites that must branch on label kind** (verify when adding new metric/display code):
+
+1. Sample panel display in `BacktestPanels.hpp` (`GUI_Panel_Training` collection summary) — kind determines whether to show +/-/neutral, per-class histogram, or min/max/mean/stddev.
+2. Train Model in-sample metric in `BacktestPanels.hpp` (post-training prediction loop) — kind determines whether to compute accuracy, multiclass-accuracy, or MSE+correlation.
+3. Walk-Forward `Backtest_RunWalkForward` in `BacktestEngine.hpp`:
+   - Neutral filter at start: only run for binary (regression `0.5` is a real value, not a sentinel).
+   - XGBoost objective + `num_class` param: select by kind.
+   - `scale_pos_weight`: binary only (multiclass uses per-sample weights, regression doesn't have the concept).
+   - Per-fold metric: pick `WalkForward_ComputeAccuracy` / `ComputeMulticlassAccuracy` / `ComputeMSE`+`ComputeCorrelation`.
+   - Aggregate `WalkForwardResults`: write `mean_val_accuracy` for classification or `mean_val_correlation`+`mean_val_mse` for regression. Set `wf->label_kind` so display layer knows what to format.
+4. Walk-Forward result display in `BacktestPanels.hpp` — read `wf->label_kind` and pick column headers + formatting (Acc% vs r vs MSE).
+5. Overfit detection — pick `OverfitDetection_CheckDefaults` (classification) or `OverfitDetection_CheckRegressionDefaults` (regression). The `OverfitReport` struct fields are reused; field semantics depend on kind.
+6. Save Run / `expected.cfg` writer — already records `expected_num_classes`. Verify on load.
+
+**Why this is load-bearing.** 2026-04-25 morning session — ran Forward P&L (regression label) and got `+: 0 / -: 2,254,869 / Ratio: 0.0%` in the sample panel, `Train Accuracy: 0.2%`, and walk-forward `0.0%/0.0%/0.0%` for every fold. None of those numbers were meaningful — they were binary-classification metrics computed on continuous regression labels (every label below the binary 0.5 threshold → counted as "negative"; predictions binarized at 0.5 → useless on continuous output; walk-forward hardcoded `binary:logistic` so it actively trained nonsense models). Same shape as the equity_curve spinner from the previous day: a primitive existed (`label_table.num_classes`), a few sites consulted it (training-side objective), but the rest of the codebase still assumed binary. The fix wired all six sites above to branch on kind. The helpers + this rule make the next regression-vs-classification metric drift hard to write accidentally — **but enforcement is on the human**, the compiler doesn't catch a new metric site that simply doesn't call the helpers.
+
+**Future hardening (deferred):** turn `num_classes` into `enum class LabelKind { Binary, Regression, Multiclass }` so the compiler exhaustive-checks switches. Larger surgery — touches every existing site again. Reasonable v2 once the current convention has settled.
+
+## Current State (2026-04-25 afternoon)
+
+**Branch:** `experiment/phase5-zoo`, 27 commits ahead of `experiment/per-core-sharding` (main). Pending merge into main as Phase 6 (live-readiness) prep.
+
+**Tests:** controller_test 279/279 passing.
+
+**Build state:** `build/` (ANSI), `build_gui/` (ImGui) clean. `build_suite/` (XGBoost) NOT currently set up — will be brought online as part of live-readiness work. See `build.sh` helper.
+
+**Active phase:** Phase 6 live-readiness — see `plans/live-readiness-master.md` and 6 subplans + 6 test sidecars + 1 regression-test sidecar. Goal: take engine from "research-grade" to "operational live trader on Binance." Pivot from "find ML signal" to "ship live, ML when signal exists."
+
+**Engine capability summary:**
+- Portfolio controller: stable. 279/279 tests cover slot reuse, fee floors, SL invariants, regime adjustment, OMS basics.
+- ML pipeline: end-to-end working (backtest → labels → features → train → walk-forward → overfit detection). Model at calibrated noise floor on current 16 features — confirmed "no signal" answer, not bug-induced. See `DOCS/changelogs/2026-04-25-*.md`.
+- Phase 5 (CoreModelZoo + 3-class softmax + label-type-aware metrics + multiclass weights): SHIPPED. Includes 8 fixes for bugs that surfaced during validation.
+- Live trading: architecturally capable (full OMS, paper/live sync, kill switch, orphan recovery, reconnect handling). Operational gaps: maker/taker accounting, depth persistence, alerting — addressed by Phase 8 / 8a / 8b.
+
+**Recent invariants (added during Phase 5):**
+- Dynamic-buffer lifecycle (Init/Reset/Free/EnsureCapacity must update together) — see "Dynamic Sizing" section
+- Label-type-aware metrics (every metric site consults `label_table[t].num_classes`) — see "Label-type-aware metric invariant"
+
+**Engine subsystem state:**
 - Post-SL cooldown: adaptive (scales by trend confidence at SL time) or fixed cycle count
 - Regime detection: score-based with 7 signals, extensible RegimeSignals struct
 - Volume spike detection: current/max ratio, spacing relaxation on 5x+ spikes
@@ -371,7 +455,8 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
 - VWAP gate: buy signal gates on price being below volume-weighted average price
 - Session awareness: per-session (Asian/EU/US/overnight) volume gate multiplier
 - Snapshot persistence: v7 (entry_time + session stats survive restarts)
-- Binance websocket: WORKING (live market data)
+- Binance websocket: WORKING (live market data + depth + user data)
+- Confidence loop: WIRED (multiplier path + display) — confidence_enabled cfg gate, defaults off
 - TUI: ANSI only (zero deps, diff-based rendering, foxml palette). FTXUI/notcurses removed.
 - TUI snapshot: zero-pollution (full copy on slow path, live price/volume/active_count every tick)
 - Momentum TP/SL: adaptive (R²-scaled + ROR acceleration bonus at fill time)
@@ -379,6 +464,7 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
 - Slippage simulation: configurable entry/exit price adjustment (slippage_pct in engine.cfg)
 - Single-slot mode: max_positions=1 (default), sells entire BTC balance on exit (no dust)
 - Paper/live sync: unbacked paper positions are undone, startup recovers orphaned BTC
+- foxml_suite: SamplesSnapshot pattern eliminates GUI/worker race on results->labels (post-2026-04-25)
 
 ## Key Design Decisions
 

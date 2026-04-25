@@ -138,6 +138,84 @@ static inline OverfitReport OverfitDetection_CheckDefaults(float train_acc, floa
                                    OVERFIT_FEATURE_COUNT_CAP);
 }
 
+//======================================================================================================
+// [REGRESSION-AWARE OVERFIT CHECK]
+//======================================================================================================
+// For regression labels, accuracy-threshold checks don't apply. We use Pearson
+// correlation between predictions and labels as the analog metric:
+//   - |train_corr| close to 1 → memorization (model has near-perfect fit)
+//   - train_corr - val_corr large → generalization gap (overfitting)
+//
+// For tick-scale prediction, typical val_correlation is near 0 even for good
+// models (BTC at this scale is mostly noise). A train_corr of 0.30 with
+// val_corr of 0.0 is therefore the regression analog of "100% train acc, 50%
+// val acc" — clear overfit.
+//
+// Defaults match the binary thresholds shape (0.99 / 0.20) but the
+// interpretation is correlation-space. Both tunable separately if needed.
+#define OVERFIT_TRAIN_CORR_THRESHOLD  0.99f   // |train_corr| >= this = memorization
+#define OVERFIT_TRAIN_VAL_CORR_GAP    0.20f   // train_corr - val_corr >= this = gap
+
+static inline OverfitReport OverfitDetection_CheckRegression(float train_corr, float val_corr,
+                                                               int n_features,
+                                                               float corr_thresh,
+                                                               float gap_thresh,
+                                                               int feat_cap) {
+    OverfitReport r;
+    memset(&r, 0, sizeof(r));
+    // we reuse the OverfitReport struct — fields hold correlations for regression.
+    // train_accuracy = train_corr, val_accuracy = val_corr, train_val_gap = corr gap.
+    // The display layer reads WalkForwardResults.label_kind to format these.
+    r.train_accuracy = train_corr;
+    r.cv_accuracy    = -1.0f;
+    r.val_accuracy   = val_corr;
+    r.n_features     = n_features;
+    r.train_cv_gap   = -1.0f;
+    r.train_val_gap  = train_corr - val_corr;
+
+    // check 1: extreme train correlation (memorization on continuous targets)
+    float abs_train = train_corr < 0.0f ? -train_corr : train_corr;
+    if (abs_train >= corr_thresh) {
+        r.is_overfit   = 1;
+        r.check_failed = 1;
+        snprintf(r.reason, sizeof(r.reason),
+                 "memorization: |train_corr| %.4f >= %.2f", abs_train, corr_thresh);
+        return r;
+    }
+
+    // check 2: train/val correlation gap
+    if (r.train_val_gap >= gap_thresh) {
+        r.is_overfit   = 1;
+        r.check_failed = 3;  // analog of binary "train/val gap"
+        snprintf(r.reason, sizeof(r.reason),
+                 "train/val corr gap: %.4f >= %.2f (train=%.4f, val=%.4f)",
+                 r.train_val_gap, gap_thresh, train_corr, val_corr);
+        return r;
+    }
+
+    // check 3: feature count cap (optional, same as classification)
+    if (feat_cap > 0 && n_features >= feat_cap) {
+        r.is_overfit   = 1;
+        r.check_failed = 4;
+        snprintf(r.reason, sizeof(r.reason),
+                 "feature count: %d >= %d", n_features, feat_cap);
+        return r;
+    }
+
+    r.is_overfit = 0;
+    snprintf(r.reason, sizeof(r.reason), "clean");
+    return r;
+}
+
+static inline OverfitReport OverfitDetection_CheckRegressionDefaults(float train_corr,
+                                                                      float val_corr,
+                                                                      int n_features) {
+    return OverfitDetection_CheckRegression(train_corr, val_corr, n_features,
+                                             OVERFIT_TRAIN_CORR_THRESHOLD,
+                                             OVERFIT_TRAIN_VAL_CORR_GAP,
+                                             OVERFIT_FEATURE_COUNT_CAP);
+}
+
 // aggregate overfit status across multiple folds
 // returns: number of folds flagged as overfit
 static inline int OverfitDetection_CountOverfit(const OverfitReport *reports, int n_folds) {

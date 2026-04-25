@@ -140,14 +140,19 @@ struct BacktestStats {
 //======================================================================================================
 // [RESULTS]
 //======================================================================================================
-#define BACKTEST_MAX_EQUITY    8192
-#define BACKTEST_SAMPLES_INIT  500000  // initial allocation, grows as needed
+#define BACKTEST_EQUITY_INIT   8192    // initial equity_curve allocation, grows 2x as needed
+#define BACKTEST_SAMPLES_INIT  500000  // initial sample buffer allocation, grows as needed
 #define BACKTEST_TRADE_CSV     "logging/BACKTEST_order_history.csv"
 
 struct BacktestResults {
     BacktestStats stats;
-    double equity_curve[BACKTEST_MAX_EQUITY];
+    // equity curve — recorded per completed trade. Long backtests at 50-200
+    // trades/day across multi-year datasets exceed any small fixed cap, so
+    // this is dynamic. Stats (Sharpe / max DD / return) compute from this
+    // array — silent truncation = wrong stats. NEVER cap this silently.
+    double *equity_curve;
     int equity_count;
+    int equity_capacity;
     char trade_csv_path[256];
     // ML features (dynamically allocated, grows as needed)
     float *feature_matrix;   // [sample_capacity * MODEL_MAX_FEATURES]
@@ -169,6 +174,8 @@ static inline void BacktestResults_Init(BacktestResults *r) {
     r->sample_tick_indices = (int *)malloc(r->sample_capacity * sizeof(int));
     r->sample_prices       = (double *)malloc(r->sample_capacity * sizeof(double));
     r->sample_regimes      = (int *)malloc(r->sample_capacity * sizeof(int));
+    r->equity_capacity = BACKTEST_EQUITY_INIT;
+    r->equity_curve    = (double *)malloc(r->equity_capacity * sizeof(double));
 }
 
 static inline void BacktestResults_Free(BacktestResults *r) {
@@ -177,19 +184,56 @@ static inline void BacktestResults_Free(BacktestResults *r) {
     free(r->sample_tick_indices);
     free(r->sample_prices);
     free(r->sample_regimes);
+    free(r->equity_curve);
     r->feature_matrix = NULL;
     r->labels = NULL;
     r->sample_tick_indices = NULL;
     r->sample_prices = NULL;
     r->sample_regimes = NULL;
+    r->equity_curve = NULL;
     r->sample_count = 0;
     r->sample_capacity = 0;
+    r->equity_count = 0;
+    r->equity_capacity = 0;
+}
+
+// Reset counts/scalars while PRESERVING heap allocations + their capacities.
+// Hand-rolled save/restore blocks in the run paths missed equity_curve when
+// it became dynamic (ff9ac48), which caused the first trade exit to call
+// EnsureEquityCapacity with capacity=0, hitting `while (0 < needed) cap *= 2`
+// — infinite spin at 100% CPU on the worker thread.
+//
+// When extending BacktestResults with a new dynamic field: update _Init,
+// _Free, AND this _Reset. The Ensure*Capacity helpers are also defended
+// against zero capacity (defense-in-depth) but this is the load-bearing fix.
+static inline void BacktestResults_Reset(BacktestResults *r) {
+    float *fm  = r->feature_matrix;
+    float *lb  = r->labels;
+    int   *ti  = r->sample_tick_indices;
+    double *sp = r->sample_prices;
+    int   *sr  = r->sample_regimes;
+    int    sample_cap = r->sample_capacity;
+    double *ec = r->equity_curve;
+    int    eq_cap = r->equity_capacity;
+
+    memset(r, 0, sizeof(*r));
+
+    r->feature_matrix      = fm;
+    r->labels              = lb;
+    r->sample_tick_indices = ti;
+    r->sample_prices       = sp;
+    r->sample_regimes      = sr;
+    r->sample_capacity     = sample_cap;
+    r->equity_curve        = ec;
+    r->equity_capacity     = eq_cap;
 }
 
 // grow sample buffers by 2x when full
 static inline int BacktestResults_EnsureCapacity(BacktestResults *r, int needed) {
     if (needed <= r->sample_capacity) return 1;
-    int new_cap = r->sample_capacity * 2;
+    // floor: if capacity leaked to 0 (forgot to preserve in a reset path),
+    // seed from BACKTEST_SAMPLES_INIT instead of spinning on `0 *= 2`.
+    int new_cap = r->sample_capacity > 0 ? r->sample_capacity * 2 : BACKTEST_SAMPLES_INIT;
     while (new_cap < needed) new_cap *= 2;
     float *fm  = (float *)realloc(r->feature_matrix, new_cap * MODEL_MAX_FEATURES * sizeof(float));
     float *lb  = (float *)realloc(r->labels, new_cap * sizeof(float));
@@ -208,6 +252,99 @@ static inline int BacktestResults_EnsureCapacity(BacktestResults *r, int needed)
     r->sample_regimes = sr;
     r->sample_capacity = new_cap;
     return 1;
+}
+
+// grow equity_curve by 2x when full. CRITICAL — stats compute from this
+// array, so silent truncation produces wrong Sharpe / max DD / return.
+static inline int BacktestResults_EnsureEquityCapacity(BacktestResults *r, int needed) {
+    if (needed <= r->equity_capacity) return 1;
+    // floor: see BacktestResults_EnsureCapacity — same zero-capacity spin guard.
+    int new_cap = r->equity_capacity > 0 ? r->equity_capacity * 2 : BACKTEST_EQUITY_INIT;
+    while (new_cap < needed) new_cap *= 2;
+    double *ec = (double *)realloc(r->equity_curve, new_cap * sizeof(double));
+    if (!ec) {
+        fprintf(stderr, "[backtest] failed to grow equity_curve to %d (%.0f MB) — stats will be partial\n",
+                new_cap, new_cap * 8.0 / 1e6);
+        return 0;
+    }
+    r->equity_curve = ec;
+    r->equity_capacity = new_cap;
+    return 1;
+}
+
+//======================================================================================================
+// [TRAINING HELPERS]
+//======================================================================================================
+// XGBoost binary `scale_pos_weight` compensates for class imbalance.
+// At ratio 0.2% positive (typical for tight-barrier label sets on BTC),
+// the trivial "predict majority class" baseline gets >99% accuracy and
+// the loss function has zero pressure to learn the minority class —
+// every walk-forward fold flags as memorization. scale_pos_weight =
+// n_neg/n_pos rebalances the loss so positives count equally per-class.
+//
+// Multiclass (multi:softprob) ignores scale_pos_weight; use per-sample
+// weights via XGDMatrixSetFloatInfo("weight", ...) for those.
+// Regression (reg:squarederror) doesn't need it.
+//
+// Threshold for "positive": label >= 0.5f. Matches the convention used
+// in WalkForward_ComputeAccuracy and the binary-classifier label values
+// (0.0 = negative, 1.0 = positive, 0.5 = neutral and already filtered).
+static inline double XGBoost_ComputeScalePosWeight(const float *labels, int n,
+                                                     int *out_n_pos = nullptr,
+                                                     int *out_n_neg = nullptr) {
+    int n_pos = 0, n_neg = 0;
+    for (int i = 0; i < n; i++) {
+        if (labels[i] >= 0.5f) n_pos++;
+        else n_neg++;
+    }
+    if (out_n_pos) *out_n_pos = n_pos;
+    if (out_n_neg) *out_n_neg = n_neg;
+    // guard against zero-positive (degenerate dataset) — return 1.0 so
+    // XGBoost doesn't divide by zero. caller should also surface this.
+    if (n_pos == 0) return 1.0;
+    return (double)n_neg / (double)n_pos;
+}
+
+// Multiclass: scale_pos_weight is binary-only. For multiclass softmax we use
+// per-sample weights via XGDMatrixSetFloatInfo(d, "weight", ...). Inverse-
+// frequency formula:
+//
+//   weight[i] = total / (K * count[label[i]])
+//
+// Each class contributes equally to the loss regardless of frequency. A class
+// with 95% of samples gets weight ~0.21 per sample; a class with 1% gets
+// weight ~33.0 per sample. Without this, multiclass with skewed distribution
+// (e.g. PEAK_VALLEY_STABLE typically ~95% stable on tick-scale BTC) trains
+// a model that trivially predicts the majority class for high accuracy but
+// zero predictive value for the minority classes — same failure mode as
+// binary class imbalance with no scale_pos_weight.
+//
+// out_weights buffer must be `count` floats. out_counts (optional, [num_classes])
+// receives per-class sample counts so caller can log them.
+static inline void XGBoost_ComputeMulticlassWeights(const float *labels, int count,
+                                                      int num_classes, float *out_weights,
+                                                      int *out_counts = nullptr) {
+    if (num_classes < 2 || count <= 0) {
+        for (int i = 0; i < count; i++) out_weights[i] = 1.0f;
+        return;
+    }
+    int K = num_classes > 16 ? 16 : num_classes;
+    int counts[16] = {0};
+    for (int i = 0; i < count; i++) {
+        int c = (int)(labels[i] + 0.5f);
+        if (c >= 0 && c < K) counts[c]++;
+    }
+    for (int i = 0; i < count; i++) {
+        int c = (int)(labels[i] + 0.5f);
+        if (c >= 0 && c < K && counts[c] > 0) {
+            out_weights[i] = (float)count / ((float)K * (float)counts[c]);
+        } else {
+            out_weights[i] = 1.0f;
+        }
+    }
+    if (out_counts) {
+        for (int k = 0; k < K; k++) out_counts[k] = counts[k];
+    }
 }
 
 //======================================================================================================
@@ -339,21 +476,7 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
     }
 
     // reset results — preserve dynamic allocations, just reset counts
-    {
-        float *fm = results->feature_matrix;
-        float *lb = results->labels;
-        int   *ti = results->sample_tick_indices;
-        double *sp = results->sample_prices;
-        int   *sr = results->sample_regimes;
-        int cap = results->sample_capacity;
-        memset(results, 0, sizeof(*results));
-        results->feature_matrix = fm;
-        results->labels = lb;
-        results->sample_tick_indices = ti;
-        results->sample_prices = sp;
-        results->sample_regimes = sr;
-        results->sample_capacity = cap;
-    }
+    BacktestResults_Reset(results);
 
     // load config
     ControllerConfig<BACKTEST_FP> cfg;
@@ -544,9 +667,10 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
                                                tick.is_buyer_maker,
                                                (double)(ticks[i].timestamp_us / 1000000));
 
-            // track equity curve (on each trade completion)
+            // track equity curve (on each trade completion).
+            // grows dynamically — CAPPING THIS CONTAMINATES STATS (Sharpe/DD/return).
             if (ctrl.total_buys > 0 && (ctrl.wins + ctrl.losses) > (uint32_t)results->equity_count) {
-                if (results->equity_count < BACKTEST_MAX_EQUITY) {
+                if (BacktestResults_EnsureEquityCapacity(results, results->equity_count + 1)) {
                     double bal = FPN_ToDouble(ctrl.balance);
                     double rpnl = FPN_ToDouble(ctrl.realized_pnl);
                     results->equity_curve[results->equity_count] = bal + rpnl;
@@ -626,12 +750,24 @@ done:
         fprintf(stderr, "[backtest] allocating label buffer: %d ticks (%.0f MB)\n",
                 label_max, (double)label_max * sizeof(HistoricalTick) / 1e6);
         if (label_ticks) {
+            // CRITICAL: BacktestData_Load resets *count to 0 each call (see line ~68),
+            // so passing &label_count caused each file to overwrite the previous
+            // file's count rather than accumulate. The data writes overlapped and
+            // label_count ended up = size_of_last_file rather than sum_of_files.
+            // Then sample_tick_indices (set during replay using global total_processed)
+            // would all clamp to label_count-1, pointing into a garbage region of
+            // the corrupted buffer. Every multi-file label run was on noise.
+            // Fix: use a per-file local count, accumulate into label_count manually.
             for (int f = 0; f < run_cfg->num_data_files; f++) {
                 if (label_count >= label_max) break;
-                int before = label_count;
-                BacktestData_Load(label_ticks + label_count, &label_count, label_max - label_count,
+                int per_file_count = 0;
+                BacktestData_Load(label_ticks + label_count, &per_file_count,
+                                  label_max - label_count,
                                   run_cfg->data_paths[f]);
+                label_count += per_file_count;
             }
+            fprintf(stderr, "[backtest] label buffer: %d total ticks across %d files\n",
+                    label_count, run_cfg->num_data_files);
 
             // get label function from table
             LabelFn label_fn = NULL;
@@ -672,17 +808,13 @@ done:
             results->stats.total_trades, results->stats.total_pnl);
 
     // gate reason breakdown — shows WHY the engine isn't trading
+    // names come from GATE_REASON_TABLE[] (single source of truth in PortfolioController.hpp)
     if (total_slow_cycles > 0) {
-        static const char *gr_names[] = {
-            "ok", "warmup", "no_signal", "no_trade", "book",
-            "danger", "kill", "recovery", "volatile", "cooldown",
-            "wind_down", "paused", "downtrend", "cost", "barrier"
-        };
         fprintf(stderr, "[backtest] gate reason breakdown (%d slow-path cycles):\n", total_slow_cycles);
         for (int g = 0; g < NUM_GATE_REASONS; g++) {
             if (gate_counts[g] > 0) {
                 fprintf(stderr, "  %-12s %7d  (%5.1f%%)\n",
-                        gr_names[g], gate_counts[g],
+                        GATE_REASON_TABLE[g].name, gate_counts[g],
                         100.0 * gate_counts[g] / total_slow_cycles);
             }
         }
@@ -711,8 +843,14 @@ done:
 #define WALKFORWARD_MAX_FOLDS VALIDATION_MAX_FOLDS
 
 struct WalkForwardFoldResult {
-    float train_accuracy;
-    float val_accuracy;
+    // classification metrics — populated for binary + multiclass label kinds
+    float train_accuracy;     // [0..1]
+    float val_accuracy;       // [0..1]
+    // regression metrics — populated for regression label kind
+    float train_mse;
+    float val_mse;
+    float train_correlation;  // Pearson r in [-1, +1]
+    float val_correlation;
     int train_samples;
     int test_samples;
     OverfitReport overfit;
@@ -725,10 +863,16 @@ struct WalkForwardResults {
     PurgedSplit splits[WALKFORWARD_MAX_FOLDS];
     int num_folds;          // total folds requested
     int valid_folds;        // folds that had enough data
-    float mean_val_accuracy;
-    float std_val_accuracy;
-    float mean_train_accuracy;
-    int overfit_count;      // folds flagged as overfit
+    // metric aggregates — interpretation depends on label_kind
+    float mean_val_accuracy;       // binary/multiclass
+    float std_val_accuracy;        // binary/multiclass
+    float mean_train_accuracy;     // binary/multiclass
+    float mean_val_mse;            // regression
+    float mean_val_correlation;    // regression — load-bearing: signal vs noise
+    float mean_train_correlation;  // regression
+    int overfit_count;      // folds flagged as overfit (binary/multiclass only)
+    int label_kind;         // 0=binary, 1=regression, ≥2=multiclass — display reads this
+    int num_classes;        // ≥2 for multiclass; 0 for binary; 1 for regression
     double elapsed_ms;
     char fingerprint[65];   // SHA256 of config + data (empty if not computed)
 };
@@ -748,14 +892,84 @@ static inline float WalkForward_ComputeAccuracy(const float *predictions, const 
     return (float)correct / count;
 }
 
+// multiclass accuracy: predictions is count × num_classes flat array (softmax probs).
+// argmax over each row, compare to integer truth (rounded from label float).
+static inline float WalkForward_ComputeMulticlassAccuracy(const float *predictions,
+                                                            const float *labels,
+                                                            int count, int num_classes) {
+    if (count <= 0 || num_classes < 2) return 0.0f;
+    int correct = 0;
+    for (int i = 0; i < count; i++) {
+        int best = 0;
+        float best_p = predictions[i * num_classes];
+        for (int k = 1; k < num_classes; k++) {
+            float p = predictions[i * num_classes + k];
+            if (p > best_p) { best_p = p; best = k; }
+        }
+        int truth = (int)(labels[i] + 0.5f);
+        if (best == truth) correct++;
+    }
+    return (float)correct / count;
+}
+
+// regression: mean squared error. Lower = better. Sensitive to outliers.
+static inline float WalkForward_ComputeMSE(const float *predictions, const float *labels,
+                                             int count) {
+    if (count <= 0) return 0.0f;
+    double sum_sq = 0.0;
+    for (int i = 0; i < count; i++) {
+        double d = (double)predictions[i] - (double)labels[i];
+        sum_sq += d * d;
+    }
+    return (float)(sum_sq / count);
+}
+
+// regression: Pearson correlation between predictions and labels in [-1, +1].
+// 0 ≈ no signal. >0.05 ≈ weak but real signal. >0.2 ≈ meaningful for tick-scale.
+// This is the metric that matters for "did the model learn anything" in
+// regression — MSE alone can be misleading (a model predicting always-zero
+// gets low MSE on small-magnitude targets while having zero predictive power).
+static inline float WalkForward_ComputeCorrelation(const float *predictions,
+                                                      const float *labels, int count) {
+    if (count < 2) return 0.0f;
+    double mean_p = 0.0, mean_l = 0.0;
+    for (int i = 0; i < count; i++) {
+        mean_p += predictions[i];
+        mean_l += labels[i];
+    }
+    mean_p /= count;
+    mean_l /= count;
+
+    double sum_pl = 0.0, sum_pp = 0.0, sum_ll = 0.0;
+    for (int i = 0; i < count; i++) {
+        double dp = (double)predictions[i] - mean_p;
+        double dl = (double)labels[i] - mean_l;
+        sum_pl += dp * dl;
+        sum_pp += dp * dp;
+        sum_ll += dl * dl;
+    }
+    double denom = sqrt(sum_pp * sum_ll);
+    if (denom <= 0.0) return 0.0f;
+    return (float)(sum_pl / denom);
+}
+
 static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                                             const BacktestResults *data,
                                             int n_splits, int horizon_ticks,
                                             int buffer_ticks, int min_train_samples,
                                             volatile int *progress_pct,
-                                            volatile int *cancel_flag) {
+                                            volatile int *cancel_flag,
+                                            int label_type = LABEL_WIN_LOSS) {
     memset(wf, 0, sizeof(*wf));
     *progress_pct = 0;
+
+    // label-type-aware: pick objective + metric kind once, branch downstream.
+    // Defaults to binary if caller didn't specify (backward compat).
+    int num_classes_lt = LabelType_NumClasses(label_type);
+    int is_regression  = LabelType_IsRegression(label_type);
+    int is_multiclass  = LabelType_IsMulticlass(label_type);
+    wf->label_kind   = num_classes_lt;
+    wf->num_classes  = num_classes_lt;
 
 #ifndef USE_XGBOOST
     fprintf(stderr, "[walkforward] XGBoost not compiled in — cannot train. "
@@ -779,21 +993,33 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     if (min_train_samples < 50) min_train_samples = 50;
     wf->num_folds = n_splits;
 
-    // pre-compact: extract non-neutral samples into contiguous arrays
-    // barrier labels produce ~97% neutrals, so we must split over non-neutrals only
-    // otherwise later folds' test sets land in the all-neutral tail and get 0 samples
-    int nn_count = 0; // non-neutral count
-    for (int i = 0; i < data->sample_count; i++) {
-        if (data->labels[i] != 0.5f) nn_count++;
+    // pre-compact: for binary labels, extract non-neutral samples (label != 0.5)
+    // because barrier labels produce ~97% neutrals and splitting over the full
+    // sample range puts later folds' test sets in the all-neutral tail.
+    //
+    // For regression, every sample is a valid label (0.5 is a legitimate value,
+    // not a sentinel). Don't filter — copy all samples through.
+    // For multiclass, labels are integer class ids 0..K-1, never 0.5 — no filter
+    // is needed but harmless. Skip the filter for clarity + correctness.
+    int filter_neutrals = LabelType_IsBinary(label_type);
+
+    int nn_count = 0;
+    if (filter_neutrals) {
+        for (int i = 0; i < data->sample_count; i++) {
+            if (data->labels[i] != 0.5f) nn_count++;
+        }
+    } else {
+        nn_count = data->sample_count;
     }
 
     if (nn_count < 100) {
-        fprintf(stderr, "[walkforward] only %d non-neutral samples — need at least 100\n", nn_count);
+        fprintf(stderr, "[walkforward] only %d %s samples — need at least 100\n",
+                nn_count, filter_neutrals ? "non-neutral" : "labeled");
         *progress_pct = 100;
         return;
     }
 
-    // allocate compacted non-neutral data (features + labels + original indices for purge)
+    // allocate compacted data (features + labels + original indices for purge)
     float *nn_features = (float *)malloc(nn_count * MODEL_NUM_FEATURES * sizeof(float));
     float *nn_labels   = (float *)malloc(nn_count * sizeof(float));
     int   *nn_indices  = (int *)malloc(nn_count * sizeof(int)); // original sample index
@@ -806,7 +1032,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
 
     int j = 0;
     for (int i = 0; i < data->sample_count; i++) {
-        if (data->labels[i] == 0.5f) continue;
+        if (filter_neutrals && data->labels[i] == 0.5f) continue;
         memcpy(&nn_features[j * MODEL_NUM_FEATURES],
                &data->feature_matrix[i * MODEL_NUM_FEATURES],
                MODEL_NUM_FEATURES * sizeof(float));
@@ -815,8 +1041,10 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         j++;
     }
 
-    fprintf(stderr, "[walkforward] non-neutral samples: %d / %d total (%.1f%%)\n",
-            nn_count, data->sample_count, 100.0 * nn_count / data->sample_count);
+    fprintf(stderr, "[walkforward] %s samples: %d / %d total (%.1f%%) — kind=%s\n",
+            filter_neutrals ? "non-neutral" : "labeled",
+            nn_count, data->sample_count, 100.0 * nn_count / data->sample_count,
+            LabelType_KindName(label_type));
 
     // compute purge gap in non-neutral index space
     // original purge_gap is in sample indices; scale by non-neutral density
@@ -912,8 +1140,20 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             continue;
         }
 
-        // training params — match the suite's existing training config
-        XGBoosterSetParam(booster, "objective", "binary:logistic");
+        // training params — kind-aware objective (label-type-aware metric invariant).
+        // Binary classification: binary:logistic + scale_pos_weight for class balance.
+        // Multiclass: multi:softprob + num_class. scale_pos_weight is binary-only;
+        //   multiclass class imbalance needs per-sample weights (deferred).
+        // Regression: reg:squarederror, no class-weight concept.
+        if (is_regression) {
+            XGBoosterSetParam(booster, "objective", "reg:squarederror");
+        } else if (is_multiclass) {
+            XGBoosterSetParam(booster, "objective", "multi:softprob");
+            char nc_s[8]; snprintf(nc_s, 8, "%d", num_classes_lt);
+            XGBoosterSetParam(booster, "num_class", nc_s);
+        } else {
+            XGBoosterSetParam(booster, "objective", "binary:logistic");
+        }
         XGBoosterSetParam(booster, "max_depth", "6");
         XGBoosterSetParam(booster, "eta", "0.1");
         XGBoosterSetParam(booster, "subsample", "0.8");
@@ -922,58 +1162,112 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         XGBoosterSetParam(booster, "nthread", "1");
         XGBoosterSetParam(booster, "verbosity", "0");
         XGBoosterSetParam(booster, "seed", "42");
+        // class balance — kind-specific.
+        // Binary: scale_pos_weight = n_neg/n_pos (single param).
+        // Multiclass: per-sample inverse-frequency weights via DMatrix info.
+        // Regression: no class-imbalance concept.
+        if (!is_regression && !is_multiclass) {
+            int n_pos = 0, n_neg = 0;
+            double spw = XGBoost_ComputeScalePosWeight(train_labels, n_train, &n_pos, &n_neg);
+            char spw_s[24]; snprintf(spw_s, sizeof(spw_s), "%.4f", spw);
+            XGBoosterSetParam(booster, "scale_pos_weight", spw_s);
+            fprintf(stderr, "[walkforward] fold %d: class balance +%d / -%d → scale_pos_weight=%s\n",
+                    f + 1, n_pos, n_neg, spw_s);
+        } else if (is_multiclass) {
+            float *mc_weights = (float *)malloc(n_train * sizeof(float));
+            int   mc_counts[16] = {0};
+            if (mc_weights) {
+                XGBoost_ComputeMulticlassWeights(train_labels, n_train, num_classes_lt,
+                                                  mc_weights, mc_counts);
+                XGDMatrixSetFloatInfo(dtrain, "weight", mc_weights, n_train);
+                fprintf(stderr, "[walkforward] fold %d: multiclass class counts:", f + 1);
+                for (int k = 0; k < num_classes_lt && k < 16; k++) {
+                    fprintf(stderr, " c%d=%d (%.1f%%)", k, mc_counts[k],
+                            n_train > 0 ? 100.0f * mc_counts[k] / n_train : 0.0f);
+                }
+                fprintf(stderr, " — per-sample weights applied\n");
+                free(mc_weights);
+            }
+        }
 
-        // train with early stopping eval on test set
-        DMatrixHandle evals[] = { dtrain, dtest };
-        const char *eval_names[] = { "train", "val" };
+        // train (no early stopping yet — full n_rounds always)
         int n_rounds = 200;
-
         for (int r = 0; r < n_rounds; r++) {
             ret = XGBoosterUpdateOneIter(booster, r, dtrain);
             if (ret != 0) break;
         }
 
-        // predict on train set (for overfit detection)
+        // predict on train + test, compute kind-appropriate metric
         {
-            bst_ulong out_len;
-            const float *out_result;
-            ret = XGBoosterPredict(booster, dtrain, 0, 0, 0, &out_len, &out_result);
-            if (ret == 0 && (int)out_len == n_train) {
-                fr->train_accuracy = WalkForward_ComputeAccuracy(
-                    out_result, train_labels, n_train, 0.5f);
+            bst_ulong out_len_tr = 0, out_len_te = 0;
+            const float *pred_tr = nullptr, *pred_te = nullptr;
+            int pred_tr_ok = (XGBoosterPredict(booster, dtrain, 0, 0, 0, &out_len_tr, &pred_tr) == 0);
+            int pred_te_ok = (XGBoosterPredict(booster, dtest,  0, 0, 0, &out_len_te, &pred_te) == 0);
+
+            if (is_regression) {
+                if (pred_tr_ok && (int)out_len_tr == n_train) {
+                    fr->train_mse         = WalkForward_ComputeMSE(pred_tr, train_labels, n_train);
+                    fr->train_correlation = WalkForward_ComputeCorrelation(pred_tr, train_labels, n_train);
+                }
+                if (pred_te_ok && (int)out_len_te == n_test) {
+                    fr->val_mse         = WalkForward_ComputeMSE(pred_te, test_labels, n_test);
+                    fr->val_correlation = WalkForward_ComputeCorrelation(pred_te, test_labels, n_test);
+                }
+            } else if (is_multiclass) {
+                int K = num_classes_lt;
+                if (pred_tr_ok && (int)out_len_tr == n_train * K) {
+                    fr->train_accuracy = WalkForward_ComputeMulticlassAccuracy(
+                        pred_tr, train_labels, n_train, K);
+                }
+                if (pred_te_ok && (int)out_len_te == n_test * K) {
+                    fr->val_accuracy = WalkForward_ComputeMulticlassAccuracy(
+                        pred_te, test_labels, n_test, K);
+                }
+            } else {
+                if (pred_tr_ok && (int)out_len_tr == n_train) {
+                    fr->train_accuracy = WalkForward_ComputeAccuracy(
+                        pred_tr, train_labels, n_train, 0.5f);
+                }
+                if (pred_te_ok && (int)out_len_te == n_test) {
+                    fr->val_accuracy = WalkForward_ComputeAccuracy(
+                        pred_te, test_labels, n_test, 0.5f);
+                }
             }
         }
 
-        // predict on test set (the metric that matters)
-        {
-            bst_ulong out_len;
-            const float *out_result;
-            ret = XGBoosterPredict(booster, dtest, 0, 0, 0, &out_len, &out_result);
-            if (ret == 0 && (int)out_len == n_test) {
-                fr->val_accuracy = WalkForward_ComputeAccuracy(
-                    out_result, test_labels, n_test, 0.5f);
-            }
-        }
-
-        // feature importances (stability tracking hook)
-        // XGBoost importance via dump → we use a simpler approach: score type
-        // for now, zero-fill — populated when we add importance extraction
+        // feature importances (stability tracking hook) — zero-filled until
+        // we wire XGBoost importance extraction
         memset(fr->feature_importances, 0, sizeof(fr->feature_importances));
 
         fr->train_samples = n_train;
-        fr->test_samples = n_test;
+        fr->test_samples  = n_test;
         fr->valid = 1;
 
-        // overfit detection per fold
-        fr->overfit = OverfitDetection_CheckDefaults(
-            fr->train_accuracy, -1.0f, fr->val_accuracy, MODEL_NUM_FEATURES);
+        // overfit detection — kind-appropriate. Classification uses accuracy
+        // thresholds (binary + multiclass). Regression uses Pearson correlation
+        // thresholds — see OverfitDetection_CheckRegression for rationale.
+        if (is_regression) {
+            fr->overfit = OverfitDetection_CheckRegressionDefaults(
+                fr->train_correlation, fr->val_correlation, MODEL_NUM_FEATURES);
+        } else {
+            fr->overfit = OverfitDetection_CheckDefaults(
+                fr->train_accuracy, -1.0f, fr->val_accuracy, MODEL_NUM_FEATURES);
+        }
         OverfitDetection_Print(&fr->overfit, f);
-
-        // accumulate stats
-        sum_val += fr->val_accuracy;
-        sum_val_sq += fr->val_accuracy * fr->val_accuracy;
-        sum_train += fr->train_accuracy;
         if (fr->overfit.is_overfit) wf->overfit_count++;
+
+        // accumulate aggregates — kind-appropriate
+        if (is_regression) {
+            sum_val      += fr->val_mse;          // MSE for "lower=better" aggregate
+            sum_val_sq   += fr->val_mse * fr->val_mse;
+            sum_train    += fr->train_mse;
+            wf->mean_val_correlation   += fr->val_correlation;   // mean of fold rs
+            wf->mean_train_correlation += fr->train_correlation;
+        } else {
+            sum_val    += fr->val_accuracy;
+            sum_val_sq += fr->val_accuracy * fr->val_accuracy;
+            sum_train  += fr->train_accuracy;
+        }
         counted_folds++;
 
         // cleanup
@@ -983,21 +1277,35 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
 
         *progress_pct = (int)(100.0 * (f + 1) / n_splits);
 
-        fprintf(stderr, "[walkforward] fold %d/%d: train_acc=%.4f, val_acc=%.4f%s\n",
-                f + 1, n_splits, fr->train_accuracy, fr->val_accuracy,
-                fr->overfit.is_overfit ? " [OVERFIT]" : "");
+        // log per-fold result — kind-appropriate
+        if (is_regression) {
+            fprintf(stderr, "[walkforward] fold %d/%d: train_mse=%.6f val_mse=%.6f | corr train=%.4f val=%.4f\n",
+                    f + 1, n_splits, fr->train_mse, fr->val_mse,
+                    fr->train_correlation, fr->val_correlation);
+        } else {
+            fprintf(stderr, "[walkforward] fold %d/%d: train_acc=%.4f, val_acc=%.4f%s\n",
+                    f + 1, n_splits, fr->train_accuracy, fr->val_accuracy,
+                    fr->overfit.is_overfit ? " [OVERFIT]" : "");
+        }
     }
 
     free(nn_features);
     free(nn_labels);
     free(nn_indices);
 
-    // compute aggregate stats
+    // compute aggregate stats — kind-appropriate
     if (counted_folds > 0) {
-        wf->mean_val_accuracy = sum_val / counted_folds;
-        wf->mean_train_accuracy = sum_train / counted_folds;
-        float var = (sum_val_sq / counted_folds) - (wf->mean_val_accuracy * wf->mean_val_accuracy);
-        wf->std_val_accuracy = (var > 0.0f) ? (float)sqrt((double)var) : 0.0f;
+        if (is_regression) {
+            wf->mean_val_mse           = sum_val   / counted_folds;
+            wf->mean_val_correlation  /= counted_folds;
+            wf->mean_train_correlation /= counted_folds;
+            // mean_val/train_accuracy stay 0 — display reads label_kind to pick
+        } else {
+            wf->mean_val_accuracy   = sum_val / counted_folds;
+            wf->mean_train_accuracy = sum_train / counted_folds;
+            float var = (sum_val_sq / counted_folds) - (wf->mean_val_accuracy * wf->mean_val_accuracy);
+            wf->std_val_accuracy = (var > 0.0f) ? (float)sqrt((double)var) : 0.0f;
+        }
     }
 
     gettimeofday(&t_end, NULL);

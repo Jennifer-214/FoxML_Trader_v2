@@ -67,8 +67,13 @@
 // strategy ID added in the future. See pitfall P6.5.
 #define STRATEGY_NONE          0xFF
 
-// strategy short names for display (indexed by strategy ID)
+// strategy short names for display (indexed by strategy ID, ≤4 chars for tight UI columns)
 static const char *STRATEGY_SHORT_NAMES[] = {"MR", "MOM", "DIP", "ML", "EMA"};
+
+// strategy full names for logs and verbose displays (indexed by strategy ID)
+static const char *STRATEGY_FULL_NAMES[] = {
+    "MeanReversion", "Momentum", "SimpleDip", "ML", "EmaCross"
+};
 
 //======================================================================================================
 // [REGIME CONSTANTS]

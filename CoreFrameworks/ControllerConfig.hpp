@@ -125,7 +125,13 @@ template <unsigned F> struct ControllerConfig {
                                      // variance > this = volatile spike
   uint32_t regime_hysteresis;  // slow-path cycles before regime switch (e.g. 5)
   uint32_t min_warmup_samples; // min rolling stats samples before trading (0 =
-                               // use warmup_ticks only)
+                               // use warmup_ticks only). CAPS AT W=128: this
+                               // gates on rolling.count which is bounded by
+                               // the rolling window size. Values > 128 are
+                               // CLAMPED at config load with a warning. If you
+                               // want a longer total-tick warmup, use
+                               // warmup_ticks instead — it counts raw ticks
+                               // and has no upper bound.
   // post-SL cooldown
   uint32_t sl_cooldown_cycles; // slow-path cycles to pause buying after SL (0 =
                                // disabled)
@@ -247,6 +253,13 @@ template <unsigned F> struct ControllerConfig {
                                // price peaks
   char peak_model_path[256];   // path to P(will_peak) model
   char valley_model_path[256]; // path to P(will_valley) model
+  // Phase 5c stupid-proofing: when a model is loaded from a run bundle
+  // (core_N_model_dir), the engine reads models/{dir}/expected.cfg and
+  // compares ML-relevant fields against the live config. mismatches are
+  // a) warnings (default), b) load failures (strict=1), or c) ignored (=-1).
+  // strict mode is recommended for production deployment; default mode
+  // for development so a single missing expected.cfg doesn't break startup.
+  int model_verify_strict;     // 0=warn (default), 1=strict, -1=skip
   // Per-core sharding (Phase 13) — STARTUP-ONLY, ignored by hot reload
   uint8_t
       engine_mode; // ENGINE_MODE_SINGLE_CORE (default) or ENGINE_MODE_SHARDED
@@ -271,6 +284,14 @@ template <unsigned F> struct ControllerConfig {
   // own model. Default empty = use shared ml_model_path. Config syntax:
   // core_0_model_path=models/aggressive.xgb
   char core_model_path[16][256];
+  // Per-core ML model directory. When set, the engine auto-discovers
+  // role-specific models in this directory (barrier.json/.xgb,
+  // buy_signal.json/.xgb, regime.json/.xgb, exit.json/.xgb) and loads
+  // them into a CoreModelZoo. Missing files = role disabled.
+  // When BOTH model_dir and model_path are set, model_dir wins (zoo
+  // supersedes legacy single-model). Config syntax:
+  // core_0_model_dir=models/aggressive/
+  char core_model_dir[16][256];
   // Per-strategy TP/SL overrides. Default 0 = fall back to the shared
   // take_profit_pct / stop_loss_pct. Non-zero = use this instead.
   // Momentum already has momentum_tp_mult / momentum_sl_mult (stddev mults).
@@ -448,6 +469,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.confidence_enabled = 0;
   cfg.prediction_normalize = 0;
   cfg.barrier_gate_enabled = 0;
+  cfg.model_verify_strict = 0;  // 0=warn, 1=strict (fail on mismatch), -1=skip
   cfg.peak_model_path[0] = '\0';
   cfg.valley_model_path[0] = '\0';
   // Per-core sharding (Phase 13) — safe defaults: legacy mode, 4 cores if opted
@@ -458,6 +480,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
   for (int i = 0; i < 16; ++i) cfg.core_risk_pct[i] = FPN_Zero<F>();  // 0 = shared
   for (int i = 0; i < 16; ++i) cfg.core_model_path[i][0] = '\0';    // empty = shared
+  for (int i = 0; i < 16; ++i) cfg.core_model_dir[i][0] = '\0';     // empty = use model_path or shared
   cfg.simpledip_tp_pct  = FPN_Zero<F>();  // 0 = use shared take_profit_pct
   cfg.simpledip_sl_pct  = FPN_Zero<F>();
   cfg.mr_tp_pct         = FPN_Zero<F>();
@@ -694,6 +717,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(confidence_enabled)
     CFG_PARSE_INT(prediction_normalize)
     CFG_PARSE_INT(barrier_gate_enabled)
+    CFG_PARSE_INT(model_verify_strict)
 
     // Per-core sharding (Phase 13) — engine_mode accepts both string and int
     // forms. The GUI SettingsPanel uses CFG_BOOL which writes "0"/"1"; manual
@@ -734,6 +758,19 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         strncpy(cfg.core_model_path[core_idx], val,
                 sizeof(cfg.core_model_path[core_idx]) - 1);
         cfg.core_model_path[core_idx][sizeof(cfg.core_model_path[core_idx]) - 1] = '\0';
+      }
+      continue;
+    }
+    // Per-core model dir: core_0_model_dir=models/aggressive/
+    // when set, engine auto-discovers role-specific models in the directory
+    // (barrier.json, buy_signal.json, regime.json, exit.json) and loads each
+    // present file into the per-core CoreModelZoo.
+    if (strncmp(key, "core_", 5) == 0 && strstr(key, "_model_dir")) {
+      int core_idx = atoi(key + 5);
+      if (core_idx >= 0 && core_idx < 16) {
+        strncpy(cfg.core_model_dir[core_idx], val,
+                sizeof(cfg.core_model_dir[core_idx]) - 1);
+        cfg.core_model_dir[core_idx][sizeof(cfg.core_model_dir[core_idx]) - 1] = '\0';
       }
       continue;
     }
@@ -809,6 +846,26 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   }
 
   fclose(f);
+
+  // post-load validation/clamping. min_warmup_samples gates on rolling.count
+  // which caps at the short rolling window size (W=128). Values above 128
+  // mean "warmup never completes" — user-hostile silent failure. Clamp +
+  // explain so the user understands what happened and what to use instead.
+  // (Took us multiple hours of debugging Friday night before we figured this
+  // out — the field name implied "ticks" but actually means "rolling window
+  // samples." See CLAUDE.md "Label-type-aware metric invariant" for the
+  // sibling rule about consulting source-of-truth helpers.)
+  const uint32_t ROLLING_WINDOW_SHORT = 128; // matches RollingStats<F> default W
+  if (cfg.min_warmup_samples > ROLLING_WINDOW_SHORT) {
+    fprintf(stderr,
+            "[CFG] WARNING: min_warmup_samples=%u exceeds rolling window size "
+            "%u and would cause warmup to never complete. Clamped to %u.\n"
+            "      If you want a longer total-tick warmup, use warmup_ticks "
+            "instead (counts raw ticks, no upper bound).\n",
+            cfg.min_warmup_samples, ROLLING_WINDOW_SHORT, ROLLING_WINDOW_SHORT);
+    cfg.min_warmup_samples = ROLLING_WINDOW_SHORT;
+  }
+
   return cfg;
 }
 //======================================================================================================

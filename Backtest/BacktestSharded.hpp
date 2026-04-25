@@ -91,21 +91,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     (void)out_snapshot; // not yet wired in sharded path
 
     // Reset results — preserve dynamic allocations like the legacy path does
-    {
-        float *fm = results->feature_matrix;
-        float *lb = results->labels;
-        int   *ti = results->sample_tick_indices;
-        double *sp = results->sample_prices;
-        int   *sr = results->sample_regimes;
-        int cap = results->sample_capacity;
-        memset(results, 0, sizeof(*results));
-        results->feature_matrix = fm;
-        results->labels = lb;
-        results->sample_tick_indices = ti;
-        results->sample_prices = sp;
-        results->sample_regimes = sr;
-        results->sample_capacity = cap;
-    }
+    BacktestResults_Reset(results);
 
     // Load config (or use override)
     ControllerConfig<BACKTEST_FP> cfg;
@@ -300,8 +286,9 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 }
                 last_realized_pnl = current_realized;
 
-                // Equity curve sample (one per completed trade)
-                if (results->equity_count < BACKTEST_MAX_EQUITY) {
+                // Equity curve sample (one per completed trade).
+                // dynamic growth — capping silently contaminates stats.
+                if (BacktestResults_EnsureEquityCapacity(results, results->equity_count + 1)) {
                     double bal = FPN_ToDouble(state.oms->balance);
                     results->equity_curve[results->equity_count] = bal;
                     results->equity_count++;

@@ -70,6 +70,21 @@ static inline void log_ts(char *buf, size_t len) {
 #define GATE_REASON_BARRIER    14  // barrier gate (peak probability too high)
 #define NUM_GATE_REASONS       15
 
+// Fill rejection reasons — set in last_reject_reason when a buy attempt fails
+#define REJECT_REASON_NONE       0
+#define REJECT_REASON_SPACING    1   // too close to last buy (anti-spam)
+#define REJECT_REASON_BALANCE    2   // insufficient balance for trade
+#define REJECT_REASON_EXPOSURE   3   // would exceed max exposure cap
+#define REJECT_REASON_BREAKER    4   // circuit breaker / blown account
+#define REJECT_REASON_FULL       5   // portfolio at max_positions
+#define REJECT_REASON_DUPLICATE  6   // identical price already held
+#define REJECT_REASON_MIN_VOL    7   // volatility below threshold
+#define NUM_REJECT_REASONS       8
+
+static const char *REJECT_REASON_NAMES[NUM_REJECT_REASONS] = {
+    "", "spacing", "balance", "exposure", "breaker", "max_pos", "duplicate", "min_vol"
+};
+
 // centralized gate reason metadata — renderers look up name/description here.
 // add new gate reasons: one #define above + one row below.
 struct GateReasonDef {
@@ -564,12 +579,11 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
     const char *reasons[] = {"TP", "SL", "TIME", "SESSION_CLOSE"};
     {
       double pnl_d = FPN_ToDouble(pos_pnl);
-      static const char *sn[] = {"MR", "MOM", "DIP", "ML", "EMA"};
       char ts[16]; log_ts(ts, sizeof(ts));
       fprintf(stderr, "[%s] [TRADE] SELL $%.2f × %.6f %s %s$%.2f %s bal=$%.2f\n",
               ts, exit_d, qty_d, reasons[reason],
               pnl_d >= 0 ? "+" : "", pnl_d,
-              (strat >= 0 && strat < 5) ? sn[strat] : "?",
+              (strat >= 0 && strat < NUM_STRATEGIES) ? STRATEGY_SHORT_NAMES[strat] : "?",
               FPN_ToDouble(ctrl->balance));
     }
     TradeLogBuffer_PushSell(&ctrl->trade_buf, rec->tick, exit_d, qty_d, entry_d, delta_pct,
@@ -936,11 +950,11 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
           ctrl->strategy_id = ctrl->config.default_strategy;
       PortfolioController_StrategyDispatch(ctrl, current_price);
       ctrl->state = CONTROLLER_ACTIVE;
-      static const char *strat_names[] = {"MR", "Momentum", "SimpleDip", "ML", "EmaCross"};
       int sid = ctrl->strategy_id;
       { char ts[16]; log_ts(ts, sizeof(ts));
       fprintf(stderr, "[%s] [SESSION] warmup complete — %d samples, strategy=%s, price=$%.2f\n",
-              ts, ctrl->rolling.count, (sid >= 0 && sid < 5) ? strat_names[sid] : "?",
+              ts, ctrl->rolling.count,
+              (sid >= 0 && sid < NUM_STRATEGIES) ? STRATEGY_FULL_NAMES[sid] : "?",
               FPN_ToDouble(current_price)); }
     }
 
@@ -1251,12 +1265,11 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
         ctrl->total_buys++;
         ctrl->idle_cycles = 0;  // reset gate death spiral counter
         {
-          static const char *sn[] = {"MR", "MOM", "DIP", "ML", "EMA"};
           int si = ctrl->strategy_id;
           char ts[16]; log_ts(ts, sizeof(ts));
           fprintf(stderr, "[%s] [TRADE] BUY $%.2f × %.6f ($%.2f) %s tp=$%.2f sl=$%.2f bal=$%.2f\n",
                   ts, FPN_ToDouble(fill_price), FPN_ToDouble(sized_qty), FPN_ToDouble(cost),
-                  (si >= 0 && si < 5) ? sn[si] : "?",
+                  (si >= 0 && si < NUM_STRATEGIES) ? STRATEGY_SHORT_NAMES[si] : "?",
                   FPN_ToDouble(tp_price), FPN_ToDouble(sl_price),
                   FPN_ToDouble(FPN_SubSat(ctrl->balance, total_cost)));
         }
@@ -1658,16 +1671,15 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       ctrl->halt_reason = 0;
     }
     // log gate state transitions (slow path only, ~1 per state change)
+    // names come from GATE_REASON_TABLE — single source of truth, prevents
+    // the local-array-falls-out-of-sync bug class (had 14 entries when
+    // NUM_GATE_REASONS=15 → OOB read for GATE_REASON_BARRIER).
     if (ctrl->gate_reason != prev_gate) {
-      static const char *gr[] = {
-        "ok", "warmup", "no_signal", "no_trade", "book",
-        "danger", "kill", "recovery", "volatile", "cooldown",
-        "wind_down", "paused", "downtrend", "cost"
-      };
       int gi = (ctrl->gate_reason >= 0 && ctrl->gate_reason < NUM_GATE_REASONS) ? ctrl->gate_reason : 0;
       int pi = (prev_gate >= 0 && prev_gate < NUM_GATE_REASONS) ? prev_gate : 0;
       char ts[16]; log_ts(ts, sizeof(ts));
-      fprintf(stderr, "[%s] [GATE] %s → %s\n", ts, gr[pi], gr[gi]);
+      fprintf(stderr, "[%s] [GATE] %s → %s\n", ts,
+              GATE_REASON_TABLE[pi].name, GATE_REASON_TABLE[gi].name);
     }
   }
 }

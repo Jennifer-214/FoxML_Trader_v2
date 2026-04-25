@@ -47,6 +47,8 @@
 #include "../CoreFrameworks/ControllerConfig.hpp"
 #include "../CoreFrameworks/GateParameters.hpp"
 #include "../FixedPoint/FixedPointN.hpp"
+#include "../ML_Headers/BarrierGate.hpp"
+#include "../ML_Headers/CoreModelZoo.hpp"
 #include "../ML_Headers/ModelInference.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/RegimeDetector.hpp"
@@ -280,14 +282,23 @@ inline void EmaCross_BuildParameters(
 }
 
 //======================================================================================================
-// [ML — model-driven buy signals]
+// [ML — model-driven buy signals via CoreModelZoo]
 //======================================================================================================
-// Packs features from rolling stats, runs inference on the loaded model,
-// and produces gate parameters if prediction > threshold. Each core can
-// load a different model via core_N_model_path config.
+// Packs features from rolling stats, runs inference on whichever role models
+// are loaded in the per-core CoreModelZoo, computes BarrierGate modulation,
+// and produces gate parameters.
 //
-// The model_handle pointer is passed through the dispatcher's model_ctx
-// parameter. If null or no model loaded, falls back to SimpleDip behavior.
+// Model resolution priority (first match wins):
+//   1. CORE_MODEL_BARRIER (3-class softmax: stable/peak/valley) — primary path
+//   2. CORE_MODEL_BUY_SIGNAL (single-binary, complementary interpretation) — legacy
+//   3. no models → fall back to SimpleDip behavior
+//
+// BarrierGate modulation (when config->barrier_gate_enabled):
+//   - hard block when bg.blocked (p_peak > BARRIER_HARD_BLOCK)
+//   - hard block when prediction < ml_buy_threshold (signal too cold)
+//   - else soft modulation: scale trade_size by bg.gate ∈ [g_min, 1.0]
+//
+// model_handle_ptr is &CoreModelZoo<F> (per-core, populated by EngineSharded).
 //======================================================================================================
 template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline void ML_BuildParameters(
@@ -298,10 +309,10 @@ inline void ML_BuildParameters(
     GateParameters<F>* out,
     void* model_handle_ptr
 ) {
-    ModelHandle<F>* model = (ModelHandle<F>*)model_handle_ptr;
+    CoreModelZoo<F>* zoo = (CoreModelZoo<F>*)model_handle_ptr;
 
-    // if no model loaded, fall back to SimpleDip
-    if (!model || model->backend == MODEL_BACKEND_NONE) {
+    // if no zoo or no models loaded, fall back to SimpleDip
+    if (!zoo || !CoreModelZoo_HasAny(zoo)) {
         SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
         out->strategy_id = STRATEGY_ML;
         return;
@@ -335,10 +346,47 @@ inline void ML_BuildParameters(
             sig.vol_ratio = FPN_FromDouble<F>(1.0);
     }
 
-    // pack features + run inference
+    // pack features once — used by whichever model role is loaded
     float features[MODEL_MAX_FEATURES];
     int n = ModelFeatures_Pack(features, &sig, rolling, rolling_long);
-    float prediction = Model_Predict(model, features, n);
+
+    // run inference, prefer 3-class barrier model when available
+    double prediction = 0.5;   // neutral fallback
+    double p_peak     = 0.5;
+    double p_valley   = 0.5;
+    int have_signal   = 0;
+
+    if (zoo->loaded_mask & CORE_MODEL_BARRIER) {
+        // 3-class softmax: [0]=stable, [1]=peak, [2]=valley
+        float multi[3] = {0.0f, 0.0f, 0.0f};
+        int got = Model_PredictMulti(&zoo->barrier, features, n, multi, 3);
+        if (got >= 3) {
+            p_peak     = multi[1];
+            p_valley   = multi[2];
+            // entry signal = "valley imminent" — primary trade trigger
+            prediction = p_valley;
+            have_signal = 1;
+        } else if (got == 1) {
+            // model was actually binary (mis-labeled as barrier role) — still usable
+            prediction = multi[0];
+            p_peak     = 1.0 - prediction;
+            p_valley   = prediction;
+            have_signal = 1;
+        }
+    } else if (zoo->loaded_mask & CORE_MODEL_BUY_SIGNAL) {
+        // legacy single-binary: complementary interpretation
+        prediction = Model_Predict(&zoo->buy_signal, features, n);
+        p_peak     = 1.0 - prediction;
+        p_valley   = prediction;
+        have_signal = 1;
+    }
+
+    // if inference failed, fall back to SimpleDip
+    if (!have_signal) {
+        SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
+        out->strategy_id = STRATEGY_ML;
+        return;
+    }
 
     // TP/SL from ML-specific config
     FPN<F> tp_pct = config->ml_tp_pct;
@@ -349,17 +397,30 @@ inline void ML_BuildParameters(
     // volume gate
     FPN<F> volume_threshold = FPN_Mul(rolling->volume_avg, config->volume_multiplier);
 
-    // sizing
+    // sizing — base trade size before barrier modulation
     FPN<F> trade_size = FPN_Zero<F>();
     if (!FPN_IsZero(entry_price)) {
         trade_size = FPN_DivNoAssert(allocated_balance, entry_price);
     }
 
-    // only enter if prediction exceeds threshold
+    // gate decision: BarrierGate (continuous modulation) OR binary threshold
     double threshold = FPN_ToDouble(config->ml_buy_threshold);
-    FPN<F> gate_price = (prediction >= threshold)
-        ? entry_price  // signal is hot — set gate at current price level
-        : FPN_Zero<F>();  // signal is cold — zero gate blocks entry
+    FPN<F> gate_price = FPN_Zero<F>();  // default: zero-gate (no entry)
+
+    if (config->barrier_gate_enabled) {
+        BarrierGateResult bg = BarrierGate_Compute(p_peak, p_valley);
+        // hard block if either: barrier says "imminent peak" OR prediction below threshold
+        if (!bg.blocked && prediction >= threshold) {
+            gate_price = entry_price;
+            // soft modulation: scale position by gate strength [g_min, 1.0]
+            trade_size = FPN_Mul(trade_size, FPN_FromDouble<F>(bg.gate));
+        }
+    } else {
+        // legacy binary threshold path (backward compat when barrier_gate_enabled=0)
+        if (prediction >= threshold) {
+            gate_price = entry_price;
+        }
+    }
 
     out->bg_price_threshold   = gate_price;
     out->bg_volume_threshold  = volume_threshold;

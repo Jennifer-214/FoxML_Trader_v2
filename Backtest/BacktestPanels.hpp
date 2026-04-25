@@ -25,7 +25,9 @@
 //======================================================================================================
 // [DATA PANEL STATE]
 //======================================================================================================
-#define DATA_MAX_FILES 256
+// scan cap for the Data panel — must be ≥ MAX_DATA_FILES so the GUI doesn't
+// silently truncate before the run_config buffer fills. paired with Limits.hpp.
+#define DATA_MAX_FILES 2048
 
 struct DataPanelState {
     char data_dir[256];
@@ -93,6 +95,42 @@ static inline void DataPanel_Scan(DataPanelState *state) {
 }
 
 //======================================================================================================
+// [SAMPLES SNAPSHOT — thread-safe display struct]
+//======================================================================================================
+// Worker thread writes to this ONCE at end of Backtest_Run (after the label
+// post-pass populates results->labels[]). GUI thread reads from this when
+// rendering — never iterates results->labels[] directly, eliminating the
+// realloc-race that crashed the suite on 2026-04-25.
+//
+// Thread safety: worker writes all fields, then sets running=0 last.
+// GUI reads only when running==0. The volatile running flag prevents
+// compiler reordering of the loads/stores around it on x86.
+//
+// All three label-kind branches (binary/multiclass/regression) populate
+// the appropriate subset; the rest stay zero. label_kind tells the GUI
+// which subset to display.
+struct SamplesSnapshot {
+    int sample_count;        // 0 = no completed run yet
+    int label_type;          // LABEL_* id used during the run
+    int label_kind;          // 0 = binary, 1 = regression, 2 = multiclass
+    int num_classes;         // ≥2 for multiclass; 0 otherwise
+
+    // binary
+    int pos_count;
+    int neg_count;
+    int neutral_count;
+
+    // multiclass — class_counts[c] = number of samples in class c
+    int class_counts[16];
+
+    // regression
+    float lmin;
+    float lmax;
+    float lmean;
+    float lstddev;
+};
+
+//======================================================================================================
 // [RUN CONTROL STATE]
 //======================================================================================================
 struct RunControlState {
@@ -105,6 +143,7 @@ struct RunControlState {
     BacktestResults results;
     CandleAccumulator *candle_acc;
     TUISnapshot *snapshot;       // populated by worker after run completes
+    SamplesSnapshot stats_snapshot; // distribution stats — see comment above struct
     char config_path[256];
 };
 
@@ -112,6 +151,57 @@ static inline void RunControl_Init(RunControlState *state) {
     memset(state, 0, sizeof(*state));
     strncpy(state->config_path, "backtest.cfg", sizeof(state->config_path) - 1);
     BacktestResults_Init(&state->results);
+}
+
+// Compute distribution stats from results->labels[] into a SamplesSnapshot.
+// MUST only be called when no other thread is writing to results->labels —
+// i.e. by the worker thread AFTER Backtest_Run has populated labels in the
+// post-pass, BEFORE running=0 is set. The GUI thread reads the snapshot
+// only when running==0, giving a safe happens-before relationship.
+static inline void SamplesSnapshot_Compute(SamplesSnapshot *snap,
+                                             const BacktestResults *r,
+                                             int label_type) {
+    memset(snap, 0, sizeof(*snap));
+    snap->label_type = label_type;
+    int K = LabelType_NumClasses(label_type);
+    snap->num_classes = K;
+    snap->label_kind  = (K == 0) ? 0 : (K == 1 ? 1 : 2);
+
+    if (r->sample_count <= 0 || !r->labels) return;
+    snap->sample_count = r->sample_count;
+
+    if (snap->label_kind == 1) {
+        // regression: range / mean / σ
+        float lmin = r->labels[0], lmax = r->labels[0];
+        double sum = 0.0, sum_sq = 0.0;
+        for (int i = 0; i < r->sample_count; i++) {
+            float v = r->labels[i];
+            sum += v; sum_sq += (double)v * v;
+            if (v < lmin) lmin = v;
+            if (v > lmax) lmax = v;
+        }
+        double mean = sum / r->sample_count;
+        double var  = (sum_sq / r->sample_count) - mean * mean;
+        snap->lmin    = lmin;
+        snap->lmax    = lmax;
+        snap->lmean   = (float)mean;
+        snap->lstddev = (var > 0.0) ? (float)sqrt(var) : 0.0f;
+    } else if (snap->label_kind == 2) {
+        // multiclass: per-class histogram
+        int Kc = K > 16 ? 16 : K;
+        for (int i = 0; i < r->sample_count; i++) {
+            int c = (int)(r->labels[i] + 0.5f);
+            if (c >= 0 && c < Kc) snap->class_counts[c]++;
+        }
+    } else {
+        // binary: +/-/neutral
+        for (int i = 0; i < r->sample_count; i++) {
+            float v = r->labels[i];
+            if (v > 0.5f) snap->pos_count++;
+            else if (v < 0.5f) snap->neg_count++;
+            else snap->neutral_count++;
+        }
+    }
 }
 
 // worker thread function
@@ -127,6 +217,12 @@ static inline void *backtest_worker_fn(void *arg) {
     Backtest_Run(&state->results, &state->run_config,
                  &state->progress_pct, &state->cancel_flag,
                  state->candle_acc, state->snapshot);
+
+    // Compute display snapshot after labels are populated by Backtest_Run's
+    // post-pass. Done BEFORE running=0 so the GUI never sees a stale
+    // snapshot when it next reads (running=0 is the happens-before edge).
+    SamplesSnapshot_Compute(&state->stats_snapshot, &state->results,
+                              state->run_config.label_type);
 
     state->complete = 1;
     state->running = 0;
@@ -156,6 +252,7 @@ static inline void RunControl_Start(RunControlState *state, DataPanelState *data
     state->progress_pct = 0;
     state->cancel_flag = 0;
     state->complete = 0;
+    memset(&state->stats_snapshot, 0, sizeof(state->stats_snapshot));
     state->running = 1;
 
     // reset candle accumulator if present
@@ -187,13 +284,54 @@ static inline void GUI_Panel_DataBrowser(DataPanelState *state) {
         return;
     }
 
-    // select all / none
+    // basic select / clear
     if (ImGui::Button("Select All")) {
         for (int i = 0; i < state->file_count; i++) state->selected[i] = true;
     }
     ImGui::SameLine();
     if (ImGui::Button("Select None")) {
         for (int i = 0; i < state->file_count; i++) state->selected[i] = false;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Invert")) {
+        for (int i = 0; i < state->file_count; i++) state->selected[i] = !state->selected[i];
+    }
+
+    // quick presets — files are sorted alphabetically (YYYY-MM-DD), so
+    // "Last N" = N most recent days. fast iteration patterns:
+    //   Last 30   = single month for fast smoke test
+    //   Last 90   = quarter, typical first training run
+    //   Last 365  = full year for production training
+    auto select_last_n = [&](int n) {
+        for (int i = 0; i < state->file_count; i++) state->selected[i] = false;
+        int start = state->file_count - n;
+        if (start < 0) start = 0;
+        for (int i = start; i < state->file_count; i++) state->selected[i] = true;
+    };
+    auto select_first_n = [&](int n) {
+        for (int i = 0; i < state->file_count; i++) state->selected[i] = false;
+        int end = n < state->file_count ? n : state->file_count;
+        for (int i = 0; i < end; i++) state->selected[i] = true;
+    };
+    if (ImGui::Button("Last 30"))   select_last_n(30);
+    ImGui::SameLine(); if (ImGui::Button("Last 90"))   select_last_n(90);
+    ImGui::SameLine(); if (ImGui::Button("Last 180"))  select_last_n(180);
+    ImGui::SameLine(); if (ImGui::Button("Last 365"))  select_last_n(365);
+    ImGui::SameLine(); if (ImGui::Button("Last 730"))  select_last_n(730);
+
+    // custom range — input N, Apply selects last N or first N
+    static int n_custom = 90;
+    static bool from_end = true;
+    ImGui::SetNextItemWidth(80);
+    ImGui::InputInt("##n_custom", &n_custom, 0, 0);
+    if (n_custom < 1) n_custom = 1;
+    if (n_custom > state->file_count) n_custom = state->file_count;
+    ImGui::SameLine();
+    ImGui::Checkbox("from end (newest)", &from_end);
+    ImGui::SameLine();
+    if (ImGui::Button("Apply")) {
+        if (from_end) select_last_n(n_custom);
+        else          select_first_n(n_custom);
     }
 
     // count selected
@@ -248,6 +386,12 @@ static inline void GUI_Panel_RunControl(RunControlState *state, DataPanelState *
         if (ImGui::Button("Run Backtest")) {
             RunControl_Start(state, data);
         }
+        ImGui::SetItemTooltip(
+            "Replays selected files through the engine, computes stats only.\n"
+            "Use this for quick performance evaluation (Sharpe, DD, win rate).\n\n"
+            "If you want to TRAIN an ML model, use \"Collect Features\" in the\n"
+            "Training panel instead — it runs the same backtest plus gathers\n"
+            "the feature/label samples XGBoost needs.");
         if (!can_run) {
             ImGui::EndDisabled();
             ImGui::SameLine();
@@ -351,9 +495,9 @@ static inline void GUI_Panel_Results(const BacktestResults *results) {
 
 struct ComparisonState {
     BacktestStats stats[COMPARISON_MAX_RUNS];
-    double equity_curves[COMPARISON_MAX_RUNS][BACKTEST_MAX_EQUITY];
-    int equity_counts[COMPARISON_MAX_RUNS];
-    char labels[COMPARISON_MAX_RUNS][64];
+    double *equity_curves[COMPARISON_MAX_RUNS];   // dynamic per-run snapshots
+    int     equity_counts[COMPARISON_MAX_RUNS];
+    char    labels[COMPARISON_MAX_RUNS][64];
     int run_count;
 };
 
@@ -361,10 +505,19 @@ static inline void Comparison_Init(ComparisonState *state) {
     memset(state, 0, sizeof(*state));
 }
 
+static inline void Comparison_Free(ComparisonState *state) {
+    for (int i = 0; i < COMPARISON_MAX_RUNS; i++) {
+        free(state->equity_curves[i]);
+        state->equity_curves[i] = NULL;
+    }
+}
+
 static inline void Comparison_SaveRun(ComparisonState *state, const BacktestResults *results,
                                        const char *label) {
     if (state->run_count >= COMPARISON_MAX_RUNS) {
-        // shift everything down, drop oldest
+        // drop oldest, shift the rest down. free the oldest's buffer first
+        // so we don't leak when the slot gets overwritten.
+        free(state->equity_curves[0]);
         memmove(&state->stats[0], &state->stats[1],
                 (COMPARISON_MAX_RUNS - 1) * sizeof(BacktestStats));
         memmove(&state->equity_curves[0], &state->equity_curves[1],
@@ -373,13 +526,24 @@ static inline void Comparison_SaveRun(ComparisonState *state, const BacktestResu
                 (COMPARISON_MAX_RUNS - 1) * sizeof(int));
         memmove(&state->labels[0], &state->labels[1],
                 (COMPARISON_MAX_RUNS - 1) * sizeof(state->labels[0]));
+        // tail is now duplicated by the memmove; clear the old tail pointer
+        state->equity_curves[COMPARISON_MAX_RUNS - 1] = NULL;
         state->run_count = COMPARISON_MAX_RUNS - 1;
     }
     int idx = state->run_count;
     state->stats[idx] = results->stats;
     int ec = results->equity_count;
-    if (ec > BACKTEST_MAX_EQUITY) ec = BACKTEST_MAX_EQUITY;
-    memcpy(state->equity_curves[idx], results->equity_curve, ec * sizeof(double));
+    // free any previous snapshot in this slot, then allocate fresh of exact size
+    free(state->equity_curves[idx]);
+    state->equity_curves[idx] = NULL;
+    if (ec > 0) {
+        state->equity_curves[idx] = (double *)malloc(ec * sizeof(double));
+        if (state->equity_curves[idx]) {
+            memcpy(state->equity_curves[idx], results->equity_curve, ec * sizeof(double));
+        } else {
+            ec = 0;
+        }
+    }
     state->equity_counts[idx] = ec;
     strncpy(state->labels[idx], label, 63);
     state->labels[idx][63] = '\0';
@@ -437,13 +601,23 @@ static inline void GUI_Panel_Comparison(ComparisonState *state, const BacktestRe
 
     if (ImPlot::BeginPlot("Equity Comparison", ImVec2(-1, 200))) {
         ImPlot::SetupAxes("Trade #", "$");
+        // single reusable x-axis buffer — sized to the largest run, grown as needed.
+        // static so we don't malloc/free on every redraw frame.
+        static double *xs = NULL;
+        static int xs_capacity = 0;
+        int xs_needed = 0;
+        for (int r = 0; r < state->run_count; r++) {
+            if (state->equity_counts[r] > xs_needed) xs_needed = state->equity_counts[r];
+        }
+        if (xs_needed > xs_capacity) {
+            xs = (double *)realloc(xs, xs_needed * sizeof(double));
+            xs_capacity = xs ? xs_needed : 0;
+            // (re)fill x-axis identity values up to new capacity
+            for (int i = 0; i < xs_capacity; i++) xs[i] = (double)i;
+        }
         for (int r = 0; r < state->run_count; r++) {
             int n = state->equity_counts[r];
-            if (n < 2) continue;
-            // build x-axis (trade index)
-            double xs[BACKTEST_MAX_EQUITY];
-            for (int i = 0; i < n; i++) xs[i] = (double)i;
-
+            if (n < 2 || !state->equity_curves[r] || !xs) continue;
             ImPlotSpec ls;
             ls.LineColor = run_colors[r % 8];
             ls.LineWeight = 2.0f;
@@ -738,7 +912,14 @@ struct TrainingPanelState {
     char feature_names[MODEL_MAX_FEATURES][32];
     char model_path[256];
     bool model_trained;
-    float train_accuracy;
+    float train_accuracy;            // binary/multiclass: classification accuracy (0..1)
+    // regression-only metrics (valid when label kind == regression)
+    float train_mse;                 // mean squared error
+    float train_correlation;         // Pearson r between predictions and labels
+    float train_label_min;           // observed label min/max for context
+    float train_label_max;
+    float train_label_mean;
+    float train_label_stddev;
     int positive_count, negative_count;
     char status_msg[128];
     // walk-forward validation (Phase 6A — A7 GUI rework)
@@ -814,7 +995,8 @@ static inline void *walkforward_worker_fn(void *arg) {
     Backtest_RunWalkForward(&state->wf_results, data,
                              state->wf_n_splits, state->wf_horizon_ticks,
                              state->wf_buffer_ticks, state->wf_min_train,
-                             &state->wf_progress, &state->wf_cancel);
+                             &state->wf_progress, &state->wf_cancel,
+                             state->label_type);
 
     state->wf_has_results = true;
     state->wf_complete = 1;
@@ -830,23 +1012,37 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                        DataPanelState *data) {
     ImGui::Begin("Training");
 
-    // label config
-    static const char *label_names[] = {"Win/Loss", "Barrier", "Forward P&L", "Regime"};
+    // label config — display names derived from label_table (single source of truth).
+    // adding a label = 1 entry in LabelFunctions.hpp::label_table[]; this dropdown auto-updates.
+    static const char *label_names[LABEL_COUNT];
+    static bool label_names_built = false;
+    if (!label_names_built) {
+        for (int i = 0; i < LABEL_COUNT; i++) {
+            label_names[i] = label_table[i].display_name;
+        }
+        label_names_built = true;
+    }
     ImGui::Combo("Label Type", &state->label_type, label_names, LABEL_COUNT);
     ImGui::SetItemTooltip("How to label each sample for ML training:\n"
                           "  Win/Loss: 1 if price hits TP%% first, 0 if SL%% first\n"
                           "  Barrier: same but returns 0.5 (neutral) if neither hit within horizon\n"
                           "  Forward P&L: 1 if price is higher N ticks later, 0 if lower\n"
-                          "  Regime: labels by detected regime (not for buy signal)");
+                          "  Regime: labels by detected regime (multi-class)\n"
+                          "  Vol Barrier: k * rolling_vol barriers (FoxML formulation)\n"
+                          "  Will Peak / Will Valley: binary classifiers for legacy 2-model BarrierGate\n"
+                          "  Peak/Valley/Stable: 3-class softmax (PRIMARY for BarrierGate) —\n"
+                          "    saves to barrier.json for zoo auto-discovery");
 
-    if (state->label_type == LABEL_WIN_LOSS || state->label_type == LABEL_BARRIER) {
+    // TP/SL barriers — used by win_loss, barrier, vol_barrier, peak_valley_stable
+    if (state->label_type == LABEL_WIN_LOSS || state->label_type == LABEL_BARRIER ||
+        state->label_type == LABEL_VOL_BARRIER || state->label_type == LABEL_PEAK_VALLEY_STABLE) {
         ImGui::InputFloat("TP Barrier %", &state->label_tp_pct, 0.1f, 0.5f, "%.1f");
         ImGui::SetItemTooltip("Take-profit barrier as %% of price\n"
-                              "label = 1 if price moves up this much before SL is hit\n"
+                              "label = 1 (or VALLEY for 3-class) if price moves up this much before SL is hit\n"
                               "wider = fewer but higher-confidence labels");
         ImGui::InputFloat("SL Barrier %", &state->label_sl_pct, 0.1f, 0.5f, "%.1f");
         ImGui::SetItemTooltip("Stop-loss barrier as %% of price\n"
-                              "label = 0 if price drops this much before TP is hit\n"
+                              "label = 0 (or PEAK for 3-class) if price drops this much before TP is hit\n"
                               "wider = fewer but higher-confidence labels");
     }
     if (state->label_type == LABEL_FORWARD_PNL) {
@@ -854,12 +1050,25 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         ImGui::SetItemTooltip("How many ticks to look ahead\n"
                               "label = 1 if price is higher, 0 if lower");
     }
+    // Lookahead horizon for multiclass and peak/valley labels
+    if (state->label_type == LABEL_PEAK_VALLEY_STABLE ||
+        state->label_type == LABEL_WILL_PEAK || state->label_type == LABEL_WILL_VALLEY) {
+        ImGui::InputInt("Lookahead Ticks", &state->label_forward_ticks, 100, 1000);
+        ImGui::SetItemTooltip("How many ticks forward to scan for the barrier hit\n"
+                              "0 = scan to end of data. Default 500.\n"
+                              "Larger = more confident labels, fewer stable cases\n"
+                              "Smaller = more stable cases, sharper peak/valley signal");
+    }
 
     ImGui::Separator();
 
-    // collect features button
+    // collect features button — disabled if no data selected OR a backtest is
+    // already running (mirrors the Walk-Forward pattern). prevents the
+    // "click button N times because nothing visibly happens" UX trap that
+    // fires N parallel backtests each writing to the same log file.
     bool has_data = data->selected_count > 0;
-    if (!has_data) ImGui::BeginDisabled();
+    bool can_collect = has_data && !run_control->running;
+    if (!can_collect) ImGui::BeginDisabled();
     if (ImGui::Button("Collect Features")) {
         // clear previous training/walk-forward results on re-collect
         state->model_trained = false;
@@ -886,6 +1095,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         run_control->progress_pct = 0;
         run_control->cancel_flag = 0;
         run_control->complete = 0;
+        memset(&run_control->stats_snapshot, 0, sizeof(run_control->stats_snapshot));
         run_control->running = 1;
 
         if (run_control->candle_acc)
@@ -896,38 +1106,236 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         pthread_create(&run_control->worker_tid, NULL, backtest_worker_fn, args);
         pthread_detach(run_control->worker_tid);
     }
-    if (!has_data) {
+    ImGui::SetItemTooltip(
+        "Runs a backtest AND gathers ML training samples (features + labels)\n"
+        "for every slow-path cycle. Required before Train Model.\n\n"
+        "Output goes to results->feature_matrix (in-memory). The dataset\n"
+        "rebuilds every time you click — use Run Control's Run Backtest if\n"
+        "you only need stats and want to skip the sample collection cost.");
+    if (!can_collect) {
         ImGui::EndDisabled();
         ImGui::SameLine();
-        ImGui::TextDisabled("Select data files first");
+        if (run_control->running) {
+            ImGui::TextColored(FoxmlColors::yellow, "running... (%d%%)", run_control->progress_pct);
+        } else {
+            ImGui::TextDisabled("Select data files first");
+        }
+    } else if (run_control->running) {
+        // safety belt: if running flag flipped while button was enabled (race), still warn
+        ImGui::SameLine();
+        ImGui::TextColored(FoxmlColors::yellow, "running... (%d%%)", run_control->progress_pct);
     }
 
-    // show feature collection status
+    // results pointer for Train Model + Walk-Forward sections below — they
+    // need sample_count + feature_matrix + labels, all of which are safe to
+    // read by the time those sections run (Train Model runs synchronously
+    // on the UI thread; Walk-Forward worker is its own thread that doesn't
+    // collide with backtest_worker_fn).
     BacktestResults *results = &run_control->results;
-    if (results->sample_count > 0) {
-        // count label distribution
-        state->positive_count = 0;
-        state->negative_count = 0;
-        int neutral_count = 0;
-        for (int i = 0; i < results->sample_count; i++) {
-            if (results->labels[i] > 0.5f) state->positive_count++;
-            else if (results->labels[i] < 0.5f) state->negative_count++;
-            else neutral_count++;
-        }
 
-        int labeled = state->positive_count + state->negative_count;
-        ImGui::Text("Samples: %d  |  +: %d  |  -: %d  |  neutral: %d  |  Ratio: %.1f%%",
-                     results->sample_count, state->positive_count, state->negative_count,
-                     neutral_count,
-                     labeled > 0
-                         ? (float)state->positive_count / labeled * 100.0f : 0.0f);
-        ImGui::SetItemTooltip("Samples: total feature vectors collected (one per slow-path cycle)\n"
-                              "+: labeled as buy signal (price hit TP barrier)\n"
-                              "-: labeled as no-buy (price hit SL barrier)\n"
-                              "neutral: neither barrier hit within horizon (excluded from training)\n"
-                              "Ratio: +/(+ + -) — class balance among non-neutral labels\n\n"
-                              "50%% ratio is ideal for balanced training\n"
-                              "high neutral %% is normal with barrier labels + tight barriers");
+    // show feature collection status — display reads from a worker-written
+    // snapshot, NOT from results->labels[] directly.
+    //
+    // Why: results->labels (+ sample_count, sample_capacity) is written by
+    // the worker thread during collection and realloc'd as the buffer grows.
+    // GUI rendering at 60fps that iterated those buffers raced with worker
+    // reallocs → use-after-free → segfault on a 2.25M-sample run on
+    // 2026-04-25. Snapshot pattern: worker computes the distribution stats
+    // ONCE after Backtest_Run completes (in backtest_worker_fn) and sets
+    // running=0 last. GUI reads the snapshot when running==0. The volatile
+    // flag prevents compiler reordering of the loads/stores, giving a
+    // happens-before edge.
+    //
+    // Bonus: the diagnostic compute happens once per run, not every render
+    // frame. Iterating millions of labels every frame was wasteful even
+    // when it didn't crash.
+    const SamplesSnapshot *snap = &run_control->stats_snapshot;
+    if (snap->sample_count > 0) {
+        // FoxML colors for diagnostics
+        const ImVec4 diag_green  = ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
+        const ImVec4 diag_yellow = ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
+        const ImVec4 diag_red    = ImVec4(0.95f, 0.35f, 0.35f, 1.0f);
+
+        if (snap->label_kind == 1) {
+            // regression: continuous labels — show distribution stats, not +/- counts.
+            float lmin = snap->lmin, lmax = snap->lmax;
+            float mean = snap->lmean, stddev = snap->lstddev;
+            // expose to state for downstream display
+            state->train_label_min    = lmin;
+            state->train_label_max    = lmax;
+            state->train_label_mean   = mean;
+            state->train_label_stddev = stddev;
+            ImGui::Text("Samples: %d  |  range: [%.4f, %.4f]  |  mean: %.4f  |  σ: %.4f",
+                         snap->sample_count, lmin, lmax, mean, stddev);
+            ImGui::SetItemTooltip("Regression labels — continuous target (e.g. forward %% return).\n"
+                                  "range: min and max observed values\n"
+                                  "mean: average label value (close to 0 for return-style targets)\n"
+                                  "σ: standard deviation — wider σ = more spread, more learnable signal\n\n"
+                                  "If σ ≈ 0, all samples have nearly the same label and the model\n"
+                                  "has nothing to predict. Larger σ relative to typical XGBoost\n"
+                                  "step size (~eta × leaf_value) means the model can fit something.");
+
+            // Diagnosis: interpret the distribution for the user
+            const ImVec4 *dcol = &diag_green;
+            const char *dtext = "looks normal — distribution shape is reasonable for continuous returns";
+            const char *dtip  = "Sanity checks all pass: σ is meaningful, range isn't pathological,\n"
+                                "and the asymmetry isn't extreme. Move on to training and read the\n"
+                                "Pearson r in walk-forward.";
+            if (stddev < 0.0001) {
+                dcol = &diag_red;
+                dtext = "σ ≈ 0 — labels are essentially constant, nothing for model to predict";
+                dtip  = "All samples have nearly the same label. The model can only output a\n"
+                        "single constant value, which is useless. Check the label generator —\n"
+                        "this is usually a bug (e.g. all samples computed against the same\n"
+                        "reference price).";
+            } else {
+                float abs_min = lmin < 0 ? -lmin : lmin;
+                float abs_max = lmax < 0 ? -lmax : lmax;
+                float asym = (abs_max > 0.001f && abs_min > 0.001f)
+                             ? (abs_min > abs_max ? abs_min / abs_max : abs_max / abs_min)
+                             : 1.0f;
+                if (asym > 10.0f) {
+                    dcol = &diag_red;
+                    dtext = "range is wildly asymmetric — likely a label-generator bug";
+                    dtip  = "abs(min) and abs(max) differ by >10x. For unbiased forward returns\n"
+                            "on a roughly stationary asset, this should not happen. Most common\n"
+                            "cause: label generator with a reference-price bug, file-boundary\n"
+                            "edge case, or division-by-near-zero. Check label_table[t].fn.";
+                } else if (abs_min > 50.0f || abs_max > 50.0f) {
+                    dcol = &diag_yellow;
+                    dtext = "range has very large values — verify label units (% vs raw)";
+                    dtip  = "Label values exceed ±50. If labels are %% returns, BTC moving 50%%\n"
+                            "in the lookahead window is implausible at tick scale → likely a bug.\n"
+                            "If labels are raw $ deltas, this is fine but XGBoost may want a\n"
+                            "scaled feature.";
+                }
+            }
+            ImGui::TextColored(*dcol, "Diagnosis: %s", dtext);
+            ImGui::SetItemTooltip("%s", dtip);
+        } else if (snap->label_kind == 2) {
+            // multiclass: per-class histogram from snapshot.
+            int K = snap->num_classes > 16 ? 16 : snap->num_classes;
+            // build display string: "Samples: N  |  c0: X (Y%)  |  c1: ..."
+            char buf[256];
+            int off = snprintf(buf, sizeof(buf), "Samples: %d  ", snap->sample_count);
+            for (int k = 0; k < K && off < (int)sizeof(buf) - 1; k++) {
+                off += snprintf(buf + off, sizeof(buf) - off, "|  c%d: %d (%.1f%%)  ",
+                                k, snap->class_counts[k],
+                                snap->sample_count > 0
+                                    ? 100.0f * snap->class_counts[k] / snap->sample_count : 0.0f);
+            }
+            ImGui::TextUnformatted(buf);
+            ImGui::SetItemTooltip("Multiclass labels — per-class sample counts.\n"
+                                  "c0..cK-1 = class index (e.g. for Peak/Valley/Stable:\n"
+                                  "  c0=stable, c1=peak, c2=valley)\n\n"
+                                  "Heavy imbalance (one class >90%%) means the model can\n"
+                                  "trivially predict that class for high accuracy. Consider\n"
+                                  "class-rebalanced training (per-sample weights) or different\n"
+                                  "label parameters (barrier widths, lookahead horizon).");
+
+            // Diagnosis for multiclass: check imbalance
+            const ImVec4 *mc_col = &diag_green;
+            const char *mc_text = "balanced — classes have similar populations, model can learn each";
+            const char *mc_tip  = "No class dominates >70%%. The per-sample inverse-frequency\n"
+                                  "weights (already applied during training) should let the model\n"
+                                  "differentiate. Read multiclass accuracy + per-class precision\n"
+                                  "carefully.";
+            int max_count = 0;
+            int max_class = 0;
+            int counts_used = 0;
+            for (int k = 0; k < K; k++) {
+                if (snap->class_counts[k] > max_count) {
+                    max_count = snap->class_counts[k]; max_class = k;
+                }
+                if (snap->class_counts[k] > 0) counts_used++;
+            }
+            float max_pct = snap->sample_count > 0
+                ? 100.0f * max_count / snap->sample_count : 0.0f;
+            if (counts_used <= 1) {
+                mc_col = &diag_red;
+                mc_text = "all samples in one class — labels are degenerate";
+                mc_tip  = "Every sample got the same class. Likely a label-generator bug or\n"
+                          "extreme barrier widths / horizons that prevent any other class\n"
+                          "from triggering. Try different label parameters or check the\n"
+                          "label function.";
+            } else if (max_pct > 95.0f) {
+                mc_col = &diag_red;
+                mc_text = "extreme imbalance — model will trivially predict majority class";
+                mc_tip  = "One class is >95%% of samples. Per-sample weights help but the\n"
+                          "model has very few minority-class samples to actually learn from.\n"
+                          "Consider tighter barrier widths (more decisive labels), longer\n"
+                          "lookahead, or a different label scheme entirely (try Forward P&L\n"
+                          "regression — sidesteps class imbalance).";
+            } else if (max_pct > 70.0f) {
+                mc_col = &diag_yellow;
+                mc_text = "moderate imbalance — minority classes underrepresented";
+                mc_tip  = "Largest class is >70%%. Per-sample weights compensate in the loss,\n"
+                          "but if minority-class signal is what you want to capture, fewer\n"
+                          "training examples = noisier learning. Watch the per-class accuracy\n"
+                          "after training, not just overall.";
+            }
+            ImGui::TextColored(*mc_col, "Diagnosis: c%d dominates at %.1f%% — %s",
+                               max_class, max_pct, mc_text);
+            ImGui::SetItemTooltip("%s", mc_tip);
+        } else {
+            // binary: +/-/neutral counts from snapshot
+            state->positive_count = snap->pos_count;
+            state->negative_count = snap->neg_count;
+            int neutral_count = snap->neutral_count;
+            int labeled = snap->pos_count + snap->neg_count;
+            ImGui::Text("Samples: %d  |  +: %d  |  -: %d  |  neutral: %d  |  Ratio: %.1f%%",
+                         snap->sample_count, snap->pos_count, snap->neg_count,
+                         neutral_count,
+                         labeled > 0
+                             ? (float)snap->pos_count / labeled * 100.0f : 0.0f);
+            ImGui::SetItemTooltip("Binary labels.\n"
+                                  "+: labeled as buy signal (price hit TP barrier first)\n"
+                                  "-: labeled as no-buy (price hit SL barrier first)\n"
+                                  "neutral: neither barrier hit within horizon (excluded from training)\n"
+                                  "Ratio: +/(+ + -) — class balance among non-neutral labels\n\n"
+                                  "50%% ratio is ideal for balanced training\n"
+                                  "high neutral %% is normal with barrier labels + tight barriers\n"
+                                  "extreme imbalance (<5%%) → classifier trivially predicts majority,\n"
+                                  "scale_pos_weight is auto-applied to compensate.");
+
+            // Diagnosis for binary: check ratio + neutral fraction
+            const ImVec4 *bn_col = &diag_green;
+            const char *bn_text = "well-balanced for training — model has both classes to learn from";
+            const char *bn_tip  = "Ratio is in [30%%, 70%%] and neutral fraction is reasonable.\n"
+                                  "Ready to train. After training, read walk-forward val accuracy.";
+            float ratio = labeled > 0 ? 100.0f * snap->pos_count / labeled : 0.0f;
+            float neutral_pct = snap->sample_count > 0
+                ? 100.0f * neutral_count / snap->sample_count : 0.0f;
+            if (labeled == 0) {
+                bn_col = &diag_red;
+                bn_text = "all samples are neutral — no class labels to train on";
+                bn_tip  = "100%% neutral means neither TP nor SL was hit within the horizon\n"
+                          "for any sample. Either widen the horizon (Lookahead Ticks), tighten\n"
+                          "the barriers (TP%% / SL%%), or check the label generator.";
+            } else if (ratio < 5.0f || ratio > 95.0f) {
+                bn_col = &diag_red;
+                bn_text = "extreme imbalance — scale_pos_weight will compensate but minority class is sparse";
+                bn_tip  = "+/(+ + -) is outside [5%%, 95%%]. The auto-applied scale_pos_weight\n"
+                          "rebalances the loss, but the minority class still has very few\n"
+                          "training examples. Consider symmetric barriers (TP=SL) or a\n"
+                          "different label.";
+            } else if (ratio < 20.0f || ratio > 80.0f) {
+                bn_col = &diag_yellow;
+                bn_text = "skewed — scale_pos_weight active, watch val accuracy";
+                bn_tip  = "Ratio outside [20%%, 80%%]. scale_pos_weight is doing real work\n"
+                          "here. Walk-forward val_accuracy is more meaningful than raw\n"
+                          "training accuracy in this regime.";
+            } else if (neutral_pct > 95.0f) {
+                bn_col = &diag_yellow;
+                bn_text = "very high neutral fraction — most samples excluded from training";
+                bn_tip  = "Less than 5%% of samples got a definitive label. The model only\n"
+                          "trains on the resolved minority. Ratio looks OK but n_valid is\n"
+                          "small. Consider longer horizon or wider barriers if walk-forward\n"
+                          "shows high variance across folds.";
+            }
+            ImGui::TextColored(*bn_col, "Diagnosis: %s", bn_text);
+            ImGui::SetItemTooltip("%s", bn_tip);
+        }
     }
 
     ImGui::Separator();
@@ -950,7 +1358,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     ImGui::SetItemTooltip("Where to save the trained model\n"
                           "used by the engine at runtime for ML buy signals");
 
-    // train button
+    // synchronous-train warning — sets expectations before the freeze
+    ImGui::TextColored(FoxmlColors::comment,
+        "(Train Model runs synchronously — GUI may freeze 5-30s. Watch the Log panel for progress.)");
+
+    // train button. NOTE: Train Model runs SYNCHRONOUSLY on the UI thread
+    // (no worker thread). the GUI will freeze for 5-30 seconds during XGBoost
+    // training. the tooltip warns the user so it doesn't feel broken.
     bool can_train = results->sample_count >= 10;
 #ifndef USE_XGBOOST
     can_train = false;
@@ -962,6 +1376,15 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         state->status_msg[0] = '\0';
         state->wf_has_results = false;
 #ifdef USE_XGBOOST
+        // log to stderr so the Log panel shows the user "training started"
+        // before XGBoost grabs the UI thread for 5-30s. without this, the
+        // Train Model button looks frozen (because it IS — synchronous).
+        fprintf(stderr, "[TRAIN] starting on %d samples (label_type=%d, "
+                        "max_depth=%d, lr=%.3f, n_est=%d)...\n",
+                results->sample_count, state->label_type,
+                state->max_depth, state->learning_rate, state->n_estimators);
+        fflush(stderr);
+
         // create output directory
         mkdir("models", 0755);
 
@@ -996,7 +1419,54 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         char lr_s[16]; snprintf(lr_s, 16, "%f", state->learning_rate);
         XGBoosterSetParam(booster, "max_depth", depth_s);
         XGBoosterSetParam(booster, "eta", lr_s);
-        XGBoosterSetParam(booster, "objective", "binary:logistic");
+
+        // objective + num_class read from label_table (single source of truth)
+        //   num_classes  0 = binary classification
+        //   num_classes  1 = continuous regression
+        //   num_classes >=2 = multiclass softmax
+        int num_classes = (state->label_type >= 0 && state->label_type < LABEL_COUNT)
+                          ? label_table[state->label_type].num_classes : 0;
+        int is_multiclass  = (num_classes >= 2);
+        int is_regression  = (num_classes == 1);
+
+        if (is_multiclass) {
+            XGBoosterSetParam(booster, "objective", "multi:softprob");
+            char nc_s[8]; snprintf(nc_s, 8, "%d", num_classes);
+            XGBoosterSetParam(booster, "num_class", nc_s);
+            // class-balance via per-sample weights (scale_pos_weight is binary-only).
+            // Without this, multiclass with skewed distribution trains a majority
+            // predictor — same failure mode as binary imbalance.
+            float *mc_weights = (float *)malloc(n_valid * sizeof(float));
+            int   mc_counts[16] = {0};
+            if (mc_weights) {
+                XGBoost_ComputeMulticlassWeights(train_labels, n_valid, num_classes,
+                                                  mc_weights, mc_counts);
+                XGDMatrixSetFloatInfo(dtrain, "weight", mc_weights, n_valid);
+                fprintf(stderr, "[TRAIN] multiclass class counts:");
+                for (int k = 0; k < num_classes && k < 16; k++) {
+                    fprintf(stderr, " c%d=%d (%.1f%%)", k, mc_counts[k],
+                            n_valid > 0 ? 100.0f * mc_counts[k] / n_valid : 0.0f);
+                }
+                fprintf(stderr, " — per-sample weights applied\n");
+                fflush(stderr);
+                free(mc_weights);
+            }
+        } else if (is_regression) {
+            XGBoosterSetParam(booster, "objective", "reg:squarederror");
+        } else {
+            XGBoosterSetParam(booster, "objective", "binary:logistic");
+            // class-balance: scale_pos_weight = n_neg/n_pos. Without this,
+            // imbalanced datasets (typical for tight-barrier label sets)
+            // train a model that trivially predicts the majority class.
+            int n_pos = 0, n_neg = 0;
+            double spw = XGBoost_ComputeScalePosWeight(train_labels, n_valid, &n_pos, &n_neg);
+            char spw_s[24]; snprintf(spw_s, sizeof(spw_s), "%.4f", spw);
+            XGBoosterSetParam(booster, "scale_pos_weight", spw_s);
+            fprintf(stderr, "[TRAIN] class balance: +%d / -%d → scale_pos_weight=%s%s\n",
+                    n_pos, n_neg, spw_s,
+                    n_pos == 0 ? "  WARNING: zero positives, model cannot learn" : "");
+            fflush(stderr);
+        }
         XGBoosterSetParam(booster, "nthread", "4");
         XGBoosterSetParam(booster, "verbosity", "0");
 
@@ -1022,20 +1492,32 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // save model
         XGBoosterSaveModel(booster, state->model_path);
 
-        // compute training accuracy (in-sample — just for sanity check)
+        // compute in-sample training metric — kind-appropriate (label-type-aware
+        // metric invariant). For binary/multiclass this is accuracy; for
+        // regression we report MSE + Pearson correlation (sign-agreement was
+        // a poor proxy that didn't distinguish "predicting all-zero" from
+        // "actually learning small but real signal").
         bst_ulong out_len;
         const float *out_result;
         DMatrixHandle dpred;
         XGDMatrixCreateFromMat(train_features, n_valid,
                                MODEL_NUM_FEATURES, NAN, &dpred);
         XGBoosterPredict(booster, dpred, 0, 0, 0, &out_len, &out_result);
-        int correct = 0;
-        for (int i = 0; i < n_valid; i++) {
-            int pred = out_result[i] >= 0.5f ? 1 : 0;
-            int truth = train_labels[i] > 0.5f ? 1 : 0;
-            if (pred == truth) correct++;
+        if (is_multiclass) {
+            state->train_accuracy = WalkForward_ComputeMulticlassAccuracy(
+                out_result, train_labels, n_valid, num_classes) * 100.0f;
+            state->train_mse = 0.0f;
+            state->train_correlation = 0.0f;
+        } else if (is_regression) {
+            state->train_mse         = WalkForward_ComputeMSE(out_result, train_labels, n_valid);
+            state->train_correlation = WalkForward_ComputeCorrelation(out_result, train_labels, n_valid);
+            state->train_accuracy    = 0.0f;  // not meaningful for regression
+        } else {
+            state->train_accuracy = WalkForward_ComputeAccuracy(
+                out_result, train_labels, n_valid, 0.5f) * 100.0f;
+            state->train_mse = 0.0f;
+            state->train_correlation = 0.0f;
         }
-        state->train_accuracy = (n_valid > 0) ? (float)correct / n_valid * 100.0f : 0.0f;
         XGDMatrixFree(dpred);
 
         // feature importance (gain-based)
@@ -1050,8 +1532,15 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         free(train_labels);
 
         state->model_trained = true;
-        snprintf(state->status_msg, sizeof(state->status_msg),
-                 "Model saved to %s (accuracy: %.1f%%)", state->model_path, state->train_accuracy);
+        if (is_regression) {
+            snprintf(state->status_msg, sizeof(state->status_msg),
+                     "Model saved to %s (MSE: %.6f, corr: %.4f)",
+                     state->model_path, state->train_mse, state->train_correlation);
+        } else {
+            snprintf(state->status_msg, sizeof(state->status_msg),
+                     "Model saved to %s (accuracy: %.1f%%)",
+                     state->model_path, state->train_accuracy);
+        }
         } // end malloc success block
 #endif
     }
@@ -1068,11 +1557,23 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 #endif
     }
 
-    // training results
+    // training results — kind-appropriate display.
     if (state->model_trained) {
         ImGui::Separator();
         ImGui::TextColored(ImVec4(0.55f, 0.76f, 0.51f, 1.0f), "%s", state->status_msg);
-        ImGui::Text("Train Accuracy: %.1f%% (in-sample)", state->train_accuracy);
+        if (LabelType_IsRegression(state->label_type)) {
+            ImGui::Text("Train MSE: %.6f  |  Pearson r: %.4f  (in-sample)",
+                         state->train_mse, state->train_correlation);
+            ImGui::SetItemTooltip("Pearson r is the load-bearing metric for regression.\n"
+                                  "  |r| < 0.05  → no signal (model didn't learn)\n"
+                                  "  |r| 0.05-0.2 → weak but real signal\n"
+                                  "  |r| > 0.2   → strong signal for tick-scale prediction\n\n"
+                                  "MSE alone can be misleading: a model predicting always-zero\n"
+                                  "gets low MSE on small-magnitude targets while having zero\n"
+                                  "predictive power. Always read r alongside MSE.");
+        } else {
+            ImGui::Text("Train Accuracy: %.1f%% (in-sample)", state->train_accuracy);
+        }
 
         // save run: bundle config + model into models/{run_name}/
         ImGui::Separator();
@@ -1083,9 +1584,29 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             mkdir("models", 0755);
             mkdir(run_dir, 0755);
 
-            // copy model
+            // pick role-specific filename so CoreModelZoo auto-discovers it.
+            // role is derived from label_type: 3-class softmax → "barrier",
+            // regime classifier → "regime", everything else → "buy_signal".
+            const char *role_name = "buy_signal";
+            int expected_num_classes = 0;  // 0 = binary
+            if (state->label_type == LABEL_PEAK_VALLEY_STABLE) {
+                role_name = "barrier";
+                expected_num_classes = 3;
+            } else if (state->label_type == LABEL_REGIME) {
+                role_name = "regime";
+                expected_num_classes = 4;
+            } else if (state->label_type == LABEL_FORWARD_PNL) {
+                role_name = "buy_signal";  // regression treated as binary slot
+                expected_num_classes = 1;  // 1 = regression
+            }
+
+            // detect source extension (.json or .xgb)
+            const char *src_ext = strrchr(state->model_path, '.');
+            if (!src_ext) src_ext = ".xgb";
+
+            // copy model with role-specific name
             char dst_model[384];
-            snprintf(dst_model, sizeof(dst_model), "%s/model.xgb", run_dir);
+            snprintf(dst_model, sizeof(dst_model), "%s/%s%s", run_dir, role_name, src_ext);
             FILE *msrc = fopen(state->model_path, "rb");
             FILE *mdst = fopen(dst_model, "wb");
             if (msrc && mdst) {
@@ -1095,7 +1616,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             if (msrc) fclose(msrc);
             if (mdst) fclose(mdst);
 
-            // copy config
+            // copy full backtest.cfg as historical record (for reproducibility)
             char dst_cfg[384];
             snprintf(dst_cfg, sizeof(dst_cfg), "%s/engine.cfg", run_dir);
             FILE *csrc = fopen("backtest.cfg", "r");
@@ -1107,16 +1628,57 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             if (csrc) fclose(csrc);
             if (cdst) fclose(cdst);
 
+            // write expected.cfg — ML-relevant fields only. when the engine
+            // loads this run via core_N_model_dir, it reads expected.cfg and
+            // compares against the live engine.cfg. mismatches → loud warnings
+            // (or strict failure if model_verify_strict=1). this is the
+            // stupid-proof check: prevents accidentally deploying a 3-class
+            // model with barrier_gate_enabled=0, etc.
+            char dst_expected[384];
+            snprintf(dst_expected, sizeof(dst_expected), "%s/expected.cfg", run_dir);
+            FILE *ef = fopen(dst_expected, "w");
+            if (ef) {
+                fprintf(ef, "# auto-generated by foxml_suite Save Run — DO NOT EDIT\n");
+                fprintf(ef, "# the engine compares these against engine.cfg at load time.\n");
+                fprintf(ef, "# mismatch → warning (default) or failure (model_verify_strict=1).\n");
+                fprintf(ef, "\n");
+                fprintf(ef, "# role this model fills in CoreModelZoo (barrier|regime|exit|buy_signal)\n");
+                fprintf(ef, "expected_role = %s\n", role_name);
+                fprintf(ef, "expected_label_type = %d\n", state->label_type);
+                fprintf(ef, "expected_num_classes = %d\n", expected_num_classes);
+                fprintf(ef, "\n");
+                fprintf(ef, "# ML config the model was trained against. live engine should match.\n");
+                if (expected_num_classes >= 2) {
+                    fprintf(ef, "barrier_gate_enabled = 1   # 3-class model REQUIRES this to be useful\n");
+                } else {
+                    fprintf(ef, "# barrier_gate_enabled = 0 or 1 both fine for binary models\n");
+                }
+                fprintf(ef, "ml_buy_threshold = %.3f\n", FPN_ToDouble(results->config_used.ml_buy_threshold));
+                fprintf(ef, "ml_tp_pct = %.6f\n", FPN_ToDouble(results->config_used.ml_tp_pct));
+                fprintf(ef, "ml_sl_pct = %.6f\n", FPN_ToDouble(results->config_used.ml_sl_pct));
+                fprintf(ef, "ml_backend = %d\n", results->config_used.ml_backend);
+                fprintf(ef, "\n");
+                fprintf(ef, "# training hyperparameters (informational, not verified at runtime)\n");
+                fprintf(ef, "# max_depth = %d\n", state->max_depth);
+                fprintf(ef, "# learning_rate = %.3f\n", state->learning_rate);
+                fprintf(ef, "# n_estimators = %d\n", state->n_estimators);
+                fprintf(ef, "# train_accuracy = %.1f%% (in-sample)\n", state->train_accuracy);
+                fclose(ef);
+            }
+
             // write results summary
             char dst_summary[384];
             snprintf(dst_summary, sizeof(dst_summary), "%s/summary.txt", run_dir);
             FILE *sf = fopen(dst_summary, "w");
             if (sf) {
                 fprintf(sf, "run: %s\n", state->run_name);
+                fprintf(sf, "role: %s\n", role_name);
                 fprintf(sf, "accuracy: %.1f%%\n", state->train_accuracy);
                 fprintf(sf, "model: %s\n", dst_model);
                 fprintf(sf, "config: %s\n", dst_cfg);
+                fprintf(sf, "expected: %s\n", dst_expected);
                 fprintf(sf, "label_type: %d\n", state->label_type);
+                fprintf(sf, "expected_num_classes: %d\n", expected_num_classes);
                 fprintf(sf, "max_depth: %d\n", state->max_depth);
                 fprintf(sf, "learning_rate: %.3f\n", state->learning_rate);
                 fprintf(sf, "n_estimators: %d\n", state->n_estimators);
@@ -1124,12 +1686,14 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             }
 
             snprintf(state->save_msg, sizeof(state->save_msg),
-                     "Saved to %s/ (model + config + summary)", run_dir);
+                     "Saved to %s/ (role=%s, model + expected.cfg)", run_dir, role_name);
         }
         if (state->save_msg[0])
             ImGui::TextColored(FoxmlColors::green, "%s", state->save_msg);
-        ImGui::SetItemTooltip("Bundles model + backtest.cfg + summary into models/{name}/\n"
-                              "Deploy: copy engine.cfg to live, set ml_model_path to model.xgb");
+        ImGui::SetItemTooltip("Bundles model + expected.cfg + summary into models/{name}/.\n"
+                              "Filename is role-derived (barrier/regime/buy_signal) so the\n"
+                              "engine's CoreModelZoo auto-discovers it.\n"
+                              "Deploy: set core_N_model_dir = models/{name}/ in engine.cfg.");
     }
 
     //==================================================================
@@ -1205,39 +1769,162 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         }
     }
 
-    // walk-forward results display
+    // walk-forward results display — kind-aware (label-type-aware metric invariant)
     if (state->wf_has_results) {
         WalkForwardResults *wf = &state->wf_results;
+        bool wf_is_regression = (wf->label_kind == 1);
 
         // aggregate metrics — the metrics that actually matter
         ImGui::Separator();
         {
-            // mean ± std validation accuracy (green if reasonable, red if overfit)
             ImVec4 val_color = (wf->overfit_count > 0)
                 ? ImVec4(0.95f, 0.35f, 0.35f, 1.0f)   // red: overfit detected
                 : ImVec4(0.55f, 0.76f, 0.51f, 1.0f);   // green: clean
-            ImGui::TextColored(val_color, "Val Accuracy: %.1f%% +/- %.1f%%",
-                               wf->mean_val_accuracy * 100.0f, wf->std_val_accuracy * 100.0f);
-            ImGui::SetItemTooltip("Mean accuracy on unseen test data across all folds\n"
-                                  "+/- shows consistency (lower = more stable)\n\n"
-                                  "> 55%%: model has real predictive signal\n"
-                                  "~ 50%%: no better than random (coin flip)\n"
-                                  "< 50%%: model is anti-predictive (inverted signal)");
-            ImGui::SameLine();
-            ImGui::TextDisabled("(train: %.1f%%)", wf->mean_train_accuracy * 100.0f);
-            ImGui::SetItemTooltip("Training accuracy — how well the model fits the data it trained on\n"
-                                  "high train + low val = overfitting (memorizing noise)\n"
-                                  "the gap between train and val is what matters");
+
+            if (wf_is_regression) {
+                // load-bearing metric for regression: mean Pearson r across folds.
+                // MSE is shown alongside but doesn't tell you if the model has signal —
+                // a model predicting always-zero gets low MSE on small targets.
+                ImGui::TextColored(val_color, "Val Pearson r: %.4f",
+                                   wf->mean_val_correlation);
+                ImGui::SetItemTooltip("Mean Pearson correlation between predictions and labels\n"
+                                      "across all walk-forward folds. THIS is the metric that\n"
+                                      "tells you if the model has signal:\n\n"
+                                      "  |r| < 0.05 → no signal (predictions uncorrelated with truth)\n"
+                                      "  |r| 0.05-0.2 → weak but real signal\n"
+                                      "  |r| > 0.2 → strong signal at tick scale\n"
+                                      "  |r| > 0.99 → memorization (flagged as overfit)\n\n"
+                                      "Negative r means the model is anti-predictive — fitting\n"
+                                      "noise that happens to be inverted. Still a memorization risk.");
+                ImGui::SameLine();
+                ImGui::TextDisabled("(train: %.4f, MSE: %.6f)",
+                                    wf->mean_train_correlation, wf->mean_val_mse);
+                ImGui::SetItemTooltip("train: in-sample correlation\n"
+                                      "MSE: mean squared error on validation\n"
+                                      "MSE alone is not a signal indicator — read it alongside r.");
+            } else {
+                ImGui::TextColored(val_color, "Val Accuracy: %.1f%% +/- %.1f%%",
+                                   wf->mean_val_accuracy * 100.0f, wf->std_val_accuracy * 100.0f);
+                ImGui::SetItemTooltip("Mean accuracy on unseen test data across all folds\n"
+                                      "+/- shows consistency (lower = more stable)\n\n"
+                                      "> 55%%: model has real predictive signal\n"
+                                      "~ 50%%: no better than random (coin flip)\n"
+                                      "< 50%%: model is anti-predictive (inverted signal)");
+                ImGui::SameLine();
+                ImGui::TextDisabled("(train: %.1f%%)", wf->mean_train_accuracy * 100.0f);
+                ImGui::SetItemTooltip("Training accuracy — how well the model fits the data it trained on\n"
+                                      "high train + low val = overfitting (memorizing noise)\n"
+                                      "the gap between train and val is what matters");
+            }
         }
 
-        // overfit warning
+        // overfit warning — same structure for both kinds, reason text is kind-specific
         if (wf->overfit_count > 0) {
             ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f),
                 "WARNING: %d/%d folds flagged as overfit", wf->overfit_count, wf->valid_folds);
             ImGui::SetItemTooltip("Folds where the model memorized training data\n"
-                                  "flagged when train accuracy >= 99%% (memorization)\n"
-                                  "or train-val gap is extreme\n\n"
-                                  "try: fewer estimators, lower max depth, more data");
+                                  "Classification: flagged when train accuracy >= 99%% or\n"
+                                  "  train-val gap >= 20%%\n"
+                                  "Regression: flagged when |train_corr| >= 0.99 or\n"
+                                  "  train_corr - val_corr >= 0.20\n\n"
+                                  "try: fewer estimators, lower max depth, more data,\n"
+                                  "different label parameters (barriers, lookahead)");
+        }
+
+        // Walk-Forward diagnosis — interpret the result for the user.
+        // This is the load-bearing line: it tells you what just happened
+        // in plain language so you don't have to mentally translate metrics.
+        {
+            const ImVec4 wf_green  = ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
+            const ImVec4 wf_yellow = ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
+            const ImVec4 wf_red    = ImVec4(0.95f, 0.35f, 0.35f, 1.0f);
+            const ImVec4 *wd_col = &wf_yellow;
+            const char *wd_text = "result unclear";
+            const char *wd_tip  = "Couldn't classify the result. Check per-fold table for details.";
+
+            if (wf_is_regression) {
+                float val_r = wf->mean_val_correlation;
+                float train_r = wf->mean_train_correlation;
+                float abs_val_r = val_r < 0 ? -val_r : val_r;
+                float abs_train_r = train_r < 0 ? -train_r : train_r;
+                if (wf->overfit_count > 0 && abs_val_r < 0.05f) {
+                    wd_col = &wf_red;
+                    wd_text = "memorization without generalization — model learned training noise";
+                    wd_tip  = "Train correlation is high (the overfit detector flagged it),\n"
+                              "but val correlation is ~0. Model memorized training samples\n"
+                              "without learning anything that transfers. Reduce capacity:\n"
+                              "lower max_depth (try 2-3), fewer estimators, or more data.";
+                } else if (abs_val_r < 0.05f && abs_train_r < 0.05f) {
+                    wd_col = &wf_red;
+                    wd_text = "no signal — features don't predict returns at this horizon";
+                    wd_tip  = "Both train and val correlations are near zero. The model\n"
+                              "couldn't learn anything from the features even on training data.\n"
+                              "This means: features genuinely lack predictive content for this\n"
+                              "label, OR the labels are degenerate (check sample-panel\n"
+                              "Diagnosis for label sanity), OR the horizon is wrong (try\n"
+                              "shorter or longer Forward Ticks).";
+                } else if (abs_val_r >= 0.20f) {
+                    wd_col = &wf_green;
+                    wd_text = "STRONG signal — verify no leakage before trusting";
+                    wd_tip  = "Mean val Pearson r >= 0.20 is unusually strong for tick-scale\n"
+                              "BTC prediction. Before celebrating: check that purge gap is\n"
+                              "respected (no train/test temporal overlap), that labels don't\n"
+                              "leak future info into features, and that the fingerprint matches\n"
+                              "expected. If it survives those checks, this is real edge.";
+                } else if (abs_val_r >= 0.05f) {
+                    wd_col = &wf_green;
+                    wd_text = "weak but real signal — worth optimizing";
+                    wd_tip  = "Mean val Pearson r in [0.05, 0.20]. Real edge but small.\n"
+                              "Hyperparameter sweep can extract more (longer training,\n"
+                              "different max_depth, different label horizons). Compare\n"
+                              "across folds for stability — high variance = brittle.";
+                } else {
+                    wd_col = &wf_yellow;
+                    wd_text = "marginal — barely above noise";
+                    wd_tip  = "abs(val r) is between 0.0 and 0.05. Could be real weak signal\n"
+                              "or just noise. Run again with different folds or longer training\n"
+                              "to see if it's stable.";
+                }
+            } else {
+                // binary or multiclass — both report accuracy
+                float val_acc = wf->mean_val_accuracy;
+                float train_acc = wf->mean_train_accuracy;
+                if (wf->overfit_count >= wf->valid_folds && wf->valid_folds > 0) {
+                    wd_col = &wf_red;
+                    wd_text = "every fold flagged as memorization — model trivially fits training";
+                    wd_tip  = "All valid folds were flagged. Most common cause: extreme class\n"
+                              "imbalance where 'predict majority' gets 99%+ training accuracy\n"
+                              "but val accuracy converges to the prior rate — looks high\n"
+                              "but means nothing. Check sample panel ratio. Or reduce\n"
+                              "model capacity (max_depth 2-3).";
+                } else if (val_acc < 0.52f) {
+                    wd_col = &wf_red;
+                    wd_text = "no edge — val accuracy at or below random chance";
+                    wd_tip  = "Mean val accuracy < 52%%. With binary fee-bearing trades,\n"
+                              "you typically need >55%% to overcome fees + slippage. The\n"
+                              "features aren't separating the classes at this label/horizon.\n"
+                              "Try a different label (Forward P&L regression sidesteps\n"
+                              "class-balance issues), or tighter barriers, or different\n"
+                              "lookahead.";
+                } else if (val_acc >= 0.55f) {
+                    wd_col = &wf_green;
+                    wd_text = "real edge — val accuracy above the fee-overhead threshold";
+                    wd_tip  = "Mean val accuracy >= 55%%. After fees of ~0.1%% × 2 sides,\n"
+                              "this regime can plausibly produce positive expectancy. Verify\n"
+                              "fold-to-fold stability (low std), no leakage, and that the\n"
+                              "training distribution matches the deployment regime.";
+                } else {
+                    wd_col = &wf_yellow;
+                    wd_text = "marginal — val accuracy between 52-55%%, may not survive fees";
+                    wd_tip  = "Mean val accuracy is in the 52-55%% band. This is real signal\n"
+                              "but might not overcome fees + slippage in live trading. Worth\n"
+                              "optimizing if you can also reduce trading costs (maker rebates,\n"
+                              "longer holding period to amortize fees).";
+                }
+                (void)train_acc; // available for future train/val gap diagnostics
+            }
+            ImGui::TextColored(*wd_col, "Diagnosis: %s", wd_text);
+            ImGui::SetItemTooltip("%s", wd_tip);
         }
 
         // fingerprint
@@ -1249,39 +1936,64 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 ImGui::SetTooltip("Full: %s\nReproducible: same config + data = same hash", wf->fingerprint);
         }
 
-        // per-fold table
+        // per-fold table — column headers + values depend on label kind
         if (wf->valid_folds > 0 && ImGui::TreeNode("Per-Fold Results")) {
             ImGui::BeginTable("folds", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg);
             ImGui::TableSetupColumn("Fold", ImGuiTableColumnFlags_WidthFixed, 40);
-            ImGui::TableSetupColumn("Train", ImGuiTableColumnFlags_WidthFixed, 80);
-            ImGui::TableSetupColumn("Val", ImGuiTableColumnFlags_WidthFixed, 80);
-            ImGui::TableSetupColumn("Gap", ImGuiTableColumnFlags_WidthFixed, 60);
+            if (wf_is_regression) {
+                ImGui::TableSetupColumn("Train r",  ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Val r",    ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Val MSE",  ImGuiTableColumnFlags_WidthFixed, 90);
+            } else {
+                ImGui::TableSetupColumn("Train",    ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Val",      ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Gap",      ImGuiTableColumnFlags_WidthFixed, 60);
+            }
             ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableHeadersRow();
-            ImGui::SetItemTooltip("Train: accuracy on data the model saw during training\n"
-                                  "Val: accuracy on future data it never saw (the real test)\n"
-                                  "Gap: train - val (lower is better, >20%% = overfitting)\n"
-                                  "Status: overfit detection (memorization, high gap, etc.)");
+            if (wf_is_regression) {
+                ImGui::SetItemTooltip("Train r: in-sample Pearson correlation\n"
+                                      "Val r: out-of-sample correlation (the real test)\n"
+                                      "Val MSE: mean squared error on validation\n"
+                                      "Status: overfit detection (corr-based for regression)");
+            } else {
+                ImGui::SetItemTooltip("Train: accuracy on data the model saw during training\n"
+                                      "Val: accuracy on future data it never saw (the real test)\n"
+                                      "Gap: train - val (lower is better, >20%% = overfitting)\n"
+                                      "Status: overfit detection (memorization, high gap, etc.)");
+            }
 
             for (int i = 0; i < wf->num_folds; i++) {
                 if (!wf->folds[i].valid) continue;
                 ImGui::TableNextRow();
-
                 ImGui::TableSetColumnIndex(0);
                 ImGui::Text("%d", i + 1);
 
-                ImGui::TableSetColumnIndex(1);
-                ImGui::Text("%.1f%%", wf->folds[i].train_accuracy * 100.0f);
-
-                ImGui::TableSetColumnIndex(2);
-                ImGui::Text("%.1f%%", wf->folds[i].val_accuracy * 100.0f);
-
-                ImGui::TableSetColumnIndex(3);
-                float gap = wf->folds[i].train_accuracy - wf->folds[i].val_accuracy;
-                ImVec4 gap_color = (gap > 0.20f) ? ImVec4(0.95f, 0.35f, 0.35f, 1.0f)
-                                 : (gap > 0.10f) ? ImVec4(0.95f, 0.75f, 0.30f, 1.0f)
-                                                  : ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
-                ImGui::TextColored(gap_color, "%.1f%%", gap * 100.0f);
+                if (wf_is_regression) {
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%.4f", wf->folds[i].train_correlation);
+                    ImGui::TableSetColumnIndex(2);
+                    // color val_r: green if signal-like, yellow weak, red near zero or memorized
+                    float vr = wf->folds[i].val_correlation;
+                    float abs_vr = vr < 0 ? -vr : vr;
+                    ImVec4 vr_color = (abs_vr > 0.20f) ? ImVec4(0.55f, 0.76f, 0.51f, 1.0f)
+                                    : (abs_vr > 0.05f) ? ImVec4(0.95f, 0.75f, 0.30f, 1.0f)
+                                                       : ImVec4(0.95f, 0.35f, 0.35f, 1.0f);
+                    ImGui::TextColored(vr_color, "%.4f", vr);
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::Text("%.6f", wf->folds[i].val_mse);
+                } else {
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%.1f%%", wf->folds[i].train_accuracy * 100.0f);
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("%.1f%%", wf->folds[i].val_accuracy * 100.0f);
+                    ImGui::TableSetColumnIndex(3);
+                    float gap = wf->folds[i].train_accuracy - wf->folds[i].val_accuracy;
+                    ImVec4 gap_color = (gap > 0.20f) ? ImVec4(0.95f, 0.35f, 0.35f, 1.0f)
+                                     : (gap > 0.10f) ? ImVec4(0.95f, 0.75f, 0.30f, 1.0f)
+                                                      : ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
+                    ImGui::TextColored(gap_color, "%.1f%%", gap * 100.0f);
+                }
 
                 ImGui::TableSetColumnIndex(4);
                 if (wf->folds[i].overfit.is_overfit) {
