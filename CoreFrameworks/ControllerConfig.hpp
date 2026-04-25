@@ -125,7 +125,13 @@ template <unsigned F> struct ControllerConfig {
                                      // variance > this = volatile spike
   uint32_t regime_hysteresis;  // slow-path cycles before regime switch (e.g. 5)
   uint32_t min_warmup_samples; // min rolling stats samples before trading (0 =
-                               // use warmup_ticks only)
+                               // use warmup_ticks only). CAPS AT W=128: this
+                               // gates on rolling.count which is bounded by
+                               // the rolling window size. Values > 128 are
+                               // CLAMPED at config load with a warning. If you
+                               // want a longer total-tick warmup, use
+                               // warmup_ticks instead — it counts raw ticks
+                               // and has no upper bound.
   // post-SL cooldown
   uint32_t sl_cooldown_cycles; // slow-path cycles to pause buying after SL (0 =
                                // disabled)
@@ -840,6 +846,26 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   }
 
   fclose(f);
+
+  // post-load validation/clamping. min_warmup_samples gates on rolling.count
+  // which caps at the short rolling window size (W=128). Values above 128
+  // mean "warmup never completes" — user-hostile silent failure. Clamp +
+  // explain so the user understands what happened and what to use instead.
+  // (Took us multiple hours of debugging Friday night before we figured this
+  // out — the field name implied "ticks" but actually means "rolling window
+  // samples." See CLAUDE.md "Label-type-aware metric invariant" for the
+  // sibling rule about consulting source-of-truth helpers.)
+  const uint32_t ROLLING_WINDOW_SHORT = 128; // matches RollingStats<F> default W
+  if (cfg.min_warmup_samples > ROLLING_WINDOW_SHORT) {
+    fprintf(stderr,
+            "[CFG] WARNING: min_warmup_samples=%u exceeds rolling window size "
+            "%u and would cause warmup to never complete. Clamped to %u.\n"
+            "      If you want a longer total-tick warmup, use warmup_ticks "
+            "instead (counts raw ticks, no upper bound).\n",
+            cfg.min_warmup_samples, ROLLING_WINDOW_SHORT, ROLLING_WINDOW_SHORT);
+    cfg.min_warmup_samples = ROLLING_WINDOW_SHORT;
+  }
+
   return cfg;
 }
 //======================================================================================================
