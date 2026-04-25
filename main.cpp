@@ -356,6 +356,45 @@ int main(int argc, char *argv[]) {
 #endif
 #endif // MULTICORE_TUI
 
+    //==================================================================================================
+    // notify state (Phase 8b) — operational alerts. Off by default. When
+    // enabled, picks backend by cfg.notify_backend (0=stderr, 1=command).
+    // The Command backend takes notify_command as a shell template with up
+    // to two %s placeholders (subject, body) that get safely shell-escaped.
+    // After Init, g_notify points at g_notify_state and Notify_Send call
+    // sites everywhere route through the configured backend. Shutdown drains
+    // the queue and joins the worker thread.
+    //==================================================================================================
+    static NotifyState g_notify_state;
+    static NotifyCommandState g_notify_cmd_state;
+    if (ccfg.notify_enabled) {
+        NotifyBackendFn backend = NotifyBackend_Stderr;
+        void *backend_state = nullptr;
+        if (ccfg.notify_backend == 1) {
+            if (ccfg.notify_command[0] == '\0') {
+                fprintf(stderr, "[NOTIFY] backend=command but notify_command is empty — "
+                                "falling back to stderr\n");
+            } else {
+                strncpy(g_notify_cmd_state.template_str, ccfg.notify_command,
+                        sizeof(g_notify_cmd_state.template_str) - 1);
+                g_notify_cmd_state.template_str[sizeof(g_notify_cmd_state.template_str) - 1] = '\0';
+                backend = NotifyBackend_Command;
+                backend_state = &g_notify_cmd_state;
+            }
+        } else if (ccfg.notify_backend != 0) {
+            fprintf(stderr, "[NOTIFY] backend=%d not recognized — falling back to stderr\n",
+                    ccfg.notify_backend);
+        }
+        NotifyState_Init(&g_notify_state, backend, backend_state,
+                         (uint64_t)ccfg.notify_cooldown_secs * 1000000ULL);
+        if (g_notify_state.worker_started) {
+            g_notify = &g_notify_state;
+            fprintf(stderr, "[ENGINE] notify enabled (backend=%s, cooldown=%us)\n",
+                    backend == NotifyBackend_Stderr ? "stderr" : "command",
+                    ccfg.notify_cooldown_secs);
+        }
+    }
+
 #ifdef LATENCY_PROFILING
     // calibrate TSC: measure cycles over a known 10ms sleep to get cycles-per-nanosecond
     {
@@ -1101,6 +1140,13 @@ int main(int argc, char *argv[]) {
     if (depth_tid != 0) {
         __atomic_store_n(&depth_shared.quit_requested, 1, __ATOMIC_RELEASE);
         pthread_join(depth_tid, NULL);
+    }
+
+    // notify shutdown (Phase 8b c3) — drain remaining events + join worker.
+    // No-op if Init never ran (worker_started=0 path inside _Shutdown).
+    if (g_notify) {
+        NotifyState_Shutdown(g_notify);
+        g_notify = nullptr;
     }
     TradeLogBuffer_Drain(&ctrl.trade_buf, &log);
     TradeLog_Close(&log);

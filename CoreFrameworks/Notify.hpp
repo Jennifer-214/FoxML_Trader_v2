@@ -258,4 +258,134 @@ static inline int NotifyBackend_Stderr(const NotifyEvent *evt, void *state) {
     return 0;
 }
 
+//======================================================================================================
+// [COMMAND BACKEND] — generic shell-out via popen
+//======================================================================================================
+// Runs a configurable shell command for each event. Decouples the engine
+// from any specific notification service. Templates MUST wrap %s in single
+// quotes — Notify_ShellEscape replaces internal ' with '\'' but does NOT
+// add the surrounding quotes (caller's responsibility).
+//
+//   - dunst:    notify-send 'Engine: %s' '%s'
+//   - Discord:  curl -s -X POST -H 'Content-Type: application/json' \
+//                    -d '{"content":"%s\n%s"}' YOUR_DISCORD_WEBHOOK
+//   - Slack:    curl -s -X POST -H 'Content-Type: application/json' \
+//                    -d '{"text":"%s: %s"}' YOUR_SLACK_WEBHOOK
+//   - Telegram: curl -s 'https://api.telegram.org/bot<TOK>/sendMessage' \
+//                    -d 'chat_id=<CHAT>&text=%s: %s'
+//   - ntfy.sh:  curl -s -d '%s: %s' https://ntfy.sh/your-topic
+//   - email:    printf 'Subject: %s\n\n%s' '%s' '%s' | sendmail you@example
+//
+// Template syntax: up to TWO %s placeholders. First gets the SUBJECT, second
+// gets the BODY. Anything else passes through literally — no printf parsing
+// (avoids format-string injection from user-supplied templates).
+//
+// Substitutions are shell-escaped (internal ' → '\'') but NOT JSON-escaped.
+// For Discord/Slack JSON payloads, " and \ in the message body will break
+// the JSON layer. Engine-generated alert text is plain; if you want bullet-
+// proof JSON, wrap your curl invocation in a helper script that handles
+// JSON escaping (e.g., via `jq -Rs` or `python -c 'import json,sys;...'`).
+//
+// Threading: popen forks /bin/sh; pclose reaps. Worker thread blocks until
+// the command exits — a hung curl will back up the queue. Recommend prepending
+// `timeout 10 ` to the cfg default. Worker thread is dedicated so this won't
+// affect the engine hot path.
+
+struct NotifyCommandState {
+    char template_str[512]; // copied from cfg at Init; not modified
+};
+
+// Shell-quote `in` into `out`. Replaces internal ' with '\'' (close-escape-
+// reopen). Does NOT add enclosing quotes — the USER TEMPLATE provides them
+// (e.g., `notify-send 'Engine: %s' '%s'`). Worst case ~4x input + 1.
+//
+// Why not enclose: the user's template typically already has '%s' (single-
+// quoted placeholder) so it can sit inside JSON strings, dunst args, curl -d
+// payloads, etc. Doubly-quoting (template's quote + our enclosure) produces
+// ''-pairs that bash parses as empty strings, breaking the surrounding
+// quoted region. Standard shell-escape contract: caller wraps with quotes.
+//
+// Limitations: assumes user's surrounding context is SINGLE quotes. For
+// JSON payloads (curl -d '{"content":"%s"}'), values with " or \ also need
+// JSON escaping — out of scope here. Plain-text alerts (the engine's
+// default format) work everywhere; messages with ", \, or other JSON-
+// special chars may break the JSON layer when sent to Discord/Slack.
+// Document this for users; provide a wrapper script if needed.
+static inline void Notify_ShellEscape(char *out, size_t out_cap, const char *in) {
+    if (out_cap == 0) return;
+    size_t pos = 0;
+    while (*in && pos + 4 < out_cap) {
+        if (*in == '\'') {
+            // close-escape-reopen: '\''
+            out[pos++] = '\'';
+            out[pos++] = '\\';
+            out[pos++] = '\'';
+            out[pos++] = '\'';
+        } else {
+            out[pos++] = *in;
+        }
+        in++;
+    }
+    out[pos] = '\0';
+}
+
+// Manual %s substitution — NOT printf-based. Prevents format-string injection
+// from user-supplied templates (template comes from cfg, may have stray %d/%n).
+// Substitutes up to two %s with subject + body in order. Other characters
+// pass through literally. Returns 1 on success, 0 if the command buffer
+// overflowed before completion (still tries to run what fit).
+static inline int Notify_BuildCommand(char *out, size_t out_cap,
+                                       const char *tmpl,
+                                       const char *subj_esc,
+                                       const char *body_esc) {
+    size_t pos = 0;
+    int n_subs = 0;
+    const char *p = tmpl;
+    while (*p && pos + 1 < out_cap) {
+        if (p[0] == '%' && p[1] == 's' && n_subs < 2) {
+            const char *sub = (n_subs == 0) ? subj_esc : body_esc;
+            size_t sub_len = strlen(sub);
+            if (pos + sub_len + 1 >= out_cap) {
+                out[pos] = '\0';
+                return 0; // truncated
+            }
+            memcpy(out + pos, sub, sub_len);
+            pos += sub_len;
+            p += 2;
+            n_subs++;
+        } else {
+            out[pos++] = *p++;
+        }
+    }
+    out[pos] = '\0';
+    return *p == '\0';
+}
+
+static inline int NotifyBackend_Command(const NotifyEvent *evt, void *state) {
+    NotifyCommandState *cs = (NotifyCommandState *)state;
+    if (!cs || cs->template_str[0] == '\0') return -1;
+
+    // Shell-escape both fields (just internal ' replacement; no enclosure).
+    // Buffers sized so even all-quote input stays bounded: 4x growth + null.
+    char esc_subj[1024];   // subject is 128 → worst case 4*128 + 1 = 513
+    char esc_body[3072];   // body is 512 → worst case 4*512 + 1 = 2049
+    Notify_ShellEscape(esc_subj, sizeof(esc_subj), evt->subject);
+    Notify_ShellEscape(esc_body, sizeof(esc_body), evt->body);
+
+    char cmd[8192];
+    Notify_BuildCommand(cmd, sizeof(cmd), cs->template_str, esc_subj, esc_body);
+
+    FILE *f = popen(cmd, "r");
+    if (!f) {
+        fprintf(stderr, "[NOTIFY] popen failed for command backend (cmd truncated to %.80s...)\n", cmd);
+        return -1;
+    }
+    // Drain stdout so the child doesn't block on a full pipe. We don't care
+    // about the output — the alert is fire-and-forget.
+    char drain[256];
+    while (fread(drain, 1, sizeof(drain), f) > 0) {}
+    pclose(f); // reap child to avoid zombies
+    return 0;
+}
+
 #endif // NOTIFY_HPP

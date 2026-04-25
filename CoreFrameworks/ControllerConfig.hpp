@@ -235,6 +235,14 @@ template <unsigned F> struct ControllerConfig {
   int record_depth; // 0=disabled (default), 1=record depth snapshots
   uint32_t
       record_max_days; // auto-prune CSVs older than this (default 30, ~2GB cap)
+
+  // operational alerts (Phase 8b): route kill switch, orphan, disconnect
+  // events through a configurable backend. All off by default.
+  int notify_enabled;             // 0=disabled (default), 1=route alerts
+  int notify_backend;             // 0=stderr (default), 1=command (popen-based)
+  char notify_command[512];       // shell template with up to 2 %s (subject, body)
+                                  // examples in engine.cfg / SettingsPanel tooltip
+  uint32_t notify_cooldown_secs;  // per-event-kind cooldown (default 60)
   // FoxML integration — Phase 6C (all default OFF, zero behavior change when
   // disabled)
   int cost_gate_enabled; // 0=disabled, 1=estimate trade cost via CostModel,
@@ -465,6 +473,11 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.record_ticks = 0;
   cfg.record_depth = 0; // Phase 8a c5 — opt-in
   cfg.record_max_days = 30;
+  // Phase 8b — operational alerts (all opt-in; default = no behavior change)
+  cfg.notify_enabled = 0;
+  cfg.notify_backend = 0;          // stderr
+  cfg.notify_command[0] = '\0';
+  cfg.notify_cooldown_secs = 60;
   // FoxML integration — Phase 6C (all OFF by default, zero behavior change)
   cfg.cost_gate_enabled = 0;
   cfg.foxml_vol_scaling_enabled = 0;
@@ -713,6 +726,24 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(record_ticks)
     CFG_PARSE_INT(record_depth)
     CFG_PARSE_U32(record_max_days)
+
+    //--- operational alerts (Phase 8b) ---
+    CFG_PARSE_INT(notify_enabled)
+    CFG_PARSE_INT(notify_backend)
+    CFG_PARSE_U32(notify_cooldown_secs)
+    // notify_command is a string — no macro for that, inline parse below
+    if (strcmp(key, "notify_command") == 0) {
+        strncpy(cfg.notify_command, val, sizeof(cfg.notify_command) - 1);
+        cfg.notify_command[sizeof(cfg.notify_command) - 1] = '\0';
+        // strip trailing newline if any (the cfg parser usually does this,
+        // but be defensive — bad commands break alerts silently otherwise)
+        size_t nl = strlen(cfg.notify_command);
+        while (nl > 0 && (cfg.notify_command[nl-1] == '\n' ||
+                          cfg.notify_command[nl-1] == '\r')) {
+            cfg.notify_command[--nl] = '\0';
+        }
+        continue;
+    }
 
     //--- FoxML integration (Phase 6C) ---
     CFG_PARSE_INT(cost_gate_enabled)
