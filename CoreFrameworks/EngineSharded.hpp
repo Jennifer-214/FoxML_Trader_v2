@@ -573,6 +573,7 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     g_shared.pause_requested = 0;
     g_shared.reload_requested = 0;
     g_shared.drag_slot = -1;
+    for (int i = 0; i < 16; ++i) g_shared.swap_strategy_requested[i] = STRATEGY_NONE;
     static CandleAccumulator g_candle_acc;
     CandleAccumulator_Init(&g_candle_acc, 60);
     g_shared.candle_acc = &g_candle_acc;
@@ -634,6 +635,29 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
                 slow_path_counter = 0;
                 RollingStats_Push(&rolling_short, t.price, t.volume);
                 RollingStats_Push(&rolling_long,  t.price, t.volume);
+#ifdef USE_IMGUI_GUI
+                // v4.0 hot-swap strategy: GUI requests are picked up here.
+                // STRATEGY_NONE (0xFF) = no request; any other value swaps
+                // the core's strategy. Open positions are honored — the swap
+                // waits until the position closes naturally so the old
+                // strategy's TP/SL still applies to its own entry.
+                for (int c = 0; c < num_cores && c < 16; ++c) {
+                    uint8_t pending = __atomic_load_n(
+                        &g_shared.swap_strategy_requested[c], __ATOMIC_ACQUIRE);
+                    if (pending == STRATEGY_NONE) continue;
+                    if ((state.oms->portfolio.active_bitmap &
+                         (uint16_t)(1u << c)) != 0) {
+                        continue;  // position open; defer until exit
+                    }
+                    uint8_t old_strat = state.cores[c].strategy_id;
+                    state.cores[c].strategy_id = pending;
+                    __atomic_store_n(&g_shared.swap_strategy_requested[c],
+                                     STRATEGY_NONE, __ATOMIC_RELEASE);
+                    fprintf(stderr,
+                            "[sharded] core %d: strategy swapped %u -> %u\n",
+                            c, (unsigned)old_strat, (unsigned)pending);
+                }
+#endif
                 EventLoop_RebuildAllParameters(&state, &rolling_short, &cfg, &rolling_long);
                 EventLoop_PushParameters(&state);
                 // KNOWN RACE (audit 2026-04-09): KillSwitchEvaluate reads

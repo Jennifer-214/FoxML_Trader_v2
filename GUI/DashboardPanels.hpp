@@ -1007,6 +1007,72 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
 #ifdef LATENCY_PROFILING
     GUI_Panel_Latency(s);
 #endif
+    // Per-Core Strategy control (v4.0 hot-swap). Sharded mode only. One row
+    // per core: current strategy + dropdown of swappable choices + Apply button.
+    // Engine watches shared->swap_strategy_requested[c] on the slow path; the
+    // swap waits for any open position to close before applying so the old
+    // strategy's TP/SL still governs its own entry.
+    if (s->sharded_mode_active && s->per_core_count > 0 && shared) {
+        ImGui::Begin("Per-Core Strategy");
+        SectionHeader("PER-CORE STRATEGY");
+        ImGui::TextColored(FoxmlColors::comment,
+            "(swap waits for open position to close before applying)");
+        ImGuiTableFlags tf2 = ImGuiTableFlags_BordersInnerV |
+                              ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_SizingStretchProp;
+        if (ImGui::BeginTable("##percore_strat", 5, tf2)) {
+            ImGui::TableSetupColumn("Core",   ImGuiTableColumnFlags_WidthFixed, 35);
+            ImGui::TableSetupColumn("Active", ImGuiTableColumnFlags_WidthFixed, 50);
+            ImGui::TableSetupColumn("Choose", ImGuiTableColumnFlags_WidthFixed, 100);
+            ImGui::TableSetupColumn("Apply",  ImGuiTableColumnFlags_WidthFixed, 65);
+            ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableHeadersRow();
+            // pre-build the strategy options list once per render
+            static const char* strat_labels[NUM_STRATEGIES] = {
+                "MR", "MOM", "DIP", "ML", "EMA"
+            };
+            static int chosen[16] = {0};  // per-core dropdown selection (preserves across frames)
+            for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%d", i);
+                ImGui::TableNextColumn();
+                uint8_t sid = s->per_core[i].strategy_id_display;
+                ImGui::TextColored(FoxmlColors::primary, "%s",
+                    sid < NUM_STRATEGIES ? strat_labels[sid] : "?");
+                // initialize chosen[i] to active strategy on first sight so the
+                // dropdown defaults to the current value rather than "MR"
+                if (chosen[i] >= NUM_STRATEGIES) chosen[i] = 0;
+                ImGui::TableNextColumn();
+                ImGui::PushID(i);
+                ImGui::SetNextItemWidth(-1);
+                ImGui::Combo("##strat", &chosen[i], strat_labels, NUM_STRATEGIES);
+                ImGui::TableNextColumn();
+                bool same_as_active = (chosen[i] == sid);
+                if (same_as_active) ImGui::BeginDisabled();
+                if (ImGui::Button("Apply")) {
+                    __atomic_store_n(
+                        &shared->swap_strategy_requested[i],
+                        (uint8_t)chosen[i], __ATOMIC_RELEASE);
+                }
+                if (same_as_active) ImGui::EndDisabled();
+                ImGui::PopID();
+                ImGui::TableNextColumn();
+                uint8_t pending = __atomic_load_n(
+                    &shared->swap_strategy_requested[i], __ATOMIC_ACQUIRE);
+                if (pending != STRATEGY_NONE) {
+                    const char* pname = pending < NUM_STRATEGIES ? strat_labels[pending] : "?";
+                    ImGui::TextColored(FoxmlColors::yellow,
+                        "swap → %s pending (waiting for position close)", pname);
+                } else {
+                    ImGui::TextColored(FoxmlColors::comment, "ready");
+                }
+            }
+            ImGui::EndTable();
+        }
+        ImGui::End();
+    }
+
     // Per-core latency panel (sharded mode only)
     if (s->sharded_mode_active && s->per_core_count > 0) {
         ImGui::Begin("Per-Core Latency");

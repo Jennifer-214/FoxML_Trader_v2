@@ -932,6 +932,12 @@ struct TUISharedState {
     volatile int drag_slot;       // -1 = no drag, 0-15 = position slot
     volatile int drag_is_tp;      // 1 = TP, 0 = SL
     volatile double drag_price;   // new price value
+    // Hot-swap strategy per core (sharded mode). GUI writes; controller core
+    // reads + acts on the next slow-path rebuild. Value 0xFF (STRATEGY_NONE)
+    // means "no pending swap"; any other value triggers the swap. Controller
+    // resets to 0xFF after applying. Per-core array so multiple cores can
+    // be queued independently.
+    volatile uint8_t swap_strategy_requested[16];
     EngineTUI tui;
     const char *config_path;
     void *candle_acc;  // CandleAccumulator* (GUI build only, NULL for ANSI)

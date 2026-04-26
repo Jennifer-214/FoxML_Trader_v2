@@ -39,10 +39,19 @@ if [[ "$TARGET" == "--clean" ]]; then
     TARGET="all"
 fi
 
+# The engine looks for engine.cfg in cwd. Without this symlink, running
+# ./engine from build/ gets "config not found, using defaults" — and falls
+# back to synthetic ticks instead of the live Binance feed.
+link_cfg() {
+    local dir="$1"
+    [[ -d "$dir" ]] && [[ -f engine.cfg ]] && ln -sfn ../engine.cfg "$dir/engine.cfg"
+}
+
 build_engine() {
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build
     cmake -B build -DCMAKE_BUILD_TYPE=Release
     cmake --build build -j"$JOBS"
+    link_cfg build
 }
 
 build_gui() {
@@ -54,6 +63,7 @@ build_gui() {
     # raw production performance use `./build.sh gui-lite` instead.
     cmake -B build_gui -DUSE_IMGUI_GUI=ON -DLATENCY_PROFILING=ON -DUSE_XGBOOST=ON
     cmake --build build_gui -j"$JOBS"
+    link_cfg build_gui
 }
 
 build_gui_lite() {
@@ -63,6 +73,7 @@ build_gui_lite() {
     # is the goal and you've already validated latency in build_lat.
     cmake -B build_gui_lite -DUSE_IMGUI_GUI=ON
     cmake --build build_gui_lite -j"$JOBS"
+    link_cfg build_gui_lite
 }
 
 build_suite() {
@@ -70,12 +81,14 @@ build_suite() {
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_suite
     cmake -B build_suite -DUSE_IMGUI_GUI=ON -DLATENCY_PROFILING=ON -DUSE_XGBOOST=ON
     cmake --build build_suite -j"$JOBS" --target foxml_suite
+    link_cfg build_suite
 }
 
 build_latency() {
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_lat
     cmake -B build_lat -DLATENCY_PROFILING=ON
     cmake --build build_lat -j"$JOBS"
+    link_cfg build_lat
 }
 
 run_tests() {
