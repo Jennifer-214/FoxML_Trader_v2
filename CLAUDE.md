@@ -469,6 +469,66 @@ When `confidence_enabled=1` AND `strategy_id == STRATEGY_ML`:
 5. **Confidence is read on slow path, displayed via `last_confidence`.** `last_confidence` is updated on every gate decision; TUI/GUI read the snapshot field. **NEVER read `last_confidence` from the hot path.**
 6. **Tunables (Phase 6prep):** `cfg.confidence_window` (default 32, max 64), `cfg.confidence_freshness_tau` (default 300s = 5min), `cfg.confidence_threshold_scale` (default 2.0). All preserve pre-Phase-6prep hardcoded behavior at default values. Tuning these requires an actual signal to A/B against — meaningless on noise-floor models.
 
+### Train-Serve Feature Parity (load-bearing — v4.0.1)
+
+The ML pipeline trains on features computed during backtest replay
+(legacy `PortfolioController` slow path) and serves on features
+computed during live execution (sharded `EventLoopState` slow path).
+**Both paths MUST call `Regime_ComputeSignals` with equivalent state**
+or the model predicts on degraded inputs at serving time — silent
+train-serve drift, hard to detect because it produces "real-looking"
+predictions that just don't match what the model learned.
+
+`ModelFeatures_Pack` reads 16 fields off `RegimeSignals + RollingStats`.
+Three of them require state beyond the rolling window:
+- `sig.ror_slope` — needs a `RORRegressor` of the rolling slope history
+- `sig.ema_sma_spread` — needs an `ema_price` (exponentially smoothed)
+- `sig.ema_above_sma` — derived from `ema_sma_spread`
+
+**The sharded engine maintains both** as static locals in
+`EngineSharded_Run`:
+- `RORRegressor<F> regime_ror` — pushed each slow path in `fan_out`
+  with `LinearRegression3XResult{slope, intercept=0, r_squared}`.
+  Mirrors `PortfolioController.hpp:~1552`.
+- `FPN<F> ema_price` — updated **every tick** in `fan_out` (not slow
+  path). Branchless first-tick: if zero, take current price; else
+  apply `ema_alpha * old + (1-alpha) * new`. Mirrors `PortfolioController_Tick`.
+
+These are passed to `EventLoop_RebuildAllParameters` via the new
+optional `ror_regressor` + `ema_price` parameters and threaded through
+`MLBuildContext` to `ML_BuildParameters`. When both are non-null,
+`ML_BuildParameters` calls `Regime_ComputeSignals` (single source of
+truth for the feature pack). When null (legacy callers / tests), it
+falls back to inline minimal population — preserves prior behavior
+for those callers.
+
+**Why this is load-bearing.** Pre-v4.0.1, the sharded path inline-
+populated a smaller subset of `RegimeSignals`. The three fields above
+stayed at zero. A model trained with non-zero values would see all
+zeros at inference. Predictions diverge. Caught by direct audit
+question ("are you sure the sharded engine produces the same features
+the backtest does?") — could have shipped silently otherwise.
+
+**Adding a new feature to `ModelFeatures_Pack`:**
+1. Define `FEAT_NEW_NAME` constant + bump `MODEL_NUM_FEATURES` +
+   `MODEL_FORMAT_VERSION` (existing rules)
+2. Add the field to `RegimeSignals<F>`
+3. Populate it in `Regime_ComputeSignals` — that's the single site
+4. If the field needs new state (like ROR did), add it to BOTH
+   `PortfolioController` (legacy backtest path) AND
+   `EngineSharded_Run` (sharded live path), with parity in update
+   cadence (per-tick vs slow-path)
+5. Re-train all models — old models will fail version check at load
+
+**Other train-serve divergences (documented but accepted):**
+- Backtest is all-taker; live can be maker. Doesn't affect features
+  (model doesn't use fee-derived features).
+- Backtest assumes full fills; live can have partials. Doesn't affect
+  features.
+- Tick timing — backtest replays CSV with stored timestamps, live has
+  real network jitter. Affects P&L from a given prediction, not the
+  prediction itself.
+
 ### Maker/Taker Fee Accuracy (Phase 8)
 
 When applying fees in any code path:
@@ -555,10 +615,14 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
 
 **Future hardening (deferred):** turn `num_classes` into `enum class LabelKind { Binary, Regression, Multiclass }` so the compiler exhaustive-checks switches. Larger surgery — touches every existing site again. Reasonable v2 once the current convention has settled.
 
-## Current State (2026-04-25 evening — v4.0.0)
+## Current State (2026-04-25 late evening — v4.0.1)
 
-**Branch:** `experiment/per-core-sharding` (main). v4.0.0 released — sharded
-production + per-core ML confidence loop + hot-swap + live-data default.
+**Branch:** `experiment/per-core-sharding` (main). v4.0.1 released — twelve
+post-release polish commits on top of v4.0.0. Train-serve parity for ML
+fixed (RORRegressor + EMA in sharded slow path), shutdown promptness fixed
+(interruptible reconnect/retry sleeps), several v4.0 default-mode regressions
+ported (Settings hot-reload, GUI drag, Collect Features routing), MOM gate
+direction wired (`GATE_FLAG_BUY_ABOVE`).
 
 **Tests:** controller_test 351/351 passing, depth_recorder_test 17/17 passing.
 
@@ -770,3 +834,14 @@ template <unsigned F> struct YourNameState {
 - **FPN<F> only**: no floats in hot/warm paths
 - **Regression adaptation**: feed P&L → compute slope → negate → shift filters → clamp to bounds → mask by R²
 - **Trailing exits**: `hold_score = SNR × R²` → ratchet TP/SL upward with FPN_Max
+
+### Sharded gate direction (v4.0.1)
+
+The sharded hot path's `BG_Evaluate` defaults to buy-below
+(`tick.price < bg_price_threshold`). For a buy-above strategy
+(momentum, breakout, etc.), the strategy's `_BuildParameters` MUST set
+`out->flags |= GATE_FLAG_BUY_ABOVE`. Otherwise the core silently buys
+dips while the GUI claims it's a momentum strategy — pre-v4.0.1 bug.
+The flag is read in both the standalone `BG_Evaluate` (tests) and the
+inlined version in `ExecutionCore_Tick` (production). Selection is
+branchless via mask, ~1ns hot-path overhead.
