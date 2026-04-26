@@ -48,6 +48,7 @@
 #include "../DataStream/BinanceUserData.hpp"
 #include "BinanceAdapter.hpp"
 #include "ReconciliationLoop.hpp"
+#include "ShardedLiveSafety.hpp"   // Phase 0: orphan recovery, force-close, reconcile
 #include "ShardedSnapshot.hpp"
 #include "ControllerEventLoop.hpp"
 #include "CoreLatencyStats.hpp"
@@ -318,6 +319,35 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     if (num_cores < 1) num_cores = 1;
     if (num_cores > MAX_EXECUTION_CORES) num_cores = MAX_EXECUTION_CORES;
 
+    // Phase 0.1 — orphan BTC recovery + live starting balance.
+    // Mirrors legacy main.cpp behavior: query exchange balances at boot, and
+    // if any BTC exists (sharded has no persistence yet, so BTC at boot is
+    // by definition orphan from a prior session), market-sell to recover
+    // USDT. Use the post-recovery USDT as the starting balance for the OMS
+    // — the cfg's starting_balance is only used in paper mode.
+    //
+    // Notify isn't initialized yet (it's set up later, after OMS init), so
+    // alerts at this point go to stderr only. That's acceptable: stderr is
+    // line-buffered to a file (logging/engine.log), and any failure here
+    // is fatal anyway — the user will see it on next start.
+    FPN<F> live_starting_balance = cfg.starting_balance;
+    if (live_trading) {
+        double usdt_recovered = 0.0, btc_remaining = 0.0;
+        if (!EngineSharded_OrphanRecovery(&g_sharded_binance_adapter,
+                                           /*notify=*/nullptr,
+                                           &usdt_recovered,
+                                           &btc_remaining)) {
+            fprintf(stderr, "[sharded] FATAL: orphan recovery failed — refusing to start with unknown exchange state\n");
+            BinanceAdapter_ShutdownState(&g_sharded_binance_adapter);
+            std::signal(SIGINT, prev_int);
+            std::signal(SIGTERM, prev_term);
+            return;
+        }
+        live_starting_balance = FPN_FromDouble<F>(usdt_recovered);
+        fprintf(stderr, "[sharded] LIVE starting balance set from exchange: $%.2f\n",
+                usdt_recovered);
+    }
+
     // OMS phase 03 chunk 1B: construct the OMS first with the bank state,
     // then wire the EventLoopState to point at it. Financial state lives
     // in OrderManagerState; EventLoopState is a thin dispatcher.
@@ -327,7 +357,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     }
     OrderManagerState<F> oms;
     OrderManager_Init(&oms, exchange_adapter, live_trading ? 1 : 0,
-                      cfg.starting_balance, cfg.fee_rate,
+                      live_starting_balance, cfg.fee_rate,
                       (int)cfg.oms_event_log_mode);
     // Phase 8 (post-coding c9) — explicit maker/taker rates so HandleFill's
     // per-fill rate selection actually works. Init defaults both = fee_rate
@@ -1398,6 +1428,23 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 #endif  // USE_IMGUI_GUI else (ANSI TUI)
 
     fprintf(stderr, "[sharded] shutdown requested, joining threads...\n");
+    // Phase 0.2 — force-close on shutdown. Refuse to silently exit with
+    // open positions. Submits market sells via OrderManager_Submit (same
+    // path as TP/SL exits) and waits up to 30s for the bitmap to clear as
+    // fills come through user-data WS → drainer → OnEvent. Drainer is
+    // still running at this point — the joins below come after.
+    // Paper mode: clears bitmap locally (no exchange interaction).
+    {
+        int remaining = EngineSharded_ForceCloseOnShutdown<F>(
+            &oms, live_trading ? &g_sharded_binance_adapter : nullptr,
+            g_notify, /*timeout_secs=*/30);
+        if (remaining > 0) {
+            fprintf(stderr,
+                "[sharded] WARNING: %d position(s) could not be force-closed before exit. "
+                "Manual intervention required to flatten on Binance before next session.\n",
+                remaining);
+        }
+    }
     // Per-stage shutdown logging — when the process refuses to exit on close,
     // these tell us WHICH thread is hung. Without them every shutdown bug
     // looks the same from outside ("the engine doesn't die"). Each stage

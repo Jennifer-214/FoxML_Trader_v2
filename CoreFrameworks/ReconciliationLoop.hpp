@@ -151,8 +151,13 @@ static inline int ReconciliationLoop_Pass(ReconciliationLoopState<F>* s) {
              "drift=%.4f exchange=%.4f expected=%.4f",
              drift_usdt, exchange_usdt, expected_usdt);
 
-    if (!SPSCRing_TryPush(&s->reconcile_queue, cmd)) {
-        fprintf(stderr, "[Reconciler] reconcile_queue full, dropping correction\n");
+    // Phase 0.3 fix: push to the OMS's reconcile_queue (which OMS_Tick
+    // drains). Previously we pushed to our own s->reconcile_queue, which
+    // nothing reads — drift corrections were silently dropped on the floor.
+    // s->reconcile_queue stays initialized for now (callers may reference
+    // it); it's dead code that should be cleaned up in a follow-on commit.
+    if (!SPSCRing_TryPush(&s->oms->reconcile_queue, cmd)) {
+        fprintf(stderr, "[Reconciler] oms->reconcile_queue full, dropping correction\n");
         return 0;
     }
 
