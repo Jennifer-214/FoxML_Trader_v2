@@ -575,7 +575,9 @@ inline int EventLoop_RebuildAllParameters(
     EventLoopState<F>* state,
     const RollingStats<F, W>* rolling,
     const ControllerConfig<F>* config,
-    const RollingStats<F, WL>* rolling_long = nullptr
+    const RollingStats<F, WL>* rolling_long = nullptr,
+    const void* ror_regressor = nullptr,    // const RORRegressor<F>*
+    const void* ema_price     = nullptr     // const FPN<F>*
 ) {
     int rebuilt = 0;
     for (int slot = 0; slot < state->registered_count; ++slot) {
@@ -596,6 +598,11 @@ inline int EventLoop_RebuildAllParameters(
             ml_ctx.confidence     = &state->cores[slot].confidence;
             ml_ctx.out_prediction = &state->cores[slot].staged_prediction;
             ml_ctx.out_confidence = &state->cores[slot].last_confidence;
+            // v4.0 train-serve parity: pass through ROR + EMA from engine
+            // slow path so Regime_ComputeSignals can produce the full
+            // feature set the backtest path produces during training.
+            ml_ctx.ror_regressor  = (void*)ror_regressor;
+            ml_ctx.ema_price      = (void*)ema_price;
             dispatch_ctx = &ml_ctx;
         }
         Strategy_BuildParameters(

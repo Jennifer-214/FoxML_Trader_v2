@@ -459,6 +459,19 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // pushes ticks into these on cadence and rebuilds gate params from them.
     static RollingStats<F, 128> rolling_short = RollingStats_Init<F, 128>();
     static RollingStats<F, 512> rolling_long  = RollingStats_Init<F, 512>();
+    // v4.0 train-serve parity: RORRegressor + EMA price track the same state
+    // legacy PortfolioController maintains, so ML_BuildParameters can call
+    // Regime_ComputeSignals and produce ALL the features ModelFeatures_Pack
+    // reads — not just a subset. Without these, sig->ror_slope,
+    // sig->ema_sma_spread, sig->ema_above_sma stayed at zero in sharded
+    // while backtest produced them non-zero, causing model train/serve drift.
+    static RORRegressor<F> regime_ror = RORRegressor_Init<F>();
+    static FPN<F> ema_price = FPN_Zero<F>();
+    // EMA alpha matches PortfolioController_Init's default (gate_ema_alpha
+    // is the cfg key). Computed at boot from cfg; updated each tick.
+    FPN<F> ema_alpha = !FPN_IsZero(cfg.gate_ema_alpha)
+                       ? cfg.gate_ema_alpha
+                       : FPN_FromDouble<F>(0.1);
     rolling_short = RollingStats_Init<F, 128>();
     rolling_long  = RollingStats_Init<F, 512>();
 
@@ -602,7 +615,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     //----------------------------------------------------------------------
     // Producer thread — generates synthetic ticks and fans out to all cores
     //----------------------------------------------------------------------
-    std::thread producer([&producer_done, &ticks_produced, &bcfg, &last_price, &last_volume, &cfg, &state, num_cores, use_synthetic, tsc_ghz] {
+    std::thread producer([&producer_done, &ticks_produced, &bcfg, &last_price, &last_volume,
+                          &cfg, &state, num_cores, use_synthetic, tsc_ghz,
+                          &ema_price, &ema_alpha, &regime_ror] {
         EngineSharded_PinThread(0);  // best-effort pin to CPU 0
         uint64_t seq = 0;
         // Sharded mode uses a much shorter slow_path_interval than legacy
@@ -615,7 +630,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // Helper that fans a single tick out to every core's tick ring,
         // updates rolling stats, and runs the slow-path rebuild on cadence.
         auto fan_out = [num_cores, &seq, &ticks_produced, &last_price, &last_volume,
-                        &cfg, &state, &slow_path_counter, slow_path_interval, tsc_ghz]
+                        &cfg, &state, &slow_path_counter, slow_path_interval, tsc_ghz,
+                        &ema_price, ema_alpha, &regime_ror]
                        (double price_d, double volume_d, uint64_t ts_us) {
             Tick<F> t;
             memset(&t, 0, sizeof(t));
@@ -632,6 +648,19 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             ticks_produced.fetch_add(1, std::memory_order_relaxed);
             last_price.store(price_d, std::memory_order_relaxed);
             last_volume.store(volume_d, std::memory_order_relaxed);
+
+            // v4.0 train-serve parity: update EMA price on every tick (matches
+            // legacy PortfolioController_Tick behavior). Used by ML feature
+            // pack — without this, sig->ema_sma_spread + sig->ema_above_sma
+            // stay zero in sharded while backtest produces them non-zero.
+            // First-tick branchless: if ema is zero, take current price as-is;
+            // otherwise standard exponential smoothing.
+            FPN<F> one_minus_alpha = FPN_Sub(FPN_FromDouble<F>(1.0), ema_alpha);
+            FPN<F> ema_new = FPN_Add(
+                FPN_Mul(ema_price, ema_alpha),
+                FPN_Mul(t.price, one_minus_alpha));
+            if (FPN_IsZero(ema_price)) ema_price = t.price;
+            else                       ema_price = ema_new;
 
             // Phase 8a (post-coding c7) — record raw tick to CSV when enabled.
             // No-op when record_ticks=0 (the gate is inside TickRecorder_Push).
@@ -653,6 +682,17 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 slow_path_counter = 0;
                 RollingStats_Push(&rolling_short, t.price, t.volume);
                 RollingStats_Push(&rolling_long,  t.price, t.volume);
+                // v4.0 train-serve parity: feed rolling slope to RORRegressor
+                // (slope of slopes = trend acceleration). Matches legacy at
+                // PortfolioController.hpp:1552. Without this, sig->ror_slope
+                // is zero in sharded while backtest produces it non-zero.
+                {
+                    LinearRegression3XResult<F> slope_sample;
+                    slope_sample.model.slope     = rolling_short.price_slope;
+                    slope_sample.model.intercept = FPN_Zero<F>();
+                    slope_sample.r_squared       = rolling_short.price_r_squared;
+                    RORRegressor_Push(&regime_ror, slope_sample);
+                }
 #ifdef USE_IMGUI_GUI
                 // v4.0 hot-swap strategy: GUI requests are picked up here.
                 // STRATEGY_NONE (0xFF) = no request; any other value swaps
@@ -750,7 +790,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                             "(per-core overrides + tunables refreshed)\n");
                 }
 #endif
-                EventLoop_RebuildAllParameters(&state, &rolling_short, &cfg, &rolling_long);
+                EventLoop_RebuildAllParameters(&state, &rolling_short, &cfg, &rolling_long,
+                                                &regime_ror, &ema_price);
                 EventLoop_PushParameters(&state);
                 // KNOWN RACE (audit 2026-04-09): KillSwitchEvaluate reads
                 // oms->balance from this (producer) thread while the drainer

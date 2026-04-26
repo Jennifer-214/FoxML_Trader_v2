@@ -83,6 +83,13 @@ struct MLBuildContext {
     ConfidenceScorer*   confidence;
     double*             out_prediction;
     double*             out_confidence;
+    // v4.0 train-serve parity: pass through the RORRegressor + EMA price
+    // that the engine's slow path maintains. ML_BuildParameters uses these
+    // with Regime_ComputeSignals so ALL features ModelFeatures_Pack reads
+    // (ror_slope, ema_sma_spread, ema_above_sma) match what the legacy
+    // backtest path produces during training.
+    void*               ror_regressor;   // const RORRegressor<F>*
+    void*               ema_price;       // const FPN<F>*
 };
 
 //======================================================================================================
@@ -344,11 +351,15 @@ inline void ML_BuildParameters(
     ConfidenceScorer* conf_scorer = nullptr;
     double* out_prediction = nullptr;
     double* out_confidence = nullptr;
+    const RORRegressor<F>* ror_in = nullptr;
+    const FPN<F>* ema_in = nullptr;
     if (mctx) {
         zoo = (CoreModelZoo<F>*)mctx->model_handle;
         conf_scorer = mctx->confidence;
         out_prediction = mctx->out_prediction;
         out_confidence = mctx->out_confidence;
+        ror_in = (const RORRegressor<F>*)mctx->ror_regressor;
+        ema_in = (const FPN<F>*)mctx->ema_price;
     }
 
     // if no zoo or no models loaded, fall back to SimpleDip
@@ -366,24 +377,33 @@ inline void ML_BuildParameters(
     FPN<F> entry_price = rolling->price_avg;
     if (FPN_IsZero(entry_price)) entry_price = recent_high;
 
-    // pack features from rolling stats into a minimal RegimeSignals
+    // v4.0 train-serve parity: when the engine provides a RORRegressor + EMA
+    // pointer (sharded production path), call Regime_ComputeSignals — same
+    // path the legacy backtest uses. Otherwise (legacy/test callers without
+    // mctx, or mctx without these pointers), fall back to the inline minimal
+    // population (preserves prior behavior for those callers; ror_slope +
+    // ema_sma_spread + ema_above_sma stay zero, matching pre-v4.0).
     RegimeSignals<F> sig;
     memset(&sig, 0, sizeof(sig));
-    sig.short_slope    = FPN_IsZero(rolling->price_avg) ? FPN_Zero<F>()
-                         : FPN_DivNoAssert(rolling->price_slope, rolling->price_avg);
-    sig.short_r2       = rolling->price_r_squared;
-    sig.short_variance = rolling->price_variance;
-    sig.volume_slope   = rolling->volume_slope;
-    sig.volume_delta   = rolling->volume_delta;
-    if (rolling_long && rolling_long->count > 0) {
-        sig.long_slope    = FPN_IsZero(rolling_long->price_avg) ? FPN_Zero<F>()
-                            : FPN_DivNoAssert(rolling_long->price_slope, rolling_long->price_avg);
-        sig.long_r2       = rolling_long->price_r_squared;
-        sig.long_variance = rolling_long->price_variance;
-        if (!FPN_IsZero(rolling_long->price_variance))
-            sig.vol_ratio = FPN_DivNoAssert(rolling->price_variance, rolling_long->price_variance);
-        else
-            sig.vol_ratio = FPN_FromDouble<F>(1.0);
+    if (ror_in && ema_in && rolling_long) {
+        Regime_ComputeSignals(&sig, rolling, rolling_long, ror_in, *ema_in);
+    } else {
+        sig.short_slope    = FPN_IsZero(rolling->price_avg) ? FPN_Zero<F>()
+                             : FPN_DivNoAssert(rolling->price_slope, rolling->price_avg);
+        sig.short_r2       = rolling->price_r_squared;
+        sig.short_variance = rolling->price_variance;
+        sig.volume_slope   = rolling->volume_slope;
+        sig.volume_delta   = rolling->volume_delta;
+        if (rolling_long && rolling_long->count > 0) {
+            sig.long_slope    = FPN_IsZero(rolling_long->price_avg) ? FPN_Zero<F>()
+                                : FPN_DivNoAssert(rolling_long->price_slope, rolling_long->price_avg);
+            sig.long_r2       = rolling_long->price_r_squared;
+            sig.long_variance = rolling_long->price_variance;
+            if (!FPN_IsZero(rolling_long->price_variance))
+                sig.vol_ratio = FPN_DivNoAssert(rolling->price_variance, rolling_long->price_variance);
+            else
+                sig.vol_ratio = FPN_FromDouble<F>(1.0);
+        }
     }
 
     // pack features once — used by whichever model role is loaded
