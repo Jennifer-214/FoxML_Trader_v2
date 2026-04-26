@@ -44,7 +44,11 @@ namespace tt {
 // (0x4B434954 "TICK") so a legacy v11 file produces a clean refuse-load
 // rather than parsing as garbage.
 #define SHARDED_SNAPSHOT_MAGIC    0x53484430u
-#define SHARDED_SNAPSHOT_VERSION  1u
+// v1: initial layout (Phase 4)
+// v2: + per-core RollingIC + RollingRMSE buffer contents (Phase 4.1).
+//     Without this, ML cores cold-start to ~zero confidence on every
+//     restart and stay armed-but-inactive until live fills repopulate.
+#define SHARDED_SNAPSHOT_VERSION  2u
 
 //======================================================================================================
 // [SAVE]
@@ -149,6 +153,23 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
         if (fwrite(&ctx.staged_prediction, 8, 1, f) != 1) goto fail;
         if (fwrite(&ctx.active_prediction, 8, 1, f) != 1) goto fail;
         if (fwrite(&ctx.last_confidence,   8, 1, f) != 1) goto fail;
+
+        // v2 (Phase 4.1) — RollingIC + RollingRMSE buffer contents. The
+        // `window` field is intentionally NOT saved: it comes from cfg at
+        // Init, so persisting it would carry stale config across restarts
+        // if the user changed confidence_window. predictions/actuals/
+        // squared_errors are the actual learning signal we don't want to
+        // lose on restart.
+        if (fwrite(ctx.confidence.ic.predictions,
+                   sizeof(double), ROLLING_IC_MAX_WINDOW, f) != ROLLING_IC_MAX_WINDOW) goto fail;
+        if (fwrite(ctx.confidence.ic.actuals,
+                   sizeof(double), ROLLING_IC_MAX_WINDOW, f) != ROLLING_IC_MAX_WINDOW) goto fail;
+        if (fwrite(&ctx.confidence.ic.count, sizeof(int), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.confidence.ic.head,  sizeof(int), 1, f) != 1) goto fail;
+        if (fwrite(ctx.confidence.rmse.squared_errors,
+                   sizeof(double), ROLLING_IC_MAX_WINDOW, f) != ROLLING_IC_MAX_WINDOW) goto fail;
+        if (fwrite(&ctx.confidence.rmse.count, sizeof(int), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.confidence.rmse.head,  sizeof(int), 1, f) != 1) goto fail;
     }
 
     // Flush + fsync so the rename is meaningful.
@@ -268,8 +289,14 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath) 
         // feeder
         FPN<F>   feeder_samples[MAX_WINDOW];
         int      feeder_head, feeder_count;
-        // confidence
+        // confidence (v1)
         double   staged, active, last_confidence;
+        // v2: rolling buffer contents
+        double   ic_predictions[ROLLING_IC_MAX_WINDOW];
+        double   ic_actuals[ROLLING_IC_MAX_WINDOW];
+        int      ic_count, ic_head;
+        double   rmse_squared_errors[ROLLING_IC_MAX_WINDOW];
+        int      rmse_count, rmse_head;
     };
     CoreSnap snaps[MAX_EXECUTION_CORES];
 
@@ -309,6 +336,14 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath) 
         if (fread(&s.staged,         8, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.active,         8, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.last_confidence,8, 1, f) != 1) { fclose(f); return 0; }
+        // v2 — RollingIC + RollingRMSE buffers
+        if (fread(s.ic_predictions, sizeof(double), ROLLING_IC_MAX_WINDOW, f) != ROLLING_IC_MAX_WINDOW) { fclose(f); return 0; }
+        if (fread(s.ic_actuals,     sizeof(double), ROLLING_IC_MAX_WINDOW, f) != ROLLING_IC_MAX_WINDOW) { fclose(f); return 0; }
+        if (fread(&s.ic_count, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.ic_head,  sizeof(int), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(s.rmse_squared_errors, sizeof(double), ROLLING_IC_MAX_WINDOW, f) != ROLLING_IC_MAX_WINDOW) { fclose(f); return 0; }
+        if (fread(&s.rmse_count, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.rmse_head,  sizeof(int), 1, f) != 1) { fclose(f); return 0; }
     }
     fclose(f);
 
@@ -355,6 +390,17 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath) 
         ctx.staged_prediction = s.staged;
         ctx.active_prediction = s.active;
         ctx.last_confidence   = s.last_confidence;
+        // v2 — restore rolling IC + RMSE buffer contents. Don't overwrite
+        // the `window` field on either struct: it was set from current
+        // cfg at ConfidenceScorer_Init and persisting it would carry
+        // stale config across restarts.
+        memcpy(ctx.confidence.ic.predictions, s.ic_predictions, sizeof(s.ic_predictions));
+        memcpy(ctx.confidence.ic.actuals,     s.ic_actuals,     sizeof(s.ic_actuals));
+        ctx.confidence.ic.count = s.ic_count;
+        ctx.confidence.ic.head  = s.ic_head;
+        memcpy(ctx.confidence.rmse.squared_errors, s.rmse_squared_errors, sizeof(s.rmse_squared_errors));
+        ctx.confidence.rmse.count = s.rmse_count;
+        ctx.confidence.rmse.head  = s.rmse_head;
     }
 
     fprintf(stderr, "[snapshot] loaded sharded snapshot from %s (%u cores, ts=%llu)\n",

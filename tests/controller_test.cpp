@@ -4344,6 +4344,16 @@ int main() {
                         FPN_FromDouble<64>(100.0 * (c + 1) + j);
                 }
                 r->state.cores[c].last_confidence = 0.5 + 0.1 * c;
+                // Phase 4.1: populate IC/RMSE buffers with distinguishable values
+                r->state.cores[c].confidence.ic.head  = 5 + c;
+                r->state.cores[c].confidence.ic.count = 10 + c;
+                r->state.cores[c].confidence.rmse.head  = 7 + c;
+                r->state.cores[c].confidence.rmse.count = 12 + c;
+                for (int j = 0; j < 4; ++j) {
+                    r->state.cores[c].confidence.ic.predictions[j] = 0.1 * c + 0.01 * j;
+                    r->state.cores[c].confidence.ic.actuals[j]     = -0.05 + 0.02 * j + 0.01 * c;
+                    r->state.cores[c].confidence.rmse.squared_errors[j] = 0.001 * (c + 1) + 0.0001 * j;
+                }
             }
             r->oms.balance      = FPN_FromDouble<64>(9837.42);
             r->oms.realized_pnl = FPN_FromDouble<64>(-162.58);
@@ -4375,6 +4385,19 @@ int main() {
                       r2->state.cores[c].pnl_feeder.count == MAX_WINDOW);
                 check("round-trip: pnl_feeder sample[0]",
                       fabs(FPN_ToDouble(r2->state.cores[c].pnl_feeder.price_samples[0]) - (100.0 * (c + 1))) < 1e-6);
+                // Phase 4.1: IC/RMSE buffers
+                check("round-trip: IC head/count restored",
+                      r2->state.cores[c].confidence.ic.head == (5 + c) &&
+                      r2->state.cores[c].confidence.ic.count == (10 + c));
+                check("round-trip: IC predictions[0] restored",
+                      fabs(r2->state.cores[c].confidence.ic.predictions[0] - 0.1 * c) < 1e-9);
+                check("round-trip: IC actuals[1] restored",
+                      fabs(r2->state.cores[c].confidence.ic.actuals[1] - (-0.05 + 0.02 + 0.01 * c)) < 1e-9);
+                check("round-trip: RMSE head/count restored",
+                      r2->state.cores[c].confidence.rmse.head == (7 + c) &&
+                      r2->state.cores[c].confidence.rmse.count == (12 + c));
+                check("round-trip: RMSE squared_errors[2] restored",
+                      fabs(r2->state.cores[c].confidence.rmse.squared_errors[2] - (0.001 * (c + 1) + 0.0002)) < 1e-9);
             }
         }
 
@@ -4407,6 +4430,21 @@ int main() {
             auto* r = build_state(2, 10000.0);
             int loaded = tt::ShardedSnapshot_Load<64>(&r->state, test_path);
             check("version mismatch: refused",
+                  loaded == 0);
+        }
+
+        // ---- Test 4b (Phase 4.1): refuse v1 (pre-confidence-buffers) ----
+        {
+            FILE* f = fopen(test_path, "wb");
+            uint32_t magic = 0x53484430u;
+            uint32_t v1 = 1;  // explicitly v1
+            fwrite(&magic, 4, 1, f);
+            fwrite(&v1, 4, 1, f);
+            fclose(f);
+
+            auto* r = build_state(2, 10000.0);
+            int loaded = tt::ShardedSnapshot_Load<64>(&r->state, test_path);
+            check("v1 file refused (no backward compat with pre-Phase-4.1)",
                   loaded == 0);
         }
 
