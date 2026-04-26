@@ -615,14 +615,25 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
 
 **Future hardening (deferred):** turn `num_classes` into `enum class LabelKind { Binary, Regression, Multiclass }` so the compiler exhaustive-checks switches. Larger surgery — touches every existing site again. Reasonable v2 once the current convention has settled.
 
-## Current State (2026-04-25 late evening — v4.0.1)
+## Current State (2026-04-25 overnight — v4.0.3)
 
-**Branch:** `experiment/per-core-sharding` (main). v4.0.1 released — twelve
-post-release polish commits on top of v4.0.0. Train-serve parity for ML
-fixed (RORRegressor + EMA in sharded slow path), shutdown promptness fixed
-(interruptible reconnect/retry sleeps), several v4.0 default-mode regressions
-ported (Settings hot-reload, GUI drag, Collect Features routing), MOM gate
-direction wired (`GATE_FLAG_BUY_ABOVE`).
+**Branch:** `experiment/per-core-sharding` (main). v4.0.3 released —
+twelve features ported from legacy `PortfolioController` to sharded
+engine, bringing sharded to ~95% functional parity for live trading.
+v4.0.2 fixed TickRecorder timestamp bug + warmup gating + shutdown
+diagnostics. v4.0.1 fixed train-serve parity + shutdown promptness +
+several v4.0 default-mode regressions.
+
+Sharded now has features legacy doesn't: per-core ML model + confidence,
+hot-swap strategies live, AUTO regime mode per core, per-core config,
+40-400ns branchless hot path (vs legacy ~5µs).
+
+Hot-path additions in v4.0.3 cumulative: ~6ns (GATE_FLAG_BUY_ABOVE
+mask select + FPN_Max(sl, ratchet_sl) for trailing). Both branchless,
+FPN-pure, well under 500ns p99 budget.
+
+Deferred: partial exits (architectural — needs slot rework), trailing
+TP (similar mechanism, lower priority), full EmaCross port.
 
 **Tests:** controller_test 351/351 passing, depth_recorder_test 17/17 passing.
 
