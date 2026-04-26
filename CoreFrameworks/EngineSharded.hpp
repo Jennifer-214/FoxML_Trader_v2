@@ -820,8 +820,33 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                sizeof(cfg.core_model_dir[c]));
                     }
                     cfg = new_cfg;
+
+                    // Phase 2.1: recompute allocated_balance after reload.
+                    // Pre-2.1 the allocated_balance field was set ONCE in
+                    // EngineSharded_Run init and never refreshed — changing
+                    // risk_pct or core_N_risk_pct in cfg was silently
+                    // stale. Mirror the startup formula here.
+                    // NOTE: don't touch core_open_notional during reload —
+                    // open positions still exist; the new allocation either
+                    // expands or shrinks the budget but the deployed
+                    // notional is unchanged.
+                    {
+                        double total_balance = FPN_ToDouble(cfg.starting_balance);
+                        double default_risk  = FPN_ToDouble(cfg.risk_pct);
+                        if (default_risk <= 0.0) default_risk = 0.10;
+                        double default_per_core = (total_balance * default_risk) / (double)num_cores;
+                        if (default_per_core < 1.0) default_per_core = 1.0;
+                        for (int c = 0; c < num_cores; ++c) {
+                            double core_balance = default_per_core;
+                            if (!FPN_IsZero(cfg.core_risk_pct[c])) {
+                                core_balance = total_balance * FPN_ToDouble(cfg.core_risk_pct[c]);
+                                if (core_balance < 1.0) core_balance = 1.0;
+                            }
+                            state.cores[c].allocated_balance = FPN_FromDouble<F>(core_balance);
+                        }
+                    }
                     fprintf(stderr, "[sharded] cfg hot-reloaded "
-                            "(per-core overrides + tunables refreshed)\n");
+                            "(per-core overrides + tunables refreshed, allocations recomputed)\n");
                 }
 #endif
                 EventLoop_RebuildAllParameters(&state, &rolling_short, &cfg, &rolling_long,
@@ -979,6 +1004,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     for (int c = 0; c < num_cores; ++c) {
                         state.cores[c].entries_processed = 0;
                         state.cores[c].exits_processed   = 0;
+                        // Phase 2.1: reset per-core counters too. Without
+                        // this, a paper reset would leak realized P&L /
+                        // budget state from the previous "session" into
+                        // the new one — wrong reading on every panel.
+                        state.cores[c].core_realized      = FPN_Zero<F>();
+                        state.cores[c].core_fees          = FPN_Zero<F>();
+                        state.cores[c].core_wins          = 0;
+                        state.cores[c].core_losses        = 0;
+                        state.cores[c].core_open_notional = FPN_Zero<F>();
                     }
                     fprintf(stderr, "[sharded] paper reset: balance=$%.2f\n",
                             FPN_ToDouble(cfg.starting_balance));

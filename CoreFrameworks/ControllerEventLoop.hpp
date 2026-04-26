@@ -146,6 +146,21 @@ struct CoreContext {
     FPN<F> core_fees;              // sum of fees paid by this core's fills
     uint32_t core_wins;            // exits with net > 0
     uint32_t core_losses;          // exits with net <= 0
+    // Phase 2.1: per-core open notional. Sum of (entry_price × qty) across
+    // currently-open positions for this core. Updated branchlessly in
+    // EventLoop_OnEvent — entry adds notional, exit subtracts the SAME
+    // notional snapshot (NOT exit_price × qty — asymmetric subtraction
+    // would leak positive residue per winning trade and accumulate
+    // unboundedly). FPN_SubSat guards against rare underflow.
+    //
+    // Used by: Account panel "Budget Used %" display today (instrumentation
+    // only); Phase 2.2 sizing clamp (max_qty = (allocated - open_notional)
+    // / entry_price); Phase 3 MTM kill switch (current_value = allocated +
+    // realized + unrealized, where unrealized is computed from open
+    // positions). Single-position-per-core invariant means this is the
+    // entry notional of one position today, but the sum-of-positions
+    // model survives future multi-position-per-core.
+    FPN<F> core_open_notional;
 };
 
 //======================================================================================================
@@ -231,6 +246,8 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].core_fees = FPN_Zero<F>();
         state->cores[i].core_wins = 0;
         state->cores[i].core_losses = 0;
+        // Phase 2.1: per-core open notional (sum of entry_price × qty)
+        state->cores[i].core_open_notional = FPN_Zero<F>();
     }
 }
 
@@ -496,6 +513,11 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         ctx->entries_processed++;
         state->total_entries++;
         state->total_events_processed++;
+        // Phase 2.1: per-core open notional. Add the entry notional. The
+        // exit branch subtracts the SAME (entry_price × qty) snapshot so
+        // round-trips return to exactly zero — never use exit_price × qty
+        // here (asymmetric subtraction would leak residue per trade).
+        ctx->core_open_notional = FPN_Add(ctx->core_open_notional, notional);
         // CSV: record AFTER portfolio mutation so the slot is consistent if the
         // log call inspects it (currently it doesn't, but kept defensive).
         if (state->oms->trade_log) {
@@ -537,6 +559,14 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         uint32_t is_win = (uint32_t)FPN_GreaterThan(net, FPN_Zero<F>());
         ctx->core_wins   += is_win;
         ctx->core_losses += (1u - is_win);
+        // Phase 2.1: subtract the SAME entry notional we added at entry time.
+        // Use entry_price_snap × qty_snap, NOT exit_price × qty_snap — the
+        // latter would leak residue per round trip (positive when winning,
+        // negative when losing) and drift the budget tracker unboundedly.
+        // FPN_SubSat saturates at zero if state ever becomes inconsistent
+        // (defensive against future bugs; should never trigger in practice).
+        FPN<F> entry_notional_snap = FPN_Mul(entry_price_snap, qty_snap);
+        ctx->core_open_notional = FPN_SubSat(ctx->core_open_notional, entry_notional_snap);
         // Phase 09: track peak balance for drawdown-based kill switch.
         // Cheap on the slow path; the comparison is one FPN compare per exit.
         if (FPN_GreaterThan(state->oms->balance, state->oms->ks_peak_balance)) {

@@ -931,6 +931,12 @@ struct TUISnapshot {
         uint32_t core_wins;            // exit count with net > 0
         uint32_t core_losses;          // exit count with net <= 0
         uint32_t core_open_positions;  // entries_processed - exits_processed
+        // Phase 2.1: per-core open notional (sum of entry_price × qty for
+        // open positions). Tracks how much of allocated_balance is currently
+        // deployed. Phase 2.2 uses (allocated - open_notional) as the
+        // sizing budget for new entries.
+        double   core_open_notional;   // raw notional of open positions
+        double   core_budget_used_pct; // open_notional / allocated × 100
     };
     PerCoreSnap per_core[16];      // up to MAX_EXECUTION_CORES
 };

@@ -208,6 +208,13 @@ static inline void TUI_CopySnapshotSharded(
         uint64_t entries = state->cores[i].entries_processed;
         uint64_t exits   = state->cores[i].exits_processed;
         snap->per_core[i].core_open_positions = (uint32_t)(entries - exits);
+        // Phase 2.1: per-core open notional + budget-used %. The % is
+        // computed defensively — if allocated is zero or near-zero (rare
+        // misconfiguration), report 0% rather than a divide-by-zero blowup.
+        double open_n  = FPN_ToDouble(state->cores[i].core_open_notional);
+        double alloc_d = FPN_ToDouble(state->cores[i].allocated_balance);
+        snap->per_core[i].core_open_notional = open_n;
+        snap->per_core[i].core_budget_used_pct = (alloc_d > 0.01) ? (open_n / alloc_d * 100.0) : 0.0;
         tt::ExecutionCore<F>* core = state->cores[i].core;
         if (core) {
             tt::GateParameters<F> params;

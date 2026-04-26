@@ -762,7 +762,7 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
             ImGui::TableSetupColumn("Realized",ImGuiTableColumnFlags_WidthFixed, 90.0f);
             ImGui::TableSetupColumn("Fees",    ImGuiTableColumnFlags_WidthFixed, 70.0f);
             ImGui::TableSetupColumn("W/L",     ImGuiTableColumnFlags_WidthFixed, 70.0f);
-            ImGui::TableSetupColumn("Open",    ImGuiTableColumnFlags_WidthFixed, 50.0f);
+            ImGui::TableSetupColumn("Budget",  ImGuiTableColumnFlags_WidthFixed, 70.0f);
             ImGui::TableHeadersRow();
 
             for (int i = 0; i < s->per_core_count && i < 16; ++i) {
@@ -803,10 +803,23 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
                 }
 
                 ImGui::TableNextColumn();
-                if (pc->core_open_positions > 0) {
-                    ImGui::TextColored(FoxmlColors::sand, "%u", pc->core_open_positions);
+                // Phase 2.1: "Budget" column shows how much of the core's
+                // allocation is currently deployed. Color: green <50%,
+                // yellow 50-90%, red >90% (>90% means new entries will
+                // be clamped or rejected once Phase 2.2 enforcement lands).
+                if (pc->core_open_positions == 0) {
+                    ImGui::TextDisabled("0%%");
                 } else {
-                    ImGui::TextDisabled("0");
+                    double pct = pc->core_budget_used_pct;
+                    ImVec4 col = (pct < 50.0)  ? FoxmlColors::green
+                               : (pct < 90.0)  ? FoxmlColors::yellow
+                                                : FoxmlColors::red;
+                    ImGui::TextColored(col, "%.0f%%", pct);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Budget used: $%.2f / $%.2f (%u open position%s)",
+                            pc->core_open_notional, pc->core_allocated,
+                            pc->core_open_positions, pc->core_open_positions == 1 ? "" : "s");
+                    }
                 }
             }
             ImGui::EndTable();

@@ -18,6 +18,8 @@
 #include "../CoreFrameworks/PortfolioController.hpp"
 #include "../CoreFrameworks/Order.hpp"
 #include "../CoreFrameworks/OrderManager.hpp"
+#include "../CoreFrameworks/ControllerEventLoop.hpp"  // Phase 2.1 tests
+#include "../CoreFrameworks/ExecutionCore.hpp"        // Phase 2.1 tests
 #include "../DataStream/BinanceUserData.hpp"
 #include "../Backtest/BacktestEngine.hpp"
 #include "../Backtest/HeldOutSplit.hpp"
@@ -3850,6 +3852,108 @@ int main() {
                   fabs(FPN_ToDouble(cfg.confidence_threshold_scale) - 1.5) < 1e-6);
             unlink(path);
         }
+    }
+
+    //======================================================================================================
+    // [PHASE 2.1 TESTS — core_open_notional accounting]
+    //======================================================================================================
+    // Pin the symmetric add/sub invariant: entry adds (entry_price × qty) to
+    // ctx->core_open_notional; exit subtracts the SAME entry-snapshot value
+    // (NOT exit_price × qty — asymmetric subtraction would leak residue per
+    // round trip). The hammer test below opens + closes 100 positions with
+    // varied entry/exit prices and asserts final value is exactly zero.
+    //======================================================================================================
+    printf("\n--- Phase 2.1: core_open_notional symmetry ---\n");
+    {
+        // Helper to build a TradeEvent
+        auto make_event = [](uint16_t cid, uint8_t type, double price, uint64_t ts) {
+            tt::TradeEvent<64> ev{};
+            ev.price = FPN_FromDouble<64>(price);
+            ev.timestamp = ts;
+            ev.core_id = cid;
+            ev.type = type;
+            return ev;
+        };
+
+        // Set up a single-core EventLoopState
+        tt::OrderManagerState<64> oms;
+        tt::EventLoopState<64> state;
+        tt::EventLoopState_InitLegacy(&state, &oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+
+        tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
+        tt::SPSCRing_Init(&tick_ring);
+        tt::ExecutionCore<64> core;
+        tt::ExecutionCore_Init(&core, 0, &tick_ring);
+        int slot = tt::EventLoopState_RegisterCore(&state, &core,
+            FPN_FromDouble<64>(60100.0),  // intended_tp
+            FPN_FromDouble<64>(59900.0),  // intended_sl
+            FPN_FromDouble<64>(0.01));    // intended_qty
+
+        // Initial state: zero notional
+        check("initial: core_open_notional == 0",
+              FPN_ToDouble(state.cores[slot].core_open_notional) == 0.0);
+
+        // Single entry at $60000 × 0.01 BTC = $600 notional
+        tt::EventLoop_OnEvent(&state,
+            make_event((uint16_t)slot, tt::TRADE_EVENT_ENTRY, 60000.0, 1));
+        double after_entry = FPN_ToDouble(state.cores[slot].core_open_notional);
+        check("after entry @60000 × 0.01: notional == 600.0",
+              fabs(after_entry - 600.0) < 1e-6);
+
+        // Exit at $60100 (winning trade — exit price > entry price). The
+        // CRITICAL test: notional must subtract the ENTRY-SIDE value (60000
+        // × 0.01 = 600), not the EXIT-SIDE value (60100 × 0.01 = 601).
+        // If subtracted asymmetrically, residue = -1.0 per round trip.
+        tt::EventLoop_OnEvent(&state,
+            make_event((uint16_t)slot, tt::TRADE_EVENT_EXIT, 60100.0, 2));
+        double after_winning_exit = FPN_ToDouble(state.cores[slot].core_open_notional);
+        check("after winning exit: notional returns to 0 (no positive residue)",
+              fabs(after_winning_exit) < 1e-6);
+
+        // Round trip with a LOSING trade — exit < entry. Residue would
+        // accumulate negatively if subtraction were asymmetric.
+        tt::EventLoop_OnEvent(&state,
+            make_event((uint16_t)slot, tt::TRADE_EVENT_ENTRY, 60000.0, 3));
+        tt::EventLoop_OnEvent(&state,
+            make_event((uint16_t)slot, tt::TRADE_EVENT_EXIT, 59500.0, 4));
+        double after_losing_exit = FPN_ToDouble(state.cores[slot].core_open_notional);
+        check("after losing exit: notional returns to 0 (no negative residue)",
+              fabs(after_losing_exit) < 1e-6);
+
+        // HAMMER TEST — the symmetry-bug detector. Open + close 100
+        // positions with varied entry/exit prices (mix of winners and
+        // losers, big and small swings). After all 100 round trips, if
+        // even one had asymmetric subtraction, the residue accumulates and
+        // diverges from zero.
+        for (int i = 0; i < 100; ++i) {
+            // Vary prices to expose any asymmetry
+            double entry_price = 60000.0 + (i % 7) * 50.0 - 150.0;  // 59850..60150
+            double exit_price  = entry_price + (i % 11) * 30.0 - 150.0;  // ±150
+            tt::EventLoop_OnEvent(&state,
+                make_event((uint16_t)slot, tt::TRADE_EVENT_ENTRY, entry_price, 100 + 2 * i));
+            tt::EventLoop_OnEvent(&state,
+                make_event((uint16_t)slot, tt::TRADE_EVENT_EXIT, exit_price, 101 + 2 * i));
+        }
+        double after_hammer = FPN_ToDouble(state.cores[slot].core_open_notional);
+        check("hammer test (100 round trips, varied prices): notional == 0",
+              fabs(after_hammer) < 1e-6);
+
+        // Verify entries_processed / exits_processed match (sanity)
+        check("hammer: entries_processed == 102 (1+1+100)",
+              state.cores[slot].entries_processed == 102);
+        check("hammer: exits_processed == 102",
+              state.cores[slot].exits_processed == 102);
+
+        // Open one more without closing, verify nonzero, then close it
+        tt::EventLoop_OnEvent(&state,
+            make_event((uint16_t)slot, tt::TRADE_EVENT_ENTRY, 65000.0, 9999));
+        check("standalone open: notional == 65000 × 0.01 = 650",
+              fabs(FPN_ToDouble(state.cores[slot].core_open_notional) - 650.0) < 1e-6);
+        tt::EventLoop_OnEvent(&state,
+            make_event((uint16_t)slot, tt::TRADE_EVENT_EXIT, 65500.0, 10000));
+        check("final close: notional back to 0",
+              fabs(FPN_ToDouble(state.cores[slot].core_open_notional)) < 1e-6);
     }
 
     printf("\n======================================\n");
