@@ -180,6 +180,16 @@ struct CoreContext {
     uint8_t core_kill_tripped;      // 1 = killed; entries zero-gated with HALT_CORE_KILL
     uint8_t  _pad_kill[3];          // alignment
     uint32_t core_ks_trips_total;   // lifetime trip count (for forensics)
+    // v4.2.1 — slow-path cycles since last fill on this core. Resets on
+    // entry. Used as a "death-spiral" detector: if a core hasn't fired
+    // in many cycles, the pnl_feeder is full of stale regression data
+    // that's no longer informative — clear it so adaptive feedback
+    // (D10) doesn't keep applying shifts based on ancient outcomes.
+    // Mirrors legacy PortfolioController_Tick line 1641 mechanism but
+    // doesn't need the filter-decay step (sharded recomputes
+    // resolved_cfg fresh each rebuild, so there's no live-filter state
+    // to drift back toward defaults).
+    uint32_t idle_cycles;
 };
 
 //======================================================================================================
@@ -274,6 +284,8 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].core_dd_pct           = FPN_Zero<F>();
         state->cores[i].core_kill_tripped     = 0;
         state->cores[i].core_ks_trips_total   = 0;
+        // v4.2.1: idle-cycle counter for death-spiral detection
+        state->cores[i].idle_cycles = 0;
     }
 }
 
@@ -492,7 +504,24 @@ inline void EventLoopState_SetIntendedParams(EventLoopState<F>* state, int slot,
 // them, but defensive logic in case of replay or fuzz testing.
 //======================================================================================================
 template <unsigned F>
-inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& event) {
+inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& event_in) {
+    // v4.2.1 — paper-mode slippage simulation. In live, event.price comes
+    // from the WS executionReport (already includes real exchange slippage).
+    // In paper, event.price is the tick that triggered the gate; adjust to
+    // model realistic worst-case execution: BUY fills above gate price,
+    // SELL fills below trigger price. Mirrors legacy PortfolioController
+    // behavior (PortfolioController.hpp:1041 + :659).
+    //
+    // Mutate a local copy so the caller's event is untouched.
+    TradeEvent<F> event = event_in;
+    if (!state->oms->live_trading && !FPN_IsZero(state->oms->slippage_pct)) {
+        FPN<F> slip = FPN_Mul(event.price, state->oms->slippage_pct);
+        if (event.type & TRADE_EVENT_ENTRY) {
+            event.price = FPN_Add(event.price, slip);
+        } else if (event.type & TRADE_EVENT_EXIT) {
+            event.price = FPN_Sub(event.price, slip);
+        }
+    }
     int slot = (int)event.core_id;
     if (slot < 0 || slot >= state->registered_count) return;
 
@@ -539,6 +568,8 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         ctx->entries_processed++;
         state->total_entries++;
         state->total_events_processed++;
+        // v4.2.1: reset idle-cycle counter on every fill
+        ctx->idle_cycles = 0;
         // Phase 2.1: per-core open notional. Add the entry notional. The
         // exit branch subtracts the SAME (entry_price × qty) snapshot so
         // round-trips return to exactly zero — never use exit_price × qty
@@ -731,6 +762,23 @@ inline int EventLoop_RebuildAllParameters(
         if (!FPN_IsZero(session_mult)) {
             resolved_cfg.volume_multiplier =
                 FPN_Mul(resolved_cfg.volume_multiplier, session_mult);
+        }
+
+        // v4.2.1: idle-cycle counter. Bump every rebuild; reset to 0 in
+        // OnEvent's entry branch on every fill. When the threshold is
+        // exceeded the pnl_feeder ring buffer is reset so adaptive
+        // feedback (D10) doesn't keep applying shifts based on stale
+        // outcomes from before a long quiet period. Mirrors the recovery
+        // intent of legacy `idle_reset_cycles` without the filter-decay
+        // step (sharded recomputes resolved_cfg fresh each rebuild, so
+        // there's no live-filter drift to undo).
+        state->cores[slot].idle_cycles++;
+        if (config->idle_reset_cycles > 0 &&
+            state->cores[slot].idle_cycles >= config->idle_reset_cycles) {
+            state->cores[slot].pnl_feeder.head  = 0;
+            state->cores[slot].pnl_feeder.count = 0;
+            // Don't clear the actual price_samples — they're FPN_Zero already
+            // when count==0 since the regression code reads only [0..count).
         }
 
         // v4.0.3 D10: adaptive feedback. Compute regression slope of recent

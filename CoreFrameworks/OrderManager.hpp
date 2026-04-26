@@ -167,6 +167,12 @@ struct OrderManagerState {
     // any fills arrive. HandleFill picks per Order's is_maker field.
     FPN<F>       fee_rate_maker;
     FPN<F>       fee_rate_taker;
+    // v4.2.1 — paper-mode slippage simulation. Adjusts fill prices to model
+    // realistic worst-case execution: BUY fills above gate price, SELL fills
+    // below trigger price. ONLY applied in paper mode (live=0); in live the
+    // exchange already returns the real post-slippage price. Engine sets
+    // this from cfg.slippage_pct after Init. Default zero = no simulation.
+    FPN<F>       slippage_pct;
     // Phase 8 (post-coding c10) — maker/taker accounting counters parallel
     // to PortfolioController's (which only fire in legacy mode). HandleFill
     // increments these per fill so sharded mode has correct accounting.
@@ -312,6 +318,7 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     oms->fee_rate            = fee_rate;
     oms->fee_rate_maker      = fee_rate; // Phase 8: legacy default = same rate
     oms->fee_rate_taker      = fee_rate; // engine sets per-cfg after Init
+    oms->slippage_pct        = FPN_Zero<F>(); // v4.2.1: engine sets per-cfg after Init
     // Phase 8 (post-coding c10) — counter init
     oms->maker_fills_count   = 0;
     oms->taker_fills_count   = 0;

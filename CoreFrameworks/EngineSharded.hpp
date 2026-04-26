@@ -367,6 +367,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // backtest sharded, these are also set explicitly there (BacktestSharded.hpp).
     oms.fee_rate_maker = cfg.fee_rate_maker;
     oms.fee_rate_taker = cfg.fee_rate_taker;
+    // v4.2.1 — paper-mode slippage simulation. Cfg-driven (engine.cfg
+    // slippage_pct). Live mode reads exchange fill prices directly so this
+    // value is ignored (EventLoop_OnEvent gates on live_trading).
+    oms.slippage_pct = cfg.slippage_pct;
 
     // Trade log CSV — same pattern as legacy engine in main.cpp
     static ShardedTradeLog g_sharded_trade_log;
