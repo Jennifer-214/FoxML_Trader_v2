@@ -40,6 +40,8 @@
 
 #include "../DataStream/BinanceCrypto.hpp"
 #include "../DataStream/BinanceOrderAPI.hpp"
+#include "../DataStream/TickRecorder.hpp"  // Phase 8a (post-coding c7)
+#include "Notify.hpp"                     // Phase 8b (post-coding c8)
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/StrategyParameters.hpp"
@@ -311,6 +313,13 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     OrderManager_Init(&oms, exchange_adapter, live_trading ? 1 : 0,
                       cfg.starting_balance, cfg.fee_rate,
                       (int)cfg.oms_event_log_mode);
+    // Phase 8 (post-coding c9) — explicit maker/taker rates so HandleFill's
+    // per-fill rate selection actually works. Init defaults both = fee_rate
+    // (legacy compat); engine layer sets the real values from cfg here.
+    // For live mode, this picks up the cfg-loaded maker/taker rates. For
+    // backtest sharded, these are also set explicitly there (BacktestSharded.hpp).
+    oms.fee_rate_maker = cfg.fee_rate_maker;
+    oms.fee_rate_taker = cfg.fee_rate_taker;
 
     // Trade log CSV — same pattern as legacy engine in main.cpp
     static ShardedTradeLog g_sharded_trade_log;
@@ -340,6 +349,77 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
         } else {
             fprintf(stderr, "[sharded] user data websocket init failed, "
                              "falling back to REST-only fills\n");
+        }
+    }
+
+    // Phase 8b (post-coding c8) — NotifyState for operational alerts.
+    // Same setup as legacy path: stderr backend by default, command backend
+    // (popen) for dunst/Discord/Slack/Telegram/etc when configured. Off by
+    // default (notify_enabled=0). Notify_Send call sites in
+    // PortfolioController + BinanceCrypto/Depth/UserData are shared headers
+    // — they fire in both modes; g_notify being non-null is what gates
+    // actual delivery.
+    static NotifyState g_notify_state;
+    static NotifyCommandState g_notify_cmd_state;
+    if (cfg.notify_enabled) {
+        NotifyBackendFn backend = NotifyBackend_Stderr;
+        void *backend_state = nullptr;
+        if (cfg.notify_backend == 1) {
+            if (cfg.notify_command[0] == '\0') {
+                fprintf(stderr, "[sharded] notify backend=command but notify_command "
+                                "is empty — falling back to stderr\n");
+            } else {
+                strncpy(g_notify_cmd_state.template_str, cfg.notify_command,
+                        sizeof(g_notify_cmd_state.template_str) - 1);
+                g_notify_cmd_state.template_str[sizeof(g_notify_cmd_state.template_str) - 1] = '\0';
+                backend = NotifyBackend_Command;
+                backend_state = &g_notify_cmd_state;
+            }
+        } else if (cfg.notify_backend != 0) {
+            fprintf(stderr, "[sharded] notify backend=%d not recognized — "
+                            "falling back to stderr\n", cfg.notify_backend);
+        }
+        NotifyState_Init(&g_notify_state, backend, backend_state,
+                         (uint64_t)cfg.notify_cooldown_secs * 1000000ULL);
+        if (g_notify_state.worker_started) {
+            g_notify = &g_notify_state;
+            fprintf(stderr, "[sharded] notify enabled (backend=%s, cooldown=%us)\n",
+                    backend == NotifyBackend_Stderr ? "stderr" : "command",
+                    cfg.notify_cooldown_secs);
+        }
+    }
+
+    // Phase 8a (post-coding c7) — TickRecorder for raw market tick CSV audit.
+    // Same pattern as legacy path. Off by default (record_ticks=0).
+    static TickRecorder g_tick_rec;
+    TickRecorder_Init(&g_tick_rec, bcfg.symbol, cfg.record_ticks, cfg.record_max_days);
+
+    // Phase 8a (post-coding c6) — depth feed + DepthRecorder.
+    // Same setup as main.cpp's legacy path, runs only when depth_enabled=1.
+    // Per-core controllers can read shared->snapshots[active].imbalance later
+    // (book_imbalance feed in EngineSharded slow path lands in post-coding c14).
+    static DepthRecorder g_depth_rec;
+    static DepthSharedState<F> g_depth_shared;
+    static pthread_t g_depth_tid = 0;
+    DepthRecorder_Init(&g_depth_rec, bcfg.symbol, "data", cfg.record_max_days,
+                       cfg.record_depth && cfg.depth_enabled);
+    if (cfg.depth_enabled) {
+        const char *depth_host;
+        int depth_port;
+        if (bcfg.use_testnet)         { depth_host = "testnet.binance.vision";   depth_port = 443; }
+        else if (bcfg.use_binance_us) { depth_host = "stream.binance.us";        depth_port = 9443; }
+        else                          { depth_host = "data-stream.binance.vision"; depth_port = 443; }
+
+        if (DepthStream_Init<F>(&g_depth_shared, bcfg.symbol,
+                                 depth_host, depth_port,
+                                 /*reconnect_delay=*/2) == 0) {
+            g_depth_shared.recorder = cfg.record_depth ? &g_depth_rec : NULL;
+            pthread_create(&g_depth_tid, NULL, depth_thread_fn<F>, &g_depth_shared);
+            fprintf(stderr, "[sharded] depth feed active (%s:%d %s@depth5@100ms)%s\n",
+                    depth_host, depth_port, bcfg.symbol,
+                    cfg.record_depth ? " — recording" : "");
+        } else {
+            fprintf(stderr, "[sharded] depth feed init failed — continuing without depth\n");
         }
     }
 
@@ -526,6 +606,12 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
             ticks_produced.fetch_add(1, std::memory_order_relaxed);
             last_price.store(price_d, std::memory_order_relaxed);
             last_volume.store(volume_d, std::memory_order_relaxed);
+
+            // Phase 8a (post-coding c7) — record raw tick to CSV when enabled.
+            // No-op when record_ticks=0 (the gate is inside TickRecorder_Push).
+            // is_buyer_maker not available from the sharded fan_out yet; pass 0.
+            // (Legacy path passes the real value from BinanceStream tick read.)
+            TickRecorder_Push(&g_tick_rec, price_d, volume_d, (int64_t)ts_us, 0);
 
 #ifdef USE_IMGUI_GUI
             // Feed candles for the chart panel (same pattern as main.cpp:396)
@@ -1013,6 +1099,20 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     g_shared.quit_requested = 1;
     pthread_join(gui_tid, NULL);
 #endif
+    // Phase 8a (post-coding c6) — depth thread shutdown + recorder close.
+    // depth_thread_fn polls quit_requested at top of loop; next 200ms cycle
+    // picks it up. g_depth_tid==0 when depth_enabled was off or init failed.
+    if (g_depth_tid != 0) {
+        __atomic_store_n(&g_depth_shared.quit_requested, 1, __ATOMIC_RELEASE);
+        pthread_join(g_depth_tid, NULL);
+    }
+    DepthRecorder_Close(&g_depth_rec);
+    TickRecorder_Close(&g_tick_rec);  // Phase 8a (post-coding c7)
+    // Phase 8b (post-coding c8) — drain notify queue + join worker.
+    if (g_notify) {
+        NotifyState_Shutdown(g_notify);
+        g_notify = nullptr;
+    }
     OrderManager_Shutdown(&oms);
 
     fprintf(stderr, "[sharded] all threads joined.\n");

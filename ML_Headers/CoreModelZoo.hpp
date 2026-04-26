@@ -203,6 +203,10 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
     double expected_threshold = -1.0;
     int expected_num_classes = -1;
     char expected_role[64] = "";
+    // Phase 7 prep — informational (logged, not mismatch-checked against live
+    // cfg). Discipline values the model was trained under. -1 = not in file.
+    double expected_held_out_fraction = -1.0;
+    double expected_gap_threshold     = -1.0;
     int mismatches = 0;
 
     char line[512];
@@ -235,6 +239,8 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
             strncpy(expected_role, val, sizeof(expected_role) - 1);
             expected_role[sizeof(expected_role) - 1] = '\0';
         }
+        else if (strcmp(key, "held_out_fraction") == 0)        expected_held_out_fraction = atof(val);
+        else if (strcmp(key, "gap_acceptable_threshold") == 0) expected_gap_threshold     = atof(val);
     }
     fclose(f);
 
@@ -259,6 +265,16 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
                         "loaded model has %d outputs\n",
                 core_id, expected_num_classes, zoo->barrier.num_outputs);
         mismatches++;
+    }
+
+    // Phase 7 prep — log discipline values informationally so the user knows
+    // what validation regime the model was trained under. Not compared to
+    // live cfg (yet); add comparison if drift becomes a real concern.
+    if (expected_held_out_fraction >= 0.0 || expected_gap_threshold >= 0.0) {
+        fprintf(stderr, "[ML] core %d: validation discipline — held_out=%.2f gap_threshold=%.3f\n",
+                core_id,
+                expected_held_out_fraction >= 0.0 ? expected_held_out_fraction : 0.0,
+                expected_gap_threshold     >= 0.0 ? expected_gap_threshold     : 0.0);
     }
 
     if (mismatches == 0) {

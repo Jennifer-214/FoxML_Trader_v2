@@ -265,14 +265,32 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         if (candle_px < 3.0f) candle_px = 3.0f;
         float hw = candle_px * 0.5f;
 
+        // Color flicker fix: tiny ±1-cent oscillations around opens[i] (live
+        // candle) flip bull/bear every tick at HFT scale. Use a small basis-
+        // point threshold (0.005% = ~$3.88 at $77k BTC). Within threshold:
+        // neutral (wheat) — within tick-noise, no directional bias.
+        const double FLICKER_BPS = 0.00005; // 0.005% = 0.5 basis points
         for (int i = 0; i < vc; i++) {
             ImVec2 po = ImPlot::PlotToPixels(cs->xs[i], cs->opens[i]);
             ImVec2 pc = ImPlot::PlotToPixels(cs->xs[i], cs->closes[i]);
             ImVec2 pl = ImPlot::PlotToPixels(cs->xs[i], cs->lows[i]);
             ImVec2 ph = ImPlot::PlotToPixels(cs->xs[i], cs->highs[i]);
-            bool bull = cs->closes[i] >= cs->opens[i];
-            ImU32 bc = ImGui::GetColorU32(bull ? FoxmlColors::green_b : FoxmlColors::red);
-            ImU32 wc = ImGui::GetColorU32(bull ? FoxmlColors::sand : FoxmlColors::comment);
+            double delta = cs->closes[i] - cs->opens[i];
+            double thr = cs->opens[i] * FLICKER_BPS;
+            int bull_state = (delta > thr) ? 1 : (delta < -thr) ? -1 : 0;
+            ImU32 bc, wc;
+            if (bull_state > 0) {
+                bc = ImGui::GetColorU32(FoxmlColors::green_b);
+                wc = ImGui::GetColorU32(FoxmlColors::sand);
+            } else if (bull_state < 0) {
+                bc = ImGui::GetColorU32(FoxmlColors::red);
+                wc = ImGui::GetColorU32(FoxmlColors::comment);
+            } else {
+                // neutral — within tick-noise of open
+                bc = ImGui::GetColorU32(ImVec4(FoxmlColors::wheat.x, FoxmlColors::wheat.y,
+                                                FoxmlColors::wheat.z, 0.6f));
+                wc = ImGui::GetColorU32(FoxmlColors::comment);
+            }
             float cx = po.x;
             dl->AddLine(ImVec2(cx, ph.y), ImVec2(cx, pl.y), wc, 1.0f);
             float top = (po.y < pc.y) ? po.y : pc.y;
@@ -358,8 +376,19 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             ImVec2 tsz = ImGui::CalcTextSize(ptag);
             float pr = plot_r.x - 2;
             float pl = pr - tsz.x - 8;
-            bool bull = (vc >= 2 && cs->closes[vc-1] >= cs->closes[vc-2]);
-            ImVec4 tag_col = bull ? FoxmlColors::green_b : FoxmlColors::red;
+            // Flicker fix (same threshold as candle body): tiny oscillations
+            // around closes[vc-2] flip bull/bear every tick. Threshold to a
+            // 0.5 basis-point neutral zone — wheat tag below threshold.
+            ImVec4 tag_col;
+            if (vc >= 2) {
+                double delta = cs->closes[vc-1] - cs->closes[vc-2];
+                double thr = cs->closes[vc-2] * FLICKER_BPS;
+                if (delta > thr)       tag_col = FoxmlColors::green_b;
+                else if (delta < -thr) tag_col = FoxmlColors::red;
+                else                   tag_col = FoxmlColors::wheat;
+            } else {
+                tag_col = FoxmlColors::wheat;
+            }
             dl->AddRectFilled(ImVec2(pl, price_px.y - tsz.y * 0.5f - 2),
                               ImVec2(pr, price_px.y + tsz.y * 0.5f + 2),
                               ImGui::GetColorU32(tag_col), 2.0f);

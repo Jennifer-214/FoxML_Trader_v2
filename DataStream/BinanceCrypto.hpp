@@ -42,6 +42,7 @@
 
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../CoreFrameworks/OrderGates.hpp"
+#include "../CoreFrameworks/Notify.hpp"  // Phase 8b — disconnect alerts
 
 using namespace std;
 
@@ -572,6 +573,16 @@ static inline void BinanceStream_Close(BinanceStream *bs) {
 //======================================================================================================
 static inline int BinanceStream_Reconnect(BinanceStream *bs, const BinanceConfig *config) {
     fprintf(stderr, "[BINANCE] reconnecting in %u seconds...\n", config->reconnect_delay);
+    // Phase 8b: alert at the convergence point (every reconnect path lands here).
+    if (g_notify) {
+        char body[256];
+        snprintf(body, sizeof(body),
+                 "Trade WS disconnected. Reconnecting in %u seconds. "
+                 "Investigate if this fires repeatedly.",
+                 config->reconnect_delay);
+        Notify_Send(g_notify, NOTIFY_WARN, NK_DISCONNECT_TRADE,
+                    "Binance trade WS disconnected", body);
+    }
     BinanceStream_Close(bs);
 
     if (config->reconnect_delay > 0) {

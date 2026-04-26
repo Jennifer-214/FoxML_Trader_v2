@@ -37,7 +37,20 @@ static const CfgFieldDef field_defs[] = {
     // Trading
     {"take_profit_pct",       "TP %%",        "Trading",         CFG_FLOAT, "%.2f", NULL},
     {"stop_loss_pct",         "SL %%",        "Trading",         CFG_FLOAT, "%.2f", NULL},
-    {"fee_rate",              "Fee %%",       "Trading",         CFG_FLOAT, "%.2f", NULL},
+    {"fee_rate",              "Fee %%",       "Trading",         CFG_FLOAT, "%.2f",
+        "Legacy fee rate (% per trade) — used for pre-trade quantity computations\n"
+        "(no-trade band, fee floor for TP, kill switch estimate, spread display)\n"
+        "and as the default for fee_rate_maker / fee_rate_taker if those aren't set."},
+    {"fee_rate_maker",        "Maker %%",     "Trading",         CFG_FLOAT, "%.3f",
+        "Maker fee rate (% per fill) — applied when order->is_maker=1 (POST_ONLY\n"
+        "limit fill). Default 0.075 (Binance tier 0 BNB-discount). If not set,\n"
+        "mirrors fee_rate. Setting ONLY this without fee_rate_taker triggers a\n"
+        "[CFG] warning — both should be set explicitly or neither."},
+    {"fee_rate_taker",        "Taker %%",     "Trading",         CFG_FLOAT, "%.3f",
+        "Taker fee rate (% per fill) — applied when order->is_maker=0 (market\n"
+        "fill, default for synchronous orders, or POST_ONLY limit that crossed\n"
+        "the spread). Default 0.100 (Binance tier 0 BNB-discount). Backtest\n"
+        "uses this rate exclusively (all-taker simulation)."},
     {"slippage_pct",          "Slippage %%",  "Trading",         CFG_FLOAT, "%.2f", NULL},
     {"risk_pct",              "Risk/Pos %%",  "Trading",         CFG_FLOAT, "%.1f", NULL},
     {"fee_floor_mult",        "Fee Floor",    "Trading",         CFG_FLOAT, "%.1f",
@@ -167,8 +180,43 @@ static const CfgFieldDef field_defs[] = {
     // Tick Recording
     {"record_ticks",          "Record Ticks", "Tick Recording",  CFG_BOOL,  NULL,
         "Record raw ticks to CSV for backtesting/ML training\nOutput: data/{SYMBOL}/YYYY-MM-DD.csv\n~30-70MB/day for BTCUSDT"},
+    {"record_depth",          "Record Depth", "Tick Recording",  CFG_BOOL,  NULL,
+        "Record @depth5@100ms snapshots to CSV (top-of-book + lastUpdateId)\n"
+        "Output: data/{SYMBOL}/depth/YYYY-MM-DD.csv\n"
+        "Requires depth_enabled=1. Daily rotation, auto-pruned by record_max_days.\n"
+        "Gap markers (# GAP) on backward last_update_id, wallclock >2s, or disconnect.\n"
+        "~50 MB/day for BTCUSDT. Required for future backtest replay of book state."},
     {"record_max_days",       "Max Days",     "Tick Recording",  CFG_FLOAT, "%.0f",
-        "Auto-delete tick CSVs older than this many days\n30 = ~1-2GB cap on disk usage"},
+        "Auto-delete tick + depth CSVs older than this many days\n30 = ~1-2GB cap on disk usage (more if depth recording is on)"},
+    // Operational Monitoring (Phase 8b) — alerts on kill switch, orphans, disconnects
+    {"notify_enabled",        "Notify",       "Operational Monitoring", CFG_BOOL,  NULL,
+        "0 = file logs only (default)\n"
+        "1 = route alerts through configured backend (kill switch trips, orphans,\n"
+        "    disconnects). Also keeps the existing fprintfs — backend is additive."},
+    {"notify_backend",        "Backend",      "Operational Monitoring", CFG_INT,   "%d",
+        "0 = stderr (default — visible via tail -f or syslog)\n"
+        "1 = command (popen-based shell template — see notify_command)\n"
+        "Slack/Telegram/Discord/dunst/etc. all use backend=1 with a service-\n"
+        "specific command template. No native HTTP backends — sidesteps the\n"
+        "TLS-in-engine question entirely."},
+    {"notify_command",        "Command",      "Operational Monitoring", CFG_PATH,  NULL,
+        "Shell command template with up to two %s (subject, body).\n"
+        "Examples (substitute YOUR_* with real URLs/tokens):\n"
+        "  dunst:    notify-send 'Engine: %s' '%s'\n"
+        "  Discord:  curl -s -X POST -H 'Content-Type: application/json' \\\n"
+        "                -d '{\"content\":\"%s\\n%s\"}' YOUR_DISCORD_WEBHOOK\n"
+        "  Slack:    curl -s -X POST -H 'Content-Type: application/json' \\\n"
+        "                -d '{\"text\":\"%s: %s\"}' YOUR_SLACK_WEBHOOK\n"
+        "  Telegram: curl -s 'https://api.telegram.org/botYOUR_TOKEN/sendMessage' \\\n"
+        "                -d 'chat_id=YOUR_CHAT&text=%s: %s'\n"
+        "  ntfy.sh:  curl -s -d '%s: %s' https://ntfy.sh/your-topic\n"
+        "Recommend prepending `timeout 10 ` for safety against hung commands.\n"
+        "%s placeholders MUST be wrapped in single quotes in the template — the\n"
+        "engine escapes internal ' but does not add enclosing quotes."},
+    {"notify_cooldown_secs",  "Cooldown s",   "Operational Monitoring", CFG_INT,   "%d",
+        "Min seconds between alerts of the same kind (default 60).\n"
+        "Different kinds are independent. Lower = more spam during disconnect storms.\n"
+        "Used for both stderr and command backends."},
     // Toggles
     {"use_real_money",        "LIVE Trading", "Toggles",         CFG_BOOL,  NULL,   NULL},
     {"partial_exit_enabled",  "Partial Exits","Toggles",         CFG_BOOL,  NULL,   NULL},
@@ -188,6 +236,24 @@ static const CfgFieldDef field_defs[] = {
         "Max bandit influence fraction (0.30 = 30%%)\nramps from 0%% to this over first 200 trades"},
     {"confidence_enabled",       "Confidence",        "FoxML",  CFG_BOOL,  NULL,
         "Dynamic ML threshold based on prediction quality\nraises threshold when IC/freshness/stability are low"},
+    {"confidence_window",        "Conf Window",       "FoxML",  CFG_INT,   "%d",
+        "RollingIC + RollingRMSE window size (default 32)\nlarger = smoother but slower to react to model changes\ncapped at ROLLING_IC_MAX_WINDOW=64"},
+    {"confidence_freshness_tau", "Conf Tau (s)",      "FoxML",  CFG_FLOAT, "%.0f",
+        "Freshness decay constant in seconds (default 300 = 5min)\ne^(-data_age/tau): data_age=tau gives 0.37 freshness"},
+    {"confidence_threshold_scale","Conf Scale",        "FoxML",  CFG_FLOAT, "%.2f",
+        "Gate formula: effective_thr = base * (this - conf)\ndefault 2.0 — conf=0 → 2x base (suppresses marginal signals)\nconf=1 → 1x base (full signal). Clamps at 1.0."},
+    // Validation (Phase 7prep) — held-out test set + generalization gap
+    {"held_out_fraction",        "Held-Out %",         "Validation", CFG_FLOAT, "%.2f",
+        "Fraction of data reserved as held-out test set\n"
+        "default 0.20 (20%% — last 2 months of 12-month dataset)\n"
+        "code refuses to peek at this set during training/tuning\n"
+        "explicit unlock required for final evaluation\n"
+        "clamped to [0.05, 0.30] in HeldOutSplit_Make"},
+    {"gap_acceptable_threshold", "Gap Threshold",      "Validation", CFG_FLOAT, "%.3f",
+        "Max acceptable |walk-forward - held-out| generalization gap\n"
+        "default 0.05 — gap above this = poor generalization (not OK)\n"
+        "applied to both classification accuracy and regression Pearson r\n"
+        "load-bearing: this is the WAS-IT-REAL test for trained models"},
     // Model Paths (Phase 7C)
     {"ml_model_path",            "Buy Model",         "Models", CFG_PATH,  NULL,
         "Path to XGBoost/LightGBM buy-signal model\ntrain in foxml_suite, load here"},
@@ -273,7 +339,7 @@ static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 struct SettingsState {
     float float_vals[NUM_FIELDS];  // storage for float/int fields
     int   bool_vals[NUM_FIELDS];   // storage for bool fields
-    char  path_vals[NUM_FIELDS][256]; // storage for path fields
+    char  path_vals[NUM_FIELDS][512]; // storage for path fields (Phase 8b: 256→512 to fit notify_command templates)
     bool  loaded;
     char  cfg_path[256];
 };
@@ -326,8 +392,8 @@ static inline void Settings_Load(SettingsState *s) {
                 const char *val = p + klen + 1;
                 if (field_defs[i].type == CFG_PATH) {
                     // strip trailing whitespace/newline
-                    strncpy(s->path_vals[i], val, 255);
-                    s->path_vals[i][255] = '\0';
+                    strncpy(s->path_vals[i], val, 511);
+                    s->path_vals[i][511] = '\0';
                     char *end = s->path_vals[i] + strlen(s->path_vals[i]) - 1;
                     while (end > s->path_vals[i] && (*end == '\n' || *end == '\r' || *end == ' ')) *end-- = '\0';
                 } else if (field_defs[i].type == CFG_BOOL)

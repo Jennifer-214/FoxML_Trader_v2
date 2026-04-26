@@ -1657,6 +1657,14 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 fprintf(ef, "ml_tp_pct = %.6f\n", FPN_ToDouble(results->config_used.ml_tp_pct));
                 fprintf(ef, "ml_sl_pct = %.6f\n", FPN_ToDouble(results->config_used.ml_sl_pct));
                 fprintf(ef, "ml_backend = %d\n", results->config_used.ml_backend);
+                // Phase 7 prep — held-out validation cfg saved for reproducibility.
+                // Live engine compares these; mismatch = warning (or fail under
+                // model_verify_strict=1). Documents the validation discipline
+                // the model was evaluated under.
+                fprintf(ef, "held_out_fraction = %.4f\n",
+                        FPN_ToDouble(results->config_used.held_out_fraction));
+                fprintf(ef, "gap_acceptable_threshold = %.4f\n",
+                        FPN_ToDouble(results->config_used.gap_acceptable_threshold));
                 fprintf(ef, "\n");
                 fprintf(ef, "# training hyperparameters (informational, not verified at runtime)\n");
                 fprintf(ef, "# max_depth = %d\n", state->max_depth);

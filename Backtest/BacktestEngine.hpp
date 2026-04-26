@@ -23,6 +23,7 @@
 #include "BacktestSnapshot.hpp"
 #include "ValidationSplit.hpp"
 #include "OverfitDetection.hpp"
+#include "HeldOutSplit.hpp"  // Phase 7prep — locked held-out test set discipline
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -876,6 +877,115 @@ struct WalkForwardResults {
     double elapsed_ms;
     char fingerprint[65];   // SHA256 of config + data (empty if not computed)
 };
+
+//======================================================================================================
+// [FULL VALIDATION — walk-forward + held-out gap (Phase 7prep)]
+//======================================================================================================
+// Combines walk-forward CV (on train+val portion) with held-out test eval
+// (on the locked portion). Reports both side-by-side and computes the
+// generalization gap |WF_val - held_out|. Small gap = generalization is real;
+// large gap = WF was likely overfit despite per-fold OK numbers.
+//
+// Phase 7prep ships the FRAMEWORK: lock-check, slice-view of BacktestResults
+// for WF, gap math, label-kind branching. The actual held-out training (run
+// XGBoost on full train+val with selected hyperparameters, predict on held-
+// out, compute metric) is Phase 7 finalize work — happens when there's a
+// real model to evaluate. Phase 7prep stubs that section to held_out_count=0
+// + zero metrics; gap computation is consistent (zero-vs-WF degenerate case).
+//
+// When Phase 7 finalize fills in the held-out training, the existing tests
+// continue to validate framework behavior; new tests will validate the
+// actual training path with synthetic-signal data.
+//======================================================================================================
+struct FullValidationResults {
+    WalkForwardResults walkforward;        // WF CV on [0, trainval_end)
+
+    // held-out eval — populated by Phase 7 finalize; framework only in 7prep
+    int held_out_count;                    // size of held-out portion actually evaluated
+    float held_out_metric;                 // accuracy or Pearson r per label_kind
+    float held_out_mse;                    // regression only
+    float held_out_correlation;            // regression only
+    OverfitReport held_out_overfit;        // train_metric (from WF) vs val (from held-out)
+
+    // generalization gap — load-bearing
+    float wf_to_held_out_gap;              // |WF mean val - held_out| (label-kind-aware)
+    int gap_acceptable;                    // 1 if gap < gap_threshold
+    float gap_threshold;                   // for traceability — what was the threshold?
+
+    int label_kind;                        // mirrored from WalkForwardResults for display
+    int ran_held_out;                      // 1 if held-out training fired, 0 if stubbed/locked
+    char fingerprint[65];                  // SHA256 (mirrored from walkforward)
+};
+
+// Forward declaration — Backtest_RunWalkForward is defined further down in
+// this header (the implementation is large enough to live near the bottom).
+// Backtest_RunFullValidation calls it on a sliced view of BacktestResults.
+static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
+                                            const BacktestResults *data,
+                                            int n_splits, int horizon_ticks,
+                                            int buffer_ticks, int min_train_samples,
+                                            volatile int *progress_pct,
+                                            volatile int *cancel_flag,
+                                            int label_type);
+
+static inline void Backtest_RunFullValidation(FullValidationResults *out,
+                                                const BacktestResults *data,
+                                                const HeldOutSplit *split,
+                                                int n_splits, int horizon,
+                                                int buffer, int min_train,
+                                                volatile int *progress,
+                                                volatile int *cancel,
+                                                int label_type,
+                                                float gap_threshold) {
+    memset(out, 0, sizeof(*out));
+    out->gap_threshold = gap_threshold;
+
+    // Refuse if split is locked (caller MUST unlock with token first)
+    if (!split || split->locked) {
+        fprintf(stderr, "[FULLVALIDATION] split is locked or null — refusing to run.\n"
+                        "                 call HeldOutSplit_Unlock(split, token) first.\n");
+        return;
+    }
+    if (!data || data->sample_count <= 0 || split->trainval_end_idx <= 0) {
+        fprintf(stderr, "[FULLVALIDATION] no samples to run on (split shape invalid)\n");
+        return;
+    }
+
+    // Sliced view: WF sees ONLY the train+val portion. Shallow copy of
+    // BacktestResults — points at the same heap buffers but reports a
+    // smaller sample_count, so Backtest_RunWalkForward never reads the
+    // held-out region. No data is copied; the slice is just a count cap.
+    BacktestResults slice = *data;
+    slice.sample_count = split->trainval_end_idx;
+
+    // Run walk-forward CV on the slice
+    Backtest_RunWalkForward(&out->walkforward, &slice, n_splits, horizon,
+                             buffer, min_train, progress, cancel, label_type);
+    out->label_kind = out->walkforward.label_kind;
+    memcpy(out->fingerprint, out->walkforward.fingerprint, sizeof(out->fingerprint));
+
+    // Held-out training + eval = Phase 7 finalize. Stub for 7prep so the
+    // gap computation has a consistent zero-baseline.
+    out->ran_held_out = 0;
+    out->held_out_count = 0;
+    out->held_out_metric = 0.0f;
+    out->held_out_mse = 0.0f;
+    out->held_out_correlation = 0.0f;
+
+    // Generalization gap: |WF mean - held_out|, label-kind-aware. With
+    // ran_held_out=0 the gap is just the WF mean (degenerate but consistent).
+    // When Phase 7 finalize ships, real held-out metrics will populate.
+    if (LabelType_IsRegression(label_type)) {
+        out->wf_to_held_out_gap = (float)fabs(
+            (double)out->walkforward.mean_val_correlation - (double)out->held_out_correlation);
+    } else {
+        out->wf_to_held_out_gap = (float)fabs(
+            (double)out->walkforward.mean_val_accuracy - (double)out->held_out_metric);
+    }
+    // gap_acceptable only meaningful when held-out actually ran. Default 0
+    // when stubbed — signals "not yet validated" rather than "validated OK".
+    out->gap_acceptable = (out->ran_held_out && out->wf_to_held_out_gap < gap_threshold) ? 1 : 0;
+}
 
 // compute accuracy: fraction of predictions matching labels (for classification)
 // threshold: prediction >= thresh → class 1, else class 0

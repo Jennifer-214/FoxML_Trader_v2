@@ -20,7 +20,12 @@
 //======================================================================================================
 #include "DataStream/BinanceCrypto.hpp"
 #include "DataStream/BinanceOrderAPI.hpp"
+#include "DataStream/BinanceDepth.hpp"
 #include "DataStream/EngineTUI.hpp"
+#include "CoreFrameworks/Notify.hpp"
+// Phase 8b — g_notify is a C++17 inline variable defined in Notify.hpp,
+// nullptr by default. Live engine assigns &g_notify_state in main() after
+// NotifyState_Init when cfg.notify_enabled=1 (lands in c3+c4).
 #include "CoreFrameworks/EngineSharded.hpp"
 #include "CoreFrameworks/PortfolioController.hpp"
 #include "MemHeaders/PoolAllocator.hpp"
@@ -94,6 +99,16 @@ static inline void engine_force_close_all(PortfolioController<FP> *ctrl, TradeLo
         fprintf(stderr, "[ENGINE] FATAL: bitmap not zero after force-close: 0x%04X\n",
                 ctrl->portfolio.active_bitmap);
         fprintf(stderr, "[ENGINE] halting - refusing to reconnect with orphaned positions\n");
+        if (g_notify) {
+            char body[256];
+            snprintf(body, sizeof(body),
+                     "Bitmap nonzero (0x%04X) after force-close — engine halted "
+                     "to avoid reconnecting with orphaned positions. Manual "
+                     "reconciliation required.",
+                     ctrl->portfolio.active_bitmap);
+            Notify_Send(g_notify, NOTIFY_CRITICAL, NK_ORPHAN_HALT,
+                        "Engine halted — orphan detection at force-close", body);
+        }
         exit(1);
     }
 }
@@ -132,15 +147,49 @@ int main(int argc, char *argv[]) {
     }
 
     //==================================================================================================
-    // Phase 13 dispatch: per-core sharded mode is a separate entry point that
-    // bypasses the legacy single-threaded engine entirely. Set engine_mode =
-    // sharded in engine.cfg to land here.
+    // Phase 13+ dispatch: SHARDED is the production engine and is now the DEFAULT.
+    // Legacy single-threaded mode is kept as a benchmark/regression baseline but is
+    // DEPRECATED — see CLAUDE.md "Cross-Mode Init Placement" invariant. Adding
+    // features in main.cpp's post-dispatch loop = silent production gap (the
+    // sharded path won't see them). New features should land in:
+    //   - EngineSharded.hpp (sharded-only setup / per-core init)
+    //   - CoreFrameworks/EventLoopState (cross-core dispatch)
+    //   - CoreFrameworks/OrderManager (OMS HandleFill — fee math + counters)
     //==================================================================================================
     if (ccfg.engine_mode == ENGINE_MODE_SHARDED) {
         tt::EngineSharded_Run(ccfg, bcfg);
         return 0;
     }
 
+    // Runtime deprecation warning for legacy single-threaded mode.
+    fprintf(stderr,
+            "================================================================\n"
+            "[ENGINE] WARNING: engine_mode=single_core is the LEGACY benchmark\n"
+            "[ENGINE]   path and is DEPRECATED as of 2026-04-25. Phase 8+\n"
+            "[ENGINE]   features (depth feed, notify, recorders, maker/taker\n"
+            "[ENGINE]   accounting) are wired in the sharded path and may be\n"
+            "[ENGINE]   incomplete here. For production trading set:\n"
+            "[ENGINE]     engine_mode=sharded\n"
+            "[ENGINE]   in engine.cfg. Continuing in legacy mode for now.\n"
+            "================================================================\n");
+
+    //==================================================================================================
+    // ============================================================
+    // LEGACY ENGINE PATH — single-threaded, deprecated as of 2026-04-25
+    // ============================================================
+    // Everything below this line runs ONLY in legacy single-threaded mode.
+    // New features go in:
+    //   - CoreFrameworks/EngineSharded.hpp        (sharded-mode init/teardown)
+    //   - CoreFrameworks/EventLoopState           (cross-core dispatch)
+    //   - CoreFrameworks/OrderManager.hpp         (OMS HandleFill — fee math + counters)
+    //   - CoreFrameworks/ExecutionCore.hpp        (per-core hot path)
+    // Adding init/runtime code here = silent production gap (sharded won't see it).
+    // See CLAUDE.md "Cross-Mode Init Placement" invariant.
+    //
+    // This path remains live for benchmark/regression comparisons + controller_test
+    // (which exercises PortfolioController, the legacy controller). Production
+    // trading uses the sharded path above.
+    // ============================================================
     //==================================================================================================
     // license check — before connecting to exchange
     //==================================================================================================
@@ -193,6 +242,13 @@ int main(int argc, char *argv[]) {
     // init tick recorder (writes raw ticks to CSV for backtesting/ML training)
     TickRecorder tick_rec;
     TickRecorder_Init(&tick_rec, bcfg.symbol, ccfg.record_ticks, ccfg.record_max_days);
+
+    // init depth recorder (Phase 8a c5) — writes @depth5@100ms snapshots to CSV
+    // when record_depth=1 AND depth_enabled=1 (recorder is fed by depth_thread_fn).
+    // Recorder pointer is wired into depth_shared below the depth-thread block.
+    DepthRecorder depth_rec;
+    DepthRecorder_Init(&depth_rec, bcfg.symbol, "data", ccfg.record_max_days,
+                       ccfg.record_depth && ccfg.depth_enabled);
 
     // metrics log — diagnostics for verifying regime switching, strategy behavior
     MetricsLog metrics;
@@ -261,6 +317,15 @@ int main(int argc, char *argv[]) {
                 double qty_d = binance_round_qty(btc_start, order_api.filters.lot_step_size);
                 if (qty_d >= order_api.filters.lot_min_qty) {
                     fprintf(stderr, "[LIVE] orphaned BTC %.8f — selling to recover USDT\n", qty_d);
+                    if (g_notify) {
+                        char body[256];
+                        snprintf(body, sizeof(body),
+                                 "Orphaned BTC balance %.8f detected at startup. "
+                                 "Engine is auto-selling to recover USDT.",
+                                 qty_d);
+                        Notify_Send(g_notify, NOTIFY_WARN, NK_ORPHAN_DETECTED,
+                                    "Orphan recovery at startup", body);
+                    }
                     char oid[32]; double fp = 0, fq = 0;
                     BinanceOrderAPI_MarketSell(&order_api, qty_d, oid, &fp, &fq);
                     // re-query USDT balance after sell
@@ -325,6 +390,45 @@ int main(int argc, char *argv[]) {
 #endif
 #endif // MULTICORE_TUI
 
+    //==================================================================================================
+    // notify state (Phase 8b) — operational alerts. Off by default. When
+    // enabled, picks backend by cfg.notify_backend (0=stderr, 1=command).
+    // The Command backend takes notify_command as a shell template with up
+    // to two %s placeholders (subject, body) that get safely shell-escaped.
+    // After Init, g_notify points at g_notify_state and Notify_Send call
+    // sites everywhere route through the configured backend. Shutdown drains
+    // the queue and joins the worker thread.
+    //==================================================================================================
+    static NotifyState g_notify_state;
+    static NotifyCommandState g_notify_cmd_state;
+    if (ccfg.notify_enabled) {
+        NotifyBackendFn backend = NotifyBackend_Stderr;
+        void *backend_state = nullptr;
+        if (ccfg.notify_backend == 1) {
+            if (ccfg.notify_command[0] == '\0') {
+                fprintf(stderr, "[NOTIFY] backend=command but notify_command is empty — "
+                                "falling back to stderr\n");
+            } else {
+                strncpy(g_notify_cmd_state.template_str, ccfg.notify_command,
+                        sizeof(g_notify_cmd_state.template_str) - 1);
+                g_notify_cmd_state.template_str[sizeof(g_notify_cmd_state.template_str) - 1] = '\0';
+                backend = NotifyBackend_Command;
+                backend_state = &g_notify_cmd_state;
+            }
+        } else if (ccfg.notify_backend != 0) {
+            fprintf(stderr, "[NOTIFY] backend=%d not recognized — falling back to stderr\n",
+                    ccfg.notify_backend);
+        }
+        NotifyState_Init(&g_notify_state, backend, backend_state,
+                         (uint64_t)ccfg.notify_cooldown_secs * 1000000ULL);
+        if (g_notify_state.worker_started) {
+            g_notify = &g_notify_state;
+            fprintf(stderr, "[ENGINE] notify enabled (backend=%s, cooldown=%us)\n",
+                    backend == NotifyBackend_Stderr ? "stderr" : "command",
+                    ccfg.notify_cooldown_secs);
+        }
+    }
+
 #ifdef LATENCY_PROFILING
     // calibrate TSC: measure cycles over a known 10ms sleep to get cycles-per-nanosecond
     {
@@ -346,6 +450,41 @@ int main(int argc, char *argv[]) {
                 tui.tsc_per_ns, tui.tsc_per_ns);
     }
 #endif
+
+    //==================================================================================================
+    // depth feed (Phase 8a c3) — activate the @depth5@100ms WS thread when
+    // depth_enabled=1. The thread populates DepthSharedState<F>; the slow path
+    // pulls book_imbalance from there each tick (Phase 8a c4). When disabled,
+    // depth_tid stays 0 and ctrl.book_imbalance remains at its _Init value (0)
+    // — the existing book-imbalance gate is dead unless min_book_imbalance>0.
+    //
+    // Init failure is non-fatal: log + continue without depth. Trading still
+    // works, the book gate just stays inert (same as depth_enabled=0).
+    //==================================================================================================
+    DepthSharedState<FP> depth_shared = {};
+    pthread_t depth_tid = 0;
+    if (ccfg.depth_enabled) {
+        const char *depth_host;
+        int depth_port;
+        if (bcfg.use_testnet)         { depth_host = "testnet.binance.vision";   depth_port = 443; }
+        else if (bcfg.use_binance_us) { depth_host = "stream.binance.us";        depth_port = 9443; }
+        else                          { depth_host = "data-stream.binance.vision"; depth_port = 443; }
+
+        if (DepthStream_Init<FP>(&depth_shared, bcfg.symbol,
+                                  depth_host, depth_port,
+                                  /*reconnect_delay=*/2) == 0) {
+            // Wire recorder if record_depth was set (DepthRecorder_Init handled
+            // the enabled flag — null-out the pointer when disabled to skip the
+            // per-snapshot enabled check on the depth thread).
+            depth_shared.recorder = ccfg.record_depth ? &depth_rec : NULL;
+            pthread_create(&depth_tid, NULL, depth_thread_fn<FP>, &depth_shared);
+            fprintf(stderr, "[ENGINE] depth feed active (%s:%d %s@depth5@100ms)%s\n",
+                    depth_host, depth_port, bcfg.symbol,
+                    ccfg.record_depth ? " — recording" : "");
+        } else {
+            fprintf(stderr, "[ENGINE] depth feed init failed — continuing without depth\n");
+        }
+    }
 
     //==================================================================================================
     // main loop
@@ -561,6 +700,16 @@ int main(int argc, char *argv[]) {
                 }
             }
             ctrl.sim_time = time(NULL); // live engine: wall clock
+            // Phase 8a c4: pull latest book imbalance from depth thread (if running).
+            // Pairs with depth_thread_fn's RELEASE on active_idx after writing the
+            // snapshot — ACQUIRE here makes the snapshot's contents visible.
+            // Slow-path read inside PortfolioController_Tick uses ctrl.book_imbalance.
+            // depth_tid == 0 path (depth_enabled=0 or Init failed) leaves book_imbalance
+            // at its _Init value (0) — pre-Phase-8a behavior preserved.
+            if (depth_tid != 0) {
+                int dactive = __atomic_load_n(&depth_shared.active_idx, __ATOMIC_ACQUIRE);
+                ctrl.book_imbalance = depth_shared.snapshots[dactive].imbalance;
+            }
             PortfolioController_Tick(&ctrl, &pool, last_stream.price, last_stream.volume, &log, last_stream.is_buyer_maker);
 #ifdef LATENCY_PROFILING
             uint64_t t3 = __rdtscp(&tsc_aux);
@@ -770,6 +919,15 @@ int main(int argc, char *argv[]) {
                         if (orphans) {
                             fprintf(stderr, "[LIVE] WARNING: %d orphaned real positions — selling\n",
                                     __builtin_popcount(orphans));
+                            if (g_notify) {
+                                char body[256];
+                                snprintf(body, sizeof(body),
+                                         "%d real positions detected without paper backing "
+                                         "(bitmap mismatch). Engine is auto-selling to recover.",
+                                         __builtin_popcount(orphans));
+                                Notify_Send(g_notify, NOTIFY_ALERT, NK_ORPHAN_DETECTED,
+                                            "Orphaned real positions detected", body);
+                            }
                             while (orphans) {
                                 int idx = __builtin_ctz(orphans);
                                 double qty_d = FPN_ToDouble(ctrl.portfolio.positions[idx].quantity);
@@ -1009,10 +1167,26 @@ int main(int argc, char *argv[]) {
 #else
     TUI_Cleanup(&tui);
 #endif
+
+    // depth feed shutdown (Phase 8a c3) — depth_thread_fn polls quit_requested
+    // at the top of its loop with ACQUIRE; the next 200ms poll cycle picks up
+    // the signal. depth_tid==0 when depth_enabled was off or init failed.
+    if (depth_tid != 0) {
+        __atomic_store_n(&depth_shared.quit_requested, 1, __ATOMIC_RELEASE);
+        pthread_join(depth_tid, NULL);
+    }
+
+    // notify shutdown (Phase 8b c3) — drain remaining events + join worker.
+    // No-op if Init never ran (worker_started=0 path inside _Shutdown).
+    if (g_notify) {
+        NotifyState_Shutdown(g_notify);
+        g_notify = nullptr;
+    }
     TradeLogBuffer_Drain(&ctrl.trade_buf, &log);
     TradeLog_Close(&log);
     MetricsLog_Close(&metrics);
     TickRecorder_Close(&tick_rec);
+    DepthRecorder_Close(&depth_rec);
     BinanceStream_Close(&bs);
     free(pool.slots);
     free(ctrl.rolling_long);

@@ -49,6 +49,17 @@ template <unsigned F> struct ControllerConfig {
   FPN<F> stop_loss_pct;    // per-position stop loss (e.g. 0.015 = 1.5%)
   FPN<F> starting_balance; // paper trading starting balance (e.g. 10000.0)
   FPN<F> fee_rate;         // per-trade fee rate (e.g. 0.001 = 0.1% for Binance)
+                           // Phase 8: legacy field. Pre-Phase-8 behavior preserved
+                           // when fee_rate_maker == fee_rate_taker == fee_rate.
+                           // Backtest fingerprint hashes this field (NOT the new
+                           // maker/taker fields) — preserves bundle compatibility.
+  // Phase 8 — bifurcated maker/taker fee rates. Live engine uses these per fill
+  // based on order->is_maker (set from Binance executionReport "m" field).
+  // Backtest simulates as all-taker (is_maker=0 always). Documented divergence.
+  FPN<F> fee_rate_maker;   // maker fill fee rate (e.g. 0.00075 = 0.075% Binance tier 0)
+  FPN<F> fee_rate_taker;   // taker fill fee rate (e.g. 0.00100 = 0.100% Binance tier 0)
+  // Fee_Compute helper — defined after the struct so all fee math sites
+  // share one implementation. See note in main file just below struct.
   FPN<F> risk_pct; // fraction of balance to risk per position (e.g. 0.02 = 2%)
   // market microstructure filters (initial values - adapted at runtime by P&L
   // regression)
@@ -229,8 +240,20 @@ template <unsigned F> struct ControllerConfig {
   // tick recording (writes raw ticks to CSV for backtesting/ML training)
   int record_ticks; // 0=disabled (default), 1=record to
                     // data/{symbol}/YYYY-MM-DD.csv
+  // depth recording (Phase 8a c5): writes @depth5@100ms snapshots to
+  // data/{symbol}/depth/YYYY-MM-DD.csv. Requires depth_enabled=1 (recorder
+  // is fed by depth_thread_fn). Off by default — opt-in for replay/audit.
+  int record_depth; // 0=disabled (default), 1=record depth snapshots
   uint32_t
       record_max_days; // auto-prune CSVs older than this (default 30, ~2GB cap)
+
+  // operational alerts (Phase 8b): route kill switch, orphan, disconnect
+  // events through a configurable backend. All off by default.
+  int notify_enabled;             // 0=disabled (default), 1=route alerts
+  int notify_backend;             // 0=stderr (default), 1=command (popen-based)
+  char notify_command[512];       // shell template with up to 2 %s (subject, body)
+                                  // examples in engine.cfg / SettingsPanel tooltip
+  uint32_t notify_cooldown_secs;  // per-event-kind cooldown (default 60)
   // FoxML integration — Phase 6C (all default OFF, zero behavior change when
   // disabled)
   int cost_gate_enabled; // 0=disabled, 1=estimate trade cost via CostModel,
@@ -245,6 +268,19 @@ template <unsigned F> struct ControllerConfig {
                              // 0.30)
   int confidence_enabled;    // 0=disabled, 1=dynamic ml_buy_threshold from
                              // confidence scoring
+  // Phase 6 prep — tunable confidence loop parameters. Defaults preserve the
+  // pre-Phase-6prep hardcoded values. Only consulted when confidence_enabled=1.
+  uint32_t confidence_window;       // RollingIC + RollingRMSE window (default 32)
+  FPN<F>   confidence_freshness_tau; // freshness decay constant in seconds (default 300)
+  FPN<F>   confidence_threshold_scale; // gate formula: effective_thr = base * (this - conf)
+                                       // (default 2.0 — clamps at 1.0 in code)
+  // Phase 7 prep — held-out validation infrastructure. Used by foxml_suite
+  // when training/evaluating a model. Live engine reads via expected.cfg
+  // mismatch checks (CoreModelZoo).
+  FPN<F>   held_out_fraction;        // 0.20 = 20% of data reserved for final-test
+                                     // (clamped to [0.05, 0.30] in HeldOutSplit_Make)
+  FPN<F>   gap_acceptable_threshold; // max acceptable |WF mean - held_out| gap
+                                     // (default 0.05 — gap above this = poor generalization)
   // Prediction normalization — Phase 7F (default OFF)
   int prediction_normalize; // 0=disabled, 1=z-score normalize predictions
                             // (activates after 100)
@@ -311,6 +347,30 @@ template <unsigned F> struct ControllerConfig {
   // green during the migration window.
   uint32_t oms_event_log_mode; // 0 = legacy (default), 1 = event log
 };
+
+//======================================================================================================
+// [FEE_COMPUTE — Phase 8 maker/taker helper]
+//======================================================================================================
+// Apply the correct fee rate based on whether the fill was a maker or taker.
+// Single source of truth for fee math on a per-fill basis.
+//
+// Caller-side discipline (CLAUDE.md "Maker/Taker Accuracy" invariant in c7):
+//   - ENTRY fees: pass order->is_maker from the matching fill
+//   - EXIT fees from market sells (TP/SL hits): pass is_maker=0 (always taker)
+//   - EXIT fees from limit sells (Phase 9 hybrid execution, deferred): pass
+//     order->is_maker from the matching exit fill
+//
+// Backtest path: pass is_maker=0 always — backtest simulates as all-taker
+// (documented divergence; backtest maker simulation is Phase 9 work).
+//
+// In legacy cfg mode (only fee_rate set, mirrored to maker+taker), both
+// branches return identical values → behavior matches pre-Phase-8.
+template <unsigned F>
+inline FPN<F> Fee_Compute(const ControllerConfig<F>* cfg, FPN<F> notional, int is_maker) {
+    FPN<F> rate = is_maker ? cfg->fee_rate_maker : cfg->fee_rate_taker;
+    return FPN_Mul(notional, rate);
+}
+
 //======================================================================================================
 template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   ControllerConfig<F> cfg;
@@ -327,6 +387,11 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.starting_balance =
       FPN_FromDouble<F>(1000000.0); // 1M default so tests arent balance-limited
   cfg.fee_rate = FPN_FromDouble<F>(0.001); // 0.1% per trade (Binance default)
+  // Phase 8 — Binance tier 0 BNB-discount default rates. Live engine uses
+  // these per-fill based on order->is_maker. If user sets only fee_rate
+  // (legacy mode), backward-compat clause below mirrors to both.
+  cfg.fee_rate_maker = FPN_FromDouble<F>(0.00075); // 0.075% maker tier 0
+  cfg.fee_rate_taker = FPN_FromDouble<F>(0.00100); // 0.100% taker tier 0
   cfg.risk_pct = FPN_FromDouble<F>(0.02);  // risk 2% of balance per position
   cfg.volume_multiplier = FPN_FromDouble<F>(3.0);
   cfg.entry_offset_pct = FPN_FromDouble<F>(0.0015);
@@ -459,7 +524,13 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // tick recording (disabled by default — no disk usage unless explicitly
   // enabled)
   cfg.record_ticks = 0;
+  cfg.record_depth = 0; // Phase 8a c5 — opt-in
   cfg.record_max_days = 30;
+  // Phase 8b — operational alerts (all opt-in; default = no behavior change)
+  cfg.notify_enabled = 0;
+  cfg.notify_backend = 0;          // stderr
+  cfg.notify_command[0] = '\0';
+  cfg.notify_cooldown_secs = 60;
   // FoxML integration — Phase 6C (all OFF by default, zero behavior change)
   cfg.cost_gate_enabled = 0;
   cfg.foxml_vol_scaling_enabled = 0;
@@ -467,14 +538,26 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.bandit_enabled = 0;
   cfg.bandit_blend_ratio = FPN_FromDouble<F>(0.30);
   cfg.confidence_enabled = 0;
+  // Phase 6 prep — defaults match the pre-amend hardcoded values
+  cfg.confidence_window           = 32;                          // CONFIDENCE_IC_WINDOW_DEFAULT
+  cfg.confidence_freshness_tau    = FPN_FromDouble<F>(300.0);    // CONFIDENCE_FRESHNESS_TAU_DEFAULT
+  cfg.confidence_threshold_scale  = FPN_FromDouble<F>(2.0);      // hardcoded `2.0` in gate formula
+  // Phase 7 prep — held-out validation defaults
+  cfg.held_out_fraction           = FPN_FromDouble<F>(0.20);     // 20% reserved
+  cfg.gap_acceptable_threshold    = FPN_FromDouble<F>(0.05);     // 5% max gap for "OK"
   cfg.prediction_normalize = 0;
   cfg.barrier_gate_enabled = 0;
   cfg.model_verify_strict = 0;  // 0=warn, 1=strict (fail on mismatch), -1=skip
   cfg.peak_model_path[0] = '\0';
   cfg.valley_model_path[0] = '\0';
-  // Per-core sharding (Phase 13) — safe defaults: legacy mode, 4 cores if opted
-  // in
-  cfg.engine_mode = ENGINE_MODE_SINGLE_CORE;
+  // Per-core sharding (Phase 13+) — DEFAULT IS SHARDED. Sharded is the
+  // production engine: per-core ExecutionCore + per-core PortfolioController
+  // + central OMS, branchless ~60ns hot path, risk distributed across cores.
+  // ENGINE_MODE_SINGLE_CORE remains available for benchmark/regression
+  // baselines but is DEPRECATED and emits a runtime warning at startup.
+  // Adding new features in legacy-only paths = silent production gap;
+  // see CLAUDE.md "Cross-Mode Init Placement" invariant.
+  cfg.engine_mode = ENGINE_MODE_SHARDED;
   cfg.num_execution_cores = 4;
   cfg.sharded_force_synthetic = 0;
   for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
@@ -502,6 +585,12 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
 template <unsigned F>
 inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   ControllerConfig<F> cfg = ControllerConfig_Default<F>();
+
+  // Phase 8: track whether the user explicitly set maker/taker rates in
+  // the cfg file. Can't infer from value comparison alone — explicit
+  // values matching defaults would falsely trigger legacy-mirroring.
+  int maker_explicitly_set = 0;
+  int taker_explicitly_set = 0;
 
   FILE *f = fopen(filepath, "r");
   if (!f)
@@ -621,6 +710,19 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_PCT(take_profit_pct)
     CFG_PARSE_PCT(stop_loss_pct)
     CFG_PARSE_PCT(fee_rate)
+    // Phase 8: track explicit-set for the post-parse legacy-mirror decision.
+    // Inline parse instead of CFG_PARSE_PCT macro (which would `continue;`
+    // before setting the flag). Same divide-by-100 semantics.
+    if (strcmp(key, "fee_rate_maker") == 0) {
+        cfg.fee_rate_maker = FPN_FromDouble<F>(atof(val) / 100.0);
+        maker_explicitly_set = 1;
+        continue;
+    }
+    if (strcmp(key, "fee_rate_taker") == 0) {
+        cfg.fee_rate_taker = FPN_FromDouble<F>(atof(val) / 100.0);
+        taker_explicitly_set = 1;
+        continue;
+    }
     CFG_PARSE_PCT(risk_pct)
     CFG_PARSE_PCT(entry_offset_pct)
     CFG_PARSE_PCT(offset_min)
@@ -706,7 +808,26 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 
     //--- tick recording ---
     CFG_PARSE_INT(record_ticks)
+    CFG_PARSE_INT(record_depth)
     CFG_PARSE_U32(record_max_days)
+
+    //--- operational alerts (Phase 8b) ---
+    CFG_PARSE_INT(notify_enabled)
+    CFG_PARSE_INT(notify_backend)
+    CFG_PARSE_U32(notify_cooldown_secs)
+    // notify_command is a string — no macro for that, inline parse below
+    if (strcmp(key, "notify_command") == 0) {
+        strncpy(cfg.notify_command, val, sizeof(cfg.notify_command) - 1);
+        cfg.notify_command[sizeof(cfg.notify_command) - 1] = '\0';
+        // strip trailing newline if any (the cfg parser usually does this,
+        // but be defensive — bad commands break alerts silently otherwise)
+        size_t nl = strlen(cfg.notify_command);
+        while (nl > 0 && (cfg.notify_command[nl-1] == '\n' ||
+                          cfg.notify_command[nl-1] == '\r')) {
+            cfg.notify_command[--nl] = '\0';
+        }
+        continue;
+    }
 
     //--- FoxML integration (Phase 6C) ---
     CFG_PARSE_INT(cost_gate_enabled)
@@ -715,6 +836,11 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(bandit_enabled)
     CFG_PARSE_FPN(bandit_blend_ratio)
     CFG_PARSE_INT(confidence_enabled)
+    CFG_PARSE_U32(confidence_window)
+    CFG_PARSE_FPN(confidence_freshness_tau)
+    CFG_PARSE_FPN(confidence_threshold_scale)
+    CFG_PARSE_FPN(held_out_fraction)
+    CFG_PARSE_FPN(gap_acceptable_threshold)
     CFG_PARSE_INT(prediction_normalize)
     CFG_PARSE_INT(barrier_gate_enabled)
     CFG_PARSE_INT(model_verify_strict)
@@ -846,6 +972,46 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   }
 
   fclose(f);
+
+  // Phase 8 — backward-compat for fee_rate_maker / fee_rate_taker.
+  //
+  // Three valid cfg shapes:
+  //   1. Only fee_rate set (legacy): mirror to both maker + taker.
+  //      Live engine effectively becomes "all-fee_rate" — same as pre-Phase-8.
+  //   2. fee_rate_maker + fee_rate_taker set explicitly: live engine uses
+  //      per-fill rates based on order->is_maker.
+  //   3. Mixed: fee_rate set AND exactly ONE of maker/taker explicitly set.
+  //      The other stays at its DEFAULT, which is almost certainly wrong —
+  //      WARN loudly so the user can fix.
+  //
+  // Use the explicit-set flags tracked during parse (above). This handles
+  // the case where the user explicitly sets maker/taker to values that
+  // happen to equal Default() — value-comparison can't distinguish.
+  {
+    int legacy_set = !FPN_IsZero(cfg.fee_rate);
+
+    if (!maker_explicitly_set && !taker_explicitly_set && legacy_set) {
+      // Legacy mode: only fee_rate set in cfg, mirror to both.
+      cfg.fee_rate_maker = cfg.fee_rate;
+      cfg.fee_rate_taker = cfg.fee_rate;
+      fprintf(stderr,
+              "[CFG] fee_rate=%.5f → mirrored to maker+taker (legacy mode)\n",
+              FPN_ToDouble(cfg.fee_rate));
+    } else if (legacy_set && (maker_explicitly_set ^ taker_explicitly_set)) {
+      // Mixed-cfg WARNING — almost certainly user error.
+      fprintf(stderr,
+              "[CFG] WARNING: fee_rate=%.5f set, but only one of "
+              "fee_rate_maker (%.5f) / fee_rate_taker (%.5f) explicitly set. "
+              "The other stayed at its default. If you meant to set both, "
+              "set both explicitly. If you meant legacy mode, remove the "
+              "explicitly-set one.\n",
+              FPN_ToDouble(cfg.fee_rate),
+              FPN_ToDouble(cfg.fee_rate_maker),
+              FPN_ToDouble(cfg.fee_rate_taker));
+    }
+    // else: both maker+taker set explicitly (case 2 — silent, working as
+    // intended) OR neither set + no legacy fee_rate (zero everywhere, fine).
+  }
 
   // post-load validation/clamping. min_warmup_samples gates on rolling.count
   // which caps at the short rolling window size (W=128). Values above 128

@@ -156,6 +156,56 @@ train models in the foxml_suite backtest GUI, export to `.xgb`, point config at 
 
 **ML never runs on the hot path.** the model produces gate parameters, the parameter slot ferries them across, the executor consumes them in single-digit ns. swap the model class entirely (XGBoost → LSTM → transformer → none) and the executor's per-tick cost doesn't change.
 
+## trained model results
+
+> **Status:** infrastructure shipped (Phase 7 prep). Numbers below get filled in when a model with non-zero validation Pearson r exists. Section is template-only until then.
+
+### methodology
+
+- **Walk-forward** for hyperparameter selection (purged temporal CV — train on `[0, t)`, test on `[t+buffer, t+buffer+horizon)`, advance, repeat). Per-fold metric: accuracy for binary/multiclass, Pearson r for regression. Aggregated as mean ± stddev across folds.
+- **Held-out** for the unbiased generalization estimate. A locked portion (default 20%, configurable via `held_out_fraction`) is reserved BEFORE any tuning. Code refuses to peek without an explicit unlock + audit log (`HeldOutSplit_Unlock`). Final eval runs once with the WF-selected hyperparameters.
+- **Generalization gap**: `|WF_mean_val - held_out|`. Threshold is `gap_acceptable_threshold` (default 0.05). Gap above threshold = WF was overfit despite per-fold OK numbers — model doesn't ship.
+- **Reproducibility**: model bundles save `expected.cfg` capturing label_type, `held_out_fraction`, `gap_acceptable_threshold`, threshold values. Live engine logs these at load time so future-you sees the discipline values the model was trained under.
+
+### walk-forward validation
+
+| fold | train range | val range | metric | overfit? |
+|------|-------------|-----------|--------|----------|
+| 1/5  | TBD         | TBD       | TBD    | TBD      |
+| 2/5  | TBD         | TBD       | TBD    | TBD      |
+| ...  |             |           |        |          |
+
+- Mean validation metric: TBD
+- Train/val gap: TBD
+- Folds flagged as overfit: TBD/5
+
+### held-out test
+
+- Held-out fraction: 0.20 (last 20% of dataset, ~2 months of 12-month BTCUSDT)
+- Held-out metric: TBD
+- WF → held-out gap: TBD
+- Gap acceptable threshold: 0.05
+- **Verdict: TBD** (PASS = gap < threshold; FAIL = gap ≥ threshold, model doesn't ship)
+
+### strategy comparison
+
+| strategy | total P&L (%) | Sharpe | max DD (%) | win rate (%) |
+|----------|---------------|--------|------------|--------------|
+| SimpleDip (vanilla)      | TBD | TBD | TBD | TBD |
+| SimpleDip + ML gate      | TBD | TBD | TBD | TBD |
+
+### equity curve
+
+[screenshot placeholder — fill from Compare panel after held-out evaluation]
+
+### reproducibility
+
+- Model fingerprint: TBD (SHA256 of training cfg + data)
+- Config bundle: `models/{run_name}/expected.cfg`
+- Data: BTCUSDT aggTrades, [start_date] – [end_date]
+- Engine version: TBD (see `Version.hpp`)
+- Tag at release: TBD
+
 ## order management system (OMS)
 
 8 phases, all shipped:
@@ -213,7 +263,8 @@ hot-reloadable with `R` in the GUI. per-core strategy and risk can be changed at
 ## tests
 
 ```bash
-./build/controller_test                                              # 279 assertions
+./build/controller_test                                              # 351 assertions
+./build/depth_recorder_test                                          # 17 assertions (Phase 8a — depth recorder)
 ./experiments/per_core_sharding/build/test_oms                       # 9 OMS state machine tests
 ./experiments/per_core_sharding/build/test_oms_concurrent            # 4 TSan-validated stress tests
 ./experiments/per_core_sharding/build/test_order_event_log           # 8 event log fold tests

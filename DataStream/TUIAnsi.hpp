@@ -680,6 +680,22 @@ static inline int ANSI_Section_Portfolio(AnsiBuf *ab, const TUISnapshot *s, int 
               s->exposure_pct, s->max_exp, s->fees);
     y++;
 
+    // Phase 8 (post-coding) — maker/taker breakdown. Only rendered when
+    // there's been at least one fill of either type; legacy / sync-only
+    // runs show all-taker. Non-zero maker_fills_count requires Phase 9
+    // hybrid execution OR the OMS event_log_mode=1 path with real WS fills.
+    uint32_t total_fills = s->maker_fills_count + s->taker_fills_count;
+    if (total_fills > 0) {
+        ab_goto(ab, y, 3);
+        double maker_pct = (double)s->maker_fills_count / total_fills * 100.0;
+        ab_printf(ab, A_SAND "fills: " A_FG "M:%u" A_DIM " (%.0f%%) "
+                  A_FG "T:%u" A_DIM "   "
+                  A_SAND "fees split: " A_FG "M:$%.4f " A_FG "T:$%.4f" A_RESET,
+                  s->maker_fills_count, maker_pct, s->taker_fills_count,
+                  s->total_maker_fees, s->total_taker_fees);
+        y++;
+    }
+
     return y;
 }
 

@@ -50,7 +50,31 @@ sudo make install && sudo ldconfig
 
 ## Architecture
 
+**Default engine mode: SHARDED (per-core).** N execution cores (default 4,
+cap 16), each with its own ExecutionCore + parameters + tick ring + slot
+in the central OMS portfolio. Branchless ~60ns hot path per core. Producer
+thread pinned to one CPU, fans real Binance ticks (or synthetic for
+offline benchmark) across SPSC rings to per-core consumer threads.
+
+**Sharded mode key properties:**
+- Per-core strategy (`core_N_strategy=simple_dip|momentum|ema_cross|ml`)
+- Per-core ML model (`core_N_model_path=...` or `core_N_model_dir=...` for
+  a CoreModelZoo with auto-discovered roles barrier/buy_signal/regime/exit)
+- Per-core risk allocation (`core_N_risk_pct=...`, default = `risk_pct / N`)
+- Per-core ConfidenceScorer (when STRATEGY_ML in use, Phase 6prep wiring per controller)
+- Risk distributed: a single bad core can lose its allocation, not the account
+- Hot path p99 target: ≤500ns per core
+- No portfolio walk on the hot path — each core only owns its slot
+
+**Legacy single-threaded mode** (`engine_mode=single_core`) remains
+available as a benchmark + regression baseline but is **DEPRECATED**.
+A runtime warning fires at startup. Phase 8+ features may be incomplete
+in legacy mode (see "Cross-Mode Init Placement" invariant under Safety
+Invariants — adding init in main.cpp post-dispatch silently skips the
+sharded path).
+
 ```
+LEGACY MODE (deprecated benchmark path):
 HOT PATH (every tick):
   BuyGate (branchless) -> OrderPool
   PositionExitGate (branchless bitmap walk) -> ExitBuffer
@@ -367,6 +391,54 @@ When adjusting momentum positions, use `momentum_tp_mult` / `momentum_sl_mult`.
 When adjusting MR positions, use `take_profit_pct × 100` / `stop_loss_pct × 100`.
 Never cross these — MR config on momentum positions (or vice versa) creates asymmetric exits.
 
+### Cross-Mode Init Placement (load-bearing — Phase 13+)
+
+**Sharded is the production engine mode; single_core is deprecated.** This
+shapes how new code lands.
+
+`main.cpp` dispatches to `tt::EngineSharded_Run` near the top (~line 154)
+and **returns** from `main()`. Code AFTER the dispatch only runs in legacy
+mode. Code that should run in BOTH modes MUST be:
+
+  (a) initialized BEFORE the dispatch in `main.cpp`, OR
+  (b) called from inside `EngineSharded_Run` (in `EngineSharded.hpp`) too
+
+**Verification gate**: when adding init code in `main.cpp`, ASK "does this
+need to run in sharded mode?" — if yes, place above the
+`engine_mode == ENGINE_MODE_SHARDED` dispatch. Quick check:
+
+```bash
+grep -n "engine_mode == ENGINE_MODE_SHARDED" main.cpp
+# Your new init: line number must be ≤ that line, OR also called inside
+# EngineSharded_Run.
+```
+
+**Things this affects** (must work in both modes):
+- Depth WS thread + DepthRecorder (Phase 8a)
+- TickRecorder
+- NotifyState + g_notify (Phase 8b)
+- book_imbalance feed into per-core controllers
+- Any new background thread, shared global, or recorder
+
+**Why this is load-bearing.** Phase 8a/8b shipped initialization in
+`main.cpp` AFTER the sharded dispatch — meaning sharded mode silently had
+none of those features. Caught by direct observation (latency numbers +
+missing panels) at the end of live-readiness coding, fixed retroactively.
+The rule is now in code: doctrine in this file + the runtime warning when
+legacy mode boots.
+
+**Cross-architecture features** (not just init placement): some Phase
+features are wired on `PortfolioController` (legacy controller) but need
+equivalent wiring on `OrderManager_HandleFill` / `EventLoop_OnEvent`
+(sharded controllers). Examples:
+- Phase 8 c5 maker/taker counters — port from `PortfolioController_DrainExits`
+  to `OrderManager_HandleFill`
+- Phase 6prep confidence gate — port from `PortfolioController_Tick` to
+  the ML strategy slow-path rebuild in EngineSharded
+
+When porting between architectures: same logic, different host struct.
+Keep tests in both modes' code paths so regressions are visible.
+
 ### FPN-Only Accounting
 Any code path that touches balance, P&L, fees, equity, or position pricing MUST use `FPN<F>` — never `double` or `float` for intermediate calculations. `double` is only acceptable at system boundaries:
 - **OK**: `FPN_ToDouble` for display, logging, CSV output, printf
@@ -378,12 +450,68 @@ Any code path that touches balance, P&L, fees, equity, or position pricing MUST 
 - `peak_equity`, `session_start_equity`, `max_drawdown` (PortfolioController struct) — double fields used by kill switch
 - Kill switch equity/drawdown computation (PortfolioController.hpp ~line 1103-1135) — all double arithmetic
 - Orphan recovery proceeds (main.cpp ~line 766) — `fp * fq` in double before FPN conversion
+- **Confidence loop gate decision** (PortfolioController.hpp:~1618, added 2026-04-25 Phase 6prep doc): `effective_thr = base * (scale - conf)` with `base`, `scale`, `conf` all in `double`. The `ConfidenceScorer` (`ML_Headers/ConfidenceScore.hpp`) uses double throughout (IC, RMSE, freshness all double-valued metrics). Pre-existing — Phase 6prep just made `scale` cfg-tunable, didn't change the type. Fix would require turning ConfidenceScorer math into FPN throughout, out of scope.
 
 ### FPN Comparison Completeness
 When comparing FPN values, use `FPN_LessThan`, `FPN_GreaterThanOrEqual`, etc. — never partial word comparisons. The inline optimization in `PositionExitGate` (Portfolio.hpp:226-229) only compares MSW and LSW, skipping middle words — this is a known bug that can miss exits near price boundaries.
 
 ### Halt Flag Invariant
 Every code path that suppresses buying MUST set `ctrl->buying_halted = 1` and zero `ctrl->gate_offset`. Ad-hoc zeroing of `buy_conds` alone is insufficient — hot-path gate tracking will restore it from `gate_offset` on the next tick.
+
+### Confidence Loop Invariant (Phase 6prep)
+
+When `confidence_enabled=1` AND `strategy_id == STRATEGY_ML`:
+
+1. **Every fill MUST push `(prediction, realized_return)` into `RollingIC` + `RollingRMSE`** via `ConfidenceScorer_Update`. Already wired in `PortfolioController_HandleFill` at the post-exit accounting block. Don't add second update sites — IC contamination = wrong confidence.
+2. **Confidence MUST be computed inside the slow-path gate block at `PortfolioController.hpp:~1614`**, before the buy-gate decision. Hot path may not call `ConfidenceScorer_Compute` (does Spearman ranking — O(W²) on rank computation; fine on slow path, not on every tick).
+3. **Effective-threshold formula:** `effective_thr = base * (scale - conf)`, clamped to `≤ 1.0`. `scale` is `cfg.confidence_threshold_scale` (default 2.0). `base` is `cfg.ml_buy_threshold`. Modifying the formula = update the test in `controller_test.cpp` Group "Phase 6prep: Gate effective threshold" in the same commit.
+4. **Safe-by-default behavior on noise-floor models:** when IC is near zero (no real signal), `abs_ic` clamps to `CONFIDENCE_MIN_IC_DEFAULT = 0.01`, freshness/stability stay near 1.0, so conf ≈ 0.01. Effective threshold ≈ `2.0 * base` — gate effectively never fires. **This is desirable** — ML strategy stays armed-but-inactive until real signal materializes.
+5. **Confidence is read on slow path, displayed via `last_confidence`.** `last_confidence` is updated on every gate decision; TUI/GUI read the snapshot field. **NEVER read `last_confidence` from the hot path.**
+6. **Tunables (Phase 6prep):** `cfg.confidence_window` (default 32, max 64), `cfg.confidence_freshness_tau` (default 300s = 5min), `cfg.confidence_threshold_scale` (default 2.0). All preserve pre-Phase-6prep hardcoded behavior at default values. Tuning these requires an actual signal to A/B against — meaningless on noise-floor models.
+
+### Maker/Taker Fee Accuracy (Phase 8)
+
+When applying fees in any code path:
+
+1. **Fee charge sites** (booking the fee on a real fill) MUST use the per-fill rate. Either:
+   - At the cfg layer: `Fee_Compute(cfg, notional, is_maker)` in `ControllerConfig.hpp` reads `cfg->fee_rate_maker` or `cfg->fee_rate_taker` based on the flag.
+   - At the OMS layer: `oms->fee_rate_maker` / `oms->fee_rate_taker` directly (engine sets these from cfg after `OrderManager_Init`).
+   Never `FPN_Mul(notional, cfg.fee_rate)` for an actual fee charge — that's the legacy single-rate path.
+2. **Source `is_maker` from the order that produced the fill**, not from a heuristic. For:
+   - Live executionReport WS fills: parsed from Binance "m" field by `ud_parse_execution_report`.
+   - Synchronous market BUY/SELL: hardcoded `is_maker=0` (market orders are taker by exchange definition).
+   - Backtest: hardcoded `is_maker=0` (all-taker simulation, documented divergence).
+3. **Pre-trade quantity sites** (no-trade band, fee floor for TP, kill-switch estimate, spread_bps display) intentionally use the LEGACY `fee_rate` field, NOT the maker/taker fields. They use fee_rate as a quantity in pre-trade computation, not as a fee charge on a real fill. Each such site has a `// Phase 8: pre-trade ... — leave as fee_rate` comment.
+4. **Sanity invariant**: after every fill that goes through the synchronous path, `total_fees == total_maker_fees + total_taker_fees` on the controller. The OMS event-log path books fees independently and doesn't update these counters.
+5. **Cfg backward compat**: if user sets only `fee_rate` (legacy), it mirrors to both maker and taker at load time. If user sets fee_rate AND only ONE of maker/taker, a `[CFG] WARNING` fires (mixed-cfg = almost certainly an error). The mirroring uses parse-time explicit-set flags, NOT value comparison — explicit values matching defaults still count as explicit.
+6. **`ORDER_PARTIAL` is no longer a dead enum.** Adding code that does `if (state == ORDER_FILLED)` should consider whether `ORDER_PARTIAL` should also be handled (e.g., partial-fill bookkeeping). `Order_IsTerminal` correctly returns false for PARTIAL.
+
+### Held-Out Validation Discipline (Phase 7prep)
+
+When training/evaluating an ML model in foxml_suite:
+
+1. **Held-out test set is locked by default.** `HeldOutSplit_Make(total, fraction)` returns a struct with `locked=1`. `HeldOutSplit_TestAccessAllowed` returns 0 until `HeldOutSplit_Unlock(s, token)` is called with the correct token. Use this when you want a final unbiased generalization estimate that hyperparameter selection didn't peek at.
+2. **Walk-forward CV runs ONLY on `[0, trainval_end_idx)`.** `Backtest_RunFullValidation` enforces this by passing a sliced view of `BacktestResults` with `sample_count` capped at `trainval_end_idx`. Don't access test indices `[test_start_idx, total_samples)` from training/tuning code.
+3. **Held-out evaluation runs ONCE per locked split.** After unlock, run final eval, record gap. Don't iterate on hyperparameters using held-out feedback — that defeats the whole purpose. If you need a second evaluation, `HeldOutSplit_Relock` generates a new token (old token can't unlock).
+4. **Generalization gap is the WAS-IT-REAL test:** `|WF_mean_val - held_out|`. Default threshold (`cfg.gap_acceptable_threshold`, default 0.05) means gap above 5% = walk-forward was overfit despite per-fold OK numbers. **Models with gap > threshold should not ship.**
+5. **`expected.cfg` saves the discipline values** (`held_out_fraction`, `gap_acceptable_threshold`) alongside the model bundle. Live engine logs these at model load time so future devs see what regime the model was trained under. Mismatch with current engine cfg is currently informational; tighten to enforced-mismatch later if drift becomes a real concern.
+6. **Token is friction not security.** Determined peeker can edit memory or read source. The goal is "make accidental peeking impossible, intentional peeking auditable" — discipline mechanism for ML training, not a permission system. Resist any "ergonomic" change that weakens the lock (auto-unlock-after-timeout, default-unlocked-in-development-mode) — they defeat the purpose.
+
+### Operational Alerting (Phase 8b)
+
+When adding a new alertable event:
+
+1. Add a new `NK_*` kind to the `NotifyKind` enum in `Notify.hpp`. **Append-only** — never reorder existing values; cooldown indexes are stable per-kind.
+2. Call `Notify_Send(g_notify, level, kind, subject, body)` alongside the existing `fprintf` at the event site. Keep the `fprintf` (file logs are the forensic record).
+3. Choose the level:
+   - `NOTIFY_INFO` — status updates, session start
+   - `NOTIFY_WARN` — recoverable issues (reconnect, transient errors)
+   - `NOTIFY_ALERT` — user attention required (kill switch trip, orphan)
+   - `NOTIFY_CRITICAL` — engine cannot continue safely
+4. Use the SAME `NK_*` kind for the same logical event everywhere — cooldown is per-kind, so a disconnect storm collapses to one alert per cooldown window.
+5. **NEVER call `Notify_Send` from the hot path.** Slow path / dedicated threads only. The Notify worker thread runs the backend; callers enqueue and return immediately.
+6. Subject ≤ 128 chars, body ≤ 512 chars. Both are shell-escaped (internal `'` → `'\''`) when the Command backend is in use, but `"` and `\` are NOT JSON-escaped — keep alert text plain ASCII to be safe across Discord/Slack/dunst/email backends.
+7. Guard call sites with `if (g_notify)` — backtest and tests leave it null, all calls become no-ops.
 
 ### Regime Adjustment Checklist
 When adding a new regime transition case in `Regime_AdjustPositions`:
@@ -448,6 +576,12 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
 - Label-type-aware metrics (every metric site consults `label_table[t].num_classes`) — see "Label-type-aware metric invariant"
 
 **Engine subsystem state:**
+- **Default mode: SHARDED** (Phase 13+). Per-core ExecutionCore + per-core
+  PortfolioController state slot in central OMS, branchless ~60ns hot path.
+  Legacy `engine_mode=single_core` deprecated, runtime warning at startup.
+- Per-core strategy + ML model + risk allocation (Phase 13). 4 cores default
+  (cap 16). Each core can run a different strategy + load its own
+  CoreModelZoo (auto-discovered roles: barrier, buy_signal, regime, exit).
 - Post-SL cooldown: adaptive (scales by trend confidence at SL time) or fixed cycle count
 - Regime detection: score-based with 7 signals, extensible RegimeSignals struct
 - Volume spike detection: current/max ratio, spacing relaxation on 5x+ spikes
@@ -455,7 +589,10 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
 - VWAP gate: buy signal gates on price being below volume-weighted average price
 - Session awareness: per-session (Asian/EU/US/overnight) volume gate multiplier
 - Snapshot persistence: v7 (entry_time + session stats survive restarts)
-- Binance websocket: WORKING (live market data + depth + user data)
+- Binance trade websocket: ACTIVE (live market data, runs on every engine startup)
+- Binance depth websocket (Phase 8a): ACTIVE when `depth_enabled=1`. Pre-Phase-8a the thread function existed but was never started — `book_imbalance` always read 0 and the gate at PortfolioController.hpp:1600 was dead. Now the thread starts when cfg flag is set and `book_imbalance` is fed from `DepthSharedState.snapshots[active].imbalance` on every tick. Default `min_book_imbalance=0` keeps the gate inert unless user opts in.
+- Binance user-data websocket: defined but not started in main.cpp (parallel pattern to pre-Phase-8a depth — wiring exists but no `pthread_create`)
+- DepthRecorder (Phase 8a): writes top-of-book to `data/{SYMBOL}/depth/YYYY-MM-DD.csv` when `record_depth=1 && depth_enabled=1`. Daily rotation, auto-prune via `record_max_days`. Gap markers on backward `last_update_id`, wallclock >2s silence, or explicit disconnect. Crash-window gaps are NOT marked (recorder state in memory only — restart resets gap tracking).
 - Confidence loop: WIRED (multiplier path + display) — confidence_enabled cfg gate, defaults off
 - TUI: ANSI only (zero deps, diff-based rendering, foxml palette). FTXUI/notcurses removed.
 - TUI snapshot: zero-pollution (full copy on slow path, live price/volume/active_count every tick)

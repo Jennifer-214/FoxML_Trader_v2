@@ -469,6 +469,40 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
     ImGui::SameLine();
     ImGui::Text("$%.2f", s->fees);
 
+    // Phase 8 (post-coding) — maker/taker breakdown. Hover tooltip on the
+    // fees line shows the split when there's at least one fill.
+    if (ImGui::IsItemHovered()) {
+        uint32_t total_fills = s->maker_fills_count + s->taker_fills_count;
+        if (total_fills > 0) {
+            double maker_pct = (double)s->maker_fills_count / total_fills * 100.0;
+            ImGui::SetTooltip("Maker: %u fills (%.1f%%) — $%.4f\n"
+                              "Taker: %u fills (%.1f%%) — $%.4f\n"
+                              "Total: $%.4f",
+                              s->maker_fills_count, maker_pct,         s->total_maker_fees,
+                              s->taker_fills_count, 100.0 - maker_pct, s->total_taker_fees,
+                              s->total_maker_fees + s->total_taker_fees);
+        } else {
+            ImGui::SetTooltip("No fills yet — maker/taker breakdown N/A");
+        }
+    }
+
+    // Inline maker/taker line below fees, only shown when there are fills.
+    {
+        uint32_t total_fills = s->maker_fills_count + s->taker_fills_count;
+        if (total_fills > 0) {
+            double maker_pct = (double)s->maker_fills_count / total_fills * 100.0;
+            ImGui::TextColored(FoxmlColors::sand, "M/T:");
+            ImGui::SameLine();
+            ImGui::Text("%u/%u", s->maker_fills_count, s->taker_fills_count);
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%.0f%% maker)", maker_pct);
+            ImGui::SameLine(0, 20);
+            ImGui::TextColored(FoxmlColors::sand, "split:");
+            ImGui::SameLine();
+            ImGui::Text("$%.4f / $%.4f", s->total_maker_fees, s->total_taker_fees);
+        }
+    }
+
     ImGui::TextColored(FoxmlColors::sand, "exposure:");
     ImGui::SameLine();
     ImGui::Text("%.1f%%/%.0f%%", s->exposure_pct, s->max_exp);

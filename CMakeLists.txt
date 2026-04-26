@@ -170,6 +170,23 @@ endif()
 add_executable(controller_test tests/controller_test.cpp)
 target_compile_options(controller_test PRIVATE -O3 -march=native -funroll-loops -flto)
 target_include_directories(controller_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
+# Phase 5d regression tests pull in Backtest/BacktestEngine.hpp for BacktestResults
+# helpers, XGBoost weight helpers, and LabelType_* helpers. BacktestEngine.hpp
+# unconditionally references TUISnapshot, which is only defined under
+# MULTICORE_TUI. Match the production engine target.
+target_compile_definitions(controller_test PRIVATE MULTICORE_TUI)
+find_package(Threads REQUIRED)
+target_link_libraries(controller_test PRIVATE Threads::Threads)
+
+# Phase 8a c7 — DepthRecorder test binary. Separate from controller_test
+# because the recorder writes to disk and tests use tempdir fixtures. Pulls
+# in DataStream/DepthRecorder.hpp which transitively includes BinanceDepth.hpp;
+# no MULTICORE_TUI needed (no TUISnapshot reference path).
+add_executable(depth_recorder_test tests/depth_recorder_test.cpp)
+target_compile_options(depth_recorder_test PRIVATE -O2 -march=native)
+target_include_directories(depth_recorder_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
+target_link_libraries(depth_recorder_test PRIVATE ssl crypto pthread)
 
 enable_testing()
 add_test(NAME controller_test COMMAND controller_test)
+add_test(NAME depth_recorder_test COMMAND depth_recorder_test)

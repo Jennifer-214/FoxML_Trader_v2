@@ -394,9 +394,12 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
 
     // === MODE 0: legacy OnEvent path (unchanged) ===
     if (is_entry) {
-        // Compute entry fee = entry_price * qty * fee_rate (matches existing fee model)
+        // Compute entry fee = entry_price * qty * fee_rate
+        // Phase 8: synchronous market BUY = taker by exchange definition.
+        // OMS HandleFill (mode 1) will book the actual maker/taker fee from
+        // the WS executionReport. This sync accounting is optimistic.
         FPN<F> notional = FPN_Mul(event.price, ctx->intended_qty);
-        FPN<F> entry_fee = FPN_Mul(notional, state->oms->fee_rate);
+        FPN<F> entry_fee = FPN_Mul(notional, state->oms->fee_rate_taker);
         Portfolio_OpenSlot(&state->oms->portfolio, slot,
                            event.price,
                            ctx->intended_qty,
@@ -429,7 +432,8 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         FPN<F> entry_fee = state->oms->portfolio.positions[slot].entry_fee;
         FPN<F> gross = Portfolio_CloseSlot(&state->oms->portfolio, slot, event.price);
         FPN<F> exit_notional = FPN_Mul(event.price, qty_snap);
-        FPN<F> exit_fee = FPN_Mul(exit_notional, state->oms->fee_rate);
+        // Phase 8: TP/SL exit = market sell = always taker by exchange def.
+        FPN<F> exit_fee = FPN_Mul(exit_notional, state->oms->fee_rate_taker);
         FPN<F> total_fee = FPN_Add(entry_fee, exit_fee);
         FPN<F> net = FPN_Sub(gross, total_fee);
         state->oms->balance = FPN_Add(state->oms->balance, net);

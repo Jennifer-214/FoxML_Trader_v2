@@ -47,6 +47,14 @@ struct OrderResult {
     double   fill_qty;            // total filled quantity
     int      error_code;          // exchange-specific error code, 0 on success
     char     error_message[128];  // human-readable error string
+    // Phase 8 — Binance fill type for maker/taker fee accounting.
+    // Set by ud_parse_execution_report from the "m" field on WS fills.
+    // Synchronous REST fills (Phase 02) leave this 0 (assume taker — Binance
+    // market orders are always taker by definition). Backtest path uses 0.
+    uint8_t  is_maker;            // 1 = maker fill, 0 = taker (default)
+    uint8_t  order_complete;      // 1 = "X":"FILLED", 0 = "X":"PARTIALLY_FILLED"
+    double   commission;          // Binance "n" — commission paid this fill (in commission_asset units)
+    char     commission_asset[8]; // "BNB", "USDT", "BTC" — Binance "N" field
 };
 
 // Callback signature: the adapter calls this when an order completes.

@@ -11,6 +11,15 @@
 // configrurebale parameters for polling rates and stuff, this should be a
 // seperate module from the actual order engine, as it shouldnt interfere with
 // the order execution, this simply pipes conditions to the gates
+//
+// ============================================================
+// LEGACY CONTROLLER (Phase 13+): used by single-threaded engine mode +
+// controller_test. Sharded mode (production default) uses
+// CoreFrameworks/OrderManager.hpp (OrderManagerState + EventLoop_OnEvent
+// + ExecutionCore<F>) instead. Features added HERE only fire when
+// engine_mode=single_core OR in unit tests. For sharded-also wiring, port
+// to the OMS path. See CLAUDE.md "Cross-Mode Init Placement" invariant.
+// ============================================================
 //======================================================================================================
 // [INCLUDE]
 //======================================================================================================
@@ -20,6 +29,7 @@
 #include "ControllerConfig.hpp"
 #include "OrderGates.hpp"
 #include "Portfolio.hpp"
+#include "Notify.hpp"  // Phase 8b — operational alerts at kill switch sites
 #include "../DataStream/TradeLog.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/WelfordStats.hpp"
@@ -236,6 +246,16 @@ template <unsigned F> struct PortfolioController {
   // Welford online trackers (unbounded stream, O(1) push)
   WelfordTracker<F> pnl_tracker;      // per-exit P&L distribution
   WelfordTracker<F> signal_tracker;   // buy signal strength distribution
+
+  // Phase 8 — maker/taker accounting. PLACED AT END OF STRUCT per cross-plan
+  // amendment #6: 2× FPN<F=64> = ~1KB; placing earlier could push hot-path
+  // fields (portfolio.active_bitmap, buying_halted, gate_offset) off their
+  // cache lines. Confirmed warm-path-only — incremented on fill consumption,
+  // read for stats display.
+  uint32_t maker_fills_count;
+  uint32_t taker_fills_count;
+  FPN<F> total_maker_fees;
+  FPN<F> total_taker_fees;
 };
 //======================================================================================================
 // [INIT]
@@ -248,6 +268,11 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->realized_pnl = FPN_Zero<F>();
   ctrl->balance = config.starting_balance;
   ctrl->total_fees = FPN_Zero<F>();
+  // Phase 8 — maker/taker accounting (placed at struct end, init at struct end)
+  ctrl->maker_fills_count = 0;
+  ctrl->taker_fills_count = 0;
+  ctrl->total_maker_fees = FPN_Zero<F>();
+  ctrl->total_taker_fees = FPN_Zero<F>();
   ctrl->wins = 0;
   ctrl->losses = 0;
   ctrl->total_buys = 0;
@@ -342,8 +367,12 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->last_confidence = 0.0;
   for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; i++)
     ctrl->entry_prediction[i] = 0.0;
-  ConfidenceScorer_Init(&ctrl->confidence, CONFIDENCE_IC_WINDOW_DEFAULT,
-                          CONFIDENCE_FRESHNESS_TAU_DEFAULT);
+  // Phase 6 prep: read tunables from cfg. ConfidenceScorer_Init falls back to
+  // CONFIDENCE_IC_WINDOW_DEFAULT / CONFIDENCE_FRESHNESS_TAU_DEFAULT when the
+  // cfg values are 0/non-positive — defaults preserve pre-amend behavior.
+  ConfidenceScorer_Init(&ctrl->confidence,
+                          (int)config.confidence_window,
+                          FPN_ToDouble(config.confidence_freshness_tau));
   Bandit_Init(&ctrl->bandit, NUM_STRATEGIES, BANDIT_GAMMA_DEFAULT, BANDIT_ETA_MAX_DEFAULT,
               FPN_ToDouble(config.bandit_blend_ratio), BANDIT_MIN_SAMPLES_DEFAULT, BANDIT_RAMP_UP_DEFAULT);
   Bandit_SetArmName(&ctrl->bandit, STRATEGY_MEAN_REVERSION, "MR");
@@ -464,7 +493,10 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
     // P&L computation (FPN-only, no doubles until display boundary)
     // all position data from record — immune to slot reuse
     FPN<F> gross_proceeds = FPN_Mul(exit_price, rec->quantity);
-    FPN<F> exit_fee = FPN_Mul(gross_proceeds, ctrl->config.fee_rate);
+    // Phase 8: TP/SL exits = market sell = always taker by exchange
+    // definition. Use fee_rate_taker. Hybrid execution (Phase 9) would add
+    // limit-order exits that need ExitRecord.is_maker; for now, taker.
+    FPN<F> exit_fee = FPN_Mul(gross_proceeds, ctrl->config.fee_rate_taker);
     FPN<F> net_proceeds = FPN_SubSat(gross_proceeds, exit_fee);
     FPN<F> entry_cost = FPN_Mul(rec->entry_price, rec->quantity);
     FPN<F> total_entry_cost = FPN_AddSat(entry_cost, rec->entry_fee);
@@ -475,6 +507,14 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
     ctrl->daily_realized_pnl = FPN_AddSat(ctrl->daily_realized_pnl, pos_pnl);
     ctrl->balance = FPN_AddSat(ctrl->balance, net_proceeds);
     ctrl->total_fees = FPN_AddSat(ctrl->total_fees, exit_fee);
+    // Phase 8: TP/SL exits are market sells = taker. Synchronous path
+    // doesn't see WS executionReport, so attribute the fee bookkeeping
+    // to taker. For OMS event_log_mode=1 paths, the OMS books fees
+    // independently with real is_maker — that path doesn't update these
+    // counters (separation of concerns; counters track the controller's
+    // own synchronous accounting).
+    ctrl->taker_fills_count++;
+    ctrl->total_taker_fees = FPN_AddSat(ctrl->total_taker_fees, exit_fee);
     Welford_Push(&ctrl->pnl_tracker, pos_pnl);
 
     // per-strategy reward attribution (entry_strategy is a separate array, safe)
@@ -717,6 +757,8 @@ inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) 
   // NO-TRADE BAND: suppress entries when signal strength < fee breakeven
   // cost-aware: signal must exceed fee_rate × no_trade_band_mult to justify trade
   if (ctrl->config.no_trade_band_enabled && !FPN_IsZero(ctrl->rolling.price_avg)) {
+    // Phase 8: pre-trade gate threshold — fee_rate as a quantity, not a fee
+    // charge on a fill. Leave as fee_rate (not fee_rate_taker) intentionally.
     FPN<F> min_signal = FPN_Mul(ctrl->config.fee_rate, ctrl->config.no_trade_band_mult);
     FPN<F> signal_dist = FPN_Sub(ctrl->buy_conds.price, ctrl->rolling.price_avg);
     // absolute value
@@ -819,8 +861,9 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     // include pending exit proceeds — exit gate clears bitmap before DrainExits credits balance
     // without this, equity appears crashed between exit gate and drain (false kill trigger)
     // uses exact exit_price × qty - slippage - fees (matches what RecordExit will credit)
+    // Phase 8: pending proceeds use taker rate (TP/SL exits are market sells).
     FPN<F> pending = ExitBuffer_PendingProceeds(&ctrl->exit_buf,
-                                                 ctrl->config.fee_rate, ctrl->config.slippage_pct);
+                                                 ctrl->config.fee_rate_taker, ctrl->config.slippage_pct);
     FPN<F> equity = FPN_AddSat(FPN_AddSat(ctrl->balance, pv), pending);
     int tripped = 0;
     // daily loss: (equity - start) / start < -threshold
@@ -870,6 +913,17 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
                 FPN_ToDouble(ctrl->portfolio.positions[idx].take_profit_price),
                 FPN_ToDouble(ctrl->portfolio.positions[idx].stop_loss_price));
         scan &= scan - 1;
+      }
+      // Phase 8b: alert. Subject is short for SMS-style backends; body has
+      // the operational detail. Uses NOTIFY_ALERT (attention required).
+      if (g_notify) {
+        char body[256];
+        snprintf(body, sizeof(body),
+                 "Kill switch triggered (reason=%d). Equity=%.2f, balance=%.2f, "
+                 "%d open position(s). All buying halted.",
+                 ctrl->kill_reason, eq_d, bal_d, npos);
+        Notify_Send(g_notify, NOTIFY_ALERT, NK_KILL_TRIGGER,
+                    "Engine kill switch triggered", body);
       }
       KillSwitch_Activate(ctrl, ctrl->kill_reason);
     }
@@ -1076,7 +1130,11 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
 
     // balance check: can we afford this position + entry fee? (branchless)
     FPN<F> cost = FPN_Mul(fill_price, sized_qty);
-    FPN<F> entry_fee = FPN_Mul(cost, ctrl->config.fee_rate);
+    // Phase 8: synchronous market BUY entry = taker by exchange definition.
+    // Live engine's WS executionReport will book the actual fee with the
+    // real is_maker value via the OMS HandleFill path. This synchronous
+    // accounting is optimistic — converges to actual on WS confirmation.
+    FPN<F> entry_fee = FPN_Mul(cost, ctrl->config.fee_rate_taker);
     FPN<F> total_cost = FPN_AddSat(cost, entry_fee);
     int can_afford = FPN_GreaterThanOrEqual(ctrl->balance, total_cost);
 
@@ -1177,6 +1235,9 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       // TP FLOOR: ensure TP is above the round-trip fee breakeven point
       // min_tp = entry + entry * fee_rate * fee_floor_mult
       // default 3.0 = 2x round-trip fees + 1x safety margin
+      // Phase 8: pre-trade fee-floor quantity — uses single fee_rate
+      // intentionally (not fee_rate_taker), as this is a conservative
+      // round-trip estimate that should hold under either fill type.
       FPN<F> fee_floor_offset =
           FPN_Mul(fill_price, FPN_Mul(ctrl->config.fee_rate, ctrl->config.fee_floor_mult));
       FPN<F> tp_floor = FPN_AddSat(fill_price, fee_floor_offset);
@@ -1275,6 +1336,10 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
         }
         ctrl->balance = FPN_SubSat(ctrl->balance, total_cost);
         ctrl->total_fees = FPN_AddSat(ctrl->total_fees, entry_fee);
+        // Phase 8: synchronous market BUY entry = taker. Same reasoning
+        // as the exit-fee site above.
+        ctrl->taker_fills_count++;
+        ctrl->total_taker_fees = FPN_AddSat(ctrl->total_taker_fees, entry_fee);
 
         // buffer buy record (no file I/O on hot path)
         { double _avg = FPN_ToDouble(ctrl->rolling.price_avg);
@@ -1415,6 +1480,8 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   FPN<F> gross_pnl = Portfolio_ComputePnL(&ctrl->portfolio, current_price);
   FPN<F> portfolio_value =
       Portfolio_ComputeValue(&ctrl->portfolio, current_price);
+  // Phase 8: pre-trade kill-switch estimate — fee_rate as quantity, not a
+  // fee charge on a fill. Leave as fee_rate (conservative round-trip).
   FPN<F> estimated_exit_fees = FPN_Mul(portfolio_value, ctrl->config.fee_rate);
   ctrl->portfolio_delta = FPN_Sub(gross_pnl, estimated_exit_fees);
 
@@ -1446,6 +1513,15 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
         double pct = (FPN_ToDouble(loss) / FPN_ToDouble(ctrl->session_start_equity)) * 100.0;
         { char ts[16]; log_ts(ts, sizeof(ts));
         fprintf(stderr, "[%s] [KILL] daily loss %.2f%% exceeded limit — trading halted\n", ts, pct); }
+        if (g_notify) {
+          char body[256];
+          snprintf(body, sizeof(body),
+                   "Daily loss %.2f%% exceeded the configured limit (%.2f%%). "
+                   "Engine has halted all buying. Investigate immediately.",
+                   pct, FPN_ToDouble(ctrl->config.kill_switch_daily_loss_pct) * 100.0);
+          Notify_Send(g_notify, NOTIFY_ALERT, NK_KILL_DAILY_LOSS,
+                      "Engine kill switch — daily loss", body);
+        }
       }
     }
     // drawdown: dd = peak - equity, limit = peak * threshold
@@ -1457,6 +1533,15 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
         double pct = (FPN_ToDouble(dd) / FPN_ToDouble(ctrl->peak_equity)) * 100.0;
         { char ts[16]; log_ts(ts, sizeof(ts));
         fprintf(stderr, "[%s] [KILL] drawdown %.2f%% exceeded limit — trading halted\n", ts, pct); }
+        if (g_notify) {
+          char body[256];
+          snprintf(body, sizeof(body),
+                   "Drawdown %.2f%% from peak equity exceeded the configured limit (%.2f%%). "
+                   "Engine has halted all buying. Investigate immediately.",
+                   pct, FPN_ToDouble(ctrl->config.kill_switch_drawdown_pct) * 100.0);
+          Notify_Send(g_notify, NOTIFY_ALERT, NK_KILL_DRAWDOWN,
+                      "Engine kill switch — drawdown", body);
+        }
       }
     }
   }
@@ -1577,15 +1662,20 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     ctrl->buy_conds.volume = FPN_Mul(ctrl->buy_conds.volume, ctrl->session_mult);
   }
 
-  // CONFIDENCE GATE: raise ML threshold when prediction quality is low
-  // effective_threshold = base * (2 - confidence) — high confidence = same threshold,
-  // low confidence = up to 2x threshold (suppresses marginal signals)
+  // CONFIDENCE GATE: raise ML threshold when prediction quality is low.
+  // effective_threshold = base * (scale - confidence)
+  //   scale=2.0 (default): high conf=base, conf=0 means up to 2x (clamp at 1.0)
+  //   scale tunable via cfg.confidence_threshold_scale (Phase 6 prep)
+  // KNOWN FPN-only violation: this formula is in `double` because the existing
+  // ConfidenceScorer is double-only. Documented in CLAUDE.md "FPN-Only
+  // Accounting / Known violations to fix".
   if (ctrl->config.confidence_enabled && ctrl->strategy_id == STRATEGY_ML
       && !FPN_IsZero(ctrl->buy_conds.price)) {
     double conf = ConfidenceScorer_Compute(&ctrl->confidence, 0.0); // data_age=0 (live)
     ctrl->last_confidence = conf;
     double base_thr = FPN_ToDouble(ctrl->config.ml_buy_threshold);
-    double effective_thr = base_thr * (2.0 - conf);
+    double scale = FPN_ToDouble(ctrl->config.confidence_threshold_scale);
+    double effective_thr = base_thr * (scale - conf);
     if (effective_thr > 1.0) effective_thr = 1.0;
     double pred = FPN_ToDouble(ctrl->ml_strategy.last_prediction);
     if (pred > 0.0 && pred < effective_thr) {
