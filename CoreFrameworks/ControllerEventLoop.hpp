@@ -111,6 +111,15 @@ struct CoreContext {
     // prices. Mirrors legacy PortfolioController spacing logic.
     FPN<F> last_entry_price;
     uint64_t last_entry_tick;      // for time-based exit (A3)
+    // v4.0.3 D7 SL cooldown: after a stop-loss exit, pause entries on this
+    // core for N slow-path cycles. Decremented each rebuild; entries
+    // zero-gated while > 0. Optionally adaptive — scales by trend confidence
+    // at SL time (cfg.sl_cooldown_adaptive).
+    uint32_t sl_cooldown_remaining;
+    // v4.0.3 D8 halt reason: most recent reason the gate was zero-gated.
+    // 0 = ok / armed; 1 = spacing; 2 = vwap; 3 = long-slope; 4 = vol-delta;
+    // 5 = min-stddev; 6 = sl-cooldown; 7 = warmup. Displayed in GUI per core.
+    uint8_t  halt_reason;
 };
 
 //======================================================================================================
@@ -182,6 +191,8 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].last_confidence = 0.0;
         state->cores[i].last_entry_price = FPN_Zero<F>();
         state->cores[i].last_entry_tick  = 0;
+        state->cores[i].sl_cooldown_remaining = 0;
+        state->cores[i].halt_reason = 0;
     }
 }
 
@@ -626,50 +637,58 @@ inline int EventLoop_RebuildAllParameters(
 
         // v4.0.3 cross-cutting checks applied uniformly across all strategies.
         // Each is a "zero-gate if violated" filter — preserves the strategy's
-        // intended TP/SL/qty but disables the entry trigger.
+        // intended TP/SL/qty but disables the entry trigger. Halt reasons are
+        // tracked per-core for GUI display.
         //
-        // SPACING: zero-gate if the proposed entry is too close to this
-        // core's last entry. Prevents clustering positions at similar prices.
+        // Reasons: 0=ok, 1=spacing, 2=vwap, 3=long-slope, 4=vol-delta,
+        //          5=min-stddev, 6=sl-cooldown
+        state->cores[slot].halt_reason = 0;
+        auto zero_gate = [&](uint8_t reason) {
+            state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
+            if (state->cores[slot].halt_reason == 0)  // first reason wins
+                state->cores[slot].halt_reason = reason;
+        };
+
+        // SL COOLDOWN: decrement counter; if still active, zero-gate.
+        if (state->cores[slot].sl_cooldown_remaining > 0) {
+            state->cores[slot].sl_cooldown_remaining--;
+            zero_gate(6);
+        }
+        // SPACING: zero-gate if proposed entry too close to last entry.
         if (!Strategy_SpacingOk(state->cores[slot].pending_params.bg_price_threshold,
                                  state->cores[slot].last_entry_price,
                                  rolling, &resolved_cfg)) {
-            state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
+            zero_gate(1);
         }
-        // VWAP gate: zero-gate if price is above (VWAP - VWAP*offset). Forces
-        // entries to happen below VWAP — buying retracements, not pumps.
+        // VWAP gate: forces entries below VWAP — buy retracements, not pumps.
         if (!FPN_IsZero(resolved_cfg.vwap_offset) && !FPN_IsZero(rolling->vwap)) {
             FPN<F> vwap_threshold = FPN_Sub(rolling->vwap,
                 FPN_Mul(rolling->vwap, resolved_cfg.vwap_offset));
             if (FPN_GreaterThan(state->cores[slot].pending_params.bg_price_threshold,
                                  vwap_threshold)) {
-                state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
+                zero_gate(2);
             }
         }
-        // LONG-SLOPE gate: zero-gate if 512-tick relative slope is below
-        // min_long_slope (i.e. confirmed downtrend). Negative threshold means
-        // "allow mild dips," 0 means "any uptrend required."
+        // LONG-SLOPE gate: blocks buys in confirmed downtrends.
         if (!FPN_IsZero(resolved_cfg.min_long_slope) && rolling_long &&
             !FPN_IsZero(rolling_long->price_avg)) {
             FPN<F> long_rel_slope = FPN_DivNoAssert(rolling_long->price_slope,
                                                      rolling_long->price_avg);
             if (FPN_LessThan(long_rel_slope, resolved_cfg.min_long_slope)) {
-                state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
+                zero_gate(3);
             }
         }
-        // VOLUME DELTA gate: zero-gate if volume_delta < min_buy_delta.
-        // Negative volume_delta = net selling pressure. Threshold of -0.3
-        // allows mild selling, blocks heavy dumps.
+        // VOLUME DELTA gate: blocks heavy dumps.
         if (!FPN_IsZero(resolved_cfg.min_buy_delta) &&
             FPN_LessThan(rolling->volume_delta, resolved_cfg.min_buy_delta)) {
-            state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
+            zero_gate(4);
         }
-        // MIN STDDEV gate: zero-gate when stddev/price < min_stddev_pct (dead
-        // market). No volatility = no opportunity for typical TP distance.
+        // MIN STDDEV gate: skip dead markets.
         if (!FPN_IsZero(resolved_cfg.min_stddev_pct) && !FPN_IsZero(rolling->price_avg)) {
             FPN<F> stddev_ratio = FPN_DivNoAssert(rolling->price_stddev,
                                                     rolling->price_avg);
             if (FPN_LessThan(stddev_ratio, resolved_cfg.min_stddev_pct)) {
-                state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
+                zero_gate(5);
             }
         }
         // FEE FLOOR: ratchet TP up so it clears at least

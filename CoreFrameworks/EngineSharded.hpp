@@ -1081,19 +1081,28 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // next Tick starts fresh. ML cores only — non-ML cores ignored even if
     // the bit is set (defensive: shouldn't happen since only ML strategy
     // emits trades that produce predictions, but cheap to guard).
-    auto drain_confidence_feedback = [&state, &oms]() {
+    auto drain_confidence_feedback = [&state, &oms, &cfg]() {
         uint16_t mask = oms.last_closed_mask;
         while (mask) {
             int slot = __builtin_ctz(mask);
             mask &= (uint16_t)(mask - 1);
             if (slot < 0 || slot >= state.registered_count) continue;
-            if (state.cores[slot].strategy_id != STRATEGY_ML) continue;
-            ConfidenceScorer_Update(
-                &state.cores[slot].confidence,
-                state.cores[slot].active_prediction,
-                oms.last_realized_return[slot]);
-            // clear active_prediction once consumed — no open position
-            state.cores[slot].active_prediction = 0.0;
+            double realized = oms.last_realized_return[slot];
+            // ConfidenceScorer feedback (ML cores only)
+            if (state.cores[slot].strategy_id == STRATEGY_ML) {
+                ConfidenceScorer_Update(
+                    &state.cores[slot].confidence,
+                    state.cores[slot].active_prediction,
+                    realized);
+                state.cores[slot].active_prediction = 0.0;
+            }
+            // v4.0.3 D7: SL cooldown — set on losing exits regardless of
+            // strategy. Realized return < 0 = SL (or worse) hit. Pause new
+            // entries on this core for sl_cooldown_cycles slow-path cycles.
+            // Mirrors legacy PortfolioController post-SL cooldown.
+            if (realized < 0.0 && cfg.sl_cooldown_cycles > 0) {
+                state.cores[slot].sl_cooldown_remaining = cfg.sl_cooldown_cycles;
+            }
         }
         oms.last_closed_mask = 0;
     };
