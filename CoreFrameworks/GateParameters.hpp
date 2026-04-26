@@ -39,6 +39,11 @@ constexpr uint8_t GATE_FLAG_TP_ENABLED       = 0x01;
 constexpr uint8_t GATE_FLAG_SL_ENABLED       = 0x02;
 constexpr uint8_t GATE_FLAG_TRAILING_ENABLED = 0x04;
 constexpr uint8_t GATE_FLAG_VOLUME_REQUIRED  = 0x08;
+// v4.0: gate fires when tick.price >= bg_price_threshold (momentum buy-above)
+// instead of <= (mean-reversion buy-below). Selected branchlessly in
+// BG_Evaluate / ExecutionCore_Tick. Pre-v4.0 the hot path was buy-below only,
+// silently breaking MOM strategy in sharded mode.
+constexpr uint8_t GATE_FLAG_BUY_ABOVE        = 0x10;
 
 // Strategy IDs come from Strategies/StrategyInterface.hpp (single source of
 // truth shared with the legacy strategies). STRATEGY_NONE = 0xFF means
@@ -92,11 +97,15 @@ static_assert(alignof(GateParameters<64>) >= 64, "GateParameters<64> must be cac
 template <unsigned F>
 __attribute__((always_inline))
 static inline bool BG_Evaluate(const Tick<F>& tick, const GateParameters<F>* params) {
-    // Stub: price below threshold AND (volume above threshold OR volume not required)
-    uint64_t price_ok  = (uint64_t)FPN_LessThan(tick.price, params->bg_price_threshold);
-    uint64_t volume_ok = (uint64_t)FPN_GreaterThan(tick.volume, params->bg_volume_threshold);
+    // Branchless price check — selects buy-below (price < threshold, MR/DIP/EMA/ML)
+    // or buy-above (price > threshold, MOM) based on GATE_FLAG_BUY_ABOVE.
+    // Both comparisons computed unconditionally; mask selects the active one.
+    uint64_t price_below = (uint64_t)FPN_LessThan(tick.price, params->bg_price_threshold);
+    uint64_t price_above = (uint64_t)FPN_GreaterThan(tick.price, params->bg_price_threshold);
+    uint64_t buy_above   = (uint64_t)((params->flags & GATE_FLAG_BUY_ABOVE) != 0);
+    uint64_t price_ok    = (price_above & buy_above) | (price_below & ~buy_above);
+    uint64_t volume_ok   = (uint64_t)FPN_GreaterThan(tick.volume, params->bg_volume_threshold);
     uint64_t volume_required = (uint64_t)((params->flags & GATE_FLAG_VOLUME_REQUIRED) != 0);
-    // Branchless: if volume required, we need volume_ok; otherwise, volume_ok = 1
     uint64_t volume_check = (volume_required & volume_ok) | (~volume_required & 1ULL);
     return (price_ok & volume_check) != 0;
 }

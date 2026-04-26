@@ -38,6 +38,8 @@
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
 
+#include "BinanceCrypto.hpp"  // for g_binance_shutdown_flag (interruptible REST sleeps)
+
 //======================================================================================================
 // [ORDER STATUS CODES]
 //======================================================================================================
@@ -403,7 +405,20 @@ static inline int binance_retry_request(BinanceOrderAPI *api,
     for (int attempt = 0; attempt < 4; attempt++) {
         if (attempt > 0) {
             fprintf(stderr, "[REST] retry %d/3 after %ds...\n", attempt, delays[attempt]);
-            sleep(delays[attempt]);
+            // Interruptible sleep — same pattern as BinanceStream_Reconnect.
+            // Without this, an in-flight retry blocks engine shutdown for up
+            // to 4 seconds. Polls g_binance_shutdown_flag every 100ms and
+            // bails out early when set; caller (drainer) sees the failure
+            // status and the outer loop exits via shutdown check.
+            for (int s = 0; s < delays[attempt]; ++s) {
+                for (int j = 0; j < 10; ++j) {
+                    if (g_binance_shutdown_flag && *g_binance_shutdown_flag) {
+                        return -1;
+                    }
+                    struct timespec ts = {0, 100000000};
+                    nanosleep(&ts, NULL);
+                }
+            }
         }
         int status = binance_signed_request(api, method, path, params,
                                              response_buf, buf_size);
@@ -437,7 +452,17 @@ static inline int binance_retry_request(BinanceOrderAPI *api,
         if (status == 418 || status == 429) {
             fprintf(stderr, "[REST] rate limited (HTTP %d), weight=%d\n",
                     status, api->rate_limit_weight);
-            sleep(delays[attempt] + 5);  // extra penalty for rate limit
+            // Interruptible — see comment above on the retry sleep.
+            int wait_secs = delays[attempt] + 5;
+            for (int s = 0; s < wait_secs; ++s) {
+                for (int j = 0; j < 10; ++j) {
+                    if (g_binance_shutdown_flag && *g_binance_shutdown_flag) {
+                        return -1;
+                    }
+                    struct timespec ts = {0, 100000000};
+                    nanosleep(&ts, NULL);
+                }
+            }
         }
     }
     fprintf(stderr, "[REST] all retries failed\n");

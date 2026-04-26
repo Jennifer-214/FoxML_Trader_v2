@@ -278,7 +278,12 @@ inline void Momentum_BuildParameters(
     out->sl_pct               = config->stop_loss_pct;
     out->trade_size           = trade_size;
     out->strategy_id          = STRATEGY_MOMENTUM;
-    out->flags                = GATE_FLAG_TP_ENABLED | GATE_FLAG_SL_ENABLED;
+    // v4.0: GATE_FLAG_BUY_ABOVE — momentum buys breakouts above the threshold,
+    // not dips below. Pre-v4.0 the hot path was hardcoded to buy-below, so MOM
+    // in sharded silently traded like MR. Strategy logic is still a stub
+    // (buy at rolling avg) but at least the direction is now correct.
+    out->flags                = GATE_FLAG_TP_ENABLED | GATE_FLAG_SL_ENABLED |
+                                GATE_FLAG_BUY_ABOVE;
     for (int i = 0; i < 6; ++i) out->_pad[i] = 0;
 }
 

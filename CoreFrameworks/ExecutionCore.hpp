@@ -245,7 +245,14 @@ static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tic
     uint8_t flags = core->cached_params.flags;
 
     // === Inlined BG_Evaluate ===
-    uint64_t price_ok      = (uint64_t)FPN_LessThan(tick.price, core->cached_params.bg_price_threshold);
+    // Branchless direction select via GATE_FLAG_BUY_ABOVE (v4.0 — momentum
+    // strategy buys above breakout, mean-reversion / dip / ml / ema buy below).
+    // Both comparisons computed unconditionally so the CPU pipelines them;
+    // mask picks the active one. Adds ~1ns vs single-direction; ignorable.
+    uint64_t price_below   = (uint64_t)FPN_LessThan(tick.price, core->cached_params.bg_price_threshold);
+    uint64_t price_above   = (uint64_t)FPN_GreaterThan(tick.price, core->cached_params.bg_price_threshold);
+    uint64_t buy_above     = (uint64_t)((flags & GATE_FLAG_BUY_ABOVE) != 0);
+    uint64_t price_ok      = (price_above & buy_above) | (price_below & ~buy_above);
     uint64_t volume_ok     = (uint64_t)FPN_GreaterThan(tick.volume, core->cached_params.bg_volume_threshold);
     uint64_t volume_req    = (uint64_t)((flags & GATE_FLAG_VOLUME_REQUIRED) != 0);
     uint64_t volume_check  = (volume_req & volume_ok) | (~volume_req & 1ULL);
