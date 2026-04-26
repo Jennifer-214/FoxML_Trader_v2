@@ -1053,13 +1053,19 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                 ImGui::Combo("##strat", &chosen[i], strat_labels, NUM_STRATEGIES);
                 ImGui::TableNextColumn();
                 bool same_as_active = (chosen[i] == sid);
-                if (same_as_active) ImGui::BeginDisabled();
-                if (ImGui::Button("Apply")) {
-                    __atomic_store_n(
-                        &shared->swap_strategy_requested[i],
-                        (uint8_t)chosen[i], __ATOMIC_RELEASE);
+                if (same_as_active) {
+                    // No swap to apply — show a clear "Active" label instead
+                    // of a greyed-out Apply button (which looked broken).
+                    ImGui::BeginDisabled();
+                    ImGui::Button("Active");
+                    ImGui::EndDisabled();
+                } else {
+                    if (ImGui::Button("Apply")) {
+                        __atomic_store_n(
+                            &shared->swap_strategy_requested[i],
+                            (uint8_t)chosen[i], __ATOMIC_RELEASE);
+                    }
                 }
-                if (same_as_active) ImGui::EndDisabled();
                 ImGui::TableNextColumn();
                 uint8_t pending = __atomic_load_n(
                     &shared->swap_strategy_requested[i], __ATOMIC_ACQUIRE);

@@ -629,7 +629,12 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id) {
 //==========================================================================
 // RENDER — tabbed: Global + Core 0..N
 //==========================================================================
-static inline void GUI_Panel_Settings(SettingsState *s, volatile sig_atomic_t *reload_flag) {
+// live_core_count > 0 → use it (number of cores actually registered with the
+// engine). 0 → fall back to the cfg's num_execution_cores field. Reflects
+// running cores, not cfg-only intent — engine doesn't add/remove cores live.
+static inline void GUI_Panel_Settings(SettingsState *s,
+                                       volatile sig_atomic_t *reload_flag,
+                                       int live_core_count = 0) {
     ImGui::Begin("Settings");
 
     if (!s->loaded) Settings_Load(s);
@@ -638,16 +643,23 @@ static inline void GUI_Panel_Settings(SettingsState *s, volatile sig_atomic_t *r
     ImGui::TextColored(FoxmlColors::comment, "edit + press Enter to apply");
     ImGui::Separator();
 
-    // num_execution_cores drives how many Core tabs to render. Pull it from
-    // loaded state — the field_defs entry "num_execution_cores" stores it.
-    int num_cores = 4;
-    for (int i = 0; i < NUM_FIELDS; ++i) {
-        if (strcmp(field_defs[i].key, "num_execution_cores") == 0) {
-            num_cores = (int)s->float_vals[i];
-            if (num_cores < 1) num_cores = 1;
-            if (num_cores > MAX_GUI_CORES) num_cores = MAX_GUI_CORES;
-            break;
+    // Tabs match live registered cores when available; else fall back to
+    // cfg num_execution_cores; else default 4. Avoids the "I have 4 cores
+    // but only 1 tab" bug when num_execution_cores is missing from cfg
+    // (cfg defaults to 4 on the engine side, but Settings_Load only sees
+    // what's literally written in the file).
+    int num_cores = 0;
+    if (live_core_count > 0 && live_core_count <= MAX_GUI_CORES) {
+        num_cores = live_core_count;
+    } else {
+        for (int i = 0; i < NUM_FIELDS; ++i) {
+            if (strcmp(field_defs[i].key, "num_execution_cores") == 0) {
+                num_cores = (int)s->float_vals[i];
+                break;
+            }
         }
+        if (num_cores < 1) num_cores = 4;  // safe default = engine's default
+        if (num_cores > MAX_GUI_CORES) num_cores = MAX_GUI_CORES;
     }
 
     bool changed = false;
