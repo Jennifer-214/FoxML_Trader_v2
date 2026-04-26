@@ -204,10 +204,15 @@ inline void MeanReversion_BuildParameters(
     FPN<F> allocated_balance,
     GateParameters<F>* out
 ) {
-    // TODO(phase06-followup): full port of the regression feedback loop.
-    // For now, use the rolling mean ± stddev as the base entry/exit prices.
-    FPN<F> entry_price = rolling->price_avg;
-    if (FPN_IsZero(entry_price)) entry_price = rolling->price_max;
+    // BUG FIX (v4.0.3): pre-fix used `bg_threshold = rolling->price_avg`
+    // with no depth requirement — gate fired on EVERY tick price < avg
+    // (statistically half of all ticks during noise). Real MR buys on
+    // meaningful DIPS below mean. Now matches SimpleDip's pattern: gate
+    // sits at `avg - (avg × entry_offset_pct)` so it requires a true dip.
+    FPN<F> avg = rolling->price_avg;
+    if (FPN_IsZero(avg)) avg = rolling->price_max;
+    FPN<F> dip_offset = FPN_Mul(avg, config->entry_offset_pct);
+    FPN<F> entry_price = FPN_Sub(avg, dip_offset);
 
     FPN<F> tp_pct = !FPN_IsZero(config->mr_tp_pct) ? config->mr_tp_pct : config->take_profit_pct;
     FPN<F> sl_pct = !FPN_IsZero(config->mr_sl_pct) ? config->mr_sl_pct : config->stop_loss_pct;
@@ -248,15 +253,25 @@ inline void Momentum_BuildParameters(
     FPN<F> allocated_balance,
     GateParameters<F>* out
 ) {
-    // TODO(phase06-followup): full port with ROR and R² gates.
-    // For phase 06 stub: buy above the rolling avg.
-    // Momentum uses stddev multipliers (momentum_tp_mult / momentum_sl_mult)
-    // rather than percentage TP/SL. Falls back to shared percentage if not set.
-    FPN<F> entry_price = rolling->price_avg;
-    if (FPN_IsZero(entry_price)) entry_price = rolling->price_max;
+    // BUG FIX (v4.0.3): same family as MR — pre-fix used `bg_threshold = avg`
+    // with no breakout depth. Gate fired on every tick price > avg (with the
+    // BUY_ABOVE flag). Real momentum buys on confirmed BREAKOUTS above the
+    // mean, not infinitesimal upticks. Now requires a breakout of
+    // `entry_offset_pct` above the rolling mean before the gate arms.
+    FPN<F> avg = rolling->price_avg;
+    if (FPN_IsZero(avg)) avg = rolling->price_max;
+    FPN<F> breakout_offset = FPN_Mul(avg, config->entry_offset_pct);
+    FPN<F> entry_price = FPN_Add(avg, breakout_offset);
 
+    // STDDEV-floor guard: in early warmup or dead-flat markets,
+    // rolling->price_stddev can be near-zero, which made tp_amount basically
+    // zero and produced TP=SL=entry positions (caught visually in v4.0.2).
+    // Require a minimum stddev relative to price (1bp) before trusting the
+    // stddev-mult path; otherwise fall back to percentage.
+    FPN<F> min_stddev_floor = FPN_Mul(avg, FPN_FromDouble<F>(0.0001));
+    int stddev_usable = FPN_GreaterThan(rolling->price_stddev, min_stddev_floor);
     FPN<F> tp_amount, sl_amount;
-    if (!FPN_IsZero(config->momentum_tp_mult) && !FPN_IsZero(rolling->price_stddev)) {
+    if (!FPN_IsZero(config->momentum_tp_mult) && stddev_usable) {
         tp_amount = FPN_Mul(rolling->price_stddev, config->momentum_tp_mult);
         sl_amount = FPN_Mul(rolling->price_stddev, config->momentum_sl_mult);
     } else {
