@@ -42,8 +42,16 @@ fi
 # The engine looks for engine.cfg in cwd. Without this symlink, running
 # ./engine from build/ gets "config not found, using defaults" — and falls
 # back to synthetic ticks instead of the live Binance feed.
+#
+# engine.cfg is gitignored (user-tuned values never commit). On first
+# build after a clone, seed it from engine.cfg.example so the new dev
+# has a working config out of the gate.
 link_cfg() {
     local dir="$1"
+    if [[ ! -f engine.cfg ]] && [[ -f engine.cfg.example ]]; then
+        cp engine.cfg.example engine.cfg
+        echo "[build] seeded engine.cfg from engine.cfg.example (edit + restart engine)"
+    fi
     [[ -d "$dir" ]] && [[ -f engine.cfg ]] && ln -sfn ../engine.cfg "$dir/engine.cfg"
 }
 

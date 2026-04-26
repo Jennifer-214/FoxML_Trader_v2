@@ -13,3 +13,9 @@ plans/
 .claude/
 .chart-venv/
 secrets.cfg
+
+# user-tuned config files — never commit. engine.cfg.example tracks the
+# canonical defaults; users copy it to engine.cfg and tune locally.
+engine.cfg
+controller.cfg
+backtest.cfg
