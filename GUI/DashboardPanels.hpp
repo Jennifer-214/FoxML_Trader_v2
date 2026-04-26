@@ -922,6 +922,75 @@ static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
         }
     }
 
+    // Per-Core ML — sharded mode only. Phase 6prep sharded c16. Shows the
+    // per-core breakdown that the headline summary collapses. Each ML core
+    // gets a row with prediction / confidence / IC / RMSE.
+    if (s->sharded_mode_active) {
+        int any_ml_core = 0;
+        for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+            if (s->per_core[i].is_ml) { any_ml_core = 1; break; }
+        }
+        if (any_ml_core && ImGui::CollapsingHeader("Per-Core ML",
+                            ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGuiTableFlags tf = ImGuiTableFlags_BordersInnerV |
+                                  ImGuiTableFlags_RowBg |
+                                  ImGuiTableFlags_SizingStretchProp;
+            if (ImGui::BeginTable("##percore_ml", 6, tf)) {
+                ImGui::TableSetupColumn("Core",     ImGuiTableColumnFlags_WidthFixed, 35);
+                ImGui::TableSetupColumn("Model",    ImGuiTableColumnFlags_WidthFixed, 50);
+                ImGui::TableSetupColumn("Pred",     ImGuiTableColumnFlags_WidthFixed, 65);
+                ImGui::TableSetupColumn("Conf",     ImGuiTableColumnFlags_WidthFixed, 90);
+                ImGui::TableSetupColumn("IC",       ImGuiTableColumnFlags_WidthFixed, 60);
+                ImGui::TableSetupColumn("RMSE",     ImGuiTableColumnFlags_WidthFixed, 60);
+                ImGui::TableHeadersRow();
+                for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+                    if (!s->per_core[i].is_ml) continue;
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%d", i);
+                    ImGui::TableNextColumn();
+                    if (s->per_core[i].ml_model_loaded) {
+                        ImGui::TextColored(FoxmlColors::green, "loaded");
+                    } else {
+                        ImGui::TextColored(FoxmlColors::comment, "none");
+                    }
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%.4f", s->per_core[i].ml_last_prediction);
+                    ImGui::TableNextColumn();
+                    {
+                        float cf = (float)s->per_core[i].ml_last_confidence;
+                        if (cf < 0.0f) cf = 0.0f; if (cf > 1.0f) cf = 1.0f;
+                        ImVec4 bc = cf > 0.5f ? FoxmlColors::green
+                                  : cf > 0.3f ? FoxmlColors::yellow
+                                  : FoxmlColors::red;
+                        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, bc);
+                        char overlay[32];
+                        snprintf(overlay, sizeof(overlay), "%.2f", cf);
+                        ImGui::ProgressBar(cf, ImVec2(-1, 0), overlay);
+                        ImGui::PopStyleColor();
+                    }
+                    ImGui::TableNextColumn();
+                    {
+                        double ic = s->per_core[i].ml_confidence_ic;
+                        ImVec4 cc = ic > 0.1 ? FoxmlColors::green
+                                  : ic > 0.0 ? FoxmlColors::yellow
+                                  : FoxmlColors::red;
+                        ImGui::TextColored(cc, "%+.3f", ic);
+                    }
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%.3f", s->per_core[i].ml_confidence_rmse);
+                }
+                ImGui::EndTable();
+            }
+            // Footnote: explain what the headline `Confidence` block shows
+            // when the per-core view is open (avoids confusion with the
+            // top-of-panel single-core summary).
+            ImGui::TextColored(FoxmlColors::comment,
+                "(headline above shows highest-conf core; "
+                "noise-floor IC clamps to 0.01)");
+        }
+    }
+
     ImGui::End();
 }
 

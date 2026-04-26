@@ -530,6 +530,13 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
                     }
                 }
             }
+
+            // Phase 6prep sharded c12: re-init ConfidenceScorer with cfg
+            // tunables. EventLoopState_Init left it at safe defaults; for
+            // ML cores we want the user's window/tau settings active.
+            ConfidenceScorer_Init(&state.cores[i].confidence,
+                                  (int)cfg.confidence_window,
+                                  FPN_ToDouble(cfg.confidence_freshness_tau));
         }
 
         // Cores start permission=0. The slow-path rebuild grants permission
@@ -837,23 +844,57 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
                         state.cores[slot].intended_sl,
                         state.cores[slot].strategy_id,
                         event.price);
+                    // Phase 6prep sharded c13: snapshot the staged prediction
+                    // into active_prediction at entry submit. Persists across
+                    // the entry→exit window so the IC update at exit pairs the
+                    // realized return with the prediction that actually
+                    // triggered the trade — not the latest rebuild's value.
+                    if (is_entry &&
+                        state.cores[slot].strategy_id == STRATEGY_ML) {
+                        state.cores[slot].active_prediction =
+                            state.cores[slot].staged_prediction;
+                    }
                 }
             }
         }
         return total_drained;
     };
 
-    std::thread drainer([&state, &oms, &producer_done, &drain_with_submit] {
+    // Phase 6prep sharded c14: feed the ConfidenceScorer with realized returns
+    // from each just-closed position. Bitmap is cleared after drain so the
+    // next Tick starts fresh. ML cores only — non-ML cores ignored even if
+    // the bit is set (defensive: shouldn't happen since only ML strategy
+    // emits trades that produce predictions, but cheap to guard).
+    auto drain_confidence_feedback = [&state, &oms]() {
+        uint16_t mask = oms.last_closed_mask;
+        while (mask) {
+            int slot = __builtin_ctz(mask);
+            mask &= (uint16_t)(mask - 1);
+            if (slot < 0 || slot >= state.registered_count) continue;
+            if (state.cores[slot].strategy_id != STRATEGY_ML) continue;
+            ConfidenceScorer_Update(
+                &state.cores[slot].confidence,
+                state.cores[slot].active_prediction,
+                oms.last_realized_return[slot]);
+            // clear active_prediction once consumed — no open position
+            state.cores[slot].active_prediction = 0.0;
+        }
+        oms.last_closed_mask = 0;
+    };
+
+    std::thread drainer([&state, &oms, &producer_done, &drain_with_submit, &drain_confidence_feedback] {
         EngineSharded_PinThread(state.registered_count + 1);
         while (!g_engine_sharded_shutdown) {
             int total_drained = drain_with_submit();
             OrderManager_Tick(&oms);
+            drain_confidence_feedback();
 
             if (total_drained == 0) std::this_thread::yield();
             if (producer_done.load(std::memory_order_acquire)) {
                 for (int k = 0; k < 16; ++k) {
                     drain_with_submit();
                     OrderManager_Tick(&oms);
+                    drain_confidence_feedback();
                 }
                 break;
             }

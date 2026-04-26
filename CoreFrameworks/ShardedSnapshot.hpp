@@ -23,8 +23,12 @@
 #pragma once
 
 #include "../DataStream/EngineTUI.hpp"
+#include "../ML_Headers/ConfidenceScore.hpp"
+#include "../ML_Headers/CoreModelZoo.hpp"
 #include "ControllerEventLoop.hpp"
 #include "EventLoopAggregates.hpp"
+
+#include <cmath>
 
 // TUISnapshot, TUIPositionSnap, RollingStats, ControllerConfig, Position
 // are all in the global namespace. EventLoopState, EventLoopAggregates,
@@ -140,6 +144,15 @@ static inline void TUI_CopySnapshotSharded(
     if (state->registered_count > 0) {
         snap->strategy_id = state->cores[0].strategy_id;
     }
+    // Phase 6prep sharded c16: ML aggregation across per-core scorers. We
+    // pick the highest-confidence ML core to populate the headline `s->ml.*`
+    // fields (which the existing GUI_Panel_MLIntelligence already reads).
+    // Per-core detail goes into per_core[i].ml_* for the per-core panel.
+    int    headline_ml_core = -1;
+    double headline_conf    = -1.0;
+    int    any_ml_active    = 0;
+    int    any_model_loaded = 0;
+
     for (int i = 0; i < state->registered_count && i < 16; ++i) {
         snap->per_core[i].strategy_id_display = state->cores[i].strategy_id;
         tt::ExecutionCore<F>* core = state->cores[i].core;
@@ -157,5 +170,49 @@ static inline void TUI_CopySnapshotSharded(
                 }
             }
         }
+
+        // Phase 6prep sharded c16: per-core ML observability
+        if (state->cores[i].strategy_id == STRATEGY_ML) {
+            snap->per_core[i].is_ml = 1;
+            any_ml_active = 1;
+            CoreModelZoo<F>* zoo = (CoreModelZoo<F>*)state->cores[i].model_handle;
+            int loaded = (zoo && CoreModelZoo_HasAny(zoo)) ? 1 : 0;
+            snap->per_core[i].ml_model_loaded = (uint8_t)loaded;
+            if (loaded) any_model_loaded = 1;
+            // staged_prediction is the freshest rebuild output; active_prediction
+            // is the snapshot at last entry submit (0 if no open position).
+            snap->per_core[i].ml_last_prediction   = state->cores[i].staged_prediction;
+            snap->per_core[i].ml_last_confidence   = state->cores[i].last_confidence;
+            snap->per_core[i].ml_active_prediction = state->cores[i].active_prediction;
+            // Direct reads of scorer internals — these are double-only and safe
+            // to compute on the snapshot path (snapshot is slow-path itself).
+            snap->per_core[i].ml_confidence_ic   = RollingIC_Compute(&state->cores[i].confidence.ic);
+            snap->per_core[i].ml_confidence_rmse = RollingRMSE_Compute(&state->cores[i].confidence.rmse);
+            // Track the highest-confidence ML core for the headline summary.
+            // Tie-break: prefer the lowest core index (deterministic).
+            if (state->cores[i].last_confidence > headline_conf) {
+                headline_conf = state->cores[i].last_confidence;
+                headline_ml_core = i;
+            }
+        }
     }
+
+    // Phase 6prep sharded c16: populate s->ml.* from the headline ML core.
+    // GUI_Panel_MLIntelligence renders this single-core view; per-core detail
+    // goes through the new per-core section.
+    snap->ml.confidence_enabled = cfg->confidence_enabled ? 1 : 0;
+    snap->ml.ml_model_loaded    = any_model_loaded;
+    if (headline_ml_core >= 0) {
+        const auto& core_pc = snap->per_core[headline_ml_core];
+        snap->ml.confidence            = core_pc.ml_last_confidence;
+        snap->ml.confidence_ic         = core_pc.ml_confidence_ic;
+        snap->ml.confidence_rmse       = core_pc.ml_confidence_rmse;
+        // Stability ≈ exp(-rmse) per Confidence_Stability; the GUI labels
+        // this as "Stability" not "Freshness" despite the field name (legacy).
+        snap->ml.confidence_freshness  = (core_pc.ml_confidence_rmse > 0.0)
+                                          ? std::exp(-core_pc.ml_confidence_rmse)
+                                          : 1.0;
+        snap->ml.ml_last_prediction    = core_pc.ml_last_prediction;
+    }
+    (void)any_ml_active;
 }

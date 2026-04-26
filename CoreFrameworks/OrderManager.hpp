@@ -179,6 +179,17 @@ struct OrderManagerState {
     FPN<F>       total_fees;       // mirrors PortfolioController.total_fees
                                     // for sanity invariant; OMS-side aggregate.
 
+    // === EXIT-FILL FEEDBACK (Phase 6prep sharded c14) ===
+    // HandleFill on ORDER_MARKET_SELL sets one bit per closed core in
+    // last_closed_mask and writes the realized return into the parallel array.
+    // The drainer reads after OrderManager_Tick, calls ConfidenceScorer_Update
+    // for ML cores, then clears the mask. Single-threaded by construction —
+    // drainer is the sole reader, OMS_Tick (same thread) is the sole writer.
+    // realized_return = (exit_price - entry_price) / entry_price as a double
+    // (ConfidenceScorer is double-only — see CLAUDE.md FPN-Only invariant).
+    uint16_t     last_closed_mask;
+    double       last_realized_return[MAX_PORTFOLIO_POSITIONS];
+
     // === KILL SWITCH STATE (moved from EventLoopState in phase 03 chunk 1) ===
     // Configured by EventLoopState_ConfigureKillSwitch (which now writes
     // here through the OMS pointer). Disabled by default (both thresholds
@@ -307,6 +318,11 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     oms->total_maker_fees    = FPN_Zero<F>();
     oms->total_taker_fees    = FPN_Zero<F>();
     oms->total_fees          = FPN_Zero<F>();
+    // Phase 6prep sharded c14 — exit-fill feedback channel
+    oms->last_closed_mask    = 0;
+    for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; ++i) {
+        oms->last_realized_return[i] = 0.0;
+    }
     oms->ks_min_balance      = FPN_Zero<F>();
     oms->ks_max_drawdown_pct = FPN_Zero<F>();
     oms->ks_peak_balance     = starting_balance;  // initial peak = start
@@ -552,6 +568,18 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         FPN<F> entry_price_snap = oms->portfolio.positions[pslot].entry_price;
         FPN<F> entry_fee = oms->portfolio.positions[pslot].entry_fee;
         FPN<F> qty_snap  = oms->portfolio.positions[pslot].quantity;
+        // Phase 6prep sharded c14: compute realized return as double for the
+        // ConfidenceScorer feedback channel BEFORE CloseSlot wipes entry_price.
+        // The scorer uses (prediction, return) pairs to estimate IC. Skip the
+        // signal if entry_price is degenerate (paper-mode dust, etc.).
+        double entry_price_d = FPN_ToDouble(entry_price_snap);
+        double exit_price_d  = FPN_ToDouble(fill_price);
+        if (entry_price_d > 0.0 &&
+            pslot >= 0 && pslot < MAX_PORTFOLIO_POSITIONS) {
+            oms->last_realized_return[pslot] =
+                (exit_price_d - entry_price_d) / entry_price_d;
+            oms->last_closed_mask |= (uint16_t)(1u << pslot);
+        }
         FPN<F> gross     = Portfolio_CloseSlot(&oms->portfolio, pslot, fill_price);
         FPN<F> exit_notional = FPN_Mul(fill_price, qty_snap);
         // Phase 8: maker/taker fee on exit. ORDER_MARKET_SELL is taker by

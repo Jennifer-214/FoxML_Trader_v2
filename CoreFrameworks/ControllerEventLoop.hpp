@@ -44,6 +44,7 @@
 #pragma once
 
 #include "../Limits.hpp"
+#include "../ML_Headers/ConfidenceScore.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/StrategyParameters.hpp"
 #include "ExecutionCore.hpp"
@@ -84,6 +85,25 @@ struct CoreContext {
     void*    model_handle;         // ModelHandle<F>* for STRATEGY_ML cores (nullptr for others)
     uint64_t entries_processed;    // bumped on entry event
     uint64_t exits_processed;      // bumped on exit event
+    // Phase 6prep (sharded c12-c14): per-core ML confidence loop. The scorer
+    // is fed (prediction, realized_return) pairs at exit fill time and read
+    // on the slow path during ML_BuildParameters to damp the entry threshold.
+    // last_confidence is the most recently computed conf for snapshot reads
+    // (don't recompute on hot/snapshot path — it's an O(W²) Spearman ranking).
+    //
+    // Two prediction fields, intentional:
+    //   staged_prediction  — output of ML_BuildParameters; overwritten every
+    //                        slow-path rebuild with the freshest prediction
+    //   active_prediction  — snapshot of staged at entry-submit time; persists
+    //                        across the entry→exit window so the IC update at
+    //                        exit can correlate against the prediction that
+    //                        actually triggered the trade (not the latest one)
+    // Single-position-per-core invariant means active_prediction is plenty;
+    // multi-position would need a per-position ring.
+    ConfidenceScorer confidence;
+    double staged_prediction;      // prediction from last ML rebuild
+    double active_prediction;      // prediction at last entry submit (0 = no open pos)
+    double last_confidence;        // most recent ConfidenceScorer_Compute result
 };
 
 //======================================================================================================
@@ -144,6 +164,15 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].model_handle = nullptr;
         state->cores[i].entries_processed = 0;
         state->cores[i].exits_processed = 0;
+        // Phase 6prep sharded: ConfidenceScorer with safe defaults. EngineSharded
+        // re-inits with cfg values for STRATEGY_ML cores after this; non-ML cores
+        // keep these defaults (the scorer never gets fed, so it stays inert).
+        ConfidenceScorer_Init(&state->cores[i].confidence,
+                              CONFIDENCE_IC_WINDOW_DEFAULT,
+                              CONFIDENCE_FRESHNESS_TAU_DEFAULT);
+        state->cores[i].staged_prediction = 0.0;
+        state->cores[i].active_prediction = 0.0;
+        state->cores[i].last_confidence = 0.0;
     }
 }
 
@@ -551,6 +580,19 @@ inline int EventLoop_RebuildAllParameters(
     int rebuilt = 0;
     for (int slot = 0; slot < state->registered_count; ++slot) {
         if (state->cores[slot].strategy_id == STRATEGY_NONE) continue;
+        // Phase 6prep sharded c13/c15: pack ML extras for ML cores. Non-ML cores
+        // get nullptr (the dispatcher passes it through and ML_BuildParameters
+        // never runs anyway). Stack-allocated; ML_BuildParameters dereferences
+        // and copies what it needs synchronously.
+        MLBuildContext ml_ctx{};
+        void* dispatch_ctx = nullptr;
+        if (state->cores[slot].strategy_id == STRATEGY_ML) {
+            ml_ctx.model_handle   = state->cores[slot].model_handle;
+            ml_ctx.confidence     = &state->cores[slot].confidence;
+            ml_ctx.out_prediction = &state->cores[slot].staged_prediction;
+            ml_ctx.out_confidence = &state->cores[slot].last_confidence;
+            dispatch_ctx = &ml_ctx;
+        }
         Strategy_BuildParameters(
             state->cores[slot].strategy_id,
             rolling,
@@ -558,7 +600,7 @@ inline int EventLoop_RebuildAllParameters(
             state->cores[slot].allocated_balance,
             &state->cores[slot].pending_params,
             rolling_long,
-            state->cores[slot].model_handle
+            dispatch_ctx
         );
         // Mirror the pack's TP/SL/qty into the controller-side intended_*
         // fields so OnEvent uses the freshly computed values when the next

@@ -48,6 +48,7 @@
 #include "../CoreFrameworks/GateParameters.hpp"
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/BarrierGate.hpp"
+#include "../ML_Headers/ConfidenceScore.hpp"
 #include "../ML_Headers/CoreModelZoo.hpp"
 #include "../ML_Headers/ModelInference.hpp"
 #include "../ML_Headers/RollingStats.hpp"
@@ -57,6 +58,32 @@
 #include <cstdint>
 
 namespace tt {
+
+//======================================================================================================
+// [ML BUILD CONTEXT — Phase 6prep sharded c13/c15]
+//======================================================================================================
+// Bundle of ML-only extras that the dispatcher passes through to ML_BuildParameters
+// as a single void*. Keeps the dispatcher signature stable when more ML inputs
+// are added (cost model, vol scaler) — just add a field here.
+//
+// Non-ML strategies don't see this; the dispatcher's void* ml_ctx is opaque to
+// them.
+//
+// Field semantics:
+//   model_handle    — &CoreModelZoo<F>, populated by EngineSharded per core
+//   confidence      — &CoreContext::confidence, fed (pred, return) at exit fill
+//   out_prediction  — written by ML_BuildParameters with the prediction value
+//                     used in the gate decision; drainer snapshots this into
+//                     active_prediction at entry-submit time
+//   out_confidence  — written with the conf used (so snapshot reads match the
+//                     value that drove the gate decision; no recomputation)
+//======================================================================================================
+struct MLBuildContext {
+    void*               model_handle;
+    ConfidenceScorer*   confidence;
+    double*             out_prediction;
+    double*             out_confidence;
+};
 
 //======================================================================================================
 // [SIMPLEDIP — full port]
@@ -298,7 +325,10 @@ inline void EmaCross_BuildParameters(
 //   - hard block when prediction < ml_buy_threshold (signal too cold)
 //   - else soft modulation: scale trade_size by bg.gate ∈ [g_min, 1.0]
 //
-// model_handle_ptr is &CoreModelZoo<F> (per-core, populated by EngineSharded).
+// ml_ctx_ptr is &MLBuildContext (Phase 6prep sharded c13/c15). Legacy callers
+// (LegacyReferenceDriver, experiment tests) pass nullptr — no model, no
+// confidence damping, fall back to SimpleDip. Sharded production path always
+// passes a real MLBuildContext.
 //======================================================================================================
 template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline void ML_BuildParameters(
@@ -307,9 +337,19 @@ inline void ML_BuildParameters(
     const ControllerConfig<F>* config,
     FPN<F> allocated_balance,
     GateParameters<F>* out,
-    void* model_handle_ptr
+    void* ml_ctx_ptr
 ) {
-    CoreModelZoo<F>* zoo = (CoreModelZoo<F>*)model_handle_ptr;
+    MLBuildContext* mctx = (MLBuildContext*)ml_ctx_ptr;
+    CoreModelZoo<F>* zoo = nullptr;
+    ConfidenceScorer* conf_scorer = nullptr;
+    double* out_prediction = nullptr;
+    double* out_confidence = nullptr;
+    if (mctx) {
+        zoo = (CoreModelZoo<F>*)mctx->model_handle;
+        conf_scorer = mctx->confidence;
+        out_prediction = mctx->out_prediction;
+        out_confidence = mctx->out_confidence;
+    }
 
     // if no zoo or no models loaded, fall back to SimpleDip
     if (!zoo || !CoreModelZoo_HasAny(zoo)) {
@@ -403,8 +443,26 @@ inline void ML_BuildParameters(
         trade_size = FPN_DivNoAssert(allocated_balance, entry_price);
     }
 
+    // Phase 6prep sharded c15: confidence-damped threshold. When confidence_enabled,
+    // the effective entry threshold is base * (scale - conf), clamped to <= 1.0.
+    // A noise-floor model (conf ≈ CONFIDENCE_MIN_IC_DEFAULT) gives effective ≈
+    // base * (2.0 - 0.01) ≈ 2*base — gate stays cold. Real signal pushes conf
+    // toward 1.0 → effective approaches 0 → gate fires more readily. The
+    // unconditional clamp to 1.0 prevents a perverse "always blocked" state if
+    // base+scale combine to >1.0 with low conf. Mirrors the legacy formula at
+    // PortfolioController.hpp:~1614.
+    double base_threshold = FPN_ToDouble(config->ml_buy_threshold);
+    double conf_now = 0.0;
+    double threshold = base_threshold;
+    if (config->confidence_enabled && conf_scorer) {
+        conf_now = ConfidenceScorer_Compute(conf_scorer, 0.0);  // data_age=0 (live)
+        double scale = FPN_ToDouble(config->confidence_threshold_scale);
+        double effective = base_threshold * (scale - conf_now);
+        if (effective > 1.0) effective = 1.0;
+        threshold = effective;
+    }
+
     // gate decision: BarrierGate (continuous modulation) OR binary threshold
-    double threshold = FPN_ToDouble(config->ml_buy_threshold);
     FPN<F> gate_price = FPN_Zero<F>();  // default: zero-gate (no entry)
 
     if (config->barrier_gate_enabled) {
@@ -421,6 +479,12 @@ inline void ML_BuildParameters(
             gate_price = entry_price;
         }
     }
+
+    // Phase 6prep sharded c13/c15: outparams for snapshot + drainer.
+    // out_prediction is snapshotted to ctx->active_prediction at entry submit.
+    // out_confidence is read by ShardedSnapshot for ML observability.
+    if (out_prediction)  *out_prediction  = prediction;
+    if (out_confidence)  *out_confidence  = conf_now;
 
     out->bg_price_threshold   = gate_price;
     out->bg_volume_threshold  = volume_threshold;

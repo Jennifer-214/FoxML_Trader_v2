@@ -902,6 +902,16 @@ struct TUISnapshot {
         double   avg_ns;
         uint8_t  strategy_id_display;  // STRATEGY_* constant for this core
         double   buy_gate_price;       // current buy gate threshold (for chart overlay)
+        // Phase 6prep sharded c16 — per-core ML observability. Populated only
+        // for STRATEGY_ML cores by TUI_CopySnapshotSharded; non-ML cores leave
+        // is_ml=0 and renderer skips them.
+        uint8_t  is_ml;                // 1 = STRATEGY_ML core with ML extras valid
+        uint8_t  ml_model_loaded;      // 1 = zoo has at least one role loaded
+        double   ml_last_prediction;   // most recent ML inference output [0, 1]
+        double   ml_last_confidence;   // ConfidenceScorer_Compute result [0, 1]
+        double   ml_confidence_ic;     // RollingIC value for tooltip / debug
+        double   ml_confidence_rmse;   // RollingRMSE value
+        double   ml_active_prediction; // prediction at fill time of open position (0 if no open pos)
     };
     PerCoreSnap per_core[16];      // up to MAX_EXECUTION_CORES
 };
