@@ -691,9 +691,9 @@ inline int EventLoop_RebuildAllParameters(
             const FPN<F>* ema_in          = (const FPN<F>*)ema_price;
             RegimeSignals<F> sig;
             Regime_ComputeSignals(&sig, rolling, rolling_long, ror_in, *ema_in);
+            int old_regime = state->cores[slot].regime_state.current_regime;
             int new_regime = Regime_Classify(&state->cores[slot].regime_state,
                                               &sig, &resolved_cfg);
-            (void)new_regime;
             int resolved = Regime_ToStrategy(state->cores[slot].regime_state.current_regime);
             // Don't recurse into STRATEGY_AUTO (defensive — REGIME_STRATEGY_TABLE
             // shouldn't return AUTO, but safer to clamp).
@@ -701,6 +701,22 @@ inline int EventLoop_RebuildAllParameters(
                 effective_strategy_id = (uint8_t)resolved;
             } else {
                 effective_strategy_id = STRATEGY_MEAN_REVERSION;  // safe default
+            }
+            // v4.0.3 D11: regime change mid-position → tighten ratchet_sl
+            // closer to current price (lock in any open profit ahead of
+            // strategy switch). Only trigger when regime ACTUALLY changed
+            // (not just hysteresis-pending) and a position is open.
+            if (new_regime != old_regime &&
+                (state->oms->portfolio.active_bitmap & (uint16_t)(1u << slot))) {
+                // Move ratchet to current rolling avg minus tighter offset
+                // (stddev × 1.0 = closer than the trailing default).
+                FPN<F> tight_sl = FPN_Sub(rolling->price_avg,
+                                           rolling->price_stddev);
+                if (FPN_GreaterThan(tight_sl,
+                        state->cores[slot].pending_params.ratchet_sl)) {
+                    state->cores[slot].pending_params.ratchet_sl = tight_sl;
+                    state->cores[slot].dirty = 1;
+                }
             }
         }
         // Phase 6prep sharded c13/c15: pack ML extras for ML cores. Non-ML cores
