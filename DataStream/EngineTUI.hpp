@@ -921,6 +921,16 @@ struct TUISnapshot {
         double   ml_confidence_ic;     // RollingIC value for tooltip / debug
         double   ml_confidence_rmse;   // RollingRMSE value
         double   ml_active_prediction; // prediction at fill time of open position (0 if no open pos)
+        // v4.0.4: per-core P&L breakdown for Account panel. Sourced from
+        // CoreContext::core_realized / core_wins / core_losses / core_fees.
+        // The aggregate equals oms->realized_pnl modulo timing (snapshot
+        // taken between updates can show transient skew).
+        double   core_realized;        // net P&L from this core's exits
+        double   core_fees;            // fees paid by this core's fills
+        double   core_allocated;       // capital share (cores[i].allocated_balance)
+        uint32_t core_wins;            // exit count with net > 0
+        uint32_t core_losses;          // exit count with net <= 0
+        uint32_t core_open_positions;  // entries_processed - exits_processed
     };
     PerCoreSnap per_core[16];      // up to MAX_EXECUTION_CORES
 };

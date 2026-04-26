@@ -222,24 +222,72 @@ static inline void GUI_Panel_Market(const TUISnapshot *s) {
     ImVec4 regime_color = (rj == REGIME_TRENDING) ? FoxmlColors::green :
                           (rj == REGIME_MILD_TREND) ? FoxmlColors::sand :
                           (rj == REGIME_VOLATILE || rj == REGIME_TRENDING_DOWN) ? FoxmlColors::red : FoxmlColors::comment;
-    const char *strat_name = (s->strategy_id == 4) ? "EMA CROSS" :
-                              (s->strategy_id == 2) ? "SIMPLE DIP" :
-                              (s->strategy_id == 1) ? "MOMENTUM" : "MEAN REVERSION";
-    ImGui::TextColored(FoxmlColors::sand, "regime:");
-    ImGui::SameLine();
-    ImGui::TextColored(regime_color, "%s", REGIME_INFO[rj].full_name);
-    ImGui::SameLine();
-    ImGui::TextColored(FoxmlColors::comment, "(%.0fm)", s->regime_duration_min);
-    ImGui::SameLine(0, 20);
-    ImGui::TextColored(FoxmlColors::sand, "strategy:");
-    ImGui::SameLine();
-    if (s->regime_auto) {
-        ImGui::TextColored(FoxmlColors::primary, "AUTO");
+
+    if (s->sharded_mode_active && s->per_core_count > 0) {
+        // v4.0.4: per-core strategy breakdown. The pre-sharded "headline
+        // strategy" is meaningless when each core runs its own. Show:
+        //   - regime headline (sourced from first AUTO core's hysteresis)
+        //   - count of cores per resolved strategy as a mini bar
+        // Each AUTO core has its own regime_state — this displays the
+        // first one. Hover the regime to see the source.
+        ImGui::TextColored(FoxmlColors::sand, "regime (core 0):");
         ImGui::SameLine();
-        ImGui::TextColored(FoxmlColors::comment, ">");
+        ImGui::TextColored(regime_color, "%s", REGIME_INFO[rj].full_name);
         ImGui::SameLine();
+        ImGui::TextColored(FoxmlColors::comment, "(%.0fm)", s->regime_duration_min);
+
+        // count cores by resolved strategy (falls back to display id when
+        // resolution hasn't run yet — ML/MR/MOM/DIP/EMA cores all hit the
+        // resolved branch since their resolved_strategy_id == strategy_id).
+        int strat_count[NUM_STRATEGIES] = {0};
+        int unresolved = 0;
+        for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+            uint8_t sid = s->per_core[i].resolved_strategy_id;
+            if (sid >= NUM_STRATEGIES) sid = s->per_core[i].strategy_id_display;
+            if (sid >= NUM_STRATEGIES) { unresolved++; continue; }
+            strat_count[sid]++;
+        }
+        // strategy palette — same as Buy Gate / Chart so colors agree
+        static const ImVec4 strat_colors[NUM_STRATEGIES] = {
+            {0.85f, 0.65f, 0.35f, 0.9f},  // MR
+            {0.85f, 0.45f, 0.45f, 0.9f},  // MOM
+            {0.45f, 0.75f, 0.45f, 0.9f},  // DIP
+            {0.65f, 0.45f, 0.80f, 0.9f},  // ML
+            {0.35f, 0.75f, 0.80f, 0.9f},  // EMA
+            {0.70f, 0.70f, 0.70f, 0.9f},  // AUTO (shouldn't appear post-resolve)
+        };
+        ImGui::TextColored(FoxmlColors::sand, "cores (%d):", s->per_core_count);
+        for (int sid = 0; sid < NUM_STRATEGIES; ++sid) {
+            if (strat_count[sid] == 0) continue;
+            ImGui::SameLine(0, 8);
+            ImGui::TextColored(strat_colors[sid], "%s:%d",
+                STRATEGY_SHORT_NAMES[sid], strat_count[sid]);
+        }
+        if (unresolved > 0) {
+            ImGui::SameLine(0, 8);
+            ImGui::TextColored(FoxmlColors::comment, "?:%d", unresolved);
+        }
+    } else {
+        // legacy single-engine view — kept for engine_mode=single_core.
+        const char *strat_name = (s->strategy_id == 4) ? "EMA CROSS" :
+                                  (s->strategy_id == 2) ? "SIMPLE DIP" :
+                                  (s->strategy_id == 1) ? "MOMENTUM" : "MEAN REVERSION";
+        ImGui::TextColored(FoxmlColors::sand, "regime:");
+        ImGui::SameLine();
+        ImGui::TextColored(regime_color, "%s", REGIME_INFO[rj].full_name);
+        ImGui::SameLine();
+        ImGui::TextColored(FoxmlColors::comment, "(%.0fm)", s->regime_duration_min);
+        ImGui::SameLine(0, 20);
+        ImGui::TextColored(FoxmlColors::sand, "strategy:");
+        ImGui::SameLine();
+        if (s->regime_auto) {
+            ImGui::TextColored(FoxmlColors::primary, "AUTO");
+            ImGui::SameLine();
+            ImGui::TextColored(FoxmlColors::comment, ">");
+            ImGui::SameLine();
+        }
+        ImGui::Text("%s", strat_name);
     }
-    ImGui::Text("%s", strat_name);
 
     // avg + stddev
     ImGui::TextColored(FoxmlColors::sand, "avg:");
@@ -689,6 +737,81 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
         ImGui::TextColored(FoxmlColors::red, "TRIPPED");
     else
         ImGui::TextColored(FoxmlColors::green, "OK");
+
+    // v4.0.4: per-core P&L breakdown. The aggregate above is the OMS-wide
+    // total; this table splits it back out by which core booked each exit.
+    // Useful for spotting a single core eating its allocation while the
+    // others are flat.
+    if (s->sharded_mode_active && s->per_core_count > 0) {
+        ImGui::Spacing();
+        SectionHeader("PER-CORE P&L");
+        // strategy palette — same as Market / Buy Gate / Chart
+        static const ImVec4 strat_colors[NUM_STRATEGIES] = {
+            {0.85f, 0.65f, 0.35f, 0.9f},  // MR
+            {0.85f, 0.45f, 0.45f, 0.9f},  // MOM
+            {0.45f, 0.75f, 0.45f, 0.9f},  // DIP
+            {0.65f, 0.45f, 0.80f, 0.9f},  // ML
+            {0.35f, 0.75f, 0.80f, 0.9f},  // EMA
+            {0.70f, 0.70f, 0.70f, 0.9f},  // AUTO (shouldn't appear post-resolve)
+        };
+        ImGuiTableFlags tflags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp;
+        if (ImGui::BeginTable("per_core_pnl", 7, tflags)) {
+            ImGui::TableSetupColumn("Core", ImGuiTableColumnFlags_WidthFixed, 36.0f);
+            ImGui::TableSetupColumn("Strat", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+            ImGui::TableSetupColumn("Alloc",   ImGuiTableColumnFlags_WidthFixed, 80.0f);
+            ImGui::TableSetupColumn("Realized",ImGuiTableColumnFlags_WidthFixed, 90.0f);
+            ImGui::TableSetupColumn("Fees",    ImGuiTableColumnFlags_WidthFixed, 70.0f);
+            ImGui::TableSetupColumn("W/L",     ImGuiTableColumnFlags_WidthFixed, 70.0f);
+            ImGui::TableSetupColumn("Open",    ImGuiTableColumnFlags_WidthFixed, 50.0f);
+            ImGui::TableHeadersRow();
+
+            for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+                const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%d", i);
+
+                ImGui::TableNextColumn();
+                uint8_t sid = pc->resolved_strategy_id;
+                if (sid >= NUM_STRATEGIES) sid = pc->strategy_id_display;
+                if (sid < NUM_STRATEGIES) {
+                    ImGui::TextColored(strat_colors[sid], "%s", STRATEGY_SHORT_NAMES[sid]);
+                } else {
+                    ImGui::TextDisabled("?");
+                }
+
+                ImGui::TableNextColumn();
+                ImGui::Text("$%.2f", pc->core_allocated);
+
+                ImGui::TableNextColumn();
+                ImGui::TextColored(PnlColor(pc->core_realized), "$%+.2f", pc->core_realized);
+
+                ImGui::TableNextColumn();
+                ImGui::Text("$%.4f", pc->core_fees);
+
+                ImGui::TableNextColumn();
+                uint32_t total = pc->core_wins + pc->core_losses;
+                if (total > 0) {
+                    double win_pct = (double)pc->core_wins / total * 100.0;
+                    ImVec4 wlc = (win_pct >= 50.0) ? FoxmlColors::green : FoxmlColors::red;
+                    ImGui::TextColored(wlc, "%u/%u", pc->core_wins, pc->core_losses);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("%.1f%% win rate (%u trades)", win_pct, total);
+                    }
+                } else {
+                    ImGui::TextDisabled("0/0");
+                }
+
+                ImGui::TableNextColumn();
+                if (pc->core_open_positions > 0) {
+                    ImGui::TextColored(FoxmlColors::sand, "%u", pc->core_open_positions);
+                } else {
+                    ImGui::TextDisabled("0");
+                }
+            }
+            ImGui::EndTable();
+        }
+    }
 
     // Paper reset button — only shown when not live trading
     if (shared && !s->live_trading) {

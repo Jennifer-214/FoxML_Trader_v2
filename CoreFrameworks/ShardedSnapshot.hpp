@@ -197,6 +197,17 @@ static inline void TUI_CopySnapshotSharded(
         // v4.0.4: per-core diagnostic state for Buy Gate panel
         snap->per_core[i].halt_reason            = state->cores[i].halt_reason;
         snap->per_core[i].sl_cooldown_remaining  = state->cores[i].sl_cooldown_remaining;
+        // v4.0.4: per-core P&L for Account panel breakdown
+        snap->per_core[i].core_realized      = FPN_ToDouble(state->cores[i].core_realized);
+        snap->per_core[i].core_fees          = FPN_ToDouble(state->cores[i].core_fees);
+        snap->per_core[i].core_allocated     = FPN_ToDouble(state->cores[i].allocated_balance);
+        snap->per_core[i].core_wins          = state->cores[i].core_wins;
+        snap->per_core[i].core_losses        = state->cores[i].core_losses;
+        // open positions = entries minus exits (single-position-per-core invariant
+        // means this is 0 or 1 today, but kept generic for future multi-position).
+        uint64_t entries = state->cores[i].entries_processed;
+        uint64_t exits   = state->cores[i].exits_processed;
+        snap->per_core[i].core_open_positions = (uint32_t)(entries - exits);
         tt::ExecutionCore<F>* core = state->cores[i].core;
         if (core) {
             tt::GateParameters<F> params;

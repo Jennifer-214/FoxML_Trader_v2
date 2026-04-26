@@ -137,6 +137,15 @@ struct CoreContext {
     // strategy from REGIME_STRATEGY_TABLE for the current detected regime.
     // Snapshot reads this for the GUI display so AUTO rows show e.g. "AUTO (DIP)".
     uint8_t resolved_strategy_id;
+    // v4.0.4: per-core P&L tracking. The OMS keeps a single global
+    // realized_pnl across all cores (since portfolio is shared); these
+    // counters split it out by source core for the Account panel and any
+    // future per-core kill switch / risk re-allocation logic. Updated in
+    // EventLoop_OnEvent exit branch, alongside oms->realized_pnl.
+    FPN<F> core_realized;          // sum of net P&L from this core's exits
+    FPN<F> core_fees;              // sum of fees paid by this core's fills
+    uint32_t core_wins;            // exits with net > 0
+    uint32_t core_losses;          // exits with net <= 0
 };
 
 //======================================================================================================
@@ -217,6 +226,11 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         // v4.0.3 D10: P&L feeder per core for adaptive filter shifts.
         state->cores[i].pnl_feeder = RegressionFeederX_Init<F>();
         state->cores[i].resolved_strategy_id = STRATEGY_NONE;  // v4.0.4
+        // v4.0.4: per-core P&L counters
+        state->cores[i].core_realized = FPN_Zero<F>();
+        state->cores[i].core_fees = FPN_Zero<F>();
+        state->cores[i].core_wins = 0;
+        state->cores[i].core_losses = 0;
     }
 }
 
@@ -511,6 +525,18 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         FPN<F> net = FPN_Sub(gross, total_fee);
         state->oms->balance = FPN_Add(state->oms->balance, net);
         state->oms->realized_pnl = FPN_Add(state->oms->realized_pnl, net);
+        // v4.0.4: per-core P&L bookkeeping. The OMS keeps a single global
+        // accumulator (one portfolio); we split it back out by source core
+        // for the Account panel so users can see which core is making/losing
+        // money. core_fees adds the entry+exit fee for this fill.
+        // Branchless win/loss: FPN_GreaterThan returns 1/0, used as integer
+        // mask. Slow path so cost is irrelevant — kept branchless for
+        // consistency with the rest of the engine.
+        ctx->core_realized = FPN_Add(ctx->core_realized, net);
+        ctx->core_fees = FPN_Add(ctx->core_fees, total_fee);
+        uint32_t is_win = (uint32_t)FPN_GreaterThan(net, FPN_Zero<F>());
+        ctx->core_wins   += is_win;
+        ctx->core_losses += (1u - is_win);
         // Phase 09: track peak balance for drawdown-based kill switch.
         // Cheap on the slow path; the comparison is one FPN compare per exit.
         if (FPN_GreaterThan(state->oms->balance, state->oms->ks_peak_balance)) {
