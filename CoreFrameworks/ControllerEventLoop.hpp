@@ -104,6 +104,13 @@ struct CoreContext {
     double staged_prediction;      // prediction from last ML rebuild
     double active_prediction;      // prediction at last entry submit (0 = no open pos)
     double last_confidence;        // most recent ConfidenceScorer_Compute result
+    // v4.0.3 spacing: last entry price for this core, set by drainer on
+    // entry submit. Strategy _BuildParameters checks
+    // |new_entry - last_entry_price| < stddev × spacing_multiplier and
+    // zero-gates if too close, preventing entry clustering at similar
+    // prices. Mirrors legacy PortfolioController spacing logic.
+    FPN<F> last_entry_price;
+    uint64_t last_entry_tick;      // for time-based exit (A3)
 };
 
 //======================================================================================================
@@ -173,6 +180,8 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].staged_prediction = 0.0;
         state->cores[i].active_prediction = 0.0;
         state->cores[i].last_confidence = 0.0;
+        state->cores[i].last_entry_price = FPN_Zero<F>();
+        state->cores[i].last_entry_tick  = 0;
     }
 }
 
@@ -614,6 +623,37 @@ inline int EventLoop_RebuildAllParameters(
             rolling_long,
             dispatch_ctx
         );
+
+        // v4.0.3 cross-cutting checks applied uniformly across all strategies:
+        //
+        // SPACING: zero-gate if the proposed entry is too close to this
+        // core's last entry. Prevents clustering positions at similar prices
+        // (which produces correlated wins/losses, not independent diversification).
+        // Mirrors legacy PortfolioController spacing logic.
+        if (!Strategy_SpacingOk(state->cores[slot].pending_params.bg_price_threshold,
+                                 state->cores[slot].last_entry_price,
+                                 rolling, &resolved_cfg)) {
+            state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
+        }
+        // FEE FLOOR: ratchet TP up so it clears at least
+        // entry × fee_rate × fee_floor_mult. Round-trip fees are 2×fee_rate,
+        // so fee_floor_mult=5 means TP must clear ~2.5× round-trip fees + margin.
+        // No-op when bg_price_threshold is zero (no entry), or
+        // fee_floor_mult/fee_rate is zero.
+        if (!FPN_IsZero(state->cores[slot].pending_params.bg_price_threshold)) {
+            FPN<F> entry = state->cores[slot].pending_params.bg_price_threshold;
+            FPN<F> current_tp = state->cores[slot].pending_params.sg_take_profit_price;
+            // tp_amount = current_tp - entry; if it's negative that's already broken
+            // (means strategy set TP below entry — leave alone, it's strategy's bug).
+            if (FPN_GreaterThan(current_tp, entry)) {
+                FPN<F> tp_amount = FPN_Sub(current_tp, entry);
+                FPN<F> floored = Strategy_TpFloor(entry, tp_amount, &resolved_cfg);
+                if (FPN_GreaterThan(floored, tp_amount)) {
+                    state->cores[slot].pending_params.sg_take_profit_price =
+                        FPN_Add(entry, floored);
+                }
+            }
+        }
         // Mirror the pack's TP/SL/qty into the controller-side intended_*
         // fields so OnEvent uses the freshly computed values when the next
         // entry fires. This ties the strategy output to the entry handler.

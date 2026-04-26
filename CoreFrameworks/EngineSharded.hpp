@@ -983,7 +983,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // Extracted drain+Submit helper. Called from both the main drainer loop
     // and the trailing shutdown drain. One site to update when adding new
     // Submit parameters or event types.
-    auto drain_with_submit = [&state, &oms]() -> int {
+    auto drain_with_submit = [&state, &oms, &ticks_produced]() -> int {
         int total_drained = 0;
         for (int slot = 0; slot < state.registered_count; ++slot) {
             ExecutionCore<F>* core = state.cores[slot].core;
@@ -1024,6 +1024,12 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         state.cores[slot].strategy_id == STRATEGY_ML) {
                         state.cores[slot].active_prediction =
                             state.cores[slot].staged_prediction;
+                    }
+                    // v4.0.3 spacing + time-based exit: stamp this entry
+                    // for cross-cutting checks on the next rebuild.
+                    if (is_entry) {
+                        state.cores[slot].last_entry_price = event.price;
+                        state.cores[slot].last_entry_tick  = ticks_produced.load(std::memory_order_relaxed);
                     }
                 }
             }

@@ -93,6 +93,52 @@ struct MLBuildContext {
 };
 
 //======================================================================================================
+// [SPACING + FEE-FLOOR HELPERS — v4.0.3]
+//======================================================================================================
+// Shared logic across all strategies' _BuildParameters. Pre-v4.0.3 these
+// were silently ignored by sharded strategies — now applied uniformly.
+//
+// Spacing: zero-gate the entry if it's within `stddev × spacing_multiplier`
+// of the last entry on this core. Prevents clustering N positions at
+// near-identical prices (which produces correlated wins/losses, not
+// independent diversification).
+//
+// Fee floor: ratchet TP up so it clears `entry × fee_rate × fee_floor_mult`.
+// Round-trip fees on a position are 2 × fee_rate (entry + exit), so
+// fee_floor_mult of 5 means TP must clear ~2.5× round-trip fees.
+//======================================================================================================
+template <unsigned F, unsigned W = 128>
+inline bool Strategy_SpacingOk(FPN<F> proposed_entry,
+                                FPN<F> last_entry,
+                                const RollingStats<F, W>* rolling,
+                                const ControllerConfig<F>* config) {
+    // No prior entry → spacing irrelevant.
+    if (FPN_IsZero(last_entry)) return true;
+    // Spacing disabled or zero stddev → can't compute meaningful threshold.
+    if (FPN_IsZero(config->spacing_multiplier)) return true;
+    if (FPN_IsZero(rolling->price_stddev))      return true;
+    // Required min distance between entries
+    FPN<F> min_dist = FPN_Mul(rolling->price_stddev, config->spacing_multiplier);
+    // |proposed - last|
+    FPN<F> diff = FPN_GreaterThanOrEqual(proposed_entry, last_entry)
+        ? FPN_Sub(proposed_entry, last_entry)
+        : FPN_Sub(last_entry, proposed_entry);
+    return FPN_GreaterThanOrEqual(diff, min_dist);
+}
+
+template <unsigned F>
+inline FPN<F> Strategy_TpFloor(FPN<F> entry_price,
+                                FPN<F> tp_amount,
+                                const ControllerConfig<F>* config) {
+    if (FPN_IsZero(config->fee_floor_mult) || FPN_IsZero(config->fee_rate))
+        return tp_amount;
+    // Required floor = entry × fee_rate × fee_floor_mult
+    FPN<F> fee_per_side = FPN_Mul(entry_price, config->fee_rate);
+    FPN<F> floor = FPN_Mul(fee_per_side, config->fee_floor_mult);
+    return FPN_GreaterThanOrEqual(tp_amount, floor) ? tp_amount : floor;
+}
+
+//======================================================================================================
 // [SIMPLEDIP — full port]
 //======================================================================================================
 //
