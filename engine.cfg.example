@@ -280,3 +280,43 @@ foxml_vol_scaling_z_max=3.0     # z-score clipping threshold for vol scaler
 bandit_enabled=0                # blend regime strategy with Exp3-IX bandit weights
 bandit_blend_ratio=0.30         # max bandit influence fraction (ramps from 0% to this)
 confidence_enabled=0            # dynamic buy threshold from prediction quality scoring
+
+#==============================================================================
+# PER-CORE OVERRIDES (v4.0)
+#==============================================================================
+# Each execution core (0..15) can override any of the fields below. Empty or
+# 0 = inherit from the global value above. Set to override for that core only.
+#
+# Use cases:
+#   - A/B test the same strategy with different tunings on different cores
+#   - Run riskier momentum on Core 0 vs conservative MR on Core 1
+#   - Test ml_buy_threshold sensitivity per core without touching the global
+#
+# Cfg syntax: core_<N>_<field>=<value>. The field name matches the global.
+# All examples below are commented out — uncomment + edit to use, OR use the
+# Settings panel's per-core tabs in engine_gui to edit them visually.
+#
+# Trading
+# core_0_take_profit_pct=4.0
+# core_1_take_profit_pct=6.0
+# core_0_stop_loss_pct=2.0
+# core_0_fee_floor_mult=3.0
+#
+# Entry filters
+# core_0_entry_offset_pct=0.150
+# core_0_volume_multiplier=1.50
+# core_0_spacing_multiplier=2.50
+# core_0_offset_stddev_mult=2.00
+#
+# Strategy-specific (only consulted when this core runs the matching strategy)
+# core_0_simpledip_tp_pct=3.0
+# core_0_simpledip_sl_pct=1.5
+# core_1_mr_tp_pct=2.5
+# core_1_mr_sl_pct=1.25
+# core_2_momentum_tp_mult=3.0
+# core_2_momentum_sl_mult=1.0
+# core_3_emacross_tp_pct=4.0
+# core_3_emacross_sl_pct=2.0
+# core_0_ml_tp_pct=1.5
+# core_0_ml_sl_pct=0.8
+# core_0_ml_buy_threshold=0.55

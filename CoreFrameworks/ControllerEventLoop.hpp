@@ -580,6 +580,11 @@ inline int EventLoop_RebuildAllParameters(
     int rebuilt = 0;
     for (int slot = 0; slot < state->registered_count; ++slot) {
         if (state->cores[slot].strategy_id == STRATEGY_NONE) continue;
+        // v4.0 per-core overrides: resolve the cfg for this core. Stack-local
+        // copy with override fields swapped in. Strategies receive a "fully
+        // resolved" cfg and don't need to know about the override mechanism.
+        ControllerConfig<F> resolved_cfg =
+            ControllerConfig_ResolveForCore(*config, slot);
         // Phase 6prep sharded c13/c15: pack ML extras for ML cores. Non-ML cores
         // get nullptr (the dispatcher passes it through and ML_BuildParameters
         // never runs anyway). Stack-allocated; ML_BuildParameters dereferences
@@ -596,7 +601,7 @@ inline int EventLoop_RebuildAllParameters(
         Strategy_BuildParameters(
             state->cores[slot].strategy_id,
             rolling,
-            config,
+            &resolved_cfg,
             state->cores[slot].allocated_balance,
             &state->cores[slot].pending_params,
             rolling_long,

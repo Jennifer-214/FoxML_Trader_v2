@@ -334,12 +334,80 @@ static const CfgFieldDef field_defs[] = {
 static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 
 //==========================================================================
+// PER-CORE OVERRIDE FIELDS — v4.0
+//
+// One row per overridable field. The actual cfg key is built at render time:
+// "core_<N>_<key_suffix>". 0 / blank means "inherit from Global tab".
+//
+// Adding a per-core field: add ONE entry here + ONE line in
+// PerCoreOverrides + ONE line in ControllerConfig_ResolveForCore + ONE
+// parser case in ControllerConfig_Load. Four sites total.
+//==========================================================================
+struct PerCoreFieldDef {
+    const char *key_suffix;   // e.g. "take_profit_pct" → cfg key core_0_take_profit_pct
+    const char *label;
+    const char *section;      // "Trading" / "Entry Filters" / "Strategy-Specific"
+    const char *fmt;
+    const char *tooltip;
+};
+
+static const PerCoreFieldDef per_core_fields[] = {
+    // Trading overrides
+    {"take_profit_pct",   "TP %%",       "Trading",           "%.2f",
+        "Override global TP %. 0 = inherit from Global tab."},
+    {"stop_loss_pct",     "SL %%",       "Trading",           "%.2f",
+        "Override global SL %. 0 = inherit from Global tab."},
+    {"fee_floor_mult",    "Fee Floor",   "Trading",           "%.1f",
+        "Override global fee floor multiplier. 0 = inherit."},
+    // Entry filter overrides
+    {"entry_offset_pct",   "Offset %%",   "Entry Filters",    "%.3f",
+        "Override global buy gate offset. 0 = inherit."},
+    {"volume_multiplier",  "Vol Mult",    "Entry Filters",    "%.2f",
+        "Override global volume gate multiplier. 0 = inherit."},
+    {"spacing_multiplier", "Spacing",     "Entry Filters",    "%.2f",
+        "Override global entry spacing (in stddev). 0 = inherit."},
+    {"offset_stddev_mult", "Stddev Mult", "Entry Filters",    "%.2f",
+        "Override global stddev mult for offset. 0 = inherit."},
+    // Strategy-specific overrides — only consulted when this core runs the
+    // matching strategy. Useful for A/B testing same-strategy variants
+    // across cores.
+    {"simpledip_tp_pct",  "DIP TP %%",   "Strategy-Specific", "%.2f",
+        "DIP-only TP override for this core. 0 = inherit."},
+    {"simpledip_sl_pct",  "DIP SL %%",   "Strategy-Specific", "%.2f",
+        "DIP-only SL override for this core. 0 = inherit."},
+    {"mr_tp_pct",         "MR TP %%",    "Strategy-Specific", "%.2f",
+        "MR-only TP override for this core. 0 = inherit."},
+    {"mr_sl_pct",         "MR SL %%",    "Strategy-Specific", "%.2f",
+        "MR-only SL override for this core. 0 = inherit."},
+    {"momentum_tp_mult",  "MOM TP σ",    "Strategy-Specific", "%.2f",
+        "MOM-only TP stddev multiplier for this core. 0 = inherit."},
+    {"momentum_sl_mult",  "MOM SL σ",    "Strategy-Specific", "%.2f",
+        "MOM-only SL stddev multiplier for this core. 0 = inherit."},
+    {"emacross_tp_pct",   "EMA TP %%",   "Strategy-Specific", "%.2f",
+        "EMA-only TP override for this core. 0 = inherit."},
+    {"emacross_sl_pct",   "EMA SL %%",   "Strategy-Specific", "%.2f",
+        "EMA-only SL override for this core. 0 = inherit."},
+    {"ml_tp_pct",         "ML TP %%",    "Strategy-Specific", "%.2f",
+        "ML-only TP override for this core. 0 = inherit."},
+    {"ml_sl_pct",         "ML SL %%",    "Strategy-Specific", "%.2f",
+        "ML-only SL override for this core. 0 = inherit."},
+    {"ml_buy_threshold",  "ML Threshold","Strategy-Specific", "%.3f",
+        "ML buy threshold override for this core (0-1). 0 = inherit."},
+};
+static constexpr int NUM_PER_CORE_FIELDS =
+    sizeof(per_core_fields) / sizeof(per_core_fields[0]);
+static constexpr int MAX_GUI_CORES = 16;
+
+//==========================================================================
 // SETTINGS STATE — auto-generated from field_defs (no manual struct)
 //==========================================================================
 struct SettingsState {
     float float_vals[NUM_FIELDS];  // storage for float/int fields
     int   bool_vals[NUM_FIELDS];   // storage for bool fields
     char  path_vals[NUM_FIELDS][512]; // storage for path fields (Phase 8b: 256→512 to fit notify_command templates)
+    // v4.0 per-core override storage. Indexed [core][field]. Floats only —
+    // every per-core override is FPN<F> in the cfg.
+    float per_core_vals[MAX_GUI_CORES][NUM_PER_CORE_FIELDS];
     bool  loaded;
     char  cfg_path[256];
 };
@@ -378,6 +446,11 @@ static inline void cfg_write_field(const char *path, const char *key, const char
 }
 
 static inline void Settings_Load(SettingsState *s) {
+    // zero per-core overrides up front; populated below if cfg has them
+    for (int c = 0; c < MAX_GUI_CORES; ++c)
+        for (int j = 0; j < NUM_PER_CORE_FIELDS; ++j)
+            s->per_core_vals[c][j] = 0.0f;
+
     FILE *f = fopen(s->cfg_path, "r");
     if (!f) return;
     char line[512];
@@ -386,6 +459,8 @@ static inline void Settings_Load(SettingsState *s) {
         char *p = line;
         while (*p == ' ' || *p == '\t') p++;
 
+        // try matching against global field_defs first
+        bool matched = false;
         for (int i = 0; i < NUM_FIELDS; i++) {
             size_t klen = strlen(field_defs[i].key);
             if (strncmp(p, field_defs[i].key, klen) == 0 && p[klen] == '=') {
@@ -402,7 +477,27 @@ static inline void Settings_Load(SettingsState *s) {
                     s->float_vals[i] = (float)atoi(val);
                 else
                     s->float_vals[i] = (float)atof(val);
+                matched = true;
                 break;
+            }
+        }
+        if (matched) continue;
+
+        // v4.0 per-core override: parse `core_<N>_<suffix>=<value>`
+        if (strncmp(p, "core_", 5) == 0) {
+            int core_idx = atoi(p + 5);
+            const char *us = p + 5;
+            while (*us && *us != '_') us++;
+            if (*us == '_' && core_idx >= 0 && core_idx < MAX_GUI_CORES) {
+                const char *suffix = us + 1;
+                for (int j = 0; j < NUM_PER_CORE_FIELDS; ++j) {
+                    size_t slen = strlen(per_core_fields[j].key_suffix);
+                    if (strncmp(suffix, per_core_fields[j].key_suffix, slen) == 0 &&
+                        suffix[slen] == '=') {
+                        s->per_core_vals[core_idx][j] = (float)atof(suffix + slen + 1);
+                        break;
+                    }
+                }
             }
         }
     }
@@ -411,17 +506,9 @@ static inline void Settings_Load(SettingsState *s) {
 }
 
 //==========================================================================
-// RENDER — auto-generates UI from field_defs
+// GLOBAL TAB — renders the auto-generated field_defs[] layout
 //==========================================================================
-static inline void GUI_Panel_Settings(SettingsState *s, volatile sig_atomic_t *reload_flag) {
-    ImGui::Begin("Settings");
-
-    if (!s->loaded) Settings_Load(s);
-
-    ImGui::TextColored(FoxmlColors::primary, "ENGINE SETTINGS");
-    ImGui::TextColored(FoxmlColors::comment, "edit + press Enter to apply");
-    ImGui::Separator();
-
+static inline bool Settings_RenderGlobalTab(SettingsState *s) {
     bool changed = false;
     const char *current_section = NULL;
 
@@ -492,6 +579,92 @@ static inline void GUI_Panel_Settings(SettingsState *s, volatile sig_atomic_t *r
         // hover tooltip from field_defs — inline, no separate lookup chain
         if (fd->tooltip)
             ImGui::SetItemTooltip("%s", fd->tooltip);
+    }
+    return changed;
+}
+
+//==========================================================================
+// PER-CORE TAB — renders one core's PerCoreOverrides editor
+//==========================================================================
+// Each row is one override. Empty/0 = inherit from Global. The current value
+// from the Global tab is shown next to the input as a small grey hint.
+static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id) {
+    bool changed = false;
+
+    ImGui::TextColored(FoxmlColors::comment,
+        "Empty (0.00) means \"inherit from Global tab\". "
+        "Set any override to use that value for this core only.");
+
+    const char *current_section = NULL;
+    for (int j = 0; j < NUM_PER_CORE_FIELDS; ++j) {
+        const PerCoreFieldDef *pcf = &per_core_fields[j];
+        if (!current_section || strcmp(current_section, pcf->section) != 0) {
+            current_section = pcf->section;
+            ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_DefaultOpen;
+            if (!ImGui::CollapsingHeader(pcf->section, fl)) {
+                while (j + 1 < NUM_PER_CORE_FIELDS &&
+                       strcmp(per_core_fields[j + 1].section, pcf->section) == 0)
+                    ++j;
+                continue;
+            }
+        }
+        ImGui::PushID(j);  // disambiguate same-named labels across the 18 rows
+        ImGui::SetNextItemWidth(80);
+        ImGui::InputFloat(pcf->label, &s->per_core_vals[core_id][j], 0, 0, pcf->fmt);
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            char key[64];
+            snprintf(key, sizeof(key), "core_%d_%s", core_id, pcf->key_suffix);
+            char val[32];
+            snprintf(val, sizeof(val), pcf->fmt, s->per_core_vals[core_id][j]);
+            cfg_write_field(s->cfg_path, key, val);
+            changed = true;
+        }
+        if (pcf->tooltip)
+            ImGui::SetItemTooltip("%s", pcf->tooltip);
+        ImGui::PopID();
+    }
+    return changed;
+}
+
+//==========================================================================
+// RENDER — tabbed: Global + Core 0..N
+//==========================================================================
+static inline void GUI_Panel_Settings(SettingsState *s, volatile sig_atomic_t *reload_flag) {
+    ImGui::Begin("Settings");
+
+    if (!s->loaded) Settings_Load(s);
+
+    ImGui::TextColored(FoxmlColors::primary, "ENGINE SETTINGS");
+    ImGui::TextColored(FoxmlColors::comment, "edit + press Enter to apply");
+    ImGui::Separator();
+
+    // num_execution_cores drives how many Core tabs to render. Pull it from
+    // loaded state — the field_defs entry "num_execution_cores" stores it.
+    int num_cores = 4;
+    for (int i = 0; i < NUM_FIELDS; ++i) {
+        if (strcmp(field_defs[i].key, "num_execution_cores") == 0) {
+            num_cores = (int)s->float_vals[i];
+            if (num_cores < 1) num_cores = 1;
+            if (num_cores > MAX_GUI_CORES) num_cores = MAX_GUI_CORES;
+            break;
+        }
+    }
+
+    bool changed = false;
+    if (ImGui::BeginTabBar("##settings_tabs")) {
+        if (ImGui::BeginTabItem("Global")) {
+            if (Settings_RenderGlobalTab(s)) changed = true;
+            ImGui::EndTabItem();
+        }
+        for (int c = 0; c < num_cores; ++c) {
+            char tab_label[16];
+            snprintf(tab_label, sizeof(tab_label), "Core %d", c);
+            if (ImGui::BeginTabItem(tab_label)) {
+                if (Settings_RenderPerCoreTab(s, c)) changed = true;
+                ImGui::EndTabItem();
+            }
+        }
+        ImGui::EndTabBar();
     }
 
     if (changed) {
