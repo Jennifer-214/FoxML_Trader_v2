@@ -809,11 +809,21 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // TODO: move kill switch eval to drainer thread, or use an
                 // atomic balance snapshot for the comparison.
                 EventLoop_KillSwitchEvaluate(&state);
-                // Grant permission as soon as the rolling stats have any
-                // data at all — the first sample gives us a meaningful
-                // rolling max for the SimpleDip threshold. Each core is its
-                // own mini-portfolio so there's no need for a long warmup.
-                if (rolling_short.count >= 1) {
+                // Warmup gating: don't grant permission until rolling stats
+                // have meaningful data. Pre-v4.0.1 this was `count >= 1`,
+                // which let MR (buy-below-avg) AND MOM (buy-above-avg) BOTH
+                // fire on the second tick — every restart instantly opened
+                // 2 positions with garbage TP/SL because rolling.price_avg
+                // and rolling.price_stddev hadn't stabilized yet.
+                //
+                // Use cfg.min_warmup_samples if set (>0), else half the
+                // short window (= 64). 64 samples gives a stable enough
+                // rolling stddev for momentum sizing to compute non-trivial
+                // TP/SL distances and prevents the both-strategies-fire
+                // race during the first few ticks.
+                uint32_t min_samples = cfg.min_warmup_samples > 0
+                    ? cfg.min_warmup_samples : 64;
+                if (rolling_short.count >= (int)min_samples) {
                     for (int c = 0; c < num_cores; ++c) {
                         if (state.cores[c].strategy_id != STRATEGY_NONE) {
                             ExecutionCore_SetPermission(&cores[c], 1);
@@ -1294,27 +1304,38 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 #endif  // USE_IMGUI_GUI else (ANSI TUI)
 
     fprintf(stderr, "[sharded] shutdown requested, joining threads...\n");
-    producer.join();
-    for (auto& e : executors) e.join();
-    drainer.join();
-#ifdef USE_IMGUI_GUI
-    g_shared.quit_requested = 1;
-    pthread_join(gui_tid, NULL);
-#endif
-    // Phase 8a (post-coding c6) — depth thread shutdown + recorder close.
-    // depth_thread_fn polls quit_requested at top of loop; next 200ms cycle
-    // picks it up. g_depth_tid==0 when depth_enabled was off or init failed.
+    // Per-stage shutdown logging — when the process refuses to exit on close,
+    // these tell us WHICH thread is hung. Without them every shutdown bug
+    // looks the same from outside ("the engine doesn't die"). Each stage
+    // also signals its dedicated quit flag BEFORE joining so the thread has
+    // a chance to see it on its next loop iteration. v4.0.1 added per-stage
+    // signals after observing producer+depth could be in mid-reconnect with
+    // their dedicated flags not yet set.
+    fprintf(stderr, "[sharded]   joining depth thread...\n");
     if (g_depth_tid != 0) {
         __atomic_store_n(&g_depth_shared.quit_requested, 1, __ATOMIC_RELEASE);
         pthread_join(g_depth_tid, NULL);
     }
+    fprintf(stderr, "[sharded]   joining producer...\n");
+    producer.join();
+    fprintf(stderr, "[sharded]   joining executors (%d)...\n", num_cores);
+    for (auto& e : executors) e.join();
+    fprintf(stderr, "[sharded]   joining drainer...\n");
+    drainer.join();
+#ifdef USE_IMGUI_GUI
+    fprintf(stderr, "[sharded]   joining GUI...\n");
+    g_shared.quit_requested = 1;
+    pthread_join(gui_tid, NULL);
+#endif
+    fprintf(stderr, "[sharded]   closing recorders...\n");
     DepthRecorder_Close(&g_depth_rec);
     TickRecorder_Close(&g_tick_rec);  // Phase 8a (post-coding c7)
-    // Phase 8b (post-coding c8) — drain notify queue + join worker.
+    fprintf(stderr, "[sharded]   shutting down notify worker...\n");
     if (g_notify) {
         NotifyState_Shutdown(g_notify);
         g_notify = nullptr;
     }
+    fprintf(stderr, "[sharded]   shutting down OMS...\n");
     OrderManager_Shutdown(&oms);
 
     fprintf(stderr, "[sharded] all threads joined.\n");

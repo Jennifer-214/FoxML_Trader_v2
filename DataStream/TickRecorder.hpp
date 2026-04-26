@@ -55,7 +55,12 @@ static inline void TickRecorder_MkdirP(const char *path) {
 
 //======================================================================================================
 static inline int TickRecorder_DateInt(int64_t timestamp_us) {
-    time_t t = (time_t)(timestamp_us / 1000);
+    // BUG-FIX: parameter is MICROSECONDS (per name + caller contract), so we
+    // need /1e6 to get seconds. Pre-fix used /1000 which treated input as
+    // milliseconds — produced years like 58286 instead of 2026 because the
+    // resulting "time_t" was 1000× too large. Burned through one new file
+    // per tick because each tick's "day" computed differently.
+    time_t t = (time_t)(timestamp_us / 1000000LL);
     struct tm tm;
     gmtime_r(&t, &tm);
     return (tm.tm_year + 1900) * 10000 + (tm.tm_mon + 1) * 100 + tm.tm_mday;
