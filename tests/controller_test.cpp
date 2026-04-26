@@ -20,6 +20,7 @@
 #include "../CoreFrameworks/OrderManager.hpp"
 #include "../CoreFrameworks/ControllerEventLoop.hpp"  // Phase 2.1 tests
 #include "../CoreFrameworks/ExecutionCore.hpp"        // Phase 2.1 tests
+#include "../CoreFrameworks/ShardedSnapshotPersist.hpp"  // Phase 4 tests
 #include "../DataStream/BinanceUserData.hpp"
 #include "../Backtest/BacktestEngine.hpp"
 #include "../Backtest/HeldOutSplit.hpp"
@@ -4270,6 +4271,181 @@ int main() {
             check("pre-tripped: bg_price_threshold zero-gated",
                   FPN_IsZero(r->state.cores[0].pending_params.bg_price_threshold));
         }
+    }
+
+    //======================================================================================================
+    // [PHASE 4 TESTS — sharded snapshot persistence]
+    //======================================================================================================
+    // Pin: round-trip save→load preserves all per-core state. Refuse legacy
+    // v11 magic cleanly (no migration). Refuse version mismatch. Refuse core-
+    // count mismatch (cfg drift). Missing file is fine (first run). Atomic
+    // rename leaves previous good file intact on failed write (smoke test).
+    //======================================================================================================
+    printf("\n--- Phase 4: sharded snapshot persistence ---\n");
+    {
+        const char* test_path = "/tmp/sharded_snapshot_test.dat";
+        unlink(test_path);  // ensure clean start
+
+        // Helper that builds a fresh state with N cores
+        auto build_state = [](int num_cores, double balance) {
+            struct R {
+                tt::OrderManagerState<64> oms;
+                tt::EventLoopState<64> state;
+                tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE> tick_rings[8];
+                tt::ExecutionCore<64> cores[8];
+            };
+            R* r = new R();
+            tt::EventLoopState_InitLegacy(&r->state, &r->oms,
+                FPN_FromDouble<64>(balance), FPN_FromDouble<64>(0.001));
+            for (int i = 0; i < num_cores && i < 8; ++i) {
+                tt::SPSCRing_Init(&r->tick_rings[i]);
+                tt::ExecutionCore_Init(&r->cores[i], 0, &r->tick_rings[i]);
+                tt::EventLoopState_RegisterCore(&r->state, &r->cores[i],
+                    FPN_FromDouble<64>(60100.0), FPN_FromDouble<64>(59900.0),
+                    FPN_FromDouble<64>(0.01));
+                tt::EventLoopState_SetCoreStrategy(&r->state, i,
+                    STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(balance / num_cores));
+            }
+            return r;
+        };
+
+        // ---- Test 1: missing file → load returns 0, state untouched ----
+        {
+            auto* r = build_state(2, 10000.0);
+            int loaded = tt::ShardedSnapshot_Load<64>(&r->state, "/tmp/nonexistent_snapshot.dat");
+            check("missing file: load returns 0",
+                  loaded == 0);
+            check("missing file: state untouched (balance still starting)",
+                  fabs(FPN_ToDouble(r->state.oms->balance) - 10000.0) < 1e-6);
+        }
+
+        // ---- Test 2: round trip preserves all per-core state ----
+        {
+            auto* r = build_state(4, 10000.0);
+            // Simulate a session of activity on each core
+            for (int c = 0; c < 4; ++c) {
+                r->state.cores[c].entries_processed = 10 + c;
+                r->state.cores[c].exits_processed   = 8 + c;
+                r->state.cores[c].core_realized     = FPN_FromDouble<64>(50.0 - 10.0 * c);
+                r->state.cores[c].core_fees         = FPN_FromDouble<64>(2.5);
+                r->state.cores[c].core_wins         = 6 + c;
+                r->state.cores[c].core_losses       = 2;
+                r->state.cores[c].core_open_notional = FPN_FromDouble<64>(100.0 + 50.0 * c);
+                r->state.cores[c].core_peak_balance  = FPN_FromDouble<64>(2600.0 + 100.0 * c);
+                r->state.cores[c].core_dd_pct        = FPN_FromDouble<64>(0.03 * c);
+                r->state.cores[c].core_kill_tripped  = (c == 2) ? 1 : 0;
+                r->state.cores[c].core_ks_trips_total = c;
+                r->state.cores[c].regime_state.current_regime = c % 4;
+                r->state.cores[c].regime_state.hysteresis_count = 5 + c;
+                r->state.cores[c].pnl_feeder.head  = c % MAX_WINDOW;
+                r->state.cores[c].pnl_feeder.count = MAX_WINDOW;
+                for (int j = 0; j < MAX_WINDOW; ++j) {
+                    r->state.cores[c].pnl_feeder.price_samples[j] =
+                        FPN_FromDouble<64>(100.0 * (c + 1) + j);
+                }
+                r->state.cores[c].last_confidence = 0.5 + 0.1 * c;
+            }
+            r->oms.balance      = FPN_FromDouble<64>(9837.42);
+            r->oms.realized_pnl = FPN_FromDouble<64>(-162.58);
+
+            int saved = tt::ShardedSnapshot_Save<64>(&r->state, test_path);
+            check("round-trip: save returns 1",
+                  saved == 1);
+
+            // Build a fresh state with same num_cores; load over it
+            auto* r2 = build_state(4, 10000.0);  // fresh OMS
+            int loaded = tt::ShardedSnapshot_Load<64>(&r2->state, test_path);
+            check("round-trip: load returns 1",
+                  loaded == 1);
+            check("round-trip: oms.balance restored",
+                  fabs(FPN_ToDouble(r2->state.oms->balance) - 9837.42) < 1e-6);
+            check("round-trip: oms.realized_pnl restored",
+                  fabs(FPN_ToDouble(r2->state.oms->realized_pnl) - (-162.58)) < 1e-6);
+
+            for (int c = 0; c < 4; ++c) {
+                check("round-trip: entries_processed",
+                      r2->state.cores[c].entries_processed == (uint64_t)(10 + c));
+                check("round-trip: core_realized",
+                      fabs(FPN_ToDouble(r2->state.cores[c].core_realized) - (50.0 - 10.0 * c)) < 1e-6);
+                check("round-trip: core_kill_tripped",
+                      r2->state.cores[c].core_kill_tripped == (c == 2 ? 1 : 0));
+                check("round-trip: regime current",
+                      r2->state.cores[c].regime_state.current_regime == (c % 4));
+                check("round-trip: pnl_feeder count",
+                      r2->state.cores[c].pnl_feeder.count == MAX_WINDOW);
+                check("round-trip: pnl_feeder sample[0]",
+                      fabs(FPN_ToDouble(r2->state.cores[c].pnl_feeder.price_samples[0]) - (100.0 * (c + 1))) < 1e-6);
+            }
+        }
+
+        // ---- Test 3: refuse legacy v11 magic cleanly ----
+        {
+            FILE* f = fopen(test_path, "wb");
+            uint32_t legacy_magic = 0x4B434954u;  // PORTFOLIO_SNAPSHOT_MAGIC
+            uint32_t v11 = 11;
+            fwrite(&legacy_magic, 4, 1, f);
+            fwrite(&v11, 4, 1, f);
+            fclose(f);
+
+            auto* r = build_state(2, 10000.0);
+            int loaded = tt::ShardedSnapshot_Load<64>(&r->state, test_path);
+            check("legacy magic: refused (returns 0)",
+                  loaded == 0);
+            check("legacy magic: state untouched",
+                  fabs(FPN_ToDouble(r->state.oms->balance) - 10000.0) < 1e-6);
+        }
+
+        // ---- Test 4: refuse version mismatch ----
+        {
+            FILE* f = fopen(test_path, "wb");
+            uint32_t magic = 0x53484430u;  // SHARDED_SNAPSHOT_MAGIC
+            uint32_t bad_version = 99;
+            fwrite(&magic, 4, 1, f);
+            fwrite(&bad_version, 4, 1, f);
+            fclose(f);
+
+            auto* r = build_state(2, 10000.0);
+            int loaded = tt::ShardedSnapshot_Load<64>(&r->state, test_path);
+            check("version mismatch: refused",
+                  loaded == 0);
+        }
+
+        // ---- Test 5: refuse core-count mismatch ----
+        {
+            // Save with 4 cores
+            auto* r4 = build_state(4, 10000.0);
+            r4->oms.balance = FPN_FromDouble<64>(8888.0);  // distinguishable
+            tt::ShardedSnapshot_Save<64>(&r4->state, test_path);
+
+            // Load into a 2-core state
+            auto* r2 = build_state(2, 10000.0);
+            int loaded = tt::ShardedSnapshot_Load<64>(&r2->state, test_path);
+            check("core-count mismatch (4 saved, 2 cfg): refused",
+                  loaded == 0);
+            check("core-count mismatch: state untouched",
+                  fabs(FPN_ToDouble(r2->state.oms->balance) - 10000.0) < 1e-6);
+        }
+
+        // ---- Test 6: corrupted file (truncated mid-block) ----
+        {
+            // Save valid snapshot
+            auto* r = build_state(2, 10000.0);
+            tt::ShardedSnapshot_Save<64>(&r->state, test_path);
+            // Truncate to half its size
+            FILE* f = fopen(test_path, "rb");
+            fseek(f, 0, SEEK_END); long sz = ftell(f); fclose(f);
+            f = fopen(test_path, "r+b");
+            ftruncate(fileno(f), sz / 2);
+            fclose(f);
+
+            auto* r2 = build_state(2, 10000.0);
+            int loaded = tt::ShardedSnapshot_Load<64>(&r2->state, test_path);
+            check("truncated file: refused (no crash)",
+                  loaded == 0);
+        }
+
+        // ---- Cleanup ----
+        unlink(test_path);
     }
 
     printf("\n======================================\n");

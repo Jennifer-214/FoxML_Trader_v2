@@ -50,6 +50,7 @@
 #include "ReconciliationLoop.hpp"
 #include "ShardedLiveSafety.hpp"   // Phase 0: orphan recovery, force-close, reconcile
 #include "ShardedSnapshot.hpp"
+#include "ShardedSnapshotPersist.hpp"  // Phase 4: persistent state across restarts
 #include "ControllerEventLoop.hpp"
 #include "CoreLatencyStats.hpp"
 #include "ControllerConfig.hpp"
@@ -607,6 +608,29 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         CoreLatencyStats_Enable(&cores[i].latency_stats);
     }
 
+    // Phase 4 — load persisted state. Cores are now registered + initialized
+    // with cfg-derived values; this overlays any previous session's regime
+    // hysteresis, pnl_feeder, kill switch peak/trips, P&L counters,
+    // open positions. Refuses cleanly on bad magic / version / core-count
+    // mismatch (logs + starts fresh — never crashes).
+    //
+    // Snapshot path: data/sharded_snapshot.dat. Live mode skips load —
+    // orphan recovery already established the live balance from the
+    // exchange, and persisted positions could be wrong if the user manually
+    // traded between sessions. Paper mode is the safe-to-resume case.
+    {
+        const char* snapshot_path = "data/sharded_snapshot.dat";
+        // Ensure data/ exists (mkdir is idempotent — silent if it does)
+        mkdir("data", 0755);
+        if (!live_trading) {
+            int loaded = ShardedSnapshot_Load<F>(&state, snapshot_path);
+            (void)loaded;  // logged inside; nothing else to do here
+        } else {
+            fprintf(stderr, "[snapshot] LIVE mode: skipping snapshot load "
+                            "(exchange-truth-of-state)\n");
+        }
+    }
+
     std::atomic<bool> producer_done{false};
     std::atomic<uint64_t> ticks_produced{0};
     std::atomic<uint64_t> ticks_consumed_total{0};
@@ -651,7 +675,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     //----------------------------------------------------------------------
     std::thread producer([&producer_done, &ticks_produced, &bcfg, &last_price, &last_volume,
                           &cfg, &state, num_cores, use_synthetic, tsc_ghz,
-                          &ema_price, &ema_alpha, &regime_ror] {
+                          &ema_price, &ema_alpha, &regime_ror, live_trading] {
         EngineSharded_PinThread(0);  // best-effort pin to CPU 0
         uint64_t seq = 0;
         // Sharded mode uses a much shorter slow_path_interval than legacy
@@ -665,7 +689,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // updates rolling stats, and runs the slow-path rebuild on cadence.
         auto fan_out = [num_cores, &seq, &ticks_produced, &last_price, &last_volume,
                         &cfg, &state, &slow_path_counter, slow_path_interval, tsc_ghz,
-                        &ema_price, ema_alpha, &regime_ror]
+                        &ema_price, ema_alpha, &regime_ror, live_trading]
                        (double price_d, double volume_d, uint64_t ts_us) {
             Tick<F> t;
             memset(&t, 0, sizeof(t));
@@ -871,6 +895,18 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 EventLoop_RebuildAllParameters(&state, &rolling_short, &cfg, &rolling_long,
                                                 &regime_ror, &ema_price,
                                                 FPN_IsZero(mtm_price) ? nullptr : &mtm_price);
+
+                // Phase 4 — periodic snapshot save. Once every ~1024 slow-path
+                // cycles, paper mode only. With slow_path_interval=8 ticks and
+                // ~10 ticks/sec that's roughly every 13 minutes — frequent
+                // enough to bound state-loss-on-crash, infrequent enough to
+                // not spam the disk. Atomic rename means a crash mid-save
+                // leaves the previous good file intact.
+                static int save_counter = 0;
+                if (!live_trading && (++save_counter >= 1024)) {
+                    save_counter = 0;
+                    ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat");
+                }
                 EventLoop_PushParameters(&state);
                 // KNOWN RACE (audit 2026-04-09): KillSwitchEvaluate reads
                 // oms->balance from this (producer) thread while the drainer
@@ -1489,6 +1525,21 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 #endif  // USE_IMGUI_GUI else (ANSI TUI)
 
     fprintf(stderr, "[sharded] shutdown requested, joining threads...\n");
+
+    // Phase 4 — final snapshot save BEFORE force-close. Captures the
+    // pre-close state so a restart can resume regime hysteresis +
+    // pnl_feeder + kill switch peak. Force-close mutates portfolio +
+    // realized_pnl; we save first so the persisted state matches the
+    // engine's "intent" rather than an in-progress liquidation.
+    // Paper mode only — live mode treats exchange state as truth.
+    if (!live_trading) {
+        if (ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat")) {
+            fprintf(stderr, "[snapshot] final save: data/sharded_snapshot.dat\n");
+        } else {
+            fprintf(stderr, "[snapshot] final save FAILED — next restart starts fresh\n");
+        }
+    }
+
     // Phase 0.2 — force-close on shutdown. Refuse to silently exit with
     // open positions. Submits market sells via OrderManager_Submit (same
     // path as TP/SL exits) and waits up to 30s for the bitmap to clear as
