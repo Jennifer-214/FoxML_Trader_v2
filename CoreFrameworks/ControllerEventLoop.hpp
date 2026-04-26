@@ -616,6 +616,24 @@ inline int EventLoop_RebuildAllParameters(
         // resolved" cfg and don't need to know about the override mechanism.
         ControllerConfig<F> resolved_cfg =
             ControllerConfig_ResolveForCore(*config, slot);
+        // v4.0.3 D6: session-aware volume multiplier. Each session has its
+        // own typical volume profile — cfg can require lower volume during
+        // Asian session (when BTC is quieter) than US session (when busier).
+        // Mirrors legacy PortfolioController. Time-of-day from system clock —
+        // assumes engine clock is synced (it should be for live trading).
+        time_t now = time(nullptr);
+        struct tm tm_utc;
+        gmtime_r(&now, &tm_utc);
+        FPN<F> session_mult = FPN_FromDouble<F>(1.0);
+        int hour = tm_utc.tm_hour;
+        if (hour >= 0 && hour < 7)         session_mult = resolved_cfg.session_asian_mult;
+        else if (hour >= 7 && hour < 13)   session_mult = resolved_cfg.session_european_mult;
+        else if (hour >= 13 && hour < 20)  session_mult = resolved_cfg.session_us_mult;
+        else                                session_mult = resolved_cfg.session_overnight_mult;
+        if (!FPN_IsZero(session_mult)) {
+            resolved_cfg.volume_multiplier =
+                FPN_Mul(resolved_cfg.volume_multiplier, session_mult);
+        }
 
         // v4.0.3 B: STRATEGY_AUTO regime mode. The core's nominal strategy_id
         // is AUTO; we compute the current regime from the same RegimeSignals
@@ -690,9 +708,27 @@ inline int EventLoop_RebuildAllParameters(
             zero_gate(6);
         }
         // SPACING: zero-gate if proposed entry too close to last entry.
+        // SPIKE-RELAXATION (D5): when current volume is a spike (>= max ×
+        // spike_threshold), reduce the spacing requirement by
+        // spike_spacing_reduction. Real volume bursts are valid second-entry
+        // opportunities — don't artificially space them out.
+        ControllerConfig<F> spacing_cfg = resolved_cfg;
+        if (!FPN_IsZero(rolling->volume_max) &&
+            !FPN_IsZero(resolved_cfg.spike_threshold)) {
+            FPN<F> ratio_thresh = FPN_Mul(rolling->volume_max,
+                FPN_DivNoAssert(FPN_FromDouble<F>(1.0), resolved_cfg.spike_threshold));
+            // Note: spike active when current_volume × spike_threshold >= max.
+            // Equivalent: current >= max / spike_threshold.
+            // We check the latest volume_avg as the "current" representative.
+            if (FPN_GreaterThanOrEqual(rolling->volume_avg, ratio_thresh)) {
+                spacing_cfg.spacing_multiplier = FPN_Mul(
+                    resolved_cfg.spacing_multiplier,
+                    resolved_cfg.spike_spacing_reduction);
+            }
+        }
         if (!Strategy_SpacingOk(state->cores[slot].pending_params.bg_price_threshold,
                                  state->cores[slot].last_entry_price,
-                                 rolling, &resolved_cfg)) {
+                                 rolling, &spacing_cfg)) {
             zero_gate(1);
         }
         // VWAP gate: forces entries below VWAP — buy retracements, not pumps.
