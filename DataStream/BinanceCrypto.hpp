@@ -33,6 +33,7 @@
 #include <netdb.h>
 #include <poll.h>
 #include <time.h>
+#include <csignal>
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -571,6 +572,12 @@ static inline void BinanceStream_Close(BinanceStream *bs) {
 // close the existing connection and re-establish from scratch
 // waits reconnect_delay seconds before attempting (avoids hammering binance)
 //======================================================================================================
+// Engine sets this at startup so reconnect can break out of its delay
+// sleep when the user closes the GUI / hits Ctrl+C. NULL (default) =
+// no shutdown signal wired; degrades to a normal blocking sleep.
+// C++17 inline variable: single instance shared across TUs, no linker conflict.
+inline volatile std::sig_atomic_t* g_binance_shutdown_flag = nullptr;
+
 static inline int BinanceStream_Reconnect(BinanceStream *bs, const BinanceConfig *config) {
     fprintf(stderr, "[BINANCE] reconnecting in %u seconds...\n", config->reconnect_delay);
     // Phase 8b: alert at the convergence point (every reconnect path lands here).
@@ -585,8 +592,20 @@ static inline int BinanceStream_Reconnect(BinanceStream *bs, const BinanceConfig
     }
     BinanceStream_Close(bs);
 
+    // Interruptible sleep: poll the shutdown flag every 100ms instead of
+    // blocking for `reconnect_delay` seconds. Without this, closing the GUI
+    // during a reconnect window leaves the producer thread stuck in sleep()
+    // for up to reconnect_delay seconds — feels like the process won't die.
     if (config->reconnect_delay > 0) {
-        sleep(config->reconnect_delay);
+        for (uint32_t s = 0; s < config->reconnect_delay; ++s) {
+            for (int j = 0; j < 10; ++j) {
+                if (g_binance_shutdown_flag && *g_binance_shutdown_flag) {
+                    return 0;  // bail; caller's outer loop will see shutdown
+                }
+                struct timespec ts = {0, 100000000};  // 100ms
+                nanosleep(&ts, NULL);
+            }
+        }
     }
 
     return BinanceStream_Init(bs, config);

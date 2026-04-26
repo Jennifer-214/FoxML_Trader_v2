@@ -239,7 +239,16 @@ static inline void *depth_thread_fn(void *arg) {
 
     while (!__atomic_load_n(&shared->quit_requested, __ATOMIC_ACQUIRE)) {
         if (!ds->connected) {
-            sleep(shared->reconnect_delay);
+            // Interruptible sleep — checks shared->quit_requested every 100ms
+            // so engine shutdown isn't blocked for reconnect_delay seconds.
+            for (uint32_t s = 0; s < shared->reconnect_delay; ++s) {
+                for (int j = 0; j < 10; ++j) {
+                    if (__atomic_load_n(&shared->quit_requested, __ATOMIC_ACQUIRE))
+                        return NULL;
+                    struct timespec ts = {0, 100000000};
+                    nanosleep(&ts, NULL);
+                }
+            }
             if (DepthStream_Init(shared, shared->symbol, shared->host,
                                   shared->port, shared->reconnect_delay) < 0) continue;
             ds = &shared->stream;

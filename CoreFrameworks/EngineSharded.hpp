@@ -226,6 +226,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     g_engine_sharded_shutdown = 0;
     auto prev_int  = std::signal(SIGINT,  EngineSharded_SignalHandler);
     auto prev_term = std::signal(SIGTERM, EngineSharded_SignalHandler);
+    // Wire the Binance reconnect helper to our shutdown flag so its delay
+    // sleep is interruptible. Without this, closing the GUI during a
+    // reconnect window blocks for up to cfg.reconnect_delay seconds.
+    g_binance_shutdown_flag = &g_engine_sharded_shutdown;
 
     // Try to open the real Binance stream. If it fails — or if the cfg
     // explicitly forces synthetic mode — fall back to the synthetic tick
