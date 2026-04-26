@@ -831,6 +831,45 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     }
                 }
 
+                // v4.0.3 A3: time-based exit. Walk active positions, force-close
+                // any held longer than cfg.max_hold_ticks WITH gain below
+                // cfg.min_hold_gain_pct. Profitable positions are kept (they're
+                // still working). Mirrors legacy PortfolioController behavior.
+                // No-op when max_hold_ticks=0 (disabled, the default).
+                if (cfg.max_hold_ticks > 0) {
+                    uint64_t now_tick = ticks_produced.load(std::memory_order_relaxed);
+                    double current_price_d = last_price.load(std::memory_order_relaxed);
+                    if (current_price_d > 0.01) {
+                        uint16_t bm = state.oms->portfolio.active_bitmap;
+                        while (bm) {
+                            int slot = __builtin_ctz(bm);
+                            bm &= (uint16_t)(bm - 1);
+                            // elapsed = events since this core's last entry stamp
+                            uint64_t entry_t = state.cores[slot].last_entry_tick;
+                            if (entry_t == 0) continue;  // never stamped (shouldn't happen if active)
+                            uint64_t elapsed = now_tick - entry_t;
+                            if (elapsed < cfg.max_hold_ticks) continue;
+                            // gross % gain since entry
+                            double entry_d = FPN_ToDouble(state.oms->portfolio.positions[slot].entry_price);
+                            if (entry_d <= 0.0) continue;
+                            double gain_pct = (current_price_d - entry_d) / entry_d;
+                            double min_gain = FPN_ToDouble(cfg.min_hold_gain_pct);
+                            if (gain_pct >= min_gain) continue;  // still profitable enough; keep it
+                            // Submit force-close. OMS HandleFill will close the slot
+                            // and book net P&L exactly like a normal SG-triggered exit.
+                            FPN<F> qty = state.oms->portfolio.positions[slot].quantity;
+                            FPN<F> price_fpn = FPN_FromDouble<F>(current_price_d);
+                            tt::OrderManager_Submit(state.oms,
+                                (int16_t)slot, ORDER_MARKET_SELL,
+                                qty, FPN_Zero<F>(), FPN_Zero<F>(),
+                                state.cores[slot].strategy_id, price_fpn);
+                            fprintf(stderr,
+                                "[sharded] core %d: time-exit (held %lu ticks, gain %.3f%%)\n",
+                                slot, (unsigned long)elapsed, gain_pct * 100.0);
+                        }
+                    }
+                }
+
 #ifdef USE_IMGUI_GUI
                 // Populate TUISnapshot for the GUI — same double-buffered
                 // pattern as legacy engine in main.cpp:845-912.
