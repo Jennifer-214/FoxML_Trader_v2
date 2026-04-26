@@ -1302,100 +1302,10 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
 #ifdef LATENCY_PROFILING
     GUI_Panel_Latency(s);
 #endif
-    // Per-Core Strategy control (v4.0 hot-swap). Sharded mode only. One row
-    // per core: current strategy + dropdown of swappable choices + Apply button.
-    // Engine watches shared->swap_strategy_requested[c] on the slow path; the
-    // swap waits for any open position to close before applying so the old
-    // strategy's TP/SL still governs its own entry.
-    if (s->sharded_mode_active && s->per_core_count > 0 && shared) {
-        ImGui::Begin("Per-Core Strategy");
-        SectionHeader("PER-CORE STRATEGY");
-        ImGui::TextColored(FoxmlColors::comment,
-            "(swap waits for open position to close before applying)");
-        ImGuiTableFlags tf2 = ImGuiTableFlags_BordersInnerV |
-                              ImGuiTableFlags_RowBg |
-                              ImGuiTableFlags_SizingStretchProp;
-        if (ImGui::BeginTable("##percore_strat", 5, tf2)) {
-            // Column NAMES drive ImGui's column IDs. Renamed "Apply" → "Swap"
-            // to avoid hashing the same string as the in-row Apply button
-            // (which Imgui flagged on hover with "2 visible items with
-            // conflicting IDs").
-            ImGui::TableSetupColumn("Core",   ImGuiTableColumnFlags_WidthFixed, 35);
-            ImGui::TableSetupColumn("Active", ImGuiTableColumnFlags_WidthFixed, 50);
-            ImGui::TableSetupColumn("Choose", ImGuiTableColumnFlags_WidthFixed, 100);
-            ImGui::TableSetupColumn("Swap",   ImGuiTableColumnFlags_WidthFixed, 65);
-            ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableHeadersRow();
-            // pre-build the strategy options list once per render. Order
-            // must match STRATEGY_* enum in StrategyInterface.hpp.
-            static const char* strat_labels[NUM_STRATEGIES] = {
-                "MR", "MOM", "DIP", "ML", "EMA", "AUTO"
-            };
-            static int chosen[16] = {0};  // per-core dropdown selection (preserves across frames)
-            for (int i = 0; i < s->per_core_count && i < 16; ++i) {
-                uint8_t sid = s->per_core[i].strategy_id_display;
-                // PushID OUTSIDE the column transitions — wraps the entire row
-                // so the Combo and the Button get distinct IDs per core. ImGui
-                // asserted a push/pop mismatch when this was inner-scoped over
-                // multiple TableNextColumn calls.
-                ImGui::PushID(i);
-                ImGui::TableNextRow();
-                ImGui::TableNextColumn();
-                ImGui::Text("%d", i);
-                ImGui::TableNextColumn();
-                ImGui::TextColored(FoxmlColors::primary, "%s",
-                    sid < NUM_STRATEGIES ? strat_labels[sid] : "?");
-                // initialize chosen[i] to active strategy on first sight so the
-                // dropdown defaults to the current value rather than "MR"
-                if (chosen[i] >= NUM_STRATEGIES) chosen[i] = 0;
-                ImGui::TableNextColumn();
-                ImGui::SetNextItemWidth(-1);
-                ImGui::Combo("##strat", &chosen[i], strat_labels, NUM_STRATEGIES);
-                ImGui::TableNextColumn();
-                bool same_as_active = (chosen[i] == sid);
-                if (same_as_active) {
-                    // No swap to apply — show a clear "Active" label instead
-                    // of a greyed-out Apply button (which looked broken).
-                    ImGui::BeginDisabled();
-                    ImGui::Button("Active");
-                    ImGui::EndDisabled();
-                } else {
-                    if (ImGui::Button("Apply")) {
-                        // Signal the engine for live hot-swap.
-                        __atomic_store_n(
-                            &shared->swap_strategy_requested[i],
-                            (uint8_t)chosen[i], __ATOMIC_RELEASE);
-                        // Persist to engine.cfg so the swap survives restart.
-                        // Map strategy_id back to the short name the cfg parser
-                        // accepts (StrategyInterface.hpp + ControllerConfig.hpp
-                        // parser block agree on these abbreviations).
-                        static const char* strat_cfg_names[NUM_STRATEGIES] = {
-                            "mr", "momentum", "simple_dip", "ml", "ema_cross", "auto"
-                        };
-                        if (chosen[i] >= 0 && chosen[i] < NUM_STRATEGIES) {
-                            char key[64];
-                            snprintf(key, sizeof(key), "core_%d_strategy", i);
-                            cfg_write_field("engine.cfg", key,
-                                            strat_cfg_names[chosen[i]]);
-                        }
-                    }
-                }
-                ImGui::TableNextColumn();
-                uint8_t pending = __atomic_load_n(
-                    &shared->swap_strategy_requested[i], __ATOMIC_ACQUIRE);
-                if (pending != STRATEGY_NONE) {
-                    const char* pname = pending < NUM_STRATEGIES ? strat_labels[pending] : "?";
-                    ImGui::TextColored(FoxmlColors::yellow,
-                        "swap → %s pending (waiting for position close)", pname);
-                } else {
-                    ImGui::TextColored(FoxmlColors::comment, "ready");
-                }
-                ImGui::PopID();
-            }
-            ImGui::EndTable();
-        }
-        ImGui::End();
-    }
+    // v4.0.4: standalone "Per-Core Strategy" panel removed — its hot-swap
+    // dropdown + Apply button moved into Settings → Core N → "Core
+    // Configuration" section, so all per-core knobs (strategy, risk %,
+    // model path, model dir, plus all overrides) live under one tab.
 
     // Per-core latency panel (sharded mode only)
     if (s->sharded_mode_active && s->per_core_count > 0) {

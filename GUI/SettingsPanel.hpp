@@ -12,6 +12,8 @@
 
 #include "imgui.h"
 #include "FoxmlTheme.hpp"
+#include "../DataStream/EngineTUI.hpp"  // TUISharedState, TUISnapshot for per-core core-config
+#include "../Strategies/StrategyInterface.hpp"  // STRATEGY_* + NUM_STRATEGIES + SHORT_NAMES
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -408,6 +410,14 @@ struct SettingsState {
     // v4.0 per-core override storage. Indexed [core][field]. Floats only —
     // every per-core override is FPN<F> in the cfg.
     float per_core_vals[MAX_GUI_CORES][NUM_PER_CORE_FIELDS];
+    // v4.0.4 per-core "core configuration" — strategy / risk / model. These
+    // can't share per_core_vals[] because they have heterogeneous types
+    // (string + dropdown + float + path). Loaded by Settings_Load alongside
+    // per_core_vals.
+    int   per_core_strategy[MAX_GUI_CORES];   // chosen STRATEGY_* index for dropdown (-1 = unset / use cfg)
+    float per_core_risk_pct[MAX_GUI_CORES];   // 0 = inherit (risk_pct / num_cores)
+    char  per_core_model_path[MAX_GUI_CORES][256];
+    char  per_core_model_dir[MAX_GUI_CORES][256];
     bool  loaded;
     char  cfg_path[256];
 };
@@ -478,11 +488,29 @@ static inline void cfg_write_field(const char *path, const char *key, const char
     }
 }
 
+// Map cfg strategy name (e.g. "simple_dip") to STRATEGY_* index. Returns -1
+// on unknown. Mirror of the parser block in ControllerConfig_Load.
+static inline int settings_strategy_name_to_id(const char *name) {
+    if (strcmp(name, "mr") == 0 || strcmp(name, "mean_reversion") == 0) return 0;  // STRATEGY_MEAN_REVERSION
+    if (strcmp(name, "momentum") == 0 || strcmp(name, "mom") == 0)      return 1;  // STRATEGY_MOMENTUM
+    if (strcmp(name, "simple_dip") == 0 || strcmp(name, "dip") == 0)    return 2;  // STRATEGY_SIMPLE_DIP
+    if (strcmp(name, "ml") == 0)                                        return 3;  // STRATEGY_ML
+    if (strcmp(name, "ema_cross") == 0 || strcmp(name, "ema") == 0)     return 4;  // STRATEGY_EMA_CROSS
+    if (strcmp(name, "auto") == 0)                                      return 5;  // STRATEGY_AUTO
+    if (strcmp(name, "none") == 0)                                      return -1;
+    return -1;
+}
+
 static inline void Settings_Load(SettingsState *s) {
     // zero per-core overrides up front; populated below if cfg has them
-    for (int c = 0; c < MAX_GUI_CORES; ++c)
+    for (int c = 0; c < MAX_GUI_CORES; ++c) {
         for (int j = 0; j < NUM_PER_CORE_FIELDS; ++j)
             s->per_core_vals[c][j] = 0.0f;
+        s->per_core_strategy[c] = -1;
+        s->per_core_risk_pct[c] = 0.0f;
+        s->per_core_model_path[c][0] = '\0';
+        s->per_core_model_dir[c][0]  = '\0';
+    }
 
     FILE *f = fopen(s->cfg_path, "r");
     if (!f) return;
@@ -523,13 +551,38 @@ static inline void Settings_Load(SettingsState *s) {
             while (*us && *us != '_') us++;
             if (*us == '_' && core_idx >= 0 && core_idx < MAX_GUI_CORES) {
                 const char *suffix = us + 1;
+                bool pc_matched = false;
                 for (int j = 0; j < NUM_PER_CORE_FIELDS; ++j) {
                     size_t slen = strlen(per_core_fields[j].key_suffix);
                     if (strncmp(suffix, per_core_fields[j].key_suffix, slen) == 0 &&
                         suffix[slen] == '=') {
                         s->per_core_vals[core_idx][j] = (float)atof(suffix + slen + 1);
+                        pc_matched = true;
                         break;
                     }
+                }
+                if (pc_matched) continue;
+                // v4.0.4 core-configuration keys (heterogeneous types — not
+                // in per_core_fields[]).
+                if (strncmp(suffix, "strategy=", 9) == 0) {
+                    char nm[32];
+                    strncpy(nm, suffix + 9, sizeof(nm) - 1);
+                    nm[sizeof(nm) - 1] = '\0';
+                    char *end = nm + strlen(nm) - 1;
+                    while (end > nm && (*end == '\n' || *end == '\r' || *end == ' ')) *end-- = '\0';
+                    s->per_core_strategy[core_idx] = settings_strategy_name_to_id(nm);
+                } else if (strncmp(suffix, "risk_pct=", 9) == 0) {
+                    s->per_core_risk_pct[core_idx] = (float)atof(suffix + 9);
+                } else if (strncmp(suffix, "model_path=", 11) == 0) {
+                    strncpy(s->per_core_model_path[core_idx], suffix + 11, 255);
+                    s->per_core_model_path[core_idx][255] = '\0';
+                    char *end = s->per_core_model_path[core_idx] + strlen(s->per_core_model_path[core_idx]) - 1;
+                    while (end > s->per_core_model_path[core_idx] && (*end == '\n' || *end == '\r' || *end == ' ')) *end-- = '\0';
+                } else if (strncmp(suffix, "model_dir=", 10) == 0) {
+                    strncpy(s->per_core_model_dir[core_idx], suffix + 10, 255);
+                    s->per_core_model_dir[core_idx][255] = '\0';
+                    char *end = s->per_core_model_dir[core_idx] + strlen(s->per_core_model_dir[core_idx]) - 1;
+                    while (end > s->per_core_model_dir[core_idx] && (*end == '\n' || *end == '\r' || *end == ' ')) *end-- = '\0';
                 }
             }
         }
@@ -621,12 +674,134 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
 //==========================================================================
 // Each row is one override. Empty/0 = inherit from Global. The current value
 // from the Global tab is shown next to the input as a small grey hint.
-static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id) {
+//
+// v4.0.4: optional `shared` + `snap` enable the "Core Configuration" section
+// at the top of each per-core tab — strategy hot-swap dropdown, risk_pct,
+// model_path, model_dir. Folded in from the standalone "Per-Core Strategy"
+// panel so per-core knobs live in one place. Pass NULL to skip the
+// hot-swap UI (tests / non-sharded callers).
+static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
+                                              TUISharedState *shared = NULL,
+                                              const TUISnapshot *snap = NULL) {
     bool changed = false;
 
     ImGui::TextColored(FoxmlColors::comment,
         "Empty (0.00) means \"inherit from Global tab\". "
         "Set any override to use that value for this core only.");
+
+    // v4.0.4 — Core Configuration section. Strategy + risk + model path,
+    // pulling from cfg-only fields (not per_core_fields[] which is float-
+    // only). Strategy persists immediately on Apply via cfg_write_field
+    // and signals the engine via swap_strategy_requested[] for hot-swap.
+    if (ImGui::CollapsingHeader("Core Configuration", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // ---- strategy dropdown + Apply ----
+        // Determine the live ACTIVE strategy from snapshot if present.
+        // Otherwise read what's in cfg.
+        int active_sid = -1;
+        if (snap && snap->sharded_mode_active && core_id < snap->per_core_count) {
+            active_sid = snap->per_core[core_id].strategy_id_display;
+        } else if (s->per_core_strategy[core_id] >= 0) {
+            active_sid = s->per_core_strategy[core_id];
+        }
+        // Initialize dropdown to the active strategy on first sight so it
+        // doesn't default to "MR" for every core.
+        int *chosen = &s->per_core_strategy[core_id];
+        if (*chosen < 0 && active_sid >= 0) *chosen = active_sid;
+        if (*chosen < 0) *chosen = 0;  // fallback for cores w/o cfg + no snapshot
+
+        ImGui::Text("Strategy:");
+        ImGui::SameLine();
+        if (active_sid >= 0 && active_sid < NUM_STRATEGIES) {
+            ImGui::TextColored(FoxmlColors::primary, "active=%s",
+                               STRATEGY_SHORT_NAMES[active_sid]);
+        } else {
+            ImGui::TextDisabled("(no live core)");
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(110);
+        ImGui::PushID("strat_combo");
+        ImGui::Combo("##strat", chosen, STRATEGY_SHORT_NAMES, NUM_STRATEGIES);
+        ImGui::PopID();
+        ImGui::SameLine();
+        bool same_as_active = (*chosen == active_sid);
+        if (same_as_active) {
+            ImGui::BeginDisabled();
+            ImGui::Button("Active");
+            ImGui::EndDisabled();
+        } else {
+            ImGui::PushID("strat_apply");
+            if (ImGui::Button("Apply")) {
+                if (shared && *chosen >= 0 && *chosen < NUM_STRATEGIES) {
+                    __atomic_store_n(&shared->swap_strategy_requested[core_id],
+                                     (uint8_t)*chosen, __ATOMIC_RELEASE);
+                }
+                static const char* strat_cfg_names[NUM_STRATEGIES] = {
+                    "mr", "momentum", "simple_dip", "ml", "ema_cross", "auto"
+                };
+                if (*chosen >= 0 && *chosen < NUM_STRATEGIES) {
+                    char key[64];
+                    snprintf(key, sizeof(key), "core_%d_strategy", core_id);
+                    cfg_write_field(s->cfg_path, key, strat_cfg_names[*chosen]);
+                    changed = true;
+                }
+            }
+            ImGui::PopID();
+        }
+        // pending swap status (when Apply was pressed but core still has open pos)
+        if (shared) {
+            uint8_t pending = __atomic_load_n(&shared->swap_strategy_requested[core_id],
+                                              __ATOMIC_ACQUIRE);
+            if (pending != STRATEGY_NONE) {
+                ImGui::SameLine();
+                const char* pname = pending < NUM_STRATEGIES ? STRATEGY_SHORT_NAMES[pending] : "?";
+                ImGui::TextColored(FoxmlColors::yellow,
+                    "swap → %s pending (waiting for position close)", pname);
+            }
+        }
+
+        // ---- risk_pct ----
+        ImGui::SetNextItemWidth(80);
+        ImGui::PushID("risk");
+        ImGui::InputFloat("Risk %", &s->per_core_risk_pct[core_id], 0, 0, "%.1f");
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            char key[64];
+            snprintf(key, sizeof(key), "core_%d_risk_pct", core_id);
+            char val[32];
+            snprintf(val, sizeof(val), "%.2f", s->per_core_risk_pct[core_id]);
+            cfg_write_field(s->cfg_path, key, val);
+            changed = true;
+        }
+        ImGui::PopID();
+        ImGui::SetItemTooltip("Override per-core risk %% (0 = inherit risk_pct/num_cores). "
+                              "Stored as `core_%d_risk_pct=N.NN` in cfg.", core_id);
+
+        // ---- model_path / model_dir (ML cores) ----
+        ImGui::SetNextItemWidth(360);
+        ImGui::PushID("mpath");
+        ImGui::InputText("Model Path", s->per_core_model_path[core_id], 256);
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            char key[64];
+            snprintf(key, sizeof(key), "core_%d_model_path", core_id);
+            cfg_write_field(s->cfg_path, key, s->per_core_model_path[core_id]);
+            changed = true;
+        }
+        ImGui::PopID();
+        ImGui::SetItemTooltip("Single model file. Used by STRATEGY_ML cores. "
+                              "Use Model Dir below for a CoreModelZoo with role auto-discovery.");
+
+        ImGui::SetNextItemWidth(360);
+        ImGui::PushID("mdir");
+        ImGui::InputText("Model Dir", s->per_core_model_dir[core_id], 256);
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            char key[64];
+            snprintf(key, sizeof(key), "core_%d_model_dir", core_id);
+            cfg_write_field(s->cfg_path, key, s->per_core_model_dir[core_id]);
+            changed = true;
+        }
+        ImGui::PopID();
+        ImGui::SetItemTooltip("Directory containing barrier/buy_signal/regime/exit roles. "
+                              "Takes precedence over Model Path when set.");
+    }
 
     const char *current_section = NULL;
     for (int j = 0; j < NUM_PER_CORE_FIELDS; ++j) {
@@ -667,7 +842,9 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id) {
 // running cores, not cfg-only intent — engine doesn't add/remove cores live.
 static inline void GUI_Panel_Settings(SettingsState *s,
                                        volatile sig_atomic_t *reload_flag,
-                                       int live_core_count = 0) {
+                                       int live_core_count = 0,
+                                       TUISharedState *shared = NULL,
+                                       const TUISnapshot *snap = NULL) {
     ImGui::Begin("Settings");
 
     if (!s->loaded) Settings_Load(s);
@@ -712,7 +889,7 @@ static inline void GUI_Panel_Settings(SettingsState *s,
             snprintf(tab_label, sizeof(tab_label), "Core %d", c);
             if (ImGui::BeginTabItem(tab_label)) {
                 ImGui::PushID(c + 1000);  // distinct from any field index
-                if (Settings_RenderPerCoreTab(s, c)) changed = true;
+                if (Settings_RenderPerCoreTab(s, c, shared, snap)) changed = true;
                 ImGui::PopID();
                 ImGui::EndTabItem();
             }
