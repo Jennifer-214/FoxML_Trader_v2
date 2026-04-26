@@ -425,8 +425,41 @@ static inline void cfg_write_field(const char *path, const char *key, const char
 
     char search[128];
     snprintf(search, sizeof(search), "%s=", key);
-    char *pos = strstr(buf, search);
-    if (!pos) return;
+    size_t klen = strlen(search);
+
+    // Line-anchored search: walk lines, match start-of-line. Naive
+    // strstr matches `mr_tp_pct=` inside `core_0_mr_tp_pct=` — wrong key.
+    // v4.0 per-core keys make that collision common; line anchoring is
+    // load-bearing.
+    char *pos = NULL;
+    char *p = buf;
+    while (*p) {
+        // skip leading whitespace on this line
+        char *line_start = p;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, search, klen) == 0) {
+            pos = p;
+            break;
+        }
+        // advance to next line
+        p = line_start;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') p++;
+    }
+
+    if (!pos) {
+        // Key not in file — append a new line at the end. The whole point
+        // of the v4.0 per-core tabs is creating overrides that don't yet
+        // exist; the prior "silently drop" behavior broke that flow.
+        f = fopen(path, "a");
+        if (f) {
+            // make sure we start on a fresh line
+            if (len > 0 && buf[len - 1] != '\n') fputc('\n', f);
+            fprintf(f, "%s=%s\n", key, value);
+            fclose(f);
+        }
+        return;
+    }
 
     char *eol = pos;
     while (*eol && *eol != '\n' && *eol != '\r') eol++;
