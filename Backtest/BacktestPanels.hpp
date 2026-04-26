@@ -1036,11 +1036,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // TP/SL barriers — used by win_loss, barrier, vol_barrier, peak_valley_stable
     if (state->label_type == LABEL_WIN_LOSS || state->label_type == LABEL_BARRIER ||
         state->label_type == LABEL_VOL_BARRIER || state->label_type == LABEL_PEAK_VALLEY_STABLE) {
-        ImGui::InputFloat("TP Barrier %", &state->label_tp_pct, 0.1f, 0.5f, "%.1f");
+        // 3 decimals + 0.01 step lets users dial in tight barriers (5 bps = 0.050)
+        // for short lookahead horizons where 0.1+ rarely triggers. Pre-fix, the
+        // 0.1 step + "%.1f" format clamped at 0.1 — anything tighter rounded to 0.
+        ImGui::InputFloat("TP Barrier %", &state->label_tp_pct, 0.01f, 0.1f, "%.3f");
         ImGui::SetItemTooltip("Take-profit barrier as %% of price\n"
                               "label = 1 (or VALLEY for 3-class) if price moves up this much before SL is hit\n"
-                              "wider = fewer but higher-confidence labels");
-        ImGui::InputFloat("SL Barrier %", &state->label_sl_pct, 0.1f, 0.5f, "%.1f");
+                              "wider = fewer but higher-confidence labels\n"
+                              "tip: 0.050 = 5 bps. For short horizons (~1k ticks) at BTC scale,\n"
+                              "0.05-0.10%% gives balanced labels; 0.3+ usually = 99%% \"stable\".");
+        ImGui::InputFloat("SL Barrier %", &state->label_sl_pct, 0.01f, 0.1f, "%.3f");
         ImGui::SetItemTooltip("Stop-loss barrier as %% of price\n"
                               "label = 0 (or PEAK for 3-class) if price drops this much before TP is hit\n"
                               "wider = fewer but higher-confidence labels");
