@@ -555,33 +555,62 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
 
 **Future hardening (deferred):** turn `num_classes` into `enum class LabelKind { Binary, Regression, Multiclass }` so the compiler exhaustive-checks switches. Larger surgery — touches every existing site again. Reasonable v2 once the current convention has settled.
 
-## Current State (2026-04-25 afternoon)
+## Current State (2026-04-25 evening — v4.0.0)
 
-**Branch:** `experiment/phase5-zoo`, 27 commits ahead of `experiment/per-core-sharding` (main). Pending merge into main as Phase 6 (live-readiness) prep.
+**Branch:** `experiment/per-core-sharding` (main). v4.0.0 released — sharded
+production + per-core ML confidence loop + hot-swap + live-data default.
 
-**Tests:** controller_test 279/279 passing.
+**Tests:** controller_test 351/351 passing, depth_recorder_test 17/17 passing.
 
-**Build state:** `build/` (ANSI), `build_gui/` (ImGui) clean. `build_suite/` (XGBoost) NOT currently set up — will be brought online as part of live-readiness work. See `build.sh` helper.
+**Build state:** all four targets clean — `build/engine`, `build_gui/engine_gui`,
+`build_gui/foxml_suite`, `build/controller_test`. `build.sh` auto-symlinks
+`engine.cfg` into each build dir so `./engine_*` connects to live Binance
+out of the box. See `build.sh` helper.
 
-**Active phase:** Phase 6 live-readiness — see `plans/live-readiness-master.md` and 6 subplans + 6 test sidecars + 1 regression-test sidecar. Goal: take engine from "research-grade" to "operational live trader on Binance." Pivot from "find ML signal" to "ship live, ML when signal exists."
+**Phase status:** live-readiness work is shipped. Phase 5 zoo + 8a depth
+recorder + 8b notify + 8 maker/taker + 6prep confidence loop + 7prep
+validation + sharded integration (c5-c11) + per-core ML loop (c12-c16) +
+hot-swap + live-data default — all merged into main, all tagged.
+Current focus shifts from "ship live infra" to "validate with $10 paper
+soak and find ML signal."
 
 **Engine capability summary:**
-- Portfolio controller: stable. 279/279 tests cover slot reuse, fee floors, SL invariants, regime adjustment, OMS basics.
-- ML pipeline: end-to-end working (backtest → labels → features → train → walk-forward → overfit detection). Model at calibrated noise floor on current 16 features — confirmed "no signal" answer, not bug-induced. See `DOCS/changelogs/2026-04-25-*.md`.
-- Phase 5 (CoreModelZoo + 3-class softmax + label-type-aware metrics + multiclass weights): SHIPPED. Includes 8 fixes for bugs that surfaced during validation.
-- Live trading: architecturally capable (full OMS, paper/live sync, kill switch, orphan recovery, reconnect handling). Operational gaps: maker/taker accounting, depth persistence, alerting — addressed by Phase 8 / 8a / 8b.
+- Sharded engine: production. Per-core ExecutionCore (40-400ns p99 measured
+  at idle), per-core strategy + per-core ML model + per-core risk allocation.
+- Legacy single-threaded: DEPRECATED with runtime warning. Kept for
+  benchmark/regression. Phase 8+ features may be incomplete (see CLAUDE.md
+  "Cross-Mode Init Placement" invariant).
+- ML pipeline: end-to-end working in BOTH legacy and sharded paths.
+  ConfidenceScorer per core in sharded; armed-but-inactive on noise-floor
+  models via `effective_thr = base * (scale - conf)`.
+- Live trading: architecturally complete (full OMS, paper/live sync, kill
+  switch, orphan recovery, reconnect, maker/taker accounting, depth
+  recording, alerting). Live-data is the default — `cd build_gui && ./engine_gui`
+  connects to Binance out of the box.
 
-**Recent invariants (added during Phase 5):**
+**Recent invariants (added during Phase 5/v4.0):**
 - Dynamic-buffer lifecycle (Init/Reset/Free/EnsureCapacity must update together) — see "Dynamic Sizing" section
 - Label-type-aware metrics (every metric site consults `label_table[t].num_classes`) — see "Label-type-aware metric invariant"
+- Cross-mode init placement (Phase 13+ doctrine — sharded code path must be
+  reached before main.cpp returns OR have an equivalent inside `EngineSharded_Run`)
+- Confidence loop invariant (Phase 6prep, ported to sharded in v4.0 c12-c16)
+- Maker/taker fee accuracy (Phase 8 — entry + exit branches in `OrderManager_HandleFill`)
+- Held-out validation discipline (Phase 7prep — locked test split)
 
 **Engine subsystem state:**
-- **Default mode: SHARDED** (Phase 13+). Per-core ExecutionCore + per-core
-  PortfolioController state slot in central OMS, branchless ~60ns hot path.
-  Legacy `engine_mode=single_core` deprecated, runtime warning at startup.
-- Per-core strategy + ML model + risk allocation (Phase 13). 4 cores default
-  (cap 16). Each core can run a different strategy + load its own
-  CoreModelZoo (auto-discovered roles: barrier, buy_signal, regime, exit).
+- **Default mode: SHARDED** (production since v4.0.0). Per-core ExecutionCore +
+  per-core PortfolioController state slot in central OMS, branchless 40-400ns
+  hot path measured. Legacy `engine_mode=single_core` deprecated, runtime
+  warning at startup.
+- Per-core strategy + ML model + risk allocation. 4 cores default (cap 16).
+  Each core can run a different strategy + load its own CoreModelZoo
+  (auto-discovered roles: barrier, buy_signal, regime, exit).
+- Per-core ConfidenceScorer (v4.0 c12) — independent IC/RMSE/freshness per
+  ML core. `last_confidence` displayed in TUISnapshot per_core[i] for the
+  GUI "Per-Core ML" panel.
+- Hot-swap strategy per core (v4.0). GUI dropdown + Apply button writes to
+  `TUISharedState::swap_strategy_requested[c]`; controller slow path applies
+  when no open position. New "Per-Core Strategy" panel.
 - Post-SL cooldown: adaptive (scales by trend confidence at SL time) or fixed cycle count
 - Regime detection: score-based with 7 signals, extensible RegimeSignals struct
 - Volume spike detection: current/max ratio, spacing relaxation on 5x+ spikes
@@ -589,19 +618,33 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
 - VWAP gate: buy signal gates on price being below volume-weighted average price
 - Session awareness: per-session (Asian/EU/US/overnight) volume gate multiplier
 - Snapshot persistence: v7 (entry_time + session stats survive restarts)
-- Binance trade websocket: ACTIVE (live market data, runs on every engine startup)
-- Binance depth websocket (Phase 8a): ACTIVE when `depth_enabled=1`. Pre-Phase-8a the thread function existed but was never started — `book_imbalance` always read 0 and the gate at PortfolioController.hpp:1600 was dead. Now the thread starts when cfg flag is set and `book_imbalance` is fed from `DepthSharedState.snapshots[active].imbalance` on every tick. Default `min_book_imbalance=0` keeps the gate inert unless user opts in.
-- Binance user-data websocket: defined but not started in main.cpp (parallel pattern to pre-Phase-8a depth — wiring exists but no `pthread_create`)
-- DepthRecorder (Phase 8a): writes top-of-book to `data/{SYMBOL}/depth/YYYY-MM-DD.csv` when `record_depth=1 && depth_enabled=1`. Daily rotation, auto-prune via `record_max_days`. Gap markers on backward `last_update_id`, wallclock >2s silence, or explicit disconnect. Crash-window gaps are NOT marked (recorder state in memory only — restart resets gap tracking).
-- Confidence loop: WIRED (multiplier path + display) — confidence_enabled cfg gate, defaults off
+- Binance trade websocket: ACTIVE (live market data, runs on every engine startup
+  unless `sharded_force_synthetic=1`)
+- Binance depth websocket (Phase 8a, sharded c6): ACTIVE when `depth_enabled=1` in
+  both legacy and sharded paths. `book_imbalance` fed from `DepthSharedState`
+  on every tick. Default `min_book_imbalance=0` keeps the gate inert unless opted in.
+- Binance user-data websocket: defined but not started in main.cpp / EngineSharded
+  (parallel pattern to pre-Phase-8a depth — wiring exists but no `pthread_create`).
+- DepthRecorder (Phase 8a, sharded c6): writes top-of-book to
+  `data/{SYMBOL}/depth/YYYY-MM-DD.csv` when `record_depth=1 && depth_enabled=1`.
+  Daily rotation, auto-prune via `record_max_days`. Gap markers on backward
+  `last_update_id`, wallclock >2s silence, or explicit disconnect.
+- TickRecorder (sharded c7): writes ticks to `data/{SYMBOL}/YYYY-MM-DD.csv` when
+  `record_ticks=1`. Daily rotation, auto-prune via `record_max_days`.
+- NotifyState (Phase 8b, sharded c8): operational alerting via stderr or external
+  command backend. Per-kind cooldown, level filter, append-only `NK_*` enum.
+- Confidence loop: WIRED in BOTH legacy and sharded (v4.0 c12-c16) — per-core
+  scorer in sharded, single scorer in legacy. `confidence_enabled` cfg gate,
+  defaults off.
 - TUI: ANSI only (zero deps, diff-based rendering, foxml palette). FTXUI/notcurses removed.
-- TUI snapshot: zero-pollution (full copy on slow path, live price/volume/active_count every tick)
+- TUI snapshot: zero-pollution (full copy on slow path, live price/volume/active_count every tick).
+  Sharded mode populates `per_core[i]` with both latency stats AND ML observability.
 - Momentum TP/SL: adaptive (R²-scaled + ROR acceleration bonus at fill time)
 - Trailing TP/SL: SL floor invariant enforced (only when SL below entry — free trades exempt)
 - Slippage simulation: configurable entry/exit price adjustment (slippage_pct in engine.cfg)
 - Single-slot mode: max_positions=1 (default), sells entire BTC balance on exit (no dust)
 - Paper/live sync: unbacked paper positions are undone, startup recovers orphaned BTC
-- foxml_suite: SamplesSnapshot pattern eliminates GUI/worker race on results->labels (post-2026-04-25)
+- foxml_suite: SamplesSnapshot pattern eliminates GUI/worker race on results->labels
 
 ## Key Design Decisions
 
