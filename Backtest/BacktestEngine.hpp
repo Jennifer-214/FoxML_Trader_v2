@@ -462,6 +462,15 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
                                  TUISnapshot *out_snapshot = NULL) {
     // Phase 13 dispatch: peek at engine_mode WITHOUT touching results yet,
     // so the sharded path's own reset is honored.
+    //
+    // v4.0 carve-out: feature collection (collect_features=1) ONLY runs on
+    // the legacy path. BacktestSharded_Run intentionally has no
+    // sample/feature plumbing — sharded is the live execution engine,
+    // legacy is the research/training environment. When sharded became
+    // the default in v4.0, "Collect Features" silently ran the sharded
+    // path which produced zero samples. Forcing the legacy path here
+    // keeps ML training working without needing to set engine_mode=
+    // single_core in backtest.cfg.
     {
         ControllerConfig<BACKTEST_FP> peek;
         if (run_cfg->use_config_override) {
@@ -469,7 +478,8 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
         } else {
             peek = ControllerConfig_Load<BACKTEST_FP>(run_cfg->config_path);
         }
-        if (peek.engine_mode == ENGINE_MODE_SHARDED) {
+        if (peek.engine_mode == ENGINE_MODE_SHARDED &&
+            !run_cfg->collect_features) {
             tt::BacktestSharded_Run(results, run_cfg, progress_pct, cancel_flag,
                                      candle_acc, out_snapshot);
             return;

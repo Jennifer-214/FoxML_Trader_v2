@@ -218,7 +218,7 @@ static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* cores,
 // Pass &g_shutdown_requested or whichever variable you have.
 //======================================================================================================
 template <unsigned F>
-static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
+static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                       const BinanceConfig& bcfg) {
     // Install our own SIGINT/SIGTERM handler so threads can shut down cleanly.
     // Save the previous handlers so we can restore them on exit (in case the
@@ -693,6 +693,61 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
                     fprintf(stderr,
                             "[sharded] core %d: strategy swapped %u -> %u\n",
                             c, (unsigned)old_strat, (unsigned)pending);
+                }
+
+                // v4.0: GUI drag-TP/SL pickup. Mirrors the legacy main.cpp
+                // handler at main.cpp:585. Sharded mode previously ignored
+                // drag_slot (only legacy consumed it), so dragging TP/SL
+                // lines on the chart silently did nothing in sharded mode.
+                // Writes go directly to the OMS portfolio's position fields.
+                {
+                    int slot = __atomic_load_n(&g_shared.drag_slot, __ATOMIC_ACQUIRE);
+                    if (slot >= 0 && slot < 16) {
+                        int is_tp = g_shared.drag_is_tp;
+                        double dprice = g_shared.drag_price;
+                        __atomic_store_n(&g_shared.drag_slot, -1, __ATOMIC_RELEASE);
+                        auto *pos = &state.oms->portfolio.positions[slot];
+                        if (state.oms->portfolio.active_bitmap & (uint16_t)(1u << slot)) {
+                            if (is_tp)
+                                pos->take_profit_price = FPN_FromDouble<F>(dprice);
+                            else
+                                pos->stop_loss_price = FPN_FromDouble<F>(dprice);
+                            fprintf(stderr, "[sharded] GUI drag: slot %d %s -> $%.2f\n",
+                                    slot, is_tp ? "TP" : "SL", dprice);
+                        }
+                    }
+                }
+
+                // v4.0 hot-reload: GUI Settings panel writes engine.cfg and
+                // sets reload_requested. Sharded mode previously ignored this
+                // (only legacy main.cpp consumed it), so per-core overrides
+                // edited via the GUI never took effect until restart. Re-read
+                // engine.cfg, copy reloadable fields into the in-memory cfg.
+                //
+                // Boot-only fields are preserved (engine_mode, num_execution_cores,
+                // model paths, starting_balance, fee_rate_maker/taker, exchange
+                // routing, recording flags). Tunables are bulk-copied including
+                // the per-core overrides array.
+                if (__atomic_exchange_n(&g_shared.reload_requested, 0,
+                                         __ATOMIC_ACQ_REL)) {
+                    ControllerConfig<F> new_cfg = ControllerConfig_Load<F>("engine.cfg");
+                    // boot-only: preserve fields that the running engine cannot
+                    // change live (would require thread restart, file I/O off
+                    // the controller thread, or different per-core wiring).
+                    new_cfg.engine_mode         = cfg.engine_mode;
+                    new_cfg.num_execution_cores = cfg.num_execution_cores;
+                    new_cfg.starting_balance    = cfg.starting_balance;
+                    for (int c = 0; c < 16; ++c) {
+                        memcpy(new_cfg.core_model_path[c],
+                               cfg.core_model_path[c],
+                               sizeof(cfg.core_model_path[c]));
+                        memcpy(new_cfg.core_model_dir[c],
+                               cfg.core_model_dir[c],
+                               sizeof(cfg.core_model_dir[c]));
+                    }
+                    cfg = new_cfg;
+                    fprintf(stderr, "[sharded] cfg hot-reloaded "
+                            "(per-core overrides + tunables refreshed)\n");
                 }
 #endif
                 EventLoop_RebuildAllParameters(&state, &rolling_short, &cfg, &rolling_long);
