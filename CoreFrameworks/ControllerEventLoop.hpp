@@ -624,16 +624,53 @@ inline int EventLoop_RebuildAllParameters(
             dispatch_ctx
         );
 
-        // v4.0.3 cross-cutting checks applied uniformly across all strategies:
+        // v4.0.3 cross-cutting checks applied uniformly across all strategies.
+        // Each is a "zero-gate if violated" filter — preserves the strategy's
+        // intended TP/SL/qty but disables the entry trigger.
         //
         // SPACING: zero-gate if the proposed entry is too close to this
-        // core's last entry. Prevents clustering positions at similar prices
-        // (which produces correlated wins/losses, not independent diversification).
-        // Mirrors legacy PortfolioController spacing logic.
+        // core's last entry. Prevents clustering positions at similar prices.
         if (!Strategy_SpacingOk(state->cores[slot].pending_params.bg_price_threshold,
                                  state->cores[slot].last_entry_price,
                                  rolling, &resolved_cfg)) {
             state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
+        }
+        // VWAP gate: zero-gate if price is above (VWAP - VWAP*offset). Forces
+        // entries to happen below VWAP — buying retracements, not pumps.
+        if (!FPN_IsZero(resolved_cfg.vwap_offset) && !FPN_IsZero(rolling->vwap)) {
+            FPN<F> vwap_threshold = FPN_Sub(rolling->vwap,
+                FPN_Mul(rolling->vwap, resolved_cfg.vwap_offset));
+            if (FPN_GreaterThan(state->cores[slot].pending_params.bg_price_threshold,
+                                 vwap_threshold)) {
+                state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
+            }
+        }
+        // LONG-SLOPE gate: zero-gate if 512-tick relative slope is below
+        // min_long_slope (i.e. confirmed downtrend). Negative threshold means
+        // "allow mild dips," 0 means "any uptrend required."
+        if (!FPN_IsZero(resolved_cfg.min_long_slope) && rolling_long &&
+            !FPN_IsZero(rolling_long->price_avg)) {
+            FPN<F> long_rel_slope = FPN_DivNoAssert(rolling_long->price_slope,
+                                                     rolling_long->price_avg);
+            if (FPN_LessThan(long_rel_slope, resolved_cfg.min_long_slope)) {
+                state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
+            }
+        }
+        // VOLUME DELTA gate: zero-gate if volume_delta < min_buy_delta.
+        // Negative volume_delta = net selling pressure. Threshold of -0.3
+        // allows mild selling, blocks heavy dumps.
+        if (!FPN_IsZero(resolved_cfg.min_buy_delta) &&
+            FPN_LessThan(rolling->volume_delta, resolved_cfg.min_buy_delta)) {
+            state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
+        }
+        // MIN STDDEV gate: zero-gate when stddev/price < min_stddev_pct (dead
+        // market). No volatility = no opportunity for typical TP distance.
+        if (!FPN_IsZero(resolved_cfg.min_stddev_pct) && !FPN_IsZero(rolling->price_avg)) {
+            FPN<F> stddev_ratio = FPN_DivNoAssert(rolling->price_stddev,
+                                                    rolling->price_avg);
+            if (FPN_LessThan(stddev_ratio, resolved_cfg.min_stddev_pct)) {
+                state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
+            }
         }
         // FEE FLOOR: ratchet TP up so it clears at least
         // entry × fee_rate × fee_floor_mult. Round-trip fees are 2×fee_rate,
