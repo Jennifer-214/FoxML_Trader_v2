@@ -13,6 +13,7 @@
 #include "FoxmlTheme.hpp"
 #include "../Version.hpp"
 #include "../Strategies/StrategyInterface.hpp"
+#include "SettingsPanel.hpp"  // cfg_write_field for hot-swap persistence
 #include <ctime>
 
 // ── helper: colored value text (green if positive, red if negative) ──
@@ -1135,9 +1136,23 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                     ImGui::EndDisabled();
                 } else {
                     if (ImGui::Button("Apply")) {
+                        // Signal the engine for live hot-swap.
                         __atomic_store_n(
                             &shared->swap_strategy_requested[i],
                             (uint8_t)chosen[i], __ATOMIC_RELEASE);
+                        // Persist to engine.cfg so the swap survives restart.
+                        // Map strategy_id back to the short name the cfg parser
+                        // accepts (StrategyInterface.hpp + ControllerConfig.hpp
+                        // parser block agree on these abbreviations).
+                        static const char* strat_cfg_names[NUM_STRATEGIES] = {
+                            "mr", "momentum", "simple_dip", "ml", "ema_cross"
+                        };
+                        if (chosen[i] >= 0 && chosen[i] < NUM_STRATEGIES) {
+                            char key[64];
+                            snprintf(key, sizeof(key), "core_%d_strategy", i);
+                            cfg_write_field("engine.cfg", key,
+                                            strat_cfg_names[chosen[i]]);
+                        }
                     }
                 }
                 ImGui::TableNextColumn();
