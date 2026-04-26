@@ -1033,18 +1033,22 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
             };
             static int chosen[16] = {0};  // per-core dropdown selection (preserves across frames)
             for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+                uint8_t sid = s->per_core[i].strategy_id_display;
+                // PushID OUTSIDE the column transitions — wraps the entire row
+                // so the Combo and the Button get distinct IDs per core. ImGui
+                // asserted a push/pop mismatch when this was inner-scoped over
+                // multiple TableNextColumn calls.
+                ImGui::PushID(i);
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
                 ImGui::Text("%d", i);
                 ImGui::TableNextColumn();
-                uint8_t sid = s->per_core[i].strategy_id_display;
                 ImGui::TextColored(FoxmlColors::primary, "%s",
                     sid < NUM_STRATEGIES ? strat_labels[sid] : "?");
                 // initialize chosen[i] to active strategy on first sight so the
                 // dropdown defaults to the current value rather than "MR"
                 if (chosen[i] >= NUM_STRATEGIES) chosen[i] = 0;
                 ImGui::TableNextColumn();
-                ImGui::PushID(i);
                 ImGui::SetNextItemWidth(-1);
                 ImGui::Combo("##strat", &chosen[i], strat_labels, NUM_STRATEGIES);
                 ImGui::TableNextColumn();
@@ -1056,7 +1060,6 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                         (uint8_t)chosen[i], __ATOMIC_RELEASE);
                 }
                 if (same_as_active) ImGui::EndDisabled();
-                ImGui::PopID();
                 ImGui::TableNextColumn();
                 uint8_t pending = __atomic_load_n(
                     &shared->swap_strategy_requested[i], __ATOMIC_ACQUIRE);
@@ -1067,6 +1070,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                 } else {
                     ImGui::TextColored(FoxmlColors::comment, "ready");
                 }
+                ImGui::PopID();
             }
             ImGui::EndTable();
         }
