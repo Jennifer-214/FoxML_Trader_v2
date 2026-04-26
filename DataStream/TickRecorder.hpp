@@ -152,7 +152,13 @@ static inline void TickRecorder_Init(TickRecorder *rec, const char *symbol,
         upper_sym[i] = (symbol[i] >= 'a' && symbol[i] <= 'z') ? symbol[i] - 32 : symbol[i];
     upper_sym[strlen(symbol) < 15 ? strlen(symbol) : 15] = '\0';
 
-    snprintf(rec->data_dir, sizeof(rec->data_dir), "data/%s/", upper_sym);
+    // v4.2.2: ticks land in data/{SYMBOL}/_staging/ first. A separate
+    // verification step (scripts/verify_ticks.sh) checks the file is a
+    // full day and promotes it into data/{SYMBOL}/ for training use.
+    // This stops partial-day or corrupt recordings (e.g. the year-58286
+    // TickRecorder bug from before v4.0.2) from polluting the dataset
+    // folder. Symlinking via build.sh keeps relative paths working.
+    snprintf(rec->data_dir, sizeof(rec->data_dir), "data/%s/_staging/", upper_sym);
     TickRecorder_MkdirP(rec->data_dir);
 
     // prune old files on startup
