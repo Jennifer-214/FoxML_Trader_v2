@@ -74,6 +74,16 @@ struct alignas(64) GateParameters {
     // --- Sizing (controller-set, not used by gate evaluation directly) ---
     FPN<F> trade_size;               // size for the next entry, written to Position by controller
 
+    // --- v4.0.3 D9 trailing SL ratchet ---
+    // Controller writes via standard slow-path PushParameters (seqlock-protected).
+    // Hot path uses effective_sl = FPN_Max(active_sl, ratchet_sl) — branchless,
+    // FPN-pure. When zero (default), FPN_Max(sl, 0) = sl so no behavior change.
+    // When non-zero, acts as a floor for SL — exit fires when price drops to
+    // this level even if the original live_sl was lower. Mirrors legacy
+    // PortfolioController trailing behavior; reaction time bounded by
+    // slow_path_interval (~100-200ms) for the SET, microseconds for the FIRE.
+    FPN<F> ratchet_sl;
+
     // --- Identification ---
     uint8_t strategy_id;             // STRATEGY_* constant
     uint8_t flags;                   // GATE_FLAG_* bitmask
@@ -133,6 +143,7 @@ static inline void GateParameters_Init(GateParameters<F>* params) {
     params->tp_pct = FPN_Zero<F>();
     params->sl_pct = FPN_Zero<F>();
     params->trade_size = FPN_Zero<F>();
+    params->ratchet_sl = FPN_Zero<F>();  // v4.0.3 D9
     params->strategy_id = STRATEGY_NONE;
     params->flags = 0;
 }

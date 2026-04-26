@@ -870,6 +870,41 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     }
                 }
 
+                // v4.0.3 D9: Trailing SL ratchet. For each active position,
+                // if gross gain >= cfg.tp_hold_score, compute trailing target
+                // = current_price - (stddev × sl_trail_mult). Write to
+                // pending_params.ratchet_sl which the hot path picks up via
+                // the existing seqlock on next param push. Only ratchets UP
+                // (FPN_Max in hot path means lower ratchet values are ignored).
+                if (!FPN_IsZero(cfg.sl_trail_mult) &&
+                    !FPN_IsZero(rolling_short.price_stddev) &&
+                    !FPN_IsZero(cfg.tp_hold_score)) {
+                    double cur_d = last_price.load(std::memory_order_relaxed);
+                    if (cur_d > 0.01) {
+                        double stddev_d = FPN_ToDouble(rolling_short.price_stddev);
+                        double trail_dist_d = stddev_d * FPN_ToDouble(cfg.sl_trail_mult);
+                        double hold_thresh = FPN_ToDouble(cfg.tp_hold_score);
+                        uint16_t bm = state.oms->portfolio.active_bitmap;
+                        while (bm) {
+                            int slot = __builtin_ctz(bm);
+                            bm &= (uint16_t)(bm - 1);
+                            double entry_d = FPN_ToDouble(state.oms->portfolio.positions[slot].entry_price);
+                            if (entry_d <= 0.0) continue;
+                            double gain_pct = (cur_d - entry_d) / entry_d;
+                            if (gain_pct < hold_thresh) continue;  // not yet trailing
+                            double new_sl_d = cur_d - trail_dist_d;
+                            // Write new ratchet into pending_params; hot path
+                            // FPN_Max ensures we never lower an existing ratchet.
+                            FPN<F> new_ratchet = FPN_FromDouble<F>(new_sl_d);
+                            FPN<F> existing = state.cores[slot].pending_params.ratchet_sl;
+                            if (FPN_GreaterThan(new_ratchet, existing)) {
+                                state.cores[slot].pending_params.ratchet_sl = new_ratchet;
+                                state.cores[slot].dirty = 1;  // force push
+                            }
+                        }
+                    }
+                }
+
 #ifdef USE_IMGUI_GUI
                 // Populate TUISnapshot for the GUI — same double-buffered
                 // pattern as legacy engine in main.cpp:845-912.

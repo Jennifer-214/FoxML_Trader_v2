@@ -688,6 +688,15 @@ inline int EventLoop_RebuildAllParameters(
             dispatch_ctx
         );
 
+        // v4.0.3 D9: clear ratchet_sl when no position active on this core,
+        // so stale trailing state from previous trade doesn't leak into the
+        // next entry. Engine slow-path code below SETS ratchet_sl when a
+        // position is active and trailing should kick in.
+        bool slot_active = (state->oms->portfolio.active_bitmap & (uint16_t)(1u << slot)) != 0;
+        if (!slot_active) {
+            state->cores[slot].pending_params.ratchet_sl = FPN_Zero<F>();
+        }
+
         // v4.0.3 cross-cutting checks applied uniformly across all strategies.
         // Each is a "zero-gate if violated" filter — preserves the strategy's
         // intended TP/SL/qty but disables the entry trigger. Halt reasons are

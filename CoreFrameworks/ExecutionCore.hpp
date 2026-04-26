@@ -261,8 +261,14 @@ static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tic
     // === Inlined SG_Evaluate (using selected tp/sl from above) ===
     uint64_t tp_enabled    = (uint64_t)((flags & GATE_FLAG_TP_ENABLED) != 0);
     uint64_t sl_enabled    = (uint64_t)((flags & GATE_FLAG_SL_ENABLED) != 0);
+    // v4.0.3 D9: trailing SL via ratchet field. Branchless FPN_Max selects
+    // the higher of original SL and the ratchet floor. When ratchet_sl is
+    // FPN_Zero (default, no ratchet), FPN_Max(sl, 0) = sl so behavior is
+    // unchanged. When controller has ratcheted up, the ratchet wins → exit
+    // fires when price drops to the trailing level. ~5ns added per tick.
+    FPN<F> effective_sl = FPN_Max(sl, core->cached_params.ratchet_sl);
     uint64_t tp_hit        = (uint64_t)FPN_GreaterThanOrEqual(tick.price, tp);
-    uint64_t sl_hit        = (uint64_t)FPN_LessThanOrEqual(tick.price, sl);
+    uint64_t sl_hit        = (uint64_t)FPN_LessThanOrEqual(tick.price, effective_sl);
     uint64_t sg_fires      = (tp_enabled & tp_hit) | (sl_enabled & sl_hit);
 
     // Mask events. ~active means "not currently in a trade". permission means
