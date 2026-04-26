@@ -119,7 +119,8 @@ struct CoreContext {
     uint32_t sl_cooldown_remaining;
     // v4.0.3 D8 halt reason: most recent reason the gate was zero-gated.
     // 0 = ok / armed; 1 = spacing; 2 = vwap; 3 = long-slope; 4 = vol-delta;
-    // 5 = min-stddev; 6 = sl-cooldown; 7 = warmup. Displayed in GUI per core.
+    // 5 = min-stddev; 6 = sl-cooldown; 7 = warmup; 8 = core-budget (Phase 2.2).
+    // Displayed in GUI per core.
     uint8_t  halt_reason;
     // v4.0.3 B: per-core regime state for STRATEGY_AUTO. Tracks current
     // regime + hysteresis so the auto-mode core's strategy choice doesn't
@@ -829,13 +830,50 @@ inline int EventLoop_RebuildAllParameters(
         // tracked per-core for GUI display.
         //
         // Reasons: 0=ok, 1=spacing, 2=vwap, 3=long-slope, 4=vol-delta,
-        //          5=min-stddev, 6=sl-cooldown
+        //          5=min-stddev, 6=sl-cooldown, 7=warmup, 8=core-budget
         state->cores[slot].halt_reason = 0;
         auto zero_gate = [&](uint8_t reason) {
             state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
             if (state->cores[slot].halt_reason == 0)  // first reason wins
                 state->cores[slot].halt_reason = reason;
         };
+
+        // Phase 2.2: per-core budget enforcement. Clamp the strategy's
+        // requested qty against remaining allocation, and zero-gate
+        // entirely when budget is exhausted (open_notional >= allocated).
+        // The clamp is the meaningful path under multi-position-per-core;
+        // the halt fires when a core is already fully deployed and a
+        // strategy still wants to enter. Today (single-position-per-core,
+        // sizing = full allocation per trade) the clamp is mostly defensive
+        // — catches bugs where intended_qty gets corrupted to a huge value
+        // — and it'll matter structurally when multi-position-per-core lands.
+        // All FPN-pure, slow path. NOTE: FPN<F> is signed — we explicitly
+        // compare open_notional >= allocated (rather than relying on
+        // FPN_SubSat saturating to zero on underflow, which it doesn't).
+        {
+            FPN<F> alloc       = state->cores[slot].allocated_balance;
+            FPN<F> open_n      = state->cores[slot].core_open_notional;
+            FPN<F> entry_price = state->cores[slot].pending_params.bg_price_threshold;
+            if (FPN_GreaterThanOrEqual(open_n, alloc)) {
+                // Fully or over-deployed — no slot-room for another entry.
+                // Zero-gate with HALT_CORE_BUDGET. Trade size also clamped
+                // to zero so any downstream consumer of trade_size sees
+                // an honest zero rather than a stale value.
+                state->cores[slot].pending_params.trade_size = FPN_Zero<F>();
+                zero_gate(8);
+            } else if (!FPN_IsZero(entry_price)) {
+                // Budget remaining is positive — clamp qty to
+                // (budget_remaining / entry_price). Under single-position-
+                // per-core today, open_n is 0 when this branch runs (we hit
+                // the GE branch above when deployed), so budget_remaining
+                // == alloc and the clamp is a no-op. Multi-position-per-core
+                // would land here with partial budget, producing a real clamp.
+                FPN<F> budget_remaining = FPN_Sub(alloc, open_n);  // > 0 by branch
+                FPN<F> max_qty = FPN_DivNoAssert(budget_remaining, entry_price);
+                state->cores[slot].pending_params.trade_size =
+                    FPN_Min(state->cores[slot].pending_params.trade_size, max_qty);
+            }
+        }
 
         // SL COOLDOWN: decrement counter; if still active, zero-gate.
         if (state->cores[slot].sl_cooldown_remaining > 0) {

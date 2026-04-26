@@ -3956,6 +3956,126 @@ int main() {
               fabs(FPN_ToDouble(state.cores[slot].core_open_notional)) < 1e-6);
     }
 
+    //======================================================================================================
+    // [PHASE 2.2 TESTS — sizing clamp + HALT_CORE_BUDGET]
+    //======================================================================================================
+    // Pin the budget enforcement: when a core's open_notional reaches its
+    // allocated_balance, the next entry attempt must zero-gate with reason 8
+    // (core-budget). When budget is partial, the qty clamps to
+    // (budget_remaining / entry_price) instead of the full allocation. All
+    // logic lives in the cross-cutting filter post-process inside
+    // EventLoop_RebuildAllParameters — no strategy code is touched.
+    //======================================================================================================
+    printf("\n--- Phase 2.2: budget enforcement ---\n");
+    {
+        // Drive RebuildAllParameters with a stub rolling stats + cfg so we
+        // can isolate the budget logic from strategy-specific math.
+        tt::OrderManagerState<64> oms;
+        tt::EventLoopState<64> state;
+        tt::EventLoopState_InitLegacy(&state, &oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+
+        tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
+        tt::SPSCRing_Init(&tick_ring);
+        tt::ExecutionCore<64> core;
+        tt::ExecutionCore_Init(&core, 0, &tick_ring);
+        int slot = tt::EventLoopState_RegisterCore(&state, &core,
+            FPN_FromDouble<64>(60100.0), FPN_FromDouble<64>(59900.0),
+            FPN_FromDouble<64>(0.01));
+
+        // SimpleDip with $1000 allocation. Sizing math:
+        //   trade_size = allocated / expected_entry = 1000 / 60000 ≈ 0.0167
+        tt::EventLoopState_SetCoreStrategy(&state, slot,
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(1000.0));
+
+        // Stub cfg + rolling stats with values that produce a non-zero
+        // bg_price_threshold. SimpleDip uses recent_high * (1 - offset_pct).
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.entry_offset_pct  = FPN_FromDouble<64>(0.001);
+        cfg.take_profit_pct   = FPN_FromDouble<64>(0.005);
+        cfg.stop_loss_pct     = FPN_FromDouble<64>(0.003);
+        cfg.volume_multiplier = FPN_FromDouble<64>(1.0);
+        // disable cross-cutting filters that would zero-gate independently
+        cfg.min_stddev_pct  = FPN_Zero<64>();
+        cfg.min_long_slope  = FPN_Zero<64>();
+        cfg.min_buy_delta   = FPN_Zero<64>();
+        cfg.vwap_offset     = FPN_Zero<64>();
+        cfg.spacing_multiplier = FPN_Zero<64>();
+        cfg.fee_floor_mult  = FPN_Zero<64>();
+        cfg.spike_threshold = FPN_Zero<64>();
+        cfg.filter_scale    = FPN_Zero<64>();
+
+        RollingStats<64, 128> rolling = RollingStats_Init<64, 128>();
+        // populate enough state for SimpleDip to produce a price_threshold
+        rolling.price_max  = FPN_FromDouble<64>(60000.0);
+        rolling.price_avg  = FPN_FromDouble<64>(60000.0);
+        rolling.volume_avg = FPN_FromDouble<64>(1.0);
+        rolling.count      = 200;  // past warmup
+
+        // ---- Test 1: full budget remaining → no clamp, no halt ----
+        state.cores[slot].core_open_notional = FPN_Zero<64>();
+        tt::EventLoop_RebuildAllParameters(&state, &rolling, &cfg);
+        check("budget=full: halt_reason == 0 (not budget-halted)",
+              state.cores[slot].halt_reason != 8);
+        // qty should equal 1000 / (60000 × (1 - 0.001)) ≈ 0.01668
+        double tsize_full = FPN_ToDouble(state.cores[slot].pending_params.trade_size);
+        check("budget=full: trade_size matches strategy math (~0.0167)",
+              tsize_full > 0.016 && tsize_full < 0.018);
+
+        // ---- Test 2: partial budget → qty clamps proportionally ----
+        // Set core_open_notional to $500 of $1000 allocation. Budget
+        // remaining = $500. Expected: trade_size = 500 / 59940 ≈ 0.00834.
+        state.cores[slot].core_open_notional = FPN_FromDouble<64>(500.0);
+        tt::EventLoop_RebuildAllParameters(&state, &rolling, &cfg);
+        check("budget=half: halt_reason != 8 (still has room)",
+              state.cores[slot].halt_reason != 8);
+        double tsize_half = FPN_ToDouble(state.cores[slot].pending_params.trade_size);
+        check("budget=half: trade_size clamped to ~half (~0.00834)",
+              tsize_half > 0.008 && tsize_half < 0.009);
+
+        // ---- Test 3: budget fully deployed → halt fires + qty=0 ----
+        state.cores[slot].core_open_notional = FPN_FromDouble<64>(1000.0);
+        tt::EventLoop_RebuildAllParameters(&state, &rolling, &cfg);
+        check("budget=exhausted: halt_reason == 8 (core-budget)",
+              state.cores[slot].halt_reason == 8);
+        check("budget=exhausted: trade_size clamped to 0",
+              FPN_IsZero(state.cores[slot].pending_params.trade_size));
+        check("budget=exhausted: bg_price_threshold zero-gated",
+              FPN_IsZero(state.cores[slot].pending_params.bg_price_threshold));
+
+        // ---- Test 4: over-budget (defensive) → halt + qty=0 ----
+        // open_notional > allocated should never happen with the symmetric
+        // tracker, but defensive: FPN_SubSat saturates at zero so budget
+        // remaining is zero and halt fires.
+        state.cores[slot].core_open_notional = FPN_FromDouble<64>(1500.0);
+        tt::EventLoop_RebuildAllParameters(&state, &rolling, &cfg);
+        check("budget=over: halt_reason == 8 (saturating subtraction safe)",
+              state.cores[slot].halt_reason == 8);
+        check("budget=over: trade_size still 0",
+              FPN_IsZero(state.cores[slot].pending_params.trade_size));
+
+        // ---- Test 5: multi-core isolation ----
+        // Add a second core with full budget; verify core 0 budget exhaustion
+        // doesn't bleed into core 1.
+        tt::ExecutionCore<64> core1;
+        tt::ExecutionCore_Init(&core1, 0, &tick_ring);
+        int slot1 = tt::EventLoopState_RegisterCore(&state, &core1,
+            FPN_FromDouble<64>(60100.0), FPN_FromDouble<64>(59900.0),
+            FPN_FromDouble<64>(0.01));
+        tt::EventLoopState_SetCoreStrategy(&state, slot1,
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(1000.0));
+        // core 0 stays exhausted from test 4; core 1 has full budget
+        state.cores[slot1].core_open_notional = FPN_Zero<64>();
+        tt::EventLoop_RebuildAllParameters(&state, &rolling, &cfg);
+        check("multi-core: core 0 still budget-halted",
+              state.cores[slot].halt_reason == 8);
+        check("multi-core: core 1 not halted (independent budget)",
+              state.cores[slot1].halt_reason != 8);
+        double t1 = FPN_ToDouble(state.cores[slot1].pending_params.trade_size);
+        check("multi-core: core 1 trade_size unclamped",
+              t1 > 0.016 && t1 < 0.018);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

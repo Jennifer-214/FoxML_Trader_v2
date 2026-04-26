@@ -493,7 +493,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
         // Halt reason names match the codes in EventLoop_RebuildAllParameters.
         static const char* halt_names[] = {
             "ok", "spacing", "vwap", "long-slope", "vol-delta",
-            "min-stddev", "sl-cooldown"
+            "min-stddev", "sl-cooldown", "warmup", "core-budget"
         };
         for (int i = 0; i < s->per_core_count && i < 16; ++i) {
             const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
@@ -525,7 +525,9 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     ImGui::TextColored(FoxmlColors::comment, "off");
                 }
                 // Halt reason
-                if (pc->halt_reason > 0 && pc->halt_reason < 7) {
+                // halt_names array now goes up through index 8 (core-budget,
+                // Phase 2.2). Bound: < (sizeof(halt_names)/sizeof(*halt_names)).
+                if (pc->halt_reason > 0 && pc->halt_reason < 9) {
                     ImGui::SameLine(0, 15);
                     ImGui::TextColored(FoxmlColors::yellow,
                         "halted: %s", halt_names[pc->halt_reason]);
