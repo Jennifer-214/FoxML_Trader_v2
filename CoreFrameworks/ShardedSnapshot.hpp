@@ -215,6 +215,11 @@ static inline void TUI_CopySnapshotSharded(
         double alloc_d = FPN_ToDouble(state->cores[i].allocated_balance);
         snap->per_core[i].core_open_notional = open_n;
         snap->per_core[i].core_budget_used_pct = (alloc_d > 0.01) ? (open_n / alloc_d * 100.0) : 0.0;
+        // Phase 3: per-core kill switch state for the Risk panel
+        snap->per_core[i].core_peak_balance    = FPN_ToDouble(state->cores[i].core_peak_balance);
+        snap->per_core[i].core_dd_pct          = FPN_ToDouble(state->cores[i].core_dd_pct);
+        snap->per_core[i].core_ks_trips_total  = state->cores[i].core_ks_trips_total;
+        snap->per_core[i].core_kill_tripped    = state->cores[i].core_kill_tripped;
         tt::ExecutionCore<F>* core = state->cores[i].core;
         if (core) {
             tt::GateParameters<F> params;

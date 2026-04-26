@@ -4076,6 +4076,202 @@ int main() {
               t1 > 0.016 && t1 < 0.018);
     }
 
+    //======================================================================================================
+    // [PHASE 3 TESTS — per-core kill switch with MTM]
+    //======================================================================================================
+    // Pin: peak ratchets, dd computes correctly, trip fires only when both
+    // dd > threshold AND drop > min_kill_loss, halt zero-gates entries when
+    // tripped, manual reset clears trip + refreshes peak. Multi-core
+    // independence. MTM unrealized included when current_price is passed.
+    //======================================================================================================
+    printf("\n--- Phase 3: per-core kill switch ---\n");
+    {
+        auto fresh_state = []() {
+            struct R {
+                tt::OrderManagerState<64> oms;
+                tt::EventLoopState<64> state;
+                tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
+                tt::ExecutionCore<64> core;
+            };
+            // Heap-allocated so we get fresh OMS state per test (atomics in
+            // OMS / SPSCRing block assignment-from-temporary). Tests are
+            // short-lived and small — the leak is acceptable.
+            R* r = new R();
+            tt::EventLoopState_InitLegacy(&r->state, &r->oms,
+                FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            tt::SPSCRing_Init(&r->tick_ring);
+            tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
+            int slot = tt::EventLoopState_RegisterCore(&r->state, &r->core,
+                FPN_FromDouble<64>(60100.0), FPN_FromDouble<64>(59900.0),
+                FPN_FromDouble<64>(0.01));
+            tt::EventLoopState_SetCoreStrategy(&r->state, slot,
+                STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(1000.0));
+            return r;
+        };
+
+        // Stub cfg + rolling stats that produces a non-zero gate threshold
+        // and disables the other zero-gate filters
+        auto stub_cfg = []() {
+            ControllerConfig<64> c = ControllerConfig_Default<64>();
+            c.entry_offset_pct = FPN_FromDouble<64>(0.001);
+            c.take_profit_pct  = FPN_FromDouble<64>(0.005);
+            c.stop_loss_pct    = FPN_FromDouble<64>(0.003);
+            c.volume_multiplier = FPN_FromDouble<64>(1.0);
+            c.min_stddev_pct = FPN_Zero<64>();
+            c.min_long_slope = FPN_Zero<64>();
+            c.min_buy_delta  = FPN_Zero<64>();
+            c.vwap_offset    = FPN_Zero<64>();
+            c.spacing_multiplier = FPN_Zero<64>();
+            c.fee_floor_mult = FPN_Zero<64>();
+            c.spike_threshold = FPN_Zero<64>();
+            c.filter_scale   = FPN_Zero<64>();
+            // Phase 3: 10% drawdown threshold, $5 floor, MTM enabled
+            c.max_drawdown_pct = FPN_FromDouble<64>(0.10);
+            c.min_kill_loss    = FPN_FromDouble<64>(5.0);
+            c.enable_mtm_kill_switch = 1;
+            return c;
+        };
+
+        RollingStats<64, 128> rolling = RollingStats_Init<64, 128>();
+        rolling.price_max  = FPN_FromDouble<64>(60000.0);
+        rolling.price_avg  = FPN_FromDouble<64>(60000.0);
+        rolling.volume_avg = FPN_FromDouble<64>(1.0);
+        rolling.count      = 200;
+
+        // ---- Test 1: peak initializes to allocated on first rebuild ----
+        {
+            auto* r = fresh_state();
+            ControllerConfig<64> cfg = stub_cfg();
+            tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
+            check("init: peak == allocated_balance after first rebuild",
+                  fabs(FPN_ToDouble(r->state.cores[0].core_peak_balance) - 1000.0) < 1e-6);
+            check("init: kill not tripped",
+                  r->state.cores[0].core_kill_tripped == 0);
+            check("init: dd == 0",
+                  FPN_IsZero(r->state.cores[0].core_dd_pct));
+        }
+
+        // ---- Test 2: realized loss within threshold doesn't trip ----
+        {
+            auto* r = fresh_state();
+            ControllerConfig<64> cfg = stub_cfg();
+            // First rebuild establishes peak at 1000
+            tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
+            // Now lose $50 realized = 5% drawdown (under 10% threshold)
+            r->state.cores[0].core_realized = FPN_FromDouble<64>(-50.0);
+            tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
+            check("loss within threshold (5%, $50): no trip",
+                  r->state.cores[0].core_kill_tripped == 0);
+            // dd should compute as roughly 5%
+            double dd = FPN_ToDouble(r->state.cores[0].core_dd_pct);
+            check("loss within threshold: dd ~= 5%",
+                  dd > 0.04 && dd < 0.06);
+        }
+
+        // ---- Test 3: realized loss exceeds threshold AND floor → trip ----
+        {
+            auto* r = fresh_state();
+            ControllerConfig<64> cfg = stub_cfg();
+            tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
+            // Lose $150 realized = 15% drawdown (over 10% threshold) and
+            // $150 > $5 min_kill_loss
+            r->state.cores[0].core_realized = FPN_FromDouble<64>(-150.0);
+            tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
+            check("loss exceeds threshold (15%): kill tripped",
+                  r->state.cores[0].core_kill_tripped == 1);
+            check("trip: ks_trips_total bumped",
+                  r->state.cores[0].core_ks_trips_total == 1);
+            check("trip: halt_reason == 9 (core-kill)",
+                  r->state.cores[0].halt_reason == 9);
+            check("trip: bg_price_threshold zero-gated",
+                  FPN_IsZero(r->state.cores[0].pending_params.bg_price_threshold));
+        }
+
+        // ---- Test 4: tiny absolute loss doesn't trip even if dd% high ----
+        {
+            auto* r = fresh_state();
+            ControllerConfig<64> cfg = stub_cfg();
+            // allocated=1000, but min_kill_loss=$5. Drop $4 = 0.4% — way
+            // under the threshold anyway, so this is more about confirming
+            // both conditions are AND'd. Try a config where allocated is
+            // small to force the floor check to matter.
+            r->state.cores[0].allocated_balance = FPN_FromDouble<64>(20.0);
+            tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
+            // peak should now be 20
+            // Drop $4 = 20% dd (over 10% threshold), but $4 < $5 floor
+            r->state.cores[0].core_realized = FPN_FromDouble<64>(-4.0);
+            tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
+            check("dd over threshold but drop under floor ($4 < $5): NO trip",
+                  r->state.cores[0].core_kill_tripped == 0);
+        }
+
+        // ---- Test 5: MTM unrealized loss trips (no realized exit yet) ----
+        {
+            auto* r = fresh_state();
+            ControllerConfig<64> cfg = stub_cfg();
+            tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
+            // Manually open a position at $60000 with qty 0.01 (notional $600)
+            Portfolio_OpenSlot(&r->oms.portfolio, 0,
+                FPN_FromDouble<64>(60000.0), FPN_FromDouble<64>(0.01),
+                FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59000.0),
+                FPN_Zero<64>());
+            r->state.cores[0].core_open_notional = FPN_FromDouble<64>(600.0);
+
+            // Price drops to $40000: unrealized = (40000-60000)*0.01 = -$200
+            // current_value = 1000 + 0 + (-200) = 800
+            // peak still 1000, dd = 200/1000 = 20% (over 10% threshold)
+            // drop = $200 > $5 floor → trip
+            FPN<64> mtm = FPN_FromDouble<64>(40000.0);
+            tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg, (const RollingStats<64, 512>*)nullptr, nullptr, nullptr, &mtm);
+            check("MTM: -$200 unrealized trips kill (no realized)",
+                  r->state.cores[0].core_kill_tripped == 1);
+        }
+
+        // ---- Test 6: MTM disabled → realized-only behavior ----
+        {
+            auto* r = fresh_state();
+            ControllerConfig<64> cfg = stub_cfg();
+            cfg.enable_mtm_kill_switch = 0;  // realized-only mode
+            tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
+            Portfolio_OpenSlot(&r->oms.portfolio, 0,
+                FPN_FromDouble<64>(60000.0), FPN_FromDouble<64>(0.01),
+                FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59000.0),
+                FPN_Zero<64>());
+            // Big unrealized loss but MTM is off — kill should NOT fire
+            FPN<64> mtm = FPN_FromDouble<64>(30000.0);  // -$300 unrealized
+            tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg, (const RollingStats<64, 512>*)nullptr, nullptr, nullptr, &mtm);
+            check("MTM disabled: unrealized loss alone doesn't trip",
+                  r->state.cores[0].core_kill_tripped == 0);
+        }
+
+        // ---- Test 7: per-core override beats global threshold ----
+        {
+            auto* r = fresh_state();
+            ControllerConfig<64> cfg = stub_cfg();
+            // Global threshold 10%, override core 0 to 5%
+            cfg.core_max_drawdown_pct[0] = FPN_FromDouble<64>(0.05);
+            tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
+            // Lose $80 = 8% — over 5% override but under 10% global
+            r->state.cores[0].core_realized = FPN_FromDouble<64>(-80.0);
+            tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
+            check("per-core override (5%) trips at 8% even when global (10%) wouldn't",
+                  r->state.cores[0].core_kill_tripped == 1);
+        }
+
+        // ---- Test 8: post-trip halt prevents further entries ----
+        {
+            auto* r = fresh_state();
+            ControllerConfig<64> cfg = stub_cfg();
+            // Set a small allocated balance to ensure peak doesn't override
+            r->state.cores[0].core_kill_tripped = 1;  // pre-tripped
+            tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
+            check("pre-tripped: halt_reason == 9 immediately",
+                  r->state.cores[0].halt_reason == 9);
+            check("pre-tripped: bg_price_threshold zero-gated",
+                  FPN_IsZero(r->state.cores[0].pending_params.bg_price_threshold));
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

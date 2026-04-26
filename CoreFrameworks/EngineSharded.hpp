@@ -848,9 +848,29 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     fprintf(stderr, "[sharded] cfg hot-reloaded "
                             "(per-core overrides + tunables refreshed, allocations recomputed)\n");
                 }
+                // Phase 3: process per-core kill resets BEFORE the rebuild
+                // so a freshly-reset core can be re-evaluated this cycle.
+                // Each reset clears the trip flag and refreshes peak to the
+                // current value. GUI-only — g_shared lives inside the
+                // USE_IMGUI_GUI ifdef.
+                for (int c = 0; c < num_cores; ++c) {
+                    if (g_shared.kill_reset_per_core[c]) {
+                        g_shared.kill_reset_per_core[c] = 0;
+                        state.cores[c].core_kill_tripped = 0;
+                        state.cores[c].core_peak_balance = FPN_Zero<F>();
+                        state.cores[c].core_dd_pct = FPN_Zero<F>();
+                        fprintf(stderr, "[sharded] core %d kill switch RESET\n", c);
+                    }
+                }
 #endif
+                // Phase 3: pass current_price for MTM kill switch evaluation.
+                // Read once from the producer atomic; tracker is realized-only
+                // on the first slow path before any tick has been seen.
+                FPN<F> mtm_price = FPN_FromDouble<F>(
+                    last_price.load(std::memory_order_relaxed));
                 EventLoop_RebuildAllParameters(&state, &rolling_short, &cfg, &rolling_long,
-                                                &regime_ror, &ema_price);
+                                                &regime_ror, &ema_price,
+                                                FPN_IsZero(mtm_price) ? nullptr : &mtm_price);
                 EventLoop_PushParameters(&state);
                 // KNOWN RACE (audit 2026-04-09): KillSwitchEvaluate reads
                 // oms->balance from this (producer) thread while the drainer
@@ -1013,6 +1033,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         state.cores[c].core_wins          = 0;
                         state.cores[c].core_losses        = 0;
                         state.cores[c].core_open_notional = FPN_Zero<F>();
+                        // Phase 3: reset per-core kill switch state too.
+                        // Trip flags + peak + dd all clear so cores can
+                        // trade fresh after a paper reset.
+                        state.cores[c].core_peak_balance   = FPN_Zero<F>();
+                        state.cores[c].core_dd_pct         = FPN_Zero<F>();
+                        state.cores[c].core_kill_tripped   = 0;
+                        state.cores[c].core_ks_trips_total = 0;
                     }
                     fprintf(stderr, "[sharded] paper reset: balance=$%.2f\n",
                             FPN_ToDouble(cfg.starting_balance));

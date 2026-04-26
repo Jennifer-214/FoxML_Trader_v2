@@ -937,6 +937,11 @@ struct TUISnapshot {
         // sizing budget for new entries.
         double   core_open_notional;   // raw notional of open positions
         double   core_budget_used_pct; // open_notional / allocated × 100
+        // Phase 3: per-core kill switch state for the Risk panel
+        double   core_peak_balance;    // peak watermark (allocated + realized + MTM)
+        double   core_dd_pct;          // current drawdown fraction (0..1)
+        uint32_t core_ks_trips_total;  // historical trip count
+        uint8_t  core_kill_tripped;    // 1 = kill-halted right now
     };
     PerCoreSnap per_core[16];      // up to MAX_EXECUTION_CORES
 };
@@ -963,6 +968,11 @@ struct TUISharedState {
     // resets to 0xFF after applying. Per-core array so multiple cores can
     // be queued independently.
     volatile uint8_t swap_strategy_requested[16];
+    // Phase 3: per-core kill switch reset. GUI writes 1 to reset the trip
+    // for that specific core. Controller resets the flag back to 0 after
+    // clearing core_kill_tripped + refreshing core_peak_balance to current.
+    // Independent per core — resetting core 0 doesn't touch core 3.
+    volatile sig_atomic_t kill_reset_per_core[16];
     EngineTUI tui;
     const char *config_path;
     void *candle_acc;  // CandleAccumulator* (GUI build only, NULL for ANSI)

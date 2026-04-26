@@ -372,6 +372,21 @@ template <unsigned F> struct ControllerConfig {
   // shared risk_pct / num_cores. Non-zero = use this specific percentage.
   // Config syntax: core_0_risk_pct=20.0 (stored as 0.20).
   FPN<F> core_risk_pct[16];    // MAX_EXECUTION_CORES
+  // Phase 3: per-core kill switch overrides + global tunables.
+  // core_max_drawdown_pct[i] overrides the shared max_drawdown_pct for
+  // this specific core. Default 0 = use shared. Config syntax:
+  // core_0_max_drawdown_pct=15.0 (stored as 0.15).
+  FPN<F> core_max_drawdown_pct[16];
+  // min_kill_loss: absolute USDT floor for the per-core kill switch. The
+  // trip fires only when BOTH dd_pct exceeds threshold AND drop exceeds
+  // this floor. Without it, a tiny allocation ($10) loses $0.50, dd=5%,
+  // and the kill trips on rounding noise. Default $5. Config syntax:
+  // min_kill_loss=5.0
+  FPN<F> min_kill_loss;
+  // enable_mtm_kill_switch: 1 = include unrealized P&L in kill eval (mark
+  // to market every slow path); 0 = realized-only (legacy behavior). MTM
+  // catches "position riding down with no SL hit yet" scenarios. Default 1.
+  uint32_t enable_mtm_kill_switch;
   // Per-core ML model path. Each core running STRATEGY_ML can load its
   // own model. Default empty = use shared ml_model_path. Config syntax:
   // core_0_model_path=models/aggressive.xgb
@@ -666,6 +681,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.sharded_force_synthetic = 0;
   for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
   for (int i = 0; i < 16; ++i) cfg.core_risk_pct[i] = FPN_Zero<F>();  // 0 = shared
+  // Phase 3: per-core kill switch overrides default to 0 (= use shared).
+  for (int i = 0; i < 16; ++i) cfg.core_max_drawdown_pct[i] = FPN_Zero<F>();
+  cfg.min_kill_loss = FPN_FromDouble<F>(5.0);   // $5 absolute-loss floor for trip
+  cfg.enable_mtm_kill_switch = 1;                // mark-to-market enabled by default
   for (int i = 0; i < 16; ++i) cfg.core_model_path[i][0] = '\0';    // empty = shared
   for (int i = 0; i < 16; ++i) cfg.core_model_dir[i][0] = '\0';     // empty = use model_path or shared
   // v4.0 per-core overrides — zero in every field = "inherit global"
@@ -853,6 +872,9 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_PCT(offset_min)
     CFG_PARSE_PCT(offset_max)
     CFG_PARSE_PCT(max_drawdown_pct)
+    // Phase 3: kill switch tunables
+    CFG_PARSE_FPN_POS(min_kill_loss)
+    CFG_PARSE_U32(enable_mtm_kill_switch)
     CFG_PARSE_PCT(max_exposure_pct)
     CFG_PARSE_PCT(min_hold_gain_pct)
     CFG_PARSE_PCT(regime_r2_threshold)
@@ -999,6 +1021,17 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       int core_idx = atoi(key + 5);
       if (core_idx >= 0 && core_idx < 16) {
         cfg.core_risk_pct[core_idx] = FPN_FromDouble<F>(atof(val) / 100.0);
+      }
+      continue;
+    }
+    // Phase 3: per-core kill switch override. core_0_max_drawdown_pct=15.0
+    // means core 0 trips at 15% drawdown (overrides shared max_drawdown_pct).
+    // Match must come before _max checks (substring "_max" is in
+    // "_max_drawdown_pct"). Specific suffix match keeps it safe.
+    if (strncmp(key, "core_", 5) == 0 && strstr(key, "_max_drawdown_pct")) {
+      int core_idx = atoi(key + 5);
+      if (core_idx >= 0 && core_idx < 16) {
+        cfg.core_max_drawdown_pct[core_idx] = FPN_FromDouble<F>(atof(val) / 100.0);
       }
       continue;
     }

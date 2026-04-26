@@ -119,8 +119,8 @@ struct CoreContext {
     uint32_t sl_cooldown_remaining;
     // v4.0.3 D8 halt reason: most recent reason the gate was zero-gated.
     // 0 = ok / armed; 1 = spacing; 2 = vwap; 3 = long-slope; 4 = vol-delta;
-    // 5 = min-stddev; 6 = sl-cooldown; 7 = warmup; 8 = core-budget (Phase 2.2).
-    // Displayed in GUI per core.
+    // 5 = min-stddev; 6 = sl-cooldown; 7 = warmup; 8 = core-budget (Phase 2.2);
+    // 9 = core-kill (Phase 3). Displayed in GUI per core.
     uint8_t  halt_reason;
     // v4.0.3 B: per-core regime state for STRATEGY_AUTO. Tracks current
     // regime + hysteresis so the auto-mode core's strategy choice doesn't
@@ -162,6 +162,24 @@ struct CoreContext {
     // entry notional of one position today, but the sum-of-positions
     // model survives future multi-position-per-core.
     FPN<F> core_open_notional;
+    // Phase 3: per-core kill switch state. Realized + MTM unrealized P&L
+    // tracked against a peak-to-trough drawdown. When dd exceeds threshold
+    // (and absolute drop exceeds min_kill_loss floor), the core is "killed"
+    // — buying_halted equivalent, future entries zero-gate with reason 9.
+    // Open positions ride to TP/SL; kill blocks NEW trades, doesn't force-close.
+    //
+    // current_value = allocated + realized + unrealized
+    // peak          = FPN_Max(peak, current_value)  (slow path, branchless)
+    // dd_pct        = (peak - current_value) / peak
+    //
+    // Manual reset via TUISharedState::kill_reset_per_core[N] resets the
+    // trip flag and refreshes peak to current. Aggregate OMS-level breaker
+    // remains as backstop for whole-account drawdown.
+    FPN<F> core_peak_balance;       // peak of current_value over core's lifetime
+    FPN<F> core_dd_pct;             // current drawdown % (display field, recomputed each rebuild)
+    uint8_t core_kill_tripped;      // 1 = killed; entries zero-gated with HALT_CORE_KILL
+    uint8_t  _pad_kill[3];          // alignment
+    uint32_t core_ks_trips_total;   // lifetime trip count (for forensics)
 };
 
 //======================================================================================================
@@ -249,6 +267,13 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].core_losses = 0;
         // Phase 2.1: per-core open notional (sum of entry_price × qty)
         state->cores[i].core_open_notional = FPN_Zero<F>();
+        // Phase 3: per-core kill switch state. peak starts at zero; the
+        // first slow-path rebuild bumps it to (allocated + 0 + 0) which
+        // then becomes the high-water mark.
+        state->cores[i].core_peak_balance     = FPN_Zero<F>();
+        state->cores[i].core_dd_pct           = FPN_Zero<F>();
+        state->cores[i].core_kill_tripped     = 0;
+        state->cores[i].core_ks_trips_total   = 0;
     }
 }
 
@@ -678,7 +703,8 @@ inline int EventLoop_RebuildAllParameters(
     const ControllerConfig<F>* config,
     const RollingStats<F, WL>* rolling_long = nullptr,
     const void* ror_regressor = nullptr,    // const RORRegressor<F>*
-    const void* ema_price     = nullptr     // const FPN<F>*
+    const void* ema_price     = nullptr,    // const FPN<F>*
+    const void* current_price = nullptr     // const FPN<F>* — Phase 3 MTM
 ) {
     int rebuilt = 0;
     for (int slot = 0; slot < state->registered_count; ++slot) {
@@ -872,6 +898,74 @@ inline int EventLoop_RebuildAllParameters(
                 FPN<F> max_qty = FPN_DivNoAssert(budget_remaining, entry_price);
                 state->cores[slot].pending_params.trade_size =
                     FPN_Min(state->cores[slot].pending_params.trade_size, max_qty);
+            }
+        }
+
+        // Phase 3 — per-core kill switch: MTM peak/drawdown tracking + trip
+        // evaluation. Realized P&L from oms->realized_pnl already includes
+        // closed exits booked by this core; unrealized comes from MTM walking
+        // open positions (only this core's slot under single-position-per-core).
+        // current_value = allocated + realized + unrealized.
+        // peak ratchets up via FPN_Max; trip fires when dd_pct exceeds
+        // threshold AND drop exceeds min_kill_loss floor (so tiny allocs
+        // don't trip on rounding noise).
+        //
+        // MTM is best-effort: if current_price is null (legacy callers / tests
+        // not passing it), we fall back to realized-only — peak/dd computed
+        // without the unrealized term. enable_mtm_kill_switch=0 forces this
+        // realized-only mode regardless of whether current_price was passed.
+        {
+            FPN<F> alloc     = state->cores[slot].allocated_balance;
+            FPN<F> realized  = state->cores[slot].core_realized;
+            FPN<F> unrealized = FPN_Zero<F>();
+            const FPN<F>* px_in = (const FPN<F>*)current_price;
+            if (config->enable_mtm_kill_switch && px_in &&
+                !FPN_IsZero(*px_in) && (state->oms->portfolio.active_bitmap & (1u << slot))) {
+                Position<F>& pos = state->oms->portfolio.positions[slot];
+                FPN<F> diff = FPN_Sub(*px_in, pos.entry_price);
+                unrealized = FPN_Mul(diff, pos.quantity);
+            }
+            FPN<F> current_value = FPN_Add(alloc, FPN_Add(realized, unrealized));
+            // Peak ratchet (branchless via FPN_Max). Initialize to alloc on
+            // first sight if peak is still zero (first rebuild after init).
+            if (FPN_IsZero(state->cores[slot].core_peak_balance)) {
+                state->cores[slot].core_peak_balance = alloc;
+            }
+            state->cores[slot].core_peak_balance =
+                FPN_Max(state->cores[slot].core_peak_balance, current_value);
+            // Drawdown computation. Skip if peak is zero (defensive — should
+            // never happen after the init bump above, but handles a freshly
+            // reset state). dd = (peak - current) / peak.
+            FPN<F> drop = FPN_Sub(state->cores[slot].core_peak_balance, current_value);
+            if (FPN_GreaterThan(drop, FPN_Zero<F>()) &&
+                FPN_GreaterThan(state->cores[slot].core_peak_balance, FPN_Zero<F>())) {
+                state->cores[slot].core_dd_pct = FPN_DivNoAssert(drop,
+                    state->cores[slot].core_peak_balance);
+            } else {
+                state->cores[slot].core_dd_pct = FPN_Zero<F>();
+            }
+            // Trip evaluation. Threshold: per-core override if set, else
+            // global max_drawdown_pct. Trip ALSO requires drop > min_kill_loss
+            // so a tiny allocation doesn't trip on rounding noise.
+            if (state->cores[slot].core_kill_tripped == 0) {
+                FPN<F> threshold = !FPN_IsZero(config->core_max_drawdown_pct[slot])
+                    ? config->core_max_drawdown_pct[slot]
+                    : config->max_drawdown_pct;
+                if (FPN_GreaterThan(state->cores[slot].core_dd_pct, threshold) &&
+                    FPN_GreaterThan(drop, config->min_kill_loss)) {
+                    state->cores[slot].core_kill_tripped   = 1;
+                    state->cores[slot].core_ks_trips_total++;
+                    fprintf(stderr, "[sharded] CORE KILL: core %d tripped — "
+                            "dd=%.2f%% drop=$%.2f peak=$%.2f current=$%.2f\n",
+                            slot,
+                            FPN_ToDouble(state->cores[slot].core_dd_pct) * 100.0,
+                            FPN_ToDouble(drop),
+                            FPN_ToDouble(state->cores[slot].core_peak_balance),
+                            FPN_ToDouble(current_value));
+                }
+            }
+            if (state->cores[slot].core_kill_tripped) {
+                zero_gate(9);  // HALT_CORE_KILL
             }
         }
 

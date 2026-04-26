@@ -493,7 +493,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
         // Halt reason names match the codes in EventLoop_RebuildAllParameters.
         static const char* halt_names[] = {
             "ok", "spacing", "vwap", "long-slope", "vol-delta",
-            "min-stddev", "sl-cooldown", "warmup", "core-budget"
+            "min-stddev", "sl-cooldown", "warmup", "core-budget", "core-kill"
         };
         for (int i = 0; i < s->per_core_count && i < 16; ++i) {
             const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
@@ -525,9 +525,9 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     ImGui::TextColored(FoxmlColors::comment, "off");
                 }
                 // Halt reason
-                // halt_names array now goes up through index 8 (core-budget,
-                // Phase 2.2). Bound: < (sizeof(halt_names)/sizeof(*halt_names)).
-                if (pc->halt_reason > 0 && pc->halt_reason < 9) {
+                // halt_names array now goes up through index 9 (core-kill,
+                // Phase 3). Bound: < (sizeof(halt_names)/sizeof(*halt_names)).
+                if (pc->halt_reason > 0 && pc->halt_reason < 10) {
                     ImGui::SameLine(0, 15);
                     ImGui::TextColored(FoxmlColors::yellow,
                         "halted: %s", halt_names[pc->halt_reason]);
@@ -1321,6 +1321,114 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
     // dropdown + Apply button moved into Settings → Core N → "Core
     // Configuration" section, so all per-core knobs (strategy, risk %,
     // model path, model dir, plus all overrides) live under one tab.
+
+    // Phase 3.5 — RISK PANEL. Per-core kill switch dashboard with reset
+    // controls. Account panel stays read-only / monitoring; this panel
+    // is for taking action when a core gets in trouble. Future home for
+    // manual halt, force-close, drawdown override slider, etc.
+    if (s->sharded_mode_active && s->per_core_count > 0 && shared) {
+        ImGui::Begin("Risk");
+        SectionHeader("PER-CORE RISK");
+        ImGui::TextColored(FoxmlColors::comment,
+            "(kill switch tracks peak-to-trough drawdown including unrealized; "
+            "trip blocks future entries — open positions ride to TP/SL)");
+
+        ImGuiTableFlags rt = ImGuiTableFlags_BordersInnerV |
+                              ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_SizingStretchProp;
+        if (ImGui::BeginTable("risk_per_core", 8, rt)) {
+            ImGui::TableSetupColumn("Core",   ImGuiTableColumnFlags_WidthFixed, 36);
+            ImGui::TableSetupColumn("Strat",  ImGuiTableColumnFlags_WidthFixed, 56);
+            ImGui::TableSetupColumn("Peak",   ImGuiTableColumnFlags_WidthFixed, 80);
+            ImGui::TableSetupColumn("Curr",   ImGuiTableColumnFlags_WidthFixed, 80);
+            ImGui::TableSetupColumn("DD%%",   ImGuiTableColumnFlags_WidthFixed, 70);
+            ImGui::TableSetupColumn("Trips",  ImGuiTableColumnFlags_WidthFixed, 50);
+            ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 70);
+            ImGui::TableHeadersRow();
+
+            static const ImVec4 strat_colors[NUM_STRATEGIES] = {
+                {0.85f, 0.65f, 0.35f, 0.9f},  // MR
+                {0.85f, 0.45f, 0.45f, 0.9f},  // MOM
+                {0.45f, 0.75f, 0.45f, 0.9f},  // DIP
+                {0.65f, 0.45f, 0.80f, 0.9f},  // ML
+                {0.35f, 0.75f, 0.80f, 0.9f},  // EMA
+                {0.70f, 0.70f, 0.70f, 0.9f},  // AUTO
+            };
+
+            for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+                const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
+                ImGui::PushID(i);
+                ImGui::TableNextRow();
+
+                ImGui::TableNextColumn();
+                ImGui::Text("%d", i);
+
+                ImGui::TableNextColumn();
+                uint8_t sid = pc->resolved_strategy_id;
+                if (sid >= NUM_STRATEGIES) sid = pc->strategy_id_display;
+                if (sid < NUM_STRATEGIES) {
+                    ImGui::TextColored(strat_colors[sid], "%s", STRATEGY_SHORT_NAMES[sid]);
+                } else {
+                    ImGui::TextDisabled("?");
+                }
+
+                ImGui::TableNextColumn();
+                ImGui::Text("$%.2f", pc->core_peak_balance);
+
+                // Current value = allocated + realized (+ unrealized when MTM
+                // is on, but we don't surface unrealized separately yet —
+                // the dd% derives from the current that the engine saw).
+                // Reconstruct approximately: peak * (1 - dd) gives current
+                // at the time peak was last evaluated.
+                double approx_current = pc->core_peak_balance * (1.0 - pc->core_dd_pct);
+                ImGui::TableNextColumn();
+                ImGui::Text("$%.2f", approx_current);
+
+                // DD%, color-coded
+                ImGui::TableNextColumn();
+                double dd = pc->core_dd_pct * 100.0;
+                ImVec4 dd_col = (dd < 5.0)  ? FoxmlColors::green
+                              : (dd < 10.0) ? FoxmlColors::yellow
+                                            : FoxmlColors::red;
+                ImGui::TextColored(dd_col, "%.1f%%", dd);
+
+                ImGui::TableNextColumn();
+                if (pc->core_ks_trips_total > 0) {
+                    ImGui::TextColored(FoxmlColors::yellow, "%u", pc->core_ks_trips_total);
+                } else {
+                    ImGui::TextDisabled("0");
+                }
+
+                ImGui::TableNextColumn();
+                if (pc->core_kill_tripped) {
+                    ImGui::TextColored(FoxmlColors::red_b, "KILLED");
+                } else {
+                    ImGui::TextColored(FoxmlColors::green, "armed");
+                }
+
+                ImGui::TableNextColumn();
+                if (pc->core_kill_tripped) {
+                    if (ImGui::Button("Reset")) {
+                        // Per-core reset signal — engine slow path picks this
+                        // up, clears trip flag, refreshes peak to current.
+                        shared->kill_reset_per_core[i] = 1;
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Clear kill trip + refresh peak watermark.\n"
+                                          "Core %d will resume trading on next slow-path cycle.", i);
+                    }
+                } else {
+                    ImGui::BeginDisabled();
+                    ImGui::Button("Reset");
+                    ImGui::EndDisabled();
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+        ImGui::End();
+    }
 
     // Per-core latency panel (sharded mode only)
     if (s->sharded_mode_active && s->per_core_count > 0) {
