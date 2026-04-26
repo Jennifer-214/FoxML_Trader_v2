@@ -98,9 +98,21 @@ static volatile std::sig_atomic_t g_engine_sharded_shutdown = 0;
 //======================================================================================================
 static ShardedOrderLatency g_sharded_order_lat;
 
+// Pointer to the GUI's quit_requested flag, set by EngineSharded_Run after
+// g_shared is constructed. The signal handler writes through it so SDL's GUI
+// thread (which loops on quit_requested) exits in lockstep with the engine
+// threads (which loop on g_engine_sharded_shutdown). Without this, Ctrl+C
+// flips g_engine_sharded_shutdown but the GUI thread keeps running until the
+// main thread reaches its post-join cleanup — which can hang if SDL's event
+// dispatch holds resources the joiner is waiting on. Two flags, one signal.
+static volatile sig_atomic_t* g_engine_sharded_gui_quit_ptr = nullptr;
+
 extern "C" inline void EngineSharded_SignalHandler(int sig) {
     (void)sig;
     g_engine_sharded_shutdown = 1;
+    if (g_engine_sharded_gui_quit_ptr) {
+        *g_engine_sharded_gui_quit_ptr = 1;
+    }
 }
 
 //======================================================================================================
@@ -574,6 +586,12 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
     g_shared.reload_requested = 0;
     g_shared.drag_slot = -1;
     for (int i = 0; i < 16; ++i) g_shared.swap_strategy_requested[i] = STRATEGY_NONE;
+    // Wire the signal handler's GUI-quit pointer to this g_shared. After
+    // this assignment, SIGINT will set BOTH g_engine_sharded_shutdown AND
+    // g_shared.quit_requested in one atomic-ish step, ensuring the GUI
+    // thread can drop out of its SDL event loop in the same tick as the
+    // engine threads see the shutdown flag.
+    g_engine_sharded_gui_quit_ptr = &g_shared.quit_requested;
     static CandleAccumulator g_candle_acc;
     CandleAccumulator_Init(&g_candle_acc, 60);
     g_shared.candle_acc = &g_candle_acc;
@@ -648,6 +666,25 @@ static inline void EngineSharded_Run(const ControllerConfig<F>& cfg,
                     if ((state.oms->portfolio.active_bitmap &
                          (uint16_t)(1u << c)) != 0) {
                         continue;  // position open; defer until exit
+                    }
+                    // v4.0 audit: refuse swap-to-ML if this core never had
+                    // a model loaded. Otherwise ML_BuildParameters would
+                    // silently fall back to SimpleDip while the GUI claims
+                    // the core is ML — confusing failure mode. model_handle
+                    // is set at engine boot for cores configured with
+                    // core_N_strategy=ml + a model path; we can't load a
+                    // model mid-session because that requires file I/O off
+                    // the controller thread.
+                    if (pending == STRATEGY_ML &&
+                        state.cores[c].model_handle == NULL) {
+                        fprintf(stderr,
+                                "[sharded] core %d: refusing swap to ML — no model "
+                                "loaded for this core. Set core_%d_model_dir or "
+                                "core_%d_model_path in engine.cfg + restart.\n",
+                                c, c, c);
+                        __atomic_store_n(&g_shared.swap_strategy_requested[c],
+                                         STRATEGY_NONE, __ATOMIC_RELEASE);
+                        continue;
                     }
                     uint8_t old_strat = state.cores[c].strategy_id;
                     state.cores[c].strategy_id = pending;

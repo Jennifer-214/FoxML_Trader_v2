@@ -155,6 +155,10 @@ static inline void TUI_CopySnapshotSharded(
 
     for (int i = 0; i < state->registered_count && i < 16; ++i) {
         snap->per_core[i].strategy_id_display = state->cores[i].strategy_id;
+        // Per-core gate direction. MOMENTUM buys above; everything else buys
+        // below. Mirrors the dispatch pattern in PortfolioController_StrategyDispatch.
+        snap->per_core[i].gate_direction =
+            (state->cores[i].strategy_id == STRATEGY_MOMENTUM) ? 1 : 0;
         tt::ExecutionCore<F>* core = state->cores[i].core;
         if (core) {
             tt::GateParameters<F> params;

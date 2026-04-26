@@ -394,16 +394,13 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     ImGui::TextColored(FoxmlColors::comment, "—");
                 }
                 ImGui::TableNextColumn();
-                // mirror the headline status logic against this core's gate
+                // Per-core direction (MOM = >=, everything else = <=).
                 if (gate_p < 0.01) {
                     ImGui::TextColored(FoxmlColors::yellow, "off");
                 } else if (s->positions[i].idx >= 0) {
                     ImGui::TextColored(FoxmlColors::comment, "in pos");
                 } else {
-                    // direction is the headline gate_direction (best-effort —
-                    // sharded snapshot doesn't carry per-core gate_direction
-                    // yet; treat all-cores-same per the current strategy mix)
-                    int price_ok = s->gate_direction
+                    int price_ok = s->per_core[i].gate_direction
                         ? (s->price >= gate_p)
                         : (s->price <= gate_p);
                     if (price_ok)

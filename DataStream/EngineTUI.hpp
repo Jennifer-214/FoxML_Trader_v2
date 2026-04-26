@@ -905,6 +905,7 @@ struct TUISnapshot {
         // Phase 6prep sharded c16 — per-core ML observability. Populated only
         // for STRATEGY_ML cores by TUI_CopySnapshotSharded; non-ML cores leave
         // is_ml=0 and renderer skips them.
+        uint8_t  gate_direction;       // 0 = buy below (MR/DIP/EMA/ML), 1 = buy above (MOM)
         uint8_t  is_ml;                // 1 = STRATEGY_ML core with ML extras valid
         uint8_t  ml_model_loaded;      // 1 = zoo has at least one role loaded
         double   ml_last_prediction;   // most recent ML inference output [0, 1]
