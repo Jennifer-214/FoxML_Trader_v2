@@ -150,7 +150,28 @@ static inline void TUI_CopySnapshotSharded(
     snap->sharded_mode_active = 1;
     snap->per_core_count = state->registered_count;
     if (state->registered_count > 0) {
-        snap->strategy_id = state->cores[0].strategy_id;
+        // v4.0.4: use core 0's RESOLVED strategy as headline. For AUTO core 0
+        // this gives the regime-resolved concrete strategy; for static cores
+        // it equals strategy_id. Avoids showing "AUTO" raw which isn't a
+        // real strategy the Market panel can label.
+        uint8_t headline_sid = (state->cores[0].resolved_strategy_id != STRATEGY_NONE)
+                                ? state->cores[0].resolved_strategy_id
+                                : state->cores[0].strategy_id;
+        snap->strategy_id = headline_sid;
+        // v4.0.4: regime headline. Pick the regime from the first AUTO
+        // core if any exist (its hysteresis state IS the regime). Otherwise
+        // compute fresh from rolling stats so the panel isn't stuck on
+        // RANGING. Each AUTO core has its own state — they may differ
+        // briefly under hysteresis, but core 0 (or first AUTO) is the
+        // "headline" for display purposes.
+        int headline_regime = REGIME_RANGING;  // default
+        for (int i = 0; i < state->registered_count && i < 16; ++i) {
+            if (state->cores[i].strategy_id == STRATEGY_AUTO) {
+                headline_regime = state->cores[i].regime_state.current_regime;
+                break;
+            }
+        }
+        snap->current_regime = headline_regime;
     }
     // Phase 6prep sharded c16: ML aggregation across per-core scorers. We
     // pick the highest-confidence ML core to populate the headline `s->ml.*`
