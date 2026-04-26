@@ -83,7 +83,10 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
     time_t now = time(NULL);
     unsigned elapsed = (unsigned)difftime(now, (time_t)start_time);
     unsigned hours = elapsed / 3600, mins = (elapsed % 3600) / 60, secs = elapsed % 60;
-    const char *state_str = (s->engine_state == 0) ? "WARMUP" :
+    // v4.0.4: prefer state_warmup (populated by both sharded + legacy
+    // snapshots) over engine_state (legacy field, not populated in sharded
+    // mode — caused stuck "WARMUP" display after warmup actually completed).
+    const char *state_str = s->state_warmup ? "WARMUP" :
                             (s->engine_state == 2) ? "CLOSING" : "ACTIVE";
 
     if (s->live_trading)
