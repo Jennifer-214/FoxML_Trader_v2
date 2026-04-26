@@ -746,8 +746,10 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             dl->AddText(ImVec2(box_l + icon_w, tl.y + lpad), IM_COL32(255,255,255,230), clabels[i].text);
         }
 
-        // buy gate threshold — cyan, thick dotted, distinct from entry/TP/SL
-        if (snap->buy_p > 0.01) {
+        // buy gate threshold — cyan, thick dotted, distinct from entry/TP/SL.
+        // In sharded mode this is core 0's gate, redundant with the per-core
+        // lines drawn below. Hide it to avoid double-drawing + reduce clutter.
+        if (snap->buy_p > 0.01 && !snap->sharded_mode_active) {
             ImVec2 left  = ImPlot::PlotToPixels(cs->x_lo, snap->buy_p);
             ImVec2 right = ImPlot::PlotToPixels(cs->x_hi, snap->buy_p);
             ImU32 gate_col = ImGui::GetColorU32(ImVec4(

@@ -346,6 +346,79 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
     ImGui::Begin("Buy Gate");
     SectionHeader("BUY GATE");
 
+    // v4.0 sharded: per-core gate table. Each core has its own gate price,
+    // colored by the core's strategy (matches the chart's gate-line colors).
+    // The detailed view below shows core 0; this table shows all cores.
+    if (s->sharded_mode_active && s->per_core_count > 0) {
+        // strategy color palette — same indices as ChartPanel's strat_colors
+        // so a row's color matches its line on the chart.
+        static const ImVec4 strat_colors[NUM_STRATEGIES] = {
+            {0.85f, 0.65f, 0.35f, 0.9f},  // MR — orange/sand
+            {0.85f, 0.45f, 0.45f, 0.9f},  // MOM — red
+            {0.45f, 0.75f, 0.45f, 0.9f},  // DIP — green
+            {0.65f, 0.45f, 0.80f, 0.9f},  // ML — purple
+            {0.35f, 0.75f, 0.80f, 0.9f},  // EMA — cyan
+        };
+        ImGuiTableFlags tf = ImGuiTableFlags_BordersInnerV |
+                              ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_SizingStretchProp;
+        if (ImGui::BeginTable("##bg_percore", 5, tf)) {
+            ImGui::TableSetupColumn("Core",   ImGuiTableColumnFlags_WidthFixed, 35);
+            ImGui::TableSetupColumn("Strat",  ImGuiTableColumnFlags_WidthFixed, 50);
+            ImGui::TableSetupColumn("Gate",   ImGuiTableColumnFlags_WidthFixed, 90);
+            ImGui::TableSetupColumn("Dist",   ImGuiTableColumnFlags_WidthFixed, 80);
+            ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableHeadersRow();
+            for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%d", i);
+                ImGui::TableNextColumn();
+                uint8_t sid = s->per_core[i].strategy_id_display;
+                ImVec4 col = (sid < NUM_STRATEGIES) ? strat_colors[sid]
+                                                   : ImVec4(0.6f,0.6f,0.6f,0.9f);
+                ImGui::TextColored(col, "%s",
+                    sid < NUM_STRATEGIES ? STRATEGY_SHORT_NAMES[sid] : "?");
+                ImGui::TableNextColumn();
+                double gate_p = s->per_core[i].buy_gate_price;
+                if (gate_p > 0.01) {
+                    ImGui::Text("$%.2f", gate_p);
+                } else {
+                    ImGui::TextColored(FoxmlColors::comment, "—");
+                }
+                ImGui::TableNextColumn();
+                if (gate_p > 0.01 && s->price > 0.01) {
+                    double dist_pct = ((s->price - gate_p) / s->price) * 100.0;
+                    ImGui::Text("%+.3f%%", dist_pct);
+                } else {
+                    ImGui::TextColored(FoxmlColors::comment, "—");
+                }
+                ImGui::TableNextColumn();
+                // mirror the headline status logic against this core's gate
+                if (gate_p < 0.01) {
+                    ImGui::TextColored(FoxmlColors::yellow, "off");
+                } else if (s->positions[i].idx >= 0) {
+                    ImGui::TextColored(FoxmlColors::comment, "in pos");
+                } else {
+                    // direction is the headline gate_direction (best-effort —
+                    // sharded snapshot doesn't carry per-core gate_direction
+                    // yet; treat all-cores-same per the current strategy mix)
+                    int price_ok = s->gate_direction
+                        ? (s->price >= gate_p)
+                        : (s->price <= gate_p);
+                    if (price_ok)
+                        ImGui::TextColored(FoxmlColors::green_b, "READY");
+                    else
+                        ImGui::TextColored(FoxmlColors::yellow, "wait");
+                }
+            }
+            ImGui::EndTable();
+        }
+        ImGui::Separator();
+        ImGui::TextColored(FoxmlColors::comment,
+            "(detail below = core 0; rows above = all cores)");
+    }
+
     const char *gate_op = s->gate_direction ? ">=" : "<=";
 
     // price gate
@@ -1021,10 +1094,14 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                               ImGuiTableFlags_RowBg |
                               ImGuiTableFlags_SizingStretchProp;
         if (ImGui::BeginTable("##percore_strat", 5, tf2)) {
+            // Column NAMES drive ImGui's column IDs. Renamed "Apply" → "Swap"
+            // to avoid hashing the same string as the in-row Apply button
+            // (which Imgui flagged on hover with "2 visible items with
+            // conflicting IDs").
             ImGui::TableSetupColumn("Core",   ImGuiTableColumnFlags_WidthFixed, 35);
             ImGui::TableSetupColumn("Active", ImGuiTableColumnFlags_WidthFixed, 50);
             ImGui::TableSetupColumn("Choose", ImGuiTableColumnFlags_WidthFixed, 100);
-            ImGui::TableSetupColumn("Apply",  ImGuiTableColumnFlags_WidthFixed, 65);
+            ImGui::TableSetupColumn("Swap",   ImGuiTableColumnFlags_WidthFixed, 65);
             ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableHeadersRow();
             // pre-build the strategy options list once per render

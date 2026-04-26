@@ -665,14 +665,22 @@ static inline void GUI_Panel_Settings(SettingsState *s,
     bool changed = false;
     if (ImGui::BeginTabBar("##settings_tabs")) {
         if (ImGui::BeginTabItem("Global")) {
+            // Defensive ID scope per tab — section labels in Global may
+            // collide with per_core_fields section labels (both have
+            // "Trading", "Entry Filters") even though only one tab renders
+            // at a time. Cheap insurance.
+            ImGui::PushID("global_tab");
             if (Settings_RenderGlobalTab(s)) changed = true;
+            ImGui::PopID();
             ImGui::EndTabItem();
         }
         for (int c = 0; c < num_cores; ++c) {
             char tab_label[16];
             snprintf(tab_label, sizeof(tab_label), "Core %d", c);
             if (ImGui::BeginTabItem(tab_label)) {
+                ImGui::PushID(c + 1000);  // distinct from any field index
                 if (Settings_RenderPerCoreTab(s, c)) changed = true;
+                ImGui::PopID();
                 ImGui::EndTabItem();
             }
         }
