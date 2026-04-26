@@ -173,6 +173,9 @@ static inline void TUI_CopySnapshotSharded(
                               ? state->cores[i].resolved_strategy_id
                               : state->cores[i].strategy_id;
         snap->per_core[i].gate_direction = (dir_strat == STRATEGY_MOMENTUM) ? 1 : 0;
+        // v4.0.4: per-core diagnostic state for Buy Gate panel
+        snap->per_core[i].halt_reason            = state->cores[i].halt_reason;
+        snap->per_core[i].sl_cooldown_remaining  = state->cores[i].sl_cooldown_remaining;
         tt::ExecutionCore<F>* core = state->cores[i].core;
         if (core) {
             tt::GateParameters<F> params;

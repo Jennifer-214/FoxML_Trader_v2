@@ -905,6 +905,10 @@ struct TUISnapshot {
         uint8_t  resolved_strategy_id; // v4.0.4: when strategy=AUTO, the regime-resolved
                                         // concrete strategy. Equals strategy_id_display for
                                         // non-AUTO. STRATEGY_NONE if AUTO hasn't resolved yet.
+        uint8_t  halt_reason;          // v4.0.4: per-core halt reason (0=ok, 1=spacing,
+                                        // 2=vwap, 3=long-slope, 4=vol-delta, 5=min-stddev,
+                                        // 6=sl-cooldown). Source: CoreContext::halt_reason.
+        uint32_t sl_cooldown_remaining;// v4.0.4: per-core SL cooldown counter
         double   buy_gate_price;       // current buy gate threshold (for chart overlay)
         // Phase 6prep sharded c16 — per-core ML observability. Populated only
         // for STRATEGY_ML cores by TUI_CopySnapshotSharded; non-ML cores leave

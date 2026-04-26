@@ -436,8 +436,83 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
             ImGui::EndTable();
         }
         ImGui::Separator();
-        ImGui::TextColored(FoxmlColors::comment,
-            "(detail below = core 0; rows above = all cores)");
+
+        // v4.0.4: per-core expandable details replacing the legacy single-core
+        // lower block. Each core gets a collapsing header with its full state.
+        // Halt reason names match the codes in EventLoop_RebuildAllParameters.
+        static const char* halt_names[] = {
+            "ok", "spacing", "vwap", "long-slope", "vol-delta",
+            "min-stddev", "sl-cooldown"
+        };
+        for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+            const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
+            uint8_t sid = pc->strategy_id_display;
+            const char *sname = (sid < NUM_STRATEGIES) ? STRATEGY_SHORT_NAMES[sid] : "?";
+            char hdr[64];
+            if (sid == STRATEGY_AUTO && pc->resolved_strategy_id < NUM_STRATEGIES) {
+                snprintf(hdr, sizeof(hdr), "Core %d  AUTO(%s)##bgdetail", i,
+                         STRATEGY_SHORT_NAMES[pc->resolved_strategy_id]);
+            } else {
+                snprintf(hdr, sizeof(hdr), "Core %d  %s##bgdetail", i, sname);
+            }
+            ImGui::PushID(i + 200);
+            if (ImGui::CollapsingHeader(hdr)) {
+                // Gate price
+                ImGui::TextColored(FoxmlColors::sand, "  gate %s",
+                    pc->gate_direction ? ">=" : "<=");
+                ImGui::SameLine();
+                if (pc->buy_gate_price > 0.01) {
+                    ImGui::Text("$%.2f", pc->buy_gate_price);
+                    if (s->price > 0.01) {
+                        double dist = s->price - pc->buy_gate_price;
+                        double dist_pct = (dist / s->price) * 100.0;
+                        ImGui::SameLine(0, 10);
+                        ImGui::TextColored(FoxmlColors::comment,
+                            "(dist %+.3f%%)", dist_pct);
+                    }
+                } else {
+                    ImGui::TextColored(FoxmlColors::comment, "off");
+                }
+                // Halt reason
+                if (pc->halt_reason > 0 && pc->halt_reason < 7) {
+                    ImGui::SameLine(0, 15);
+                    ImGui::TextColored(FoxmlColors::yellow,
+                        "halted: %s", halt_names[pc->halt_reason]);
+                }
+                // Position state
+                if (s->positions[i].idx >= 0) {
+                    ImGui::SameLine(0, 15);
+                    ImGui::TextColored(FoxmlColors::comment, "(in pos)");
+                }
+                // Cooldown
+                if (pc->sl_cooldown_remaining > 0) {
+                    ImGui::SameLine(0, 15);
+                    ImGui::TextColored(FoxmlColors::yellow,
+                        "cooldown %u", pc->sl_cooldown_remaining);
+                }
+                // ML extras
+                if (pc->is_ml) {
+                    ImGui::TextColored(FoxmlColors::sand, "  ML:");
+                    ImGui::SameLine();
+                    ImGui::TextColored(FoxmlColors::comment, "model:");
+                    ImGui::SameLine();
+                    ImGui::TextColored(pc->ml_model_loaded
+                                       ? FoxmlColors::green : FoxmlColors::yellow,
+                        "%s", pc->ml_model_loaded ? "loaded" : "none");
+                    ImGui::SameLine(0, 10);
+                    ImGui::TextColored(FoxmlColors::comment, "pred:");
+                    ImGui::SameLine();
+                    ImGui::Text("%.4f", pc->ml_last_prediction);
+                    ImGui::SameLine(0, 10);
+                    ImGui::TextColored(FoxmlColors::comment, "conf:");
+                    ImGui::SameLine();
+                    ImGui::Text("%.2f", pc->ml_last_confidence);
+                }
+            }
+            ImGui::PopID();
+        }
+        ImGui::End();
+        return;  // skip the legacy single-core block below in sharded mode
     }
 
     const char *gate_op = s->gate_direction ? ">=" : "<=";
