@@ -45,6 +45,7 @@
 
 #include "../Limits.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"
+#include "../ML_Headers/LinearRegression3X.hpp"  // v4.0.3 D10 RegressionFeederX
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/StrategyParameters.hpp"
 #include "ExecutionCore.hpp"
@@ -125,6 +126,12 @@ struct CoreContext {
     // flap on noise. Each AUTO core has its own state — different cores
     // can detect different regimes if their cfg differs.
     RegimeState<F> regime_state;
+    // v4.0.3 D10: per-core P&L regression feeder for adaptive feedback.
+    // Drainer pushes realized return on each exit; slow path reads slope
+    // to shift resolved_cfg.entry_offset_pct + volume_multiplier within
+    // [offset_min/max] + [vol_mult_min/max] bounds. Mirrors legacy
+    // MeanReversion_Adapt / Momentum_Adapt regression-driven adaptation.
+    RegressionFeederX<F> pnl_feeder;
 };
 
 //======================================================================================================
@@ -202,6 +209,8 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         // matches legacy default — requires 3 consecutive cycles of new
         // regime detection before switching.
         Regime_Init(&state->cores[i].regime_state, 3);
+        // v4.0.3 D10: P&L feeder per core for adaptive filter shifts.
+        state->cores[i].pnl_feeder = RegressionFeederX_Init<F>();
     }
 }
 
@@ -633,6 +642,40 @@ inline int EventLoop_RebuildAllParameters(
         if (!FPN_IsZero(session_mult)) {
             resolved_cfg.volume_multiplier =
                 FPN_Mul(resolved_cfg.volume_multiplier, session_mult);
+        }
+
+        // v4.0.3 D10: adaptive feedback. Compute regression slope of recent
+        // realized P&L. Negative slope = losing recently → tighten filters
+        // (raise entry_offset_pct, raise volume_multiplier). Positive slope
+        // = winning → loosen (lower offset, lower vol_mult). Scaled by
+        // cfg.filter_scale and clamped to [offset_min, offset_max] +
+        // [vol_mult_min, vol_mult_max] bounds. Mirrors legacy
+        // MeanReversion_Adapt / Momentum_Adapt feedback loops.
+        if (state->cores[slot].pnl_feeder.count >= 4 &&
+            !FPN_IsZero(resolved_cfg.filter_scale)) {
+            LinearRegression3XResult<F> reg =
+                RegressionFeederX_Compute(&state->cores[slot].pnl_feeder);
+            FPN<F> slope = reg.model.slope;
+            // Only apply if R² is meaningful (otherwise slope is noise).
+            if (FPN_GreaterThan(reg.r_squared, FPN_FromDouble<F>(0.20))) {
+                // shift = -slope × filter_scale  (negative slope → positive shift = tighter)
+                FPN<F> shift = FPN_Mul(slope, resolved_cfg.filter_scale);
+                shift.sign = !shift.sign;  // negate
+                // Apply to entry_offset_pct, clamped to [offset_min, offset_max]
+                FPN<F> new_offset = FPN_Add(resolved_cfg.entry_offset_pct, shift);
+                if (FPN_LessThan(new_offset, resolved_cfg.offset_min))
+                    new_offset = resolved_cfg.offset_min;
+                if (FPN_GreaterThan(new_offset, resolved_cfg.offset_max))
+                    new_offset = resolved_cfg.offset_max;
+                resolved_cfg.entry_offset_pct = new_offset;
+                // Apply to volume_multiplier same direction (tighter when losing)
+                FPN<F> new_vmult = FPN_Add(resolved_cfg.volume_multiplier, shift);
+                if (FPN_LessThan(new_vmult, resolved_cfg.vol_mult_min))
+                    new_vmult = resolved_cfg.vol_mult_min;
+                if (FPN_GreaterThan(new_vmult, resolved_cfg.vol_mult_max))
+                    new_vmult = resolved_cfg.vol_mult_max;
+                resolved_cfg.volume_multiplier = new_vmult;
+            }
         }
 
         // v4.0.3 B: STRATEGY_AUTO regime mode. The core's nominal strategy_id

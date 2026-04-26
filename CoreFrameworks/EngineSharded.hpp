@@ -1138,6 +1138,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             if (realized < 0.0 && cfg.sl_cooldown_cycles > 0) {
                 state.cores[slot].sl_cooldown_remaining = cfg.sl_cooldown_cycles;
             }
+            // v4.0.3 D10: push realized P&L to per-core feeder for adaptive
+            // filter feedback. Slope of recent returns drives shifts to
+            // entry_offset_pct + volume_multiplier on slow-path rebuild.
+            RegressionFeederX_Push(&state.cores[slot].pnl_feeder,
+                                    FPN_FromDouble<F>(realized));
         }
         oms.last_closed_mask = 0;
     };
