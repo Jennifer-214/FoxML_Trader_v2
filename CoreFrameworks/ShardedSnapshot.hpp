@@ -92,6 +92,14 @@ static inline void TUI_CopySnapshotSharded(
     snap->max_drawdown_pct = agg.max_drawdown_pct * 100.0;
     snap->fee_rate_pct = FPN_ToDouble(cfg->fee_rate) * 100.0;
 
+    // v4.0.4: warmup progress display. min_warmup_samples is what the
+    // warmup gate at EngineSharded.hpp checks; warmup_samples_now is
+    // the current rolling count. state_warmup = (now < target).
+    snap->min_warmup_samples = (int)cfg->min_warmup_samples;
+    if (snap->min_warmup_samples <= 0) snap->min_warmup_samples = 64;  // engine default
+    snap->warmup_samples_now = rolling->count;
+    snap->state_warmup = (snap->warmup_samples_now < snap->min_warmup_samples) ? 1 : 0;
+
     // kill switch
     snap->kill_switch_active = agg.kill_switch_tripped;
     snap->breaker_tripped    = agg.kill_switch_tripped;
@@ -155,10 +163,16 @@ static inline void TUI_CopySnapshotSharded(
 
     for (int i = 0; i < state->registered_count && i < 16; ++i) {
         snap->per_core[i].strategy_id_display = state->cores[i].strategy_id;
-        // Per-core gate direction. MOMENTUM buys above; everything else buys
-        // below. Mirrors the dispatch pattern in PortfolioController_StrategyDispatch.
-        snap->per_core[i].gate_direction =
-            (state->cores[i].strategy_id == STRATEGY_MOMENTUM) ? 1 : 0;
+        // v4.0.4: resolved strategy after AUTO regime classification. For
+        // non-AUTO cores this equals strategy_id_display.
+        snap->per_core[i].resolved_strategy_id = state->cores[i].resolved_strategy_id;
+        // Per-core gate direction. Use RESOLVED strategy for AUTO so direction
+        // tracks the active regime's strategy. MOMENTUM buys above; everything
+        // else buys below.
+        uint8_t dir_strat = (state->cores[i].resolved_strategy_id != STRATEGY_NONE)
+                              ? state->cores[i].resolved_strategy_id
+                              : state->cores[i].strategy_id;
+        snap->per_core[i].gate_direction = (dir_strat == STRATEGY_MOMENTUM) ? 1 : 0;
         tt::ExecutionCore<F>* core = state->cores[i].core;
         if (core) {
             tt::GateParameters<F> params;

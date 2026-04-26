@@ -826,6 +826,7 @@ struct TUISnapshot {
     double session_mult;   // current session gate multiplier
     int sl_cooldown;      // remaining slow-path cycles in post-SL cooldown
     int min_warmup_samples; // configured minimum for warmup display
+    int warmup_samples_now; // current rolling sample count (v4.0.4 — for "X / Y" progress)
     int engine_state;     // 0=warmup, 1=active, 2=closing
     // config display
     double cfg_tp, cfg_sl, cfg_fee, cfg_slippage;
@@ -901,6 +902,9 @@ struct TUISnapshot {
         double   max_ns;
         double   avg_ns;
         uint8_t  strategy_id_display;  // STRATEGY_* constant for this core
+        uint8_t  resolved_strategy_id; // v4.0.4: when strategy=AUTO, the regime-resolved
+                                        // concrete strategy. Equals strategy_id_display for
+                                        // non-AUTO. STRATEGY_NONE if AUTO hasn't resolved yet.
         double   buy_gate_price;       // current buy gate threshold (for chart overlay)
         // Phase 6prep sharded c16 — per-core ML observability. Populated only
         // for STRATEGY_ML cores by TUI_CopySnapshotSharded; non-ML cores leave

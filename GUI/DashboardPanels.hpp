@@ -94,6 +94,16 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
     ImGui::TextColored(FoxmlColors::sand, "STATE:");
     ImGui::SameLine();
     ImGui::Text("%-8s", state_str);
+    // v4.0.4: warmup progress display when in warmup. Shows samples
+    // collected vs target so user knows how long until trading starts.
+    if (s->state_warmup && s->min_warmup_samples > 0) {
+        int remaining = s->min_warmup_samples - s->warmup_samples_now;
+        if (remaining < 0) remaining = 0;
+        ImGui::SameLine();
+        ImGui::TextColored(FoxmlColors::yellow,
+            "(%d / %d, %d to go)",
+            s->warmup_samples_now, s->min_warmup_samples, remaining);
+    }
     ImGui::SameLine();
     ImGui::TextColored(FoxmlColors::comment, "|");
     ImGui::SameLine();
@@ -378,8 +388,21 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                 uint8_t sid = s->per_core[i].strategy_id_display;
                 ImVec4 col = (sid < NUM_STRATEGIES) ? strat_colors[sid]
                                                    : ImVec4(0.6f,0.6f,0.6f,0.9f);
-                ImGui::TextColored(col, "%s",
-                    sid < NUM_STRATEGIES ? STRATEGY_SHORT_NAMES[sid] : "?");
+                // v4.0.4: AUTO cores show "AUTO(DIP)" with the regime-resolved
+                // concrete strategy in parens. Color follows the resolved strategy
+                // so the chart's per-core gate line matches the row color.
+                if (sid == STRATEGY_AUTO) {
+                    uint8_t rs = s->per_core[i].resolved_strategy_id;
+                    if (rs < NUM_STRATEGIES && rs != STRATEGY_AUTO) {
+                        ImVec4 rcol = strat_colors[rs];
+                        ImGui::TextColored(rcol, "AUTO(%s)", STRATEGY_SHORT_NAMES[rs]);
+                    } else {
+                        ImGui::TextColored(col, "AUTO");
+                    }
+                } else {
+                    ImGui::TextColored(col, "%s",
+                        sid < NUM_STRATEGIES ? STRATEGY_SHORT_NAMES[sid] : "?");
+                }
                 ImGui::TableNextColumn();
                 double gate_p = s->per_core[i].buy_gate_price;
                 if (gate_p > 0.01) {

@@ -132,6 +132,11 @@ struct CoreContext {
     // [offset_min/max] + [vol_mult_min/max] bounds. Mirrors legacy
     // MeanReversion_Adapt / Momentum_Adapt regression-driven adaptation.
     RegressionFeederX<F> pnl_feeder;
+    // v4.0.4: resolved strategy_id (after AUTO regime resolution). Equals
+    // strategy_id for non-AUTO cores. For AUTO cores, holds the concrete
+    // strategy from REGIME_STRATEGY_TABLE for the current detected regime.
+    // Snapshot reads this for the GUI display so AUTO rows show e.g. "AUTO (DIP)".
+    uint8_t resolved_strategy_id;
 };
 
 //======================================================================================================
@@ -211,6 +216,7 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         Regime_Init(&state->cores[i].regime_state, 3);
         // v4.0.3 D10: P&L feeder per core for adaptive filter shifts.
         state->cores[i].pnl_feeder = RegressionFeederX_Init<F>();
+        state->cores[i].resolved_strategy_id = STRATEGY_NONE;  // v4.0.4
     }
 }
 
@@ -737,6 +743,11 @@ inline int EventLoop_RebuildAllParameters(
             ml_ctx.ema_price      = (void*)ema_price;
             dispatch_ctx = &ml_ctx;
         }
+        // v4.0.4: stash the resolved strategy for GUI display. For non-AUTO
+        // cores this just mirrors strategy_id; for AUTO it's the regime-
+        // resolved concrete strategy.
+        state->cores[slot].resolved_strategy_id = effective_strategy_id;
+
         Strategy_BuildParameters(
             effective_strategy_id,
             rolling,
