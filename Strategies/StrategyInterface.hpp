@@ -59,7 +59,8 @@
 #define STRATEGY_SIMPLE_DIP    2
 #define STRATEGY_ML            3
 #define STRATEGY_EMA_CROSS     4
-#define NUM_STRATEGIES         5
+#define STRATEGY_AUTO          5  // v4.0.3: regime-driven auto-select per core
+#define NUM_STRATEGIES         6
 
 // Per-core sharding (phase 06+) sentinel: a core with strategy_id ==
 // STRATEGY_NONE has no strategy assigned, parameter pushes are skipped, and
@@ -68,11 +69,11 @@
 #define STRATEGY_NONE          0xFF
 
 // strategy short names for display (indexed by strategy ID, ≤4 chars for tight UI columns)
-static const char *STRATEGY_SHORT_NAMES[] = {"MR", "MOM", "DIP", "ML", "EMA"};
+static const char *STRATEGY_SHORT_NAMES[] = {"MR", "MOM", "DIP", "ML", "EMA", "AUTO"};
 
 // strategy full names for logs and verbose displays (indexed by strategy ID)
 static const char *STRATEGY_FULL_NAMES[] = {
-    "MeanReversion", "Momentum", "SimpleDip", "ML", "EmaCross"
+    "MeanReversion", "Momentum", "SimpleDip", "ML", "EmaCross", "Auto-Regime"
 };
 
 //======================================================================================================

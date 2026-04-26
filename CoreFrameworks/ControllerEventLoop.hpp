@@ -120,6 +120,11 @@ struct CoreContext {
     // 0 = ok / armed; 1 = spacing; 2 = vwap; 3 = long-slope; 4 = vol-delta;
     // 5 = min-stddev; 6 = sl-cooldown; 7 = warmup. Displayed in GUI per core.
     uint8_t  halt_reason;
+    // v4.0.3 B: per-core regime state for STRATEGY_AUTO. Tracks current
+    // regime + hysteresis so the auto-mode core's strategy choice doesn't
+    // flap on noise. Each AUTO core has its own state — different cores
+    // can detect different regimes if their cfg differs.
+    RegimeState<F> regime_state;
 };
 
 //======================================================================================================
@@ -193,6 +198,10 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].last_entry_tick  = 0;
         state->cores[i].sl_cooldown_remaining = 0;
         state->cores[i].halt_reason = 0;
+        // v4.0.3 B: regime state per AUTO core. Hysteresis threshold of 3
+        // matches legacy default — requires 3 consecutive cycles of new
+        // regime detection before switching.
+        Regime_Init(&state->cores[i].regime_state, 3);
     }
 }
 
@@ -607,13 +616,39 @@ inline int EventLoop_RebuildAllParameters(
         // resolved" cfg and don't need to know about the override mechanism.
         ControllerConfig<F> resolved_cfg =
             ControllerConfig_ResolveForCore(*config, slot);
+
+        // v4.0.3 B: STRATEGY_AUTO regime mode. The core's nominal strategy_id
+        // is AUTO; we compute the current regime from the same RegimeSignals
+        // the ML pack uses, classify with hysteresis, and resolve to a
+        // concrete strategy via REGIME_STRATEGY_TABLE. The dispatcher never
+        // sees STRATEGY_AUTO — it sees the resolved id (MR/MOM/DIP/EMA).
+        // Each AUTO core tracks its own regime_state independently.
+        uint8_t effective_strategy_id = state->cores[slot].strategy_id;
+        if (effective_strategy_id == STRATEGY_AUTO &&
+            ror_regressor && ema_price && rolling_long) {
+            const RORRegressor<F>* ror_in = (const RORRegressor<F>*)ror_regressor;
+            const FPN<F>* ema_in          = (const FPN<F>*)ema_price;
+            RegimeSignals<F> sig;
+            Regime_ComputeSignals(&sig, rolling, rolling_long, ror_in, *ema_in);
+            int new_regime = Regime_Classify(&state->cores[slot].regime_state,
+                                              &sig, &resolved_cfg);
+            (void)new_regime;
+            int resolved = Regime_ToStrategy(state->cores[slot].regime_state.current_regime);
+            // Don't recurse into STRATEGY_AUTO (defensive — REGIME_STRATEGY_TABLE
+            // shouldn't return AUTO, but safer to clamp).
+            if (resolved != STRATEGY_AUTO && resolved != STRATEGY_NONE) {
+                effective_strategy_id = (uint8_t)resolved;
+            } else {
+                effective_strategy_id = STRATEGY_MEAN_REVERSION;  // safe default
+            }
+        }
         // Phase 6prep sharded c13/c15: pack ML extras for ML cores. Non-ML cores
         // get nullptr (the dispatcher passes it through and ML_BuildParameters
         // never runs anyway). Stack-allocated; ML_BuildParameters dereferences
         // and copies what it needs synchronously.
         MLBuildContext ml_ctx{};
         void* dispatch_ctx = nullptr;
-        if (state->cores[slot].strategy_id == STRATEGY_ML) {
+        if (effective_strategy_id == STRATEGY_ML) {
             ml_ctx.model_handle   = state->cores[slot].model_handle;
             ml_ctx.confidence     = &state->cores[slot].confidence;
             ml_ctx.out_prediction = &state->cores[slot].staged_prediction;
@@ -626,7 +661,7 @@ inline int EventLoop_RebuildAllParameters(
             dispatch_ctx = &ml_ctx;
         }
         Strategy_BuildParameters(
-            state->cores[slot].strategy_id,
+            effective_strategy_id,
             rolling,
             &resolved_cfg,
             state->cores[slot].allocated_balance,

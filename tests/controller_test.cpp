@@ -1982,7 +1982,7 @@ int main() {
         check("RegimeInfo: MILD_TREND short_name",
               strcmp(REGIME_INFO[REGIME_MILD_TREND].short_name, "EMACR") == 0);
         check("RegimeInfo: NUM_REGIMES == 5", NUM_REGIMES == 5);
-        check("NUM_STRATEGIES == 5", NUM_STRATEGIES == 5);
+        check("NUM_STRATEGIES == 6", NUM_STRATEGIES == 6);  // v4.0.3 added STRATEGY_AUTO
 
         // Regime_Classify integration is tested via the full controller path
         // (SL floor tests above exercise actual regime transitions)

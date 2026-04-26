@@ -1035,6 +1035,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         else if (strcmp(val, "simple_dip") == 0 || strcmp(val, "dip") == 0) sid = 2;
         else if (strcmp(val, "ml") == 0) sid = 3;
         else if (strcmp(val, "ema_cross") == 0 || strcmp(val, "ema") == 0) sid = 4;
+        else if (strcmp(val, "auto") == 0 || strcmp(val, "regime") == 0) sid = 5;  // v4.0.3 STRATEGY_AUTO
         else if (strcmp(val, "none") == 0) sid = 0xFF;
         else sid = (uint8_t)atoi(val);  // numeric fallback
         cfg.core_strategies[core_idx] = sid;

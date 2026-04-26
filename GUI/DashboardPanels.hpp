@@ -1102,9 +1102,10 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
             ImGui::TableSetupColumn("Swap",   ImGuiTableColumnFlags_WidthFixed, 65);
             ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableHeadersRow();
-            // pre-build the strategy options list once per render
+            // pre-build the strategy options list once per render. Order
+            // must match STRATEGY_* enum in StrategyInterface.hpp.
             static const char* strat_labels[NUM_STRATEGIES] = {
-                "MR", "MOM", "DIP", "ML", "EMA"
+                "MR", "MOM", "DIP", "ML", "EMA", "AUTO"
             };
             static int chosen[16] = {0};  // per-core dropdown selection (preserves across frames)
             for (int i = 0; i < s->per_core_count && i < 16; ++i) {
@@ -1145,7 +1146,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                         // accepts (StrategyInterface.hpp + ControllerConfig.hpp
                         // parser block agree on these abbreviations).
                         static const char* strat_cfg_names[NUM_STRATEGIES] = {
-                            "mr", "momentum", "simple_dip", "ml", "ema_cross"
+                            "mr", "momentum", "simple_dip", "ml", "ema_cross", "auto"
                         };
                         if (chosen[i] >= 0 && chosen[i] < NUM_STRATEGIES) {
                             char key[64];
