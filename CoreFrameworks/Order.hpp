@@ -96,7 +96,16 @@ struct Order {
     // only when state == ORDER_FILLED or ORDER_PARTIAL; 0 (taker) until
     // first fill event arrives. Backtest path keeps is_maker=0 always.
     uint8_t   is_maker;
-    uint8_t   _pad[5];             // adjusted from 6 to keep struct size stable
+    // P.3 partial exits (2026-04-27): leg index when partial_exit_enabled.
+    // 0 = leg A or single position (slot = core_id when partials disabled,
+    //     slot = 2*core_id + 0 when enabled);
+    // 1 = leg B (slot = 2*core_id + 1, only when partials enabled).
+    // The drainer computes the actual portfolio slot via Sharded_LegSlot
+    // before calling Submit; core_id is set to that slot value, so HandleFill
+    // can use o->core_id directly as the slot index. leg is carried for
+    // observability (trade log, ConfidenceScorer feedback per-leg).
+    uint8_t   leg;
+    uint8_t   _pad[4];             // adjusted from 5 to keep struct size stable
 };
 
 // Initialize an order to PENDING state with the given identifying fields.
@@ -126,6 +135,7 @@ inline void Order_Init(Order<F>* o, uint64_t id, int16_t core_id, OrderType type
     o->retry_count     = 0;
     o->strategy_id     = 0xFF;  // STRATEGY_NONE
     o->is_maker        = 0;     // assume taker until executionReport says otherwise
+    o->leg             = 0;     // P.3: defaults to leg A / single-position
 }
 
 // Phase 8 anti-drift guard: pin Order<F> size to catch silent ABI breakage

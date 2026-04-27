@@ -1365,7 +1365,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // Extracted drain+Submit helper. Called from both the main drainer loop
     // and the trailing shutdown drain. One site to update when adding new
     // Submit parameters or event types.
-    auto drain_with_submit = [&state, &oms, &ticks_produced]() -> int {
+    auto drain_with_submit = [&state, &oms, &ticks_produced, &cfg]() -> int {
         int total_drained = 0;
         for (int slot = 0; slot < state.registered_count; ++slot) {
             ExecutionCore<F>* core = state.cores[slot].core;
@@ -1377,12 +1377,43 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 bool is_entry = (event.type & TRADE_EVENT_ENTRY) != 0;
                 bool is_exit  = (event.type & TRADE_EVENT_EXIT)  != 0;
 
+                // P.3: map (core_id, leg) → portfolio slot. When
+                // partial_exit_enabled=0, slot == core_id (1:1 mapping
+                // preserves pre-P.3 behavior). When enabled, slot = 2*c+leg.
+                int partial_on = cfg.partial_exit_enabled ? 1 : 0;
+                int portfolio_slot = Sharded_LegSlot(slot, (int)event.leg, partial_on);
+                if (portfolio_slot < 0) {
+                    // Defensive: malformed event (e.g. leg=1 without partials
+                    // enabled). Drop + log; don't crash the drainer.
+                    fprintf(stderr,
+                        "[sharded] drainer: invalid (core=%d, leg=%u) for "
+                        "partial_enabled=%d → dropping event\n",
+                        slot, (unsigned)event.leg, partial_on);
+                    continue;
+                }
+
                 // snapshot exit qty BEFORE OnEvent because CloseSlot clears it
                 double order_qty_d = 0.0;
                 if (is_exit) {
-                    order_qty_d = FPN_ToDouble(state.oms->portfolio.positions[slot].quantity);
+                    // Exit qty: read from the LEG's portfolio slot (leg A's
+                    // qty for leg A exit, leg B's for leg B exit). With
+                    // partials disabled, portfolio_slot == slot == core_id
+                    // and behavior is identical to pre-P.3.
+                    order_qty_d = FPN_ToDouble(
+                        state.oms->portfolio.positions[portfolio_slot].quantity);
                 } else if (is_entry) {
-                    order_qty_d = FPN_ToDouble(state.cores[slot].intended_qty);
+                    // Entry qty: split intended_qty between legs by
+                    // partial_exit_pct. Leg A gets partial_pct, leg B gets
+                    // (1 - partial_pct). When partials disabled, leg is
+                    // always 0 and we use the full intended_qty (no split).
+                    double full_qty = FPN_ToDouble(state.cores[slot].intended_qty);
+                    if (partial_on && event.leg == PARTIAL_LEG_A) {
+                        order_qty_d = full_qty * FPN_ToDouble(cfg.partial_exit_pct);
+                    } else if (partial_on && event.leg == PARTIAL_LEG_B) {
+                        order_qty_d = full_qty * (1.0 - FPN_ToDouble(cfg.partial_exit_pct));
+                    } else {
+                        order_qty_d = full_qty;
+                    }
                 }
 
                 EventLoop_OnEvent(&state, event);
@@ -1390,26 +1421,30 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
                 if ((is_entry || is_exit) && order_qty_d > 0.0) {
                     OrderManager_Submit(&oms,
-                        (int16_t)slot,
+                        (int16_t)portfolio_slot,  // P.3: actual slot, not core_id
                         is_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
                         FPN_FromDouble<F>(order_qty_d),
                         state.cores[slot].intended_tp,
                         state.cores[slot].intended_sl,
                         state.cores[slot].strategy_id,
-                        event.price);
+                        event.price,
+                        event.leg);  // P.3: leg propagated to Order
                     // Phase 6prep sharded c13: snapshot the staged prediction
                     // into active_prediction at entry submit. Persists across
                     // the entry→exit window so the IC update at exit pairs the
                     // realized return with the prediction that actually
                     // triggered the trade — not the latest rebuild's value.
-                    if (is_entry &&
+                    // Only on leg A entry — leg B is part of the same trade,
+                    // shouldn't double-stamp the prediction.
+                    if (is_entry && event.leg == PARTIAL_LEG_A &&
                         state.cores[slot].strategy_id == STRATEGY_ML) {
                         state.cores[slot].active_prediction =
                             state.cores[slot].staged_prediction;
                     }
                     // v4.0.3 spacing + time-based exit: stamp this entry
-                    // for cross-cutting checks on the next rebuild.
-                    if (is_entry) {
+                    // for cross-cutting checks on the next rebuild. Only
+                    // on leg A entry (one trade = one entry stamp).
+                    if (is_entry && event.leg == PARTIAL_LEG_A) {
                         state.cores[slot].last_entry_price = event.price;
                         state.cores[slot].last_entry_tick  = ticks_produced.load(std::memory_order_relaxed);
                     }

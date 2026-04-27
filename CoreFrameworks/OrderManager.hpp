@@ -409,7 +409,8 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms,
                                     FPN<F> intended_tp = FPN_Zero<F>(),
                                     FPN<F> intended_sl = FPN_Zero<F>(),
                                     uint8_t strategy_id = 0xFF,
-                                    FPN<F> event_price = FPN_Zero<F>()) {
+                                    FPN<F> event_price = FPN_Zero<F>(),
+                                    uint8_t leg = 0) {  // P.3: 0 = leg A / single, 1 = leg B
     uint64_t id = oms->next_order_id++;
 
     // Paper mode + legacy (mode 0): count and return. Never touch the
@@ -442,6 +443,7 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms,
     oms->orders[slot].intended_sl   = intended_sl;
     oms->orders[slot].strategy_id   = strategy_id;
     oms->orders[slot].event_price   = event_price;
+    oms->orders[slot].leg           = leg;  // P.3: 0/1 for partial exits
     oms->orders[slot].state         = ORDER_SUBMITTED;
     oms->total_submitted.fetch_add(1, std::memory_order_relaxed);
 
