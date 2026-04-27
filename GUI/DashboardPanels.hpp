@@ -917,7 +917,7 @@ static inline void GUI_Panel_Config(const TUISnapshot *s) {
 //==========================================================================
 // PANEL: POSITIONS — proper table with aligned columns
 //==========================================================================
-static inline void GUI_Panel_Positions(const TUISnapshot *s) {
+static inline void GUI_Panel_Positions(const TUISnapshot *s, TUISharedState *shared = NULL) {
     ImGui::Begin("Positions");
 
     ImGui::TextColored(FoxmlColors::primary, "POSITIONS");
@@ -938,7 +938,10 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s) {
     ImGuiTableFlags flags = ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
                             ImGuiTableFlags_SizingStretchProp;
 
-    if (ImGui::BeginTable("##positions", 11, flags)) {
+    // v4.7.8: 12th column for Action (Close button) when shared state is
+    // wired. Falls back to 11 columns when shared==NULL (legacy callers).
+    int n_cols = (shared != NULL) ? 12 : 11;
+    if (ImGui::BeginTable("##positions", n_cols, flags)) {
         ImGui::TableSetupColumn("#",      ImGuiTableColumnFlags_WidthFixed, 40);
         ImGui::TableSetupColumn("Strat",  ImGuiTableColumnFlags_WidthFixed, 35);
         ImGui::TableSetupColumn("Entry",  ImGuiTableColumnFlags_WidthFixed, 60);
@@ -950,6 +953,9 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s) {
         ImGui::TableSetupColumn("Gross",  ImGuiTableColumnFlags_WidthFixed, 55);
         ImGui::TableSetupColumn("Net",    ImGuiTableColumnFlags_WidthFixed, 55);
         ImGui::TableSetupColumn("Hold",   ImGuiTableColumnFlags_WidthFixed, 45);
+        if (shared) {
+            ImGui::TableSetupColumn("Act", ImGuiTableColumnFlags_WidthFixed, 50);
+        }
         ImGui::TableHeadersRow();
 
         int displayed = 0;
@@ -1043,6 +1049,26 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s) {
                 ImGui::TextColored(FoxmlColors::yellow, "%.0fm T", ps->hold_minutes);
             else
                 ImGui::Text("%.0fm", ps->hold_minutes);
+
+            // v4.7.8: manual close button. Sets the per-slot close request
+            // flag — drainer reads, emits a synthetic SELL via OMS, clears
+            // the flag. Race-tolerant: HandleFill dedups via slot bitmap
+            // if SL fires the same window.
+            if (shared) {
+                ImGui::TableNextColumn();
+                ImGui::PushID(ps->idx);
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.25f, 0.25f, 0.7f));
+                if (ImGui::SmallButton("Close")) {
+                    shared->manual_close_requested[ps->idx] = 1;
+                }
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Force-close slot %d at next market tick.\n"
+                                      "Bypasses TP/SL gates. Bound for fill at current price.",
+                                      ps->idx);
+                }
+                ImGui::PopID();
+            }
 
             displayed++;
         }
@@ -1355,7 +1381,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
     GUI_Panel_Market(s);
     GUI_Panel_BuyGate(s);
     GUI_Panel_Account(s, shared);
-    GUI_Panel_Positions(s);
+    GUI_Panel_Positions(s, shared);
     GUI_Panel_Stats(s);
     GUI_Panel_MLIntelligence(s);
 #ifdef LATENCY_PROFILING

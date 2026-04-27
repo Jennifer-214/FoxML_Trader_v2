@@ -974,6 +974,12 @@ struct TUISharedState {
     // clearing core_kill_tripped + refreshing core_peak_balance to current.
     // Independent per core — resetting core 0 doesn't touch core 3.
     volatile sig_atomic_t kill_reset_per_core[16];
+    // v4.7.8: manual close per portfolio slot. GUI writes 1 to force-close
+    // the position at that slot (bypasses hot-path SG; emits a synthetic
+    // exit event from the drainer). Drainer reads + acts + clears the
+    // flag back to 0. Indexed by portfolio slot (under partials, slot 2c
+    // is leg A and 2c+1 is leg B — closing one closes only that leg).
+    volatile sig_atomic_t manual_close_requested[16];
     EngineTUI tui;
     const char *config_path;
     void *candle_acc;  // CandleAccumulator* (GUI build only, NULL for ANSI)

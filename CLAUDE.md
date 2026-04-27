@@ -305,6 +305,7 @@ Before starting any plan that spans more than a single commit, walk it through t
 - For new optional state, follow the existing pattern (heap-allocated, NULL-init in caller, freed in cleanup).
 - The right shape: new state owns its lifecycle in ONE place, all consumers receive it via params.
 - **Forward-thinking test**: how many sites would the next similar feature need to modify? Aim to reduce that count.
+- **Preserve public surface during refactors.** When changing the implementation of a struct field or function, keep the field name + type signature the same if at all possible. Consumers that read `cs->xs[i]` or call `Strategy_BuildParameters(...)` don't care what the values mean internally — they treat them as opaque. Change the contents (what gets written into `xs`) and the meaning, NOT the name. v4.7.12 chart time-axis refactor proved this: changing `xs[i]` from index-based to time-based touched ~30 sites if you renamed the field, ~3 sites if you kept the name and updated only the producer. Same rule applies to function signatures (add optional params with defaults rather than changing positional args), enum values (append-only, never reorder), and struct layouts (add fields at end, never reorder).
 
 ### 4. Pointer init + heap lifecycle
 - Any new heap-allocated pointer field on `OrderManagerState` / `EventLoopState` / `CoreContext`?

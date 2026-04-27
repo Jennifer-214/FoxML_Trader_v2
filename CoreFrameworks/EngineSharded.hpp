@@ -734,6 +734,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     g_shared.reload_requested = 0;
     g_shared.drag_slot = -1;
     for (int i = 0; i < 16; ++i) g_shared.swap_strategy_requested[i] = STRATEGY_NONE;
+    for (int i = 0; i < 16; ++i) g_shared.manual_close_requested[i]  = 0;
     // Wire the signal handler's GUI-quit pointer to this g_shared. After
     // this assignment, SIGINT will set BOTH g_engine_sharded_shutdown AND
     // g_shared.quit_requested in one atomic-ish step, ensuring the GUI
@@ -1496,10 +1497,78 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         EventLoop_DrainPostFill(&state, &oms, cfg.sl_cooldown_cycles);
     };
 
-    std::thread drainer([&state, &oms, &producer_done, &drain_with_submit, &drain_post_fill] {
+    // v4.7.8: manual force-close requests from the GUI. User clicks a
+    // button on the Positions panel → GUI sets manual_close_requested[slot]=1
+    // → drainer reads + emits a synthetic SELL via OrderManager_Submit
+    // bypassing the hot-path SG. Race with the hot path (ExecutionCore
+    // could fire a real SL on the same slot in the same window) is
+    // tolerated: HandleFill checks the bitmap before CloseSlot, so a
+    // double-close becomes a no-op on the second attempt. Slow-path only.
+    //
+    // GUI-only: g_shared lives in the GUI build's #ifdef USE_IMGUI_GUI
+    // block. ANSI TUI / headless builds compile a no-op lambda so the
+    // drainer thread doesn't have to fork on build flags.
+#ifdef USE_IMGUI_GUI
+    TUISharedState* shared_ptr = &g_shared;
+    auto drain_manual_closes = [&state, &oms, &cfg, &last_price, shared_ptr]() {
+        for (int slot = 0; slot < MAX_PORTFOLIO_POSITIONS; ++slot) {
+            if (!shared_ptr->manual_close_requested[slot]) continue;
+            shared_ptr->manual_close_requested[slot] = 0;
+            // Skip if no open position at this slot — defensive against
+            // double-clicks or races with auto-close.
+            if ((oms.portfolio.active_bitmap & (uint16_t)(1u << slot)) == 0) {
+                std::fprintf(stderr,
+                    "[manual-close] slot %d: no active position, ignoring\n", slot);
+                continue;
+            }
+            FPN<F> qty = oms.portfolio.positions[slot].quantity;
+            if (FPN_IsZero(qty)) continue;
+            // Map slot → core_id for strategy_id + leg lookup
+            int partial_on = cfg.partial_exit_enabled ? 1 : 0;
+            int core_id = partial_on ? (slot >> 1) : slot;
+            int leg     = partial_on ? (slot & 1)  : 0;
+            if (core_id < 0 || core_id >= state.registered_count) continue;
+            uint8_t strategy_id = state.cores[core_id].strategy_id;
+            // Use latest tick price as fill price for paper mode. Live
+            // mode would route to a real adapter SELL — same Submit call.
+            FPN<F> fill_px = FPN_FromDouble<F>(
+                last_price.load(std::memory_order_relaxed));
+            if (FPN_IsZero(fill_px)) {
+                fill_px = oms.portfolio.positions[slot].entry_price;  // safe fallback
+            }
+            OrderManager_Submit(&oms,
+                (int16_t)slot, ORDER_MARKET_SELL,
+                qty,
+                FPN_Zero<F>(), FPN_Zero<F>(),
+                strategy_id,
+                fill_px,
+                (uint8_t)leg);
+            // Clear the matching ExecutionCore active flag so the hot
+            // path doesn't re-emit on the next tick (race-tolerant —
+            // worst case is one duplicate exit event that HandleFill
+            // dedups via the empty-slot bitmap check).
+            if (state.cores[core_id].core) {
+                if (leg == 0) state.cores[core_id].core->active   = 0;
+                else          state.cores[core_id].core->active_b = 0;
+            }
+            std::fprintf(stderr,
+                "[manual-close] slot %d (core %d leg %s): force-exit @ %.2f, qty %.6f\n",
+                slot, core_id, leg == 0 ? "A" : "B",
+                FPN_ToDouble(fill_px), FPN_ToDouble(qty));
+        }
+    };
+#else
+    // ANSI / headless build: no GUI → no manual close requests possible.
+    // No-op lambda so the drainer loop doesn't need build-flag forks.
+    auto drain_manual_closes = []() {};
+#endif
+
+    std::thread drainer([&state, &oms, &producer_done, &drain_with_submit,
+                         &drain_post_fill, &drain_manual_closes] {
         EngineSharded_PinThread(state.registered_count + 1);
         while (!g_engine_sharded_shutdown) {
             int total_drained = drain_with_submit();
+            drain_manual_closes();
             OrderManager_Tick(&oms);
             drain_post_fill();
 
@@ -1507,6 +1576,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             if (producer_done.load(std::memory_order_acquire)) {
                 for (int k = 0; k < 16; ++k) {
                     drain_with_submit();
+                    drain_manual_closes();
                     OrderManager_Tick(&oms);
                     drain_post_fill();
                 }
