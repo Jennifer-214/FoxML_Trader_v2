@@ -41,13 +41,28 @@ namespace tt {
 constexpr uint8_t TRADE_EVENT_ENTRY = 0x01;
 constexpr uint8_t TRADE_EVENT_EXIT  = 0x02;
 
+// Partial exits P.2 (2026-04-27): leg index for the two-position-per-core
+// model. 0 = leg A (or single position when partial_exit_enabled=0); 1 =
+// leg B. Drainer maps to portfolio slot via Sharded_LegSlot(core_id, leg,
+// partial_exit_enabled). Lives here because TradeEvent.leg uses these
+// values; ControllerEventLoop.hpp re-exports under the same names for
+// readability at slow-path call sites.
+constexpr int PARTIAL_LEG_A = 0;
+constexpr int PARTIAL_LEG_B = 1;
+
 template <unsigned F>
 struct alignas(64) TradeEvent {
     FPN<F>   price;        // fill price for entry or exit (FPN)
     uint64_t timestamp;    // market time of the originating tick (microseconds)
     uint16_t core_id;      // which execution core fired this event
     uint8_t  type;         // bitmask: TRADE_EVENT_ENTRY and/or TRADE_EVENT_EXIT
-    uint8_t  _pad[5];      // explicit padding for layout stability
+    // P.2 (partial exits, 2026-04-27): leg index for the two-position-per-
+    // core model. 0 = leg A (or single position when partial_exit_enabled=0);
+    // 1 = leg B. Drainer maps to portfolio slot via Sharded_LegSlot(core_id,
+    // leg, partial_exit_enabled). When partial_exit_enabled=0, leg is always
+    // 0 — preserves pre-Wave-1 behavior.
+    uint8_t  leg;
+    uint8_t  _pad[4];      // explicit padding for layout stability
 };
 
 static_assert(std::is_trivially_copyable<TradeEvent<64>>::value, "TradeEvent<64> must be trivially copyable");

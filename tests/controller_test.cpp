@@ -5701,6 +5701,175 @@ e3_skip_load:;
               Sharded_ValidatePartialExitCfg(&cfg) == 0);
     }
 
+    //==================================================================================================
+    // Partial Exits — P.2 (ExecutionCore hot-path dual-leg SG check)
+    //==================================================================================================
+    // Verifies the branchless leg-A + leg-B SG evaluation in
+    // ExecutionCore_Tick. With GATE_FLAG_PAIR_ACTIVE set + entry firing,
+    // both legs activate; their TPs and shared SL fire independently. Each
+    // exit pushes its own TradeEvent with .leg = 0 or 1 so the drainer
+    // (P.3) can map to the correct portfolio slot.
+    //==================================================================================================
+    printf("\n--- Partial Exits P.2: hot-path dual-leg SG ---\n");
+    {
+        using namespace tt;
+        // Helper: set up an ExecutionCore + permission + parameter pack
+        auto setup = [](ExecutionCore<64>* core,
+                        SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE>* ring,
+                        GateParameters<64>* params,
+                        bool pair_active,
+                        double bg_threshold,
+                        double tp_pct, double tp_pct_b, double sl_pct) {
+            SPSCRing_Init(ring);
+            ExecutionCore_Init(core, 0, ring);
+            ExecutionCore_SetPermission(core, 1);
+            GateParameters_Init(params);
+            params->bg_price_threshold = FPN_FromDouble<64>(bg_threshold);
+            params->bg_volume_threshold = FPN_Zero<64>();
+            params->tp_pct = FPN_FromDouble<64>(tp_pct);
+            params->tp_pct_b = FPN_FromDouble<64>(tp_pct_b);
+            params->sl_pct = FPN_FromDouble<64>(sl_pct);
+            params->trade_size = FPN_FromDouble<64>(0.01);
+            params->strategy_id = STRATEGY_SIMPLE_DIP;
+            params->flags = GATE_FLAG_TP_ENABLED | GATE_FLAG_SL_ENABLED;
+            if (pair_active) params->flags |= GATE_FLAG_PAIR_ACTIVE;
+            // Push params via the parameter slot
+            ExecutionCore_SetParameters(core, *params);
+        };
+
+        // ---- Test: GATE_FLAG_PAIR_ACTIVE off → single-leg behavior unchanged ----
+        {
+            ExecutionCore<64> core;
+            SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> ring;
+            GateParameters<64> params;
+            setup(&core, &ring, &params, /*pair_active=*/false,
+                  /*bg=*/100.0, /*tp%=*/0.01, /*tp_b%=*/0.02, /*sl%=*/0.005);
+
+            // Tick at price 99 → below threshold 100 → BG fires → entry
+            Tick<64> t{};
+            t.price  = FPN_FromDouble<64>(99.0);
+            t.volume = FPN_FromDouble<64>(1.0);
+            ExecutionCore_Tick(&core, t);
+            check("pair_off: leg A active after entry",
+                  core.active == 1);
+            check("pair_off: leg B stays inactive (no GATE_FLAG_PAIR_ACTIVE)",
+                  core.active_b == 0);
+            // Verify exactly one event pushed (leg A entry)
+            TradeEvent<64> ev;
+            int popped = 0;
+            while (SPSCRing_TryPop(&core.event_ring, &ev)) popped++;
+            check("pair_off: exactly 1 event (leg A entry only)", popped == 1);
+        }
+
+        // ---- Test: GATE_FLAG_PAIR_ACTIVE on → entry opens BOTH legs ----
+        {
+            ExecutionCore<64> core;
+            SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> ring;
+            GateParameters<64> params;
+            setup(&core, &ring, &params, /*pair_active=*/true,
+                  /*bg=*/100.0, /*tp%=*/0.01, /*tp_b%=*/0.02, /*sl%=*/0.005);
+
+            Tick<64> t{};
+            t.price  = FPN_FromDouble<64>(99.0);
+            t.volume = FPN_FromDouble<64>(1.0);
+            ExecutionCore_Tick(&core, t);
+            check("pair_on entry: leg A active",
+                  core.active == 1);
+            check("pair_on entry: leg B active",
+                  core.active_b == 1);
+            check("pair_on entry: leg A live_tp = 99 * 1.01 = 99.99",
+                  fabs(FPN_ToDouble(core.live_tp) - 99.99) < 1e-6);
+            check("pair_on entry: leg B live_tp_b = 99 * 1.02 = 100.98",
+                  fabs(FPN_ToDouble(core.live_tp_b) - 100.98) < 1e-6);
+            check("pair_on entry: shared SL (leg A) = 99 * 0.995 = 98.505",
+                  fabs(FPN_ToDouble(core.live_sl) - 98.505) < 1e-6);
+            check("pair_on entry: leg B SL == leg A SL (shared)",
+                  fabs(FPN_ToDouble(core.live_sl_b) - 98.505) < 1e-6);
+            // Two events: leg A entry + leg B entry
+            int popped = 0;
+            int saw_leg_a = 0, saw_leg_b = 0;
+            TradeEvent<64> ev;
+            while (SPSCRing_TryPop(&core.event_ring, &ev)) {
+                popped++;
+                if (ev.type == TRADE_EVENT_ENTRY) {
+                    if (ev.leg == PARTIAL_LEG_A) saw_leg_a = 1;
+                    if (ev.leg == PARTIAL_LEG_B) saw_leg_b = 1;
+                }
+            }
+            check("pair_on entry: 2 events total", popped == 2);
+            check("pair_on entry: leg A entry event present", saw_leg_a == 1);
+            check("pair_on entry: leg B entry event present", saw_leg_b == 1);
+        }
+
+        // ---- Test: leg A's TP fires while leg B's doesn't (TP1 < TP2) ----
+        {
+            ExecutionCore<64> core;
+            SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> ring;
+            GateParameters<64> params;
+            setup(&core, &ring, &params, /*pair_active=*/true,
+                  /*bg=*/100.0, /*tp%=*/0.01, /*tp_b%=*/0.02, /*sl%=*/0.005);
+            // Entry tick
+            Tick<64> t{};
+            t.price = FPN_FromDouble<64>(99.0); t.volume = FPN_FromDouble<64>(1.0);
+            ExecutionCore_Tick(&core, t);
+            // Drain entry events
+            TradeEvent<64> ev;
+            while (SPSCRing_TryPop(&core.event_ring, &ev)) {}
+            // Tick at price 100 → leg A TP (99.99) hit; leg B TP (100.98) not yet
+            t.price = FPN_FromDouble<64>(100.0);
+            ExecutionCore_Tick(&core, t);
+            check("leg A TP only: leg A inactive after TP1",
+                  core.active == 0);
+            check("leg A TP only: leg B stays active (TP2 not hit yet)",
+                  core.active_b == 1);
+            int popped = 0;
+            int saw_a_exit = 0, saw_b_exit = 0;
+            while (SPSCRing_TryPop(&core.event_ring, &ev)) {
+                popped++;
+                if (ev.type == TRADE_EVENT_EXIT) {
+                    if (ev.leg == PARTIAL_LEG_A) saw_a_exit = 1;
+                    if (ev.leg == PARTIAL_LEG_B) saw_b_exit = 1;
+                }
+            }
+            check("leg A TP only: 1 exit event (leg A only)", popped == 1);
+            check("leg A TP only: leg A exit event present", saw_a_exit == 1);
+            check("leg A TP only: leg B exit event NOT present", saw_b_exit == 0);
+        }
+
+        // ---- Test: SL hits both legs (shared SL) ----
+        {
+            ExecutionCore<64> core;
+            SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> ring;
+            GateParameters<64> params;
+            setup(&core, &ring, &params, /*pair_active=*/true,
+                  /*bg=*/100.0, /*tp%=*/0.01, /*tp_b%=*/0.02, /*sl%=*/0.005);
+            Tick<64> t{};
+            t.price = FPN_FromDouble<64>(99.0); t.volume = FPN_FromDouble<64>(1.0);
+            ExecutionCore_Tick(&core, t);
+            TradeEvent<64> ev;
+            while (SPSCRing_TryPop(&core.event_ring, &ev)) {}
+            // Tick at 98.0 → below SL 98.505 → both legs SL fire
+            t.price = FPN_FromDouble<64>(98.0);
+            ExecutionCore_Tick(&core, t);
+            check("shared SL: leg A inactive",
+                  core.active == 0);
+            check("shared SL: leg B inactive",
+                  core.active_b == 0);
+            int popped = 0;
+            int saw_a_exit = 0, saw_b_exit = 0;
+            while (SPSCRing_TryPop(&core.event_ring, &ev)) {
+                popped++;
+                if (ev.type == TRADE_EVENT_EXIT) {
+                    if (ev.leg == PARTIAL_LEG_A) saw_a_exit = 1;
+                    if (ev.leg == PARTIAL_LEG_B) saw_b_exit = 1;
+                }
+            }
+            check("shared SL: 2 exit events (both legs)", popped == 2);
+            check("shared SL: leg A exit present", saw_a_exit == 1);
+            check("shared SL: leg B exit present", saw_b_exit == 1);
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

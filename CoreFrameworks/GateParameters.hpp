@@ -59,6 +59,16 @@ constexpr uint8_t GATE_FLAG_BUY_ABOVE        = 0x10;
 //     persistent state to corrupt; if the slow path forgets to set it,
 //     the gate naturally re-opens.
 constexpr uint8_t GATE_FLAG_BUY_BLOCKED      = 0x20;
+// Partial exits P.2 (2026-04-27): when set, on entry the hot path opens
+// BOTH leg A (TP=tp_pct, slot=core_id*2+0) AND leg B (TP=tp_pct_b,
+// slot=core_id*2+1). Both share live_sl. Set by Strategy_BuildParameters
+// when cfg.partial_exit_enabled=1 (P.4); cleared otherwise. With this
+// flag set, ExecutionCore_Tick branchlessly evaluates SG on both legs;
+// either or both can fire on a given tick. With it clear, leg-B fields
+// are never written and active_b stays 0 → leg-B SG result is masked
+// out, hot path costs ~1ns extra (the unused FPN comparisons pipeline
+// into otherwise-idle CPU slots).
+constexpr uint8_t GATE_FLAG_PAIR_ACTIVE      = 0x40;
 
 // Strategy IDs come from Strategies/StrategyInterface.hpp (single source of
 // truth shared with the legacy strategies). STRATEGY_NONE = 0xFF means
@@ -85,6 +95,13 @@ struct alignas(64) GateParameters {
     // loss bias from phase 13 head-to-head.
     FPN<F> tp_pct;                   // 0.005 = 0.5% TP. zero → use sg_take_profit_price
     FPN<F> sl_pct;                   // 0.0025 = 0.25% SL. zero → use sg_stop_loss_price
+    // Partial exits P.2: leg-B TP percentage (used only when
+    // GATE_FLAG_PAIR_ACTIVE is set). Strategy_BuildParameters typically
+    // sets tp_pct_b = tp_pct * cfg.tp2_mult (TP2 farther than TP1). Leg B
+    // shares the same live_sl as leg A. Zero-defaults when partials
+    // disabled, in which case the entry path won't activate leg B
+    // regardless.
+    FPN<F> tp_pct_b;
 
     // --- Sizing (controller-set, not used by gate evaluation directly) ---
     FPN<F> trade_size;               // size for the next entry, written to Position by controller
@@ -163,6 +180,7 @@ static inline void GateParameters_Init(GateParameters<F>* params) {
     params->sg_stop_loss_price = FPN_Zero<F>();
     params->tp_pct = FPN_Zero<F>();
     params->sl_pct = FPN_Zero<F>();
+    params->tp_pct_b = FPN_Zero<F>();  // P.2: leg-B TP%, set by strategy when partials enabled
     params->trade_size = FPN_Zero<F>();
     params->ratchet_sl = FPN_Zero<F>();  // v4.0.3 D9
     params->strategy_id = STRATEGY_NONE;

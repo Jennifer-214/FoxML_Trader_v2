@@ -359,9 +359,11 @@ inline int EventLoopState_RegisterCore(EventLoopState<F>* state,
 // / 2 = 8 (assuming MAX_PORTFOLIO_POSITIONS=16). Boot-time validation
 // refuses to start if num_execution_cores × 2 > MAX_PORTFOLIO_POSITIONS.
 //
-// LEG INDICES (used in P.2 hot path, P.3 OMS):
-constexpr int PARTIAL_LEG_A = 0;
-constexpr int PARTIAL_LEG_B = 1;
+// LEG INDICES — the constants live in CoreFrameworks/TradeEvent.hpp so
+// ExecutionCore_Tick (which doesn't include this header) can use the same
+// names. Re-stated here as a comment for readability:
+//   PARTIAL_LEG_A = 0
+//   PARTIAL_LEG_B = 1
 
 // Returns the portfolio slot index for (core_id, leg) given the cfg.
 // leg=0 always returns a valid slot; leg=1 returns -1 when partial_exit_-
