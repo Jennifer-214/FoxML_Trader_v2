@@ -196,6 +196,45 @@ struct OrderManagerState {
     uint16_t     last_closed_mask;
     double       last_realized_return[MAX_PORTFOLIO_POSITIONS];
 
+    // === PER-FILL BOOKKEEPING (mode 1 per-core accounting) ===
+    // HandleFill writes one record per fill into last_fill[portfolio_slot].
+    // The drainer reads after OrderManager_Tick and applies them to the
+    // matching CoreContext (mapped via Sharded_LegSlot under partials).
+    // Same producer/consumer contract as last_closed_mask:
+    //   - producer: HandleFill (drainer thread, OMS_Tick callee)
+    //   - consumer: drainer thread post-Tick
+    //   single-threaded → no atomics needed.
+    //
+    // entry_notional / entry_fee — populated on BUY fills; mask bit set in
+    //   last_opened_mask (separate from last_closed_mask so paired entry+
+    //   exit on different slots in the same drain cycle don't lose data).
+    //
+    // exit_net_pnl / exit_entry_notional / exit_total_fees / was_win —
+    //   populated on SELL fills; mask bit set in last_closed_mask
+    //   (existing). Drainer uses these for core_realized accumulation,
+    //   core_open_notional decrement, core_fees, core_wins/core_losses.
+    struct FillRecord {
+        FPN<F>  entry_notional;       // entry: fill_price × fill_qty
+        FPN<F>  entry_fee;            // entry fee (maker or taker)
+        FPN<F>  exit_net_pnl;         // exit: gross − total_fees (signed)
+        FPN<F>  exit_entry_notional;  // exit: entry_price_snap × qty_snap
+        FPN<F>  exit_total_fees;      // exit: entry_fee + exit_fee booked at close
+        int8_t  was_win;              // exit only: 1 if exit_net_pnl > 0
+        int8_t  _pad[7];
+    };
+    FillRecord last_fill[MAX_PORTFOLIO_POSITIONS];
+    uint16_t   last_opened_mask;
+    uint8_t    _pad_lof[6];
+
+    // === PARTIALS GEOMETRY (mirrored from cfg at engine init) ===
+    // partial_exit_enabled = 1 → portfolio slot 2c is core c's leg A,
+    // slot 2c+1 is core c's leg B (mapping via Sharded_LegSlot in
+    // ControllerEventLoop.hpp). The drainer needs this to map slot→core
+    // when applying FillRecords to per-core stats. Set at sharded init,
+    // not changed at runtime (toggle requires snapshot v3 reload anyway).
+    uint8_t partial_exit_enabled;
+    uint8_t _pad_pe[7];
+
     // === KILL SWITCH STATE (moved from EventLoopState in phase 03 chunk 1) ===
     // Configured by EventLoopState_ConfigureKillSwitch (which now writes
     // here through the OMS pointer). Disabled by default (both thresholds
@@ -329,6 +368,17 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     oms->last_closed_mask    = 0;
     for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; ++i) {
         oms->last_realized_return[i] = 0.0;
+    }
+    // Mode 1 per-fill bookkeeping
+    oms->last_opened_mask    = 0;
+    oms->partial_exit_enabled = 0;  // engine sets per-cfg after Init
+    for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; ++i) {
+        oms->last_fill[i].entry_notional      = FPN_Zero<F>();
+        oms->last_fill[i].entry_fee           = FPN_Zero<F>();
+        oms->last_fill[i].exit_net_pnl        = FPN_Zero<F>();
+        oms->last_fill[i].exit_entry_notional = FPN_Zero<F>();
+        oms->last_fill[i].exit_total_fees     = FPN_Zero<F>();
+        oms->last_fill[i].was_win             = 0;
     }
     oms->ks_min_balance      = FPN_Zero<F>();
     oms->ks_max_drawdown_pct = FPN_Zero<F>();
@@ -560,6 +610,13 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         Portfolio_OpenSlot(&oms->portfolio, (int)o->core_id,
                            fill_price, fill_qty,
                            o->intended_tp, o->intended_sl, entry_fee);
+        // Mode 1 per-core bookkeeping: stash entry data for the drainer to
+        // apply to CoreContext (core_open_notional += notional, core_fees
+        // += entry_fee). Slot is the portfolio slot — drainer maps to
+        // core_id via Sharded_LegSlot under partials.
+        oms->last_fill[(int)o->core_id].entry_notional = notional;
+        oms->last_fill[(int)o->core_id].entry_fee      = entry_fee;
+        oms->last_opened_mask |= (uint16_t)(1u << (int)o->core_id);
         if (oms->trade_log) {
             TradeEvent<F> synth{};
             synth.price     = fill_price;
@@ -612,6 +669,16 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         if (FPN_GreaterThan(oms->balance, oms->ks_peak_balance)) {
             oms->ks_peak_balance = oms->balance;
         }
+        // Mode 1 per-core bookkeeping: stash exit data for the drainer to
+        // apply to CoreContext (core_realized += net, core_open_notional
+        // -= entry_notional_snap, core_fees += total_fee, core_wins/losses).
+        // entry_notional uses the SAME entry_price × qty snapshot the
+        // mode-0 path subtracts — symmetric round-trip leaves no residue.
+        oms->last_fill[pslot].exit_net_pnl        = net;
+        oms->last_fill[pslot].exit_entry_notional = FPN_Mul(entry_price_snap, qty_snap);
+        oms->last_fill[pslot].exit_total_fees     = total_fee;
+        oms->last_fill[pslot].was_win             = FPN_GreaterThan(net, FPN_Zero<F>()) ? 1 : 0;
+        // last_closed_mask bit was set above (line 590) — same producer.
         if (oms->trade_log) {
             TradeEvent<F> synth{};
             synth.price     = fill_price;
