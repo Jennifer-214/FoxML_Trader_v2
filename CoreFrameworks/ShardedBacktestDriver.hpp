@@ -317,6 +317,22 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
         }
         EventLoop_PushParameters(drv->state);
         EventLoop_KillSwitchEvaluate(drv->state);
+
+        // v4.7.17: same shared time-exit + trailing-SL ratchet helpers the
+        // live engine calls (EngineSharded_Run line ~1117). Pre-v4.7.17 both
+        // were inlined into EngineSharded only, leaving backtest silently
+        // no-op when user enabled cfg.max_hold_ticks or cfg.tp_hold_score
+        // → ML model trained on backtest never learned the early-exit
+        // pattern that live applies. tick_index is the per-run tick
+        // counter, equivalent to live's `ticks_produced.load()`.
+        if (drv->oms && drv->config && drv->rolling) {
+            double current_price = FPN_ToDouble(tick.price);
+            EventLoop_TimeExit(drv->state, drv->oms, *drv->config,
+                               (uint64_t)tick_index, current_price);
+            EventLoop_TrailingSLRatchet(drv->state, *drv->config,
+                                         *drv->rolling, current_price);
+        }
+
         drv->slow_path_runs++;
 
         // Track E.1 — fire the slow-path hook AFTER all driver work finishes.

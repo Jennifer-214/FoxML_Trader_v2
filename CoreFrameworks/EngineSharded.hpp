@@ -1108,107 +1108,16 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     }
                 }
 
-                // v4.0.3 A3: time-based exit. Walk active positions, force-close
-                // any held longer than cfg.max_hold_ticks WITH gain below
-                // cfg.min_hold_gain_pct. Profitable positions are kept (they're
-                // still working). Mirrors legacy PortfolioController behavior.
-                // No-op when max_hold_ticks=0 (disabled, the default).
-                if (cfg.max_hold_ticks > 0) {
-                    uint64_t now_tick = ticks_produced.load(std::memory_order_relaxed);
-                    double current_price_d = last_price.load(std::memory_order_relaxed);
-                    if (current_price_d > 0.01) {
-                        uint16_t bm = state.oms->portfolio.active_bitmap;
-                        while (bm) {
-                            int slot = __builtin_ctz(bm);
-                            bm &= (uint16_t)(bm - 1);
-                            // elapsed = events since this core's last entry stamp
-                            uint64_t entry_t = state.cores[slot].last_entry_tick;
-                            if (entry_t == 0) continue;  // never stamped (shouldn't happen if active)
-                            // Bug fix (2026-04-27): defensive guard against
-                            // future entry_tick values. ticks_produced resets
-                            // to 0 each engine session, but last_entry_tick is
-                            // persisted via ShardedSnapshotPersist. After a
-                            // restart with active positions in the snapshot,
-                            // entry_t can be > now_tick → uint64 subtraction
-                            // underflows to ~2^64 → time-exit fires every
-                            // cycle, submitting redundant SELL orders that
-                            // never clear the slot in the panel. Skip until
-                            // next genuine entry stamps it freshly.
-                            if (entry_t > now_tick) {
-                                fprintf(stderr,
-                                    "[sharded] core %d: stale entry_tick from "
-                                    "snapshot (entry_t=%llu > now_tick=%llu); "
-                                    "resetting to current tick. Time-exit "
-                                    "skipped this cycle.\n",
-                                    slot, (unsigned long long)entry_t,
-                                    (unsigned long long)now_tick);
-                                state.cores[slot].last_entry_tick = now_tick;
-                                continue;
-                            }
-                            uint64_t elapsed = now_tick - entry_t;
-                            if (elapsed < cfg.max_hold_ticks) continue;
-                            // gross % gain since entry
-                            double entry_d = FPN_ToDouble(state.oms->portfolio.positions[slot].entry_price);
-                            if (entry_d <= 0.0) continue;
-                            double gain_pct = (current_price_d - entry_d) / entry_d;
-                            double min_gain = FPN_ToDouble(cfg.min_hold_gain_pct);
-                            if (gain_pct >= min_gain) continue;  // still profitable enough; keep it
-                            // Submit force-close. OMS HandleFill will close the slot
-                            // and book net P&L exactly like a normal SG-triggered exit.
-                            FPN<F> qty = state.oms->portfolio.positions[slot].quantity;
-                            FPN<F> price_fpn = FPN_FromDouble<F>(current_price_d);
-                            tt::OrderManager_Submit(state.oms,
-                                (int16_t)slot, ORDER_MARKET_SELL,
-                                qty, FPN_Zero<F>(), FPN_Zero<F>(),
-                                state.cores[slot].strategy_id, price_fpn);
-                            // v4.7.13: same heartbeat-counter bump as the manual
-                            // close path. Time-exit bypasses EventLoop_OnEvent
-                            // (goes straight to OrderManager_Submit), so without
-                            // this the Stats panel exits counter stays frozen
-                            // even though HandleFill processes the fill normally.
-                            state.cores[slot].exits_processed++;
-                            state.total_exits++;
-                            state.total_events_processed++;
-                            fprintf(stderr,
-                                "[sharded] core %d: time-exit (held %lu ticks, gain %.3f%%)\n",
-                                slot, (unsigned long)elapsed, gain_pct * 100.0);
-                        }
-                    }
-                }
-
-                // v4.0.3 D9: Trailing SL ratchet. For each active position,
-                // if gross gain >= cfg.tp_hold_score, compute trailing target
-                // = current_price - (stddev × sl_trail_mult). Write to
-                // pending_params.ratchet_sl which the hot path picks up via
-                // the existing seqlock on next param push. Only ratchets UP
-                // (FPN_Max in hot path means lower ratchet values are ignored).
-                if (!FPN_IsZero(cfg.sl_trail_mult) &&
-                    !FPN_IsZero(rolling_short.price_stddev) &&
-                    !FPN_IsZero(cfg.tp_hold_score)) {
-                    double cur_d = last_price.load(std::memory_order_relaxed);
-                    if (cur_d > 0.01) {
-                        double stddev_d = FPN_ToDouble(rolling_short.price_stddev);
-                        double trail_dist_d = stddev_d * FPN_ToDouble(cfg.sl_trail_mult);
-                        double hold_thresh = FPN_ToDouble(cfg.tp_hold_score);
-                        uint16_t bm = state.oms->portfolio.active_bitmap;
-                        while (bm) {
-                            int slot = __builtin_ctz(bm);
-                            bm &= (uint16_t)(bm - 1);
-                            double entry_d = FPN_ToDouble(state.oms->portfolio.positions[slot].entry_price);
-                            if (entry_d <= 0.0) continue;
-                            double gain_pct = (cur_d - entry_d) / entry_d;
-                            if (gain_pct < hold_thresh) continue;  // not yet trailing
-                            double new_sl_d = cur_d - trail_dist_d;
-                            // Write new ratchet into pending_params; hot path
-                            // FPN_Max ensures we never lower an existing ratchet.
-                            FPN<F> new_ratchet = FPN_FromDouble<F>(new_sl_d);
-                            FPN<F> existing = state.cores[slot].pending_params.ratchet_sl;
-                            if (FPN_GreaterThan(new_ratchet, existing)) {
-                                state.cores[slot].pending_params.ratchet_sl = new_ratchet;
-                                state.cores[slot].dirty = 1;  // force push
-                            }
-                        }
-                    }
+                // v4.7.17: time-exit + trailing SL ratchet extracted to shared
+                // helpers in ControllerEventLoop.hpp so backtest + live evolve
+                // identically when these features are enabled. Pre-v4.7.17 both
+                // were inlined here, leaving backtest silently no-op when user
+                // set max_hold_ticks > 0 or tp_hold_score > 0 → train-serve drift.
+                {
+                    uint64_t now_tick      = ticks_produced.load(std::memory_order_relaxed);
+                    double   current_price = last_price.load(std::memory_order_relaxed);
+                    EventLoop_TimeExit(&state, state.oms, cfg, now_tick, current_price);
+                    EventLoop_TrailingSLRatchet(&state, cfg, rolling_short, current_price);
                 }
 
 #ifdef USE_IMGUI_GUI

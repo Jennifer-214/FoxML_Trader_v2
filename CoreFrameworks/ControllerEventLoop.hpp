@@ -1562,6 +1562,132 @@ inline int EventLoop_KillSwitchEvaluate(EventLoopState<F>* state) {
 //
 // returns the number of cores that had permission restored.
 //======================================================================================================
+
+//======================================================================================================
+// [TIME-EXIT] (v4.7.17 — extracted from EngineSharded for backtest parity)
+//======================================================================================================
+// Walk the active-position bitmap, force-close any leg held longer than
+// cfg.max_hold_ticks WITH gross gain below cfg.min_hold_gain_pct.
+// Profitable positions are kept (still working). No-op when
+// cfg.max_hold_ticks == 0 (default). Same logic in live + backtest now —
+// adding a new exit gate updates ONE site.
+//
+// Defensive guard: entry_t > now_tick (snapshot-restored future stamp)
+// would underflow the uint64 subtraction → time-exit fires every cycle.
+// Reset to current and skip when detected; next genuine entry stamps fresh.
+//
+// Caller supplies the elapsed-tick basis + current price:
+//   - Live: `ticks_produced.load()` and `last_price.load()` atomics
+//   - Backtest: `tick_index` and `tick.price` (from RunTick)
+//
+// Counts every leg-exit as one heartbeat increment (matches live's pre-
+// extraction wiring). Uses OrderManager_Submit directly because time-exit
+// bypasses the SG-driven event path.
+//======================================================================================================
+template <unsigned F>
+inline void EventLoop_TimeExit(EventLoopState<F>* state,
+                                OrderManagerState<F>* oms,
+                                const ControllerConfig<F>& cfg,
+                                uint64_t now_tick,
+                                double current_price) {
+    if (cfg.max_hold_ticks == 0)  return;
+    if (current_price <= 0.01)    return;
+
+    uint16_t bm = oms->portfolio.active_bitmap;
+    while (bm) {
+        int slot = __builtin_ctz(bm);
+        bm &= (uint16_t)(bm - 1);
+
+        uint64_t entry_t = state->cores[slot].last_entry_tick;
+        if (entry_t == 0) continue;  // never stamped (shouldn't happen if active)
+        if (entry_t > now_tick) {
+            // Snapshot-drift guard. See "Snapshot Tick-Counter Drift"
+            // invariant in CLAUDE.md.
+            fprintf(stderr,
+                "[time-exit] core %d: stale entry_tick from snapshot "
+                "(entry_t=%llu > now_tick=%llu); resetting.\n",
+                slot, (unsigned long long)entry_t,
+                (unsigned long long)now_tick);
+            state->cores[slot].last_entry_tick = now_tick;
+            continue;
+        }
+        uint64_t elapsed = now_tick - entry_t;
+        if (elapsed < cfg.max_hold_ticks) continue;
+
+        double entry_d = FPN_ToDouble(oms->portfolio.positions[slot].entry_price);
+        if (entry_d <= 0.0) continue;
+        double gain_pct = (current_price - entry_d) / entry_d;
+        double min_gain = FPN_ToDouble(cfg.min_hold_gain_pct);
+        if (gain_pct >= min_gain) continue;  // still profitable enough; keep it
+
+        // Force-close. OMS HandleFill closes the slot exactly like a
+        // normal SG-triggered exit.
+        FPN<F> qty       = oms->portfolio.positions[slot].quantity;
+        FPN<F> price_fpn = FPN_FromDouble<F>(current_price);
+        OrderManager_Submit(oms, (int16_t)slot, ORDER_MARKET_SELL,
+                             qty, FPN_Zero<F>(), FPN_Zero<F>(),
+                             state->cores[slot].strategy_id, price_fpn);
+
+        // Heartbeat counters — time-exit bypasses EventLoop_OnEvent so we
+        // bump them here (matches the legacy wiring that lived in
+        // EngineSharded).
+        state->cores[slot].exits_processed++;
+        state->total_exits++;
+        state->total_events_processed++;
+        fprintf(stderr,
+            "[time-exit] core %d: held %lu ticks, gain %.3f%%\n",
+            slot, (unsigned long)elapsed, gain_pct * 100.0);
+    }
+}
+
+//======================================================================================================
+// [TRAILING-SL RATCHET / D9] (v4.7.17 — extracted from EngineSharded)
+//======================================================================================================
+// For each active position with gross gain >= cfg.tp_hold_score, write a
+// trailing SL = current_price - (price_stddev × cfg.sl_trail_mult) into
+// pending_params.ratchet_sl. Hot path picks it up via the existing
+// seqlock on the next param push. Only ratchets UP (FPN_Max in hot path
+// drops smaller ratchet values). No-op when cfg.tp_hold_score == 0
+// (default) OR cfg.sl_trail_mult == 0 OR rolling.price_stddev == 0.
+//
+// Caller supplies current price:
+//   - Live: `last_price.load()` atomic
+//   - Backtest: `tick.price`
+//
+// Reads rolling.price_stddev directly (caller-owned RollingStats).
+//======================================================================================================
+template <unsigned F, unsigned W>
+inline void EventLoop_TrailingSLRatchet(EventLoopState<F>* state,
+                                         const ControllerConfig<F>& cfg,
+                                         const RollingStats<F, W>& rolling,
+                                         double current_price) {
+    if (FPN_IsZero(cfg.sl_trail_mult))   return;
+    if (FPN_IsZero(cfg.tp_hold_score))   return;
+    if (FPN_IsZero(rolling.price_stddev)) return;
+    if (current_price <= 0.01)            return;
+
+    double stddev_d     = FPN_ToDouble(rolling.price_stddev);
+    double trail_dist_d = stddev_d * FPN_ToDouble(cfg.sl_trail_mult);
+    double hold_thresh  = FPN_ToDouble(cfg.tp_hold_score);
+
+    uint16_t bm = state->oms->portfolio.active_bitmap;
+    while (bm) {
+        int slot = __builtin_ctz(bm);
+        bm &= (uint16_t)(bm - 1);
+        double entry_d = FPN_ToDouble(state->oms->portfolio.positions[slot].entry_price);
+        if (entry_d <= 0.0) continue;
+        double gain_pct = (current_price - entry_d) / entry_d;
+        if (gain_pct < hold_thresh) continue;  // not yet trailing
+
+        FPN<F> new_ratchet = FPN_FromDouble<F>(current_price - trail_dist_d);
+        FPN<F> existing    = state->cores[slot].pending_params.ratchet_sl;
+        if (FPN_GreaterThan(new_ratchet, existing)) {
+            state->cores[slot].pending_params.ratchet_sl = new_ratchet;
+            state->cores[slot].dirty = 1;  // force push next cycle
+        }
+    }
+}
+
 template <unsigned F>
 inline int EventLoop_Unpause(EventLoopState<F>* state) {
     state->oms->kill_switch_tripped = 0;
