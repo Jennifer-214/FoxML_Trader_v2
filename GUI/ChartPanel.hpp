@@ -942,6 +942,10 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 {0.35f, 0.75f, 0.80f, 0.6f},  // EMA — cyan
             };
             for (int ci = 0; ci < snap->per_core_count && ci < 16; ++ci) {
+                // v4.7.13: per-core filter — when filter is set, only
+                // show the selected core's gate. ci here is the core_id
+                // directly (not a slot), so it's a simple equality check.
+                if (settings->core_filter >= 0 && ci != settings->core_filter) continue;
                 // skip cores that have an active position — their gate
                 // is irrelevant while holding, and the line overlaps
                 // with the position's TP/SL labels
