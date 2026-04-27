@@ -78,6 +78,15 @@ main.cpp post-dispatch silently skips the sharded path).
 Setting `engine_mode=single_core` in `backtest.cfg` is a no-op going
 forward — the cfg field is parsed but ignored for one release cycle.
 
+**ANSI TUI** (`build/engine`, no GUI deps) is **DEPRECATED for
+production** as of v4.6 (2026-04-27). Kept for headless operation
+(servers, CI, embedded contexts) but not the production interface.
+Use `build_gui/engine_gui` (ImGui + SDL2 + OpenGL3) for live trading.
+The ANSI renderer (`DataStream/TUIAnsi.hpp`) and any TUISnapshot
+fields it uniquely consumes will be cleaned up in a future hygiene
+pass — not load-bearing right now since the GUI path doesn't read
+from the same fields.
+
 ```
 LEGACY MODE (deprecated benchmark path):
 HOT PATH (every tick):
