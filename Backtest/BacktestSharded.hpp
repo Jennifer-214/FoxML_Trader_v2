@@ -45,10 +45,13 @@
 #include "../CoreFrameworks/Tick.hpp"
 #include "../DataStream/EngineTUI.hpp"  // for TUISnapshot
 #include "../FixedPoint/FixedPointN.hpp"
-#include "../ML_Headers/ModelInference.hpp"  // for ModelFeatures_Pack
+#include "../ML_Headers/ConfidenceScore.hpp"  // ConfidenceScorer_Init for ML cores (E.2)
+#include "../ML_Headers/CoreModelZoo.hpp"     // E.2 — load per-core ML zoos
+#include "../ML_Headers/ModelInference.hpp"   // for ModelFeatures_Pack
 #include "../ML_Headers/ROR_regressor.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/RegimeDetector.hpp"  // CumDeltaState, TickRateState, Regime_ComputeSignals
+#include "../Strategies/StrategyInterface.hpp"  // STRATEGY_ML, STRATEGY_NONE constants
 #include "BacktestEngine.hpp"  // for BacktestResults, BacktestRunConfig, BacktestData_Load
 #include "LabelFunctions.hpp"  // for HistoricalTick
 
@@ -106,18 +109,14 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     cfg.slow_path_max_secs = 999999;
     results->config_used = cfg;
 
-    fprintf(stderr, "[backtest sharded] mode=sharded cores=%u strategy=%d\n",
+    fprintf(stderr, "[backtest sharded] mode=sharded cores=%u default_strategy=%d\n",
             (unsigned)cfg.num_execution_cores, cfg.default_strategy);
 
-    // Strategy gate: only SimpleDip is ported in this build. Bail with a
-    // clear error if the user picked something else.
-    int requested_strategy = cfg.default_strategy;
-    if (requested_strategy < 0) requested_strategy = STRATEGY_SIMPLE_DIP;
-    if (requested_strategy != STRATEGY_SIMPLE_DIP) {
-        fprintf(stderr, "[backtest sharded] ERROR: only SimpleDip (strategy 2) is currently "
-                        "ported to the sharded path. requested=%d\n", requested_strategy);
-        return;
-    }
+    // Track E.2 — multi-strategy support. The prior SimpleDip-only gate
+    // is gone; per-core strategy comes from cfg.core_strategies[i] (set
+    // by ControllerConfig_Load from `core_N_strategy=...` directives,
+    // defaults to STRATEGY_SIMPLE_DIP when unset). Mirrors EngineSharded_Run
+    // lines 559-648.
 
     //----------------------------------------------------------------------
     // Set up the per-core engine
@@ -153,26 +152,99 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     static SPSCRing<Tick<BACKTEST_FP>, EXECUTION_CORE_TICK_RING_SIZE> tick_rings[MAX_EXECUTION_CORES];
     static ExecutionCore<BACKTEST_FP> cores[MAX_EXECUTION_CORES];
 
-    // Risk slice per core: starting balance / num_cores. Each core sizes its
-    // entries against this allocation, so the aggregate exposure matches what
-    // a single-controller engine would do with risk_pct.
+    // Risk slice per core: even split of (total_balance × risk_pct) across
+    // cores, with cfg.core_risk_pct[i] override allowed. Mirrors
+    // EngineSharded_Run lines 549-557.
     double total_balance = FPN_ToDouble(cfg.starting_balance);
-    double per_core_balance = (total_balance * FPN_ToDouble(cfg.risk_pct)) / (double)num_cores;
-    if (per_core_balance < 1.0) per_core_balance = 1.0;
+    double default_risk = FPN_ToDouble(cfg.risk_pct);
+    if (default_risk <= 0.0) default_risk = 0.10;
+    double default_per_core = (total_balance * default_risk) / (double)num_cores;
+    if (default_per_core < 1.0) default_per_core = 1.0;
+
+    // Track E.2 — per-core ML model zoos. Static so they persist across the
+    // call (CoreModelZoo holds open file/model handles); free + re-init each
+    // run to avoid stale state when the user runs multiple backtests with
+    // different ML configs in one suite session.
+    static CoreModelZoo<BACKTEST_FP> ml_zoos[MAX_EXECUTION_CORES];
 
     for (int i = 0; i < num_cores; ++i) {
         SPSCRing_Init(&tick_rings[i]);
         ExecutionCore_Init(&cores[i], (uint16_t)i, &tick_rings[i]);
-        // intended TP/SL/qty get filled in by the slow-path strategy rebuild;
-        // initial values from config are placeholders.
-        FPN<BACKTEST_FP> init_tp = FPN_FromDouble<BACKTEST_FP>(total_balance);  // never hit
-        FPN<BACKTEST_FP> init_sl = FPN_Zero<BACKTEST_FP>();                     // never hit
-        FPN<BACKTEST_FP> init_qty = FPN_Zero<BACKTEST_FP>();                    // no entries until rebuild
-        EventLoopState_RegisterCore(&state, &cores[i], init_tp, init_sl, init_qty);
+        // intended TP/SL/qty get filled in by the slow-path strategy rebuild
+        EventLoopState_RegisterCore(&state, &cores[i],
+            FPN_Zero<BACKTEST_FP>(), FPN_Zero<BACKTEST_FP>(), FPN_Zero<BACKTEST_FP>());
+
+        // per-core risk: cfg.core_risk_pct[i] override or even-split default
+        double core_balance = default_per_core;
+        if (!FPN_IsZero(cfg.core_risk_pct[i])) {
+            core_balance = total_balance * FPN_ToDouble(cfg.core_risk_pct[i]);
+            if (core_balance < 1.0) core_balance = 1.0;
+        }
         EventLoopState_SetCoreStrategy(&state, i,
-            (uint8_t)STRATEGY_SIMPLE_DIP,
-            FPN_FromDouble<BACKTEST_FP>(per_core_balance));
-        ExecutionCore_SetPermission(&cores[i], 1);
+            cfg.core_strategies[i],
+            FPN_FromDouble<BACKTEST_FP>(core_balance));
+
+        // Track E.2 — ML model load for STRATEGY_ML cores. Three resolution
+        // paths, mirrors EngineSharded_Run lines 576-631:
+        //   1. core_N_model_dir set → CoreModelZoo from directory
+        //   2. core_N_model_path set → legacy single buy_signal model
+        //   3. ml_model_path globally → legacy fallback
+        if (cfg.core_strategies[i] == STRATEGY_ML) {
+            // Free any prior backtest run's zoo state on this slot before
+            // reinit. CoreModelZoo holds heap allocations; double-Init
+            // without Free leaks the prior allocation.
+            CoreModelZoo_Free(&ml_zoos[i]);
+            CoreModelZoo_Init(&ml_zoos[i]);
+            int backend = cfg.ml_backend ? cfg.ml_backend : MODEL_BACKEND_XGBOOST;
+            int loaded = 0;
+            if (cfg.core_model_dir[i][0]) {
+                loaded = CoreModelZoo_LoadFromDir(&ml_zoos[i],
+                                                   cfg.core_model_dir[i], backend);
+                fprintf(stderr, "[backtest sharded] core %d: zoo from %s, %d role(s) loaded\n",
+                        i, cfg.core_model_dir[i], loaded);
+            } else {
+                const char* model_path = cfg.core_model_path[i][0]
+                    ? cfg.core_model_path[i] : cfg.ml_model_path;
+                if (model_path[0]) {
+                    loaded = CoreModelZoo_LoadLegacy(&ml_zoos[i], model_path, backend);
+                    if (loaded) {
+                        fprintf(stderr, "[backtest sharded] core %d: legacy buy_signal model loaded from %s\n",
+                                i, model_path);
+                    } else {
+                        fprintf(stderr, "[backtest sharded] core %d: ML model load FAILED (%s), "
+                                         "falling back to SimpleDip\n", i, model_path);
+                    }
+                }
+            }
+            if (loaded) {
+                state.cores[i].model_handle = &ml_zoos[i];
+                if (cfg.core_model_dir[i][0]) {
+                    int verify_ok = CoreModelZoo_VerifyExpected(&ml_zoos[i],
+                        cfg.core_model_dir[i],
+                        cfg.barrier_gate_enabled,
+                        FPN_ToDouble(cfg.ml_buy_threshold),
+                        cfg.model_verify_strict, i,
+                        cfg.poll_interval,
+                        (unsigned)MODEL_FORMAT_VERSION);
+                    if (!verify_ok && cfg.model_verify_strict > 0) {
+                        fprintf(stderr, "[backtest sharded] core %d: ML model UNLOADED due to "
+                                         "strict verify failure\n", i);
+                        CoreModelZoo_Free(&ml_zoos[i]);
+                        state.cores[i].model_handle = NULL;
+                    }
+                }
+            }
+            // Phase 6prep — ConfidenceScorer with cfg tunables
+            ConfidenceScorer_Init(&state.cores[i].confidence,
+                                   (int)cfg.confidence_window,
+                                   FPN_ToDouble(cfg.confidence_freshness_tau));
+        }
+
+        // Track E.2 — permission starts 0; granted after warmup samples
+        // accumulate. Mirrors EngineSharded_Run lines 999-1019. Pre-E.2,
+        // BacktestSharded set permission=1 immediately, which let strategies
+        // fire on garbage rolling stats during the first ticks.
+        ExecutionCore_SetPermission(&cores[i], 0);
     }
 
     // RollingStats lives on the stack here so the slow-path parameter rebuild
@@ -290,6 +362,10 @@ static inline void BacktestSharded_Run(BacktestResults *results,
 
     int total_processed = 0;
     int total_ticks_all_files = 0;
+    // Track E.2 — warmup gate. Cores start with permission=0; once rolling
+    // stats accumulate min_warmup_samples, permission flips to 1 for all
+    // non-NONE cores (idempotent). Mirrors EngineSharded_Run.
+    int warmup_permission_granted = 0;
 
     // First pass: count ticks per file for the progress bar
     int *file_tick_counts = (int *)calloc(run_cfg->num_data_files, sizeof(int));
@@ -361,7 +437,30 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             //   3. DrainEvents (process any entries / exits)
             //   4. On cadence: rebuild parameters, push, evaluate kill switch
             //   5. Track E.1 — fire on_slow_path hook (when registered)
+            uint64_t prev_slow_runs = drv.slow_path_runs;
             ShardedBacktest_RunTick(&drv, t, total_processed);
+
+            // Track E.2 — warmup-aware permission grant. Mirrors
+            // EngineSharded_Run lines 999-1019. Pre-E.2, BacktestSharded set
+            // permission=1 at startup, which let strategies fire on garbage
+            // rolling stats during the first ticks. Now we grant permission
+            // only after rolling.count crosses min_warmup_samples (default
+            // 64 = half of W=128). Idempotent — once granted, stays granted.
+            if (!warmup_permission_granted && drv.slow_path_runs > prev_slow_runs) {
+                uint32_t min_samples = cfg.min_warmup_samples > 0
+                    ? cfg.min_warmup_samples : 64;
+                if (rolling.count >= (int)min_samples) {
+                    for (int c = 0; c < num_cores; ++c) {
+                        if (state.cores[c].strategy_id != STRATEGY_NONE) {
+                            ExecutionCore_SetPermission(&cores[c], 1);
+                        }
+                    }
+                    warmup_permission_granted = 1;
+                    fprintf(stderr, "[backtest sharded] warmup complete at tick %d "
+                                    "(rolling.count=%d, threshold=%u) — permission granted\n",
+                            total_processed, rolling.count, min_samples);
+                }
+            }
 
             // DEBUG: dump pending params after the first slow-path rebuild
             if (!debug_dumped && drv.slow_path_runs > 0) {
