@@ -48,7 +48,13 @@ namespace tt {
 // v2: + per-core RollingIC + RollingRMSE buffer contents (Phase 4.1).
 //     Without this, ML cores cold-start to ~zero confidence on every
 //     restart and stay armed-but-inactive until live fills repopulate.
-#define SHARDED_SNAPSHOT_VERSION  2u
+// v3: + partial_exit_enabled byte in header + per-core leg-B
+//     ExecutionCore mirrors (active_b, entry_price_b, live_tp_b,
+//     live_sl_b). Closes the bug where toggling partials between
+//     sessions reinterpreted single-position snapshot slots under the
+//     paired-leg geometry. v2 files refused on load (no migration —
+//     paired-leg state can't be reconstructed from single-leg).
+#define SHARDED_SNAPSHOT_VERSION  3u
 
 //======================================================================================================
 // [SAVE]
@@ -57,9 +63,15 @@ namespace tt {
 // file (if any) is unchanged — atomic rename never moves the .tmp into
 // place if writes failed.
 //======================================================================================================
+// `partial_exit_enabled` is the engine's current cfg.partial_exit_enabled
+// (1 if partials are on, 0 otherwise). Persisted in the header so the
+// loader can refuse a snapshot taken under a different toggle state —
+// position slot indices have different meaning between the two
+// geometries (1:1 vs paired legs A+B).
 template <unsigned F>
 inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
-                                  const char* filepath) {
+                                  const char* filepath,
+                                  int partial_exit_enabled) {
     if (!state || !state->oms || !filepath) return 0;
 
     // Write to .tmp first; rename only on full success.
@@ -83,6 +95,16 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
     if (fwrite(&version, 4, 1, f) != 1)       goto fail;
     if (fwrite(&num_cores, 4, 1, f) != 1)     goto fail;
     if (fwrite(&timestamp_us, 8, 1, f) != 1)  goto fail;
+    // v3: partials toggle byte + 3 bytes pad (keeps subsequent block
+    // 4-byte aligned). Loader refuses a file whose toggle state differs
+    // from current cfg, since position slot indices have different
+    // meaning between the two geometries.
+    {
+        uint8_t partials_byte = partial_exit_enabled ? 1 : 0;
+        if (fwrite(&partials_byte, 1, 1, f) != 1) goto fail;
+        uint8_t pad[3] = {0, 0, 0};
+        if (fwrite(pad, 3, 1, f) != 1) goto fail;
+    }
 
     // ---- GLOBAL OMS BLOCK ----
     if (fwrite(&state->oms->balance,             sizeof(FPN<F>), 1, f) != 1) goto fail;
@@ -171,6 +193,12 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
         if (fwrite(&ctx.confidence.rmse.count, sizeof(int), 1, f) != 1) goto fail;
         if (fwrite(&ctx.confidence.rmse.head,  sizeof(int), 1, f) != 1) goto fail;
     }
+    // v3 NOTE: ExecutionCore leg-B mirrors (active_b, entry_price_b,
+    // live_tp_b, live_sl_b) are NOT persisted as separate fields —
+    // they're derived at load time from portfolio.positions[2c+1],
+    // which is already persisted in the global OMS block. Same source
+    // of truth as leg A (positions[2c]). One less field set to keep
+    // in sync.
 
     // Flush + fsync so the rename is meaningful.
     if (fflush(f) != 0) goto fail;
@@ -208,8 +236,15 @@ fail:
 // state mutation. The first per-core read failure aborts the whole load
 // and rolls back to the in-memory snapshot taken at function entry.
 //======================================================================================================
+// `partial_exit_enabled` is the engine's CURRENT cfg.partial_exit_enabled
+// (1 if partials are on, 0 otherwise). Loader refuses files written under
+// a different toggle state — slot indices have different meaning between
+// the two geometries (1:1 vs paired legs A+B), so reusing positions
+// across the toggle creates "zombie" entries that look real in the GUI
+// panel but can't be exited by the hot path.
 template <unsigned F>
-inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath) {
+inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
+                                  int partial_exit_enabled) {
     if (!state || !state->oms || !filepath) return 0;
     FILE* f = fopen(filepath, "rb");
     if (!f) {
@@ -251,6 +286,27 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath) 
         fclose(f); return 0;
     }
     if (fread(&timestamp_us, 8, 1, f) != 1) { fclose(f); return 0; }
+
+    // v3: partials toggle byte + 3 bytes pad. Refuse if the saved toggle
+    // state differs from the current cfg — slot-index geometry changed,
+    // restored positions would be zombies. (User toggled partial_exit_enabled
+    // since the file was written.)
+    {
+        uint8_t file_partials_byte = 0;
+        uint8_t pad[3] = {0, 0, 0};
+        if (fread(&file_partials_byte, 1, 1, f) != 1) { fclose(f); return 0; }
+        if (fread(pad, 3, 1, f) != 1) { fclose(f); return 0; }
+        int file_partials = file_partials_byte ? 1 : 0;
+        int cfg_partials  = partial_exit_enabled ? 1 : 0;
+        if (file_partials != cfg_partials) {
+            fprintf(stderr,
+                "[snapshot] %s written with partial_exit_enabled=%d, current cfg=%d — "
+                "refusing load (slot geometry differs; restoring would create zombie "
+                "positions). Starting fresh.\n",
+                filepath, file_partials, cfg_partials);
+            fclose(f); return 0;
+        }
+    }
 
     // ---- GLOBAL OMS BLOCK ----
     FPN<F> tmp_balance, tmp_realized, tmp_peak;
@@ -422,24 +478,38 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath) 
     // slow path, or (c) day-boundary close.
     //
     // Fix: walk the restored active_bitmap, copy Position fields into the
-    // matching ExecutionCore<F>'s hot-path mirrors, set active=1.
+    // matching ExecutionCore<F>'s hot-path mirrors, set active flag.
+    //
+    // v3 — partials-aware mapping. With partial_exit_enabled=1, slot 2c
+    // is core c's leg A and slot 2c+1 is core c's leg B. Each leg has
+    // its own mirror set on the same ExecutionCore (active vs active_b,
+    // live_tp vs live_tp_b, etc.). Without this branch, leg-B slots
+    // (2c+1 >= registered_count when N==MAX/2) silently fail the bound
+    // check and never re-activate.
     uint16_t restored_bm = state->oms->portfolio.active_bitmap;
     int restored_count = 0;
     while (restored_bm) {
         int slot = __builtin_ctz(restored_bm);
         restored_bm &= (uint16_t)(restored_bm - 1);
-        if (slot < 0 || slot >= (int)state->registered_count) continue;
-        ExecutionCore<F>* core_ptr = state->cores[slot].core;
+        int core_id = partial_exit_enabled ? (slot >> 1) : slot;
+        int leg     = partial_exit_enabled ? (slot & 1)  : 0;
+        if (core_id < 0 || core_id >= (int)state->registered_count) continue;
+        ExecutionCore<F>* core_ptr = state->cores[core_id].core;
         if (!core_ptr) continue;
         const Position<F>& pos = state->oms->portfolio.positions[slot];
-        core_ptr->entry_price = pos.entry_price;
-        core_ptr->live_tp     = pos.take_profit_price;
-        core_ptr->live_sl     = pos.stop_loss_price;
-        // Active flag last (RELEASE-ish ordering — core is single-threaded
-        // here at boot, but the hot path will read this on its next tick).
-        // No atomic needed: core hot-path thread isn't running yet at
-        // snapshot-load time.
-        core_ptr->active = 1;
+        // Active flag last (no atomic needed — core hot-path thread
+        // isn't running yet at snapshot-load time).
+        if (leg == 0) {
+            core_ptr->entry_price = pos.entry_price;
+            core_ptr->live_tp     = pos.take_profit_price;
+            core_ptr->live_sl     = pos.stop_loss_price;
+            core_ptr->active      = 1;
+        } else {
+            core_ptr->entry_price_b = pos.entry_price;
+            core_ptr->live_tp_b     = pos.take_profit_price;
+            core_ptr->live_sl_b     = pos.stop_loss_price;
+            core_ptr->active_b      = 1;
+        }
         restored_count++;
     }
     if (restored_count > 0) {

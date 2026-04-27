@@ -695,7 +695,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // Ensure data/ exists (mkdir is idempotent — silent if it does)
         mkdir("data", 0755);
         if (!live_trading) {
-            int loaded = ShardedSnapshot_Load<F>(&state, snapshot_path);
+            int loaded = ShardedSnapshot_Load<F>(&state, snapshot_path,
+                                                  cfg.partial_exit_enabled ? 1 : 0);
             (void)loaded;  // logged inside; nothing else to do here
         } else {
             fprintf(stderr, "[snapshot] LIVE mode: skipping snapshot load "
@@ -1064,7 +1065,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 static int save_counter = 0;
                 if (!live_trading && (++save_counter >= 1024)) {
                     save_counter = 0;
-                    ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat");
+                    ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat",
+                                              cfg.partial_exit_enabled ? 1 : 0);
                 }
                 EventLoop_PushParameters(&state);
                 // KNOWN RACE (audit 2026-04-09): KillSwitchEvaluate reads
@@ -1749,7 +1751,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // engine's "intent" rather than an in-progress liquidation.
     // Paper mode only — live mode treats exchange state as truth.
     if (!live_trading) {
-        if (ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat")) {
+        if (ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat",
+                                      cfg.partial_exit_enabled ? 1 : 0)) {
             fprintf(stderr, "[snapshot] final save: data/sharded_snapshot.dat\n");
         } else {
             fprintf(stderr, "[snapshot] final save FAILED — next restart starts fresh\n");

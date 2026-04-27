@@ -4316,7 +4316,7 @@ int main() {
         // ---- Test 1: missing file → load returns 0, state untouched ----
         {
             auto* r = build_state(2, 10000.0);
-            int loaded = tt::ShardedSnapshot_Load<64>(&r->state, "/tmp/nonexistent_snapshot.dat");
+            int loaded = tt::ShardedSnapshot_Load<64>(&r->state, "/tmp/nonexistent_snapshot.dat", 0);
             check("missing file: load returns 0",
                   loaded == 0);
             check("missing file: state untouched (balance still starting)",
@@ -4362,13 +4362,13 @@ int main() {
             r->oms.balance      = FPN_FromDouble<64>(9837.42);
             r->oms.realized_pnl = FPN_FromDouble<64>(-162.58);
 
-            int saved = tt::ShardedSnapshot_Save<64>(&r->state, test_path);
+            int saved = tt::ShardedSnapshot_Save<64>(&r->state, test_path, 0);
             check("round-trip: save returns 1",
                   saved == 1);
 
             // Build a fresh state with same num_cores; load over it
             auto* r2 = build_state(4, 10000.0);  // fresh OMS
-            int loaded = tt::ShardedSnapshot_Load<64>(&r2->state, test_path);
+            int loaded = tt::ShardedSnapshot_Load<64>(&r2->state, test_path, 0);
             check("round-trip: load returns 1",
                   loaded == 1);
             check("round-trip: oms.balance restored",
@@ -4415,7 +4415,7 @@ int main() {
             fclose(f);
 
             auto* r = build_state(2, 10000.0);
-            int loaded = tt::ShardedSnapshot_Load<64>(&r->state, test_path);
+            int loaded = tt::ShardedSnapshot_Load<64>(&r->state, test_path, 0);
             check("legacy magic: refused (returns 0)",
                   loaded == 0);
             check("legacy magic: state untouched",
@@ -4432,7 +4432,7 @@ int main() {
             fclose(f);
 
             auto* r = build_state(2, 10000.0);
-            int loaded = tt::ShardedSnapshot_Load<64>(&r->state, test_path);
+            int loaded = tt::ShardedSnapshot_Load<64>(&r->state, test_path, 0);
             check("version mismatch: refused",
                   loaded == 0);
         }
@@ -4447,7 +4447,7 @@ int main() {
             fclose(f);
 
             auto* r = build_state(2, 10000.0);
-            int loaded = tt::ShardedSnapshot_Load<64>(&r->state, test_path);
+            int loaded = tt::ShardedSnapshot_Load<64>(&r->state, test_path, 0);
             check("v1 file refused (no backward compat with pre-Phase-4.1)",
                   loaded == 0);
         }
@@ -4457,11 +4457,11 @@ int main() {
             // Save with 4 cores
             auto* r4 = build_state(4, 10000.0);
             r4->oms.balance = FPN_FromDouble<64>(8888.0);  // distinguishable
-            tt::ShardedSnapshot_Save<64>(&r4->state, test_path);
+            tt::ShardedSnapshot_Save<64>(&r4->state, test_path, 0);
 
             // Load into a 2-core state
             auto* r2 = build_state(2, 10000.0);
-            int loaded = tt::ShardedSnapshot_Load<64>(&r2->state, test_path);
+            int loaded = tt::ShardedSnapshot_Load<64>(&r2->state, test_path, 0);
             check("core-count mismatch (4 saved, 2 cfg): refused",
                   loaded == 0);
             check("core-count mismatch: state untouched",
@@ -4472,7 +4472,7 @@ int main() {
         {
             // Save valid snapshot
             auto* r = build_state(2, 10000.0);
-            tt::ShardedSnapshot_Save<64>(&r->state, test_path);
+            tt::ShardedSnapshot_Save<64>(&r->state, test_path, 0);
             // Truncate to half its size
             FILE* f = fopen(test_path, "rb");
             fseek(f, 0, SEEK_END); long sz = ftell(f); fclose(f);
@@ -4481,7 +4481,7 @@ int main() {
             fclose(f);
 
             auto* r2 = build_state(2, 10000.0);
-            int loaded = tt::ShardedSnapshot_Load<64>(&r2->state, test_path);
+            int loaded = tt::ShardedSnapshot_Load<64>(&r2->state, test_path, 0);
             check("truncated file: refused (no crash)",
                   loaded == 0);
         }
@@ -4505,7 +4505,7 @@ int main() {
                 FPN_FromDouble<64>(0.6));     // entry_fee
 
             // Save snapshot of this state
-            tt::ShardedSnapshot_Save<64>(&r->state, test_path);
+            tt::ShardedSnapshot_Save<64>(&r->state, test_path, 0);
 
             // Build a FRESH state — ExecutionCore fields are zero-init
             auto* r2 = build_state(2, 10000.0);
@@ -4515,7 +4515,7 @@ int main() {
                   FPN_IsZero(r2->cores[0].live_tp));
 
             // Load — should re-activate core[0] from restored Position
-            int loaded = tt::ShardedSnapshot_Load<64>(&r2->state, test_path);
+            int loaded = tt::ShardedSnapshot_Load<64>(&r2->state, test_path, 0);
             check("snapshot re-activate: load succeeded",
                   loaded == 1);
             check("snapshot re-activate: portfolio.active_bitmap restored",
@@ -4532,6 +4532,44 @@ int main() {
             check("snapshot re-activate: core[1].active stays 0 (no position)",
                   r2->cores[1].active == 0);
 
+            unlink(test_path);
+        }
+
+        // ---- Test 8 (v3): partials-toggle mismatch refused ----
+        // Snapshot saved with partials=0 must be refused when current cfg
+        // says partials=1, and vice versa. Prevents the slot-geometry
+        // reinterpretation bug that surfaced 2026-04-27 (single-leg
+        // positions in slots 0..3 reinterpreted as paired-leg geometry
+        // → zombie positions, undisplayable strategies).
+        {
+            auto* r = build_state(2, 10000.0);
+            r->oms.balance = FPN_FromDouble<64>(7777.0);
+            tt::ShardedSnapshot_Save<64>(&r->state, test_path, 0);  // saved partials=0
+
+            auto* r2 = build_state(2, 10000.0);
+            int loaded = tt::ShardedSnapshot_Load<64>(&r2->state, test_path, 1);  // load asking partials=1
+            check("v3 partials toggle (saved=0, load=1): refused",
+                  loaded == 0);
+            check("v3 partials toggle: state untouched on refuse",
+                  fabs(FPN_ToDouble(r2->state.oms->balance) - 10000.0) < 1e-6);
+            unlink(test_path);
+
+            auto* r3 = build_state(2, 10000.0);
+            r3->oms.balance = FPN_FromDouble<64>(8888.0);
+            tt::ShardedSnapshot_Save<64>(&r3->state, test_path, 1);  // saved partials=1
+
+            auto* r4 = build_state(2, 10000.0);
+            int loaded2 = tt::ShardedSnapshot_Load<64>(&r4->state, test_path, 0);  // load asking partials=0
+            check("v3 partials toggle (saved=1, load=0): refused",
+                  loaded2 == 0);
+
+            // Match: same flag both ways → load succeeds
+            auto* r5 = build_state(2, 10000.0);
+            int loaded3 = tt::ShardedSnapshot_Load<64>(&r5->state, test_path, 1);
+            check("v3 partials toggle (saved=1, load=1): accepted",
+                  loaded3 == 1);
+            check("v3 partials toggle accepted: balance restored",
+                  fabs(FPN_ToDouble(r5->state.oms->balance) - 8888.0) < 1e-6);
             unlink(test_path);
         }
 
