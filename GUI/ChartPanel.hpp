@@ -919,7 +919,14 @@ static inline void GUI_VolumeChart(const ChartState *cs, const TUISnapshot *snap
         float bw = (chart_w / vis) * 0.35f;
         if (bw < 1.5f) bw = 1.5f;
         for (int i = 0; i < vc; i++) {
-            ImVec4 col = (cs->buy_ratios[i] > 0.5) ? FoxmlColors::green : FoxmlColors::red_b;
+            // Color volume bars by candle direction: green when close > open
+            // (bullish candle), red when close < open (bearish drop). Matches
+            // standard market-volume convention on tradingview-style charts.
+            // Tiny flat candles (|delta| < FLICKER_BPS × open) treated as
+            // neutral/green to avoid flicker on dust moves.
+            double delta = cs->closes[i] - cs->opens[i];
+            double thr   = cs->opens[i] * 0.00005;  // 0.5 bps flicker floor
+            ImVec4 col = (delta < -thr) ? FoxmlColors::red_b : FoxmlColors::green;
             col.w = 0.7f;
             ImVec2 top = ImPlot::PlotToPixels(cs->xs[i], cs->volumes[i]);
             ImVec2 bot = ImPlot::PlotToPixels(cs->xs[i], 0.0);
