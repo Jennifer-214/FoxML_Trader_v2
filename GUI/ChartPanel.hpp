@@ -63,39 +63,48 @@ static inline void ChartState_Prepare(ChartState *cs, const CandleSnapshot *csna
     cs->ready = (n >= 2);
     if (!cs->ready) return;
 
-    int vis_start = 0;
+    // v4.7.12: load ALL candles (up to CANDLE_MAX = 4096), not just the
+    // last `vis`. xs[i] is now absolute unix time (seconds since epoch)
+    // instead of array index. This makes the X axis stable across ring-
+    // buffer eviction — a candle's X coordinate doesn't shift when
+    // older candles drop off, so user pan position stays anchored to
+    // the same wall-clock time.
+    //
+    // Public-surface rule: kept field name `xs` and shape (double[]).
+    // Consumers that PlotToPixels(cs->xs[i], ...) keep working — they
+    // treat xs as opaque doubles. The only callers that DERIVE meaning
+    // from xs values are inside this file and updated in lockstep.
     cs->vis_count = n;
-    if (n > vis) {
-        vis_start = n - vis;
-        cs->vis_count = vis;
-    }
-
-    for (int i = 0; i < cs->vis_count; i++) {
-        const Candle &c = csnap->candles[vis_start + i];
-        cs->xs[i]     = (double)i;
-        cs->opens[i]  = c.open;
-        cs->highs[i]  = c.high;
-        cs->lows[i]   = c.low;
-        cs->closes[i] = c.close;
-        cs->volumes[i] = c.volume;
+    for (int i = 0; i < n; i++) {
+        const Candle &c = csnap->candles[i];
+        cs->xs[i]        = c.time_sec;
+        cs->opens[i]     = c.open;
+        cs->highs[i]     = c.high;
+        cs->lows[i]      = c.low;
+        cs->closes[i]    = c.close;
+        cs->volumes[i]   = c.volume;
         cs->buy_ratios[i] = (c.volume > 0) ? c.buy_vol / c.volume : 0.5;
         cs->times_sec[i] = c.time_sec;
     }
 
     cs->last_price = csnap->candles[n - 1].close;
     cs->vwap = csnap->vwap;
-    cs->x_lo = -0.5;
-    cs->x_hi = vis - 0.5;
+    // Initial X view = last `vis` candles' time range. Pad by half an
+    // interval on each side so candle bodies don't touch the axis.
+    int view_start = (n > vis) ? n - vis : 0;
+    double interval = (double)settings->candle_interval;
+    cs->x_lo = csnap->candles[view_start].time_sec - interval * 0.5;
+    cs->x_hi = csnap->candles[n - 1].time_sec     + interval * 0.5;
 
     // SMA
     cs->sma_first = -1;
     memset(cs->sma, 0, sizeof(cs->sma));
     if (n >= 20) {
-        for (int i = 0; i < cs->vis_count; i++) {
-            int gi = vis_start + i;
-            if (gi < 19) continue;
+        // v4.7.12: i now indexes into the full snapshot (no vis_start
+        // offset). SMA only meaningful from index 19 onward.
+        for (int i = 19; i < n; i++) {
             double sum = 0;
-            for (int j = gi - 19; j <= gi; j++) sum += csnap->candles[j].close;
+            for (int j = i - 19; j <= i; j++) sum += csnap->candles[j].close;
             cs->sma[i] = sum / 20.0;
             if (cs->sma_first < 0) cs->sma_first = i;
         }
@@ -235,34 +244,27 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
     if (ImPlot::BeginPlot("##price", ImVec2(-1, -1),
                            ImPlotFlags_NoTitle | ImPlotFlags_NoMouseText)) {
 
+        // v4.7.12: X axis as time. SetupAxisScale(Time) → ImPlot formats
+        // ticks as HH:MM:SS / MM-DD natively, so we drop the manual
+        // tick label code below. Once condition lets user pan/zoom;
+        // re-applies Always when y_reset_requested is set (Reset View
+        // resets BOTH axes — they're tied conceptually).
         ImPlot::SetupAxes(NULL, NULL,
                           ImPlotAxisFlags_NoLabel | ImPlotAxisFlags_NoGridLines,
                           ImPlotAxisFlags_Opposite);
-        ImPlot::SetupAxisLimits(ImAxis_X1, cs->x_lo, cs->x_hi, ImPlotCond_Always);
+        ImPlot::SetupAxisScale(ImAxis_X1, ImPlotScale_Time);
+        ImPlotCond x_cond = settings->y_reset_requested ? ImPlotCond_Always : ImPlotCond_Once;
+        ImPlot::SetupAxisLimits(ImAxis_X1, cs->x_lo, cs->x_hi, x_cond);
         // secondary Y-axis for ML prediction overlay (0-1 range)
         if (settings->show_ml_overlay && snap->ml.pred_count > 1) {
             ImPlot::SetupAxis(ImAxis_Y2, NULL, ImPlotAxisFlags_NoGridLines | ImPlotAxisFlags_NoLabel);
             ImPlot::SetupAxisLimits(ImAxis_Y2, 0.0, 1.0, ImPlotCond_Always);
         }
 
-        // time tick labels — static buffers so pointers survive until EndPlot
-        static double tick_pos[16];
-        static char tick_bufs[16][8];
-        static const char *tick_labels_p[16];
-        int tick_n = 0;
-        if (vc > 0) {
-            int step = vc > 5 ? vc / 5 : 1;
-            for (int i = 0; i < vc && tick_n < 16; i += step) {
-                if (cs->times_sec[i] < 1.0) continue;
-                tick_pos[tick_n] = cs->xs[i];
-                time_t t = (time_t)cs->times_sec[i];
-                struct tm *tm = localtime(&t);
-                snprintf(tick_bufs[tick_n], 8, "%02d:%02d", tm->tm_hour, tm->tm_min);
-                tick_labels_p[tick_n] = tick_bufs[tick_n];
-                tick_n++;
-            }
-            ImPlot::SetupAxisTicks(ImAxis_X1, tick_pos, tick_n, tick_labels_p);
-        }
+        // v4.7.12: time tick labels are now handled natively by ImPlot
+        // via the ImPlotAxisFlags_Time flag set above. The pre-v4.7.12
+        // manual tick code was needed because xs was an arbitrary index;
+        // with xs = unix_seconds, ImPlot formats automatically.
 
         // Y limits with padding + TP/SL expansion (bounded).
         // v4.7.6: previously we unconditionally expanded Y to include
@@ -335,9 +337,16 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         }
 
         // candlesticks
-        float chart_w = ImPlot::GetPlotSize().x;
-        float candle_px = (chart_w / vis) * 0.7f;
-        if (candle_px < 3.0f) candle_px = 3.0f;
+        // v4.7.12: candle width derived from time interval at current
+        // zoom. Was `chart_w / vis` (fixed pixel-per-bar based on
+        // visible_candles setting); under time-axis with free zoom,
+        // user can compress/expand freely so we measure how many
+        // pixels one candle interval spans NOW, scale by 0.7 (gap).
+        ImVec2 px_l = ImPlot::PlotToPixels(0.0, 0.0);
+        ImVec2 px_r = ImPlot::PlotToPixels((double)settings->candle_interval, 0.0);
+        float candle_px = (px_r.x - px_l.x) * 0.7f;
+        if (candle_px < 1.5f) candle_px = 1.5f;
+        if (candle_px > 40.0f) candle_px = 40.0f;
         float hw = candle_px * 0.5f;
 
         // Color flicker fix: tiny ±1-cent oscillations around opens[i] (live
