@@ -338,6 +338,95 @@ inline int EventLoopState_RegisterCore(EventLoopState<F>* state,
 }
 
 //======================================================================================================
+// [PARTIAL EXITS — LEG SLOT MAPPING]
+//======================================================================================================
+// Per `plans/partial-exits-sharded.md` (P.1, 2026-04-27): when
+// `cfg.partial_exit_enabled=1`, each core owns TWO portfolio slots — one
+// for leg A (first half exits at TP1), one for leg B (second half rides
+// to TP2 or shared SL). When disabled, each core owns ONE slot at index
+// == core_id (legacy single-position behavior).
+//
+// Slot layout with partials:
+//   core 0 → slots {0, 1}  (leg A=0, leg B=1)
+//   core 1 → slots {2, 3}
+//   core 2 → slots {4, 5}
+//   ...
+//
+// Without partials:
+//   core c → slot {c}      (leg index ignored)
+//
+// CAPACITY: with partials enabled, max cores caps at MAX_PORTFOLIO_POSITIONS
+// / 2 = 8 (assuming MAX_PORTFOLIO_POSITIONS=16). Boot-time validation
+// refuses to start if num_execution_cores × 2 > MAX_PORTFOLIO_POSITIONS.
+//
+// LEG INDICES (used in P.2 hot path, P.3 OMS):
+constexpr int PARTIAL_LEG_A = 0;
+constexpr int PARTIAL_LEG_B = 1;
+
+// Returns the portfolio slot index for (core_id, leg) given the cfg.
+// leg=0 always returns a valid slot; leg=1 returns -1 when partial_exit_-
+// enabled=0. Caller-side: ignore leg=1 result when partials disabled.
+//
+// All slow-path / boot-time. Trivially inlined.
+static inline int Sharded_LegSlot(int core_id, int leg, int partial_exit_enabled) {
+    if (core_id < 0) return -1;
+    if (!partial_exit_enabled) {
+        // Single-slot mode: leg index ignored, slot == core_id
+        return (leg == PARTIAL_LEG_A) ? core_id : -1;
+    }
+    // Pair mode: leg A = 2c, leg B = 2c+1
+    if (leg != PARTIAL_LEG_A && leg != PARTIAL_LEG_B) return -1;
+    int slot = core_id * 2 + leg;
+    if (slot >= MAX_PORTFOLIO_POSITIONS) return -1;
+    return slot;
+}
+
+// Boot-time validation. Returns 1 if cfg + capacity are consistent, 0
+// otherwise (and prints the reason to stderr). Call from engine startup
+// AFTER cfg load, BEFORE core registration.
+//
+// Failure modes:
+//   - partial_exit_enabled=1 AND num_execution_cores * 2 > MAX_PORTFOLIO_POSITIONS
+//   - num_execution_cores < 1 (caller should already validate)
+//   - partial_exit_pct outside (0.0, 1.0) when partials enabled
+template <unsigned F>
+static inline int Sharded_ValidatePartialExitCfg(const ControllerConfig<F>* cfg) {
+    if (!cfg->partial_exit_enabled) return 1;  // disabled = always valid
+    int n_cores = (int)cfg->num_execution_cores;
+    if (n_cores < 1) {
+        std::fprintf(stderr,
+            "[partial-exits] num_execution_cores=%d invalid; needs >= 1\n",
+            n_cores);
+        return 0;
+    }
+    int max_pair_cores = MAX_PORTFOLIO_POSITIONS / 2;
+    if (n_cores > max_pair_cores) {
+        std::fprintf(stderr,
+            "[partial-exits] partial_exit_enabled=1 caps num_execution_cores "
+            "at %d (got %d). Each core uses TWO portfolio slots in pair mode "
+            "(leg A + leg B); MAX_PORTFOLIO_POSITIONS=%d → %d cores max.\n"
+            "  Either: (a) reduce num_execution_cores to %d or fewer, or\n"
+            "          (b) set partial_exit_enabled=0 in your cfg.\n",
+            max_pair_cores, n_cores, MAX_PORTFOLIO_POSITIONS, max_pair_cores,
+            max_pair_cores);
+        return 0;
+    }
+    double pct = FPN_ToDouble(cfg->partial_exit_pct);
+    if (pct <= 0.0 || pct >= 1.0) {
+        std::fprintf(stderr,
+            "[partial-exits] partial_exit_pct=%.4f invalid; needs (0, 1) "
+            "exclusive. 0.5 = exit half at TP1, half rides to TP2.\n",
+            pct);
+        return 0;
+    }
+    std::fprintf(stderr,
+        "[partial-exits] enabled: %d cores using %d slots (legs A+B), "
+        "TP1 exits %.0f%% of qty\n",
+        n_cores, n_cores * 2, pct * 100.0);
+    return 1;
+}
+
+//======================================================================================================
 // [SET CORE STRATEGY]
 //======================================================================================================
 // assign a strategy to a registered core. the strategy_id is used by

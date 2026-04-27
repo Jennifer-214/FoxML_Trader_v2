@@ -5572,6 +5572,86 @@ e3_skip_load:;
               sig.spread_bps == 0.0);
     }
 
+    //==================================================================================================
+    // Partial Exits — P.1 (slot mapping + cfg validation)
+    //==================================================================================================
+    // First phase of partial-exits-sharded plan. Adds slot mapping helper +
+    // boot-time cfg validation. Hot path (P.2) and OMS leg differentiation
+    // (P.3) land in subsequent commits with measurement.
+    //==================================================================================================
+    printf("\n--- Partial Exits P.1: Sharded_LegSlot mapping ---\n");
+    {
+        using namespace tt;
+        // Disabled: leg A returns core_id, leg B returns -1
+        check("disabled, core 0 leg A → slot 0",
+              Sharded_LegSlot(0, PARTIAL_LEG_A, 0) == 0);
+        check("disabled, core 3 leg A → slot 3",
+              Sharded_LegSlot(3, PARTIAL_LEG_A, 0) == 3);
+        check("disabled, core 0 leg B → -1 (no second slot)",
+              Sharded_LegSlot(0, PARTIAL_LEG_B, 0) == -1);
+
+        // Enabled: leg A → 2c, leg B → 2c+1
+        check("enabled, core 0 leg A → slot 0",
+              Sharded_LegSlot(0, PARTIAL_LEG_A, 1) == 0);
+        check("enabled, core 0 leg B → slot 1",
+              Sharded_LegSlot(0, PARTIAL_LEG_B, 1) == 1);
+        check("enabled, core 1 leg A → slot 2",
+              Sharded_LegSlot(1, PARTIAL_LEG_A, 1) == 2);
+        check("enabled, core 1 leg B → slot 3",
+              Sharded_LegSlot(1, PARTIAL_LEG_B, 1) == 3);
+        check("enabled, core 7 leg B → slot 15 (last valid)",
+              Sharded_LegSlot(7, PARTIAL_LEG_B, 1) == 15);
+        check("enabled, core 8 leg A → -1 (would be slot 16, OOB)",
+              Sharded_LegSlot(8, PARTIAL_LEG_A, 1) == -1);
+
+        // Defensive: invalid inputs
+        check("negative core_id → -1", Sharded_LegSlot(-1, 0, 1) == -1);
+        check("invalid leg index → -1", Sharded_LegSlot(0, 99, 1) == -1);
+    }
+
+    printf("\n--- Partial Exits P.1: Sharded_ValidatePartialExitCfg ---\n");
+    {
+        using namespace tt;
+        // Disabled: always valid regardless of other fields
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.partial_exit_enabled = 0;
+        cfg.num_execution_cores = 16;  // would fail if partials enabled
+        check("disabled: validation passes regardless of n_cores",
+              Sharded_ValidatePartialExitCfg(&cfg) == 1);
+
+        // Enabled, within capacity (4 cores → 8 slots, fits 16-slot portfolio)
+        cfg.partial_exit_enabled = 1;
+        cfg.num_execution_cores = 4;
+        cfg.partial_exit_pct = FPN_FromDouble<64>(0.5);
+        check("enabled with 4 cores: validation passes",
+              Sharded_ValidatePartialExitCfg(&cfg) == 1);
+
+        // Enabled, at capacity (8 cores × 2 legs = 16 slots, exactly fits)
+        cfg.num_execution_cores = 8;
+        check("enabled with 8 cores (max): validation passes",
+              Sharded_ValidatePartialExitCfg(&cfg) == 1);
+
+        // Enabled, over capacity (9 cores × 2 = 18 > 16)
+        cfg.num_execution_cores = 9;
+        check("enabled with 9 cores: validation FAILS (over slot capacity)",
+              Sharded_ValidatePartialExitCfg(&cfg) == 0);
+
+        // Enabled with bad partial_exit_pct
+        cfg.num_execution_cores = 4;
+        cfg.partial_exit_pct = FPN_Zero<64>();
+        check("enabled with partial_exit_pct=0: validation FAILS",
+              Sharded_ValidatePartialExitCfg(&cfg) == 0);
+        cfg.partial_exit_pct = FPN_FromDouble<64>(1.5);
+        check("enabled with partial_exit_pct=1.5: validation FAILS",
+              Sharded_ValidatePartialExitCfg(&cfg) == 0);
+
+        // Enabled with zero cores
+        cfg.partial_exit_pct = FPN_FromDouble<64>(0.5);
+        cfg.num_execution_cores = 0;
+        check("enabled with 0 cores: validation FAILS",
+              Sharded_ValidatePartialExitCfg(&cfg) == 0);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
