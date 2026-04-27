@@ -92,6 +92,14 @@ inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol) {
     log->file = fopen(filename, "a");
     if (!log->file) return 0;
 
+    // v4.7.3: line-buffered so every row auto-flushes to disk on its
+    // trailing newline. Default is fully-buffered (8KB), which holds
+    // hours of trade data in memory across a typical paper-soak cycle
+    // and only flushes on clean shutdown — meaning a crash, kill, or
+    // mid-session GUI read sees stale CSV. With trades being rare
+    // events (≪ ticks), the per-row fflush syscall cost is negligible.
+    setvbuf(log->file, nullptr, _IOLBF, 0);
+
     if (!has_content) {
         // Two-line header: a comment line documenting format and ordering, then
         // the column names. Tools that read this file should treat the leading

@@ -357,6 +357,24 @@ static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tic
     // Rare branch: push event(s) when something actually fired. Almost
     // always not-taken in steady state, predicts perfectly. Entry-time
     // TP/SL recompute + leg-B activation folded into the same rare branch.
+    //
+    // v4.7.3: track each push's success. Pre-v4.7.3 the return value of
+    // SPSCRing_TryPush was discarded — if the ring filled (drainer
+    // briefly stalled), the event was silently dropped BUT the active
+    // flag was still cleared on the unconditional mask update below.
+    // Result: zombie position — Portfolio.active_bitmap stays set
+    // (no Portfolio_CloseSlot ran on the lost exit), core->active=0,
+    // hot path's `can_exit = active & sg_fires` evaluates to 0
+    // forever, AND the active=0 fallback uses cached_params.sg_stop_loss_price
+    // (slow-path-computed against the CURRENT bg threshold, not the
+    // entry's SL) — which on a sustained price move tracks current
+    // price closely → sl_hit never fires.
+    //
+    // Fix: only flip the active flag for legs whose event actually
+    // queued. Failed pushes leave active unchanged → next tick retries
+    // naturally (sg_fires_a still TRUE if SL still in range).
+    uint8_t exit_a_pushed = 1, exit_b_pushed = 1;
+    uint8_t entry_a_pushed = 1, entry_b_pushed = 1;
     if (__builtin_expect(can_enter | can_exit_a | can_exit_b, 0)) {
         // Leg A exit (or single-position exit when partials disabled)
         if (can_exit_a) {
@@ -366,7 +384,7 @@ static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tic
             event.core_id   = core->core_id;
             event.type      = TRADE_EVENT_EXIT;
             event.leg       = PARTIAL_LEG_A;
-            SPSCRing_TryPush(&core->event_ring, event);
+            exit_a_pushed = SPSCRing_TryPush(&core->event_ring, event) ? 1 : 0;
         }
         // Leg B exit (only when active_b=1)
         if (can_exit_b) {
@@ -376,7 +394,7 @@ static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tic
             event.core_id   = core->core_id;
             event.type      = TRADE_EVENT_EXIT;
             event.leg       = PARTIAL_LEG_B;
-            SPSCRing_TryPush(&core->event_ring, event);
+            exit_b_pushed = SPSCRing_TryPush(&core->event_ring, event) ? 1 : 0;
         }
         // Entry — opens leg A always, leg B too when GATE_FLAG_PAIR_ACTIVE
         if (can_enter) {
@@ -387,61 +405,84 @@ static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tic
             event_a.core_id   = core->core_id;
             event_a.type      = TRADE_EVENT_ENTRY;
             event_a.leg       = PARTIAL_LEG_A;
-            SPSCRing_TryPush(&core->event_ring, event_a);
+            entry_a_pushed = SPSCRing_TryPush(&core->event_ring, event_a) ? 1 : 0;
 
-            // Phase 14: stash leg A's live TP/SL computed from the actual
-            // fill price. If tp_pct/sl_pct non-zero use the percentage
-            // path; otherwise fall back to absolute prices from the param
-            // pack.
-            core->entry_price = tick.price;
-            FPN<F> tp_pct = core->cached_params.tp_pct;
-            if (!FPN_IsZero(tp_pct)) {
-                core->live_tp = FPN_Add(tick.price, FPN_Mul(tick.price, tp_pct));
-            } else {
-                core->live_tp = core->cached_params.sg_take_profit_price;
-            }
-            FPN<F> sl_pct = core->cached_params.sl_pct;
-            if (!FPN_IsZero(sl_pct)) {
-                core->live_sl = FPN_Sub(tick.price, FPN_Mul(tick.price, sl_pct));
-            } else {
-                core->live_sl = core->cached_params.sg_stop_loss_price;
-            }
-
-            // P.2: when GATE_FLAG_PAIR_ACTIVE, also open leg B at the same
-            // entry price. Leg B's TP comes from cached_params.tp_pct_b
-            // (set by Strategy_BuildParameters as tp_pct * cfg.tp2_mult).
-            // Leg B's SL is shared with leg A (legacy two-position model).
-            if (pair_active) {
-                TradeEvent<F> event_b{};
-                event_b.price     = tick.price;
-                event_b.timestamp = tick.timestamp;
-                event_b.core_id   = core->core_id;
-                event_b.type      = TRADE_EVENT_ENTRY;
-                event_b.leg       = PARTIAL_LEG_B;
-                SPSCRing_TryPush(&core->event_ring, event_b);
-
-                core->entry_price_b = tick.price;
-                FPN<F> tp_pct_b = core->cached_params.tp_pct_b;
-                if (!FPN_IsZero(tp_pct_b)) {
-                    core->live_tp_b = FPN_Add(tick.price, FPN_Mul(tick.price, tp_pct_b));
+            // Only stash live TP/SL when entry actually queued. If the
+            // push failed, leg-A's mask update below leaves active=0 →
+            // hot path won't read these fields anyway.
+            if (entry_a_pushed) {
+                core->entry_price = tick.price;
+                FPN<F> tp_pct = core->cached_params.tp_pct;
+                if (!FPN_IsZero(tp_pct)) {
+                    core->live_tp = FPN_Add(tick.price, FPN_Mul(tick.price, tp_pct));
                 } else {
-                    // No leg-B TP configured — fall back to leg A's TP
-                    // (effectively makes leg B a duplicate exit at TP1,
-                    // which P.4 cfg validation guards against).
-                    core->live_tp_b = core->live_tp;
+                    core->live_tp = core->cached_params.sg_take_profit_price;
                 }
-                core->live_sl_b = core->live_sl;  // shared SL
+                FPN<F> sl_pct = core->cached_params.sl_pct;
+                if (!FPN_IsZero(sl_pct)) {
+                    core->live_sl = FPN_Sub(tick.price, FPN_Mul(tick.price, sl_pct));
+                } else {
+                    core->live_sl = core->cached_params.sg_stop_loss_price;
+                }
+
+                // P.2: leg B opens only when leg A succeeded AND
+                // GATE_FLAG_PAIR_ACTIVE is set. Tied to leg A's success
+                // so we never end up with a leg B floating without leg A.
+                if (pair_active) {
+                    TradeEvent<F> event_b{};
+                    event_b.price     = tick.price;
+                    event_b.timestamp = tick.timestamp;
+                    event_b.core_id   = core->core_id;
+                    event_b.type      = TRADE_EVENT_ENTRY;
+                    event_b.leg       = PARTIAL_LEG_B;
+                    entry_b_pushed = SPSCRing_TryPush(&core->event_ring, event_b) ? 1 : 0;
+
+                    if (entry_b_pushed) {
+                        core->entry_price_b = tick.price;
+                        FPN<F> tp_pct_b = core->cached_params.tp_pct_b;
+                        if (!FPN_IsZero(tp_pct_b)) {
+                            core->live_tp_b = FPN_Add(tick.price, FPN_Mul(tick.price, tp_pct_b));
+                        } else {
+                            // No leg-B TP configured — fall back to leg A's TP
+                            // (effectively makes leg B a duplicate exit at TP1,
+                            // which P.4 cfg validation guards against).
+                            core->live_tp_b = core->live_tp;
+                        }
+                        core->live_sl_b = core->live_sl;  // shared SL
+                    }
+                }
             }
+        }
+        // Surface push failures so we know if the ring is filling. Predicted
+        // not-taken in steady state — if this fires, something upstream is
+        // backed up and we'd rather know than silently retry.
+        if (__builtin_expect(!(exit_a_pushed & exit_b_pushed &
+                                entry_a_pushed & entry_b_pushed), 0)) {
+            std::fprintf(stderr,
+                "[execution-core] core %d: event ring push FAILED "
+                "(exit_a=%u exit_b=%u entry_a=%u entry_b=%u) — "
+                "active flag preserved, will retry next tick\n",
+                core->core_id, exit_a_pushed, exit_b_pushed,
+                entry_a_pushed, entry_b_pushed);
         }
     }
 
-    // Branchless flag updates. Each leg toggles independently:
-    //   leg A: set on can_enter, clear on can_exit_a
-    //   leg B: set on (can_enter & pair_active), clear on can_exit_b
-    // Same tick can't both enter and exit a leg (mutually exclusive masks)
-    // so OR-then-AND-NOT is safe.
-    core->active   = (uint8_t)((active   | can_enter)               & ~can_exit_a);
-    core->active_b = (uint8_t)((active_b | (can_enter & pair_active)) & ~can_exit_b);
+    // Branchless flag updates honoring per-leg push success. Failed pushes
+    // mask out the flip, so active stays at its prior value and the next
+    // tick retries naturally. Same-tick can't both enter and exit a leg
+    // (mutually exclusive can_* masks) so OR-then-AND-NOT remains safe.
+    uint64_t exit_a_eff  = can_exit_a & (uint64_t)exit_a_pushed;
+    uint64_t exit_b_eff  = can_exit_b & (uint64_t)exit_b_pushed;
+    uint64_t enter_a_eff = can_enter  & (uint64_t)entry_a_pushed;
+    // Leg B activation requires BOTH leg-A and leg-B pushes succeeded.
+    // If leg A's push failed, we never even tried leg B — leaves active_b
+    // alone. If leg A succeeded but leg B failed, leg A's active flag
+    // toggles correctly while leg B stays inactive (next tick: leg A is
+    // already active, can_enter blocked by any_active=1, so we won't
+    // retry leg B's missed entry — accept losing that one leg this trade).
+    uint64_t enter_b_eff = enter_a_eff & (uint64_t)entry_b_pushed & pair_active;
+    core->active   = (uint8_t)((active   | enter_a_eff) & ~exit_a_eff);
+    core->active_b = (uint8_t)((active_b | enter_b_eff) & ~exit_b_eff);
 
     // Latency sample close — only when enabled (predicted not-taken).
     if (__builtin_expect(lat_enabled, 0)) {

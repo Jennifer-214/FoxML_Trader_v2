@@ -384,6 +384,21 @@ static inline int Sharded_LegSlot(int core_id, int leg, int partial_exit_enabled
     return slot;
 }
 
+// Build the bitmap mask for core c's portfolio slot(s). Under partials,
+// core c owns slots 2c and 2c+1 (legs A and B). Without partials,
+// core c owns just slot c. Used by slow-path checks that ask "is core
+// c currently in any position?" or "what portfolio slots does this
+// core occupy?".
+static inline uint16_t Sharded_CoreSlotMask(int core_id, int partial_exit_enabled) {
+    if (core_id < 0 || core_id >= MAX_PORTFOLIO_POSITIONS) return 0;
+    if (partial_exit_enabled) {
+        int sa = core_id * 2, sb = core_id * 2 + 1;
+        if (sb >= MAX_PORTFOLIO_POSITIONS) return 0;
+        return (uint16_t)((1u << sa) | (1u << sb));
+    }
+    return (uint16_t)(1u << core_id);
+}
+
 // Boot-time validation. Returns 1 if cfg + capacity are consistent, 0
 // otherwise (and prints the reason to stderr). Call from engine startup
 // AFTER cfg load, BEFORE core registration.
@@ -1058,7 +1073,8 @@ inline int EventLoop_RebuildAllParameters(
             // strategy switch). Only trigger when regime ACTUALLY changed
             // (not just hysteresis-pending) and a position is open.
             if (new_regime != old_regime &&
-                (state->oms->portfolio.active_bitmap & (uint16_t)(1u << slot))) {
+                (state->oms->portfolio.active_bitmap &
+                 Sharded_CoreSlotMask(slot, config->partial_exit_enabled))) {
                 // Move ratchet to current rolling avg minus tighter offset
                 // (stddev × 1.0 = closer than the trailing default).
                 FPN<F> tight_sl = FPN_Sub(rolling->price_avg,
@@ -1121,7 +1137,10 @@ inline int EventLoop_RebuildAllParameters(
         // so stale trailing state from previous trade doesn't leak into the
         // next entry. Engine slow-path code below SETS ratchet_sl when a
         // position is active and trailing should kick in.
-        bool slot_active = (state->oms->portfolio.active_bitmap & (uint16_t)(1u << slot)) != 0;
+        // Partials-aware: core's portfolio slot(s) come from the helper
+        // (slot N or 2N+0/2N+1 depending on partial_exit_enabled).
+        bool slot_active = (state->oms->portfolio.active_bitmap &
+                             Sharded_CoreSlotMask(slot, config->partial_exit_enabled)) != 0;
         if (!slot_active) {
             state->cores[slot].pending_params.ratchet_sl = FPN_Zero<F>();
         }
@@ -1210,11 +1229,20 @@ inline int EventLoop_RebuildAllParameters(
             FPN<F> realized  = state->cores[slot].core_realized;
             FPN<F> unrealized = FPN_Zero<F>();
             const FPN<F>* px_in = (const FPN<F>*)current_price;
-            if (config->enable_mtm_kill_switch && px_in &&
-                !FPN_IsZero(*px_in) && (state->oms->portfolio.active_bitmap & (1u << slot))) {
-                Position<F>& pos = state->oms->portfolio.positions[slot];
-                FPN<F> diff = FPN_Sub(*px_in, pos.entry_price);
-                unrealized = FPN_Mul(diff, pos.quantity);
+            // Partials-aware MTM walk: under partials, core c's positions
+            // live in slots 2c and 2c+1 (one Position per leg, each with
+            // independent qty). Sum unrealized across both. Without
+            // partials, only slot c is walked.
+            if (config->enable_mtm_kill_switch && px_in && !FPN_IsZero(*px_in)) {
+                uint16_t mask = Sharded_CoreSlotMask(slot, config->partial_exit_enabled);
+                uint16_t bm   = state->oms->portfolio.active_bitmap & mask;
+                while (bm) {
+                    int s = __builtin_ctz(bm);
+                    bm &= (uint16_t)(bm - 1);
+                    Position<F>& pos = state->oms->portfolio.positions[s];
+                    FPN<F> diff = FPN_Sub(*px_in, pos.entry_price);
+                    unrealized = FPN_Add(unrealized, FPN_Mul(diff, pos.quantity));
+                }
             }
             FPN<F> current_value = FPN_Add(alloc, FPN_Add(realized, unrealized));
             // Peak ratchet (branchless via FPN_Max). Initialize to alloc on
