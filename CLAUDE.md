@@ -711,11 +711,24 @@ Wired now (E.1 + E.2 + E.3, 2026-04-26):
   buys until the data lands), matching live's "no depth → don't trade"
   semantics.
 
+Inherited by routing (E.4 + E.5, no migration code needed):
+- **Walk-Forward / FullValidation** (`Backtest_RunWalkForward`,
+  `Backtest_RunFullValidation`): read `BacktestResults.feature_matrix`
+  directly. They never call the engine — the engine ran upstream
+  during the data-collection pass that populated `BacktestResults`.
+  When `engine_mode=sharded`, that upstream pass is now
+  `BacktestSharded_Run` (E.1's dispatcher), so WF + FullValidation
+  see sharded features automatically. Verified: only call site is
+  `BacktestPanels.hpp:1421` consuming `state->results` populated by
+  `BacktestPanels.hpp:217`'s `Backtest_Run` call.
+- **Sweep / Optimizer** (`Backtest_RunSweep`): iterates over config
+  combinations and calls `Backtest_Run` per iteration
+  (`BacktestEngine.hpp:1626`). Each call routes through the
+  dispatcher, so optimizer runs honor `engine_mode=sharded` per
+  config. The `use_config_override + config_override` mechanism
+  preserves user-set overrides including `engine_mode`.
+
 Not yet wired:
-- **Walk-Forward / Sweep migration (E.4 / E.5)**: consume
-  `BacktestResults` directly, so they automatically inherit E.1's
-  feature collection when `engine_mode=sharded`. No code change beyond
-  cfg; runtime parity with legacy is the open question E.6 closes.
 - **Parity harness (E.6)**: no programmatic `legacy-vs-sharded` feature
   diff yet. If you change `Regime_ComputeSignals` between now and E.6,
   manually run "Collect Features" in BOTH `engine_mode=single_core` and
