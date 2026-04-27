@@ -24,6 +24,7 @@
 #include "../CoreFrameworks/ShardedBacktestDriver.hpp"   // Track E.1 tests
 #include "../ML_Headers/CoreModelZoo.hpp"                // Track E.2 tests
 #include "../DataStream/DepthReplayState.hpp"            // Track E.3 tests
+#include "../ML_Headers/FlowFeatures.hpp"                // v4.5 Wave 1 tests
 #include "../DataStream/BinanceUserData.hpp"
 #include "../Backtest/BacktestEngine.hpp"
 #include "../Backtest/HeldOutSplit.hpp"
@@ -5375,6 +5376,122 @@ e3_skip_load:;
             0, &low_imb);
         check("min_book_imbalance=0 disables the gate even with low imb",
               (state.cores[0].pending_params.flags & GATE_FLAG_BUY_BLOCKED) == 0);
+    }
+
+    //==================================================================================================
+    // v4.5 Wave 1 — D.1 BookImbalanceHistory, D.2 FlowState, D.4 LargeTradeState
+    //==================================================================================================
+    // Three small ring-buffer / EWMA states feeding the v4.5 microstructure
+    // feature pack. Tests cover lifecycle (Init clears state, Push grows
+    // count, ring eviction maintains running sums, computed metrics agree
+    // with hand-computed values for small inputs).
+    //==================================================================================================
+    printf("\n--- Wave 1 D.1: BookImbalanceHistory init / push / means ---\n");
+    {
+        BookImbalanceHistory<64, 8> h;  // small W=8 to exercise eviction
+        BookImbHistory_Init(&h);
+        check("Init: count == 0", h.count == 0);
+        check("Init: head == 0", h.head == 0);
+        check("Init: sum == 0", FPN_IsZero(h.sum));
+        check("Init: MeanLong == 0 on empty", FPN_IsZero(BookImbHistory_MeanLong(&h)));
+        check("Init: Last == 0 on empty", FPN_IsZero(BookImbHistory_Last(&h)));
+
+        // Push 4 samples: 0.1, 0.2, 0.3, 0.4
+        BookImbHistory_Push(&h, FPN_FromDouble<64>(0.1));
+        BookImbHistory_Push(&h, FPN_FromDouble<64>(0.2));
+        BookImbHistory_Push(&h, FPN_FromDouble<64>(0.3));
+        BookImbHistory_Push(&h, FPN_FromDouble<64>(0.4));
+        check("Push 4: count == 4", h.count == 4);
+        check("MeanLong: (0.1+0.2+0.3+0.4)/4 == 0.25",
+              fabs(FPN_ToDouble(BookImbHistory_MeanLong(&h)) - 0.25) < 1e-9);
+        check("Last: == 0.4 (most recent)",
+              fabs(FPN_ToDouble(BookImbHistory_Last(&h)) - 0.4) < 1e-9);
+        check("MeanShort(2): (0.3+0.4)/2 == 0.35",
+              fabs(FPN_ToDouble(BookImbHistory_MeanShort(&h, 2)) - 0.35) < 1e-9);
+
+        // Fill to capacity, then evict
+        for (int i = 4; i < 8; i++)
+            BookImbHistory_Push(&h, FPN_FromDouble<64>(0.5 + 0.1 * (i - 4)));
+        check("Filled: count == 8 (W)", h.count == 8);
+        // Push one more — evict oldest (0.1), new sum = 0.2..0.8 + 0.9
+        BookImbHistory_Push(&h, FPN_FromDouble<64>(0.9));
+        check("After eviction: count stays at 8", h.count == 8);
+        // sum should be (0.2+0.3+0.4+0.5+0.6+0.7+0.8+0.9) = 4.4, mean = 0.55
+        check("Eviction: sum tracks correctly (mean = 0.55)",
+              fabs(FPN_ToDouble(BookImbHistory_MeanLong(&h)) - 0.55) < 1e-9);
+        check("Eviction: Last == 0.9 (newest)",
+              fabs(FPN_ToDouble(BookImbHistory_Last(&h)) - 0.9) < 1e-9);
+    }
+
+    printf("\n--- Wave 1 D.2: FlowState EWMA decay + accumulation ---\n");
+    {
+        FlowState f;
+        FlowState_Init(&f);
+        check("Init: ewma_10s == 0", f.ewma_10s == 0.0);
+        check("Init: ewma_1m == 0", f.ewma_1m == 0.0);
+        check("Init: ewma_5m == 0", f.ewma_5m == 0.0);
+        check("Init: last_us == 0", f.last_us == 0);
+
+        // First push: seeds all EWMAs to the sample value, no decay
+        FlowState_Push(&f, 1000000ULL, 5.0);
+        check("First push: ewma_10s == 5.0", fabs(f.ewma_10s - 5.0) < 1e-12);
+        check("First push: ewma_1m == 5.0", fabs(f.ewma_1m - 5.0) < 1e-12);
+        check("First push: ewma_5m == 5.0", fabs(f.ewma_5m - 5.0) < 1e-12);
+        check("First push: last_us updated", f.last_us == 1000000ULL);
+
+        // Second push: 10 seconds later. ewma_10s should decay by exp(-1) ≈ 0.368
+        // ewma_10s_new = 5.0 * exp(-10/10) + 0.0 = 5.0 * 0.368 ≈ 1.839
+        FlowState_Push(&f, 1000000ULL + 10ULL * 1000000ULL, 0.0);
+        double expect_10s = 5.0 * exp(-1.0);
+        check("After 10s decay: ewma_10s ≈ 5*exp(-1)",
+              fabs(f.ewma_10s - expect_10s) < 1e-9);
+        // ewma_5m decays by exp(-10/300) ≈ 0.967
+        double expect_5m = 5.0 * exp(-10.0 / 300.0);
+        check("After 10s decay: ewma_5m ≈ 5*exp(-10/300)",
+              fabs(f.ewma_5m - expect_5m) < 1e-9);
+
+        // Backward timestamp: just adds, no decay
+        FlowState_Push(&f, 500000ULL, 1.0);  // backward
+        double after = f.ewma_10s;
+        check("Backward push adds without decay (ewma_10s grew by 1)",
+              fabs(after - (expect_10s + 1.0)) < 1e-9);
+    }
+
+    printf("\n--- Wave 1 D.4: LargeTradeState push + z-score ---\n");
+    {
+        LargeTradeState<64, 8> lt;
+        LargeTradeState_Init(&lt);
+        check("Init: count == 0", lt.count == 0);
+        check("Init: ZScore on empty == 0",
+              LargeTradeState_ZScore(&lt, FPN_FromDouble<64>(1.0)) == 0.0);
+        check("Init: Last on empty == 0", FPN_IsZero(LargeTradeState_Last(&lt)));
+
+        // Push uniform values: z-score should be 0 (no variance)
+        for (int i = 0; i < 4; i++)
+            LargeTradeState_Push(&lt, FPN_FromDouble<64>(1.0));
+        check("Uniform window: z-score of mean == 0",
+              fabs(LargeTradeState_ZScore(&lt, FPN_FromDouble<64>(1.0))) < 1e-9);
+
+        // Push a spread: 1, 2, 3, 4. mean=2.5, var = ((1-2.5)^2+(2-2.5)^2+(3-2.5)^2+(4-2.5)^2)/4 = 5/4 = 1.25
+        // stddev = sqrt(1.25) ≈ 1.118
+        LargeTradeState_Init(&lt);
+        for (int i = 1; i <= 4; i++)
+            LargeTradeState_Push(&lt, FPN_FromDouble<64>((double)i));
+        double expect_z = (4.0 - 2.5) / sqrt(1.25);
+        check("Spread window: z-score of 4.0 ≈ (4-2.5)/sqrt(1.25)",
+              fabs(LargeTradeState_ZScore(&lt, FPN_FromDouble<64>(4.0)) - expect_z) < 1e-9);
+        check("Last: == 4.0 (most recent)",
+              fabs(FPN_ToDouble(LargeTradeState_Last(&lt)) - 4.0) < 1e-9);
+
+        // Eviction: fill to W=8, then push. sum + sum_sq must update.
+        for (int i = 5; i <= 8; i++)
+            LargeTradeState_Push(&lt, FPN_FromDouble<64>((double)i));
+        check("Filled to W=8: count == 8", lt.count == 8);
+        // Push 9: evict 1 (oldest). New window: 2..9. mean = (2+3+...+9)/8 = 44/8 = 5.5
+        LargeTradeState_Push(&lt, FPN_FromDouble<64>(9.0));
+        double mean = FPN_ToDouble(lt.sum) / 8.0;
+        check("After eviction: mean ≈ 5.5 (sum tracks)",
+              fabs(mean - 5.5) < 1e-9);
     }
 
     printf("\n======================================\n");

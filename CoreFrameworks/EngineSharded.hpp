@@ -547,6 +547,17 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     CumDelta_Init(&cumdelta_state);
     TickRate_Init(&tick_rate_state);
 
+    // v4.5 Wave 1 — D.1/D.2/D.4 state. Same lifetime + reset shape as the
+    // v4.3 state above. BookImbalanceHistory pushes from the slow-path
+    // book_imbalance read; FlowState + LargeTradeState push from per-tick
+    // flow + size in fan_out.
+    static BookImbalanceHistory<F, 1024> book_imb_history;
+    static FlowState                     flow_state;
+    static LargeTradeState<F, 1024>      large_trade_state;
+    BookImbHistory_Init(&book_imb_history);
+    FlowState_Init(&flow_state);
+    LargeTradeState_Init(&large_trade_state);
+
     // Per-core risk allocation: split the configured starting balance across
     // cores. Each core gets its own mini-portfolio that's risk_pct of the
     // total. With risk_pct=10% and 4 cores starting at $10k, each core gets
@@ -741,7 +752,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         auto fan_out = [num_cores, &seq, &ticks_produced, &last_price, &last_volume,
                         &cfg, &state, &slow_path_counter, slow_path_interval, tsc_ghz,
                         &ema_price, ema_alpha, &regime_ror, live_trading,
-                        &rolling_medium, &rolling_baseline, &cumdelta_state, &tick_rate_state]
+                        &rolling_medium, &rolling_baseline, &cumdelta_state, &tick_rate_state,
+                        &book_imb_history, &flow_state, &large_trade_state]
                        (double price_d, double volume_d, uint64_t ts_us,
                         int is_buyer_maker = 0) {  // v4.3 — defaulted for synthetic paths
             Tick<F> t;
@@ -816,6 +828,16 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     slope_sample.model.intercept = FPN_Zero<F>();
                     slope_sample.r_squared       = rolling_short.price_r_squared;
                     RORRegressor_Push(&regime_ror, slope_sample);
+                }
+                // v4.5 Wave 1 — push flow + large-trade state at slow-path
+                // cadence (mirror of ShardedBacktestDriver). BookImbalance-
+                // History pushed below after we read the active depth
+                // snapshot. signed_vol mirrors CumDelta sign convention.
+                {
+                    double signed_vol = volume_d;
+                    if (is_buyer_maker) signed_vol = -signed_vol;
+                    FlowState_Push(&flow_state, ts_us, signed_vol);
+                    LargeTradeState_Push(&large_trade_state, t.volume);
                 }
 #ifdef USE_IMGUI_GUI
                 // v4.0 hot-swap strategy: GUI requests are picked up here.
@@ -984,13 +1006,23 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 } else {
                     book_imb = FPN_Zero<F>();
                 }
+                // v4.5 Wave 1 — push book_imbalance into history at slow-path
+                // cadence. Mirror in BacktestSharded driver. Push happens
+                // BEFORE RebuildAllParameters so Regime_ComputeSignals reads
+                // the freshly-updated history.
+                if (cfg.depth_enabled) {
+                    BookImbHistory_Push(&book_imb_history, book_imb);
+                }
                 EventLoop_RebuildAllParameters(&state, &rolling_short, &cfg, &rolling_long,
                                                 &regime_ror, &ema_price,
                                                 FPN_IsZero(mtm_price) ? nullptr : &mtm_price,
                                                 &rolling_medium, &rolling_baseline,
                                                 &cumdelta_state, &tick_rate_state,
                                                 rebuild_ts_us,
-                                                cfg.depth_enabled ? &book_imb : nullptr);
+                                                cfg.depth_enabled ? &book_imb : nullptr,
+                                                /* book_imb_history */ &book_imb_history,
+                                                /* flow_state       */ &flow_state,
+                                                /* large_trade_state*/ &large_trade_state);
 
                 // Phase 4 — periodic snapshot save. Once every ~1024 slow-path
                 // cycles, paper mode only. With slow_path_interval=8 ticks and

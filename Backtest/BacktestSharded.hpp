@@ -274,6 +274,14 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     rolling_baseline = RollingStats_Init<BACKTEST_FP, 1024>();
     CumDelta_Init(&cumdelta_state);
     TickRate_Init(&tick_rate_state);
+    // v4.5 Wave 1 — D.1/D.2/D.4 state. Mirrors EngineSharded_Run; reset
+    // each backtest run so multiple Collect Features clicks start clean.
+    static BookImbalanceHistory<BACKTEST_FP, 1024> book_imb_history;
+    static FlowState                               flow_state;
+    static LargeTradeState<BACKTEST_FP, 1024>      large_trade_state;
+    BookImbHistory_Init(&book_imb_history);
+    FlowState_Init(&flow_state);
+    LargeTradeState_Init(&large_trade_state);
     FPN<BACKTEST_FP> ema_alpha = !FPN_IsZero(cfg.gate_ema_alpha)
                                  ? cfg.gate_ema_alpha
                                  : FPN_FromDouble<BACKTEST_FP>(0.1);
@@ -321,6 +329,11 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     drv.regime_ror        = &regime_ror;
     drv.ema_price         = &ema_price;
     drv.book_imbalance    = depth_enabled ? &book_imbalance_holder : nullptr;
+    // v4.5 Wave 1 — driver pushes to these on slow-path firings; consumed
+    // by Regime_ComputeSignals via MLBuildContext threading.
+    drv.book_imb_history  = &book_imb_history;
+    drv.flow_state        = &flow_state;
+    drv.large_trade_state = &large_trade_state;
 
     //----------------------------------------------------------------------
     // Track E.1 — feature collection hook. When collect_features=1, register
@@ -369,7 +382,13 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                                        d->regime_ror, *d->ema_price,
                                        d->rolling_medium, d->rolling_baseline,
                                        d->cumdelta_state, d->tick_rate_state,
-                                       tk.timestamp);
+                                       tk.timestamp,
+                                       // v4.5 Wave 1 — pass new state so the
+                                       // collected feature_matrix matches what
+                                       // the ML strategy sees at serve time.
+                                       d->book_imb_history,
+                                       d->flow_state,
+                                       d->large_trade_state);
             }
             ModelFeatures_Pack<BACKTEST_FP>(
                 &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES],

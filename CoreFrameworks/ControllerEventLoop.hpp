@@ -750,7 +750,14 @@ inline int EventLoop_RebuildAllParameters(
     // Strategy_BuildParameters runs, vetoing entries until the imbalance
     // recovers. Caller passes from DepthSharedState (live) or
     // DepthReplayState (backtest) — symmetric across both paths.
-    const void* book_imbalance = nullptr      // const FPN<F>*
+    const void* book_imbalance = nullptr,     // const FPN<F>*
+    // v4.5 Wave 1 (2026-04-27) — D.1/D.2/D.4 feature pack expansion.
+    // Optional state pointers; when non-null, threaded into MLBuildContext
+    // so ML_BuildParameters → Regime_ComputeSignals populates the new
+    // RegimeSignals fields. Symmetric live + backtest. Null-safe.
+    const void* book_imb_history = nullptr,   // const BookImbalanceHistory<F, 1024>*
+    const void* flow_state       = nullptr,   // const FlowState*
+    const void* large_trade_state = nullptr   // const LargeTradeState<F, 1024>*
 ) {
     int rebuilt = 0;
     // Track E.3: compute the book-imbalance veto once before the per-core
@@ -860,7 +867,8 @@ inline int EventLoop_RebuildAllParameters(
                                    (const RollingStats<F, 1024>*)rolling_baseline,
                                    (const CumDeltaState<F>*)cumdelta_state,
                                    (const TickRateState*)tick_rate_state,
-                                   timestamp_us);
+                                   timestamp_us,
+                                   book_imb_history, flow_state, large_trade_state);
             int old_regime = state->cores[slot].regime_state.current_regime;
             int new_regime = Regime_Classify(&state->cores[slot].regime_state,
                                               &sig, &resolved_cfg);
@@ -911,6 +919,10 @@ inline int EventLoop_RebuildAllParameters(
             ml_ctx.cumdelta_state  = (void*)cumdelta_state;
             ml_ctx.tick_rate_state = (void*)tick_rate_state;
             ml_ctx.timestamp_us    = timestamp_us;
+            // v4.5 Wave 1 — D.1/D.2/D.4 state passthrough
+            ml_ctx.book_imb_history  = (void*)book_imb_history;
+            ml_ctx.flow_state        = (void*)flow_state;
+            ml_ctx.large_trade_state = (void*)large_trade_state;
             dispatch_ctx = &ml_ctx;
         }
         // v4.0.4: stash the resolved strategy for GUI display. For non-AUTO

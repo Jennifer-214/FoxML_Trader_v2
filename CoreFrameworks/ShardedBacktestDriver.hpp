@@ -46,6 +46,7 @@
 
 #pragma once
 
+#include "../ML_Headers/FlowFeatures.hpp"  // v4.5 Wave 1 — D.1/D.2/D.4
 #include "../ML_Headers/LinearRegression3X.hpp"
 #include "../ML_Headers/ROR_regressor.hpp"
 #include "../ML_Headers/RollingStats.hpp"
@@ -100,6 +101,16 @@ struct ShardedBacktestDriver {
     // (cfg.min_book_imbalance gate stays inert, pre-E.3 behavior).
     const FPN<F>*          book_imbalance;
 
+    // v4.5 Wave 1 — D.1/D.2/D.4 state for the new microstructure features.
+    // Driver mutates these on slow-path firings (Push functions in
+    // ML_Headers/FlowFeatures.hpp) and threads pointers through to
+    // EventLoop_RebuildAllParameters. Type-erased to keep the driver's
+    // template surface bounded; ML_BuildParameters re-typed at the
+    // consumer end. NULL = legacy callers (pre-Wave-1 behavior).
+    void*                  book_imb_history;   // BookImbalanceHistory<F, 1024>*
+    void*                  flow_state;         // FlowState*
+    void*                  large_trade_state;  // LargeTradeState<F, 1024>*
+
     // Track E.1 — slow-path completion hook. Fires AFTER slow-path
     // RollingStats pushes / RebuildAllParameters / KillSwitchEvaluate, BEFORE
     // returning from RunTick. Used by BacktestSharded_Run to collect ML
@@ -144,6 +155,10 @@ inline void ShardedBacktestDriver_Init(ShardedBacktestDriver<F, W, WL>* drv,
     drv->regime_ror         = nullptr;
     drv->ema_price          = nullptr;
     drv->book_imbalance     = nullptr;  // Track E.3
+    // v4.5 Wave 1
+    drv->book_imb_history   = nullptr;
+    drv->flow_state         = nullptr;
+    drv->large_trade_state  = nullptr;
     drv->on_slow_path       = nullptr;
     drv->hook_ctx           = nullptr;
 }
@@ -220,6 +235,27 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
             slope_sample.r_squared       = drv->rolling->price_r_squared;
             RORRegressor_Push(drv->regime_ror, slope_sample);
         }
+        // v4.5 Wave 1 — push the new feature-state buffers at the same
+        // slow-path cadence as v4.3 state. NULL guards keep legacy
+        // callers / tests at pre-Wave-1 behavior (zero features).
+        if (drv->book_imb_history && drv->book_imbalance) {
+            BookImbHistory_Push(
+                (BookImbalanceHistory<F, 1024>*)drv->book_imb_history,
+                *drv->book_imbalance);
+        }
+        if (drv->flow_state) {
+            // Signed volume: is_buyer_maker=1 → seller aggression (negative);
+            // =0 → buyer aggression (+). Mirrors CumDelta_Push.
+            double signed_vol = FPN_ToDouble(tick.volume);
+            if (tick.is_buyer_maker) signed_vol = -signed_vol;
+            FlowState_Push((FlowState*)drv->flow_state,
+                            tick.timestamp, signed_vol);
+        }
+        if (drv->large_trade_state) {
+            LargeTradeState_Push(
+                (LargeTradeState<F, 1024>*)drv->large_trade_state,
+                tick.volume);
+        }
         if (drv->rolling && drv->config) {
             // Thread the v4.3 + ROR/EMA state through the rebuild so per-core
             // ML strategies see the same RegimeSignals fields the live path
@@ -235,7 +271,10 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
                 /* cumdelta_state  */ (const void*)drv->cumdelta_state,
                 /* tick_rate_state */ (const void*)drv->tick_rate_state,
                 /* timestamp_us    */ tick.timestamp,
-                /* book_imbalance  */ (const void*)drv->book_imbalance);
+                /* book_imbalance  */ (const void*)drv->book_imbalance,
+                /* book_imb_history*/ drv->book_imb_history,
+                /* flow_state      */ drv->flow_state,
+                /* large_trade_state*/ drv->large_trade_state);
         }
         EventLoop_PushParameters(drv->state);
         EventLoop_KillSwitchEvaluate(drv->state);

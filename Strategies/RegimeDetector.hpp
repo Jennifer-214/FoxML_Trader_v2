@@ -38,6 +38,7 @@
 #include "../CoreFrameworks/Portfolio.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/ROR_regressor.hpp"
+#include "../ML_Headers/FlowFeatures.hpp"  // v4.5 Wave 1 — D.1/D.2/D.4 state
 #include <time.h>
 
 // regime constants, RegimeInfo, and REGIME_STRATEGY_TABLE are in StrategyInterface.hpp
@@ -86,6 +87,16 @@ template <unsigned F> struct RegimeSignals {
     double tick_rate_z;       // current ticks/sec z-score vs trailing baseline
     FPN<F> dist_to_high;      // (baseline_max - current_price) / current_price
     FPN<F> dist_to_low;       // (current_price - baseline_min) / current_price
+    // v4.5 — Wave 1 feature pack expansion (D.1 + D.2 + D.4). All zero-
+    // default when the corresponding state isn't supplied to
+    // Regime_ComputeSignals.
+    FPN<F>  book_imb_mean_short; // mean of last 64 book_imbalance samples
+    FPN<F>  book_imb_mean_long;  // mean over full BookImbalanceHistory window
+    FPN<F>  book_imb_drift;      // current book_imbalance - mean_long
+    double  flow_10s;            // signed-volume EWMA, half-life 10s
+    double  flow_1m;             // half-life 60s
+    double  flow_5m;             // half-life 300s
+    double  large_trade_z;       // z-score of current trade size vs window
 };
 
 //======================================================================================================
@@ -213,7 +224,14 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
                                    const RollingStats<F, 1024> *rolling_baseline = nullptr,
                                    const CumDeltaState<F> *cumdelta = nullptr,
                                    const TickRateState *tick_rate = nullptr,
-                                   uint64_t timestamp_us = 0) {
+                                   uint64_t timestamp_us = 0,
+                                   // v4.5 Wave 1 — optional state for D.1, D.2, D.4
+                                   // (book imbalance history, flow EWMAs, large
+                                   // trade z-score). Zero-defaults when null,
+                                   // mirroring v4.3's pattern.
+                                   const void *book_imb_history = nullptr,
+                                   const void *flow_state = nullptr,
+                                   const void *large_trade_state = nullptr) {
     // short window signals
     sig->short_count    = rolling->count;
     sig->short_r2       = rolling->price_r_squared;
@@ -346,6 +364,55 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
     } else {
         sig->dist_to_high = FPN_Zero<F>();
         sig->dist_to_low = FPN_Zero<F>();
+    }
+
+    // v4.5 Wave 1 — D.1: book imbalance over time. Reads from
+    // BookImbalanceHistory; mean_short over last 64 samples, mean_long
+    // over full window, drift = current - mean_long. Zero-default when
+    // state pointer is null OR count < 2 (cold start).
+    if (book_imb_history) {
+        const BookImbalanceHistory<F, 1024> *h =
+            (const BookImbalanceHistory<F, 1024> *)book_imb_history;
+        if (h->count >= 2) {
+            sig->book_imb_mean_short = BookImbHistory_MeanShort(h, 64);
+            sig->book_imb_mean_long  = BookImbHistory_MeanLong(h);
+            FPN<F> last = BookImbHistory_Last(h);
+            sig->book_imb_drift = FPN_Sub(last, sig->book_imb_mean_long);
+        } else {
+            sig->book_imb_mean_short = FPN_Zero<F>();
+            sig->book_imb_mean_long  = FPN_Zero<F>();
+            sig->book_imb_drift      = FPN_Zero<F>();
+        }
+    } else {
+        sig->book_imb_mean_short = FPN_Zero<F>();
+        sig->book_imb_mean_long  = FPN_Zero<F>();
+        sig->book_imb_drift      = FPN_Zero<F>();
+    }
+
+    // v4.5 Wave 1 — D.2: signed-volume EWMAs. FlowState's EWMAs ARE the
+    // features (no additional computation needed). Zero-default when state
+    // pointer is null.
+    if (flow_state) {
+        const FlowState *fs = (const FlowState *)flow_state;
+        sig->flow_10s = fs->ewma_10s;
+        sig->flow_1m  = fs->ewma_1m;
+        sig->flow_5m  = fs->ewma_5m;
+    } else {
+        sig->flow_10s = 0.0;
+        sig->flow_1m  = 0.0;
+        sig->flow_5m  = 0.0;
+    }
+
+    // v4.5 Wave 1 — D.4: large-trade z-score. Compares the most recently
+    // pushed trade size against the rolling window's distribution. Zero-
+    // default when state pointer is null OR window has < 2 samples.
+    if (large_trade_state) {
+        const LargeTradeState<F, 1024> *lt =
+            (const LargeTradeState<F, 1024> *)large_trade_state;
+        FPN<F> last = LargeTradeState_Last(lt);
+        sig->large_trade_z = LargeTradeState_ZScore(lt, last);
+    } else {
+        sig->large_trade_z = 0.0;
     }
 }
 

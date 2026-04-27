@@ -58,10 +58,22 @@
 #define FEAT_TICK_RATE_Z     22  // current ticks/sec z-score vs trailing baseline
 #define FEAT_DIST_TO_HIGH    23  // (price_max_baseline - current_price) / price (% below recent high)
 #define FEAT_DIST_TO_LOW     24  // (current_price - price_min_baseline) / price (% above recent low)
-#define MODEL_NUM_FEATURES   25
+// v4.5 Wave 1 — D.1 (book imbalance over time), D.2 (flow asymmetry),
+// D.4 (large-trade detection). All append-only; new features grow indices
+// monotonically.
+#define FEAT_BOOK_IMB_MEAN_SHORT 25  // mean of last 64 book_imbalance samples
+#define FEAT_BOOK_IMB_MEAN_LONG  26  // mean over full BookImbalanceHistory window (~17m)
+#define FEAT_BOOK_IMB_DRIFT      27  // current book_imbalance - mean_long
+#define FEAT_FLOW_10S            28  // signed-volume EWMA, half-life 10s
+#define FEAT_FLOW_1M             29  // signed-volume EWMA, half-life 60s
+#define FEAT_FLOW_5M             30  // signed-volume EWMA, half-life 300s
+#define FEAT_LARGE_TRADE_Z       31  // z-score of current trade size vs trailing window
+#define MODEL_NUM_FEATURES       32
 
-// max features buffer (room for future expansion)
-#define MODEL_MAX_FEATURES   32
+// max features buffer — bumped 32 → 64 to leave headroom for D.3 (Wave 2:
+// spread_bps, spread_zscore) and any further expansion without retouching
+// every fixed-size feature buffer in the codebase.
+#define MODEL_MAX_FEATURES   64
 
 // model format version — increment when FEAT_* indices or count changes.
 // embedded in trained models, checked at load time. old models with wrong
@@ -71,7 +83,9 @@
 // v2 (v4.3): added 9 medium-horizon features (FEAT_MID_*, FEAT_CUMDELTA,
 //           FEAT_HOUR_SIN/COS, FEAT_VOL_REGIME_RAT, FEAT_TICK_RATE_Z,
 //           FEAT_DIST_TO_HIGH/LOW). Old v1 models will fail load.
-#define MODEL_FORMAT_VERSION 2
+// v3 (v4.5 Wave 1): added 7 microstructure features (FEAT_BOOK_IMB_*,
+//           FEAT_FLOW_*, FEAT_LARGE_TRADE_Z). Old v2 models will fail load.
+#define MODEL_FORMAT_VERSION 3
 
 //======================================================================================================
 // [FEATURE LOOKBACK REGISTRY]
@@ -128,6 +142,14 @@ static const FeatureLookback FEATURE_LOOKBACKS[] = {
     { FEAT_TICK_RATE_Z,    "tick_rate_z",    1024, 1 },
     { FEAT_DIST_TO_HIGH,   "dist_to_high",   1024, 1 },
     { FEAT_DIST_TO_LOW,    "dist_to_low",    1024, 1 },
+    // v4.5 Wave 1 features
+    { FEAT_BOOK_IMB_MEAN_SHORT, "book_imb_mean_short", 64,   1 },  // last 64 slow-path samples
+    { FEAT_BOOK_IMB_MEAN_LONG,  "book_imb_mean_long",  1024, 1 },  // BookImbalanceHistory window
+    { FEAT_BOOK_IMB_DRIFT,      "book_imb_drift",      1024, 1 },
+    { FEAT_FLOW_10S,            "flow_10s",            10,   1 },  // ~10s wallclock
+    { FEAT_FLOW_1M,             "flow_1m",             60,   1 },  // ~60s wallclock
+    { FEAT_FLOW_5M,             "flow_5m",             300,  1 },  // ~300s wallclock
+    { FEAT_LARGE_TRADE_Z,       "large_trade_z",       1024, 1 },
 };
 
 static const int FEATURE_LOOKBACK_COUNT = sizeof(FEATURE_LOOKBACKS) / sizeof(FEATURE_LOOKBACKS[0]);
@@ -490,6 +512,14 @@ inline int ModelFeatures_Pack(float *buf, const RegimeSignals<F> *sig,
     buf[FEAT_TICK_RATE_Z]    = (float)sig->tick_rate_z;
     buf[FEAT_DIST_TO_HIGH]   = (float)FPN_ToDouble(sig->dist_to_high);
     buf[FEAT_DIST_TO_LOW]    = (float)FPN_ToDouble(sig->dist_to_low);
+    // v4.5 Wave 1 — microstructure features (D.1, D.2, D.4)
+    buf[FEAT_BOOK_IMB_MEAN_SHORT] = (float)FPN_ToDouble(sig->book_imb_mean_short);
+    buf[FEAT_BOOK_IMB_MEAN_LONG]  = (float)FPN_ToDouble(sig->book_imb_mean_long);
+    buf[FEAT_BOOK_IMB_DRIFT]      = (float)FPN_ToDouble(sig->book_imb_drift);
+    buf[FEAT_FLOW_10S]            = (float)sig->flow_10s;
+    buf[FEAT_FLOW_1M]             = (float)sig->flow_1m;
+    buf[FEAT_FLOW_5M]             = (float)sig->flow_5m;
+    buf[FEAT_LARGE_TRADE_Z]       = (float)sig->large_trade_z;
     return MODEL_NUM_FEATURES;
 }
 

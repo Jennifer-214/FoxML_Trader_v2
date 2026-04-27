@@ -98,6 +98,10 @@ struct MLBuildContext {
     void*               cumdelta_state;  // const CumDeltaState<F>*
     void*               tick_rate_state; // const TickRateState*
     uint64_t            timestamp_us;    // current tick wall time for hour-of-day
+    // v4.5 Wave 1 — D.1/D.2/D.4 state. Same threading pattern as v4.3.
+    void*               book_imb_history;   // const BookImbalanceHistory<F, 1024>*
+    void*               flow_state;         // const FlowState*
+    void*               large_trade_state;  // const LargeTradeState<F, 1024>*
 };
 
 //======================================================================================================
@@ -466,8 +470,13 @@ inline void ML_BuildParameters(
         const CumDeltaState<F>* cd = mctx ? (const CumDeltaState<F>*)mctx->cumdelta_state : nullptr;
         const TickRateState* tr = mctx ? (const TickRateState*)mctx->tick_rate_state : nullptr;
         uint64_t ts = mctx ? mctx->timestamp_us : 0;
+        // v4.5 Wave 1 — D.1/D.2/D.4 state passthrough
+        const void* bih = mctx ? mctx->book_imb_history  : nullptr;
+        const void* fs  = mctx ? mctx->flow_state        : nullptr;
+        const void* lts = mctx ? mctx->large_trade_state : nullptr;
         Regime_ComputeSignals(&sig, rolling, rolling_long, ror_in, *ema_in,
-                               mid, base, cd, tr, ts);
+                               mid, base, cd, tr, ts,
+                               bih, fs, lts);
     } else {
         sig.short_slope    = FPN_IsZero(rolling->price_avg) ? FPN_Zero<F>()
                              : FPN_DivNoAssert(rolling->price_slope, rolling->price_avg);
