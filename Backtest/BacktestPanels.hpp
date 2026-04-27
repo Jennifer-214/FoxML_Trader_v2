@@ -522,13 +522,23 @@ struct PastRun {
     int   n_estimators;
     // from expected.cfg
     float ml_buy_threshold;
-    float ml_tp_pct;
-    float ml_sl_pct;
+    float ml_tp_pct;             // engine deployment TP (decimal)
+    float ml_sl_pct;             // engine deployment SL (decimal)
     float held_out_fraction;
     float gap_acceptable_threshold;
+    // v4.3 — LABEL barriers from Training panel (what the model was trained
+    // to predict). These are the values shown in the Past Runs table, not
+    // ml_tp_pct/ml_sl_pct (which are engine deployment thresholds, often
+    // different from the label barriers).
+    float label_tp_pct;          // % stored as float (e.g. 0.150 means 0.15%)
+    float label_sl_pct;
+    int   label_lookahead_ticks;
     // from summary.txt v2 (post-v4.3) — optional, zeroed when missing
-    float val_accuracy;          // walk-forward mean
+    int   label_kind;            // 0=binary/multiclass, 1=regression (drives display formatting)
+    float val_accuracy;          // walk-forward mean (for binary/multiclass)
     float val_stddev;
+    float val_correlation;       // for regression
+    float val_mse;               // for regression
     float train_val_gap;
     int   overfit_folds;
     int   has_wf_results;        // 1 = WF metrics present, 0 = old-format file
@@ -603,8 +613,14 @@ static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
         else if (strcmp(k, "n_estimators") == 0)         r->n_estimators = atoi(v);
         else if (strcmp(k, "val_accuracy") == 0)       { r->val_accuracy = (float)atof(v); r->has_wf_results = 1; }
         else if (strcmp(k, "val_stddev") == 0)           r->val_stddev = (float)atof(v);
+        else if (strcmp(k, "val_correlation") == 0)    { r->val_correlation = (float)atof(v); r->has_wf_results = 1; }
+        else if (strcmp(k, "val_mse") == 0)              r->val_mse = (float)atof(v);
+        else if (strcmp(k, "label_kind") == 0)           r->label_kind = atoi(v);
         else if (strcmp(k, "train_val_gap") == 0)        r->train_val_gap = (float)atof(v);
         else if (strcmp(k, "overfit_folds") == 0)        r->overfit_folds = atoi(v);
+        else if (strcmp(k, "label_tp_pct") == 0)         r->label_tp_pct = (float)atof(v);
+        else if (strcmp(k, "label_sl_pct") == 0)         r->label_sl_pct = (float)atof(v);
+        else if (strcmp(k, "label_lookahead_ticks") == 0) r->label_lookahead_ticks = atoi(v);
     }
     fclose(f);
 
@@ -673,95 +689,202 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
         return;
     }
 
+    // Split runs by label kind so each tab has its own column set.
+    // Classification tab: binary + multiclass (label_kind != 1).
+    // Regression tab: label_kind == 1.
+    int n_class = 0, n_regr = 0;
+    for (int i = 0; i < s->count; ++i) {
+        if (s->runs[i].label_kind == 1) n_regr++;
+        else                              n_class++;
+    }
+
     ImGuiTableFlags flags =
         ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
         ImGuiTableFlags_Sortable | ImGuiTableFlags_Resizable |
         ImGuiTableFlags_ScrollX | ImGuiTableFlags_SizingFixedFit;
-    if (ImGui::BeginTable("past_runs_table", 12, flags)) {
-        ImGui::TableSetupColumn("Run",        ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 200);
-        ImGui::TableSetupColumn("Role",       ImGuiTableColumnFlags_WidthFixed, 70);
-        ImGui::TableSetupColumn("Lbl",        ImGuiTableColumnFlags_WidthFixed, 35);
-        ImGui::TableSetupColumn("Classes",    ImGuiTableColumnFlags_WidthFixed, 50);
-        ImGui::TableSetupColumn("TP %%",      ImGuiTableColumnFlags_WidthFixed, 60);
-        ImGui::TableSetupColumn("SL %%",      ImGuiTableColumnFlags_WidthFixed, 60);
-        ImGui::TableSetupColumn("Train",      ImGuiTableColumnFlags_WidthFixed, 60);
-        ImGui::TableSetupColumn("Val",        ImGuiTableColumnFlags_WidthFixed, 70);
-        ImGui::TableSetupColumn("Gap",        ImGuiTableColumnFlags_WidthFixed, 60);
-        ImGui::TableSetupColumn("Overfit",    ImGuiTableColumnFlags_WidthFixed, 50);
-        ImGui::TableSetupColumn("Depth/LR/N", ImGuiTableColumnFlags_WidthFixed, 110);
-        ImGui::TableSetupColumn("Threshold",  ImGuiTableColumnFlags_WidthFixed, 70);
-        ImGui::TableHeadersRow();
 
-        for (int i = 0; i < s->count; ++i) {
-            PastRun *r = &s->runs[i];
-            ImGui::TableNextRow();
-
-            // selectable row name
-            ImGui::TableSetColumnIndex(0);
-            char rowid[160];
-            snprintf(rowid, sizeof(rowid), "%s##run%d", r->dir_name, i);
-            bool sel = (s->selected == i);
-            if (ImGui::Selectable(rowid, sel, ImGuiSelectableFlags_SpanAllColumns)) {
-                s->selected = i;
-            }
-
-            ImGui::TableNextColumn();
-            ImGui::TextDisabled("%s", r->role);
-
-            ImGui::TableNextColumn();
-            ImGui::Text("%d", r->label_type);
-
-            ImGui::TableNextColumn();
-            if (r->expected_num_classes == 0)      ImGui::Text("bin");
-            else if (r->expected_num_classes == 1) ImGui::Text("reg");
-            else                                    ImGui::Text("%d", r->expected_num_classes);
-
-            ImGui::TableNextColumn();
-            ImGui::Text("%.3f", r->ml_tp_pct * 100.0f);
-            ImGui::TableNextColumn();
-            ImGui::Text("%.3f", r->ml_sl_pct * 100.0f);
-
-            ImGui::TableNextColumn();
-            ImGui::Text("%.1f%%", r->train_accuracy);
-
-            // Val accuracy (or "-" if no WF results)
-            ImGui::TableNextColumn();
-            if (r->has_wf_results) {
-                ImVec4 vcol = (r->val_accuracy < 35.0f) ? FoxmlColors::red
-                            : (r->val_accuracy < 50.0f) ? FoxmlColors::yellow
-                                                         : FoxmlColors::green;
-                ImGui::TextColored(vcol, "%.1f%%", r->val_accuracy);
-            } else {
-                ImGui::TextDisabled("-");
-            }
-
-            ImGui::TableNextColumn();
-            if (r->has_wf_results) {
-                ImVec4 gcol = (r->train_val_gap > 0.20f) ? FoxmlColors::red
-                            : (r->train_val_gap > 0.10f) ? FoxmlColors::yellow
-                                                          : FoxmlColors::green;
-                ImGui::TextColored(gcol, "%.3f", r->train_val_gap);
-            } else {
-                ImGui::TextDisabled("-");
-            }
-
-            ImGui::TableNextColumn();
-            if (r->has_wf_results) {
-                if (r->overfit_folds > 0)
-                    ImGui::TextColored(FoxmlColors::red, "%d", r->overfit_folds);
-                else
-                    ImGui::Text("0");
-            } else {
-                ImGui::TextDisabled("-");
-            }
-
-            ImGui::TableNextColumn();
-            ImGui::Text("%d/%.2f/%d", r->max_depth, r->learning_rate, r->n_estimators);
-
-            ImGui::TableNextColumn();
-            ImGui::Text("%.3f", r->ml_buy_threshold);
+    // Helper: render one selectable row's leading "Run" cell. Shared between
+    // both tabs since selection is global across runs.
+    auto render_run_cell = [&](int i) {
+        PastRun *r = &s->runs[i];
+        ImGui::TableSetColumnIndex(0);
+        char rowid[160];
+        snprintf(rowid, sizeof(rowid), "%s##run%d", r->dir_name, i);
+        bool sel = (s->selected == i);
+        if (ImGui::Selectable(rowid, sel, ImGuiSelectableFlags_SpanAllColumns)) {
+            s->selected = i;
         }
-        ImGui::EndTable();
+    };
+
+    if (ImGui::BeginTabBar("##past_runs_tabs")) {
+        // ============================================================
+        // CLASSIFICATION TAB — binary + multiclass models
+        // ============================================================
+        char class_label[64];
+        snprintf(class_label, sizeof(class_label), "Classification (%d)", n_class);
+        if (ImGui::BeginTabItem(class_label)) {
+            if (n_class == 0) {
+                ImGui::TextDisabled("No classification runs saved yet.");
+            } else if (ImGui::BeginTable("past_runs_class", 12, flags)) {
+                ImGui::TableSetupColumn("Run",        ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 220);
+                ImGui::TableSetupColumn("Role",       ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Label",      ImGuiTableColumnFlags_WidthFixed, 50);
+                ImGui::TableSetupColumn("Classes",    ImGuiTableColumnFlags_WidthFixed, 70);
+                ImGui::TableSetupColumn("TP bps",     ImGuiTableColumnFlags_WidthFixed, 75);
+                ImGui::TableSetupColumn("SL bps",     ImGuiTableColumnFlags_WidthFixed, 75);
+                ImGui::TableSetupColumn("Lookahead",  ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Train Acc",  ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Val Acc",    ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Gap",        ImGuiTableColumnFlags_WidthFixed, 70);
+                ImGui::TableSetupColumn("Overfit",    ImGuiTableColumnFlags_WidthFixed, 70);
+                ImGui::TableSetupColumn("Depth/LR/N", ImGuiTableColumnFlags_WidthFixed, 120);
+                ImGui::TableHeadersRow();
+
+                for (int i = 0; i < s->count; ++i) {
+                    PastRun *r = &s->runs[i];
+                    if (r->label_kind == 1) continue;  // skip regression runs
+                    ImGui::TableNextRow();
+
+                    render_run_cell(i);
+                    ImGui::TableNextColumn(); ImGui::TextDisabled("%s", r->role);
+                    ImGui::TableNextColumn(); ImGui::Text("%d", r->label_type);
+                    ImGui::TableNextColumn();
+                    if (r->expected_num_classes == 0)      ImGui::Text("binary");
+                    else                                    ImGui::Text("%d-class", r->expected_num_classes);
+
+                    ImGui::TableNextColumn();
+                    if (r->label_tp_pct > 0.0f) ImGui::Text("%.1f", r->label_tp_pct * 100.0f);
+                    else                         ImGui::TextDisabled("-");
+                    ImGui::TableNextColumn();
+                    if (r->label_sl_pct > 0.0f) ImGui::Text("%.1f", r->label_sl_pct * 100.0f);
+                    else                         ImGui::TextDisabled("-");
+                    ImGui::TableNextColumn();
+                    if (r->label_lookahead_ticks > 0) ImGui::Text("%d", r->label_lookahead_ticks);
+                    else                               ImGui::TextDisabled("-");
+
+                    ImGui::TableNextColumn(); ImGui::Text("%.1f%%", r->train_accuracy);
+
+                    ImGui::TableNextColumn();
+                    if (r->has_wf_results) {
+                        // Color thresholds depend on chance level: 3-class
+                        // baseline ~33%, binary ~50%, plus majority-class
+                        // dominance can shift these. Keep simple bands.
+                        float thresh_low  = (r->expected_num_classes >= 2) ? 35.0f : 50.0f;
+                        float thresh_good = (r->expected_num_classes >= 2) ? 50.0f : 60.0f;
+                        ImVec4 vcol = (r->val_accuracy < thresh_low)  ? FoxmlColors::red
+                                    : (r->val_accuracy < thresh_good) ? FoxmlColors::yellow
+                                                                        : FoxmlColors::green;
+                        ImGui::TextColored(vcol, "%.1f%%", r->val_accuracy);
+                    } else {
+                        ImGui::TextDisabled("-");
+                    }
+
+                    ImGui::TableNextColumn();
+                    if (r->has_wf_results) {
+                        ImVec4 gcol = (r->train_val_gap > 0.20f) ? FoxmlColors::red
+                                    : (r->train_val_gap > 0.10f) ? FoxmlColors::yellow
+                                                                  : FoxmlColors::green;
+                        ImGui::TextColored(gcol, "%.3f", r->train_val_gap);
+                    } else {
+                        ImGui::TextDisabled("-");
+                    }
+
+                    ImGui::TableNextColumn();
+                    if (r->has_wf_results) {
+                        if (r->overfit_folds > 0)
+                            ImGui::TextColored(FoxmlColors::red, "%d", r->overfit_folds);
+                        else
+                            ImGui::Text("0");
+                    } else {
+                        ImGui::TextDisabled("-");
+                    }
+
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%d/%.2f/%d", r->max_depth, r->learning_rate, r->n_estimators);
+                }
+                ImGui::EndTable();
+            }
+            ImGui::EndTabItem();
+        }
+
+        // ============================================================
+        // REGRESSION TAB — continuous-target models (forward P&L, etc.)
+        // ============================================================
+        char regr_label[64];
+        snprintf(regr_label, sizeof(regr_label), "Regression (%d)", n_regr);
+        if (ImGui::BeginTabItem(regr_label)) {
+            if (n_regr == 0) {
+                ImGui::TextDisabled("No regression runs saved yet.");
+            } else if (ImGui::BeginTable("past_runs_regr", 11, flags)) {
+                ImGui::TableSetupColumn("Run",        ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 220);
+                ImGui::TableSetupColumn("Role",       ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Label",      ImGuiTableColumnFlags_WidthFixed, 50);
+                ImGui::TableSetupColumn("TP bps",     ImGuiTableColumnFlags_WidthFixed, 75);
+                ImGui::TableSetupColumn("SL bps",     ImGuiTableColumnFlags_WidthFixed, 75);
+                ImGui::TableSetupColumn("Lookahead",  ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Train r",    ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Val r",      ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Val MSE",    ImGuiTableColumnFlags_WidthFixed, 90);
+                ImGui::TableSetupColumn("Gap (r)",    ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Depth/LR/N", ImGuiTableColumnFlags_WidthFixed, 120);
+                ImGui::TableHeadersRow();
+
+                for (int i = 0; i < s->count; ++i) {
+                    PastRun *r = &s->runs[i];
+                    if (r->label_kind != 1) continue;  // only regression
+                    ImGui::TableNextRow();
+
+                    render_run_cell(i);
+                    ImGui::TableNextColumn(); ImGui::TextDisabled("%s", r->role);
+                    ImGui::TableNextColumn(); ImGui::Text("%d", r->label_type);
+
+                    ImGui::TableNextColumn();
+                    if (r->label_tp_pct > 0.0f) ImGui::Text("%.1f", r->label_tp_pct * 100.0f);
+                    else                         ImGui::TextDisabled("-");
+                    ImGui::TableNextColumn();
+                    if (r->label_sl_pct > 0.0f) ImGui::Text("%.1f", r->label_sl_pct * 100.0f);
+                    else                         ImGui::TextDisabled("-");
+                    ImGui::TableNextColumn();
+                    if (r->label_lookahead_ticks > 0) ImGui::Text("%d", r->label_lookahead_ticks);
+                    else                               ImGui::TextDisabled("-");
+
+                    // Train r — for regression, train_accuracy field stores
+                    // the in-sample correlation already (since training code
+                    // sets state->train_correlation; "accuracy" field stays 0).
+                    // Older runs may not have separate train_correlation
+                    // captured — we show train_accuracy for now as a proxy.
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%.3f", r->train_accuracy / 100.0f);
+
+                    ImGui::TableNextColumn();
+                    if (r->has_wf_results) {
+                        // Pearson r threshold bands for crypto-tick
+                        // regression: |r|>0.10 is meaningful at this scale.
+                        float ar = fabsf(r->val_correlation);
+                        ImVec4 vcol = (ar < 0.05f) ? FoxmlColors::red
+                                    : (ar < 0.10f) ? FoxmlColors::yellow
+                                                    : FoxmlColors::green;
+                        ImGui::TextColored(vcol, "%.3f", r->val_correlation);
+                    } else {
+                        ImGui::TextDisabled("-");
+                    }
+
+                    ImGui::TableNextColumn();
+                    if (r->has_wf_results) ImGui::Text("%.5f", r->val_mse);
+                    else                    ImGui::TextDisabled("-");
+
+                    ImGui::TableNextColumn();
+                    if (r->has_wf_results) ImGui::Text("%.3f", r->train_val_gap);
+                    else                    ImGui::TextDisabled("-");
+
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%d/%.2f/%d", r->max_depth, r->learning_rate, r->n_estimators);
+                }
+                ImGui::EndTable();
+            }
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
     }
 
     // detail / action area for the selected run
@@ -2002,18 +2125,40 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 fprintf(sf, "max_depth: %d\n", state->max_depth);
                 fprintf(sf, "learning_rate: %.3f\n", state->learning_rate);
                 fprintf(sf, "n_estimators: %d\n", state->n_estimators);
+                // v4.3 — label barriers from the Training panel. These are
+                // the values shown in the Past Runs table and they describe
+                // what the model was trained to predict (different from
+                // engine ml_tp_pct/ml_sl_pct which are deployment thresholds).
+                fprintf(sf, "label_tp_pct: %.4f\n", state->label_tp_pct);
+                fprintf(sf, "label_sl_pct: %.4f\n", state->label_sl_pct);
+                fprintf(sf, "label_lookahead_ticks: %d\n", state->label_forward_ticks);
                 // v4.3 — also persist Walk-Forward metrics if a WF run has
                 // been completed for this training. Past Runs viewer reads
                 // these to show val accuracy + overfit gap. valid_folds == 0
                 // means no WF was run; skip the block (older format).
                 if (state->wf_results.valid_folds > 0) {
-                    fprintf(sf, "val_accuracy: %.2f\n",
-                            state->wf_results.mean_val_accuracy * 100.0f);
-                    fprintf(sf, "val_stddev: %.2f\n",
-                            state->wf_results.std_val_accuracy * 100.0f);
-                    fprintf(sf, "train_val_gap: %.4f\n",
-                            state->wf_results.mean_train_accuracy -
-                            state->wf_results.mean_val_accuracy);
+                    // label-kind-aware metric writeout. For binary/multiclass
+                    // (label_kind != 1) WF populates mean_val_accuracy; for
+                    // regression (label_kind == 1) WF populates correlation +
+                    // mse instead. Save whichever is meaningful.
+                    fprintf(sf, "label_kind: %d\n", state->wf_results.label_kind);
+                    if (state->wf_results.label_kind == 1) {
+                        fprintf(sf, "val_correlation: %.4f\n",
+                                state->wf_results.mean_val_correlation);
+                        fprintf(sf, "val_mse: %.6f\n",
+                                state->wf_results.mean_val_mse);
+                        fprintf(sf, "train_val_gap: %.4f\n",
+                                state->wf_results.mean_train_correlation -
+                                state->wf_results.mean_val_correlation);
+                    } else {
+                        fprintf(sf, "val_accuracy: %.2f\n",
+                                state->wf_results.mean_val_accuracy * 100.0f);
+                        fprintf(sf, "val_stddev: %.2f\n",
+                                state->wf_results.std_val_accuracy * 100.0f);
+                        fprintf(sf, "train_val_gap: %.4f\n",
+                                state->wf_results.mean_train_accuracy -
+                                state->wf_results.mean_val_accuracy);
+                    }
                     fprintf(sf, "overfit_folds: %d\n",
                             state->wf_results.overfit_count);
                     fprintf(sf, "valid_folds: %d\n",
