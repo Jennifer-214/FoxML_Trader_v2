@@ -207,7 +207,14 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             ImPlot::SetupAxisTicks(ImAxis_X1, tick_pos, tick_n, tick_labels_p);
         }
 
-        // Y limits with padding + TP/SL expansion
+        // Y limits with padding + TP/SL expansion (bounded).
+        // v4.7.6: previously we unconditionally expanded Y to include
+        // every position's TP and SL — fine when configs set TP/SL
+        // close to current price, but with wider 1%+ TP/SL the chart
+        // gets dominated by far markers and candles squish into ~10%
+        // of vertical space. Now we expand for TP/SL only when they
+        // sit within ~2× the candle range; further markers render at
+        // the chart edge as out-of-view tags (clipped by ImPlot).
         double y_min = 1e18, y_max = -1e18;
         for (int i = 0; i < vc; i++) {
             if (cs->lows[i] < y_min) y_min = cs->lows[i];
@@ -220,11 +227,17 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             y_min = mid - min_range * 0.5;
             y_max = mid + min_range * 0.5;
         }
+        // Expansion budget: candle range × 2. TP/SL within this window
+        // gets included; further markers stay where they are and ImPlot
+        // clips them to the visible area.
+        double candle_range = y_max - y_min;
+        double expand_lo    = y_min - candle_range;
+        double expand_hi    = y_max + candle_range;
         for (int pi = 0; pi < 16; pi++) {
             const TUIPositionSnap *ps = &snap->positions[pi];
             if (ps->idx < 0) continue;
-            if (ps->tp > 0 && ps->tp > y_max) y_max = ps->tp;
-            if (ps->sl > 0 && ps->sl < y_min) y_min = ps->sl;
+            if (ps->tp > 0 && ps->tp > y_max && ps->tp <= expand_hi) y_max = ps->tp;
+            if (ps->sl > 0 && ps->sl < y_min && ps->sl >= expand_lo) y_min = ps->sl;
         }
         double pad = (y_max - y_min) * 0.1;
         ImPlot::SetupAxisLimits(ImAxis_Y1, y_min - pad, y_max + pad, ImPlotCond_Always);

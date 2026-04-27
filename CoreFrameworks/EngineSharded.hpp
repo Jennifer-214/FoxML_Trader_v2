@@ -1468,6 +1468,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     if (is_entry && event.leg == PARTIAL_LEG_A) {
                         state.cores[slot].last_entry_price = event.price;
                         state.cores[slot].last_entry_tick  = ticks_produced.load(std::memory_order_relaxed);
+                        // v4.7.6: wall-clock entry time so GUI's "Hold"
+                        // column can show real elapsed minutes for open
+                        // positions. Microseconds since epoch — divide
+                        // by 60_000_000 in the snapshot copy for minutes.
+                        state.cores[slot].last_entry_wall_us = (uint64_t)
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count();
                     }
                 }
             }

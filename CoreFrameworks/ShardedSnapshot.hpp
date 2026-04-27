@@ -120,6 +120,12 @@ static inline void TUI_CopySnapshotSharded(
     // per-position details
     uint16_t bm = state->oms->portfolio.active_bitmap;
     double total_value = 0.0, total_qty = 0.0;
+    // v4.7.6: wall-clock now in microseconds — used to compute
+    // hold_minutes from the per-core last_entry_wall_us stamp.
+    uint64_t now_wall_us = (uint64_t)
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    int partial_on = cfg->partial_exit_enabled ? 1 : 0;
     while (bm) {
         int idx = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
@@ -138,6 +144,19 @@ static inline void TUI_CopySnapshotSharded(
             ps->net_pnl   = ps->gross_pnl - (fee_r * 200.0);
         }
         ps->is_trailing = (ps->tp != ps->orig_tp) ? 1 : 0;
+        // v4.7.6: hold_minutes from per-core last_entry_wall_us. Both
+        // legs of a paired trade share the same core's stamp (only leg A
+        // stamps it on entry), so map slot → core_id and read from there.
+        int core_id = partial_on ? (idx >> 1) : idx;
+        if (core_id >= 0 && core_id < state->registered_count) {
+            uint64_t entry_wall = state->cores[core_id].last_entry_wall_us;
+            if (entry_wall > 0 && now_wall_us > entry_wall) {
+                ps->hold_minutes = (double)(now_wall_us - entry_wall) / 60000000.0;
+            } else {
+                ps->hold_minutes = 0.0;
+            }
+            ps->entry_time = (time_t)(entry_wall / 1000000ULL);
+        }
         total_value += ps->value;
         total_qty   += ps->qty;
     }

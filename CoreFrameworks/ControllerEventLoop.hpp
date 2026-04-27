@@ -113,6 +113,10 @@ struct CoreContext {
     // prices. Mirrors legacy PortfolioController spacing logic.
     FPN<F> last_entry_price;
     uint64_t last_entry_tick;      // for time-based exit (A3)
+    // v4.7.6: wall-clock microseconds at the leg-A entry stamp site so
+    // GUI can show "hold time" for open positions. Independent of
+    // last_entry_tick (which is a producer count, not seconds).
+    uint64_t last_entry_wall_us;
     // v4.0.3 D7 SL cooldown: after a stop-loss exit, pause entries on this
     // core for N slow-path cycles. Decremented each rebuild; entries
     // zero-gated while > 0. Optionally adaptive — scales by trend confidence
@@ -262,6 +266,7 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].last_confidence = 0.0;
         state->cores[i].last_entry_price = FPN_Zero<F>();
         state->cores[i].last_entry_tick  = 0;
+        state->cores[i].last_entry_wall_us = 0;
         state->cores[i].sl_cooldown_remaining = 0;
         state->cores[i].halt_reason = 0;
         // v4.0.3 B: regime state per AUTO core. Hysteresis threshold of 3
