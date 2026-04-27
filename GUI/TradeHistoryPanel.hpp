@@ -93,13 +93,18 @@ static inline void TradeHistory_Refresh(TradeHistory *th) {
         // (slots 2c+0 + 2c+1) modes.
         e->leg = e->core_id & 1;
 
-        // Reason: derive from PnL sign (sharded log doesn't carry an
-        // explicit reason field). Positive = TP, negative = SL.
-        // Refinement later: have ShardedTradeLog write the actual SG
-        // trigger so we can show TP1/TP2/SL distinctly.
-        if (e->pnl > 0.0)      strncpy(e->reason, "TP", 7);
-        else if (e->pnl < 0.0) strncpy(e->reason, "SL", 7);
-        else                   strncpy(e->reason, "FLAT", 7);
+        // Reason: derive from price direction (exit vs entry), not P&L
+        // sign. The sharded log doesn't carry an explicit reason field
+        // yet, but the gate that fired is determined by price crossing:
+        //   exit_price > entry_price → TP gate fired (price hit upper)
+        //   exit_price < entry_price → SL gate fired (price hit lower)
+        //   exit_price == entry_price → noise / no-move (rare)
+        // Pre-v4.7.5 used P&L sign which lied when fees ate a real TP
+        // (small TP gain - 2× taker fees = negative P&L → labeled "SL"
+        // even though the TP gate is what fired).
+        if (e->exit_price > e->entry_price)      strncpy(e->reason, "TP", 7);
+        else if (e->exit_price < e->entry_price) strncpy(e->reason, "SL", 7);
+        else                                     strncpy(e->reason, "FLAT", 7);
         e->reason[7] = '\0';
 
         // Strategy: column 2 is numeric strategy_id (uint8_t). Use the
@@ -172,7 +177,15 @@ static inline void GUI_Panel_TradeHistory(TradeHistory *th) {
             ImGui::TextColored(fee_col, "$%.2f", e->fee);
 
             ImGui::TableNextColumn();
-            ImVec4 reason_col = (strcmp(e->reason, "TP") == 0) ? FoxmlColors::green_b : FoxmlColors::red;
+            // Color reason by gate type (TP=green, SL=red, FLAT=gray).
+            // Note: a "TP" row can still have negative P&L when fees > gain
+            // — that's a fee-bleed signal, distinct from a real SL hit.
+            // The reason column shows what GATE fired; the P&L column shows
+            // whether you made money. Both can disagree; that's diagnostic.
+            ImVec4 reason_col;
+            if (strcmp(e->reason, "TP") == 0)        reason_col = FoxmlColors::green_b;
+            else if (strcmp(e->reason, "SL") == 0)   reason_col = FoxmlColors::red;
+            else                                      reason_col = FoxmlColors::comment;
             ImGui::TextColored(reason_col, "%s", e->reason);
 
             ImGui::TableNextColumn();
