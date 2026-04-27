@@ -200,6 +200,11 @@ int main(int argc, char *argv[]) {
     // comparison state (overlay multiple runs)
     static ComparisonState comparison;
     Comparison_Init(&comparison);
+    // v4.3 — Past Runs viewer state. Scans models/{name}/ subdirs at startup;
+    // the Rescan button repopulates if user saves/deletes runs externally.
+    static PastRunsState past_runs;
+    PastRuns_Init(&past_runs);
+    PastRuns_Scan(&past_runs);
 
     // optimizer state
     static OptimizerPanelState optimizer;
@@ -296,6 +301,7 @@ int main(int argc, char *argv[]) {
         GUI_Panel_RunControl(&run_control, &data_panel);
         GUI_Panel_Results(&run_control.results);
         GUI_Panel_Comparison(&comparison, &run_control.results);
+        GUI_Panel_PastRuns(&past_runs);
         GUI_Panel_Optimizer(&optimizer, &data_panel);
         GUI_Panel_Training(&training, &run_control, &data_panel);
         GUI_Panel_LogViewer(&log_viewer);

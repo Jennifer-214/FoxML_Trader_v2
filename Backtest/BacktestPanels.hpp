@@ -501,6 +501,300 @@ struct ComparisonState {
     int run_count;
 };
 
+//==========================================================================
+// PAST RUNS VIEWER (v4.3) — scan models/{run_name}/ subdirs, parse the
+// summary.txt + expected.cfg in each, render a sortable table for easy
+// comparison across saved runs. Differs from ComparisonState (in-memory
+// equity curves only) — Past Runs persists across restarts, captures ML
+// metrics specifically (accuracy, val acc, label kind, hyperparams).
+//==========================================================================
+#define PAST_RUNS_MAX 64
+
+struct PastRun {
+    char dir_name[128];          // run directory name under models/
+    // from summary.txt
+    char role[32];
+    float train_accuracy;        // % (in-sample at train time)
+    int   label_type;
+    int   expected_num_classes;  // 0=binary, 1=regression, ≥2=multiclass
+    int   max_depth;
+    float learning_rate;
+    int   n_estimators;
+    // from expected.cfg
+    float ml_buy_threshold;
+    float ml_tp_pct;
+    float ml_sl_pct;
+    float held_out_fraction;
+    float gap_acceptable_threshold;
+    // from summary.txt v2 (post-v4.3) — optional, zeroed when missing
+    float val_accuracy;          // walk-forward mean
+    float val_stddev;
+    float train_val_gap;
+    int   overfit_folds;
+    int   has_wf_results;        // 1 = WF metrics present, 0 = old-format file
+};
+
+struct PastRunsState {
+    PastRun runs[PAST_RUNS_MAX];
+    int     count;
+    int     selected;            // index of last clicked row (for inspector / actions)
+    char    status_msg[256];     // last action status (e.g., "loaded", "deleted")
+    int     sort_column;         // 0..N-1, which column to sort by
+    int     sort_descending;     // 0 = asc, 1 = desc
+};
+
+static inline void PastRuns_Init(PastRunsState *s) {
+    memset(s, 0, sizeof(*s));
+    s->selected = -1;
+    s->sort_column = 6;          // default sort by val_accuracy descending
+    s->sort_descending = 1;
+}
+
+// helper: parse a key=value line into a (key, value) pair via simple split.
+// returns 1 on success, 0 if line doesn't contain '='.
+static inline int parse_kv_line(const char *line, char *key, size_t key_size,
+                                  char *val, size_t val_size) {
+    const char *eq = strchr(line, ':');
+    const char *eq2 = strchr(line, '=');
+    if (!eq || (eq2 && eq2 < eq)) eq = eq2;
+    if (!eq) return 0;
+    size_t klen = (size_t)(eq - line);
+    if (klen >= key_size) klen = key_size - 1;
+    memcpy(key, line, klen);
+    key[klen] = '\0';
+    // trim trailing whitespace from key
+    while (klen > 0 && (key[klen-1] == ' ' || key[klen-1] == '\t')) key[--klen] = '\0';
+    // skip ':' or '=' and following whitespace
+    const char *vstart = eq + 1;
+    while (*vstart == ' ' || *vstart == '\t') vstart++;
+    strncpy(val, vstart, val_size - 1);
+    val[val_size - 1] = '\0';
+    // trim trailing newline / whitespace from value
+    size_t vlen = strlen(val);
+    while (vlen > 0 && (val[vlen-1] == '\n' || val[vlen-1] == '\r' ||
+                         val[vlen-1] == ' '  || val[vlen-1] == '\t' ||
+                         val[vlen-1] == '%')) val[--vlen] = '\0';
+    return 1;
+}
+
+// scan one run directory's metadata files
+static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
+    memset(r, 0, sizeof(*r));
+    const char *base = strrchr(run_dir, '/');
+    base = base ? base + 1 : run_dir;
+    strncpy(r->dir_name, base, sizeof(r->dir_name) - 1);
+
+    char path[400];
+    char line[512];
+
+    // summary.txt
+    snprintf(path, sizeof(path), "%s/summary.txt", run_dir);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;  // no summary = not a Save Run bundle
+    while (fgets(line, sizeof(line), f)) {
+        char k[64], v[256];
+        if (!parse_kv_line(line, k, sizeof(k), v, sizeof(v))) continue;
+        if      (strcmp(k, "role") == 0)                 strncpy(r->role, v, sizeof(r->role) - 1);
+        else if (strcmp(k, "accuracy") == 0)             r->train_accuracy = (float)atof(v);
+        else if (strcmp(k, "label_type") == 0)           r->label_type = atoi(v);
+        else if (strcmp(k, "expected_num_classes") == 0) r->expected_num_classes = atoi(v);
+        else if (strcmp(k, "max_depth") == 0)            r->max_depth = atoi(v);
+        else if (strcmp(k, "learning_rate") == 0)        r->learning_rate = (float)atof(v);
+        else if (strcmp(k, "n_estimators") == 0)         r->n_estimators = atoi(v);
+        else if (strcmp(k, "val_accuracy") == 0)       { r->val_accuracy = (float)atof(v); r->has_wf_results = 1; }
+        else if (strcmp(k, "val_stddev") == 0)           r->val_stddev = (float)atof(v);
+        else if (strcmp(k, "train_val_gap") == 0)        r->train_val_gap = (float)atof(v);
+        else if (strcmp(k, "overfit_folds") == 0)        r->overfit_folds = atoi(v);
+    }
+    fclose(f);
+
+    // expected.cfg (optional; older runs may not have all fields)
+    snprintf(path, sizeof(path), "%s/expected.cfg", run_dir);
+    f = fopen(path, "r");
+    if (f) {
+        while (fgets(line, sizeof(line), f)) {
+            if (line[0] == '#') continue;
+            char k[64], v[256];
+            if (!parse_kv_line(line, k, sizeof(k), v, sizeof(v))) continue;
+            if      (strcmp(k, "ml_buy_threshold") == 0)         r->ml_buy_threshold = (float)atof(v);
+            else if (strcmp(k, "ml_tp_pct") == 0)                 r->ml_tp_pct = (float)atof(v);
+            else if (strcmp(k, "ml_sl_pct") == 0)                 r->ml_sl_pct = (float)atof(v);
+            else if (strcmp(k, "held_out_fraction") == 0)         r->held_out_fraction = (float)atof(v);
+            else if (strcmp(k, "gap_acceptable_threshold") == 0)  r->gap_acceptable_threshold = (float)atof(v);
+        }
+        fclose(f);
+    }
+    return 1;
+}
+
+static inline void PastRuns_Scan(PastRunsState *s) {
+    s->count = 0;
+    s->status_msg[0] = '\0';
+    DIR *d = opendir("models");
+    if (!d) {
+        snprintf(s->status_msg, sizeof(s->status_msg), "models/ dir not found");
+        return;
+    }
+    struct dirent *entry;
+    while ((entry = readdir(d)) != NULL && s->count < PAST_RUNS_MAX) {
+        if (entry->d_name[0] == '.') continue;
+        // check if it's a directory containing summary.txt
+        char sub[300];
+        snprintf(sub, sizeof(sub), "models/%s", entry->d_name);
+        struct stat st;
+        if (stat(sub, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        if (PastRuns_LoadOne(&s->runs[s->count], sub)) s->count++;
+    }
+    closedir(d);
+    snprintf(s->status_msg, sizeof(s->status_msg),
+             "scanned %d run(s) in models/", s->count);
+}
+
+// label-type-aware metric label
+static inline const char* PastRun_MetricLabel(int expected_num_classes) {
+    if (expected_num_classes == 1) return "Corr (r)";   // regression
+    if (expected_num_classes >= 2) return "Acc (multi)";// multiclass
+    return "Acc (bin)";                                  // binary (0)
+}
+
+static inline void GUI_Panel_PastRuns(PastRunsState *s) {
+    ImGui::Begin("Past Runs");
+    SectionHeader("PAST RUNS");
+
+    if (ImGui::Button("Rescan")) PastRuns_Scan(s);
+    ImGui::SameLine();
+    if (s->status_msg[0])
+        ImGui::TextColored(FoxmlColors::comment, "(%s)", s->status_msg);
+
+    if (s->count == 0) {
+        ImGui::TextDisabled("No saved runs found in models/. "
+                            "Train a model and click 'Save Run' in the Training panel.");
+        ImGui::End();
+        return;
+    }
+
+    ImGuiTableFlags flags =
+        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_Sortable | ImGuiTableFlags_Resizable |
+        ImGuiTableFlags_ScrollX | ImGuiTableFlags_SizingFixedFit;
+    if (ImGui::BeginTable("past_runs_table", 12, flags)) {
+        ImGui::TableSetupColumn("Run",        ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 200);
+        ImGui::TableSetupColumn("Role",       ImGuiTableColumnFlags_WidthFixed, 70);
+        ImGui::TableSetupColumn("Lbl",        ImGuiTableColumnFlags_WidthFixed, 35);
+        ImGui::TableSetupColumn("Classes",    ImGuiTableColumnFlags_WidthFixed, 50);
+        ImGui::TableSetupColumn("TP %%",      ImGuiTableColumnFlags_WidthFixed, 60);
+        ImGui::TableSetupColumn("SL %%",      ImGuiTableColumnFlags_WidthFixed, 60);
+        ImGui::TableSetupColumn("Train",      ImGuiTableColumnFlags_WidthFixed, 60);
+        ImGui::TableSetupColumn("Val",        ImGuiTableColumnFlags_WidthFixed, 70);
+        ImGui::TableSetupColumn("Gap",        ImGuiTableColumnFlags_WidthFixed, 60);
+        ImGui::TableSetupColumn("Overfit",    ImGuiTableColumnFlags_WidthFixed, 50);
+        ImGui::TableSetupColumn("Depth/LR/N", ImGuiTableColumnFlags_WidthFixed, 110);
+        ImGui::TableSetupColumn("Threshold",  ImGuiTableColumnFlags_WidthFixed, 70);
+        ImGui::TableHeadersRow();
+
+        for (int i = 0; i < s->count; ++i) {
+            PastRun *r = &s->runs[i];
+            ImGui::TableNextRow();
+
+            // selectable row name
+            ImGui::TableSetColumnIndex(0);
+            char rowid[160];
+            snprintf(rowid, sizeof(rowid), "%s##run%d", r->dir_name, i);
+            bool sel = (s->selected == i);
+            if (ImGui::Selectable(rowid, sel, ImGuiSelectableFlags_SpanAllColumns)) {
+                s->selected = i;
+            }
+
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", r->role);
+
+            ImGui::TableNextColumn();
+            ImGui::Text("%d", r->label_type);
+
+            ImGui::TableNextColumn();
+            if (r->expected_num_classes == 0)      ImGui::Text("bin");
+            else if (r->expected_num_classes == 1) ImGui::Text("reg");
+            else                                    ImGui::Text("%d", r->expected_num_classes);
+
+            ImGui::TableNextColumn();
+            ImGui::Text("%.3f", r->ml_tp_pct * 100.0f);
+            ImGui::TableNextColumn();
+            ImGui::Text("%.3f", r->ml_sl_pct * 100.0f);
+
+            ImGui::TableNextColumn();
+            ImGui::Text("%.1f%%", r->train_accuracy);
+
+            // Val accuracy (or "-" if no WF results)
+            ImGui::TableNextColumn();
+            if (r->has_wf_results) {
+                ImVec4 vcol = (r->val_accuracy < 35.0f) ? FoxmlColors::red
+                            : (r->val_accuracy < 50.0f) ? FoxmlColors::yellow
+                                                         : FoxmlColors::green;
+                ImGui::TextColored(vcol, "%.1f%%", r->val_accuracy);
+            } else {
+                ImGui::TextDisabled("-");
+            }
+
+            ImGui::TableNextColumn();
+            if (r->has_wf_results) {
+                ImVec4 gcol = (r->train_val_gap > 0.20f) ? FoxmlColors::red
+                            : (r->train_val_gap > 0.10f) ? FoxmlColors::yellow
+                                                          : FoxmlColors::green;
+                ImGui::TextColored(gcol, "%.3f", r->train_val_gap);
+            } else {
+                ImGui::TextDisabled("-");
+            }
+
+            ImGui::TableNextColumn();
+            if (r->has_wf_results) {
+                if (r->overfit_folds > 0)
+                    ImGui::TextColored(FoxmlColors::red, "%d", r->overfit_folds);
+                else
+                    ImGui::Text("0");
+            } else {
+                ImGui::TextDisabled("-");
+            }
+
+            ImGui::TableNextColumn();
+            ImGui::Text("%d/%.2f/%d", r->max_depth, r->learning_rate, r->n_estimators);
+
+            ImGui::TableNextColumn();
+            ImGui::Text("%.3f", r->ml_buy_threshold);
+        }
+        ImGui::EndTable();
+    }
+
+    // detail / action area for the selected run
+    if (s->selected >= 0 && s->selected < s->count) {
+        PastRun *r = &s->runs[s->selected];
+        ImGui::Separator();
+        ImGui::TextColored(FoxmlColors::primary, "Selected: %s", r->dir_name);
+        ImGui::TextColored(FoxmlColors::comment,
+            "Role=%s  label_type=%d  num_classes=%d  held_out=%.2f  gap_threshold=%.2f",
+            r->role, r->label_type, r->expected_num_classes,
+            r->held_out_fraction, r->gap_acceptable_threshold);
+
+        // Path hint for engine.cfg
+        ImGui::TextColored(FoxmlColors::sand,
+            "To use in engine: set core_N_model_dir=models/%s/ in engine.cfg",
+            r->dir_name);
+
+        if (ImGui::Button("Open Folder Path")) {
+            // copy the path to status_msg as a hint (no shell exec from here)
+            snprintf(s->status_msg, sizeof(s->status_msg),
+                     "models/%s/", r->dir_name);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete (manual)")) {
+            // safety: don't actually rm here. show user the command to run.
+            snprintf(s->status_msg, sizeof(s->status_msg),
+                     "to delete: rm -r models/%s/", r->dir_name);
+        }
+    }
+
+    ImGui::End();
+}
+
 static inline void Comparison_Init(ComparisonState *state) {
     memset(state, 0, sizeof(*state));
 }
@@ -1022,7 +1316,20 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         }
         label_names_built = true;
     }
+    int prev_label_type = state->label_type;
     ImGui::Combo("Label Type", &state->label_type, label_names, LABEL_COUNT);
+    // v4.2.2: when label type changes, retarget the default Model Path so it
+    // matches the role this label trains. Pre-patch, the path stayed at the
+    // legacy "models/buy_signal.json" regardless of label type — confusing
+    // since 3-class barrier models would then save under a binary-role name
+    // (Save Run still rewrote it to barrier.json on bundle, but the in-progress
+    // training output had the wrong filename). Now the field tracks the role.
+    if (state->label_type != prev_label_type) {
+        const char* role = "buy_signal";  // legacy / binary default
+        if (state->label_type == LABEL_PEAK_VALLEY_STABLE) role = "barrier";
+        else if (state->label_type == LABEL_REGIME)       role = "regime";
+        snprintf(state->model_path, sizeof(state->model_path), "models/%s.json", role);
+    }
     ImGui::SetItemTooltip("How to label each sample for ML training:\n"
                           "  Win/Loss: 1 if price hits TP%% first, 0 if SL%% first\n"
                           "  Barrier: same but returns 0.5 (neutral) if neither hit within horizon\n"
@@ -1695,6 +2002,23 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 fprintf(sf, "max_depth: %d\n", state->max_depth);
                 fprintf(sf, "learning_rate: %.3f\n", state->learning_rate);
                 fprintf(sf, "n_estimators: %d\n", state->n_estimators);
+                // v4.3 — also persist Walk-Forward metrics if a WF run has
+                // been completed for this training. Past Runs viewer reads
+                // these to show val accuracy + overfit gap. valid_folds == 0
+                // means no WF was run; skip the block (older format).
+                if (state->wf_results.valid_folds > 0) {
+                    fprintf(sf, "val_accuracy: %.2f\n",
+                            state->wf_results.mean_val_accuracy * 100.0f);
+                    fprintf(sf, "val_stddev: %.2f\n",
+                            state->wf_results.std_val_accuracy * 100.0f);
+                    fprintf(sf, "train_val_gap: %.4f\n",
+                            state->wf_results.mean_train_accuracy -
+                            state->wf_results.mean_val_accuracy);
+                    fprintf(sf, "overfit_folds: %d\n",
+                            state->wf_results.overfit_count);
+                    fprintf(sf, "valid_folds: %d\n",
+                            state->wf_results.valid_folds);
+                }
                 fclose(sf);
             }
 
