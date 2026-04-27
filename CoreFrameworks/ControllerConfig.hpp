@@ -114,6 +114,12 @@ template <unsigned F> struct ControllerConfig {
   // Backtest simulates as all-taker (is_maker=0 always). Documented divergence.
   FPN<F> fee_rate_maker;   // maker fill fee rate (e.g. 0.00075 = 0.075% Binance tier 0)
   FPN<F> fee_rate_taker;   // taker fill fee rate (e.g. 0.00100 = 0.100% Binance tier 0)
+  // v4.3.2 (Track C.1) — pay fees in BNB on Binance gives a 25% discount
+  // on both maker and taker. When set, fee_rate_maker and fee_rate_taker
+  // are scaled by 0.75 at engine boot. User must also enable BNB fee
+  // payment in Binance UI (one-time account setting). Logged at boot so
+  // the config is visible. 0 = disabled (default).
+  uint32_t pay_fees_in_bnb;
   // Fee_Compute helper — defined after the struct so all fee math sites
   // share one implementation. See note in main file just below struct.
   FPN<F> risk_pct; // fraction of balance to risk per position (e.g. 0.02 = 2%)
@@ -511,6 +517,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // (legacy mode), backward-compat clause below mirrors to both.
   cfg.fee_rate_maker = FPN_FromDouble<F>(0.00075); // 0.075% maker tier 0
   cfg.fee_rate_taker = FPN_FromDouble<F>(0.00100); // 0.100% taker tier 0
+  cfg.pay_fees_in_bnb = 0;                          // v4.3.2: 1 = apply BNB 25% discount
   cfg.risk_pct = FPN_FromDouble<F>(0.02);  // risk 2% of balance per position
   cfg.volume_multiplier = FPN_FromDouble<F>(3.0);
   cfg.entry_offset_pct = FPN_FromDouble<F>(0.0015);
@@ -902,6 +909,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 
     //--- uint32_t ---
     CFG_PARSE_U32(poll_interval)
+    CFG_PARSE_U32(pay_fees_in_bnb)  // v4.3.2 Track C.1 — Binance BNB 25% fee discount
     CFG_PARSE_U32(warmup_ticks)
     CFG_PARSE_U32(slow_path_max_secs)
     CFG_PARSE_U32(max_hold_ticks)

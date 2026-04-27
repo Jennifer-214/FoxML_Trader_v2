@@ -367,6 +367,21 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // backtest sharded, these are also set explicitly there (BacktestSharded.hpp).
     oms.fee_rate_maker = cfg.fee_rate_maker;
     oms.fee_rate_taker = cfg.fee_rate_taker;
+    // v4.3.2 (Track C.1) — Binance BNB-pay 25% fee discount. Apply at
+    // boot so all fee math sites (sizing's no-trade-band, Fee_Compute,
+    // OnEvent's exit fee, kill-switch margin estimation) see the
+    // discounted rates uniformly. User must also enable BNB fee payment
+    // in Binance UI for this to actually apply on live fills.
+    if (cfg.pay_fees_in_bnb) {
+        FPN<F> bnb_factor = FPN_FromDouble<F>(0.75);
+        oms.fee_rate_maker = FPN_Mul(oms.fee_rate_maker, bnb_factor);
+        oms.fee_rate_taker = FPN_Mul(oms.fee_rate_taker, bnb_factor);
+        fprintf(stderr,
+            "[sharded] BNB fee discount ENABLED — maker=%.4f%% taker=%.4f%% "
+            "(verify Binance UI 'pay fees in BNB' is also on)\n",
+            FPN_ToDouble(oms.fee_rate_maker) * 100.0,
+            FPN_ToDouble(oms.fee_rate_taker) * 100.0);
+    }
     // v4.2.1 — paper-mode slippage simulation. Cfg-driven (engine.cfg
     // slippage_pct). Live mode reads exchange fill prices directly so this
     // value is ignored (EventLoop_OnEvent gates on live_trading).
