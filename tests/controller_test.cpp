@@ -5973,6 +5973,198 @@ e3_skip_load:;
         }
     }
 
+    //======================================================================================================
+    // [Mode 1 — partials per-core accounting via FillRecord + DrainPostFill]
+    //======================================================================================================
+    // Verify the mode-1 path that replaced legacy mode-0 EventLoop_OnEvent
+    // for sharded engines. Synthesizes fills directly via
+    // OrderManager_HandleFill, runs EventLoop_DrainPostFill, asserts
+    // CoreContext stats accumulate correctly under partials geometry.
+    //======================================================================================================
+    printf("\n--- Mode 1 — partials accounting (FillRecord + DrainPostFill) ---\n");
+    {
+        struct R {
+            tt::OrderManagerState<64> oms;
+            tt::EventLoopState<64> state;
+            tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE> tick_rings[4];
+            tt::ExecutionCore<64> cores[4];
+        };
+        R* r = new R();
+        tt::EventLoopState_InitLegacy(&r->state, &r->oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+        // Mode 1 — OMS owns portfolio mutation + per-core accounting via
+        // the FillRecord machinery this commit added.
+        r->oms.event_log_mode      = 1;
+        r->oms.partial_exit_enabled = 1;  // paired-leg geometry
+        r->oms.fee_rate_taker      = FPN_FromDouble<64>(0.001);  // 10bps taker
+        r->oms.fee_rate_maker      = FPN_FromDouble<64>(0.001);
+
+        // Two cores → 4 portfolio slots in pair mode (slot 2c is leg A,
+        // 2c+1 is leg B for core c).
+        for (int c = 0; c < 2; ++c) {
+            tt::SPSCRing_Init(&r->tick_rings[c]);
+            tt::ExecutionCore_Init(&r->cores[c], c, &r->tick_rings[c]);
+            tt::EventLoopState_RegisterCore(&r->state, &r->cores[c],
+                FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+                FPN_FromDouble<64>(0.01));
+            tt::EventLoopState_SetCoreStrategy(&r->state, c,
+                STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(1500.0));
+        }
+
+        // Synthesize a paired entry fill on core 0 (slots 0 + 1).
+        // Total qty 0.02 split 50/50: leg A = 0.01, leg B = 0.01.
+        // Entry price = 60000. Notional per leg = 0.01 × 60000 = $600.
+        // Per-core open_notional total = $600 + $600 = $1200 (NOT $2400 —
+        // the bug we fixed).
+        auto submit_and_fill_entry = [&](int portfolio_slot, double qty, double price) {
+            tt::ExchangeAdapter<64> empty{};
+            uint64_t oid = tt::OrderManager_Submit(&r->oms,
+                (int16_t)portfolio_slot, tt::ORDER_MARKET_BUY,
+                FPN_FromDouble<64>(qty),
+                FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+                STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(price), 0);
+            (void)oid;
+            // Find the order we just submitted and fill it.
+            for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
+                if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
+                tt::Order<64>* o = &r->oms.orders[i];
+                if (o->core_id == portfolio_slot && o->state != tt::ORDER_FILLED) {
+                    tt::OrderManager_HandleFill(&r->oms, o,
+                        FPN_FromDouble<64>(price), FPN_FromDouble<64>(qty));
+                    o->state = tt::ORDER_FILLED;
+                    r->oms.order_bitmap &= ~(uint16_t)(1u << i);
+                    break;
+                }
+            }
+        };
+
+        submit_and_fill_entry(0, 0.01, 60000.0);  // core 0 leg A
+        submit_and_fill_entry(1, 0.01, 60000.0);  // core 0 leg B
+
+        // Pre-drain: per-core stats are zero (FillRecord is captured but
+        // not consumed yet).
+        check("mode 1 pre-drain: core 0 open_notional still 0",
+              FPN_IsZero(r->state.cores[0].core_open_notional));
+        check("mode 1 pre-drain: oms.last_opened_mask has slots 0+1",
+              (r->oms.last_opened_mask & 0x3) == 0x3);
+
+        tt::EventLoop_DrainPostFill(&r->state, &r->oms, 0);
+
+        // Post-drain: open_notional sums to $1200 ($600 per leg × 2 legs),
+        // both legs accumulated into core 0's CoreContext. The 200% bug
+        // was caused by mode-0 OnEvent adding ctx->intended_qty (full
+        // qty) per leg event — it accumulated to $2400 instead.
+        double open_n = FPN_ToDouble(r->state.cores[0].core_open_notional);
+        check("mode 1 post-drain: core 0 open_notional == $1200 (both legs)",
+              fabs(open_n - 1200.0) < 0.5);
+        check("mode 1 post-drain: open_notional ≤ allocated (no 200% bug)",
+              open_n <= 1500.0 + 0.01);
+        check("mode 1 post-drain: last_opened_mask cleared",
+              r->oms.last_opened_mask == 0);
+        // Fees: 0.001 × $600 × 2 legs = $1.20
+        check("mode 1 post-drain: core 0 fees accumulated",
+              FPN_ToDouble(r->state.cores[0].core_fees) > 1.0 &&
+              FPN_ToDouble(r->state.cores[0].core_fees) < 1.5);
+
+        // Synthesize paired exit at $61200 (= +2% gross).
+        auto submit_and_fill_exit = [&](int portfolio_slot, double qty, double price) {
+            uint64_t oid = tt::OrderManager_Submit(&r->oms,
+                (int16_t)portfolio_slot, tt::ORDER_MARKET_SELL,
+                FPN_FromDouble<64>(qty),
+                FPN_Zero<64>(), FPN_Zero<64>(),
+                STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(price), 0);
+            (void)oid;
+            for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
+                if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
+                tt::Order<64>* o = &r->oms.orders[i];
+                if (o->core_id == portfolio_slot && o->state != tt::ORDER_FILLED) {
+                    tt::OrderManager_HandleFill(&r->oms, o,
+                        FPN_FromDouble<64>(price), FPN_FromDouble<64>(qty));
+                    o->state = tt::ORDER_FILLED;
+                    r->oms.order_bitmap &= ~(uint16_t)(1u << i);
+                    break;
+                }
+            }
+        };
+        submit_and_fill_exit(0, 0.01, 61200.0);  // leg A profit
+        submit_and_fill_exit(1, 0.01, 61200.0);  // leg B profit
+
+        tt::EventLoop_DrainPostFill(&r->state, &r->oms, 0);
+
+        // Both legs profited → core_realized accumulates net P&L of both,
+        // open_notional decrements back to ~0, core_wins == 2.
+        double realized = FPN_ToDouble(r->state.cores[0].core_realized);
+        check("mode 1 post-exit: core 0 core_realized > 0 (both legs profited)",
+              realized > 0.0);
+        check("mode 1 post-exit: core 0 open_notional decremented to ~0",
+              FPN_ToDouble(r->state.cores[0].core_open_notional) < 0.5);
+        check("mode 1 post-exit: core 0 wins == 2",
+              r->state.cores[0].core_wins == 2);
+        check("mode 1 post-exit: core 0 losses == 0",
+              r->state.cores[0].core_losses == 0);
+        check("mode 1 post-exit: last_closed_mask cleared",
+              r->oms.last_closed_mask == 0);
+
+        // Other cores untouched.
+        check("mode 1: core 1 open_notional still 0 (no fills)",
+              FPN_IsZero(r->state.cores[1].core_open_notional));
+        check("mode 1: core 1 wins/losses still 0",
+              r->state.cores[1].core_wins == 0 &&
+              r->state.cores[1].core_losses == 0);
+
+        delete r;
+    }
+
+    // Mode 1 — partials disabled: slot == core_id, single-leg accounting
+    // (regression check that the new path doesn't change non-partials behavior)
+    {
+        struct R {
+            tt::OrderManagerState<64> oms;
+            tt::EventLoopState<64> state;
+            tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
+            tt::ExecutionCore<64> core;
+        };
+        R* r = new R();
+        tt::EventLoopState_InitLegacy(&r->state, &r->oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+        r->oms.event_log_mode       = 1;
+        r->oms.partial_exit_enabled = 0;  // single-leg
+        r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
+        r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
+        tt::SPSCRing_Init(&r->tick_ring);
+        tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
+        tt::EventLoopState_RegisterCore(&r->state, &r->core,
+            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+            FPN_FromDouble<64>(0.01));
+        tt::EventLoopState_SetCoreStrategy(&r->state, 0,
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(1500.0));
+
+        // Synthesize a single full-qty entry fill on slot 0.
+        uint64_t oid = tt::OrderManager_Submit(&r->oms,
+            0, tt::ORDER_MARKET_BUY, FPN_FromDouble<64>(0.02),
+            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+        (void)oid;
+        for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
+            if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
+            tt::Order<64>* o = &r->oms.orders[i];
+            if (o->state != tt::ORDER_FILLED) {
+                tt::OrderManager_HandleFill(&r->oms, o,
+                    FPN_FromDouble<64>(60000.0), FPN_FromDouble<64>(0.02));
+                o->state = tt::ORDER_FILLED;
+                r->oms.order_bitmap &= ~(uint16_t)(1u << i);
+                break;
+            }
+        }
+        tt::EventLoop_DrainPostFill(&r->state, &r->oms, 0);
+
+        // Notional = 0.02 × 60000 = $1200 (full qty).
+        check("mode 1 partials-off: core 0 open_notional == $1200 single leg",
+              fabs(FPN_ToDouble(r->state.cores[0].core_open_notional) - 1200.0) < 0.5);
+
+        delete r;
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

@@ -721,10 +721,13 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.mr_sl_pct         = FPN_Zero<F>();
   cfg.emacross_tp_pct   = FPN_Zero<F>();
   cfg.emacross_sl_pct   = FPN_Zero<F>();
-  // OMS phase 03 — default to legacy OnEvent path so existing tests and
-  // the production engine before the migration soak stay on the known-good
-  // code.
-  cfg.oms_event_log_mode = 0;
+  // OMS phase 03 — mode 1: OMS owns portfolio mutation + per-core
+  // accounting (via FillRecord drained post-Tick). Required for partials
+  // (mode 0 used event.core_id directly as portfolio slot, which breaks
+  // when slot != core_id under paired-leg geometry). Mode 0 left in
+  // place for tests that explicitly want the legacy OnEvent path; new
+  // production code paths default to 1.
+  cfg.oms_event_log_mode = 1;
   return cfg;
 }
 //======================================================================================================

@@ -403,6 +403,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // slippage_pct). Live mode reads exchange fill prices directly so this
     // value is ignored (EventLoop_OnEvent gates on live_trading).
     oms.slippage_pct = cfg.slippage_pct;
+    // Partials geometry mirrored to OMS for the post-fill drainer's
+    // slot→core_id mapping. Set once at init — toggle requires snapshot v3
+    // reload anyway (see Snapshot Re-Activation Invariant).
+    oms.partial_exit_enabled = cfg.partial_exit_enabled ? 1 : 0;
 
     // Trade log CSV — same pattern as legacy engine in main.cpp
     static ShardedTradeLog g_sharded_trade_log;
@@ -1461,50 +1465,28 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // next Tick starts fresh. ML cores only — non-ML cores ignored even if
     // the bit is set (defensive: shouldn't happen since only ML strategy
     // emits trades that produce predictions, but cheap to guard).
-    auto drain_confidence_feedback = [&state, &oms, &cfg]() {
-        uint16_t mask = oms.last_closed_mask;
-        while (mask) {
-            int slot = __builtin_ctz(mask);
-            mask &= (uint16_t)(mask - 1);
-            if (slot < 0 || slot >= state.registered_count) continue;
-            double realized = oms.last_realized_return[slot];
-            // ConfidenceScorer feedback (ML cores only)
-            if (state.cores[slot].strategy_id == STRATEGY_ML) {
-                ConfidenceScorer_Update(
-                    &state.cores[slot].confidence,
-                    state.cores[slot].active_prediction,
-                    realized);
-                state.cores[slot].active_prediction = 0.0;
-            }
-            // v4.0.3 D7: SL cooldown — set on losing exits regardless of
-            // strategy. Realized return < 0 = SL (or worse) hit. Pause new
-            // entries on this core for sl_cooldown_cycles slow-path cycles.
-            // Mirrors legacy PortfolioController post-SL cooldown.
-            if (realized < 0.0 && cfg.sl_cooldown_cycles > 0) {
-                state.cores[slot].sl_cooldown_remaining = cfg.sl_cooldown_cycles;
-            }
-            // v4.0.3 D10: push realized P&L to per-core feeder for adaptive
-            // filter feedback. Slope of recent returns drives shifts to
-            // entry_offset_pct + volume_multiplier on slow-path rebuild.
-            RegressionFeederX_Push(&state.cores[slot].pnl_feeder,
-                                    FPN_FromDouble<F>(realized));
-        }
-        oms.last_closed_mask = 0;
+    // Mode 1 per-fill drainer pass — implementation in
+    // ControllerEventLoop.hpp::EventLoop_DrainPostFill. Same producer-
+    // consumer contract: drainer thread (here) consumes what
+    // OrderManager_Tick produces. Extracted to a standalone function so
+    // it's directly unit-testable without standing up a producer thread.
+    auto drain_post_fill = [&state, &oms, &cfg]() {
+        EventLoop_DrainPostFill(&state, &oms, cfg.sl_cooldown_cycles);
     };
 
-    std::thread drainer([&state, &oms, &producer_done, &drain_with_submit, &drain_confidence_feedback] {
+    std::thread drainer([&state, &oms, &producer_done, &drain_with_submit, &drain_post_fill] {
         EngineSharded_PinThread(state.registered_count + 1);
         while (!g_engine_sharded_shutdown) {
             int total_drained = drain_with_submit();
             OrderManager_Tick(&oms);
-            drain_confidence_feedback();
+            drain_post_fill();
 
             if (total_drained == 0) std::this_thread::yield();
             if (producer_done.load(std::memory_order_acquire)) {
                 for (int k = 0; k < 16; ++k) {
                     drain_with_submit();
                     OrderManager_Tick(&oms);
-                    drain_confidence_feedback();
+                    drain_post_fill();
                 }
                 break;
             }

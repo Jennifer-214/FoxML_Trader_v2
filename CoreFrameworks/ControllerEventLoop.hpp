@@ -571,6 +571,81 @@ inline void EventLoopState_SetIntendedParams(EventLoopState<F>* state, int slot,
 }
 
 //======================================================================================================
+// [DRAIN POST-FILL — mode 1 per-core stats consumer]
+//======================================================================================================
+// Run by the drainer thread after every OrderManager_Tick. Consumes the
+// FillRecords + masks populated by OrderManager_HandleFill and applies
+// per-core CoreContext updates that the legacy mode-0 path used to do
+// inside EventLoop_OnEvent: core_open_notional, core_realized, core_fees,
+// core_wins/core_losses, ConfidenceScorer feedback, SL cooldown,
+// pnl_feeder push.
+//
+// Slot → core_id mapping is partials-aware via oms->partial_exit_enabled.
+// Both legs of a paired trade route their stats to the SAME CoreContext
+// (one per core, not one per leg) — partials only split the exit
+// schedule, not the allocation. Entry-time stamping (active_prediction
+// reset, ConfidenceScorer update) fires per-leg-exit, but
+// active_prediction was already stashed by leg-A entry; the second update
+// just resets it to 0 a second time. Acceptable; future cleanup could
+// gate on leg via FillRecord.
+//
+// All slow-path. Single-threaded (drainer is sole reader, OMS_Tick on
+// the same thread is sole writer). FPN-pure on the per-core math.
+//======================================================================================================
+template <unsigned F>
+inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
+                                     OrderManagerState<F>* oms,
+                                     uint32_t sl_cooldown_cycles) {
+    const int partial_on = oms->partial_exit_enabled ? 1 : 0;
+    const int max_slot   = partial_on ? state->registered_count * 2
+                                      : state->registered_count;
+
+    // ---- Entries: open_notional / fees ----
+    uint16_t open_mask = oms->last_opened_mask;
+    while (open_mask) {
+        int slot = __builtin_ctz(open_mask);
+        open_mask &= (uint16_t)(open_mask - 1);
+        if (slot < 0 || slot >= max_slot) continue;
+        int core_id = partial_on ? (slot >> 1) : slot;
+        CoreContext<F>& ctx = state->cores[core_id];
+        const auto& rec = oms->last_fill[slot];
+        ctx.core_open_notional = FPN_Add(ctx.core_open_notional, rec.entry_notional);
+        ctx.core_fees          = FPN_AddSat(ctx.core_fees, rec.entry_fee);
+    }
+    oms->last_opened_mask = 0;
+
+    // ---- Exits: realized / open_notional decrement / fees / W-L /
+    //            ConfidenceScorer / SL cooldown / pnl_feeder ----
+    uint16_t close_mask = oms->last_closed_mask;
+    while (close_mask) {
+        int slot = __builtin_ctz(close_mask);
+        close_mask &= (uint16_t)(close_mask - 1);
+        if (slot < 0 || slot >= max_slot) continue;
+        int core_id = partial_on ? (slot >> 1) : slot;
+        CoreContext<F>& ctx = state->cores[core_id];
+        const auto& rec = oms->last_fill[slot];
+
+        ctx.core_realized      = FPN_Add(ctx.core_realized, rec.exit_net_pnl);
+        ctx.core_open_notional = FPN_SubSat(ctx.core_open_notional, rec.exit_entry_notional);
+        ctx.core_fees          = FPN_AddSat(ctx.core_fees, rec.exit_total_fees);
+        ctx.core_wins   += (rec.was_win ? 1u : 0u);
+        ctx.core_losses += (rec.was_win ? 0u : 1u);
+
+        double realized = oms->last_realized_return[slot];
+        if (ctx.strategy_id == STRATEGY_ML) {
+            ConfidenceScorer_Update(&ctx.confidence,
+                                    ctx.active_prediction, realized);
+            ctx.active_prediction = 0.0;
+        }
+        if (realized < 0.0 && sl_cooldown_cycles > 0) {
+            ctx.sl_cooldown_remaining = sl_cooldown_cycles;
+        }
+        RegressionFeederX_Push(&ctx.pnl_feeder, FPN_FromDouble<F>(realized));
+    }
+    oms->last_closed_mask = 0;
+}
+
+//======================================================================================================
 // [ON EVENT]
 //======================================================================================================
 // process one TradeEvent. dispatches to entry or exit handling based on
