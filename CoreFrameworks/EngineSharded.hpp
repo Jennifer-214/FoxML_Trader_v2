@@ -506,6 +506,19 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // while backtest produced them non-zero, causing model train/serve drift.
     static RORRegressor<F> regime_ror = RORRegressor_Init<F>();
     static FPN<F> ema_price = FPN_Zero<F>();
+    // v4.3 — feature-pack expansion. Shared per-engine (not per-core) since
+    // these describe market state, not core state. Same population cadence
+    // as legacy PortfolioController so train-serve parity is preserved.
+    static RollingStats<F, 256>  rolling_medium   = RollingStats_Init<F, 256>();
+    static RollingStats<F, 1024> rolling_baseline = RollingStats_Init<F, 1024>();
+    static CumDeltaState<F>      cumdelta_state;
+    static TickRateState         tick_rate_state;
+    static int                   v43_state_initialized = 0;
+    if (!v43_state_initialized) {
+        CumDelta_Init(&cumdelta_state);
+        TickRate_Init(&tick_rate_state);
+        v43_state_initialized = 1;
+    }
     // EMA alpha matches PortfolioController_Init's default (gate_ema_alpha
     // is the cfg key). Computed at boot from cfg; updated each tick.
     FPN<F> ema_alpha = !FPN_IsZero(cfg.gate_ema_alpha)
@@ -513,6 +526,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                        : FPN_FromDouble<F>(0.1);
     rolling_short = RollingStats_Init<F, 128>();
     rolling_long  = RollingStats_Init<F, 512>();
+    rolling_medium = RollingStats_Init<F, 256>();
+    rolling_baseline = RollingStats_Init<F, 1024>();
+    CumDelta_Init(&cumdelta_state);
+    TickRate_Init(&tick_rate_state);
 
     // Per-core risk allocation: split the configured starting balance across
     // cores. Each core gets its own mini-portfolio that's risk_pct of the
@@ -693,14 +710,17 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // updates rolling stats, and runs the slow-path rebuild on cadence.
         auto fan_out = [num_cores, &seq, &ticks_produced, &last_price, &last_volume,
                         &cfg, &state, &slow_path_counter, slow_path_interval, tsc_ghz,
-                        &ema_price, ema_alpha, &regime_ror, live_trading]
-                       (double price_d, double volume_d, uint64_t ts_us) {
+                        &ema_price, ema_alpha, &regime_ror, live_trading,
+                        &rolling_medium, &rolling_baseline, &cumdelta_state, &tick_rate_state]
+                       (double price_d, double volume_d, uint64_t ts_us,
+                        int is_buyer_maker = 0) {  // v4.3 — defaulted for synthetic paths
             Tick<F> t;
             memset(&t, 0, sizeof(t));
             t.price = FPN_FromDouble<F>(price_d);
             t.volume = FPN_FromDouble<F>(volume_d);
             t.timestamp = ts_us;
             t.sequence = seq++;
+            t.is_buyer_maker = (uint8_t)(is_buyer_maker ? 1 : 0);
             for (int c = 0; c < num_cores; ++c) {
                 while (!SPSCRing_TryPush(&tick_rings[c], t)) {
                     if (g_engine_sharded_shutdown) return false;
@@ -744,6 +764,18 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 slow_path_counter = 0;
                 RollingStats_Push(&rolling_short, t.price, t.volume);
                 RollingStats_Push(&rolling_long,  t.price, t.volume);
+                // v4.3 — feed expanded feature-pack state. is_buyer_maker not
+                // available from sharded fan_out yet (TODO: thread it from
+                // BinanceStream). For now, default to 0 = treat all volume as
+                // taker-buy aggression. This matches train-serve parity for
+                // the backtest's CSV-aware path only when we plumb is_buyer_maker
+                // through both. Until that plumbing lands in v4.3.1, cumdelta
+                // skews high-aggression-positive in live; backtest still gets
+                // the real signed delta from CSV.
+                RollingStats_Push(&rolling_medium, t.price, t.volume);
+                RollingStats_Push(&rolling_baseline, t.price, t.volume);
+                CumDelta_Push(&cumdelta_state, t.volume, is_buyer_maker);
+                TickRate_Push(&tick_rate_state, ts_us);
                 // v4.0 train-serve parity: feed rolling slope to RORRegressor
                 // (slope of slopes = trend acceleration). Matches legacy at
                 // PortfolioController.hpp:1552. Without this, sig->ror_slope
@@ -896,9 +928,20 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // on the first slow path before any tick has been seen.
                 FPN<F> mtm_price = FPN_FromDouble<F>(
                     last_price.load(std::memory_order_relaxed));
+                // v4.3 — pass expanded feature-pack state for the model's
+                // medium-horizon features. Same pointers go to both the AUTO
+                // regime resolution branch (above the dispatch) and the ML
+                // strategy branch (via MLBuildContext) — single source of
+                // truth, train-serve parity preserved.
+                uint64_t rebuild_ts_us = (uint64_t)
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
                 EventLoop_RebuildAllParameters(&state, &rolling_short, &cfg, &rolling_long,
                                                 &regime_ror, &ema_price,
-                                                FPN_IsZero(mtm_price) ? nullptr : &mtm_price);
+                                                FPN_IsZero(mtm_price) ? nullptr : &mtm_price,
+                                                &rolling_medium, &rolling_baseline,
+                                                &cumdelta_state, &tick_rate_state,
+                                                rebuild_ts_us);
 
                 // Phase 4 — periodic snapshot save. Once every ~1024 slow-path
                 // cycles, paper mode only. With slow_path_interval=8 ticks and
@@ -1125,7 +1168,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // since epoch from Binance; expand to micros for the per-core
                     // Tick.timestamp field.
                     if (!fan_out(ds.price_d, ds.volume_d,
-                                  (uint64_t)time(NULL) * 1000000ULL)) {
+                                  (uint64_t)time(NULL) * 1000000ULL,
+                                  ds.is_buyer_maker)) {
                         break;
                     }
                     if (!BinanceStream_HasPending(&bs)) break;

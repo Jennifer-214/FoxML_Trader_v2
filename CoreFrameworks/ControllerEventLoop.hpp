@@ -735,7 +735,13 @@ inline int EventLoop_RebuildAllParameters(
     const RollingStats<F, WL>* rolling_long = nullptr,
     const void* ror_regressor = nullptr,    // const RORRegressor<F>*
     const void* ema_price     = nullptr,    // const FPN<F>*
-    const void* current_price = nullptr     // const FPN<F>* — Phase 3 MTM
+    const void* current_price = nullptr,    // const FPN<F>* — Phase 3 MTM
+    // v4.3 — expanded feature-pack state (optional)
+    const void* rolling_medium   = nullptr,  // const RollingStats<F, 256>*
+    const void* rolling_baseline = nullptr,  // const RollingStats<F, 1024>*
+    const void* cumdelta_state   = nullptr,  // const CumDeltaState<F>*
+    const void* tick_rate_state  = nullptr,  // const TickRateState*
+    uint64_t timestamp_us = 0
 ) {
     int rebuilt = 0;
     for (int slot = 0; slot < state->registered_count; ++slot) {
@@ -827,7 +833,15 @@ inline int EventLoop_RebuildAllParameters(
             const RORRegressor<F>* ror_in = (const RORRegressor<F>*)ror_regressor;
             const FPN<F>* ema_in          = (const FPN<F>*)ema_price;
             RegimeSignals<F> sig;
-            Regime_ComputeSignals(&sig, rolling, rolling_long, ror_in, *ema_in);
+            // v4.3 — pass expanded state so AUTO regime classification sees
+            // the same features the ML core will see (consistency for the
+            // few signals Regime_Classify reads beyond just slope/R²).
+            Regime_ComputeSignals(&sig, rolling, rolling_long, ror_in, *ema_in,
+                                   (const RollingStats<F, 256>*)rolling_medium,
+                                   (const RollingStats<F, 1024>*)rolling_baseline,
+                                   (const CumDeltaState<F>*)cumdelta_state,
+                                   (const TickRateState*)tick_rate_state,
+                                   timestamp_us);
             int old_regime = state->cores[slot].regime_state.current_regime;
             int new_regime = Regime_Classify(&state->cores[slot].regime_state,
                                               &sig, &resolved_cfg);
@@ -872,6 +886,12 @@ inline int EventLoop_RebuildAllParameters(
             // feature set the backtest path produces during training.
             ml_ctx.ror_regressor  = (void*)ror_regressor;
             ml_ctx.ema_price      = (void*)ema_price;
+            // v4.3 — feature-pack expansion state from the engine slow path
+            ml_ctx.rolling_medium  = (void*)rolling_medium;
+            ml_ctx.rolling_baseline= (void*)rolling_baseline;
+            ml_ctx.cumdelta_state  = (void*)cumdelta_state;
+            ml_ctx.tick_rate_state = (void*)tick_rate_state;
+            ml_ctx.timestamp_us    = timestamp_us;
             dispatch_ctx = &ml_ctx;
         }
         // v4.0.4: stash the resolved strategy for GUI display. For non-AUTO

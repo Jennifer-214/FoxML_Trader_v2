@@ -49,6 +49,7 @@
 #endif
 #include <stdio.h>
 #include <time.h>
+#include <chrono>  // v4.3 — wall clock fallback for timestamp_us in feature pack
 
 // timestamp helper for structured log output — HH:MM:SS UTC
 static inline void log_ts(char *buf, size_t len) {
@@ -242,6 +243,12 @@ template <unsigned F> struct PortfolioController {
   //================================================================================================
   RollingStats<F> rolling;
   RollingStats<F, 512> *rolling_long;  // heap-allocated (24KB), slow path only
+  // v4.3 — feature-pack expansion. All heap-allocated, shared across cores
+  // (per-engine state, not per-core, since these describe market state).
+  RollingStats<F, 256> *rolling_medium;     // ~393KB, mid-horizon slope/R²
+  RollingStats<F, 1024> *rolling_baseline;  // ~1.5MB, vol regime + extremes
+  CumDeltaState<F> *cumdelta_state;         // ~512KB, buyer/seller aggression
+  TickRateState tick_rate_state;            // 8KB inline, tick arrival rate
 
   // Welford online trackers (unbounded stream, O(1) push)
   WelfordTracker<F> pnl_tracker;      // per-exit P&L distribution
@@ -416,6 +423,33 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
     return;
   }
   *ctrl->rolling_long = RollingStats_Init<F, 512>();
+
+  // v4.3 — feature-pack expansion state (heap-allocated, ~2.5MB total)
+  if (ctrl->rolling_medium) free(ctrl->rolling_medium);
+  ctrl->rolling_medium = (RollingStats<F, 256>*)malloc(sizeof(RollingStats<F, 256>));
+  if (!ctrl->rolling_medium) {
+    fprintf(stderr, "[FATAL] malloc failed for rolling_medium (~393KB)\n");
+    return;
+  }
+  *ctrl->rolling_medium = RollingStats_Init<F, 256>();
+
+  if (ctrl->rolling_baseline) free(ctrl->rolling_baseline);
+  ctrl->rolling_baseline = (RollingStats<F, 1024>*)malloc(sizeof(RollingStats<F, 1024>));
+  if (!ctrl->rolling_baseline) {
+    fprintf(stderr, "[FATAL] malloc failed for rolling_baseline (~1.5MB)\n");
+    return;
+  }
+  *ctrl->rolling_baseline = RollingStats_Init<F, 1024>();
+
+  if (ctrl->cumdelta_state) free(ctrl->cumdelta_state);
+  ctrl->cumdelta_state = (CumDeltaState<F>*)malloc(sizeof(CumDeltaState<F>));
+  if (!ctrl->cumdelta_state) {
+    fprintf(stderr, "[FATAL] malloc failed for cumdelta_state (~512KB)\n");
+    return;
+  }
+  CumDelta_Init(ctrl->cumdelta_state);
+
+  TickRate_Init(&ctrl->tick_rate_state);
 
   // warmup validation: ensure warmup_ticks >= max feature lookback
   // features read N ticks back — if warmup is shorter, features see uninitialized data
@@ -983,6 +1017,13 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       ctrl->volume_sum = FPN_AddSat(ctrl->volume_sum, current_volume);
       RollingStats_Push(&ctrl->rolling, current_price, current_volume, is_buyer_maker);
       RollingStats_Push(ctrl->rolling_long, current_price, current_volume, is_buyer_maker);
+      // v4.3 — feed new state for feature pack expansion
+      if (ctrl->rolling_medium)
+          RollingStats_Push(ctrl->rolling_medium, current_price, current_volume, is_buyer_maker);
+      if (ctrl->rolling_baseline)
+          RollingStats_Push(ctrl->rolling_baseline, current_price, current_volume, is_buyer_maker);
+      if (ctrl->cumdelta_state)
+          CumDelta_Push(ctrl->cumdelta_state, current_volume, is_buyer_maker);
       ctrl->tick_count = 0; // Reset for main.cpp slow-path detection
     }
 
@@ -1561,7 +1602,19 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // regime detection: compute signals from rolling stats + ROR, then classify
   {
     RegimeSignals<F> signals;
-    Regime_ComputeSignals(&signals, &ctrl->rolling, ctrl->rolling_long, &ctrl->regime_ror, ctrl->ema_price);
+    // v4.3 — pass expanded state for the new features. timestamp_us comes
+    // from sim_time (backtest) or wall clock (live legacy mode).
+    uint64_t now_us = (uint64_t)ctrl->sim_time * 1000000ULL;
+    if (now_us == 0) {
+        now_us = (uint64_t)
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+    // Push tick rate sample at slow-path cadence (good enough for the z-score)
+    TickRate_Push(&ctrl->tick_rate_state, now_us);
+    Regime_ComputeSignals(&signals, &ctrl->rolling, ctrl->rolling_long, &ctrl->regime_ror, ctrl->ema_price,
+                          ctrl->rolling_medium, ctrl->rolling_baseline,
+                          ctrl->cumdelta_state, &ctrl->tick_rate_state, now_us);
 
     // Mode A: regime model enrichment — add model_score to classification
     if (Model_IsLoaded(&ctrl->regime_model)) {

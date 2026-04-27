@@ -90,6 +90,14 @@ struct MLBuildContext {
     // backtest path produces during training.
     void*               ror_regressor;   // const RORRegressor<F>*
     void*               ema_price;       // const FPN<F>*
+    // v4.3 — feature-pack expansion. Same pattern: engine maintains the
+    // state, ML_BuildParameters threads it into Regime_ComputeSignals so
+    // sharded live and legacy backtest produce identical features.
+    void*               rolling_medium;  // const RollingStats<F, 256>*
+    void*               rolling_baseline;// const RollingStats<F, 1024>*
+    void*               cumdelta_state;  // const CumDeltaState<F>*
+    void*               tick_rate_state; // const TickRateState*
+    uint64_t            timestamp_us;    // current tick wall time for hour-of-day
 };
 
 //======================================================================================================
@@ -452,7 +460,14 @@ inline void ML_BuildParameters(
     RegimeSignals<F> sig;
     memset(&sig, 0, sizeof(sig));
     if (ror_in && ema_in && rolling_long) {
-        Regime_ComputeSignals(&sig, rolling, rolling_long, ror_in, *ema_in);
+        // v4.3 — forward the expanded feature-pack state if mctx provides it
+        const RollingStats<F, 256>* mid = mctx ? (const RollingStats<F, 256>*)mctx->rolling_medium : nullptr;
+        const RollingStats<F, 1024>* base = mctx ? (const RollingStats<F, 1024>*)mctx->rolling_baseline : nullptr;
+        const CumDeltaState<F>* cd = mctx ? (const CumDeltaState<F>*)mctx->cumdelta_state : nullptr;
+        const TickRateState* tr = mctx ? (const TickRateState*)mctx->tick_rate_state : nullptr;
+        uint64_t ts = mctx ? mctx->timestamp_us : 0;
+        Regime_ComputeSignals(&sig, rolling, rolling_long, ror_in, *ema_in,
+                               mid, base, cd, tr, ts);
     } else {
         sig.short_slope    = FPN_IsZero(rolling->price_avg) ? FPN_Zero<F>()
                              : FPN_DivNoAssert(rolling->price_slope, rolling->price_avg);

@@ -47,7 +47,18 @@
 #define FEAT_PRICE_AVG       13
 #define FEAT_VOLUME_AVG      14
 #define FEAT_EMA_ABOVE_SMA   15
-#define MODEL_NUM_FEATURES   16
+// v4.3 — medium-horizon feature expansion. All append-only (CLAUDE.md
+// "Adding a new ML feature" — never reorder, never remove).
+#define FEAT_MID_SLOPE       16  // slope on 256-tick window (between short and long)
+#define FEAT_MID_R2          17  // R² of mid-window slope
+#define FEAT_CUMDELTA        18  // cumulative trade-side delta (buyer - seller agg) over rolling window
+#define FEAT_HOUR_SIN        19  // cyclical hour-of-day: sin(2π × hour/24)
+#define FEAT_HOUR_COS        20  // cyclical hour-of-day: cos(2π × hour/24)
+#define FEAT_VOL_REGIME_RAT  21  // current short_stddev / longer-baseline stddev (4096-tick)
+#define FEAT_TICK_RATE_Z     22  // current ticks/sec z-score vs trailing baseline
+#define FEAT_DIST_TO_HIGH    23  // (price_max_baseline - current_price) / price (% below recent high)
+#define FEAT_DIST_TO_LOW     24  // (current_price - price_min_baseline) / price (% above recent low)
+#define MODEL_NUM_FEATURES   25
 
 // max features buffer (room for future expansion)
 #define MODEL_MAX_FEATURES   32
@@ -56,7 +67,11 @@
 // embedded in trained models, checked at load time. old models with wrong
 // version fail loudly instead of producing silent garbage predictions.
 // FEAT_* constants are APPEND-ONLY — never reorder, never remove.
-#define MODEL_FORMAT_VERSION 1
+// v1: initial 16-feature pack
+// v2 (v4.3): added 9 medium-horizon features (FEAT_MID_*, FEAT_CUMDELTA,
+//           FEAT_HOUR_SIN/COS, FEAT_VOL_REGIME_RAT, FEAT_TICK_RATE_Z,
+//           FEAT_DIST_TO_HIGH/LOW). Old v1 models will fail load.
+#define MODEL_FORMAT_VERSION 2
 
 //======================================================================================================
 // [FEATURE LOOKBACK REGISTRY]
@@ -103,6 +118,16 @@ static const FeatureLookback FEATURE_LOOKBACKS[] = {
     { FEAT_PRICE_AVG,      "price_avg",      128, 1 },
     { FEAT_VOLUME_AVG,     "volume_avg",     128, 1 },
     { FEAT_EMA_ABOVE_SMA,  "ema_above_sma",  512, 1 },
+    // v4.3 features
+    { FEAT_MID_SLOPE,      "mid_slope",      256, 1 },  // 256-tick rolling window
+    { FEAT_MID_R2,         "mid_r2",         256, 1 },
+    { FEAT_CUMDELTA,       "cumdelta",       1024, 1 },  // rolling buyer-seller agg delta
+    { FEAT_HOUR_SIN,       "hour_sin",       1, 1 },     // pure time-of-day, no lookback
+    { FEAT_HOUR_COS,       "hour_cos",       1, 1 },
+    { FEAT_VOL_REGIME_RAT, "vol_regime_rat", 1024, 1 },  // current vs longer baseline
+    { FEAT_TICK_RATE_Z,    "tick_rate_z",    1024, 1 },
+    { FEAT_DIST_TO_HIGH,   "dist_to_high",   1024, 1 },
+    { FEAT_DIST_TO_LOW,    "dist_to_low",    1024, 1 },
 };
 
 static const int FEATURE_LOOKBACK_COUNT = sizeof(FEATURE_LOOKBACKS) / sizeof(FEATURE_LOOKBACKS[0]);
@@ -455,6 +480,16 @@ inline int ModelFeatures_Pack(float *buf, const RegimeSignals<F> *sig,
     buf[FEAT_PRICE_AVG]      = (float)FPN_ToDouble(r->price_avg);
     buf[FEAT_VOLUME_AVG]     = (float)FPN_ToDouble(r->volume_avg);
     buf[FEAT_EMA_ABOVE_SMA]  = (float)sig->ema_above_sma;
+    // v4.3 — medium-horizon features
+    buf[FEAT_MID_SLOPE]      = (float)FPN_ToDouble(sig->mid_slope);
+    buf[FEAT_MID_R2]         = (float)FPN_ToDouble(sig->mid_r2);
+    buf[FEAT_CUMDELTA]       = (float)FPN_ToDouble(sig->cumdelta);
+    buf[FEAT_HOUR_SIN]       = (float)sig->hour_sin;
+    buf[FEAT_HOUR_COS]       = (float)sig->hour_cos;
+    buf[FEAT_VOL_REGIME_RAT] = (float)FPN_ToDouble(sig->vol_regime_ratio);
+    buf[FEAT_TICK_RATE_Z]    = (float)sig->tick_rate_z;
+    buf[FEAT_DIST_TO_HIGH]   = (float)FPN_ToDouble(sig->dist_to_high);
+    buf[FEAT_DIST_TO_LOW]    = (float)FPN_ToDouble(sig->dist_to_low);
     return MODEL_NUM_FEATURES;
 }
 

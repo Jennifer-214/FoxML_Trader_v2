@@ -75,7 +75,122 @@ template <unsigned F> struct RegimeSignals {
     int ror_ready;            // 1 if ROR has enough data for meaningful output
     // ML model output (populated by ModelInference if model loaded, zero otherwise)
     FPN<F> model_score;       // raw model prediction [0, 1] — higher = more likely trending
+    // v4.3 — medium-horizon feature expansion. All zero-default if the
+    // optional state/params aren't supplied to Regime_ComputeSignals.
+    FPN<F> mid_slope;         // 256-tick relative slope (between short and long)
+    FPN<F> mid_r2;            // 256-tick R²
+    FPN<F> cumdelta;          // rolling cumulative buyer-vs-seller aggression
+    double hour_sin;          // sin(2π × hour_utc / 24), cyclical hour encoding
+    double hour_cos;          // cos(2π × hour_utc / 24)
+    FPN<F> vol_regime_ratio;  // short_stddev / baseline_stddev (4096-tick)
+    double tick_rate_z;       // current ticks/sec z-score vs trailing baseline
+    FPN<F> dist_to_high;      // (baseline_max - current_price) / current_price
+    FPN<F> dist_to_low;       // (current_price - baseline_min) / current_price
 };
+
+//======================================================================================================
+// v4.3 — auxiliary state for new features (not maintained by RollingStats)
+//======================================================================================================
+// Cumulative trade-side delta — running net buyer aggression over a rolling
+// window. is_buyer_maker=1 means the buyer was the maker → seller was the
+// taker → net delta -= qty. is_buyer_maker=0 → buyer was taker → +qty.
+// Ring buffer of recent N samples for windowed aggregation.
+//======================================================================================================
+#define CUMDELTA_WINDOW 1024
+template <unsigned F> struct CumDeltaState {
+    FPN<F> sum;               // current window sum
+    FPN<F> samples[CUMDELTA_WINDOW];
+    int    head;
+    int    count;
+};
+
+template <unsigned F>
+inline void CumDelta_Init(CumDeltaState<F>* s) {
+    s->sum = FPN_Zero<F>();
+    s->head = 0;
+    s->count = 0;
+    for (int i = 0; i < CUMDELTA_WINDOW; ++i) s->samples[i] = FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline void CumDelta_Push(CumDeltaState<F>* s, FPN<F> qty, int is_buyer_maker) {
+    // is_buyer_maker=1 → seller aggression (negative); =0 → buyer aggression (+).
+    FPN<F> signed_qty = is_buyer_maker ? FPN_Negate(qty) : qty;
+    if (s->count < CUMDELTA_WINDOW) {
+        s->samples[s->head] = signed_qty;
+        s->sum = FPN_Add(s->sum, signed_qty);
+        s->head = (s->head + 1) % CUMDELTA_WINDOW;
+        s->count++;
+    } else {
+        // evict oldest, add new
+        FPN<F> evict = s->samples[s->head];
+        s->sum = FPN_Sub(s->sum, evict);
+        s->samples[s->head] = signed_qty;
+        s->sum = FPN_Add(s->sum, signed_qty);
+        s->head = (s->head + 1) % CUMDELTA_WINDOW;
+    }
+}
+
+//======================================================================================================
+// Tick arrival rate Z-score — current ticks/sec vs trailing baseline.
+// Maintains a rolling-stat estimate of inter-tick latency to compute mean
+// and stddev; current rate's z-score is informative for burst detection.
+//======================================================================================================
+#define TICKRATE_WINDOW 1024
+struct TickRateState {
+    uint64_t recent_ts_us[TICKRATE_WINDOW];  // microsecond timestamps
+    int    head;
+    int    count;
+    double trailing_mean_rate;  // baseline ticks-per-second mean
+    double trailing_stddev_rate; // baseline stddev
+};
+
+static inline void TickRate_Init(TickRateState* s) {
+    s->head = 0;
+    s->count = 0;
+    s->trailing_mean_rate = 0.0;
+    s->trailing_stddev_rate = 0.0;
+    for (int i = 0; i < TICKRATE_WINDOW; ++i) s->recent_ts_us[i] = 0;
+}
+
+static inline void TickRate_Push(TickRateState* s, uint64_t timestamp_us) {
+    s->recent_ts_us[s->head] = timestamp_us;
+    s->head = (s->head + 1) % TICKRATE_WINDOW;
+    if (s->count < TICKRATE_WINDOW) s->count++;
+    // refresh baseline stats periodically (every full buffer)
+    if (s->count == TICKRATE_WINDOW && s->head == 0) {
+        // compute current per-second rate using start/end timestamps
+        uint64_t first = s->recent_ts_us[0];
+        uint64_t last = s->recent_ts_us[TICKRATE_WINDOW - 1];
+        if (last > first) {
+            double span_sec = (double)(last - first) / 1e6;
+            double rate = (double)TICKRATE_WINDOW / span_sec;
+            // update mean using exponential decay
+            if (s->trailing_mean_rate == 0.0) {
+                s->trailing_mean_rate = rate;
+                s->trailing_stddev_rate = rate * 0.1;  // ~10% as initial stddev guess
+            } else {
+                double alpha = 0.05;  // slow decay
+                double diff = rate - s->trailing_mean_rate;
+                s->trailing_mean_rate += alpha * diff;
+                // EWMA stddev approximation
+                s->trailing_stddev_rate = (1 - alpha) * s->trailing_stddev_rate + alpha * (diff < 0 ? -diff : diff);
+            }
+        }
+    }
+}
+
+static inline double TickRate_CurrentZ(const TickRateState* s) {
+    if (s->count < 2 || s->trailing_stddev_rate <= 0.0) return 0.0;
+    // current rate from last two samples
+    int prev = (s->head - 2 + TICKRATE_WINDOW) % TICKRATE_WINDOW;
+    int curr = (s->head - 1 + TICKRATE_WINDOW) % TICKRATE_WINDOW;
+    if (s->recent_ts_us[curr] <= s->recent_ts_us[prev]) return 0.0;
+    double inter = (double)(s->recent_ts_us[curr] - s->recent_ts_us[prev]) / 1e6;
+    if (inter <= 0.0) return 0.0;
+    double current_rate = 1.0 / inter;
+    return (current_rate - s->trailing_mean_rate) / s->trailing_stddev_rate;
+}
 
 //======================================================================================================
 // [COMPUTE SIGNALS]
@@ -83,12 +198,22 @@ template <unsigned F> struct RegimeSignals {
 // fills RegimeSignals from current rolling stats, rolling_long, and ROR
 // called once per slow-path cycle before Regime_Classify
 //======================================================================================================
+// v4.3 — feature-pack expansion. Optional new state pointers populate the
+// new fields when non-null; when null, new fields stay zero-initialized so
+// older callers remain compatible at compile time. The FEAT_* indices in
+// the model still expect those features though — old v1 models will fail
+// the version check on load.
 template <unsigned F>
 inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
                                    const RollingStats<F> *rolling,
                                    const RollingStats<F, 512> *rolling_long,
                                    const RORRegressor<F> *ror,
-                                   FPN<F> ema_price) {
+                                   FPN<F> ema_price,
+                                   const RollingStats<F, 256> *rolling_medium = nullptr,
+                                   const RollingStats<F, 1024> *rolling_baseline = nullptr,
+                                   const CumDeltaState<F> *cumdelta = nullptr,
+                                   const TickRateState *tick_rate = nullptr,
+                                   uint64_t timestamp_us = 0) {
     // short window signals
     sig->short_count    = rolling->count;
     sig->short_r2       = rolling->price_r_squared;
@@ -154,6 +279,73 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
             FPN_Sub(ema_price, rolling_long->price_avg), rolling_long->price_avg);
     } else {
         sig->ema_sma_spread_long = FPN_Zero<F>();
+    }
+
+    // v4.3 — medium-horizon features. Each one zero-defaults if its required
+    // state isn't supplied; train-serve parity is preserved as long as both
+    // backtest and live populate the same state with the same cadence.
+
+    // FEAT_MID_SLOPE / FEAT_MID_R2 — 256-tick mid-window slope
+    if (rolling_medium && rolling_medium->count >= 32 && !FPN_IsZero(rolling_medium->price_avg)) {
+        sig->mid_slope = FPN_DivNoAssert(rolling_medium->price_slope, rolling_medium->price_avg);
+        sig->mid_r2    = rolling_medium->price_r_squared;
+    } else {
+        sig->mid_slope = FPN_Zero<F>();
+        sig->mid_r2    = FPN_Zero<F>();
+    }
+
+    // FEAT_CUMDELTA — rolling buyer-vs-seller aggression
+    if (cumdelta && cumdelta->count >= 32) {
+        // normalize by window size for scale-invariance
+        FPN<F> n = FPN_FromDouble<F>((double)cumdelta->count);
+        sig->cumdelta = FPN_DivNoAssert(cumdelta->sum, n);
+    } else {
+        sig->cumdelta = FPN_Zero<F>();
+    }
+
+    // FEAT_HOUR_SIN / FEAT_HOUR_COS — cyclical hour-of-day encoding
+    // timestamp_us=0 (e.g. tests / no-clock paths) → both zero
+    if (timestamp_us > 0) {
+        time_t t = (time_t)(timestamp_us / 1000000ULL);
+        struct tm utc;
+        gmtime_r(&t, &utc);
+        // hour with fractional component for smoother cyclical encoding
+        double hour_f = (double)utc.tm_hour + (double)utc.tm_min / 60.0;
+        const double TAU = 2.0 * 3.14159265358979323846;
+        sig->hour_sin = sin(TAU * hour_f / 24.0);
+        sig->hour_cos = cos(TAU * hour_f / 24.0);
+    } else {
+        sig->hour_sin = 0.0;
+        sig->hour_cos = 0.0;
+    }
+
+    // FEAT_VOL_REGIME_RAT — current short stddev / longer-baseline stddev
+    if (rolling_baseline && rolling_baseline->count >= 256 &&
+        !FPN_IsZero(rolling_baseline->price_stddev) && !FPN_IsZero(rolling->price_stddev)) {
+        sig->vol_regime_ratio = FPN_DivNoAssert(rolling->price_stddev, rolling_baseline->price_stddev);
+    } else {
+        sig->vol_regime_ratio = FPN_FromDouble<F>(1.0);  // default: no abnormality
+    }
+
+    // FEAT_TICK_RATE_Z — current ticks/sec z-score vs baseline
+    sig->tick_rate_z = (tick_rate ? TickRate_CurrentZ(tick_rate) : 0.0);
+
+    // FEAT_DIST_TO_HIGH / FEAT_DIST_TO_LOW — distance from baseline extremes
+    if (rolling_baseline && rolling_baseline->count >= 256 &&
+        !FPN_IsZero(rolling_baseline->price_avg)) {
+        FPN<F> current = rolling->price_avg;  // using rolling avg as proxy for current price
+        if (!FPN_IsZero(current)) {
+            sig->dist_to_high = FPN_DivNoAssert(
+                FPN_Sub(rolling_baseline->price_max, current), current);
+            sig->dist_to_low = FPN_DivNoAssert(
+                FPN_Sub(current, rolling_baseline->price_min), current);
+        } else {
+            sig->dist_to_high = FPN_Zero<F>();
+            sig->dist_to_low = FPN_Zero<F>();
+        }
+    } else {
+        sig->dist_to_high = FPN_Zero<F>();
+        sig->dist_to_low = FPN_Zero<F>();
     }
 }
 

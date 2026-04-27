@@ -34,6 +34,12 @@ struct alignas(64) Tick {
     FPN<F>   volume;       // current trade volume (FPN)
     uint64_t timestamp;    // market time, microseconds since epoch
     uint64_t sequence;     // monotonic sequence number from the exchange feed
+    // v4.3 — Binance "m" field. 1 = buyer was the maker (seller aggressed),
+    // 0 = buyer was the taker (buyer aggressed). Used by the cumulative
+    // delta feature in the model pack. Default 0 = treat as buyer
+    // aggression for synthetic paths (test/backtest with no flag).
+    uint8_t  is_buyer_maker;
+    uint8_t  _pad_v43[7];  // keep alignment / cache-line stability
 };
 
 // Validate at compile time that Tick<F> can be used in SPSC rings (which require
