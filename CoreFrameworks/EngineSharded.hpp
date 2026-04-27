@@ -1117,6 +1117,27 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                             // elapsed = events since this core's last entry stamp
                             uint64_t entry_t = state.cores[slot].last_entry_tick;
                             if (entry_t == 0) continue;  // never stamped (shouldn't happen if active)
+                            // Bug fix (2026-04-27): defensive guard against
+                            // future entry_tick values. ticks_produced resets
+                            // to 0 each engine session, but last_entry_tick is
+                            // persisted via ShardedSnapshotPersist. After a
+                            // restart with active positions in the snapshot,
+                            // entry_t can be > now_tick → uint64 subtraction
+                            // underflows to ~2^64 → time-exit fires every
+                            // cycle, submitting redundant SELL orders that
+                            // never clear the slot in the panel. Skip until
+                            // next genuine entry stamps it freshly.
+                            if (entry_t > now_tick) {
+                                fprintf(stderr,
+                                    "[sharded] core %d: stale entry_tick from "
+                                    "snapshot (entry_t=%llu > now_tick=%llu); "
+                                    "resetting to current tick. Time-exit "
+                                    "skipped this cycle.\n",
+                                    slot, (unsigned long long)entry_t,
+                                    (unsigned long long)now_tick);
+                                state.cores[slot].last_entry_tick = now_tick;
+                                continue;
+                            }
                             uint64_t elapsed = now_tick - entry_t;
                             if (elapsed < cfg.max_hold_ticks) continue;
                             // gross % gain since entry
