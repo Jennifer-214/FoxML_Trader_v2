@@ -1162,6 +1162,99 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s, TUISharedState *sha
 }
 
 //==========================================================================
+// PANEL: PER-CORE P&L HISTORY (v4.7.11)
+//==========================================================================
+// Overlays each core's realized P&L over the session as 4 lines on the
+// same chart. Useful for spotting which core is adding alpha vs which
+// is bleeding fees. Samples once per second (or on every snapshot tick
+// if slower). Ring buffer of last 1800 samples = 30 min @ 1Hz; older
+// samples scroll off the left.
+//
+// Static state — single-instance panel, OK to keep in function-static.
+// Pure GUI thread, doesn't touch engine state.
+//==========================================================================
+static inline void GUI_Panel_PerCorePnL(const TUISnapshot *s) {
+    static constexpr int PNL_HISTORY = 1800;
+    static double pnl_history[PNL_HISTORY][16];  // [time_idx][core]
+    static double time_history[PNL_HISTORY];
+    static int    history_count = 0;
+    static int    history_head  = 0;
+    static double last_sample_t = 0.0;
+    static double session_t0    = 0.0;
+
+    double now_s = (double)time(NULL);
+    if (session_t0 == 0.0) session_t0 = now_s;
+
+    // Sample at most once per second
+    if (now_s - last_sample_t >= 1.0) {
+        last_sample_t = now_s;
+        for (int c = 0; c < 16; c++) {
+            double v = (c < s->per_core_count) ? s->per_core[c].core_realized : 0.0;
+            pnl_history[history_head][c] = v;
+        }
+        time_history[history_head] = now_s - session_t0;
+        history_head = (history_head + 1) % PNL_HISTORY;
+        if (history_count < PNL_HISTORY) history_count++;
+    }
+
+    ImGui::Begin("Per-Core P&L");
+    SectionHeader("PER-CORE P&L (session)");
+
+    if (history_count < 2) {
+        ImGui::TextColored(FoxmlColors::comment, "(collecting samples — wait 2s)");
+        ImGui::End();
+        return;
+    }
+
+    // Linearize the ring into a contiguous buffer for ImPlot
+    static double xs[PNL_HISTORY];
+    static double ys[16][PNL_HISTORY];
+    int n = history_count;
+    int start = (history_count == PNL_HISTORY) ? history_head : 0;
+    for (int i = 0; i < n; i++) {
+        int src = (start + i) % PNL_HISTORY;
+        xs[i] = time_history[src];
+        for (int c = 0; c < 16; c++) ys[c][i] = pnl_history[src][c];
+    }
+
+    if (ImPlot::BeginPlot("##percore_pnl", ImVec2(-1, -1),
+                          ImPlotFlags_NoTitle | ImPlotFlags_NoMouseText)) {
+        ImPlot::SetupAxes("session seconds", "realized P&L ($)",
+                          ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+        // One line per active core. Same color palette as the per-core
+        // panel strategies (blue/orange/green/purple/teal cycle).
+        static const ImVec4 line_colors[] = {
+            {0.40f, 0.60f, 0.85f, 1.0f},  // core 0
+            {0.85f, 0.55f, 0.25f, 1.0f},  // core 1
+            {0.45f, 0.75f, 0.45f, 1.0f},  // core 2
+            {0.65f, 0.45f, 0.80f, 1.0f},  // core 3
+            {0.35f, 0.75f, 0.80f, 1.0f},  // core 4+
+        };
+        for (int c = 0; c < s->per_core_count && c < 16; c++) {
+            char label[16];
+            uint8_t sid = s->per_core[c].resolved_strategy_id;
+            if (sid >= NUM_STRATEGIES) sid = s->per_core[c].strategy_id_display;
+            const char *strat = (sid < NUM_STRATEGIES)
+                ? STRATEGY_SHORT_NAMES[sid] : "?";
+            snprintf(label, sizeof(label), "C%d %s", c, strat);
+            ImPlotSpec spec;
+            spec.LineColor  = line_colors[c % 5];
+            spec.LineWeight = 1.5f;
+            ImPlot::PlotLine(label, xs, ys[c], n, spec);
+        }
+        // Zero-line for breakeven reference
+        double zx[2] = {xs[0], xs[n - 1]};
+        double zy[2] = {0.0, 0.0};
+        ImPlotSpec zspec;
+        zspec.LineColor  = ImVec4(0.6f, 0.6f, 0.6f, 0.4f);
+        zspec.LineWeight = 1.0f;
+        ImPlot::PlotLine("##zero", zx, zy, 2, zspec);
+        ImPlot::EndPlot();
+    }
+    ImGui::End();
+}
+
+//==========================================================================
 // PANEL: STATS
 //==========================================================================
 static inline void GUI_Panel_Stats(const TUISnapshot *s) {
@@ -1463,6 +1556,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
     GUI_Panel_BuyGate(s);
     GUI_Panel_Account(s, shared);
     GUI_Panel_Positions(s, shared);
+    GUI_Panel_PerCorePnL(s);
     GUI_Panel_Stats(s);
     GUI_Panel_MLIntelligence(s);
 #ifdef LATENCY_PROFILING
