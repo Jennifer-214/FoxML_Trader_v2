@@ -355,6 +355,138 @@ When you add a new heap-allocated field to `BacktestResults` (or any struct with
 
 **Live engine is the opposite** — zero dynamic allocation on the hot path. All live buffers are fixed-size, pre-allocated at startup. No malloc, no realloc, no syscalls in the tick loop. This is a hard rule for the execution engine (`build/engine`, `build_gui/engine_gui`).
 
+## Plan Review Checklist (load-bearing — apply to every multi-day plan)
+
+Before starting any plan that spans more than a single commit, walk it
+through this checklist. Findings → either revise scope, add a mitigation,
+or document an accepted exception in the plan itself. **Audit BEFORE
+coding**, not after — every audit-after-the-fact in this codebase has
+caught real bugs that would have shipped.
+
+### 1. Hot path purity
+- Does this add code to `ExecutionCore_Tick`, `BG_Evaluate`, `SG_Evaluate`,
+  or any per-tick callsite?
+- If yes, is every operation **branchless** (no `if`, only mask-select),
+  **FPN-only** (no `double` arithmetic), and **alloc-free** (no malloc /
+  syscall)?
+- Hot path latency budget is **≤500ns p99**. Currently 40-400ns.
+  Adding ≥10ns requires explicit justification in the plan.
+- Default answer: hot path stays untouched. New code goes on slow path.
+
+### 2. Train-serve parity
+- Does this affect `RegimeSignals` fields or `ModelFeatures_Pack`?
+- If yes, does **both** the backtest path AND the sharded live path
+  populate the new state with **equivalent cadence and inputs**?
+- New features must produce identical values for identical input
+  streams in both paths. Document any accepted divergence (e.g.,
+  maker/taker fees, tick timing) explicitly.
+- Sites that may need updating: `PortfolioController_Tick`,
+  `EngineSharded_Run` fan_out, `ML_BuildParameters`, `Regime_ComputeSignals`,
+  `ModelFeatures_Pack`. Any feature requiring depth data must work in
+  both paths or be deferred until depth replay exists in backtest.
+
+### 3. Surface area / coupling
+- How many files / call sites does this change?
+- Are we adding `if (live_trading)` branches anywhere? (Smell — usually
+  means the abstraction boundary is wrong.)
+- For new optional state, does it follow the existing pattern (heap-
+  allocated, NULL-init in caller, freed in cleanup)?
+- The right shape is: new state owns its lifecycle in ONE place, all
+  consumers receive it via params. Adding a feature should NOT require
+  touching 5+ unrelated files.
+- **Forward-thinking test**: how many sites would the next similar
+  feature need to modify? Aim to reduce that count, not match it.
+
+### 4. Pointer init + heap lifecycle
+- Any new heap-allocated pointer field on `PortfolioController` /
+  `OrderManagerState` / `EventLoopState` / `CoreContext`?
+- If yes:
+  - Every caller of `*_Init` must `NULL` the pointer first (4 sites
+    today: `main.cpp:218`, `main.cpp:657`, `Backtest/BacktestEngine.hpp:507`,
+    plus tests using `= {}` zero-init).
+  - `_Init` must `if (ptr) free(ptr)` before re-allocating (handles
+    re-init / 24h reconnect path).
+  - Cleanup path must free + NULL on shutdown.
+  - Snapshot persistence must include the new state (or document why
+    it's session-only).
+- This is the doctrine behind the v4.3 segfault — three sites needed
+  the same NULL-init line, two had it, one didn't.
+
+### 5. Backward compatibility
+- Does this break existing saved data?
+  - Snapshots: `SHARDED_SNAPSHOT_VERSION` bump → old files refused.
+    OK if intentional, document in changelog.
+  - Models: `MODEL_FORMAT_VERSION` bump → old `.json` models fail load.
+    Always document the FEAT_* additions / changes in the changelog.
+  - Saved Runs: extending `summary.txt` / `expected.cfg` is forward-
+    compat (old fields still parse). Removing fields breaks Past Runs.
+  - Cfg files: adding new fields is fine (default in `_Default`,
+    parser falls through). Removing parsed fields breaks user cfgs.
+
+### 6. Multi-threading correctness
+- New shared state? Identify the producer + consumer threads.
+- SPSC ring? Verify single producer, single consumer.
+- Atomic vs non-atomic — anything multi-thread-shared without
+  `std::atomic` or explicit `__atomic_*` is a race.
+- Race conditions to specifically check: producer + drainer on OMS
+  fields, slow path + hot path on GateParameters (use seqlock).
+- Backtest mode determinism: even if the engine is multi-threaded,
+  backtest output should be reproducible run-to-run for tuning to be
+  meaningful. Synchronous tick replay (producer waits for executor)
+  is one mitigation.
+
+### 7. Test coverage
+- Is there a "hammer test" that exercises the round-trip / N-iteration
+  case? (Phase 2.1 cumdelta, v4.3 CumDelta_Push wraparound — these
+  catch symmetry / wraparound bugs the next time someone touches the
+  code.)
+- Does the test cover **edge cases**: cold start (count==0), full
+  window (count==WINDOW), wraparound (count > WINDOW), zero inputs,
+  uninitialized fields?
+- Does it run in `controller_test` (the 482-assertion default)?
+- Migration plans (e.g., Track E) need parity tests: run BOTH old
+  and new paths on the same input, diff feature outputs.
+
+### 8. Docs + invariants
+- Does this introduce a load-bearing rule that future devs need to
+  know? If yes, add a section to "Safety Invariants" below or extend
+  this checklist.
+- Update "Current State" with the new capability.
+- Add a dated changelog entry under `DOCS/changelogs/`.
+- If a plan is significant, write it to `plans/{name}.md` (gitignored)
+  and commit-message-link it.
+
+### 9. Forward maintenance
+- Will this require touching 30+ sites to extend later? If yes,
+  redesign for lower coupling.
+- Will the next similar feature copy-paste this code? If yes,
+  factor a helper / template / generic pattern.
+- Will future engine changes likely break this? Identify the
+  brittle assumption (e.g., "assumes max_positions=1") and document
+  it in the comment.
+
+### 10. Rollback story
+- Tag `pre-{name}` before starting. Push to remote.
+- For multi-week plans, branch `backup/pre-{name}-{date}` so the
+  full state survives even if tags get reorganized.
+- Each phase commit should be individually revertable.
+- Plan document records what was tried and why, so a rollback later
+  has context.
+
+### Audit verdicts vocabulary
+
+When applying this checklist, label findings consistently:
+
+- **PASS ✅**: requirement met
+- **FIXED ✅**: was an issue, patched in the same pass
+- **GAP** ⚠️: real concern, must address before plan ships
+- **DRIFT** ⚠️: pre-existing condition the plan inherits — note + mitigate
+- **DEFERRED**: scoped out, has explicit follow-up
+- **ACCEPTED**: known divergence, documented and lived with
+
+This vocabulary keeps audit reports calibrated. "Issue" / "concern" /
+"problem" are too vague — these labels say what should happen next.
+
 ## Safety Invariants
 
 Rules that MUST be followed when writing or modifying trading logic. These prevent the classes of bugs found in the March 2026 audit.

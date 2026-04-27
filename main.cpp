@@ -216,7 +216,14 @@ int main(int argc, char *argv[]) {
     // init controller
     //==================================================================================================
     PortfolioController<FP> ctrl;
-    ctrl.rolling_long = NULL;  // Init checks this before free on reinit
+    // NULL all heap pointer members before Init — Init's `if (ptr) free(ptr)`
+    // pattern reads these and would segfault on uninit stack memory. v4.3
+    // added rolling_medium / rolling_baseline / cumdelta_state, all need
+    // the same treatment as rolling_long.
+    ctrl.rolling_long     = NULL;
+    ctrl.rolling_medium   = NULL;
+    ctrl.rolling_baseline = NULL;
+    ctrl.cumdelta_state   = NULL;
     PortfolioController_Init(&ctrl, ccfg);
 
     // try to load snapshot from previous session
