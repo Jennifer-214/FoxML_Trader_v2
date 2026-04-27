@@ -187,6 +187,17 @@ target_compile_options(depth_recorder_test PRIVATE -O2 -march=native)
 target_include_directories(depth_recorder_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
 target_link_libraries(depth_recorder_test PRIVATE ssl crypto pthread)
 
+# Track E.6 — parity validation harness. Runs the legacy + sharded backtest
+# paths on the same tick file and diffs feature_matrix output. Final gate
+# before E.7 deletes the legacy backtest body. Compiled with the same
+# MULTICORE_TUI definition controller_test uses (BacktestEngine.hpp pulls
+# in TUISnapshot transitively).
+add_executable(parity_harness tests/parity_harness.cpp)
+target_compile_options(parity_harness PRIVATE -O3 -march=native -funroll-loops -flto)
+target_include_directories(parity_harness PRIVATE ${CMAKE_SOURCE_DIR}/..)
+target_compile_definitions(parity_harness PRIVATE MULTICORE_TUI)
+target_link_libraries(parity_harness PRIVATE Threads::Threads)
+
 enable_testing()
 add_test(NAME controller_test COMMAND controller_test)
 add_test(NAME depth_recorder_test COMMAND depth_recorder_test)
