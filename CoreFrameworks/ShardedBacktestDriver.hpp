@@ -93,6 +93,12 @@ struct ShardedBacktestDriver {
     TickRateState*         tick_rate_state;
     RORRegressor<F>*       regime_ror;
     const FPN<F>*          ema_price;       // caller updates per-tick before RunTick
+    // Track E.3 — depth-derived gate input. Caller updates this pointer (or
+    // its target) per-tick from DepthReplayState's current snapshot. Driver
+    // threads it to RebuildAllParameters; RebuildAll vetoes buys when
+    // *book_imbalance < cfg.min_book_imbalance. NULL = no depth feed
+    // (cfg.min_book_imbalance gate stays inert, pre-E.3 behavior).
+    const FPN<F>*          book_imbalance;
 
     // Track E.1 — slow-path completion hook. Fires AFTER slow-path
     // RollingStats pushes / RebuildAllParameters / KillSwitchEvaluate, BEFORE
@@ -137,6 +143,7 @@ inline void ShardedBacktestDriver_Init(ShardedBacktestDriver<F, W, WL>* drv,
     drv->tick_rate_state    = nullptr;
     drv->regime_ror         = nullptr;
     drv->ema_price          = nullptr;
+    drv->book_imbalance     = nullptr;  // Track E.3
     drv->on_slow_path       = nullptr;
     drv->hook_ctx           = nullptr;
 }
@@ -227,7 +234,8 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
                 /* rolling_baseline*/ (const void*)drv->rolling_baseline,
                 /* cumdelta_state  */ (const void*)drv->cumdelta_state,
                 /* tick_rate_state */ (const void*)drv->tick_rate_state,
-                /* timestamp_us    */ tick.timestamp);
+                /* timestamp_us    */ tick.timestamp,
+                /* book_imbalance  */ (const void*)drv->book_imbalance);
         }
         EventLoop_PushParameters(drv->state);
         EventLoop_KillSwitchEvaluate(drv->state);

@@ -256,7 +256,13 @@ static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tic
     uint64_t volume_ok     = (uint64_t)FPN_GreaterThan(tick.volume, core->cached_params.bg_volume_threshold);
     uint64_t volume_req    = (uint64_t)((flags & GATE_FLAG_VOLUME_REQUIRED) != 0);
     uint64_t volume_check  = (volume_req & volume_ok) | (~volume_req & 1ULL);
-    uint64_t bg_fires      = price_ok & volume_check;
+    // Track E.3: slow-path veto via GATE_FLAG_BUY_BLOCKED. Branchless mask
+    // — blocked_mask is ALL_ONES when blocked, 0 when open. AND with
+    // ~blocked_mask drops bg_fires when vetoed. Same shape as the
+    // standalone BG_Evaluate in GateParameters.hpp. ~1ns added.
+    uint64_t blocked       = (uint64_t)((flags & GATE_FLAG_BUY_BLOCKED) != 0);
+    uint64_t blocked_mask  = -blocked;
+    uint64_t bg_fires      = (price_ok & volume_check) & ~blocked_mask;
 
     // === Inlined SG_Evaluate (using selected tp/sl from above) ===
     uint64_t tp_enabled    = (uint64_t)((flags & GATE_FLAG_TP_ENABLED) != 0);

@@ -43,6 +43,7 @@
 #include "../CoreFrameworks/ExecutionCore.hpp"
 #include "../CoreFrameworks/ShardedBacktestDriver.hpp"
 #include "../CoreFrameworks/Tick.hpp"
+#include "../DataStream/DepthReplayState.hpp"  // Track E.3 — depth replay
 #include "../DataStream/EngineTUI.hpp"  // for TUISnapshot
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"  // ConfidenceScorer_Init for ML cores (E.2)
@@ -280,6 +281,36 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     FPN<BACKTEST_FP> one_minus_alpha =
         FPN_Sub(FPN_FromDouble<BACKTEST_FP>(1.0), ema_alpha);
 
+    //----------------------------------------------------------------------
+    // Track E.3 — depth replay. Mirrors how EngineSharded_Run reads
+    // book_imbalance from g_depth_shared.snapshots[active] each slow path.
+    // DepthReplayState loads CSVs DepthRecorder wrote and advances the
+    // current snapshot in lockstep with tick timestamps.
+    //
+    // Heap lifecycle (four-site rule):
+    //   - static + Free-then-Init dance handles multi-run-per-process
+    //     (suite reuses the same DepthReplayState across Collect Features
+    //     clicks). Free first to avoid leaking the prior run's row buffer.
+    //   - Free at function exit only if needed; static keeps last-run
+    //     state alive for the next call (re-Init fully resets).
+    //----------------------------------------------------------------------
+    static DepthReplayState<BACKTEST_FP> depth_replay;
+    static int depth_replay_initialized = 0;
+    if (depth_replay_initialized) {
+        DepthReplayState_Free(&depth_replay);
+    }
+    DepthReplayState_Init(&depth_replay, "BTCUSDT", "data");
+    depth_replay_initialized = 1;
+    // depth_enabled gate: when 0, replay state is initialized but never
+    // advanced — book_imbalance_holder stays at zero, gate stays inert.
+    // Mirrors live cfg.depth_enabled=0 (depth thread doesn't run).
+    int depth_enabled = (int)cfg.depth_enabled;
+    // Holder for the current book_imbalance value passed to the driver.
+    // Driver reads via pointer so updates between RunTick calls land
+    // automatically.
+    static FPN<BACKTEST_FP> book_imbalance_holder = FPN_Zero<BACKTEST_FP>();
+    book_imbalance_holder = FPN_Zero<BACKTEST_FP>();
+
     ShardedBacktestDriver<BACKTEST_FP, 128, 512> drv;
     ShardedBacktestDriver_Init(&drv, &state, &rolling, &cfg, (int)cfg.poll_interval, &rolling_long, &oms);
     // Track E.1 — wire parity state into the driver. Driver pushes these on
@@ -290,6 +321,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     drv.tick_rate_state   = &tick_rate_state;
     drv.regime_ror        = &regime_ror;
     drv.ema_price         = &ema_price;
+    drv.book_imbalance    = depth_enabled ? &book_imbalance_holder : nullptr;
 
     //----------------------------------------------------------------------
     // Track E.1 — feature collection hook. When collect_features=1, register
@@ -430,6 +462,19 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 FPN_Mul(t.price,    one_minus_alpha));
             if (FPN_IsZero(ema_price)) ema_price = t.price;
             else                       ema_price = ema_new;
+
+            // Track E.3 — advance depth replay in lockstep with the tick
+            // stream. _Advance walks rows whose timestamp_us <= t.timestamp,
+            // updating depth_replay.current to the latest matching row. The
+            // first call after a day boundary auto-loads the new day's CSV
+            // (degrades silently to no-op if the file is missing). Read the
+            // current imbalance into the holder the driver points at —
+            // RebuildAllParameters reads via the holder pointer on the next
+            // slow-path firing.
+            if (depth_enabled) {
+                DepthReplayState_Advance(&depth_replay, t.timestamp);
+                book_imbalance_holder = depth_replay.current.imbalance;
+            }
 
             // Step the per-core engine through this tick. Internally:
             //   1. RollingStats_Push so the slow path has fresh data

@@ -44,6 +44,21 @@ constexpr uint8_t GATE_FLAG_VOLUME_REQUIRED  = 0x08;
 // BG_Evaluate / ExecutionCore_Tick. Pre-v4.0 the hot path was buy-below only,
 // silently breaking MOM strategy in sharded mode.
 constexpr uint8_t GATE_FLAG_BUY_ABOVE        = 0x10;
+// Track E.3 (2026-04-26): slow-path veto for the buy gate. When set, BG
+// fires evaluate to false regardless of price/volume. Used by the
+// book_imbalance gate (ControllerEventLoop.hpp) and any future slow-path
+// "do not buy right now" decision that needs to mask without revoking
+// permission (revoking would also disable kill-switch reset / warmup
+// state machine — those are separate concerns).
+//
+// Why a flag and not a permission flip:
+//   - permission is a single bit owned by the controller's lifecycle
+//     (warmup → trading → kill-switch). Layering a third source on it
+//     races during the kill-switch reset path.
+//   - flag is a per-rebuild snapshot — recomputed every slow path. No
+//     persistent state to corrupt; if the slow path forgets to set it,
+//     the gate naturally re-opens.
+constexpr uint8_t GATE_FLAG_BUY_BLOCKED      = 0x20;
 
 // Strategy IDs come from Strategies/StrategyInterface.hpp (single source of
 // truth shared with the legacy strategies). STRATEGY_NONE = 0xFF means
@@ -117,7 +132,13 @@ static inline bool BG_Evaluate(const Tick<F>& tick, const GateParameters<F>* par
     uint64_t volume_ok   = (uint64_t)FPN_GreaterThan(tick.volume, params->bg_volume_threshold);
     uint64_t volume_required = (uint64_t)((params->flags & GATE_FLAG_VOLUME_REQUIRED) != 0);
     uint64_t volume_check = (volume_required & volume_ok) | (~volume_required & 1ULL);
-    return (price_ok & volume_check) != 0;
+    // Track E.3: slow-path veto. When GATE_FLAG_BUY_BLOCKED is set, force
+    // bg_fires to 0. Branchless — blocked_mask is ALL_ONES when blocked,
+    // 0 when open. AND with ~blocked_mask drops the gate when vetoed,
+    // passes through when open. ~1ns added.
+    uint64_t blocked      = (uint64_t)((params->flags & GATE_FLAG_BUY_BLOCKED) != 0);
+    uint64_t blocked_mask = -blocked;  // 0 or ALL_ONES
+    return ((price_ok & volume_check) & ~blocked_mask) != 0;
 }
 
 template <unsigned F>

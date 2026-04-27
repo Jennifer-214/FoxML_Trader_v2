@@ -462,8 +462,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
     // Phase 8a (post-coding c6) — depth feed + DepthRecorder.
     // Same setup as main.cpp's legacy path, runs only when depth_enabled=1.
-    // Per-core controllers can read shared->snapshots[active].imbalance later
-    // (book_imbalance feed in EngineSharded slow path lands in post-coding c14).
+    // Track E.3 (2026-04-26): book_imbalance is now consumed in the slow
+    // path below via EventLoop_RebuildAllParameters. Symmetric with
+    // BacktestSharded_Run reading from DepthReplayState.
     static DepthRecorder g_depth_rec;
     static DepthSharedState<F> g_depth_shared;
     static pthread_t g_depth_tid = 0;
@@ -965,12 +966,31 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 uint64_t rebuild_ts_us = (uint64_t)
                     std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::system_clock::now().time_since_epoch()).count();
+                // Track E.3 (post-coding c14, finally landed 2026-04-26)
+                // — feed book_imbalance from the depth thread into the
+                // per-core slow-path rebuild. The depth thread runs only
+                // when cfg.depth_enabled=1 and writes to active_idx with
+                // RELEASE; we read with ACQUIRE for matching ordering.
+                // When depth_enabled=0 OR the depth thread hasn't received
+                // a snapshot yet, the value stays at FPN_Zero (init) —
+                // RebuildAllParameters' gate check fails closed if cfg.
+                // min_book_imbalance>0, which is the desired semantics
+                // (no data → no buys, since we can't evaluate the gate).
+                FPN<F> book_imb;
+                if (cfg.depth_enabled) {
+                    int dactive = __atomic_load_n(&g_depth_shared.active_idx,
+                                                   __ATOMIC_ACQUIRE);
+                    book_imb = g_depth_shared.snapshots[dactive].imbalance;
+                } else {
+                    book_imb = FPN_Zero<F>();
+                }
                 EventLoop_RebuildAllParameters(&state, &rolling_short, &cfg, &rolling_long,
                                                 &regime_ror, &ema_price,
                                                 FPN_IsZero(mtm_price) ? nullptr : &mtm_price,
                                                 &rolling_medium, &rolling_baseline,
                                                 &cumdelta_state, &tick_rate_state,
-                                                rebuild_ts_us);
+                                                rebuild_ts_us,
+                                                cfg.depth_enabled ? &book_imb : nullptr);
 
                 // Phase 4 — periodic snapshot save. Once every ~1024 slow-path
                 // cycles, paper mode only. With slow_path_interval=8 ticks and

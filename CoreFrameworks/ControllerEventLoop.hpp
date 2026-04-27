@@ -741,9 +741,28 @@ inline int EventLoop_RebuildAllParameters(
     const void* rolling_baseline = nullptr,  // const RollingStats<F, 1024>*
     const void* cumdelta_state   = nullptr,  // const CumDeltaState<F>*
     const void* tick_rate_state  = nullptr,  // const TickRateState*
-    uint64_t timestamp_us = 0
+    uint64_t timestamp_us = 0,
+    // Track E.3 (2026-04-26) — depth-derived buy gate. Optional FPN<F>*
+    // (passed as void* to keep the signature uniform with the other
+    // optional pointers above and avoid template-parameter coupling). When
+    // non-null AND cfg.min_book_imbalance > 0 AND *book_imbalance < min,
+    // every core's pending_params gets GATE_FLAG_BUY_BLOCKED set after
+    // Strategy_BuildParameters runs, vetoing entries until the imbalance
+    // recovers. Caller passes from DepthSharedState (live) or
+    // DepthReplayState (backtest) — symmetric across both paths.
+    const void* book_imbalance = nullptr      // const FPN<F>*
 ) {
     int rebuilt = 0;
+    // Track E.3: compute the book-imbalance veto once before the per-core
+    // loop. The check is global (the order book is the same for every
+    // core), so we evaluate once and OR the flag into each core's flags
+    // below. cfg.min_book_imbalance==0 disables the gate entirely (legacy
+    // behavior; pre-E.3 cfg ships with min=0).
+    int book_imbalance_blocked = 0;
+    if (book_imbalance && !FPN_IsZero(config->min_book_imbalance)) {
+        const FPN<F>* bi = (const FPN<F>*)book_imbalance;
+        book_imbalance_blocked = FPN_LessThan(*bi, config->min_book_imbalance) ? 1 : 0;
+    }
     for (int slot = 0; slot < state->registered_count; ++slot) {
         if (state->cores[slot].strategy_id == STRATEGY_NONE) continue;
         // v4.0 per-core overrides: resolve the cfg for this core. Stack-local
@@ -924,13 +943,28 @@ inline int EventLoop_RebuildAllParameters(
         // tracked per-core for GUI display.
         //
         // Reasons: 0=ok, 1=spacing, 2=vwap, 3=long-slope, 4=vol-delta,
-        //          5=min-stddev, 6=sl-cooldown, 7=warmup, 8=core-budget
+        //          5=min-stddev, 6=sl-cooldown, 7=warmup, 8=core-budget,
+        //          9=core-kill, 10=book-imbalance (Track E.3)
         state->cores[slot].halt_reason = 0;
         auto zero_gate = [&](uint8_t reason) {
             state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
             if (state->cores[slot].halt_reason == 0)  // first reason wins
                 state->cores[slot].halt_reason = reason;
         };
+
+        // Track E.3 (2026-04-26) — book_imbalance veto via flag (not
+        // bg_price_threshold=0). The flag mechanism works for buy-above
+        // (momentum) AND buy-below strategies; zero_gate above only works
+        // for buy-below because bg_price_threshold=0 always satisfies
+        // "price > 0" for momentum (latent zero_gate bug, pre-existing —
+        // separate fix). Flag is recomputed every rebuild, so when
+        // imbalance recovers Strategy_BuildParameters' fresh `out->flags`
+        // assignment naturally drops the BLOCKED bit.
+        if (book_imbalance_blocked) {
+            state->cores[slot].pending_params.flags |= GATE_FLAG_BUY_BLOCKED;
+            if (state->cores[slot].halt_reason == 0)
+                state->cores[slot].halt_reason = 10;
+        }
 
         // Phase 2.2: per-core budget enforcement. Clamp the strategy's
         // requested qty against remaining allocation, and zero-gate

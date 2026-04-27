@@ -23,6 +23,7 @@
 #include "../CoreFrameworks/ShardedSnapshotPersist.hpp"  // Phase 4 tests
 #include "../CoreFrameworks/ShardedBacktestDriver.hpp"   // Track E.1 tests
 #include "../ML_Headers/CoreModelZoo.hpp"                // Track E.2 tests
+#include "../DataStream/DepthReplayState.hpp"            // Track E.3 tests
 #include "../DataStream/BinanceUserData.hpp"
 #include "../Backtest/BacktestEngine.hpp"
 #include "../Backtest/HeldOutSplit.hpp"
@@ -5107,6 +5108,273 @@ int main() {
               __atomic_load_n(&cores[1].permission, __ATOMIC_ACQUIRE) == 0);
         check("post-warmup: slot 2 (MOMENTUM) permission == 1",
               __atomic_load_n(&cores[2].permission, __ATOMIC_ACQUIRE) == 1);
+    }
+
+    //==================================================================================================
+    // Track E.3 — depth replay + book_imbalance buy gate
+    //==================================================================================================
+    // Three coverage layers:
+    //   1. DepthReplayState — CSV reader + lockstep advance (file present /
+    //      file missing / cursor monotonic / day rotation skipped at this
+    //      level since both file present + missing exercise the same
+    //      _LoadDay path internally).
+    //   2. GATE_FLAG_BUY_BLOCKED — branchless mask in BG_Evaluate vetoes
+    //      buys regardless of price/volume + GATE_FLAG_BUY_ABOVE direction.
+    //   3. EventLoop_RebuildAllParameters — book_imbalance arg below cfg
+    //      min sets the flag + halt_reason=10 across all registered cores.
+    //==================================================================================================
+    printf("\n--- Track E.3: DepthReplayState load + advance ---\n");
+    {
+        // Write a synthetic depth CSV mirroring DepthRecorder_Write format.
+        // Timestamps land on 2026-04-26 UTC so DepthReplay_DateInt → 20260426
+        // matches the file we create below.
+        char tmpl[] = "/tmp/depthtest-XXXXXX";
+        char* tmpdir = mkdtemp(tmpl);
+        check("mkdtemp succeeded for depth replay test", tmpdir != nullptr);
+        if (!tmpdir) goto e3_skip_load;
+
+        // Build {tmpdir}/TEST/depth/ + the file
+        char depthdir[300];
+        snprintf(depthdir, sizeof(depthdir), "%s/TEST/depth", tmpdir);
+        char mkcmd[400];
+        snprintf(mkcmd, sizeof(mkcmd), "mkdir -p %s", depthdir);
+        int sysret = system(mkcmd);
+        (void)sysret;
+
+        // Pick a stable mid-future date; compute the matching date_int
+        // dynamically so the file name + timestamp UTC date always agree
+        // (avoids "I-counted-leap-years-wrong" test bugs).
+        const uint64_t day_start = 1777161600ULL * 1000000ULL;  // 2026-04-26 00:00:00 UTC
+        time_t day_start_sec = (time_t)(day_start / 1000000ULL);
+        struct tm dtm;
+        gmtime_r(&day_start_sec, &dtm);
+        int day_int = (dtm.tm_year + 1900) * 10000
+                    + (dtm.tm_mon + 1) * 100
+                    + dtm.tm_mday;
+        char csvpath[400];
+        snprintf(csvpath, sizeof(csvpath), "%s/%04d-%02d-%02d.csv",
+                 depthdir, dtm.tm_year + 1900, dtm.tm_mon + 1, dtm.tm_mday);
+        FILE* fp = fopen(csvpath, "w");
+        check("opened synthetic depth CSV for write", fp != nullptr);
+        if (!fp) goto e3_skip_load;
+        fprintf(fp, "timestamp_us,last_update_id,bid_price,bid_qty,ask_price,ask_qty\n");
+        fprintf(fp, "%llu,100,50000.00,10.0,50001.00,5.0\n",
+                (unsigned long long)(day_start + 1000000));        // row 0: imb > 0
+        fprintf(fp, "%llu,101,50001.00,3.0,50002.00,7.0\n",
+                (unsigned long long)(day_start + 2000000));        // row 1: imb < 0
+        fprintf(fp, "# GAP at_us=2500000 reason=test\n");           // skipped
+        fprintf(fp, "%llu,102,50002.00,8.0,50003.00,2.0\n",
+                (unsigned long long)(day_start + 3000000));        // row 2: imb > 0
+        fclose(fp);
+
+        DepthReplayState<64> state;
+        memset(&state, 0, sizeof(state));
+        DepthReplayState_Init(&state, "TEST", tmpdir);
+        int loaded = DepthReplayState_LoadDay(&state, day_int);
+        check("LoadDay returned 3 rows (GAP comment skipped)", loaded == 3);
+        check("LoadDay set file_present=1", state.file_present == 1);
+        check("LoadDay set row_count=3", state.row_count == 3);
+        check("LoadDay parsed row 0 timestamp",
+              state.rows[0].timestamp_us == day_start + 1000000);
+        check("LoadDay parsed row 0 last_update_id",
+              state.rows[0].last_update_id == 100);
+        check("LoadDay computed imbalance for row 0 (bid > ask = positive)",
+              FPN_ToDouble(state.rows[0].imbalance) > 0.0);
+        check("LoadDay computed imbalance for row 1 (bid < ask = negative)",
+              FPN_ToDouble(state.rows[1].imbalance) < 0.0);
+
+        // Advance to before any row — cursor stays at 0, current unchanged
+        DepthReplayState_Advance(&state, day_start);
+        check("Advance(before first row): cursor stays 0", state.cursor == 0);
+        check("Advance(before first row): current.imbalance == 0 (init)",
+              FPN_IsZero(state.current.imbalance));
+
+        // Advance to row 0's exact timestamp
+        DepthReplayState_Advance(&state, day_start + 1000000);
+        check("Advance(row 0 ts): cursor advances to 1", state.cursor == 1);
+        check("Advance(row 0 ts): current.imbalance > 0",
+              FPN_ToDouble(state.current.imbalance) > 0.0);
+
+        // Advance past row 1 (target between row 1 and row 2)
+        DepthReplayState_Advance(&state, day_start + 2500000);
+        check("Advance(between row 1 and 2): cursor advances to 2",
+              state.cursor == 2);
+        check("Advance(between row 1 and 2): current.imbalance < 0 (row 1)",
+              FPN_ToDouble(state.current.imbalance) < 0.0);
+
+        // Advance well past last row — cursor caps at row_count
+        DepthReplayState_Advance(&state, day_start + 1000000000ULL);
+        check("Advance(after last row): cursor caps at row_count",
+              state.cursor == state.row_count);
+        check("Advance(after last row): current = row[2]",
+              FPN_ToDouble(state.current.imbalance) > 0.0);
+
+        // Cursor must NOT rewind on a backward target
+        int saved_cursor = state.cursor;
+        DepthReplayState_Advance(&state, day_start);  // backward
+        check("Advance(backward): cursor does NOT rewind",
+              state.cursor == saved_cursor);
+
+        DepthReplayState_Free(&state);
+        check("Free: rows pointer NULL after free", state.rows == nullptr);
+
+        // Cleanup tmpdir
+        char rmcmd[400];
+        snprintf(rmcmd, sizeof(rmcmd), "rm -rf %s", tmpdir);
+        sysret = system(rmcmd);
+        (void)sysret;
+    }
+e3_skip_load:;
+
+    printf("\n--- Track E.3: DepthReplayState missing file degrades silently ---\n");
+    {
+        DepthReplayState<64> state;
+        memset(&state, 0, sizeof(state));
+        DepthReplayState_Init(&state, "NONEXISTENT", "/tmp/no-such-dir");
+        int loaded = DepthReplayState_LoadDay(&state, 19700101);
+        check("LoadDay on missing dir returns 0", loaded == 0);
+        check("LoadDay on missing dir leaves rows NULL", state.rows == nullptr);
+        check("LoadDay on missing dir sets file_present=0",
+              state.file_present == 0);
+
+        // Advance is a no-op — current stays at init zeros
+        DepthReplayState_Advance(&state, 12345);
+        check("Advance with no rows: current.imbalance still 0",
+              FPN_IsZero(state.current.imbalance));
+
+        // Free is safe even with no rows ever loaded
+        DepthReplayState_Free(&state);
+        check("Free on never-loaded state: no crash",
+              state.rows == nullptr);
+    }
+
+    printf("\n--- Track E.3: GATE_FLAG_BUY_BLOCKED vetoes BG_Evaluate ---\n");
+    {
+        using namespace tt;
+        // Buy-below strategy: gate normally fires when price < threshold.
+        Tick<64> tick{};
+        tick.price  = FPN_FromDouble<64>(99.0);
+        tick.volume = FPN_FromDouble<64>(0.0);
+
+        GateParameters<64> params;
+        GateParameters_Init(&params);
+        params.bg_price_threshold  = FPN_FromDouble<64>(100.0);
+        params.bg_volume_threshold = FPN_FromDouble<64>(0.0);
+        params.flags = 0;  // no volume requirement, no buy-above, no block
+
+        check("buy-below: gate fires when price < threshold",
+              BG_Evaluate(tick, &params) == true);
+
+        // Add the BLOCKED flag — gate should now fail
+        params.flags |= GATE_FLAG_BUY_BLOCKED;
+        check("buy-below: BUY_BLOCKED vetoes the gate",
+              BG_Evaluate(tick, &params) == false);
+
+        // Buy-above (momentum) — also vetoed
+        Tick<64> tick_up{};
+        tick_up.price  = FPN_FromDouble<64>(101.0);
+        tick_up.volume = FPN_FromDouble<64>(0.0);
+        GateParameters<64> params_up;
+        GateParameters_Init(&params_up);
+        params_up.bg_price_threshold  = FPN_FromDouble<64>(100.0);
+        params_up.bg_volume_threshold = FPN_FromDouble<64>(0.0);
+        params_up.flags = GATE_FLAG_BUY_ABOVE;
+
+        check("buy-above: gate fires when price > threshold",
+              BG_Evaluate(tick_up, &params_up) == true);
+        params_up.flags |= GATE_FLAG_BUY_BLOCKED;
+        check("buy-above: BUY_BLOCKED vetoes the gate",
+              BG_Evaluate(tick_up, &params_up) == false);
+    }
+
+    printf("\n--- Track E.3: RebuildAllParameters book_imbalance gate ---\n");
+    {
+        using namespace tt;
+        // Set up a 2-core sharded engine with non-zero min_book_imbalance.
+        // Pass book_imbalance below threshold → both cores get
+        // GATE_FLAG_BUY_BLOCKED + halt_reason=10.
+        OrderManagerState<64> oms;
+        ExchangeAdapter<64> empty_adapter{};
+        OrderManager_Init(&oms, empty_adapter, 0,
+                          FPN_FromDouble<64>(10000.0),
+                          FPN_FromDouble<64>(0.001));
+        EventLoopState<64> state;
+        EventLoopState_Init(&state, &oms);
+
+        SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> rings[2];
+        ExecutionCore<64> cores[2];
+        for (int i = 0; i < 2; ++i) {
+            SPSCRing_Init(&rings[i]);
+            ExecutionCore_Init(&cores[i], (uint16_t)i, &rings[i]);
+            EventLoopState_RegisterCore(&state, &cores[i],
+                FPN_Zero<64>(), FPN_Zero<64>(), FPN_Zero<64>());
+            EventLoopState_SetCoreStrategy(&state, i, STRATEGY_SIMPLE_DIP,
+                FPN_FromDouble<64>(250.0));
+        }
+
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.min_book_imbalance = FPN_FromDouble<64>(0.10);  // require 10% bid bias
+
+        RollingStats<64, 128> rolling = RollingStats_Init<64, 128>();
+        // Push a few rows so SimpleDip_BuildParameters has data to chew on
+        for (int i = 0; i < 32; ++i) {
+            RollingStats_Push(&rolling, FPN_FromDouble<64>(50000.0 + (i % 5)),
+                              FPN_FromDouble<64>(1.0));
+        }
+
+        // Case 1: book_imbalance=0.05 (below 0.10 threshold) → BLOCKED set
+        FPN<64> low_imb  = FPN_FromDouble<64>(0.05);
+        EventLoop_RebuildAllParameters(
+            &state, &rolling, &cfg,
+            /* rolling_long  */ (const RollingStats<64, 512>*)nullptr,
+            /* ror           */ nullptr, /* ema           */ nullptr,
+            /* current_price */ nullptr, /* mid           */ nullptr,
+            /* baseline      */ nullptr, /* cumdelta      */ nullptr,
+            /* tick_rate     */ nullptr,
+            /* timestamp_us  */ 0,
+            /* book_imbalance*/ &low_imb);
+
+        check("low book_imbalance: core 0 BUY_BLOCKED flag set",
+              (state.cores[0].pending_params.flags & GATE_FLAG_BUY_BLOCKED) != 0);
+        check("low book_imbalance: core 1 BUY_BLOCKED flag set",
+              (state.cores[1].pending_params.flags & GATE_FLAG_BUY_BLOCKED) != 0);
+        check("low book_imbalance: halt_reason=10 (book-imbalance) on core 0",
+              state.cores[0].halt_reason == 10);
+
+        // Case 2: book_imbalance=0.20 (above 0.10 threshold) → NOT blocked
+        FPN<64> high_imb = FPN_FromDouble<64>(0.20);
+        EventLoop_RebuildAllParameters(
+            &state, &rolling, &cfg,
+            (const RollingStats<64, 512>*)nullptr,
+            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+            0, &high_imb);
+
+        check("high book_imbalance: core 0 BUY_BLOCKED flag CLEARED",
+              (state.cores[0].pending_params.flags & GATE_FLAG_BUY_BLOCKED) == 0);
+        check("high book_imbalance: halt_reason != 10 on core 0",
+              state.cores[0].halt_reason != 10);
+
+        // Case 3: book_imbalance=NULL (no depth feed) → gate inert (legacy
+        // behavior — pre-E.3 behavior preserved when caller doesn't pass it)
+        EventLoop_RebuildAllParameters(
+            &state, &rolling, &cfg,
+            (const RollingStats<64, 512>*)nullptr,
+            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+            0, nullptr);
+
+        check("NULL book_imbalance: gate stays inert (flag cleared)",
+              (state.cores[0].pending_params.flags & GATE_FLAG_BUY_BLOCKED) == 0);
+
+        // Case 4: cfg.min_book_imbalance=0 (gate disabled) + low imb →
+        // gate is inert regardless. Default cfg ships with min=0.
+        cfg.min_book_imbalance = FPN_Zero<64>();
+        EventLoop_RebuildAllParameters(
+            &state, &rolling, &cfg,
+            (const RollingStats<64, 512>*)nullptr,
+            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+            0, &low_imb);
+        check("min_book_imbalance=0 disables the gate even with low imb",
+              (state.cores[0].pending_params.flags & GATE_FLAG_BUY_BLOCKED) == 0);
     }
 
     printf("\n======================================\n");

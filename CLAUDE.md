@@ -669,7 +669,7 @@ The "add to BOTH paths" rule above is being retired. Track E completes
 ships, "did we update both paths?" stops being a question — there is
 one path. Plan: `plans/track-e-sharded-backtest.md`.
 
-Wired now (E.1 + E.2, 2026-04-26):
+Wired now (E.1 + E.2 + E.3, 2026-04-26):
 - **Feature collection** runs through `ShardedBacktestDriver::on_slow_path`
   (registered by `BacktestSharded_Run` when `collect_features=1`). The
   callback runs `Regime_ComputeSignals` with the same args as
@@ -690,13 +690,28 @@ Wired now (E.1 + E.2, 2026-04-26):
   pushes mirror `EngineSharded_Run` static-local state. Driver threads
   these via `EventLoop_RebuildAllParameters` to ML strategies AND the
   feature-collection hook — single source of state.
+- **Depth replay (E.3)** + **`book_imbalance` buy gate**. New
+  `DepthReplayState<F>` (`DataStream/DepthReplayState.hpp`) reads
+  the daily CSVs `DepthRecorder` writes (Phase 8a) and exposes a
+  `BookSnapshot<F>` whose `imbalance` field consumers read identically
+  to `DepthSharedState::snapshots[active].imbalance` in the live
+  engine. `BacktestSharded_Run` advances the replay state in lockstep
+  with the tick stream and pipes `imbalance` through to
+  `EventLoop_RebuildAllParameters` via the new optional
+  `book_imbalance` parameter. The live path (`EngineSharded_Run`,
+  formerly the missing post-Phase-8a "coding c14") now reads from
+  `g_depth_shared` symmetrically. Both paths converge on a new
+  `GATE_FLAG_BUY_BLOCKED` flag that BG_Evaluate vetoes via a 1ns
+  branchless mask (works for buy-above and buy-below strategies, unlike
+  the legacy `zero_gate(reason)` pattern which only zeros
+  `bg_price_threshold` — latent bug for momentum, separate fix). When
+  `cfg.min_book_imbalance==0` the gate is inert (default cfg). Edge
+  case: missing depth file for a tick file's date → `file_present=0`,
+  `imbalance` stays at zero → with `min>0` the gate fails closed (no
+  buys until the data lands), matching live's "no depth → don't trade"
+  semantics.
 
 Not yet wired:
-- **Depth replay (E.3)**: `book_imbalance` and any spread-derived
-  features remain 0 in backtest. Sharded *live* also doesn't currently
-  read `book_imbalance` (post-Phase-8a coding c14 never landed — the
-  depth thread runs but no per-core controller consumes the imbalance).
-  E.3 lands both wirings together.
 - **Walk-Forward / Sweep migration (E.4 / E.5)**: consume
   `BacktestResults` directly, so they automatically inherit E.1's
   feature collection when `engine_mode=sharded`. No code change beyond
@@ -720,6 +735,23 @@ mirror). The driver pointer plumbing is the load-bearing piece — if
 the driver doesn't get fed the new state, the feature-collection hook
 sees zeros while live ML strategies see real values. Symmetrical to
 the v4.0.1 bug, just one layer deeper.
+
+**Adding a new depth-derived input.** After E.3, depth-state symmetry
+is achieved at the public-API level: live reads `BookSnapshot<F>` via
+`DepthSharedState::snapshots[active].FIELD` (atomic), backtest reads
+the same `BookSnapshot<F>` via `DepthReplayState::current.FIELD`
+(plain). Adding a new derived feature (e.g. spread-bps for D.3,
+book-imbalance-over-time for D.1):
+1. Add the field to `BookSnapshot<F>` (`DataStream/BinanceDepth.hpp`).
+2. Compute it in `depth_parse_json` (live).
+3. Compute it in `DepthReplayState_LoadDay`'s row-build block
+   (`DataStream/DepthReplayState.hpp`) so the replay reads agree with
+   live for the same input bid/ask/qty values.
+4. Read it on the slow path the same way `book_imbalance` is read in
+   `EngineSharded_Run` and `BacktestSharded_Run`. Pass via
+   `EventLoop_RebuildAllParameters` (or `Regime_ComputeSignals` if it's
+   a feature pack input).
+5. Don't read it on the hot path — depth state is slow-path only.
 
 ### Maker/Taker Fee Accuracy (Phase 8)
 
