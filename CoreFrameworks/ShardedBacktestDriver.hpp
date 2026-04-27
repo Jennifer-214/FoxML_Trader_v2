@@ -46,7 +46,10 @@
 
 #pragma once
 
+#include "../ML_Headers/LinearRegression3X.hpp"
+#include "../ML_Headers/ROR_regressor.hpp"
 #include "../ML_Headers/RollingStats.hpp"
+#include "../Strategies/RegimeDetector.hpp"  // CumDeltaState, TickRateState
 #include "ControllerEventLoop.hpp"
 #include "ExecutionCore.hpp"
 #include "OrderManager.hpp"
@@ -78,6 +81,28 @@ struct ShardedBacktestDriver {
     OrderManagerState<F>*    oms;           // optional, nullptr = no OMS tick after drain
     int slow_path_interval;                 // ticks between slow-path firings (e.g. 64)
     uint64_t slow_path_runs;                // observability counter
+
+    // Track E.1 — train-serve parity state. Optional. When set, driver pushes
+    // these on slow-path firings (mirroring EngineSharded_Run lines 794-818)
+    // and threads them into EventLoop_RebuildAllParameters so ML strategies
+    // see the same RegimeSignals features the live path produces. NULL fields
+    // are skipped — driver works the same as before for legacy callers.
+    RollingStats<F, 256>*  rolling_medium;
+    RollingStats<F, 1024>* rolling_baseline;
+    CumDeltaState<F>*      cumdelta_state;
+    TickRateState*         tick_rate_state;
+    RORRegressor<F>*       regime_ror;
+    const FPN<F>*          ema_price;       // caller updates per-tick before RunTick
+
+    // Track E.1 — slow-path completion hook. Fires AFTER slow-path
+    // RollingStats pushes / RebuildAllParameters / KillSwitchEvaluate, BEFORE
+    // returning from RunTick. Used by BacktestSharded_Run to collect ML
+    // features without touching the driver's tick-stepping logic.
+    void (*on_slow_path)(void* ctx,
+                         ShardedBacktestDriver<F, W, WL>* drv,
+                         const Tick<F>& tick,
+                         int tick_index);
+    void* hook_ctx;
 };
 
 //======================================================================================================
@@ -103,6 +128,17 @@ inline void ShardedBacktestDriver_Init(ShardedBacktestDriver<F, W, WL>* drv,
     drv->oms                = oms;
     drv->slow_path_interval = slow_path_interval > 0 ? slow_path_interval : 64;
     drv->slow_path_runs     = 0;
+    // Track E.1 — optional train-serve state + hook. Caller assigns directly
+    // after Init when needed (BacktestSharded_Run does this for feature
+    // collection). NULL = legacy behavior, slow path skips v4.3 pushes.
+    drv->rolling_medium     = nullptr;
+    drv->rolling_baseline   = nullptr;
+    drv->cumdelta_state     = nullptr;
+    drv->tick_rate_state    = nullptr;
+    drv->regime_ror         = nullptr;
+    drv->ema_price          = nullptr;
+    drv->on_slow_path       = nullptr;
+    drv->hook_ctx           = nullptr;
 }
 
 //======================================================================================================
@@ -151,12 +187,60 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
         if (drv->rolling_long) {
             RollingStats_Push(drv->rolling_long, tick.price, tick.volume);
         }
+        // Track E.1 — push v4.3 state at the same cadence EngineSharded_Run
+        // does (lines 804-818). Each guarded so callers that don't supply
+        // the state get prior behavior.
+        if (drv->rolling_medium) {
+            RollingStats_Push(drv->rolling_medium, tick.price, tick.volume);
+        }
+        if (drv->rolling_baseline) {
+            RollingStats_Push(drv->rolling_baseline, tick.price, tick.volume);
+        }
+        if (drv->cumdelta_state) {
+            // is_buyer_maker available on Tick<F> per the v4.3 plumbing.
+            CumDelta_Push(drv->cumdelta_state, tick.volume, tick.is_buyer_maker);
+        }
+        if (drv->tick_rate_state) {
+            TickRate_Push(drv->tick_rate_state, tick.timestamp);
+        }
+        if (drv->regime_ror && drv->rolling) {
+            // Slope-of-slopes feed (mirrors EngineSharded line 813-818 +
+            // legacy PortfolioController.hpp:1552). RORRegressor takes a
+            // LinearRegression3XResult; intercept is irrelevant for ROR.
+            LinearRegression3XResult<F> slope_sample;
+            slope_sample.model.slope     = drv->rolling->price_slope;
+            slope_sample.model.intercept = FPN_Zero<F>();
+            slope_sample.r_squared       = drv->rolling->price_r_squared;
+            RORRegressor_Push(drv->regime_ror, slope_sample);
+        }
         if (drv->rolling && drv->config) {
-            EventLoop_RebuildAllParameters(drv->state, drv->rolling, drv->config, drv->rolling_long);
+            // Thread the v4.3 + ROR/EMA state through the rebuild so per-core
+            // ML strategies see the same RegimeSignals fields the live path
+            // produces. Fields are NULL-passed when caller didn't supply
+            // state, matching the pre-Track-E sharded backtest behavior.
+            EventLoop_RebuildAllParameters(
+                drv->state, drv->rolling, drv->config, drv->rolling_long,
+                /* ror_regressor   */ (const void*)drv->regime_ror,
+                /* ema_price       */ (const void*)drv->ema_price,
+                /* current_price   */ (const void*)&tick.price,
+                /* rolling_medium  */ (const void*)drv->rolling_medium,
+                /* rolling_baseline*/ (const void*)drv->rolling_baseline,
+                /* cumdelta_state  */ (const void*)drv->cumdelta_state,
+                /* tick_rate_state */ (const void*)drv->tick_rate_state,
+                /* timestamp_us    */ tick.timestamp);
         }
         EventLoop_PushParameters(drv->state);
         EventLoop_KillSwitchEvaluate(drv->state);
         drv->slow_path_runs++;
+
+        // Track E.1 — fire the slow-path hook AFTER all driver work finishes.
+        // The hook (when registered by the caller) reads the now-fresh state
+        // pointers above and runs feature collection / regime tracking /
+        // anything else that wants a slow-path observability point. Driver
+        // hot loop stays unchanged when no hook is registered.
+        if (drv->on_slow_path) {
+            drv->on_slow_path(drv->hook_ctx, drv, tick, tick_index);
+        }
     }
 }
 

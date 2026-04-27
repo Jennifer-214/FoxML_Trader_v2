@@ -448,6 +448,76 @@ static inline void BacktestSharded_Run(BacktestResults *results,
 }
 
 //======================================================================================================
+// [LABEL COMPUTATION HELPER — Track E.1]
+//======================================================================================================
+// Compute labels for a populated BacktestResults using forward-looking tick
+// data. Extracted from the legacy Backtest_Run body so both legacy and
+// sharded paths can share it (sharded path adopted feature collection in
+// E.1; this is the matching label-side parity).
+//
+// Caller must have already set results->sample_count, results->sample_tick_indices,
+// results->sample_prices, and results->stats.ticks_processed. Uses
+// run_cfg->data_paths to reload the full tick stream (labels need forward-
+// looking data the replay already discarded).
+//
+// No-op when collect_features=0 or sample_count==0 — caller doesn't need to
+// gate.
+//======================================================================================================
+static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
+                                                      const BacktestRunConfig *run_cfg) {
+    if (!run_cfg->collect_features) return;
+    if (results->sample_count <= 0) return;
+    if (run_cfg->num_data_files <= 0) return;
+
+    int label_count = 0;
+    int label_max = (int)results->stats.ticks_processed + 1024;
+    if (label_max < 1024) label_max = 1024;
+    HistoricalTick *label_ticks = (HistoricalTick *)malloc((size_t)label_max * sizeof(HistoricalTick));
+    fprintf(stderr, "[backtest] allocating label buffer: %d ticks (%.0f MB)\n",
+            label_max, (double)label_max * sizeof(HistoricalTick) / 1e6);
+    if (!label_ticks) return;
+
+    // CRITICAL: BacktestData_Load resets *count to 0 each call, so passing
+    // &label_count caused each file to overwrite the previous file's data.
+    // Use a per-file local count, accumulate manually.
+    for (int f = 0; f < run_cfg->num_data_files; f++) {
+        if (label_count >= label_max) break;
+        int per_file_count = 0;
+        BacktestData_Load(label_ticks + label_count, &per_file_count,
+                          label_max - label_count, run_cfg->data_paths[f]);
+        label_count += per_file_count;
+    }
+    fprintf(stderr, "[backtest] label buffer: %d total ticks across %d files\n",
+            label_count, run_cfg->num_data_files);
+
+    LabelFn label_fn = NULL;
+    for (int l = 0; l < LABEL_COUNT; l++) {
+        if (label_table[l].id == run_cfg->label_type) {
+            label_fn = label_table[l].fn;
+            break;
+        }
+    }
+    if (!label_fn) label_fn = Label_WinLoss;  // fallback
+
+    double tp = run_cfg->label_tp_pct > 0 ? run_cfg->label_tp_pct : 1.5;
+    double sl = run_cfg->label_sl_pct > 0 ? run_cfg->label_sl_pct : 1.0;
+    int fwd = run_cfg->label_forward_ticks > 0 ? run_cfg->label_forward_ticks : 1000;
+
+    for (int s = 0; s < results->sample_count; s++) {
+        int tidx = results->sample_tick_indices[s];
+        if (tidx >= label_count) tidx = label_count - 1;
+        int extra = (run_cfg->label_type == LABEL_REGIME)
+            ? results->sample_regimes[s] : fwd;
+        results->labels[s] = label_fn(label_ticks, tidx, label_count,
+                                       results->sample_prices[s], tp, sl, extra);
+    }
+    free(label_ticks);
+
+    fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.1f%%, sl=%.1f%%)\n",
+            results->sample_count, run_cfg->label_type, tp, sl);
+}
+
+//======================================================================================================
 // [RUN]
 //======================================================================================================
 // the core replay loop — mirrors main.cpp:363-547
@@ -455,6 +525,11 @@ static inline void BacktestSharded_Run(BacktestResults *results,
 // Phase 13 dispatch: peek at engine_mode at the top. If sharded, route to the
 // per-core path in BacktestSharded.hpp and return. Otherwise fall through to
 // the legacy single-threaded code below, which is unchanged.
+//
+// Track E.1 (2026-04-26): the sharded path now collects features too. The
+// `!collect_features` carve-out is gone — when engine_mode=sharded, we
+// always route to BacktestSharded_Run and call the shared label helper on
+// the way out.
 //======================================================================================================
 static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfig *run_cfg,
                                  volatile int *progress_pct, volatile int *cancel_flag,
@@ -463,14 +538,13 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
     // Phase 13 dispatch: peek at engine_mode WITHOUT touching results yet,
     // so the sharded path's own reset is honored.
     //
-    // v4.0 carve-out: feature collection (collect_features=1) ONLY runs on
-    // the legacy path. BacktestSharded_Run intentionally has no
-    // sample/feature plumbing — sharded is the live execution engine,
-    // legacy is the research/training environment. When sharded became
-    // the default in v4.0, "Collect Features" silently ran the sharded
-    // path which produced zero samples. Forcing the legacy path here
-    // keeps ML training working without needing to set engine_mode=
-    // single_core in backtest.cfg.
+    // Track E.1 (2026-04-26): the prior `!run_cfg->collect_features`
+    // carve-out is gone — sharded now has its own feature collection
+    // hook (BacktestSharded.hpp) that runs Regime_ComputeSignals on the
+    // same inputs the live ML serve path uses, so train-serve drift can't
+    // happen the way it did in v4.0.1. Labels still need the post-replay
+    // forward-looking pass; we run that helper after the sharded body
+    // returns and short-circuit out.
     {
         ControllerConfig<BACKTEST_FP> peek;
         if (run_cfg->use_config_override) {
@@ -478,10 +552,13 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
         } else {
             peek = ControllerConfig_Load<BACKTEST_FP>(run_cfg->config_path);
         }
-        if (peek.engine_mode == ENGINE_MODE_SHARDED &&
-            !run_cfg->collect_features) {
+        if (peek.engine_mode == ENGINE_MODE_SHARDED) {
             tt::BacktestSharded_Run(results, run_cfg, progress_pct, cancel_flag,
                                      candle_acc, out_snapshot);
+            // Track E.1 — labels need forward-looking ticks the replay
+            // already discarded. Helper reloads + computes; no-op when
+            // collect_features=0.
+            Backtest_ComputeLabelsFromSamples(results, run_cfg);
             return;
         }
     }
@@ -760,62 +837,9 @@ done:
     }
 
     // post-processing: compute labels (needs forward-looking tick data)
-    // reload last data file for label computation (labels look forward within this file)
-    if (run_cfg->collect_features && results->sample_count > 0 && run_cfg->num_data_files > 0) {
-        // reload all files concatenated for label computation (labels need forward-looking data)
-        int label_count = 0;
-        int label_max = total_processed + 1024; // size to actual data (no arbitrary cap)
-        HistoricalTick *label_ticks = (HistoricalTick *)malloc((size_t)label_max * sizeof(HistoricalTick));
-        fprintf(stderr, "[backtest] allocating label buffer: %d ticks (%.0f MB)\n",
-                label_max, (double)label_max * sizeof(HistoricalTick) / 1e6);
-        if (label_ticks) {
-            // CRITICAL: BacktestData_Load resets *count to 0 each call (see line ~68),
-            // so passing &label_count caused each file to overwrite the previous
-            // file's count rather than accumulate. The data writes overlapped and
-            // label_count ended up = size_of_last_file rather than sum_of_files.
-            // Then sample_tick_indices (set during replay using global total_processed)
-            // would all clamp to label_count-1, pointing into a garbage region of
-            // the corrupted buffer. Every multi-file label run was on noise.
-            // Fix: use a per-file local count, accumulate into label_count manually.
-            for (int f = 0; f < run_cfg->num_data_files; f++) {
-                if (label_count >= label_max) break;
-                int per_file_count = 0;
-                BacktestData_Load(label_ticks + label_count, &per_file_count,
-                                  label_max - label_count,
-                                  run_cfg->data_paths[f]);
-                label_count += per_file_count;
-            }
-            fprintf(stderr, "[backtest] label buffer: %d total ticks across %d files\n",
-                    label_count, run_cfg->num_data_files);
-
-            // get label function from table
-            LabelFn label_fn = NULL;
-            for (int l = 0; l < LABEL_COUNT; l++) {
-                if (label_table[l].id == run_cfg->label_type) {
-                    label_fn = label_table[l].fn;
-                    break;
-                }
-            }
-            if (!label_fn) label_fn = Label_WinLoss; // fallback
-
-            double tp = run_cfg->label_tp_pct > 0 ? run_cfg->label_tp_pct : 1.5;
-            double sl = run_cfg->label_sl_pct > 0 ? run_cfg->label_sl_pct : 1.0;
-            int fwd = run_cfg->label_forward_ticks > 0 ? run_cfg->label_forward_ticks : 1000;
-
-            for (int s = 0; s < results->sample_count; s++) {
-                int tidx = results->sample_tick_indices[s];
-                if (tidx >= label_count) tidx = label_count - 1;
-                int extra = (run_cfg->label_type == LABEL_REGIME)
-                    ? results->sample_regimes[s] : fwd;
-                results->labels[s] = label_fn(label_ticks, tidx, label_count,
-                                               results->sample_prices[s], tp, sl, extra);
-            }
-            free(label_ticks);
-
-            fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.1f%%, sl=%.1f%%)\n",
-                    results->sample_count, run_cfg->label_type, tp, sl);
-        }
-    }
+    // Track E.1 — extracted to Backtest_ComputeLabelsFromSamples so the
+    // sharded path can call the same code without duplicating it.
+    Backtest_ComputeLabelsFromSamples(results, run_cfg);
 
     // cleanup
     free(ticks);

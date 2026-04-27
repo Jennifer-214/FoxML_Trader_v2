@@ -21,6 +21,7 @@
 #include "../CoreFrameworks/ControllerEventLoop.hpp"  // Phase 2.1 tests
 #include "../CoreFrameworks/ExecutionCore.hpp"        // Phase 2.1 tests
 #include "../CoreFrameworks/ShardedSnapshotPersist.hpp"  // Phase 4 tests
+#include "../CoreFrameworks/ShardedBacktestDriver.hpp"   // Track E.1 tests
 #include "../DataStream/BinanceUserData.hpp"
 #include "../Backtest/BacktestEngine.hpp"
 #include "../Backtest/HeldOutSplit.hpp"
@@ -4791,6 +4792,146 @@ int main() {
               FPN_IsZero(sig.dist_to_low));
         check("hour_sin / hour_cos with timestamp_us=0: both == 0",
               sig.hour_sin == 0.0 && sig.hour_cos == 0.0);
+    }
+
+    //==================================================================================================
+    // Track E.1 — feature collection hook on ShardedBacktestDriver
+    //==================================================================================================
+    // The hook fires once per slow-path firing AFTER all driver work
+    // finishes. Backstops the parity-with-EngineSharded contract: feature
+    // collection callbacks should see a well-defined cadence and never
+    // double-fire on the same tick.
+    //==================================================================================================
+    printf("\n--- Track E.1: slow-path hook fires on cadence ---\n");
+    {
+        using namespace tt;
+        struct HookCounter {
+            int slow_path_fires;
+            int last_tick_index;
+            int double_fire_on_same_tick;
+        } hc;
+        hc.slow_path_fires         = 0;
+        hc.last_tick_index         = -1;
+        hc.double_fire_on_same_tick = 0;
+
+        // Build a minimal sharded engine: 1 core, no strategy (STRATEGY_NONE).
+        // The hook should fire on cadence regardless of strategy state.
+        OrderManagerState<64> oms;
+        ExchangeAdapter<64> empty_adapter{};
+        OrderManager_Init(&oms, empty_adapter, 0,
+                          FPN_FromDouble<64>(10000.0),
+                          FPN_FromDouble<64>(0.001));
+
+        EventLoopState<64> state;
+        EventLoopState_Init(&state, &oms);
+
+        SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> ring;
+        SPSCRing_Init(&ring);
+        ExecutionCore<64> core;
+        ExecutionCore_Init(&core, 0, &ring);
+        EventLoopState_RegisterCore(&state, &core,
+            FPN_Zero<64>(), FPN_Zero<64>(), FPN_Zero<64>());
+
+        RollingStats<64, 128> rolling = RollingStats_Init<64, 128>();
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+
+        ShardedBacktestDriver<64, 128, 512> drv;
+        ShardedBacktestDriver_Init(&drv, &state, &rolling, &cfg, /*slow_path_interval=*/8);
+
+        drv.hook_ctx = &hc;
+        drv.on_slow_path = [](void* ctx_v,
+                              ShardedBacktestDriver<64, 128, 512>* d,
+                              const Tick<64>& /*tk*/,
+                              int tick_index) {
+            (void)d;
+            HookCounter* c = (HookCounter*)ctx_v;
+            if (c->last_tick_index == tick_index) c->double_fire_on_same_tick++;
+            c->last_tick_index = tick_index;
+            c->slow_path_fires++;
+        };
+
+        // Feed 80 ticks at slow_path_interval=8 → expect 10 hook firings.
+        for (int i = 0; i < 80; ++i) {
+            Tick<64> t{};
+            t.price     = FPN_FromDouble<64>(60000.0 + i);
+            t.volume    = FPN_FromDouble<64>(1.0);
+            t.timestamp = (uint64_t)(1000000ULL * (uint64_t)i);
+            t.sequence  = (uint64_t)i;
+            ShardedBacktest_RunTick(&drv, t, i);
+        }
+
+        check("hook fired 10 times across 80 ticks at interval=8",
+              hc.slow_path_fires == 10);
+        check("hook never fires twice on the same tick_index",
+              hc.double_fire_on_same_tick == 0);
+        check("driver slow_path_runs == hook fires",
+              (int)drv.slow_path_runs == hc.slow_path_fires);
+        check("hook NULL after re-Init clears state",
+              (ShardedBacktestDriver_Init(&drv, &state, &rolling, &cfg, 8),
+               drv.on_slow_path == nullptr));
+    }
+
+    printf("\n--- Track E.1: hook receives tick + cadence-fresh state ---\n");
+    {
+        using namespace tt;
+        // Verify the hook sees the tick's price/volume/timestamp and that
+        // driver->slow_path_runs has incremented BEFORE the hook fires
+        // (so callbacks can read the fresh state).
+        struct WitnessCtx {
+            uint64_t observed_runs;
+            double   observed_price;
+            uint64_t observed_ts;
+        } w;
+        w.observed_runs  = 0;
+        w.observed_price = 0.0;
+        w.observed_ts    = 0;
+
+        OrderManagerState<64> oms;
+        ExchangeAdapter<64> empty_adapter{};
+        OrderManager_Init(&oms, empty_adapter, 0,
+                          FPN_FromDouble<64>(10000.0),
+                          FPN_FromDouble<64>(0.001));
+        EventLoopState<64> state;
+        EventLoopState_Init(&state, &oms);
+
+        SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> ring;
+        SPSCRing_Init(&ring);
+        ExecutionCore<64> core;
+        ExecutionCore_Init(&core, 0, &ring);
+        EventLoopState_RegisterCore(&state, &core,
+            FPN_Zero<64>(), FPN_Zero<64>(), FPN_Zero<64>());
+
+        RollingStats<64, 128> rolling = RollingStats_Init<64, 128>();
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+
+        ShardedBacktestDriver<64, 128, 512> drv;
+        ShardedBacktestDriver_Init(&drv, &state, &rolling, &cfg, 4);
+        drv.hook_ctx = &w;
+        drv.on_slow_path = [](void* ctx_v,
+                              ShardedBacktestDriver<64, 128, 512>* d,
+                              const Tick<64>& tk,
+                              int /*ti*/) {
+            WitnessCtx* w_ = (WitnessCtx*)ctx_v;
+            w_->observed_runs  = d->slow_path_runs;
+            w_->observed_price = FPN_ToDouble(tk.price);
+            w_->observed_ts    = tk.timestamp;
+        };
+
+        // Send four ticks — only the 4th (index 3) lands on slow path.
+        for (int i = 0; i < 4; ++i) {
+            Tick<64> t{};
+            t.price     = FPN_FromDouble<64>(50000.0 + 100.0 * i);
+            t.volume    = FPN_FromDouble<64>(1.0);
+            t.timestamp = (uint64_t)(2000000ULL * (uint64_t)i);
+            t.sequence  = (uint64_t)i;
+            ShardedBacktest_RunTick(&drv, t, i);
+        }
+        check("hook saw slow_path_runs incremented (>=1) when fired",
+              w.observed_runs >= 1);
+        check("hook saw the slow-path tick's price (50300.0)",
+              fabs(w.observed_price - 50300.0) < 1e-6);
+        check("hook saw the slow-path tick's timestamp",
+              w.observed_ts == 6000000ULL);
     }
 
     printf("\n======================================\n");

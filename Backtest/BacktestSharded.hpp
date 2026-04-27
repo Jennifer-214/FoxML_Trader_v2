@@ -45,7 +45,10 @@
 #include "../CoreFrameworks/Tick.hpp"
 #include "../DataStream/EngineTUI.hpp"  // for TUISnapshot
 #include "../FixedPoint/FixedPointN.hpp"
+#include "../ML_Headers/ModelInference.hpp"  // for ModelFeatures_Pack
+#include "../ML_Headers/ROR_regressor.hpp"
 #include "../ML_Headers/RollingStats.hpp"
+#include "../Strategies/RegimeDetector.hpp"  // CumDeltaState, TickRateState, Regime_ComputeSignals
 #include "BacktestEngine.hpp"  // for BacktestResults, BacktestRunConfig, BacktestData_Load
 #include "LabelFunctions.hpp"  // for HistoricalTick
 
@@ -181,8 +184,103 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     rolling = RollingStats_Init<BACKTEST_FP, 128>();      // explicit reset each run
     rolling_long = RollingStats_Init<BACKTEST_FP, 512>(); // explicit reset each run
 
+    //----------------------------------------------------------------------
+    // Track E.1 — train-serve parity state. Mirrors EngineSharded_Run's
+    // static locals (lines 522-547) so RegimeSignals fields fed to ML
+    // strategies + feature collection match what the live path produces.
+    // Re-init each call so backtests are deterministic from a clean state.
+    //----------------------------------------------------------------------
+    static RORRegressor<BACKTEST_FP> regime_ror   = RORRegressor_Init<BACKTEST_FP>();
+    static FPN<BACKTEST_FP>          ema_price    = FPN_Zero<BACKTEST_FP>();
+    static RollingStats<BACKTEST_FP, 256>  rolling_medium   = RollingStats_Init<BACKTEST_FP, 256>();
+    static RollingStats<BACKTEST_FP, 1024> rolling_baseline = RollingStats_Init<BACKTEST_FP, 1024>();
+    static CumDeltaState<BACKTEST_FP>      cumdelta_state;
+    static TickRateState                   tick_rate_state;
+    regime_ror       = RORRegressor_Init<BACKTEST_FP>();
+    ema_price        = FPN_Zero<BACKTEST_FP>();
+    rolling_medium   = RollingStats_Init<BACKTEST_FP, 256>();
+    rolling_baseline = RollingStats_Init<BACKTEST_FP, 1024>();
+    CumDelta_Init(&cumdelta_state);
+    TickRate_Init(&tick_rate_state);
+    FPN<BACKTEST_FP> ema_alpha = !FPN_IsZero(cfg.gate_ema_alpha)
+                                 ? cfg.gate_ema_alpha
+                                 : FPN_FromDouble<BACKTEST_FP>(0.1);
+    FPN<BACKTEST_FP> one_minus_alpha =
+        FPN_Sub(FPN_FromDouble<BACKTEST_FP>(1.0), ema_alpha);
+
     ShardedBacktestDriver<BACKTEST_FP, 128, 512> drv;
     ShardedBacktestDriver_Init(&drv, &state, &rolling, &cfg, (int)cfg.poll_interval, &rolling_long, &oms);
+    // Track E.1 — wire parity state into the driver. Driver pushes these on
+    // slow-path firings and threads them into EventLoop_RebuildAllParameters.
+    drv.rolling_medium    = &rolling_medium;
+    drv.rolling_baseline  = &rolling_baseline;
+    drv.cumdelta_state    = &cumdelta_state;
+    drv.tick_rate_state   = &tick_rate_state;
+    drv.regime_ror        = &regime_ror;
+    drv.ema_price         = &ema_price;
+
+    //----------------------------------------------------------------------
+    // Track E.1 — feature collection hook. When collect_features=1, register
+    // a callback that fires after each slow-path rebuild and packs a row of
+    // the feature_matrix using Regime_ComputeSignals (the same single
+    // source-of-truth the live ML serve path uses). When collect_features=0,
+    // the hook stays NULL and the driver runs identically to its prior shape.
+    //----------------------------------------------------------------------
+    struct FeatureCollectCtx {
+        BacktestResults*  results;
+        const ControllerConfig<BACKTEST_FP>* cfg;
+        // warmup gate — skip collection until rolling stats have meaningful
+        // data. Mirrors legacy `ctrl.state != CONTROLLER_WARMUP` (lines
+        // 1034-1035 of PortfolioController.hpp).
+        uint32_t          warmup_ticks;
+        uint32_t          min_warmup_samples;
+    };
+    FeatureCollectCtx fc_ctx{};
+    fc_ctx.results            = results;
+    fc_ctx.cfg                = &cfg;
+    fc_ctx.warmup_ticks       = cfg.warmup_ticks;
+    fc_ctx.min_warmup_samples = cfg.min_warmup_samples;
+
+    if (run_cfg->collect_features) {
+        drv.hook_ctx = &fc_ctx;
+        drv.on_slow_path = [](void* ctx_v,
+                              ShardedBacktestDriver<BACKTEST_FP, 128, 512>* d,
+                              const Tick<BACKTEST_FP>& tk,
+                              int tick_index) {
+            auto* fc = (FeatureCollectCtx*)ctx_v;
+            // Warmup gate — wait for tick threshold + rolling fill.
+            if ((uint32_t)tick_index < fc->warmup_ticks) return;
+            if (d->rolling->count < (int)fc->min_warmup_samples) return;
+            // Capacity guard — silent truncation contaminates ML training.
+            if (!BacktestResults_EnsureCapacity(fc->results,
+                                                 fc->results->sample_count + 1)) return;
+
+            // Regime_ComputeSignals with the EXACT inputs the live ML serve
+            // path uses (mirrors StrategyParameters.hpp:469). When the driver
+            // doesn't have ROR/EMA wired (legacy callers), this branch is
+            // skipped and the row gets zeroed signals — same as a non-ML run.
+            RegimeSignals<BACKTEST_FP> sig;
+            memset(&sig, 0, sizeof(sig));
+            if (d->rolling && d->rolling_long && d->regime_ror && d->ema_price) {
+                Regime_ComputeSignals(&sig, d->rolling, d->rolling_long,
+                                       d->regime_ror, *d->ema_price,
+                                       d->rolling_medium, d->rolling_baseline,
+                                       d->cumdelta_state, d->tick_rate_state,
+                                       tk.timestamp);
+            }
+            ModelFeatures_Pack<BACKTEST_FP>(
+                &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES],
+                &sig, d->rolling, d->rolling_long);
+            fc->results->sample_tick_indices[fc->results->sample_count] = (uint64_t)tick_index;
+            fc->results->sample_prices[fc->results->sample_count] = FPN_ToDouble(tk.price);
+            // Sharded has no central regime field (each core may run a
+            // different strategy). Default 0 — Past Runs / regime histograms
+            // that read this should treat sharded results as regime-agnostic.
+            fc->results->sample_regimes[fc->results->sample_count] = 0;
+            fc->results->labels[fc->results->sample_count] = 0.0f;  // post-pass
+            fc->results->sample_count++;
+        };
+    }
 
     //----------------------------------------------------------------------
     // Replay loop
@@ -246,11 +344,23 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             if (ticks[i].price < price_lo) price_lo = ticks[i].price;
             if (ticks[i].price > price_hi) price_hi = ticks[i].price;
 
+            // Track E.1 — train-serve parity. Update EMA price every tick,
+            // mirroring EngineSharded_Run lines 769-774 + legacy
+            // PortfolioController_Tick. Driver reads the resulting value via
+            // drv.ema_price on slow-path firings; without per-tick updates
+            // sig->ema_sma_spread + sig->ema_above_sma stay stale or zero.
+            FPN<BACKTEST_FP> ema_new = FPN_Add(
+                FPN_Mul(ema_price, ema_alpha),
+                FPN_Mul(t.price,    one_minus_alpha));
+            if (FPN_IsZero(ema_price)) ema_price = t.price;
+            else                       ema_price = ema_new;
+
             // Step the per-core engine through this tick. Internally:
             //   1. RollingStats_Push so the slow path has fresh data
             //   2. Fan out to every core (1..num_cores)
             //   3. DrainEvents (process any entries / exits)
             //   4. On cadence: rebuild parameters, push, evaluate kill switch
+            //   5. Track E.1 — fire on_slow_path hook (when registered)
             ShardedBacktest_RunTick(&drv, t, total_processed);
 
             // DEBUG: dump pending params after the first slow-path rebuild
