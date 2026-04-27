@@ -598,11 +598,24 @@ inline void EventLoopState_SetIntendedParams(EventLoopState<F>* state, int slot,
 // Slot → core_id mapping is partials-aware via oms->partial_exit_enabled.
 // Both legs of a paired trade route their stats to the SAME CoreContext
 // (one per core, not one per leg) — partials only split the exit
-// schedule, not the allocation. Entry-time stamping (active_prediction
-// reset, ConfidenceScorer update) fires per-leg-exit, but
-// active_prediction was already stashed by leg-A entry; the second update
-// just resets it to 0 a second time. Acceptable; future cleanup could
-// gate on leg via FillRecord.
+// schedule, not the allocation.
+//
+// Per-leg vs per-trade fields (load-bearing under partials):
+//   - PER-LEG (every exit fill contributes): core_realized,
+//     core_open_notional, core_fees. Each leg has its own qty + entry
+//     notional + fee, so all aggregate.
+//   - PER-TRADE (leg-A only fires the signal): core_wins/core_losses,
+//     ConfidenceScorer_Update, active_prediction reset, pnl_feeder push,
+//     sl_cooldown_remaining. One trade = one outcome signal. Mirrors the
+//     entry-side rule that last_entry_tick + last_entry_price +
+//     active_prediction are stamped only on leg-A entries.
+//
+// v4.7.4: prior behavior fired the per-trade hooks on EVERY leg bit,
+// causing IC contamination on the ConfidenceScorer (1 valid (X, ret_a)
+// pair + 1 garbage (0, ret_b) pair after active_prediction was wiped on
+// leg-A iter), 2× pnl_feeder pushes per trade, doubled W/L counters. The
+// double-fire was actually present since v4.7.0 partials but only
+// became visible once cores were swapped to STRATEGY_ML.
 //
 // All slow-path. Single-threaded (drainer is sole reader, OMS_Tick on
 // the same thread is sole writer). FPN-pure on the per-core math.
@@ -629,33 +642,40 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
     }
     oms->last_opened_mask = 0;
 
-    // ---- Exits: realized / open_notional decrement / fees / W-L /
-    //            ConfidenceScorer / SL cooldown / pnl_feeder ----
+    // ---- Exits ----
     uint16_t close_mask = oms->last_closed_mask;
     while (close_mask) {
         int slot = __builtin_ctz(close_mask);
         close_mask &= (uint16_t)(close_mask - 1);
         if (slot < 0 || slot >= max_slot) continue;
         int core_id = partial_on ? (slot >> 1) : slot;
+        // Leg A is the even slot under partials; the only slot when
+        // partials disabled. Per-trade signals (W/L, ConfidenceScorer,
+        // pnl_feeder, cooldown) fire only on leg A — see header comment.
+        bool is_leg_a = !partial_on || ((slot & 1) == 0);
         CoreContext<F>& ctx = state->cores[core_id];
         const auto& rec = oms->last_fill[slot];
 
+        // Per-leg accounting: every exit fill contributes.
         ctx.core_realized      = FPN_Add(ctx.core_realized, rec.exit_net_pnl);
         ctx.core_open_notional = FPN_SubSat(ctx.core_open_notional, rec.exit_entry_notional);
         ctx.core_fees          = FPN_AddSat(ctx.core_fees, rec.exit_total_fees);
-        ctx.core_wins   += (rec.was_win ? 1u : 0u);
-        ctx.core_losses += (rec.was_win ? 0u : 1u);
 
-        double realized = oms->last_realized_return[slot];
-        if (ctx.strategy_id == STRATEGY_ML) {
-            ConfidenceScorer_Update(&ctx.confidence,
-                                    ctx.active_prediction, realized);
-            ctx.active_prediction = 0.0;
+        // Per-trade signals: leg A only.
+        if (is_leg_a) {
+            ctx.core_wins   += (rec.was_win ? 1u : 0u);
+            ctx.core_losses += (rec.was_win ? 0u : 1u);
+            double realized = oms->last_realized_return[slot];
+            if (ctx.strategy_id == STRATEGY_ML) {
+                ConfidenceScorer_Update(&ctx.confidence,
+                                        ctx.active_prediction, realized);
+                ctx.active_prediction = 0.0;
+            }
+            if (realized < 0.0 && sl_cooldown_cycles > 0) {
+                ctx.sl_cooldown_remaining = sl_cooldown_cycles;
+            }
+            RegressionFeederX_Push(&ctx.pnl_feeder, FPN_FromDouble<F>(realized));
         }
-        if (realized < 0.0 && sl_cooldown_cycles > 0) {
-            ctx.sl_cooldown_remaining = sl_cooldown_cycles;
-        }
-        RegressionFeederX_Push(&ctx.pnl_feeder, FPN_FromDouble<F>(realized));
     }
     oms->last_closed_mask = 0;
 }

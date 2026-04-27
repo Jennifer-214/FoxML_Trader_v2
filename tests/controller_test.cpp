@@ -6092,14 +6092,17 @@ e3_skip_load:;
         tt::EventLoop_DrainPostFill(&r->state, &r->oms, 0);
 
         // Both legs profited → core_realized accumulates net P&L of both,
-        // open_notional decrements back to ~0, core_wins == 2.
+        // open_notional decrements back to ~0. v4.7.4: W/L counts logical
+        // trades, not legs — paired exit = 1 trade, so wins == 1 (was 2
+        // pre-v4.7.4 when both leg bits incremented). Realized still
+        // sums both legs' net P&L.
         double realized = FPN_ToDouble(r->state.cores[0].core_realized);
         check("mode 1 post-exit: core 0 core_realized > 0 (both legs profited)",
               realized > 0.0);
         check("mode 1 post-exit: core 0 open_notional decremented to ~0",
               FPN_ToDouble(r->state.cores[0].core_open_notional) < 0.5);
-        check("mode 1 post-exit: core 0 wins == 2",
-              r->state.cores[0].core_wins == 2);
+        check("mode 1 post-exit: core 0 wins == 1 (one logical trade)",
+              r->state.cores[0].core_wins == 1);
         check("mode 1 post-exit: core 0 losses == 0",
               r->state.cores[0].core_losses == 0);
         check("mode 1 post-exit: last_closed_mask cleared",
