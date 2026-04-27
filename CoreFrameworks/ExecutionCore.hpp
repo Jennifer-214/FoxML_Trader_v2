@@ -266,11 +266,12 @@ static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tic
     // bench_batch_floor v2 vs v3 where the branch was 4 ns slower).
     FPN<F> tp = active ? core->live_tp : core->cached_params.sg_take_profit_price;
     FPN<F> sl = active ? core->live_sl : core->cached_params.sg_stop_loss_price;
-    // P.2: leg-B TP/SL are core-owned, written on entry when GATE_FLAG_PAIR_-
-    // ACTIVE was set. When active_b=0 these are zero and SG_b would always
-    // fire on price >= 0; the active_b mask in can_exit_b zeros that out.
-    FPN<F> tp_b = core->live_tp_b;
-    FPN<F> sl_b = core->live_sl_b;
+    // Note: leg-B TP/SL are loaded inside the branch-gated block below
+    // (P.2 v2). The original P.2 design read them unconditionally; that
+    // cost ~40ns per tick because FPN<64> compares pipeline less than
+    // expected on the i5-1035G4. Moving the loads + compares behind
+    // `if (__builtin_expect(active_b, 0))` returns steady-state latency
+    // to the pre-P.2 baseline. Cost is paid only while a pair is open.
 
     // Read frequently used fields. The compiler keeps them in registers across
     // the body since cached_params is read-only in the steady path.
@@ -296,34 +297,44 @@ static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tic
     uint64_t blocked_mask  = -blocked;
     uint64_t bg_fires      = (price_ok & volume_check) & ~blocked_mask;
 
-    // === Inlined SG_Evaluate — DUAL LEG (P.2 partial exits) ===
-    // Both legs evaluated unconditionally so the CPU pipelines them in
-    // parallel. active_a / active_b masks gate which (if any) fires.
-    // ~1-2ns added per tick total: 4 FPN comparisons (2 per leg) + 2 mask
-    // ops, all of which pipeline into otherwise-idle CPU slots after the
-    // BG_Evaluate above. When active_b=0 (the steady state when partials
-    // disabled or no leg-B opened yet), the leg-B path is masked out.
+    // === Inlined SG_Evaluate ===
+    // Leg A: always evaluated (single-position case + when paired). Leg B:
+    // BRANCH-GATED on active_b (P.2 v2 — 2026-04-27 measurement showed
+    // unconditional leg-B compute cost ~40ns/tick on the i5-1035G4
+    // because FPN<64> compares don't pipeline as cleanly as expected).
+    // Branch is predicted not-taken in steady state; when no pair is
+    // open (the common case, especially with partial_exit_enabled=0),
+    // the leg-B FPN ops + memory loads are skipped entirely. When a
+    // pair IS open (rare, only between leg A entry and final leg B
+    // exit), branch is taken and we pay the +40ns to evaluate leg B.
+    //
+    // Net behavior:
+    //   - partial_exit_enabled=0 (default): zero leg-B cost ever
+    //   - partial_exit_enabled=1, no pair open: zero leg-B cost
+    //   - partial_exit_enabled=1, pair open: +40ns until pair closes
     uint64_t tp_enabled    = (uint64_t)((flags & GATE_FLAG_TP_ENABLED) != 0);
     uint64_t sl_enabled    = (uint64_t)((flags & GATE_FLAG_SL_ENABLED) != 0);
     // v4.0.3 D9: trailing SL via ratchet field. Branchless FPN_Max selects
     // the higher of original SL and the ratchet floor. When ratchet_sl is
     // FPN_Zero (default, no ratchet), FPN_Max(sl, 0) = sl so behavior is
     // unchanged. When controller has ratcheted up, the ratchet wins → exit
-    // fires when price drops to the trailing level. Applied to both legs
-    // for parity (legacy-style "shared SL" between leg A and leg B).
-    FPN<F> effective_sl   = FPN_Max(sl,   core->cached_params.ratchet_sl);
-    FPN<F> effective_sl_b = FPN_Max(sl_b, core->cached_params.ratchet_sl);
-    // Leg A SG (existing pattern, unchanged for partials_disabled case)
+    // fires when price drops to the trailing level.
+    FPN<F> effective_sl = FPN_Max(sl, core->cached_params.ratchet_sl);
+    // Leg A SG (existing pattern, unchanged)
     uint64_t tp_hit_a   = (uint64_t)FPN_GreaterThanOrEqual(tick.price, tp);
     uint64_t sl_hit_a   = (uint64_t)FPN_LessThanOrEqual(tick.price, effective_sl);
     uint64_t sg_fires_a = (tp_enabled & tp_hit_a) | (sl_enabled & sl_hit_a);
-    // Leg B SG (P.2 — new). Computed always; gated by active_b in
-    // can_exit_b below. tp_b/sl_b are 0 when leg B never opened, so
-    // sg_fires_b would evaluate as "tp_hit when tick.price >= 0 = always
-    // true" — but active_b=0 zeros can_exit_b, neutralizing.
-    uint64_t tp_hit_b   = (uint64_t)FPN_GreaterThanOrEqual(tick.price, tp_b);
-    uint64_t sl_hit_b   = (uint64_t)FPN_LessThanOrEqual(tick.price, effective_sl_b);
-    uint64_t sg_fires_b = (tp_enabled & tp_hit_b) | (sl_enabled & sl_hit_b);
+    // Leg B SG — gated. Variable defaults to 0 so can_exit_b stays 0
+    // when active_b=0 (the steady state).
+    uint64_t sg_fires_b = 0;
+    if (__builtin_expect(active_b, 0)) {
+        FPN<F> tp_b           = core->live_tp_b;
+        FPN<F> sl_b           = core->live_sl_b;
+        FPN<F> effective_sl_b = FPN_Max(sl_b, core->cached_params.ratchet_sl);
+        uint64_t tp_hit_b     = (uint64_t)FPN_GreaterThanOrEqual(tick.price, tp_b);
+        uint64_t sl_hit_b     = (uint64_t)FPN_LessThanOrEqual(tick.price, effective_sl_b);
+        sg_fires_b            = (tp_enabled & tp_hit_b) | (sl_enabled & sl_hit_b);
+    }
 
     // Mask events. ~(active_a | active_b) means "not currently in any leg".
     // This tighter gate prevents leg A from re-opening solo while leg B is
