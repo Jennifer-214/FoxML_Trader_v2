@@ -85,7 +85,20 @@ static inline void TUI_CopySnapshotSharded(
     snap->unrealized   = agg.unrealized_pnl;
     snap->total_pnl    = agg.realized_pnl + agg.unrealized_pnl;
     snap->return_pct   = (snap->starting > 0.0) ? (snap->total_pnl / snap->starting * 100.0) : 0.0;
-    snap->active_count = agg.active_position_count;
+    // active_count under partials: agg counts raw bitmap bits, but slot
+    // 2c+0 + slot 2c+1 are ONE logical trade (both legs of one core's
+    // pair). Collapse to "trades open" by counting cores with any leg
+    // active. Standard "any-of-pair" trick: OR adjacent bits together,
+    // mask to even positions, popcount. Handles half-paired states too
+    // (e.g. leg A closed but leg B still open after TP1) — that core
+    // counts as 1, not 0 (under-count) or 2 (raw bitmap).
+    if (cfg->partial_exit_enabled) {
+        uint16_t bm = state->oms->portfolio.active_bitmap;
+        uint16_t any_pair = (uint16_t)(((bm | (bm >> 1)) & 0x5555u));
+        snap->active_count = __builtin_popcount(any_pair);
+    } else {
+        snap->active_count = agg.active_position_count;
+    }
     snap->max_positions = (int)cfg->num_execution_cores;
     snap->max_dd       = agg.max_drawdown;
     snap->max_drawdown = agg.max_drawdown;

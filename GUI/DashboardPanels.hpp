@@ -939,7 +939,7 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s) {
                             ImGuiTableFlags_SizingStretchProp;
 
     if (ImGui::BeginTable("##positions", 11, flags)) {
-        ImGui::TableSetupColumn("#",      ImGuiTableColumnFlags_WidthFixed, 25);
+        ImGui::TableSetupColumn("#",      ImGuiTableColumnFlags_WidthFixed, 40);
         ImGui::TableSetupColumn("Strat",  ImGuiTableColumnFlags_WidthFixed, 35);
         ImGui::TableSetupColumn("Entry",  ImGuiTableColumnFlags_WidthFixed, 60);
         ImGui::TableSetupColumn("Now",    ImGuiTableColumnFlags_WidthFixed, 60);

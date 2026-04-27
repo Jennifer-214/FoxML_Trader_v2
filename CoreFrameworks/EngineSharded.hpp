@@ -1426,11 +1426,26 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 ++total_drained;
 
                 if ((is_entry || is_exit) && order_qty_d > 0.0) {
+                    // v4.7.2: leg B's intended_tp must be TP2, not TP1.
+                    // intended_tp on the core is leg A's absolute TP. For
+                    // leg B, scale the TP-distance by cfg.tp2_mult — same
+                    // computation the hot path does for live_tp_b, just
+                    // expressed in absolute price form so Position.tp +
+                    // snapshot persistence reflect the actual TP2. Keeps
+                    // the panel display honest AND prevents
+                    // snapshot-restore-while-paired from reviving leg B
+                    // with TP1 instead of TP2.
+                    FPN<F> leg_tp = state.cores[slot].intended_tp;
+                    if (is_entry && partial_on && event.leg == PARTIAL_LEG_B) {
+                        FPN<F> tp_dist_a = FPN_Sub(state.cores[slot].intended_tp, event.price);
+                        FPN<F> tp_dist_b = FPN_Mul(tp_dist_a, cfg.tp2_mult);
+                        leg_tp = FPN_Add(event.price, tp_dist_b);
+                    }
                     OrderManager_Submit(&oms,
                         (int16_t)portfolio_slot,  // P.3: actual slot, not core_id
                         is_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
                         FPN_FromDouble<F>(order_qty_d),
-                        state.cores[slot].intended_tp,
+                        leg_tp,
                         state.cores[slot].intended_sl,
                         state.cores[slot].strategy_id,
                         event.price,
