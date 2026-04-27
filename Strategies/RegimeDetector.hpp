@@ -97,6 +97,9 @@ template <unsigned F> struct RegimeSignals {
     double  flow_1m;             // half-life 60s
     double  flow_5m;             // half-life 300s
     double  large_trade_z;       // z-score of current trade size vs window
+    // v4.6 Wave 2 — D.3 spread dynamics
+    double  spread_bps;          // current spread / mid_price × 10000 (basis points)
+    double  spread_zscore;       // z-score of current spread vs trailing window
 };
 
 //======================================================================================================
@@ -231,7 +234,15 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
                                    // mirroring v4.3's pattern.
                                    const void *book_imb_history = nullptr,
                                    const void *flow_state = nullptr,
-                                   const void *large_trade_state = nullptr) {
+                                   const void *large_trade_state = nullptr,
+                                   // v4.6 Wave 2 — D.3 spread dynamics. spread_-
+                                   // current + mid_price come from BookSnapshot
+                                   // (the same struct DepthSharedState +
+                                   // DepthReplayState expose). spread_state is
+                                   // a SpreadState<F, 1024> ring for z-score.
+                                   const void *spread_state = nullptr,
+                                   double current_spread = 0.0,
+                                   double current_mid_price = 0.0) {
     // short window signals
     sig->short_count    = rolling->count;
     sig->short_r2       = rolling->price_r_squared;
@@ -413,6 +424,26 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
         sig->large_trade_z = LargeTradeState_ZScore(lt, last);
     } else {
         sig->large_trade_z = 0.0;
+    }
+
+    // v4.6 Wave 2 — D.3: spread dynamics.
+    //   spread_bps   = current_spread / mid_price × 10000 (basis points).
+    //                  Zero-default when mid_price is zero (cold start) or
+    //                  current_spread is zero (no depth feed).
+    //   spread_zscore = z-score of current_spread vs SpreadState window.
+    //                   Zero-default when state is null or count < 2.
+    if (current_mid_price > 1e-12 && current_spread > 0.0) {
+        sig->spread_bps = (current_spread / current_mid_price) * 10000.0;
+    } else {
+        sig->spread_bps = 0.0;
+    }
+    if (spread_state) {
+        const SpreadState<F, 1024> *ss =
+            (const SpreadState<F, 1024> *)spread_state;
+        sig->spread_zscore = SpreadState_ZScore(ss,
+            FPN_FromDouble<F>(current_spread));
+    } else {
+        sig->spread_zscore = 0.0;
     }
 }
 

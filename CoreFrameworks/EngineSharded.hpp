@@ -557,6 +557,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     BookImbHistory_Init(&book_imb_history);
     FlowState_Init(&flow_state);
     LargeTradeState_Init(&large_trade_state);
+    // v4.6 Wave 2 — D.3 spread state. Pushed at slow-path with current
+    // spread from g_depth_shared.snapshots[active].spread.
+    static SpreadState<F, 1024> spread_state;
+    SpreadState_Init(&spread_state);
 
     // Per-core risk allocation: split the configured starting balance across
     // cores. Each core gets its own mini-portfolio that's risk_pct of the
@@ -753,7 +757,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         &cfg, &state, &slow_path_counter, slow_path_interval, tsc_ghz,
                         &ema_price, ema_alpha, &regime_ror, live_trading,
                         &rolling_medium, &rolling_baseline, &cumdelta_state, &tick_rate_state,
-                        &book_imb_history, &flow_state, &large_trade_state]
+                        &book_imb_history, &flow_state, &large_trade_state,
+                        &spread_state]
                        (double price_d, double volume_d, uint64_t ts_us,
                         int is_buyer_maker = 0) {  // v4.3 — defaulted for synthetic paths
             Tick<F> t;
@@ -999,10 +1004,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // min_book_imbalance>0, which is the desired semantics
                 // (no data → no buys, since we can't evaluate the gate).
                 FPN<F> book_imb;
+                FPN<F> book_spread   = FPN_Zero<F>();
+                FPN<F> book_mid      = FPN_Zero<F>();
                 if (cfg.depth_enabled) {
                     int dactive = __atomic_load_n(&g_depth_shared.active_idx,
                                                    __ATOMIC_ACQUIRE);
-                    book_imb = g_depth_shared.snapshots[dactive].imbalance;
+                    book_imb    = g_depth_shared.snapshots[dactive].imbalance;
+                    book_spread = g_depth_shared.snapshots[dactive].spread;
+                    book_mid    = g_depth_shared.snapshots[dactive].mid_price;
                 } else {
                     book_imb = FPN_Zero<F>();
                 }
@@ -1012,6 +1021,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // the freshly-updated history.
                 if (cfg.depth_enabled) {
                     BookImbHistory_Push(&book_imb_history, book_imb);
+                    // v4.6 Wave 2 — push spread into z-score ring
+                    SpreadState_Push(&spread_state, book_spread);
                 }
                 EventLoop_RebuildAllParameters(&state, &rolling_short, &cfg, &rolling_long,
                                                 &regime_ror, &ema_price,
@@ -1022,7 +1033,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 cfg.depth_enabled ? &book_imb : nullptr,
                                                 /* book_imb_history */ &book_imb_history,
                                                 /* flow_state       */ &flow_state,
-                                                /* large_trade_state*/ &large_trade_state);
+                                                /* large_trade_state*/ &large_trade_state,
+                                                /* spread_state     */ &spread_state,
+                                                /* current_spread   */ FPN_ToDouble(book_spread),
+                                                /* current_mid_price*/ FPN_ToDouble(book_mid));
 
                 // Phase 4 — periodic snapshot save. Once every ~1024 slow-path
                 // cycles, paper mode only. With slow_path_interval=8 ticks and

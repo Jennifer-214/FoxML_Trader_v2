@@ -102,6 +102,11 @@ struct MLBuildContext {
     void*               book_imb_history;   // const BookImbalanceHistory<F, 1024>*
     void*               flow_state;         // const FlowState*
     void*               large_trade_state;  // const LargeTradeState<F, 1024>*
+    // v4.6 Wave 2 — D.3 spread dynamics state + current spread/mid (from
+    // depth state's BookSnapshot). FlowFeatures.hpp exposes SpreadState.
+    void*               spread_state;       // const SpreadState<F, 1024>*
+    double              current_spread;     // BookSnapshot::spread (FPN→double)
+    double              current_mid_price;  // BookSnapshot::mid_price (FPN→double)
 };
 
 //======================================================================================================
@@ -474,9 +479,14 @@ inline void ML_BuildParameters(
         const void* bih = mctx ? mctx->book_imb_history  : nullptr;
         const void* fs  = mctx ? mctx->flow_state        : nullptr;
         const void* lts = mctx ? mctx->large_trade_state : nullptr;
+        // v4.6 Wave 2 — D.3 spread state + current spread/mid
+        const void* sst = mctx ? mctx->spread_state      : nullptr;
+        double cur_spread = mctx ? mctx->current_spread    : 0.0;
+        double cur_mid    = mctx ? mctx->current_mid_price : 0.0;
         Regime_ComputeSignals(&sig, rolling, rolling_long, ror_in, *ema_in,
                                mid, base, cd, tr, ts,
-                               bih, fs, lts);
+                               bih, fs, lts,
+                               sst, cur_spread, cur_mid);
     } else {
         sig.short_slope    = FPN_IsZero(rolling->price_avg) ? FPN_Zero<F>()
                              : FPN_DivNoAssert(rolling->price_slope, rolling->price_avg);

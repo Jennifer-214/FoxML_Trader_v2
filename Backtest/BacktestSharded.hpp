@@ -282,6 +282,14 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     BookImbHistory_Init(&book_imb_history);
     FlowState_Init(&flow_state);
     LargeTradeState_Init(&large_trade_state);
+    // v4.6 Wave 2 — D.3 spread state + holders updated per-tick from
+    // depth_replay.current.spread / mid_price.
+    static SpreadState<BACKTEST_FP, 1024> spread_state;
+    static FPN<BACKTEST_FP>               spread_holder    = FPN_Zero<BACKTEST_FP>();
+    static FPN<BACKTEST_FP>               mid_price_holder = FPN_Zero<BACKTEST_FP>();
+    SpreadState_Init(&spread_state);
+    spread_holder    = FPN_Zero<BACKTEST_FP>();
+    mid_price_holder = FPN_Zero<BACKTEST_FP>();
     FPN<BACKTEST_FP> ema_alpha = !FPN_IsZero(cfg.gate_ema_alpha)
                                  ? cfg.gate_ema_alpha
                                  : FPN_FromDouble<BACKTEST_FP>(0.1);
@@ -334,6 +342,9 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     drv.book_imb_history  = &book_imb_history;
     drv.flow_state        = &flow_state;
     drv.large_trade_state = &large_trade_state;
+    drv.spread_state      = &spread_state;
+    drv.current_spread    = depth_enabled ? &spread_holder    : nullptr;
+    drv.current_mid_price = depth_enabled ? &mid_price_holder : nullptr;
 
     //----------------------------------------------------------------------
     // Track E.1 — feature collection hook. When collect_features=1, register
@@ -388,7 +399,13 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                                        // the ML strategy sees at serve time.
                                        d->book_imb_history,
                                        d->flow_state,
-                                       d->large_trade_state);
+                                       d->large_trade_state,
+                                       // v4.6 Wave 2 — D.3 spread state + values
+                                       d->spread_state,
+                                       d->current_spread
+                                           ? FPN_ToDouble(*d->current_spread) : 0.0,
+                                       d->current_mid_price
+                                           ? FPN_ToDouble(*d->current_mid_price) : 0.0);
             }
             ModelFeatures_Pack<BACKTEST_FP>(
                 &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES],
@@ -498,6 +515,10 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             if (depth_enabled) {
                 DepthReplayState_Advance(&depth_replay, t.timestamp);
                 book_imbalance_holder = depth_replay.current.imbalance;
+                // v4.6 Wave 2 — refresh spread + mid holders from the same
+                // BookSnapshot. Driver reads via pointer on slow path.
+                spread_holder    = depth_replay.current.spread;
+                mid_price_holder = depth_replay.current.mid_price;
             }
 
             // Step the per-core engine through this tick. Internally:

@@ -757,7 +757,12 @@ inline int EventLoop_RebuildAllParameters(
     // RegimeSignals fields. Symmetric live + backtest. Null-safe.
     const void* book_imb_history = nullptr,   // const BookImbalanceHistory<F, 1024>*
     const void* flow_state       = nullptr,   // const FlowState*
-    const void* large_trade_state = nullptr   // const LargeTradeState<F, 1024>*
+    const void* large_trade_state = nullptr,  // const LargeTradeState<F, 1024>*
+    // v4.6 Wave 2 (2026-04-27) — D.3 spread dynamics state + current
+    // spread / mid_price from BookSnapshot. Same null-safe pattern.
+    const void* spread_state    = nullptr,    // const SpreadState<F, 1024>*
+    double      current_spread  = 0.0,        // BookSnapshot::spread → double
+    double      current_mid_price = 0.0       // BookSnapshot::mid_price → double
 ) {
     int rebuilt = 0;
     // Track E.3: compute the book-imbalance veto once before the per-core
@@ -868,7 +873,8 @@ inline int EventLoop_RebuildAllParameters(
                                    (const CumDeltaState<F>*)cumdelta_state,
                                    (const TickRateState*)tick_rate_state,
                                    timestamp_us,
-                                   book_imb_history, flow_state, large_trade_state);
+                                   book_imb_history, flow_state, large_trade_state,
+                                   spread_state, current_spread, current_mid_price);
             int old_regime = state->cores[slot].regime_state.current_regime;
             int new_regime = Regime_Classify(&state->cores[slot].regime_state,
                                               &sig, &resolved_cfg);
@@ -923,6 +929,10 @@ inline int EventLoop_RebuildAllParameters(
             ml_ctx.book_imb_history  = (void*)book_imb_history;
             ml_ctx.flow_state        = (void*)flow_state;
             ml_ctx.large_trade_state = (void*)large_trade_state;
+            // v4.6 Wave 2 — D.3 spread state + current values
+            ml_ctx.spread_state       = (void*)spread_state;
+            ml_ctx.current_spread     = current_spread;
+            ml_ctx.current_mid_price  = current_mid_price;
             dispatch_ctx = &ml_ctx;
         }
         // v4.0.4: stash the resolved strategy for GUI display. For non-AUTO

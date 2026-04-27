@@ -68,7 +68,12 @@
 #define FEAT_FLOW_1M             29  // signed-volume EWMA, half-life 60s
 #define FEAT_FLOW_5M             30  // signed-volume EWMA, half-life 300s
 #define FEAT_LARGE_TRADE_Z       31  // z-score of current trade size vs trailing window
-#define MODEL_NUM_FEATURES       32
+// v4.6 Wave 2 — D.3 (spread dynamics). Reads from BookSnapshot.spread
+// (live) / DepthReplayState.current.spread (backtest) — both produce
+// identical values for identical input bid/ask streams.
+#define FEAT_SPREAD_BPS          32  // current spread / mid_price × 10000 (basis points)
+#define FEAT_SPREAD_ZSCORE       33  // z-score of current spread vs trailing window
+#define MODEL_NUM_FEATURES       34
 
 // max features buffer — bumped 32 → 64 to leave headroom for D.3 (Wave 2:
 // spread_bps, spread_zscore) and any further expansion without retouching
@@ -85,7 +90,9 @@
 //           FEAT_DIST_TO_HIGH/LOW). Old v1 models will fail load.
 // v3 (v4.5 Wave 1): added 7 microstructure features (FEAT_BOOK_IMB_*,
 //           FEAT_FLOW_*, FEAT_LARGE_TRADE_Z). Old v2 models will fail load.
-#define MODEL_FORMAT_VERSION 3
+// v4 (v4.6 Wave 2): added 2 spread features (FEAT_SPREAD_BPS,
+//           FEAT_SPREAD_ZSCORE). Old v3 models will fail load.
+#define MODEL_FORMAT_VERSION 4
 
 //======================================================================================================
 // [FEATURE LOOKBACK REGISTRY]
@@ -150,6 +157,9 @@ static const FeatureLookback FEATURE_LOOKBACKS[] = {
     { FEAT_FLOW_1M,             "flow_1m",             60,   1 },  // ~60s wallclock
     { FEAT_FLOW_5M,             "flow_5m",             300,  1 },  // ~300s wallclock
     { FEAT_LARGE_TRADE_Z,       "large_trade_z",       1024, 1 },
+    // v4.6 Wave 2 features
+    { FEAT_SPREAD_BPS,          "spread_bps",          1,    1 },  // current value, no lookback
+    { FEAT_SPREAD_ZSCORE,       "spread_zscore",       1024, 1 },
 };
 
 static const int FEATURE_LOOKBACK_COUNT = sizeof(FEATURE_LOOKBACKS) / sizeof(FEATURE_LOOKBACKS[0]);
@@ -520,6 +530,9 @@ inline int ModelFeatures_Pack(float *buf, const RegimeSignals<F> *sig,
     buf[FEAT_FLOW_1M]             = (float)sig->flow_1m;
     buf[FEAT_FLOW_5M]             = (float)sig->flow_5m;
     buf[FEAT_LARGE_TRADE_Z]       = (float)sig->large_trade_z;
+    // v4.6 Wave 2 — spread features (D.3)
+    buf[FEAT_SPREAD_BPS]          = (float)sig->spread_bps;
+    buf[FEAT_SPREAD_ZSCORE]       = (float)sig->spread_zscore;
     return MODEL_NUM_FEATURES;
 }
 

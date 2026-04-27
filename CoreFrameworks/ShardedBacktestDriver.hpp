@@ -110,6 +110,14 @@ struct ShardedBacktestDriver {
     void*                  book_imb_history;   // BookImbalanceHistory<F, 1024>*
     void*                  flow_state;         // FlowState*
     void*                  large_trade_state;  // LargeTradeState<F, 1024>*
+    // v4.6 Wave 2 — D.3 spread dynamics. spread_state ring; current
+    // spread + mid_price observed from depth state (caller-owned holders
+    // — caller updates per-tick before RunTick). Driver pushes spread to
+    // the ring on slow-path; passes current values straight through to
+    // RebuildAllParameters.
+    void*                  spread_state;       // SpreadState<F, 1024>*
+    const FPN<F>*          current_spread;     // BookSnapshot::spread holder
+    const FPN<F>*          current_mid_price;  // BookSnapshot::mid_price holder
 
     // Track E.1 — slow-path completion hook. Fires AFTER slow-path
     // RollingStats pushes / RebuildAllParameters / KillSwitchEvaluate, BEFORE
@@ -159,6 +167,10 @@ inline void ShardedBacktestDriver_Init(ShardedBacktestDriver<F, W, WL>* drv,
     drv->book_imb_history   = nullptr;
     drv->flow_state         = nullptr;
     drv->large_trade_state  = nullptr;
+    // v4.6 Wave 2
+    drv->spread_state       = nullptr;
+    drv->current_spread     = nullptr;
+    drv->current_mid_price  = nullptr;
     drv->on_slow_path       = nullptr;
     drv->hook_ctx           = nullptr;
 }
@@ -256,6 +268,13 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
                 (LargeTradeState<F, 1024>*)drv->large_trade_state,
                 tick.volume);
         }
+        // v4.6 Wave 2 — push current spread into z-score ring. Caller must
+        // have updated *drv->current_spread before RunTick.
+        if (drv->spread_state && drv->current_spread) {
+            SpreadState_Push(
+                (SpreadState<F, 1024>*)drv->spread_state,
+                *drv->current_spread);
+        }
         if (drv->rolling && drv->config) {
             // Thread the v4.3 + ROR/EMA state through the rebuild so per-core
             // ML strategies see the same RegimeSignals fields the live path
@@ -274,7 +293,12 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
                 /* book_imbalance  */ (const void*)drv->book_imbalance,
                 /* book_imb_history*/ drv->book_imb_history,
                 /* flow_state      */ drv->flow_state,
-                /* large_trade_state*/ drv->large_trade_state);
+                /* large_trade_state*/ drv->large_trade_state,
+                /* spread_state    */ drv->spread_state,
+                /* current_spread  */ drv->current_spread
+                                       ? FPN_ToDouble(*drv->current_spread) : 0.0,
+                /* current_mid_price*/ drv->current_mid_price
+                                       ? FPN_ToDouble(*drv->current_mid_price) : 0.0);
         }
         EventLoop_PushParameters(drv->state);
         EventLoop_KillSwitchEvaluate(drv->state);

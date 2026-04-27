@@ -5494,6 +5494,84 @@ e3_skip_load:;
               fabs(mean - 5.5) < 1e-9);
     }
 
+    //==================================================================================================
+    // v4.6 Wave 2 — D.3 SpreadState
+    //==================================================================================================
+    // Same shape as LargeTradeState (ring + running sum + sum_sq → z-score).
+    // Tests cover Init/Push/Last/ZScore + ring eviction running-sum tracking
+    // + the spread_bps formula correctness in Regime_ComputeSignals.
+    //==================================================================================================
+    printf("\n--- Wave 2 D.3: SpreadState push + z-score + eviction ---\n");
+    {
+        SpreadState<64, 8> sp;
+        SpreadState_Init(&sp);
+        check("SpreadState Init: count == 0", sp.count == 0);
+        check("SpreadState Init: ZScore on empty == 0",
+              SpreadState_ZScore(&sp, FPN_FromDouble<64>(0.5)) == 0.0);
+
+        // Uniform values: z-score == 0 (no variance)
+        for (int i = 0; i < 4; i++)
+            SpreadState_Push(&sp, FPN_FromDouble<64>(0.01));
+        check("SpreadState uniform: z-score of mean == 0",
+              fabs(SpreadState_ZScore(&sp, FPN_FromDouble<64>(0.01))) < 1e-9);
+
+        // Spread of values 0.01, 0.02, 0.03, 0.04. mean=0.025, var=1.25e-4
+        SpreadState_Init(&sp);
+        for (int i = 1; i <= 4; i++)
+            SpreadState_Push(&sp, FPN_FromDouble<64>(0.01 * (double)i));
+        double expect_z = (0.04 - 0.025) / sqrt(1.25e-4);
+        check("SpreadState spread: z-score of 0.04 matches expected",
+              fabs(SpreadState_ZScore(&sp, FPN_FromDouble<64>(0.04)) - expect_z) < 1e-7);
+        check("SpreadState Last: == 0.04 (most recent)",
+              fabs(FPN_ToDouble(SpreadState_Last(&sp)) - 0.04) < 1e-9);
+
+        // Ring eviction at W=8: push 8 more, sum tracks correctly
+        for (int i = 5; i <= 8; i++)
+            SpreadState_Push(&sp, FPN_FromDouble<64>(0.01 * (double)i));
+        check("SpreadState filled: count == 8", sp.count == 8);
+        // Push another (evicts 0.01). Window: 0.02..0.09. mean = 0.055
+        SpreadState_Push(&sp, FPN_FromDouble<64>(0.09));
+        double mean = FPN_ToDouble(sp.sum) / 8.0;
+        check("SpreadState eviction: mean ≈ 0.055",
+              fabs(mean - 0.055) < 1e-9);
+    }
+
+    printf("\n--- Wave 2 D.3: spread_bps formula in Regime_ComputeSignals ---\n");
+    {
+        // spread_bps = current_spread / mid_price × 10000
+        // Test with known values (spread=0.5 on mid=50000 → 0.1 bps)
+        using namespace tt;
+        RollingStats<64, 128>  rolling = RollingStats_Init<64, 128>();
+        RollingStats<64, 512>  rolling_long = RollingStats_Init<64, 512>();
+        RORRegressor<64> ror = RORRegressor_Init<64>();
+
+        RegimeSignals<64> sig;
+        memset(&sig, 0, sizeof(sig));
+        // Pass non-NULL spread values — populates spread_bps; spread_state
+        // null → zscore 0
+        Regime_ComputeSignals<64>(&sig, &rolling, &rolling_long, &ror,
+                                   FPN_Zero<64>(),
+                                   nullptr, nullptr, nullptr, nullptr,
+                                   0,
+                                   nullptr, nullptr, nullptr,
+                                   nullptr, /*spread*/ 0.5, /*mid*/ 50000.0);
+        // 0.5 / 50000 × 10000 = 0.1
+        check("spread_bps = spread/mid × 10000 (0.5/50000 = 0.1 bps)",
+              fabs(sig.spread_bps - 0.1) < 1e-9);
+        check("spread_zscore = 0 when state is null",
+              sig.spread_zscore == 0.0);
+
+        // Cold start: mid_price == 0 → spread_bps zero-defaults
+        Regime_ComputeSignals<64>(&sig, &rolling, &rolling_long, &ror,
+                                   FPN_Zero<64>(),
+                                   nullptr, nullptr, nullptr, nullptr,
+                                   0,
+                                   nullptr, nullptr, nullptr,
+                                   nullptr, /*spread*/ 0.5, /*mid*/ 0.0);
+        check("spread_bps zero-defaults on mid_price==0 (cold start)",
+              sig.spread_bps == 0.0);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

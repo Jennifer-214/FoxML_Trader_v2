@@ -242,4 +242,74 @@ static inline FPN<F> LargeTradeState_Last(const LargeTradeState<F, W> *s) {
     return s->sizes[idx];
 }
 
+//======================================================================================================
+// [SPREAD STATE — D.3]
+//======================================================================================================
+// Rolling window of recent bid-ask spread samples. Same shape as
+// LargeTradeState (running sum + sum_sq for O(1) mean + variance), kept
+// as a separate struct for clarity at call sites and future divergence
+// (e.g. spread-specific normalizations like spread/price ratio).
+//
+// Window W default 1024 ≈ 17 minutes at slow_path=100 cadence.
+//
+// FEAT_SPREAD_BPS comes from current spread normalized by mid_price ×
+// 10000 (computed inline at Regime_ComputeSignals time, no state needed).
+// FEAT_SPREAD_ZSCORE is the z-score of current spread vs this state's
+// distribution.
+//======================================================================================================
+template <unsigned F, unsigned W = 1024>
+struct SpreadState {
+    FPN<F> samples[W];
+    FPN<F> sum;
+    FPN<F> sum_sq;
+    int    count;
+    int    head;
+};
+
+template <unsigned F, unsigned W = 1024>
+static inline void SpreadState_Init(SpreadState<F, W> *s) {
+    memset(s, 0, sizeof(*s));
+    s->sum    = FPN_Zero<F>();
+    s->sum_sq = FPN_Zero<F>();
+    s->count  = 0;
+    s->head   = 0;
+    for (unsigned i = 0; i < W; i++) s->samples[i] = FPN_Zero<F>();
+}
+
+template <unsigned F, unsigned W = 1024>
+static inline void SpreadState_Push(SpreadState<F, W> *s, FPN<F> sample) {
+    if (s->count >= (int)W) {
+        FPN<F> evicted = s->samples[s->head];
+        s->sum    = FPN_Sub(s->sum, evicted);
+        s->sum_sq = FPN_Sub(s->sum_sq, FPN_Mul(evicted, evicted));
+    } else {
+        s->count++;
+    }
+    s->samples[s->head] = sample;
+    s->sum    = FPN_Add(s->sum, sample);
+    s->sum_sq = FPN_Add(s->sum_sq, FPN_Mul(sample, sample));
+    s->head = (s->head + 1) % W;
+}
+
+template <unsigned F, unsigned W = 1024>
+static inline double SpreadState_ZScore(const SpreadState<F, W> *s, FPN<F> current_spread) {
+    if (s->count < 2) return 0.0;
+    double n = (double)s->count;
+    double mean = FPN_ToDouble(s->sum) / n;
+    double mean_sq = FPN_ToDouble(s->sum_sq) / n;
+    double var = mean_sq - mean * mean;
+    if (var <= 0.0) return 0.0;
+    double stddev = sqrt(var);
+    if (stddev <= 1e-12) return 0.0;
+    double cur = FPN_ToDouble(current_spread);
+    return (cur - mean) / stddev;
+}
+
+template <unsigned F, unsigned W = 1024>
+static inline FPN<F> SpreadState_Last(const SpreadState<F, W> *s) {
+    if (s->count <= 0) return FPN_Zero<F>();
+    int idx = (s->head - 1 + (int)W) % (int)W;
+    return s->samples[idx];
+}
+
 #endif // FLOW_FEATURES_HPP
