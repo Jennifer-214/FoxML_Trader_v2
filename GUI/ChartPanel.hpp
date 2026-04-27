@@ -23,6 +23,12 @@ struct ChartSettings {
     bool show_spread = true;
     bool show_crosshair = true;
     bool show_ml_overlay = false;  // prediction probability + confidence band
+    // v4.7.7: chart auto-fit control. When true (initial state OR after the
+    // user clicks "Reset View"), the next frame applies ImPlotCond_Always
+    // on the Y axis to re-center on candles. Auto-cleared after one frame
+    // so subsequent frames use ImPlotCond_Once and the user can scroll-
+    // wheel zoom without the auto-fit snapping back.
+    bool y_reset_requested = true;
 };
 
 //==========================================================================
@@ -172,6 +178,18 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         ImGui::SameLine(); ImGui::Checkbox("ML", &settings->show_ml_overlay);
     }
 
+    // v4.7.7: Reset View — re-fit Y axis to candles + nearby TP/SL on
+    // demand. Useful when user has scrolled out and wants to snap back
+    // to "show me the action."
+    ImGui::SameLine(0, 20);
+    if (ImGui::SmallButton("Reset View")) {
+        settings->y_reset_requested = true;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Re-fit Y axis to current candle range + nearby TP/SL.\n"
+                          "Use scroll wheel inside the chart to zoom freely.");
+    }
+
     ImPlot::PushStyleColor(ImPlotCol_PlotBg, FoxmlColors::bg_dark);
     // subtle Y grid lines for price readability
     ImPlot::PushStyleColor(ImPlotCol_AxisGrid, ImVec4(1, 1, 1, 0.06f));
@@ -240,7 +258,11 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             if (ps->sl > 0 && ps->sl < y_min && ps->sl >= expand_lo) y_min = ps->sl;
         }
         double pad = (y_max - y_min) * 0.1;
-        ImPlot::SetupAxisLimits(ImAxis_Y1, y_min - pad, y_max + pad, ImPlotCond_Always);
+        // v4.7.7: Always on first render OR when user clicks "Reset View",
+        // Once otherwise so scroll-wheel zoom isn't snapped back every frame.
+        ImPlotCond y_cond = settings->y_reset_requested ? ImPlotCond_Always : ImPlotCond_Once;
+        ImPlot::SetupAxisLimits(ImAxis_Y1, y_min - pad, y_max + pad, y_cond);
+        if (settings->y_reset_requested) settings->y_reset_requested = false;
         ImPlot::SetupAxisFormat(ImAxis_Y1, "$%.0f");
 
         // regime background shading
