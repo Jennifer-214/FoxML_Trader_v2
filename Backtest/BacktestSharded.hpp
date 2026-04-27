@@ -42,9 +42,11 @@
 #include "../CoreFrameworks/EventLoopAggregates.hpp"
 #include "../CoreFrameworks/ExecutionCore.hpp"
 #include "../CoreFrameworks/ShardedBacktestDriver.hpp"
+#include "../CoreFrameworks/ShardedSnapshot.hpp"  // Track E.7 — TUI_CopySnapshotSharded
 #include "../CoreFrameworks/Tick.hpp"
 #include "../DataStream/DepthReplayState.hpp"  // Track E.3 — depth replay
 #include "../DataStream/EngineTUI.hpp"  // for TUISnapshot
+#include "../GUI/CandleAccumulator.hpp"  // Track E.7 — chart panel feed
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"  // ConfidenceScorer_Init for ML cores (E.2)
 #include "../ML_Headers/CoreModelZoo.hpp"     // E.2 — load per-core ML zoos
@@ -94,9 +96,6 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                                         volatile int *cancel_flag,
                                         CandleAccumulator *candle_acc,
                                         TUISnapshot *out_snapshot = NULL) {
-    (void)candle_acc;   // not yet wired in sharded path
-    (void)out_snapshot; // not yet wired in sharded path
-
     // Reset results — preserve dynamic allocations like the legacy path does
     BacktestResults_Reset(results);
 
@@ -437,6 +436,10 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // DEBUG: track price range and dump threshold once after first slow path
     double price_lo = 1e18, price_hi = 0.0;
     int debug_dumped = 0;
+    // Track E.7 — last seen price + volume for the post-run TUISnapshot
+    // populate. Captured per tick; survives the inner-loop scope.
+    double last_price_d  = 0.0;
+    double last_volume_d = 0.0;
 
     for (int f = 0; f < run_cfg->num_data_files; f++) {
         int count = 0;
@@ -451,6 +454,8 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             // DEBUG: track price range
             if (ticks[i].price < price_lo) price_lo = ticks[i].price;
             if (ticks[i].price > price_hi) price_hi = ticks[i].price;
+            last_price_d  = ticks[i].price;
+            last_volume_d = ticks[i].qty;
 
             // Track E.1 — train-serve parity. Update EMA price every tick,
             // mirroring EngineSharded_Run lines 769-774 + legacy
@@ -484,6 +489,19 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             //   5. Track E.1 — fire on_slow_path hook (when registered)
             uint64_t prev_slow_runs = drv.slow_path_runs;
             ShardedBacktest_RunTick(&drv, t, total_processed);
+
+            // Track E.7 — feed candle accumulator for the chart panel.
+            // Throttled to every 100th tick (legacy mirrors this exactly at
+            // BacktestEngine.hpp:761) — 1-min candles don't need every tick,
+            // and unthrottled CandleAccumulator's mutex contention freezes
+            // the GUI thread. Same pattern as EngineSharded fan_out (line
+            // ~785).
+            if (candle_acc && (total_processed % 100) == 0) {
+                CandleAccumulator_PushWithTime(candle_acc,
+                    ticks[i].price, ticks[i].qty,
+                    ticks[i].is_buyer_maker,
+                    (double)(ticks[i].timestamp_us / 1000000));
+            }
 
             // Track E.2 — warmup-aware permission grant. Mirrors
             // EngineSharded_Run lines 999-1019. Pre-E.2, BacktestSharded set
@@ -615,6 +633,18 @@ done:
         stats->return_pct = ((final_balance - starting_bal) / starting_bal) * 100.0;
     }
     stats->elapsed_ms = elapsed;
+
+    // Track E.7 — populate TUISnapshot for the dashboard panels (Market,
+    // Account, Stats, Positions, Buy Gate read from this). Same shape as
+    // the live engine's TUI_CopySnapshotSharded path; foxml_suite's
+    // dashboard renders identically. price_d_last is captured during
+    // the replay loop above.
+    if (out_snapshot) {
+        TUI_CopySnapshotSharded<BACKTEST_FP, 128, 512>(
+            out_snapshot, &state, &rolling, &rolling_long, &cfg,
+            last_price_d, last_volume_d);
+        out_snapshot->live_trading = 0;  // mirror BacktestSnapshot_Copy override
+    }
 
     free(ticks);
     free(file_tick_counts);

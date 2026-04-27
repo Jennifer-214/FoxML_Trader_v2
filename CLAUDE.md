@@ -66,12 +66,17 @@ offline benchmark) across SPSC rings to per-core consumer threads.
 - Hot path p99 target: ≤500ns per core
 - No portfolio walk on the hot path — each core only owns its slot
 
-**Legacy single-threaded mode** (`engine_mode=single_core`) remains
-available as a benchmark + regression baseline but is **DEPRECATED**.
-A runtime warning fires at startup. Phase 8+ features may be incomplete
-in legacy mode (see "Cross-Mode Init Placement" invariant under Safety
-Invariants — adding init in main.cpp post-dispatch silently skips the
-sharded path).
+**Legacy single-threaded LIVE mode** (`engine_mode=single_core` in
+`main.cpp`) remains available as a benchmark + regression baseline
+but is **DEPRECATED**. A runtime warning fires at startup. Phase 8+
+features may be incomplete in legacy live mode (see "Cross-Mode Init
+Placement" invariant under Safety Invariants — adding init in
+main.cpp post-dispatch silently skips the sharded path).
+
+**Legacy BACKTEST mode is GONE** as of Track E.7 (2026-04-26).
+`Backtest_Run` is now a thin wrapper around `BacktestSharded_Run`.
+Setting `engine_mode=single_core` in `backtest.cfg` is a no-op going
+forward — the cfg field is parsed but ignored for one release cycle.
 
 ```
 LEGACY MODE (deprecated benchmark path):
@@ -647,9 +652,11 @@ the backtest does?") — could have shipped silently otherwise.
 2. Add the field to `RegimeSignals<F>`
 3. Populate it in `Regime_ComputeSignals` — that's the single site
 4. If the field needs new state (like ROR did), add it to BOTH
-   `PortfolioController` (legacy backtest path) AND
-   `EngineSharded_Run` (sharded live path), with parity in update
-   cadence (per-tick vs slow-path)
+   `EngineSharded_Run` (sharded live path) AND `BacktestSharded_Run`
+   (sharded backtest, mirrors via `ShardedBacktestDriver`), with
+   parity in update cadence (per-tick vs slow-path). Post-Track-E.7
+   the legacy `PortfolioController` push site is deleted; only the
+   two sharded paths remain.
 5. Re-train all models — old models will fail version check at load
 
 **Other train-serve divergences (documented but accepted):**
@@ -728,26 +735,36 @@ Inherited by routing (E.4 + E.5, no migration code needed):
   config. The `use_config_override + config_override` mechanism
   preserves user-set overrides including `engine_mode`.
 
-Not yet wired:
-- **Parity harness (E.6)**: no programmatic `legacy-vs-sharded` feature
-  diff yet. If you change `Regime_ComputeSignals` between now and E.6,
-  manually run "Collect Features" in BOTH `engine_mode=single_core` and
-  `engine_mode=sharded` to confirm features still match.
-- **Legacy backtest deletion (E.7)**: `Backtest_Run` legacy body is
-  still alive when `engine_mode=single_core`. Deprecated for
-  production-training use; the legacy path's feature pack uses
-  `ctrl->sim_time*1e6` (second-rounded historical time) for
-  `hour_sin/hour_cos` while sharded uses `tk.timestamp` (full µs
-  precision) — diverges only at hour boundaries; sharded is correct.
+Track E status: complete (E.1–E.7 all shipped 2026-04-26). Sharded
+is the only backtest path. `Backtest_Run` is a thin wrapper around
+`BacktestSharded_Run`. The legacy `PortfolioController`-driven body
+is deleted (~350 LOC removed).
 
-**Adding new state during the transition.** Track E temporarily
-*increases* the surface for adding `RegimeSignals` state — until E.7
-ships, a new state field needs THREE updates (PortfolioController
-slow-path push + EngineSharded fan_out push + BacktestSharded driver
-mirror). The driver pointer plumbing is the load-bearing piece — if
-the driver doesn't get fed the new state, the feature-collection hook
-sees zeros while live ML strategies see real values. Symmetrical to
-the v4.0.1 bug, just one layer deeper.
+Follow-up cleanup (separate release):
+- Drop `engine_mode` cfg parser. Currently parsed but ignored — one
+  release cycle of grace so user cfgs setting `engine_mode=single_core`
+  don't fail to load.
+- Optional: factor a shared "sharded slow-path init" helper that both
+  `EngineSharded_Run` and `BacktestSharded_Run` call, so future
+  per-feature state additions land in one site instead of two.
+- Parity harness (`tests/parity_harness.cpp`) remains as a one-shot
+  diagnostic tool (committed under `track-e.6`) — useful if anyone
+  resurrects legacy for benchmarking, otherwise inert.
+
+**Adding new state during the transition.** Pre-E.7, Track E
+temporarily *increased* the surface for adding `RegimeSignals` state
+(PortfolioController + EngineSharded + BacktestSharded driver mirror).
+Post-E.7 (2026-04-26), legacy backtest body is deleted — the
+`PortfolioController` push site is gone. Adding new state now
+requires TWO updates: `EngineSharded_Run` static-local push +
+`BacktestSharded_Run` static-local mirror via `ShardedBacktestDriver`.
+Both still required because the live + backtest paths run in
+different *control flows* (live is multi-thread + producer fan_out;
+backtest is single-thread + driver loop) even though they share the
+same `Regime_ComputeSignals` / `ModelFeatures_Pack` call sites.
+Future cleanup: factor a shared "sharded init" helper that both
+`EngineSharded_Run` and `BacktestSharded_Run` call, collapsing to one
+push site.
 
 **Adding a new depth-derived input.** After E.3, depth-state symmetry
 is achieved at the public-API level: live reads `BookSnapshot<F>` via

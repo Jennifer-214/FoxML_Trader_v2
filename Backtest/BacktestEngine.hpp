@@ -518,356 +518,53 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
 }
 
 //======================================================================================================
-// [RUN]
+// [RUN — Track E.7 thin wrapper]
 //======================================================================================================
-// the core replay loop — mirrors main.cpp:363-547
+// After Track E.7 (2026-04-26), Backtest_Run is a thin wrapper around the
+// sharded path. The legacy `PortfolioController_Tick`-driven body
+// (~350 LOC) has been deleted. Sharded is the only backtest path.
 //
-// Phase 13 dispatch: peek at engine_mode at the top. If sharded, route to the
-// per-core path in BacktestSharded.hpp and return. Otherwise fall through to
-// the legacy single-threaded code below, which is unchanged.
+// `engine_mode` from cfg is now ignored — every backtest runs through
+// `BacktestSharded_Run`. Keeping the cfg field parsed (in
+// `ControllerConfig.hpp`) for one release cycle so user cfgs setting
+// `engine_mode=single_core` don't fail to load; it's a no-op going
+// forward and will be removed in a follow-up release.
 //
-// Track E.1 (2026-04-26): the sharded path now collects features too. The
-// `!collect_features` carve-out is gone — when engine_mode=sharded, we
-// always route to BacktestSharded_Run and call the shared label helper on
-// the way out.
+// All call sites (BacktestPanels.hpp Run Backtest button, Sweep,
+// FullValidation, WalkForward downstream consumers) keep working
+// transparently — same signature, same `BacktestResults` output, same
+// label post-pass.
+//
+// What still works that used to live in the legacy body:
+//   - `out_snapshot` populate: `BacktestSharded_Run` calls
+//     `TUI_CopySnapshotSharded` at the end (E.7).
+//   - `candle_acc` push: throttled per-tick in the replay loop (E.7).
+//   - Feature collection: driver `on_slow_path` hook (E.1).
+//   - Multi-strategy + ML model load: per-core loop (E.2).
+//   - Depth replay + `book_imbalance` gate: `DepthReplayState` (E.3).
+//   - Label computation: `Backtest_ComputeLabelsFromSamples` (E.1).
+//
+// What no longer works because legacy is gone:
+//   - Per-tick `gate_reason` diagnostics (legacy printed a "gate
+//     reason breakdown" at end of run). Sharded tracks halt_reason
+//     per-core in `state.cores[i].halt_reason`; aggregate breakdown
+//     could be added if needed but isn't today. Not load-bearing.
+//   - The `BacktestStats_Compute(stats, ctrl, ...)` path that read
+//     fields off `PortfolioController`. Sharded computes equivalent
+//     stats inline in `BacktestSharded_Run` (P&L, win/loss, drawdown,
+//     equity curve).
 //======================================================================================================
-static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfig *run_cfg,
-                                 volatile int *progress_pct, volatile int *cancel_flag,
+static inline void Backtest_Run(BacktestResults *results,
+                                 const BacktestRunConfig *run_cfg,
+                                 volatile int *progress_pct,
+                                 volatile int *cancel_flag,
                                  CandleAccumulator *candle_acc,
                                  TUISnapshot *out_snapshot = NULL) {
-    // Phase 13 dispatch: peek at engine_mode WITHOUT touching results yet,
-    // so the sharded path's own reset is honored.
-    //
-    // Track E.1 (2026-04-26): the prior `!run_cfg->collect_features`
-    // carve-out is gone — sharded now has its own feature collection
-    // hook (BacktestSharded.hpp) that runs Regime_ComputeSignals on the
-    // same inputs the live ML serve path uses, so train-serve drift can't
-    // happen the way it did in v4.0.1. Labels still need the post-replay
-    // forward-looking pass; we run that helper after the sharded body
-    // returns and short-circuit out.
-    {
-        ControllerConfig<BACKTEST_FP> peek;
-        if (run_cfg->use_config_override) {
-            peek = run_cfg->config_override;
-        } else {
-            peek = ControllerConfig_Load<BACKTEST_FP>(run_cfg->config_path);
-        }
-        if (peek.engine_mode == ENGINE_MODE_SHARDED) {
-            tt::BacktestSharded_Run(results, run_cfg, progress_pct, cancel_flag,
-                                     candle_acc, out_snapshot);
-            // Track E.1 — labels need forward-looking ticks the replay
-            // already discarded. Helper reloads + computes; no-op when
-            // collect_features=0.
-            Backtest_ComputeLabelsFromSamples(results, run_cfg);
-            return;
-        }
-    }
-
-    // reset results — preserve dynamic allocations, just reset counts
-    BacktestResults_Reset(results);
-
-    // load config
-    ControllerConfig<BACKTEST_FP> cfg;
-    if (run_cfg->use_config_override) {
-        cfg = run_cfg->config_override;
-    } else {
-        cfg = ControllerConfig_Load<BACKTEST_FP>(run_cfg->config_path);
-    }
-    // train-serve parity: disable wall-clock time floor so backtest is purely
-    // tick-driven.  live engine uses slow_path_max_secs to trigger RollingStats_Push
-    // during sparse markets — backtest must NOT do this or features diverge.
-    cfg.slow_path_max_secs = 999999;
-
-    results->config_used = cfg;
-
-    // init controller (same as main.cpp:159-161). Stack-allocated so its
-    // pointer members are uninitialized — must NULL them before
-    // PortfolioController_Init reads them in its `if (ptr) free(ptr)` paths,
-    // otherwise free()ing garbage segfaults on the second backtest of a
-    // session. v4.3 added rolling_medium/rolling_baseline/cumdelta_state —
-    // these need the same treatment as rolling_long.
-    PortfolioController<BACKTEST_FP> ctrl;
-    ctrl.rolling_long     = NULL;
-    ctrl.rolling_medium   = NULL;
-    ctrl.rolling_baseline = NULL;
-    ctrl.cumdelta_state   = NULL;
-    PortfolioController_Init(&ctrl, cfg);
-    ctrl.sim_time = 0;          // will be set from first tick timestamp
-    ctrl.last_slow_time = 0;    // triggers time seed on first tick
-
-    // gate reason diagnostics — count slow-path cycles per gate reason
-    int gate_counts[NUM_GATE_REASONS] = {};
-    int total_slow_cycles = 0;
-
-    // init order pool (same as main.cpp:174)
-    OrderPool<BACKTEST_FP> pool;
-    OrderPool_init(&pool, 64);
-
-    // init trade log — write to backtest output
-    mkdir("logging", 0755);
-    // truncate trade log for each run (live engine appends, but backtest should start fresh)
-    remove(BACKTEST_TRADE_CSV);
-    TradeLog log;
-    snprintf(results->trade_csv_path, sizeof(results->trade_csv_path),
-             BACKTEST_TRADE_CSV);
-    TradeLog_Init(&log, "BACKTEST");
-
-    // load all data files
-    struct timeval t_start, t_end;
-    gettimeofday(&t_start, NULL);
-
-    int total_processed = 0;
-    int total_ticks_all_files = 0;
-
-    // first pass: count total ticks per file for progress bar + allocation
-    int *file_tick_counts = (int *)calloc(run_cfg->num_data_files, sizeof(int));
-    int max_ticks_in_file = 0;
-    for (int f = 0; f < run_cfg->num_data_files; f++) {
-        FILE *fp = fopen(run_cfg->data_paths[f], "r");
-        if (!fp) continue;
-        int lines = 0;
-        char buf[512];
-        while (fgets(buf, sizeof(buf), fp)) lines++;
-        fclose(fp);
-        file_tick_counts[f] = lines - 1; // subtract header
-        total_ticks_all_files += file_tick_counts[f];
-        if (file_tick_counts[f] > max_ticks_in_file)
-            max_ticks_in_file = file_tick_counts[f];
-    }
-    if (total_ticks_all_files <= 0) total_ticks_all_files = 1; // avoid div by zero
-
-    // allocate tick buffer sized to the largest file (no silent truncation)
-    int max_ticks = max_ticks_in_file + 1024; // small padding
-    if (max_ticks < 1024) max_ticks = 1024;
-    HistoricalTick *ticks = (HistoricalTick *)malloc(max_ticks * sizeof(HistoricalTick));
-    if (!ticks) {
-        fprintf(stderr, "[backtest] failed to allocate tick buffer (%d ticks, %.0f MB)\n",
-                max_ticks, max_ticks * sizeof(HistoricalTick) / 1e6);
-        free(file_tick_counts);
-        return;
-    }
-    fprintf(stderr, "[backtest] tick buffer: %d ticks (%.0f MB) for %d files\n",
-            max_ticks, max_ticks * sizeof(HistoricalTick) / 1e6, run_cfg->num_data_files);
-
-    double price_d_last = 0.0; // track last price for snapshot
-    int64_t last_day_ms = 0;  // day boundary detection (ms timestamp of last midnight)
-
-    // replay each file
-    for (int f = 0; f < run_cfg->num_data_files; f++) {
-        int count = 0;
-        if (!BacktestData_Load(ticks, &count, max_ticks, run_cfg->data_paths[f]))
-            continue;
-
-        //==========================================================================================
-        // REPLAY LOOP — mirrors main.cpp:363-547
-        // if main.cpp's tick processing order changes, update this to match
-        //==========================================================================================
-        for (int i = 0; i < count; i++) {
-            if (*cancel_flag) goto done;
-
-            // day boundary: mirrors live engine 24h reconnect
-            // force-close all positions, reset session state, clear kill switch
-            // timestamp_us is actually microseconds — convert to day boundary in μs
-            int64_t tick_day = (ticks[i].timestamp_us / 86400000000LL) * 86400000000LL;
-            if (tick_day != last_day_ms && last_day_ms != 0) {
-                time_t day_ts = (time_t)(tick_day / 1000000);
-                struct tm *dt = gmtime(&day_ts);
-                fprintf(stderr, "[backtest] day boundary: %04d-%02d-%02d | positions=%d kill=%d bal=%.2f\n",
-                    dt->tm_year+1900, dt->tm_mon+1, dt->tm_mday,
-                    __builtin_popcount(ctrl.portfolio.active_bitmap),
-                    ctrl.kill_switch_active, FPN_ToDouble(ctrl.balance));
-                FPN<BACKTEST_FP> last_price_fpn = FPN_FromDouble<BACKTEST_FP>(price_d_last);
-
-                // force-close all active positions at last known price
-                uint16_t bmp = ctrl.portfolio.active_bitmap;
-                while (bmp) {
-                    int idx = __builtin_ctz(bmp);
-                    if (ctrl.exit_buf.count < 16) {
-                        ExitRecord<BACKTEST_FP> *rec = &ctrl.exit_buf.records[ctrl.exit_buf.count];
-                        rec->position_index = idx;
-                        rec->exit_price     = last_price_fpn;
-                        rec->tick           = ctrl.total_ticks;
-                        rec->entry_price    = ctrl.portfolio.positions[idx].entry_price;
-                        rec->quantity       = ctrl.portfolio.positions[idx].quantity;
-                        rec->entry_fee      = ctrl.portfolio.positions[idx].entry_fee;
-                        rec->pair_index     = ctrl.portfolio.positions[idx].pair_index;
-                        // use TP/SL reason based on P&L so wins/losses count correctly
-                        int profitable = FPN_GreaterThan(last_price_fpn, rec->entry_price);
-                        rec->reason = profitable ? 0 : 1; // 0=TP, 1=SL
-                        ctrl.exit_buf.count++;
-                        ctrl.portfolio.active_bitmap &= ~(1 << idx);
-                    }
-                    bmp &= bmp - 1;
-                }
-                // drain exits — P&L accounting for forced closes
-                if (ctrl.exit_buf.count > 0) {
-                    PortfolioController_DrainExits(&ctrl);
-                    TradeLogBuffer_Drain(&ctrl.trade_buf, &log);
-                    ExitBuffer_Clear(&ctrl.exit_buf);
-                }
-
-                // reset session state
-                FPN<BACKTEST_FP> equity = ctrl.balance; // no positions after force-close
-                ctrl.session_start_equity = equity;
-                ctrl.peak_equity = equity;
-                ctrl.daily_realized_pnl = FPN_Zero<BACKTEST_FP>();
-                ctrl.sl_cooldown_counter = 0;
-                ctrl.idle_cycles = 0;
-
-                // clear kill switch + all halts
-                ctrl.kill_switch_active = 0;
-                ctrl.kill_reason = 0;
-                ctrl.buying_halted = 0;
-                ctrl.halt_reason = 0;
-                ctrl.kill_recovery_counter = 0;
-
-                ctrl.session_high = price_d_last;
-                ctrl.session_low = price_d_last;
-            }
-            last_day_ms = tick_day;
-
-            // build DataStream (same struct as live)
-            DataStream<BACKTEST_FP> tick;
-            tick.price = FPN_FromDouble<BACKTEST_FP>(ticks[i].price);
-            tick.volume = FPN_FromDouble<BACKTEST_FP>(ticks[i].qty);
-            tick.price_d = ticks[i].price;
-            tick.volume_d = ticks[i].qty;
-            tick.is_buyer_maker = ticks[i].is_buyer_maker;
-            price_d_last = ticks[i].price;
-
-            // set simulated clock from historical timestamp
-            // timestamp_us is actually microseconds in Binance aggTrades format
-            ctrl.sim_time = (time_t)(ticks[i].timestamp_us / 1000000);
-            // seed time state on first tick of each file (avoids clock gaps between files)
-            if (i == 0 || total_processed == 0) {
-                ctrl.last_slow_time = (uint64_t)ctrl.sim_time;
-                ctrl.regime.regime_start_time = ctrl.sim_time;
-            }
-
-            // exit gate on EVERY tick (same as main.cpp:381-392)
-            if (ctrl.portfolio.active_bitmap)
-                PositionExitGate(&ctrl.portfolio, tick.price, &ctrl.exit_buf, ctrl.total_ticks);
-
-            // buy gate (same as main.cpp BuyGate call after burst drain)
-            BuyGate(&ctrl.buy_conds, &tick, &pool);
-
-            // core tick processing (same as main.cpp PortfolioController_Tick call)
-            PortfolioController_Tick(&ctrl, &pool, tick.price, tick.volume,
-                                     &log, tick.is_buyer_maker);
-
-            // feed candle accumulator for chart (with historical timestamps)
-            // throttle to every 100th tick — 1-min candles don't need every tick,
-            // and unthrottled mutex contention (237M locks) freezes the GUI thread
-            if (candle_acc && (total_processed % 100) == 0)
-                CandleAccumulator_PushWithTime(candle_acc, tick.price_d, tick.volume_d,
-                                               tick.is_buyer_maker,
-                                               (double)(ticks[i].timestamp_us / 1000000));
-
-            // track equity curve (on each trade completion).
-            // grows dynamically — CAPPING THIS CONTAMINATES STATS (Sharpe/DD/return).
-            if (ctrl.total_buys > 0 && (ctrl.wins + ctrl.losses) > (uint32_t)results->equity_count) {
-                if (BacktestResults_EnsureEquityCapacity(results, results->equity_count + 1)) {
-                    double bal = FPN_ToDouble(ctrl.balance);
-                    double rpnl = FPN_ToDouble(ctrl.realized_pnl);
-                    results->equity_curve[results->equity_count] = bal + rpnl;
-                    results->equity_count++;
-                }
-            }
-
-            // feature collection (on slow path only, when enabled)
-            // labels are computed in a post-processing pass after replay
-            // (they need forward-looking data that hasn't been seen yet)
-            if (run_cfg->collect_features && ctrl.tick_count == 0 &&
-                ctrl.state != CONTROLLER_WARMUP &&
-                BacktestResults_EnsureCapacity(results, results->sample_count + 1)) {
-                ModelFeatures_Pack<BACKTEST_FP>(
-                    &results->feature_matrix[results->sample_count * MODEL_NUM_FEATURES],
-                    &ctrl.last_signals,
-                    &ctrl.rolling,
-                    ctrl.rolling_long);
-                results->sample_tick_indices[results->sample_count] = total_processed;
-                results->sample_prices[results->sample_count] = ticks[i].price;
-                results->sample_regimes[results->sample_count] = ctrl.regime.current_regime;
-                results->labels[results->sample_count] = 0.0f; // filled in post-pass
-                results->sample_count++;
-            }
-
-            // gate reason diagnostics (every slow-path cycle)
-            if (ctrl.tick_count == 0 && ctrl.state != CONTROLLER_WARMUP) {
-                int gr = ctrl.gate_reason;
-                if (gr >= 0 && gr < NUM_GATE_REASONS) gate_counts[gr]++;
-                total_slow_cycles++;
-            }
-
-            total_processed++;
-            // update progress every 10K ticks (avoid atomic contention)
-            if ((total_processed & 0x3FFF) == 0)
-                *progress_pct = (int)(100.0 * total_processed / total_ticks_all_files);
-        }
-    }
-
-done:
-    *progress_pct = 100;
-
-    gettimeofday(&t_end, NULL);
-    double elapsed = (t_end.tv_sec - t_start.tv_sec) * 1000.0
-                   + (t_end.tv_usec - t_start.tv_usec) / 1000.0;
-
-    // force-drain remaining trade log entries
-    TradeLogBuffer_Drain(&ctrl.trade_buf, &log);
-    TradeLog_Close(&log);
-
-    // compute stats
-    double start_bal = FPN_ToDouble(cfg.starting_balance);
-    BacktestStats_Compute(&results->stats, &ctrl, start_bal, elapsed);
-    results->stats.ticks_processed = total_processed; // override: use actual file tick count
-
-    // sharpe from equity curve, drawdown from controller (equity = balance + positions)
-    if (results->equity_count > 1)
-        BacktestStats_ComputeFromEquity(&results->stats, results->equity_curve, results->equity_count);
-    // override equity-curve drawdown with controller's (tracks true equity, not just balance)
-    results->stats.max_drawdown = FPN_ToDouble(ctrl.max_drawdown);
-    double pe = FPN_ToDouble(ctrl.peak_equity);
-    results->stats.max_drawdown_pct = (pe > 0.0)
-        ? (results->stats.max_drawdown / pe) * 100.0 : 0.0;
-
-    // populate TUISnapshot for dashboard panels (if requested)
-    if (out_snapshot) {
-        BacktestSnapshot_Copy<BACKTEST_FP>(out_snapshot, &ctrl, price_d_last, 0.0);
-    }
-
-    // post-processing: compute labels (needs forward-looking tick data)
-    // Track E.1 — extracted to Backtest_ComputeLabelsFromSamples so the
-    // sharded path can call the same code without duplicating it.
+    tt::BacktestSharded_Run(results, run_cfg, progress_pct, cancel_flag,
+                            candle_acc, out_snapshot);
+    // Labels need forward-looking ticks the replay already discarded.
+    // Helper reloads + computes; no-op when collect_features=0.
     Backtest_ComputeLabelsFromSamples(results, run_cfg);
-
-    // cleanup
-    free(ticks);
-    free(file_tick_counts);
-    free(ctrl.rolling_long);
-    // v4.3 — free expanded feature-pack state too. ~2.4MB total — leaks
-    // accumulate fast across multiple Collect Features clicks in one suite
-    // session.
-    free(ctrl.rolling_medium);
-    free(ctrl.rolling_baseline);
-    free(ctrl.cumdelta_state);
-
-    fprintf(stderr, "[backtest] completed: %lu ticks in %.1fms, %u trades, P&L $%.2f\n",
-            results->stats.ticks_processed, elapsed,
-            results->stats.total_trades, results->stats.total_pnl);
-
-    // gate reason breakdown — shows WHY the engine isn't trading
-    // names come from GATE_REASON_TABLE[] (single source of truth in PortfolioController.hpp)
-    if (total_slow_cycles > 0) {
-        fprintf(stderr, "[backtest] gate reason breakdown (%d slow-path cycles):\n", total_slow_cycles);
-        for (int g = 0; g < NUM_GATE_REASONS; g++) {
-            if (gate_counts[g] > 0) {
-                fprintf(stderr, "  %-12s %7d  (%5.1f%%)\n",
-                        GATE_REASON_TABLE[g].name, gate_counts[g],
-                        100.0 * gate_counts[g] / total_slow_cycles);
-            }
-        }
-    }
 }
 
 //======================================================================================================
