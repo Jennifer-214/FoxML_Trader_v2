@@ -244,15 +244,16 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
     if (ImPlot::BeginPlot("##price", ImVec2(-1, -1),
                            ImPlotFlags_NoTitle | ImPlotFlags_NoMouseText)) {
 
-        // v4.7.12: X axis as time. SetupAxisScale(Time) → ImPlot formats
-        // ticks as HH:MM:SS / MM-DD natively, so we drop the manual
-        // tick label code below. Once condition lets user pan/zoom;
-        // re-applies Always when y_reset_requested is set (Reset View
-        // resets BOTH axes — they're tied conceptually).
+        // v4.7.14 fix for v4.7.12 regression: X axis stays linear
+        // (NOT ImPlotScale_Time). The time-scale transform broke
+        // PlotToPixels for our manually-drawn candle bodies — they
+        // landed at wrong pixel coords or outside the visible plot
+        // area. We keep cs->xs as time_sec (stable across ring
+        // eviction so pan-back still works), but feed it as plain
+        // doubles. Manual HH:MM tick labels (loop below) restored.
         ImPlot::SetupAxes(NULL, NULL,
                           ImPlotAxisFlags_NoLabel | ImPlotAxisFlags_NoGridLines,
                           ImPlotAxisFlags_Opposite);
-        ImPlot::SetupAxisScale(ImAxis_X1, ImPlotScale_Time);
         ImPlotCond x_cond = settings->y_reset_requested ? ImPlotCond_Always : ImPlotCond_Once;
         ImPlot::SetupAxisLimits(ImAxis_X1, cs->x_lo, cs->x_hi, x_cond);
         // secondary Y-axis for ML prediction overlay (0-1 range)
@@ -261,10 +262,27 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             ImPlot::SetupAxisLimits(ImAxis_Y2, 0.0, 1.0, ImPlotCond_Always);
         }
 
-        // v4.7.12: time tick labels are now handled natively by ImPlot
-        // via the ImPlotAxisFlags_Time flag set above. The pre-v4.7.12
-        // manual tick code was needed because xs was an arbitrary index;
-        // with xs = unix_seconds, ImPlot formats automatically.
+        // v4.7.14: manual time tick labels restored. Now that xs[i] is
+        // unix_seconds (eviction-stable), label values are taken directly
+        // from xs[i] — same as pre-v4.7.12 except no vis_start offset
+        // since ChartState_Prepare loads the full snapshot now.
+        static double tick_pos[16];
+        static char tick_bufs[16][8];
+        static const char *tick_labels_p[16];
+        int tick_n = 0;
+        if (vc > 0) {
+            int step = vc > 5 ? vc / 5 : 1;
+            for (int i = 0; i < vc && tick_n < 16; i += step) {
+                if (cs->times_sec[i] < 1.0) continue;
+                tick_pos[tick_n] = cs->xs[i];
+                time_t t = (time_t)cs->times_sec[i];
+                struct tm *tm = localtime(&t);
+                snprintf(tick_bufs[tick_n], 8, "%02d:%02d", tm->tm_hour, tm->tm_min);
+                tick_labels_p[tick_n] = tick_bufs[tick_n];
+                tick_n++;
+            }
+            ImPlot::SetupAxisTicks(ImAxis_X1, tick_pos, tick_n, tick_labels_p);
+        }
 
         // Y limits with padding + TP/SL expansion (bounded).
         // v4.7.6: previously we unconditionally expanded Y to include
@@ -337,13 +355,14 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         }
 
         // candlesticks
-        // v4.7.12: candle width derived from time interval at current
-        // zoom. Was `chart_w / vis` (fixed pixel-per-bar based on
-        // visible_candles setting); under time-axis with free zoom,
-        // user can compress/expand freely so we measure how many
-        // pixels one candle interval spans NOW, scale by 0.7 (gap).
-        ImVec2 px_l = ImPlot::PlotToPixels(0.0, 0.0);
-        ImVec2 px_r = ImPlot::PlotToPixels((double)settings->candle_interval, 0.0);
+        // v4.7.14: candle width measured from one interval span at
+        // CURRENT zoom level so candles compress/expand smoothly.
+        // Reference points must be inside the visible plot area —
+        // PlotToPixels for off-screen coords can return clipped/garbage
+        // values on some ImPlot versions. Use cs->x_lo (always visible)
+        // and cs->x_lo + interval as the reference span.
+        ImVec2 px_l = ImPlot::PlotToPixels(cs->x_lo, cs->lows[0]);
+        ImVec2 px_r = ImPlot::PlotToPixels(cs->x_lo + (double)settings->candle_interval, cs->lows[0]);
         float candle_px = (px_r.x - px_l.x) * 0.7f;
         if (candle_px < 1.5f) candle_px = 1.5f;
         if (candle_px > 40.0f) candle_px = 40.0f;
