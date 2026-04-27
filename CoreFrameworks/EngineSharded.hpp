@@ -601,7 +601,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         cfg.core_model_dir[i],
                         cfg.barrier_gate_enabled,
                         FPN_ToDouble(cfg.ml_buy_threshold),
-                        cfg.model_verify_strict, i);
+                        cfg.model_verify_strict, i,
+                        // v4.3.1: train-serve cadence + feature format check
+                        cfg.poll_interval,
+                        (unsigned)MODEL_FORMAT_VERSION);
                     if (!verify_ok && cfg.model_verify_strict > 0) {
                         // strict mode + mismatch: detach model, treat as "no model loaded"
                         // (executor falls back to SimpleDip per ML_BuildParameters)
@@ -699,11 +702,22 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                           &ema_price, &ema_alpha, &regime_ror, live_trading] {
         EngineSharded_PinThread(0);  // best-effort pin to CPU 0
         uint64_t seq = 0;
-        // Sharded mode uses a much shorter slow_path_interval than legacy
-        // because the per-core path runs the slow path on the producer
-        // thread (its own pinned CPU) and the cost is negligible. Tighter
-        // cadence means rolling stats stay fresh on slow market feeds.
-        int slow_path_interval = 8;
+        // v4.3.1 — slow_path_interval now reads cfg.poll_interval to match
+        // backtest (which always used cfg.poll_interval=100 default).
+        // Pre-v4.3.1 sharded hardcoded this to 8, which meant rolling
+        // stats covered 12.5× less time history at SERVING (sharded) than
+        // at TRAINING (backtest) — silent train-serve drift on every
+        // RollingStats-derived feature (slope, R², variance, EMA spread,
+        // etc.). Aligning eliminates the drift.
+        // Cost: sharded slow path fires 12.5× less often. Slow path is
+        // not perf-critical (microseconds per fire, runs on dedicated
+        // producer CPU). User can override via engine.cfg poll_interval=N
+        // for tighter cadence at the cost of train-serve parity.
+        int slow_path_interval = (int)cfg.poll_interval;
+        if (slow_path_interval < 1) slow_path_interval = 100;
+        fprintf(stderr, "[sharded] slow_path_interval = %d ticks "
+                        "(from cfg.poll_interval — matches backtest cadence)\n",
+                slow_path_interval);
         int slow_path_counter = 0;
 
         // Helper that fans a single tick out to every core's tick ring,

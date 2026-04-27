@@ -175,10 +175,18 @@ inline int CoreModelZoo_HasAny(const CoreModelZoo<F> *zoo) {
 // will only use one class and the model is being underutilized.
 //======================================================================================================
 template <unsigned F>
+// v4.3.1 — extended signature to also verify slow-path cadence + feature
+// pack version. live_poll_interval and live_feature_format_version are
+// the engine's runtime values; the loader compares them against what
+// expected.cfg recorded at training time. Mismatch on cadence = silent
+// train-serve drift; mismatch on feature format = wrong number of
+// features in the pack, model crashes or produces garbage.
 inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *dir,
                                        int live_barrier_gate_enabled,
                                        double live_ml_buy_threshold,
-                                       int strict_mode, int core_id) {
+                                       int strict_mode, int core_id,
+                                       unsigned live_poll_interval = 0,
+                                       unsigned live_feature_format_version = 0) {
     // structural check: multiclass model + barrier_gate_enabled=0 → warn
     int has_multiclass = (zoo->loaded_mask & CORE_MODEL_BARRIER) && zoo->barrier.num_outputs >= 2;
     if (has_multiclass && !live_barrier_gate_enabled) {
@@ -207,6 +215,10 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
     // cfg). Discipline values the model was trained under. -1 = not in file.
     double expected_held_out_fraction = -1.0;
     double expected_gap_threshold     = -1.0;
+    // v4.3.1 — train-serve cadence + feature pack version (-1 = old format)
+    int expected_poll_interval        = -1;
+    int expected_feature_format_ver   = -1;
+    int expected_num_features         = -1;
     int mismatches = 0;
 
     char line[512];
@@ -241,8 +253,42 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
         }
         else if (strcmp(key, "held_out_fraction") == 0)        expected_held_out_fraction = atof(val);
         else if (strcmp(key, "gap_acceptable_threshold") == 0) expected_gap_threshold     = atof(val);
+        else if (strcmp(key, "expected_poll_interval") == 0)         expected_poll_interval = atoi(val);
+        else if (strcmp(key, "expected_feature_format_version") == 0) expected_feature_format_ver = atoi(val);
+        else if (strcmp(key, "expected_num_features") == 0)          expected_num_features = atoi(val);
     }
     fclose(f);
+
+    // v4.3.1 — slow-path cadence mismatch is silent train-serve drift.
+    // Model was trained at training-cadence; serving at sharded-cadence.
+    // If they differ, all RollingStats-derived features (slope, R², etc.)
+    // describe different time windows than the model expects. Always warn.
+    if (expected_poll_interval > 0 && live_poll_interval > 0 &&
+        (unsigned)expected_poll_interval != live_poll_interval) {
+        fprintf(stderr,
+            "[ML] core %d: MISMATCH — model trained at poll_interval=%d, "
+            "engine running at poll_interval=%u\n"
+            "                  RollingStats time-windows differ %.1f×; "
+            "predictions will diverge from training distribution.\n"
+            "                  Set engine.cfg poll_interval=%d to match.\n",
+            core_id, expected_poll_interval, live_poll_interval,
+            (double)live_poll_interval / (double)expected_poll_interval,
+            expected_poll_interval);
+        mismatches++;
+    }
+    // v4.3 — feature format version mismatch = pack contents differ.
+    // FEAT_* indices change → the model interprets feature N as something
+    // it wasn't trained on. Hard fail.
+    if (expected_feature_format_ver > 0 && live_feature_format_version > 0 &&
+        (unsigned)expected_feature_format_ver != live_feature_format_version) {
+        fprintf(stderr,
+            "[ML] core %d: FATAL — model trained with feature_format=v%d "
+            "but engine runtime is v%u. Feature indices differ; model "
+            "would interpret inputs as wrong features.\n"
+            "                  Retrain the model on the current engine.\n",
+            core_id, expected_feature_format_ver, live_feature_format_version);
+        mismatches++;
+    }
 
     // compare each field, log mismatches
     if (expected_barrier_gate >= 0 && expected_barrier_gate != live_barrier_gate_enabled) {

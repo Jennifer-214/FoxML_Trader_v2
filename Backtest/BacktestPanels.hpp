@@ -2111,6 +2111,21 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 fprintf(ef, "ml_tp_pct = %.6f\n", FPN_ToDouble(results->config_used.ml_tp_pct));
                 fprintf(ef, "ml_sl_pct = %.6f\n", FPN_ToDouble(results->config_used.ml_sl_pct));
                 fprintf(ef, "ml_backend = %d\n", results->config_used.ml_backend);
+                // v4.3.1 — record the slow-path cadence the model was trained
+                // against. Sharded engine reads cfg.poll_interval at boot;
+                // model expects to see RollingStats computed at the same
+                // cadence. Mismatch → silent train-serve drift (12.5× time-
+                // window difference at the old hardcoded value of 8 vs
+                // backtest default 100). Engine compares + warns on load.
+                fprintf(ef, "expected_poll_interval = %u\n",
+                        results->config_used.poll_interval);
+                // v4.3 — feature pack version the model was trained on.
+                // Engine refuses to load a v1 model into a v2 feature
+                // pipeline (and vice versa) — feature indices change.
+                fprintf(ef, "expected_feature_format_version = %u\n",
+                        (unsigned)MODEL_FORMAT_VERSION);
+                fprintf(ef, "expected_num_features = %u\n",
+                        (unsigned)MODEL_NUM_FEATURES);
                 // Phase 7 prep — held-out validation cfg saved for reproducibility.
                 // Live engine compares these; mismatch = warning (or fail under
                 // model_verify_strict=1). Documents the validation discipline

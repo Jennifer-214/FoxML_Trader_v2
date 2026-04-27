@@ -4641,6 +4641,158 @@ int main() {
               state.cores[slot].pnl_feeder.head == 0);
     }
 
+    //======================================================================================================
+    // [v4.3 FEATURE PACK TESTS — CumDelta, TickRate, hour cyclical, vol regime]
+    //======================================================================================================
+    // Pin the new auxiliary state structs and feature computations. Adding
+    // these now (post-hoc) before Track D adds even more state — the same
+    // invariants apply to every new feature: round-trip the state, verify
+    // edge cases (cold start, full window wraparound, zero inputs), confirm
+    // the value reaches the packed feature buffer.
+    //======================================================================================================
+    printf("\n--- v4.3: CumDelta round-trip ---\n");
+    {
+        CumDeltaState<64> s;
+        CumDelta_Init(&s);
+        check("init: count == 0", s.count == 0);
+        check("init: head == 0", s.head == 0);
+        check("init: sum == 0", FPN_IsZero(s.sum));
+
+        // single buy aggression (is_buyer_maker=0): +qty
+        CumDelta_Push(&s, FPN_FromDouble<64>(0.5), 0);
+        check("after 1 buy push: count == 1", s.count == 1);
+        check("after 1 buy push: sum == +0.5",
+              fabs(FPN_ToDouble(s.sum) - 0.5) < 1e-6);
+
+        // sell aggression (is_buyer_maker=1): -qty
+        CumDelta_Push(&s, FPN_FromDouble<64>(0.3), 1);
+        check("after 1 sell push: count == 2",  s.count == 2);
+        check("after 1 sell push: sum == 0.5 - 0.3 = 0.2",
+              fabs(FPN_ToDouble(s.sum) - 0.2) < 1e-6);
+
+        // hammer: 100 mixed pushes, sum should be (50 buys × 0.1) - (50 sells × 0.1) = 0
+        for (int i = 0; i < 100; ++i) {
+            CumDelta_Push(&s, FPN_FromDouble<64>(0.1), i % 2);
+        }
+        check("hammer 100 mixed @ 0.1: sum back to ~0.2 (carryover from setup)",
+              fabs(FPN_ToDouble(s.sum) - 0.2) < 1e-6);
+
+        // wraparound: push enough to evict everything
+        // (CUMDELTA_WINDOW = 1024). Push 2000 buys all +0.5, sum should
+        // approach 1024 × 0.5 = 512 (last 1024 entries all +0.5)
+        CumDeltaState<64> s2;
+        CumDelta_Init(&s2);
+        for (int i = 0; i < 2000; ++i) {
+            CumDelta_Push(&s2, FPN_FromDouble<64>(0.5), 0);
+        }
+        check("wrap test 2000 buys: count saturates at CUMDELTA_WINDOW=1024",
+              s2.count == 1024);
+        check("wrap test 2000 buys: sum ~= 1024 × 0.5 = 512",
+              fabs(FPN_ToDouble(s2.sum) - 512.0) < 1e-3);
+    }
+
+    printf("\n--- v4.3: TickRate baseline + z-score ---\n");
+    {
+        TickRateState s;
+        TickRate_Init(&s);
+        check("init: count == 0", s.count == 0);
+        check("init: trailing_mean_rate == 0",
+              s.trailing_mean_rate == 0.0);
+
+        // push timestamps spaced 100ms apart (10 ticks/sec)
+        uint64_t ts = 1000000;  // 1 second base
+        for (int i = 0; i < 100; ++i) {
+            TickRate_Push(&s, ts + (uint64_t)i * 100000ULL);
+        }
+        check("after 100 pushes: count == 100", s.count == 100);
+        // baseline only updates when ring fills (1024 pushes), so still 0
+        check("after 100 pushes (window=1024): baseline still 0 (not enough samples)",
+              s.trailing_mean_rate == 0.0);
+
+        // pre-fill ring; baseline updates on first wrap
+        TickRateState s2;
+        TickRate_Init(&s2);
+        for (int i = 0; i < 1024; ++i) {
+            // 100ms apart → 10 ticks/sec
+            TickRate_Push(&s2, 1000000ULL + (uint64_t)i * 100000ULL);
+        }
+        check("after 1024 pushes: count saturates at TICKRATE_WINDOW",
+              s2.count == 1024);
+        check("after 1024 pushes: baseline ~10 ticks/sec",
+              s2.trailing_mean_rate > 9.0 && s2.trailing_mean_rate < 11.0);
+    }
+
+    printf("\n--- v4.3: hour cyclical encoding ---\n");
+    {
+        // encoding: sin(2π × hour/24), cos(2π × hour/24).
+        // Verify continuity across hour boundaries.
+        const double TAU = 2.0 * 3.14159265358979323846;
+
+        // hour 0 → sin=0, cos=1
+        double h0_sin = sin(TAU * 0.0 / 24.0);
+        double h0_cos = cos(TAU * 0.0 / 24.0);
+        check("hour 0: sin == 0",   fabs(h0_sin - 0.0) < 1e-9);
+        check("hour 0: cos == 1",   fabs(h0_cos - 1.0) < 1e-9);
+
+        // hour 6 → sin=1, cos=0  (90 degrees)
+        double h6_sin = sin(TAU * 6.0 / 24.0);
+        double h6_cos = cos(TAU * 6.0 / 24.0);
+        check("hour 6: sin == 1",   fabs(h6_sin - 1.0) < 1e-9);
+        check("hour 6: cos == 0",   fabs(h6_cos - 0.0) < 1e-9);
+
+        // hour 24 wraps back to 0
+        double h24_sin = sin(TAU * 24.0 / 24.0);
+        double h24_cos = cos(TAU * 24.0 / 24.0);
+        check("hour 24 wraps to 0: sin == 0", fabs(h24_sin - 0.0) < 1e-9);
+        check("hour 24 wraps to 0: cos == 1", fabs(h24_cos - 1.0) < 1e-9);
+
+        // hour 23 → close to hour 0 in (sin,cos) space (vs hour 12 which is opposite)
+        double h23_sin = sin(TAU * 23.0 / 24.0);
+        double h23_cos = cos(TAU * 23.0 / 24.0);
+        // L2 distance hour 23 → hour 0 should be small
+        double dist_23_0 = sqrt((h23_sin - h0_sin)*(h23_sin - h0_sin) +
+                                  (h23_cos - h0_cos)*(h23_cos - h0_cos));
+        // L2 distance hour 12 → hour 0 should be large (= 2.0, opposite)
+        double h12_sin = sin(TAU * 12.0 / 24.0);
+        double h12_cos = cos(TAU * 12.0 / 24.0);
+        double dist_12_0 = sqrt((h12_sin - h0_sin)*(h12_sin - h0_sin) +
+                                  (h12_cos - h0_cos)*(h12_cos - h0_cos));
+        check("cyclical: hour 23 closer to 0 than hour 12 is",
+              dist_23_0 < dist_12_0);
+        check("cyclical: hour 12 distance == 2.0 (diametrically opposite)",
+              fabs(dist_12_0 - 2.0) < 1e-9);
+    }
+
+    printf("\n--- v4.3: vol_regime cold start ---\n");
+    {
+        // Default behavior when rolling_baseline isn't ready: should stay
+        // at 1.0 (no abnormality detected). Test by passing nullptr.
+        RegimeSignals<64> sig{};
+        RollingStats<64, 128> rolling = RollingStats_Init<64, 128>();
+        rolling.price_avg = FPN_FromDouble<64>(60000.0);
+        rolling.price_stddev = FPN_FromDouble<64>(50.0);  // some variance
+        rolling.count = 200;
+
+        RollingStats<64, 512> rolling_long = RollingStats_Init<64, 512>();
+        rolling_long.count = 600;
+
+        RORRegressor<64> ror = RORRegressor_Init<64>();
+
+        // Call with all v4.3 state nullptr — vol_regime_ratio should default
+        // to 1.0 (cold start, no baseline)
+        Regime_ComputeSignals<64>(&sig, &rolling, &rolling_long, &ror,
+                                   FPN_FromDouble<64>(60000.0),
+                                   nullptr, nullptr, nullptr, nullptr, 0);
+        check("vol_regime cold start: ratio == 1.0 (no baseline)",
+              fabs(FPN_ToDouble(sig.vol_regime_ratio) - 1.0) < 1e-6);
+        check("dist_to_high cold start: == 0",
+              FPN_IsZero(sig.dist_to_high));
+        check("dist_to_low cold start: == 0",
+              FPN_IsZero(sig.dist_to_low));
+        check("hour_sin / hour_cos with timestamp_us=0: both == 0",
+              sig.hour_sin == 0.0 && sig.hour_cos == 0.0);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
