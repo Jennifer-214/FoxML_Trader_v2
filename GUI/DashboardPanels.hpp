@@ -770,14 +770,36 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
             for (int i = 0; i < s->per_core_count && i < 16; ++i) {
                 const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
                 ImGui::TableNextRow();
+                if (pc->core_kill_tripped) {
+                    // 2A: highlight killed cores. Subtle red row tint so the
+                    // panel doesn't look broken when a core trips, just
+                    // visibly distinct. Hover any cell for the dd% reason.
+                    ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                        ImGui::GetColorU32(ImVec4(0.4f, 0.1f, 0.1f, 0.45f)));
+                }
                 ImGui::TableNextColumn();
-                ImGui::Text("%d", i);
+                if (pc->core_kill_tripped) {
+                    ImGui::TextColored(FoxmlColors::red, "%d!", i);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Core %d killed (dd %.2f%%) — entries halted "
+                                          "until manual reset", i, pc->core_dd_pct * 100.0);
+                    }
+                } else {
+                    ImGui::Text("%d", i);
+                }
 
                 ImGui::TableNextColumn();
                 uint8_t sid = pc->resolved_strategy_id;
                 if (sid >= NUM_STRATEGIES) sid = pc->strategy_id_display;
                 if (sid < NUM_STRATEGIES) {
-                    ImGui::TextColored(strat_colors[sid], "%s", STRATEGY_SHORT_NAMES[sid]);
+                    if (pc->core_kill_tripped) {
+                        // Strikethrough effect via dimmed colored text
+                        ImVec4 c = strat_colors[sid];
+                        c.w = 0.45f;
+                        ImGui::TextColored(c, "%s", STRATEGY_SHORT_NAMES[sid]);
+                    } else {
+                        ImGui::TextColored(strat_colors[sid], "%s", STRATEGY_SHORT_NAMES[sid]);
+                    }
                 } else {
                     ImGui::TextDisabled("?");
                 }

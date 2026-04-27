@@ -49,6 +49,7 @@
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/StrategyParameters.hpp"
 #include "ExecutionCore.hpp"
+#include "Notify.hpp"
 #include "OrderManager.hpp"
 #include "Portfolio.hpp"
 #include "ShardedTradeLog.hpp"
@@ -1170,13 +1171,27 @@ inline int EventLoop_RebuildAllParameters(
                     FPN_GreaterThan(drop, config->min_kill_loss)) {
                     state->cores[slot].core_kill_tripped   = 1;
                     state->cores[slot].core_ks_trips_total++;
+                    double dd_pct_d  = FPN_ToDouble(state->cores[slot].core_dd_pct) * 100.0;
+                    double drop_d    = FPN_ToDouble(drop);
+                    double peak_d    = FPN_ToDouble(state->cores[slot].core_peak_balance);
+                    double current_d = FPN_ToDouble(current_value);
                     fprintf(stderr, "[sharded] CORE KILL: core %d tripped — "
                             "dd=%.2f%% drop=$%.2f peak=$%.2f current=$%.2f\n",
-                            slot,
-                            FPN_ToDouble(state->cores[slot].core_dd_pct) * 100.0,
-                            FPN_ToDouble(drop),
-                            FPN_ToDouble(state->cores[slot].core_peak_balance),
-                            FPN_ToDouble(current_value));
+                            slot, dd_pct_d, drop_d, peak_d, current_d);
+                    // 2A — alert via Notify subsystem alongside stderr log.
+                    // Per-kind cooldown (NK_CORE_KILL_TRIP=10) collapses
+                    // back-to-back trips on the same core to one alert per
+                    // window. Backtest leaves g_notify null → no-op.
+                    if (g_notify) {
+                        char body[256];
+                        snprintf(body, sizeof(body),
+                                 "Core %d kill tripped: dd=%.2f%% drop=$%.2f "
+                                 "peak=$%.2f current=$%.2f. Entries halted on "
+                                 "this core until manual reset.",
+                                 slot, dd_pct_d, drop_d, peak_d, current_d);
+                        Notify_Send(g_notify, NOTIFY_ALERT, NK_CORE_KILL_TRIP,
+                                    "Per-core kill switch tripped", body);
+                    }
                 }
             }
             if (state->cores[slot].core_kill_tripped) {
