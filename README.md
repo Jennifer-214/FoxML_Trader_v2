@@ -9,6 +9,18 @@ per-core risk-sharded crypto trading engine in C++17. one position per pinned CP
 >
 > rdtsc bracket overhead is ~8 ns on this CPU, so real per-tick work sits around **32-40 ns** in live multi-threaded execution. single-thread cache-resident algorithmic floor is **11.56 ns/tick** (see bench table below).
 
+### best p99 observed in live trading (post-v4.7.5)
+
+![best per-core p99 — 76ns](assets/per-core-latency-best.png)
+
+> **44,500 samples per core, live Binance feed, GUI rendering at the same time:**
+> Core 3 SimpleDip · p99 = **76 ns** · subtract ~25–30 ns rdtsc floor → effective **~46 ns p99**
+>
+> Core 2 AUTO (regime-resolved) · p99 = **78 ns**
+> Core 0 MR · p99 = 113 ns · Core 1 EMA · p99 = 108 ns
+>
+> p50 across all cores: 43 ns raw → ~13 ns effective. measured on i9-9980HK (Coffee Lake H, 2.4 GHz base / 5.0 GHz turbo, 2018-2019).
+
 built from scratch, self-taught, ~60k lines across engine + backtest suite + ML pipeline. reusable primitives extracted as a public C++20 header-only library: [**FoxLIB**](https://github.com/Jennyfirrr/FoxLIB).
 
 [![Donate](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.com/ncp/payment/8M6XLK7M8569C) [![Discord](https://img.shields.io/badge/Discord-Community-5865F2.svg)](https://discord.gg/asSDcYwPz)
