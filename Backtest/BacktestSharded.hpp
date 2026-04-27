@@ -112,6 +112,16 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     fprintf(stderr, "[backtest sharded] mode=sharded cores=%u default_strategy=%d\n",
             (unsigned)cfg.num_execution_cores, cfg.default_strategy);
 
+    // Partial exits P.1 — validate cfg before allocating cores. When
+    // partial_exit_enabled=1, refuses to run if num_execution_cores*2
+    // exceeds MAX_PORTFOLIO_POSITIONS. Mirrors the EngineSharded_Run
+    // boot-time check so backtest + live agree on cfg sanity.
+    if (!Sharded_ValidatePartialExitCfg(&cfg)) {
+        fprintf(stderr, "[backtest sharded] FATAL: partial-exit cfg "
+                        "validation failed. Skipping run.\n");
+        return;
+    }
+
     // Track E.2 — multi-strategy support. The prior SimpleDip-only gate
     // is gone; per-core strategy comes from cfg.core_strategies[i] (set
     // by ControllerConfig_Load from `core_N_strategy=...` directives,

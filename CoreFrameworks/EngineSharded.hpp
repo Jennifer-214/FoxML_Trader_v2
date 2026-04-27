@@ -248,6 +248,23 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     fprintf(stderr, "================================================================\n");
     fprintf(stderr, "[sharded] STARTING in per-core sharded mode\n");
     fprintf(stderr, "[sharded] num_execution_cores = %u\n", (unsigned)cfg.num_execution_cores);
+
+    // Partial exits P.1 (2026-04-27): validate cfg before allocating cores.
+    // When partial_exit_enabled=1, refuses to start if num_execution_cores * 2
+    // exceeds MAX_PORTFOLIO_POSITIONS (each core uses 2 portfolio slots in
+    // pair mode). When disabled (default), returns 1 unconditionally.
+    // Logs the activation line "[partial-exits] enabled: ..." so live engine
+    // operators can see whether partials are armed at boot.
+    //
+    // NOTE: P.1 only validates + announces. Actual partial-exit BEHAVIOR
+    // (hot-path TP1 detection, OMS leg-aware booking, strategy dual-TP
+    // wiring) lands in P.2-P.4. With partial_exit_enabled=1 in this build,
+    // the validation passes but trades still execute single-leg.
+    if (!Sharded_ValidatePartialExitCfg(&cfg)) {
+        fprintf(stderr, "[sharded] FATAL: partial-exit cfg validation failed. "
+                        "Refusing to start.\n");
+        return;
+    }
     if (use_synthetic) {
         fprintf(stderr, "[sharded] Binance stream not available — using SYNTHETIC ticks\n");
     } else {
