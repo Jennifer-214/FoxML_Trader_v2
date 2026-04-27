@@ -55,11 +55,48 @@ link_cfg() {
     [[ -d "$dir" ]] && [[ -f engine.cfg ]] && ln -sfn ../engine.cfg "$dir/engine.cfg"
 }
 
+# v4.3 — maintain bin/ symlinks to the canonical "latest" binary of each
+# user-facing target. Without this, users get confused about which build_*
+# directory contains the up-to-date binary (since `./build.sh suite` only
+# rebuilds in build_suite/ while `./build.sh gui` rebuilds in build_gui/,
+# the same target binary can have different timestamps in each dir).
+#
+# pick_newest target candidate1 candidate2 ... — symlinks bin/{target} to
+# whichever candidate file has the latest mtime. Skips missing candidates.
+pick_newest() {
+    local target="$1"; shift
+    local newest=""
+    local newest_mtime=0
+    for c in "$@"; do
+        [[ -f "$c" ]] || continue
+        local mt
+        mt=$(stat -c %Y "$c" 2>/dev/null || echo 0)
+        if (( mt > newest_mtime )); then
+            newest="$c"
+            newest_mtime=$mt
+        fi
+    done
+    if [[ -n "$newest" ]]; then
+        # newest path is repo-relative (e.g. "build_gui/foxml_suite") — convert
+        # to ../{path} for the symlink (since bin/ is one level deep).
+        ln -sfn "../$newest" "bin/$target"
+    fi
+}
+
+update_bin_links() {
+    mkdir -p bin
+    pick_newest engine          build/engine          build_gui/engine          build_lat/engine
+    pick_newest controller_test build/controller_test build_gui/controller_test
+    pick_newest engine_gui      build_gui/engine_gui  build_gui_lite/engine_gui
+    pick_newest foxml_suite     build_gui/foxml_suite build_suite/foxml_suite   build_gui_lite/foxml_suite
+}
+
 build_engine() {
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build
     cmake -B build -DCMAKE_BUILD_TYPE=Release
     cmake --build build -j"$JOBS"
     link_cfg build
+    update_bin_links
 }
 
 build_gui() {
@@ -72,6 +109,7 @@ build_gui() {
     cmake -B build_gui -DUSE_IMGUI_GUI=ON -DLATENCY_PROFILING=ON -DUSE_XGBOOST=ON
     cmake --build build_gui -j"$JOBS"
     link_cfg build_gui
+    update_bin_links
 }
 
 build_gui_lite() {
@@ -82,6 +120,7 @@ build_gui_lite() {
     cmake -B build_gui_lite -DUSE_IMGUI_GUI=ON
     cmake --build build_gui_lite -j"$JOBS"
     link_cfg build_gui_lite
+    update_bin_links
 }
 
 build_suite() {
@@ -90,6 +129,7 @@ build_suite() {
     cmake -B build_suite -DUSE_IMGUI_GUI=ON -DLATENCY_PROFILING=ON -DUSE_XGBOOST=ON
     cmake --build build_suite -j"$JOBS" --target foxml_suite
     link_cfg build_suite
+    update_bin_links
 }
 
 build_latency() {
@@ -97,6 +137,7 @@ build_latency() {
     cmake -B build_lat -DLATENCY_PROFILING=ON
     cmake --build build_lat -j"$JOBS"
     link_cfg build_lat
+    update_bin_links
 }
 
 run_tests() {
@@ -129,8 +170,8 @@ case "$TARGET" in
         build_latency
         ;;
     clean)
-        rm -rf build build_gui build_gui_lite build_suite build_lat
-        echo "all build dirs removed"
+        rm -rf build build_gui build_gui_lite build_suite build_lat bin
+        echo "all build dirs + bin/ symlinks removed"
         ;;
     *)
         echo "unknown target: $TARGET" >&2

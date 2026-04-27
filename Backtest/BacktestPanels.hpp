@@ -643,27 +643,36 @@ static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
     return 1;
 }
 
-static inline void PastRuns_Scan(PastRunsState *s) {
-    s->count = 0;
-    s->status_msg[0] = '\0';
-    DIR *d = opendir("models");
-    if (!d) {
-        snprintf(s->status_msg, sizeof(s->status_msg), "models/ dir not found");
-        return;
-    }
+// v4.3 — scan one directory for run subdirs containing summary.txt. Used
+// recursively for the two-level models/{kind}/{run_name}/ layout AND for
+// backward compat with flat models/{run_name}/ runs from before v4.3.
+static inline void PastRuns_ScanOneDir(PastRunsState *s, const char *path) {
+    DIR *d = opendir(path);
+    if (!d) return;
     struct dirent *entry;
     while ((entry = readdir(d)) != NULL && s->count < PAST_RUNS_MAX) {
         if (entry->d_name[0] == '.') continue;
-        // check if it's a directory containing summary.txt
-        char sub[300];
-        snprintf(sub, sizeof(sub), "models/%s", entry->d_name);
+        char sub[400];
+        snprintf(sub, sizeof(sub), "%s/%s", path, entry->d_name);
         struct stat st;
         if (stat(sub, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
         if (PastRuns_LoadOne(&s->runs[s->count], sub)) s->count++;
     }
     closedir(d);
+}
+
+static inline void PastRuns_Scan(PastRunsState *s) {
+    s->count = 0;
+    s->status_msg[0] = '\0';
+    // v4.3 — walk the kind-organized subdirs first
+    PastRuns_ScanOneDir(s, "models/classification");
+    PastRuns_ScanOneDir(s, "models/regression");
+    // Backward compat: also scan models/ directly for runs saved before v4.3
+    // (those still have summary.txt at models/{run_name}/).
+    PastRuns_ScanOneDir(s, "models");
     snprintf(s->status_msg, sizeof(s->status_msg),
-             "scanned %d run(s) in models/", s->count);
+             "scanned %d run(s) in models/{classification,regression,...}",
+             s->count);
 }
 
 // label-type-aware metric label
@@ -2014,11 +2023,6 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         ImGui::Separator();
         ImGui::InputText("Run Name", state->run_name, sizeof(state->run_name));
         if (ImGui::Button("Save Run")) {
-            char run_dir[320];
-            snprintf(run_dir, sizeof(run_dir), "models/%s", state->run_name);
-            mkdir("models", 0755);
-            mkdir(run_dir, 0755);
-
             // pick role-specific filename so CoreModelZoo auto-discovers it.
             // role is derived from label_type: 3-class softmax → "barrier",
             // regime classifier → "regime", everything else → "buy_signal".
@@ -2034,6 +2038,21 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 role_name = "buy_signal";  // regression treated as binary slot
                 expected_num_classes = 1;  // 1 = regression
             }
+
+            // v4.3 — kind-organized layout: models/{kind}/{run_name}/.
+            // Classification models go under classification/; regression
+            // under regression/. Engine cfg path is the full subdir-prefix
+            // path: core_N_model_dir=models/classification/your_run/.
+            const char *kind_dir = (expected_num_classes == 1) ? "regression"
+                                                                : "classification";
+            char run_dir[400];
+            snprintf(run_dir, sizeof(run_dir), "models/%s/%s",
+                     kind_dir, state->run_name);
+            mkdir("models", 0755);
+            char kind_parent[300];
+            snprintf(kind_parent, sizeof(kind_parent), "models/%s", kind_dir);
+            mkdir(kind_parent, 0755);
+            mkdir(run_dir, 0755);
 
             // detect source extension (.json or .xgb)
             const char *src_ext = strrchr(state->model_path, '.');

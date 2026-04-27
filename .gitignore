@@ -1,12 +1,16 @@
 build/
 build_gui/
+build_gui_lite/
+build_lat/
 build_latency/
 build_suite/
 build_suite_asan/
+bin/                # v4.3 — symlinks to latest canonical binaries; build.sh maintains
 vendor/
 logging/
 paper_runs/
 data/
+models/             # v4.3 — saved Run bundles. User-trained, edge-sensitive
 *.o
 *.d
 plans/
