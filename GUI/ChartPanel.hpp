@@ -89,12 +89,24 @@ static inline void ChartState_Prepare(ChartState *cs, const CandleSnapshot *csna
 
     cs->last_price = csnap->candles[n - 1].close;
     cs->vwap = csnap->vwap;
-    // Initial X view = last `vis` candles' time range. Pad by half an
-    // interval on each side so candle bodies don't touch the axis.
-    int view_start = (n > vis) ? n - vis : 0;
+    // Initial X view spans `vis * interval` seconds. Bars pack adjacent at
+    // consistent interval-wide spacing.
+    //   n < vis  (cold start): LEFT-anchored. Oldest candle pinned to the
+    //              left edge; new candles march in from the left and
+    //              extend rightward until the window fills.
+    //   n >= vis (steady state): RIGHT-anchored. Newest candle on the
+    //              right edge; window slides with each new candle so the
+    //              latest `vis` always show.
+    // Horizontal lines + right-edge labels read from ImPlot::GetPlotLimits()
+    // so they follow live pan/zoom — see xL/xR captured at top of the plot.
     double interval = (double)settings->candle_interval;
-    cs->x_lo = csnap->candles[view_start].time_sec - interval * 0.5;
-    cs->x_hi = csnap->candles[n - 1].time_sec     + interval * 0.5;
+    if (n < vis) {
+        cs->x_lo = csnap->candles[0].time_sec - interval * 0.5;
+        cs->x_hi = cs->x_lo + (double)vis * interval;
+    } else {
+        cs->x_hi = csnap->candles[n - 1].time_sec + interval * 0.5;
+        cs->x_lo = cs->x_hi - (double)vis * interval;
+    }
 
     // SMA
     cs->sma_first = -1;
@@ -328,6 +340,15 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         // regime background shading
         ImDrawList *dl = ImPlot::GetPlotDrawList();
         ImPlot::PushPlotClipRect();
+        // v4.7.16: live plot bounds. cs->x_lo/cs->x_hi are the INITIAL view
+        // (candle range padded). Once the user pans or zooms, those bounds
+        // become stale and any horizontal line drawn at them stops short of
+        // the visible chart edge. ImPlot::GetPlotLimits() returns the
+        // CURRENT visible X range every frame — use it for every full-width
+        // horizontal line (price/VWAP/EMA/gates/H-L/crosshair/entry/TP/SL).
+        ImPlotRect _plim = ImPlot::GetPlotLimits();
+        const double xL = _plim.X.Min;
+        const double xR = _plim.X.Max;
         {
             ImVec2 plot_tl = ImPlot::GetPlotPos();
             ImVec2 plot_sz = ImPlot::GetPlotSize();
@@ -347,8 +368,8 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
 
         // current price line (thin dotted across full width)
         {
-            ImVec2 price_l = ImPlot::PlotToPixels(cs->x_lo, cs->last_price);
-            ImVec2 price_r = ImPlot::PlotToPixels(cs->x_hi, cs->last_price);
+            ImVec2 price_l = ImPlot::PlotToPixels(xL, cs->last_price);
+            ImVec2 price_r = ImPlot::PlotToPixels(xR, cs->last_price);
             dl->AddLine(price_l, price_r,
                         ImGui::GetColorU32(ImVec4(FoxmlColors::wheat.x, FoxmlColors::wheat.y,
                                                    FoxmlColors::wheat.z, 0.3f)), 1.0f);
@@ -427,7 +448,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
 
         // VWAP
         if (cs->vwap > 0) {
-            double vy[2] = {cs->vwap, cs->vwap}, vx[2] = {cs->x_lo, cs->x_hi};
+            double vy[2] = {cs->vwap, cs->vwap}, vx[2] = {xL, xR};
             ImPlotSpec s; s.LineColor = {FoxmlColors::wheat.x, FoxmlColors::wheat.y,
                                           FoxmlColors::wheat.z, 0.5f}; s.LineWeight = 1.0f;
             ImPlot::PlotLine("VWAP", vx, vy, 2, s);
@@ -443,7 +464,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         // EMA (fast gate baseline — what the gate uses now)
         if (snap->ema_price > 0) {
             double ey[2] = {snap->ema_price, snap->ema_price};
-            double ex[2] = {cs->x_lo, cs->x_hi};
+            double ex[2] = {xL, xR};
             ImPlotSpec s;
             s.LineColor = FoxmlColors::cyan;
             s.LineWeight = 1.0f;
@@ -473,8 +494,8 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
 
         // === live price tag on Y-axis ===
         if (settings->show_price_tag) {
-            ImVec2 price_px = ImPlot::PlotToPixels(cs->x_hi, cs->last_price);
-            ImVec2 plot_r = ImPlot::PlotToPixels(cs->x_hi, 0);
+            ImVec2 price_px = ImPlot::PlotToPixels(xR, cs->last_price);
+            ImVec2 plot_r = ImPlot::PlotToPixels(xR, 0);
             char ptag[16];
             snprintf(ptag, 16, "$%.0f", cs->last_price);
             ImVec2 tsz = ImGui::CalcTextSize(ptag);
@@ -506,15 +527,15 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 FoxmlColors::comment.x, FoxmlColors::comment.y,
                 FoxmlColors::comment.z, 0.25f));
             // session high
-            ImVec2 sh_l = ImPlot::PlotToPixels(cs->x_lo, snap->session_high);
-            ImVec2 sh_r = ImPlot::PlotToPixels(cs->x_hi, snap->session_high);
+            ImVec2 sh_l = ImPlot::PlotToPixels(xL, snap->session_high);
+            ImVec2 sh_r = ImPlot::PlotToPixels(xR, snap->session_high);
             for (float x = sh_l.x; x < sh_r.x; x += 8.0f) {
                 float x2 = x + 3.0f; if (x2 > sh_r.x) x2 = sh_r.x;
                 dl->AddLine(ImVec2(x, sh_l.y), ImVec2(x2, sh_l.y), sess_col, 1.0f);
             }
             // session low
-            ImVec2 sl_l = ImPlot::PlotToPixels(cs->x_lo, snap->session_low);
-            ImVec2 sl_r = ImPlot::PlotToPixels(cs->x_hi, snap->session_low);
+            ImVec2 sl_l = ImPlot::PlotToPixels(xL, snap->session_low);
+            ImVec2 sl_r = ImPlot::PlotToPixels(xR, snap->session_low);
             for (float x = sl_l.x; x < sl_r.x; x += 8.0f) {
                 float x2 = x + 3.0f; if (x2 > sl_r.x) x2 = sl_r.x;
                 dl->AddLine(ImVec2(x, sl_l.y), ImVec2(x2, sl_l.y), sess_col, 1.0f);
@@ -586,7 +607,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             {0.55f, 0.75f, 0.95f, 1.0f},  // sky
             {0.90f, 0.80f, 0.50f, 1.0f},  // butter
         };
-        ImVec2 plot_right = ImPlot::PlotToPixels(cs->x_hi, 0);
+        ImVec2 plot_right = ImPlot::PlotToPixels(xR, 0);
         float right_edge = plot_right.x - 4;
 
         // newest position index for fade effect
@@ -631,7 +652,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
 
             // entry line — full width, solid
             double y[2] = {ps->entry, ps->entry};
-            double lx[2] = {cs->x_lo, cs->x_hi};
+            double lx[2] = {xL, xR};
             ImPlotSpec s;
             s.LineColor = {FoxmlColors::wheat.x, FoxmlColors::wheat.y,
                            FoxmlColors::wheat.z, age_alpha};
@@ -664,8 +685,8 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 if (price <= 0) continue;
                 bool is_tp = (tp_pass == 0);
 
-                ImVec2 left  = ImPlot::PlotToPixels(cs->x_lo, price);
-                ImVec2 right = ImPlot::PlotToPixels(cs->x_hi, price);
+                ImVec2 left  = ImPlot::PlotToPixels(xL, price);
+                ImVec2 right = ImPlot::PlotToPixels(xR, price);
                 // blend accent with green/red so lines stay distinguishable
                 ImVec4 base = is_tp
                     ? ImVec4(accent.x * 0.5f + 0.2f, accent.y * 0.3f + 0.5f,
@@ -731,8 +752,8 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                     // highlight the hovered line
                     double hp = best_tp ? snap->positions[best_slot].tp
                                         : snap->positions[best_slot].sl;
-                    ImVec2 hl = ImPlot::PlotToPixels(cs->x_lo, hp);
-                    ImVec2 hr = ImPlot::PlotToPixels(cs->x_hi, hp);
+                    ImVec2 hl = ImPlot::PlotToPixels(xL, hp);
+                    ImVec2 hr = ImPlot::PlotToPixels(xR, hp);
                     dl->AddLine(hl, hr, IM_COL32(255,255,255,80), 2.0f);
                     ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
 
@@ -747,8 +768,8 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
 
                 // draw drag preview line
-                ImVec2 dl_l = ImPlot::PlotToPixels(cs->x_lo, drag.price);
-                ImVec2 dl_r = ImPlot::PlotToPixels(cs->x_hi, drag.price);
+                ImVec2 dl_l = ImPlot::PlotToPixels(xL, drag.price);
+                ImVec2 dl_r = ImPlot::PlotToPixels(xR, drag.price);
                 ImU32 dcol = drag.is_tp ? IM_COL32(100, 220, 100, 180)
                                         : IM_COL32(220, 100, 100, 180);
                 dl->AddLine(dl_l, dl_r, dcol, 2.0f);
@@ -857,8 +878,8 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         // In sharded mode this is core 0's gate, redundant with the per-core
         // lines drawn below. Hide it to avoid double-drawing + reduce clutter.
         if (snap->buy_p > 0.01 && !snap->sharded_mode_active) {
-            ImVec2 left  = ImPlot::PlotToPixels(cs->x_lo, snap->buy_p);
-            ImVec2 right = ImPlot::PlotToPixels(cs->x_hi, snap->buy_p);
+            ImVec2 left  = ImPlot::PlotToPixels(xL, snap->buy_p);
+            ImVec2 right = ImPlot::PlotToPixels(xR, snap->buy_p);
             ImU32 gate_col = ImGui::GetColorU32(ImVec4(
                 FoxmlColors::cyan.x, FoxmlColors::cyan.y, FoxmlColors::cyan.z, 0.7f));
             // dot-dash pattern (3px dot, 4px gap, 10px dash, 4px gap)
@@ -878,9 +899,9 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 drawing = !drawing;
                 pi_pat++;
             }
-            ImPlot::Annotation(cs->x_lo + 1, snap->buy_p,
+            ImPlot::Annotation(xL, snap->buy_p,
                                {FoxmlColors::cyan.x, FoxmlColors::cyan.y, FoxmlColors::cyan.z, 1.0f},
-                               ImVec2(5, 0), true, "GATE $%.0f", snap->buy_p);
+                               ImVec2(35, 0), true, "GATE $%.0f", snap->buy_p);
         }
 
         // hover crosshair + tooltip
@@ -888,8 +909,8 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             ImPlotPoint mouse = ImPlot::GetPlotMousePos();
 
             // horizontal crosshair line
-            ImVec2 ch_l = ImPlot::PlotToPixels(cs->x_lo, mouse.y);
-            ImVec2 ch_r = ImPlot::PlotToPixels(cs->x_hi, mouse.y);
+            ImVec2 ch_l = ImPlot::PlotToPixels(xL, mouse.y);
+            ImVec2 ch_r = ImPlot::PlotToPixels(xR, mouse.y);
             ImU32 ch_col = ImGui::GetColorU32(ImVec4(
                 FoxmlColors::comment.x, FoxmlColors::comment.y,
                 FoxmlColors::comment.z, 0.35f));
@@ -960,6 +981,16 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 {0.65f, 0.45f, 0.80f, 0.6f},  // ML — purple
                 {0.35f, 0.75f, 0.80f, 0.6f},  // EMA — cyan
             };
+            // v4.7.16: gate line endpoints follow the live plot bounds
+            // (xL/xR captured above) so lines span the full visible chart
+            // even after user zoom/pan.
+            double gate_lx[2] = {xL, xR};
+            // Track drawn label Y pixels so cores with similar gate prices
+            // stagger their labels vertically instead of stacking on top
+            // of each other. Threshold: 14px. Subsequent labels offset
+            // upward by 16px increments to keep them readable.
+            float drawn_label_py[16] = {0};
+            int drawn_label_n = 0;
             for (int ci = 0; ci < snap->per_core_count && ci < 16; ++ci) {
                 // v4.7.13: per-core filter — when filter is set, only
                 // show the selected core's gate. ci here is the core_id
@@ -975,14 +1006,23 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 ImVec4 col = (sid < NUM_STRATEGIES) ? strat_colors[sid]
                                         : ImVec4(0.5f, 0.5f, 0.5f, 0.4f);
                 const char *sname = (sid < NUM_STRATEGIES) ? STRATEGY_SHORT_NAMES[sid] : "?";
-                double lx[2] = {cs->x_lo, cs->x_hi};
                 double ly[2] = {bg_price, bg_price};
                 char lbl[32]; snprintf(lbl, 32, "##bg%d", ci);
                 ImPlotSpec bgs; bgs.LineColor = col; bgs.LineWeight = 1.0f;
-                ImPlot::PlotLine(lbl, lx, ly, 2, bgs);
-                // label on the left edge to avoid overlapping TP/SL labels
-                ImPlot::Annotation(cs->x_lo + 2, bg_price, col,
-                                    ImVec2(-5, -5), false, "C%d %s", ci, sname);
+                ImPlot::PlotLine(lbl, gate_lx, ly, 2, bgs);
+                // label on the left edge to avoid overlapping TP/SL labels.
+                // Stagger Y offset when gate price is within 14px of an
+                // already-drawn label so multiple cores' labels don't
+                // collide. Each collision pushes 16px further up.
+                float label_py = ImPlot::PlotToPixels(xL, bg_price).y;
+                int collisions = 0;
+                for (int j = 0; j < drawn_label_n; j++) {
+                    if (fabsf(drawn_label_py[j] - label_py) < 14.0f) collisions++;
+                }
+                drawn_label_py[drawn_label_n++] = label_py;
+                ImPlot::Annotation(xL, bg_price, col,
+                                    ImVec2(40, -5 - collisions * 16), false,
+                                    "C%d %s", ci, sname);
             }
         }
 
@@ -1026,6 +1066,12 @@ static inline void GUI_VolumeChart(const ChartState *cs, const TUISnapshot *snap
 
         ImDrawList *dl = ImPlot::GetPlotDrawList();
         ImPlot::PushPlotClipRect();
+        // v4.7.16: live plot bounds for the volume chart's full-width
+        // horizontals (gate line, crosshair). See price-chart counterpart
+        // for rationale — cs->x_lo/cs->x_hi go stale on user pan/zoom.
+        ImPlotRect _vplim = ImPlot::GetPlotLimits();
+        const double vxL = _vplim.X.Min;
+        const double vxR = _vplim.X.Max;
         float chart_w = ImPlot::GetPlotSize().x;
         float bw = (chart_w / vis) * 0.35f;
         if (bw < 1.5f) bw = 1.5f;
@@ -1046,8 +1092,8 @@ static inline void GUI_VolumeChart(const ChartState *cs, const TUISnapshot *snap
         }
         // volume gate threshold — cyan dot-dash, matching price chart gate style
         if (snap->buy_v > 0.0001) {
-            ImVec2 left  = ImPlot::PlotToPixels(cs->x_lo, snap->buy_v);
-            ImVec2 right = ImPlot::PlotToPixels(cs->x_hi, snap->buy_v);
+            ImVec2 left  = ImPlot::PlotToPixels(vxL, snap->buy_v);
+            ImVec2 right = ImPlot::PlotToPixels(vxR, snap->buy_v);
             ImU32 gate_col = ImGui::GetColorU32(ImVec4(
                 FoxmlColors::cyan.x, FoxmlColors::cyan.y, FoxmlColors::cyan.z, 0.7f));
             float pattern[] = {3, 4, 10, 4};
@@ -1065,9 +1111,9 @@ static inline void GUI_VolumeChart(const ChartState *cs, const TUISnapshot *snap
                 drawing = !drawing;
                 pi_pat++;
             }
-            ImPlot::Annotation(cs->x_lo + 1, snap->buy_v,
+            ImPlot::Annotation(vxL, snap->buy_v,
                                {FoxmlColors::cyan.x, FoxmlColors::cyan.y, FoxmlColors::cyan.z, 1.0f},
-                               ImVec2(5, 0), true, "VOL GATE");
+                               ImVec2(35, 0), true, "VOL GATE");
         }
 
         ImPlot::PopPlotClipRect();
@@ -1075,8 +1121,8 @@ static inline void GUI_VolumeChart(const ChartState *cs, const TUISnapshot *snap
         // hover crosshair + volume readout
         if (ImPlot::IsPlotHovered()) {
             ImPlotPoint mouse = ImPlot::GetPlotMousePos();
-            ImVec2 ch_l = ImPlot::PlotToPixels(cs->x_lo, mouse.y);
-            ImVec2 ch_r = ImPlot::PlotToPixels(cs->x_hi, mouse.y);
+            ImVec2 ch_l = ImPlot::PlotToPixels(vxL, mouse.y);
+            ImVec2 ch_r = ImPlot::PlotToPixels(vxR, mouse.y);
             ImU32 ch_col = ImGui::GetColorU32(ImVec4(
                 FoxmlColors::comment.x, FoxmlColors::comment.y,
                 FoxmlColors::comment.z, 0.35f));

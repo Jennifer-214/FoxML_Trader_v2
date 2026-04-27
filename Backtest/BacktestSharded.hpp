@@ -134,7 +134,16 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // Phase 03 chunk 1B: construct OMS first, then wire EventLoopState to it.
     ExchangeAdapter<BACKTEST_FP> empty_adapter{};
     OrderManagerState<BACKTEST_FP> oms;
-    OrderManager_Init(&oms, empty_adapter, 0, cfg.starting_balance, cfg.fee_rate);
+    // v4.7.15: train-serve parity. Live engine defaults to event_log_mode=1
+    // since v4.7.1 (HandleFill + FillRecord + DrainPostFill). Backtest was
+    // stuck on mode 0 (legacy OnEvent path). Under partials this hit the
+    // v4.7.0 slot-collision bug + per-core accounting diverged from live.
+    // Pass event_log_mode=1 here so backtest uses the same fill+drain
+    // pipeline as live. ShardedBacktestDriver::on_tick adds a matching
+    // EventLoop_DrainPostFill call after OrderManager_Tick to consume
+    // FillRecords on the same tick they're produced (no separate drainer
+    // thread in backtest; everything runs synchronously).
+    OrderManager_Init(&oms, empty_adapter, 0, cfg.starting_balance, cfg.fee_rate, 1);
     // Phase 8: backtest is all-taker. Set OMS rates explicitly so HandleFill's
     // is_maker branch picks the right rate. Both = fee_rate_taker → backtest
     // numerics unchanged from pre-Phase-8 (cfg legacy mirroring already set
@@ -142,6 +151,9 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // real per-fill maker/taker tagging from Binance executionReport).
     oms.fee_rate_maker = cfg.fee_rate_taker; // backtest = all-taker semantics
     oms.fee_rate_taker = cfg.fee_rate_taker;
+    // v4.7.15: mirror partials geometry to OMS for the post-fill drainer's
+    // slot→core_id mapping. Same as EngineSharded_Run sets it from cfg.
+    oms.partial_exit_enabled = cfg.partial_exit_enabled ? 1 : 0;
     EventLoopState<BACKTEST_FP> state;
     EventLoopState_Init(&state, &oms);
 

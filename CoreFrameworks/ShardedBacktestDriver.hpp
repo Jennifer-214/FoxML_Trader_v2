@@ -205,6 +205,21 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
     //     handler runs after the drain enqueued synthetic results.
     if (drv->oms) OrderManager_Tick(drv->oms);
 
+    // 2c. v4.7.15 — train-serve parity. When OMS runs in event_log_mode=1
+    //     (live default since v4.7.1), per-fill bookkeeping
+    //     (core_open_notional, core_fees, ConfidenceScorer feedback,
+    //     wins/losses, SL cooldown) is populated by OrderManager_Tick
+    //     into FillRecords + masks but NOT applied to the CoreContexts
+    //     until DrainPostFill consumes them. Live engine calls this on
+    //     the drainer thread after each OrderManager_Tick (EngineSharded
+    //     line 1594). Mirror the same call here so backtest CoreContexts
+    //     match live for identical inputs. Safe to call when masks are
+    //     zero (no fills this tick) — the function early-exits per slot.
+    if (drv->oms && drv->oms->event_log_mode != 0 && drv->config) {
+        EventLoop_DrainPostFill(drv->state, drv->oms,
+                                 drv->config->sl_cooldown_cycles);
+    }
+
     // 3. Slow path on cadence. tick_index is 0-based so we fire every
     //    slow_path_interval ticks starting from interval-1.
     //
@@ -333,6 +348,13 @@ inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
     // didn't have time to process.
     EventLoop_DrainEvents(drv->state);
     if (drv->oms) OrderManager_Tick(drv->oms);
+    // v4.7.15: drain post-fill in mode 1 to match live's final-flush loop
+    // (EngineSharded line 1597-1604). Without this, the last tick's
+    // FillRecords sit in the OMS buffers and never apply to CoreContexts.
+    if (drv->oms && drv->oms->event_log_mode != 0 && drv->config) {
+        EventLoop_DrainPostFill(drv->state, drv->oms,
+                                 drv->config->sl_cooldown_cycles);
+    }
 }
 
 }  // namespace tt

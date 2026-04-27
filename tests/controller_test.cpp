@@ -6168,6 +6168,209 @@ e3_skip_load:;
         delete r;
     }
 
+    //======================================================================================================
+    // [v4.7.16 — backtest/live parity: ShardedBacktest_RunTick wires DrainPostFill]
+    //======================================================================================================
+    // Regression guard for the v4.7.15 fix. Backtest OMS runs in event_log_mode=1
+    // (matches live default since v4.7.1). Mode 1 routes per-fill bookkeeping
+    // (core_open_notional, core_fees, ConfidenceScorer feedback, wins/losses,
+    // SL cooldown) through OMS FillRecords + DrainPostFill — NOT through the
+    // legacy OnEvent path. If the backtest driver fails to call DrainPostFill
+    // after OrderManager_Tick, those CoreContext fields stay at zero forever,
+    // ML training drifts from live serving, ConfidenceScorer per-core IC
+    // gets stuck at noise floor, SL cooldown never decrements.
+    //
+    // Without the v4.7.15 fix in ShardedBacktestDriver.hpp, this test fails
+    // (open_notional stays at 0 even after the fill drains through the driver).
+    //======================================================================================================
+    printf("\n--- v4.7.16 — backtest/live parity (driver wires DrainPostFill) ---\n");
+    {
+        struct R {
+            tt::OrderManagerState<64>                                        oms;
+            tt::EventLoopState<64>                                           state;
+            tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE>    tick_ring;
+            tt::ExecutionCore<64>                                            core;
+            RollingStats<64, 128>                                            rolling;
+            RollingStats<64, 512>                                            rolling_long;
+            ControllerConfig<64>                                             cfg;
+            tt::ShardedBacktestDriver<64, 128, 512>                          drv;
+        };
+        R* r = new R();
+        r->cfg = ControllerConfig_Default<64>();
+        r->cfg.sl_cooldown_cycles = 0;
+        tt::EventLoopState_InitLegacy(&r->state, &r->oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+        r->oms.event_log_mode       = 1;       // mirror live default
+        r->oms.partial_exit_enabled = 0;
+        r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
+        r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
+        tt::SPSCRing_Init(&r->tick_ring);
+        tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
+        tt::EventLoopState_RegisterCore(&r->state, &r->core,
+            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+            FPN_FromDouble<64>(0.01));
+        tt::EventLoopState_SetCoreStrategy(&r->state, 0,
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(1500.0));
+        r->rolling      = RollingStats_Init<64, 128>();
+        r->rolling_long = RollingStats_Init<64, 512>();
+        tt::ShardedBacktestDriver_Init(&r->drv, &r->state, &r->rolling,
+                                         &r->cfg, /*slow_path_interval=*/8,
+                                         &r->rolling_long, &r->oms);
+
+        // Synthesize an entry fill via OMS_HandleFill. Mode 1 captures it
+        // into oms->last_fill[slot] + last_opened_mask but does NOT update
+        // CoreContext until DrainPostFill consumes the masks.
+        tt::ExchangeAdapter<64> empty{};
+        uint64_t oid = tt::OrderManager_Submit(&r->oms,
+            0, tt::ORDER_MARKET_BUY, FPN_FromDouble<64>(0.02),
+            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+        (void)oid;
+        for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
+            if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
+            tt::Order<64>* o = &r->oms.orders[i];
+            if (o->state != tt::ORDER_FILLED) {
+                tt::OrderManager_HandleFill(&r->oms, o,
+                    FPN_FromDouble<64>(60000.0), FPN_FromDouble<64>(0.02));
+                o->state = tt::ORDER_FILLED;
+                r->oms.order_bitmap &= ~(uint16_t)(1u << i);
+                break;
+            }
+        }
+        // Pre-condition: mask captured, CoreContext untouched.
+        check("v4.7.16 pre-RunTick: open_mask has slot 0",
+              (r->oms.last_opened_mask & 0x1) != 0);
+        check("v4.7.16 pre-RunTick: core 0 open_notional still zero",
+              FPN_IsZero(r->state.cores[0].core_open_notional));
+
+        // Run a no-op tick through the driver. Internally:
+        //   1. Fan out tick to cores (no event since gate state unchanged)
+        //   2. EventLoop_DrainEvents (nothing to drain)
+        //   3. OrderManager_Tick (no commands queued)
+        //   4. v4.7.15: EventLoop_DrainPostFill consumes our pre-staged mask
+        // Step 4 is what we're regression-testing.
+        tt::Tick<64> dummy = { FPN_FromDouble<64>(60000.0),
+                                FPN_FromDouble<64>(0.001),
+                                1000000ULL, 0, 0 };
+        tt::ShardedBacktest_RunTick(&r->drv, dummy, 0);
+
+        // If DrainPostFill ran: CoreContext updated, mask cleared.
+        check("v4.7.16 post-RunTick: core 0 open_notional == $1200 (drainer ran)",
+              fabs(FPN_ToDouble(r->state.cores[0].core_open_notional) - 1200.0) < 0.5);
+        check("v4.7.16 post-RunTick: last_opened_mask cleared",
+              r->oms.last_opened_mask == 0);
+        // Fee 0.001 × $1200 = $1.20
+        check("v4.7.16 post-RunTick: core 0 fees accumulated",
+              FPN_ToDouble(r->state.cores[0].core_fees) > 1.0 &&
+              FPN_ToDouble(r->state.cores[0].core_fees) < 1.5);
+
+        // Synthesize an exit at +1% — RunTick should now drain the close mask
+        // too, incrementing wins. Confirms exit-path parity.
+        uint64_t exit_oid = tt::OrderManager_Submit(&r->oms,
+            0, tt::ORDER_MARKET_SELL, FPN_FromDouble<64>(0.02),
+            FPN_Zero<64>(), FPN_Zero<64>(),
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60600.0), 0);
+        (void)exit_oid;
+        for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
+            if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
+            tt::Order<64>* o = &r->oms.orders[i];
+            if (o->state != tt::ORDER_FILLED) {
+                tt::OrderManager_HandleFill(&r->oms, o,
+                    FPN_FromDouble<64>(60600.0), FPN_FromDouble<64>(0.02));
+                o->state = tt::ORDER_FILLED;
+                r->oms.order_bitmap &= ~(uint16_t)(1u << i);
+                break;
+            }
+        }
+        tt::ShardedBacktest_RunTick(&r->drv, dummy, 1);
+        check("v4.7.16 post-exit: core 0 wins == 1 (drainer ran on exit)",
+              r->state.cores[0].core_wins == 1);
+        check("v4.7.16 post-exit: core 0 losses == 0",
+              r->state.cores[0].core_losses == 0);
+        check("v4.7.16 post-exit: core 0 core_realized > 0",
+              FPN_ToDouble(r->state.cores[0].core_realized) > 0.0);
+        check("v4.7.16 post-exit: open_notional decremented",
+              FPN_ToDouble(r->state.cores[0].core_open_notional) < 0.5);
+
+        delete r;
+    }
+
+    //======================================================================================================
+    // [v4.7.16 — final-flush parity: ShardedBacktest_Run drains last-tick fills]
+    //======================================================================================================
+    // Mode 1 + the convenience wrapper. EngineSharded's drainer thread does a
+    // final-flush loop after producer_done is set (lines 1597-1604) so any
+    // last-tick fills get drained before shutdown. ShardedBacktest_Run mirrors
+    // this with a final OrderManager_Tick + DrainPostFill after the loop.
+    // Without it, fills queued by the LAST tick stay in OMS limbo forever.
+    //======================================================================================================
+    {
+        struct R {
+            tt::OrderManagerState<64>                                        oms;
+            tt::EventLoopState<64>                                           state;
+            tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE>    tick_ring;
+            tt::ExecutionCore<64>                                            core;
+            RollingStats<64, 128>                                            rolling;
+            RollingStats<64, 512>                                            rolling_long;
+            ControllerConfig<64>                                             cfg;
+            tt::ShardedBacktestDriver<64, 128, 512>                          drv;
+        };
+        R* r = new R();
+        r->cfg = ControllerConfig_Default<64>();
+        r->cfg.sl_cooldown_cycles = 0;
+        tt::EventLoopState_InitLegacy(&r->state, &r->oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+        r->oms.event_log_mode       = 1;
+        r->oms.partial_exit_enabled = 0;
+        r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
+        r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
+        tt::SPSCRing_Init(&r->tick_ring);
+        tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
+        tt::EventLoopState_RegisterCore(&r->state, &r->core,
+            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+            FPN_FromDouble<64>(0.01));
+        tt::EventLoopState_SetCoreStrategy(&r->state, 0,
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(1500.0));
+        r->rolling      = RollingStats_Init<64, 128>();
+        r->rolling_long = RollingStats_Init<64, 512>();
+        tt::ShardedBacktestDriver_Init(&r->drv, &r->state, &r->rolling,
+                                         &r->cfg, /*slow_path_interval=*/8,
+                                         &r->rolling_long, &r->oms);
+
+        // Pre-stage a fill BEFORE entering ShardedBacktest_Run. The wrapper
+        // will fan ticks to cores then do the final flush. We assert the
+        // mask gets consumed even though no tick fired during the run.
+        uint64_t oid = tt::OrderManager_Submit(&r->oms,
+            0, tt::ORDER_MARKET_BUY, FPN_FromDouble<64>(0.02),
+            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+        (void)oid;
+        for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
+            if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
+            tt::Order<64>* o = &r->oms.orders[i];
+            if (o->state != tt::ORDER_FILLED) {
+                tt::OrderManager_HandleFill(&r->oms, o,
+                    FPN_FromDouble<64>(60000.0), FPN_FromDouble<64>(0.02));
+                o->state = tt::ORDER_FILLED;
+                r->oms.order_bitmap &= ~(uint16_t)(1u << i);
+                break;
+            }
+        }
+
+        // Empty tick stream — only the final-flush block runs.
+        tt::Tick<64> ticks[1] = { { FPN_FromDouble<64>(60000.0),
+                                     FPN_FromDouble<64>(0.001),
+                                     1000000ULL, 0, 0 } };
+        tt::ShardedBacktest_Run(&r->drv, ticks, 0);
+
+        check("v4.7.16 final-flush: open_notional drained ($1200)",
+              fabs(FPN_ToDouble(r->state.cores[0].core_open_notional) - 1200.0) < 0.5);
+        check("v4.7.16 final-flush: last_opened_mask cleared",
+              r->oms.last_opened_mask == 0);
+
+        delete r;
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
