@@ -29,6 +29,12 @@ struct ChartSettings {
     // so subsequent frames use ImPlotCond_Once and the user can scroll-
     // wheel zoom without the auto-fit snapping back.
     bool y_reset_requested = true;
+    // v4.7.10: core filter for entry/TP/SL markers. -1 = all cores (default,
+    // unchanged behavior). 0..N-1 = show only that core's positions on the
+    // chart. Affects entry markers, TP/SL dashed lines + tags, and
+    // Y-axis auto-expansion. Candles + indicators (VWAP/SMA/sessions/H/L)
+    // are global to the symbol and always rendered regardless.
+    int core_filter = -1;
 };
 
 //==========================================================================
@@ -190,6 +196,39 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                           "Use scroll wheel inside the chart to zoom freely.");
     }
 
+    // v4.7.10: per-core filter dropdown. When a specific core is picked,
+    // only that core's entry markers + TP/SL lines render — useful for
+    // isolating one core's behavior when 4 strategies overlap.
+    ImGui::SameLine(0, 15);
+    ImGui::TextColored(FoxmlColors::comment, "Core");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(70);
+    {
+        static const char *core_labels[] = {"All", "0", "1", "2", "3"};
+        int cur = (settings->core_filter < 0 || settings->core_filter > 3)
+                  ? 0 : settings->core_filter + 1;
+        if (ImGui::Combo("##core_filter", &cur, core_labels, 5)) {
+            settings->core_filter = (cur == 0) ? -1 : (cur - 1);
+        }
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Show entry markers + TP/SL lines for one core only.\n"
+                          "Candles + global indicators always render.");
+    }
+
+    // v4.7.10 helper: returns true if this slot should be skipped given the
+    // core filter. -1 (= all) returns false unconditionally. Otherwise,
+    // map slot → core_id (slot/2 under partials, slot otherwise) and
+    // skip if that core_id != filter. Used in every position-iteration
+    // loop below.
+    int filter_core = settings->core_filter;
+    int filter_partial = snap->partial_exit_enabled ? 1 : 0;
+    auto slot_filtered_out = [filter_core, filter_partial](int slot_idx) -> bool {
+        if (filter_core < 0) return false;
+        int core = filter_partial ? (slot_idx >> 1) : slot_idx;
+        return core != filter_core;
+    };
+
     ImPlot::PushStyleColor(ImPlotCol_PlotBg, FoxmlColors::bg_dark);
     // subtle Y grid lines for price readability
     ImPlot::PushStyleColor(ImPlotCol_AxisGrid, ImVec4(1, 1, 1, 0.06f));
@@ -254,6 +293,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         for (int pi = 0; pi < 16; pi++) {
             const TUIPositionSnap *ps = &snap->positions[pi];
             if (ps->idx < 0) continue;
+            if (slot_filtered_out(ps->idx)) continue;
             if (ps->tp > 0 && ps->tp > y_max && ps->tp <= expand_hi) y_max = ps->tp;
             if (ps->sl > 0 && ps->sl < y_min && ps->sl >= expand_lo) y_min = ps->sl;
         }
@@ -339,6 +379,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         for (int pi = 0; pi < 16; pi++) {
             const TUIPositionSnap *ps = &snap->positions[pi];
             if (ps->idx < 0 || ps->entry_time == 0) continue;
+            if (slot_filtered_out(ps->idx)) continue;
             double et = (double)ps->entry_time;
             // find candle containing this entry time
             int best_i = -1;
@@ -529,6 +570,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         for (int pi = 0; pi < 16; pi++) {
             const TUIPositionSnap *ps = &snap->positions[pi];
             if (ps->idx < 0 || ps->entry <= 0) continue;
+            if (slot_filtered_out(ps->idx)) continue;
 
             bool already_drawn = false;
             for (int j = 0; j < drawn_entry_count; j++) {
@@ -583,6 +625,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         for (int pi = 0; pi < 16; pi++) {
             const TUIPositionSnap *ps = &snap->positions[pi];
             if (ps->idx < 0) continue;
+            if (slot_filtered_out(ps->idx)) continue;
             int di = display_idx[pi];
             float age_alpha = (display_count <= 1) ? 1.0f :
                 0.4f + 0.6f * ((float)di / newest_di);
@@ -645,6 +688,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                 for (int pi = 0; pi < 16; pi++) {
                     const TUIPositionSnap *ps = &snap->positions[pi];
                     if (ps->idx < 0) continue;
+                    if (slot_filtered_out(ps->idx)) continue;
                     for (int t = 0; t < 2; t++) {
                         double p = t == 0 ? ps->tp : ps->sl;
                         if (p <= 0) continue;
