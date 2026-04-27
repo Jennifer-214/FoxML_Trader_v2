@@ -878,32 +878,125 @@ When adding a new regime transition case in `Regime_AdjustPositions`:
 
 **Future hardening (deferred):** turn `num_classes` into `enum class LabelKind { Binary, Regression, Multiclass }` so the compiler exhaustive-checks switches. Larger surgery — touches every existing site again. Reasonable v2 once the current convention has settled.
 
-## Current State (2026-04-25 overnight — v4.0.3)
+### Snapshot Re-Activation Invariant (load-bearing — 2026-04-27)
 
-**Branch:** `experiment/per-core-sharding` (main). v4.0.3 released —
-twelve features ported from legacy `PortfolioController` to sharded
-engine, bringing sharded to ~95% functional parity for live trading.
-v4.0.2 fixed TickRecorder timestamp bug + warmup gating + shutdown
-diagnostics. v4.0.1 fixed train-serve parity + shutdown promptness +
-several v4.0 default-mode regressions.
+**Rule:** when `ShardedSnapshot_Load` restores `portfolio.active_bitmap` + `portfolio.positions[slot]`, it MUST also re-activate the matching `ExecutionCore<F>` hot-path mirrors (`active`, `entry_price`, `live_tp`, `live_sl`). Otherwise restored positions are "zombie" — open in the portfolio but cannot exit because hot path's `can_exit = active & sg_fires` evaluates to 0 (active stays at 0 init default).
+
+**Why this is load-bearing.** 2026-04-27 — user observed in live `engine_gui` that positions stayed open after price dropped below their stop-loss. Chart showed SL trigger markers but Positions panel kept showing the open positions. Root cause: snapshot persisted Position fields (entry, tp, sl, qty) but NOT the ExecutionCore mirrors that the hot path actually reads. After restart, hot-path SG never fired for restored positions.
+
+**Fix lives at `CoreFrameworks/ShardedSnapshotPersist.hpp`** — after the existing portfolio + core-context restoration, walk the bitmap:
+
+```cpp
+uint16_t bm = state->oms->portfolio.active_bitmap;
+while (bm) {
+    int slot = __builtin_ctz(bm);
+    bm &= (uint16_t)(bm - 1);
+    if (slot < 0 || slot >= (int)state->registered_count) continue;
+    ExecutionCore<F>* core_ptr = state->cores[slot].core;
+    if (!core_ptr) continue;
+    const Position<F>& pos = state->oms->portfolio.positions[slot];
+    core_ptr->entry_price = pos.entry_price;
+    core_ptr->live_tp     = pos.take_profit_price;
+    core_ptr->live_sl     = pos.stop_loss_price;
+    core_ptr->active      = 1;
+}
+```
+
+**When adding new ExecutionCore hot-path state (e.g. partial exits' `live_tp_b`/`active_b` from P.2):** the snapshot loader needs to handle them too. Either persist + restore, OR reset to safe defaults (the partial-exits work currently relies on the second leg cleanly closing on the live path before snapshot save; a snapshot-while-paired would need a v9 schema bump).
+
+### Snapshot Tick-Counter Drift (load-bearing — 2026-04-27)
+
+**Rule:** any slow-path code that subtracts a snapshot-persisted tick counter from the current `ticks_produced` MUST guard against `entry_t > now_tick` (uint64 underflow). The persisted counter survives engine restart; the live counter resets to 0. Without the guard, `now_tick - entry_t` underflows to ~2^64 → time-exit thresholds trivially pass → spurious force-close orders fire every cycle.
+
+**Pattern (current home: `EngineSharded.hpp` time-exit block, ~line 1110):**
+
+```cpp
+uint64_t entry_t = state.cores[slot].last_entry_tick;
+if (entry_t == 0) continue;
+if (entry_t > now_tick) {
+    // Snapshot drift: persisted entry_tick is from a previous session's
+    // ticks_produced, which has reset. Reset to current + skip this cycle.
+    fprintf(stderr, "[sharded] core %d: stale entry_tick from snapshot ...\n", slot);
+    state.cores[slot].last_entry_tick = now_tick;
+    continue;
+}
+uint64_t elapsed = now_tick - entry_t;
+```
+
+**Why this is load-bearing.** Same 2026-04-27 session as the re-activation bug. Symptom was `engine.log` spammed with `time-exit (held 18446744073709536760 ticks, gain -X.X%)` — held count is approximately 2^64 minus a small offset (the underflow). Spurious SELL submissions piled up against the genuine SL exit, blocking the slot from clearing.
+
+**Future hardening:** consider persisting `ticks_produced` alongside per-core `last_entry_tick` and computing elapsed against the saved producer baseline; or reset all `last_entry_tick` values to 0 on snapshot load (forcing time-exit to wait for fresh entry). The current guard catches the bug without changing snapshot semantics.
+
+### Partial Exits — Two-Position-per-Core (load-bearing — 2026-04-27)
+
+**Architectural invariant:** when `cfg.partial_exit_enabled=1`, each sharded execution core owns TWO portfolio slots:
+- core `c` → leg A in slot `2c`, leg B in slot `2c+1`
+- max cores = `MAX_PORTFOLIO_POSITIONS / 2` = 8 (validated at boot via `Sharded_ValidatePartialExitCfg`)
+
+When `cfg.partial_exit_enabled=0` (default): core `c` → slot `c` (1:1), slot `2c+1` is unused. `Sharded_LegSlot(core_id, leg, partial_enabled)` returns the correct slot for both modes.
+
+**Slot mapping helper — `CoreFrameworks/ControllerEventLoop.hpp`:**
+```cpp
+Sharded_LegSlot(core_id, PARTIAL_LEG_A, partial_enabled)  // → core_id (off) or 2c (on)
+Sharded_LegSlot(core_id, PARTIAL_LEG_B, partial_enabled)  // → -1 (off) or 2c+1 (on)
+```
+`PARTIAL_LEG_A` / `PARTIAL_LEG_B` constants live in `CoreFrameworks/TradeEvent.hpp` (where the `TradeEvent::leg` field is defined) so `ExecutionCore_Tick` can use them without including the EventLoop header.
+
+**Hot path — `ExecutionCore_Tick`:** branchless dual-leg SG_Evaluate. Both legs' TP/SL comparisons run unconditionally (CPU pipelines them in parallel); `active_a` / `active_b` masks gate which leg's `can_exit` actually fires. When partials disabled, `active_b=0` always → leg B masked out → only leg A behavior visible. Latency cost: ~1-2ns added per tick (4 extra FPN comparisons + 2 mask ops, all pipelined). Hot-path budget remains ≤500ns p99.
+
+**Slow path — strategy dispatcher cap (`Strategies/StrategyParameters.hpp:Strategy_BuildParameters`):** every strategy's `_BuildParameters` writes the leg-A fields (`tp_pct`, `sl_pct`, etc.); the dispatcher applies a uniform post-cap that sets `GATE_FLAG_PAIR_ACTIVE` + `tp_pct_b = tp_pct * cfg.tp2_mult` when `cfg.partial_exit_enabled=1`. When disabled, dispatcher explicitly clears both (in case `out` was a re-used GateParameters instance). Adding a new strategy: do NOT write `tp_pct_b` or `GATE_FLAG_PAIR_ACTIVE` — the dispatcher handles partials uniformly.
+
+**OMS drainer — `EngineSharded.hpp:drain_with_submit`:** maps each `TradeEvent` to a portfolio slot via `Sharded_LegSlot(event.core_id, event.leg, cfg.partial_exit_enabled)`. For entries, splits `intended_qty` by `cfg.partial_exit_pct` (leg A gets `partial_pct`, leg B gets `1 - partial_pct`). For exits, reads qty from the LEG's `portfolio.positions[portfolio_slot].quantity`. The `core_id` parameter to `OrderManager_Submit` is the actual portfolio slot (so `HandleFill` writes the right slot); `event.leg` is propagated to `Order::leg` for trade-log observability.
+
+**Per-core counters / state stamping (`last_entry_tick`, `last_entry_price`, `active_prediction`):** updated only on **leg A** entry events (one trade = one stamp). Leg B is the same trade's second slot; double-stamping would skew spacing checks + ConfidenceScorer feedback.
+
+**`tp2_mult` defensive default:** when 0 or `tp_pct=0`, dispatcher falls back to `tp_pct_b = tp_pct` (leg B duplicates leg A — effectively a no-op since both legs exit at same TP). User cfgs should set `tp2_mult > 1.0` for meaningful partials (default cfg = 2.0).
+
+**What's deferred (separate plan items):**
+- `breakeven_on_partial=1` semantics — slow path should ratchet leg B's SL to entry_price after leg A's TP1 fires. Currently leg B's SL stays at the original shared SL.
+- Snapshot persistence of `live_tp_b` / `active_b` / `entry_price_b` — current snapshot v8 doesn't include these; a snapshot taken with both legs active won't restore leg B correctly. Acceptable today because snapshot save happens periodically + at shutdown when cfg.live_trading=0; the failure mode is "leg B closes at next live tick that hits its TP/SL" which matches single-leg semantics.
+
+**Toggle:** `cfg.partial_exit_enabled = 0` (default) preserves all pre-partial-exit behavior. Validation refuses boot if enabled with too many cores. All commits per-phase revertable: `pre-partial-exits` tag at `abd08d3` for full revert.
+
+## Current State (2026-04-27 — v4.6 + partial exits in progress)
+
+**Branch:** `experiment/per-core-sharding` (main). v4.4.0 shipped Track
+E (sharded backtest unification — legacy backtest body deleted, sharded
+is the only path); v4.5.0 shipped Wave 1 microstructure features (D.1
+book imbalance over time, D.2 flow EWMAs, D.4 large-trade z-score);
+v4.6.0 shipped Wave 2 spread dynamics (D.3 spread bps + zscore).
+Partial exits P.1–P.4 landed; P.5 (docs + version bump to v4.7) pending.
+
+Two snapshot bug fixes shipped 2026-04-27:
+- Time-exit underflow guard (commit `b86b17f`) — ticks_produced resets
+  per session but last_entry_tick persists; entry_t > now_tick was
+  underflowing to ~2^64 → spurious time-exit submissions. Fix at
+  `EngineSharded.hpp` time-exit block.
+- Snapshot ExecutionCore re-activation (commit `777f843`) — restored
+  positions had `active=0` on the core; hot-path SG never fired →
+  zombie positions visible in panel but un-exitable. Fix at
+  `ShardedSnapshotPersist.hpp` post-load loop.
 
 Sharded now has features legacy doesn't: per-core ML model + confidence,
 hot-swap strategies live, AUTO regime mode per core, per-core config,
-40-400ns branchless hot path (vs legacy ~5µs).
+40-400ns branchless hot path (vs legacy ~5µs), 9 microstructure
+features (book imbalance over time, flow EWMAs, large-trade z, spread
+dynamics) only available in sharded, AND partial exits (two-position-
+per-core) once P.4 lands.
 
-Hot-path additions in v4.0.3 cumulative: ~6ns (GATE_FLAG_BUY_ABOVE
-mask select + FPN_Max(sl, ratchet_sl) for trailing). Both branchless,
-FPN-pure, well under 500ns p99 budget.
+Hot-path additions cumulative (post-Track-E + Waves + partials):
+~3-4ns total — GATE_FLAG_BUY_ABOVE (1ns), GATE_FLAG_BUY_BLOCKED (1ns,
+Track E.3), partial-exits dual-leg SG (1-2ns, P.2). All branchless,
+FPN-pure, well under 500ns p99 budget. Live `engine_gui` measurement
+2026-04-27 showed p99 = 460-567ns post-rdtsc-floor.
 
-Deferred: partial exits (architectural — needs slot rework), trailing
-TP (similar mechanism, lower priority), full EmaCross port.
-
-**Tests:** controller_test 351/351 passing, depth_recorder_test 17/17 passing.
+**Tests:** controller_test 640/640 passing.
 
 **Build state:** all four targets clean — `build/engine`, `build_gui/engine_gui`,
-`build_gui/foxml_suite`, `build/controller_test`. `build.sh` auto-symlinks
-`engine.cfg` into each build dir so `./engine_*` connects to live Binance
-out of the box. See `build.sh` helper.
+`build_gui/foxml_suite`, `build/controller_test`, `build/parity_harness`.
+`build.sh` auto-symlinks `engine.cfg` into each build dir so `./engine_*`
+connects to live Binance out of the box. `bin/engine_gui` symlinks to
+`build_gui/engine_gui` for canonical "latest" access. See `build.sh` helper.
 
 **Phase status:** live-readiness work is shipped. Phase 5 zoo + 8a depth
 recorder + 8b notify + 8 maker/taker + 6prep confidence loop + 7prep

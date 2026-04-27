@@ -646,22 +646,56 @@ inline void Strategy_BuildParameters(
     switch (strategy_id) {
         case STRATEGY_SIMPLE_DIP:
             SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
-            return;
+            break;
         case STRATEGY_MEAN_REVERSION:
             MeanReversion_BuildParameters(rolling, config, allocated_balance, out);
-            return;
+            break;
         case STRATEGY_MOMENTUM:
             Momentum_BuildParameters(rolling, config, allocated_balance, out);
-            return;
+            break;
         case STRATEGY_EMA_CROSS:
             EmaCross_BuildParameters(rolling, config, allocated_balance, out);
-            return;
+            break;
         case STRATEGY_ML:
             ML_BuildParameters(rolling, rolling_long, config, allocated_balance, out, model_ctx);
-            return;
+            break;
         default:
             GateParameters_Init(out);
             return;
+    }
+
+    // Partial exits P.4 (2026-04-27): uniform post-dispatch cap. When
+    // cfg.partial_exit_enabled=1, set GATE_FLAG_PAIR_ACTIVE on the param
+    // pack so the hot path (ExecutionCore_Tick, P.2) opens both legs on
+    // entry. Compute leg-B's TP percentage from cfg.tp2_mult — leg B's
+    // TP is farther than leg A's by this multiplier (default 2.0 = TP2 is
+    // 2× the TP1 distance). Leg B's SL is shared with leg A (set by
+    // ExecutionCore_Tick on entry as live_sl_b = live_sl).
+    //
+    // Why here instead of inside each _BuildParameters: every strategy
+    // has identical partial-exit semantics — same flag, same tp_pct_b
+    // formula. Centralizing keeps the per-strategy code untouched and
+    // makes future tweaks (e.g. asymmetric leg sizing) one-place changes.
+    //
+    // No-op when partial_exit_enabled=0: tp_pct_b stays at GateParameters_-
+    // Init's zero, and GATE_FLAG_PAIR_ACTIVE is never set. Pre-P.4
+    // behavior preserved exactly.
+    if (config->partial_exit_enabled) {
+        out->flags |= GATE_FLAG_PAIR_ACTIVE;
+        // tp_pct_b = tp_pct * tp2_mult. Falls back to tp_pct (TP1 distance,
+        // i.e. leg B duplicates leg A) when tp2_mult is zero (defensive —
+        // strategy ought to have set tp_pct, but if not, leg B is a no-op).
+        if (!FPN_IsZero(config->tp2_mult) && !FPN_IsZero(out->tp_pct)) {
+            out->tp_pct_b = FPN_Mul(out->tp_pct, config->tp2_mult);
+        } else {
+            out->tp_pct_b = out->tp_pct;
+        }
+    } else {
+        // Explicit clear when disabled — guarantees pre-P.4 callers
+        // (or a re-used GateParameters instance) see tp_pct_b == 0 +
+        // GATE_FLAG_PAIR_ACTIVE clear, regardless of prior state.
+        out->flags &= ~GATE_FLAG_PAIR_ACTIVE;
+        out->tp_pct_b = FPN_Zero<F>();
     }
 }
 

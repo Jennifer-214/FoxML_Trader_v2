@@ -5870,6 +5870,71 @@ e3_skip_load:;
         }
     }
 
+    //==================================================================================================
+    // Partial Exits — P.4 (Strategy_BuildParameters dual-TP wiring)
+    //==================================================================================================
+    // When cfg.partial_exit_enabled=1, Strategy_BuildParameters' uniform
+    // post-dispatch cap sets GATE_FLAG_PAIR_ACTIVE on the params + computes
+    // tp_pct_b = tp_pct × cfg.tp2_mult. When disabled, tp_pct_b stays zero
+    // and GATE_FLAG_PAIR_ACTIVE never sets — pre-P.4 behavior preserved.
+    //==================================================================================================
+    printf("\n--- Partial Exits P.4: Strategy_BuildParameters wiring ---\n");
+    {
+        using namespace tt;
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.partial_exit_enabled = 0;  // DISABLED first
+        cfg.tp2_mult             = FPN_FromDouble<64>(2.0);
+
+        // Need rolling stats with enough data for SimpleDip to compute
+        RollingStats<64, 128> rolling = RollingStats_Init<64, 128>();
+        for (int i = 0; i < 64; i++) {
+            RollingStats_Push(&rolling, FPN_FromDouble<64>(100.0 + (i % 5)),
+                              FPN_FromDouble<64>(1.0));
+        }
+        RollingStats<64, 512> rolling_long = RollingStats_Init<64, 512>();
+        for (int i = 0; i < 64; i++) {
+            RollingStats_Push(&rolling_long, FPN_FromDouble<64>(100.0 + (i % 5)),
+                              FPN_FromDouble<64>(1.0));
+        }
+
+        GateParameters<64> params;
+
+        // ---- partial_exit_enabled=0 → no GATE_FLAG_PAIR_ACTIVE ----
+        cfg.partial_exit_enabled = 0;
+        Strategy_BuildParameters(STRATEGY_SIMPLE_DIP,
+            &rolling, &cfg, FPN_FromDouble<64>(1000.0),
+            &params, &rolling_long);
+        check("P.4 disabled: GATE_FLAG_PAIR_ACTIVE NOT set",
+              (params.flags & GATE_FLAG_PAIR_ACTIVE) == 0);
+        check("P.4 disabled: tp_pct_b stays at zero",
+              FPN_IsZero(params.tp_pct_b));
+
+        // ---- partial_exit_enabled=1 → flag set, tp_pct_b = tp_pct * 2.0 ----
+        cfg.partial_exit_enabled = 1;
+        Strategy_BuildParameters(STRATEGY_SIMPLE_DIP,
+            &rolling, &cfg, FPN_FromDouble<64>(1000.0),
+            &params, &rolling_long);
+        check("P.4 enabled: GATE_FLAG_PAIR_ACTIVE set",
+              (params.flags & GATE_FLAG_PAIR_ACTIVE) != 0);
+        // tp_pct_b should be tp_pct × 2.0 (when tp_pct non-zero)
+        if (!FPN_IsZero(params.tp_pct)) {
+            double tp_pct_d = FPN_ToDouble(params.tp_pct);
+            double tp_pct_b_d = FPN_ToDouble(params.tp_pct_b);
+            check("P.4 enabled: tp_pct_b == tp_pct × tp2_mult (2x)",
+                  fabs(tp_pct_b_d - 2.0 * tp_pct_d) < 1e-9);
+        }
+
+        // ---- Defensive: tp2_mult=0 → tp_pct_b falls back to tp_pct ----
+        cfg.tp2_mult = FPN_Zero<64>();
+        Strategy_BuildParameters(STRATEGY_SIMPLE_DIP,
+            &rolling, &cfg, FPN_FromDouble<64>(1000.0),
+            &params, &rolling_long);
+        if (!FPN_IsZero(params.tp_pct)) {
+            check("P.4 defensive: tp2_mult=0 → tp_pct_b == tp_pct (fallback)",
+                  fabs(FPN_ToDouble(params.tp_pct_b) - FPN_ToDouble(params.tp_pct)) < 1e-9);
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
