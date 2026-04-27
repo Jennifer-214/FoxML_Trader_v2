@@ -503,9 +503,17 @@ static inline void Backtest_Run(BacktestResults *results, const BacktestRunConfi
 
     results->config_used = cfg;
 
-    // init controller (same as main.cpp:159-161)
+    // init controller (same as main.cpp:159-161). Stack-allocated so its
+    // pointer members are uninitialized — must NULL them before
+    // PortfolioController_Init reads them in its `if (ptr) free(ptr)` paths,
+    // otherwise free()ing garbage segfaults on the second backtest of a
+    // session. v4.3 added rolling_medium/rolling_baseline/cumdelta_state —
+    // these need the same treatment as rolling_long.
     PortfolioController<BACKTEST_FP> ctrl;
-    ctrl.rolling_long = NULL;
+    ctrl.rolling_long     = NULL;
+    ctrl.rolling_medium   = NULL;
+    ctrl.rolling_baseline = NULL;
+    ctrl.cumdelta_state   = NULL;
     PortfolioController_Init(&ctrl, cfg);
     ctrl.sim_time = 0;          // will be set from first tick timestamp
     ctrl.last_slow_time = 0;    // triggers time seed on first tick
@@ -813,6 +821,12 @@ done:
     free(ticks);
     free(file_tick_counts);
     free(ctrl.rolling_long);
+    // v4.3 — free expanded feature-pack state too. ~2.4MB total — leaks
+    // accumulate fast across multiple Collect Features clicks in one suite
+    // session.
+    free(ctrl.rolling_medium);
+    free(ctrl.rolling_baseline);
+    free(ctrl.cumdelta_state);
 
     fprintf(stderr, "[backtest] completed: %lu ticks in %.1fms, %u trades, P&L $%.2f\n",
             results->stats.ticks_processed, elapsed,
