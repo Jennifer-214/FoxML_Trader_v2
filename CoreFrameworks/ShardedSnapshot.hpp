@@ -137,6 +137,33 @@ static inline void TUI_CopySnapshotSharded(
     // counters
     snap->total_buys = (uint32_t)agg.total_entries;
 
+    // Bug fix (2026-04-27): aggregate per-core core_wins / core_losses
+    // into snap->wins / snap->losses so the global Stats panel
+    // (GUI_Panel_Stats reads s->wins + s->losses for total_exits) sees
+    // real numbers in sharded mode. Pre-fix, snap->wins / losses stayed
+    // at zero (only per_core[i].core_wins was populated downstream),
+    // so the Stats panel showed buys=N exits=0 W=0 L=0 even when cores
+    // had visibly racked up wins/losses in their per-core W/L column.
+    //
+    // With partial exits, each LEG exit counts as a separate win/loss
+    // (HandleFill increments per-leg via OnEvent's mode-0 path).
+    // A paired trade where leg A hits TP1 (win) and leg B hits SL (loss)
+    // shows as 1 win + 1 loss = 50% win-rate. UX semantics for "trades
+    // vs leg events" is a separate display question.
+    uint32_t total_wins   = 0;
+    uint32_t total_losses = 0;
+    for (int i = 0; i < state->registered_count && i < 16; ++i) {
+        total_wins   += state->cores[i].core_wins;
+        total_losses += state->cores[i].core_losses;
+    }
+    snap->wins   = total_wins;
+    snap->losses = total_losses;
+    if (total_wins + total_losses > 0) {
+        snap->win_rate = (double)total_wins / (double)(total_wins + total_losses) * 100.0;
+    } else {
+        snap->win_rate = 0.0;
+    }
+
     // config display
     snap->cfg_tp  = FPN_ToDouble(cfg->take_profit_pct) * 100.0;
     snap->cfg_sl  = FPN_ToDouble(cfg->stop_loss_pct) * 100.0;

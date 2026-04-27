@@ -1383,7 +1383,17 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                 // at the time peak was last evaluated.
                 double approx_current = pc->core_peak_balance * (1.0 - pc->core_dd_pct);
                 ImGui::TableNextColumn();
-                ImGui::Text("$%.2f", approx_current);
+                // Color Curr by direction vs allocation: green when above
+                // (core in profit overall), red when below (in loss),
+                // default neutral when flat. Same threshold semantics as
+                // the Realized column in PER-CORE P&L.
+                ImVec4 curr_col = FoxmlColors::text;
+                if (approx_current > pc->core_allocated + 0.005) {
+                    curr_col = FoxmlColors::green;
+                } else if (approx_current < pc->core_allocated - 0.005) {
+                    curr_col = FoxmlColors::red;
+                }
+                ImGui::TextColored(curr_col, "$%.2f", approx_current);
 
                 // DD%, color-coded
                 ImGui::TableNextColumn();
