@@ -892,6 +892,7 @@ struct TUISnapshot {
     // sharded AND CoreLatencyStats are enabled. Display panel renders only
     // when sharded_mode_active is set.
     int sharded_mode_active;       // 1 = sharded engine running, 0 = legacy
+    int partial_exit_enabled;      // 1 = paired-leg geometry (slot 2c+leg)
     int per_core_count;            // number of cores actively reporting
     struct PerCoreSnap {
         uint64_t samples;
@@ -1006,6 +1007,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     // sharded mode is running. Legacy mode leaves these zeroed and the
     // TUI panel just doesn't render the per-core section.
     snap->sharded_mode_active = 0;
+    snap->partial_exit_enabled = 0;
     snap->per_core_count = 0;
 
     snap->price  = price_d;

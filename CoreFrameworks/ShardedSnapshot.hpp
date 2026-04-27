@@ -175,6 +175,7 @@ static inline void TUI_CopySnapshotSharded(
     // use core 0's strategy as the "headline" strategy for the Market panel,
     // and core 0's gate parameters for the Buy Gate panel.
     snap->sharded_mode_active = 1;
+    snap->partial_exit_enabled = cfg->partial_exit_enabled ? 1 : 0;
     snap->per_core_count = state->registered_count;
     if (state->registered_count > 0) {
         // v4.0.4: use core 0's RESOLVED strategy as headline. For AUTO core 0

@@ -959,12 +959,32 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s) {
 
             double diff = s->price - ps->entry;
             ImGui::TableNextRow();
+            // Subtle row-bg tint per core so paired legs visually group.
+            // Alternating cores stay default vs lightly tinted; both
+            // legs of the same core share the tint. No-op under
+            // partials-off (no leg-B rows exist).
+            if (s->partial_exit_enabled && ((ps->idx >> 1) & 1)) {
+                ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                    ImGui::GetColorU32(ImVec4(0.20f, 0.20f, 0.25f, 0.30f)));
+            }
 
-            // # column
+            // # column — under partials, slot 2c+leg belongs to core c.
+            // Show "0.A" and "0.B" so the pair is obvious; under
+            // partials-off, show plain core id.
+            int row_core_id = s->partial_exit_enabled ? (ps->idx >> 1) : ps->idx;
+            int row_leg     = s->partial_exit_enabled ? (ps->idx & 1)  : 0;
             ImGui::TableNextColumn();
-            ImGui::TextColored(FoxmlColors::wheat, "#%d", ps->idx);
+            if (s->partial_exit_enabled) {
+                ImGui::TextColored(FoxmlColors::wheat, "#%d.%c",
+                                    row_core_id, row_leg == 0 ? 'A' : 'B');
+            } else {
+                ImGui::TextColored(FoxmlColors::wheat, "#%d", ps->idx);
+            }
 
-            // strategy (color-coded)
+            // strategy (color-coded). Under partials, look up core_id =
+            // slot/2 — both legs share the same per_core entry, so leg A
+            // and leg B render with the same strategy color (correct —
+            // they're one trade).
             ImGui::TableNextColumn();
             {
                 static const ImVec4 sc[] = {
@@ -974,10 +994,12 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s) {
                     {0.65f, 0.45f, 0.80f, 1.0f},
                     {0.35f, 0.75f, 0.80f, 1.0f},
                 };
-                uint8_t sid = (ps->idx < 16 && s->sharded_mode_active)
-                    ? s->per_core[ps->idx].strategy_id_display : 0xFF;
+                uint8_t sid = (row_core_id < 16 && s->sharded_mode_active)
+                    ? s->per_core[row_core_id].strategy_id_display : 0xFF;
                 ImVec4 col = (sid < NUM_STRATEGIES) ? sc[sid] : FoxmlColors::comment;
                 const char *name = (sid < NUM_STRATEGIES) ? STRATEGY_SHORT_NAMES[sid] : "?";
+                // Dim leg B slightly so it visually nests under leg A
+                if (row_leg == 1) col.w = 0.6f;
                 ImGui::TextColored(col, "%s", name);
             }
 
