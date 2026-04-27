@@ -661,6 +661,66 @@ the backtest does?") — could have shipped silently otherwise.
   real network jitter. Affects P&L from a given prediction, not the
   prediction itself.
 
+**Track E — sharded backtest unification (in progress, 2026-04-26+):**
+
+The "add to BOTH paths" rule above is being retired. Track E completes
+`BacktestSharded_Run` so that backtest *uses* the same
+`Regime_ComputeSignals` call site as the live serve path. Once E.7
+ships, "did we update both paths?" stops being a question — there is
+one path. Plan: `plans/track-e-sharded-backtest.md`.
+
+Wired now (E.1 + E.2, 2026-04-26):
+- **Feature collection** runs through `ShardedBacktestDriver::on_slow_path`
+  (registered by `BacktestSharded_Run` when `collect_features=1`). The
+  callback runs `Regime_ComputeSignals` with the same args as
+  `StrategyParameters.hpp:469` (the live ML serve path) and packs via
+  `ModelFeatures_Pack`. New `RegimeSignals` fields populated in
+  `Regime_ComputeSignals` light up automatically in sharded backtest.
+- **Strategy + risk + ML model wiring** in `BacktestSharded_Run` mirrors
+  `EngineSharded_Run` (lines 559-648). `cfg.core_strategies[i]` and
+  `cfg.core_risk_pct[i]` are honored. ML cores load `CoreModelZoo` +
+  init `ConfidenceScorer` with the same cfg tunables. Adding a strategy
+  to `EventLoop_RebuildAllParameters` dispatch picks up
+  sharded-backtest support automatically — no separate plumbing.
+- **Warmup gate** matches live: cores start at permission=0, granted
+  when `rolling.count >= cfg.min_warmup_samples`. Pre-E.2 backtest set
+  permission=1 immediately, which let strategies fire on garbage
+  rolling stats during the first ticks.
+- **Per-tick EMA** + **slow-path RORRegressor / CumDelta / TickRate**
+  pushes mirror `EngineSharded_Run` static-local state. Driver threads
+  these via `EventLoop_RebuildAllParameters` to ML strategies AND the
+  feature-collection hook — single source of state.
+
+Not yet wired:
+- **Depth replay (E.3)**: `book_imbalance` and any spread-derived
+  features remain 0 in backtest. Sharded *live* also doesn't currently
+  read `book_imbalance` (post-Phase-8a coding c14 never landed — the
+  depth thread runs but no per-core controller consumes the imbalance).
+  E.3 lands both wirings together.
+- **Walk-Forward / Sweep migration (E.4 / E.5)**: consume
+  `BacktestResults` directly, so they automatically inherit E.1's
+  feature collection when `engine_mode=sharded`. No code change beyond
+  cfg; runtime parity with legacy is the open question E.6 closes.
+- **Parity harness (E.6)**: no programmatic `legacy-vs-sharded` feature
+  diff yet. If you change `Regime_ComputeSignals` between now and E.6,
+  manually run "Collect Features" in BOTH `engine_mode=single_core` and
+  `engine_mode=sharded` to confirm features still match.
+- **Legacy backtest deletion (E.7)**: `Backtest_Run` legacy body is
+  still alive when `engine_mode=single_core`. Deprecated for
+  production-training use; the legacy path's feature pack uses
+  `ctrl->sim_time*1e6` (second-rounded historical time) for
+  `hour_sin/hour_cos` while sharded uses `tk.timestamp` (full µs
+  precision) — diverges only at hour boundaries; sharded is correct.
+
+**Adding new state during the transition.** Track E temporarily
+*increases* the surface for adding `RegimeSignals` state — until E.7
+ships, a new state field needs THREE updates (PortfolioController
+slow-path push + EngineSharded fan_out push + BacktestSharded driver
+mirror). The driver pointer plumbing is the load-bearing piece — if
+the driver doesn't get fed the new state, the feature-collection hook
+sees zeros while live ML strategies see real values. Symmetrical to
+the v4.0.1 bug, just one layer deeper.
+
 ### Maker/Taker Fee Accuracy (Phase 8)
 
 When applying fees in any code path:

@@ -22,6 +22,7 @@
 #include "../CoreFrameworks/ExecutionCore.hpp"        // Phase 2.1 tests
 #include "../CoreFrameworks/ShardedSnapshotPersist.hpp"  // Phase 4 tests
 #include "../CoreFrameworks/ShardedBacktestDriver.hpp"   // Track E.1 tests
+#include "../ML_Headers/CoreModelZoo.hpp"                // Track E.2 tests
 #include "../DataStream/BinanceUserData.hpp"
 #include "../Backtest/BacktestEngine.hpp"
 #include "../Backtest/HeldOutSplit.hpp"
@@ -4932,6 +4933,180 @@ int main() {
               fabs(w.observed_price - 50300.0) < 1e-6);
         check("hook saw the slow-path tick's timestamp",
               w.observed_ts == 6000000ULL);
+    }
+
+    //==================================================================================================
+    // Track E.2 — multi-strategy support in BacktestSharded_Run
+    //==================================================================================================
+    // E.2 dropped the SimpleDip-only gate; per-core strategy now reads from
+    // cfg.core_strategies[i]. Tests below cover the building blocks
+    // BacktestSharded_Run's per-core init loop relies on (lines 170-247):
+    // CoreModelZoo Free-before-Init safety on first run, EventLoopState_-
+    // SetCoreStrategy correctness with mixed values, and the warmup
+    // permission grant's STRATEGY_NONE skip semantics. End-to-end tick-stream
+    // parity vs legacy is deferred to the E.6 parity harness.
+    //==================================================================================================
+    printf("\n--- Track E.2: CoreModelZoo Free-before-Init safety ---\n");
+    {
+        using namespace tt;
+        // BacktestSharded_Run calls CoreModelZoo_Free(&ml_zoos[i]) before
+        // CoreModelZoo_Init(&ml_zoos[i]) on every backtest run so the suite
+        // can run multiple Collect Features clicks per process without
+        // leaking the prior model handles. On the FIRST run the slot is
+        // zero-init memory — Free must be a no-op there or the suite
+        // crashes on the first ML backtest. Verify the Free-then-Init
+        // dance succeeds on zero-init memory + is idempotent.
+        CoreModelZoo<64> zoo;
+        memset(&zoo, 0, sizeof(zoo)); // mimic static-array zero-init
+
+        CoreModelZoo_Free(&zoo);  // expected no-op (all handles=NULL)
+        check("Free on zero-init zoo: loaded_mask stays 0",
+              zoo.loaded_mask == 0);
+        check("Free on zero-init zoo: HasAny == 0",
+              CoreModelZoo_HasAny(&zoo) == 0);
+
+        CoreModelZoo_Init(&zoo);
+        check("Init after Free: loaded_mask == 0",
+              zoo.loaded_mask == 0);
+        check("Init after Free: barrier handle not loaded",
+              !Model_IsLoaded(&zoo.barrier));
+        check("Init after Free: buy_signal handle not loaded",
+              !Model_IsLoaded(&zoo.buy_signal));
+
+        // Idempotent Free: should be safe to call again
+        CoreModelZoo_Free(&zoo);
+        check("Free idempotent: still loaded_mask == 0",
+              zoo.loaded_mask == 0);
+    }
+
+    printf("\n--- Track E.2: per-core strategy + risk wiring ---\n");
+    {
+        using namespace tt;
+        // BacktestSharded_Run sets per-core strategy + allocated_balance via
+        // EventLoopState_SetCoreStrategy with cfg.core_strategies[i] and a
+        // balance derived from cfg.core_risk_pct[i] (override) or even-split
+        // default. Verify the framework primitive correctly tracks mixed
+        // values across multiple slots — the contract E.2 relies on.
+        OrderManagerState<64> oms;
+        ExchangeAdapter<64> empty_adapter{};
+        OrderManager_Init(&oms, empty_adapter, 0,
+                          FPN_FromDouble<64>(10000.0),
+                          FPN_FromDouble<64>(0.001));
+        EventLoopState<64> state;
+        EventLoopState_Init(&state, &oms);
+
+        SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> rings[4];
+        ExecutionCore<64> cores[4];
+        for (int i = 0; i < 4; ++i) {
+            SPSCRing_Init(&rings[i]);
+            ExecutionCore_Init(&cores[i], (uint16_t)i, &rings[i]);
+            EventLoopState_RegisterCore(&state, &cores[i],
+                FPN_Zero<64>(), FPN_Zero<64>(), FPN_Zero<64>());
+        }
+
+        // Mimic BacktestSharded_Run lines 178-185: even-split default,
+        // override on slot 1.  total=$10k, default risk_pct=10% → per-core
+        // default = $250.  Slot 1 override: 20% → $2000.
+        const uint8_t strategies[4] = {
+            STRATEGY_SIMPLE_DIP,
+            STRATEGY_MOMENTUM,
+            STRATEGY_MEAN_REVERSION,
+            STRATEGY_NONE,
+        };
+        const double total_balance     = 10000.0;
+        const double default_risk      = 0.10;
+        const double default_per_core  = (total_balance * default_risk) / 4.0; // $250
+        const double slot1_override    = total_balance * 0.20;                 // $2000
+
+        EventLoopState_SetCoreStrategy(&state, 0, strategies[0],
+            FPN_FromDouble<64>(default_per_core));
+        EventLoopState_SetCoreStrategy(&state, 1, strategies[1],
+            FPN_FromDouble<64>(slot1_override));
+        EventLoopState_SetCoreStrategy(&state, 2, strategies[2],
+            FPN_FromDouble<64>(default_per_core));
+        EventLoopState_SetCoreStrategy(&state, 3, strategies[3],
+            FPN_FromDouble<64>(default_per_core));
+
+        check("slot 0 strategy_id == SIMPLE_DIP",
+              state.cores[0].strategy_id == STRATEGY_SIMPLE_DIP);
+        check("slot 1 strategy_id == MOMENTUM",
+              state.cores[1].strategy_id == STRATEGY_MOMENTUM);
+        check("slot 2 strategy_id == MEAN_REVERSION",
+              state.cores[2].strategy_id == STRATEGY_MEAN_REVERSION);
+        check("slot 3 strategy_id == NONE",
+              state.cores[3].strategy_id == STRATEGY_NONE);
+
+        check("slot 0 allocated_balance ~= $250 (default split)",
+              fabs(FPN_ToDouble(state.cores[0].allocated_balance) - default_per_core) < 1e-6);
+        check("slot 1 allocated_balance ~= $2000 (override)",
+              fabs(FPN_ToDouble(state.cores[1].allocated_balance) - slot1_override) < 1e-6);
+        check("slot 2 allocated_balance ~= $250 (default split)",
+              fabs(FPN_ToDouble(state.cores[2].allocated_balance) - default_per_core) < 1e-6);
+
+        // Out-of-range slot: SetCoreStrategy must NOT crash + must NOT
+        // mutate state. Defensive guard at ControllerEventLoop.hpp:359.
+        EventLoopState_SetCoreStrategy(&state, 99, STRATEGY_MOMENTUM,
+            FPN_FromDouble<64>(99999.0));
+        check("out-of-range slot 99: no crash, slot 0 unchanged",
+              state.cores[0].strategy_id == STRATEGY_SIMPLE_DIP);
+    }
+
+    printf("\n--- Track E.2: warmup permission grant skips STRATEGY_NONE ---\n");
+    {
+        using namespace tt;
+        // BacktestSharded_Run grants permission post-warmup ONLY to cores
+        // whose strategy_id != STRATEGY_NONE (BacktestSharded.hpp:453-457,
+        // mirrors EngineSharded_Run lines 1014-1018). Verify this asymmetry:
+        // a NONE core never trades, even after rolling.count crosses
+        // min_warmup_samples. This is the safe-default rule from pitfall
+        // P6.5 — cores without an assigned strategy stay disabled.
+        OrderManagerState<64> oms;
+        ExchangeAdapter<64> empty_adapter{};
+        OrderManager_Init(&oms, empty_adapter, 0,
+                          FPN_FromDouble<64>(10000.0),
+                          FPN_FromDouble<64>(0.001));
+        EventLoopState<64> state;
+        EventLoopState_Init(&state, &oms);
+
+        SPSCRing<Tick<64>, EXECUTION_CORE_TICK_RING_SIZE> rings[3];
+        ExecutionCore<64> cores[3];
+        for (int i = 0; i < 3; ++i) {
+            SPSCRing_Init(&rings[i]);
+            ExecutionCore_Init(&cores[i], (uint16_t)i, &rings[i]);
+            EventLoopState_RegisterCore(&state, &cores[i],
+                FPN_Zero<64>(), FPN_Zero<64>(), FPN_Zero<64>());
+            ExecutionCore_SetPermission(&cores[i], 0); // E.2: starts at 0
+        }
+
+        EventLoopState_SetCoreStrategy(&state, 0, STRATEGY_SIMPLE_DIP,
+            FPN_FromDouble<64>(250.0));
+        EventLoopState_SetCoreStrategy(&state, 1, STRATEGY_NONE,
+            FPN_FromDouble<64>(250.0));
+        EventLoopState_SetCoreStrategy(&state, 2, STRATEGY_MOMENTUM,
+            FPN_FromDouble<64>(250.0));
+
+        check("pre-warmup: slot 0 permission == 0",
+              __atomic_load_n(&cores[0].permission, __ATOMIC_ACQUIRE) == 0);
+        check("pre-warmup: slot 1 permission == 0 (NONE)",
+              __atomic_load_n(&cores[1].permission, __ATOMIC_ACQUIRE) == 0);
+        check("pre-warmup: slot 2 permission == 0",
+              __atomic_load_n(&cores[2].permission, __ATOMIC_ACQUIRE) == 0);
+
+        // Mirror BacktestSharded_Run's warmup grant loop (lines 453-457).
+        // Real path checks rolling.count >= min_warmup_samples first; this
+        // test exercises the per-core branch directly.
+        for (int c = 0; c < 3; ++c) {
+            if (state.cores[c].strategy_id != STRATEGY_NONE) {
+                ExecutionCore_SetPermission(&cores[c], 1);
+            }
+        }
+
+        check("post-warmup: slot 0 (SIMPLE_DIP) permission == 1",
+              __atomic_load_n(&cores[0].permission, __ATOMIC_ACQUIRE) == 1);
+        check("post-warmup: slot 1 (NONE) permission STILL == 0",
+              __atomic_load_n(&cores[1].permission, __ATOMIC_ACQUIRE) == 0);
+        check("post-warmup: slot 2 (MOMENTUM) permission == 1",
+              __atomic_load_n(&cores[2].permission, __ATOMIC_ACQUIRE) == 1);
     }
 
     printf("\n======================================\n");
