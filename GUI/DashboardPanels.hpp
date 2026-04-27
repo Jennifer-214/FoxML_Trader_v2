@@ -1076,6 +1076,87 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s, TUISharedState *sha
         ImGui::EndTable();
     }
 
+    // v4.7.9: text-entry TP/SL realignment. Single-row form below the
+    // table — pick slot, type new price, click Apply TP or Apply SL.
+    // Reuses the existing drag pickup mechanism (drag_slot/drag_is_tp/
+    // drag_price) so no new pipeline. Same atomic write pattern as the
+    // chart drag handler. Only rendered when shared state is wired
+    // (otherwise we have no way to apply the value).
+    if (shared) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextColored(FoxmlColors::comment, "Realign TP/SL:");
+        ImGui::SameLine();
+
+        // Build a list of currently-open slot indices for the combo
+        static int picked_slot = -1;
+        char combo_label[32];
+        if (picked_slot >= 0 && picked_slot < 16 && s->positions[picked_slot].idx >= 0) {
+            int leg = s->partial_exit_enabled ? (picked_slot & 1) : 0;
+            int core = s->partial_exit_enabled ? (picked_slot >> 1) : picked_slot;
+            snprintf(combo_label, sizeof(combo_label),
+                     s->partial_exit_enabled ? "#%d.%c" : "#%d",
+                     core, leg == 0 ? 'A' : 'B');
+        } else {
+            picked_slot = -1;
+            snprintf(combo_label, sizeof(combo_label), "Slot");
+        }
+        ImGui::SetNextItemWidth(70);
+        if (ImGui::BeginCombo("##realign_slot", combo_label)) {
+            for (int i = 0; i < 16; i++) {
+                if (s->positions[i].idx < 0) continue;
+                int leg  = s->partial_exit_enabled ? (i & 1) : 0;
+                int core = s->partial_exit_enabled ? (i >> 1) : i;
+                char item[32];
+                snprintf(item, sizeof(item),
+                         s->partial_exit_enabled ? "#%d.%c" : "#%d",
+                         core, leg == 0 ? 'A' : 'B');
+                if (ImGui::Selectable(item, picked_slot == i)) picked_slot = i;
+            }
+            ImGui::EndCombo();
+        }
+
+        // Pre-populate inputs with current TP/SL when a slot is selected
+        static double new_tp = 0.0, new_sl = 0.0;
+        static int last_picked = -2;
+        if (picked_slot != last_picked && picked_slot >= 0) {
+            new_tp = s->positions[picked_slot].tp;
+            new_sl = s->positions[picked_slot].sl;
+            last_picked = picked_slot;
+        }
+
+        ImGui::SameLine();
+        ImGui::TextColored(FoxmlColors::green, "TP");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(80);
+        ImGui::InputDouble("##realign_tp", &new_tp, 0.0, 0.0, "%.2f");
+        ImGui::SameLine();
+        ImGui::TextColored(FoxmlColors::red, "SL");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(80);
+        ImGui::InputDouble("##realign_sl", &new_sl, 0.0, 0.0, "%.2f");
+
+        ImGui::SameLine();
+        bool can_apply = (picked_slot >= 0 && picked_slot < 16 &&
+                           s->positions[picked_slot].idx >= 0);
+        if (!can_apply) ImGui::BeginDisabled();
+        if (ImGui::SmallButton("Apply TP")) {
+            __atomic_store_n(&shared->drag_is_tp, 1, __ATOMIC_RELEASE);
+            shared->drag_price = new_tp;
+            __atomic_store_n(&shared->drag_slot, picked_slot, __ATOMIC_RELEASE);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Apply SL")) {
+            __atomic_store_n(&shared->drag_is_tp, 0, __ATOMIC_RELEASE);
+            shared->drag_price = new_sl;
+            __atomic_store_n(&shared->drag_slot, picked_slot, __ATOMIC_RELEASE);
+        }
+        if (!can_apply) ImGui::EndDisabled();
+
+        if (ImGui::IsItemHovered() && !can_apply) {
+            ImGui::SetTooltip("Pick a slot first");
+        }
+    }
 
     ImGui::End();
 }
