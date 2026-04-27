@@ -4486,6 +4486,55 @@ int main() {
                   loaded == 0);
         }
 
+        // ---- Test: Snapshot re-activates ExecutionCore (2026-04-27 fix) ----
+        // Bug: snapshot saves Position fields but NOT ExecutionCore::active /
+        // live_tp / live_sl. After load, hot path's "can_exit = active &
+        // sg_fires" sees active=0 → SG never fires → restored positions
+        // become zombie (open in portfolio, can't be exited by TP/SL).
+        // Fix: snapshot loader walks active_bitmap, restores ExecutionCore
+        // state from each Position.
+        {
+            auto* r = build_state(2, 10000.0);
+
+            // Open a position on slot 0 with known TP/SL prices
+            Portfolio_OpenSlot(&r->state.oms->portfolio, 0,
+                FPN_FromDouble<64>(60000.0),  // entry_price
+                FPN_FromDouble<64>(0.01),     // qty
+                FPN_FromDouble<64>(60900.0),  // tp
+                FPN_FromDouble<64>(59100.0),  // sl
+                FPN_FromDouble<64>(0.6));     // entry_fee
+
+            // Save snapshot of this state
+            tt::ShardedSnapshot_Save<64>(&r->state, test_path);
+
+            // Build a FRESH state — ExecutionCore fields are zero-init
+            auto* r2 = build_state(2, 10000.0);
+            check("pre-load: fresh core[0].active == 0",
+                  r2->cores[0].active == 0);
+            check("pre-load: fresh core[0].live_tp == 0",
+                  FPN_IsZero(r2->cores[0].live_tp));
+
+            // Load — should re-activate core[0] from restored Position
+            int loaded = tt::ShardedSnapshot_Load<64>(&r2->state, test_path);
+            check("snapshot re-activate: load succeeded",
+                  loaded == 1);
+            check("snapshot re-activate: portfolio.active_bitmap restored",
+                  (r2->state.oms->portfolio.active_bitmap & 0x1) != 0);
+            check("snapshot re-activate: core[0].active == 1",
+                  r2->cores[0].active == 1);
+            check("snapshot re-activate: core[0].live_tp == 60900",
+                  fabs(FPN_ToDouble(r2->cores[0].live_tp) - 60900.0) < 1e-6);
+            check("snapshot re-activate: core[0].live_sl == 59100",
+                  fabs(FPN_ToDouble(r2->cores[0].live_sl) - 59100.0) < 1e-6);
+            check("snapshot re-activate: core[0].entry_price == 60000",
+                  fabs(FPN_ToDouble(r2->cores[0].entry_price) - 60000.0) < 1e-6);
+            // Slot 1 has no position; core[1] should stay inactive
+            check("snapshot re-activate: core[1].active stays 0 (no position)",
+                  r2->cores[1].active == 0);
+
+            unlink(test_path);
+        }
+
         // ---- Cleanup ----
         unlink(test_path);
     }

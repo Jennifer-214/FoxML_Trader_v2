@@ -403,6 +403,52 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath) 
         ctx.confidence.rmse.head  = s.rmse_head;
     }
 
+    // Bug fix (2026-04-27): re-activate ExecutionCore<F> hot-path state from
+    // each restored Position. Snapshot persists portfolio.positions[slot]
+    // (entry_price, take_profit_price, stop_loss_price, quantity) but NOT the
+    // ExecutionCore's active flag / live_tp / live_sl / entry_price — those
+    // are core-owned and ephemeral, written on entry by the hot path.
+    //
+    // Without this re-activation, hot path's exit gate evaluates:
+    //   can_exit = active & sg_fires    // active=0 (init default)
+    // → can_exit always 0 → SG never fires for restored positions →
+    // positions become "zombie" (visible in portfolio.active_bitmap and
+    // GUI Positions panel, but cannot be exited by TP/SL on the hot path).
+    //
+    // Symptom: after engine restart with active snapshot positions, even
+    // when price drops below a position's stop_loss_price, the hot path's
+    // SG_Evaluate doesn't fire because active=0. Position stays open until
+    // (a) user manually exits via GUI, (b) max_hold_ticks force-closes via
+    // slow path, or (c) day-boundary close.
+    //
+    // Fix: walk the restored active_bitmap, copy Position fields into the
+    // matching ExecutionCore<F>'s hot-path mirrors, set active=1.
+    uint16_t restored_bm = state->oms->portfolio.active_bitmap;
+    int restored_count = 0;
+    while (restored_bm) {
+        int slot = __builtin_ctz(restored_bm);
+        restored_bm &= (uint16_t)(restored_bm - 1);
+        if (slot < 0 || slot >= (int)state->registered_count) continue;
+        ExecutionCore<F>* core_ptr = state->cores[slot].core;
+        if (!core_ptr) continue;
+        const Position<F>& pos = state->oms->portfolio.positions[slot];
+        core_ptr->entry_price = pos.entry_price;
+        core_ptr->live_tp     = pos.take_profit_price;
+        core_ptr->live_sl     = pos.stop_loss_price;
+        // Active flag last (RELEASE-ish ordering — core is single-threaded
+        // here at boot, but the hot path will read this on its next tick).
+        // No atomic needed: core hot-path thread isn't running yet at
+        // snapshot-load time.
+        core_ptr->active = 1;
+        restored_count++;
+    }
+    if (restored_count > 0) {
+        fprintf(stderr,
+            "[snapshot] re-activated %d ExecutionCore(s) from restored "
+            "positions — hot-path SG/TP/SL gates armed\n",
+            restored_count);
+    }
+
     fprintf(stderr, "[snapshot] loaded sharded snapshot from %s (%u cores, ts=%llu)\n",
             filepath, file_num_cores, (unsigned long long)timestamp_us);
     return 1;
