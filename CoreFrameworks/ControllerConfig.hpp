@@ -148,10 +148,24 @@ constexpr uint8_t ENGINE_ARCH_PER_CORE_SLOW = 1;
     RAW(confidence_freshness_tau) \
     RAW(confidence_threshold_scale)
 
+// v4.7.40: INT-typed per-core overrides. Separate macro because INT fields
+// are uint32_t (not FPN<F>) — different declaration + parser. 0 = inherit
+// (caller checks `if (override == 0) use cfg.field`). All sentinel-friendly
+// (cfg INT defaults are non-zero meaningful values).
+#define PER_CORE_OVERRIDE_INT_FIELDS(INT) \
+    /* v4.7.40: per-core slow-path cadence. Each engine can poll faster or */ \
+    /* slower than the global poll_interval — fast strategies (momentum) */ \
+    /* may want tighter rebuilds; slow strategies (MR) tolerate longer. */ \
+    INT(poll_interval)
+
 template <unsigned F> struct PerCoreOverrides {
 #define _DECL_OV_FIELD(name) FPN<F> name;
     PER_CORE_OVERRIDE_FIELDS(_DECL_OV_FIELD, _DECL_OV_FIELD)
 #undef _DECL_OV_FIELD
+// v4.7.40: INT-typed overrides. uint32_t storage; 0 = inherit.
+#define _DECL_OV_INT_FIELD(name) uint32_t name;
+    PER_CORE_OVERRIDE_INT_FIELDS(_DECL_OV_INT_FIELD)
+#undef _DECL_OV_INT_FIELD
 };
 
 //======================================================================================================
@@ -542,6 +556,11 @@ inline ControllerConfig<F> ControllerConfig_ResolveForCore(
 #define _RESOLVE_OV_FIELD(name) if (!FPN_IsZero(ov.name)) resolved.name = ov.name;
     PER_CORE_OVERRIDE_FIELDS(_RESOLVE_OV_FIELD, _RESOLVE_OV_FIELD)
 #undef _RESOLVE_OV_FIELD
+// v4.7.40: INT overrides — 0 = inherit (caller's config field already
+// has the global default; non-zero overrides it).
+#define _RESOLVE_OV_INT_FIELD(name) if (ov.name != 0) resolved.name = ov.name;
+    PER_CORE_OVERRIDE_INT_FIELDS(_RESOLVE_OV_INT_FIELD)
+#undef _RESOLVE_OV_INT_FIELD
     return resolved;
 }
 
@@ -753,6 +772,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
 #define _ZERO_OV_FIELD(name) cfg.core_overrides[i].name = FPN_Zero<F>();
     PER_CORE_OVERRIDE_FIELDS(_ZERO_OV_FIELD, _ZERO_OV_FIELD)
 #undef _ZERO_OV_FIELD
+// v4.7.40: zero INT overrides too (0 = inherit).
+#define _ZERO_OV_INT_FIELD(name) cfg.core_overrides[i].name = 0;
+    PER_CORE_OVERRIDE_INT_FIELDS(_ZERO_OV_INT_FIELD)
+#undef _ZERO_OV_INT_FIELD
   }
   cfg.simpledip_tp_pct  = FPN_Zero<F>();  // 0 = use shared take_profit_pct
   cfg.simpledip_sl_pct  = FPN_Zero<F>();
@@ -1158,6 +1181,10 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         PER_CORE_OVERRIDE_FIELDS(_PARSE_OV_PCT, _PARSE_OV_RAW)
 #undef _PARSE_OV_PCT
 #undef _PARSE_OV_RAW
+// v4.7.40: INT overrides — atoi parse, 0 = inherit.
+#define _PARSE_OV_INT(name) if (strcmp(suffix, #name) == 0) { ov.name = (uint32_t)atoi(val); continue; }
+        PER_CORE_OVERRIDE_INT_FIELDS(_PARSE_OV_INT)
+#undef _PARSE_OV_INT
       }
     }
     // Per-strategy TP/SL overrides (percentage, parsed with /100)

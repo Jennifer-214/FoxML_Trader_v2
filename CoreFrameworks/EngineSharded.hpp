@@ -1666,8 +1666,18 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                       &book_imb_history, &flow_state,
                                       &large_trade_state, &spread_state,
                                       &paper_reset_in_progress]() {
-                int slow_path_interval = (int)cfg.poll_interval;
+                // v4.7.40 (Phase D): per-core poll interval from resolved
+                // cfg. If core has core_N_poll_interval set, use that;
+                // otherwise inherit global cfg.poll_interval.
+                ControllerConfig<F> resolved_init =
+                    ControllerConfig_ResolveForCore(cfg, c);
+                int slow_path_interval = (int)resolved_init.poll_interval;
                 if (slow_path_interval < 1) slow_path_interval = 100;
+                fprintf(stderr,
+                    "[slow-path-%d] poll_interval=%d ticks (override=%u, global=%u)\n",
+                    c, slow_path_interval,
+                    (unsigned)cfg.core_overrides[c].poll_interval,
+                    (unsigned)cfg.poll_interval);
                 uint64_t last_seen_tick = 0;
                 while (!g_engine_sharded_shutdown) {
                     // Reset Paper coordination — park while reset runs.
