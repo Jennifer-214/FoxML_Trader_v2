@@ -1177,13 +1177,25 @@ static inline void GUI_Panel_PerCorePnL(const TUISnapshot *s) {
     static constexpr int PNL_HISTORY = 1800;
     static double pnl_history[PNL_HISTORY][16];  // [time_idx][core]
     static double time_history[PNL_HISTORY];
-    static int    history_count = 0;
-    static int    history_head  = 0;
-    static double last_sample_t = 0.0;
-    static double session_t0    = 0.0;
+    static int      history_count    = 0;
+    static int      history_head     = 0;
+    static double   last_sample_t    = 0.0;
+    static double   session_t0       = 0.0;
+    static uint32_t last_seen_reset_seq = 0;
 
     double now_s = (double)time(NULL);
     if (session_t0 == 0.0) session_t0 = now_s;
+
+    // v4.7.18: detect paper reset and clear the ring. Pre-v4.7.18 the
+    // panel kept 30min of pre-reset samples, mixing stale -P&L with new
+    // zeros and making the Y axis autofit to a misleading range.
+    if ((uint32_t)s->paper_reset_seq != last_seen_reset_seq) {
+        last_seen_reset_seq = (uint32_t)s->paper_reset_seq;
+        history_count = 0;
+        history_head  = 0;
+        session_t0    = now_s;  // restart the "session seconds" axis
+        last_sample_t = 0.0;
+    }
 
     // Sample at most once per second
     if (now_s - last_sample_t >= 1.0) {
@@ -1261,15 +1273,29 @@ static inline void GUI_Panel_Stats(const TUISnapshot *s) {
     ImGui::Begin("Stats");
     SectionHeader("STATS");
 
-    uint32_t total_exits = s->wins + s->losses;
+    uint32_t closed_trades = s->wins + s->losses;
+    // v4.7.18: under partials, 1 logical trade = 2 leg-fills. Show both
+    // numbers so the user can tell the difference at a glance.
+    //   buys/exits headline = LOGICAL trades
+    //   "(N fills)" tail    = PER-FILL heartbeat
+    uint32_t logical_buys = (s->partial_exit_enabled && s->total_buys > 0)
+                          ? (s->total_buys / 2u) : s->total_buys;
 
     ImGui::TextColored(FoxmlColors::sand, "buys:");
     ImGui::SameLine();
-    ImGui::Text("%-4u", s->total_buys);
+    ImGui::Text("%u", logical_buys);
+    if (s->partial_exit_enabled) {
+        ImGui::SameLine();
+        ImGui::TextColored(FoxmlColors::comment, "(%u fills)", s->total_buys);
+    }
     ImGui::SameLine(0, 10);
     ImGui::TextColored(FoxmlColors::sand, "exits:");
     ImGui::SameLine();
-    ImGui::Text("%-4u", total_exits);
+    ImGui::Text("%u", closed_trades);
+    if (s->partial_exit_enabled) {
+        ImGui::SameLine();
+        ImGui::TextColored(FoxmlColors::comment, "(%u fills)", s->total_exits_fills);
+    }
     ImGui::SameLine(0, 10);
     ImGui::TextColored(FoxmlColors::sand, "W:");
     ImGui::SameLine();
@@ -1300,7 +1326,7 @@ static inline void GUI_Panel_Stats(const TUISnapshot *s) {
         ImGui::TextColored(FoxmlColors::comment, "(mkt: $%.2f)", s->avg_loss_market);
     }
 
-    if (total_exits > 0) {
+    if (closed_trades > 0) {
         ImGui::TextColored(FoxmlColors::sand, "E[trade]:");
         ImGui::SameLine();
         ImGui::TextColored(PnlColor(s->expectancy), "$%+.2f", s->expectancy);

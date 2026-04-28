@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 
 namespace tt {
 
@@ -55,6 +56,10 @@ struct ShardedTradeLog {
     FILE*    file;
     uint64_t row_count;          // total rows written this session
     uint64_t writes_truncated;   // snprintf truncations (should always be 0)
+    // v4.7.18: cache the symbol from Init so Rotate() can rebuild the
+    // filename without forcing callers to thread bcfg through every
+    // call site. Empty string before first Init.
+    char     symbol[32];
 };
 
 //======================================================================================================
@@ -72,6 +77,10 @@ inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol) {
     log->file = nullptr;
     log->row_count = 0;
     log->writes_truncated = 0;
+    // v4.7.18: cache symbol for Rotate() (must precede the early-return paths
+    // below so even a failed Init records what was attempted)
+    std::strncpy(log->symbol, symbol, sizeof(log->symbol) - 1);
+    log->symbol[sizeof(log->symbol) - 1] = '\0';
 
     // Build filename: logging/SYMBOL_order_history.csv
     // matches the path the GUI's TradeReader expects
@@ -122,6 +131,48 @@ inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol) {
 //======================================================================================================
 inline void ShardedTradeLog_Flush(ShardedTradeLog* log) {
     if (log->file) fflush(log->file);
+}
+
+//======================================================================================================
+// [ROTATE] (v4.7.18 — Reset Paper integration)
+//======================================================================================================
+// Close the current trade log, rename it to a timestamped backup, and reopen
+// fresh. Used by the GUI's "Reset Paper" button so the user gets a clean
+// trade-history view without losing the prior session's data.
+//
+// Naming: logging/SYMBOL_order_history.YYYYMMDD-HHMMSS.csv
+//
+// Returns 1 on success, 0 if anything fails (no-op on failure — engine keeps
+// the existing file open).
+//======================================================================================================
+inline int ShardedTradeLog_Rotate(ShardedTradeLog* log) {
+    if (!log->file || log->symbol[0] == '\0') return 0;
+    fclose(log->file);
+    log->file = nullptr;
+
+    char src[256], dst[256];
+    int sn = snprintf(src, sizeof(src),
+                      "logging/%s_order_history.csv", log->symbol);
+    if (sn < 0 || (size_t)sn >= sizeof(src)) return 0;
+
+    time_t now = time(NULL);
+    struct tm* tm = localtime(&now);
+    int dn = snprintf(dst, sizeof(dst),
+                      "logging/%s_order_history.%04d%02d%02d-%02d%02d%02d.csv",
+                      log->symbol,
+                      tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+                      tm->tm_hour, tm->tm_min, tm->tm_sec);
+    if (dn < 0 || (size_t)dn >= sizeof(dst)) return 0;
+
+    if (rename(src, dst) != 0) {
+        // rename failed — try to reopen the original file so we don't
+        // end up with no log at all
+        log->file = fopen(src, "a");
+        return 0;
+    }
+    log->row_count = 0;
+    // Reopen fresh — Init writes the header again since file is now empty
+    return ShardedTradeLog_Init(log, log->symbol);
 }
 
 inline void ShardedTradeLog_Close(ShardedTradeLog* log) {

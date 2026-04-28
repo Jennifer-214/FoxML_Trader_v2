@@ -834,8 +834,18 @@ struct TUISnapshot {
     int live_trading;      // 1 = use_real_money enabled
     double cfg_hold_score, cfg_trail_mult, cfg_sl_trail_mult;
     double cfg_offset_val; // offset pct or stddev mult depending on mode
-    // stats
-    uint32_t total_buys, wins, losses;
+    // stats. Two flavors:
+    //   total_buys / total_exits_fills — per-fill heartbeat counters
+    //     (each leg-fill bumps; a paired trade entry/exit = 2 fills).
+    //   wins / losses — per-trade counters (leg-A-only stamped, so 1
+    //     paired close = 1 win or 1 loss).
+    // Stats panel shows both: e.g. "buys: 3 (6 fills)  exits: 1 (2 fills)".
+    uint32_t total_buys, total_exits_fills, wins, losses;
+    // v4.7.18: paper_reset_seq mirror so retained-history GUI panels
+    // (Per-Core P&L ring, equity curve, etc.) can detect reset events
+    // and clear their buffers. Bumped by the engine in the paper-reset
+    // handler. Panel saves last_seen value, compares each frame.
+    uint32_t paper_reset_seq;
     double win_rate, profit_factor, avg_win, avg_loss, avg_loss_market, avg_hold;
     double expectancy;       // (win_rate * avg_win) - (loss_rate * avg_loss)
     double max_drawdown;     // peak-to-trough equity drop ($)
@@ -959,6 +969,12 @@ struct TUISharedState {
     volatile sig_atomic_t regime_cycle_requested;
     volatile sig_atomic_t kill_reset_requested;
     volatile sig_atomic_t paper_reset_requested;  // reset balance + positions to starting state
+    // v4.7.18: monotonic counter bumped by the engine each time a paper
+    // reset completes. GUI panels with retained history (Per-Core P&L
+    // ring buffer, equity curve, etc.) save the last seen value and
+    // clear their buffers when it changes. Stays simple — atomic-style
+    // semantics on uint32 are fine for sig_atomic_t reads on x86.
+    volatile sig_atomic_t paper_reset_seq;
     // GUI drag-TP/SL: slot index + new price (engine clears after pickup)
     volatile int drag_slot;       // -1 = no drag, 0-15 = position slot
     volatile int drag_is_tp;      // 1 = TP, 0 = SL

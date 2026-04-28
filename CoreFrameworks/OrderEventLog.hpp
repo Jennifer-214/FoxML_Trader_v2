@@ -248,6 +248,47 @@ inline void OrderEventLog_InitWithFile(OrderEventLog<F>* log, const char* path) 
 }
 
 //======================================================================================================
+// [RESET — v4.7.18 Reset Paper integration]
+//======================================================================================================
+// Truncate the disk event log to header-only (or remove + recreate) and zero
+// the in-memory state. Called from the engine's paper-reset handler so a
+// fresh boot doesn't replay 40 zombie events from a prior session.
+//
+// Keeps the same file handle open in append mode after the truncation so
+// subsequent appends keep working without reinitializing.
+//======================================================================================================
+template <unsigned F>
+inline void OrderEventLog_Reset(OrderEventLog<F>* log) {
+    // In-memory: clear count + reset id sequence. Buffer stays allocated.
+    log->count = 0;
+    log->next_event_id = 1;
+
+    if (!log->disk_file || log->disk_path[0] == '\0') return;
+
+    // Close the current handle, recreate the file fresh (truncates), reopen
+    // for append. Re-writes the header so the file remains valid.
+    std::fclose(log->disk_file);
+    log->disk_file = std::fopen(log->disk_path, "wb");
+    if (!log->disk_file) {
+        std::fprintf(stderr, "[OrderEventLog] WARN: reset failed to reopen %s\n",
+                     log->disk_path);
+        return;
+    }
+    OrderEventLogFileHeader hdr;
+    std::memset(&hdr, 0, sizeof(hdr));
+    std::memcpy(hdr.magic, "OMSEL01", 8);
+    hdr.fpn_width  = F;
+    hdr.entry_size = (uint32_t)sizeof(OrderEvent<F>);
+    std::fwrite(&hdr, sizeof(hdr), 1, log->disk_file);
+    std::fflush(log->disk_file);
+    // reopen in append mode so subsequent writes keep going
+    std::fclose(log->disk_file);
+    log->disk_file = std::fopen(log->disk_path, "ab");
+    std::fprintf(stderr, "[OrderEventLog] reset: %s truncated + re-headered\n",
+                 log->disk_path);
+}
+
+//======================================================================================================
 // [LOAD FROM DISK — phase 07 replay on startup]
 //======================================================================================================
 // Reads events from a previously-written event log file and populates the

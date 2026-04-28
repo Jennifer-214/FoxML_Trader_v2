@@ -120,7 +120,7 @@ static inline void TradeHistory_Refresh(TradeHistory *th) {
     fclose(f);
 }
 
-static inline void GUI_Panel_TradeHistory(TradeHistory *th) {
+static inline void GUI_Panel_TradeHistory(TradeHistory *th, int partial_exit_enabled = 0) {
     ImGui::Begin("Trade History");
 
     TradeHistory_Refresh(th);
@@ -139,8 +139,15 @@ static inline void GUI_Panel_TradeHistory(TradeHistory *th) {
     ImGuiTableFlags flags = ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
                             ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable;
 
-    if (ImGui::BeginTable("##trades", 9, flags, ImVec2(0, -1))) {
+    // v4.7.18: explicit Core + Leg columns. Pre-v4.7.18 the leg was buried
+    // as a ".B" suffix on the strategy name; the actual core_id was hidden
+    // entirely (CSV stores portfolio SLOT in the core_id field, which under
+    // partials is 2*core+leg). Now: Core column shows real core (slot/2
+    // when partials enabled, slot otherwise); Leg column shows A/B/–.
+    if (ImGui::BeginTable("##trades", 11, flags, ImVec2(0, -1))) {
         ImGui::TableSetupColumn("#",      ImGuiTableColumnFlags_WidthFixed, 30);
+        ImGui::TableSetupColumn("Core",   ImGuiTableColumnFlags_WidthFixed, 35);
+        ImGui::TableSetupColumn("Leg",    ImGuiTableColumnFlags_WidthFixed, 30);
         ImGui::TableSetupColumn("Entry",  ImGuiTableColumnFlags_WidthFixed, 70);
         ImGui::TableSetupColumn("Exit",   ImGuiTableColumnFlags_WidthFixed, 70);
         ImGui::TableSetupColumn("P&L",    ImGuiTableColumnFlags_WidthFixed, 70);
@@ -159,6 +166,20 @@ static inline void GUI_Panel_TradeHistory(TradeHistory *th) {
 
             ImGui::TableNextColumn();
             ImGui::Text("%d", th->count - 1 - i + 1);
+
+            // v4.7.18: actual core_id + leg breakdown. CSV's core_id field
+            // is the portfolio SLOT (slot c → core c/2, leg c%2 under
+            // partials). With partials disabled, slot == core, leg == 0.
+            int actual_core = partial_exit_enabled ? (e->core_id >> 1) : e->core_id;
+            ImGui::TableNextColumn();
+            ImGui::TextColored(FoxmlColors::wheat, "C%d", actual_core);
+            ImGui::TableNextColumn();
+            if (partial_exit_enabled) {
+                ImVec4 leg_col = (e->leg == 0) ? FoxmlColors::green_b : FoxmlColors::sand;
+                ImGui::TextColored(leg_col, "%s", e->leg == 0 ? "A" : "B");
+            } else {
+                ImGui::TextColored(FoxmlColors::comment, "–");
+            }
 
             ImGui::TableNextColumn();
             ImGui::Text("$%.0f", e->entry_price);

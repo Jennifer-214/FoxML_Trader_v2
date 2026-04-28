@@ -349,7 +349,7 @@ static inline void *gui_thread_fn(void *arg) {
         GUI_Panel_Settings(&settings, &shared->reload_requested,
                            snap->sharded_mode_active ? snap->per_core_count : 0,
                            shared, snap);
-        GUI_Panel_TradeHistory(&trade_history);
+        GUI_Panel_TradeHistory(&trade_history, snap->partial_exit_enabled);
         GUI_Panel_LogViewer(&log_viewer);
 
         Gui_EndFrame(&gui);

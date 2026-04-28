@@ -1138,6 +1138,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     TUI_CopySnapshotSharded(bs, &state, &rolling_short, &rolling_long,
                                              &cfg, price_d, volume_d);
                     TUI_PopulatePerCoreLatency(bs, cores, num_cores, tsc_ghz);
+                    // v4.7.18: paper-reset seq for history-clearing panels
+                    bs->paper_reset_seq = (uint32_t)g_shared.paper_reset_seq;
                     // append current data point to graph ring buffers
                     bs->price_history[bs->graph_head] = bs->price;
                     bs->volume_history[bs->graph_head] = bs->volume;
@@ -1181,8 +1183,24 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         state.cores[c].core_kill_tripped   = 0;
                         state.cores[c].core_ks_trips_total = 0;
                     }
-                    fprintf(stderr, "[sharded] paper reset: balance=$%.2f\n",
-                            FPN_ToDouble(cfg.starting_balance));
+                    // v4.7.18: rotate the trade history CSV to a timestamped
+                    // backup so the GUI's Trade History panel goes blank
+                    // instead of mixing pre-reset rows with new ones.
+                    if (state.oms->trade_log) {
+                        ShardedTradeLog_Rotate(state.oms->trade_log);
+                    }
+                    // v4.7.18: also truncate the OMS event log on disk so
+                    // the next engine restart doesn't replay 40+ zombie
+                    // events from the prior session into the fresh state.
+                    OrderEventLog_Reset(&state.oms->event_log);
+                    // v4.7.18: bump the reset sequence counter so retained-
+                    // history GUI panels (Per-Core P&L ring buffer, equity
+                    // curve, etc.) can clear themselves.
+                    g_shared.paper_reset_seq++;
+                    fprintf(stderr, "[sharded] paper reset: balance=$%.2f "
+                                    "(seq=%u, trade log + event log rotated)\n",
+                            FPN_ToDouble(cfg.starting_balance),
+                            (unsigned)g_shared.paper_reset_seq);
                 }
 #endif
             }

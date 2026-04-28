@@ -253,6 +253,21 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
     ImPlot::PushStyleColor(ImPlotCol_PlotBg, FoxmlColors::bg_dark);
     // subtle Y grid lines for price readability
     ImPlot::PushStyleColor(ImPlotCol_AxisGrid, ImVec4(1, 1, 1, 0.06f));
+    // v4.7.18: pan vs drag-TP/SL routing.
+    //   plain LMB drag → ImPlot pan (default)
+    //   shift+LMB drag → grab + drag a TP/SL line (our handler below)
+    // To make this work, we dynamically suppress ImPlot's pan when shift
+    // is held — by setting PanMod to a modifier the user isn't pressing,
+    // pan stops firing this frame, leaving LMB free for our drag. When
+    // shift is released, PanMod reverts to none and plain drag pans
+    // again. Saved input map is restored at EndPlot for other plots
+    // (volume) to keep their default bindings.
+    ImPlotInputMap prev_input_map = ImPlot::GetInputMap();
+    if (ImGui::GetIO().KeyShift) {
+        ImPlot::GetInputMap().PanMod = ImGuiMod_Ctrl;  // disable plain-LMB pan this frame
+    } else {
+        ImPlot::GetInputMap().PanMod = 0;
+    }
     if (ImPlot::BeginPlot("##price", ImVec2(-1, -1),
                            ImPlotFlags_NoTitle | ImPlotFlags_NoMouseText)) {
 
@@ -723,12 +738,16 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             }
         }
 
-        // draggable TP/SL lines
+        // draggable TP/SL lines (shift+LMB drag — see input-map block above)
         static DragState drag = {0, -1, 0, 0};
         if (ImPlot::IsPlotHovered() || drag.active) {
             ImPlotPoint mouse = ImPlot::GetPlotMousePos();
             ImVec2 mouse_px = ImGui::GetMousePos();
             bool mouse_down = ImGui::IsMouseDown(0);
+            // v4.7.18: require shift to be held to START the drag.
+            // Continuation (drag.active already 1) is independent — user
+            // can release shift mid-drag without losing the grab.
+            bool shift_held = ImGui::GetIO().KeyShift;
 
             if (!drag.active) {
                 // hover detection: find nearest TP/SL line within 5px
@@ -748,8 +767,10 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                         }
                     }
                 }
-                if (best_slot >= 0) {
-                    // highlight the hovered line
+                if (best_slot >= 0 && shift_held) {
+                    // highlight the hovered line (only when shift held —
+                    // otherwise hover near a line shouldn't change cursor
+                    // since plain drag is for panning)
                     double hp = best_tp ? snap->positions[best_slot].tp
                                         : snap->positions[best_slot].sl;
                     ImVec2 hl = ImPlot::PlotToPixels(xL, hp);
@@ -1028,6 +1049,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
 
         ImPlot::EndPlot();
     }
+    ImPlot::GetInputMap() = prev_input_map;  // v4.7.18: restore pan/select bindings
     ImPlot::PopStyleColor(2);  // PlotBg + AxisGrid
     ImGui::End();
 }

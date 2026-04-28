@@ -167,7 +167,12 @@ static inline void TUI_CopySnapshotSharded(
     }
 
     // counters
-    snap->total_buys = (uint32_t)agg.total_entries;
+    snap->total_buys        = (uint32_t)agg.total_entries;
+    snap->total_exits_fills = (uint32_t)agg.total_exits;  // per-fill heartbeat (leg fills)
+    // v4.7.18: paper-reset sequence — caller fills this in (the engine
+    // owns the TUISharedState that holds the live counter). Default 0
+    // here so non-engine callers (tests) don't trip on uninit.
+    snap->paper_reset_seq   = 0;
 
     // Bug fix (2026-04-27): aggregate per-core core_wins / core_losses
     // into snap->wins / snap->losses so the global Stats panel
