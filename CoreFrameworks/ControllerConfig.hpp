@@ -63,33 +63,48 @@ constexpr uint8_t ENGINE_MODE_SHARDED = 1;
 // `ControllerConfig_Load`'s per-core block + surface in the Settings
 // panel's per-core tab. Four sites, all in this file + SettingsPanel.hpp.
 //======================================================================================================
+// v4.7.24: per-core override fields driven by ONE X-macro list. Adding a
+// new override = ONE line in this macro. Struct members, init zeroing,
+// resolver overwrite logic, and cfg parser ALL auto-derive from this list.
+//
+// PCT(name)  — percentage field; cfg writes 4.0, stored as 0.04. Parser
+//              divides by 100.0 at load.
+// RAW(name)  — raw FPN field; cfg writes 3.0, stored as 3.0. Parser uses
+//              atof directly.
+//
+// Field NAMES MUST MATCH same-named members of ControllerConfig exactly —
+// the resolver does a direct field-by-field overwrite by name.
+//
+// Pre-v4.7.24 this required 4 separate edits across this file (struct,
+// init, resolver, parser) — easy to forget one site and silently lose
+// the override on a new field. The X-macro collapses that to one line.
+#define PER_CORE_OVERRIDE_FIELDS(PCT, RAW) \
+    /* Trading */ \
+    PCT(take_profit_pct) \
+    PCT(stop_loss_pct) \
+    RAW(fee_floor_mult) \
+    /* Entry filters */ \
+    PCT(entry_offset_pct) \
+    RAW(volume_multiplier) \
+    RAW(spacing_multiplier) \
+    RAW(offset_stddev_mult) \
+    /* Strategy-specific */ \
+    PCT(simpledip_tp_pct) \
+    PCT(simpledip_sl_pct) \
+    PCT(mr_tp_pct) \
+    PCT(mr_sl_pct) \
+    RAW(momentum_tp_mult) \
+    RAW(momentum_sl_mult) \
+    PCT(emacross_tp_pct) \
+    PCT(emacross_sl_pct) \
+    PCT(ml_tp_pct) \
+    PCT(ml_sl_pct) \
+    RAW(ml_buy_threshold)
+
 template <unsigned F> struct PerCoreOverrides {
-  // Trading. Field names match the same-named members of ControllerConfig
-  // exactly — the resolver does a direct field-by-field overwrite.
-  FPN<F> take_profit_pct;       // shadows global take_profit_pct
-  FPN<F> stop_loss_pct;
-  FPN<F> fee_floor_mult;
-
-  // Entry filters
-  FPN<F> entry_offset_pct;      // shadows global entry_offset_pct
-  FPN<F> volume_multiplier;
-  FPN<F> spacing_multiplier;    // shadows global spacing_multiplier
-  FPN<F> offset_stddev_mult;    // shadows global offset_stddev_mult
-
-  // Strategy-specific overrides — per-strategy-type knobs that previously
-  // existed only at global scope. These let you run e.g. MR with different
-  // TPs on different cores.
-  FPN<F> simpledip_tp_pct;
-  FPN<F> simpledip_sl_pct;
-  FPN<F> mr_tp_pct;
-  FPN<F> mr_sl_pct;
-  FPN<F> momentum_tp_mult;
-  FPN<F> momentum_sl_mult;
-  FPN<F> emacross_tp_pct;
-  FPN<F> emacross_sl_pct;
-  FPN<F> ml_tp_pct;
-  FPN<F> ml_sl_pct;
-  FPN<F> ml_buy_threshold;
+#define _DECL_OV_FIELD(name) FPN<F> name;
+    PER_CORE_OVERRIDE_FIELDS(_DECL_OV_FIELD, _DECL_OV_FIELD)
+#undef _DECL_OV_FIELD
 };
 
 //======================================================================================================
@@ -472,27 +487,11 @@ inline ControllerConfig<F> ControllerConfig_ResolveForCore(
     ControllerConfig<F> resolved = global;
     if (core_id < 0 || core_id >= 16) return resolved;
     const PerCoreOverrides<F>& ov = global.core_overrides[core_id];
-    // Trading
-    if (!FPN_IsZero(ov.take_profit_pct))   resolved.take_profit_pct   = ov.take_profit_pct;
-    if (!FPN_IsZero(ov.stop_loss_pct))     resolved.stop_loss_pct     = ov.stop_loss_pct;
-    if (!FPN_IsZero(ov.fee_floor_mult))    resolved.fee_floor_mult    = ov.fee_floor_mult;
-    // Entry filters
-    if (!FPN_IsZero(ov.entry_offset_pct))   resolved.entry_offset_pct   = ov.entry_offset_pct;
-    if (!FPN_IsZero(ov.volume_multiplier))  resolved.volume_multiplier  = ov.volume_multiplier;
-    if (!FPN_IsZero(ov.spacing_multiplier)) resolved.spacing_multiplier = ov.spacing_multiplier;
-    if (!FPN_IsZero(ov.offset_stddev_mult)) resolved.offset_stddev_mult = ov.offset_stddev_mult;
-    // Strategy-specific
-    if (!FPN_IsZero(ov.simpledip_tp_pct))  resolved.simpledip_tp_pct  = ov.simpledip_tp_pct;
-    if (!FPN_IsZero(ov.simpledip_sl_pct))  resolved.simpledip_sl_pct  = ov.simpledip_sl_pct;
-    if (!FPN_IsZero(ov.mr_tp_pct))         resolved.mr_tp_pct         = ov.mr_tp_pct;
-    if (!FPN_IsZero(ov.mr_sl_pct))         resolved.mr_sl_pct         = ov.mr_sl_pct;
-    if (!FPN_IsZero(ov.momentum_tp_mult))  resolved.momentum_tp_mult  = ov.momentum_tp_mult;
-    if (!FPN_IsZero(ov.momentum_sl_mult))  resolved.momentum_sl_mult  = ov.momentum_sl_mult;
-    if (!FPN_IsZero(ov.emacross_tp_pct))   resolved.emacross_tp_pct   = ov.emacross_tp_pct;
-    if (!FPN_IsZero(ov.emacross_sl_pct))   resolved.emacross_sl_pct   = ov.emacross_sl_pct;
-    if (!FPN_IsZero(ov.ml_tp_pct))         resolved.ml_tp_pct         = ov.ml_tp_pct;
-    if (!FPN_IsZero(ov.ml_sl_pct))         resolved.ml_sl_pct         = ov.ml_sl_pct;
-    if (!FPN_IsZero(ov.ml_buy_threshold))  resolved.ml_buy_threshold  = ov.ml_buy_threshold;
+    // v4.7.24: resolver auto-derives from PER_CORE_OVERRIDE_FIELDS. Adding
+    // a new field = 1 line in the macro list, not a line here.
+#define _RESOLVE_OV_FIELD(name) if (!FPN_IsZero(ov.name)) resolved.name = ov.name;
+    PER_CORE_OVERRIDE_FIELDS(_RESOLVE_OV_FIELD, _RESOLVE_OV_FIELD)
+#undef _RESOLVE_OV_FIELD
     return resolved;
 }
 
@@ -694,26 +693,12 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.enable_mtm_kill_switch = 1;                // mark-to-market enabled by default
   for (int i = 0; i < 16; ++i) cfg.core_model_path[i][0] = '\0';    // empty = shared
   for (int i = 0; i < 16; ++i) cfg.core_model_dir[i][0] = '\0';     // empty = use model_path or shared
-  // v4.0 per-core overrides — zero in every field = "inherit global"
+  // v4.0 per-core overrides — zero in every field = "inherit global".
+  // v4.7.24: zeroing auto-derives from PER_CORE_OVERRIDE_FIELDS macro.
   for (int i = 0; i < 16; ++i) {
-    cfg.core_overrides[i].take_profit_pct    = FPN_Zero<F>();
-    cfg.core_overrides[i].stop_loss_pct      = FPN_Zero<F>();
-    cfg.core_overrides[i].fee_floor_mult     = FPN_Zero<F>();
-    cfg.core_overrides[i].entry_offset_pct   = FPN_Zero<F>();
-    cfg.core_overrides[i].volume_multiplier  = FPN_Zero<F>();
-    cfg.core_overrides[i].spacing_multiplier = FPN_Zero<F>();
-    cfg.core_overrides[i].offset_stddev_mult = FPN_Zero<F>();
-    cfg.core_overrides[i].simpledip_tp_pct  = FPN_Zero<F>();
-    cfg.core_overrides[i].simpledip_sl_pct  = FPN_Zero<F>();
-    cfg.core_overrides[i].mr_tp_pct         = FPN_Zero<F>();
-    cfg.core_overrides[i].mr_sl_pct         = FPN_Zero<F>();
-    cfg.core_overrides[i].momentum_tp_mult  = FPN_Zero<F>();
-    cfg.core_overrides[i].momentum_sl_mult  = FPN_Zero<F>();
-    cfg.core_overrides[i].emacross_tp_pct   = FPN_Zero<F>();
-    cfg.core_overrides[i].emacross_sl_pct   = FPN_Zero<F>();
-    cfg.core_overrides[i].ml_tp_pct         = FPN_Zero<F>();
-    cfg.core_overrides[i].ml_sl_pct         = FPN_Zero<F>();
-    cfg.core_overrides[i].ml_buy_threshold  = FPN_Zero<F>();
+#define _ZERO_OV_FIELD(name) cfg.core_overrides[i].name = FPN_Zero<F>();
+    PER_CORE_OVERRIDE_FIELDS(_ZERO_OV_FIELD, _ZERO_OV_FIELD)
+#undef _ZERO_OV_FIELD
   }
   cfg.simpledip_tp_pct  = FPN_Zero<F>();  // 0 = use shared take_profit_pct
   cfg.simpledip_sl_pct  = FPN_Zero<F>();
@@ -1091,9 +1076,10 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // the fallback. Two categories — pct (atof/100, e.g. take_profit_pct)
     // and raw FPN (atof, e.g. ml_buy_threshold).
     //
-    // Adding a new override field: extend the struct in PerCoreOverrides,
-    // the corresponding line in ControllerConfig_ResolveForCore, and add
-    // a row below with the right macro.
+    // v4.7.24: parser auto-derives from PER_CORE_OVERRIDE_FIELDS macro.
+    // Adding a new override field = ONE line in the macro list near the
+    // top of this header. The struct, init, resolver, and parser all
+    // pick up the new field automatically.
     if (strncmp(key, "core_", 5) == 0) {
       int core_idx = -1;
       const char* suffix = nullptr;
@@ -1104,26 +1090,11 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       if (*p == '_' && core_idx >= 0 && core_idx < 16) {
         suffix = p + 1;
         PerCoreOverrides<F>& ov = cfg.core_overrides[core_idx];
-        // Percentage fields (config writes 4.0, stored as 0.04)
-        if (strcmp(suffix, "take_profit_pct")    == 0) { ov.take_profit_pct    = FPN_FromDouble<F>(atof(val)/100.0); continue; }
-        if (strcmp(suffix, "stop_loss_pct")      == 0) { ov.stop_loss_pct      = FPN_FromDouble<F>(atof(val)/100.0); continue; }
-        if (strcmp(suffix, "entry_offset_pct")   == 0) { ov.entry_offset_pct   = FPN_FromDouble<F>(atof(val)/100.0); continue; }
-        if (strcmp(suffix, "simpledip_tp_pct")   == 0) { ov.simpledip_tp_pct   = FPN_FromDouble<F>(atof(val)/100.0); continue; }
-        if (strcmp(suffix, "simpledip_sl_pct")   == 0) { ov.simpledip_sl_pct   = FPN_FromDouble<F>(atof(val)/100.0); continue; }
-        if (strcmp(suffix, "mr_tp_pct")          == 0) { ov.mr_tp_pct          = FPN_FromDouble<F>(atof(val)/100.0); continue; }
-        if (strcmp(suffix, "mr_sl_pct")          == 0) { ov.mr_sl_pct          = FPN_FromDouble<F>(atof(val)/100.0); continue; }
-        if (strcmp(suffix, "emacross_tp_pct")    == 0) { ov.emacross_tp_pct    = FPN_FromDouble<F>(atof(val)/100.0); continue; }
-        if (strcmp(suffix, "emacross_sl_pct")    == 0) { ov.emacross_sl_pct    = FPN_FromDouble<F>(atof(val)/100.0); continue; }
-        if (strcmp(suffix, "ml_tp_pct")          == 0) { ov.ml_tp_pct          = FPN_FromDouble<F>(atof(val)/100.0); continue; }
-        if (strcmp(suffix, "ml_sl_pct")          == 0) { ov.ml_sl_pct          = FPN_FromDouble<F>(atof(val)/100.0); continue; }
-        // Raw FPN fields (atof, no /100)
-        if (strcmp(suffix, "fee_floor_mult")     == 0) { ov.fee_floor_mult     = FPN_FromDouble<F>(atof(val));       continue; }
-        if (strcmp(suffix, "volume_multiplier")  == 0) { ov.volume_multiplier  = FPN_FromDouble<F>(atof(val));       continue; }
-        if (strcmp(suffix, "spacing_multiplier") == 0) { ov.spacing_multiplier = FPN_FromDouble<F>(atof(val));       continue; }
-        if (strcmp(suffix, "offset_stddev_mult") == 0) { ov.offset_stddev_mult = FPN_FromDouble<F>(atof(val));       continue; }
-        if (strcmp(suffix, "momentum_tp_mult")   == 0) { ov.momentum_tp_mult   = FPN_FromDouble<F>(atof(val));       continue; }
-        if (strcmp(suffix, "momentum_sl_mult")   == 0) { ov.momentum_sl_mult   = FPN_FromDouble<F>(atof(val));       continue; }
-        if (strcmp(suffix, "ml_buy_threshold")   == 0) { ov.ml_buy_threshold   = FPN_FromDouble<F>(atof(val));       continue; }
+#define _PARSE_OV_PCT(name) if (strcmp(suffix, #name) == 0) { ov.name = FPN_FromDouble<F>(atof(val)/100.0); continue; }
+#define _PARSE_OV_RAW(name) if (strcmp(suffix, #name) == 0) { ov.name = FPN_FromDouble<F>(atof(val));       continue; }
+        PER_CORE_OVERRIDE_FIELDS(_PARSE_OV_PCT, _PARSE_OV_RAW)
+#undef _PARSE_OV_PCT
+#undef _PARSE_OV_RAW
       }
     }
     // Per-strategy TP/SL overrides (percentage, parsed with /100)
