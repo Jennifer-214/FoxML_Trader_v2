@@ -101,9 +101,9 @@ static const CfgFieldDef field_defs[] = {
         "Slow-path cycles to observe after kill reset\nbefore trading resumes (prevents immediate re-entry)"},
     // v4.7.29: Vol Sizing + No-Trade Band scale curves moved to per-core
     // tabs. Toggles stay global (engine-architectural enable/disable).
-    {"vol_sizing_enabled",    "Vol Sizing",   "Vol Sizing",      CFG_BOOL,  NULL,
+    {"vol_sizing_enabled",    "Vol Sizing##bool",   "Vol Sizing",      CFG_BOOL,  NULL,
         "Engine-wide enable for vol sizing.\nPer-core scale_min/scale_max overrides live in each core's Vol Sizing section."},
-    {"no_trade_band_enabled", "No-Trade Band","No-Trade Band",   CFG_BOOL,  NULL,
+    {"no_trade_band_enabled", "No-Trade Band##bool","No-Trade Band",   CFG_BOOL,  NULL,
         "Engine-wide enable for the no-trade band.\nPer-core band multiplier override lives in each core's No-Trade Band section."},
     // Regime Detection
     {"regime_crossover_threshold","Mild Trend","Regime Detection",CFG_FLOAT,"%.5f",
@@ -191,7 +191,7 @@ static const CfgFieldDef field_defs[] = {
         "Used for both stderr and command backends."},
     // Toggles
     {"use_real_money",        "LIVE Trading", "Toggles",         CFG_BOOL,  NULL,   NULL},
-    {"partial_exit_enabled",  "Partial Exits","Toggles",         CFG_BOOL,  NULL,   NULL},
+    {"partial_exit_enabled",  "Partial Exits##toggle","Toggles",         CFG_BOOL,  NULL,   NULL},
     {"session_filter_enabled","Session Filter","Toggles",        CFG_BOOL,  NULL,   NULL},
     {"depth_enabled",         "Order Book",   "Toggles",         CFG_BOOL,  NULL,   NULL},
     {"min_book_imbalance",    "Book Imbal",   "Toggles",         CFG_FLOAT, "%.2f", NULL},
