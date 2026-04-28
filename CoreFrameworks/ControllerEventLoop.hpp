@@ -654,77 +654,75 @@ inline void EventLoopState_SetIntendedParams(EventLoopState<F>* state, int slot,
 // All slow-path. Single-threaded (drainer is sole reader, OMS_Tick on
 // the same thread is sole writer). FPN-pure on the per-core math.
 //======================================================================================================
+// v4.7.38 (Phase C.1): per-core helper. Walks ONLY this core's slots in
+// the open/close masks. Clears only its own bits (`mask &= ~my_mask`).
+// Wrapper EventLoop_DrainPostFill calls this for each registered core.
+//
+// Atomicity note: in the centralized path (drainer thread is sole caller,
+// today's mode), plain uint16_t writes to last_opened_mask / last_closed_mask
+// are safe. When Phase C.2 spawns per-core slow-path threads, EACH thread's
+// OneCore call clears its own bits — multiple writers to the same uint16
+// becomes a race. Phase C.2 will convert these to std::atomic<uint16_t>
+// and use fetch_and(~my_mask). For Phase C.1 (this commit), single-writer
+// drainer keeps plain access safe.
 template <unsigned F>
-inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
-                                     OrderManagerState<F>* oms,
-                                     uint32_t sl_cooldown_cycles) {
+inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
+                                             OrderManagerState<F>* oms,
+                                             uint32_t sl_cooldown_cycles,
+                                             int core_id) {
     const int partial_on = oms->partial_exit_enabled ? 1 : 0;
-    const int max_slot   = partial_on ? state->registered_count * 2
-                                      : state->registered_count;
+    uint16_t my_mask = partial_on
+        ? (uint16_t)((1u << (core_id * 2)) | (1u << (core_id * 2 + 1)))
+        : (uint16_t)(1u << core_id);
+    const int max_slot = partial_on ? state->registered_count * 2
+                                    : state->registered_count;
+
+    CoreContext<F>& ctx = state->cores[core_id];
 
     // ---- Entries: open_notional / fees + heartbeat counters ----
-    uint16_t open_mask = oms->last_opened_mask;
+    uint16_t open_mask = (uint16_t)(oms->last_opened_mask & my_mask);
     while (open_mask) {
         int slot = __builtin_ctz(open_mask);
         open_mask &= (uint16_t)(open_mask - 1);
         if (slot < 0 || slot >= max_slot) continue;
-        int core_id = partial_on ? (slot >> 1) : slot;
-        CoreContext<F>& ctx = state->cores[core_id];
         const auto& rec = oms->last_fill[slot];
         ctx.core_open_notional = FPN_Add(ctx.core_open_notional, rec.entry_notional);
         ctx.core_fees          = FPN_AddSat(ctx.core_fees, rec.entry_fee);
-        // v4.7.19: heartbeat counters bumped HERE — atomic with the CSV
-        // write inside HandleFill that produced this mask bit. Replaces
-        // the prior decoupled bumps in OnEvent / manual-close / time-exit
-        // that over-counted when Submit failed or HandleFill rejected
-        // (active_bitmap guard etc.).
         ctx.entries_processed++;
         state->total_entries++;
         state->total_events_processed++;
     }
-    oms->last_opened_mask = 0;
+    oms->last_opened_mask &= (uint16_t)~my_mask;  // clear only my bits
 
     // ---- Exits ----
-    uint16_t close_mask = oms->last_closed_mask;
+    uint16_t close_mask = (uint16_t)(oms->last_closed_mask & my_mask);
     while (close_mask) {
         int slot = __builtin_ctz(close_mask);
         close_mask &= (uint16_t)(close_mask - 1);
         if (slot < 0 || slot >= max_slot) continue;
-        int core_id = partial_on ? (slot >> 1) : slot;
         // Leg A is the even slot under partials; the only slot when
         // partials disabled. Per-trade signals (W/L, ConfidenceScorer,
-        // pnl_feeder, cooldown) fire only on leg A — see header comment.
+        // pnl_feeder, cooldown) fire only on leg A.
         bool is_leg_a = !partial_on || ((slot & 1) == 0);
-        CoreContext<F>& ctx = state->cores[core_id];
         const auto& rec = oms->last_fill[slot];
 
         // Per-leg accounting: every exit fill contributes.
         ctx.core_realized      = FPN_Add(ctx.core_realized, rec.exit_net_pnl);
         ctx.core_open_notional = FPN_SubSat(ctx.core_open_notional, rec.exit_entry_notional);
         ctx.core_fees          = FPN_AddSat(ctx.core_fees, rec.exit_total_fees);
-        // v4.7.19: heartbeat counters bumped HERE — same doctrine as
-        // entries above.
         ctx.exits_processed++;
         state->total_exits++;
         state->total_events_processed++;
 
-        // v4.7.21: W/L pairing under partial exits.
-        // partials enabled → both legs belong to one trade idea. Stash the
-        // first leg's net P&L; when its partner closes, classify by total
-        // net (positive → 1W, otherwise → 1L). One bump per trade.
-        // partials disabled → bypass; the leg-A-only block below is the
-        // only fill site, so its existing per-trade bump is correct.
+        // v4.7.21 W/L pairing under partials (unchanged).
         if (partial_on) {
             if (ctx.partner_pending_active) {
                 FPN<F> total_net = FPN_Add(ctx.partner_pending_pnl, rec.exit_net_pnl);
                 if (FPN_GreaterThan(total_net, FPN_Zero<F>())) {
                     ctx.core_wins++;
-                    // v4.7.25: gross_wins accumulates the positive net.
                     ctx.core_gross_wins = FPN_Add(ctx.core_gross_wins, total_net);
                 } else {
                     ctx.core_losses++;
-                    // v4.7.25: gross_losses stores the unsigned magnitude.
-                    // total_net <= 0 here, so 0 - total_net = |total_net|.
                     ctx.core_gross_losses = FPN_Add(ctx.core_gross_losses,
                                                     FPN_Sub(FPN_Zero<F>(), total_net));
                 }
@@ -737,19 +735,13 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
         }
 
         // Per-trade signals: leg A only.
-        // - W/L: only when partials disabled (when enabled, pairing block above
-        //   handles it). When partials disabled, the only exit is leg A.
-        // - ConfidenceScorer / cooldown / pnl_feeder: always leg A only,
-        //   tied to leg A's prediction & TP1 outcome.
         if (is_leg_a) {
             if (!partial_on) {
                 ctx.core_wins   += (rec.was_win ? 1u : 0u);
                 ctx.core_losses += (rec.was_win ? 0u : 1u);
-                // v4.7.25: gross win/loss accumulators for single-leg trades.
                 if (rec.was_win) {
                     ctx.core_gross_wins = FPN_Add(ctx.core_gross_wins, rec.exit_net_pnl);
                 } else {
-                    // exit_net_pnl <= 0 here, store the unsigned magnitude.
                     ctx.core_gross_losses = FPN_Add(ctx.core_gross_losses,
                                                     FPN_Sub(FPN_Zero<F>(), rec.exit_net_pnl));
                 }
@@ -766,7 +758,17 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
             RegressionFeederX_Push(&ctx.pnl_feeder, FPN_FromDouble<F>(realized));
         }
     }
-    oms->last_closed_mask = 0;
+    oms->last_closed_mask &= (uint16_t)~my_mask;  // clear only my bits
+}
+
+// Wrapper: iterate registered cores. Centralized + backtest paths use this.
+template <unsigned F>
+inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
+                                     OrderManagerState<F>* oms,
+                                     uint32_t sl_cooldown_cycles) {
+    for (int c = 0; c < state->registered_count; ++c) {
+        EventLoop_DrainPostFillOneCore(state, oms, sl_cooldown_cycles, c);
+    }
 }
 
 //======================================================================================================
@@ -1069,8 +1071,52 @@ inline int EventLoop_RebuildAllParameters(
         const FPN<F>* bi = (const FPN<F>*)book_imbalance;
         book_imbalance_blocked = FPN_LessThan(*bi, config->min_book_imbalance) ? 1 : 0;
     }
+    // v4.7.38 (Phase C.1): per-core loop body extracted to EventLoop_RebuildOneCore.
+    // Both centralized path (this loop) and per-core slow-path (Phase C.2)
+    // call OneCore with the same arguments — guarantees train-serve parity
+    // by sharing the SAME function across all execution paths. STRATEGY_NONE
+    // skip is the caller's responsibility (cheap conditional).
     for (int slot = 0; slot < state->registered_count; ++slot) {
         if (state->cores[slot].strategy_id == STRATEGY_NONE) continue;
+        EventLoop_RebuildOneCore(
+            state, slot, rolling, config, rolling_long, ror_regressor, ema_price,
+            current_price, rolling_medium, rolling_baseline, cumdelta_state,
+            tick_rate_state, timestamp_us, book_imbalance, book_imb_history,
+            flow_state, large_trade_state, spread_state, current_spread,
+            current_mid_price, book_imbalance_blocked);
+        ++rebuilt;
+    }
+    return rebuilt;
+}
+
+// v4.7.38 (Phase C.1): single-core variant of RebuildAllParameters.
+// Caller must precompute book_imbalance_blocked (cheap — one FPN compare)
+// and skip cores with strategy_id == STRATEGY_NONE before calling.
+template <unsigned F, unsigned W = 128, unsigned WL = 512>
+inline void EventLoop_RebuildOneCore(
+    EventLoopState<F>* state,
+    int slot,
+    const RollingStats<F, W>* rolling,
+    const ControllerConfig<F>* config,
+    const RollingStats<F, WL>* rolling_long,
+    const void* ror_regressor,
+    const void* ema_price,
+    const void* current_price,
+    const void* rolling_medium,
+    const void* rolling_baseline,
+    const void* cumdelta_state,
+    const void* tick_rate_state,
+    uint64_t timestamp_us,
+    const void* book_imbalance,
+    const void* book_imb_history,
+    const void* flow_state,
+    const void* large_trade_state,
+    const void* spread_state,
+    double      current_spread,
+    double      current_mid_price,
+    int         book_imbalance_blocked) {
+    {
+        // Single-iteration scope (was inside `for` loop body before extraction).
         // v4.0 per-core overrides: resolve the cfg for this core. Stack-local
         // copy with override fields swapped in. Strategies receive a "fully
         // resolved" cfg and don't need to know about the override mechanism.
@@ -1500,9 +1546,7 @@ inline int EventLoop_RebuildAllParameters(
         state->cores[slot].intended_sl  = state->cores[slot].pending_params.sg_stop_loss_price;
         state->cores[slot].intended_qty = state->cores[slot].pending_params.trade_size;
         state->cores[slot].dirty = 1;
-        ++rebuilt;
     }
-    return rebuilt;
 }
 
 //======================================================================================================
@@ -1671,31 +1715,42 @@ inline int EventLoop_KillSwitchEvaluate(EventLoopState<F>* state) {
 // extraction wiring). Uses OrderManager_Submit directly because time-exit
 // bypasses the SG-driven event path.
 //======================================================================================================
+// v4.7.38 (Phase C.1): per-core helper, processes only this core's slots.
+// Caller-checked preconditions (cfg.max_hold_ticks > 0 && current_price > 0).
+// Wrapper EventLoop_TimeExit checks once + iterates.
 template <unsigned F>
-inline void EventLoop_TimeExit(EventLoopState<F>* state,
-                                OrderManagerState<F>* oms,
-                                const ControllerConfig<F>& cfg,
-                                uint64_t now_tick,
-                                double current_price) {
-    if (cfg.max_hold_ticks == 0)  return;
-    if (current_price <= 0.01)    return;
+inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
+                                       OrderManagerState<F>* oms,
+                                       const ControllerConfig<F>& cfg,
+                                       uint64_t now_tick,
+                                       double current_price,
+                                       int core_id) {
+    // Build per-core slot mask: slot c (partials off) or slots 2c+0..1 (on).
+    int partial_on = oms->partial_exit_enabled ? 1 : 0;
+    uint16_t my_mask = partial_on
+        ? (uint16_t)((1u << (core_id * 2)) | (1u << (core_id * 2 + 1)))
+        : (uint16_t)(1u << core_id);
+    uint16_t bm = (uint16_t)(oms->portfolio.active_bitmap & my_mask);
 
-    uint16_t bm = oms->portfolio.active_bitmap;
     while (bm) {
         int slot = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
 
-        uint64_t entry_t = state->cores[slot].last_entry_tick;
+        // Note: state->cores[] is indexed by core_id, not slot. With partials,
+        // both leg-A (slot 2c) and leg-B (slot 2c+1) share the same CoreContext
+        // at index core_id. last_entry_tick is stamped only on leg-A entries
+        // by design (per-trade signal), so checking via core_id is correct.
+        uint64_t entry_t = state->cores[core_id].last_entry_tick;
         if (entry_t == 0) continue;  // never stamped (shouldn't happen if active)
         if (entry_t > now_tick) {
             // Snapshot-drift guard. See "Snapshot Tick-Counter Drift"
             // invariant in CLAUDE.md.
             fprintf(stderr,
-                "[time-exit] core %d: stale entry_tick from snapshot "
+                "[time-exit] core %d slot %d: stale entry_tick from snapshot "
                 "(entry_t=%llu > now_tick=%llu); resetting.\n",
-                slot, (unsigned long long)entry_t,
+                core_id, slot, (unsigned long long)entry_t,
                 (unsigned long long)now_tick);
-            state->cores[slot].last_entry_tick = now_tick;
+            state->cores[core_id].last_entry_tick = now_tick;
             continue;
         }
         uint64_t elapsed = now_tick - entry_t;
@@ -1707,23 +1762,32 @@ inline void EventLoop_TimeExit(EventLoopState<F>* state,
         double min_gain = FPN_ToDouble(cfg.min_hold_gain_pct);
         if (gain_pct >= min_gain) continue;  // still profitable enough; keep it
 
-        // Force-close. OMS HandleFill closes the slot exactly like a
-        // normal SG-triggered exit.
-        // v4.7.37 (Phase B reordered): push through OMS_PushSubmit instead
-        // of calling Submit directly. Drainer thread drains the queue and
-        // calls Submit serially — preserves OMS contract, fixes latent
-        // race when per-core slow-paths land in Phase C.
+        // Force-close via OMS_PushSubmit (drainer is sole Submit caller).
         FPN<F> qty       = oms->portfolio.positions[slot].quantity;
         FPN<F> price_fpn = FPN_FromDouble<F>(current_price);
         OMS_PushSubmit(oms, (int16_t)slot, ORDER_MARKET_SELL,
                         qty, FPN_Zero<F>(), FPN_Zero<F>(),
-                        state->cores[slot].strategy_id, price_fpn);
+                        state->cores[core_id].strategy_id, price_fpn);
 
-        // v4.7.19: counter bumps moved to EventLoop_DrainPostFill (single
-        // source of truth, atomic with CSV write).
         fprintf(stderr,
-            "[time-exit] core %d: held %lu ticks, gain %.3f%%\n",
-            slot, (unsigned long)elapsed, gain_pct * 100.0);
+            "[time-exit] core %d slot %d: held %lu ticks, gain %.3f%%\n",
+            core_id, slot, (unsigned long)elapsed, gain_pct * 100.0);
+    }
+}
+
+// Wrapper: preconditions + iterate. Existing callers (centralized + backtest)
+// keep working unchanged.
+template <unsigned F>
+inline void EventLoop_TimeExit(EventLoopState<F>* state,
+                                OrderManagerState<F>* oms,
+                                const ControllerConfig<F>& cfg,
+                                uint64_t now_tick,
+                                double current_price) {
+    if (cfg.max_hold_ticks == 0)  return;
+    if (current_price <= 0.01)    return;
+
+    for (int c = 0; c < state->registered_count; ++c) {
+        EventLoop_TimeExitOneCore(state, oms, cfg, now_tick, current_price, c);
     }
 }
 
@@ -1743,6 +1807,48 @@ inline void EventLoop_TimeExit(EventLoopState<F>* state,
 //
 // Reads rolling.price_stddev directly (caller-owned RollingStats).
 //======================================================================================================
+// v4.7.38 (Phase C.1): per-core helper. Caller-checked preconditions.
+// Implicitly fixes a pre-existing bug where the original walked
+// active_bitmap by slot but indexed state->cores[slot] (per-core array) —
+// under partials, slot 1 (core 0's leg B) wrongly read/wrote core 1's
+// pending_params. OneCore correctly uses core_id for cores[] indexing
+// while still iterating per-slot for portfolio.positions[].
+template <unsigned F, unsigned W>
+inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
+                                                 const ControllerConfig<F>& cfg,
+                                                 const RollingStats<F, W>& rolling,
+                                                 double current_price,
+                                                 int core_id) {
+    double stddev_d     = FPN_ToDouble(rolling.price_stddev);
+    double trail_dist_d = stddev_d * FPN_ToDouble(cfg.sl_trail_mult);
+    double hold_thresh  = FPN_ToDouble(cfg.tp_hold_score);
+
+    int partial_on = state->oms->partial_exit_enabled ? 1 : 0;
+    uint16_t my_mask = partial_on
+        ? (uint16_t)((1u << (core_id * 2)) | (1u << (core_id * 2 + 1)))
+        : (uint16_t)(1u << core_id);
+    uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
+
+    while (bm) {
+        int slot = __builtin_ctz(bm);
+        bm &= (uint16_t)(bm - 1);
+        double entry_d = FPN_ToDouble(state->oms->portfolio.positions[slot].entry_price);
+        if (entry_d <= 0.0) continue;
+        double gain_pct = (current_price - entry_d) / entry_d;
+        if (gain_pct < hold_thresh) continue;  // not yet trailing
+
+        // Note: pending_params is per-CORE (one queue per core). Both legs
+        // share it under partials. Index via core_id, not slot.
+        FPN<F> new_ratchet = FPN_FromDouble<F>(current_price - trail_dist_d);
+        FPN<F> existing    = state->cores[core_id].pending_params.ratchet_sl;
+        if (FPN_GreaterThan(new_ratchet, existing)) {
+            state->cores[core_id].pending_params.ratchet_sl = new_ratchet;
+            state->cores[core_id].dirty = 1;  // force push next cycle
+        }
+    }
+}
+
+// Wrapper: preconditions + iterate.
 template <unsigned F, unsigned W>
 inline void EventLoop_TrailingSLRatchet(EventLoopState<F>* state,
                                          const ControllerConfig<F>& cfg,
@@ -1753,25 +1859,8 @@ inline void EventLoop_TrailingSLRatchet(EventLoopState<F>* state,
     if (FPN_IsZero(rolling.price_stddev)) return;
     if (current_price <= 0.01)            return;
 
-    double stddev_d     = FPN_ToDouble(rolling.price_stddev);
-    double trail_dist_d = stddev_d * FPN_ToDouble(cfg.sl_trail_mult);
-    double hold_thresh  = FPN_ToDouble(cfg.tp_hold_score);
-
-    uint16_t bm = state->oms->portfolio.active_bitmap;
-    while (bm) {
-        int slot = __builtin_ctz(bm);
-        bm &= (uint16_t)(bm - 1);
-        double entry_d = FPN_ToDouble(state->oms->portfolio.positions[slot].entry_price);
-        if (entry_d <= 0.0) continue;
-        double gain_pct = (current_price - entry_d) / entry_d;
-        if (gain_pct < hold_thresh) continue;  // not yet trailing
-
-        FPN<F> new_ratchet = FPN_FromDouble<F>(current_price - trail_dist_d);
-        FPN<F> existing    = state->cores[slot].pending_params.ratchet_sl;
-        if (FPN_GreaterThan(new_ratchet, existing)) {
-            state->cores[slot].pending_params.ratchet_sl = new_ratchet;
-            state->cores[slot].dirty = 1;  // force push next cycle
-        }
+    for (int c = 0; c < state->registered_count; ++c) {
+        EventLoop_TrailingSLRatchetOneCore(state, cfg, rolling, current_price, c);
     }
 }
 
