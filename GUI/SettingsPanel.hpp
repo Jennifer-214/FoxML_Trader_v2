@@ -131,22 +131,8 @@ static const CfgFieldDef field_defs[] = {
         "Short/long variance ratio for VOLATILE\n2.0 = short-window variance is 2x long-window"},
     {"regime_hysteresis",     "Hysteresis",   "Regime Detection", CFG_INT,   "%d",
         "Slow-path cycles before regime switch\nprevents rapid flipping between strategies"},
-    // Momentum
-    {"momentum_breakout_mult","Breakout",     "Momentum",        CFG_FLOAT, "%.2f",
-        "Buy above avg by this many stddev\nhigher = require stronger breakout"},
-    {"momentum_tp_mult",      "Mom TP",       "Momentum",        CFG_FLOAT, "%.2f",
-        "Momentum TP distance in stddev units\nscaled by R-squared at fill time"},
-    {"momentum_sl_mult",      "Mom SL",       "Momentum",        CFG_FLOAT, "%.2f",
-        "Momentum SL distance in stddev units\nscaled by R-squared at fill time"},
-    {"momentum_r2_min",       "R² Min",       "Momentum",        CFG_FLOAT, "%.2f",
-        "Min R-squared to enter momentum trades\n0.4 = require 40%% trend consistency"},
-    // EMA Cross
-    {"emacross_dip_mult",     "Dip Mult",     "EMA Cross",       CFG_FLOAT, "%.2f",
-        "Buy this many stddevs below EMA\n0.5 = half sigma dip"},
-    {"emacross_crossover_min","Crossover Min", "EMA Cross",       CFG_FLOAT, "%.4f",
-        "Min EMA-SMA spread to confirm uptrend\n0.0003 = 0.03%%"},
-    {"emacross_trail_mult",   "Trail Mult",   "EMA Cross",       CFG_FLOAT, "%.2f",
-        "Trailing TP factor when EMA rising\n1.5 = 50%% wider trail"},
+    // (Momentum + EMA Cross strategy tuning consolidated into "Momentum
+    //  Tuning" / "EMA Cross Tuning" sections below — v4.7.22 dedup pass.)
     // Partial Exits
     {"partial_exit_pct",      "TP1 Split %%", "Partial Exits",   CFG_FLOAT, "%.2f",
         "Fraction to exit at TP1\n0.5 = 50%% exits early, 50%% rides TP2"},
@@ -268,17 +254,17 @@ static const CfgFieldDef field_defs[] = {
         "Path to P(will_peak) model\ntrain with LABEL_WILL_PEAK in foxml_suite"},
     {"valley_model_path",        "Valley Model",      "Barrier", CFG_PATH, NULL,
         "Path to P(will_valley) model\ntrain with LABEL_WILL_VALLEY in foxml_suite"},
-    // Per-core sharded engine (Phase 14 — experimental)
-    {"engine_mode",              "Sharded Mode",      "Per-Core (Experimental)", CFG_BOOL, NULL,
-        "Per-core risk-sharded execution (experimental).\n"
-        "OFF (default): legacy single-threaded engine.\n"
-        "ON: per-core architecture, controller core owns the portfolio,\n"
-        "    each execution core is a mini-portfolio of one position.\n"
-        "    Uses synthetic ticks until Binance feed wiring lands.\n"
+    // Per-core sharded engine — production since v4.x; legacy single_core
+    // is deprecated and warns on boot.
+    {"engine_mode",              "Sharded Mode",      "Per-Core", CFG_BOOL, NULL,
+        "Per-core risk-sharded execution (production default).\n"
+        "ON (default): per-core architecture, controller owns the portfolio,\n"
+        "    each execution core runs one position at a time on its own thread.\n"
+        "OFF: legacy single-threaded engine — DEPRECATED, warns at boot.\n"
         "RESTART REQUIRED to take effect."},
-    {"num_execution_cores",      "Cores",             "Per-Core (Experimental)", CFG_INT,  "%d",
+    {"num_execution_cores",      "Cores",             "Per-Core", CFG_INT,  "%d",
         "Number of execution cores in sharded mode (1-16).\n"
-        "Each core handles one position at a time.\n"
+        "Each core handles one position at a time (or two with partial exits).\n"
         "Recommended: physical core count - 2 (one for controller, one for OS).\n"
         "On AMD: pin all cores to the same CCD to avoid cross-die latency.\n"
         "RESTART REQUIRED to take effect."},
@@ -309,6 +295,8 @@ static const CfgFieldDef field_defs[] = {
         "Momentum SL distance in stddevs\n2.0 = SL at entry - 2σ"},
     {"momentum_breakout_mult",   "MOM Breakout",      "Momentum Tuning",  CFG_FLOAT, "%.2f",
         "Buy when price > avg + stddev * this"},
+    {"momentum_r2_min",          "MOM R² Min",        "Momentum Tuning",  CFG_FLOAT, "%.2f",
+        "Min R-squared to enter momentum trades\n0.4 = require 40%% trend consistency"},
     {"emacross_tp_pct",          "EMA TP %%",         "EMA Cross Tuning", CFG_FLOAT, "%.2f",
         "EMA Cross-specific take profit %%\n0 = use shared TP %%"},
     {"emacross_sl_pct",          "EMA SL %%",         "EMA Cross Tuning", CFG_FLOAT, "%.2f",
@@ -317,6 +305,8 @@ static const CfgFieldDef field_defs[] = {
         "Buy this many stddevs below EMA in uptrends"},
     {"emacross_crossover_min",   "EMA Cross Min",     "EMA Cross Tuning", CFG_FLOAT, "%.4f",
         "Min EMA-SMA spread for uptrend confirmation"},
+    {"emacross_trail_mult",      "EMA Trail Mult",    "EMA Cross Tuning", CFG_FLOAT, "%.2f",
+        "Trailing TP factor when EMA rising\n1.5 = 50%% wider trail"},
     // Engine Timing — knobs that control sample cadence + warmup
     // (added 2026-04-25 — these matter for ML training experiments and were
     // previously cfg-only edits)
@@ -589,6 +579,18 @@ static inline void Settings_Load(SettingsState *s) {
     }
     fclose(f);
     s->loaded = true;
+
+    // v4.7.22: post-load defaults for fields the cfg may not have written.
+    // Without this, the widget shows 0 even though the engine boots with
+    // the default. Only patch num_execution_cores here — engine_mode is
+    // boolean and we can't distinguish "missing from cfg" from "explicitly
+    // 0", so flipping it would override user intent.
+    for (int i = 0; i < NUM_FIELDS; ++i) {
+        if (strcmp(field_defs[i].key, "num_execution_cores") == 0 &&
+            s->float_vals[i] < 1.0f) {
+            s->float_vals[i] = 4.0f;  // matches ControllerConfig_Default
+        }
+    }
 }
 
 //==========================================================================
@@ -848,6 +850,18 @@ static inline void GUI_Panel_Settings(SettingsState *s,
     ImGui::Begin("Settings");
 
     if (!s->loaded) Settings_Load(s);
+
+    // v4.7.22: when the engine is running with N cores live, sync the
+    // num_execution_cores widget to that value so it doesn't read stale-
+    // 0 or a stale cfg value while the live count is authoritative.
+    if (live_core_count > 0 && live_core_count <= MAX_GUI_CORES) {
+        for (int i = 0; i < NUM_FIELDS; ++i) {
+            if (strcmp(field_defs[i].key, "num_execution_cores") == 0) {
+                s->float_vals[i] = (float)live_core_count;
+                break;
+            }
+        }
+    }
 
     ImGui::TextColored(FoxmlColors::primary, "ENGINE SETTINGS");
     ImGui::TextColored(FoxmlColors::comment, "edit + press Enter to apply");
