@@ -256,10 +256,16 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                     }
                 }
             }
-            // Phase 6prep — ConfidenceScorer with cfg tunables
+            // Phase 6prep — ConfidenceScorer with cfg tunables.
+            // v4.7.32: per-core resolved tau (mirrors EngineSharded_Run
+            // for train-serve parity). confidence_window stays global.
+            const auto& ov_conf = cfg.core_overrides[i];
+            FPN<BACKTEST_FP> tau_eff = !FPN_IsZero(ov_conf.confidence_freshness_tau)
+                ? ov_conf.confidence_freshness_tau
+                : cfg.confidence_freshness_tau;
             ConfidenceScorer_Init(&state.cores[i].confidence,
                                    (int)cfg.confidence_window,
-                                   FPN_ToDouble(cfg.confidence_freshness_tau));
+                                   FPN_ToDouble(tau_eff));
         }
 
         // Track E.2 — permission starts 0; granted after warmup samples

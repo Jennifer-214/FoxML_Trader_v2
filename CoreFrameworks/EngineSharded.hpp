@@ -670,9 +670,16 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             // Phase 6prep sharded c12: re-init ConfidenceScorer with cfg
             // tunables. EventLoopState_Init left it at safe defaults; for
             // ML cores we want the user's window/tau settings active.
+            // v4.7.32: read per-core resolved cfg so per-core
+            // confidence_freshness_tau override actually takes effect.
+            // confidence_window stays global (INT not in X-macro yet).
+            const auto& ov_conf = cfg.core_overrides[i];
+            FPN<F> tau_eff = !FPN_IsZero(ov_conf.confidence_freshness_tau)
+                ? ov_conf.confidence_freshness_tau
+                : cfg.confidence_freshness_tau;
             ConfidenceScorer_Init(&state.cores[i].confidence,
                                   (int)cfg.confidence_window,
-                                  FPN_ToDouble(cfg.confidence_freshness_tau));
+                                  FPN_ToDouble(tau_eff));
         }
 
         // Cores start permission=0. The slow-path rebuild grants permission
@@ -1373,11 +1380,17 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // partial_exit_pct. Leg A gets partial_pct, leg B gets
                     // (1 - partial_pct). When partials disabled, leg is
                     // always 0 and we use the full intended_qty (no split).
+                    // v4.7.32: read partial_exit_pct from per-core override
+                    // when set (0 = inherit). Pre-fix it always read global,
+                    // making the per-core override a silent no-op.
                     double full_qty = FPN_ToDouble(state.cores[slot].intended_qty);
+                    const auto& ov = cfg.core_overrides[slot];
+                    FPN<F> partial_pct = !FPN_IsZero(ov.partial_exit_pct)
+                        ? ov.partial_exit_pct : cfg.partial_exit_pct;
                     if (partial_on && event.leg == PARTIAL_LEG_A) {
-                        order_qty_d = full_qty * FPN_ToDouble(cfg.partial_exit_pct);
+                        order_qty_d = full_qty * FPN_ToDouble(partial_pct);
                     } else if (partial_on && event.leg == PARTIAL_LEG_B) {
-                        order_qty_d = full_qty * (1.0 - FPN_ToDouble(cfg.partial_exit_pct));
+                        order_qty_d = full_qty * (1.0 - FPN_ToDouble(partial_pct));
                     } else {
                         order_qty_d = full_qty;
                     }
@@ -1399,7 +1412,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     FPN<F> leg_tp = state.cores[slot].intended_tp;
                     if (is_entry && partial_on && event.leg == PARTIAL_LEG_B) {
                         FPN<F> tp_dist_a = FPN_Sub(state.cores[slot].intended_tp, event.price);
-                        FPN<F> tp_dist_b = FPN_Mul(tp_dist_a, cfg.tp2_mult);
+                        // v4.7.32: per-core tp2_mult override (0 = inherit).
+                        const auto& ov_tp2 = cfg.core_overrides[slot];
+                        FPN<F> tp2_mult_eff = !FPN_IsZero(ov_tp2.tp2_mult)
+                            ? ov_tp2.tp2_mult : cfg.tp2_mult;
+                        FPN<F> tp_dist_b = FPN_Mul(tp_dist_a, tp2_mult_eff);
                         leg_tp = FPN_Add(event.price, tp_dist_b);
                     }
                     OrderManager_Submit(&oms,
