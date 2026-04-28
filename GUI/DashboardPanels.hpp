@@ -152,20 +152,36 @@ static inline void GUI_Panel_Header(const TUISnapshot *s, uint64_t start_time) {
     // per-core strategy overview (sharded mode)
     if (s->sharded_mode_active && s->per_core_count > 0) {
         static const ImVec4 sc[] = {
-            {0.40f, 0.60f, 0.85f, 1.0f},  // MR blue
-            {0.85f, 0.55f, 0.25f, 1.0f},  // MOM orange
-            {0.45f, 0.75f, 0.45f, 1.0f},  // DIP green
-            {0.65f, 0.45f, 0.80f, 1.0f},  // ML purple
-            {0.35f, 0.75f, 0.80f, 1.0f},  // EMA cyan
+            {0.40f, 0.60f, 0.85f, 1.0f},  // 0 MR  blue
+            {0.85f, 0.55f, 0.25f, 1.0f},  // 1 MOM orange
+            {0.45f, 0.75f, 0.45f, 1.0f},  // 2 DIP green
+            {0.65f, 0.45f, 0.80f, 1.0f},  // 3 ML  purple
+            {0.35f, 0.75f, 0.80f, 1.0f},  // 4 EMA cyan
+            {0.90f, 0.80f, 0.50f, 1.0f},  // 5 AUTO gold (was missing — rendered as
+                                           //   out-of-bounds garbage color, making
+                                           //   the C{n}:AUTO label invisible in the
+                                           //   CORES header line)
         };
+        // sc[] must stay aligned with STRATEGY_* enum (size = NUM_STRATEGIES).
+        static_assert(sizeof(sc)/sizeof(sc[0]) == NUM_STRATEGIES,
+                      "sc[] color array out of sync with NUM_STRATEGIES");
         ImGui::TextColored(FoxmlColors::sand, "CORES:");
         for (int i = 0; i < s->per_core_count && i < 16; ++i) {
             ImGui::SameLine();
             uint8_t sid = s->per_core[i].strategy_id_display;
+            // For AUTO, append the resolved strategy in parens so the header
+            // matches the Buy Gate panel's "AUTO(MR)" / "AUTO(DIP)" labels.
             ImVec4 col = (sid < NUM_STRATEGIES) ? sc[sid] : FoxmlColors::comment;
             const char *name = (sid < NUM_STRATEGIES) ? STRATEGY_SHORT_NAMES[sid]
                                : (sid == 0xFF ? "OFF" : "?");
-            ImGui::TextColored(col, "C%d:%s", i, name);
+            if (sid == STRATEGY_AUTO) {
+                uint8_t rsid = s->per_core[i].resolved_strategy_id;
+                const char *rname = (rsid < NUM_STRATEGIES && rsid != STRATEGY_AUTO)
+                                    ? STRATEGY_SHORT_NAMES[rsid] : "?";
+                ImGui::TextColored(col, "C%d:%s(%s)", i, name, rname);
+            } else {
+                ImGui::TextColored(col, "C%d:%s", i, name);
+            }
         }
     }
 
@@ -415,11 +431,15 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
         // strategy color palette — same indices as ChartPanel's strat_colors
         // so a row's color matches its line on the chart.
         static const ImVec4 strat_colors[NUM_STRATEGIES] = {
-            {0.85f, 0.65f, 0.35f, 0.9f},  // MR — orange/sand
-            {0.85f, 0.45f, 0.45f, 0.9f},  // MOM — red
-            {0.45f, 0.75f, 0.45f, 0.9f},  // DIP — green
-            {0.65f, 0.45f, 0.80f, 0.9f},  // ML — purple
-            {0.35f, 0.75f, 0.80f, 0.9f},  // EMA — cyan
+            {0.85f, 0.65f, 0.35f, 0.9f},  // 0 MR — orange/sand
+            {0.85f, 0.45f, 0.45f, 0.9f},  // 1 MOM — red
+            {0.45f, 0.75f, 0.45f, 0.9f},  // 2 DIP — green
+            {0.65f, 0.45f, 0.80f, 0.9f},  // 3 ML — purple
+            {0.35f, 0.75f, 0.80f, 0.9f},  // 4 EMA — cyan
+            {0.90f, 0.80f, 0.50f, 0.9f},  // 5 AUTO — gold (was missing — array
+                                           //   defaulted strat_colors[5] to zero
+                                           //   = transparent black, making any
+                                           //   AUTO core's row invisible)
         };
         ImGuiTableFlags tf = ImGuiTableFlags_BordersInnerV |
                               ImGuiTableFlags_RowBg |

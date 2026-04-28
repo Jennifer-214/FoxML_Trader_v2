@@ -995,13 +995,19 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         // horizontal line per core at the buy gate price threshold,
         // color-coded by strategy. Only drawn when the price is non-zero.
         if (snap->sharded_mode_active) {
-            ImVec4 strat_colors[] = {
-                {0.40f, 0.60f, 0.85f, 0.6f},  // MR — blue
-                {0.85f, 0.55f, 0.25f, 0.6f},  // MOM — orange
-                {0.45f, 0.75f, 0.45f, 0.6f},  // DIP — green
-                {0.65f, 0.45f, 0.80f, 0.6f},  // ML — purple
-                {0.35f, 0.75f, 0.80f, 0.6f},  // EMA — cyan
+            ImVec4 strat_colors[NUM_STRATEGIES] = {
+                {0.40f, 0.60f, 0.85f, 0.6f},  // 0 MR — blue
+                {0.85f, 0.55f, 0.25f, 0.6f},  // 1 MOM — orange
+                {0.45f, 0.75f, 0.45f, 0.6f},  // 2 DIP — green
+                {0.65f, 0.45f, 0.80f, 0.6f},  // 3 ML — purple
+                {0.35f, 0.75f, 0.80f, 0.6f},  // 4 EMA — cyan
+                {0.90f, 0.80f, 0.50f, 0.6f},  // 5 AUTO — gold (was missing —
+                                              //   gate lines for AUTO cores
+                                              //   rendered as transparent
+                                              //   black, invisible on chart)
             };
+            static_assert(sizeof(strat_colors)/sizeof(strat_colors[0]) == NUM_STRATEGIES,
+                          "strat_colors[] out of sync with NUM_STRATEGIES");
             // v4.7.16: gate line endpoints follow the live plot bounds
             // (xL/xR captured above) so lines span the full visible chart
             // even after user zoom/pan.
