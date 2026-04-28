@@ -593,6 +593,37 @@ static inline void Settings_Load(SettingsState *s) {
     }
 }
 
+// v4.7.23: map a Global-tab section to the strategy it applies to.
+// Returns -1 if the section is strategy-agnostic (Trading defaults, Risk
+// Management, Regime Detection, etc. — always visible). Otherwise returns
+// the STRATEGY_* constant; the section is hidden when no configured core
+// uses that strategy.
+static inline int global_section_strategy(const char *section) {
+    if (strcmp(section, "SimpleDip Tuning")     == 0) return STRATEGY_SIMPLE_DIP;
+    if (strcmp(section, "MeanReversion Tuning") == 0) return STRATEGY_MEAN_REVERSION;
+    if (strcmp(section, "Momentum Tuning")      == 0) return STRATEGY_MOMENTUM;
+    if (strcmp(section, "EMA Cross Tuning")     == 0) return STRATEGY_EMA_CROSS;
+    if (strcmp(section, "FoxML")                == 0) return STRATEGY_ML;
+    if (strcmp(section, "Validation")           == 0) return STRATEGY_ML;
+    if (strcmp(section, "Models")               == 0) return STRATEGY_ML;
+    if (strcmp(section, "Barrier")              == 0) return STRATEGY_ML;
+    return -1;
+}
+
+// True when any configured core is running this strategy (or AUTO, which
+// can route to any). Source of truth: SettingsState's per_core_strategy[]
+// (the user's intent — what they have configured, may differ from live
+// until Apply is pressed). The user's configuration is what the panel
+// should adapt to.
+static inline bool any_core_uses_strategy(const SettingsState *s, int strat) {
+    for (int c = 0; c < MAX_GUI_CORES; ++c) {
+        int sid = s->per_core_strategy[c];
+        if (sid < 0) continue;
+        if (sid == strat || sid == STRATEGY_AUTO) return true;
+    }
+    return false;
+}
+
 //==========================================================================
 // GLOBAL TAB — renders the auto-generated field_defs[] layout
 //==========================================================================
@@ -606,6 +637,15 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
         // auto collapsing headers by section name
         if (!current_section || strcmp(current_section, fd->section) != 0) {
             current_section = fd->section;
+            // v4.7.23: hide strategy-specific sections when no configured
+            // core uses that strategy. AUTO cores match all strategies.
+            int sec_strat = global_section_strategy(current_section);
+            if (sec_strat >= 0 && !any_core_uses_strategy(s, sec_strat)) {
+                while (i + 1 < NUM_FIELDS &&
+                       strcmp(field_defs[i + 1].section, current_section) == 0)
+                    i++;
+                continue;
+            }
             bool default_open = (strcmp(fd->section, "Trading") == 0 ||
                                 strcmp(fd->section, "Entry Filters") == 0 ||
                                 strcmp(fd->section, "EMA Gate") == 0);
@@ -682,6 +722,35 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
 // model_path, model_dir. Folded in from the standalone "Per-Core Strategy"
 // panel so per-core knobs live in one place. Pass NULL to skip the
 // hot-swap UI (tests / non-sharded callers).
+// v4.7.23: map a per-core override key to the strategy it applies to.
+// Returns -1 if the field is strategy-agnostic (TP/SL/entry-filter overrides
+// always apply regardless of which strategy the core runs). Returns the
+// STRATEGY_* constant for fields that ONLY apply when the core runs that
+// strategy — those get hidden from the per-core tab when the core's resolved
+// strategy doesn't match.
+//
+// Used by Settings_RenderPerCoreTab to scope the "Strategy-Specific" section
+// to fields relevant to THIS core's strategy. AUTO cores show all (since
+// AUTO routes to any strategy at runtime).
+static inline int per_core_field_strategy(const char *key_suffix) {
+    if (strncmp(key_suffix, "simpledip_", 10) == 0) return STRATEGY_SIMPLE_DIP;
+    if (strncmp(key_suffix, "mr_",         3) == 0) return STRATEGY_MEAN_REVERSION;
+    if (strncmp(key_suffix, "momentum_",   9) == 0) return STRATEGY_MOMENTUM;
+    if (strncmp(key_suffix, "emacross_",   9) == 0) return STRATEGY_EMA_CROSS;
+    if (strncmp(key_suffix, "ml_",         3) == 0) return STRATEGY_ML;
+    return -1;  // strategy-agnostic
+}
+
+// True when this per-core field should be VISIBLE on the tab for a core
+// running `core_strategy`. AUTO (5) shows all; STRATEGY_NONE shows nothing
+// strategy-specific (only the agnostic overrides).
+static inline bool per_core_field_visible(const char *key_suffix, int core_strategy) {
+    int field_strat = per_core_field_strategy(key_suffix);
+    if (field_strat < 0) return true;       // agnostic
+    if (core_strategy == STRATEGY_AUTO) return true;
+    return core_strategy == field_strat;
+}
+
 static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
                                               TUISharedState *shared = NULL,
                                               const TUISnapshot *snap = NULL) {
@@ -805,19 +874,51 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
                               "Takes precedence over Model Path when set.");
     }
 
+    // v4.7.23: resolve this core's strategy for the strategy-aware filter.
+    // Prefer the LIVE active strategy from the snapshot; fall back to the
+    // user's pending-but-not-applied dropdown choice; last resort STRATEGY_NONE
+    // (hides strategy-specific fields entirely until something is configured).
+    int core_strategy = STRATEGY_NONE;
+    if (snap && snap->sharded_mode_active && core_id < snap->per_core_count) {
+        core_strategy = snap->per_core[core_id].strategy_id_display;
+    } else if (s->per_core_strategy[core_id] >= 0) {
+        core_strategy = s->per_core_strategy[core_id];
+    }
+
     const char *current_section = NULL;
+    bool current_section_open = false;
     for (int j = 0; j < NUM_PER_CORE_FIELDS; ++j) {
         const PerCoreFieldDef *pcf = &per_core_fields[j];
         if (!current_section || strcmp(current_section, pcf->section) != 0) {
             current_section = pcf->section;
-            ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_DefaultOpen;
-            if (!ImGui::CollapsingHeader(pcf->section, fl)) {
+            // v4.7.23: pre-scan section for any visible field. If none match
+            // the core's strategy, skip the whole section silently.
+            bool any_visible = false;
+            for (int k = j; k < NUM_PER_CORE_FIELDS &&
+                            strcmp(per_core_fields[k].section, current_section) == 0; ++k) {
+                if (per_core_field_visible(per_core_fields[k].key_suffix, core_strategy)) {
+                    any_visible = true;
+                    break;
+                }
+            }
+            if (!any_visible) {
                 while (j + 1 < NUM_PER_CORE_FIELDS &&
-                       strcmp(per_core_fields[j + 1].section, pcf->section) == 0)
+                       strcmp(per_core_fields[j + 1].section, current_section) == 0)
+                    ++j;
+                continue;
+            }
+            ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_DefaultOpen;
+            current_section_open = ImGui::CollapsingHeader(current_section, fl);
+            if (!current_section_open) {
+                while (j + 1 < NUM_PER_CORE_FIELDS &&
+                       strcmp(per_core_fields[j + 1].section, current_section) == 0)
                     ++j;
                 continue;
             }
         }
+        if (!current_section_open) continue;
+        // v4.7.23: skip individual fields that don't match this core's strategy.
+        if (!per_core_field_visible(pcf->key_suffix, core_strategy)) continue;
         ImGui::PushID(j);  // disambiguate same-named labels across the 18 rows
         ImGui::SetNextItemWidth(80);
         ImGui::InputFloat(pcf->label, &s->per_core_vals[core_id][j], 0, 0, pcf->fmt);
