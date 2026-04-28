@@ -152,9 +152,9 @@ static const CfgFieldDef field_defs[] = {
     {"session_us_mult",       "US",           "Session Filters",  CFG_FLOAT, "%.2f",
         "Volume gate multiplier 13-20 UTC\nlower = less selective (best liquidity)"},
     {"session_overnight_mult","Overnight",    "Session Filters",  CFG_FLOAT, "%.2f", NULL},
-    // Strategy
-    {"default_strategy",      "Default##strat","Strategy",       CFG_INT,   "%d",
-        "-2 = Full Auto (MR+EMA Cross+Momentum+SimpleDip)\n-1 = Legacy Auto (MR+Momentum only)\n 0 = Mean Reversion\n 1 = Momentum\n 2 = Simple Dip\n 3 = ML\n 4 = EMA Cross"},
+    // v4.7.27: "Strategy" section dropped. Per-core dropdowns in each
+    // core's tab are the canonical strategy assignment surface. cfg's
+    // default_strategy=N still parses for legacy single_core boot.
     // EMA Gate
     {"gate_ema_enabled",      "EMA Enabled",  "EMA Gate",        CFG_BOOL,  NULL,   NULL},
     {"gate_ema_alpha",        "Alpha",        "EMA Gate",        CFG_FLOAT, "%.4f",
@@ -277,33 +277,16 @@ static const CfgFieldDef field_defs[] = {
     {"core_1_risk_pct",          "Core 1 Risk %%",    "Core Risk",        CFG_FLOAT, "%.1f", NULL},
     {"core_2_risk_pct",          "Core 2 Risk %%",    "Core Risk",        CFG_FLOAT, "%.1f", NULL},
     {"core_3_risk_pct",          "Core 3 Risk %%",    "Core Risk",        CFG_FLOAT, "%.1f", NULL},
-    // Per-strategy TP/SL overrides (0 = use shared take_profit_pct / stop_loss_pct)
-    {"simpledip_tp_pct",         "DIP TP %%",         "SimpleDip Tuning", CFG_FLOAT, "%.2f",
-        "SimpleDip-specific take profit %%\n0 = use shared TP %%"},
-    {"simpledip_sl_pct",         "DIP SL %%",         "SimpleDip Tuning", CFG_FLOAT, "%.2f",
-        "SimpleDip-specific stop loss %%\n0 = use shared SL %%"},
-    {"mr_tp_pct",                "MR TP %%",          "MeanReversion Tuning", CFG_FLOAT, "%.2f",
-        "MeanReversion-specific take profit %%\n0 = use shared TP %%"},
-    {"mr_sl_pct",                "MR SL %%",          "MeanReversion Tuning", CFG_FLOAT, "%.2f",
-        "MeanReversion-specific stop loss %%\n0 = use shared SL %%"},
-    {"momentum_tp_mult",         "MOM TP σ",          "Momentum Tuning",  CFG_FLOAT, "%.1f",
-        "Momentum TP distance in stddevs\n3.0 = TP at entry + 3σ"},
-    {"momentum_sl_mult",         "MOM SL σ",          "Momentum Tuning",  CFG_FLOAT, "%.1f",
-        "Momentum SL distance in stddevs\n2.0 = SL at entry - 2σ"},
-    {"momentum_breakout_mult",   "MOM Breakout",      "Momentum Tuning",  CFG_FLOAT, "%.2f",
-        "Buy when price > avg + stddev * this"},
-    {"momentum_r2_min",          "MOM R² Min",        "Momentum Tuning",  CFG_FLOAT, "%.2f",
-        "Min R-squared to enter momentum trades\n0.4 = require 40%% trend consistency"},
-    {"emacross_tp_pct",          "EMA TP %%",         "EMA Cross Tuning", CFG_FLOAT, "%.2f",
-        "EMA Cross-specific take profit %%\n0 = use shared TP %%"},
-    {"emacross_sl_pct",          "EMA SL %%",         "EMA Cross Tuning", CFG_FLOAT, "%.2f",
-        "EMA Cross-specific stop loss %%\n0 = use shared SL %%"},
-    {"emacross_dip_mult",        "EMA Dip σ",         "EMA Cross Tuning", CFG_FLOAT, "%.2f",
-        "Buy this many stddevs below EMA in uptrends"},
-    {"emacross_crossover_min",   "EMA Cross Min",     "EMA Cross Tuning", CFG_FLOAT, "%.4f",
-        "Min EMA-SMA spread for uptrend confirmation"},
-    {"emacross_trail_mult",      "EMA Trail Mult",    "EMA Cross Tuning", CFG_FLOAT, "%.2f",
-        "Trailing TP factor when EMA rising\n1.5 = 50%% wider trail"},
+    // v4.7.27: strategy-tuning sections moved EXCLUSIVELY to per-core tabs.
+    // Pre-v4.7.27 the Global tab also exposed SimpleDip/MR/Momentum/EMA Cross
+    // Tuning fields as "shared default with per-core override" — that
+    // hierarchy was confusion bloat. Per-core sharded means each core IS
+    // a strategy instance; "what controls Core 1?" should be answered by
+    // Core 1's tab alone, not by mentally merging Global + override.
+    // Cfg parser still accepts global keys (e.g. simpledip_tp_pct=4.0) for
+    // backwards compat with older cfg files; resolver still treats them as
+    // the fallback when no per-core override is set. Just no UI surface
+    // here — set them via the per-core tab's Strategy-Specific section.
     // Engine Timing — knobs that control sample cadence + warmup
     // (added 2026-04-25 — these matter for ML training experiments and were
     // previously cfg-only edits)
@@ -372,10 +355,18 @@ static const PerCoreFieldDef per_core_fields[] = {
         "MOM-only TP stddev multiplier for this core. 0 = inherit."},
     {"momentum_sl_mult",  "MOM SL σ",    "Strategy-Specific", "%.2f",
         "MOM-only SL stddev multiplier for this core. 0 = inherit."},
+    {"momentum_r2_min",   "MOM R² Min",  "Strategy-Specific", "%.2f",
+        "Min R² to enter momentum trades on this core. 0 = inherit."},
     {"emacross_tp_pct",   "EMA TP %%",   "Strategy-Specific", "%.2f",
         "EMA-only TP override for this core. 0 = inherit."},
     {"emacross_sl_pct",   "EMA SL %%",   "Strategy-Specific", "%.2f",
         "EMA-only SL override for this core. 0 = inherit."},
+    {"emacross_dip_mult", "EMA Dip σ",   "Strategy-Specific", "%.2f",
+        "Buy this many stddevs below EMA in uptrends. 0 = inherit."},
+    {"emacross_crossover_min", "EMA Cross Min", "Strategy-Specific", "%.4f",
+        "Min EMA-SMA spread for uptrend confirmation. 0 = inherit."},
+    {"emacross_trail_mult", "EMA Trail σ", "Strategy-Specific", "%.2f",
+        "Trailing TP factor when EMA rising. 0 = inherit."},
     {"ml_tp_pct",         "ML TP %%",    "Strategy-Specific", "%.2f",
         "ML-only TP override for this core. 0 = inherit."},
     {"ml_sl_pct",         "ML SL %%",    "Strategy-Specific", "%.2f",

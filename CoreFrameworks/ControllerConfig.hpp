@@ -95,8 +95,12 @@ constexpr uint8_t ENGINE_MODE_SHARDED = 1;
     PCT(mr_sl_pct) \
     RAW(momentum_tp_mult) \
     RAW(momentum_sl_mult) \
+    RAW(momentum_r2_min) \
     PCT(emacross_tp_pct) \
     PCT(emacross_sl_pct) \
+    RAW(emacross_dip_mult) \
+    RAW(emacross_crossover_min) \
+    RAW(emacross_trail_mult) \
     PCT(ml_tp_pct) \
     PCT(ml_sl_pct) \
     RAW(ml_buy_threshold)
