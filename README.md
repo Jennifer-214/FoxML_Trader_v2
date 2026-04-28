@@ -304,8 +304,6 @@ dual-licensed: **AGPL-3.0-or-later** (see [LICENSE](LICENSE)) **or Commercial**.
 
 personal use, learning, and paper trading are welcome and encouraged. commercial use, network-accessible deployment, or use for profit requires a commercial license — contact [jenn.lewis5789@gmail.com](mailto:jenn.lewis5789@gmail.com).
 
-unauthorized use settlement: 100% of gross revenue from date of first unauthorized use (up to 10–15 years), full statutory damages under 17 U.S.C. § 504 (up to $150,000 per work for willful infringement). bounty: 50% of total settlement for reports leading to successful enforcement. see [BOUNTY.md](BOUNTY.md).
-
 **copyright (c) 2026 Jennifer Lewis. all rights reserved.**
 
 ---
