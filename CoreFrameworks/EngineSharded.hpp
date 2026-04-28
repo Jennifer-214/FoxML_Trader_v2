@@ -877,8 +877,18 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     uint8_t pending = __atomic_load_n(
                         &g_shared.swap_strategy_requested[c], __ATOMIC_ACQUIRE);
                     if (pending == STRATEGY_NONE) continue;
-                    if ((state.oms->portfolio.active_bitmap &
-                         (uint16_t)(1u << c)) != 0) {
+                    // v4.7.28: partials-aware open-position check. With
+                    // partial_exit_enabled=1 each core owns 2 slots
+                    // (leg A at 2c, leg B at 2c+1). Pre-v4.7.28 this
+                    // checked bit `c` only — for Core 2 that's bit 2,
+                    // which under partials is actually Core 1's leg A.
+                    // If Core 1 had a position open, Core 2's swap would
+                    // defer forever even though Core 2 has nothing open.
+                    int partial_on = state.oms->partial_exit_enabled ? 1 : 0;
+                    uint16_t open_mask = partial_on
+                        ? (uint16_t)((1u << (c * 2)) | (1u << (c * 2 + 1)))
+                        : (uint16_t)(1u << c);
+                    if ((state.oms->portfolio.active_bitmap & open_mask) != 0) {
                         continue;  // position open; defer until exit
                     }
                     // v4.0 audit: refuse swap-to-ML if this core never had
