@@ -195,49 +195,47 @@ static const CfgFieldDef field_defs[] = {
     {"session_filter_enabled","Session Filter","Toggles",        CFG_BOOL,  NULL,   NULL},
     {"depth_enabled",         "Order Book",   "Toggles",         CFG_BOOL,  NULL,   NULL},
     {"min_book_imbalance",    "Book Imbal",   "Toggles",         CFG_FLOAT, "%.2f", NULL},
-    // FoxML integration (Phase 6C)
+    // FoxML integration — engine-wide enable/disable + training-time defaults
+    // (per-core FPN tuning lives in each ML core's "ML" override section).
     {"cost_gate_enabled",        "Cost Gate",         "FoxML",  CFG_BOOL,  NULL,
-        "Suppress entries when estimated trade cost exceeds TP target\nuses spread + vol timing + market impact model"},
+        "Engine-wide enable for cost gate (suppress entries when estimated\n"
+        "trade cost exceeds TP target). Per-core FPN knobs live in each\n"
+        "ML core's tab."},
     {"foxml_vol_scaling_enabled","Vol Scaling",        "FoxML",  CFG_BOOL,  NULL,
-        "Scale position size inversely with volatility\nhigh vol = smaller position (consistent risk per trade)"},
-    {"foxml_vol_scaling_z_max",  "Vol Z-Max",         "FoxML",  CFG_FLOAT, "%.1f",
-        "Z-score clipping threshold for vol scaler\n3.0 = cap at 3 sigma (FoxML default)"},
+        "Engine-wide enable for FoxML vol scaling.\n"
+        "Per-core Vol Z-Max override lives in each ML core's tab."},
     {"bandit_enabled",           "Bandit",            "FoxML",  CFG_BOOL,  NULL,
-        "Blend regime strategy pick with Exp3-IX bandit weights\nlearns which strategies actually profit over time"},
-    {"bandit_blend_ratio",       "Blend Ratio",       "FoxML",  CFG_FLOAT, "%.2f",
-        "Max bandit influence fraction (0.30 = 30%%)\nramps from 0%% to this over first 200 trades"},
+        "Engine-wide enable for Exp3-IX bandit blending.\n"
+        "Per-core Blend Ratio override lives in each ML core's tab."},
     {"confidence_enabled",       "Confidence",        "FoxML",  CFG_BOOL,  NULL,
-        "Dynamic ML threshold based on prediction quality\nraises threshold when IC/freshness/stability are low"},
+        "Engine-wide enable for dynamic ML threshold scaling.\n"
+        "Per-core Tau / Scale overrides live in each ML core's tab."},
     {"confidence_window",        "Conf Window",       "FoxML",  CFG_INT,   "%d",
-        "RollingIC + RollingRMSE window size (default 32)\nlarger = smoother but slower to react to model changes\ncapped at ROLLING_IC_MAX_WINDOW=64"},
-    {"confidence_freshness_tau", "Conf Tau (s)",      "FoxML",  CFG_FLOAT, "%.0f",
-        "Freshness decay constant in seconds (default 300 = 5min)\ne^(-data_age/tau): data_age=tau gives 0.37 freshness"},
-    {"confidence_threshold_scale","Conf Scale",        "FoxML",  CFG_FLOAT, "%.2f",
-        "Gate formula: effective_thr = base * (this - conf)\ndefault 2.0 — conf=0 → 2x base (suppresses marginal signals)\nconf=1 → 1x base (full signal). Clamps at 1.0."},
-    // Validation (Phase 7prep) — held-out test set + generalization gap
+        "RollingIC + RollingRMSE window size (engine-wide; cap 64).\n"
+        "Same window per ML core today; INT support for X-macro deferred."},
+    // Validation — training-time held-out gating (engine-wide).
     {"held_out_fraction",        "Held-Out %",         "Validation", CFG_FLOAT, "%.2f",
-        "Fraction of data reserved as held-out test set\n"
-        "default 0.20 (20%% — last 2 months of 12-month dataset)\n"
-        "code refuses to peek at this set during training/tuning\n"
-        "explicit unlock required for final evaluation\n"
-        "clamped to [0.05, 0.30] in HeldOutSplit_Make"},
+        "Fraction of data reserved as held-out test set (training-time).\n"
+        "Clamped [0.05, 0.30]. Engine-wide setup; one bundle per training run."},
     {"gap_acceptable_threshold", "Gap Threshold",      "Validation", CFG_FLOAT, "%.3f",
-        "Max acceptable |walk-forward - held-out| generalization gap\n"
-        "default 0.05 — gap above this = poor generalization (not OK)\n"
-        "applied to both classification accuracy and regression Pearson r\n"
-        "load-bearing: this is the WAS-IT-REAL test for trained models"},
-    // Model Paths (Phase 7C)
+        "Max acceptable WF↔held-out generalization gap (training-time).\n"
+        "Engine-wide quality bar for ALL trained models in this session."},
+    // v4.7.31: ML model paths + barrier gate stay engine-wide for now.
+    // ml_model_path is already overridable per-core via core_N_model_path;
+    // regime / peak / valley paths don't have per-core storage yet —
+    // adding it requires struct/parser changes across ControllerConfig
+    // (deferred). Hidden when no core uses STRATEGY_ML by v4.7.30 filter.
     {"ml_model_path",            "Buy Model",         "Models", CFG_PATH,  NULL,
-        "Path to XGBoost/LightGBM buy-signal model\ntrain in foxml_suite, load here"},
+        "Path to XGBoost/LightGBM buy-signal model.\n"
+        "Per-core override available via core_N_model_path in each ML core's tab."},
     {"regime_model_path",        "Regime Model",      "Models", CFG_PATH,  NULL,
-        "Path to regime enrichment model\nMode A: regime signal enhancement"},
-    // Barrier Gate (Phase 7E)
+        "Path to regime enrichment model (engine-wide). Per-core deferred."},
     {"barrier_gate_enabled",     "Barrier Gate",      "Barrier", CFG_BOOL, NULL,
-        "Block entries before predicted price peaks\nrequires trained peak/valley models"},
+        "Block entries before predicted price peaks (engine-wide).\nrequires trained peak/valley models"},
     {"peak_model_path",          "Peak Model",        "Barrier", CFG_PATH, NULL,
-        "Path to P(will_peak) model\ntrain with LABEL_WILL_PEAK in foxml_suite"},
+        "Path to P(will_peak) model (engine-wide). Per-core deferred."},
     {"valley_model_path",        "Valley Model",      "Barrier", CFG_PATH, NULL,
-        "Path to P(will_valley) model\ntrain with LABEL_WILL_VALLEY in foxml_suite"},
+        "Path to P(will_valley) model (engine-wide). Per-core deferred."},
     // Per-core sharded engine — production since v4.x; legacy single_core is
     // deprecated and warns on boot. v4.7.26: removed the "Sharded Mode" toggle
     // from the GUI — sharded is the only path users should see. Cfg parser
@@ -249,18 +247,10 @@ static const CfgFieldDef field_defs[] = {
         "Recommended: physical core count - 2 (one for controller, one for OS).\n"
         "On AMD: pin all cores to the same CCD to avoid cross-die latency.\n"
         "RESTART REQUIRED to take effect."},
-    // Per-core strategy assignment
-    {"core_0_strategy",          "Core 0",            "Core Strategies",  CFG_INT, "%d",
-        "0=MR 1=Momentum 2=SimpleDip 3=ML 4=EMA Cross 255=None\nHot-swappable while running"},
-    {"core_1_strategy",          "Core 1",            "Core Strategies",  CFG_INT, "%d", NULL},
-    {"core_2_strategy",          "Core 2",            "Core Strategies",  CFG_INT, "%d", NULL},
-    {"core_3_strategy",          "Core 3",            "Core Strategies",  CFG_INT, "%d", NULL},
-    // Per-core risk allocation (0 = use shared risk_pct / num_cores)
-    {"core_0_risk_pct",          "Core 0 Risk %%",    "Core Risk",        CFG_FLOAT, "%.1f",
-        "Risk %% of total balance for core 0\n0 = use shared risk_pct / num_cores"},
-    {"core_1_risk_pct",          "Core 1 Risk %%",    "Core Risk",        CFG_FLOAT, "%.1f", NULL},
-    {"core_2_risk_pct",          "Core 2 Risk %%",    "Core Risk",        CFG_FLOAT, "%.1f", NULL},
-    {"core_3_risk_pct",          "Core 3 Risk %%",    "Core Risk",        CFG_FLOAT, "%.1f", NULL},
+    // v4.7.31: "Core Strategies" + "Core Risk" summary sections removed.
+    // These were duplicate views of per-core Strategy + Risk %% controls
+    // already present in each per-core tab's "Core Configuration" section.
+    // Cfg parser still accepts core_N_strategy / core_N_risk_pct.
     // v4.7.27: strategy-tuning sections moved EXCLUSIVELY to per-core tabs.
     // Pre-v4.7.27 the Global tab also exposed SimpleDip/MR/Momentum/EMA Cross
     // Tuning fields as "shared default with per-core override" — that
@@ -400,6 +390,18 @@ static const PerCoreFieldDef per_core_fields[] = {
         "Fraction to exit at TP1 for this core (0.5 = 50%). 0 = inherit."},
     {"tp2_mult",          "TP2 Mult",     "Partial Exits",    "%.2f",
         "TP2 distance = TP1 distance * this for this core. 0 = inherit."},
+    // v4.7.31: ML / FoxML overrides — only render when this core uses ML.
+    // Strategy filter (per_core_field_strategy) maps any "ml_*", "bandit_*",
+    // "foxml_*", "confidence_*" prefix to STRATEGY_ML so they only show on
+    // ML cores (or AUTO — no, AUTO doesn't route to ML per v4.7.30).
+    {"foxml_vol_scaling_z_max",   "Vol Z-Max",      "ML",  "%.1f",
+        "Z-score clipping for vol scaler on this core. 0 = inherit."},
+    {"bandit_blend_ratio",        "Bandit Blend",   "ML",  "%.2f",
+        "Max bandit influence fraction for this core (0.30 = 30%). 0 = inherit."},
+    {"confidence_freshness_tau",  "Conf Tau (s)",   "ML",  "%.0f",
+        "Freshness decay constant in seconds for this core. 0 = inherit."},
+    {"confidence_threshold_scale","Conf Scale",     "ML",  "%.2f",
+        "Confidence gate scale: effective_thr = base * (this - conf). 0 = inherit."},
 };
 static constexpr int NUM_PER_CORE_FIELDS =
     sizeof(per_core_fields) / sizeof(per_core_fields[0]);
@@ -758,6 +760,13 @@ static inline int per_core_field_strategy(const char *key_suffix) {
     if (strncmp(key_suffix, "momentum_",   9) == 0) return STRATEGY_MOMENTUM;
     if (strncmp(key_suffix, "emacross_",   9) == 0) return STRATEGY_EMA_CROSS;
     if (strncmp(key_suffix, "ml_",         3) == 0) return STRATEGY_ML;
+    // v4.7.31: ML-related ecosystem fields. ConfidenceScorer / Bandit /
+    // FoxML vol scaling / Cost Gate / Barrier — all consumed only by
+    // STRATEGY_ML cores, so the per-core overrides should only render
+    // when this core's strategy is ML.
+    if (strncmp(key_suffix, "confidence_", 11) == 0) return STRATEGY_ML;
+    if (strncmp(key_suffix, "bandit_",      7) == 0) return STRATEGY_ML;
+    if (strncmp(key_suffix, "foxml_",       6) == 0) return STRATEGY_ML;
     return -1;  // strategy-agnostic
 }
 

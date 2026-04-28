@@ -126,7 +126,13 @@ constexpr uint8_t ENGINE_MODE_SHARDED = 1;
     RAW(no_trade_band_mult) \
     /* v4.7.29: Partial exit geometry overrides — TP1 split + TP2 mult per core */ \
     RAW(partial_exit_pct) \
-    RAW(tp2_mult)
+    RAW(tp2_mult) \
+    /* v4.7.31: ML/FoxML overrides — different ML cores can have different */ \
+    /* confidence behavior, vol-z scaling, bandit blend ratios, etc. */ \
+    RAW(foxml_vol_scaling_z_max) \
+    RAW(bandit_blend_ratio) \
+    RAW(confidence_freshness_tau) \
+    RAW(confidence_threshold_scale)
 
 template <unsigned F> struct PerCoreOverrides {
 #define _DECL_OV_FIELD(name) FPN<F> name;
