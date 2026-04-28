@@ -30,6 +30,18 @@ built from scratch, self-taught, ~60k lines across engine + backtest suite + ML 
 
 ---
 
+## what it looks like running
+
+![price chart with gate overlays](assets/gui-chart.png)
+
+> live chart, BTCUSDT 1m bars. entry tag `#0,1 $76460` mid-frame, TP +1066 / SL -390 lines extending across, per-core gate lines (C0 MR, C1 EMA, C2 AUTO, C3 DIP) stacked on the left and staggered to avoid label collision. SMA ribbon, VWAP, EU session marker rendered together without fighting each other.
+
+![full GUI dashboard](assets/gui-dashboard.png)
+
+> full layout. 4 cores running different strategies (MR / EMA / AUTO / DIP), regime detector classifying `TRENDING_DOWN`, partials paired across slots `#3.A` and `#3.B`, per-core latency p50 35-58 ns over 513k samples, account + risk panels with kill switch armed per core. all from a single tick stream fanned across SPSC rings.
+
+---
+
 ## why these numbers matter
 
 raw nanoseconds are abstract. context for what 500 ns p99 buys you:

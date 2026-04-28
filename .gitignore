@@ -5,12 +5,14 @@ build_lat/
 build_latency/
 build_suite/
 build_suite_asan/
-bin/                # v4.3 — symlinks to latest canonical binaries; build.sh maintains
+# v4.3 — symlinks to latest canonical binaries; build.sh maintains
+bin/
 vendor/
 logging/
 paper_runs/
 data/
-models/             # v4.3 — saved Run bundles. User-trained, edge-sensitive
+# v4.3 — saved Run bundles. User-trained, edge-sensitive
+models/
 *.o
 *.d
 plans/
@@ -23,3 +25,10 @@ secrets.cfg
 engine.cfg
 controller.cfg
 backtest.cfg
+
+# ImGui window state — runtime-only, per-machine
+foxml_gui.ini
+foxml_suite.ini
+
+# session scratch notes — not for the repo
+continue.md
