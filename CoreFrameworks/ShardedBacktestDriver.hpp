@@ -200,6 +200,13 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
     // 2. Drain any trade events the cores fired this tick.
     EventLoop_DrainEvents(drv->state);
 
+    // 2a. v4.7.37 (Phase B reordered) — drain submit_queue first. EventLoop_
+    //     TimeExit (called below in the slow-path block) and any future
+    //     producer-side submit pushes route through OMS_PushSubmit instead
+    //     of calling Submit directly. Backtest is single-threaded so the
+    //     drain happens inline here, mirroring live's drainer thread.
+    if (drv->oms) OMS_DrainSubmit(drv->oms, drv->state->registered_count);
+
     // 2b. In event_log_mode=1, portfolio mutation happens in OMS_Tick
     //     (the fill handler), not in OnEvent. Tick the OMS so the fill
     //     handler runs after the drain enqueued synthetic results.
@@ -363,6 +370,9 @@ inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
     // Final drain — catches anything the last tick fired that the slow path
     // didn't have time to process.
     EventLoop_DrainEvents(drv->state);
+    // v4.7.37 (Phase B reordered): drain any pending submit commands from
+    // the final iteration BEFORE OMS_Tick so they get filled.
+    if (drv->oms) OMS_DrainSubmit(drv->oms, drv->state->registered_count);
     if (drv->oms) OrderManager_Tick(drv->oms);
     // v4.7.15: drain post-fill in mode 1 to match live's final-flush loop
     // (EngineSharded line 1597-1604). Without this, the last tick's

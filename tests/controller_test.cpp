@@ -6713,6 +6713,80 @@ e3_skip_load:;
         delete r;
     }
 
+    //======================================================================================================
+    // [v4.7.37 — OMS Submit funneling via per-core SPSC queue (Phase B)]
+    //======================================================================================================
+    // Verify the new OMS_PushSubmit / OMS_DrainSubmit infrastructure:
+    // commands pushed by external producer threads must reach the drainer's
+    // OrderManager_Submit unchanged, preserving the documented "drainer is
+    // sole Submit caller" contract. When Phase C spawns per-core slow-path
+    // threads, this funnel is what makes concurrent Submit safe.
+    //======================================================================================================
+    printf("\n--- v4.7.37 — OMS Submit funneling via SPSC queue (Phase B) ---\n");
+    {
+        struct R {
+            tt::OrderManagerState<64> oms;
+        };
+        R* r = new R();
+        tt::ExchangeAdapter<64> empty{};
+        tt::OrderManager_Init(&r->oms, empty, /*live=*/0,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+        r->oms.event_log_mode       = 1;       // mirror live default
+        r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
+        r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
+
+        // Push 3 SubmitCommands across different core_ids
+        bool p0 = tt::OMS_PushSubmit(&r->oms, 0, tt::ORDER_MARKET_BUY,
+            FPN_FromDouble<64>(0.02),
+            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+        bool p1 = tt::OMS_PushSubmit(&r->oms, 1, tt::ORDER_MARKET_BUY,
+            FPN_FromDouble<64>(0.03),
+            FPN_FromDouble<64>(60800.0), FPN_FromDouble<64>(59800.0),
+            STRATEGY_MEAN_REVERSION, FPN_FromDouble<64>(60100.0), 0);
+        bool p2 = tt::OMS_PushSubmit(&r->oms, 2, tt::ORDER_MARKET_BUY,
+            FPN_FromDouble<64>(0.04),
+            FPN_FromDouble<64>(60900.0), FPN_FromDouble<64>(59900.0),
+            STRATEGY_EMA_CROSS, FPN_FromDouble<64>(60200.0), 0);
+
+        check("v4.7.37: PushSubmit core 0 succeeded", p0);
+        check("v4.7.37: PushSubmit core 1 succeeded", p1);
+        check("v4.7.37: PushSubmit core 2 succeeded", p2);
+        // No Submit has been called yet — order_bitmap should still be 0
+        check("v4.7.37: order_bitmap empty before drain (queue holds commands)",
+              r->oms.order_bitmap == 0);
+
+        // Drain — calls OrderManager_Submit serially for each pushed command
+        int drained = tt::OMS_DrainSubmit(&r->oms, /*num_cores=*/3);
+        check("v4.7.37: DrainSubmit returns 3 (all pushed commands consumed)",
+              drained == 3);
+        check("v4.7.37: order_bitmap reflects 3 reserved slots after drain",
+              __builtin_popcount(r->oms.order_bitmap) == 3);
+
+        // Push another and drain only that one — verify the queues stay clean
+        bool p3 = tt::OMS_PushSubmit(&r->oms, 0, tt::ORDER_MARKET_SELL,
+            FPN_FromDouble<64>(0.02),
+            FPN_Zero<64>(), FPN_Zero<64>(),
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60500.0), 0);
+        check("v4.7.37: subsequent PushSubmit succeeds (queue not full)", p3);
+        int drained2 = tt::OMS_DrainSubmit(&r->oms, 3);
+        check("v4.7.37: second drain returns 1", drained2 == 1);
+        int drained3 = tt::OMS_DrainSubmit(&r->oms, 3);
+        check("v4.7.37: idempotent — drain on empty queues returns 0",
+              drained3 == 0);
+
+        // Invalid core_id rejected
+        bool bad = tt::OMS_PushSubmit(&r->oms, /*invalid*/-1, tt::ORDER_MARKET_BUY,
+            FPN_FromDouble<64>(0.01));
+        check("v4.7.37: PushSubmit rejects invalid core_id=-1", !bad);
+        bad = tt::OMS_PushSubmit(&r->oms, /*too high*/MAX_EXECUTION_CORES,
+            tt::ORDER_MARKET_BUY, FPN_FromDouble<64>(0.01));
+        check("v4.7.37: PushSubmit rejects core_id >= MAX_EXECUTION_CORES",
+              !bad);
+
+        delete r;
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

@@ -1419,7 +1419,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         FPN<F> tp_dist_b = FPN_Mul(tp_dist_a, tp2_mult_eff);
                         leg_tp = FPN_Add(event.price, tp_dist_b);
                     }
-                    OrderManager_Submit(&oms,
+                    // v4.7.37 (Phase B reordered): push through OMS_PushSubmit
+                    // instead of calling Submit directly. Drainer drains the
+                    // queue + calls Submit serially — preserves OMS single-
+                    // caller contract for when Phase C spawns N producers.
+                    OMS_PushSubmit(&oms,
                         (int16_t)portfolio_slot,  // P.3: actual slot, not core_id
                         is_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
                         FPN_FromDouble<F>(order_qty_d),
@@ -1513,7 +1517,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             if (FPN_IsZero(fill_px)) {
                 fill_px = oms.portfolio.positions[slot].entry_price;  // safe fallback
             }
-            OrderManager_Submit(&oms,
+            // v4.7.37 (Phase B reordered): push through OMS_PushSubmit so
+            // the drainer thread serializes Submit calls. Manual close is a
+            // GUI-driven event; without funneling, this site races with
+            // other producer-thread Submits when Phase C spawns multiple.
+            OMS_PushSubmit(&oms,
                 (int16_t)slot, ORDER_MARKET_SELL,
                 qty,
                 FPN_Zero<F>(), FPN_Zero<F>(),
@@ -1549,8 +1557,19 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                          &drain_post_fill, &drain_manual_closes] {
         EngineSharded_PinThread(state.registered_count + 1);
         while (!g_engine_sharded_shutdown) {
+            // Sequence per cycle:
+            //   1. drain_with_submit / drain_manual_closes — these push
+            //      SubmitCommands into oms.submit_queues (v4.7.37; was direct
+            //      OrderManager_Submit calls before Phase B).
+            //   2. OMS_DrainSubmit — drainer (sole Submit caller) pops the
+            //      queues and calls Submit serially. Preserves OMS contract.
+            //   3. OrderManager_Tick — drains result_queue / ws_result_queue
+            //      / reconcile_queue, calls HandleFill on completed orders.
+            //   4. drain_post_fill — applies per-core CoreContext updates
+            //      from FillRecords.
             int total_drained = drain_with_submit();
             drain_manual_closes();
+            OMS_DrainSubmit(&oms, state.registered_count);  // v4.7.37
             OrderManager_Tick(&oms);
             drain_post_fill();
 
@@ -1559,6 +1578,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 for (int k = 0; k < 16; ++k) {
                     drain_with_submit();
                     drain_manual_closes();
+                    OMS_DrainSubmit(&oms, state.registered_count);  // v4.7.37
                     OrderManager_Tick(&oms);
                     drain_post_fill();
                 }

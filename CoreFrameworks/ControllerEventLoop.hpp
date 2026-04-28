@@ -1709,11 +1709,15 @@ inline void EventLoop_TimeExit(EventLoopState<F>* state,
 
         // Force-close. OMS HandleFill closes the slot exactly like a
         // normal SG-triggered exit.
+        // v4.7.37 (Phase B reordered): push through OMS_PushSubmit instead
+        // of calling Submit directly. Drainer thread drains the queue and
+        // calls Submit serially — preserves OMS contract, fixes latent
+        // race when per-core slow-paths land in Phase C.
         FPN<F> qty       = oms->portfolio.positions[slot].quantity;
         FPN<F> price_fpn = FPN_FromDouble<F>(current_price);
-        OrderManager_Submit(oms, (int16_t)slot, ORDER_MARKET_SELL,
-                             qty, FPN_Zero<F>(), FPN_Zero<F>(),
-                             state->cores[slot].strategy_id, price_fpn);
+        OMS_PushSubmit(oms, (int16_t)slot, ORDER_MARKET_SELL,
+                        qty, FPN_Zero<F>(), FPN_Zero<F>(),
+                        state->cores[slot].strategy_id, price_fpn);
 
         // v4.7.19: counter bumps moved to EventLoop_DrainPostFill (single
         // source of truth, atomic with CSV write).

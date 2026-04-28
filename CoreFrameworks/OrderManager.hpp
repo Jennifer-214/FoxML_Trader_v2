@@ -100,6 +100,32 @@ struct Command {
 
 constexpr size_t OMS_RESULT_QUEUE_SIZE = 256;
 
+// v4.7.37: SubmitCommand — payload for the per-core submit_queues. Producer
+// threads (today: producer slow-path; future: per-core slow-path threads)
+// push commands here instead of calling OrderManager_Submit directly. The
+// drainer thread (sole Submit caller) pops from these queues each tick,
+// preserving the documented "single Submit caller" OMS contract even when
+// multiple producer-side threads need to submit orders.
+//
+// Sizing: 32 slots per queue. Slow-path submit events are rare (force-close
+// on time-exit, manual close, drag, swap) — peak <1/sec. 32 is generous.
+//
+// SubmitCommand is templated on F so the FPN<F> fields are sized correctly.
+template <unsigned F>
+struct SubmitCommand {
+    int16_t  core_id;       // execution-core id; routes the resulting fill
+    uint8_t  order_type;    // OrderType enum (uint8 for compact storage)
+    uint8_t  strategy_id;   // strategy that produced this order
+    uint8_t  leg;           // 0 = leg A or single, 1 = leg B (partials)
+    uint8_t  _pad[3];
+    FPN<F>   qty;
+    FPN<F>   intended_tp;
+    FPN<F>   intended_sl;
+    FPN<F>   event_price;   // for the trade log + fill price
+};
+
+constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
+
 //======================================================================================================
 // [ORDER MANAGER STATE]
 //======================================================================================================
@@ -153,6 +179,17 @@ struct OrderManagerState {
     // drainer is the sole consumer. Carries CMD_RECONCILE commands with
     // drift amounts. OrderManager_Tick drains this third.
     SPSCRing<Command, 64> reconcile_queue;
+
+    // v4.7.37: per-core submit queues. Producer threads (today: producer
+    // slow-path; future: per-core slow-path threads in engine_arch=
+    // per_core_slow) push SubmitCommands here. The drainer thread pops
+    // them in OMS_DrainSubmit and calls OrderManager_Submit serially —
+    // preserving the documented "drainer is sole Submit caller" contract.
+    //
+    // Why per-core (not one queue): when per-core slow-paths spawn (Phase C),
+    // each thread is the sole producer for its own ring. SPSC contract
+    // holds. With one shared queue, multiple producers would need MPSC.
+    SPSCRing<SubmitCommand<F>, OMS_SUBMIT_QUEUE_SIZE> submit_queues[MAX_EXECUTION_CORES];
 
     // === BANK STATE (moved from EventLoopState in phase 03 chunk 1) ===
     // Canonical portfolio + balance. After phase 03 mode 1 ships, these
@@ -349,6 +386,10 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     SPSCRing_Init(&oms->result_queue);
     SPSCRing_Init(&oms->ws_result_queue);
     SPSCRing_Init(&oms->reconcile_queue);
+    // v4.7.37: per-core submit queues (Phase B reordered)
+    for (int i = 0; i < MAX_EXECUTION_CORES; ++i) {
+        SPSCRing_Init(&oms->submit_queues[i]);
+    }
 
     // Phase 03 chunk 1B: bank state lives here now.
     Portfolio_Init(&oms->portfolio);
@@ -550,6 +591,90 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms,
         return 0;
     }
     return id;
+}
+
+//======================================================================================================
+// [PUSH SUBMIT — funnel external Submit requests through SPSC queue]
+//======================================================================================================
+// v4.7.37 (Phase B reordered): producer threads call OMS_PushSubmit instead
+// of OrderManager_Submit. Drainer thread pops from submit_queues and calls
+// OrderManager_Submit serially, preserving the documented "drainer is sole
+// Submit caller" OMS contract.
+//
+// Per-core SPSC: each core_id has its own queue. Today's caller (producer
+// slow-path) is the sole producer for ALL queues — still SPSC per ring.
+// When Phase C spawns per-core slow-paths, each thread is the sole producer
+// for its own ring. SPSC contract holds in both modes.
+//
+// Returns false if the queue is full (caller should consider this an error
+// — slow-path submission backlog suggests drainer is starved). Returns true
+// on successful push.
+//======================================================================================================
+template <unsigned F>
+inline bool OMS_PushSubmit(OrderManagerState<F>* oms,
+                            int16_t core_id,
+                            OrderType type,
+                            FPN<F> qty,
+                            FPN<F> intended_tp = FPN_Zero<F>(),
+                            FPN<F> intended_sl = FPN_Zero<F>(),
+                            uint8_t strategy_id = 0xFF,
+                            FPN<F> event_price = FPN_Zero<F>(),
+                            uint8_t leg = 0) {
+    if (core_id < 0 || core_id >= MAX_EXECUTION_CORES) {
+        std::fprintf(stderr,
+                     "[OMS] PushSubmit: invalid core_id=%d (max=%d)\n",
+                     (int)core_id, MAX_EXECUTION_CORES);
+        return false;
+    }
+    SubmitCommand<F> cmd{};
+    cmd.core_id      = core_id;
+    cmd.order_type   = (uint8_t)type;
+    cmd.strategy_id  = strategy_id;
+    cmd.leg          = leg;
+    cmd.qty          = qty;
+    cmd.intended_tp  = intended_tp;
+    cmd.intended_sl  = intended_sl;
+    cmd.event_price  = event_price;
+    bool pushed = SPSCRing_TryPush(&oms->submit_queues[core_id], cmd);
+    if (!pushed) {
+        std::fprintf(stderr,
+                     "[OMS] PushSubmit: queue full for core=%d type=%u "
+                     "(drainer starved?)\n",
+                     (int)core_id, (unsigned)type);
+    }
+    return pushed;
+}
+
+//======================================================================================================
+// [DRAIN SUBMIT — drainer thread pops queues and calls Submit serially]
+//======================================================================================================
+// v4.7.37 (Phase B reordered): called from the drainer thread's loop, before
+// OrderManager_Tick. Drains all per-core submit queues and calls
+// OrderManager_Submit for each command. Single-threaded — preserves OMS
+// contract.
+//
+// Returns the number of commands drained.
+//======================================================================================================
+template <unsigned F>
+inline int OMS_DrainSubmit(OrderManagerState<F>* oms, int num_cores) {
+    int drained = 0;
+    int max = (num_cores > MAX_EXECUTION_CORES) ? MAX_EXECUTION_CORES : num_cores;
+    for (int c = 0; c < max; ++c) {
+        SubmitCommand<F> cmd;
+        while (SPSCRing_TryPop(&oms->submit_queues[c], &cmd)) {
+            OrderManager_Submit(oms,
+                                cmd.core_id,
+                                (OrderType)cmd.order_type,
+                                cmd.qty,
+                                cmd.intended_tp,
+                                cmd.intended_sl,
+                                cmd.strategy_id,
+                                cmd.event_price,
+                                cmd.leg);
+            drained++;
+        }
+    }
+    return drained;
 }
 
 //======================================================================================================
