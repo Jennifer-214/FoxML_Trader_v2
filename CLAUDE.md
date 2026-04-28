@@ -87,6 +87,21 @@ RollingStats (128 + 512 tick windows) →
 5. Add tooltip in `SetItemTooltip` section (mandatory)
 6. New strategy → update `default_strategy` tooltip
 
+### ImGui Label IDs (load-bearing — v4.7.33)
+ImGui derives widget IDs from visible labels. Two widgets with the same label at the same scope = ID collision = wrong checkmark state, hover errors, duplicate-icon warnings. Three rules:
+1. **Widgets inside a loop** (per-core rows, per-position buttons) → `ImGui::PushID(i)` per iteration. Per-core P&L "Reset" buttons + Positions "Close" buttons follow this pattern.
+2. **Widget label matching enclosing CollapsingHeader / parent scope** → append `##suffix` to the widget label. ImGui hides everything after `##` in display but uses the full string in the ID hash. E.g. `"Vol Sizing##bool"` displays "Vol Sizing" but doesn't collide with the "Vol Sizing" section header.
+3. **Single-instance widgets with unique labels** → label as-is is fine.
+
+Adding a new GUI-editable cfg field whose label matches its section name? Use `##bool` / `##toggle` / `##unique` suffix.
+
+### New per-core override field (v4.7.24+)
+1. Add ONE line to `PER_CORE_OVERRIDE_FIELDS(PCT, RAW)` X-macro in `CoreFrameworks/ControllerConfig.hpp` — choose `PCT(name)` for percent-stored fields (cfg writes 4.0, stored 0.04) or `RAW(name)` for direct FPN
+2. Add corresponding `per_core_fields[]` entry in `GUI/SettingsPanel.hpp` for the per-core tab
+3. **Verify the consumer** reads via `ControllerConfig_ResolveForCore` OR uses the `if (!FPN_IsZero(ov.X)) ov.X else cfg.X` pattern — direct `cfg.X` reads bypass the override (silent no-op). Both live (`EngineSharded.hpp`) and backtest (`BacktestSharded.hpp`) sites must be fixed in lockstep for train-serve parity.
+
+The X-macro auto-generates: struct member, init zeroing, resolver overwrite, cfg parser case. Single-source-of-truth list for per-core overrides.
+
 ### New TUI/GUI display field
 1. Add to `TUISnapshot` struct (`DataStream/EngineTUI.hpp`)
 2. Populate in `TUI_CopySnapshot()`
