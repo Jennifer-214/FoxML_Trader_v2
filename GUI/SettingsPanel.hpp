@@ -625,16 +625,21 @@ static inline int global_section_strategy(const char *section) {
     return -1;
 }
 
-// True when any configured core is running this strategy (or AUTO, which
-// can route to any). Source of truth: SettingsState's per_core_strategy[]
-// (the user's intent — what they have configured, may differ from live
-// until Apply is pressed). The user's configuration is what the panel
-// should adapt to.
+// True when any configured core is running this strategy.
+// v4.7.30: AUTO routes to MR/Momentum/SimpleDip/EMA Cross only (not ML).
+// Pre-v4.7.30 treated AUTO as "matches everything" — that surfaced ML
+// sections (FoxML/Validation/Models/Barrier) in Global whenever any
+// core was AUTO, even though AUTO never routes to ML.
+//
+// Source of truth: SettingsState's per_core_strategy[] (user intent —
+// what they have configured, may differ from live until Apply pressed).
 static inline bool any_core_uses_strategy(const SettingsState *s, int strat) {
     for (int c = 0; c < MAX_GUI_CORES; ++c) {
         int sid = s->per_core_strategy[c];
         if (sid < 0) continue;
-        if (sid == strat || sid == STRATEGY_AUTO) return true;
+        if (sid == strat) return true;
+        // AUTO routes to MR/MOM/EMA/DIP only — NOT ML.
+        if (sid == STRATEGY_AUTO && strat != STRATEGY_ML) return true;
     }
     return false;
 }
@@ -757,12 +762,18 @@ static inline int per_core_field_strategy(const char *key_suffix) {
 }
 
 // True when this per-core field should be VISIBLE on the tab for a core
-// running `core_strategy`. AUTO (5) shows all; STRATEGY_NONE shows nothing
-// strategy-specific (only the agnostic overrides).
+// running `core_strategy`. STRATEGY_NONE shows nothing strategy-specific
+// (only the agnostic overrides).
+//
+// v4.7.30: AUTO routes to MR/Momentum/SimpleDip/EMA Cross only — NOT ML.
+// Pre-v4.7.30 AUTO showed ALL strategy-specific fields including ML's,
+// which never matter for an AUTO core. Now AUTO matches everything except ML.
 static inline bool per_core_field_visible(const char *key_suffix, int core_strategy) {
     int field_strat = per_core_field_strategy(key_suffix);
     if (field_strat < 0) return true;       // agnostic
-    if (core_strategy == STRATEGY_AUTO) return true;
+    if (core_strategy == STRATEGY_AUTO) {
+        return field_strat != STRATEGY_ML;
+    }
     return core_strategy == field_strat;
 }
 
