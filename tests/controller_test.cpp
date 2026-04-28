@@ -6373,6 +6373,128 @@ e3_skip_load:;
 
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
+    //======================================================================================================
+    // [v4.7.19 — counter/CSV atomicity + double-close guard]
+    //======================================================================================================
+    // Two regression tests for the v4.7.19 architectural fix:
+    //
+    //   (a) double-close on already-closed slot is a no-op — no balance
+    //       drain, no CSV row, no counter bump. Pre-v4.7.19 a duplicate
+    //       SELL fill on a closed slot read stale entry_price/quantity
+    //       and wrote a phantom CSV row + drained an exit fee from balance.
+    //
+    //   (b) successful single fill bumps total_entries / total_exits
+    //       exactly once, after DrainPostFill runs. Pre-v4.7.19 the bump
+    //       happened in OnEvent BEFORE Submit/HandleFill could fail,
+    //       producing 7-vs-5 counter-vs-CSV drift.
+    //======================================================================================================
+    printf("\n--- v4.7.19 — counter/CSV atomicity + double-close guard ---\n");
+    {
+        struct R {
+            tt::OrderManagerState<64> oms;
+            tt::EventLoopState<64>    state;
+            tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
+            tt::ExecutionCore<64>     core;
+        };
+        R* r = new R();
+        tt::EventLoopState_InitLegacy(&r->state, &r->oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+        r->oms.event_log_mode       = 1;
+        r->oms.partial_exit_enabled = 0;
+        r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
+        r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
+        tt::SPSCRing_Init(&r->tick_ring);
+        tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
+        tt::EventLoopState_RegisterCore(&r->state, &r->core,
+            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+            FPN_FromDouble<64>(0.01));
+        tt::EventLoopState_SetCoreStrategy(&r->state, 0,
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(1500.0));
+
+        // ---- Open + close slot 0 normally ----
+        tt::ExchangeAdapter<64> empty{};
+        uint64_t buy_id = tt::OrderManager_Submit(&r->oms,
+            0, tt::ORDER_MARKET_BUY, FPN_FromDouble<64>(0.02),
+            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+        (void)buy_id;
+        for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
+            if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
+            tt::Order<64>* o = &r->oms.orders[i];
+            if (o->state != tt::ORDER_FILLED) {
+                tt::OrderManager_HandleFill(&r->oms, o,
+                    FPN_FromDouble<64>(60000.0), FPN_FromDouble<64>(0.02));
+                o->state = tt::ORDER_FILLED;
+                r->oms.order_bitmap &= ~(uint16_t)(1u << i);
+                break;
+            }
+        }
+        tt::EventLoop_DrainPostFill(&r->state, &r->oms, 0);
+
+        check("v4.7.19 (b): entry bump happens via DrainPostFill — total_entries == 1",
+              r->state.total_entries == 1);
+        check("v4.7.19 (b): per-core entries_processed == 1",
+              r->state.cores[0].entries_processed == 1);
+
+        // Now close it.
+        uint64_t sell_id = tt::OrderManager_Submit(&r->oms,
+            0, tt::ORDER_MARKET_SELL, FPN_FromDouble<64>(0.02),
+            FPN_Zero<64>(), FPN_Zero<64>(),
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60600.0), 0);
+        (void)sell_id;
+        for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
+            if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
+            tt::Order<64>* o = &r->oms.orders[i];
+            if (o->state != tt::ORDER_FILLED) {
+                tt::OrderManager_HandleFill(&r->oms, o,
+                    FPN_FromDouble<64>(60600.0), FPN_FromDouble<64>(0.02));
+                o->state = tt::ORDER_FILLED;
+                r->oms.order_bitmap &= ~(uint16_t)(1u << i);
+                break;
+            }
+        }
+        tt::EventLoop_DrainPostFill(&r->state, &r->oms, 0);
+
+        check("v4.7.19 (b): exit bump via DrainPostFill — total_exits == 1",
+              r->state.total_exits == 1);
+        double balance_after_close = FPN_ToDouble(r->oms.balance);
+        check("v4.7.19 (b): balance reflects single close (~$10000 + win - 2 fees)",
+              balance_after_close > 9990.0 && balance_after_close < 10020.0);
+
+        // ---- Now attempt a duplicate SELL fill on the already-closed slot.
+        //      Pre-v4.7.19: would write a phantom CSV row + drain a fee.
+        //      Post-v4.7.19: HandleFill no-ops at the bitmap guard.
+        double balance_before_dup = balance_after_close;
+        uint32_t exits_before_dup = r->state.total_exits;
+
+        // Simulate a duplicate fill by directly calling HandleFill with a
+        // synthetic Order on the empty slot. (Real-world path: race between
+        // manual-close and hot-path SG.)
+        tt::Order<64> dup_sell{};
+        dup_sell.id            = 9999;
+        dup_sell.core_id       = 0;
+        dup_sell.type          = (uint8_t)tt::ORDER_MARKET_SELL;
+        dup_sell.strategy_id   = STRATEGY_SIMPLE_DIP;
+        dup_sell.is_maker      = 0;
+        dup_sell.requested_qty = FPN_FromDouble<64>(0.02);
+        dup_sell.intended_tp   = FPN_Zero<64>();
+        dup_sell.intended_sl   = FPN_Zero<64>();
+        tt::OrderManager_HandleFill(&r->oms, &dup_sell,
+            FPN_FromDouble<64>(60600.0), FPN_FromDouble<64>(0.02));
+        tt::EventLoop_DrainPostFill(&r->state, &r->oms, 0);
+
+        check("v4.7.19 (a): duplicate SELL on closed slot — balance unchanged",
+              fabs(FPN_ToDouble(r->oms.balance) - balance_before_dup) < 0.01);
+        check("v4.7.19 (a): duplicate SELL — total_exits NOT bumped",
+              r->state.total_exits == exits_before_dup);
+        check("v4.7.19 (a): duplicate SELL — last_closed_mask stays clear",
+              r->oms.last_closed_mask == 0);
+
+        delete r;
+    }
+
+    printf("\n======================================\n");
+    printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
 
     return tests_failed > 0 ? 1 : 0;

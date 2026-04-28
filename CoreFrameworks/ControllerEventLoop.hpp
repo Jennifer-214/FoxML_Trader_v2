@@ -633,7 +633,7 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
     const int max_slot   = partial_on ? state->registered_count * 2
                                       : state->registered_count;
 
-    // ---- Entries: open_notional / fees ----
+    // ---- Entries: open_notional / fees + heartbeat counters ----
     uint16_t open_mask = oms->last_opened_mask;
     while (open_mask) {
         int slot = __builtin_ctz(open_mask);
@@ -644,6 +644,14 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
         const auto& rec = oms->last_fill[slot];
         ctx.core_open_notional = FPN_Add(ctx.core_open_notional, rec.entry_notional);
         ctx.core_fees          = FPN_AddSat(ctx.core_fees, rec.entry_fee);
+        // v4.7.19: heartbeat counters bumped HERE — atomic with the CSV
+        // write inside HandleFill that produced this mask bit. Replaces
+        // the prior decoupled bumps in OnEvent / manual-close / time-exit
+        // that over-counted when Submit failed or HandleFill rejected
+        // (active_bitmap guard etc.).
+        ctx.entries_processed++;
+        state->total_entries++;
+        state->total_events_processed++;
     }
     oms->last_opened_mask = 0;
 
@@ -665,6 +673,11 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
         ctx.core_realized      = FPN_Add(ctx.core_realized, rec.exit_net_pnl);
         ctx.core_open_notional = FPN_SubSat(ctx.core_open_notional, rec.exit_entry_notional);
         ctx.core_fees          = FPN_AddSat(ctx.core_fees, rec.exit_total_fees);
+        // v4.7.19: heartbeat counters bumped HERE — same doctrine as
+        // entries above.
+        ctx.exits_processed++;
+        state->total_exits++;
+        state->total_events_processed++;
 
         // Per-trade signals: leg A only.
         if (is_leg_a) {
@@ -746,15 +759,18 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
     // slots and updates balance. OnEvent just bumps counters so the
     // statistics stay correct for the TUI and the drainer loop.
     if (state->oms->event_log_mode == 1) {
-        if (is_entry) {
-            ctx->entries_processed++;
-            state->total_entries++;
-        }
-        if (is_exit) {
-            ctx->exits_processed++;
-            state->total_exits++;
-        }
-        state->total_events_processed++;
+        // v4.7.19: do NOT bump heartbeat counters here. OnEvent fires for
+        // every TradeEvent the drainer pops — but the actual fill (and
+        // CSV write) happens later in OMS_Tick → HandleFill. Bumping here
+        // over-counts when Submit fails, when the result_queue is full,
+        // or when the slot was already closed by a racing manual-close.
+        // The counters are now bumped atomically with the CSV write in
+        // EventLoop_DrainPostFill (which walks last_opened_mask /
+        // last_closed_mask that HandleFill populates per actual fill).
+        // OnEvent's mode-1 path is now a pure no-op return.
+        (void)ctx;
+        (void)is_entry;
+        (void)is_exit;
         return;
     }
 
@@ -1628,12 +1644,8 @@ inline void EventLoop_TimeExit(EventLoopState<F>* state,
                              qty, FPN_Zero<F>(), FPN_Zero<F>(),
                              state->cores[slot].strategy_id, price_fpn);
 
-        // Heartbeat counters — time-exit bypasses EventLoop_OnEvent so we
-        // bump them here (matches the legacy wiring that lived in
-        // EngineSharded).
-        state->cores[slot].exits_processed++;
-        state->total_exits++;
-        state->total_events_processed++;
+        // v4.7.19: counter bumps moved to EventLoop_DrainPostFill (single
+        // source of truth, atomic with CSV write).
         fprintf(stderr,
             "[time-exit] core %d: held %lu ticks, gain %.3f%%\n",
             slot, (unsigned long)elapsed, gain_pct * 100.0);

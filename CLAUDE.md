@@ -221,6 +221,25 @@ pos->stop_loss_price = FPN_Min(pos->stop_loss_price, sl_floor);
 ### FPN Division Guards
 Every `FPN_DivNoAssert(num, den)` MUST guard `if (FPN_IsZero(den)) return;`. `FPN_DivNoAssert` saturates to MAX on zero — silent extreme values.
 
+### Fill-Counter Atomicity (load-bearing — v4.7.19)
+
+**Rule:** heartbeat counters (`state.total_entries`, `state.total_exits`, `state.cores[].entries_processed`, `state.cores[].exits_processed`) MUST be bumped **only inside `EventLoop_DrainPostFill`**, walking `oms->last_opened_mask` / `oms->last_closed_mask`. These masks are populated by `OrderManager_HandleFill` exactly when a real fill writes a CSV row + mutates portfolio/balance. Bumping anywhere else (OnEvent, manual-close lambdas, time-exit, future bypass paths) decouples the counter from the actual fill — over-counts when `Submit` fails, when the result_queue is full, or when `HandleFill` rejects via the active-bitmap guard.
+
+**`OrderManager_HandleFill` SELL branch MUST guard against double-close:**
+
+```cpp
+if ((oms->portfolio.active_bitmap & (uint16_t)(1u << pslot)) == 0) {
+    fprintf(stderr, "[OMS] HandleFill: SELL on closed slot — no-op\n");
+    return;
+}
+```
+
+Without this guard, a duplicate SELL fill (e.g., manual-close racing with hot-path SG) reads stale `entry_price`/`quantity` from `Portfolio_CloseSlot`'s leftover position record, computes phantom gross/fees, drains balance, and writes a ghost CSV row.
+
+**Why this is load-bearing.** v4.7.19 — Stats panel showed `exits: 2 (7 fills)` while trade log CSV had 5 rows. Counter bumps in `OnEvent` (mode 1) + manual-close + time-exit fired BEFORE Submit/HandleFill could fail; phantom fees drained from balance through ghost CSV rows. In live mode the same race would push duplicate `OrderManager_Submit` calls to Binance — second SELL could fill as an unintended SHORT.
+
+Adding a new fill-producing path: just submit through OMS. `HandleFill` populates the masks, `DrainPostFill` bumps the counters and applies CoreContext updates. Single source of truth.
+
 ### Config Field Conventions
 - `_pct` suffix: stored as decimal (0.04 = 4%), parsed `/100.0`. Stddev mult use: `mult = field × 100`
 - `_mult` suffix: direct value (3.0 = 3.0σ), parsed raw. Used directly: `offset = stddev × field`

@@ -631,6 +631,21 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
     } else if (o->type == (uint8_t)ORDER_MARKET_SELL) {
         // Exit fill: close portfolio slot, compute P&L, update balance.
         int pslot = (int)o->core_id;
+        // v4.7.19: guard against double-close. Portfolio_CloseSlot doesn't
+        // zero entry_price/quantity on close — it just clears the bitmap
+        // bit. So if a SECOND SELL fill arrives for an already-closed slot
+        // (e.g., manual-close racing with hot-path SG, or stale event in
+        // ring), the read below picks up STALE entry_price + quantity,
+        // computes a ghost gross/fee, and writes a phantom CSV row + bumps
+        // total_filled. Result: trade history rows that never happened.
+        // Skip the entire SELL branch when the slot bit is already clear.
+        if ((oms->portfolio.active_bitmap & (uint16_t)(1u << pslot)) == 0) {
+            std::fprintf(stderr,
+                "[OMS] HandleFill: slot %d SELL on already-closed slot — "
+                "no-op (likely race between manual close and hot-path SG)\n",
+                pslot);
+            return;
+        }
         FPN<F> entry_price_snap = oms->portfolio.positions[pslot].entry_price;
         FPN<F> entry_fee = oms->portfolio.positions[pslot].entry_fee;
         FPN<F> qty_snap  = oms->portfolio.positions[pslot].quantity;

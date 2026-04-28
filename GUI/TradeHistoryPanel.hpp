@@ -102,9 +102,17 @@ static inline void TradeHistory_Refresh(TradeHistory *th) {
         // Pre-v4.7.5 used P&L sign which lied when fees ate a real TP
         // (small TP gain - 2× taker fees = negative P&L → labeled "SL"
         // even though the TP gate is what fired).
-        if (e->exit_price > e->entry_price)      strncpy(e->reason, "TP", 7);
-        else if (e->exit_price < e->entry_price) strncpy(e->reason, "SL", 7);
-        else                                     strncpy(e->reason, "FLAT", 7);
+        // v4.7.19: tolerance-based FLAT. With sub-cent price diffs that
+        // round to the same display value (e.g. exit $76740.02 vs entry
+        // $76740.05), the strict < / > comparison labels micro-moves as
+        // SL/TP. Manual closes + duplicate-fill ghost rows commonly land
+        // here. Threshold: 0.5 basis points = 0.005% of entry, same
+        // FLICKER_BPS used by the chart's neutral-candle threshold.
+        double price_diff = e->exit_price - e->entry_price;
+        double flat_thr   = e->entry_price * 0.00005;
+        if      (price_diff >  flat_thr) strncpy(e->reason, "TP", 7);
+        else if (price_diff < -flat_thr) strncpy(e->reason, "SL", 7);
+        else                             strncpy(e->reason, "FLAT", 7);
         e->reason[7] = '\0';
 
         // Strategy: column 2 is numeric strategy_id (uint8_t). Use the
@@ -210,16 +218,10 @@ static inline void GUI_Panel_TradeHistory(TradeHistory *th, int partial_exit_ena
             ImGui::TextColored(reason_col, "%s", e->reason);
 
             ImGui::TableNextColumn();
-            // P.3 partials: show ".B" suffix on leg B exits so users can
-            // distinguish the second leg of a paired trade. Leg A exits
-            // and single-position exits both show as just the strategy
-            // name (visually identical — no false positives when partials
-            // are off).
-            if (e->leg == 1) {
-                ImGui::TextColored(FoxmlColors::comment, "%s.B", e->strategy);
-            } else {
-                ImGui::TextColored(FoxmlColors::comment, "%s", e->strategy);
-            }
+            // v4.7.19: strip .B suffix — Leg column already conveys the
+            // leg, so the suffix was redundant after v4.7.18 added the
+            // dedicated Leg column.
+            ImGui::TextColored(FoxmlColors::comment, "%s", e->strategy);
 
             ImGui::TableNextColumn();
             ImGui::Text("$%.0f", e->entry_price * e->qty);

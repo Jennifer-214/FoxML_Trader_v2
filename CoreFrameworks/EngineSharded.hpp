@@ -1478,19 +1478,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 strategy_id,
                 fill_px,
                 (uint8_t)leg);
-            // v4.7.13: bump the same heartbeat counters that
-            // EventLoop_OnEvent's mode-1 path bumps on a normal exit
-            // event. Manual close bypasses OnEvent (it goes straight to
-            // OrderManager_Submit), so without this the Stats panel's
-            // exits counter stays frozen even though the X row hits
-            // the trade log and FillRecord/DrainPostFill processes the
-            // exit normally. core_wins/core_losses still gated to leg-A
-            // only by DrainPostFill's existing rule (one trade = one
-            // outcome signal); total_exits is a per-fill heartbeat so
-            // every leg-fill counts here.
-            state.cores[core_id].exits_processed++;
-            state.total_exits++;
-            state.total_events_processed++;
+            // v4.7.19: counter bumps moved to EventLoop_DrainPostFill —
+            // see the doctrine note there. Pre-v4.7.19 we bumped here
+            // BEFORE Submit could fail (queue full, slot already closed,
+            // etc.), causing 7-vs-5 counter-vs-CSV drift. Now bumps fire
+            // exactly when HandleFill writes a CSV row.
             // Clear the matching ExecutionCore active flag so the hot
             // path doesn't re-emit on the next tick (race-tolerant —
             // worst case is one duplicate exit event that HandleFill
