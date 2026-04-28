@@ -189,9 +189,21 @@ static inline void TUI_CopySnapshotSharded(
     // vs leg events" is a separate display question.
     uint32_t total_wins   = 0;
     uint32_t total_losses = 0;
+    // v4.7.25: aggregate gross_wins / gross_losses across cores so the
+    // sharded Stats panel can compute avg_win / avg_loss / profit_factor /
+    // expectancy. Pre-v4.7.25 these fields stayed at zero in sharded mode
+    // (only the legacy single_core path populated them) — visible in the
+    // GUI as "avg W: $0.00 L: $0.00 E[trade]: $+0.00" even after dozens
+    // of trades. Per-trade pairing semantics (v4.7.21) carry through:
+    // a TP1+SL paired exit's NET is summed once and routed into the
+    // matching gross bucket inside DrainPostFill.
+    FPN<F> gross_wins   = FPN_Zero<F>();
+    FPN<F> gross_losses = FPN_Zero<F>();
     for (int i = 0; i < state->registered_count && i < 16; ++i) {
         total_wins   += state->cores[i].core_wins;
         total_losses += state->cores[i].core_losses;
+        gross_wins   = FPN_Add(gross_wins,   state->cores[i].core_gross_wins);
+        gross_losses = FPN_Add(gross_losses, state->cores[i].core_gross_losses);
     }
     snap->wins   = total_wins;
     snap->losses = total_losses;
@@ -199,6 +211,23 @@ static inline void TUI_CopySnapshotSharded(
         snap->win_rate = (double)total_wins / (double)(total_wins + total_losses) * 100.0;
     } else {
         snap->win_rate = 0.0;
+    }
+    // v4.7.25: populate avg_win / avg_loss / profit_factor / expectancy
+    // from the per-core gross accumulators. Mirrors TUI_CopySnapshot's
+    // legacy formulas (line ~1233) so the Stats panel renders correctly
+    // in BOTH modes.
+    double g_wins_d   = FPN_ToDouble(gross_wins);
+    double g_losses_d = FPN_ToDouble(gross_losses);
+    snap->avg_win  = (total_wins   > 0) ? g_wins_d   / (double)total_wins   : 0.0;
+    snap->avg_loss = (total_losses > 0) ? g_losses_d / (double)total_losses : 0.0;
+    snap->profit_factor = (g_losses_d > 0.001) ? g_wins_d / g_losses_d : 0.0;
+    if (total_wins + total_losses > 0) {
+        double tot = (double)(total_wins + total_losses);
+        double wr = (double)total_wins   / tot;
+        double lr = (double)total_losses / tot;
+        snap->expectancy = (wr * snap->avg_win) - (lr * snap->avg_loss);
+    } else {
+        snap->expectancy = 0.0;
     }
 
     // config display

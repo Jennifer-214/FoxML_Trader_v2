@@ -6559,6 +6559,11 @@ e3_skip_load:;
                   r->state.cores[0].core_losses == 0);
             check("v4.7.21 (1): pairing flag cleared after both legs drained",
                   r->state.cores[0].partner_pending_active == 0);
+            // v4.7.25: gross win bucket should hold the total net (5+10=15)
+            check("v4.7.25 (1): TP+TP paired → core_gross_wins == 15.0",
+                  fabs(FPN_ToDouble(r->state.cores[0].core_gross_wins) - 15.0) < 0.001);
+            check("v4.7.25 (1): TP+TP paired → core_gross_losses untouched",
+                  FPN_IsZero(r->state.cores[0].core_gross_losses));
             delete r;
         }
 
@@ -6584,6 +6589,11 @@ e3_skip_load:;
                   r->state.cores[0].core_wins == 0);
             check("v4.7.21 (2): TP+SL paired (net negative) → core_losses == 1",
                   r->state.cores[0].core_losses == 1);
+            // v4.7.25: gross loss bucket holds magnitude of -5.0 net = 5.0
+            check("v4.7.25 (2): TP+SL paired (net -5) → core_gross_losses == 5.0",
+                  fabs(FPN_ToDouble(r->state.cores[0].core_gross_losses) - 5.0) < 0.001);
+            check("v4.7.25 (2): TP+SL paired → core_gross_wins untouched",
+                  FPN_IsZero(r->state.cores[0].core_gross_wins));
             delete r;
         }
 

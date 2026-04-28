@@ -164,6 +164,17 @@ struct CoreContext {
     FPN<F> partner_pending_pnl;
     uint8_t partner_pending_active;
     uint8_t _pad_partner[7];
+    // v4.7.25: per-core gross win/loss accumulators, mirroring the legacy
+    // single_core's ctrl->gross_wins / ctrl->gross_losses. Sum of net P&L
+    // for winning trades (gross_wins) and absolute net P&L for losing
+    // trades (gross_losses, stored unsigned). Updated alongside core_wins
+    // / core_losses — same per-trade semantics under partials (sum the
+    // pair, classify by sign, accumulate into the matching gross bucket).
+    // Pre-v4.7.25 sharded snapshot left snap->avg_win / avg_loss /
+    // profit_factor / expectancy at zero — these accumulators feed those
+    // fields in TUI_CopySnapshotSharded.
+    FPN<F> core_gross_wins;
+    FPN<F> core_gross_losses;
     // Phase 2.1: per-core open notional. Sum of (entry_price × qty) across
     // currently-open positions for this core. Updated branchlessly in
     // EventLoop_OnEvent — entry adds notional, exit subtracts the SAME
@@ -296,6 +307,9 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         // v4.7.21: pending-partner pairing state (per-trade W/L under partials)
         state->cores[i].partner_pending_pnl = FPN_Zero<F>();
         state->cores[i].partner_pending_active = 0;
+        // v4.7.25: gross win/loss accumulators
+        state->cores[i].core_gross_wins   = FPN_Zero<F>();
+        state->cores[i].core_gross_losses = FPN_Zero<F>();
         // Phase 2.1: per-core open notional (sum of entry_price × qty)
         state->cores[i].core_open_notional = FPN_Zero<F>();
         // Phase 3: per-core kill switch state. peak starts at zero; the
@@ -703,8 +717,17 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
         if (partial_on) {
             if (ctx.partner_pending_active) {
                 FPN<F> total_net = FPN_Add(ctx.partner_pending_pnl, rec.exit_net_pnl);
-                if (FPN_GreaterThan(total_net, FPN_Zero<F>())) ctx.core_wins++;
-                else                                            ctx.core_losses++;
+                if (FPN_GreaterThan(total_net, FPN_Zero<F>())) {
+                    ctx.core_wins++;
+                    // v4.7.25: gross_wins accumulates the positive net.
+                    ctx.core_gross_wins = FPN_Add(ctx.core_gross_wins, total_net);
+                } else {
+                    ctx.core_losses++;
+                    // v4.7.25: gross_losses stores the unsigned magnitude.
+                    // total_net <= 0 here, so 0 - total_net = |total_net|.
+                    ctx.core_gross_losses = FPN_Add(ctx.core_gross_losses,
+                                                    FPN_Sub(FPN_Zero<F>(), total_net));
+                }
                 ctx.partner_pending_pnl = FPN_Zero<F>();
                 ctx.partner_pending_active = 0;
             } else {
@@ -722,6 +745,14 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
             if (!partial_on) {
                 ctx.core_wins   += (rec.was_win ? 1u : 0u);
                 ctx.core_losses += (rec.was_win ? 0u : 1u);
+                // v4.7.25: gross win/loss accumulators for single-leg trades.
+                if (rec.was_win) {
+                    ctx.core_gross_wins = FPN_Add(ctx.core_gross_wins, rec.exit_net_pnl);
+                } else {
+                    // exit_net_pnl <= 0 here, store the unsigned magnitude.
+                    ctx.core_gross_losses = FPN_Add(ctx.core_gross_losses,
+                                                    FPN_Sub(FPN_Zero<F>(), rec.exit_net_pnl));
+                }
             }
             double realized = oms->last_realized_return[slot];
             if (ctx.strategy_id == STRATEGY_ML) {
