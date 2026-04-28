@@ -75,28 +75,17 @@ static const CfgFieldDef field_defs[] = {
     {"min_buy_delta",         "Min Buy Delta","Entry Filters",   CFG_FLOAT, "%.2f",
         "Min volume delta for MR buys\n-0.3 = allow mild selling, block heavy dumps"},
     {"vwap_offset",           "VWAP Offset",  "Entry Filters",   CFG_FLOAT, "%.4f", NULL},
-    // Adaptation
-    {"filter_scale",          "Filter Scale", "Adaptation",      CFG_FLOAT, "%.2f",
-        "How fast filters adapt to P&L regression\nhigher = more reactive to recent performance"},
-    {"offset_min",            "Offset Min %%","Adaptation",      CFG_FLOAT, "%.2f", NULL},
-    {"offset_max",            "Offset Max %%","Adaptation",      CFG_FLOAT, "%.2f", NULL},
-    {"vol_mult_min",          "Vol Min",      "Adaptation",      CFG_FLOAT, "%.2f", NULL},
-    {"vol_mult_max",          "Vol Max",      "Adaptation",      CFG_FLOAT, "%.2f", NULL},
-    {"r2_threshold",          "R² Threshold", "Adaptation",      CFG_FLOAT, "%.2f", NULL},
-    {"slope_scale_buy",       "Slope Scale",  "Adaptation",      CFG_FLOAT, "%.2f", NULL},
-    {"max_shift",             "Max Shift",    "Adaptation",      CFG_FLOAT, "%.4f", NULL},
-    // Trailing TP/SL
-    {"tp_hold_score",         "Hold Score",   "Trailing TP/SL",  CFG_FLOAT, "%.2f",
-        "SNR * R-squared threshold to activate trailing\nhigher = only trail strong consistent trends"},
-    {"tp_trail_mult",         "Trail TP",     "Trailing TP/SL",  CFG_FLOAT, "%.2f",
-        "Trailing TP distance as fraction of offset\nTP ratchets up as price rises"},
-    {"sl_trail_mult",         "Trail SL",     "Trailing TP/SL",  CFG_FLOAT, "%.2f",
-        "Trailing SL distance as fraction of offset\nSL ratchets up to lock in gains"},
-    // Time-Based Exit
+    // v4.7.29: Adaptation, Trailing TP/SL, Time-Based Exit moved to per-core
+    // tabs. These were exit/feedback policies that varied by strategy
+    // (DIP wants short holds, EMA Cross wants long; Momentum wants tighter
+    // R² gates, etc.). Set them per-core via each tab's override sections.
+    // max_hold_ticks (uint32) stays global — INT support for X-macro is a
+    // future extension; min_hold_gain_pct moved to per-core handles the
+    // common case (different strategies want different hold-gain floors).
     {"max_hold_ticks",        "Max Hold",     "Time-Based Exit", CFG_INT,   "%d",
-        "Close position after this many ticks\n0 = disabled, 75000 ≈ 4-5 hours"},
-    {"min_hold_gain_pct",     "Min Gain %%",  "Time-Based Exit", CFG_FLOAT, "%.2f",
-        "Only time-exit if gain below this %%\nprotects profitable positions from time exit"},
+        "Close position after this many ticks (engine-wide).\n"
+        "0 = disabled, 75000 ≈ 4-5 hours.\n"
+        "Per-core min-gain floor lives in each core's Time Exit override."},
     // Risk Management
     {"max_drawdown_pct",      "Max DD %%",    "Risk Management", CFG_FLOAT, "%.1f",
         "Circuit breaker: halt trading if total P&L\ndrops below this %% of starting balance"},
@@ -110,16 +99,12 @@ static const CfgFieldDef field_defs[] = {
         "Max drawdown from session peak before kill\n5.0 = halt if 5%% below intra-session high"},
     {"kill_recovery_warmup",  "Recovery",     "Kill Switch",      CFG_INT,   "%d",
         "Slow-path cycles to observe after kill reset\nbefore trading resumes (prevents immediate re-entry)"},
-    // Vol Sizing
-    {"vol_sizing_enabled",    "Enabled",      "Vol Sizing",      CFG_BOOL,  NULL,   NULL},
-    {"vol_scale_min",         "Scale Min",    "Vol Sizing",      CFG_FLOAT, "%.2f",
-        "Minimum position scale factor\n0.25 = never less than 25%% of base qty"},
-    {"vol_scale_max",         "Scale Max",    "Vol Sizing",      CFG_FLOAT, "%.2f",
-        "Maximum position scale factor\n2.0 = never more than 200%% of base qty"},
-    // No-Trade Band
-    {"no_trade_band_enabled", "Enabled",      "No-Trade Band",   CFG_BOOL,  NULL,   NULL},
-    {"no_trade_band_mult",    "Fee Mult",     "No-Trade Band",   CFG_FLOAT, "%.2f",
-        "Signal must exceed fee_rate * this to trade\n3.0 = dip must be 3x round-trip fee cost"},
+    // v4.7.29: Vol Sizing + No-Trade Band scale curves moved to per-core
+    // tabs. Toggles stay global (engine-architectural enable/disable).
+    {"vol_sizing_enabled",    "Vol Sizing",   "Vol Sizing",      CFG_BOOL,  NULL,
+        "Engine-wide enable for vol sizing.\nPer-core scale_min/scale_max overrides live in each core's Vol Sizing section."},
+    {"no_trade_band_enabled", "No-Trade Band","No-Trade Band",   CFG_BOOL,  NULL,
+        "Engine-wide enable for the no-trade band.\nPer-core band multiplier override lives in each core's No-Trade Band section."},
     // Regime Detection
     {"regime_crossover_threshold","Mild Trend","Regime Detection",CFG_FLOAT,"%.5f",
         "EMA/SMA spread for MILD_TREND (EMA Cross)\n0.0005 = 0.05%% gap (~$35 at BTC $68k)\nbelow = RANGING, above = mild uptrend"},
@@ -133,12 +118,11 @@ static const CfgFieldDef field_defs[] = {
         "Slow-path cycles before regime switch\nprevents rapid flipping between strategies"},
     // (Momentum + EMA Cross strategy tuning consolidated into "Momentum
     //  Tuning" / "EMA Cross Tuning" sections below — v4.7.22 dedup pass.)
-    // Partial Exits
-    {"partial_exit_pct",      "TP1 Split %%", "Partial Exits",   CFG_FLOAT, "%.2f",
-        "Fraction to exit at TP1\n0.5 = 50%% exits early, 50%% rides TP2"},
-    {"tp2_mult",              "TP2 Mult",     "Partial Exits",   CFG_FLOAT, "%.2f",
-        "TP2 distance = TP1 distance * this\n2.0 = second leg targets double the gain"},
-    {"breakeven_on_partial",  "Breakeven SL", "Partial Exits",   CFG_BOOL,  NULL,   NULL},
+    // v4.7.29: Partial Exits geometry (split %, TP2 mult) moved to per-core.
+    // breakeven_on_partial stays global (single bool toggle).
+    {"breakeven_on_partial",  "Breakeven SL", "Partial Exits",   CFG_BOOL,  NULL,
+        "Engine-wide: ratchet leg-B SL to entry after leg A TP1 hits.\n"
+        "Per-core split % and TP2 mult overrides live in each core's Partial Exits section."},
     // Gate Recovery
     {"idle_reset_cycles",     "Idle Reset",   "Gate Recovery",   CFG_INT,   "%d",
         "Cycles with no fill before gate decay\nprevents permanent lockout after losses"},
@@ -373,6 +357,49 @@ static const PerCoreFieldDef per_core_fields[] = {
         "ML-only SL override for this core. 0 = inherit."},
     {"ml_buy_threshold",  "ML Threshold","Strategy-Specific", "%.3f",
         "ML buy threshold override for this core (0-1). 0 = inherit."},
+    // v4.7.29: per-core adaptation overrides — adaptive feedback per core.
+    // Different strategies want different reactivity: MR with deep adaptation,
+    // Momentum with tighter R² gates, etc.
+    {"filter_scale",      "Filter Scale", "Adaptation",       "%.2f",
+        "How fast filters adapt to P&L regression for this core. 0 = inherit."},
+    {"r2_threshold",      "R² Threshold", "Adaptation",       "%.2f",
+        "Min R² to trust this core's regression model. 0 = inherit."},
+    {"slope_scale_buy",   "Slope Scale",  "Adaptation",       "%.2f",
+        "How much slope shifts buy threshold for this core. 0 = inherit."},
+    {"max_shift",         "Max Shift",    "Adaptation",       "%.4f",
+        "Max drift from initial buy conditions for this core. 0 = inherit."},
+    {"offset_min",        "Offset Min %%","Adaptation",       "%.3f",
+        "Most aggressive entry_offset_pct floor for this core. 0 = inherit."},
+    {"offset_max",        "Offset Max %%","Adaptation",       "%.3f",
+        "Most defensive entry_offset_pct ceiling for this core. 0 = inherit."},
+    {"vol_mult_min",      "Vol Min",      "Adaptation",       "%.2f",
+        "Most aggressive volume_multiplier floor for this core. 0 = inherit."},
+    {"vol_mult_max",      "Vol Max",      "Adaptation",       "%.2f",
+        "Most defensive volume_multiplier ceiling for this core. 0 = inherit."},
+    // v4.7.29: trailing TP/SL exit ratchet, per core.
+    {"tp_hold_score",     "Hold Score",   "Trailing",         "%.2f",
+        "Min SNR*R² to activate trailing for this core. 0 = inherit."},
+    {"tp_trail_mult",     "Trail TP",     "Trailing",         "%.2f",
+        "Trailing TP distance multiplier for this core. 0 = inherit."},
+    {"sl_trail_mult",     "Trail SL",     "Trailing",         "%.2f",
+        "Trailing SL distance multiplier for this core. 0 = inherit."},
+    // v4.7.29: time exit gain floor, per core (max_hold_ticks stays global).
+    {"min_hold_gain_pct", "Min Gain %%",  "Time Exit",        "%.2f",
+        "Only time-exit if gain below this %% for this core. 0 = inherit."},
+    // v4.7.29: vol sizing curve, per core.
+    {"vol_scale_min",     "Scale Min",    "Vol Sizing",       "%.2f",
+        "Min position scale factor for this core. 0 = inherit."},
+    {"vol_scale_max",     "Scale Max",    "Vol Sizing",       "%.2f",
+        "Max position scale factor for this core. 0 = inherit."},
+    // v4.7.29: no-trade band fee multiplier, per core.
+    {"no_trade_band_mult","Band Mult",    "No-Trade Band",    "%.2f",
+        "Signal must exceed fee_rate * this to trade for this core. 0 = inherit."},
+    // v4.7.29: partial exit geometry, per core. partial_exit_enabled stays
+    // global (engine-architectural).
+    {"partial_exit_pct",  "TP1 Split",    "Partial Exits",    "%.2f",
+        "Fraction to exit at TP1 for this core (0.5 = 50%). 0 = inherit."},
+    {"tp2_mult",          "TP2 Mult",     "Partial Exits",    "%.2f",
+        "TP2 distance = TP1 distance * this for this core. 0 = inherit."},
 };
 static constexpr int NUM_PER_CORE_FIELDS =
     sizeof(per_core_fields) / sizeof(per_core_fields[0]);

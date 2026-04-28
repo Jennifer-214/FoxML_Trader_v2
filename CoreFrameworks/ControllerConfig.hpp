@@ -103,7 +103,30 @@ constexpr uint8_t ENGINE_MODE_SHARDED = 1;
     RAW(emacross_trail_mult) \
     PCT(ml_tp_pct) \
     PCT(ml_sl_pct) \
-    RAW(ml_buy_threshold)
+    RAW(ml_buy_threshold) \
+    /* v4.7.29: Adaptation overrides — adaptive feedback per core */ \
+    RAW(filter_scale) \
+    RAW(r2_threshold) \
+    RAW(slope_scale_buy) \
+    RAW(max_shift) \
+    PCT(offset_min) \
+    PCT(offset_max) \
+    RAW(vol_mult_min) \
+    RAW(vol_mult_max) \
+    /* v4.7.29: Trailing TP/SL overrides — exit ratchet per core */ \
+    RAW(tp_hold_score) \
+    RAW(tp_trail_mult) \
+    RAW(sl_trail_mult) \
+    /* v4.7.29: Time exit override — holding period per core */ \
+    PCT(min_hold_gain_pct) \
+    /* v4.7.29: Vol sizing overrides — position scale curve per core */ \
+    RAW(vol_scale_min) \
+    RAW(vol_scale_max) \
+    /* v4.7.29: No-trade band override — entry gate strictness per core */ \
+    RAW(no_trade_band_mult) \
+    /* v4.7.29: Partial exit geometry overrides — TP1 split + TP2 mult per core */ \
+    RAW(partial_exit_pct) \
+    RAW(tp2_mult)
 
 template <unsigned F> struct PerCoreOverrides {
 #define _DECL_OV_FIELD(name) FPN<F> name;
