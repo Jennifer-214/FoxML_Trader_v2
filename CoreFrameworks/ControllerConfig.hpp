@@ -36,6 +36,20 @@
 constexpr uint8_t ENGINE_MODE_SINGLE_CORE = 0;
 constexpr uint8_t ENGINE_MODE_SHARDED = 1;
 
+// v4.7.39: engine_arch — controls slow-path threading model under sharded
+// mode. STARTUP-ONLY (changes ignored on hot reload).
+//   ENGINE_ARCH_CENTRALIZED (default): slow-path runs on producer thread,
+//     iterating per-core work in one loop. Existing behavior since v4.x.
+//   ENGINE_ARCH_PER_CORE_SLOW: spawns N pthreads at boot, each running
+//     a per-core slow-path loop. Producer keeps global work (RollingStats
+//     pushes, snapshot save, GUI publish, global KillSwitchEvaluate).
+//     Per-core slow-paths handle: strategy dispatch, regime classify,
+//     gate parameter rebuild, time-exit, trailing SL, post-fill drain,
+//     warmup permission, per-core kill switch, swap/drag/manual-close.
+//   See plans/2026-04-28-per-core-slow-path-master.md for full design.
+constexpr uint8_t ENGINE_ARCH_CENTRALIZED   = 0;
+constexpr uint8_t ENGINE_ARCH_PER_CORE_SLOW = 1;
+
 //======================================================================================================
 // [PER-CORE OVERRIDES — v4.0]
 //======================================================================================================
@@ -409,6 +423,9 @@ template <unsigned F> struct ControllerConfig {
   // Per-core sharding (Phase 13) — STARTUP-ONLY, ignored by hot reload
   uint8_t
       engine_mode; // ENGINE_MODE_SINGLE_CORE (default) or ENGINE_MODE_SHARDED
+  // v4.7.39 (per-core slow-path migration): slow-path threading model
+  // under sharded mode. STARTUP-ONLY. See ENGINE_ARCH_* constants above.
+  uint8_t engine_arch; // ENGINE_ARCH_CENTRALIZED (default) or PER_CORE_SLOW
   uint16_t num_execution_cores; // sharded mode only, ignored in single_core
                                 // mode (default 4, cap 16)
   // Phase 14: when 1, sharded mode forces the synthetic tick generator
@@ -716,6 +733,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // Adding new features in legacy-only paths = silent production gap;
   // see CLAUDE.md "Cross-Mode Init Placement" invariant.
   cfg.engine_mode = ENGINE_MODE_SHARDED;
+  // v4.7.39 (per-core slow-path migration, Phase C.2): default to centralized
+  // slow-path. Set engine_arch=per_core_slow in cfg to opt into per-core
+  // slow-path threads. Phase F flips this default after parity verification.
+  cfg.engine_arch = ENGINE_ARCH_CENTRALIZED;
   cfg.num_execution_cores = 4;
   cfg.sharded_force_synthetic = 0;
   for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
@@ -1029,6 +1050,15 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.engine_mode = ENGINE_MODE_SHARDED;
       else
         cfg.engine_mode = ENGINE_MODE_SINGLE_CORE;
+      continue;
+    }
+    // v4.7.39: engine_arch — slow-path threading model (sharded only).
+    // Accepts string forms "centralized"/"per_core_slow" or int "0"/"1".
+    if (strcmp(key, "engine_arch") == 0) {
+      if (strcmp(val, "per_core_slow") == 0 || strcmp(val, "1") == 0)
+        cfg.engine_arch = ENGINE_ARCH_PER_CORE_SLOW;
+      else
+        cfg.engine_arch = ENGINE_ARCH_CENTRALIZED;
       continue;
     }
     // num_execution_cores: clamped to [1, 16] (special case to enforce the cap)
