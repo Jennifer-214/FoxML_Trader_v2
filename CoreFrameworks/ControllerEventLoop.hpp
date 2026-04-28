@@ -152,6 +152,18 @@ struct CoreContext {
     FPN<F> core_fees;              // sum of fees paid by this core's fills
     uint32_t core_wins;            // exits with net > 0
     uint32_t core_losses;          // exits with net <= 0
+    // v4.7.21: per-trade W/L pairing under partial exits. When partials are
+    // enabled, leg A and leg B close as separate fills, but they belong to
+    // ONE trade idea. Counting each leg independently overstates trade count
+    // and loses the "did this idea make money?" signal — e.g. leg A=TP1
+    // (+small) plus leg B=SL (-larger) is net negative but per-leg counts
+    // 1W + 1L. We pair them by stashing the first leg's net P&L; when the
+    // partner closes we compute total net and bump core_wins/core_losses by 1.
+    // partials disabled → bypass pairing, per-leg-A logic is correct
+    // (single-leg trades, no partner exists).
+    FPN<F> partner_pending_pnl;
+    uint8_t partner_pending_active;
+    uint8_t _pad_partner[7];
     // Phase 2.1: per-core open notional. Sum of (entry_price × qty) across
     // currently-open positions for this core. Updated branchlessly in
     // EventLoop_OnEvent — entry adds notional, exit subtracts the SAME
@@ -281,6 +293,9 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].core_fees = FPN_Zero<F>();
         state->cores[i].core_wins = 0;
         state->cores[i].core_losses = 0;
+        // v4.7.21: pending-partner pairing state (per-trade W/L under partials)
+        state->cores[i].partner_pending_pnl = FPN_Zero<F>();
+        state->cores[i].partner_pending_active = 0;
         // Phase 2.1: per-core open notional (sum of entry_price × qty)
         state->cores[i].core_open_notional = FPN_Zero<F>();
         // Phase 3: per-core kill switch state. peak starts at zero; the
@@ -679,10 +694,35 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
         state->total_exits++;
         state->total_events_processed++;
 
+        // v4.7.21: W/L pairing under partial exits.
+        // partials enabled → both legs belong to one trade idea. Stash the
+        // first leg's net P&L; when its partner closes, classify by total
+        // net (positive → 1W, otherwise → 1L). One bump per trade.
+        // partials disabled → bypass; the leg-A-only block below is the
+        // only fill site, so its existing per-trade bump is correct.
+        if (partial_on) {
+            if (ctx.partner_pending_active) {
+                FPN<F> total_net = FPN_Add(ctx.partner_pending_pnl, rec.exit_net_pnl);
+                if (FPN_GreaterThan(total_net, FPN_Zero<F>())) ctx.core_wins++;
+                else                                            ctx.core_losses++;
+                ctx.partner_pending_pnl = FPN_Zero<F>();
+                ctx.partner_pending_active = 0;
+            } else {
+                ctx.partner_pending_pnl = rec.exit_net_pnl;
+                ctx.partner_pending_active = 1;
+            }
+        }
+
         // Per-trade signals: leg A only.
+        // - W/L: only when partials disabled (when enabled, pairing block above
+        //   handles it). When partials disabled, the only exit is leg A.
+        // - ConfidenceScorer / cooldown / pnl_feeder: always leg A only,
+        //   tied to leg A's prediction & TP1 outcome.
         if (is_leg_a) {
-            ctx.core_wins   += (rec.was_win ? 1u : 0u);
-            ctx.core_losses += (rec.was_win ? 0u : 1u);
+            if (!partial_on) {
+                ctx.core_wins   += (rec.was_win ? 1u : 0u);
+                ctx.core_losses += (rec.was_win ? 0u : 1u);
+            }
             double realized = oms->last_realized_return[slot];
             if (ctx.strategy_id == STRATEGY_ML) {
                 ConfidenceScorer_Update(&ctx.confidence,

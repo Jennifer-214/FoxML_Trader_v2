@@ -29,6 +29,13 @@ struct ChartSettings {
     // so subsequent frames use ImPlotCond_Once and the user can scroll-
     // wheel zoom without the auto-fit snapping back.
     bool y_reset_requested = true;
+    // v4.7.21: opt-in "fit Y to all TP/SL levels" mode. Default off — Reset
+    // View fits to candles + nearby TP/SL only (current behavior). When ON,
+    // Reset View pulls Y range out to include every position's full TP/SL
+    // span, even if those sit far from current price. Useful for seeing
+    // the full risk geometry at a glance; bad as a default because far TP/SL
+    // squashes price action into a thin band.
+    bool show_all_levels = false;
     // v4.7.10: core filter for entry/TP/SL markers. -1 = all cores (default,
     // unchanged behavior). 0..N-1 = show only that core's positions on the
     // chart. Affects entry markers, TP/SL dashed lines + tags, and
@@ -216,6 +223,16 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         ImGui::SetTooltip("Re-fit Y axis to current candle range + nearby TP/SL.\n"
                           "Use scroll wheel inside the chart to zoom freely.");
     }
+    // v4.7.21: opt-in toggle to make Reset View include all TP/SL levels
+    // even if they sit far from current price. Off by default (otherwise
+    // far TP/SL squashes candles into a thin band).
+    ImGui::SameLine(0, 8);
+    ImGui::Checkbox("All Levels", &settings->show_all_levels);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("When ON, Reset View pulls Y range to include every\n"
+                          "position's TP and SL, even if they sit far from price.\n"
+                          "Useful for seeing full risk geometry; squashes candles.");
+    }
 
     // v4.7.10: per-core filter dropdown. When a specific core is picked,
     // only that core's entry markers + TP/SL lines render — useful for
@@ -319,10 +336,27 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         // of vertical space. Now we expand for TP/SL only when they
         // sit within ~2× the candle range; further markers render at
         // the chart edge as out-of-view tags (clipped by ImPlot).
+        //
+        // v4.7.21: candle Y fit is now restricted to the visible-X window
+        // [cs->x_lo, cs->x_hi]. Previously it walked all candles in the
+        // buffer (up to 4096), so a deep dip from earlier in the session
+        // would inflate candle_range and pull the expansion budget out
+        // far enough to swallow distant SL lines — collapsing recent
+        // price action into a thin band. Limiting to the post-reset
+        // visible window matches what the user actually sees.
         double y_min = 1e18, y_max = -1e18;
         for (int i = 0; i < vc; i++) {
+            if (cs->xs[i] < cs->x_lo || cs->xs[i] > cs->x_hi) continue;
             if (cs->lows[i] < y_min) y_min = cs->lows[i];
             if (cs->highs[i] > y_max) y_max = cs->highs[i];
+        }
+        // safety net: visible window may have zero candles momentarily
+        // (cold start / pan beyond data). fall back to all candles.
+        if (y_min > y_max) {
+            for (int i = 0; i < vc; i++) {
+                if (cs->lows[i] < y_min) y_min = cs->lows[i];
+                if (cs->highs[i] > y_max) y_max = cs->highs[i];
+            }
         }
         double min_range = cs->last_price * 0.001;
         if (min_range < 20.0) min_range = 20.0;
@@ -334,6 +368,11 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
         // Expansion budget: candle range × 2. TP/SL within this window
         // gets included; further markers stay where they are and ImPlot
         // clips them to the visible area.
+        //
+        // v4.7.21: when settings->show_all_levels is set, expansion is
+        // unbounded — every position's TP/SL is included regardless of
+        // distance from candles. Off by default; useful for seeing the
+        // full risk geometry across the session.
         double candle_range = y_max - y_min;
         double expand_lo    = y_min - candle_range;
         double expand_hi    = y_max + candle_range;
@@ -341,8 +380,13 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             const TUIPositionSnap *ps = &snap->positions[pi];
             if (ps->idx < 0) continue;
             if (slot_filtered_out(ps->idx)) continue;
-            if (ps->tp > 0 && ps->tp > y_max && ps->tp <= expand_hi) y_max = ps->tp;
-            if (ps->sl > 0 && ps->sl < y_min && ps->sl >= expand_lo) y_min = ps->sl;
+            if (settings->show_all_levels) {
+                if (ps->tp > 0 && ps->tp > y_max) y_max = ps->tp;
+                if (ps->sl > 0 && ps->sl < y_min) y_min = ps->sl;
+            } else {
+                if (ps->tp > 0 && ps->tp > y_max && ps->tp <= expand_hi) y_max = ps->tp;
+                if (ps->sl > 0 && ps->sl < y_min && ps->sl >= expand_lo) y_min = ps->sl;
+            }
         }
         double pad = (y_max - y_min) * 0.1;
         // v4.7.7: Always on first render OR when user clicks "Reset View",

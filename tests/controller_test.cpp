@@ -6493,6 +6493,133 @@ e3_skip_load:;
         delete r;
     }
 
+    //======================================================================================================
+    // [v4.7.21 — W/L pairing under partial exits]
+    //======================================================================================================
+    // Verify the per-trade W/L classification when partials are enabled:
+    //
+    //   (1) two paired exits that net positive → 1 win, 0 losses
+    //   (2) two paired exits that net negative → 0 wins, 1 loss
+    //   (3) partials disabled → per-leg-A path still produces 1 win or 1
+    //       loss per single-leg trade (regression for pre-v4.7.21 behavior)
+    //
+    // Pre-v4.7.21: each leg was counted independently (TP/SL split = 1W +
+    // 1L). Post-v4.7.21 with partials on: pair the two legs, classify by
+    // total net. Single bump per trade idea.
+    //======================================================================================================
+    printf("\n--- v4.7.21 — W/L pairing under partial exits ---\n");
+    {
+        // Direct CoreContext drive — exercise the pairing branch in
+        // EventLoop_DrainPostFill without spinning up a full ExecutionCore.
+        // Build minimal OMS state with two FillRecords + a closed_mask
+        // covering slots 0 (leg A) and 1 (leg B). Drain. Inspect counters.
+
+        struct R {
+            tt::OrderManagerState<64> oms;
+            tt::EventLoopState<64>    state;
+            tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
+            tt::ExecutionCore<64>     core;
+        };
+
+        auto seed_paired_exit = [](R* r, double pnl_a, double pnl_b) {
+            // Mark slots 0 and 1 as having FillRecords ready to drain.
+            // last_closed_mask bits 0+1 = leg A + leg B for core 0.
+            r->oms.last_fill[0].exit_net_pnl       = FPN_FromDouble<64>(pnl_a);
+            r->oms.last_fill[0].exit_entry_notional= FPN_Zero<64>();
+            r->oms.last_fill[0].exit_total_fees    = FPN_Zero<64>();
+            r->oms.last_fill[0].was_win            = (pnl_a > 0.0) ? 1 : 0;
+            r->oms.last_fill[1].exit_net_pnl       = FPN_FromDouble<64>(pnl_b);
+            r->oms.last_fill[1].exit_entry_notional= FPN_Zero<64>();
+            r->oms.last_fill[1].exit_total_fees    = FPN_Zero<64>();
+            r->oms.last_fill[1].was_win            = (pnl_b > 0.0) ? 1 : 0;
+            r->oms.last_closed_mask = (uint16_t)0x3;  // bits 0,1
+        };
+
+        // ---- Case 1: TP1 + TP2 (both legs win, net positive) ----
+        {
+            R* r = new R();
+            tt::EventLoopState_InitLegacy(&r->state, &r->oms,
+                FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            r->oms.partial_exit_enabled = 1;
+            r->oms.event_log_mode = 1;
+            tt::SPSCRing_Init(&r->tick_ring);
+            tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
+            tt::EventLoopState_RegisterCore(&r->state, &r->core,
+                FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+                FPN_FromDouble<64>(0.01));
+            tt::EventLoopState_SetCoreStrategy(&r->state, 0,
+                STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(1500.0));
+
+            seed_paired_exit(r, +5.0, +10.0);  // TP1 + TP2
+            tt::EventLoop_DrainPostFill(&r->state, &r->oms, 0);
+
+            check("v4.7.21 (1): TP+TP paired → core_wins == 1",
+                  r->state.cores[0].core_wins == 1);
+            check("v4.7.21 (1): TP+TP paired → core_losses == 0",
+                  r->state.cores[0].core_losses == 0);
+            check("v4.7.21 (1): pairing flag cleared after both legs drained",
+                  r->state.cores[0].partner_pending_active == 0);
+            delete r;
+        }
+
+        // ---- Case 2: TP1 + SL (split outcome, net negative — the canonical "looks like 1W+1L but is actually 1L") ----
+        {
+            R* r = new R();
+            tt::EventLoopState_InitLegacy(&r->state, &r->oms,
+                FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            r->oms.partial_exit_enabled = 1;
+            r->oms.event_log_mode = 1;
+            tt::SPSCRing_Init(&r->tick_ring);
+            tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
+            tt::EventLoopState_RegisterCore(&r->state, &r->core,
+                FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+                FPN_FromDouble<64>(0.01));
+            tt::EventLoopState_SetCoreStrategy(&r->state, 0,
+                STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(1500.0));
+
+            seed_paired_exit(r, +3.0, -8.0);  // TP1 small win + SL larger loss = net -5
+            tt::EventLoop_DrainPostFill(&r->state, &r->oms, 0);
+
+            check("v4.7.21 (2): TP+SL paired (net negative) → core_wins == 0",
+                  r->state.cores[0].core_wins == 0);
+            check("v4.7.21 (2): TP+SL paired (net negative) → core_losses == 1",
+                  r->state.cores[0].core_losses == 1);
+            delete r;
+        }
+
+        // ---- Case 3: partials disabled → existing per-leg-A path ----
+        {
+            R* r = new R();
+            tt::EventLoopState_InitLegacy(&r->state, &r->oms,
+                FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            r->oms.partial_exit_enabled = 0;
+            r->oms.event_log_mode = 1;
+            tt::SPSCRing_Init(&r->tick_ring);
+            tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
+            tt::EventLoopState_RegisterCore(&r->state, &r->core,
+                FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+                FPN_FromDouble<64>(0.01));
+            tt::EventLoopState_SetCoreStrategy(&r->state, 0,
+                STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(1500.0));
+
+            // Single-leg: just slot 0, no slot 1.
+            r->oms.last_fill[0].exit_net_pnl       = FPN_FromDouble<64>(+7.0);
+            r->oms.last_fill[0].exit_entry_notional= FPN_Zero<64>();
+            r->oms.last_fill[0].exit_total_fees    = FPN_Zero<64>();
+            r->oms.last_fill[0].was_win            = 1;
+            r->oms.last_closed_mask = (uint16_t)0x1;
+            tt::EventLoop_DrainPostFill(&r->state, &r->oms, 0);
+
+            check("v4.7.21 (3): partials off → single win bumps core_wins == 1",
+                  r->state.cores[0].core_wins == 1);
+            check("v4.7.21 (3): partials off → core_losses unchanged",
+                  r->state.cores[0].core_losses == 0);
+            check("v4.7.21 (3): partials off → pending stash never set",
+                  r->state.cores[0].partner_pending_active == 0);
+            delete r;
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
