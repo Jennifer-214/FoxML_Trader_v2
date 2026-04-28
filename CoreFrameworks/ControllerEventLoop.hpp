@@ -48,6 +48,7 @@
 #include "../ML_Headers/LinearRegression3X.hpp"  // v4.0.3 D10 RegressionFeederX
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/StrategyParameters.hpp"
+#include "CoreLatencyStats.hpp"  // v4.7.42 — slow_path_latency on CoreContext
 #include "ExecutionCore.hpp"
 #include "Notify.hpp"
 #include "OrderManager.hpp"
@@ -218,6 +219,12 @@ struct CoreContext {
     // resolved_cfg fresh each rebuild, so there's no live-filter state
     // to drift back toward defaults).
     uint32_t idle_cycles;
+    // v4.7.42 (Phase E): per-core slow-path latency profiling. Mirrors
+    // ExecutionCore::latency_stats (hot-path) for the slow-path. Sampled
+    // around the per-core slow-path body in engine_arch=per_core_slow.
+    // In centralized mode, total_count stays 0 (no samples collected —
+    // single producer slow-path doesn't break per-core, by design).
+    CoreLatencyStats slow_path_latency;
 };
 
 //======================================================================================================
@@ -310,6 +317,10 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         // v4.7.25: gross win/loss accumulators
         state->cores[i].core_gross_wins   = FPN_Zero<F>();
         state->cores[i].core_gross_losses = FPN_Zero<F>();
+        // v4.7.42 (Phase E): per-core slow-path latency stats — mirrors
+        // ExecutionCore::latency_stats. Init zeros + disabled until engine
+        // explicitly enables (CoreLatencyStats_Enable).
+        CoreLatencyStats_Init(&state->cores[i].slow_path_latency);
         // Phase 2.1: per-core open notional (sum of entry_price × qty)
         state->cores[i].core_open_notional = FPN_Zero<F>();
         // Phase 3: per-core kill switch state. peak starts at zero; the

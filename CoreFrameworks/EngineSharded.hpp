@@ -69,6 +69,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <x86intrin.h>  // v4.7.42: __rdtsc for slow-path latency sampling
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -1678,6 +1679,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     c, slow_path_interval,
                     (unsigned)cfg.core_overrides[c].poll_interval,
                     (unsigned)cfg.poll_interval);
+                // v4.7.42 (Phase E): enable per-core slow-path latency stats.
+                // Sampled around the per-cycle work below (RebuildOneCore +
+                // PushParameters + TimeExitOneCore + TrailingSL + permission).
+                CoreLatencyStats_Enable(&state.cores[c].slow_path_latency);
                 uint64_t last_seen_tick = 0;
                 while (!g_engine_sharded_shutdown) {
                     // Reset Paper coordination — park while reset runs.
@@ -1692,6 +1697,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         continue;
                     }
                     last_seen_tick = now_tick;
+
+                    // v4.7.42 (Phase E): rdtsc-bracket the per-cycle work for
+                    // slow-path latency stats. Sample after work completes.
+                    uint64_t _sp_t0 = __rdtsc();
 
                     // Skip cores with STRATEGY_NONE (caller responsibility per
                     // OneCore contract; OneCore would no-op on STRATEGY_NONE
@@ -1812,6 +1821,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         state.cores[c].strategy_id != STRATEGY_NONE) {
                         ExecutionCore_SetPermission(&cores[c], 1);
                     }
+
+                    // v4.7.42 (Phase E): close rdtsc bracket + sample.
+                    uint64_t _sp_t1 = __rdtsc();
+                    CoreLatencyStats_Sample(&state.cores[c].slow_path_latency,
+                                             _sp_t1 - _sp_t0, _sp_t1);
 
                     // NOTE: DrainPostFill stays on the drainer thread (single
                     // writer of last_*_mask is HandleFill on drainer; same
