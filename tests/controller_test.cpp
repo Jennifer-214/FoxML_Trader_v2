@@ -6620,6 +6620,89 @@ e3_skip_load:;
         }
     }
 
+    //======================================================================================================
+    // [v4.7.21 — backtest parity: W/L pairing flows through ShardedBacktest_RunTick]
+    //======================================================================================================
+    // Explicit parity guard. The pairing logic lives in EventLoop_DrainPostFill
+    // (shared header). Backtest calls DrainPostFill via ShardedBacktest_RunTick
+    // (since v4.7.15). This test runs a TP1+SL paired sequence through the
+    // BACKTEST driver and verifies the pairing applies — proving train-serve
+    // parity is structural, not just inferred.
+    //
+    // Without v4.7.21 in DrainPostFill: backtest would count TP+SL as 1W+1L
+    // per-leg, training data inflates win rates, models trained on backtest
+    // would mispredict in live (where pairing would also be wrong but at
+    // least consistent with backtest).
+    //
+    // With v4.7.21 in shared drain: backtest produces 1L (net negative).
+    // Live produces 1L (net negative). Same shared function, same outcome.
+    //======================================================================================================
+    printf("\n--- v4.7.21 — backtest parity: pairing through ShardedBacktest_RunTick ---\n");
+    {
+        struct R {
+            tt::OrderManagerState<64>                                        oms;
+            tt::EventLoopState<64>                                           state;
+            tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE>    tick_ring;
+            tt::ExecutionCore<64>                                            core;
+            RollingStats<64, 128>                                            rolling;
+            RollingStats<64, 512>                                            rolling_long;
+            ControllerConfig<64>                                             cfg;
+            tt::ShardedBacktestDriver<64, 128, 512>                          drv;
+        };
+        R* r = new R();
+        r->cfg = ControllerConfig_Default<64>();
+        r->cfg.sl_cooldown_cycles = 0;
+        r->cfg.partial_exit_enabled = 1;
+        tt::EventLoopState_InitLegacy(&r->state, &r->oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+        r->oms.event_log_mode       = 1;
+        r->oms.partial_exit_enabled = 1;       // mirror cfg
+        r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.0);  // zero fees: clean P&L signal
+        r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.0);
+        tt::SPSCRing_Init(&r->tick_ring);
+        tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
+        tt::EventLoopState_RegisterCore(&r->state, &r->core,
+            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+            FPN_FromDouble<64>(0.01));
+        tt::EventLoopState_SetCoreStrategy(&r->state, 0,
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(1500.0));
+        r->rolling      = RollingStats_Init<64, 128>();
+        r->rolling_long = RollingStats_Init<64, 512>();
+        tt::ShardedBacktestDriver_Init(&r->drv, &r->state, &r->rolling,
+                                         &r->cfg, /*slow_path_interval=*/8,
+                                         &r->rolling_long, &r->oms);
+
+        // Stage two paired exit fills directly into OMS state — leg A (slot 0)
+        // wins +3.0, leg B (slot 1) loses -8.0. Net = -5.0 → 1 loss when paired.
+        r->oms.last_fill[0].exit_net_pnl        = FPN_FromDouble<64>(+3.0);
+        r->oms.last_fill[0].exit_entry_notional = FPN_Zero<64>();
+        r->oms.last_fill[0].exit_total_fees     = FPN_Zero<64>();
+        r->oms.last_fill[0].was_win             = 1;
+        r->oms.last_fill[1].exit_net_pnl        = FPN_FromDouble<64>(-8.0);
+        r->oms.last_fill[1].exit_entry_notional = FPN_Zero<64>();
+        r->oms.last_fill[1].exit_total_fees     = FPN_Zero<64>();
+        r->oms.last_fill[1].was_win             = 0;
+        r->oms.last_closed_mask = (uint16_t)0x3;
+
+        // Drive a no-op tick through the backtest driver — DrainPostFill
+        // gets called inside.
+        tt::Tick<64> dummy = { FPN_FromDouble<64>(60000.0),
+                                FPN_FromDouble<64>(0.001),
+                                1000000ULL, 0, 0 };
+        tt::ShardedBacktest_RunTick(&r->drv, dummy, 0);
+
+        check("v4.7.21 backtest: TP+SL paired through driver → core_wins == 0",
+              r->state.cores[0].core_wins == 0);
+        check("v4.7.21 backtest: TP+SL paired through driver → core_losses == 1",
+              r->state.cores[0].core_losses == 1);
+        check("v4.7.21 backtest: pairing flag cleared after backtest drain",
+              r->state.cores[0].partner_pending_active == 0);
+        check("v4.7.21 backtest: closed_mask consumed by driver drain",
+              r->oms.last_closed_mask == 0);
+
+        delete r;
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
