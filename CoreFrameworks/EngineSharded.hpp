@@ -1185,6 +1185,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     TUI_CopySnapshotSharded(bs, &state, &rolling_short, &rolling_long,
                                              &cfg, price_d, volume_d);
                     TUI_PopulatePerCoreLatency(bs, cores, num_cores, tsc_ghz);
+                    // v5.0.1 (Phase H): slow-path latency from CoreContext.
+                    TUI_PopulatePerCoreSlowPathLatency(bs, &state, tsc_ghz);
                     // v4.7.18: paper-reset seq for history-clearing panels
                     bs->paper_reset_seq = (uint32_t)g_shared.paper_reset_seq;
                     // append current data point to graph ring buffers

@@ -1759,16 +1759,19 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
         ImGui::End();
     }
 
-    // Per-core latency panel (sharded mode only)
+    // Per-core latency panel (sharded mode only). v5.0.1 (Phase H): split
+    // into HOT and SLOW sub-tables. Slow-path table only populated when
+    // engine_arch=per_core_slow; otherwise sp_samples stays 0.
     if (s->sharded_mode_active && s->per_core_count > 0) {
         ImGui::Begin("Per-Core Latency");
-        SectionHeader("PER-CORE LATENCY");
+
+        SectionHeader("PER-ENGINE HOT-PATH LATENCY");
         ImGui::TextColored(FoxmlColors::comment, "(last 256 samples, subtract ~25-30ns rdtsc floor)");
 
         ImGuiTableFlags tf = ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
                               ImGuiTableFlags_SizingStretchProp;
-        if (ImGui::BeginTable("##percore", 8, tf)) {
-            ImGui::TableSetupColumn("Core",    ImGuiTableColumnFlags_WidthFixed, 35);
+        if (ImGui::BeginTable("##percore_hot", 8, tf)) {
+            ImGui::TableSetupColumn("Engine",  ImGuiTableColumnFlags_WidthFixed, 45);
             ImGui::TableSetupColumn("Strat",   ImGuiTableColumnFlags_WidthFixed, 35);
             ImGui::TableSetupColumn("Samples", ImGuiTableColumnFlags_WidthFixed, 55);
             ImGui::TableSetupColumn("Min",     ImGuiTableColumnFlags_WidthFixed, 50);
@@ -1777,7 +1780,6 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
             ImGui::TableSetupColumn("p99",     ImGuiTableColumnFlags_WidthFixed, 50);
             ImGui::TableSetupColumn("Max",     ImGuiTableColumnFlags_WidthFixed, 50);
             ImGui::TableHeadersRow();
-
             for (int i = 0; i < s->per_core_count && i < 16; ++i) {
                 const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
                 ImGui::TableNextRow();
@@ -1802,6 +1804,54 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
             }
             ImGui::EndTable();
         }
+
+        ImGui::Spacing();
+        SectionHeader("PER-ENGINE SLOW-PATH LATENCY");
+        ImGui::TextColored(FoxmlColors::comment,
+            "(per-cycle work in engine_arch=per_core_slow; centralized = 0 samples)");
+
+        if (ImGui::BeginTable("##percore_slow", 8, tf)) {
+            ImGui::TableSetupColumn("Engine",  ImGuiTableColumnFlags_WidthFixed, 45);
+            ImGui::TableSetupColumn("Strat",   ImGuiTableColumnFlags_WidthFixed, 35);
+            ImGui::TableSetupColumn("Samples", ImGuiTableColumnFlags_WidthFixed, 55);
+            ImGui::TableSetupColumn("Min",     ImGuiTableColumnFlags_WidthFixed, 60);
+            ImGui::TableSetupColumn("p50",     ImGuiTableColumnFlags_WidthFixed, 60);
+            ImGui::TableSetupColumn("p95",     ImGuiTableColumnFlags_WidthFixed, 60);
+            ImGui::TableSetupColumn("p99",     ImGuiTableColumnFlags_WidthFixed, 60);
+            ImGui::TableSetupColumn("Max",     ImGuiTableColumnFlags_WidthFixed, 60);
+            ImGui::TableHeadersRow();
+            for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+                const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%d", i);
+                ImGui::TableNextColumn();
+                uint8_t sid = pc->strategy_id_display;
+                ImGui::TextColored(FoxmlColors::primary, "%s",
+                                   sid < NUM_STRATEGIES ? STRATEGY_SHORT_NAMES[sid] : "?");
+                ImGui::TableNextColumn();
+                if (pc->sp_samples == 0) {
+                    ImGui::TextColored(FoxmlColors::comment, "-");
+                    for (int j = 0; j < 5; ++j) { ImGui::TableNextColumn(); ImGui::TextColored(FoxmlColors::comment, "-"); }
+                } else {
+                    // Slow-path values are µs-scale; show with µ suffix when large.
+                    auto fmt_ns = [](double ns) -> const char* {
+                        static char buf[32];
+                        if (ns >= 1000.0) snprintf(buf, sizeof(buf), "%.1fµs", ns / 1000.0);
+                        else              snprintf(buf, sizeof(buf), "%.0fns", ns);
+                        return buf;
+                    };
+                    ImGui::Text("%lu", (unsigned long)pc->sp_samples);
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_min_ns));
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_p50_ns));
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_p95_ns));
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_p99_ns));
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_max_ns));
+                }
+            }
+            ImGui::EndTable();
+        }
+
         ImGui::End();
     }
 }

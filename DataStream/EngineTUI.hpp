@@ -905,6 +905,7 @@ struct TUISnapshot {
     int partial_exit_enabled;      // 1 = paired-leg geometry (slot 2c+leg)
     int per_core_count;            // number of cores actively reporting
     struct PerCoreSnap {
+        // Hot-path latency (per-tick gate eval cycles).
         uint64_t samples;
         double   min_ns;
         double   p50_ns;
@@ -912,6 +913,15 @@ struct TUISnapshot {
         double   p99_ns;
         double   max_ns;
         double   avg_ns;
+        // v5.0.1 (Phase H): slow-path latency (per-cycle work in
+        // engine_arch=per_core_slow). 0 in centralized mode.
+        uint64_t sp_samples;
+        double   sp_min_ns;
+        double   sp_p50_ns;
+        double   sp_p95_ns;
+        double   sp_p99_ns;
+        double   sp_max_ns;
+        double   sp_avg_ns;
         uint8_t  strategy_id_display;  // STRATEGY_* constant for this core
         uint8_t  resolved_strategy_id; // v4.0.4: when strategy=AUTO, the regime-resolved
                                         // concrete strategy. Equals strategy_id_display for
@@ -1304,6 +1314,40 @@ static inline void TUI_PopulatePerCoreLatency(TUISnapshot *snap,
         snap->per_core[i].p99_ns  = 0;
         snap->per_core[i].max_ns  = 0;
         snap->per_core[i].avg_ns  = 0;
+        // v5.0.1 (Phase H): slow-path latency too
+        snap->per_core[i].sp_samples = 0;
+        snap->per_core[i].sp_min_ns  = 0;
+        snap->per_core[i].sp_p50_ns  = 0;
+        snap->per_core[i].sp_p95_ns  = 0;
+        snap->per_core[i].sp_p99_ns  = 0;
+        snap->per_core[i].sp_max_ns  = 0;
+        snap->per_core[i].sp_avg_ns  = 0;
+    }
+}
+
+// v5.0.1 (Phase H): populate per-core SLOW-path latency stats from
+// EventLoopState's CoreContext::slow_path_latency. Sibling to
+// TUI_PopulatePerCoreLatency (which handles hot-path). Caller invokes
+// AFTER TUI_PopulatePerCoreLatency so the per-core slot count is set.
+//
+// StateT templated to keep this header free of EventLoopState dependency.
+template <typename StateT>
+static inline void TUI_PopulatePerCoreSlowPathLatency(TUISnapshot *snap,
+                                                       const StateT *state,
+                                                       double tsc_ghz) {
+    int n = snap->per_core_count;
+    if (n < 0) n = 0;
+    if (n > 16) n = 16;
+    for (int i = 0; i < n; ++i) {
+        tt::CoreLatencySnapshot ls = tt::CoreLatencyStats_Snapshot(
+            &state->cores[i].slow_path_latency, tsc_ghz);
+        snap->per_core[i].sp_samples = ls.total_count;
+        snap->per_core[i].sp_min_ns  = ls.min_ns;
+        snap->per_core[i].sp_p50_ns  = ls.p50_ns;
+        snap->per_core[i].sp_p95_ns  = ls.p95_ns;
+        snap->per_core[i].sp_p99_ns  = ls.p99_ns;
+        snap->per_core[i].sp_max_ns  = ls.max_ns;
+        snap->per_core[i].sp_avg_ns  = ls.avg_ns;
     }
 }
 
