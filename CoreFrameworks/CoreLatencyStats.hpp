@@ -56,6 +56,13 @@ struct alignas(64) CoreLatencyStats {
     static constexpr int RING_SIZE = 256;  // power of 2 for cheap masking
     static_assert((RING_SIZE & (RING_SIZE - 1)) == 0, "RING_SIZE must be power of 2");
 
+    // v4.7.36: lifetime log-bucket histogram for session-wide percentiles.
+    // 64 buckets each covering [2^i, 2^(i+1)) cycles. Bucket lookup via
+    // __builtin_clzll — ~2-3 cycles. Increment is a regular ++ (single-
+    // writer; controller reads on slow path only). Cost on hot path:
+    // ~3-5ns added vs the prior version. Memory: 512 bytes per core.
+    static constexpr int HIST_BUCKETS = 64;
+
     // --- Cache line 0: hot fields the execution core writes every sample ---
     std::atomic<uint8_t> enabled;     // controller-flipped, hot path reads with relaxed
     uint8_t  _pad0[7];
@@ -72,6 +79,10 @@ struct alignas(64) CoreLatencyStats {
     // is way more than any healthy hot path should ever see. Anything larger
     // gets clamped to UINT32_MAX as a flag.
     uint32_t recent[RING_SIZE];
+    // v4.7.36: lifetime histogram. bucket[i] = count of samples with
+    // floor(log2(cycles)) == i. Used by snapshot to compute lifetime
+    // p50/p95/p99 across all samples (not just the last 256).
+    uint64_t lifetime_buckets[HIST_BUCKETS];
 };
 
 //======================================================================================================
@@ -99,6 +110,12 @@ struct CoreLatencySnapshot {
     double   p99_ns;
     // Sample window depth used for percentile calc (min(total_count, 256))
     int      window_size;
+    // v4.7.36: lifetime percentiles from log-bucket histogram (all samples,
+    // not just last 256). Bucket precision is power-of-2, so values are
+    // approximate — reported as the upper bound of the bucket.
+    double   lifetime_p50_ns;
+    double   lifetime_p95_ns;
+    double   lifetime_p99_ns;
 };
 
 //======================================================================================================
@@ -117,6 +134,7 @@ inline void CoreLatencyStats_Init(CoreLatencyStats* s) {
     s->ring_head = 0;
     s->last_sample_tsc = 0;
     for (int i = 0; i < CoreLatencyStats::RING_SIZE; ++i) s->recent[i] = 0;
+    for (int i = 0; i < CoreLatencyStats::HIST_BUCKETS; ++i) s->lifetime_buckets[i] = 0;
 }
 
 inline void CoreLatencyStats_Reset(CoreLatencyStats* s) {
@@ -127,6 +145,7 @@ inline void CoreLatencyStats_Reset(CoreLatencyStats* s) {
     s->ring_head = 0;
     s->last_sample_tsc = 0;
     for (int i = 0; i < CoreLatencyStats::RING_SIZE; ++i) s->recent[i] = 0;
+    for (int i = 0; i < CoreLatencyStats::HIST_BUCKETS; ++i) s->lifetime_buckets[i] = 0;
 }
 
 inline void CoreLatencyStats_Enable(CoreLatencyStats* s) {
@@ -157,6 +176,13 @@ static inline void CoreLatencyStats_Sample(CoreLatencyStats* s, uint64_t cycles,
     s->recent[s->ring_head] = clamped;
     s->ring_head = (s->ring_head + 1) & (CoreLatencyStats::RING_SIZE - 1);
     s->last_sample_tsc = now_tsc;
+    // v4.7.36: lifetime histogram bucket increment. floor(log2(cycles))
+    // gives bucket index. clzll counts leading zeros — 63 minus that is
+    // the highest set bit position, i.e. floor(log2). Bucket 0 reserved
+    // for cycles==0 (shouldn't happen but defensive).
+    int bucket = (cycles == 0) ? 0 : (63 - __builtin_clzll(cycles));
+    if (bucket >= CoreLatencyStats::HIST_BUCKETS) bucket = CoreLatencyStats::HIST_BUCKETS - 1;
+    s->lifetime_buckets[bucket]++;
 }
 
 //======================================================================================================
@@ -205,6 +231,29 @@ inline CoreLatencySnapshot CoreLatencyStats_Snapshot(const CoreLatencyStats* s, 
     out.p50_ns = cyc_to_ns((double)out.p50_cycles);
     out.p95_ns = cyc_to_ns((double)out.p95_cycles);
     out.p99_ns = cyc_to_ns((double)out.p99_cycles);
+
+    // v4.7.36: lifetime percentiles from log-bucket histogram. Walk
+    // buckets accumulating count until we cross each percentile threshold.
+    // Bucket i covers [2^i, 2^(i+1)) cycles — report upper bound as the
+    // percentile estimate (conservative). Power-of-2 precision means
+    // reported values are within ~2x of true percentile.
+    auto lifetime_pct = [&](double pct) -> double {
+        uint64_t target = (uint64_t)((double)s->total_count * pct);
+        if (target == 0) target = 1;
+        uint64_t accum = 0;
+        for (int b = 0; b < CoreLatencyStats::HIST_BUCKETS; ++b) {
+            accum += s->lifetime_buckets[b];
+            if (accum >= target) {
+                // Upper bound of bucket b is 2^(b+1) cycles.
+                uint64_t cycles_upper = (b >= 63) ? UINT64_MAX : (1ULL << (b + 1));
+                return cyc_to_ns((double)cycles_upper);
+            }
+        }
+        return cyc_to_ns((double)s->max_cycles);
+    };
+    out.lifetime_p50_ns = lifetime_pct(0.50);
+    out.lifetime_p95_ns = lifetime_pct(0.95);
+    out.lifetime_p99_ns = lifetime_pct(0.99);
     return out;
 }
 

@@ -245,8 +245,10 @@ static inline void GUI_Panel_Market(const TUISnapshot *s) {
         //   - regime headline (sourced from first AUTO core's hysteresis)
         //   - count of cores per resolved strategy as a mini bar
         // Each AUTO core has its own regime_state — this displays the
-        // first one. Hover the regime to see the source.
-        ImGui::TextColored(FoxmlColors::sand, "regime (core 0):");
+        // first one. v4.7.35: dropped misleading "core 0" suffix; the
+        // value is actually the first-AUTO-core's regime classification
+        // (or core 0 fallback if no AUTO core configured).
+        ImGui::TextColored(FoxmlColors::sand, "regime:");
         ImGui::SameLine();
         ImGui::TextColored(regime_color, "%s", REGIME_INFO[rj].full_name);
         ImGui::SameLine();
@@ -255,9 +257,14 @@ static inline void GUI_Panel_Market(const TUISnapshot *s) {
         // count cores by resolved strategy (falls back to display id when
         // resolution hasn't run yet — ML/MR/MOM/DIP/EMA cores all hit the
         // resolved branch since their resolved_strategy_id == strategy_id).
+        // v4.7.35: also count AUTO-configured cores separately so the
+        // breakdown distinguishes "1 native MR + 1 AUTO routing to MR"
+        // from "2 explicitly-MR cores" (both show MR:2 in resolved view).
         int strat_count[NUM_STRATEGIES] = {0};
+        int auto_count = 0;
         int unresolved = 0;
         for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+            if (s->per_core[i].strategy_id_display == STRATEGY_AUTO) auto_count++;
             uint8_t sid = s->per_core[i].resolved_strategy_id;
             if (sid >= NUM_STRATEGIES) sid = s->per_core[i].strategy_id_display;
             if (sid >= NUM_STRATEGIES) { unresolved++; continue; }
@@ -278,6 +285,13 @@ static inline void GUI_Panel_Market(const TUISnapshot *s) {
             ImGui::SameLine(0, 8);
             ImGui::TextColored(strat_colors[sid], "%s:%d",
                 STRATEGY_SHORT_NAMES[sid], strat_count[sid]);
+        }
+        // v4.7.35: AUTO count appended last so user can see how many
+        // of the resolved counts above came from AUTO routing vs
+        // explicit strategy assignment.
+        if (auto_count > 0) {
+            ImGui::SameLine(0, 8);
+            ImGui::TextColored(FoxmlColors::sand, "(AUTO:%d)", auto_count);
         }
         if (unresolved > 0) {
             ImGui::SameLine(0, 8);
