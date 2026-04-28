@@ -809,17 +809,22 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
                 }
 
                 ImGui::TableNextColumn();
-                uint8_t sid = pc->resolved_strategy_id;
-                if (sid >= NUM_STRATEGIES) sid = pc->strategy_id_display;
-                if (sid < NUM_STRATEGIES) {
-                    if (pc->core_kill_tripped) {
-                        // Strikethrough effect via dimmed colored text
-                        ImVec4 c = strat_colors[sid];
-                        c.w = 0.45f;
-                        ImGui::TextColored(c, "%s", STRATEGY_SHORT_NAMES[sid]);
-                    } else {
-                        ImGui::TextColored(strat_colors[sid], "%s", STRATEGY_SHORT_NAMES[sid]);
-                    }
+                // v4.7.34: AUTO cores show "AUTO(routed)" so user can tell
+                // at a glance whether a core is regime-routing or fixed.
+                // Color follows the resolved strategy so per-core panels +
+                // chart per-core gate lines stay in sync visually.
+                uint8_t cfg_sid = pc->strategy_id_display;
+                uint8_t live_sid = pc->resolved_strategy_id;
+                if (live_sid >= NUM_STRATEGIES) live_sid = cfg_sid;
+                if (cfg_sid == STRATEGY_AUTO &&
+                    live_sid < NUM_STRATEGIES && live_sid != STRATEGY_AUTO) {
+                    ImVec4 c = strat_colors[live_sid];
+                    if (pc->core_kill_tripped) c.w = 0.45f;
+                    ImGui::TextColored(c, "AUTO(%s)", STRATEGY_SHORT_NAMES[live_sid]);
+                } else if (live_sid < NUM_STRATEGIES) {
+                    ImVec4 c = strat_colors[live_sid];
+                    if (pc->core_kill_tripped) c.w = 0.45f;
+                    ImGui::TextColored(c, "%s", STRATEGY_SHORT_NAMES[live_sid]);
                 } else {
                     ImGui::TextDisabled("?");
                 }
@@ -1656,10 +1661,19 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                 ImGui::Text("%d", i);
 
                 ImGui::TableNextColumn();
-                uint8_t sid = pc->resolved_strategy_id;
-                if (sid >= NUM_STRATEGIES) sid = pc->strategy_id_display;
-                if (sid < NUM_STRATEGIES) {
-                    ImGui::TextColored(strat_colors[sid], "%s", STRATEGY_SHORT_NAMES[sid]);
+                // v4.7.34: AUTO cores show "AUTO(routed)" — same pattern as
+                // Per-Core P&L panel + Buy Gate detail header. Color follows
+                // the resolved strategy.
+                uint8_t cfg_sid_r  = pc->strategy_id_display;
+                uint8_t live_sid_r = pc->resolved_strategy_id;
+                if (live_sid_r >= NUM_STRATEGIES) live_sid_r = cfg_sid_r;
+                if (cfg_sid_r == STRATEGY_AUTO &&
+                    live_sid_r < NUM_STRATEGIES && live_sid_r != STRATEGY_AUTO) {
+                    ImGui::TextColored(strat_colors[live_sid_r], "AUTO(%s)",
+                                        STRATEGY_SHORT_NAMES[live_sid_r]);
+                } else if (live_sid_r < NUM_STRATEGIES) {
+                    ImGui::TextColored(strat_colors[live_sid_r], "%s",
+                                        STRATEGY_SHORT_NAMES[live_sid_r]);
                 } else {
                     ImGui::TextDisabled("?");
                 }
