@@ -36,6 +36,20 @@
 constexpr uint8_t ENGINE_MODE_SINGLE_CORE = 0;
 constexpr uint8_t ENGINE_MODE_SHARDED = 1;
 
+// v4.7.39: engine_arch — controls slow-path threading model under sharded
+// mode. STARTUP-ONLY (changes ignored on hot reload).
+//   ENGINE_ARCH_CENTRALIZED (default): slow-path runs on producer thread,
+//     iterating per-core work in one loop. Existing behavior since v4.x.
+//   ENGINE_ARCH_PER_CORE_SLOW: spawns N pthreads at boot, each running
+//     a per-core slow-path loop. Producer keeps global work (RollingStats
+//     pushes, snapshot save, GUI publish, global KillSwitchEvaluate).
+//     Per-core slow-paths handle: strategy dispatch, regime classify,
+//     gate parameter rebuild, time-exit, trailing SL, post-fill drain,
+//     warmup permission, per-core kill switch, swap/drag/manual-close.
+//   See plans/2026-04-28-per-core-slow-path-master.md for full design.
+constexpr uint8_t ENGINE_ARCH_CENTRALIZED   = 0;
+constexpr uint8_t ENGINE_ARCH_PER_CORE_SLOW = 1;
+
 //======================================================================================================
 // [PER-CORE OVERRIDES — v4.0]
 //======================================================================================================
@@ -134,10 +148,24 @@ constexpr uint8_t ENGINE_MODE_SHARDED = 1;
     RAW(confidence_freshness_tau) \
     RAW(confidence_threshold_scale)
 
+// v4.7.40: INT-typed per-core overrides. Separate macro because INT fields
+// are uint32_t (not FPN<F>) — different declaration + parser. 0 = inherit
+// (caller checks `if (override == 0) use cfg.field`). All sentinel-friendly
+// (cfg INT defaults are non-zero meaningful values).
+#define PER_CORE_OVERRIDE_INT_FIELDS(INT) \
+    /* v4.7.40: per-core slow-path cadence. Each engine can poll faster or */ \
+    /* slower than the global poll_interval — fast strategies (momentum) */ \
+    /* may want tighter rebuilds; slow strategies (MR) tolerate longer. */ \
+    INT(poll_interval)
+
 template <unsigned F> struct PerCoreOverrides {
 #define _DECL_OV_FIELD(name) FPN<F> name;
     PER_CORE_OVERRIDE_FIELDS(_DECL_OV_FIELD, _DECL_OV_FIELD)
 #undef _DECL_OV_FIELD
+// v4.7.40: INT-typed overrides. uint32_t storage; 0 = inherit.
+#define _DECL_OV_INT_FIELD(name) uint32_t name;
+    PER_CORE_OVERRIDE_INT_FIELDS(_DECL_OV_INT_FIELD)
+#undef _DECL_OV_INT_FIELD
 };
 
 //======================================================================================================
@@ -409,6 +437,9 @@ template <unsigned F> struct ControllerConfig {
   // Per-core sharding (Phase 13) — STARTUP-ONLY, ignored by hot reload
   uint8_t
       engine_mode; // ENGINE_MODE_SINGLE_CORE (default) or ENGINE_MODE_SHARDED
+  // v4.7.39 (per-core slow-path migration): slow-path threading model
+  // under sharded mode. STARTUP-ONLY. See ENGINE_ARCH_* constants above.
+  uint8_t engine_arch; // ENGINE_ARCH_CENTRALIZED (default) or PER_CORE_SLOW
   uint16_t num_execution_cores; // sharded mode only, ignored in single_core
                                 // mode (default 4, cap 16)
   // Phase 14: when 1, sharded mode forces the synthetic tick generator
@@ -525,6 +556,11 @@ inline ControllerConfig<F> ControllerConfig_ResolveForCore(
 #define _RESOLVE_OV_FIELD(name) if (!FPN_IsZero(ov.name)) resolved.name = ov.name;
     PER_CORE_OVERRIDE_FIELDS(_RESOLVE_OV_FIELD, _RESOLVE_OV_FIELD)
 #undef _RESOLVE_OV_FIELD
+// v4.7.40: INT overrides — 0 = inherit (caller's config field already
+// has the global default; non-zero overrides it).
+#define _RESOLVE_OV_INT_FIELD(name) if (ov.name != 0) resolved.name = ov.name;
+    PER_CORE_OVERRIDE_INT_FIELDS(_RESOLVE_OV_INT_FIELD)
+#undef _RESOLVE_OV_INT_FIELD
     return resolved;
 }
 
@@ -716,6 +752,13 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // Adding new features in legacy-only paths = silent production gap;
   // see CLAUDE.md "Cross-Mode Init Placement" invariant.
   cfg.engine_mode = ENGINE_MODE_SHARDED;
+  // v5.0.0 (Phase F): per_core_slow is the new default. Each engine = a
+  // self-contained strategy unit (slow + hot pthread pair). Centralized
+  // architecture available as opt-out via engine_arch=centralized for
+  // benchmark / regression / legacy use. Train-serve parity preserved
+  // structurally: all 3 callers (centralized live, per_core_slow live,
+  // backtest) execute the same OneCore helpers on the same state.cores[c].
+  cfg.engine_arch = ENGINE_ARCH_PER_CORE_SLOW;
   cfg.num_execution_cores = 4;
   cfg.sharded_force_synthetic = 0;
   for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
@@ -732,6 +775,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
 #define _ZERO_OV_FIELD(name) cfg.core_overrides[i].name = FPN_Zero<F>();
     PER_CORE_OVERRIDE_FIELDS(_ZERO_OV_FIELD, _ZERO_OV_FIELD)
 #undef _ZERO_OV_FIELD
+// v4.7.40: zero INT overrides too (0 = inherit).
+#define _ZERO_OV_INT_FIELD(name) cfg.core_overrides[i].name = 0;
+    PER_CORE_OVERRIDE_INT_FIELDS(_ZERO_OV_INT_FIELD)
+#undef _ZERO_OV_INT_FIELD
   }
   cfg.simpledip_tp_pct  = FPN_Zero<F>();  // 0 = use shared take_profit_pct
   cfg.simpledip_sl_pct  = FPN_Zero<F>();
@@ -1031,6 +1078,15 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.engine_mode = ENGINE_MODE_SINGLE_CORE;
       continue;
     }
+    // v4.7.39: engine_arch — slow-path threading model (sharded only).
+    // Accepts string forms "centralized"/"per_core_slow" or int "0"/"1".
+    if (strcmp(key, "engine_arch") == 0) {
+      if (strcmp(val, "per_core_slow") == 0 || strcmp(val, "1") == 0)
+        cfg.engine_arch = ENGINE_ARCH_PER_CORE_SLOW;
+      else
+        cfg.engine_arch = ENGINE_ARCH_CENTRALIZED;
+      continue;
+    }
     // num_execution_cores: clamped to [1, 16] (special case to enforce the cap)
     if (strcmp(key, "num_execution_cores") == 0) {
       int v = atoi(val);
@@ -1128,6 +1184,10 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         PER_CORE_OVERRIDE_FIELDS(_PARSE_OV_PCT, _PARSE_OV_RAW)
 #undef _PARSE_OV_PCT
 #undef _PARSE_OV_RAW
+// v4.7.40: INT overrides — atoi parse, 0 = inherit.
+#define _PARSE_OV_INT(name) if (strcmp(suffix, #name) == 0) { ov.name = (uint32_t)atoi(val); continue; }
+        PER_CORE_OVERRIDE_INT_FIELDS(_PARSE_OV_INT)
+#undef _PARSE_OV_INT
       }
     }
     // Per-strategy TP/SL overrides (percentage, parsed with /100)

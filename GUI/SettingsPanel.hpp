@@ -1036,7 +1036,9 @@ static inline void GUI_Panel_Settings(SettingsState *s,
         }
         for (int c = 0; c < num_cores; ++c) {
             char tab_label[16];
-            snprintf(tab_label, sizeof(tab_label), "Core %d", c);
+            // v4.7.41 (Phase G): "Engine N" reframes each tab as a strategy
+            // engine (slow + hot pair) rather than just an exec core.
+            snprintf(tab_label, sizeof(tab_label), "Engine %d", c);
             if (ImGui::BeginTabItem(tab_label)) {
                 ImGui::PushID(c + 1000);  // distinct from any field index
                 if (Settings_RenderPerCoreTab(s, c, shared, snap)) changed = true;
