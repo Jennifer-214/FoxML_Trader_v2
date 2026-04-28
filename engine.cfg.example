@@ -260,6 +260,31 @@ tp2_mult=2.00                   # TP2 = TP1 distance × this
 breakeven_on_partial=1          # move SL to breakeven after TP1 hit
 
 #==============================================================================
+# ENGINE ARCHITECTURE (v5.0.0+)
+#==============================================================================
+# engine_arch — slow-path threading model under sharded mode.
+#   per_core_slow (default since v5.0.0): each engine = self-contained
+#                  strategy unit (slow + hot pthread pair). N slow-path
+#                  threads spawn at boot, each runs RebuildOneCore +
+#                  TimeExitOneCore + TrailingSLRatchetOneCore for its
+#                  own core. Producer thread keeps global work
+#                  (RollingStats, depth, snapshot save, GUI publish).
+#                  Real prop-shop architecture; matches Xeon-class deploy.
+#   centralized   (legacy): producer thread runs slow-path for all cores
+#                  in one loop. Available for benchmark / regression
+#                  comparison. Functionally equivalent (shared OneCore
+#                  helpers); just a different threading topology.
+# STARTUP-ONLY — changes ignored on hot reload.
+engine_arch=per_core_slow
+
+# Optional: per-core slow-path cadence override.
+# core_N_poll_interval=N — fast strategies (momentum) may want tighter
+# rebuilds; slow strategies (MR) tolerate longer. 0 (or absent) = inherit
+# global poll_interval.
+# core_0_poll_interval=50
+# core_1_poll_interval=100
+
+#==============================================================================
 # ML INFERENCE
 #==============================================================================
 # XGBoost or LightGBM model for buy signals. train in foxml_suite, load here.

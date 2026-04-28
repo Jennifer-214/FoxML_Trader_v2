@@ -752,10 +752,13 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // Adding new features in legacy-only paths = silent production gap;
   // see CLAUDE.md "Cross-Mode Init Placement" invariant.
   cfg.engine_mode = ENGINE_MODE_SHARDED;
-  // v4.7.39 (per-core slow-path migration, Phase C.2): default to centralized
-  // slow-path. Set engine_arch=per_core_slow in cfg to opt into per-core
-  // slow-path threads. Phase F flips this default after parity verification.
-  cfg.engine_arch = ENGINE_ARCH_CENTRALIZED;
+  // v5.0.0 (Phase F): per_core_slow is the new default. Each engine = a
+  // self-contained strategy unit (slow + hot pthread pair). Centralized
+  // architecture available as opt-out via engine_arch=centralized for
+  // benchmark / regression / legacy use. Train-serve parity preserved
+  // structurally: all 3 callers (centralized live, per_core_slow live,
+  // backtest) execute the same OneCore helpers on the same state.cores[c].
+  cfg.engine_arch = ENGINE_ARCH_PER_CORE_SLOW;
   cfg.num_execution_cores = 4;
   cfg.sharded_force_synthetic = 0;
   for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
