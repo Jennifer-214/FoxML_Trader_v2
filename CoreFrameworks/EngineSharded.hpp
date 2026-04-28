@@ -1182,6 +1182,21 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         state.cores[c].core_dd_pct         = FPN_Zero<F>();
                         state.cores[c].core_kill_tripped   = 0;
                         state.cores[c].core_ks_trips_total = 0;
+                        // v4.7.26: clear v4.7.21 pairing state. Without this,
+                        // leg A closed pre-reset stays stashed in
+                        // partner_pending_pnl; leg B closes post-reset and
+                        // pairs against the stale stash → ghost loss bumps
+                        // core_losses without a corresponding fill, leaving
+                        // the panel showing W:0 L:N with 0-fills counter.
+                        state.cores[c].partner_pending_pnl    = FPN_Zero<F>();
+                        state.cores[c].partner_pending_active = 0;
+                        // v4.7.26: clear v4.7.25 gross accumulators. Without
+                        // this, post-reset avg W/L can read stale gross
+                        // values divided by the freshly-zero W/L counters
+                        // → divide-by-zero hides the issue, but a single
+                        // post-reset trade then produces a misleading mean.
+                        state.cores[c].core_gross_wins   = FPN_Zero<F>();
+                        state.cores[c].core_gross_losses = FPN_Zero<F>();
                     }
                     // v4.7.18: rotate the trade history CSV to a timestamped
                     // backup so the GUI's Trade History panel goes blank

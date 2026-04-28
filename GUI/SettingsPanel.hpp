@@ -254,14 +254,11 @@ static const CfgFieldDef field_defs[] = {
         "Path to P(will_peak) model\ntrain with LABEL_WILL_PEAK in foxml_suite"},
     {"valley_model_path",        "Valley Model",      "Barrier", CFG_PATH, NULL,
         "Path to P(will_valley) model\ntrain with LABEL_WILL_VALLEY in foxml_suite"},
-    // Per-core sharded engine — production since v4.x; legacy single_core
-    // is deprecated and warns on boot.
-    {"engine_mode",              "Sharded Mode",      "Per-Core", CFG_BOOL, NULL,
-        "Per-core risk-sharded execution (production default).\n"
-        "ON (default): per-core architecture, controller owns the portfolio,\n"
-        "    each execution core runs one position at a time on its own thread.\n"
-        "OFF: legacy single-threaded engine — DEPRECATED, warns at boot.\n"
-        "RESTART REQUIRED to take effect."},
+    // Per-core sharded engine — production since v4.x; legacy single_core is
+    // deprecated and warns on boot. v4.7.26: removed the "Sharded Mode" toggle
+    // from the GUI — sharded is the only path users should see. Cfg parser
+    // still accepts engine_mode= for backwards compat with old cfg files;
+    // users who really want legacy can hand-edit. No UI surface = no foot-gun.
     {"num_execution_cores",      "Cores",             "Per-Core", CFG_INT,  "%d",
         "Number of execution cores in sharded mode (1-16).\n"
         "Each core handles one position at a time (or two with partial exits).\n"
