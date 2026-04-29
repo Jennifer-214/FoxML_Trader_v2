@@ -131,9 +131,21 @@ inline void EmaCross_ExitAdjust(Portfolio<F> *portfolio, FPN<F> current_price,
             FPN<F> new_tp = FPN_Sub(current_price, trail_dist);
             pos->take_profit_price = FPN_Max(pos->take_profit_price, new_tp);
 
-            // trail SL up too
+            // trail SL up too — but cap at fee-floor so we don't ratchet
+            // into a guaranteed-net-loss exit.
             FPN<F> sl_dist = FPN_Mul(stddev, cfg->sl_trail_mult);
             FPN<F> new_sl = FPN_Sub(current_price, sl_dist);
+
+            // v5.1.7: fee-floor on the SL ratchet. entry × (1 - 3 × fee_rate)
+            // is the floor below which any SG-fired exit would be net-
+            // negative after round-trip fees.
+            FPN<F> fee_rate = !FPN_IsZero(cfg->fee_rate_taker)
+                ? cfg->fee_rate_taker : cfg->fee_rate;
+            FPN<F> fee_floor_dist = FPN_Mul(pos->entry_price,
+                FPN_Mul(fee_rate, FPN_FromDouble<F>(3.0)));
+            FPN<F> sl_floor = FPN_Sub(pos->entry_price, fee_floor_dist);
+            new_sl = FPN_Min(new_sl, sl_floor);
+
             // only ratchet SL up, never down
             if (FPN_LessThan(pos->stop_loss_price, pos->entry_price)) {
                 pos->stop_loss_price = FPN_Max(pos->stop_loss_price, new_sl);

@@ -2130,6 +2130,18 @@ inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
         : (uint16_t)(1u << core_id);
     uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
 
+    // v5.1.7: fee-floor on the ratchet. The trailing-SL ratchet writes
+    // ratchet_sl which the hot-path SG uses as effective_sl = max(sl, ratchet_sl).
+    // Without a floor, the ratchet can push effective_sl above
+    // entry × (1 - fee_rate × 2), causing the FIRST tiny pullback to fire
+    // SG → exit at near-breakeven gross which becomes net-negative after
+    // round-trip fees. Cap the ratchet at entry × (1 - 3 × fee_rate_taker)
+    // to guarantee any SG-fired exit clears fees with at least 1× fee_rate
+    // of margin.
+    double fee_taker_d = FPN_ToDouble(cfg.fee_rate_taker);
+    if (fee_taker_d <= 0.0) fee_taker_d = FPN_ToDouble(cfg.fee_rate);
+    double fee_floor_pct = 3.0 * fee_taker_d;
+
     while (bm) {
         int slot = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
@@ -2138,9 +2150,18 @@ inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
         double gain_pct = (current_price - entry_d) / entry_d;
         if (gain_pct < hold_thresh) continue;  // not yet trailing
 
+        // v5.1.7: clamp the proposed ratchet floor.
+        double new_ratchet_d = current_price - trail_dist_d;
+        double sl_floor_d    = entry_d * (1.0 - fee_floor_pct);
+        if (new_ratchet_d > sl_floor_d) {
+            // Trail wants to ratchet ABOVE the fee floor → would close
+            // positions that haven't yet earned 3× fees of margin. Cap.
+            new_ratchet_d = sl_floor_d;
+        }
+
         // Note: pending_params is per-CORE (one queue per core). Both legs
         // share it under partials. Index via core_id, not slot.
-        FPN<F> new_ratchet = FPN_FromDouble<F>(current_price - trail_dist_d);
+        FPN<F> new_ratchet = FPN_FromDouble<F>(new_ratchet_d);
         FPN<F> existing    = state->cores[core_id].pending_params.ratchet_sl;
         if (FPN_GreaterThan(new_ratchet, existing)) {
             state->cores[core_id].pending_params.ratchet_sl = new_ratchet;
