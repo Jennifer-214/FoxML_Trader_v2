@@ -170,6 +170,107 @@ static inline int EngineSharded_PinThread(int cpu_id) {
 }
 
 //======================================================================================================
+// [SMART SLOW-PATH CPU PIN ASSIGNMENT — v5.1.5]
+//======================================================================================================
+// Read /sys/devices/system/cpu/cpuN/topology/thread_siblings_list to learn
+// which CPUs share a physical core (SMT siblings). Choose slow-path pins
+// that AVOID landing on SMT siblings of the producer/hot-path/drainer
+// threads — those siblings contend with the busiest threads on the box
+// for L1/L2 cache and execution units.
+//
+// Returns 1 on success (writes N pins to out_pins[0..N-1]), 0 on failure
+// (caller should fall back to the simple round-robin auto-derive).
+//======================================================================================================
+static inline int EngineSharded_GetSiblingCPU(int cpu_id) {
+#ifdef __linux__
+    char path[256];
+    snprintf(path, sizeof(path),
+        "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", cpu_id);
+    FILE* f = fopen(path, "r");
+    if (!f) return -1;
+    char buf[64] = {0};
+    if (!fgets(buf, sizeof(buf), f)) { fclose(f); return -1; }
+    fclose(f);
+    // Format: "cpu_id,sibling_id" or "cpu_id-sibling_id" — parse two ints.
+    int a = -1, b = -1;
+    if (sscanf(buf, "%d,%d", &a, &b) == 2 || sscanf(buf, "%d-%d", &a, &b) == 2) {
+        if (a == cpu_id) return b;
+        if (b == cpu_id) return a;
+    }
+    return -1;  // single-thread-per-core CPU
+#else
+    (void)cpu_id;
+    return -1;
+#endif
+}
+
+// Computes slow-path pin assignment that avoids SMT-sharing with busy
+// threads. Strategy:
+//   1. Build set of "hot" CPUs = {producer_cpu, hot_path[0..N-1], drainer_cpu}
+//   2. Build set of "tainted" CPUs = SMT siblings of hot CPUs
+//   3. Build candidate list: CPUs not in hot ∪ tainted (true idle)
+//   4. If we have enough candidates, assign in order
+//   5. Otherwise fall back to including tainted CPUs (still better than
+//      colliding with hot — round-robin among the tainted pool)
+//
+// out_pins[0..num_slow-1] gets the chosen CPU IDs. Returns 1 on success.
+static inline int EngineSharded_SmartSlowPathPins(int producer_cpu,
+                                                    int drainer_cpu,
+                                                    int num_hot,
+                                                    int num_slow,
+                                                    int* out_pins) {
+    if (num_slow <= 0 || num_slow > 16) return 0;
+    long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+    if (nproc < 2) return 0;
+
+    // Mark hot CPUs (running busy work).
+    bool hot[64] = {false};
+    if (producer_cpu >= 0 && producer_cpu < (int)nproc) hot[producer_cpu] = true;
+    if (drainer_cpu  >= 0 && drainer_cpu  < (int)nproc) hot[drainer_cpu] = true;
+    for (int i = 0; i < num_hot && i < 16; ++i) {
+        int hcpu = i + 1;  // hot-path i pins to CPU i+1 by convention
+        if (hcpu >= 0 && hcpu < (int)nproc) hot[hcpu] = true;
+    }
+
+    // Mark tainted = SMT siblings of hot CPUs.
+    bool tainted[64] = {false};
+    for (int i = 0; i < (int)nproc && i < 64; ++i) {
+        if (!hot[i]) continue;
+        int sib = EngineSharded_GetSiblingCPU(i);
+        if (sib >= 0 && sib < (int)nproc) tainted[sib] = true;
+    }
+
+    // First pass: pick truly idle CPUs (not hot, not tainted).
+    int chosen[16] = {0};
+    int chosen_count = 0;
+    for (int i = 0; i < (int)nproc && chosen_count < num_slow; ++i) {
+        if (!hot[i] && !tainted[i]) {
+            chosen[chosen_count++] = i;
+        }
+    }
+    // Second pass: if we still need more, fall back to tainted (better
+    // than landing on hot CPUs themselves).
+    for (int i = 0; i < (int)nproc && chosen_count < num_slow; ++i) {
+        if (tainted[i] && !hot[i]) {
+            // Skip if already chosen
+            bool already = false;
+            for (int j = 0; j < chosen_count; ++j) if (chosen[j] == i) already = true;
+            if (!already) chosen[chosen_count++] = i;
+        }
+    }
+    // Third pass (rare — small CPU box): wrap around to hot CPUs.
+    for (int i = 0; i < (int)nproc && chosen_count < num_slow; ++i) {
+        bool already = false;
+        for (int j = 0; j < chosen_count; ++j) if (chosen[j] == i) already = true;
+        if (!already) chosen[chosen_count++] = i;
+    }
+
+    if (chosen_count < num_slow) return 0;
+    for (int i = 0; i < num_slow; ++i) out_pins[i] = chosen[i];
+    return 1;
+}
+
+//======================================================================================================
 // [LATENCY DUMP]
 //======================================================================================================
 // Dumps per-core latency stats in a compact table after the run finishes.
@@ -1697,29 +1798,61 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // runs reset, clears.
     std::vector<std::thread> slow_paths;
     if (cfg.engine_arch == ENGINE_ARCH_PER_CORE_SLOW) {
-        // Compute pin base: 0 = auto-derive, <0 = disabled, >0 = explicit.
-        int sp_pin_base = -1;  // <0 = no pin
+        // v5.1.5: smart pin selection. With cfg.slow_path_pin_offset == 0
+        // (auto), use SmartSlowPathPins to AVOID landing on SMT siblings of
+        // producer/hot-path/drainer CPUs. Pre-v5.1.5 the auto-derive was a
+        // simple (num_cores + 2 + c) % nproc, which on a 16-thread Intel
+        // (8 phys × 2 SMT) put slow-paths 2,3 on CPUs 8,9 = SMT siblings of
+        // producer/hot-path-0 → 2× slowdown vs slow-paths 0,1 on idle
+        // physical cores 6,7. Smart logic prefers truly-idle CPUs first,
+        // then SMT siblings of idle cores, then falls back gracefully.
+        int sp_pins[16];
         long nproc = topo_nproc;
+        bool smart_ok = false;
+        int sp_pin_base = -1;  // <0 = no pin
         if (cfg.slow_path_pin_offset == 0) {
-            // Auto: pin past drainer (drainer = num_cores + 1).
-            sp_pin_base = num_cores + 2;
+            smart_ok = EngineSharded_SmartSlowPathPins(
+                /*producer_cpu=*/topo_producer_cpu,
+                /*drainer_cpu=*/topo_drainer_cpu,
+                /*num_hot=*/num_cores,
+                /*num_slow=*/num_cores,
+                sp_pins);
+            if (smart_ok) {
+                sp_pin_base = sp_pins[0];  // for log only
+                fprintf(stderr, "[sharded] engine_arch=per_core_slow: spawning %d "
+                                "slow-path threads (smart pin: ", num_cores);
+                for (int c = 0; c < num_cores; ++c) {
+                    fprintf(stderr, "%s%d", c ? "," : "", sp_pins[c]);
+                }
+                fprintf(stderr, ", nproc %ld)\n", nproc);
+            } else {
+                // Fallback: simple (num_cores + 2 + c) % nproc
+                sp_pin_base = num_cores + 2;
+                fprintf(stderr, "[sharded] engine_arch=per_core_slow: spawning %d "
+                                "slow-path threads (smart pin failed; fallback base CPU %d, nproc %ld)\n",
+                        num_cores, sp_pin_base, nproc);
+            }
         } else if (cfg.slow_path_pin_offset > 0) {
             sp_pin_base = cfg.slow_path_pin_offset;
-        }
-        if (sp_pin_base >= 0) {
             fprintf(stderr, "[sharded] engine_arch=per_core_slow: spawning %d "
-                            "slow-path threads (pin base CPU %d, nproc %ld)\n",
+                            "slow-path threads (explicit pin base CPU %d, nproc %ld)\n",
                     num_cores, sp_pin_base, nproc);
         } else {
+            // < 0: no pin
             fprintf(stderr, "[sharded] engine_arch=per_core_slow: spawning %d "
                             "slow-path threads (UNPINNED, slow_path_pin_offset=%d)\n",
                     num_cores, cfg.slow_path_pin_offset);
         }
         slow_paths.reserve(num_cores);
         for (int c = 0; c < num_cores; ++c) {
-            int sp_cpu = (sp_pin_base >= 0)
-                ? (int)((sp_pin_base + c) % nproc)
-                : -1;
+            int sp_cpu;
+            if (smart_ok) {
+                sp_cpu = sp_pins[c];
+            } else if (sp_pin_base >= 0) {
+                sp_cpu = (int)((sp_pin_base + c) % nproc);
+            } else {
+                sp_cpu = -1;
+            }
             topo_slow_cpu[c] = sp_cpu;  // v5.0.2: capture for topology panel
             slow_paths.emplace_back([c, sp_cpu, &state, &oms, &cores, &cfg,
                                       &ticks_produced, &last_price, &last_volume,
