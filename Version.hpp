@@ -3,6 +3,6 @@
 // update HERE only — all renderers include this
 
 #define ENGINE_VERSION_MAJOR 5
-#define ENGINE_VERSION_MINOR 2
-#define ENGINE_VERSION_PATCH 3
-#define ENGINE_VERSION_STRING "5.2.3"
+#define ENGINE_VERSION_MINOR 3
+#define ENGINE_VERSION_PATCH 0
+#define ENGINE_VERSION_STRING "5.3.0"
