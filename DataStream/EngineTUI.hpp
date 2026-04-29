@@ -26,6 +26,7 @@
 #include <time.h>
 
 #include "../CoreFrameworks/PortfolioController.hpp"
+#include "../CoreFrameworks/SPSCRing.hpp"  // v5.0.3: SPSCRing_Depth for Q-depth display
 #include "../CoreFrameworks/OrderGates.hpp"
 #include "../CoreFrameworks/CoreLatencyStats.hpp"
 #include <fcntl.h>
@@ -904,6 +905,14 @@ struct TUISnapshot {
     int sharded_mode_active;       // 1 = sharded engine running, 0 = legacy
     int partial_exit_enabled;      // 1 = paired-leg geometry (slot 2c+leg)
     int per_core_count;            // number of cores actively reporting
+    // v5.0.2 (Engine Topology): system + thread layout for the GUI
+    // Engine Topology panel. Populated once at boot in EngineSharded_Run
+    // (values are static after thread spawn).
+    uint8_t engine_arch;           // ENGINE_ARCH_CENTRALIZED / PER_CORE_SLOW
+    int16_t producer_cpu;          // pinned CPU for the producer thread
+    int16_t drainer_cpu;           // pinned CPU for the drainer thread
+    int16_t nproc;                 // sysconf(_SC_NPROCESSORS_ONLN)
+    int16_t slow_path_pin_offset;  // raw cfg value (-1 disabled, 0 auto, >0 explicit)
     struct PerCoreSnap {
         // Hot-path latency (per-tick gate eval cycles).
         uint64_t samples;
@@ -963,6 +972,26 @@ struct TUISnapshot {
         double   core_dd_pct;          // current drawdown fraction (0..1)
         uint32_t core_ks_trips_total;  // historical trip count
         uint8_t  core_kill_tripped;    // 1 = kill-halted right now
+        // v5.0.2 (Engine Topology): per-core thread layout
+        int16_t  hot_path_cpu;         // pinned CPU (-1 if unpinned)
+        int16_t  slow_path_cpu;        // pinned CPU (-1 if unpinned/centralized)
+        uint32_t poll_interval_ticks;  // resolved per-core (override or global)
+        // v5.0.3 (Engine Topology advanced): live thread observability.
+        // sp_state: 0=running, 1=parked (reset_in_progress), 2=cadence-yield, 3=paused (user)
+        // sp_last_tick_us: monotonic us of last completed slow-path cycle
+        // sp_cycles_total: monotonic count of completed slow-path cycles
+        // sp_yield_count: monotonic count of cadence-or-park yields
+        // sp_submit_q_depth: live SPSC submit_queues[c] depth (informational)
+        uint64_t sp_last_tick_us;
+        uint64_t sp_cycles_total;
+        uint64_t sp_yield_count;
+        uint16_t sp_submit_q_depth;
+        uint8_t  sp_state;
+        // v5.1.1 (slow-path work breakdown): per-section p50 in ns.
+        // Sections: 0=rebuild, 1=push_params, 2=time_exit, 3=trail_sl, 4=other
+        // Only populated when engine_arch=per_core_slow.
+        double   sp_breakdown_p50_ns[5];
+        double   sp_breakdown_p99_ns[5];
     };
     PerCoreSnap per_core[16];      // up to MAX_EXECUTION_CORES
 };
@@ -1006,6 +1035,12 @@ struct TUISharedState {
     // flag back to 0. Indexed by portfolio slot (under partials, slot 2c
     // is leg A and 2c+1 is leg B — closing one closes only that leg).
     volatile sig_atomic_t manual_close_requested[16];
+    // v5.0.3 (Engine Topology advanced): per-engine pause toggle. GUI sets
+    // bit c to pause slow-path c; clears bit c to resume. Slow-path thread
+    // checks its bit at top of loop; if set, yields without doing work
+    // (sp_state=3, sp_yield_count++). Single-writer (GUI) per bit; per-
+    // core thread c is single-reader of bit c. Doesn't affect hot-path.
+    volatile uint16_t paused_engines_mask;
     EngineTUI tui;
     const char *config_path;
     void *candle_acc;  // CandleAccumulator* (GUI build only, NULL for ANSI)
@@ -1041,6 +1076,12 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->sharded_mode_active = 0;
     snap->partial_exit_enabled = 0;
     snap->per_core_count = 0;
+    // v5.0.2: topology — zeroed in legacy mode (panel won't render).
+    snap->engine_arch = 0;
+    snap->producer_cpu = -1;
+    snap->drainer_cpu = -1;
+    snap->nproc = 0;
+    snap->slow_path_pin_offset = 0;
 
     snap->price  = price_d;
     snap->volume = volume_d;
@@ -1348,6 +1389,86 @@ static inline void TUI_PopulatePerCoreSlowPathLatency(TUISnapshot *snap,
         snap->per_core[i].sp_p99_ns  = ls.p99_ns;
         snap->per_core[i].sp_max_ns  = ls.max_ns;
         snap->per_core[i].sp_avg_ns  = ls.avg_ns;
+        // v5.1.1: per-section breakdown.
+        for (int s = 0; s < 5; ++s) {
+            tt::CoreLatencySnapshot ss = tt::CoreLatencyStats_Snapshot(
+                &state->cores[i].slow_path_breakdown[s], tsc_ghz);
+            snap->per_core[i].sp_breakdown_p50_ns[s] = ss.p50_ns;
+            snap->per_core[i].sp_breakdown_p99_ns[s] = ss.p99_ns;
+        }
+    }
+}
+
+//======================================================================================================
+// [ADVANCED TOPOLOGY POPULATION (v5.0.3)]
+//======================================================================================================
+// Sibling to TUI_PopulateTopology — copies the live observability fields
+// from CoreContext into TUISnapshot::PerCoreSnap for the Engine Topology
+// panel's State/Cycles/LastCycle/Q-depth columns. Called from the GUI
+// snapshot publish each cycle (cheap — handful of relaxed loads).
+//
+// StateT/OmsT templated to keep this header free of EventLoopState and
+// OrderManagerState dependencies.
+//======================================================================================================
+template <typename StateT, typename OmsT>
+static inline void TUI_PopulateAdvancedTopology(TUISnapshot *snap,
+                                                  const StateT *state,
+                                                  const OmsT *oms) {
+    int n = snap->per_core_count;
+    if (n < 0) n = 0;
+    if (n > 16) n = 16;
+    for (int i = 0; i < n; ++i) {
+        snap->per_core[i].sp_last_tick_us =
+            state->cores[i].sp_last_tick_us.load(std::memory_order_relaxed);
+        snap->per_core[i].sp_cycles_total =
+            state->cores[i].sp_cycles_total.load(std::memory_order_relaxed);
+        snap->per_core[i].sp_yield_count =
+            state->cores[i].sp_yield_count.load(std::memory_order_relaxed);
+        snap->per_core[i].sp_state =
+            state->cores[i].sp_state.load(std::memory_order_relaxed);
+        snap->per_core[i].sp_submit_q_depth =
+            (uint16_t)SPSCRing_Depth(&oms->submit_queues[i]);
+    }
+}
+
+//======================================================================================================
+// [TOPOLOGY POPULATION (Engine Topology panel)]
+//======================================================================================================
+// v5.0.2: snapshot the system + thread layout for the GUI Engine Topology
+// panel. Called ONCE at boot from EngineSharded_Run after thread spawn,
+// since the values are static for the lifetime of the engine.
+//
+// Args:
+//   engine_arch         — cfg.engine_arch (centralized vs per_core_slow)
+//   producer_cpu        — pin assignment for producer thread (always 0 today)
+//   drainer_cpu         — pin assignment for drainer thread (num_cores + 1)
+//   nproc               — sysconf(_SC_NPROCESSORS_ONLN)
+//   slow_path_pin_off   — raw cfg.slow_path_pin_offset (-1 disabled, 0 auto, >0 explicit)
+//   hot_cpu[i]          — per-core hot-path pin (i + 1 in current layout)
+//   slow_cpu[i]         — per-core slow-path pin (-1 if unpinned)
+//   poll_interval[i]    — per-core resolved poll cadence
+//======================================================================================================
+static inline void TUI_PopulateTopology(TUISnapshot *snap,
+                                         uint8_t engine_arch,
+                                         int producer_cpu,
+                                         int drainer_cpu,
+                                         int nproc,
+                                         int slow_path_pin_off,
+                                         const int *hot_cpu,
+                                         const int *slow_cpu,
+                                         const uint32_t *poll_interval) {
+    snap->engine_arch          = engine_arch;
+    snap->producer_cpu         = (int16_t)producer_cpu;
+    snap->drainer_cpu          = (int16_t)drainer_cpu;
+    snap->nproc                = (int16_t)nproc;
+    snap->slow_path_pin_offset = (int16_t)slow_path_pin_off;
+    int n = snap->per_core_count;
+    if (n < 0) n = 0;
+    if (n > 16) n = 16;
+    for (int i = 0; i < n; ++i) {
+        snap->per_core[i].hot_path_cpu  = (int16_t)hot_cpu[i];
+        snap->per_core[i].slow_path_cpu = (int16_t)slow_cpu[i];
+        snap->per_core[i].poll_interval_ticks = poll_interval[i];
     }
 }
 

@@ -5,6 +5,8 @@ build_lat/
 build_latency/
 build_suite/
 build_suite_asan/
+build_tsan/
+build_asan/
 # v4.3 — symlinks to latest canonical binaries; build.sh maintains
 bin/
 vendor/

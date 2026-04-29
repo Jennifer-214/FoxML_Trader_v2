@@ -15,6 +15,7 @@
 #include "../Strategies/StrategyInterface.hpp"
 #include "SettingsPanel.hpp"  // cfg_write_field for hot-swap persistence
 #include <ctime>
+#include <chrono>  // v5.0.3: Engine Topology drift display
 
 // ── helper: colored value text (green if positive, red if negative) ──
 static inline ImVec4 PnlColor(double val) {
@@ -1851,6 +1852,280 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
             }
             ImGui::EndTable();
         }
+
+        // v5.1.1: per-section work breakdown — only meaningful in
+        // per_core_slow (centralized = section samples are zero).
+        ImGui::Spacing();
+        SectionHeader("PER-ENGINE SLOW-PATH WORK BREAKDOWN");
+        ImGui::TextColored(FoxmlColors::comment,
+            "(per-section p50/p99 inside the slow-path cycle; per_core_slow only)");
+
+        if (ImGui::BeginTable("##percore_breakdown", 11, tf)) {
+            ImGui::TableSetupColumn("Engine", ImGuiTableColumnFlags_WidthFixed, 45);
+            ImGui::TableSetupColumn("Strat",  ImGuiTableColumnFlags_WidthFixed, 35);
+            ImGui::TableSetupColumn("Other p50", ImGuiTableColumnFlags_WidthFixed, 60);
+            ImGui::TableSetupColumn("Other p99", ImGuiTableColumnFlags_WidthFixed, 60);
+            ImGui::TableSetupColumn("Rebuild p50", ImGuiTableColumnFlags_WidthFixed, 70);
+            ImGui::TableSetupColumn("Rebuild p99", ImGuiTableColumnFlags_WidthFixed, 70);
+            ImGui::TableSetupColumn("Push p50",  ImGuiTableColumnFlags_WidthFixed, 60);
+            ImGui::TableSetupColumn("Push p99",  ImGuiTableColumnFlags_WidthFixed, 60);
+            ImGui::TableSetupColumn("TimeExit",  ImGuiTableColumnFlags_WidthFixed, 60);
+            ImGui::TableSetupColumn("TrailSL",   ImGuiTableColumnFlags_WidthFixed, 60);
+            ImGui::TableSetupColumn("Σ p50",     ImGuiTableColumnFlags_WidthFixed, 70);
+            ImGui::TableHeadersRow();
+            auto fmt_ns = [](double ns) -> const char* {
+                static char buf[32];
+                if (ns >= 1000.0) snprintf(buf, sizeof(buf), "%.1fµs", ns / 1000.0);
+                else              snprintf(buf, sizeof(buf), "%.0fns", ns);
+                return buf;
+            };
+            for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+                const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn(); ImGui::Text("%d", i);
+                ImGui::TableNextColumn();
+                uint8_t sid = pc->strategy_id_display;
+                ImGui::TextColored(FoxmlColors::primary, "%s",
+                                   sid < NUM_STRATEGIES ? STRATEGY_SHORT_NAMES[sid] : "?");
+                if (s->engine_arch != 1) {
+                    for (int k = 0; k < 9; ++k) {
+                        ImGui::TableNextColumn();
+                        ImGui::TextColored(FoxmlColors::comment, "-");
+                    }
+                } else {
+                    // Section order in struct: 0=rebuild, 1=push, 2=time, 3=trail, 4=other
+                    // Column display reorders for readability.
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[4]));
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[4]));
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[0]));
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[0]));
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[1]));
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[1]));
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[2]));
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[3]));
+                    double sum_p50 = pc->sp_breakdown_p50_ns[0] +
+                                     pc->sp_breakdown_p50_ns[1] +
+                                     pc->sp_breakdown_p50_ns[2] +
+                                     pc->sp_breakdown_p50_ns[3] +
+                                     pc->sp_breakdown_p50_ns[4];
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(sum_p50));
+                }
+            }
+            ImGui::EndTable();
+        }
+        ImGui::TextColored(FoxmlColors::comment,
+            "Σ p50 = sum of section p50s — should approximate the total sp p50 above.");
+
+        ImGui::End();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // v5.0.2 (Phase H): Engine Topology panel — shows the static thread
+    // layout: which CPU each thread is pinned to, what each engine's
+    // strategy + cadence is, and the system architecture (engine_arch,
+    // nproc, slow_path_pin_offset). Helps diagnose pin conflicts /
+    // unexpected OS scheduling and explains "why is engine 3 a bit
+    // jittery on this box".
+    // ─────────────────────────────────────────────────────────────────────
+    if (s->sharded_mode_active && s->per_core_count > 0) {
+        ImGui::Begin("Engine Topology");
+
+        SectionHeader("SYSTEM");
+        const char *arch_label = (s->engine_arch == 1)
+            ? "per_core_slow"
+            : "centralized";
+        ImGui::TextColored(FoxmlColors::comment, "engine_arch:");
+        ImGui::SameLine();
+        ImGui::TextColored(s->engine_arch == 1
+                            ? FoxmlColors::green_b
+                            : FoxmlColors::accent,
+                           "%s", arch_label);
+
+        ImGui::TextColored(FoxmlColors::comment, "system CPUs (nproc):");
+        ImGui::SameLine();
+        ImGui::Text("%d", (int)s->nproc);
+
+        ImGui::TextColored(FoxmlColors::comment, "slow_path_pin_offset:");
+        ImGui::SameLine();
+        if (s->slow_path_pin_offset < 0) {
+            ImGui::TextColored(FoxmlColors::yellow, "%d (UNPINNED)",
+                               (int)s->slow_path_pin_offset);
+        } else if (s->slow_path_pin_offset == 0) {
+            ImGui::TextColored(FoxmlColors::text, "0 (auto: base CPU %d)",
+                               s->per_core_count + 2);
+        } else {
+            ImGui::TextColored(FoxmlColors::text, "%d (explicit base)",
+                               (int)s->slow_path_pin_offset);
+        }
+
+        ImGui::Spacing();
+        SectionHeader("SHARED THREADS");
+        if (ImGui::BeginTable("##topo_shared", 2,
+                ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("Thread", ImGuiTableColumnFlags_WidthFixed, 100);
+            ImGui::TableSetupColumn("CPU",    ImGuiTableColumnFlags_WidthFixed, 60);
+            ImGui::TableHeadersRow();
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::Text("Producer");
+            ImGui::TableNextColumn(); ImGui::Text("%d", (int)s->producer_cpu);
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::Text("Drainer");
+            ImGui::TableNextColumn(); ImGui::Text("%d", (int)s->drainer_cpu);
+
+            ImGui::EndTable();
+        }
+
+        ImGui::Spacing();
+        SectionHeader("PER-ENGINE THREADS");
+        // v5.0.3: now includes live thread state, drift, and lifecycle.
+        const int topo_col_count = (s->engine_arch == 1 && shared) ? 10 : 9;
+        if (ImGui::BeginTable("##topo_engines", topo_col_count,
+                ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("Engine",   ImGuiTableColumnFlags_WidthFixed, 55);
+            ImGui::TableSetupColumn("Strategy", ImGuiTableColumnFlags_WidthFixed, 95);
+            ImGui::TableSetupColumn("Hot CPU",  ImGuiTableColumnFlags_WidthFixed, 60);
+            ImGui::TableSetupColumn("Slow CPU", ImGuiTableColumnFlags_WidthFixed, 65);
+            ImGui::TableSetupColumn("Poll",     ImGuiTableColumnFlags_WidthFixed, 55);
+            ImGui::TableSetupColumn("State",    ImGuiTableColumnFlags_WidthFixed, 65);
+            ImGui::TableSetupColumn("Last cycle", ImGuiTableColumnFlags_WidthFixed, 80);
+            ImGui::TableSetupColumn("Cycles",   ImGuiTableColumnFlags_WidthFixed, 80);
+            ImGui::TableSetupColumn("Q",        ImGuiTableColumnFlags_WidthFixed, 40);
+            if (s->engine_arch == 1 && shared) {
+                ImGui::TableSetupColumn("",     ImGuiTableColumnFlags_WidthFixed, 70);
+            }
+            ImGui::TableHeadersRow();
+
+            // wall-now in us — used for "last cycle" Δ display
+            uint64_t now_us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+
+            for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+                const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
+                ImGui::PushID(i);
+                ImGui::TableNextRow();
+
+                ImGui::TableNextColumn(); ImGui::Text("%d", i);
+
+                ImGui::TableNextColumn();
+                uint8_t sid = pc->strategy_id_display;
+                uint8_t rsid = pc->resolved_strategy_id;
+                if (sid == STRATEGY_AUTO && rsid != STRATEGY_NONE) {
+                    ImGui::TextColored(FoxmlColors::primary, "AUTO(%s)",
+                                       rsid < NUM_STRATEGIES
+                                            ? STRATEGY_SHORT_NAMES[rsid] : "?");
+                } else {
+                    ImGui::TextColored(FoxmlColors::primary, "%s",
+                                       sid < NUM_STRATEGIES
+                                            ? STRATEGY_SHORT_NAMES[sid] : "?");
+                }
+
+                ImGui::TableNextColumn();
+                if (pc->hot_path_cpu < 0) {
+                    ImGui::TextColored(FoxmlColors::yellow, "unpin");
+                } else {
+                    ImGui::Text("%d", (int)pc->hot_path_cpu);
+                }
+
+                ImGui::TableNextColumn();
+                if (s->engine_arch != 1) {
+                    ImGui::TextColored(FoxmlColors::comment, "(prod)");
+                } else if (pc->slow_path_cpu < 0) {
+                    ImGui::TextColored(FoxmlColors::yellow, "unpin");
+                } else {
+                    ImGui::Text("%d", (int)pc->slow_path_cpu);
+                }
+
+                ImGui::TableNextColumn();
+                ImGui::Text("%u t", (unsigned)pc->poll_interval_ticks);
+
+                // State — coarse thread state with color
+                ImGui::TableNextColumn();
+                if (s->engine_arch != 1) {
+                    ImGui::TextColored(FoxmlColors::comment, "(prod)");
+                } else {
+                    switch (pc->sp_state) {
+                        case 0: ImGui::TextColored(FoxmlColors::green_b, "running"); break;
+                        case 1: ImGui::TextColored(FoxmlColors::yellow,  "parked");  break;
+                        case 2: ImGui::TextColored(FoxmlColors::comment, "yield");   break;
+                        case 3: ImGui::TextColored(FoxmlColors::red,     "PAUSED");  break;
+                        default: ImGui::TextColored(FoxmlColors::comment, "?"); break;
+                    }
+                }
+
+                // Last cycle — Δus since last sp_last_tick_us. Drift indicator.
+                ImGui::TableNextColumn();
+                if (s->engine_arch != 1) {
+                    ImGui::TextColored(FoxmlColors::comment, "-");
+                } else if (pc->sp_last_tick_us == 0) {
+                    ImGui::TextColored(FoxmlColors::comment, "warmup");
+                } else {
+                    uint64_t delta = (now_us > pc->sp_last_tick_us)
+                        ? (now_us - pc->sp_last_tick_us) : 0;
+                    if (delta < 1000) {
+                        ImGui::Text("%lluµs", (unsigned long long)delta);
+                    } else if (delta < 1000000) {
+                        ImGui::Text("%.1fms", (double)delta / 1000.0);
+                    } else {
+                        ImGui::TextColored(FoxmlColors::yellow, "%.1fs",
+                                           (double)delta / 1000000.0);
+                    }
+                }
+
+                // Cycles — total completed slow-path cycles
+                ImGui::TableNextColumn();
+                if (s->engine_arch != 1) {
+                    ImGui::TextColored(FoxmlColors::comment, "-");
+                } else {
+                    ImGui::Text("%llu", (unsigned long long)pc->sp_cycles_total);
+                }
+
+                // Submit queue depth (capacity 32; warn if > 16)
+                ImGui::TableNextColumn();
+                if (pc->sp_submit_q_depth > 16) {
+                    ImGui::TextColored(FoxmlColors::yellow, "%u",
+                                       (unsigned)pc->sp_submit_q_depth);
+                } else {
+                    ImGui::Text("%u", (unsigned)pc->sp_submit_q_depth);
+                }
+
+                // Pause/Resume — only in per_core_slow with shared control
+                if (s->engine_arch == 1 && shared) {
+                    ImGui::TableNextColumn();
+                    bool paused = (shared->paused_engines_mask &
+                                   (uint16_t)(1u << i)) != 0;
+                    const char *btn_label = paused ? "Resume" : "Pause";
+                    if (ImGui::Button(btn_label)) {
+                        // Toggle bit i. Single GUI thread is the writer.
+                        if (paused) {
+                            shared->paused_engines_mask &= (uint16_t)~(1u << i);
+                        } else {
+                            shared->paused_engines_mask |= (uint16_t)(1u << i);
+                        }
+                    }
+                }
+
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+
+        ImGui::Spacing();
+        ImGui::TextColored(FoxmlColors::comment,
+            "Hot CPU = pinned core for the SPSC consumer (per-tick gate eval).");
+        ImGui::TextColored(FoxmlColors::comment,
+            "Slow CPU = pinned core for the per-engine slow-path thread.");
+        ImGui::TextColored(FoxmlColors::comment,
+            "(prod) = centralized arch — slow-path runs on the producer thread.");
+        ImGui::TextColored(FoxmlColors::comment,
+            "State: running=actively rebuilding | yield=between cadences | parked=reset in progress | PAUSED=user toggle.");
+        ImGui::TextColored(FoxmlColors::comment,
+            "Last cycle = wall-time since the last completed cycle. > 1s = thread starved or stopped.");
+        ImGui::TextColored(FoxmlColors::comment,
+            "Q = current OMS submit-queue depth (cap 32). > 16 indicates drainer backpressure.");
 
         ImGui::End();
     }

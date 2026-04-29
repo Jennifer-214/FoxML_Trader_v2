@@ -399,6 +399,47 @@ if (entry_t > now_tick) {
 uint64_t elapsed = now_tick - entry_t;
 ```
 
+### Per-Core Data-Plane Single-Writer (v5.1.0+)
+
+Each engine OWNS its rolling/regime/flow state via heap-allocated
+`CoreContext::slow_state` (`CoreSlowState<F>` in `ControllerEventLoop.hpp`).
+Single-writer per `state.cores[c].slow_state`:
+
+- **Per-tick `ema_price`**: producer writes ALL N engines' copies in
+  `fan_out` via `EventLoop_UpdateEmaPriceAllCores`.
+- **Per-cadence fields** (rolling stats, regime_ror, cumdelta, tick_rate,
+  flow, large_trade, book_imb_history, spread_state):
+  - `centralized`: producer iterates c=0..N via `EventLoop_UpdateRollingStateAllCores`.
+  - `per_core_slow`: per-core slow-path c writes its OWN slow_state via
+    `EventLoop_UpdateRollingStateOneCore(state, c, ...)`.
+  - backtest (single-thread): same helper, linear iteration.
+
+Cross-thread reads bounded to per-tick `ema_price` in per_core_slow
+(producer→engine c) — relaxed loads, x86-acceptable. Adding new
+rolling/regime input: field on `CoreSlowState<F>` + init line + push in
+`UpdateRollingStateOneCore` + read in `Regime_ComputeSignals`. All 3
+callers pick up automatically.
+
+Direct reads from producer-thread shared state (legacy v5.0.x and
+earlier) are gone — `static RollingStats rolling_short` etc. removed in
+v5.1.2. Reading via `state.cores[c].slow_state` is the only correct path.
+
+### Lifecycle Bitmap Single-Writer (v5.0.3)
+
+`TUISharedState::paused_engines_mask` (uint16_t) controls per-engine
+slow-path pausing. GUI is sole writer per bit; per-core slow-path c is
+single-reader of bit c only. No atomic ops needed beyond the volatile
+load. Slow-path checks at TOP of loop (before reset-paper park + cadence
+yield), sets `sp_state=3`, increments `sp_yield_count`, yields. Hot-path
+unaffected.
+
+### Per-Section Latency Stats Single-Writer (v5.1.1)
+
+Each `CoreContext::slow_path_breakdown[section]` is single-writer by the
+thread running that section. Sections (append-only, indices stable for
+GUI): REBUILD, PUSH_PARAMS, TIME_EXIT, TRAIL_SL, OTHER. Bracket cost
+~10ns × 5 sections = ~50ns/cycle, < 1% of microsecond-scale slow-path.
+
 ### Partial Exits — Two-Position-per-Core
 
 `cfg.partial_exit_enabled=1` → each core owns 2 slots:

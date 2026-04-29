@@ -440,6 +440,16 @@ template <unsigned F> struct ControllerConfig {
   // v4.7.39 (per-core slow-path migration): slow-path threading model
   // under sharded mode. STARTUP-ONLY. See ENGINE_ARCH_* constants above.
   uint8_t engine_arch; // ENGINE_ARCH_CENTRALIZED (default) or PER_CORE_SLOW
+  // v5.0.2: slow-path CPU pin policy. STARTUP-ONLY.
+  //   < 0  → do not pin slow-paths (OS-scheduled — original v5.0 behavior)
+  //   == 0 → auto: pin slow-path c to (drainer_cpu + 1 + c) mod nproc.
+  //          Drainer pins to (num_cores + 1) so default base is num_cores + 2.
+  //          Wraps via modulo if base + num_cores > nproc.
+  //   > 0  → explicit base: pin slow-path c to (offset + c) mod nproc.
+  // Default 0 (auto). Slow-paths are jitter-tolerant so HT-sharing with
+  // spare cores is acceptable. Set to -1 to disable (e.g. for benchmarks
+  // comparing pinned vs unpinned).
+  int slow_path_pin_offset;
   uint16_t num_execution_cores; // sharded mode only, ignored in single_core
                                 // mode (default 4, cap 16)
   // Phase 14: when 1, sharded mode forces the synthetic tick generator
@@ -759,6 +769,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // structurally: all 3 callers (centralized live, per_core_slow live,
   // backtest) execute the same OneCore helpers on the same state.cores[c].
   cfg.engine_arch = ENGINE_ARCH_PER_CORE_SLOW;
+  cfg.slow_path_pin_offset = 0;  // 0 = auto-derive (drainer_cpu + 1)
   cfg.num_execution_cores = 4;
   cfg.sharded_force_synthetic = 0;
   for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
@@ -1085,6 +1096,11 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.engine_arch = ENGINE_ARCH_PER_CORE_SLOW;
       else
         cfg.engine_arch = ENGINE_ARCH_CENTRALIZED;
+      continue;
+    }
+    // v5.0.2: slow_path_pin_offset — int. <0 disables, 0 auto, >0 explicit.
+    if (strcmp(key, "slow_path_pin_offset") == 0) {
+      cfg.slow_path_pin_offset = atoi(val);
       continue;
     }
     // num_execution_cores: clamped to [1, 16] (special case to enforce the cap)

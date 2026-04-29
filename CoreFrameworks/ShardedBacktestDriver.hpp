@@ -298,25 +298,30 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
                 *drv->current_spread);
         }
         if (drv->rolling && drv->config) {
-            // Thread the v4.3 + ROR/EMA state through the rebuild so per-core
-            // ML strategies see the same RegimeSignals fields the live path
-            // produces. Fields are NULL-passed when caller didn't supply
-            // state, matching the pre-Track-E sharded backtest behavior.
-            EventLoop_RebuildAllParameters(
-                drv->state, drv->rolling, drv->config, drv->rolling_long,
-                /* ror_regressor   */ (const void*)drv->regime_ror,
-                /* ema_price       */ (const void*)drv->ema_price,
-                /* current_price   */ (const void*)&tick.price,
-                /* rolling_medium  */ (const void*)drv->rolling_medium,
-                /* rolling_baseline*/ (const void*)drv->rolling_baseline,
-                /* cumdelta_state  */ (const void*)drv->cumdelta_state,
-                /* tick_rate_state */ (const void*)drv->tick_rate_state,
+            // v5.1.2 (full symmetric decoupling): backtest pushes to per-
+            // core slow_state via the shared helper, then rebuilds via
+            // RebuildAllParameters_PerCore. Train-serve parity is now
+            // structural — backtest, centralized, and per_core_slow live
+            // all consume the same `state.cores[c].slow_state`.
+            //
+            // The driver's shared rolling state above is still pushed
+            // (keeps existing tests + benchmark/regression callers
+            // working) but no longer feeds the rebuild call.
+            EventLoop_UpdateRollingStateAllCores(
+                drv->state, tick.price, tick.volume, tick.timestamp,
+                tick.is_buyer_maker,
+                drv->book_imbalance ? *drv->book_imbalance : FPN_Zero<F>(),
+                drv->current_spread ? *drv->current_spread : FPN_Zero<F>(),
+                /*depth_enabled=*/(drv->book_imbalance || drv->current_spread) ? 1 : 0);
+            // ema_price replication — same pattern as live producer.
+            if (drv->ema_price) {
+                EventLoop_UpdateEmaPriceAllCores(drv->state, *drv->ema_price);
+            }
+            EventLoop_RebuildAllParameters_PerCore(
+                drv->state, drv->config,
+                /* current_price   */ &tick.price,
                 /* timestamp_us    */ tick.timestamp,
-                /* book_imbalance  */ (const void*)drv->book_imbalance,
-                /* book_imb_history*/ drv->book_imb_history,
-                /* flow_state      */ drv->flow_state,
-                /* large_trade_state*/ drv->large_trade_state,
-                /* spread_state    */ drv->spread_state,
+                /* book_imbalance  */ drv->book_imbalance,
                 /* current_spread  */ drv->current_spread
                                        ? FPN_ToDouble(*drv->current_spread) : 0.0,
                 /* current_mid_price*/ drv->current_mid_price

@@ -140,6 +140,31 @@ build_latency() {
     update_bin_links
 }
 
+# v5.0.5: TSan build for race detection. -O1 -g keeps usable line info; -fno-omit-
+# frame-pointer for nice stacks. Slow runtime (~5-15× hot path) but unrelated to
+# correctness checking. Use against engine + controller_test in synthetic mode
+# for race / data-race detection.
+build_tsan() {
+    [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_tsan
+    cmake -B build_tsan -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_CXX_FLAGS="-fsanitize=thread -O1 -g -fno-omit-frame-pointer -DUSE_NATIVE_128=ON" \
+        -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+    cmake --build build_tsan -j"$JOBS"
+    link_cfg build_tsan
+}
+
+# v5.0.5: ASan build for memory-error detection. Catches use-after-free,
+# double-free, leaks, buffer overflows. Less overhead than TSan (~2-3×) so
+# can run more aggressively. Use against engine + controller_test.
+build_asan() {
+    [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_asan
+    cmake -B build_asan -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_CXX_FLAGS="-fsanitize=address -O1 -g -fno-omit-frame-pointer -DUSE_NATIVE_128=ON" \
+        -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address"
+    cmake --build build_asan -j"$JOBS"
+    link_cfg build_asan
+}
+
 run_tests() {
     build_engine
     echo "--- running controller_test ---"
@@ -169,13 +194,20 @@ case "$TARGET" in
     latency)
         build_latency
         ;;
+    tsan)
+        build_tsan
+        ;;
+    asan)
+        build_asan
+        ;;
     clean)
-        rm -rf build build_gui build_gui_lite build_suite build_lat bin
+        rm -rf build build_gui build_gui_lite build_suite build_lat \
+               build_tsan build_asan bin
         echo "all build dirs + bin/ symlinks removed"
         ;;
     *)
         echo "unknown target: $TARGET" >&2
-        echo "usage: $0 {engine|gui|gui-lite|suite|all|test|latency|clean} [--clean]" >&2
+        echo "usage: $0 {engine|gui|gui-lite|suite|all|test|latency|tsan|asan|clean} [--clean]" >&2
         exit 1
         ;;
 esac

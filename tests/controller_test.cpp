@@ -22,6 +22,7 @@
 #include "../CoreFrameworks/ExecutionCore.hpp"        // Phase 2.1 tests
 #include "../CoreFrameworks/ShardedSnapshotPersist.hpp"  // Phase 4 tests
 #include "../CoreFrameworks/ShardedBacktestDriver.hpp"   // Track E.1 tests
+#include "../DataStream/EngineTUI.hpp"                   // v5.0.4 — topology populator tests
 #include "../ML_Headers/CoreModelZoo.hpp"                // Track E.2 tests
 #include "../DataStream/DepthReplayState.hpp"            // Track E.3 tests
 #include "../ML_Headers/FlowFeatures.hpp"                // v4.5 Wave 1 tests
@@ -3187,26 +3188,32 @@ int main() {
     //======================================================================================================
 
     // Counting backend — records every event the worker dispatches.
+    // v5.0.5: events_received is std::atomic<int> so TSan sees the
+    // worker→main synchronization properly. last_event written by the
+    // worker is observed only AFTER events_received bump (release-ack via
+    // events_received's store) — same pattern the engine uses everywhere.
     struct NotifyCountState {
-        int events_received;
+        std::atomic<int> events_received;
         NotifyEvent last_event;
     };
     auto NotifyBackend_Counting = [](const NotifyEvent *evt, void *state) -> int {
         NotifyCountState *s = (NotifyCountState *)state;
-        s->events_received++;
         s->last_event = *evt;
+        s->events_received.fetch_add(1, std::memory_order_release);
         return 0;
     };
     // Helper: poll up to ~200ms for the worker thread to drain.
-    auto wait_for_count = [](volatile int *count, int target) {
-        for (int i = 0; i < 100 && *count < target; i++) usleep(2000);
+    auto wait_for_count = [](std::atomic<int> *count, int target) {
+        for (int i = 0; i < 100 &&
+             count->load(std::memory_order_acquire) < target; i++) usleep(2000);
     };
 
     // ----- Group 1: Lifecycle (2 assertions) -----------------------------------------------------------
     printf("\n--- Phase 8b: Notify lifecycle ---\n");
     {
         NotifyState ns;
-        NotifyCountState bs = {0, {}};
+        NotifyCountState bs;
+        bs.events_received.store(0); memset(&bs.last_event, 0, sizeof(bs.last_event));
         NotifyState_Init(&ns, NotifyBackend_Counting, &bs, /*cooldown_us=*/1000000);
         check("Init starts worker thread (worker_started=1)", ns.worker_started == 1);
         NotifyState_Shutdown(&ns);
@@ -3218,13 +3225,14 @@ int main() {
     printf("\n--- Phase 8b: Send + dispatch ---\n");
     {
         NotifyState ns;
-        NotifyCountState bs = {0, {}};
+        NotifyCountState bs;
+        bs.events_received.store(0); memset(&bs.last_event, 0, sizeof(bs.last_event));
         NotifyState_Init(&ns, NotifyBackend_Counting, &bs, /*cooldown_us=*/0);
 
         Notify_Send(&ns, NOTIFY_ALERT, NK_KILL_TRIGGER, "test-subj", "test-body");
         wait_for_count(&bs.events_received, 1);
 
-        check("event reaches backend after Send", bs.events_received == 1);
+        check("event reaches backend after Send", bs.events_received.load(std::memory_order_acquire) == 1);
         check("backend receives correct level + kind",
               bs.last_event.level == NOTIFY_ALERT &&
               bs.last_event.event_kind == NK_KILL_TRIGGER);
@@ -3238,7 +3246,8 @@ int main() {
     printf("\n--- Phase 8b: Cooldown gate ---\n");
     {
         NotifyState ns;
-        NotifyCountState bs = {0, {}};
+        NotifyCountState bs;
+        bs.events_received.store(0); memset(&bs.last_event, 0, sizeof(bs.last_event));
         // 100ms cooldown — same kind firing inside this window is dropped
         NotifyState_Init(&ns, NotifyBackend_Counting, &bs, /*cooldown_us=*/100000);
 
@@ -3247,21 +3256,21 @@ int main() {
         Notify_Send(&ns, NOTIFY_ALERT, NK_KILL_TRIGGER, "third", "");  // dropped
         wait_for_count(&bs.events_received, 1);
         check("same kind within cooldown: only 1 event reaches backend",
-              bs.events_received == 1);
+              bs.events_received.load(std::memory_order_acquire) == 1);
 
         // Different kinds fire independently within cooldown
         Notify_Send(&ns, NOTIFY_WARN, NK_DISCONNECT_TRADE, "a", "");
         Notify_Send(&ns, NOTIFY_INFO, NK_SESSION_START,    "b", "");
         wait_for_count(&bs.events_received, 3);
         check("different kinds fire independently inside cooldown window",
-              bs.events_received == 3);
+              bs.events_received.load(std::memory_order_acquire) == 3);
 
         // Wait past cooldown, fire same kind again — now allowed
         usleep(150000);
         Notify_Send(&ns, NOTIFY_ALERT, NK_KILL_TRIGGER, "fourth", "");
         wait_for_count(&bs.events_received, 4);
         check("same kind fires again past cooldown window",
-              bs.events_received == 4);
+              bs.events_received.load(std::memory_order_acquire) == 4);
 
         NotifyState_Shutdown(&ns);
     }
@@ -3275,7 +3284,8 @@ int main() {
     printf("\n--- Phase 8b: Queue full handling ---\n");
     {
         NotifyState ns;
-        NotifyCountState bs = {0, {}};
+        NotifyCountState bs;
+        bs.events_received.store(0); memset(&bs.last_event, 0, sizeof(bs.last_event));
         NotifyState_Init(&ns, NotifyBackend_Counting, &bs, /*cooldown_us=*/0);
 
         // Fire 100 events; queue cap is 64. Some may drop if worker is slow.
@@ -3288,7 +3298,8 @@ int main() {
         usleep(100000);
         // Bounded by 100, lower bound is the queue cap.
         check("queue full bounded — 0 ≤ received ≤ 100, no crash, no unbounded growth",
-              bs.events_received <= 100 && bs.events_received >= 1);
+              bs.events_received.load(std::memory_order_acquire) <= 100 &&
+              bs.events_received.load(std::memory_order_acquire) >= 1);
 
         NotifyState_Shutdown(&ns);
     }
@@ -3297,7 +3308,8 @@ int main() {
     printf("\n--- Phase 8b: Shutdown drains queue ---\n");
     {
         NotifyState ns;
-        NotifyCountState bs = {0, {}};
+        NotifyCountState bs;
+        bs.events_received.store(0); memset(&bs.last_event, 0, sizeof(bs.last_event));
         NotifyState_Init(&ns, NotifyBackend_Counting, &bs, /*cooldown_us=*/0);
 
         // Enqueue 5 different-kind events, immediately Shutdown.
@@ -3308,7 +3320,7 @@ int main() {
         NotifyState_Shutdown(&ns); // must drain before joining
 
         check("shutdown drains all 5 enqueued events before joining worker",
-              bs.events_received == 5);
+              bs.events_received.load(std::memory_order_acquire) == 5);
     }
 
     // ----- Group 6: Shell escape correctness (3 assertions) ----------------------------------------------
@@ -6785,6 +6797,260 @@ e3_skip_load:;
               !bad);
 
         delete r;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // v5.0.4 — parity regression tests (v5.1 polish item 2)
+    // OneCore identity, single-core update isolation, Reset Paper invariant,
+    // submit queue full, topology field stability.
+    // ─────────────────────────────────────────────────────────────────────
+    printf("\n--- v5.0.4 — OneCore wrapper identity (Phase B/F parity) ---\n");
+    {
+        // The wrappers are LITERALLY N OneCore calls. This test pins that
+        // invariant: future drift between wrapper and per-core call sites
+        // would silently break per_core_slow's parity. Compare specific
+        // per-core counters after both paths run on equivalent state.
+        struct R {
+            tt::OrderManagerState<64> oms;
+            tt::EventLoopState<64> state;
+            tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
+            tt::ExecutionCore<64> cores_ec[4];
+        };
+        R* r1 = new R();
+        R* r2 = new R();
+        for (R* rp : {r1, r2}) {
+            tt::EventLoopState_InitLegacy(&rp->state, &rp->oms,
+                FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            tt::SPSCRing_Init(&rp->tick_ring);
+            for (int c = 0; c < 4; ++c) {
+                tt::ExecutionCore_Init(&rp->cores_ec[c], (uint16_t)c, &rp->tick_ring);
+                tt::EventLoopState_RegisterCore(&rp->state, &rp->cores_ec[c],
+                    FPN_FromDouble<64>(60100.0), FPN_FromDouble<64>(59900.0),
+                    FPN_FromDouble<64>(0.01));
+            }
+        }
+
+        // Path A: wrapper — single call iterates all cores internally
+        tt::EventLoop_DrainPostFill(&r1->state, &r1->oms, 0);
+        // Path B: explicit per-core OneCore calls
+        for (int c = 0; c < 4; ++c) {
+            tt::EventLoop_DrainPostFillOneCore(&r2->state, &r2->oms, 0, c);
+        }
+
+        // Compare key per-core fields (CoreContext is non-copyable due to
+        // atomic members; field-by-field is the right comparison anyway —
+        // it's what users observe). Catches drift in either path.
+        bool counters_match = true;
+        bool notional_match = true;
+        bool dirty_match = true;
+        for (int c = 0; c < 4; ++c) {
+            const auto& a = r1->state.cores[c];
+            const auto& b = r2->state.cores[c];
+            if (a.entries_processed != b.entries_processed ||
+                a.exits_processed != b.exits_processed ||
+                a.core_wins != b.core_wins ||
+                a.core_losses != b.core_losses ||
+                a.sl_cooldown_remaining != b.sl_cooldown_remaining) {
+                counters_match = false;
+            }
+            if (FPN_ToDouble(a.core_open_notional) != FPN_ToDouble(b.core_open_notional) ||
+                FPN_ToDouble(a.core_realized) != FPN_ToDouble(b.core_realized) ||
+                FPN_ToDouble(a.core_fees) != FPN_ToDouble(b.core_fees)) {
+                notional_match = false;
+            }
+            if (a.dirty != b.dirty) {
+                dirty_match = false;
+            }
+        }
+        check("v5.0.4: DrainPostFill wrapper == OneCore-loop counters", counters_match);
+        check("v5.0.4: DrainPostFill wrapper == OneCore-loop notional/realized/fees", notional_match);
+        check("v5.0.4: DrainPostFill wrapper == OneCore-loop dirty flags", dirty_match);
+
+        // Mutate counters non-trivially and re-run; identity must hold
+        for (R* rp : {r1, r2}) {
+            for (int c = 0; c < 4; ++c) {
+                rp->state.cores[c].entries_processed = (uint32_t)(c + 5);
+                rp->state.cores[c].exits_processed = (uint32_t)(c + 2);
+            }
+        }
+        tt::EventLoop_DrainPostFill(&r1->state, &r1->oms, 0);
+        for (int c = 0; c < 4; ++c) {
+            tt::EventLoop_DrainPostFillOneCore(&r2->state, &r2->oms, 0, c);
+        }
+        bool counters_match2 = true;
+        for (int c = 0; c < 4; ++c) {
+            if (r1->state.cores[c].entries_processed !=
+                    r2->state.cores[c].entries_processed ||
+                r1->state.cores[c].exits_processed !=
+                    r2->state.cores[c].exits_processed) {
+                counters_match2 = false;
+            }
+        }
+        check("v5.0.4: identity holds with non-trivial pre-call counters",
+              counters_match2);
+
+        delete r1;
+        delete r2;
+    }
+
+    printf("\n--- v5.0.4 — Single-core update isolation ---\n");
+    {
+        // OneCore must touch ONLY state.cores[core_id] — never sibling cores.
+        // Catches the v4.7.38 latent bug class (TimeExit/TrailingSL writing
+        // to wrong core under partials). Without fills, DrainPostFillOneCore
+        // is a no-op so this is an "is the cores[] array stable?" test.
+        struct R {
+            tt::OrderManagerState<64> oms;
+            tt::EventLoopState<64> state;
+            tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
+            tt::ExecutionCore<64> cores_ec[4];
+        };
+        R* r = new R();
+        tt::EventLoopState_InitLegacy(&r->state, &r->oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+        tt::SPSCRing_Init(&r->tick_ring);
+        for (int c = 0; c < 4; ++c) {
+            tt::ExecutionCore_Init(&r->cores_ec[c], (uint16_t)c, &r->tick_ring);
+            tt::EventLoopState_RegisterCore(&r->state, &r->cores_ec[c],
+                FPN_FromDouble<64>(60100.0), FPN_FromDouble<64>(59900.0),
+                FPN_FromDouble<64>(0.01));
+            // Mark each core with a distinct sentinel
+            r->state.cores[c].entries_processed = (uint32_t)(100 + c);
+            r->state.cores[c].exits_processed   = (uint32_t)(200 + c);
+        }
+
+        // Snapshot SIBLING fields BEFORE call (skip atomics — they're untouched)
+        uint32_t pre_entries[4], pre_exits[4];
+        double pre_notional[4], pre_realized[4];
+        for (int c = 0; c < 4; ++c) {
+            pre_entries[c] = r->state.cores[c].entries_processed;
+            pre_exits[c]   = r->state.cores[c].exits_processed;
+            pre_notional[c] = FPN_ToDouble(r->state.cores[c].core_open_notional);
+            pre_realized[c] = FPN_ToDouble(r->state.cores[c].core_realized);
+        }
+
+        // Call OneCore for c=2 ONLY
+        tt::EventLoop_DrainPostFillOneCore(&r->state, &r->oms, 0, 2);
+
+        // Sibling cores must be untouched
+        for (int sibling : {0, 1, 3}) {
+            char nm[80];
+            snprintf(nm, sizeof(nm),
+                "v5.0.4: OneCore(c=2) leaves c=%d entries unchanged", sibling);
+            check(nm, r->state.cores[sibling].entries_processed == pre_entries[sibling]);
+            snprintf(nm, sizeof(nm),
+                "v5.0.4: OneCore(c=2) leaves c=%d exits unchanged", sibling);
+            check(nm, r->state.cores[sibling].exits_processed == pre_exits[sibling]);
+            snprintf(nm, sizeof(nm),
+                "v5.0.4: OneCore(c=2) leaves c=%d notional unchanged", sibling);
+            check(nm, FPN_ToDouble(r->state.cores[sibling].core_open_notional) ==
+                  pre_notional[sibling]);
+            snprintf(nm, sizeof(nm),
+                "v5.0.4: OneCore(c=2) leaves c=%d realized unchanged", sibling);
+            check(nm, FPN_ToDouble(r->state.cores[sibling].core_realized) ==
+                  pre_realized[sibling]);
+        }
+        delete r;
+    }
+
+    printf("\n--- v5.0.4 — Submit queue full handling ---\n");
+    {
+        // Queue capacity is 32 (OMS_SUBMIT_QUEUE_SIZE). Push 32 + reject 33rd.
+        struct R { tt::OrderManagerState<64> oms; };
+        R* r = new R();
+        tt::ExchangeAdapter<64> empty{};
+        tt::OrderManager_Init(&r->oms, empty, 0,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+
+        int pushed_ok = 0;
+        for (int i = 0; i < 33; ++i) {
+            bool ok = tt::OMS_PushSubmit(&r->oms, 0, tt::ORDER_MARKET_BUY,
+                FPN_FromDouble<64>(0.01),
+                FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+                STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+            if (ok) pushed_ok++;
+        }
+        // Capacity reached at SOME point; we accept either 31 or 32 depending
+        // on SPSCRing semantics (head-tail with 1-slot reserve). The 33rd
+        // must always fail.
+        check("v5.0.4: queue full eventually rejects pushes",
+              pushed_ok < 33);
+        check("v5.0.4: at-capacity push count between 30 and 32 inclusive",
+              pushed_ok >= 30 && pushed_ok <= 32);
+
+        // Drain, verify exact count
+        int drained = tt::OMS_DrainSubmit(&r->oms, 1);
+        check("v5.0.4: drain count equals push count",
+              drained == pushed_ok);
+        // Empty drain returns 0
+        int drained2 = tt::OMS_DrainSubmit(&r->oms, 1);
+        check("v5.0.4: drain empty queue returns 0", drained2 == 0);
+
+        // Push another after drain — must succeed (queue empty)
+        bool ok = tt::OMS_PushSubmit(&r->oms, 0, tt::ORDER_MARKET_BUY,
+            FPN_FromDouble<64>(0.01),
+            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+        check("v5.0.4: push after full drain succeeds", ok);
+        delete r;
+    }
+
+    printf("\n--- v5.0.4 — Topology field stability ---\n");
+    {
+        // TUISnapshot::engine_arch / nproc / pin_offset / per-core hot/slow CPU
+        // round-trip via TUI_PopulateTopology.
+        TUISnapshot snap;
+        memset(&snap, 0, sizeof(snap));
+        snap.per_core_count = 4;
+
+        int hot_cpu[16] = {1, 2, 3, 4, 0,0,0,0, 0,0,0,0, 0,0,0,0};
+        int slow_cpu[16] = {6, 7, 8, 9, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1};
+        uint32_t poll[16] = {100, 50, 200, 100, 0,0,0,0, 0,0,0,0, 0,0,0,0};
+
+        TUI_PopulateTopology(&snap,
+            /*engine_arch*/ 1,           // PER_CORE_SLOW
+            /*producer_cpu*/ 0,
+            /*drainer_cpu*/ 5,
+            /*nproc*/ 16,
+            /*slow_path_pin_off*/ 0,
+            hot_cpu, slow_cpu, poll);
+
+        check("v5.0.4: topology engine_arch round-trips",
+              snap.engine_arch == 1);
+        check("v5.0.4: topology producer_cpu round-trips",
+              snap.producer_cpu == 0);
+        check("v5.0.4: topology drainer_cpu round-trips",
+              snap.drainer_cpu == 5);
+        check("v5.0.4: topology nproc round-trips",
+              snap.nproc == 16);
+        check("v5.0.4: topology pin_offset round-trips",
+              snap.slow_path_pin_offset == 0);
+        check("v5.0.4: per-core hot CPU round-trips for engine 0",
+              snap.per_core[0].hot_path_cpu == 1);
+        check("v5.0.4: per-core hot CPU round-trips for engine 3",
+              snap.per_core[3].hot_path_cpu == 4);
+        check("v5.0.4: per-core slow CPU round-trips for engine 0",
+              snap.per_core[0].slow_path_cpu == 6);
+        check("v5.0.4: per-core slow CPU round-trips for engine 3",
+              snap.per_core[3].slow_path_cpu == 9);
+        check("v5.0.4: per-core poll round-trips for engine 1",
+              snap.per_core[1].poll_interval_ticks == 50);
+
+        // Re-populate with different values — old values must be overwritten
+        for (int i = 0; i < 4; ++i) {
+            hot_cpu[i] = 10 + i;
+            slow_cpu[i] = -1;  // disable
+            poll[i] = 999;
+        }
+        TUI_PopulateTopology(&snap, 0, 1, 2, 8, -1, hot_cpu, slow_cpu, poll);
+        check("v5.0.4: topology re-populate updates engine_arch (1→0)",
+              snap.engine_arch == 0);
+        check("v5.0.4: topology re-populate updates pin_offset (0→-1)",
+              snap.slow_path_pin_offset == -1);
+        check("v5.0.4: topology re-populate updates per-core slow CPU",
+              snap.per_core[0].slow_path_cpu == -1);
+        check("v5.0.4: topology re-populate updates per-core poll",
+              snap.per_core[2].poll_interval_ticks == 999);
     }
 
     printf("\n======================================\n");

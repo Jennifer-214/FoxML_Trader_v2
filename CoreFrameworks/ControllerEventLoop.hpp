@@ -47,6 +47,8 @@
 #include "../ML_Headers/ConfidenceScore.hpp"
 #include "../ML_Headers/LinearRegression3X.hpp"  // v4.0.3 D10 RegressionFeederX
 #include "../ML_Headers/RollingStats.hpp"
+#include "../ML_Headers/ROR_regressor.hpp"        // v5.1.0 — RORRegressor on CoreContext::slow_state
+#include "../ML_Headers/FlowFeatures.hpp"         // v5.1.0 — FlowState etc on CoreContext::slow_state
 #include "../Strategies/StrategyParameters.hpp"
 #include "CoreLatencyStats.hpp"  // v4.7.42 — slow_path_latency on CoreContext
 #include "ExecutionCore.hpp"
@@ -60,6 +62,72 @@
 #include <ctime>
 
 namespace tt {
+
+//======================================================================================================
+// [CORE SLOW STATE — v5.1.0 per-core data plane]
+//======================================================================================================
+// Each engine owns its rolling/regime/flow state instead of reading
+// producer-owned shared state. See plans/2026-04-28-v5.1-data-plane-
+// decouple.md for the full design.
+//
+// SINGLE-WRITER RULE per engine:
+//   - centralized arch:    Producer thread writes ALL N cores at fan_out
+//                          + slow-path body, looping c=0..N
+//   - per_core_slow arch:  Producer writes per-tick (ema_price) to all N
+//                          cores in fan_out; per-cadence updates done by
+//                          per-core slow-path c on its OWN slow_state
+//   - backtest:            Single thread; loops c=0..N like centralized
+//
+// READ PATTERN: per-core slow-path body (centralized: producer; per_core_
+// slow: per-core thread) reads state.cores[c].slow_state. In per_core_
+// slow, ema_price is producer-written; per-cadence fields are written by
+// the per-core thread itself (no cross-thread for those). ema_price has
+// eventual-consistency cross-thread reads (relaxed loads — same as
+// pre-v5.1.0 shared design but now per-core targets).
+//
+// Window sizes are template-fixed (RollingStats<F, 128> etc.). Per-core
+// override of window size is a future enhancement requiring runtime-
+// sized buffers — currently every engine uses identical windows.
+//======================================================================================================
+template <unsigned F>
+struct CoreSlowState {
+    // Per-cadence rolling stats (RegimeDetector inputs).
+    RollingStats<F, 128>    rolling_short;
+    RollingStats<F, 512>    rolling_long;
+    RollingStats<F, 256>    rolling_medium;
+    RollingStats<F, 1024>   rolling_baseline;
+
+    // Per-cadence regime / flow state.
+    RORRegressor<F>         regime_ror;
+    CumDeltaState<F>        cumdelta_state;
+    TickRateState           tick_rate_state;
+    BookImbalanceHistory<F, 1024> book_imb_history;
+    FlowState               flow_state;
+    LargeTradeState<F, 1024> large_trade_state;
+    SpreadState<F, 1024>    spread_state;
+
+    // Per-tick: EMA price. Updated EVERY tick in producer's fan_out;
+    // hot-tail consumers (Regime_ComputeSignals) read at slow-path
+    // cadence. In per_core_slow this is a producer→slow-path cross-
+    // thread read (eventual consistency, x86-acceptable on aligned word).
+    FPN<F>                  ema_price;
+};
+
+template <unsigned F>
+inline void CoreSlowState_Init(CoreSlowState<F>* s) {
+    s->rolling_short    = RollingStats_Init<F, 128>();
+    s->rolling_long     = RollingStats_Init<F, 512>();
+    s->rolling_medium   = RollingStats_Init<F, 256>();
+    s->rolling_baseline = RollingStats_Init<F, 1024>();
+    s->regime_ror       = RORRegressor_Init<F>();
+    CumDelta_Init(&s->cumdelta_state);
+    TickRate_Init(&s->tick_rate_state);
+    BookImbHistory_Init(&s->book_imb_history);
+    FlowState_Init(&s->flow_state);
+    LargeTradeState_Init(&s->large_trade_state);
+    SpreadState_Init(&s->spread_state);
+    s->ema_price = FPN_Zero<F>();
+}
 
 //======================================================================================================
 // [CORE CONTEXT]
@@ -225,6 +293,51 @@ struct CoreContext {
     // In centralized mode, total_count stays 0 (no samples collected —
     // single producer slow-path doesn't break per-core, by design).
     CoreLatencyStats slow_path_latency;
+    // v5.1.1 (slow-path work breakdown): per-section profiling. Same
+    // single-writer rule as slow_path_latency (the slow-path thread that
+    // owns this core in per_core_slow; producer in centralized).
+    // Sections: 0=rebuild (RebuildOneCore + per-cadence pushes),
+    //           1=push_params (seqlock to ExecutionCore),
+    //           2=time_exit (TimeExitOneCore),
+    //           3=trail_sl  (TrailingSLRatchetOneCore),
+    //           4=other     (warmup permission, swap pickup, depth read).
+    // Each ~5-10ns _Sample overhead × 5 = ~50ns/cycle. Slow-path is
+    // microsecond-scale so < 1% impact.
+    static constexpr int SP_SECTION_REBUILD     = 0;
+    static constexpr int SP_SECTION_PUSH_PARAMS = 1;
+    static constexpr int SP_SECTION_TIME_EXIT   = 2;
+    static constexpr int SP_SECTION_TRAIL_SL    = 3;
+    static constexpr int SP_SECTION_OTHER       = 4;
+    static constexpr int SP_SECTION_COUNT       = 5;
+    CoreLatencyStats slow_path_breakdown[SP_SECTION_COUNT];
+    // v5.0.3 (Engine Topology advanced): live thread observability fields.
+    // Single-writer is the slow-path thread that owns this core (or the
+    // producer in centralized mode for cores it iterates). GUI publish
+    // reads relaxed and copies into TUISnapshot::PerCoreSnap.
+    //   sp_last_tick_us: wall-clock us at end of last cycle. Compare to
+    //                    "now" for cadence-drift display in topology panel.
+    //   sp_cycles_total: monotonic count of completed slow-path cycles.
+    //   sp_yield_count:  monotonic count of cadence yields + parks.
+    //   sp_state:        coarse thread state — 0=running, 1=parked
+    //                    (reset_in_progress), 2=cadence-yield, 3=paused
+    //                    (user via paused_engines_mask). Updated at the
+    //                    transition points; readers see eventual values.
+    std::atomic<uint64_t> sp_last_tick_us;
+    std::atomic<uint64_t> sp_cycles_total;
+    std::atomic<uint64_t> sp_yield_count;
+    std::atomic<uint8_t>  sp_state;
+    // v5.1.0 (per-core data-plane decoupling): each engine OWNS its
+    // rolling/regime/flow state. Centralized: producer writes all N.
+    // per_core_slow: per-core slow-path c writes its own (per-cadence
+    // fields) + producer writes ema_price to all N (per-tick). See
+    // CoreSlowState<F> doc above.
+    //
+    // POINTER (not inline) because CoreSlowState is ~3MB per engine and
+    // 16 inline copies would overflow the 8MB default stack on tests
+    // that put EventLoopState on the stack. Heap-allocated in
+    // EventLoopState_Init; freed in EventLoopState_Free. Slow-path-only
+    // access — the indirection cost is negligible at slow-path cadence.
+    CoreSlowState<F>* slow_state;
 };
 
 //======================================================================================================
@@ -321,6 +434,21 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         // ExecutionCore::latency_stats. Init zeros + disabled until engine
         // explicitly enables (CoreLatencyStats_Enable).
         CoreLatencyStats_Init(&state->cores[i].slow_path_latency);
+        // v5.1.1: per-section breakdown stats.
+        for (int s = 0; s < CoreContext<F>::SP_SECTION_COUNT; ++s) {
+            CoreLatencyStats_Init(&state->cores[i].slow_path_breakdown[s]);
+        }
+        // v5.0.3 (Engine Topology advanced): observability fields.
+        state->cores[i].sp_last_tick_us.store(0, std::memory_order_relaxed);
+        state->cores[i].sp_cycles_total.store(0, std::memory_order_relaxed);
+        state->cores[i].sp_yield_count.store(0, std::memory_order_relaxed);
+        state->cores[i].sp_state.store(0, std::memory_order_relaxed);
+        // v5.1.0 (per-core data plane): heap-allocate each engine's
+        // slow_state. ~3MB per engine × 16 cores would overflow default
+        // stack if inline. Freed in EventLoopState_Free. Caller MUST
+        // call _Free before re-_Init (otherwise leaks).
+        state->cores[i].slow_state = new CoreSlowState<F>();
+        CoreSlowState_Init(state->cores[i].slow_state);
         // Phase 2.1: per-core open notional (sum of entry_price × qty)
         state->cores[i].core_open_notional = FPN_Zero<F>();
         // Phase 3: per-core kill switch state. peak starts at zero; the
@@ -350,6 +478,24 @@ inline void EventLoopState_InitLegacy(EventLoopState<F>* state,
     ExchangeAdapter<F> empty{};
     OrderManager_Init(oms, empty, 0, starting_balance, fee_rate);
     EventLoopState_Init(state, oms);
+}
+
+//======================================================================================================
+// [FREE — v5.1.0]
+//======================================================================================================
+// Free heap-allocated CoreSlowState pointers. Idempotent: safe to call
+// twice (NULLs the pointer). Tests + engine that init via
+// EventLoopState_Init / EventLoopState_InitLegacy must call this on
+// teardown to avoid LeakSanitizer noise.
+//======================================================================================================
+template <unsigned F>
+inline void EventLoopState_Free(EventLoopState<F>* state) {
+    for (int i = 0; i < MAX_EXECUTION_CORES; ++i) {
+        if (state->cores[i].slow_state) {
+            delete state->cores[i].slow_state;
+            state->cores[i].slow_state = nullptr;
+        }
+    }
 }
 
 //======================================================================================================
@@ -1095,6 +1241,137 @@ inline int EventLoop_RebuildAllParameters(
             tick_rate_state, timestamp_us, book_imbalance, book_imb_history,
             flow_state, large_trade_state, spread_state, current_spread,
             current_mid_price, book_imbalance_blocked);
+        ++rebuilt;
+    }
+    return rebuilt;
+}
+
+//======================================================================================================
+// [PER-CORE ROLLING STATE UPDATE — v5.1.2]
+//======================================================================================================
+// Pushes (price, volume, timestamp, depth) into ONE engine's slow_state.
+// Single-writer rule: caller must be the sole writer of state.cores[c].slow_state
+// for the duration of this call:
+//   - centralized: producer iterates c=0..N
+//   - per_core_slow: per-core slow-path c writes own only
+//   - backtest: linear iteration, single-thread
+//
+// Mirrors the cadence-update logic that v5.0.x had in producer's fan_out
+// (lines ~881-915 of EngineSharded.hpp pre-v5.1.2). Centralized in this
+// helper so all 3 callers do exactly the same work — train-serve parity
+// is structural.
+//
+// Inputs:
+//   price, volume          — current tick (slow-path-cadence sample)
+//   timestamp_us           — wall-clock us of this update
+//   is_buyer_maker         — Binance flag (1 = aggressive sell, 0 = aggressive buy)
+//   depth_imbalance        — book imbalance from depth WS / replay (FPN_Zero if depth disabled)
+//   depth_spread           — spread (FPN_Zero if depth disabled)
+//   depth_enabled          — gate the depth-history pushes
+//======================================================================================================
+template <unsigned F>
+inline void EventLoop_UpdateRollingStateOneCore(
+    EventLoopState<F>* state, int slot,
+    FPN<F> price, FPN<F> volume, uint64_t timestamp_us,
+    int is_buyer_maker,
+    FPN<F> depth_imbalance, FPN<F> depth_spread,
+    int depth_enabled) {
+    if (slot < 0 || slot >= MAX_EXECUTION_CORES) return;
+    auto* sst = state->cores[slot].slow_state;
+    if (!sst) return;
+    if (FPN_IsZero(price)) return;  // pre-warmup tick — skip pushes
+
+    RollingStats_Push(&sst->rolling_short,    price, volume);
+    RollingStats_Push(&sst->rolling_long,     price, volume);
+    RollingStats_Push(&sst->rolling_medium,   price, volume);
+    RollingStats_Push(&sst->rolling_baseline, price, volume);
+    CumDelta_Push(&sst->cumdelta_state, volume, is_buyer_maker);
+    TickRate_Push(&sst->tick_rate_state, timestamp_us);
+
+    LinearRegression3XResult<F> slope_sample;
+    slope_sample.model.slope     = sst->rolling_short.price_slope;
+    slope_sample.model.intercept = FPN_Zero<F>();
+    slope_sample.r_squared       = sst->rolling_short.price_r_squared;
+    RORRegressor_Push(&sst->regime_ror, slope_sample);
+
+    double signed_vol = FPN_ToDouble(volume);
+    if (is_buyer_maker) signed_vol = -signed_vol;
+    FlowState_Push(&sst->flow_state, timestamp_us, signed_vol);
+    LargeTradeState_Push(&sst->large_trade_state, volume);
+
+    if (depth_enabled) {
+        BookImbHistory_Push(&sst->book_imb_history, depth_imbalance);
+        SpreadState_Push(&sst->spread_state, depth_spread);
+    }
+}
+
+// Multi-core variant. Loops c=0..N calling OneCore. Used by centralized
+// arch and backtest. per_core_slow lambdas call OneCore directly.
+template <unsigned F>
+inline void EventLoop_UpdateRollingStateAllCores(
+    EventLoopState<F>* state,
+    FPN<F> price, FPN<F> volume, uint64_t timestamp_us,
+    int is_buyer_maker,
+    FPN<F> depth_imbalance, FPN<F> depth_spread,
+    int depth_enabled) {
+    for (int c = 0; c < state->registered_count; ++c) {
+        EventLoop_UpdateRollingStateOneCore(state, c,
+            price, volume, timestamp_us, is_buyer_maker,
+            depth_imbalance, depth_spread, depth_enabled);
+    }
+}
+
+// Per-tick replication of ema_price across all engines' slow_state.
+// Producer thread is sole writer; loops cheaply (one FPN copy per engine).
+template <unsigned F>
+inline void EventLoop_UpdateEmaPriceAllCores(
+    EventLoopState<F>* state, FPN<F> ema_price) {
+    for (int c = 0; c < state->registered_count; ++c) {
+        if (state->cores[c].slow_state) {
+            state->cores[c].slow_state->ema_price = ema_price;
+        }
+    }
+}
+
+//======================================================================================================
+// [PER-CORE REBUILD WRAPPER — v5.1.2]
+//======================================================================================================
+// Iterates RebuildOneCore for each c using THAT engine's slow_state as
+// the read source. Replaces RebuildAllParameters in centralized arch +
+// backtest. per_core_slow's lambda already calls OneCore directly with
+// per-core pointers.
+//======================================================================================================
+template <unsigned F>
+inline int EventLoop_RebuildAllParameters_PerCore(
+    EventLoopState<F>* state,
+    const ControllerConfig<F>* config,
+    const FPN<F>* current_price,    // const FPN<F>* — Phase 3 MTM (nullptr if disabled)
+    uint64_t timestamp_us,
+    const FPN<F>* book_imbalance,   // nullptr if depth disabled
+    double current_spread,
+    double current_mid_price) {
+    int rebuilt = 0;
+    int book_imbalance_blocked = 0;
+    if (book_imbalance && !FPN_IsZero(config->min_book_imbalance)) {
+        book_imbalance_blocked = FPN_LessThan(*book_imbalance,
+            config->min_book_imbalance) ? 1 : 0;
+    }
+    for (int slot = 0; slot < state->registered_count; ++slot) {
+        if (state->cores[slot].strategy_id == STRATEGY_NONE) continue;
+        const auto* sst = state->cores[slot].slow_state;
+        if (!sst) continue;  // defensive (shouldn't happen post-Init)
+        EventLoop_RebuildOneCore(
+            state, slot,
+            &sst->rolling_short, config, &sst->rolling_long,
+            &sst->regime_ror, &sst->ema_price,
+            current_price,
+            &sst->rolling_medium, &sst->rolling_baseline,
+            &sst->cumdelta_state, &sst->tick_rate_state,
+            timestamp_us,
+            book_imbalance,
+            &sst->book_imb_history, &sst->flow_state,
+            &sst->large_trade_state, &sst->spread_state,
+            current_spread, current_mid_price, book_imbalance_blocked);
         ++rebuilt;
     }
     return rebuilt;

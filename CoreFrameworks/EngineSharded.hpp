@@ -81,6 +81,7 @@
 #include <pthread.h>
 #include <sched.h>
 #endif
+#include <unistd.h>  // sysconf(_SC_NPROCESSORS_ONLN) — POSIX, also available on macOS
 
 namespace tt {
 
@@ -532,57 +533,24 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // ExecutionCore is ~66KB and num_cores * size could blow the stack.
     static SPSCRing<Tick<F>, EXECUTION_CORE_TICK_RING_SIZE> tick_rings[MAX_EXECUTION_CORES];
     static ExecutionCore<F> cores[MAX_EXECUTION_CORES];
-    // Rolling stats for the slow-path strategy rebuild. Producer thread
-    // pushes ticks into these on cadence and rebuilds gate params from them.
-    static RollingStats<F, 128> rolling_short = RollingStats_Init<F, 128>();
-    static RollingStats<F, 512> rolling_long  = RollingStats_Init<F, 512>();
-    // v4.0 train-serve parity: RORRegressor + EMA price track the same state
-    // legacy PortfolioController maintains, so ML_BuildParameters can call
-    // Regime_ComputeSignals and produce ALL the features ModelFeatures_Pack
-    // reads — not just a subset. Without these, sig->ror_slope,
-    // sig->ema_sma_spread, sig->ema_above_sma stayed at zero in sharded
-    // while backtest produced them non-zero, causing model train/serve drift.
-    static RORRegressor<F> regime_ror = RORRegressor_Init<F>();
-    static FPN<F> ema_price = FPN_Zero<F>();
-    // v4.3 — feature-pack expansion. Shared per-engine (not per-core) since
-    // these describe market state, not core state. Same population cadence
-    // as legacy PortfolioController so train-serve parity is preserved.
-    static RollingStats<F, 256>  rolling_medium   = RollingStats_Init<F, 256>();
-    static RollingStats<F, 1024> rolling_baseline = RollingStats_Init<F, 1024>();
-    static CumDeltaState<F>      cumdelta_state;
-    static TickRateState         tick_rate_state;
-    static int                   v43_state_initialized = 0;
-    if (!v43_state_initialized) {
-        CumDelta_Init(&cumdelta_state);
-        TickRate_Init(&tick_rate_state);
-        v43_state_initialized = 1;
-    }
+    // v5.1.2 — full per-core data plane. All rolling stats, regime, flow,
+    // depth-history state lives in EACH engine's `state.cores[c].slow_state`
+    // (heap-allocated by EventLoopState_Init). Three callers update them:
+    //   - centralized:    producer's fan_out + slow-path body via
+    //                     EventLoop_UpdateRollingStateAllCores helper
+    //   - per_core_slow:  per-core slow-path lambda updates own slow_state
+    //   - backtest:       same helper, single-thread, linear iteration
+    //
+    // Pre-v5.1.2 the producer maintained ONE shared copy at function scope.
+    // Removed in v5.1.2; readers now use state.cores[c].slow_state pointers.
+    // ema_price stays at producer scope since it's per-tick (replicated to
+    // all N engines via EventLoop_UpdateEmaPriceAllCores in fan_out).
+    FPN<F> ema_price = FPN_Zero<F>();
     // EMA alpha matches PortfolioController_Init's default (gate_ema_alpha
     // is the cfg key). Computed at boot from cfg; updated each tick.
     FPN<F> ema_alpha = !FPN_IsZero(cfg.gate_ema_alpha)
                        ? cfg.gate_ema_alpha
                        : FPN_FromDouble<F>(0.1);
-    rolling_short = RollingStats_Init<F, 128>();
-    rolling_long  = RollingStats_Init<F, 512>();
-    rolling_medium = RollingStats_Init<F, 256>();
-    rolling_baseline = RollingStats_Init<F, 1024>();
-    CumDelta_Init(&cumdelta_state);
-    TickRate_Init(&tick_rate_state);
-
-    // v4.5 Wave 1 — D.1/D.2/D.4 state. Same lifetime + reset shape as the
-    // v4.3 state above. BookImbalanceHistory pushes from the slow-path
-    // book_imbalance read; FlowState + LargeTradeState push from per-tick
-    // flow + size in fan_out.
-    static BookImbalanceHistory<F, 1024> book_imb_history;
-    static FlowState                     flow_state;
-    static LargeTradeState<F, 1024>      large_trade_state;
-    BookImbHistory_Init(&book_imb_history);
-    FlowState_Init(&flow_state);
-    LargeTradeState_Init(&large_trade_state);
-    // v4.6 Wave 2 — D.3 spread state. Pushed at slow-path with current
-    // spread from g_depth_shared.snapshots[active].spread.
-    static SpreadState<F, 1024> spread_state;
-    SpreadState_Init(&spread_state);
 
     // Per-core risk allocation: split the configured starting balance across
     // cores. Each core gets its own mini-portfolio that's risk_pct of the
@@ -767,12 +735,36 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     std::atomic<bool> paper_reset_in_progress{false};
 
     //----------------------------------------------------------------------
+    // v5.0.2 (Engine Topology): function-scope arrays so the GUI publish
+    // block (inside the producer thread lambda) can hand them to
+    // TUI_PopulateTopology each tick. Hot-path CPUs are derived from the
+    // pin convention (CPU i+1 for hot-path i); slow-path CPUs are filled
+    // during the slow-path spawn loop further below; -1 = unpinned.
+    //----------------------------------------------------------------------
+    int  topo_hot_cpu[16];
+    int  topo_slow_cpu[16];
+    uint32_t topo_poll_interval[16];
+    for (int i = 0; i < 16; ++i) {
+        topo_hot_cpu[i]  = (i < num_cores) ? (i + 1) : -1;
+        topo_slow_cpu[i] = -1;
+        topo_poll_interval[i] = (i < num_cores)
+            ? ControllerConfig_ResolveForCore(cfg, i).poll_interval
+            : 0u;
+    }
+    int  topo_producer_cpu = 0;
+    int  topo_drainer_cpu  = num_cores + 1;
+    long topo_nproc        = sysconf(_SC_NPROCESSORS_ONLN);
+    if (topo_nproc < 1) topo_nproc = 1;
+
+    //----------------------------------------------------------------------
     // Producer thread — generates synthetic ticks and fans out to all cores
     //----------------------------------------------------------------------
     std::thread producer([&producer_done, &ticks_produced, &bcfg, &last_price, &last_volume,
-                          &cfg, &state, num_cores, use_synthetic, tsc_ghz,
-                          &ema_price, &ema_alpha, &regime_ror, live_trading,
-                          &paper_reset_in_progress] {
+                          &cfg, &state, &oms, num_cores, use_synthetic, tsc_ghz,
+                          &ema_price, &ema_alpha, live_trading,
+                          &paper_reset_in_progress,
+                          &topo_hot_cpu, &topo_slow_cpu, &topo_poll_interval,
+                          topo_producer_cpu, topo_drainer_cpu, topo_nproc] {
         EngineSharded_PinThread(0);  // best-effort pin to CPU 0
         uint64_t seq = 0;
         // v4.3.1 — slow_path_interval now reads cfg.poll_interval to match
@@ -796,11 +788,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // Helper that fans a single tick out to every core's tick ring,
         // updates rolling stats, and runs the slow-path rebuild on cadence.
         auto fan_out = [num_cores, &seq, &ticks_produced, &last_price, &last_volume,
-                        &cfg, &state, &slow_path_counter, slow_path_interval, tsc_ghz,
-                        &ema_price, ema_alpha, &regime_ror, live_trading,
-                        &rolling_medium, &rolling_baseline, &cumdelta_state, &tick_rate_state,
-                        &book_imb_history, &flow_state, &large_trade_state,
-                        &spread_state, &paper_reset_in_progress]
+                        &cfg, &state, &oms, &slow_path_counter, slow_path_interval, tsc_ghz,
+                        &ema_price, ema_alpha, live_trading,
+                        &paper_reset_in_progress,
+                        &topo_hot_cpu, &topo_slow_cpu, &topo_poll_interval,
+                        topo_producer_cpu, topo_drainer_cpu, topo_nproc]
                        (double price_d, double volume_d, uint64_t ts_us,
                         int is_buyer_maker = 0) {  // v4.3 — defaulted for synthetic paths
             Tick<F> t;
@@ -832,6 +824,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 FPN_Mul(t.price, one_minus_alpha));
             if (FPN_IsZero(ema_price)) ema_price = t.price;
             else                       ema_price = ema_new;
+            // v5.1.2 (full symmetric decoupling): replicate ema_price to
+            // ALL engines' slow_state in BOTH arches. Single-writer is
+            // the producer thread. Cost: N FPN copies per tick — trivial.
+            EventLoop_UpdateEmaPriceAllCores(&state, ema_price);
 
             // Phase 8a (post-coding c7) — record raw tick to CSV when enabled.
             // No-op when record_ticks=0 (the gate is inside TickRecorder_Push).
@@ -851,40 +847,19 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             slow_path_counter++;
             if (slow_path_counter >= slow_path_interval) {
                 slow_path_counter = 0;
-                RollingStats_Push(&rolling_short, t.price, t.volume);
-                RollingStats_Push(&rolling_long,  t.price, t.volume);
-                // v4.3 — feed expanded feature-pack state. is_buyer_maker not
-                // available from sharded fan_out yet (TODO: thread it from
-                // BinanceStream). For now, default to 0 = treat all volume as
-                // taker-buy aggression. This matches train-serve parity for
-                // the backtest's CSV-aware path only when we plumb is_buyer_maker
-                // through both. Until that plumbing lands in v4.3.1, cumdelta
-                // skews high-aggression-positive in live; backtest still gets
-                // the real signed delta from CSV.
-                RollingStats_Push(&rolling_medium, t.price, t.volume);
-                RollingStats_Push(&rolling_baseline, t.price, t.volume);
-                CumDelta_Push(&cumdelta_state, t.volume, is_buyer_maker);
-                TickRate_Push(&tick_rate_state, ts_us);
-                // v4.0 train-serve parity: feed rolling slope to RORRegressor
-                // (slope of slopes = trend acceleration). Matches legacy at
-                // PortfolioController.hpp:1552. Without this, sig->ror_slope
-                // is zero in sharded while backtest produces it non-zero.
-                {
-                    LinearRegression3XResult<F> slope_sample;
-                    slope_sample.model.slope     = rolling_short.price_slope;
-                    slope_sample.model.intercept = FPN_Zero<F>();
-                    slope_sample.r_squared       = rolling_short.price_r_squared;
-                    RORRegressor_Push(&regime_ror, slope_sample);
-                }
-                // v4.5 Wave 1 — push flow + large-trade state at slow-path
-                // cadence (mirror of ShardedBacktestDriver). BookImbalance-
-                // History pushed below after we read the active depth
-                // snapshot. signed_vol mirrors CumDelta sign convention.
-                {
-                    double signed_vol = volume_d;
-                    if (is_buyer_maker) signed_vol = -signed_vol;
-                    FlowState_Push(&flow_state, ts_us, signed_vol);
-                    LargeTradeState_Push(&large_trade_state, t.volume);
+                // v5.1.2 (full symmetric decoupling): centralized arch
+                // pushes per-cadence state into ALL N engines' slow_state
+                // via the shared helper. per_core_slow lambdas do their
+                // own pushes — skip here. Helper handles depth-history
+                // pushes via depth_enabled flag (we pass FPN_Zero placeholders
+                // for depth state when depth_enabled=0; the producer's main
+                // slow-path body below handles depth-history symmetrically).
+                if (cfg.engine_arch != ENGINE_ARCH_PER_CORE_SLOW) {
+                    EventLoop_UpdateRollingStateAllCores(
+                        &state, t.price, t.volume, ts_us,
+                        is_buyer_maker,
+                        FPN_Zero<F>(), FPN_Zero<F>(),
+                        /*depth_enabled=*/0);  // depth-history pushed in slow-path body
                 }
 #ifdef USE_IMGUI_GUI
                 // v4.0 hot-swap strategy: GUI requests are picked up here.
@@ -1074,29 +1049,31 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // cadence. Mirror in BacktestSharded driver. Push happens
                 // BEFORE RebuildAllParameters so Regime_ComputeSignals reads
                 // the freshly-updated history.
-                if (cfg.depth_enabled) {
-                    BookImbHistory_Push(&book_imb_history, book_imb);
-                    // v4.6 Wave 2 — push spread into z-score ring
-                    SpreadState_Push(&spread_state, book_spread);
+                // v5.1.2: centralized arch pushes depth-history into ALL
+                // N engines' slow_state. per_core_slow lambdas do their
+                // own pushes. The "rolling" inputs are nullptr here —
+                // we're only pushing depth fields; the helper short-
+                // circuits if `price` is zero, so pass current price.
+                if (cfg.depth_enabled &&
+                    cfg.engine_arch != ENGINE_ARCH_PER_CORE_SLOW) {
+                    for (int c = 0; c < state.registered_count; ++c) {
+                        auto* sst = state.cores[c].slow_state;
+                        if (!sst) continue;
+                        BookImbHistory_Push(&sst->book_imb_history, book_imb);
+                        SpreadState_Push(&sst->spread_state, book_spread);
+                    }
                 }
-                // v4.7.39 (Phase C.2): in per_core_slow mode, each slow-path
-                // thread calls EventLoop_RebuildOneCore for its own core.
-                // Producer skips the centralized iteration to avoid double-
-                // writes to state.cores[c].pending_params.
+                // v5.1.2 (full symmetric decoupling): centralized arch
+                // calls per-core RebuildAllParameters which reads each
+                // engine's OWN slow_state. per_core_slow lambdas skip
+                // (they call OneCore directly with their own pointers).
                 if (cfg.engine_arch != ENGINE_ARCH_PER_CORE_SLOW)
-                EventLoop_RebuildAllParameters(&state, &rolling_short, &cfg, &rolling_long,
-                                                &regime_ror, &ema_price,
-                                                FPN_IsZero(mtm_price) ? nullptr : &mtm_price,
-                                                &rolling_medium, &rolling_baseline,
-                                                &cumdelta_state, &tick_rate_state,
-                                                rebuild_ts_us,
-                                                cfg.depth_enabled ? &book_imb : nullptr,
-                                                /* book_imb_history */ &book_imb_history,
-                                                /* flow_state       */ &flow_state,
-                                                /* large_trade_state*/ &large_trade_state,
-                                                /* spread_state     */ &spread_state,
-                                                /* current_spread   */ FPN_ToDouble(book_spread),
-                                                /* current_mid_price*/ FPN_ToDouble(book_mid));
+                EventLoop_RebuildAllParameters_PerCore(&state, &cfg,
+                    FPN_IsZero(mtm_price) ? nullptr : &mtm_price,
+                    rebuild_ts_us,
+                    cfg.depth_enabled ? &book_imb : nullptr,
+                    FPN_ToDouble(book_spread),
+                    FPN_ToDouble(book_mid));
 
                 // Phase 4 — periodic snapshot save. Once every ~1024 slow-path
                 // cycles, paper mode only. With slow_path_interval=8 ticks and
@@ -1142,8 +1119,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     ? cfg.min_warmup_samples : 64;
                 // v4.7.39 (Phase C.2): in per_core_slow mode, each slow-path
                 // grants its own permission. Producer skips.
+                // v5.1.2: read per-core slow_state count (engine 0 — all
+                // engines push at same cadence with same input, counts equal).
                 if (cfg.engine_arch != ENGINE_ARCH_PER_CORE_SLOW &&
-                    rolling_short.count >= (int)min_samples) {
+                    state.cores[0].slow_state &&
+                    state.cores[0].slow_state->rolling_short.count >= (int)min_samples) {
                     for (int c = 0; c < num_cores; ++c) {
                         if (state.cores[c].strategy_id != STRATEGY_NONE) {
                             ExecutionCore_SetPermission(&cores[c], 1);
@@ -1159,12 +1139,20 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // v4.7.39 (Phase C.2): in per_core_slow mode, each slow-path
                 // calls TimeExitOneCore + TrailingSLRatchetOneCore for its own
                 // core. Producer skips the centralized iteration.
+                // v5.1.2: TrailingSLRatchet still takes a single rolling
+                // ref (legacy wrapper signature). For centralized arch we
+                // pass engine 0's slow_state's rolling_short — all engines
+                // have identical pushes so any is fine. Per-engine ratchet
+                // reads its own state inside the OneCore call internally.
                 if (cfg.engine_arch != ENGINE_ARCH_PER_CORE_SLOW)
                 {
                     uint64_t now_tick      = ticks_produced.load(std::memory_order_relaxed);
                     double   current_price = last_price.load(std::memory_order_relaxed);
                     EventLoop_TimeExit(&state, state.oms, cfg, now_tick, current_price);
-                    EventLoop_TrailingSLRatchet(&state, cfg, rolling_short, current_price);
+                    if (state.cores[0].slow_state) {
+                        EventLoop_TrailingSLRatchet(&state, cfg,
+                            state.cores[0].slow_state->rolling_short, current_price);
+                    }
                 }
 
 #ifdef USE_IMGUI_GUI
@@ -1182,11 +1170,25 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     bs->graph_head = fs->graph_head;
                     bs->graph_count = fs->graph_count;
                     // populate from sharded state
-                    TUI_CopySnapshotSharded(bs, &state, &rolling_short, &rolling_long,
-                                             &cfg, price_d, volume_d);
+                    // v5.1.2: TUI snapshot reads engine 0's slow_state since
+                    // all engines have identical pushes (same input/cadence).
+                    auto* sst0 = state.cores[0].slow_state;
+                    if (sst0) {
+                        TUI_CopySnapshotSharded(bs, &state, &sst0->rolling_short,
+                                                 &sst0->rolling_long, &cfg, price_d, volume_d);
+                    }
                     TUI_PopulatePerCoreLatency(bs, cores, num_cores, tsc_ghz);
                     // v5.0.1 (Phase H): slow-path latency from CoreContext.
                     TUI_PopulatePerCoreSlowPathLatency(bs, &state, tsc_ghz);
+                    // v5.0.2 (Phase H): topology — system + thread layout.
+                    TUI_PopulateTopology(bs, cfg.engine_arch,
+                                          topo_producer_cpu, topo_drainer_cpu,
+                                          (int)topo_nproc,
+                                          cfg.slow_path_pin_offset,
+                                          topo_hot_cpu, topo_slow_cpu,
+                                          topo_poll_interval);
+                    // v5.0.3 (Engine Topology advanced): live thread state.
+                    TUI_PopulateAdvancedTopology(bs, &state, &oms);
                     // v4.7.18: paper-reset seq for history-clearing panels
                     bs->paper_reset_seq = (uint32_t)g_shared.paper_reset_seq;
                     // append current data point to graph ring buffers
@@ -1643,11 +1645,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // GUI publish, account-level KillSwitchEvaluate). Per-core sections
     // in producer's slow-path body are gated on engine_arch.
     //
-    // TODO(pinning): slow-path threads currently UNPINNED — let OS schedule.
-    // Slow-path is jitter-tolerant; pinning conflicts with hot-path/producer/
-    // drainer pins on small-CPU laptops. Phase F polish: measure benefit of
-    // pinning to spare cores (e.g. cores 6-7 on i9-9980HK) via
-    // EngineSharded_PinThread or similar. Add cfg.slow_path_pin_offset.
+    // v5.0.2: slow-path pinning. cfg.slow_path_pin_offset:
+    //   < 0  → no pin (OS-scheduled, original v5.0 behavior)
+    //   == 0 → auto: base = drainer_cpu + 1 = num_cores + 2
+    //   > 0  → explicit base
+    // Slow-path c pins to (base + c) mod nproc. HT-sharing acceptable
+    // (slow-path is jitter-tolerant). Best-effort: pin failure is logged
+    // and execution continues unpinned.
     //
     // Reset Paper coordination: paper_reset_in_progress atomic declared
     // earlier (~line 786) so fan_out lambda's reset handler can reference
@@ -1655,20 +1659,38 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // runs reset, clears.
     std::vector<std::thread> slow_paths;
     if (cfg.engine_arch == ENGINE_ARCH_PER_CORE_SLOW) {
-        fprintf(stderr, "[sharded] engine_arch=per_core_slow: spawning %d "
-                        "slow-path threads (UNPINNED for now — see TODO)\n",
-                num_cores);
+        // Compute pin base: 0 = auto-derive, <0 = disabled, >0 = explicit.
+        int sp_pin_base = -1;  // <0 = no pin
+        long nproc = topo_nproc;
+        if (cfg.slow_path_pin_offset == 0) {
+            // Auto: pin past drainer (drainer = num_cores + 1).
+            sp_pin_base = num_cores + 2;
+        } else if (cfg.slow_path_pin_offset > 0) {
+            sp_pin_base = cfg.slow_path_pin_offset;
+        }
+        if (sp_pin_base >= 0) {
+            fprintf(stderr, "[sharded] engine_arch=per_core_slow: spawning %d "
+                            "slow-path threads (pin base CPU %d, nproc %ld)\n",
+                    num_cores, sp_pin_base, nproc);
+        } else {
+            fprintf(stderr, "[sharded] engine_arch=per_core_slow: spawning %d "
+                            "slow-path threads (UNPINNED, slow_path_pin_offset=%d)\n",
+                    num_cores, cfg.slow_path_pin_offset);
+        }
         slow_paths.reserve(num_cores);
         for (int c = 0; c < num_cores; ++c) {
-            slow_paths.emplace_back([c, &state, &oms, &cores, &cfg,
-                                      &ticks_produced, &last_price,
-                                      &rolling_short, &rolling_long,
-                                      &rolling_medium, &rolling_baseline,
-                                      &regime_ror, &ema_price,
-                                      &cumdelta_state, &tick_rate_state,
-                                      &book_imb_history, &flow_state,
-                                      &large_trade_state, &spread_state,
+            int sp_cpu = (sp_pin_base >= 0)
+                ? (int)((sp_pin_base + c) % nproc)
+                : -1;
+            topo_slow_cpu[c] = sp_cpu;  // v5.0.2: capture for topology panel
+            slow_paths.emplace_back([c, sp_cpu, &state, &oms, &cores, &cfg,
+                                      &ticks_produced, &last_price, &last_volume,
                                       &paper_reset_in_progress]() {
+                // v5.0.2: best-effort pin to chosen CPU. Failure logged,
+                // execution continues unpinned.
+                if (sp_cpu >= 0) {
+                    EngineSharded_PinThread(sp_cpu);
+                }
                 // v4.7.40 (Phase D): per-core poll interval from resolved
                 // cfg. If core has core_N_poll_interval set, use that;
                 // otherwise inherit global cfg.poll_interval.
@@ -1677,32 +1699,56 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 int slow_path_interval = (int)resolved_init.poll_interval;
                 if (slow_path_interval < 1) slow_path_interval = 100;
                 fprintf(stderr,
-                    "[slow-path-%d] poll_interval=%d ticks (override=%u, global=%u)\n",
+                    "[slow-path-%d] poll_interval=%d ticks (override=%u, global=%u) "
+                    "pinned_cpu=%d\n",
                     c, slow_path_interval,
                     (unsigned)cfg.core_overrides[c].poll_interval,
-                    (unsigned)cfg.poll_interval);
+                    (unsigned)cfg.poll_interval,
+                    sp_cpu);
                 // v4.7.42 (Phase E): enable per-core slow-path latency stats.
                 // Sampled around the per-cycle work below (RebuildOneCore +
                 // PushParameters + TimeExitOneCore + TrailingSL + permission).
                 CoreLatencyStats_Enable(&state.cores[c].slow_path_latency);
+                // v5.1.1: enable per-section breakdown stats.
+                for (int s = 0; s < CoreContext<F>::SP_SECTION_COUNT; ++s) {
+                    CoreLatencyStats_Enable(&state.cores[c].slow_path_breakdown[s]);
+                }
                 uint64_t last_seen_tick = 0;
                 while (!g_engine_sharded_shutdown) {
+                    // v5.0.3: user pause via paused_engines_mask bit c.
+#ifdef USE_IMGUI_GUI
+                    if (g_shared.paused_engines_mask & (uint16_t)(1u << c)) {
+                        state.cores[c].sp_state.store(3, std::memory_order_relaxed);
+                        state.cores[c].sp_yield_count.fetch_add(1, std::memory_order_relaxed);
+                        std::this_thread::yield();
+                        continue;
+                    }
+#endif
                     // Reset Paper coordination — park while reset runs.
                     if (paper_reset_in_progress.load(std::memory_order_acquire)) {
+                        state.cores[c].sp_state.store(1, std::memory_order_relaxed);
+                        state.cores[c].sp_yield_count.fetch_add(1, std::memory_order_relaxed);
                         std::this_thread::yield();
                         continue;
                     }
                     // Cadence — wake when enough ticks have passed.
                     uint64_t now_tick = ticks_produced.load(std::memory_order_acquire);
                     if (now_tick - last_seen_tick < (uint64_t)slow_path_interval) {
+                        state.cores[c].sp_state.store(2, std::memory_order_relaxed);
+                        state.cores[c].sp_yield_count.fetch_add(1, std::memory_order_relaxed);
                         std::this_thread::yield();
                         continue;
                     }
                     last_seen_tick = now_tick;
+                    state.cores[c].sp_state.store(0, std::memory_order_relaxed);  // running
 
                     // v4.7.42 (Phase E): rdtsc-bracket the per-cycle work for
                     // slow-path latency stats. Sample after work completes.
                     uint64_t _sp_t0 = __rdtsc();
+                    // v5.1.1: per-section breakdown — section start markers.
+                    // Each `_sec_t*` captures rdtsc between sections; the
+                    // delta becomes that section's sample.
+                    uint64_t _sec_t_other_start = _sp_t0;
 
                     // Skip cores with STRATEGY_NONE (caller responsibility per
                     // OneCore contract; OneCore would no-op on STRATEGY_NONE
@@ -1773,6 +1819,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
                     // mtm_price for MTM kill switch (in RebuildOneCore body).
                     double price_d = last_price.load(std::memory_order_relaxed);
+                    double volume_d = last_volume.load(std::memory_order_relaxed);
                     FPN<F> mtm_price = price_d > 0.0
                         ? FPN_FromDouble<F>(price_d) : FPN_Zero<F>();
 
@@ -1780,17 +1827,46 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
                             std::chrono::system_clock::now().time_since_epoch()).count();
 
+                    // v5.1.2 (full symmetric): use shared OneCore helper.
+                    // Single-writer is this thread (per_core_slow's c).
+                    auto* sst = state.cores[c].slow_state;
+                    FPN<F> vol = volume_d > 0.0 ? FPN_FromDouble<F>(volume_d) : FPN_Zero<F>();
+                    FPN<F> bs = cfg.depth_enabled ?
+                        FPN_FromDouble<F>(book_spread_d) : FPN_Zero<F>();
+                    EventLoop_UpdateRollingStateOneCore(
+                        &state, c,
+                        mtm_price, vol, rebuild_ts_us,
+                        /*is_buyer_maker=*/0,
+                        cfg.depth_enabled ? book_imb : FPN_Zero<F>(),
+                        bs,
+                        cfg.depth_enabled ? 1 : 0);
+
+                    // v5.1.1: bracket OTHER section (depth read + swap pickup
+                    // + per-cadence pushes setup).
+                    uint64_t _sec_t_rebuild_start = __rdtsc();
+                    CoreLatencyStats_Sample(
+                        &state.cores[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_OTHER],
+                        _sec_t_rebuild_start - _sec_t_other_start, _sec_t_rebuild_start);
+
                     // === Strategy dispatch + gate parameter rebuild ===
+                    // v5.1.0: pass per-core slow_state pointers instead of
+                    // producer-shared state. Each engine reads ONLY its own.
                     EventLoop_RebuildOneCore(
-                        &state, c, &rolling_short, &cfg, &rolling_long,
-                        &regime_ror, &ema_price,
+                        &state, c, &sst->rolling_short, &cfg, &sst->rolling_long,
+                        &sst->regime_ror, &sst->ema_price,
                         FPN_IsZero(mtm_price) ? nullptr : &mtm_price,
-                        &rolling_medium, &rolling_baseline,
-                        &cumdelta_state, &tick_rate_state, rebuild_ts_us,
+                        &sst->rolling_medium, &sst->rolling_baseline,
+                        &sst->cumdelta_state, &sst->tick_rate_state, rebuild_ts_us,
                         cfg.depth_enabled ? &book_imb : nullptr,
-                        &book_imb_history, &flow_state,
-                        &large_trade_state, &spread_state,
+                        &sst->book_imb_history, &sst->flow_state,
+                        &sst->large_trade_state, &sst->spread_state,
                         book_spread_d, book_mid_d, book_imbalance_blocked);
+
+                    // v5.1.1: bracket REBUILD section.
+                    uint64_t _sec_t_push_start = __rdtsc();
+                    CoreLatencyStats_Sample(
+                        &state.cores[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_REBUILD],
+                        _sec_t_push_start - _sec_t_rebuild_start, _sec_t_push_start);
 
                     // === Push pending_params via seqlock (was inside
                     // PushParameters wrapper; inline for per-core path).
@@ -1803,23 +1879,43 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         state.cores[c].dirty = 0;
                     }
 
+                    // v5.1.1: bracket PUSH_PARAMS section.
+                    uint64_t _sec_t_te_start = __rdtsc();
+                    CoreLatencyStats_Sample(
+                        &state.cores[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_PUSH_PARAMS],
+                        _sec_t_te_start - _sec_t_push_start, _sec_t_te_start);
+
                     // === Time exit + trailing SL ratchet (per-core) ===
                     if (cfg.max_hold_ticks > 0 && price_d > 0.01) {
                         EventLoop_TimeExitOneCore(&state, &oms, cfg,
                             now_tick, price_d, c);
                     }
+                    // v5.1.1: bracket TIME_EXIT section.
+                    uint64_t _sec_t_tsl_start = __rdtsc();
+                    CoreLatencyStats_Sample(
+                        &state.cores[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_TIME_EXIT],
+                        _sec_t_tsl_start - _sec_t_te_start, _sec_t_tsl_start);
+
                     if (!FPN_IsZero(cfg.sl_trail_mult) &&
                         !FPN_IsZero(cfg.tp_hold_score) &&
-                        !FPN_IsZero(rolling_short.price_stddev) &&
+                        !FPN_IsZero(sst->rolling_short.price_stddev) &&
                         price_d > 0.01) {
                         EventLoop_TrailingSLRatchetOneCore(&state, cfg,
-                            rolling_short, price_d, c);
+                            sst->rolling_short, price_d, c);
                     }
+                    // v5.1.1: bracket TRAIL_SL section. Tail-end "OTHER"
+                    // (warmup permission + post-cycle book-keeping) folds
+                    // into the next iteration's _sec_t_other_start delta —
+                    // negligible (<100ns) so we don't add another bracket.
+                    uint64_t _sec_t_tail = __rdtsc();
+                    CoreLatencyStats_Sample(
+                        &state.cores[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_TRAIL_SL],
+                        _sec_t_tail - _sec_t_tsl_start, _sec_t_tail);
 
                     // === Warmup permission grant (per-core check) ===
                     uint32_t min_samples = cfg.min_warmup_samples > 0
                         ? cfg.min_warmup_samples : 64;
-                    if (rolling_short.count >= (int)min_samples &&
+                    if (sst->rolling_short.count >= (int)min_samples &&
                         state.cores[c].strategy_id != STRATEGY_NONE) {
                         ExecutionCore_SetPermission(&cores[c], 1);
                     }
@@ -1828,6 +1924,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     uint64_t _sp_t1 = __rdtsc();
                     CoreLatencyStats_Sample(&state.cores[c].slow_path_latency,
                                              _sp_t1 - _sp_t0, _sp_t1);
+
+                    // v5.0.3: post-cycle book-keeping for the topology panel.
+                    {
+                        uint64_t now_us =
+                            (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count();
+                        state.cores[c].sp_last_tick_us.store(now_us, std::memory_order_relaxed);
+                        state.cores[c].sp_cycles_total.fetch_add(1, std::memory_order_relaxed);
+                    }
 
                     // NOTE: DrainPostFill stays on the drainer thread (single
                     // writer of last_*_mask is HandleFill on drainer; same

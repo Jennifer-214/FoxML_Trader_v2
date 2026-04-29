@@ -277,6 +277,14 @@ breakeven_on_partial=1          # move SL to breakeven after TP1 hit
 # STARTUP-ONLY — changes ignored on hot reload.
 engine_arch=per_core_slow
 
+# v5.0.2: slow_path_pin_offset — CPU pinning policy for slow-path threads
+# (only used when engine_arch=per_core_slow).
+#   -1 = no pin (OS-scheduled — original v5.0 behavior)
+#    0 = auto-derive (base = num_execution_cores + 2, past the drainer)
+#   >0 = explicit base CPU. Slow-path c pins to (offset + c) mod nproc.
+# Default 0 (auto). HT-sharing acceptable since slow-paths are jitter-tolerant.
+# slow_path_pin_offset=0
+
 # Optional: per-core slow-path cadence override.
 # core_N_poll_interval=N — fast strategies (momentum) may want tighter
 # rebuilds; slow strategies (MR) tolerate longer. 0 (or absent) = inherit
