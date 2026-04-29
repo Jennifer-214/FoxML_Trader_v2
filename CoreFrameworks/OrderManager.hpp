@@ -774,6 +774,11 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         FPN<F> entry_price_snap = oms->portfolio.positions[pslot].entry_price;
         FPN<F> entry_fee = oms->portfolio.positions[pslot].entry_fee;
         FPN<F> qty_snap  = oms->portfolio.positions[pslot].quantity;
+        // v5.1.6 (diagnostic logging): capture position TP/SL BEFORE close
+        // so we can infer which gate fired this exit. Logged below after
+        // gross/fee/net are computed.
+        FPN<F> tp_snap = oms->portfolio.positions[pslot].take_profit_price;
+        FPN<F> sl_snap = oms->portfolio.positions[pslot].stop_loss_price;
         // Phase 6prep sharded c14: compute realized return as double for the
         // ConfidenceScorer feedback channel BEFORE CloseSlot wipes entry_price.
         // The scorer uses (prediction, return) pairs to estimate IC. Skip the
@@ -818,6 +823,38 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         oms->last_fill[pslot].exit_entry_notional = FPN_Mul(entry_price_snap, qty_snap);
         oms->last_fill[pslot].exit_total_fees     = total_fee;
         oms->last_fill[pslot].was_win             = FPN_GreaterThan(net, FPN_Zero<F>()) ? 1 : 0;
+        // v5.1.6 (diagnostic logging): infer exit reason from the relationship
+        // between fill_price and the position's TP/SL at close-time.
+        //   - TP_HIT:  exit ≥ pos.take_profit_price (hot-path SG TP fired)
+        //   - SL_HIT:  exit ≤ pos.stop_loss_price (hot-path SG SL fired —
+        //              note: this includes ratchet_sl effect which RAISES sl
+        //              via FPN_Max in ExecutionCore::SG_Evaluate)
+        //   - INSIDE:  exit between TP and SL — the exit was forced by
+        //              something OTHER than the hot-path SG (TimeExit force-
+        //              close, manual close from GUI drag, kill switch, etc.)
+        // The "INSIDE" case is what we care about most — the +0.097% bleed
+        // pattern we saw in v5.1.2 soak (exits inside the TP/SL band that
+        // shouldn't have fired the hot path). After v5.1.6 lands, grep
+        // engine.log for "[exit-diag]" with reason=INSIDE to find every
+        // mystery close.
+        {
+            double entry_d = FPN_ToDouble(entry_price_snap);
+            double exit_d  = FPN_ToDouble(fill_price);
+            double tp_d    = FPN_ToDouble(tp_snap);
+            double sl_d    = FPN_ToDouble(sl_snap);
+            double gain    = entry_d > 0.0 ? (exit_d - entry_d) / entry_d : 0.0;
+            double net_d   = FPN_ToDouble(net);
+            double fee_d   = FPN_ToDouble(total_fee);
+            const char* reason = "INSIDE";
+            if (tp_d > 0.0 && exit_d >= tp_d - 1e-6) reason = "TP_HIT";
+            else if (sl_d > 0.0 && exit_d <= sl_d + 1e-6) reason = "SL_HIT";
+            std::fprintf(stderr,
+                "[exit-diag] slot=%d strat=%u reason=%s entry=%.2f exit=%.2f "
+                "tp=%.2f sl=%.2f gain=%+.4f%% gross=%+.4f fees=%.4f net=%+.4f\n",
+                pslot, (unsigned)o->strategy_id, reason,
+                entry_d, exit_d, tp_d, sl_d, gain * 100.0,
+                FPN_ToDouble(gross), fee_d, net_d);
+        }
         // last_closed_mask bit was set above (line 590) — same producer.
         if (oms->trade_log) {
             TradeEvent<F> synth{};
