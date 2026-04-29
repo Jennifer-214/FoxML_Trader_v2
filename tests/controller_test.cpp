@@ -6075,10 +6075,13 @@ e3_skip_load:;
               open_n <= 1500.0 + 0.01);
         check("mode 1 post-drain: last_opened_mask cleared",
               r->oms.last_opened_mask == 0);
-        // Fees: 0.001 × $600 × 2 legs = $1.20
-        check("mode 1 post-drain: core 0 fees accumulated",
-              FPN_ToDouble(r->state.cores[0].core_fees) > 1.0 &&
-              FPN_ToDouble(r->state.cores[0].core_fees) < 1.5);
+        // v5.3.1 (Phase D fee accounting fix): entry pass no longer adds
+        // entry_fee — core_fees only accumulates on exit (where it picks
+        // up the round-trip total via exit_total_fees). Pre-fix, this
+        // checked > 1.0 because line 860 added entry_fee on entry; that
+        // was double-counting against the exit pass's exit_total_fees.
+        check("mode 1 post-drain: core 0 fees still 0 (only exits accumulate)",
+              FPN_IsZero(r->state.cores[0].core_fees));
 
         // Synthesize paired exit at $61200 (= +2% gross).
         auto submit_and_fill_exit = [&](int portfolio_slot, double qty, double price) {
@@ -6121,6 +6124,14 @@ e3_skip_load:;
               r->state.cores[0].core_losses == 0);
         check("mode 1 post-exit: last_closed_mask cleared",
               r->oms.last_closed_mask == 0);
+        // v5.3.1 (Phase D): post-exit, core_fees should equal the round-trip
+        // fees for both legs (entry+exit per leg × 2 legs).
+        // Per leg: entry_notional($600) × 0.001 + exit_notional($612) × 0.001
+        //        = $0.60 + $0.612 = $1.212.  Both legs: ~$2.424.
+        // Sanity range $2.0–$2.6 to be tolerant of fee_rate variations.
+        check("mode 1 post-exit: core 0 fees ≈ round-trip × 2 legs",
+              FPN_ToDouble(r->state.cores[0].core_fees) > 2.0 &&
+              FPN_ToDouble(r->state.cores[0].core_fees) < 2.6);
 
         // Other cores untouched.
         check("mode 1: core 1 open_notional still 0 (no fills)",
@@ -6273,10 +6284,12 @@ e3_skip_load:;
               fabs(FPN_ToDouble(r->state.cores[0].core_open_notional) - 1200.0) < 0.5);
         check("v4.7.16 post-RunTick: last_opened_mask cleared",
               r->oms.last_opened_mask == 0);
-        // Fee 0.001 × $1200 = $1.20
-        check("v4.7.16 post-RunTick: core 0 fees accumulated",
-              FPN_ToDouble(r->state.cores[0].core_fees) > 1.0 &&
-              FPN_ToDouble(r->state.cores[0].core_fees) < 1.5);
+        // v5.3.1 (Phase D): entry pass no longer adds entry_fee to core_fees.
+        // The exit pass picks up the round-trip total. Pre-fix, this
+        // accumulated entry_fee on entry AND entry_fee+exit_fee on exit
+        // (double-counting). See ControllerEventLoop.hpp Phase D fix.
+        check("v4.7.16 post-RunTick: core 0 fees still 0 (only exits accumulate)",
+              FPN_IsZero(r->state.cores[0].core_fees));
 
         // Synthesize an exit at +1% — RunTick should now drain the close mask
         // too, incrementing wins. Confirms exit-path parity.
@@ -6305,6 +6318,12 @@ e3_skip_load:;
               FPN_ToDouble(r->state.cores[0].core_realized) > 0.0);
         check("v4.7.16 post-exit: open_notional decremented",
               FPN_ToDouble(r->state.cores[0].core_open_notional) < 0.5);
+        // v5.3.1 (Phase D): post-exit fees ≈ entry_fee + exit_fee
+        // = $1200 × 0.001 + $1212 × 0.001 ≈ $2.412.
+        // Tolerance $2.0–$2.6.
+        check("v4.7.16 post-exit: core 0 fees ≈ round-trip (entry+exit fee)",
+              FPN_ToDouble(r->state.cores[0].core_fees) > 2.0 &&
+              FPN_ToDouble(r->state.cores[0].core_fees) < 2.6);
 
         delete r;
     }

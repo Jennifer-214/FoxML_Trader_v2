@@ -1351,7 +1351,13 @@ static inline void GUI_Panel_Stats(const TUISnapshot *s) {
     ImGui::SameLine(0, 10);
     ImGui::TextColored(FoxmlColors::sand, "pf:");
     ImGui::SameLine();
-    ImGui::TextColored(PnlColor(s->profit_factor - 1.0), "%.2f", s->profit_factor);
+    // v5.3.1 (Phase D): profit_factor < 0 is the "all wins, no losses" sentinel
+    // (mathematically ∞). Pre-fix code rendered 0.00 which was misleading.
+    if (s->profit_factor < 0.0) {
+        ImGui::TextColored(FoxmlColors::green, "%s", "\xE2\x88\x9E");  // ∞
+    } else {
+        ImGui::TextColored(PnlColor(s->profit_factor - 1.0), "%.2f", s->profit_factor);
+    }
     ImGui::SameLine(0, 10);
     ImGui::TextColored(FoxmlColors::sand, "avg W:");
     ImGui::SameLine();

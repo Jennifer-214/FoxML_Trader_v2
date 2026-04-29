@@ -857,7 +857,12 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         if (slot < 0 || slot >= max_slot) continue;
         const auto& rec = oms->last_fill[slot];
         ctx.core_open_notional = FPN_Add(ctx.core_open_notional, rec.entry_notional);
-        ctx.core_fees          = FPN_AddSat(ctx.core_fees, rec.entry_fee);
+        // v5.3.1 (Phase D fee accounting fix): do NOT add entry_fee here.
+        // The exit pass below adds rec.exit_total_fees which already equals
+        // entry_fee + exit_fee (set in OMS_HandleFill). Adding entry_fee
+        // here was double-counting it — visible in the GUI as per-core
+        // "Fees" being ~1.5× the sum of Trade History fees (entry+exit
+        // round-trip × N legs vs entry × N + entry+exit × N).
         ctx.entries_processed++;
         state->total_entries++;
         state->total_events_processed++;
