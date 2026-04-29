@@ -428,6 +428,12 @@ template <unsigned F> struct ControllerConfig {
   // — useful for dev). Set both for production live deploy.
   int    held_out_gate_strict;       // 0=warn-only (default), 1=refuse load, -1=skip
   char   held_out_stamp_secret[128]; // HMAC-SHA256 secret for stamp signing/verify
+  // v5.3.2 — auto-stamp on held-out completion. When 1, Backtest_RunFullValidation
+  // calls stamp_write_for_model after a successful held-out training pass, using
+  // held_out_stamp_secret + gap_acceptable_threshold above. Default 0 to preserve
+  // current behavior (manual stamping via tools/stamp_model.sh); flip to 1 after
+  // configuring the secret to enable hands-off stamp generation in foxml_suite.
+  int    auto_stamp_on_held_out;
   // v5.2.1 (live reconciliation Phase 1) — exchange-truth sync at boot
   // (and optionally on heartbeat). LIVE-mode-only — paper mode skips
   // reconcile entirely.
@@ -774,6 +780,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.gap_acceptable_threshold    = FPN_FromDouble<F>(0.05);     // 5% max gap for "OK"
   cfg.held_out_gate_strict        = 0;                            // gate off by default (warn-only)
   cfg.held_out_stamp_secret[0]    = '\0';                         // empty = accept-any (dev)
+  cfg.auto_stamp_on_held_out      = 0;                            // opt-in; flip to 1 after configuring secret
   cfg.reconcile_interval_sec      = 0;                            // 0 = boot-only
   cfg.reconcile_dry_run           = 1;                            // safer default; flip to 0 deliberately
   cfg.prediction_normalize = 0;
@@ -1111,6 +1118,10 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         if (n >= sizeof(cfg.held_out_stamp_secret)) n = sizeof(cfg.held_out_stamp_secret) - 1;
         memcpy(cfg.held_out_stamp_secret, val, n);
         cfg.held_out_stamp_secret[n] = '\0';
+        continue;
+    }
+    if (strcmp(key, "auto_stamp_on_held_out") == 0) {
+        cfg.auto_stamp_on_held_out = atoi(val);
         continue;
     }
     if (strcmp(key, "reconcile_interval_sec") == 0) {

@@ -686,6 +686,19 @@ struct FullValidationResults {
     int label_kind;                        // mirrored from WalkForwardResults for display
     int ran_held_out;                      // 1 if held-out training fired, 0 if stubbed/locked
     char fingerprint[65];                  // SHA256 (mirrored from walkforward)
+
+    // v5.3.2 Phase C — auto-stamp on held-out completion. Caller pre-fills
+    // auto_stamp_path + auto_stamp_secret + auto_stamp_format_version BEFORE
+    // calling Backtest_RunFullValidation. When ran_held_out=1 + path non-empty,
+    // RunFullValidation calls stamp_write_for_model and populates the result
+    // fields below. Empty path = auto-stamp disabled (current behavior).
+    char auto_stamp_path[512];             // request: full path to .bin file (empty = skip)
+    char auto_stamp_secret[128];           // request: HMAC secret (empty = devmode placeholder)
+    int  auto_stamp_format_version;        // request: 0 = use MODEL_FORMAT_VERSION
+    int  auto_stamp_attempted;             // result: 1 if stamping fired (path was set)
+    int  auto_stamp_ok;                    // result: 1 if stamp written successfully
+    char auto_stamp_error[256];            // result: failure reason (if attempted && !ok)
+    char auto_stamp_path_written[520];     // result: path of written stamp file
 };
 
 // Forward declaration — Backtest_RunWalkForward is defined further down in
@@ -746,6 +759,59 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
     out->held_out_metric      = he.metric;
     out->held_out_mse         = he.mse;
     out->held_out_correlation = he.correlation;
+
+    // v5.3.2 Phase C — auto-stamp hook. Caller passes auto_stamp_path +
+    // auto_stamp_secret + auto_stamp_format_version through the
+    // FullValidationResults's auto_stamp_* fields BEFORE calling. When
+    // ran_held_out=1 AND auto_stamp_path is non-empty AND auto_stamp_secret
+    // is set, fire stamp_write_for_model with the metrics just computed.
+    // Keeps RunFullValidation's signature stable; gates everything on
+    // the result struct's pre-populated request fields.
+    out->auto_stamp_attempted = 0;
+    out->auto_stamp_ok        = 0;
+    out->auto_stamp_error[0]  = '\0';
+    out->auto_stamp_path_written[0] = '\0';
+    if (out->ran_held_out && out->auto_stamp_path[0] != '\0') {
+        // Pick wf metric per label kind (matches engine's gap math).
+        double wf_metric = LabelType_IsRegression(label_type)
+            ? out->walkforward.mean_val_correlation
+            : out->walkforward.mean_val_accuracy;
+
+        // today's date in ISO format
+        char today[16] = {0};
+        time_t now = time(NULL);
+        struct tm tm_buf;
+        localtime_r(&now, &tm_buf);
+        strftime(today, sizeof(today), "%Y-%m-%d", &tm_buf);
+
+        StampWriteResult sr = stamp_write_for_model(
+            out->auto_stamp_path,
+            out->auto_stamp_secret,
+            out->auto_stamp_format_version > 0 ? out->auto_stamp_format_version
+                                                : MODEL_FORMAT_VERSION,
+            today,
+            wf_metric,
+            (double)out->held_out_metric,
+            (double)gap_threshold,
+            /*force=*/0);
+        out->auto_stamp_attempted = 1;
+        out->auto_stamp_ok = sr.ok;
+        if (sr.ok) {
+            size_t n = strlen(sr.stamp_path);
+            if (n >= sizeof(out->auto_stamp_path_written))
+                n = sizeof(out->auto_stamp_path_written) - 1;
+            memcpy(out->auto_stamp_path_written, sr.stamp_path, n);
+            out->auto_stamp_path_written[n] = '\0';
+            fprintf(stderr, "[autostamp] wrote %s\n", sr.stamp_path);
+        } else {
+            size_t n = strlen(sr.error);
+            if (n >= sizeof(out->auto_stamp_error))
+                n = sizeof(out->auto_stamp_error) - 1;
+            memcpy(out->auto_stamp_error, sr.error, n);
+            out->auto_stamp_error[n] = '\0';
+            fprintf(stderr, "[autostamp] FAIL: %s\n", sr.error);
+        }
+    }
 
     // Generalization gap: |WF mean - held_out|, label-kind-aware. With
     // ran_held_out=0 the gap is just the WF mean (degenerate but consistent).

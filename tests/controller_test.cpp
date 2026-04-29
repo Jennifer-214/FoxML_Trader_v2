@@ -31,6 +31,7 @@
 #include "../Backtest/BacktestEngine.hpp"
 #include "../Backtest/HeldOutSplit.hpp"
 #include "../MemHeaders/HmacSha256.hpp"                  // v5.3.0 Phase B — in-process HMAC primitive
+#include "../MemHeaders/RunHistory.hpp"                  // v5.3.2 Phase C — JSONL append-only run history
 
 using namespace std;
 
@@ -7801,6 +7802,135 @@ e3_skip_load:;
         check("v5.3.0a: Backtest_RunFullValidation → ran_held_out propagates from helper",
               out.ran_held_out == 0 && out.held_out_count == 0);
         BacktestResults_Free(&dummy);
+    }
+
+    //======================================================================================================
+    // [v5.3.2 Phase C — auto-stamp wiring + RunHistory append-only log]
+    //======================================================================================================
+    printf("\n--- v5.3.2 Phase C: auto-stamp + run history ---\n");
+    {
+        // Auto-stamp does NOT fire when path is empty (current default).
+        // ran_held_out=0 in this test (no XGBoost), so the inner gate is also
+        // false; assert auto_stamp_attempted stays 0.
+        HeldOutSplit s = HeldOutSplit_Make(1000, 0.20);
+        HeldOutSplit_Unlock(&s, s.lock_token);
+        BacktestResults dummy;
+        BacktestResults_Init(&dummy);
+        FullValidationResults out = {};
+        // auto_stamp_path left empty
+        volatile int prog = 0, cancel = 0;
+        Backtest_RunFullValidation(&out, &dummy, &s, 3, 100, 10, 100,
+                                    &prog, &cancel, LABEL_WIN_LOSS, 0.05f);
+        check("v5.3.2c: auto-stamp inactive when path empty",
+              out.auto_stamp_attempted == 0);
+        BacktestResults_Free(&dummy);
+    }
+    {
+        // Auto-stamp also does NOT fire when ran_held_out=0 (e.g. XGBoost off,
+        // locked split, no eval samples). Even with path set, the gate
+        // requires ran_held_out=1.
+        HeldOutSplit s = HeldOutSplit_Make(1000, 0.20);
+        HeldOutSplit_Unlock(&s, s.lock_token);
+        BacktestResults dummy;
+        BacktestResults_Init(&dummy);
+        FullValidationResults out = {};
+        strncpy(out.auto_stamp_path, "/tmp/never-written-x9z.bin", sizeof(out.auto_stamp_path) - 1);
+        strncpy(out.auto_stamp_secret, "test-secret", sizeof(out.auto_stamp_secret) - 1);
+        volatile int prog = 0, cancel = 0;
+        Backtest_RunFullValidation(&out, &dummy, &s, 3, 100, 10, 100,
+                                    &prog, &cancel, LABEL_WIN_LOSS, 0.05f);
+        check("v5.3.2c: auto-stamp inactive when ran_held_out=0",
+              out.auto_stamp_attempted == 0);
+        BacktestResults_Free(&dummy);
+    }
+    {
+        // RunHistory_Append produces a valid JSONL line with all fields.
+        char path[] = "/tmp/test_runhistory_XXXXXX";
+        int fd = mkstemp(path);
+        if (fd >= 0) {
+            close(fd);
+
+            tt::RunHistoryEntry e = {};
+            e.model_path        = "/tmp/some_model.bin";
+            e.wf_mean_val       = 0.55;
+            e.held_out_metric   = 0.53;
+            e.gap               = 0.02;
+            e.gap_threshold     = 0.05;
+            e.gap_acceptable    = 1;
+            e.ran_held_out      = 1;
+            e.stamp_attempted   = 1;
+            e.stamp_ok          = 1;
+            e.stamp_path        = "/tmp/some_model.bin.stamp";
+
+            int ok = tt::RunHistory_Append(path, e);
+            check("v5.3.2c: RunHistory_Append returns ok=1", ok == 1);
+
+            // Read back; must contain the schema-1 marker, model_path, and a
+            // numeric gap. Round-trip via simple substring checks (full JSON
+            // parse not needed — we wrote it, we know the format).
+            FILE* f = fopen(path, "r");
+            int has_schema = 0, has_path = 0, has_gap = 0, has_stamp = 0;
+            if (f) {
+                char buf[4096] = {0};
+                size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+                fclose(f);
+                buf[n] = '\0';
+                has_schema = strstr(buf, "\"schema\":1")              != NULL;
+                has_path   = strstr(buf, "\"model_path\":\"/tmp/some_model.bin\"") != NULL;
+                has_gap    = strstr(buf, "\"gap\":0.020000")          != NULL;
+                has_stamp  = strstr(buf, "\"stamp_ok\":1")            != NULL;
+            }
+            check("v5.3.2c: RunHistory file has schema marker",      has_schema);
+            check("v5.3.2c: RunHistory file has model_path",         has_path);
+            check("v5.3.2c: RunHistory file has gap formatted as fixed-precision", has_gap);
+            check("v5.3.2c: RunHistory file has stamp_ok flag",      has_stamp);
+
+            unlink(path);
+        } else {
+            check("v5.3.2c: RunHistory_Append returns ok=1", 0);
+            check("v5.3.2c: RunHistory file has schema marker", 0);
+            check("v5.3.2c: RunHistory file has model_path", 0);
+            check("v5.3.2c: RunHistory file has gap formatted as fixed-precision", 0);
+            check("v5.3.2c: RunHistory file has stamp_ok flag", 0);
+        }
+    }
+    {
+        // RunHistory_Append refuses when path is NULL or empty.
+        tt::RunHistoryEntry e = {};
+        e.model_path = "x";
+        e.stamp_path = "x";
+        int ok1 = tt::RunHistory_Append(nullptr, e);
+        int ok2 = tt::RunHistory_Append("",      e);
+        check("v5.3.2c: RunHistory_Append refuses null/empty path",
+              ok1 == 0 && ok2 == 0);
+    }
+    {
+        // Append twice — second line should follow the first; total file
+        // contains two newline-terminated JSON objects (proper JSONL).
+        char path[] = "/tmp/test_runhistory2_XXXXXX";
+        int fd = mkstemp(path);
+        if (fd >= 0) {
+            close(fd);
+            tt::RunHistoryEntry e1 = {};
+            e1.model_path = "a"; e1.stamp_path = "a";
+            tt::RunHistoryEntry e2 = {};
+            e2.model_path = "b"; e2.stamp_path = "b";
+            tt::RunHistory_Append(path, e1);
+            tt::RunHistory_Append(path, e2);
+
+            FILE* f = fopen(path, "r");
+            int line_count = 0;
+            if (f) {
+                int c;
+                while ((c = fgetc(f)) != EOF) if (c == '\n') line_count++;
+                fclose(f);
+            }
+            check("v5.3.2c: RunHistory append-only — 2 entries → 2 newlines",
+                  line_count == 2);
+            unlink(path);
+        } else {
+            check("v5.3.2c: RunHistory append-only — 2 entries → 2 newlines", 0);
+        }
     }
 
     printf("\n======================================\n");
