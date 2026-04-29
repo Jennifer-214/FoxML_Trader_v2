@@ -293,22 +293,35 @@ struct CoreContext {
     // In centralized mode, total_count stays 0 (no samples collected —
     // single producer slow-path doesn't break per-core, by design).
     CoreLatencyStats slow_path_latency;
-    // v5.1.1 (slow-path work breakdown): per-section profiling. Same
-    // single-writer rule as slow_path_latency (the slow-path thread that
-    // owns this core in per_core_slow; producer in centralized).
-    // Sections: 0=rebuild (RebuildOneCore + per-cadence pushes),
-    //           1=push_params (seqlock to ExecutionCore),
-    //           2=time_exit (TimeExitOneCore),
-    //           3=trail_sl  (TrailingSLRatchetOneCore),
-    //           4=other     (warmup permission, swap pickup, depth read).
-    // Each ~5-10ns _Sample overhead × 5 = ~50ns/cycle. Slow-path is
-    // microsecond-scale so < 1% impact.
-    static constexpr int SP_SECTION_REBUILD     = 0;
-    static constexpr int SP_SECTION_PUSH_PARAMS = 1;
-    static constexpr int SP_SECTION_TIME_EXIT   = 2;
-    static constexpr int SP_SECTION_TRAIL_SL    = 3;
-    static constexpr int SP_SECTION_OTHER       = 4;
+    // v5.1.1 + v5.1.3 (slow-path work breakdown): per-section profiling.
+    // Same single-writer rule as slow_path_latency.
+    //
+    // Sections (label rework in v5.1.3 — earlier "Other" lumped the heavy
+    // rolling-state pushes with trivial setup; now split honestly):
+    //   0=ROLLING   — EventLoop_UpdateRollingStateOneCore + cadence setup
+    //                 (depth read, swap pickup, mtm_price). DOMINATES the
+    //                 cycle: 4 RollingStats pushes × O(W) FPN math, full-
+    //                 window recompute. Expect ~100-300µs in steady state
+    //                 with W=1024 baseline.
+    //   1=REBUILD   — EventLoop_RebuildOneCore: regime classify + strategy
+    //                 dispatch + gate compute. Expect 5-30µs.
+    //   2=PUSH      — seqlock push of pending_params to ExecutionCore.
+    //                 Expect ~100-500ns (single FPN copy + atomic).
+    //   3=TIME_EXIT — EventLoop_TimeExitOneCore. Expect ~100-300ns.
+    //   4=TRAIL_SL  — EventLoop_TrailingSLRatchetOneCore. Expect ~100-300ns.
+    //
+    // Sum-of-sections ≈ slow_path_latency total (within rdtsc bracket noise).
+    // ~10ns _Sample × 5 = ~50ns/cycle overhead, < 0.1% of typical cycle.
+    static constexpr int SP_SECTION_ROLLING     = 0;
+    static constexpr int SP_SECTION_REBUILD     = 1;
+    static constexpr int SP_SECTION_PUSH        = 2;
+    static constexpr int SP_SECTION_TIME_EXIT   = 3;
+    static constexpr int SP_SECTION_TRAIL_SL    = 4;
     static constexpr int SP_SECTION_COUNT       = 5;
+    // Back-compat aliases — earlier names kept so external callers don't
+    // break. New code should use the names above.
+    static constexpr int SP_SECTION_OTHER       = SP_SECTION_ROLLING;
+    static constexpr int SP_SECTION_PUSH_PARAMS = SP_SECTION_PUSH;
     CoreLatencyStats slow_path_breakdown[SP_SECTION_COUNT];
     // v5.0.3 (Engine Topology advanced): live thread observability fields.
     // Single-writer is the slow-path thread that owns this core (or the

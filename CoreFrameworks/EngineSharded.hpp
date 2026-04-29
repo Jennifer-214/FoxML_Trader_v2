@@ -751,6 +751,36 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             ? ControllerConfig_ResolveForCore(cfg, i).poll_interval
             : 0u;
     }
+
+    //----------------------------------------------------------------------
+    // v5.1.3 — fee-floor warning. A profitable round-trip needs gross
+    // P&L > 2× fee_rate (entry + exit fees, both at taker rate worst-case).
+    // We use 3× as the warning threshold so a winning trade clears fees
+    // with at least 1× fee_rate of profit margin (otherwise rounding +
+    // slippage erode the edge).
+    //
+    // Per-core resolved take_profit_pct must be >= 3 × fee_rate_taker.
+    // Strategies that emit dynamic TP (e.g. EMA's stddev-based) can still
+    // trip the runtime guard inside Strategy_BuildParameters even if cfg
+    // looks fine here — boot warning catches static-cfg cases only.
+    //----------------------------------------------------------------------
+    {
+        double fee_taker = FPN_ToDouble(cfg.fee_rate_taker);
+        if (fee_taker <= 0.0) fee_taker = FPN_ToDouble(cfg.fee_rate);  // fallback
+        double tp_floor = 3.0 * fee_taker;
+        for (int i = 0; i < num_cores; ++i) {
+            ControllerConfig<F> rc = ControllerConfig_ResolveForCore(cfg, i);
+            double tp_pct = FPN_ToDouble(rc.take_profit_pct);
+            if (tp_pct > 0.0 && tp_pct < tp_floor) {
+                fprintf(stderr,
+                    "[sharded] WARN: core %d take_profit_pct=%.4f%% is below "
+                    "the fee floor (3 × taker=%.4f%% = %.4f%%). Winning trades "
+                    "will be net-negative after fees. Recommend tp_pct >= %.4f%%.\n",
+                    i, tp_pct * 100.0, fee_taker * 100.0,
+                    tp_floor * 100.0, tp_floor * 100.0);
+            }
+        }
+    }
     int  topo_producer_cpu = 0;
     int  topo_drainer_cpu  = num_cores + 1;
     long topo_nproc        = sysconf(_SC_NPROCESSORS_ONLN);

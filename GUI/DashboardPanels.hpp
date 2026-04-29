@@ -1863,8 +1863,8 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
         if (ImGui::BeginTable("##percore_breakdown", 11, tf)) {
             ImGui::TableSetupColumn("Engine", ImGuiTableColumnFlags_WidthFixed, 45);
             ImGui::TableSetupColumn("Strat",  ImGuiTableColumnFlags_WidthFixed, 35);
-            ImGui::TableSetupColumn("Other p50", ImGuiTableColumnFlags_WidthFixed, 60);
-            ImGui::TableSetupColumn("Other p99", ImGuiTableColumnFlags_WidthFixed, 60);
+            ImGui::TableSetupColumn("Rolling p50", ImGuiTableColumnFlags_WidthFixed, 70);
+            ImGui::TableSetupColumn("Rolling p99", ImGuiTableColumnFlags_WidthFixed, 70);
             ImGui::TableSetupColumn("Rebuild p50", ImGuiTableColumnFlags_WidthFixed, 70);
             ImGui::TableSetupColumn("Rebuild p99", ImGuiTableColumnFlags_WidthFixed, 70);
             ImGui::TableSetupColumn("Push p50",  ImGuiTableColumnFlags_WidthFixed, 60);
@@ -1895,14 +1895,16 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                 } else {
                     // Section order in struct: 0=rebuild, 1=push, 2=time, 3=trail, 4=other
                     // Column display reorders for readability.
-                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[4]));
-                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[4]));
+                    // v5.1.3: indices match SP_SECTION_* (0=ROLLING, 1=REBUILD,
+                    // 2=PUSH, 3=TIME_EXIT, 4=TRAIL_SL).
                     ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[0]));
                     ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[0]));
                     ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[1]));
                     ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[1]));
                     ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[2]));
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p99_ns[2]));
                     ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[3]));
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_breakdown_p50_ns[4]));
                     double sum_p50 = pc->sp_breakdown_p50_ns[0] +
                                      pc->sp_breakdown_p50_ns[1] +
                                      pc->sp_breakdown_p50_ns[2] +
