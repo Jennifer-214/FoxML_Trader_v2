@@ -39,6 +39,7 @@
 #include <openssl/evp.h>
 
 #include "BinanceCrypto.hpp"  // for g_binance_shutdown_flag (interruptible REST sleeps)
+#include "../MemHeaders/HmacSha256.hpp"  // v5.3.0 Phase B — shared HMAC primitive (used by binance_hmac_sha256 wrapper below)
 
 //======================================================================================================
 // [ORDER STATUS CODES]
@@ -106,14 +107,17 @@ static inline int64_t binance_current_ms() {
     return (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
 
+// v5.3.0 Phase B — thin wrapper over MemHeaders/HmacSha256.hpp's
+// tt::hmac_sha256_hex. The shared primitive is the same openssl HMAC
+// call this used to do inline; consolidating means stamp signing +
+// Binance signing share one tested path.
 static inline void binance_hmac_sha256(const char *key, const char *data, char *hex_out) {
-    unsigned char digest[EVP_MAX_MD_SIZE];
-    unsigned int digest_len = 0;
-    HMAC(EVP_sha256(), key, (int)strlen(key),
-         (const unsigned char*)data, strlen(data), digest, &digest_len);
-    for (unsigned i = 0; i < digest_len; i++)
-        sprintf(hex_out + i * 2, "%02x", digest[i]);
-    hex_out[digest_len * 2] = '\0';
+    if (!tt::hmac_sha256_hex(key, data, hex_out)) {
+        // Failure path: fill with zeros so a corrupt sig won't accidentally
+        // collide with anything; caller will detect via REST 401.
+        memset(hex_out, '0', 64);
+        hex_out[64] = '\0';
+    }
 }
 
 // simple JSON value extractor — finds "key":"value" or "key":number

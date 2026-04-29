@@ -21,8 +21,11 @@
 
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
+#include "../MemHeaders/HmacSha256.hpp"  // v5.3.0 Phase B — in-process HMAC + SHA-256 (replaces popen paths)
 #include <stdio.h>
 #include <string.h>
+#include <locale.h>                       // v5.3.0 Phase B — uselocale for canonical body LC_NUMERIC pinning
+#include <unistd.h>                       // v5.3.0 Phase B — unlink/rename for atomic stamp writes
 
 // backend IDs
 #define MODEL_BACKEND_NONE     0
@@ -578,36 +581,12 @@ struct ModelStampResult {
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
 // Out parameter `hex` must be at least 65 bytes (64 hex digits + NUL).
+//
+// v5.3.0 Phase B: now an in-process EVP wrapper. Was a popen("sha256sum ...")
+// shell-out in v5.2.0 — replaced for speed, shell-injection safety, and
+// removing the dependency on /usr/bin/sha256sum being installed.
 inline int sha256_file_hex(const char* path, char* hex_out, size_t hex_cap) {
-    if (hex_cap < 65) return 0;
-#ifdef __linux__
-    FILE* f = fopen(path, "rb");
-    if (!f) return 0;
-    // Use openssl EVP_sha256 (already linked via BinanceOrderAPI's HMAC use)
-    // EVP_MD_CTX is opaque; sha256 of a file is small + simple.
-    // For minimal scope, we shell out to /usr/bin/sha256sum if available
-    // and parse — avoids a heavier evp dependency in this header.
-    fclose(f);
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "sha256sum '%s' 2>/dev/null", path);
-    FILE* p = popen(cmd, "r");
-    if (!p) return 0;
-    char buf[128] = {0};
-    if (!fgets(buf, sizeof(buf), p)) { pclose(p); return 0; }
-    pclose(p);
-    // sha256sum output: "<64hex>  <path>\n"
-    if (strlen(buf) < 64) return 0;
-    memcpy(hex_out, buf, 64);
-    hex_out[64] = '\0';
-    // Lowercase normalize
-    for (int i = 0; i < 64; ++i) {
-        if (hex_out[i] >= 'A' && hex_out[i] <= 'F') hex_out[i] += 32;
-    }
-    return 1;
-#else
-    (void)path; (void)hex_out; (void)hex_cap;
-    return 0;
-#endif
+    return tt::sha256_file_hex_inproc(path, hex_out, hex_cap);
 }
 
 // Parse a "key=value" line into key + value pointers. Returns 1 on success.
@@ -757,27 +736,19 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
         snprintf(r.reason, sizeof(r.reason), "ok (dev mode, sig unchecked)");
         return r;
     }
-    // Real signature check. We use sha256sum-as-hmac via openssl shell-out
-    // since that's already a dep (same path as sha256_file_hex). Production
-    // path would use EVP_HMAC; for v5.2.0 Phase 1 the shell-out is acceptable.
-    char cmd[8192];
-    // Echo canonical body via stdin → openssl dgst -sha256 -hmac
-    snprintf(cmd, sizeof(cmd),
-        "printf '%%s' \"%s\" | openssl dgst -sha256 -hmac '%s' 2>/dev/null | awk '{print $NF}'",
-        canonical, secret);
-    FILE* p = popen(cmd, "r");
-    if (!p) {
+    // v5.3.0 Phase B: in-process HMAC. Was a popen("openssl dgst -sha256 -hmac")
+    // shell-out in v5.2.0 — replaced for shell-injection safety (canonical
+    // body contained user-controlled fields like trained_on, secret was
+    // single-quoted). RFC 4231 vectors and bash-compat regression test in
+    // controller_test.cpp guard sig parity with the bash script's openssl
+    // calls.
+    char computed[80];
+    if (!tt::hmac_sha256_hex(secret, canonical, computed)) {
         r.valid = 0;
-        snprintf(r.reason, sizeof(r.reason), "could not invoke openssl for HMAC verify");
+        snprintf(r.reason, sizeof(r.reason), "HMAC-SHA256 computation failed");
         return r;
     }
-    char computed[128] = {0};
-    if (fgets(computed, sizeof(computed), p)) {
-        // Strip newline
-        char* nl = strchr(computed, '\n'); if (nl) *nl = '\0';
-    }
-    pclose(p);
-    if (computed[0] && strcmp(computed, stamp_sig) == 0) {
+    if (strcmp(computed, stamp_sig) == 0) {
         r.valid = 1;
         snprintf(r.reason, sizeof(r.reason), "ok (signature verified, gap %.4f ≤ %.4f)",
             r.generalization_gap, r.gap_threshold);
@@ -787,6 +758,145 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             "signature mismatch: stamp=%.16s... computed=%.16s...",
             stamp_sig, computed);
     }
+    return r;
+}
+
+//======================================================================================================
+// [v5.3.0 Phase B — stamp_write_for_model: sign + write a model stamp in-process]
+//======================================================================================================
+// Inverse of verify_model_stamp. Computes SHA-256 of the model file,
+// builds the same canonical body the verifier reads, signs with
+// HMAC-SHA256, writes <model>.stamp atomically (write to .tmp, then
+// rename — POSIX atomic within a filesystem). Refuses to write when
+// |wf - held_out| > gap_threshold unless `force` is set.
+//
+// Field order in the canonical body MUST match tools/stamp_model.sh
+// byte-for-byte; bash-compat regression test in controller_test.cpp
+// catches drift.
+//
+// Locale pinning: %g/%f honor LC_NUMERIC. A stamp signed under
+// LC_NUMERIC=C wouldn't verify under LC_NUMERIC=de_DE because
+// 0.55 → "0,55" in some locales. We pin LC_NUMERIC=C for the canonical
+// body construction (per-thread via uselocale).
+//======================================================================================================
+
+struct StampWriteResult {
+    int  ok;             // 1 = stamp written; 0 = refused (gap too wide, i/o, etc.)
+    char error[256];     // human-readable failure reason
+    char stamp_path[512]; // where it was written (or would have been)
+};
+
+inline StampWriteResult stamp_write_for_model(const char* model_path,
+                                                const char* secret,
+                                                int   format_version,
+                                                const char* trained_on_iso,  // YYYY-MM-DD
+                                                double wf_mean_val,
+                                                double held_out_metric,
+                                                double gap_threshold,
+                                                int   force) {
+    StampWriteResult r;
+    r.ok = 0;
+    r.error[0] = '\0';
+    r.stamp_path[0] = '\0';
+
+    if (!model_path || !trained_on_iso) {
+        snprintf(r.error, sizeof(r.error), "NULL inputs (model_path/trained_on_iso)");
+        return r;
+    }
+
+    // 1. SHA-256 of the model file (in-process)
+    char model_sha[80] = {0};
+    if (!tt::sha256_file_hex_inproc(model_path, model_sha, sizeof(model_sha))) {
+        snprintf(r.error, sizeof(r.error), "could not sha256 %s", model_path);
+        return r;
+    }
+
+    // 2. Compute |wf - held_out|
+    double gap = wf_mean_val - held_out_metric;
+    if (gap < 0) gap = -gap;
+
+    // 3. Refuse on gap > threshold (unless force)
+    if (gap > gap_threshold && !force) {
+        snprintf(r.error, sizeof(r.error),
+            "REFUSE: gap %.4f > threshold %.4f (use force=1 to override)",
+            gap, gap_threshold);
+        return r;
+    }
+
+    // 4. Pin LC_NUMERIC=C for canonical body construction. uselocale() is
+    //    per-thread — doesn't disturb the rest of the process.
+    locale_t pinned = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+    locale_t prev = (locale_t)0;
+    if (pinned) prev = uselocale(pinned);
+
+    // 5. Canonical body — must match bash script + verifier byte-for-byte.
+    //    Field order: format-version, sha256, trained_on, wf_mean_val,
+    //    held_out_metric, gap, gap_threshold. Each line ends with \n.
+    char canonical[2048];
+    int n = snprintf(canonical, sizeof(canonical),
+        "model_format_version=%d\n"
+        "model_sha256=%s\n"
+        "trained_on=%s\n"
+        "wf_mean_val=%g\n"
+        "held_out_metric=%g\n"
+        "gap=%.6f\n"
+        "gap_threshold=%g\n",
+        format_version, model_sha, trained_on_iso,
+        wf_mean_val, held_out_metric, gap, gap_threshold);
+
+    // Restore prior locale ASAP — every subsequent return must NOT undo this twice
+    if (pinned) {
+        uselocale(prev);
+        freelocale(pinned);
+    }
+
+    if (n <= 0 || (size_t)n >= sizeof(canonical)) {
+        snprintf(r.error, sizeof(r.error), "canonical body overflow (n=%d)", n);
+        return r;
+    }
+
+    // 6. HMAC-SHA256(secret, canonical). Empty secret = dev-mode placeholder
+    //    so the file is well-formed but the engine knows to skip sig check.
+    char sig[80];
+    const char* effective_secret = (secret && secret[0]) ? secret : "";
+    if (effective_secret[0] == '\0') {
+        memcpy(sig, "devmode-no-secret-no-signature", 31);
+        sig[31] = '\0';
+    } else {
+        if (!tt::hmac_sha256_hex(effective_secret, canonical, sig)) {
+            snprintf(r.error, sizeof(r.error), "HMAC-SHA256 computation failed");
+            return r;
+        }
+    }
+
+    // 7. Atomic write: write to <stamp>.tmp, then rename. POSIX rename()
+    //    is atomic within the same filesystem, so a reader can never
+    //    observe a partially-written stamp.
+    snprintf(r.stamp_path, sizeof(r.stamp_path), "%s.stamp", model_path);
+    char tmp_path[520];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", r.stamp_path);
+
+    FILE* f = fopen(tmp_path, "w");
+    if (!f) {
+        snprintf(r.error, sizeof(r.error), "fopen failed: %s", tmp_path);
+        return r;
+    }
+    fputs(canonical, f);
+    fprintf(f, "signature=%s\n", sig);
+    if (fclose(f) != 0) {
+        unlink(tmp_path);
+        snprintf(r.error, sizeof(r.error), "fclose failed: %s", tmp_path);
+        return r;
+    }
+
+    if (rename(tmp_path, r.stamp_path) != 0) {
+        unlink(tmp_path);
+        snprintf(r.error, sizeof(r.error), "rename failed: %s -> %s",
+                 tmp_path, r.stamp_path);
+        return r;
+    }
+
+    r.ok = 1;
     return r;
 }
 

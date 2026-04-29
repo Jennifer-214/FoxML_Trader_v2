@@ -149,7 +149,7 @@ if(USE_IMGUI_GUI)
         imgui_lib
         ${SDL2_LIBRARIES}
         OpenGL::GL
-        pthread
+        ssl crypto pthread
     )
     if(USE_NATIVE_128)
         target_compile_definitions(foxml_suite PRIVATE USE_NATIVE_128)
@@ -176,7 +176,7 @@ target_include_directories(controller_test PRIVATE ${CMAKE_SOURCE_DIR}/..)
 # MULTICORE_TUI. Match the production engine target.
 target_compile_definitions(controller_test PRIVATE MULTICORE_TUI)
 find_package(Threads REQUIRED)
-target_link_libraries(controller_test PRIVATE Threads::Threads)
+target_link_libraries(controller_test PRIVATE Threads::Threads ssl crypto)
 
 # Phase 8a c7 — DepthRecorder test binary. Separate from controller_test
 # because the recorder writes to disk and tests use tempdir fixtures. Pulls
@@ -196,7 +196,7 @@ add_executable(parity_harness tests/parity_harness.cpp)
 target_compile_options(parity_harness PRIVATE -O3 -march=native -funroll-loops -flto)
 target_include_directories(parity_harness PRIVATE ${CMAKE_SOURCE_DIR}/..)
 target_compile_definitions(parity_harness PRIVATE MULTICORE_TUI)
-target_link_libraries(parity_harness PRIVATE Threads::Threads)
+target_link_libraries(parity_harness PRIVATE Threads::Threads ssl crypto)
 
 enable_testing()
 add_test(NAME controller_test COMMAND controller_test)
