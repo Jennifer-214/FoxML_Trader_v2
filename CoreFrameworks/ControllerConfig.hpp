@@ -419,6 +419,15 @@ template <unsigned F> struct ControllerConfig {
                                      // (clamped to [0.05, 0.30] in HeldOutSplit_Make)
   FPN<F>   gap_acceptable_threshold; // max acceptable |WF mean - held_out| gap
                                      // (default 0.05 — gap above this = poor generalization)
+  // v5.2.0 (held-out gate Phase 1) — model attestation infrastructure.
+  // Each .bin model can have a paired .stamp file with hash+signature
+  // attesting that held-out validation passed. When held_out_gate_strict=1,
+  // CoreModelZoo_LoadFromDir refuses to load .bin files without a valid
+  // stamp. Defaults: strict=0 (gate disabled — existing models still load),
+  // secret="" (which makes verify_model_stamp accept any stamp signature
+  // — useful for dev). Set both for production live deploy.
+  int    held_out_gate_strict;       // 0=warn-only (default), 1=refuse load, -1=skip
+  char   held_out_stamp_secret[128]; // HMAC-SHA256 secret for stamp signing/verify
   // Prediction normalization — Phase 7F (default OFF)
   int prediction_normalize; // 0=disabled, 1=z-score normalize predictions
                             // (activates after 100)
@@ -749,6 +758,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // Phase 7 prep — held-out validation defaults
   cfg.held_out_fraction           = FPN_FromDouble<F>(0.20);     // 20% reserved
   cfg.gap_acceptable_threshold    = FPN_FromDouble<F>(0.05);     // 5% max gap for "OK"
+  cfg.held_out_gate_strict        = 0;                            // gate off by default (warn-only)
+  cfg.held_out_stamp_secret[0]    = '\0';                         // empty = accept-any (dev)
   cfg.prediction_normalize = 0;
   cfg.barrier_gate_enabled = 0;
   cfg.model_verify_strict = 0;  // 0=warn, 1=strict (fail on mismatch), -1=skip
@@ -1075,6 +1086,17 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(confidence_threshold_scale)
     CFG_PARSE_FPN(held_out_fraction)
     CFG_PARSE_FPN(gap_acceptable_threshold)
+    if (strcmp(key, "held_out_gate_strict") == 0) {
+        cfg.held_out_gate_strict = atoi(val);
+        continue;
+    }
+    if (strcmp(key, "held_out_stamp_secret") == 0) {
+        size_t n = strlen(val);
+        if (n >= sizeof(cfg.held_out_stamp_secret)) n = sizeof(cfg.held_out_stamp_secret) - 1;
+        memcpy(cfg.held_out_stamp_secret, val, n);
+        cfg.held_out_stamp_secret[n] = '\0';
+        continue;
+    }
     CFG_PARSE_INT(prediction_normalize)
     CFG_PARSE_INT(barrier_gate_enabled)
     CFG_PARSE_INT(model_verify_strict)

@@ -7141,6 +7141,127 @@ e3_skip_load:;
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // v5.2.0 — held-out gate Phase 1: verify_model_stamp
+    //
+    // The verifier reads a `.stamp` file and validates: format-version match,
+    // gap below threshold, model file hash unchanged, HMAC-SHA256 signature
+    // valid. Tests use temp files written + cleaned up inline.
+    // ─────────────────────────────────────────────────────────────────────
+    printf("\n--- v5.2.0 — held-out gate: verify_model_stamp ---\n");
+    {
+        // Helper: write a tiny "model" file (just text) — enough for sha256
+        const char* model_path = "/tmp/tt_test_model.bin";
+        const char* stamp_path = "/tmp/tt_test_model.bin.stamp";
+        FILE* f = fopen(model_path, "w");
+        if (f) {
+            fputs("test-model-bytes-v5.2.0\n", f);
+            fclose(f);
+        }
+        // Compute the actual sha256 of our test "model"
+        char actual_sha[80] = {0};
+        int sha_ok = sha256_file_hex(model_path, actual_sha, sizeof(actual_sha));
+        check("v5.2.0: sha256_file_hex computes hash", sha_ok == 1);
+
+        // Test 1: stamp missing → returns -1
+        unlink(stamp_path);
+        ModelStampResult r = verify_model_stamp(model_path, "secret", 0.05, 12);
+        check("v5.2.0: missing stamp → valid == -1", r.valid == -1);
+
+        // Test 2: well-formed stamp with empty secret (dev mode) → ACCEPT
+        f = fopen(stamp_path, "w");
+        if (f) {
+            fprintf(f,
+                "model_format_version=12\n"
+                "model_sha256=%s\n"
+                "trained_on=2026-04-29\n"
+                "wf_mean_val=0.55\n"
+                "held_out_metric=0.53\n"
+                "gap=0.02\n"
+                "gap_threshold=0.05\n"
+                "signature=devmode-not-checked\n", actual_sha);
+            fclose(f);
+        }
+        r = verify_model_stamp(model_path, "", 0.05, 12);
+        check("v5.2.0: empty secret = dev mode = accept", r.valid == 1);
+
+        // Test 3: format-version mismatch → REJECT
+        r = verify_model_stamp(model_path, "", 0.05, 99);  // engine wants v99
+        check("v5.2.0: format-version mismatch → reject", r.valid == 0);
+
+        // Test 4: gap exceeds threshold → REJECT
+        f = fopen(stamp_path, "w");
+        if (f) {
+            fprintf(f,
+                "model_format_version=12\n"
+                "model_sha256=%s\n"
+                "gap=0.15\n"               // wider than threshold
+                "gap_threshold=0.05\n"
+                "signature=x\n", actual_sha);
+            fclose(f);
+        }
+        r = verify_model_stamp(model_path, "", 0.05, 12);
+        check("v5.2.0: gap > threshold → reject", r.valid == 0);
+
+        // Test 5: model hash mismatch → REJECT (simulates post-stamp swap)
+        f = fopen(stamp_path, "w");
+        if (f) {
+            fprintf(f,
+                "model_format_version=12\n"
+                "model_sha256=deadbeef0000000000000000000000000000000000000000000000000000beef\n"
+                "gap=0.02\n"
+                "gap_threshold=0.05\n"
+                "signature=x\n");
+            fclose(f);
+        }
+        r = verify_model_stamp(model_path, "", 0.05, 12);
+        check("v5.2.0: model hash mismatch → reject", r.valid == 0);
+
+        // Test 6: signature mismatch in real-secret mode → REJECT
+        f = fopen(stamp_path, "w");
+        if (f) {
+            fprintf(f,
+                "model_format_version=12\n"
+                "model_sha256=%s\n"
+                "gap=0.02\n"
+                "gap_threshold=0.05\n"
+                "signature=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n",
+                actual_sha);
+            fclose(f);
+        }
+        r = verify_model_stamp(model_path, "real-secret-key", 0.05, 12);
+        check("v5.2.0: bad signature with real secret → reject", r.valid == 0);
+
+        // Test 7: well-formed stamp with proper HMAC → ACCEPT
+        // Generate the actual signature to embed
+        char canonical_body[1024];
+        snprintf(canonical_body, sizeof(canonical_body),
+            "model_format_version=12\nmodel_sha256=%s\ngap=0.02\ngap_threshold=0.05\n",
+            actual_sha);
+        char hmac_cmd[2048];
+        snprintf(hmac_cmd, sizeof(hmac_cmd),
+            "printf '%%s' \"%s\" | openssl dgst -sha256 -hmac 'real-secret-key' 2>/dev/null | awk '{print $NF}'",
+            canonical_body);
+        FILE* p = popen(hmac_cmd, "r");
+        char real_sig[128] = {0};
+        if (p && fgets(real_sig, sizeof(real_sig), p)) {
+            char* nl = strchr(real_sig, '\n'); if (nl) *nl = '\0';
+        }
+        if (p) pclose(p);
+
+        f = fopen(stamp_path, "w");
+        if (f) {
+            fprintf(f, "%ssignature=%s\n", canonical_body, real_sig);
+            fclose(f);
+        }
+        r = verify_model_stamp(model_path, "real-secret-key", 0.05, 12);
+        check("v5.2.0: valid HMAC signature → accept", r.valid == 1);
+
+        // Cleanup
+        unlink(model_path);
+        unlink(stamp_path);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

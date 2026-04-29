@@ -4,7 +4,7 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 
 **Re-generate**: `./tools/gen_code_map.sh`
 
-**Last regenerated**: 2026-04-29 (commit 439dcd2)
+**Last regenerated**: 2026-04-29 (commit 3a94223)
 
 ## CoreFrameworks/
 
@@ -22,9 +22,9 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 
 ### ControllerConfig.hpp
 
-- `Fee_Compute` — line 541
-- `ControllerConfig_ResolveForCore` — line 559
-- `ControllerConfig_Load` — line 816
+- `Fee_Compute` — line 550
+- `ControllerConfig_ResolveForCore` — line 568
+- `ControllerConfig_Load` — line 827
 
 ### ControllerEventLoop.hpp
 
@@ -497,12 +497,12 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 ### CoreModelZoo.hpp
 
 - `CoreModelZoo_Init` — line 58
-- `CoreModelZoo_TryLoadRole` — line 71
-- `CoreModelZoo_LoadFromDir` — line 104
-- `CoreModelZoo_LoadLegacy` — line 135
-- `CoreModelZoo_Free` — line 146
-- `CoreModelZoo_HasAny` — line 156
-- `CoreModelZoo_VerifyExpected` — line 184 — features in the pack, model crashes or produces garbage.
+- `CoreModelZoo_TryLoadRole` — line 76
+- `CoreModelZoo_LoadFromDir` — line 143
+- `CoreModelZoo_LoadLegacy` — line 180
+- `CoreModelZoo_Free` — line 191
+- `CoreModelZoo_HasAny` — line 201
+- `CoreModelZoo_VerifyExpected` — line 229 — features in the pack, model crashes or produces garbage.
 
 ### CostModel.hpp
 

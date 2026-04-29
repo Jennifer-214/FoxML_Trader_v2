@@ -67,33 +67,72 @@ inline void CoreModelZoo_Init(CoreModelZoo<F> *zoo) {
 // try to load a single model from <dir>/<role>.json, falling back to <role>.xgb
 // returns 1 if loaded, 0 if file not found or load failed
 //======================================================================================================
+// v5.2.0: held-out gate. When `secret` is non-null + `strict != 0`, refuse
+// to load a model file that doesn't have a valid `.stamp` sibling. See
+// `verify_model_stamp` in ModelInference.hpp.
+//
+// Default args preserve pre-v5.2.0 callers — no gate when secret==nullptr.
 template <unsigned F>
 inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
-                                    const char *role_name, int backend) {
+                                    const char *role_name, int backend,
+                                    const char* held_out_stamp_secret = nullptr,
+                                    double gap_threshold = 0.05,
+                                    int held_out_gate_strict = 0) {
     char path[512];
     struct stat st;
+    const char* found_path = nullptr;
 
     // try .json first (modern XGBoost format, matches Training panel default)
     snprintf(path, sizeof(path), "%s/%s.json", dir, role_name);
     if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
-        return Model_Load(handle, path, backend);
+        found_path = path;
     }
 
     // fall back to .xgb (older binary format)
-    snprintf(path, sizeof(path), "%s/%s.xgb", dir, role_name);
-    if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
-        return Model_Load(handle, path, backend);
-    }
-
-    // .txt for LightGBM
-    if (backend == MODEL_BACKEND_LIGHTGBM) {
-        snprintf(path, sizeof(path), "%s/%s.txt", dir, role_name);
+    if (!found_path) {
+        snprintf(path, sizeof(path), "%s/%s.xgb", dir, role_name);
         if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
-            return Model_Load(handle, path, backend);
+            found_path = path;
         }
     }
 
-    return 0;
+    // .txt for LightGBM
+    if (!found_path && backend == MODEL_BACKEND_LIGHTGBM) {
+        snprintf(path, sizeof(path), "%s/%s.txt", dir, role_name);
+        if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+            found_path = path;
+        }
+    }
+
+    if (!found_path) return 0;
+
+    // v5.2.0 held-out gate: verify stamp before loading. Skip in non-strict
+    // modes (-1 = explicit skip, 0 = warn-only) to preserve back-compat
+    // with un-stamped models. strict=1 = refuse load on any failure.
+    if (held_out_gate_strict != -1) {
+        ModelStampResult sr = verify_model_stamp(found_path,
+            held_out_stamp_secret ? held_out_stamp_secret : "",
+            gap_threshold,
+            MODEL_FORMAT_VERSION);
+        if (sr.valid <= 0) {
+            if (held_out_gate_strict == 1) {
+                fprintf(stderr,
+                    "[held-out gate] REFUSING to load %s — %s (strict mode)\n",
+                    found_path, sr.reason);
+                return 0;  // refuse
+            }
+            // warn-only: log and continue
+            fprintf(stderr,
+                "[held-out gate] WARN: %s — %s (strict=0, loading anyway)\n",
+                found_path, sr.reason);
+        } else {
+            fprintf(stderr,
+                "[held-out gate] %s: %s\n",
+                found_path, sr.reason);
+        }
+    }
+
+    return Model_Load(handle, found_path, backend);
 }
 
 //======================================================================================================
@@ -101,19 +140,25 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
 // disabled. returns the number of roles loaded.
 //======================================================================================================
 template <unsigned F>
-inline int CoreModelZoo_LoadFromDir(CoreModelZoo<F> *zoo, const char *dir, int backend) {
+inline int CoreModelZoo_LoadFromDir(CoreModelZoo<F> *zoo, const char *dir, int backend,
+                                     const char* held_out_stamp_secret = nullptr,
+                                     double gap_threshold = 0.05,
+                                     int held_out_gate_strict = 0) {
     if (!dir || dir[0] == '\0') return 0;
 
     int loaded = 0;
-    if (CoreModelZoo_TryLoadRole(&zoo->barrier, dir, "barrier", backend)) {
+    if (CoreModelZoo_TryLoadRole(&zoo->barrier, dir, "barrier", backend,
+            held_out_stamp_secret, gap_threshold, held_out_gate_strict)) {
         zoo->loaded_mask |= CORE_MODEL_BARRIER;
         loaded++;
     }
-    if (CoreModelZoo_TryLoadRole(&zoo->regime, dir, "regime", backend)) {
+    if (CoreModelZoo_TryLoadRole(&zoo->regime, dir, "regime", backend,
+            held_out_stamp_secret, gap_threshold, held_out_gate_strict)) {
         zoo->loaded_mask |= CORE_MODEL_REGIME;
         loaded++;
     }
-    if (CoreModelZoo_TryLoadRole(&zoo->exit, dir, "exit", backend)) {
+    if (CoreModelZoo_TryLoadRole(&zoo->exit, dir, "exit", backend,
+            held_out_stamp_secret, gap_threshold, held_out_gate_strict)) {
         zoo->loaded_mask |= CORE_MODEL_EXIT;
         loaded++;
     }

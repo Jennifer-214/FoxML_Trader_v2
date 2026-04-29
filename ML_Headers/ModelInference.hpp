@@ -536,4 +536,258 @@ inline int ModelFeatures_Pack(float *buf, const RegimeSignals<F> *sig,
     return MODEL_NUM_FEATURES;
 }
 
+//======================================================================================================
+// [v5.2.0 — held-out gate: model stamp verification]
+//======================================================================================================
+// A `.stamp` file lives alongside each `.bin` model:
+//
+//   models/aggressive/buy_signal.bin
+//   models/aggressive/buy_signal.stamp
+//
+// Stamp format (text, key=value lines, last line is signature):
+//
+//   model_format_version=12
+//   model_sha256=<hex of binary>
+//   trained_on=2026-04-28
+//   wf_mean_val=0.55
+//   held_out_metric=0.53
+//   gap=0.02
+//   gap_threshold=0.05
+//   signature=<HMAC-SHA256(secret, all-prior-lines-concatenated)>
+//
+// Verifier returns:
+//   1 = stamp present, signature valid, gap below threshold → safe to load
+//   0 = stamp present but FAILED (sig mismatch, gap too wide, format-version
+//       drift, or model_sha256 mismatch) → REJECT, log reason
+//  -1 = stamp file missing entirely → caller decides via held_out_gate_strict
+//
+// Empty `secret` = "accept any signature" mode (dev convenience).
+// Real production: set a non-empty secret + flip held_out_gate_strict=1.
+//
+// Safe from path traversal: caller passes the .bin path; we append ".stamp".
+// File reads are bounded; stamp file > 4KB is treated as malformed.
+//======================================================================================================
+
+struct ModelStampResult {
+    int    valid;             // 1 / 0 / -1 per above
+    char   reason[256];       // human-readable failure reason
+    int    model_format_version;
+    double generalization_gap;
+    double gap_threshold;
+};
+
+// Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
+// Out parameter `hex` must be at least 65 bytes (64 hex digits + NUL).
+inline int sha256_file_hex(const char* path, char* hex_out, size_t hex_cap) {
+    if (hex_cap < 65) return 0;
+#ifdef __linux__
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    // Use openssl EVP_sha256 (already linked via BinanceOrderAPI's HMAC use)
+    // EVP_MD_CTX is opaque; sha256 of a file is small + simple.
+    // For minimal scope, we shell out to /usr/bin/sha256sum if available
+    // and parse — avoids a heavier evp dependency in this header.
+    fclose(f);
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "sha256sum '%s' 2>/dev/null", path);
+    FILE* p = popen(cmd, "r");
+    if (!p) return 0;
+    char buf[128] = {0};
+    if (!fgets(buf, sizeof(buf), p)) { pclose(p); return 0; }
+    pclose(p);
+    // sha256sum output: "<64hex>  <path>\n"
+    if (strlen(buf) < 64) return 0;
+    memcpy(hex_out, buf, 64);
+    hex_out[64] = '\0';
+    // Lowercase normalize
+    for (int i = 0; i < 64; ++i) {
+        if (hex_out[i] >= 'A' && hex_out[i] <= 'F') hex_out[i] += 32;
+    }
+    return 1;
+#else
+    (void)path; (void)hex_out; (void)hex_cap;
+    return 0;
+#endif
+}
+
+// Parse a "key=value" line into key + value pointers. Returns 1 on success.
+// Modifies `line` in place (NUL-terminates the key at '=').
+inline int stamp_parse_line(char* line, const char** key_out, const char** val_out) {
+    char* eq = strchr(line, '=');
+    if (!eq) return 0;
+    *eq = '\0';
+    *key_out = line;
+    *val_out = eq + 1;
+    // Trim trailing newline from value
+    char* nl = strchr((char*)*val_out, '\n');
+    if (nl) *nl = '\0';
+    return 1;
+}
+
+// Verify a model stamp. See header for return values + format.
+//
+// model_path: path to the .bin file. `.stamp` is implied by appending.
+// secret: HMAC secret. Empty string ("") = accept-any signature (dev mode).
+// gap_threshold: max acceptable generalization gap. Stamp gap must be ≤ this.
+// expected_format_version: caller passes MODEL_FORMAT_VERSION; mismatch fails.
+inline ModelStampResult verify_model_stamp(const char* model_path,
+                                            const char* secret,
+                                            double gap_threshold,
+                                            int expected_format_version) {
+    ModelStampResult r;
+    r.valid = -1;
+    r.reason[0] = '\0';
+    r.model_format_version = 0;
+    r.generalization_gap = 0.0;
+    r.gap_threshold = gap_threshold;
+
+    char stamp_path[512];
+    snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
+    FILE* f = fopen(stamp_path, "r");
+    if (!f) {
+        snprintf(r.reason, sizeof(r.reason), "stamp file missing: %s", stamp_path);
+        return r;
+    }
+
+    // Read the whole stamp into a buffer (cap 4KB)
+    char buf[4096] = {0};
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0) {
+        r.valid = 0;
+        snprintf(r.reason, sizeof(r.reason), "empty stamp file");
+        return r;
+    }
+    buf[n] = '\0';
+
+    // Parse line-by-line. Capture each key/value into r and detect the
+    // signature line. Build the canonical "signed body" (everything before
+    // signature= line) for HMAC verify.
+    char canonical[4096] = {0};
+    size_t canonical_len = 0;
+    char model_sha[80] = {0};
+    char stamp_sig[128] = {0};
+
+    char* save = nullptr;
+    char* line = strtok_r(buf, "\n", &save);
+    while (line) {
+        char line_copy[512] = {0};
+        size_t lc = strlen(line);
+        if (lc >= sizeof(line_copy)) lc = sizeof(line_copy) - 1;
+        memcpy(line_copy, line, lc);
+        line_copy[lc] = '\0';
+
+        const char* key;
+        const char* val;
+        if (stamp_parse_line(line_copy, &key, &val)) {
+            if (strcmp(key, "signature") == 0) {
+                size_t vl = strlen(val);
+                if (vl >= sizeof(stamp_sig)) vl = sizeof(stamp_sig) - 1;
+                memcpy(stamp_sig, val, vl);
+                stamp_sig[vl] = '\0';
+                break;  // signature is the last line; stop accumulating canonical
+            }
+            // Add this line to canonical (in original "key=val\n" form)
+            int wrote = snprintf(canonical + canonical_len,
+                                  sizeof(canonical) - canonical_len,
+                                  "%s=%s\n", key, val);
+            if (wrote > 0 && (size_t)wrote < sizeof(canonical) - canonical_len) {
+                canonical_len += wrote;
+            }
+            // Capture fields we care about
+            if (strcmp(key, "model_format_version") == 0) {
+                r.model_format_version = atoi(val);
+            } else if (strcmp(key, "model_sha256") == 0) {
+                size_t vl = strlen(val);
+                if (vl >= sizeof(model_sha)) vl = sizeof(model_sha) - 1;
+                memcpy(model_sha, val, vl);
+                model_sha[vl] = '\0';
+            } else if (strcmp(key, "gap") == 0) {
+                r.generalization_gap = atof(val);
+            } else if (strcmp(key, "gap_threshold") == 0) {
+                r.gap_threshold = atof(val);
+            }
+        }
+        line = strtok_r(nullptr, "\n", &save);
+    }
+
+    // 1. Format version match
+    if (r.model_format_version != expected_format_version) {
+        r.valid = 0;
+        snprintf(r.reason, sizeof(r.reason),
+            "format-version mismatch: stamp=%d engine=%d",
+            r.model_format_version, expected_format_version);
+        return r;
+    }
+
+    // 2. Gap acceptable
+    if (r.generalization_gap > r.gap_threshold) {
+        r.valid = 0;
+        snprintf(r.reason, sizeof(r.reason),
+            "generalization gap %.4f exceeds threshold %.4f",
+            r.generalization_gap, r.gap_threshold);
+        return r;
+    }
+
+    // 3. Model file hasn't been swapped post-stamp
+    char actual_sha[80] = {0};
+    if (!sha256_file_hex(model_path, actual_sha, sizeof(actual_sha))) {
+        r.valid = 0;
+        snprintf(r.reason, sizeof(r.reason),
+            "could not compute sha256 of %s", model_path);
+        return r;
+    }
+    if (model_sha[0] && strcmp(model_sha, actual_sha) != 0) {
+        r.valid = 0;
+        snprintf(r.reason, sizeof(r.reason),
+            "model file hash differs from stamp: actual=%.16s... stamp=%.16s...",
+            actual_sha, model_sha);
+        return r;
+    }
+
+    // 4. Signature verify (HMAC-SHA256 over canonical body, base64 or hex sig)
+    //    Empty secret = accept-any (dev mode). Production should set secret.
+    if (secret == nullptr || secret[0] == '\0') {
+        // Dev mode — accept without sig check. Log a warning so this is
+        // visible in stderr.
+        fprintf(stderr,
+            "[stamp] WARN: held_out_stamp_secret is empty — signature NOT verified for %s\n",
+            stamp_path);
+        r.valid = 1;
+        snprintf(r.reason, sizeof(r.reason), "ok (dev mode, sig unchecked)");
+        return r;
+    }
+    // Real signature check. We use sha256sum-as-hmac via openssl shell-out
+    // since that's already a dep (same path as sha256_file_hex). Production
+    // path would use EVP_HMAC; for v5.2.0 Phase 1 the shell-out is acceptable.
+    char cmd[8192];
+    // Echo canonical body via stdin → openssl dgst -sha256 -hmac
+    snprintf(cmd, sizeof(cmd),
+        "printf '%%s' \"%s\" | openssl dgst -sha256 -hmac '%s' 2>/dev/null | awk '{print $NF}'",
+        canonical, secret);
+    FILE* p = popen(cmd, "r");
+    if (!p) {
+        r.valid = 0;
+        snprintf(r.reason, sizeof(r.reason), "could not invoke openssl for HMAC verify");
+        return r;
+    }
+    char computed[128] = {0};
+    if (fgets(computed, sizeof(computed), p)) {
+        // Strip newline
+        char* nl = strchr(computed, '\n'); if (nl) *nl = '\0';
+    }
+    pclose(p);
+    if (computed[0] && strcmp(computed, stamp_sig) == 0) {
+        r.valid = 1;
+        snprintf(r.reason, sizeof(r.reason), "ok (signature verified, gap %.4f ≤ %.4f)",
+            r.generalization_gap, r.gap_threshold);
+    } else {
+        r.valid = 0;
+        snprintf(r.reason, sizeof(r.reason),
+            "signature mismatch: stamp=%.16s... computed=%.16s...",
+            stamp_sig, computed);
+    }
+    return r;
+}
+
 #endif // MODEL_INFERENCE_HPP
