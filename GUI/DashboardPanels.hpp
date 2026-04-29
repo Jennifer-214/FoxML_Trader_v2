@@ -1771,11 +1771,12 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
 
         ImGuiTableFlags tf = ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
                               ImGuiTableFlags_SizingStretchProp;
-        if (ImGui::BeginTable("##percore_hot", 8, tf)) {
+        if (ImGui::BeginTable("##percore_hot", 9, tf)) {
             ImGui::TableSetupColumn("Engine",  ImGuiTableColumnFlags_WidthFixed, 45);
             ImGui::TableSetupColumn("Strat",   ImGuiTableColumnFlags_WidthFixed, 35);
             ImGui::TableSetupColumn("Samples", ImGuiTableColumnFlags_WidthFixed, 55);
             ImGui::TableSetupColumn("Min",     ImGuiTableColumnFlags_WidthFixed, 50);
+            ImGui::TableSetupColumn("Avg",     ImGuiTableColumnFlags_WidthFixed, 50);
             ImGui::TableSetupColumn("p50",     ImGuiTableColumnFlags_WidthFixed, 50);
             ImGui::TableSetupColumn("p95",     ImGuiTableColumnFlags_WidthFixed, 50);
             ImGui::TableSetupColumn("p99",     ImGuiTableColumnFlags_WidthFixed, 50);
@@ -1793,10 +1794,11 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                 ImGui::TableNextColumn();
                 if (pc->samples == 0) {
                     ImGui::TextColored(FoxmlColors::comment, "-");
-                    for (int j = 0; j < 5; ++j) { ImGui::TableNextColumn(); ImGui::TextColored(FoxmlColors::comment, "-"); }
+                    for (int j = 0; j < 6; ++j) { ImGui::TableNextColumn(); ImGui::TextColored(FoxmlColors::comment, "-"); }
                 } else {
                     ImGui::Text("%lu", (unsigned long)pc->samples);
                     ImGui::TableNextColumn(); ImGui::Text("%.0f", pc->min_ns);
+                    ImGui::TableNextColumn(); ImGui::Text("%.0f", pc->avg_ns);
                     ImGui::TableNextColumn(); ImGui::Text("%.0f", pc->p50_ns);
                     ImGui::TableNextColumn(); ImGui::Text("%.0f", pc->p95_ns);
                     ImGui::TableNextColumn(); ImGui::Text("%.0f", pc->p99_ns);
@@ -1811,11 +1813,12 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
         ImGui::TextColored(FoxmlColors::comment,
             "(per-cycle work in engine_arch=per_core_slow; centralized = 0 samples)");
 
-        if (ImGui::BeginTable("##percore_slow", 8, tf)) {
+        if (ImGui::BeginTable("##percore_slow", 9, tf)) {
             ImGui::TableSetupColumn("Engine",  ImGuiTableColumnFlags_WidthFixed, 45);
             ImGui::TableSetupColumn("Strat",   ImGuiTableColumnFlags_WidthFixed, 35);
             ImGui::TableSetupColumn("Samples", ImGuiTableColumnFlags_WidthFixed, 55);
             ImGui::TableSetupColumn("Min",     ImGuiTableColumnFlags_WidthFixed, 60);
+            ImGui::TableSetupColumn("Avg",     ImGuiTableColumnFlags_WidthFixed, 60);
             ImGui::TableSetupColumn("p50",     ImGuiTableColumnFlags_WidthFixed, 60);
             ImGui::TableSetupColumn("p95",     ImGuiTableColumnFlags_WidthFixed, 60);
             ImGui::TableSetupColumn("p99",     ImGuiTableColumnFlags_WidthFixed, 60);
@@ -1833,7 +1836,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                 ImGui::TableNextColumn();
                 if (pc->sp_samples == 0) {
                     ImGui::TextColored(FoxmlColors::comment, "-");
-                    for (int j = 0; j < 5; ++j) { ImGui::TableNextColumn(); ImGui::TextColored(FoxmlColors::comment, "-"); }
+                    for (int j = 0; j < 6; ++j) { ImGui::TableNextColumn(); ImGui::TextColored(FoxmlColors::comment, "-"); }
                 } else {
                     // Slow-path values are µs-scale; show with µ suffix when large.
                     auto fmt_ns = [](double ns) -> const char* {
@@ -1844,6 +1847,7 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                     };
                     ImGui::Text("%lu", (unsigned long)pc->sp_samples);
                     ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_min_ns));
+                    ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_avg_ns));
                     ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_p50_ns));
                     ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_p95_ns));
                     ImGui::TableNextColumn(); ImGui::Text("%s", fmt_ns(pc->sp_p99_ns));
