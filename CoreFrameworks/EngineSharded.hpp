@@ -842,6 +842,29 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             last_price.store(price_d, std::memory_order_relaxed);
             last_volume.store(volume_d, std::memory_order_relaxed);
 
+            // v5.1.4: GUI drag-TP/SL pickup runs per-tick, NOT at slow-path
+            // cadence. Pre-v5.1.4 this lived in the cadence block and gave
+            // 5-33s of perceived latency. Cost: one atomic_load + branch on
+            // -1 per tick (~5ns on a modern x86). Branch is taken only on
+            // the rare tick where a drag has just happened.
+#ifdef USE_IMGUI_GUI
+            {
+                int slot = __atomic_load_n(&g_shared.drag_slot, __ATOMIC_ACQUIRE);
+                if (slot >= 0 && slot < 16) {
+                    int is_tp = g_shared.drag_is_tp;
+                    double dprice = g_shared.drag_price;
+                    __atomic_store_n(&g_shared.drag_slot, -1, __ATOMIC_RELEASE);
+                    auto *pos = &state.oms->portfolio.positions[slot];
+                    if (state.oms->portfolio.active_bitmap & (uint16_t)(1u << slot)) {
+                        if (is_tp) pos->take_profit_price = FPN_FromDouble<F>(dprice);
+                        else       pos->stop_loss_price   = FPN_FromDouble<F>(dprice);
+                        fprintf(stderr, "[sharded] GUI drag: slot %d %s -> $%.2f\n",
+                                slot, is_tp ? "TP" : "SL", dprice);
+                    }
+                }
+            }
+#endif
+
             // v4.0 train-serve parity: update EMA price on every tick (matches
             // legacy PortfolioController_Tick behavior). Used by ML feature
             // pack — without this, sig->ema_sma_spread + sig->ema_above_sma
@@ -946,28 +969,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                             c, (unsigned)old_strat, (unsigned)pending);
                 }
 
-                // v4.0: GUI drag-TP/SL pickup. Mirrors the legacy main.cpp
-                // handler at main.cpp:585. Sharded mode previously ignored
-                // drag_slot (only legacy consumed it), so dragging TP/SL
-                // lines on the chart silently did nothing in sharded mode.
-                // Writes go directly to the OMS portfolio's position fields.
-                {
-                    int slot = __atomic_load_n(&g_shared.drag_slot, __ATOMIC_ACQUIRE);
-                    if (slot >= 0 && slot < 16) {
-                        int is_tp = g_shared.drag_is_tp;
-                        double dprice = g_shared.drag_price;
-                        __atomic_store_n(&g_shared.drag_slot, -1, __ATOMIC_RELEASE);
-                        auto *pos = &state.oms->portfolio.positions[slot];
-                        if (state.oms->portfolio.active_bitmap & (uint16_t)(1u << slot)) {
-                            if (is_tp)
-                                pos->take_profit_price = FPN_FromDouble<F>(dprice);
-                            else
-                                pos->stop_loss_price = FPN_FromDouble<F>(dprice);
-                            fprintf(stderr, "[sharded] GUI drag: slot %d %s -> $%.2f\n",
-                                    slot, is_tp ? "TP" : "SL", dprice);
-                        }
-                    }
-                }
+                // v5.1.4: drag-TP/SL pickup MOVED out of the slow-path cadence
+                // block to fire every tick — see fan_out's tick-rate handler
+                // at line ~870. Pre-v5.1.4 this lived here and added 5-33s of
+                // latency on every TP/SL drag, plus dropped back-to-back drags
+                // when the second one overwrote the slot before the engine
+                // saw the first. Tick-rate pickup gives ~tens of ms latency
+                // and reduces the back-to-back drop window proportionally.
 
                 // v4.0 hot-reload: GUI Settings panel writes engine.cfg and
                 // sets reload_requested. Sharded mode previously ignored this
