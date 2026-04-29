@@ -24,6 +24,13 @@ per-core risk-sharded crypto trading engine in C++17. one position per pinned CP
 
 built from scratch, self-taught, ~60k lines across engine + backtest suite + ML pipeline. reusable primitives extracted as a public C++20 header-only library: [**FoxLIB**](https://github.com/Jennyfirrr/FoxLIB).
 
+**recent (v5.3.x):**
+- pre-live ML rigor: held-out validation gate. models refuse to load in production unless they're signed with HMAC-SHA256 stamps proving the train↔held-out gap is below threshold ([v5.2.0](DOCS/CHANGELOG.md), [v5.3.0](DOCS/CHANGELOG.md))
+- live exchange reconciliation at boot: REST-fetches account / open orders / recent trades from binance, refuses to boot if exchange holds something the engine doesn't know about ([v5.2.1, v5.2.2](DOCS/CHANGELOG.md))
+- in-process HMAC + SHA-256 (no popen, no shell-injection surface) ([v5.3.0](DOCS/CHANGELOG.md))
+- auto-stamp wiring + JSONL run history for experiment tracking ([v5.3.2](DOCS/CHANGELOG.md))
+- 800+ unit tests across the engine + parity harness
+
 [![Donate](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.com/ncp/payment/8M6XLK7M8569C) [![Discord](https://img.shields.io/badge/Discord-Community-5865F2.svg)](https://discord.gg/asSDcYwPz)
 
 > **paper trading by default.** live trading via Binance REST API is supported but experimental — use at your own risk. set `use_real_money=1` and add API keys to `secrets.cfg`. no API key needed for market data feeds.
