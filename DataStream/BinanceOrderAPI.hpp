@@ -684,6 +684,38 @@ static inline int BinanceOrderAPI_GetBalance(BinanceOrderAPI *api,
     return 1;
 }
 
+// v5.2.1 (live reconciliation Phase 1): fetch open orders for the symbol.
+// `body` receives raw JSON array. Caller parses (or passes to
+// OrderManager_Reconcile which has the parser). Returns HTTP status.
+//
+// Why raw JSON here, parser in OrderManager: keeps the network layer
+// thin + testable with mock JSON, and keeps the reconcile logic
+// network-independent (testable without real REST calls).
+static inline int BinanceOrderAPI_GetOpenOrders(BinanceOrderAPI *api,
+                                                  char *body, size_t body_cap) {
+    char params[128];
+    snprintf(params, sizeof(params), "symbol=%s", api->symbol);
+    return binance_retry_request(api, "GET", "/api/v3/openOrders", params,
+                                  body, body_cap);
+}
+
+// v5.2.1: fetch recent trades (fills) for the symbol since `since_trade_id`.
+// Pass since_trade_id=0 for "last 100 trades" (Binance default). Pass
+// the last-known-processed trade id to catch only new fills.
+static inline int BinanceOrderAPI_GetMyTrades(BinanceOrderAPI *api,
+                                               int64_t since_trade_id,
+                                               char *body, size_t body_cap) {
+    char params[256];
+    if (since_trade_id > 0) {
+        snprintf(params, sizeof(params), "symbol=%s&fromId=%lld&limit=500",
+                 api->symbol, (long long)since_trade_id);
+    } else {
+        snprintf(params, sizeof(params), "symbol=%s&limit=100", api->symbol);
+    }
+    return binance_retry_request(api, "GET", "/api/v3/myTrades", params,
+                                  body, body_cap);
+}
+
 // query both USDT and BTC balances in a single API call
 // returns 1 on success, 0 on failure
 static inline int BinanceOrderAPI_GetBalances(BinanceOrderAPI *api,

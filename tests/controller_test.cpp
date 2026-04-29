@@ -23,6 +23,7 @@
 #include "../CoreFrameworks/ShardedSnapshotPersist.hpp"  // Phase 4 tests
 #include "../CoreFrameworks/ShardedBacktestDriver.hpp"   // Track E.1 tests
 #include "../DataStream/EngineTUI.hpp"                   // v5.0.4 — topology populator tests
+#include "../CoreFrameworks/Reconcile.hpp"                // v5.2.1 — live reconciliation tests
 #include "../ML_Headers/CoreModelZoo.hpp"                // Track E.2 tests
 #include "../DataStream/DepthReplayState.hpp"            // Track E.3 tests
 #include "../ML_Headers/FlowFeatures.hpp"                // v4.5 Wave 1 tests
@@ -7260,6 +7261,134 @@ e3_skip_load:;
         // Cleanup
         unlink(model_path);
         unlink(stamp_path);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // v5.2.1 — live reconciliation Phase 1 (logic, no network)
+    //
+    // The reconcile module's logic is unit-tested with mocked Binance
+    // JSON responses. Network is in BinanceOrderAPI.hpp (not tested here).
+    // ─────────────────────────────────────────────────────────────────────
+    printf("\n--- v5.2.1 — live reconciliation: parsing + decisions ---\n");
+    {
+        // Test 1: parse open orders JSON
+        const char* open_orders_json = R"([
+            {"symbol":"BTCUSDT","orderId":12345,"price":"60000.00","origQty":"0.01",
+             "status":"NEW","side":"BUY","clientOrderId":"tt-BTCUSDT-1"},
+            {"symbol":"BTCUSDT","orderId":67890,"price":"61000.00","origQty":"0.02",
+             "status":"PARTIALLY_FILLED","side":"SELL","clientOrderId":"manual-cancel-test"}
+        ])";
+        tt::ReconcileOpenOrder orders[8];
+        int n = tt::Reconcile_ParseOpenOrders(open_orders_json, orders, 8);
+        check("v5.2.1: parse 2 open orders", n == 2);
+        check("v5.2.1: order 0 id parsed", orders[0].order_id == 12345);
+        check("v5.2.1: order 0 price parsed", orders[0].price == 60000.0);
+        check("v5.2.1: order 0 is OURS (tt- prefix)", orders[0].is_ours == 1);
+        check("v5.2.1: order 1 is NOT ours", orders[1].is_ours == 0);
+        check("v5.2.1: order 0 status NEW", strcmp(orders[0].status, "NEW") == 0);
+
+        // Test 2: parse my-trades JSON
+        const char* trades_json = R"([
+            {"id":111,"orderId":12345,"price":"60000.00","qty":"0.01",
+             "commission":"0.06","time":1700000000000,"isBuyer":true,"isMaker":false},
+            {"id":222,"orderId":67890,"price":"61000.00","qty":"0.005",
+             "commission":"0.03","time":1700000060000,"isBuyer":false,"isMaker":true}
+        ])";
+        tt::ReconcileTrade trades[8];
+        n = tt::Reconcile_ParseMyTrades(trades_json, trades, 8);
+        check("v5.2.1: parse 2 trades", n == 2);
+        check("v5.2.1: trade 0 id parsed", trades[0].trade_id == 111);
+        check("v5.2.1: trade 0 is buyer (BUY fill)", trades[0].is_buyer == 1);
+        check("v5.2.1: trade 0 NOT maker (taker)", trades[0].is_maker == 0);
+        check("v5.2.1: trade 1 is maker", trades[1].is_maker == 1);
+
+        // Test 3: decide() with no disagreement → no actions, no refusal
+        {
+            tt::ReconcileResult r = tt::Reconcile_Decide(
+                /*usdt=*/10000.0, /*btc=*/0.0,
+                nullptr, 0,
+                nullptr, 0,
+                /*local_open=*/0);
+            check("v5.2.1: no orders + no trades + flat → no refusal",
+                  r.refused_boot == 0);
+            check("v5.2.1: no orders → 0 cancel actions", r.cancel_actions == 0);
+            check("v5.2.1: no trades → 0 fills to replay", r.fills_to_replay == 0);
+        }
+
+        // Test 4: our open orders → cancel actions counted
+        {
+            tt::ReconcileResult r = tt::Reconcile_Decide(
+                10000.0, 0.0,
+                orders, 2,           // 2 from earlier — 1 ours + 1 manual
+                nullptr, 0,
+                /*local_open=*/0);
+            check("v5.2.1: 1 of-ours order → 1 cancel action",
+                  r.cancel_actions == 1);
+        }
+
+        // Test 5: missed fills → replay count
+        {
+            tt::ReconcileResult r = tt::Reconcile_Decide(
+                10000.0, 0.0,
+                nullptr, 0,
+                trades, 2,
+                /*local_open=*/0);
+            check("v5.2.1: 2 trades since last → 2 fills to replay",
+                  r.fills_to_replay == 2);
+        }
+
+        // Test 6: CRITICAL — exchange has BTC but local has 0 positions
+        {
+            tt::ReconcileResult r = tt::Reconcile_Decide(
+                /*usdt=*/9000.0, /*btc=*/0.01,    // exchange has position
+                nullptr, 0,
+                nullptr, 0,
+                /*local_open=*/0);                 // local says nothing open
+            check("v5.2.1: exchange BTC > 0 but local flat → REFUSE BOOT",
+                  r.refused_boot == 1);
+            check("v5.2.1: refusal reason populated",
+                  strstr(r.refusal_reason, "Refusing to boot") != nullptr);
+        }
+
+        // Test 7: opposite case — local has open, exchange flat (likely
+        // missed sell fill). Soft handling, NOT refusal.
+        {
+            tt::ReconcileResult r = tt::Reconcile_Decide(
+                10000.0, 0.0,
+                nullptr, 0,
+                nullptr, 0,
+                /*local_open=*/1);                 // local says open
+            check("v5.2.1: local open + exchange flat → soft (no refusal)",
+                  r.refused_boot == 0);
+            check("v5.2.1: local open + exchange flat → diagnostic flag set",
+                  r.has_local_position_no_exchange == 1);
+        }
+
+        // Test 8: dust threshold — small BTC balance below dust = "no position"
+        {
+            tt::ReconcileResult r = tt::Reconcile_Decide(
+                10000.0, 0.000001,  // way below 0.00001 dust threshold
+                nullptr, 0,
+                nullptr, 0,
+                0);
+            check("v5.2.1: dust BTC balance → not flagged as exchange position",
+                  r.has_exchange_position_no_local == 0);
+        }
+
+        // Test 9: empty array
+        {
+            tt::ReconcileOpenOrder oo[1];
+            int n0 = tt::Reconcile_ParseOpenOrders("[]", oo, 1);
+            check("v5.2.1: empty array → 0 entries", n0 == 0);
+        }
+
+        // Test 10: malformed JSON (missing close brace) — graceful, no crash
+        {
+            tt::ReconcileOpenOrder oo[1];
+            int n0 = tt::Reconcile_ParseOpenOrders(
+                "[{\"orderId\":1,\"symbol\":\"BTCUSDT\"", oo, 1);
+            check("v5.2.1: malformed JSON → returns 0 (no crash)", n0 == 0);
+        }
     }
 
     printf("\n======================================\n");

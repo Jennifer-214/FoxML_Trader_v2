@@ -4,7 +4,7 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 
 **Re-generate**: `./tools/gen_code_map.sh`
 
-**Last regenerated**: 2026-04-29 (commit 3a94223)
+**Last regenerated**: 2026-04-29 (commit 94545a8)
 
 ## CoreFrameworks/
 
@@ -22,9 +22,9 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 
 ### ControllerConfig.hpp
 
-- `Fee_Compute` — line 550
-- `ControllerConfig_ResolveForCore` — line 568
-- `ControllerConfig_Load` — line 827
+- `Fee_Compute` — line 564
+- `ControllerConfig_ResolveForCore` — line 582
+- `ControllerConfig_Load` — line 843
 
 ### ControllerEventLoop.hpp
 
@@ -192,6 +192,13 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 - `Portfolio_Save` — line 362
 - `Portfolio_Load` — line 393
 
+### Reconcile.hpp
+
+- `Reconcile_ParseOpenOrders` — line 182 — Output: fills `out` array up to `out_cap`. Returns count parsed.
+- `Reconcile_ParseMyTrades` — line 215 — Output: fills `out` array up to `out_cap`. Returns count parsed.
+- `Reconcile_Decide` — line 257 — Outputs ReconcileResult with planned actions. Caller applies them.
+- `Reconcile_LogReport` — line 319 — 3. If refused_boot: caller exits / refuses to advance
+
 ### ReconciliationLoop.hpp
 
 - `ReconciliationLoop_Pass` — line 93
@@ -330,9 +337,11 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 - `BinanceOrderAPI_GetStatus` — line 578 — fills filled_qty and avg_price on success
 - `BinanceOrderAPI_LoadFilters` — line 627 — returns 1 on success, 0 on failure (caller should treat as fatal)
 - `BinanceOrderAPI_GetBalance` — line 662 — returns 1 on success, 0 on failure
-- `BinanceOrderAPI_GetBalances` — line 689 — returns 1 on success, 0 on failure
-- `BinanceOrderAPI_SyncClock` — line 713 — re-sync clock offset (call periodically or after reconnect)
-- `BinanceOrderAPI_Init` — line 727 — must be called after Cleanup, ServerTime, SyncClock, LoadFilters are defined
+- `BinanceOrderAPI_GetOpenOrders` — line 694 — network-independent (testable without real REST calls).
+- `BinanceOrderAPI_GetMyTrades` — line 705 — the last-known-processed trade id to catch only new fills.
+- `BinanceOrderAPI_GetBalances` — line 721 — returns 1 on success, 0 on failure
+- `BinanceOrderAPI_SyncClock` — line 745 — re-sync clock offset (call periodically or after reconnect)
+- `BinanceOrderAPI_Init` — line 759 — must be called after Cleanup, ServerTime, SyncClock, LoadFilters are defined
 
 ### BinanceUserData.hpp
 

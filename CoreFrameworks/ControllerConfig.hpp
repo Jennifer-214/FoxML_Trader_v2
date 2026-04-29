@@ -428,6 +428,20 @@ template <unsigned F> struct ControllerConfig {
   // — useful for dev). Set both for production live deploy.
   int    held_out_gate_strict;       // 0=warn-only (default), 1=refuse load, -1=skip
   char   held_out_stamp_secret[128]; // HMAC-SHA256 secret for stamp signing/verify
+  // v5.2.1 (live reconciliation Phase 1) — exchange-truth sync at boot
+  // (and optionally on heartbeat). LIVE-mode-only — paper mode skips
+  // reconcile entirely.
+  //   reconcile_interval_sec: 0 = boot-only (default, sufficient for
+  //                              most cases), >0 = poll cadence in
+  //                              seconds for heartbeat reconciliation
+  //                              (defends against silent WS-missed fills).
+  //   reconcile_dry_run:      1 = log what would change but don't apply
+  //                              (recommended for first live deploy
+  //                              against testnet)
+  //                              0 = full reconcile (production)
+  // Default dry_run=1 is intentional friction — flip to 0 deliberately.
+  int    reconcile_interval_sec;
+  int    reconcile_dry_run;
   // Prediction normalization — Phase 7F (default OFF)
   int prediction_normalize; // 0=disabled, 1=z-score normalize predictions
                             // (activates after 100)
@@ -760,6 +774,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.gap_acceptable_threshold    = FPN_FromDouble<F>(0.05);     // 5% max gap for "OK"
   cfg.held_out_gate_strict        = 0;                            // gate off by default (warn-only)
   cfg.held_out_stamp_secret[0]    = '\0';                         // empty = accept-any (dev)
+  cfg.reconcile_interval_sec      = 0;                            // 0 = boot-only
+  cfg.reconcile_dry_run           = 1;                            // safer default; flip to 0 deliberately
   cfg.prediction_normalize = 0;
   cfg.barrier_gate_enabled = 0;
   cfg.model_verify_strict = 0;  // 0=warn, 1=strict (fail on mismatch), -1=skip
@@ -1095,6 +1111,14 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         if (n >= sizeof(cfg.held_out_stamp_secret)) n = sizeof(cfg.held_out_stamp_secret) - 1;
         memcpy(cfg.held_out_stamp_secret, val, n);
         cfg.held_out_stamp_secret[n] = '\0';
+        continue;
+    }
+    if (strcmp(key, "reconcile_interval_sec") == 0) {
+        cfg.reconcile_interval_sec = atoi(val);
+        continue;
+    }
+    if (strcmp(key, "reconcile_dry_run") == 0) {
+        cfg.reconcile_dry_run = atoi(val);
         continue;
     }
     CFG_PARSE_INT(prediction_normalize)
