@@ -9,7 +9,7 @@ per-core risk-sharded crypto trading engine in C++17. one position per pinned CP
 >
 > rdtsc bracket overhead is ~8 ns on this CPU, so real per-tick work sits around **32-40 ns** in live multi-threaded execution. single-thread cache-resident algorithmic floor is **11.56 ns/tick** (see bench table below).
 
-### minimum p99 observed in live trading (post-v4.7.5)
+### minimum p99 observed in live trading
 
 ![min per-core p99 — 76ns](assets/per-core-latency-best.png)
 
@@ -78,20 +78,28 @@ HOT PATH (every tick, per-core, ~30-40 ns measured work):
     ↓ branchless BG/SG evaluation (4 FPN comparisons)
     ↓ on entry/exit: push TradeEvent → SPSC ring
 
-SLOW PATH (every ~256 ticks, controller core):
-  ↓ RollingStats (least-squares regression, R², variance)
-  ↓ RegimeSignals (7 features, score-based classifier)
-  ↓ ML inference (XGBoost/LightGBM single-row, ~1-5 µs)
+SLOW PATH (per-core pthread, every ~256 ticks per cadence override):
+  ↓ RollingStats (least-squares regression, R², variance) — per-core slow_state
+  ↓ RegimeSignals (7 features, score-based classifier) — per-core
+  ↓ ML inference (XGBoost/LightGBM single-row, ~1-5 µs) — per-core model
   ↓ Strategy_BuildParameters → GateParameters
   ↓ ParameterSlot_Write (seqlock, wait-free producer)
 
-CONTROLLER (drainer thread):
+PRODUCER (single thread):
+  ↓ tick read from Binance WS (or backtest replay)
+  ↓ fan_out across N per-core SPSC rings (one per engine)
+  ↓ ema_price replication to each engine's slow_state
+  ↓ GUI snapshot publish
+
+DRAINER (single thread):
   ↓ pops trade events from all cores' SPSC rings
+  ↓ drains per-core OMS submit queues (sole OMS_Submit caller)
   ↓ routes through Order Management System
   ↓ portfolio mutation via extracted fill handler
 
 ORDER MANAGEMENT SYSTEM:
-  three SPSC rings: REST fills, WebSocket fills, reconciliation
+  per-core SPSC submit queues funnel into the single drainer
+  three input rings: REST fills, WebSocket fills, reconciliation
   async submission via BinanceAdapter worker thread
   idempotency keys, error-aware retry, rate limit tracking
   binary event log with disk persistence + deterministic fold
@@ -190,13 +198,14 @@ train models in the foxml_suite backtest GUI, export to `.xgb`, point config at 
 
 ## trained model results
 
-> **Status:** infrastructure shipped (Phase 7 prep). Numbers below get filled in when a model with non-zero validation Pearson r exists. Section is template-only until then.
+> **Status:** held-out training pipeline runs end-to-end (v5.3.0 Phase A) and the load-time gate is enforced (v5.2.0). Numbers below get filled in when a model with non-zero held-out Pearson r exists. Section is template-only until then.
 
 ### methodology
 
 - **Walk-forward** for hyperparameter selection (purged temporal CV — train on `[0, t)`, test on `[t+buffer, t+buffer+horizon)`, advance, repeat). Per-fold metric: accuracy for binary/multiclass, Pearson r for regression. Aggregated as mean ± stddev across folds.
-- **Held-out** for the unbiased generalization estimate. A locked portion (default 20%, configurable via `held_out_fraction`) is reserved BEFORE any tuning. Code refuses to peek without an explicit unlock + audit log (`HeldOutSplit_Unlock`). Final eval runs once with the WF-selected hyperparameters.
+- **Held-out** for the unbiased generalization estimate. A locked portion (default 20%, configurable via `held_out_fraction`) is reserved BEFORE any tuning. Code refuses to peek without an explicit unlock + audit log (`HeldOutSplit_Unlock`). After WF picks hyperparameters, `Backtest_RunFullValidation` calls `HeldOutSplit_TrainEval` which trains one model on `[0, trainval_end_idx)` with those hyperparameters and evaluates on the held-out portion. Same hyperparameters as a WF fold so the gap is apples-to-apples.
 - **Generalization gap**: `|WF_mean_val - held_out|`. Threshold is `gap_acceptable_threshold` (default 0.05). Gap above threshold = WF was overfit despite per-fold OK numbers — model doesn't ship.
+- **Load-time gate** (v5.2.0 + v5.3.0): each `model.bin` has a sibling `model.stamp` containing format-version, sha256 of the binary, wf_mean_val, held_out_metric, gap, gap_threshold, plus an HMAC-SHA256 signature. At engine boot in strict mode, `verify_model_stamp` checks all four; any failure refuses the load. Stamps are generated either via `tools/stamp_model.sh` (CLI) or in-process via `stamp_write_for_model` (auto-stamp wiring lands in v5.3.2).
 - **Reproducibility**: model bundles save `expected.cfg` capturing label_type, `held_out_fraction`, `gap_acceptable_threshold`, threshold values. Live engine logs these at load time so future-you sees the discipline values the model was trained under.
 
 ### walk-forward validation
@@ -278,16 +287,28 @@ set `engine_mode = sharded` in engine.cfg. key settings:
 
 ```
 engine_mode = sharded
+engine_arch = per_core_slow    # v5.0+ default. legacy: centralized (single shared slow-path)
 num_execution_cores = 4
 sharded_force_synthetic = 0    # 1 = offline testing with synthetic ticks
 use_real_money = 0             # paper trading (default)
 
 starting_balance = 10000.00
 fee_rate = 0.10
+fee_rate_taker = 0.00100       # taker rate (Binance tier 0)
+fee_rate_maker = 0.00075       # maker rate (Binance tier 0)
 risk_pct = 15.00               # default per-core risk (override with core_N_risk_pct)
 
 take_profit_pct = 0.15         # shared TP (override per-strategy)
 stop_loss_pct = 0.10           # shared SL (override per-strategy)
+
+# held-out validation gate (v5.2.0 + v5.3.0)
+held_out_gate_strict = 0       # 0 = warn-only (default), 1 = refuse load on stamp failure
+held_out_stamp_secret =        # HMAC-SHA256 secret; empty = accept-any (dev convenience)
+gap_acceptable_threshold = 0.05
+
+# live exchange reconciliation (v5.2.1)
+reconcile_dry_run = 1          # 1 = log what would change, don't apply (default)
+reconcile_interval_sec = 0     # 0 = boot-only; >0 = heartbeat poll cadence
 ```
 
 hot-reloadable with `R` in the GUI. per-core strategy and risk can be changed at runtime via the settings panel.
@@ -295,27 +316,27 @@ hot-reloadable with `R` in the GUI. per-core strategy and risk can be changed at
 ## tests
 
 ```bash
-./build/controller_test                                              # 351 assertions
-./build/depth_recorder_test                                          # 17 assertions (Phase 8a — depth recorder)
-./experiments/per_core_sharding/build/test_oms                       # 9 OMS state machine tests
-./experiments/per_core_sharding/build/test_oms_concurrent            # 4 TSan-validated stress tests
-./experiments/per_core_sharding/build/test_order_event_log           # 8 event log fold tests
-./experiments/per_core_sharding/build/test_event_log_head_to_head    # 27 mode 0 vs mode 1 assertions
-./experiments/per_core_sharding/build/test_oms_phase04_06            # 31 WS fill + reconcile tests
-./experiments/per_core_sharding/build/bench_batch_floor              # latency bench
+./build/controller_test           # 809 assertions across the engine + ML + OMS + reconcile
+./build/depth_recorder_test       # 17 assertions (depth recorder)
+./build/parity_harness            # legacy single_core ↔ sharded backtest byte-identity
+./build_lat/bench_batch_floor     # latency bench (rdtsc-bracketed)
+
+# sanitizer builds
+./build.sh tsan                   # ThreadSanitizer build (controller_test + engine)
+./build.sh asan                   # AddressSanitizer build
 ```
 
-concurrent tests run under `-DTSAN=ON` (separate build dir) to validate the lock-free patterns. the seqlock test catches torn reads at high producer rate; that's how the original triple buffer plan got rejected.
+concurrent tests run under TSan (`./build.sh tsan`) to validate the lock-free patterns. the seqlock test catches torn reads at high producer rate; that's how the original triple buffer plan got rejected. `parity_harness` runs the legacy single_core path and the sharded backtest path on the same input and asserts byte-identical training data — pins train-serve symmetry by construction.
 
 ## what's still raw
 
 honest TODOs:
 
-- **strategy stubs in sharded mode** — only `simple_dip` is fully ported to `Strategy_BuildParameters`. MR / Momentum / EmaCross fall back to SimpleDip until ported (mechanical work, follows the SimpleDip pattern).
-- **snapshot v11** — per-core state persistence across restarts. single-core snapshots load fine; sharded mode loses per-core fill state on restart.
-- **testnet soak** — 24-hour live run with `use_real_money=1, use_testnet=1` to verify WS fills + reconciler drift + listen key refresh hasn't been done yet.
-- **partial fills** — `ORDER_PARTIAL` state exists in the enum but the code goes straight to `FILLED`.
-- **rejection reset** — executor stays in optimistic state after a failed order; needs a `CMD_REJECT` path to release the slot.
+- **testnet soak** — 24-hour continuous live run on Binance testnet (`use_real_money=1, use_testnet=1`) to verify WS fills + reconciler drift + listen key refresh under real network conditions hasn't been done yet. Paper-mode soaks have run; testnet is the next gate before mainnet.
+- **reconcile Phase 2 (apply path)** — boot reconciliation in v5.2.1+ is dry-run only: it logs disagreement and refuses to boot on catastrophic state drift, but doesn't yet cancel orphan exchange orders, replay missed fills, or force-close stale local positions. That's the v5.3.x or v5.4.x ship once paper soak validates the dry-run reports.
+- **WS reconnect reconcile** — reconcile fires only at boot. A mid-session WS disconnect + reconnect is currently trusted to deliver any missed events; a re-fetch of openOrders + myTrades on every reconnect would close that hole.
+- **suite ↔ held-out wiring** — held-out training works end-to-end via `Backtest_RunFullValidation` and tests, but the foxml_suite training panel still uses `Backtest_RunWalkForward` directly. Switching the suite over (so the GUI's pipeline button fires the full validation including held-out + auto-stamp) is the v5.4.x ML QOL bundle (Stamps inspection panel + auto-versioned model saves with symlink + Train+Validate+Stamp pipeline button).
+- **per-fill maker/taker observability in GUI** — engine tracks `maker_fills_count` / `taker_fills_count` / `total_maker_fees` / `total_taker_fees` separately, but the per-core display only shows the sum. Splitting the column would help spot maker-vs-taker mix shifts during live runs.
 
 ## license
 
