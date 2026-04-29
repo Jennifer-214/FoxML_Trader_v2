@@ -7391,6 +7391,73 @@ e3_skip_load:;
         }
     }
 
+    //======================================================================================================
+    // [v5.3.0 Phase A — held-out training (Phase 7 finalize)]
+    //======================================================================================================
+    // Validates that HeldOutSplit_TrainEval is reachable, gates correctly,
+    // and that Backtest_RunFullValidation propagates its result. Real-metric
+    // assertions (training produces a plausible accuracy/correlation) require
+    // USE_XGBOOST and live in the suite-build smoke test, not here. The
+    // controller_test build deliberately stays zero-dep.
+    //======================================================================================================
+    printf("\n--- v5.3.0 Phase A: HeldOutSplit_TrainEval wiring ---\n");
+    {
+        // NULL inputs → ok=0 (defensive)
+        HeldOutTrainEvalResult r = HeldOutSplit_TrainEval(nullptr, nullptr, LABEL_WIN_LOSS, nullptr);
+        check("v5.3.0a: HeldOutSplit_TrainEval NULL inputs → ok=0", r.ok == 0);
+    }
+    {
+        // Locked split → refuses to run (matches HeldOutSplit_Unlock discipline)
+        HeldOutSplit s = HeldOutSplit_Make(1000, 0.20);  // locked by default
+        BacktestResults dummy;
+        BacktestResults_Init(&dummy);
+        HeldOutTrainEvalResult r = HeldOutSplit_TrainEval(&dummy, &s, LABEL_WIN_LOSS, nullptr);
+        check("v5.3.0a: HeldOutSplit_TrainEval locked split → ok=0", r.ok == 0);
+        BacktestResults_Free(&dummy);
+    }
+    {
+        // Empty data (sample_count=0) → no held-out samples, ok=0
+        HeldOutSplit s = HeldOutSplit_Make(1000, 0.20);
+        HeldOutSplit_Unlock(&s, s.lock_token);
+        BacktestResults dummy;
+        BacktestResults_Init(&dummy);
+        HeldOutTrainEvalResult r = HeldOutSplit_TrainEval(&dummy, &s, LABEL_WIN_LOSS, nullptr);
+        check("v5.3.0a: HeldOutSplit_TrainEval empty data → ok=0", r.ok == 0);
+        BacktestResults_Free(&dummy);
+    }
+    {
+        // Cancel flag set → returns cleanly (no crash, ok=0). Without
+        // XGBoost compiled in, the function returns ok=0 before reaching
+        // the cancel check — but the call is still safe.
+        HeldOutSplit s = HeldOutSplit_Make(1000, 0.20);
+        HeldOutSplit_Unlock(&s, s.lock_token);
+        BacktestResults dummy;
+        BacktestResults_Init(&dummy);
+        volatile int cancel = 1;
+        HeldOutTrainEvalResult r = HeldOutSplit_TrainEval(&dummy, &s, LABEL_WIN_LOSS, &cancel);
+        check("v5.3.0a: HeldOutSplit_TrainEval cancel flag → ok=0 no crash", r.ok == 0);
+        BacktestResults_Free(&dummy);
+    }
+    {
+        // End-to-end wiring: Backtest_RunFullValidation calls the helper,
+        // ran_held_out propagates from helper.ok into the result struct.
+        // (ok=0 here because XGBoost isn't compiled into controller_test;
+        // the assertion is that the wiring is correct, not the training.)
+        HeldOutSplit s = HeldOutSplit_Make(1000, 0.20);
+        HeldOutSplit_Unlock(&s, s.lock_token);
+        BacktestResults dummy;
+        BacktestResults_Init(&dummy);
+        FullValidationResults out = {};
+        volatile int prog = 0, cancel = 0;
+        Backtest_RunFullValidation(&out, &dummy, &s,
+                                    /*n_splits=*/3, /*horizon=*/100, /*buffer=*/10,
+                                    /*min_train=*/100, &prog, &cancel,
+                                    LABEL_WIN_LOSS, /*gap_threshold=*/0.05f);
+        check("v5.3.0a: Backtest_RunFullValidation → ran_held_out propagates from helper",
+              out.ran_held_out == 0 && out.held_out_count == 0);
+        BacktestResults_Free(&dummy);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

@@ -624,23 +624,49 @@ struct WalkForwardResults {
 };
 
 //======================================================================================================
-// [FULL VALIDATION — walk-forward + held-out gap (Phase 7prep)]
+// [FULL VALIDATION — walk-forward + held-out gap]
 //======================================================================================================
 // Combines walk-forward CV (on train+val portion) with held-out test eval
 // (on the locked portion). Reports both side-by-side and computes the
 // generalization gap |WF_val - held_out|. Small gap = generalization is real;
 // large gap = WF was likely overfit despite per-fold OK numbers.
 //
-// Phase 7prep ships the FRAMEWORK: lock-check, slice-view of BacktestResults
-// for WF, gap math, label-kind branching. The actual held-out training (run
-// XGBoost on full train+val with selected hyperparameters, predict on held-
-// out, compute metric) is Phase 7 finalize work — happens when there's a
-// real model to evaluate. Phase 7prep stubs that section to held_out_count=0
-// + zero metrics; gap computation is consistent (zero-vs-WF degenerate case).
+// v5.3.0 Phase A: held-out training is now real (was stubbed in 7prep).
+// HeldOutSplit_TrainEval trains one model on the train+val portion using
+// the same hyperparameters as a WF fold (train-serve symmetry — gap measured
+// against the same model class as deployed) and evaluates on the held-out
+// portion. The metric returned is kind-appropriate (accuracy for classification,
+// correlation for regression) and matches what WalkForwardResults reports as
+// mean_val_*, so the gap |WF - held_out| is apples-to-apples.
+//======================================================================================================
+
+// HeldOutSplit_TrainEval — train one XGBoost model on [0, trainval_end_idx)
+// of the data and evaluate on [trainval_end_idx, sample_count). Returns the
+// kind-appropriate metric. cancel_flag is the standard worker cancellation
+// sentinel (NULL = no cancellation).
 //
-// When Phase 7 finalize fills in the held-out training, the existing tests
-// continue to validate framework behavior; new tests will validate the
-// actual training path with synthetic-signal data.
+// Why a single train+eval pass and not a CV: the WF mean already captures
+// CV-style variance on the train+val portion. The held-out's job is to
+// answer "does ONE model trained on the full train+val portion actually
+// generalize to data we never touched?" — which is the deployment question.
+struct HeldOutTrainEvalResult {
+    int   ok;            // 1 if training + eval succeeded
+    int   eval_count;    // size of held-out portion actually evaluated (post-filter)
+    int   train_count;   // size of train portion actually trained on (post-filter)
+    float metric;        // accuracy (classification) or Pearson correlation (regression)
+    float mse;           // regression only; 0 for classification
+    float correlation;   // regression only; 0 for classification
+    float train_metric;  // training-fold metric (sanity check — should exceed `metric`)
+};
+
+// Forward declaration — definition follows Backtest_RunWalkForward so the
+// helper has visibility into WalkForward_Compute* and XGBoost_Compute* funcs.
+static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
+    const BacktestResults *data,
+    const HeldOutSplit *split,
+    int label_type,
+    volatile int *cancel_flag);
+
 //======================================================================================================
 struct FullValidationResults {
     WalkForwardResults walkforward;        // WF CV on [0, trainval_end)
@@ -709,13 +735,17 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
     out->label_kind = out->walkforward.label_kind;
     memcpy(out->fingerprint, out->walkforward.fingerprint, sizeof(out->fingerprint));
 
-    // Held-out training + eval = Phase 7 finalize. Stub for 7prep so the
-    // gap computation has a consistent zero-baseline.
-    out->ran_held_out = 0;
-    out->held_out_count = 0;
-    out->held_out_metric = 0.0f;
-    out->held_out_mse = 0.0f;
-    out->held_out_correlation = 0.0f;
+    // Held-out training + eval (v5.3.0 Phase A — was stubbed in 7prep).
+    // Trains one model on [0, trainval_end) using the same hyperparameters
+    // as a WF fold, evaluates on [trainval_end, sample_count). Honors the
+    // existing cancel_flag plumbing — early cancellation leaves
+    // ran_held_out=0 so the gap stays at the degenerate baseline.
+    HeldOutTrainEvalResult he = HeldOutSplit_TrainEval(data, split, label_type, cancel);
+    out->ran_held_out         = he.ok;
+    out->held_out_count       = he.eval_count;
+    out->held_out_metric      = he.metric;
+    out->held_out_mse         = he.mse;
+    out->held_out_correlation = he.correlation;
 
     // Generalization gap: |WF mean - held_out|, label-kind-aware. With
     // ran_held_out=0 the gap is just the WF mean (degenerate but consistent).
@@ -1181,6 +1211,208 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     fprintf(stderr, "==============================\n\n");
 
 #endif // USE_XGBOOST
+}
+
+//======================================================================================================
+// [HELD-OUT TRAIN + EVAL — definition]
+//======================================================================================================
+// Forward-declared near the FullValidationResults struct so
+// Backtest_RunFullValidation can call it; defined here so all the helper
+// functions it uses (WalkForward_Compute*, XGBoost_Compute*) are visible.
+static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
+    const BacktestResults *data,
+    const HeldOutSplit *split,
+    int label_type,
+    volatile int *cancel_flag) {
+    HeldOutTrainEvalResult r = {};
+
+#ifndef USE_XGBOOST
+    fprintf(stderr, "[heldout] XGBoost not compiled in — cannot train. "
+                    "rebuild with -DUSE_XGBOOST=ON\n");
+    return r;
+#else
+    if (!data || !split) return r;
+    if (split->locked) {
+        fprintf(stderr, "[heldout] split is locked — cannot evaluate. "
+                        "call HeldOutSplit_Unlock(split, token) first.\n");
+        return r;
+    }
+    if (data->sample_count <= split->trainval_end_idx) {
+        fprintf(stderr, "[heldout] no held-out samples (sample_count=%d, trainval_end=%d)\n",
+                data->sample_count, split->trainval_end_idx);
+        return r;
+    }
+
+    int num_classes     = LabelType_NumClasses(label_type);
+    int is_regression   = LabelType_IsRegression(label_type);
+    int is_multiclass   = LabelType_IsMulticlass(label_type);
+    int filter_neutrals = LabelType_IsBinary(label_type);
+
+    int n_train = 0, n_eval = 0;
+    for (int i = 0; i < data->sample_count; ++i) {
+        if (filter_neutrals && data->labels[i] == 0.5f) continue;
+        if (i < split->trainval_end_idx) n_train++;
+        else                              n_eval++;
+    }
+
+    if (n_train < 100 || n_eval < 10) {
+        fprintf(stderr, "[heldout] insufficient samples after filter: train=%d eval=%d\n",
+                n_train, n_eval);
+        return r;
+    }
+
+    float *train_features = (float*)malloc((size_t)n_train * MODEL_NUM_FEATURES * sizeof(float));
+    float *train_labels   = (float*)malloc((size_t)n_train * sizeof(float));
+    float *eval_features  = (float*)malloc((size_t)n_eval  * MODEL_NUM_FEATURES * sizeof(float));
+    float *eval_labels    = (float*)malloc((size_t)n_eval  * sizeof(float));
+
+    DMatrixHandle dtrain = NULL, deval = NULL;
+    BoosterHandle booster = NULL;
+    float *mc_weights = NULL;
+
+    do {
+        if (!train_features || !train_labels || !eval_features || !eval_labels) {
+            fprintf(stderr, "[heldout] failed to allocate compaction buffers\n");
+            break;
+        }
+
+        int ti = 0, ei = 0;
+        for (int i = 0; i < data->sample_count; ++i) {
+            if (filter_neutrals && data->labels[i] == 0.5f) continue;
+            if (i < split->trainval_end_idx) {
+                memcpy(&train_features[ti * MODEL_NUM_FEATURES],
+                       &data->feature_matrix[i * MODEL_NUM_FEATURES],
+                       MODEL_NUM_FEATURES * sizeof(float));
+                train_labels[ti++] = data->labels[i];
+            } else {
+                memcpy(&eval_features[ei * MODEL_NUM_FEATURES],
+                       &data->feature_matrix[i * MODEL_NUM_FEATURES],
+                       MODEL_NUM_FEATURES * sizeof(float));
+                eval_labels[ei++] = data->labels[i];
+            }
+        }
+
+        fprintf(stderr, "[heldout] training on %d samples, evaluating on %d (kind=%s)\n",
+                n_train, n_eval, LabelType_KindName(label_type));
+
+        if (XGDMatrixCreateFromMat(train_features, n_train, MODEL_NUM_FEATURES, -1.0f, &dtrain) != 0) {
+            fprintf(stderr, "[heldout] failed to create train DMatrix: %s\n", XGBGetLastError());
+            break;
+        }
+        XGDMatrixSetFloatInfo(dtrain, "label", train_labels, n_train);
+
+        if (XGDMatrixCreateFromMat(eval_features, n_eval, MODEL_NUM_FEATURES, -1.0f, &deval) != 0) {
+            fprintf(stderr, "[heldout] failed to create eval DMatrix: %s\n", XGBGetLastError());
+            break;
+        }
+        XGDMatrixSetFloatInfo(deval, "label", eval_labels, n_eval);
+
+        if (XGBoosterCreate(&dtrain, 1, &booster) != 0) {
+            fprintf(stderr, "[heldout] failed to create booster: %s\n", XGBGetLastError());
+            break;
+        }
+
+        // Hyperparameters MUST match Backtest_RunWalkForward's per-fold setup
+        // exactly. Held-out is the deployment proxy; it should train the same
+        // model class WF measured. Diverging here = drift between gap
+        // measurement and reality.
+        if (is_regression) {
+            XGBoosterSetParam(booster, "objective", "reg:squarederror");
+        } else if (is_multiclass) {
+            XGBoosterSetParam(booster, "objective", "multi:softprob");
+            char nc_s[8]; snprintf(nc_s, sizeof(nc_s), "%d", num_classes);
+            XGBoosterSetParam(booster, "num_class", nc_s);
+        } else {
+            XGBoosterSetParam(booster, "objective", "binary:logistic");
+        }
+        XGBoosterSetParam(booster, "max_depth", "6");
+        XGBoosterSetParam(booster, "eta", "0.1");
+        XGBoosterSetParam(booster, "subsample", "0.8");
+        XGBoosterSetParam(booster, "colsample_bytree", "0.8");
+        XGBoosterSetParam(booster, "min_child_weight", "5");
+        XGBoosterSetParam(booster, "nthread", "1");
+        XGBoosterSetParam(booster, "verbosity", "0");
+        XGBoosterSetParam(booster, "seed", "42");
+
+        if (!is_regression && !is_multiclass) {
+            int n_pos = 0, n_neg = 0;
+            double spw = XGBoost_ComputeScalePosWeight(train_labels, n_train, &n_pos, &n_neg);
+            char spw_s[24]; snprintf(spw_s, sizeof(spw_s), "%.4f", spw);
+            XGBoosterSetParam(booster, "scale_pos_weight", spw_s);
+        } else if (is_multiclass) {
+            mc_weights = (float*)malloc((size_t)n_train * sizeof(float));
+            int mc_counts[16] = {0};
+            if (mc_weights) {
+                XGBoost_ComputeMulticlassWeights(train_labels, n_train, num_classes,
+                                                  mc_weights, mc_counts);
+                XGDMatrixSetFloatInfo(dtrain, "weight", mc_weights, n_train);
+            }
+        }
+
+        int n_rounds = 200;
+        int train_aborted = 0;
+        for (int rr = 0; rr < n_rounds; ++rr) {
+            if (cancel_flag && *cancel_flag) {
+                train_aborted = 1;
+                break;
+            }
+            if (XGBoosterUpdateOneIter(booster, rr, dtrain) != 0) break;
+        }
+        if (train_aborted) {
+            fprintf(stderr, "[heldout] training cancelled at round %d\n", n_rounds);
+            break;
+        }
+
+        bst_ulong out_len_tr = 0, out_len_ev = 0;
+        const float *pred_tr = NULL, *pred_ev = NULL;
+        int pr_tr_ok = (XGBoosterPredict(booster, dtrain, 0, 0, 0, &out_len_tr, &pred_tr) == 0);
+        int pr_ev_ok = (XGBoosterPredict(booster, deval,  0, 0, 0, &out_len_ev, &pred_ev) == 0);
+
+        if (is_regression) {
+            if (pr_tr_ok && (int)out_len_tr == n_train) {
+                r.train_metric = WalkForward_ComputeCorrelation(pred_tr, train_labels, n_train);
+            }
+            if (pr_ev_ok && (int)out_len_ev == n_eval) {
+                r.metric      = WalkForward_ComputeCorrelation(pred_ev, eval_labels, n_eval);
+                r.mse         = WalkForward_ComputeMSE(pred_ev, eval_labels, n_eval);
+                r.correlation = r.metric;
+            }
+        } else if (is_multiclass) {
+            int K = num_classes;
+            if (pr_tr_ok && (int)out_len_tr == n_train * K) {
+                r.train_metric = WalkForward_ComputeMulticlassAccuracy(pred_tr, train_labels, n_train, K);
+            }
+            if (pr_ev_ok && (int)out_len_ev == n_eval * K) {
+                r.metric = WalkForward_ComputeMulticlassAccuracy(pred_ev, eval_labels, n_eval, K);
+            }
+        } else {
+            if (pr_tr_ok && (int)out_len_tr == n_train) {
+                r.train_metric = WalkForward_ComputeAccuracy(pred_tr, train_labels, n_train, 0.5f);
+            }
+            if (pr_ev_ok && (int)out_len_ev == n_eval) {
+                r.metric = WalkForward_ComputeAccuracy(pred_ev, eval_labels, n_eval, 0.5f);
+            }
+        }
+
+        r.eval_count  = n_eval;
+        r.train_count = n_train;
+        r.ok = 1;
+
+        fprintf(stderr, "[heldout] result: train_metric=%.4f held_out_metric=%.4f%s\n",
+                r.train_metric, r.metric,
+                is_regression ? " (correlation)" : " (accuracy)");
+    } while (0);
+
+    if (booster) XGBoosterFree(booster);
+    if (dtrain)  XGDMatrixFree(dtrain);
+    if (deval)   XGDMatrixFree(deval);
+    free(train_features);
+    free(train_labels);
+    free(eval_features);
+    free(eval_labels);
+    free(mc_weights);
+    return r;
+#endif
 }
 
 //======================================================================================================
