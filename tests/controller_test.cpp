@@ -5218,7 +5218,7 @@ int main() {
     //      file missing / cursor monotonic / day rotation skipped at this
     //      level since both file present + missing exercise the same
     //      _LoadDay path internally).
-    //   2. GATE_FLAG_BUY_BLOCKED — branchless mask in BG_Evaluate vetoes
+    //   2. tt::GATE_FLAG_BUY_BLOCKED — branchless mask in BG_Evaluate vetoes
     //      buys regardless of price/volume + GATE_FLAG_BUY_ABOVE direction.
     //   3. EventLoop_RebuildAllParameters — book_imbalance arg below cfg
     //      min sets the flag + halt_reason=10 across all registered cores.
@@ -5348,7 +5348,7 @@ e3_skip_load:;
               state.rows == nullptr);
     }
 
-    printf("\n--- Track E.3: GATE_FLAG_BUY_BLOCKED vetoes BG_Evaluate ---\n");
+    printf("\n--- Track E.3: tt::GATE_FLAG_BUY_BLOCKED vetoes BG_Evaluate ---\n");
     {
         using namespace tt;
         // Buy-below strategy: gate normally fires when price < threshold.
@@ -5366,7 +5366,7 @@ e3_skip_load:;
               BG_Evaluate(tick, &params) == true);
 
         // Add the BLOCKED flag — gate should now fail
-        params.flags |= GATE_FLAG_BUY_BLOCKED;
+        params.flags |= tt::GATE_FLAG_BUY_BLOCKED;
         check("buy-below: BUY_BLOCKED vetoes the gate",
               BG_Evaluate(tick, &params) == false);
 
@@ -5382,7 +5382,7 @@ e3_skip_load:;
 
         check("buy-above: gate fires when price > threshold",
               BG_Evaluate(tick_up, &params_up) == true);
-        params_up.flags |= GATE_FLAG_BUY_BLOCKED;
+        params_up.flags |= tt::GATE_FLAG_BUY_BLOCKED;
         check("buy-above: BUY_BLOCKED vetoes the gate",
               BG_Evaluate(tick_up, &params_up) == false);
     }
@@ -5392,7 +5392,7 @@ e3_skip_load:;
         using namespace tt;
         // Set up a 2-core sharded engine with non-zero min_book_imbalance.
         // Pass book_imbalance below threshold → both cores get
-        // GATE_FLAG_BUY_BLOCKED + halt_reason=10.
+        // tt::GATE_FLAG_BUY_BLOCKED + halt_reason=10.
         OrderManagerState<64> oms;
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
@@ -5435,9 +5435,9 @@ e3_skip_load:;
             /* book_imbalance*/ &low_imb);
 
         check("low book_imbalance: core 0 BUY_BLOCKED flag set",
-              (state.cores[0].pending_params.flags & GATE_FLAG_BUY_BLOCKED) != 0);
+              (state.cores[0].pending_params.flags & tt::GATE_FLAG_BUY_BLOCKED) != 0);
         check("low book_imbalance: core 1 BUY_BLOCKED flag set",
-              (state.cores[1].pending_params.flags & GATE_FLAG_BUY_BLOCKED) != 0);
+              (state.cores[1].pending_params.flags & tt::GATE_FLAG_BUY_BLOCKED) != 0);
         check("low book_imbalance: halt_reason=10 (book-imbalance) on core 0",
               state.cores[0].halt_reason == 10);
 
@@ -5450,7 +5450,7 @@ e3_skip_load:;
             0, &high_imb);
 
         check("high book_imbalance: core 0 BUY_BLOCKED flag CLEARED",
-              (state.cores[0].pending_params.flags & GATE_FLAG_BUY_BLOCKED) == 0);
+              (state.cores[0].pending_params.flags & tt::GATE_FLAG_BUY_BLOCKED) == 0);
         check("high book_imbalance: halt_reason != 10 on core 0",
               state.cores[0].halt_reason != 10);
 
@@ -5463,7 +5463,7 @@ e3_skip_load:;
             0, nullptr);
 
         check("NULL book_imbalance: gate stays inert (flag cleared)",
-              (state.cores[0].pending_params.flags & GATE_FLAG_BUY_BLOCKED) == 0);
+              (state.cores[0].pending_params.flags & tt::GATE_FLAG_BUY_BLOCKED) == 0);
 
         // Case 4: cfg.min_book_imbalance=0 (gate disabled) + low imb →
         // gate is inert regardless. Default cfg ships with min=0.
@@ -5474,7 +5474,7 @@ e3_skip_load:;
             nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
             0, &low_imb);
         check("min_book_imbalance=0 disables the gate even with low imb",
-              (state.cores[0].pending_params.flags & GATE_FLAG_BUY_BLOCKED) == 0);
+              (state.cores[0].pending_params.flags & tt::GATE_FLAG_BUY_BLOCKED) == 0);
     }
 
     //==================================================================================================
@@ -7051,6 +7051,94 @@ e3_skip_load:;
               snap.per_core[0].slow_path_cpu == -1);
         check("v5.0.4: topology re-populate updates per-core poll",
               snap.per_core[2].poll_interval_ticks == 999);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // v5.1.10 — runtime BUY_BLOCKED fee-floor gate (Strategy P3)
+    //
+    // Strategy_BuildParameters dispatcher post-cap sets tt::GATE_FLAG_BUY_BLOCKED
+    // when out->tp_pct < 3 × cfg.fee_rate_taker. Catches dynamic-TP-collapse
+    // (e.g. EMA stddev-based TP shrinking on low-vol cycles).
+    // ─────────────────────────────────────────────────────────────────────
+    printf("\n--- v5.1.10 — runtime BUY_BLOCKED fee-floor gate ---\n");
+    {
+        // Build a minimal config with known fee_rate_taker
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.fee_rate_taker = FPN_FromDouble<64>(0.001);  // 0.1% taker
+        cfg.fee_rate       = FPN_FromDouble<64>(0.001);
+        // Floor = 3 × 0.001 = 0.003 (0.3% TP minimum)
+
+        // Minimal RollingStats — populate enough that strategies emit non-zero output
+        RollingStats<64, 128> rs = RollingStats_Init<64, 128>();
+        for (int i = 0; i < 100; ++i) {
+            rs.price_avg = FPN_FromDouble<64>(60000.0 + i * 0.1);
+            RollingStats_Push(&rs,
+                FPN_FromDouble<64>(60000.0 + i * 0.1),
+                FPN_FromDouble<64>(1.0));
+        }
+
+        // Test 1: TP wide enough — gate NOT set
+        {
+            cfg.take_profit_pct = FPN_FromDouble<64>(0.01);   // 1% TP
+            cfg.stop_loss_pct   = FPN_FromDouble<64>(0.005);  // 0.5% SL
+            cfg.partial_exit_enabled = 0;  // simpler path
+            tt::GateParameters<64> out;
+            tt::GateParameters_Init(&out);
+            tt::Strategy_BuildParameters<64>(STRATEGY_MEAN_REVERSION, &rs, &cfg,
+                FPN_FromDouble<64>(1000.0), &out);
+            check("v5.1.10: TP=1.0% > floor 0.3% → BUY_BLOCKED clear",
+                  (out.flags & tt::GATE_FLAG_BUY_BLOCKED) == 0);
+            check("v5.1.10: TP=1.0% wide trade → tp_pct populated",
+                  !FPN_IsZero(out.tp_pct));
+        }
+
+        // Test 2: TP exactly at floor (3 × 0.001 = 0.003) — boundary
+        {
+            cfg.take_profit_pct = FPN_FromDouble<64>(0.003);  // 0.3% TP, == floor
+            tt::GateParameters<64> out;
+            tt::GateParameters_Init(&out);
+            tt::Strategy_BuildParameters<64>(STRATEGY_MEAN_REVERSION, &rs, &cfg,
+                FPN_FromDouble<64>(1000.0), &out);
+            check("v5.1.10: TP exactly at floor → BUY_BLOCKED clear (LessThan, not LE)",
+                  (out.flags & tt::GATE_FLAG_BUY_BLOCKED) == 0);
+        }
+
+        // Test 3: TP below floor — gate FIRES
+        {
+            cfg.take_profit_pct = FPN_FromDouble<64>(0.001);  // 0.1% TP, below floor
+            tt::GateParameters<64> out;
+            tt::GateParameters_Init(&out);
+            tt::Strategy_BuildParameters<64>(STRATEGY_MEAN_REVERSION, &rs, &cfg,
+                FPN_FromDouble<64>(1000.0), &out);
+            check("v5.1.10: TP=0.1% < floor 0.3% → BUY_BLOCKED set",
+                  (out.flags & tt::GATE_FLAG_BUY_BLOCKED) != 0);
+        }
+
+        // Test 4: fee_rate_taker fallback to fee_rate
+        {
+            cfg.fee_rate_taker  = FPN_Zero<64>();              // unset
+            cfg.fee_rate        = FPN_FromDouble<64>(0.002);   // 0.2% legacy
+            cfg.take_profit_pct = FPN_FromDouble<64>(0.005);   // 0.5% TP, > 3 × 0.002 = 0.6%? no, 0.005 < 0.006
+            tt::GateParameters<64> out;
+            tt::GateParameters_Init(&out);
+            tt::Strategy_BuildParameters<64>(STRATEGY_MEAN_REVERSION, &rs, &cfg,
+                FPN_FromDouble<64>(1000.0), &out);
+            check("v5.1.10: fee_rate_taker=0 falls back to fee_rate; TP 0.5% < 3×0.2%=0.6% → BUY_BLOCKED set",
+                  (out.flags & tt::GATE_FLAG_BUY_BLOCKED) != 0);
+        }
+
+        // Test 5: STRATEGY_NONE produces tp_pct=0 — gate skips (no false positive)
+        {
+            cfg.fee_rate_taker  = FPN_FromDouble<64>(0.001);
+            cfg.fee_rate        = FPN_FromDouble<64>(0.001);
+            cfg.take_profit_pct = FPN_FromDouble<64>(0.01);
+            tt::GateParameters<64> out;
+            tt::GateParameters_Init(&out);
+            tt::Strategy_BuildParameters<64>(STRATEGY_NONE, &rs, &cfg,
+                FPN_FromDouble<64>(1000.0), &out);
+            check("v5.1.10: STRATEGY_NONE → tp_pct=0 → BUY_BLOCKED NOT set (skip-on-zero guard)",
+                  (out.flags & tt::GATE_FLAG_BUY_BLOCKED) == 0);
+        }
     }
 
     printf("\n======================================\n");

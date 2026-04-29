@@ -697,6 +697,41 @@ inline void Strategy_BuildParameters(
         out->flags &= ~GATE_FLAG_PAIR_ACTIVE;
         out->tp_pct_b = FPN_Zero<F>();
     }
+
+    // v5.1.10 (Strategy P3 — runtime BUY_BLOCKED fee-floor gate):
+    // After the strategy emits its TP target + post-cap leg-B math,
+    // verify that TP1 leaves enough margin to clear round-trip fees.
+    // If `out->tp_pct < 3 × fee_rate_taker`, set GATE_FLAG_BUY_BLOCKED
+    // so the hot-path BG never fires. Catches the dynamic-TP-collapse
+    // case (e.g. EMA stddev-based TP shrinking when stddev is low,
+    // SimpleDip on a momentary recent_high spike) that the v5.1.3
+    // boot-time warning misses (boot warning checks STATIC cfg, not
+    // dynamic per-cycle TP).
+    //
+    // Why post-cap: tp_pct_b is derived from tp_pct, so checking tp_pct
+    // alone covers both legs. If TP1 clears the floor, TP2 (which is
+    // tp2_mult × TP1 ≥ TP1) will too.
+    //
+    // Why a gate, not a clamp: we don't want to "fix" a too-tight TP
+    // by widening it — that would mask configuration mistakes. Refusing
+    // to enter is the correct response.
+    //
+    // Logged once per cycle when the gate fires (not per tick — gate
+    // is set on slow-path output, hot-path reads cached_params and
+    // doesn't log). Caller sees the BUY_BLOCKED flag in pending_params
+    // and can decide whether to log + how often.
+    {
+        FPN<F> fee_taker = !FPN_IsZero(config->fee_rate_taker)
+            ? config->fee_rate_taker : config->fee_rate;
+        FPN<F> three = FPN_FromDouble<F>(3.0);
+        FPN<F> floor_pct = FPN_Mul(fee_taker, three);
+        // out->tp_pct may be zero if strategy didn't set it (e.g.
+        // STRATEGY_NONE fallthrough). Skip the gate in that case —
+        // the strategy itself has already produced a no-op result.
+        if (!FPN_IsZero(out->tp_pct) && FPN_LessThan(out->tp_pct, floor_pct)) {
+            out->flags |= GATE_FLAG_BUY_BLOCKED;
+        }
+    }
 }
 
 }  // namespace tt
