@@ -48,6 +48,7 @@
 #include "../DataStream/BinanceUserData.hpp"
 #include "BinanceAdapter.hpp"
 #include "ReconciliationLoop.hpp"
+#include "Reconcile.hpp"  // v5.2.1: boot-time exchange-truth reconcile (parse + decide)
 #include "ShardedLiveSafety.hpp"   // Phase 0: orphan recovery, force-close, reconcile
 #include "ShardedSnapshot.hpp"
 #include "ShardedSnapshotPersist.hpp"  // Phase 4: persistent state across restarts
@@ -780,8 +781,62 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                   cfg.partial_exit_enabled ? 1 : 0);
             (void)loaded;  // logged inside; nothing else to do here
         } else {
-            fprintf(stderr, "[snapshot] LIVE mode: skipping snapshot load "
-                            "(exchange-truth-of-state)\n");
+            // v5.2.2 (live reconciliation Phase 1 wiring): exchange truth
+            // is authoritative in live mode. Fetch account + open orders +
+            // recent trades and reconcile against local state. Refuses
+            // boot on critical disagreement (exchange has BTC, local has
+            // 0 positions). Apply path is dry-run by default — flip
+            // cfg.reconcile_dry_run=0 deliberately for production after
+            // verifying logs.
+            //
+            // Phase 2 (deferred): actually CANCEL flagged orders, REPLAY
+            // missed fills via OrderManager_ProcessFillCommand, FORCE-CLOSE
+            // local slots that don't match exchange. Requires
+            // BinanceOrderAPI_CancelOrder + Command synthesis helpers
+            // that don't exist yet. v5.2.2 ships dry-run + critical
+            // refusal — surfaces all the disagreements without applying.
+            fprintf(stderr, "[snapshot] LIVE mode: reconciling with exchange truth\n");
+
+            BinanceOrderAPI* api = &g_sharded_binance_adapter.workers_api[0];
+            double exch_usdt = 0.0, exch_btc = 0.0;
+            BinanceOrderAPI_GetBalances(api, &exch_usdt, &exch_btc);
+
+            char open_buf[16384] = {0};
+            char trades_buf[65536] = {0};
+            BinanceOrderAPI_GetOpenOrders(api, open_buf, sizeof(open_buf));
+            BinanceOrderAPI_GetMyTrades(api, /*since_trade_id=*/0,
+                                         trades_buf, sizeof(trades_buf));
+
+            tt::ReconcileOpenOrder orders[16];
+            tt::ReconcileTrade     trades[256];
+            int n_orders = tt::Reconcile_ParseOpenOrders(open_buf, orders, 16);
+            int n_trades = tt::Reconcile_ParseMyTrades(trades_buf, trades, 256);
+
+            int local_open = __builtin_popcount(oms.portfolio.active_bitmap);
+            tt::ReconcileResult rr = tt::Reconcile_Decide(
+                exch_usdt, exch_btc,
+                orders, n_orders,
+                trades, n_trades,
+                local_open);
+
+            tt::Reconcile_LogReport(rr, cfg.reconcile_dry_run);
+
+            if (rr.refused_boot) {
+                fprintf(stderr,
+                    "[reconcile] CRITICAL — refusing to boot. "
+                    "Resolve disagreement manually then restart.\n");
+                BinanceAdapter_ShutdownState(&g_sharded_binance_adapter);
+                std::signal(SIGINT,  prev_int);
+                std::signal(SIGTERM, prev_term);
+                return;
+            }
+
+            if (!cfg.reconcile_dry_run) {
+                fprintf(stderr,
+                    "[reconcile] WARN: reconcile_dry_run=0 set but "
+                    "Phase 2 apply path not implemented yet. No changes "
+                    "applied. Set dry_run=1 explicitly to silence this.\n");
+            }
         }
     }
 
