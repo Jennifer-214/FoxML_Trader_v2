@@ -53,6 +53,7 @@
 #include "../ML_Headers/ModelInference.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/RegimeDetector.hpp"
+#include "SimpleDip.hpp"          // SimpleDipState<F> — Phase 2.1 state-aware BuildParameters
 #include "StrategyInterface.hpp"
 
 #include <cstdint>
@@ -192,15 +193,20 @@ inline void SimpleDip_BuildParameters(
     const ControllerConfig<F>* config,
     FPN<F> allocated_balance,
     GateParameters<F>* out,
-    const RollingStats<F, WL>* rolling_long = nullptr
+    const RollingStats<F, WL>* rolling_long = nullptr,
+    SimpleDipState<F>* state = nullptr
 ) {
-    // Match production SimpleDip_BuySignal: use MAX(short_max, long_max) when
-    // a long-window stats is provided, otherwise fall back to the short max.
-    // Without this the sharded path produces a tighter entry threshold than
-    // the legacy path and misses trades that legacy takes.
+    // v5.4.0 Phase 2.1 — when a per-core SimpleDipState is supplied (sharded
+    // production path post-Phase 1), publish recent_high into it so the
+    // legacy `_BuySignal` contract is preserved (state is the source of truth
+    // for "where the dip reference is"). Tests + legacy paths still pass
+    // nullptr and get the inline behavior — same numerics as pre-Phase 2.1.
     FPN<F> recent_high = rolling->price_max;
     if (rolling_long && FPN_GreaterThan(rolling_long->price_max, recent_high)) {
         recent_high = rolling_long->price_max;
+    }
+    if (state) {
+        state->recent_high = recent_high;
     }
 
     // expected_entry = recent_high * (1 - entry_offset_pct)
@@ -668,11 +674,16 @@ inline void Strategy_BuildParameters(
     FPN<F> allocated_balance,
     GateParameters<F>* out,
     const RollingStats<F, WL>* rolling_long = nullptr,
-    void* model_ctx = nullptr
+    void* model_ctx = nullptr,
+    void* strategy_state = nullptr   // v5.4.0 Phase 2.x — typed-cast inside each branch
 ) {
     switch (strategy_id) {
         case STRATEGY_SIMPLE_DIP:
-            SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
+            // v5.4.0 Phase 2.1 — pass typed state through. nullptr is the
+            // legacy contract (test paths, AUTO cores pre-Phase 3) and
+            // produces identical numerics to pre-Phase 2.1.
+            SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long,
+                                       (SimpleDipState<F>*)strategy_state);
             break;
         case STRATEGY_MEAN_REVERSION:
             MeanReversion_BuildParameters(rolling, config, allocated_balance, out);

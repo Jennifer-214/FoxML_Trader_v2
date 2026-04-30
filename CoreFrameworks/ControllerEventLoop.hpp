@@ -51,6 +51,9 @@
 #include "../ML_Headers/FlowFeatures.hpp"         // v5.1.0 — FlowState etc on CoreContext::slow_state
 #include "../MemHeaders/HealthLog.hpp"           // v5.4.0 Phase 0.1 — structured JSONL diagnostic log
 #include "../Strategies/StrategyParameters.hpp"
+// Strategies/StrategyLifecycle.hpp included LATER (post-EventLoopState
+// definition) to avoid the include cycle: SL needs CoreContext +
+// EventLoopState, and ControllerEventLoop.hpp defines them at line ~404.
 #include "CoreLatencyStats.hpp"  // v4.7.42 — slow_path_latency on CoreContext
 #include "ExecutionCore.hpp"
 #include "Notify.hpp"
@@ -412,6 +415,14 @@ struct alignas(64) EventLoopState {
     // pass nullptr will get crashes in any accessor or OnEvent call.
     OrderManagerState<F>* oms;
 };
+
+}  // namespace tt
+// v5.4.0 Phase 2.1 — Strategy_AdaptPerCore / Strategy_InitPerCore /
+// Strategy_FreePerCore live in StrategyLifecycle.hpp. Included here
+// (post-EventLoopState definition) so the dispatcher can refer to
+// CoreContext / EventLoopState without an include cycle.
+#include "../Strategies/StrategyLifecycle.hpp"
+namespace tt {
 
 //======================================================================================================
 // [INIT]
@@ -1666,6 +1677,21 @@ inline void EventLoop_RebuildOneCore(
         // resolved concrete strategy.
         state->cores[slot].resolved_strategy_id = effective_strategy_id;
 
+        // v5.4.0 Phase 2.1 — Adapt before BuildParameters. Per the strategy
+        // contract (StrategyInterface.hpp), Adapt mutates per-core state and
+        // BuildParameters reads it. No-op when state is null (AUTO cores
+        // pre-Phase 3, NONE cores). portfolio_delta passed as zero on the
+        // sharded slow path — pre-v5.4 strategies that consumed it (legacy
+        // path) are out of band; sharded uses pnl_feeder for the
+        // rebuild-time feedback loop (line ~1537 above).
+        Strategy_AdaptPerCore(
+            state, slot, effective_strategy_id,
+            rolling->price_avg,         // current_price proxy (slow-path doesn't see live tick)
+            FPN_Zero<F>(),              // portfolio_delta — fed via pnl_feeder above, not here
+            state->oms->portfolio.active_bitmap,
+            &resolved_cfg
+        );
+
         Strategy_BuildParameters(
             effective_strategy_id,
             rolling,
@@ -1673,7 +1699,8 @@ inline void EventLoop_RebuildOneCore(
             state->cores[slot].allocated_balance,
             &state->cores[slot].pending_params,
             rolling_long,
-            dispatch_ctx
+            dispatch_ctx,
+            state->cores[slot].strategy_state    // v5.4.0 Phase 2.1 — typed-cast inside dispatcher
         );
 
         // v4.0.3 D9: clear ratchet_sl when no position active on this core,

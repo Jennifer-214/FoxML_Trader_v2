@@ -123,6 +123,53 @@ inline void Strategy_InitPerCore(EventLoopState<F>* state, int slot,
 }
 
 //======================================================================================================
+// [ADAPT — per-cadence dispatch]
+//======================================================================================================
+// Called from EventLoop_RebuildOneCore each slow-path cadence, BEFORE
+// Strategy_BuildParameters. Updates per-strategy adaptive state from the
+// latest market observations. Pure no-op when state is null (e.g. AUTO
+// cores pre-Phase 3, STRATEGY_NONE cores) — preserves prior behavior.
+//
+// Phase 2.1 (SimpleDip): SimpleDip_Adapt is itself a no-op; the actual
+// state update (recent_high) happens inside SimpleDip_BuildParameters
+// where rolling is in scope. Wiring exists for symmetry with other
+// strategies and to establish the dispatcher pattern Phase 2.2-2.5
+// will fill in.
+//======================================================================================================
+template <unsigned F>
+inline void Strategy_AdaptPerCore(
+    EventLoopState<F>* state,
+    int slot,
+    uint8_t effective_strategy_id,
+    FPN<F> current_price,
+    FPN<F> portfolio_delta,
+    uint16_t active_bitmap,
+    const ControllerConfig<F>* cfg
+) {
+    if (slot < 0 || slot >= MAX_EXECUTION_CORES) return;
+    auto& ctx = state->cores[slot];
+    if (!ctx.strategy_state) return;  // no allocated state → no Adapt
+
+    // Stack-local scratch — legacy _Adapt signature wants buy_conds, sharded
+    // doesn't use it (parameters flow via GateParameters seqlock, not
+    // BuySideGateConditions).
+    BuySideGateConditions<F> buy_conds_scratch{};
+
+    switch (effective_strategy_id) {
+        case STRATEGY_SIMPLE_DIP:
+            if (ctx.strategy_state_kind == STRATEGY_SIMPLE_DIP) {
+                SimpleDip_Adapt(static_cast<SimpleDipState<F>*>(ctx.strategy_state),
+                                current_price, portfolio_delta, active_bitmap,
+                                &buy_conds_scratch, cfg);
+            }
+            break;
+        // Phase 2.2-2.5 will add MR / Momentum / EmaCross / ML cases here.
+        default:
+            break;
+    }
+}
+
+//======================================================================================================
 // [FREE — destroy per-strategy state]
 //======================================================================================================
 // Idempotent: safe to call on slots where strategy_state == nullptr.

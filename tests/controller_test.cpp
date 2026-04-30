@@ -8135,6 +8135,94 @@ e3_skip_load:;
         tt::EventLoopState_Free(&state);
     }
 
+    printf("\n--- v5.4.0 Phase 2.1: SimpleDip state-aware BuildParameters ---\n");
+    {
+        // SimpleDip_BuildParameters with non-null state writes recent_high
+        // into state. Numerics match the legacy nullptr-state path
+        // (state-write is a side-channel; gate output is unchanged).
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        // Seed rolling with a price scan so price_max is meaningful
+        for (int i = 0; i < 64; ++i) {
+            FPN<FP> p = FPN_FromDouble<FP>(50000.0 + (double)i * 10.0);
+            FPN<FP> v = FPN_FromDouble<FP>(1.0);
+            RollingStats_Push(&rolling, p, v);
+        }
+
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.entry_offset_pct = FPN_FromDouble<FP>(0.0015);
+
+        SimpleDipState<FP> sdip{};
+        tt::GateParameters<FP> out_with_state{};
+        SimpleDip_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+                                   &out_with_state, (RollingStats<FP, 512>*)nullptr,
+                                   &sdip);
+        check("v5.4.0p2.1: state-aware Build populates state->recent_high",
+              !FPN_IsZero(sdip.recent_high));
+        check("v5.4.0p2.1: state-aware Build's recent_high == rolling->price_max",
+              FPN_Equal(sdip.recent_high, rolling.price_max));
+
+        // Same call with nullptr state — must produce identical gate output
+        // (state is a write-only side-channel, doesn't affect numerics).
+        tt::GateParameters<FP> out_no_state{};
+        SimpleDip_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+                                   &out_no_state, (RollingStats<FP, 512>*)nullptr,
+                                   (SimpleDipState<FP>*)nullptr);
+        check("v5.4.0p2.1: nullptr-state path produces identical bg threshold",
+              FPN_Equal(out_with_state.bg_price_threshold, out_no_state.bg_price_threshold));
+        check("v5.4.0p2.1: nullptr-state path produces identical TP",
+              FPN_Equal(out_with_state.sg_take_profit_price, out_no_state.sg_take_profit_price));
+        check("v5.4.0p2.1: nullptr-state path produces identical SL",
+              FPN_Equal(out_with_state.sg_stop_loss_price, out_no_state.sg_stop_loss_price));
+    }
+    {
+        // Strategy_BuildParameters dispatcher accepts strategy_state and
+        // routes it to SimpleDip. Verify the cast happens correctly.
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        for (int i = 0; i < 64; ++i) {
+            FPN<FP> p = FPN_FromDouble<FP>(60000.0 + (double)i * 5.0);
+            FPN<FP> v = FPN_FromDouble<FP>(2.0);
+            RollingStats_Push(&rolling, p, v);
+        }
+
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.entry_offset_pct = FPN_FromDouble<FP>(0.001);
+
+        SimpleDipState<FP> sdip{};
+        tt::GateParameters<FP> out{};
+        tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg,
+                                      FPN_FromDouble<FP>(500.0), &out,
+                                      (RollingStats<FP, 512>*)nullptr,
+                                      nullptr, &sdip);
+        check("v5.4.0p2.1: dispatcher routes strategy_state to SimpleDip",
+              FPN_Equal(sdip.recent_high, rolling.price_max));
+    }
+    {
+        // Strategy_AdaptPerCore with no allocated state is a safe no-op
+        // (does not dereference null strategy_state). Verifies that AUTO
+        // and NONE cores survive the new dispatch wiring.
+        tt::OrderManagerState<FP> oms;
+        tt::EventLoopState<FP> state;
+        tt::EventLoopState_Init(&state, &oms);
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        // strategy_state stays null (no Init called)
+        tt::Strategy_AdaptPerCore(&state, 0, STRATEGY_SIMPLE_DIP,
+                                   FPN_FromDouble<FP>(50000.0),
+                                   FPN_Zero<FP>(), 0, &cfg);
+        check("v5.4.0p2.1: AdaptPerCore is no-op when strategy_state is null",
+              state.cores[0].strategy_state == nullptr);
+
+        // Now allocate state and verify Adapt runs without crashing.
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        tt::Strategy_InitPerCore(&state, 0, STRATEGY_SIMPLE_DIP, &rolling, &cfg);
+        tt::Strategy_AdaptPerCore(&state, 0, STRATEGY_SIMPLE_DIP,
+                                   FPN_FromDouble<FP>(50000.0),
+                                   FPN_Zero<FP>(), 0, &cfg);
+        check("v5.4.0p2.1: AdaptPerCore safely runs SimpleDip_Adapt with allocated state",
+              state.cores[0].strategy_state != nullptr);
+        tt::Strategy_FreePerCore(&state, 0);
+        tt::EventLoopState_Free(&state);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
