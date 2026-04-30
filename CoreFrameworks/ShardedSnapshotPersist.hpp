@@ -283,7 +283,8 @@ fail:
 // panel but can't be exited by the hot path.
 template <unsigned F>
 inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
-                                  int partial_exit_enabled) {
+                                  int partial_exit_enabled,
+                                  const ControllerConfig<F>* cfg = nullptr) {
     if (!state || !state->oms || !filepath) return 0;
     FILE* f = fopen(filepath, "rb");
     if (!f) {
@@ -580,15 +581,49 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         const Position<F>& pos = state->oms->portfolio.positions[slot];
         // Active flag last (no atomic needed — core hot-path thread
         // isn't running yet at snapshot-load time).
+        // v5.5.5: recompute live_tp / live_sl from entry × (1 ± pct).
+        // pre-fix copied pos.take_profit_price / pos.stop_loss_price into
+        // live_tp / live_sl. Those are populated at entry from the
+        // strategy's intended_tp = sg_take_profit_price. For Momentum,
+        // sg_take_profit_price is stddev-based (entry + stddev × momentum_tp_mult)
+        // and can be just $10-30 above entry in low-vol regimes — nothing
+        // like the fresh-entry hot path's `live_tp = fill × (1 + tp_pct)`
+        // which uses cfg's pct (e.g. 0.8% for core 0). User reported on
+        // 2026-04-30 that restored Momentum positions sold at near-entry
+        // prices for tiny gains that lost to fees. Now compute live_tp
+        // the same way ExecutionCore_Tick does on a fresh entry, using
+        // per-core resolved tp_pct/sl_pct from cfg.
+        FPN<F> entry = pos.entry_price;
+        // When cfg is provided (production caller), recompute live_tp/sl
+        // from entry × (1 ± pct) so it matches the fresh-entry hot path.
+        // When cfg is nullptr (legacy callers, tests), fall back to the
+        // pre-fix pos.* path.
+        FPN<F> live_tp_a = pos.take_profit_price;
+        FPN<F> live_sl_a = pos.stop_loss_price;
+        FPN<F> live_tp_b_val = pos.take_profit_price;
+        if (cfg) {
+            ControllerConfig<F> resolved = ControllerConfig_ResolveForCore(*cfg, core_id);
+            FPN<F> tp_pct_a = resolved.take_profit_pct;
+            FPN<F> sl_pct_a = resolved.stop_loss_pct;
+            if (!FPN_IsZero(tp_pct_a))
+                live_tp_a = FPN_Add(entry, FPN_Mul(entry, tp_pct_a));
+            if (!FPN_IsZero(sl_pct_a))
+                live_sl_a = FPN_Sub(entry, FPN_Mul(entry, sl_pct_a));
+            FPN<F> tp_pct_b = !FPN_IsZero(resolved.tp2_mult) && !FPN_IsZero(tp_pct_a)
+                ? FPN_Mul(tp_pct_a, resolved.tp2_mult)
+                : tp_pct_a;
+            if (!FPN_IsZero(tp_pct_b))
+                live_tp_b_val = FPN_Add(entry, FPN_Mul(entry, tp_pct_b));
+        }
         if (leg == 0) {
-            core_ptr->entry_price = pos.entry_price;
-            core_ptr->live_tp     = pos.take_profit_price;
-            core_ptr->live_sl     = pos.stop_loss_price;
+            core_ptr->entry_price = entry;
+            core_ptr->live_tp     = live_tp_a;
+            core_ptr->live_sl     = live_sl_a;
             core_ptr->active      = 1;
         } else {
-            core_ptr->entry_price_b = pos.entry_price;
-            core_ptr->live_tp_b     = pos.take_profit_price;
-            core_ptr->live_sl_b     = pos.stop_loss_price;
+            core_ptr->entry_price_b = entry;
+            core_ptr->live_tp_b     = live_tp_b_val;
+            core_ptr->live_sl_b     = live_sl_a;  // shared SL
             core_ptr->active_b      = 1;
         }
         restored_count++;

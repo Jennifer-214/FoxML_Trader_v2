@@ -806,7 +806,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         mkdir("data", 0755);
         if (!live_trading) {
             int loaded = ShardedSnapshot_Load<F>(&state, snapshot_path,
-                                                  cfg.partial_exit_enabled ? 1 : 0);
+                                                  cfg.partial_exit_enabled ? 1 : 0,
+                                                  &cfg);  // v5.5.5
             (void)loaded;  // logged inside; nothing else to do here
         } else {
             // v5.2.2 (live reconciliation Phase 1 wiring): exchange truth
