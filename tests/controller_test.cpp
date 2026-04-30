@@ -8688,6 +8688,83 @@ e3_skip_load:;
         tt::EventLoopState_Free(&state);
     }
 
+    printf("\n--- v5.4.1 Bug B2: OMS_DrainSubmit walks all queues under partials ---\n");
+    {
+        // Pre-fix, OMS_DrainSubmit(num_cores=N) only drained queues 0..N-1
+        // even when partials enabled, while OMS_PushSubmit keys queues by
+        // portfolio_slot (0..2N-1). Result: cores beyond N had submits
+        // stranded forever. This test pushes commands into queues 0..7
+        // (4 cores under partials) and confirms drain walks all 8 when
+        // called with the partials-aware count.
+        struct PartialsRig {
+            tt::OrderManagerState<64> oms;
+            tt::EventLoopState<64> state;
+        };
+        auto* rig = new PartialsRig();
+        tt::ExchangeAdapter<64> adapter{};
+        tt::OrderManager_Init(&rig->oms, adapter,
+                               /*live_trading=*/0,
+                               FPN_FromDouble<64>(10000.0),
+                               FPN_FromDouble<64>(0.001),
+                               /*event_log_mode=*/0);  // mode 0 keeps
+                                                        // Submit a no-op
+                                                        // for paper
+        rig->oms.partial_exit_enabled = 1;  // partials on
+        tt::EventLoopState_Init(&rig->state, &rig->oms);
+        rig->state.registered_count = 4;    // 4 cores
+
+        // Push 8 commands — one per portfolio slot 0..7 (covers both legs
+        // of all 4 cores under partials).
+        int pushed = 0;
+        for (int slot = 0; slot < 8; ++slot) {
+            uint8_t leg = (uint8_t)(slot & 1);
+            bool ok = tt::OMS_PushSubmit(&rig->oms,
+                (int16_t)slot, tt::ORDER_MARKET_BUY,
+                FPN_FromDouble<64>(0.01),
+                FPN_Zero<64>(), FPN_Zero<64>(),
+                STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(50000.0), leg);
+            if (ok) pushed++;
+        }
+        check("v5.4.1.B2: 8 PushSubmit calls accepted (all queues had room)",
+              pushed == 8);
+
+        // Pre-fix behavior: drain(num_cores=4) would only walk queues 0..3,
+        // returning 4 (legs A+B of cores 0..1) and stranding 4 commands in
+        // queues 4..7. The fix uses partials_drain_count = 2*N when partials
+        // enabled.
+        int drain_count = rig->oms.partial_exit_enabled
+            ? rig->state.registered_count * 2 : rig->state.registered_count;
+        check("v5.4.1.B2: drain count is 2*N under partials",
+              drain_count == 8);
+
+        int drained = tt::OMS_DrainSubmit(&rig->oms, drain_count);
+        check("v5.4.1.B2: DrainSubmit consumes all 8 commands when called with 2*N",
+              drained == 8);
+
+        // Sanity: a second drain returns 0 (idempotent on empty queues).
+        int drained2 = tt::OMS_DrainSubmit(&rig->oms, drain_count);
+        check("v5.4.1.B2: idempotent — drain on empty returns 0",
+              drained2 == 0);
+
+        // Now demonstrate the pre-fix BUG by re-pushing 8 commands and
+        // calling drain with the OLD num_cores=N. Expect only 4 drained;
+        // the other 4 stay stuck in queues 4..7.
+        for (int slot = 0; slot < 8; ++slot) {
+            tt::OMS_PushSubmit(&rig->oms, (int16_t)slot, tt::ORDER_MARKET_BUY,
+                FPN_FromDouble<64>(0.01), FPN_Zero<64>(), FPN_Zero<64>(),
+                STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(50000.0),
+                (uint8_t)(slot & 1));
+        }
+        int pre_fix_drained = tt::OMS_DrainSubmit(&rig->oms, /*num_cores=*/4);
+        check("v5.4.1.B2: pre-fix drain (num_cores=N=4) only walks 4 queues",
+              pre_fix_drained == 4);
+        // Drain remaining 4 with full-walk to clean up
+        tt::OMS_DrainSubmit(&rig->oms, /*num_cores=*/8);
+
+        tt::EventLoopState_Free(&rig->state);
+        delete rig;
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
