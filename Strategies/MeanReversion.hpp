@@ -532,5 +532,84 @@ inline void MeanReversion_ExitAdjust(Portfolio<F> *portfolio,
 }
 
 //======================================================================================================
+// [EXIT ADJUST — sharded, ratchet_sl path]
 //======================================================================================================
+// v5.4.0 Phase 2.2: sharded equivalent of MeanReversion_ExitAdjust above.
+// The legacy version writes pos->stop_loss_price + pos->take_profit_price,
+// neither of which the sharded hot path reads (postmortem F4 — dead writes,
+// hot path reads core->live_sl + cached_params.ratchet_sl).
+//
+// Differences vs legacy:
+//   - Writes ratchet_sl (max-only) via Strategy_WriteRatchetSL helper which
+//     applies the v5.1.7 fee-floor cap (entry × (1 - 3 × fee_rate_taker)).
+//   - Per-core scope: iterates this core's slot(s) only, not the full
+//     portfolio bitmap.
+//   - TP trailing deferred to Phase 3 (parallel TP-ratchet channel — sharded
+//     hot path uses cached_params.tp_pct via per-fill compute, no TP ratchet
+//     field exists yet).
+//   - Same regression-based hold_score = (reg_slope / stddev) × R²:
+//     trail only when confidence is high.
+//
+// Forward declaration of Strategy_WriteRatchetSL — defined in
+// StrategyLifecycle.hpp which can't be included here (cycle).
+//======================================================================================================
+namespace tt {
+template <unsigned F> struct EventLoopState;
+template <unsigned F>
+bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
+                              FPN<F> proposed_sl, FPN<F> entry_price,
+                              const ControllerConfig<F>* cfg);
+
+template <unsigned F, unsigned W>
+inline void MeanReversion_ExitAdjustSharded(
+    EventLoopState<F>* state,
+    int slot,
+    MeanReversionState<F>* mr,
+    FPN<F> current_price,
+    const RollingStats<F, W>* rolling,
+    const ControllerConfig<F>* cfg
+) {
+    if (FPN_IsZero(cfg->tp_hold_score))   return;
+    if (FPN_IsZero(rolling->price_stddev)) return;
+
+    // Compute regression-based hold_score from MR state's price feeder.
+    // MR_Adapt pushes price_feeder this same cycle; Adapt runs before this
+    // function, so we read fresh data.
+    FPN<F> r_squared = FPN_Zero<F>();
+    FPN<F> reg_slope = FPN_Zero<F>();
+    if (mr->price_feeder.count >= MAX_WINDOW) {
+        LinearRegression3XResult<F> price_reg =
+            RegressionFeederX_Compute(&mr->price_feeder);
+        r_squared = price_reg.r_squared;
+        reg_slope = price_reg.model.slope;
+    }
+    FPN<F> snr        = FPN_DivNoAssert(reg_slope, rolling->price_stddev);
+    FPN<F> hold_score = FPN_Mul(snr, r_squared);
+    if (!FPN_GreaterThanOrEqual(hold_score, cfg->tp_hold_score)) return;
+
+    // For each of this core's active slots, propose a trailing SL and
+    // route through Strategy_WriteRatchetSL (fee-floor capped, max-only).
+    int partial_on = state->oms->partial_exit_enabled ? 1 : 0;
+    uint16_t my_mask = partial_on
+        ? (uint16_t)((1u << (slot * 2)) | (1u << (slot * 2 + 1)))
+        : (uint16_t)(1u << slot);
+    uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
+
+    FPN<F> sl_offset = FPN_Mul(rolling->price_stddev, cfg->sl_trail_mult);
+    FPN<F> trailing_sl = FPN_Sub(current_price, sl_offset);
+
+    while (bm) {
+        int pidx = __builtin_ctz(bm);
+        bm &= (uint16_t)(bm - 1);
+        FPN<F> entry = state->oms->portfolio.positions[pidx].entry_price;
+        // Only trail when position is "running" (price above original_tp)
+        // and entry is set (idle slot guard).
+        if (FPN_IsZero(entry)) continue;
+        FPN<F> orig_tp = state->oms->portfolio.positions[pidx].original_tp;
+        if (!FPN_IsZero(orig_tp) && !FPN_GreaterThan(current_price, orig_tp)) continue;
+        Strategy_WriteRatchetSL(state, slot, trailing_sl, entry, cfg);
+    }
+}
+} // namespace tt
+
 #endif // MEAN_REVERSION_HPP

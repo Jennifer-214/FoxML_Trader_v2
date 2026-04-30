@@ -8223,6 +8223,141 @@ e3_skip_load:;
         tt::EventLoopState_Free(&state);
     }
 
+    printf("\n--- v5.4.0 Phase 2.2: MeanReversion state-aware BuildParameters + ratchet ---\n");
+    {
+        // MR Init seeds adaptive filter values from cfg.
+        tt::OrderManagerState<FP> oms;
+        tt::EventLoopState<FP> state;
+        tt::EventLoopState_Init(&state, &oms);
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.entry_offset_pct  = FPN_FromDouble<FP>(0.0020);
+        cfg.volume_multiplier = FPN_FromDouble<FP>(2.0);
+        cfg.offset_stddev_mult = FPN_Zero<FP>();  // pct mode
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        for (int i = 0; i < 64; ++i) {
+            RollingStats_Push(&rolling, FPN_FromDouble<FP>(50000.0 + i),
+                              FPN_FromDouble<FP>(1.0));
+        }
+        tt::Strategy_InitPerCore(&state, 0, STRATEGY_MEAN_REVERSION, &rolling, &cfg);
+        auto* mr = static_cast<MeanReversionState<FP>*>(state.cores[0].strategy_state);
+        check("v5.4.0p2.2: MR Init seeds live_offset_pct from cfg",
+              FPN_Equal(mr->live_offset_pct, cfg.entry_offset_pct));
+        check("v5.4.0p2.2: MR Init seeds live_vol_mult from cfg",
+              FPN_Equal(mr->live_vol_mult, cfg.volume_multiplier));
+
+        tt::Strategy_FreePerCore(&state, 0);
+        tt::EventLoopState_Free(&state);
+    }
+    {
+        // State-aware MR_BuildParameters with adapted state produces a
+        // different gate output than the cfg-only fallback. Concretely: if
+        // we mutate state.live_offset_pct to a different value than cfg,
+        // the bg threshold should reflect the state value.
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        for (int i = 0; i < 64; ++i) {
+            RollingStats_Push(&rolling, FPN_FromDouble<FP>(50000.0 + i),
+                              FPN_FromDouble<FP>(1.0));
+        }
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.entry_offset_pct = FPN_FromDouble<FP>(0.001);
+        cfg.offset_stddev_mult = FPN_Zero<FP>();
+        cfg.volume_multiplier = FPN_FromDouble<FP>(1.0);
+
+        // nullptr-state path (legacy)
+        tt::GateParameters<FP> out_legacy{};
+        tt::MeanReversion_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+                                           &out_legacy);
+
+        // State-aware path with deliberately DIFFERENT live values
+        MeanReversionState<FP> mr{};
+        mr.live_offset_pct  = FPN_FromDouble<FP>(0.005);   // 5x cfg
+        mr.live_vol_mult    = FPN_FromDouble<FP>(3.0);
+        mr.live_stddev_mult = FPN_Zero<FP>();
+        tt::GateParameters<FP> out_state{};
+        tt::MeanReversion_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+                                           &out_state, &mr);
+        check("v5.4.0p2.2: state-aware MR produces lower bg threshold (bigger dip)",
+              FPN_LessThan(out_state.bg_price_threshold, out_legacy.bg_price_threshold));
+        check("v5.4.0p2.2: state-aware MR produces higher volume threshold (3x mult)",
+              FPN_GreaterThan(out_state.bg_volume_threshold, out_legacy.bg_volume_threshold));
+    }
+    {
+        // Dispatcher routes strategy_state to MR branch.
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        for (int i = 0; i < 64; ++i) {
+            RollingStats_Push(&rolling, FPN_FromDouble<FP>(50000.0 + i),
+                              FPN_FromDouble<FP>(1.0));
+        }
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.entry_offset_pct = FPN_FromDouble<FP>(0.001);
+        cfg.offset_stddev_mult = FPN_Zero<FP>();
+
+        MeanReversionState<FP> mr{};
+        mr.live_offset_pct = FPN_FromDouble<FP>(0.010);  // 10x cfg
+        mr.live_vol_mult   = FPN_FromDouble<FP>(1.0);
+        mr.live_stddev_mult = FPN_Zero<FP>();
+
+        tt::GateParameters<FP> out{};
+        tt::Strategy_BuildParameters(STRATEGY_MEAN_REVERSION, &rolling, &cfg,
+                                      FPN_FromDouble<FP>(500.0), &out,
+                                      (RollingStats<FP, 512>*)nullptr,
+                                      nullptr, &mr);
+        // Compute expected: avg - avg*0.010
+        FPN<FP> avg = rolling.price_avg;
+        FPN<FP> expected = FPN_Sub(avg, FPN_Mul(avg, mr.live_offset_pct));
+        check("v5.4.0p2.2: dispatcher routes strategy_state to MR (uses live_offset)",
+              FPN_Equal(out.bg_price_threshold, expected));
+    }
+    {
+        // Strategy_WriteRatchetSL fee-floor cap: a proposal above the floor
+        // gets capped to the floor.
+        tt::OrderManagerState<FP> oms;
+        tt::EventLoopState<FP> state;
+        tt::EventLoopState_Init(&state, &oms);
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.fee_rate_taker = FPN_FromDouble<FP>(0.001);  // 10 bps
+        cfg.fee_rate       = cfg.fee_rate_taker;
+        FPN<FP> entry = FPN_FromDouble<FP>(50000.0);
+        // Floor ≈ entry * (1 - 3*0.001) ≈ 49850 (FPN precision: 49849.x..49850.x)
+        // Use a tolerance check to avoid double→FPN rounding mismatches.
+        FPN<FP> proposal_above = FPN_FromDouble<FP>(49950.0);
+        bool wrote = tt::Strategy_WriteRatchetSL(&state, 0, proposal_above, entry, &cfg);
+        double stored_d = FPN_ToDouble(state.cores[0].pending_params.ratchet_sl);
+        check("v5.4.0p2.2: WriteRatchetSL accepts above-floor proposal and caps",
+              wrote && stored_d > 49849.0 && stored_d < 49851.0);
+        check("v5.4.0p2.2: WriteRatchetSL sets dirty=1 on advance",
+              state.cores[0].dirty == 1);
+
+        // Lower proposal (well below current cap) is a no-op since
+        // ratchet_sl is now the cap value (~49850).
+        FPN<FP> lower_proposal = FPN_FromDouble<FP>(49000.0);
+        state.cores[0].dirty = 0;
+        FPN<FP> ratchet_before = state.cores[0].pending_params.ratchet_sl;
+        bool wrote2 = tt::Strategy_WriteRatchetSL(&state, 0, lower_proposal, entry, &cfg);
+        check("v5.4.0p2.2: WriteRatchetSL is max-only (lower proposal ignored)",
+              !wrote2 && FPN_Equal(state.cores[0].pending_params.ratchet_sl, ratchet_before));
+        check("v5.4.0p2.2: WriteRatchetSL leaves dirty unchanged when no advance",
+              state.cores[0].dirty == 0);
+
+        tt::EventLoopState_Free(&state);
+    }
+    {
+        // Strategy_ExitAdjustPerCore is a no-op when state isn't allocated
+        // (e.g. AUTO core whose Init didn't allocate MR state yet).
+        tt::OrderManagerState<FP> oms;
+        tt::EventLoopState<FP> state;
+        tt::EventLoopState_Init(&state, &oms);
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        // No Init call — strategy_state stays null.
+        tt::Strategy_ExitAdjustPerCore(&state, 0, STRATEGY_MEAN_REVERSION,
+                                        FPN_FromDouble<FP>(50000.0), &rolling, &cfg);
+        check("v5.4.0p2.2: ExitAdjustPerCore is no-op when state is null",
+              state.cores[0].strategy_state == nullptr &&
+              state.cores[0].dirty == 0);
+        tt::EventLoopState_Free(&state);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

@@ -54,6 +54,7 @@
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/RegimeDetector.hpp"
 #include "SimpleDip.hpp"          // SimpleDipState<F> — Phase 2.1 state-aware BuildParameters
+#include "MeanReversion.hpp"      // MeanReversionState<F> — Phase 2.2 state-aware BuildParameters
 #include "StrategyInterface.hpp"
 
 #include <cstdint>
@@ -271,8 +272,18 @@ inline void MeanReversion_BuildParameters(
     const RollingStats<F, W>* rolling,
     const ControllerConfig<F>* config,
     FPN<F> allocated_balance,
-    GateParameters<F>* out
+    GateParameters<F>* out,
+    MeanReversionState<F>* state = nullptr   // v5.4.0 Phase 2.2 — adaptive filter state
 ) {
+    // v5.4.0 Phase 2.2: when state is provided (sharded path post-Phase 1),
+    // use state->live_offset_pct + state->live_vol_mult + state->live_stddev_mult
+    // — these are seeded from cfg at boot and adapted by MR_Adapt on cadence
+    // (P&L regression-driven). When state is nullptr (legacy callers, tests),
+    // fall back to cfg defaults — preserves pre-Phase 2.2 numerics.
+    FPN<F> live_offset = state ? state->live_offset_pct  : config->entry_offset_pct;
+    FPN<F> live_vmult  = state ? state->live_vol_mult    : config->volume_multiplier;
+    FPN<F> live_smult  = state ? state->live_stddev_mult : config->offset_stddev_mult;
+
     // BUG FIX (v4.0.3): pre-fix used `bg_threshold = rolling->price_avg`
     // with no depth requirement — gate fired on EVERY tick price < avg
     // (statistically half of all ticks during noise). Real MR buys on
@@ -280,14 +291,26 @@ inline void MeanReversion_BuildParameters(
     // sits at `avg - (avg × entry_offset_pct)` so it requires a true dip.
     FPN<F> avg = rolling->price_avg;
     if (FPN_IsZero(avg)) avg = rolling->price_max;
-    FPN<F> dip_offset = FPN_Mul(avg, config->entry_offset_pct);
-    FPN<F> entry_price = FPN_Sub(avg, dip_offset);
+
+    // v5.4.0 Phase 2.2: dual-mode entry price like the legacy MR_BuySignal.
+    // pct mode: entry = avg - (avg * live_offset_pct)
+    // stddev mode: entry = avg - (stddev * live_stddev_mult)
+    // Mode toggle is `live_smult > 0` (cfg.offset_stddev_mult is the global
+    // toggle; state mirrors at boot, may drift via Adapt within bounds).
+    FPN<F> entry_price;
+    if (!FPN_IsZero(live_smult)) {
+        FPN<F> stddev_offset = FPN_Mul(rolling->price_stddev, live_smult);
+        entry_price = FPN_Sub(avg, stddev_offset);
+    } else {
+        FPN<F> dip_offset = FPN_Mul(avg, live_offset);
+        entry_price = FPN_Sub(avg, dip_offset);
+    }
 
     FPN<F> tp_pct = !FPN_IsZero(config->mr_tp_pct) ? config->mr_tp_pct : config->take_profit_pct;
     FPN<F> sl_pct = !FPN_IsZero(config->mr_sl_pct) ? config->mr_sl_pct : config->stop_loss_pct;
     FPN<F> tp_amount = FPN_Mul(entry_price, tp_pct);
     FPN<F> sl_amount = FPN_Mul(entry_price, sl_pct);
-    FPN<F> volume_threshold = FPN_Mul(rolling->volume_avg, config->volume_multiplier);
+    FPN<F> volume_threshold = FPN_Mul(rolling->volume_avg, live_vmult);
 
     FPN<F> trade_size = FPN_Zero<F>();
     if (!FPN_IsZero(entry_price)) {
@@ -686,7 +709,9 @@ inline void Strategy_BuildParameters(
                                        (SimpleDipState<F>*)strategy_state);
             break;
         case STRATEGY_MEAN_REVERSION:
-            MeanReversion_BuildParameters(rolling, config, allocated_balance, out);
+            // v5.4.0 Phase 2.2 — pass typed MR state through.
+            MeanReversion_BuildParameters(rolling, config, allocated_balance, out,
+                                           (MeanReversionState<F>*)strategy_state);
             break;
         case STRATEGY_MOMENTUM:
             Momentum_BuildParameters(rolling, config, allocated_balance, out);

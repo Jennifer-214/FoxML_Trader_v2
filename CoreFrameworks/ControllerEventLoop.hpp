@@ -1715,6 +1715,16 @@ inline void EventLoop_RebuildOneCore(
             state->cores[slot].pending_params.ratchet_sl = FPN_Zero<F>();
         }
 
+        // v5.4.0 Phase 2.2: strategy-specific exit-adjust for cores with
+        // open slots. Writes ratchet_sl via Strategy_WriteRatchetSL (fee-floor
+        // capped). Coexists with the generic EventLoop_TrailingSLRatchetOneCore
+        // — both write the same field with max-only semantics; the higher
+        // proposal wins.
+        if (slot_active) {
+            Strategy_ExitAdjustPerCore(state, slot, effective_strategy_id,
+                                        rolling->price_avg, rolling, &resolved_cfg);
+        }
+
         // v4.0.3 cross-cutting checks applied uniformly across all strategies.
         // Each is a "zero-gate if violated" filter — preserves the strategy's
         // intended TP/SL/qty but disables the entry trigger. Halt reasons are
