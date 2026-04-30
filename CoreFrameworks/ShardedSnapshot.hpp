@@ -134,8 +134,43 @@ static inline void TUI_CopySnapshotSharded(
         ps->idx      = idx;
         ps->entry    = FPN_ToDouble(pos->entry_price);
         ps->qty      = FPN_ToDouble(pos->quantity);
-        ps->tp       = FPN_ToDouble(pos->take_profit_price);
-        ps->sl       = FPN_ToDouble(pos->stop_loss_price);
+
+        // v5.4.0 Phase 4: GUI shows the SAME effective TP/SL the hot path
+        // will exit at. Pre-Phase 4 the snapshot read pos->take_profit_price
+        // / pos->stop_loss_price (postmortem F2 — dead writes, hot path
+        // uses core->live_tp + cached_params.ratchet_tp instead). Now we
+        // mirror SG_Evaluate's formula: effective = max(active, ratchet).
+        // Falls back to pos->* when this slot's core isn't yet registered
+        // (cold start) or when reading param_slot fails.
+        int core_id_for_pos = (cfg->partial_exit_enabled ? (idx >> 1) : idx);
+        bool resolved_effective = false;
+        if (core_id_for_pos >= 0 && core_id_for_pos < state->registered_count) {
+            tt::ExecutionCore<F>* xc = state->cores[core_id_for_pos].core;
+            if (xc) {
+                tt::GateParameters<F> params;
+                tt::ParameterSlot_Read(&xc->param_slot, &params);
+                // Leg-aware live levels: leg B (slot odd under partials)
+                // uses live_tp_b, leg A uses live_tp.
+                bool is_leg_b = cfg->partial_exit_enabled && (idx & 1);
+                FPN<F> live_tp = is_leg_b ? xc->live_tp_b : xc->live_tp;
+                FPN<F> live_sl = is_leg_b ? xc->live_sl_b : xc->live_sl;
+                // active_tp/sl is the per-fill price when set, else the
+                // cached params absolute. Same shape as ExecutionCore_Tick.
+                FPN<F> active_tp = !FPN_IsZero(live_tp) ? live_tp : params.sg_take_profit_price;
+                FPN<F> active_sl = !FPN_IsZero(live_sl) ? live_sl : params.sg_stop_loss_price;
+                FPN<F> effective_tp = FPN_Max(active_tp, params.ratchet_tp);
+                FPN<F> effective_sl = FPN_Max(active_sl, params.ratchet_sl);
+                ps->tp = FPN_ToDouble(effective_tp);
+                ps->sl = FPN_ToDouble(effective_sl);
+                resolved_effective = true;
+            }
+        }
+        if (!resolved_effective) {
+            // Fallback for cold-start / no-core-registered: legacy display
+            // matches what it used to show.
+            ps->tp = FPN_ToDouble(pos->take_profit_price);
+            ps->sl = FPN_ToDouble(pos->stop_loss_price);
+        }
         ps->orig_tp  = FPN_ToDouble(pos->original_tp);
         ps->value    = price_d * ps->qty;
         if (ps->entry > 0.0) {
