@@ -16,6 +16,11 @@ struct TradeHistoryEntry {
     int tick;
     int core_id;     // P.3 partials: which core fired this trade
     int leg;         // P.3 partials: 0 = leg A or single, 1 = leg B
+    // v5.5.2: hold time. Computed from matching E (entry) row's timestamp_us
+    // → X (exit) row's timestamp_us via a per-slot state machine in the
+    // CSV reader. -1 = no matching E row found (CSV truncated, log
+    // rotated, etc.).
+    double hold_secs;
 };
 
 static constexpr int MAX_HISTORY = 256;
@@ -54,13 +59,31 @@ static inline void TradeHistory_Refresh(TradeHistory *th) {
     // entry_price but potentially different exit_price/pnl/fees.
     //
     // No header row in the sharded log — no skip-first.
+    //
+    // v5.5.2: track entry timestamps per slot (16 max under partials) so
+    // we can compute hold_secs on each matching X row. State machine:
+    //   E row arrives → store timestamp[slot] = ts
+    //   X row arrives → hold = ts - entry_ts[slot] (in seconds), reset slot
+    // If a slot has no recent E (file truncated, leg desync), hold_secs = -1.
+    uint64_t entry_ts_us[16] = {0};
     char line[1024];
     while (fgets(line, sizeof(line), f)) {
         if (line[0] == '\0' || line[0] == '\n' || line[0] == '#') continue;
 
-        // Column 3: 'E' or 'X'. Quick reject on non-X rows.
+        // Column 3: 'E' or 'X'. Build the entry-timestamp map from E rows
+        // before processing X rows so hold_secs is available.
         char kind_s[8];
         csv_field(line, 3, kind_s, sizeof(kind_s));
+        if (kind_s[0] == 'E') {
+            char ets_s[24], ecore_s[8];
+            csv_field(line, 0, ets_s,   sizeof(ets_s));
+            csv_field(line, 1, ecore_s, sizeof(ecore_s));
+            int eslot = atoi(ecore_s);
+            if (eslot >= 0 && eslot < 16) {
+                entry_ts_us[eslot] = (uint64_t)atoll(ets_s);
+            }
+            continue;
+        }
         if (kind_s[0] != 'X') continue;
         if (th->count >= MAX_HISTORY) break;
 
@@ -83,6 +106,23 @@ static inline void TradeHistory_Refresh(TradeHistory *th) {
         e->fee         = atof(fees_s);
         e->tick        = (int)atoll(tick_s);
         e->core_id     = atoi(core_s);
+
+        // v5.5.2: compute hold_secs from entry-row timestamp. tick_s is
+        // the X row's timestamp_us; entry_ts_us[slot] was set on the
+        // matching E row above. If no E row was seen for this slot
+        // (CSV truncated / log rotated), hold_secs = -1.0 sentinel.
+        if (e->core_id >= 0 && e->core_id < 16 && entry_ts_us[e->core_id] > 0) {
+            uint64_t exit_ts_us = (uint64_t)atoll(tick_s);
+            if (exit_ts_us > entry_ts_us[e->core_id]) {
+                e->hold_secs = (double)(exit_ts_us - entry_ts_us[e->core_id])
+                                / 1000000.0;
+            } else {
+                e->hold_secs = 0.0;  // same-tick — same-second resolution
+            }
+            entry_ts_us[e->core_id] = 0;  // consume — next E sets it again
+        } else {
+            e->hold_secs = -1.0;  // no matching E row
+        }
 
         // P.3 partials: core_id in the CSV is actually the PORTFOLIO SLOT
         // (the drainer passes Sharded_LegSlot result as Submit's core_id).
@@ -164,6 +204,7 @@ static inline void GUI_Panel_TradeHistory(TradeHistory *th, int partial_exit_ena
         ImGui::TableSetupColumn("Strat",  ImGuiTableColumnFlags_WidthFixed, 45);
         ImGui::TableSetupColumn("In",     ImGuiTableColumnFlags_WidthFixed, 65);
         ImGui::TableSetupColumn("Out",    ImGuiTableColumnFlags_WidthFixed, 65);
+        ImGui::TableSetupColumn("Hold",   ImGuiTableColumnFlags_WidthFixed, 60);  // v5.5.2
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
 
@@ -228,6 +269,23 @@ static inline void GUI_Panel_TradeHistory(TradeHistory *th, int partial_exit_ena
 
             ImGui::TableNextColumn();
             ImGui::Text("$%.0f", e->exit_price * e->qty);
+
+            // v5.5.2: hold time. Formatted as Xs (<60s), XmYs (1-59 min),
+            // XhYm (1+ hour). Sentinel hold_secs<0 → "—" (no E row matched).
+            ImGui::TableNextColumn();
+            if (e->hold_secs < 0.0) {
+                ImGui::TextColored(FoxmlColors::comment, "—");
+            } else if (e->hold_secs < 60.0) {
+                ImGui::Text("%.0fs", e->hold_secs);
+            } else if (e->hold_secs < 3600.0) {
+                int m = (int)(e->hold_secs / 60.0);
+                int s = (int)e->hold_secs % 60;
+                ImGui::Text("%dm%ds", m, s);
+            } else {
+                int h = (int)(e->hold_secs / 3600.0);
+                int m = ((int)e->hold_secs % 3600) / 60;
+                ImGui::Text("%dh%dm", h, m);
+            }
         }
 
         ImGui::EndTable();
