@@ -356,6 +356,33 @@ inline void Momentum_BuildParameters(
     out->sl_pct               = config->stop_loss_pct;
     out->trade_size           = trade_size;
     out->strategy_id          = STRATEGY_MOMENTUM;
+
+    // v5.4.0 Phase A.3 diagnostic — gated on TT_SL_DEBUG env var.
+    // Logs entry-time SL emission for MOM. If sg_stop_loss_price ends up
+    // ABOVE entry_price, the bug is in BuildParameters. If it's correctly
+    // BELOW entry but the live position shows SL above entry, the bug is
+    // downstream (Momentum_ExitAdjust trailing ratchet, or Portfolio_OpenSlot
+    // path, or the regime-change ratchet at ControllerEventLoop.hpp:1535).
+    {
+        static int sl_dbg = -1;
+        if (sl_dbg == -1) {
+            const char* e = getenv("TT_SL_DEBUG");
+            sl_dbg = (e && e[0] && e[0] != '0') ? 1 : 0;
+        }
+        static thread_local uint32_t mom_dbg_cycle = 0;
+        if (sl_dbg && (mom_dbg_cycle++ & 0x0F) == 0) {
+            double e = FPN_ToDouble(entry_price);
+            double sl = FPN_ToDouble(out->sg_stop_loss_price);
+            double tp = FPN_ToDouble(out->sg_take_profit_price);
+            const char* geom = (sl < e) ? "OK_long" : (sl > e ? "INVERTED" : "ZERO");
+            fprintf(stderr,
+                "[mom-sl-build] entry=%.2f tp=%.2f sl=%.2f sl_amount=%.4f "
+                "stddev=%.4f mom_sl_mult=%.4f geom=%s\n",
+                e, tp, sl, FPN_ToDouble(sl_amount),
+                FPN_ToDouble(rolling->price_stddev),
+                FPN_ToDouble(config->momentum_sl_mult), geom);
+        }
+    }
     // v4.0: GATE_FLAG_BUY_ABOVE — momentum buys breakouts above the threshold,
     // not dips below. Pre-v4.0 the hot path was hardcoded to buy-below, so MOM
     // in sharded silently traded like MR. Strategy logic is still a stub
