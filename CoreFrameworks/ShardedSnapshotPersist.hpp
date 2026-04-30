@@ -67,7 +67,12 @@ namespace tt {
 // silently skipped from persistence — Stats panel avg_win / avg_loss /
 // profit_factor read zero after restart). Plus idle_cycles for
 // death-spiral state continuity.
-#define SHARDED_SNAPSHOT_VERSION  5u
+// v6 (recurring-bugs Class 6): adds OMS counters total_fees,
+// total_maker_fees, total_taker_fees, maker_fills_count,
+// taker_fills_count — were never persisted, so session forensics
+// reset on every restart even though balance + realized_pnl
+// continued. v5 files rejected on load with version-mismatch.
+#define SHARDED_SNAPSHOT_VERSION  6u
 
 //======================================================================================================
 // [SAVE]
@@ -124,6 +129,14 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
     if (fwrite(&state->oms->realized_pnl,        sizeof(FPN<F>), 1, f) != 1) goto fail;
     if (fwrite(&state->oms->ks_peak_balance,     sizeof(FPN<F>), 1, f) != 1) goto fail;
     if (fwrite(&state->oms->kill_switch_tripped, sizeof(int),    1, f) != 1) goto fail;
+    // v6 (recurring-bugs Class 6): OMS counters. HandleFill bumps these
+    // on every fill (entry+exit). Without persistence, session
+    // forensics drop to zero on every restart.
+    if (fwrite(&state->oms->total_fees,          sizeof(FPN<F>), 1, f) != 1) goto fail;
+    if (fwrite(&state->oms->total_maker_fees,    sizeof(FPN<F>), 1, f) != 1) goto fail;
+    if (fwrite(&state->oms->total_taker_fees,    sizeof(FPN<F>), 1, f) != 1) goto fail;
+    if (fwrite(&state->oms->maker_fills_count,   sizeof(uint32_t), 1, f) != 1) goto fail;
+    if (fwrite(&state->oms->taker_fills_count,   sizeof(uint32_t), 1, f) != 1) goto fail;
 
     // Portfolio bitmap + 16 positions (full Portfolio struct snapshot).
     if (fwrite(&state->oms->portfolio.active_bitmap, 2, 1, f) != 1) goto fail;
@@ -341,6 +354,14 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
     if (fread(&tmp_realized,     sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
     if (fread(&tmp_peak,         sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
     if (fread(&tmp_kill_tripped, sizeof(int),    1, f) != 1) { fclose(f); return 0; }
+    // v6 OMS counters: read into tmps, apply at commit point below.
+    FPN<F> tmp_total_fees, tmp_total_maker, tmp_total_taker;
+    uint32_t tmp_maker_count, tmp_taker_count;
+    if (fread(&tmp_total_fees,   sizeof(FPN<F>),  1, f) != 1) { fclose(f); return 0; }
+    if (fread(&tmp_total_maker,  sizeof(FPN<F>),  1, f) != 1) { fclose(f); return 0; }
+    if (fread(&tmp_total_taker,  sizeof(FPN<F>),  1, f) != 1) { fclose(f); return 0; }
+    if (fread(&tmp_maker_count,  sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }
+    if (fread(&tmp_taker_count,  sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }
 
     uint16_t bitmap = 0, pad16 = 0;
     Position<F> positions[16];
@@ -449,6 +470,12 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
     state->oms->realized_pnl        = tmp_realized;
     state->oms->ks_peak_balance     = tmp_peak;
     state->oms->kill_switch_tripped = tmp_kill_tripped;
+    // v6 OMS counters apply
+    state->oms->total_fees          = tmp_total_fees;
+    state->oms->total_maker_fees    = tmp_total_maker;
+    state->oms->total_taker_fees    = tmp_total_taker;
+    state->oms->maker_fills_count   = tmp_maker_count;
+    state->oms->taker_fills_count   = tmp_taker_count;
     state->oms->portfolio.active_bitmap = bitmap;
     memcpy(state->oms->portfolio.positions, positions, sizeof(positions));
 

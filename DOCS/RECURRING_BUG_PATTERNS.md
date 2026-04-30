@@ -206,3 +206,125 @@ grep -A40 "paper_reset_in_progress" CoreFrameworks/EngineSharded.hpp
   to also touch the reset handler.
 - Test: after Reset Paper, every CoreContext field should equal its
   Init-time default. Simple property test catches future regressions.
+
+---
+
+## Class 6 — OMS counter persistence
+
+**Symptom:** session-cumulative counters on the OMS (fee totals,
+maker/taker breakdown, fill counts) reset to zero on engine restart
+even though `balance` and `realized_pnl` continue from the snapshot.
+After restart, the GUI's fees tooltip / session forensics drop the
+session totals and the user can't reconcile cumulative spend.
+
+**Root cause:** `ShardedSnapshotPersist.hpp` save/load was authored
+for the financial-state primitives (balance, realized_pnl, peak,
+kill_switch_tripped) and never expanded as the OMS grew counter
+fields. Maker/taker / fee-totals were added in Phase 8; never
+propagated into the snapshot file.
+
+**Detection:**
+```bash
+# Fields on OMS struct that look like cumulative counters
+grep -E "uint(32|64)_t|FPN<F>" CoreFrameworks/OrderManager.hpp \
+    | grep -iE "total|count|fee|fill" | head -20
+# What's actually persisted
+grep "fwrite(&state->oms->" CoreFrameworks/ShardedSnapshotPersist.hpp
+# Diff: counters that exist but aren't written are candidates
+```
+
+**Known instances:**
+- v5.4.4 — `total_fees`, `total_maker_fees`, `total_taker_fees`,
+  `maker_fills_count`, `taker_fills_count` not persisted. Snapshot
+  version bumped 5→6.
+
+**Prevention:**
+- Same as Class 4: bump SHARDED_SNAPSHOT_VERSION when adding any OMS
+  counter that needs continuity, with a save/load symmetry check.
+- Future refactor: snapshot save/load should iterate fields from a
+  schema struct rather than open-coded fwrite/fread. A schema
+  mismatch then becomes a static_assert at compile time.
+
+---
+
+## Class 7 — Threading topology violations (audited clean post-v5.4.x)
+
+**Symptom:** would manifest as data races on per-core fields under
+TSan stress. Pre-fixes in v4.7.x already converted shared mutating
+state to per-core or atomic. Round 2 audit (2026-04-30) flagged two
+candidate violations; both turned out to be false alarms:
+
+1. `EventLoop_QueueParameters` writes `pending_params` from producer
+   while per-core thread also writes — flagged. Verification: the
+   function is only called by an experiment test, never in the live
+   drainer or per-core slow path. False alarm.
+
+2. `OnEvent` writes `ctx->idle_cycles = 0` from drainer while
+   per-core thread increments it — flagged. Verification: `OnEvent`
+   in mode 1 (default since v4.7.x) early-returns at line 1083
+   before reaching the increment. The write is unreachable in
+   production. Classified as inert dead code; cleanup can fold it
+   into the mode-0 legacy block (low priority).
+
+**Prevention:**
+- `./build.sh tsan` clean run on `engine` synthetic mode is the
+  durable validation. v5.0.5 confirmed clean; rerun before any
+  new threading work.
+- Future audits: distinguish "field written by multiple threads" from
+  "fields written by multiple threads at the same time" — many
+  per-core fields appear to have multiple writers but the writes are
+  serialized by mode/cadence/topology gating.
+
+---
+
+## Class 8 — User-configurable features silently inactive in sharded
+
+**Symptom:** user flips a cfg flag, expects behavior change, sees
+none. TUI may even display "enabled" status. The cfg field is parsed,
+stored, displayed — but the runtime decision path that should consume
+it doesn't exist in the sharded code, only in the legacy
+PortfolioController.
+
+**Root cause:** the sharded port migrated the structural execution
+path (slow-path → strategy → gate parameters → hot path) but did not
+port every modulator / gating layer. Cost gating (CostModel) and vol
+scaling (VolScaler) were two such layers — fully implemented in
+legacy, fully orphaned in sharded.
+
+**Detection:**
+```bash
+# For each cfg field that's marked "enabled" or has explicit gating
+# semantics, check if it's read in the sharded path
+for field in $(grep -oE "[a-z_]+_enabled" CoreFrameworks/ControllerConfig.hpp | sort -u); do
+    legacy_reads=$(grep -c "config.$field\|cfg.$field" CoreFrameworks/PortfolioController.hpp 2>/dev/null)
+    sharded_reads=$(grep -rh "config.$field\|cfg.$field" \
+        CoreFrameworks/EngineSharded.hpp \
+        CoreFrameworks/ControllerEventLoop.hpp \
+        Strategies/ 2>/dev/null | wc -l)
+    if [ $legacy_reads -gt 0 ] && [ $sharded_reads -eq 0 ]; then
+        echo "ORPHAN: $field (legacy=$legacy_reads, sharded=0)"
+    fi
+done
+```
+
+**Known instances:**
+- v5.4.4 (DOCUMENTED, NOT YET FIXED) —
+  - `cost_gate_enabled`: legacy reads at PortfolioController.hpp:1751.
+    Sharded zero reads. CostModel evaluates expected cost vs
+    expected gain at entry; if `cost > k × gain`, vetoes the entry.
+    Sharded skip means cost-aware entry filtering is dead.
+  - `foxml_vol_scaling_enabled`: legacy reads at
+    PortfolioController.hpp:1168, 1789. Sharded zero reads. Scales
+    risk_pct by recent volatility (cuts size in high-vol regimes).
+    Sharded skip means user's risk_pct is constant regardless of
+    volatility.
+
+**Prevention:**
+- Readiness skill check: when a plan touches an `*_enabled` cfg
+  field, require explicit "where is this consumed" answer for both
+  legacy AND sharded paths. Block ship if sharded path is empty.
+- Dust scan: extend Scan 9 (orphaned function detection) to also
+  scan for orphaned cfg-enabled fields.
+- Long-term fix: port CostModel + VolScaler integration into the
+  sharded `Strategy_BuildParameters` dispatcher path. Tracked as a
+  v5.5+ feature ship.
