@@ -54,7 +54,16 @@ namespace tt {
 //     sessions reinterpreted single-position snapshot slots under the
 //     paired-leg geometry. v2 files refused on load (no migration —
 //     paired-leg state can't be reconstructed from single-leg).
-#define SHARDED_SNAPSHOT_VERSION  3u
+// v4 (v5.4.0 Phase 1.1): CoreContext gained `void* strategy_state`
+//     pointer + `uint8_t strategy_state_kind`. Persistence policy:
+//     kind-only is serialized (4 bytes/core); the void* is NOT
+//     serialized (pointers don't survive across processes). On load,
+//     Strategy_InitPerCore reallocates state from scratch matching the
+//     persisted kind. Treated as session-only — strategy adapted
+//     parameters reconverge within a few slow-path cadences. Full
+//     state persistence deferred to v5.5.0.
+//     v3 files rejected on load with a version-mismatch error.
+#define SHARDED_SNAPSHOT_VERSION  4u
 
 //======================================================================================================
 // [SAVE]
@@ -127,9 +136,14 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
         // Identity / sizing
         if (fwrite(&ctx.strategy_id,         1, 1, f) != 1) goto fail;
         if (fwrite(&ctx.resolved_strategy_id,1, 1, f) != 1) goto fail;
+        // v5.4.0 (snapshot v4): persist strategy_state_kind so the load
+        // path can call Strategy_InitPerCore with the right kind to
+        // reallocate state. The void* strategy_state pointer itself is
+        // NOT persisted (pointers don't survive restart).
+        if (fwrite(&ctx.strategy_state_kind, 1, 1, f) != 1) goto fail;
         {
-            uint16_t pad16 = 0;
-            if (fwrite(&pad16, 2, 1, f) != 1) goto fail;
+            uint8_t pad8 = 0;  // was uint16_t pad16 in v3; one byte stolen for state_kind
+            if (fwrite(&pad8, 1, 1, f) != 1) goto fail;
         }
         if (fwrite(&ctx.allocated_balance,   sizeof(FPN<F>), 1, f) != 1) goto fail;
 
@@ -327,6 +341,7 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
     struct CoreSnap {
         uint8_t  strategy_id;
         uint8_t  resolved_strategy_id;
+        uint8_t  strategy_state_kind;  // v5.4.0 — used by load to dispatch Strategy_InitPerCore
         FPN<F>   allocated_balance;
         uint64_t entries_processed;
         uint64_t exits_processed;
@@ -358,11 +373,18 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
 
     for (uint32_t i = 0; i < file_num_cores; ++i) {
         CoreSnap& s = snaps[i];
-        uint16_t pad16_2 = 0;
+        // v5.4.0: pad16_2 (2-byte pad after resolved_strategy_id) was
+        // replaced by strategy_state_kind (1 byte) + 1-byte pad.
         uint8_t  pad8[3];
         if (fread(&s.strategy_id, 1, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.resolved_strategy_id, 1, 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&pad16_2, 2, 1, f) != 1) { fclose(f); return 0; }
+        // v5.4.0 (snapshot v4): read strategy_state_kind. Used by load to
+        // call Strategy_InitPerCore(kind) — see end of load function.
+        if (fread(&s.strategy_state_kind, 1, 1, f) != 1) { fclose(f); return 0; }
+        {
+            uint8_t pad8_kind = 0;
+            if (fread(&pad8_kind, 1, 1, f) != 1) { fclose(f); return 0; }
+        }
         if (fread(&s.allocated_balance, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.entries_processed, 8, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.exits_processed,   8, 1, f) != 1) { fclose(f); return 0; }
@@ -418,6 +440,15 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         // resolved_strategy_id is per-tick output; restore it for display
         // continuity but the next rebuild will overwrite anyway.
         ctx.resolved_strategy_id = s.resolved_strategy_id;
+        // v5.4.0: persist strategy_state_kind so the load path can call
+        // Strategy_InitPerCore with the correct kind. The actual void*
+        // strategy_state pointer is reallocated fresh on load; persistence
+        // is kind-only (see SHARDED_SNAPSHOT_VERSION 4 doc).
+        // NOTE: Strategy_InitPerCore call moved to engine boot AFTER this
+        // load returns — the engine's init path checks strategy_state_kind
+        // and dispatches. This separation keeps the persist layer free of
+        // Strategy_*Init dependencies.
+        ctx.strategy_state_kind  = s.strategy_state_kind;
         ctx.allocated_balance    = s.allocated_balance;
         ctx.entries_processed    = s.entries_processed;
         ctx.exits_processed      = s.exits_processed;

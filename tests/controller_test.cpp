@@ -33,6 +33,7 @@
 #include "../MemHeaders/HmacSha256.hpp"                  // v5.3.0 Phase B — in-process HMAC primitive
 #include "../MemHeaders/RunHistory.hpp"                  // v5.3.2 Phase C — JSONL append-only run history
 #include "../MemHeaders/HealthLog.hpp"                   // v5.4.0 Phase 0.1 — structured operational diagnostic log
+#include "../Strategies/StrategyLifecycle.hpp"           // v5.4.0 Phase 1.2 — Strategy_InitPerCore / FreePerCore
 
 using namespace std;
 
@@ -8002,6 +8003,136 @@ e3_skip_load:;
             check("v5.4.0p0.1: log file contains formatted message", 0);
             check("v5.4.0p0.1: Health_Log returns 0 when disabled", 0);
         }
+    }
+
+    //======================================================================================================
+    // [v5.4.0 Phase 1 — strategy state allocation + lifecycle dispatcher]
+    //======================================================================================================
+    printf("\n--- v5.4.0 Phase 1: strategy state allocation + dispatcher ---\n");
+    {
+        // SHARDED_SNAPSHOT_VERSION bumped from 3 to 4 for the CoreContext
+        // strategy_state addition. Hardcoded check to catch accidental
+        // reverts.
+        check("v5.4.0p1: SHARDED_SNAPSHOT_VERSION is 4 (was 3 pre-v5.4)",
+              SHARDED_SNAPSHOT_VERSION == 4u);
+    }
+    {
+        // Default state after EventLoopState_Init: strategy_state nullptr,
+        // strategy_state_kind 0xFF (uninitialized sentinel).
+        tt::OrderManagerState<FP> oms;
+        tt::EventLoopState<FP> state;
+        tt::EventLoopState_Init(&state, &oms);
+        check("v5.4.0p1: default strategy_state is nullptr",
+              state.cores[0].strategy_state == nullptr);
+        check("v5.4.0p1: default strategy_state_kind is 0xFF (uninit)",
+              state.cores[0].strategy_state_kind == 0xFF);
+        tt::EventLoopState_Free(&state);
+    }
+    {
+        // Strategy_InitPerCore allocates state matching strategy_id.
+        // Tested for SimpleDip (simplest, no allocations beyond the state struct).
+        tt::OrderManagerState<FP> oms;
+        tt::EventLoopState<FP> state;
+        tt::EventLoopState_Init(&state, &oms);
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        // Need a rolling stats; default-constructed is fine (Init reads price_max which starts at FPN_Zero).
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+
+        tt::Strategy_InitPerCore(&state, 0, STRATEGY_SIMPLE_DIP, &rolling, &cfg);
+        check("v5.4.0p1: SimpleDip Init allocates strategy_state",
+              state.cores[0].strategy_state != nullptr);
+        check("v5.4.0p1: SimpleDip Init sets strategy_state_kind",
+              state.cores[0].strategy_state_kind == STRATEGY_SIMPLE_DIP);
+
+        tt::Strategy_FreePerCore(&state, 0);
+        check("v5.4.0p1: SimpleDip Free clears strategy_state",
+              state.cores[0].strategy_state == nullptr);
+        check("v5.4.0p1: SimpleDip Free clears kind to 0xFF",
+              state.cores[0].strategy_state_kind == 0xFF);
+
+        tt::EventLoopState_Free(&state);
+    }
+    {
+        // Each strategy id allocates a different concrete state struct;
+        // Free of each must release without error. Tests the dispatch
+        // paths for all 5 strategy kinds.
+        const uint8_t kinds[5] = {STRATEGY_SIMPLE_DIP, STRATEGY_MOMENTUM,
+                                   STRATEGY_MEAN_REVERSION, STRATEGY_EMA_CROSS,
+                                   STRATEGY_ML};
+        const char* names[5] = {"SimpleDip", "Momentum", "MR", "EmaCross", "ML"};
+        tt::OrderManagerState<FP> oms;
+        tt::EventLoopState<FP> state;
+        tt::EventLoopState_Init(&state, &oms);
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+
+        for (int k = 0; k < 5; ++k) {
+            tt::Strategy_InitPerCore(&state, 0, kinds[k], &rolling, &cfg);
+            char buf[128];
+            snprintf(buf, sizeof(buf), "v5.4.0p1: %s Init allocates", names[k]);
+            check(buf, state.cores[0].strategy_state != nullptr &&
+                       state.cores[0].strategy_state_kind == kinds[k]);
+            tt::Strategy_FreePerCore(&state, 0);
+            snprintf(buf, sizeof(buf), "v5.4.0p1: %s Free releases cleanly", names[k]);
+            check(buf, state.cores[0].strategy_state == nullptr);
+        }
+        tt::EventLoopState_Free(&state);
+    }
+    {
+        // Init twice on same slot must free old state first (idempotent
+        // re-init for hot-swap). No leak; second call's kind takes effect.
+        tt::OrderManagerState<FP> oms;
+        tt::EventLoopState<FP> state;
+        tt::EventLoopState_Init(&state, &oms);
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+
+        tt::Strategy_InitPerCore(&state, 0, STRATEGY_MOMENTUM, &rolling, &cfg);
+        void* first_ptr = state.cores[0].strategy_state;
+        check("v5.4.0p1: first Init allocates Momentum",
+              first_ptr != nullptr && state.cores[0].strategy_state_kind == STRATEGY_MOMENTUM);
+
+        // Re-init with MR — must free the old Momentum state and allocate fresh MR
+        tt::Strategy_InitPerCore(&state, 0, STRATEGY_MEAN_REVERSION, &rolling, &cfg);
+        check("v5.4.0p1: re-Init swaps strategy kind cleanly",
+              state.cores[0].strategy_state != nullptr &&
+              state.cores[0].strategy_state_kind == STRATEGY_MEAN_REVERSION);
+
+        tt::Strategy_FreePerCore(&state, 0);
+        tt::EventLoopState_Free(&state);
+    }
+    {
+        // STRATEGY_AUTO and STRATEGY_NONE leave strategy_state nullptr
+        // (no state needed for AUTO routing or no-trade cores).
+        tt::OrderManagerState<FP> oms;
+        tt::EventLoopState<FP> state;
+        tt::EventLoopState_Init(&state, &oms);
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+
+        tt::Strategy_InitPerCore(&state, 0, STRATEGY_AUTO, &rolling, &cfg);
+        check("v5.4.0p1: STRATEGY_AUTO allocates no state (routes to sub-strategy)",
+              state.cores[0].strategy_state == nullptr &&
+              state.cores[0].strategy_state_kind == STRATEGY_AUTO);
+
+        tt::Strategy_InitPerCore(&state, 0, STRATEGY_NONE, &rolling, &cfg);
+        check("v5.4.0p1: STRATEGY_NONE allocates no state (no trading)",
+              state.cores[0].strategy_state == nullptr &&
+              state.cores[0].strategy_state_kind == STRATEGY_NONE);
+
+        tt::EventLoopState_Free(&state);
+    }
+    {
+        // Free on already-null strategy_state is a no-op (idempotent).
+        // Engine shutdown path may double-call this; must be safe.
+        tt::OrderManagerState<FP> oms;
+        tt::EventLoopState<FP> state;
+        tt::EventLoopState_Init(&state, &oms);
+        tt::Strategy_FreePerCore(&state, 0);  // first call — already null
+        tt::Strategy_FreePerCore(&state, 0);  // second call — still null
+        check("v5.4.0p1: Strategy_FreePerCore is idempotent (no crash on double-call)",
+              state.cores[0].strategy_state == nullptr);
+        tt::EventLoopState_Free(&state);
     }
 
     printf("\n======================================\n");

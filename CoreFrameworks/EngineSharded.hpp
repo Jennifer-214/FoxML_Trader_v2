@@ -45,6 +45,7 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/StrategyParameters.hpp"
+#include "../Strategies/StrategyLifecycle.hpp"  // v5.4.0 Phase 1.2: Strategy_InitPerCore / _FreePerCore
 #include "../DataStream/BinanceUserData.hpp"
 #include "BinanceAdapter.hpp"
 #include "ReconciliationLoop.hpp"
@@ -762,6 +763,22 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             ConfidenceScorer_Init(&state.cores[i].confidence,
                                   (int)cfg.confidence_window,
                                   FPN_ToDouble(tau_eff));
+        }
+
+        // v5.4.0 Phase 1.3 — wire Strategy_InitPerCore. Allocates the
+        // strategy state struct matching state.cores[i].strategy_id.
+        // Pre-warmup: strategies' state structs get garbage initial values
+        // (rolling stats are empty); first slow-path _Adapt cadence after
+        // warmup converges them to sane values. This is safe because
+        // permission=0 until warmup completes, so no entries can fire
+        // with garbage state.
+        //
+        // Pre-v5.4 status: this call was MISSING in the sharded path —
+        // the entire strategy state lifecycle was orphaned (postmortem F7).
+        if (state.cores[i].strategy_id != STRATEGY_NONE) {
+            tt::Strategy_InitPerCore(&state, i, state.cores[i].strategy_id,
+                                      &state.cores[i].slow_state->rolling_short,
+                                      &cfg);
         }
 
         // Cores start permission=0. The slow-path rebuild grants permission
@@ -2562,6 +2579,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // since BinanceAdapter_Init was never called — worker_count stays 0.
     if (live_trading) {
         BinanceAdapter_ShutdownState(&g_sharded_binance_adapter);
+    }
+
+    // v5.4.0 Phase 1.3 — release per-strategy state. Symmetric with the
+    // Strategy_InitPerCore call above. Pre-v5.4 this was missing because
+    // strategy state was never allocated; post-v5.4 it must be released
+    // to avoid LeakSanitizer noise (and good hygiene anyway).
+    for (int c = 0; c < state.registered_count; ++c) {
+        tt::Strategy_FreePerCore(&state, c);
     }
 
     // Restore previous signal handlers so subsequent code paths see the

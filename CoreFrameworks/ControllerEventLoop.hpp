@@ -352,6 +352,35 @@ struct CoreContext {
     // EventLoopState_Init; freed in EventLoopState_Free. Slow-path-only
     // access — the indirection cost is negligible at slow-path cadence.
     CoreSlowState<F>* slow_state;
+
+    // v5.4.0 Phase 1.1 — per-strategy state (lifecycle stage 1 + 2: Init/Adapt).
+    // Heap-allocated by Strategy_InitPerCore at engine boot; freed by
+    // Strategy_FreePerCore on shutdown / strategy hot-swap. Concrete type
+    // depends on strategy_state_kind:
+    //   STRATEGY_MOMENTUM       → MomentumState<F>*
+    //   STRATEGY_MEAN_REVERSION → MeanReversionState<F>*
+    //   STRATEGY_SIMPLE_DIP     → SimpleDipState<F>*
+    //   STRATEGY_EMA_CROSS      → EmaCrossState<F>*
+    //   STRATEGY_ML             → MLStrategyState<F>*
+    //   STRATEGY_AUTO/NONE      → nullptr (no state needed)
+    // void* used to avoid pulling all strategy headers into ControllerEventLoop.hpp.
+    // Concrete typing happens at Strategy_InitPerCore call sites where each
+    // strategy's header is included.
+    //
+    // Single-writer per core (the per-core slow-path thread), single-reader
+    // (same thread reading state for _Adapt and _BuildParameters). No
+    // cross-thread access — strategy state stays per-engine just like
+    // slow_state above.
+    //
+    // Snapshot persistence (v5.4 → SHARDED_SNAPSHOT_VERSION 4): only
+    // strategy_state_kind is persisted. On load, Strategy_InitPerCore
+    // is called to reallocate state from scratch matching the persisted
+    // kind. Treated as session-only — strategies' adapted parameters
+    // converge within a few cadences post-restart, so this is acceptable
+    // for v5.4. Full persistence deferred to v5.5.0.
+    void*    strategy_state;        // owned by this core's slow-path thread
+    uint8_t  strategy_state_kind;   // matches strategy_id at allocation; 0xFF = uninitialized
+    uint8_t  _pad_strategy_state[7];
 };
 
 //======================================================================================================
@@ -463,6 +492,13 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         // call _Free before re-_Init (otherwise leaks).
         state->cores[i].slow_state = new CoreSlowState<F>();
         CoreSlowState_Init(state->cores[i].slow_state);
+        // v5.4.0 Phase 1.1: per-strategy state. Allocated by
+        // Strategy_InitPerCore at engine boot AFTER cfg is read so the
+        // dispatcher knows which kind to allocate. Init here just to
+        // nullptr/0xFF — caller is responsible for calling
+        // Strategy_InitPerCore. _Free handles the cleanup symmetrically.
+        state->cores[i].strategy_state      = nullptr;
+        state->cores[i].strategy_state_kind = 0xFF;  // 0xFF = uninitialized sentinel
         // Phase 2.1: per-core open notional (sum of entry_price × qty)
         state->cores[i].core_open_notional = FPN_Zero<F>();
         // Phase 3: per-core kill switch state. peak starts at zero; the
@@ -501,6 +537,19 @@ inline void EventLoopState_InitLegacy(EventLoopState<F>* state,
 // twice (NULLs the pointer). Tests + engine that init via
 // EventLoopState_Init / EventLoopState_InitLegacy must call this on
 // teardown to avoid LeakSanitizer noise.
+//
+// v5.4.0 IMPORTANT: caller MUST also call `Strategy_FreePerCore` (from
+// Strategies/StrategyLifecycle.hpp) for each slot BEFORE this function,
+// to release per-strategy state. We don't dispatch to Strategy_FreePerCore
+// here because doing so would create a circular include
+// (ControllerEventLoop.hpp ↔ StrategyLifecycle.hpp). The contract is:
+//
+//   for (int c = 0; c < state.registered_count; ++c)
+//       Strategy_FreePerCore(&state, c);
+//   EventLoopState_Free(&state);
+//
+// Forgetting Strategy_FreePerCore = leak of strategy state structs
+// (~few KB per core). LeakSanitizer flags it.
 //======================================================================================================
 template <unsigned F>
 inline void EventLoopState_Free(EventLoopState<F>* state) {
@@ -508,6 +557,19 @@ inline void EventLoopState_Free(EventLoopState<F>* state) {
         if (state->cores[i].slow_state) {
             delete state->cores[i].slow_state;
             state->cores[i].slow_state = nullptr;
+        }
+        // strategy_state is freed by caller via Strategy_FreePerCore
+        // before this function (see contract above). If it's still
+        // non-null here, it's a leak — log to help catch the missing
+        // call. Continue rather than dispatch (we don't know the kind
+        // here without the strategy headers).
+        if (state->cores[i].strategy_state) {
+            fprintf(stderr,
+                "[EventLoopState_Free] WARN: slot %d has non-null strategy_state "
+                "kind=%u — caller forgot to call Strategy_FreePerCore. Leaking.\n",
+                i, state->cores[i].strategy_state_kind);
+            state->cores[i].strategy_state = nullptr;  // prevent dangling
+            state->cores[i].strategy_state_kind = 0xFF;
         }
     }
 }
