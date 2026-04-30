@@ -82,6 +82,20 @@ inline void Strategy_InitPerCore(EventLoopState<F>* state, int slot,
     switch (strategy_id) {
         case STRATEGY_MOMENTUM: {
             auto* s = new MomentumState<F>{};
+            // v5.4.0 Phase 2.3 — seed adaptive filter values from cfg.
+            // Mirrors the legacy PortfolioController init path; without
+            // this seed Momentum_Adapt has nothing to ratchet against and
+            // breakout_mult collapses to breakout_min.
+            if (cfg) {
+                // Prefer momentum_breakout_mult (per-strategy cfg field) when
+                // set; otherwise fall back to a sensible default that the
+                // squeeze + regression can adapt away from.
+                FPN<F> seed_mult = !FPN_IsZero(cfg->momentum_breakout_mult)
+                    ? cfg->momentum_breakout_mult
+                    : FPN_FromDouble<F>(2.0);  // 2σ default
+                s->live_breakout_mult = seed_mult;
+                s->live_vol_mult      = cfg->volume_multiplier;
+            }
             Momentum_Init(s, rolling, &buy_conds_scratch);
             ctx.strategy_state = s;
             break;
@@ -187,7 +201,15 @@ inline void Strategy_AdaptPerCore(
                                      &buy_conds_scratch, cfg);
             }
             break;
-        // Phase 2.3-2.5 will add Momentum / EmaCross / ML cases here.
+        case STRATEGY_MOMENTUM:
+            // v5.4.0 Phase 2.3 — same kind-match guard as MR.
+            if (ctx.strategy_state_kind == STRATEGY_MOMENTUM) {
+                Momentum_Adapt(static_cast<MomentumState<F>*>(ctx.strategy_state),
+                                current_price, portfolio_delta, active_bitmap,
+                                &buy_conds_scratch, cfg);
+            }
+            break;
+        // Phase 2.4-2.5 will add EmaCross / ML cases here.
         default:
             break;
     }
@@ -277,7 +299,14 @@ inline void Strategy_ExitAdjustPerCore(
                     current_price, rolling, cfg);
             }
             break;
-        // Phase 2.3-2.4 will add Momentum / EmaCross.
+        case STRATEGY_MOMENTUM:
+            if (ctx.strategy_state_kind == STRATEGY_MOMENTUM) {
+                Momentum_ExitAdjustSharded(state, slot,
+                    static_cast<MomentumState<F>*>(ctx.strategy_state),
+                    current_price, rolling, cfg);
+            }
+            break;
+        // Phase 2.4 will add EmaCross.
         default:
             break;
     }

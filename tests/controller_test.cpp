@@ -8358,6 +8358,85 @@ e3_skip_load:;
         tt::EventLoopState_Free(&state);
     }
 
+    printf("\n--- v5.4.0 Phase 2.3: Momentum state-aware BuildParameters + ratchet ---\n");
+    {
+        // Momentum Init seeds live_breakout_mult from cfg.
+        tt::OrderManagerState<FP> oms;
+        tt::EventLoopState<FP> state;
+        tt::EventLoopState_Init(&state, &oms);
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.momentum_breakout_mult = FPN_FromDouble<FP>(1.5);
+        cfg.volume_multiplier      = FPN_FromDouble<FP>(2.0);
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        tt::Strategy_InitPerCore(&state, 0, STRATEGY_MOMENTUM, &rolling, &cfg);
+        auto* mom = static_cast<MomentumState<FP>*>(state.cores[0].strategy_state);
+        check("v5.4.0p2.3: Momentum Init seeds live_breakout_mult from cfg",
+              FPN_Equal(mom->live_breakout_mult, cfg.momentum_breakout_mult));
+        check("v5.4.0p2.3: Momentum Init seeds live_vol_mult from cfg",
+              FPN_Equal(mom->live_vol_mult, cfg.volume_multiplier));
+
+        tt::Strategy_FreePerCore(&state, 0);
+        tt::EventLoopState_Free(&state);
+    }
+    {
+        // State-aware Momentum_BuildParameters with state uses
+        // stddev*live_breakout_mult; nullptr-state path uses entry_offset_pct.
+        // For typical params they produce different bg_price thresholds.
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        for (int i = 0; i < 64; ++i) {
+            // Add some noise to ensure non-zero stddev
+            double p = 50000.0 + (double)((i % 4) * 50);
+            RollingStats_Push(&rolling, FPN_FromDouble<FP>(p),
+                              FPN_FromDouble<FP>(1.0));
+        }
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.entry_offset_pct = FPN_FromDouble<FP>(0.0001);  // tiny pct path
+        cfg.volume_multiplier = FPN_FromDouble<FP>(1.0);
+
+        // Legacy path (no state): uses entry_offset_pct
+        tt::GateParameters<FP> out_legacy{};
+        tt::Momentum_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+                                      &out_legacy);
+
+        // State-aware: large breakout_mult should push entry far above avg
+        MomentumState<FP> mom{};
+        mom.live_breakout_mult = FPN_FromDouble<FP>(3.0);  // 3σ breakout
+        mom.live_vol_mult      = FPN_FromDouble<FP>(1.0);
+        tt::GateParameters<FP> out_state{};
+        tt::Momentum_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+                                      &out_state, &mom);
+        check("v5.4.0p2.3: state-aware Momentum produces higher bg threshold "
+              "(stddev path > pct path)",
+              FPN_GreaterThan(out_state.bg_price_threshold, out_legacy.bg_price_threshold));
+    }
+    {
+        // Dispatcher routes strategy_state to Momentum branch.
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        for (int i = 0; i < 64; ++i) {
+            double p = 50000.0 + (double)((i % 4) * 100);
+            RollingStats_Push(&rolling, FPN_FromDouble<FP>(p),
+                              FPN_FromDouble<FP>(1.0));
+        }
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+
+        MomentumState<FP> mom{};
+        mom.live_breakout_mult = FPN_FromDouble<FP>(2.5);
+        mom.live_vol_mult      = FPN_FromDouble<FP>(1.0);
+
+        tt::GateParameters<FP> out{};
+        tt::Strategy_BuildParameters(STRATEGY_MOMENTUM, &rolling, &cfg,
+                                      FPN_FromDouble<FP>(500.0), &out,
+                                      (RollingStats<FP, 512>*)nullptr,
+                                      nullptr, &mom);
+        // Expected: avg + stddev * 2.5
+        FPN<FP> expected_breakout = FPN_Mul(rolling.price_stddev, mom.live_breakout_mult);
+        FPN<FP> expected = FPN_Add(rolling.price_avg, expected_breakout);
+        check("v5.4.0p2.3: dispatcher routes state to Momentum (stddev*breakout_mult)",
+              FPN_Equal(out.bg_price_threshold, expected));
+        check("v5.4.0p2.3: Momentum BuildParameters sets BUY_ABOVE flag",
+              (out.flags & tt::GATE_FLAG_BUY_ABOVE) != 0);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

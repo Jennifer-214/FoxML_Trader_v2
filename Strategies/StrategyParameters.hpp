@@ -55,6 +55,7 @@
 #include "../Strategies/RegimeDetector.hpp"
 #include "SimpleDip.hpp"          // SimpleDipState<F> — Phase 2.1 state-aware BuildParameters
 #include "MeanReversion.hpp"      // MeanReversionState<F> — Phase 2.2 state-aware BuildParameters
+#include "Momentum.hpp"           // MomentumState<F>     — Phase 2.3 state-aware BuildParameters
 #include "StrategyInterface.hpp"
 
 #include <cstdint>
@@ -343,8 +344,20 @@ inline void Momentum_BuildParameters(
     const RollingStats<F, W>* rolling,
     const ControllerConfig<F>* config,
     FPN<F> allocated_balance,
-    GateParameters<F>* out
+    GateParameters<F>* out,
+    MomentumState<F>* state = nullptr   // v5.4.0 Phase 2.3 — adaptive breakout state
 ) {
+    // v5.4.0 Phase 2.3: when state is provided (sharded path post-Phase 1),
+    // use state->live_breakout_mult + state->live_vol_mult — these are
+    // seeded from cfg at boot and adapted by Momentum_Adapt on cadence.
+    // When state is nullptr (legacy callers, tests), fall back to cfg
+    // defaults — preserves pre-Phase 2.3 numerics. Note that the legacy
+    // sharded stub used entry_offset_pct (a percentage); state-aware path
+    // uses momentum_breakout_mult (a stddev multiplier), which is the
+    // legacy single-core convention.
+    FPN<F> live_breakout = state ? state->live_breakout_mult : FPN_Zero<F>();
+    FPN<F> live_vmult    = state ? state->live_vol_mult      : config->volume_multiplier;
+
     // BUG FIX (v4.0.3): same family as MR — pre-fix used `bg_threshold = avg`
     // with no breakout depth. Gate fired on every tick price > avg (with the
     // BUY_ABOVE flag). Real momentum buys on confirmed BREAKOUTS above the
@@ -352,7 +365,16 @@ inline void Momentum_BuildParameters(
     // `entry_offset_pct` above the rolling mean before the gate arms.
     FPN<F> avg = rolling->price_avg;
     if (FPN_IsZero(avg)) avg = rolling->price_max;
-    FPN<F> breakout_offset = FPN_Mul(avg, config->entry_offset_pct);
+    // v5.4.0 Phase 2.3: stddev * live_breakout_mult when state provides it
+    // (matches legacy Momentum_BuySignal: avg + stddev * breakout_mult). When
+    // state is null OR live_breakout is zero, fall back to entry_offset_pct
+    // (the pre-Phase 2.3 sharded behavior).
+    FPN<F> breakout_offset;
+    if (state && !FPN_IsZero(live_breakout) && !FPN_IsZero(rolling->price_stddev)) {
+        breakout_offset = FPN_Mul(rolling->price_stddev, live_breakout);
+    } else {
+        breakout_offset = FPN_Mul(avg, config->entry_offset_pct);
+    }
     FPN<F> entry_price = FPN_Add(avg, breakout_offset);
 
     // STDDEV-floor guard: in early warmup or dead-flat markets,
@@ -370,7 +392,9 @@ inline void Momentum_BuildParameters(
         tp_amount = FPN_Mul(entry_price, config->take_profit_pct);
         sl_amount = FPN_Mul(entry_price, config->stop_loss_pct);
     }
-    FPN<F> volume_threshold = FPN_Mul(rolling->volume_avg, config->volume_multiplier);
+    // v5.4.0 Phase 2.3: live_vmult from state when present (adaptive),
+    // else cfg.volume_multiplier (legacy).
+    FPN<F> volume_threshold = FPN_Mul(rolling->volume_avg, live_vmult);
 
     FPN<F> trade_size = FPN_Zero<F>();
     if (!FPN_IsZero(entry_price)) {
@@ -714,7 +738,9 @@ inline void Strategy_BuildParameters(
                                            (MeanReversionState<F>*)strategy_state);
             break;
         case STRATEGY_MOMENTUM:
-            Momentum_BuildParameters(rolling, config, allocated_balance, out);
+            // v5.4.0 Phase 2.3 — pass typed Momentum state through.
+            Momentum_BuildParameters(rolling, config, allocated_balance, out,
+                                      (MomentumState<F>*)strategy_state);
             break;
         case STRATEGY_EMA_CROSS:
             EmaCross_BuildParameters(rolling, config, allocated_balance, out);
