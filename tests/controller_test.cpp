@@ -8688,6 +8688,51 @@ e3_skip_load:;
         tt::EventLoopState_Free(&state);
     }
 
+    printf("\n--- v5.5.0 Class 8: CostModel + VolScaler integration ---\n");
+    {
+        // CostModel + VolScaler integration in Strategy_BuildParameters
+        // dispatcher. Both gated on cfg flags; defaults off → behavior
+        // identical to pre-v5.5.
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        for (int i = 0; i < 64; ++i) {
+            RollingStats_Push(&rolling,
+                FPN_FromDouble<FP>(50000.0 + (double)((i % 8) * 25)),
+                FPN_FromDouble<FP>(1.0));
+        }
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.entry_offset_pct = FPN_FromDouble<FP>(0.001);
+
+        // Defaults off — baseline gate output.
+        cfg.cost_gate_enabled = 0;
+        cfg.foxml_vol_scaling_enabled = 0;
+        tt::GateParameters<FP> baseline{};
+        tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg,
+                                      FPN_FromDouble<FP>(1000.0), &baseline);
+        check("v5.5.0p8: defaults off — bg threshold non-zero",
+              !FPN_IsZero(baseline.bg_price_threshold));
+        check("v5.5.0p8: defaults off — trade_size populated",
+              !FPN_IsZero(baseline.trade_size));
+        FPN<FP> baseline_size = baseline.trade_size;
+
+        // VolScaler enabled — trade_size should shrink under high rel vol.
+        cfg.foxml_vol_scaling_enabled = 1;
+        cfg.foxml_vol_scaling_z_max = FPN_FromDouble<FP>(3.0);
+        tt::GateParameters<FP> with_vol{};
+        tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg,
+                                      FPN_FromDouble<FP>(1000.0), &with_vol);
+        check("v5.5.0p8: VolScaler enabled — trade_size <= baseline (scale-down only)",
+              FPN_LessThanOrEqual(with_vol.trade_size, baseline_size));
+
+        // CostModel enabled — non-crashing path, flags computed.
+        cfg.foxml_vol_scaling_enabled = 0;
+        cfg.cost_gate_enabled = 1;
+        tt::GateParameters<FP> with_cost{};
+        tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg,
+                                      FPN_FromDouble<FP>(1000.0), &with_cost);
+        check("v5.5.0p8: CostModel enabled — flags computed without crash",
+              with_cost.strategy_id == STRATEGY_SIMPLE_DIP);
+    }
+
     printf("\n--- v5.4.1 Bug B2: OMS_DrainSubmit walks all queues under partials ---\n");
     {
         // Pre-fix, OMS_DrainSubmit(num_cores=N) only drained queues 0..N-1

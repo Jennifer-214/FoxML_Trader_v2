@@ -50,8 +50,10 @@
 #include "../ML_Headers/BarrierGate.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"
 #include "../ML_Headers/CoreModelZoo.hpp"
+#include "../ML_Headers/CostModel.hpp"     // v5.5.0 Class 8 — cost gate
 #include "../ML_Headers/ModelInference.hpp"
 #include "../ML_Headers/RollingStats.hpp"
+#include "../ML_Headers/VolScaler.hpp"     // v5.5.0 Class 8 — vol scaling
 #include "../Strategies/RegimeDetector.hpp"
 #include "SimpleDip.hpp"          // SimpleDipState<F> — Phase 2.1 state-aware BuildParameters
 #include "MeanReversion.hpp"      // MeanReversionState<F> — Phase 2.2 state-aware BuildParameters
@@ -880,6 +882,66 @@ inline void Strategy_BuildParameters(
         // the strategy itself has already produced a no-op result.
         if (!FPN_IsZero(out->tp_pct) && FPN_LessThan(out->tp_pct, floor_pct)) {
             out->flags |= GATE_FLAG_BUY_BLOCKED;
+        }
+    }
+
+    // v5.5.0 (recurring-bugs Class 8): cost gate + vol scaling.
+    // Both flags default off; opt-in via cfg. Defaults preserve pre-v5.5
+    // numerics exactly.
+    //
+    // CostModel: estimate trade cost (timing + impact). When cost exceeds
+    // a fraction of expected gain (tp_pct), set BUY_BLOCKED. Spread-cost
+    // contribution is omitted in this first port — sharded path doesn't
+    // yet plumb live spread bps to BuildParameters; timing + impact alone
+    // is the conservative approximation. Future: thread spread_bps from
+    // CoreSlowState::spread_state.
+    if (config->cost_gate_enabled && !FPN_IsZero(out->tp_pct) &&
+        !FPN_IsZero(out->bg_price_threshold) && rolling) {
+        double price = FPN_ToDouble(rolling->price_avg);
+        double rel_vol = (price > 0.01)
+            ? FPN_ToDouble(rolling->price_stddev) / price : 0.0;
+        if (rel_vol > 0.0) {
+            // order size and ADV in dollars. ADV approximated as
+            // volume_avg × price × 1440 (tick-rate samples-per-day proxy).
+            double order_size_d = FPN_ToDouble(out->trade_size) *
+                                  FPN_ToDouble(out->bg_price_threshold);
+            double adv_d = FPN_ToDouble(rolling->volume_avg) * price * 1440.0;
+            TradingCosts c = CostModel_Estimate(
+                /*spread_bps=*/0.0,    // omitted — see comment above
+                rel_vol,
+                /*horizon_minutes=*/5.0,
+                order_size_d, adv_d,
+                COST_K1_DEFAULT, COST_K2_DEFAULT, COST_K3_DEFAULT);
+            // Veto when total cost exceeds 50% of expected gain (tp_bps).
+            // Conservative threshold; can be made cfg-tunable later.
+            double tp_bps = FPN_ToDouble(out->tp_pct) * 10000.0;
+            if (c.total_cost > tp_bps * 0.5) {
+                out->flags |= GATE_FLAG_BUY_BLOCKED;
+            }
+        }
+    }
+
+    // VolScaler: shrink trade_size in high-volatility regimes. Uses
+    // alpha=tp_pct and vol=stddev/price; weight in [0, 1] that scales
+    // the existing trade_size down (never up — never increases risk).
+    if (config->foxml_vol_scaling_enabled && !FPN_IsZero(out->trade_size) &&
+        !FPN_IsZero(out->tp_pct) && rolling) {
+        double price = FPN_ToDouble(rolling->price_avg);
+        double rel_vol = (price > 0.01)
+            ? FPN_ToDouble(rolling->price_stddev) / price : 0.0;
+        if (rel_vol > 0.0) {
+            double alpha = FPN_ToDouble(out->tp_pct);
+            double z_max = !FPN_IsZero(config->foxml_vol_scaling_z_max)
+                ? FPN_ToDouble(config->foxml_vol_scaling_z_max)
+                : VOL_SCALER_Z_MAX_DEFAULT;
+            // max_weight=1.0 → VolScaler returns weight in [0, 1] which we
+            // multiply trade_size by. Effectively: weight=1 means no
+            // change; weight<1 means smaller position in high-vol regime.
+            double weight = VolScaler_Size(alpha, rel_vol, z_max, /*max_weight=*/1.0);
+            if (weight > 0.0 && weight < 1.0) {
+                out->trade_size = FPN_Mul(out->trade_size,
+                                           FPN_FromDouble<F>(weight));
+            }
         }
     }
 }
