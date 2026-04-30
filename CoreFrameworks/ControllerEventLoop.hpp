@@ -49,6 +49,7 @@
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/ROR_regressor.hpp"        // v5.1.0 — RORRegressor on CoreContext::slow_state
 #include "../ML_Headers/FlowFeatures.hpp"         // v5.1.0 — FlowState etc on CoreContext::slow_state
+#include "../MemHeaders/HealthLog.hpp"           // v5.4.0 Phase 0.1 — structured JSONL diagnostic log
 #include "../Strategies/StrategyParameters.hpp"
 #include "CoreLatencyStats.hpp"  // v4.7.42 — slow_path_latency on CoreContext
 #include "ExecutionCore.hpp"
@@ -1525,6 +1526,22 @@ inline void EventLoop_RebuildOneCore(
             int new_regime = Regime_Classify(&state->cores[slot].regime_state,
                                               &sig, &resolved_cfg);
             int resolved = Regime_ToStrategy(state->cores[slot].regime_state.current_regime);
+            // v5.4.0 Phase 0.1 — log AUTO-core regime classification per cadence.
+            // Cheap (cfg-gated, no-op when disabled). Captures regime transitions
+            // and the inputs that drove them — runtime visibility into the
+            // "regime stuck on RANGING" symptom (F3).
+            if (tt::Health_LogEnabled(tt::HEALTH_INFO)) {
+                tt::Health_Log(tt::HEALTH_INFO, "regime", slot,
+                    "old=%d new=%d resolved_strat=%d ema_sma_spread=%g "
+                    "short_r2=%g ror_slope=%g hyst=%d/%d short_count=%d",
+                    old_regime, new_regime, resolved,
+                    FPN_ToDouble(sig.ema_sma_spread),
+                    FPN_ToDouble(sig.short_r2),
+                    FPN_ToDouble(sig.ror_slope),
+                    state->cores[slot].regime_state.hysteresis_count,
+                    state->cores[slot].regime_state.hysteresis_threshold,
+                    sig.short_count);
+            }
             // Don't recurse into STRATEGY_AUTO (defensive — REGIME_STRATEGY_TABLE
             // shouldn't return AUTO, but safer to clamp).
             if (resolved != STRATEGY_AUTO && resolved != STRATEGY_NONE) {
