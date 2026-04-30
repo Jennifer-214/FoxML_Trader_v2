@@ -8529,6 +8529,98 @@ e3_skip_load:;
               out.strategy_id == STRATEGY_EMA_CROSS);
     }
 
+    printf("\n--- v5.4.0 Phase 2.5: ML Adapt + ExitAdjust dispatch ---\n");
+    {
+        // Strategy_AdaptPerCore for ML is an explicit no-op. Verifies that
+        // the dispatcher recognizes ML as a known kind without crashing
+        // and without mutating state.
+        tt::OrderManagerState<FP> oms;
+        tt::EventLoopState<FP> state;
+        tt::EventLoopState_Init(&state, &oms);
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        tt::Strategy_InitPerCore(&state, 0, STRATEGY_ML, &rolling, &cfg);
+        check("v5.4.0p2.5: ML Init allocates state",
+              state.cores[0].strategy_state != nullptr);
+
+        // Adapt should not crash + not write the dirty bit.
+        state.cores[0].dirty = 0;
+        tt::Strategy_AdaptPerCore(&state, 0, STRATEGY_ML,
+                                   FPN_FromDouble<FP>(50000.0),
+                                   FPN_Zero<FP>(), 0, &cfg);
+        check("v5.4.0p2.5: ML Adapt is a clean no-op (no dirty bit set)",
+              state.cores[0].dirty == 0);
+        tt::Strategy_FreePerCore(&state, 0);
+        tt::EventLoopState_Free(&state);
+    }
+    {
+        // MLStrategy_ExitAdjustSharded: skip when R² is below 0.5.
+        tt::OrderManagerState<FP> oms;
+        tt::EventLoopState<FP> state;
+        tt::EventLoopState_Init(&state, &oms);
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.fee_rate_taker = FPN_FromDouble<FP>(0.001);
+        cfg.fee_rate       = cfg.fee_rate_taker;
+        cfg.sl_trail_mult  = FPN_FromDouble<FP>(2.0);
+
+        // Hand-craft a rolling-stats with low R² (below 0.5)
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        rolling.price_stddev    = FPN_FromDouble<FP>(50.0);
+        rolling.price_r_squared = FPN_FromDouble<FP>(0.3);  // below threshold
+
+        tt::Strategy_InitPerCore(&state, 0, STRATEGY_ML, &rolling, &cfg);
+        // Open a fake position for slot 0 so the iterator has something
+        // to consider. ratchet stays at zero through ExitAdjust because
+        // R² gate fails.
+        state.oms->portfolio.active_bitmap = (uint16_t)0x1;
+        state.oms->portfolio.positions[0].entry_price = FPN_FromDouble<FP>(50000.0);
+        state.oms->portfolio.positions[0].original_tp = FPN_FromDouble<FP>(50500.0);
+
+        FPN<FP> ratchet_before = state.cores[0].pending_params.ratchet_sl;
+        tt::Strategy_ExitAdjustPerCore(&state, 0, STRATEGY_ML,
+                                        FPN_FromDouble<FP>(51000.0), &rolling, &cfg);
+        check("v5.4.0p2.5: ML ExitAdjust skips when R² < 0.5",
+              FPN_Equal(state.cores[0].pending_params.ratchet_sl, ratchet_before));
+
+        tt::Strategy_FreePerCore(&state, 0);
+        state.oms->portfolio.active_bitmap = 0;
+        tt::EventLoopState_Free(&state);
+    }
+    {
+        // MLStrategy_ExitAdjustSharded: ratchet writes when R² ≥ 0.5
+        // AND price is above original_tp. Cap is the fee-floor.
+        tt::OrderManagerState<FP> oms;
+        tt::EventLoopState<FP> state;
+        tt::EventLoopState_Init(&state, &oms);
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.fee_rate_taker = FPN_FromDouble<FP>(0.001);
+        cfg.fee_rate       = cfg.fee_rate_taker;
+        cfg.sl_trail_mult  = FPN_FromDouble<FP>(2.0);
+
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        rolling.price_stddev    = FPN_FromDouble<FP>(50.0);
+        rolling.price_r_squared = FPN_FromDouble<FP>(0.85);  // strong R²
+
+        tt::Strategy_InitPerCore(&state, 0, STRATEGY_ML, &rolling, &cfg);
+        state.oms->portfolio.active_bitmap = (uint16_t)0x1;
+        state.oms->portfolio.positions[0].entry_price = FPN_FromDouble<FP>(50000.0);
+        state.oms->portfolio.positions[0].original_tp = FPN_FromDouble<FP>(50500.0);
+
+        // current_price 51000 → trailing_sl = 51000 - 50*2 = 50900.
+        // floor = 50000 * (1 - 3*0.001) ≈ 49850. trailing_sl > floor → cap to floor.
+        tt::Strategy_ExitAdjustPerCore(&state, 0, STRATEGY_ML,
+                                        FPN_FromDouble<FP>(51000.0), &rolling, &cfg);
+        double stored = FPN_ToDouble(state.cores[0].pending_params.ratchet_sl);
+        check("v5.4.0p2.5: ML ExitAdjust ratchets via fee-floor cap when R² ≥ 0.5",
+              stored > 49849.0 && stored < 49851.0);
+        check("v5.4.0p2.5: ML ExitAdjust sets dirty=1 on advance",
+              state.cores[0].dirty == 1);
+
+        tt::Strategy_FreePerCore(&state, 0);
+        state.oms->portfolio.active_bitmap = 0;
+        tt::EventLoopState_Free(&state);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

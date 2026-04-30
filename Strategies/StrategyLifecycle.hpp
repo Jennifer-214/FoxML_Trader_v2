@@ -224,7 +224,16 @@ inline void Strategy_AdaptPerCore(
                                 &buy_conds_scratch, cfg);
             }
             break;
-        // Phase 2.5 will add ML.
+        case STRATEGY_ML:
+            // v5.4.0 Phase 2.5 — MLStrategy_Adapt is intentionally empty
+            // (model weights are static, trained offline). This branch
+            // exists so the dispatcher recognizes ML as a known kind
+            // rather than falling through to default; it's also where
+            // future online-learning / IC-tracking hooks would land.
+            // ConfidenceScorer drift is updated separately at exit-fill
+            // time via OMS, not on the slow-path Adapt cadence.
+            (void)ctx;
+            break;
         default:
             break;
     }
@@ -325,6 +334,13 @@ inline void Strategy_ExitAdjustPerCore(
             if (ctx.strategy_state_kind == STRATEGY_EMA_CROSS) {
                 EmaCross_ExitAdjustSharded(state, slot,
                     static_cast<EmaCrossState<F>*>(ctx.strategy_state),
+                    current_price, rolling, cfg);
+            }
+            break;
+        case STRATEGY_ML:
+            if (ctx.strategy_state_kind == STRATEGY_ML) {
+                MLStrategy_ExitAdjustSharded(state, slot,
+                    static_cast<MLStrategyState<F>*>(ctx.strategy_state),
                     current_price, rolling, cfg);
             }
             break;
