@@ -192,7 +192,7 @@ static inline void GUI_Panel_TradeHistory(TradeHistory *th, int partial_exit_ena
     // entirely (CSV stores portfolio SLOT in the core_id field, which under
     // partials is 2*core+leg). Now: Core column shows real core (slot/2
     // when partials enabled, slot otherwise); Leg column shows A/B/–.
-    if (ImGui::BeginTable("##trades", 11, flags, ImVec2(0, -1))) {
+    if (ImGui::BeginTable("##trades", 12, flags, ImVec2(0, -1))) {  // v5.5.3: +Hold
         ImGui::TableSetupColumn("#",      ImGuiTableColumnFlags_WidthFixed, 30);
         ImGui::TableSetupColumn("Core",   ImGuiTableColumnFlags_WidthFixed, 35);
         ImGui::TableSetupColumn("Leg",    ImGuiTableColumnFlags_WidthFixed, 30);
