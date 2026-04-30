@@ -17,7 +17,7 @@ change rarely enough that manual updates work).
 - **DISCIPLINE** — process/structural invariant, not directly unit-testable
 - **GAP** — no test found, invariant relies on human discipline alone
 
-## The 22 invariants
+## The 27 invariants
 
 | # | Invariant | Tests covering it | Coverage |
 |---|---|---|---|
@@ -43,14 +43,22 @@ change rarely enough that manual updates work).
 | 20 | **Per-Section Latency Stats Single-Writer** (v5.1.1 breakdown) | v5.0.4 — Topology field stability (6998) | DISCIPLINE — same as #19 |
 | 21 | **Partial Exits — Two-Position-per-Core** (slot mapping, leg-A only counters) | P.1: Sharded_LegSlot mapping (5681), P.1: Validation (5711), P.2: dual-leg SG (5763) | COVERED |
 | 22 | **W/L Pair Classification under Partials** (v4.7.21 partner_pending_pnl combined sign) | v4.7.21 — W/L pairing under partials (6522) via partner_pending_pnl tests | COVERED |
+| 23 | **Strategy Lifecycle Completeness** (every architecture must call all 5 stages — Init/Adapt/BuildParameters/ExitAdjust/RegimeAdjust — or explicitly mark SKIPPED) — see `DOCS/STRATEGY_INTERFACE.md` | `tools/calls_graph_diff.sh` (Phase 0.3); future Group A tests in `DOCS/v5.4-test-inventory.md` (Phase 2 strategy wiring) | DISCIPLINE — structural enforcement via the calls-graph-diff tool, not a single unit assertion. Pre-v5.4 status: VIOLATED on sharded path (4 of 5 stages orphaned for all 5 strategies — see `DOCS/v5.4-regression-postmortem.md` F7). |
+| 24 | **Hot Path SL/TP Source of Truth** (SG_Evaluate reads `core->live_sl + cached_params.ratchet_sl`; strategy code MUST write to ratchet, NOT `pos->stop_loss_price`) | Group B tests (Phase 5.3) assert `effective_sl` changes when strategy decides to trail — see `DOCS/v5.4-test-inventory.md` | COVERED post-v5.4 Phase 2; pre-v5.4 status: VIOLATED (all 5 strategies wrote to dead `pos->...` fields — F1 in postmortem) |
+| 25 | **Display ↔ Execution Alignment** (GUI panels showing live trade state must read the same field SG_Evaluate uses; or document divergence as explicit invariant) | Group E tests (Phase 4) assert GUI's SL display = `get_effective_sl(core, active)` | DISCIPLINE — pre-v5.4: VIOLATED (GUI read `pos->stop_loss_price` while execution used `core->live_sl` — F2 in postmortem). Post-v5.4 Phase 4 fix. |
+| 26 | **Health Log Cfg-Gated** (Health_Log calls become no-ops when path empty; zero overhead in production-disabled state) | v5.4.0 Phase 0.1 controller_test (8 assertions) — default empty path, parser, configure→log→read, disable→no-op | COVERED |
+| 27 | **Snapshot Version Bump Requirement** (any change to `CoreContext` / persisted struct fields requires `SHARDED_SNAPSHOT_VERSION` bump + CHANGELOG breaking-change note) | Group C tests (Phase 1) — write v3 header + load with v5.4 → assert load fails with version-mismatch error | DISCIPLINE — structural rule; pre-v5.4 status: enforced by single point of truth (the version int in load path). v5.4 codifies this in the contract. |
 
 ## Summary
 
-- **17 COVERED** (78%) — direct test failure on regression
-- **4 DISCIPLINE** (#5, #18, #19, #20) — structural invariants enforced by code
-  layout / thread topology, verified via parity_harness + sanitizers
+- **18 COVERED** (67%) — direct test failure on regression
+- **8 DISCIPLINE** (#5, #18, #19, #20, #23, #25, #27, #24-pending-Phase-2) — structural invariants enforced by code
+  layout / thread topology / external tool, verified via parity_harness + sanitizers + calls_graph_diff
 - **1 PARTIAL** (#9) — formula tested, "single update site" relies on grep
 - **0 GAP** — every invariant has at least structural enforcement
+
+(Counts shift after v5.4.0 ships — invariants 23-27 are pre-v5.4 VIOLATED
+or pending; Phase 2-6 work brings several to COVERED status.)
 
 ## When to update this map
 
