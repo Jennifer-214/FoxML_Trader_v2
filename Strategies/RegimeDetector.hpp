@@ -40,6 +40,7 @@
 #include "../ML_Headers/ROR_regressor.hpp"
 #include "../ML_Headers/FlowFeatures.hpp"  // v4.5 Wave 1 — D.1/D.2/D.4 state
 #include <time.h>
+#include <stdlib.h>  // v5.4.0 Phase A.2: getenv() for TT_REGIME_DEBUG diagnostic gate
 
 // regime constants, RegimeInfo, and REGIME_STRATEGY_TABLE are in StrategyInterface.hpp
 
@@ -599,6 +600,42 @@ inline int Regime_Classify(RegimeState<F> *state,
     if (state->hysteresis_count >= state->hysteresis_threshold
         && state->proposed_regime != state->current_regime) {
         state->current_regime = state->proposed_regime;
+    }
+
+    // v5.4.0 Phase A.2 diagnostic — gated on TT_REGIME_DEBUG env var.
+    // Prints every 16th call to avoid stderr spam. Logs all the inputs
+    // the classifier saw, so we can tell whether the classifier is
+    // receiving sane data or whether the regression is upstream
+    // (data-flow / per-core slow_state population issue).
+    {
+        static int debug_enabled = -1;
+        if (debug_enabled == -1) {
+            const char* e = getenv("TT_REGIME_DEBUG");
+            debug_enabled = (e && e[0] && e[0] != '0') ? 1 : 0;
+        }
+        if (debug_enabled) {
+            // Per-engine call counter; thread_local so per_core_slow's
+            // independent threads don't race on it. Cap at 16 engines.
+            static thread_local uint32_t dbg_cycle = 0;
+            dbg_cycle++;
+            if ((dbg_cycle & 0x0F) == 0) {  // every 16 cycles
+                fprintf(stderr,
+                    "[regime-dbg] short_count=%d ema_sma_spread=%.6f "
+                    "long_spread=%.6f r2=%.4f ror_slope=%.6f ror_ready=%d "
+                    "vol_ratio=%.4f trending=%d volatile=%d "
+                    "detected=%d current=%d proposed=%d hyst=%d/%d\n",
+                    sig->short_count,
+                    FPN_ToDouble(sig->ema_sma_spread),
+                    FPN_ToDouble(sig->ema_sma_spread_long),
+                    FPN_ToDouble(sig->short_r2),
+                    FPN_ToDouble(sig->ror_slope),
+                    sig->ror_ready,
+                    FPN_ToDouble(sig->vol_ratio),
+                    trending_score, volatile_score,
+                    detected, state->current_regime, state->proposed_regime,
+                    state->hysteresis_count, state->hysteresis_threshold);
+            }
+        }
     }
 
     return state->current_regime;
