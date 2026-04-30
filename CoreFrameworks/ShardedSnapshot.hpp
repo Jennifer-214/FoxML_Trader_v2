@@ -89,7 +89,16 @@ static inline void TUI_CopySnapshotSharded(
     // Legacy EngineTUI.hpp path set this from ctrl->total_fees; the
     // sharded equivalent is oms->total_fees, populated by HandleFill on
     // entry+exit fills.
-    snap->fees         = FPN_ToDouble(state->oms->total_fees);
+    snap->fees             = FPN_ToDouble(state->oms->total_fees);
+    // v5.4.2 — same B1-class fix for the maker/taker breakdown
+    // (used by the fees tooltip). OMS HandleFill bumps these counters
+    // on every fill (BUY entry + SELL exit). Pre-fix, sharded mode
+    // showed all-zeros in the maker/taker tooltip even after dozens of
+    // fills.
+    snap->maker_fills_count = state->oms->maker_fills_count;
+    snap->taker_fills_count = state->oms->taker_fills_count;
+    snap->total_maker_fees  = FPN_ToDouble(state->oms->total_maker_fees);
+    snap->total_taker_fees  = FPN_ToDouble(state->oms->total_taker_fees);
     snap->return_pct   = (snap->starting > 0.0) ? (snap->total_pnl / snap->starting * 100.0) : 0.0;
     // active_count under partials: agg counts raw bitmap bits, but slot
     // 2c+0 + slot 2c+1 are ONE logical trade (both legs of one core's
