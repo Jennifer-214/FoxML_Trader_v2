@@ -1654,13 +1654,34 @@ inline void EventLoop_RebuildOneCore(
             if (new_regime != old_regime &&
                 (state->oms->portfolio.active_bitmap &
                  Sharded_CoreSlotMask(slot, config->partial_exit_enabled))) {
-                // SL tighten (D11 — preserved unchanged for parity).
+                // v5.5.4 (Class 2 / Class 9 hybrid): SL tighten on regime
+                // transition. The legacy D11 path here wrote ratchet_sl
+                // DIRECTLY without the v5.1.7 fee-floor cap. Symptom (user
+                // 2026-04-30 paper trade history): on AUTO regime switch
+                // with an open position, ratchet_sl could be set to
+                // price_avg - stddev which is ABOVE entry × 0.997 in
+                // low-vol regimes, causing exits at near-entry prices that
+                // lose to fees ("TP firing too tight" pattern). Now route
+                // through Strategy_WriteRatchetSL per-slot so the cap is
+                // applied (entry × (1 - 3 × fee_rate_taker)). Same shape
+                // as the strategy-specific trailing path. Iterate this
+                // core's slot(s) so we have entry_price per slot for the
+                // cap math.
                 FPN<F> tight_sl = FPN_Sub(rolling->price_avg,
                                            rolling->price_stddev);
-                if (FPN_GreaterThan(tight_sl,
-                        state->cores[slot].pending_params.ratchet_sl)) {
-                    state->cores[slot].pending_params.ratchet_sl = tight_sl;
-                    state->cores[slot].dirty = 1;
+                int partial_on = config->partial_exit_enabled ? 1 : 0;
+                uint16_t my_mask = partial_on
+                    ? (uint16_t)((1u << (slot * 2)) | (1u << (slot * 2 + 1)))
+                    : (uint16_t)(1u << slot);
+                uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
+                while (bm) {
+                    int pidx = __builtin_ctz(bm);
+                    bm &= (uint16_t)(bm - 1);
+                    FPN<F> entry_p = state->oms->portfolio.positions[pidx].entry_price;
+                    if (!FPN_IsZero(entry_p)) {
+                        Strategy_WriteRatchetSL(state, slot, tight_sl,
+                                                  entry_p, &resolved_cfg);
+                    }
                 }
 
                 // v5.4.0 Phase 3.1: TP retune per transition shape.
