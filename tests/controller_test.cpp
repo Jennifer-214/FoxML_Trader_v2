@@ -8437,6 +8437,98 @@ e3_skip_load:;
               (out.flags & tt::GATE_FLAG_BUY_ABOVE) != 0);
     }
 
+    printf("\n--- v5.4.0 Phase 2.4: EmaCross state-aware BuildParameters + crossover ---\n");
+    {
+        // EmaCross_BuildParameters with state + uptrend (EMA above SMA)
+        // produces an active bg threshold; without uptrend the gate zeroes.
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        for (int i = 0; i < 64; ++i) {
+            // Steady prices to keep stddev meaningful
+            double p = 50000.0 + (double)((i % 8) * 25);
+            RollingStats_Push(&rolling, FPN_FromDouble<FP>(p),
+                              FPN_FromDouble<FP>(1.0));
+        }
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        cfg.emacross_dip_mult        = FPN_FromDouble<FP>(0.5);
+        cfg.emacross_crossover_min   = FPN_FromDouble<FP>(0.1);  // 0.1σ above SMA
+        cfg.volume_multiplier        = FPN_FromDouble<FP>(1.0);
+
+        // Uptrend state: EMA well above rolling avg → crossover passes
+        EmaCrossState<FP> es_up{};
+        es_up.prev_ema = FPN_Add(rolling.price_avg,
+                                  FPN_Mul(rolling.price_stddev, FPN_FromDouble<FP>(1.0)));
+        es_up.last_ema_slope = FPN_FromDouble<FP>(0.5);  // rising
+        tt::GateParameters<FP> out_up{};
+        tt::EmaCross_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+                                      &out_up, &es_up);
+        check("v5.4.0p2.4: EmaCross uptrend → bg threshold is non-zero",
+              !FPN_IsZero(out_up.bg_price_threshold));
+
+        // Downtrend state: EMA below rolling avg → crossover fails → gate zeroes
+        EmaCrossState<FP> es_down{};
+        es_down.prev_ema = FPN_Sub(rolling.price_avg,
+                                    FPN_Mul(rolling.price_stddev, FPN_FromDouble<FP>(1.0)));
+        es_down.last_ema_slope = FPN_FromDouble<FP>(-0.5);
+        // Sign on negation
+        es_down.last_ema_slope.sign = 1;
+        tt::GateParameters<FP> out_down{};
+        tt::EmaCross_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+                                      &out_down, &es_down);
+        check("v5.4.0p2.4: EmaCross no-uptrend → bg threshold zeroed",
+              FPN_IsZero(out_down.bg_price_threshold));
+    }
+    {
+        // Strategy_AdaptPerCore EmaCross branch: updates state->prev_ema and
+        // last_ema_slope from the ema_price param.
+        tt::OrderManagerState<FP> oms;
+        tt::EventLoopState<FP> state;
+        tt::EventLoopState_Init(&state, &oms);
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        for (int i = 0; i < 32; ++i) {
+            RollingStats_Push(&rolling, FPN_FromDouble<FP>(50000.0 + i),
+                              FPN_FromDouble<FP>(1.0));
+        }
+        tt::Strategy_InitPerCore(&state, 0, STRATEGY_EMA_CROSS, &rolling, &cfg);
+        auto* es = static_cast<EmaCrossState<FP>*>(state.cores[0].strategy_state);
+        FPN<FP> prev_seed = es->prev_ema;
+        check("v5.4.0p2.4: Init seeds prev_ema from rolling",
+              FPN_Equal(prev_seed, rolling.price_avg));
+
+        FPN<FP> ema_now = FPN_FromDouble<FP>(50500.0);
+        tt::Strategy_AdaptPerCore(&state, 0, STRATEGY_EMA_CROSS,
+                                   FPN_FromDouble<FP>(50000.0),
+                                   FPN_Zero<FP>(), 0, &cfg, &ema_now);
+        check("v5.4.0p2.4: AdaptPerCore updates prev_ema to ema_now",
+              FPN_Equal(es->prev_ema, ema_now));
+        // last_ema_slope should equal ema_now - prev_seed
+        FPN<FP> expected_slope = FPN_Sub(ema_now, prev_seed);
+        check("v5.4.0p2.4: AdaptPerCore computes ema_slope = now - prev",
+              FPN_Equal(es->last_ema_slope, expected_slope));
+
+        tt::Strategy_FreePerCore(&state, 0);
+        tt::EventLoopState_Free(&state);
+    }
+    {
+        // EmaCross_BuildParameters nullptr-state path falls back to the
+        // pre-Phase 2.4 SimpleDip-with-overrides behavior. Ensures legacy
+        // callers remain numerically stable.
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        for (int i = 0; i < 64; ++i) {
+            RollingStats_Push(&rolling, FPN_FromDouble<FP>(50000.0 + i * 5),
+                              FPN_FromDouble<FP>(1.0));
+        }
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+
+        tt::GateParameters<FP> out{};
+        tt::EmaCross_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+                                      &out, (EmaCrossState<FP>*)nullptr);
+        check("v5.4.0p2.4: nullptr-state path produces non-zero threshold (SimpleDip fallback)",
+              !FPN_IsZero(out.bg_price_threshold));
+        check("v5.4.0p2.4: nullptr-state path tags strategy_id as EMA_CROSS",
+              out.strategy_id == STRATEGY_EMA_CROSS);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

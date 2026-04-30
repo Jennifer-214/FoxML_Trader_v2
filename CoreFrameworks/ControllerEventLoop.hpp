@@ -1684,12 +1684,16 @@ inline void EventLoop_RebuildOneCore(
         // sharded slow path — pre-v5.4 strategies that consumed it (legacy
         // path) are out of band; sharded uses pnl_feeder for the
         // rebuild-time feedback loop (line ~1537 above).
+        // v5.4.0 Phase 2.4 — also pass ema_price (per-tick replicated by
+        // producer) so EmaCross's Adapt branch can update its prev_ema +
+        // last_ema_slope tracking.
         Strategy_AdaptPerCore(
             state, slot, effective_strategy_id,
             rolling->price_avg,         // current_price proxy (slow-path doesn't see live tick)
             FPN_Zero<F>(),              // portfolio_delta — fed via pnl_feeder above, not here
             state->oms->portfolio.active_bitmap,
-            &resolved_cfg
+            &resolved_cfg,
+            (const FPN<F>*)ema_price    // v5.4.0 Phase 2.4 — for EmaCross
         );
 
         Strategy_BuildParameters(

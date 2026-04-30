@@ -170,7 +170,8 @@ inline void Strategy_AdaptPerCore(
     FPN<F> current_price,
     FPN<F> portfolio_delta,
     uint16_t active_bitmap,
-    const ControllerConfig<F>* cfg
+    const ControllerConfig<F>* cfg,
+    const FPN<F>* ema_price = nullptr   // v5.4.0 Phase 2.4 — EmaCross uses this; others ignore
 ) {
     if (slot < 0 || slot >= MAX_EXECUTION_CORES) return;
     auto& ctx = state->cores[slot];
@@ -209,7 +210,21 @@ inline void Strategy_AdaptPerCore(
                                 &buy_conds_scratch, cfg);
             }
             break;
-        // Phase 2.4-2.5 will add EmaCross / ML cases here.
+        case STRATEGY_EMA_CROSS:
+            // v5.4.0 Phase 2.4 — EmaCross_Adapt itself is a no-op (no
+            // regression / no idle squeeze). Use this hook to update the
+            // state's EMA tracking — last_ema_slope + prev_ema — from the
+            // current ema_price. EmaCross_BuildParameters reads state->prev_ema
+            // for the crossover reference and last_ema_slope drives ExitAdjust.
+            if (ctx.strategy_state_kind == STRATEGY_EMA_CROSS && ema_price) {
+                auto* es = static_cast<EmaCrossState<F>*>(ctx.strategy_state);
+                es->last_ema_slope = FPN_Sub(*ema_price, es->prev_ema);
+                es->prev_ema       = *ema_price;
+                EmaCross_Adapt(es, current_price, portfolio_delta, active_bitmap,
+                                &buy_conds_scratch, cfg);
+            }
+            break;
+        // Phase 2.5 will add ML.
         default:
             break;
     }
@@ -306,7 +321,13 @@ inline void Strategy_ExitAdjustPerCore(
                     current_price, rolling, cfg);
             }
             break;
-        // Phase 2.4 will add EmaCross.
+        case STRATEGY_EMA_CROSS:
+            if (ctx.strategy_state_kind == STRATEGY_EMA_CROSS) {
+                EmaCross_ExitAdjustSharded(state, slot,
+                    static_cast<EmaCrossState<F>*>(ctx.strategy_state),
+                    current_price, rolling, cfg);
+            }
+            break;
         default:
             break;
     }

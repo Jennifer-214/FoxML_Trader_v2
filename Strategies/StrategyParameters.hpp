@@ -56,6 +56,7 @@
 #include "SimpleDip.hpp"          // SimpleDipState<F> — Phase 2.1 state-aware BuildParameters
 #include "MeanReversion.hpp"      // MeanReversionState<F> — Phase 2.2 state-aware BuildParameters
 #include "Momentum.hpp"           // MomentumState<F>     — Phase 2.3 state-aware BuildParameters
+#include "private/EmaCross.hpp"   // EmaCrossState<F>     — Phase 2.4 state-aware BuildParameters
 #include "StrategyInterface.hpp"
 
 #include <cstdint>
@@ -458,24 +459,82 @@ inline void EmaCross_BuildParameters(
     const RollingStats<F, W>* rolling,
     const ControllerConfig<F>* config,
     FPN<F> allocated_balance,
-    GateParameters<F>* out
+    GateParameters<F>* out,
+    EmaCrossState<F>* state = nullptr   // v5.4.0 Phase 2.4 — EMA tracking state
 ) {
-    // TODO(phase06-followup): full port with EMA crossover trigger.
-    // For phase 06 stub: same entry logic as SimpleDip but uses EMA Cross
-    // specific TP/SL overrides if set.
-    SimpleDip_BuildParameters(rolling, config, allocated_balance, out);
-    out->strategy_id = STRATEGY_EMA_CROSS;
-    // Override TP/SL with EMA Cross specific values if set
-    if (!FPN_IsZero(config->emacross_tp_pct)) {
-        out->tp_pct = config->emacross_tp_pct;
-        FPN<F> entry = out->bg_price_threshold;
-        out->sg_take_profit_price = FPN_Add(entry, FPN_Mul(entry, config->emacross_tp_pct));
+    // v5.4.0 Phase 2.4: when state is provided (sharded path post-Phase 1),
+    // use state->prev_ema (set by Adapt from the producer's per-tick EMA)
+    // as the dip reference + crossover anchor. Mirrors legacy
+    // EmaCross_BuySignal:
+    //   ref = ema (or rolling avg fallback)
+    //   crossover = ref > short_sma (by emacross_crossover_min stddevs)
+    //   buy_price = ref - stddev * emacross_dip_mult
+    //   gate zeroed when crossover not confirmed (no entries during downtrend).
+    //
+    // When state is nullptr (legacy callers, tests), keep the pre-Phase 2.4
+    // SimpleDip-with-overrides behavior so existing snapshots/tests stay
+    // numerically identical.
+    if (!state) {
+        SimpleDip_BuildParameters(rolling, config, allocated_balance, out);
+        out->strategy_id = STRATEGY_EMA_CROSS;
+        if (!FPN_IsZero(config->emacross_tp_pct)) {
+            out->tp_pct = config->emacross_tp_pct;
+            FPN<F> entry = out->bg_price_threshold;
+            out->sg_take_profit_price = FPN_Add(entry, FPN_Mul(entry, config->emacross_tp_pct));
+        }
+        if (!FPN_IsZero(config->emacross_sl_pct)) {
+            out->sl_pct = config->emacross_sl_pct;
+            FPN<F> entry = out->bg_price_threshold;
+            out->sg_stop_loss_price = FPN_Sub(entry, FPN_Mul(entry, config->emacross_sl_pct));
+        }
+        return;
     }
-    if (!FPN_IsZero(config->emacross_sl_pct)) {
-        out->sl_pct = config->emacross_sl_pct;
-        FPN<F> entry = out->bg_price_threshold;
-        out->sg_stop_loss_price = FPN_Sub(entry, FPN_Mul(entry, config->emacross_sl_pct));
+
+    // State-aware path. ref = state->prev_ema (Adapt populated this from
+    // the producer's per-tick EMA replication). Fall back to rolling avg
+    // if the state hasn't been seeded yet (cold-start, ema=0).
+    FPN<F> ref = !FPN_IsZero(state->prev_ema) ? state->prev_ema : rolling->price_avg;
+
+    // Crossover gate: ref must sit above short SMA by at least
+    // emacross_crossover_min stddevs. Same geometry as the legacy
+    // EmaCross_BuySignal.
+    int uptrend = 0;
+    if (!FPN_IsZero(rolling->price_avg) && !FPN_IsZero(rolling->price_stddev)) {
+        FPN<F> diff = FPN_Sub(ref, rolling->price_avg);
+        int ema_above = (diff.sign == 0) && !FPN_IsZero(diff);
+        FPN<F> spread_stddevs = FPN_DivNoAssert(diff, rolling->price_stddev);
+        uptrend = ema_above & FPN_GreaterThan(spread_stddevs, config->emacross_crossover_min);
     }
+
+    // Buy price = ref - stddev * emacross_dip_mult (dip below EMA)
+    FPN<F> dip = FPN_Mul(rolling->price_stddev, config->emacross_dip_mult);
+    FPN<F> entry_price = FPN_Sub(ref, dip);
+
+    // TP/SL: use EMA-specific cfg overrides; fall through to shared.
+    FPN<F> tp_pct = !FPN_IsZero(config->emacross_tp_pct)
+        ? config->emacross_tp_pct : config->take_profit_pct;
+    FPN<F> sl_pct = !FPN_IsZero(config->emacross_sl_pct)
+        ? config->emacross_sl_pct : config->stop_loss_pct;
+
+    FPN<F> tp_amount = FPN_Mul(entry_price, tp_pct);
+    FPN<F> sl_amount = FPN_Mul(entry_price, sl_pct);
+    FPN<F> volume_threshold = FPN_Mul(rolling->volume_avg, config->volume_multiplier);
+
+    FPN<F> trade_size = FPN_Zero<F>();
+    if (!FPN_IsZero(entry_price)) {
+        trade_size = FPN_DivNoAssert(allocated_balance, entry_price);
+    }
+
+    out->bg_price_threshold   = uptrend ? entry_price : FPN_Zero<F>();
+    out->bg_volume_threshold  = volume_threshold;
+    out->sg_take_profit_price = FPN_Add(entry_price, tp_amount);
+    out->sg_stop_loss_price   = FPN_Sub(entry_price, sl_amount);
+    out->tp_pct               = tp_pct;
+    out->sl_pct               = sl_pct;
+    out->trade_size           = trade_size;
+    out->strategy_id          = STRATEGY_EMA_CROSS;
+    out->flags                = GATE_FLAG_TP_ENABLED | GATE_FLAG_SL_ENABLED;
+    for (int i = 0; i < 6; ++i) out->_pad[i] = 0;
 }
 
 //======================================================================================================
@@ -743,7 +802,9 @@ inline void Strategy_BuildParameters(
                                       (MomentumState<F>*)strategy_state);
             break;
         case STRATEGY_EMA_CROSS:
-            EmaCross_BuildParameters(rolling, config, allocated_balance, out);
+            // v5.4.0 Phase 2.4 — pass typed EmaCross state through.
+            EmaCross_BuildParameters(rolling, config, allocated_balance, out,
+                                      (EmaCrossState<F>*)strategy_state);
             break;
         case STRATEGY_ML:
             ML_BuildParameters(rolling, rolling_long, config, allocated_balance, out, model_ctx);
