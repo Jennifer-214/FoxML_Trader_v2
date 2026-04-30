@@ -2475,21 +2475,31 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         }
     }
 
-    // Phase 0.2 — force-close on shutdown. Refuse to silently exit with
-    // open positions. Submits market sells via OrderManager_Submit (same
-    // path as TP/SL exits) and waits up to 30s for the bitmap to clear as
-    // fills come through user-data WS → drainer → OnEvent. Drainer is
-    // still running at this point — the joins below come after.
-    // Paper mode: clears bitmap locally (no exchange interaction).
+    // v5.4.5 (recurring-bugs Class 9 — shutdown UX): positions PERSIST
+    // across restart. Engine is designed to run 24/7; on operator-initiated
+    // shutdown (Ctrl+C, GUI close), the snapshot saved above captures open
+    // positions and the next session resumes management.
+    //
+    // Pre-fix: this site called EngineSharded_ForceCloseOnShutdown with a
+    // 30s timeout, which submitted market SELLs for every open position
+    // and blocked the join sequence waiting for fills. Symptom on shutdown
+    // with positions open: terminal hung for up to 30s after Ctrl+C with
+    // no output, because force-close runs BEFORE the
+    // "[sharded] joining threads..." prints. User reported this as
+    // "engine doesn't exit cleanly when positions are open."
+    //
+    // Force-close logic preserved in the codebase (EngineSharded_ForceCloseOnShutdown)
+    // for callers that explicitly want it (e.g. risk-managed live shutdown
+    // sequences). The default 24/7 paper/live operation just persists.
     {
-        int remaining = EngineSharded_ForceCloseOnShutdown<F>(
-            &oms, live_trading ? &g_sharded_binance_adapter : nullptr,
-            g_notify, /*timeout_secs=*/30);
-        if (remaining > 0) {
+        int still_open = __builtin_popcount(oms.portfolio.active_bitmap);
+        if (still_open > 0) {
             fprintf(stderr,
-                "[sharded] WARNING: %d position(s) could not be force-closed before exit. "
-                "Manual intervention required to flatten on Binance before next session.\n",
-                remaining);
+                "[sharded] %d position(s) open on shutdown — persisting via "
+                "snapshot for next session (force-close disabled by default; "
+                "see EngineSharded_ForceCloseOnShutdown if you need exchange "
+                "flatten on exit).\n",
+                still_open);
         }
     }
     // Per-stage shutdown logging — when the process refuses to exit on close,
