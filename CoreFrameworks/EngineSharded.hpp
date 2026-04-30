@@ -1482,6 +1482,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         // post-reset trade then produces a misleading mean.
                         state.cores[c].core_gross_wins   = FPN_Zero<F>();
                         state.cores[c].core_gross_losses = FPN_Zero<F>();
+                        // v5.4.3 (recurring-bugs Class 5): also clear
+                        // sl_cooldown_remaining + idle_cycles. Without
+                        // these, a pre-reset SL exit leaves the core
+                        // zero-gated post-reset (halt_reason=6) for N
+                        // ticks user thinks fresh. idle_cycles same
+                        // pattern — death-spiral counter shouldn't
+                        // carry pre-reset state.
+                        state.cores[c].sl_cooldown_remaining = 0;
+                        state.cores[c].idle_cycles           = 0;
                     }
                     // v4.7.18: rotate the trade history CSV to a timestamped
                     // backup so the GUI's Trade History panel goes blank

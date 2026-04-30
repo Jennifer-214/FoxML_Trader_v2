@@ -63,7 +63,11 @@ namespace tt {
 //     parameters reconverge within a few slow-path cadences. Full
 //     state persistence deferred to v5.5.0.
 //     v3 files rejected on load with a version-mismatch error.
-#define SHARDED_SNAPSHOT_VERSION  4u
+// v5: adds core_gross_wins / core_gross_losses (added in v4.7.25 but
+// silently skipped from persistence — Stats panel avg_win / avg_loss /
+// profit_factor read zero after restart). Plus idle_cycles for
+// death-spiral state continuity.
+#define SHARDED_SNAPSHOT_VERSION  5u
 
 //======================================================================================================
 // [SAVE]
@@ -155,6 +159,14 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
         if (fwrite(&ctx.core_open_notional,  sizeof(FPN<F>), 1, f) != 1) goto fail;
         if (fwrite(&ctx.core_wins,           4, 1, f) != 1) goto fail;
         if (fwrite(&ctx.core_losses,         4, 1, f) != 1) goto fail;
+        // v5.4.3 (recurring-bugs Class 4): core_gross_wins/losses were
+        // added in v4.7.25 but never persisted, so Stats panel avg_win,
+        // avg_loss, profit_factor, expectancy all read $0.00 after
+        // restart until the next post-restart trade. idle_cycles is
+        // the death-spiral counter — also persisted for continuity.
+        if (fwrite(&ctx.core_gross_wins,     sizeof(FPN<F>), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.core_gross_losses,   sizeof(FPN<F>), 1, f) != 1) goto fail;
+        if (fwrite(&ctx.idle_cycles,         4, 1, f) != 1) goto fail;
 
         // Spacing state
         if (fwrite(&ctx.last_entry_price,    sizeof(FPN<F>), 1, f) != 1) goto fail;
@@ -347,6 +359,9 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         uint64_t exits_processed;
         FPN<F>   core_realized, core_fees, core_open_notional;
         uint32_t core_wins, core_losses;
+        // v5.4.3 (snapshot v5): gross accumulators + idle counter
+        FPN<F>   core_gross_wins, core_gross_losses;
+        uint32_t idle_cycles;
         FPN<F>   last_entry_price;
         uint64_t last_entry_tick;
         uint32_t sl_cooldown_remaining;
@@ -393,6 +408,10 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         if (fread(&s.core_open_notional,sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.core_wins,         4, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.core_losses,       4, 1, f) != 1) { fclose(f); return 0; }
+        // v5.4.3 (snapshot v5): gross accumulators + idle_cycles.
+        if (fread(&s.core_gross_wins,   sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.core_gross_losses, sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
+        if (fread(&s.idle_cycles,       4, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.last_entry_price,  sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.last_entry_tick,   8, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.sl_cooldown_remaining, 4, 1, f) != 1) { fclose(f); return 0; }
@@ -457,6 +476,10 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         ctx.core_open_notional   = s.core_open_notional;
         ctx.core_wins            = s.core_wins;
         ctx.core_losses          = s.core_losses;
+        // v5.4.3 (snapshot v5): apply gross accumulators + idle counter.
+        ctx.core_gross_wins      = s.core_gross_wins;
+        ctx.core_gross_losses    = s.core_gross_losses;
+        ctx.idle_cycles          = s.idle_cycles;
         ctx.last_entry_price     = s.last_entry_price;
         ctx.last_entry_tick      = s.last_entry_tick;
         ctx.sl_cooldown_remaining= s.sl_cooldown_remaining;

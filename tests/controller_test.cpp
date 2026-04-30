@@ -8013,8 +8013,8 @@ e3_skip_load:;
         // SHARDED_SNAPSHOT_VERSION bumped from 3 to 4 for the CoreContext
         // strategy_state addition. Hardcoded check to catch accidental
         // reverts.
-        check("v5.4.0p1: SHARDED_SNAPSHOT_VERSION is 4 (was 3 pre-v5.4)",
-              SHARDED_SNAPSHOT_VERSION == 4u);
+        check("v5.4.3: SHARDED_SNAPSHOT_VERSION is 5 (v5.4.0=4, v5.4.3=5 added gross+idle)",
+              SHARDED_SNAPSHOT_VERSION == 5u);
     }
     {
         // Default state after EventLoopState_Init: strategy_state nullptr,
