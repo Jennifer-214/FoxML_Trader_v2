@@ -205,7 +205,15 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
     //     producer-side submit pushes route through OMS_PushSubmit instead
     //     of calling Submit directly. Backtest is single-threaded so the
     //     drain happens inline here, mirroring live's drainer thread.
-    if (drv->oms) OMS_DrainSubmit(drv->oms, drv->state->registered_count);
+    if (drv->oms) {
+        // v5.4.1 Bug B2: drain count must cover all queues that may have
+        // been written. Under partials, ExecutionCore producers push
+        // SubmitCommands keyed by portfolio_slot (0..2N-1), so the drain
+        // walks 2N queues instead of N.
+        int dc = drv->oms->partial_exit_enabled
+            ? drv->state->registered_count * 2 : drv->state->registered_count;
+        OMS_DrainSubmit(drv->oms, dc);
+    }
 
     // 2b. In event_log_mode=1, portfolio mutation happens in OMS_Tick
     //     (the fill handler), not in OnEvent. Tick the OMS so the fill
@@ -377,7 +385,15 @@ inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
     EventLoop_DrainEvents(drv->state);
     // v4.7.37 (Phase B reordered): drain any pending submit commands from
     // the final iteration BEFORE OMS_Tick so they get filled.
-    if (drv->oms) OMS_DrainSubmit(drv->oms, drv->state->registered_count);
+    if (drv->oms) {
+        // v5.4.1 Bug B2: drain count must cover all queues that may have
+        // been written. Under partials, ExecutionCore producers push
+        // SubmitCommands keyed by portfolio_slot (0..2N-1), so the drain
+        // walks 2N queues instead of N.
+        int dc = drv->oms->partial_exit_enabled
+            ? drv->state->registered_count * 2 : drv->state->registered_count;
+        OMS_DrainSubmit(drv->oms, dc);
+    }
     if (drv->oms) OrderManager_Tick(drv->oms);
     // v4.7.15: drain post-fill in mode 1 to match live's final-flush loop
     // (EngineSharded line 1597-1604). Without this, the last tick's

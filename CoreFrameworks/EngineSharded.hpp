@@ -1841,7 +1841,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             //      from FillRecords.
             int total_drained = drain_with_submit();
             drain_manual_closes();
-            OMS_DrainSubmit(&oms, state.registered_count);  // v4.7.37
+            // v5.4.1 Bug B2: under partials, ExecutionCore producers push
+            // SubmitCommands keyed by portfolio_slot (0..2N-1, where N =
+            // num_execution_cores). DrainSubmit must walk all queues that
+            // may have been written, not just queues 0..N-1. Pre-fix,
+            // cores beyond num_cores under partials had their submits
+            // stuck in undrained queues forever — silent zero-trade state.
+            int drain_count = oms.partial_exit_enabled
+                ? state.registered_count * 2 : state.registered_count;
+            OMS_DrainSubmit(&oms, drain_count);  // v4.7.37
             OrderManager_Tick(&oms);
             drain_post_fill();
 
@@ -1850,7 +1858,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 for (int k = 0; k < 16; ++k) {
                     drain_with_submit();
                     drain_manual_closes();
-                    OMS_DrainSubmit(&oms, state.registered_count);  // v4.7.37
+                    // v5.4.1 Bug B2: same partials-aware drain count as the
+                    // main loop above.
+                    int dc = oms.partial_exit_enabled
+                        ? state.registered_count * 2 : state.registered_count;
+                    OMS_DrainSubmit(&oms, dc);  // v4.7.37
                     OrderManager_Tick(&oms);
                     drain_post_fill();
                 }

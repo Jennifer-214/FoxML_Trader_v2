@@ -84,6 +84,12 @@ static inline void TUI_CopySnapshotSharded(
     snap->realized     = agg.realized_pnl;
     snap->unrealized   = agg.unrealized_pnl;
     snap->total_pnl    = agg.realized_pnl + agg.unrealized_pnl;
+    // v5.4.1 Bug B1: was never populated in sharded path → Account header
+    // always showed fees: $0.00 even when OMS had accumulated fees.
+    // Legacy EngineTUI.hpp path set this from ctrl->total_fees; the
+    // sharded equivalent is oms->total_fees, populated by HandleFill on
+    // entry+exit fills.
+    snap->fees         = FPN_ToDouble(state->oms->total_fees);
     snap->return_pct   = (snap->starting > 0.0) ? (snap->total_pnl / snap->starting * 100.0) : 0.0;
     // active_count under partials: agg counts raw bitmap bits, but slot
     // 2c+0 + slot 2c+1 are ONE logical trade (both legs of one core's

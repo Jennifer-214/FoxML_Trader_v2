@@ -923,6 +923,26 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
 
     CoreContext<F>& ctx = state->cores[core_id];
 
+    // v5.4.1 Bug B diagnostic: log when this core has bits to process.
+    // Cheap (cfg-gated, no-op when disabled). Helps narrow whether the
+    // mask plumbing or the increment math is the cause of stuck-zero
+    // per-core counters.
+    {
+        uint16_t hit_open  = (uint16_t)(oms->last_opened_mask & my_mask);
+        uint16_t hit_close = (uint16_t)(oms->last_closed_mask & my_mask);
+        if ((hit_open || hit_close) && tt::Health_LogEnabled(tt::HEALTH_INFO)) {
+            tt::Health_Log(tt::HEALTH_INFO, "drain", core_id,
+                "my_mask=0x%x last_open=0x%x last_close=0x%x partial=%d realized_pre=%g fees_pre=%g wins=%u losses=%u",
+                (unsigned)my_mask,
+                (unsigned)oms->last_opened_mask,
+                (unsigned)oms->last_closed_mask,
+                partial_on,
+                FPN_ToDouble(ctx.core_realized),
+                FPN_ToDouble(ctx.core_fees),
+                ctx.core_wins, ctx.core_losses);
+        }
+    }
+
     // ---- Entries: open_notional / fees + heartbeat counters ----
     uint16_t open_mask = (uint16_t)(oms->last_opened_mask & my_mask);
     while (open_mask) {
