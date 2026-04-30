@@ -116,6 +116,17 @@ struct alignas(64) GateParameters {
     // slow_path_interval (~100-200ms) for the SET, microseconds for the FIRE.
     FPN<F> ratchet_sl;
 
+    // --- v5.4.0 Phase 3.3 trailing TP ratchet ---
+    // Parallel channel to ratchet_sl. For LONG positions, ratcheting TP UP
+    // locks in a higher exit target as the trade runs. Hot path uses
+    // effective_tp = FPN_Max(active_tp, ratchet_tp) — same FPN_Max pattern
+    // as SL. When zero (default), no behavior change. Used by Regime_AdjustPositions
+    // (Phase 3.1) to widen TP on RANGING→TRENDING transitions and by future
+    // strategy-specific TP trailing in Phase 4+. Pre-v5.4 sharded had no TP
+    // ratchet field; the legacy Regime_AdjustPositions writes to pos->take_profit_price
+    // were dead — postmortem F4.
+    FPN<F> ratchet_tp;
+
     // --- Identification ---
     uint8_t strategy_id;             // STRATEGY_* constant
     uint8_t flags;                   // GATE_FLAG_* bitmask
@@ -165,8 +176,12 @@ static inline bool SG_Evaluate(const FPN<F>& current_price, const FPN<F>& entry_
     (void)entry_price;  // unused in stub; real implementation may use for trailing
     uint64_t tp_enabled = (uint64_t)((params->flags & GATE_FLAG_TP_ENABLED) != 0);
     uint64_t sl_enabled = (uint64_t)((params->flags & GATE_FLAG_SL_ENABLED) != 0);
-    uint64_t tp_hit = (uint64_t)FPN_GreaterThanOrEqual(current_price, params->sg_take_profit_price);
-    uint64_t sl_hit = (uint64_t)FPN_LessThanOrEqual(current_price, params->sg_stop_loss_price);
+    // v5.4.0 Phase 3.3: ratchet_tp / ratchet_sl raise the effective exit
+    // levels (max-only). Zero defaults preserve pre-v5.4 numerics.
+    FPN<F> effective_tp = FPN_Max(params->sg_take_profit_price, params->ratchet_tp);
+    FPN<F> effective_sl = FPN_Max(params->sg_stop_loss_price,   params->ratchet_sl);
+    uint64_t tp_hit = (uint64_t)FPN_GreaterThanOrEqual(current_price, effective_tp);
+    uint64_t sl_hit = (uint64_t)FPN_LessThanOrEqual(current_price, effective_sl);
     return ((tp_enabled & tp_hit) | (sl_enabled & sl_hit)) != 0;
 }
 
@@ -183,6 +198,7 @@ static inline void GateParameters_Init(GateParameters<F>* params) {
     params->tp_pct_b = FPN_Zero<F>();  // P.2: leg-B TP%, set by strategy when partials enabled
     params->trade_size = FPN_Zero<F>();
     params->ratchet_sl = FPN_Zero<F>();  // v4.0.3 D9
+    params->ratchet_tp = FPN_Zero<F>();  // v5.4.0 Phase 3.3 — TP ratchet channel
     params->strategy_id = STRATEGY_NONE;
     params->flags = 0;
 }

@@ -320,8 +320,15 @@ static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tic
     // unchanged. When controller has ratcheted up, the ratchet wins → exit
     // fires when price drops to the trailing level.
     FPN<F> effective_sl = FPN_Max(sl, core->cached_params.ratchet_sl);
+    // v5.4.0 Phase 3.3: trailing TP via ratchet_tp — same FPN_Max pattern
+    // as SL. When ratchet_tp is FPN_Zero (default), FPN_Max(tp, 0) = tp so
+    // behavior is unchanged. When the controller has ratcheted TP up
+    // (Regime_AdjustPositionsSharded, future strategy trailing), the higher
+    // value wins — TP fires at the new lock-in level. Same ~1ns cost shape
+    // as the SL ratchet.
+    FPN<F> effective_tp = FPN_Max(tp, core->cached_params.ratchet_tp);
     // Leg A SG (existing pattern, unchanged)
-    uint64_t tp_hit_a   = (uint64_t)FPN_GreaterThanOrEqual(tick.price, tp);
+    uint64_t tp_hit_a   = (uint64_t)FPN_GreaterThanOrEqual(tick.price, effective_tp);
     uint64_t sl_hit_a   = (uint64_t)FPN_LessThanOrEqual(tick.price, effective_sl);
     uint64_t sg_fires_a = (tp_enabled & tp_hit_a) | (sl_enabled & sl_hit_a);
     // Leg B SG — gated. Variable defaults to 0 so can_exit_b stays 0
@@ -331,7 +338,8 @@ static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tic
         FPN<F> tp_b           = core->live_tp_b;
         FPN<F> sl_b           = core->live_sl_b;
         FPN<F> effective_sl_b = FPN_Max(sl_b, core->cached_params.ratchet_sl);
-        uint64_t tp_hit_b     = (uint64_t)FPN_GreaterThanOrEqual(tick.price, tp_b);
+        FPN<F> effective_tp_b = FPN_Max(tp_b, core->cached_params.ratchet_tp);
+        uint64_t tp_hit_b     = (uint64_t)FPN_GreaterThanOrEqual(tick.price, effective_tp_b);
         uint64_t sl_hit_b     = (uint64_t)FPN_LessThanOrEqual(tick.price, effective_sl_b);
         sg_fires_b            = (tp_enabled & tp_hit_b) | (sl_enabled & sl_hit_b);
     }

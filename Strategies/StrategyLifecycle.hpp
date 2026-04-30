@@ -286,6 +286,32 @@ inline bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
 }
 
 //======================================================================================================
+// [WRITE RATCHET TP — shared helper, no fee-floor]
+//======================================================================================================
+// Companion to Strategy_WriteRatchetSL, parallel channel for trailing TP.
+// LONG geometry: TP ratchets UP (FPN_Max wins) → locks in higher exit
+// targets. No fee-floor cap is needed: a higher TP can never produce a
+// net-negative exit. Used by Regime_AdjustPositions on RANGING→TRENDING
+// transitions and by future strategy-specific TP trailing.
+//
+// Returns true iff the write actually advanced ratchet_tp.
+//======================================================================================================
+template <unsigned F>
+inline bool Strategy_WriteRatchetTP(EventLoopState<F>* state, int slot,
+                                     FPN<F> proposed_tp) {
+    if (slot < 0 || slot >= MAX_EXECUTION_CORES) return false;
+    if (FPN_IsZero(proposed_tp)) return false;
+
+    auto& ctx = state->cores[slot];
+    if (FPN_GreaterThan(proposed_tp, ctx.pending_params.ratchet_tp)) {
+        ctx.pending_params.ratchet_tp = proposed_tp;
+        ctx.dirty = 1;
+        return true;
+    }
+    return false;
+}
+
+//======================================================================================================
 // [EXIT ADJUST — per-cadence dispatch]
 //======================================================================================================
 // Called from EventLoop_RebuildOneCore each slow-path cadence, AFTER

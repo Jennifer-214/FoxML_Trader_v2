@@ -1626,17 +1626,51 @@ inline void EventLoop_RebuildOneCore(
             // closer to current price (lock in any open profit ahead of
             // strategy switch). Only trigger when regime ACTUALLY changed
             // (not just hysteresis-pending) and a position is open.
+            // v5.4.0 Phase 3.1: also write ratchet_tp to widen/tighten
+            // TP per transition shape — restoring the legacy
+            // Regime_AdjustPositions behavior that was orphaned in sharded
+            // (postmortem F4: the legacy function writes pos->take_profit_price,
+            // which the hot path doesn't read).
             if (new_regime != old_regime &&
                 (state->oms->portfolio.active_bitmap &
                  Sharded_CoreSlotMask(slot, config->partial_exit_enabled))) {
-                // Move ratchet to current rolling avg minus tighter offset
-                // (stddev × 1.0 = closer than the trailing default).
+                // SL tighten (D11 — preserved unchanged for parity).
                 FPN<F> tight_sl = FPN_Sub(rolling->price_avg,
                                            rolling->price_stddev);
                 if (FPN_GreaterThan(tight_sl,
                         state->cores[slot].pending_params.ratchet_sl)) {
                     state->cores[slot].pending_params.ratchet_sl = tight_sl;
                     state->cores[slot].dirty = 1;
+                }
+
+                // v5.4.0 Phase 3.1: TP retune per transition shape.
+                // Widening transitions (RANGING→TRENDING, MILD_TREND→TRENDING)
+                // ratchet TP UP to let positions run further. Tightening
+                // transitions (TRENDING→RANGING) lock in profit by ratcheting
+                // TP UP to a closer target (price + tight_offset). The TP
+                // ratchet is max-only via Strategy_WriteRatchetTP, so a
+                // tightening proposal that would *lower* TP is silently
+                // dropped — this preserves the "ratchet locks gains" intent.
+                bool widen = (old_regime == REGIME_RANGING && new_regime == REGIME_TRENDING) ||
+                             (old_regime == REGIME_MILD_TREND && new_regime == REGIME_TRENDING);
+                bool tighten = ((old_regime == REGIME_TRENDING || old_regime == REGIME_TRENDING_DOWN
+                                 || old_regime == REGIME_MILD_TREND) &&
+                                new_regime == REGIME_RANGING);
+                if (widen) {
+                    // Wider TP target: rolling avg + stddev × momentum_tp_mult.
+                    // Mirrors legacy Regime_AdjustPositions RANGING→TRENDING case.
+                    FPN<F> tp_offset = FPN_Mul(rolling->price_stddev,
+                                                resolved_cfg.momentum_tp_mult);
+                    FPN<F> wide_tp   = FPN_Add(rolling->price_avg, tp_offset);
+                    Strategy_WriteRatchetTP(state, slot, wide_tp);
+                } else if (tighten) {
+                    // Tighter TP target: lock in profit by ratcheting TP up
+                    // to current_price + small offset. Only advances if
+                    // higher than existing ratchet_tp (max-only semantics).
+                    FPN<F> tight_offset = FPN_Mul(rolling->price_stddev,
+                                                   FPN_FromDouble<F>(0.5));
+                    FPN<F> tight_tp     = FPN_Add(rolling->price_avg, tight_offset);
+                    Strategy_WriteRatchetTP(state, slot, tight_tp);
                 }
             }
         }

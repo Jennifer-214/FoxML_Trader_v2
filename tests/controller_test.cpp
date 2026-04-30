@@ -8621,6 +8621,73 @@ e3_skip_load:;
         tt::EventLoopState_Free(&state);
     }
 
+    printf("\n--- v5.4.0 Phase 3.3: ratchet_tp channel ---\n");
+    {
+        // GateParameters_Init clears ratchet_tp to zero.
+        tt::GateParameters<FP> p;
+        tt::GateParameters_Init(&p);
+        check("v5.4.0p3.3: GateParameters_Init clears ratchet_tp",
+              FPN_IsZero(p.ratchet_tp));
+    }
+    {
+        // SG_Evaluate (standalone): ratchet_tp = 0 → behavior identical
+        // to pre-Phase 3.3 (uses sg_take_profit_price).
+        tt::GateParameters<FP> p;
+        tt::GateParameters_Init(&p);
+        p.flags = tt::GATE_FLAG_TP_ENABLED | tt::GATE_FLAG_SL_ENABLED;
+        p.sg_take_profit_price = FPN_FromDouble<FP>(50500.0);
+        p.sg_stop_loss_price   = FPN_FromDouble<FP>(49500.0);
+
+        // Price below TP, above SL: no fire
+        check("v5.4.0p3.3: SG_Evaluate ratchet_tp=0 — mid-range no fire",
+              !tt::SG_Evaluate(FPN_FromDouble<FP>(50000.0),
+                                FPN_FromDouble<FP>(50000.0), &p));
+        // Price at TP: fire
+        check("v5.4.0p3.3: SG_Evaluate ratchet_tp=0 — TP hit fires",
+              tt::SG_Evaluate(FPN_FromDouble<FP>(50500.0),
+                               FPN_FromDouble<FP>(50000.0), &p));
+
+        // ratchet_tp above TP → effective_tp uses ratchet (the TP "moves up")
+        p.ratchet_tp = FPN_FromDouble<FP>(51000.0);
+        check("v5.4.0p3.3: ratchet_tp > tp — old TP price no longer fires",
+              !tt::SG_Evaluate(FPN_FromDouble<FP>(50500.0),
+                                FPN_FromDouble<FP>(50000.0), &p));
+        check("v5.4.0p3.3: ratchet_tp > tp — new ratchet level fires",
+              tt::SG_Evaluate(FPN_FromDouble<FP>(51000.0),
+                               FPN_FromDouble<FP>(50000.0), &p));
+    }
+    {
+        // Strategy_WriteRatchetTP: max-only semantics + dirty bit.
+        tt::OrderManagerState<FP> oms;
+        tt::EventLoopState<FP> state;
+        tt::EventLoopState_Init(&state, &oms);
+        check("v5.4.0p3.3: ratchet_tp default is zero",
+              FPN_IsZero(state.cores[0].pending_params.ratchet_tp));
+
+        bool wrote1 = tt::Strategy_WriteRatchetTP(&state, 0,
+                                                    FPN_FromDouble<FP>(51000.0));
+        check("v5.4.0p3.3: WriteRatchetTP advance from 0 returns true",
+              wrote1 && FPN_Equal(state.cores[0].pending_params.ratchet_tp,
+                                   FPN_FromDouble<FP>(51000.0)) &&
+              state.cores[0].dirty == 1);
+
+        state.cores[0].dirty = 0;
+        bool wrote2 = tt::Strategy_WriteRatchetTP(&state, 0,
+                                                    FPN_FromDouble<FP>(50500.0));
+        check("v5.4.0p3.3: WriteRatchetTP lower proposal is no-op",
+              !wrote2 && FPN_Equal(state.cores[0].pending_params.ratchet_tp,
+                                    FPN_FromDouble<FP>(51000.0)) &&
+              state.cores[0].dirty == 0);
+
+        bool wrote3 = tt::Strategy_WriteRatchetTP(&state, 0,
+                                                    FPN_FromDouble<FP>(52000.0));
+        check("v5.4.0p3.3: WriteRatchetTP higher proposal advances",
+              wrote3 && FPN_Equal(state.cores[0].pending_params.ratchet_tp,
+                                   FPN_FromDouble<FP>(52000.0)));
+
+        tt::EventLoopState_Free(&state);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
