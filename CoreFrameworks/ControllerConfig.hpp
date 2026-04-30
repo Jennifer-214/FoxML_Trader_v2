@@ -434,6 +434,14 @@ template <unsigned F> struct ControllerConfig {
   // current behavior (manual stamping via tools/stamp_model.sh); flip to 1 after
   // configuring the secret to enable hands-off stamp generation in foxml_suite.
   int    auto_stamp_on_held_out;
+  // v5.4.0 (Phase 0.1) — operational health log. Always-available
+  // structured JSONL diagnostic log. Replaces ad-hoc env-gated stderr
+  // traces. When enabled, engine init configures MemHeaders/HealthLog.hpp
+  // with these values; subsequent Health_Log() calls append to the path.
+  //   health_log_path: "" (default) = disabled; non-empty = JSONL output path
+  //   health_log_level: 0 = info (always), 1 = debug, 2 = trace
+  char   health_log_path[256];
+  int    health_log_level;
   // v5.2.1 (live reconciliation Phase 1) — exchange-truth sync at boot
   // (and optionally on heartbeat). LIVE-mode-only — paper mode skips
   // reconcile entirely.
@@ -781,6 +789,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.held_out_gate_strict        = 0;                            // gate off by default (warn-only)
   cfg.held_out_stamp_secret[0]    = '\0';                         // empty = accept-any (dev)
   cfg.auto_stamp_on_held_out      = 0;                            // opt-in; flip to 1 after configuring secret
+  cfg.health_log_path[0]          = '\0';                         // empty = disabled
+  cfg.health_log_level            = 0;                            // 0=info, 1=debug, 2=trace
   cfg.reconcile_interval_sec      = 0;                            // 0 = boot-only
   cfg.reconcile_dry_run           = 1;                            // safer default; flip to 0 deliberately
   cfg.prediction_normalize = 0;
@@ -1122,6 +1132,17 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     if (strcmp(key, "auto_stamp_on_held_out") == 0) {
         cfg.auto_stamp_on_held_out = atoi(val);
+        continue;
+    }
+    if (strcmp(key, "health_log_path") == 0) {
+        size_t n = strlen(val);
+        if (n >= sizeof(cfg.health_log_path)) n = sizeof(cfg.health_log_path) - 1;
+        memcpy(cfg.health_log_path, val, n);
+        cfg.health_log_path[n] = '\0';
+        continue;
+    }
+    if (strcmp(key, "health_log_level") == 0) {
+        cfg.health_log_level = atoi(val);
         continue;
     }
     if (strcmp(key, "reconcile_interval_sec") == 0) {

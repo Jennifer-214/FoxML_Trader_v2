@@ -49,6 +49,7 @@
 #include "BinanceAdapter.hpp"
 #include "ReconciliationLoop.hpp"
 #include "Reconcile.hpp"  // v5.2.1: boot-time exchange-truth reconcile (parse + decide)
+#include "../MemHeaders/HealthLog.hpp"  // v5.4.0 Phase 0.1: structured JSONL diagnostic log
 #include "ShardedLiveSafety.hpp"   // Phase 0: orphan recovery, force-close, reconcile
 #include "ShardedSnapshot.hpp"
 #include "ShardedSnapshotPersist.hpp"  // Phase 4: persistent state across restarts
@@ -336,6 +337,16 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // sleep is interruptible. Without this, closing the GUI during a
     // reconnect window blocks for up to cfg.reconnect_delay seconds.
     g_binance_shutdown_flag = &g_engine_sharded_shutdown;
+
+    // v5.4.0 Phase 0.1 — wire Health log per cfg. Empty path = disabled
+    // (Health_Log calls become no-ops). Non-empty path = JSONL output;
+    // every Health_Log call appends a line. See MemHeaders/HealthLog.hpp.
+    tt::Health_LogConfigure(cfg.health_log_path, cfg.health_log_level);
+    if (cfg.health_log_path[0]) {
+        tt::Health_Log(tt::HEALTH_INFO, "engine", -1,
+            "engine_start arch=sharded num_cores=%u health_log_level=%d",
+            (unsigned)cfg.num_execution_cores, cfg.health_log_level);
+    }
 
     // Try to open the real Binance stream. If it fails — or if the cfg
     // explicitly forces synthetic mode — fall back to the synthetic tick

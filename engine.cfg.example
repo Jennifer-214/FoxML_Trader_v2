@@ -353,3 +353,20 @@ confidence_enabled=0            # dynamic buy threshold from prediction quality 
 # core_0_ml_tp_pct=1.5
 # core_0_ml_sl_pct=0.8
 # core_0_ml_buy_threshold=0.55
+
+# ===========================================================================
+# v5.4.0 Phase 0.1 — operational health log (always-available diagnostic)
+# ===========================================================================
+# Structured JSONL diagnostic log. When health_log_path is non-empty, the
+# engine appends a line per Health_Log call with timestamp, category, and
+# message. Useful for ongoing operational visibility without code changes.
+#
+# Categories used by the engine: engine, regime, sl_emission, sg_eval,
+# cooldown, latency, fee_accounting, strategy_adapt.
+# Levels: 0=info (always), 1=debug, 2=trace.
+#
+# Empty path = disabled (zero overhead). Non-empty = JSONL output.
+#
+# Example (uncomment to enable):
+# health_log_path=logs/foxml-health.jsonl
+# health_log_level=0

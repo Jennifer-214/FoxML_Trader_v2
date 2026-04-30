@@ -32,6 +32,7 @@
 #include "../Backtest/HeldOutSplit.hpp"
 #include "../MemHeaders/HmacSha256.hpp"                  // v5.3.0 Phase B — in-process HMAC primitive
 #include "../MemHeaders/RunHistory.hpp"                  // v5.3.2 Phase C — JSONL append-only run history
+#include "../MemHeaders/HealthLog.hpp"                   // v5.4.0 Phase 0.1 — structured operational diagnostic log
 
 using namespace std;
 
@@ -7930,6 +7931,76 @@ e3_skip_load:;
             unlink(path);
         } else {
             check("v5.3.2c: RunHistory append-only — 2 entries → 2 newlines", 0);
+        }
+    }
+
+    //======================================================================================================
+    // [v5.4.0 Phase 0.1 — health_log cfg wiring]
+    //======================================================================================================
+    printf("\n--- v5.4.0 Phase 0.1: health_log cfg parsing ---\n");
+    {
+        // Default values when not set in cfg
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        check("v5.4.0p0.1: health_log_path default is empty",
+              cfg.health_log_path[0] == '\0');
+        check("v5.4.0p0.1: health_log_level default is 0 (info)",
+              cfg.health_log_level == 0);
+    }
+    {
+        // Parse cfg with health_log_path + health_log_level set
+        char path[] = "/tmp/test_health_cfg_XXXXXX";
+        int fd = mkstemp(path);
+        if (fd >= 0) {
+            dprintf(fd, "health_log_path=/tmp/foxml-health-test.jsonl\n");
+            dprintf(fd, "health_log_level=2\n");
+            close(fd);
+            ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(path);
+            check("v5.4.0p0.1: parses health_log_path",
+                  strcmp(cfg.health_log_path, "/tmp/foxml-health-test.jsonl") == 0);
+            check("v5.4.0p0.1: parses health_log_level",
+                  cfg.health_log_level == 2);
+            unlink(path);
+        } else {
+            check("v5.4.0p0.1: parses health_log_path", 0);
+            check("v5.4.0p0.1: parses health_log_level", 0);
+        }
+    }
+    {
+        // Smoke: configure HealthLog with a real path, log a line, read it back.
+        // Validates the end-to-end path: cfg → Health_LogConfigure → Health_Log → file.
+        char path[] = "/tmp/test_health_smoke_XXXXXX";
+        int fd = mkstemp(path);
+        if (fd >= 0) {
+            close(fd);
+            tt::Health_LogConfigure(path, tt::HEALTH_INFO);
+            int ok = tt::Health_Log(tt::HEALTH_INFO, "test", -1,
+                "key1=val1 key2=%d", 42);
+            check("v5.4.0p0.1: Health_Log returns ok=1 when configured", ok == 1);
+
+            FILE* f = fopen(path, "r");
+            int has_marker = 0, has_kv = 0;
+            if (f) {
+                char buf[1024] = {0};
+                size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+                fclose(f);
+                buf[n] = '\0';
+                has_marker = strstr(buf, "\"cat\":\"test\"") != NULL;
+                has_kv     = strstr(buf, "key1=val1 key2=42") != NULL;
+            }
+            check("v5.4.0p0.1: log file contains category marker", has_marker);
+            check("v5.4.0p0.1: log file contains formatted message", has_kv);
+
+            // Disable + verify subsequent calls become no-ops
+            tt::Health_LogConfigure("", 0);
+            int ok2 = tt::Health_Log(tt::HEALTH_INFO, "test", -1, "after disable");
+            check("v5.4.0p0.1: Health_Log returns 0 when disabled", ok2 == 0);
+
+            unlink(path);
+        } else {
+            check("v5.4.0p0.1: Health_Log returns ok=1 when configured", 0);
+            check("v5.4.0p0.1: log file contains category marker", 0);
+            check("v5.4.0p0.1: log file contains formatted message", 0);
+            check("v5.4.0p0.1: Health_Log returns 0 when disabled", 0);
         }
     }
 
