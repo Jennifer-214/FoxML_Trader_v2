@@ -1792,8 +1792,23 @@ inline void EventLoop_RebuildOneCore(
         //          5=min-stddev, 6=sl-cooldown, 7=warmup, 8=core-budget,
         //          9=core-kill, 10=book-imbalance (Track E.3)
         state->cores[slot].halt_reason = 0;
+        // v5.5.1 (Bug B-FLAT — addressed the "latent zero_gate bug" called out
+        // in the Track E.3 comment below). Pre-fix: zero_gate set
+        // bg_price_threshold = 0 to disable entries. This works for buy-below
+        // strategies (price < 0 is never true). For BUY_ABOVE (Momentum),
+        // BG_Evaluate's "price > 0" check is ALWAYS true, so zero_gate did
+        // not actually block momentum — entries fired on EVERY tick. Combined
+        // with the per-core budget cap zeroing trade_size, momentum cores
+        // emitted a stream of $0-qty entries that immediately exited at
+        // entry price (FLAT in trade history, $0 In/Out columns).
+        //
+        // Fix: also set GATE_FLAG_BUY_BLOCKED. The flag mechanism (Track E.3
+        // pattern) works for both directions. Keep the bg_price_threshold = 0
+        // write for backward compat with buy-below paths and for any
+        // downstream code that special-cases the zero threshold.
         auto zero_gate = [&](uint8_t reason) {
             state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
+            state->cores[slot].pending_params.flags |= GATE_FLAG_BUY_BLOCKED;
             if (state->cores[slot].halt_reason == 0)  // first reason wins
                 state->cores[slot].halt_reason = reason;
         };
