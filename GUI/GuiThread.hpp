@@ -28,6 +28,46 @@
 #include "StrategyQualityPanel.hpp"  // v5.7.6
 
 //==========================================================================
+// STATEFUL PANEL REGISTRY — v5.8.4b
+//==========================================================================
+// Single source of truth for the 4 stateful GUI panels. Each row carries
+// state struct type + uniform `_Init(state*, const char* path)` function
+// + init param (path or "" for panels that don't need one).
+//
+// Adding a stateful panel:
+//   1. Implement state struct + Panel_Init(state, path) + render fn
+//   2. Append one row here
+//   3. Recompile — declarations + init calls auto-generate
+//
+// Stateless panels (BuyGate, Market, Account, Positions, Risk, Stats —
+// the 10 panels that take only `snap` and have no per-frame state) keep
+// their direct GUI_Panel_X(snap) calls in the render loop; registry
+// would add no value there.
+//
+// Render dispatch is NOT in this registry — the 4 stateful render fns
+// have non-uniform signatures (TradeHistory takes (state*, int);
+// LogViewer takes (state*); Settings takes (state*, bool*, int, void*,
+// void*); StrategyQuality takes (state*, const char*)). Uniformizing
+// renders is a separate ship that subsumes the deferred render-thread
+// I/O cleanup.
+//
+// Row format: X(<var_id>, <state_type>, <init_fn>, <init_param_path>)
+//==========================================================================
+#define FOREACH_PANEL(X) \
+    X(trade_history,    TradeHistory,                 TradeHistory_Init,        "logging/btcusdt_order_history.csv") \
+    X(log_viewer,       LogViewer,                    LogViewer_Init,           "logging/engine.log") \
+    X(settings,         SettingsState,                Settings_Init,            "engine.cfg") \
+    X(strategy_quality, ::tt::StrategyQualityState,   ::tt::StrategyQuality_Init, "logging/health.jsonl")
+
+// Panel ID enum — for tests. Order matches FOREACH_PANEL row order.
+enum {
+#define X(var_id, state_type, init_fn, init_param) PANEL_##var_id,
+    FOREACH_PANEL(X)
+#undef X
+    NUM_STATEFUL_PANELS
+};
+
+//==========================================================================
 // GUI CONTEXT
 //==========================================================================
 struct GuiContext {
@@ -284,18 +324,13 @@ static inline void *gui_thread_fn(void *arg) {
     // chart display settings
     ChartSettings chart_settings;
 
-    // settings panel state
-    SettingsState settings = {};
-    strncpy(settings.cfg_path, "engine.cfg", 255);
-
-    // trade history + log viewer
-    TradeHistory trade_history;
-    TradeHistory_Init(&trade_history, "logging/btcusdt_order_history.csv");
-    LogViewer log_viewer;
-    LogViewer_Init(&log_viewer, "logging/engine.log");
-    // v5.7.6: strategy quality panel state — refresh-button-driven,
-    // reads health.jsonl on demand. Health log path comes from cfg.
-    tt::StrategyQualityState strategy_quality;
+    // v5.8.4b: 4 stateful panels declared + initialized via the
+    // FOREACH_PANEL(X) registry above. Adding a panel = 1 X-macro line.
+#define X(var_id, state_type, init_fn, init_param) \
+    state_type var_id; \
+    init_fn(&var_id, init_param);
+    FOREACH_PANEL(X)
+#undef X
 
     while (gui.running && !__atomic_load_n(&shared->quit_requested, __ATOMIC_ACQUIRE)) {
         if (!Gui_BeginFrame(&gui)) break;

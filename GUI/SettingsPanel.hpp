@@ -508,6 +508,21 @@ static inline int settings_strategy_name_to_id(const char *name) {
     return -1;
 }
 
+// v5.8.4b: uniform `void X_Init(StateT*, const char*)` signature for the
+// FOREACH_PANEL(X) registry in GuiThread.hpp. Settings has lazy file
+// load (Settings_Load fires on first GUI_Panel_Settings render when
+// !s->loaded), so Init's job is just: zero the struct + stash cfg_path
+// so Settings_Load knows where to read.
+static inline void Settings_Init(SettingsState *s, const char *cfg_path) {
+    *s = SettingsState{};
+    if (cfg_path) {
+        size_t n = strlen(cfg_path);
+        if (n >= sizeof(s->cfg_path)) n = sizeof(s->cfg_path) - 1;
+        memcpy(s->cfg_path, cfg_path, n);
+        s->cfg_path[n] = '\0';
+    }
+}
+
 static inline void Settings_Load(SettingsState *s) {
     // zero per-core overrides up front; populated below if cfg has them
     for (int c = 0; c < MAX_GUI_CORES; ++c) {

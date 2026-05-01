@@ -51,6 +51,15 @@ struct StrategyQualityState {
     StrategyQualityAggregate agg[NUM_STRATEGIES];
 };
 
+// v5.8.4b: uniform `void X_Init(StateT*, const char*)` signature for the
+// FOREACH_PANEL(X) registry. StrategyQuality state has default member
+// initializers and loads on-demand at the Refresh button — Init is
+// effectively a no-op zero-ensure. Path param is ignored (the actual
+// log path is passed at render time via GUI_Panel_StrategyQuality).
+static inline void StrategyQuality_Init(StrategyQualityState *s, const char* /*path_unused*/) {
+    *s = StrategyQualityState{};
+}
+
 // Parse "key=val" out of a log line msg. Returns 1 if key found and val
 // written into out (caller-supplied buffer). val is whitespace-terminated.
 inline int sq_parse_kv(const char* line, const char* key,
