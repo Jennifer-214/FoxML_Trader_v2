@@ -974,6 +974,26 @@ struct TUISnapshot {
                                         // entirely; if any future strategy enables the
                                         // VOLUME_REQUIRED flag, the operator could not
                                         // see why entries were blocked on volume.
+
+        // v5.6.3 — gate diagnostics. Each {actual, threshold} pair shows
+        // why a controller-level check passes or fails. Sourced from the
+        // SAME variable the controller reads (single-source rule —
+        // EXECUTION_DISPLAY_INVARIANTS.md). All values 0.0 when the
+        // corresponding check isn't running (cfg disabled or rolling
+        // not warmed). Display: green when actual passes threshold,
+        // red/yellow when fails.
+        double   diag_spacing_actual;     // current dist to last_entry_price
+        double   diag_spacing_floor;      // min_dist (stddev * spacing_multiplier)
+        double   diag_vwap_actual;        // current bg_price_threshold
+        double   diag_vwap_threshold;     // vwap - vwap*vwap_offset
+        double   diag_long_slope;         // long_rel_slope (price_slope / price_avg)
+        double   diag_long_slope_min;     // cfg.min_long_slope
+        double   diag_volume_delta;       // rolling.volume_delta
+        double   diag_volume_delta_min;   // cfg.min_buy_delta
+        double   diag_stddev_pct;         // rolling.price_stddev / rolling.price_avg
+        double   diag_stddev_pct_min;     // cfg.min_stddev_pct
+        double   diag_tp_pct_actual;      // out.tp_pct (set by strategy)
+        double   diag_tp_pct_floor;       // 3 * fee_rate_taker (fee-floor)
         // Phase 6prep sharded c16 — per-core ML observability. Populated only
         // for STRATEGY_ML cores by TUI_CopySnapshotSharded; non-ML cores leave
         // is_ml=0 and renderer skips them.

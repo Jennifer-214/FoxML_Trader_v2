@@ -711,6 +711,49 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     ImGui::TextColored(FoxmlColors::sand,
                         "  vol thr: %.4f", pc->bg_volume_threshold);
                 }
+                // v5.6.3: gate diagnostic comparands (single-source rule —
+                // values come from CoreContext::diag_*, captured by the
+                // controller's gate checks). Each pair shows actual vs
+                // threshold; green when actual passes, yellow/red when
+                // fails. Skip rows with both sides at zero (cfg disabled).
+                auto diag_row = [](const char* label, double actual,
+                                   double thr, bool greater_is_pass,
+                                   const char* fmt = "%.4f") {
+                    if (actual == 0.0 && thr == 0.0) return;
+                    bool pass = greater_is_pass ? (actual >= thr)
+                                                : (actual <= thr);
+                    auto col = pass ? FoxmlColors::green : FoxmlColors::yellow;
+                    ImGui::TextColored(FoxmlColors::sand, "    %s:", label);
+                    ImGui::SameLine();
+                    ImGui::TextColored(col, fmt, actual);
+                    ImGui::SameLine();
+                    ImGui::TextColored(FoxmlColors::comment, " / thr ");
+                    ImGui::SameLine();
+                    ImGui::Text(fmt, thr);
+                };
+                diag_row("spacing",  pc->diag_spacing_actual,
+                                      pc->diag_spacing_floor, true,  "%.2f");
+                diag_row("vwap",     pc->diag_vwap_actual,
+                                      pc->diag_vwap_threshold, false, "$%.2f");
+                diag_row("long-slope", pc->diag_long_slope,
+                                        pc->diag_long_slope_min, true, "%+.6f");
+                diag_row("vol-delta", pc->diag_volume_delta,
+                                       pc->diag_volume_delta_min, true, "%+.4f");
+                diag_row("stddev%",  pc->diag_stddev_pct,
+                                      pc->diag_stddev_pct_min, true, "%.4f");
+                // tp_pct vs fee floor — needs % formatting (display as bps).
+                if (pc->diag_tp_pct_actual != 0.0 || pc->diag_tp_pct_floor != 0.0) {
+                    bool tp_pass = pc->diag_tp_pct_actual >= pc->diag_tp_pct_floor;
+                    auto col = tp_pass ? FoxmlColors::green : FoxmlColors::yellow;
+                    ImGui::TextColored(FoxmlColors::sand, "    tp_pct:");
+                    ImGui::SameLine();
+                    ImGui::TextColored(col, "%.3f%%",
+                        pc->diag_tp_pct_actual * 100.0);
+                    ImGui::SameLine();
+                    ImGui::TextColored(FoxmlColors::comment, " / floor ");
+                    ImGui::SameLine();
+                    ImGui::Text("%.3f%%", pc->diag_tp_pct_floor * 100.0);
+                }
                 // ML extras
                 if (pc->is_ml) {
                     ImGui::TextColored(FoxmlColors::sand, "  ML:");

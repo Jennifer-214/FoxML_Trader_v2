@@ -378,6 +378,20 @@ static inline void TUI_CopySnapshotSharded(
         // for strategy-specific reasons (no uptrend, fee-floor BUY_BLOCKED,
         // ML below threshold, etc).
         snap->per_core[i].strategy_halt_reason   = state->cores[i].strategy_halt_reason;
+        // v5.6.3: copy gate diagnostic comparands. Captured by the
+        // controller's gate checks; converted FPN<F> → double here.
+        snap->per_core[i].diag_spacing_actual    = FPN_ToDouble(state->cores[i].diag_spacing_actual);
+        snap->per_core[i].diag_spacing_floor     = FPN_ToDouble(state->cores[i].diag_spacing_floor);
+        snap->per_core[i].diag_vwap_actual       = FPN_ToDouble(state->cores[i].diag_vwap_actual);
+        snap->per_core[i].diag_vwap_threshold    = FPN_ToDouble(state->cores[i].diag_vwap_threshold);
+        snap->per_core[i].diag_long_slope        = FPN_ToDouble(state->cores[i].diag_long_slope);
+        snap->per_core[i].diag_long_slope_min    = FPN_ToDouble(state->cores[i].diag_long_slope_min);
+        snap->per_core[i].diag_volume_delta      = FPN_ToDouble(state->cores[i].diag_volume_delta);
+        snap->per_core[i].diag_volume_delta_min  = FPN_ToDouble(state->cores[i].diag_volume_delta_min);
+        snap->per_core[i].diag_stddev_pct        = FPN_ToDouble(state->cores[i].diag_stddev_pct);
+        snap->per_core[i].diag_stddev_pct_min    = FPN_ToDouble(state->cores[i].diag_stddev_pct_min);
+        snap->per_core[i].diag_tp_pct_actual     = FPN_ToDouble(state->cores[i].diag_tp_pct_actual);
+        snap->per_core[i].diag_tp_pct_floor      = FPN_ToDouble(state->cores[i].diag_tp_pct_floor);
         snap->per_core[i].sl_cooldown_remaining  = state->cores[i].sl_cooldown_remaining;
         // v4.0.4: per-core P&L for Account panel breakdown
         snap->per_core[i].core_realized      = FPN_ToDouble(state->cores[i].core_realized);

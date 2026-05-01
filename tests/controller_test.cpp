@@ -8913,6 +8913,38 @@ e3_skip_load:;
               : true);
     }
 
+    printf("\n--- v5.6.3: gate diagnostic field plumbing ---\n");
+    {
+        // PerCoreSnap gains 12 diag_* fields (6 actual/threshold pairs).
+        // Compile-time enforced by struct layout; runtime asserts catch
+        // accidental field removal/rename.
+        TUISnapshot::PerCoreSnap pc{};
+        pc.diag_spacing_actual    = 1.0;
+        pc.diag_spacing_floor     = 2.0;
+        pc.diag_vwap_actual       = 100.0;
+        pc.diag_vwap_threshold    = 99.0;
+        pc.diag_long_slope        = 0.0001;
+        pc.diag_long_slope_min    = -0.0001;
+        pc.diag_volume_delta      = 0.5;
+        pc.diag_volume_delta_min  = 0.1;
+        pc.diag_stddev_pct        = 0.002;
+        pc.diag_stddev_pct_min    = 0.001;
+        pc.diag_tp_pct_actual     = 0.0014;
+        pc.diag_tp_pct_floor      = 0.0015;
+        check("v5.6.3: spacing diag fields populated",
+              pc.diag_spacing_actual == 1.0 && pc.diag_spacing_floor == 2.0);
+        check("v5.6.3: vwap diag fields populated",
+              pc.diag_vwap_actual == 100.0 && pc.diag_vwap_threshold == 99.0);
+        check("v5.6.3: long-slope diag fields populated (signed)",
+              pc.diag_long_slope > 0.0 && pc.diag_long_slope_min < 0.0);
+        check("v5.6.3: volume-delta diag fields populated",
+              pc.diag_volume_delta == 0.5 && pc.diag_volume_delta_min == 0.1);
+        check("v5.6.3: stddev_pct diag fields populated",
+              pc.diag_stddev_pct == 0.002);
+        check("v5.6.3: tp_pct diag — fee-floor scenario detectable",
+              pc.diag_tp_pct_actual < pc.diag_tp_pct_floor);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

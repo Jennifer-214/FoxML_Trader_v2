@@ -207,6 +207,24 @@ struct CoreContext {
     // or setting BUY_BLOCKED. SHALT_OK = no strategy-level veto.
     // GUI display order: halt_reason > 0 > strategy_halt_reason > 0.
     uint8_t  strategy_halt_reason;
+    // v5.6.3 — gate diagnostic comparands. Captured by the controller's
+    // post-Strategy_BuildParameters gate checks (spacing, vwap, long-slope,
+    // vol-delta, min-stddev) so the GUI can show actual vs threshold per
+    // gate without recomputing (single-source rule —
+    // EXECUTION_DISPLAY_INVARIANTS.md). Snapshot copies into PerCoreSnap
+    // diag_* fields. Reset by the rebuild loop before each pass.
+    FPN<F> diag_spacing_actual;     // |bg_threshold - last_entry|
+    FPN<F> diag_spacing_floor;      // stddev * spacing_multiplier
+    FPN<F> diag_vwap_actual;        // bg_price_threshold
+    FPN<F> diag_vwap_threshold;     // vwap - vwap*vwap_offset
+    FPN<F> diag_long_slope;         // long_rel_slope
+    FPN<F> diag_long_slope_min;     // cfg.min_long_slope
+    FPN<F> diag_volume_delta;       // rolling.volume_delta
+    FPN<F> diag_volume_delta_min;   // cfg.min_buy_delta
+    FPN<F> diag_stddev_pct;         // rolling.price_stddev / rolling.price_avg
+    FPN<F> diag_stddev_pct_min;     // cfg.min_stddev_pct
+    FPN<F> diag_tp_pct_actual;      // out.tp_pct
+    FPN<F> diag_tp_pct_floor;       // 3 * fee_rate_taker
     // v4.0.3 B: per-core regime state for STRATEGY_AUTO. Tracks current
     // regime + hysteresis so the auto-mode core's strategy choice doesn't
     // flap on noise. Each AUTO core has its own state — different cores
@@ -2014,6 +2032,19 @@ inline void EventLoop_RebuildOneCore(
                     resolved_cfg.spike_spacing_reduction);
             }
         }
+        // v5.6.3: capture spacing comparands for GUI diagnostic readout.
+        // Single-source rule — these are the SAME values
+        // Strategy_SpacingOk reads internally, exposed for display.
+        {
+            FPN<F> a = state->cores[slot].pending_params.bg_price_threshold;
+            FPN<F> b = state->cores[slot].last_entry_price;
+            FPN<F> abs_dist = FPN_GreaterThanOrEqual(a, b)
+                ? FPN_Sub(a, b) : FPN_Sub(b, a);
+            FPN<F> min_dist = FPN_Mul(rolling->price_stddev,
+                                       spacing_cfg.spacing_multiplier);
+            state->cores[slot].diag_spacing_actual = abs_dist;
+            state->cores[slot].diag_spacing_floor  = min_dist;
+        }
         if (!Strategy_SpacingOk(state->cores[slot].pending_params.bg_price_threshold,
                                  state->cores[slot].last_entry_price,
                                  rolling, &spacing_cfg)) {
@@ -2023,6 +2054,10 @@ inline void EventLoop_RebuildOneCore(
         if (!FPN_IsZero(resolved_cfg.vwap_offset) && !FPN_IsZero(rolling->vwap)) {
             FPN<F> vwap_threshold = FPN_Sub(rolling->vwap,
                 FPN_Mul(rolling->vwap, resolved_cfg.vwap_offset));
+            // v5.6.3: capture both sides for GUI.
+            state->cores[slot].diag_vwap_actual    =
+                state->cores[slot].pending_params.bg_price_threshold;
+            state->cores[slot].diag_vwap_threshold = vwap_threshold;
             if (FPN_GreaterThan(state->cores[slot].pending_params.bg_price_threshold,
                                  vwap_threshold)) {
                 zero_gate(2);
@@ -2033,22 +2068,47 @@ inline void EventLoop_RebuildOneCore(
             !FPN_IsZero(rolling_long->price_avg)) {
             FPN<F> long_rel_slope = FPN_DivNoAssert(rolling_long->price_slope,
                                                      rolling_long->price_avg);
+            // v5.6.3: capture for GUI.
+            state->cores[slot].diag_long_slope     = long_rel_slope;
+            state->cores[slot].diag_long_slope_min = resolved_cfg.min_long_slope;
             if (FPN_LessThan(long_rel_slope, resolved_cfg.min_long_slope)) {
                 zero_gate(3);
             }
         }
         // VOLUME DELTA gate: blocks heavy dumps.
-        if (!FPN_IsZero(resolved_cfg.min_buy_delta) &&
-            FPN_LessThan(rolling->volume_delta, resolved_cfg.min_buy_delta)) {
-            zero_gate(4);
+        if (!FPN_IsZero(resolved_cfg.min_buy_delta)) {
+            // v5.6.3: capture both sides regardless of pass/fail so the
+            // GUI shows current state (display invariant: always show
+            // when cfg enabled).
+            state->cores[slot].diag_volume_delta     = rolling->volume_delta;
+            state->cores[slot].diag_volume_delta_min = resolved_cfg.min_buy_delta;
+            if (FPN_LessThan(rolling->volume_delta, resolved_cfg.min_buy_delta)) {
+                zero_gate(4);
+            }
         }
         // MIN STDDEV gate: skip dead markets.
         if (!FPN_IsZero(resolved_cfg.min_stddev_pct) && !FPN_IsZero(rolling->price_avg)) {
             FPN<F> stddev_ratio = FPN_DivNoAssert(rolling->price_stddev,
                                                     rolling->price_avg);
+            // v5.6.3: capture for GUI.
+            state->cores[slot].diag_stddev_pct     = stddev_ratio;
+            state->cores[slot].diag_stddev_pct_min = resolved_cfg.min_stddev_pct;
             if (FPN_LessThan(stddev_ratio, resolved_cfg.min_stddev_pct)) {
                 zero_gate(5);
             }
+        }
+        // v5.6.3: capture tp_pct + fee floor for GUI. Same formula as
+        // the dispatcher's fee-floor BUY_BLOCKED path
+        // (StrategyParameters.hpp:875-895). Capture here so the
+        // collapsing-header readout shows actual vs floor regardless
+        // of whether BUY_BLOCKED fired.
+        {
+            FPN<F> fee_taker = !FPN_IsZero(resolved_cfg.fee_rate_taker)
+                ? resolved_cfg.fee_rate_taker : resolved_cfg.fee_rate;
+            state->cores[slot].diag_tp_pct_actual =
+                state->cores[slot].pending_params.tp_pct;
+            state->cores[slot].diag_tp_pct_floor =
+                FPN_Mul(fee_taker, FPN_FromDouble<F>(3.0));
         }
         // FEE FLOOR: ratchet TP up so it clears at least
         // entry × fee_rate × fee_floor_mult. Round-trip fees are 2×fee_rate,
