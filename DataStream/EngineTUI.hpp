@@ -937,9 +937,63 @@ struct TUISnapshot {
                                         // non-AUTO. STRATEGY_NONE if AUTO hasn't resolved yet.
         uint8_t  halt_reason;          // v4.0.4: per-core halt reason (0=ok, 1=spacing,
                                         // 2=vwap, 3=long-slope, 4=vol-delta, 5=min-stddev,
-                                        // 6=sl-cooldown). Source: CoreContext::halt_reason.
+                                        // 6=sl-cooldown, 7=warmup, 8=core-budget,
+                                        // 9=core-kill, 10=imbalance — v5.6.0 added 10).
+                                        // Source: CoreContext::halt_reason. Names array
+                                        // in DashboardPanels.hpp must stay in sync; bound
+                                        // check is sizeof(halt_names)/sizeof(halt_names[0]).
+        uint8_t  strategy_halt_reason; // v5.6.2: strategy-internal halt reason. Codes
+                                        // defined in StrategyInterface.hpp (SHALT_*).
+                                        // Set by strategy _BuildParameters before
+                                        // Gate_Zero / BUY_BLOCKED. Display priority:
+                                        // halt_reason > 0 wins; else this; else
+                                        // gate_flags & BUY_BLOCKED; else "no signal".
+        uint8_t  gate_flags;           // v5.6.0: snapshot of cached_params.flags so the
+                                        // GUI can render BUY_BLOCKED / VOLUME_REQUIRED /
+                                        // TP_ENABLED / SL_ENABLED / BUY_ABOVE / PAIR_ACTIVE.
+                                        // See EXECUTION_DISPLAY_INVARIANTS.md for the
+                                        // predicate↔display matrix.
+        uint8_t  permission;           // v5.6.1: snapshot of core->permission atomic
+                                        // (acquire load). 0 = entries forbidden (startup
+                                        // gate, kill-switch trip, AUTO unresolved). 1 =
+                                        // entries allowed. Without this surface, a
+                                        // kill-tripped core can show READY in the top
+                                        // table — the kill state is visible only on the
+                                        // separate Risk panel.
+        uint8_t  bitmap_consistency;   // v5.6.1: 1 if (positions[i].idx >= 0) ==
+                                        // (core->active | core->active_b), 0 if drift.
+                                        // A 0 here = display↔execution divergence
+                                        // (Class 2 / 2c bug) and is logged via cat=gate
+                                        // health entry. Steady state should always be 1.
         uint32_t sl_cooldown_remaining;// v4.0.4: per-core SL cooldown counter
         double   buy_gate_price;       // current buy gate threshold (for chart overlay)
+        double   bg_volume_threshold;  // v5.6.1: cached_params.bg_volume_threshold —
+                                        // shown in collapsing header alongside the price
+                                        // gate. Active only when GATE_FLAG_VOLUME_REQUIRED
+                                        // is set in gate_flags. Pre-v5.6 unsurfaced
+                                        // entirely; if any future strategy enables the
+                                        // VOLUME_REQUIRED flag, the operator could not
+                                        // see why entries were blocked on volume.
+
+        // v5.6.3 — gate diagnostics. Each {actual, threshold} pair shows
+        // why a controller-level check passes or fails. Sourced from the
+        // SAME variable the controller reads (single-source rule —
+        // EXECUTION_DISPLAY_INVARIANTS.md). All values 0.0 when the
+        // corresponding check isn't running (cfg disabled or rolling
+        // not warmed). Display: green when actual passes threshold,
+        // red/yellow when fails.
+        double   diag_spacing_actual;     // current dist to last_entry_price
+        double   diag_spacing_floor;      // min_dist (stddev * spacing_multiplier)
+        double   diag_vwap_actual;        // current bg_price_threshold
+        double   diag_vwap_threshold;     // vwap - vwap*vwap_offset
+        double   diag_long_slope;         // long_rel_slope (price_slope / price_avg)
+        double   diag_long_slope_min;     // cfg.min_long_slope
+        double   diag_volume_delta;       // rolling.volume_delta
+        double   diag_volume_delta_min;   // cfg.min_buy_delta
+        double   diag_stddev_pct;         // rolling.price_stddev / rolling.price_avg
+        double   diag_stddev_pct_min;     // cfg.min_stddev_pct
+        double   diag_tp_pct_actual;      // out.tp_pct (set by strategy)
+        double   diag_tp_pct_floor;       // 3 * fee_rate_taker (fee-floor)
         // Phase 6prep sharded c16 — per-core ML observability. Populated only
         // for STRATEGY_ML cores by TUI_CopySnapshotSharded; non-ML cores leave
         // is_ml=0 and renderer skips them.

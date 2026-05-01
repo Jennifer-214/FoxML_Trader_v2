@@ -4,7 +4,7 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 
 **Re-generate**: `./tools/gen_code_map.sh`
 
-**Last regenerated**: 2026-04-30 (commit d1ba41d)
+**Last regenerated**: 2026-04-30 (commit 3337cc0)
 
 ## CoreFrameworks/
 
@@ -22,55 +22,55 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 
 ### ControllerConfig.hpp
 
-- `Fee_Compute` — line 578
-- `ControllerConfig_ResolveForCore` — line 596
-- `ControllerConfig_Load` — line 860
+- `Fee_Compute` — line 597
+- `ControllerConfig_ResolveForCore` — line 615
+- `ControllerConfig_Load` — line 888
 
 ### ControllerEventLoop.hpp
 
 - `CoreSlowState_Init` — line 121
-- `EventLoopState_Init` — line 436
-- `EventLoopState_InitLegacy` — line 535
-- `EventLoopState_Free` — line 566
-- `EventLoopState_RegisterCore` — line 602
-- `Sharded_LegSlot` — line 652 — All slow-path / boot-time. Trivially inlined.
-- `Sharded_ValidatePartialExitCfg` — line 689
-- `EventLoopState_SetCoreStrategy` — line 741
-- `EventLoopState_AttachTradeLog` — line 761
-- `EventLoopState_AttachOms` — line 775
-- `EventLoopState_Balance` — line 793
-- `EventLoopState_RealizedPnl` — line 798
-- `EventLoopState_FeeRate` — line 803
-- `EventLoopState_Portfolio` — line 808
-- `EventLoopState_PortfolioMut` — line 813
-- `EventLoopState_KsMinBalance` — line 818
-- `EventLoopState_KsMaxDrawdownPct` — line 823
-- `EventLoopState_KsPeakBalance` — line 828
-- `EventLoopState_TradeLog` — line 843
-- `EventLoopState_SetIntendedParams` — line 858
-- `EventLoop_DrainPostFillOneCore` — line 913
-- `EventLoop_DrainPostFill` — line 1035
-- `EventLoop_OnEvent` — line 1069
-- `EventLoop_DrainEvents` — line 1229
-- `EventLoop_QueueParameters` — line 1263
-- `EventLoop_RebuildAllParameters` — line 1296
-- `EventLoop_UpdateRollingStateOneCore` — line 1385
-- `EventLoop_UpdateRollingStateAllCores` — line 1423
-- `EventLoop_UpdateEmaPriceAllCores` — line 1439
-- `EventLoop_RebuildAllParameters_PerCore` — line 1457
-- `EventLoop_RebuildOneCore` — line 1496
-- `EventLoop_PushParameters` — line 2086
-- `EventLoopState_ConfigureKillSwitch` — line 2116
-- `EventLoop_ClearAllPermissions` — line 2126
-- `EventLoop_KillSwitchTrip` — line 2137
-- `EventLoop_KillSwitchEvaluate` — line 2165
-- `EventLoop_TimeExitOneCore` — line 2238
-- `EventLoop_TimeExit` — line 2297
-- `EventLoop_TrailingSLRatchetOneCore` — line 2333
-- `EventLoop_TrailingSLRatchet` — line 2390
-- `EventLoop_Unpause` — line 2405
-- `EventLoop_SlowPath` — line 2428
-- `EventLoop_RunController` — line 2453
+- `EventLoopState_Init` — line 470
+- `EventLoopState_InitLegacy` — line 573
+- `EventLoopState_Free` — line 604
+- `EventLoopState_RegisterCore` — line 640
+- `Sharded_LegSlot` — line 690 — All slow-path / boot-time. Trivially inlined.
+- `Sharded_ValidatePartialExitCfg` — line 727
+- `EventLoopState_SetCoreStrategy` — line 779
+- `EventLoopState_AttachTradeLog` — line 799
+- `EventLoopState_AttachOms` — line 813
+- `EventLoopState_Balance` — line 831
+- `EventLoopState_RealizedPnl` — line 836
+- `EventLoopState_FeeRate` — line 841
+- `EventLoopState_Portfolio` — line 846
+- `EventLoopState_PortfolioMut` — line 851
+- `EventLoopState_KsMinBalance` — line 856
+- `EventLoopState_KsMaxDrawdownPct` — line 861
+- `EventLoopState_KsPeakBalance` — line 866
+- `EventLoopState_TradeLog` — line 881
+- `EventLoopState_SetIntendedParams` — line 896
+- `EventLoop_DrainPostFillOneCore` — line 951
+- `EventLoop_DrainPostFill` — line 1128
+- `EventLoop_OnEvent` — line 1162
+- `EventLoop_DrainEvents` — line 1322
+- `EventLoop_QueueParameters` — line 1356
+- `EventLoop_RebuildAllParameters` — line 1389
+- `EventLoop_UpdateRollingStateOneCore` — line 1478
+- `EventLoop_UpdateRollingStateAllCores` — line 1516
+- `EventLoop_UpdateEmaPriceAllCores` — line 1532
+- `EventLoop_RebuildAllParameters_PerCore` — line 1550
+- `EventLoop_RebuildOneCore` — line 1589
+- `EventLoop_PushParameters` — line 2263
+- `EventLoopState_ConfigureKillSwitch` — line 2293
+- `EventLoop_ClearAllPermissions` — line 2303
+- `EventLoop_KillSwitchTrip` — line 2314
+- `EventLoop_KillSwitchEvaluate` — line 2342
+- `EventLoop_TimeExitOneCore` — line 2415
+- `EventLoop_TimeExit` — line 2474
+- `EventLoop_TrailingSLRatchetOneCore` — line 2510
+- `EventLoop_TrailingSLRatchet` — line 2567
+- `EventLoop_Unpause` — line 2582
+- `EventLoop_SlowPath` — line 2605
+- `EventLoop_RunController` — line 2630
 
 ### CoreLatencyStats.hpp
 
@@ -283,10 +283,10 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 - `TickRate_Push` — line 171
 - `TickRate_CurrentZ` — line 198
 - `Regime_ComputeSignals` — line 222
-- `Regime_Init` — line 468
-- `Regime_Classify` — line 498
-- `Regime_ToStrategy` — line 647
-- `Regime_AdjustPositions` — line 665
+- `Regime_Init` — line 475
+- `Regime_Classify` — line 507
+- `Regime_ToStrategy` — line 661
+- `Regime_AdjustPositions` — line 679
 
 ### SimpleDip.hpp
 
@@ -390,15 +390,15 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 - `TUI_Render` — line 185
 - `TUI_HandleInput` — line 571
 - `MLSnapshot_Populate` — line 691
-- `TUI_CopySnapshot` — line 1056
-- `TUI_CopySnapshot` — line 1062
-- `TUI_CopySnapshot` — line 1069
-- `TUI_PopulatePerCoreLatency` — line 1329
-- `TUI_PopulatePerCoreSlowPathLatency` — line 1376
-- `TUI_PopulateAdvancedTopology` — line 1414
-- `TUI_PopulateTopology` — line 1451 — poll_interval[i]    — per-core resolved poll cadence
-- `TUI_Render_Snapshot` — line 1489 — runs on TUI thread. reads only from snapshot (all doubles, no FPN).
-- `TUI_ReadKey` — line 1700
+- `TUI_CopySnapshot` — line 1110
+- `TUI_CopySnapshot` — line 1116
+- `TUI_CopySnapshot` — line 1123
+- `TUI_PopulatePerCoreLatency` — line 1383
+- `TUI_PopulatePerCoreSlowPathLatency` — line 1430
+- `TUI_PopulateAdvancedTopology` — line 1468
+- `TUI_PopulateTopology` — line 1505 — poll_interval[i]    — per-core resolved poll cadence
+- `TUI_Render_Snapshot` — line 1543 — runs on TUI thread. reads only from snapshot (all doubles, no FPN).
+- `TUI_ReadKey` — line 1754
 
 ### FauxFIX.hpp
 
@@ -635,14 +635,14 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 - `GUI_Panel_TopBar` — line 195 — PANEL: TOP BAR — key metrics at a glance
 - `GUI_Panel_Market` — line 232 — PANEL: MARKET (merged Market Structure + Regime Signals)
 - `GUI_Panel_BuyGate` — line 438 — PANEL: BUY GATE
-- `GUI_Panel_Account` — line 692 — PANEL: ACCOUNT (merged Portfolio + P&L + Risk)
-- `GUI_Panel_Config` — line 912 — PANEL: CONFIG
-- `GUI_Panel_Positions` — line 960 — PANEL: POSITIONS — proper table with aligned columns
-- `GUI_Panel_PerCorePnL` — line 1216 — Pure GUI thread, doesn't touch engine state.
-- `GUI_Panel_Stats` — line 1312 — PANEL: STATS
-- `GUI_Panel_Latency` — line 1400 — PANEL: LATENCY (conditional on LATENCY_PROFILING)
-- `GUI_Panel_MLIntelligence` — line 1456 — PANEL: ML INTELLIGENCE — bandit arms, confidence, cost, model info
-- `GUI_RenderDashboard` — line 1623
+- `GUI_Panel_Account` — line 872 — PANEL: ACCOUNT (merged Portfolio + P&L + Risk)
+- `GUI_Panel_Config` — line 1092 — PANEL: CONFIG
+- `GUI_Panel_Positions` — line 1140 — PANEL: POSITIONS — proper table with aligned columns
+- `GUI_Panel_PerCorePnL` — line 1423 — Pure GUI thread, doesn't touch engine state.
+- `GUI_Panel_Stats` — line 1519 — PANEL: STATS
+- `GUI_Panel_Latency` — line 1607 — PANEL: LATENCY (conditional on LATENCY_PROFILING)
+- `GUI_Panel_MLIntelligence` — line 1663 — PANEL: ML INTELLIGENCE — bandit arms, confidence, cost, model info
+- `GUI_RenderDashboard` — line 1830
 
 ### FoxmlTheme.hpp
 
@@ -650,12 +650,12 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 
 ### GuiThread.hpp
 
-- `Gui_Init` — line 41 — GUI INIT
-- `Gui_Shutdown` — line 147 — GUI SHUTDOWN
-- `Gui_BeginFrame` — line 160 — GUI FRAME
-- `Gui_EndFrame` — line 184
-- `Gui_SetupDefaultLayout` — line 199 — chart 60% left, dashboard panels stacked 40% right
-- `Gui_HandleKeys` — line 249 — GUI KEYBOARD — same controls as ANSI TUI
+- `Gui_Init` — line 42 — GUI INIT
+- `Gui_Shutdown` — line 148 — GUI SHUTDOWN
+- `Gui_BeginFrame` — line 161 — GUI FRAME
+- `Gui_EndFrame` — line 185
+- `Gui_SetupDefaultLayout` — line 200 — chart 60% left, dashboard panels stacked 40% right
+- `Gui_HandleKeys` — line 250 — GUI KEYBOARD — same controls as ANSI TUI
 
 ### LogViewerPanel.hpp
 
@@ -669,6 +669,11 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 - `Settings_RenderGlobalTab` — line 652 — GLOBAL TAB — renders the auto-generated field_defs[] layout
 - `Settings_RenderPerCoreTab` — line 789
 - `GUI_Panel_Settings` — line 981 — running cores, not cfg-only intent — engine doesn't add/remove cores live.
+
+### StrategyQualityPanel.hpp
+
+- `StrategyQuality_Refresh` — line 138
+- `GUI_Panel_StrategyQuality` — line 215
 
 ### TradeHistoryPanel.hpp
 

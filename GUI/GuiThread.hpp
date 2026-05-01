@@ -25,6 +25,7 @@
 #include "SettingsPanel.hpp"
 #include "TradeHistoryPanel.hpp"
 #include "LogViewerPanel.hpp"
+#include "StrategyQualityPanel.hpp"  // v5.7.6
 
 //==========================================================================
 // GUI CONTEXT
@@ -292,6 +293,9 @@ static inline void *gui_thread_fn(void *arg) {
     TradeHistory_Init(&trade_history, "logging/btcusdt_order_history.csv");
     LogViewer log_viewer;
     LogViewer_Init(&log_viewer, "logging/engine.log");
+    // v5.7.6: strategy quality panel state — refresh-button-driven,
+    // reads health.jsonl on demand. Health log path comes from cfg.
+    tt::StrategyQualityState strategy_quality;
 
     while (gui.running && !__atomic_load_n(&shared->quit_requested, __ATOMIC_ACQUIRE)) {
         if (!Gui_BeginFrame(&gui)) break;
@@ -351,6 +355,12 @@ static inline void *gui_thread_fn(void *arg) {
                            shared, snap);
         GUI_Panel_TradeHistory(&trade_history, snap->partial_exit_enabled);
         GUI_Panel_LogViewer(&log_viewer);
+        // v5.7.6: strategy quality dashboard. Reads logging/health.jsonl
+        // on Refresh button click — same path convention as trade_history.
+        // Operator must have set health_log_path in engine.cfg for entry/
+        // exit lines to exist; the panel surfaces a hint if the file is
+        // missing or empty.
+        tt::GUI_Panel_StrategyQuality(&strategy_quality, "logging/health.jsonl");
 
         Gui_EndFrame(&gui);
     }

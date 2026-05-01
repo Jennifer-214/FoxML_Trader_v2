@@ -106,4 +106,66 @@ static const int REGIME_STRATEGY_TABLE[] = {
     STRATEGY_EMA_CROSS,       // MILD_TREND (4)
 };
 
+//======================================================================================================
+// [STRATEGY HALT REASON CODES — v5.6.2]
+//======================================================================================================
+// Distinct from CoreContext::halt_reason (controller-level halts:
+// spacing, vwap, long-slope, vol-delta, min-stddev, sl-cooldown,
+// warmup, core-budget, core-kill, imbalance — set in
+// ControllerEventLoop.hpp:1812-1814).
+//
+// strategy_halt_reason captures STRATEGY-INTERNAL vetoes — the
+// reasons a strategy zero-gates or sets BUY_BLOCKED before the
+// controller-level checks run. Each strategy's _BuildParameters
+// MUST set strategy_halt_reason before Gate_Zero or BUY_BLOCKED
+// is set in `out`. Reset to SHALT_OK at the top of each rebuild.
+//
+// Display priority in the GUI: controller halt_reason > 0 wins;
+// else strategy_halt_reason > 0 wins; else gate_flags & BUY_BLOCKED;
+// else "no signal".
+//
+// Adding a new SHALT code: append here, append to shalt_names[]
+// in DashboardPanels.hpp, and update the bound assertion in
+// controller_test.cpp (EXECUTION_DISPLAY section).
+//======================================================================================================
+constexpr uint8_t SHALT_OK             = 0;
+constexpr uint8_t SHALT_NO_UPTREND     = 1;  // EmaCross / MeanReversion long-trend gate
+constexpr uint8_t SHALT_NO_MEAN_REV    = 2;  // MeanReversion vwap_ok / long_ok / delta_ok
+constexpr uint8_t SHALT_FEE_FLOOR      = 3;  // dispatcher fee-floor BUY_BLOCKED (TP < 3 * fee_taker)
+constexpr uint8_t SHALT_COST_GATE      = 4;  // dispatcher cost-gate BUY_BLOCKED (CostModel)
+constexpr uint8_t SHALT_STDDEV_ZERO    = 5;  // any strategy on dead market (rolling.stddev == 0)
+constexpr uint8_t SHALT_NO_BREAKOUT    = 6;  // Momentum: price hasn't broken above threshold
+constexpr uint8_t SHALT_ML_NO_PRED     = 7;  // ML: zoo unloaded or no inference output
+constexpr uint8_t SHALT_ML_BELOW_THR   = 8;  // ML: prediction below trigger threshold
+constexpr uint8_t SHALT_LOW_CONFIDENCE = 9;  // ConfidenceScorer veto
+constexpr uint8_t SHALT_NO_SIGNAL      = 10; // catch-all for strategy zero-gates that
+                                              // didn't set a more specific code
+// v5.7.5 — MOM-specific quality filter SHALT codes. All gated cfg-side
+// (momentum_min_* fields default 0/off, preserving pre-v5.7 behavior).
+constexpr uint8_t SHALT_MOM_TP_TOO_TIGHT = 11; // momentum_min_tp_margin_pct unmet
+constexpr uint8_t SHALT_MOM_NO_FLOW      = 12; // momentum_min_buy_delta_recent unmet
+constexpr uint8_t SHALT_MOM_LOW_R2       = 13; // momentum_min_r2 unmet
+constexpr uint8_t SHALT_MOM_LAST_LOST    = 14; // momentum_require_last_win + last exit was loss
+constexpr uint8_t SHALT_MAX              = 14; // highest valid code (test bound)
+
+// Names for display, indexed by SHALT_*. Keep in sync with
+// shalt_names[] mirror in DashboardPanels.hpp.
+static const char* SHALT_SHORT_NAMES[] = {
+    "ok",            // 0
+    "no-uptrend",    // 1
+    "no-mean-rev",   // 2
+    "fee-floor",     // 3
+    "cost-gate",     // 4
+    "stddev-zero",   // 5
+    "no-breakout",   // 6
+    "ml-no-pred",    // 7
+    "ml-below-thr",  // 8
+    "low-confidence",// 9
+    "no-signal",     // 10
+    "mom:tp-tight",  // 11 SHALT_MOM_TP_TOO_TIGHT
+    "mom:no-flow",   // 12 SHALT_MOM_NO_FLOW
+    "mom:low-r2",    // 13 SHALT_MOM_LOW_R2
+    "mom:last-lost", // 14 SHALT_MOM_LAST_LOST
+};
+
 #endif // STRATEGY_INTERFACE_HPP

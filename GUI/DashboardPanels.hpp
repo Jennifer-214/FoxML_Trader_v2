@@ -456,6 +456,43 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                                            //   = transparent black, making any
                                            //   AUTO core's row invisible)
         };
+        // v5.6.0: halt_names + the BUY_BLOCKED flag bit are needed by both
+        // the top-table Status column AND the collapsing-header detail block,
+        // so declare here at panel scope rather than inside the second loop.
+        // Codes 0..10 must stay in sync with EngineTUI.hpp's halt_reason
+        // comment + ControllerEventLoop.hpp:1812-1814.
+        static const char* halt_names[] = {
+            "ok", "spacing", "vwap", "long-slope", "vol-delta",
+            "min-stddev", "sl-cooldown", "warmup", "core-budget", "core-kill",
+            "imbalance"
+        };
+        constexpr int halt_names_count =
+            (int)(sizeof(halt_names) / sizeof(halt_names[0]));
+        // v5.6.2/v5.7.5: SHALT_* names for strategy-internal halt reasons.
+        // Mirror of SHALT_SHORT_NAMES in StrategyInterface.hpp — keep in sync.
+        static const char* shalt_names[] = {
+            "ok",            // SHALT_OK = 0
+            "no-uptrend",    // SHALT_NO_UPTREND = 1
+            "no-mean-rev",   // SHALT_NO_MEAN_REV = 2
+            "fee-floor",     // SHALT_FEE_FLOOR = 3
+            "cost-gate",     // SHALT_COST_GATE = 4
+            "stddev-zero",   // SHALT_STDDEV_ZERO = 5
+            "no-breakout",   // SHALT_NO_BREAKOUT = 6
+            "ml-no-pred",    // SHALT_ML_NO_PRED = 7
+            "ml-below-thr",  // SHALT_ML_BELOW_THR = 8
+            "low-confidence",// SHALT_LOW_CONFIDENCE = 9
+            "no-signal",     // SHALT_NO_SIGNAL = 10
+            "mom:tp-tight", // SHALT_MOM_TP_TOO_TIGHT = 11
+            "mom:no-flow",  // SHALT_MOM_NO_FLOW = 12
+            "mom:low-r2",   // SHALT_MOM_LOW_R2 = 13
+            "mom:last-lost",// SHALT_MOM_LAST_LOST = 14
+        };
+        constexpr int shalt_names_count =
+            (int)(sizeof(shalt_names) / sizeof(shalt_names[0]));
+        constexpr uint8_t GUI_GATE_FLAG_BUY_BLOCKED = 0x20;  // mirrors
+            // GateParameters.hpp:61. Display-side mirror keeps the GUI
+            // module from needing CoreFrameworks/ headers; checked by
+            // EXECUTION_DISPLAY_INVARIANTS.md test for value parity.
         ImGuiTableFlags tf = ImGuiTableFlags_BordersInnerV |
                               ImGuiTableFlags_RowBg |
                               ImGuiTableFlags_SizingStretchProp;
@@ -504,13 +541,66 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     ImGui::TextColored(FoxmlColors::comment, "—");
                 }
                 ImGui::TableNextColumn();
-                // Per-core direction (MOM = >=, everything else = <=).
-                if (gate_p < 0.01) {
-                    ImGui::TextColored(FoxmlColors::yellow, "off");
+                // v5.6.0: Status column priority chain — every hot-path
+                // BG_Evaluate term gets a surface here. Order matters
+                // (most-informative wins). See EXECUTION_DISPLAY_INVARIANTS.md.
+                //
+                // Hot path: bg_fires = price_ok & volume_check & ~blocked
+                //           can_enter = ~any_active & permission & bg_fires
+                //
+                // Display priority:
+                //   1. in pos          (any_active = 1; positions snapshot)
+                //   2. blocked         (BUY_BLOCKED flag set, hot path refuses)
+                //   3. off: <halt>     (gate zeroed by controller, halt code set)
+                //   4. off: no signal  (gate zeroed by strategy, no halt code —
+                //                       v5.6.2 will replace with strategy_halt_reason)
+                //   5. wait            (gate live, price hasn't crossed)
+                //   6. READY           (price crossed, no other blocker)
+                const auto *pc = &s->per_core[i];
+                // v5.6.1: priority chain extended for permission + bitmap
+                // drift. Permission=0 means the hot path will refuse
+                // entries regardless of price/flags (kill switch trip,
+                // startup gate). Bitmap drift means GUI and hot path
+                // disagree on any_active — flagged for diagnosis.
+                if (!pc->bitmap_consistency) {
+                    ImGui::TextColored(FoxmlColors::red,
+                        "DRIFT (bitmap)");
                 } else if (s->positions[i].idx >= 0) {
                     ImGui::TextColored(FoxmlColors::comment, "in pos");
+                } else if (pc->permission == 0) {
+                    ImGui::TextColored(FoxmlColors::yellow, "PERM_OFF");
+                } else if (pc->gate_flags & GUI_GATE_FLAG_BUY_BLOCKED) {
+                    // v5.6.2: prefer the specific SHALT code (fee-floor /
+                    // cost-gate) over generic "blocked" when set.
+                    if (pc->strategy_halt_reason > 0 &&
+                        pc->strategy_halt_reason < shalt_names_count) {
+                        ImGui::TextColored(FoxmlColors::yellow,
+                            "blocked: %s",
+                            shalt_names[pc->strategy_halt_reason]);
+                    } else {
+                        ImGui::TextColored(FoxmlColors::yellow, "blocked");
+                    }
+                } else if (pc->halt_reason > 0 &&
+                           pc->halt_reason < halt_names_count) {
+                    ImGui::TextColored(FoxmlColors::yellow,
+                        "off: %s", halt_names[pc->halt_reason]);
+                } else if (pc->strategy_halt_reason > 0 &&
+                           pc->strategy_halt_reason < shalt_names_count) {
+                    // v5.6.2: strategy zero-gated for a strategy-internal
+                    // reason that didn't go through BUY_BLOCKED. Today
+                    // only SHALT_NO_SIGNAL lands here; future per-strategy
+                    // codes (NO_UPTREND, NO_MEAN_REV, etc) will too.
+                    ImGui::TextColored(FoxmlColors::yellow,
+                        "off: %s", shalt_names[pc->strategy_halt_reason]);
+                } else if (gate_p < 0.01) {
+                    // Catch-all when neither halt_reason nor strategy_halt_reason
+                    // is set but threshold is zero — should not happen post-v5.6.2
+                    // (SHALT_NO_SIGNAL is the post-pass fallback). If you see this,
+                    // a code path is producing a zero gate without setting any
+                    // reason — treat as drift.
+                    ImGui::TextColored(FoxmlColors::yellow, "off: ???");
                 } else {
-                    int price_ok = s->per_core[i].gate_direction
+                    int price_ok = pc->gate_direction
                         ? (s->price >= gate_p)
                         : (s->price <= gate_p);
                     if (price_ok)
@@ -525,11 +615,9 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
 
         // v4.0.4: per-core expandable details replacing the legacy single-core
         // lower block. Each core gets a collapsing header with its full state.
-        // Halt reason names match the codes in EventLoop_RebuildAllParameters.
-        static const char* halt_names[] = {
-            "ok", "spacing", "vwap", "long-slope", "vol-delta",
-            "min-stddev", "sl-cooldown", "warmup", "core-budget", "core-kill"
-        };
+        // halt_names + halt_names_count declared at panel scope above so the
+        // top-table Status column also has access. v5.6.0 — added "imbalance"
+        // at index 10.
         for (int i = 0; i < s->per_core_count && i < 16; ++i) {
             const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
             uint8_t sid = pc->strategy_id_display;
@@ -560,12 +648,51 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     ImGui::TextColored(FoxmlColors::comment, "off");
                 }
                 // Halt reason
-                // halt_names array now goes up through index 9 (core-kill,
-                // Phase 3). Bound: < (sizeof(halt_names)/sizeof(*halt_names)).
-                if (pc->halt_reason > 0 && pc->halt_reason < 10) {
+                // v5.6.0: bound matches halt_names_count so adding new codes
+                // doesn't silently drop them (was hardcoded `< 10` before,
+                // hiding halt_reason=10=imbalance entirely).
+                if (pc->halt_reason > 0 && pc->halt_reason < halt_names_count) {
                     ImGui::SameLine(0, 15);
                     ImGui::TextColored(FoxmlColors::yellow,
                         "halted: %s", halt_names[pc->halt_reason]);
+                }
+                // v5.6.1/2: BUY_BLOCKED flag readout. Independent of halt_reason —
+                // strategy-level fee-floor + cost-gate set BUY_BLOCKED. When a
+                // SHALT code is also set, show the specific reason
+                // (fee-floor / cost-gate / etc); otherwise show the bare flag.
+                if (pc->gate_flags & GUI_GATE_FLAG_BUY_BLOCKED) {
+                    ImGui::SameLine(0, 15);
+                    if (pc->strategy_halt_reason > 0 &&
+                        pc->strategy_halt_reason < shalt_names_count) {
+                        ImGui::TextColored(FoxmlColors::yellow,
+                            "BLOCKED: %s",
+                            shalt_names[pc->strategy_halt_reason]);
+                    } else {
+                        ImGui::TextColored(FoxmlColors::yellow, "BUY_BLOCKED");
+                    }
+                } else if (pc->strategy_halt_reason > 0 &&
+                           pc->strategy_halt_reason < shalt_names_count) {
+                    // SHALT set but no BUY_BLOCKED → strategy-zero-gated.
+                    ImGui::SameLine(0, 15);
+                    ImGui::TextColored(FoxmlColors::yellow,
+                        "shalt: %s",
+                        shalt_names[pc->strategy_halt_reason]);
+                }
+                // v5.6.1: permission atomic. 0 = entries forbidden by
+                // controller (kill switch / startup gate). The Risk panel
+                // already shows kill-switch state, but this surface ties
+                // the visibility to the same row as the gate state.
+                if (pc->permission == 0) {
+                    ImGui::SameLine(0, 15);
+                    ImGui::TextColored(FoxmlColors::red, "PERM_OFF");
+                }
+                // v5.6.1: bitmap drift — Class 2c regression detector. The
+                // hot path's any_active mask and the GUI's positions
+                // bitmap should always agree. If they don't, the engine
+                // and the operator are looking at different states.
+                if (!pc->bitmap_consistency) {
+                    ImGui::SameLine(0, 15);
+                    ImGui::TextColored(FoxmlColors::red, "DRIFT(bitmap)");
                 }
                 // Position state
                 if (s->positions[i].idx >= 0) {
@@ -577,6 +704,59 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     ImGui::SameLine(0, 15);
                     ImGui::TextColored(FoxmlColors::yellow,
                         "cooldown %u", pc->sl_cooldown_remaining);
+                }
+                // v5.6.1: volume gate — only meaningful when
+                // GATE_FLAG_VOLUME_REQUIRED is set in gate_flags. Today no
+                // strategy sets this flag, but the surface needs to exist
+                // before any future strategy enables it (otherwise that
+                // strategy's volume gate would be silent).
+                constexpr uint8_t GUI_GATE_FLAG_VOLUME_REQUIRED = 0x08;
+                if (pc->gate_flags & GUI_GATE_FLAG_VOLUME_REQUIRED) {
+                    ImGui::TextColored(FoxmlColors::sand,
+                        "  vol thr: %.4f", pc->bg_volume_threshold);
+                }
+                // v5.6.3: gate diagnostic comparands (single-source rule —
+                // values come from CoreContext::diag_*, captured by the
+                // controller's gate checks). Each pair shows actual vs
+                // threshold; green when actual passes, yellow/red when
+                // fails. Skip rows with both sides at zero (cfg disabled).
+                auto diag_row = [](const char* label, double actual,
+                                   double thr, bool greater_is_pass,
+                                   const char* fmt = "%.4f") {
+                    if (actual == 0.0 && thr == 0.0) return;
+                    bool pass = greater_is_pass ? (actual >= thr)
+                                                : (actual <= thr);
+                    auto col = pass ? FoxmlColors::green : FoxmlColors::yellow;
+                    ImGui::TextColored(FoxmlColors::sand, "    %s:", label);
+                    ImGui::SameLine();
+                    ImGui::TextColored(col, fmt, actual);
+                    ImGui::SameLine();
+                    ImGui::TextColored(FoxmlColors::comment, " / thr ");
+                    ImGui::SameLine();
+                    ImGui::Text(fmt, thr);
+                };
+                diag_row("spacing",  pc->diag_spacing_actual,
+                                      pc->diag_spacing_floor, true,  "%.2f");
+                diag_row("vwap",     pc->diag_vwap_actual,
+                                      pc->diag_vwap_threshold, false, "$%.2f");
+                diag_row("long-slope", pc->diag_long_slope,
+                                        pc->diag_long_slope_min, true, "%+.6f");
+                diag_row("vol-delta", pc->diag_volume_delta,
+                                       pc->diag_volume_delta_min, true, "%+.4f");
+                diag_row("stddev%",  pc->diag_stddev_pct,
+                                      pc->diag_stddev_pct_min, true, "%.4f");
+                // tp_pct vs fee floor — needs % formatting (display as bps).
+                if (pc->diag_tp_pct_actual != 0.0 || pc->diag_tp_pct_floor != 0.0) {
+                    bool tp_pass = pc->diag_tp_pct_actual >= pc->diag_tp_pct_floor;
+                    auto col = tp_pass ? FoxmlColors::green : FoxmlColors::yellow;
+                    ImGui::TextColored(FoxmlColors::sand, "    tp_pct:");
+                    ImGui::SameLine();
+                    ImGui::TextColored(col, "%.3f%%",
+                        pc->diag_tp_pct_actual * 100.0);
+                    ImGui::SameLine();
+                    ImGui::TextColored(FoxmlColors::comment, " / floor ");
+                    ImGui::SameLine();
+                    ImGui::Text("%.3f%%", pc->diag_tp_pct_floor * 100.0);
                 }
                 // ML extras
                 if (pc->is_ml) {
@@ -1061,13 +1241,40 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s, TUISharedState *sha
             ImGui::TableNextColumn();
             ImGui::TextColored(PnlColor(diff), "%+.0f", diff);
 
-            // TP
+            // TP — v5.6.5 adds enabled-flag indicator + original-TP
+            // tooltip on hover. ps->tp is already the effective TP
+            // (max of live + ratchet) per ShardedSnapshot.hpp:178.
+            // gate_flags from per_core: TP_ENABLED=0x01, SL_ENABLED=0x02.
             ImGui::TableNextColumn();
-            ImGui::TextColored(FoxmlColors::green, "%.0f", ps->tp);
+            {
+                uint8_t gf = (row_core_id < 16 && s->sharded_mode_active)
+                    ? s->per_core[row_core_id].gate_flags : 0xFF;  // unknown
+                                                                     // → assume on
+                bool tp_enabled = (gf & 0x01) != 0;
+                if (!tp_enabled) {
+                    ImGui::TextColored(FoxmlColors::red, "OFF");
+                } else {
+                    ImGui::TextColored(FoxmlColors::green, "%.0f", ps->tp);
+                }
+                if (ImGui::IsItemHovered() && ps->orig_tp > 0.0 &&
+                    ps->orig_tp != ps->tp) {
+                    ImGui::SetTooltip("orig TP: $%.2f\nratchet'd to: $%.2f",
+                                       ps->orig_tp, ps->tp);
+                }
+            }
 
             // SL
             ImGui::TableNextColumn();
-            ImGui::TextColored(FoxmlColors::red, "%.0f", ps->sl);
+            {
+                uint8_t gf = (row_core_id < 16 && s->sharded_mode_active)
+                    ? s->per_core[row_core_id].gate_flags : 0xFF;
+                bool sl_enabled = (gf & 0x02) != 0;
+                if (!sl_enabled) {
+                    ImGui::TextColored(FoxmlColors::red, "OFF");
+                } else {
+                    ImGui::TextColored(FoxmlColors::red, "%.0f", ps->sl);
+                }
+            }
 
             // value
             ImGui::TableNextColumn();

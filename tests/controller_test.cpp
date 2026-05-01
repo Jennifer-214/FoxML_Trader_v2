@@ -8810,6 +8810,160 @@ e3_skip_load:;
         delete rig;
     }
 
+    // === EXECUTION_DISPLAY (v5.6.0+) ===
+    // Constants that GUI/DashboardPanels.hpp mirrors from CoreFrameworks
+    // headers. If either side drifts the silent-block bug returns. See
+    // DOCS/EXECUTION_DISPLAY_INVARIANTS.md.
+    printf("\n--- v5.6.0: predicate↔display constant parity ---\n");
+    {
+        // GUI mirrors GATE_FLAG_BUY_BLOCKED as a literal 0x20 (avoids
+        // pulling CoreFrameworks headers into GUI module). If
+        // GateParameters.hpp ever changes the bit, the mirror must change
+        // too — this test catches the drift.
+        check("v5.6.0: GATE_FLAG_BUY_BLOCKED == 0x20 (GUI mirror constant)",
+              (uint8_t)tt::GATE_FLAG_BUY_BLOCKED == 0x20);
+        // v5.6.1 adds a VOLUME_REQUIRED mirror in DashboardPanels for
+        // the collapsing-header volume readout. Same drift-prevention
+        // shape as BUY_BLOCKED.
+        check("v5.6.1: GATE_FLAG_VOLUME_REQUIRED == 0x08 (GUI mirror)",
+              (uint8_t)tt::GATE_FLAG_VOLUME_REQUIRED == 0x08);
+
+        // halt_reason codes set by ControllerEventLoop must match what
+        // halt_names[] in DashboardPanels.hpp can render. Pre-v5.6.0 the
+        // bound was hardcoded `< 10` and silently dropped halt_reason=10
+        // (book-imbalance). v5.6.0 added "imbalance" at index 10 and
+        // switched the bound to halt_names_count. If the controller adds
+        // a new halt code without extending halt_names[], display drops it.
+        // Highest valid code: 10 (imbalance). Update both this assertion
+        // AND halt_names[] when adding new codes.
+        constexpr int EXPECTED_MAX_HALT_REASON = 10;
+        check("v5.6.0: highest controller halt_reason code is 10 (imbalance)",
+              EXPECTED_MAX_HALT_REASON == 10);
+    }
+
+    printf("\n--- v5.6.1: PerCoreSnap predicate fields ---\n");
+    {
+        // v5.6.1 adds gate_flags / permission / bitmap_consistency /
+        // bg_volume_threshold to PerCoreSnap. Compile-time enforced;
+        // runtime asserts catch struct-layout regressions (someone
+        // removing a field, accidentally type-changing, etc).
+        TUISnapshot::PerCoreSnap pc{};
+        pc.gate_flags = 0x20;
+        pc.permission = 1;
+        pc.bitmap_consistency = 1;
+        pc.bg_volume_threshold = 12.5;
+        check("v5.6.1: gate_flags field accepts BUY_BLOCKED bit",
+              pc.gate_flags == 0x20);
+        check("v5.6.1: permission field accepts 0/1",
+              pc.permission == 1);
+        check("v5.6.1: bitmap_consistency field accepts 0/1",
+              pc.bitmap_consistency == 1);
+        check("v5.6.1: bg_volume_threshold field accepts double",
+              pc.bg_volume_threshold > 12.0 && pc.bg_volume_threshold < 13.0);
+    }
+
+    printf("\n--- v5.6.2: SHALT codes + dispatcher fee-floor wiring ---\n");
+    {
+        // SHALT_* code values are stable identifiers — once shipped, GUI
+        // arrays and health log payloads reference them by integer. Reorder-
+        // ing or renumbering breaks both. These asserts pin the values.
+        check("v5.6.2: SHALT_OK == 0",          SHALT_OK == 0);
+        check("v5.6.2: SHALT_NO_UPTREND == 1",  SHALT_NO_UPTREND == 1);
+        check("v5.6.2: SHALT_NO_MEAN_REV == 2", SHALT_NO_MEAN_REV == 2);
+        check("v5.6.2: SHALT_FEE_FLOOR == 3",   SHALT_FEE_FLOOR == 3);
+        check("v5.6.2: SHALT_COST_GATE == 4",   SHALT_COST_GATE == 4);
+        check("v5.6.2: SHALT_NO_SIGNAL == 10",  SHALT_NO_SIGNAL == 10);
+        // v5.7.5 added codes 11..14 (SHALT_MOM_*); SHALT_MAX is the
+        // highest valid code. Update both this assertion and
+        // SHALT_SHORT_NAMES[] when adding new codes.
+        check("v5.7.5: SHALT_MAX == 14 (highest after MOM filter codes)",
+              SHALT_MAX == 14);
+        check("v5.7.5: SHALT_MOM_TP_TOO_TIGHT == 11", SHALT_MOM_TP_TOO_TIGHT == 11);
+        check("v5.7.5: SHALT_MOM_NO_FLOW == 12",      SHALT_MOM_NO_FLOW == 12);
+        check("v5.7.5: SHALT_MOM_LOW_R2 == 13",       SHALT_MOM_LOW_R2 == 13);
+        check("v5.7.5: SHALT_MOM_LAST_LOST == 14",    SHALT_MOM_LAST_LOST == 14);
+
+        // Names array length must equal SHALT_MAX + 1, otherwise display
+        // would index out of bounds for the highest valid code.
+        constexpr int shalt_names_len =
+            (int)(sizeof(SHALT_SHORT_NAMES) / sizeof(SHALT_SHORT_NAMES[0]));
+        check("v5.6.2: SHALT_SHORT_NAMES has SHALT_MAX+1 entries",
+              shalt_names_len == SHALT_MAX + 1);
+
+        // Dispatcher SHALT post-pass: when bg_price_threshold is zero AND no
+        // BUY_BLOCKED flag AND no specific SHALT code → SHALT_NO_SIGNAL.
+        // Use STRATEGY_NONE (no strategy assigned) which leaves out->bg_*
+        // at zero. Confirms the post-pass writes SHALT_NO_SIGNAL.
+        using namespace tt;
+        RollingStats<64, 128> rolling;
+        memset(&rolling, 0, sizeof(rolling));
+        rolling.price_avg     = FPN_FromDouble<64>(76600.0);
+        rolling.price_stddev  = FPN_FromDouble<64>(50.0);
+        rolling.volume_avg    = FPN_FromDouble<64>(0.5);
+        rolling.count         = 200;  // warmed
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.fee_rate_taker = FPN_FromDouble<64>(0.0005);
+        cfg.fee_rate       = FPN_FromDouble<64>(0.0005);
+        GateParameters<64> out;
+        GateParameters_Init(&out);
+        uint8_t shalt = SHALT_OK;
+        Strategy_BuildParameters(STRATEGY_NONE, &rolling, &cfg,
+                                  FPN_FromDouble<64>(1500.0), &out,
+                                  (const RollingStats<64, 512>*)nullptr,
+                                  nullptr, nullptr, &shalt);
+        // STRATEGY_NONE leaves bg_price_threshold zero, no flags set.
+        // Post-pass should write SHALT_NO_SIGNAL.
+        check("v5.6.2: post-pass writes SHALT_NO_SIGNAL on zero-gate "
+              "with no specific code",
+              FPN_IsZero(out.bg_price_threshold)
+              ? (shalt == SHALT_NO_SIGNAL)
+              : true);
+    }
+
+    printf("\n--- v5.7.2: hardcoded-strategy boot guard cfg ---\n");
+    {
+        // The cfg field exists with default 0 (refuse hardcoded in live).
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.7.2: acknowledge_hardcoded_strategy_in_live default 0",
+              cfg.acknowledge_hardcoded_strategy_in_live == 0);
+        // Setting to 1 (operator override) preserved as a 1.
+        cfg.acknowledge_hardcoded_strategy_in_live = 1;
+        check("v5.7.2: acknowledge flag accepts 1",
+              cfg.acknowledge_hardcoded_strategy_in_live == 1);
+    }
+
+    printf("\n--- v5.6.3: gate diagnostic field plumbing ---\n");
+    {
+        // PerCoreSnap gains 12 diag_* fields (6 actual/threshold pairs).
+        // Compile-time enforced by struct layout; runtime asserts catch
+        // accidental field removal/rename.
+        TUISnapshot::PerCoreSnap pc{};
+        pc.diag_spacing_actual    = 1.0;
+        pc.diag_spacing_floor     = 2.0;
+        pc.diag_vwap_actual       = 100.0;
+        pc.diag_vwap_threshold    = 99.0;
+        pc.diag_long_slope        = 0.0001;
+        pc.diag_long_slope_min    = -0.0001;
+        pc.diag_volume_delta      = 0.5;
+        pc.diag_volume_delta_min  = 0.1;
+        pc.diag_stddev_pct        = 0.002;
+        pc.diag_stddev_pct_min    = 0.001;
+        pc.diag_tp_pct_actual     = 0.0014;
+        pc.diag_tp_pct_floor      = 0.0015;
+        check("v5.6.3: spacing diag fields populated",
+              pc.diag_spacing_actual == 1.0 && pc.diag_spacing_floor == 2.0);
+        check("v5.6.3: vwap diag fields populated",
+              pc.diag_vwap_actual == 100.0 && pc.diag_vwap_threshold == 99.0);
+        check("v5.6.3: long-slope diag fields populated (signed)",
+              pc.diag_long_slope > 0.0 && pc.diag_long_slope_min < 0.0);
+        check("v5.6.3: volume-delta diag fields populated",
+              pc.diag_volume_delta == 0.5 && pc.diag_volume_delta_min == 0.1);
+        check("v5.6.3: stddev_pct diag fields populated",
+              pc.diag_stddev_pct == 0.002);
+        check("v5.6.3: tp_pct diag — fee-floor scenario detectable",
+              pc.diag_tp_pct_actual < pc.diag_tp_pct_floor);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

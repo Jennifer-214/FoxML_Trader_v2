@@ -459,6 +459,13 @@ template <unsigned F> struct RegimeState {
     int last_strategy_id;        // tracks which strategy was active before transition
     uint64_t regime_start_tick;  // tick at which current regime started
     time_t regime_start_time;    // wall clock time at regime start (for duration display)
+    // v5.7.1: expose the regime classifier's intermediate scores so the
+    // entry-quality log can record "what the classifier saw at fill time."
+    // Single-source rule (EXECUTION_DISPLAY_INVARIANTS.md) — Regime_Classify
+    // writes these on every cycle; entry log reads at fill moment. Reading
+    // doesn't recompute. Never persisted (snapshot re-derives on warmup).
+    int last_trending_score;     // last classification cycle's trending_score
+    int last_volatile_score;     // last classification cycle's volatile_score
 };
 
 //======================================================================================================
@@ -470,6 +477,8 @@ inline void Regime_Init(RegimeState<F> *state, int hysteresis_threshold) {
     state->proposed_regime = REGIME_RANGING;
     state->hysteresis_count = 0;
     state->hysteresis_threshold = hysteresis_threshold;
+    state->last_trending_score = 0;  // v5.7.1
+    state->last_volatile_score = 0;
     state->last_strategy_id = STRATEGY_MEAN_REVERSION;
     state->regime_start_tick = 0;
     state->regime_start_time = time(NULL);
@@ -588,6 +597,11 @@ inline int Regime_Classify(RegimeState<F> *state,
         detected = REGIME_VOLATILE;
     else
         detected = REGIME_RANGING;
+
+    // v5.7.1: persist the scores so the entry-quality log can read them
+    // at fill time without recomputing. Single-source rule.
+    state->last_trending_score = trending_score;
+    state->last_volatile_score = volatile_score;
 
     // hysteresis: proposed regime must hold for N consecutive cycles before switching
     if (detected == state->proposed_regime) {

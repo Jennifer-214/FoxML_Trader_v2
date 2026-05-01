@@ -180,6 +180,18 @@ log_file=engine.log             # stderr redirect when tui_enabled=0 (append mod
 use_real_money=0                # 0 = paper trading (default safe), 1 = real orders via REST API
 # use_binance_us=1              # uncomment for Binance US (required for US-based users)
 
+# v5.7.2 — hardcoded strategy boot guard. AUTO (regime-gated) is the
+# recommended assignment for live capital because hardcoded strategies
+# fire regardless of regime classification (the 2026-04-30 audit showed
+# the "MOM enters in RANGING" pattern came from Core 0 hardcoded MOM,
+# not classifier failure). When use_real_money=1 AND any core has a
+# hardcoded strategy, boot ERRORS unless this flag is set to 1.
+# Paper runs always boot with a WARN regardless. Set to 1 only if you
+# explicitly want a hardcoded strategy in live mode (e.g. running a
+# specific strategy comparison, or know the regime context for the
+# session).
+acknowledge_hardcoded_strategy_in_live=0
+
 #==============================================================================
 # KILL SWITCH
 #==============================================================================

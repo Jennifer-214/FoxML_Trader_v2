@@ -198,8 +198,42 @@ struct CoreContext {
     // v4.0.3 D8 halt reason: most recent reason the gate was zero-gated.
     // 0 = ok / armed; 1 = spacing; 2 = vwap; 3 = long-slope; 4 = vol-delta;
     // 5 = min-stddev; 6 = sl-cooldown; 7 = warmup; 8 = core-budget (Phase 2.2);
-    // 9 = core-kill (Phase 3). Displayed in GUI per core.
+    // 9 = core-kill (Phase 3); 10 = imbalance (Track E.3, surfaced v5.6.0).
+    // Displayed in GUI per core.
     uint8_t  halt_reason;
+    // v5.6.2: strategy-internal halt reason. Distinct from halt_reason
+    // (controller-level). Each strategy's _BuildParameters sets this
+    // to a SHALT_* code (see StrategyInterface.hpp) before zero-gating
+    // or setting BUY_BLOCKED. SHALT_OK = no strategy-level veto.
+    // GUI display order: halt_reason > 0 > strategy_halt_reason > 0.
+    uint8_t  strategy_halt_reason;
+    // v5.6.3 — gate diagnostic comparands. Captured by the controller's
+    // post-Strategy_BuildParameters gate checks (spacing, vwap, long-slope,
+    // vol-delta, min-stddev) so the GUI can show actual vs threshold per
+    // gate without recomputing (single-source rule —
+    // EXECUTION_DISPLAY_INVARIANTS.md). Snapshot copies into PerCoreSnap
+    // diag_* fields. Reset by the rebuild loop before each pass.
+    FPN<F> diag_spacing_actual;     // |bg_threshold - last_entry|
+    FPN<F> diag_spacing_floor;      // stddev * spacing_multiplier
+    FPN<F> diag_vwap_actual;        // bg_price_threshold
+    FPN<F> diag_vwap_threshold;     // vwap - vwap*vwap_offset
+    FPN<F> diag_long_slope;         // long_rel_slope
+    FPN<F> diag_long_slope_min;     // cfg.min_long_slope
+    FPN<F> diag_volume_delta;       // rolling.volume_delta
+    FPN<F> diag_volume_delta_min;   // cfg.min_buy_delta
+    FPN<F> diag_stddev_pct;         // rolling.price_stddev / rolling.price_avg
+    FPN<F> diag_stddev_pct_min;     // cfg.min_stddev_pct
+    FPN<F> diag_tp_pct_actual;      // out.tp_pct
+    FPN<F> diag_tp_pct_floor;       // 3 * fee_rate_taker
+    // v5.6.6: previous packed gate-state byte. Used by the gate-state
+    // edge-trigger health log emit to detect transitions. Layout:
+    //   bits 0..3 : halt_reason          (0..10 fits in 4 bits)
+    //   bits 4..7 : strategy_halt_reason (0..10)
+    //   bit  8     : (BUY_BLOCKED >> 5) & 1
+    //   bit  9     : permission
+    // Stored as uint16_t. Fresh state computed at end of RebuildOneCore;
+    // emit cat="gate" log only when packed_now != prev_gate_log_state.
+    uint16_t prev_gate_log_state;
     // v4.0.3 B: per-core regime state for STRATEGY_AUTO. Tracks current
     // regime + hysteresis so the auto-mode core's strategy choice doesn't
     // flap on noise. Each AUTO core has its own state — different cores
@@ -466,6 +500,10 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].last_entry_wall_us = 0;
         state->cores[i].sl_cooldown_remaining = 0;
         state->cores[i].halt_reason = 0;
+        state->cores[i].strategy_halt_reason = 0;
+        // v5.6.6: sentinel = 0xFFFF so the first rebuild ALWAYS emits a
+        // baseline gate log entry. Subsequent emits are edge-triggered.
+        state->cores[i].prev_gate_log_state = 0xFFFF;
         // v4.0.3 B: regime state per AUTO core. Hysteresis threshold of 3
         // matches legacy default — requires 3 consecutive cycles of new
         // regime detection before switching.
@@ -960,6 +998,40 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         ctx.entries_processed++;
         state->total_entries++;
         state->total_events_processed++;
+
+        // v5.7.1: entry-quality health log. Captures the state of the
+        // engine at the moment a fill landed — strategy + resolved
+        // strategy + regime + scores + slow-path diag values + gate
+        // threshold + fee-floor margin. Operators can post-hoc grep:
+        //   jq 'select(.cat=="entry" and .core==N)' health.jsonl
+        // and classify trades by regime/strategy/score combination.
+        // Entry price + qty come from the portfolio slot (FillRecord
+        // only stores notional, not the components).
+        if (tt::Health_LogEnabled(tt::HEALTH_INFO) && slot < 16) {
+            const auto& pos = oms->portfolio.positions[slot];
+            tt::Health_Log(tt::HEALTH_INFO, "entry", core_id,
+                "slot=%d strat=%u resolved=%u regime=%d "
+                "trend_score=%d vol_score=%d hyst=%d/%d "
+                "entry_px=%g qty=%g entry_notional=%g entry_fee=%g "
+                "tp_pct=%g tp_floor=%g "
+                "stddev_pct=%g long_slope=%g vol_delta=%g",
+                slot, (unsigned)ctx.strategy_id,
+                (unsigned)ctx.resolved_strategy_id,
+                ctx.regime_state.current_regime,
+                ctx.regime_state.last_trending_score,
+                ctx.regime_state.last_volatile_score,
+                ctx.regime_state.hysteresis_count,
+                ctx.regime_state.hysteresis_threshold,
+                FPN_ToDouble(pos.entry_price),
+                FPN_ToDouble(pos.quantity),
+                FPN_ToDouble(rec.entry_notional),
+                FPN_ToDouble(rec.entry_fee),
+                FPN_ToDouble(ctx.diag_tp_pct_actual),
+                FPN_ToDouble(ctx.diag_tp_pct_floor),
+                FPN_ToDouble(ctx.diag_stddev_pct),
+                FPN_ToDouble(ctx.diag_long_slope),
+                FPN_ToDouble(ctx.diag_volume_delta));
+        }
     }
     oms->last_opened_mask &= (uint16_t)~my_mask;  // clear only my bits
 
@@ -982,6 +1054,27 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         ctx.exits_processed++;
         state->total_exits++;
         state->total_events_processed++;
+
+        // v5.7.1: exit-quality health log. Pairs with entry-log lines
+        // to classify (strategy, regime_at_entry, exit_kind, net_bps)
+        // for the strategy quality dashboard. exit_kind is inferred
+        // from oms->last_realized_return + cooldown state — TP / SL
+        // distinction is captured in `was_win` for now; finer
+        // exit-kind taxonomy (time-exit, ratchet, manual) is deferred
+        // to the dashboard panel computing it from order_history CSV.
+        if (tt::Health_LogEnabled(tt::HEALTH_INFO)) {
+            double realized = oms->last_realized_return[slot];
+            tt::Health_Log(tt::HEALTH_INFO, "exit", core_id,
+                "slot=%d strat=%u resolved=%u was_win=%d realized_ret=%g "
+                "net_pnl=%g entry_notional=%g total_fees=%g leg_a=%d",
+                slot, (unsigned)ctx.strategy_id,
+                (unsigned)ctx.resolved_strategy_id,
+                (int)rec.was_win, realized,
+                FPN_ToDouble(rec.exit_net_pnl),
+                FPN_ToDouble(rec.exit_entry_notional),
+                FPN_ToDouble(rec.exit_total_fees),
+                is_leg_a ? 1 : 0);
+        }
 
         // v4.7.21 W/L pairing under partials (unchanged).
         if (partial_on) {
@@ -1779,7 +1872,10 @@ inline void EventLoop_RebuildOneCore(
             &state->cores[slot].pending_params,
             rolling_long,
             dispatch_ctx,
-            state->cores[slot].strategy_state    // v5.4.0 Phase 2.1 — typed-cast inside dispatcher
+            state->cores[slot].strategy_state,   // v5.4.0 Phase 2.1 — typed-cast inside dispatcher
+            &state->cores[slot].strategy_halt_reason  // v5.6.2 — dispatcher writes
+                                                       // SHALT_* codes for fee-floor /
+                                                       // cost-gate / no-signal paths.
         );
 
         // v4.0.3 D9: clear ratchet_sl when no position active on this core,
@@ -1813,6 +1909,10 @@ inline void EventLoop_RebuildOneCore(
         //          5=min-stddev, 6=sl-cooldown, 7=warmup, 8=core-budget,
         //          9=core-kill, 10=book-imbalance (Track E.3)
         state->cores[slot].halt_reason = 0;
+        // v5.6.2: reset strategy_halt_reason every rebuild. Strategies
+        // set this to a SHALT_* code when zero-gating for strategy-
+        // internal reasons. SHALT_OK = no veto.
+        state->cores[slot].strategy_halt_reason = SHALT_OK;
         // v5.5.1 (Bug B-FLAT — addressed the "latent zero_gate bug" called out
         // in the Track E.3 comment below). Pre-fix: zero_gate set
         // bg_price_threshold = 0 to disable entries. This works for buy-below
@@ -2000,6 +2100,19 @@ inline void EventLoop_RebuildOneCore(
                     resolved_cfg.spike_spacing_reduction);
             }
         }
+        // v5.6.3: capture spacing comparands for GUI diagnostic readout.
+        // Single-source rule — these are the SAME values
+        // Strategy_SpacingOk reads internally, exposed for display.
+        {
+            FPN<F> a = state->cores[slot].pending_params.bg_price_threshold;
+            FPN<F> b = state->cores[slot].last_entry_price;
+            FPN<F> abs_dist = FPN_GreaterThanOrEqual(a, b)
+                ? FPN_Sub(a, b) : FPN_Sub(b, a);
+            FPN<F> min_dist = FPN_Mul(rolling->price_stddev,
+                                       spacing_cfg.spacing_multiplier);
+            state->cores[slot].diag_spacing_actual = abs_dist;
+            state->cores[slot].diag_spacing_floor  = min_dist;
+        }
         if (!Strategy_SpacingOk(state->cores[slot].pending_params.bg_price_threshold,
                                  state->cores[slot].last_entry_price,
                                  rolling, &spacing_cfg)) {
@@ -2009,6 +2122,10 @@ inline void EventLoop_RebuildOneCore(
         if (!FPN_IsZero(resolved_cfg.vwap_offset) && !FPN_IsZero(rolling->vwap)) {
             FPN<F> vwap_threshold = FPN_Sub(rolling->vwap,
                 FPN_Mul(rolling->vwap, resolved_cfg.vwap_offset));
+            // v5.6.3: capture both sides for GUI.
+            state->cores[slot].diag_vwap_actual    =
+                state->cores[slot].pending_params.bg_price_threshold;
+            state->cores[slot].diag_vwap_threshold = vwap_threshold;
             if (FPN_GreaterThan(state->cores[slot].pending_params.bg_price_threshold,
                                  vwap_threshold)) {
                 zero_gate(2);
@@ -2019,22 +2136,47 @@ inline void EventLoop_RebuildOneCore(
             !FPN_IsZero(rolling_long->price_avg)) {
             FPN<F> long_rel_slope = FPN_DivNoAssert(rolling_long->price_slope,
                                                      rolling_long->price_avg);
+            // v5.6.3: capture for GUI.
+            state->cores[slot].diag_long_slope     = long_rel_slope;
+            state->cores[slot].diag_long_slope_min = resolved_cfg.min_long_slope;
             if (FPN_LessThan(long_rel_slope, resolved_cfg.min_long_slope)) {
                 zero_gate(3);
             }
         }
         // VOLUME DELTA gate: blocks heavy dumps.
-        if (!FPN_IsZero(resolved_cfg.min_buy_delta) &&
-            FPN_LessThan(rolling->volume_delta, resolved_cfg.min_buy_delta)) {
-            zero_gate(4);
+        if (!FPN_IsZero(resolved_cfg.min_buy_delta)) {
+            // v5.6.3: capture both sides regardless of pass/fail so the
+            // GUI shows current state (display invariant: always show
+            // when cfg enabled).
+            state->cores[slot].diag_volume_delta     = rolling->volume_delta;
+            state->cores[slot].diag_volume_delta_min = resolved_cfg.min_buy_delta;
+            if (FPN_LessThan(rolling->volume_delta, resolved_cfg.min_buy_delta)) {
+                zero_gate(4);
+            }
         }
         // MIN STDDEV gate: skip dead markets.
         if (!FPN_IsZero(resolved_cfg.min_stddev_pct) && !FPN_IsZero(rolling->price_avg)) {
             FPN<F> stddev_ratio = FPN_DivNoAssert(rolling->price_stddev,
                                                     rolling->price_avg);
+            // v5.6.3: capture for GUI.
+            state->cores[slot].diag_stddev_pct     = stddev_ratio;
+            state->cores[slot].diag_stddev_pct_min = resolved_cfg.min_stddev_pct;
             if (FPN_LessThan(stddev_ratio, resolved_cfg.min_stddev_pct)) {
                 zero_gate(5);
             }
+        }
+        // v5.6.3: capture tp_pct + fee floor for GUI. Same formula as
+        // the dispatcher's fee-floor BUY_BLOCKED path
+        // (StrategyParameters.hpp:875-895). Capture here so the
+        // collapsing-header readout shows actual vs floor regardless
+        // of whether BUY_BLOCKED fired.
+        {
+            FPN<F> fee_taker = !FPN_IsZero(resolved_cfg.fee_rate_taker)
+                ? resolved_cfg.fee_rate_taker : resolved_cfg.fee_rate;
+            state->cores[slot].diag_tp_pct_actual =
+                state->cores[slot].pending_params.tp_pct;
+            state->cores[slot].diag_tp_pct_floor =
+                FPN_Mul(fee_taker, FPN_FromDouble<F>(3.0));
         }
         // FEE FLOOR: ratchet TP up so it clears at least
         // entry × fee_rate × fee_floor_mult. Round-trip fees are 2×fee_rate,
@@ -2062,6 +2204,41 @@ inline void EventLoop_RebuildOneCore(
         state->cores[slot].intended_sl  = state->cores[slot].pending_params.sg_stop_loss_price;
         state->cores[slot].intended_qty = state->cores[slot].pending_params.trade_size;
         state->cores[slot].dirty = 1;
+
+        // v5.6.6: gate-state edge-trigger health log emit. Pack the four
+        // hot-path-relevant fields into a single uint16_t and compare
+        // against the previous packed state. Emit cat="gate" only on
+        // transition. This means MB/min during steady state (no log
+        // traffic) and a single line per gate-state flip — easy to grep
+        // post-hoc when diagnosing missed trades.
+        //
+        // Pack layout:
+        //   bits  0..3 : halt_reason          (clamped to 15)
+        //   bits  4..7 : strategy_halt_reason (clamped to 15)
+        //   bit   8     : BUY_BLOCKED
+        //   bit   9     : permission
+        if (tt::Health_LogEnabled(tt::HEALTH_INFO)) {
+            uint8_t  hr   = state->cores[slot].halt_reason          & 0x0F;
+            uint8_t  shr  = state->cores[slot].strategy_halt_reason & 0x0F;
+            uint8_t  bb   = (state->cores[slot].pending_params.flags
+                              & GATE_FLAG_BUY_BLOCKED) ? 1 : 0;
+            uint8_t  perm = state->cores[slot].core
+                ? __atomic_load_n(&state->cores[slot].core->permission,
+                                   __ATOMIC_ACQUIRE)
+                : 0;
+            uint16_t packed = (uint16_t)(hr | (shr << 4)
+                                          | (bb   << 8) | (perm << 9));
+            if (packed != state->cores[slot].prev_gate_log_state) {
+                tt::Health_Log(tt::HEALTH_INFO, "gate", slot,
+                    "halt=%u shalt=%u blocked=%u perm=%u "
+                    "gate=%g price=%g",
+                    (unsigned)hr, (unsigned)shr,
+                    (unsigned)bb, (unsigned)perm,
+                    FPN_ToDouble(state->cores[slot].pending_params.bg_price_threshold),
+                    FPN_ToDouble(rolling->price_avg));
+                state->cores[slot].prev_gate_log_state = packed;
+            }
+        }
     }
 }
 

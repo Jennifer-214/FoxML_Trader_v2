@@ -132,6 +132,36 @@ static inline void TUI_CopySnapshotSharded(
     snap->kill_switch_active = agg.kill_switch_tripped;
     snap->breaker_tripped    = agg.kill_switch_tripped;
 
+    // v5.7.9: session indicator. The legacy single-core
+    // PortfolioController computes current_session + session_mult
+    // from UTC hour at the top of every slow-path cycle
+    // (PortfolioController.hpp:1440-1443). The sharded port never
+    // mirrored this — `snap->current_session` stayed at 0 (ASIA)
+    // and `snap->session_mult` at 0.0 forever, hence the GUI's
+    // stuck "ASIA (0.0x)" indicator. Computing here in the snapshot
+    // copy is cheap (one time() syscall per GUI frame, ~60Hz) and
+    // matches the legacy formula bit-for-bit. Mirror Class 2c —
+    // sharding-port-orphan with display↔execution divergence.
+    {
+        time_t now = time(nullptr);
+        struct tm utc;
+        gmtime_r(&now, &utc);
+        int h = utc.tm_hour;
+        if (h < 7) {
+            snap->current_session = 0;  // ASIA
+            snap->session_mult    = FPN_ToDouble(cfg->session_asian_mult);
+        } else if (h < 13) {
+            snap->current_session = 1;  // EU
+            snap->session_mult    = FPN_ToDouble(cfg->session_european_mult);
+        } else if (h < 20) {
+            snap->current_session = 2;  // US
+            snap->session_mult    = FPN_ToDouble(cfg->session_us_mult);
+        } else {
+            snap->current_session = 3;  // OVERNIGHT
+            snap->session_mult    = FPN_ToDouble(cfg->session_overnight_mult);
+        }
+    }
+
     // per-position details
     uint16_t bm = state->oms->portfolio.active_bitmap;
     double total_value = 0.0, total_qty = 0.0;
@@ -214,6 +244,33 @@ static inline void TUI_CopySnapshotSharded(
     snap->total_qty   = total_qty;
     if (snap->starting > 0.0) {
         snap->exposure_pct = (total_value / snap->starting) * 100.0;
+    }
+
+    // v5.6.1 / v5.7.7-fix: bitmap consistency post-pass.
+    // Compares the hot-path's any_active mask
+    // (core->active | core->active_b) against the GUI's view from the
+    // portfolio bitmap. The per-position loop above populated
+    // snap->positions[].idx; now read core->active directly so we don't
+    // depend on per-core-loop ordering (the v5.6.1 ship had a bug here
+    // where the tentative byte was read BEFORE the per-core loop wrote
+    // it, causing false DRIFT positives on cores 1/2/3 when permission
+    // was off on core 0 — observed 2026-04-30 paper run).
+    //
+    // Under partials, core c owns slots {2c, 2c+1}. Without partials,
+    // core c owns slot c. If masks disagree → Class 2c display↔execution
+    // divergence; GUI surfaces as "DRIFT(bitmap)".
+    //
+    // Final value: 1 = consistent, 0 = drift detected.
+    for (int c = 0; c < state->registered_count && c < 16; ++c) {
+        tt::ExecutionCore<F>* xc = state->cores[c].core;
+        bool hot_any_active = xc &&
+            ((xc->active | xc->active_b) & 1) != 0;
+        int slot_a = partial_on ? (c * 2)     : c;
+        int slot_b = partial_on ? (c * 2 + 1) : -1;
+        bool gui_any_pos = (slot_a >= 0 && slot_a < 16 && snap->positions[slot_a].idx >= 0)
+                       || (slot_b >= 0 && slot_b < 16 && snap->positions[slot_b].idx >= 0);
+        snap->per_core[c].bitmap_consistency =
+            (hot_any_active == gui_any_pos) ? 1 : 0;
     }
 
     // counters
@@ -350,6 +407,25 @@ static inline void TUI_CopySnapshotSharded(
         snap->per_core[i].gate_direction = (dir_strat == STRATEGY_MOMENTUM) ? 1 : 0;
         // v4.0.4: per-core diagnostic state for Buy Gate panel
         snap->per_core[i].halt_reason            = state->cores[i].halt_reason;
+        // v5.6.2: strategy-internal halt reason (SHALT_*). Distinct from
+        // halt_reason — set by strategy _BuildParameters when zero-gating
+        // for strategy-specific reasons (no uptrend, fee-floor BUY_BLOCKED,
+        // ML below threshold, etc).
+        snap->per_core[i].strategy_halt_reason   = state->cores[i].strategy_halt_reason;
+        // v5.6.3: copy gate diagnostic comparands. Captured by the
+        // controller's gate checks; converted FPN<F> → double here.
+        snap->per_core[i].diag_spacing_actual    = FPN_ToDouble(state->cores[i].diag_spacing_actual);
+        snap->per_core[i].diag_spacing_floor     = FPN_ToDouble(state->cores[i].diag_spacing_floor);
+        snap->per_core[i].diag_vwap_actual       = FPN_ToDouble(state->cores[i].diag_vwap_actual);
+        snap->per_core[i].diag_vwap_threshold    = FPN_ToDouble(state->cores[i].diag_vwap_threshold);
+        snap->per_core[i].diag_long_slope        = FPN_ToDouble(state->cores[i].diag_long_slope);
+        snap->per_core[i].diag_long_slope_min    = FPN_ToDouble(state->cores[i].diag_long_slope_min);
+        snap->per_core[i].diag_volume_delta      = FPN_ToDouble(state->cores[i].diag_volume_delta);
+        snap->per_core[i].diag_volume_delta_min  = FPN_ToDouble(state->cores[i].diag_volume_delta_min);
+        snap->per_core[i].diag_stddev_pct        = FPN_ToDouble(state->cores[i].diag_stddev_pct);
+        snap->per_core[i].diag_stddev_pct_min    = FPN_ToDouble(state->cores[i].diag_stddev_pct_min);
+        snap->per_core[i].diag_tp_pct_actual     = FPN_ToDouble(state->cores[i].diag_tp_pct_actual);
+        snap->per_core[i].diag_tp_pct_floor      = FPN_ToDouble(state->cores[i].diag_tp_pct_floor);
         snap->per_core[i].sl_cooldown_remaining  = state->cores[i].sl_cooldown_remaining;
         // v4.0.4: per-core P&L for Account panel breakdown
         snap->per_core[i].core_realized      = FPN_ToDouble(state->cores[i].core_realized);
@@ -379,6 +455,21 @@ static inline void TUI_CopySnapshotSharded(
             tt::GateParameters<F> params;
             tt::ParameterSlot_Read(&core->param_slot, &params);
             snap->per_core[i].buy_gate_price = FPN_ToDouble(params.bg_price_threshold);
+            // v5.6.0: snapshot the flags byte so GUI can render BUY_BLOCKED /
+            // VOLUME_REQUIRED / TP/SL ENABLED / BUY_ABOVE / PAIR_ACTIVE without
+            // needing access to GateParameters internals. ParameterSlot_Read
+            // is seqlock-published so flags + thresholds are consistent.
+            snap->per_core[i].gate_flags = params.flags;
+            // v5.6.1: bg_volume_threshold for collapsing-header readout. Only
+            // meaningful when GATE_FLAG_VOLUME_REQUIRED is set, but copying
+            // unconditionally is cheaper than branching.
+            snap->per_core[i].bg_volume_threshold =
+                FPN_ToDouble(params.bg_volume_threshold);
+            // v5.6.1: permission atomic snapshot. ACQUIRE load matches the
+            // hot-path read in ExecutionCore.hpp:356, so we see the same
+            // state the next tick would see. 0 = entries forbidden.
+            snap->per_core[i].permission = (uint8_t)__atomic_load_n(
+                &core->permission, __ATOMIC_ACQUIRE);
             // populate headline buy gate from core 0
             if (i == 0) {
                 snap->buy_p = FPN_ToDouble(params.bg_price_threshold);
