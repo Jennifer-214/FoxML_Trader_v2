@@ -1535,9 +1535,11 @@ static inline void GUI_Panel_Stats(const TUISnapshot *s) {
     ImGui::SameLine(0, 10);
     ImGui::TextColored(FoxmlColors::sand, "pf:");
     ImGui::SameLine();
-    // v5.3.1 (Phase D): profit_factor < 0 is the "all wins, no losses" sentinel
-    // (mathematically ∞). Pre-fix code rendered 0.00 which was misleading.
-    if (s->profit_factor < 0.0) {
+    // v5.8.4c: render "∞" for all-wins runs via the dedicated all_wins_run
+    // flag (replaces v5.3.1's -1.0 sentinel packed into profit_factor —
+    // sentinel was ambiguous in OPT_METRIC_PF math, now display + math
+    // cleanly separated).
+    if (s->all_wins_run) {
         ImGui::TextColored(FoxmlColors::green, "%s", "\xE2\x88\x9E");  // ∞
     } else {
         ImGui::TextColored(PnlColor(s->profit_factor - 1.0), "%.2f", s->profit_factor);

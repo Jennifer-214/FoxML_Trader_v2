@@ -27,6 +27,7 @@
 #include "../ML_Headers/CoreModelZoo.hpp"
 #include "ControllerEventLoop.hpp"
 #include "EventLoopAggregates.hpp"
+#include "MetricCompute.hpp"  // v5.8.4c: shared metric helpers
 
 #include <cmath>
 
@@ -327,25 +328,20 @@ static inline void TUI_CopySnapshotSharded(
     double g_losses_d = FPN_ToDouble(gross_losses);
     snap->avg_win  = (total_wins   > 0) ? g_wins_d   / (double)total_wins   : 0.0;
     snap->avg_loss = (total_losses > 0) ? g_losses_d / (double)total_losses : 0.0;
-    // v5.3.1 (Phase D): when no losses, profit_factor is mathematically
-    // undefined (∞). Pre-fix code returned 0.0 which renders as "pf: 0.00"
-    // — confusing for a strategy with all wins. Use -1.0 as a "no losses"
-    // sentinel; Stats panel renders "—" for negative values.
-    if (g_losses_d > 0.001) {
-        snap->profit_factor = g_wins_d / g_losses_d;
-    } else if (g_wins_d > 0.001) {
-        snap->profit_factor = -1.0;  // sentinel: ∞ (all wins, no losses)
-    } else {
-        snap->profit_factor = 0.0;   // no trades at all
-    }
-    if (total_wins + total_losses > 0) {
-        double tot = (double)(total_wins + total_losses);
-        double wr = (double)total_wins   / tot;
-        double lr = (double)total_losses / tot;
-        snap->expectancy = (wr * snap->avg_win) - (lr * snap->avg_loss);
-    } else {
-        snap->expectancy = 0.0;
-    }
+    // v5.8.4c: routed through canonical Compute_* helpers (single source
+    // of truth across backtest + live + sharded paths). The legacy -1.0
+    // "all-wins sentinel" was packed into profit_factor itself and
+    // disagreed with BacktestEngine's 0.0-for-no-losses convention; this
+    // caused OPT_METRIC_PF in walk-forward optimization to read
+    // path-dependent values for the same trade set. Now: profit_factor is
+    // numerically 0.0 when losses=0 (matches BacktestEngine), and the
+    // separate snap->all_wins_run flag tells the GUI/TUI render path to
+    // display "—" / "∞" distinctly. Math + display cleanly separated.
+    snap->profit_factor = Compute_ProfitFactor(g_wins_d, g_losses_d);
+    snap->all_wins_run  = Compute_AllWinsRun(g_wins_d, g_losses_d);
+    snap->expectancy = Compute_Expectancy((uint32_t)(total_wins + total_losses),
+                                           (uint32_t)total_wins,
+                                           snap->avg_win, snap->avg_loss);
 
     // config display
     snap->cfg_tp  = FPN_ToDouble(cfg->take_profit_pct) * 100.0;

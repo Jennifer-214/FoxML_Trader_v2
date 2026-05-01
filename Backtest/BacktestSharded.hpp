@@ -506,6 +506,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     int loss_count = 0;
     double peak_equity = total_balance;
     double max_drawdown = 0.0;
+    double max_dd_pct   = 0.0;  // v5.8.4c: tracked alongside max_drawdown via shared helper
 
     // DEBUG: track price range and dump threshold once after first slow path
     double price_lo = 1e18, price_hi = 0.0;
@@ -652,12 +653,12 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 }
             }
 
-            // Track peak equity + max drawdown using EventLoopAggregates
-            // (no current price snapshot needed here, balance is enough)
+            // v5.8.4c: shared inner-update helper — same code path as
+            // BacktestStats_ComputeFromEquity's post-hoc walk. Bytewise
+            // FP identity guaranteed by construction.
             double cur_equity = FPN_ToDouble(state.oms->balance);
-            if (cur_equity > peak_equity) peak_equity = cur_equity;
-            double dd = peak_equity - cur_equity;
-            if (dd > max_drawdown) max_drawdown = dd;
+            MaxDrawdown_UpdateIncremental(cur_equity, &peak_equity,
+                                           &max_drawdown, &max_dd_pct);
 
             total_processed++;
             if ((total_processed & 0x3FFF) == 0) {
@@ -699,17 +700,18 @@ done:
     }
     if (win_count > 0) stats->avg_win = cumulative_wins / win_count;
     if (loss_count > 0) stats->avg_loss = cumulative_losses / loss_count;
-    if (cumulative_losses > 0.0) {
-        stats->profit_factor = cumulative_wins / cumulative_losses;
-    }
-    stats->max_drawdown = max_drawdown;
-    if (peak_equity > 0.0) {
-        stats->max_drawdown_pct = (max_drawdown / peak_equity) * 100.0;
-    }
+    // v5.8.4c: route metrics through Compute_* helpers — kills the prior
+    // 4-site profit_factor drift (epsilon 0.0001 vs 0.001 vs none vs
+    // -1.0-sentinel). all_wins_run flag separates display semantics
+    // from the numeric value for OPT_METRIC_PF / display rendering.
+    stats->profit_factor    = Compute_ProfitFactor(cumulative_wins, cumulative_losses);
+    stats->all_wins_run     = Compute_AllWinsRun(cumulative_wins, cumulative_losses);
+    stats->expectancy       = Compute_Expectancy(stats->total_trades, stats->wins,
+                                                   stats->avg_win, stats->avg_loss);
+    stats->max_drawdown     = max_drawdown;
+    stats->max_drawdown_pct = max_dd_pct * 100.0;
     double starting_bal = FPN_ToDouble(cfg.starting_balance);
-    if (starting_bal > 0.0) {
-        stats->return_pct = ((final_balance - starting_bal) / starting_bal) * 100.0;
-    }
+    stats->return_pct = Compute_ReturnPct(final_balance - starting_bal, starting_bal);
     stats->elapsed_ms = elapsed;
 
     // Track E.7 — populate TUISnapshot for the dashboard panels (Market,

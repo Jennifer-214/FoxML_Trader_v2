@@ -16,6 +16,7 @@
 
 #include "../CoreFrameworks/PortfolioController.hpp"
 #include "../CoreFrameworks/OrderGates.hpp"
+#include "../CoreFrameworks/MetricCompute.hpp"  // v5.8.4c: shared metric helpers
 #include "../DataStream/TradeLog.hpp"
 #include "../ML_Headers/ModelInference.hpp"
 #include "../GUI/CandleAccumulator.hpp"
@@ -136,6 +137,12 @@ struct BacktestStats {
     double avg_hold_ticks;
     double elapsed_ms;
     uint64_t ticks_processed;
+    // v5.8.4c: replaces the legacy -1.0 "no-losses" sentinel that used to
+    // be packed into profit_factor itself. Set to 1 when wins > 0 and
+    // losses == 0 — display layer renders "—" (or "∞") on this flag,
+    // optimizer continues to read profit_factor numerically (now 0.0 in
+    // that case). Cleanly separates math from display semantics.
+    int all_wins_run;
 };
 
 //======================================================================================================
@@ -351,6 +358,13 @@ static inline void XGBoost_ComputeMulticlassWeights(const float *labels, int cou
 //======================================================================================================
 // [STATS COMPUTE]
 //======================================================================================================
+// v5.8.4c: per-metric Compute_* helpers + MaxDrawdown_UpdateIncremental
+// live in CoreFrameworks/MetricCompute.hpp (included via
+// ShardedSnapshot.hpp / EngineTUI.hpp's transitive includes). Single
+// source of truth across backtest, live TUI, and per-core snapshot
+// paths — kills the 4-site profit_factor drift + 3-site expectancy
+// fabs() inconsistency + 2-site max_drawdown reimplementation.
+//======================================================================================================
 static inline void BacktestStats_Compute(BacktestStats *stats,
                                           const PortfolioController<BACKTEST_FP> *ctrl,
                                           double starting_balance,
@@ -363,34 +377,19 @@ static inline void BacktestStats_Compute(BacktestStats *stats,
     stats->ticks_processed = ctrl->total_ticks;
     stats->elapsed_ms = elapsed_ms;
 
-    // win rate
-    stats->win_rate = (stats->total_trades > 0)
-        ? (double)stats->wins / stats->total_trades * 100.0
-        : 0.0;
-
-    // averages
+    // v5.8.4c: route every metric through Compute_* helpers (single
+    // source of truth shared with EngineTUI / ShardedSnapshot paths).
     double gw = FPN_ToDouble(ctrl->gross_wins);
     double gl = FPN_ToDouble(ctrl->gross_losses);
     stats->avg_win  = (stats->wins > 0)   ? gw / stats->wins   : 0.0;
     stats->avg_loss = (stats->losses > 0) ? gl / stats->losses : 0.0;
-
-    // profit factor
-    stats->profit_factor = (gl > 0.0001) ? gw / gl : 0.0;
-
-    // expectancy: (win_rate * avg_win) - (loss_rate * avg_loss)
-    double wr = stats->wins > 0 ? (double)stats->wins / stats->total_trades : 0.0;
-    double lr = 1.0 - wr;
-    stats->expectancy = (wr * stats->avg_win) - (lr * fabs(stats->avg_loss));
-
-    // return %
-    stats->return_pct = (starting_balance > 0.0)
-        ? stats->total_pnl / starting_balance * 100.0
-        : 0.0;
-
-    // avg hold ticks
-    stats->avg_hold_ticks = (stats->total_trades > 0)
-        ? (double)ctrl->total_hold_ticks / stats->total_trades
-        : 0.0;
+    stats->win_rate       = Compute_WinRate(stats->wins, stats->total_trades);
+    stats->profit_factor  = Compute_ProfitFactor(gw, gl);
+    stats->all_wins_run   = Compute_AllWinsRun(gw, gl);
+    stats->expectancy     = Compute_Expectancy(stats->total_trades, stats->wins,
+                                                stats->avg_win, stats->avg_loss);
+    stats->return_pct     = Compute_ReturnPct(stats->total_pnl, starting_balance);
+    stats->avg_hold_ticks = Compute_AvgHoldTicks(ctrl->total_hold_ticks, stats->total_trades);
 
     // max drawdown — compute from equity curve in results (caller's job)
     // sharpe — needs equity curve data too
@@ -401,16 +400,14 @@ static inline void BacktestStats_Compute(BacktestStats *stats,
 //======================================================================================================
 static inline void BacktestStats_ComputeFromEquity(BacktestStats *stats,
                                                     const double *equity, int count) {
-    // max drawdown
-    double peak = equity[0];
+    // v5.8.4c: max drawdown via shared MaxDrawdown_UpdateIncremental helper —
+    // BacktestSharded.hpp's per-tick path calls the same helper with the
+    // same scalar update logic. Bytewise FP identity by construction.
+    double peak = (count > 0) ? equity[0] : 0.0;
     double max_dd = 0.0;
     double max_dd_pct = 0.0;
     for (int i = 1; i < count; i++) {
-        if (equity[i] > peak) peak = equity[i];
-        double dd = peak - equity[i];
-        if (dd > max_dd) max_dd = dd;
-        double dd_pct = (peak > 0.0) ? dd / peak : 0.0;
-        if (dd_pct > max_dd_pct) max_dd_pct = dd_pct;
+        MaxDrawdown_UpdateIncremental(equity[i], &peak, &max_dd, &max_dd_pct);
     }
     stats->max_drawdown = max_dd;
     stats->max_drawdown_pct = max_dd_pct * 100.0;

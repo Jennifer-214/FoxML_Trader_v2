@@ -28,6 +28,7 @@
 #include "../CoreFrameworks/PortfolioController.hpp"
 #include "../CoreFrameworks/SPSCRing.hpp"  // v5.0.3: SPSCRing_Depth for Q-depth display
 #include "../CoreFrameworks/OrderGates.hpp"
+#include "../CoreFrameworks/MetricCompute.hpp"  // v5.8.4c: shared metric helpers
 #include "../CoreFrameworks/CoreLatencyStats.hpp"
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -458,7 +459,8 @@ static inline void TUI_Render(EngineTUI *tui, const PortfolioController<F> *ctrl
     double win_rate = (total_exits > 0) ? ((double)ctrl->wins / total_exits) * 100.0 : 0.0;
     double g_wins  = FPN_ToDouble(ctrl->gross_wins);
     double g_losses = FPN_ToDouble(ctrl->gross_losses);
-    double profit_factor = (g_losses > 0.001) ? g_wins / g_losses : 0.0;
+    // v5.8.4c: canonical Compute_ProfitFactor (epsilon=0.0001, no sentinel).
+    double profit_factor = Compute_ProfitFactor(g_wins, g_losses);
     double avg_win  = (ctrl->wins > 0) ? g_wins / ctrl->wins : 0.0;
     double avg_loss = (ctrl->losses > 0) ? g_losses / ctrl->losses : 0.0;
     double avg_hold = (total_exits > 0) ? (double)ctrl->total_hold_ticks / total_exits : 0.0;
@@ -849,6 +851,7 @@ struct TUISnapshot {
     uint32_t paper_reset_seq;
     double win_rate, profit_factor, avg_win, avg_loss, avg_loss_market, avg_hold;
     double expectancy;       // (win_rate * avg_win) - (loss_rate * avg_loss)
+    int all_wins_run;        // v5.8.4c: 1 if wins>0 && losses==0; display layer renders "—" / "∞"
     double max_drawdown;     // peak-to-trough equity drop ($)
     double max_drawdown_pct; // peak-to-trough as % of peak
     double fee_ratio;        // total_fees / gross_wins (% of gains eaten by fees)
@@ -1335,7 +1338,10 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->win_rate      = (total_exits > 0) ? ((double)ctrl->wins / total_exits) * 100.0 : 0.0;
     double g_wins  = FPN_ToDouble(ctrl->gross_wins);
     double g_losses = FPN_ToDouble(ctrl->gross_losses);
-    snap->profit_factor = (g_losses > 0.001) ? g_wins / g_losses : 0.0;
+    // v5.8.4c: canonical helpers (single source of truth across backtest +
+    // live + sharded snapshot paths).
+    snap->profit_factor = Compute_ProfitFactor(g_wins, g_losses);
+    snap->all_wins_run  = Compute_AllWinsRun(g_wins, g_losses);
     snap->avg_win  = (ctrl->wins > 0)  ? g_wins / ctrl->wins : 0.0;
     snap->avg_loss = (ctrl->losses > 0) ? g_losses / ctrl->losses : 0.0;
     // market-only avg loss: subtract estimated round-trip fees per losing exit
@@ -1349,12 +1355,10 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     }
     snap->avg_hold = (total_exits > 0)  ? (double)ctrl->total_hold_ticks / total_exits : 0.0;
 
-    // expectancy: expected $ per trade
-    if (total_exits > 0) {
-      double wr = (double)ctrl->wins / total_exits;
-      double lr = (double)ctrl->losses / total_exits;
-      snap->expectancy = (wr * snap->avg_win) - (lr * snap->avg_loss);
-    } else snap->expectancy = 0.0;
+    // v5.8.4c: canonical Compute_Expectancy (keeps fabs(avg_loss) — defensive).
+    snap->expectancy = Compute_Expectancy((uint32_t)total_exits,
+                                           (uint32_t)ctrl->wins,
+                                           snap->avg_win, snap->avg_loss);
 
     // max drawdown
     snap->max_drawdown = FPN_ToDouble(ctrl->max_drawdown);
