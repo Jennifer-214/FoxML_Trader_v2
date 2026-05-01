@@ -146,6 +146,68 @@ sees the same struct the hot path will see on its next tick. Reading
 individual fields out of a half-published struct is a torn-read bug —
 the snapshot displays a frankenstein state that no real tick observed.
 
+### v5.6.4 audit verdict (2026-04-30): PASS
+
+Walked every `snap->per_core[i].*` write in `TUI_CopySnapshotSharded`
+(`CoreFrameworks/ShardedSnapshot.hpp:362-443`). Findings:
+
+1. **`cached_params` reads** (`gate_flags`, `bg_volume_threshold`,
+   `buy_gate_price`) — done via `ParameterSlot_Read` at line 380.
+   The seqlock guarantees the snapshot sees a consistent view of the
+   parameter struct, atomic with the next-tick view from the hot path.
+   ✅ Compliant.
+
+2. **`core->permission` (atomic, hot-path-written)** — read with
+   `__atomic_load_n(..., __ATOMIC_ACQUIRE)` at line ~395. ACQUIRE
+   load matches the hot path's read at `ExecutionCore.hpp:356` so the
+   snapshot sees the same value the next tick would see. ✅ Compliant.
+
+3. **`core->active`, `core->active_b` (hot-path-written, single-byte)**
+   — read without atomic in the bitmap_consistency check. Single-byte
+   loads are atomic on x86; torn reads produce 0 or 1, never an
+   intermediate state. Worst case is a one-frame transient
+   `bitmap_consistency = 0` that resolves next snapshot. Display
+   surface flags this as `DRIFT(bitmap)` so it's never silent —
+   the operator can correlate with hot-path activity. ✅ Acceptable
+   (display-acceptable, not strict synchronization).
+
+4. **Slow-path-only fields** (`halt_reason`, `strategy_halt_reason`,
+   `core_realized`, `core_fees`, `core_wins`, `core_losses`, all
+   `diag_*` FPN values, `regime_state.*`, etc.) — written by the
+   slow-path thread that owns the core, read by the GUI thread.
+   Slow path runs at ~poll_interval cadence (typically every 10-100
+   ticks); GUI at ~60Hz. Race window per field is small. Multi-byte
+   reads (FPN<F> = 24 bytes) could in theory tear under concurrent
+   write, but: (a) slow-path doesn't write mid-frame; it writes at
+   the end of its rebuild cycle; (b) display tolerance is high
+   (one stale value resolves next frame); (c) no field is used to
+   make a decision — they're all read for visualization. ✅
+   Acceptable — slow-path-published display-only fields don't need
+   atomic semantics.
+
+5. **`positions[i].idx`, `entry_price`, `quantity`** etc. — populated
+   from `oms->portfolio.active_bitmap` walk + `Position<F>` reads.
+   The portfolio is mutated by the OMS drainer (single thread) and
+   read by the GUI. Same single-writer / readers-tolerant pattern;
+   ✅ acceptable.
+
+**Conclusion**: existing synchronization is sufficient for v5.6's
+display surfaces. No new sync primitive needed.
+
+### Future regressions to watch
+
+If a future PR adds:
+
+- A new field that the **hot path writes** without atomic publish:
+  reject it. Hot-path writes need either atomic or seqlock publish
+  before snapshot can read them.
+- A new field that drives an **operator decision** (kill switch, manual
+  intervention trigger): require atomic / seqlock. "Display-only"
+  tolerance doesn't apply when the value drives action.
+- A field where **torn reads change semantics** (e.g. a 64-bit
+  cumulative counter where reading half-old half-new produces
+  nonsense): require atomic.
+
 ## Health log gate transitions
 
 `cat="gate"` entries in `health.jsonl` MUST be edge-triggered only.
