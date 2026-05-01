@@ -314,6 +314,47 @@ jq 'select(.cat == "regime" and .core == 0 and (.msg | contains("new=0") | not))
 
 ## How to add a new strategy
 
+### Post-v5.8.1 (after FOREACH_STRATEGY X-macro registry ships)
+
+```
+1. cp DOCS/STRATEGY_TEMPLATE.hpp Strategies/<Name>.hpp
+   (or Strategies/private/<Name>.hpp for alpha-flavored)
+
+2. Replace <Name> token everywhere in the new file. Implement the
+   four lifecycle functions (Init / Adapt / BuildParameters /
+   ExitAdjustSharded). Match the canonical signatures (see
+   DOCS/EASY_ADDITIONS_INVARIANTS.md).
+
+3. Append one row to FOREACH_STRATEGY(X) in StrategyInterface.hpp:
+
+     X(<NAME>, "<short>", "<full>", <Name>State, \
+       <Name>_Init, <Name>_BuildParameters, \
+       <Name>_Adapt, <Name>_ExitAdjustSharded)
+
+4. Append a strategy color to strat_colors[NUM_STRATEGIES] in
+   GUI/DashboardPanels.hpp (this is the only manual edit beyond the
+   X-macro line).
+
+5. Run: ./build.sh test
+   - Compile errors → typo in step 3 (function name doesn't match
+     the actual definition). Fix.
+   - Tests should pass; the X-macro auto-generates dispatch tables
+     so no manual wiring is needed.
+
+6. Run: ./tools/calls_graph_diff.sh
+   - Output should be CLEAN. If new orphans appear, your
+     X-macro line references a function name that doesn't exist OR
+     a stage isn't being dispatched.
+
+7. Add tests for the new strategy's behavior in
+   tests/controller_test.cpp under the // === EXTENSIBILITY ===
+   group (or strategy-specific group).
+
+DONE. ~3 sites total: file + X-macro line + GUI color.
+```
+
+### Pre-v5.8.1 (current state — before X-macro registry ships)
+
 1. Define `<Strategy>State<F>` struct in `Strategies/<Strategy>.hpp`
 2. Implement all five lifecycle stages (or document skips)
 3. Add dispatcher entry in `Strategies/StrategyParameters.hpp`
@@ -323,6 +364,22 @@ jq 'select(.cat == "regime" and .core == 0 and (.msg | contains("new=0") | not))
 7. Verify all four architectures (legacy, centralized, per_core_slow, backtest)
    call all five stages — run `tools/calls_graph_diff.sh` to confirm no
    stage is orphaned
+
+(8 sites currently. v5.8.1 reduces this to 3 via the X-macro registry.)
+
+## Canonical signatures (audited 2026-05-01)
+
+For the X-macro to write a uniform function pointer table, every
+strategy's lifecycle functions must conform to canonical signatures.
+Drift = compile-time failure when X-macro tries to assign mismatched
+types to a `void (*)(...)` declared with the canonical type.
+
+**Audit results (2026-05-01):**
+
+- `_Init` — uniform across all 5 strategies ✅
+- `_Adapt` — drift in MLStrategy (takes `const void* cfg` for include-cycle workaround). v5.8.1 must add an adapter wrapper `MLStrategy_Adapt_Canonical` for the X-macro to point at. Real function preserved for legacy callers.
+- `_BuildParameters` — uniform for SimpleDip/MeanReversion/Momentum/EmaCross. ML_BuildParameters takes additional `rolling_long` parameter. v5.8.1 either uses case-block dispatch (preserves wider signature) or wraps ML in an adapter. Case-block is simpler.
+- `_ExitAdjustSharded` — uniform across all 5 ✅
 
 ## Naming consistency rule (readiness skill enforcement)
 

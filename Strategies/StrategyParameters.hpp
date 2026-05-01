@@ -58,7 +58,13 @@
 #include "SimpleDip.hpp"          // SimpleDipState<F> — Phase 2.1 state-aware BuildParameters
 #include "MeanReversion.hpp"      // MeanReversionState<F> — Phase 2.2 state-aware BuildParameters
 #include "Momentum.hpp"           // MomentumState<F>     — Phase 2.3 state-aware BuildParameters
-#include "private/EmaCross.hpp"   // EmaCrossState<F>     — Phase 2.4 state-aware BuildParameters
+// v5.8.0 Phase 0: conditional include. Public release snapshots can drop
+// Strategies/private/ and the build still compiles. The X-macro registry
+// (v5.8.1) uses the same __has_include guard to omit EMA_CROSS from
+// FOREACH_STRATEGY when private/EmaCross.hpp is missing.
+#if __has_include("private/EmaCross.hpp")
+#  include "private/EmaCross.hpp"   // EmaCrossState<F>     — Phase 2.4 state-aware BuildParameters
+#endif
 #include "StrategyInterface.hpp"
 
 #include <cstdint>

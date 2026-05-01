@@ -25,6 +25,7 @@ SHARDED_FILES=(
     "CoreFrameworks/EngineSharded.hpp"
     "CoreFrameworks/ShardedBacktestDriver.hpp"
     "Strategies/StrategyParameters.hpp"
+    "Strategies/StrategyLifecycle.hpp"  # v5.4.0+ per-core dispatch
 )
 
 # Extract function calls (Pattern_FunctionName followed by '(') excluding
@@ -65,9 +66,22 @@ SHARDED_CALLS=$(
 )
 
 # Diff: in legacy but not in sharded
-ORPHAN_CANDIDATES=$(comm -23 \
+ORPHAN_CANDIDATES_RAW=$(comm -23 \
     <(echo "$LEGACY_CALLS" | sort -u) \
     <(echo "$SHARDED_CALLS" | sort -u))
+
+# Subtract whitelisted baseline (known-expected legacy orphans).
+# See tools/calls_graph_diff_baseline.txt for the policy + entries.
+# Baseline file uses one symbol per line; # comments + blank lines ignored.
+BASELINE_FILE="$REPO_ROOT/tools/calls_graph_diff_baseline.txt"
+if [[ -f "$BASELINE_FILE" ]]; then
+    BASELINE=$(grep -vE '^\s*(#|$)' "$BASELINE_FILE" | sort -u)
+    ORPHAN_CANDIDATES=$(comm -23 \
+        <(echo "$ORPHAN_CANDIDATES_RAW" | sort -u) \
+        <(echo "$BASELINE"))
+else
+    ORPHAN_CANDIDATES="$ORPHAN_CANDIDATES_RAW"
+fi
 
 # Also detect: functions defined in Strategies/ but called nowhere at all.
 # Different bug class from "orphaned in migration" — these are defined and
@@ -90,9 +104,18 @@ ALL_CALLS=$(
         done
     } | grep -E "$PATTERN_RE" | sort -u
 )
-NEVER_CALLED=$(comm -23 \
+NEVER_CALLED_RAW=$(comm -23 \
     <(echo "$DEFINED_FNS") \
     <(echo "$ALL_CALLS"))
+
+# Same baseline subtraction for dead-defined: legacy variants kept for tests.
+if [[ -f "$BASELINE_FILE" ]]; then
+    NEVER_CALLED=$(comm -23 \
+        <(echo "$NEVER_CALLED_RAW" | sort -u) \
+        <(echo "$BASELINE"))
+else
+    NEVER_CALLED="$NEVER_CALLED_RAW"
+fi
 
 if [[ -z "$ORPHAN_CANDIDATES" && -z "$NEVER_CALLED" ]]; then
     echo "[calls-graph-diff] CLEAN — no strategy/regime functions orphaned or dead-defined"

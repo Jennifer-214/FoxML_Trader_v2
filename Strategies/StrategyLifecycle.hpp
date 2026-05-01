@@ -42,7 +42,10 @@
 #include "MeanReversion.hpp"
 #include "SimpleDip.hpp"
 #include "MLStrategy.hpp"
-#include "private/EmaCross.hpp"
+// v5.8.0 Phase 0: conditional include — see StrategyParameters.hpp comment.
+#if __has_include("private/EmaCross.hpp")
+#  include "private/EmaCross.hpp"
+#endif
 #include "StrategyInterface.hpp"  // STRATEGY_* enum, BuySideGateConditions
 
 namespace tt {
