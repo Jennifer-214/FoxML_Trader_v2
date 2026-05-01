@@ -4,7 +4,7 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 
 **Re-generate**: `./tools/gen_code_map.sh`
 
-**Last regenerated**: 2026-04-30 (commit fba12b6)
+**Last regenerated**: 2026-04-30 (commit 3337cc0)
 
 ## CoreFrameworks/
 
@@ -22,9 +22,9 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 
 ### ControllerConfig.hpp
 
-- `Fee_Compute` — line 578
-- `ControllerConfig_ResolveForCore` — line 596
-- `ControllerConfig_Load` — line 860
+- `Fee_Compute` — line 597
+- `ControllerConfig_ResolveForCore` — line 615
+- `ControllerConfig_Load` — line 888
 
 ### ControllerEventLoop.hpp
 
@@ -49,28 +49,28 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 - `EventLoopState_TradeLog` — line 881
 - `EventLoopState_SetIntendedParams` — line 896
 - `EventLoop_DrainPostFillOneCore` — line 951
-- `EventLoop_DrainPostFill` — line 1073
-- `EventLoop_OnEvent` — line 1107
-- `EventLoop_DrainEvents` — line 1267
-- `EventLoop_QueueParameters` — line 1301
-- `EventLoop_RebuildAllParameters` — line 1334
-- `EventLoop_UpdateRollingStateOneCore` — line 1423
-- `EventLoop_UpdateRollingStateAllCores` — line 1461
-- `EventLoop_UpdateEmaPriceAllCores` — line 1477
-- `EventLoop_RebuildAllParameters_PerCore` — line 1495
-- `EventLoop_RebuildOneCore` — line 1534
-- `EventLoop_PushParameters` — line 2208
-- `EventLoopState_ConfigureKillSwitch` — line 2238
-- `EventLoop_ClearAllPermissions` — line 2248
-- `EventLoop_KillSwitchTrip` — line 2259
-- `EventLoop_KillSwitchEvaluate` — line 2287
-- `EventLoop_TimeExitOneCore` — line 2360
-- `EventLoop_TimeExit` — line 2419
-- `EventLoop_TrailingSLRatchetOneCore` — line 2455
-- `EventLoop_TrailingSLRatchet` — line 2512
-- `EventLoop_Unpause` — line 2527
-- `EventLoop_SlowPath` — line 2550
-- `EventLoop_RunController` — line 2575
+- `EventLoop_DrainPostFill` — line 1128
+- `EventLoop_OnEvent` — line 1162
+- `EventLoop_DrainEvents` — line 1322
+- `EventLoop_QueueParameters` — line 1356
+- `EventLoop_RebuildAllParameters` — line 1389
+- `EventLoop_UpdateRollingStateOneCore` — line 1478
+- `EventLoop_UpdateRollingStateAllCores` — line 1516
+- `EventLoop_UpdateEmaPriceAllCores` — line 1532
+- `EventLoop_RebuildAllParameters_PerCore` — line 1550
+- `EventLoop_RebuildOneCore` — line 1589
+- `EventLoop_PushParameters` — line 2263
+- `EventLoopState_ConfigureKillSwitch` — line 2293
+- `EventLoop_ClearAllPermissions` — line 2303
+- `EventLoop_KillSwitchTrip` — line 2314
+- `EventLoop_KillSwitchEvaluate` — line 2342
+- `EventLoop_TimeExitOneCore` — line 2415
+- `EventLoop_TimeExit` — line 2474
+- `EventLoop_TrailingSLRatchetOneCore` — line 2510
+- `EventLoop_TrailingSLRatchet` — line 2567
+- `EventLoop_Unpause` — line 2582
+- `EventLoop_SlowPath` — line 2605
+- `EventLoop_RunController` — line 2630
 
 ### CoreLatencyStats.hpp
 
@@ -283,10 +283,10 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 - `TickRate_Push` — line 171
 - `TickRate_CurrentZ` — line 198
 - `Regime_ComputeSignals` — line 222
-- `Regime_Init` — line 468
-- `Regime_Classify` — line 498
-- `Regime_ToStrategy` — line 647
-- `Regime_AdjustPositions` — line 665
+- `Regime_Init` — line 475
+- `Regime_Classify` — line 507
+- `Regime_ToStrategy` — line 661
+- `Regime_AdjustPositions` — line 679
 
 ### SimpleDip.hpp
 
@@ -635,14 +635,14 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 - `GUI_Panel_TopBar` — line 195 — PANEL: TOP BAR — key metrics at a glance
 - `GUI_Panel_Market` — line 232 — PANEL: MARKET (merged Market Structure + Regime Signals)
 - `GUI_Panel_BuyGate` — line 438 — PANEL: BUY GATE
-- `GUI_Panel_Account` — line 868 — PANEL: ACCOUNT (merged Portfolio + P&L + Risk)
-- `GUI_Panel_Config` — line 1088 — PANEL: CONFIG
-- `GUI_Panel_Positions` — line 1136 — PANEL: POSITIONS — proper table with aligned columns
-- `GUI_Panel_PerCorePnL` — line 1419 — Pure GUI thread, doesn't touch engine state.
-- `GUI_Panel_Stats` — line 1515 — PANEL: STATS
-- `GUI_Panel_Latency` — line 1603 — PANEL: LATENCY (conditional on LATENCY_PROFILING)
-- `GUI_Panel_MLIntelligence` — line 1659 — PANEL: ML INTELLIGENCE — bandit arms, confidence, cost, model info
-- `GUI_RenderDashboard` — line 1826
+- `GUI_Panel_Account` — line 872 — PANEL: ACCOUNT (merged Portfolio + P&L + Risk)
+- `GUI_Panel_Config` — line 1092 — PANEL: CONFIG
+- `GUI_Panel_Positions` — line 1140 — PANEL: POSITIONS — proper table with aligned columns
+- `GUI_Panel_PerCorePnL` — line 1423 — Pure GUI thread, doesn't touch engine state.
+- `GUI_Panel_Stats` — line 1519 — PANEL: STATS
+- `GUI_Panel_Latency` — line 1607 — PANEL: LATENCY (conditional on LATENCY_PROFILING)
+- `GUI_Panel_MLIntelligence` — line 1663 — PANEL: ML INTELLIGENCE — bandit arms, confidence, cost, model info
+- `GUI_RenderDashboard` — line 1830
 
 ### FoxmlTheme.hpp
 
@@ -650,12 +650,12 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 
 ### GuiThread.hpp
 
-- `Gui_Init` — line 41 — GUI INIT
-- `Gui_Shutdown` — line 147 — GUI SHUTDOWN
-- `Gui_BeginFrame` — line 160 — GUI FRAME
-- `Gui_EndFrame` — line 184
-- `Gui_SetupDefaultLayout` — line 199 — chart 60% left, dashboard panels stacked 40% right
-- `Gui_HandleKeys` — line 249 — GUI KEYBOARD — same controls as ANSI TUI
+- `Gui_Init` — line 42 — GUI INIT
+- `Gui_Shutdown` — line 148 — GUI SHUTDOWN
+- `Gui_BeginFrame` — line 161 — GUI FRAME
+- `Gui_EndFrame` — line 185
+- `Gui_SetupDefaultLayout` — line 200 — chart 60% left, dashboard panels stacked 40% right
+- `Gui_HandleKeys` — line 250 — GUI KEYBOARD — same controls as ANSI TUI
 
 ### LogViewerPanel.hpp
 
@@ -669,6 +669,11 @@ Auto-generated function index. Walks .hpp files in each subsystem and extracts `
 - `Settings_RenderGlobalTab` — line 652 — GLOBAL TAB — renders the auto-generated field_defs[] layout
 - `Settings_RenderPerCoreTab` — line 789
 - `GUI_Panel_Settings` — line 981 — running cores, not cfg-only intent — engine doesn't add/remove cores live.
+
+### StrategyQualityPanel.hpp
+
+- `StrategyQuality_Refresh` — line 138
+- `GUI_Panel_StrategyQuality` — line 215
 
 ### TradeHistoryPanel.hpp
 
