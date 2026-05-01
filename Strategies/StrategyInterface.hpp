@@ -201,48 +201,54 @@ static const int REGIME_STRATEGY_TABLE[] = {
 // else strategy_halt_reason > 0 wins; else gate_flags & BUY_BLOCKED;
 // else "no signal".
 //
-// Adding a new SHALT code: append here, append to shalt_names[]
-// in DashboardPanels.hpp, and update the bound assertion in
-// controller_test.cpp (EXECUTION_DISPLAY section).
+// v5.8.2 — registry-driven via FOREACH_SHALT(X). Adding a new SHALT
+// code is a single-line change here; the GUI mirror in
+// DashboardPanels.hpp now reads SHALT_SHORT_NAMES directly. Bound
+// assertion in controller_test.cpp uses NUM_SHALT_CODES.
+//
+// Row format: X(<id>, <short_name>, <description>)
+// IDs are append-only; never reorder or remove (existing trade logs
+// reference numeric values).
 //======================================================================================================
-constexpr uint8_t SHALT_OK             = 0;
-constexpr uint8_t SHALT_NO_UPTREND     = 1;  // EmaCross / MeanReversion long-trend gate
-constexpr uint8_t SHALT_NO_MEAN_REV    = 2;  // MeanReversion vwap_ok / long_ok / delta_ok
-constexpr uint8_t SHALT_FEE_FLOOR      = 3;  // dispatcher fee-floor BUY_BLOCKED (TP < 3 * fee_taker)
-constexpr uint8_t SHALT_COST_GATE      = 4;  // dispatcher cost-gate BUY_BLOCKED (CostModel)
-constexpr uint8_t SHALT_STDDEV_ZERO    = 5;  // any strategy on dead market (rolling.stddev == 0)
-constexpr uint8_t SHALT_NO_BREAKOUT    = 6;  // Momentum: price hasn't broken above threshold
-constexpr uint8_t SHALT_ML_NO_PRED     = 7;  // ML: zoo unloaded or no inference output
-constexpr uint8_t SHALT_ML_BELOW_THR   = 8;  // ML: prediction below trigger threshold
-constexpr uint8_t SHALT_LOW_CONFIDENCE = 9;  // ConfidenceScorer veto
-constexpr uint8_t SHALT_NO_SIGNAL      = 10; // catch-all for strategy zero-gates that
-                                              // didn't set a more specific code
-// v5.7.5 — MOM-specific quality filter SHALT codes. All gated cfg-side
-// (momentum_min_* fields default 0/off, preserving pre-v5.7 behavior).
-constexpr uint8_t SHALT_MOM_TP_TOO_TIGHT = 11; // momentum_min_tp_margin_pct unmet
-constexpr uint8_t SHALT_MOM_NO_FLOW      = 12; // momentum_min_buy_delta_recent unmet
-constexpr uint8_t SHALT_MOM_LOW_R2       = 13; // momentum_min_r2 unmet
-constexpr uint8_t SHALT_MOM_LAST_LOST    = 14; // momentum_require_last_win + last exit was loss
-constexpr uint8_t SHALT_MAX              = 14; // highest valid code (test bound)
+#define FOREACH_SHALT(X) \
+    X(OK,               "ok",             "all strategies pass") \
+    X(NO_UPTREND,       "no-uptrend",     "EmaCross / MeanReversion long-trend gate") \
+    X(NO_MEAN_REV,      "no-mean-rev",    "MeanReversion vwap_ok / long_ok / delta_ok") \
+    X(FEE_FLOOR,        "fee-floor",      "dispatcher fee-floor BUY_BLOCKED (TP < 3 * fee_taker)") \
+    X(COST_GATE,        "cost-gate",      "dispatcher cost-gate BUY_BLOCKED (CostModel)") \
+    X(STDDEV_ZERO,      "stddev-zero",    "any strategy on dead market (rolling.stddev == 0)") \
+    X(NO_BREAKOUT,      "no-breakout",    "Momentum: price hasn't broken above threshold") \
+    X(ML_NO_PRED,       "ml-no-pred",     "ML: zoo unloaded or no inference output") \
+    X(ML_BELOW_THR,     "ml-below-thr",   "ML: prediction below trigger threshold") \
+    X(LOW_CONFIDENCE,   "low-confidence", "ConfidenceScorer veto") \
+    X(NO_SIGNAL,        "no-signal",      "catch-all for strategy zero-gates without specific code") \
+    X(MOM_TP_TOO_TIGHT, "mom:tp-tight",   "momentum_min_tp_margin_pct unmet") \
+    X(MOM_NO_FLOW,      "mom:no-flow",    "momentum_min_buy_delta_recent unmet") \
+    X(MOM_LOW_R2,       "mom:low-r2",     "momentum_min_r2 unmet") \
+    X(MOM_LAST_LOST,    "mom:last-lost",  "momentum_require_last_win + last exit was loss")
 
-// Names for display, indexed by SHALT_*. Keep in sync with
-// shalt_names[] mirror in DashboardPanels.hpp.
-static const char* SHALT_SHORT_NAMES[] = {
-    "ok",            // 0
-    "no-uptrend",    // 1
-    "no-mean-rev",   // 2
-    "fee-floor",     // 3
-    "cost-gate",     // 4
-    "stddev-zero",   // 5
-    "no-breakout",   // 6
-    "ml-no-pred",    // 7
-    "ml-below-thr",  // 8
-    "low-confidence",// 9
-    "no-signal",     // 10
-    "mom:tp-tight",  // 11 SHALT_MOM_TP_TOO_TIGHT
-    "mom:no-flow",   // 12 SHALT_MOM_NO_FLOW
-    "mom:low-r2",    // 13 SHALT_MOM_LOW_R2
-    "mom:last-lost", // 14 SHALT_MOM_LAST_LOST
+// Auto-generated SHALT_<id> constants. Underlying type uint8_t for
+// compact storage in TradeEvent / per-core snapshot fields.
+enum : uint8_t {
+#define X(id, name, desc) SHALT_##id,
+    FOREACH_SHALT(X)
+#undef X
+    NUM_SHALT_CODES
 };
+
+// Highest valid code. Kept for back-compat with existing test bounds.
+// Equivalent to NUM_SHALT_CODES - 1.
+constexpr uint8_t SHALT_MAX = NUM_SHALT_CODES - 1;
+
+// Names for display, indexed by SHALT_*. Single source of truth —
+// DashboardPanels.hpp references this directly (no mirror).
+static const char* SHALT_SHORT_NAMES[] = {
+#define X(id, name, desc) name,
+    FOREACH_SHALT(X)
+#undef X
+};
+
+static_assert(sizeof(SHALT_SHORT_NAMES) / sizeof(*SHALT_SHORT_NAMES) == NUM_SHALT_CODES,
+              "SHALT_SHORT_NAMES out of sync with NUM_SHALT_CODES");
 
 #endif // STRATEGY_INTERFACE_HPP

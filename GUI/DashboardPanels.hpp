@@ -468,27 +468,10 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
         };
         constexpr int halt_names_count =
             (int)(sizeof(halt_names) / sizeof(halt_names[0]));
-        // v5.6.2/v5.7.5: SHALT_* names for strategy-internal halt reasons.
-        // Mirror of SHALT_SHORT_NAMES in StrategyInterface.hpp — keep in sync.
-        static const char* shalt_names[] = {
-            "ok",            // SHALT_OK = 0
-            "no-uptrend",    // SHALT_NO_UPTREND = 1
-            "no-mean-rev",   // SHALT_NO_MEAN_REV = 2
-            "fee-floor",     // SHALT_FEE_FLOOR = 3
-            "cost-gate",     // SHALT_COST_GATE = 4
-            "stddev-zero",   // SHALT_STDDEV_ZERO = 5
-            "no-breakout",   // SHALT_NO_BREAKOUT = 6
-            "ml-no-pred",    // SHALT_ML_NO_PRED = 7
-            "ml-below-thr",  // SHALT_ML_BELOW_THR = 8
-            "low-confidence",// SHALT_LOW_CONFIDENCE = 9
-            "no-signal",     // SHALT_NO_SIGNAL = 10
-            "mom:tp-tight", // SHALT_MOM_TP_TOO_TIGHT = 11
-            "mom:no-flow",  // SHALT_MOM_NO_FLOW = 12
-            "mom:low-r2",   // SHALT_MOM_LOW_R2 = 13
-            "mom:last-lost",// SHALT_MOM_LAST_LOST = 14
-        };
-        constexpr int shalt_names_count =
-            (int)(sizeof(shalt_names) / sizeof(shalt_names[0]));
+        // v5.8.2: SHALT_* names sourced directly from SHALT_SHORT_NAMES
+        // (StrategyInterface.hpp's FOREACH_SHALT(X) registry). Local
+        // mirror retired — single source of truth.
+        constexpr int shalt_names_count = (int)NUM_SHALT_CODES;
         constexpr uint8_t GUI_GATE_FLAG_BUY_BLOCKED = 0x20;  // mirrors
             // GateParameters.hpp:61. Display-side mirror keeps the GUI
             // module from needing CoreFrameworks/ headers; checked by
@@ -576,7 +559,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                         pc->strategy_halt_reason < shalt_names_count) {
                         ImGui::TextColored(FoxmlColors::yellow,
                             "blocked: %s",
-                            shalt_names[pc->strategy_halt_reason]);
+                            SHALT_SHORT_NAMES[pc->strategy_halt_reason]);
                     } else {
                         ImGui::TextColored(FoxmlColors::yellow, "blocked");
                     }
@@ -591,7 +574,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     // only SHALT_NO_SIGNAL lands here; future per-strategy
                     // codes (NO_UPTREND, NO_MEAN_REV, etc) will too.
                     ImGui::TextColored(FoxmlColors::yellow,
-                        "off: %s", shalt_names[pc->strategy_halt_reason]);
+                        "off: %s", SHALT_SHORT_NAMES[pc->strategy_halt_reason]);
                 } else if (gate_p < 0.01) {
                     // Catch-all when neither halt_reason nor strategy_halt_reason
                     // is set but threshold is zero — should not happen post-v5.6.2
@@ -666,7 +649,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                         pc->strategy_halt_reason < shalt_names_count) {
                         ImGui::TextColored(FoxmlColors::yellow,
                             "BLOCKED: %s",
-                            shalt_names[pc->strategy_halt_reason]);
+                            SHALT_SHORT_NAMES[pc->strategy_halt_reason]);
                     } else {
                         ImGui::TextColored(FoxmlColors::yellow, "BUY_BLOCKED");
                     }
@@ -676,7 +659,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     ImGui::SameLine(0, 15);
                     ImGui::TextColored(FoxmlColors::yellow,
                         "shalt: %s",
-                        shalt_names[pc->strategy_halt_reason]);
+                        SHALT_SHORT_NAMES[pc->strategy_halt_reason]);
                 }
                 // v5.6.1: permission atomic. 0 = entries forbidden by
                 // controller (kill switch / startup gate). The Risk panel
