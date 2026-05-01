@@ -94,6 +94,7 @@ Per-engine slow_state (RollingStats × 4 + RORRegressor + flow + depth) →
 9. No API key for market data WS (public endpoint)
 10. Partial exits: dispatcher post-cap so strategies stay leg-A-only; hot path branch-gates leg B
 11. Smart CPU pinning (v5.1.5): slow-paths avoid SMT siblings of busy threads via /sys topology read
+12. Display ↔ execution invariant (v5.6.0): every term in BG_Evaluate / SG_Evaluate must have a corresponding GUI surface. Adding a new hot-path predicate term requires a `PerCoreSnap` field + a panel render in the same PR. See `DOCS/EXECUTION_DISPLAY_INVARIANTS.md`.
 
 ---
 
