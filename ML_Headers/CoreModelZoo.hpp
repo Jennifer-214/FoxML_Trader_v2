@@ -34,6 +34,8 @@
 #define CORE_MODEL_ZOO_HPP
 
 #include "ModelInference.hpp"
+#include "FeatureRegistry.hpp"  // v5.8.6: FEATURE_REGISTRY_HASH() drift catch
+#include "../Version.hpp"        // v5.8.6: ENGINE_VERSION_STRING for boot log
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -109,11 +111,18 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
     // v5.2.0 held-out gate: verify stamp before loading. Skip in non-strict
     // modes (-1 = explicit skip, 0 = warn-only) to preserve back-compat
     // with un-stamped models. strict=1 = refuse load on any failure.
+    //
+    // v5.8.6: passes FEATURE_REGISTRY_HASH() through so the verifier can
+    // catch train-serve feature-set drift (model trained against a
+    // different FOREACH_FEATURE registry than the current build). Old
+    // stamps without the hash field load with a stderr WARN — the
+    // back-compat path in verify_model_stamp.
     if (held_out_gate_strict != -1) {
         ModelStampResult sr = verify_model_stamp(found_path,
             held_out_stamp_secret ? held_out_stamp_secret : "",
             gap_threshold,
-            MODEL_FORMAT_VERSION);
+            MODEL_FORMAT_VERSION,
+            FEATURE_REGISTRY_HASH());
         if (sr.valid <= 0) {
             if (held_out_gate_strict == 1) {
                 fprintf(stderr,
@@ -126,9 +135,18 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                 "[held-out gate] WARN: %s — %s (strict=0, loading anyway)\n",
                 found_path, sr.reason);
         } else {
+            // v5.8.6: emit a single match-status line so operators can
+            // see at-a-glance whether the loaded model agrees with the
+            // current engine. Stamp's engine_version may be empty for
+            // pre-v5.8.6 stamps; print "unknown" in that case.
+            const char* stamp_eng = sr.engine_version[0] ? sr.engine_version : "unknown";
             fprintf(stderr,
-                "[held-out gate] %s: %s\n",
-                found_path, sr.reason);
+                "[model] %s: trained_engine=%s registry=%016lx (current=%s/%016lx) — %s\n",
+                found_path, stamp_eng,
+                (unsigned long)sr.feature_registry_hash,
+                ENGINE_VERSION_STRING,
+                (unsigned long)FEATURE_REGISTRY_HASH(),
+                sr.reason);
         }
     }
 

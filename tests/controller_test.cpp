@@ -4038,8 +4038,8 @@ int main() {
         // ---- Test 1: full budget remaining → no clamp, no halt ----
         state.cores[slot].core_open_notional = FPN_Zero<64>();
         tt::EventLoop_RebuildAllParameters(&state, &rolling, &cfg);
-        check("budget=full: halt_reason == 0 (not budget-halted)",
-              state.cores[slot].halt_reason != 8);
+        check("budget=full: halt_reason != HALT_CORE_BUDGET (not budget-halted)",
+              state.cores[slot].halt_reason != HALT_CORE_BUDGET);
         // qty should equal 1000 / (60000 × (1 - 0.001)) ≈ 0.01668
         double tsize_full = FPN_ToDouble(state.cores[slot].pending_params.trade_size);
         check("budget=full: trade_size matches strategy math (~0.0167)",
@@ -4050,8 +4050,8 @@ int main() {
         // remaining = $500. Expected: trade_size = 500 / 59940 ≈ 0.00834.
         state.cores[slot].core_open_notional = FPN_FromDouble<64>(500.0);
         tt::EventLoop_RebuildAllParameters(&state, &rolling, &cfg);
-        check("budget=half: halt_reason != 8 (still has room)",
-              state.cores[slot].halt_reason != 8);
+        check("budget=half: halt_reason != HALT_CORE_BUDGET (still has room)",
+              state.cores[slot].halt_reason != HALT_CORE_BUDGET);
         double tsize_half = FPN_ToDouble(state.cores[slot].pending_params.trade_size);
         check("budget=half: trade_size clamped to ~half (~0.00834)",
               tsize_half > 0.008 && tsize_half < 0.009);
@@ -4059,8 +4059,8 @@ int main() {
         // ---- Test 3: budget fully deployed → halt fires + qty=0 ----
         state.cores[slot].core_open_notional = FPN_FromDouble<64>(1000.0);
         tt::EventLoop_RebuildAllParameters(&state, &rolling, &cfg);
-        check("budget=exhausted: halt_reason == 8 (core-budget)",
-              state.cores[slot].halt_reason == 8);
+        check("budget=exhausted: halt_reason == HALT_CORE_BUDGET",
+              state.cores[slot].halt_reason == HALT_CORE_BUDGET);
         check("budget=exhausted: trade_size clamped to 0",
               FPN_IsZero(state.cores[slot].pending_params.trade_size));
         check("budget=exhausted: bg_price_threshold zero-gated",
@@ -4072,8 +4072,8 @@ int main() {
         // remaining is zero and halt fires.
         state.cores[slot].core_open_notional = FPN_FromDouble<64>(1500.0);
         tt::EventLoop_RebuildAllParameters(&state, &rolling, &cfg);
-        check("budget=over: halt_reason == 8 (saturating subtraction safe)",
-              state.cores[slot].halt_reason == 8);
+        check("budget=over: halt_reason == HALT_CORE_BUDGET (saturating subtraction safe)",
+              state.cores[slot].halt_reason == HALT_CORE_BUDGET);
         check("budget=over: trade_size still 0",
               FPN_IsZero(state.cores[slot].pending_params.trade_size));
 
@@ -4091,7 +4091,7 @@ int main() {
         state.cores[slot1].core_open_notional = FPN_Zero<64>();
         tt::EventLoop_RebuildAllParameters(&state, &rolling, &cfg);
         check("multi-core: core 0 still budget-halted",
-              state.cores[slot].halt_reason == 8);
+              state.cores[slot].halt_reason == HALT_CORE_BUDGET);
         check("multi-core: core 1 not halted (independent budget)",
               state.cores[slot1].halt_reason != 8);
         double t1 = FPN_ToDouble(state.cores[slot1].pending_params.trade_size);
@@ -4204,8 +4204,8 @@ int main() {
                   r->state.cores[0].core_kill_tripped == 1);
             check("trip: ks_trips_total bumped",
                   r->state.cores[0].core_ks_trips_total == 1);
-            check("trip: halt_reason == 9 (core-kill)",
-                  r->state.cores[0].halt_reason == 9);
+            check("trip: halt_reason == HALT_CORE_KILL",
+                  r->state.cores[0].halt_reason == HALT_CORE_KILL);
             check("trip: bg_price_threshold zero-gated",
                   FPN_IsZero(r->state.cores[0].pending_params.bg_price_threshold));
         }
@@ -4288,8 +4288,8 @@ int main() {
             // Set a small allocated balance to ensure peak doesn't override
             r->state.cores[0].core_kill_tripped = 1;  // pre-tripped
             tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
-            check("pre-tripped: halt_reason == 9 immediately",
-                  r->state.cores[0].halt_reason == 9);
+            check("pre-tripped: halt_reason == HALT_CORE_KILL immediately",
+                  r->state.cores[0].halt_reason == HALT_CORE_KILL);
             check("pre-tripped: bg_price_threshold zero-gated",
                   FPN_IsZero(r->state.cores[0].pending_params.bg_price_threshold));
         }
@@ -5444,8 +5444,8 @@ e3_skip_load:;
               (state.cores[0].pending_params.flags & tt::GATE_FLAG_BUY_BLOCKED) != 0);
         check("low book_imbalance: core 1 BUY_BLOCKED flag set",
               (state.cores[1].pending_params.flags & tt::GATE_FLAG_BUY_BLOCKED) != 0);
-        check("low book_imbalance: halt_reason=10 (book-imbalance) on core 0",
-              state.cores[0].halt_reason == 10);
+        check("low book_imbalance: halt_reason == HALT_IMBALANCE on core 0",
+              state.cores[0].halt_reason == HALT_IMBALANCE);
 
         // Case 2: book_imbalance=0.20 (above 0.10 threshold) → NOT blocked
         FPN<64> high_imb = FPN_FromDouble<64>(0.20);
@@ -9567,6 +9567,92 @@ e3_skip_load:;
         bs.all_wins_run = 1;
         check("v5.8.4c: BacktestStats has all_wins_run field",
               bs.all_wins_run == 1);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.8.6 stamp engine_version + registry hash drift catch ---\n");
+    {
+        const char* tmp_model = "/tmp/v5_8_6_drift_test.bin";
+        const char* tmp_stamp = "/tmp/v5_8_6_drift_test.bin.stamp";
+
+        FILE* mf = fopen(tmp_model, "wb");
+        if (mf) {
+            const char* dummy_payload = "MOCKMODEL_586";
+            fwrite(dummy_payload, 1, strlen(dummy_payload), mf);
+            fclose(mf);
+
+            uint64_t current_hash = FEATURE_REGISTRY_HASH();
+
+            // 1. New-style stamp: engine_version + matching hash → loads cleanly
+            //    via the production-shaped path (CoreModelZoo will pass current
+            //    hash + format version). Uses ENGINE_VERSION_STRING from
+            //    Version.hpp rather than hardcoding the literal so future
+            //    version bumps don't drift this test.
+            StampWriteResult wr = stamp_write_for_model(
+                tmp_model, /*secret=*/"",
+                /*format_version=*/MODEL_FORMAT_VERSION,
+                /*trained_on=*/"2026-05-01",
+                /*wf_mean=*/0.55, /*held_out=*/0.53,
+                /*gap_threshold=*/0.05, /*force=*/0,
+                /*feature_registry_hash=*/current_hash,
+                /*engine_version=*/ENGINE_VERSION_STRING);
+            check("v5.8.6: stamp_write_for_model accepts engine_version",
+                  wr.ok == 1);
+
+            ModelStampResult vr1 = verify_model_stamp(
+                tmp_model, /*secret=*/"",
+                /*gap_threshold=*/0.05,
+                /*expected_format_version=*/MODEL_FORMAT_VERSION,
+                /*expected_feature_registry_hash=*/current_hash);
+            check("v5.8.6: verifier reads engine_version from stamp body (matches ENGINE_VERSION_STRING)",
+                  vr1.valid == 1 && strcmp(vr1.engine_version, ENGINE_VERSION_STRING) == 0);
+
+            // 2. Mismatched registry hash → REJECT (drift catch fires).
+            //    The mismatch is exactly what would happen if a model was
+            //    trained against a different FOREACH_FEATURE registry than
+            //    the one the loading engine has.
+            ModelStampResult vr2 = verify_model_stamp(
+                tmp_model, /*secret=*/"",
+                /*gap_threshold=*/0.05,
+                /*expected_format_version=*/MODEL_FORMAT_VERSION,
+                /*expected_feature_registry_hash=*/0xdeadbeefcafebabeULL);
+            check("v5.8.6: verifier REJECTS mismatched registry hash (drift)",
+                  vr2.valid == 0 &&
+                  strstr(vr2.reason, "feature-registry-hash mismatch") != nullptr);
+
+            // 3. Legacy stamp (no hash field) loaded with non-zero expected hash:
+            //    accept with stderr WARN, NOT reject. Preserves back-compat for
+            //    pre-v5.8.1a stamps. Re-write the stamp without the hash field.
+            StampWriteResult wr_legacy = stamp_write_for_model(
+                tmp_model, /*secret=*/"",
+                /*format_version=*/MODEL_FORMAT_VERSION,
+                /*trained_on=*/"2026-05-01",
+                /*wf_mean=*/0.55, /*held_out=*/0.53,
+                /*gap_threshold=*/0.05, /*force=*/0,
+                /*feature_registry_hash=*/0,    // omit → no field in stamp body
+                /*engine_version=*/nullptr);
+            check("v5.8.6: legacy-shape stamp (no hash, no engine_version) writes",
+                  wr_legacy.ok == 1);
+
+            ModelStampResult vr3 = verify_model_stamp(
+                tmp_model, /*secret=*/"",
+                /*gap_threshold=*/0.05,
+                /*expected_format_version=*/MODEL_FORMAT_VERSION,
+                /*expected_feature_registry_hash=*/current_hash);
+            check("v5.8.6: legacy stamp + non-zero expected hash → ACCEPT (warn, not reject)",
+                  vr3.valid == 1);
+            check("v5.8.6: legacy stamp parses engine_version as empty string",
+                  vr3.engine_version[0] == '\0');
+
+            // 4. ENGINE_VERSION_STRING from Version.hpp is a valid SemVer string
+            //    (sanity — guards against accidental empty/null at compile time).
+            check("v5.8.6: ENGINE_VERSION_STRING non-empty",
+                  ENGINE_VERSION_STRING && ENGINE_VERSION_STRING[0] != '\0');
+
+            unlink(tmp_model);
+            unlink(tmp_stamp);
+        } else {
+            check("v5.8.6: tmp model file creation", 0);
+        }
     }
 
     printf("\n======================================\n");

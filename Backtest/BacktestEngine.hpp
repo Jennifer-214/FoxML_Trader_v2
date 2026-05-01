@@ -19,6 +19,8 @@
 #include "../CoreFrameworks/MetricCompute.hpp"  // v5.8.4c: shared metric helpers
 #include "../DataStream/TradeLog.hpp"
 #include "../ML_Headers/ModelInference.hpp"
+#include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.6: FEATURE_REGISTRY_HASH() for auto-stamp
+#include "../Version.hpp"                      // v5.8.6: ENGINE_VERSION_STRING for auto-stamp
 #include "../GUI/CandleAccumulator.hpp"
 #include "LabelFunctions.hpp"
 #include "BacktestSnapshot.hpp"
@@ -781,6 +783,9 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         localtime_r(&now, &tm_buf);
         strftime(today, sizeof(today), "%Y-%m-%d", &tm_buf);
 
+        // v5.8.6: embed FEATURE_REGISTRY_HASH() + ENGINE_VERSION_STRING so the
+        // load-time verifier can catch train-serve drift + the operator sees
+        // which engine version the model was trained against.
         StampWriteResult sr = stamp_write_for_model(
             out->auto_stamp_path,
             out->auto_stamp_secret,
@@ -790,7 +795,9 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             wf_metric,
             (double)out->held_out_metric,
             (double)gap_threshold,
-            /*force=*/0);
+            /*force=*/0,
+            /*feature_registry_hash=*/FEATURE_REGISTRY_HASH(),
+            /*engine_version=*/ENGINE_VERSION_STRING);
         out->auto_stamp_attempted = 1;
         out->auto_stamp_ok = sr.ok;
         if (sr.ok) {
