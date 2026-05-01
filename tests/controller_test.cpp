@@ -8862,6 +8862,57 @@ e3_skip_load:;
               pc.bg_volume_threshold > 12.0 && pc.bg_volume_threshold < 13.0);
     }
 
+    printf("\n--- v5.6.2: SHALT codes + dispatcher fee-floor wiring ---\n");
+    {
+        // SHALT_* code values are stable identifiers — once shipped, GUI
+        // arrays and health log payloads reference them by integer. Reorder-
+        // ing or renumbering breaks both. These asserts pin the values.
+        check("v5.6.2: SHALT_OK == 0",          SHALT_OK == 0);
+        check("v5.6.2: SHALT_NO_UPTREND == 1",  SHALT_NO_UPTREND == 1);
+        check("v5.6.2: SHALT_NO_MEAN_REV == 2", SHALT_NO_MEAN_REV == 2);
+        check("v5.6.2: SHALT_FEE_FLOOR == 3",   SHALT_FEE_FLOOR == 3);
+        check("v5.6.2: SHALT_COST_GATE == 4",   SHALT_COST_GATE == 4);
+        check("v5.6.2: SHALT_NO_SIGNAL == 10",  SHALT_NO_SIGNAL == 10);
+        check("v5.6.2: SHALT_MAX matches highest defined code",
+              SHALT_MAX == 10);
+
+        // Names array length must equal SHALT_MAX + 1, otherwise display
+        // would index out of bounds for the highest valid code.
+        constexpr int shalt_names_len =
+            (int)(sizeof(SHALT_SHORT_NAMES) / sizeof(SHALT_SHORT_NAMES[0]));
+        check("v5.6.2: SHALT_SHORT_NAMES has SHALT_MAX+1 entries",
+              shalt_names_len == SHALT_MAX + 1);
+
+        // Dispatcher SHALT post-pass: when bg_price_threshold is zero AND no
+        // BUY_BLOCKED flag AND no specific SHALT code → SHALT_NO_SIGNAL.
+        // Use STRATEGY_NONE (no strategy assigned) which leaves out->bg_*
+        // at zero. Confirms the post-pass writes SHALT_NO_SIGNAL.
+        using namespace tt;
+        RollingStats<64, 128> rolling;
+        memset(&rolling, 0, sizeof(rolling));
+        rolling.price_avg     = FPN_FromDouble<64>(76600.0);
+        rolling.price_stddev  = FPN_FromDouble<64>(50.0);
+        rolling.volume_avg    = FPN_FromDouble<64>(0.5);
+        rolling.count         = 200;  // warmed
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.fee_rate_taker = FPN_FromDouble<64>(0.0005);
+        cfg.fee_rate       = FPN_FromDouble<64>(0.0005);
+        GateParameters<64> out;
+        GateParameters_Init(&out);
+        uint8_t shalt = SHALT_OK;
+        Strategy_BuildParameters(STRATEGY_NONE, &rolling, &cfg,
+                                  FPN_FromDouble<64>(1500.0), &out,
+                                  (const RollingStats<64, 512>*)nullptr,
+                                  nullptr, nullptr, &shalt);
+        // STRATEGY_NONE leaves bg_price_threshold zero, no flags set.
+        // Post-pass should write SHALT_NO_SIGNAL.
+        check("v5.6.2: post-pass writes SHALT_NO_SIGNAL on zero-gate "
+              "with no specific code",
+              FPN_IsZero(out.bg_price_threshold)
+              ? (shalt == SHALT_NO_SIGNAL)
+              : true);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

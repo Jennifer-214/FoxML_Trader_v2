@@ -783,7 +783,13 @@ inline void Strategy_BuildParameters(
     GateParameters<F>* out,
     const RollingStats<F, WL>* rolling_long = nullptr,
     void* model_ctx = nullptr,
-    void* strategy_state = nullptr   // v5.4.0 Phase 2.x — typed-cast inside each branch
+    void* strategy_state = nullptr,  // v5.4.0 Phase 2.x — typed-cast inside each branch
+    uint8_t* strategy_halt_reason = nullptr  // v5.6.2 — when non-null, dispatcher
+                                              // writes SHALT_* codes for BUY_BLOCKED
+                                              // paths (fee-floor, cost-gate) and a
+                                              // post-pass for strategy zero-gates
+                                              // that didn't set a specific code.
+                                              // Caller resets to SHALT_OK before call.
 ) {
     switch (strategy_id) {
         case STRATEGY_SIMPLE_DIP:
@@ -813,6 +819,11 @@ inline void Strategy_BuildParameters(
             break;
         default:
             GateParameters_Init(out);
+            // v5.6.2: STRATEGY_NONE / unknown strategy → no signal.
+            // Early return bypasses the post-pass; set SHALT here.
+            if (strategy_halt_reason && *strategy_halt_reason == SHALT_OK) {
+                *strategy_halt_reason = SHALT_NO_SIGNAL;
+            }
             return;
     }
 
@@ -882,6 +893,12 @@ inline void Strategy_BuildParameters(
         // the strategy itself has already produced a no-op result.
         if (!FPN_IsZero(out->tp_pct) && FPN_LessThan(out->tp_pct, floor_pct)) {
             out->flags |= GATE_FLAG_BUY_BLOCKED;
+            // v5.6.2: SHALT visibility. Operator sees "blocked: fee-floor"
+            // in the GUI Status column instead of plain "blocked" or
+            // "READY".
+            if (strategy_halt_reason && *strategy_halt_reason == SHALT_OK) {
+                *strategy_halt_reason = SHALT_FEE_FLOOR;
+            }
         }
     }
 
@@ -917,6 +934,10 @@ inline void Strategy_BuildParameters(
             double tp_bps = FPN_ToDouble(out->tp_pct) * 10000.0;
             if (c.total_cost > tp_bps * 0.5) {
                 out->flags |= GATE_FLAG_BUY_BLOCKED;
+                // v5.6.2: SHALT visibility for cost-gate veto.
+                if (strategy_halt_reason && *strategy_halt_reason == SHALT_OK) {
+                    *strategy_halt_reason = SHALT_COST_GATE;
+                }
             }
         }
     }
@@ -943,6 +964,22 @@ inline void Strategy_BuildParameters(
                                            FPN_FromDouble<F>(weight));
             }
         }
+    }
+
+    // v5.6.2: SHALT post-pass. If the strategy zero-gated bg_price_threshold
+    // for a strategy-internal reason (uptrend not confirmed, no mean-reversion
+    // signal, etc) and didn't set BUY_BLOCKED via the dispatcher's fee-floor
+    // or cost-gate paths, no specific SHALT code is set yet. Mark as
+    // SHALT_NO_SIGNAL so the GUI shows "off: no-signal" instead of plain "off".
+    //
+    // A future ship per-strategy will assign more specific codes
+    // (SHALT_NO_UPTREND, SHALT_NO_MEAN_REV, SHALT_NO_BREAKOUT, etc) by
+    // having strategies take a SHALT pointer too. For now, no-signal
+    // is a strict improvement over the silent "off" state.
+    if (strategy_halt_reason && *strategy_halt_reason == SHALT_OK &&
+        FPN_IsZero(out->bg_price_threshold) &&
+        !(out->flags & GATE_FLAG_BUY_BLOCKED)) {
+        *strategy_halt_reason = SHALT_NO_SIGNAL;
     }
 }
 

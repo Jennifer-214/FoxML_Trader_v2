@@ -942,6 +942,12 @@ struct TUISnapshot {
                                         // Source: CoreContext::halt_reason. Names array
                                         // in DashboardPanels.hpp must stay in sync; bound
                                         // check is sizeof(halt_names)/sizeof(halt_names[0]).
+        uint8_t  strategy_halt_reason; // v5.6.2: strategy-internal halt reason. Codes
+                                        // defined in StrategyInterface.hpp (SHALT_*).
+                                        // Set by strategy _BuildParameters before
+                                        // Gate_Zero / BUY_BLOCKED. Display priority:
+                                        // halt_reason > 0 wins; else this; else
+                                        // gate_flags & BUY_BLOCKED; else "no signal".
         uint8_t  gate_flags;           // v5.6.0: snapshot of cached_params.flags so the
                                         // GUI can render BUY_BLOCKED / VOLUME_REQUIRED /
                                         // TP_ENABLED / SL_ENABLED / BUY_ABOVE / PAIR_ACTIVE.

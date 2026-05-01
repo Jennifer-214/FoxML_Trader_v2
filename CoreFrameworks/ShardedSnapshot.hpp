@@ -373,6 +373,11 @@ static inline void TUI_CopySnapshotSharded(
         snap->per_core[i].gate_direction = (dir_strat == STRATEGY_MOMENTUM) ? 1 : 0;
         // v4.0.4: per-core diagnostic state for Buy Gate panel
         snap->per_core[i].halt_reason            = state->cores[i].halt_reason;
+        // v5.6.2: strategy-internal halt reason (SHALT_*). Distinct from
+        // halt_reason — set by strategy _BuildParameters when zero-gating
+        // for strategy-specific reasons (no uptrend, fee-floor BUY_BLOCKED,
+        // ML below threshold, etc).
+        snap->per_core[i].strategy_halt_reason   = state->cores[i].strategy_halt_reason;
         snap->per_core[i].sl_cooldown_remaining  = state->cores[i].sl_cooldown_remaining;
         // v4.0.4: per-core P&L for Account panel breakdown
         snap->per_core[i].core_realized      = FPN_ToDouble(state->cores[i].core_realized);

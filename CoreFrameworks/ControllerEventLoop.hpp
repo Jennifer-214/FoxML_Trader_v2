@@ -198,8 +198,15 @@ struct CoreContext {
     // v4.0.3 D8 halt reason: most recent reason the gate was zero-gated.
     // 0 = ok / armed; 1 = spacing; 2 = vwap; 3 = long-slope; 4 = vol-delta;
     // 5 = min-stddev; 6 = sl-cooldown; 7 = warmup; 8 = core-budget (Phase 2.2);
-    // 9 = core-kill (Phase 3). Displayed in GUI per core.
+    // 9 = core-kill (Phase 3); 10 = imbalance (Track E.3, surfaced v5.6.0).
+    // Displayed in GUI per core.
     uint8_t  halt_reason;
+    // v5.6.2: strategy-internal halt reason. Distinct from halt_reason
+    // (controller-level). Each strategy's _BuildParameters sets this
+    // to a SHALT_* code (see StrategyInterface.hpp) before zero-gating
+    // or setting BUY_BLOCKED. SHALT_OK = no strategy-level veto.
+    // GUI display order: halt_reason > 0 > strategy_halt_reason > 0.
+    uint8_t  strategy_halt_reason;
     // v4.0.3 B: per-core regime state for STRATEGY_AUTO. Tracks current
     // regime + hysteresis so the auto-mode core's strategy choice doesn't
     // flap on noise. Each AUTO core has its own state — different cores
@@ -1779,7 +1786,10 @@ inline void EventLoop_RebuildOneCore(
             &state->cores[slot].pending_params,
             rolling_long,
             dispatch_ctx,
-            state->cores[slot].strategy_state    // v5.4.0 Phase 2.1 — typed-cast inside dispatcher
+            state->cores[slot].strategy_state,   // v5.4.0 Phase 2.1 — typed-cast inside dispatcher
+            &state->cores[slot].strategy_halt_reason  // v5.6.2 — dispatcher writes
+                                                       // SHALT_* codes for fee-floor /
+                                                       // cost-gate / no-signal paths.
         );
 
         // v4.0.3 D9: clear ratchet_sl when no position active on this core,
@@ -1813,6 +1823,10 @@ inline void EventLoop_RebuildOneCore(
         //          5=min-stddev, 6=sl-cooldown, 7=warmup, 8=core-budget,
         //          9=core-kill, 10=book-imbalance (Track E.3)
         state->cores[slot].halt_reason = 0;
+        // v5.6.2: reset strategy_halt_reason every rebuild. Strategies
+        // set this to a SHALT_* code when zero-gating for strategy-
+        // internal reasons. SHALT_OK = no veto.
+        state->cores[slot].strategy_halt_reason = SHALT_OK;
         // v5.5.1 (Bug B-FLAT — addressed the "latent zero_gate bug" called out
         // in the Track E.3 comment below). Pre-fix: zero_gate set
         // bg_price_threshold = 0 to disable entries. This works for buy-below

@@ -468,6 +468,23 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
         };
         constexpr int halt_names_count =
             (int)(sizeof(halt_names) / sizeof(halt_names[0]));
+        // v5.6.2: SHALT_* names for strategy-internal halt reasons. Mirror
+        // of SHALT_SHORT_NAMES in StrategyInterface.hpp — keep in sync.
+        static const char* shalt_names[] = {
+            "ok",            // SHALT_OK = 0
+            "no-uptrend",    // SHALT_NO_UPTREND = 1
+            "no-mean-rev",   // SHALT_NO_MEAN_REV = 2
+            "fee-floor",     // SHALT_FEE_FLOOR = 3
+            "cost-gate",     // SHALT_COST_GATE = 4
+            "stddev-zero",   // SHALT_STDDEV_ZERO = 5
+            "no-breakout",   // SHALT_NO_BREAKOUT = 6
+            "ml-no-pred",    // SHALT_ML_NO_PRED = 7
+            "ml-below-thr",  // SHALT_ML_BELOW_THR = 8
+            "low-confidence",// SHALT_LOW_CONFIDENCE = 9
+            "no-signal",     // SHALT_NO_SIGNAL = 10
+        };
+        constexpr int shalt_names_count =
+            (int)(sizeof(shalt_names) / sizeof(shalt_names[0]));
         constexpr uint8_t GUI_GATE_FLAG_BUY_BLOCKED = 0x20;  // mirrors
             // GateParameters.hpp:61. Display-side mirror keeps the GUI
             // module from needing CoreFrameworks/ headers; checked by
@@ -549,13 +566,35 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                 } else if (pc->permission == 0) {
                     ImGui::TextColored(FoxmlColors::yellow, "PERM_OFF");
                 } else if (pc->gate_flags & GUI_GATE_FLAG_BUY_BLOCKED) {
-                    ImGui::TextColored(FoxmlColors::yellow, "blocked");
+                    // v5.6.2: prefer the specific SHALT code (fee-floor /
+                    // cost-gate) over generic "blocked" when set.
+                    if (pc->strategy_halt_reason > 0 &&
+                        pc->strategy_halt_reason < shalt_names_count) {
+                        ImGui::TextColored(FoxmlColors::yellow,
+                            "blocked: %s",
+                            shalt_names[pc->strategy_halt_reason]);
+                    } else {
+                        ImGui::TextColored(FoxmlColors::yellow, "blocked");
+                    }
                 } else if (pc->halt_reason > 0 &&
                            pc->halt_reason < halt_names_count) {
                     ImGui::TextColored(FoxmlColors::yellow,
                         "off: %s", halt_names[pc->halt_reason]);
+                } else if (pc->strategy_halt_reason > 0 &&
+                           pc->strategy_halt_reason < shalt_names_count) {
+                    // v5.6.2: strategy zero-gated for a strategy-internal
+                    // reason that didn't go through BUY_BLOCKED. Today
+                    // only SHALT_NO_SIGNAL lands here; future per-strategy
+                    // codes (NO_UPTREND, NO_MEAN_REV, etc) will too.
+                    ImGui::TextColored(FoxmlColors::yellow,
+                        "off: %s", shalt_names[pc->strategy_halt_reason]);
                 } else if (gate_p < 0.01) {
-                    ImGui::TextColored(FoxmlColors::yellow, "off: no signal");
+                    // Catch-all when neither halt_reason nor strategy_halt_reason
+                    // is set but threshold is zero — should not happen post-v5.6.2
+                    // (SHALT_NO_SIGNAL is the post-pass fallback). If you see this,
+                    // a code path is producing a zero gate without setting any
+                    // reason — treat as drift.
+                    ImGui::TextColored(FoxmlColors::yellow, "off: ???");
                 } else {
                     int price_ok = pc->gate_direction
                         ? (s->price >= gate_p)
@@ -613,13 +652,27 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     ImGui::TextColored(FoxmlColors::yellow,
                         "halted: %s", halt_names[pc->halt_reason]);
                 }
-                // v5.6.1: BUY_BLOCKED flag readout. Independent of halt_reason —
-                // strategy-level fee-floor + cost-gate set BUY_BLOCKED without
-                // setting halt_reason. v5.6.2 will replace this with a more
-                // specific strategy_halt_reason name.
+                // v5.6.1/2: BUY_BLOCKED flag readout. Independent of halt_reason —
+                // strategy-level fee-floor + cost-gate set BUY_BLOCKED. When a
+                // SHALT code is also set, show the specific reason
+                // (fee-floor / cost-gate / etc); otherwise show the bare flag.
                 if (pc->gate_flags & GUI_GATE_FLAG_BUY_BLOCKED) {
                     ImGui::SameLine(0, 15);
-                    ImGui::TextColored(FoxmlColors::yellow, "BUY_BLOCKED");
+                    if (pc->strategy_halt_reason > 0 &&
+                        pc->strategy_halt_reason < shalt_names_count) {
+                        ImGui::TextColored(FoxmlColors::yellow,
+                            "BLOCKED: %s",
+                            shalt_names[pc->strategy_halt_reason]);
+                    } else {
+                        ImGui::TextColored(FoxmlColors::yellow, "BUY_BLOCKED");
+                    }
+                } else if (pc->strategy_halt_reason > 0 &&
+                           pc->strategy_halt_reason < shalt_names_count) {
+                    // SHALT set but no BUY_BLOCKED → strategy-zero-gated.
+                    ImGui::SameLine(0, 15);
+                    ImGui::TextColored(FoxmlColors::yellow,
+                        "shalt: %s",
+                        shalt_names[pc->strategy_halt_reason]);
                 }
                 // v5.6.1: permission atomic. 0 = entries forbidden by
                 // controller (kill switch / startup gate). The Risk panel
