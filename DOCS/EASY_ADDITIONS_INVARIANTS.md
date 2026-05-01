@@ -43,18 +43,18 @@ of the registry picks up the new entry automatically.
 
 ---
 
-## Audited categories — current state and post-v5.8 target
+## Audited categories — pre-v5.8 → post-v5.8 (all shipped)
 
-| Category | Current sites | Post-v5.8 target | Phase | Notes |
+| Category | Pre-v5.8 sites | Post-v5.8 sites | Shipped in | Notes |
 |---|---|---|---|---|
-| Strategies | 8 | 3 | v5.8.0 | strategy file + X-macro line + GUI color (color is the only manual step) |
-| ML features | 5-7 | 2 | v5.8.2 | compute fn + X-macro line |
-| SHALT codes | 4 | 1 | v5.8.3 | one X-macro row, names auto-generated |
-| Controller halt_reason | 3 | 1 | v5.8.4 | same |
-| Regimes | 5 | 1 | v5.8.5 | one X-macro row |
-| Targets (label_table) | already 2 | 2 | n/a (existing) | reuses existing `label_table[]` in LabelFunctions.hpp |
-| Stateful GUI panels | 4 | 2 | v5.8.4b | only 4 of 14 panels are stateful — only those benefit |
-| Backtest metrics | 5 | 2 | v5.8.4c | includes `OPT_METRIC_*` enum + `Backtest_RunSweep` dispatch |
+| Strategies | 8 | 3 | v5.8.0 | strategy file + `FOREACH_STRATEGY(X)` line + GUI color |
+| ML features | 5-7 (per feature) | 2 | v5.8.1a + v5.8.1b | compute fn + `FOREACH_FEATURE(X)` line. Phase 2 split: 5.8.1a built infra + first 10; 5.8.1b migrated remaining 24 + flipped 5 callers + retired `ModelFeatures_Pack` |
+| SHALT codes | 4 | 1 | v5.8.2 | one `FOREACH_SHALT(X)` row, names auto-gen, GUI mirror dropped |
+| Controller halt_reason | 3 (+ 12 raw int sites) | 1 | v5.8.3 | one `FOREACH_HALT_REASON(X)` row + introduced `HALT_*` named constants from prior raw integers (3 direct + 8 indirect via `zero_gate(N)` lambda); `HALT_WARMUP=7` documented as reserved-but-unused |
+| Regimes | 5 | 1 | v5.8.4 | one `FOREACH_REGIME(X)` row; `__has_include` fallback for `MILD_TREND_DEFAULT_STRATEGY` keeps public-release builds compiling |
+| Stateful GUI panels | 4 | 2 | v5.8.4b | one `FOREACH_PANEL(X)` row + `_Init` stub. Only 4 of 14 panels are stateful — stateless 10 keep direct `GUI_Panel_X(snap)` calls. Render dispatch stays hand-coded (signatures non-uniform) — uniformization deferred to render-thread I/O cleanup |
+| Backtest metrics | 5 (4-site drift) | 2 | v5.8.4c | one `FOREACH_BACKTEST_METRIC(X)` row + extracted `Compute_*` helpers in `CoreFrameworks/MetricCompute.hpp`. Reconciled 3 cross-site formula drifts (profit_factor zero-guards, expectancy fabs, max_drawdown two impls) |
+| Targets (label_table) | already 2 | 2 | pre-v5.8 | reuses existing `label_table[]` in `Backtest/LabelFunctions.hpp` |
 | Per-core overrides | 1 | 1 | done v5.0.x | already X-macroized as `PER_CORE_OVERRIDE_FIELDS` |
 
 ## Audited categories — DEFERRED (not standardized)
@@ -142,7 +142,7 @@ pattern.
 Verified by `tools/calls_graph_diff.sh` — all 5 wired correctly
 in `StrategyLifecycle.hpp`.
 
-### ML feature compute (proposed canonical, no drift today)
+### ML feature compute (canonical post-v5.8.1b)
 
 ```cpp
 template <unsigned F>
@@ -152,6 +152,33 @@ inline FPN<F> ML_Compute_<Name>(const FeatureComputeCtx<F>* ctx);
 `FeatureComputeCtx` is the bundle of all available inputs (rolling,
 EMA, ROR, flow, depth, spread). Each compute fn reads what it needs,
 returns FPN<F>. `FPN_Zero` is the safe "I don't have data yet" return.
+
+`Features_PackAll(ctx, out)` loops the registry, invokes each enabled
+compute fn, writes float result into out[i]. `FEATURE_REGISTRY_HASH`
+is an FNV-1a fold over enabled `(name, version)` pairs and contributes
+to the model fingerprint — flipping the hash forces retrain via
+`MODEL_FORMAT_VERSION` rejection at load.
+
+### Backtest metric compute (canonical post-v5.8.4c)
+
+```cpp
+static inline double Compute_<MetricName>(<scalar inputs>);
+static inline void   <Stateful>_UpdateIncremental(/* in-out state */);
+```
+
+Helpers in `CoreFrameworks/MetricCompute.hpp` (CoreFrameworks-level
+so both runtime and backtest paths can include without crossing the
+runtime → backtest-suite layering). `MaxDrawdown_UpdateIncremental`
+is the canonical example of "shared inner helper called from two
+different cadences" — post-hoc walk in `BacktestStats_ComputeFromEquity`
+loops it; per-tick replay in `BacktestSharded` invokes it once per
+sample. Same code path → bytewise FP identity by construction (formal
+equivalence ≠ bytewise equivalence for floating-point; structural
+single-source eliminates drift class).
+
+`FOREACH_BACKTEST_METRIC(X)` is metadata-only (name + printf format),
+not dispatch — the Compute_* helpers take varying input shapes and
+aren't function-pointer dispatchable.
 
 ### Target / label functions (already canonical via label_table)
 
@@ -249,3 +276,27 @@ If any of the following becomes painful in a future ship, revisit:
   `calls_graph_diff.sh` baseline still shows clean (no new orphans),
   the loop test passes, and any hash snapshot tests get their values
   updated deliberately.
+
+---
+
+## Post-v5.8 rule (CLAUDE.md decision #13)
+
+**Any new category that requires multi-site addition must use an
+X-macro registry from the start.**
+
+Concretely: if you find yourself writing a comment like *"to add a
+new X, append to enum here, then to names array there, then to
+dispatcher case in another file..."* — stop. Use the X-macro idiom
+instead. The pattern is mature; the compile-time enforcement
+(`static_assert` on array-vs-enum size parity, `calls_graph_diff.sh`
+on dispatch orphans) makes drift impossible by construction.
+
+The audit table above is the binding registry of categories. Adding
+a new category to the table is a deliberate act — document why the
+category is "the next instance shape" and not just an ad-hoc enum +
+names mirror.
+
+Categories in the **DEFERRED** table can be promoted later if their
+trigger condition fires. The trigger conditions exist precisely so
+the bar for new category standardization is "real pain experienced",
+not "theoretical scalability."

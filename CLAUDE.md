@@ -95,6 +95,7 @@ Per-engine slow_state (RollingStats × 4 + RORRegressor + flow + depth) →
 10. Partial exits: dispatcher post-cap so strategies stay leg-A-only; hot path branch-gates leg B
 11. Smart CPU pinning (v5.1.5): slow-paths avoid SMT siblings of busy threads via /sys topology read
 12. Display ↔ execution invariant (v5.6.0): every term in BG_Evaluate / SG_Evaluate must have a corresponding GUI surface. Adding a new hot-path predicate term requires a `PerCoreSnap` field + a panel render in the same PR. See `DOCS/EXECUTION_DISPLAY_INVARIANTS.md`.
+13. X-macro registry is the standard pattern for multi-site additions (v5.8.0+). Any category where "adding the next instance" requires touching ≥2 code sites must use a `FOREACH_<CATEGORY>(X)` registry. See `DOCS/EASY_ADDITIONS_INVARIANTS.md` for the canonical spec + the audited categories. Instances: strategies, ML features, SHALT codes, halt_reason codes, regimes, stateful GUI panels, backtest metrics.
 
 ---
 
