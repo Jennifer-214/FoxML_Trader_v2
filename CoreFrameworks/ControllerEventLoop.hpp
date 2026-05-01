@@ -225,6 +225,15 @@ struct CoreContext {
     FPN<F> diag_stddev_pct_min;     // cfg.min_stddev_pct
     FPN<F> diag_tp_pct_actual;      // out.tp_pct
     FPN<F> diag_tp_pct_floor;       // 3 * fee_rate_taker
+    // v5.6.6: previous packed gate-state byte. Used by the gate-state
+    // edge-trigger health log emit to detect transitions. Layout:
+    //   bits 0..3 : halt_reason          (0..10 fits in 4 bits)
+    //   bits 4..7 : strategy_halt_reason (0..10)
+    //   bit  8     : (BUY_BLOCKED >> 5) & 1
+    //   bit  9     : permission
+    // Stored as uint16_t. Fresh state computed at end of RebuildOneCore;
+    // emit cat="gate" log only when packed_now != prev_gate_log_state.
+    uint16_t prev_gate_log_state;
     // v4.0.3 B: per-core regime state for STRATEGY_AUTO. Tracks current
     // regime + hysteresis so the auto-mode core's strategy choice doesn't
     // flap on noise. Each AUTO core has its own state — different cores
@@ -491,6 +500,10 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].last_entry_wall_us = 0;
         state->cores[i].sl_cooldown_remaining = 0;
         state->cores[i].halt_reason = 0;
+        state->cores[i].strategy_halt_reason = 0;
+        // v5.6.6: sentinel = 0xFFFF so the first rebuild ALWAYS emits a
+        // baseline gate log entry. Subsequent emits are edge-triggered.
+        state->cores[i].prev_gate_log_state = 0xFFFF;
         // v4.0.3 B: regime state per AUTO core. Hysteresis threshold of 3
         // matches legacy default — requires 3 consecutive cycles of new
         // regime detection before switching.
@@ -2136,6 +2149,41 @@ inline void EventLoop_RebuildOneCore(
         state->cores[slot].intended_sl  = state->cores[slot].pending_params.sg_stop_loss_price;
         state->cores[slot].intended_qty = state->cores[slot].pending_params.trade_size;
         state->cores[slot].dirty = 1;
+
+        // v5.6.6: gate-state edge-trigger health log emit. Pack the four
+        // hot-path-relevant fields into a single uint16_t and compare
+        // against the previous packed state. Emit cat="gate" only on
+        // transition. This means MB/min during steady state (no log
+        // traffic) and a single line per gate-state flip — easy to grep
+        // post-hoc when diagnosing missed trades.
+        //
+        // Pack layout:
+        //   bits  0..3 : halt_reason          (clamped to 15)
+        //   bits  4..7 : strategy_halt_reason (clamped to 15)
+        //   bit   8     : BUY_BLOCKED
+        //   bit   9     : permission
+        if (tt::Health_LogEnabled(tt::HEALTH_INFO)) {
+            uint8_t  hr   = state->cores[slot].halt_reason          & 0x0F;
+            uint8_t  shr  = state->cores[slot].strategy_halt_reason & 0x0F;
+            uint8_t  bb   = (state->cores[slot].pending_params.flags
+                              & GATE_FLAG_BUY_BLOCKED) ? 1 : 0;
+            uint8_t  perm = state->cores[slot].core
+                ? __atomic_load_n(&state->cores[slot].core->permission,
+                                   __ATOMIC_ACQUIRE)
+                : 0;
+            uint16_t packed = (uint16_t)(hr | (shr << 4)
+                                          | (bb   << 8) | (perm << 9));
+            if (packed != state->cores[slot].prev_gate_log_state) {
+                tt::Health_Log(tt::HEALTH_INFO, "gate", slot,
+                    "halt=%u shalt=%u blocked=%u perm=%u "
+                    "gate=%g price=%g",
+                    (unsigned)hr, (unsigned)shr,
+                    (unsigned)bb, (unsigned)perm,
+                    FPN_ToDouble(state->cores[slot].pending_params.bg_price_threshold),
+                    FPN_ToDouble(rolling->price_avg));
+                state->cores[slot].prev_gate_log_state = packed;
+            }
+        }
     }
 }
 
