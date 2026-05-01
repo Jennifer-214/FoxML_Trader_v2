@@ -8913,6 +8913,18 @@ e3_skip_load:;
               : true);
     }
 
+    printf("\n--- v5.7.2: hardcoded-strategy boot guard cfg ---\n");
+    {
+        // The cfg field exists with default 0 (refuse hardcoded in live).
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.7.2: acknowledge_hardcoded_strategy_in_live default 0",
+              cfg.acknowledge_hardcoded_strategy_in_live == 0);
+        // Setting to 1 (operator override) preserved as a 1.
+        cfg.acknowledge_hardcoded_strategy_in_live = 1;
+        check("v5.7.2: acknowledge flag accepts 1",
+              cfg.acknowledge_hardcoded_strategy_in_live == 1);
+    }
+
     printf("\n--- v5.6.3: gate diagnostic field plumbing ---\n");
     {
         // PerCoreSnap gains 12 diag_* fields (6 actual/threshold pairs).

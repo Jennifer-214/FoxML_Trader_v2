@@ -341,6 +341,14 @@ template <unsigned F> struct ControllerConfig {
   int default_strategy; // -1=regime auto, 0=MR, 1=Momentum, 2=SimpleDip
   // live trading
   int use_real_money; // 0=paper (default), 1=real orders via REST API
+  // v5.7.2: explicit acknowledgment that the operator wants to run a
+  // hardcoded (non-AUTO) strategy in live mode. Default 0 — the boot
+  // path refuses to start with use_real_money=1 AND any
+  // core_N_strategy != auto unless this flag is set. AUTO (regime-
+  // gated) is preferred for live capital because hardcoded strategies
+  // fire regardless of regime. Setting this to 1 is the operator
+  // saying "I know what I'm doing" and is logged.
+  int acknowledge_hardcoded_strategy_in_live;
   // kill switch (sticky — stays active until session reset or manual TUI 'k')
   int kill_switch_enabled; // 0=disabled, 1=enabled
   FPN<F>
@@ -732,6 +740,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.gate_ema_one_minus_alpha = FPN_FromDouble<F>(0.003); // 1.0 - 0.997
   cfg.default_strategy = -1; // -1 = regime auto (backward compat)
   cfg.use_real_money = 0;    // 0 = paper trading (default safe)
+  cfg.acknowledge_hardcoded_strategy_in_live = 0;  // v5.7.2 — operator
+                                                    // must set to 1 to
+                                                    // run hardcoded
+                                                    // strategies live
   // kill switch
   cfg.kill_switch_enabled = 1; // on by default — safety first
   cfg.kill_switch_daily_loss_pct =
@@ -1062,6 +1074,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_PCT(breakeven_buffer_pct)
     CFG_PARSE_INT(depth_enabled)
     CFG_PARSE_INT(use_real_money)
+    CFG_PARSE_INT(acknowledge_hardcoded_strategy_in_live)  // v5.7.2
     CFG_PARSE_INT(session_filter_enabled)
     CFG_PARSE_INT(gate_ema_enabled)
     CFG_PARSE_INT(default_strategy)

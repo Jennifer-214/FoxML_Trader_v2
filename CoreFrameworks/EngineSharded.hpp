@@ -349,6 +349,69 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             (unsigned)cfg.num_execution_cores, cfg.health_log_level);
     }
 
+    // v5.7.2 — hardcoded strategy boot guard. AUTO (regime-gated) is the
+    // recommended assignment for live/paper runs because it routes
+    // strategy selection through the regime classifier. Hardcoded
+    // strategies fire regardless of regime, which is fine for backtest
+    // comparison but risky for capital. Per the v5.7 regime audit
+    // (DOCS/changelogs/2026-04-30-regime-classifier-audit.md): the
+    // 2026-04-30 "MOM enters in RANGING" symptom traced to Core 0
+    // being hardcoded MOM, not an AUTO classifier bug.
+    //
+    // Behavior:
+    //   paper run + hardcoded core → WARN to stderr + health log
+    //   live run (use_real_money=1) + hardcoded core →
+    //     ERROR + abort UNLESS acknowledge_hardcoded_strategy_in_live=1
+    {
+        int hardcoded_count = 0;
+        char hardcoded_list[256] = {0};
+        size_t pos = 0;
+        for (uint16_t i = 0; i < cfg.num_execution_cores && i < 16; ++i) {
+            uint8_t sid = cfg.core_strategies[i];
+            if (sid != STRATEGY_AUTO && sid != STRATEGY_NONE) {
+                hardcoded_count++;
+                if (pos < sizeof(hardcoded_list) - 16) {
+                    const char* sname = (sid < NUM_STRATEGIES)
+                        ? STRATEGY_SHORT_NAMES[sid] : "?";
+                    pos += (size_t)snprintf(hardcoded_list + pos,
+                        sizeof(hardcoded_list) - pos,
+                        "%score_%u=%s", pos > 0 ? ", " : "", i, sname);
+                }
+            }
+        }
+        if (hardcoded_count > 0) {
+            const bool live = (cfg.use_real_money != 0);
+            const bool ack  = (cfg.acknowledge_hardcoded_strategy_in_live != 0);
+            if (live && !ack) {
+                fprintf(stderr,
+                    "[sharded] ERROR: live mode (use_real_money=1) with "
+                    "%d hardcoded strategy core(s): %s\n"
+                    "[sharded]        AUTO is recommended for live capital "
+                    "(regime-gated strategy selection).\n"
+                    "[sharded]        To override: set "
+                    "acknowledge_hardcoded_strategy_in_live=1 in engine.cfg.\n",
+                    hardcoded_count, hardcoded_list);
+                tt::Health_Log(tt::HEALTH_INFO, "engine", -1,
+                    "boot_abort reason=hardcoded_strategy_in_live cores=%s",
+                    hardcoded_list);
+                return;  // refuse to boot
+            }
+            // paper, or live+ack — WARN only
+            fprintf(stderr,
+                "[sharded] WARN: %d hardcoded strategy core(s): %s. "
+                "AUTO is recommended for live/paper runs (regime-gated). "
+                "Hardcoded is fine for backtest comparisons.\n",
+                hardcoded_count, hardcoded_list);
+            if (cfg.health_log_path[0]) {
+                tt::Health_Log(tt::HEALTH_INFO, "engine", -1,
+                    "boot_warn hardcoded_strategy_count=%d cores=%s "
+                    "live=%d acknowledged=%d",
+                    hardcoded_count, hardcoded_list,
+                    (int)live, (int)ack);
+            }
+        }
+    }
+
     // Try to open the real Binance stream. If it fails — or if the cfg
     // explicitly forces synthetic mode — fall back to the synthetic tick
     // generator so the latency testbed still runs.
