@@ -492,10 +492,24 @@ inline int Model_IsLoaded(const ModelHandle<F> *m) {
 }
 
 //======================================================================================================
-// [FEATURE PACKING]
+// [FEATURE PACKING — DEPRECATED]
 //======================================================================================================
-// packs RegimeSignals + RollingStats into a float array for model inference.
-// feature order is defined by FEAT_* constants — must match training pipeline.
+// Replaced by Features_PackAll in ML_Headers/FeatureRegistry.hpp (v5.8.1b).
+// All 5 production callers (MLStrategy, StrategyParameters dispatcher,
+// BacktestSharded, PortfolioController regime/barrier paths) flipped at
+// v5.8.1b ship time.
+//
+// This function is now a frozen historical reference, kept ONLY so the
+// EXTENSIBILITY equivalence test in controller_test.cpp can validate that
+// Features_PackAll produces bytewise-identical output. Treat any change
+// to this body as breaking the regression contract — change Features_PackAll
+// instead, then re-pin the FEATURE_REGISTRY_HASH snapshot.
+//
+// Scheduled for full removal in v5.9 once the registry has a few months
+// of paper-validation behind it. At that point the equivalence test gets
+// retired alongside.
+//
+// Feature order is defined by FEAT_* constants — must match training pipeline.
 // forward-declare RegimeSignals to avoid circular include.
 //======================================================================================================
 template <unsigned F> struct RegimeSignals; // forward declaration

@@ -3,20 +3,20 @@
 // See LICENSE file in the project root for full license text.
 
 //======================================================================================================
-// [FEATURE REGISTRY — v5.8.1a — X-macro driven]
+// [FEATURE REGISTRY — v5.8.1b — X-macro driven]
 //======================================================================================================
 // Single source of truth for ML features. Adding a new feature:
 //   1. Implement `ML_Compute_<Name>(ctx)` returning FPN<F>
 //   2. Append one row to FOREACH_FEATURE(X)
 //   3. Recompile — FEATURE_REGISTRY_HASH flips, old stamps reject at load
 //
-// Phase split (v5.8.1):
-//   v5.8.1a (this ship): infrastructure + first 10 features (FEAT_SHORT_SLOPE
-//     through FEAT_VOLUME_DELTA, indices 0-9 in legacy ModelFeatures_Pack).
-//     ModelFeatures_Pack stays in production; Features_PackAll is a parallel
-//     path that produces equivalent values for tests/verification.
-//   v5.8.1b (next ship): remaining 24 features + flip 5 callers from
-//     ModelFeatures_Pack to Features_PackAll + retire the legacy function.
+// Status (v5.8.1b): all 34 features registered (FEAT_SHORT_SLOPE through
+// FEAT_SPREAD_ZSCORE). All 5 production callers (MLStrategy,
+// StrategyParameters dispatcher, BacktestSharded, PortfolioController
+// regime + barrier paths) use Features_PackAll. Legacy ModelFeatures_Pack
+// in ModelInference.hpp is a deprecated frozen reference — kept only so
+// the EXTENSIBILITY equivalence test can validate bytewise parity.
+// Scheduled for full removal in v5.9.
 //
 // Auto-generated from FOREACH_FEATURE(X):
 //   - enum FeatureId with stable IDs
@@ -145,6 +145,142 @@ inline FPN<F> ML_Compute_VolumeDelta(const FeatureComputeCtx<F>* ctx) {
 }
 
 //======================================================================================================
+// [FEATURE COMPUTE FUNCTIONS — v5.8.1b features 10-33]
+//======================================================================================================
+// Indices 10, 15-33 read from ctx->signals (precomputed RegimeSignals bundle).
+// Indices 11-14 are the only ones reading directly from ctx->short_rolling
+// (vwap_deviation, price_stddev, price_avg, volume_avg).
+//
+// double-typed signals (hour_sin/cos, tick_rate_z, flow_*, large_trade_z,
+// spread_bps/zscore) round-trip through FPN_FromDouble<F> → FPN_ToDouble →
+// float. With F=64 fractional bits the round-trip is lossless to within
+// 1/2^64, far below float precision, so Features_PackAll produces the same
+// float bits as the legacy direct (float)double cast in ModelFeatures_Pack.
+//======================================================================================================
+
+template <unsigned F>
+inline FPN<F> ML_Compute_EmaSmaSpread(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->ema_sma_spread : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_VwapDev(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->short_rolling) ? ctx->short_rolling->vwap_deviation : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_PriceStddev(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->short_rolling) ? ctx->short_rolling->price_stddev : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_PriceAvg(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->short_rolling) ? ctx->short_rolling->price_avg : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_VolumeAvg(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->short_rolling) ? ctx->short_rolling->volume_avg : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_EmaAboveSma(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals)
+        ? FPN_FromDouble<F>((double)ctx->signals->ema_above_sma)
+        : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_MidSlope(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->mid_slope : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_MidR2(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->mid_r2 : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_CumDelta(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->cumdelta : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_HourSin(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->hour_sin) : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_HourCos(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->hour_cos) : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_VolRegimeRatio(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->vol_regime_ratio : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_TickRateZ(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->tick_rate_z) : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_DistToHigh(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->dist_to_high : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_DistToLow(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->dist_to_low : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_BookImbMeanShort(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->book_imb_mean_short : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_BookImbMeanLong(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->book_imb_mean_long : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_BookImbDrift(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->book_imb_drift : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_Flow10s(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->flow_10s) : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_Flow1m(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->flow_1m) : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_Flow5m(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->flow_5m) : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_LargeTradeZ(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->large_trade_z) : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_SpreadBps(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->spread_bps) : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_SpreadZscore(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? FPN_FromDouble<F>(ctx->signals->spread_zscore) : FPN_Zero<F>();
+}
+
+//======================================================================================================
 // [FEATURE REGISTRY — X-macro]
 //======================================================================================================
 // Row format:
@@ -157,25 +293,50 @@ inline FPN<F> ML_Compute_VolumeDelta(const FeatureComputeCtx<F>* ctx) {
 // Version: bump on formula change. Bumping flips the hash → retrain.
 // Don't bump for renames or comment-only edits.
 //
-// IDs: contiguous from 0. Order MUST match historical FEAT_* indices for
-// the duration of the v5.8.1a/b transition (so v5.8.1a's Features_PackAll
-// produces identical buf[i] values to ModelFeatures_Pack for indices 0-9).
+// IDs: contiguous from 0. Order MUST match historical FEAT_* indices so
+// trained models continue to find each feature at the expected position.
+// EXTENSIBILITY tests pin specific FEATURE_<NAME> == <legacy index> values
+// to catch reorderings.
 //======================================================================================================
 
 #define FEATURE_ENABLED  1
 #define FEATURE_DISABLED 0
 
 #define FOREACH_FEATURE(X) \
-    X(SHORT_SLOPE,    "short_slope",    1, FEATURE_ENABLED, ML_Compute_ShortSlope,    "regression slope, 128-tick window") \
-    X(SHORT_R2,       "short_r2",       1, FEATURE_ENABLED, ML_Compute_ShortR2,       "R² of short-window regression") \
-    X(SHORT_VARIANCE, "short_variance", 1, FEATURE_ENABLED, ML_Compute_ShortVariance, "price variance over 128 ticks") \
-    X(LONG_SLOPE,     "long_slope",     1, FEATURE_ENABLED, ML_Compute_LongSlope,     "regression slope, 512-tick window") \
-    X(LONG_R2,        "long_r2",        1, FEATURE_ENABLED, ML_Compute_LongR2,        "R² of long-window regression") \
-    X(LONG_VARIANCE,  "long_variance",  1, FEATURE_ENABLED, ML_Compute_LongVariance,  "price variance over 512 ticks") \
-    X(VOL_RATIO,      "vol_ratio",      1, FEATURE_ENABLED, ML_Compute_VolRatio,      "short variance / long variance") \
-    X(ROR_SLOPE,      "ror_slope",      1, FEATURE_ENABLED, ML_Compute_RorSlope,      "regression-on-regression slope") \
-    X(VOLUME_SLOPE,   "volume_slope",   1, FEATURE_ENABLED, ML_Compute_VolumeSlope,   "regression slope of volume") \
-    X(VOLUME_DELTA,   "volume_delta",   1, FEATURE_ENABLED, ML_Compute_VolumeDelta,   "volume change last vs avg")
+    X(SHORT_SLOPE,        "short_slope",        1, FEATURE_ENABLED, ML_Compute_ShortSlope,        "regression slope, 128-tick window") \
+    X(SHORT_R2,           "short_r2",           1, FEATURE_ENABLED, ML_Compute_ShortR2,           "R² of short-window regression") \
+    X(SHORT_VARIANCE,     "short_variance",     1, FEATURE_ENABLED, ML_Compute_ShortVariance,     "price variance over 128 ticks") \
+    X(LONG_SLOPE,         "long_slope",         1, FEATURE_ENABLED, ML_Compute_LongSlope,         "regression slope, 512-tick window") \
+    X(LONG_R2,            "long_r2",            1, FEATURE_ENABLED, ML_Compute_LongR2,            "R² of long-window regression") \
+    X(LONG_VARIANCE,      "long_variance",      1, FEATURE_ENABLED, ML_Compute_LongVariance,      "price variance over 512 ticks") \
+    X(VOL_RATIO,          "vol_ratio",          1, FEATURE_ENABLED, ML_Compute_VolRatio,          "short variance / long variance") \
+    X(ROR_SLOPE,          "ror_slope",          1, FEATURE_ENABLED, ML_Compute_RorSlope,          "regression-on-regression slope") \
+    X(VOLUME_SLOPE,       "volume_slope",       1, FEATURE_ENABLED, ML_Compute_VolumeSlope,       "regression slope of volume") \
+    X(VOLUME_DELTA,       "volume_delta",       1, FEATURE_ENABLED, ML_Compute_VolumeDelta,       "volume change last vs avg") \
+    X(EMA_SMA_SPREAD,     "ema_sma_spread",     1, FEATURE_ENABLED, ML_Compute_EmaSmaSpread,      "(ema - sma) / sma normalized") \
+    X(VWAP_DEV,           "vwap_dev",           1, FEATURE_ENABLED, ML_Compute_VwapDev,           "VWAP deviation from short rolling") \
+    X(PRICE_STDDEV,       "price_stddev",       1, FEATURE_ENABLED, ML_Compute_PriceStddev,       "stddev of price, short window") \
+    X(PRICE_AVG,          "price_avg",          1, FEATURE_ENABLED, ML_Compute_PriceAvg,          "mean price, short window") \
+    X(VOLUME_AVG,         "volume_avg",         1, FEATURE_ENABLED, ML_Compute_VolumeAvg,         "mean volume, short window") \
+    X(EMA_ABOVE_SMA,      "ema_above_sma",      1, FEATURE_ENABLED, ML_Compute_EmaAboveSma,       "1 if ema > short SMA (binary)") \
+    X(MID_SLOPE,          "mid_slope",          1, FEATURE_ENABLED, ML_Compute_MidSlope,          "regression slope, 256-tick window") \
+    X(MID_R2,             "mid_r2",             1, FEATURE_ENABLED, ML_Compute_MidR2,             "R² of mid-window regression") \
+    X(CUMDELTA,           "cumdelta",           1, FEATURE_ENABLED, ML_Compute_CumDelta,          "rolling cumulative buyer-vs-seller") \
+    X(HOUR_SIN,           "hour_sin",           1, FEATURE_ENABLED, ML_Compute_HourSin,           "cyclical hour-of-day sin") \
+    X(HOUR_COS,           "hour_cos",           1, FEATURE_ENABLED, ML_Compute_HourCos,           "cyclical hour-of-day cos") \
+    X(VOL_REGIME_RAT,     "vol_regime_rat",     1, FEATURE_ENABLED, ML_Compute_VolRegimeRatio,    "short stddev / baseline stddev") \
+    X(TICK_RATE_Z,        "tick_rate_z",        1, FEATURE_ENABLED, ML_Compute_TickRateZ,         "ticks/sec z-score vs trailing baseline") \
+    X(DIST_TO_HIGH,       "dist_to_high",       1, FEATURE_ENABLED, ML_Compute_DistToHigh,        "(baseline_max - price) / price") \
+    X(DIST_TO_LOW,        "dist_to_low",        1, FEATURE_ENABLED, ML_Compute_DistToLow,         "(price - baseline_min) / price") \
+    X(BOOK_IMB_MEAN_SHORT, "book_imb_mean_short", 1, FEATURE_ENABLED, ML_Compute_BookImbMeanShort, "mean of last 64 book_imbalance samples") \
+    X(BOOK_IMB_MEAN_LONG,  "book_imb_mean_long",  1, FEATURE_ENABLED, ML_Compute_BookImbMeanLong,  "mean over full BookImbalanceHistory window") \
+    X(BOOK_IMB_DRIFT,      "book_imb_drift",      1, FEATURE_ENABLED, ML_Compute_BookImbDrift,     "current book_imbalance - mean_long") \
+    X(FLOW_10S,           "flow_10s",           1, FEATURE_ENABLED, ML_Compute_Flow10s,           "signed-volume EWMA, half-life 10s") \
+    X(FLOW_1M,            "flow_1m",            1, FEATURE_ENABLED, ML_Compute_Flow1m,            "signed-volume EWMA, half-life 60s") \
+    X(FLOW_5M,            "flow_5m",            1, FEATURE_ENABLED, ML_Compute_Flow5m,            "signed-volume EWMA, half-life 300s") \
+    X(LARGE_TRADE_Z,      "large_trade_z",      1, FEATURE_ENABLED, ML_Compute_LargeTradeZ,       "z-score of current trade size") \
+    X(SPREAD_BPS,         "spread_bps",         1, FEATURE_ENABLED, ML_Compute_SpreadBps,         "spread / mid_price × 10000") \
+    X(SPREAD_ZSCORE,      "spread_zscore",      1, FEATURE_ENABLED, ML_Compute_SpreadZscore,      "z-score of current spread")
 
 // Auto-generated FEATURE_<ID> enum constants. Order matches FOREACH_FEATURE.
 enum FeatureId : uint16_t {
@@ -255,15 +416,15 @@ inline uint64_t FEATURE_REGISTRY_HASH() {
 //======================================================================================================
 // [FEATURES_PACK_ALL — the new packer]
 //======================================================================================================
-// Replaces ModelFeatures_Pack in v5.8.1b. Loops the X-macro registry,
+// Replaced ModelFeatures_Pack at v5.8.1b. Loops the X-macro registry,
 // invokes each enabled compute fn, writes float result into out[i].
 //
 // `out` must have capacity >= NUM_REGISTERED_FEATURES.
 // Returns the number of features written.
 //
-// v5.8.1a: only 10 features registered. ModelFeatures_Pack still runs in
-// production. Equivalence test in controller_test.cpp verifies that
-// out[i] from this fn matches buf[i] from ModelFeatures_Pack for i < 10.
+// Equivalence test in controller_test.cpp pins out[i] == legacy
+// ModelFeatures_Pack buf[i] for ALL 34 indices — load-bearing regression
+// guard against future divergence in either path.
 //======================================================================================================
 template <unsigned F>
 inline int Features_PackAll(const FeatureComputeCtx<F>* ctx, float* out) {

@@ -33,6 +33,7 @@
 #include "../DataStream/TradeLog.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/WelfordStats.hpp"
+#include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
 #include "../Strategies/MeanReversion.hpp"
 #include "../Strategies/Momentum.hpp"
 #include "../Strategies/SimpleDip.hpp"
@@ -1616,10 +1617,15 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
                           ctrl->rolling_medium, ctrl->rolling_baseline,
                           ctrl->cumdelta_state, &ctrl->tick_rate_state, now_us);
 
-    // Mode A: regime model enrichment — add model_score to classification
+    // Mode A: regime model enrichment — add model_score to classification.
+    // v5.8.1b: registry-driven feature pack.
     if (Model_IsLoaded(&ctrl->regime_model)) {
       float feat_buf[MODEL_MAX_FEATURES];
-      int n = ModelFeatures_Pack(feat_buf, &signals, &ctrl->rolling, ctrl->rolling_long);
+      FeatureComputeCtx<F> ctx{};
+      ctx.signals       = &signals;
+      ctx.short_rolling = &ctrl->rolling;
+      ctx.long_rolling  = ctrl->rolling_long;
+      int n = Features_PackAll(&ctx, feat_buf);
       signals.model_score = FPN_FromDouble<F>(
           (double)Model_Predict(&ctrl->regime_model, feat_buf, n));
     }
@@ -1768,11 +1774,16 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   }
 
   // BARRIER GATE: block entries before predicted price peaks
-  // uses last_signals (already computed in regime detection above)
+  // uses last_signals (already computed in regime detection above).
+  // v5.8.1b: registry-driven feature pack.
   if (ctrl->config.barrier_gate_enabled && !FPN_IsZero(ctrl->buy_conds.price)
       && Model_IsLoaded(&ctrl->peak_model)) {
     float features[MODEL_MAX_FEATURES];
-    int n = ModelFeatures_Pack(features, &ctrl->last_signals, &ctrl->rolling, ctrl->rolling_long);
+    FeatureComputeCtx<F> ctx{};
+    ctx.signals       = &ctrl->last_signals;
+    ctx.short_rolling = &ctrl->rolling;
+    ctx.long_rolling  = ctrl->rolling_long;
+    int n = Features_PackAll(&ctx, features);
     double p_peak = Model_Predict(&ctrl->peak_model, features, n);
     double p_valley = Model_IsLoaded(&ctrl->valley_model)
         ? Model_Predict(&ctrl->valley_model, features, n) : 0.5;

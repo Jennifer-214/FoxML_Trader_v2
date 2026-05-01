@@ -20,6 +20,7 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/ModelInference.hpp"
+#include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
 #include "../CoreFrameworks/OrderGates.hpp"
 
 //======================================================================================================
@@ -111,8 +112,12 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
 
     if (!state->model_ready) return conds;
 
-    // pack features from regime signals + rolling stats
-    int n = ModelFeatures_Pack(state->feature_buf, signals, rolling, rolling_long);
+    // pack features from regime signals + rolling stats (v5.8.1b: registry-driven)
+    FeatureComputeCtx<F> ctx{};
+    ctx.signals       = signals;
+    ctx.short_rolling = rolling;
+    ctx.long_rolling  = rolling_long;
+    int n = Features_PackAll(&ctx, state->feature_buf);
 
     // run inference
     float prediction = Model_Predict(&state->buy_model, state->feature_buf, n);

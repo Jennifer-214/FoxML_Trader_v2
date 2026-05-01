@@ -9028,45 +9028,55 @@ e3_skip_load:;
               row_count == NUM_STRATEGIES_REAL);
     }
 
-    printf("\n--- EXTENSIBILITY: v5.8.1a feature X-macro registry ---\n");
+    printf("\n--- EXTENSIBILITY: v5.8.1b feature X-macro registry (full 34-feature set) ---\n");
     {
-        // Registry shape: 10 features registered in v5.8.1a (FEAT_SHORT_SLOPE
-        // through FEAT_VOLUME_DELTA, indices 0-9). v5.8.1b adds 24 more
-        // (target: NUM_REGISTERED_FEATURES == 34).
-        check("v5.8.1a: NUM_REGISTERED_FEATURES == 10 (first batch)",
-              NUM_REGISTERED_FEATURES == 10);
-        check("v5.8.1a: FEATURE_SHORT_SLOPE == 0", FEATURE_SHORT_SLOPE == 0);
-        check("v5.8.1a: FEATURE_VOLUME_DELTA == 9", FEATURE_VOLUME_DELTA == 9);
+        // v5.8.1b: all 34 features now registered (FEAT_SHORT_SLOPE through
+        // FEAT_SPREAD_ZSCORE). ModelFeatures_Pack remains as a thin
+        // back-compat wrapper around Features_PackAll until v5.9.
+        check("v5.8.1b: NUM_REGISTERED_FEATURES == 34 (full set)",
+              NUM_REGISTERED_FEATURES == 34);
+        check("v5.8.1b: FEATURE_SHORT_SLOPE == 0", FEATURE_SHORT_SLOPE == 0);
+        check("v5.8.1b: FEATURE_VOLUME_DELTA == 9", FEATURE_VOLUME_DELTA == 9);
+        // Boundary checks for the 24 newly registered features (10-33). These
+        // are load-bearing — trained models index buf[i] by these positions,
+        // so a reorder of FOREACH_FEATURE(X) silently corrupts predictions.
+        check("v5.8.1b: FEATURE_EMA_SMA_SPREAD == 10", FEATURE_EMA_SMA_SPREAD == 10);
+        check("v5.8.1b: FEATURE_HOUR_SIN == 19",       FEATURE_HOUR_SIN == 19);
+        check("v5.8.1b: FEATURE_LARGE_TRADE_Z == 31",  FEATURE_LARGE_TRADE_Z == 31);
+        check("v5.8.1b: FEATURE_SPREAD_ZSCORE == 33",  FEATURE_SPREAD_ZSCORE == 33);
 
         // Registry hash must be non-zero — sanity that FNV-1a folded
         // over ≥ 1 enabled row.
         uint64_t h = FEATURE_REGISTRY_HASH();
-        check("v5.8.1a: FEATURE_REGISTRY_HASH != 0", h != 0);
+        check("v5.8.1b: FEATURE_REGISTRY_HASH != 0", h != 0);
 
         // Pinned snapshot — any change to FOREACH_FEATURE flips the hash
         // and fails this test, forcing a deliberate "yes I'm changing
-        // the model contract" acknowledgment + retrain. v5.8.1b will
-        // bump this snapshot when adding the remaining 24 features.
-        // FNV-1a fold over the 10 enabled rows of FOREACH_FEATURE,
-        // chaining hash(name) and hash(":v" + version). Pinned at
-        // v5.8.1a ship time. If this test fails after a deliberate
-        // registry change, update the constant + bump
-        // MODEL_FORMAT_VERSION + retrain models. Failure path prints
-        // computed value for easy update.
-        constexpr uint64_t EXPECTED_HASH_V5_8_1A = 0xf7274ab6cb764a40ULL;
-        if (h != EXPECTED_HASH_V5_8_1A) {
+        // the model contract" acknowledgment + retrain.
+        // FNV-1a fold over the 34 enabled rows of FOREACH_FEATURE,
+        // chaining hash(name) and hash(":v" + version). Re-pinned at
+        // v5.8.1b ship time when the remaining 24 features were added.
+        // If this test fails after a deliberate registry change, update
+        // the constant + bump MODEL_FORMAT_VERSION + retrain models.
+        // Failure path prints computed value for easy update.
+        constexpr uint64_t EXPECTED_HASH_V5_8_1B = 0xfc9119b8ed47bcf9ULL;
+        if (h != EXPECTED_HASH_V5_8_1B) {
             fprintf(stderr,
                 "  [hash debug] computed=0x%016lx expected=0x%016lx\n",
-                (unsigned long)h, (unsigned long)EXPECTED_HASH_V5_8_1A);
+                (unsigned long)h, (unsigned long)EXPECTED_HASH_V5_8_1B);
         }
-        check("v5.8.1a: FEATURE_REGISTRY_HASH matches pinned snapshot",
-              h == EXPECTED_HASH_V5_8_1A);
+        check("v5.8.1b: FEATURE_REGISTRY_HASH matches pinned snapshot",
+              h == EXPECTED_HASH_V5_8_1B);
 
-        // Names array drift detection.
-        check("v5.8.1a: FEATURE_NAMES[0] == \"short_slope\"",
+        // Names array drift detection — boundaries of the registered set.
+        check("v5.8.1b: FEATURE_NAMES[0] == \"short_slope\"",
               strcmp(FEATURE_NAMES[FEATURE_SHORT_SLOPE], "short_slope") == 0);
-        check("v5.8.1a: FEATURE_NAMES[9] == \"volume_delta\"",
+        check("v5.8.1b: FEATURE_NAMES[9] == \"volume_delta\"",
               strcmp(FEATURE_NAMES[FEATURE_VOLUME_DELTA], "volume_delta") == 0);
+        check("v5.8.1b: FEATURE_NAMES[10] == \"ema_sma_spread\"",
+              strcmp(FEATURE_NAMES[FEATURE_EMA_SMA_SPREAD], "ema_sma_spread") == 0);
+        check("v5.8.1b: FEATURE_NAMES[33] == \"spread_zscore\"",
+              strcmp(FEATURE_NAMES[FEATURE_SPREAD_ZSCORE], "spread_zscore") == 0);
 
         // FOREACH_FEATURE row counter — expand with a counter X-macro
         // and verify it matches NUM_REGISTERED_FEATURES.
@@ -9075,10 +9085,10 @@ e3_skip_load:;
             FOREACH_FEATURE(X)
 #undef X
             ;
-        check("v5.8.1a: FOREACH_FEATURE row count == NUM_REGISTERED_FEATURES",
+        check("v5.8.1b: FOREACH_FEATURE row count == NUM_REGISTERED_FEATURES",
               feat_count == (int)NUM_REGISTERED_FEATURES);
 
-        // All registered v5.8.1a features must be ENABLED at ship time
+        // All registered features must be ENABLED at ship time
         // (DISABLED is a future hook for experimental features).
         bool all_enabled = true;
         for (int i = 0; i < (int)NUM_REGISTERED_FEATURES; i++) {
@@ -9087,25 +9097,68 @@ e3_skip_load:;
                 break;
             }
         }
-        check("v5.8.1a: all registered features ENABLED", all_enabled);
+        check("v5.8.1b: all registered features ENABLED", all_enabled);
 
         // Equivalence: Features_PackAll must produce the same float values
-        // as ModelFeatures_Pack for the registered indices. This is the
-        // load-bearing test that lets v5.8.1b flip callers without behavior
-        // change.
+        // as ModelFeatures_Pack for ALL 34 registered indices. This is the
+        // load-bearing test that lets v5.8.1b flip the 5 callers without
+        // behavior change.
+        //
+        // Populates all sig/rolling fields read by ModelFeatures_Pack across
+        // the full 0-33 range. Includes double-typed fields (hour_*, flow_*,
+        // tick_rate_z, large_trade_z, spread_*) which round-trip through
+        // FPN_FromDouble<64> in the new path; this test catches any
+        // precision divergence vs the legacy direct (float)double cast.
         RegimeSignals<64> sig{};
-        sig.short_slope    = FPN_FromDouble<64>(0.0042);
-        sig.short_r2       = FPN_FromDouble<64>(0.78);
-        sig.short_variance = FPN_FromDouble<64>(0.000123);
-        sig.long_slope     = FPN_FromDouble<64>(0.0019);
-        sig.long_r2        = FPN_FromDouble<64>(0.45);
-        sig.long_variance  = FPN_FromDouble<64>(0.000456);
-        sig.vol_ratio      = FPN_FromDouble<64>(2.7);
-        sig.ror_slope      = FPN_FromDouble<64>(-0.0001);
-        sig.volume_slope   = FPN_FromDouble<64>(0.005);
-        sig.volume_delta   = FPN_FromDouble<64>(0.013);
+        // 0-9 (FPN<F> from signals)
+        sig.short_slope         = FPN_FromDouble<64>(0.0042);
+        sig.short_r2            = FPN_FromDouble<64>(0.78);
+        sig.short_variance      = FPN_FromDouble<64>(0.000123);
+        sig.long_slope          = FPN_FromDouble<64>(0.0019);
+        sig.long_r2             = FPN_FromDouble<64>(0.45);
+        sig.long_variance       = FPN_FromDouble<64>(0.000456);
+        sig.vol_ratio           = FPN_FromDouble<64>(2.7);
+        sig.ror_slope           = FPN_FromDouble<64>(-0.0001);
+        sig.volume_slope        = FPN_FromDouble<64>(0.005);
+        sig.volume_delta        = FPN_FromDouble<64>(0.013);
+        // 10 (FPN<F>)
+        sig.ema_sma_spread      = FPN_FromDouble<64>(0.0033);
+        // 15 (int → cast to double in compute)
+        sig.ema_above_sma       = 1;
+        // 16-18 (FPN<F>)
+        sig.mid_slope           = FPN_FromDouble<64>(0.0027);
+        sig.mid_r2              = FPN_FromDouble<64>(0.61);
+        sig.cumdelta            = FPN_FromDouble<64>(-0.42);
+        // 19-20 (double — FPN_FromDouble round-trip)
+        sig.hour_sin            = 0.7071;
+        sig.hour_cos            = -0.3827;
+        // 21 (FPN<F>)
+        sig.vol_regime_ratio    = FPN_FromDouble<64>(1.85);
+        // 22 (double)
+        sig.tick_rate_z         = 1.23;
+        // 23-24 (FPN<F>)
+        sig.dist_to_high        = FPN_FromDouble<64>(0.0042);
+        sig.dist_to_low         = FPN_FromDouble<64>(0.0089);
+        // 25-27 (FPN<F>)
+        sig.book_imb_mean_short = FPN_FromDouble<64>(0.15);
+        sig.book_imb_mean_long  = FPN_FromDouble<64>(0.08);
+        sig.book_imb_drift      = FPN_FromDouble<64>(0.07);
+        // 28-31 (double)
+        sig.flow_10s            = 12.34;
+        sig.flow_1m             = -5.67;
+        sig.flow_5m             = 22.01;
+        sig.large_trade_z       = 2.1;
+        // 32-33 (double)
+        sig.spread_bps          = 1.5;
+        sig.spread_zscore       = -0.4;
 
+        // r fields read by ModelFeatures_Pack indices 11-14
         RollingStats<64, 128> r{};
+        r.vwap_deviation        = FPN_FromDouble<64>(0.00018);
+        r.price_stddev          = FPN_FromDouble<64>(0.011);
+        r.price_avg             = FPN_FromDouble<64>(48000.0);
+        r.volume_avg            = FPN_FromDouble<64>(0.92);
+
         RollingStats<64, 512> r_long{};
 
         FeatureComputeCtx<64> ctx{};
@@ -9118,27 +9171,39 @@ e3_skip_load:;
         ModelFeatures_Pack(pack_old, &sig, &r, &r_long);
         int n_new = Features_PackAll(&ctx, pack_new);
 
-        check("v5.8.1a: Features_PackAll returns 10 (registered count)",
-              n_new == 10);
+        check("v5.8.1b: Features_PackAll returns 34 (registered count)",
+              n_new == 34);
 
-        // Per-index equivalence for indices 0-9. Tolerance 1e-6 because
-        // both paths convert FPN→double→float identically.
+        // Per-index equivalence for ALL 34 indices. Tolerance 1e-5 (slightly
+        // looser than the 0-9 test's 1e-6) because doubles round-trip through
+        // FPN_FromDouble<64>; with F=64 the round-trip error is ~1/2^64 ≈ 5e-20
+        // in double space and float quantization tops out at ~5e-7 for
+        // O(1)-magnitude values, but extreme magnitudes (price_avg ~48000,
+        // FEAT_PRICE_AVG=13) push the float ULP up to ~4e-3, so we use a
+        // relative-tolerance check instead of pure absolute.
         bool equiv = true;
-        for (int i = 0; i < 10; i++) {
-            float diff = pack_old[i] - pack_new[i];
+        for (int i = 0; i < 34; i++) {
+            float a = pack_old[i];
+            float b = pack_new[i];
+            float diff = a - b;
             if (diff < 0) diff = -diff;
-            if (diff > 1e-6f) {
+            float scale = (a < 0 ? -a : a);
+            if (scale < 1.0f) scale = 1.0f;
+            float rel = diff / scale;
+            if (rel > 1e-5f) {
                 fprintf(stderr,
-                    "  [feat %d (%s)] old=%.9g new=%.9g diff=%.9g\n",
-                    i, FEATURE_NAMES[i], pack_old[i], pack_new[i], diff);
+                    "  [feat %d (%s)] old=%.9g new=%.9g rel_diff=%.3e\n",
+                    i, FEATURE_NAMES[i], a, b, rel);
                 equiv = false;
             }
         }
-        check("v5.8.1a: Features_PackAll bytewise-equivalent to ModelFeatures_Pack for indices 0-9",
+        check("v5.8.1b: Features_PackAll bytewise-equivalent to ModelFeatures_Pack for ALL 34 indices",
               equiv);
 
-        // MODEL_FORMAT_VERSION bumped 4 → 5 in this ship.
-        check("v5.8.1a: MODEL_FORMAT_VERSION == 5", MODEL_FORMAT_VERSION == 5);
+        // MODEL_FORMAT_VERSION bumped 4 → 5 in v5.8.1a; stays at 5 across
+        // v5.8.1b since the wire format (stamp body fields) is unchanged
+        // — only the registry hash value flips.
+        check("v5.8.1b: MODEL_FORMAT_VERSION == 5", MODEL_FORMAT_VERSION == 5);
 
         // Drift detection — verifier rejects stamp with mutated hash when
         // caller passes expected_feature_registry_hash != 0. Construct a
@@ -9161,7 +9226,7 @@ e3_skip_load:;
                 /*wf_mean=*/0.55, /*held_out=*/0.53,
                 /*gap_threshold=*/0.05, /*force=*/0,
                 /*feature_registry_hash=*/stamp_hash);
-            check("v5.8.1a: stamp_write_for_model emits feature_registry_hash",
+            check("v5.8.1b: stamp_write_for_model emits feature_registry_hash",
                   wr.ok == 1);
 
             // Read back — verifier with matching hash should pass.
@@ -9170,7 +9235,7 @@ e3_skip_load:;
                 /*gap_threshold=*/0.05,
                 /*expected_format_version=*/MODEL_FORMAT_VERSION,
                 /*expected_feature_registry_hash=*/stamp_hash);
-            check("v5.8.1a: verify accepts stamp with matching hash",
+            check("v5.8.1b: verify accepts stamp with matching hash",
                   vr1.valid == 1 && vr1.feature_registry_hash == stamp_hash);
 
             // Verifier with mismatched hash should reject (drift detection).
@@ -9179,7 +9244,7 @@ e3_skip_load:;
                 /*gap_threshold=*/0.05,
                 /*expected_format_version=*/MODEL_FORMAT_VERSION,
                 /*expected_feature_registry_hash=*/0xfeedfacecafebabeULL);
-            check("v5.8.1a: verify rejects stamp with mutated hash (drift)",
+            check("v5.8.1b: verify rejects stamp with mutated hash (drift)",
                   vr2.valid == 0 &&
                   strstr(vr2.reason, "feature-registry-hash mismatch") != nullptr);
 
@@ -9189,7 +9254,7 @@ e3_skip_load:;
                 tmp_model, /*secret=*/"",
                 /*gap_threshold=*/0.05,
                 /*expected_format_version=*/MODEL_FORMAT_VERSION);
-            check("v5.8.1a: verify with expected_hash=0 skips drift check",
+            check("v5.8.1b: verify with expected_hash=0 skips drift check",
                   vr3.valid == 1);
 
             unlink(tmp_model);

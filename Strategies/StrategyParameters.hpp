@@ -52,6 +52,7 @@
 #include "../ML_Headers/CoreModelZoo.hpp"
 #include "../ML_Headers/CostModel.hpp"     // v5.5.0 Class 8 — cost gate
 #include "../ML_Headers/ModelInference.hpp"
+#include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/VolScaler.hpp"     // v5.5.0 Class 8 — vol scaling
 #include "../Strategies/RegimeDetector.hpp"
@@ -653,9 +654,15 @@ inline void ML_BuildParameters(
         }
     }
 
-    // pack features once — used by whichever model role is loaded
+    // pack features once — used by whichever model role is loaded.
+    // v5.8.1b: registry-driven via Features_PackAll. Same contract as the
+    // legacy ModelFeatures_Pack (validated bytewise in EXTENSIBILITY tests).
     float features[MODEL_MAX_FEATURES];
-    int n = ModelFeatures_Pack(features, &sig, rolling, rolling_long);
+    FeatureComputeCtx<F> ctx{};
+    ctx.signals       = &sig;
+    ctx.short_rolling = rolling;
+    ctx.long_rolling  = rolling_long;
+    int n = Features_PackAll(&ctx, features);
 
     // run inference, prefer 3-class barrier model when available
     double prediction = 0.5;   // neutral fallback

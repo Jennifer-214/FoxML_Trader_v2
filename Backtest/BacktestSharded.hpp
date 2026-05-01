@@ -50,7 +50,8 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"  // ConfidenceScorer_Init for ML cores (E.2)
 #include "../ML_Headers/CoreModelZoo.hpp"     // E.2 — load per-core ML zoos
-#include "../ML_Headers/ModelInference.hpp"   // for ModelFeatures_Pack
+#include "../ML_Headers/ModelInference.hpp"   // for stamp helpers
+#include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
 #include "../ML_Headers/ROR_regressor.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/RegimeDetector.hpp"  // CumDeltaState, TickRateState, Regime_ComputeSignals
@@ -435,9 +436,18 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                                        d->current_mid_price
                                            ? FPN_ToDouble(*d->current_mid_price) : 0.0);
             }
-            ModelFeatures_Pack<BACKTEST_FP>(
-                &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES],
-                &sig, d->rolling, d->rolling_long);
+            // v5.8.1b: registry-driven feature pack. Bytewise-equivalent to
+            // legacy ModelFeatures_Pack — load-bearing for train-serve parity
+            // since this matrix feeds model training and the live engine
+            // packs the same features at serve time.
+            {
+                FeatureComputeCtx<BACKTEST_FP> ctx{};
+                ctx.signals       = &sig;
+                ctx.short_rolling = d->rolling;
+                ctx.long_rolling  = d->rolling_long;
+                Features_PackAll(&ctx,
+                    &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES]);
+            }
             fc->results->sample_tick_indices[fc->results->sample_count] = (uint64_t)tick_index;
             fc->results->sample_prices[fc->results->sample_count] = FPN_ToDouble(tk.price);
             // Sharded has no central regime field (each core may run a
