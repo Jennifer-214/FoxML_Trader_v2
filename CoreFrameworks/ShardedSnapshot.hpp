@@ -216,27 +216,31 @@ static inline void TUI_CopySnapshotSharded(
         snap->exposure_pct = (total_value / snap->starting) * 100.0;
     }
 
-    // v5.6.1: bitmap consistency post-pass. The per-core loop above wrote
-    // a tentative bitmap_consistency = (core->active | core->active_b)
-    // into snap->per_core[i].bitmap_consistency. The per-position loop
-    // just finished writing snap->positions[idx].idx for active slots.
-    // Now we compare: for each core, is the hot-path "any_active" mask
-    // consistent with the GUI's view from the portfolio bitmap?
+    // v5.6.1 / v5.7.7-fix: bitmap consistency post-pass.
+    // Compares the hot-path's any_active mask
+    // (core->active | core->active_b) against the GUI's view from the
+    // portfolio bitmap. The per-position loop above populated
+    // snap->positions[].idx; now read core->active directly so we don't
+    // depend on per-core-loop ordering (the v5.6.1 ship had a bug here
+    // where the tentative byte was read BEFORE the per-core loop wrote
+    // it, causing false DRIFT positives on cores 1/2/3 when permission
+    // was off on core 0 — observed 2026-04-30 paper run).
     //
     // Under partials, core c owns slots {2c, 2c+1}. Without partials,
-    // core c owns slot c. If the masks disagree, we have Class 2c
-    // display↔execution divergence — the GUI's "in pos" indicator and
-    // the hot-path's any_active gate will report different states.
+    // core c owns slot c. If masks disagree → Class 2c display↔execution
+    // divergence; GUI surfaces as "DRIFT(bitmap)".
     //
     // Final value: 1 = consistent, 0 = drift detected.
     for (int c = 0; c < state->registered_count && c < 16; ++c) {
-        uint8_t hot_any_active = snap->per_core[c].bitmap_consistency;
+        tt::ExecutionCore<F>* xc = state->cores[c].core;
+        bool hot_any_active = xc &&
+            ((xc->active | xc->active_b) & 1) != 0;
         int slot_a = partial_on ? (c * 2)     : c;
         int slot_b = partial_on ? (c * 2 + 1) : -1;
         bool gui_any_pos = (slot_a >= 0 && slot_a < 16 && snap->positions[slot_a].idx >= 0)
                        || (slot_b >= 0 && slot_b < 16 && snap->positions[slot_b].idx >= 0);
         snap->per_core[c].bitmap_consistency =
-            ((hot_any_active != 0) == gui_any_pos) ? 1 : 0;
+            (hot_any_active == gui_any_pos) ? 1 : 0;
     }
 
     // counters
@@ -436,17 +440,6 @@ static inline void TUI_CopySnapshotSharded(
             // state the next tick would see. 0 = entries forbidden.
             snap->per_core[i].permission = (uint8_t)__atomic_load_n(
                 &core->permission, __ATOMIC_ACQUIRE);
-            // v5.6.1: bitmap consistency check. (positions[i].idx >= 0) is
-            // populated below from oms->portfolio.active_bitmap; here we
-            // just compare the hot-path "any leg active" vs zero. Drift
-            // would mean the GUI's "in pos" indicator and the hot-path
-            // any_active mask disagree — Class 2 display↔execution divergence.
-            uint8_t any_active = (uint8_t)((core->active | core->active_b) & 1);
-            // The portfolio-side check happens after positions are filled in
-            // below; we record any_active here and compare in a post-pass.
-            // Defer to bitmap_consistency_check below.
-            snap->per_core[i].bitmap_consistency = any_active;  // tentative —
-                                                                  // overwritten below
             // populate headline buy gate from core 0
             if (i == 0) {
                 snap->buy_p = FPN_ToDouble(params.bg_price_threshold);
