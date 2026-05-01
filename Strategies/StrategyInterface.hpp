@@ -251,4 +251,60 @@ static const char* SHALT_SHORT_NAMES[] = {
 static_assert(sizeof(SHALT_SHORT_NAMES) / sizeof(*SHALT_SHORT_NAMES) == NUM_SHALT_CODES,
               "SHALT_SHORT_NAMES out of sync with NUM_SHALT_CODES");
 
+//======================================================================================================
+// [HALT REASONS — controller-level halt codes — v5.8.3 X-macro registry]
+//======================================================================================================
+// These are set by the slow-path gate rebuild loop (ControllerEventLoop)
+// when a cross-cutting filter (spacing, vwap, vol-delta, book-imbalance,
+// etc.) zero-gates a core. SHALT_* (above) is the strategy-internal
+// equivalent set by individual strategies.
+//
+// IDs are append-only — never reorder or remove. Trade logs and per-core
+// snapshots persist this value as a raw integer; reordering breaks
+// historical decode.
+//
+// HALT_WARMUP (=7) is reserved-but-unused: warmup state is gated via
+// `permission=0` upstream of the zero_gate path (see EngineSharded.hpp
+// init), so no halt_reason=7 is ever written by current code. Kept in
+// the registry for back-compat with older trade logs that may have
+// recorded it before the permission mechanism took over.
+//
+// Row format: X(<id>, <short_name>, <description>)
+//======================================================================================================
+#define FOREACH_HALT_REASON(X) \
+    X(OK,           "ok",           "all gates pass") \
+    X(SPACING,      "spacing",      "proposed entry too close to last entry") \
+    X(VWAP,         "vwap",         "entry above VWAP threshold (anti-pump)") \
+    X(LONG_SLOPE,   "long-slope",   "long-window slope below floor (downtrend)") \
+    X(VOL_DELTA,    "vol-delta",    "buy/sell volume delta below floor (heavy dump)") \
+    X(MIN_STDDEV,   "min-stddev",   "rolling stddev below floor (dead market)") \
+    X(SL_COOLDOWN,  "sl-cooldown",  "stop-loss cooldown active") \
+    X(WARMUP,       "warmup",       "reserved — warmup state via permission=0 instead") \
+    X(CORE_BUDGET,  "core-budget",  "core open_notional >= allocated") \
+    X(CORE_KILL,    "core-kill",    "per-core kill switch tripped") \
+    X(IMBALANCE,    "imbalance",    "book imbalance below threshold (Track E.3)")
+
+// Auto-generated HALT_<id> constants. Underlying type uint8_t — matches
+// the existing `halt_reason` field width on EventLoopState::cores[].
+enum : uint8_t {
+#define X(id, name, desc) HALT_##id,
+    FOREACH_HALT_REASON(X)
+#undef X
+    NUM_HALT_REASONS
+};
+
+// Highest valid code. Equivalent to NUM_HALT_REASONS - 1.
+constexpr uint8_t HALT_MAX = NUM_HALT_REASONS - 1;
+
+// Names for display, indexed by HALT_*. Single source of truth —
+// DashboardPanels.hpp reads this directly (no mirror).
+static const char* HALT_NAMES[] = {
+#define X(id, name, desc) name,
+    FOREACH_HALT_REASON(X)
+#undef X
+};
+
+static_assert(sizeof(HALT_NAMES) / sizeof(*HALT_NAMES) == NUM_HALT_REASONS,
+              "HALT_NAMES out of sync with NUM_HALT_REASONS");
+
 #endif // STRATEGY_INTERFACE_HPP

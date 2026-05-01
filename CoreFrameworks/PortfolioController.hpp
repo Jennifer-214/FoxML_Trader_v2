@@ -362,6 +362,12 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->daily_realized_pnl = FPN_Zero<F>();
   ctrl->kill_recovery_counter = 0;
   ctrl->buying_halted = 0;
+  // Legacy single-core controller halt_reason is a NARROWER namespace than
+  // sharded EventLoopState::cores[].halt_reason: only 0=ok / 1=kill apply
+  // here. The HALT_* enum from FOREACH_HALT_REASON is for the sharded path
+  // only; reusing it here would semantically alias HALT_SPACING=1 with
+  // "kill switch tripped". Leave as raw int — legacy controller is
+  // deprecated and warned at boot.
   ctrl->halt_reason = 0;
   ctrl->gate_reason = GATE_REASON_WARMUP;
   ctrl->last_vol_scale = 1.0;

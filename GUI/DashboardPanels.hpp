@@ -456,18 +456,12 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                                            //   = transparent black, making any
                                            //   AUTO core's row invisible)
         };
-        // v5.6.0: halt_names + the BUY_BLOCKED flag bit are needed by both
-        // the top-table Status column AND the collapsing-header detail block,
-        // so declare here at panel scope rather than inside the second loop.
-        // Codes 0..10 must stay in sync with EngineTUI.hpp's halt_reason
-        // comment + ControllerEventLoop.hpp:1812-1814.
-        static const char* halt_names[] = {
-            "ok", "spacing", "vwap", "long-slope", "vol-delta",
-            "min-stddev", "sl-cooldown", "warmup", "core-budget", "core-kill",
-            "imbalance"
-        };
-        constexpr int halt_names_count =
-            (int)(sizeof(halt_names) / sizeof(halt_names[0]));
+        // v5.8.3: halt_names sourced directly from HALT_NAMES
+        // (StrategyInterface.hpp's FOREACH_HALT_REASON(X) registry).
+        // Local mirror retired — single source of truth, eliminates the
+        // class of bug that bit v5.6.0 (mirror-out-of-sync silently
+        // dropped halt_reason=10/imbalance from the display).
+        constexpr int halt_names_count = (int)NUM_HALT_REASONS;
         // v5.8.2: SHALT_* names sourced directly from SHALT_SHORT_NAMES
         // (StrategyInterface.hpp's FOREACH_SHALT(X) registry). Local
         // mirror retired — single source of truth.
@@ -566,7 +560,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                 } else if (pc->halt_reason > 0 &&
                            pc->halt_reason < halt_names_count) {
                     ImGui::TextColored(FoxmlColors::yellow,
-                        "off: %s", halt_names[pc->halt_reason]);
+                        "off: %s", HALT_NAMES[pc->halt_reason]);
                 } else if (pc->strategy_halt_reason > 0 &&
                            pc->strategy_halt_reason < shalt_names_count) {
                     // v5.6.2: strategy zero-gated for a strategy-internal
@@ -637,7 +631,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                 if (pc->halt_reason > 0 && pc->halt_reason < halt_names_count) {
                     ImGui::SameLine(0, 15);
                     ImGui::TextColored(FoxmlColors::yellow,
-                        "halted: %s", halt_names[pc->halt_reason]);
+                        "halted: %s", HALT_NAMES[pc->halt_reason]);
                 }
                 // v5.6.1/2: BUY_BLOCKED flag readout. Independent of halt_reason —
                 // strategy-level fee-floor + cost-gate set BUY_BLOCKED. When a

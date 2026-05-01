@@ -499,8 +499,8 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].last_entry_tick  = 0;
         state->cores[i].last_entry_wall_us = 0;
         state->cores[i].sl_cooldown_remaining = 0;
-        state->cores[i].halt_reason = 0;
-        state->cores[i].strategy_halt_reason = 0;
+        state->cores[i].halt_reason = HALT_OK;
+        state->cores[i].strategy_halt_reason = SHALT_OK;
         // v5.6.6: sentinel = 0xFFFF so the first rebuild ALWAYS emits a
         // baseline gate log entry. Subsequent emits are edge-triggered.
         state->cores[i].prev_gate_log_state = 0xFFFF;
@@ -1905,10 +1905,9 @@ inline void EventLoop_RebuildOneCore(
         // intended TP/SL/qty but disables the entry trigger. Halt reasons are
         // tracked per-core for GUI display.
         //
-        // Reasons: 0=ok, 1=spacing, 2=vwap, 3=long-slope, 4=vol-delta,
-        //          5=min-stddev, 6=sl-cooldown, 7=warmup, 8=core-budget,
-        //          9=core-kill, 10=book-imbalance (Track E.3)
-        state->cores[slot].halt_reason = 0;
+        // v5.8.3: halt_reason is now a HALT_* enum from FOREACH_HALT_REASON
+        // (StrategyInterface.hpp). See registry there for code semantics.
+        state->cores[slot].halt_reason = HALT_OK;
         // v5.6.2: reset strategy_halt_reason every rebuild. Strategies
         // set this to a SHALT_* code when zero-gating for strategy-
         // internal reasons. SHALT_OK = no veto.
@@ -1930,7 +1929,7 @@ inline void EventLoop_RebuildOneCore(
         auto zero_gate = [&](uint8_t reason) {
             state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
             state->cores[slot].pending_params.flags |= GATE_FLAG_BUY_BLOCKED;
-            if (state->cores[slot].halt_reason == 0)  // first reason wins
+            if (state->cores[slot].halt_reason == HALT_OK)  // first reason wins
                 state->cores[slot].halt_reason = reason;
         };
 
@@ -1944,8 +1943,8 @@ inline void EventLoop_RebuildOneCore(
         // assignment naturally drops the BLOCKED bit.
         if (book_imbalance_blocked) {
             state->cores[slot].pending_params.flags |= GATE_FLAG_BUY_BLOCKED;
-            if (state->cores[slot].halt_reason == 0)
-                state->cores[slot].halt_reason = 10;
+            if (state->cores[slot].halt_reason == HALT_OK)
+                state->cores[slot].halt_reason = HALT_IMBALANCE;
         }
 
         // Phase 2.2: per-core budget enforcement. Clamp the strategy's
@@ -1970,7 +1969,7 @@ inline void EventLoop_RebuildOneCore(
                 // to zero so any downstream consumer of trade_size sees
                 // an honest zero rather than a stale value.
                 state->cores[slot].pending_params.trade_size = FPN_Zero<F>();
-                zero_gate(8);
+                zero_gate(HALT_CORE_BUDGET);
             } else if (!FPN_IsZero(entry_price)) {
                 // Budget remaining is positive — clamp qty to
                 // (budget_remaining / entry_price). Under single-position-
@@ -2072,14 +2071,14 @@ inline void EventLoop_RebuildOneCore(
                 }
             }
             if (state->cores[slot].core_kill_tripped) {
-                zero_gate(9);  // HALT_CORE_KILL
+                zero_gate(HALT_CORE_KILL);
             }
         }
 
         // SL COOLDOWN: decrement counter; if still active, zero-gate.
         if (state->cores[slot].sl_cooldown_remaining > 0) {
             state->cores[slot].sl_cooldown_remaining--;
-            zero_gate(6);
+            zero_gate(HALT_SL_COOLDOWN);
         }
         // SPACING: zero-gate if proposed entry too close to last entry.
         // SPIKE-RELAXATION (D5): when current volume is a spike (>= max ×
@@ -2116,7 +2115,7 @@ inline void EventLoop_RebuildOneCore(
         if (!Strategy_SpacingOk(state->cores[slot].pending_params.bg_price_threshold,
                                  state->cores[slot].last_entry_price,
                                  rolling, &spacing_cfg)) {
-            zero_gate(1);
+            zero_gate(HALT_SPACING);
         }
         // VWAP gate: forces entries below VWAP — buy retracements, not pumps.
         if (!FPN_IsZero(resolved_cfg.vwap_offset) && !FPN_IsZero(rolling->vwap)) {
@@ -2128,7 +2127,7 @@ inline void EventLoop_RebuildOneCore(
             state->cores[slot].diag_vwap_threshold = vwap_threshold;
             if (FPN_GreaterThan(state->cores[slot].pending_params.bg_price_threshold,
                                  vwap_threshold)) {
-                zero_gate(2);
+                zero_gate(HALT_VWAP);
             }
         }
         // LONG-SLOPE gate: blocks buys in confirmed downtrends.
@@ -2140,7 +2139,7 @@ inline void EventLoop_RebuildOneCore(
             state->cores[slot].diag_long_slope     = long_rel_slope;
             state->cores[slot].diag_long_slope_min = resolved_cfg.min_long_slope;
             if (FPN_LessThan(long_rel_slope, resolved_cfg.min_long_slope)) {
-                zero_gate(3);
+                zero_gate(HALT_LONG_SLOPE);
             }
         }
         // VOLUME DELTA gate: blocks heavy dumps.
@@ -2151,7 +2150,7 @@ inline void EventLoop_RebuildOneCore(
             state->cores[slot].diag_volume_delta     = rolling->volume_delta;
             state->cores[slot].diag_volume_delta_min = resolved_cfg.min_buy_delta;
             if (FPN_LessThan(rolling->volume_delta, resolved_cfg.min_buy_delta)) {
-                zero_gate(4);
+                zero_gate(HALT_VOL_DELTA);
             }
         }
         // MIN STDDEV gate: skip dead markets.
@@ -2162,7 +2161,7 @@ inline void EventLoop_RebuildOneCore(
             state->cores[slot].diag_stddev_pct     = stddev_ratio;
             state->cores[slot].diag_stddev_pct_min = resolved_cfg.min_stddev_pct;
             if (FPN_LessThan(stddev_ratio, resolved_cfg.min_stddev_pct)) {
-                zero_gate(5);
+                zero_gate(HALT_MIN_STDDEV);
             }
         }
         // v5.6.3: capture tp_pct + fee floor for GUI. Same formula as
