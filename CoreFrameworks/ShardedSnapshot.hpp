@@ -132,6 +132,36 @@ static inline void TUI_CopySnapshotSharded(
     snap->kill_switch_active = agg.kill_switch_tripped;
     snap->breaker_tripped    = agg.kill_switch_tripped;
 
+    // v5.7.9: session indicator. The legacy single-core
+    // PortfolioController computes current_session + session_mult
+    // from UTC hour at the top of every slow-path cycle
+    // (PortfolioController.hpp:1440-1443). The sharded port never
+    // mirrored this — `snap->current_session` stayed at 0 (ASIA)
+    // and `snap->session_mult` at 0.0 forever, hence the GUI's
+    // stuck "ASIA (0.0x)" indicator. Computing here in the snapshot
+    // copy is cheap (one time() syscall per GUI frame, ~60Hz) and
+    // matches the legacy formula bit-for-bit. Mirror Class 2c —
+    // sharding-port-orphan with display↔execution divergence.
+    {
+        time_t now = time(nullptr);
+        struct tm utc;
+        gmtime_r(&now, &utc);
+        int h = utc.tm_hour;
+        if (h < 7) {
+            snap->current_session = 0;  // ASIA
+            snap->session_mult    = FPN_ToDouble(cfg->session_asian_mult);
+        } else if (h < 13) {
+            snap->current_session = 1;  // EU
+            snap->session_mult    = FPN_ToDouble(cfg->session_european_mult);
+        } else if (h < 20) {
+            snap->current_session = 2;  // US
+            snap->session_mult    = FPN_ToDouble(cfg->session_us_mult);
+        } else {
+            snap->current_session = 3;  // OVERNIGHT
+            snap->session_mult    = FPN_ToDouble(cfg->session_overnight_mult);
+        }
+    }
+
     // per-position details
     uint16_t bm = state->oms->portfolio.active_bitmap;
     double total_value = 0.0, total_qty = 0.0;
