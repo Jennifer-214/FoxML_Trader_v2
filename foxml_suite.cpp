@@ -29,6 +29,7 @@
 #include "GUI/SettingsPanel.hpp"
 #include "GUI/DashboardPanels.hpp"
 #include "GUI/LogViewerPanel.hpp"
+#include "GUI/EngineHeaderPanel.hpp"  // v5.8.6b: engine version + registry hash header
 
 #include "Backtest/BacktestPanels.hpp"
 
@@ -317,6 +318,9 @@ int main(int argc, char *argv[]) {
         static volatile sig_atomic_t suite_reload_flag = 0;
         GUI_Panel_Settings(&settings, &suite_reload_flag);
         suite_reload_flag = 0; // consume — config takes effect on next run
+
+        // v5.8.6b: engine header — version + feature registry hash + format
+        tt::EngineHeader_Render();
 
         // trade history (reuse existing panel — reads backtest CSV)
         if (run_control.complete) {

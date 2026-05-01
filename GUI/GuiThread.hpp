@@ -26,6 +26,7 @@
 #include "TradeHistoryPanel.hpp"
 #include "LogViewerPanel.hpp"
 #include "StrategyQualityPanel.hpp"  // v5.7.6
+#include "EngineHeaderPanel.hpp"     // v5.8.6b: engine version + registry hash header
 
 //==========================================================================
 // STATEFUL PANEL REGISTRY — v5.8.4b
@@ -360,6 +361,9 @@ static inline void *gui_thread_fn(void *arg) {
                      snap->price, snap->total_pnl);
             SDL_SetWindowTitle(gui.window, title);
         }
+
+        // v5.8.6b: engine header — version + feature registry hash + format
+        tt::EngineHeader_Render();
 
         // dashboard panels (right side)
         GUI_RenderDashboard(snap, snap->start_time ? snap->start_time : gui_start, shared);
