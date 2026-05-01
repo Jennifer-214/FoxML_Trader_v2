@@ -1237,13 +1237,40 @@ static inline void GUI_Panel_Positions(const TUISnapshot *s, TUISharedState *sha
             ImGui::TableNextColumn();
             ImGui::TextColored(PnlColor(diff), "%+.0f", diff);
 
-            // TP
+            // TP — v5.6.5 adds enabled-flag indicator + original-TP
+            // tooltip on hover. ps->tp is already the effective TP
+            // (max of live + ratchet) per ShardedSnapshot.hpp:178.
+            // gate_flags from per_core: TP_ENABLED=0x01, SL_ENABLED=0x02.
             ImGui::TableNextColumn();
-            ImGui::TextColored(FoxmlColors::green, "%.0f", ps->tp);
+            {
+                uint8_t gf = (row_core_id < 16 && s->sharded_mode_active)
+                    ? s->per_core[row_core_id].gate_flags : 0xFF;  // unknown
+                                                                     // → assume on
+                bool tp_enabled = (gf & 0x01) != 0;
+                if (!tp_enabled) {
+                    ImGui::TextColored(FoxmlColors::red, "OFF");
+                } else {
+                    ImGui::TextColored(FoxmlColors::green, "%.0f", ps->tp);
+                }
+                if (ImGui::IsItemHovered() && ps->orig_tp > 0.0 &&
+                    ps->orig_tp != ps->tp) {
+                    ImGui::SetTooltip("orig TP: $%.2f\nratchet'd to: $%.2f",
+                                       ps->orig_tp, ps->tp);
+                }
+            }
 
             // SL
             ImGui::TableNextColumn();
-            ImGui::TextColored(FoxmlColors::red, "%.0f", ps->sl);
+            {
+                uint8_t gf = (row_core_id < 16 && s->sharded_mode_active)
+                    ? s->per_core[row_core_id].gate_flags : 0xFF;
+                bool sl_enabled = (gf & 0x02) != 0;
+                if (!sl_enabled) {
+                    ImGui::TextColored(FoxmlColors::red, "OFF");
+                } else {
+                    ImGui::TextColored(FoxmlColors::red, "%.0f", ps->sl);
+                }
+            }
 
             // value
             ImGui::TableNextColumn();
