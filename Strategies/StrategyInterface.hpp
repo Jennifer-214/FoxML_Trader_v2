@@ -154,34 +154,66 @@ static_assert(sizeof(STRATEGY_FULL_NAMES) / sizeof(*STRATEGY_FULL_NAMES) == NUM_
               "STRATEGY_FULL_NAMES out of sync with NUM_STRATEGIES");
 
 //======================================================================================================
-// [REGIME CONSTANTS]
+// [REGIME CONSTANTS — v5.8.4 X-macro registry]
 //======================================================================================================
-#define REGIME_RANGING       0
-#define REGIME_TRENDING      1  // uptrend — momentum (buy breakouts above)
-#define REGIME_VOLATILE      2
-#define REGIME_TRENDING_DOWN 3  // downtrend — pause buying (future: short strategy)
-#define REGIME_MILD_TREND    4  // mild uptrend — EMA Cross (buy dips in uptrend)
-#define NUM_REGIMES          5
+// Adding a regime is a 1-line change to FOREACH_REGIME(X) below — auto-
+// generates REGIME_<id> constants, REGIME_INFO[] short/full name lookup,
+// and REGIME_STRATEGY_TABLE[] regime→strategy mapping. The regime
+// classifier (Strategies/RegimeDetector.hpp) still needs to be updated
+// to know how to score the new regime — registry only handles dispatch.
+//
+// IDs are append-only — never reorder or remove. Persisted snapshots
+// and trade logs reference these by integer.
+//
+// MILD_TREND default strategy is conditionally STRATEGY_EMA_CROSS when
+// private/EmaCross.hpp is in the build, else falls back to
+// STRATEGY_MEAN_REVERSION. Mirrors the conditional include in
+// FOREACH_STRATEGY_EMACROSS so public-release builds still compile.
+//
+// Row format: X(<id>, <short_name>, <full_name>, <default_strategy_id>)
+//======================================================================================================
+#if __has_include("private/EmaCross.hpp")
+#  define MILD_TREND_DEFAULT_STRATEGY STRATEGY_EMA_CROSS
+#else
+#  define MILD_TREND_DEFAULT_STRATEGY STRATEGY_MEAN_REVERSION  /* fallback when private/ absent */
+#endif
 
-// regime info lookup table — single source of truth for display
-// adding a regime = one line here, zero display edits elsewhere
+#define FOREACH_REGIME(X) \
+    X(RANGING,       "RANGE", "RANGING",       STRATEGY_MEAN_REVERSION) \
+    X(TRENDING,      "TREND", "TRENDING",      STRATEGY_MOMENTUM) \
+    X(VOLATILE,      "VOLAT", "VOLATILE",      STRATEGY_SIMPLE_DIP) \
+    X(TRENDING_DOWN, "TR_DN", "TRENDING_DOWN", STRATEGY_MEAN_REVERSION) \
+    X(MILD_TREND,    "EMACR", "MILD_TREND",    MILD_TREND_DEFAULT_STRATEGY)
+
+// Auto-generated REGIME_<id> constants. Plain int (not enum) for back-
+// compat with the dozens of comparison sites in RegimeDetector.hpp that
+// use `regime == REGIME_X` patterns.
+enum {
+#define X(id, short_name, full_name, default_strat) REGIME_##id,
+    FOREACH_REGIME(X)
+#undef X
+    NUM_REGIMES
+};
+
+// Display info lookup table — short + long names per regime.
 struct RegimeInfo { const char *short_name; const char *full_name; };
 static const RegimeInfo REGIME_INFO[] = {
-    {"RANGE", "RANGING"},        // 0
-    {"TREND", "TRENDING"},       // 1
-    {"VOLAT", "VOLATILE"},       // 2
-    {"TR_DN", "TRENDING_DOWN"},  // 3
-    {"EMACR", "MILD_TREND"},     // 4
+#define X(id, short_name, full_name, default_strat) {short_name, full_name},
+    FOREACH_REGIME(X)
+#undef X
 };
 
-// regime-to-strategy mapping table — branchless lookup
+// Regime-to-strategy mapping table — branchless lookup at slow path.
 static const int REGIME_STRATEGY_TABLE[] = {
-    STRATEGY_MEAN_REVERSION,  // RANGING (0)
-    STRATEGY_MOMENTUM,        // TRENDING (1)
-    STRATEGY_SIMPLE_DIP,      // VOLATILE (2)
-    STRATEGY_MEAN_REVERSION,  // TRENDING_DOWN (3)
-    STRATEGY_EMA_CROSS,       // MILD_TREND (4)
+#define X(id, short_name, full_name, default_strat) default_strat,
+    FOREACH_REGIME(X)
+#undef X
 };
+
+static_assert(sizeof(REGIME_INFO) / sizeof(*REGIME_INFO) == NUM_REGIMES,
+              "REGIME_INFO out of sync with NUM_REGIMES");
+static_assert(sizeof(REGIME_STRATEGY_TABLE) / sizeof(*REGIME_STRATEGY_TABLE) == NUM_REGIMES,
+              "REGIME_STRATEGY_TABLE out of sync with NUM_REGIMES");
 
 //======================================================================================================
 // [STRATEGY HALT REASON CODES — v5.6.2]
