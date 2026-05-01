@@ -95,7 +95,12 @@
 //           FEAT_FLOW_*, FEAT_LARGE_TRADE_Z). Old v2 models will fail load.
 // v4 (v4.6 Wave 2): added 2 spread features (FEAT_SPREAD_BPS,
 //           FEAT_SPREAD_ZSCORE). Old v3 models will fail load.
-#define MODEL_FORMAT_VERSION 4
+// v5 (v5.8.1a): introduce feature_registry_hash field in stamp body.
+//           Hash is FNV-1a over FOREACH_FEATURE(X) enabled-row names +
+//           versions (see FeatureRegistry.hpp). Stamps signed under one
+//           registry refuse to load under a different registry. v4 stamps
+//           lack the field and fail format-version check.
+#define MODEL_FORMAT_VERSION 5
 
 //======================================================================================================
 // [FEATURE LOOKBACK REGISTRY]
@@ -572,11 +577,12 @@ inline int ModelFeatures_Pack(float *buf, const RegimeSignals<F> *sig,
 //======================================================================================================
 
 struct ModelStampResult {
-    int    valid;             // 1 / 0 / -1 per above
-    char   reason[256];       // human-readable failure reason
-    int    model_format_version;
-    double generalization_gap;
-    double gap_threshold;
+    int      valid;             // 1 / 0 / -1 per above
+    char     reason[256];       // human-readable failure reason
+    int      model_format_version;
+    double   generalization_gap;
+    double   gap_threshold;
+    uint64_t feature_registry_hash;  // v5.8.1a: 0 if absent (old stamps)
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -612,13 +618,15 @@ inline int stamp_parse_line(char* line, const char** key_out, const char** val_o
 inline ModelStampResult verify_model_stamp(const char* model_path,
                                             const char* secret,
                                             double gap_threshold,
-                                            int expected_format_version) {
+                                            int expected_format_version,
+                                            uint64_t expected_feature_registry_hash = 0) {
     ModelStampResult r;
     r.valid = -1;
     r.reason[0] = '\0';
     r.model_format_version = 0;
     r.generalization_gap = 0.0;
     r.gap_threshold = gap_threshold;
+    r.feature_registry_hash = 0;
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -685,6 +693,10 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 r.generalization_gap = atof(val);
             } else if (strcmp(key, "gap_threshold") == 0) {
                 r.gap_threshold = atof(val);
+            } else if (strcmp(key, "feature_registry_hash") == 0) {
+                // v5.8.1a: parse hex-encoded 64-bit hash. strtoull accepts
+                // 0x-prefix or bare hex. Stamp emits %016lx (no prefix).
+                r.feature_registry_hash = (uint64_t)strtoull(val, nullptr, 16);
             }
         }
         line = strtok_r(nullptr, "\n", &save);
@@ -696,6 +708,21 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
         snprintf(r.reason, sizeof(r.reason),
             "format-version mismatch: stamp=%d engine=%d",
             r.model_format_version, expected_format_version);
+        return r;
+    }
+
+    // 1b. v5.8.1a — feature registry hash match. When caller passes
+    // expected_feature_registry_hash != 0, stamp must contain matching
+    // hash. Default 0 = "skip check" (backward-compat for callers that
+    // haven't migrated to the new signature; v5.8.1b flips them all).
+    if (expected_feature_registry_hash != 0 &&
+        r.feature_registry_hash != expected_feature_registry_hash) {
+        r.valid = 0;
+        snprintf(r.reason, sizeof(r.reason),
+            "feature-registry-hash mismatch: stamp=%016lx engine=%016lx "
+            "(retrain required)",
+            (unsigned long)r.feature_registry_hash,
+            (unsigned long)expected_feature_registry_hash);
         return r;
     }
 
@@ -793,7 +820,8 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
                                                 double wf_mean_val,
                                                 double held_out_metric,
                                                 double gap_threshold,
-                                                int   force) {
+                                                int   force,
+                                                uint64_t feature_registry_hash = 0) {
     StampWriteResult r;
     r.ok = 0;
     r.error[0] = '\0';
@@ -831,18 +859,39 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
 
     // 5. Canonical body — must match bash script + verifier byte-for-byte.
     //    Field order: format-version, sha256, trained_on, wf_mean_val,
-    //    held_out_metric, gap, gap_threshold. Each line ends with \n.
+    //    held_out_metric, gap, gap_threshold, [feature_registry_hash].
+    //    feature_registry_hash is appended ONLY when format_version >= 5
+    //    AND a non-zero hash was supplied. v4 stamps and dev-mode invocations
+    //    omit the field — verifier handles missing field as "skip check"
+    //    when expected_feature_registry_hash == 0.
+    //    Each line ends with \n.
     char canonical[2048];
-    int n = snprintf(canonical, sizeof(canonical),
-        "model_format_version=%d\n"
-        "model_sha256=%s\n"
-        "trained_on=%s\n"
-        "wf_mean_val=%g\n"
-        "held_out_metric=%g\n"
-        "gap=%.6f\n"
-        "gap_threshold=%g\n",
-        format_version, model_sha, trained_on_iso,
-        wf_mean_val, held_out_metric, gap, gap_threshold);
+    int n;
+    if (format_version >= 5 && feature_registry_hash != 0) {
+        n = snprintf(canonical, sizeof(canonical),
+            "model_format_version=%d\n"
+            "model_sha256=%s\n"
+            "trained_on=%s\n"
+            "wf_mean_val=%g\n"
+            "held_out_metric=%g\n"
+            "gap=%.6f\n"
+            "gap_threshold=%g\n"
+            "feature_registry_hash=%016lx\n",
+            format_version, model_sha, trained_on_iso,
+            wf_mean_val, held_out_metric, gap, gap_threshold,
+            (unsigned long)feature_registry_hash);
+    } else {
+        n = snprintf(canonical, sizeof(canonical),
+            "model_format_version=%d\n"
+            "model_sha256=%s\n"
+            "trained_on=%s\n"
+            "wf_mean_val=%g\n"
+            "held_out_metric=%g\n"
+            "gap=%.6f\n"
+            "gap_threshold=%g\n",
+            format_version, model_sha, trained_on_iso,
+            wf_mean_val, held_out_metric, gap, gap_threshold);
+    }
 
     // Restore prior locale ASAP — every subsequent return must NOT undo this twice
     if (pinned) {

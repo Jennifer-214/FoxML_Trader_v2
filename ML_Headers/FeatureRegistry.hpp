@@ -1,0 +1,279 @@
+// Copyright (c) 2026 Jennifer Lewis. All rights reserved.
+// Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+// See LICENSE file in the project root for full license text.
+
+//======================================================================================================
+// [FEATURE REGISTRY — v5.8.1a — X-macro driven]
+//======================================================================================================
+// Single source of truth for ML features. Adding a new feature:
+//   1. Implement `ML_Compute_<Name>(ctx)` returning FPN<F>
+//   2. Append one row to FOREACH_FEATURE(X)
+//   3. Recompile — FEATURE_REGISTRY_HASH flips, old stamps reject at load
+//
+// Phase split (v5.8.1):
+//   v5.8.1a (this ship): infrastructure + first 10 features (FEAT_SHORT_SLOPE
+//     through FEAT_VOLUME_DELTA, indices 0-9 in legacy ModelFeatures_Pack).
+//     ModelFeatures_Pack stays in production; Features_PackAll is a parallel
+//     path that produces equivalent values for tests/verification.
+//   v5.8.1b (next ship): remaining 24 features + flip 5 callers from
+//     ModelFeatures_Pack to Features_PackAll + retire the legacy function.
+//
+// Auto-generated from FOREACH_FEATURE(X):
+//   - enum FeatureId with stable IDs
+//   - FEATURE_NAMES[] / FEATURE_VERSIONS[] arrays
+//   - Features_PackAll(ctx, out) — packs all enabled features into a float array
+//   - FEATURE_REGISTRY_HASH (FNV-1a over name+version) — contributes to model
+//     fingerprint so train-time vs serve-time feature-set mismatch becomes a
+//     load-time rejection
+//
+// Canonical signature (do not deviate; see DOCS/FEATURE_INTERFACE.md):
+//   template <unsigned F>
+//   inline FPN<F> ML_Compute_<Name>(const FeatureComputeCtx<F>* ctx);
+//
+// FPN_Zero<F>() is the safe "I don't have data yet" return for cold-start /
+// warmup paths.
+//======================================================================================================
+#pragma once
+
+#include <cstdint>
+#include "../FixedPoint/FixedPointN.hpp"
+#include "RollingStats.hpp"
+#include "ROR_regressor.hpp"
+#include "FlowFeatures.hpp"
+#include "../Strategies/RegimeDetector.hpp"  // RegimeSignals<F>
+
+// CumDeltaState + TickRateState live elsewhere in the codebase; forward
+// declare so FeatureComputeCtx can hold typed pointers without a circular
+// include. Definitions: CumDeltaState in FlowFeatures.hpp / RegimeDetector.hpp,
+// TickRateState in DataStream/.
+template <unsigned F> struct CumDeltaState;
+struct TickRateState;
+
+//======================================================================================================
+// [FEATURE COMPUTE CONTEXT]
+//======================================================================================================
+// The bundle of all available ML inference inputs. Each compute fn reads
+// what it needs and ignores the rest. New fields appended over time as
+// new feature categories surface.
+//
+// v5.8.1a — `signals` is pre-computed RegimeSignals from the slow path.
+// First 10 features read from this bundle (no recomputation). Future
+// features may read directly from short_rolling / long_rolling / etc.
+// for finer-grained access.
+//
+// MLBuildContext (legacy bundle in StrategyParameters.hpp) maps 1:1 to
+// these fields — v5.8.1b's caller migration just renames + reroutes.
+//======================================================================================================
+template <unsigned F>
+struct FeatureComputeCtx {
+    // Pre-computed regime signal bundle. v5.8.1a features read here.
+    const RegimeSignals<F>*               signals;
+
+    // Raw rolling-stats bundles (multiple windows).
+    const RollingStats<F, 128>*           short_rolling;
+    const RollingStats<F, 512>*           long_rolling;
+    const RollingStats<F, 256>*           medium_rolling;
+    const RollingStats<F, 1024>*          baseline_rolling;
+
+    // Auxiliary state — populated from MLBuildContext during migration.
+    const FPN<F>*                         ema_price;
+    const RORRegressor<F>*                ror;
+    const FlowState*                      flow;
+    const BookImbalanceHistory<F, 1024>*  book_imb;
+    const SpreadState<F, 1024>*           spread;
+    const LargeTradeState<F, 1024>*       large_trade;
+    const CumDeltaState<F>*               cumdelta;
+    const TickRateState*                  tick_rate;
+    uint64_t                              timestamp_us;
+};
+
+//======================================================================================================
+// [FEATURE COMPUTE FUNCTIONS — v5.8.1a first 10 features]
+//======================================================================================================
+// All read from ctx->signals (the pre-computed RegimeSignals bundle).
+// FPN_Zero return on null ctx or null signals — safe for cold-start.
+//======================================================================================================
+
+template <unsigned F>
+inline FPN<F> ML_Compute_ShortSlope(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->short_slope : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_ShortR2(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->short_r2 : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_ShortVariance(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->short_variance : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_LongSlope(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->long_slope : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_LongR2(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->long_r2 : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_LongVariance(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->long_variance : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_VolRatio(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->vol_ratio : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_RorSlope(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->ror_slope : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_VolumeSlope(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->volume_slope : FPN_Zero<F>();
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_VolumeDelta(const FeatureComputeCtx<F>* ctx) {
+    return (ctx && ctx->signals) ? ctx->signals->volume_delta : FPN_Zero<F>();
+}
+
+//======================================================================================================
+// [FEATURE REGISTRY — X-macro]
+//======================================================================================================
+// Row format:
+//   X(<ID>, <name>, <version>, <ENABLED|DISABLED>, <compute_fn>, <note>)
+//
+// ENABLED/DISABLED is a compile-time gate — DISABLED features are skipped
+// by Features_PackAll AND don't contribute to FEATURE_REGISTRY_HASH (so
+// disabling a feature flips the hash, forcing retrain).
+//
+// Version: bump on formula change. Bumping flips the hash → retrain.
+// Don't bump for renames or comment-only edits.
+//
+// IDs: contiguous from 0. Order MUST match historical FEAT_* indices for
+// the duration of the v5.8.1a/b transition (so v5.8.1a's Features_PackAll
+// produces identical buf[i] values to ModelFeatures_Pack for indices 0-9).
+//======================================================================================================
+
+#define FEATURE_ENABLED  1
+#define FEATURE_DISABLED 0
+
+#define FOREACH_FEATURE(X) \
+    X(SHORT_SLOPE,    "short_slope",    1, FEATURE_ENABLED, ML_Compute_ShortSlope,    "regression slope, 128-tick window") \
+    X(SHORT_R2,       "short_r2",       1, FEATURE_ENABLED, ML_Compute_ShortR2,       "R² of short-window regression") \
+    X(SHORT_VARIANCE, "short_variance", 1, FEATURE_ENABLED, ML_Compute_ShortVariance, "price variance over 128 ticks") \
+    X(LONG_SLOPE,     "long_slope",     1, FEATURE_ENABLED, ML_Compute_LongSlope,     "regression slope, 512-tick window") \
+    X(LONG_R2,        "long_r2",        1, FEATURE_ENABLED, ML_Compute_LongR2,        "R² of long-window regression") \
+    X(LONG_VARIANCE,  "long_variance",  1, FEATURE_ENABLED, ML_Compute_LongVariance,  "price variance over 512 ticks") \
+    X(VOL_RATIO,      "vol_ratio",      1, FEATURE_ENABLED, ML_Compute_VolRatio,      "short variance / long variance") \
+    X(ROR_SLOPE,      "ror_slope",      1, FEATURE_ENABLED, ML_Compute_RorSlope,      "regression-on-regression slope") \
+    X(VOLUME_SLOPE,   "volume_slope",   1, FEATURE_ENABLED, ML_Compute_VolumeSlope,   "regression slope of volume") \
+    X(VOLUME_DELTA,   "volume_delta",   1, FEATURE_ENABLED, ML_Compute_VolumeDelta,   "volume change last vs avg")
+
+// Auto-generated FEATURE_<ID> enum constants. Order matches FOREACH_FEATURE.
+enum FeatureId : uint16_t {
+#define X(id, name, version, enabled, fn, note) FEATURE_##id,
+    FOREACH_FEATURE(X)
+#undef X
+    NUM_REGISTERED_FEATURES
+};
+
+// Names + versions arrays — auto-generated.
+static const char* FEATURE_NAMES[] = {
+#define X(id, name, version, enabled, fn, note) name,
+    FOREACH_FEATURE(X)
+#undef X
+};
+
+static const int FEATURE_VERSIONS[] = {
+#define X(id, name, version, enabled, fn, note) version,
+    FOREACH_FEATURE(X)
+#undef X
+};
+
+static const int FEATURE_ENABLED_FLAGS[] = {
+#define X(id, name, version, enabled, fn, note) enabled,
+    FOREACH_FEATURE(X)
+#undef X
+};
+
+static_assert(sizeof(FEATURE_NAMES) / sizeof(*FEATURE_NAMES) == NUM_REGISTERED_FEATURES,
+              "FEATURE_NAMES out of sync with NUM_REGISTERED_FEATURES");
+static_assert(sizeof(FEATURE_VERSIONS) / sizeof(*FEATURE_VERSIONS) == NUM_REGISTERED_FEATURES,
+              "FEATURE_VERSIONS out of sync with NUM_REGISTERED_FEATURES");
+
+//======================================================================================================
+// [FEATURE REGISTRY HASH — FNV-1a over enabled feature names+versions]
+//======================================================================================================
+// Compile-time hash that contributes to the model fingerprint. Stamp body
+// embeds this value at training time; verifier rejects load when it
+// differs from the build-time value (= train-serve feature-set mismatch).
+//
+// DISABLED features don't contribute, so flipping ENABLED → DISABLED also
+// flips the hash, forcing retrain.
+//======================================================================================================
+
+namespace tt {
+constexpr uint64_t FNV_OFFSET_64 = 0xcbf29ce484222325ULL;
+constexpr uint64_t FNV_PRIME_64  = 0x100000001b3ULL;
+
+// FNV-1a hash of a null-terminated C string. Recursive constexpr for C++17.
+constexpr uint64_t fnv1a(const char* s, uint64_t h = FNV_OFFSET_64) {
+    return *s ? fnv1a(s + 1, (h ^ (uint64_t)(uint8_t)*s) * FNV_PRIME_64) : h;
+}
+} // namespace tt
+
+// Compile-time fold over the registry. Each enabled row contributes
+// hash(name) chained with hash(":v" + version).
+inline uint64_t feature_registry_hash_compute() {
+    uint64_t h = tt::FNV_OFFSET_64;
+#define X(id, name, version, enabled, fn, note) \
+    if ((enabled)) { \
+        for (const char* p = name; *p; ++p) \
+            h = (h ^ (uint64_t)(uint8_t)*p) * tt::FNV_PRIME_64; \
+        const char* vstr = ":v" #version; \
+        for (const char* p = vstr; *p; ++p) \
+            h = (h ^ (uint64_t)(uint8_t)*p) * tt::FNV_PRIME_64; \
+    }
+    FOREACH_FEATURE(X)
+#undef X
+    return h;
+}
+
+inline uint64_t FEATURE_REGISTRY_HASH() {
+    static const uint64_t h = feature_registry_hash_compute();
+    return h;
+}
+
+//======================================================================================================
+// [FEATURES_PACK_ALL — the new packer]
+//======================================================================================================
+// Replaces ModelFeatures_Pack in v5.8.1b. Loops the X-macro registry,
+// invokes each enabled compute fn, writes float result into out[i].
+//
+// `out` must have capacity >= NUM_REGISTERED_FEATURES.
+// Returns the number of features written.
+//
+// v5.8.1a: only 10 features registered. ModelFeatures_Pack still runs in
+// production. Equivalence test in controller_test.cpp verifies that
+// out[i] from this fn matches buf[i] from ModelFeatures_Pack for i < 10.
+//======================================================================================================
+template <unsigned F>
+inline int Features_PackAll(const FeatureComputeCtx<F>* ctx, float* out) {
+    int n = 0;
+#define X(id, name, version, enabled, fn, note) \
+    if ((enabled)) { \
+        out[FEATURE_##id] = (float)FPN_ToDouble(fn(ctx)); \
+        ++n; \
+    }
+    FOREACH_FEATURE(X)
+#undef X
+    return n;
+}

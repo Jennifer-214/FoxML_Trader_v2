@@ -25,6 +25,7 @@
 #include "../DataStream/EngineTUI.hpp"                   // v5.0.4 — topology populator tests
 #include "../CoreFrameworks/Reconcile.hpp"                // v5.2.1 — live reconciliation tests
 #include "../ML_Headers/CoreModelZoo.hpp"                // Track E.2 tests
+#include "../ML_Headers/FeatureRegistry.hpp"              // v5.8.1a tests
 #include "../DataStream/DepthReplayState.hpp"            // Track E.3 tests
 #include "../ML_Headers/FlowFeatures.hpp"                // v4.5 Wave 1 tests
 #include "../DataStream/BinanceUserData.hpp"
@@ -9025,6 +9026,175 @@ e3_skip_load:;
             ;
         check("v5.8.0: FOREACH_STRATEGY row count == NUM_STRATEGIES_REAL",
               row_count == NUM_STRATEGIES_REAL);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.8.1a feature X-macro registry ---\n");
+    {
+        // Registry shape: 10 features registered in v5.8.1a (FEAT_SHORT_SLOPE
+        // through FEAT_VOLUME_DELTA, indices 0-9). v5.8.1b adds 24 more
+        // (target: NUM_REGISTERED_FEATURES == 34).
+        check("v5.8.1a: NUM_REGISTERED_FEATURES == 10 (first batch)",
+              NUM_REGISTERED_FEATURES == 10);
+        check("v5.8.1a: FEATURE_SHORT_SLOPE == 0", FEATURE_SHORT_SLOPE == 0);
+        check("v5.8.1a: FEATURE_VOLUME_DELTA == 9", FEATURE_VOLUME_DELTA == 9);
+
+        // Registry hash must be non-zero — sanity that FNV-1a folded
+        // over ≥ 1 enabled row.
+        uint64_t h = FEATURE_REGISTRY_HASH();
+        check("v5.8.1a: FEATURE_REGISTRY_HASH != 0", h != 0);
+
+        // Pinned snapshot — any change to FOREACH_FEATURE flips the hash
+        // and fails this test, forcing a deliberate "yes I'm changing
+        // the model contract" acknowledgment + retrain. v5.8.1b will
+        // bump this snapshot when adding the remaining 24 features.
+        // FNV-1a fold over the 10 enabled rows of FOREACH_FEATURE,
+        // chaining hash(name) and hash(":v" + version). Pinned at
+        // v5.8.1a ship time. If this test fails after a deliberate
+        // registry change, update the constant + bump
+        // MODEL_FORMAT_VERSION + retrain models. Failure path prints
+        // computed value for easy update.
+        constexpr uint64_t EXPECTED_HASH_V5_8_1A = 0xf7274ab6cb764a40ULL;
+        if (h != EXPECTED_HASH_V5_8_1A) {
+            fprintf(stderr,
+                "  [hash debug] computed=0x%016lx expected=0x%016lx\n",
+                (unsigned long)h, (unsigned long)EXPECTED_HASH_V5_8_1A);
+        }
+        check("v5.8.1a: FEATURE_REGISTRY_HASH matches pinned snapshot",
+              h == EXPECTED_HASH_V5_8_1A);
+
+        // Names array drift detection.
+        check("v5.8.1a: FEATURE_NAMES[0] == \"short_slope\"",
+              strcmp(FEATURE_NAMES[FEATURE_SHORT_SLOPE], "short_slope") == 0);
+        check("v5.8.1a: FEATURE_NAMES[9] == \"volume_delta\"",
+              strcmp(FEATURE_NAMES[FEATURE_VOLUME_DELTA], "volume_delta") == 0);
+
+        // FOREACH_FEATURE row counter — expand with a counter X-macro
+        // and verify it matches NUM_REGISTERED_FEATURES.
+        constexpr int feat_count = 0
+#define X(...) + 1
+            FOREACH_FEATURE(X)
+#undef X
+            ;
+        check("v5.8.1a: FOREACH_FEATURE row count == NUM_REGISTERED_FEATURES",
+              feat_count == (int)NUM_REGISTERED_FEATURES);
+
+        // All registered v5.8.1a features must be ENABLED at ship time
+        // (DISABLED is a future hook for experimental features).
+        bool all_enabled = true;
+        for (int i = 0; i < (int)NUM_REGISTERED_FEATURES; i++) {
+            if (FEATURE_ENABLED_FLAGS[i] != FEATURE_ENABLED) {
+                all_enabled = false;
+                break;
+            }
+        }
+        check("v5.8.1a: all registered features ENABLED", all_enabled);
+
+        // Equivalence: Features_PackAll must produce the same float values
+        // as ModelFeatures_Pack for the registered indices. This is the
+        // load-bearing test that lets v5.8.1b flip callers without behavior
+        // change.
+        RegimeSignals<64> sig{};
+        sig.short_slope    = FPN_FromDouble<64>(0.0042);
+        sig.short_r2       = FPN_FromDouble<64>(0.78);
+        sig.short_variance = FPN_FromDouble<64>(0.000123);
+        sig.long_slope     = FPN_FromDouble<64>(0.0019);
+        sig.long_r2        = FPN_FromDouble<64>(0.45);
+        sig.long_variance  = FPN_FromDouble<64>(0.000456);
+        sig.vol_ratio      = FPN_FromDouble<64>(2.7);
+        sig.ror_slope      = FPN_FromDouble<64>(-0.0001);
+        sig.volume_slope   = FPN_FromDouble<64>(0.005);
+        sig.volume_delta   = FPN_FromDouble<64>(0.013);
+
+        RollingStats<64, 128> r{};
+        RollingStats<64, 512> r_long{};
+
+        FeatureComputeCtx<64> ctx{};
+        ctx.signals       = &sig;
+        ctx.short_rolling = &r;
+        ctx.long_rolling  = &r_long;
+
+        float pack_old[MODEL_MAX_FEATURES] = {0};
+        float pack_new[MODEL_MAX_FEATURES] = {0};
+        ModelFeatures_Pack(pack_old, &sig, &r, &r_long);
+        int n_new = Features_PackAll(&ctx, pack_new);
+
+        check("v5.8.1a: Features_PackAll returns 10 (registered count)",
+              n_new == 10);
+
+        // Per-index equivalence for indices 0-9. Tolerance 1e-6 because
+        // both paths convert FPN→double→float identically.
+        bool equiv = true;
+        for (int i = 0; i < 10; i++) {
+            float diff = pack_old[i] - pack_new[i];
+            if (diff < 0) diff = -diff;
+            if (diff > 1e-6f) {
+                fprintf(stderr,
+                    "  [feat %d (%s)] old=%.9g new=%.9g diff=%.9g\n",
+                    i, FEATURE_NAMES[i], pack_old[i], pack_new[i], diff);
+                equiv = false;
+            }
+        }
+        check("v5.8.1a: Features_PackAll bytewise-equivalent to ModelFeatures_Pack for indices 0-9",
+              equiv);
+
+        // MODEL_FORMAT_VERSION bumped 4 → 5 in this ship.
+        check("v5.8.1a: MODEL_FORMAT_VERSION == 5", MODEL_FORMAT_VERSION == 5);
+
+        // Drift detection — verifier rejects stamp with mutated hash when
+        // caller passes expected_feature_registry_hash != 0. Construct a
+        // dummy stamp file with a known hash, then verify with the wrong
+        // expected value — should reject with a clear reason.
+        const char* tmp_model = "/tmp/v5_8_1a_drift_test.bin";
+        const char* tmp_stamp = "/tmp/v5_8_1a_drift_test.bin.stamp";
+        FILE* mf = fopen(tmp_model, "wb");
+        if (mf) {
+            const char* dummy_payload = "MOCKMODEL";
+            fwrite(dummy_payload, 1, 9, mf);
+            fclose(mf);
+
+            // Write a stamp with a specific hash via the writer.
+            uint64_t stamp_hash = 0xdeadbeefcafebabeULL;
+            StampWriteResult wr = stamp_write_for_model(
+                tmp_model, /*secret=*/"",
+                /*format_version=*/MODEL_FORMAT_VERSION,
+                /*trained_on=*/"2026-05-01",
+                /*wf_mean=*/0.55, /*held_out=*/0.53,
+                /*gap_threshold=*/0.05, /*force=*/0,
+                /*feature_registry_hash=*/stamp_hash);
+            check("v5.8.1a: stamp_write_for_model emits feature_registry_hash",
+                  wr.ok == 1);
+
+            // Read back — verifier with matching hash should pass.
+            ModelStampResult vr1 = verify_model_stamp(
+                tmp_model, /*secret=*/"",
+                /*gap_threshold=*/0.05,
+                /*expected_format_version=*/MODEL_FORMAT_VERSION,
+                /*expected_feature_registry_hash=*/stamp_hash);
+            check("v5.8.1a: verify accepts stamp with matching hash",
+                  vr1.valid == 1 && vr1.feature_registry_hash == stamp_hash);
+
+            // Verifier with mismatched hash should reject (drift detection).
+            ModelStampResult vr2 = verify_model_stamp(
+                tmp_model, /*secret=*/"",
+                /*gap_threshold=*/0.05,
+                /*expected_format_version=*/MODEL_FORMAT_VERSION,
+                /*expected_feature_registry_hash=*/0xfeedfacecafebabeULL);
+            check("v5.8.1a: verify rejects stamp with mutated hash (drift)",
+                  vr2.valid == 0 &&
+                  strstr(vr2.reason, "feature-registry-hash mismatch") != nullptr);
+
+            // Verifier with expected_hash=0 (default) skips the check —
+            // backward-compat for callers that haven't migrated.
+            ModelStampResult vr3 = verify_model_stamp(
+                tmp_model, /*secret=*/"",
+                /*gap_threshold=*/0.05,
+                /*expected_format_version=*/MODEL_FORMAT_VERSION);
+            check("v5.8.1a: verify with expected_hash=0 skips drift check",
+                  vr3.valid == 1);
+
+            unlink(tmp_model);
+            unlink(tmp_stamp);
+        }
     }
 
     printf("\n======================================\n");
