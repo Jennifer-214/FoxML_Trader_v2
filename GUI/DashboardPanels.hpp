@@ -456,6 +456,22 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                                            //   = transparent black, making any
                                            //   AUTO core's row invisible)
         };
+        // v5.6.0: halt_names + the BUY_BLOCKED flag bit are needed by both
+        // the top-table Status column AND the collapsing-header detail block,
+        // so declare here at panel scope rather than inside the second loop.
+        // Codes 0..10 must stay in sync with EngineTUI.hpp's halt_reason
+        // comment + ControllerEventLoop.hpp:1812-1814.
+        static const char* halt_names[] = {
+            "ok", "spacing", "vwap", "long-slope", "vol-delta",
+            "min-stddev", "sl-cooldown", "warmup", "core-budget", "core-kill",
+            "imbalance"
+        };
+        constexpr int halt_names_count =
+            (int)(sizeof(halt_names) / sizeof(halt_names[0]));
+        constexpr uint8_t GUI_GATE_FLAG_BUY_BLOCKED = 0x20;  // mirrors
+            // GateParameters.hpp:61. Display-side mirror keeps the GUI
+            // module from needing CoreFrameworks/ headers; checked by
+            // EXECUTION_DISPLAY_INVARIANTS.md test for value parity.
         ImGuiTableFlags tf = ImGuiTableFlags_BordersInnerV |
                               ImGuiTableFlags_RowBg |
                               ImGuiTableFlags_SizingStretchProp;
@@ -504,13 +520,34 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     ImGui::TextColored(FoxmlColors::comment, "—");
                 }
                 ImGui::TableNextColumn();
-                // Per-core direction (MOM = >=, everything else = <=).
-                if (gate_p < 0.01) {
-                    ImGui::TextColored(FoxmlColors::yellow, "off");
-                } else if (s->positions[i].idx >= 0) {
+                // v5.6.0: Status column priority chain — every hot-path
+                // BG_Evaluate term gets a surface here. Order matters
+                // (most-informative wins). See EXECUTION_DISPLAY_INVARIANTS.md.
+                //
+                // Hot path: bg_fires = price_ok & volume_check & ~blocked
+                //           can_enter = ~any_active & permission & bg_fires
+                //
+                // Display priority:
+                //   1. in pos          (any_active = 1; positions snapshot)
+                //   2. blocked         (BUY_BLOCKED flag set, hot path refuses)
+                //   3. off: <halt>     (gate zeroed by controller, halt code set)
+                //   4. off: no signal  (gate zeroed by strategy, no halt code —
+                //                       v5.6.2 will replace with strategy_halt_reason)
+                //   5. wait            (gate live, price hasn't crossed)
+                //   6. READY           (price crossed, no other blocker)
+                const auto *pc = &s->per_core[i];
+                if (s->positions[i].idx >= 0) {
                     ImGui::TextColored(FoxmlColors::comment, "in pos");
+                } else if (pc->gate_flags & GUI_GATE_FLAG_BUY_BLOCKED) {
+                    ImGui::TextColored(FoxmlColors::yellow, "blocked");
+                } else if (pc->halt_reason > 0 &&
+                           pc->halt_reason < halt_names_count) {
+                    ImGui::TextColored(FoxmlColors::yellow,
+                        "off: %s", halt_names[pc->halt_reason]);
+                } else if (gate_p < 0.01) {
+                    ImGui::TextColored(FoxmlColors::yellow, "off: no signal");
                 } else {
-                    int price_ok = s->per_core[i].gate_direction
+                    int price_ok = pc->gate_direction
                         ? (s->price >= gate_p)
                         : (s->price <= gate_p);
                     if (price_ok)
@@ -525,11 +562,9 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
 
         // v4.0.4: per-core expandable details replacing the legacy single-core
         // lower block. Each core gets a collapsing header with its full state.
-        // Halt reason names match the codes in EventLoop_RebuildAllParameters.
-        static const char* halt_names[] = {
-            "ok", "spacing", "vwap", "long-slope", "vol-delta",
-            "min-stddev", "sl-cooldown", "warmup", "core-budget", "core-kill"
-        };
+        // halt_names + halt_names_count declared at panel scope above so the
+        // top-table Status column also has access. v5.6.0 — added "imbalance"
+        // at index 10.
         for (int i = 0; i < s->per_core_count && i < 16; ++i) {
             const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
             uint8_t sid = pc->strategy_id_display;
@@ -560,9 +595,10 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     ImGui::TextColored(FoxmlColors::comment, "off");
                 }
                 // Halt reason
-                // halt_names array now goes up through index 9 (core-kill,
-                // Phase 3). Bound: < (sizeof(halt_names)/sizeof(*halt_names)).
-                if (pc->halt_reason > 0 && pc->halt_reason < 10) {
+                // v5.6.0: bound matches halt_names_count so adding new codes
+                // doesn't silently drop them (was hardcoded `< 10` before,
+                // hiding halt_reason=10=imbalance entirely).
+                if (pc->halt_reason > 0 && pc->halt_reason < halt_names_count) {
                     ImGui::SameLine(0, 15);
                     ImGui::TextColored(FoxmlColors::yellow,
                         "halted: %s", halt_names[pc->halt_reason]);

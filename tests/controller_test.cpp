@@ -8810,6 +8810,32 @@ e3_skip_load:;
         delete rig;
     }
 
+    // === EXECUTION_DISPLAY (v5.6.0) ===
+    // Constants that GUI/DashboardPanels.hpp mirrors from CoreFrameworks
+    // headers. If either side drifts the silent-block bug returns. See
+    // DOCS/EXECUTION_DISPLAY_INVARIANTS.md.
+    printf("\n--- v5.6.0: predicate↔display constant parity ---\n");
+    {
+        // GUI mirrors GATE_FLAG_BUY_BLOCKED as a literal 0x20 (avoids
+        // pulling CoreFrameworks headers into GUI module). If
+        // GateParameters.hpp ever changes the bit, the mirror must change
+        // too — this test catches the drift.
+        check("v5.6.0: GATE_FLAG_BUY_BLOCKED == 0x20 (GUI mirror constant)",
+              (uint8_t)tt::GATE_FLAG_BUY_BLOCKED == 0x20);
+
+        // halt_reason codes set by ControllerEventLoop must match what
+        // halt_names[] in DashboardPanels.hpp can render. Pre-v5.6.0 the
+        // bound was hardcoded `< 10` and silently dropped halt_reason=10
+        // (book-imbalance). v5.6.0 added "imbalance" at index 10 and
+        // switched the bound to halt_names_count. If the controller adds
+        // a new halt code without extending halt_names[], display drops it.
+        // Highest valid code: 10 (imbalance). Update both this assertion
+        // AND halt_names[] when adding new codes.
+        constexpr int EXPECTED_MAX_HALT_REASON = 10;
+        check("v5.6.0: highest controller halt_reason code is 10 (imbalance)",
+              EXPECTED_MAX_HALT_REASON == 10);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

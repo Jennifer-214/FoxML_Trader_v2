@@ -379,6 +379,11 @@ static inline void TUI_CopySnapshotSharded(
             tt::GateParameters<F> params;
             tt::ParameterSlot_Read(&core->param_slot, &params);
             snap->per_core[i].buy_gate_price = FPN_ToDouble(params.bg_price_threshold);
+            // v5.6.0: snapshot the flags byte so GUI can render BUY_BLOCKED /
+            // VOLUME_REQUIRED / TP/SL ENABLED / BUY_ABOVE / PAIR_ACTIVE without
+            // needing access to GateParameters internals. ParameterSlot_Read
+            // is seqlock-published so flags + thresholds are consistent.
+            snap->per_core[i].gate_flags = params.flags;
             // populate headline buy gate from core 0
             if (i == 0) {
                 snap->buy_p = FPN_ToDouble(params.bg_price_threshold);
