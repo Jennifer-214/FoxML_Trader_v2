@@ -998,6 +998,40 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         ctx.entries_processed++;
         state->total_entries++;
         state->total_events_processed++;
+
+        // v5.7.1: entry-quality health log. Captures the state of the
+        // engine at the moment a fill landed — strategy + resolved
+        // strategy + regime + scores + slow-path diag values + gate
+        // threshold + fee-floor margin. Operators can post-hoc grep:
+        //   jq 'select(.cat=="entry" and .core==N)' health.jsonl
+        // and classify trades by regime/strategy/score combination.
+        // Entry price + qty come from the portfolio slot (FillRecord
+        // only stores notional, not the components).
+        if (tt::Health_LogEnabled(tt::HEALTH_INFO) && slot < 16) {
+            const auto& pos = oms->portfolio.positions[slot];
+            tt::Health_Log(tt::HEALTH_INFO, "entry", core_id,
+                "slot=%d strat=%u resolved=%u regime=%d "
+                "trend_score=%d vol_score=%d hyst=%d/%d "
+                "entry_px=%g qty=%g entry_notional=%g entry_fee=%g "
+                "tp_pct=%g tp_floor=%g "
+                "stddev_pct=%g long_slope=%g vol_delta=%g",
+                slot, (unsigned)ctx.strategy_id,
+                (unsigned)ctx.resolved_strategy_id,
+                ctx.regime_state.current_regime,
+                ctx.regime_state.last_trending_score,
+                ctx.regime_state.last_volatile_score,
+                ctx.regime_state.hysteresis_count,
+                ctx.regime_state.hysteresis_threshold,
+                FPN_ToDouble(pos.entry_price),
+                FPN_ToDouble(pos.quantity),
+                FPN_ToDouble(rec.entry_notional),
+                FPN_ToDouble(rec.entry_fee),
+                FPN_ToDouble(ctx.diag_tp_pct_actual),
+                FPN_ToDouble(ctx.diag_tp_pct_floor),
+                FPN_ToDouble(ctx.diag_stddev_pct),
+                FPN_ToDouble(ctx.diag_long_slope),
+                FPN_ToDouble(ctx.diag_volume_delta));
+        }
     }
     oms->last_opened_mask &= (uint16_t)~my_mask;  // clear only my bits
 
@@ -1020,6 +1054,27 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         ctx.exits_processed++;
         state->total_exits++;
         state->total_events_processed++;
+
+        // v5.7.1: exit-quality health log. Pairs with entry-log lines
+        // to classify (strategy, regime_at_entry, exit_kind, net_bps)
+        // for the strategy quality dashboard. exit_kind is inferred
+        // from oms->last_realized_return + cooldown state — TP / SL
+        // distinction is captured in `was_win` for now; finer
+        // exit-kind taxonomy (time-exit, ratchet, manual) is deferred
+        // to the dashboard panel computing it from order_history CSV.
+        if (tt::Health_LogEnabled(tt::HEALTH_INFO)) {
+            double realized = oms->last_realized_return[slot];
+            tt::Health_Log(tt::HEALTH_INFO, "exit", core_id,
+                "slot=%d strat=%u resolved=%u was_win=%d realized_ret=%g "
+                "net_pnl=%g entry_notional=%g total_fees=%g leg_a=%d",
+                slot, (unsigned)ctx.strategy_id,
+                (unsigned)ctx.resolved_strategy_id,
+                (int)rec.was_win, realized,
+                FPN_ToDouble(rec.exit_net_pnl),
+                FPN_ToDouble(rec.exit_entry_notional),
+                FPN_ToDouble(rec.exit_total_fees),
+                is_leg_a ? 1 : 0);
+        }
 
         // v4.7.21 W/L pairing under partials (unchanged).
         if (partial_on) {
