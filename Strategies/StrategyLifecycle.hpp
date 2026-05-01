@@ -51,6 +51,48 @@
 namespace tt {
 
 //======================================================================================================
+// [SEED FROM CFG — overload-resolution per state type]
+//======================================================================================================
+// The X-macro Init dispatcher allocates state generically + calls _Init
+// uniformly. Strategies that need cfg-derived seeding (MR, Momentum)
+// override this template via overload. Default = no-op.
+//
+// Why overload not specialization: function-template specialization +
+// template parameter inference is fragile across compilers. Overloading
+// on the state-type pointer is unambiguous and selects the right
+// override at the X-macro call site.
+//======================================================================================================
+template <typename StateT, unsigned F>
+inline void Strategy_SeedFromCfg(StateT* s, const ControllerConfig<F>* cfg) {
+    (void)s; (void)cfg;  // default: no seed
+}
+
+template <unsigned F>
+inline void Strategy_SeedFromCfg(MomentumState<F>* s, const ControllerConfig<F>* cfg) {
+    // v5.4.0 Phase 2.3 — seed adaptive filter values from cfg.
+    // Mirrors the legacy PortfolioController init path; without this
+    // seed Momentum_Adapt has nothing to ratchet against and
+    // breakout_mult collapses to breakout_min.
+    if (!cfg) return;
+    FPN<F> seed_mult = !FPN_IsZero(cfg->momentum_breakout_mult)
+        ? cfg->momentum_breakout_mult
+        : FPN_FromDouble<F>(2.0);  // 2σ default
+    s->live_breakout_mult = seed_mult;
+    s->live_vol_mult      = cfg->volume_multiplier;
+}
+
+template <unsigned F>
+inline void Strategy_SeedFromCfg(MeanReversionState<F>* s, const ControllerConfig<F>* cfg) {
+    // v5.4.0 Phase 2.2 — seed adaptive filter values from cfg.
+    // Without this seed, MR_Adapt clamps to cfg.offset_min /
+    // cfg.vol_mult_min — collapsing the adaptive range entirely.
+    if (!cfg) return;
+    s->live_offset_pct  = cfg->entry_offset_pct;
+    s->live_vol_mult    = cfg->volume_multiplier;
+    s->live_stddev_mult = cfg->offset_stddev_mult;  // 0 = pct mode, >0 = stddev mode
+}
+
+//======================================================================================================
 // [INIT — allocate per-strategy state]
 //======================================================================================================
 // Allocates the right state struct on the heap, calls the strategy's
@@ -62,6 +104,10 @@ namespace tt {
 // fills in. Sharded engine doesn't use BuySideGateConditions (it uses
 // GateParameters via _BuildParameters); the scratch is just a sink so
 // the signature works without modifying legacy code.
+//
+// v5.8.0: switch dispatch generated from FOREACH_STRATEGY(X). Each row
+// emits one case that allocates the registered state type, runs the
+// optional cfg seed, then calls the registered _Init function.
 //======================================================================================================
 template <unsigned F>
 inline void Strategy_FreePerCore(EventLoopState<F>* state, int slot);
@@ -83,62 +129,16 @@ inline void Strategy_InitPerCore(EventLoopState<F>* state, int slot,
     BuySideGateConditions<F> buy_conds_scratch{};
 
     switch (strategy_id) {
-        case STRATEGY_MOMENTUM: {
-            auto* s = new MomentumState<F>{};
-            // v5.4.0 Phase 2.3 — seed adaptive filter values from cfg.
-            // Mirrors the legacy PortfolioController init path; without
-            // this seed Momentum_Adapt has nothing to ratchet against and
-            // breakout_mult collapses to breakout_min.
-            if (cfg) {
-                // Prefer momentum_breakout_mult (per-strategy cfg field) when
-                // set; otherwise fall back to a sensible default that the
-                // squeeze + regression can adapt away from.
-                FPN<F> seed_mult = !FPN_IsZero(cfg->momentum_breakout_mult)
-                    ? cfg->momentum_breakout_mult
-                    : FPN_FromDouble<F>(2.0);  // 2σ default
-                s->live_breakout_mult = seed_mult;
-                s->live_vol_mult      = cfg->volume_multiplier;
-            }
-            Momentum_Init(s, rolling, &buy_conds_scratch);
-            ctx.strategy_state = s;
-            break;
+#define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn) \
+        case STRATEGY_##id: { \
+            auto* s = new state_t<F>{}; \
+            Strategy_SeedFromCfg(s, cfg); \
+            init_fn(s, rolling, &buy_conds_scratch); \
+            ctx.strategy_state = s; \
+            break; \
         }
-        case STRATEGY_MEAN_REVERSION: {
-            auto* s = new MeanReversionState<F>{};
-            // v5.4.0 Phase 2.2 — seed adaptive filter values from cfg.
-            // Legacy PortfolioController did this at line ~309 before
-            // calling MR_Init; sharded missed it because MR_Init itself
-            // doesn't write live_offset_pct/live_vol_mult/live_stddev_mult
-            // (it reads them to pick mode + compute initial buy_conds).
-            // Without this seed, MR_Adapt clamps to cfg.offset_min and
-            // cfg.vol_mult_min — collapsing the adaptive range entirely.
-            if (cfg) {
-                s->live_offset_pct  = cfg->entry_offset_pct;
-                s->live_vol_mult    = cfg->volume_multiplier;
-                s->live_stddev_mult = cfg->offset_stddev_mult;  // 0 = pct mode, >0 = stddev mode
-            }
-            MeanReversion_Init(s, rolling, &buy_conds_scratch);
-            ctx.strategy_state = s;
-            break;
-        }
-        case STRATEGY_SIMPLE_DIP: {
-            auto* s = new SimpleDipState<F>{};
-            SimpleDip_Init(s, rolling, &buy_conds_scratch);
-            ctx.strategy_state = s;
-            break;
-        }
-        case STRATEGY_EMA_CROSS: {
-            auto* s = new EmaCrossState<F>{};
-            EmaCross_Init(s, rolling, &buy_conds_scratch);
-            ctx.strategy_state = s;
-            break;
-        }
-        case STRATEGY_ML: {
-            auto* s = new MLStrategyState<F>{};
-            MLStrategy_Init(s, rolling, &buy_conds_scratch);
-            ctx.strategy_state = s;
-            break;
-        }
+        FOREACH_STRATEGY(X)
+#undef X
         case STRATEGY_AUTO:
         case STRATEGY_NONE:
         default:
@@ -147,8 +147,6 @@ inline void Strategy_InitPerCore(EventLoopState<F>* state, int slot,
             break;
     }
     ctx.strategy_state_kind = strategy_id;
-
-    (void)cfg;  // not currently consumed by any _Init; reserved for future strategies
 }
 
 //======================================================================================================
@@ -185,61 +183,50 @@ inline void Strategy_AdaptPerCore(
     // BuySideGateConditions).
     BuySideGateConditions<F> buy_conds_scratch{};
 
+    // v5.8.0: dispatch via FOREACH_STRATEGY(X). Each strategy's _Adapt
+    // is invoked with the canonical signature (cast inside the case to
+    // the registered state type). EmaCross has special pre-tracking
+    // (last_ema_slope + prev_ema seeded from ema_price) handled
+    // separately below — outside the X-macro because the canonical
+    // _Adapt signature doesn't include ema_price. Per the v5.8 audit:
+    // 4 of 5 strategies match canonical sig; EmaCross is the outlier.
+    //
+    // Kind-match guard: only invoke when allocated state matches the
+    // effective strategy. Mismatched kind (e.g. AUTO core whose
+    // effective_strategy_id resolved to MR but state was allocated for
+    // the original AUTO sentinel) leaves state untouched. Phase 3 will
+    // handle AUTO re-allocation on regime transitions.
     switch (effective_strategy_id) {
-        case STRATEGY_SIMPLE_DIP:
-            if (ctx.strategy_state_kind == STRATEGY_SIMPLE_DIP) {
-                SimpleDip_Adapt(static_cast<SimpleDipState<F>*>(ctx.strategy_state),
-                                current_price, portfolio_delta, active_bitmap,
-                                &buy_conds_scratch, cfg);
-            }
+#define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn) \
+        case STRATEGY_##id: \
+            if (ctx.strategy_state_kind == STRATEGY_##id) { \
+                adapt_fn(static_cast<state_t<F>*>(ctx.strategy_state), \
+                          current_price, portfolio_delta, active_bitmap, \
+                          &buy_conds_scratch, cfg); \
+            } \
             break;
-        case STRATEGY_MEAN_REVERSION:
-            // v5.4.0 Phase 2.2 — only invoke when allocated state matches.
-            // Mismatched kind (e.g. AUTO core whose effective_strategy_id
-            // resolved to MR but state was allocated for the original AUTO
-            // sentinel) leaves state untouched; Phase 3 will handle AUTO
-            // re-allocation on regime transitions.
-            if (ctx.strategy_state_kind == STRATEGY_MEAN_REVERSION) {
-                MeanReversion_Adapt(static_cast<MeanReversionState<F>*>(ctx.strategy_state),
-                                     current_price, portfolio_delta, active_bitmap,
-                                     &buy_conds_scratch, cfg);
-            }
-            break;
-        case STRATEGY_MOMENTUM:
-            // v5.4.0 Phase 2.3 — same kind-match guard as MR.
-            if (ctx.strategy_state_kind == STRATEGY_MOMENTUM) {
-                Momentum_Adapt(static_cast<MomentumState<F>*>(ctx.strategy_state),
-                                current_price, portfolio_delta, active_bitmap,
-                                &buy_conds_scratch, cfg);
-            }
-            break;
-        case STRATEGY_EMA_CROSS:
-            // v5.4.0 Phase 2.4 — EmaCross_Adapt itself is a no-op (no
-            // regression / no idle squeeze). Use this hook to update the
-            // state's EMA tracking — last_ema_slope + prev_ema — from the
-            // current ema_price. EmaCross_BuildParameters reads state->prev_ema
-            // for the crossover reference and last_ema_slope drives ExitAdjust.
-            if (ctx.strategy_state_kind == STRATEGY_EMA_CROSS && ema_price) {
-                auto* es = static_cast<EmaCrossState<F>*>(ctx.strategy_state);
-                es->last_ema_slope = FPN_Sub(*ema_price, es->prev_ema);
-                es->prev_ema       = *ema_price;
-                EmaCross_Adapt(es, current_price, portfolio_delta, active_bitmap,
-                                &buy_conds_scratch, cfg);
-            }
-            break;
-        case STRATEGY_ML:
-            // v5.4.0 Phase 2.5 — MLStrategy_Adapt is intentionally empty
-            // (model weights are static, trained offline). This branch
-            // exists so the dispatcher recognizes ML as a known kind
-            // rather than falling through to default; it's also where
-            // future online-learning / IC-tracking hooks would land.
-            // ConfidenceScorer drift is updated separately at exit-fill
-            // time via OMS, not on the slow-path Adapt cadence.
-            (void)ctx;
-            break;
+        FOREACH_STRATEGY(X)
+#undef X
         default:
             break;
     }
+
+    // v5.4.0 Phase 2.4 — EmaCross post-pass: update the state's EMA
+    // tracking (last_ema_slope + prev_ema) from the current ema_price.
+    // EmaCross_BuildParameters reads state->prev_ema for the crossover
+    // reference; last_ema_slope drives ExitAdjust. This update lives
+    // outside the X-macro because the canonical _Adapt sig doesn't
+    // include ema_price (4 of 5 strategies don't need it). When ema_price
+    // is null (cold start), skip the update — prev_ema stays at its
+    // default zero and BuildParameters falls back to rolling avg.
+#if __has_include("private/EmaCross.hpp")
+    if (effective_strategy_id == STRATEGY_EMA_CROSS &&
+        ctx.strategy_state_kind == STRATEGY_EMA_CROSS && ema_price) {
+        auto* es = static_cast<EmaCrossState<F>*>(ctx.strategy_state);
+        es->last_ema_slope = FPN_Sub(*ema_price, es->prev_ema);
+        es->prev_ema       = *ema_price;
+    }
+#endif
 }
 
 //======================================================================================================
@@ -344,35 +331,20 @@ inline void Strategy_ExitAdjustPerCore(
     auto& ctx = state->cores[slot];
     if (!ctx.strategy_state) return;
 
+    // v5.8.0: dispatch via FOREACH_STRATEGY(X). SimpleDip's
+    // _ExitAdjustSharded is a no-op stub (added in v5.8.0 for X-macro
+    // signature uniformity); the call still happens but does nothing.
     switch (effective_strategy_id) {
-        case STRATEGY_MEAN_REVERSION:
-            if (ctx.strategy_state_kind == STRATEGY_MEAN_REVERSION) {
-                MeanReversion_ExitAdjustSharded(state, slot,
-                    static_cast<MeanReversionState<F>*>(ctx.strategy_state),
-                    current_price, rolling, cfg);
-            }
+#define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn) \
+        case STRATEGY_##id: \
+            if (ctx.strategy_state_kind == STRATEGY_##id) { \
+                exit_fn(state, slot, \
+                         static_cast<state_t<F>*>(ctx.strategy_state), \
+                         current_price, rolling, cfg); \
+            } \
             break;
-        case STRATEGY_MOMENTUM:
-            if (ctx.strategy_state_kind == STRATEGY_MOMENTUM) {
-                Momentum_ExitAdjustSharded(state, slot,
-                    static_cast<MomentumState<F>*>(ctx.strategy_state),
-                    current_price, rolling, cfg);
-            }
-            break;
-        case STRATEGY_EMA_CROSS:
-            if (ctx.strategy_state_kind == STRATEGY_EMA_CROSS) {
-                EmaCross_ExitAdjustSharded(state, slot,
-                    static_cast<EmaCrossState<F>*>(ctx.strategy_state),
-                    current_price, rolling, cfg);
-            }
-            break;
-        case STRATEGY_ML:
-            if (ctx.strategy_state_kind == STRATEGY_ML) {
-                MLStrategy_ExitAdjustSharded(state, slot,
-                    static_cast<MLStrategyState<F>*>(ctx.strategy_state),
-                    current_price, rolling, cfg);
-            }
-            break;
+        FOREACH_STRATEGY(X)
+#undef X
         default:
             break;
     }
@@ -393,22 +365,16 @@ inline void Strategy_FreePerCore(EventLoopState<F>* state, int slot) {
         ctx.strategy_state_kind = 0xFF;
         return;
     }
+    // v5.8.0: dispatch via FOREACH_STRATEGY(X). Each row generates one
+    // case that deletes the registered state type. Unknown kinds leak
+    // (defensive) — see default branch.
     switch (ctx.strategy_state_kind) {
-        case STRATEGY_MOMENTUM:
-            delete static_cast<MomentumState<F>*>(ctx.strategy_state);
+#define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn) \
+        case STRATEGY_##id: \
+            delete static_cast<state_t<F>*>(ctx.strategy_state); \
             break;
-        case STRATEGY_MEAN_REVERSION:
-            delete static_cast<MeanReversionState<F>*>(ctx.strategy_state);
-            break;
-        case STRATEGY_SIMPLE_DIP:
-            delete static_cast<SimpleDipState<F>*>(ctx.strategy_state);
-            break;
-        case STRATEGY_EMA_CROSS:
-            delete static_cast<EmaCrossState<F>*>(ctx.strategy_state);
-            break;
-        case STRATEGY_ML:
-            delete static_cast<MLStrategyState<F>*>(ctx.strategy_state);
-            break;
+        FOREACH_STRATEGY(X)
+#undef X
         default:
             // Unknown kind: leak rather than miscast. 0xFF (uninitialized)
             // means strategy_state should already be nullptr — handled

@@ -204,7 +204,7 @@ template <unsigned F> struct PortfolioController {
   MomentumState<F> momentum;
   SimpleDipState<F> simple_dip;
   MLStrategyState<F> ml_strategy;
-#ifdef STRATEGY_EMA_CROSS
+#if __has_include("../Strategies/private/EmaCross.hpp")
   EmaCrossState<F> ema_cross;
 #endif
   RegimeState<F> regime;
@@ -386,7 +386,7 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   Bandit_SetArmName(&ctrl->bandit, STRATEGY_MOMENTUM, "Momentum");
   Bandit_SetArmName(&ctrl->bandit, STRATEGY_SIMPLE_DIP, "SimpleDip");
   Bandit_SetArmName(&ctrl->bandit, STRATEGY_ML, "ML");
-#ifdef STRATEGY_EMA_CROSS
+#if __has_include("../Strategies/private/EmaCross.hpp")
   Bandit_SetArmName(&ctrl->bandit, STRATEGY_EMA_CROSS, "EmaCross");
 #endif
   for (int i = 0; i < 5; i++) {
@@ -731,7 +731,7 @@ inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) 
                                            ctrl->rolling_long, &ctrl->config);
     ctrl->buy_conds.gate_direction = 0;
     break;
-#ifdef STRATEGY_EMA_CROSS
+#if __has_include("../Strategies/private/EmaCross.hpp")
   case STRATEGY_EMA_CROSS:
     ctrl->buy_conds = EmaCross_BuySignal(&ctrl->ema_cross, &ctrl->rolling,
                                           ctrl->rolling_long, &ctrl->config,
@@ -833,7 +833,7 @@ inline void PortfolioController_StrategyDispatch(PortfolioController<F> *ctrl,
                      ctrl->portfolio.active_bitmap, &ctrl->buy_conds,
                      &ctrl->config);
     break;
-#ifdef STRATEGY_EMA_CROSS
+#if __has_include("../Strategies/private/EmaCross.hpp")
   case STRATEGY_EMA_CROSS:
     EmaCross_Adapt(&ctrl->ema_cross, current_price, ctrl->portfolio_delta,
                     ctrl->portfolio.active_bitmap, &ctrl->buy_conds, &ctrl->config);
@@ -1037,7 +1037,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       Momentum_Init(&ctrl->momentum, &ctrl->rolling, &ctrl->buy_conds);
       SimpleDip_Init(&ctrl->simple_dip, &ctrl->rolling, &ctrl->buy_conds);
       MLStrategy_Init(&ctrl->ml_strategy, &ctrl->rolling, &ctrl->buy_conds);
-#ifdef STRATEGY_EMA_CROSS
+#if __has_include("../Strategies/private/EmaCross.hpp")
       EmaCross_Init(&ctrl->ema_cross, &ctrl->rolling, &ctrl->buy_conds);
 #endif
       // use configured default strategy (0=MR, 1=Momentum, 2=SimpleDip)

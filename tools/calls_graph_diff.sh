@@ -28,6 +28,15 @@ SHARDED_FILES=(
     "Strategies/StrategyLifecycle.hpp"  # v5.4.0+ per-core dispatch
 )
 
+# v5.8.0: X-macro registry files. Functions named in FOREACH_*(X) entries
+# are invoked via macro expansion in the dispatchers — the textual call
+# sites (init_fn, adapt_fn, exit_fn) don't reveal the original function
+# names. Extract function-shaped tokens from the registry definition and
+# treat them as "called via X-macro".
+XMACRO_FILES=(
+    "Strategies/StrategyInterface.hpp"
+)
+
 # Extract function calls (Pattern_FunctionName followed by '(') excluding
 # comment lines + definitions. We want USAGE only.
 extract_calls() {
@@ -58,11 +67,26 @@ PATTERN_RE="^(${PATTERN_RE:1})"
 # Calls in legacy entrypoint
 LEGACY_CALLS=$(extract_calls "$LEGACY_FILE" | grep -E "$PATTERN_RE" || true)
 
+# v5.8.0: function names referenced in X-macro registries. The registry
+# rows span multiple lines (line continuations via `\`), and the X(...)
+# entries are the only places where function-name-shaped tokens appear
+# in StrategyInterface.hpp. Grep the whole file for the function-name
+# pattern; the MODULE_PATTERNS filter further down narrows to the
+# strategy/regime families we care about.
+XMACRO_CALLS=$(
+    for f in "${XMACRO_FILES[@]}"; do
+        grep -hoE '[A-Z][A-Za-z0-9]+_[A-Z][A-Za-z0-9]+' "$f" 2>/dev/null
+    done | sort -u
+)
+
 # Calls in sharded entrypoints (union)
 SHARDED_CALLS=$(
-    for f in "${SHARDED_FILES[@]}"; do
-        extract_calls "$f"
-    done | grep -E "$PATTERN_RE" | sort -u
+    {
+        for f in "${SHARDED_FILES[@]}"; do
+            extract_calls "$f"
+        done
+        echo "$XMACRO_CALLS"
+    } | grep -E "$PATTERN_RE" | sort -u
 )
 
 # Diff: in legacy but not in sharded
@@ -102,6 +126,7 @@ ALL_CALLS=$(
         for f in "${SHARDED_FILES[@]}"; do
             extract_calls "$f"
         done
+        echo "$XMACRO_CALLS"
     } | grep -E "$PATTERN_RE" | sort -u
 )
 NEVER_CALLED_RAW=$(comm -23 \

@@ -54,27 +54,104 @@
 #ifndef STRATEGY_INTERFACE_HPP
 #define STRATEGY_INTERFACE_HPP
 
-#define STRATEGY_MEAN_REVERSION 0
-#define STRATEGY_MOMENTUM      1
-#define STRATEGY_SIMPLE_DIP    2
-#define STRATEGY_ML            3
-#define STRATEGY_EMA_CROSS     4
-#define STRATEGY_AUTO          5  // v4.0.3: regime-driven auto-select per core
-#define NUM_STRATEGIES         6
+#include <cstdint>
+#include <cstddef>
 
-// Per-core sharding (phase 06+) sentinel: a core with strategy_id ==
-// STRATEGY_NONE has no strategy assigned, parameter pushes are skipped, and
-// permission stays at 0. Value chosen so it can never collide with a real
-// strategy ID added in the future. See pitfall P6.5.
-#define STRATEGY_NONE          0xFF
+//======================================================================================================
+// [STRATEGY REGISTRY — v5.8.0 X-macro]
+//======================================================================================================
+// Single source of truth for all public strategies. Adding a strategy:
+//   1. cp DOCS/STRATEGY_TEMPLATE.hpp Strategies/<Name>.hpp; implement
+//      4 lifecycle fns (_Init / _BuildParameters / _Adapt /
+//      _ExitAdjustSharded) per DOCS/STRATEGY_INTERFACE.md.
+//   2. Append one row to FOREACH_STRATEGY(X) below.
+//   3. Add a strategy color to GUI/DashboardPanels.hpp's strat_colors[].
+//   4. ./build.sh test
+//
+// Auto-generated from FOREACH_STRATEGY(X):
+//   - STRATEGY_<ID> enum constants (compile-time IDs, contiguous from 0)
+//   - NUM_STRATEGIES_REAL (count of registered real strategies)
+//   - STRATEGY_SHORT_NAMES[] / STRATEGY_FULL_NAMES[] arrays
+// Lifecycle dispatchers in StrategyLifecycle.hpp +
+// Strategy_BuildParameters in StrategyParameters.hpp consume the same
+// registry.
+//
+// Canonical signatures (do not deviate; see DOCS/EASY_ADDITIONS_INVARIANTS.md):
+//   _Init(state, rolling, buy_conds)
+//   _Adapt(state, current_price, portfolio_delta, active_bitmap, buy_conds, cfg)
+//   _BuildParameters(rolling, config, allocated_balance, out [, state])
+//   _ExitAdjustSharded(state, slot, strat_state, current_price, rolling, cfg)
+//
+// Drift (v5.8.0 audit):
+//   - MLStrategy_Adapt takes `const void* cfg` (include-cycle workaround) →
+//     X-macro references MLStrategy_Adapt_Canonical adapter
+//   - ML_BuildParameters has wider sig (extra rolling_long + ml_ctx args) →
+//     dispatcher uses case-block dispatch in StrategyParameters.hpp
+//
+// Public/private split: when private/EmaCross.hpp is absent, the
+// EMA_CROSS row is omitted from the registry (#__has_include guard).
+// STRATEGY_EMA_CROSS enum constant simply doesn't exist in that build —
+// callers that reference it fail at compile time, which is the intended
+// "private snapshot can't reference private code" behavior.
+//======================================================================================================
 
-// strategy short names for display (indexed by strategy ID, ≤4 chars for tight UI columns)
-static const char *STRATEGY_SHORT_NAMES[] = {"MR", "MOM", "DIP", "ML", "EMA", "AUTO"};
+#if __has_include("private/EmaCross.hpp")
+#  define FOREACH_STRATEGY_EMACROSS(X) \
+    X(EMA_CROSS, "EMA",  "EmaCross",      EmaCrossState, \
+       EmaCross_Init,        EmaCross_BuildParameters, \
+       EmaCross_Adapt,       EmaCross_ExitAdjustSharded)
+#else
+#  define FOREACH_STRATEGY_EMACROSS(X) /* private/EmaCross.hpp absent */
+#endif
 
-// strategy full names for logs and verbose displays (indexed by strategy ID)
-static const char *STRATEGY_FULL_NAMES[] = {
-    "MeanReversion", "Momentum", "SimpleDip", "ML", "EmaCross", "Auto-Regime"
+#define FOREACH_STRATEGY(X) \
+    X(MEAN_REVERSION, "MR",   "MeanReversion", MeanReversionState, \
+       MeanReversion_Init,   MeanReversion_BuildParameters, \
+       MeanReversion_Adapt,  MeanReversion_ExitAdjustSharded) \
+    X(MOMENTUM,       "MOM",  "Momentum",      MomentumState, \
+       Momentum_Init,        Momentum_BuildParameters, \
+       Momentum_Adapt,       Momentum_ExitAdjustSharded) \
+    X(SIMPLE_DIP,     "DIP",  "SimpleDip",     SimpleDipState, \
+       SimpleDip_Init,       SimpleDip_BuildParameters, \
+       SimpleDip_Adapt,      SimpleDip_ExitAdjustSharded) \
+    X(ML,             "ML",   "ML",            MLStrategyState, \
+       MLStrategy_Init,      ML_BuildParameters, \
+       MLStrategy_Adapt_Canonical, MLStrategy_ExitAdjustSharded) \
+    FOREACH_STRATEGY_EMACROSS(X)
+
+// IDs — auto-generated. Order matches the historical assignment
+// (MR=0, MOM=1, DIP=2, ML=3, EMA=4) so cfg files / stamps survive the
+// refactor unchanged.
+enum StrategyId : uint8_t {
+#define X(id, ...) STRATEGY_##id,
+    FOREACH_STRATEGY(X)
+#undef X
+    NUM_STRATEGIES_REAL,                            // count of registered real strategies
+    STRATEGY_AUTO    = NUM_STRATEGIES_REAL,         // v4.0.3 sentinel: regime-driven auto-select
+    NUM_STRATEGIES   = NUM_STRATEGIES_REAL + 1,     // includes AUTO
+    STRATEGY_NONE    = 0xFF                         // per-core "no strategy assigned"
 };
+
+// Names for display, indexed by strategy ID. Real strategies' names
+// auto-generate from the X-macro; AUTO appended manually.
+#define X(id, short_name, full_name, ...) short_name,
+static const char *STRATEGY_SHORT_NAMES[] = {
+    FOREACH_STRATEGY(X)
+    "AUTO"
+};
+#undef X
+
+#define X(id, short_name, full_name, ...) full_name,
+static const char *STRATEGY_FULL_NAMES[] = {
+    FOREACH_STRATEGY(X)
+    "Auto-Regime"
+};
+#undef X
+
+static_assert(sizeof(STRATEGY_SHORT_NAMES) / sizeof(*STRATEGY_SHORT_NAMES) == NUM_STRATEGIES,
+              "STRATEGY_SHORT_NAMES out of sync with NUM_STRATEGIES");
+static_assert(sizeof(STRATEGY_FULL_NAMES) / sizeof(*STRATEGY_FULL_NAMES) == NUM_STRATEGIES,
+              "STRATEGY_FULL_NAMES out of sync with NUM_STRATEGIES");
 
 //======================================================================================================
 // [REGIME CONSTANTS]

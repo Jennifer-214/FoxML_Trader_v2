@@ -8964,6 +8964,69 @@ e3_skip_load:;
               pc.diag_tp_pct_actual < pc.diag_tp_pct_floor);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.8.0 strategy X-macro registry ---\n");
+    {
+        // Registry shape: real strategies are contiguous from 0;
+        // STRATEGY_AUTO sits one past the last real ID; NUM_STRATEGIES
+        // includes AUTO; STRATEGY_NONE is 0xFF.
+        check("v5.8.0: STRATEGY_MEAN_REVERSION == 0", STRATEGY_MEAN_REVERSION == 0);
+        check("v5.8.0: STRATEGY_MOMENTUM == 1",       STRATEGY_MOMENTUM == 1);
+        check("v5.8.0: STRATEGY_SIMPLE_DIP == 2",     STRATEGY_SIMPLE_DIP == 2);
+        check("v5.8.0: STRATEGY_ML == 3",             STRATEGY_ML == 3);
+#if __has_include("../Strategies/private/EmaCross.hpp")
+        check("v5.8.0: STRATEGY_EMA_CROSS == 4",      STRATEGY_EMA_CROSS == 4);
+        check("v5.8.0: NUM_STRATEGIES_REAL == 5 (EmaCross present)",
+              NUM_STRATEGIES_REAL == 5);
+        check("v5.8.0: STRATEGY_AUTO == 5",           STRATEGY_AUTO == 5);
+        check("v5.8.0: NUM_STRATEGIES == 6",          NUM_STRATEGIES == 6);
+#else
+        check("v5.8.0: NUM_STRATEGIES_REAL == 4 (EmaCross absent)",
+              NUM_STRATEGIES_REAL == 4);
+        check("v5.8.0: STRATEGY_AUTO == 4 (private absent)", STRATEGY_AUTO == 4);
+        check("v5.8.0: NUM_STRATEGIES == 5 (private absent)", NUM_STRATEGIES == 5);
+#endif
+        check("v5.8.0: STRATEGY_NONE == 0xFF",        STRATEGY_NONE == 0xFF);
+
+        // Names auto-generated from FOREACH_STRATEGY(X). Pinned to
+        // expected strings — any drift fails compile (static_assert in
+        // header) or here.
+        check("v5.8.0: STRATEGY_SHORT_NAMES[MR] == \"MR\"",
+              strcmp(STRATEGY_SHORT_NAMES[STRATEGY_MEAN_REVERSION], "MR") == 0);
+        check("v5.8.0: STRATEGY_SHORT_NAMES[MOM] == \"MOM\"",
+              strcmp(STRATEGY_SHORT_NAMES[STRATEGY_MOMENTUM], "MOM") == 0);
+        check("v5.8.0: STRATEGY_SHORT_NAMES[DIP] == \"DIP\"",
+              strcmp(STRATEGY_SHORT_NAMES[STRATEGY_SIMPLE_DIP], "DIP") == 0);
+        check("v5.8.0: STRATEGY_SHORT_NAMES[ML] == \"ML\"",
+              strcmp(STRATEGY_SHORT_NAMES[STRATEGY_ML], "ML") == 0);
+        check("v5.8.0: STRATEGY_SHORT_NAMES[AUTO] == \"AUTO\"",
+              strcmp(STRATEGY_SHORT_NAMES[STRATEGY_AUTO], "AUTO") == 0);
+        check("v5.8.0: STRATEGY_FULL_NAMES[MR] == \"MeanReversion\"",
+              strcmp(STRATEGY_FULL_NAMES[STRATEGY_MEAN_REVERSION], "MeanReversion") == 0);
+        check("v5.8.0: STRATEGY_FULL_NAMES[AUTO] == \"Auto-Regime\"",
+              strcmp(STRATEGY_FULL_NAMES[STRATEGY_AUTO], "Auto-Regime") == 0);
+
+        // Loop assertion: every real strategy ID has a non-empty short
+        // name — catches accidental empty rows in FOREACH_STRATEGY.
+        bool all_named = true;
+        for (int sid = 0; sid < NUM_STRATEGIES_REAL; sid++) {
+            if (!STRATEGY_SHORT_NAMES[sid] || STRATEGY_SHORT_NAMES[sid][0] == '\0') {
+                all_named = false;
+                break;
+            }
+        }
+        check("v5.8.0: every real strategy has non-empty short name", all_named);
+
+        // FOREACH_STRATEGY row counter — expand once with a counter
+        // X-macro and verify it matches NUM_STRATEGIES_REAL.
+        constexpr int row_count = 0
+#define X(...) + 1
+            FOREACH_STRATEGY(X)
+#undef X
+            ;
+        check("v5.8.0: FOREACH_STRATEGY row count == NUM_STRATEGIES_REAL",
+              row_count == NUM_STRATEGIES_REAL);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

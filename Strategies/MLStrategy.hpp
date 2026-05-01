@@ -70,6 +70,24 @@ inline void MLStrategy_Adapt(MLStrategyState<F> *state, FPN<F> current_price,
     (void)active_bitmap; (void)buy_conds; (void)cfg;
 }
 
+// v5.8.0 — canonical-signature adapter. The X-macro registry expects
+// every strategy's _Adapt to take `const ControllerConfig<F>*` as the
+// last arg (per DOCS/EASY_ADDITIONS_INVARIANTS.md). MLStrategy_Adapt
+// historically took `const void*` (likely an include-cycle workaround).
+// This wrapper conforms to the canonical sig and forwards as void*.
+// Real-function preserved for legacy callers; X-macro references this
+// adapter.
+template <unsigned F> struct ControllerConfig;
+template <unsigned F>
+inline void MLStrategy_Adapt_Canonical(
+    MLStrategyState<F> *state, FPN<F> current_price,
+    FPN<F> portfolio_delta, uint16_t active_bitmap,
+    const BuySideGateConditions<F> *buy_conds,
+    const ControllerConfig<F> *cfg) {
+    MLStrategy_Adapt(state, current_price, portfolio_delta, active_bitmap,
+                      buy_conds, (const void*)cfg);
+}
+
 //======================================================================================================
 // [BUY SIGNAL]
 //======================================================================================================

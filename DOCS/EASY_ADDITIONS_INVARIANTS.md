@@ -47,7 +47,7 @@ of the registry picks up the new entry automatically.
 
 | Category | Current sites | Post-v5.8 target | Phase | Notes |
 |---|---|---|---|---|
-| Strategies | 8 | 3 | v5.8.1 | strategy file + X-macro line + GUI color (color is the only manual step) |
+| Strategies | 8 | 3 | v5.8.0 | strategy file + X-macro line + GUI color (color is the only manual step) |
 | ML features | 5-7 | 2 | v5.8.2 | compute fn + X-macro line |
 | SHALT codes | 4 | 1 | v5.8.3 | one X-macro row, names auto-generated |
 | Controller halt_reason | 3 | 1 | v5.8.4 | same |
@@ -110,7 +110,7 @@ inline void <Name>_Adapt(
 of `const ControllerConfig<F>* cfg`. Likely was an include-cycle
 workaround at the time of writing.
 
-**Fix for v5.8.1:** add a thin adapter
+**Fix for v5.8.0:** add a thin adapter
 `MLStrategy_Adapt_Canonical` that casts the void* and calls the
 real function. The X-macro references the adapter. Real function
 preserved for legacy callers.
@@ -131,7 +131,7 @@ inline void <Name>_BuildParameters(
 window features). The dispatcher in `Strategy_BuildParameters`
 handles this via case-by-case dispatch.
 
-**Fix for v5.8.1:** the X-macro can reference each strategy's
+**Fix for v5.8.0:** the X-macro can reference each strategy's
 `_BuildParameters` directly via case-block dispatch (preserving
 ML's wider signature) rather than via uniform function pointer.
 Slightly less clean than full table-dispatch but matches existing

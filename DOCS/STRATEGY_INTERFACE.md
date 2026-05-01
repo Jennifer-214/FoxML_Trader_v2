@@ -314,7 +314,7 @@ jq 'select(.cat == "regime" and .core == 0 and (.msg | contains("new=0") | not))
 
 ## How to add a new strategy
 
-### Post-v5.8.1 (after FOREACH_STRATEGY X-macro registry ships)
+### Post-v5.8.0 (after FOREACH_STRATEGY X-macro registry ships)
 
 ```
 1. cp DOCS/STRATEGY_TEMPLATE.hpp Strategies/<Name>.hpp
@@ -353,7 +353,7 @@ jq 'select(.cat == "regime" and .core == 0 and (.msg | contains("new=0") | not))
 DONE. ~3 sites total: file + X-macro line + GUI color.
 ```
 
-### Pre-v5.8.1 (current state — before X-macro registry ships)
+### Pre-v5.8.0 (current state — before X-macro registry ships)
 
 1. Define `<Strategy>State<F>` struct in `Strategies/<Strategy>.hpp`
 2. Implement all five lifecycle stages (or document skips)
@@ -365,7 +365,7 @@ DONE. ~3 sites total: file + X-macro line + GUI color.
    call all five stages — run `tools/calls_graph_diff.sh` to confirm no
    stage is orphaned
 
-(8 sites currently. v5.8.1 reduces this to 3 via the X-macro registry.)
+(8 sites currently. v5.8.0 reduces this to 3 via the X-macro registry.)
 
 ## Canonical signatures (audited 2026-05-01)
 
@@ -377,8 +377,8 @@ types to a `void (*)(...)` declared with the canonical type.
 **Audit results (2026-05-01):**
 
 - `_Init` — uniform across all 5 strategies ✅
-- `_Adapt` — drift in MLStrategy (takes `const void* cfg` for include-cycle workaround). v5.8.1 must add an adapter wrapper `MLStrategy_Adapt_Canonical` for the X-macro to point at. Real function preserved for legacy callers.
-- `_BuildParameters` — uniform for SimpleDip/MeanReversion/Momentum/EmaCross. ML_BuildParameters takes additional `rolling_long` parameter. v5.8.1 either uses case-block dispatch (preserves wider signature) or wraps ML in an adapter. Case-block is simpler.
+- `_Adapt` — drift in MLStrategy (takes `const void* cfg` for include-cycle workaround). v5.8.0 must add an adapter wrapper `MLStrategy_Adapt_Canonical` for the X-macro to point at. Real function preserved for legacy callers.
+- `_BuildParameters` — uniform for SimpleDip/MeanReversion/Momentum/EmaCross. ML_BuildParameters takes additional `rolling_long` parameter. v5.8.0 either uses case-block dispatch (preserves wider signature) or wraps ML in an adapter. Case-block is simpler.
 - `_ExitAdjustSharded` — uniform across all 5 ✅
 
 ## Naming consistency rule (readiness skill enforcement)
