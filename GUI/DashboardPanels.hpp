@@ -536,8 +536,18 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                 //   5. wait            (gate live, price hasn't crossed)
                 //   6. READY           (price crossed, no other blocker)
                 const auto *pc = &s->per_core[i];
-                if (s->positions[i].idx >= 0) {
+                // v5.6.1: priority chain extended for permission + bitmap
+                // drift. Permission=0 means the hot path will refuse
+                // entries regardless of price/flags (kill switch trip,
+                // startup gate). Bitmap drift means GUI and hot path
+                // disagree on any_active — flagged for diagnosis.
+                if (!pc->bitmap_consistency) {
+                    ImGui::TextColored(FoxmlColors::red,
+                        "DRIFT (bitmap)");
+                } else if (s->positions[i].idx >= 0) {
                     ImGui::TextColored(FoxmlColors::comment, "in pos");
+                } else if (pc->permission == 0) {
+                    ImGui::TextColored(FoxmlColors::yellow, "PERM_OFF");
                 } else if (pc->gate_flags & GUI_GATE_FLAG_BUY_BLOCKED) {
                     ImGui::TextColored(FoxmlColors::yellow, "blocked");
                 } else if (pc->halt_reason > 0 &&
@@ -603,6 +613,30 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     ImGui::TextColored(FoxmlColors::yellow,
                         "halted: %s", halt_names[pc->halt_reason]);
                 }
+                // v5.6.1: BUY_BLOCKED flag readout. Independent of halt_reason —
+                // strategy-level fee-floor + cost-gate set BUY_BLOCKED without
+                // setting halt_reason. v5.6.2 will replace this with a more
+                // specific strategy_halt_reason name.
+                if (pc->gate_flags & GUI_GATE_FLAG_BUY_BLOCKED) {
+                    ImGui::SameLine(0, 15);
+                    ImGui::TextColored(FoxmlColors::yellow, "BUY_BLOCKED");
+                }
+                // v5.6.1: permission atomic. 0 = entries forbidden by
+                // controller (kill switch / startup gate). The Risk panel
+                // already shows kill-switch state, but this surface ties
+                // the visibility to the same row as the gate state.
+                if (pc->permission == 0) {
+                    ImGui::SameLine(0, 15);
+                    ImGui::TextColored(FoxmlColors::red, "PERM_OFF");
+                }
+                // v5.6.1: bitmap drift — Class 2c regression detector. The
+                // hot path's any_active mask and the GUI's positions
+                // bitmap should always agree. If they don't, the engine
+                // and the operator are looking at different states.
+                if (!pc->bitmap_consistency) {
+                    ImGui::SameLine(0, 15);
+                    ImGui::TextColored(FoxmlColors::red, "DRIFT(bitmap)");
+                }
                 // Position state
                 if (s->positions[i].idx >= 0) {
                     ImGui::SameLine(0, 15);
@@ -613,6 +647,16 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     ImGui::SameLine(0, 15);
                     ImGui::TextColored(FoxmlColors::yellow,
                         "cooldown %u", pc->sl_cooldown_remaining);
+                }
+                // v5.6.1: volume gate — only meaningful when
+                // GATE_FLAG_VOLUME_REQUIRED is set in gate_flags. Today no
+                // strategy sets this flag, but the surface needs to exist
+                // before any future strategy enables it (otherwise that
+                // strategy's volume gate would be silent).
+                constexpr uint8_t GUI_GATE_FLAG_VOLUME_REQUIRED = 0x08;
+                if (pc->gate_flags & GUI_GATE_FLAG_VOLUME_REQUIRED) {
+                    ImGui::TextColored(FoxmlColors::sand,
+                        "  vol thr: %.4f", pc->bg_volume_threshold);
                 }
                 // ML extras
                 if (pc->is_ml) {

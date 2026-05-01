@@ -947,8 +947,27 @@ struct TUISnapshot {
                                         // TP_ENABLED / SL_ENABLED / BUY_ABOVE / PAIR_ACTIVE.
                                         // See EXECUTION_DISPLAY_INVARIANTS.md for the
                                         // predicate↔display matrix.
+        uint8_t  permission;           // v5.6.1: snapshot of core->permission atomic
+                                        // (acquire load). 0 = entries forbidden (startup
+                                        // gate, kill-switch trip, AUTO unresolved). 1 =
+                                        // entries allowed. Without this surface, a
+                                        // kill-tripped core can show READY in the top
+                                        // table — the kill state is visible only on the
+                                        // separate Risk panel.
+        uint8_t  bitmap_consistency;   // v5.6.1: 1 if (positions[i].idx >= 0) ==
+                                        // (core->active | core->active_b), 0 if drift.
+                                        // A 0 here = display↔execution divergence
+                                        // (Class 2 / 2c bug) and is logged via cat=gate
+                                        // health entry. Steady state should always be 1.
         uint32_t sl_cooldown_remaining;// v4.0.4: per-core SL cooldown counter
         double   buy_gate_price;       // current buy gate threshold (for chart overlay)
+        double   bg_volume_threshold;  // v5.6.1: cached_params.bg_volume_threshold —
+                                        // shown in collapsing header alongside the price
+                                        // gate. Active only when GATE_FLAG_VOLUME_REQUIRED
+                                        // is set in gate_flags. Pre-v5.6 unsurfaced
+                                        // entirely; if any future strategy enables the
+                                        // VOLUME_REQUIRED flag, the operator could not
+                                        // see why entries were blocked on volume.
         // Phase 6prep sharded c16 — per-core ML observability. Populated only
         // for STRATEGY_ML cores by TUI_CopySnapshotSharded; non-ML cores leave
         // is_ml=0 and renderer skips them.

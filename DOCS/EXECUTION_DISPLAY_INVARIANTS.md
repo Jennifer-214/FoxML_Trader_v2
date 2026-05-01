@@ -42,11 +42,11 @@ sufficient grounds to reject a PR.**
 | Term | Source field | PerCoreSnap field | GUI surface | Status |
 |---|---|---|---|---|
 | `price_ok` (BG) | `cached_params.bg_price_threshold` + `flags & BUY_ABOVE` | `buy_gate_price`, `gate_direction` | Buy Gate top table (Status column) | ✅ |
-| `volume_ok` (BG) | `cached_params.bg_volume_threshold` | `bg_volume_threshold_display` (v5.6.1) | Buy Gate collapsing header (v5.6.1) | ⚠ to-add |
-| `volume_required` (BG) | `cached_params.flags & GATE_FLAG_VOLUME_REQUIRED` | `gate_flags` (v5.6.0) | Buy Gate Status (decoded from gate_flags) | ⚠ to-add |
-| `~blocked_mask` (BG) | `cached_params.flags & GATE_FLAG_BUY_BLOCKED` | `gate_flags` (v5.6.0) | Buy Gate Status: "blocked" | ⚠ to-add (v5.6.0) |
-| `permission` (entry) | `core->permission` (atomic) | `permission` (v5.6.1) | Buy Gate Status: "PERM_OFF" badge (v5.6.1) | ⚠ to-add |
-| `~any_active` (entry) | `core->execution_active \| active_b` | `positions[i].idx` | Buy Gate Status: "in pos" + Positions panel | ✅ |
+| `volume_ok` (BG) | `cached_params.bg_volume_threshold` | `bg_volume_threshold` (v5.6.1) | Buy Gate collapsing header (v5.6.1) | ✅ |
+| `volume_required` (BG) | `cached_params.flags & GATE_FLAG_VOLUME_REQUIRED` | `gate_flags` (v5.6.0) | Buy Gate collapsing header (v5.6.1) | ✅ |
+| `~blocked_mask` (BG) | `cached_params.flags & GATE_FLAG_BUY_BLOCKED` | `gate_flags` (v5.6.0) | Buy Gate Status: "blocked" + collapsing-header BUY_BLOCKED tag | ✅ |
+| `permission` (entry) | `core->permission` (atomic) | `permission` (v5.6.1) | Buy Gate Status: "PERM_OFF" badge | ✅ |
+| `~any_active` (entry) | `core->active \| core->active_b` | `positions[i].idx` + bitmap_consistency check | Buy Gate Status: "in pos" + Positions panel + DRIFT(bitmap) on divergence | ✅ |
 | `tp_enabled` (SG) | `cached_params.flags & GATE_FLAG_TP_ENABLED` | `gate_flags` (v5.6.0) | Positions: ✓/✗ TP indicator (v5.6.5) | ⚠ to-add |
 | `sl_enabled` (SG) | `cached_params.flags & GATE_FLAG_SL_ENABLED` | `gate_flags` (v5.6.0) | Positions: ✓/✗ SL indicator (v5.6.5) | ⚠ to-add |
 | `effective_tp` (SG, includes ratchet) | `FPN_Max(live_tp, ratchet_tp)` | `effective_tp_display` (v5.6.5) | Positions panel | ⚠ to-add (v5.6.5) |

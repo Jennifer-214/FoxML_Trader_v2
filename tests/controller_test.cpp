@@ -8810,7 +8810,7 @@ e3_skip_load:;
         delete rig;
     }
 
-    // === EXECUTION_DISPLAY (v5.6.0) ===
+    // === EXECUTION_DISPLAY (v5.6.0+) ===
     // Constants that GUI/DashboardPanels.hpp mirrors from CoreFrameworks
     // headers. If either side drifts the silent-block bug returns. See
     // DOCS/EXECUTION_DISPLAY_INVARIANTS.md.
@@ -8822,6 +8822,11 @@ e3_skip_load:;
         // too — this test catches the drift.
         check("v5.6.0: GATE_FLAG_BUY_BLOCKED == 0x20 (GUI mirror constant)",
               (uint8_t)tt::GATE_FLAG_BUY_BLOCKED == 0x20);
+        // v5.6.1 adds a VOLUME_REQUIRED mirror in DashboardPanels for
+        // the collapsing-header volume readout. Same drift-prevention
+        // shape as BUY_BLOCKED.
+        check("v5.6.1: GATE_FLAG_VOLUME_REQUIRED == 0x08 (GUI mirror)",
+              (uint8_t)tt::GATE_FLAG_VOLUME_REQUIRED == 0x08);
 
         // halt_reason codes set by ControllerEventLoop must match what
         // halt_names[] in DashboardPanels.hpp can render. Pre-v5.6.0 the
@@ -8834,6 +8839,27 @@ e3_skip_load:;
         constexpr int EXPECTED_MAX_HALT_REASON = 10;
         check("v5.6.0: highest controller halt_reason code is 10 (imbalance)",
               EXPECTED_MAX_HALT_REASON == 10);
+    }
+
+    printf("\n--- v5.6.1: PerCoreSnap predicate fields ---\n");
+    {
+        // v5.6.1 adds gate_flags / permission / bitmap_consistency /
+        // bg_volume_threshold to PerCoreSnap. Compile-time enforced;
+        // runtime asserts catch struct-layout regressions (someone
+        // removing a field, accidentally type-changing, etc).
+        TUISnapshot::PerCoreSnap pc{};
+        pc.gate_flags = 0x20;
+        pc.permission = 1;
+        pc.bitmap_consistency = 1;
+        pc.bg_volume_threshold = 12.5;
+        check("v5.6.1: gate_flags field accepts BUY_BLOCKED bit",
+              pc.gate_flags == 0x20);
+        check("v5.6.1: permission field accepts 0/1",
+              pc.permission == 1);
+        check("v5.6.1: bitmap_consistency field accepts 0/1",
+              pc.bitmap_consistency == 1);
+        check("v5.6.1: bg_volume_threshold field accepts double",
+              pc.bg_volume_threshold > 12.0 && pc.bg_volume_threshold < 13.0);
     }
 
     printf("\n======================================\n");

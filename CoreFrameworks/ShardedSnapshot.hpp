@@ -216,6 +216,29 @@ static inline void TUI_CopySnapshotSharded(
         snap->exposure_pct = (total_value / snap->starting) * 100.0;
     }
 
+    // v5.6.1: bitmap consistency post-pass. The per-core loop above wrote
+    // a tentative bitmap_consistency = (core->active | core->active_b)
+    // into snap->per_core[i].bitmap_consistency. The per-position loop
+    // just finished writing snap->positions[idx].idx for active slots.
+    // Now we compare: for each core, is the hot-path "any_active" mask
+    // consistent with the GUI's view from the portfolio bitmap?
+    //
+    // Under partials, core c owns slots {2c, 2c+1}. Without partials,
+    // core c owns slot c. If the masks disagree, we have Class 2c
+    // display↔execution divergence — the GUI's "in pos" indicator and
+    // the hot-path's any_active gate will report different states.
+    //
+    // Final value: 1 = consistent, 0 = drift detected.
+    for (int c = 0; c < state->registered_count && c < 16; ++c) {
+        uint8_t hot_any_active = snap->per_core[c].bitmap_consistency;
+        int slot_a = partial_on ? (c * 2)     : c;
+        int slot_b = partial_on ? (c * 2 + 1) : -1;
+        bool gui_any_pos = (slot_a >= 0 && slot_a < 16 && snap->positions[slot_a].idx >= 0)
+                       || (slot_b >= 0 && slot_b < 16 && snap->positions[slot_b].idx >= 0);
+        snap->per_core[c].bitmap_consistency =
+            ((hot_any_active != 0) == gui_any_pos) ? 1 : 0;
+    }
+
     // counters
     snap->total_buys        = (uint32_t)agg.total_entries;
     snap->total_exits_fills = (uint32_t)agg.total_exits;  // per-fill heartbeat (leg fills)
@@ -384,6 +407,27 @@ static inline void TUI_CopySnapshotSharded(
             // needing access to GateParameters internals. ParameterSlot_Read
             // is seqlock-published so flags + thresholds are consistent.
             snap->per_core[i].gate_flags = params.flags;
+            // v5.6.1: bg_volume_threshold for collapsing-header readout. Only
+            // meaningful when GATE_FLAG_VOLUME_REQUIRED is set, but copying
+            // unconditionally is cheaper than branching.
+            snap->per_core[i].bg_volume_threshold =
+                FPN_ToDouble(params.bg_volume_threshold);
+            // v5.6.1: permission atomic snapshot. ACQUIRE load matches the
+            // hot-path read in ExecutionCore.hpp:356, so we see the same
+            // state the next tick would see. 0 = entries forbidden.
+            snap->per_core[i].permission = (uint8_t)__atomic_load_n(
+                &core->permission, __ATOMIC_ACQUIRE);
+            // v5.6.1: bitmap consistency check. (positions[i].idx >= 0) is
+            // populated below from oms->portfolio.active_bitmap; here we
+            // just compare the hot-path "any leg active" vs zero. Drift
+            // would mean the GUI's "in pos" indicator and the hot-path
+            // any_active mask disagree — Class 2 display↔execution divergence.
+            uint8_t any_active = (uint8_t)((core->active | core->active_b) & 1);
+            // The portfolio-side check happens after positions are filled in
+            // below; we record any_active here and compare in a post-pass.
+            // Defer to bitmap_consistency_check below.
+            snap->per_core[i].bitmap_consistency = any_active;  // tentative —
+                                                                  // overwritten below
             // populate headline buy gate from core 0
             if (i == 0) {
                 snap->buy_p = FPN_ToDouble(params.bg_price_threshold);
