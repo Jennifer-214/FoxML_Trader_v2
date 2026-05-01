@@ -98,6 +98,47 @@ grep -rn "pos->stop_loss_price\|pos->take_profit_price" \
   `grep -oE "snap->[a-z_]+" ShardedSnapshot.hpp`; legacy-only
   fields are candidates.
 
+### Sub-pattern 2c — Display predicate is a strict subset of hot-path predicate
+
+**Symptom:** GUI says "READY" but no fire happens, or shows "off"
+with no explanation. Operator looking at the dashboard cannot tell
+whether the engine is correctly inactive or silently broken.
+
+**Root cause:** The hot path enforces N conditions for an entry/exit
+to fire (e.g. `price_ok & volume_check & ~blocked & permission &
+~any_active`). The GUI's "READY" predicate checks fewer than N. Any
+condition checked by the hot path but NOT the GUI produces "looks
+ready, isn't ready" misleading state.
+
+**Detection:**
+```bash
+# Inventory hot-path entry predicate terms
+grep -A30 "Inlined BG_Evaluate" CoreFrameworks/ExecutionCore.hpp | \
+    grep -oE "[a-z_]+_ok|[a-z_]+_check|[a-z_]+_required" | sort -u
+# Inventory display predicate terms
+grep -A20 "READY\|wait\|in pos" GUI/DashboardPanels.hpp | \
+    grep -oE "price_ok|volume_ok|blocked|permission|any_active" | sort -u
+# Diff = silent terms.
+```
+
+**Known instances:**
+- v5.6.0 — Buy Gate top table only checked `price_ok`; ignored
+  `BUY_BLOCKED`, `permission`, `volume_required`. Fee-floor BUY_BLOCKED
+  (StrategyParameters.hpp:884) silently dropped DIP entries.
+- v5.6.0 — `halt_reason = 10` (book-imbalance) was set in the
+  controller but `halt_names[]` only had indices 0-9; entire
+  imbalance veto was invisible.
+
+**Prevention:**
+- v5.6.0 enforces a "predicate ↔ display matrix" in
+  `DOCS/EXECUTION_DISPLAY_INVARIANTS.md`. New hot-path predicate
+  terms MUST add a corresponding GUI surface in the same PR.
+- `controller_test.cpp` predicate-parity test asserts the display
+  Status string matches the hot-path mask outcome under each
+  isolated condition.
+- Single-source rule: numeric thresholds shown in GUI must read the
+  SAME variable the controller checks. No display-side recomputation.
+
 ---
 
 ## Class 3 — Drain count under partials
