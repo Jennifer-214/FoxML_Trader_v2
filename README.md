@@ -29,11 +29,22 @@ built from scratch, self-taught, ~60k lines across engine + backtest suite + ML 
 - live exchange reconciliation at boot: REST-fetches account / open orders / recent trades from binance, refuses to boot if exchange holds something the engine doesn't know about ([v5.2.1, v5.2.2](DOCS/CHANGELOG.md))
 - in-process HMAC + SHA-256 (no popen, no shell-injection surface) ([v5.3.0](DOCS/CHANGELOG.md))
 - auto-stamp wiring + JSONL run history for experiment tracking ([v5.3.2](DOCS/CHANGELOG.md))
-- 800+ unit tests across the engine + parity harness
+- 890+ unit tests across the engine + parity harness
 
 [![Donate](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.com/ncp/payment/8M6XLK7M8569C) [![Discord](https://img.shields.io/badge/Discord-Community-5865F2.svg)](https://discord.gg/asSDcYwPz)
 
 > **paper trading by default.** live trading via Binance REST API is supported but experimental — use at your own risk. set `use_real_money=1` and add API keys to `secrets.cfg`. no API key needed for market data feeds.
+
+---
+
+## hire me
+
+built this from the ground up — branchless fixed-point math, lock-free SPSC plumbing, per-core sharding, ML inference pipeline, regime detection. ~60k lines, 890+ tests. self-taught. if you're building HFT, low-latency, or quantitative systems, i'd love to talk.
+
+- email: jenn.lewis5789@gmail.com
+- phone: 205-413-7057
+
+— Jennifer Lewis
 
 ---
 
@@ -316,7 +327,7 @@ hot-reloadable with `R` in the GUI. per-core strategy and risk can be changed at
 ## tests
 
 ```bash
-./build/controller_test           # 809 assertions across the engine + ML + OMS + reconcile
+./build/controller_test           # 892 assertions across the engine + ML + OMS + reconcile
 ./build/depth_recorder_test       # 17 assertions (depth recorder)
 ./build/parity_harness            # legacy single_core ↔ sharded backtest byte-identity
 ./build_lat/bench_batch_floor     # latency bench (rdtsc-bracketed)
