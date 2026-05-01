@@ -295,6 +295,17 @@ template <unsigned F> struct ControllerConfig {
   // momentum strategy
   FPN<F>
       momentum_breakout_mult; // buy when price > avg + stddev * this (e.g. 1.5)
+  // v5.7.5 — MOM quality filters. All default to 0 (filter off,
+  // current behavior preserved). Operator opts in after observing
+  // v5.7.6 quality dashboard data. Each filter sets BUY_BLOCKED +
+  // a SHALT_MOM_* code when triggered, surfaced in the v5.6 GUI.
+  // See DOCS/changelogs/2026-04-30-regime-classifier-audit.md for
+  // why these are defensive depth even after Phase 2's hardcoded
+  // strategy boot guard.
+  FPN<F> momentum_min_tp_margin_pct;     // SHALT_MOM_TP_TOO_TIGHT — require tp_pct >= this (recommended: 0.0040 = 0.40%)
+  FPN<F> momentum_min_buy_delta_recent;  // SHALT_MOM_NO_FLOW — require recent volume_delta >= this (rec: 0.05)
+  FPN<F> momentum_min_r2;                // SHALT_MOM_LOW_R2 — require short_r2 >= this (rec: 0.30)
+  int momentum_require_last_win;         // SHALT_MOM_LAST_LOST — 1 = block re-entry until previous trade was TP win (rec: 0=off)
   FPN<F> momentum_tp_mult;    // TP multiplier for momentum (e.g. 3.0 stddevs)
   FPN<F> momentum_sl_mult;    // SL multiplier for momentum (e.g. 1.0 stddevs)
   // EMA cross strategy
@@ -706,6 +717,11 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.sl_cooldown_extra = 8;    // max extra (strong downtrend)
   // momentum strategy
   cfg.momentum_breakout_mult = FPN_FromDouble<F>(1.5); // buy 1.5σ above avg
+  // v5.7.5 — MOM quality filters default 0 (off, preserves pre-v5.7 behavior)
+  cfg.momentum_min_tp_margin_pct    = FPN_Zero<F>();
+  cfg.momentum_min_buy_delta_recent = FPN_Zero<F>();
+  cfg.momentum_min_r2               = FPN_Zero<F>();
+  cfg.momentum_require_last_win     = 0;
   cfg.momentum_tp_mult = FPN_FromDouble<F>(3.0);       // wider TP for trends
   cfg.momentum_sl_mult = FPN_FromDouble<F>(1.0);       // tighter SL than MR
   // EMA cross strategy
@@ -980,6 +996,10 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(regime_volatile_stddev)
     CFG_PARSE_FPN(regime_vol_spike_ratio)
     CFG_PARSE_FPN(momentum_breakout_mult)
+    CFG_PARSE_FPN(momentum_min_tp_margin_pct)     // v5.7.5
+    CFG_PARSE_FPN(momentum_min_buy_delta_recent)  // v5.7.5
+    CFG_PARSE_FPN(momentum_min_r2)                // v5.7.5
+    CFG_PARSE_INT(momentum_require_last_win)      // v5.7.5
     CFG_PARSE_FPN(momentum_tp_mult)
     CFG_PARSE_FPN(momentum_sl_mult)
     CFG_PARSE_FPN(emacross_dip_mult)

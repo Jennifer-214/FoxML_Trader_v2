@@ -140,7 +140,13 @@ constexpr uint8_t SHALT_ML_BELOW_THR   = 8;  // ML: prediction below trigger thr
 constexpr uint8_t SHALT_LOW_CONFIDENCE = 9;  // ConfidenceScorer veto
 constexpr uint8_t SHALT_NO_SIGNAL      = 10; // catch-all for strategy zero-gates that
                                               // didn't set a more specific code
-constexpr uint8_t SHALT_MAX            = 10; // highest valid code (test bound)
+// v5.7.5 — MOM-specific quality filter SHALT codes. All gated cfg-side
+// (momentum_min_* fields default 0/off, preserving pre-v5.7 behavior).
+constexpr uint8_t SHALT_MOM_TP_TOO_TIGHT = 11; // momentum_min_tp_margin_pct unmet
+constexpr uint8_t SHALT_MOM_NO_FLOW      = 12; // momentum_min_buy_delta_recent unmet
+constexpr uint8_t SHALT_MOM_LOW_R2       = 13; // momentum_min_r2 unmet
+constexpr uint8_t SHALT_MOM_LAST_LOST    = 14; // momentum_require_last_win + last exit was loss
+constexpr uint8_t SHALT_MAX              = 14; // highest valid code (test bound)
 
 // Names for display, indexed by SHALT_*. Keep in sync with
 // shalt_names[] mirror in DashboardPanels.hpp.
@@ -156,6 +162,10 @@ static const char* SHALT_SHORT_NAMES[] = {
     "ml-below-thr",  // 8
     "low-confidence",// 9
     "no-signal",     // 10
+    "mom:tp-tight",  // 11 SHALT_MOM_TP_TOO_TIGHT
+    "mom:no-flow",   // 12 SHALT_MOM_NO_FLOW
+    "mom:low-r2",    // 13 SHALT_MOM_LOW_R2
+    "mom:last-lost", // 14 SHALT_MOM_LAST_LOST
 };
 
 #endif // STRATEGY_INTERFACE_HPP

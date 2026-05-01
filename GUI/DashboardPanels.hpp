@@ -468,8 +468,8 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
         };
         constexpr int halt_names_count =
             (int)(sizeof(halt_names) / sizeof(halt_names[0]));
-        // v5.6.2: SHALT_* names for strategy-internal halt reasons. Mirror
-        // of SHALT_SHORT_NAMES in StrategyInterface.hpp — keep in sync.
+        // v5.6.2/v5.7.5: SHALT_* names for strategy-internal halt reasons.
+        // Mirror of SHALT_SHORT_NAMES in StrategyInterface.hpp — keep in sync.
         static const char* shalt_names[] = {
             "ok",            // SHALT_OK = 0
             "no-uptrend",    // SHALT_NO_UPTREND = 1
@@ -482,6 +482,10 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
             "ml-below-thr",  // SHALT_ML_BELOW_THR = 8
             "low-confidence",// SHALT_LOW_CONFIDENCE = 9
             "no-signal",     // SHALT_NO_SIGNAL = 10
+            "mom:tp-tight", // SHALT_MOM_TP_TOO_TIGHT = 11
+            "mom:no-flow",  // SHALT_MOM_NO_FLOW = 12
+            "mom:low-r2",   // SHALT_MOM_LOW_R2 = 13
+            "mom:last-lost",// SHALT_MOM_LAST_LOST = 14
         };
         constexpr int shalt_names_count =
             (int)(sizeof(shalt_names) / sizeof(shalt_names[0]));

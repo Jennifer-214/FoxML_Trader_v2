@@ -8873,8 +8873,15 @@ e3_skip_load:;
         check("v5.6.2: SHALT_FEE_FLOOR == 3",   SHALT_FEE_FLOOR == 3);
         check("v5.6.2: SHALT_COST_GATE == 4",   SHALT_COST_GATE == 4);
         check("v5.6.2: SHALT_NO_SIGNAL == 10",  SHALT_NO_SIGNAL == 10);
-        check("v5.6.2: SHALT_MAX matches highest defined code",
-              SHALT_MAX == 10);
+        // v5.7.5 added codes 11..14 (SHALT_MOM_*); SHALT_MAX is the
+        // highest valid code. Update both this assertion and
+        // SHALT_SHORT_NAMES[] when adding new codes.
+        check("v5.7.5: SHALT_MAX == 14 (highest after MOM filter codes)",
+              SHALT_MAX == 14);
+        check("v5.7.5: SHALT_MOM_TP_TOO_TIGHT == 11", SHALT_MOM_TP_TOO_TIGHT == 11);
+        check("v5.7.5: SHALT_MOM_NO_FLOW == 12",      SHALT_MOM_NO_FLOW == 12);
+        check("v5.7.5: SHALT_MOM_LOW_R2 == 13",       SHALT_MOM_LOW_R2 == 13);
+        check("v5.7.5: SHALT_MOM_LAST_LOST == 14",    SHALT_MOM_LAST_LOST == 14);
 
         // Names array length must equal SHALT_MAX + 1, otherwise display
         // would index out of bounds for the highest valid code.

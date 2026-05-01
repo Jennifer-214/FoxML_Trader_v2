@@ -808,6 +808,61 @@ inline void Strategy_BuildParameters(
             // v5.4.0 Phase 2.3 — pass typed Momentum state through.
             Momentum_BuildParameters(rolling, config, allocated_balance, out,
                                       (MomentumState<F>*)strategy_state);
+            // v5.7.5 — MOM quality filters. Each gated cfg-side (default
+            // 0/off, preserving pre-v5.7 behavior). Operator opts in
+            // after observing v5.7.6 quality dashboard data. Each filter
+            // sets BUY_BLOCKED + a SHALT_MOM_* code visible in the v5.6
+            // GUI. Order: TP-margin first (cheapest), then R², then
+            // flow, then last-lost — first SHALT wins per the SHALT_OK
+            // guard pattern so the most-load-bearing reason surfaces.
+            if (rolling) {
+                bool blocked = false;
+                // Filter 1: minimum TP margin. Catches MOM trades where
+                // the strategy's tp_pct is too thin to meaningfully clear
+                // fees + slippage even after the dispatcher's fee-floor
+                // (v5.1.10) passes — the dispatcher's check requires
+                // 3 * fee, this filter enforces a stricter operator-set
+                // floor (recommended 0.40%).
+                if (!FPN_IsZero(config->momentum_min_tp_margin_pct) &&
+                    !FPN_IsZero(out->tp_pct) &&
+                    FPN_LessThan(out->tp_pct, config->momentum_min_tp_margin_pct)) {
+                    out->flags |= GATE_FLAG_BUY_BLOCKED;
+                    blocked = true;
+                    if (strategy_halt_reason && *strategy_halt_reason == SHALT_OK) {
+                        *strategy_halt_reason = SHALT_MOM_TP_TOO_TIGHT;
+                    }
+                }
+                // Filter 2: R² minimum (short-window regression fit).
+                // Low R² = noisy data = breakout is probably noise.
+                if (!blocked && !FPN_IsZero(config->momentum_min_r2) &&
+                    FPN_LessThan(rolling->price_r_squared, config->momentum_min_r2)) {
+                    out->flags |= GATE_FLAG_BUY_BLOCKED;
+                    blocked = true;
+                    if (strategy_halt_reason && *strategy_halt_reason == SHALT_OK) {
+                        *strategy_halt_reason = SHALT_MOM_LOW_R2;
+                    }
+                }
+                // Filter 3: recent flow agreement (volume_delta).
+                // Reject when recent flow opposes the breakout direction.
+                if (!blocked && !FPN_IsZero(config->momentum_min_buy_delta_recent) &&
+                    FPN_LessThan(rolling->volume_delta,
+                                  config->momentum_min_buy_delta_recent)) {
+                    out->flags |= GATE_FLAG_BUY_BLOCKED;
+                    blocked = true;
+                    if (strategy_halt_reason && *strategy_halt_reason == SHALT_OK) {
+                        *strategy_halt_reason = SHALT_MOM_NO_FLOW;
+                    }
+                }
+                // Filter 4: require last entry was a TP win. Aggressive —
+                // disabled by default. Strategy-state owns the
+                // last_entry_won flag (set in MomentumState by the
+                // drainer post-fill); without state we can't enforce.
+                // Reserved hook; full wiring needs MomentumState extension
+                // and is deferred to a follow-up if measurement justifies.
+                // (Keeping the cfg field + SHALT code defined now so the
+                // table stays stable.)
+                (void)config->momentum_require_last_win;  // not yet wired
+            }
             break;
         case STRATEGY_EMA_CROSS:
             // v5.4.0 Phase 2.4 — pass typed EmaCross state through.
