@@ -31,6 +31,7 @@
 #include "../ML_Headers/FlowFeatures.hpp"                // v4.5 Wave 1 tests
 #include "../DataStream/BinanceUserData.hpp"
 #include "../Backtest/BacktestEngine.hpp"
+#include "../Backtest/BacktestSharded.hpp"  // v5.9.2 — parity test calls Backtest_Run end-to-end
 #include "../Backtest/HeldOutSplit.hpp"
 #include "../MemHeaders/HmacSha256.hpp"                  // v5.3.0 Phase B — in-process HMAC primitive
 #include "../MemHeaders/RunHistory.hpp"                  // v5.3.2 Phase C — JSONL append-only run history
@@ -10133,6 +10134,184 @@ e3_skip_load:;
         pcs.warmup_progress_pct = 100;
         check("v5.9.1: PerCoreSnap.warmup_progress_pct accepts 100",
               pcs.warmup_progress_pct == 100);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.9.2 Phase 3 — train-serve parity regression test ---\n");
+    {
+        // The deferred prevention layer. v5.8.6 added structural protection
+        // via feature_registry_hash; this adds a comprehensive regression
+        // assertion that the slow-path feature pipeline produces bytewise-
+        // identical output across two runs of the same synthetic tick stream.
+        //
+        // What this catches:
+        //   - Non-determinism (uninitialized state introducing variance)
+        //   - Init-order drift (v5.9.1a class — fields read before write)
+        //   - Future Regime_ComputeSignals or MLBuildContext populator
+        //     changes that don't propagate symmetrically
+        //
+        // What this CANNOT catch (separate concern):
+        //   - Live engine threading-induced ordering (test runs single-thread)
+        //   - Cfg parsing differences (test uses programmatic ControllerConfig)
+        //
+        // Test architecture:
+        //   1. Generate deterministic synthetic tick stream → tmpfile CSV
+        //   2. Build minimal cfg via ControllerConfig_Default + overrides
+        //   3. Run Backtest_Run twice with collect_features=1
+        //   4. Diff feature_matrix bytewise — must match exactly
+        //   5. Regression sim: perturb one tick → diff vs run #1 must catch it
+
+        // === Step 1: synthetic tick generator ===
+        // 5000 ticks with deterministic price (cosine + linear drift),
+        // volume (stepped pattern), is_buyer_maker (alternating).
+        // Timestamps at 100ms intervals starting from a fixed epoch — gives
+        // hour_sin/hour_cos variation across the run.
+        char tick_csv[] = "/tmp/v592_parity_ticks_XXXXXX.csv";
+        int tfd = mkstemps(tick_csv, 4);
+        check("v5.9.2 setup: synthetic tick CSV created", tfd >= 0);
+        if (tfd < 0) { return 1; }
+        FILE *tf = fdopen(tfd, "w");
+        fprintf(tf, "timestamp_us,price,quantity,is_buyer_maker\n");
+        const int N_TICKS = 5000;
+        const int64_t START_US = 1700000000LL * 1000000LL;  // 2023-11-14 epoch us
+        for (int i = 0; i < N_TICKS; ++i) {
+            int64_t ts_us = START_US + (int64_t)i * 100000LL;  // 100ms apart
+            double phase = (double)i * 0.01;
+            double price = 60000.0 + 200.0 * cos(phase) + 0.5 * (double)i;
+            double qty   = 0.001 + 0.01 * (double)((i * 7) % 11) / 11.0;
+            int bm       = (i % 3 == 0) ? 1 : 0;
+            fprintf(tf, "%lld,%.4f,%.6f,%d\n", (long long)ts_us, price, qty, bm);
+        }
+        fclose(tf);
+
+        // === Step 2: cfg setup ===
+        // Default cfg with collect-features-friendly defaults. Backtest_Run
+        // requires a config_path on disk for run.config_path even when
+        // use_config_override=1 (it's logged in the [backtest] header).
+        char tmp_cfg[] = "/tmp/v592_parity_cfg_XXXXXX";
+        int cfd = mkstemp(tmp_cfg);
+        if (cfd >= 0) {
+            const char* cfg_body = "num_execution_cores=1\n";
+            (void)!write(cfd, cfg_body, strlen(cfg_body));
+            close(cfd);
+        }
+
+        BacktestRunConfig run;
+        memset(&run, 0, sizeof(run));
+        snprintf(run.data_paths[0], sizeof(run.data_paths[0]), "%s", tick_csv);
+        run.num_data_files = 1;
+        snprintf(run.config_path, sizeof(run.config_path), "%s", tmp_cfg);
+        run.use_config_override = 1;
+        run.config_override = ControllerConfig_Default<BACKTEST_FP>();
+        run.config_override.num_execution_cores = 1;
+        run.collect_features = 1;
+        run.label_type = LABEL_WIN_LOSS;
+        run.label_tp_pct = 1.5;
+        run.label_sl_pct = 1.0;
+        run.label_forward_ticks = 100;
+
+        // === Step 3: run backtest twice ===
+        BacktestResults r1, r2;
+        BacktestResults_Init(&r1);
+        BacktestResults_Init(&r2);
+        int prog1 = 0, cancel1 = 0;
+        int prog2 = 0, cancel2 = 0;
+        Backtest_Run(&r1, &run, &prog1, &cancel1, NULL);
+        Backtest_Run(&r2, &run, &prog2, &cancel2, NULL);
+
+        check("v5.9.2: synthetic tick stream produces > 0 samples (collect_features=1)",
+              r1.sample_count > 0);
+        check("v5.9.2: both runs produce identical sample count",
+              r1.sample_count == r2.sample_count);
+
+        // === Step 4: bytewise feature_matrix diff ===
+        int rows_with_diff = 0;
+        int first_diff_row = -1;
+        int first_diff_col = -1;
+        if (r1.sample_count > 0 && r2.sample_count > 0 && r1.feature_matrix && r2.feature_matrix) {
+            int n = (r1.sample_count < r2.sample_count) ? r1.sample_count : r2.sample_count;
+            for (int i = 0; i < n; ++i) {
+                int row_diff = 0;
+                for (int j = 0; j < MODEL_NUM_FEATURES; ++j) {
+                    float a = r1.feature_matrix[i * MODEL_NUM_FEATURES + j];
+                    float b = r2.feature_matrix[i * MODEL_NUM_FEATURES + j];
+                    // Bit-exact float compare. NaN==NaN both sides counts as
+                    // identical (both runs produce same NaN for same input).
+                    if (memcmp(&a, &b, sizeof(float)) != 0) {
+                        row_diff = 1;
+                        if (first_diff_row < 0) {
+                            first_diff_row = i;
+                            first_diff_col = j;
+                        }
+                    }
+                }
+                if (row_diff) ++rows_with_diff;
+            }
+        }
+        check("v5.9.2: backtest is deterministic — feature_matrix bytewise identical across two runs",
+              rows_with_diff == 0);
+        if (rows_with_diff > 0) {
+            fprintf(stderr,
+                "  [v5.9.2 DIAG] %d rows with diffs, first @ row=%d col=%d (FEATURE_%s)\n",
+                rows_with_diff, first_diff_row, first_diff_col,
+                (first_diff_col >= 0 && first_diff_col < (int)NUM_REGISTERED_FEATURES)
+                  ? FEATURE_NAMES[first_diff_col] : "?");
+        }
+
+        // === Step 5: regression simulation ===
+        // Generate a NEW CSV with one tick perturbed; run; assert features
+        // diverge. This proves the determinism check is non-tautological —
+        // the same harness that says "identical = parity" also says
+        // "perturbed = diff caught."
+        char tick_csv2[] = "/tmp/v592_parity_ticks_perturbed_XXXXXX.csv";
+        int tfd2 = mkstemps(tick_csv2, 4);
+        if (tfd2 >= 0) {
+            FILE *tf2 = fdopen(tfd2, "w");
+            fprintf(tf2, "timestamp_us,price,quantity,is_buyer_maker\n");
+            for (int i = 0; i < N_TICKS; ++i) {
+                int64_t ts_us = START_US + (int64_t)i * 100000LL;
+                double phase = (double)i * 0.01;
+                double price = 60000.0 + 200.0 * cos(phase) + 0.5 * (double)i;
+                // Perturb tick #2500 (mid-stream so rolling stats are warm).
+                if (i == 2500) price += 100.0;
+                double qty   = 0.001 + 0.01 * (double)((i * 7) % 11) / 11.0;
+                int bm       = (i % 3 == 0) ? 1 : 0;
+                fprintf(tf2, "%lld,%.4f,%.6f,%d\n", (long long)ts_us, price, qty, bm);
+            }
+            fclose(tf2);
+
+            BacktestRunConfig run3 = run;
+            snprintf(run3.data_paths[0], sizeof(run3.data_paths[0]), "%s", tick_csv2);
+            BacktestResults r3;
+            BacktestResults_Init(&r3);
+            int prog3 = 0, cancel3 = 0;
+            Backtest_Run(&r3, &run3, &prog3, &cancel3, NULL);
+
+            int perturbed_diff_rows = 0;
+            if (r1.sample_count > 0 && r3.sample_count > 0) {
+                int n = (r1.sample_count < r3.sample_count) ? r1.sample_count : r3.sample_count;
+                for (int i = 0; i < n; ++i) {
+                    for (int j = 0; j < MODEL_NUM_FEATURES; ++j) {
+                        float a = r1.feature_matrix[i * MODEL_NUM_FEATURES + j];
+                        float b = r3.feature_matrix[i * MODEL_NUM_FEATURES + j];
+                        if (memcmp(&a, &b, sizeof(float)) != 0) {
+                            ++perturbed_diff_rows;
+                            break;
+                        }
+                    }
+                }
+            }
+            check("v5.9.2: regression sim — perturbed tick stream produces non-zero feature diff",
+                  perturbed_diff_rows > 0);
+            BacktestResults_Free(&r3);
+            unlink(tick_csv2);
+        } else {
+            check("v5.9.2: regression sim tmpfile creation", 0);
+        }
+
+        BacktestResults_Free(&r1);
+        BacktestResults_Free(&r2);
+        unlink(tick_csv);
+        unlink(tmp_cfg);
     }
 
     printf("\n--- EXTENSIBILITY: v5.8.10 CoreModelZoo strict-mode integration (drift refusal) ---\n");

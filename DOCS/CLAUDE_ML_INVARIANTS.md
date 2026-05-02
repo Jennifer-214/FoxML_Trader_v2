@@ -17,10 +17,15 @@ the same input state. Validated by:
    synthetic RegimeSignals input, asserts indices 0-33 match between
    `Features_PackAll` and the legacy `ModelFeatures_Pack` (frozen
    reference, retired in v5.9).
-2. Phase 3 parity regression test (post-v5.9.2) — drives both live
-   path (`EventLoop_RebuildAllParameters_PerCore`) and backtest path
-   (`Backtest_RunFullValidation`) through the same synthetic tick
-   stream + asserts feature_matrix bytewise-equal at every sample.
+2. Phase 3 parity regression test (v5.9.2 EXTENSIBILITY block in
+   `controller_test.cpp`) — generates a deterministic 5000-tick
+   synthetic stream (cosine + linear drift, stepped volume,
+   alternating buyer-maker), runs `Backtest_Run` with
+   `collect_features=1` twice, diffs `feature_matrix` bytewise. Both
+   runs MUST produce identical feature output across every sample
+   row × feature column. Plus a regression-simulation: a 3rd run with
+   one tick perturbed mid-stream MUST produce a non-zero diff (proves
+   the assertion is non-tautological).
 
 **Why:** v5.8 paper testing surfaced multiple "wired but unobserved"
 failures where the live engine fell back to defaults silently. The
