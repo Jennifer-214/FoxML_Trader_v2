@@ -572,6 +572,14 @@ struct PastRun {
     int   has_stamp;             // 1 = .stamp file exists in run dir
     char  stamp_verify_msg[128]; // populated by Verify Stamp button — empty if not verified yet
     int   stamp_verify_state;    // 0=unverified, 1=ok, -1=fail
+    // v5.9.5d — full verify result stored when stamp_verify_state==1.
+    // Renders as expandable "Stamp details" tree below the OK/FAIL line.
+    // Pre-v5.9.5d the operator only saw "OK — engine=X registry=Y" without
+    // the recorded inference cfg / training metrics / scaler binding /
+    // model_num_outputs that were ALL just stamped (v5.9.5b/c). This makes
+    // those values actually visible for cross-cfg audit.
+    ModelStampResult stamp_verify_full;
+    int   stamp_verify_has_full;  // 1 = stamp_verify_full populated
 };
 
 struct PastRunsState {
@@ -1031,6 +1039,11 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                         /*expected_format_version=*/MODEL_FORMAT_VERSION,
                         /*expected_feature_registry_hash=*/FEATURE_REGISTRY_HASH());
                     r->stamp_verify_state = vr.valid;
+                    // v5.9.5d — capture full result for "Stamp details"
+                    // expansion below. Operator audits recorded vs runtime
+                    // cfg without leaving the suite.
+                    r->stamp_verify_full = vr;
+                    r->stamp_verify_has_full = (vr.valid == 1) ? 1 : 0;
                     if (vr.valid == 1) {
                         snprintf(r->stamp_verify_msg, sizeof(r->stamp_verify_msg),
                             "OK — engine=%s registry=%016lx",
@@ -1050,6 +1063,94 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                 ? ImVec4(0.55f, 0.76f, 0.51f, 1.0f)
                 : ImVec4(0.95f, 0.35f, 0.35f, 1.0f);
             ImGui::TextColored(vc, "%s", r->stamp_verify_msg);
+
+            // v5.9.5d — Stamp details expansion. Renders all recorded
+            // body fields when the stamp verifies. Lets operator audit
+            // recorded inference cfg vs runtime cfg without manually
+            // reading the .stamp file. Only shown on successful verify
+            // (FAIL case is already self-explanatory via the reason).
+            if (r->stamp_verify_has_full) {
+                const ModelStampResult &v = r->stamp_verify_full;
+                char tree_id[64];
+                snprintf(tree_id, sizeof(tree_id), "Stamp details##%s",
+                         r->dir_name);
+                if (ImGui::TreeNode(tree_id)) {
+                    // Generalization metrics
+                    ImGui::Text("gap:               %.4f  (threshold: %.4f)",
+                                v.generalization_gap, v.gap_threshold);
+                    ImGui::Text("model_format_ver:  %d  (stamp_schema: %d)",
+                                v.model_format_version, v.stamp_format_version);
+                    // Cross-build identifiers
+                    ImGui::Separator();
+                    ImGui::Text("engine_version:    %s",
+                                v.engine_version[0] ? v.engine_version : "(unknown)");
+                    ImGui::Text("registry_hash:     %016lx",
+                                (unsigned long)v.feature_registry_hash);
+                    if (v.cross_major_engine) {
+                        ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.35f, 1.0f),
+                                           "  (cross-major-engine WARN)");
+                    }
+                    // v5.9.4a model_num_outputs (output dimension)
+                    if (v.has_model_num_outputs) {
+                        ImGui::Text("model_num_outputs: %d", v.model_num_outputs);
+                    }
+                    // v5.9.4a training_poll_interval (cadence)
+                    if (v.has_training_poll_interval) {
+                        ImGui::Text("training_poll:    %u",
+                                    (unsigned)v.training_poll_interval);
+                    }
+                    // v5.9.3a scaler binding
+                    if (v.has_scaler_fields) {
+                        ImGui::Separator();
+                        ImGui::Text("scaler_present:    %d",
+                                    v.feature_scaler_present);
+                        if (v.feature_scaler_present && v.scaler_sha256[0]) {
+                            ImGui::Text("scaler_sha256:");
+                            ImGui::SameLine();
+                            ImGui::PushStyleColor(ImGuiCol_Text,
+                                ImVec4(0.85f, 0.80f, 0.60f, 1.0f));
+                            ImGui::PushItemWidth(-1);
+                            char tmp_id[80];
+                            snprintf(tmp_id, sizeof(tmp_id), "##sha_%s",
+                                     r->dir_name);
+                            // Cast away const — InputText with ReadOnly is
+                            // display-only, doesn't mutate.
+                            ImGui::InputText(tmp_id,
+                                              (char*)v.scaler_sha256,
+                                              sizeof(v.scaler_sha256),
+                                              ImGuiInputTextFlags_ReadOnly);
+                            ImGui::PopItemWidth();
+                            ImGui::PopStyleColor();
+                        }
+                    }
+                    // v5.9.2b inference cfg block
+                    if (v.has_inference_cfg) {
+                        ImGui::Separator();
+                        ImGui::TextColored(FoxmlColors::comment,
+                                           "Recorded cfg at training time:");
+                        ImGui::Text("  confidence_threshold_scale:       %.4g",
+                                    v.inference_cfg_confidence_threshold_scale);
+                        ImGui::Text("  barrier_gate_enabled:             %d",
+                                    v.inference_cfg_barrier_gate_enabled);
+                        ImGui::Text("  confidence_hard_block_threshold:  %.4g",
+                                    v.inference_cfg_confidence_hard_block_threshold);
+                        ImGui::Text("  held_out_fraction:                %.3f",
+                                    v.inference_cfg_held_out_fraction);
+                        ImGui::Text("  freshness_tau:                    %.1f",
+                                    v.inference_cfg_freshness_tau);
+                        if (v.has_inference_cfg_bandit) {
+                            ImGui::Text("  bandit_blend_ratio:               %.4g",
+                                        v.inference_cfg_bandit_blend_ratio);
+                        }
+                        if (v.has_inference_cfg_fees) {
+                            ImGui::Text("  fee_rate_maker / taker:           %.5f / %.5f",
+                                        v.inference_cfg_fee_rate_maker,
+                                        v.inference_cfg_fee_rate_taker);
+                        }
+                    }
+                    ImGui::TreePop();
+                }
+            }
         }
     }
 
@@ -1477,6 +1578,12 @@ struct TrainingPanelState {
     float train_label_stddev;
     int positive_count, negative_count;
     char status_msg[128];
+    // v5.9.5d — scaler SHA-256 hex (64 chars + null) for GUI display.
+    // Populated by train_model_worker_fn post-FeatureStandardizer_Persist;
+    // empty when scaler not persisted. Single-writer (worker) → reader (UI
+    // render after tm_complete=1 flips). Pre-v5.9.5d the SHA was only
+    // logged via stderr — operator couldn't see it in foxml_suite.
+    char scaler_sha256_hex[80];
     // walk-forward validation (Phase 6A — A7 GUI rework)
     int wf_n_splits;          // number of temporal folds (default 5)
     int wf_horizon_ticks;     // label horizon for purge gap calc (default 1000)
@@ -1926,6 +2033,17 @@ static inline void *train_model_worker_fn(void *arg) {
                                 "[train] scaler_sha256=%s — pass to stamp tool to bind\n",
                         scaler_path, scaler_sha256_hex);
             }
+            // v5.9.5d — copy SHA into shared state for GUI display.
+            // MUST happen before tm_complete=1 flag flip below; worker→UI
+            // ordering follows the v5.9.0c pattern (single-writer worker
+            // publishes via flag, UI reads after flag observed). x86
+            // aligned-byte writes are atomic; the volatile completion flag
+            // forces no-reordering at the compiler level.
+            size_t hex_n = strnlen(scaler_sha256_hex, sizeof(scaler_sha256_hex));
+            if (hex_n >= sizeof(state->scaler_sha256_hex))
+                hex_n = sizeof(state->scaler_sha256_hex) - 1;
+            memcpy(state->scaler_sha256_hex, scaler_sha256_hex, hex_n);
+            state->scaler_sha256_hex[hex_n] = '\0';
         } else {
             // Gap G atomic contract: persist failure must not propagate to
             // stamp claiming scaler. Worker doesn't emit stamps directly,
@@ -1963,16 +2081,22 @@ static inline void *train_model_worker_fn(void *arg) {
     }
 
     state->model_trained = true;
+    // v5.9.5d — status line ends with "next: Run Full Validation to
+    // auto-stamp" so operator knows the workflow continuation. Train Model
+    // alone produces an unstamped model (no held-out metric → no
+    // generalization gap → engine refuses load in strict mode); Run Full
+    // Validation produces the stamp.
+    const char *next_hint = " — next: Run Full Validation to auto-stamp";
     if (is_regression) {
         snprintf(state->status_msg, sizeof(state->status_msg),
-                 "Model saved to %s (MSE: %.6f, corr: %.4f)%s",
+                 "Model saved to %s (MSE: %.6f, corr: %.4f)%s%s",
                  snap_model_path, state->train_mse, state->train_correlation,
-                 scaler_persisted ? " [+scaler]" : "");
+                 scaler_persisted ? " [+scaler]" : "", next_hint);
     } else {
         snprintf(state->status_msg, sizeof(state->status_msg),
-                 "Model saved to %s (accuracy: %.1f%%)%s",
+                 "Model saved to %s (accuracy: %.1f%%)%s%s",
                  snap_model_path, state->train_accuracy,
-                 scaler_persisted ? " [+scaler]" : "");
+                 scaler_persisted ? " [+scaler]" : "", next_hint);
     }
 #endif  // USE_XGBOOST
 
@@ -2406,6 +2530,25 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     if (state->model_trained) {
         ImGui::Separator();
         ImGui::TextColored(ImVec4(0.55f, 0.76f, 0.51f, 1.0f), "%s", state->status_msg);
+        // v5.9.5d — surface scaler SHA-256 to operator (was stderr-only).
+        // Wraps to next line; selectable so operator can copy. Hidden when
+        // empty (no scaler persisted; degenerate-features case).
+        if (state->scaler_sha256_hex[0]) {
+            ImGui::TextColored(FoxmlColors::comment, "scaler_sha256:");
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.80f, 0.60f, 1.0f));
+            // InputText with ReadOnly = selectable + copyable single-line.
+            ImGui::PushItemWidth(-1);
+            ImGui::InputText("##scaler_sha", state->scaler_sha256_hex,
+                              sizeof(state->scaler_sha256_hex),
+                              ImGuiInputTextFlags_ReadOnly);
+            ImGui::PopItemWidth();
+            ImGui::PopStyleColor();
+            ImGui::SetItemTooltip("SHA-256 of the persisted .scaler sidecar file.\n"
+                                  "Run Full Validation auto-binds via in-process emit\n"
+                                  "(v5.9.5b). For manual stamping via tools/stamp_model.sh,\n"
+                                  "pass --scaler-sha256=<this value> + --feature-scaler-present=1.");
+        }
         if (LabelType_IsRegression(state->label_type)) {
             ImGui::Text("Train MSE: %.6f  |  Pearson r: %.4f  (in-sample)",
                          state->train_mse, state->train_correlation);
