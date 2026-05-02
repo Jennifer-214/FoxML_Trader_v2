@@ -36,6 +36,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cmath>  // v5.9.0: isnan/isinf for NaN-fold validation in Features_PackAll
 #include "../FixedPoint/FixedPointN.hpp"
 #include "RollingStats.hpp"
 #include "../Strategies/RegimeDetector.hpp"  // RegimeSignals<F>
@@ -408,18 +409,52 @@ inline uint64_t FEATURE_REGISTRY_HASH() {
 // invokes each enabled compute fn, writes float result into out[i].
 //
 // `out` must have capacity >= NUM_REGISTERED_FEATURES.
-// Returns the number of features written.
+//
+// Returns:
+//   N (>= 0) — number of features written, all valid floats
+//   -1       — NaN/Inf detected at index N. Caller MUST treat this as
+//              validation failure: zero `out`, log, skip Model_Predict.
+//              Single source of truth for feature validation; do NOT
+//              re-validate at call sites.
 //
 // Equivalence test in controller_test.cpp pins out[i] == legacy
 // ModelFeatures_Pack buf[i] for ALL 34 indices — load-bearing regression
 // guard against future divergence in either path.
+//
+// v5.9.0 — NaN/Inf validation FOLDED into the packer. Prevents silent
+// passthrough of garbage to XGBoost (which can produce NaN output → gate
+// decision evaluates false silently → no entry → operator-blind miss).
+//
+// Two-layer check:
+//
+// (1) `FPN_IsValidFinite<F>(val_fpn)` — branchless integer magnitude check.
+//     Catches FPN_DivNoAssert(x, 0) saturation (FPN_MAX, ~3.4e38 in float
+//     space) AND any FPN value > 1e15 (no legitimate feature is this
+//     large). FPN itself can't be NaN/Inf — it's an integer — so the
+//     float-side check below misses "FPN garbage in normal-finite range."
+//
+// (2) `std::isnan(_v) || std::isinf(_v)` — float-side post-conversion
+//     check. Catches the FPN→float saturation case (FPN_MAX → +Inf in
+//     float because float max is 3.4e38, equal to FPN<64>'s post-conversion
+//     value). Also catches `FPN_FromDouble(NaN)` paths that propagate
+//     through to the output float.
+//
+// Both layers are mandatory — they cover orthogonal failure modes. Either
+// firing returns -1 sentinel; caller MUST treat as validation failure
+// (zero `out`, log, skip Model_Predict).
+//
+// See DOCS/CLAUDE_ML_INVARIANTS.md "Features_PackAll validates output".
 //======================================================================================================
 template <unsigned F>
 inline int Features_PackAll(const FeatureComputeCtx<F>* ctx, float* out) {
     int n = 0;
 #define X(id, name, version, enabled, fn, note) \
     if ((enabled)) { \
-        out[FEATURE_##id] = (float)FPN_ToDouble(fn(ctx)); \
+        FPN<F> _fpn = fn(ctx); \
+        if (!FPN_IsValidFinite(_fpn)) { return -1; } \
+        float _v = (float)FPN_ToDouble(_fpn); \
+        if (std::isnan(_v) || std::isinf(_v)) { return -1; } \
+        out[FEATURE_##id] = _v; \
         ++n; \
     }
     FOREACH_FEATURE(X)

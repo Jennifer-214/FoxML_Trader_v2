@@ -197,6 +197,31 @@ static inline int ValidationSplit_Generate(PurgedSplit *folds, int total_samples
                 horizon_ticks, buffer_ticks);
     }
 
+    // v5.9.0 — post-generation invariant check. The construction logic
+    // above sets train_end = test_start - purge_gap, but a future bug
+    // could silently overlap train/val (look-ahead bias in walk-forward).
+    // Audit doc finding V5_9_AUDIT-#8. Belt-and-suspenders: scan every
+    // valid fold + invalidate any that violates the purge invariant.
+    int invalidated_post_check = 0;
+    for (int i = 0; i < n_splits; ++i) {
+        PurgedSplit *f = &folds[i];
+        if (!f->valid) continue;
+        // Invariant: train_end + purge_gap <= test_start.
+        // (purge_gap zone between train and test has no labels.)
+        if (f->train_end + f->purge_gap > f->test_start) {
+            fprintf(stderr, "[validation] FATAL: fold %d/%d violates purge invariant "
+                    "(train_end=%d + purge_gap=%d > test_start=%d) — invalidating fold\n",
+                    i + 1, n_splits, f->train_end, f->purge_gap, f->test_start);
+            f->valid = 0;
+            invalidated_post_check++;
+            valid_count--;
+        }
+    }
+    if (invalidated_post_check > 0) {
+        fprintf(stderr, "[validation] post-check invalidated %d fold(s) — "
+                "%d remain valid\n", invalidated_post_check, valid_count);
+    }
+
     return valid_count;
 }
 

@@ -719,6 +719,29 @@ template <unsigned F> inline FPN<F> FPN_Abs(FPN<F> value) {
     return result;
 }
 
+// v5.9.0 — FPN garbage / saturation sanity check.
+// FPN itself can't be NaN/Inf (integer type), but FPN_DivNoAssert(x, 0)
+// saturates to FPN_MAX silently (per CLAUDE_INVARIANTS.md), and
+// FPN_FromDouble<F>(NaN/Inf) is undefined behavior that can produce
+// integer values in any range. Float-side std::isnan/isinf catches
+// the cases where FPN→float conversion produces NaN/Inf, but a
+// "wrong but float-finite" FPN value would slip through.
+//
+// FPN_IsValidFinite<F>(val) catches that gap with a branchless
+// magnitude check. Threshold 1e15 is a global "no legitimate feature
+// is this large" sanity bound — well above any realistic price/volume
+// /flow value, well below FPN_MAX. Operator-tunable per-feature in
+// the future if needed (see DOCS/CLAUDE_ML_INVARIANTS.md).
+//
+// Returns 1 if |val| < 1e15 (sane), 0 if saturation/garbage suspected.
+// Branchless after FPN_Abs + FPN_LessThan compile down to integer cmp.
+template <unsigned F> inline int FPN_IsValidFinite(FPN<F> value) {
+    // Threshold computed once per type-instantiation (constexpr-eligible
+    // when FPN_FromDouble specializes; otherwise hoisted by the compiler).
+    FPN<F> threshold = FPN_FromDouble<F>(1e15);
+    return FPN_LessThan(FPN_Abs(value), threshold);
+}
+
 template <unsigned F> inline FPN<F> FPN_Sign(FPN<F> value) {
     // branchless: compute +/-1.0, then mask to zero if input is zero
     int is_nonzero                   = !FPN_MagIsZero(value);

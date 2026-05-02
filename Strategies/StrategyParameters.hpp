@@ -69,6 +69,7 @@
 #include "StrategyInterface.hpp"
 
 #include <cstdint>
+#include <cmath>  // v5.9.0: std::isnan/isinf for prediction validation
 
 namespace tt {
 
@@ -662,6 +663,14 @@ inline void ML_BuildParameters(
     ctx.signals       = &sig;
     ctx.short_rolling = rolling;
     int n = Features_PackAll(&ctx, features);
+    // v5.9.0 — NaN/Inf in feature pack → fall through to SimpleDip.
+    // Features_PackAll returns -1 sentinel; never feed garbage to XGBoost.
+    if (n < 0) {
+        fprintf(stderr, "[ML] dispatch: NaN/Inf in feature pack — falling through to SimpleDip\n");
+        SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
+        out->strategy_id = STRATEGY_ML;
+        return;
+    }
 
     // run inference, prefer 3-class barrier model when available
     double prediction = 0.5;   // neutral fallback
@@ -674,27 +683,45 @@ inline void ML_BuildParameters(
         float multi[3] = {0.0f, 0.0f, 0.0f};
         int got = Model_PredictMulti(&zoo->barrier, features, n, multi, 3);
         if (got >= 3) {
-            p_peak     = multi[1];
-            p_valley   = multi[2];
-            // entry signal = "valley imminent" — primary trade trigger
-            prediction = p_valley;
-            have_signal = 1;
+            // v5.9.0 — NaN/Inf in multiclass output → no signal (silent
+            // miss class). XGBoost can return NaN on pathological inputs.
+            if (std::isnan(multi[0]) || std::isinf(multi[0]) ||
+                std::isnan(multi[1]) || std::isinf(multi[1]) ||
+                std::isnan(multi[2]) || std::isinf(multi[2])) {
+                fprintf(stderr, "[ML] dispatch: barrier multi-prediction NaN/Inf — no signal\n");
+            } else {
+                p_peak     = multi[1];
+                p_valley   = multi[2];
+                // entry signal = "valley imminent" — primary trade trigger
+                prediction = p_valley;
+                have_signal = 1;
+            }
         } else if (got == 1) {
             // model was actually binary (mis-labeled as barrier role) — still usable
-            prediction = multi[0];
+            if (std::isnan(multi[0]) || std::isinf(multi[0])) {
+                fprintf(stderr, "[ML] dispatch: barrier-as-binary prediction NaN/Inf — no signal\n");
+            } else {
+                prediction = multi[0];
+                p_peak     = 1.0 - prediction;
+                p_valley   = prediction;
+                have_signal = 1;
+            }
+        }
+    } else if (zoo->loaded_mask & CORE_MODEL_BUY_SIGNAL) {
+        // legacy single-binary: complementary interpretation
+        double pred_raw = (double)Model_Predict(&zoo->buy_signal, features, n);
+        if (std::isnan(pred_raw) || std::isinf(pred_raw)) {
+            fprintf(stderr, "[ML] dispatch: buy_signal prediction NaN/Inf — no signal\n");
+        } else {
+            prediction = pred_raw;
             p_peak     = 1.0 - prediction;
             p_valley   = prediction;
             have_signal = 1;
         }
-    } else if (zoo->loaded_mask & CORE_MODEL_BUY_SIGNAL) {
-        // legacy single-binary: complementary interpretation
-        prediction = Model_Predict(&zoo->buy_signal, features, n);
-        p_peak     = 1.0 - prediction;
-        p_valley   = prediction;
-        have_signal = 1;
     }
 
-    // if inference failed, fall back to SimpleDip
+    // if inference failed (no model loaded, or NaN/Inf prediction),
+    // fall back to SimpleDip
     if (!have_signal) {
         SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
         out->strategy_id = STRATEGY_ML;

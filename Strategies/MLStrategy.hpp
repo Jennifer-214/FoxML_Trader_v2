@@ -22,6 +22,7 @@
 #include "../ML_Headers/ModelInference.hpp"
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
 #include "../CoreFrameworks/OrderGates.hpp"
+#include <cmath>  // v5.9.0: std::isnan/isinf for prediction validation
 
 //======================================================================================================
 // [STATE]
@@ -117,9 +118,22 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
     ctx.signals       = signals;
     ctx.short_rolling = rolling;
     int n = Features_PackAll(&ctx, state->feature_buf);
+    // v5.9.0 — NaN/Inf in feature pack → no entry (Features_PackAll returns
+    // -1 sentinel; never pass garbage to XGBoost, never silently entry).
+    if (n < 0) {
+        fprintf(stderr, "[ML] BuySignal: NaN/Inf in feature pack — skipping prediction\n");
+        return conds;  // already zero-initialized above; no buy signal
+    }
 
     // run inference
     float prediction = Model_Predict(&state->buy_model, state->feature_buf, n);
+    // v5.9.0 — NaN/Inf in prediction → no entry. XGBoost can return NaN on
+    // pathological inputs; `prediction > threshold` evaluates false on NaN
+    // (silent miss). Guard explicitly + log.
+    if (std::isnan(prediction) || std::isinf(prediction)) {
+        fprintf(stderr, "[ML] BuySignal: prediction NaN/Inf — skipping entry\n");
+        return conds;
+    }
     state->last_prediction = FPN_FromDouble<F>((double)prediction);
 
     // cast config to access threshold

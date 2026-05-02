@@ -135,6 +135,17 @@ if [[ "$FORMAT_VERSION" -ge 5 && -n "$ENGINE_VERSION" ]]; then
 "
 fi
 
+# v5.9.0 — append stamp_format_version when format >= 5. Schema version of
+# the stamp body itself (distinct from model_format_version which versions
+# the model file shape). Bumped on future stamp body schema changes.
+# Verifier records the value; future strict mode could reject unknown
+# versions. MUST stay in sync with stamp_write_for_model in
+# ML_Headers/ModelInference.hpp — bash-parity regression test pins this.
+if [[ "$FORMAT_VERSION" -ge 5 ]]; then
+    CANONICAL="${CANONICAL}stamp_format_version=1
+"
+fi
+
 # 5. HMAC-SHA256(secret, canonical_body)
 if [[ -z "$SECRET" ]]; then
     # Empty secret = dev mode (verify_model_stamp accepts any sig).

@@ -440,12 +440,28 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             // legacy ModelFeatures_Pack — load-bearing for train-serve parity
             // since this matrix feeds model training and the live engine
             // packs the same features at serve time.
+            //
+            // v5.9.0 — NaN/Inf in feature pack → SKIP this sample. Don't
+            // include garbage in the training matrix; would corrupt model
+            // weights. Features_PackAll returns -1 sentinel on validation
+            // failure.
             {
                 FeatureComputeCtx<BACKTEST_FP> ctx{};
                 ctx.signals       = &sig;
                 ctx.short_rolling = d->rolling;
-                Features_PackAll(&ctx,
+                int n = Features_PackAll(&ctx,
                     &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES]);
+                if (n < 0) {
+                    // Skip this sample entirely — don't bump sample_count.
+                    // Per-feature breakdown logged once (rate-limit by global
+                    // counter to avoid spam during pathological data).
+                    static int nan_skip_warn_emitted = 0;
+                    if (!nan_skip_warn_emitted) {
+                        fprintf(stderr, "[backtest] WARN: NaN/Inf in feature pack at tick %d — skipping sample (further skips silent)\n", tick_index);
+                        nan_skip_warn_emitted = 1;
+                    }
+                    return;  // exit the lambda; this sample dropped
+                }
             }
             fc->results->sample_tick_indices[fc->results->sample_count] = (uint64_t)tick_index;
             fc->results->sample_prices[fc->results->sample_count] = FPN_ToDouble(tk.price);

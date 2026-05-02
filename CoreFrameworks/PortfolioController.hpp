@@ -34,6 +34,7 @@
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/WelfordStats.hpp"
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
+#include <cmath>                               // v5.9.0: std::isnan/isinf for prediction validation
 #include "../Strategies/MeanReversion.hpp"
 #include "../Strategies/Momentum.hpp"
 #include "../Strategies/SimpleDip.hpp"
@@ -1625,14 +1626,23 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
 
     // Mode A: regime model enrichment — add model_score to classification.
     // v5.8.1b: registry-driven feature pack.
+    // v5.9.0: NaN/Inf in feature pack OR prediction → leave model_score=0
+    //         (no enrichment this cycle, regime classifier uses its base
+    //         scores). Don't propagate garbage into the regime decision.
     if (Model_IsLoaded(&ctrl->regime_model)) {
       float feat_buf[MODEL_MAX_FEATURES];
       FeatureComputeCtx<F> ctx{};
       ctx.signals       = &signals;
       ctx.short_rolling = &ctrl->rolling;
       int n = Features_PackAll(&ctx, feat_buf);
-      signals.model_score = FPN_FromDouble<F>(
-          (double)Model_Predict(&ctrl->regime_model, feat_buf, n));
+      if (n >= 0) {
+        double pred = (double)Model_Predict(&ctrl->regime_model, feat_buf, n);
+        if (!std::isnan(pred) && !std::isinf(pred)) {
+          signals.model_score = FPN_FromDouble<F>(pred);
+        }
+        // else: leave model_score at zero-init (no enrichment)
+      }
+      // else: NaN/Inf in pack — leave model_score at zero-init
     }
 
     ctrl->last_signals = signals; // cache for MLStrategy_BuySignal
@@ -1781,6 +1791,9 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // BARRIER GATE: block entries before predicted price peaks
   // uses last_signals (already computed in regime detection above).
   // v5.8.1b: registry-driven feature pack.
+  // v5.9.0: NaN/Inf in feature pack OR prediction → skip the gate
+  //         (don't block on garbage; safer to defer to lower-level
+  //         gates that have valid inputs).
   if (ctrl->config.barrier_gate_enabled && !FPN_IsZero(ctrl->buy_conds.price)
       && Model_IsLoaded(&ctrl->peak_model)) {
     float features[MODEL_MAX_FEATURES];
@@ -1788,13 +1801,19 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     ctx.signals       = &ctrl->last_signals;
     ctx.short_rolling = &ctrl->rolling;
     int n = Features_PackAll(&ctx, features);
-    double p_peak = Model_Predict(&ctrl->peak_model, features, n);
-    double p_valley = Model_IsLoaded(&ctrl->valley_model)
-        ? Model_Predict(&ctrl->valley_model, features, n) : 0.5;
-    BarrierGateResult bg = BarrierGate_Compute(p_peak, p_valley);
-    if (bg.blocked) {
-      Gate_Zero(&ctrl->buy_conds, 0);
-      ctrl->gate_reason = GATE_REASON_BARRIER;
+    // n >= 0 only when feature pack is NaN/Inf-free; otherwise skip gate.
+    if (n >= 0) {
+      double p_peak = (double)Model_Predict(&ctrl->peak_model, features, n);
+      double p_valley = Model_IsLoaded(&ctrl->valley_model)
+          ? (double)Model_Predict(&ctrl->valley_model, features, n) : 0.5;
+      if (!std::isnan(p_peak) && !std::isinf(p_peak) &&
+          !std::isnan(p_valley) && !std::isinf(p_valley)) {
+        BarrierGateResult bg = BarrierGate_Compute(p_peak, p_valley);
+        if (bg.blocked) {
+          Gate_Zero(&ctrl->buy_conds, 0);
+          ctrl->gate_reason = GATE_REASON_BARRIER;
+        }
+      }
     }
   }
 

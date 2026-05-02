@@ -598,6 +598,10 @@ struct ModelStampResult {
     double   gap_threshold;
     uint64_t feature_registry_hash;  // v5.8.1a: 0 if absent (old stamps)
     char     engine_version[16];     // v5.8.6: SemVer string at training time, "" if absent
+    int      stamp_format_version;   // v5.9.0: schema version of the stamp body itself.
+                                     //         0 if absent (v5.8.x and older).
+                                     //         1 = current (v5.9.0+).
+                                     //         Verifier rejects unknown versions in strict mode.
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -643,6 +647,7 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     r.gap_threshold = gap_threshold;
     r.feature_registry_hash = 0;
     r.engine_version[0] = '\0';
+    r.stamp_format_version = 0;  // v5.9.0: 0 = absent (legacy stamp)
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -720,6 +725,12 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 if (vl >= sizeof(r.engine_version)) vl = sizeof(r.engine_version) - 1;
                 memcpy(r.engine_version, val, vl);
                 r.engine_version[vl] = '\0';
+            } else if (strcmp(key, "stamp_format_version") == 0) {
+                // v5.9.0: stamp body schema version. 0 means absent (legacy);
+                // current = 1. Future schema changes bump this. Verifier
+                // could reject unknown versions in strict mode (deferred to
+                // a future ship; for now we just record the value).
+                r.stamp_format_version = atoi(val);
             }
         }
         line = strtok_r(nullptr, "\n", &save);
@@ -902,6 +913,12 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     //    Each line ends with \n.
     int has_hash    = (format_version >= 5 && feature_registry_hash != 0);
     int has_engver  = (format_version >= 5 && engine_version && engine_version[0] != '\0');
+    // v5.9.0: stamp_format_version=1 emitted whenever format_version >= 5
+    // (the v5.8.1a+ wire-format era — the era that has feature_registry_hash
+    // and engine_version). Schema version of the stamp body itself,
+    // distinct from MODEL_FORMAT_VERSION (which versions the model file
+    // shape, not the stamp). Bumped on future stamp body schema changes.
+    int has_stamp_ver = (format_version >= 5);
     char canonical[2048];
     int n = snprintf(canonical, sizeof(canonical),
         "model_format_version=%d\n"
@@ -922,6 +939,11 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     if (has_engver && n > 0 && (size_t)n < sizeof(canonical)) {
         int wrote = snprintf(canonical + n, sizeof(canonical) - n,
             "engine_version=%s\n", engine_version);
+        if (wrote > 0) n += wrote;
+    }
+    if (has_stamp_ver && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "stamp_format_version=1\n");
         if (wrote > 0) n += wrote;
     }
 
