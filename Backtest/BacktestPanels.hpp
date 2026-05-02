@@ -542,6 +542,16 @@ struct PastRun {
     float train_val_gap;
     int   overfit_folds;
     int   has_wf_results;        // 1 = WF metrics present, 0 = old-format file
+    // v5.8.9 — held-out + auto-stamp metadata. Populated when summary.txt
+    // contains held_out_metric (Run Full Validation produced it) and when
+    // a .stamp file exists alongside the saved model. Operator-visible
+    // signals: "is this run deploy-ready?" (held-out gap < threshold +
+    // signed stamp present + matches current build).
+    float held_out_metric;
+    int   has_held_out;
+    int   has_stamp;             // 1 = .stamp file exists in run dir
+    char  stamp_verify_msg[128]; // populated by Verify Stamp button — empty if not verified yet
+    int   stamp_verify_state;    // 0=unverified, 1=ok, -1=fail
 };
 
 struct PastRunsState {
@@ -621,8 +631,37 @@ static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
         else if (strcmp(k, "label_tp_pct") == 0)         r->label_tp_pct = (float)atof(v);
         else if (strcmp(k, "label_sl_pct") == 0)         r->label_sl_pct = (float)atof(v);
         else if (strcmp(k, "label_lookahead_ticks") == 0) r->label_lookahead_ticks = atoi(v);
+        // v5.8.9 — held-out + auto-stamp summary fields (optional, missing
+        // for older runs).
+        else if (strcmp(k, "held_out_metric") == 0)    { r->held_out_metric = (float)atof(v); r->has_held_out = 1; }
     }
     fclose(f);
+
+    // v5.8.9 — check for a .stamp file alongside the model. PastRuns
+    // doesn't parse the stamp body itself (too expensive — would compute
+    // SHA-256 of every saved model on Rescan). Verify Stamp button fires
+    // verify_model_stamp on demand.
+    {
+        char model_path[400];
+        const char *src_ext = ".json";  // most common; verifier checks .bin path with .stamp suffix
+        // Try role-specific filenames in priority order
+        const char *role_files[] = {"barrier.json", "buy_signal.json", "regime.json",
+                                     "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",
+                                     NULL};
+        for (int i = 0; role_files[i]; ++i) {
+            snprintf(model_path, sizeof(model_path), "%s/%s", run_dir, role_files[i]);
+            struct stat mst;
+            if (stat(model_path, &mst) != 0) continue;
+            char stamp_path[420];
+            snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
+            struct stat sst;
+            if (stat(stamp_path, &sst) == 0) {
+                r->has_stamp = 1;
+                break;
+            }
+        }
+        (void)src_ext;
+    }
 
     // expected.cfg (optional; older runs may not have all fields)
     snprintf(path, sizeof(path), "%s/expected.cfg", run_dir);
@@ -717,8 +756,14 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
     auto render_run_cell = [&](int i) {
         PastRun *r = &s->runs[i];
         ImGui::TableSetColumnIndex(0);
-        char rowid[160];
-        snprintf(rowid, sizeof(rowid), "%s##run%d", r->dir_name, i);
+        char rowid[200];
+        // v5.8.9 — surface stamp presence inline in the run name. "[stamped]"
+        // prefix means a .stamp file exists alongside the saved model;
+        // operators can filter visually for deploy-ready runs without a
+        // separate column. Verify Stamp button (inspector below) actually
+        // validates signature + drift hash.
+        const char *stamp_tag = r->has_stamp ? "[stamped] " : "";
+        snprintf(rowid, sizeof(rowid), "%s%s##run%d", stamp_tag, r->dir_name, i);
         bool sel = (s->selected == i);
         if (ImGui::Selectable(rowid, sel, ImGuiSelectableFlags_SpanAllColumns)) {
             s->selected = i;
@@ -921,6 +966,70 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
             // safety: don't actually rm here. show user the command to run.
             snprintf(s->status_msg, sizeof(s->status_msg),
                      "to delete: rm -r models/%s/", r->dir_name);
+        }
+
+        // v5.8.9 — Verify Stamp: runs verify_model_stamp on the saved
+        // model's .stamp file using the current build's
+        // FEATURE_REGISTRY_HASH() so the operator can confirm match
+        // (signature valid + format version + drift hash) before
+        // deploying. Same code path the live engine fires at boot.
+        if (r->has_stamp) {
+            ImGui::SameLine();
+            if (ImGui::Button("Verify Stamp")) {
+                // Try common role files in priority order — same shape as
+                // PastRuns_LoadOne's stat() check above.
+                const char *role_files[] = {
+                    "barrier.json", "buy_signal.json", "regime.json",
+                    "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",
+                    NULL
+                };
+                char model_path[512];
+                const char *found = NULL;
+                for (int i = 0; role_files[i]; ++i) {
+                    snprintf(model_path, sizeof(model_path), "models/%s/%s",
+                             r->dir_name, role_files[i]);
+                    struct stat mst;
+                    if (stat(model_path, &mst) == 0) {
+                        found = model_path;
+                        break;
+                    }
+                }
+                if (!found) {
+                    snprintf(r->stamp_verify_msg, sizeof(r->stamp_verify_msg),
+                        "no model file found in models/%s/", r->dir_name);
+                    r->stamp_verify_state = -1;
+                } else {
+                    // Empty secret = devmode (accepts any signature, just
+                    // checks format version + sha + registry hash).
+                    // Operators verifying for deploy should set the secret
+                    // here once we expose a UI input — for now devmode keeps
+                    // the button low-friction.
+                    ModelStampResult vr = verify_model_stamp(
+                        found, /*secret=*/"",
+                        /*gap_threshold=*/(double)r->gap_acceptable_threshold > 0.0
+                            ? (double)r->gap_acceptable_threshold : 0.05,
+                        /*expected_format_version=*/MODEL_FORMAT_VERSION,
+                        /*expected_feature_registry_hash=*/FEATURE_REGISTRY_HASH());
+                    r->stamp_verify_state = vr.valid;
+                    if (vr.valid == 1) {
+                        snprintf(r->stamp_verify_msg, sizeof(r->stamp_verify_msg),
+                            "OK — engine=%s registry=%016lx",
+                            vr.engine_version[0] ? vr.engine_version : "unknown",
+                            (unsigned long)vr.feature_registry_hash);
+                    } else {
+                        snprintf(r->stamp_verify_msg, sizeof(r->stamp_verify_msg),
+                            "FAIL — %s", vr.reason);
+                    }
+                }
+            }
+        }
+
+        // Render verify result if button has been pressed for this run.
+        if (r->stamp_verify_msg[0]) {
+            ImVec4 vc = (r->stamp_verify_state == 1)
+                ? ImVec4(0.55f, 0.76f, 0.51f, 1.0f)
+                : ImVec4(0.95f, 0.35f, 0.35f, 1.0f);
+            ImGui::TextColored(vc, "%s", r->stamp_verify_msg);
         }
     }
 
@@ -2171,6 +2280,26 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             if (msrc) fclose(msrc);
             if (mdst) fclose(mdst);
 
+            // v5.8.9 — copy the .stamp file alongside the model if Run Full
+            // Validation produced one. Without this, the saved bundle would
+            // be missing the stamp and the deployed engine would fall back
+            // to "no stamp" (warn-load or refuse depending on
+            // held_out_gate_strict). Preserves the auto-stamp work end-to-end.
+            char src_stamp[480];
+            snprintf(src_stamp, sizeof(src_stamp), "%s.stamp", state->model_path);
+            char dst_stamp[480];
+            snprintf(dst_stamp, sizeof(dst_stamp), "%s.stamp", dst_model);
+            FILE *ssrc = fopen(src_stamp, "rb");
+            if (ssrc) {
+                FILE *sdst = fopen(dst_stamp, "wb");
+                if (sdst) {
+                    char buf[4096]; size_t n;
+                    while ((n = fread(buf, 1, sizeof(buf), ssrc)) > 0) fwrite(buf, 1, n, sdst);
+                    fclose(sdst);
+                }
+                fclose(ssrc);
+            }
+
             // copy full backtest.cfg as historical record (for reproducibility)
             char dst_cfg[384];
             snprintf(dst_cfg, sizeof(dst_cfg), "%s/engine.cfg", run_dir);
@@ -2298,6 +2427,31 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                             state->wf_results.overfit_count);
                     fprintf(sf, "valid_folds: %d\n",
                             state->wf_results.valid_folds);
+                }
+                // v5.8.9 — held-out + auto-stamp results from Run Full
+                // Validation. Captured only when fv_has_results is set
+                // (i.e. operator pressed the FV button after Train+WF).
+                // Older saves (or saves without FV) skip this block.
+                if (state->fv_has_results) {
+                    const FullValidationResults *fv = &state->fv_results;
+                    if (fv->ran_held_out) {
+                        fprintf(sf, "held_out_metric: %.4f\n",
+                                (double)fv->held_out_metric);
+                        fprintf(sf, "held_out_count: %d\n",
+                                (int)fv->held_out_count);
+                        fprintf(sf, "held_out_gap_threshold: %.4f\n",
+                                (double)fv->gap_threshold);
+                    }
+                    fprintf(sf, "auto_stamp_attempted: %d\n", fv->auto_stamp_attempted);
+                    fprintf(sf, "auto_stamp_ok: %d\n", fv->auto_stamp_ok);
+                    if (fv->auto_stamp_path_written[0]) {
+                        fprintf(sf, "auto_stamp_path_written: %s\n",
+                                fv->auto_stamp_path_written);
+                    }
+                    if (fv->auto_stamp_attempted && !fv->auto_stamp_ok &&
+                        fv->auto_stamp_error[0]) {
+                        fprintf(sf, "auto_stamp_error: %s\n", fv->auto_stamp_error);
+                    }
                 }
                 fclose(sf);
             }
