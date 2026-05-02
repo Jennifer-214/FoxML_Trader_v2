@@ -382,3 +382,28 @@ confidence_enabled=0            # dynamic buy threshold from prediction quality 
 # Example (uncomment to enable):
 # health_log_path=logs/foxml-health.jsonl
 # health_log_level=0
+
+#==============================================================================
+# HELD-OUT VALIDATION + STAMP-BASED MODEL ATTESTATION (v5.2.0+, refined v5.8.6+)
+#==============================================================================
+# held_out_fraction: portion of training data reserved as final-test set.
+#   Code refuses access during training/tuning; explicit unlock required.
+# gap_acceptable_threshold: |WF mean - held_out| > this = poor generalization.
+#   Used by foxml_suite's "Run Full Validation" button to accept or refuse
+#   auto-stamping a trained model.
+held_out_fraction=0.20
+gap_acceptable_threshold=0.05
+
+# Held-out gate (v5.2.0): refuse to load a .bin without a valid .stamp sibling.
+# v5.8.6 extends this gate to also catch feature-registry-hash drift (model
+# trained against a different FOREACH_FEATURE registry than current build).
+# Defaults preserve back-compat with un-stamped models.
+held_out_gate_strict=0          # 0=warn-only, 1=refuse load on stamp failure, -1=skip
+held_out_stamp_secret=          # HMAC-SHA256 secret. Empty = devmode (signs but accepts any sig)
+
+# Auto-stamp on held-out completion (v5.3.2 + v5.8.7).
+# When 1, foxml_suite's "Run Full Validation" button writes a signed stamp
+# alongside the trained model file. Stamp body embeds engine_version +
+# feature_registry_hash so the live engine can detect drift at load time.
+# Default 0 = manual stamping via tools/stamp_model.sh.
+auto_stamp_on_held_out=0

@@ -1363,6 +1363,22 @@ struct TrainingPanelState {
     // save run (bundles config + model for deployment)
     char run_name[64];
     char save_msg[128];
+    // v5.8.7 — Full Validation (held-out + auto-stamp). Replaces the
+    // hand-wired multi-button workflow with a single integrated path
+    // that exercises Backtest_RunFullValidation, which is the function
+    // carrying the v5.8.6 auto-stamp wiring (FEATURE_REGISTRY_HASH +
+    // engine_version embedded in stamp body).
+    volatile int fv_running;
+    volatile int fv_progress;
+    volatile int fv_cancel;
+    volatile int fv_complete;
+    pthread_t fv_tid;
+    FullValidationResults fv_results;
+    bool fv_has_results;
+    char fv_auto_stamp_secret[128];   // HMAC secret (empty = devmode, signs but accepts any sig)
+    float fv_held_out_fraction;       // 0.05 .. 0.30; clamped by HeldOutSplit_Make
+    float fv_gap_threshold;           // gap threshold for stamp accept/refuse
+    char fv_status_msg[256];          // post-run summary + auto-stamp result
 };
 
 static inline void TrainingPanel_Init(TrainingPanelState *state) {
@@ -1404,6 +1420,18 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->wf_complete = 0;
     state->wf_has_results = false;
     memset(&state->wf_results, 0, sizeof(state->wf_results));
+    // v5.8.7 — full validation defaults (mirrors the cfg defaults so the
+    // suite UI is usable out-of-the-box without editing engine.cfg).
+    state->fv_running = 0;
+    state->fv_progress = 0;
+    state->fv_cancel = 0;
+    state->fv_complete = 0;
+    state->fv_has_results = false;
+    memset(&state->fv_results, 0, sizeof(state->fv_results));
+    state->fv_auto_stamp_secret[0] = '\0';   // devmode by default
+    state->fv_held_out_fraction = 0.20f;      // matches HELDOUT_FRACTION default
+    state->fv_gap_threshold = 0.05f;          // matches gap_acceptable_threshold default
+    state->fv_status_msg[0] = '\0';
 }
 
 // walk-forward worker thread
@@ -1427,6 +1455,79 @@ static inline void *walkforward_worker_fn(void *arg) {
     state->wf_has_results = true;
     state->wf_complete = 1;
     state->wf_running = 0;
+    return NULL;
+}
+
+// v5.8.7 — full-validation worker thread. Mirrors walkforward_worker_fn but
+// calls Backtest_RunFullValidation, which carries the v5.8.6 auto-stamp
+// wiring (FEATURE_REGISTRY_HASH + engine_version embedded in stamp body).
+struct FullValidationWorkerArgs {
+    TrainingPanelState *state;
+    const BacktestResults *data;
+};
+
+static inline void *fullvalidation_worker_fn(void *arg) {
+    FullValidationWorkerArgs *args = (FullValidationWorkerArgs *)arg;
+    TrainingPanelState *state = args->state;
+    const BacktestResults *data = args->data;
+    free(args);
+
+    // Build held-out split and unlock immediately. The friction-grade lock
+    // exists to make held-out access a deliberate operator action; the
+    // suite UI's Run Full Validation button is exactly that deliberate
+    // action, so unlocking here is correct.
+    HeldOutSplit split = HeldOutSplit_Make(data->sample_count,
+                                            (double)state->fv_held_out_fraction);
+    char unlock_token[33];
+    memcpy(unlock_token, split.lock_token, sizeof(unlock_token));
+    HeldOutSplit_Unlock(&split, unlock_token);
+
+    // Pre-populate auto-stamp request fields. Backtest_RunFullValidation
+    // gates the stamp_write_for_model call on auto_stamp_path being non-empty
+    // AND ran_held_out=1; both are met here when training succeeds.
+    memset(&state->fv_results, 0, sizeof(state->fv_results));
+    {
+        size_t n = strlen(state->model_path);
+        if (n >= sizeof(state->fv_results.auto_stamp_path))
+            n = sizeof(state->fv_results.auto_stamp_path) - 1;
+        memcpy(state->fv_results.auto_stamp_path, state->model_path, n);
+        state->fv_results.auto_stamp_path[n] = '\0';
+    }
+    {
+        size_t n = strlen(state->fv_auto_stamp_secret);
+        if (n >= sizeof(state->fv_results.auto_stamp_secret))
+            n = sizeof(state->fv_results.auto_stamp_secret) - 1;
+        memcpy(state->fv_results.auto_stamp_secret, state->fv_auto_stamp_secret, n);
+        state->fv_results.auto_stamp_secret[n] = '\0';
+    }
+    state->fv_results.auto_stamp_format_version = 0;  // 0 = use MODEL_FORMAT_VERSION
+
+    Backtest_RunFullValidation(&state->fv_results, data, &split,
+                                state->wf_n_splits, state->wf_horizon_ticks,
+                                state->wf_buffer_ticks, state->wf_min_train,
+                                &state->fv_progress, &state->fv_cancel,
+                                state->label_type, state->fv_gap_threshold);
+
+    // Build a one-line status summary the UI can render in fv_status_msg.
+    if (state->fv_results.auto_stamp_attempted) {
+        if (state->fv_results.auto_stamp_ok) {
+            snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+                "Stamp written: %s", state->fv_results.auto_stamp_path_written);
+        } else {
+            snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+                "Stamp REFUSED: %s", state->fv_results.auto_stamp_error);
+        }
+    } else if (state->fv_results.ran_held_out) {
+        snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+            "Held-out OK; auto-stamp skipped (path empty?)");
+    } else {
+        snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+            "Held-out did not complete (cancel or shape error?)");
+    }
+
+    state->fv_has_results = true;
+    state->fv_complete = 1;
+    state->fv_running = 0;
     return NULL;
 }
 
@@ -2521,6 +2622,128 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             }
             ImGui::EndTable();
             ImGui::TreePop();
+        }
+    }
+
+    //==================================================================
+    // FULL VALIDATION (v5.8.7) — held-out + auto-stamp
+    //==================================================================
+    // The "shippable model" gate: train on [0, trainval_end) with the same
+    // hyperparameters as a WF fold, evaluate on the locked held-out portion,
+    // and (if gap_threshold met) auto-write a signed stamp alongside the
+    // model file. The stamp embeds:
+    //   - feature_registry_hash (FEATURE_REGISTRY_HASH() — current build)
+    //   - engine_version       (ENGINE_VERSION_STRING — current build)
+    //   - model_format_version (MODEL_FORMAT_VERSION — wire format)
+    // so the live engine's CoreModelZoo_TryLoadRole can refuse to load a
+    // model trained against a different feature set or engine version.
+    //
+    // This button is the ONLY UI path that exercises Backtest_RunFullValidation
+    // (and therefore the v5.8.6 auto-stamp wiring). Pre-v5.8.7 the function
+    // existed but was unreachable from the suite.
+    ImGui::Separator();
+    ImGui::Text("Full Validation (held-out + auto-stamp)");
+    ImGui::SetItemTooltip("Trains on [0, trainval_end), evaluates on locked\n"
+                          "held-out tail, and (if held_out gap < threshold)\n"
+                          "auto-writes a signed stamp alongside the model.\n\n"
+                          "Stamp embeds engine_version + feature_registry_hash\n"
+                          "so the live engine refuses to load a model trained\n"
+                          "against a drifted build.");
+    {
+        ImGui::PushItemWidth(-180);
+        ImGui::SliderFloat("Held-out fraction",
+                           &state->fv_held_out_fraction, 0.05f, 0.30f, "%.2f");
+        ImGui::SliderFloat("Gap threshold",
+                           &state->fv_gap_threshold, 0.01f, 0.20f, "%.2f");
+        ImGui::InputText("HMAC secret (empty = devmode)",
+                         state->fv_auto_stamp_secret,
+                         sizeof(state->fv_auto_stamp_secret));
+        ImGui::PopItemWidth();
+        ImGui::SetItemTooltip("Empty secret = dev mode. Stamp is written but the\n"
+                              "verifier accepts any signature on load (with a stderr\n"
+                              "warn). Production: set a non-empty secret in BOTH the\n"
+                              "suite (here) and engine.cfg (held_out_stamp_secret),\n"
+                              "and flip held_out_gate_strict=1 in engine.cfg to refuse\n"
+                              "unsigned loads.");
+
+        const BacktestResults *fv_data = &run_control->results;
+        bool can_fv =
+#ifdef USE_XGBOOST
+            fv_data->sample_count >= 50 && state->model_path[0] != '\0';
+#else
+            false;
+#endif
+
+        if (state->fv_running) {
+            ImGui::ProgressBar(state->fv_progress / 100.0f, ImVec2(-1, 0),
+                               "Full validation...");
+            if (ImGui::Button("Cancel Full Validation"))
+                state->fv_cancel = 1;
+        } else {
+            if (!can_fv) ImGui::BeginDisabled();
+            if (ImGui::Button("Run Full Validation")) {
+                state->fv_running = 1;
+                state->fv_progress = 0;
+                state->fv_cancel = 0;
+                state->fv_complete = 0;
+                state->fv_has_results = false;
+                state->fv_status_msg[0] = '\0';
+
+                FullValidationWorkerArgs *fv_args =
+                    (FullValidationWorkerArgs *)malloc(sizeof(FullValidationWorkerArgs));
+                fv_args->state = state;
+                fv_args->data = fv_data;
+                pthread_create(&state->fv_tid, NULL, fullvalidation_worker_fn, fv_args);
+                pthread_detach(state->fv_tid);
+            }
+            if (!can_fv) {
+                ImGui::EndDisabled();
+#ifndef USE_XGBOOST
+                ImGui::SameLine();
+                ImGui::TextDisabled("Build with -DUSE_XGBOOST=ON");
+#else
+                ImGui::SameLine();
+                if (state->model_path[0] == '\0')
+                    ImGui::TextDisabled("Set Model Path first");
+                else if (fv_data->sample_count < 50)
+                    ImGui::TextDisabled("Need 50+ samples");
+#endif
+            }
+        }
+    }
+
+    if (state->fv_has_results) {
+        const FullValidationResults *fv = &state->fv_results;
+        ImGui::Separator();
+
+        // Held-out metric line — the load-bearing "did the model generalize?"
+        // signal. Color: green when held_out >= wf_mean (no degradation),
+        // yellow when small gap, red when above threshold.
+        double wf_metric = (fv->label_kind == 1)
+            ? fv->walkforward.mean_val_correlation
+            : fv->walkforward.mean_val_accuracy;
+        double gap = wf_metric - (double)fv->held_out_metric;
+        if (gap < 0) gap = -gap;
+        ImVec4 ho_col = (gap > (double)fv->gap_threshold)
+            ? ImVec4(0.95f, 0.35f, 0.35f, 1.0f)
+            : (gap > (double)fv->gap_threshold * 0.5)
+                ? ImVec4(0.95f, 0.75f, 0.30f, 1.0f)
+                : ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
+        if (fv->ran_held_out) {
+            ImGui::TextColored(ho_col,
+                "Held-out: %.4f (WF mean: %.4f, gap: %.4f, threshold: %.4f)",
+                (double)fv->held_out_metric, wf_metric, gap, (double)fv->gap_threshold);
+        } else {
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f),
+                "Held-out did NOT complete");
+        }
+
+        // Auto-stamp result line. Sourced from the worker's status_msg.
+        if (state->fv_status_msg[0]) {
+            ImVec4 stamp_col = fv->auto_stamp_attempted && fv->auto_stamp_ok
+                ? ImVec4(0.55f, 0.76f, 0.51f, 1.0f)
+                : ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
+            ImGui::TextColored(stamp_col, "%s", state->fv_status_msg);
         }
     }
 
