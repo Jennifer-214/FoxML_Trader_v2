@@ -9962,6 +9962,84 @@ e3_skip_load:;
               mctx.model_load_failed != nullptr);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.9.0c cfg explicit-set tracking + cfg-source visibility ---\n");
+    {
+        // Cfg explicit-set bitmap (V5_9_AUDIT-#5).
+        // ControllerConfig_Default initializes core_strategies_explicit_set=0
+        // (no cores explicitly set). Parser sets bit i when core_i_strategy=
+        // line is encountered. Boot WARN fires when num_execution_cores>0
+        // and bitmap is 0.
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.9.0c: ControllerConfig_Default sets core_strategies_explicit_set=0",
+              cfg.core_strategies_explicit_set == 0);
+        check("v5.9.0c: ControllerConfig_Default sets source_cfg_path=\"\"",
+              cfg.source_cfg_path[0] == '\0');
+
+        // Test parser: write a cfg with explicit core_0_strategy + core_2_strategy,
+        // expect bits 0 and 2 set, others clear.
+        char tmp_cfg[] = "/tmp/v590c_cfg_test_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        if (fd >= 0) {
+            const char* cfg_body =
+                "num_execution_cores=4\n"
+                "core_0_strategy=mr\n"
+                "core_2_strategy=ml\n";
+            (void)!write(fd, cfg_body, strlen(cfg_body));
+            close(fd);
+
+            ControllerConfig<64> parsed = ControllerConfig_Load<64>(tmp_cfg);
+            check("v5.9.0c: parser sets explicit bit for core_0_strategy",
+                  (parsed.core_strategies_explicit_set & 0x1) == 0x1);
+            check("v5.9.0c: parser sets explicit bit for core_2_strategy",
+                  (parsed.core_strategies_explicit_set & 0x4) == 0x4);
+            check("v5.9.0c: parser leaves bit clear for absent core_1_strategy",
+                  (parsed.core_strategies_explicit_set & 0x2) == 0);
+            check("v5.9.0c: parser leaves bit clear for absent core_3_strategy",
+                  (parsed.core_strategies_explicit_set & 0x8) == 0);
+            check("v5.9.0c: parser captures source_cfg_path",
+                  strcmp(parsed.source_cfg_path, tmp_cfg) == 0);
+
+            unlink(tmp_cfg);
+        } else {
+            check("v5.9.0c: tmp cfg file creation for parser test", 0);
+        }
+
+        // Test the all-default case: cfg with num_execution_cores>0 but
+        // no core_N_strategy lines should leave explicit_set=0 + emit
+        // boot WARN. We can't easily capture stderr in test, but we
+        // can verify the bitmap state.
+        char tmp_cfg2[] = "/tmp/v590c_cfg_default_XXXXXX";
+        fd = mkstemp(tmp_cfg2);
+        if (fd >= 0) {
+            const char* default_body = "num_execution_cores=4\n";  // no per-core
+            (void)!write(fd, default_body, strlen(default_body));
+            close(fd);
+
+            ControllerConfig<64> parsed = ControllerConfig_Load<64>(tmp_cfg2);
+            check("v5.9.0c: cfg with no core_N_strategy lines has explicit_set=0",
+                  parsed.core_strategies_explicit_set == 0);
+            check("v5.9.0c: defaulted cfg still sets all cores to SIMPLE_DIP=2",
+                  parsed.core_strategies[0] == 2 && parsed.core_strategies[3] == 2);
+
+            unlink(tmp_cfg2);
+        } else {
+            check("v5.9.0c: tmp cfg file creation for all-default test", 0);
+        }
+
+        // PerCoreSnap.strategy_was_explicit_set field exists + is uint8_t.
+        // (Compile-time check; populator is in ShardedSnapshot.hpp.)
+        TUISnapshot::PerCoreSnap pcs{};
+        pcs.strategy_was_explicit_set = 1;
+        check("v5.9.0c: PerCoreSnap.strategy_was_explicit_set assignable",
+              pcs.strategy_was_explicit_set == 1);
+
+        // TUISnapshot.source_cfg_path field exists + is null-terminable.
+        TUISnapshot snap{};
+        strncpy(snap.source_cfg_path, "engine.cfg", sizeof(snap.source_cfg_path) - 1);
+        check("v5.9.0c: TUISnapshot.source_cfg_path assignable",
+              strcmp(snap.source_cfg_path, "engine.cfg") == 0);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.8.10 CoreModelZoo strict-mode integration (drift refusal) ---\n");
     {
         // Engine boot integration test for the drift-refusal path. Distinct

@@ -518,6 +518,19 @@ template <unsigned F> struct ControllerConfig {
   // Config syntax: core_0_strategy=simple_dip, core_1_strategy=ema_cross, etc.
   // Accepted names: mr, momentum, simple_dip, ml, ema_cross, none.
   uint8_t core_strategies[16]; // MAX_EXECUTION_CORES
+  // v5.9.0c — explicit-set bitmap for core_strategies. Bit i set = `core_i_strategy=`
+  // appeared in the cfg file (operator deliberate choice). Bit i clear = field
+  // absent in cfg, default applied. Surfaces "default vs deliberate" tri-state
+  // in TUI per V5_9_AUDIT-#5. The today-bug class: backtest.cfg lacked
+  // per-core strategy lines → all cores defaulted to SIMPLE_DIP → operator
+  // saw "0!" hardcoded warnings, couldn't tell defaulted from deliberate.
+  uint16_t core_strategies_explicit_set;
+  // v5.9.0c — captured cfg file path. ControllerConfig_Load stores the path
+  // it parsed; the engine header panel displays this so operators see at
+  // boot which cfg drove the configuration. Distinct binaries (engine_gui
+  // reads engine.cfg, foxml_suite reads backtest.cfg) → "loaded cfg path"
+  // makes the difference visible.
+  char source_cfg_path[256];
   // Per-core risk allocation. core_risk_pct[i] is the fraction of total
   // balance this core can risk on a single trade. Default 0 = use the
   // shared risk_pct / num_cores. Non-zero = use this specific percentage.
@@ -845,6 +858,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.num_execution_cores = 4;
   cfg.sharded_force_synthetic = 0;
   for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
+  cfg.core_strategies_explicit_set = 0;                       // v5.9.0c: no bits set = all defaulted
+  cfg.source_cfg_path[0] = '\0';                              // v5.9.0c: populated by ControllerConfig_Load
   for (int i = 0; i < 16; ++i) cfg.core_risk_pct[i] = FPN_Zero<F>();  // 0 = shared
   // Phase 3: per-core kill switch overrides default to 0 (= use shared).
   for (int i = 0; i < 16; ++i) cfg.core_max_drawdown_pct[i] = FPN_Zero<F>();
@@ -887,6 +902,15 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
 template <unsigned F>
 inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   ControllerConfig<F> cfg = ControllerConfig_Default<F>();
+
+  // v5.9.0c — capture the cfg path so the engine header panel can display
+  // it. Operators distinguish engine.cfg vs backtest.cfg load at-a-glance.
+  if (filepath) {
+    size_t n = strlen(filepath);
+    if (n >= sizeof(cfg.source_cfg_path)) n = sizeof(cfg.source_cfg_path) - 1;
+    memcpy(cfg.source_cfg_path, filepath, n);
+    cfg.source_cfg_path[n] = '\0';
+  }
 
   // Phase 8: track whether the user explicitly set maker/taker rates in
   // the cfg file. Can't infer from value comparison alone — explicit
@@ -1284,6 +1308,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         else if (strcmp(val, "none") == 0) sid = 0xFF;
         else sid = (uint8_t)atoi(val);  // numeric fallback
         cfg.core_strategies[core_idx] = sid;
+        // v5.9.0c — set explicit bit so TUI can distinguish deliberate from defaulted.
+        cfg.core_strategies_explicit_set |= (uint16_t)(1u << core_idx);
       }
       continue;
     }
@@ -1373,6 +1399,24 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   }
 
   fclose(f);
+
+  // v5.9.0c — surface "all per-core strategies defaulted" silent failure.
+  // V5_9_AUDIT-#5. The today-bug: backtest.cfg lacked core_N_strategy=
+  // lines → all 16 cores fell to STRATEGY_SIMPLE_DIP default → operator
+  // saw "0!" hardcoded warnings, couldn't distinguish defaulted from
+  // deliberate. Stderr WARN at boot makes the silent fallback visible.
+  //
+  // Fires only when num_execution_cores > 0 (we have actual cores) AND
+  // explicit_set bitmap is zero (no core_N_strategy= lines parsed).
+  if (cfg.num_execution_cores > 0 && cfg.core_strategies_explicit_set == 0) {
+    fprintf(stderr,
+        "[cfg] WARN: %s has no `core_N_strategy=` lines. "
+        "All %u cores defaulting to SIMPLE_DIP (per ControllerConfig_Default). "
+        "If this is unintended (e.g., you copied backtest.cfg without "
+        "the per-core fields), add `core_0_strategy=mr` etc. to the cfg.\n",
+        filepath ? filepath : "(unknown cfg)",
+        (unsigned)cfg.num_execution_cores);
+  }
 
   // Phase 8 — backward-compat for fee_rate_maker / fee_rate_taker.
   //

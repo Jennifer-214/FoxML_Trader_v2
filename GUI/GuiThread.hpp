@@ -364,7 +364,8 @@ static inline void *gui_thread_fn(void *arg) {
         }
 
         // v5.8.6b: engine header — version + feature registry hash + format
-        tt::EngineHeader_Render();
+        // v5.9.0c: pass snap so cfg path renders too
+        tt::EngineHeader_Render(snap);
         // v5.9.0b: ML status — per-core load state, prediction context, NaN counters
         tt::MLStatus_Render(snap);
 

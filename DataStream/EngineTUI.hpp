@@ -767,6 +767,13 @@ struct TUISnapshot {
     int state_warmup; // 1 = warmup, 0 = active
     int is_paused;
     uint64_t start_time;
+    // v5.9.0c — captured cfg file path. Engine header panel renders this so
+    // operators see at-a-glance which cfg drove the configuration. Distinct
+    // binaries read different files (engine_gui → engine.cfg, foxml_suite →
+    // backtest.cfg) — operator confusion was the root cause of v5.8 paper-
+    // test "all DIP" bug. Populated in TUI_CopySnapshot* from
+    // ControllerConfig::source_cfg_path.
+    char source_cfg_path[256];
     // rolling stats
     double roll_price_avg, roll_stddev, roll_p_min, roll_p_max;
     double roll_vol_avg, roll_vol_slope;
@@ -1018,6 +1025,11 @@ struct TUISnapshot {
         double   ml_last_effective_threshold;// post-confidence-damping threshold actually used
         uint32_t ml_nan_feature_events;      // total feature-pack NaN/Inf events on this core
         uint32_t ml_nan_prediction_events;   // total prediction NaN/Inf events on this core
+        // v5.9.0c — cfg explicit-set bitmap surfaced per-core. 1 = operator
+        // set core_N_strategy= explicitly in cfg; 0 = default applied
+        // because field was absent. Drives tri-state marker in Per-Core
+        // P&L panel: "0!" deliberate, "0?" defaulted, "0" auto-regime.
+        uint8_t  strategy_was_explicit_set;
         // v4.0.4: per-core P&L breakdown for Account panel. Sourced from
         // CoreContext::core_realized / core_wins / core_losses / core_fees.
         // The aggregate equals oms->realized_pnl modulo timing (snapshot
@@ -1155,6 +1167,13 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->state_warmup = (ctrl->state == CONTROLLER_WARMUP);
     snap->is_paused = FPN_IsZero(ctrl->buy_conds.price) && !snap->state_warmup;
     snap->start_time = 0; // TUI thread computes uptime from its own start_time
+    // v5.9.0c — capture cfg path for engine header panel display
+    {
+        size_t n = strlen(ctrl->config.source_cfg_path);
+        if (n >= sizeof(snap->source_cfg_path)) n = sizeof(snap->source_cfg_path) - 1;
+        memcpy(snap->source_cfg_path, ctrl->config.source_cfg_path, n);
+        snap->source_cfg_path[n] = '\0';
+    }
 
     // rolling stats
     double avg = FPN_ToDouble(ctrl->rolling.price_avg);

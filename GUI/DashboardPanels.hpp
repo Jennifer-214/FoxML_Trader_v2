@@ -988,6 +988,17 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
                 uint8_t cfg_sid = pc->strategy_id_display;
                 uint8_t live_sid = pc->resolved_strategy_id;
                 if (live_sid >= NUM_STRATEGIES) live_sid = cfg_sid;
+                // v5.9.0c — tri-state explicit-set marker (V5_9_AUDIT-#5):
+                //   AUTO core           → no suffix (AUTO already indicates regime routing)
+                //   explicit-set non-AUTO → "!" suffix (operator deliberately set this)
+                //   defaulted non-AUTO   → "?" suffix (cfg lacked core_N_strategy= line, default applied)
+                // Catches the today-bug class: backtest.cfg without per-core
+                // strategy lines → all cores show "DIP?" → operator sees the
+                // defaulted state at-a-glance rather than mistaking it for
+                // a deliberate choice.
+                const char *explicit_marker =
+                    (cfg_sid == STRATEGY_AUTO) ? "" :
+                    (pc->strategy_was_explicit_set ? "!" : "?");
                 if (cfg_sid == STRATEGY_AUTO &&
                     live_sid < NUM_STRATEGIES && live_sid != STRATEGY_AUTO) {
                     ImVec4 c = strat_colors[live_sid];
@@ -996,7 +1007,15 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
                 } else if (live_sid < NUM_STRATEGIES) {
                     ImVec4 c = strat_colors[live_sid];
                     if (pc->core_kill_tripped) c.w = 0.45f;
-                    ImGui::TextColored(c, "%s", STRATEGY_SHORT_NAMES[live_sid]);
+                    ImGui::TextColored(c, "%s%s", STRATEGY_SHORT_NAMES[live_sid], explicit_marker);
+                    if (!pc->strategy_was_explicit_set && cfg_sid != STRATEGY_AUTO) {
+                        ImGui::SetItemTooltip(
+                            "Strategy DEFAULTED — cfg lacked core_%d_strategy= line.\n"
+                            "All-default fallback per ControllerConfig_Default (line 847).\n"
+                            "If unintended, add `core_%d_strategy=mr` (or other) to cfg.\n"
+                            "See V5_9_AUDIT-#5 in DOCS/V5_9_ML_HARDENING_AUDIT.md.",
+                            i, i);
+                    }
                 } else {
                     ImGui::TextDisabled("?");
                 }

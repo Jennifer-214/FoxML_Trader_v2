@@ -321,7 +321,8 @@ int main(int argc, char *argv[]) {
         suite_reload_flag = 0; // consume — config takes effect on next run
 
         // v5.8.6b: engine header — version + feature registry hash + format
-        tt::EngineHeader_Render();
+        // v5.9.0c: pass snap so cfg path renders too
+        tt::EngineHeader_Render(&suite_snap);
         // v5.9.0b: ML status — per-core load state, prediction context, NaN counters
         tt::MLStatus_Render(&suite_snap);
 

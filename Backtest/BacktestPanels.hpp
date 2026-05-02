@@ -1488,6 +1488,13 @@ struct TrainingPanelState {
     float fv_held_out_fraction;       // 0.05 .. 0.30; clamped by HeldOutSplit_Make
     float fv_gap_threshold;           // gap threshold for stamp accept/refuse
     char fv_status_msg[256];          // post-run summary + auto-stamp result
+    // v5.9.0c — Train Model worker thread state (V5_9_AUDIT-#7).
+    // Pre-v5.9.0c, Train Model ran synchronously and froze the GUI 5-30s.
+    // Worker pattern mirrors fv_* above. State is single-writer (worker
+    // thread) → main UI reads after volatile completion flag flips.
+    volatile int tm_running;
+    volatile int tm_complete;
+    pthread_t tm_tid;
 };
 
 static inline void TrainingPanel_Init(TrainingPanelState *state) {
@@ -1541,6 +1548,9 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->fv_held_out_fraction = 0.20f;      // matches HELDOUT_FRACTION default
     state->fv_gap_threshold = 0.05f;          // matches gap_acceptable_threshold default
     state->fv_status_msg[0] = '\0';
+    // v5.9.0c — Train Model worker init
+    state->tm_running = 0;
+    state->tm_complete = 0;
 }
 
 // walk-forward worker thread

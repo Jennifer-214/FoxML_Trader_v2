@@ -129,6 +129,14 @@ static inline void TUI_CopySnapshotSharded(
     snap->warmup_samples_now = rolling->count;
     snap->state_warmup = (snap->warmup_samples_now < snap->min_warmup_samples) ? 1 : 0;
 
+    // v5.9.0c — capture cfg path for engine header panel
+    {
+        size_t n = strlen(cfg->source_cfg_path);
+        if (n >= sizeof(snap->source_cfg_path)) n = sizeof(snap->source_cfg_path) - 1;
+        memcpy(snap->source_cfg_path, cfg->source_cfg_path, n);
+        snap->source_cfg_path[n] = '\0';
+    }
+
     // kill switch
     snap->kill_switch_active = agg.kill_switch_tripped;
     snap->breaker_tripped    = agg.kill_switch_tripped;
@@ -394,6 +402,11 @@ static inline void TUI_CopySnapshotSharded(
         // v4.0.4: resolved strategy after AUTO regime classification. For
         // non-AUTO cores this equals strategy_id_display.
         snap->per_core[i].resolved_strategy_id = state->cores[i].resolved_strategy_id;
+        // v5.9.0c — explicit-set bitmap (V5_9_AUDIT-#5). Drives tri-state
+        // marker in Per-Core P&L panel: "i!" deliberate, "i?" defaulted,
+        // "i" auto-regime. Read bit i from the cfg's bitmap.
+        snap->per_core[i].strategy_was_explicit_set =
+            (cfg->core_strategies_explicit_set >> i) & 0x1;
         // Per-core gate direction. Use RESOLVED strategy for AUTO so direction
         // tracks the active regime's strategy. MOMENTUM buys above; everything
         // else buys below.

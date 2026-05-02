@@ -31,7 +31,10 @@
 
 namespace tt {
 
-inline void EngineHeader_Render() {
+// v5.8.6b: original 3-arg version (engine + format + registry).
+// v5.9.0c: optional snap arg displays the loaded cfg path. When snap is
+// nullptr (legacy callers), only the 3 build-time fields render.
+inline void EngineHeader_Render(const struct TUISnapshot* snap = nullptr) {
     if (ImGui::Begin("Engine")) {
         ImGui::TextColored(FoxmlColors::sand, "engine:");
         ImGui::SameLine();
@@ -46,6 +49,22 @@ inline void EngineHeader_Render() {
         ImGui::TextColored(FoxmlColors::sand, "registry:");
         ImGui::SameLine();
         ImGui::Text("%016lx", (unsigned long)FEATURE_REGISTRY_HASH());
+
+        // v5.9.0c — cfg source path (V5_9_AUDIT-#4). Operators see at-a-
+        // glance which cfg drove the configuration. Critical because
+        // engine_gui reads engine.cfg while foxml_suite reads
+        // backtest.cfg — the source-confusion was the today-bug root.
+        if (snap && snap->source_cfg_path[0]) {
+            ImGui::SameLine(0, 14);
+            ImGui::TextColored(FoxmlColors::sand, "cfg:");
+            ImGui::SameLine();
+            ImGui::Text("%s", snap->source_cfg_path);
+            ImGui::SetItemTooltip(
+                "Cfg file path the binary parsed at boot.\n"
+                "engine_gui reads engine.cfg; foxml_suite reads backtest.cfg.\n"
+                "Edits to the OTHER file have no effect on this binary.\n"
+                "If you expected different behavior, check which cfg you edited.");
+        }
     }
     ImGui::End();
 }
