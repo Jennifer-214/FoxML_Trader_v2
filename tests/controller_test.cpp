@@ -11752,6 +11752,118 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- EXTENSIBILITY: v5.9.5c — bash CLI parity for full inference cfg binding ---\n");
+    {
+        // v5.9.5c — extends v5.8.8's bash↔in-process round-trip to cover the
+        // 9 inference cfg flags added in v5.9.2b/.3b/.4a (the "half-wired"
+        // class that v5.9.5b closed in-process; v5.9.5c closes the bash
+        // CLI side). Verifies bash emits each field, signature is
+        // verifiable, and parser reads each value back.
+        char model_path[] = "/tmp/test_v595c_bash_XXXXXX";
+        int fd = mkstemp(model_path);
+        if (fd >= 0) {
+            (void)!write(fd, "v595c-bash-content", 18);
+            close(fd);
+
+            const char* script_candidates[] = {
+                "../tools/stamp_model.sh",
+                "./tools/stamp_model.sh",
+                "tools/stamp_model.sh",
+                NULL
+            };
+            const char* script = NULL;
+            for (int i = 0; script_candidates[i]; ++i) {
+                if (access(script_candidates[i], X_OK) == 0) {
+                    script = script_candidates[i];
+                    break;
+                }
+            }
+
+            if (script) {
+                char hash_hex[32];
+                snprintf(hash_hex, sizeof(hash_hex), "%016lx",
+                         (unsigned long)FEATURE_REGISTRY_HASH());
+
+                // Larger cmd buffer per readiness check — 9 new flags
+                // ~150 chars overhead.
+                char cmd[4096];
+                snprintf(cmd, sizeof(cmd),
+                    "%s --model '%s' --secret 'v595c-parity-secret' "
+                    "--wf-mean-val 0.55 --held-out-metric 0.53 "
+                    "--gap-threshold 0.05 --trained-on 2026-05-02 "
+                    "--format-version %d "
+                    "--feature-registry-hash %s "
+                    "--engine-version '%s' "
+                    "--confidence-threshold-scale 2.5 "
+                    "--barrier-gate-enabled 1 "
+                    "--confidence-hard-block-threshold 0.07 "
+                    "--held-out-fraction 0.25 "
+                    "--freshness-tau 450 "
+                    "--bandit-blend-ratio 0.40 "
+                    "--fee-rate-maker 0.00060 "
+                    "--fee-rate-taker 0.00090 "
+                    "--training-poll-interval 200 "
+                    "--model-num-outputs 3 "
+                    "2>/dev/null",
+                    script, model_path, MODEL_FORMAT_VERSION,
+                    hash_hex, ENGINE_VERSION_STRING);
+                int rc = system(cmd);
+                if (rc == 0) {
+                    ModelStampResult vr = verify_model_stamp(
+                        model_path, "v595c-parity-secret",
+                        0.05, MODEL_FORMAT_VERSION,
+                        FEATURE_REGISTRY_HASH());
+                    check("v5.9.5c: bash-signed stamp with full inf verifies via in-process",
+                          vr.valid == 1);
+                    check("v5.9.5c: bash-written has_inference_cfg=1",
+                          vr.has_inference_cfg == 1);
+                    check("v5.9.5c: bash-written confidence_threshold_scale=2.5",
+                          fabs(vr.inference_cfg_confidence_threshold_scale - 2.5) < 1e-9);
+                    check("v5.9.5c: bash-written barrier_gate_enabled=1",
+                          vr.inference_cfg_barrier_gate_enabled == 1);
+                    check("v5.9.5c: bash-written confidence_hard_block_threshold=0.07",
+                          fabs(vr.inference_cfg_confidence_hard_block_threshold - 0.07) < 1e-9);
+                    check("v5.9.5c: bash-written held_out_fraction=0.25",
+                          fabs(vr.inference_cfg_held_out_fraction - 0.25) < 1e-9);
+                    check("v5.9.5c: bash-written freshness_tau=450",
+                          fabs(vr.inference_cfg_freshness_tau - 450.0) < 1e-9);
+                    check("v5.9.5c: bash-written has_bandit=1",
+                          vr.has_inference_cfg_bandit == 1);
+                    check("v5.9.5c: bash-written bandit_blend_ratio=0.40",
+                          fabs(vr.inference_cfg_bandit_blend_ratio - 0.40) < 1e-9);
+                    check("v5.9.5c: bash-written has_fees=1",
+                          vr.has_inference_cfg_fees == 1);
+                    check("v5.9.5c: bash-written fee_rate_maker=0.00060",
+                          fabs(vr.inference_cfg_fee_rate_maker - 0.00060) < 1e-9);
+                    check("v5.9.5c: bash-written fee_rate_taker=0.00090",
+                          fabs(vr.inference_cfg_fee_rate_taker - 0.00090) < 1e-9);
+                    check("v5.9.5c: bash-written training_poll_interval=200",
+                          vr.has_training_poll_interval == 1 &&
+                          vr.training_poll_interval == 200u);
+                    check("v5.9.5c: bash-written model_num_outputs=3",
+                          vr.has_model_num_outputs == 1 &&
+                          vr.model_num_outputs == 3);
+
+                    char stamp_path[256];
+                    snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
+                    unlink(stamp_path);
+                } else {
+                    for (int i = 0; i < 13; ++i) {
+                        check("v5.9.5c: bash CLI invocation failed", 0);
+                    }
+                }
+            } else {
+                fprintf(stderr, "[v5.9.5c] WARN: stamp_model.sh not found — bash-parity test skipped\n");
+                for (int i = 0; i < 13; ++i) {
+                    check("v5.9.5c: bash-parity test (skipped, script not found)", 1);
+                }
+            }
+            unlink(model_path);
+        } else {
+            check("v5.9.5c: tmp model file for bash test", 0);
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

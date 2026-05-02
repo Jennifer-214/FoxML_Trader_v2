@@ -14,6 +14,13 @@
 # the v5.8.6 in-process stamp body extension. Bash-signed stamps now
 # verify identically to in-process-signed ones (regression-tested in
 # controller_test.cpp).
+# v5.9.3b — added --feature-scaler-present + --scaler-sha256 for the
+# v5.9.3a scaler sidecar binding.
+# v5.9.4a — added --model-num-outputs for the model-output-dimension
+# stamp binding (catches multiclass-vs-binary mismatch at load).
+# v5.9.5c — added 9 more flags for full inference cfg parity with the
+# in-process emit at Backtest_RunFullValidation. Closes the
+# half-wired StampInferenceCfgInputs gap caught at v5.9.5 sprint exit.
 #
 # Usage:
 #   ./tools/stamp_model.sh \
@@ -25,7 +32,17 @@
 #       [--trained-on 2026-04-29] \
 #       [--format-version 5] \
 #       [--feature-registry-hash fc9119b8ed47bcf9] \
-#       [--engine-version 5.8.8] \
+#       [--engine-version 5.9.5c] \
+#       [--feature-scaler-present 1 --scaler-sha256 <hex>] \
+#       [--model-num-outputs 3] \
+#       [--confidence-threshold-scale 2.0] \
+#       [--barrier-gate-enabled 1] \
+#       [--confidence-hard-block-threshold 0.05] \
+#       [--held-out-fraction 0.20] \
+#       [--freshness-tau 300] \
+#       [--bandit-blend-ratio 0.30] \
+#       [--fee-rate-maker 0.00075 --fee-rate-taker 0.00100] \
+#       [--training-poll-interval 100] \
 #       [--force]
 #
 # Refuses to write if gap > gap_threshold unless --force is passed.
@@ -53,10 +70,20 @@ ENGINE_VERSION=""
 FEATURE_SCALER_PRESENT=""
 SCALER_SHA256=""
 MODEL_NUM_OUTPUTS=""
+# v5.9.5c — full inference cfg binding (CLI parity with in-process emit)
+CONF_THR_SCALE=""
+BARRIER_GATE=""
+CONF_HARD_BLOCK=""
+HELD_OUT_FRACTION=""
+FRESHNESS_TAU=""
+BANDIT_BLEND=""
+FEE_RATE_MAKER=""
+FEE_RATE_TAKER=""
+TRAINING_POLL_INTERVAL=""
 FORCE=0
 
 usage() {
-    sed -n '4,38p' "$0"
+    sed -n '4,52p' "$0"
     exit 1
 }
 
@@ -74,6 +101,16 @@ while [[ $# -gt 0 ]]; do
         --feature-scaler-present) FEATURE_SCALER_PRESENT="$2"; shift 2 ;;
         --scaler-sha256)          SCALER_SHA256="$2";         shift 2 ;;
         --model-num-outputs)      MODEL_NUM_OUTPUTS="$2";     shift 2 ;;
+        # v5.9.5c — full inference cfg binding (CLI parity with in-process emit)
+        --confidence-threshold-scale)        CONF_THR_SCALE="$2";       shift 2 ;;
+        --barrier-gate-enabled)              BARRIER_GATE="$2";          shift 2 ;;
+        --confidence-hard-block-threshold)   CONF_HARD_BLOCK="$2";       shift 2 ;;
+        --held-out-fraction)                 HELD_OUT_FRACTION="$2";     shift 2 ;;
+        --freshness-tau)                     FRESHNESS_TAU="$2";         shift 2 ;;
+        --bandit-blend-ratio)                BANDIT_BLEND="$2";          shift 2 ;;
+        --fee-rate-maker)                    FEE_RATE_MAKER="$2";        shift 2 ;;
+        --fee-rate-taker)                    FEE_RATE_TAKER="$2";        shift 2 ;;
+        --training-poll-interval)            TRAINING_POLL_INTERVAL="$2"; shift 2 ;;
         --force)                  FORCE=1;                    shift ;;
         -h|--help)                usage ;;
         *) echo "[stamp] unknown arg: $1" >&2; usage ;;
@@ -149,6 +186,55 @@ fi
 # ML_Headers/ModelInference.hpp — bash-parity regression test pins this.
 if [[ "$FORMAT_VERSION" -ge 5 ]]; then
     CANONICAL="${CANONICAL}stamp_format_version=1
+"
+fi
+
+# v5.9.5c — inference cfg binding. Order MUST match in-process emitter at
+# ML_Headers/ModelInference.hpp:1158-1191 byte-for-byte (HMAC verifies the
+# entire body, signatures diverge on any byte difference). Five core fields
+# emit together when ANY of the five is supplied (mirrors has_inference_cfg
+# semantics: cfg-recording flag for "trainer recorded these"). Bandit +
+# fees emit separately when their respective groups are supplied. Doubles
+# formatted via printf "%g" to match in-process; LC_NUMERIC=C already
+# pinned at script top.
+if [[ -n "$CONF_THR_SCALE" || -n "$BARRIER_GATE" || -n "$CONF_HARD_BLOCK" \
+   || -n "$HELD_OUT_FRACTION" || -n "$FRESHNESS_TAU" ]]; then
+    CTS_FMT=$(awk -v v="${CONF_THR_SCALE:-0}"     'BEGIN { printf "%g", v }')
+    BG_FMT="${BARRIER_GATE:-0}"
+    CHB_FMT=$(awk -v v="${CONF_HARD_BLOCK:-0}"    'BEGIN { printf "%g", v }')
+    HOF_FMT=$(awk -v v="${HELD_OUT_FRACTION:-0}"  'BEGIN { printf "%g", v }')
+    FTAU_FMT=$(awk -v v="${FRESHNESS_TAU:-0}"     'BEGIN { printf "%g", v }')
+    CANONICAL="${CANONICAL}inference_cfg_confidence_threshold_scale=${CTS_FMT}
+inference_cfg_barrier_gate_enabled=${BG_FMT}
+inference_cfg_confidence_hard_block_threshold=${CHB_FMT}
+inference_cfg_held_out_fraction=${HOF_FMT}
+inference_cfg_freshness_tau=${FTAU_FMT}
+"
+fi
+
+# v5.9.5c — bandit_blend_ratio (gated on bandit_enabled in-process).
+if [[ -n "$BANDIT_BLEND" ]]; then
+    BB_FMT=$(awk -v v="$BANDIT_BLEND" 'BEGIN { printf "%g", v }')
+    CANONICAL="${CANONICAL}inference_cfg_bandit_blend_ratio=${BB_FMT}
+"
+fi
+
+# v5.9.5c — fee_rate_maker + fee_rate_taker (paired; gated on cost_gate_enabled
+# in-process). Both emit together — partial fees would diverge from in-process
+# emit which uses a single snprintf for both lines.
+if [[ -n "$FEE_RATE_MAKER" && -n "$FEE_RATE_TAKER" ]]; then
+    FRM_FMT=$(awk -v v="$FEE_RATE_MAKER" 'BEGIN { printf "%g", v }')
+    FRT_FMT=$(awk -v v="$FEE_RATE_TAKER" 'BEGIN { printf "%g", v }')
+    CANONICAL="${CANONICAL}inference_cfg_fee_rate_maker=${FRM_FMT}
+inference_cfg_fee_rate_taker=${FRT_FMT}
+"
+elif [[ -n "$FEE_RATE_MAKER" || -n "$FEE_RATE_TAKER" ]]; then
+    echo "[stamp] WARN: --fee-rate-maker + --fee-rate-taker must both be set; skipping fees" >&2
+fi
+
+# v5.9.5c — training_poll_interval (cadence binding). uint32_t printed as %u.
+if [[ -n "$TRAINING_POLL_INTERVAL" ]]; then
+    CANONICAL="${CANONICAL}training_poll_interval=${TRAINING_POLL_INTERVAL}
 "
 fi
 
