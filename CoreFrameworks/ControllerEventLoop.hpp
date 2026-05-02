@@ -576,6 +576,22 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].core_ks_trips_total   = 0;
         // v4.2.1: idle-cycle counter for death-spiral detection
         state->cores[i].idle_cycles = 0;
+        // v5.9.0b — ML observability fields. Without explicit init, the
+        // hard-block / nan-counter / rate-limit-log paths read garbage on
+        // fresh-state runs. Caught by v5.9.1 parity audit (V5_9_AUDIT-#9
+        // follow-up). Same pattern as the staged_prediction / last_confidence
+        // init above — every CoreContext field declared in v5.9 needs to
+        // land here.
+        state->cores[i].model_load_failed              = 0;
+        state->cores[i].last_ml_critical_log_us        = 0;
+        state->cores[i].last_ml_threshold              = 0.0;
+        state->cores[i].last_ml_effective_threshold    = 0.0;
+        state->cores[i].nan_feature_events_total       = 0;
+        state->cores[i].nan_prediction_events_total    = 0;
+        // v5.9.1 — edge-trigger flag for boot-time per-core warmup-complete
+        // log. Set to 1 once per session per core after the first slow-path
+        // rebuild that observes rolling.count >= min_warmup_samples.
+        state->cores[i].warmup_log_emitted             = 0;
     }
 }
 
