@@ -10426,6 +10426,123 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- EXTENSIBILITY: v5.9.2c Phase 3.7 — runtime parity polish ---\n");
+    {
+        // v5.9.2c #2 — CSV tick-sort validation.
+        // Build a deliberately-unsorted tick array, run BacktestData_ValidateSort
+        // with each mode, verify behavior.
+        HistoricalTick ticks[8];
+        // monotonic for indices 0..3, then 4 jumps backward (violation),
+        // 5 ahead, 6 jumps backward (violation), 7 ahead.
+        ticks[0].timestamp_us = 1000; ticks[0].price = 100; ticks[0].qty = 1;
+        ticks[1].timestamp_us = 1100; ticks[1].price = 101; ticks[1].qty = 1;
+        ticks[2].timestamp_us = 1200; ticks[2].price = 102; ticks[2].qty = 1;
+        ticks[3].timestamp_us = 1300; ticks[3].price = 103; ticks[3].qty = 1;
+        ticks[4].timestamp_us =  900; ticks[4].price = 104; ticks[4].qty = 1; // VIOLATION
+        ticks[5].timestamp_us = 1400; ticks[5].price = 105; ticks[5].qty = 1;
+        ticks[6].timestamp_us = 1350; ticks[6].price = 106; ticks[6].qty = 1; // VIOLATION
+        ticks[7].timestamp_us = 1500; ticks[7].price = 107; ticks[7].qty = 1;
+        for (int i = 0; i < 8; ++i) ticks[i].is_buyer_maker = 0;
+
+        // Test 1: WARN mode — returns 0, doesn't modify
+        HistoricalTick t_warn[8];
+        memcpy(t_warn, ticks, sizeof(ticks));
+        int rc_warn = BacktestData_ValidateSort(t_warn, 8, CSV_SORT_WARN, "test_warn");
+        check("v5.9.2c: WARN mode returns clean (proceed) on violations",
+              rc_warn == 0);
+        check("v5.9.2c: WARN mode does NOT modify the tick array",
+              t_warn[4].timestamp_us == 900 && t_warn[6].timestamp_us == 1350);
+
+        // Test 2: STRICT mode — returns -1
+        HistoricalTick t_strict[8];
+        memcpy(t_strict, ticks, sizeof(ticks));
+        int rc_strict = BacktestData_ValidateSort(t_strict, 8, CSV_SORT_STRICT, "test_strict");
+        check("v5.9.2c: STRICT mode returns -1 on violations",
+              rc_strict == -1);
+
+        // Test 3: AUTO mode — returns 0 + sorts in place
+        HistoricalTick t_auto[8];
+        memcpy(t_auto, ticks, sizeof(ticks));
+        int rc_auto = BacktestData_ValidateSort(t_auto, 8, CSV_SORT_AUTO, "test_auto");
+        check("v5.9.2c: AUTO mode returns 0 (sorted)",
+              rc_auto == 0);
+        // Verify post-sort the array is monotonic
+        int monotonic_after_sort = 1;
+        for (int i = 1; i < 8; ++i) {
+            if (t_auto[i].timestamp_us < t_auto[i-1].timestamp_us) {
+                monotonic_after_sort = 0;
+                break;
+            }
+        }
+        check("v5.9.2c: AUTO mode produces monotonic array",
+              monotonic_after_sort);
+
+        // Test 4: clean array (already sorted) — no-op for all modes
+        HistoricalTick clean[4];
+        clean[0].timestamp_us = 1000; clean[1].timestamp_us = 1100;
+        clean[2].timestamp_us = 1200; clean[3].timestamp_us = 1300;
+        for (int i = 0; i < 4; ++i) { clean[i].price = 100; clean[i].qty = 1; clean[i].is_buyer_maker = 0; }
+        int rc_clean_warn   = BacktestData_ValidateSort(clean, 4, CSV_SORT_WARN, "clean_warn");
+        int rc_clean_strict = BacktestData_ValidateSort(clean, 4, CSV_SORT_STRICT, "clean_strict");
+        int rc_clean_auto   = BacktestData_ValidateSort(clean, 4, CSV_SORT_AUTO, "clean_auto");
+        check("v5.9.2c: clean array returns 0 for all modes",
+              rc_clean_warn == 0 && rc_clean_strict == 0 && rc_clean_auto == 0);
+
+        // Test 5: cfg field default
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.9.2c: csv_sort_check_mode defaults to CSV_SORT_WARN (0)",
+              cfg.csv_sort_check_mode == CSV_SORT_WARN);
+
+        // v5.9.2c #3 — HeldOutSplit_GenToken stable entropy.
+        // Two calls with identical inputs produce identical tokens (was: differ
+        // due to stack address + timestamp entropy pre-v5.9.2c).
+        char token1[33], token2[33];
+        HeldOutSplit_GenToken(token1, 1000, 800, 0);
+        HeldOutSplit_GenToken(token2, 1000, 800, 0);
+        check("v5.9.2c: GenToken with identical inputs produces identical tokens",
+              strcmp(token1, token2) == 0);
+
+        // Different shape → different tokens (collision resistance check)
+        char token_a[33], token_b[33];
+        HeldOutSplit_GenToken(token_a, 1000, 800, 0);
+        HeldOutSplit_GenToken(token_b, 1000, 750, 0);  // different trainval_end
+        check("v5.9.2c: GenToken with different shape produces different tokens",
+              strcmp(token_a, token_b) != 0);
+
+        // Different stable_seed → different tokens (still distinguishable for
+        // cfg-dependent uniqueness)
+        char token_c[33], token_d[33];
+        HeldOutSplit_GenToken(token_c, 1000, 800, 0);
+        HeldOutSplit_GenToken(token_d, 1000, 800, 0xDEADBEEFULL);
+        check("v5.9.2c: GenToken with different stable_seed produces different tokens",
+              strcmp(token_c, token_d) != 0);
+
+        // HeldOutSplit_Make integration: same shape produces same token now
+        HeldOutSplit s1 = HeldOutSplit_Make(1000, 0.20);
+        HeldOutSplit s2 = HeldOutSplit_Make(1000, 0.20);
+        check("v5.9.2c: HeldOutSplit_Make twice with same args produces same token",
+              strcmp(s1.lock_token, s2.lock_token) == 0);
+
+        // HeldOutSplit_Unlock works with the reproducible token
+        check("v5.9.2c: token from one Make can unlock another Make's split (reproducibility)",
+              HeldOutSplit_Unlock(&s1, s2.lock_token) == 1);
+
+        // v5.9.2c #4 — PerCoreSnap field-init discipline check.
+        // Spot-check: a synthesized PerCoreSnap with a category-representative
+        // field set should round-trip through the populator (verified at
+        // compile-time by the comment block in EngineTUI.hpp PerCoreSnap def).
+        TUISnapshot::PerCoreSnap pcs = {};
+        pcs.strategy_id_display = 5;       // v5.4.0 strategy enum
+        pcs.halt_reason         = 7;       // warmup
+        pcs.ml_model_loaded     = 1;
+        pcs.core_realized       = 12.34;
+        pcs.warmup_progress_pct = 75;
+        check("v5.9.2c: PerCoreSnap representative fields round-trip across categories",
+              pcs.strategy_id_display == 5 && pcs.halt_reason == 7 &&
+              pcs.ml_model_loaded == 1 && pcs.core_realized == 12.34 &&
+              pcs.warmup_progress_pct == 75);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

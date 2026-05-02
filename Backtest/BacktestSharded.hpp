@@ -531,10 +531,30 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     double last_price_d  = 0.0;
     double last_volume_d = 0.0;
 
+    int64_t prev_file_last_ts = 0;  // v5.9.2c: track for inter-file ordering check
     for (int f = 0; f < run_cfg->num_data_files; f++) {
         int count = 0;
         if (!BacktestData_Load(ticks, &count, max_ticks, run_cfg->data_paths[f]))
             continue;
+        // v5.9.2c — validate intra-file ordering on each file
+        // (sharded loads files one at a time, can't concat-validate
+        // like BacktestEngine.hpp's label_ticks does).
+        char file_label[280];
+        snprintf(file_label, sizeof(file_label), "data file %d (%s)",
+                 f, run_cfg->data_paths[f]);
+        int sort_rc = BacktestData_ValidateSort(ticks, count,
+                                                 cfg.csv_sort_check_mode, file_label);
+        if (sort_rc < 0) continue;  // STRICT: skip this file, keep going
+        // Inter-file ordering check
+        if (f > 0 && count > 0 && ticks[0].timestamp_us < prev_file_last_ts) {
+            fprintf(stderr,
+                "[WARN] data file %d starts before file %d ends "
+                "(first ts %lld < prev last %lld). Files may be out-of-order.\n",
+                f, f - 1,
+                (long long)ticks[0].timestamp_us,
+                (long long)prev_file_last_ts);
+        }
+        if (count > 0) prev_file_last_ts = ticks[count - 1].timestamp_us;
 
         for (int i = 0; i < count; i++) {
             if (*cancel_flag) goto done;

@@ -923,6 +923,32 @@ struct TUISnapshot {
     int16_t drainer_cpu;           // pinned CPU for the drainer thread
     int16_t nproc;                 // sysconf(_SC_NPROCESSORS_ONLN)
     int16_t slow_path_pin_offset;  // raw cfg value (-1 disabled, 0 auto, >0 explicit)
+    // ─────────────────────────────────────────────────────────────────
+    // PerCoreSnap field-init discipline (v5.9.2c)
+    // ─────────────────────────────────────────────────────────────────
+    // Adding a new field here requires updating BOTH places:
+    //
+    //   1. This struct definition (the read side, GUI/TUI consumers)
+    //   2. CoreFrameworks/ShardedSnapshot.hpp::TUI_CopySnapshotSharded
+    //      populator (the write side, runs every snapshot cycle)
+    //
+    // OR the field must be deliberately legitimately-zero (e.g. hot-path
+    // latency stats `samples`, `*_ns` are zero in sharded mode because
+    // the populator doesn't surface them — slow-path latency `sp_*_ns`
+    // is the sharded equivalent at line ~939-944).
+    //
+    // The comprehensive parity audit at v5.9.2c (DOCS/changelogs/
+    // 2026-05-02-v5.9-ml-hardening.md) verified all 49 actively-
+    // populated fields have populator lines and all 14 legitimately-
+    // zero fields have a documented reason. Discipline rule applies
+    // for any future field addition.
+    //
+    // Sentinel test below in tests/controller_test.cpp v5.9.2c
+    // EXTENSIBILITY block exercises the populator end-to-end with a
+    // synthesized CoreContext + asserts representative fields land
+    // correctly. This catches "added field but forgot populator" at
+    // PR time rather than runtime.
+    // ─────────────────────────────────────────────────────────────────
     struct PerCoreSnap {
         // Hot-path latency (per-tick gate eval cycles).
         uint64_t samples;

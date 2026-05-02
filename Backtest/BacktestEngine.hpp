@@ -101,6 +101,65 @@ static inline int BacktestData_Load(HistoricalTick *ticks, int *count, int max_t
 
     fclose(f);
     fprintf(stderr, "[backtest] loaded %d ticks from %s\n", *count, csv_path);
+    return *count > 0 ? 1 : 0;
+}
+
+//======================================================================================================
+// [TICK SORT VALIDATION — v5.9.2c]
+//======================================================================================================
+// Validates the tick array is timestamp-monotonic (`ticks[i].timestamp_us
+// >= ticks[i-1].timestamp_us`). Closes the silent-drift class where
+// concatenated daily exports / mistyped tick replays produce out-of-order
+// CSVs that silently corrupt rolling stats / ROR / tick-rate features at
+// training time. Caller passes cfg's csv_sort_check_mode to choose
+// behavior on violation: WARN (default) / STRICT / AUTO.
+//
+// Returns: 0 = clean (no violations or auto-sorted), -1 = STRICT refusal.
+// Caller in STRICT mode should treat -1 as "abort run".
+//======================================================================================================
+static inline int HistoricalTick_CmpByTime(const void *a, const void *b) {
+    int64_t ta = ((const HistoricalTick*)a)->timestamp_us;
+    int64_t tb = ((const HistoricalTick*)b)->timestamp_us;
+    if (ta < tb) return -1;
+    if (ta > tb) return 1;
+    return 0;
+}
+
+static inline int BacktestData_ValidateSort(HistoricalTick *ticks, int count,
+                                             int mode, const char *label) {
+    if (count < 2) return 0;
+    int violations = 0;
+    int first_idx = -1;
+    for (int i = 1; i < count; i++) {
+        if (ticks[i].timestamp_us < ticks[i-1].timestamp_us) {
+            violations++;
+            if (first_idx < 0) first_idx = i;
+        }
+    }
+    if (violations == 0) return 0;
+
+    if (mode == CSV_SORT_STRICT) {
+        fprintf(stderr,
+            "[FATAL] csv_sort_check_mode=strict: %s has %d tick ordering "
+            "violations (first at idx %d: ts=%lld < prev=%lld). Refusing load.\n",
+            label, violations, first_idx,
+            (long long)ticks[first_idx].timestamp_us,
+            (long long)ticks[first_idx-1].timestamp_us);
+        return -1;
+    } else if (mode == CSV_SORT_AUTO) {
+        qsort(ticks, (size_t)count, sizeof(HistoricalTick), HistoricalTick_CmpByTime);
+        fprintf(stderr,
+            "[INFO] csv_sort_check_mode=auto: %s had %d violations, sorted in-place.\n",
+            label, violations);
+        return 0;
+    } else {  // CSV_SORT_WARN (default, or unknown mode treated as warn)
+        fprintf(stderr,
+            "[WARN] %s has %d tick ordering violations (first at idx %d). "
+            "Features will be computed on out-of-order data. Set "
+            "csv_sort_check_mode=2 (auto) to sort, or =1 (strict) to refuse.\n",
+            label, violations, first_idx);
+        return 0;
+    }
     return 1;
 }
 
@@ -496,6 +555,21 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
     }
     fprintf(stderr, "[backtest] label buffer: %d total ticks across %d files\n",
             label_count, run_cfg->num_data_files);
+
+    // v5.9.2c — validate the CONCATENATED label_ticks array. Catches
+    // intra-file violations AND inter-file ordering (file 1's last tick
+    // > file 2's first tick).
+    int sort_mode = run_cfg->use_config_override
+                  ? run_cfg->config_override.csv_sort_check_mode
+                  : CSV_SORT_WARN;
+    int sort_rc = BacktestData_ValidateSort(label_ticks, label_count,
+                                             sort_mode, "label_ticks (concatenated)");
+    if (sort_rc < 0) {
+        // STRICT refusal — abort label computation; results.labels stays
+        // unpopulated so caller knows training data is unusable.
+        free(label_ticks);
+        return;
+    }
 
     LabelFn label_fn = NULL;
     for (int l = 0; l < LABEL_COUNT; l++) {

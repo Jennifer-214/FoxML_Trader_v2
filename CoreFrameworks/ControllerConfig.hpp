@@ -168,6 +168,13 @@ template <unsigned F> struct PerCoreOverrides {
 #undef _DECL_OV_INT_FIELD
 };
 
+// v5.9.2c — CSV tick-sort validation modes (csv_sort_check_mode field).
+// Backtest path checks tick timestamp ordering post-load; live engine
+// doesn't load CSV (Binance WS is in-order by construction).
+#define CSV_SORT_WARN   0   // default — log violations, proceed
+#define CSV_SORT_STRICT 1   // refuse load on any violation
+#define CSV_SORT_AUTO   2   // sort in-place + INFO log of violation count
+
 //======================================================================================================
 // [CONFIG]
 //======================================================================================================
@@ -281,6 +288,17 @@ template <unsigned F> struct ControllerConfig {
                                // want a longer total-tick warmup, use
                                // warmup_ticks instead — it counts raw ticks
                                // and has no upper bound.
+  // v5.9.2c — CSV tick-sort validation mode. Backtest path checks that
+  // ticks are timestamp-monotonic post-load; live engine doesn't load
+  // CSV (Binance WS is in-order by construction). Mode values:
+  //   0 = WARN   (default — log violations, proceed with potentially-
+  //               garbage features). Backward-compat with pre-v5.9.2c.
+  //   1 = STRICT (refuse load on any violation; abort backtest run)
+  //   2 = AUTO   (sort the array in-place, log INFO with violation count)
+  // Without this guard, unsorted CSVs (concatenated daily exports,
+  // mistyped tick replays) silently produce garbage rolling stats /
+  // ROR / tick-rate features at training time.
+  int csv_sort_check_mode;
   // post-SL cooldown
   uint32_t sl_cooldown_cycles; // slow-path cycles to pause buying after SL (0 =
                                // disabled)
@@ -658,6 +676,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.warmup_ticks = 128; // minimum raw ticks before trading
   cfg.min_warmup_samples =
       0; // min slow-path samples in rolling window (0 = warmup_ticks only)
+  cfg.csv_sort_check_mode = CSV_SORT_WARN; // v5.9.2c — default: log + proceed
   cfg.r2_threshold = FPN_FromDouble<F>(0.30);
   cfg.slope_scale_buy = FPN_FromDouble<F>(0.50);
   cfg.max_shift =
@@ -1105,6 +1124,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_U32(max_hold_ticks)
     CFG_PARSE_U32(regime_hysteresis)
     CFG_PARSE_U32(min_warmup_samples)
+    CFG_PARSE_INT(csv_sort_check_mode)
     CFG_PARSE_U32(idle_reset_cycles)
     CFG_PARSE_U32(sl_cooldown_cycles)
     CFG_PARSE_U32(sl_cooldown_base)

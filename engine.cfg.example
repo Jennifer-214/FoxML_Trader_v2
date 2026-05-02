@@ -29,6 +29,15 @@ wind_down_minutes=5             # minutes before 24h boundary to stop new buys a
 warmup_ticks=128                # minimum raw ticks before trading
 min_warmup_samples=128          # wait for short window to fill (128 × poll_interval ≈ 71 min at BTC rate)
 
+# v5.9.2c — CSV tick-sort validation (backtest only; live uses ordered WS)
+#   0 = warn   (default — log violations, proceed with potentially-garbage features)
+#   1 = strict (refuse load on any violation; abort backtest run)
+#   2 = auto   (sort the array in-place, log INFO with violation count)
+# Without this guard, unsorted CSVs (concatenated daily exports, mistyped
+# tick replays) silently produce garbage rolling stats / ROR / tick-rate
+# features at training time.
+csv_sort_check_mode=0           # warn — change to 1 if your tick CSVs should never be unsorted
+
 #==============================================================================
 # REGRESSION GATE
 #==============================================================================
