@@ -397,6 +397,12 @@ confidence_hard_block_threshold=0.0   # recommended after retrain: 0.05
 # Example (uncomment to enable):
 # health_log_path=logs/foxml-health.jsonl
 # health_log_level=0
+#
+# v5.9.4 — log rotation policy. Without rotation, long soaks accumulate
+# multi-GB JSONL files. Rotation atomically renames to <path>.<unix_ts_us>
+# when size exceeds max_bytes; keep_count controls retention.
+# health_log_max_bytes=104857600    # 100 MB (default 0 = no rotation)
+# health_log_keep_count=7           # keep last 7 rotated files (default 0)
 
 #==============================================================================
 # HELD-OUT VALIDATION + STAMP-BASED MODEL ATTESTATION (v5.2.0+, refined v5.8.6+)
@@ -434,6 +440,16 @@ held_out_gate_strict=0          # 0=warn-only, 1=refuse load on stamp failure, -
 #   allow_cross_major_engine=1
 # Combined with held_out_gate_strict=0 → engine warns + loads anyway.
 allow_cross_major_engine=0      # 0=refuse cross-major (safe), 1=allow with warn
+
+# v5.9.4 — minor-version drift acknowledgment. By default, engine boot
+# WARNs when a loaded model's stamp engine_version differs from the
+# current build's ENGINE_VERSION_STRING by minor (e.g. stamp says 5.8.x
+# on a 5.9.x build). Patch-level drifts (5.9.0a vs 5.9.0b) NOT warned.
+# Operator who deliberately deploys cross-minor (typical: stamps from
+# previous sprint, loaded on current build) flips this to 1 to suppress.
+# Cross-major drift is gated separately by allow_cross_major_engine
+# above + the held_out_gate_strict refusal path.
+acknowledge_cross_binary_version_drift=0   # 0=warn (safe), 1=suppress minor WARN
 held_out_stamp_secret=          # HMAC-SHA256 secret. Empty = devmode (signs but accepts any sig)
 
 # Auto-stamp on held-out completion (v5.3.2 + v5.8.7 + v5.8.10).

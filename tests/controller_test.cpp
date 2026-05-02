@@ -11341,6 +11341,123 @@ e3_skip_load:;
         free(tmat);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.9.4 Phase 5 — recipes + health rotation + cross-binary ---\n");
+    {
+        // === Test 1: cfg defaults for new fields ===
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.9.4: health_log_max_bytes defaults to 0 (rotation off)",
+              cfg.health_log_max_bytes == 0);
+        check("v5.9.4: health_log_keep_count defaults to 0 (no retention)",
+              cfg.health_log_keep_count == 0);
+        check("v5.9.4: acknowledge_cross_binary_version_drift defaults to 0 (warn on)",
+              cfg.acknowledge_cross_binary_version_drift == 0);
+
+        // === Test 2: cfg parser accepts new fields ===
+        char tmp_cfg[] = "/tmp/v594_cfg_test_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        if (fd >= 0) {
+            const char* body =
+                "health_log_max_bytes=104857600\n"
+                "health_log_keep_count=7\n"
+                "acknowledge_cross_binary_version_drift=1\n";
+            (void)!write(fd, body, strlen(body));
+            close(fd);
+            ControllerConfig<64> parsed = ControllerConfig_Load<64>(tmp_cfg);
+            check("v5.9.4: cfg parser reads health_log_max_bytes",
+                  parsed.health_log_max_bytes == 104857600);
+            check("v5.9.4: cfg parser reads health_log_keep_count",
+                  parsed.health_log_keep_count == 7);
+            check("v5.9.4: cfg parser reads acknowledge_cross_binary_version_drift",
+                  parsed.acknowledge_cross_binary_version_drift == 1);
+            unlink(tmp_cfg);
+        } else {
+            check("v5.9.4: tmp cfg for parser test", 0);
+        }
+
+        // === Test 3: Health log rotation triggers on size threshold ===
+        // Configure a small max_bytes (1KB) + keep_count=2; write enough
+        // events to trigger rotation; verify rotation happened.
+        char tmp_dir[] = "/tmp/v594_rotate_XXXXXX";
+        if (mkdtemp(tmp_dir) != NULL) {
+            char log_path[400];
+            snprintf(log_path, sizeof(log_path), "%s/test.jsonl", tmp_dir);
+
+            tt::Health_LogConfigureWithRotation(log_path, tt::HEALTH_INFO,
+                                                  /*max_bytes=*/512,
+                                                  /*keep_count=*/2);
+            // Each event writes ~80 bytes of JSON. ~10 events triggers
+            // rotation at 512-byte cap (file becomes >=512 bytes after
+            // event N, rotation rename happens AFTER write completes).
+            for (int i = 0; i < 30; ++i) {
+                tt::Health_Log(tt::HEALTH_INFO, "test_cat", -1,
+                                 "iteration=%d padding=aaaaaaaaaaaaa", i);
+            }
+
+            // Verify rotation occurred: at least one rotated file exists.
+            char ls_cmd[600];
+            snprintf(ls_cmd, sizeof(ls_cmd),
+                "ls -1 '%s'.[0-9]* 2>/dev/null | wc -l", log_path);
+            FILE* lp = popen(ls_cmd, "r");
+            int rotated_count = 0;
+            if (lp) {
+                if (fscanf(lp, "%d", &rotated_count) != 1) rotated_count = -1;
+                pclose(lp);
+            }
+            check("v5.9.4: health log rotation produces rotated files",
+                  rotated_count > 0);
+            check("v5.9.4: health log retention caps rotated files at keep_count",
+                  rotated_count <= 2);
+
+            // Cleanup
+            char rm_cmd[600];
+            snprintf(rm_cmd, sizeof(rm_cmd), "rm -f '%s'*", log_path);
+            int rc = system(rm_cmd);
+            (void)rc;
+            rmdir(tmp_dir);
+
+            // Disable rotation for subsequent tests
+            tt::Health_LogConfigure(nullptr, tt::HEALTH_INFO);
+        } else {
+            check("v5.9.4: tmp dir for rotation test", 0);
+        }
+
+        // === Test 4: Health log no-rotation when max_bytes=0 ===
+        char tmp_dir2[] = "/tmp/v594_norotate_XXXXXX";
+        if (mkdtemp(tmp_dir2) != NULL) {
+            char log_path[400];
+            snprintf(log_path, sizeof(log_path), "%s/test.jsonl", tmp_dir2);
+
+            tt::Health_LogConfigureWithRotation(log_path, tt::HEALTH_INFO,
+                                                  /*max_bytes=*/0,    // disabled
+                                                  /*keep_count=*/0);
+            for (int i = 0; i < 30; ++i) {
+                tt::Health_Log(tt::HEALTH_INFO, "test_cat", -1,
+                                 "iteration=%d padding=aaaaaaaaaaaaa", i);
+            }
+
+            char ls_cmd[600];
+            snprintf(ls_cmd, sizeof(ls_cmd),
+                "ls -1 '%s'.[0-9]* 2>/dev/null | wc -l", log_path);
+            FILE* lp = popen(ls_cmd, "r");
+            int rotated = 0;
+            if (lp) {
+                if (fscanf(lp, "%d", &rotated) != 1) rotated = -1;
+                pclose(lp);
+            }
+            check("v5.9.4: max_bytes=0 produces no rotated files",
+                  rotated == 0);
+
+            char rm_cmd[600];
+            snprintf(rm_cmd, sizeof(rm_cmd), "rm -f '%s'*", log_path);
+            int rc = system(rm_cmd);
+            (void)rc;
+            rmdir(tmp_dir2);
+            tt::Health_LogConfigure(nullptr, tt::HEALTH_INFO);
+        } else {
+            check("v5.9.4: tmp dir for no-rotation test", 0);
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

@@ -79,7 +79,12 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                                     const char *role_name, int backend,
                                     const char* held_out_stamp_secret = nullptr,
                                     double gap_threshold = 0.05,
-                                    int held_out_gate_strict = 0) {
+                                    int held_out_gate_strict = 0,
+                                    // v5.9.4 — operator opt-in: suppress
+                                    // minor-version drift WARN. Cross-major
+                                    // is still always refused/warned per
+                                    // ModelStampResult.cross_major_engine.
+                                    int acknowledge_cross_binary_drift = 0) {
     char path[512];
     struct stat st;
     const char* found_path = nullptr;
@@ -150,6 +155,25 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                 ENGINE_VERSION_STRING,
                 (unsigned long)FEATURE_REGISTRY_HASH(),
                 sr.reason);
+            // v5.9.4 — minor-version drift WARN. Same-major (cross_major=0)
+            // but different minor (e.g. stamp=5.8.x, build=5.9.4) is usually
+            // OK but worth surfacing so operator notices unintended deploys.
+            // Patch-level drift (5.9.3a vs 5.9.3b) NOT warned — same minor.
+            // Operator suppresses with cfg.acknowledge_cross_binary_version_drift=1.
+            if (!sr.cross_major_engine && sr.engine_version[0] &&
+                !acknowledge_cross_binary_drift) {
+                int sm = 0, sn = 0;
+                sscanf(sr.engine_version, "%d.%d", &sm, &sn);
+                int cm = 0, cn = 0;
+                sscanf(ENGINE_VERSION_STRING, "%d.%d", &cm, &cn);
+                if (sm == cm && sn != cn) {
+                    fprintf(stderr,
+                        "[engine_version] WARN: %s stamp's engine_version=%s "
+                        "differs from build %s by minor. Set "
+                        "acknowledge_cross_binary_version_drift=1 to suppress.\n",
+                        found_path, sr.engine_version, ENGINE_VERSION_STRING);
+                }
+            }
         }
     }
 
@@ -220,26 +244,34 @@ template <unsigned F>
 inline int CoreModelZoo_LoadFromDir(CoreModelZoo<F> *zoo, const char *dir, int backend,
                                      const char* held_out_stamp_secret = nullptr,
                                      double gap_threshold = 0.05,
-                                     int held_out_gate_strict = 0) {
+                                     int held_out_gate_strict = 0,
+                                     // v5.9.4 — operator opt-in, threaded
+                                     // through to per-role load.
+                                     int acknowledge_cross_binary_drift = 0) {
     if (!dir || dir[0] == '\0') return 0;
 
     int loaded = 0;
     if (CoreModelZoo_TryLoadRole(&zoo->barrier, dir, "barrier", backend,
-            held_out_stamp_secret, gap_threshold, held_out_gate_strict)) {
+            held_out_stamp_secret, gap_threshold, held_out_gate_strict,
+            acknowledge_cross_binary_drift)) {
         zoo->loaded_mask |= CORE_MODEL_BARRIER;
         loaded++;
     }
     if (CoreModelZoo_TryLoadRole(&zoo->regime, dir, "regime", backend,
-            held_out_stamp_secret, gap_threshold, held_out_gate_strict)) {
+            held_out_stamp_secret, gap_threshold, held_out_gate_strict,
+            acknowledge_cross_binary_drift)) {
         zoo->loaded_mask |= CORE_MODEL_REGIME;
         loaded++;
     }
     if (CoreModelZoo_TryLoadRole(&zoo->exit, dir, "exit", backend,
-            held_out_stamp_secret, gap_threshold, held_out_gate_strict)) {
+            held_out_stamp_secret, gap_threshold, held_out_gate_strict,
+            acknowledge_cross_binary_drift)) {
         zoo->loaded_mask |= CORE_MODEL_EXIT;
         loaded++;
     }
-    if (CoreModelZoo_TryLoadRole(&zoo->buy_signal, dir, "buy_signal", backend)) {
+    if (CoreModelZoo_TryLoadRole(&zoo->buy_signal, dir, "buy_signal", backend,
+            held_out_stamp_secret, gap_threshold, held_out_gate_strict,
+            acknowledge_cross_binary_drift)) {
         zoo->loaded_mask |= CORE_MODEL_BUY_SIGNAL;
         loaded++;
     }

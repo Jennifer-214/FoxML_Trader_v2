@@ -495,6 +495,25 @@ template <unsigned F> struct ControllerConfig {
   //   health_log_level: 0 = info (always), 1 = debug, 2 = trace
   char   health_log_path[256];
   int    health_log_level;
+  // v5.9.4 — health log rotation (in-process, atomic rename pattern).
+  // Without rotation, long soaks (30+ days) accumulate >5GB of JSONL,
+  // operator-unfriendly. Rotates via rename to <path>.<unix_ts>,
+  // keeps last `keep_count` rotated files, deletes oldest.
+  //   health_log_max_bytes: 0 = no rotation (default for back-compat);
+  //                         >0 = rotate when current file exceeds size
+  //   health_log_keep_count: 0 = keep nothing (default; only the
+  //                              active file lives); N = keep last N
+  //                              rotated files (typical: 7)
+  uint64_t health_log_max_bytes;
+  int      health_log_keep_count;
+  // v5.9.4 — cross-binary version drift acknowledgment. By default,
+  // engine boot WARNs (stderr) when a loaded model's stamp engine_version
+  // differs from current ENGINE_VERSION_STRING by major.minor. Operators
+  // who deliberately deploy a v5.8 model on a v5.9 engine (or v5.9.1 on
+  // v5.9.4) flip this to 1 to suppress the WARN. The cross-major check
+  // (different MAJOR) is a separate refusal gate; this only suppresses
+  // the patch/minor drift WARN. See DOCS/PARITY_LIFECYCLE.md.
+  int    acknowledge_cross_binary_version_drift;
   // v5.2.1 (live reconciliation Phase 1) — exchange-truth sync at boot
   // (and optionally on heartbeat). LIVE-mode-only — paper mode skips
   // reconcile entirely.
@@ -870,6 +889,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.held_out_stamp_secret[0]    = '\0';                         // empty = accept-any (dev)
   cfg.auto_stamp_on_held_out      = 1;                            // v5.8.10: default 1 (suite Run Full Validation auto-stamps); set 0 only for manual tools/stamp_model.sh workflow
   cfg.health_log_path[0]          = '\0';                         // empty = disabled
+  cfg.health_log_max_bytes        = 0;                            // 0 = no rotation (back-compat)
+  cfg.health_log_keep_count       = 0;                            // 0 = no retained rotated files
+  cfg.acknowledge_cross_binary_version_drift = 0;                 // v5.9.4 — default WARN on minor drift
   cfg.health_log_level            = 0;                            // 0=info, 1=debug, 2=trace
   cfg.reconcile_interval_sec      = 0;                            // 0 = boot-only
   cfg.reconcile_dry_run           = 1;                            // safer default; flip to 0 deliberately
@@ -1264,6 +1286,16 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.health_log_level = atoi(val);
         continue;
     }
+    if (strcmp(key, "health_log_max_bytes") == 0) {
+        cfg.health_log_max_bytes = (uint64_t)strtoull(val, nullptr, 10);
+        continue;
+    }
+    if (strcmp(key, "health_log_keep_count") == 0) {
+        cfg.health_log_keep_count = atoi(val);
+        if (cfg.health_log_keep_count < 0) cfg.health_log_keep_count = 0;
+        continue;
+    }
+    CFG_PARSE_INT(acknowledge_cross_binary_version_drift)
     if (strcmp(key, "reconcile_interval_sec") == 0) {
         cfg.reconcile_interval_sec = atoi(val);
         continue;
