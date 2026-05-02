@@ -1635,14 +1635,16 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       ctx.signals       = &signals;
       ctx.short_rolling = &ctrl->rolling;
       int n = Features_PackAll(&ctx, feat_buf);
-      if (n >= 0) {
+      // v5.9.3b — apply scaler. Identity no-op when not loaded.
+      if (n >= 0 && tt::FeatureStandardizer_Apply(
+                      &ctrl->regime_model.scaler, feat_buf, n) >= 0) {
         double pred = (double)Model_Predict(&ctrl->regime_model, feat_buf, n);
         if (!std::isnan(pred) && !std::isinf(pred)) {
           signals.model_score = FPN_FromDouble<F>(pred);
         }
         // else: leave model_score at zero-init (no enrichment)
       }
-      // else: NaN/Inf in pack — leave model_score at zero-init
+      // else: NaN/Inf in pack OR post-scaler — leave model_score at zero-init
     }
 
     ctrl->last_signals = signals; // cache for MLStrategy_BuySignal
@@ -1801,7 +1803,15 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     ctx.signals       = &ctrl->last_signals;
     ctx.short_rolling = &ctrl->rolling;
     int n = Features_PackAll(&ctx, features);
-    // n >= 0 only when feature pack is NaN/Inf-free; otherwise skip gate.
+    // v5.9.3b — apply scaler ONCE before both peak + valley predictions
+    // share the same features buffer. Use peak_model's scaler (peak +
+    // valley are paired models trained on identical feature shapes;
+    // their scalers should agree, and peak's is the canonical).
+    if (n >= 0 && tt::FeatureStandardizer_Apply(
+                    &ctrl->peak_model.scaler, features, n) < 0) {
+      n = -1;  // mark as failed; falls through to "skip gate" below
+    }
+    // n >= 0 only when feature pack + scaler-apply both succeeded.
     if (n >= 0) {
       double p_peak = (double)Model_Predict(&ctrl->peak_model, features, n);
       double p_valley = Model_IsLoaded(&ctrl->valley_model)

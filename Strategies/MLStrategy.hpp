@@ -125,6 +125,17 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
         return conds;  // already zero-initialized above; no buy signal
     }
 
+    // v5.9.3b — apply feature standardizer (mean-centering + unit-variance).
+    // Identity no-op when state->buy_model.scaler.has_scaler=0 (legacy v5.x
+    // models or v5.9.3+ models without a sidecar). Post-apply finite check
+    // catches any NaN introduced by the scaler math itself (rare-edge:
+    // stddev floored + feature at saturation).
+    if (tt::FeatureStandardizer_Apply(&state->buy_model.scaler,
+                                       state->feature_buf, n) < 0) {
+        fprintf(stderr, "[ML] BuySignal: NaN/Inf post-scaler-apply — skipping prediction\n");
+        return conds;
+    }
+
     // run inference
     float prediction = Model_Predict(&state->buy_model, state->feature_buf, n);
     // v5.9.0 — NaN/Inf in prediction → no entry. XGBoost can return NaN on

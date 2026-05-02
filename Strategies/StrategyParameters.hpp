@@ -718,6 +718,17 @@ inline void ML_BuildParameters(
     int have_signal   = 0;
 
     if (zoo->loaded_mask & CORE_MODEL_BARRIER) {
+        // v5.9.3b — apply scaler associated with barrier role. Identity
+        // no-op when zoo->barrier.scaler.has_scaler=0 (legacy or absent).
+        if (tt::FeatureStandardizer_Apply(&zoo->barrier.scaler, features, n) < 0) {
+            fprintf(stderr, "[ML] dispatch: NaN/Inf post-scaler (barrier) — no signal\n");
+            if (mctx && mctx->nan_feature_events_total) {
+                (*mctx->nan_feature_events_total)++;
+            }
+            SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
+            out->strategy_id = STRATEGY_ML;
+            return;
+        }
         // 3-class softmax: [0]=stable, [1]=peak, [2]=valley
         float multi[3] = {0.0f, 0.0f, 0.0f};
         int got = Model_PredictMulti(&zoo->barrier, features, n, multi, 3);
@@ -747,6 +758,16 @@ inline void ML_BuildParameters(
             }
         }
     } else if (zoo->loaded_mask & CORE_MODEL_BUY_SIGNAL) {
+        // v5.9.3b — apply scaler associated with buy_signal role.
+        if (tt::FeatureStandardizer_Apply(&zoo->buy_signal.scaler, features, n) < 0) {
+            fprintf(stderr, "[ML] dispatch: NaN/Inf post-scaler (buy_signal) — no signal\n");
+            if (mctx && mctx->nan_feature_events_total) {
+                (*mctx->nan_feature_events_total)++;
+            }
+            SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
+            out->strategy_id = STRATEGY_ML;
+            return;
+        }
         // legacy single-binary: complementary interpretation
         double pred_raw = (double)Model_Predict(&zoo->buy_signal, features, n);
         if (std::isnan(pred_raw) || std::isinf(pred_raw)) {

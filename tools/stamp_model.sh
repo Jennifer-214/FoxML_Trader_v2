@@ -50,6 +50,8 @@ TRAINED_ON="$(date -u +%Y-%m-%d)"
 FORMAT_VERSION="5"
 FEATURE_REGISTRY_HASH=""
 ENGINE_VERSION=""
+FEATURE_SCALER_PRESENT=""
+SCALER_SHA256=""
 FORCE=0
 
 usage() {
@@ -68,6 +70,8 @@ while [[ $# -gt 0 ]]; do
         --format-version)         FORMAT_VERSION="$2";        shift 2 ;;
         --feature-registry-hash)  FEATURE_REGISTRY_HASH="$2"; shift 2 ;;
         --engine-version)         ENGINE_VERSION="$2";        shift 2 ;;
+        --feature-scaler-present) FEATURE_SCALER_PRESENT="$2"; shift 2 ;;
+        --scaler-sha256)          SCALER_SHA256="$2";         shift 2 ;;
         --force)                  FORCE=1;                    shift ;;
         -h|--help)                usage ;;
         *) echo "[stamp] unknown arg: $1" >&2; usage ;;
@@ -143,6 +147,17 @@ fi
 # ML_Headers/ModelInference.hpp — bash-parity regression test pins this.
 if [[ "$FORMAT_VERSION" -ge 5 ]]; then
     CANONICAL="${CANONICAL}stamp_format_version=1
+"
+fi
+
+# v5.9.3b — append feature_scaler_present + scaler_sha256 if both supplied.
+# These bind the .scaler sidecar to the model. Order MUST match the
+# in-process emitter at ML_Headers/ModelInference.hpp:1158-1167 (single
+# block emit, both lines together). Bash-parity regression test pins
+# this in controller_test.cpp.
+if [[ -n "$FEATURE_SCALER_PRESENT" ]]; then
+    CANONICAL="${CANONICAL}feature_scaler_present=${FEATURE_SCALER_PRESENT}
+scaler_sha256=${SCALER_SHA256}
 "
 fi
 

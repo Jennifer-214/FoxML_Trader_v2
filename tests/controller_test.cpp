@@ -11163,6 +11163,184 @@ e3_skip_load:;
         free(fmat);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.9.3b Phase 4 — scaler apply + training integration ---\n");
+    {
+        using namespace tt;
+        // === Test 1: train→serve roundtrip on synthetic features ===
+        // Compute scaler on training matrix, persist sidecar, reload from
+        // disk, apply to identical matrix. Output features should have
+        // mean ≈ 0, stddev ≈ 1 per column (the scaling contract).
+        const int N_SAMPLES = 200;
+        float* tmat = (float*)malloc(N_SAMPLES * NUM_REGISTERED_FEATURES * sizeof(float));
+        // Column 0: linear ramp 0..199; mean=99.5, stddev≈57.88
+        // Column 1: cosine wave; mean≈0, stddev≈0.71
+        // Other columns: zeros (degenerate; tests stddev floor handling)
+        for (int s = 0; s < N_SAMPLES; ++s) {
+            for (unsigned f = 0; f < NUM_REGISTERED_FEATURES; ++f) {
+                if (f == 0) tmat[s * NUM_REGISTERED_FEATURES + f] = (float)s;
+                else if (f == 1) tmat[s * NUM_REGISTERED_FEATURES + f] = cosf(0.1f * s);
+                else tmat[s * NUM_REGISTERED_FEATURES + f] = 0.0f;
+            }
+        }
+
+        char tmp_dir[] = "/tmp/v593b_roundtrip_XXXXXX";
+        if (mkdtemp(tmp_dir) != NULL) {
+            char sidecar_path[400];
+            snprintf(sidecar_path, sizeof(sidecar_path), "%s/model.bin.scaler", tmp_dir);
+
+            // Train side: Compute + Persist
+            FeatureStandardizer train_sc;
+            FeatureStandardizer_Compute(&train_sc, tmat, N_SAMPLES, SCALER_STDDEV_FLOOR);
+            int prc = FeatureStandardizer_Persist(&train_sc, sidecar_path);
+            check("v5.9.3b: train-side Persist succeeds",
+                  prc == 1);
+
+            // Serve side: Load + Apply
+            FeatureStandardizer serve_sc;
+            int lrc = FeatureStandardizer_Load(&serve_sc, sidecar_path);
+            check("v5.9.3b: serve-side Load succeeds",
+                  lrc == 1);
+
+            // Apply to one row at a time + collect post-apply means.
+            // For a column-wise scaler applied to ITS OWN training set,
+            // the resulting per-column mean must be ~0 and stddev ~1
+            // (the standardization contract).
+            double apply_sum_col0 = 0.0, apply_sum_col1 = 0.0;
+            int apply_ok = 1;
+            for (int s = 0; s < N_SAMPLES; ++s) {
+                float row[NUM_REGISTERED_FEATURES];
+                memcpy(row, &tmat[s * NUM_REGISTERED_FEATURES],
+                       sizeof(float) * NUM_REGISTERED_FEATURES);
+                if (FeatureStandardizer_Apply(&serve_sc, row, NUM_REGISTERED_FEATURES) < 0) {
+                    apply_ok = 0;
+                    break;
+                }
+                apply_sum_col0 += row[0];
+                apply_sum_col1 += row[1];
+            }
+            check("v5.9.3b: serve-side Apply succeeds on full training matrix",
+                  apply_ok == 1);
+
+            double apply_mean_col0 = apply_sum_col0 / N_SAMPLES;
+            double apply_mean_col1 = apply_sum_col1 / N_SAMPLES;
+            check("v5.9.3b: post-apply mean[col0] ≈ 0 (centered)",
+                  fabs(apply_mean_col0) < 1e-5);
+            check("v5.9.3b: post-apply mean[col1] ≈ 0 (centered)",
+                  fabs(apply_mean_col1) < 1e-5);
+
+            // === Test 2: registry hash drift refusal ===
+            // Manually corrupt the sidecar's registry_hash field, attempt Load.
+            FILE* cf = fopen(sidecar_path, "rb+");
+            check("v5.9.3b: sidecar reopenable for corruption test",
+                  cf != NULL);
+            if (cf) {
+                // registry_hash is at offset 8 (after magic + num_features)
+                fseek(cf, 8, SEEK_SET);
+                uint64_t bad_hash = ~train_sc.registry_hash;  // bit-flipped
+                fwrite(&bad_hash, 8, 1, cf);
+                fclose(cf);
+
+                FeatureStandardizer drift_sc;
+                int drift_lrc = FeatureStandardizer_Load(&drift_sc, sidecar_path);
+                // Load itself succeeds (file is structurally valid; embedded SHA
+                // mismatches because we corrupted the body) — should refuse via SHA
+                check("v5.9.3b: Load refuses corrupted-hash sidecar (SHA mismatch)",
+                      drift_lrc == -1);
+            }
+
+            // Cleanup
+            unlink(sidecar_path);
+            rmdir(tmp_dir);
+        } else {
+            check("v5.9.3b: tmp dir for roundtrip test", 0);
+        }
+
+        // === Test 3: stamp + scaler binding via tools/stamp_model.sh
+        //                                          parity (bash + in-process)
+        // Synthesizes a stamp via in-process emit, verifies field round-trip.
+        // (Bash parity is exercised by the v5.8.8 round-trip test infrastructure
+        // — extending it for scaler fields would require running the bash script
+        // from the test, which the existing v5.8.8 test does. Future ship.)
+        {
+            char tmp_dir2[] = "/tmp/v593b_stamp_XXXXXX";
+            if (mkdtemp(tmp_dir2) != NULL) {
+                char model_path[400];
+                snprintf(model_path, sizeof(model_path), "%s/model.bin", tmp_dir2);
+                FILE* mf = fopen(model_path, "w");
+                if (mf) {
+                    fwrite("dummy", 1, 5, mf);
+                    fclose(mf);
+
+                    // Emit stamp WITHOUT scaler fields (legacy shape)
+                    StampWriteResult sw_legacy = stamp_write_for_model(
+                        model_path, "test-secret-v593b", 5, "2026-05-02",
+                        0.65, 0.62, 0.05, 0,
+                        0xABCD1234U, "5.9.3b", /*inf=*/nullptr);
+                    check("v5.9.3b: legacy-shape stamp (no scaler) writes OK",
+                          sw_legacy.ok == 1);
+
+                    ModelStampResult v_legacy = verify_model_stamp(model_path,
+                        "test-secret-v593b", 0.10, 5, 0xABCD1234U);
+                    check("v5.9.3b: legacy stamp parses with feature_scaler_present=0",
+                          v_legacy.feature_scaler_present == 0);
+
+                    char stamp_path[450];
+                    snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
+                    unlink(stamp_path);
+
+                    // Emit stamp WITH scaler fields (v5.9.3b shape)
+                    StampInferenceCfgInputs inf = {};
+                    inf.has_scaler = 1;
+                    inf.feature_scaler_present = 1;
+                    inf.scaler_sha256_hex =
+                        "feedfacecafebabe0123456789abcdef0123456789abcdef0123456789abcdef";
+
+                    StampWriteResult sw_full = stamp_write_for_model(
+                        model_path, "test-secret-v593b", 5, "2026-05-02",
+                        0.65, 0.62, 0.05, 0,
+                        0xABCD1234U, "5.9.3b", &inf);
+                    check("v5.9.3b: full-shape stamp (with scaler) writes OK",
+                          sw_full.ok == 1);
+
+                    ModelStampResult v_full = verify_model_stamp(model_path,
+                        "test-secret-v593b", 0.10, 5, 0xABCD1234U);
+                    check("v5.9.3b: full stamp parses feature_scaler_present=1",
+                          v_full.feature_scaler_present == 1);
+                    check("v5.9.3b: full stamp parses scaler_sha256 verbatim",
+                          strncmp(v_full.scaler_sha256, inf.scaler_sha256_hex, 64) == 0);
+
+                    unlink(stamp_path);
+                    unlink(model_path);
+                }
+                rmdir(tmp_dir2);
+            }
+        }
+
+        // === Test 4: NaN apply early-return (sentinel propagation) ===
+        // Construct a scaler that would produce NaN/Inf on apply (mean
+        // very large; stddev tiny; feature very large). Verify Apply
+        // returns -1 sentinel.
+        {
+            FeatureStandardizer pathological;
+            FeatureStandardizer_Init(&pathological);
+            pathological.has_scaler = 1;
+            pathological.num_features = NUM_REGISTERED_FEATURES;
+            pathological.registry_hash = FEATURE_REGISTRY_HASH();
+            pathological.stddev_floor = SCALER_STDDEV_FLOOR;
+            for (unsigned i = 0; i < NUM_REGISTERED_FEATURES; ++i) {
+                pathological.mean[i] = 1e300;       // near double max
+                pathological.stddev[i] = 1.0;
+            }
+            float bigfeat[NUM_REGISTERED_FEATURES];
+            for (unsigned i = 0; i < NUM_REGISTERED_FEATURES; ++i) bigfeat[i] = -1e30f;
+            int rc_path = FeatureStandardizer_Apply(&pathological, bigfeat, NUM_REGISTERED_FEATURES);
+            check("v5.9.3b: pathological apply (mean+feature both huge) returns -1 sentinel",
+                  rc_path == -1);
+        }
+
+        free(tmat);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

@@ -1882,20 +1882,73 @@ static inline void *train_model_worker_fn(void *arg) {
 
     memset(state->feature_importance, 0, sizeof(state->feature_importance));
 
+    // v5.9.3b — train-time scaler computation + sidecar persist (Gap G).
+    // Reads train_features (still alive at this point, freed below).
+    // Atomic ordering: Compute → Persist → SHA-256 hex → log to operator.
+    // Operator runs tools/stamp_model.sh --feature-scaler-present=1
+    // --scaler-sha256=<hex> (or sets auto_stamp_path in cfg for next run)
+    // to bind the sidecar to the model's stamp.
+    int scaler_persisted = 0;
+    char scaler_sha256_hex[80] = {0};
+    char scaler_path[600] = {0};
+    {
+        tt::FeatureStandardizer scaler;
+        tt::FeatureStandardizer_Compute(&scaler, train_features, n_valid,
+                                          tt::SCALER_STDDEV_FLOOR);
+        snprintf(scaler_path, sizeof(scaler_path), "%s.scaler", snap_model_path);
+        if (tt::FeatureStandardizer_Persist(&scaler, scaler_path)) {
+            scaler_persisted = 1;
+            // Compute SHA-256 of the on-disk file (verifies it landed;
+            // don't trust in-memory compute). Hex output for stamp.
+            if (!tt::sha256_file_hex_inproc(scaler_path, scaler_sha256_hex,
+                                              sizeof(scaler_sha256_hex))) {
+                fprintf(stderr, "[train] scaler persisted but SHA-256 read failed\n");
+                scaler_sha256_hex[0] = '\0';
+            } else {
+                fprintf(stderr, "[train] scaler persisted: %s\n"
+                                "[train] scaler_sha256=%s — pass to stamp tool to bind\n",
+                        scaler_path, scaler_sha256_hex);
+            }
+        } else {
+            // Gap G atomic contract: persist failure must not propagate to
+            // stamp claiming scaler. Worker doesn't emit stamps directly,
+            // but log loudly so operator doesn't manually bind a missing file.
+            fprintf(stderr,
+                "[train] [WARN] scaler persist FAILED; train_features have "
+                "non-degenerate stats but no .scaler on disk. Do not stamp "
+                "this model with feature_scaler_present=1.\n");
+        }
+    }
+
     XGDMatrixFree(dtrain);
     XGBoosterFree(booster);
     free(train_features);
     free(train_labels);
 
+    // v5.9.3b — Gap I: cancel-mid-emit orphan cleanup. The worker doesn't
+    // emit stamps today (operator does via tools/stamp_model.sh), but if
+    // cancel hit between persist + train return, leave the sidecar on disk
+    // with the operator's path. Logged above so they know to clean up.
+    // The full Gap I (auto-stamp + auto-cleanup) lands when worker stamp
+    // emission is wired (post-v5.9.3 cleanup ship).
+    if (state->tm_cancel && scaler_persisted) {
+        // Cancel after persist — sidecar exists; operator must decide.
+        fprintf(stderr,
+            "[train] cancelled post-scaler-persist; %s remains on disk "
+            "(rm if model wasn't kept)\n", scaler_path);
+    }
+
     state->model_trained = true;
     if (is_regression) {
         snprintf(state->status_msg, sizeof(state->status_msg),
-                 "Model saved to %s (MSE: %.6f, corr: %.4f)",
-                 snap_model_path, state->train_mse, state->train_correlation);
+                 "Model saved to %s (MSE: %.6f, corr: %.4f)%s",
+                 snap_model_path, state->train_mse, state->train_correlation,
+                 scaler_persisted ? " [+scaler]" : "");
     } else {
         snprintf(state->status_msg, sizeof(state->status_msg),
-                 "Model saved to %s (accuracy: %.1f%%)",
-                 snap_model_path, state->train_accuracy);
+                 "Model saved to %s (accuracy: %.1f%%)%s",
+                 snap_model_path, state->train_accuracy,
+                 scaler_persisted ? " [+scaler]" : "");
     }
 #endif  // USE_XGBOOST
 
