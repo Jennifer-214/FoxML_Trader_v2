@@ -1,9 +1,14 @@
 # v5.9 ML Hardening — Audit Findings
 
-**Date:** 2026-05-01
-**Status:** ACTIVE — addressed across v5.9.0 → v5.9.5 ships.
+**Date:** 2026-05-01 (closed 2026-05-02)
+**Status:** CLOSED — all 27 findings addressed across v5.9.0 → v5.9.5.
+See `DOCS/changelogs/2026-05-02-v5.9-ml-hardening.md` for the
+sprint postmortem (Phase 6).
 **Source:** automated audit (2026-05-01) + manual verification +
-post-paper-test findings (2026-05-01 evening).
+post-paper-test findings (2026-05-01 evening + 2026-05-02 morning).
+**Closure tag:** `v5.9.5` (2026-05-02). Sprint statistics: 17 tags,
++225 tests (1030 → 1255), hot path UNTOUCHED every ship, 1 calendar
+day end-to-end.
 
 This doc is the **binding registry** of issues v5.9 must address.
 Every confirmed finding has a ship in `plans/2026-05-01-v5.9-ml-hardening.md`.
