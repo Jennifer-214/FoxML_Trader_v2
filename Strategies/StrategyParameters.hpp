@@ -55,6 +55,7 @@
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/VolScaler.hpp"     // v5.5.0 Class 8 — vol scaling
+#include "../MemHeaders/HealthLog.hpp"     // v5.9.0b — Health_LogCriticalRateLimited
 #include "../Strategies/RegimeDetector.hpp"
 #include "SimpleDip.hpp"          // SimpleDipState<F> — Phase 2.1 state-aware BuildParameters
 #include "MeanReversion.hpp"      // MeanReversionState<F> — Phase 2.2 state-aware BuildParameters
@@ -97,6 +98,15 @@ struct MLBuildContext {
     ConfidenceScorer*   confidence;
     double*             out_prediction;
     double*             out_confidence;
+    // v5.9.0b — ML observability pass-through. ML_BuildParameters writes
+    // these for the entry log + ML Status panel to read. nullptr-safe
+    // (legacy/test callers can omit).
+    int*                model_load_failed;            // read-only: set by CoreModelZoo, observed here
+    uint64_t*           last_ml_critical_log_us;      // rate-limit gate for fall-through log
+    double*             out_threshold;                // ml_buy_threshold at decision time
+    double*             out_effective_threshold;      // post-damping threshold used
+    uint32_t*           nan_feature_events_total;     // bumped on Features_PackAll -1
+    uint32_t*           nan_prediction_events_total;  // bumped on Model_Predict NaN/Inf
     // v4.0 train-serve parity: pass through the RORRegressor + EMA price
     // that the engine's slow path maintains. ML_BuildParameters uses these
     // with Regime_ComputeSignals so ALL features ModelFeatures_Pack reads
@@ -596,6 +606,20 @@ inline void ML_BuildParameters(
 
     // if no zoo or no models loaded, fall back to SimpleDip
     if (!zoo || !CoreModelZoo_HasAny(zoo)) {
+        // v5.9.0b — emit rate-limited CRITICAL log so the operator sees
+        // ML→SimpleDip fall-through (V5_9_AUDIT-#2). Pre-v5.9.0b this
+        // was silent; now visible in health log.
+        if (mctx && mctx->last_ml_critical_log_us) {
+            int load_failed = mctx->model_load_failed && *mctx->model_load_failed;
+            tt::Health_LogCriticalRateLimited(
+                mctx->last_ml_critical_log_us,
+                /*gate_us=*/60000000ULL,  // 60s per-core gate
+                /*core=*/-1,  // ML_BuildParameters doesn't have core_id; -1 = unknown
+                "ml",
+                "ML→SimpleDip fall-through: %s (zoo=%s)",
+                load_failed ? "model load failed" : "no model configured",
+                zoo ? "empty" : "null");
+        }
         SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
         out->strategy_id = STRATEGY_ML;
         return;
@@ -665,8 +689,18 @@ inline void ML_BuildParameters(
     int n = Features_PackAll(&ctx, features);
     // v5.9.0 — NaN/Inf in feature pack → fall through to SimpleDip.
     // Features_PackAll returns -1 sentinel; never feed garbage to XGBoost.
+    // v5.9.0b — bump per-core NaN counter + emit rate-limited CRITICAL.
     if (n < 0) {
-        fprintf(stderr, "[ML] dispatch: NaN/Inf in feature pack — falling through to SimpleDip\n");
+        if (mctx && mctx->nan_feature_events_total) {
+            (*mctx->nan_feature_events_total)++;
+        }
+        if (mctx && mctx->last_ml_critical_log_us) {
+            tt::Health_LogCriticalRateLimited(
+                mctx->last_ml_critical_log_us, 60000000ULL, -1, "ml",
+                "NaN/Inf in feature pack — fall-through to SimpleDip "
+                "(nan_feature_events_total=%u)",
+                mctx->nan_feature_events_total ? *mctx->nan_feature_events_total : 0);
+        }
         SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
         out->strategy_id = STRATEGY_ML;
         return;
@@ -723,10 +757,30 @@ inline void ML_BuildParameters(
     // if inference failed (no model loaded, or NaN/Inf prediction),
     // fall back to SimpleDip
     if (!have_signal) {
+        // v5.9.0b — bump prediction-NaN counter + emit rate-limited
+        // CRITICAL when fall-through is due to NaN (vs no model loaded).
+        // The earlier NaN-fall-through paths above already log; this
+        // catches the case where ALL prediction attempts produced NaN.
+        if (mctx && mctx->nan_prediction_events_total) {
+            (*mctx->nan_prediction_events_total)++;
+        }
+        if (mctx && mctx->last_ml_critical_log_us) {
+            tt::Health_LogCriticalRateLimited(
+                mctx->last_ml_critical_log_us, 60000000ULL, -1, "ml",
+                "no signal — all model predictions NaN/Inf or model unloaded "
+                "(nan_prediction_events_total=%u)",
+                mctx->nan_prediction_events_total ? *mctx->nan_prediction_events_total : 0);
+        }
         SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
         out->strategy_id = STRATEGY_ML;
         return;
     }
+
+    // v5.9.0b — record threshold + effective_threshold for entry log + ML
+    // Status panel display. Threshold is read from cfg; effective is
+    // post-confidence-damping (computed below in the gate decision).
+    double ml_threshold_d = (double)FPN_ToDouble(config->ml_buy_threshold);
+    if (mctx && mctx->out_threshold) *mctx->out_threshold = ml_threshold_d;
 
     // TP/SL from ML-specific config
     FPN<F> tp_pct = config->ml_tp_pct;
@@ -761,6 +815,9 @@ inline void ML_BuildParameters(
         if (effective > 1.0) effective = 1.0;
         threshold = effective;
     }
+    // v5.9.0b — surface the effective threshold for entry log + ML Status
+    // panel. Same value the gate decision uses below; single source of truth.
+    if (mctx && mctx->out_effective_threshold) *mctx->out_effective_threshold = threshold;
 
     // gate decision: BarrierGate (continuous modulation) OR binary threshold
     FPN<F> gate_price = FPN_Zero<F>();  // default: zero-gate (no entry)

@@ -809,8 +809,16 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         fprintf(stderr, "[sharded] core %d: ML model UNLOADED due to strict verify failure\n", i);
                         CoreModelZoo_Free(&ml_zoos[i]);
                         state.cores[i].model_handle = NULL;
+                        // v5.9.0b: surface load failure to operator via TUI/health log
+                        state.cores[i].model_load_failed = 1;
                     }
                 }
+            } else {
+                // v5.9.0b: ML strategy was selected but model didn't load.
+                // Distinct from "no model configured" (which is operator
+                // intent — leave flag at 0). Here: strategy=ML + load
+                // attempted + failed → surface to operator.
+                state.cores[i].model_load_failed = 1;
             }
 
             // Phase 6prep sharded c12: re-init ConfidenceScorer with cfg

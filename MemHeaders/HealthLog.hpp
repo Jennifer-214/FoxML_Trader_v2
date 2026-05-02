@@ -52,10 +52,24 @@
 namespace tt {
 
 // Level enum — keep small ints so the cfg int comparison is cheap.
+// Negative values are MORE severe than INFO (always emit regardless of
+// min_level cfg). Positive values are MORE verbose (debug/trace).
+//
+// Semantics:
+//   CRITICAL — operator-blocking. ML→SimpleDip fall-through, model load
+//              failure, drift catch fires. ALWAYS emits.
+//   WARN     — degraded but functioning. Cfg defaults applied silently,
+//              held-out gate warn-load, etc. ALWAYS emits unless
+//              min_level configured higher.
+//   INFO     — normal events (entry/exit, regime change, slow-path).
+//   DEBUG    — diagnostic detail; suppressed unless min_level=1.
+//   TRACE    — per-tick or noisy; suppressed unless min_level=2.
 enum HealthLogLevel {
-    HEALTH_INFO  = 0,
-    HEALTH_DEBUG = 1,
-    HEALTH_TRACE = 2,
+    HEALTH_CRITICAL = -2,  // v5.9.0b: operator-blocking failure mode
+    HEALTH_WARN     = -1,  // v5.9.0b: degraded but functioning
+    HEALTH_INFO     =  0,
+    HEALTH_DEBUG    =  1,
+    HEALTH_TRACE    =  2,
 };
 
 // Module-static config holder. Set once at engine boot, read on every
@@ -91,10 +105,17 @@ inline void Health_LogConfigure(const char* path, int min_level) {
 
 // Returns 1 if logging is enabled at or above the given level. Cheap
 // short-circuit so callers can wrap expensive payload formatting.
+//
+// Filter semantics (v5.9.0b): negative levels (CRITICAL=-2, WARN=-1)
+// ALWAYS emit when path is configured (more severe than INFO). Positive
+// levels (DEBUG=1, TRACE=2) suppressed unless min_level >= level. INFO=0
+// always emits. So "level > min_level" suppresses; "level <= 0" or
+// "level <= min_level" emits.
 inline int Health_LogEnabled(int level) {
     HealthLogState* s = HealthLog_Singleton();
     if (!s->path[0]) return 0;
-    return level >= s->min_level ? 1 : 0;
+    if (level <= 0) return 1;          // CRITICAL/WARN/INFO always emit
+    return level <= s->min_level ? 1 : 0;
 }
 
 // Core append. Caller passes category, optional core_id (-1 = global),
@@ -105,7 +126,9 @@ inline int Health_Log(int level, const char* category, int core_id,
                       const char* fmt, ...) {
     HealthLogState* s = HealthLog_Singleton();
     if (!s->path[0]) return 0;
-    if (level < s->min_level) return 0;
+    // v5.9.0b — filter: suppress positive levels (DEBUG/TRACE) above
+    // configured verbosity. CRITICAL/WARN/INFO (level <= 0) always emit.
+    if (level > 0 && level > s->min_level) return 0;
 
     // ISO 8601 UTC with ms precision
     struct timeval tv;
@@ -119,8 +142,10 @@ inline int Health_Log(int level, const char* category, int core_id,
     }
 
     const char* level_str =
-        (level == HEALTH_TRACE) ? "trace" :
-        (level == HEALTH_DEBUG) ? "debug" :
+        (level == HEALTH_TRACE)    ? "trace"    :
+        (level == HEALTH_DEBUG)    ? "debug"    :
+        (level == HEALTH_WARN)     ? "warn"     :
+        (level == HEALTH_CRITICAL) ? "critical" :
         "info";
 
     // Format payload first (caller's printf). Buffer large enough for
@@ -171,6 +196,53 @@ inline int Health_Log(int level, const char* category, int core_id,
     if (pinned) { uselocale(prev); freelocale(pinned); }
 
     return (written > 0 && flush_ok && close_ok) ? 1 : 0;
+}
+
+// v5.9.0b — rate-limited critical log helper. Same semantics as
+// Health_Log() but suppresses repeat emissions within `gate_us`
+// microseconds. Caller owns the `last_emit_us` storage (typically
+// per-core: a uint64_t field on CoreContext, OR a static at the
+// call site for per-process gating).
+//
+// Usage:
+//   static uint64_t last_us = 0;  // OR: CoreContext::last_ml_critical_log_us
+//   Health_LogCriticalRateLimited(&last_us, /*gate_us=*/60000000ULL,  // 60s
+//                                  /*core=*/core_id, "ml",
+//                                  "fall-through to SimpleDip: %s", reason);
+//
+// Returns 1 if emitted, 0 if suppressed. Stamp on fail-loud errors;
+// don't use for debug spam (DEBUG/TRACE levels exist for that).
+//
+// Implementation: gettimeofday() + atomic-style read-modify on the
+// uint64_t. Caller's responsibility to ensure single-writer if
+// shared across threads (per-core fields are; per-process statics
+// need pthread mutex if shared, but the failure mode is acceptable
+// double-emit-once on race, not data corruption).
+inline int Health_LogCriticalRateLimited(uint64_t* last_emit_us,
+                                          uint64_t gate_us,
+                                          int core_id,
+                                          const char* category,
+                                          const char* fmt, ...) {
+    if (!last_emit_us) return 0;
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    uint64_t now_us = (uint64_t)tv.tv_sec * 1000000ULL + (uint64_t)tv.tv_usec;
+    if (*last_emit_us != 0 && (now_us - *last_emit_us) < gate_us) {
+        return 0;  // suppressed within gate window
+    }
+    *last_emit_us = now_us;
+
+    // Vararg forward via a vsnprintf helper. Format payload first,
+    // then call Health_Log with the materialized string + a "%s"
+    // format. (Avoids re-implementing vsnprintf+JSONL escape here.)
+    char payload[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int p_len = vsnprintf(payload, sizeof(payload), fmt, ap);
+    va_end(ap);
+    if (p_len < 0) payload[0] = '\0';
+
+    return Health_Log(HEALTH_CRITICAL, category, core_id, "%s", payload);
 }
 
 } // namespace tt

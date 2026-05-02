@@ -1008,6 +1008,16 @@ struct TUISnapshot {
         double   ml_confidence_ic;     // RollingIC value for tooltip / debug
         double   ml_confidence_rmse;   // RollingRMSE value
         double   ml_active_prediction; // prediction at fill time of open position (0 if no open pos)
+        // v5.9.0b — ML observability extensions for the new ML Status panel.
+        // Distinct from ml_model_loaded: ml_model_load_failed=1 means
+        // "load was attempted and refused/missing" (operator should care);
+        // ml_model_loaded=0 with load_failed=0 means "no model configured"
+        // (operator intent — leave at simpler strategy).
+        uint8_t  ml_model_load_failed;       // 1 = ML strategy selected but model didn't load
+        double   ml_last_threshold;          // ml_buy_threshold at last decision
+        double   ml_last_effective_threshold;// post-confidence-damping threshold actually used
+        uint32_t ml_nan_feature_events;      // total feature-pack NaN/Inf events on this core
+        uint32_t ml_nan_prediction_events;   // total prediction NaN/Inf events on this core
         // v4.0.4: per-core P&L breakdown for Account panel. Sourced from
         // CoreContext::core_realized / core_wins / core_losses / core_fees.
         // The aggregate equals oms->realized_pnl modulo timing (snapshot

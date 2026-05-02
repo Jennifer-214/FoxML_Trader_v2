@@ -30,6 +30,7 @@
 #include "GUI/DashboardPanels.hpp"
 #include "GUI/LogViewerPanel.hpp"
 #include "GUI/EngineHeaderPanel.hpp"  // v5.8.6b: engine version + registry hash header
+#include "GUI/MLStatusPanel.hpp"      // v5.9.0b: per-core ML observability
 
 #include "Backtest/BacktestPanels.hpp"
 
@@ -321,6 +322,8 @@ int main(int argc, char *argv[]) {
 
         // v5.8.6b: engine header — version + feature registry hash + format
         tt::EngineHeader_Render();
+        // v5.9.0b: ML status — per-core load state, prediction context, NaN counters
+        tt::MLStatus_Render(&suite_snap);
 
         // trade history (reuse existing panel — reads backtest CSV)
         if (run_control.complete) {

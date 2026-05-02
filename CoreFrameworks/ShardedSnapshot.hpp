@@ -494,6 +494,13 @@ static inline void TUI_CopySnapshotSharded(
             // to compute on the snapshot path (snapshot is slow-path itself).
             snap->per_core[i].ml_confidence_ic   = RollingIC_Compute(&state->cores[i].confidence.ic);
             snap->per_core[i].ml_confidence_rmse = RollingRMSE_Compute(&state->cores[i].confidence.rmse);
+            // v5.9.0b — ML observability extensions. Single-writer (slow path)
+            // → snapshot read; no race. Counters are uint32 monotonic.
+            snap->per_core[i].ml_model_load_failed       = (uint8_t)state->cores[i].model_load_failed;
+            snap->per_core[i].ml_last_threshold          = state->cores[i].last_ml_threshold;
+            snap->per_core[i].ml_last_effective_threshold= state->cores[i].last_ml_effective_threshold;
+            snap->per_core[i].ml_nan_feature_events      = state->cores[i].nan_feature_events_total;
+            snap->per_core[i].ml_nan_prediction_events   = state->cores[i].nan_prediction_events_total;
             // Track the highest-confidence ML core for the headline summary.
             // Tie-break: prefer the lowest core index (deterministic).
             if (state->cores[i].last_confidence > headline_conf) {

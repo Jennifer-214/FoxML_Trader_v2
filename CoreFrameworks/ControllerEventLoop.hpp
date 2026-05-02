@@ -49,7 +49,8 @@
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/ROR_regressor.hpp"        // v5.1.0 — RORRegressor on CoreContext::slow_state
 #include "../ML_Headers/FlowFeatures.hpp"         // v5.1.0 — FlowState etc on CoreContext::slow_state
-#include "../MemHeaders/HealthLog.hpp"           // v5.4.0 Phase 0.1 — structured JSONL diagnostic log
+#include "../MemHeaders/HealthLog.hpp"
+#include "../ML_Headers/FeatureRegistry.hpp"  // v5.9.0b: FEATURE_REGISTRY_HASH() in entry log           // v5.4.0 Phase 0.1 — structured JSONL diagnostic log
 #include "../Strategies/StrategyParameters.hpp"
 // Strategies/StrategyLifecycle.hpp included LATER (post-EventLoopState
 // definition) to avoid the include cycle: SL needs CoreContext +
@@ -179,6 +180,15 @@ struct CoreContext {
     double staged_prediction;      // prediction from last ML rebuild
     double active_prediction;      // prediction at last entry submit (0 = no open pos)
     double last_confidence;        // most recent ConfidenceScorer_Compute result
+    // v5.9.0b — ML observability extensions (V5_9_AUDIT-#2, #3).
+    // Surface model load failures, ML decision context, and NaN counters
+    // to the operator via TUISnapshot + ML Status panel + entry log.
+    int      model_load_failed;            // 1 = model attempted but refused/missing (distinct from "no model configured")
+    uint64_t last_ml_critical_log_us;      // rate-limit gate for ML→SimpleDip CRITICAL log (per-core)
+    double   last_ml_threshold;            // ml_buy_threshold at last decision (display + entry log)
+    double   last_ml_effective_threshold;  // post-confidence-damping threshold actually used
+    uint32_t nan_feature_events_total;     // count of Features_PackAll -1 sentinel returns on this core
+    uint32_t nan_prediction_events_total;  // count of Model_Predict NaN/Inf events on this core
     // v4.0.3 spacing: last entry price for this core, set by drainer on
     // entry submit. Strategy _BuildParameters checks
     // |new_entry - last_entry_price| < stddev × spacing_multiplier and
@@ -1009,12 +1019,18 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // only stores notional, not the components).
         if (tt::Health_LogEnabled(tt::HEALTH_INFO) && slot < 16) {
             const auto& pos = oms->portfolio.positions[slot];
+            // v5.9.0b — extended with ML decision context (V5_9_AUDIT-#3).
+            // Post-mortem analysis: "why did ML enter that bad trade?" is
+            // now answerable from the log alone (prediction, threshold,
+            // confidence, registry hash).
+            int is_ml = (ctx.resolved_strategy_id == STRATEGY_ML);
             tt::Health_Log(tt::HEALTH_INFO, "entry", core_id,
                 "slot=%d strat=%u resolved=%u regime=%d "
                 "trend_score=%d vol_score=%d hyst=%d/%d "
                 "entry_px=%g qty=%g entry_notional=%g entry_fee=%g "
                 "tp_pct=%g tp_floor=%g "
-                "stddev_pct=%g long_slope=%g vol_delta=%g",
+                "stddev_pct=%g long_slope=%g vol_delta=%g "
+                "ml_pred=%g ml_thr=%g ml_eff_thr=%g ml_conf=%g registry=%016lx",
                 slot, (unsigned)ctx.strategy_id,
                 (unsigned)ctx.resolved_strategy_id,
                 ctx.regime_state.current_regime,
@@ -1030,7 +1046,13 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 FPN_ToDouble(ctx.diag_tp_pct_floor),
                 FPN_ToDouble(ctx.diag_stddev_pct),
                 FPN_ToDouble(ctx.diag_long_slope),
-                FPN_ToDouble(ctx.diag_volume_delta));
+                FPN_ToDouble(ctx.diag_volume_delta),
+                // v5.9.0b — ML decision context. Zero for non-ML cores.
+                is_ml ? ctx.active_prediction : 0.0,
+                is_ml ? ctx.last_ml_threshold : 0.0,
+                is_ml ? ctx.last_ml_effective_threshold : 0.0,
+                is_ml ? ctx.last_confidence : 0.0,
+                (unsigned long)FEATURE_REGISTRY_HASH());
         }
     }
     oms->last_opened_mask &= (uint16_t)~my_mask;  // clear only my bits
@@ -1838,6 +1860,16 @@ inline void EventLoop_RebuildOneCore(
             ml_ctx.spread_state       = (void*)spread_state;
             ml_ctx.current_spread     = current_spread;
             ml_ctx.current_mid_price  = current_mid_price;
+            // v5.9.0b — ML observability pass-through (V5_9_AUDIT-#2, #3).
+            // Caller-owned per-core storage; ML_BuildParameters reads/writes
+            // through these pointers + the entry log emitter reads them at
+            // fill time.
+            ml_ctx.model_load_failed           = &state->cores[slot].model_load_failed;
+            ml_ctx.last_ml_critical_log_us     = &state->cores[slot].last_ml_critical_log_us;
+            ml_ctx.out_threshold               = &state->cores[slot].last_ml_threshold;
+            ml_ctx.out_effective_threshold     = &state->cores[slot].last_ml_effective_threshold;
+            ml_ctx.nan_feature_events_total    = &state->cores[slot].nan_feature_events_total;
+            ml_ctx.nan_prediction_events_total = &state->cores[slot].nan_prediction_events_total;
             dispatch_ctx = &ml_ctx;
         }
         // v4.0.4: stash the resolved strategy for GUI display. For non-AUTO

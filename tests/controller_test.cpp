@@ -9874,6 +9874,94 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- EXTENSIBILITY: v5.9.0b ML observability infrastructure ---\n");
+    {
+        // HEALTH_CRITICAL + HEALTH_WARN levels exist + emit when min_level=0.
+        check("v5.9.0b: HEALTH_CRITICAL == -2", tt::HEALTH_CRITICAL == -2);
+        check("v5.9.0b: HEALTH_WARN == -1",     tt::HEALTH_WARN == -1);
+        check("v5.9.0b: HEALTH_INFO == 0 (unchanged)", tt::HEALTH_INFO == 0);
+        // Health_LogEnabled returns true for negative levels even when
+        // min_level=0 (CRITICAL always emits).
+        // Note: we don't actually call the logger here (would require
+        // configuring a real path); just verify the level enum integrity.
+
+        // Health_LogCriticalRateLimited rate-limits via a caller-owned
+        // last_emit_us cell. Two rapid calls within gate_us → second
+        // suppressed. Two calls outside the gate → both emit.
+        uint64_t last_us = 0;
+        // First call: gate_us=1ms, last_us=0 → emits (returns 1, but
+        // requires Health_LogConfigure with a real path — without that,
+        // Health_Log returns 0. Either way the rate-limit logic itself
+        // is deterministic on `last_us`.)
+        // Configure a tmp health log path for the test.
+        char tmp_log[] = "/tmp/v590b_healthlog_XXXXXX";
+        int fd = mkstemp(tmp_log);
+        if (fd >= 0) {
+            close(fd);
+            tt::Health_LogConfigure(tmp_log, tt::HEALTH_INFO);
+
+            int r1 = tt::Health_LogCriticalRateLimited(
+                &last_us, /*gate_us=*/1000000ULL, 0, "test", "first call");
+            check("v5.9.0b: rate-limited critical first-call emits",
+                  r1 == 1);
+            uint64_t first_emit = last_us;
+            check("v5.9.0b: rate-limited critical updates last_emit_us",
+                  first_emit > 0);
+
+            // Second call WITHIN gate window: suppressed.
+            int r2 = tt::Health_LogCriticalRateLimited(
+                &last_us, /*gate_us=*/1000000ULL, 0, "test", "second call (suppressed)");
+            check("v5.9.0b: rate-limited critical suppresses within gate window",
+                  r2 == 0);
+            check("v5.9.0b: rate-limited critical does NOT update last_emit_us when suppressed",
+                  last_us == first_emit);
+
+            // Reset config + cleanup.
+            tt::Health_LogConfigure("", tt::HEALTH_INFO);
+            unlink(tmp_log);
+        } else {
+            check("v5.9.0b: rate-limited critical first-call emits", 0);
+            check("v5.9.0b: rate-limited critical updates last_emit_us", 0);
+            check("v5.9.0b: rate-limited critical suppresses within gate window", 0);
+            check("v5.9.0b: rate-limited critical does NOT update last_emit_us when suppressed", 0);
+        }
+
+        // CoreContext extensions exist — compile-time check via memset+access.
+        // (The fields would have caused compile failure earlier if missing.)
+        tt::CoreContext<64> ctx{};
+        ctx.model_load_failed = 1;
+        ctx.last_ml_threshold = 0.5;
+        ctx.last_ml_effective_threshold = 0.55;
+        ctx.nan_feature_events_total = 7;
+        ctx.nan_prediction_events_total = 3;
+        ctx.last_ml_critical_log_us = 12345;
+        check("v5.9.0b: CoreContext.model_load_failed assignable",
+              ctx.model_load_failed == 1);
+        check("v5.9.0b: CoreContext.last_ml_threshold assignable",
+              ctx.last_ml_threshold == 0.5);
+        check("v5.9.0b: CoreContext.nan_feature_events_total counter assignable",
+              ctx.nan_feature_events_total == 7);
+        check("v5.9.0b: CoreContext.nan_prediction_events_total counter assignable",
+              ctx.nan_prediction_events_total == 3);
+
+        // MLBuildContext pass-through pointer fields exist.
+        tt::MLBuildContext mctx{};
+        int load_failed = 1;
+        uint64_t last_log = 0;
+        double thr = 0.0;
+        double eff_thr = 0.0;
+        uint32_t nan_feat = 0;
+        uint32_t nan_pred = 0;
+        mctx.model_load_failed = &load_failed;
+        mctx.last_ml_critical_log_us = &last_log;
+        mctx.out_threshold = &thr;
+        mctx.out_effective_threshold = &eff_thr;
+        mctx.nan_feature_events_total = &nan_feat;
+        mctx.nan_prediction_events_total = &nan_pred;
+        check("v5.9.0b: MLBuildContext pass-through pointers compile + assign",
+              mctx.model_load_failed != nullptr);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.8.10 CoreModelZoo strict-mode integration (drift refusal) ---\n");
     {
         // Engine boot integration test for the drift-refusal path. Distinct

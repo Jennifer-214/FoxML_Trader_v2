@@ -27,6 +27,7 @@
 #include "LogViewerPanel.hpp"
 #include "StrategyQualityPanel.hpp"  // v5.7.6
 #include "EngineHeaderPanel.hpp"     // v5.8.6b: engine version + registry hash header
+#include "MLStatusPanel.hpp"         // v5.9.0b: per-core ML observability
 
 //==========================================================================
 // STATEFUL PANEL REGISTRY — v5.8.4b
@@ -364,6 +365,8 @@ static inline void *gui_thread_fn(void *arg) {
 
         // v5.8.6b: engine header — version + feature registry hash + format
         tt::EngineHeader_Render();
+        // v5.9.0b: ML status — per-core load state, prediction context, NaN counters
+        tt::MLStatus_Render(snap);
 
         // dashboard panels (right side)
         GUI_RenderDashboard(snap, snap->start_time ? snap->start_time : gui_start, shared);
