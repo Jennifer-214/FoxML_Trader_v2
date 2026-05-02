@@ -189,6 +189,13 @@ struct CoreContext {
     double   last_ml_effective_threshold;  // post-confidence-damping threshold actually used
     uint32_t nan_feature_events_total;     // count of Features_PackAll -1 sentinel returns on this core
     uint32_t nan_prediction_events_total;  // count of Model_Predict NaN/Inf events on this core
+    // v5.9.1 — edge-trigger for boot-time per-core warmup-complete log.
+    // RebuildOneCore checks (rolling_short.count >= min_warmup_samples)
+    // every cycle; fires the log exactly once per core (and per session)
+    // by setting this flag. Distinct from the global startup gate at
+    // EngineSharded.hpp:1420 (which uses core 0's count to release ALL
+    // cores from CONTROLLER_WARMUP). Per-core readiness lives here.
+    uint8_t warmup_log_emitted;
     // v4.0.3 spacing: last entry price for this core, set by drainer on
     // entry submit. Strategy _BuildParameters checks
     // |new_entry - last_entry_price| < stddev × spacing_multiplier and
@@ -1665,6 +1672,21 @@ inline void EventLoop_RebuildOneCore(
         // step (sharded recomputes resolved_cfg fresh each rebuild, so
         // there's no live-filter drift to undo).
         state->cores[slot].idle_cycles++;
+        // v5.9.1 — boot-time per-core warmup-complete log (V5_9_AUDIT-#9).
+        // Fires once per session per core, on the rebuild cycle that first
+        // observes rolling.count >= min_warmup_samples. Distinct from the
+        // global startup gate that releases all cores from CONTROLLER_WARMUP
+        // simultaneously — operator wants per-core readiness because in
+        // per_core_slow arch each core's slow path runs at its own cadence.
+        if (!state->cores[slot].warmup_log_emitted) {
+            int wmin = (int)config->min_warmup_samples;
+            if (wmin <= 0) wmin = 64;  // engine default (matches ShardedSnapshot fallback)
+            if (rolling->count >= wmin) {
+                fprintf(stderr, "[core %d] warmup complete (%d/%d samples) — strategy active\n",
+                        slot, rolling->count, wmin);
+                state->cores[slot].warmup_log_emitted = 1;
+            }
+        }
         if (config->idle_reset_cycles > 0 &&
             state->cores[slot].idle_cycles >= config->idle_reset_cycles) {
             state->cores[slot].pnl_feeder.head  = 0;
@@ -1870,6 +1892,12 @@ inline void EventLoop_RebuildOneCore(
             ml_ctx.out_effective_threshold     = &state->cores[slot].last_ml_effective_threshold;
             ml_ctx.nan_feature_events_total    = &state->cores[slot].nan_feature_events_total;
             ml_ctx.nan_prediction_events_total = &state->cores[slot].nan_prediction_events_total;
+            // v5.9.1 — wire SHALT pointer through MLBuildContext so the
+            // confidence hard-block path can attribute SHALT_LOW_CONFIDENCE.
+            // Same address the dispatcher passes via its strategy_halt_reason
+            // parameter; ml_ctx is the only path ML_BuildParameters has into
+            // it without changing the dispatcher signature.
+            ml_ctx.out_strategy_halt_reason    = &state->cores[slot].strategy_halt_reason;
             dispatch_ctx = &ml_ctx;
         }
         // v4.0.4: stash the resolved strategy for GUI display. For non-AUTO

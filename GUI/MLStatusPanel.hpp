@@ -48,15 +48,31 @@ inline void MLStatus_Render(const TUISnapshot* snap) {
             const auto& pc = snap->per_core[i];
 
             // Only render rows for ML cores OR cores with ML symptoms
-            // (load failed / NaN events) — keeps the panel quiet for
-            // non-ML cores in mixed deployments.
+            // (load failed / NaN events / pre-warmup) — keeps the panel
+            // quiet for non-ML cores in mixed deployments.
             int has_ml_signal = pc.is_ml || pc.ml_model_load_failed ||
                                  pc.ml_nan_feature_events > 0 ||
-                                 pc.ml_nan_prediction_events > 0;
+                                 pc.ml_nan_prediction_events > 0 ||
+                                 (pc.is_ml && pc.warmup_progress_pct < 100);
             if (!has_ml_signal) continue;
 
             ImGui::TextColored(FoxmlColors::sand, "core %d:", i);
             ImGui::SameLine(0, 8);
+
+            // v5.9.1 — pre-warmup overlay. ML strategy is configured but
+            // hasn't seen enough samples to make a decision yet. Operator
+            // would otherwise see model=loaded + pred=0.0000 + thr=— with
+            // no signal that the engine is still warming up.
+            if (pc.warmup_progress_pct < 100) {
+                ImGui::TextColored(FoxmlColors::sand,
+                    "warmup: %u%%", (unsigned)pc.warmup_progress_pct);
+                ImGui::SetItemTooltip(
+                    "Per-core slow path is still gathering rolling samples.\n"
+                    "Model + features won't fire predictions until rolling\n"
+                    "count reaches min_warmup_samples. Once 100%%, expect a\n"
+                    "boot-time stderr line confirming readiness.");
+                ImGui::SameLine(0, 14);
+            }
 
             // Model state — tri-state.
             if (pc.ml_model_load_failed) {

@@ -33,6 +33,8 @@
 #ifndef CONFIDENCE_SCORE_HPP
 #define CONFIDENCE_SCORE_HPP
 
+#include <stdio.h>
+
 #include <math.h>
 #include <string.h>
 
@@ -215,7 +217,17 @@ struct ConfidenceScorer {
 static inline void ConfidenceScorer_Init(ConfidenceScorer *cs, int window, double tau) {
     RollingIC_Init(&cs->ic, (window > 0) ? window : CONFIDENCE_IC_WINDOW_DEFAULT);
     RollingRMSE_Init(&cs->rmse, (window > 0) ? window : CONFIDENCE_IC_WINDOW_DEFAULT);
-    cs->freshness_tau = (tau > 0.0) ? tau : CONFIDENCE_FRESHNESS_TAU_DEFAULT;
+    // v5.9.1 (V5_9_AUDIT-#13) — surface silent default fallback. Cfg parser
+    // now refuses tau<=0, but defensive code-path callers (older tests,
+    // direct embeds) still hit this branch. WARN once at boot so the
+    // operator knows why their cfg value isn't taking effect.
+    if (tau <= 0.0) {
+        fprintf(stderr, "[WARN] ConfidenceScorer_Init: tau=%.3f invalid, using default %.1f\n",
+                tau, (double)CONFIDENCE_FRESHNESS_TAU_DEFAULT);
+        cs->freshness_tau = CONFIDENCE_FRESHNESS_TAU_DEFAULT;
+    } else {
+        cs->freshness_tau = tau;
+    }
     cs->last_confidence = 0.0;
 }
 

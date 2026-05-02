@@ -145,6 +145,14 @@ struct BacktestStats {
     // optimizer continues to read profit_factor numerically (now 0.0 in
     // that case). Cleanly separates math from display semantics.
     int all_wins_run;
+    // v5.9.1: count of label samples that produced NaN/Inf at compute.
+    // For binary/regression: wrapped to neutral default (0.5/0.0) and consumed.
+    // For multiclass: sample is skipped (not included in training matrix), since
+    // softmax has no defensible neutral default. nan_labels_dropped only
+    // increments on the multiclass-skip path; binary/regression saved samples
+    // are tracked via their own counters if needed.
+    uint32_t nan_labels_total;     // total NaN/Inf label outputs encountered
+    uint32_t nan_labels_dropped;   // multiclass samples skipped from training
 };
 
 //======================================================================================================
@@ -502,18 +510,41 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
     double sl = run_cfg->label_sl_pct > 0 ? run_cfg->label_sl_pct : 1.0;
     int fwd = run_cfg->label_forward_ticks > 0 ? run_cfg->label_forward_ticks : 1000;
 
+    int is_multiclass = LabelType_IsMulticlass(run_cfg->label_type);
+    int is_regression = LabelType_IsRegression(run_cfg->label_type);
     for (int s = 0; s < results->sample_count; s++) {
         int tidx = results->sample_tick_indices[s];
         if (tidx >= label_count) tidx = label_count - 1;
         int extra = (run_cfg->label_type == LABEL_REGIME)
             ? results->sample_regimes[s] : fwd;
-        results->labels[s] = label_fn(label_ticks, tidx, label_count,
-                                       results->sample_prices[s], tp, sl, extra);
+        float lbl = label_fn(label_ticks, tidx, label_count,
+                             results->sample_prices[s], tp, sl, extra);
+        if (isnan(lbl) || isinf(lbl)) {
+            results->stats.nan_labels_total++;
+            if (is_multiclass) {
+                // multiclass softmax has no defensible neutral; mark with NAN
+                // so the training-matrix copy step skips this sample.
+                results->labels[s] = NAN;
+                results->stats.nan_labels_dropped++;
+            } else if (is_regression) {
+                results->labels[s] = 0.0f;  // zero return is the neutral default
+            } else {
+                results->labels[s] = 0.5f;  // binary: neither class
+            }
+        } else {
+            results->labels[s] = lbl;
+        }
     }
     free(label_ticks);
 
-    fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.1f%%, sl=%.1f%%)\n",
+    fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.1f%%, sl=%.1f%%)",
             results->sample_count, run_cfg->label_type, tp, sl);
+    if (results->stats.nan_labels_total > 0) {
+        fprintf(stderr, " — NaN/Inf: %u total, %u dropped (multiclass)",
+                results->stats.nan_labels_total,
+                results->stats.nan_labels_dropped);
+    }
+    fputc('\n', stderr);
 }
 
 //======================================================================================================
@@ -957,11 +988,16 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     // For multiclass, labels are integer class ids 0..K-1, never 0.5 — no filter
     // is needed but harmless. Skip the filter for clarity + correctness.
     int filter_neutrals = LabelType_IsBinary(label_type);
+    int filter_nan = LabelType_IsMulticlass(label_type);  // v5.9.1: NAN-marked = NaN-label-dropped
 
     int nn_count = 0;
     if (filter_neutrals) {
         for (int i = 0; i < data->sample_count; i++) {
             if (data->labels[i] != 0.5f) nn_count++;
+        }
+    } else if (filter_nan) {
+        for (int i = 0; i < data->sample_count; i++) {
+            if (!isnan(data->labels[i])) nn_count++;
         }
     } else {
         nn_count = data->sample_count;
@@ -988,6 +1024,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     int j = 0;
     for (int i = 0; i < data->sample_count; i++) {
         if (filter_neutrals && data->labels[i] == 0.5f) continue;
+        if (filter_nan && isnan(data->labels[i])) continue;
         memcpy(&nn_features[j * MODEL_NUM_FEATURES],
                &data->feature_matrix[i * MODEL_NUM_FEATURES],
                MODEL_NUM_FEATURES * sizeof(float));
@@ -1317,10 +1354,12 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
     int is_regression   = LabelType_IsRegression(label_type);
     int is_multiclass   = LabelType_IsMulticlass(label_type);
     int filter_neutrals = LabelType_IsBinary(label_type);
+    int filter_nan      = is_multiclass;  // v5.9.1: NAN-marked = NaN-label-dropped
 
     int n_train = 0, n_eval = 0;
     for (int i = 0; i < data->sample_count; ++i) {
         if (filter_neutrals && data->labels[i] == 0.5f) continue;
+        if (filter_nan && isnan(data->labels[i])) continue;
         if (i < split->trainval_end_idx) n_train++;
         else                              n_eval++;
     }
@@ -1349,6 +1388,7 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
         int ti = 0, ei = 0;
         for (int i = 0; i < data->sample_count; ++i) {
             if (filter_neutrals && data->labels[i] == 0.5f) continue;
+            if (filter_nan && isnan(data->labels[i])) continue;
             if (i < split->trainval_end_idx) {
                 memcpy(&train_features[ti * MODEL_NUM_FEATURES],
                        &data->feature_matrix[i * MODEL_NUM_FEATURES],

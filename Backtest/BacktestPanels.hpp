@@ -482,6 +482,26 @@ static inline void GUI_Panel_Results(const BacktestResults *results) {
         if (results->sample_count > 0)
             row("ML Samples",  "%d", results->sample_count);
 
+        if (s->nan_labels_total > 0) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "NaN/Inf Labels");
+            ImGui::TableNextColumn();
+            if (s->nan_labels_dropped > 0) {
+                ImGui::Text("%u total (%u multiclass dropped)",
+                            s->nan_labels_total, s->nan_labels_dropped);
+            } else {
+                ImGui::Text("%u (replaced with neutral default)",
+                            s->nan_labels_total);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Label generators produced NaN/Inf for these samples.\n"
+                                  "Binary → 0.5, regression → 0.0, multiclass → skipped.\n"
+                                  "Non-zero count usually indicates degenerate input data\n"
+                                  "(zero prices, missing forward window, etc.).");
+            }
+        }
+
         ImGui::EndTable();
     }
 

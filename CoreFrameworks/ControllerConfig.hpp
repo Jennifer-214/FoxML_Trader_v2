@@ -431,6 +431,14 @@ template <unsigned F> struct ControllerConfig {
   FPN<F>   confidence_freshness_tau; // freshness decay constant in seconds (default 300)
   FPN<F>   confidence_threshold_scale; // gate formula: effective_thr = base * (this - conf)
                                        // (default 2.0 — clamps at 1.0 in code)
+  // v5.9.1 (V5_9_AUDIT-#21) — hard-block entries when raw confidence is below
+  // this threshold, INDEPENDENT of damping. With low IC (noisy predictions),
+  // damped threshold can become pathological; trades fire on essentially-
+  // random predictions. Hard floor is the safety net.
+  // Default 0.0 = disabled (preserves pre-v5.9.1 behavior). Operator opts in
+  // (audit-recommended value 0.05). Only consulted when confidence_enabled=1.
+  // Surfaced via SHALT_LOW_CONFIDENCE on the strategy_halt_reason channel.
+  FPN<F>   confidence_hard_block_threshold;
   // Phase 7 prep — held-out validation infrastructure. Used by foxml_suite
   // when training/evaluating a model. Live engine reads via expected.cfg
   // mismatch checks (CoreModelZoo).
@@ -824,6 +832,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.confidence_window           = 32;                          // CONFIDENCE_IC_WINDOW_DEFAULT
   cfg.confidence_freshness_tau    = FPN_FromDouble<F>(300.0);    // CONFIDENCE_FRESHNESS_TAU_DEFAULT
   cfg.confidence_threshold_scale  = FPN_FromDouble<F>(2.0);      // hardcoded `2.0` in gate formula
+  // v5.9.1 — hard-block floor. 0.0 = disabled (pre-v5.9.1 behavior).
+  // Operator opts in (audit-recommended 0.05) for the noise-floor protection.
+  cfg.confidence_hard_block_threshold = FPN_FromDouble<F>(0.0);
   // Phase 7 prep — held-out validation defaults
   cfg.held_out_fraction           = FPN_FromDouble<F>(0.20);     // 20% reserved
   cfg.gap_acceptable_threshold    = FPN_FromDouble<F>(0.05);     // 5% max gap for "OK"
@@ -1172,8 +1183,23 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(bandit_blend_ratio)
     CFG_PARSE_INT(confidence_enabled)
     CFG_PARSE_U32(confidence_window)
-    CFG_PARSE_FPN(confidence_freshness_tau)
+    // v5.9.1 (V5_9_AUDIT-#13) — tau<=0 silently fell back to default in
+    // ConfidenceScorer_Init. Reject at parse time so the operator sees
+    // the bad value before it's silently overridden during boot.
+    if (strcmp(key, "confidence_freshness_tau") == 0) {
+        double v = atof(val);
+        if (v <= 0.0) {
+            fprintf(stderr,
+                "[cfg] confidence_freshness_tau=%.3f invalid — must be > 0 "
+                "(use default by omitting the field; see DOCS/CLAUDE_INTEGRATION.md)\n",
+                v);
+            continue;
+        }
+        cfg.confidence_freshness_tau = FPN_FromDouble<F>(v);
+        continue;
+    }
     CFG_PARSE_FPN(confidence_threshold_scale)
+    CFG_PARSE_FPN_POS(confidence_hard_block_threshold)
     CFG_PARSE_FPN(held_out_fraction)
     CFG_PARSE_FPN(gap_acceptable_threshold)
     if (strcmp(key, "held_out_gate_strict") == 0) {

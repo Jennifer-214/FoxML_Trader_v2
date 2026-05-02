@@ -10040,6 +10040,101 @@ e3_skip_load:;
               strcmp(snap.source_cfg_path, "engine.cfg") == 0);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.9.1 Phase 2 — edge cases + observability polish ---\n");
+    {
+        // V5_9_AUDIT-#12: Label NaN/Inf wrapping. Wrapper is at the call site
+        // in BacktestEngine.hpp:510. Per-type policy: binary→0.5, regression→
+        // 0.0, multiclass→NAN sentinel skipped at compaction. We can't
+        // exercise the full pipeline cheaply in this unit test, so we verify
+        // the field shape on BacktestStats and a representative call into
+        // a label fn that's susceptible to NaN (Label_ForwardPnl divides by
+        // sample_price → NaN if price=0).
+        BacktestStats st = {};
+        st.nan_labels_total   = 5;
+        st.nan_labels_dropped = 2;
+        check("v5.9.1: BacktestStats.nan_labels_total assignable",
+              st.nan_labels_total == 5);
+        check("v5.9.1: BacktestStats.nan_labels_dropped assignable",
+              st.nan_labels_dropped == 2);
+
+        // Label_ForwardPnl with sample_price=0.0 produces NaN — this is the
+        // case the wrapper catches. The label fn itself returns NaN; the
+        // caller-side wrap converts to 0.0 (regression default).
+        HistoricalTick hticks[3];
+        hticks[0].price = 0.0; hticks[0].qty = 1.0; hticks[0].timestamp_us = 1000; hticks[0].is_buyer_maker = 0;
+        hticks[1].price = 100.0; hticks[1].qty = 1.0; hticks[1].timestamp_us = 2000; hticks[1].is_buyer_maker = 0;
+        hticks[2].price = 100.0; hticks[2].qty = 1.0; hticks[2].timestamp_us = 3000; hticks[2].is_buyer_maker = 0;
+        float lbl = Label_ForwardPnl(hticks, 0, 3, /*sample_price=*/0.0, 1.5, 1.0, 2);
+        check("v5.9.1: Label_ForwardPnl with zero sample_price produces NaN/Inf",
+              isnan(lbl) || isinf(lbl));
+
+        // V5_9_AUDIT-#13: ConfidenceScorer_Init tau<=0 logs WARN + uses default.
+        // Can't capture stderr easily, so verify the post-state: tau is
+        // overridden to CONFIDENCE_FRESHNESS_TAU_DEFAULT (300.0).
+        ConfidenceScorer cs;
+        ConfidenceScorer_Init(&cs, 32, /*tau=*/-1.0);
+        check("v5.9.1: ConfidenceScorer_Init tau<=0 falls back to default",
+              cs.freshness_tau == CONFIDENCE_FRESHNESS_TAU_DEFAULT);
+
+        ConfidenceScorer_Init(&cs, 32, /*tau=*/0.0);
+        check("v5.9.1: ConfidenceScorer_Init tau=0 falls back to default",
+              cs.freshness_tau == CONFIDENCE_FRESHNESS_TAU_DEFAULT);
+
+        ConfidenceScorer_Init(&cs, 32, /*tau=*/100.0);
+        check("v5.9.1: ConfidenceScorer_Init tau>0 takes the value",
+              cs.freshness_tau == 100.0);
+
+        // V5_9_AUDIT-#13: ControllerConfig_Parse rejects tau<=0.
+        // Write a cfg with tau=-5.0; parser must skip the field, default
+        // (300.0) is preserved. Cleanest test: load + verify default still
+        // present.
+        char tmp_cfg[] = "/tmp/v591_tau_test_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        if (fd >= 0) {
+            const char* body = "confidence_freshness_tau=-5.0\n";
+            (void)!write(fd, body, strlen(body));
+            close(fd);
+            ControllerConfig<64> parsed = ControllerConfig_Load<64>(tmp_cfg);
+            check("v5.9.1: cfg parser rejects tau<=0 (default preserved)",
+                  FPN_ToDouble(parsed.confidence_freshness_tau) == 300.0);
+            unlink(tmp_cfg);
+        } else {
+            check("v5.9.1: tmp cfg file creation for tau test", 0);
+        }
+
+        // V5_9_AUDIT-#21: Confidence hard-block default = 0.0 (disabled).
+        // ControllerConfig_Default sets confidence_hard_block_threshold=0.0
+        // to preserve pre-v5.9.1 behavior. Operator opts in to 0.05.
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.9.1: confidence_hard_block_threshold defaults to 0.0 (disabled)",
+              FPN_ToDouble(cfg.confidence_hard_block_threshold) == 0.0);
+
+        // Cfg parser accepts the new field.
+        char tmp_cfg2[] = "/tmp/v591_hardblock_XXXXXX";
+        fd = mkstemp(tmp_cfg2);
+        if (fd >= 0) {
+            const char* body = "confidence_hard_block_threshold=0.05\n";
+            (void)!write(fd, body, strlen(body));
+            close(fd);
+            ControllerConfig<64> parsed = ControllerConfig_Load<64>(tmp_cfg2);
+            check("v5.9.1: confidence_hard_block_threshold parses 0.05",
+                  FPN_ToDouble(parsed.confidence_hard_block_threshold) == 0.05);
+            unlink(tmp_cfg2);
+        } else {
+            check("v5.9.1: tmp cfg file creation for hard-block test", 0);
+        }
+
+        // V5_9_AUDIT-#9: PerCoreSnap.warmup_progress_pct field exists,
+        // assignable, uint8_t (0..100 range).
+        TUISnapshot::PerCoreSnap pcs{};
+        pcs.warmup_progress_pct = 75;
+        check("v5.9.1: PerCoreSnap.warmup_progress_pct assignable",
+              pcs.warmup_progress_pct == 75);
+        pcs.warmup_progress_pct = 100;
+        check("v5.9.1: PerCoreSnap.warmup_progress_pct accepts 100",
+              pcs.warmup_progress_pct == 100);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.8.10 CoreModelZoo strict-mode integration (drift refusal) ---\n");
     {
         // Engine boot integration test for the drift-refusal path. Distinct

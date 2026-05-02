@@ -107,6 +107,11 @@ struct MLBuildContext {
     double*             out_effective_threshold;      // post-damping threshold used
     uint32_t*           nan_feature_events_total;     // bumped on Features_PackAll -1
     uint32_t*           nan_prediction_events_total;  // bumped on Model_Predict NaN/Inf
+    // v5.9.1 (V5_9_AUDIT-#21) — ML strategy writes SHALT_LOW_CONFIDENCE here
+    // when raw confidence falls below confidence_hard_block_threshold. The
+    // dispatcher's strategy_halt_reason pointer is wired to this slot so the
+    // GUI Strategy Halt panel + entry log can attribute the block correctly.
+    uint8_t*            out_strategy_halt_reason;
     // v4.0 train-serve parity: pass through the RORRegressor + EMA price
     // that the engine's slow path maintains. ML_BuildParameters uses these
     // with Regime_ComputeSignals so ALL features ModelFeatures_Pack reads
@@ -818,6 +823,30 @@ inline void ML_BuildParameters(
     // v5.9.0b — surface the effective threshold for entry log + ML Status
     // panel. Same value the gate decision uses below; single source of truth.
     if (mctx && mctx->out_effective_threshold) *mctx->out_effective_threshold = threshold;
+
+    // v5.9.1 (V5_9_AUDIT-#21) — confidence hard-floor. Damping alone can
+    // produce a pathological "always near zero" effective threshold when
+    // confidence is in the noise floor; entries fire on essentially-random
+    // predictions. Hard-block when raw confidence is below the operator-
+    // configured floor. Default 0.0 = disabled (preserves pre-v5.9.1).
+    double hard_floor = FPN_ToDouble(config->confidence_hard_block_threshold);
+    if (config->confidence_enabled && hard_floor > 0.0 && conf_now < hard_floor) {
+        out->bg_price_threshold   = FPN_Zero<F>();
+        out->bg_volume_threshold  = FPN_Zero<F>();
+        out->sg_take_profit_price = FPN_Zero<F>();
+        out->sg_stop_loss_price   = FPN_Zero<F>();
+        out->tp_pct               = FPN_Zero<F>();
+        out->sl_pct               = FPN_Zero<F>();
+        out->trade_size           = FPN_Zero<F>();
+        out->strategy_id          = STRATEGY_ML;
+        out->flags                = GATE_FLAG_BUY_BLOCKED;
+        for (int i = 0; i < 6; ++i) out->_pad[i] = 0;
+        if (mctx && mctx->out_strategy_halt_reason)
+            *mctx->out_strategy_halt_reason = SHALT_LOW_CONFIDENCE;
+        if (out_prediction) *out_prediction = prediction;
+        if (out_confidence) *out_confidence = conf_now;
+        return;
+    }
 
     // gate decision: BarrierGate (continuous modulation) OR binary threshold
     FPN<F> gate_price = FPN_Zero<F>();  // default: zero-gate (no entry)

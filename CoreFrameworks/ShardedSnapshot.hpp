@@ -407,6 +407,19 @@ static inline void TUI_CopySnapshotSharded(
         // "i" auto-regime. Read bit i from the cfg's bitmap.
         snap->per_core[i].strategy_was_explicit_set =
             (cfg->core_strategies_explicit_set >> i) & 0x1;
+        // v5.9.1 — per-core warmup % (rolling_short.count vs min_warmup_samples).
+        // Defensive bounds: if min_warmup_samples is 0/unset, the engine
+        // defaults to 64 (matches the global-snap fallback at line 128).
+        {
+            int wmin = (int)cfg->min_warmup_samples;
+            if (wmin <= 0) wmin = 64;
+            int wnow = state->cores[i].slow_state ?
+                       state->cores[i].slow_state->rolling_short.count : 0;
+            int pct = (wnow >= wmin) ? 100 : ((wnow * 100) / wmin);
+            if (pct > 100) pct = 100;
+            if (pct < 0) pct = 0;
+            snap->per_core[i].warmup_progress_pct = (uint8_t)pct;
+        }
         // Per-core gate direction. Use RESOLVED strategy for AUTO so direction
         // tracks the active regime's strategy. MOMENTUM buys above; everything
         // else buys below.

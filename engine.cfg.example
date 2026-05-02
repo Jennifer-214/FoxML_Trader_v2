@@ -325,6 +325,12 @@ foxml_vol_scaling_z_max=3.0     # z-score clipping threshold for vol scaler
 bandit_enabled=0                # blend regime strategy with Exp3-IX bandit weights
 bandit_blend_ratio=0.30         # max bandit influence fraction (ramps from 0% to this)
 confidence_enabled=0            # dynamic buy threshold from prediction quality scoring
+# v5.9.1 — confidence hard-floor. Hard-block ML entries when raw confidence
+# is below this value, INDEPENDENT of damping. Default 0.0 = disabled
+# (preserves pre-v5.9.1 behavior). Audit-recommended once confidence is
+# stable: 0.05. Only consulted when confidence_enabled=1. Surfaced via the
+# strategy_halt_reason channel as SHALT_LOW_CONFIDENCE.
+confidence_hard_block_threshold=0.0   # recommended after retrain: 0.05
 
 #==============================================================================
 # PER-CORE OVERRIDES (v4.0)

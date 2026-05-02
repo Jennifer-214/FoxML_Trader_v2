@@ -1030,6 +1030,12 @@ struct TUISnapshot {
         // because field was absent. Drives tri-state marker in Per-Core
         // P&L panel: "0!" deliberate, "0?" defaulted, "0" auto-regime.
         uint8_t  strategy_was_explicit_set;
+        // v5.9.1 — per-core warmup progress (rolling.count vs min_warmup_samples).
+        // 0..100 once warmup starts; 100 once warmup_complete edge fires.
+        // The global TUISnapshot.warmup_samples_now collapses cores in
+        // sharded mode — operator needs per-core visibility to spot a single
+        // core stuck due to misconfigured slow-path cadence.
+        uint8_t  warmup_progress_pct;
         // v4.0.4: per-core P&L breakdown for Account panel. Sourced from
         // CoreContext::core_realized / core_wins / core_losses / core_fees.
         // The aggregate equals oms->realized_pnl modulo timing (snapshot
