@@ -145,21 +145,42 @@ document before merging.
 - [ ] Predictions match
 - [ ] Decisions match
 
-### Surface G: `MODEL_FORMAT_VERSION` bumped
+### Surface G: Stamp body schema extended (optional fields, NO format bump)
+
+This is the v5.8.6 / v5.9.2b / v5.9.3a pattern: add optional fields to
+the stamp body with `has_*` flags. NO `MODEL_FORMAT_VERSION` bump
+needed; legacy stamps parse with all `has_*=0` flags. v5.9.3 (scaler
+sidecar) followed this pattern. Use this checklist when adding new
+optional stamp body fields.
 
 **ML-side:**
-- [ ] Verifier handles old and new format stamps
-- [ ] Trainer emits new format (in-process + bash script in parity)
-- [ ] v5.8.8-style round-trip test passes for new fields
+- [ ] Verifier parses new fields with `has_*=0` default for absent
+- [ ] Trainer emits new fields when caller passes them via the
+      relevant struct (e.g. `StampInferenceCfgInputs`)
+- [ ] Bash `tools/stamp_model.sh` accepts matching `--<field>=<value>`
+      args + appends to canonical body (HMAC-protected)
+- [ ] v5.8.8-style round-trip test extends to new fields (in-process
+      + bash both produce identical stamps for identical inputs)
 
 **Live-side:**
-- [ ] Boot with old-format model → backward-compat path (warn-load
-      with new field defaults)
-- [ ] Boot with new-format model → all new fields verified
+- [ ] Boot with stamp lacking new fields (legacy / pre-version stamps)
+      → backward-compat path: `has_*=0` flags set, default behavior
+- [ ] Boot with stamp containing new fields → values surfaced via
+      `ModelStampResult` struct; downstream consumers use them
+- [ ] Strict-mode refusal works for fields that gate load (e.g.
+      registry_hash mismatch, scaler SHA mismatch)
 
 **Cross-check:**
-- [ ] Stamp body new fields present + signed correctly
-- [ ] HMAC signature still validates after new fields added
+- [ ] HMAC signature still validates after new fields added (canonical
+      body bytes are part of the signed body)
+- [ ] Locale-pinned (`LC_NUMERIC=C`) — bash + in-process emit identical
+      bytes for identical numeric inputs
+
+**When to bump `MODEL_FORMAT_VERSION` instead:** ONLY when the model
+file's serialization shape changes (e.g. binary file format change).
+Stamp body schema changes are forward-compat additions; they don't
+require a format bump. See `DOCS/PARITY_LIFECYCLE.md` "Scenario: I'm
+bumping `MODEL_FORMAT_VERSION`" for the rare case.
 
 ### Surface H: Build flag changed (`-DUSE_NATIVE_128`, etc.)
 

@@ -29,7 +29,7 @@ requires snapshot update.
 | **`RollingStats_Push` math** (windowing, EMA, SMA) | Feature outputs change | NO | Sub-area 1a catches via dependency tree | YES if outputs change |
 | **`label_table[]` row** (add/remove/reorder) | No hash today (deferred to v5.10+ `FOREACH_TARGET`) | NO | Manual via 8 Label_* tests | Backtest comparisons not comparable; live unaffected |
 | **`Label_*` body** (formula change, lookahead shift) | Training data changes; live unaffected | NO | Sub-area 3 catches | Research-integrity only; live unaffected |
-| **`MODEL_FORMAT_VERSION` bump** (5→6 for v5.9.3 scaler) | Engine refuses old format unless backward-compat field handling | YES (stamp body version field) | None — version bumps are deliberate | YES; recipe in `DOCS/ML_TRAINING.md` |
+| **`MODEL_FORMAT_VERSION` bump** (currently 5; would be 6+ for a future wire-format change) | Engine refuses old format unless backward-compat field handling | YES (stamp body version field) | None — version bumps are deliberate | YES if hash flips OR backward-compat field added |
 | **Stamp body field add** (e.g. `feature_scaler_present`) | New field parsed; absent → backward-compat default | Forward-compat parser tolerates unknown keys | v5.8.8 round-trip catches | NO — new field optional; existing models load with default |
 | **Scaler sidecar `.scaler` content** (mean/stddev change) | SHA-256 in stamp differs | YES (`scaler_sha256` in stamp + sidecar's own registry hash) | None today (v5.9.3 will add) | Implicit — sidecar pinned to model |
 | **`SCALER_STDDEV_FLOOR`** (constexpr default) | Apply-time math changes | YES (Q32 floor embedded in sidecar per v5.9.3 design) | None | NO — persisted floor pins per-model |
@@ -93,7 +93,17 @@ trained-model cfg and serve-time cfg.
 For non-inference cfg (operational settings, GUI prefs, log paths),
 default flips are normal — no parity concern.
 
-### Scenario: I'm bumping `MODEL_FORMAT_VERSION` (e.g. v5.9.3 scaler)
+### Scenario: I'm bumping `MODEL_FORMAT_VERSION`
+
+`MODEL_FORMAT_VERSION` versions the model FILE shape. Most stamp body
+schema changes do NOT need a bump — they can be added as optional
+forward-compat fields with `has_*` flags (the v5.8.6
+`feature_registry_hash` pattern, repeated in v5.9.2b for
+`inference_cfg_*` and v5.9.3a for `feature_scaler_present` +
+`scaler_sha256`). Only bump when the model file's serialization
+itself changes.
+
+If a bump is genuinely needed:
 
 1. Bump constant.
 2. Verifier (`verify_model_stamp`) must handle BOTH old and new
@@ -103,6 +113,13 @@ default flips are normal — no parity concern.
    updates to emit new fields when format >= bumped version.
 4. Add v5.8.8-style round-trip test for new fields.
 5. CHANGELOG: list the new fields + backward-compat behavior.
+
+**v5.9.3 specifically:** scaler sidecar landed WITHOUT a format bump.
+Stamp body gains optional fields (`feature_scaler_present`,
+`scaler_sha256`) parsed forward-compat by older verifiers; legacy
+v5.x stamps load with `has_scaler_fields=0` + identity scaler. The
+sidecar binary itself has its OWN magic + registry hash + body SHA;
+binding to the model is via stamp's `scaler_sha256` field.
 
 ## What NOT to change without strong justification
 

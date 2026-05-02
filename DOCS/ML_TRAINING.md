@@ -140,13 +140,104 @@ Inverse-freq is mathematically correct: it makes the loss
 balanced. Half-strength (sqrt of inverse-freq) is heuristic
 and harder to reason about. Stick with the formula.
 
+## Scaler-aware training (v5.9.3+)
+
+v5.9.3 added feature standardization (mean-centering + unit-variance
+scaling) via the `.scaler` sidecar binary. Operator workflow change:
+
+### Training a model with the scaler enabled
+
+1. **Run training as usual** — `Train Model` button in foxml suite.
+   The worker auto-computes the scaler over the post-WF compacted
+   training matrix and persists `<model>.scaler` next to the
+   `<model>.bin` file. No cfg flag needed.
+
+2. **Read the worker log** for two pieces of info:
+   - `[train] scaler persisted: /path/to/<model>.scaler`
+   - `[train] scaler_sha256=<hex> — pass to stamp tool to bind`
+   The status_msg in the GUI also shows `[+scaler]` suffix when
+   persist succeeded.
+
+3. **Bind the scaler to the stamp** via tools/stamp_model.sh:
+   ```bash
+   ./tools/stamp_model.sh \
+       --model models/aggressive/buy_signal.bin \
+       --secret "$HELD_OUT_STAMP_SECRET" \
+       --wf-mean-val 0.55 \
+       --held-out-metric 0.53 \
+       --gap-threshold 0.05 \
+       --feature-registry-hash <hex from build> \
+       --engine-version 5.9.3b \
+       --feature-scaler-present 1 \
+       --scaler-sha256 <hex from worker log>
+   ```
+
+4. **Verify the binding** at engine boot:
+   - ML Status panel shows green "scaler: applied (registry_hash=...)"
+   - Boot stderr emits: `[scaler] <model>.scaler: loaded (registry_hash=..., num_features=N)`
+   - Entry log shows post-scaler features (mean ≈ 0, stddev ≈ 1
+     vs raw values pre-v5.9.3)
+
+### Training a model WITHOUT the scaler
+
+The scaler is optional. To skip:
+- Don't pass `--feature-scaler-present` to `tools/stamp_model.sh`
+- Stamp body lacks the field; engine loads with `has_scaler_fields=0`,
+  `feature_scaler_present=0`. Apply path early-returns identity.
+- ML Status panel shows sand "scaler: NONE (legacy v5 model)"
+
+This is the default behavior for legacy v5.x models (which have no
+scaler) and for any v5.9.3+ model where the operator deliberately
+opts out. Behavior is bytewise-identical to pre-v5.9.3 — the scaler
+infrastructure is fully forward-compat.
+
+### Why scaling matters
+
+Without standardization, XGBoost trees split on raw feature values.
+Trees adapt to feature scales fine, but TWO classes of bugs are
+silently worse without scaling:
+
+1. **Numerical conditioning at the prediction layer:** very large
+   features (e.g. price=60000) overwhelm small-magnitude features
+   (e.g. ema_sma_spread=0.0015) in any non-tree model the codebase
+   may add later (logistic regression, neural nets). Scaling
+   future-proofs the feature pipeline.
+
+2. **Drift detection:** post-scaler features have a known
+   distribution (mean ≈ 0, stddev ≈ 1 on the training data). At
+   inference, deviations >> 3 stddev signal market regime that
+   the model wasn't trained on. Pre-scaler this is invisible.
+
+### Scaler invalidation triggers
+
+The scaler binds to a SPECIFIC training set + feature set + build.
+It MUST be regenerated when:
+
+- **`FOREACH_FEATURE` changes** (add/remove/reorder, version bump)
+  → `FEATURE_REGISTRY_HASH` flips; sidecar's embedded hash mismatches
+  build's hash; scaler refused at load. Retrain mandatory.
+- **Feature compute fn body changes** (snapshot test in v5.9.2a
+  catches this) → feature output values change; old scaler stats
+  are wrong for new feature distribution. Retrain mandatory.
+- **Training data changes** (different period, different symbol) →
+  scaler stats reflect specific data distribution. Retrain
+  recommended for distribution shifts.
+
+`MODEL_FORMAT_VERSION` does NOT need to bump for any of these — the
+forward-compat parser pattern handles backward compat (legacy stamps
+without scaler fields still load).
+
 ## See also
 
 - `Backtest/BacktestEngine.hpp` — `XGBoost_ComputeScalePosWeight`
   (binary), `XGBoost_ComputeMulticlassWeights` (multiclass)
   — these are computed inside the suite for consistency
-- `DOCS/CLAUDE_ML_INVARIANTS.md` rule 8 — Features_PackAll
-  validates output (post-v5.9.0); the trainer must produce
-  features that pass the same validation
+- `DOCS/CLAUDE_ML_INVARIANTS.md` — rules covering scaler binding,
+  stddev floor identity, 3-tier strict mode, atomic write contract
+- `DOCS/PARITY_LIFECYCLE.md` — operator-facing change matrix
+  including "Scaler sidecar" row
+- `DOCS/PARITY_VERIFICATION_CHECKLIST.md` Surface F — operational
+  checklist for verifying scaler-bound models work end-to-end
 - The audit at `DOCS/V5_9_ML_HARDENING_AUDIT.md` finding #3
   for the full diagnosis of the v5.8 imbalance issue
+- `ML_Headers/FeatureStandardizer.hpp` — implementation reference
