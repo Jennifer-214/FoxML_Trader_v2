@@ -144,7 +144,17 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // EventLoop_DrainPostFill call after OrderManager_Tick to consume
     // FillRecords on the same tick they're produced (no separate drainer
     // thread in backtest; everything runs synchronously).
-    OrderManager_Init(&oms, empty_adapter, 0, cfg.starting_balance, cfg.fee_rate, 1);
+    // v5.9.5e — pass empty event_log_path to disable disk persistence.
+    // Mode=1 still drives the in-memory event log (fill+drain pipeline
+    // parity with live, per v4.7.15). Backtest is hermetic; OMS starts
+    // fresh from cfg.starting_balance every run. Pre-v5.9.5e backtest
+    // silently inherited live OMS state across runs (stale balance,
+    // polluted trade history). Feature/label pipeline unaffected (it
+    // doesn't read OMS), but Past Runs P&L now reflects only the
+    // current backtest run.
+    OrderManager_Init(&oms, empty_adapter, 0, cfg.starting_balance, cfg.fee_rate,
+                      /*event_log_mode=*/1,
+                      /*event_log_path=*/"");
     // Phase 8: backtest is all-taker. Set OMS rates explicitly so HandleFill's
     // is_maker branch picks the right rate. Both = fee_rate_taker → backtest
     // numerics unchanged from pre-Phase-8 (cfg legacy mirroring already set
