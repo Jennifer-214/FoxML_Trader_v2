@@ -527,6 +527,27 @@ static inline void TUI_CopySnapshotSharded(
             snap->per_core[i].ml_last_effective_threshold= state->cores[i].last_ml_effective_threshold;
             snap->per_core[i].ml_nan_feature_events      = state->cores[i].nan_feature_events_total;
             snap->per_core[i].ml_nan_prediction_events   = state->cores[i].nan_prediction_events_total;
+            // v5.9.3a — scaler observability (Gap H). Aggregate across all
+            // 4 model roles in the zoo: scaler considered "present" if ANY
+            // role's handle has has_scaler=1; "load_failed" if ANY role has
+            // scaler_load_failed=1. (Per the v5.9.3a load contract, all
+            // roles in a zoo share the same training pipeline so they
+            // typically agree, but per-role granularity is preserved by
+            // the underlying ModelHandle.scaler — this surface aggregates.)
+            uint8_t any_scaler_present = 0;
+            uint8_t any_scaler_failed  = 0;
+            if (zoo) {
+                if (zoo->buy_signal.scaler.has_scaler)   any_scaler_present = 1;
+                if (zoo->barrier.scaler.has_scaler)      any_scaler_present = 1;
+                if (zoo->regime.scaler.has_scaler)       any_scaler_present = 1;
+                if (zoo->exit.scaler.has_scaler)         any_scaler_present = 1;
+                if (zoo->buy_signal.scaler_load_failed)  any_scaler_failed  = 1;
+                if (zoo->barrier.scaler_load_failed)     any_scaler_failed  = 1;
+                if (zoo->regime.scaler_load_failed)      any_scaler_failed  = 1;
+                if (zoo->exit.scaler_load_failed)        any_scaler_failed  = 1;
+            }
+            snap->per_core[i].ml_scaler_present     = any_scaler_present;
+            snap->per_core[i].ml_scaler_load_failed = any_scaler_failed;
             // Track the highest-confidence ML core for the headline summary.
             // Tie-break: prefer the lowest core index (deterministic).
             if (state->cores[i].last_confidence > headline_conf) {

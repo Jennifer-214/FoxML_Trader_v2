@@ -10965,6 +10965,204 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- EXTENSIBILITY: v5.9.3a Phase 4 — feature standardizer (disabled) ---\n");
+    {
+        using namespace tt;
+        // === Test 1: FeatureStandardizer_Init produces identity ===
+        // Apply on identity-init scaler must be no-op (has_scaler=0 early return).
+        FeatureStandardizer sc1 = {};
+        FeatureStandardizer_Init(&sc1);
+        float fbuf[NUM_REGISTERED_FEATURES];
+        for (unsigned i = 0; i < NUM_REGISTERED_FEATURES; ++i) {
+            fbuf[i] = (float)(i * 1.5 + 0.25);
+        }
+        float fbuf_orig[NUM_REGISTERED_FEATURES];
+        memcpy(fbuf_orig, fbuf, sizeof(fbuf));
+        int ar1 = FeatureStandardizer_Apply(&sc1, fbuf, NUM_REGISTERED_FEATURES);
+        check("v5.9.3a: Apply on uninit scaler is identity (no-op)",
+              ar1 == 0 && memcmp(fbuf, fbuf_orig, sizeof(fbuf)) == 0);
+
+        // === Test 2: Compute correctness on synthetic data ===
+        // Build a small feature matrix: 100 samples × NUM_FEATURES
+        // For column 0: all values = 5.0 (mean=5, stddev=0 → floor)
+        // For column 1: linear ramp 0..99 (mean=49.5, stddev≈29.011)
+        const int N_SAMPLES = 100;
+        float* fmat = (float*)malloc(N_SAMPLES * NUM_REGISTERED_FEATURES * sizeof(float));
+        for (int s = 0; s < N_SAMPLES; ++s) {
+            for (unsigned f = 0; f < NUM_REGISTERED_FEATURES; ++f) {
+                if (f == 0) fmat[s * NUM_REGISTERED_FEATURES + f] = 5.0f;        // constant
+                else if (f == 1) fmat[s * NUM_REGISTERED_FEATURES + f] = (float)s; // linear
+                else fmat[s * NUM_REGISTERED_FEATURES + f] = 0.0f;
+            }
+        }
+        FeatureStandardizer sc2 = {};
+        FeatureStandardizer_Compute(&sc2, fmat, N_SAMPLES, SCALER_STDDEV_FLOOR);
+        check("v5.9.3a: Compute sets has_scaler=1",
+              sc2.has_scaler == 1);
+        check("v5.9.3a: Compute mean[0]=5.0 for constant column",
+              fabs(sc2.mean[0] - 5.0) < 1e-9);
+        check("v5.9.3a: Compute mean[1]≈49.5 for linear column",
+              fabs(sc2.mean[1] - 49.5) < 1e-9);
+        check("v5.9.3a: Compute stddev[0]=0 for constant column",
+              fabs(sc2.stddev[0]) < 1e-9);
+        // sample stddev of 0..99 (n=100, n-1 denominator) ≈ 29.011491975...
+        check("v5.9.3a: Compute stddev[1]≈29.01 for linear column",
+              fabs(sc2.stddev[1] - 29.011491975882016) < 1e-6);
+        check("v5.9.3a: Compute persists registry_hash from current build",
+              sc2.registry_hash == FEATURE_REGISTRY_HASH());
+
+        // === Test 3: Apply correctness — stddev floor ===
+        // Constant feature (stddev=0) → fmax(0, floor) prevents Inf/NaN.
+        // For column 0: in=5.0, mean=5.0, fmax(stddev=0, floor=1e-9) = 1e-9
+        //   out = (5.0 - 5.0) / 1e-9 = 0 / 1e-9 = 0 (finite, well-defined)
+        float fbuf2[NUM_REGISTERED_FEATURES];
+        for (unsigned i = 0; i < NUM_REGISTERED_FEATURES; ++i) fbuf2[i] = 0.0f;
+        fbuf2[0] = 5.0f;   // exactly mean → 0 after standardization
+        fbuf2[1] = 49.5f;  // exactly mean → 0 after standardization
+        int ar2 = FeatureStandardizer_Apply(&sc2, fbuf2, NUM_REGISTERED_FEATURES);
+        check("v5.9.3a: Apply with stddev floor produces finite output",
+              ar2 == 0);
+        check("v5.9.3a: Apply on constant feature at mean → 0 (stddev floor catches /0)",
+              fbuf2[0] == 0.0f);
+        check("v5.9.3a: Apply on linear feature at mean → 0 (centered)",
+              fbuf2[1] == 0.0f);
+
+        // === Test 4: Persist + Load round-trip ===
+        char tmp_dir[] = "/tmp/v593a_scaler_XXXXXX";
+        if (mkdtemp(tmp_dir) != NULL) {
+            char sidecar_path[400];
+            snprintf(sidecar_path, sizeof(sidecar_path), "%s/buy_signal.bin.scaler", tmp_dir);
+            int prc = FeatureStandardizer_Persist(&sc2, sidecar_path);
+            check("v5.9.3a: Persist returns success",
+                  prc == 1);
+
+            struct stat st;
+            check("v5.9.3a: sidecar file exists post-Persist",
+                  stat(sidecar_path, &st) == 0 && S_ISREG(st.st_mode));
+            // Expected size: 4 (magic) + 4 (num_features) + 8 (hash) + 4 (floor_q)
+            //              + 8*N (mean) + 8*N (stddev) + 32 (sha)
+            int expected_size = 4 + 4 + 8 + 4 + 8 * NUM_REGISTERED_FEATURES * 2 + 32;
+            check("v5.9.3a: sidecar file size matches expected layout",
+                  st.st_size == expected_size);
+
+            FeatureStandardizer sc3 = {};
+            int lrc = FeatureStandardizer_Load(&sc3, sidecar_path);
+            check("v5.9.3a: Load round-trip returns success",
+                  lrc == 1);
+            check("v5.9.3a: Load reads has_scaler=1",
+                  sc3.has_scaler == 1);
+            check("v5.9.3a: Load round-trips registry_hash",
+                  sc3.registry_hash == sc2.registry_hash);
+            check("v5.9.3a: Load round-trips num_features",
+                  sc3.num_features == sc2.num_features);
+            check("v5.9.3a: Load round-trips mean[1] bytewise",
+                  sc3.mean[1] == sc2.mean[1]);
+            check("v5.9.3a: Load round-trips stddev[1] bytewise",
+                  sc3.stddev[1] == sc2.stddev[1]);
+            check("v5.9.3a: VerifyAgainstBuild matches loaded scaler",
+                  FeatureStandardizer_VerifyAgainstBuild(&sc3) == 1);
+
+            // === Test 5: Corrupt sidecar refused at Load ===
+            FILE* cf = fopen(sidecar_path, "rb+");
+            if (cf) {
+                // Flip one byte in the body (mean[5] start ≈ offset 20 + 5*8 = 60)
+                fseek(cf, 60, SEEK_SET);
+                uint8_t b = 0;
+                if (fread(&b, 1, 1, cf) == 1) {
+                    fseek(cf, 60, SEEK_SET);
+                    b ^= 0xFF;
+                    fwrite(&b, 1, 1, cf);
+                }
+                fclose(cf);
+            }
+            FeatureStandardizer sc4 = {};
+            int lrc_corrupt = FeatureStandardizer_Load(&sc4, sidecar_path);
+            check("v5.9.3a: Load on corrupted sidecar refuses (-1)",
+                  lrc_corrupt == -1);
+            check("v5.9.3a: Corrupted Load leaves has_scaler=0",
+                  sc4.has_scaler == 0);
+
+            unlink(sidecar_path);
+            rmdir(tmp_dir);
+        } else {
+            check("v5.9.3a: tmp dir creation for sidecar tests", 0);
+        }
+
+        // === Test 6: Stamp body parses feature_scaler_present + scaler_sha256 ===
+        char tmp_dir2[] = "/tmp/v593a_stamp_XXXXXX";
+        if (mkdtemp(tmp_dir2) != NULL) {
+            char model_path[400];
+            snprintf(model_path, sizeof(model_path), "%s/model.bin", tmp_dir2);
+            FILE* mf = fopen(model_path, "w");
+            if (mf) {
+                fwrite("dummy", 1, 5, mf);
+                fclose(mf);
+
+                // Write a stamp claiming scaler present + a fake SHA
+                StampInferenceCfgInputs inf = {};
+                inf.has_scaler = 1;
+                inf.feature_scaler_present = 1;
+                inf.scaler_sha256_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+                StampWriteResult sw = stamp_write_for_model(
+                    model_path, "test-secret-v593a", 5, "2026-05-02",
+                    0.65, 0.62, 0.05, 0,
+                    0xABCD1234U, "5.9.3a", &inf);
+                check("v5.9.3a: stamp_write_for_model accepts scaler inputs",
+                      sw.ok == 1);
+
+                ModelStampResult v = verify_model_stamp(model_path,
+                    "test-secret-v593a", 0.10, 5, 0xABCD1234U);
+                check("v5.9.3a: stamp with scaler fields verifies",
+                      v.valid == 1);
+                check("v5.9.3a: parser sets has_scaler_fields=1",
+                      v.has_scaler_fields == 1);
+                check("v5.9.3a: parser reads feature_scaler_present=1",
+                      v.feature_scaler_present == 1);
+                check("v5.9.3a: parser reads scaler_sha256 hex",
+                      strncmp(v.scaler_sha256, "0123456789abcdef", 16) == 0);
+
+                char stamp_path[450];
+                snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
+                unlink(stamp_path);
+                unlink(model_path);
+
+                // Test 7: legacy-shape stamp (no scaler fields) → has_*=0
+                FILE* mf2 = fopen(model_path, "w");
+                fwrite("dummy2", 1, 6, mf2);
+                fclose(mf2);
+                StampWriteResult sw2 = stamp_write_for_model(
+                    model_path, "test-secret-v593a", 5, "2026-05-02",
+                    0.65, 0.62, 0.05, 0,
+                    0xABCD1234U, "5.9.3a", /*inf=*/nullptr);
+                check("v5.9.3a: stamp without scaler fields writes OK",
+                      sw2.ok == 1);
+                ModelStampResult v2 = verify_model_stamp(model_path,
+                    "test-secret-v593a", 0.10, 5, 0xABCD1234U);
+                check("v5.9.3a: legacy stamp → has_scaler_fields=0",
+                      v2.has_scaler_fields == 0);
+                check("v5.9.3a: legacy stamp → feature_scaler_present=0",
+                      v2.feature_scaler_present == 0);
+
+                unlink(stamp_path);
+                unlink(model_path);
+            } else {
+                check("v5.9.3a: tmp model file for stamp test", 0);
+            }
+            rmdir(tmp_dir2);
+        } else {
+            check("v5.9.3a: tmp dir for stamp test", 0);
+        }
+
+        // === Test 8: PerCoreSnap fields exist ===
+        TUISnapshot::PerCoreSnap pcs = {};
+        pcs.ml_scaler_present = 1;
+        pcs.ml_scaler_load_failed = 0;
+        check("v5.9.3a: PerCoreSnap.ml_scaler_present + ml_scaler_load_failed assignable",
+              pcs.ml_scaler_present == 1 && pcs.ml_scaler_load_failed == 0);
+
+        free(fmat);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

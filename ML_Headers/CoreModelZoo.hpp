@@ -117,12 +117,15 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
     // different FOREACH_FEATURE registry than the current build). Old
     // stamps without the hash field load with a stderr WARN — the
     // back-compat path in verify_model_stamp.
+    ModelStampResult sr = {};
+    int have_sr = 0;
     if (held_out_gate_strict != -1) {
-        ModelStampResult sr = verify_model_stamp(found_path,
+        sr = verify_model_stamp(found_path,
             held_out_stamp_secret ? held_out_stamp_secret : "",
             gap_threshold,
             MODEL_FORMAT_VERSION,
             FEATURE_REGISTRY_HASH());
+        have_sr = 1;
         if (sr.valid <= 0) {
             if (held_out_gate_strict == 1) {
                 fprintf(stderr,
@@ -150,7 +153,63 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         }
     }
 
-    return Model_Load(handle, found_path, backend);
+    int rc = Model_Load(handle, found_path, backend);
+    if (rc <= 0) return rc;
+
+    // v5.9.3a — scaler sidecar load. Stamp claimed scaler present? Try
+    // to load and verify <model>.scaler. 3-tier behavior on failure:
+    //   strict=1: refuse model load (consistent with stamp drift refusal)
+    //   strict=0: warn + set handle->scaler_load_failed=1, continue
+    //             with identity scaler applied
+    //   strict=-1: skip (no verification at all; same as today's policy)
+    if (have_sr && sr.feature_scaler_present && held_out_gate_strict != -1) {
+        char scaler_path[600];
+        snprintf(scaler_path, sizeof(scaler_path), "%s.scaler", found_path);
+
+        // Step 1: SHA-256 of the on-disk file matches stamp's claim.
+        char actual_sha[80] = {0};
+        int sha_ok = tt::sha256_file_hex_inproc(scaler_path, actual_sha, sizeof(actual_sha));
+        int sha_match = (sha_ok && sr.scaler_sha256[0] != '\0' &&
+                         strcmp(actual_sha, sr.scaler_sha256) == 0);
+
+        // Step 2: load + parse the binary.
+        int load_rc = sha_match ? tt::FeatureStandardizer_Load(&handle->scaler, scaler_path) : -1;
+
+        // Step 3: registry hash + num_features match build.
+        int verify_ok = (load_rc == 1) &&
+                        tt::FeatureStandardizer_VerifyAgainstBuild(&handle->scaler);
+
+        if (!verify_ok) {
+            const char* why = !sha_ok           ? "sidecar missing or unreadable"
+                            : !sha_match        ? "sidecar SHA-256 mismatch with stamp"
+                            : load_rc == 0      ? "sidecar parse failed"
+                            : load_rc == -1     ? "sidecar magic/format invalid"
+                            :                     "registry_hash or num_features mismatch";
+            if (held_out_gate_strict == 1) {
+                fprintf(stderr,
+                    "[scaler] REFUSING to load %s — %s (strict mode)\n",
+                    scaler_path, why);
+                tt::FeatureStandardizer_Free(&handle->scaler);
+                handle->scaler_load_failed = 1;
+                return 0;
+            }
+            // warn-mode: identity applied, surface to operator via PerCoreSnap
+            fprintf(stderr,
+                "[CRITICAL] scaler load failed (reason=%s) but engine continuing "
+                "with identity (held_out_gate_strict=0). Predictions WILL drift "
+                "from training distribution. Set strict=1 in cfg to refuse.\n", why);
+            tt::FeatureStandardizer_Free(&handle->scaler);
+            handle->scaler_load_failed = 1;
+        } else {
+            fprintf(stderr,
+                "[scaler] %s: loaded (registry_hash=%016lx, num_features=%u)\n",
+                scaler_path,
+                (unsigned long)handle->scaler.registry_hash,
+                (unsigned)handle->scaler.num_features);
+        }
+    }
+
+    return rc;
 }
 
 //======================================================================================================

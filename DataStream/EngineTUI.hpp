@@ -1062,6 +1062,18 @@ struct TUISnapshot {
         // sharded mode — operator needs per-core visibility to spot a single
         // core stuck due to misconfigured slow-path cadence.
         uint8_t  warmup_progress_pct;
+        // v5.9.3a — scaler observability (Gap H from comprehensive parity audit).
+        // ml_scaler_present=1 when CoreModelZoo loaded the .scaler sidecar
+        // successfully (handle->scaler.has_scaler == 1).
+        // ml_scaler_load_failed=1 when stamp claimed scaler present but load
+        // failed in non-strict mode (engine continued with identity → silent
+        // drift class without this surface).
+        // Mutually-exclusive states (operator-facing matrix):
+        //   present=1 + failed=0 → green "scaler: applied"
+        //   present=0 + failed=1 → red "scaler: WARN — load failed"
+        //   present=0 + failed=0 → sand "scaler: NONE (legacy v5 model)"
+        uint8_t  ml_scaler_present;
+        uint8_t  ml_scaler_load_failed;
         // v4.0.4: per-core P&L breakdown for Account panel. Sourced from
         // CoreContext::core_realized / core_wins / core_losses / core_fees.
         // The aggregate equals oms->realized_pnl modulo timing (snapshot

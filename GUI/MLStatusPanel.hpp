@@ -124,6 +124,36 @@ inline void MLStatus_Render(const TUISnapshot* snap) {
                 }
             }
 
+            // v5.9.3a — scaler row (Gap H). Mutually-exclusive states.
+            if (pc.ml_model_loaded) {
+                ImGui::SameLine(0, 14);
+                if (pc.ml_scaler_load_failed) {
+                    ImGui::TextColored(FoxmlColors::red, "scaler: WARN — load failed");
+                    ImGui::SetItemTooltip(
+                        "Stamp claimed scaler present but the .scaler sidecar\n"
+                        "either failed verification or couldn't be read. Engine\n"
+                        "is continuing with IDENTITY scaler applied (held_out_\n"
+                        "gate_strict=0). Predictions WILL drift from training.\n"
+                        "Operator action: verify .scaler sidecar exists +\n"
+                        "matches stamp's scaler_sha256, or set strict=1 to\n"
+                        "refuse load entirely.");
+                } else if (pc.ml_scaler_present) {
+                    ImGui::TextColored(FoxmlColors::green, "scaler: applied");
+                    ImGui::SetItemTooltip(
+                        "Feature standardizer (mean-centering + unit-variance)\n"
+                        "loaded from <model>.scaler sidecar. Features are\n"
+                        "transformed before Model_Predict per training-time\n"
+                        "stats. v5.9.3a infrastructure / v5.9.3b activates.");
+                } else {
+                    ImGui::TextColored(FoxmlColors::sand, "scaler: NONE");
+                    ImGui::SetItemTooltip(
+                        "Stamp does not claim a scaler sidecar (legacy v5.x\n"
+                        "model OR v5.9.3+ stamp with feature_scaler_present=0).\n"
+                        "Features fed to model raw, no standardization. To\n"
+                        "enable: retrain with v5.9.3+ training pipeline.");
+                }
+            }
+
             // NaN/Inf counters — bright red if non-zero, dim if clean.
             if (pc.ml_nan_feature_events > 0 || pc.ml_nan_prediction_events > 0) {
                 ImGui::Indent(20);

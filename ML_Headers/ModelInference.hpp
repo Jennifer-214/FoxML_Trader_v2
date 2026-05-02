@@ -23,6 +23,7 @@
 #include "../ML_Headers/RollingStats.hpp"
 #include "../MemHeaders/HmacSha256.hpp"  // v5.3.0 Phase B — in-process HMAC + SHA-256 (replaces popen paths)
 #include "../Version.hpp"                 // v5.9.2b — ENGINE_VERSION_STRING for cross-major detection
+#include "FeatureStandardizer.hpp"       // v5.9.3a — inline scaler struct on ModelHandle
 #include <stdio.h>
 #include <string.h>
 #include <locale.h>                       // v5.3.0 Phase B — uselocale for canonical body LC_NUMERIC pinning
@@ -217,6 +218,20 @@ struct ModelHandle {
                             // "model is 3-class but barrier_gate_enabled=0".
     char model_path[256];   // path for display/logging
     char training_fingerprint[65]; // SHA256 of config+data used to train this model (empty if unknown)
+    // v5.9.3a — feature standardizer (mean-centering + unit-variance).
+    // Inline (not heap) per audit decision: NUM_REGISTERED_FEATURES is
+    // constexpr → struct size known at compile time. ~600 bytes per
+    // handle; trivial vs the mmap'd XGBoost booster size.
+    // has_scaler=0 = identity (legacy / not loaded); =1 = active.
+    // Apply path early-returns when 0, so v5.9.3a "ships disabled"
+    // is the natural state until v5.9.3b activates training-side
+    // Compute + Persist + the 5 apply-site callers.
+    tt::FeatureStandardizer scaler;
+    // v5.9.3a — Gap H observability. Set by CoreModelZoo_TryLoadRole
+    // when scaler load fails in non-strict mode (engine warns + applies
+    // identity, distinct from model_load_failed which is the model itself).
+    // Surfaces to PerCoreSnap.ml_scaler_load_failed for ML Status panel.
+    int scaler_load_failed;
 };
 
 //======================================================================================================
@@ -227,6 +242,11 @@ inline void Model_Init(ModelHandle<F> *m) {
     m->num_features = 0;
     m->num_outputs = 0;
     m->model_path[0] = '\0';
+    // v5.9.3a — scaler init. has_scaler=0 means identity-applied;
+    // CoreModelZoo_TryLoadRole calls FeatureStandardizer_Load post-Model_Load
+    // to populate.
+    tt::FeatureStandardizer_Init(&m->scaler);
+    m->scaler_load_failed = 0;
 }
 
 //======================================================================================================
@@ -628,6 +648,15 @@ struct ModelStampResult {
     //   cross_major_engine==1 AND !cfg.allow_cross_major_engine
     // Within-major (5.7 → 5.9) always allowed.
     uint8_t  cross_major_engine;
+    // v5.9.3a — scaler sidecar binding. has_scaler_fields=1 when stamp
+    // contains feature_scaler_present + scaler_sha256 lines (v5.9.3+
+    // stamps); =0 means legacy stamp (no scaler claimed). Distinct from
+    // feature_scaler_present (=1 only when scaler is actually present
+    // for the model). Backward compat: legacy stamps load with
+    // has_scaler_fields=0 + feature_scaler_present=0.
+    uint8_t  has_scaler_fields;
+    uint8_t  feature_scaler_present;        // 1 = sidecar exists at <model>.scaler
+    char     scaler_sha256[65];             // SHA-256 hex of full sidecar file
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -689,6 +718,13 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     r.has_training_poll_interval = 0;
     r.training_poll_interval = 0;
     r.inference_cfg_drift_count = 0;
+    r.cross_major_engine = 0;
+    // v5.9.3a — scaler fields. has_scaler_fields = 1 if stamp had any
+    // scaler key; feature_scaler_present = 1 only if stamp claims the
+    // sidecar exists. Legacy stamps load with both = 0 (forward-compat).
+    r.has_scaler_fields = 0;
+    r.feature_scaler_present = 0;
+    r.scaler_sha256[0] = '\0';
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -803,6 +839,17 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             } else if (strcmp(key, "training_poll_interval") == 0) {
                 r.training_poll_interval = (uint32_t)strtoul(val, nullptr, 10);
                 r.has_training_poll_interval = 1;
+            }
+            // v5.9.3a — scaler fields
+            else if (strcmp(key, "feature_scaler_present") == 0) {
+                r.feature_scaler_present = (atoi(val) != 0) ? 1 : 0;
+                r.has_scaler_fields = 1;
+            } else if (strcmp(key, "scaler_sha256") == 0) {
+                size_t vl = strlen(val);
+                if (vl >= sizeof(r.scaler_sha256)) vl = sizeof(r.scaler_sha256) - 1;
+                memcpy(r.scaler_sha256, val, vl);
+                r.scaler_sha256[vl] = '\0';
+                r.has_scaler_fields = 1;
             }
         }
         line = strtok_r(nullptr, "\n", &save);
@@ -964,6 +1011,13 @@ struct StampInferenceCfgInputs {
     double   fee_rate_taker;
     int      has_training_poll_interval;             // 1 = emit training_poll_interval
     uint32_t training_poll_interval;
+    // v5.9.3a — scaler sidecar binding fields. has_scaler=1 → emit
+    // both feature_scaler_present + scaler_sha256 lines. scaler_sha256
+    // is the SHA-256 of the FULL sidecar file (computed by trainer
+    // post-Persist via sha256_file_hex_inproc).
+    int      has_scaler;
+    int      feature_scaler_present;                 // 0 = no sidecar; 1 = sidecar exists
+    const char* scaler_sha256_hex;                   // null-terminated 64-char hex (or empty)
 };
 
 inline StampWriteResult stamp_write_for_model(const char* model_path,
@@ -1098,6 +1152,17 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
         int wrote = snprintf(canonical + n, sizeof(canonical) - n,
             "training_poll_interval=%u\n",
             (unsigned)inf->training_poll_interval);
+        if (wrote > 0) n += wrote;
+    }
+    // v5.9.3a — scaler sidecar binding. Both lines emit together; SHA
+    // empty when feature_scaler_present=0 (no sidecar).
+    if (inf && inf->has_scaler && n > 0 && (size_t)n < sizeof(canonical)) {
+        const char* sha = (inf->scaler_sha256_hex && inf->scaler_sha256_hex[0])
+                        ? inf->scaler_sha256_hex : "";
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "feature_scaler_present=%d\n"
+            "scaler_sha256=%s\n",
+            inf->feature_scaler_present ? 1 : 0, sha);
         if (wrote > 0) n += wrote;
     }
 
