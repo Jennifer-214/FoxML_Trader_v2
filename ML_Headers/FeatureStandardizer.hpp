@@ -63,6 +63,46 @@ namespace tt {
 // random file headers don't accidentally validate as scaler files.
 static constexpr uint32_t SCALER_MAGIC = 0xFE5C1AE2u;
 
+// Scaler sidecar body layout — single source of truth.
+//
+// On-disk file: [body || sha256(body)]
+//   - body: the fields below, packed in this exact order
+//   - sha256: 32 bytes appended after the body, verified at Load
+//
+// Body fields (in serialization order):
+//   magic         [4 bytes, uint32_t]  — SCALER_MAGIC, identifies file type
+//   num_features  [4 bytes, uint32_t]  — must equal NUM_REGISTERED_FEATURES
+//                                        (refused at load if mismatched)
+//   registry_hash [8 bytes, uint64_t]  — FOREACH_FEATURE compile-time hash;
+//                                        binds scaler to feature registry
+//                                        (v5.9.3a; refused on cross-build
+//                                        mismatch in strict mode)
+//   stddev_floor  [4 bytes, uint32_t]  — Q32-encoded floor; apply uses
+//                                        fmax(stddev, floor) to avoid
+//                                        div-by-zero on constant features
+//   mean[N]       [8N bytes, double*N] — per-feature mean
+//   stddev[N]     [8N bytes, double*N] — per-feature stddev
+//
+// Total = 20 + 16*NUM_REGISTERED_FEATURES bytes (default N=34 → 564 bytes).
+//
+// Both Persist (write) and Load (verify-SHA) build the body from these
+// fields. SCALER_BODY_BYTES is used to size the in-memory staging buffer
+// in both paths — they must stay byte-aligned with the writes below.
+//
+// v5.9.5a: extracted as named constant after v5.9.3a's `registry_hash`
+// addition silently broke the manual `8 + 4 + 8N*2` formula (was off-by-8;
+// caused stack overflow caught by -Wstringop-overflow at v5.9.5 sprint
+// exit). Using sizeof() for each field is type-safe — changing a field's
+// type updates this constant automatically; adding a new field requires
+// editing this list (forces conscious update of both write paths).
+static constexpr size_t SCALER_BODY_BYTES =
+    sizeof(uint32_t)                              // magic
+  + sizeof(uint32_t)                              // num_features
+  + sizeof(uint64_t)                              // registry_hash
+  + sizeof(uint32_t)                              // stddev_floor (Q32)
+  + sizeof(double) * NUM_REGISTERED_FEATURES      // mean[N]
+  + sizeof(double) * NUM_REGISTERED_FEATURES;     // stddev[N]
+
 // Default stddev floor. For constant features (stddev=0) or near-constant
 // (stddev < floor), apply uses fmax(stddev, floor) to avoid div-by-zero
 // or pathological magnification. Persisted in sidecar as Q32 fixed-point
@@ -218,7 +258,8 @@ static inline int FeatureStandardizer_Load(FeatureStandardizer* sc,
     // Recompute body SHA-256 from the in-memory state we just loaded.
     // (Body = bytes BEFORE the trailing sha256.) This catches any
     // mid-file tamper that didn't affect the trailing field.
-    uint8_t body_buf[8 + 4 + sizeof(double) * NUM_REGISTERED_FEATURES * 2];
+    // Buffer size from SCALER_BODY_BYTES — see field layout there.
+    uint8_t body_buf[SCALER_BODY_BYTES];
     size_t off = 0;
     uint32_t magic_w = SCALER_MAGIC;       memcpy(body_buf + off, &magic_w, 4); off += 4;
     uint32_t nf_w    = nfeat;              memcpy(body_buf + off, &nf_w,    4); off += 4;
@@ -317,7 +358,8 @@ static inline int FeatureStandardizer_Persist(const FeatureStandardizer* sc,
     if (!f) return 0;
 
     // Build body in memory, compute SHA, then write body + SHA.
-    uint8_t body[8 + 4 + sizeof(double) * NUM_REGISTERED_FEATURES * 2];
+    // Buffer size from SCALER_BODY_BYTES — see field layout there.
+    uint8_t body[SCALER_BODY_BYTES];
     size_t off = 0;
     uint32_t magic = SCALER_MAGIC;            memcpy(body + off, &magic, 4); off += 4;
     uint32_t nfeat = sc->num_features;        memcpy(body + off, &nfeat, 4); off += 4;

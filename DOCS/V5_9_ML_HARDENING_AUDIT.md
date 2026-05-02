@@ -6,9 +6,14 @@ See `DOCS/changelogs/2026-05-02-v5.9-ml-hardening.md` for the
 sprint postmortem (Phase 6).
 **Source:** automated audit (2026-05-01) + manual verification +
 post-paper-test findings (2026-05-01 evening + 2026-05-02 morning).
-**Closure tag:** `v5.9.5` (2026-05-02). Sprint statistics: 17 tags,
-+225 tests (1030 → 1255), hot path UNTOUCHED every ship, 1 calendar
-day end-to-end.
+**Closure tag:** `v5.9.5a` (2026-05-02; v5.9.5 + sprint-exit
+build-warning hotfix). Sprint statistics: 18 tags, +225 tests
+(1030 → 1255), hot path UNTOUCHED every ship, 1 calendar day
+end-to-end. v5.9.5a fixed an off-by-8 stack overflow in
+`FeatureStandardizer.hpp` Persist + Load paths (caught by
+`-Wstringop-overflow` on `gui` + `suite` builds; missed by source-
+read `/parity-check` agent run — methodology gap closed by adding
+Section K to the skill).
 
 This doc is the **binding registry** of issues v5.9 must address.
 Every confirmed finding has a ship in `plans/2026-05-01-v5.9-ml-hardening.md`.
