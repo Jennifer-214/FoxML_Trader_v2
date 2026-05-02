@@ -38,53 +38,41 @@
 #include <cstdint>
 #include "../FixedPoint/FixedPointN.hpp"
 #include "RollingStats.hpp"
-#include "ROR_regressor.hpp"
-#include "FlowFeatures.hpp"
 #include "../Strategies/RegimeDetector.hpp"  // RegimeSignals<F>
-
-// CumDeltaState + TickRateState live elsewhere in the codebase; forward
-// declare so FeatureComputeCtx can hold typed pointers without a circular
-// include. Definitions: CumDeltaState in FlowFeatures.hpp / RegimeDetector.hpp,
-// TickRateState in DataStream/.
-template <unsigned F> struct CumDeltaState;
-struct TickRateState;
 
 //======================================================================================================
 // [FEATURE COMPUTE CONTEXT]
 //======================================================================================================
-// The bundle of all available ML inference inputs. Each compute fn reads
-// what it needs and ignores the rest. New fields appended over time as
-// new feature categories surface.
+// The bundle of inputs the registered feature compute functions read.
+// Each compute fn reads what it needs and ignores the rest.
 //
-// v5.8.1a — `signals` is pre-computed RegimeSignals from the slow path.
-// First 10 features read from this bundle (no recomputation). Future
-// features may read directly from short_rolling / long_rolling / etc.
-// for finer-grained access.
+// v5.9.0a — tightened from the v5.8.1a forward-compat shape. Removed
+// 11 unused auxiliary fields (long_rolling, medium_rolling,
+// baseline_rolling, ema_price, ror, flow, book_imb, spread,
+// large_trade, cumdelta, tick_rate, timestamp_us). All 34 currently
+// registered features read from `signals` (precomputed by
+// Regime_ComputeSignals from the upstream raw state) or from
+// `short_rolling` (indices 11-14: vwap_dev, price_stddev, price_avg,
+// volume_avg). Aux state is upstream of `signals`, not duplicated
+// into the ctx.
 //
-// MLBuildContext (legacy bundle in StrategyParameters.hpp) maps 1:1 to
-// these fields — v5.8.1b's caller migration just renames + reroutes.
+// When a v5.10+ feature needs raw state access not surfaced by
+// RegimeSignals, re-add the specific field at that time. YAGNI
+// applies — declared-but-unused fields confuse readers + audit
+// tools (the v5.8 audit's false-CRITICAL came from misreading
+// these fields as required).
 //======================================================================================================
 template <unsigned F>
 struct FeatureComputeCtx {
-    // Pre-computed regime signal bundle. v5.8.1a features read here.
+    // Pre-computed regime signal bundle. Feature indices 0-10, 15-33
+    // read here. Populated by Regime_ComputeSignals at slow-path
+    // cadence on both live (MLBuildContext path) and backtest
+    // (BacktestSharded driver) paths — train-serve parity.
     const RegimeSignals<F>*               signals;
 
-    // Raw rolling-stats bundles (multiple windows).
+    // Short-window rolling stats. Feature indices 11-14 read here:
+    // vwap_dev, price_stddev, price_avg, volume_avg.
     const RollingStats<F, 128>*           short_rolling;
-    const RollingStats<F, 512>*           long_rolling;
-    const RollingStats<F, 256>*           medium_rolling;
-    const RollingStats<F, 1024>*          baseline_rolling;
-
-    // Auxiliary state — populated from MLBuildContext during migration.
-    const FPN<F>*                         ema_price;
-    const RORRegressor<F>*                ror;
-    const FlowState*                      flow;
-    const BookImbalanceHistory<F, 1024>*  book_imb;
-    const SpreadState<F, 1024>*           spread;
-    const LargeTradeState<F, 1024>*       large_trade;
-    const CumDeltaState<F>*               cumdelta;
-    const TickRateState*                  tick_rate;
-    uint64_t                              timestamp_us;
 };
 
 //======================================================================================================

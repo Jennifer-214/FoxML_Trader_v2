@@ -661,7 +661,6 @@ inline void ML_BuildParameters(
     FeatureComputeCtx<F> ctx{};
     ctx.signals       = &sig;
     ctx.short_rolling = rolling;
-    ctx.long_rolling  = rolling_long;
     int n = Features_PackAll(&ctx, features);
 
     // run inference, prefer 3-class barrier model when available

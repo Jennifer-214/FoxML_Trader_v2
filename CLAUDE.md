@@ -108,6 +108,7 @@ separate files. **Read the relevant file when starting work in that area:**
 |---|---|
 | Adding a cfg field, GUI panel, strategy, ML feature, per-core override | [`DOCS/CLAUDE_INTEGRATION.md`](DOCS/CLAUDE_INTEGRATION.md) |
 | Changing OMS, kill switch, snapshot, fee math, hot path, slow-path threading, anything load-bearing | [`DOCS/CLAUDE_INVARIANTS.md`](DOCS/CLAUDE_INVARIANTS.md) |
+| Touching FeatureRegistry, FeatureComputeCtx, MLBuildContext, CoreModelZoo, stamp_*, verify_model_stamp, train→serve path | [`DOCS/CLAUDE_ML_INVARIANTS.md`](DOCS/CLAUDE_ML_INVARIANTS.md) |
 | Planning a multi-day change | [`DOCS/CLAUDE_REVIEW.md`](DOCS/CLAUDE_REVIEW.md) |
 | Backtest suite (Run Control, Training, Walk-Forward, Held-Out) | [`DOCS/CLAUDE_FOXML_SUITE.md`](DOCS/CLAUDE_FOXML_SUITE.md) |
 

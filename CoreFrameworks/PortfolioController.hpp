@@ -1630,7 +1630,6 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       FeatureComputeCtx<F> ctx{};
       ctx.signals       = &signals;
       ctx.short_rolling = &ctrl->rolling;
-      ctx.long_rolling  = ctrl->rolling_long;
       int n = Features_PackAll(&ctx, feat_buf);
       signals.model_score = FPN_FromDouble<F>(
           (double)Model_Predict(&ctrl->regime_model, feat_buf, n));
@@ -1788,7 +1787,6 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     FeatureComputeCtx<F> ctx{};
     ctx.signals       = &ctrl->last_signals;
     ctx.short_rolling = &ctrl->rolling;
-    ctx.long_rolling  = ctrl->rolling_long;
     int n = Features_PackAll(&ctx, features);
     double p_peak = Model_Predict(&ctrl->peak_model, features, n);
     double p_valley = Model_IsLoaded(&ctrl->valley_model)

@@ -9164,7 +9164,8 @@ e3_skip_load:;
         FeatureComputeCtx<64> ctx{};
         ctx.signals       = &sig;
         ctx.short_rolling = &r;
-        ctx.long_rolling  = &r_long;
+        // v5.9.0a: long_rolling removed from FeatureComputeCtx (was unused).
+        // r_long still passed to ModelFeatures_Pack below for legacy comparison.
 
         float pack_old[MODEL_MAX_FEATURES] = {0};
         float pack_new[MODEL_MAX_FEATURES] = {0};

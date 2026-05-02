@@ -444,7 +444,6 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 FeatureComputeCtx<BACKTEST_FP> ctx{};
                 ctx.signals       = &sig;
                 ctx.short_rolling = d->rolling;
-                ctx.long_rolling  = d->rolling_long;
                 Features_PackAll(&ctx,
                     &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES]);
             }

@@ -116,7 +116,6 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
     FeatureComputeCtx<F> ctx{};
     ctx.signals       = signals;
     ctx.short_rolling = rolling;
-    ctx.long_rolling  = rolling_long;
     int n = Features_PackAll(&ctx, state->feature_buf);
 
     // run inference
