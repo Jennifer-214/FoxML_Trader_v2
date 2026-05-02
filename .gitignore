@@ -17,7 +17,7 @@ data/
 models/
 *.o
 *.d
-plans/
+plans
 .claude/
 .chart-venv/
 secrets.cfg
