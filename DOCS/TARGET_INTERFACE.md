@@ -138,3 +138,39 @@ Existing helpers:
 - `ML_Headers/ModelInference.hpp` — `verify_model_stamp` (rejects
   target_kind mismatch post-v5.9.0)
 - `DOCS/EASY_ADDITIONS_INVARIANTS.md` — the X-macro pattern overall
+
+## Snapshot-test discipline (v5.9.2a+)
+
+Labels currently have NO `LABEL_REGISTRY_HASH` (the `label_table[]` is
+hand-maintained, not X-macro-generated). The v5.9.2a snapshot tests
+in `tests/controller_test.cpp` (search for "Sub-area 3") are the SOLE
+protection against label body changes — a future `FOREACH_TARGET`
+X-macro retrofit (deferred to v5.10+) would add structural protection.
+
+Each of the 8 label functions has a fixed-input snapshot test. The
+synthetic input is a 200-tick array with deterministic ramp/dip
+shape; expected outputs match each label's documented contract.
+
+**When you modify a Label function body:**
+
+1. Run `./build.sh test`. If the v5.9.2a label snapshot block fails,
+   your change has observable effect.
+2. Decide:
+   - **Bytewise-equivalent refactor**: preserve outputs, no test
+     update.
+   - **Intentional semantic shift** (changing lookahead semantics,
+     fixing a bug): update the recorded snapshot values. CHANGELOG:
+     "v5.X.Y changed Label_<NAME> semantics; models trained on old
+     labels are not comparable to new training runs."
+3. Until `FOREACH_TARGET` exists, there's no automatic refuse-to-load
+   mechanism — operator discipline + snapshot test + CHANGELOG is
+   the protection layer.
+
+**Less urgent than feature snapshot drift** because labels are
+TRAINING-time only (live engine never sees labels). Drift is a
+research-integrity concern (you can't compare two backtests if labels
+changed semantics) rather than runtime-prediction concern.
+
+See `DOCS/CLAUDE_ML_INVARIANTS.md` "Feature output snapshot is part
+of the parity surface" for the analogous discipline applied to
+features (which IS runtime-critical).

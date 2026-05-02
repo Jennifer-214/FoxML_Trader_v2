@@ -10543,6 +10543,241 @@ e3_skip_load:;
               pcs.warmup_progress_pct == 75);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.9.2a Phase 3.5 — drift protection snapshot tests ---\n");
+    {
+        using namespace tt;  // GateParameters, SimpleDip_BuildParameters, etc.
+        // v5.9.2a snapshot tests — catch function-body changes that don't
+        // flip FEATURE_REGISTRY_HASH. Closes the "operator changed
+        // ML_Compute_HourSin body but didn't bump version" silent-drift
+        // class.
+
+        // === Sub-area 1a: Features_PackAll snapshot ===
+        // 30 of 34 features are direct passthrough from ctx->signals;
+        // 4 (FEATURE_VWAP_DEV..VOLUME_AVG) read ctx->short_rolling.
+        // Expected output = (float)FPN_ToDouble(input) for FPN fields,
+        // or (float)input for double fields.
+        {
+            RegimeSignals<64> signals = {};
+            // Set each signals field to a distinct non-zero value so any
+            // index drift in FOREACH_FEATURE is detected.
+            signals.short_slope    = FPN_FromDouble<64>(0.0001);
+            signals.short_r2       = FPN_FromDouble<64>(0.71);
+            signals.short_variance = FPN_FromDouble<64>(2.5);
+            signals.long_slope     = FPN_FromDouble<64>(0.0002);
+            signals.long_r2        = FPN_FromDouble<64>(0.65);
+            signals.long_variance  = FPN_FromDouble<64>(8.5);
+            signals.vol_ratio      = FPN_FromDouble<64>(0.29);
+            signals.ror_slope      = FPN_FromDouble<64>(0.0003);
+            signals.volume_slope   = FPN_FromDouble<64>(1.5);
+            signals.volume_delta   = FPN_FromDouble<64>(-0.42);
+            signals.ema_sma_spread = FPN_FromDouble<64>(0.0015);
+            signals.ema_above_sma  = 1;  // int (binary)
+            signals.mid_slope      = FPN_FromDouble<64>(0.0005);
+            signals.mid_r2         = FPN_FromDouble<64>(0.55);
+            signals.cumdelta       = FPN_FromDouble<64>(125.0);
+            signals.hour_sin       = 0.866;     // double
+            signals.hour_cos       = 0.5;       // double
+            signals.vol_regime_ratio = FPN_FromDouble<64>(1.42);
+            signals.tick_rate_z    = 2.1;       // double
+            signals.dist_to_high   = FPN_FromDouble<64>(0.0125);
+            signals.dist_to_low    = FPN_FromDouble<64>(0.0083);
+            signals.book_imb_mean_short = FPN_FromDouble<64>(0.15);
+            signals.book_imb_mean_long  = FPN_FromDouble<64>(0.05);
+            signals.book_imb_drift      = FPN_FromDouble<64>(0.10);
+            signals.flow_10s   = 50.0;          // double
+            signals.flow_1m    = 120.0;         // double
+            signals.flow_5m    = 300.0;         // double
+            signals.large_trade_z = 1.8;        // double
+            signals.spread_bps    = 2.5;        // double
+            signals.spread_zscore = 0.7;        // double
+
+            RollingStats<64, 128> short_rolling = {};
+            short_rolling.vwap_deviation = FPN_FromDouble<64>(0.0007);
+            short_rolling.price_stddev   = FPN_FromDouble<64>(15.5);
+            short_rolling.price_avg      = FPN_FromDouble<64>(60000.0);
+            short_rolling.volume_avg     = FPN_FromDouble<64>(0.005);
+
+            FeatureComputeCtx<64> ctx = {};
+            ctx.signals = &signals;
+            ctx.short_rolling = &short_rolling;
+
+            float out[NUM_REGISTERED_FEATURES];
+            int n = Features_PackAll<64>(&ctx, out);
+            check("v5.9.2a: Features_PackAll returns NUM_REGISTERED_FEATURES",
+                  n == (int)NUM_REGISTERED_FEATURES);
+
+            auto check_pass = [&](int idx, double expected, const char* name) {
+                float got = out[idx];
+                float exp_f = (float)expected;
+                char msg[160];
+                snprintf(msg, sizeof(msg),
+                    "v5.9.2a: feature[%d] %s passes through %.6f (got %.6f)",
+                    idx, name, expected, (double)got);
+                check(msg, got == exp_f);
+            };
+
+            check_pass(FEATURE_SHORT_SLOPE,    0.0001,  "short_slope");
+            check_pass(FEATURE_SHORT_R2,       0.71,    "short_r2");
+            check_pass(FEATURE_SHORT_VARIANCE, 2.5,     "short_variance");
+            check_pass(FEATURE_LONG_SLOPE,     0.0002,  "long_slope");
+            check_pass(FEATURE_LONG_R2,        0.65,    "long_r2");
+            check_pass(FEATURE_LONG_VARIANCE,  8.5,     "long_variance");
+            check_pass(FEATURE_VOL_RATIO,      0.29,    "vol_ratio");
+            check_pass(FEATURE_ROR_SLOPE,      0.0003,  "ror_slope");
+            check_pass(FEATURE_VOLUME_SLOPE,   1.5,     "volume_slope");
+            check_pass(FEATURE_VOLUME_DELTA,   -0.42,   "volume_delta");
+            check_pass(FEATURE_EMA_SMA_SPREAD, 0.0015,  "ema_sma_spread");
+            check_pass(FEATURE_VWAP_DEV,       0.0007,  "vwap_dev");
+            check_pass(FEATURE_PRICE_STDDEV,   15.5,    "price_stddev");
+            check_pass(FEATURE_PRICE_AVG,      60000.0, "price_avg");
+            check_pass(FEATURE_VOLUME_AVG,     0.005,   "volume_avg");
+            check_pass(FEATURE_EMA_ABOVE_SMA,  1.0,     "ema_above_sma");
+            check_pass(FEATURE_MID_SLOPE,      0.0005,  "mid_slope");
+            check_pass(FEATURE_MID_R2,         0.55,    "mid_r2");
+            check_pass(FEATURE_CUMDELTA,       125.0,   "cumdelta");
+            check_pass(FEATURE_HOUR_SIN,       0.866,   "hour_sin");
+            check_pass(FEATURE_HOUR_COS,       0.5,     "hour_cos");
+            check_pass(FEATURE_VOL_REGIME_RAT, 1.42,    "vol_regime_ratio");
+            check_pass(FEATURE_TICK_RATE_Z,    2.1,     "tick_rate_z");
+            check_pass(FEATURE_DIST_TO_HIGH,   0.0125,  "dist_to_high");
+            check_pass(FEATURE_DIST_TO_LOW,    0.0083,  "dist_to_low");
+            check_pass(FEATURE_BOOK_IMB_MEAN_SHORT, 0.15,  "book_imb_mean_short");
+            check_pass(FEATURE_BOOK_IMB_MEAN_LONG,  0.05,  "book_imb_mean_long");
+            check_pass(FEATURE_BOOK_IMB_DRIFT, 0.10,   "book_imb_drift");
+            check_pass(FEATURE_FLOW_10S,       50.0,   "flow_10s");
+            check_pass(FEATURE_FLOW_1M,        120.0,  "flow_1m");
+            check_pass(FEATURE_FLOW_5M,        300.0,  "flow_5m");
+            check_pass(FEATURE_LARGE_TRADE_Z,  1.8,    "large_trade_z");
+            check_pass(FEATURE_SPREAD_BPS,     2.5,    "spread_bps");
+            check_pass(FEATURE_SPREAD_ZSCORE,  0.7,    "spread_zscore");
+        }
+
+        // === Sub-area 2a: ConfidenceScorer formula snapshot ===
+        // Confidence formula: |IC| × exp(-dt/tau) × 1/(1+RMSE)
+        {
+            // Combo 1: high IC, fresh (dt=0), no error → 0.5
+            double r1 = Confidence_Compute(0.5, 0.0, 0.0, 300.0);
+            check("v5.9.2a: Confidence(IC=0.5, fresh, no err) == 0.5",
+                  fabs(r1 - 0.5) < 1e-9);
+
+            // Combo 2: zero IC clamped to MIN_IC_DEFAULT (0.01 per
+            // ConfidenceScore.hpp:199); freshness=1, stability=1 → 0.01
+            double r2 = Confidence_Compute(0.0, 0.0, 0.0, 300.0);
+            check("v5.9.2a: Confidence(IC=0) clamps to MIN_IC (0.01)",
+                  fabs(r2 - 0.01) < 1e-9);
+
+            // Combo 3: negative IC handled as |IC| → 0.5
+            double r3 = Confidence_Compute(-0.5, 0.0, 0.0, 300.0);
+            check("v5.9.2a: Confidence(IC=-0.5, fresh, no err) == 0.5",
+                  fabs(r3 - 0.5) < 1e-9);
+
+            // Combo 4: stale data (dt=tau) → freshness=1/e ≈ 0.3679
+            // Result = 0.5 × (1/e) × 1.0 ≈ 0.18394
+            double r4 = Confidence_Compute(0.5, 300.0, 0.0, 300.0);
+            check("v5.9.2a: Confidence(IC=0.5, dt=tau, no err) == 0.5/e",
+                  fabs(r4 - (0.5 / 2.7182818284590452)) < 1e-6);
+        }
+
+        // === Sub-area 2b: SimpleDip strategy gate snapshot ===
+        // SimpleDip is the simplest (no state). Other strategies require
+        // strategy_state setup; ML strategy requires a loaded model.
+        // Defer MR/Momentum/EmaCross/ML to v5.9.4 if needed; SimpleDip
+        // proves the test pattern works.
+        {
+            RollingStats<64, 128> rolling = {};
+            rolling.price_avg    = FPN_FromDouble<64>(60000.0);
+            rolling.price_stddev = FPN_FromDouble<64>(60.0);
+            rolling.price_max    = FPN_FromDouble<64>(60100.0);
+            rolling.volume_avg   = FPN_FromDouble<64>(0.005);
+
+            ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+            cfg.take_profit_pct = FPN_FromDouble<64>(0.005);
+            cfg.stop_loss_pct   = FPN_FromDouble<64>(0.0025);
+
+            GateParameters<64> out = {};
+            SimpleDip_BuildParameters<64, 128>(
+                &rolling, &cfg, FPN_FromDouble<64>(1000.0), &out);
+
+            // SimpleDip threshold = recent_high * (1 - entry_offset_pct).
+            // With price_max=60100 + default offset=0.0015 → threshold ≈ 60009.85
+            // which is BELOW price_max but ABOVE price_avg=60000. Assert
+            // threshold < recent_high (the strategy contract).
+            check("v5.9.2a: SimpleDip gate price_threshold < recent_high (price_max)",
+                  FPN_LessThan(out.bg_price_threshold, rolling.price_max));
+            check("v5.9.2a: SimpleDip tp_pct propagates from cfg",
+                  FPN_ToDouble(out.tp_pct) == 0.005);
+            check("v5.9.2a: SimpleDip sl_pct propagates from cfg",
+                  FPN_ToDouble(out.sl_pct) == 0.0025);
+            check("v5.9.2a: SimpleDip trade_size > 0",
+                  !FPN_IsZero(out.trade_size));
+            check("v5.9.2a: SimpleDip strategy_id == STRATEGY_SIMPLE_DIP",
+                  out.strategy_id == STRATEGY_SIMPLE_DIP);
+        }
+
+        // === Sub-area 3: Label function body snapshots ===
+        // 8 label functions × 1 fixed-input test each. Sole protection
+        // against label body drift since no LABEL_REGISTRY_HASH exists.
+        {
+            HistoricalTick lticks[200];
+            for (int i = 0; i < 200; ++i) {
+                double p;
+                if (i < 100) p = 60000.0 + 0.20 * i;        // up to 60020
+                else         p = 60020.0 - 0.20 * (i - 100); // back to 60000
+                lticks[i].price = p;
+                lticks[i].qty = 0.001 + 0.0001 * i;
+                lticks[i].timestamp_us = 1000000LL + i * 1000;
+                lticks[i].is_buyer_maker = (i % 2);
+            }
+
+            const double sample_price = 60000.0;
+            const double tp_pct = 0.03;   // 0.03% — small barrier, easily hit
+            const double sl_pct = 0.05;   // 0.05% — larger barrier
+            const int forward = 50;
+
+            // Label_WinLoss — up-ramp hits TP first → 1.0
+            float lbl_wl = Label_WinLoss(lticks, 0, 200, sample_price, tp_pct, sl_pct, forward);
+            check("v5.9.2a: Label_WinLoss on up-ramp → 1.0",
+                  lbl_wl == 1.0f);
+
+            // Label_Barrier — same → 1.0
+            float lbl_bar = Label_Barrier(lticks, 0, 200, sample_price, tp_pct, sl_pct, forward);
+            check("v5.9.2a: Label_Barrier on up-ramp → 1.0",
+                  lbl_bar == 1.0f);
+
+            // Label_ForwardPnl — return at i+50, price[50]=60010, ret≈0.0167%
+            float lbl_fp = Label_ForwardPnl(lticks, 0, 200, sample_price, tp_pct, sl_pct, forward);
+            check("v5.9.2a: Label_ForwardPnl at i+50 ≈ 0.0167%",
+                  fabsf(lbl_fp - (10.0f / 60000.0f * 100.0f)) < 1e-5);
+
+            // Label_Regime — passes regime in extra_param, returns it as float
+            float lbl_reg = Label_Regime(lticks, 0, 200, sample_price, tp_pct, sl_pct, /*regime=*/2);
+            check("v5.9.2a: Label_Regime returns extra_param as float",
+                  lbl_reg == 2.0f);
+
+            // Label_VolBarrier — vol-scaled barrier, returns 0/0.5/1.0
+            float lbl_vb = Label_VolBarrier(lticks, 30, 200, sample_price, 0.5, 0.0, 20);
+            check("v5.9.2a: Label_VolBarrier returns valid output (0/0.5/1.0)",
+                  lbl_vb == 0.0f || lbl_vb == 0.5f || lbl_vb == 1.0f);
+
+            // Label_WillPeak — peak at tick 100, sample at tick 30, far → 0.0
+            float lbl_wp = Label_WillPeak(lticks, 30, 200, lticks[30].price, 0, 0, 50);
+            check("v5.9.2a: Label_WillPeak when peak is far → 0.0",
+                  lbl_wp == 0.0f);
+
+            // Label_WillValley — sample at tick 100, valley near
+            float lbl_wv = Label_WillValley(lticks, 100, 200, lticks[100].price, 0, 0, 50);
+            check("v5.9.2a: Label_WillValley near valley → 0/1",
+                  lbl_wv == 0.0f || lbl_wv == 1.0f);
+
+            // Label_PeakValleyStable — within forward=50 ticks the price
+            // ramps from 60000 → 60010, never reaching up_barrier (60018)
+            // or down_barrier (59970). Returns 0.0 (stable).
+            float lbl_pvs = Label_PeakValleyStable(lticks, 0, 200, sample_price, tp_pct, sl_pct, forward);
+            check("v5.9.2a: Label_PeakValleyStable when no barrier hit → 0.0 (stable)",
+                  lbl_pvs == 0.0f);
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

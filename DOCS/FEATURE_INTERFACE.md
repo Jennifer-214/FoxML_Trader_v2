@@ -151,3 +151,43 @@ features bug.
 - `DOCS/CLAUDE_INTEGRATION.md` — broader integration recipes
 - `Strategies/RegimeDetector.hpp` — `RegimeSignals` (different
   extensibility surface — for regime classification, not ML)
+
+## Snapshot-test discipline (v5.9.2a+)
+
+`FEATURE_REGISTRY_HASH` catches X-macro structural changes (add/remove/
+reorder rows, version field bump). It does NOT catch function-body
+changes — modifying `ML_Compute_HourSin` to use hours-of-week instead
+of hours-of-day, fixing a sign error in `ML_Compute_VwapDev`, or
+changing `Regime_ComputeSignals` to populate `ema_sma_spread`
+differently all leave the hash unchanged. Pre-v5.9.2a these slipped
+past structural protection silently.
+
+The v5.9.2a snapshot tests in `tests/controller_test.cpp` (search for
+"Sub-area 1a") set each `RegimeSignals` field to a distinct non-zero
+value, run `Features_PackAll`, and assert each output matches
+`(float)FPN_ToDouble(input)`. Function-body changes that alter output
+trip the snapshot.
+
+**When you modify a Compute function (or anything in the dependency
+tree — `Regime_ComputeSignals`, `RollingStats_Push`, etc.):**
+
+1. Run `./build.sh test`. If the v5.9.2a feature snapshot block fails,
+   your change has observable effect (intentional or accidental).
+2. Decide:
+   - **Bytewise-equivalent refactor** (variable rename, branch reorder
+     that doesn't change output): preserve outputs, no version bump,
+     no test update.
+   - **Intentional semantic shift** (formula change, dependency change,
+     bug fix that changes output): update the recorded snapshot
+     values AND bump the relevant `FOREACH_FEATURE` row's `version`
+     field. CHANGELOG: "v5.X.Y bumped FEATURE_<NAME> version from N
+     to N+1, retrain required."
+3. Verify: `FEATURE_REGISTRY_HASH` flips post-bump (existing models
+   refuse to load), snapshot tests pass against new values.
+
+**Both layers required.** Hash alone misses body changes; snapshot
+alone doesn't tell models to refuse. Together they make drift
+impossible to ship without explicit retrain decision.
+
+See `DOCS/CLAUDE_ML_INVARIANTS.md` "Feature output snapshot is part
+of the parity surface" for the full rule.

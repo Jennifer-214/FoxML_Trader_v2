@@ -288,3 +288,121 @@ Every invariant above counters one or more cases of this:
 **Prevention principle:** "Wired but not exercised" gaps must be
 caught at PR-time (regression test) or plan-time (readiness
 Checks 15-17), not paper-test-time.
+
+## Sidecar registry-hash binding (v5.9.3+)
+
+**Rule:** When `feature_scaler_present=1` in the stamp body, the
+`<model>.scaler` sidecar binary MUST embed the
+`FEATURE_REGISTRY_HASH` it was computed under. Engine load refuses
+when the sidecar's hash differs from the current build's hash, EVEN
+IF the parent stamp's hash matches.
+
+**Why:** v5.9.3 introduces a NEW train→serve handoff (the scaler).
+If the FOREACH_FEATURE registry is reordered/changed between training
+the scaler and loading it at engine boot, the scaler's
+mean[i]/stddev[i] arrays index to a different feature set than what
+Features_PackAll produces — silent feature mis-scaling. Two-layer
+binding (stamp's hash AND scaler's hash) makes drift impossible to
+ship without explicit retrain.
+
+**How to apply:** Phase 4 must add `feature_registry_hash` to the
+`.scaler` binary header. `CoreModelZoo_TryLoadRole` must verify both
+hashes match the build's `FEATURE_REGISTRY_HASH()` before applying
+the scaler.
+
+## Stddev floor identity (v5.9.3+)
+
+**Rule:** `SCALER_STDDEV_FLOOR` (constexpr default `1e-9`) MUST be
+embedded in the `.scaler` sidecar (Q32 fixed-point), not just
+constexpr in code. Both `_Compute` (training) and `_Apply` (serving)
+read the floor from the sidecar. Future changes to the constexpr
+default DO NOT silently change behavior for existing models.
+
+**Why:** drift class — change `SCALER_STDDEV_FLOOR` from `1e-9` to
+`1e-8` in code, deploy without retrain. Training-side scaler still
+has its 1e-9 stats; serve-side now floors at 1e-8 → for any feature
+where stddev was in [1e-9, 1e-8] range, divisor differs → output
+differs. Persisted floor pins the contract per-model.
+
+**How to apply:** Sidecar layout includes `[u32 stddev_floor_q]`
+field at fixed offset. Both Compute and Apply read this field, not
+the constexpr.
+
+## 3-tier strict-mode behavior (v5.9.0+ generalized in v5.9.3)
+
+**Rule:** For ANY train-serve handoff (stamp registry hash, scaler
+load, format_version, future ensemble weights, etc.):
+
+- `held_out_gate_strict=1` → REFUSE load on mismatch, model
+  unavailable, ML→SimpleDip CRITICAL log fires
+- `held_out_gate_strict=0` → WARN load, identity/default applied,
+  distinct PerCoreSnap state surface (e.g.
+  `ml_model_load_failed=1`, `ml_scaler_load_failed=1`),
+  rate-limited CRITICAL log
+- **Silent fallback is forbidden.** Every refusal/warn path surfaces
+  to the operator.
+
+**Why:** v5.9.0b shipped this for model load failure; v5.9.3 extends
+to scaler load failure; future handoffs follow same shape. Operator
+must always see when serve-time uses identity/default in place of
+the trained artifact.
+
+**How to apply:** When adding a new artifact verifier, mirror the
+pattern: PerCoreSnap field + populator + ML Status panel branch +
+rate-limited CRITICAL log. Tests must cover refuse-path AND
+warn-path observability.
+
+## Trainer atomic write contract (v5.3.0 generalized in v5.9.3)
+
+**Rule:** Sidecar persist MUST complete (with sha verification of
+on-disk file) BEFORE stamp emit. If persist fails, training run
+aborts with no stamp written. If stamp emit fails, sidecar is
+removed. No half-baked artifact pairs (stamp claiming
+`feature_scaler_present=1` while sidecar is missing).
+
+**Why:** half-baked artifact pair = exact silent-drift class v5.9
+prevents. Engine boot would either refuse (strict, OK) or warn-load
+with identity (non-strict, BAD — operator thinks model is using
+trained scaler but it's actually identity).
+
+**How to apply:** training pipeline ordering enforced as:
+1. compute scaler in-memory
+2. persist sidecar atomically (`.tmp` + `rename`)
+3. compute SHA-256 from on-disk file (verify it landed; don't trust
+   in-memory copy)
+4. write stamp atomically with `scaler_sha256=<hex>`
+5. on-cancel cleanup: remove orphan `.scaler` if persist completed
+   but stamp emit didn't
+
+## Feature output snapshot is part of the parity surface (v5.9.2a+)
+
+**Rule:** `FEATURE_REGISTRY_HASH` catches X-macro structural changes
+(add/remove/reorder rows, version field bumps). The v5.9.2a
+snapshot tests catch FUNCTION-BODY changes (ML_Compute_*,
+Regime_ComputeSignals, RollingStats math). Both layers are required;
+neither alone is sufficient.
+
+When modifying ANY function in the feature dependency tree, author
+either:
+- Preserves output bit-for-bit (numeric-equivalent refactor) — no
+  test update needed
+- OR updates the snapshot test's recorded values AND bumps the
+  relevant `FOREACH_FEATURE` row's `version` field (so existing
+  models refuse to load with the new feature semantics)
+
+**Why:** pre-v5.9.2a, body changes silently passed `FEATURE_REGISTRY_HASH`
+verification — model loaded fine, predictions silently drifted.
+Snapshot tests detect via "expected vs actual feature output bytes"
+at PR-time, forcing the version bump + retrain decision before merge.
+
+**How to apply:** snapshot tests live at `tests/controller_test.cpp`
+v5.9.2a EXTENSIBILITY block. When you change a feature compute fn:
+- Run tests; if they fail, your change is detectable (intentional
+  semantic shift)
+- Either revert to bytewise-identical math, or update the recorded
+  values + bump version field
+- Document in CHANGELOG: "v5.X.Y bumped FEATURE_<NAME> version
+  from N to N+1, retrain required"
+
+This same discipline applies to `Regime_ComputeSignals`,
+`RollingStats_Push`, and any function the snapshot test exercises.
