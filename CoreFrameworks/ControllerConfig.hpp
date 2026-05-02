@@ -472,6 +472,14 @@ template <unsigned F> struct ControllerConfig {
   // secret="" (which makes verify_model_stamp accept any stamp signature
   // — useful for dev). Set both for production live deploy.
   int    held_out_gate_strict;       // 0=warn-only (default), 1=refuse load, -1=skip
+  // v5.9.2b — allow loading a model whose stamp's engine_version differs
+  // by major version from current build (e.g. stamp says 5.x but engine
+  // is 6.x). Cross-major can introduce hot-path predicate changes that
+  // make a v5-trained model misbehave at v6 inference. Default 0 (refuse
+  // cross-major in both strict + non-strict modes); operator opts in
+  // explicitly with allow_cross_major_engine=1 + held_out_gate_strict=0.
+  // Within-major loads (5.7 → 5.9) are always permitted.
+  int    allow_cross_major_engine;
   char   held_out_stamp_secret[128]; // HMAC-SHA256 secret for stamp signing/verify
   // v5.3.2 — auto-stamp on held-out completion. When 1, Backtest_RunFullValidation
   // calls stamp_write_for_model after a successful held-out training pass, using
@@ -858,6 +866,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.held_out_fraction           = FPN_FromDouble<F>(0.20);     // 20% reserved
   cfg.gap_acceptable_threshold    = FPN_FromDouble<F>(0.05);     // 5% max gap for "OK"
   cfg.held_out_gate_strict        = 0;                            // gate off by default (warn-only)
+  cfg.allow_cross_major_engine    = 0;                            // v5.9.2b — refuse cross-major by default
   cfg.held_out_stamp_secret[0]    = '\0';                         // empty = accept-any (dev)
   cfg.auto_stamp_on_held_out      = 1;                            // v5.8.10: default 1 (suite Run Full Validation auto-stamps); set 0 only for manual tools/stamp_model.sh workflow
   cfg.health_log_path[0]          = '\0';                         // empty = disabled
@@ -1208,10 +1217,16 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // the bad value before it's silently overridden during boot.
     if (strcmp(key, "confidence_freshness_tau") == 0) {
         double v = atof(val);
-        if (v <= 0.0) {
+        // v5.9.1 (V5_9_AUDIT-#13) — reject tau<=0 (silent default fallback).
+        // v5.9.2b — also clamp to [60.0, 3600.0] (1 minute to 1 hour).
+        // Out-of-range values silently degraded the confidence damping
+        // contract: tau=1e6 effectively disabled freshness decay; tau=10
+        // produced near-zero confidence after just a few seconds. Both
+        // are pathological. Range matches the model lifetime envelope.
+        if (v <= 0.0 || v < 60.0 || v > 3600.0) {
             fprintf(stderr,
-                "[cfg] confidence_freshness_tau=%.3f invalid — must be > 0 "
-                "(use default by omitting the field; see DOCS/CLAUDE_INTEGRATION.md)\n",
+                "[cfg] confidence_freshness_tau=%.3f out of range [60.0, 3600.0]; "
+                "using default 300.0. See DOCS/CLAUDE_INTEGRATION.md.\n",
                 v);
             continue;
         }
@@ -1222,6 +1237,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN_POS(confidence_hard_block_threshold)
     CFG_PARSE_FPN(held_out_fraction)
     CFG_PARSE_FPN(gap_acceptable_threshold)
+    CFG_PARSE_INT(allow_cross_major_engine)
     if (strcmp(key, "held_out_gate_strict") == 0) {
         cfg.held_out_gate_strict = atoi(val);
         continue;

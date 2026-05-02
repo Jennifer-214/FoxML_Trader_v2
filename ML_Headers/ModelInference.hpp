@@ -22,6 +22,7 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../MemHeaders/HmacSha256.hpp"  // v5.3.0 Phase B — in-process HMAC + SHA-256 (replaces popen paths)
+#include "../Version.hpp"                 // v5.9.2b — ENGINE_VERSION_STRING for cross-major detection
 #include <stdio.h>
 #include <string.h>
 #include <locale.h>                       // v5.3.0 Phase B — uselocale for canonical body LC_NUMERIC pinning
@@ -602,6 +603,31 @@ struct ModelStampResult {
                                      //         0 if absent (v5.8.x and older).
                                      //         1 = current (v5.9.0+).
                                      //         Verifier rejects unknown versions in strict mode.
+    // v5.9.2b — inference-affecting cfg fields stamped at training time.
+    // Verifier compares against current cfg; mismatch triggers
+    // 3-tier strict-mode behavior (refuse / warn / surfaced).
+    // Field flags = 1 when stamp had the field; 0 = absent (skip check).
+    uint8_t  has_inference_cfg;                    // 1 if any inference_cfg_* present
+    double   inference_cfg_confidence_threshold_scale;
+    int      inference_cfg_barrier_gate_enabled;
+    double   inference_cfg_confidence_hard_block_threshold;
+    double   inference_cfg_held_out_fraction;
+    double   inference_cfg_freshness_tau;
+    uint8_t  has_inference_cfg_bandit;             // 1 if bandit_blend_ratio present
+    double   inference_cfg_bandit_blend_ratio;
+    uint8_t  has_inference_cfg_fees;               // 1 if fee_rate_* fields present
+    double   inference_cfg_fee_rate_maker;
+    double   inference_cfg_fee_rate_taker;
+    uint8_t  has_training_poll_interval;
+    uint32_t training_poll_interval;
+    int      inference_cfg_drift_count;            // 0 if all match; >0 = mismatched fields
+    // v5.9.2b — cross-major engine version detection. Set to 1 when stamp's
+    // engine_version differs by major number from current build's
+    // ENGINE_VERSION_STRING (e.g. stamp says 5.9.0 but engine is 6.0.0).
+    // Caller (CoreModelZoo) refuses load when:
+    //   cross_major_engine==1 AND !cfg.allow_cross_major_engine
+    // Within-major (5.7 → 5.9) always allowed.
+    uint8_t  cross_major_engine;
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -648,6 +674,21 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     r.feature_registry_hash = 0;
     r.engine_version[0] = '\0';
     r.stamp_format_version = 0;  // v5.9.0: 0 = absent (legacy stamp)
+    // v5.9.2b — inference cfg fields. has_* flags = 0 until parser sets them.
+    r.has_inference_cfg = 0;
+    r.inference_cfg_confidence_threshold_scale = 0.0;
+    r.inference_cfg_barrier_gate_enabled = 0;
+    r.inference_cfg_confidence_hard_block_threshold = 0.0;
+    r.inference_cfg_held_out_fraction = 0.0;
+    r.inference_cfg_freshness_tau = 0.0;
+    r.has_inference_cfg_bandit = 0;
+    r.inference_cfg_bandit_blend_ratio = 0.0;
+    r.has_inference_cfg_fees = 0;
+    r.inference_cfg_fee_rate_maker = 0.0;
+    r.inference_cfg_fee_rate_taker = 0.0;
+    r.has_training_poll_interval = 0;
+    r.training_poll_interval = 0;
+    r.inference_cfg_drift_count = 0;
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -732,8 +773,57 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 // a future ship; for now we just record the value).
                 r.stamp_format_version = atoi(val);
             }
+            // v5.9.2b — inference-affecting cfg fields. Each present field
+            // sets the relevant has_* flag. Verifier compares against
+            // current cfg later (caller-side).
+            else if (strcmp(key, "inference_cfg_confidence_threshold_scale") == 0) {
+                r.inference_cfg_confidence_threshold_scale = atof(val);
+                r.has_inference_cfg = 1;
+            } else if (strcmp(key, "inference_cfg_barrier_gate_enabled") == 0) {
+                r.inference_cfg_barrier_gate_enabled = atoi(val);
+                r.has_inference_cfg = 1;
+            } else if (strcmp(key, "inference_cfg_confidence_hard_block_threshold") == 0) {
+                r.inference_cfg_confidence_hard_block_threshold = atof(val);
+                r.has_inference_cfg = 1;
+            } else if (strcmp(key, "inference_cfg_held_out_fraction") == 0) {
+                r.inference_cfg_held_out_fraction = atof(val);
+                r.has_inference_cfg = 1;
+            } else if (strcmp(key, "inference_cfg_freshness_tau") == 0) {
+                r.inference_cfg_freshness_tau = atof(val);
+                r.has_inference_cfg = 1;
+            } else if (strcmp(key, "inference_cfg_bandit_blend_ratio") == 0) {
+                r.inference_cfg_bandit_blend_ratio = atof(val);
+                r.has_inference_cfg_bandit = 1;
+            } else if (strcmp(key, "inference_cfg_fee_rate_maker") == 0) {
+                r.inference_cfg_fee_rate_maker = atof(val);
+                r.has_inference_cfg_fees = 1;
+            } else if (strcmp(key, "inference_cfg_fee_rate_taker") == 0) {
+                r.inference_cfg_fee_rate_taker = atof(val);
+                r.has_inference_cfg_fees = 1;
+            } else if (strcmp(key, "training_poll_interval") == 0) {
+                r.training_poll_interval = (uint32_t)strtoul(val, nullptr, 10);
+                r.has_training_poll_interval = 1;
+            }
         }
         line = strtok_r(nullptr, "\n", &save);
+    }
+
+    // v5.9.2b — cross-major engine version detection. Compare stamp's
+    // engine_version major against current build's ENGINE_VERSION_STRING
+    // major. Empty stamp engine_version (pre-v5.8.6) → skip (allow).
+    // Major = atoi() of the prefix before first '.' — works for "5.9.2",
+    // "5.9.2a", "v5.9.2", or any leading-int form.
+    r.cross_major_engine = 0;
+    if (r.engine_version[0] != '\0') {
+        const char* sv = r.engine_version;
+        if (sv[0] == 'v' || sv[0] == 'V') sv++;  // accept v-prefix
+        int stamp_major = atoi(sv);
+        const char* cur = ENGINE_VERSION_STRING;
+        if (cur[0] == 'v' || cur[0] == 'V') cur++;
+        int cur_major = atoi(cur);
+        if (stamp_major != cur_major && stamp_major > 0 && cur_major > 0) {
+            r.cross_major_engine = 1;
+        }
     }
 
     // 1. Format version match
@@ -856,6 +946,26 @@ struct StampWriteResult {
     char stamp_path[512]; // where it was written (or would have been)
 };
 
+// v5.9.2b — inference cfg fields bound to the stamp at training time.
+// Caller fills only the fields it has; has_* flags gate emit. Nullptr
+// passed for legacy callers means none of these fields emit (forward-
+// compat with v5.9.0/.1/.2 stamps).
+struct StampInferenceCfgInputs {
+    int      has_inference_cfg;                     // 1 = emit the 5 always-present cfg fields below
+    double   confidence_threshold_scale;
+    int      barrier_gate_enabled;
+    double   confidence_hard_block_threshold;
+    double   held_out_fraction;
+    double   freshness_tau;                          // bound to stamp at training time
+    int      has_bandit;                             // 1 = emit bandit_blend_ratio (when bandit_enabled cfg=1)
+    double   bandit_blend_ratio;
+    int      has_fees;                               // 1 = emit fee_rate_maker/taker (when cost_gate_enabled=1)
+    double   fee_rate_maker;
+    double   fee_rate_taker;
+    int      has_training_poll_interval;             // 1 = emit training_poll_interval
+    uint32_t training_poll_interval;
+};
+
 inline StampWriteResult stamp_write_for_model(const char* model_path,
                                                 const char* secret,
                                                 int   format_version,
@@ -865,7 +975,10 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
                                                 double gap_threshold,
                                                 int   force,
                                                 uint64_t feature_registry_hash = 0,
-                                                const char* engine_version = nullptr) {
+                                                const char* engine_version = nullptr,
+                                                // v5.9.2b — inference cfg binding.
+                                                // Optional; nullptr = skip emit (legacy callers).
+                                                const StampInferenceCfgInputs* inf = nullptr) {
     StampWriteResult r;
     r.ok = 0;
     r.error[0] = '\0';
@@ -919,7 +1032,11 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     // distinct from MODEL_FORMAT_VERSION (which versions the model file
     // shape, not the stamp). Bumped on future stamp body schema changes.
     int has_stamp_ver = (format_version >= 5);
-    char canonical[2048];
+    // v5.9.2b — bumped from 2048 → 4096. Original ~700 bytes; 9 new
+    // inference_cfg_* + training_poll_interval fields × ~50 bytes each
+    // = +450 bytes worst-case, well under the new ceiling. Leaves
+    // headroom for v5.9.3 scaler fields too.
+    char canonical[4096];
     int n = snprintf(canonical, sizeof(canonical),
         "model_format_version=%d\n"
         "model_sha256=%s\n"
@@ -944,6 +1061,43 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     if (has_stamp_ver && n > 0 && (size_t)n < sizeof(canonical)) {
         int wrote = snprintf(canonical + n, sizeof(canonical) - n,
             "stamp_format_version=1\n");
+        if (wrote > 0) n += wrote;
+    }
+    // v5.9.2b — inference cfg binding. Emitted only when caller passed
+    // non-null `inf` pointer + respective has_* flag set. Verifier
+    // parser tolerates absent fields (legacy stamps + no-bind callers).
+    if (inf && inf->has_inference_cfg && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "inference_cfg_confidence_threshold_scale=%g\n"
+            "inference_cfg_barrier_gate_enabled=%d\n"
+            "inference_cfg_confidence_hard_block_threshold=%g\n"
+            "inference_cfg_held_out_fraction=%g\n"
+            "inference_cfg_freshness_tau=%g\n",
+            inf->confidence_threshold_scale,
+            inf->barrier_gate_enabled,
+            inf->confidence_hard_block_threshold,
+            inf->held_out_fraction,
+            inf->freshness_tau);
+        if (wrote > 0) n += wrote;
+    }
+    if (inf && inf->has_bandit && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "inference_cfg_bandit_blend_ratio=%g\n",
+            inf->bandit_blend_ratio);
+        if (wrote > 0) n += wrote;
+    }
+    if (inf && inf->has_fees && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "inference_cfg_fee_rate_maker=%g\n"
+            "inference_cfg_fee_rate_taker=%g\n",
+            inf->fee_rate_maker,
+            inf->fee_rate_taker);
+        if (wrote > 0) n += wrote;
+    }
+    if (inf && inf->has_training_poll_interval && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "training_poll_interval=%u\n",
+            (unsigned)inf->training_poll_interval);
         if (wrote > 0) n += wrote;
     }
 

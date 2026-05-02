@@ -10778,6 +10778,193 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- EXTENSIBILITY: v5.9.2b Phase 3.6 — stamp-bound inference cfg + cross-major + tau range ---\n");
+    {
+        // === Sub-area 6: tau range bound [60, 3600] ===
+        // v5.9.1 rejected tau<=0; v5.9.2b extends to clamp to model lifetime
+        // envelope. Out-of-range → reject + WARN + use default.
+        char tmp_cfg[] = "/tmp/v592b_tau_test_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        if (fd >= 0) {
+            const char* body_low = "confidence_freshness_tau=10\n"; // < 60 → rejected
+            (void)!write(fd, body_low, strlen(body_low));
+            close(fd);
+            ControllerConfig<64> parsed_low = ControllerConfig_Load<64>(tmp_cfg);
+            check("v5.9.2b: tau=10 (below range) rejected, default used",
+                  FPN_ToDouble(parsed_low.confidence_freshness_tau) == 300.0);
+            unlink(tmp_cfg);
+        } else {
+            check("v5.9.2b: tmp cfg for tau-low test", 0);
+        }
+
+        char tmp_cfg2[] = "/tmp/v592b_tau_high_XXXXXX";
+        fd = mkstemp(tmp_cfg2);
+        if (fd >= 0) {
+            const char* body_high = "confidence_freshness_tau=10000\n"; // > 3600 → rejected
+            (void)!write(fd, body_high, strlen(body_high));
+            close(fd);
+            ControllerConfig<64> parsed_high = ControllerConfig_Load<64>(tmp_cfg2);
+            check("v5.9.2b: tau=10000 (above range) rejected, default used",
+                  FPN_ToDouble(parsed_high.confidence_freshness_tau) == 300.0);
+            unlink(tmp_cfg2);
+        } else {
+            check("v5.9.2b: tmp cfg for tau-high test", 0);
+        }
+
+        char tmp_cfg3[] = "/tmp/v592b_tau_ok_XXXXXX";
+        fd = mkstemp(tmp_cfg3);
+        if (fd >= 0) {
+            const char* body_ok = "confidence_freshness_tau=600\n"; // in range
+            (void)!write(fd, body_ok, strlen(body_ok));
+            close(fd);
+            ControllerConfig<64> parsed_ok = ControllerConfig_Load<64>(tmp_cfg3);
+            check("v5.9.2b: tau=600 (in range) accepted",
+                  FPN_ToDouble(parsed_ok.confidence_freshness_tau) == 600.0);
+            unlink(tmp_cfg3);
+        } else {
+            check("v5.9.2b: tmp cfg for tau-ok test", 0);
+        }
+
+        // === Sub-area 2 setup: allow_cross_major_engine cfg field ===
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.9.2b: allow_cross_major_engine defaults to 0",
+              cfg.allow_cross_major_engine == 0);
+
+        char tmp_cfg4[] = "/tmp/v592b_cross_major_XXXXXX";
+        fd = mkstemp(tmp_cfg4);
+        if (fd >= 0) {
+            const char* body = "allow_cross_major_engine=1\n";
+            (void)!write(fd, body, strlen(body));
+            close(fd);
+            ControllerConfig<64> parsed = ControllerConfig_Load<64>(tmp_cfg4);
+            check("v5.9.2b: cfg parser accepts allow_cross_major_engine=1",
+                  parsed.allow_cross_major_engine == 1);
+            unlink(tmp_cfg4);
+        } else {
+            check("v5.9.2b: tmp cfg for cross_major test", 0);
+        }
+
+        // === Sub-areas 1 + 2 + 5: stamp body inference_cfg + cross-major detection ===
+        // Test verify_model_stamp on a synthesized stamp body. Round-trips
+        // a stamp with inference_cfg_* fields, parses, asserts results.
+        char tmp_dir[] = "/tmp/v592b_stamp_XXXXXX";
+        if (mkdtemp(tmp_dir) != NULL) {
+            // Need a model file to compute stamp's model_sha256. Use a tiny
+            // dummy file — stamp parser only needs the file to exist.
+            char model_path[400];
+            snprintf(model_path, sizeof(model_path), "%s/model.bin", tmp_dir);
+            FILE* mf = fopen(model_path, "w");
+            if (mf) {
+                fwrite("dummy", 1, 5, mf);
+                fclose(mf);
+
+                // Use stamp_write_for_model with inference_cfg inputs
+                StampInferenceCfgInputs inf = {};
+                inf.has_inference_cfg = 1;
+                inf.confidence_threshold_scale = 2.0;
+                inf.barrier_gate_enabled = 1;
+                inf.confidence_hard_block_threshold = 0.05;
+                inf.held_out_fraction = 0.20;
+                inf.freshness_tau = 300.0;
+                inf.has_bandit = 1;
+                inf.bandit_blend_ratio = 0.30;
+                inf.has_fees = 1;
+                inf.fee_rate_maker = 0.00075;
+                inf.fee_rate_taker = 0.00100;
+                inf.has_training_poll_interval = 1;
+                inf.training_poll_interval = 100;
+
+                StampWriteResult sw = stamp_write_for_model(
+                    model_path, "test-secret-v592b", 5, "2026-05-02",
+                    0.65, 0.62, 0.05, /*force=*/0,
+                    /*hash=*/0xABCD1234U, /*engine_version=*/"5.9.2b", &inf);
+                check("v5.9.2b: stamp_write_for_model accepts inference cfg inputs",
+                      sw.ok == 1);
+
+                // Now verify + check fields parsed back
+                ModelStampResult v = verify_model_stamp(model_path,
+                    "test-secret-v592b", 0.10, 5, /*expected_hash=*/0xABCD1234U);
+                check("v5.9.2b: stamp with inference_cfg verifies",
+                      v.valid == 1);
+                check("v5.9.2b: parser sets has_inference_cfg=1",
+                      v.has_inference_cfg == 1);
+                check("v5.9.2b: parsed confidence_threshold_scale matches stamp",
+                      v.inference_cfg_confidence_threshold_scale == 2.0);
+                check("v5.9.2b: parsed barrier_gate_enabled matches stamp",
+                      v.inference_cfg_barrier_gate_enabled == 1);
+                check("v5.9.2b: parsed has_inference_cfg_bandit=1",
+                      v.has_inference_cfg_bandit == 1);
+                check("v5.9.2b: parsed bandit_blend_ratio matches stamp",
+                      fabs(v.inference_cfg_bandit_blend_ratio - 0.30) < 1e-9);
+                check("v5.9.2b: parsed has_inference_cfg_fees=1",
+                      v.has_inference_cfg_fees == 1);
+                check("v5.9.2b: parsed fee_rate_taker matches stamp",
+                      fabs(v.inference_cfg_fee_rate_taker - 0.001) < 1e-9);
+                check("v5.9.2b: parsed has_training_poll_interval=1",
+                      v.has_training_poll_interval == 1);
+                check("v5.9.2b: parsed training_poll_interval matches stamp",
+                      v.training_poll_interval == 100u);
+
+                // Cross-major check: stamp says 5.9.2b, ENGINE_VERSION_STRING
+                // is also 5.x → same major, cross_major_engine=0
+                check("v5.9.2b: same-major engine_version → cross_major_engine=0",
+                      v.cross_major_engine == 0);
+
+                char stamp_path[450];
+                snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
+                unlink(stamp_path);
+                unlink(model_path);
+
+                // Test cross-major detection: write a stamp claiming
+                // engine_version="6.0.0" (different major from current 5.x)
+                FILE* mf2 = fopen(model_path, "w");
+                fwrite("dummy2", 1, 6, mf2);
+                fclose(mf2);
+                StampWriteResult sw2 = stamp_write_for_model(
+                    model_path, "test-secret-v592b", 5, "2026-05-02",
+                    0.65, 0.62, 0.05, 0,
+                    0xABCD1234U, /*engine_version=*/"6.0.0", nullptr);
+                check("v5.9.2b: stamp_write with future-major engine_version succeeds",
+                      sw2.ok == 1);
+
+                ModelStampResult v2 = verify_model_stamp(model_path,
+                    "test-secret-v592b", 0.10, 5, /*expected_hash=*/0xABCD1234U);
+                check("v5.9.2b: cross-major engine_version → cross_major_engine=1",
+                      v2.cross_major_engine == 1);
+
+                unlink(stamp_path);
+                unlink(model_path);
+
+                // Legacy stamp without inference_cfg → has_*=0 (forward-compat)
+                FILE* mf3 = fopen(model_path, "w");
+                fwrite("dummy3", 1, 6, mf3);
+                fclose(mf3);
+                StampWriteResult sw3 = stamp_write_for_model(
+                    model_path, "test-secret-v592b", 5, "2026-05-02",
+                    0.65, 0.62, 0.05, 0,
+                    0xABCD1234U, "5.9.2b", /*inf=*/nullptr);
+                check("v5.9.2b: stamp without inference_cfg writes OK", sw3.ok == 1);
+
+                ModelStampResult v3 = verify_model_stamp(model_path,
+                    "test-secret-v592b", 0.10, 5, 0xABCD1234U);
+                check("v5.9.2b: legacy-shape stamp → has_inference_cfg=0",
+                      v3.has_inference_cfg == 0);
+                check("v5.9.2b: legacy-shape stamp → has_inference_cfg_fees=0",
+                      v3.has_inference_cfg_fees == 0);
+                check("v5.9.2b: legacy-shape stamp → has_training_poll_interval=0",
+                      v3.has_training_poll_interval == 0);
+
+                unlink(stamp_path);
+                unlink(model_path);
+            } else {
+                check("v5.9.2b: tmp model file creation", 0);
+            }
+            rmdir(tmp_dir);
+        } else {
+            check("v5.9.2b: tmp dir creation for stamp tests", 0);
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

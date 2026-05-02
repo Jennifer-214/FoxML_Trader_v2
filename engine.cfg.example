@@ -425,6 +425,15 @@ gap_acceptable_threshold=0.05
 # Leaving strict=0 in production is a footgun: a drifted model would
 # load with a stderr WARN that nobody sees during normal operation.
 held_out_gate_strict=0          # 0=warn-only, 1=refuse load on stamp failure, -1=skip
+
+# v5.9.2b — allow loading a model whose stamp's engine_version differs by
+# major version from the current build (e.g. stamp says 5.x but engine is
+# 6.x). Cross-major can introduce hot-path predicate changes that make a
+# v5-trained model misbehave at v6 inference. Default 0 (refuse cross-major).
+# Operator opts in explicitly to deploy older models on newer engines:
+#   allow_cross_major_engine=1
+# Combined with held_out_gate_strict=0 → engine warns + loads anyway.
+allow_cross_major_engine=0      # 0=refuse cross-major (safe), 1=allow with warn
 held_out_stamp_secret=          # HMAC-SHA256 secret. Empty = devmode (signs but accepts any sig)
 
 # Auto-stamp on held-out completion (v5.3.2 + v5.8.7 + v5.8.10).
