@@ -891,6 +891,47 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         // v5.8.6: embed FEATURE_REGISTRY_HASH() + ENGINE_VERSION_STRING so the
         // load-time verifier can catch train-serve drift + the operator sees
         // which engine version the model was trained against.
+        //
+        // v5.9.5b — close the half-wired StampInferenceCfgInputs gap. v5.9.2b
+        // added 9 inference-affecting cfg fields to the stamp body schema +
+        // verifier, but production emit sites (suite Run Full Validation
+        // here, plus tools/stamp_model.sh CLI) never populated `inf`. Result:
+        // suite-emitted stamps lacked all stamp-bound cfg protection. Same
+        // shape as the v5.9.4a model_num_outputs gap. Fix: build inf from
+        // data->config_used + label_type, pass to stamp_write_for_model.
+        // Scaler sha256 not wired here (Run Full Validation doesn't persist
+        // a scaler in this path — separate v5.9.5c+ scope).
+        StampInferenceCfgInputs inf = {};
+        inf.has_inference_cfg = 1;
+        inf.confidence_threshold_scale =
+            FPN_ToDouble(data->config_used.confidence_threshold_scale);
+        inf.barrier_gate_enabled = data->config_used.barrier_gate_enabled;
+        inf.confidence_hard_block_threshold =
+            FPN_ToDouble(data->config_used.confidence_hard_block_threshold);
+        inf.held_out_fraction =
+            FPN_ToDouble(data->config_used.held_out_fraction);
+        inf.freshness_tau =
+            FPN_ToDouble(data->config_used.confidence_freshness_tau);
+        if (data->config_used.bandit_enabled) {
+            inf.has_bandit = 1;
+            inf.bandit_blend_ratio =
+                FPN_ToDouble(data->config_used.bandit_blend_ratio);
+        }
+        if (data->config_used.cost_gate_enabled) {
+            inf.has_fees = 1;
+            inf.fee_rate_maker = FPN_ToDouble(data->config_used.fee_rate_maker);
+            inf.fee_rate_taker = FPN_ToDouble(data->config_used.fee_rate_taker);
+        }
+        inf.has_training_poll_interval = 1;
+        inf.training_poll_interval     = data->config_used.poll_interval;
+        // model_num_outputs derived from label_type: binary/regression → 1,
+        // multiclass K → K. Single source of truth: LabelType_NumClasses.
+        {
+            int K = LabelType_NumClasses(label_type);
+            inf.has_num_outputs   = 1;
+            inf.model_num_outputs = (K >= 2) ? K : 1;
+        }
+
         StampWriteResult sr = stamp_write_for_model(
             out->auto_stamp_path,
             out->auto_stamp_secret,
@@ -902,7 +943,8 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             (double)gap_threshold,
             /*force=*/0,
             /*feature_registry_hash=*/FEATURE_REGISTRY_HASH(),
-            /*engine_version=*/ENGINE_VERSION_STRING);
+            /*engine_version=*/ENGINE_VERSION_STRING,
+            /*inf=*/&inf);
         out->auto_stamp_attempted = 1;
         out->auto_stamp_ok = sr.ok;
         if (sr.ok) {

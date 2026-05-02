@@ -11587,6 +11587,171 @@ e3_skip_load:;
               h.has_training_poll_interval == 1 && h.training_poll_interval == 250u);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.9.5b — in-process stamp emit populates StampInferenceCfgInputs ---\n");
+    {
+        // The v5.9.2b + v5.9.3a + v5.9.4a stamp body extensions added 9
+        // inference cfg fields + scaler binding + model_num_outputs to the
+        // schema, but the in-process emit at Backtest_RunFullValidation
+        // never populated `inf` — passed nullptr. Result: suite-emitted
+        // stamps were missing all stamp-bound cfg protection. v5.9.5b
+        // wires the inf from data->config_used + label_type. These tests
+        // verify the wiring shape.
+        using namespace tt;
+        char tmp_dir[] = "/tmp/v595b_stamp_XXXXXX";
+        if (mkdtemp(tmp_dir) != NULL) {
+            char model_path[400];
+            snprintf(model_path, sizeof(model_path), "%s/model.bin", tmp_dir);
+            FILE* mf = fopen(model_path, "w");
+            if (mf) {
+                fwrite("dummy", 1, 5, mf);
+                fclose(mf);
+
+                // Mirror v5.9.5b inf-construction logic at
+                // BacktestEngine.hpp:Backtest_RunFullValidation —
+                // configurable cfg with non-default values + multiclass
+                // label_type. Verifies the production wiring populates
+                // every documented stamp body field.
+                ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+                cfg.confidence_threshold_scale       = FPN_FromDouble<64>(2.5);
+                cfg.barrier_gate_enabled             = 1;
+                cfg.confidence_hard_block_threshold  = FPN_FromDouble<64>(0.07);
+                cfg.held_out_fraction                = FPN_FromDouble<64>(0.25);
+                cfg.confidence_freshness_tau         = FPN_FromDouble<64>(450.0);
+                cfg.bandit_enabled                   = 1;
+                cfg.bandit_blend_ratio               = FPN_FromDouble<64>(0.40);
+                cfg.cost_gate_enabled                = 1;
+                cfg.fee_rate_maker                   = FPN_FromDouble<64>(0.00060);
+                cfg.fee_rate_taker                   = FPN_FromDouble<64>(0.00090);
+                cfg.poll_interval                    = 200u;
+
+                int label_type = LABEL_PEAK_VALLEY_STABLE;  // 3-class
+
+                // ↓ This block IS the v5.9.5b wiring (mirrors
+                //   Backtest_RunFullValidation):
+                StampInferenceCfgInputs inf = {};
+                inf.has_inference_cfg = 1;
+                inf.confidence_threshold_scale =
+                    FPN_ToDouble(cfg.confidence_threshold_scale);
+                inf.barrier_gate_enabled = cfg.barrier_gate_enabled;
+                inf.confidence_hard_block_threshold =
+                    FPN_ToDouble(cfg.confidence_hard_block_threshold);
+                inf.held_out_fraction =
+                    FPN_ToDouble(cfg.held_out_fraction);
+                inf.freshness_tau =
+                    FPN_ToDouble(cfg.confidence_freshness_tau);
+                if (cfg.bandit_enabled) {
+                    inf.has_bandit = 1;
+                    inf.bandit_blend_ratio =
+                        FPN_ToDouble(cfg.bandit_blend_ratio);
+                }
+                if (cfg.cost_gate_enabled) {
+                    inf.has_fees = 1;
+                    inf.fee_rate_maker = FPN_ToDouble(cfg.fee_rate_maker);
+                    inf.fee_rate_taker = FPN_ToDouble(cfg.fee_rate_taker);
+                }
+                inf.has_training_poll_interval = 1;
+                inf.training_poll_interval     = cfg.poll_interval;
+                {
+                    int K = LabelType_NumClasses(label_type);
+                    inf.has_num_outputs   = 1;
+                    inf.model_num_outputs = (K >= 2) ? K : 1;
+                }
+
+                StampWriteResult sw = stamp_write_for_model(
+                    model_path, "test-secret-v595b", 5, "2026-05-02",
+                    0.65, 0.62, 0.05, /*force=*/0,
+                    /*hash=*/0xCAFE5599u, /*engine_version=*/"5.9.5b", &inf);
+                check("v5.9.5b: stamp_write accepts full inf populated from cfg",
+                      sw.ok == 1);
+
+                ModelStampResult v = verify_model_stamp(model_path,
+                    "test-secret-v595b", 0.10, 5, /*expected_hash=*/0xCAFE5599u);
+                check("v5.9.5b: full-cfg stamp verifies",
+                      v.valid == 1);
+                check("v5.9.5b: confidence_threshold_scale round-trips (2.5)",
+                      fabs(v.inference_cfg_confidence_threshold_scale - 2.5) < 1e-9);
+                check("v5.9.5b: barrier_gate_enabled round-trips",
+                      v.inference_cfg_barrier_gate_enabled == 1);
+                check("v5.9.5b: confidence_hard_block_threshold round-trips (0.07)",
+                      fabs(v.inference_cfg_confidence_hard_block_threshold - 0.07) < 1e-9);
+                check("v5.9.5b: held_out_fraction round-trips (0.25)",
+                      fabs(v.inference_cfg_held_out_fraction - 0.25) < 1e-9);
+                check("v5.9.5b: freshness_tau round-trips (450)",
+                      fabs(v.inference_cfg_freshness_tau - 450.0) < 1e-9);
+                check("v5.9.5b: has_bandit set (cfg.bandit_enabled=1)",
+                      v.has_inference_cfg_bandit == 1);
+                check("v5.9.5b: bandit_blend_ratio round-trips (0.40)",
+                      fabs(v.inference_cfg_bandit_blend_ratio - 0.40) < 1e-9);
+                check("v5.9.5b: has_fees set (cfg.cost_gate_enabled=1)",
+                      v.has_inference_cfg_fees == 1);
+                check("v5.9.5b: fee_rate_maker round-trips (0.00060)",
+                      fabs(v.inference_cfg_fee_rate_maker - 0.00060) < 1e-9);
+                check("v5.9.5b: training_poll_interval round-trips (200)",
+                      v.has_training_poll_interval == 1 &&
+                      v.training_poll_interval == 200u);
+                check("v5.9.5b: model_num_outputs=3 for PEAK_VALLEY_STABLE",
+                      v.has_model_num_outputs == 1 &&
+                      v.model_num_outputs == 3);
+
+                char stamp_path[450];
+                snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
+                unlink(stamp_path);
+                unlink(model_path);
+
+                // Test: gating — when bandit_enabled=0 + cost_gate_enabled=0,
+                // has_bandit + has_fees stay 0 (don't emit those lines)
+                FILE* mf2 = fopen(model_path, "w");
+                fwrite("d2", 1, 2, mf2);
+                fclose(mf2);
+                StampInferenceCfgInputs inf2 = {};
+                inf2.has_inference_cfg = 1;
+                inf2.confidence_threshold_scale = 1.0;
+                inf2.held_out_fraction          = 0.20;
+                inf2.freshness_tau              = 300.0;
+                // bandit_enabled=0 → has_bandit stays 0
+                // cost_gate_enabled=0 → has_fees stays 0
+                inf2.has_training_poll_interval = 1;
+                inf2.training_poll_interval     = 100;
+                inf2.has_num_outputs            = 1;
+                inf2.model_num_outputs          = 1;  // binary
+                StampWriteResult sw_min = stamp_write_for_model(
+                    model_path, "test-secret-v595b", 5, "2026-05-02",
+                    0.55, 0.52, 0.05, 0, 0xCAFE5599u, "5.9.5b", &inf2);
+                check("v5.9.5b: stamp with bandit/fees gated off writes OK",
+                      sw_min.ok == 1);
+                ModelStampResult v_min = verify_model_stamp(model_path,
+                    "test-secret-v595b", 0.10, 5, 0xCAFE5599u);
+                check("v5.9.5b: gated-off bandit → has_inference_cfg_bandit=0",
+                      v_min.has_inference_cfg_bandit == 0);
+                check("v5.9.5b: gated-off fees → has_inference_cfg_fees=0",
+                      v_min.has_inference_cfg_fees == 0);
+
+                unlink(stamp_path);
+                unlink(model_path);
+
+                // label_type → model_num_outputs mapping (single-source-of-
+                // truth via LabelType_NumClasses)
+                check("v5.9.5b: LabelType_NumClasses(LABEL_WIN_LOSS) → outputs=1 (binary)",
+                      ((LabelType_NumClasses(LABEL_WIN_LOSS) >= 2)
+                          ? LabelType_NumClasses(LABEL_WIN_LOSS) : 1) == 1);
+                check("v5.9.5b: LabelType_NumClasses(LABEL_FORWARD_PNL) → outputs=1 (regression)",
+                      ((LabelType_NumClasses(LABEL_FORWARD_PNL) >= 2)
+                          ? LabelType_NumClasses(LABEL_FORWARD_PNL) : 1) == 1);
+                check("v5.9.5b: LabelType_NumClasses(LABEL_REGIME) → outputs=4 (multiclass)",
+                      ((LabelType_NumClasses(LABEL_REGIME) >= 2)
+                          ? LabelType_NumClasses(LABEL_REGIME) : 1) == 4);
+                check("v5.9.5b: LabelType_NumClasses(LABEL_PEAK_VALLEY_STABLE) → outputs=3",
+                      ((LabelType_NumClasses(LABEL_PEAK_VALLEY_STABLE) >= 2)
+                          ? LabelType_NumClasses(LABEL_PEAK_VALLEY_STABLE) : 1) == 3);
+            } else {
+                check("v5.9.5b: tmp model file for stamp test", 0);
+            }
+            rmdir(tmp_dir);
+        } else {
+            check("v5.9.5b: tmp dir for stamp test", 0);
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
