@@ -1594,8 +1594,14 @@ static inline void *fullvalidation_worker_fn(void *arg) {
     // Pre-populate auto-stamp request fields. Backtest_RunFullValidation
     // gates the stamp_write_for_model call on auto_stamp_path being non-empty
     // AND ran_held_out=1; both are met here when training succeeds.
+    //
+    // v5.8.10 — gate path-setting on the cfg's auto_stamp_on_held_out flag.
+    // When the operator runs the suite with auto_stamp_on_held_out=0 (intent:
+    // manual stamping via tools/stamp_model.sh), the FV button still runs
+    // held-out validation but skips the stamp write. Honors operator intent.
     memset(&state->fv_results, 0, sizeof(state->fv_results));
-    {
+    int auto_stamp_enabled = data->config_used.auto_stamp_on_held_out;
+    if (auto_stamp_enabled) {
         size_t n = strlen(state->model_path);
         if (n >= sizeof(state->fv_results.auto_stamp_path))
             n = sizeof(state->fv_results.auto_stamp_path) - 1;
@@ -1627,8 +1633,13 @@ static inline void *fullvalidation_worker_fn(void *arg) {
                 "Stamp REFUSED: %s", state->fv_results.auto_stamp_error);
         }
     } else if (state->fv_results.ran_held_out) {
-        snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
-            "Held-out OK; auto-stamp skipped (path empty?)");
+        if (!auto_stamp_enabled) {
+            snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+                "Held-out OK; auto-stamp disabled (cfg auto_stamp_on_held_out=0)");
+        } else {
+            snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+                "Held-out OK; auto-stamp skipped (model_path empty?)");
+        }
     } else {
         snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
             "Held-out did not complete (cancel or shape error?)");

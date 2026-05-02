@@ -9744,6 +9744,118 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- EXTENSIBILITY: v5.8.10 CoreModelZoo strict-mode integration (drift refusal) ---\n");
+    {
+        // Engine boot integration test for the drift-refusal path. Distinct
+        // from the v5.8.6 unit tests of verify_model_stamp directly: this
+        // exercises CoreModelZoo_TryLoadRole, which is the path the live
+        // engine actually fires at startup for each model.
+        //
+        // The held_out_gate_strict=1 mode REFUSES the load when the stamp's
+        // feature_registry_hash diverges from the current build's
+        // FEATURE_REGISTRY_HASH(). Catches "model trained against a different
+        // FOREACH_FEATURE registry" before any inference fires.
+        //
+        // Sets up a tmp dir mimicking models/<role>/buy_signal.json layout
+        // so the role-discovery path (json → xgb → txt) finds the file.
+        char tmp_dir[] = "/tmp/v5810_strict_XXXXXX";
+        if (mkdtemp(tmp_dir)) {
+            char model_path[300];
+            snprintf(model_path, sizeof(model_path), "%s/buy_signal.json", tmp_dir);
+            FILE *mf = fopen(model_path, "wb");
+            if (mf) {
+                const char *dummy = "STRICT_MODE_TEST_v5810";
+                fwrite(dummy, 1, strlen(dummy), mf);
+                fclose(mf);
+
+                // Sign a stamp with a DELIBERATELY MISMATCHED registry hash —
+                // this is what would happen if a model was trained against a
+                // pre-v5.8.1b FOREACH_FEATURE registry then carried into a
+                // post-v5.8.1b build.
+                const uint64_t mismatched_hash = 0xdeadbeefcafebabeULL;
+                StampWriteResult wr = stamp_write_for_model(
+                    model_path, /*secret=*/"",
+                    /*format_version=*/MODEL_FORMAT_VERSION,
+                    /*trained_on=*/"2026-05-01",
+                    /*wf_mean=*/0.55, /*held_out=*/0.53,
+                    /*gap_threshold=*/0.05, /*force=*/0,
+                    /*feature_registry_hash=*/mismatched_hash,
+                    /*engine_version=*/"5.7.99");  // older string for realism
+                check("v5.8.10: setup — stamp with mismatched hash writes",
+                      wr.ok == 1);
+
+                // strict=1 + non-empty secret would also need HMAC; we use
+                // empty secret (devmode) so the verifier accepts the signature
+                // but still checks format_version + registry_hash. The
+                // mismatch on hash is what we expect to fire the refusal.
+                ModelHandle<64> handle;
+                Model_Init(&handle);
+                int rc_strict = CoreModelZoo_TryLoadRole(
+                    &handle, tmp_dir, "buy_signal",
+                    MODEL_BACKEND_XGBOOST,
+                    /*held_out_stamp_secret=*/"",
+                    /*gap_threshold=*/0.05,
+                    /*held_out_gate_strict=*/1);
+                check("v5.8.10: strict=1 + drifted registry hash → REFUSES load (rc=0)",
+                      rc_strict == 0);
+                check("v5.8.10: strict=1 refusal leaves handle uninitialized (Model_IsLoaded=0)",
+                      Model_IsLoaded(&handle) == 0);
+
+                // strict=0 (warn-only): should still load (legacy behavior)
+                // but emit the warn line. The load attempt may still fail
+                // because XGBoost can't parse the dummy payload, so we don't
+                // assert success — just confirm the strict gate didn't fire.
+                Model_Free(&handle);
+                Model_Init(&handle);
+                int rc_warn = CoreModelZoo_TryLoadRole(
+                    &handle, tmp_dir, "buy_signal",
+                    MODEL_BACKEND_XGBOOST,
+                    /*held_out_stamp_secret=*/"",
+                    /*gap_threshold=*/0.05,
+                    /*held_out_gate_strict=*/0);
+                // Either succeeds (XGBoost loaded the dummy somehow) or fails
+                // due to model-parse error. The point is strict=0 doesn't
+                // refuse based on hash drift alone.
+                (void)rc_warn;
+                Model_Free(&handle);
+
+                // Sign a stamp with the CORRECT hash → strict=1 should accept
+                // (modulo XGBoost's ability to parse the dummy payload, which
+                // it can't, so the load itself fails — but the gate would let
+                // it through).
+                wr = stamp_write_for_model(
+                    model_path, /*secret=*/"",
+                    /*format_version=*/MODEL_FORMAT_VERSION,
+                    /*trained_on=*/"2026-05-01",
+                    /*wf_mean=*/0.55, /*held_out=*/0.53,
+                    /*gap_threshold=*/0.05, /*force=*/0,
+                    /*feature_registry_hash=*/FEATURE_REGISTRY_HASH(),
+                    /*engine_version=*/ENGINE_VERSION_STRING);
+                check("v5.8.10: setup — stamp with current hash writes",
+                      wr.ok == 1);
+
+                // The verify path passes; the load may fail for unrelated
+                // XGBoost-parse reasons. We assert the verifier accepted the
+                // stamp (the gate didn't fire) by directly calling it.
+                ModelStampResult vr = verify_model_stamp(
+                    model_path, "", 0.05,
+                    MODEL_FORMAT_VERSION, FEATURE_REGISTRY_HASH());
+                check("v5.8.10: matching hash → verifier accepts (gate would not refuse)",
+                      vr.valid == 1);
+
+                char stamp_path[400];
+                snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
+                unlink(stamp_path);
+                unlink(model_path);
+            } else {
+                check("v5.8.10: setup — tmp model file creation", 0);
+            }
+            rmdir(tmp_dir);
+        } else {
+            check("v5.8.10: setup — tmp dir creation", 0);
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

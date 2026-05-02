@@ -398,12 +398,24 @@ gap_acceptable_threshold=0.05
 # v5.8.6 extends this gate to also catch feature-registry-hash drift (model
 # trained against a different FOREACH_FEATURE registry than current build).
 # Defaults preserve back-compat with un-stamped models.
+#
+# PRODUCTION DEPLOY CHECKLIST (live trading with real money):
+#   1. Set held_out_stamp_secret to a non-empty random string (e.g.
+#      `openssl rand -hex 32`). Same secret in suite + engine.
+#   2. Train + Run Full Validation in foxml_suite (auto-stamps the model).
+#   3. Verify Stamp button confirms the stamp.
+#   4. Flip held_out_gate_strict=1 below — live engine refuses to load
+#      any model whose stamp signature, format version, or feature
+#      registry hash doesn't match the current build.
+# Leaving strict=0 in production is a footgun: a drifted model would
+# load with a stderr WARN that nobody sees during normal operation.
 held_out_gate_strict=0          # 0=warn-only, 1=refuse load on stamp failure, -1=skip
 held_out_stamp_secret=          # HMAC-SHA256 secret. Empty = devmode (signs but accepts any sig)
 
-# Auto-stamp on held-out completion (v5.3.2 + v5.8.7).
+# Auto-stamp on held-out completion (v5.3.2 + v5.8.7 + v5.8.10).
 # When 1, foxml_suite's "Run Full Validation" button writes a signed stamp
 # alongside the trained model file. Stamp body embeds engine_version +
 # feature_registry_hash so the live engine can detect drift at load time.
-# Default 0 = manual stamping via tools/stamp_model.sh.
-auto_stamp_on_held_out=0
+# Default 1 — auto-stamp is the recommended path post-v5.8.7. Flip to 0
+# only if you intend to use tools/stamp_model.sh manually (rare).
+auto_stamp_on_held_out=1

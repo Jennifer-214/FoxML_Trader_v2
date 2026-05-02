@@ -816,7 +816,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.gap_acceptable_threshold    = FPN_FromDouble<F>(0.05);     // 5% max gap for "OK"
   cfg.held_out_gate_strict        = 0;                            // gate off by default (warn-only)
   cfg.held_out_stamp_secret[0]    = '\0';                         // empty = accept-any (dev)
-  cfg.auto_stamp_on_held_out      = 0;                            // opt-in; flip to 1 after configuring secret
+  cfg.auto_stamp_on_held_out      = 1;                            // v5.8.10: default 1 (suite Run Full Validation auto-stamps); set 0 only for manual tools/stamp_model.sh workflow
   cfg.health_log_path[0]          = '\0';                         // empty = disabled
   cfg.health_log_level            = 0;                            // 0=info, 1=debug, 2=trace
   cfg.reconcile_interval_sec      = 0;                            // 0 = boot-only
