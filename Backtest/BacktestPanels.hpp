@@ -1494,6 +1494,7 @@ struct TrainingPanelState {
     // thread) → main UI reads after volatile completion flag flips.
     volatile int tm_running;
     volatile int tm_complete;
+    volatile int tm_cancel;     // v5.9.0d: polled between XGBoost iterations
     pthread_t tm_tid;
 };
 
@@ -1551,6 +1552,7 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     // v5.9.0c — Train Model worker init
     state->tm_running = 0;
     state->tm_complete = 0;
+    state->tm_cancel = 0;
 }
 
 // walk-forward worker thread
@@ -1658,6 +1660,227 @@ static inline void *fullvalidation_worker_fn(void *arg) {
     state->fv_has_results = true;
     state->fv_complete = 1;
     state->fv_running = 0;
+    return NULL;
+}
+
+// v5.9.0d — Train Model worker thread (V5_9_AUDIT-#7).
+// Pre-v5.9.0d: Train Model ran SYNCHRONOUSLY on the UI thread, freezing
+// the GUI 5-30s during XGBoost training. The synchronous-train warning
+// at GUI_Panel_Training documented this as a known UX gap.
+//
+// Worker pattern mirrors fullvalidation_worker_fn (v5.8.7). Audit walked
+// the body's race surface (DOCS/V5_9_ML_HARDENING_AUDIT.md follow-up):
+//   - Snapshot user-modifiable state at entry (max_depth, lr, n_estimators,
+//     label_type, model_path). UI can change these mid-train without
+//     affecting the running worker.
+//   - tm_cancel polled between XGBoosterUpdateOneIter calls. XGBoost
+//     has no mid-iteration cancel API; bounded latency = one iter time.
+//   - All exit paths set tm_complete=1 + tm_running=0 (including malloc
+//     failure + cancel paths).
+//   - state->{train_accuracy, status_msg, model_trained, train_mse,
+//     train_correlation, feature_importance} are written by worker;
+//     UI render reads after tm_complete flag flips. x86 aligned-atomic
+//     for these primitives matches v5.8.7 fv_* pattern.
+struct TrainModelWorkerArgs {
+    TrainingPanelState *state;
+    const RunControlState *run_control;
+};
+
+static inline void *train_model_worker_fn(void *arg) {
+    TrainModelWorkerArgs *args = (TrainModelWorkerArgs *)arg;
+    TrainingPanelState *state = args->state;
+    const RunControlState *run_control = args->run_control;
+    free(args);
+
+    const BacktestResults *results = &run_control->results;
+
+    // v5.9.0d — snapshot user-modifiable state at worker entry. UI can
+    // change these mid-train via ImGui inputs; the worker uses the values
+    // captured at click time, not mid-train.
+    int snap_max_depth      = state->max_depth;
+    float snap_learning_rate = state->learning_rate;
+    int snap_n_estimators   = state->n_estimators;
+    int snap_label_type     = state->label_type;
+    char snap_model_path[256];
+    {
+        size_t n = strlen(state->model_path);
+        if (n >= sizeof(snap_model_path)) n = sizeof(snap_model_path) - 1;
+        memcpy(snap_model_path, state->model_path, n);
+        snap_model_path[n] = '\0';
+    }
+
+#ifdef USE_XGBOOST
+    // log to stderr so the Log panel shows the user "training started"
+    fprintf(stderr, "[TRAIN] starting on %d samples (label_type=%d, "
+                    "max_depth=%d, lr=%.3f, n_est=%d)...\n",
+            results->sample_count, snap_label_type,
+            snap_max_depth, snap_learning_rate, snap_n_estimators);
+    fflush(stderr);
+
+    // create output directory
+    mkdir("models", 0755);
+
+    // filter out neutral labels (0.5) — XGBoost binary needs 0 or 1
+    int n_valid = 0;
+    float *train_features = (float *)malloc(results->sample_count * MODEL_NUM_FEATURES * sizeof(float));
+    float *train_labels   = (float *)malloc(results->sample_count * sizeof(float));
+    if (!train_features || !train_labels) {
+        free(train_features); free(train_labels);
+        snprintf(state->status_msg, sizeof(state->status_msg), "Failed to allocate training buffers");
+        state->model_trained = true;  // show the error message
+        state->tm_complete = 1;
+        state->tm_running = 0;
+        return NULL;
+    }
+
+    for (int i = 0; i < results->sample_count; i++) {
+        if (results->labels[i] == 0.5f) continue;
+        memcpy(&train_features[n_valid * MODEL_NUM_FEATURES],
+               &results->feature_matrix[i * MODEL_NUM_FEATURES],
+               MODEL_NUM_FEATURES * sizeof(float));
+        train_labels[n_valid] = results->labels[i];
+        n_valid++;
+    }
+
+    DMatrixHandle dtrain;
+    XGDMatrixCreateFromMat(train_features, n_valid, MODEL_NUM_FEATURES, NAN, &dtrain);
+    XGDMatrixSetFloatInfo(dtrain, "label", train_labels, n_valid);
+
+    BoosterHandle booster;
+    XGBoosterCreate(&dtrain, 1, &booster);
+
+    char depth_s[8]; snprintf(depth_s, 8, "%d", snap_max_depth);
+    char lr_s[16]; snprintf(lr_s, 16, "%f", snap_learning_rate);
+    XGBoosterSetParam(booster, "max_depth", depth_s);
+    XGBoosterSetParam(booster, "eta", lr_s);
+
+    int num_classes = (snap_label_type >= 0 && snap_label_type < LABEL_COUNT)
+                      ? label_table[snap_label_type].num_classes : 0;
+    int is_multiclass  = (num_classes >= 2);
+    int is_regression  = (num_classes == 1);
+
+    if (is_multiclass) {
+        XGBoosterSetParam(booster, "objective", "multi:softprob");
+        char nc_s[8]; snprintf(nc_s, 8, "%d", num_classes);
+        XGBoosterSetParam(booster, "num_class", nc_s);
+        float *mc_weights = (float *)malloc(n_valid * sizeof(float));
+        int   mc_counts[16] = {0};
+        if (mc_weights) {
+            XGBoost_ComputeMulticlassWeights(train_labels, n_valid, num_classes,
+                                              mc_weights, mc_counts);
+            XGDMatrixSetFloatInfo(dtrain, "weight", mc_weights, n_valid);
+            fprintf(stderr, "[TRAIN] multiclass class counts:");
+            for (int k = 0; k < num_classes && k < 16; k++) {
+                fprintf(stderr, " c%d=%d (%.1f%%)", k, mc_counts[k],
+                        n_valid > 0 ? 100.0f * mc_counts[k] / n_valid : 0.0f);
+            }
+            fprintf(stderr, " — per-sample weights applied\n");
+            fflush(stderr);
+            free(mc_weights);
+        }
+    } else if (is_regression) {
+        XGBoosterSetParam(booster, "objective", "reg:squarederror");
+    } else {
+        XGBoosterSetParam(booster, "objective", "binary:logistic");
+        int n_pos = 0, n_neg = 0;
+        double spw = XGBoost_ComputeScalePosWeight(train_labels, n_valid, &n_pos, &n_neg);
+        char spw_s[24]; snprintf(spw_s, sizeof(spw_s), "%.4f", spw);
+        XGBoosterSetParam(booster, "scale_pos_weight", spw_s);
+        fprintf(stderr, "[TRAIN] class balance: +%d / -%d → scale_pos_weight=%s%s\n",
+                n_pos, n_neg, spw_s,
+                n_pos == 0 ? "  WARNING: zero positives, model cannot learn" : "");
+        fflush(stderr);
+    }
+    XGBoosterSetParam(booster, "nthread", "4");
+    XGBoosterSetParam(booster, "verbosity", "0");
+
+    // v5.9.0d — iteration loop with tm_cancel poll. XGBoost has no
+    // mid-iteration cancel; cancel response bounded by one iter time
+    // (typically 100ms-1s for typical hyperparameters).
+    int cancelled = 0;
+    for (int i = 0; i < snap_n_estimators; i++) {
+        if (state->tm_cancel) {
+            cancelled = 1;
+            fprintf(stderr, "[TRAIN] cancelled at iteration %d/%d\n", i, snap_n_estimators);
+            fflush(stderr);
+            break;
+        }
+        XGBoosterUpdateOneIter(booster, i, dtrain);
+    }
+
+    if (cancelled) {
+        XGDMatrixFree(dtrain);
+        XGBoosterFree(booster);
+        free(train_features);
+        free(train_labels);
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Training cancelled by user");
+        state->model_trained = false;
+        state->tm_complete = 1;
+        state->tm_running = 0;
+        return NULL;
+    }
+
+    // embed model format version + fingerprint
+    char ver_s[8]; snprintf(ver_s, 8, "%d", MODEL_FORMAT_VERSION);
+    XGBoosterSetAttr(booster, "foxml_version", ver_s);
+    {
+        const char *fp_paths[MAX_DATA_FILES];
+        for (int i = 0; i < run_control->run_config.num_data_files && i < MAX_DATA_FILES; i++)
+            fp_paths[i] = run_control->run_config.data_paths[i];
+        char fp_hex[65];
+        Fingerprint_Compute<BACKTEST_FP>(fp_hex, &results->config_used,
+            sizeof(results->config_used), fp_paths, run_control->run_config.num_data_files);
+        XGBoosterSetAttr(booster, "foxml_fingerprint", fp_hex);
+        fprintf(stderr, "[TRAIN] model fingerprint: %.12s...\n", fp_hex);
+    }
+
+    XGBoosterSaveModel(booster, snap_model_path);
+
+    // compute in-sample training metric
+    bst_ulong out_len;
+    const float *out_result;
+    DMatrixHandle dpred;
+    XGDMatrixCreateFromMat(train_features, n_valid, MODEL_NUM_FEATURES, NAN, &dpred);
+    XGBoosterPredict(booster, dpred, 0, 0, 0, &out_len, &out_result);
+    if (is_multiclass) {
+        state->train_accuracy = WalkForward_ComputeMulticlassAccuracy(
+            out_result, train_labels, n_valid, num_classes) * 100.0f;
+        state->train_mse = 0.0f;
+        state->train_correlation = 0.0f;
+    } else if (is_regression) {
+        state->train_mse         = WalkForward_ComputeMSE(out_result, train_labels, n_valid);
+        state->train_correlation = WalkForward_ComputeCorrelation(out_result, train_labels, n_valid);
+        state->train_accuracy    = 0.0f;
+    } else {
+        state->train_accuracy = WalkForward_ComputeAccuracy(
+            out_result, train_labels, n_valid, 0.5f) * 100.0f;
+        state->train_mse = 0.0f;
+        state->train_correlation = 0.0f;
+    }
+    XGDMatrixFree(dpred);
+
+    memset(state->feature_importance, 0, sizeof(state->feature_importance));
+
+    XGDMatrixFree(dtrain);
+    XGBoosterFree(booster);
+    free(train_features);
+    free(train_labels);
+
+    state->model_trained = true;
+    if (is_regression) {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Model saved to %s (MSE: %.6f, corr: %.4f)",
+                 snap_model_path, state->train_mse, state->train_correlation);
+    } else {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Model saved to %s (accuracy: %.1f%%)",
+                 snap_model_path, state->train_accuracy);
+    }
+#endif  // USE_XGBOOST
+
+    state->tm_complete = 1;
+    state->tm_running = 0;
     return NULL;
 }
 
@@ -2033,203 +2256,53 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     ImGui::SetItemTooltip("Where to save the trained model\n"
                           "used by the engine at runtime for ML buy signals");
 
-    // synchronous-train warning — sets expectations before the freeze
-    ImGui::TextColored(FoxmlColors::comment,
-        "(Train Model runs synchronously — GUI may freeze 5-30s. Watch the Log panel for progress.)");
-
-    // train button. NOTE: Train Model runs SYNCHRONOUSLY on the UI thread
-    // (no worker thread). the GUI will freeze for 5-30 seconds during XGBoost
-    // training. the tooltip warns the user so it doesn't feel broken.
+    // v5.9.0d — Train Model now runs in a worker thread. The audit at
+    // train_model_worker_fn (above) walked the race surface + cancellation
+    // path. UI shows a progress indicator + Cancel button while running;
+    // results display (below) reads the same state fields the worker writes.
     bool can_train = results->sample_count >= 10;
 #ifndef USE_XGBOOST
     can_train = false;
 #endif
-    if (!can_train) ImGui::BeginDisabled();
-    if (ImGui::Button("Train Model")) {
-        // clear previous results on re-run
-        state->model_trained = false;
-        state->status_msg[0] = '\0';
-        state->wf_has_results = false;
-#ifdef USE_XGBOOST
-        // log to stderr so the Log panel shows the user "training started"
-        // before XGBoost grabs the UI thread for 5-30s. without this, the
-        // Train Model button looks frozen (because it IS — synchronous).
-        fprintf(stderr, "[TRAIN] starting on %d samples (label_type=%d, "
-                        "max_depth=%d, lr=%.3f, n_est=%d)...\n",
-                results->sample_count, state->label_type,
-                state->max_depth, state->learning_rate, state->n_estimators);
-        fflush(stderr);
 
-        // create output directory
-        mkdir("models", 0755);
-
-        // filter out neutral labels (0.5) — XGBoost binary needs 0 or 1
-        // compact into separate buffers so results->feature_matrix stays intact for walk-forward
-        int n_valid = 0;
-        float *train_features = (float *)malloc(results->sample_count * MODEL_NUM_FEATURES * sizeof(float));
-        float *train_labels   = (float *)malloc(results->sample_count * sizeof(float));
-        if (!train_features || !train_labels) {
-            free(train_features); free(train_labels);
-            snprintf(state->status_msg, sizeof(state->status_msg), "Failed to allocate training buffers");
-            state->model_trained = true; // show the error message
-        } else {
-        for (int i = 0; i < results->sample_count; i++) {
-            if (results->labels[i] == 0.5f) continue;
-            memcpy(&train_features[n_valid * MODEL_NUM_FEATURES],
-                   &results->feature_matrix[i * MODEL_NUM_FEATURES],
-                   MODEL_NUM_FEATURES * sizeof(float));
-            train_labels[n_valid] = results->labels[i];
-            n_valid++;
+    if (state->tm_running) {
+        // Worker is mid-train. Show indeterminate progress + cancel button.
+        // XGBoost has no native iteration-progress callback; we use a
+        // pulsing bar as a "still alive" signal. Cancel polls between
+        // XGBoosterUpdateOneIter calls (bounded latency = one iter time).
+        ImGui::ProgressBar(-1.0f * (float)ImGui::GetTime(),
+                           ImVec2(-1, 0), "Training XGBoost...");
+        if (ImGui::Button("Cancel Training")) {
+            state->tm_cancel = 1;
         }
-
-        DMatrixHandle dtrain;
-        XGDMatrixCreateFromMat(train_features, n_valid,
-                               MODEL_NUM_FEATURES, NAN, &dtrain);
-        XGDMatrixSetFloatInfo(dtrain, "label", train_labels, n_valid);
-
-        BoosterHandle booster;
-        XGBoosterCreate(&dtrain, 1, &booster);
-
-        char depth_s[8]; snprintf(depth_s, 8, "%d", state->max_depth);
-        char lr_s[16]; snprintf(lr_s, 16, "%f", state->learning_rate);
-        XGBoosterSetParam(booster, "max_depth", depth_s);
-        XGBoosterSetParam(booster, "eta", lr_s);
-
-        // objective + num_class read from label_table (single source of truth)
-        //   num_classes  0 = binary classification
-        //   num_classes  1 = continuous regression
-        //   num_classes >=2 = multiclass softmax
-        int num_classes = (state->label_type >= 0 && state->label_type < LABEL_COUNT)
-                          ? label_table[state->label_type].num_classes : 0;
-        int is_multiclass  = (num_classes >= 2);
-        int is_regression  = (num_classes == 1);
-
-        if (is_multiclass) {
-            XGBoosterSetParam(booster, "objective", "multi:softprob");
-            char nc_s[8]; snprintf(nc_s, 8, "%d", num_classes);
-            XGBoosterSetParam(booster, "num_class", nc_s);
-            // class-balance via per-sample weights (scale_pos_weight is binary-only).
-            // Without this, multiclass with skewed distribution trains a majority
-            // predictor — same failure mode as binary imbalance.
-            float *mc_weights = (float *)malloc(n_valid * sizeof(float));
-            int   mc_counts[16] = {0};
-            if (mc_weights) {
-                XGBoost_ComputeMulticlassWeights(train_labels, n_valid, num_classes,
-                                                  mc_weights, mc_counts);
-                XGDMatrixSetFloatInfo(dtrain, "weight", mc_weights, n_valid);
-                fprintf(stderr, "[TRAIN] multiclass class counts:");
-                for (int k = 0; k < num_classes && k < 16; k++) {
-                    fprintf(stderr, " c%d=%d (%.1f%%)", k, mc_counts[k],
-                            n_valid > 0 ? 100.0f * mc_counts[k] / n_valid : 0.0f);
-                }
-                fprintf(stderr, " — per-sample weights applied\n");
-                fflush(stderr);
-                free(mc_weights);
-            }
-        } else if (is_regression) {
-            XGBoosterSetParam(booster, "objective", "reg:squarederror");
-        } else {
-            XGBoosterSetParam(booster, "objective", "binary:logistic");
-            // class-balance: scale_pos_weight = n_neg/n_pos. Without this,
-            // imbalanced datasets (typical for tight-barrier label sets)
-            // train a model that trivially predicts the majority class.
-            int n_pos = 0, n_neg = 0;
-            double spw = XGBoost_ComputeScalePosWeight(train_labels, n_valid, &n_pos, &n_neg);
-            char spw_s[24]; snprintf(spw_s, sizeof(spw_s), "%.4f", spw);
-            XGBoosterSetParam(booster, "scale_pos_weight", spw_s);
-            fprintf(stderr, "[TRAIN] class balance: +%d / -%d → scale_pos_weight=%s%s\n",
-                    n_pos, n_neg, spw_s,
-                    n_pos == 0 ? "  WARNING: zero positives, model cannot learn" : "");
-            fflush(stderr);
+    } else {
+        if (!can_train) ImGui::BeginDisabled();
+        if (ImGui::Button("Train Model")) {
+            // clear previous results + spawn worker
+            state->model_trained = false;
+            state->status_msg[0] = '\0';
+            state->wf_has_results = false;
+            state->tm_cancel = 0;
+            state->tm_complete = 0;
+            state->tm_running = 1;
+            TrainModelWorkerArgs *args = (TrainModelWorkerArgs *)malloc(sizeof(TrainModelWorkerArgs));
+            args->state = state;
+            args->run_control = run_control;
+            pthread_create(&state->tm_tid, NULL, train_model_worker_fn, args);
+            pthread_detach(state->tm_tid);
         }
-        XGBoosterSetParam(booster, "nthread", "4");
-        XGBoosterSetParam(booster, "verbosity", "0");
-
-        for (int i = 0; i < state->n_estimators; i++)
-            XGBoosterUpdateOneIter(booster, i, dtrain);
-
-        // embed model format version for compatibility check
-        char ver_s[8]; snprintf(ver_s, 8, "%d", MODEL_FORMAT_VERSION);
-        XGBoosterSetAttr(booster, "foxml_version", ver_s);
-
-        // embed config+data fingerprint for train-serve parity verification
-        {
-            const char *fp_paths[MAX_DATA_FILES];
-            for (int i = 0; i < run_control->run_config.num_data_files && i < MAX_DATA_FILES; i++)
-                fp_paths[i] = run_control->run_config.data_paths[i];
-            char fp_hex[65];
-            Fingerprint_Compute<BACKTEST_FP>(fp_hex, &results->config_used,
-                sizeof(results->config_used), fp_paths, run_control->run_config.num_data_files);
-            XGBoosterSetAttr(booster, "foxml_fingerprint", fp_hex);
-            fprintf(stderr, "[TRAIN] model fingerprint: %.12s...\n", fp_hex);
-        }
-
-        // save model
-        XGBoosterSaveModel(booster, state->model_path);
-
-        // compute in-sample training metric — kind-appropriate (label-type-aware
-        // metric invariant). For binary/multiclass this is accuracy; for
-        // regression we report MSE + Pearson correlation (sign-agreement was
-        // a poor proxy that didn't distinguish "predicting all-zero" from
-        // "actually learning small but real signal").
-        bst_ulong out_len;
-        const float *out_result;
-        DMatrixHandle dpred;
-        XGDMatrixCreateFromMat(train_features, n_valid,
-                               MODEL_NUM_FEATURES, NAN, &dpred);
-        XGBoosterPredict(booster, dpred, 0, 0, 0, &out_len, &out_result);
-        if (is_multiclass) {
-            state->train_accuracy = WalkForward_ComputeMulticlassAccuracy(
-                out_result, train_labels, n_valid, num_classes) * 100.0f;
-            state->train_mse = 0.0f;
-            state->train_correlation = 0.0f;
-        } else if (is_regression) {
-            state->train_mse         = WalkForward_ComputeMSE(out_result, train_labels, n_valid);
-            state->train_correlation = WalkForward_ComputeCorrelation(out_result, train_labels, n_valid);
-            state->train_accuracy    = 0.0f;  // not meaningful for regression
-        } else {
-            state->train_accuracy = WalkForward_ComputeAccuracy(
-                out_result, train_labels, n_valid, 0.5f) * 100.0f;
-            state->train_mse = 0.0f;
-            state->train_correlation = 0.0f;
-        }
-        XGDMatrixFree(dpred);
-
-        // feature importance (gain-based)
-        memset(state->feature_importance, 0, sizeof(state->feature_importance));
-        // XGBoost doesn't have a simple GetScore in C API for all features
-        // use prediction contribution as a proxy: not available in all versions
-        // for now, zero-importance displayed (Phase 6: implement via dump/parse)
-
-        XGDMatrixFree(dtrain);
-        XGBoosterFree(booster);
-        free(train_features);
-        free(train_labels);
-
-        state->model_trained = true;
-        if (is_regression) {
-            snprintf(state->status_msg, sizeof(state->status_msg),
-                     "Model saved to %s (MSE: %.6f, corr: %.4f)",
-                     state->model_path, state->train_mse, state->train_correlation);
-        } else {
-            snprintf(state->status_msg, sizeof(state->status_msg),
-                     "Model saved to %s (accuracy: %.1f%%)",
-                     state->model_path, state->train_accuracy);
-        }
-        } // end malloc success block
-#endif
-    }
-    if (!can_train) {
-        ImGui::EndDisabled();
+        if (!can_train) {
+            ImGui::EndDisabled();
 #ifndef USE_XGBOOST
-        ImGui::SameLine();
-        ImGui::TextDisabled("Build with -DUSE_XGBOOST=ON");
-#else
-        if (results->sample_count < 10) {
             ImGui::SameLine();
-            ImGui::TextDisabled("Collect features first (need 10+ samples)");
-        }
+            ImGui::TextDisabled("Build with -DUSE_XGBOOST=ON");
+#else
+            if (results->sample_count < 10) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("Collect features first (need 10+ samples)");
+            }
 #endif
+        }
     }
 
     // training results — kind-appropriate display.
