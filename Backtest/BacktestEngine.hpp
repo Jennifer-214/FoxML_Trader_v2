@@ -952,6 +952,39 @@ static inline float WalkForward_ComputeAccuracy(const float *predictions, const 
     return (float)correct / count;
 }
 
+// v5.9.4a — "always-predict-best" baseline accuracy for a label distribution.
+//   - Binary (K=2): max(0.5, max_class_freq) — uniform random OR majority
+//   - K-class (K>=3): max(1.0/K, max_class_freq) — uniform random OR majority
+//   - Regression: caller should not call this (use Pearson r diagnosis instead)
+//
+// Inputs:
+//   num_classes — from label_table[].num_classes promoted to >=2 for binary,
+//                 OR wf->num_classes / snap->num_classes for multiclass
+//   class_counts — optional; if NULL or sample_count<=0, returns uniform 1/K
+//   sample_count — total sample count
+//
+// Used by Training panel WF diagnosis (no-edge / marginal / real-edge bands)
+// + Past Runs val accuracy color thresholds. Single-source-of-truth so both
+// sites can't drift. Pre-v5.9.4a, both sites had hardcoded binary thresholds
+// (0.52 / 0.55) which mis-diagnosed multiclass — caught in 2026-05-02 paper
+// test where 3-class with 47% majority showed val=46.7% but binary heuristic
+// said "no edge — below 50%" (technically right answer, wrong reasoning).
+static inline float multiclass_baseline_accuracy(int num_classes,
+                                                   const int* class_counts,
+                                                   int sample_count) {
+    if (num_classes < 2) num_classes = 2;  // binary floor
+    float uniform = 1.0f / (float)num_classes;
+    float majority = uniform;
+    if (class_counts && sample_count > 0) {
+        int K = num_classes > 16 ? 16 : num_classes;
+        for (int k = 0; k < K; ++k) {
+            float p = (float)class_counts[k] / (float)sample_count;
+            if (p > majority) majority = p;
+        }
+    }
+    return majority;
+}
+
 // multiclass accuracy: predictions is count × num_classes flat array (softmax probs).
 // argmax over each row, compare to integer truth (rounded from label float).
 static inline float WalkForward_ComputeMulticlassAccuracy(const float *predictions,

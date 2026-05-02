@@ -232,6 +232,14 @@ struct ModelHandle {
     // identity, distinct from model_load_failed which is the model itself).
     // Surfaces to PerCoreSnap.ml_scaler_load_failed for ML Status panel.
     int scaler_load_failed;
+    // v5.9.4a — stamp-derived fields copied at CoreModelZoo_TryLoadRole
+    // post-verify. Engine boot reads these to surface drift (Phase 6
+    // poll_interval cadence) or refuse mismatched models (Phase 5
+    // num_outputs). Set to 0 when stamp lacks the field (legacy stamps).
+    uint32_t training_poll_interval;        // from stamp; 0 if absent
+    uint8_t  has_training_poll_interval;    // 1 if stamp had it
+    int      stamp_model_num_outputs;       // from stamp; 0 if absent
+    uint8_t  has_stamp_num_outputs;         // 1 if stamp had model_num_outputs
 };
 
 //======================================================================================================
@@ -247,6 +255,12 @@ inline void Model_Init(ModelHandle<F> *m) {
     // to populate.
     tt::FeatureStandardizer_Init(&m->scaler);
     m->scaler_load_failed = 0;
+    // v5.9.4a — stamp-derived fields zero-init. CoreModelZoo_TryLoadRole
+    // copies values post-verify; absent flags stay 0 (legacy stamp path).
+    m->training_poll_interval = 0;
+    m->has_training_poll_interval = 0;
+    m->stamp_model_num_outputs = 0;
+    m->has_stamp_num_outputs = 0;
 }
 
 //======================================================================================================
@@ -657,6 +671,12 @@ struct ModelStampResult {
     uint8_t  has_scaler_fields;
     uint8_t  feature_scaler_present;        // 1 = sidecar exists at <model>.scaler
     char     scaler_sha256[65];             // SHA-256 hex of full sidecar file
+    // v5.9.4a — model num_outputs (output dimension) stamp binding.
+    // has_model_num_outputs=1 when stamp had the field; legacy stamps
+    // load with 0 (no check fired). Verifier compares against
+    // ModelHandle.num_outputs at CoreModelZoo load time.
+    uint8_t  has_model_num_outputs;
+    int      model_num_outputs;
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -725,6 +745,9 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     r.has_scaler_fields = 0;
     r.feature_scaler_present = 0;
     r.scaler_sha256[0] = '\0';
+    // v5.9.4a — model num_outputs init.
+    r.has_model_num_outputs = 0;
+    r.model_num_outputs = 0;
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -850,6 +873,11 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 memcpy(r.scaler_sha256, val, vl);
                 r.scaler_sha256[vl] = '\0';
                 r.has_scaler_fields = 1;
+            }
+            // v5.9.4a — model_num_outputs (output dimension binding)
+            else if (strcmp(key, "model_num_outputs") == 0) {
+                r.model_num_outputs = atoi(val);
+                r.has_model_num_outputs = 1;
             }
         }
         line = strtok_r(nullptr, "\n", &save);
@@ -1018,6 +1046,13 @@ struct StampInferenceCfgInputs {
     int      has_scaler;
     int      feature_scaler_present;                 // 0 = no sidecar; 1 = sidecar exists
     const char* scaler_sha256_hex;                   // null-terminated 64-char hex (or empty)
+    // v5.9.4a — model num_outputs (output dimension) stamp binding.
+    // Stamp records what the trainer SAW; verifier compares against
+    // ModelHandle.num_outputs at load time. Binary/regression = 1,
+    // multiclass = num_classes (e.g. 3 for PEAK_VALLEY_STABLE).
+    // Catches "stamp claims 3-class but binary model loaded" bug.
+    int      has_num_outputs;
+    int      model_num_outputs;
 };
 
 inline StampWriteResult stamp_write_for_model(const char* model_path,
@@ -1163,6 +1198,14 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
             "feature_scaler_present=%d\n"
             "scaler_sha256=%s\n",
             inf->feature_scaler_present ? 1 : 0, sha);
+        if (wrote > 0) n += wrote;
+    }
+    // v5.9.4a — model num_outputs (output dimension). Stamp records
+    // what trainer SAW; engine load compares vs ModelHandle.num_outputs.
+    // Mismatch caught by CoreModelZoo_TryLoadRole's strict-mode gate.
+    if (inf && inf->has_num_outputs && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "model_num_outputs=%d\n", inf->model_num_outputs);
         if (wrote > 0) n += wrote;
     }
 

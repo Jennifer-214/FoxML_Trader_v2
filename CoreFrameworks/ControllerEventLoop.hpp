@@ -1698,8 +1698,15 @@ inline void EventLoop_RebuildOneCore(
             int wmin = (int)config->min_warmup_samples;
             if (wmin <= 0) wmin = 64;  // engine default (matches ShardedSnapshot fallback)
             if (rolling->count >= wmin) {
-                fprintf(stderr, "[core %d] warmup complete (%d/%d samples) — strategy active\n",
-                        slot, rolling->count, wmin);
+                // v5.9.4a — name the strategy so operator can distinguish ML
+                // vs non-ML cores in mixed deployments. Bounds-checked via
+                // static_assert on STRATEGY_SHORT_NAMES at the X-macro
+                // declaration (StrategyInterface.hpp:151).
+                int sid = state->cores[slot].strategy_id;
+                const char* sname = (sid >= 0 && sid < NUM_STRATEGIES)
+                                  ? STRATEGY_SHORT_NAMES[sid] : "unknown";
+                fprintf(stderr, "[core %d] warmup complete (%d/%d samples) — %s active\n",
+                        slot, rolling->count, wmin, sname);
                 state->cores[slot].warmup_log_emitted = 1;
             }
         }

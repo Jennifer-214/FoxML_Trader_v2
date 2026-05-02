@@ -52,6 +52,7 @@ FEATURE_REGISTRY_HASH=""
 ENGINE_VERSION=""
 FEATURE_SCALER_PRESENT=""
 SCALER_SHA256=""
+MODEL_NUM_OUTPUTS=""
 FORCE=0
 
 usage() {
@@ -72,6 +73,7 @@ while [[ $# -gt 0 ]]; do
         --engine-version)         ENGINE_VERSION="$2";        shift 2 ;;
         --feature-scaler-present) FEATURE_SCALER_PRESENT="$2"; shift 2 ;;
         --scaler-sha256)          SCALER_SHA256="$2";         shift 2 ;;
+        --model-num-outputs)      MODEL_NUM_OUTPUTS="$2";     shift 2 ;;
         --force)                  FORCE=1;                    shift ;;
         -h|--help)                usage ;;
         *) echo "[stamp] unknown arg: $1" >&2; usage ;;
@@ -158,6 +160,14 @@ fi
 if [[ -n "$FEATURE_SCALER_PRESENT" ]]; then
     CANONICAL="${CANONICAL}feature_scaler_present=${FEATURE_SCALER_PRESENT}
 scaler_sha256=${SCALER_SHA256}
+"
+fi
+
+# v5.9.4a — append model_num_outputs if supplied. Stamp records the
+# trainer's num_outputs claim; engine load compares vs ModelHandle.
+# Order MUST match in-process emitter at ML_Headers/ModelInference.hpp.
+if [[ -n "$MODEL_NUM_OUTPUTS" ]]; then
+    CANONICAL="${CANONICAL}model_num_outputs=${MODEL_NUM_OUTPUTS}
 "
 fi
 

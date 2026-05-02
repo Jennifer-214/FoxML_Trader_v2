@@ -1669,8 +1669,25 @@ static inline void *fullvalidation_worker_fn(void *arg) {
             snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
                 "Held-out OK; auto-stamp disabled (cfg auto_stamp_on_held_out=0)");
         } else {
-            snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
-                "Held-out OK; auto-stamp skipped (model_path empty?)");
+            // v5.9.4a — improved diagnostic. Pre-v5.9.4a always said
+            // "model_path empty?" — operator had no info to debug.
+            // Now show what state was actually observed.
+            if (state->model_path[0] == '\0') {
+                snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+                    "Held-out OK; auto-stamp skipped — model_path empty "
+                    "(set Model Path field before Run Full Validation)");
+            } else if (state->fv_results.auto_stamp_path[0] == '\0') {
+                snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+                    "Held-out OK; auto-stamp skipped — model_path='%s' did not "
+                    "propagate to auto_stamp_path (worker race or copy failure)",
+                    state->model_path);
+            } else {
+                snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+                    "Held-out OK; auto-stamp skipped — Backtest_RunFullValidation "
+                    "did not fire stamp_write (auto_stamp_path='%s'; check "
+                    "ran_held_out flag + path validity)",
+                    state->fv_results.auto_stamp_path);
+            }
         }
     } else {
         snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
@@ -1925,17 +1942,24 @@ static inline void *train_model_worker_fn(void *arg) {
     free(train_features);
     free(train_labels);
 
-    // v5.9.3b — Gap I: cancel-mid-emit orphan cleanup. The worker doesn't
-    // emit stamps today (operator does via tools/stamp_model.sh), but if
-    // cancel hit between persist + train return, leave the sidecar on disk
-    // with the operator's path. Logged above so they know to clean up.
-    // The full Gap I (auto-stamp + auto-cleanup) lands when worker stamp
-    // emission is wired (post-v5.9.3 cleanup ship).
+    // v5.9.4a — Gap I full closure: auto-unlink orphan scaler on cancel.
+    // Pre-v5.9.4a (v5.9.3b) just logged "operator must rm orphan"; now we
+    // unlink automatically since the model file itself is also discarded
+    // on cancel (no stamp written by this worker → no consumer for the
+    // sidecar). Atomic + idempotent: unlink failure (file already gone)
+    // is non-fatal.
     if (state->tm_cancel && scaler_persisted) {
-        // Cancel after persist — sidecar exists; operator must decide.
-        fprintf(stderr,
-            "[train] cancelled post-scaler-persist; %s remains on disk "
-            "(rm if model wasn't kept)\n", scaler_path);
+        if (unlink(scaler_path) == 0) {
+            fprintf(stderr,
+                "[train] cancelled post-scaler-persist; auto-removed orphan %s\n",
+                scaler_path);
+        } else {
+            // unlink failed — file may already be gone (concurrent cleanup),
+            // disk error, or permissions. Best-effort; don't crash worker.
+            fprintf(stderr,
+                "[train] cancelled post-scaler-persist; could not auto-remove %s "
+                "(may already be cleaned)\n", scaler_path);
+        }
     }
 
     state->model_trained = true;
@@ -2824,9 +2848,25 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                               "to see if it's stable.";
                 }
             } else {
-                // binary or multiclass — both report accuracy
+                // binary or multiclass — both report accuracy. v5.9.4a:
+                // baseline-aware bands. Pre-v5.9.4a hardcoded 0.52/0.55
+                // (binary 50%+spread); for K-class with imbalanced classes
+                // baseline can be much higher (e.g. 47% for the
+                // PEAK_VALLEY_STABLE 5.9/47.4/46.7 distribution from
+                // 2026-05-02 paper test). Diagnosis was misleading for
+                // multiclass; now uses actual majority-class baseline.
                 float val_acc = wf->mean_val_accuracy;
                 float train_acc = wf->mean_train_accuracy;
+                int K = (wf->num_classes >= 2) ? wf->num_classes : 2;
+                float baseline = multiclass_baseline_accuracy(
+                    K, snap->class_counts, snap->sample_count);
+                // "fee-overhead" threshold: 3 percentage points above
+                // baseline. Empirical — covers ~0.1% × 2 sides for
+                // typical small-to-mid TP barriers.
+                const float fee_band = 0.03f;
+                const float marginal_band = 0.01f;  // within 1pp of baseline = marginal
+                static char tip_buf[1024];
+
                 if (wf->overfit_count >= wf->valid_folds && wf->valid_folds > 0) {
                     wd_col = &wf_red;
                     wd_text = "every fold flagged as memorization — model trivially fits training";
@@ -2835,29 +2875,41 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                               "but val accuracy converges to the prior rate — looks high\n"
                               "but means nothing. Check sample panel ratio. Or reduce\n"
                               "model capacity (max_depth 2-3).";
-                } else if (val_acc < 0.52f) {
+                } else if (val_acc <= baseline + marginal_band) {
                     wd_col = &wf_red;
-                    wd_text = "no edge — val accuracy at or below random chance";
-                    wd_tip  = "Mean val accuracy < 52%%. With binary fee-bearing trades,\n"
-                              "you typically need >55%% to overcome fees + slippage. The\n"
-                              "features aren't separating the classes at this label/horizon.\n"
-                              "Try a different label (Forward P&L regression sidesteps\n"
-                              "class-balance issues), or tighter barriers, or different\n"
-                              "lookahead.";
-                } else if (val_acc >= 0.55f) {
+                    wd_text = "no edge — val accuracy at or below the always-predict-best baseline";
+                    snprintf(tip_buf, sizeof(tip_buf),
+                             "Mean val accuracy %.1f%% <= baseline %.1f%% (for %d-class with "
+                             "current distribution). Predicting the majority class would do "
+                             "equally well. Features aren't separating the classes at this "
+                             "label/horizon.\n\n"
+                             "Try: different label (Forward P&L regression sidesteps class-\n"
+                             "balance issues), tighter/wider barriers, different lookahead.",
+                             val_acc * 100.0f, baseline * 100.0f, K);
+                    wd_tip = tip_buf;
+                } else if (val_acc >= baseline + fee_band) {
                     wd_col = &wf_green;
-                    wd_text = "real edge — val accuracy above the fee-overhead threshold";
-                    wd_tip  = "Mean val accuracy >= 55%%. After fees of ~0.1%% × 2 sides,\n"
-                              "this regime can plausibly produce positive expectancy. Verify\n"
-                              "fold-to-fold stability (low std), no leakage, and that the\n"
-                              "training distribution matches the deployment regime.";
+                    wd_text = "real edge — val accuracy above baseline + fee overhead";
+                    snprintf(tip_buf, sizeof(tip_buf),
+                             "Mean val accuracy %.1f%% > baseline %.1f%% + 3%% fee buffer "
+                             "(for %d-class). After fees of ~0.1%% × 2 sides, this regime can "
+                             "plausibly produce positive expectancy. Verify fold-to-fold "
+                             "stability (low std), no leakage, and that training distribution "
+                             "matches deployment regime.",
+                             val_acc * 100.0f, baseline * 100.0f, K);
+                    wd_tip = tip_buf;
                 } else {
                     wd_col = &wf_yellow;
-                    wd_text = "marginal — val accuracy between 52-55%%, may not survive fees";
-                    wd_tip  = "Mean val accuracy is in the 52-55%% band. This is real signal\n"
-                              "but might not overcome fees + slippage in live trading. Worth\n"
-                              "optimizing if you can also reduce trading costs (maker rebates,\n"
-                              "longer holding period to amortize fees).";
+                    wd_text = "marginal — val accuracy above baseline but inside fee buffer";
+                    snprintf(tip_buf, sizeof(tip_buf),
+                             "Mean val accuracy %.1f%% is in [%.1f%%, %.1f%%] (baseline + 1-3%% "
+                             "for %d-class). Real signal but might not overcome fees + slippage "
+                             "in live trading. Worth optimizing if you can also reduce trading "
+                             "costs (maker rebates, longer holding period to amortize fees).",
+                             val_acc * 100.0f,
+                             (baseline + marginal_band) * 100.0f,
+                             (baseline + fee_band) * 100.0f, K);
+                    wd_tip = tip_buf;
                 }
                 (void)train_acc; // available for future train/val gap diagnostics
             }

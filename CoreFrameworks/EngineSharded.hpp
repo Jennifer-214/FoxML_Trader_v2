@@ -828,6 +828,37 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 state.cores[i].model_load_failed = 1;
             }
 
+            // v5.9.4a — Phase 6 cadence parity check. For each loaded
+            // role, compare stamp's training_poll_interval vs cfg's
+            // poll_interval. Mismatch = model trained at one cadence but
+            // engine running at another → silent feature distribution
+            // shift. WARN only (operational, not refusal). Operator can
+            // suppress with acknowledge_cross_binary_version_drift=1
+            // (added v5.9.4 — same flag covers minor-version + cadence).
+            if (loaded && cfg.core_model_dir[i][0] &&
+                !cfg.acknowledge_cross_binary_version_drift) {
+                CoreModelZoo<F>* zoo = &ml_zoos[i];
+                ModelHandle<F>* handles[4] = {
+                    &zoo->buy_signal, &zoo->barrier,
+                    &zoo->regime, &zoo->exit
+                };
+                const char* role_names[4] = {
+                    "buy_signal", "barrier", "regime", "exit"
+                };
+                for (int r = 0; r < 4; ++r) {
+                    if (handles[r]->has_training_poll_interval &&
+                        handles[r]->training_poll_interval != cfg.poll_interval) {
+                        fprintf(stderr,
+                            "[poll_interval] WARN: core %d role=%s stamp claims "
+                            "training_poll_interval=%u but cfg.poll_interval=%u "
+                            "(set acknowledge_cross_binary_version_drift=1 to suppress)\n",
+                            i, role_names[r],
+                            (unsigned)handles[r]->training_poll_interval,
+                            (unsigned)cfg.poll_interval);
+                    }
+                }
+            }
+
             // Phase 6prep sharded c12: re-init ConfidenceScorer with cfg
             // tunables. EventLoopState_Init left it at safe defaults; for
             // ML cores we want the user's window/tau settings active.

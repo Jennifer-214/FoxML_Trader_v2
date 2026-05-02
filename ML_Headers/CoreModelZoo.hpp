@@ -180,6 +180,40 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
     int rc = Model_Load(handle, found_path, backend);
     if (rc <= 0) return rc;
 
+    // v5.9.4a — copy stamp-derived fields onto the handle for engine
+    // boot to surface (Phase 6 poll_interval WARN; future drift checks).
+    // Only copies when stamp had the field; preserves Model_Init zero
+    // defaults for legacy stamps.
+    if (have_sr) {
+        if (sr.has_training_poll_interval) {
+            handle->training_poll_interval = sr.training_poll_interval;
+            handle->has_training_poll_interval = 1;
+        }
+        if (sr.has_model_num_outputs) {
+            handle->stamp_model_num_outputs = sr.model_num_outputs;
+            handle->has_stamp_num_outputs = 1;
+            // Phase 5 — verify stamp's claim matches Model_Load's seen
+            // num_outputs. Mismatch = stamp tampered with OR XGBoost
+            // loaded a different model than the trainer wrote. Refuse
+            // in strict mode; warn otherwise.
+            if (sr.model_num_outputs != handle->num_outputs) {
+                if (held_out_gate_strict == 1) {
+                    fprintf(stderr,
+                        "[model] REFUSING %s — stamp claims model_num_outputs=%d "
+                        "but Model_Load saw num_outputs=%d (strict mode)\n",
+                        found_path, sr.model_num_outputs, handle->num_outputs);
+                    Model_Free(handle);
+                    Model_Init(handle);
+                    return 0;
+                }
+                fprintf(stderr,
+                    "[model] WARN: %s stamp claims model_num_outputs=%d but "
+                    "loaded model has num_outputs=%d (strict=0, loading anyway)\n",
+                    found_path, sr.model_num_outputs, handle->num_outputs);
+            }
+        }
+    }
+
     // v5.9.3a — scaler sidecar load. Stamp claimed scaler present? Try
     // to load and verify <model>.scaler. 3-tier behavior on failure:
     //   strict=1: refuse model load (consistent with stamp drift refusal)

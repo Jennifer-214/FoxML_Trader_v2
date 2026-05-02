@@ -11458,6 +11458,135 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- EXTENSIBILITY: v5.9.4a Phase 5.5 — multiclass UX + closure polish ---\n");
+    {
+        using namespace tt;
+        // === Phase 2: multiclass_baseline_accuracy helper ===
+        // Binary balanced (50/50): baseline = max(0.5, max_freq) = 0.5
+        {
+            int counts[2] = {500, 500};
+            float b = multiclass_baseline_accuracy(2, counts, 1000);
+            check("v5.9.4a: baseline_accuracy(binary 50/50) == 0.5",
+                  fabsf(b - 0.5f) < 1e-6f);
+        }
+        // Binary imbalanced (90/10): baseline = max(0.5, 0.9) = 0.9
+        {
+            int counts[2] = {900, 100};
+            float b = multiclass_baseline_accuracy(2, counts, 1000);
+            check("v5.9.4a: baseline_accuracy(binary 90/10) == 0.9 (majority)",
+                  fabsf(b - 0.9f) < 1e-6f);
+        }
+        // 3-class with 2026-05-02 paper-test distribution: 5.9/47.4/46.7
+        {
+            int counts[3] = {133095, 1064565, 1050203};
+            int total = 133095 + 1064565 + 1050203;  // 2247863
+            float b = multiclass_baseline_accuracy(3, counts, total);
+            // Expected: max(1/3, 47.37%) ≈ 0.4736
+            check("v5.9.4a: baseline_accuracy(3-class 5.9/47.4/46.7) ≈ 0.4736 (majority)",
+                  fabsf(b - 0.47361717f) < 1e-4f);
+        }
+        // 4-class uniform: baseline = max(1/4, 0.25) = 0.25
+        {
+            int counts[4] = {250, 250, 250, 250};
+            float b = multiclass_baseline_accuracy(4, counts, 1000);
+            check("v5.9.4a: baseline_accuracy(4-class uniform) == 0.25 (1/K)",
+                  fabsf(b - 0.25f) < 1e-6f);
+        }
+        // Null class_counts → uniform 1/K
+        {
+            float b = multiclass_baseline_accuracy(5, nullptr, 0);
+            check("v5.9.4a: baseline_accuracy(K=5, no counts) == 0.2 (uniform)",
+                  fabsf(b - 0.2f) < 1e-6f);
+        }
+        // K=1 (degenerate, regression-passed) → floored to K=2 baseline
+        {
+            int counts[2] = {500, 500};
+            float b = multiclass_baseline_accuracy(1, counts, 1000);
+            check("v5.9.4a: baseline_accuracy(K<2) clamps to K=2 floor",
+                  fabsf(b - 0.5f) < 1e-6f);
+        }
+
+        // === Phase 5: model_num_outputs stamp round-trip ===
+        char tmp_dir[] = "/tmp/v594a_stamp_XXXXXX";
+        if (mkdtemp(tmp_dir) != NULL) {
+            char model_path[400];
+            snprintf(model_path, sizeof(model_path), "%s/model.bin", tmp_dir);
+            FILE* mf = fopen(model_path, "w");
+            if (mf) {
+                fwrite("dummy", 1, 5, mf);
+                fclose(mf);
+
+                // Test 1: write stamp WITH model_num_outputs=3, verify round-trip
+                StampInferenceCfgInputs inf = {};
+                inf.has_num_outputs = 1;
+                inf.model_num_outputs = 3;
+                StampWriteResult sw = stamp_write_for_model(
+                    model_path, "test-secret-v594a", 5, "2026-05-02",
+                    0.65, 0.62, 0.05, 0,
+                    0xABCD1234U, "5.9.4a", &inf);
+                check("v5.9.4a: stamp_write accepts model_num_outputs",
+                      sw.ok == 1);
+
+                ModelStampResult v = verify_model_stamp(model_path,
+                    "test-secret-v594a", 0.10, 5, 0xABCD1234U);
+                check("v5.9.4a: stamp with model_num_outputs verifies",
+                      v.valid == 1);
+                check("v5.9.4a: parser sets has_model_num_outputs=1",
+                      v.has_model_num_outputs == 1);
+                check("v5.9.4a: parsed model_num_outputs == 3",
+                      v.model_num_outputs == 3);
+
+                char stamp_path[450];
+                snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
+                unlink(stamp_path);
+                unlink(model_path);
+
+                // Test 2: legacy stamp without model_num_outputs → has_*=0
+                FILE* mf2 = fopen(model_path, "w");
+                fwrite("dummy2", 1, 6, mf2);
+                fclose(mf2);
+                StampWriteResult sw2 = stamp_write_for_model(
+                    model_path, "test-secret-v594a", 5, "2026-05-02",
+                    0.65, 0.62, 0.05, 0,
+                    0xABCD1234U, "5.9.4a", /*inf=*/nullptr);
+                check("v5.9.4a: legacy-shape stamp (no num_outputs) writes OK",
+                      sw2.ok == 1);
+                ModelStampResult v2 = verify_model_stamp(model_path,
+                    "test-secret-v594a", 0.10, 5, 0xABCD1234U);
+                check("v5.9.4a: legacy stamp → has_model_num_outputs=0",
+                      v2.has_model_num_outputs == 0);
+                check("v5.9.4a: legacy stamp → model_num_outputs=0 (default)",
+                      v2.model_num_outputs == 0);
+
+                unlink(stamp_path);
+                unlink(model_path);
+            } else {
+                check("v5.9.4a: tmp model file for stamp test", 0);
+            }
+            rmdir(tmp_dir);
+        } else {
+            check("v5.9.4a: tmp dir for stamp test", 0);
+        }
+
+        // === Phase 6: ModelHandle stamp-derived fields zero-init ===
+        ModelHandle<64> h = {};
+        Model_Init(&h);
+        check("v5.9.4a: Model_Init zero-inits training_poll_interval",
+              h.training_poll_interval == 0u);
+        check("v5.9.4a: Model_Init zero-inits has_training_poll_interval",
+              h.has_training_poll_interval == 0);
+        check("v5.9.4a: Model_Init zero-inits stamp_model_num_outputs",
+              h.stamp_model_num_outputs == 0);
+        check("v5.9.4a: Model_Init zero-inits has_stamp_num_outputs",
+              h.has_stamp_num_outputs == 0);
+
+        // Direct field assignability (sanity for boot-time WARN logic)
+        h.has_training_poll_interval = 1;
+        h.training_poll_interval = 250;
+        check("v5.9.4a: ModelHandle.training_poll_interval assignable",
+              h.has_training_poll_interval == 1 && h.training_poll_interval == 250u);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
