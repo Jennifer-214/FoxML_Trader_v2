@@ -582,4 +582,158 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
     }
 }
 
+//======================================================================================================
+// [v5.10.0a.G.3 — ENSEMBLE MODEL ZOO (multi-horizon sidecar struct)]
+//======================================================================================================
+// EnsembleModelZoo lives ALONGSIDE CoreModelZoo (not replacing it).
+// Single-horizon callers use CoreModelZoo unchanged; multi-horizon
+// callers populate EnsembleModelZoo when cfg.horizon_list non-empty.
+//
+// G.4 inference path: at per-tick predict, if ensemble->active, iterate
+// loaded horizons + select highest-confidence prediction; else fall
+// through to single-zoo (existing path).
+//
+// Storage shape: 4 roles × N horizons (HORIZON_LIST_MAX=8). Memory
+// upper bound: 4 × 8 × ~5-50MB per ModelHandle = up to ~1.6GB per core.
+// Operator opt-in via cfg.horizon_list; default empty = no extra memory.
+
+// Mirror ControllerConfig::HORIZON_LIST_MAX. Avoids template instantiation
+// circular dep; the value is small enough to hardcode.
+#define ENSEMBLE_HORIZON_MAX 8
+
+template <unsigned F>
+struct EnsembleModelZoo {
+    ModelHandle<F> barrier[ENSEMBLE_HORIZON_MAX];
+    ModelHandle<F> regime[ENSEMBLE_HORIZON_MAX];
+    ModelHandle<F> exit_predictor[ENSEMBLE_HORIZON_MAX];
+    ModelHandle<F> buy_signal[ENSEMBLE_HORIZON_MAX];
+    int barrier_count;
+    int regime_count;
+    int exit_predictor_count;
+    int buy_signal_count;
+    // Per-member horizon ticks (e.g. {100, 500, 1000} → ezoo populated
+    // at indices 0..2 with horizon_ticks_at_idx[0..2] = {100, 500, 1000}).
+    int horizon_ticks_at_idx[ENSEMBLE_HORIZON_MAX];
+    int active;  // 0 = use single-zoo (existing); 1 = ensemble path
+};
+
+template <unsigned F>
+inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
+    for (int i = 0; i < ENSEMBLE_HORIZON_MAX; ++i) {
+        Model_Init(&ezoo->barrier[i]);
+        Model_Init(&ezoo->regime[i]);
+        Model_Init(&ezoo->exit_predictor[i]);
+        Model_Init(&ezoo->buy_signal[i]);
+        ezoo->horizon_ticks_at_idx[i] = 0;
+    }
+    ezoo->barrier_count = 0;
+    ezoo->regime_count = 0;
+    ezoo->exit_predictor_count = 0;
+    ezoo->buy_signal_count = 0;
+    ezoo->active = 0;
+}
+
+template <unsigned F>
+inline void EnsembleModelZoo_Free(EnsembleModelZoo<F> *ezoo) {
+    for (int i = 0; i < ENSEMBLE_HORIZON_MAX; ++i) {
+        Model_Free(&ezoo->barrier[i]);
+        Model_Free(&ezoo->regime[i]);
+        Model_Free(&ezoo->exit_predictor[i]);
+        Model_Free(&ezoo->buy_signal[i]);
+    }
+    ezoo->barrier_count = 0;
+    ezoo->regime_count = 0;
+    ezoo->exit_predictor_count = 0;
+    ezoo->buy_signal_count = 0;
+    ezoo->active = 0;
+}
+
+// Load N models per role from per-horizon directories. Operator's
+// Train Multi-Horizon worker (v5.10.0a.G.1) saves to:
+//   models/<class_or_regr>/<run_name>_horizon_<H>/<role>.json
+//
+// This loader expects:
+//   base_run_path = "models/<class>/<run_name>" (without _horizon_<H> suffix)
+// Per horizon h in horizon_list[]:
+//   try load <base_run_path>_horizon_<H>/<role>.json for each role
+//
+// Returns total models loaded across all roles + horizons. Sets
+// ezoo->active=1 if any role got at least one horizon loaded.
+template <unsigned F>
+inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
+                                         const char *base_run_path,
+                                         const int *horizon_list,
+                                         int horizon_count,
+                                         int backend,
+                                         const char* held_out_stamp_secret = nullptr,
+                                         double gap_threshold = 0.05,
+                                         int held_out_gate_strict = 0,
+                                         int acknowledge_cross_binary_drift = 0) {
+    if (!ezoo || !base_run_path || base_run_path[0] == '\0' ||
+        !horizon_list || horizon_count <= 0) return 0;
+
+    if (horizon_count > ENSEMBLE_HORIZON_MAX) horizon_count = ENSEMBLE_HORIZON_MAX;
+
+    int total_loaded = 0;
+    char per_horizon_dir[512];
+    for (int h = 0; h < horizon_count; ++h) {
+        int H = horizon_list[h];
+        if (H <= 0) continue;
+        snprintf(per_horizon_dir, sizeof(per_horizon_dir),
+                 "%s_horizon_%d", base_run_path, H);
+
+        // Try each role at this horizon's dir
+        if (CoreModelZoo_TryLoadRole(&ezoo->barrier[ezoo->barrier_count],
+                                       per_horizon_dir, "barrier", backend,
+                                       held_out_stamp_secret, gap_threshold,
+                                       held_out_gate_strict,
+                                       acknowledge_cross_binary_drift)) {
+            ezoo->horizon_ticks_at_idx[ezoo->barrier_count] = H;
+            ezoo->barrier_count++;
+            total_loaded++;
+        }
+        if (CoreModelZoo_TryLoadRole(&ezoo->regime[ezoo->regime_count],
+                                       per_horizon_dir, "regime", backend,
+                                       held_out_stamp_secret, gap_threshold,
+                                       held_out_gate_strict,
+                                       acknowledge_cross_binary_drift)) {
+            ezoo->regime_count++;
+            total_loaded++;
+        }
+        if (CoreModelZoo_TryLoadRole(&ezoo->exit_predictor[ezoo->exit_predictor_count],
+                                       per_horizon_dir, "exit", backend,
+                                       held_out_stamp_secret, gap_threshold,
+                                       held_out_gate_strict,
+                                       acknowledge_cross_binary_drift)) {
+            ezoo->exit_predictor_count++;
+            total_loaded++;
+        }
+        if (CoreModelZoo_TryLoadRole(&ezoo->buy_signal[ezoo->buy_signal_count],
+                                       per_horizon_dir, "buy_signal", backend,
+                                       held_out_stamp_secret, gap_threshold,
+                                       held_out_gate_strict,
+                                       acknowledge_cross_binary_drift)) {
+            ezoo->buy_signal_count++;
+            total_loaded++;
+        }
+    }
+
+    if (total_loaded > 0) {
+        ezoo->active = 1;
+        fprintf(stderr, "[ML] ensemble zoo: %d total models loaded "
+                        "(barrier=%d, regime=%d, exit=%d, buy_signal=%d) "
+                        "across %d horizons\n",
+                total_loaded,
+                ezoo->barrier_count, ezoo->regime_count,
+                ezoo->exit_predictor_count, ezoo->buy_signal_count,
+                horizon_count);
+    } else {
+        fprintf(stderr, "[ML] ensemble zoo: no models loaded "
+                        "(checked %d horizons under base '%s'; falling back "
+                        "to single-zoo)\n",
+                horizon_count, base_run_path);
+    }
+    return total_loaded;
+}
+
 #endif // CORE_MODEL_ZOO_HPP

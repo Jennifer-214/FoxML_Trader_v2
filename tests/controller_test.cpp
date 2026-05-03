@@ -12094,6 +12094,62 @@ e3_skip_load:;
               pcs.cfg_drift_strict_refused == 1);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0a.G.3 — EnsembleModelZoo sidecar ---\n");
+    {
+        // === Test G.3.1: ENSEMBLE_HORIZON_MAX matches plan (8) ===
+        check("v5.10.0a.G.3: ENSEMBLE_HORIZON_MAX == 8 (matches HORIZON_LIST_MAX)",
+              ENSEMBLE_HORIZON_MAX == 8);
+
+        // === Test G.3.2: EnsembleModelZoo_Init zeros all counts + active flag ===
+        EnsembleModelZoo<FP> ezoo;
+        // Pre-populate with non-zero values to verify Init zeros them
+        ezoo.barrier_count = 5;
+        ezoo.regime_count = 3;
+        ezoo.exit_predictor_count = 2;
+        ezoo.buy_signal_count = 7;
+        ezoo.active = 1;
+        EnsembleModelZoo_Init(&ezoo);
+        check("v5.10.0a.G.3: Init zeros barrier_count",     ezoo.barrier_count == 0);
+        check("v5.10.0a.G.3: Init zeros regime_count",      ezoo.regime_count == 0);
+        check("v5.10.0a.G.3: Init zeros exit_predictor_count", ezoo.exit_predictor_count == 0);
+        check("v5.10.0a.G.3: Init zeros buy_signal_count",  ezoo.buy_signal_count == 0);
+        check("v5.10.0a.G.3: Init clears active flag",      ezoo.active == 0);
+
+        // === Test G.3.3: EnsembleModelZoo_Free is callable + zeros active ===
+        ezoo.active = 1;
+        ezoo.barrier_count = 3;
+        EnsembleModelZoo_Free(&ezoo);
+        check("v5.10.0a.G.3: Free clears active flag",      ezoo.active == 0);
+        check("v5.10.0a.G.3: Free zeros barrier_count",     ezoo.barrier_count == 0);
+
+        // === Test G.3.4: EnsembleModelZoo_LoadFromCfg with no horizons no-op ===
+        EnsembleModelZoo_Init(&ezoo);
+        int loaded = EnsembleModelZoo_LoadFromCfg(&ezoo,
+                                                    "models/test_baseline",
+                                                    nullptr, 0,
+                                                    MODEL_BACKEND_XGBOOST);
+        check("v5.10.0a.G.3: LoadFromCfg with horizon_count=0 returns 0",
+              loaded == 0);
+        check("v5.10.0a.G.3: LoadFromCfg with horizon_count=0 leaves active=0",
+              ezoo.active == 0);
+
+        // === Test G.3.5: LoadFromCfg with non-existent paths returns 0 ===
+        // No models present at the made-up base path; loader gracefully
+        // reports 0 loaded + leaves active=0 (forward-compat with single-zoo
+        // path).
+        int horizons[3] = {100, 500, 1000};
+        loaded = EnsembleModelZoo_LoadFromCfg(&ezoo,
+                                               "/tmp/nonexistent_v5100aG3",
+                                               horizons, 3,
+                                               MODEL_BACKEND_XGBOOST);
+        check("v5.10.0a.G.3: LoadFromCfg with bad paths returns 0 (no models found)",
+              loaded == 0);
+        check("v5.10.0a.G.3: LoadFromCfg with bad paths keeps active=0",
+              ezoo.active == 0);
+
+        EnsembleModelZoo_Free(&ezoo);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.G.2 — Stamp body grid_member_count (position 19) ---\n");
     {
         // === Test G.2.1: StampInferenceCfgInputs has grid_member_count fields ===
