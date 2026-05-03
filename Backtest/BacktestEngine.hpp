@@ -990,13 +990,21 @@ struct FullValidationResults {
 // Forward declaration — Backtest_RunWalkForward is defined further down in
 // this header (the implementation is large enough to live near the bottom).
 // Backtest_RunFullValidation calls it on a sliced view of BacktestResults.
+// v5.10.0a.D — optional cfg_override param. When non-null, WF reads
+// XGBoost hyperparams (xgb_subsample / xgb_colsample_bytree /
+// xgb_min_child_weight / xgb_seed / xgb_eval_nthread) from override
+// instead of data->config_used. Used by Backtest_RunHyperparamTrainSweep
+// to vary hyperparams per sweep cell without copying the entire
+// BacktestResults struct. Default-NULL preserves pre-v5.10.0a.D
+// behavior bytewise.
 static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                                             const BacktestResults *data,
                                             int n_splits, int horizon_ticks,
                                             int buffer_ticks, int min_train_samples,
                                             volatile int *progress_pct,
                                             volatile int *cancel_flag,
-                                            int label_type);
+                                            int label_type,
+                                            const ControllerConfig<BACKTEST_FP> *cfg_override = nullptr);
 
 static inline void Backtest_RunFullValidation(FullValidationResults *out,
                                                 const BacktestResults *data,
@@ -1333,11 +1341,18 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                                             int buffer_ticks, int min_train_samples,
                                             volatile int *progress_pct,
                                             volatile int *cancel_flag,
-                                            int label_type = LABEL_WIN_LOSS) {
+                                            int label_type,
+                                            const ControllerConfig<BACKTEST_FP> *cfg_override) {
     // v5.10.0 Item A — wf_eval phase timer (wraps full body).
     uint64_t wf_start_ns = tt::PhaseTimer_NowNs();
     memset(wf, 0, sizeof(*wf));
     *progress_pct = 0;
+    // v5.10.0a.D — resolve effective cfg. Override path used by
+    // Backtest_RunHyperparamTrainSweep to vary xgb_* per sweep cell;
+    // default-NULL falls back to data->config_used (pre-v5.10.0a.D
+    // behavior, bytewise-equivalent for non-sweep callers).
+    const ControllerConfig<BACKTEST_FP>& eff_cfg =
+        cfg_override ? *cfg_override : data->config_used;
 
     // label-type-aware: pick objective + metric kind once, branch downstream.
     // Defaults to binary if caller didn't specify (backward compat).
@@ -1551,9 +1566,21 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         // 1; matches pre-v5.10 hardcoded behavior). Operator opts in to >1
         // by setting cfg explicitly. CFG_PARSE_INT clamps negatives to 0;
         // we coerce 0/negative to 1 here for safety.
+        // v5.10.0a.D — read xgb_* from eff_cfg (override-or-data->config_used)
+        // so hyperparam sweep can vary subsample / colsample / etc per cell.
+        // XGBHyperparams_Defaults() returns hardcoded defaults; for sweep,
+        // we copy eff_cfg's values into hp so they propagate to the booster.
         tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
-        int eval_nthread = data->config_used.xgb_eval_nthread > 0
-                         ? data->config_used.xgb_eval_nthread : 1;
+        hp.subsample          = (float)FPN_ToDouble(eff_cfg.xgb_subsample);
+        hp.colsample_bytree   = (float)FPN_ToDouble(eff_cfg.xgb_colsample_bytree);
+        hp.min_child_weight   = eff_cfg.xgb_min_child_weight;
+        hp.seed               = eff_cfg.xgb_seed;
+        if (eff_cfg.xgb_tree_method[0]) {
+            strncpy(hp.tree_method, eff_cfg.xgb_tree_method, sizeof(hp.tree_method) - 1);
+            hp.tree_method[sizeof(hp.tree_method) - 1] = '\0';
+        }
+        int eval_nthread = eff_cfg.xgb_eval_nthread > 0
+                         ? eff_cfg.xgb_eval_nthread : 1;
         tt::XGBHyperparams_Apply(booster, hp, eval_nthread);
         // class balance — kind-specific.
         // Binary: scale_pos_weight = n_neg/n_pos (single param).
@@ -2127,5 +2154,120 @@ static inline void Backtest_RunSweep(OptimizerResults *opt,
         }
     }
 }
+
+//======================================================================================================
+// [v5.10.0a.D — HYPERPARAM TRAINING SWEEP]
+//======================================================================================================
+// Trains an XGBooster per sweep cell using shared feature_matrix +
+// labels (operator must Collect Features once first). Per cell,
+// applies override hyperparams via WF's cfg_override path, runs WF,
+// records val_accuracy as the cell's metric.
+//
+// Different from Backtest_RunSweep:
+//   - No Backtest_Run per cell (no engine sweep)
+//   - Per cell: clone cfg + apply ConfigField_Set, call WF with
+//     cfg_override, record metric
+//   - Output: OptimizerResults (same struct; metric is val_accuracy
+//     not P&L)
+//
+// Training-side hyperparam search. Operator workflow:
+//   1. Train Model panel: click Collect Features (populates
+//      feature_matrix + labels)
+//   2. New Hyperparam Sweep button: pick xgb_subsample range, click
+//   3. This function trains N XGBoosters, picks best by val_acc
+//   4. Operator inspects results table, decides which params to
+//      use for production train
+//
+// Single-thread baseline; parallelism via v5.10.0a.F (cfg.xgb_train_nthread).
+//
+// Metric: WF mean_val_accuracy (binary/multiclass) or
+// mean_val_correlation (regression). Stored as positive number; higher = better.
+//======================================================================================================
+#ifdef USE_XGBOOST
+static inline void Backtest_RunHyperparamTrainSweep(
+    OptimizerResults *opt,
+    const BacktestResults *feature_data,
+    const OptimizerRange *ranges, int num_params,
+    int label_type,
+    int wf_n_splits, int wf_horizon, int wf_buffer, int wf_min_train,
+    volatile int *current_run, volatile int *total_runs,
+    volatile int *cancel_flag) {
+
+    opt->num_params = num_params;
+    opt->dims[0] = ranges[0].steps();
+    opt->dims[1] = (num_params > 1) ? ranges[1].steps() : 1;
+    opt->total_runs = opt->dims[0] * opt->dims[1];
+    *total_runs = opt->total_runs;
+    *current_run = 0;
+    opt->best_idx = 0;
+    double best_metric = -1e30;
+
+    // Pre-compute parameter values (matches Backtest_RunSweep convention)
+    for (int i = 0; i < opt->dims[0]; i++)
+        opt->param_vals[0][i] = ranges[0].lo + i * ranges[0].step;
+    if (num_params > 1)
+        for (int i = 0; i < opt->dims[1]; i++)
+            opt->param_vals[1][i] = ranges[1].lo + i * ranges[1].step;
+
+    if (!feature_data || feature_data->sample_count <= 0) {
+        fprintf(stderr, "[hpsweep] no feature data — Collect Features first\n");
+        return;
+    }
+
+    // Base cfg = the cfg the features were collected under. Each cell
+    // overrides specific hyperparam fields without disturbing the rest.
+    ControllerConfig<BACKTEST_FP> base_cfg = feature_data->config_used;
+
+    fprintf(stderr, "[hpsweep] starting %d-cell sweep (sample_count=%d)\n",
+            opt->total_runs, feature_data->sample_count);
+
+    for (int i0 = 0; i0 < opt->dims[0]; i0++) {
+        for (int i1 = 0; i1 < opt->dims[1]; i1++) {
+            if (cancel_flag && *cancel_flag) {
+                fprintf(stderr, "[hpsweep] cancelled at cell %d/%d\n",
+                        (int)(i0 * opt->dims[1] + i1), opt->total_runs);
+                return;
+            }
+
+            int idx = i0 * opt->dims[1] + i1;
+            *current_run = idx + 1;
+
+            // Apply per-cell hyperparam overrides
+            ControllerConfig<BACKTEST_FP> cell_cfg = base_cfg;
+            ConfigField_Set(&cell_cfg, ranges[0].key, opt->param_vals[0][i0]);
+            if (num_params > 1)
+                ConfigField_Set(&cell_cfg, ranges[1].key, opt->param_vals[1][i1]);
+
+            // Run WF with the per-cell cfg as override
+            WalkForwardResults wf_results;
+            int local_progress = 0;
+            Backtest_RunWalkForward(&wf_results, feature_data,
+                                     wf_n_splits, wf_horizon, wf_buffer,
+                                     wf_min_train, &local_progress,
+                                     cancel_flag, label_type, &cell_cfg);
+
+            // Record metric: val_accuracy (binary/multiclass) or
+            // val_correlation (regression). OptimizerResults.metric[]
+            // is double; populate per label_kind. stats[] is unused
+            // for hyperparam sweep (no backtest stats here); zero it.
+            memset(&opt->stats[idx], 0, sizeof(opt->stats[idx]));
+            double cell_metric = 0.0;
+            if (wf_results.label_kind == 1) {
+                cell_metric = (double)wf_results.mean_val_correlation;
+            } else {
+                cell_metric = (double)wf_results.mean_val_accuracy;
+            }
+            opt->metric[idx] = cell_metric;
+
+            if (cell_metric > best_metric) {
+                best_metric = cell_metric;
+                opt->best_idx = idx;
+            }
+        }
+    }
+    fprintf(stderr, "[hpsweep] complete; best cell=%d metric=%.4f\n",
+            opt->best_idx, best_metric);
+}
+#endif // USE_XGBOOST
 
 #endif // BACKTEST_ENGINE_HPP

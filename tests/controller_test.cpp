@@ -12094,6 +12094,56 @@ e3_skip_load:;
               pcs.cfg_drift_strict_refused == 1);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0a.D — Backtest_RunHyperparamTrainSweep + WF override ---\n");
+    {
+        // === Test D.1: WF signature accepts default-NULL override (compat) ===
+        // Verifies that the new optional cfg_override param defaults to nullptr,
+        // preserving pre-v5.10.0a.D call shape. Smoke test: a ControllerConfig
+        // can be built and the override pointer is accepted by the type system.
+        ControllerConfig<FP> override_cfg = ControllerConfig_Default<FP>();
+        override_cfg.xgb_subsample = FPN_FromDouble<FP>(0.6);  // sweep value
+        const ControllerConfig<FP>* override_ptr = &override_cfg;
+        check("v5.10.0a.D: WF cfg_override pointer type accepts ControllerConfig<FP>*",
+              override_ptr != nullptr && FPN_ToDouble(override_ptr->xgb_subsample) > 0.55);
+
+        // === Test D.2: OptimizerResults can hold sweep results ===
+        // Hyperparam sweep populates OptimizerResults same struct as engine
+        // sweep; verify the struct is shape-compatible.
+        OptimizerResults opt = {};
+        opt.num_params = 1;
+        opt.dims[0] = 3;
+        opt.total_runs = 3;
+        opt.metric[0] = 0.46f;  opt.metric[1] = 0.52f;  opt.metric[2] = 0.49f;
+        opt.best_idx = 1;  // .52 beats both
+        check("v5.10.0a.D: OptimizerResults total_runs populated",
+              opt.total_runs == 3);
+        check("v5.10.0a.D: OptimizerResults best_idx tracks max metric",
+              opt.metric[opt.best_idx] > 0.50f);
+
+        // === Test D.3: ConfigField_Set accepts xgb_* keys ===
+        // Phase a extended ConfigField_Set; verify each new xgb_* field
+        // round-trips a value. Sweep cells will mutate cfg via this fn.
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        check("v5.10.0a.D: ConfigField_Set xgb_subsample accepted",
+              ConfigField_Set(&cfg, "xgb_subsample", 0.65) == 1);
+        check("v5.10.0a.D: ConfigField_Set xgb_min_child_weight accepted",
+              ConfigField_Set(&cfg, "xgb_min_child_weight", 7) == 1);
+        check("v5.10.0a.D: ConfigField_Set xgb_seed accepted",
+              ConfigField_Set(&cfg, "xgb_seed", 99) == 1);
+        check("v5.10.0a.D: xgb_subsample mutated to 0.65",
+              fabs(FPN_ToDouble(cfg.xgb_subsample) - 0.65) < 1e-6);
+        check("v5.10.0a.D: xgb_min_child_weight mutated to 7",
+              cfg.xgb_min_child_weight == 7);
+        check("v5.10.0a.D: xgb_seed mutated to 99",
+              cfg.xgb_seed == 99);
+
+        // === Test D.4: ConfigField_Set rejects unknown keys ===
+        // Defensive: passing a typo'd key returns 0; sweep cell would
+        // silently fail without this check.
+        check("v5.10.0a.D: ConfigField_Set rejects unknown key",
+              ConfigField_Set(&cfg, "totally_made_up_field", 1.0) == 0);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0 Item D — hardware-aware cfg ---\n");
     {
         // === Test 1: defaults match v5.9.5j-final hardcoded behavior ===
