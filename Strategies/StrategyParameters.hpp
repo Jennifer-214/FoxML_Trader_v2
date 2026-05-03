@@ -52,16 +52,25 @@
 #include "../ML_Headers/CoreModelZoo.hpp"
 #include "../ML_Headers/CostModel.hpp"     // v5.5.0 Class 8 — cost gate
 #include "../ML_Headers/ModelInference.hpp"
+#include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/VolScaler.hpp"     // v5.5.0 Class 8 — vol scaling
+#include "../MemHeaders/HealthLog.hpp"     // v5.9.0b — Health_LogCriticalRateLimited
 #include "../Strategies/RegimeDetector.hpp"
 #include "SimpleDip.hpp"          // SimpleDipState<F> — Phase 2.1 state-aware BuildParameters
 #include "MeanReversion.hpp"      // MeanReversionState<F> — Phase 2.2 state-aware BuildParameters
 #include "Momentum.hpp"           // MomentumState<F>     — Phase 2.3 state-aware BuildParameters
-#include "private/EmaCross.hpp"   // EmaCrossState<F>     — Phase 2.4 state-aware BuildParameters
+// v5.8.0 Phase 0: conditional include. Public release snapshots can drop
+// Strategies/private/ and the build still compiles. The X-macro registry
+// (v5.8.1) uses the same __has_include guard to omit EMA_CROSS from
+// FOREACH_STRATEGY when private/EmaCross.hpp is missing.
+#if __has_include("private/EmaCross.hpp")
+#  include "private/EmaCross.hpp"   // EmaCrossState<F>     — Phase 2.4 state-aware BuildParameters
+#endif
 #include "StrategyInterface.hpp"
 
 #include <cstdint>
+#include <cmath>  // v5.9.0: std::isnan/isinf for prediction validation
 
 namespace tt {
 
@@ -89,6 +98,20 @@ struct MLBuildContext {
     ConfidenceScorer*   confidence;
     double*             out_prediction;
     double*             out_confidence;
+    // v5.9.0b — ML observability pass-through. ML_BuildParameters writes
+    // these for the entry log + ML Status panel to read. nullptr-safe
+    // (legacy/test callers can omit).
+    int*                model_load_failed;            // read-only: set by CoreModelZoo, observed here
+    uint64_t*           last_ml_critical_log_us;      // rate-limit gate for fall-through log
+    double*             out_threshold;                // ml_buy_threshold at decision time
+    double*             out_effective_threshold;      // post-damping threshold used
+    uint32_t*           nan_feature_events_total;     // bumped on Features_PackAll -1
+    uint32_t*           nan_prediction_events_total;  // bumped on Model_Predict NaN/Inf
+    // v5.9.1 (V5_9_AUDIT-#21) — ML strategy writes SHALT_LOW_CONFIDENCE here
+    // when raw confidence falls below confidence_hard_block_threshold. The
+    // dispatcher's strategy_halt_reason pointer is wired to this slot so the
+    // GUI Strategy Halt panel + entry log can attribute the block correctly.
+    uint8_t*            out_strategy_halt_reason;
     // v4.0 train-serve parity: pass through the RORRegressor + EMA price
     // that the engine's slow path maintains. ML_BuildParameters uses these
     // with Regime_ComputeSignals so ALL features ModelFeatures_Pack reads
@@ -588,6 +611,20 @@ inline void ML_BuildParameters(
 
     // if no zoo or no models loaded, fall back to SimpleDip
     if (!zoo || !CoreModelZoo_HasAny(zoo)) {
+        // v5.9.0b — emit rate-limited CRITICAL log so the operator sees
+        // ML→SimpleDip fall-through (V5_9_AUDIT-#2). Pre-v5.9.0b this
+        // was silent; now visible in health log.
+        if (mctx && mctx->last_ml_critical_log_us) {
+            int load_failed = mctx->model_load_failed && *mctx->model_load_failed;
+            tt::Health_LogCriticalRateLimited(
+                mctx->last_ml_critical_log_us,
+                /*gate_us=*/60000000ULL,  // 60s per-core gate
+                /*core=*/-1,  // ML_BuildParameters doesn't have core_id; -1 = unknown
+                "ml",
+                "ML→SimpleDip fall-through: %s (zoo=%s)",
+                load_failed ? "model load failed" : "no model configured",
+                zoo ? "empty" : "null");
+        }
         SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
         out->strategy_id = STRATEGY_ML;
         return;
@@ -647,9 +684,32 @@ inline void ML_BuildParameters(
         }
     }
 
-    // pack features once — used by whichever model role is loaded
+    // pack features once — used by whichever model role is loaded.
+    // v5.8.1b: registry-driven via Features_PackAll. Same contract as the
+    // legacy ModelFeatures_Pack (validated bytewise in EXTENSIBILITY tests).
     float features[MODEL_MAX_FEATURES];
-    int n = ModelFeatures_Pack(features, &sig, rolling, rolling_long);
+    FeatureComputeCtx<F> ctx{};
+    ctx.signals       = &sig;
+    ctx.short_rolling = rolling;
+    int n = Features_PackAll(&ctx, features);
+    // v5.9.0 — NaN/Inf in feature pack → fall through to SimpleDip.
+    // Features_PackAll returns -1 sentinel; never feed garbage to XGBoost.
+    // v5.9.0b — bump per-core NaN counter + emit rate-limited CRITICAL.
+    if (n < 0) {
+        if (mctx && mctx->nan_feature_events_total) {
+            (*mctx->nan_feature_events_total)++;
+        }
+        if (mctx && mctx->last_ml_critical_log_us) {
+            tt::Health_LogCriticalRateLimited(
+                mctx->last_ml_critical_log_us, 60000000ULL, -1, "ml",
+                "NaN/Inf in feature pack — fall-through to SimpleDip "
+                "(nan_feature_events_total=%u)",
+                mctx->nan_feature_events_total ? *mctx->nan_feature_events_total : 0);
+        }
+        SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
+        out->strategy_id = STRATEGY_ML;
+        return;
+    }
 
     // run inference, prefer 3-class barrier model when available
     double prediction = 0.5;   // neutral fallback
@@ -658,36 +718,95 @@ inline void ML_BuildParameters(
     int have_signal   = 0;
 
     if (zoo->loaded_mask & CORE_MODEL_BARRIER) {
+        // v5.9.3b — apply scaler associated with barrier role. Identity
+        // no-op when zoo->barrier.scaler.has_scaler=0 (legacy or absent).
+        if (tt::FeatureStandardizer_Apply(&zoo->barrier.scaler, features, n) < 0) {
+            fprintf(stderr, "[ML] dispatch: NaN/Inf post-scaler (barrier) — no signal\n");
+            if (mctx && mctx->nan_feature_events_total) {
+                (*mctx->nan_feature_events_total)++;
+            }
+            SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
+            out->strategy_id = STRATEGY_ML;
+            return;
+        }
         // 3-class softmax: [0]=stable, [1]=peak, [2]=valley
         float multi[3] = {0.0f, 0.0f, 0.0f};
         int got = Model_PredictMulti(&zoo->barrier, features, n, multi, 3);
         if (got >= 3) {
-            p_peak     = multi[1];
-            p_valley   = multi[2];
-            // entry signal = "valley imminent" — primary trade trigger
-            prediction = p_valley;
-            have_signal = 1;
+            // v5.9.0 — NaN/Inf in multiclass output → no signal (silent
+            // miss class). XGBoost can return NaN on pathological inputs.
+            if (std::isnan(multi[0]) || std::isinf(multi[0]) ||
+                std::isnan(multi[1]) || std::isinf(multi[1]) ||
+                std::isnan(multi[2]) || std::isinf(multi[2])) {
+                fprintf(stderr, "[ML] dispatch: barrier multi-prediction NaN/Inf — no signal\n");
+            } else {
+                p_peak     = multi[1];
+                p_valley   = multi[2];
+                // entry signal = "valley imminent" — primary trade trigger
+                prediction = p_valley;
+                have_signal = 1;
+            }
         } else if (got == 1) {
             // model was actually binary (mis-labeled as barrier role) — still usable
-            prediction = multi[0];
+            if (std::isnan(multi[0]) || std::isinf(multi[0])) {
+                fprintf(stderr, "[ML] dispatch: barrier-as-binary prediction NaN/Inf — no signal\n");
+            } else {
+                prediction = multi[0];
+                p_peak     = 1.0 - prediction;
+                p_valley   = prediction;
+                have_signal = 1;
+            }
+        }
+    } else if (zoo->loaded_mask & CORE_MODEL_BUY_SIGNAL) {
+        // v5.9.3b — apply scaler associated with buy_signal role.
+        if (tt::FeatureStandardizer_Apply(&zoo->buy_signal.scaler, features, n) < 0) {
+            fprintf(stderr, "[ML] dispatch: NaN/Inf post-scaler (buy_signal) — no signal\n");
+            if (mctx && mctx->nan_feature_events_total) {
+                (*mctx->nan_feature_events_total)++;
+            }
+            SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
+            out->strategy_id = STRATEGY_ML;
+            return;
+        }
+        // legacy single-binary: complementary interpretation
+        double pred_raw = (double)Model_Predict(&zoo->buy_signal, features, n);
+        if (std::isnan(pred_raw) || std::isinf(pred_raw)) {
+            fprintf(stderr, "[ML] dispatch: buy_signal prediction NaN/Inf — no signal\n");
+        } else {
+            prediction = pred_raw;
             p_peak     = 1.0 - prediction;
             p_valley   = prediction;
             have_signal = 1;
         }
-    } else if (zoo->loaded_mask & CORE_MODEL_BUY_SIGNAL) {
-        // legacy single-binary: complementary interpretation
-        prediction = Model_Predict(&zoo->buy_signal, features, n);
-        p_peak     = 1.0 - prediction;
-        p_valley   = prediction;
-        have_signal = 1;
     }
 
-    // if inference failed, fall back to SimpleDip
+    // if inference failed (no model loaded, or NaN/Inf prediction),
+    // fall back to SimpleDip
     if (!have_signal) {
+        // v5.9.0b — bump prediction-NaN counter + emit rate-limited
+        // CRITICAL when fall-through is due to NaN (vs no model loaded).
+        // The earlier NaN-fall-through paths above already log; this
+        // catches the case where ALL prediction attempts produced NaN.
+        if (mctx && mctx->nan_prediction_events_total) {
+            (*mctx->nan_prediction_events_total)++;
+        }
+        if (mctx && mctx->last_ml_critical_log_us) {
+            tt::Health_LogCriticalRateLimited(
+                mctx->last_ml_critical_log_us, 60000000ULL, -1, "ml",
+                "no signal — all model predictions NaN/Inf or model unloaded "
+                "(nan_prediction_events_total=%u)",
+                mctx->nan_prediction_events_total ? *mctx->nan_prediction_events_total : 0);
+        }
         SimpleDip_BuildParameters(rolling, config, allocated_balance, out, rolling_long);
         out->strategy_id = STRATEGY_ML;
         return;
     }
+
+    // v5.9.0b — record threshold + effective_threshold for entry log + ML
+    // Status panel display. Threshold is read from cfg; effective is
+    // post-confidence-damping (computed below in the gate decision).
+    double ml_threshold_d = (double)FPN_ToDouble(config->ml_buy_threshold);
+    if (mctx && mctx->out_threshold) *mctx->out_threshold = ml_threshold_d;
 
     // TP/SL from ML-specific config
     FPN<F> tp_pct = config->ml_tp_pct;
@@ -721,6 +840,33 @@ inline void ML_BuildParameters(
         double effective = base_threshold * (scale - conf_now);
         if (effective > 1.0) effective = 1.0;
         threshold = effective;
+    }
+    // v5.9.0b — surface the effective threshold for entry log + ML Status
+    // panel. Same value the gate decision uses below; single source of truth.
+    if (mctx && mctx->out_effective_threshold) *mctx->out_effective_threshold = threshold;
+
+    // v5.9.1 (V5_9_AUDIT-#21) — confidence hard-floor. Damping alone can
+    // produce a pathological "always near zero" effective threshold when
+    // confidence is in the noise floor; entries fire on essentially-random
+    // predictions. Hard-block when raw confidence is below the operator-
+    // configured floor. Default 0.0 = disabled (preserves pre-v5.9.1).
+    double hard_floor = FPN_ToDouble(config->confidence_hard_block_threshold);
+    if (config->confidence_enabled && hard_floor > 0.0 && conf_now < hard_floor) {
+        out->bg_price_threshold   = FPN_Zero<F>();
+        out->bg_volume_threshold  = FPN_Zero<F>();
+        out->sg_take_profit_price = FPN_Zero<F>();
+        out->sg_stop_loss_price   = FPN_Zero<F>();
+        out->tp_pct               = FPN_Zero<F>();
+        out->sl_pct               = FPN_Zero<F>();
+        out->trade_size           = FPN_Zero<F>();
+        out->strategy_id          = STRATEGY_ML;
+        out->flags                = GATE_FLAG_BUY_BLOCKED;
+        for (int i = 0; i < 6; ++i) out->_pad[i] = 0;
+        if (mctx && mctx->out_strategy_halt_reason)
+            *mctx->out_strategy_halt_reason = SHALT_LOW_CONFIDENCE;
+        if (out_prediction) *out_prediction = prediction;
+        if (out_confidence) *out_confidence = conf_now;
+        return;
     }
 
     // gate decision: BarrierGate (continuous modulation) OR binary threshold

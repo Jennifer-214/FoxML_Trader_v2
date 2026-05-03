@@ -34,6 +34,8 @@
 #define CORE_MODEL_ZOO_HPP
 
 #include "ModelInference.hpp"
+#include "FeatureRegistry.hpp"  // v5.8.6: FEATURE_REGISTRY_HASH() drift catch
+#include "../Version.hpp"        // v5.8.6: ENGINE_VERSION_STRING for boot log
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -77,7 +79,12 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                                     const char *role_name, int backend,
                                     const char* held_out_stamp_secret = nullptr,
                                     double gap_threshold = 0.05,
-                                    int held_out_gate_strict = 0) {
+                                    int held_out_gate_strict = 0,
+                                    // v5.9.4 — operator opt-in: suppress
+                                    // minor-version drift WARN. Cross-major
+                                    // is still always refused/warned per
+                                    // ModelStampResult.cross_major_engine.
+                                    int acknowledge_cross_binary_drift = 0) {
     char path[512];
     struct stat st;
     const char* found_path = nullptr;
@@ -109,11 +116,21 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
     // v5.2.0 held-out gate: verify stamp before loading. Skip in non-strict
     // modes (-1 = explicit skip, 0 = warn-only) to preserve back-compat
     // with un-stamped models. strict=1 = refuse load on any failure.
+    //
+    // v5.8.6: passes FEATURE_REGISTRY_HASH() through so the verifier can
+    // catch train-serve feature-set drift (model trained against a
+    // different FOREACH_FEATURE registry than the current build). Old
+    // stamps without the hash field load with a stderr WARN — the
+    // back-compat path in verify_model_stamp.
+    ModelStampResult sr = {};
+    int have_sr = 0;
     if (held_out_gate_strict != -1) {
-        ModelStampResult sr = verify_model_stamp(found_path,
+        sr = verify_model_stamp(found_path,
             held_out_stamp_secret ? held_out_stamp_secret : "",
             gap_threshold,
-            MODEL_FORMAT_VERSION);
+            MODEL_FORMAT_VERSION,
+            FEATURE_REGISTRY_HASH());
+        have_sr = 1;
         if (sr.valid <= 0) {
             if (held_out_gate_strict == 1) {
                 fprintf(stderr,
@@ -126,13 +143,181 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                 "[held-out gate] WARN: %s — %s (strict=0, loading anyway)\n",
                 found_path, sr.reason);
         } else {
+            // v5.8.6: emit a single match-status line so operators can
+            // see at-a-glance whether the loaded model agrees with the
+            // current engine. Stamp's engine_version may be empty for
+            // pre-v5.8.6 stamps; print "unknown" in that case.
+            const char* stamp_eng = sr.engine_version[0] ? sr.engine_version : "unknown";
             fprintf(stderr,
-                "[held-out gate] %s: %s\n",
-                found_path, sr.reason);
+                "[model] %s: trained_engine=%s registry=%016lx (current=%s/%016lx) — %s\n",
+                found_path, stamp_eng,
+                (unsigned long)sr.feature_registry_hash,
+                ENGINE_VERSION_STRING,
+                (unsigned long)FEATURE_REGISTRY_HASH(),
+                sr.reason);
+            // v5.9.4 — minor-version drift WARN. Same-major (cross_major=0)
+            // but different minor (e.g. stamp=5.8.x, build=5.9.4) is usually
+            // OK but worth surfacing so operator notices unintended deploys.
+            // Patch-level drift (5.9.3a vs 5.9.3b) NOT warned — same minor.
+            // Operator suppresses with cfg.acknowledge_cross_binary_version_drift=1.
+            if (!sr.cross_major_engine && sr.engine_version[0] &&
+                !acknowledge_cross_binary_drift) {
+                int sm = 0, sn = 0;
+                sscanf(sr.engine_version, "%d.%d", &sm, &sn);
+                int cm = 0, cn = 0;
+                sscanf(ENGINE_VERSION_STRING, "%d.%d", &cm, &cn);
+                if (sm == cm && sn != cn) {
+                    fprintf(stderr,
+                        "[engine_version] WARN: %s stamp's engine_version=%s "
+                        "differs from build %s by minor. Set "
+                        "acknowledge_cross_binary_version_drift=1 to suppress.\n",
+                        found_path, sr.engine_version, ENGINE_VERSION_STRING);
+                }
+            }
         }
     }
 
-    return Model_Load(handle, found_path, backend);
+    int rc = Model_Load(handle, found_path, backend);
+    if (rc <= 0) return rc;
+
+    // v5.9.4a — copy stamp-derived fields onto the handle for engine
+    // boot to surface (Phase 6 poll_interval WARN; future drift checks).
+    // Only copies when stamp had the field; preserves Model_Init zero
+    // defaults for legacy stamps.
+    if (have_sr) {
+        if (sr.has_training_poll_interval) {
+            handle->training_poll_interval = sr.training_poll_interval;
+            handle->has_training_poll_interval = 1;
+        }
+        // v5.9.5h — copy XGBoost hyperparams from stamp onto handle.
+        // EngineSharded boot-WARN compares stamp_xgb_* vs cfg.xgb_*
+        // (mirrors v5.9.4a poll_interval pattern). No refusal — hyperparams
+        // don't affect inference, only forensics + reproducibility.
+        if (sr.has_xgb_hyperparams) {
+            handle->has_xgb_hyperparams        = 1;
+            handle->stamp_xgb_max_depth        = sr.xgb_max_depth;
+            handle->stamp_xgb_learning_rate    = sr.xgb_learning_rate;
+            handle->stamp_xgb_n_estimators     = sr.xgb_n_estimators;
+            handle->stamp_xgb_subsample        = sr.xgb_subsample;
+            handle->stamp_xgb_colsample_bytree = sr.xgb_colsample_bytree;
+            handle->stamp_xgb_min_child_weight = sr.xgb_min_child_weight;
+            handle->stamp_xgb_seed             = sr.xgb_seed;
+            size_t tmln = strnlen(sr.xgb_tree_method,
+                                   sizeof(handle->stamp_xgb_tree_method) - 1);
+            memcpy(handle->stamp_xgb_tree_method, sr.xgb_tree_method, tmln);
+            handle->stamp_xgb_tree_method[tmln] = '\0';
+        }
+        // v5.9.5h Phase 10 — build flags fingerprint
+        if (sr.has_build_flags_hash) {
+            handle->has_build_flags_hash   = 1;
+            handle->stamp_build_flags_hash = sr.build_flags_hash;
+        }
+        // v5.9.5i — copy stamp's inference cfg values. EngineSharded
+        // boot-WARN/REFUSE compares vs cfg.*. Forward-compat: legacy
+        // stamps (has_inference_cfg=0) leave handle's stamp_inf_* at
+        // Model_Init zero defaults; comparison skipped.
+        if (sr.has_inference_cfg) {
+            handle->has_stamp_inference_cfg = 1;
+            handle->stamp_inf_confidence_threshold_scale =
+                sr.inference_cfg_confidence_threshold_scale;
+            handle->stamp_inf_barrier_gate_enabled =
+                sr.inference_cfg_barrier_gate_enabled;
+            handle->stamp_inf_confidence_hard_block_threshold =
+                sr.inference_cfg_confidence_hard_block_threshold;
+            handle->stamp_inf_freshness_tau =
+                sr.inference_cfg_freshness_tau;
+        }
+        if (sr.has_inference_cfg_bandit) {
+            handle->has_stamp_bandit = 1;
+            handle->stamp_inf_bandit_blend_ratio =
+                sr.inference_cfg_bandit_blend_ratio;
+        }
+        if (sr.has_inference_cfg_fees) {
+            handle->has_stamp_fees = 1;
+            handle->stamp_inf_fee_rate_maker =
+                sr.inference_cfg_fee_rate_maker;
+            handle->stamp_inf_fee_rate_taker =
+                sr.inference_cfg_fee_rate_taker;
+        }
+        if (sr.has_model_num_outputs) {
+            handle->stamp_model_num_outputs = sr.model_num_outputs;
+            handle->has_stamp_num_outputs = 1;
+            // Phase 5 — verify stamp's claim matches Model_Load's seen
+            // num_outputs. Mismatch = stamp tampered with OR XGBoost
+            // loaded a different model than the trainer wrote. Refuse
+            // in strict mode; warn otherwise.
+            if (sr.model_num_outputs != handle->num_outputs) {
+                if (held_out_gate_strict == 1) {
+                    fprintf(stderr,
+                        "[model] REFUSING %s — stamp claims model_num_outputs=%d "
+                        "but Model_Load saw num_outputs=%d (strict mode)\n",
+                        found_path, sr.model_num_outputs, handle->num_outputs);
+                    Model_Free(handle);
+                    Model_Init(handle);
+                    return 0;
+                }
+                fprintf(stderr,
+                    "[model] WARN: %s stamp claims model_num_outputs=%d but "
+                    "loaded model has num_outputs=%d (strict=0, loading anyway)\n",
+                    found_path, sr.model_num_outputs, handle->num_outputs);
+            }
+        }
+    }
+
+    // v5.9.3a — scaler sidecar load. Stamp claimed scaler present? Try
+    // to load and verify <model>.scaler. 3-tier behavior on failure:
+    //   strict=1: refuse model load (consistent with stamp drift refusal)
+    //   strict=0: warn + set handle->scaler_load_failed=1, continue
+    //             with identity scaler applied
+    //   strict=-1: skip (no verification at all; same as today's policy)
+    if (have_sr && sr.feature_scaler_present && held_out_gate_strict != -1) {
+        char scaler_path[600];
+        snprintf(scaler_path, sizeof(scaler_path), "%s.scaler", found_path);
+
+        // Step 1: SHA-256 of the on-disk file matches stamp's claim.
+        char actual_sha[80] = {0};
+        int sha_ok = tt::sha256_file_hex_inproc(scaler_path, actual_sha, sizeof(actual_sha));
+        int sha_match = (sha_ok && sr.scaler_sha256[0] != '\0' &&
+                         strcmp(actual_sha, sr.scaler_sha256) == 0);
+
+        // Step 2: load + parse the binary.
+        int load_rc = sha_match ? tt::FeatureStandardizer_Load(&handle->scaler, scaler_path) : -1;
+
+        // Step 3: registry hash + num_features match build.
+        int verify_ok = (load_rc == 1) &&
+                        tt::FeatureStandardizer_VerifyAgainstBuild(&handle->scaler);
+
+        if (!verify_ok) {
+            const char* why = !sha_ok           ? "sidecar missing or unreadable"
+                            : !sha_match        ? "sidecar SHA-256 mismatch with stamp"
+                            : load_rc == 0      ? "sidecar parse failed"
+                            : load_rc == -1     ? "sidecar magic/format invalid"
+                            :                     "registry_hash or num_features mismatch";
+            if (held_out_gate_strict == 1) {
+                fprintf(stderr,
+                    "[scaler] REFUSING to load %s — %s (strict mode)\n",
+                    scaler_path, why);
+                tt::FeatureStandardizer_Free(&handle->scaler);
+                handle->scaler_load_failed = 1;
+                return 0;
+            }
+            // warn-mode: identity applied, surface to operator via PerCoreSnap
+            fprintf(stderr,
+                "[CRITICAL] scaler load failed (reason=%s) but engine continuing "
+                "with identity (held_out_gate_strict=0). Predictions WILL drift "
+                "from training distribution. Set strict=1 in cfg to refuse.\n", why);
+            tt::FeatureStandardizer_Free(&handle->scaler);
+            handle->scaler_load_failed = 1;
+        } else {
+            fprintf(stderr,
+                "[scaler] %s: loaded (registry_hash=%016lx, num_features=%u)\n",
+                scaler_path,
+                (unsigned long)handle->scaler.registry_hash,
+                (unsigned)handle->scaler.num_features);
+        }
+    }
+
+    return rc;
 }
 
 //======================================================================================================
@@ -143,26 +328,34 @@ template <unsigned F>
 inline int CoreModelZoo_LoadFromDir(CoreModelZoo<F> *zoo, const char *dir, int backend,
                                      const char* held_out_stamp_secret = nullptr,
                                      double gap_threshold = 0.05,
-                                     int held_out_gate_strict = 0) {
+                                     int held_out_gate_strict = 0,
+                                     // v5.9.4 — operator opt-in, threaded
+                                     // through to per-role load.
+                                     int acknowledge_cross_binary_drift = 0) {
     if (!dir || dir[0] == '\0') return 0;
 
     int loaded = 0;
     if (CoreModelZoo_TryLoadRole(&zoo->barrier, dir, "barrier", backend,
-            held_out_stamp_secret, gap_threshold, held_out_gate_strict)) {
+            held_out_stamp_secret, gap_threshold, held_out_gate_strict,
+            acknowledge_cross_binary_drift)) {
         zoo->loaded_mask |= CORE_MODEL_BARRIER;
         loaded++;
     }
     if (CoreModelZoo_TryLoadRole(&zoo->regime, dir, "regime", backend,
-            held_out_stamp_secret, gap_threshold, held_out_gate_strict)) {
+            held_out_stamp_secret, gap_threshold, held_out_gate_strict,
+            acknowledge_cross_binary_drift)) {
         zoo->loaded_mask |= CORE_MODEL_REGIME;
         loaded++;
     }
     if (CoreModelZoo_TryLoadRole(&zoo->exit, dir, "exit", backend,
-            held_out_stamp_secret, gap_threshold, held_out_gate_strict)) {
+            held_out_stamp_secret, gap_threshold, held_out_gate_strict,
+            acknowledge_cross_binary_drift)) {
         zoo->loaded_mask |= CORE_MODEL_EXIT;
         loaded++;
     }
-    if (CoreModelZoo_TryLoadRole(&zoo->buy_signal, dir, "buy_signal", backend)) {
+    if (CoreModelZoo_TryLoadRole(&zoo->buy_signal, dir, "buy_signal", backend,
+            held_out_stamp_secret, gap_threshold, held_out_gate_strict,
+            acknowledge_cross_binary_drift)) {
         zoo->loaded_mask |= CORE_MODEL_BUY_SIGNAL;
         loaded++;
     }

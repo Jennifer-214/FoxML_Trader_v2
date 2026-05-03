@@ -24,12 +24,29 @@ per-core risk-sharded crypto trading engine in C++17. one position per pinned CP
 
 built from scratch, self-taught, ~60k lines across engine + backtest suite + ML pipeline. reusable primitives extracted as a public C++20 header-only library: [**FoxLIB**](https://github.com/Jennyfirrr/FoxLIB).
 
-**recent (v5.3.x):**
-- pre-live ML rigor: held-out validation gate. models refuse to load in production unless they're signed with HMAC-SHA256 stamps proving the train↔held-out gap is below threshold ([v5.2.0](DOCS/CHANGELOG.md), [v5.3.0](DOCS/CHANGELOG.md))
-- live exchange reconciliation at boot: REST-fetches account / open orders / recent trades from binance, refuses to boot if exchange holds something the engine doesn't know about ([v5.2.1, v5.2.2](DOCS/CHANGELOG.md))
-- in-process HMAC + SHA-256 (no popen, no shell-injection surface) ([v5.3.0](DOCS/CHANGELOG.md))
-- auto-stamp wiring + JSONL run history for experiment tracking ([v5.3.2](DOCS/CHANGELOG.md))
-- 890+ unit tests across the engine + parity harness
+**recent (v5.9.x):**
+- 🛡 ML hardening sprint: silent-failure surfacing + train-serve parity. 27 audit findings closed, 27 tags shipped. Stamp body extended with `engine_version`, `feature_registry_hash`, `scaler_sha256`, XGBoost hyperparams, and build flags fingerprint. Engine refuses model loads on cross-build / cross-cfg / cross-feature-registry drift. ([v5.9.x](DOCS/changelogs/2026-05-02-v5.9-ml-hardening.md))
+- 🧩 Easy Additions: X-macro registries everywhere (FOREACH_STRATEGY, FOREACH_FEATURE, FOREACH_PANEL). Adding a new strategy / feature / panel = 1 line. ([v5.8.x](DOCS/changelogs/2026-05-01-v5.8-easy-additions.md))
+- 🎯 Strategy quality: regime classifier audit, MOM quality filters (opt-in), Strategy Quality GUI panel. ([v5.7.x](DOCS/changelogs/2026-04-30-v5.7-strategy-quality.md))
+- 🔭 Execution / display divergence: every hot-path predicate term must have a GUI surface. ([v5.6.x](DOCS/changelogs/2026-04-30-v5.6-execution-display.md))
+- 1326+ unit tests across engine + parity harness + train-serve replay determinism
+
+## documentation
+
+| If you're... | Read |
+|---|---|
+| **New to the codebase** | [`CLAUDE.md`](CLAUDE.md) (always-loaded reference) → [`DOCS/KNOWN_ISSUES.md`](DOCS/KNOWN_ISSUES.md) (current state + active testing + workarounds) → this README's *architecture* + *build* sections |
+| **Adding a feature / strategy / ML feature** | [`DOCS/CLAUDE_INTEGRATION.md`](DOCS/CLAUDE_INTEGRATION.md) → relevant interface doc: [`STRATEGY_INTERFACE.md`](DOCS/STRATEGY_INTERFACE.md), [`FEATURE_INTERFACE.md`](DOCS/FEATURE_INTERFACE.md), [`TARGET_INTERFACE.md`](DOCS/TARGET_INTERFACE.md), or [`STRATEGY_TEMPLATE.hpp`](DOCS/STRATEGY_TEMPLATE.hpp) |
+| **Working on the hot path / OMS / kill switch / snapshots** | [`DOCS/CLAUDE_INVARIANTS.md`](DOCS/CLAUDE_INVARIANTS.md) — load-bearing rules |
+| **Working on the ML pipeline (features, labels, scaler, stamps)** | [`DOCS/CLAUDE_ML_INVARIANTS.md`](DOCS/CLAUDE_ML_INVARIANTS.md) + [`DOCS/PARITY_LIFECYCLE.md`](DOCS/PARITY_LIFECYCLE.md) + [`DOCS/PARITY_VERIFICATION_CHECKLIST.md`](DOCS/PARITY_VERIFICATION_CHECKLIST.md) |
+| **Reviewing changes** | [`DOCS/CLAUDE_REVIEW.md`](DOCS/CLAUDE_REVIEW.md) — 10-item readiness checklist |
+| **Backtest suite operator** | [`DOCS/CLAUDE_FOXML_SUITE.md`](DOCS/CLAUDE_FOXML_SUITE.md) + [`DOCS/ML_TRAINING.md`](DOCS/ML_TRAINING.md) |
+| **Sprint planning** | [`plans/`](plans/) (gitignored — synced privately to workspace repo) — master plan + per-ship sub-plans |
+| **Looking for what shipped when** | [`DOCS/CHANGELOG.md`](DOCS/CHANGELOG.md) (elevator pitches) → [`DOCS/changelogs/INDEX.md`](DOCS/changelogs/INDEX.md) (per-sprint detailed write-ups) |
+| **Tracking future work** | [`DOCS/v5.10-design-notes.md`](DOCS/v5.10-design-notes.md) — captured ideas not yet planned |
+| **Recurring bug avoidance** | [`DOCS/RECURRING_BUG_PATTERNS.md`](DOCS/RECURRING_BUG_PATTERNS.md) — bug classes that have happened more than once |
+| **Code-map / function lookup** | [`DOCS/CODE_MAP.md`](DOCS/CODE_MAP.md) — auto-generated `Pattern_FunctionName` index. Run `tools/gen_code_map.sh` to refresh. |
+| **Testing invariants** | [`tests/INVARIANTS_MAP.md`](tests/INVARIANTS_MAP.md) — which test group covers each documented invariant |
 
 [![Donate](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.com/ncp/payment/8M6XLK7M8569C) [![Discord](https://img.shields.io/badge/Discord-Community-5865F2.svg)](https://discord.gg/asSDcYwPz)
 

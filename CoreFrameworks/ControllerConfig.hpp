@@ -168,6 +168,13 @@ template <unsigned F> struct PerCoreOverrides {
 #undef _DECL_OV_INT_FIELD
 };
 
+// v5.9.2c — CSV tick-sort validation modes (csv_sort_check_mode field).
+// Backtest path checks tick timestamp ordering post-load; live engine
+// doesn't load CSV (Binance WS is in-order by construction).
+#define CSV_SORT_WARN   0   // default — log violations, proceed
+#define CSV_SORT_STRICT 1   // refuse load on any violation
+#define CSV_SORT_AUTO   2   // sort in-place + INFO log of violation count
+
 //======================================================================================================
 // [CONFIG]
 //======================================================================================================
@@ -281,6 +288,17 @@ template <unsigned F> struct ControllerConfig {
                                // want a longer total-tick warmup, use
                                // warmup_ticks instead — it counts raw ticks
                                // and has no upper bound.
+  // v5.9.2c — CSV tick-sort validation mode. Backtest path checks that
+  // ticks are timestamp-monotonic post-load; live engine doesn't load
+  // CSV (Binance WS is in-order by construction). Mode values:
+  //   0 = WARN   (default — log violations, proceed with potentially-
+  //               garbage features). Backward-compat with pre-v5.9.2c.
+  //   1 = STRICT (refuse load on any violation; abort backtest run)
+  //   2 = AUTO   (sort the array in-place, log INFO with violation count)
+  // Without this guard, unsorted CSVs (concatenated daily exports,
+  // mistyped tick replays) silently produce garbage rolling stats /
+  // ROR / tick-rate features at training time.
+  int csv_sort_check_mode;
   // post-SL cooldown
   uint32_t sl_cooldown_cycles; // slow-path cycles to pause buying after SL (0 =
                                // disabled)
@@ -431,6 +449,14 @@ template <unsigned F> struct ControllerConfig {
   FPN<F>   confidence_freshness_tau; // freshness decay constant in seconds (default 300)
   FPN<F>   confidence_threshold_scale; // gate formula: effective_thr = base * (this - conf)
                                        // (default 2.0 — clamps at 1.0 in code)
+  // v5.9.1 (V5_9_AUDIT-#21) — hard-block entries when raw confidence is below
+  // this threshold, INDEPENDENT of damping. With low IC (noisy predictions),
+  // damped threshold can become pathological; trades fire on essentially-
+  // random predictions. Hard floor is the safety net.
+  // Default 0.0 = disabled (preserves pre-v5.9.1 behavior). Operator opts in
+  // (audit-recommended value 0.05). Only consulted when confidence_enabled=1.
+  // Surfaced via SHALT_LOW_CONFIDENCE on the strategy_halt_reason channel.
+  FPN<F>   confidence_hard_block_threshold;
   // Phase 7 prep — held-out validation infrastructure. Used by foxml_suite
   // when training/evaluating a model. Live engine reads via expected.cfg
   // mismatch checks (CoreModelZoo).
@@ -446,6 +472,14 @@ template <unsigned F> struct ControllerConfig {
   // secret="" (which makes verify_model_stamp accept any stamp signature
   // — useful for dev). Set both for production live deploy.
   int    held_out_gate_strict;       // 0=warn-only (default), 1=refuse load, -1=skip
+  // v5.9.2b — allow loading a model whose stamp's engine_version differs
+  // by major version from current build (e.g. stamp says 5.x but engine
+  // is 6.x). Cross-major can introduce hot-path predicate changes that
+  // make a v5-trained model misbehave at v6 inference. Default 0 (refuse
+  // cross-major in both strict + non-strict modes); operator opts in
+  // explicitly with allow_cross_major_engine=1 + held_out_gate_strict=0.
+  // Within-major loads (5.7 → 5.9) are always permitted.
+  int    allow_cross_major_engine;
   char   held_out_stamp_secret[128]; // HMAC-SHA256 secret for stamp signing/verify
   // v5.3.2 — auto-stamp on held-out completion. When 1, Backtest_RunFullValidation
   // calls stamp_write_for_model after a successful held-out training pass, using
@@ -461,6 +495,33 @@ template <unsigned F> struct ControllerConfig {
   //   health_log_level: 0 = info (always), 1 = debug, 2 = trace
   char   health_log_path[256];
   int    health_log_level;
+  // v5.9.4 — health log rotation (in-process, atomic rename pattern).
+  // Without rotation, long soaks (30+ days) accumulate >5GB of JSONL,
+  // operator-unfriendly. Rotates via rename to <path>.<unix_ts>,
+  // keeps last `keep_count` rotated files, deletes oldest.
+  //   health_log_max_bytes: 0 = no rotation (default for back-compat);
+  //                         >0 = rotate when current file exceeds size
+  //   health_log_keep_count: 0 = keep nothing (default; only the
+  //                              active file lives); N = keep last N
+  //                              rotated files (typical: 7)
+  uint64_t health_log_max_bytes;
+  int      health_log_keep_count;
+  // v5.9.4 — cross-binary version drift acknowledgment. By default,
+  // engine boot WARNs (stderr) when a loaded model's stamp engine_version
+  // differs from current ENGINE_VERSION_STRING by major.minor. Operators
+  // who deliberately deploy a v5.8 model on a v5.9 engine (or v5.9.1 on
+  // v5.9.4) flip this to 1 to suppress the WARN. The cross-major check
+  // (different MAJOR) is a separate refusal gate; this only suppresses
+  // the patch/minor drift WARN. See DOCS/PARITY_LIFECYCLE.md.
+  int    acknowledge_cross_binary_version_drift;
+  // v5.9.5i — suppress inference cfg drift WARN/REFUSE on stamp ↔ runtime
+  // mismatch. Tier 1 fields (freshness_tau, confidence_threshold_scale,
+  // barrier_gate_enabled) REFUSE in strict mode (held_out_gate_strict=1),
+  // WARN otherwise. Tier 2 (confidence_hard_block_threshold, bandit,
+  // fees) WARN only. Setting this flag = 1 silences both tiers.
+  // Default 0 (vocal). Suppresses only inference cfg drift; cross-binary
+  // version drift uses its own flag above.
+  int    acknowledge_inference_cfg_drift;
   // v5.2.1 (live reconciliation Phase 1) — exchange-truth sync at boot
   // (and optionally on heartbeat). LIVE-mode-only — paper mode skips
   // reconcile entirely.
@@ -518,6 +579,19 @@ template <unsigned F> struct ControllerConfig {
   // Config syntax: core_0_strategy=simple_dip, core_1_strategy=ema_cross, etc.
   // Accepted names: mr, momentum, simple_dip, ml, ema_cross, none.
   uint8_t core_strategies[16]; // MAX_EXECUTION_CORES
+  // v5.9.0c — explicit-set bitmap for core_strategies. Bit i set = `core_i_strategy=`
+  // appeared in the cfg file (operator deliberate choice). Bit i clear = field
+  // absent in cfg, default applied. Surfaces "default vs deliberate" tri-state
+  // in TUI per V5_9_AUDIT-#5. The today-bug class: backtest.cfg lacked
+  // per-core strategy lines → all cores defaulted to SIMPLE_DIP → operator
+  // saw "0!" hardcoded warnings, couldn't tell defaulted from deliberate.
+  uint16_t core_strategies_explicit_set;
+  // v5.9.0c — captured cfg file path. ControllerConfig_Load stores the path
+  // it parsed; the engine header panel displays this so operators see at
+  // boot which cfg drove the configuration. Distinct binaries (engine_gui
+  // reads engine.cfg, foxml_suite reads backtest.cfg) → "loaded cfg path"
+  // makes the difference visible.
+  char source_cfg_path[256];
   // Per-core risk allocation. core_risk_pct[i] is the fraction of total
   // balance this core can risk on a single trade. Default 0 = use the
   // shared risk_pct / num_cores. Non-zero = use this specific percentage.
@@ -574,6 +648,20 @@ template <unsigned F> struct ControllerConfig {
   // production runs after the soak. default 0 so existing tests stay
   // green during the migration window.
   uint32_t oms_event_log_mode; // 0 = legacy (default), 1 = event log
+
+  // v5.9.5h — XGBoost training hyperparams (cfg-tunable subset).
+  // max_depth/learning_rate/n_estimators are operator-tunable via Train
+  // Model GUI panel only (NOT cfg-bound — they're per-experiment, not
+  // per-deploy). The 5 fields below were hardcoded pre-v5.9.5h; now
+  // operator-tunable via cfg. Defaults match pre-v5.9.5h hardcoded
+  // values bytewise. Stamp body records what trained the model
+  // (Surface G `has_xgb_hyperparams` flag); engine load-WARN fires
+  // when stamp's value differs from cfg's at boot.
+  FPN<F>   xgb_subsample;          // row subsample per tree (0.5-1.0); default 0.8
+  FPN<F>   xgb_colsample_bytree;   // column subsample per tree (0.5-1.0); default 0.8
+  int      xgb_min_child_weight;   // min sum-of-weights per leaf (1-50); default 5
+  int      xgb_seed;               // RNG seed for reproducible runs; default 42
+  char     xgb_tree_method[16];    // hist | exact | approx | auto; default "hist"
 };
 
 //======================================================================================================
@@ -637,6 +725,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.warmup_ticks = 128; // minimum raw ticks before trading
   cfg.min_warmup_samples =
       0; // min slow-path samples in rolling window (0 = warmup_ticks only)
+  cfg.csv_sort_check_mode = CSV_SORT_WARN; // v5.9.2c — default: log + proceed
   cfg.r2_threshold = FPN_FromDouble<F>(0.30);
   cfg.slope_scale_buy = FPN_FromDouble<F>(0.50);
   cfg.max_shift =
@@ -811,13 +900,30 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.confidence_window           = 32;                          // CONFIDENCE_IC_WINDOW_DEFAULT
   cfg.confidence_freshness_tau    = FPN_FromDouble<F>(300.0);    // CONFIDENCE_FRESHNESS_TAU_DEFAULT
   cfg.confidence_threshold_scale  = FPN_FromDouble<F>(2.0);      // hardcoded `2.0` in gate formula
+  // v5.9.1 — hard-block floor. 0.0 = disabled (pre-v5.9.1 behavior).
+  // Operator opts in (audit-recommended 0.05) for the noise-floor protection.
+  cfg.confidence_hard_block_threshold = FPN_FromDouble<F>(0.0);
   // Phase 7 prep — held-out validation defaults
   cfg.held_out_fraction           = FPN_FromDouble<F>(0.20);     // 20% reserved
   cfg.gap_acceptable_threshold    = FPN_FromDouble<F>(0.05);     // 5% max gap for "OK"
   cfg.held_out_gate_strict        = 0;                            // gate off by default (warn-only)
+  cfg.allow_cross_major_engine    = 0;                            // v5.9.2b — refuse cross-major by default
   cfg.held_out_stamp_secret[0]    = '\0';                         // empty = accept-any (dev)
-  cfg.auto_stamp_on_held_out      = 0;                            // opt-in; flip to 1 after configuring secret
+  cfg.auto_stamp_on_held_out      = 1;                            // v5.8.10: default 1 (suite Run Full Validation auto-stamps); set 0 only for manual tools/stamp_model.sh workflow
   cfg.health_log_path[0]          = '\0';                         // empty = disabled
+  cfg.health_log_max_bytes        = 0;                            // 0 = no rotation (back-compat)
+  cfg.health_log_keep_count       = 0;                            // 0 = no retained rotated files
+  cfg.acknowledge_cross_binary_version_drift = 0;                 // v5.9.4 — default WARN on minor drift
+  cfg.acknowledge_inference_cfg_drift = 0;                        // v5.9.5i — default REFUSE/WARN on inference cfg drift
+  // v5.9.5h — XGBoost training hyperparams (cfg-tunable subset).
+  // Defaults match pre-v5.9.5h hardcoded values bytewise; non-tuning
+  // operators get identical training output post-upgrade.
+  cfg.xgb_subsample           = FPN_FromDouble<F>(0.8);
+  cfg.xgb_colsample_bytree    = FPN_FromDouble<F>(0.8);
+  cfg.xgb_min_child_weight    = 5;
+  cfg.xgb_seed                = 42;
+  strncpy(cfg.xgb_tree_method, "hist", sizeof(cfg.xgb_tree_method) - 1);
+  cfg.xgb_tree_method[sizeof(cfg.xgb_tree_method) - 1] = '\0';
   cfg.health_log_level            = 0;                            // 0=info, 1=debug, 2=trace
   cfg.reconcile_interval_sec      = 0;                            // 0 = boot-only
   cfg.reconcile_dry_run           = 1;                            // safer default; flip to 0 deliberately
@@ -845,6 +951,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.num_execution_cores = 4;
   cfg.sharded_force_synthetic = 0;
   for (int i = 0; i < 16; ++i) cfg.core_strategies[i] = 2;  // STRATEGY_SIMPLE_DIP
+  cfg.core_strategies_explicit_set = 0;                       // v5.9.0c: no bits set = all defaulted
+  cfg.source_cfg_path[0] = '\0';                              // v5.9.0c: populated by ControllerConfig_Load
   for (int i = 0; i < 16; ++i) cfg.core_risk_pct[i] = FPN_Zero<F>();  // 0 = shared
   // Phase 3: per-core kill switch overrides default to 0 (= use shared).
   for (int i = 0; i < 16; ++i) cfg.core_max_drawdown_pct[i] = FPN_Zero<F>();
@@ -887,6 +995,15 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
 template <unsigned F>
 inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   ControllerConfig<F> cfg = ControllerConfig_Default<F>();
+
+  // v5.9.0c — capture the cfg path so the engine header panel can display
+  // it. Operators distinguish engine.cfg vs backtest.cfg load at-a-glance.
+  if (filepath) {
+    size_t n = strlen(filepath);
+    if (n >= sizeof(cfg.source_cfg_path)) n = sizeof(cfg.source_cfg_path) - 1;
+    memcpy(cfg.source_cfg_path, filepath, n);
+    cfg.source_cfg_path[n] = '\0';
+  }
 
   // Phase 8: track whether the user explicitly set maker/taker rates in
   // the cfg file. Can't infer from value comparison alone — explicit
@@ -1070,6 +1187,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_U32(max_hold_ticks)
     CFG_PARSE_U32(regime_hysteresis)
     CFG_PARSE_U32(min_warmup_samples)
+    CFG_PARSE_INT(csv_sort_check_mode)
     CFG_PARSE_U32(idle_reset_cycles)
     CFG_PARSE_U32(sl_cooldown_cycles)
     CFG_PARSE_U32(sl_cooldown_base)
@@ -1148,10 +1266,44 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(bandit_blend_ratio)
     CFG_PARSE_INT(confidence_enabled)
     CFG_PARSE_U32(confidence_window)
-    CFG_PARSE_FPN(confidence_freshness_tau)
+    // v5.9.1 (V5_9_AUDIT-#13) — tau<=0 silently fell back to default in
+    // ConfidenceScorer_Init. Reject at parse time so the operator sees
+    // the bad value before it's silently overridden during boot.
+    if (strcmp(key, "confidence_freshness_tau") == 0) {
+        double v = atof(val);
+        // v5.9.1 (V5_9_AUDIT-#13) — reject tau<=0 (silent default fallback).
+        // v5.9.2b — also clamp to [60.0, 3600.0] (1 minute to 1 hour).
+        // Out-of-range values silently degraded the confidence damping
+        // contract: tau=1e6 effectively disabled freshness decay; tau=10
+        // produced near-zero confidence after just a few seconds. Both
+        // are pathological. Range matches the model lifetime envelope.
+        if (v <= 0.0 || v < 60.0 || v > 3600.0) {
+            fprintf(stderr,
+                "[cfg] confidence_freshness_tau=%.3f out of range [60.0, 3600.0]; "
+                "using default 300.0. See DOCS/CLAUDE_INTEGRATION.md.\n",
+                v);
+            continue;
+        }
+        cfg.confidence_freshness_tau = FPN_FromDouble<F>(v);
+        continue;
+    }
     CFG_PARSE_FPN(confidence_threshold_scale)
+    CFG_PARSE_FPN_POS(confidence_hard_block_threshold)
     CFG_PARSE_FPN(held_out_fraction)
     CFG_PARSE_FPN(gap_acceptable_threshold)
+    CFG_PARSE_INT(allow_cross_major_engine)
+    // v5.9.5h — XGBoost hyperparam parsers
+    CFG_PARSE_FPN_POS(xgb_subsample)
+    CFG_PARSE_FPN_POS(xgb_colsample_bytree)
+    CFG_PARSE_INT(xgb_min_child_weight)
+    CFG_PARSE_INT(xgb_seed)
+    if (strcmp(key, "xgb_tree_method") == 0) {
+        size_t n = strlen(val);
+        if (n >= sizeof(cfg.xgb_tree_method)) n = sizeof(cfg.xgb_tree_method) - 1;
+        memcpy(cfg.xgb_tree_method, val, n);
+        cfg.xgb_tree_method[n] = '\0';
+        continue;
+    }
     if (strcmp(key, "held_out_gate_strict") == 0) {
         cfg.held_out_gate_strict = atoi(val);
         continue;
@@ -1178,6 +1330,17 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.health_log_level = atoi(val);
         continue;
     }
+    if (strcmp(key, "health_log_max_bytes") == 0) {
+        cfg.health_log_max_bytes = (uint64_t)strtoull(val, nullptr, 10);
+        continue;
+    }
+    if (strcmp(key, "health_log_keep_count") == 0) {
+        cfg.health_log_keep_count = atoi(val);
+        if (cfg.health_log_keep_count < 0) cfg.health_log_keep_count = 0;
+        continue;
+    }
+    CFG_PARSE_INT(acknowledge_cross_binary_version_drift)
+    CFG_PARSE_INT(acknowledge_inference_cfg_drift)  // v5.9.5i
     if (strcmp(key, "reconcile_interval_sec") == 0) {
         cfg.reconcile_interval_sec = atoi(val);
         continue;
@@ -1284,6 +1447,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         else if (strcmp(val, "none") == 0) sid = 0xFF;
         else sid = (uint8_t)atoi(val);  // numeric fallback
         cfg.core_strategies[core_idx] = sid;
+        // v5.9.0c — set explicit bit so TUI can distinguish deliberate from defaulted.
+        cfg.core_strategies_explicit_set |= (uint16_t)(1u << core_idx);
       }
       continue;
     }
@@ -1373,6 +1538,24 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
   }
 
   fclose(f);
+
+  // v5.9.0c — surface "all per-core strategies defaulted" silent failure.
+  // V5_9_AUDIT-#5. The today-bug: backtest.cfg lacked core_N_strategy=
+  // lines → all 16 cores fell to STRATEGY_SIMPLE_DIP default → operator
+  // saw "0!" hardcoded warnings, couldn't distinguish defaulted from
+  // deliberate. Stderr WARN at boot makes the silent fallback visible.
+  //
+  // Fires only when num_execution_cores > 0 (we have actual cores) AND
+  // explicit_set bitmap is zero (no core_N_strategy= lines parsed).
+  if (cfg.num_execution_cores > 0 && cfg.core_strategies_explicit_set == 0) {
+    fprintf(stderr,
+        "[cfg] WARN: %s has no `core_N_strategy=` lines. "
+        "All %u cores defaulting to SIMPLE_DIP (per ControllerConfig_Default). "
+        "If this is unintended (e.g., you copied backtest.cfg without "
+        "the per-core fields), add `core_0_strategy=mr` etc. to the cfg.\n",
+        filepath ? filepath : "(unknown cfg)",
+        (unsigned)cfg.num_execution_cores);
+  }
 
   // Phase 8 — backward-compat for fee_rate_maker / fee_rate_taker.
   //

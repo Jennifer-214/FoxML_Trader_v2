@@ -25,6 +25,16 @@ SHARDED_FILES=(
     "CoreFrameworks/EngineSharded.hpp"
     "CoreFrameworks/ShardedBacktestDriver.hpp"
     "Strategies/StrategyParameters.hpp"
+    "Strategies/StrategyLifecycle.hpp"  # v5.4.0+ per-core dispatch
+)
+
+# v5.8.0: X-macro registry files. Functions named in FOREACH_*(X) entries
+# are invoked via macro expansion in the dispatchers — the textual call
+# sites (init_fn, adapt_fn, exit_fn) don't reveal the original function
+# names. Extract function-shaped tokens from the registry definition and
+# treat them as "called via X-macro".
+XMACRO_FILES=(
+    "Strategies/StrategyInterface.hpp"
 )
 
 # Extract function calls (Pattern_FunctionName followed by '(') excluding
@@ -57,17 +67,45 @@ PATTERN_RE="^(${PATTERN_RE:1})"
 # Calls in legacy entrypoint
 LEGACY_CALLS=$(extract_calls "$LEGACY_FILE" | grep -E "$PATTERN_RE" || true)
 
+# v5.8.0: function names referenced in X-macro registries. The registry
+# rows span multiple lines (line continuations via `\`), and the X(...)
+# entries are the only places where function-name-shaped tokens appear
+# in StrategyInterface.hpp. Grep the whole file for the function-name
+# pattern; the MODULE_PATTERNS filter further down narrows to the
+# strategy/regime families we care about.
+XMACRO_CALLS=$(
+    for f in "${XMACRO_FILES[@]}"; do
+        grep -hoE '[A-Z][A-Za-z0-9]+_[A-Z][A-Za-z0-9]+' "$f" 2>/dev/null
+    done | sort -u
+)
+
 # Calls in sharded entrypoints (union)
 SHARDED_CALLS=$(
-    for f in "${SHARDED_FILES[@]}"; do
-        extract_calls "$f"
-    done | grep -E "$PATTERN_RE" | sort -u
+    {
+        for f in "${SHARDED_FILES[@]}"; do
+            extract_calls "$f"
+        done
+        echo "$XMACRO_CALLS"
+    } | grep -E "$PATTERN_RE" | sort -u
 )
 
 # Diff: in legacy but not in sharded
-ORPHAN_CANDIDATES=$(comm -23 \
+ORPHAN_CANDIDATES_RAW=$(comm -23 \
     <(echo "$LEGACY_CALLS" | sort -u) \
     <(echo "$SHARDED_CALLS" | sort -u))
+
+# Subtract whitelisted baseline (known-expected legacy orphans).
+# See tools/calls_graph_diff_baseline.txt for the policy + entries.
+# Baseline file uses one symbol per line; # comments + blank lines ignored.
+BASELINE_FILE="$REPO_ROOT/tools/calls_graph_diff_baseline.txt"
+if [[ -f "$BASELINE_FILE" ]]; then
+    BASELINE=$(grep -vE '^\s*(#|$)' "$BASELINE_FILE" | sort -u)
+    ORPHAN_CANDIDATES=$(comm -23 \
+        <(echo "$ORPHAN_CANDIDATES_RAW" | sort -u) \
+        <(echo "$BASELINE"))
+else
+    ORPHAN_CANDIDATES="$ORPHAN_CANDIDATES_RAW"
+fi
 
 # Also detect: functions defined in Strategies/ but called nowhere at all.
 # Different bug class from "orphaned in migration" — these are defined and
@@ -88,11 +126,21 @@ ALL_CALLS=$(
         for f in "${SHARDED_FILES[@]}"; do
             extract_calls "$f"
         done
+        echo "$XMACRO_CALLS"
     } | grep -E "$PATTERN_RE" | sort -u
 )
-NEVER_CALLED=$(comm -23 \
+NEVER_CALLED_RAW=$(comm -23 \
     <(echo "$DEFINED_FNS") \
     <(echo "$ALL_CALLS"))
+
+# Same baseline subtraction for dead-defined: legacy variants kept for tests.
+if [[ -f "$BASELINE_FILE" ]]; then
+    NEVER_CALLED=$(comm -23 \
+        <(echo "$NEVER_CALLED_RAW" | sort -u) \
+        <(echo "$BASELINE"))
+else
+    NEVER_CALLED="$NEVER_CALLED_RAW"
+fi
 
 if [[ -z "$ORPHAN_CANDIDATES" && -z "$NEVER_CALLED" ]]; then
     echo "[calls-graph-diff] CLEAN — no strategy/regime functions orphaned or dead-defined"

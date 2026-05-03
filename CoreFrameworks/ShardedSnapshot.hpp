@@ -27,6 +27,7 @@
 #include "../ML_Headers/CoreModelZoo.hpp"
 #include "ControllerEventLoop.hpp"
 #include "EventLoopAggregates.hpp"
+#include "MetricCompute.hpp"  // v5.8.4c: shared metric helpers
 
 #include <cmath>
 
@@ -127,6 +128,14 @@ static inline void TUI_CopySnapshotSharded(
     if (snap->min_warmup_samples <= 0) snap->min_warmup_samples = 64;  // engine default
     snap->warmup_samples_now = rolling->count;
     snap->state_warmup = (snap->warmup_samples_now < snap->min_warmup_samples) ? 1 : 0;
+
+    // v5.9.0c — capture cfg path for engine header panel
+    {
+        size_t n = strlen(cfg->source_cfg_path);
+        if (n >= sizeof(snap->source_cfg_path)) n = sizeof(snap->source_cfg_path) - 1;
+        memcpy(snap->source_cfg_path, cfg->source_cfg_path, n);
+        snap->source_cfg_path[n] = '\0';
+    }
 
     // kill switch
     snap->kill_switch_active = agg.kill_switch_tripped;
@@ -327,25 +336,20 @@ static inline void TUI_CopySnapshotSharded(
     double g_losses_d = FPN_ToDouble(gross_losses);
     snap->avg_win  = (total_wins   > 0) ? g_wins_d   / (double)total_wins   : 0.0;
     snap->avg_loss = (total_losses > 0) ? g_losses_d / (double)total_losses : 0.0;
-    // v5.3.1 (Phase D): when no losses, profit_factor is mathematically
-    // undefined (∞). Pre-fix code returned 0.0 which renders as "pf: 0.00"
-    // — confusing for a strategy with all wins. Use -1.0 as a "no losses"
-    // sentinel; Stats panel renders "—" for negative values.
-    if (g_losses_d > 0.001) {
-        snap->profit_factor = g_wins_d / g_losses_d;
-    } else if (g_wins_d > 0.001) {
-        snap->profit_factor = -1.0;  // sentinel: ∞ (all wins, no losses)
-    } else {
-        snap->profit_factor = 0.0;   // no trades at all
-    }
-    if (total_wins + total_losses > 0) {
-        double tot = (double)(total_wins + total_losses);
-        double wr = (double)total_wins   / tot;
-        double lr = (double)total_losses / tot;
-        snap->expectancy = (wr * snap->avg_win) - (lr * snap->avg_loss);
-    } else {
-        snap->expectancy = 0.0;
-    }
+    // v5.8.4c: routed through canonical Compute_* helpers (single source
+    // of truth across backtest + live + sharded paths). The legacy -1.0
+    // "all-wins sentinel" was packed into profit_factor itself and
+    // disagreed with BacktestEngine's 0.0-for-no-losses convention; this
+    // caused OPT_METRIC_PF in walk-forward optimization to read
+    // path-dependent values for the same trade set. Now: profit_factor is
+    // numerically 0.0 when losses=0 (matches BacktestEngine), and the
+    // separate snap->all_wins_run flag tells the GUI/TUI render path to
+    // display "—" / "∞" distinctly. Math + display cleanly separated.
+    snap->profit_factor = Compute_ProfitFactor(g_wins_d, g_losses_d);
+    snap->all_wins_run  = Compute_AllWinsRun(g_wins_d, g_losses_d);
+    snap->expectancy = Compute_Expectancy((uint32_t)(total_wins + total_losses),
+                                           (uint32_t)total_wins,
+                                           snap->avg_win, snap->avg_loss);
 
     // config display
     snap->cfg_tp  = FPN_ToDouble(cfg->take_profit_pct) * 100.0;
@@ -398,6 +402,28 @@ static inline void TUI_CopySnapshotSharded(
         // v4.0.4: resolved strategy after AUTO regime classification. For
         // non-AUTO cores this equals strategy_id_display.
         snap->per_core[i].resolved_strategy_id = state->cores[i].resolved_strategy_id;
+        // v5.9.0c — explicit-set bitmap (V5_9_AUDIT-#5). Drives tri-state
+        // marker in Per-Core P&L panel: "i!" deliberate, "i?" defaulted,
+        // "i" auto-regime. Read bit i from the cfg's bitmap.
+        snap->per_core[i].strategy_was_explicit_set =
+            (cfg->core_strategies_explicit_set >> i) & 0x1;
+        // v5.9.1 — per-core warmup % (rolling_short.count vs min_warmup_samples).
+        // Defensive bounds: if min_warmup_samples is 0/unset, the engine
+        // defaults to 64 (matches the global-snap fallback at line 128).
+        {
+            int wmin = (int)cfg->min_warmup_samples;
+            if (wmin <= 0) wmin = 64;
+            int wnow = state->cores[i].slow_state ?
+                       state->cores[i].slow_state->rolling_short.count : 0;
+            int pct = (wnow >= wmin) ? 100 : ((wnow * 100) / wmin);
+            if (pct > 100) pct = 100;
+            if (pct < 0) pct = 0;
+            snap->per_core[i].warmup_progress_pct = (uint8_t)pct;
+        }
+        // v5.9.5i — cfg drift summary mirror
+        snap->per_core[i].cfg_drift_tier1_count    = state->cores[i].cfg_drift_tier1_count;
+        snap->per_core[i].cfg_drift_tier2_count    = state->cores[i].cfg_drift_tier2_count;
+        snap->per_core[i].cfg_drift_strict_refused = state->cores[i].cfg_drift_strict_refused;
         // Per-core gate direction. Use RESOLVED strategy for AUTO so direction
         // tracks the active regime's strategy. MOMENTUM buys above; everything
         // else buys below.
@@ -498,6 +524,34 @@ static inline void TUI_CopySnapshotSharded(
             // to compute on the snapshot path (snapshot is slow-path itself).
             snap->per_core[i].ml_confidence_ic   = RollingIC_Compute(&state->cores[i].confidence.ic);
             snap->per_core[i].ml_confidence_rmse = RollingRMSE_Compute(&state->cores[i].confidence.rmse);
+            // v5.9.0b — ML observability extensions. Single-writer (slow path)
+            // → snapshot read; no race. Counters are uint32 monotonic.
+            snap->per_core[i].ml_model_load_failed       = (uint8_t)state->cores[i].model_load_failed;
+            snap->per_core[i].ml_last_threshold          = state->cores[i].last_ml_threshold;
+            snap->per_core[i].ml_last_effective_threshold= state->cores[i].last_ml_effective_threshold;
+            snap->per_core[i].ml_nan_feature_events      = state->cores[i].nan_feature_events_total;
+            snap->per_core[i].ml_nan_prediction_events   = state->cores[i].nan_prediction_events_total;
+            // v5.9.3a — scaler observability (Gap H). Aggregate across all
+            // 4 model roles in the zoo: scaler considered "present" if ANY
+            // role's handle has has_scaler=1; "load_failed" if ANY role has
+            // scaler_load_failed=1. (Per the v5.9.3a load contract, all
+            // roles in a zoo share the same training pipeline so they
+            // typically agree, but per-role granularity is preserved by
+            // the underlying ModelHandle.scaler — this surface aggregates.)
+            uint8_t any_scaler_present = 0;
+            uint8_t any_scaler_failed  = 0;
+            if (zoo) {
+                if (zoo->buy_signal.scaler.has_scaler)   any_scaler_present = 1;
+                if (zoo->barrier.scaler.has_scaler)      any_scaler_present = 1;
+                if (zoo->regime.scaler.has_scaler)       any_scaler_present = 1;
+                if (zoo->exit.scaler.has_scaler)         any_scaler_present = 1;
+                if (zoo->buy_signal.scaler_load_failed)  any_scaler_failed  = 1;
+                if (zoo->barrier.scaler_load_failed)     any_scaler_failed  = 1;
+                if (zoo->regime.scaler_load_failed)      any_scaler_failed  = 1;
+                if (zoo->exit.scaler_load_failed)        any_scaler_failed  = 1;
+            }
+            snap->per_core[i].ml_scaler_present     = any_scaler_present;
+            snap->per_core[i].ml_scaler_load_failed = any_scaler_failed;
             // Track the highest-confidence ML core for the headline summary.
             // Tie-break: prefer the lowest core index (deterministic).
             if (state->cores[i].last_confidence > headline_conf) {

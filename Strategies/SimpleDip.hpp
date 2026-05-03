@@ -90,3 +90,20 @@ inline BuySideGateConditions<F> SimpleDip_BuySignal(
 //======================================================================================================
 // intentionally empty — TP/SL are set at fill time from config and never modified.
 // this is the simplest possible exit: hit TP or hit SL, nothing else.
+//
+// v5.8.0: stub function so the X-macro registry has a uniform 4-lifecycle
+// signature across all strategies. The dispatcher calls it but it does
+// nothing.
+namespace tt {
+template <unsigned F> struct EventLoopState;
+template <unsigned F, unsigned W>
+inline void SimpleDip_ExitAdjustSharded(
+    EventLoopState<F>* state, int slot,
+    SimpleDipState<F>* strat_state,
+    FPN<F> current_price,
+    const RollingStats<F, W>* rolling,
+    const ControllerConfig<F>* cfg) {
+    (void)state; (void)slot; (void)strat_state;
+    (void)current_price; (void)rolling; (void)cfg;
+}
+} // namespace tt

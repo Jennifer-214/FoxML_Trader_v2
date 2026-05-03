@@ -1,12 +1,28 @@
 # Strategy implementation refactor — future-work tracker
 
-**Status:** deferred. Current pattern is manageable for 5 strategies;
-trigger to revisit is "next time you add a 6th and feel the friction."
+**Status:** **CLOSED 2026-05-01.** Implemented in v5.8.0 (Phase 1 of
+v5.8 Easy Additions sprint). The X-macro `FOREACH_STRATEGY(X)`
+registry now drives strategy enum + name arrays + 4 lifecycle
+dispatchers from a single row. Adding a strategy is 3 sites instead
+of the 8 documented below: implement the strategy file, append one
+`FOREACH_STRATEGY(X)` row in `Strategies/StrategyInterface.hpp`, add
+GUI color (the only manual touch remaining).
 
-**Logged:** 2026-04-30, mid-v5.7 ship. User asked whether plug-and-play
-extensibility could be tighter. Honest answer: yes, but the current
-pattern works and the refactor would be pure infrastructure with no
-functional payoff until a new strategy actually lands.
+See `DOCS/EASY_ADDITIONS_INVARIANTS.md` for the canonical spec +
+`DOCS/changelogs/2026-05-01-v5.8-easy-additions.md` for the ship
+narrative. The "Option A" proposed below is what shipped.
+
+This file is preserved as the historical context for why the work
+was undertaken — useful when explaining the X-macro pattern to
+someone seeing it for the first time.
+
+---
+
+**Originally logged:** 2026-04-30, mid-v5.7 ship. User asked whether
+plug-and-play extensibility could be tighter. Honest answer: yes, but
+the current pattern works and the refactor would be pure
+infrastructure with no functional payoff until a new strategy
+actually lands.
 
 ## Current state — what adding a strategy touches today
 

@@ -18,6 +18,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <csignal>
+#include <dirent.h>     // v5.9.5f — opendir for model directory scan
+#include <sys/stat.h>   // v5.9.5f — stat for role-file detection
 
 //==========================================================================
 // FIELD DESCRIPTOR — one entry per editable config field
@@ -276,6 +278,28 @@ static const CfgFieldDef field_defs[] = {
         "Min rolling-stats samples before trading. CAPS at 128 (rolling window\n"
         "size). Values >128 are clamped at config load with a warning. Use\n"
         "warmup_ticks for longer raw-tick warmup."},
+    // v5.9.5h — XGBoost training hyperparams (cfg-tunable subset).
+    // Live engine doesn't TRAIN; these fields participate in load-time WARN
+    // when stamp's recorded value differs from cfg's. Set them to MATCH the
+    // values used to train the model you're deploying — eliminates startup
+    // noise + provides explicit drift detection. Suppressible via
+    // acknowledge_cross_binary_version_drift=1.
+    {"xgb_subsample",            "Subsample",         "ML Hyperparams",  CFG_FLOAT, "%.2f",
+        "Row subsample per tree (0.5-1.0). Lower = more variance reduction.\n"
+        "Default 0.8. Set to MATCH the value used to train the deployed model;\n"
+        "engine WARNs at boot if stamp's recorded value differs."},
+    {"xgb_colsample_bytree",     "ColSample/Tree",    "ML Hyperparams",  CFG_FLOAT, "%.2f",
+        "Column subsample per tree (0.5-1.0). Lower = less feature-importance\n"
+        "bias. Default 0.8. Match deployed model's training value or expect WARN."},
+    {"xgb_min_child_weight",     "Min Child Weight",  "ML Hyperparams",  CFG_INT,   "%d",
+        "Min sum-of-weights per leaf (1-50). Higher = more regularization.\n"
+        "Default 5. Match deployed model's training value or expect WARN."},
+    {"xgb_seed",                 "Seed",              "ML Hyperparams",  CFG_INT,   "%d",
+        "RNG seed for reproducible runs. Default 42. Match deployed model's\n"
+        "training seed or expect WARN."},
+    {"xgb_tree_method",          "Tree Method",       "ML Hyperparams",  CFG_PATH,  "%s",
+        "XGBoost tree construction algorithm: hist (fast, default) | exact |\n"
+        "approx | auto. Match deployed model's training method or expect WARN."},
 };
 static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 
@@ -427,6 +451,17 @@ struct SettingsState {
     char  per_core_model_dir[MAX_GUI_CORES][256];
     bool  loaded;
     char  cfg_path[256];
+    // v5.9.5f — model directory cache. Refresh-button-driven (no per-frame
+    // I/O — render thread blocking is forbidden, see /readiness check 17).
+    // Populated by SettingsPanel_RescanModels which walks `models/` and
+    // detects subdirs containing a recognizable role file. Reuses the same
+    // file-detection logic as PastRuns_LoadOne (BacktestPanels.hpp:629).
+    // Capped at 32 model dirs — enough for any realistic deployment.
+    static constexpr int MODEL_SCAN_MAX = 32;
+    int   model_scan_count;
+    char  model_scan_dirs[MODEL_SCAN_MAX][96];   // subdir name only (e.g. "aggressive")
+    char  model_scan_paths[MODEL_SCAN_MAX][256]; // full path "models/aggressive"
+    bool  model_scan_done;                        // 1 after first scan
 };
 
 //==========================================================================
@@ -497,6 +532,60 @@ static inline void cfg_write_field(const char *path, const char *key, const char
 
 // Map cfg strategy name (e.g. "simple_dip") to STRATEGY_* index. Returns -1
 // on unknown. Mirror of the parser block in ControllerConfig_Load.
+//==========================================================================
+// MODEL DIRECTORY SCAN (v5.9.5f)
+//==========================================================================
+// Walk `models/` and collect subdirectories that contain a recognizable
+// role file. Reuses the same role-detection list as PastRuns_LoadOne
+// (BacktestPanels.hpp:629) and Verify Stamp (BacktestPanels.hpp:1001-1005).
+// Result populates SettingsState.model_scan_* — feeds the Model Dir
+// Combo dropdown in per-core tabs.
+//
+// Refresh-button-driven (no per-frame I/O): operator clicks "Refresh
+// Models" or panel auto-rescans on first appearing. ImGui render thread
+// stays free of opendir/stat (per /readiness check 17 hardening).
+static inline void Settings_RescanModels(SettingsState *s) {
+    s->model_scan_count = 0;
+    s->model_scan_done = true;
+    DIR *dir = opendir("models");
+    if (!dir) return;
+    static const char* role_files[] = {
+        "barrier.json", "buy_signal.json", "regime.json",
+        "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",
+        "barrier.bin",  "buy_signal.bin",  "regime.bin",
+        nullptr
+    };
+    struct dirent *de;
+    while ((de = readdir(dir)) != nullptr) {
+        if (de->d_name[0] == '.') continue;
+        char dir_path[256];
+        snprintf(dir_path, sizeof(dir_path), "models/%s", de->d_name);
+        struct stat st;
+        if (stat(dir_path, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        // Detect at least one role file inside
+        bool has_role = false;
+        for (int i = 0; role_files[i]; ++i) {
+            char full[400];
+            snprintf(full, sizeof(full), "%s/%s", dir_path, role_files[i]);
+            struct stat fst;
+            if (stat(full, &fst) == 0 && S_ISREG(fst.st_mode)) {
+                has_role = true;
+                break;
+            }
+        }
+        if (!has_role) continue;
+        if (s->model_scan_count >= SettingsState::MODEL_SCAN_MAX) break;
+        size_t n = strnlen(de->d_name, sizeof(s->model_scan_dirs[0]) - 1);
+        memcpy(s->model_scan_dirs[s->model_scan_count], de->d_name, n);
+        s->model_scan_dirs[s->model_scan_count][n] = '\0';
+        size_t pn = strnlen(dir_path, sizeof(s->model_scan_paths[0]) - 1);
+        memcpy(s->model_scan_paths[s->model_scan_count], dir_path, pn);
+        s->model_scan_paths[s->model_scan_count][pn] = '\0';
+        s->model_scan_count++;
+    }
+    closedir(dir);
+}
+
 static inline int settings_strategy_name_to_id(const char *name) {
     if (strcmp(name, "mr") == 0 || strcmp(name, "mean_reversion") == 0) return 0;  // STRATEGY_MEAN_REVERSION
     if (strcmp(name, "momentum") == 0 || strcmp(name, "mom") == 0)      return 1;  // STRATEGY_MOMENTUM
@@ -506,6 +595,21 @@ static inline int settings_strategy_name_to_id(const char *name) {
     if (strcmp(name, "auto") == 0)                                      return 5;  // STRATEGY_AUTO
     if (strcmp(name, "none") == 0)                                      return -1;
     return -1;
+}
+
+// v5.8.4b: uniform `void X_Init(StateT*, const char*)` signature for the
+// FOREACH_PANEL(X) registry in GuiThread.hpp. Settings has lazy file
+// load (Settings_Load fires on first GUI_Panel_Settings render when
+// !s->loaded), so Init's job is just: zero the struct + stash cfg_path
+// so Settings_Load knows where to read.
+static inline void Settings_Init(SettingsState *s, const char *cfg_path) {
+    *s = SettingsState{};
+    if (cfg_path) {
+        size_t n = strlen(cfg_path);
+        if (n >= sizeof(s->cfg_path)) n = sizeof(s->cfg_path) - 1;
+        memcpy(s->cfg_path, cfg_path, n);
+        s->cfg_path[n] = '\0';
+    }
 }
 
 static inline void Settings_Load(SettingsState *s) {
@@ -895,18 +999,81 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
         ImGui::SetItemTooltip("Single model file. Used by STRATEGY_ML cores. "
                               "Use Model Dir below for a CoreModelZoo with role auto-discovery.");
 
+        // v5.9.5f — Model Dir is now a Combo populated from a scan of
+        // `models/` (operator no longer types paths). Falls back to
+        // InputText if scan found nothing (so operator isn't blocked).
+        // Auto-rescans on first render; refresh button below for explicit.
+        if (!s->model_scan_done) Settings_RescanModels(s);
         ImGui::SetNextItemWidth(360);
         ImGui::PushID("mdir");
-        ImGui::InputText("Model Dir", s->per_core_model_dir[core_id], 256);
-        if (ImGui::IsItemDeactivatedAfterEdit()) {
-            char key[64];
-            snprintf(key, sizeof(key), "core_%d_model_dir", core_id);
-            cfg_write_field(s->cfg_path, key, s->per_core_model_dir[core_id]);
-            changed = true;
+        if (s->model_scan_count > 0) {
+            // Find current selection (match by dir name OR full path)
+            int cur_sel = -1;  // -1 = "(none)" entry
+            for (int i = 0; i < s->model_scan_count; ++i) {
+                if (strcmp(s->per_core_model_dir[core_id],
+                            s->model_scan_paths[i]) == 0 ||
+                    strcmp(s->per_core_model_dir[core_id],
+                            s->model_scan_dirs[i]) == 0) {
+                    cur_sel = i;
+                    break;
+                }
+            }
+            const char *preview = (cur_sel >= 0)
+                ? s->model_scan_dirs[cur_sel]
+                : (s->per_core_model_dir[core_id][0]
+                    ? s->per_core_model_dir[core_id] : "(none)");
+            if (ImGui::BeginCombo("Model Dir", preview)) {
+                // (none) entry to clear the field
+                bool sel_none = (s->per_core_model_dir[core_id][0] == '\0');
+                if (ImGui::Selectable("(none)", sel_none)) {
+                    s->per_core_model_dir[core_id][0] = '\0';
+                    char key[64];
+                    snprintf(key, sizeof(key), "core_%d_model_dir", core_id);
+                    cfg_write_field(s->cfg_path, key, "");
+                    changed = true;
+                }
+                for (int i = 0; i < s->model_scan_count; ++i) {
+                    bool is_selected = (i == cur_sel);
+                    if (ImGui::Selectable(s->model_scan_dirs[i], is_selected)) {
+                        size_t n = strnlen(s->model_scan_paths[i],
+                                            sizeof(s->per_core_model_dir[core_id]) - 1);
+                        memcpy(s->per_core_model_dir[core_id],
+                                s->model_scan_paths[i], n);
+                        s->per_core_model_dir[core_id][n] = '\0';
+                        char key[64];
+                        snprintf(key, sizeof(key), "core_%d_model_dir", core_id);
+                        cfg_write_field(s->cfg_path, key,
+                                        s->per_core_model_dir[core_id]);
+                        changed = true;
+                    }
+                    if (is_selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+        } else {
+            // No models found — fall back to InputText so operator can
+            // type a path manually if needed.
+            ImGui::InputText("Model Dir", s->per_core_model_dir[core_id], 256);
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                char key[64];
+                snprintf(key, sizeof(key), "core_%d_model_dir", core_id);
+                cfg_write_field(s->cfg_path, key, s->per_core_model_dir[core_id]);
+                changed = true;
+            }
         }
         ImGui::PopID();
         ImGui::SetItemTooltip("Directory containing barrier/buy_signal/regime/exit roles. "
-                              "Takes precedence over Model Path when set.");
+                              "Takes precedence over Model Path when set.\n\n"
+                              "v5.9.5f: dropdown populated from `models/` scan.\n"
+                              "Click '↻ Rescan models/' below if you've added models\n"
+                              "since the panel opened.");
+        ImGui::SameLine();
+        ImGui::PushID("mdir_refresh");
+        if (ImGui::SmallButton("↻")) {
+            Settings_RescanModels(s);
+        }
+        ImGui::PopID();
+        ImGui::SetItemTooltip("Rescan models/ directory");
     }
 
     // v4.7.23: resolve this core's strategy for the strategy-aware filter.

@@ -22,6 +22,8 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../MemHeaders/HmacSha256.hpp"  // v5.3.0 Phase B — in-process HMAC + SHA-256 (replaces popen paths)
+#include "../Version.hpp"                 // v5.9.2b — ENGINE_VERSION_STRING for cross-major detection
+#include "FeatureStandardizer.hpp"       // v5.9.3a — inline scaler struct on ModelHandle
 #include <stdio.h>
 #include <string.h>
 #include <locale.h>                       // v5.3.0 Phase B — uselocale for canonical body LC_NUMERIC pinning
@@ -95,7 +97,12 @@
 //           FEAT_FLOW_*, FEAT_LARGE_TRADE_Z). Old v2 models will fail load.
 // v4 (v4.6 Wave 2): added 2 spread features (FEAT_SPREAD_BPS,
 //           FEAT_SPREAD_ZSCORE). Old v3 models will fail load.
-#define MODEL_FORMAT_VERSION 4
+// v5 (v5.8.1a): introduce feature_registry_hash field in stamp body.
+//           Hash is FNV-1a over FOREACH_FEATURE(X) enabled-row names +
+//           versions (see FeatureRegistry.hpp). Stamps signed under one
+//           registry refuse to load under a different registry. v4 stamps
+//           lack the field and fail format-version check.
+#define MODEL_FORMAT_VERSION 5
 
 //======================================================================================================
 // [FEATURE LOOKBACK REGISTRY]
@@ -211,6 +218,58 @@ struct ModelHandle {
                             // "model is 3-class but barrier_gate_enabled=0".
     char model_path[256];   // path for display/logging
     char training_fingerprint[65]; // SHA256 of config+data used to train this model (empty if unknown)
+    // v5.9.3a — feature standardizer (mean-centering + unit-variance).
+    // Inline (not heap) per audit decision: NUM_REGISTERED_FEATURES is
+    // constexpr → struct size known at compile time. ~600 bytes per
+    // handle; trivial vs the mmap'd XGBoost booster size.
+    // has_scaler=0 = identity (legacy / not loaded); =1 = active.
+    // Apply path early-returns when 0, so v5.9.3a "ships disabled"
+    // is the natural state until v5.9.3b activates training-side
+    // Compute + Persist + the 5 apply-site callers.
+    tt::FeatureStandardizer scaler;
+    // v5.9.3a — Gap H observability. Set by CoreModelZoo_TryLoadRole
+    // when scaler load fails in non-strict mode (engine warns + applies
+    // identity, distinct from model_load_failed which is the model itself).
+    // Surfaces to PerCoreSnap.ml_scaler_load_failed for ML Status panel.
+    int scaler_load_failed;
+    // v5.9.4a — stamp-derived fields copied at CoreModelZoo_TryLoadRole
+    // post-verify. Engine boot reads these to surface drift (Phase 6
+    // poll_interval cadence) or refuse mismatched models (Phase 5
+    // num_outputs). Set to 0 when stamp lacks the field (legacy stamps).
+    uint32_t training_poll_interval;        // from stamp; 0 if absent
+    uint8_t  has_training_poll_interval;    // 1 if stamp had it
+    int      stamp_model_num_outputs;       // from stamp; 0 if absent
+    uint8_t  has_stamp_num_outputs;         // 1 if stamp had model_num_outputs
+    // v5.9.5h — XGBoost hyperparams from stamp, copied here at
+    // CoreModelZoo._TryLoadRole load time. EngineSharded boot WARN
+    // compares these vs cfg.xgb_* (mismatch logged; no refuse since
+    // hyperparams don't affect inference).
+    uint8_t  has_xgb_hyperparams;
+    int      stamp_xgb_max_depth;
+    double   stamp_xgb_learning_rate;
+    int      stamp_xgb_n_estimators;
+    double   stamp_xgb_subsample;
+    double   stamp_xgb_colsample_bytree;
+    int      stamp_xgb_min_child_weight;
+    int      stamp_xgb_seed;
+    char     stamp_xgb_tree_method[16];
+    // v5.9.5h Phase 10 — build flags fingerprint
+    uint8_t  has_build_flags_hash;
+    uint64_t stamp_build_flags_hash;
+    // v5.9.5i — stamp's recorded inference cfg fields. EngineSharded
+    // boot-WARN/REFUSE compares these vs cfg.* (Tier 1: freshness_tau,
+    // confidence_threshold_scale, barrier_gate_enabled — REFUSE strict;
+    // Tier 2: hard_block, bandit, fees — WARN).
+    uint8_t  has_stamp_inference_cfg;
+    double   stamp_inf_confidence_threshold_scale;
+    int      stamp_inf_barrier_gate_enabled;
+    double   stamp_inf_confidence_hard_block_threshold;
+    double   stamp_inf_freshness_tau;
+    uint8_t  has_stamp_bandit;
+    double   stamp_inf_bandit_blend_ratio;
+    uint8_t  has_stamp_fees;
+    double   stamp_inf_fee_rate_maker;
+    double   stamp_inf_fee_rate_taker;
 };
 
 //======================================================================================================
@@ -221,6 +280,40 @@ inline void Model_Init(ModelHandle<F> *m) {
     m->num_features = 0;
     m->num_outputs = 0;
     m->model_path[0] = '\0';
+    // v5.9.3a — scaler init. has_scaler=0 means identity-applied;
+    // CoreModelZoo_TryLoadRole calls FeatureStandardizer_Load post-Model_Load
+    // to populate.
+    tt::FeatureStandardizer_Init(&m->scaler);
+    m->scaler_load_failed = 0;
+    // v5.9.4a — stamp-derived fields zero-init. CoreModelZoo_TryLoadRole
+    // copies values post-verify; absent flags stay 0 (legacy stamp path).
+    m->training_poll_interval = 0;
+    m->has_training_poll_interval = 0;
+    m->stamp_model_num_outputs = 0;
+    m->has_stamp_num_outputs = 0;
+    // v5.9.5h — XGBoost hyperparam fields zero-init
+    m->has_xgb_hyperparams = 0;
+    m->stamp_xgb_max_depth = 0;
+    m->stamp_xgb_learning_rate = 0.0;
+    m->stamp_xgb_n_estimators = 0;
+    m->stamp_xgb_subsample = 0.0;
+    m->stamp_xgb_colsample_bytree = 0.0;
+    m->stamp_xgb_min_child_weight = 0;
+    m->stamp_xgb_seed = 0;
+    m->stamp_xgb_tree_method[0] = '\0';
+    m->has_build_flags_hash = 0;
+    m->stamp_build_flags_hash = 0;
+    // v5.9.5i — stamp inference cfg fields zero-init
+    m->has_stamp_inference_cfg = 0;
+    m->stamp_inf_confidence_threshold_scale = 0.0;
+    m->stamp_inf_barrier_gate_enabled = 0;
+    m->stamp_inf_confidence_hard_block_threshold = 0.0;
+    m->stamp_inf_freshness_tau = 0.0;
+    m->has_stamp_bandit = 0;
+    m->stamp_inf_bandit_blend_ratio = 0.0;
+    m->has_stamp_fees = 0;
+    m->stamp_inf_fee_rate_maker = 0.0;
+    m->stamp_inf_fee_rate_taker = 0.0;
 }
 
 //======================================================================================================
@@ -487,10 +580,24 @@ inline int Model_IsLoaded(const ModelHandle<F> *m) {
 }
 
 //======================================================================================================
-// [FEATURE PACKING]
+// [FEATURE PACKING — DEPRECATED]
 //======================================================================================================
-// packs RegimeSignals + RollingStats into a float array for model inference.
-// feature order is defined by FEAT_* constants — must match training pipeline.
+// Replaced by Features_PackAll in ML_Headers/FeatureRegistry.hpp (v5.8.1b).
+// All 5 production callers (MLStrategy, StrategyParameters dispatcher,
+// BacktestSharded, PortfolioController regime/barrier paths) flipped at
+// v5.8.1b ship time.
+//
+// This function is now a frozen historical reference, kept ONLY so the
+// EXTENSIBILITY equivalence test in controller_test.cpp can validate that
+// Features_PackAll produces bytewise-identical output. Treat any change
+// to this body as breaking the regression contract — change Features_PackAll
+// instead, then re-pin the FEATURE_REGISTRY_HASH snapshot.
+//
+// Scheduled for full removal in v5.9 once the registry has a few months
+// of paper-validation behind it. At that point the equivalence test gets
+// retired alongside.
+//
+// Feature order is defined by FEAT_* constants — must match training pipeline.
 // forward-declare RegimeSignals to avoid circular include.
 //======================================================================================================
 template <unsigned F> struct RegimeSignals; // forward declaration
@@ -572,11 +679,72 @@ inline int ModelFeatures_Pack(float *buf, const RegimeSignals<F> *sig,
 //======================================================================================================
 
 struct ModelStampResult {
-    int    valid;             // 1 / 0 / -1 per above
-    char   reason[256];       // human-readable failure reason
-    int    model_format_version;
-    double generalization_gap;
-    double gap_threshold;
+    int      valid;             // 1 / 0 / -1 per above
+    char     reason[256];       // human-readable failure reason
+    int      model_format_version;
+    double   generalization_gap;
+    double   gap_threshold;
+    uint64_t feature_registry_hash;  // v5.8.1a: 0 if absent (old stamps)
+    char     engine_version[16];     // v5.8.6: SemVer string at training time, "" if absent
+    int      stamp_format_version;   // v5.9.0: schema version of the stamp body itself.
+                                     //         0 if absent (v5.8.x and older).
+                                     //         1 = current (v5.9.0+).
+                                     //         Verifier rejects unknown versions in strict mode.
+    // v5.9.2b — inference-affecting cfg fields stamped at training time.
+    // Verifier compares against current cfg; mismatch triggers
+    // 3-tier strict-mode behavior (refuse / warn / surfaced).
+    // Field flags = 1 when stamp had the field; 0 = absent (skip check).
+    uint8_t  has_inference_cfg;                    // 1 if any inference_cfg_* present
+    double   inference_cfg_confidence_threshold_scale;
+    int      inference_cfg_barrier_gate_enabled;
+    double   inference_cfg_confidence_hard_block_threshold;
+    double   inference_cfg_held_out_fraction;
+    double   inference_cfg_freshness_tau;
+    uint8_t  has_inference_cfg_bandit;             // 1 if bandit_blend_ratio present
+    double   inference_cfg_bandit_blend_ratio;
+    uint8_t  has_inference_cfg_fees;               // 1 if fee_rate_* fields present
+    double   inference_cfg_fee_rate_maker;
+    double   inference_cfg_fee_rate_taker;
+    uint8_t  has_training_poll_interval;
+    uint32_t training_poll_interval;
+    int      inference_cfg_drift_count;            // 0 if all match; >0 = mismatched fields
+    // v5.9.2b — cross-major engine version detection. Set to 1 when stamp's
+    // engine_version differs by major number from current build's
+    // ENGINE_VERSION_STRING (e.g. stamp says 5.9.0 but engine is 6.0.0).
+    // Caller (CoreModelZoo) refuses load when:
+    //   cross_major_engine==1 AND !cfg.allow_cross_major_engine
+    // Within-major (5.7 → 5.9) always allowed.
+    uint8_t  cross_major_engine;
+    // v5.9.3a — scaler sidecar binding. has_scaler_fields=1 when stamp
+    // contains feature_scaler_present + scaler_sha256 lines (v5.9.3+
+    // stamps); =0 means legacy stamp (no scaler claimed). Distinct from
+    // feature_scaler_present (=1 only when scaler is actually present
+    // for the model). Backward compat: legacy stamps load with
+    // has_scaler_fields=0 + feature_scaler_present=0.
+    uint8_t  has_scaler_fields;
+    uint8_t  feature_scaler_present;        // 1 = sidecar exists at <model>.scaler
+    char     scaler_sha256[65];             // SHA-256 hex of full sidecar file
+    // v5.9.4a — model num_outputs (output dimension) stamp binding.
+    // has_model_num_outputs=1 when stamp had the field; legacy stamps
+    // load with 0 (no check fired). Verifier compares against
+    // ModelHandle.num_outputs at CoreModelZoo load time.
+    uint8_t  has_model_num_outputs;
+    int      model_num_outputs;
+    // v5.9.5h — XGBoost training hyperparams (parsed from stamp body
+    // position 17). has_xgb_hyperparams=0 for legacy stamps; loader
+    // skips comparison.
+    uint8_t  has_xgb_hyperparams;
+    int      xgb_max_depth;
+    double   xgb_learning_rate;
+    int      xgb_n_estimators;
+    double   xgb_subsample;
+    double   xgb_colsample_bytree;
+    int      xgb_min_child_weight;
+    int      xgb_seed;
+    char     xgb_tree_method[16];
+    // v5.9.5h Phase 10 — build flags fingerprint
+    uint8_t  has_build_flags_hash;
+    uint64_t build_flags_hash;
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -612,13 +780,54 @@ inline int stamp_parse_line(char* line, const char** key_out, const char** val_o
 inline ModelStampResult verify_model_stamp(const char* model_path,
                                             const char* secret,
                                             double gap_threshold,
-                                            int expected_format_version) {
+                                            int expected_format_version,
+                                            uint64_t expected_feature_registry_hash = 0) {
     ModelStampResult r;
     r.valid = -1;
     r.reason[0] = '\0';
     r.model_format_version = 0;
     r.generalization_gap = 0.0;
     r.gap_threshold = gap_threshold;
+    r.feature_registry_hash = 0;
+    r.engine_version[0] = '\0';
+    r.stamp_format_version = 0;  // v5.9.0: 0 = absent (legacy stamp)
+    // v5.9.2b — inference cfg fields. has_* flags = 0 until parser sets them.
+    r.has_inference_cfg = 0;
+    r.inference_cfg_confidence_threshold_scale = 0.0;
+    r.inference_cfg_barrier_gate_enabled = 0;
+    r.inference_cfg_confidence_hard_block_threshold = 0.0;
+    r.inference_cfg_held_out_fraction = 0.0;
+    r.inference_cfg_freshness_tau = 0.0;
+    r.has_inference_cfg_bandit = 0;
+    r.inference_cfg_bandit_blend_ratio = 0.0;
+    r.has_inference_cfg_fees = 0;
+    r.inference_cfg_fee_rate_maker = 0.0;
+    r.inference_cfg_fee_rate_taker = 0.0;
+    r.has_training_poll_interval = 0;
+    r.training_poll_interval = 0;
+    r.inference_cfg_drift_count = 0;
+    r.cross_major_engine = 0;
+    // v5.9.3a — scaler fields. has_scaler_fields = 1 if stamp had any
+    // scaler key; feature_scaler_present = 1 only if stamp claims the
+    // sidecar exists. Legacy stamps load with both = 0 (forward-compat).
+    r.has_scaler_fields = 0;
+    r.feature_scaler_present = 0;
+    r.scaler_sha256[0] = '\0';
+    // v5.9.4a — model num_outputs init.
+    r.has_model_num_outputs = 0;
+    r.model_num_outputs = 0;
+    // v5.9.5h — XGBoost hyperparam fields zero-init
+    r.has_xgb_hyperparams = 0;
+    r.xgb_max_depth = 0;
+    r.xgb_learning_rate = 0.0;
+    r.xgb_n_estimators = 0;
+    r.xgb_subsample = 0.0;
+    r.xgb_colsample_bytree = 0.0;
+    r.xgb_min_child_weight = 0;
+    r.xgb_seed = 0;
+    r.xgb_tree_method[0] = '\0';
+    r.has_build_flags_hash = 0;
+    r.build_flags_hash = 0;
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -685,9 +894,127 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 r.generalization_gap = atof(val);
             } else if (strcmp(key, "gap_threshold") == 0) {
                 r.gap_threshold = atof(val);
+            } else if (strcmp(key, "feature_registry_hash") == 0) {
+                // v5.8.1a: parse hex-encoded 64-bit hash. strtoull accepts
+                // 0x-prefix or bare hex. Stamp emits %016lx (no prefix).
+                r.feature_registry_hash = (uint64_t)strtoull(val, nullptr, 16);
+            } else if (strcmp(key, "engine_version") == 0) {
+                // v5.8.6: SemVer string captured at training time (e.g. "5.8.5").
+                // Empty / missing for stamps written by pre-v5.8.6 callers.
+                size_t vl = strlen(val);
+                if (vl >= sizeof(r.engine_version)) vl = sizeof(r.engine_version) - 1;
+                memcpy(r.engine_version, val, vl);
+                r.engine_version[vl] = '\0';
+            } else if (strcmp(key, "stamp_format_version") == 0) {
+                // v5.9.0: stamp body schema version. 0 means absent (legacy);
+                // current = 1. Future schema changes bump this. Verifier
+                // could reject unknown versions in strict mode (deferred to
+                // a future ship; for now we just record the value).
+                r.stamp_format_version = atoi(val);
+            }
+            // v5.9.2b — inference-affecting cfg fields. Each present field
+            // sets the relevant has_* flag. Verifier compares against
+            // current cfg later (caller-side).
+            else if (strcmp(key, "inference_cfg_confidence_threshold_scale") == 0) {
+                r.inference_cfg_confidence_threshold_scale = atof(val);
+                r.has_inference_cfg = 1;
+            } else if (strcmp(key, "inference_cfg_barrier_gate_enabled") == 0) {
+                r.inference_cfg_barrier_gate_enabled = atoi(val);
+                r.has_inference_cfg = 1;
+            } else if (strcmp(key, "inference_cfg_confidence_hard_block_threshold") == 0) {
+                r.inference_cfg_confidence_hard_block_threshold = atof(val);
+                r.has_inference_cfg = 1;
+            } else if (strcmp(key, "inference_cfg_held_out_fraction") == 0) {
+                r.inference_cfg_held_out_fraction = atof(val);
+                r.has_inference_cfg = 1;
+            } else if (strcmp(key, "inference_cfg_freshness_tau") == 0) {
+                r.inference_cfg_freshness_tau = atof(val);
+                r.has_inference_cfg = 1;
+            } else if (strcmp(key, "inference_cfg_bandit_blend_ratio") == 0) {
+                r.inference_cfg_bandit_blend_ratio = atof(val);
+                r.has_inference_cfg_bandit = 1;
+            } else if (strcmp(key, "inference_cfg_fee_rate_maker") == 0) {
+                r.inference_cfg_fee_rate_maker = atof(val);
+                r.has_inference_cfg_fees = 1;
+            } else if (strcmp(key, "inference_cfg_fee_rate_taker") == 0) {
+                r.inference_cfg_fee_rate_taker = atof(val);
+                r.has_inference_cfg_fees = 1;
+            } else if (strcmp(key, "training_poll_interval") == 0) {
+                r.training_poll_interval = (uint32_t)strtoul(val, nullptr, 10);
+                r.has_training_poll_interval = 1;
+            }
+            // v5.9.3a — scaler fields
+            else if (strcmp(key, "feature_scaler_present") == 0) {
+                r.feature_scaler_present = (atoi(val) != 0) ? 1 : 0;
+                r.has_scaler_fields = 1;
+            } else if (strcmp(key, "scaler_sha256") == 0) {
+                size_t vl = strlen(val);
+                if (vl >= sizeof(r.scaler_sha256)) vl = sizeof(r.scaler_sha256) - 1;
+                memcpy(r.scaler_sha256, val, vl);
+                r.scaler_sha256[vl] = '\0';
+                r.has_scaler_fields = 1;
+            }
+            // v5.9.4a — model_num_outputs (output dimension binding)
+            else if (strcmp(key, "model_num_outputs") == 0) {
+                r.model_num_outputs = atoi(val);
+                r.has_model_num_outputs = 1;
+            }
+            // v5.9.5h — XGBoost hyperparam parsing. Macro-expanded
+            // to keep the 8-field dispatch tight (vs an if/else
+            // chain). Each macro expands to one `else if` clause
+            // continuing the existing chain.
+            #define PARSE_XGB_INT(field) \
+                else if (strcmp(key, "xgb_" #field) == 0) { \
+                    r.xgb_##field = atoi(val); \
+                    r.has_xgb_hyperparams = 1; \
+                }
+            #define PARSE_XGB_DOUBLE(field) \
+                else if (strcmp(key, "xgb_" #field) == 0) { \
+                    r.xgb_##field = atof(val); \
+                    r.has_xgb_hyperparams = 1; \
+                }
+            PARSE_XGB_INT(max_depth)
+            PARSE_XGB_DOUBLE(learning_rate)
+            PARSE_XGB_INT(n_estimators)
+            PARSE_XGB_DOUBLE(subsample)
+            PARSE_XGB_DOUBLE(colsample_bytree)
+            PARSE_XGB_INT(min_child_weight)
+            PARSE_XGB_INT(seed)
+            // tree_method is a fixed-size string; inline (no macro).
+            else if (strcmp(key, "xgb_tree_method") == 0) {
+                size_t vl = strlen(val);
+                if (vl >= sizeof(r.xgb_tree_method)) vl = sizeof(r.xgb_tree_method) - 1;
+                memcpy(r.xgb_tree_method, val, vl);
+                r.xgb_tree_method[vl] = '\0';
+                r.has_xgb_hyperparams = 1;
+            }
+            #undef PARSE_XGB_INT
+            #undef PARSE_XGB_DOUBLE
+            // v5.9.5h Phase 10 — build flags hash (hex parse)
+            else if (strcmp(key, "build_flags_hash") == 0) {
+                r.build_flags_hash = (uint64_t)strtoull(val, nullptr, 16);
+                r.has_build_flags_hash = 1;
             }
         }
         line = strtok_r(nullptr, "\n", &save);
+    }
+
+    // v5.9.2b — cross-major engine version detection. Compare stamp's
+    // engine_version major against current build's ENGINE_VERSION_STRING
+    // major. Empty stamp engine_version (pre-v5.8.6) → skip (allow).
+    // Major = atoi() of the prefix before first '.' — works for "5.9.2",
+    // "5.9.2a", "v5.9.2", or any leading-int form.
+    r.cross_major_engine = 0;
+    if (r.engine_version[0] != '\0') {
+        const char* sv = r.engine_version;
+        if (sv[0] == 'v' || sv[0] == 'V') sv++;  // accept v-prefix
+        int stamp_major = atoi(sv);
+        const char* cur = ENGINE_VERSION_STRING;
+        if (cur[0] == 'v' || cur[0] == 'V') cur++;
+        int cur_major = atoi(cur);
+        if (stamp_major != cur_major && stamp_major > 0 && cur_major > 0) {
+            r.cross_major_engine = 1;
+        }
     }
 
     // 1. Format version match
@@ -699,8 +1026,37 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
         return r;
     }
 
-    // 2. Gap acceptable
-    if (r.generalization_gap > r.gap_threshold) {
+    // 1b. v5.8.1a — feature registry hash match. When caller passes
+    // expected_feature_registry_hash != 0, the stamp's hash must match
+    // (catches train-serve drift). Default 0 = "skip check" (caller
+    // explicitly opts out). v5.8.6: when stamp has NO hash field
+    // (pre-v5.8.1a stamps parse as 0), accept with stderr WARN rather
+    // than reject — preserves back-compat with legacy models. Drift catch
+    // fires only when BOTH sides have the data and they disagree.
+    if (expected_feature_registry_hash != 0) {
+        if (r.feature_registry_hash == 0) {
+            fprintf(stderr,
+                "[stamp] WARN: %s stamp lacks feature_registry_hash "
+                "(pre-v5.8.1a) — drift NOT verified\n",
+                stamp_path);
+        } else if (r.feature_registry_hash != expected_feature_registry_hash) {
+            r.valid = 0;
+            snprintf(r.reason, sizeof(r.reason),
+                "feature-registry-hash mismatch: stamp=%016lx engine=%016lx "
+                "(retrain required)",
+                (unsigned long)r.feature_registry_hash,
+                (unsigned long)expected_feature_registry_hash);
+            return r;
+        }
+    }
+
+    // 2. Gap acceptable. v5.9.5j sentinel: gap_threshold == 0.0 + held_out
+    // == 0.0 means "training-only stamp" (Train Model auto-stamp without
+    // held-out). Skip the gap check for these stamps; they're info-grade
+    // not deploy-grade. Operator wanting deploy validation runs Run Full
+    // Validation which produces a full stamp.
+    bool training_only_stamp = (r.gap_threshold == 0.0);
+    if (!training_only_stamp && r.generalization_gap > r.gap_threshold) {
         r.valid = 0;
         snprintf(r.reason, sizeof(r.reason),
             "generalization gap %.4f exceeds threshold %.4f",
@@ -786,6 +1142,59 @@ struct StampWriteResult {
     char stamp_path[512]; // where it was written (or would have been)
 };
 
+// v5.9.2b — inference cfg fields bound to the stamp at training time.
+// Caller fills only the fields it has; has_* flags gate emit. Nullptr
+// passed for legacy callers means none of these fields emit (forward-
+// compat with v5.9.0/.1/.2 stamps).
+struct StampInferenceCfgInputs {
+    int      has_inference_cfg;                     // 1 = emit the 5 always-present cfg fields below
+    double   confidence_threshold_scale;
+    int      barrier_gate_enabled;
+    double   confidence_hard_block_threshold;
+    double   held_out_fraction;
+    double   freshness_tau;                          // bound to stamp at training time
+    int      has_bandit;                             // 1 = emit bandit_blend_ratio (when bandit_enabled cfg=1)
+    double   bandit_blend_ratio;
+    int      has_fees;                               // 1 = emit fee_rate_maker/taker (when cost_gate_enabled=1)
+    double   fee_rate_maker;
+    double   fee_rate_taker;
+    int      has_training_poll_interval;             // 1 = emit training_poll_interval
+    uint32_t training_poll_interval;
+    // v5.9.3a — scaler sidecar binding fields. has_scaler=1 → emit
+    // both feature_scaler_present + scaler_sha256 lines. scaler_sha256
+    // is the SHA-256 of the FULL sidecar file (computed by trainer
+    // post-Persist via sha256_file_hex_inproc).
+    int      has_scaler;
+    int      feature_scaler_present;                 // 0 = no sidecar; 1 = sidecar exists
+    const char* scaler_sha256_hex;                   // null-terminated 64-char hex (or empty)
+    // v5.9.4a — model num_outputs (output dimension) stamp binding.
+    // Stamp records what the trainer SAW; verifier compares against
+    // ModelHandle.num_outputs at load time. Binary/regression = 1,
+    // multiclass = num_classes (e.g. 3 for PEAK_VALLEY_STABLE).
+    // Catches "stamp claims 3-class but binary model loaded" bug.
+    int      has_num_outputs;
+    int      model_num_outputs;
+    // v5.9.5h — XGBoost training hyperparams. Stamp body position 17
+    // (canonical-order locked: appended after model_num_outputs at
+    // position 16). Surface G has_*=0 forward-compat for legacy stamps.
+    // Engine load-WARN compares these vs cfg.xgb_* at boot; mismatch
+    // logs (no refuse — hyperparams don't affect inference, only
+    // forensics + reproducibility). max_depth/lr/n_est are the
+    // operator-tunable ones; subsample/colsample/min_child_weight/
+    // seed/tree_method are the cfg-tunable ones (v5.9.5h Phase 2).
+    int      has_xgb_hyperparams;
+    int      xgb_max_depth;
+    double   xgb_learning_rate;
+    int      xgb_n_estimators;
+    double   xgb_subsample;
+    double   xgb_colsample_bytree;
+    int      xgb_min_child_weight;
+    int      xgb_seed;
+    char     xgb_tree_method[16];
+    int      has_build_flags_hash;
+    uint64_t build_flags_hash;
+};
+
 inline StampWriteResult stamp_write_for_model(const char* model_path,
                                                 const char* secret,
                                                 int   format_version,
@@ -793,7 +1202,12 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
                                                 double wf_mean_val,
                                                 double held_out_metric,
                                                 double gap_threshold,
-                                                int   force) {
+                                                int   force,
+                                                uint64_t feature_registry_hash = 0,
+                                                const char* engine_version = nullptr,
+                                                // v5.9.2b — inference cfg binding.
+                                                // Optional; nullptr = skip emit (legacy callers).
+                                                const StampInferenceCfgInputs* inf = nullptr) {
     StampWriteResult r;
     r.ok = 0;
     r.error[0] = '\0';
@@ -831,8 +1245,27 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
 
     // 5. Canonical body — must match bash script + verifier byte-for-byte.
     //    Field order: format-version, sha256, trained_on, wf_mean_val,
-    //    held_out_metric, gap, gap_threshold. Each line ends with \n.
-    char canonical[2048];
+    //    held_out_metric, gap, gap_threshold, [feature_registry_hash],
+    //    [engine_version].
+    //    feature_registry_hash is appended ONLY when format_version >= 5
+    //    AND a non-zero hash was supplied. engine_version is appended
+    //    ONLY when format_version >= 5 AND a non-empty string was supplied.
+    //    v4 stamps and dev-mode invocations omit both fields — verifier
+    //    handles missing fields as "skip check" / empty.
+    //    Each line ends with \n.
+    int has_hash    = (format_version >= 5 && feature_registry_hash != 0);
+    int has_engver  = (format_version >= 5 && engine_version && engine_version[0] != '\0');
+    // v5.9.0: stamp_format_version=1 emitted whenever format_version >= 5
+    // (the v5.8.1a+ wire-format era — the era that has feature_registry_hash
+    // and engine_version). Schema version of the stamp body itself,
+    // distinct from MODEL_FORMAT_VERSION (which versions the model file
+    // shape, not the stamp). Bumped on future stamp body schema changes.
+    int has_stamp_ver = (format_version >= 5);
+    // v5.9.2b — bumped from 2048 → 4096. Original ~700 bytes; 9 new
+    // inference_cfg_* + training_poll_interval fields × ~50 bytes each
+    // = +450 bytes worst-case, well under the new ceiling. Leaves
+    // headroom for v5.9.3 scaler fields too.
+    char canonical[4096];
     int n = snprintf(canonical, sizeof(canonical),
         "model_format_version=%d\n"
         "model_sha256=%s\n"
@@ -843,6 +1276,108 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
         "gap_threshold=%g\n",
         format_version, model_sha, trained_on_iso,
         wf_mean_val, held_out_metric, gap, gap_threshold);
+    if (has_hash && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "feature_registry_hash=%016lx\n",
+            (unsigned long)feature_registry_hash);
+        if (wrote > 0) n += wrote;
+    }
+    if (has_engver && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "engine_version=%s\n", engine_version);
+        if (wrote > 0) n += wrote;
+    }
+    if (has_stamp_ver && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "stamp_format_version=1\n");
+        if (wrote > 0) n += wrote;
+    }
+    // v5.9.2b — inference cfg binding. Emitted only when caller passed
+    // non-null `inf` pointer + respective has_* flag set. Verifier
+    // parser tolerates absent fields (legacy stamps + no-bind callers).
+    if (inf && inf->has_inference_cfg && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "inference_cfg_confidence_threshold_scale=%g\n"
+            "inference_cfg_barrier_gate_enabled=%d\n"
+            "inference_cfg_confidence_hard_block_threshold=%g\n"
+            "inference_cfg_held_out_fraction=%g\n"
+            "inference_cfg_freshness_tau=%g\n",
+            inf->confidence_threshold_scale,
+            inf->barrier_gate_enabled,
+            inf->confidence_hard_block_threshold,
+            inf->held_out_fraction,
+            inf->freshness_tau);
+        if (wrote > 0) n += wrote;
+    }
+    if (inf && inf->has_bandit && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "inference_cfg_bandit_blend_ratio=%g\n",
+            inf->bandit_blend_ratio);
+        if (wrote > 0) n += wrote;
+    }
+    if (inf && inf->has_fees && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "inference_cfg_fee_rate_maker=%g\n"
+            "inference_cfg_fee_rate_taker=%g\n",
+            inf->fee_rate_maker,
+            inf->fee_rate_taker);
+        if (wrote > 0) n += wrote;
+    }
+    if (inf && inf->has_training_poll_interval && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "training_poll_interval=%u\n",
+            (unsigned)inf->training_poll_interval);
+        if (wrote > 0) n += wrote;
+    }
+    // v5.9.3a — scaler sidecar binding. Both lines emit together; SHA
+    // empty when feature_scaler_present=0 (no sidecar).
+    if (inf && inf->has_scaler && n > 0 && (size_t)n < sizeof(canonical)) {
+        const char* sha = (inf->scaler_sha256_hex && inf->scaler_sha256_hex[0])
+                        ? inf->scaler_sha256_hex : "";
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "feature_scaler_present=%d\n"
+            "scaler_sha256=%s\n",
+            inf->feature_scaler_present ? 1 : 0, sha);
+        if (wrote > 0) n += wrote;
+    }
+    // v5.9.4a — model num_outputs (output dimension). Stamp records
+    // what trainer SAW; engine load compares vs ModelHandle.num_outputs.
+    // Mismatch caught by CoreModelZoo_TryLoadRole's strict-mode gate.
+    if (inf && inf->has_num_outputs && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "model_num_outputs=%d\n", inf->model_num_outputs);
+        if (wrote > 0) n += wrote;
+    }
+    // v5.9.5h — XGBoost training hyperparams (stamp body position 17).
+    // 8 fields emit together as a block. Operator-tunable max_depth/lr/
+    // n_est come from Train Model panel; cfg-tunable subsample/colsample/
+    // min_child_weight/seed/tree_method come from cfg.xgb_*. Engine
+    // load-WARN compares to cfg at boot; mismatch logged (no refuse —
+    // hyperparams don't affect inference, only forensics + reproducibility).
+    if (inf && inf->has_xgb_hyperparams && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "xgb_max_depth=%d\n"
+            "xgb_learning_rate=%g\n"
+            "xgb_n_estimators=%d\n"
+            "xgb_subsample=%g\n"
+            "xgb_colsample_bytree=%g\n"
+            "xgb_min_child_weight=%d\n"
+            "xgb_seed=%d\n"
+            "xgb_tree_method=%s\n",
+            inf->xgb_max_depth, inf->xgb_learning_rate, inf->xgb_n_estimators,
+            inf->xgb_subsample, inf->xgb_colsample_bytree,
+            inf->xgb_min_child_weight, inf->xgb_seed, inf->xgb_tree_method);
+        if (wrote > 0) n += wrote;
+    }
+    // v5.9.5h Phase 10 — build flags fingerprint (position 18). Emit
+    // when has_build_flags_hash=1; engine load-WARN compares stamp's
+    // hash vs current build's BUILD_FLAGS_HASH() (mismatch logged).
+    if (inf && inf->has_build_flags_hash && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "build_flags_hash=%016lx\n",
+            (unsigned long)inf->build_flags_hash);
+        if (wrote > 0) n += wrote;
+    }
 
     // Restore prior locale ASAP — every subsequent return must NOT undo this twice
     if (pinned) {

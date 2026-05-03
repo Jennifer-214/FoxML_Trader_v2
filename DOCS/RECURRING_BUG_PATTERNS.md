@@ -462,9 +462,173 @@ jq -s 'group_by(.cat=="entry") | .[] | select(.[0].cat=="entry") |
   pattern at-a-glance: any strategy showing many entries in a
   "wrong" regime with negative net bps is the smoking gun.
 
+## Class 11 — Extensibility friction causing silent drift
+
+**Symptom:** A category that supports extension (codes, metrics,
+panels, etc.) is implemented at multiple call sites without a
+canonical spec. Each site evolves independently. Eventually two
+sites disagree: same input, different output. Operator-visible
+behavior diverges from operator-expected behavior; sometimes the
+divergence affects evaluation logic (optimizer rankings, drift
+detection, walk-forward gap thresholds) — making the entire
+selection mechanism unreliable.
+
+This class is distinct from Class 1 (lifecycle orphans — code
+ABSENT) and Class 2 (display vs execution divergence across
+layers — code in the WRONG LAYER). Class 11 is code IN MULTIPLE
+PLACES that should agree but doesn't.
+
+**Root cause:** Adding the first instance of a category is fine.
+Adding the second copy-pastes the formula. By the third or fourth
+site, the formula has been retyped slightly differently. There's
+no single source of truth, so no test fails — both sides "look
+reasonable in isolation."
+
+**Detection:**
+```bash
+# Grep the formula's identifying token across the whole codebase.
+# E.g. for "profit_factor", search for the divisor pattern.
+grep -rnE "(profit_factor|gross_wins.*gross_losses)" --include="*.hpp" .
+# Eyeball the matches: do all sites use the same epsilon? Same
+# fabs? Same sentinel? If not, you've found a Class 11 instance.
+
+# Variant per-category: search for any "X_names[]" or "X_table[]"
+# array hand-maintained in parallel with an enum:
+grep -rnE "static const char\* \w+_names\[\]" --include="*.hpp" .
+# Mirror arrays are Class 11 in waiting.
+```
+
+**Known instances:**
+- v5.6.0 — Controller `halt_reason = 10` (book-imbalance) was added
+  in `ControllerEventLoop.hpp` but `halt_names[]` mirror in
+  `GUI/DashboardPanels.hpp` had only indices 0-9. The display
+  silently dropped the imbalance reason — operator saw "halted"
+  with no reason text. Fix: the bound check made imbalance
+  display work; the structural fix didn't land until v5.8.3.
+- v5.8.3 (preventive) — converted `halt_reason` raw integers to
+  `HALT_*` named constants via `FOREACH_HALT_REASON(X)`. Mirror
+  retired; `HALT_NAMES` is the registry-driven single source.
+  Found 8 indirect raw-int sites via `zero_gate(N)` lambda calls
+  that the original plan had missed.
+- v5.8.4c — `profit_factor` had 4 different formulas across 4
+  sites: `(gl > 0.0001)`, `(gl > 0.001)`, no guard, and
+  `(gl > 0.001)` with `-1.0` sentinel. The `-1.0` sentinel was
+  packed into `profit_factor` itself and read by
+  `OPT_METRIC_PF` — the walk-forward optimizer ranked
+  perfect-wins runs LOWER than mediocre ones. Fix: canonical
+  `Compute_ProfitFactor` returns `0.0` for no-losses; new
+  `all_wins_run` flag handles distinct display.
+- v5.8.4c — `expectancy` used `fabs(avg_loss)` in BacktestEngine
+  but not in EngineTUI/ShardedSnapshot. Harmless when invariant
+  held; defensive against future sign-flip. Fix: canonical
+  `Compute_Expectancy` keeps `fabs`.
+- v5.8.4c — `max_drawdown` had two independent implementations
+  (post-hoc walk in `BacktestEngine` vs incremental per-tick in
+  `BacktestSharded`). Formal equivalence ≠ bytewise FP
+  equivalence. Fix: shared `MaxDrawdown_UpdateIncremental`
+  helper called from both paths — bytewise identical by
+  construction.
+
+**Prevention:**
+- **X-macro registry pattern.** Every "category that supports
+  extension" should have a `FOREACH_<CATEGORY>(X)` registry +
+  auto-generated arrays + `static_assert` size parity. See
+  `DOCS/EASY_ADDITIONS_INVARIANTS.md` for the canonical spec.
+- **Single-helper pattern for shared formulas.** When a metric or
+  computation is needed at two cadences (post-hoc + incremental,
+  backtest + live), extract a single inner-update helper that
+  both paths call. Bytewise FP identity is structural, not test-
+  validated.
+- **Display vs math separation.** When a metric needs distinct
+  display semantics (e.g. "all wins" → "∞"), use a separate flag
+  rather than a sentinel value packed into the metric itself.
+  Sentinel values get read by downstream consumers (optimizers,
+  comparison logic) and silently corrupt rankings.
+- **Readiness deep-audit before any phase that adds an extensibility
+  point.** The v5.8.4c drift findings only surfaced when the
+  readiness skill specifically grepped for divergent formulas —
+  flagging "Class 11 in waiting" before code was written.
+
 **Adjacent**: see `DOCS/STRATEGY_REFACTOR_IDEAS.md` for the longer-
 term observation that adding MORE strategies will increase the
 chance of strategy-regime miscalibration. The X-macro refactor
 proposed there would NOT fix this class — it just makes new
 strategies easier to add. Class-10 prevention is regime-gating +
 filters + observability, all already in place post-v5.7.
+
+---
+
+## Class 12 — Wired-but-unexercised ML paths (v5.9 sprint)
+
+### Pattern
+
+Code path is structurally present (compiles, links, included in
+dispatcher) but no operator workflow actually exercises it. Symptom:
+"the function exists, the test passes, but in real use the wiring
+silently degrades or fall-through fires unobserved."
+
+### Specific instances caught + fixed in v5.9
+
+- **MLBuildContext fully populated in live sharded path** (v5.4.x
+  postmortem). Live engine had model_handle wired but state pointers
+  (ror_regressor, ema_price, etc.) were nullptr → ML_BuildParameters
+  fell through to SimpleDip on every cycle, silently. Caught by
+  reading `Strategy_BuildParameters` dispatch path against actual
+  state-population code.
+
+- **Features_PackAll output validation** (v5.9.0). PackAll produced
+  NaN/Inf for degenerate features; `prediction = Model_Predict(NaN)`
+  silently produced NaN; `prediction > threshold` evaluates false on
+  NaN; entry never fired. No log, no alert. Fixed by NaN-guard at
+  PackAll output + post-prediction NaN check.
+
+- **ML→SimpleDip fall-through CRITICAL log** (v5.9.0b). Engine
+  silently fell back to SimpleDip when ML model failed to load OR
+  when feature pack returned NaN. Operator had no surface
+  distinguishing "ML wasn't configured" vs "ML configured but
+  silently failed." Fixed by per-core `model_load_failed` field +
+  rate-limited CRITICAL log + ML Status panel surface.
+
+- **Cfg explicit-set tracking** (v5.9.0c). `core_N_strategy=`
+  silently fell through to default when absent from cfg. Operator
+  thought they had configured 4 ML cores; engine ran 4 SimpleDip
+  cores. No surface. Fixed by explicit-set bitmap on
+  ControllerConfig + boot WARN when num_execution_cores>0 with
+  bitmap=0 + Per-Core P&L tri-state marker.
+
+- **Train-serve feature parity** (v5.9.2). Even with
+  FEATURE_REGISTRY_HASH guarding the X-macro, function-body changes
+  (e.g. fix sign error in `ML_Compute_VwapDev`) silently shifted
+  output bytes. FEATURE_REGISTRY_HASH only catches X-macro
+  structural changes; function-body changes pass it. Fixed by
+  v5.9.2a snapshot tests asserting Features_PackAll output bytes
+  match recorded values for known-input ctx.
+
+- **Scaler load failure observability** (v5.9.3a, Gap H). v5.9.3
+  added `.scaler` sidecar binding via stamp's `scaler_sha256`. In
+  non-strict mode, sidecar missing or SHA-mismatch silently applied
+  identity. Operator saw "model: loaded" with no indication scaler
+  was bypassed. Fixed by `ml_scaler_load_failed` PerCoreSnap field
+  + ML Status panel red-state row + rate-limited CRITICAL log.
+
+### Prevention principle
+
+"Wired but not exercised" gaps must be caught at PR-time
+(regression test) or plan-time (readiness Checks 11-17), not
+paper-test-time. Specifically:
+
+- **Snapshot tests** (v5.9.2a) catch function-body changes that
+  preserve X-macro structure but alter output bytes.
+- **3-tier strict-mode behavior** (v5.9.3a): every train-serve
+  handoff has refuse / warn-with-surface / silent-forbidden modes.
+  Silent fallback is the bug class itself.
+- **Distinct PerCoreSnap fields** for each failure mode
+  (model_load_failed vs scaler_load_failed) prevent operator
+  conflation of distinct silent failures.
+- **Readiness skill Check 14** (v5.8 X-macro refactors): variant
+  selection audit + signature uniformity + calls_graph_diff before
+  AND after.
+
+The v5.9 sprint shipped 11+ fixes addressing this class. Future
+audits (`/ml-audit`, post-v5.9 `/parity-check`) should catch new
+instances before they reach paper testing.

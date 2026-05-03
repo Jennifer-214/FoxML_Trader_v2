@@ -253,3 +253,20 @@ Toggle: `cfg.partial_exit_enabled = 0` (default) preserves pre-partials behavior
 A "trade" under partials = leg A + leg B together (one logical position). W/L counted per trade-pair, never per leg. The first leg to close stashes its net into `partner_pending_pnl`; the second leg's close sums both nets and classifies the **pair** as W (sum > 0) or L (sum ≤ 0). Tie counts as L.
 
 Implementation in `EventLoop_DrainPostFillOneCore` (lines ~888-905). `core_gross_wins` / `core_gross_losses` accumulate the **pair net** into the matching bucket — single classification site.
+
+## Train-Serve Handoff Verification (v5.9.2a+)
+
+Any artifact traveling from training to serving — model file, stamp body, scaler sidecar (v5.9.3), and any future analogous artifact (ensemble weights, feature config, calibration curves) — MUST satisfy ALL FIVE:
+
+1. **SHA-pinned in stamp body.** Artifact's bytewise hash recorded in the parent stamp. Engine load-time verifier compares.
+2. **Load-time verification.** `verify_<artifact>` function exists + is called from `CoreModelZoo_TryLoadRole` (or analogous load path).
+3. **Refuse-or-warn 3-tier behavior.** `held_out_gate_strict=1` REFUSES on mismatch; `=0` WARNs + applies identity/default with distinct PerCoreSnap surface. Silent fallback is forbidden.
+4. **Atomic write.** Trainer writes via `.tmp + rename` (or `O_TMPFILE + linkat`) so engine never reads partial artifact.
+5. **Tests cover refusal path AND warn-mode observability path.** Two tests minimum: (a) corrupted artifact + strict=1 → refuses; (b) corrupted artifact + strict=0 → warns + flag visible in PerCoreSnap.
+
+**Why:** train-serve drift via incomplete handoff verification is the #1 silent-bug source in production ML systems. v5.9 is the codebase's investment in structural prevention. Each new artifact added without all 5 satisfied is a future v5.X.Y bug waiting to ship.
+
+**How to apply:** when adding a new train-serve artifact (Phase 4 adds the scaler; future phases may add similar artifacts), check off all 5 before merge. Cross-references:
+- `DOCS/CLAUDE_ML_INVARIANTS.md` — ML-specific rules per artifact
+- `DOCS/PARITY_LIFECYCLE.md` — operator-facing change matrix
+- `tests/INVARIANTS_MAP.md` — verification-coverage table

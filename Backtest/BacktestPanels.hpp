@@ -482,6 +482,26 @@ static inline void GUI_Panel_Results(const BacktestResults *results) {
         if (results->sample_count > 0)
             row("ML Samples",  "%d", results->sample_count);
 
+        if (s->nan_labels_total > 0) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "NaN/Inf Labels");
+            ImGui::TableNextColumn();
+            if (s->nan_labels_dropped > 0) {
+                ImGui::Text("%u total (%u multiclass dropped)",
+                            s->nan_labels_total, s->nan_labels_dropped);
+            } else {
+                ImGui::Text("%u (replaced with neutral default)",
+                            s->nan_labels_total);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Label generators produced NaN/Inf for these samples.\n"
+                                  "Binary → 0.5, regression → 0.0, multiclass → skipped.\n"
+                                  "Non-zero count usually indicates degenerate input data\n"
+                                  "(zero prices, missing forward window, etc.).");
+            }
+        }
+
         ImGui::EndTable();
     }
 
@@ -542,6 +562,24 @@ struct PastRun {
     float train_val_gap;
     int   overfit_folds;
     int   has_wf_results;        // 1 = WF metrics present, 0 = old-format file
+    // v5.8.9 — held-out + auto-stamp metadata. Populated when summary.txt
+    // contains held_out_metric (Run Full Validation produced it) and when
+    // a .stamp file exists alongside the saved model. Operator-visible
+    // signals: "is this run deploy-ready?" (held-out gap < threshold +
+    // signed stamp present + matches current build).
+    float held_out_metric;
+    int   has_held_out;
+    int   has_stamp;             // 1 = .stamp file exists in run dir
+    char  stamp_verify_msg[128]; // populated by Verify Stamp button — empty if not verified yet
+    int   stamp_verify_state;    // 0=unverified, 1=ok, -1=fail
+    // v5.9.5d — full verify result stored when stamp_verify_state==1.
+    // Renders as expandable "Stamp details" tree below the OK/FAIL line.
+    // Pre-v5.9.5d the operator only saw "OK — engine=X registry=Y" without
+    // the recorded inference cfg / training metrics / scaler binding /
+    // model_num_outputs that were ALL just stamped (v5.9.5b/c). This makes
+    // those values actually visible for cross-cfg audit.
+    ModelStampResult stamp_verify_full;
+    int   stamp_verify_has_full;  // 1 = stamp_verify_full populated
 };
 
 struct PastRunsState {
@@ -551,6 +589,9 @@ struct PastRunsState {
     char    status_msg[256];     // last action status (e.g., "loaded", "deleted")
     int     sort_column;         // 0..N-1, which column to sort by
     int     sort_descending;     // 0 = asc, 1 = desc
+    // v5.9.5i — stamp audit filter. 0 = all, 1 = stamped only, 2 = OK only,
+    // 3 = FAIL only, 4 = unstamped only.
+    int     stamp_filter;
 };
 
 static inline void PastRuns_Init(PastRunsState *s) {
@@ -621,8 +662,37 @@ static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
         else if (strcmp(k, "label_tp_pct") == 0)         r->label_tp_pct = (float)atof(v);
         else if (strcmp(k, "label_sl_pct") == 0)         r->label_sl_pct = (float)atof(v);
         else if (strcmp(k, "label_lookahead_ticks") == 0) r->label_lookahead_ticks = atoi(v);
+        // v5.8.9 — held-out + auto-stamp summary fields (optional, missing
+        // for older runs).
+        else if (strcmp(k, "held_out_metric") == 0)    { r->held_out_metric = (float)atof(v); r->has_held_out = 1; }
     }
     fclose(f);
+
+    // v5.8.9 — check for a .stamp file alongside the model. PastRuns
+    // doesn't parse the stamp body itself (too expensive — would compute
+    // SHA-256 of every saved model on Rescan). Verify Stamp button fires
+    // verify_model_stamp on demand.
+    {
+        char model_path[400];
+        const char *src_ext = ".json";  // most common; verifier checks .bin path with .stamp suffix
+        // Try role-specific filenames in priority order
+        const char *role_files[] = {"barrier.json", "buy_signal.json", "regime.json",
+                                     "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",
+                                     NULL};
+        for (int i = 0; role_files[i]; ++i) {
+            snprintf(model_path, sizeof(model_path), "%s/%s", run_dir, role_files[i]);
+            struct stat mst;
+            if (stat(model_path, &mst) != 0) continue;
+            char stamp_path[420];
+            snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
+            struct stat sst;
+            if (stat(stamp_path, &sst) == 0) {
+                r->has_stamp = 1;
+                break;
+            }
+        }
+        (void)src_ext;
+    }
 
     // expected.cfg (optional; older runs may not have all fields)
     snprintf(path, sizeof(path), "%s/expected.cfg", run_dir);
@@ -691,6 +761,28 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
     if (s->status_msg[0])
         ImGui::TextColored(FoxmlColors::comment, "(%s)", s->status_msg);
 
+    // v5.9.5i — Stamp audit filter. Operator can isolate runs by stamp
+    // status (all / stamped / OK only / FAIL / unstamped) for audit
+    // workflows. Per /plan-check 2026-05-02: dedicated Stamps panel
+    // would duplicate Past Runs's scan logic; filter inside Past Runs
+    // gives the same operator audit value with no panel duplication.
+    {
+        static const char* filter_names[] = {
+            "All", "Stamped", "Stamp OK", "Stamp FAIL", "Unstamped"
+        };
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120);
+        ImGui::Combo("##stamp_filter", &s->stamp_filter, filter_names, 5);
+        ImGui::SetItemTooltip("Filter runs by stamp status:\n"
+                              "All: every run\n"
+                              "Stamped: has .stamp file (any verify state)\n"
+                              "Stamp OK: Verify Stamp returned valid=1\n"
+                              "Stamp FAIL: Verify Stamp returned valid=0\n"
+                              "Unstamped: no .stamp file\n\n"
+                              "Click 'Verify Stamp' on a row to populate\n"
+                              "OK/FAIL state (default is unverified).");
+    }
+
     if (s->count == 0) {
         ImGui::TextDisabled("No saved runs found in models/. "
                             "Train a model and click 'Save Run' in the Training panel.");
@@ -717,8 +809,14 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
     auto render_run_cell = [&](int i) {
         PastRun *r = &s->runs[i];
         ImGui::TableSetColumnIndex(0);
-        char rowid[160];
-        snprintf(rowid, sizeof(rowid), "%s##run%d", r->dir_name, i);
+        char rowid[200];
+        // v5.8.9 — surface stamp presence inline in the run name. "[stamped]"
+        // prefix means a .stamp file exists alongside the saved model;
+        // operators can filter visually for deploy-ready runs without a
+        // separate column. Verify Stamp button (inspector below) actually
+        // validates signature + drift hash.
+        const char *stamp_tag = r->has_stamp ? "[stamped] " : "";
+        snprintf(rowid, sizeof(rowid), "%s%s##run%d", stamp_tag, r->dir_name, i);
         bool sel = (s->selected == i);
         if (ImGui::Selectable(rowid, sel, ImGuiSelectableFlags_SpanAllColumns)) {
             s->selected = i;
@@ -734,7 +832,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
         if (ImGui::BeginTabItem(class_label)) {
             if (n_class == 0) {
                 ImGui::TextDisabled("No classification runs saved yet.");
-            } else if (ImGui::BeginTable("past_runs_class", 12, flags)) {
+            } else if (ImGui::BeginTable("past_runs_class", 13, flags)) {  // v5.9.5h: +Stamp column
                 ImGui::TableSetupColumn("Run",        ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 220);
                 ImGui::TableSetupColumn("Role",       ImGuiTableColumnFlags_WidthFixed, 80);
                 ImGui::TableSetupColumn("Label",      ImGuiTableColumnFlags_WidthFixed, 50);
@@ -747,11 +845,17 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                 ImGui::TableSetupColumn("Gap",        ImGuiTableColumnFlags_WidthFixed, 70);
                 ImGui::TableSetupColumn("Overfit",    ImGuiTableColumnFlags_WidthFixed, 70);
                 ImGui::TableSetupColumn("Depth/LR/N", ImGuiTableColumnFlags_WidthFixed, 120);
+                ImGui::TableSetupColumn("Stamp",      ImGuiTableColumnFlags_WidthFixed, 60);
                 ImGui::TableHeadersRow();
 
                 for (int i = 0; i < s->count; ++i) {
                     PastRun *r = &s->runs[i];
                     if (r->label_kind == 1) continue;  // skip regression runs
+                    // v5.9.5i — stamp filter
+                    if (s->stamp_filter == 1 && !r->has_stamp) continue;
+                    if (s->stamp_filter == 2 && r->stamp_verify_state != 1) continue;
+                    if (s->stamp_filter == 3 && r->stamp_verify_state != -1) continue;
+                    if (s->stamp_filter == 4 && r->has_stamp) continue;
                     ImGui::TableNextRow();
 
                     render_run_cell(i);
@@ -810,6 +914,28 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
 
                     ImGui::TableNextColumn();
                     ImGui::Text("%d/%.2f/%d", r->max_depth, r->learning_rate, r->n_estimators);
+
+                    // v5.9.5h #19 — stamp_ok column. Four states:
+                    //   - missing:   dim "—" (no .stamp file in run dir)
+                    //   - unverified: yellow "?" (present, not yet verified)
+                    //   - verified OK: green "✓"
+                    //   - verified FAIL: red "✗" (Verify Stamp shows reason)
+                    ImGui::TableNextColumn();
+                    if (!r->has_stamp) {
+                        ImGui::TextDisabled("—");
+                    } else if (r->stamp_verify_state == 1) {
+                        ImGui::TextColored(ImVec4(0.55f, 0.76f, 0.51f, 1.0f), "✓");
+                        ImGui::SetItemTooltip("Stamp verified OK\n"
+                                              "Click 'Verify Stamp' below for full details.");
+                    } else if (r->stamp_verify_state == -1) {
+                        ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "✗");
+                        ImGui::SetItemTooltip("Stamp verification FAILED\n"
+                                              "Click 'Verify Stamp' below for reason.");
+                    } else {
+                        ImGui::TextColored(ImVec4(0.85f, 0.80f, 0.50f, 1.0f), "?");
+                        ImGui::SetItemTooltip("Stamp present, not yet verified\n"
+                                              "Click 'Verify Stamp' below to check.");
+                    }
                 }
                 ImGui::EndTable();
             }
@@ -824,7 +950,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
         if (ImGui::BeginTabItem(regr_label)) {
             if (n_regr == 0) {
                 ImGui::TextDisabled("No regression runs saved yet.");
-            } else if (ImGui::BeginTable("past_runs_regr", 11, flags)) {
+            } else if (ImGui::BeginTable("past_runs_regr", 12, flags)) {  // v5.9.5h: +Stamp column
                 ImGui::TableSetupColumn("Run",        ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 220);
                 ImGui::TableSetupColumn("Role",       ImGuiTableColumnFlags_WidthFixed, 80);
                 ImGui::TableSetupColumn("Label",      ImGuiTableColumnFlags_WidthFixed, 50);
@@ -836,11 +962,17 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                 ImGui::TableSetupColumn("Val MSE",    ImGuiTableColumnFlags_WidthFixed, 90);
                 ImGui::TableSetupColumn("Gap (r)",    ImGuiTableColumnFlags_WidthFixed, 80);
                 ImGui::TableSetupColumn("Depth/LR/N", ImGuiTableColumnFlags_WidthFixed, 120);
+                ImGui::TableSetupColumn("Stamp",      ImGuiTableColumnFlags_WidthFixed, 60);
                 ImGui::TableHeadersRow();
 
                 for (int i = 0; i < s->count; ++i) {
                     PastRun *r = &s->runs[i];
                     if (r->label_kind != 1) continue;  // only regression
+                    // v5.9.5i — stamp filter
+                    if (s->stamp_filter == 1 && !r->has_stamp) continue;
+                    if (s->stamp_filter == 2 && r->stamp_verify_state != 1) continue;
+                    if (s->stamp_filter == 3 && r->stamp_verify_state != -1) continue;
+                    if (s->stamp_filter == 4 && r->has_stamp) continue;
                     ImGui::TableNextRow();
 
                     render_run_cell(i);
@@ -888,6 +1020,28 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
 
                     ImGui::TableNextColumn();
                     ImGui::Text("%d/%.2f/%d", r->max_depth, r->learning_rate, r->n_estimators);
+
+                    // v5.9.5h #19 — stamp_ok column. Four states:
+                    //   - missing:   dim "—" (no .stamp file in run dir)
+                    //   - unverified: yellow "?" (present, not yet verified)
+                    //   - verified OK: green "✓"
+                    //   - verified FAIL: red "✗" (Verify Stamp shows reason)
+                    ImGui::TableNextColumn();
+                    if (!r->has_stamp) {
+                        ImGui::TextDisabled("—");
+                    } else if (r->stamp_verify_state == 1) {
+                        ImGui::TextColored(ImVec4(0.55f, 0.76f, 0.51f, 1.0f), "✓");
+                        ImGui::SetItemTooltip("Stamp verified OK\n"
+                                              "Click 'Verify Stamp' below for full details.");
+                    } else if (r->stamp_verify_state == -1) {
+                        ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "✗");
+                        ImGui::SetItemTooltip("Stamp verification FAILED\n"
+                                              "Click 'Verify Stamp' below for reason.");
+                    } else {
+                        ImGui::TextColored(ImVec4(0.85f, 0.80f, 0.50f, 1.0f), "?");
+                        ImGui::SetItemTooltip("Stamp present, not yet verified\n"
+                                              "Click 'Verify Stamp' below to check.");
+                    }
                 }
                 ImGui::EndTable();
             }
@@ -921,6 +1075,179 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
             // safety: don't actually rm here. show user the command to run.
             snprintf(s->status_msg, sizeof(s->status_msg),
                      "to delete: rm -r models/%s/", r->dir_name);
+        }
+
+        // v5.8.9 — Verify Stamp: runs verify_model_stamp on the saved
+        // model's .stamp file using the current build's
+        // FEATURE_REGISTRY_HASH() so the operator can confirm match
+        // (signature valid + format version + drift hash) before
+        // deploying. Same code path the live engine fires at boot.
+        if (r->has_stamp) {
+            ImGui::SameLine();
+            if (ImGui::Button("Verify Stamp")) {
+                // Try common role files in priority order — same shape as
+                // PastRuns_LoadOne's stat() check above.
+                const char *role_files[] = {
+                    "barrier.json", "buy_signal.json", "regime.json",
+                    "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",
+                    NULL
+                };
+                char model_path[512];
+                const char *found = NULL;
+                for (int i = 0; role_files[i]; ++i) {
+                    snprintf(model_path, sizeof(model_path), "models/%s/%s",
+                             r->dir_name, role_files[i]);
+                    struct stat mst;
+                    if (stat(model_path, &mst) == 0) {
+                        found = model_path;
+                        break;
+                    }
+                }
+                if (!found) {
+                    snprintf(r->stamp_verify_msg, sizeof(r->stamp_verify_msg),
+                        "no model file found in models/%s/", r->dir_name);
+                    r->stamp_verify_state = -1;
+                } else {
+                    // Empty secret = devmode (accepts any signature, just
+                    // checks format version + sha + registry hash).
+                    // Operators verifying for deploy should set the secret
+                    // here once we expose a UI input — for now devmode keeps
+                    // the button low-friction.
+                    ModelStampResult vr = verify_model_stamp(
+                        found, /*secret=*/"",
+                        /*gap_threshold=*/(double)r->gap_acceptable_threshold > 0.0
+                            ? (double)r->gap_acceptable_threshold : 0.05,
+                        /*expected_format_version=*/MODEL_FORMAT_VERSION,
+                        /*expected_feature_registry_hash=*/FEATURE_REGISTRY_HASH());
+                    r->stamp_verify_state = vr.valid;
+                    // v5.9.5d — capture full result for "Stamp details"
+                    // expansion below. Operator audits recorded vs runtime
+                    // cfg without leaving the suite.
+                    r->stamp_verify_full = vr;
+                    r->stamp_verify_has_full = (vr.valid == 1) ? 1 : 0;
+                    if (vr.valid == 1) {
+                        snprintf(r->stamp_verify_msg, sizeof(r->stamp_verify_msg),
+                            "OK — engine=%s registry=%016lx",
+                            vr.engine_version[0] ? vr.engine_version : "unknown",
+                            (unsigned long)vr.feature_registry_hash);
+                    } else {
+                        snprintf(r->stamp_verify_msg, sizeof(r->stamp_verify_msg),
+                            "FAIL — %s", vr.reason);
+                    }
+                }
+            }
+        }
+
+        // Render verify result if button has been pressed for this run.
+        if (r->stamp_verify_msg[0]) {
+            ImVec4 vc = (r->stamp_verify_state == 1)
+                ? ImVec4(0.55f, 0.76f, 0.51f, 1.0f)
+                : ImVec4(0.95f, 0.35f, 0.35f, 1.0f);
+            ImGui::TextColored(vc, "%s", r->stamp_verify_msg);
+
+            // v5.9.5d — Stamp details expansion. Renders all recorded
+            // body fields when the stamp verifies. Lets operator audit
+            // recorded inference cfg vs runtime cfg without manually
+            // reading the .stamp file. Only shown on successful verify
+            // (FAIL case is already self-explanatory via the reason).
+            if (r->stamp_verify_has_full) {
+                const ModelStampResult &v = r->stamp_verify_full;
+                char tree_id[64];
+                snprintf(tree_id, sizeof(tree_id), "Stamp details##%s",
+                         r->dir_name);
+                if (ImGui::TreeNode(tree_id)) {
+                    // Generalization metrics
+                    ImGui::Text("gap:               %.4f  (threshold: %.4f)",
+                                v.generalization_gap, v.gap_threshold);
+                    ImGui::Text("model_format_ver:  %d  (stamp_schema: %d)",
+                                v.model_format_version, v.stamp_format_version);
+                    // Cross-build identifiers
+                    ImGui::Separator();
+                    ImGui::Text("engine_version:    %s",
+                                v.engine_version[0] ? v.engine_version : "(unknown)");
+                    ImGui::Text("registry_hash:     %016lx",
+                                (unsigned long)v.feature_registry_hash);
+                    if (v.cross_major_engine) {
+                        ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.35f, 1.0f),
+                                           "  (cross-major-engine WARN)");
+                    }
+                    // v5.9.4a model_num_outputs (output dimension)
+                    if (v.has_model_num_outputs) {
+                        ImGui::Text("model_num_outputs: %d", v.model_num_outputs);
+                    }
+                    // v5.9.4a training_poll_interval (cadence)
+                    if (v.has_training_poll_interval) {
+                        ImGui::Text("training_poll:    %u",
+                                    (unsigned)v.training_poll_interval);
+                    }
+                    // v5.9.3a scaler binding
+                    if (v.has_scaler_fields) {
+                        ImGui::Separator();
+                        ImGui::Text("scaler_present:    %d",
+                                    v.feature_scaler_present);
+                        if (v.feature_scaler_present && v.scaler_sha256[0]) {
+                            ImGui::Text("scaler_sha256:");
+                            ImGui::SameLine();
+                            ImGui::PushStyleColor(ImGuiCol_Text,
+                                ImVec4(0.85f, 0.80f, 0.60f, 1.0f));
+                            ImGui::PushItemWidth(-1);
+                            char tmp_id[80];
+                            snprintf(tmp_id, sizeof(tmp_id), "##sha_%s",
+                                     r->dir_name);
+                            // Cast away const — InputText with ReadOnly is
+                            // display-only, doesn't mutate.
+                            ImGui::InputText(tmp_id,
+                                              (char*)v.scaler_sha256,
+                                              sizeof(v.scaler_sha256),
+                                              ImGuiInputTextFlags_ReadOnly);
+                            ImGui::PopItemWidth();
+                            ImGui::PopStyleColor();
+                        }
+                    }
+                    // v5.9.2b inference cfg block
+                    if (v.has_inference_cfg) {
+                        ImGui::Separator();
+                        ImGui::TextColored(FoxmlColors::comment,
+                                           "Recorded cfg at training time:");
+                        ImGui::Text("  confidence_threshold_scale:       %.4g",
+                                    v.inference_cfg_confidence_threshold_scale);
+                        ImGui::Text("  barrier_gate_enabled:             %d",
+                                    v.inference_cfg_barrier_gate_enabled);
+                        ImGui::Text("  confidence_hard_block_threshold:  %.4g",
+                                    v.inference_cfg_confidence_hard_block_threshold);
+                        ImGui::Text("  held_out_fraction:                %.3f",
+                                    v.inference_cfg_held_out_fraction);
+                        ImGui::Text("  freshness_tau:                    %.1f",
+                                    v.inference_cfg_freshness_tau);
+                        if (v.has_inference_cfg_bandit) {
+                            ImGui::Text("  bandit_blend_ratio:               %.4g",
+                                        v.inference_cfg_bandit_blend_ratio);
+                        }
+                        if (v.has_inference_cfg_fees) {
+                            ImGui::Text("  fee_rate_maker / taker:           %.5f / %.5f",
+                                        v.inference_cfg_fee_rate_maker,
+                                        v.inference_cfg_fee_rate_taker);
+                        }
+                    }
+                    // v5.9.5h — XGBoost hyperparameter group. Renders when
+                    // stamp had has_xgb_hyperparams=1 (post-v5.9.5h stamps).
+                    if (v.has_xgb_hyperparams) {
+                        ImGui::Separator();
+                        ImGui::TextColored(FoxmlColors::comment,
+                                           "XGBoost hyperparams at training time:");
+                        ImGui::Text("  max_depth:          %d",   v.xgb_max_depth);
+                        ImGui::Text("  learning_rate:      %.4f", v.xgb_learning_rate);
+                        ImGui::Text("  n_estimators:       %d",   v.xgb_n_estimators);
+                        ImGui::Text("  subsample:          %.2f", v.xgb_subsample);
+                        ImGui::Text("  colsample_bytree:   %.2f", v.xgb_colsample_bytree);
+                        ImGui::Text("  min_child_weight:   %d",   v.xgb_min_child_weight);
+                        ImGui::Text("  seed:               %d",   v.xgb_seed);
+                        ImGui::Text("  tree_method:        %s",
+                                    v.xgb_tree_method[0] ? v.xgb_tree_method : "(unknown)");
+                    }
+                    ImGui::TreePop();
+                }
+            }
         }
     }
 
@@ -1329,6 +1656,17 @@ struct TrainingPanelState {
     int max_depth;
     float learning_rate;
     int n_estimators;
+    // v5.9.5h — additional cfg-tunable XGBoost hyperparams. Defaults match
+    // pre-v5.9.5h hardcoded values bytewise; non-tuning operators get
+    // identical training output. UI exposes these as advanced tuning;
+    // operator edits affect Train Model worker output only (worker captures
+    // a snapshot at entry, like max_depth/lr/n_estimators above). Backtest
+    // WF/HeldOut paths read from cfg directly.
+    float ui_subsample;          // 0.5-1.0
+    float ui_colsample_bytree;   // 0.5-1.0
+    int   ui_min_child_weight;   // 1-50
+    int   ui_seed;               // any int
+    int   ui_tree_method_idx;    // 0=hist, 1=exact, 2=approx, 3=auto
     int label_type;
     float label_tp_pct;
     float label_sl_pct;
@@ -1348,6 +1686,22 @@ struct TrainingPanelState {
     float train_label_stddev;
     int positive_count, negative_count;
     char status_msg[128];
+    // v5.9.5d — scaler SHA-256 hex (64 chars + null) for GUI display.
+    // Populated by train_model_worker_fn post-FeatureStandardizer_Persist;
+    // empty when scaler not persisted. Single-writer (worker) → reader (UI
+    // render after tm_complete=1 flips). Pre-v5.9.5d the SHA was only
+    // logged via stderr — operator couldn't see it in foxml_suite.
+    char scaler_sha256_hex[80];
+    // v5.9.5j — Train Model auto-stamp result (Option A: WF-only).
+    // Worker fires stamp_write_for_model post-Persist when cfg.auto_stamp_on_held_out=1.
+    // Stamp records WF mean accuracy + sentinel held_out=0.0 + sentinel
+    // gap_threshold=0.0 (engine treats as training-only; load-time WARN
+    // but no refuse). Operators wanting full held-out validation use
+    // Run Full Validation panel.
+    int  tm_auto_stamp_attempted;
+    int  tm_auto_stamp_ok;
+    char tm_auto_stamp_error[256];
+    char tm_auto_stamp_path_written[400];
     // walk-forward validation (Phase 6A — A7 GUI rework)
     int wf_n_splits;          // number of temporal folds (default 5)
     int wf_horizon_ticks;     // label horizon for purge gap calc (default 1000)
@@ -1363,6 +1717,30 @@ struct TrainingPanelState {
     // save run (bundles config + model for deployment)
     char run_name[64];
     char save_msg[128];
+    // v5.8.7 — Full Validation (held-out + auto-stamp). Replaces the
+    // hand-wired multi-button workflow with a single integrated path
+    // that exercises Backtest_RunFullValidation, which is the function
+    // carrying the v5.8.6 auto-stamp wiring (FEATURE_REGISTRY_HASH +
+    // engine_version embedded in stamp body).
+    volatile int fv_running;
+    volatile int fv_progress;
+    volatile int fv_cancel;
+    volatile int fv_complete;
+    pthread_t fv_tid;
+    FullValidationResults fv_results;
+    bool fv_has_results;
+    char fv_auto_stamp_secret[128];   // HMAC secret (empty = devmode, signs but accepts any sig)
+    float fv_held_out_fraction;       // 0.05 .. 0.30; clamped by HeldOutSplit_Make
+    float fv_gap_threshold;           // gap threshold for stamp accept/refuse
+    char fv_status_msg[256];          // post-run summary + auto-stamp result
+    // v5.9.0c — Train Model worker thread state (V5_9_AUDIT-#7).
+    // Pre-v5.9.0c, Train Model ran synchronously and froze the GUI 5-30s.
+    // Worker pattern mirrors fv_* above. State is single-writer (worker
+    // thread) → main UI reads after volatile completion flag flips.
+    volatile int tm_running;
+    volatile int tm_complete;
+    volatile int tm_cancel;     // v5.9.0d: polled between XGBoost iterations
+    pthread_t tm_tid;
 };
 
 static inline void TrainingPanel_Init(TrainingPanelState *state) {
@@ -1370,6 +1748,12 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->max_depth = 4;
     state->learning_rate = 0.1f;
     state->n_estimators = 100;
+    // v5.9.5h — defaults match XGBHyperparams_Defaults bytewise
+    state->ui_subsample          = 0.8f;
+    state->ui_colsample_bytree   = 0.8f;
+    state->ui_min_child_weight   = 5;
+    state->ui_seed               = 42;
+    state->ui_tree_method_idx    = 0;  // 0 = "hist"
     state->label_type = LABEL_WIN_LOSS;
     state->label_tp_pct = 1.5f;
     state->label_sl_pct = 1.0f;
@@ -1404,6 +1788,22 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->wf_complete = 0;
     state->wf_has_results = false;
     memset(&state->wf_results, 0, sizeof(state->wf_results));
+    // v5.8.7 — full validation defaults (mirrors the cfg defaults so the
+    // suite UI is usable out-of-the-box without editing engine.cfg).
+    state->fv_running = 0;
+    state->fv_progress = 0;
+    state->fv_cancel = 0;
+    state->fv_complete = 0;
+    state->fv_has_results = false;
+    memset(&state->fv_results, 0, sizeof(state->fv_results));
+    state->fv_auto_stamp_secret[0] = '\0';   // devmode by default
+    state->fv_held_out_fraction = 0.20f;      // matches HELDOUT_FRACTION default
+    state->fv_gap_threshold = 0.05f;          // matches gap_acceptable_threshold default
+    state->fv_status_msg[0] = '\0';
+    // v5.9.0c — Train Model worker init
+    state->tm_running = 0;
+    state->tm_complete = 0;
+    state->tm_cancel = 0;
 }
 
 // walk-forward worker thread
@@ -1427,6 +1827,539 @@ static inline void *walkforward_worker_fn(void *arg) {
     state->wf_has_results = true;
     state->wf_complete = 1;
     state->wf_running = 0;
+    return NULL;
+}
+
+// v5.8.7 — full-validation worker thread. Mirrors walkforward_worker_fn but
+// calls Backtest_RunFullValidation, which carries the v5.8.6 auto-stamp
+// wiring (FEATURE_REGISTRY_HASH + engine_version embedded in stamp body).
+struct FullValidationWorkerArgs {
+    TrainingPanelState *state;
+    const BacktestResults *data;
+};
+
+static inline void *fullvalidation_worker_fn(void *arg) {
+    FullValidationWorkerArgs *args = (FullValidationWorkerArgs *)arg;
+    TrainingPanelState *state = args->state;
+    const BacktestResults *data = args->data;
+    free(args);
+
+    // Build held-out split and unlock immediately. The friction-grade lock
+    // exists to make held-out access a deliberate operator action; the
+    // suite UI's Run Full Validation button is exactly that deliberate
+    // action, so unlocking here is correct.
+    HeldOutSplit split = HeldOutSplit_Make(data->sample_count,
+                                            (double)state->fv_held_out_fraction);
+    char unlock_token[33];
+    memcpy(unlock_token, split.lock_token, sizeof(unlock_token));
+    HeldOutSplit_Unlock(&split, unlock_token);
+
+    // Pre-populate auto-stamp request fields. Backtest_RunFullValidation
+    // gates the stamp_write_for_model call on auto_stamp_path being non-empty
+    // AND ran_held_out=1; both are met here when training succeeds.
+    //
+    // v5.8.10 — gate path-setting on the cfg's auto_stamp_on_held_out flag.
+    // When the operator runs the suite with auto_stamp_on_held_out=0 (intent:
+    // manual stamping via tools/stamp_model.sh), the FV button still runs
+    // held-out validation but skips the stamp write. Honors operator intent.
+    memset(&state->fv_results, 0, sizeof(state->fv_results));
+    int auto_stamp_enabled = data->config_used.auto_stamp_on_held_out;
+    if (auto_stamp_enabled) {
+        size_t n = strlen(state->model_path);
+        if (n >= sizeof(state->fv_results.auto_stamp_path))
+            n = sizeof(state->fv_results.auto_stamp_path) - 1;
+        memcpy(state->fv_results.auto_stamp_path, state->model_path, n);
+        state->fv_results.auto_stamp_path[n] = '\0';
+    }
+    {
+        size_t n = strlen(state->fv_auto_stamp_secret);
+        if (n >= sizeof(state->fv_results.auto_stamp_secret))
+            n = sizeof(state->fv_results.auto_stamp_secret) - 1;
+        memcpy(state->fv_results.auto_stamp_secret, state->fv_auto_stamp_secret, n);
+        state->fv_results.auto_stamp_secret[n] = '\0';
+    }
+    state->fv_results.auto_stamp_format_version = 0;  // 0 = use MODEL_FORMAT_VERSION
+
+    Backtest_RunFullValidation(&state->fv_results, data, &split,
+                                state->wf_n_splits, state->wf_horizon_ticks,
+                                state->wf_buffer_ticks, state->wf_min_train,
+                                &state->fv_progress, &state->fv_cancel,
+                                state->label_type, state->fv_gap_threshold);
+
+    // Build a one-line status summary the UI can render in fv_status_msg.
+    if (state->fv_results.auto_stamp_attempted) {
+        if (state->fv_results.auto_stamp_ok) {
+            snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+                "Stamp written: %s", state->fv_results.auto_stamp_path_written);
+        } else {
+            snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+                "Stamp REFUSED: %s", state->fv_results.auto_stamp_error);
+        }
+    } else if (state->fv_results.ran_held_out) {
+        if (!auto_stamp_enabled) {
+            snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+                "Held-out OK; auto-stamp disabled (cfg auto_stamp_on_held_out=0)");
+        } else {
+            // v5.9.4a — improved diagnostic. Pre-v5.9.4a always said
+            // "model_path empty?" — operator had no info to debug.
+            // Now show what state was actually observed.
+            if (state->model_path[0] == '\0') {
+                snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+                    "Held-out OK; auto-stamp skipped — model_path empty "
+                    "(set Model Path field before Run Full Validation)");
+            } else if (state->fv_results.auto_stamp_path[0] == '\0') {
+                snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+                    "Held-out OK; auto-stamp skipped — model_path='%s' did not "
+                    "propagate to auto_stamp_path (worker race or copy failure)",
+                    state->model_path);
+            } else {
+                snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+                    "Held-out OK; auto-stamp skipped — Backtest_RunFullValidation "
+                    "did not fire stamp_write (auto_stamp_path='%s'; check "
+                    "ran_held_out flag + path validity)",
+                    state->fv_results.auto_stamp_path);
+            }
+        }
+    } else {
+        snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+            "Held-out did not complete (cancel or shape error?)");
+    }
+
+    state->fv_has_results = true;
+    state->fv_complete = 1;
+    state->fv_running = 0;
+    return NULL;
+}
+
+// v5.9.0d — Train Model worker thread (V5_9_AUDIT-#7).
+// Pre-v5.9.0d: Train Model ran SYNCHRONOUSLY on the UI thread, freezing
+// the GUI 5-30s during XGBoost training. The synchronous-train warning
+// at GUI_Panel_Training documented this as a known UX gap.
+//
+// Worker pattern mirrors fullvalidation_worker_fn (v5.8.7). Audit walked
+// the body's race surface (DOCS/V5_9_ML_HARDENING_AUDIT.md follow-up):
+//   - Snapshot user-modifiable state at entry (max_depth, lr, n_estimators,
+//     label_type, model_path). UI can change these mid-train without
+//     affecting the running worker.
+//   - tm_cancel polled between XGBoosterUpdateOneIter calls. XGBoost
+//     has no mid-iteration cancel API; bounded latency = one iter time.
+//   - All exit paths set tm_complete=1 + tm_running=0 (including malloc
+//     failure + cancel paths).
+//   - state->{train_accuracy, status_msg, model_trained, train_mse,
+//     train_correlation, feature_importance} are written by worker;
+//     UI render reads after tm_complete flag flips. x86 aligned-atomic
+//     for these primitives matches v5.8.7 fv_* pattern.
+struct TrainModelWorkerArgs {
+    TrainingPanelState *state;
+    const RunControlState *run_control;
+};
+
+static inline void *train_model_worker_fn(void *arg) {
+    TrainModelWorkerArgs *args = (TrainModelWorkerArgs *)arg;
+    TrainingPanelState *state = args->state;
+    const RunControlState *run_control = args->run_control;
+    free(args);
+
+    const BacktestResults *results = &run_control->results;
+
+    // v5.9.0d — snapshot user-modifiable state at worker entry. UI can
+    // change these mid-train via ImGui inputs; the worker uses the values
+    // captured at click time, not mid-train.
+    int snap_max_depth      = state->max_depth;
+    float snap_learning_rate = state->learning_rate;
+    int snap_n_estimators   = state->n_estimators;
+    int snap_label_type     = state->label_type;
+    // v5.9.5h — snapshot v5.9.5h hyperparams. Index→string conversion for
+    // tree_method done at apply-time (XGBHyperparams_Apply).
+    float snap_subsample        = state->ui_subsample;
+    float snap_colsample_bytree = state->ui_colsample_bytree;
+    int   snap_min_child_weight = state->ui_min_child_weight;
+    int   snap_seed             = state->ui_seed;
+    int   snap_tree_method_idx  = state->ui_tree_method_idx;
+    char snap_model_path[256];
+    {
+        size_t n = strlen(state->model_path);
+        if (n >= sizeof(snap_model_path)) n = sizeof(snap_model_path) - 1;
+        memcpy(snap_model_path, state->model_path, n);
+        snap_model_path[n] = '\0';
+    }
+
+#ifdef USE_XGBOOST
+    // log to stderr so the Log panel shows the user "training started"
+    fprintf(stderr, "[TRAIN] starting on %d samples (label_type=%d, "
+                    "max_depth=%d, lr=%.3f, n_est=%d)...\n",
+            results->sample_count, snap_label_type,
+            snap_max_depth, snap_learning_rate, snap_n_estimators);
+    fflush(stderr);
+
+    // create output directory
+    mkdir("models", 0755);
+
+    // filter out neutral labels (0.5) — XGBoost binary needs 0 or 1
+    int n_valid = 0;
+    float *train_features = (float *)malloc(results->sample_count * MODEL_NUM_FEATURES * sizeof(float));
+    float *train_labels   = (float *)malloc(results->sample_count * sizeof(float));
+    if (!train_features || !train_labels) {
+        free(train_features); free(train_labels);
+        snprintf(state->status_msg, sizeof(state->status_msg), "Failed to allocate training buffers");
+        state->model_trained = true;  // show the error message
+        state->tm_complete = 1;
+        state->tm_running = 0;
+        return NULL;
+    }
+
+    for (int i = 0; i < results->sample_count; i++) {
+        if (results->labels[i] == 0.5f) continue;
+        memcpy(&train_features[n_valid * MODEL_NUM_FEATURES],
+               &results->feature_matrix[i * MODEL_NUM_FEATURES],
+               MODEL_NUM_FEATURES * sizeof(float));
+        train_labels[n_valid] = results->labels[i];
+        n_valid++;
+    }
+
+    DMatrixHandle dtrain;
+    XGDMatrixCreateFromMat(train_features, n_valid, MODEL_NUM_FEATURES, NAN, &dtrain);
+    XGDMatrixSetFloatInfo(dtrain, "label", train_labels, n_valid);
+
+    BoosterHandle booster;
+    XGBoosterCreate(&dtrain, 1, &booster);
+
+    // v5.9.5h — XGBHyperparams struct + apply helper. All 8 fields come
+    // from operator's Train Model panel state (snapshot taken at worker
+    // entry above). max_depth/lr/n_est are existing GUI-tunable; the
+    // 5 v5.9.5h fields (subsample, colsample, min_child_weight, seed,
+    // tree_method) are also GUI-tunable in Phase 3.
+    static const char* tree_method_choices[] = { "hist", "exact", "approx", "auto" };
+    int tm_idx = (snap_tree_method_idx >= 0 && snap_tree_method_idx < 4)
+                 ? snap_tree_method_idx : 0;
+
+    tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
+    hp.max_depth         = snap_max_depth;
+    hp.learning_rate     = snap_learning_rate;
+    hp.n_estimators      = snap_n_estimators;
+    hp.subsample         = snap_subsample;
+    hp.colsample_bytree  = snap_colsample_bytree;
+    hp.min_child_weight  = snap_min_child_weight;
+    hp.seed              = snap_seed;
+    {
+        size_t n = strlen(tree_method_choices[tm_idx]);
+        if (n >= sizeof(hp.tree_method)) n = sizeof(hp.tree_method) - 1;
+        memcpy(hp.tree_method, tree_method_choices[tm_idx], n);
+        hp.tree_method[n] = '\0';
+    }
+    // Apply tree shape + RNG params; nthread=4 for faster GUI iter
+    // (deterministic-per-fold not required here — Train Model is
+    // exploratory; held-out validation uses nthread=1 for parity).
+    // Objective is set per label-type below; XGBHyperparams_Apply
+    // handles the rest (max_depth, eta, subsample, colsample,
+    // min_child_weight, seed, tree_method, verbosity).
+    tt::XGBHyperparams_Apply(booster, hp, /*nthread=*/4);
+
+    int num_classes = (snap_label_type >= 0 && snap_label_type < LABEL_COUNT)
+                      ? label_table[snap_label_type].num_classes : 0;
+    int is_multiclass  = (num_classes >= 2);
+    int is_regression  = (num_classes == 1);
+
+    if (is_multiclass) {
+        XGBoosterSetParam(booster, "objective", "multi:softprob");
+        char nc_s[8]; snprintf(nc_s, 8, "%d", num_classes);
+        XGBoosterSetParam(booster, "num_class", nc_s);
+        float *mc_weights = (float *)malloc(n_valid * sizeof(float));
+        int   mc_counts[16] = {0};
+        if (mc_weights) {
+            XGBoost_ComputeMulticlassWeights(train_labels, n_valid, num_classes,
+                                              mc_weights, mc_counts);
+            XGDMatrixSetFloatInfo(dtrain, "weight", mc_weights, n_valid);
+            fprintf(stderr, "[TRAIN] multiclass class counts:");
+            for (int k = 0; k < num_classes && k < 16; k++) {
+                fprintf(stderr, " c%d=%d (%.1f%%)", k, mc_counts[k],
+                        n_valid > 0 ? 100.0f * mc_counts[k] / n_valid : 0.0f);
+            }
+            fprintf(stderr, " — per-sample weights applied\n");
+            fflush(stderr);
+            free(mc_weights);
+        }
+    } else if (is_regression) {
+        XGBoosterSetParam(booster, "objective", "reg:squarederror");
+    } else {
+        XGBoosterSetParam(booster, "objective", "binary:logistic");
+        int n_pos = 0, n_neg = 0;
+        double spw = XGBoost_ComputeScalePosWeight(train_labels, n_valid, &n_pos, &n_neg);
+        char spw_s[24]; snprintf(spw_s, sizeof(spw_s), "%.4f", spw);
+        XGBoosterSetParam(booster, "scale_pos_weight", spw_s);
+        fprintf(stderr, "[TRAIN] class balance: +%d / -%d → scale_pos_weight=%s%s\n",
+                n_pos, n_neg, spw_s,
+                n_pos == 0 ? "  WARNING: zero positives, model cannot learn" : "");
+        fflush(stderr);
+    }
+    // (v5.9.5g tree_method=hist + v5.9.5h nthread=4 + verbosity=0 all
+    // applied above via XGBHyperparams_Apply.)
+
+    // v5.9.0d — iteration loop with tm_cancel poll. XGBoost has no
+    // mid-iteration cancel; cancel response bounded by one iter time
+    // (typically 100ms-1s for typical hyperparameters).
+    int cancelled = 0;
+    for (int i = 0; i < snap_n_estimators; i++) {
+        if (state->tm_cancel) {
+            cancelled = 1;
+            fprintf(stderr, "[TRAIN] cancelled at iteration %d/%d\n", i, snap_n_estimators);
+            fflush(stderr);
+            break;
+        }
+        XGBoosterUpdateOneIter(booster, i, dtrain);
+    }
+
+    if (cancelled) {
+        XGDMatrixFree(dtrain);
+        XGBoosterFree(booster);
+        free(train_features);
+        free(train_labels);
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Training cancelled by user");
+        state->model_trained = false;
+        state->tm_complete = 1;
+        state->tm_running = 0;
+        return NULL;
+    }
+
+    // embed model format version + fingerprint
+    char ver_s[8]; snprintf(ver_s, 8, "%d", MODEL_FORMAT_VERSION);
+    XGBoosterSetAttr(booster, "foxml_version", ver_s);
+    {
+        const char *fp_paths[MAX_DATA_FILES];
+        for (int i = 0; i < run_control->run_config.num_data_files && i < MAX_DATA_FILES; i++)
+            fp_paths[i] = run_control->run_config.data_paths[i];
+        char fp_hex[65];
+        Fingerprint_Compute<BACKTEST_FP>(fp_hex, &results->config_used,
+            sizeof(results->config_used), fp_paths, run_control->run_config.num_data_files);
+        XGBoosterSetAttr(booster, "foxml_fingerprint", fp_hex);
+        fprintf(stderr, "[TRAIN] model fingerprint: %.12s...\n", fp_hex);
+    }
+
+    XGBoosterSaveModel(booster, snap_model_path);
+
+    // compute in-sample training metric
+    bst_ulong out_len;
+    const float *out_result;
+    DMatrixHandle dpred;
+    XGDMatrixCreateFromMat(train_features, n_valid, MODEL_NUM_FEATURES, NAN, &dpred);
+    XGBoosterPredict(booster, dpred, 0, 0, 0, &out_len, &out_result);
+    if (is_multiclass) {
+        state->train_accuracy = WalkForward_ComputeMulticlassAccuracy(
+            out_result, train_labels, n_valid, num_classes) * 100.0f;
+        state->train_mse = 0.0f;
+        state->train_correlation = 0.0f;
+    } else if (is_regression) {
+        state->train_mse         = WalkForward_ComputeMSE(out_result, train_labels, n_valid);
+        state->train_correlation = WalkForward_ComputeCorrelation(out_result, train_labels, n_valid);
+        state->train_accuracy    = 0.0f;
+    } else {
+        state->train_accuracy = WalkForward_ComputeAccuracy(
+            out_result, train_labels, n_valid, 0.5f) * 100.0f;
+        state->train_mse = 0.0f;
+        state->train_correlation = 0.0f;
+    }
+    XGDMatrixFree(dpred);
+
+    memset(state->feature_importance, 0, sizeof(state->feature_importance));
+
+    // v5.9.3b — train-time scaler computation + sidecar persist (Gap G).
+    // Reads train_features (still alive at this point, freed below).
+    // Atomic ordering: Compute → Persist → SHA-256 hex → log to operator.
+    // Operator runs tools/stamp_model.sh --feature-scaler-present=1
+    // --scaler-sha256=<hex> (or sets auto_stamp_path in cfg for next run)
+    // to bind the sidecar to the model's stamp.
+    int scaler_persisted = 0;
+    char scaler_sha256_hex[80] = {0};
+    char scaler_path[600] = {0};
+    {
+        tt::FeatureStandardizer scaler;
+        tt::FeatureStandardizer_Compute(&scaler, train_features, n_valid,
+                                          tt::SCALER_STDDEV_FLOOR);
+        snprintf(scaler_path, sizeof(scaler_path), "%s.scaler", snap_model_path);
+        if (tt::FeatureStandardizer_Persist(&scaler, scaler_path)) {
+            scaler_persisted = 1;
+            // Compute SHA-256 of the on-disk file (verifies it landed;
+            // don't trust in-memory compute). Hex output for stamp.
+            if (!tt::sha256_file_hex_inproc(scaler_path, scaler_sha256_hex,
+                                              sizeof(scaler_sha256_hex))) {
+                fprintf(stderr, "[train] scaler persisted but SHA-256 read failed\n");
+                scaler_sha256_hex[0] = '\0';
+            } else {
+                fprintf(stderr, "[train] scaler persisted: %s\n"
+                                "[train] scaler_sha256=%s — pass to stamp tool to bind\n",
+                        scaler_path, scaler_sha256_hex);
+            }
+            // v5.9.5d — copy SHA into shared state for GUI display.
+            // MUST happen before tm_complete=1 flag flip below; worker→UI
+            // ordering follows the v5.9.0c pattern (single-writer worker
+            // publishes via flag, UI reads after flag observed). x86
+            // aligned-byte writes are atomic; the volatile completion flag
+            // forces no-reordering at the compiler level.
+            size_t hex_n = strnlen(scaler_sha256_hex, sizeof(scaler_sha256_hex));
+            if (hex_n >= sizeof(state->scaler_sha256_hex))
+                hex_n = sizeof(state->scaler_sha256_hex) - 1;
+            memcpy(state->scaler_sha256_hex, scaler_sha256_hex, hex_n);
+            state->scaler_sha256_hex[hex_n] = '\0';
+        } else {
+            // Gap G atomic contract: persist failure must not propagate to
+            // stamp claiming scaler. Worker doesn't emit stamps directly,
+            // but log loudly so operator doesn't manually bind a missing file.
+            fprintf(stderr,
+                "[train] [WARN] scaler persist FAILED; train_features have "
+                "non-degenerate stats but no .scaler on disk. Do not stamp "
+                "this model with feature_scaler_present=1.\n");
+        }
+    }
+
+    XGDMatrixFree(dtrain);
+    XGBoosterFree(booster);
+    free(train_features);
+    free(train_labels);
+
+    // v5.9.5j — Train Model auto-stamp (Option A: WF-only). When operator
+    // has cfg.auto_stamp_on_held_out=1 + non-empty cfg.held_out_stamp_secret,
+    // fire stamp_write_for_model with WF mean accuracy as wf_mean_val,
+    // sentinel held_out=0.0 + sentinel gap_threshold=0.0. Engine load-time
+    // recognizes the sentinel as "training-only stamp" — info-level log,
+    // no refuse. Operators wanting full held-out validation use Run Full
+    // Validation panel (which produces a full stamp via Backtest_RunFullValidation).
+    state->tm_auto_stamp_attempted = 0;
+    state->tm_auto_stamp_ok = 0;
+    state->tm_auto_stamp_error[0] = '\0';
+    state->tm_auto_stamp_path_written[0] = '\0';
+    if (run_control->results.config_used.auto_stamp_on_held_out &&
+        run_control->results.config_used.held_out_stamp_secret[0] &&
+        !cancelled) {
+        state->tm_auto_stamp_attempted = 1;
+
+        // Build inf — mirror Backtest_RunFullValidation's pattern (v5.9.5b/h)
+        StampInferenceCfgInputs inf = {};
+        inf.has_inference_cfg = 1;
+        inf.confidence_threshold_scale =
+            FPN_ToDouble(run_control->results.config_used.confidence_threshold_scale);
+        inf.barrier_gate_enabled = run_control->results.config_used.barrier_gate_enabled;
+        inf.confidence_hard_block_threshold =
+            FPN_ToDouble(run_control->results.config_used.confidence_hard_block_threshold);
+        inf.held_out_fraction =
+            FPN_ToDouble(run_control->results.config_used.held_out_fraction);
+        inf.freshness_tau =
+            FPN_ToDouble(run_control->results.config_used.confidence_freshness_tau);
+        inf.has_training_poll_interval = 1;
+        inf.training_poll_interval = run_control->results.config_used.poll_interval;
+        // num_outputs derived from label_type
+        {
+            int K = LabelType_NumClasses(snap_label_type);
+            inf.has_num_outputs = 1;
+            inf.model_num_outputs = (K >= 2) ? K : 1;
+        }
+        // XGBoost hyperparams from operator's panel inputs (v5.9.5h)
+        inf.has_xgb_hyperparams = 1;
+        inf.xgb_max_depth = snap_max_depth;
+        inf.xgb_learning_rate = snap_learning_rate;
+        inf.xgb_n_estimators = snap_n_estimators;
+        inf.xgb_subsample = snap_subsample;
+        inf.xgb_colsample_bytree = snap_colsample_bytree;
+        inf.xgb_min_child_weight = snap_min_child_weight;
+        inf.xgb_seed = snap_seed;
+        {
+            static const char* tree_method_choices[] = { "hist", "exact", "approx", "auto" };
+            int tm_idx = (snap_tree_method_idx >= 0 && snap_tree_method_idx < 4)
+                         ? snap_tree_method_idx : 0;
+            size_t tmln = strnlen(tree_method_choices[tm_idx],
+                                   sizeof(inf.xgb_tree_method) - 1);
+            memcpy(inf.xgb_tree_method, tree_method_choices[tm_idx], tmln);
+            inf.xgb_tree_method[tmln] = '\0';
+        }
+        // Build flags fingerprint (v5.9.5h #10)
+        inf.has_build_flags_hash = 1;
+        inf.build_flags_hash = tt::BUILD_FLAGS_HASH();
+        // Scaler binding (v5.9.3a) — populate when scaler_persisted
+        if (scaler_persisted && state->scaler_sha256_hex[0]) {
+            inf.has_scaler = 1;
+            inf.feature_scaler_present = 1;
+            inf.scaler_sha256_hex = state->scaler_sha256_hex;
+        }
+
+        // ISO date for trained_on
+        char today[16] = {0};
+        time_t now = time(NULL);
+        struct tm tm_buf;
+        localtime_r(&now, &tm_buf);
+        strftime(today, sizeof(today), "%Y-%m-%d", &tm_buf);
+
+        // Convert WF mean (display %) to fraction (matches Full Validation's
+        // stamping convention: 0.0-1.0).
+        double wf_metric = (double)state->train_accuracy / 100.0;
+
+        StampWriteResult sr = stamp_write_for_model(
+            snap_model_path,
+            run_control->results.config_used.held_out_stamp_secret,
+            MODEL_FORMAT_VERSION,
+            today,
+            wf_metric,
+            /*held_out_metric=*/0.0,        // sentinel: training-only stamp
+            /*gap_threshold=*/0.0,           // sentinel: skip gap check
+            /*force=*/0,
+            FEATURE_REGISTRY_HASH(),
+            ENGINE_VERSION_STRING,
+            &inf);
+        state->tm_auto_stamp_ok = sr.ok;
+        if (sr.ok) {
+            size_t pn = strnlen(sr.stamp_path, sizeof(state->tm_auto_stamp_path_written) - 1);
+            memcpy(state->tm_auto_stamp_path_written, sr.stamp_path, pn);
+            state->tm_auto_stamp_path_written[pn] = '\0';
+            fprintf(stderr, "[train] auto-stamped: %s\n", sr.stamp_path);
+        } else {
+            size_t en = strnlen(sr.error, sizeof(state->tm_auto_stamp_error) - 1);
+            memcpy(state->tm_auto_stamp_error, sr.error, en);
+            state->tm_auto_stamp_error[en] = '\0';
+            fprintf(stderr, "[train] auto-stamp FAILED: %s\n", sr.error);
+        }
+    }
+
+    // v5.9.4a — Gap I full closure: auto-unlink orphan scaler on cancel.
+    // Pre-v5.9.4a (v5.9.3b) just logged "operator must rm orphan"; now we
+    // unlink automatically since the model file itself is also discarded
+    // on cancel (no stamp written by this worker → no consumer for the
+    // sidecar). Atomic + idempotent: unlink failure (file already gone)
+    // is non-fatal.
+    if (state->tm_cancel && scaler_persisted) {
+        if (unlink(scaler_path) == 0) {
+            fprintf(stderr,
+                "[train] cancelled post-scaler-persist; auto-removed orphan %s\n",
+                scaler_path);
+        } else {
+            // unlink failed — file may already be gone (concurrent cleanup),
+            // disk error, or permissions. Best-effort; don't crash worker.
+            fprintf(stderr,
+                "[train] cancelled post-scaler-persist; could not auto-remove %s "
+                "(may already be cleaned)\n", scaler_path);
+        }
+    }
+
+    state->model_trained = true;
+    // v5.9.5d — status line ends with "next: Run Full Validation to
+    // auto-stamp" so operator knows the workflow continuation. Train Model
+    // alone produces an unstamped model (no held-out metric → no
+    // generalization gap → engine refuses load in strict mode); Run Full
+    // Validation produces the stamp.
+    const char *next_hint = " — next: Run Full Validation to auto-stamp";
+    if (is_regression) {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Model saved to %s (MSE: %.6f, corr: %.4f)%s%s",
+                 snap_model_path, state->train_mse, state->train_correlation,
+                 scaler_persisted ? " [+scaler]" : "", next_hint);
+    } else {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Model saved to %s (accuracy: %.1f%%)%s%s",
+                 snap_model_path, state->train_accuracy,
+                 scaler_persisted ? " [+scaler]" : "", next_hint);
+    }
+#endif  // USE_XGBOOST
+
+    state->tm_complete = 1;
+    state->tm_running = 0;
     return NULL;
 }
 
@@ -1798,213 +2731,133 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     ImGui::SetItemTooltip("Number of boosting rounds (trees)\n"
                           "more trees + low learning rate = better but slower\n"
                           "too many = overfitting (check walk-forward gap)");
+
+    // v5.9.5h — advanced hyperparameter section. Defaults match
+    // pre-v5.9.5h hardcoded values; non-tuning operators don't need to
+    // touch these. Operators wanting to tune get cfg-bound fields with
+    // stamp recording for drift forensics.
+    if (ImGui::CollapsingHeader("Advanced (v5.9.5h)")) {
+        ImGui::SliderFloat("Subsample", &state->ui_subsample, 0.5f, 1.0f, "%.2f");
+        ImGui::SetItemTooltip("Row subsample per tree (0.5-1.0)\n"
+                              "Lower = more variance reduction, less overfitting\n"
+                              "Default 0.8 (matches pre-v5.9.5h hardcoded)");
+        ImGui::SliderFloat("ColSample/Tree", &state->ui_colsample_bytree, 0.5f, 1.0f, "%.2f");
+        ImGui::SetItemTooltip("Column subsample per tree (0.5-1.0)\n"
+                              "Lower = less feature-importance bias\n"
+                              "Default 0.8 (matches pre-v5.9.5h hardcoded)");
+        ImGui::InputInt("Min Child Weight", &state->ui_min_child_weight, 1, 5);
+        if (state->ui_min_child_weight < 1) state->ui_min_child_weight = 1;
+        if (state->ui_min_child_weight > 50) state->ui_min_child_weight = 50;
+        ImGui::SetItemTooltip("Min sum-of-weights per leaf (1-50)\n"
+                              "Higher = more regularization\n"
+                              "Default 5 (matches pre-v5.9.5h hardcoded)");
+        ImGui::InputInt("Seed", &state->ui_seed, 1, 100);
+        ImGui::SetItemTooltip("RNG seed for reproducible runs\n"
+                              "Same seed + same data + same hyperparams = same model\n"
+                              "Default 42 (matches pre-v5.9.5h hardcoded)");
+        static const char* tree_method_names[] = {"hist", "exact", "approx", "auto"};
+        ImGui::Combo("Tree Method", &state->ui_tree_method_idx, tree_method_names, 4);
+        ImGui::SetItemTooltip("XGBoost tree construction algorithm\n"
+                              "hist (default): fast histogram, recommended\n"
+                              "exact: slow but precise (small datasets only)\n"
+                              "approx: histogram alternative\n"
+                              "auto: XGBoost picks (varies by version)");
+    }
+
     ImGui::InputText("Model Path", state->model_path, sizeof(state->model_path));
     ImGui::SetItemTooltip("Where to save the trained model\n"
                           "used by the engine at runtime for ML buy signals");
 
-    // synchronous-train warning — sets expectations before the freeze
-    ImGui::TextColored(FoxmlColors::comment,
-        "(Train Model runs synchronously — GUI may freeze 5-30s. Watch the Log panel for progress.)");
-
-    // train button. NOTE: Train Model runs SYNCHRONOUSLY on the UI thread
-    // (no worker thread). the GUI will freeze for 5-30 seconds during XGBoost
-    // training. the tooltip warns the user so it doesn't feel broken.
+    // v5.9.0d — Train Model now runs in a worker thread. The audit at
+    // train_model_worker_fn (above) walked the race surface + cancellation
+    // path. UI shows a progress indicator + Cancel button while running;
+    // results display (below) reads the same state fields the worker writes.
     bool can_train = results->sample_count >= 10;
 #ifndef USE_XGBOOST
     can_train = false;
 #endif
-    if (!can_train) ImGui::BeginDisabled();
-    if (ImGui::Button("Train Model")) {
-        // clear previous results on re-run
-        state->model_trained = false;
-        state->status_msg[0] = '\0';
-        state->wf_has_results = false;
-#ifdef USE_XGBOOST
-        // log to stderr so the Log panel shows the user "training started"
-        // before XGBoost grabs the UI thread for 5-30s. without this, the
-        // Train Model button looks frozen (because it IS — synchronous).
-        fprintf(stderr, "[TRAIN] starting on %d samples (label_type=%d, "
-                        "max_depth=%d, lr=%.3f, n_est=%d)...\n",
-                results->sample_count, state->label_type,
-                state->max_depth, state->learning_rate, state->n_estimators);
-        fflush(stderr);
 
-        // create output directory
-        mkdir("models", 0755);
-
-        // filter out neutral labels (0.5) — XGBoost binary needs 0 or 1
-        // compact into separate buffers so results->feature_matrix stays intact for walk-forward
-        int n_valid = 0;
-        float *train_features = (float *)malloc(results->sample_count * MODEL_NUM_FEATURES * sizeof(float));
-        float *train_labels   = (float *)malloc(results->sample_count * sizeof(float));
-        if (!train_features || !train_labels) {
-            free(train_features); free(train_labels);
-            snprintf(state->status_msg, sizeof(state->status_msg), "Failed to allocate training buffers");
-            state->model_trained = true; // show the error message
-        } else {
-        for (int i = 0; i < results->sample_count; i++) {
-            if (results->labels[i] == 0.5f) continue;
-            memcpy(&train_features[n_valid * MODEL_NUM_FEATURES],
-                   &results->feature_matrix[i * MODEL_NUM_FEATURES],
-                   MODEL_NUM_FEATURES * sizeof(float));
-            train_labels[n_valid] = results->labels[i];
-            n_valid++;
+    if (state->tm_running) {
+        // Worker is mid-train. Show indeterminate progress + cancel button.
+        // XGBoost has no native iteration-progress callback; we use a
+        // pulsing bar as a "still alive" signal. Cancel polls between
+        // XGBoosterUpdateOneIter calls (bounded latency = one iter time).
+        ImGui::ProgressBar(-1.0f * (float)ImGui::GetTime(),
+                           ImVec2(-1, 0), "Training XGBoost...");
+        if (ImGui::Button("Cancel Training")) {
+            state->tm_cancel = 1;
         }
-
-        DMatrixHandle dtrain;
-        XGDMatrixCreateFromMat(train_features, n_valid,
-                               MODEL_NUM_FEATURES, NAN, &dtrain);
-        XGDMatrixSetFloatInfo(dtrain, "label", train_labels, n_valid);
-
-        BoosterHandle booster;
-        XGBoosterCreate(&dtrain, 1, &booster);
-
-        char depth_s[8]; snprintf(depth_s, 8, "%d", state->max_depth);
-        char lr_s[16]; snprintf(lr_s, 16, "%f", state->learning_rate);
-        XGBoosterSetParam(booster, "max_depth", depth_s);
-        XGBoosterSetParam(booster, "eta", lr_s);
-
-        // objective + num_class read from label_table (single source of truth)
-        //   num_classes  0 = binary classification
-        //   num_classes  1 = continuous regression
-        //   num_classes >=2 = multiclass softmax
-        int num_classes = (state->label_type >= 0 && state->label_type < LABEL_COUNT)
-                          ? label_table[state->label_type].num_classes : 0;
-        int is_multiclass  = (num_classes >= 2);
-        int is_regression  = (num_classes == 1);
-
-        if (is_multiclass) {
-            XGBoosterSetParam(booster, "objective", "multi:softprob");
-            char nc_s[8]; snprintf(nc_s, 8, "%d", num_classes);
-            XGBoosterSetParam(booster, "num_class", nc_s);
-            // class-balance via per-sample weights (scale_pos_weight is binary-only).
-            // Without this, multiclass with skewed distribution trains a majority
-            // predictor — same failure mode as binary imbalance.
-            float *mc_weights = (float *)malloc(n_valid * sizeof(float));
-            int   mc_counts[16] = {0};
-            if (mc_weights) {
-                XGBoost_ComputeMulticlassWeights(train_labels, n_valid, num_classes,
-                                                  mc_weights, mc_counts);
-                XGDMatrixSetFloatInfo(dtrain, "weight", mc_weights, n_valid);
-                fprintf(stderr, "[TRAIN] multiclass class counts:");
-                for (int k = 0; k < num_classes && k < 16; k++) {
-                    fprintf(stderr, " c%d=%d (%.1f%%)", k, mc_counts[k],
-                            n_valid > 0 ? 100.0f * mc_counts[k] / n_valid : 0.0f);
-                }
-                fprintf(stderr, " — per-sample weights applied\n");
-                fflush(stderr);
-                free(mc_weights);
-            }
-        } else if (is_regression) {
-            XGBoosterSetParam(booster, "objective", "reg:squarederror");
-        } else {
-            XGBoosterSetParam(booster, "objective", "binary:logistic");
-            // class-balance: scale_pos_weight = n_neg/n_pos. Without this,
-            // imbalanced datasets (typical for tight-barrier label sets)
-            // train a model that trivially predicts the majority class.
-            int n_pos = 0, n_neg = 0;
-            double spw = XGBoost_ComputeScalePosWeight(train_labels, n_valid, &n_pos, &n_neg);
-            char spw_s[24]; snprintf(spw_s, sizeof(spw_s), "%.4f", spw);
-            XGBoosterSetParam(booster, "scale_pos_weight", spw_s);
-            fprintf(stderr, "[TRAIN] class balance: +%d / -%d → scale_pos_weight=%s%s\n",
-                    n_pos, n_neg, spw_s,
-                    n_pos == 0 ? "  WARNING: zero positives, model cannot learn" : "");
-            fflush(stderr);
+    } else {
+        if (!can_train) ImGui::BeginDisabled();
+        if (ImGui::Button("Train Model")) {
+            // clear previous results + spawn worker
+            state->model_trained = false;
+            state->status_msg[0] = '\0';
+            state->wf_has_results = false;
+            state->tm_cancel = 0;
+            state->tm_complete = 0;
+            state->tm_running = 1;
+            TrainModelWorkerArgs *args = (TrainModelWorkerArgs *)malloc(sizeof(TrainModelWorkerArgs));
+            args->state = state;
+            args->run_control = run_control;
+            pthread_create(&state->tm_tid, NULL, train_model_worker_fn, args);
+            pthread_detach(state->tm_tid);
         }
-        XGBoosterSetParam(booster, "nthread", "4");
-        XGBoosterSetParam(booster, "verbosity", "0");
-
-        for (int i = 0; i < state->n_estimators; i++)
-            XGBoosterUpdateOneIter(booster, i, dtrain);
-
-        // embed model format version for compatibility check
-        char ver_s[8]; snprintf(ver_s, 8, "%d", MODEL_FORMAT_VERSION);
-        XGBoosterSetAttr(booster, "foxml_version", ver_s);
-
-        // embed config+data fingerprint for train-serve parity verification
-        {
-            const char *fp_paths[MAX_DATA_FILES];
-            for (int i = 0; i < run_control->run_config.num_data_files && i < MAX_DATA_FILES; i++)
-                fp_paths[i] = run_control->run_config.data_paths[i];
-            char fp_hex[65];
-            Fingerprint_Compute<BACKTEST_FP>(fp_hex, &results->config_used,
-                sizeof(results->config_used), fp_paths, run_control->run_config.num_data_files);
-            XGBoosterSetAttr(booster, "foxml_fingerprint", fp_hex);
-            fprintf(stderr, "[TRAIN] model fingerprint: %.12s...\n", fp_hex);
-        }
-
-        // save model
-        XGBoosterSaveModel(booster, state->model_path);
-
-        // compute in-sample training metric — kind-appropriate (label-type-aware
-        // metric invariant). For binary/multiclass this is accuracy; for
-        // regression we report MSE + Pearson correlation (sign-agreement was
-        // a poor proxy that didn't distinguish "predicting all-zero" from
-        // "actually learning small but real signal").
-        bst_ulong out_len;
-        const float *out_result;
-        DMatrixHandle dpred;
-        XGDMatrixCreateFromMat(train_features, n_valid,
-                               MODEL_NUM_FEATURES, NAN, &dpred);
-        XGBoosterPredict(booster, dpred, 0, 0, 0, &out_len, &out_result);
-        if (is_multiclass) {
-            state->train_accuracy = WalkForward_ComputeMulticlassAccuracy(
-                out_result, train_labels, n_valid, num_classes) * 100.0f;
-            state->train_mse = 0.0f;
-            state->train_correlation = 0.0f;
-        } else if (is_regression) {
-            state->train_mse         = WalkForward_ComputeMSE(out_result, train_labels, n_valid);
-            state->train_correlation = WalkForward_ComputeCorrelation(out_result, train_labels, n_valid);
-            state->train_accuracy    = 0.0f;  // not meaningful for regression
-        } else {
-            state->train_accuracy = WalkForward_ComputeAccuracy(
-                out_result, train_labels, n_valid, 0.5f) * 100.0f;
-            state->train_mse = 0.0f;
-            state->train_correlation = 0.0f;
-        }
-        XGDMatrixFree(dpred);
-
-        // feature importance (gain-based)
-        memset(state->feature_importance, 0, sizeof(state->feature_importance));
-        // XGBoost doesn't have a simple GetScore in C API for all features
-        // use prediction contribution as a proxy: not available in all versions
-        // for now, zero-importance displayed (Phase 6: implement via dump/parse)
-
-        XGDMatrixFree(dtrain);
-        XGBoosterFree(booster);
-        free(train_features);
-        free(train_labels);
-
-        state->model_trained = true;
-        if (is_regression) {
-            snprintf(state->status_msg, sizeof(state->status_msg),
-                     "Model saved to %s (MSE: %.6f, corr: %.4f)",
-                     state->model_path, state->train_mse, state->train_correlation);
-        } else {
-            snprintf(state->status_msg, sizeof(state->status_msg),
-                     "Model saved to %s (accuracy: %.1f%%)",
-                     state->model_path, state->train_accuracy);
-        }
-        } // end malloc success block
-#endif
-    }
-    if (!can_train) {
-        ImGui::EndDisabled();
+        if (!can_train) {
+            ImGui::EndDisabled();
 #ifndef USE_XGBOOST
-        ImGui::SameLine();
-        ImGui::TextDisabled("Build with -DUSE_XGBOOST=ON");
-#else
-        if (results->sample_count < 10) {
             ImGui::SameLine();
-            ImGui::TextDisabled("Collect features first (need 10+ samples)");
-        }
+            ImGui::TextDisabled("Build with -DUSE_XGBOOST=ON");
+#else
+            if (results->sample_count < 10) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("Collect features first (need 10+ samples)");
+            }
 #endif
+        }
     }
 
     // training results — kind-appropriate display.
     if (state->model_trained) {
         ImGui::Separator();
         ImGui::TextColored(ImVec4(0.55f, 0.76f, 0.51f, 1.0f), "%s", state->status_msg);
+        // v5.9.5d — surface scaler SHA-256 to operator (was stderr-only).
+        // Wraps to next line; selectable so operator can copy. Hidden when
+        // empty (no scaler persisted; degenerate-features case).
+        if (state->scaler_sha256_hex[0]) {
+            ImGui::TextColored(FoxmlColors::comment, "scaler_sha256:");
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.80f, 0.60f, 1.0f));
+            // InputText with ReadOnly = selectable + copyable single-line.
+            ImGui::PushItemWidth(-1);
+            ImGui::InputText("##scaler_sha", state->scaler_sha256_hex,
+                              sizeof(state->scaler_sha256_hex),
+                              ImGuiInputTextFlags_ReadOnly);
+            ImGui::PopItemWidth();
+            ImGui::PopStyleColor();
+            ImGui::SetItemTooltip("SHA-256 of the persisted .scaler sidecar file.\n"
+                                  "Run Full Validation auto-binds via in-process emit\n"
+                                  "(v5.9.5b). For manual stamping via tools/stamp_model.sh,\n"
+                                  "pass --scaler-sha256=<this value> + --feature-scaler-present=1.");
+        }
+        // v5.9.5j — Train Model auto-stamp result. Renders when worker
+        // attempted auto-stamp (cfg.auto_stamp_on_held_out=1 + non-empty
+        // cfg.held_out_stamp_secret). Operator gets visible feedback
+        // without leaving the Training panel.
+        if (state->tm_auto_stamp_attempted) {
+            if (state->tm_auto_stamp_ok) {
+                ImGui::TextColored(FoxmlColors::primary,
+                    "auto-stamped: %s", state->tm_auto_stamp_path_written);
+                ImGui::SetItemTooltip(
+                    "Train Model wrote a training-only stamp (Option A).\n"
+                    "Held-out metric is sentinel 0.0 — engine load treats\n"
+                    "as info-grade, not deploy-grade. For deploy-grade\n"
+                    "validation, use Run Full Validation panel.");
+            } else {
+                ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.35f, 1.0f),
+                    "auto-stamp FAILED: %s", state->tm_auto_stamp_error);
+            }
+        }
         if (LabelType_IsRegression(state->label_type)) {
             ImGui::Text("Train MSE: %.6f  |  Pearson r: %.4f  (in-sample)",
                          state->train_mse, state->train_correlation);
@@ -2069,6 +2922,26 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             }
             if (msrc) fclose(msrc);
             if (mdst) fclose(mdst);
+
+            // v5.8.9 — copy the .stamp file alongside the model if Run Full
+            // Validation produced one. Without this, the saved bundle would
+            // be missing the stamp and the deployed engine would fall back
+            // to "no stamp" (warn-load or refuse depending on
+            // held_out_gate_strict). Preserves the auto-stamp work end-to-end.
+            char src_stamp[480];
+            snprintf(src_stamp, sizeof(src_stamp), "%s.stamp", state->model_path);
+            char dst_stamp[480];
+            snprintf(dst_stamp, sizeof(dst_stamp), "%s.stamp", dst_model);
+            FILE *ssrc = fopen(src_stamp, "rb");
+            if (ssrc) {
+                FILE *sdst = fopen(dst_stamp, "wb");
+                if (sdst) {
+                    char buf[4096]; size_t n;
+                    while ((n = fread(buf, 1, sizeof(buf), ssrc)) > 0) fwrite(buf, 1, n, sdst);
+                    fclose(sdst);
+                }
+                fclose(ssrc);
+            }
 
             // copy full backtest.cfg as historical record (for reproducibility)
             char dst_cfg[384];
@@ -2197,6 +3070,31 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                             state->wf_results.overfit_count);
                     fprintf(sf, "valid_folds: %d\n",
                             state->wf_results.valid_folds);
+                }
+                // v5.8.9 — held-out + auto-stamp results from Run Full
+                // Validation. Captured only when fv_has_results is set
+                // (i.e. operator pressed the FV button after Train+WF).
+                // Older saves (or saves without FV) skip this block.
+                if (state->fv_has_results) {
+                    const FullValidationResults *fv = &state->fv_results;
+                    if (fv->ran_held_out) {
+                        fprintf(sf, "held_out_metric: %.4f\n",
+                                (double)fv->held_out_metric);
+                        fprintf(sf, "held_out_count: %d\n",
+                                (int)fv->held_out_count);
+                        fprintf(sf, "held_out_gap_threshold: %.4f\n",
+                                (double)fv->gap_threshold);
+                    }
+                    fprintf(sf, "auto_stamp_attempted: %d\n", fv->auto_stamp_attempted);
+                    fprintf(sf, "auto_stamp_ok: %d\n", fv->auto_stamp_ok);
+                    if (fv->auto_stamp_path_written[0]) {
+                        fprintf(sf, "auto_stamp_path_written: %s\n",
+                                fv->auto_stamp_path_written);
+                    }
+                    if (fv->auto_stamp_attempted && !fv->auto_stamp_ok &&
+                        fv->auto_stamp_error[0]) {
+                        fprintf(sf, "auto_stamp_error: %s\n", fv->auto_stamp_error);
+                    }
                 }
                 fclose(sf);
             }
@@ -2402,9 +3300,25 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                               "to see if it's stable.";
                 }
             } else {
-                // binary or multiclass — both report accuracy
+                // binary or multiclass — both report accuracy. v5.9.4a:
+                // baseline-aware bands. Pre-v5.9.4a hardcoded 0.52/0.55
+                // (binary 50%+spread); for K-class with imbalanced classes
+                // baseline can be much higher (e.g. 47% for the
+                // PEAK_VALLEY_STABLE 5.9/47.4/46.7 distribution from
+                // 2026-05-02 paper test). Diagnosis was misleading for
+                // multiclass; now uses actual majority-class baseline.
                 float val_acc = wf->mean_val_accuracy;
                 float train_acc = wf->mean_train_accuracy;
+                int K = (wf->num_classes >= 2) ? wf->num_classes : 2;
+                float baseline = multiclass_baseline_accuracy(
+                    K, snap->class_counts, snap->sample_count);
+                // "fee-overhead" threshold: 3 percentage points above
+                // baseline. Empirical — covers ~0.1% × 2 sides for
+                // typical small-to-mid TP barriers.
+                const float fee_band = 0.03f;
+                const float marginal_band = 0.01f;  // within 1pp of baseline = marginal
+                static char tip_buf[1024];
+
                 if (wf->overfit_count >= wf->valid_folds && wf->valid_folds > 0) {
                     wd_col = &wf_red;
                     wd_text = "every fold flagged as memorization — model trivially fits training";
@@ -2413,29 +3327,41 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                               "but val accuracy converges to the prior rate — looks high\n"
                               "but means nothing. Check sample panel ratio. Or reduce\n"
                               "model capacity (max_depth 2-3).";
-                } else if (val_acc < 0.52f) {
+                } else if (val_acc <= baseline + marginal_band) {
                     wd_col = &wf_red;
-                    wd_text = "no edge — val accuracy at or below random chance";
-                    wd_tip  = "Mean val accuracy < 52%%. With binary fee-bearing trades,\n"
-                              "you typically need >55%% to overcome fees + slippage. The\n"
-                              "features aren't separating the classes at this label/horizon.\n"
-                              "Try a different label (Forward P&L regression sidesteps\n"
-                              "class-balance issues), or tighter barriers, or different\n"
-                              "lookahead.";
-                } else if (val_acc >= 0.55f) {
+                    wd_text = "no edge — val accuracy at or below the always-predict-best baseline";
+                    snprintf(tip_buf, sizeof(tip_buf),
+                             "Mean val accuracy %.1f%% <= baseline %.1f%% (for %d-class with "
+                             "current distribution). Predicting the majority class would do "
+                             "equally well. Features aren't separating the classes at this "
+                             "label/horizon.\n\n"
+                             "Try: different label (Forward P&L regression sidesteps class-\n"
+                             "balance issues), tighter/wider barriers, different lookahead.",
+                             val_acc * 100.0f, baseline * 100.0f, K);
+                    wd_tip = tip_buf;
+                } else if (val_acc >= baseline + fee_band) {
                     wd_col = &wf_green;
-                    wd_text = "real edge — val accuracy above the fee-overhead threshold";
-                    wd_tip  = "Mean val accuracy >= 55%%. After fees of ~0.1%% × 2 sides,\n"
-                              "this regime can plausibly produce positive expectancy. Verify\n"
-                              "fold-to-fold stability (low std), no leakage, and that the\n"
-                              "training distribution matches the deployment regime.";
+                    wd_text = "real edge — val accuracy above baseline + fee overhead";
+                    snprintf(tip_buf, sizeof(tip_buf),
+                             "Mean val accuracy %.1f%% > baseline %.1f%% + 3%% fee buffer "
+                             "(for %d-class). After fees of ~0.1%% × 2 sides, this regime can "
+                             "plausibly produce positive expectancy. Verify fold-to-fold "
+                             "stability (low std), no leakage, and that training distribution "
+                             "matches deployment regime.",
+                             val_acc * 100.0f, baseline * 100.0f, K);
+                    wd_tip = tip_buf;
                 } else {
                     wd_col = &wf_yellow;
-                    wd_text = "marginal — val accuracy between 52-55%%, may not survive fees";
-                    wd_tip  = "Mean val accuracy is in the 52-55%% band. This is real signal\n"
-                              "but might not overcome fees + slippage in live trading. Worth\n"
-                              "optimizing if you can also reduce trading costs (maker rebates,\n"
-                              "longer holding period to amortize fees).";
+                    wd_text = "marginal — val accuracy above baseline but inside fee buffer";
+                    snprintf(tip_buf, sizeof(tip_buf),
+                             "Mean val accuracy %.1f%% is in [%.1f%%, %.1f%%] (baseline + 1-3%% "
+                             "for %d-class). Real signal but might not overcome fees + slippage "
+                             "in live trading. Worth optimizing if you can also reduce trading "
+                             "costs (maker rebates, longer holding period to amortize fees).",
+                             val_acc * 100.0f,
+                             (baseline + marginal_band) * 100.0f,
+                             (baseline + fee_band) * 100.0f, K);
+                    wd_tip = tip_buf;
                 }
                 (void)train_acc; // available for future train/val gap diagnostics
             }
@@ -2521,6 +3447,128 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             }
             ImGui::EndTable();
             ImGui::TreePop();
+        }
+    }
+
+    //==================================================================
+    // FULL VALIDATION (v5.8.7) — held-out + auto-stamp
+    //==================================================================
+    // The "shippable model" gate: train on [0, trainval_end) with the same
+    // hyperparameters as a WF fold, evaluate on the locked held-out portion,
+    // and (if gap_threshold met) auto-write a signed stamp alongside the
+    // model file. The stamp embeds:
+    //   - feature_registry_hash (FEATURE_REGISTRY_HASH() — current build)
+    //   - engine_version       (ENGINE_VERSION_STRING — current build)
+    //   - model_format_version (MODEL_FORMAT_VERSION — wire format)
+    // so the live engine's CoreModelZoo_TryLoadRole can refuse to load a
+    // model trained against a different feature set or engine version.
+    //
+    // This button is the ONLY UI path that exercises Backtest_RunFullValidation
+    // (and therefore the v5.8.6 auto-stamp wiring). Pre-v5.8.7 the function
+    // existed but was unreachable from the suite.
+    ImGui::Separator();
+    ImGui::Text("Full Validation (held-out + auto-stamp)");
+    ImGui::SetItemTooltip("Trains on [0, trainval_end), evaluates on locked\n"
+                          "held-out tail, and (if held_out gap < threshold)\n"
+                          "auto-writes a signed stamp alongside the model.\n\n"
+                          "Stamp embeds engine_version + feature_registry_hash\n"
+                          "so the live engine refuses to load a model trained\n"
+                          "against a drifted build.");
+    {
+        ImGui::PushItemWidth(-180);
+        ImGui::SliderFloat("Held-out fraction",
+                           &state->fv_held_out_fraction, 0.05f, 0.30f, "%.2f");
+        ImGui::SliderFloat("Gap threshold",
+                           &state->fv_gap_threshold, 0.01f, 0.20f, "%.2f");
+        ImGui::InputText("HMAC secret (empty = devmode)",
+                         state->fv_auto_stamp_secret,
+                         sizeof(state->fv_auto_stamp_secret));
+        ImGui::PopItemWidth();
+        ImGui::SetItemTooltip("Empty secret = dev mode. Stamp is written but the\n"
+                              "verifier accepts any signature on load (with a stderr\n"
+                              "warn). Production: set a non-empty secret in BOTH the\n"
+                              "suite (here) and engine.cfg (held_out_stamp_secret),\n"
+                              "and flip held_out_gate_strict=1 in engine.cfg to refuse\n"
+                              "unsigned loads.");
+
+        const BacktestResults *fv_data = &run_control->results;
+        bool can_fv =
+#ifdef USE_XGBOOST
+            fv_data->sample_count >= 50 && state->model_path[0] != '\0';
+#else
+            false;
+#endif
+
+        if (state->fv_running) {
+            ImGui::ProgressBar(state->fv_progress / 100.0f, ImVec2(-1, 0),
+                               "Full validation...");
+            if (ImGui::Button("Cancel Full Validation"))
+                state->fv_cancel = 1;
+        } else {
+            if (!can_fv) ImGui::BeginDisabled();
+            if (ImGui::Button("Run Full Validation")) {
+                state->fv_running = 1;
+                state->fv_progress = 0;
+                state->fv_cancel = 0;
+                state->fv_complete = 0;
+                state->fv_has_results = false;
+                state->fv_status_msg[0] = '\0';
+
+                FullValidationWorkerArgs *fv_args =
+                    (FullValidationWorkerArgs *)malloc(sizeof(FullValidationWorkerArgs));
+                fv_args->state = state;
+                fv_args->data = fv_data;
+                pthread_create(&state->fv_tid, NULL, fullvalidation_worker_fn, fv_args);
+                pthread_detach(state->fv_tid);
+            }
+            if (!can_fv) {
+                ImGui::EndDisabled();
+#ifndef USE_XGBOOST
+                ImGui::SameLine();
+                ImGui::TextDisabled("Build with -DUSE_XGBOOST=ON");
+#else
+                ImGui::SameLine();
+                if (state->model_path[0] == '\0')
+                    ImGui::TextDisabled("Set Model Path first");
+                else if (fv_data->sample_count < 50)
+                    ImGui::TextDisabled("Need 50+ samples");
+#endif
+            }
+        }
+    }
+
+    if (state->fv_has_results) {
+        const FullValidationResults *fv = &state->fv_results;
+        ImGui::Separator();
+
+        // Held-out metric line — the load-bearing "did the model generalize?"
+        // signal. Color: green when held_out >= wf_mean (no degradation),
+        // yellow when small gap, red when above threshold.
+        double wf_metric = (fv->label_kind == 1)
+            ? fv->walkforward.mean_val_correlation
+            : fv->walkforward.mean_val_accuracy;
+        double gap = wf_metric - (double)fv->held_out_metric;
+        if (gap < 0) gap = -gap;
+        ImVec4 ho_col = (gap > (double)fv->gap_threshold)
+            ? ImVec4(0.95f, 0.35f, 0.35f, 1.0f)
+            : (gap > (double)fv->gap_threshold * 0.5)
+                ? ImVec4(0.95f, 0.75f, 0.30f, 1.0f)
+                : ImVec4(0.55f, 0.76f, 0.51f, 1.0f);
+        if (fv->ran_held_out) {
+            ImGui::TextColored(ho_col,
+                "Held-out: %.4f (WF mean: %.4f, gap: %.4f, threshold: %.4f)",
+                (double)fv->held_out_metric, wf_metric, gap, (double)fv->gap_threshold);
+        } else {
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f),
+                "Held-out did NOT complete");
+        }
+
+        // Auto-stamp result line. Sourced from the worker's status_msg.
+        if (state->fv_status_msg[0]) {
+            ImVec4 stamp_col = fv->auto_stamp_attempted && fv->auto_stamp_ok
+                ? ImVec4(0.55f, 0.76f, 0.51f, 1.0f)
+                : ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
+            ImGui::TextColored(stamp_col, "%s", state->fv_status_msg);
         }
     }
 

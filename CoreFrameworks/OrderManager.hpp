@@ -368,13 +368,25 @@ static void OrderManager_FillResultCallback(void* user_ctx,
 //       portfolio slots, updates balance, and appends to the event log.
 //       EventLoop_OnEvent just bumps counters.
 //======================================================================================================
+// v5.9.5e — `event_log_path` lets callers separate the in-memory event log
+// infrastructure (single-writer mode=1 used by both live + backtest for
+// fill+drain pipeline parity since v4.7.15) from the on-disk persistence
+// (live engine only — restart-recovery via replay). Backtest passes nullptr
+// or "" to use in-memory-only mode=1: no disk load, no append-on-write.
+// Pre-v5.9.5e the path was hardcoded "logging/order_events.bin" and
+// backtest_mode=1 silently inherited live OMS state across runs (stale
+// balance, polluted next_event_id), breaking backtest hermeticity. The
+// feature/label collection pipeline doesn't read OMS, so ML training
+// output was unaffected — but Past Runs P&L + trade history started
+// from the contaminated balance.
 template <unsigned F>
 inline void OrderManager_Init(OrderManagerState<F>* oms,
                               const ExchangeAdapter<F>& adapter,
                               int live_trading,
                               FPN<F> starting_balance,
                               FPN<F> fee_rate,
-                              int event_log_mode = 0) {
+                              int event_log_mode = 0,
+                              const char* event_log_path = "logging/order_events.bin") {
     for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
         Order_Init(&oms->orders[i], 0, -1, ORDER_MARKET_BUY);
         oms->orders[i].state = ORDER_FILLED;  // mark as inactive (terminal)
@@ -438,9 +450,15 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     // disk (reconstructs next_event_id), then open the file for append
     // so new events write through. On first run the load returns 0 (no
     // file) and InitWithFile creates a fresh one with a header.
-    if (event_log_mode == 1) {
+    // v5.9.5e — disk persistence only when caller passes a non-empty
+    // event_log_path. Backtest passes nullptr/"" → mode=1 in-memory-only:
+    // fill+drain pipeline still active (parity with live), but no
+    // load-from-disk + no append-to-disk. Live engine still gets full
+    // restart-recovery via the default "logging/order_events.bin".
+    int has_disk_path = (event_log_path && event_log_path[0]);
+    if (event_log_mode == 1 && has_disk_path) {
         OrderEventLog_Init(&oms->event_log);  // allocate buffer first
-        int loaded = OrderEventLog_LoadFromDisk(&oms->event_log, "logging/order_events.bin");
+        int loaded = OrderEventLog_LoadFromDisk(&oms->event_log, event_log_path);
         if (loaded > 0) {
             // replay the loaded events to reconstruct portfolio + balance
             FoldResult<F> fold = Portfolio_FromEventLog(&oms->event_log,
@@ -454,8 +472,9 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
                          "balance=$%.2f\n", loaded, FPN_ToDouble(oms->balance));
         }
         // open for append (writes new events through to disk)
-        OrderEventLog_InitWithFile(&oms->event_log, "logging/order_events.bin");
+        OrderEventLog_InitWithFile(&oms->event_log, event_log_path);
     } else {
+        // mode=0 OR mode=1+no-path → in-memory only.
         OrderEventLog_Init(&oms->event_log);
     }
 }

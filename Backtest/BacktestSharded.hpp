@@ -50,7 +50,8 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"  // ConfidenceScorer_Init for ML cores (E.2)
 #include "../ML_Headers/CoreModelZoo.hpp"     // E.2 — load per-core ML zoos
-#include "../ML_Headers/ModelInference.hpp"   // for ModelFeatures_Pack
+#include "../ML_Headers/ModelInference.hpp"   // for stamp helpers
+#include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
 #include "../ML_Headers/ROR_regressor.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../Strategies/RegimeDetector.hpp"  // CumDeltaState, TickRateState, Regime_ComputeSignals
@@ -143,7 +144,17 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // EventLoop_DrainPostFill call after OrderManager_Tick to consume
     // FillRecords on the same tick they're produced (no separate drainer
     // thread in backtest; everything runs synchronously).
-    OrderManager_Init(&oms, empty_adapter, 0, cfg.starting_balance, cfg.fee_rate, 1);
+    // v5.9.5e — pass empty event_log_path to disable disk persistence.
+    // Mode=1 still drives the in-memory event log (fill+drain pipeline
+    // parity with live, per v4.7.15). Backtest is hermetic; OMS starts
+    // fresh from cfg.starting_balance every run. Pre-v5.9.5e backtest
+    // silently inherited live OMS state across runs (stale balance,
+    // polluted trade history). Feature/label pipeline unaffected (it
+    // doesn't read OMS), but Past Runs P&L now reflects only the
+    // current backtest run.
+    OrderManager_Init(&oms, empty_adapter, 0, cfg.starting_balance, cfg.fee_rate,
+                      /*event_log_mode=*/1,
+                      /*event_log_path=*/"");
     // Phase 8: backtest is all-taker. Set OMS rates explicitly so HandleFill's
     // is_maker branch picks the right rate. Both = fee_rate_taker → backtest
     // numerics unchanged from pre-Phase-8 (cfg legacy mirroring already set
@@ -435,9 +446,33 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                                        d->current_mid_price
                                            ? FPN_ToDouble(*d->current_mid_price) : 0.0);
             }
-            ModelFeatures_Pack<BACKTEST_FP>(
-                &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES],
-                &sig, d->rolling, d->rolling_long);
+            // v5.8.1b: registry-driven feature pack. Bytewise-equivalent to
+            // legacy ModelFeatures_Pack — load-bearing for train-serve parity
+            // since this matrix feeds model training and the live engine
+            // packs the same features at serve time.
+            //
+            // v5.9.0 — NaN/Inf in feature pack → SKIP this sample. Don't
+            // include garbage in the training matrix; would corrupt model
+            // weights. Features_PackAll returns -1 sentinel on validation
+            // failure.
+            {
+                FeatureComputeCtx<BACKTEST_FP> ctx{};
+                ctx.signals       = &sig;
+                ctx.short_rolling = d->rolling;
+                int n = Features_PackAll(&ctx,
+                    &fc->results->feature_matrix[fc->results->sample_count * MODEL_NUM_FEATURES]);
+                if (n < 0) {
+                    // Skip this sample entirely — don't bump sample_count.
+                    // Per-feature breakdown logged once (rate-limit by global
+                    // counter to avoid spam during pathological data).
+                    static int nan_skip_warn_emitted = 0;
+                    if (!nan_skip_warn_emitted) {
+                        fprintf(stderr, "[backtest] WARN: NaN/Inf in feature pack at tick %d — skipping sample (further skips silent)\n", tick_index);
+                        nan_skip_warn_emitted = 1;
+                    }
+                    return;  // exit the lambda; this sample dropped
+                }
+            }
             fc->results->sample_tick_indices[fc->results->sample_count] = (uint64_t)tick_index;
             fc->results->sample_prices[fc->results->sample_count] = FPN_ToDouble(tk.price);
             // Sharded has no central regime field (each core may run a
@@ -496,6 +531,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     int loss_count = 0;
     double peak_equity = total_balance;
     double max_drawdown = 0.0;
+    double max_dd_pct   = 0.0;  // v5.8.4c: tracked alongside max_drawdown via shared helper
 
     // DEBUG: track price range and dump threshold once after first slow path
     double price_lo = 1e18, price_hi = 0.0;
@@ -505,10 +541,30 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     double last_price_d  = 0.0;
     double last_volume_d = 0.0;
 
+    int64_t prev_file_last_ts = 0;  // v5.9.2c: track for inter-file ordering check
     for (int f = 0; f < run_cfg->num_data_files; f++) {
         int count = 0;
         if (!BacktestData_Load(ticks, &count, max_ticks, run_cfg->data_paths[f]))
             continue;
+        // v5.9.2c — validate intra-file ordering on each file
+        // (sharded loads files one at a time, can't concat-validate
+        // like BacktestEngine.hpp's label_ticks does).
+        char file_label[280];
+        snprintf(file_label, sizeof(file_label), "data file %d (%s)",
+                 f, run_cfg->data_paths[f]);
+        int sort_rc = BacktestData_ValidateSort(ticks, count,
+                                                 cfg.csv_sort_check_mode, file_label);
+        if (sort_rc < 0) continue;  // STRICT: skip this file, keep going
+        // Inter-file ordering check
+        if (f > 0 && count > 0 && ticks[0].timestamp_us < prev_file_last_ts) {
+            fprintf(stderr,
+                "[WARN] data file %d starts before file %d ends "
+                "(first ts %lld < prev last %lld). Files may be out-of-order.\n",
+                f, f - 1,
+                (long long)ticks[0].timestamp_us,
+                (long long)prev_file_last_ts);
+        }
+        if (count > 0) prev_file_last_ts = ticks[count - 1].timestamp_us;
 
         for (int i = 0; i < count; i++) {
             if (*cancel_flag) goto done;
@@ -642,12 +698,12 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 }
             }
 
-            // Track peak equity + max drawdown using EventLoopAggregates
-            // (no current price snapshot needed here, balance is enough)
+            // v5.8.4c: shared inner-update helper — same code path as
+            // BacktestStats_ComputeFromEquity's post-hoc walk. Bytewise
+            // FP identity guaranteed by construction.
             double cur_equity = FPN_ToDouble(state.oms->balance);
-            if (cur_equity > peak_equity) peak_equity = cur_equity;
-            double dd = peak_equity - cur_equity;
-            if (dd > max_drawdown) max_drawdown = dd;
+            MaxDrawdown_UpdateIncremental(cur_equity, &peak_equity,
+                                           &max_drawdown, &max_dd_pct);
 
             total_processed++;
             if ((total_processed & 0x3FFF) == 0) {
@@ -689,17 +745,18 @@ done:
     }
     if (win_count > 0) stats->avg_win = cumulative_wins / win_count;
     if (loss_count > 0) stats->avg_loss = cumulative_losses / loss_count;
-    if (cumulative_losses > 0.0) {
-        stats->profit_factor = cumulative_wins / cumulative_losses;
-    }
-    stats->max_drawdown = max_drawdown;
-    if (peak_equity > 0.0) {
-        stats->max_drawdown_pct = (max_drawdown / peak_equity) * 100.0;
-    }
+    // v5.8.4c: route metrics through Compute_* helpers — kills the prior
+    // 4-site profit_factor drift (epsilon 0.0001 vs 0.001 vs none vs
+    // -1.0-sentinel). all_wins_run flag separates display semantics
+    // from the numeric value for OPT_METRIC_PF / display rendering.
+    stats->profit_factor    = Compute_ProfitFactor(cumulative_wins, cumulative_losses);
+    stats->all_wins_run     = Compute_AllWinsRun(cumulative_wins, cumulative_losses);
+    stats->expectancy       = Compute_Expectancy(stats->total_trades, stats->wins,
+                                                   stats->avg_win, stats->avg_loss);
+    stats->max_drawdown     = max_drawdown;
+    stats->max_drawdown_pct = max_dd_pct * 100.0;
     double starting_bal = FPN_ToDouble(cfg.starting_balance);
-    if (starting_bal > 0.0) {
-        stats->return_pct = ((final_balance - starting_bal) / starting_bal) * 100.0;
-    }
+    stats->return_pct = Compute_ReturnPct(final_balance - starting_bal, starting_bal);
     stats->elapsed_ms = elapsed;
 
     // Track E.7 — populate TUISnapshot for the dashboard panels (Market,

@@ -112,6 +112,30 @@ static inline int sha256_file_hex_inproc(const char* path, char* hex_out, size_t
     return 1;
 }
 
+// v5.9.3a — SHA-256 of an in-memory byte buffer.
+// out must point to 32 bytes. Returns 1 on success, 0 on EVP failure.
+// Used by FeatureStandardizer for sidecar body integrity check.
+static inline int sha256_bytes(const void* data, size_t n, unsigned char out[32]) {
+    if (!data || !out) return 0;
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) return 0;
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1) {
+        EVP_MD_CTX_free(ctx);
+        return 0;
+    }
+    if (n > 0 && EVP_DigestUpdate(ctx, data, n) != 1) {
+        EVP_MD_CTX_free(ctx);
+        return 0;
+    }
+    unsigned int raw_len = 0;
+    if (EVP_DigestFinal_ex(ctx, out, &raw_len) != 1 || raw_len != 32) {
+        EVP_MD_CTX_free(ctx);
+        return 0;
+    }
+    EVP_MD_CTX_free(ctx);
+    return 1;
+}
+
 } // namespace tt
 
 #endif // HMAC_SHA256_HPP

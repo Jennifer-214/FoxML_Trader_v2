@@ -54,57 +54,166 @@
 #ifndef STRATEGY_INTERFACE_HPP
 #define STRATEGY_INTERFACE_HPP
 
-#define STRATEGY_MEAN_REVERSION 0
-#define STRATEGY_MOMENTUM      1
-#define STRATEGY_SIMPLE_DIP    2
-#define STRATEGY_ML            3
-#define STRATEGY_EMA_CROSS     4
-#define STRATEGY_AUTO          5  // v4.0.3: regime-driven auto-select per core
-#define NUM_STRATEGIES         6
+#include <cstdint>
+#include <cstddef>
 
-// Per-core sharding (phase 06+) sentinel: a core with strategy_id ==
-// STRATEGY_NONE has no strategy assigned, parameter pushes are skipped, and
-// permission stays at 0. Value chosen so it can never collide with a real
-// strategy ID added in the future. See pitfall P6.5.
-#define STRATEGY_NONE          0xFF
+//======================================================================================================
+// [STRATEGY REGISTRY — v5.8.0 X-macro]
+//======================================================================================================
+// Single source of truth for all public strategies. Adding a strategy:
+//   1. cp DOCS/STRATEGY_TEMPLATE.hpp Strategies/<Name>.hpp; implement
+//      4 lifecycle fns (_Init / _BuildParameters / _Adapt /
+//      _ExitAdjustSharded) per DOCS/STRATEGY_INTERFACE.md.
+//   2. Append one row to FOREACH_STRATEGY(X) below.
+//   3. Add a strategy color to GUI/DashboardPanels.hpp's strat_colors[].
+//   4. ./build.sh test
+//
+// Auto-generated from FOREACH_STRATEGY(X):
+//   - STRATEGY_<ID> enum constants (compile-time IDs, contiguous from 0)
+//   - NUM_STRATEGIES_REAL (count of registered real strategies)
+//   - STRATEGY_SHORT_NAMES[] / STRATEGY_FULL_NAMES[] arrays
+// Lifecycle dispatchers in StrategyLifecycle.hpp +
+// Strategy_BuildParameters in StrategyParameters.hpp consume the same
+// registry.
+//
+// Canonical signatures (do not deviate; see DOCS/EASY_ADDITIONS_INVARIANTS.md):
+//   _Init(state, rolling, buy_conds)
+//   _Adapt(state, current_price, portfolio_delta, active_bitmap, buy_conds, cfg)
+//   _BuildParameters(rolling, config, allocated_balance, out [, state])
+//   _ExitAdjustSharded(state, slot, strat_state, current_price, rolling, cfg)
+//
+// Drift (v5.8.0 audit):
+//   - MLStrategy_Adapt takes `const void* cfg` (include-cycle workaround) →
+//     X-macro references MLStrategy_Adapt_Canonical adapter
+//   - ML_BuildParameters has wider sig (extra rolling_long + ml_ctx args) →
+//     dispatcher uses case-block dispatch in StrategyParameters.hpp
+//
+// Public/private split: when private/EmaCross.hpp is absent, the
+// EMA_CROSS row is omitted from the registry (#__has_include guard).
+// STRATEGY_EMA_CROSS enum constant simply doesn't exist in that build —
+// callers that reference it fail at compile time, which is the intended
+// "private snapshot can't reference private code" behavior.
+//======================================================================================================
 
-// strategy short names for display (indexed by strategy ID, ≤4 chars for tight UI columns)
-static const char *STRATEGY_SHORT_NAMES[] = {"MR", "MOM", "DIP", "ML", "EMA", "AUTO"};
+#if __has_include("private/EmaCross.hpp")
+#  define FOREACH_STRATEGY_EMACROSS(X) \
+    X(EMA_CROSS, "EMA",  "EmaCross",      EmaCrossState, \
+       EmaCross_Init,        EmaCross_BuildParameters, \
+       EmaCross_Adapt,       EmaCross_ExitAdjustSharded)
+#else
+#  define FOREACH_STRATEGY_EMACROSS(X) /* private/EmaCross.hpp absent */
+#endif
 
-// strategy full names for logs and verbose displays (indexed by strategy ID)
-static const char *STRATEGY_FULL_NAMES[] = {
-    "MeanReversion", "Momentum", "SimpleDip", "ML", "EmaCross", "Auto-Regime"
+#define FOREACH_STRATEGY(X) \
+    X(MEAN_REVERSION, "MR",   "MeanReversion", MeanReversionState, \
+       MeanReversion_Init,   MeanReversion_BuildParameters, \
+       MeanReversion_Adapt,  MeanReversion_ExitAdjustSharded) \
+    X(MOMENTUM,       "MOM",  "Momentum",      MomentumState, \
+       Momentum_Init,        Momentum_BuildParameters, \
+       Momentum_Adapt,       Momentum_ExitAdjustSharded) \
+    X(SIMPLE_DIP,     "DIP",  "SimpleDip",     SimpleDipState, \
+       SimpleDip_Init,       SimpleDip_BuildParameters, \
+       SimpleDip_Adapt,      SimpleDip_ExitAdjustSharded) \
+    X(ML,             "ML",   "ML",            MLStrategyState, \
+       MLStrategy_Init,      ML_BuildParameters, \
+       MLStrategy_Adapt_Canonical, MLStrategy_ExitAdjustSharded) \
+    FOREACH_STRATEGY_EMACROSS(X)
+
+// IDs — auto-generated. Order matches the historical assignment
+// (MR=0, MOM=1, DIP=2, ML=3, EMA=4) so cfg files / stamps survive the
+// refactor unchanged.
+enum StrategyId : uint8_t {
+#define X(id, ...) STRATEGY_##id,
+    FOREACH_STRATEGY(X)
+#undef X
+    NUM_STRATEGIES_REAL,                            // count of registered real strategies
+    STRATEGY_AUTO    = NUM_STRATEGIES_REAL,         // v4.0.3 sentinel: regime-driven auto-select
+    NUM_STRATEGIES   = NUM_STRATEGIES_REAL + 1,     // includes AUTO
+    STRATEGY_NONE    = 0xFF                         // per-core "no strategy assigned"
 };
 
-//======================================================================================================
-// [REGIME CONSTANTS]
-//======================================================================================================
-#define REGIME_RANGING       0
-#define REGIME_TRENDING      1  // uptrend — momentum (buy breakouts above)
-#define REGIME_VOLATILE      2
-#define REGIME_TRENDING_DOWN 3  // downtrend — pause buying (future: short strategy)
-#define REGIME_MILD_TREND    4  // mild uptrend — EMA Cross (buy dips in uptrend)
-#define NUM_REGIMES          5
+// Names for display, indexed by strategy ID. Real strategies' names
+// auto-generate from the X-macro; AUTO appended manually.
+#define X(id, short_name, full_name, ...) short_name,
+static const char *STRATEGY_SHORT_NAMES[] = {
+    FOREACH_STRATEGY(X)
+    "AUTO"
+};
+#undef X
 
-// regime info lookup table — single source of truth for display
-// adding a regime = one line here, zero display edits elsewhere
+#define X(id, short_name, full_name, ...) full_name,
+static const char *STRATEGY_FULL_NAMES[] = {
+    FOREACH_STRATEGY(X)
+    "Auto-Regime"
+};
+#undef X
+
+static_assert(sizeof(STRATEGY_SHORT_NAMES) / sizeof(*STRATEGY_SHORT_NAMES) == NUM_STRATEGIES,
+              "STRATEGY_SHORT_NAMES out of sync with NUM_STRATEGIES");
+static_assert(sizeof(STRATEGY_FULL_NAMES) / sizeof(*STRATEGY_FULL_NAMES) == NUM_STRATEGIES,
+              "STRATEGY_FULL_NAMES out of sync with NUM_STRATEGIES");
+
+//======================================================================================================
+// [REGIME CONSTANTS — v5.8.4 X-macro registry]
+//======================================================================================================
+// Adding a regime is a 1-line change to FOREACH_REGIME(X) below — auto-
+// generates REGIME_<id> constants, REGIME_INFO[] short/full name lookup,
+// and REGIME_STRATEGY_TABLE[] regime→strategy mapping. The regime
+// classifier (Strategies/RegimeDetector.hpp) still needs to be updated
+// to know how to score the new regime — registry only handles dispatch.
+//
+// IDs are append-only — never reorder or remove. Persisted snapshots
+// and trade logs reference these by integer.
+//
+// MILD_TREND default strategy is conditionally STRATEGY_EMA_CROSS when
+// private/EmaCross.hpp is in the build, else falls back to
+// STRATEGY_MEAN_REVERSION. Mirrors the conditional include in
+// FOREACH_STRATEGY_EMACROSS so public-release builds still compile.
+//
+// Row format: X(<id>, <short_name>, <full_name>, <default_strategy_id>)
+//======================================================================================================
+#if __has_include("private/EmaCross.hpp")
+#  define MILD_TREND_DEFAULT_STRATEGY STRATEGY_EMA_CROSS
+#else
+#  define MILD_TREND_DEFAULT_STRATEGY STRATEGY_MEAN_REVERSION  /* fallback when private/ absent */
+#endif
+
+#define FOREACH_REGIME(X) \
+    X(RANGING,       "RANGE", "RANGING",       STRATEGY_MEAN_REVERSION) \
+    X(TRENDING,      "TREND", "TRENDING",      STRATEGY_MOMENTUM) \
+    X(VOLATILE,      "VOLAT", "VOLATILE",      STRATEGY_SIMPLE_DIP) \
+    X(TRENDING_DOWN, "TR_DN", "TRENDING_DOWN", STRATEGY_MEAN_REVERSION) \
+    X(MILD_TREND,    "EMACR", "MILD_TREND",    MILD_TREND_DEFAULT_STRATEGY)
+
+// Auto-generated REGIME_<id> constants. Plain int (not enum) for back-
+// compat with the dozens of comparison sites in RegimeDetector.hpp that
+// use `regime == REGIME_X` patterns.
+enum {
+#define X(id, short_name, full_name, default_strat) REGIME_##id,
+    FOREACH_REGIME(X)
+#undef X
+    NUM_REGIMES
+};
+
+// Display info lookup table — short + long names per regime.
 struct RegimeInfo { const char *short_name; const char *full_name; };
 static const RegimeInfo REGIME_INFO[] = {
-    {"RANGE", "RANGING"},        // 0
-    {"TREND", "TRENDING"},       // 1
-    {"VOLAT", "VOLATILE"},       // 2
-    {"TR_DN", "TRENDING_DOWN"},  // 3
-    {"EMACR", "MILD_TREND"},     // 4
+#define X(id, short_name, full_name, default_strat) {short_name, full_name},
+    FOREACH_REGIME(X)
+#undef X
 };
 
-// regime-to-strategy mapping table — branchless lookup
+// Regime-to-strategy mapping table — branchless lookup at slow path.
 static const int REGIME_STRATEGY_TABLE[] = {
-    STRATEGY_MEAN_REVERSION,  // RANGING (0)
-    STRATEGY_MOMENTUM,        // TRENDING (1)
-    STRATEGY_SIMPLE_DIP,      // VOLATILE (2)
-    STRATEGY_MEAN_REVERSION,  // TRENDING_DOWN (3)
-    STRATEGY_EMA_CROSS,       // MILD_TREND (4)
+#define X(id, short_name, full_name, default_strat) default_strat,
+    FOREACH_REGIME(X)
+#undef X
 };
+
+static_assert(sizeof(REGIME_INFO) / sizeof(*REGIME_INFO) == NUM_REGIMES,
+              "REGIME_INFO out of sync with NUM_REGIMES");
+static_assert(sizeof(REGIME_STRATEGY_TABLE) / sizeof(*REGIME_STRATEGY_TABLE) == NUM_REGIMES,
+              "REGIME_STRATEGY_TABLE out of sync with NUM_REGIMES");
 
 //======================================================================================================
 // [STRATEGY HALT REASON CODES — v5.6.2]
@@ -124,48 +233,110 @@ static const int REGIME_STRATEGY_TABLE[] = {
 // else strategy_halt_reason > 0 wins; else gate_flags & BUY_BLOCKED;
 // else "no signal".
 //
-// Adding a new SHALT code: append here, append to shalt_names[]
-// in DashboardPanels.hpp, and update the bound assertion in
-// controller_test.cpp (EXECUTION_DISPLAY section).
+// v5.8.2 — registry-driven via FOREACH_SHALT(X). Adding a new SHALT
+// code is a single-line change here; the GUI mirror in
+// DashboardPanels.hpp now reads SHALT_SHORT_NAMES directly. Bound
+// assertion in controller_test.cpp uses NUM_SHALT_CODES.
+//
+// Row format: X(<id>, <short_name>, <description>)
+// IDs are append-only; never reorder or remove (existing trade logs
+// reference numeric values).
 //======================================================================================================
-constexpr uint8_t SHALT_OK             = 0;
-constexpr uint8_t SHALT_NO_UPTREND     = 1;  // EmaCross / MeanReversion long-trend gate
-constexpr uint8_t SHALT_NO_MEAN_REV    = 2;  // MeanReversion vwap_ok / long_ok / delta_ok
-constexpr uint8_t SHALT_FEE_FLOOR      = 3;  // dispatcher fee-floor BUY_BLOCKED (TP < 3 * fee_taker)
-constexpr uint8_t SHALT_COST_GATE      = 4;  // dispatcher cost-gate BUY_BLOCKED (CostModel)
-constexpr uint8_t SHALT_STDDEV_ZERO    = 5;  // any strategy on dead market (rolling.stddev == 0)
-constexpr uint8_t SHALT_NO_BREAKOUT    = 6;  // Momentum: price hasn't broken above threshold
-constexpr uint8_t SHALT_ML_NO_PRED     = 7;  // ML: zoo unloaded or no inference output
-constexpr uint8_t SHALT_ML_BELOW_THR   = 8;  // ML: prediction below trigger threshold
-constexpr uint8_t SHALT_LOW_CONFIDENCE = 9;  // ConfidenceScorer veto
-constexpr uint8_t SHALT_NO_SIGNAL      = 10; // catch-all for strategy zero-gates that
-                                              // didn't set a more specific code
-// v5.7.5 — MOM-specific quality filter SHALT codes. All gated cfg-side
-// (momentum_min_* fields default 0/off, preserving pre-v5.7 behavior).
-constexpr uint8_t SHALT_MOM_TP_TOO_TIGHT = 11; // momentum_min_tp_margin_pct unmet
-constexpr uint8_t SHALT_MOM_NO_FLOW      = 12; // momentum_min_buy_delta_recent unmet
-constexpr uint8_t SHALT_MOM_LOW_R2       = 13; // momentum_min_r2 unmet
-constexpr uint8_t SHALT_MOM_LAST_LOST    = 14; // momentum_require_last_win + last exit was loss
-constexpr uint8_t SHALT_MAX              = 14; // highest valid code (test bound)
+#define FOREACH_SHALT(X) \
+    X(OK,               "ok",             "all strategies pass") \
+    X(NO_UPTREND,       "no-uptrend",     "EmaCross / MeanReversion long-trend gate") \
+    X(NO_MEAN_REV,      "no-mean-rev",    "MeanReversion vwap_ok / long_ok / delta_ok") \
+    X(FEE_FLOOR,        "fee-floor",      "dispatcher fee-floor BUY_BLOCKED (TP < 3 * fee_taker)") \
+    X(COST_GATE,        "cost-gate",      "dispatcher cost-gate BUY_BLOCKED (CostModel)") \
+    X(STDDEV_ZERO,      "stddev-zero",    "any strategy on dead market (rolling.stddev == 0)") \
+    X(NO_BREAKOUT,      "no-breakout",    "Momentum: price hasn't broken above threshold") \
+    X(ML_NO_PRED,       "ml-no-pred",     "ML: zoo unloaded or no inference output") \
+    X(ML_BELOW_THR,     "ml-below-thr",   "ML: prediction below trigger threshold") \
+    X(LOW_CONFIDENCE,   "low-confidence", "ConfidenceScorer veto") \
+    X(NO_SIGNAL,        "no-signal",      "catch-all for strategy zero-gates without specific code") \
+    X(MOM_TP_TOO_TIGHT, "mom:tp-tight",   "momentum_min_tp_margin_pct unmet") \
+    X(MOM_NO_FLOW,      "mom:no-flow",    "momentum_min_buy_delta_recent unmet") \
+    X(MOM_LOW_R2,       "mom:low-r2",     "momentum_min_r2 unmet") \
+    X(MOM_LAST_LOST,    "mom:last-lost",  "momentum_require_last_win + last exit was loss")
 
-// Names for display, indexed by SHALT_*. Keep in sync with
-// shalt_names[] mirror in DashboardPanels.hpp.
-static const char* SHALT_SHORT_NAMES[] = {
-    "ok",            // 0
-    "no-uptrend",    // 1
-    "no-mean-rev",   // 2
-    "fee-floor",     // 3
-    "cost-gate",     // 4
-    "stddev-zero",   // 5
-    "no-breakout",   // 6
-    "ml-no-pred",    // 7
-    "ml-below-thr",  // 8
-    "low-confidence",// 9
-    "no-signal",     // 10
-    "mom:tp-tight",  // 11 SHALT_MOM_TP_TOO_TIGHT
-    "mom:no-flow",   // 12 SHALT_MOM_NO_FLOW
-    "mom:low-r2",    // 13 SHALT_MOM_LOW_R2
-    "mom:last-lost", // 14 SHALT_MOM_LAST_LOST
+// Auto-generated SHALT_<id> constants. Underlying type uint8_t for
+// compact storage in TradeEvent / per-core snapshot fields.
+enum : uint8_t {
+#define X(id, name, desc) SHALT_##id,
+    FOREACH_SHALT(X)
+#undef X
+    NUM_SHALT_CODES
 };
+
+// Highest valid code. Kept for back-compat with existing test bounds.
+// Equivalent to NUM_SHALT_CODES - 1.
+constexpr uint8_t SHALT_MAX = NUM_SHALT_CODES - 1;
+
+// Names for display, indexed by SHALT_*. Single source of truth —
+// DashboardPanels.hpp references this directly (no mirror).
+static const char* SHALT_SHORT_NAMES[] = {
+#define X(id, name, desc) name,
+    FOREACH_SHALT(X)
+#undef X
+};
+
+static_assert(sizeof(SHALT_SHORT_NAMES) / sizeof(*SHALT_SHORT_NAMES) == NUM_SHALT_CODES,
+              "SHALT_SHORT_NAMES out of sync with NUM_SHALT_CODES");
+
+//======================================================================================================
+// [HALT REASONS — controller-level halt codes — v5.8.3 X-macro registry]
+//======================================================================================================
+// These are set by the slow-path gate rebuild loop (ControllerEventLoop)
+// when a cross-cutting filter (spacing, vwap, vol-delta, book-imbalance,
+// etc.) zero-gates a core. SHALT_* (above) is the strategy-internal
+// equivalent set by individual strategies.
+//
+// IDs are append-only — never reorder or remove. Trade logs and per-core
+// snapshots persist this value as a raw integer; reordering breaks
+// historical decode.
+//
+// HALT_WARMUP (=7) is reserved-but-unused: warmup state is gated via
+// `permission=0` upstream of the zero_gate path (see EngineSharded.hpp
+// init), so no halt_reason=7 is ever written by current code. Kept in
+// the registry for back-compat with older trade logs that may have
+// recorded it before the permission mechanism took over.
+//
+// Row format: X(<id>, <short_name>, <description>)
+//======================================================================================================
+#define FOREACH_HALT_REASON(X) \
+    X(OK,           "ok",           "all gates pass") \
+    X(SPACING,      "spacing",      "proposed entry too close to last entry") \
+    X(VWAP,         "vwap",         "entry above VWAP threshold (anti-pump)") \
+    X(LONG_SLOPE,   "long-slope",   "long-window slope below floor (downtrend)") \
+    X(VOL_DELTA,    "vol-delta",    "buy/sell volume delta below floor (heavy dump)") \
+    X(MIN_STDDEV,   "min-stddev",   "rolling stddev below floor (dead market)") \
+    X(SL_COOLDOWN,  "sl-cooldown",  "stop-loss cooldown active") \
+    X(WARMUP,       "warmup",       "reserved — warmup state via permission=0 instead") \
+    X(CORE_BUDGET,  "core-budget",  "core open_notional >= allocated") \
+    X(CORE_KILL,    "core-kill",    "per-core kill switch tripped") \
+    X(IMBALANCE,    "imbalance",    "book imbalance below threshold (Track E.3)")
+
+// Auto-generated HALT_<id> constants. Underlying type uint8_t — matches
+// the existing `halt_reason` field width on EventLoopState::cores[].
+enum : uint8_t {
+#define X(id, name, desc) HALT_##id,
+    FOREACH_HALT_REASON(X)
+#undef X
+    NUM_HALT_REASONS
+};
+
+// Highest valid code. Equivalent to NUM_HALT_REASONS - 1.
+constexpr uint8_t HALT_MAX = NUM_HALT_REASONS - 1;
+
+// Names for display, indexed by HALT_*. Single source of truth —
+// DashboardPanels.hpp reads this directly (no mirror).
+static const char* HALT_NAMES[] = {
+#define X(id, name, desc) name,
+    FOREACH_HALT_REASON(X)
+#undef X
+};
+
+static_assert(sizeof(HALT_NAMES) / sizeof(*HALT_NAMES) == NUM_HALT_REASONS,
+              "HALT_NAMES out of sync with NUM_HALT_REASONS");
 
 #endif // STRATEGY_INTERFACE_HPP

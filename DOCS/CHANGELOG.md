@@ -1,10 +1,33 @@
 # Changelog
 
+**Navigation:**
+- [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) — current limitations, active testing, workarounds
+- [`changelogs/INDEX.md`](changelogs/INDEX.md) — chronological + version-grouped index of detailed sprint write-ups
+- [`v5.10-design-notes.md`](v5.10-design-notes.md) — future work / planned features
+
+This file is the **elevator-pitch summary** — one short row per
+version. For detailed phase-by-phase write-ups including file:line
+citations, postmortems, and lessons learned, follow the link in
+each row to the matching file in `DOCS/changelogs/`.
+
+**Format convention (going forward, post-2026-05-03):** new rows
+use the slim format — **2-3 sentences** per row + a "Detail" link
+column to the dated file in `DOCS/changelogs/`. Existing rows below
+v5.7.x are intentionally left in their original (verbose) format
+— they're historical record + would risk losing context if rewritten
+without re-reading every dated file. Don't bulk-slim them; just
+write new entries in the new shape.
+
+Recent rows (v5.9.x → v5.7.x) reflect the new convention. Older
+rows (v5.6.x → v3.x) remain in the original verbose form.
+
 ## Version Summary
 
-| Version | Date | Highlights |
-|---------|------|------------|
-| **5.7.x** | **2026-04-30** | **🎯 Strategy quality — regime audit + MOM filters + per-trade logging + quality dashboard (5-phase ship)** *(minor bump — combined branch with v5.6)* — Closes the "MOM enters bad trades in RANGING" pattern observed 2026-04-30. **v5.7.0** — regime classifier audit (replayed 18,326 existing log entries; verdict PASS, classifier healthy, symptom traces to Core 0 hardcoded MOM not AUTO bug). **v5.7.1** — `cat="entry"` + `cat="exit"` health log lines (regime + scores + diag at fill time). **v5.7.2** — boot guard: live mode + hardcoded strategy + no `acknowledge_hardcoded_strategy_in_live=1` → ERROR + abort. Paper warns. **v5.7.5** — MOM quality filters (`momentum_min_tp_margin_pct`, `momentum_min_buy_delta_recent`, `momentum_min_r2`, `momentum_require_last_win`) all default off — opt-in after observing data. SHALT_MOM_* codes 11-14. **v5.7.6** — Strategy Quality GUI panel (refresh-button JSONL aggregator; per-strategy x regime breakdown). Phases 5.7.3 + 5.7.4 SKIPPED per Phase 0 audit verdict (~8h saved). RECURRING_BUG_PATTERNS Class 10 added (strategy-regime mismatch). New `DOCS/STRATEGY_REFACTOR_IDEAS.md` parks the X-macro plug-and-play refactor for the next strategy-add trigger. Tests 914 → 920. **Hot path UNTOUCHED.** See `DOCS/changelogs/2026-04-30-v5.7-strategy-quality.md` + `2026-04-30-regime-classifier-audit.md`. |
+| Version | Date | Highlights | Detail |
+|---------|------|------------|--------|
+| **5.9.x** | **2026-05-02** | 🛡 **ML Hardening sprint** — silent-failure surfacing + train-serve parity. 27 V5_9_AUDIT findings closed across 6 phases / 27 tags / ~1.5 calendar days. NaN guards, stamp body extensions (engine_version, scaler_sha256, hyperparams, build_flags), inference cfg load-time enforcement, cross-binary drift detection, Train Model auto-stamp. Tests 1030 → 1326 (+296). Hot path UNTOUCHED. New skills: `/ml-audit`, `/parity-check`, `/plan-check`. | [`2026-05-02-v5.9-ml-hardening.md`](changelogs/2026-05-02-v5.9-ml-hardening.md) |
+| **5.8.x** | **2026-05-01** | 🧩 **Easy Additions sprint** — X-macro registries everywhere (FOREACH_STRATEGY, FOREACH_FEATURE, FOREACH_PANEL, SHALT codes, regime, metric helpers). Stamp body extended with `engine_version` + `feature_registry_hash`; load-time mismatch refuses on strict mode. Tests 938 → 1030. Hot path UNTOUCHED. Pure refactor — no operator-visible behavior change. | [`2026-05-01-v5.8-easy-additions.md`](changelogs/2026-05-01-v5.8-easy-additions.md) |
+| **5.7.x** | **2026-04-30** | 🎯 **Strategy quality sprint** — regime classifier audit (verdict PASS), entry/exit health log lines, boot guard for hardcoded-strategy-in-live, MOM quality filters (opt-in), Strategy Quality GUI panel. Tests 914 → 920. Hot path UNTOUCHED. | [`2026-04-30-v5.7-strategy-quality.md`](changelogs/2026-04-30-v5.7-strategy-quality.md), [audit](changelogs/2026-04-30-regime-classifier-audit.md) |
 | **5.6.x** | **2026-04-30** | **🔭 Execution / display divergence audit + diagnostic visibility (7-phase ship)** *(minor bump per CLAUDE.md "X.Y = significant features")* — Closes the silent-block bug class observed on 2026-04-30 paper run: GUI showed "READY" while hot path refused to fire (fee-floor `BUY_BLOCKED`). Recurring bug pattern Class 2c — display predicate is strict subset of hot-path predicate. **v5.6.0** — surface BUY_BLOCKED + book-imbalance halt (was set but invisible due to halt_names array bound). **v5.6.1** — hot-path predicate parity audit; add `permission`, `bg_volume_threshold`, `bitmap_consistency` to PerCoreSnap. **v5.6.2** — `strategy_halt_reason` (SHALT_*) for fee-floor / cost-gate / no-signal distinction. **v5.6.3** — diagnostic numerics (single-source rule); collapsing-header readouts show actual vs threshold for spacing, vwap, long-slope, vol-delta, stddev, tp_pct. **v5.6.4** — snapshot truthfulness audit verdict PASS (existing seqlock + ACQUIRE-load sufficient; Phase 5b fixes collapsed to no-op, ~5h saved). **v5.6.5** — SG predicate display: TP/SL flag indicators + original-TP tooltip on ratchet'd cells. **v5.6.6** — health log `cat="gate"` edge-triggered emits (post-hoc grep-able for missed-trade forensics). New `DOCS/EXECUTION_DISPLAY_INVARIANTS.md` codifies the "every hot-path predicate term must have a GUI surface" rule. RECURRING_BUG_PATTERNS Class 2c added. Tests 892 → 914 (+22 EXECUTION_DISPLAY assertions). **Hot path UNTOUCHED** in all six ships. See `DOCS/changelogs/2026-04-30-v5.6-execution-display.md`. |
 | 5.5.4 | 2026-04-30 | **regime-transition SL ratchet now fee-floor capped (root-cause of "TP-too-tight on AUTO" pattern)** — user paper trade history (26 trades) showed all losing, with TPs firing at $13-27 above entry on $76k positions (lose to fees). User intuited: regime transitions corrupting exit marks. **Confirmed root cause:** the v4.0.3 D11 regime-transition `tight_sl` write at `ControllerEventLoop.hpp:1662` writes `ratchet_sl` directly without the v5.1.7 fee-floor cap (which only the v5.4.0 `Strategy_WriteRatchetSL` helper applies). On AUTO regime switch with low stddev, `ratchet_sl = price_avg - stddev` ends up ABOVE `entry × 0.997` (the safe-from-fees floor), causing the next pullback to exit at near-entry prices for a guaranteed fee-eaten loss. **Fix:** D11 now routes through `Strategy_WriteRatchetSL` per active slot under partials, applying the cap. Tests 892/892. **Open separately (v5.6 design):** `live_tp` / `live_sl` on the hot path are set at entry from the strategy's params at that moment and don't update when AUTO transitions to a different sub-strategy. Position keeps the old strategy's exit levels for its lifetime. Needs deliberate "regime-aware live_tp/sl refresh" design — flagged but not in scope for v5.5.x. |
 | 5.5.3 | 2026-04-30 | **fix BeginTable column count regression** — v5.5.2's Hold column added a `TableSetupColumn` but didn't bump `BeginTable`'s expected count from 11 → 12. ImGui asserted on first launch (`TableSetupColumn(): called too many times!` → IOT/core dump). One-digit fix. Smoke test confirms engine_gui launches clean. |

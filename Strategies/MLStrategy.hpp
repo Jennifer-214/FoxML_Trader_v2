@@ -20,7 +20,9 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/ModelInference.hpp"
+#include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
 #include "../CoreFrameworks/OrderGates.hpp"
+#include <cmath>  // v5.9.0: std::isnan/isinf for prediction validation
 
 //======================================================================================================
 // [STATE]
@@ -70,6 +72,24 @@ inline void MLStrategy_Adapt(MLStrategyState<F> *state, FPN<F> current_price,
     (void)active_bitmap; (void)buy_conds; (void)cfg;
 }
 
+// v5.8.0 — canonical-signature adapter. The X-macro registry expects
+// every strategy's _Adapt to take `const ControllerConfig<F>*` as the
+// last arg (per DOCS/EASY_ADDITIONS_INVARIANTS.md). MLStrategy_Adapt
+// historically took `const void*` (likely an include-cycle workaround).
+// This wrapper conforms to the canonical sig and forwards as void*.
+// Real-function preserved for legacy callers; X-macro references this
+// adapter.
+template <unsigned F> struct ControllerConfig;
+template <unsigned F>
+inline void MLStrategy_Adapt_Canonical(
+    MLStrategyState<F> *state, FPN<F> current_price,
+    FPN<F> portfolio_delta, uint16_t active_bitmap,
+    const BuySideGateConditions<F> *buy_conds,
+    const ControllerConfig<F> *cfg) {
+    MLStrategy_Adapt(state, current_price, portfolio_delta, active_bitmap,
+                      buy_conds, (const void*)cfg);
+}
+
 //======================================================================================================
 // [BUY SIGNAL]
 //======================================================================================================
@@ -93,11 +113,38 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
 
     if (!state->model_ready) return conds;
 
-    // pack features from regime signals + rolling stats
-    int n = ModelFeatures_Pack(state->feature_buf, signals, rolling, rolling_long);
+    // pack features from regime signals + rolling stats (v5.8.1b: registry-driven)
+    FeatureComputeCtx<F> ctx{};
+    ctx.signals       = signals;
+    ctx.short_rolling = rolling;
+    int n = Features_PackAll(&ctx, state->feature_buf);
+    // v5.9.0 — NaN/Inf in feature pack → no entry (Features_PackAll returns
+    // -1 sentinel; never pass garbage to XGBoost, never silently entry).
+    if (n < 0) {
+        fprintf(stderr, "[ML] BuySignal: NaN/Inf in feature pack — skipping prediction\n");
+        return conds;  // already zero-initialized above; no buy signal
+    }
+
+    // v5.9.3b — apply feature standardizer (mean-centering + unit-variance).
+    // Identity no-op when state->buy_model.scaler.has_scaler=0 (legacy v5.x
+    // models or v5.9.3+ models without a sidecar). Post-apply finite check
+    // catches any NaN introduced by the scaler math itself (rare-edge:
+    // stddev floored + feature at saturation).
+    if (tt::FeatureStandardizer_Apply(&state->buy_model.scaler,
+                                       state->feature_buf, n) < 0) {
+        fprintf(stderr, "[ML] BuySignal: NaN/Inf post-scaler-apply — skipping prediction\n");
+        return conds;
+    }
 
     // run inference
     float prediction = Model_Predict(&state->buy_model, state->feature_buf, n);
+    // v5.9.0 — NaN/Inf in prediction → no entry. XGBoost can return NaN on
+    // pathological inputs; `prediction > threshold` evaluates false on NaN
+    // (silent miss). Guard explicitly + log.
+    if (std::isnan(prediction) || std::isinf(prediction)) {
+        fprintf(stderr, "[ML] BuySignal: prediction NaN/Inf — skipping entry\n");
+        return conds;
+    }
     state->last_prediction = FPN_FromDouble<F>((double)prediction);
 
     // cast config to access threshold

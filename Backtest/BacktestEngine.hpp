@@ -16,11 +16,16 @@
 
 #include "../CoreFrameworks/PortfolioController.hpp"
 #include "../CoreFrameworks/OrderGates.hpp"
+#include "../CoreFrameworks/MetricCompute.hpp"  // v5.8.4c: shared metric helpers
 #include "../DataStream/TradeLog.hpp"
 #include "../ML_Headers/ModelInference.hpp"
+#include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.6: FEATURE_REGISTRY_HASH() for auto-stamp
+#include "../ML_Headers/BuildFlags.hpp"       // v5.9.5h: BUILD_FLAGS_HASH() for cross-build drift detection
+#include "../Version.hpp"                      // v5.8.6: ENGINE_VERSION_STRING for auto-stamp
 #include "../GUI/CandleAccumulator.hpp"
 #include "LabelFunctions.hpp"
 #include "BacktestSnapshot.hpp"
+#include "XGBHyperparams.hpp"  // v5.9.5h: single source of truth for XGBoost hyperparams
 #include "ValidationSplit.hpp"
 #include "OverfitDetection.hpp"
 #include "HeldOutSplit.hpp"  // Phase 7prep — locked held-out test set discipline
@@ -92,12 +97,81 @@ static inline int BacktestData_Load(HistoricalTick *ticks, int *count, int max_t
             else t->is_buyer_maker = (int)strtol(p, &p, 10);
         }
 
-        if (t->price > 0.0 && t->qty > 0.0)
+        // v5.9.5j.2 — bogus-ts filter. TickRecorder occasionally writes
+        // truncated rows (write interrupted mid-CSV: only 6 of 8 fields,
+        // ts column ends up containing a partial '17144' instead of
+        // full ms timestamp '1714348800000'). Sanity bound: any tick
+        // with ts < 2017-07-14 (1.5e12 ms) is corrupt — skip.
+        // Format-1 (TickRecorder) uses microseconds; bound 1.5e15.
+        // Format-0 (Binance aggTrades) uses milliseconds; bound 1.5e12.
+        const int64_t MIN_VALID_TS = (format == 1)
+            ? 1500000000000000LL    // 1.5e15 µs = 2017-07-14
+            : 1500000000000LL;       // 1.5e12 ms = 2017-07-14
+        if (t->price > 0.0 && t->qty > 0.0 && t->timestamp_us >= MIN_VALID_TS)
             (*count)++;
     }
 
     fclose(f);
     fprintf(stderr, "[backtest] loaded %d ticks from %s\n", *count, csv_path);
+    return *count > 0 ? 1 : 0;
+}
+
+//======================================================================================================
+// [TICK SORT VALIDATION — v5.9.2c]
+//======================================================================================================
+// Validates the tick array is timestamp-monotonic (`ticks[i].timestamp_us
+// >= ticks[i-1].timestamp_us`). Closes the silent-drift class where
+// concatenated daily exports / mistyped tick replays produce out-of-order
+// CSVs that silently corrupt rolling stats / ROR / tick-rate features at
+// training time. Caller passes cfg's csv_sort_check_mode to choose
+// behavior on violation: WARN (default) / STRICT / AUTO.
+//
+// Returns: 0 = clean (no violations or auto-sorted), -1 = STRICT refusal.
+// Caller in STRICT mode should treat -1 as "abort run".
+//======================================================================================================
+static inline int HistoricalTick_CmpByTime(const void *a, const void *b) {
+    int64_t ta = ((const HistoricalTick*)a)->timestamp_us;
+    int64_t tb = ((const HistoricalTick*)b)->timestamp_us;
+    if (ta < tb) return -1;
+    if (ta > tb) return 1;
+    return 0;
+}
+
+static inline int BacktestData_ValidateSort(HistoricalTick *ticks, int count,
+                                             int mode, const char *label) {
+    if (count < 2) return 0;
+    int violations = 0;
+    int first_idx = -1;
+    for (int i = 1; i < count; i++) {
+        if (ticks[i].timestamp_us < ticks[i-1].timestamp_us) {
+            violations++;
+            if (first_idx < 0) first_idx = i;
+        }
+    }
+    if (violations == 0) return 0;
+
+    if (mode == CSV_SORT_STRICT) {
+        fprintf(stderr,
+            "[FATAL] csv_sort_check_mode=strict: %s has %d tick ordering "
+            "violations (first at idx %d: ts=%lld < prev=%lld). Refusing load.\n",
+            label, violations, first_idx,
+            (long long)ticks[first_idx].timestamp_us,
+            (long long)ticks[first_idx-1].timestamp_us);
+        return -1;
+    } else if (mode == CSV_SORT_AUTO) {
+        qsort(ticks, (size_t)count, sizeof(HistoricalTick), HistoricalTick_CmpByTime);
+        fprintf(stderr,
+            "[INFO] csv_sort_check_mode=auto: %s had %d violations, sorted in-place.\n",
+            label, violations);
+        return 0;
+    } else {  // CSV_SORT_WARN (default, or unknown mode treated as warn)
+        fprintf(stderr,
+            "[WARN] %s has %d tick ordering violations (first at idx %d). "
+            "Features will be computed on out-of-order data. Set "
+            "csv_sort_check_mode=2 (auto) to sort, or =1 (strict) to refuse.\n",
+            label, violations, first_idx);
+        return 0;
+    }
     return 1;
 }
 
@@ -136,6 +210,20 @@ struct BacktestStats {
     double avg_hold_ticks;
     double elapsed_ms;
     uint64_t ticks_processed;
+    // v5.8.4c: replaces the legacy -1.0 "no-losses" sentinel that used to
+    // be packed into profit_factor itself. Set to 1 when wins > 0 and
+    // losses == 0 — display layer renders "—" (or "∞") on this flag,
+    // optimizer continues to read profit_factor numerically (now 0.0 in
+    // that case). Cleanly separates math from display semantics.
+    int all_wins_run;
+    // v5.9.1: count of label samples that produced NaN/Inf at compute.
+    // For binary/regression: wrapped to neutral default (0.5/0.0) and consumed.
+    // For multiclass: sample is skipped (not included in training matrix), since
+    // softmax has no defensible neutral default. nan_labels_dropped only
+    // increments on the multiclass-skip path; binary/regression saved samples
+    // are tracked via their own counters if needed.
+    uint32_t nan_labels_total;     // total NaN/Inf label outputs encountered
+    uint32_t nan_labels_dropped;   // multiclass samples skipped from training
 };
 
 //======================================================================================================
@@ -351,6 +439,13 @@ static inline void XGBoost_ComputeMulticlassWeights(const float *labels, int cou
 //======================================================================================================
 // [STATS COMPUTE]
 //======================================================================================================
+// v5.8.4c: per-metric Compute_* helpers + MaxDrawdown_UpdateIncremental
+// live in CoreFrameworks/MetricCompute.hpp (included via
+// ShardedSnapshot.hpp / EngineTUI.hpp's transitive includes). Single
+// source of truth across backtest, live TUI, and per-core snapshot
+// paths — kills the 4-site profit_factor drift + 3-site expectancy
+// fabs() inconsistency + 2-site max_drawdown reimplementation.
+//======================================================================================================
 static inline void BacktestStats_Compute(BacktestStats *stats,
                                           const PortfolioController<BACKTEST_FP> *ctrl,
                                           double starting_balance,
@@ -363,34 +458,19 @@ static inline void BacktestStats_Compute(BacktestStats *stats,
     stats->ticks_processed = ctrl->total_ticks;
     stats->elapsed_ms = elapsed_ms;
 
-    // win rate
-    stats->win_rate = (stats->total_trades > 0)
-        ? (double)stats->wins / stats->total_trades * 100.0
-        : 0.0;
-
-    // averages
+    // v5.8.4c: route every metric through Compute_* helpers (single
+    // source of truth shared with EngineTUI / ShardedSnapshot paths).
     double gw = FPN_ToDouble(ctrl->gross_wins);
     double gl = FPN_ToDouble(ctrl->gross_losses);
     stats->avg_win  = (stats->wins > 0)   ? gw / stats->wins   : 0.0;
     stats->avg_loss = (stats->losses > 0) ? gl / stats->losses : 0.0;
-
-    // profit factor
-    stats->profit_factor = (gl > 0.0001) ? gw / gl : 0.0;
-
-    // expectancy: (win_rate * avg_win) - (loss_rate * avg_loss)
-    double wr = stats->wins > 0 ? (double)stats->wins / stats->total_trades : 0.0;
-    double lr = 1.0 - wr;
-    stats->expectancy = (wr * stats->avg_win) - (lr * fabs(stats->avg_loss));
-
-    // return %
-    stats->return_pct = (starting_balance > 0.0)
-        ? stats->total_pnl / starting_balance * 100.0
-        : 0.0;
-
-    // avg hold ticks
-    stats->avg_hold_ticks = (stats->total_trades > 0)
-        ? (double)ctrl->total_hold_ticks / stats->total_trades
-        : 0.0;
+    stats->win_rate       = Compute_WinRate(stats->wins, stats->total_trades);
+    stats->profit_factor  = Compute_ProfitFactor(gw, gl);
+    stats->all_wins_run   = Compute_AllWinsRun(gw, gl);
+    stats->expectancy     = Compute_Expectancy(stats->total_trades, stats->wins,
+                                                stats->avg_win, stats->avg_loss);
+    stats->return_pct     = Compute_ReturnPct(stats->total_pnl, starting_balance);
+    stats->avg_hold_ticks = Compute_AvgHoldTicks(ctrl->total_hold_ticks, stats->total_trades);
 
     // max drawdown — compute from equity curve in results (caller's job)
     // sharpe — needs equity curve data too
@@ -401,16 +481,14 @@ static inline void BacktestStats_Compute(BacktestStats *stats,
 //======================================================================================================
 static inline void BacktestStats_ComputeFromEquity(BacktestStats *stats,
                                                     const double *equity, int count) {
-    // max drawdown
-    double peak = equity[0];
+    // v5.8.4c: max drawdown via shared MaxDrawdown_UpdateIncremental helper —
+    // BacktestSharded.hpp's per-tick path calls the same helper with the
+    // same scalar update logic. Bytewise FP identity by construction.
+    double peak = (count > 0) ? equity[0] : 0.0;
     double max_dd = 0.0;
     double max_dd_pct = 0.0;
     for (int i = 1; i < count; i++) {
-        if (equity[i] > peak) peak = equity[i];
-        double dd = peak - equity[i];
-        if (dd > max_dd) max_dd = dd;
-        double dd_pct = (peak > 0.0) ? dd / peak : 0.0;
-        if (dd_pct > max_dd_pct) max_dd_pct = dd_pct;
+        MaxDrawdown_UpdateIncremental(equity[i], &peak, &max_dd, &max_dd_pct);
     }
     stats->max_drawdown = max_dd;
     stats->max_drawdown_pct = max_dd_pct * 100.0;
@@ -490,6 +568,21 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
     fprintf(stderr, "[backtest] label buffer: %d total ticks across %d files\n",
             label_count, run_cfg->num_data_files);
 
+    // v5.9.2c — validate the CONCATENATED label_ticks array. Catches
+    // intra-file violations AND inter-file ordering (file 1's last tick
+    // > file 2's first tick).
+    int sort_mode = run_cfg->use_config_override
+                  ? run_cfg->config_override.csv_sort_check_mode
+                  : CSV_SORT_WARN;
+    int sort_rc = BacktestData_ValidateSort(label_ticks, label_count,
+                                             sort_mode, "label_ticks (concatenated)");
+    if (sort_rc < 0) {
+        // STRICT refusal — abort label computation; results.labels stays
+        // unpopulated so caller knows training data is unusable.
+        free(label_ticks);
+        return;
+    }
+
     LabelFn label_fn = NULL;
     for (int l = 0; l < LABEL_COUNT; l++) {
         if (label_table[l].id == run_cfg->label_type) {
@@ -503,18 +596,41 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
     double sl = run_cfg->label_sl_pct > 0 ? run_cfg->label_sl_pct : 1.0;
     int fwd = run_cfg->label_forward_ticks > 0 ? run_cfg->label_forward_ticks : 1000;
 
+    int is_multiclass = LabelType_IsMulticlass(run_cfg->label_type);
+    int is_regression = LabelType_IsRegression(run_cfg->label_type);
     for (int s = 0; s < results->sample_count; s++) {
         int tidx = results->sample_tick_indices[s];
         if (tidx >= label_count) tidx = label_count - 1;
         int extra = (run_cfg->label_type == LABEL_REGIME)
             ? results->sample_regimes[s] : fwd;
-        results->labels[s] = label_fn(label_ticks, tidx, label_count,
-                                       results->sample_prices[s], tp, sl, extra);
+        float lbl = label_fn(label_ticks, tidx, label_count,
+                             results->sample_prices[s], tp, sl, extra);
+        if (isnan(lbl) || isinf(lbl)) {
+            results->stats.nan_labels_total++;
+            if (is_multiclass) {
+                // multiclass softmax has no defensible neutral; mark with NAN
+                // so the training-matrix copy step skips this sample.
+                results->labels[s] = NAN;
+                results->stats.nan_labels_dropped++;
+            } else if (is_regression) {
+                results->labels[s] = 0.0f;  // zero return is the neutral default
+            } else {
+                results->labels[s] = 0.5f;  // binary: neither class
+            }
+        } else {
+            results->labels[s] = lbl;
+        }
     }
     free(label_ticks);
 
-    fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.1f%%, sl=%.1f%%)\n",
+    fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.1f%%, sl=%.1f%%)",
             results->sample_count, run_cfg->label_type, tp, sl);
+    if (results->stats.nan_labels_total > 0) {
+        fprintf(stderr, " — NaN/Inf: %u total, %u dropped (multiclass)",
+                results->stats.nan_labels_total,
+                results->stats.nan_labels_dropped);
+    }
+    fputc('\n', stderr);
 }
 
 //======================================================================================================
@@ -784,6 +900,85 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         localtime_r(&now, &tm_buf);
         strftime(today, sizeof(today), "%Y-%m-%d", &tm_buf);
 
+        // v5.8.6: embed FEATURE_REGISTRY_HASH() + ENGINE_VERSION_STRING so the
+        // load-time verifier can catch train-serve drift + the operator sees
+        // which engine version the model was trained against.
+        //
+        // v5.9.5b — close the half-wired StampInferenceCfgInputs gap. v5.9.2b
+        // added 9 inference-affecting cfg fields to the stamp body schema +
+        // verifier, but production emit sites (suite Run Full Validation
+        // here, plus tools/stamp_model.sh CLI) never populated `inf`. Result:
+        // suite-emitted stamps lacked all stamp-bound cfg protection. Same
+        // shape as the v5.9.4a model_num_outputs gap. Fix: build inf from
+        // data->config_used + label_type, pass to stamp_write_for_model.
+        // Scaler sha256 not wired here (Run Full Validation doesn't persist
+        // a scaler in this path — separate v5.9.5c+ scope).
+        StampInferenceCfgInputs inf = {};
+        inf.has_inference_cfg = 1;
+        inf.confidence_threshold_scale =
+            FPN_ToDouble(data->config_used.confidence_threshold_scale);
+        inf.barrier_gate_enabled = data->config_used.barrier_gate_enabled;
+        inf.confidence_hard_block_threshold =
+            FPN_ToDouble(data->config_used.confidence_hard_block_threshold);
+        inf.held_out_fraction =
+            FPN_ToDouble(data->config_used.held_out_fraction);
+        inf.freshness_tau =
+            FPN_ToDouble(data->config_used.confidence_freshness_tau);
+        if (data->config_used.bandit_enabled) {
+            inf.has_bandit = 1;
+            inf.bandit_blend_ratio =
+                FPN_ToDouble(data->config_used.bandit_blend_ratio);
+        }
+        if (data->config_used.cost_gate_enabled) {
+            inf.has_fees = 1;
+            inf.fee_rate_maker = FPN_ToDouble(data->config_used.fee_rate_maker);
+            inf.fee_rate_taker = FPN_ToDouble(data->config_used.fee_rate_taker);
+        }
+        inf.has_training_poll_interval = 1;
+        inf.training_poll_interval     = data->config_used.poll_interval;
+        // model_num_outputs derived from label_type: binary/regression → 1,
+        // multiclass K → K. Single source of truth: LabelType_NumClasses.
+        {
+            int K = LabelType_NumClasses(label_type);
+            inf.has_num_outputs   = 1;
+            inf.model_num_outputs = (K >= 2) ? K : 1;
+        }
+        // v5.9.5h — XGBoost hyperparams binding. RFV uses
+        // XGBHyperparams_Defaults() (cfg-tunable subset overridden by
+        // config_used; Train Model overrides max_depth/lr/n_est too).
+        // Stamp records what trained the model for forensics +
+        // reproducibility; engine load-WARN compares to runtime cfg.
+        {
+            inf.has_xgb_hyperparams = 1;
+            tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
+            // RFV training uses cfg-tunable subset; pull from config_used
+            hp.subsample        = FPN_ToDouble(data->config_used.xgb_subsample);
+            hp.colsample_bytree = FPN_ToDouble(data->config_used.xgb_colsample_bytree);
+            hp.min_child_weight = data->config_used.xgb_min_child_weight;
+            hp.seed             = data->config_used.xgb_seed;
+            {
+                size_t tmln = strnlen(data->config_used.xgb_tree_method,
+                                       sizeof(hp.tree_method) - 1);
+                memcpy(hp.tree_method, data->config_used.xgb_tree_method, tmln);
+                hp.tree_method[tmln] = '\0';
+            }
+            inf.xgb_max_depth         = hp.max_depth;
+            inf.xgb_learning_rate     = (double)hp.learning_rate;
+            inf.xgb_n_estimators      = hp.n_estimators;
+            inf.xgb_subsample         = hp.subsample;
+            inf.xgb_colsample_bytree  = hp.colsample_bytree;
+            inf.xgb_min_child_weight  = hp.min_child_weight;
+            inf.xgb_seed              = hp.seed;
+            size_t tmln = strnlen(hp.tree_method, sizeof(inf.xgb_tree_method) - 1);
+            memcpy(inf.xgb_tree_method, hp.tree_method, tmln);
+            inf.xgb_tree_method[tmln] = '\0';
+        }
+        // v5.9.5h Phase 10 — build flags fingerprint. Stamps the
+        // training-build's hash so engine load can detect cross-build
+        // deploy drift (e.g., trained -O2 dev box, deployed -O3 prod).
+        inf.has_build_flags_hash = 1;
+        inf.build_flags_hash = tt::BUILD_FLAGS_HASH();
+
         StampWriteResult sr = stamp_write_for_model(
             out->auto_stamp_path,
             out->auto_stamp_secret,
@@ -793,7 +988,10 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             wf_metric,
             (double)out->held_out_metric,
             (double)gap_threshold,
-            /*force=*/0);
+            /*force=*/0,
+            /*feature_registry_hash=*/FEATURE_REGISTRY_HASH(),
+            /*engine_version=*/ENGINE_VERSION_STRING,
+            /*inf=*/&inf);
         out->auto_stamp_attempted = 1;
         out->auto_stamp_ok = sr.ok;
         if (sr.ok) {
@@ -841,6 +1039,39 @@ static inline float WalkForward_ComputeAccuracy(const float *predictions, const 
         if (pred_class == true_class) correct++;
     }
     return (float)correct / count;
+}
+
+// v5.9.4a — "always-predict-best" baseline accuracy for a label distribution.
+//   - Binary (K=2): max(0.5, max_class_freq) — uniform random OR majority
+//   - K-class (K>=3): max(1.0/K, max_class_freq) — uniform random OR majority
+//   - Regression: caller should not call this (use Pearson r diagnosis instead)
+//
+// Inputs:
+//   num_classes — from label_table[].num_classes promoted to >=2 for binary,
+//                 OR wf->num_classes / snap->num_classes for multiclass
+//   class_counts — optional; if NULL or sample_count<=0, returns uniform 1/K
+//   sample_count — total sample count
+//
+// Used by Training panel WF diagnosis (no-edge / marginal / real-edge bands)
+// + Past Runs val accuracy color thresholds. Single-source-of-truth so both
+// sites can't drift. Pre-v5.9.4a, both sites had hardcoded binary thresholds
+// (0.52 / 0.55) which mis-diagnosed multiclass — caught in 2026-05-02 paper
+// test where 3-class with 47% majority showed val=46.7% but binary heuristic
+// said "no edge — below 50%" (technically right answer, wrong reasoning).
+static inline float multiclass_baseline_accuracy(int num_classes,
+                                                   const int* class_counts,
+                                                   int sample_count) {
+    if (num_classes < 2) num_classes = 2;  // binary floor
+    float uniform = 1.0f / (float)num_classes;
+    float majority = uniform;
+    if (class_counts && sample_count > 0) {
+        int K = num_classes > 16 ? 16 : num_classes;
+        for (int k = 0; k < K; ++k) {
+            float p = (float)class_counts[k] / (float)sample_count;
+            if (p > majority) majority = p;
+        }
+    }
+    return majority;
 }
 
 // multiclass accuracy: predictions is count × num_classes flat array (softmax probs).
@@ -953,11 +1184,16 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     // For multiclass, labels are integer class ids 0..K-1, never 0.5 — no filter
     // is needed but harmless. Skip the filter for clarity + correctness.
     int filter_neutrals = LabelType_IsBinary(label_type);
+    int filter_nan = LabelType_IsMulticlass(label_type);  // v5.9.1: NAN-marked = NaN-label-dropped
 
     int nn_count = 0;
     if (filter_neutrals) {
         for (int i = 0; i < data->sample_count; i++) {
             if (data->labels[i] != 0.5f) nn_count++;
+        }
+    } else if (filter_nan) {
+        for (int i = 0; i < data->sample_count; i++) {
+            if (!isnan(data->labels[i])) nn_count++;
         }
     } else {
         nn_count = data->sample_count;
@@ -984,6 +1220,7 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     int j = 0;
     for (int i = 0; i < data->sample_count; i++) {
         if (filter_neutrals && data->labels[i] == 0.5f) continue;
+        if (filter_nan && isnan(data->labels[i])) continue;
         memcpy(&nn_features[j * MODEL_NUM_FEATURES],
                &data->feature_matrix[i * MODEL_NUM_FEATURES],
                MODEL_NUM_FEATURES * sizeof(float));
@@ -1105,14 +1342,14 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         } else {
             XGBoosterSetParam(booster, "objective", "binary:logistic");
         }
-        XGBoosterSetParam(booster, "max_depth", "6");
-        XGBoosterSetParam(booster, "eta", "0.1");
-        XGBoosterSetParam(booster, "subsample", "0.8");
-        XGBoosterSetParam(booster, "colsample_bytree", "0.8");
-        XGBoosterSetParam(booster, "min_child_weight", "5");
-        XGBoosterSetParam(booster, "nthread", "1");
-        XGBoosterSetParam(booster, "verbosity", "0");
-        XGBoosterSetParam(booster, "seed", "42");
+        // v5.9.5h — XGBHyperparams struct + apply helper. Single source of
+        // truth shared with HeldOut training (BacktestEngine.hpp:~1592) and
+        // Train Model worker (BacktestPanels.hpp). Defaults match the
+        // pre-v5.9.5h hardcoded values bytewise; non-tuning operators get
+        // identical training output. nthread=1 for deterministic per-fold
+        // output (mirrors HeldOut; Train Model uses 4 for faster GUI iter).
+        tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
+        tt::XGBHyperparams_Apply(booster, hp, /*nthread=*/1);
         // class balance — kind-specific.
         // Binary: scale_pos_weight = n_neg/n_pos (single param).
         // Multiclass: per-sample inverse-frequency weights via DMatrix info.
@@ -1313,10 +1550,12 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
     int is_regression   = LabelType_IsRegression(label_type);
     int is_multiclass   = LabelType_IsMulticlass(label_type);
     int filter_neutrals = LabelType_IsBinary(label_type);
+    int filter_nan      = is_multiclass;  // v5.9.1: NAN-marked = NaN-label-dropped
 
     int n_train = 0, n_eval = 0;
     for (int i = 0; i < data->sample_count; ++i) {
         if (filter_neutrals && data->labels[i] == 0.5f) continue;
+        if (filter_nan && isnan(data->labels[i])) continue;
         if (i < split->trainval_end_idx) n_train++;
         else                              n_eval++;
     }
@@ -1345,6 +1584,7 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
         int ti = 0, ei = 0;
         for (int i = 0; i < data->sample_count; ++i) {
             if (filter_neutrals && data->labels[i] == 0.5f) continue;
+            if (filter_nan && isnan(data->labels[i])) continue;
             if (i < split->trainval_end_idx) {
                 memcpy(&train_features[ti * MODEL_NUM_FEATURES],
                        &data->feature_matrix[i * MODEL_NUM_FEATURES],
@@ -1391,14 +1631,11 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
         } else {
             XGBoosterSetParam(booster, "objective", "binary:logistic");
         }
-        XGBoosterSetParam(booster, "max_depth", "6");
-        XGBoosterSetParam(booster, "eta", "0.1");
-        XGBoosterSetParam(booster, "subsample", "0.8");
-        XGBoosterSetParam(booster, "colsample_bytree", "0.8");
-        XGBoosterSetParam(booster, "min_child_weight", "5");
-        XGBoosterSetParam(booster, "nthread", "1");
-        XGBoosterSetParam(booster, "verbosity", "0");
-        XGBoosterSetParam(booster, "seed", "42");
+        // v5.9.5h — XGBHyperparams struct + apply helper. Mirrors WF site
+        // above for train-serve parity. nthread=1 for deterministic
+        // held-out training (single-threaded; metric must be reproducible).
+        tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
+        tt::XGBHyperparams_Apply(booster, hp, /*nthread=*/1);
 
         if (!is_regression && !is_multiclass) {
             int n_pos = 0, n_neg = 0;

@@ -456,39 +456,16 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                                            //   = transparent black, making any
                                            //   AUTO core's row invisible)
         };
-        // v5.6.0: halt_names + the BUY_BLOCKED flag bit are needed by both
-        // the top-table Status column AND the collapsing-header detail block,
-        // so declare here at panel scope rather than inside the second loop.
-        // Codes 0..10 must stay in sync with EngineTUI.hpp's halt_reason
-        // comment + ControllerEventLoop.hpp:1812-1814.
-        static const char* halt_names[] = {
-            "ok", "spacing", "vwap", "long-slope", "vol-delta",
-            "min-stddev", "sl-cooldown", "warmup", "core-budget", "core-kill",
-            "imbalance"
-        };
-        constexpr int halt_names_count =
-            (int)(sizeof(halt_names) / sizeof(halt_names[0]));
-        // v5.6.2/v5.7.5: SHALT_* names for strategy-internal halt reasons.
-        // Mirror of SHALT_SHORT_NAMES in StrategyInterface.hpp — keep in sync.
-        static const char* shalt_names[] = {
-            "ok",            // SHALT_OK = 0
-            "no-uptrend",    // SHALT_NO_UPTREND = 1
-            "no-mean-rev",   // SHALT_NO_MEAN_REV = 2
-            "fee-floor",     // SHALT_FEE_FLOOR = 3
-            "cost-gate",     // SHALT_COST_GATE = 4
-            "stddev-zero",   // SHALT_STDDEV_ZERO = 5
-            "no-breakout",   // SHALT_NO_BREAKOUT = 6
-            "ml-no-pred",    // SHALT_ML_NO_PRED = 7
-            "ml-below-thr",  // SHALT_ML_BELOW_THR = 8
-            "low-confidence",// SHALT_LOW_CONFIDENCE = 9
-            "no-signal",     // SHALT_NO_SIGNAL = 10
-            "mom:tp-tight", // SHALT_MOM_TP_TOO_TIGHT = 11
-            "mom:no-flow",  // SHALT_MOM_NO_FLOW = 12
-            "mom:low-r2",   // SHALT_MOM_LOW_R2 = 13
-            "mom:last-lost",// SHALT_MOM_LAST_LOST = 14
-        };
-        constexpr int shalt_names_count =
-            (int)(sizeof(shalt_names) / sizeof(shalt_names[0]));
+        // v5.8.3: halt_names sourced directly from HALT_NAMES
+        // (StrategyInterface.hpp's FOREACH_HALT_REASON(X) registry).
+        // Local mirror retired — single source of truth, eliminates the
+        // class of bug that bit v5.6.0 (mirror-out-of-sync silently
+        // dropped halt_reason=10/imbalance from the display).
+        constexpr int halt_names_count = (int)NUM_HALT_REASONS;
+        // v5.8.2: SHALT_* names sourced directly from SHALT_SHORT_NAMES
+        // (StrategyInterface.hpp's FOREACH_SHALT(X) registry). Local
+        // mirror retired — single source of truth.
+        constexpr int shalt_names_count = (int)NUM_SHALT_CODES;
         constexpr uint8_t GUI_GATE_FLAG_BUY_BLOCKED = 0x20;  // mirrors
             // GateParameters.hpp:61. Display-side mirror keeps the GUI
             // module from needing CoreFrameworks/ headers; checked by
@@ -576,14 +553,14 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                         pc->strategy_halt_reason < shalt_names_count) {
                         ImGui::TextColored(FoxmlColors::yellow,
                             "blocked: %s",
-                            shalt_names[pc->strategy_halt_reason]);
+                            SHALT_SHORT_NAMES[pc->strategy_halt_reason]);
                     } else {
                         ImGui::TextColored(FoxmlColors::yellow, "blocked");
                     }
                 } else if (pc->halt_reason > 0 &&
                            pc->halt_reason < halt_names_count) {
                     ImGui::TextColored(FoxmlColors::yellow,
-                        "off: %s", halt_names[pc->halt_reason]);
+                        "off: %s", HALT_NAMES[pc->halt_reason]);
                 } else if (pc->strategy_halt_reason > 0 &&
                            pc->strategy_halt_reason < shalt_names_count) {
                     // v5.6.2: strategy zero-gated for a strategy-internal
@@ -591,7 +568,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     // only SHALT_NO_SIGNAL lands here; future per-strategy
                     // codes (NO_UPTREND, NO_MEAN_REV, etc) will too.
                     ImGui::TextColored(FoxmlColors::yellow,
-                        "off: %s", shalt_names[pc->strategy_halt_reason]);
+                        "off: %s", SHALT_SHORT_NAMES[pc->strategy_halt_reason]);
                 } else if (gate_p < 0.01) {
                     // Catch-all when neither halt_reason nor strategy_halt_reason
                     // is set but threshold is zero — should not happen post-v5.6.2
@@ -654,7 +631,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                 if (pc->halt_reason > 0 && pc->halt_reason < halt_names_count) {
                     ImGui::SameLine(0, 15);
                     ImGui::TextColored(FoxmlColors::yellow,
-                        "halted: %s", halt_names[pc->halt_reason]);
+                        "halted: %s", HALT_NAMES[pc->halt_reason]);
                 }
                 // v5.6.1/2: BUY_BLOCKED flag readout. Independent of halt_reason —
                 // strategy-level fee-floor + cost-gate set BUY_BLOCKED. When a
@@ -666,7 +643,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                         pc->strategy_halt_reason < shalt_names_count) {
                         ImGui::TextColored(FoxmlColors::yellow,
                             "BLOCKED: %s",
-                            shalt_names[pc->strategy_halt_reason]);
+                            SHALT_SHORT_NAMES[pc->strategy_halt_reason]);
                     } else {
                         ImGui::TextColored(FoxmlColors::yellow, "BUY_BLOCKED");
                     }
@@ -676,7 +653,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     ImGui::SameLine(0, 15);
                     ImGui::TextColored(FoxmlColors::yellow,
                         "shalt: %s",
-                        shalt_names[pc->strategy_halt_reason]);
+                        SHALT_SHORT_NAMES[pc->strategy_halt_reason]);
                 }
                 // v5.6.1: permission atomic. 0 = entries forbidden by
                 // controller (kill switch / startup gate). The Risk panel
@@ -1011,6 +988,17 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
                 uint8_t cfg_sid = pc->strategy_id_display;
                 uint8_t live_sid = pc->resolved_strategy_id;
                 if (live_sid >= NUM_STRATEGIES) live_sid = cfg_sid;
+                // v5.9.0c — tri-state explicit-set marker (V5_9_AUDIT-#5):
+                //   AUTO core           → no suffix (AUTO already indicates regime routing)
+                //   explicit-set non-AUTO → "!" suffix (operator deliberately set this)
+                //   defaulted non-AUTO   → "?" suffix (cfg lacked core_N_strategy= line, default applied)
+                // Catches the today-bug class: backtest.cfg without per-core
+                // strategy lines → all cores show "DIP?" → operator sees the
+                // defaulted state at-a-glance rather than mistaking it for
+                // a deliberate choice.
+                const char *explicit_marker =
+                    (cfg_sid == STRATEGY_AUTO) ? "" :
+                    (pc->strategy_was_explicit_set ? "!" : "?");
                 if (cfg_sid == STRATEGY_AUTO &&
                     live_sid < NUM_STRATEGIES && live_sid != STRATEGY_AUTO) {
                     ImVec4 c = strat_colors[live_sid];
@@ -1019,7 +1007,15 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
                 } else if (live_sid < NUM_STRATEGIES) {
                     ImVec4 c = strat_colors[live_sid];
                     if (pc->core_kill_tripped) c.w = 0.45f;
-                    ImGui::TextColored(c, "%s", STRATEGY_SHORT_NAMES[live_sid]);
+                    ImGui::TextColored(c, "%s%s", STRATEGY_SHORT_NAMES[live_sid], explicit_marker);
+                    if (!pc->strategy_was_explicit_set && cfg_sid != STRATEGY_AUTO) {
+                        ImGui::SetItemTooltip(
+                            "Strategy DEFAULTED — cfg lacked core_%d_strategy= line.\n"
+                            "All-default fallback per ControllerConfig_Default (line 847).\n"
+                            "If unintended, add `core_%d_strategy=mr` (or other) to cfg.\n"
+                            "See V5_9_AUDIT-#5 in DOCS/V5_9_ML_HARDENING_AUDIT.md.",
+                            i, i);
+                    }
                 } else {
                     ImGui::TextDisabled("?");
                 }
@@ -1558,9 +1554,11 @@ static inline void GUI_Panel_Stats(const TUISnapshot *s) {
     ImGui::SameLine(0, 10);
     ImGui::TextColored(FoxmlColors::sand, "pf:");
     ImGui::SameLine();
-    // v5.3.1 (Phase D): profit_factor < 0 is the "all wins, no losses" sentinel
-    // (mathematically ∞). Pre-fix code rendered 0.00 which was misleading.
-    if (s->profit_factor < 0.0) {
+    // v5.8.4c: render "∞" for all-wins runs via the dedicated all_wins_run
+    // flag (replaces v5.3.1's -1.0 sentinel packed into profit_factor —
+    // sentinel was ambiguous in OPT_METRIC_PF math, now display + math
+    // cleanly separated).
+    if (s->all_wins_run) {
         ImGui::TextColored(FoxmlColors::green, "%s", "\xE2\x88\x9E");  // ∞
     } else {
         ImGui::TextColored(PnlColor(s->profit_factor - 1.0), "%.2f", s->profit_factor);

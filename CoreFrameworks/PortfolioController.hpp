@@ -33,6 +33,8 @@
 #include "../DataStream/TradeLog.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/WelfordStats.hpp"
+#include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
+#include <cmath>                               // v5.9.0: std::isnan/isinf for prediction validation
 #include "../Strategies/MeanReversion.hpp"
 #include "../Strategies/Momentum.hpp"
 #include "../Strategies/SimpleDip.hpp"
@@ -204,7 +206,7 @@ template <unsigned F> struct PortfolioController {
   MomentumState<F> momentum;
   SimpleDipState<F> simple_dip;
   MLStrategyState<F> ml_strategy;
-#ifdef STRATEGY_EMA_CROSS
+#if __has_include("../Strategies/private/EmaCross.hpp")
   EmaCrossState<F> ema_cross;
 #endif
   RegimeState<F> regime;
@@ -361,6 +363,12 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ctrl->daily_realized_pnl = FPN_Zero<F>();
   ctrl->kill_recovery_counter = 0;
   ctrl->buying_halted = 0;
+  // Legacy single-core controller halt_reason is a NARROWER namespace than
+  // sharded EventLoopState::cores[].halt_reason: only 0=ok / 1=kill apply
+  // here. The HALT_* enum from FOREACH_HALT_REASON is for the sharded path
+  // only; reusing it here would semantically alias HALT_SPACING=1 with
+  // "kill switch tripped". Leave as raw int — legacy controller is
+  // deprecated and warned at boot.
   ctrl->halt_reason = 0;
   ctrl->gate_reason = GATE_REASON_WARMUP;
   ctrl->last_vol_scale = 1.0;
@@ -386,7 +394,7 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   Bandit_SetArmName(&ctrl->bandit, STRATEGY_MOMENTUM, "Momentum");
   Bandit_SetArmName(&ctrl->bandit, STRATEGY_SIMPLE_DIP, "SimpleDip");
   Bandit_SetArmName(&ctrl->bandit, STRATEGY_ML, "ML");
-#ifdef STRATEGY_EMA_CROSS
+#if __has_include("../Strategies/private/EmaCross.hpp")
   Bandit_SetArmName(&ctrl->bandit, STRATEGY_EMA_CROSS, "EmaCross");
 #endif
   for (int i = 0; i < 5; i++) {
@@ -731,7 +739,7 @@ inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) 
                                            ctrl->rolling_long, &ctrl->config);
     ctrl->buy_conds.gate_direction = 0;
     break;
-#ifdef STRATEGY_EMA_CROSS
+#if __has_include("../Strategies/private/EmaCross.hpp")
   case STRATEGY_EMA_CROSS:
     ctrl->buy_conds = EmaCross_BuySignal(&ctrl->ema_cross, &ctrl->rolling,
                                           ctrl->rolling_long, &ctrl->config,
@@ -833,7 +841,7 @@ inline void PortfolioController_StrategyDispatch(PortfolioController<F> *ctrl,
                      ctrl->portfolio.active_bitmap, &ctrl->buy_conds,
                      &ctrl->config);
     break;
-#ifdef STRATEGY_EMA_CROSS
+#if __has_include("../Strategies/private/EmaCross.hpp")
   case STRATEGY_EMA_CROSS:
     EmaCross_Adapt(&ctrl->ema_cross, current_price, ctrl->portfolio_delta,
                     ctrl->portfolio.active_bitmap, &ctrl->buy_conds, &ctrl->config);
@@ -1037,7 +1045,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       Momentum_Init(&ctrl->momentum, &ctrl->rolling, &ctrl->buy_conds);
       SimpleDip_Init(&ctrl->simple_dip, &ctrl->rolling, &ctrl->buy_conds);
       MLStrategy_Init(&ctrl->ml_strategy, &ctrl->rolling, &ctrl->buy_conds);
-#ifdef STRATEGY_EMA_CROSS
+#if __has_include("../Strategies/private/EmaCross.hpp")
       EmaCross_Init(&ctrl->ema_cross, &ctrl->rolling, &ctrl->buy_conds);
 #endif
       // use configured default strategy (0=MR, 1=Momentum, 2=SimpleDip)
@@ -1616,12 +1624,27 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
                           ctrl->rolling_medium, ctrl->rolling_baseline,
                           ctrl->cumdelta_state, &ctrl->tick_rate_state, now_us);
 
-    // Mode A: regime model enrichment — add model_score to classification
+    // Mode A: regime model enrichment — add model_score to classification.
+    // v5.8.1b: registry-driven feature pack.
+    // v5.9.0: NaN/Inf in feature pack OR prediction → leave model_score=0
+    //         (no enrichment this cycle, regime classifier uses its base
+    //         scores). Don't propagate garbage into the regime decision.
     if (Model_IsLoaded(&ctrl->regime_model)) {
       float feat_buf[MODEL_MAX_FEATURES];
-      int n = ModelFeatures_Pack(feat_buf, &signals, &ctrl->rolling, ctrl->rolling_long);
-      signals.model_score = FPN_FromDouble<F>(
-          (double)Model_Predict(&ctrl->regime_model, feat_buf, n));
+      FeatureComputeCtx<F> ctx{};
+      ctx.signals       = &signals;
+      ctx.short_rolling = &ctrl->rolling;
+      int n = Features_PackAll(&ctx, feat_buf);
+      // v5.9.3b — apply scaler. Identity no-op when not loaded.
+      if (n >= 0 && tt::FeatureStandardizer_Apply(
+                      &ctrl->regime_model.scaler, feat_buf, n) >= 0) {
+        double pred = (double)Model_Predict(&ctrl->regime_model, feat_buf, n);
+        if (!std::isnan(pred) && !std::isinf(pred)) {
+          signals.model_score = FPN_FromDouble<F>(pred);
+        }
+        // else: leave model_score at zero-init (no enrichment)
+      }
+      // else: NaN/Inf in pack OR post-scaler — leave model_score at zero-init
     }
 
     ctrl->last_signals = signals; // cache for MLStrategy_BuySignal
@@ -1768,18 +1791,39 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   }
 
   // BARRIER GATE: block entries before predicted price peaks
-  // uses last_signals (already computed in regime detection above)
+  // uses last_signals (already computed in regime detection above).
+  // v5.8.1b: registry-driven feature pack.
+  // v5.9.0: NaN/Inf in feature pack OR prediction → skip the gate
+  //         (don't block on garbage; safer to defer to lower-level
+  //         gates that have valid inputs).
   if (ctrl->config.barrier_gate_enabled && !FPN_IsZero(ctrl->buy_conds.price)
       && Model_IsLoaded(&ctrl->peak_model)) {
     float features[MODEL_MAX_FEATURES];
-    int n = ModelFeatures_Pack(features, &ctrl->last_signals, &ctrl->rolling, ctrl->rolling_long);
-    double p_peak = Model_Predict(&ctrl->peak_model, features, n);
-    double p_valley = Model_IsLoaded(&ctrl->valley_model)
-        ? Model_Predict(&ctrl->valley_model, features, n) : 0.5;
-    BarrierGateResult bg = BarrierGate_Compute(p_peak, p_valley);
-    if (bg.blocked) {
-      Gate_Zero(&ctrl->buy_conds, 0);
-      ctrl->gate_reason = GATE_REASON_BARRIER;
+    FeatureComputeCtx<F> ctx{};
+    ctx.signals       = &ctrl->last_signals;
+    ctx.short_rolling = &ctrl->rolling;
+    int n = Features_PackAll(&ctx, features);
+    // v5.9.3b — apply scaler ONCE before both peak + valley predictions
+    // share the same features buffer. Use peak_model's scaler (peak +
+    // valley are paired models trained on identical feature shapes;
+    // their scalers should agree, and peak's is the canonical).
+    if (n >= 0 && tt::FeatureStandardizer_Apply(
+                    &ctrl->peak_model.scaler, features, n) < 0) {
+      n = -1;  // mark as failed; falls through to "skip gate" below
+    }
+    // n >= 0 only when feature pack + scaler-apply both succeeded.
+    if (n >= 0) {
+      double p_peak = (double)Model_Predict(&ctrl->peak_model, features, n);
+      double p_valley = Model_IsLoaded(&ctrl->valley_model)
+          ? (double)Model_Predict(&ctrl->valley_model, features, n) : 0.5;
+      if (!std::isnan(p_peak) && !std::isinf(p_peak) &&
+          !std::isnan(p_valley) && !std::isinf(p_valley)) {
+        BarrierGateResult bg = BarrierGate_Compute(p_peak, p_valley);
+        if (bg.blocked) {
+          Gate_Zero(&ctrl->buy_conds, 0);
+          ctrl->gate_reason = GATE_REASON_BARRIER;
+        }
+      }
     }
   }
 

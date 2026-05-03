@@ -17,7 +17,7 @@ data/
 models/
 *.o
 *.d
-plans/
+plans
 .claude/
 .chart-venv/
 secrets.cfg
@@ -34,3 +34,19 @@ foxml_suite.ini
 
 # session scratch notes — not for the repo
 continue.md
+
+# runtime logs — operator state, balance/position/HMAC events
+*.log
+baseline_run/
+
+# secrets — just-in-case (we already pin secrets.cfg above)
+.env
+.env.*
+*.env
+
+# IDE / tooling per-machine output
+.vscode/
+.idea/
+compile_commands.json
+.cache/
+.clangd/

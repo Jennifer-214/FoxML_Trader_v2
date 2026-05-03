@@ -49,7 +49,8 @@
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/ROR_regressor.hpp"        // v5.1.0 — RORRegressor on CoreContext::slow_state
 #include "../ML_Headers/FlowFeatures.hpp"         // v5.1.0 — FlowState etc on CoreContext::slow_state
-#include "../MemHeaders/HealthLog.hpp"           // v5.4.0 Phase 0.1 — structured JSONL diagnostic log
+#include "../MemHeaders/HealthLog.hpp"
+#include "../ML_Headers/FeatureRegistry.hpp"  // v5.9.0b: FEATURE_REGISTRY_HASH() in entry log           // v5.4.0 Phase 0.1 — structured JSONL diagnostic log
 #include "../Strategies/StrategyParameters.hpp"
 // Strategies/StrategyLifecycle.hpp included LATER (post-EventLoopState
 // definition) to avoid the include cycle: SL needs CoreContext +
@@ -179,6 +180,28 @@ struct CoreContext {
     double staged_prediction;      // prediction from last ML rebuild
     double active_prediction;      // prediction at last entry submit (0 = no open pos)
     double last_confidence;        // most recent ConfidenceScorer_Compute result
+    // v5.9.0b — ML observability extensions (V5_9_AUDIT-#2, #3).
+    // Surface model load failures, ML decision context, and NaN counters
+    // to the operator via TUISnapshot + ML Status panel + entry log.
+    int      model_load_failed;            // 1 = model attempted but refused/missing (distinct from "no model configured")
+    // v5.9.5i — cfg drift counters (populated in EngineSharded boot;
+    // TUI_CopySnapshotSharded mirrors to PerCoreSnap; ML Status panel
+    // renders summary).
+    uint8_t  cfg_drift_tier1_count;
+    uint8_t  cfg_drift_tier2_count;
+    uint8_t  cfg_drift_strict_refused;
+    uint64_t last_ml_critical_log_us;      // rate-limit gate for ML→SimpleDip CRITICAL log (per-core)
+    double   last_ml_threshold;            // ml_buy_threshold at last decision (display + entry log)
+    double   last_ml_effective_threshold;  // post-confidence-damping threshold actually used
+    uint32_t nan_feature_events_total;     // count of Features_PackAll -1 sentinel returns on this core
+    uint32_t nan_prediction_events_total;  // count of Model_Predict NaN/Inf events on this core
+    // v5.9.1 — edge-trigger for boot-time per-core warmup-complete log.
+    // RebuildOneCore checks (rolling_short.count >= min_warmup_samples)
+    // every cycle; fires the log exactly once per core (and per session)
+    // by setting this flag. Distinct from the global startup gate at
+    // EngineSharded.hpp:1420 (which uses core 0's count to release ALL
+    // cores from CONTROLLER_WARMUP). Per-core readiness lives here.
+    uint8_t warmup_log_emitted;
     // v4.0.3 spacing: last entry price for this core, set by drainer on
     // entry submit. Strategy _BuildParameters checks
     // |new_entry - last_entry_price| < stddev × spacing_multiplier and
@@ -499,8 +522,8 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].last_entry_tick  = 0;
         state->cores[i].last_entry_wall_us = 0;
         state->cores[i].sl_cooldown_remaining = 0;
-        state->cores[i].halt_reason = 0;
-        state->cores[i].strategy_halt_reason = 0;
+        state->cores[i].halt_reason = HALT_OK;
+        state->cores[i].strategy_halt_reason = SHALT_OK;
         // v5.6.6: sentinel = 0xFFFF so the first rebuild ALWAYS emits a
         // baseline gate log entry. Subsequent emits are edge-triggered.
         state->cores[i].prev_gate_log_state = 0xFFFF;
@@ -559,6 +582,25 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].core_ks_trips_total   = 0;
         // v4.2.1: idle-cycle counter for death-spiral detection
         state->cores[i].idle_cycles = 0;
+        // v5.9.0b — ML observability fields. Without explicit init, the
+        // hard-block / nan-counter / rate-limit-log paths read garbage on
+        // fresh-state runs. Caught by v5.9.1 parity audit (V5_9_AUDIT-#9
+        // follow-up). Same pattern as the staged_prediction / last_confidence
+        // init above — every CoreContext field declared in v5.9 needs to
+        // land here.
+        state->cores[i].model_load_failed              = 0;
+        state->cores[i].cfg_drift_tier1_count          = 0;
+        state->cores[i].cfg_drift_tier2_count          = 0;
+        state->cores[i].cfg_drift_strict_refused       = 0;
+        state->cores[i].last_ml_critical_log_us        = 0;
+        state->cores[i].last_ml_threshold              = 0.0;
+        state->cores[i].last_ml_effective_threshold    = 0.0;
+        state->cores[i].nan_feature_events_total       = 0;
+        state->cores[i].nan_prediction_events_total    = 0;
+        // v5.9.1 — edge-trigger flag for boot-time per-core warmup-complete
+        // log. Set to 1 once per session per core after the first slow-path
+        // rebuild that observes rolling.count >= min_warmup_samples.
+        state->cores[i].warmup_log_emitted             = 0;
     }
 }
 
@@ -1009,12 +1051,18 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // only stores notional, not the components).
         if (tt::Health_LogEnabled(tt::HEALTH_INFO) && slot < 16) {
             const auto& pos = oms->portfolio.positions[slot];
+            // v5.9.0b — extended with ML decision context (V5_9_AUDIT-#3).
+            // Post-mortem analysis: "why did ML enter that bad trade?" is
+            // now answerable from the log alone (prediction, threshold,
+            // confidence, registry hash).
+            int is_ml = (ctx.resolved_strategy_id == STRATEGY_ML);
             tt::Health_Log(tt::HEALTH_INFO, "entry", core_id,
                 "slot=%d strat=%u resolved=%u regime=%d "
                 "trend_score=%d vol_score=%d hyst=%d/%d "
                 "entry_px=%g qty=%g entry_notional=%g entry_fee=%g "
                 "tp_pct=%g tp_floor=%g "
-                "stddev_pct=%g long_slope=%g vol_delta=%g",
+                "stddev_pct=%g long_slope=%g vol_delta=%g "
+                "ml_pred=%g ml_thr=%g ml_eff_thr=%g ml_conf=%g registry=%016lx",
                 slot, (unsigned)ctx.strategy_id,
                 (unsigned)ctx.resolved_strategy_id,
                 ctx.regime_state.current_regime,
@@ -1030,7 +1078,13 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 FPN_ToDouble(ctx.diag_tp_pct_floor),
                 FPN_ToDouble(ctx.diag_stddev_pct),
                 FPN_ToDouble(ctx.diag_long_slope),
-                FPN_ToDouble(ctx.diag_volume_delta));
+                FPN_ToDouble(ctx.diag_volume_delta),
+                // v5.9.0b — ML decision context. Zero for non-ML cores.
+                is_ml ? ctx.active_prediction : 0.0,
+                is_ml ? ctx.last_ml_threshold : 0.0,
+                is_ml ? ctx.last_ml_effective_threshold : 0.0,
+                is_ml ? ctx.last_confidence : 0.0,
+                (unsigned long)FEATURE_REGISTRY_HASH());
         }
     }
     oms->last_opened_mask &= (uint16_t)~my_mask;  // clear only my bits
@@ -1643,6 +1697,28 @@ inline void EventLoop_RebuildOneCore(
         // step (sharded recomputes resolved_cfg fresh each rebuild, so
         // there's no live-filter drift to undo).
         state->cores[slot].idle_cycles++;
+        // v5.9.1 — boot-time per-core warmup-complete log (V5_9_AUDIT-#9).
+        // Fires once per session per core, on the rebuild cycle that first
+        // observes rolling.count >= min_warmup_samples. Distinct from the
+        // global startup gate that releases all cores from CONTROLLER_WARMUP
+        // simultaneously — operator wants per-core readiness because in
+        // per_core_slow arch each core's slow path runs at its own cadence.
+        if (!state->cores[slot].warmup_log_emitted) {
+            int wmin = (int)config->min_warmup_samples;
+            if (wmin <= 0) wmin = 64;  // engine default (matches ShardedSnapshot fallback)
+            if (rolling->count >= wmin) {
+                // v5.9.4a — name the strategy so operator can distinguish ML
+                // vs non-ML cores in mixed deployments. Bounds-checked via
+                // static_assert on STRATEGY_SHORT_NAMES at the X-macro
+                // declaration (StrategyInterface.hpp:151).
+                int sid = state->cores[slot].strategy_id;
+                const char* sname = (sid >= 0 && sid < NUM_STRATEGIES)
+                                  ? STRATEGY_SHORT_NAMES[sid] : "unknown";
+                fprintf(stderr, "[core %d] warmup complete (%d/%d samples) — %s active\n",
+                        slot, rolling->count, wmin, sname);
+                state->cores[slot].warmup_log_emitted = 1;
+            }
+        }
         if (config->idle_reset_cycles > 0 &&
             state->cores[slot].idle_cycles >= config->idle_reset_cycles) {
             state->cores[slot].pnl_feeder.head  = 0;
@@ -1838,6 +1914,22 @@ inline void EventLoop_RebuildOneCore(
             ml_ctx.spread_state       = (void*)spread_state;
             ml_ctx.current_spread     = current_spread;
             ml_ctx.current_mid_price  = current_mid_price;
+            // v5.9.0b — ML observability pass-through (V5_9_AUDIT-#2, #3).
+            // Caller-owned per-core storage; ML_BuildParameters reads/writes
+            // through these pointers + the entry log emitter reads them at
+            // fill time.
+            ml_ctx.model_load_failed           = &state->cores[slot].model_load_failed;
+            ml_ctx.last_ml_critical_log_us     = &state->cores[slot].last_ml_critical_log_us;
+            ml_ctx.out_threshold               = &state->cores[slot].last_ml_threshold;
+            ml_ctx.out_effective_threshold     = &state->cores[slot].last_ml_effective_threshold;
+            ml_ctx.nan_feature_events_total    = &state->cores[slot].nan_feature_events_total;
+            ml_ctx.nan_prediction_events_total = &state->cores[slot].nan_prediction_events_total;
+            // v5.9.1 — wire SHALT pointer through MLBuildContext so the
+            // confidence hard-block path can attribute SHALT_LOW_CONFIDENCE.
+            // Same address the dispatcher passes via its strategy_halt_reason
+            // parameter; ml_ctx is the only path ML_BuildParameters has into
+            // it without changing the dispatcher signature.
+            ml_ctx.out_strategy_halt_reason    = &state->cores[slot].strategy_halt_reason;
             dispatch_ctx = &ml_ctx;
         }
         // v4.0.4: stash the resolved strategy for GUI display. For non-AUTO
@@ -1905,10 +1997,9 @@ inline void EventLoop_RebuildOneCore(
         // intended TP/SL/qty but disables the entry trigger. Halt reasons are
         // tracked per-core for GUI display.
         //
-        // Reasons: 0=ok, 1=spacing, 2=vwap, 3=long-slope, 4=vol-delta,
-        //          5=min-stddev, 6=sl-cooldown, 7=warmup, 8=core-budget,
-        //          9=core-kill, 10=book-imbalance (Track E.3)
-        state->cores[slot].halt_reason = 0;
+        // v5.8.3: halt_reason is now a HALT_* enum from FOREACH_HALT_REASON
+        // (StrategyInterface.hpp). See registry there for code semantics.
+        state->cores[slot].halt_reason = HALT_OK;
         // v5.6.2: reset strategy_halt_reason every rebuild. Strategies
         // set this to a SHALT_* code when zero-gating for strategy-
         // internal reasons. SHALT_OK = no veto.
@@ -1930,7 +2021,7 @@ inline void EventLoop_RebuildOneCore(
         auto zero_gate = [&](uint8_t reason) {
             state->cores[slot].pending_params.bg_price_threshold = FPN_Zero<F>();
             state->cores[slot].pending_params.flags |= GATE_FLAG_BUY_BLOCKED;
-            if (state->cores[slot].halt_reason == 0)  // first reason wins
+            if (state->cores[slot].halt_reason == HALT_OK)  // first reason wins
                 state->cores[slot].halt_reason = reason;
         };
 
@@ -1944,8 +2035,8 @@ inline void EventLoop_RebuildOneCore(
         // assignment naturally drops the BLOCKED bit.
         if (book_imbalance_blocked) {
             state->cores[slot].pending_params.flags |= GATE_FLAG_BUY_BLOCKED;
-            if (state->cores[slot].halt_reason == 0)
-                state->cores[slot].halt_reason = 10;
+            if (state->cores[slot].halt_reason == HALT_OK)
+                state->cores[slot].halt_reason = HALT_IMBALANCE;
         }
 
         // Phase 2.2: per-core budget enforcement. Clamp the strategy's
@@ -1970,7 +2061,7 @@ inline void EventLoop_RebuildOneCore(
                 // to zero so any downstream consumer of trade_size sees
                 // an honest zero rather than a stale value.
                 state->cores[slot].pending_params.trade_size = FPN_Zero<F>();
-                zero_gate(8);
+                zero_gate(HALT_CORE_BUDGET);
             } else if (!FPN_IsZero(entry_price)) {
                 // Budget remaining is positive — clamp qty to
                 // (budget_remaining / entry_price). Under single-position-
@@ -2072,14 +2163,14 @@ inline void EventLoop_RebuildOneCore(
                 }
             }
             if (state->cores[slot].core_kill_tripped) {
-                zero_gate(9);  // HALT_CORE_KILL
+                zero_gate(HALT_CORE_KILL);
             }
         }
 
         // SL COOLDOWN: decrement counter; if still active, zero-gate.
         if (state->cores[slot].sl_cooldown_remaining > 0) {
             state->cores[slot].sl_cooldown_remaining--;
-            zero_gate(6);
+            zero_gate(HALT_SL_COOLDOWN);
         }
         // SPACING: zero-gate if proposed entry too close to last entry.
         // SPIKE-RELAXATION (D5): when current volume is a spike (>= max ×
@@ -2116,7 +2207,7 @@ inline void EventLoop_RebuildOneCore(
         if (!Strategy_SpacingOk(state->cores[slot].pending_params.bg_price_threshold,
                                  state->cores[slot].last_entry_price,
                                  rolling, &spacing_cfg)) {
-            zero_gate(1);
+            zero_gate(HALT_SPACING);
         }
         // VWAP gate: forces entries below VWAP — buy retracements, not pumps.
         if (!FPN_IsZero(resolved_cfg.vwap_offset) && !FPN_IsZero(rolling->vwap)) {
@@ -2128,7 +2219,7 @@ inline void EventLoop_RebuildOneCore(
             state->cores[slot].diag_vwap_threshold = vwap_threshold;
             if (FPN_GreaterThan(state->cores[slot].pending_params.bg_price_threshold,
                                  vwap_threshold)) {
-                zero_gate(2);
+                zero_gate(HALT_VWAP);
             }
         }
         // LONG-SLOPE gate: blocks buys in confirmed downtrends.
@@ -2140,7 +2231,7 @@ inline void EventLoop_RebuildOneCore(
             state->cores[slot].diag_long_slope     = long_rel_slope;
             state->cores[slot].diag_long_slope_min = resolved_cfg.min_long_slope;
             if (FPN_LessThan(long_rel_slope, resolved_cfg.min_long_slope)) {
-                zero_gate(3);
+                zero_gate(HALT_LONG_SLOPE);
             }
         }
         // VOLUME DELTA gate: blocks heavy dumps.
@@ -2151,7 +2242,7 @@ inline void EventLoop_RebuildOneCore(
             state->cores[slot].diag_volume_delta     = rolling->volume_delta;
             state->cores[slot].diag_volume_delta_min = resolved_cfg.min_buy_delta;
             if (FPN_LessThan(rolling->volume_delta, resolved_cfg.min_buy_delta)) {
-                zero_gate(4);
+                zero_gate(HALT_VOL_DELTA);
             }
         }
         // MIN STDDEV gate: skip dead markets.
@@ -2162,7 +2253,7 @@ inline void EventLoop_RebuildOneCore(
             state->cores[slot].diag_stddev_pct     = stddev_ratio;
             state->cores[slot].diag_stddev_pct_min = resolved_cfg.min_stddev_pct;
             if (FPN_LessThan(stddev_ratio, resolved_cfg.min_stddev_pct)) {
-                zero_gate(5);
+                zero_gate(HALT_MIN_STDDEV);
             }
         }
         // v5.6.3: capture tp_pct + fee floor for GUI. Same formula as

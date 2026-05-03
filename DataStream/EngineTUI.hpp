@@ -28,6 +28,7 @@
 #include "../CoreFrameworks/PortfolioController.hpp"
 #include "../CoreFrameworks/SPSCRing.hpp"  // v5.0.3: SPSCRing_Depth for Q-depth display
 #include "../CoreFrameworks/OrderGates.hpp"
+#include "../CoreFrameworks/MetricCompute.hpp"  // v5.8.4c: shared metric helpers
 #include "../CoreFrameworks/CoreLatencyStats.hpp"
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -458,7 +459,8 @@ static inline void TUI_Render(EngineTUI *tui, const PortfolioController<F> *ctrl
     double win_rate = (total_exits > 0) ? ((double)ctrl->wins / total_exits) * 100.0 : 0.0;
     double g_wins  = FPN_ToDouble(ctrl->gross_wins);
     double g_losses = FPN_ToDouble(ctrl->gross_losses);
-    double profit_factor = (g_losses > 0.001) ? g_wins / g_losses : 0.0;
+    // v5.8.4c: canonical Compute_ProfitFactor (epsilon=0.0001, no sentinel).
+    double profit_factor = Compute_ProfitFactor(g_wins, g_losses);
     double avg_win  = (ctrl->wins > 0) ? g_wins / ctrl->wins : 0.0;
     double avg_loss = (ctrl->losses > 0) ? g_losses / ctrl->losses : 0.0;
     double avg_hold = (total_exits > 0) ? (double)ctrl->total_hold_ticks / total_exits : 0.0;
@@ -765,6 +767,13 @@ struct TUISnapshot {
     int state_warmup; // 1 = warmup, 0 = active
     int is_paused;
     uint64_t start_time;
+    // v5.9.0c — captured cfg file path. Engine header panel renders this so
+    // operators see at-a-glance which cfg drove the configuration. Distinct
+    // binaries read different files (engine_gui → engine.cfg, foxml_suite →
+    // backtest.cfg) — operator confusion was the root cause of v5.8 paper-
+    // test "all DIP" bug. Populated in TUI_CopySnapshot* from
+    // ControllerConfig::source_cfg_path.
+    char source_cfg_path[256];
     // rolling stats
     double roll_price_avg, roll_stddev, roll_p_min, roll_p_max;
     double roll_vol_avg, roll_vol_slope;
@@ -849,6 +858,7 @@ struct TUISnapshot {
     uint32_t paper_reset_seq;
     double win_rate, profit_factor, avg_win, avg_loss, avg_loss_market, avg_hold;
     double expectancy;       // (win_rate * avg_win) - (loss_rate * avg_loss)
+    int all_wins_run;        // v5.8.4c: 1 if wins>0 && losses==0; display layer renders "—" / "∞"
     double max_drawdown;     // peak-to-trough equity drop ($)
     double max_drawdown_pct; // peak-to-trough as % of peak
     double fee_ratio;        // total_fees / gross_wins (% of gains eaten by fees)
@@ -913,6 +923,32 @@ struct TUISnapshot {
     int16_t drainer_cpu;           // pinned CPU for the drainer thread
     int16_t nproc;                 // sysconf(_SC_NPROCESSORS_ONLN)
     int16_t slow_path_pin_offset;  // raw cfg value (-1 disabled, 0 auto, >0 explicit)
+    // ─────────────────────────────────────────────────────────────────
+    // PerCoreSnap field-init discipline (v5.9.2c)
+    // ─────────────────────────────────────────────────────────────────
+    // Adding a new field here requires updating BOTH places:
+    //
+    //   1. This struct definition (the read side, GUI/TUI consumers)
+    //   2. CoreFrameworks/ShardedSnapshot.hpp::TUI_CopySnapshotSharded
+    //      populator (the write side, runs every snapshot cycle)
+    //
+    // OR the field must be deliberately legitimately-zero (e.g. hot-path
+    // latency stats `samples`, `*_ns` are zero in sharded mode because
+    // the populator doesn't surface them — slow-path latency `sp_*_ns`
+    // is the sharded equivalent at line ~939-944).
+    //
+    // The comprehensive parity audit at v5.9.2c (DOCS/changelogs/
+    // 2026-05-02-v5.9-ml-hardening.md) verified all 49 actively-
+    // populated fields have populator lines and all 14 legitimately-
+    // zero fields have a documented reason. Discipline rule applies
+    // for any future field addition.
+    //
+    // Sentinel test below in tests/controller_test.cpp v5.9.2c
+    // EXTENSIBILITY block exercises the populator end-to-end with a
+    // synthesized CoreContext + asserts representative fields land
+    // correctly. This catches "added field but forgot populator" at
+    // PR time rather than runtime.
+    // ─────────────────────────────────────────────────────────────────
     struct PerCoreSnap {
         // Hot-path latency (per-tick gate eval cycles).
         uint64_t samples;
@@ -1005,6 +1041,45 @@ struct TUISnapshot {
         double   ml_confidence_ic;     // RollingIC value for tooltip / debug
         double   ml_confidence_rmse;   // RollingRMSE value
         double   ml_active_prediction; // prediction at fill time of open position (0 if no open pos)
+        // v5.9.0b — ML observability extensions for the new ML Status panel.
+        // Distinct from ml_model_loaded: ml_model_load_failed=1 means
+        // "load was attempted and refused/missing" (operator should care);
+        // ml_model_loaded=0 with load_failed=0 means "no model configured"
+        // (operator intent — leave at simpler strategy).
+        uint8_t  ml_model_load_failed;       // 1 = ML strategy selected but model didn't load
+        double   ml_last_threshold;          // ml_buy_threshold at last decision
+        double   ml_last_effective_threshold;// post-confidence-damping threshold actually used
+        uint32_t ml_nan_feature_events;      // total feature-pack NaN/Inf events on this core
+        uint32_t ml_nan_prediction_events;   // total prediction NaN/Inf events on this core
+        // v5.9.0c — cfg explicit-set bitmap surfaced per-core. 1 = operator
+        // set core_N_strategy= explicitly in cfg; 0 = default applied
+        // because field was absent. Drives tri-state marker in Per-Core
+        // P&L panel: "0!" deliberate, "0?" defaulted, "0" auto-regime.
+        uint8_t  strategy_was_explicit_set;
+        // v5.9.1 — per-core warmup progress (rolling.count vs min_warmup_samples).
+        // 0..100 once warmup starts; 100 once warmup_complete edge fires.
+        // The global TUISnapshot.warmup_samples_now collapses cores in
+        // sharded mode — operator needs per-core visibility to spot a single
+        // core stuck due to misconfigured slow-path cadence.
+        uint8_t  warmup_progress_pct;
+        // v5.9.3a — scaler observability (Gap H from comprehensive parity audit).
+        // ml_scaler_present=1 when CoreModelZoo loaded the .scaler sidecar
+        // successfully (handle->scaler.has_scaler == 1).
+        // ml_scaler_load_failed=1 when stamp claimed scaler present but load
+        // failed in non-strict mode (engine continued with identity → silent
+        // drift class without this surface).
+        // Mutually-exclusive states (operator-facing matrix):
+        //   present=1 + failed=0 → green "scaler: applied"
+        //   present=0 + failed=1 → red "scaler: WARN — load failed"
+        //   present=0 + failed=0 → sand "scaler: NONE (legacy v5 model)"
+        uint8_t  ml_scaler_present;
+        uint8_t  ml_scaler_load_failed;
+        // v5.9.5i — cfg drift detection summary. Counts mismatches
+        // between stamp's recorded cfg + runtime cfg at boot. ML Status
+        // panel renders summary; details live in stderr boot log.
+        uint8_t  cfg_drift_tier1_count;  // freshness_tau, threshold_scale, barrier_gate
+        uint8_t  cfg_drift_tier2_count;  // hard_block, bandit, fees, hyperparams, build_flags
+        uint8_t  cfg_drift_strict_refused; // 1 = Tier 1 + strict mode
         // v4.0.4: per-core P&L breakdown for Account panel. Sourced from
         // CoreContext::core_realized / core_wins / core_losses / core_fees.
         // The aggregate equals oms->realized_pnl modulo timing (snapshot
@@ -1142,6 +1217,13 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->state_warmup = (ctrl->state == CONTROLLER_WARMUP);
     snap->is_paused = FPN_IsZero(ctrl->buy_conds.price) && !snap->state_warmup;
     snap->start_time = 0; // TUI thread computes uptime from its own start_time
+    // v5.9.0c — capture cfg path for engine header panel display
+    {
+        size_t n = strlen(ctrl->config.source_cfg_path);
+        if (n >= sizeof(snap->source_cfg_path)) n = sizeof(snap->source_cfg_path) - 1;
+        memcpy(snap->source_cfg_path, ctrl->config.source_cfg_path, n);
+        snap->source_cfg_path[n] = '\0';
+    }
 
     // rolling stats
     double avg = FPN_ToDouble(ctrl->rolling.price_avg);
@@ -1335,7 +1417,10 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     snap->win_rate      = (total_exits > 0) ? ((double)ctrl->wins / total_exits) * 100.0 : 0.0;
     double g_wins  = FPN_ToDouble(ctrl->gross_wins);
     double g_losses = FPN_ToDouble(ctrl->gross_losses);
-    snap->profit_factor = (g_losses > 0.001) ? g_wins / g_losses : 0.0;
+    // v5.8.4c: canonical helpers (single source of truth across backtest +
+    // live + sharded snapshot paths).
+    snap->profit_factor = Compute_ProfitFactor(g_wins, g_losses);
+    snap->all_wins_run  = Compute_AllWinsRun(g_wins, g_losses);
     snap->avg_win  = (ctrl->wins > 0)  ? g_wins / ctrl->wins : 0.0;
     snap->avg_loss = (ctrl->losses > 0) ? g_losses / ctrl->losses : 0.0;
     // market-only avg loss: subtract estimated round-trip fees per losing exit
@@ -1349,12 +1434,10 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     }
     snap->avg_hold = (total_exits > 0)  ? (double)ctrl->total_hold_ticks / total_exits : 0.0;
 
-    // expectancy: expected $ per trade
-    if (total_exits > 0) {
-      double wr = (double)ctrl->wins / total_exits;
-      double lr = (double)ctrl->losses / total_exits;
-      snap->expectancy = (wr * snap->avg_win) - (lr * snap->avg_loss);
-    } else snap->expectancy = 0.0;
+    // v5.8.4c: canonical Compute_Expectancy (keeps fabs(avg_loss) — defensive).
+    snap->expectancy = Compute_Expectancy((uint32_t)total_exits,
+                                           (uint32_t)ctrl->wins,
+                                           snap->avg_win, snap->avg_loss);
 
     // max drawdown
     snap->max_drawdown = FPN_ToDouble(ctrl->max_drawdown);
