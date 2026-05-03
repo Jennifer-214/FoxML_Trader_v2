@@ -278,6 +278,28 @@ static const CfgFieldDef field_defs[] = {
         "Min rolling-stats samples before trading. CAPS at 128 (rolling window\n"
         "size). Values >128 are clamped at config load with a warning. Use\n"
         "warmup_ticks for longer raw-tick warmup."},
+    // v5.9.5h — XGBoost training hyperparams (cfg-tunable subset).
+    // Live engine doesn't TRAIN; these fields participate in load-time WARN
+    // when stamp's recorded value differs from cfg's. Set them to MATCH the
+    // values used to train the model you're deploying — eliminates startup
+    // noise + provides explicit drift detection. Suppressible via
+    // acknowledge_cross_binary_version_drift=1.
+    {"xgb_subsample",            "Subsample",         "ML Hyperparams",  CFG_FLOAT, "%.2f",
+        "Row subsample per tree (0.5-1.0). Lower = more variance reduction.\n"
+        "Default 0.8. Set to MATCH the value used to train the deployed model;\n"
+        "engine WARNs at boot if stamp's recorded value differs."},
+    {"xgb_colsample_bytree",     "ColSample/Tree",    "ML Hyperparams",  CFG_FLOAT, "%.2f",
+        "Column subsample per tree (0.5-1.0). Lower = less feature-importance\n"
+        "bias. Default 0.8. Match deployed model's training value or expect WARN."},
+    {"xgb_min_child_weight",     "Min Child Weight",  "ML Hyperparams",  CFG_INT,   "%d",
+        "Min sum-of-weights per leaf (1-50). Higher = more regularization.\n"
+        "Default 5. Match deployed model's training value or expect WARN."},
+    {"xgb_seed",                 "Seed",              "ML Hyperparams",  CFG_INT,   "%d",
+        "RNG seed for reproducible runs. Default 42. Match deployed model's\n"
+        "training seed or expect WARN."},
+    {"xgb_tree_method",          "Tree Method",       "ML Hyperparams",  CFG_PATH,  "%s",
+        "XGBoost tree construction algorithm: hist (fast, default) | exact |\n"
+        "approx | auto. Match deployed model's training method or expect WARN."},
 };
 static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 

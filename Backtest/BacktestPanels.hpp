@@ -1559,6 +1559,17 @@ struct TrainingPanelState {
     int max_depth;
     float learning_rate;
     int n_estimators;
+    // v5.9.5h — additional cfg-tunable XGBoost hyperparams. Defaults match
+    // pre-v5.9.5h hardcoded values bytewise; non-tuning operators get
+    // identical training output. UI exposes these as advanced tuning;
+    // operator edits affect Train Model worker output only (worker captures
+    // a snapshot at entry, like max_depth/lr/n_estimators above). Backtest
+    // WF/HeldOut paths read from cfg directly.
+    float ui_subsample;          // 0.5-1.0
+    float ui_colsample_bytree;   // 0.5-1.0
+    int   ui_min_child_weight;   // 1-50
+    int   ui_seed;               // any int
+    int   ui_tree_method_idx;    // 0=hist, 1=exact, 2=approx, 3=auto
     int label_type;
     float label_tp_pct;
     float label_sl_pct;
@@ -1630,6 +1641,12 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->max_depth = 4;
     state->learning_rate = 0.1f;
     state->n_estimators = 100;
+    // v5.9.5h — defaults match XGBHyperparams_Defaults bytewise
+    state->ui_subsample          = 0.8f;
+    state->ui_colsample_bytree   = 0.8f;
+    state->ui_min_child_weight   = 5;
+    state->ui_seed               = 42;
+    state->ui_tree_method_idx    = 0;  // 0 = "hist"
     state->label_type = LABEL_WIN_LOSS;
     state->label_tp_pct = 1.5f;
     state->label_sl_pct = 1.0f;
@@ -1845,6 +1862,13 @@ static inline void *train_model_worker_fn(void *arg) {
     float snap_learning_rate = state->learning_rate;
     int snap_n_estimators   = state->n_estimators;
     int snap_label_type     = state->label_type;
+    // v5.9.5h — snapshot v5.9.5h hyperparams. Index→string conversion for
+    // tree_method done at apply-time (XGBHyperparams_Apply).
+    float snap_subsample        = state->ui_subsample;
+    float snap_colsample_bytree = state->ui_colsample_bytree;
+    int   snap_min_child_weight = state->ui_min_child_weight;
+    int   snap_seed             = state->ui_seed;
+    int   snap_tree_method_idx  = state->ui_tree_method_idx;
     char snap_model_path[256];
     {
         size_t n = strlen(state->model_path);
@@ -1893,15 +1917,29 @@ static inline void *train_model_worker_fn(void *arg) {
     BoosterHandle booster;
     XGBoosterCreate(&dtrain, 1, &booster);
 
-    // v5.9.5h — XGBHyperparams struct + apply helper. Operator-tunable
-    // max_depth/lr/n_estimators come from Train Model panel state
-    // (snapshot taken at worker entry); other 5 fields use defaults
-    // (will become cfg-tunable in v5.9.5h Phase 2). Single source of
-    // truth shared with WF + HeldOut paths (BacktestEngine.hpp).
+    // v5.9.5h — XGBHyperparams struct + apply helper. All 8 fields come
+    // from operator's Train Model panel state (snapshot taken at worker
+    // entry above). max_depth/lr/n_est are existing GUI-tunable; the
+    // 5 v5.9.5h fields (subsample, colsample, min_child_weight, seed,
+    // tree_method) are also GUI-tunable in Phase 3.
+    static const char* tree_method_choices[] = { "hist", "exact", "approx", "auto" };
+    int tm_idx = (snap_tree_method_idx >= 0 && snap_tree_method_idx < 4)
+                 ? snap_tree_method_idx : 0;
+
     tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
-    hp.max_depth     = snap_max_depth;
-    hp.learning_rate = snap_learning_rate;
-    hp.n_estimators  = snap_n_estimators;
+    hp.max_depth         = snap_max_depth;
+    hp.learning_rate     = snap_learning_rate;
+    hp.n_estimators      = snap_n_estimators;
+    hp.subsample         = snap_subsample;
+    hp.colsample_bytree  = snap_colsample_bytree;
+    hp.min_child_weight  = snap_min_child_weight;
+    hp.seed              = snap_seed;
+    {
+        size_t n = strlen(tree_method_choices[tm_idx]);
+        if (n >= sizeof(hp.tree_method)) n = sizeof(hp.tree_method) - 1;
+        memcpy(hp.tree_method, tree_method_choices[tm_idx], n);
+        hp.tree_method[n] = '\0';
+    }
     // Apply tree shape + RNG params; nthread=4 for faster GUI iter
     // (deterministic-per-fold not required here — Train Model is
     // exploratory; held-out validation uses nthread=1 for parity).
@@ -2485,6 +2523,39 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     ImGui::SetItemTooltip("Number of boosting rounds (trees)\n"
                           "more trees + low learning rate = better but slower\n"
                           "too many = overfitting (check walk-forward gap)");
+
+    // v5.9.5h — advanced hyperparameter section. Defaults match
+    // pre-v5.9.5h hardcoded values; non-tuning operators don't need to
+    // touch these. Operators wanting to tune get cfg-bound fields with
+    // stamp recording for drift forensics.
+    if (ImGui::CollapsingHeader("Advanced (v5.9.5h)")) {
+        ImGui::SliderFloat("Subsample", &state->ui_subsample, 0.5f, 1.0f, "%.2f");
+        ImGui::SetItemTooltip("Row subsample per tree (0.5-1.0)\n"
+                              "Lower = more variance reduction, less overfitting\n"
+                              "Default 0.8 (matches pre-v5.9.5h hardcoded)");
+        ImGui::SliderFloat("ColSample/Tree", &state->ui_colsample_bytree, 0.5f, 1.0f, "%.2f");
+        ImGui::SetItemTooltip("Column subsample per tree (0.5-1.0)\n"
+                              "Lower = less feature-importance bias\n"
+                              "Default 0.8 (matches pre-v5.9.5h hardcoded)");
+        ImGui::InputInt("Min Child Weight", &state->ui_min_child_weight, 1, 5);
+        if (state->ui_min_child_weight < 1) state->ui_min_child_weight = 1;
+        if (state->ui_min_child_weight > 50) state->ui_min_child_weight = 50;
+        ImGui::SetItemTooltip("Min sum-of-weights per leaf (1-50)\n"
+                              "Higher = more regularization\n"
+                              "Default 5 (matches pre-v5.9.5h hardcoded)");
+        ImGui::InputInt("Seed", &state->ui_seed, 1, 100);
+        ImGui::SetItemTooltip("RNG seed for reproducible runs\n"
+                              "Same seed + same data + same hyperparams = same model\n"
+                              "Default 42 (matches pre-v5.9.5h hardcoded)");
+        static const char* tree_method_names[] = {"hist", "exact", "approx", "auto"};
+        ImGui::Combo("Tree Method", &state->ui_tree_method_idx, tree_method_names, 4);
+        ImGui::SetItemTooltip("XGBoost tree construction algorithm\n"
+                              "hist (default): fast histogram, recommended\n"
+                              "exact: slow but precise (small datasets only)\n"
+                              "approx: histogram alternative\n"
+                              "auto: XGBoost picks (varies by version)");
+    }
+
     ImGui::InputText("Model Path", state->model_path, sizeof(state->model_path));
     ImGui::SetItemTooltip("Where to save the trained model\n"
                           "used by the engine at runtime for ML buy signals");
