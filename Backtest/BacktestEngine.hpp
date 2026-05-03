@@ -1546,10 +1546,15 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         // truth shared with HeldOut training (BacktestEngine.hpp:~1592) and
         // Train Model worker (BacktestPanels.hpp). Defaults match the
         // pre-v5.9.5h hardcoded values bytewise; non-tuning operators get
-        // identical training output. nthread=1 for deterministic per-fold
-        // output (mirrors HeldOut; Train Model uses 4 for faster GUI iter).
+        // identical training output.
+        // v5.10.0 Item D — nthread reads from cfg.xgb_eval_nthread (default
+        // 1; matches pre-v5.10 hardcoded behavior). Operator opts in to >1
+        // by setting cfg explicitly. CFG_PARSE_INT clamps negatives to 0;
+        // we coerce 0/negative to 1 here for safety.
         tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
-        tt::XGBHyperparams_Apply(booster, hp, /*nthread=*/1);
+        int eval_nthread = data->config_used.xgb_eval_nthread > 0
+                         ? data->config_used.xgb_eval_nthread : 1;
+        tt::XGBHyperparams_Apply(booster, hp, eval_nthread);
         // class balance — kind-specific.
         // Binary: scale_pos_weight = n_neg/n_pos (single param).
         // Multiclass: per-sample inverse-frequency weights via DMatrix info.
@@ -1856,10 +1861,15 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
             XGBoosterSetParam(booster, "objective", "binary:logistic");
         }
         // v5.9.5h — XGBHyperparams struct + apply helper. Mirrors WF site
-        // above for train-serve parity. nthread=1 for deterministic
-        // held-out training (single-threaded; metric must be reproducible).
+        // above for train-serve parity.
+        // v5.10.0 Item D — nthread reads from cfg.xgb_eval_nthread (default
+        // 1; matches pre-v5.10 hardcoded behavior). Held-out is the
+        // canonical-validation pass — multi-thread breaks bytewise
+        // reproducibility of held_out_metric, so default stays single-thread.
         tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
-        tt::XGBHyperparams_Apply(booster, hp, /*nthread=*/1);
+        int eval_nthread = data->config_used.xgb_eval_nthread > 0
+                         ? data->config_used.xgb_eval_nthread : 1;
+        tt::XGBHyperparams_Apply(booster, hp, eval_nthread);
 
         if (!is_regression && !is_multiclass) {
             int n_pos = 0, n_neg = 0;

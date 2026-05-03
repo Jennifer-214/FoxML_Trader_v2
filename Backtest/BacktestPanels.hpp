@@ -2047,13 +2047,19 @@ static inline void *train_model_worker_fn(void *arg) {
         memcpy(hp.tree_method, tree_method_choices[tm_idx], n);
         hp.tree_method[n] = '\0';
     }
-    // Apply tree shape + RNG params; nthread=4 for faster GUI iter
-    // (deterministic-per-fold not required here — Train Model is
-    // exploratory; held-out validation uses nthread=1 for parity).
-    // Objective is set per label-type below; XGBHyperparams_Apply
-    // handles the rest (max_depth, eta, subsample, colsample,
-    // min_child_weight, seed, tree_method, verbosity).
-    tt::XGBHyperparams_Apply(booster, hp, /*nthread=*/4);
+    // Apply tree shape + RNG params. Objective is set per label-type
+    // below; XGBHyperparams_Apply handles the rest (max_depth, eta,
+    // subsample, colsample, min_child_weight, seed, tree_method,
+    // verbosity).
+    // v5.10.0 Item D — train nthread is operator-tunable via
+    // cfg.xgb_train_nthread (default 1, matches v5.10.0a-final hardcoded
+    // determinism). Pre-v5.10 hardcoded 4 here for "faster GUI iter";
+    // operators wanting that bump cfg explicitly. Default-1 preserves
+    // bytewise reproducibility across runs (XGBoost multi-thread is
+    // non-deterministic per-fold).
+    int train_nthread = results->config_used.xgb_train_nthread > 0
+                      ? results->config_used.xgb_train_nthread : 1;
+    tt::XGBHyperparams_Apply(booster, hp, train_nthread);
 
     int num_classes = (snap_label_type >= 0 && snap_label_type < LABEL_COUNT)
                       ? label_table[snap_label_type].num_classes : 0;

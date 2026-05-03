@@ -12094,6 +12094,53 @@ e3_skip_load:;
               pcs.cfg_drift_strict_refused == 1);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0 Item D — hardware-aware cfg ---\n");
+    {
+        // === Test 1: defaults match v5.9.5j-final hardcoded behavior ===
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        check("v5.10.0D: xgb_train_nthread default = 4 (Train Model panel pre-v5.10)",
+              cfg.xgb_train_nthread == 4);
+        check("v5.10.0D: xgb_eval_nthread default = 1 (WF/HeldOut determinism)",
+              cfg.xgb_eval_nthread == 1);
+        check("v5.10.0D: csv_load_workers default = 1 (serial CSV; pre-v5.10)",
+              cfg.csv_load_workers == 1);
+        check("v5.10.0D: feature_collect_max_gb default = 12",
+              cfg.feature_collect_max_gb == 12);
+        check("v5.10.0D: wf_split_max_gb default = 8",
+              cfg.wf_split_max_gb == 8);
+        check("v5.10.0D: held_out_max_gb default = 4",
+              cfg.held_out_max_gb == 4);
+
+        // === Test 2: parser reads each field from cfg file ===
+        char path[] = "/tmp/v5100D_cfg_XXXXXX";
+        int fd = mkstemp(path);
+        check("v5.10.0D: tmpfile created", fd >= 0);
+        if (fd >= 0) {
+            dprintf(fd,
+                    "xgb_train_nthread=8\n"
+                    "xgb_eval_nthread=2\n"
+                    "csv_load_workers=4\n"
+                    "feature_collect_max_gb=24\n"
+                    "wf_split_max_gb=16\n"
+                    "held_out_max_gb=8\n");
+            close(fd);
+            ControllerConfig<FP> parsed = ControllerConfig_Load<FP>(path);
+            check("v5.10.0D: parses xgb_train_nthread=8",
+                  parsed.xgb_train_nthread == 8);
+            check("v5.10.0D: parses xgb_eval_nthread=2",
+                  parsed.xgb_eval_nthread == 2);
+            check("v5.10.0D: parses csv_load_workers=4",
+                  parsed.csv_load_workers == 4);
+            check("v5.10.0D: parses feature_collect_max_gb=24",
+                  parsed.feature_collect_max_gb == 24);
+            check("v5.10.0D: parses wf_split_max_gb=16",
+                  parsed.wf_split_max_gb == 16);
+            check("v5.10.0D: parses held_out_max_gb=8",
+                  parsed.held_out_max_gb == 8);
+            unlink(path);
+        }
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0 Item B — streaming label compute (sliding 2-file window) ---\n");
     {
         // Helper — write a synthetic TickRecorder-format CSV with N ticks

@@ -662,6 +662,25 @@ template <unsigned F> struct ControllerConfig {
   int      xgb_min_child_weight;   // min sum-of-weights per leaf (1-50); default 5
   int      xgb_seed;               // RNG seed for reproducible runs; default 42
   char     xgb_tree_method[16];    // hist | exact | approx | auto; default "hist"
+
+  // v5.10.0 Item D — hardware-aware cfg. Operator-tunable thread counts
+  // and RAM budgets; defaults match v5.9.5j-final behavior bytewise so
+  // upgrades don't silently flip defaults. Operator opts in to multi-thread
+  // training / parallel CSV / larger budgets.
+  //
+  // Thread counts (default=1 matches current hardcoded behavior at
+  // BacktestEngine.hpp:1352, 1638). Setting >1 breaks bytewise reproducibility;
+  // boot-time WARN fires when operator sets >1 to make the tradeoff explicit.
+  int      xgb_train_nthread;      // XGBoost Train Model worker nthread; default 4 (matches pre-v5.10 BacktestPanels.hpp hardcoded)
+  int      xgb_eval_nthread;       // XGBoost WF/HeldOut eval nthread; default 1 (deterministic per-fold)
+  int      csv_load_workers;       // parallel CSV worker threads (Item C); default 1 (serial)
+
+  // RAM budgets (advisory soft caps — emit WARN at boot if dataset projects
+  // to exceed; no hard refuse since the streaming label compute closes
+  // OOM regardless). Operator hint when sizing the box.
+  int      feature_collect_max_gb; // soft cap on feature_matrix RAM; default 12
+  int      wf_split_max_gb;        // soft cap on WF split RAM; default 8
+  int      held_out_max_gb;        // soft cap on held-out RAM; default 4
 };
 
 //======================================================================================================
@@ -924,6 +943,21 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.xgb_seed                = 42;
   strncpy(cfg.xgb_tree_method, "hist", sizeof(cfg.xgb_tree_method) - 1);
   cfg.xgb_tree_method[sizeof(cfg.xgb_tree_method) - 1] = '\0';
+  // v5.10.0 Item D — hardware-aware cfg. Defaults match pre-v5.10
+  // hardcoded behavior. Two distinct defaults reflect two distinct
+  // pre-v5.10 hardcoded sites:
+  //   - Train Model worker (BacktestPanels.hpp:2056) was nthread=4 for
+  //     faster GUI iter (exploratory; reproducibility not required)
+  //   - WF + HeldOut (BacktestEngine.hpp:1352, 1638) were nthread=1
+  //     for deterministic per-fold output (validation parity)
+  // Setting these NOW separable. Operators wanting all-deterministic
+  // workflow set both to 1; operators with bigger boxes can bump both.
+  cfg.xgb_train_nthread       = 4;   // matches BacktestPanels.hpp:2056 pre-v5.10
+  cfg.xgb_eval_nthread        = 1;   // matches BacktestEngine.hpp:1352, 1638
+  cfg.csv_load_workers        = 1;   // serial CSV load (matches pre-v5.10 behavior)
+  cfg.feature_collect_max_gb  = 12;  // advisory cap; WARN-only
+  cfg.wf_split_max_gb         = 8;
+  cfg.held_out_max_gb         = 4;
   cfg.health_log_level            = 0;                            // 0=info, 1=debug, 2=trace
   cfg.reconcile_interval_sec      = 0;                            // 0 = boot-only
   cfg.reconcile_dry_run           = 1;                            // safer default; flip to 0 deliberately
@@ -1304,6 +1338,17 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.xgb_tree_method[n] = '\0';
         continue;
     }
+    // v5.10.0 Item D — hardware-aware cfg parsers. CFG_PARSE_INT clamps
+    // negatives to defaults; we want >=0 (0 = auto-detect via nproc, NOT
+    // currently implemented; reserved for future). Setting nthread or
+    // workers > 1 emits a one-shot WARN at boot (handled in engine boot
+    // path, not parser).
+    CFG_PARSE_INT(xgb_train_nthread)
+    CFG_PARSE_INT(xgb_eval_nthread)
+    CFG_PARSE_INT(csv_load_workers)
+    CFG_PARSE_INT(feature_collect_max_gb)
+    CFG_PARSE_INT(wf_split_max_gb)
+    CFG_PARSE_INT(held_out_max_gb)
     if (strcmp(key, "held_out_gate_strict") == 0) {
         cfg.held_out_gate_strict = atoi(val);
         continue;

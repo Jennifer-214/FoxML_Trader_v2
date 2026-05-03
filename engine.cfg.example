@@ -330,6 +330,46 @@ xgb_seed=42                         # RNG seed for reproducibility
 xgb_tree_method=hist                # hist | exact | approx | auto
 
 #==============================================================================
+# HARDWARE-AWARE TUNING (v5.10.0 Item D)
+#==============================================================================
+# Operator-tunable thread counts and RAM budgets. Defaults match v5.9.5j
+# pre-v5.10 hardcoded behavior bytewise — non-tuning operators see no
+# change after upgrade.
+#
+# THREAD COUNTS
+# Setting any nthread > 1 BREAKS bytewise reproducibility of training
+# output (XGBoost multi-thread is non-deterministic per fold). For
+# deployment-grade models (validate locally then ship), operators want
+# nthread=1 everywhere. For exploratory iteration (tweaking and rerunning),
+# multi-thread is faster.
+xgb_train_nthread=4                 # Train Model worker thread count.
+                                    # Pre-v5.10 hardcoded 4. Set to 1 for
+                                    # bytewise-deterministic training output;
+                                    # bump higher for faster GUI iteration on
+                                    # multi-core boxes.
+xgb_eval_nthread=1                  # WF + HeldOut eval thread count.
+                                    # Pre-v5.10 hardcoded 1 for deterministic
+                                    # per-fold metrics. Bumping breaks bytewise
+                                    # repro of held_out_metric across runs.
+csv_load_workers=1                  # Parallel CSV load worker count (Item C).
+                                    # Pre-v5.10 serial. Bump to 4-8 on multi-
+                                    # core boxes with NVMe storage for faster
+                                    # data prep (~30-45 min saved per 1-year
+                                    # backtest). Diminishing returns past nproc.
+                                    # Output is bytewise-deterministic regardless
+                                    # of worker count (concatenation in file-date
+                                    # order).
+
+# RAM BUDGETS (advisory soft caps)
+# Item B's streaming label compute closes the OOM regardless of these caps;
+# they exist for operator-side hint sizing on bigger boxes / longer datasets.
+# Currently informational only (no boot-time refusal). Future v5.10.x ships
+# may add hard-refuse-on-projection-exceed if operator demand surfaces.
+feature_collect_max_gb=12           # advisory cap on feature_matrix RAM
+wf_split_max_gb=8                   # advisory cap on WF split per-fold RAM
+held_out_max_gb=4                   # advisory cap on held-out split RAM
+
+#==============================================================================
 # ML INFERENCE
 #==============================================================================
 # XGBoost or LightGBM model for buy signals. train in foxml_suite, load here.
