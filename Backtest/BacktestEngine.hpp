@@ -97,7 +97,17 @@ static inline int BacktestData_Load(HistoricalTick *ticks, int *count, int max_t
             else t->is_buyer_maker = (int)strtol(p, &p, 10);
         }
 
-        if (t->price > 0.0 && t->qty > 0.0)
+        // v5.9.5j.2 — bogus-ts filter. TickRecorder occasionally writes
+        // truncated rows (write interrupted mid-CSV: only 6 of 8 fields,
+        // ts column ends up containing a partial '17144' instead of
+        // full ms timestamp '1714348800000'). Sanity bound: any tick
+        // with ts < 2017-07-14 (1.5e12 ms) is corrupt — skip.
+        // Format-1 (TickRecorder) uses microseconds; bound 1.5e15.
+        // Format-0 (Binance aggTrades) uses milliseconds; bound 1.5e12.
+        const int64_t MIN_VALID_TS = (format == 1)
+            ? 1500000000000000LL    // 1.5e15 µs = 2017-07-14
+            : 1500000000000LL;       // 1.5e12 ms = 2017-07-14
+        if (t->price > 0.0 && t->qty > 0.0 && t->timestamp_us >= MIN_VALID_TS)
             (*count)++;
     }
 
