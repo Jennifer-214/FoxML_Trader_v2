@@ -27,6 +27,7 @@
 #include "../CoreFrameworks/Reconcile.hpp"                // v5.2.1 — live reconciliation tests
 #include "../ML_Headers/CoreModelZoo.hpp"                // Track E.2 tests
 #include "../ML_Headers/FeatureRegistry.hpp"              // v5.8.1a tests
+#include "../Backtest/PhaseTimers.hpp"                    // v5.10.0 Item A — phase timer tests
 #include "../DataStream/DepthReplayState.hpp"            // Track E.3 tests
 #include "../ML_Headers/FlowFeatures.hpp"                // v4.5 Wave 1 tests
 #include "../DataStream/BinanceUserData.hpp"
@@ -12091,6 +12092,62 @@ e3_skip_load:;
               pcs.cfg_drift_tier1_count == 2 &&
               pcs.cfg_drift_tier2_count == 5 &&
               pcs.cfg_drift_strict_refused == 1);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0 Item A — per-phase backtest timers ---\n");
+    {
+        // === Test 1: Reset zeroes all fields + populated flag ===
+        tt::PhaseTimer pt = {};
+        pt.parse_ns = 100;
+        pt.fan_out_hot_ns = 200;
+        pt.feature_collect_ns = 300;
+        pt.label_compute_ns = 400;
+        pt.xgboost_train_ns = 500;
+        pt.wf_eval_ns = 600;
+        pt.held_out_eval_ns = 700;
+        pt.stamp_emit_ns = 800;
+        pt.total_ns = 5000;
+        pt.populated = 1;
+        tt::PhaseTimer_Reset(&pt);
+        check("v5.10.0A: Reset zeroes parse_ns",           pt.parse_ns == 0);
+        check("v5.10.0A: Reset zeroes fan_out_hot_ns",     pt.fan_out_hot_ns == 0);
+        check("v5.10.0A: Reset zeroes feature_collect_ns", pt.feature_collect_ns == 0);
+        check("v5.10.0A: Reset zeroes label_compute_ns",   pt.label_compute_ns == 0);
+        check("v5.10.0A: Reset zeroes xgboost_train_ns",   pt.xgboost_train_ns == 0);
+        check("v5.10.0A: Reset zeroes wf_eval_ns",         pt.wf_eval_ns == 0);
+        check("v5.10.0A: Reset zeroes held_out_eval_ns",   pt.held_out_eval_ns == 0);
+        check("v5.10.0A: Reset zeroes stamp_emit_ns",      pt.stamp_emit_ns == 0);
+        check("v5.10.0A: Reset zeroes total_ns",           pt.total_ns == 0);
+        check("v5.10.0A: Reset clears populated flag",     pt.populated == 0);
+
+        // === Test 2: NowNs is monotonic (returns increasing values) ===
+        uint64_t t0 = tt::PhaseTimer_NowNs();
+        uint64_t t1 = tt::PhaseTimer_NowNs();
+        check("v5.10.0A: NowNs is monotonic (t1 >= t0)", t1 >= t0);
+
+        // === Test 3: Snapshot copies state correctly ===
+        pt.parse_ns = 1000;
+        pt.fan_out_hot_ns = 2000;
+        pt.feature_collect_ns = 3000;
+        pt.label_compute_ns = 4000;
+        pt.xgboost_train_ns = 5000;
+        pt.wf_eval_ns = 6000;
+        pt.held_out_eval_ns = 7000;
+        pt.stamp_emit_ns = 8000;
+        pt.total_ns = 30000;
+        pt.populated = 1;
+        tt::PhaseTimerSnapshot snap = {};
+        tt::PhaseTimer_PopulateSnapshot(&pt, &snap);
+        check("v5.10.0A: Snapshot copies parse_ns",           snap.parse_ns == 1000);
+        check("v5.10.0A: Snapshot copies fan_out_hot_ns",     snap.fan_out_hot_ns == 2000);
+        check("v5.10.0A: Snapshot copies feature_collect_ns", snap.feature_collect_ns == 3000);
+        check("v5.10.0A: Snapshot copies total_ns",           snap.total_ns == 30000);
+        check("v5.10.0A: Snapshot copies valid flag",         snap.valid == 1);
+
+        // === Test 4: Global singleton accessible + Reset works on it ===
+        tt::PhaseTimer_Global().parse_ns = 999;
+        tt::PhaseTimer_Reset(&tt::PhaseTimer_Global());
+        check("v5.10.0A: Global singleton accessible + reset", tt::PhaseTimer_Global().parse_ns == 0);
     }
 
     printf("\n======================================\n");

@@ -14,6 +14,7 @@
 #ifndef BACKTEST_ENGINE_HPP
 #define BACKTEST_ENGINE_HPP
 
+#include "PhaseTimers.hpp"  // v5.10.0 Item A — per-phase backtest timers
 #include "../CoreFrameworks/PortfolioController.hpp"
 #include "../CoreFrameworks/OrderGates.hpp"
 #include "../CoreFrameworks/MetricCompute.hpp"  // v5.8.4c: shared metric helpers
@@ -547,13 +548,23 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
     if (results->sample_count <= 0) return;
     if (run_cfg->num_data_files <= 0) return;
 
+    // v5.10.0 Item A — label_compute phase timer (wraps full body).
+    uint64_t label_start_ns = tt::PhaseTimer_NowNs();
+
     int label_count = 0;
     int label_max = (int)results->stats.ticks_processed + 1024;
     if (label_max < 1024) label_max = 1024;
     HistoricalTick *label_ticks = (HistoricalTick *)malloc((size_t)label_max * sizeof(HistoricalTick));
     fprintf(stderr, "[backtest] allocating label buffer: %d ticks (%.0f MB)\n",
             label_max, (double)label_max * sizeof(HistoricalTick) / 1e6);
-    if (!label_ticks) return;
+    if (!label_ticks) {
+        // v5.10.0 Item A — capture even the malloc-fail path so phase
+        // summary doesn't lose this branch.
+        tt::PhaseTimer_Global().label_compute_ns +=
+            tt::PhaseTimer_NowNs() - label_start_ns;
+        tt::PhaseTimer_Global().populated = 1;
+        return;
+    }
 
     // CRITICAL: BacktestData_Load resets *count to 0 each call, so passing
     // &label_count caused each file to overwrite the previous file's data.
@@ -580,6 +591,10 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
         // STRICT refusal — abort label computation; results.labels stays
         // unpopulated so caller knows training data is unusable.
         free(label_ticks);
+        // v5.10.0 Item A — accumulate up to refusal point.
+        tt::PhaseTimer_Global().label_compute_ns +=
+            tt::PhaseTimer_NowNs() - label_start_ns;
+        tt::PhaseTimer_Global().populated = 1;
         return;
     }
 
@@ -631,6 +646,10 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
                 results->stats.nan_labels_dropped);
     }
     fputc('\n', stderr);
+    // v5.10.0 Item A — normal-path accumulation.
+    tt::PhaseTimer_Global().label_compute_ns +=
+        tt::PhaseTimer_NowNs() - label_start_ns;
+    tt::PhaseTimer_Global().populated = 1;
 }
 
 //======================================================================================================
@@ -681,6 +700,20 @@ static inline void Backtest_Run(BacktestResults *results,
     // Labels need forward-looking ticks the replay already discarded.
     // Helper reloads + computes; no-op when collect_features=0.
     Backtest_ComputeLabelsFromSamples(results, run_cfg);
+    // v5.10.0 Item A — dump phase summary at end of pipeline. Sharded run
+    // already set total_ns; bump it to include label_compute time we just
+    // did. Skip when nothing recorded (silent no-op).
+    if (tt::PhaseTimer_Global().populated) {
+        // Recompute total to include label_compute time. The sharded run's
+        // total_ns is sum of phases at its exit; here we extend by the
+        // label_compute_ns delta (already accumulated above).
+        tt::PhaseTimer_Global().total_ns =
+            tt::PhaseTimer_Global().parse_ns
+          + tt::PhaseTimer_Global().fan_out_hot_ns
+          + tt::PhaseTimer_Global().feature_collect_ns
+          + tt::PhaseTimer_Global().label_compute_ns;
+        tt::PhaseTimer_Summary(&tt::PhaseTimer_Global(), stderr);
+    }
 }
 
 //======================================================================================================
@@ -979,6 +1012,8 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         inf.has_build_flags_hash = 1;
         inf.build_flags_hash = tt::BUILD_FLAGS_HASH();
 
+        // v5.10.0 Item A — stamp_emit phase timer.
+        uint64_t stamp_start_ns = tt::PhaseTimer_NowNs();
         StampWriteResult sr = stamp_write_for_model(
             out->auto_stamp_path,
             out->auto_stamp_secret,
@@ -992,6 +1027,9 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             /*feature_registry_hash=*/FEATURE_REGISTRY_HASH(),
             /*engine_version=*/ENGINE_VERSION_STRING,
             /*inf=*/&inf);
+        tt::PhaseTimer_Global().stamp_emit_ns +=
+            tt::PhaseTimer_NowNs() - stamp_start_ns;
+        tt::PhaseTimer_Global().populated = 1;
         out->auto_stamp_attempted = 1;
         out->auto_stamp_ok = sr.ok;
         if (sr.ok) {
@@ -1024,6 +1062,23 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
     // gap_acceptable only meaningful when held-out actually ran. Default 0
     // when stubbed — signals "not yet validated" rather than "validated OK".
     out->gap_acceptable = (out->ran_held_out && out->wf_to_held_out_gap < gap_threshold) ? 1 : 0;
+
+    // v5.10.0 Item A — extended phase summary at end of full pipeline.
+    // Total = parse + fan_out_hot + feature_collect + label_compute
+    //       + wf_eval + held_out_eval + stamp_emit
+    // (xgboost_train is nested INSIDE wf_eval + held_out_eval; not added
+    //  to total to avoid double-count.)
+    if (tt::PhaseTimer_Global().populated) {
+        tt::PhaseTimer_Global().total_ns =
+            tt::PhaseTimer_Global().parse_ns
+          + tt::PhaseTimer_Global().fan_out_hot_ns
+          + tt::PhaseTimer_Global().feature_collect_ns
+          + tt::PhaseTimer_Global().label_compute_ns
+          + tt::PhaseTimer_Global().wf_eval_ns
+          + tt::PhaseTimer_Global().held_out_eval_ns
+          + tt::PhaseTimer_Global().stamp_emit_ns;
+        tt::PhaseTimer_Summary(&tt::PhaseTimer_Global(), stderr);
+    }
 }
 
 // compute accuracy: fraction of predictions matching labels (for classification)
@@ -1142,6 +1197,8 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                                             volatile int *progress_pct,
                                             volatile int *cancel_flag,
                                             int label_type = LABEL_WIN_LOSS) {
+    // v5.10.0 Item A — wf_eval phase timer (wraps full body).
+    uint64_t wf_start_ns = tt::PhaseTimer_NowNs();
     memset(wf, 0, sizeof(*wf));
     *progress_pct = 0;
 
@@ -1157,12 +1214,18 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     fprintf(stderr, "[walkforward] XGBoost not compiled in — cannot train. "
             "rebuild with -DUSE_XGBOOST=ON\n");
     *progress_pct = 100;
+    tt::PhaseTimer_Global().wf_eval_ns +=
+        tt::PhaseTimer_NowNs() - wf_start_ns;
+    tt::PhaseTimer_Global().populated = 1;
     return;
 #else
     if (data->sample_count < 100) {
         fprintf(stderr, "[walkforward] only %d samples — need at least 100 for walk-forward\n",
                 data->sample_count);
         *progress_pct = 100;
+        tt::PhaseTimer_Global().wf_eval_ns +=
+            tt::PhaseTimer_NowNs() - wf_start_ns;
+        tt::PhaseTimer_Global().populated = 1;
         return;
     }
 
@@ -1380,10 +1443,14 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
 
         // train (no early stopping yet — full n_rounds always)
         int n_rounds = 200;
+        // v5.10.0 Item A — xgboost_train phase timer (per-fold).
+        uint64_t xgb_start_ns = tt::PhaseTimer_NowNs();
         for (int r = 0; r < n_rounds; r++) {
             ret = XGBoosterUpdateOneIter(booster, r, dtrain);
             if (ret != 0) break;
         }
+        tt::PhaseTimer_Global().xgboost_train_ns +=
+            tt::PhaseTimer_NowNs() - xgb_start_ns;
 
         // predict on train + test, compute kind-appropriate metric
         {
@@ -1514,6 +1581,13 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     fprintf(stderr, "==============================\n\n");
 
 #endif // USE_XGBOOST
+    // v5.10.0 Item A — wf_eval normal-path accumulator. Includes nested
+    // xgboost_train_ns time (which is recorded separately around each
+    // XGBoosterUpdateOneIter call so PhaseTimer_Summary can show the
+    // breakdown).
+    tt::PhaseTimer_Global().wf_eval_ns +=
+        tt::PhaseTimer_NowNs() - wf_start_ns;
+    tt::PhaseTimer_Global().populated = 1;
 }
 
 //======================================================================================================
@@ -1528,6 +1602,19 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
     int label_type,
     volatile int *cancel_flag) {
     HeldOutTrainEvalResult r = {};
+
+    // v5.10.0 Item A — held_out_eval phase timer.
+    uint64_t ho_start_ns = tt::PhaseTimer_NowNs();
+    // RAII-ish accumulate on every return path via lambda + scope_guard.
+    // C++ has no defer; use a local struct dtor.
+    struct PhaseGuard {
+        uint64_t start;
+        ~PhaseGuard() {
+            tt::PhaseTimer_Global().held_out_eval_ns +=
+                tt::PhaseTimer_NowNs() - start;
+            tt::PhaseTimer_Global().populated = 1;
+        }
+    } pt_guard{ho_start_ns};
 
 #ifndef USE_XGBOOST
     fprintf(stderr, "[heldout] XGBoost not compiled in — cannot train. "
@@ -1654,6 +1741,8 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
 
         int n_rounds = 200;
         int train_aborted = 0;
+        // v5.10.0 Item A — xgboost_train phase timer (held-out training).
+        uint64_t xgb_ho_start_ns = tt::PhaseTimer_NowNs();
         for (int rr = 0; rr < n_rounds; ++rr) {
             if (cancel_flag && *cancel_flag) {
                 train_aborted = 1;
@@ -1661,6 +1750,8 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
             }
             if (XGBoosterUpdateOneIter(booster, rr, dtrain) != 0) break;
         }
+        tt::PhaseTimer_Global().xgboost_train_ns +=
+            tt::PhaseTimer_NowNs() - xgb_ho_start_ns;
         if (train_aborted) {
             fprintf(stderr, "[heldout] training cancelled at round %d\n", n_rounds);
             break;

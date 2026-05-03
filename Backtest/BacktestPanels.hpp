@@ -3572,6 +3572,36 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         }
     }
 
+    // v5.10.0 Item A — per-phase timer breakdown. Read singleton state
+    // populated by the latest backtest run. Header is collapsing — most
+    // operators don't want it open by default. Only render when populated;
+    // a never-run state has nothing useful to show.
+    if (tt::PhaseTimer_Global().populated &&
+        ImGui::CollapsingHeader("Phase Timing (last run)")) {
+        const auto& pt = tt::PhaseTimer_Global();
+        double total_ms = pt.total_ns / 1.0e6;
+        if (total_ms > 0.0) {
+            auto row = [&](const char* label, uint64_t ns, bool nested = false) {
+                if (ns == 0) return;
+                double ms = ns / 1.0e6;
+                double pct = 100.0 * (double)ns / (double)pt.total_ns;
+                ImGui::Text("%s%-18s %8.1f ms  (%5.1f%%)",
+                            nested ? "  " : "",
+                            label, ms, pct);
+            };
+            row("parse:",           pt.parse_ns);
+            row("fan_out_hot:",     pt.fan_out_hot_ns);
+            row("feature_collect:", pt.feature_collect_ns);
+            row("label_compute:",   pt.label_compute_ns);
+            row("wf_eval:",         pt.wf_eval_ns);
+            row("xgboost_train:",   pt.xgboost_train_ns, /*nested=*/true);
+            row("held_out_eval:",   pt.held_out_eval_ns);
+            row("stamp_emit:",      pt.stamp_emit_ns);
+            ImGui::Separator();
+            ImGui::Text("%-18s %8.1f ms", "total:", total_ms);
+        }
+    }
+
     ImGui::End();
 }
 

@@ -43,6 +43,7 @@
 #include "../CoreFrameworks/ExecutionCore.hpp"
 #include "../CoreFrameworks/ShardedBacktestDriver.hpp"
 #include "../CoreFrameworks/ShardedSnapshot.hpp"  // Track E.7 — TUI_CopySnapshotSharded
+#include "PhaseTimers.hpp"  // v5.10.0 Item A — per-phase backtest timers
 #include "../CoreFrameworks/Tick.hpp"
 #include "../DataStream/DepthReplayState.hpp"  // Track E.3 — depth replay
 #include "../DataStream/EngineTUI.hpp"  // for TUISnapshot
@@ -420,6 +421,9 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             // Capacity guard — silent truncation contaminates ML training.
             if (!BacktestResults_EnsureCapacity(fc->results,
                                                  fc->results->sample_count + 1)) return;
+            // v5.10.0 Item A — feature_collect phase timer (post-gates so
+            // the warmup branch noise doesn't pollute the metric).
+            uint64_t fc_start_ns = tt::PhaseTimer_NowNs();
 
             // Regime_ComputeSignals with the EXACT inputs the live ML serve
             // path uses (mirrors StrategyParameters.hpp:469). When the driver
@@ -470,6 +474,12 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                         fprintf(stderr, "[backtest] WARN: NaN/Inf in feature pack at tick %d — skipping sample (further skips silent)\n", tick_index);
                         nan_skip_warn_emitted = 1;
                     }
+                    // v5.10.0 Item A — count the wasted Features_PackAll
+                    // compute; otherwise feature_collect_ns under-reports
+                    // when NaN-skip rate is high.
+                    tt::PhaseTimer_Global().feature_collect_ns +=
+                        tt::PhaseTimer_NowNs() - fc_start_ns;
+                    tt::PhaseTimer_Global().populated = 1;
                     return;  // exit the lambda; this sample dropped
                 }
             }
@@ -481,6 +491,10 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             fc->results->sample_regimes[fc->results->sample_count] = 0;
             fc->results->labels[fc->results->sample_count] = 0.0f;  // post-pass
             fc->results->sample_count++;
+            // v5.10.0 Item A — accumulate feature_collect time.
+            tt::PhaseTimer_Global().feature_collect_ns +=
+                tt::PhaseTimer_NowNs() - fc_start_ns;
+            tt::PhaseTimer_Global().populated = 1;
         };
     }
 
@@ -489,6 +503,12 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     //----------------------------------------------------------------------
     struct timeval t_start, t_end;
     gettimeofday(&t_start, NULL);
+
+    // v5.10.0 Item A — phase timer reset + wall-clock anchor for total_ns.
+    // Reset clears prior runs (suite reuses the singleton across Backtest_Run
+    // calls). populated flag flips once any phase records nonzero time.
+    tt::PhaseTimer_Reset(&tt::PhaseTimer_Global());
+    uint64_t pt_run_start_ns = tt::PhaseTimer_NowNs();
 
     int total_processed = 0;
     int total_ticks_all_files = 0;
@@ -544,7 +564,13 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     int64_t prev_file_last_ts = 0;  // v5.9.2c: track for inter-file ordering check
     for (int f = 0; f < run_cfg->num_data_files; f++) {
         int count = 0;
-        if (!BacktestData_Load(ticks, &count, max_ticks, run_cfg->data_paths[f]))
+        // v5.10.0 Item A — parse phase timer.
+        uint64_t parse_start_ns = tt::PhaseTimer_NowNs();
+        bool parse_ok = BacktestData_Load(ticks, &count, max_ticks, run_cfg->data_paths[f]);
+        tt::PhaseTimer_Global().parse_ns +=
+            tt::PhaseTimer_NowNs() - parse_start_ns;
+        tt::PhaseTimer_Global().populated = 1;
+        if (!parse_ok)
             continue;
         // v5.9.2c — validate intra-file ordering on each file
         // (sharded loads files one at a time, can't concat-validate
@@ -566,6 +592,13 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         }
         if (count > 0) prev_file_last_ts = ticks[count - 1].timestamp_us;
 
+        // v5.10.0 Item A — fan_out_hot phase timer wraps the inner tick
+        // loop. Includes producer fan_out + per-core hot path execution.
+        // feature_collect time is accounted separately inside the
+        // on_slow_path lambda; subtract at end so fan_out_hot doesn't
+        // double-count it.
+        uint64_t hot_loop_start_ns = tt::PhaseTimer_NowNs();
+        uint64_t fc_baseline_ns = tt::PhaseTimer_Global().feature_collect_ns;
         for (int i = 0; i < count; i++) {
             if (*cancel_flag) goto done;
 
@@ -710,6 +743,18 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 *progress_pct = (int)(100.0 * total_processed / total_ticks_all_files);
             }
         }
+        // v5.10.0 Item A — accumulate fan_out_hot for this file's tick loop.
+        // Subtract feature_collect delta accumulated during this file so the
+        // two phases don't double-count slow-path time.
+        uint64_t fc_delta_ns =
+            tt::PhaseTimer_Global().feature_collect_ns - fc_baseline_ns;
+        uint64_t hot_loop_total_ns =
+            tt::PhaseTimer_NowNs() - hot_loop_start_ns;
+        if (hot_loop_total_ns > fc_delta_ns) {
+            tt::PhaseTimer_Global().fan_out_hot_ns +=
+                (hot_loop_total_ns - fc_delta_ns);
+        }
+        tt::PhaseTimer_Global().populated = 1;
     }
 
 done:
@@ -717,6 +762,13 @@ done:
 
     // Final drain to flush anything still in flight from the last tick
     EventLoop_DrainEvents(&state);
+    // v5.10.0 Item A — capture wall-clock total for the sharded run.
+    // Caller (Backtest_Run / Backtest_RunFullValidation) may extend with
+    // label_compute / wf_eval / held_out_eval / stamp_emit and bump
+    // total_ns again at end-of-pipeline. Multiple writes are OK — the
+    // last one wins, which is what Summary cares about.
+    tt::PhaseTimer_Global().total_ns =
+        tt::PhaseTimer_NowNs() - pt_run_start_ns;
 
     gettimeofday(&t_end, NULL);
     double elapsed = (t_end.tv_sec - t_start.tv_sec) * 1000.0
