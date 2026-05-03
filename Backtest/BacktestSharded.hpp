@@ -322,6 +322,16 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                         // catches model-swap-without-clearing-bandit-state.
                         EnsembleModelZoo_LoadBanditState(&ml_ensemble_zoos[i],
                                                           cfg.core_model_dir[i]);
+                        // v5.10.0a.next.1 — operator-explicit prior path
+                        // overrides the default model_dir load. Skips
+                        // bundle-id check (operator may be transferring
+                        // weights from a sibling bundle deliberately).
+                        if (run_cfg && run_cfg->bandit_state_prior_path[0]) {
+                            EnsembleModelZoo_LoadBanditStateFromPath(
+                                &ml_ensemble_zoos[i],
+                                run_cfg->bandit_state_prior_path,
+                                /*skip_bundle_check=*/1);
+                        }
                         EnsembleModelZoo_SetBanditSaveInterval(&ml_ensemble_zoos[i],
                             cfg.ensemble_bandit_save_interval);
                         // Wire ensemble pointer into the per-core handle slot;

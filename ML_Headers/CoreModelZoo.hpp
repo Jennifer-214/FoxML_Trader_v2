@@ -1317,6 +1317,43 @@ inline int EnsembleModelZoo_LoadBanditState(
     return loaded;
 }
 
+// v5.10.0a.next.1 — load bandit state from an EXPLICIT path with optional
+// bundle-id check skip. Used by BacktestRunConfig.bandit_state_prior_path
+// when operator wants to bootstrap a new ensemble from a sibling bundle's
+// learned weights (e.g. transfer learning across runs with the same N
+// horizons but different model contents). Returns 1 if loaded.
+//
+// skip_bundle_check=1 → operator-explicit override; bundle-id mismatch
+// is allowed (typical when transferring between sibling models).
+// skip_bundle_check=0 → normal path; behaves like _LoadBanditState.
+//
+// Does NOT update ezoo->bandit_save_path — caller's _LoadBanditState
+// (if it ran first) wins for periodic-save destination, OR caller can
+// set bandit_save_path explicitly via _LoadBanditState before this.
+template <unsigned F>
+inline int EnsembleModelZoo_LoadBanditStateFromPath(
+    EnsembleModelZoo<F>* ezoo, const char* path, int skip_bundle_check) {
+    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return 0;
+    if (!path || path[0] == '\0') return 0;
+    char expected_id[65];
+    if (skip_bundle_check) {
+        expected_id[0] = '\0';  // empty SHA → Bandit_LoadJSON skips check
+    } else {
+        EnsembleModelZoo_ComputeBundleId(ezoo, expected_id, sizeof(expected_id));
+    }
+    int loaded = Bandit_LoadJSON(ezoo->bandits, NUM_REGIMES, path,
+                                   expected_id, ezoo->buy_signal_count);
+    if (loaded) {
+        fprintf(stderr, "[ensemble] loaded bandit prior from %s%s\n", path,
+                skip_bundle_check ? " (bundle-id check SKIPPED — operator override)"
+                                   : "");
+    } else if (access(path, F_OK) == 0) {
+        fprintf(stderr, "[ensemble] bandit prior at %s present but rejected "
+                        "(format/n_arms mismatch)\n", path);
+    }
+    return loaded;
+}
+
 // Configure periodic save cadence. Called once at boot after
 // _LoadBanditState. interval=0 disables periodic; shutdown save still
 // fires regardless.

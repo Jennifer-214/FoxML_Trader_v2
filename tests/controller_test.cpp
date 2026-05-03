@@ -12491,6 +12491,122 @@ e3_skip_load:;
         EnsembleModelZoo_Free(&ez_a);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0a.next.1 — Backtest bandit_state_prior_path ---\n");
+    {
+        // === Test next.1.1: LoadBanditStateFromPath with skip_bundle_check
+        // succeeds even when bundle id would mismatch ===
+        EnsembleModelZoo<FP> ez_src;
+        EnsembleModelZoo_Init(&ez_src);
+        ez_src.active = 1;
+        ez_src.buy_signal_count = 3;
+        ez_src.horizon_ticks_at_idx[0] = 100;
+        ez_src.horizon_ticks_at_idx[1] = 500;
+        ez_src.horizon_ticks_at_idx[2] = 1000;
+        // Inject deterministic fingerprints for SOURCE bundle
+        const char* src_fps[] = {"sourceaa11112222", "sourcebb33334444",
+                                  "sourcecc55556666"};
+        for (int a = 0; a < 3; ++a)
+            strncpy(ez_src.buy_signal[a].training_fingerprint, src_fps[a], 65);
+        EnsembleModelZoo_InitBandits(&ez_src, 0.05, 200);
+        // Set non-uniform weights to verify round-trip
+        for (int r = 0; r < NUM_REGIMES; ++r) {
+            for (int a = 0; a < 3; ++a) {
+                ez_src.bandits[r].weights[a] = 1.0 + 0.1 * r + 0.5 * a;
+                ez_src.bandits[r].pulls[a] = 100 * r + 10 * a;
+            }
+            ez_src.bandits[r].total_steps = 1000 + r;
+        }
+
+        // Save source bundle's bandit state to disk (using a sibling-bundle
+        // bundle_id — this represents the prior file)
+        char prior_path[] = "/tmp/v5100a_next1_prior_XXXXXX.json";
+        int pfd = mkstemps(prior_path, 5);
+        check("v5.10.0a.next.1: tmp prior file created", pfd >= 0);
+        if (pfd >= 0) {
+            close(pfd);
+            unlink(prior_path);
+            char src_id[65];
+            EnsembleModelZoo_ComputeBundleId(&ez_src, src_id, sizeof(src_id));
+            int saved = Bandit_SaveJSON(ez_src.bandits, NUM_REGIMES,
+                                          prior_path, src_id, nullptr);
+            check("v5.10.0a.next.1: source bandit state saved", saved == 1);
+
+            // Now build a DESTINATION ezoo with DIFFERENT fingerprints —
+            // simulates "operator wants to bootstrap new bundle from sibling".
+            // Bundle IDs deliberately mismatch.
+            EnsembleModelZoo<FP> ez_dst;
+            EnsembleModelZoo_Init(&ez_dst);
+            ez_dst.active = 1;
+            ez_dst.buy_signal_count = 3;
+            ez_dst.horizon_ticks_at_idx[0] = 100;
+            ez_dst.horizon_ticks_at_idx[1] = 500;
+            ez_dst.horizon_ticks_at_idx[2] = 1000;
+            const char* dst_fps[] = {"destxxxx00000000", "destyyyy00000000",
+                                      "destzzzz00000000"};
+            for (int a = 0; a < 3; ++a)
+                strncpy(ez_dst.buy_signal[a].training_fingerprint,
+                        dst_fps[a], 65);
+            EnsembleModelZoo_InitBandits(&ez_dst, 0.05, 200);
+            // Snapshot uniform-init weight for sentinel
+            double uniform_w0 = ez_dst.bandits[0].weights[0];
+
+            // Test: with skip_bundle_check=0, load fails (id mismatch)
+            int strict_load = EnsembleModelZoo_LoadBanditStateFromPath(
+                &ez_dst, prior_path, /*skip_bundle_check=*/0);
+            check("v5.10.0a.next.1: strict load rejects mismatched bundle id",
+                  strict_load == 0);
+            check("v5.10.0a.next.1: strict-load failure leaves uniform priors intact",
+                  ez_dst.bandits[0].weights[0] == uniform_w0);
+
+            // Test: with skip_bundle_check=1, load succeeds despite mismatch
+            int override_load = EnsembleModelZoo_LoadBanditStateFromPath(
+                &ez_dst, prior_path, /*skip_bundle_check=*/1);
+            check("v5.10.0a.next.1: skip_bundle_check=1 allows mismatched-id load",
+                  override_load == 1);
+            check("v5.10.0a.next.1: skip-check load overlays source weights[0][0]",
+                  ez_dst.bandits[0].weights[0] == ez_src.bandits[0].weights[0]);
+            check("v5.10.0a.next.1: skip-check load overlays source weights[3][2]",
+                  ez_dst.bandits[3].weights[2] == ez_src.bandits[3].weights[2]);
+            check("v5.10.0a.next.1: skip-check load overlays pulls",
+                  ez_dst.bandits[2].pulls[1] == ez_src.bandits[2].pulls[1]);
+            check("v5.10.0a.next.1: skip-check load overlays total_steps",
+                  ez_dst.bandits[1].total_steps == ez_src.bandits[1].total_steps);
+
+            // Test: missing file returns 0 regardless of skip flag
+            int missing = EnsembleModelZoo_LoadBanditStateFromPath(
+                &ez_dst, "/tmp/this_file_does_not_exist_v5100a_next1.json",
+                /*skip_bundle_check=*/1);
+            check("v5.10.0a.next.1: missing file returns 0",
+                  missing == 0);
+
+            // Test: empty path returns 0
+            int empty_path = EnsembleModelZoo_LoadBanditStateFromPath(
+                &ez_dst, "", /*skip_bundle_check=*/1);
+            check("v5.10.0a.next.1: empty path returns 0",
+                  empty_path == 0);
+
+            EnsembleModelZoo_Free(&ez_dst);
+            unlink(prior_path);
+        }
+
+        // === Test next.1.2: BacktestRunConfig has bandit_state_prior_path
+        // field that defaults to empty after memset ===
+        BacktestRunConfig run;
+        memset(&run, 0, sizeof(run));
+        check("v5.10.0a.next.1: BacktestRunConfig.bandit_state_prior_path "
+              "zero-init = empty",
+              run.bandit_state_prior_path[0] == '\0');
+        // Field accepts at least 399 chars + null terminator
+        snprintf(run.bandit_state_prior_path,
+                 sizeof(run.bandit_state_prior_path),
+                 "/path/to/some/bundle/bandit_state.json");
+        check("v5.10.0a.next.1: bandit_state_prior_path accepts assignment",
+              strncmp(run.bandit_state_prior_path,
+                      "/path/to/some/bundle/bandit_state.json", 256) == 0);
+
+        EnsembleModelZoo_Free(&ez_src);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.G.6 — Per-core ensemble cfg fields ---\n");
     {
         // === Test G.6.1: ensemble cfg defaults ===

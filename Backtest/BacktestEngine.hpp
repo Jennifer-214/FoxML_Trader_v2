@@ -192,6 +192,14 @@ struct BacktestRunConfig {
     double label_tp_pct;    // TP barrier for win/loss and barrier labels (e.g. 1.5 = 1.5%)
     double label_sl_pct;    // SL barrier (e.g. 1.0 = 1.0%)
     int label_forward_ticks; // forward window for forward_pnl label (e.g. 1000)
+    // v5.10.0a.next.1 — operator-explicit bandit state prior. When set,
+    // BacktestSharded_Run loads bandit weights from this path AFTER the
+    // default <core_model_dir>/bandit_state.json load, overriding it.
+    // Bundle-ID check is SKIPPED on this path (operator may intentionally
+    // bootstrap a new model bundle with weights from a sibling — e.g.
+    // transfer learning across compatible horizon lists). Empty = no
+    // prior, use default load only.
+    char bandit_state_prior_path[400];
 };
 
 //======================================================================================================
