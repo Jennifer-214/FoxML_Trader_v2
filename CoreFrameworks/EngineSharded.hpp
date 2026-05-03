@@ -856,6 +856,49 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                             (unsigned)handles[r]->training_poll_interval,
                             (unsigned)cfg.poll_interval);
                     }
+                    // v5.9.5h — XGBoost hyperparam drift WARN. Hyperparams
+                    // don't affect inference; this is forensic ("you trained
+                    // with these settings, you're running with cfg saying
+                    // something different"). Drift logged per-field; same
+                    // suppression flag as v5.9.4a poll_interval pattern.
+                    if (handles[r]->has_xgb_hyperparams) {
+                        const ModelHandle<F>* h = handles[r];
+                        double cfg_subsample = FPN_ToDouble(cfg.xgb_subsample);
+                        double cfg_colsample = FPN_ToDouble(cfg.xgb_colsample_bytree);
+                        if (fabs(h->stamp_xgb_subsample - cfg_subsample) > 1e-6) {
+                            fprintf(stderr,
+                                "[xgb_hyperparams] WARN: core %d role=%s stamp "
+                                "claims xgb_subsample=%.4f but cfg=%.4f\n",
+                                i, role_names[r], h->stamp_xgb_subsample, cfg_subsample);
+                        }
+                        if (fabs(h->stamp_xgb_colsample_bytree - cfg_colsample) > 1e-6) {
+                            fprintf(stderr,
+                                "[xgb_hyperparams] WARN: core %d role=%s stamp "
+                                "claims xgb_colsample_bytree=%.4f but cfg=%.4f\n",
+                                i, role_names[r], h->stamp_xgb_colsample_bytree,
+                                cfg_colsample);
+                        }
+                        if (h->stamp_xgb_min_child_weight != cfg.xgb_min_child_weight) {
+                            fprintf(stderr,
+                                "[xgb_hyperparams] WARN: core %d role=%s stamp "
+                                "claims xgb_min_child_weight=%d but cfg=%d\n",
+                                i, role_names[r], h->stamp_xgb_min_child_weight,
+                                cfg.xgb_min_child_weight);
+                        }
+                        if (h->stamp_xgb_seed != cfg.xgb_seed) {
+                            fprintf(stderr,
+                                "[xgb_hyperparams] WARN: core %d role=%s stamp "
+                                "claims xgb_seed=%d but cfg=%d\n",
+                                i, role_names[r], h->stamp_xgb_seed, cfg.xgb_seed);
+                        }
+                        if (strcmp(h->stamp_xgb_tree_method, cfg.xgb_tree_method) != 0) {
+                            fprintf(stderr,
+                                "[xgb_hyperparams] WARN: core %d role=%s stamp "
+                                "claims xgb_tree_method=%s but cfg=%s\n",
+                                i, role_names[r], h->stamp_xgb_tree_method,
+                                cfg.xgb_tree_method);
+                        }
+                    }
                 }
             }
 

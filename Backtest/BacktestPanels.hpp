@@ -1148,6 +1148,22 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                                         v.inference_cfg_fee_rate_taker);
                         }
                     }
+                    // v5.9.5h — XGBoost hyperparameter group. Renders when
+                    // stamp had has_xgb_hyperparams=1 (post-v5.9.5h stamps).
+                    if (v.has_xgb_hyperparams) {
+                        ImGui::Separator();
+                        ImGui::TextColored(FoxmlColors::comment,
+                                           "XGBoost hyperparams at training time:");
+                        ImGui::Text("  max_depth:          %d",   v.xgb_max_depth);
+                        ImGui::Text("  learning_rate:      %.4f", v.xgb_learning_rate);
+                        ImGui::Text("  n_estimators:       %d",   v.xgb_n_estimators);
+                        ImGui::Text("  subsample:          %.2f", v.xgb_subsample);
+                        ImGui::Text("  colsample_bytree:   %.2f", v.xgb_colsample_bytree);
+                        ImGui::Text("  min_child_weight:   %d",   v.xgb_min_child_weight);
+                        ImGui::Text("  seed:               %d",   v.xgb_seed);
+                        ImGui::Text("  tree_method:        %s",
+                                    v.xgb_tree_method[0] ? v.xgb_tree_method : "(unknown)");
+                    }
                     ImGui::TreePop();
                 }
             }

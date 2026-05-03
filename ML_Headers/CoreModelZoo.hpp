@@ -189,6 +189,24 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
             handle->training_poll_interval = sr.training_poll_interval;
             handle->has_training_poll_interval = 1;
         }
+        // v5.9.5h — copy XGBoost hyperparams from stamp onto handle.
+        // EngineSharded boot-WARN compares stamp_xgb_* vs cfg.xgb_*
+        // (mirrors v5.9.4a poll_interval pattern). No refusal — hyperparams
+        // don't affect inference, only forensics + reproducibility.
+        if (sr.has_xgb_hyperparams) {
+            handle->has_xgb_hyperparams        = 1;
+            handle->stamp_xgb_max_depth        = sr.xgb_max_depth;
+            handle->stamp_xgb_learning_rate    = sr.xgb_learning_rate;
+            handle->stamp_xgb_n_estimators     = sr.xgb_n_estimators;
+            handle->stamp_xgb_subsample        = sr.xgb_subsample;
+            handle->stamp_xgb_colsample_bytree = sr.xgb_colsample_bytree;
+            handle->stamp_xgb_min_child_weight = sr.xgb_min_child_weight;
+            handle->stamp_xgb_seed             = sr.xgb_seed;
+            size_t tmln = strnlen(sr.xgb_tree_method,
+                                   sizeof(handle->stamp_xgb_tree_method) - 1);
+            memcpy(handle->stamp_xgb_tree_method, sr.xgb_tree_method, tmln);
+            handle->stamp_xgb_tree_method[tmln] = '\0';
+        }
         if (sr.has_model_num_outputs) {
             handle->stamp_model_num_outputs = sr.model_num_outputs;
             handle->has_stamp_num_outputs = 1;

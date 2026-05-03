@@ -240,6 +240,19 @@ struct ModelHandle {
     uint8_t  has_training_poll_interval;    // 1 if stamp had it
     int      stamp_model_num_outputs;       // from stamp; 0 if absent
     uint8_t  has_stamp_num_outputs;         // 1 if stamp had model_num_outputs
+    // v5.9.5h — XGBoost hyperparams from stamp, copied here at
+    // CoreModelZoo._TryLoadRole load time. EngineSharded boot WARN
+    // compares these vs cfg.xgb_* (mismatch logged; no refuse since
+    // hyperparams don't affect inference).
+    uint8_t  has_xgb_hyperparams;
+    int      stamp_xgb_max_depth;
+    double   stamp_xgb_learning_rate;
+    int      stamp_xgb_n_estimators;
+    double   stamp_xgb_subsample;
+    double   stamp_xgb_colsample_bytree;
+    int      stamp_xgb_min_child_weight;
+    int      stamp_xgb_seed;
+    char     stamp_xgb_tree_method[16];
 };
 
 //======================================================================================================
@@ -261,6 +274,16 @@ inline void Model_Init(ModelHandle<F> *m) {
     m->has_training_poll_interval = 0;
     m->stamp_model_num_outputs = 0;
     m->has_stamp_num_outputs = 0;
+    // v5.9.5h — XGBoost hyperparam fields zero-init
+    m->has_xgb_hyperparams = 0;
+    m->stamp_xgb_max_depth = 0;
+    m->stamp_xgb_learning_rate = 0.0;
+    m->stamp_xgb_n_estimators = 0;
+    m->stamp_xgb_subsample = 0.0;
+    m->stamp_xgb_colsample_bytree = 0.0;
+    m->stamp_xgb_min_child_weight = 0;
+    m->stamp_xgb_seed = 0;
+    m->stamp_xgb_tree_method[0] = '\0';
 }
 
 //======================================================================================================
