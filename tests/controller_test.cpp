@@ -12094,6 +12094,96 @@ e3_skip_load:;
               pcs.cfg_drift_strict_refused == 1);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0a.G.7 — Per-regime BanditState + weighted blend ---\n");
+    {
+        // === Test G.7.1: EnsembleModelZoo_InitBandits initializes all NUM_REGIMES ===
+        EnsembleModelZoo<FP> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        check("v5.10.0a.G.7: EnsembleModelZoo init clears initialized_bandits flag",
+              ezoo.initialized_bandits == 0);
+        // Simulate populated ezoo (bypass LoadFromCfg for unit test)
+        ezoo.buy_signal_count = 3;
+        ezoo.horizon_ticks_at_idx[0] = 100;
+        ezoo.horizon_ticks_at_idx[1] = 500;
+        ezoo.horizon_ticks_at_idx[2] = 1000;
+        EnsembleModelZoo_InitBandits(&ezoo, 0.1, 100);
+        check("v5.10.0a.G.7: InitBandits sets initialized_bandits=1",
+              ezoo.initialized_bandits == 1);
+        // Each regime's bandit has n_arms = 3
+        for (int r = 0; r < NUM_REGIMES; ++r) {
+            char msg[64];
+            snprintf(msg, 64, "v5.10.0a.G.7: regime %d bandit has 3 arms", r);
+            check(msg, ezoo.bandits[r].n_arms == 3);
+        }
+        // Uniform initial weights → Bandit_GetProbabilities returns 1/N
+        double probs[8];
+        Bandit_GetProbabilities(&ezoo.bandits[0], probs);
+        check("v5.10.0a.G.7: uniform weights give probs near 1/N",
+              fabs(probs[0] - 1.0/3.0) < 0.01 &&
+              fabs(probs[1] - 1.0/3.0) < 0.01 &&
+              fabs(probs[2] - 1.0/3.0) < 0.01);
+
+        // === Test G.7.2: Model_Predict_Ensemble_Weighted with no models returns sentinel ===
+        ModelHandle<FP> empty[1];
+        Model_Init(&empty[0]);
+        float feats[MODEL_MAX_FEATURES] = {0};
+        double weights[8] = {0.5, 0.3, 0.2, 0, 0, 0, 0, 0};
+        int sel = -99;
+        float p = Model_Predict_Ensemble_Weighted(empty, 0, feats,
+                                                    MODEL_NUM_FEATURES,
+                                                    weights, 0, 0.0, &sel);
+        check("v5.10.0a.G.7: weighted ensemble count=0 returns 0", p == 0.0f);
+        check("v5.10.0a.G.7: weighted ensemble count=0 sets dominant_idx=-1",
+              sel == -1);
+        Model_Free(&empty[0]);
+
+        // === Test G.7.3: Agreement filter blocks split predictions ===
+        // No real models → all predictions are 0 (or NaN-skipped).
+        // n_active=0 → agreement skipped; returns sentinel 0.5 on no signal.
+        ModelHandle<FP> three[3];
+        for (int i = 0; i < 3; ++i) Model_Init(&three[i]);
+        sel = -99;
+        p = Model_Predict_Ensemble_Weighted(three, 3, feats,
+                                              MODEL_NUM_FEATURES,
+                                              weights, 0, 0.6, &sel);
+        check("v5.10.0a.G.7: all-unloaded models → no-edge sentinel 0.5",
+              fabs(p - 0.5f) < 1e-6);
+        check("v5.10.0a.G.7: no-signal sets dominant_idx=-1", sel == -1);
+        for (int i = 0; i < 3; ++i) Model_Free(&three[i]);
+
+        // === Test G.7.4: Kill-switch parser sets bitmask correctly ===
+        EnsembleModelZoo<FP> ez2;
+        EnsembleModelZoo_Init(&ez2);
+        ez2.buy_signal_count = 4;
+        ez2.horizon_ticks_at_idx[0] = 100;
+        ez2.horizon_ticks_at_idx[1] = 500;
+        ez2.horizon_ticks_at_idx[2] = 1000;
+        ez2.horizon_ticks_at_idx[3] = 2000;
+        EnsembleModelZoo_SetDisabledHorizons(&ez2, "100,1000");
+        check("v5.10.0a.G.7: kill-switch disables arm 0 (h100)",
+              (ez2.disabled_horizon_mask & 0x1) != 0);
+        check("v5.10.0a.G.7: kill-switch leaves arm 1 (h500) enabled",
+              (ez2.disabled_horizon_mask & 0x2) == 0);
+        check("v5.10.0a.G.7: kill-switch disables arm 2 (h1000)",
+              (ez2.disabled_horizon_mask & 0x4) != 0);
+        check("v5.10.0a.G.7: kill-switch leaves arm 3 (h2000) enabled",
+              (ez2.disabled_horizon_mask & 0x8) == 0);
+
+        // === Test G.7.5: Empty CSV clears bitmask ===
+        ez2.disabled_horizon_mask = 0xFF;  // pre-pollute
+        EnsembleModelZoo_SetDisabledHorizons(&ez2, "");
+        check("v5.10.0a.G.7: empty CSV clears disabled mask",
+              ez2.disabled_horizon_mask == 0);
+
+        // === Test G.7.6: Unknown horizon CSV silently skipped ===
+        EnsembleModelZoo_SetDisabledHorizons(&ez2, "9999");  // not in horizon list
+        check("v5.10.0a.G.7: unknown horizon CSV → mask stays 0",
+              ez2.disabled_horizon_mask == 0);
+
+        EnsembleModelZoo_Free(&ezoo);
+        EnsembleModelZoo_Free(&ez2);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.G.6 — Per-core ensemble cfg fields ---\n");
     {
         // === Test G.6.1: ensemble cfg defaults ===

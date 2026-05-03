@@ -143,6 +143,12 @@ struct MLBuildContext {
     // ensemble_zoo first; if active, dispatches through Model_Predict_Ensemble;
     // else falls through to single-zoo path bytewise-identical to pre-G.5.
     void*               ensemble_zoo;        // EnsembleModelZoo<F>*  (nullptr = inactive)
+    // v5.10.0a.G.7 — current regime classification. Used by ensemble
+    // weighted-blend dispatch to select the correct per-regime bandit's
+    // weights. Updated by slow-path regime classifier (RegimeDetector)
+    // before each ML_BuildParameters call. Default 0 = REGIME_RANGING
+    // (safe fallback when classifier hasn't run yet).
+    int                 current_regime_id;
 };
 
 //======================================================================================================
@@ -775,21 +781,64 @@ inline void ML_BuildParameters(
             out->strategy_id = STRATEGY_ML;
             return;
         }
-        // v5.10.0a.G.5 — ensemble dispatch when active. Uses
-        // Model_Predict_Ensemble (G.4 selection logic — argmax-confidence)
-        // until G.7 ships weighted blend variant.
+        // v5.10.0a.G.5/G.7 — ensemble dispatch when active.
+        // Two modes (cfg.ensemble_blend_mode):
+        //   "selection" → G.4 argmax-confidence (single horizon per tick)
+        //   "weighted"  → G.7 Bandit-Exp3 per-regime weighted blend (default)
         // ensemble_zoo->buy_signal[] all share the SAME scaler (per G.3
         // load-from-cfg invariant), so the standardize step above already
-        // produced the correct features for every horizon (G.7 caching
-        // optimization).
+        // produced the correct features for every horizon (G.7 perf opt #1
+        // — caching across horizons).
         double pred_raw = 0.0;
         EnsembleModelZoo<F>* ezoo = (EnsembleModelZoo<F>*)
             (mctx ? mctx->ensemble_zoo : nullptr);
         if (ezoo && ezoo->active && ezoo->buy_signal_count > 0) {
             int dominant_idx = -1;
-            pred_raw = (double)Model_Predict_Ensemble(
-                ezoo->buy_signal, ezoo->buy_signal_count,
-                features, n, &dominant_idx);
+            // Mode dispatch: weighted (default) uses bandit weights;
+            // selection falls back to G.4 argmax-confidence.
+            bool use_weighted = (strcmp(ezoo->blend_mode, "weighted") == 0);
+            if (use_weighted && ezoo->initialized_bandits) {
+                // G.7 path: per-regime bandit weights drive blend.
+                int regime_id = mctx ? mctx->current_regime_id : 0;
+                if (regime_id < 0 || regime_id >= NUM_REGIMES) regime_id = 0;
+                ezoo->last_predicted_regime_id = regime_id;
+                // G.7 #7 — regime hysteresis dampening. When regime just
+                // changed, blend OLD bandit's weights with NEW for
+                // hysteresis cycles. Otherwise use current bandit directly.
+                double weights_buf[ENSEMBLE_HORIZON_MAX];
+                if (ezoo->regime_transition_cycles_remaining > 0) {
+                    double w_curr[ENSEMBLE_HORIZON_MAX];
+                    double w_prev[ENSEMBLE_HORIZON_MAX];
+                    Bandit_GetProbabilities(&ezoo->bandits[regime_id], w_curr);
+                    Bandit_GetProbabilities(&ezoo->bandits[ezoo->prev_regime_id], w_prev);
+                    int hyst = config->regime_hysteresis > 0
+                             ? (int)config->regime_hysteresis : 5;
+                    double alpha = (double)(hyst - ezoo->regime_transition_cycles_remaining) /
+                                   (double)hyst;
+                    if (alpha < 0.0) alpha = 0.0;
+                    if (alpha > 1.0) alpha = 1.0;
+                    for (int h = 0; h < ezoo->buy_signal_count; ++h) {
+                        weights_buf[h] = alpha * w_curr[h] + (1.0 - alpha) * w_prev[h];
+                    }
+                    ezoo->regime_transition_cycles_remaining--;
+                } else {
+                    Bandit_GetProbabilities(&ezoo->bandits[regime_id], weights_buf);
+                }
+                pred_raw = (double)Model_Predict_Ensemble_Weighted(
+                    ezoo->buy_signal, ezoo->buy_signal_count,
+                    features, n,
+                    weights_buf,
+                    ezoo->disabled_horizon_mask,
+                    config->ensemble_min_agreement_pct,
+                    &dominant_idx);
+            } else {
+                // Selection path (G.4 argmax-confidence). Bandit-uninit
+                // ensembles also fall here (cold-start before _InitBandits).
+                pred_raw = (double)Model_Predict_Ensemble(
+                    ezoo->buy_signal, ezoo->buy_signal_count,
+                    features, n, &dominant_idx);
+            }
+            ezoo->last_predicted_horizon_idx = dominant_idx;
         } else {
             // Single-zoo path (existing; bytewise unchanged from pre-G.5)
             pred_raw = (double)Model_Predict(&zoo->buy_signal, features, n);

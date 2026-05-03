@@ -1895,6 +1895,7 @@ inline void EventLoop_RebuildOneCore(
         if (effective_strategy_id == STRATEGY_ML) {
             ml_ctx.model_handle   = state->cores[slot].model_handle;
             ml_ctx.ensemble_zoo   = state->cores[slot].ensemble_handle;  // v5.10.0a.G.5 — nullptr-safe; single-zoo when null
+            ml_ctx.current_regime_id = state->cores[slot].regime_state.current_regime;  // v5.10.0a.G.7
             ml_ctx.confidence     = &state->cores[slot].confidence;
             ml_ctx.out_prediction = &state->cores[slot].staged_prediction;
             ml_ctx.out_confidence = &state->cores[slot].last_confidence;

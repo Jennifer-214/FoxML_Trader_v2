@@ -301,6 +301,21 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                         fprintf(stderr, "[backtest sharded] core %d: ensemble active "
                                         "(%d horizons; %d total models)\n",
                                 i, ml_ensemble_zoos[i].buy_signal_count, n_loaded);
+                        // v5.10.0a.G.7 — initialize per-regime bandits + cache
+                        // blend mode from cfg (per-core override → global fallback).
+                        EnsembleModelZoo_InitBandits(&ml_ensemble_zoos[i],
+                                                       cfg.ensemble_bandit_eta,
+                                                       cfg.ensemble_min_warmup_predictions);
+                        const char* mode = cfg.core_ensemble_blend_mode[i][0]
+                                          ? cfg.core_ensemble_blend_mode[i]
+                                          : cfg.ensemble_blend_mode;
+                        strncpy(ml_ensemble_zoos[i].blend_mode, mode,
+                                sizeof(ml_ensemble_zoos[i].blend_mode) - 1);
+                        ml_ensemble_zoos[i].blend_mode[
+                            sizeof(ml_ensemble_zoos[i].blend_mode) - 1] = '\0';
+                        // v5.10.0a.G.7 — kill-switch: parse cfg.core_N_disabled_horizons
+                        EnsembleModelZoo_SetDisabledHorizons(&ml_ensemble_zoos[i],
+                            cfg.core_disabled_horizons[i]);
                         // Wire ensemble pointer into the per-core handle slot;
                         // dispatcher's ml_ctx.ensemble_zoo reads from this.
                         state.cores[i].ensemble_handle = &ml_ensemble_zoos[i];

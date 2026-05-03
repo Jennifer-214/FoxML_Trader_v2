@@ -837,6 +837,19 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         fprintf(stderr, "[sharded] core %d: ensemble active "
                                         "(%d horizons; %d total models)\n",
                                 i, ml_ensemble_zoos[i].buy_signal_count, n_loaded);
+                        // v5.10.0a.G.7 — initialize per-regime bandits + cfg-driven mode
+                        EnsembleModelZoo_InitBandits(&ml_ensemble_zoos[i],
+                                                       cfg.ensemble_bandit_eta,
+                                                       cfg.ensemble_min_warmup_predictions);
+                        const char* mode = cfg.core_ensemble_blend_mode[i][0]
+                                          ? cfg.core_ensemble_blend_mode[i]
+                                          : cfg.ensemble_blend_mode;
+                        strncpy(ml_ensemble_zoos[i].blend_mode, mode,
+                                sizeof(ml_ensemble_zoos[i].blend_mode) - 1);
+                        ml_ensemble_zoos[i].blend_mode[
+                            sizeof(ml_ensemble_zoos[i].blend_mode) - 1] = '\0';
+                        EnsembleModelZoo_SetDisabledHorizons(&ml_ensemble_zoos[i],
+                            cfg.core_disabled_horizons[i]);
                         state.cores[i].ensemble_handle = &ml_ensemble_zoos[i];
                     } else {
                         state.cores[i].ensemble_handle = nullptr;

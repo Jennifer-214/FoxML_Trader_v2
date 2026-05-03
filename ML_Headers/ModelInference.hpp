@@ -560,6 +560,131 @@ inline float Model_Predict_Ensemble(ModelHandle<F> *models,
 }
 
 //======================================================================================================
+// [v5.10.0a.G.7 — WEIGHTED ENSEMBLE PREDICT (Bandit-Exp3 blend)]
+//======================================================================================================
+// Run prediction across N independent boosters; combine via weighted
+// blend: final = Σ weight_i × pred_i / Σ weight_i (NaN-skipped + agreement-
+// gated). Replaces G.4's argmax-confidence selection when operator sets
+// ensemble_blend_mode=weighted (default).
+//
+// Inputs:
+//   models: array of N independent ModelHandles (caller's responsibility
+//           to ensure they share the same scaler — true by G.3 LoadFromCfg
+//           invariant)
+//   count: how many models populated (1..ENSEMBLE_HORIZON_MAX)
+//   weights: per-arm weights from BanditState (already-normalized
+//            probabilities, OR raw weights — function renormalizes)
+//   disabled_mask: bit i set = skip horizon i (operator kill-switch via
+//                  cfg.core_N_disabled_horizons, parsed by
+//                  EnsembleModelZoo_SetDisabledHorizons)
+//   min_agreement_pct: ≥X fraction of non-disabled horizons must predict
+//                       same direction OR return 0.5 (no-edge sentinel,
+//                       MLStrategy treats as no-entry). 0.0 = disabled.
+//
+// Outputs:
+//   *out_dominant_idx: which arm contributed most to signal direction
+//                       (argmax weight × |p − 0.5|); -1 if no entry
+//   Returns: blended prediction, OR 0.5 if agreement check failed.
+//
+// Latency: linear in N (each model predicts independently). G.7 perf
+// optimization #1: features are pre-standardized once before this call;
+// each Model_Predict skips its own scaler.
+template <unsigned F>
+inline float Model_Predict_Ensemble_Weighted(
+    ModelHandle<F>* models,
+    int count,
+    const float* features,
+    int num_features,
+    const double* weights,
+    uint32_t disabled_mask,
+    double min_agreement_pct,
+    int* out_dominant_idx) {
+    if (count <= 0) {
+        if (out_dominant_idx) *out_dominant_idx = -1;
+        return 0.0f;
+    }
+    if (count == 1) {
+        if (disabled_mask & 1u) {
+            if (out_dominant_idx) *out_dominant_idx = -1;
+            return 0.5f;
+        }
+        if (out_dominant_idx) *out_dominant_idx = 0;
+        return Model_Predict(&models[0], features, num_features);
+    }
+
+    // Local buffers sized to match ENSEMBLE_HORIZON_MAX (CoreModelZoo.hpp);
+    // hardcoded 8 here to avoid circular include (this header is included
+    // by CoreModelZoo.hpp).
+    float predictions[8];
+    int   valid[8];
+    if (count > 8) count = 8;  // bound safety
+    int   n_active = 0;
+    int   n_long = 0, n_short = 0;
+    for (int i = 0; i < count; ++i) {
+        if (disabled_mask & (1u << i)) {
+            valid[i] = 0;
+            predictions[i] = 0.5f;
+            continue;
+        }
+        if (!Model_IsLoaded(&models[i])) {
+            valid[i] = 0;
+            predictions[i] = 0.5f;
+            continue;
+        }
+        float p = Model_Predict(&models[i], features, num_features);
+        if (std::isnan(p) || std::isinf(p)) {
+            valid[i] = 0;
+            predictions[i] = 0.5f;
+            continue;
+        }
+        valid[i] = 1;
+        predictions[i] = p;
+        n_active++;
+        if (p > 0.5f) n_long++;
+        else if (p < 0.5f) n_short++;
+    }
+
+    // Agreement filter (G.7 #5b safety check). Skips entry when ensemble
+    // is internally split — high-conviction entries only.
+    if (n_active > 0 && min_agreement_pct > 0.0) {
+        double frac_long  = (double)n_long  / n_active;
+        double frac_short = (double)n_short / n_active;
+        double agreement  = (frac_long > frac_short) ? frac_long : frac_short;
+        if (agreement < min_agreement_pct) {
+            if (out_dominant_idx) *out_dominant_idx = -1;
+            return 0.5f;  // no-edge sentinel; MLStrategy → no entry
+        }
+    }
+
+    // Weighted blend across valid arms.
+    double sum_w = 0.0, sum_wp = 0.0;
+    double best_contrib = 0.0;
+    int    best_idx = -1;
+    for (int i = 0; i < count; ++i) {
+        if (!valid[i]) continue;
+        double w = weights[i];
+        if (w <= 0.0) w = 1e-9;  // avoid zero-weight degenerate
+        sum_w  += w;
+        sum_wp += w * (double)predictions[i];
+        // Track dominant arm: largest weight × |p - 0.5| contribution
+        double contrib = w * std::fabs((double)predictions[i] - 0.5);
+        if (contrib > best_contrib) {
+            best_contrib = contrib;
+            best_idx = i;
+        }
+    }
+    if (sum_w <= 0.0 || n_active == 0) {
+        // All-NaN or all-disabled: no signal. Fall back to first-loaded
+        // model's raw predict for robustness (matches single-model failure
+        // mode); if even that fails caller sees 0.0 / NaN.
+        if (out_dominant_idx) *out_dominant_idx = -1;
+        return 0.5f;
+    }
+    if (out_dominant_idx) *out_dominant_idx = best_idx;
+    return (float)(sum_wp / sum_w);
+}
+
+//======================================================================================================
 // [PREDICT MULTI — multi-class softmax output]
 //======================================================================================================
 // fills `out_buf` with up to max_outputs class probabilities. returns the number

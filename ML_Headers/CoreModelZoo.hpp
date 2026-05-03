@@ -35,6 +35,8 @@
 
 #include "ModelInference.hpp"
 #include "FeatureRegistry.hpp"  // v5.8.6: FEATURE_REGISTRY_HASH() drift catch
+#include "BanditLearning.hpp"   // v5.10.0a.G.7 — per-regime BanditState in EnsembleModelZoo
+#include "../Strategies/StrategyInterface.hpp"  // v5.10.0a.G.7 — NUM_REGIMES
 #include "../Version.hpp"        // v5.8.6: ENGINE_VERSION_STRING for boot log
 #include <stdio.h>
 #include <string.h>
@@ -618,6 +620,23 @@ struct EnsembleModelZoo {
     // at indices 0..2 with horizon_ticks_at_idx[0..2] = {100, 500, 1000}).
     int horizon_ticks_at_idx[ENSEMBLE_HORIZON_MAX];
     int active;  // 0 = use single-zoo (existing); 1 = ensemble path
+    // v5.10.0a.G.7 — per-regime bandit state (NUM_REGIMES from
+    // FOREACH_REGIME X-macro). Each bandit has N arms = ezoo->buy_signal_count.
+    // Cold start: uniform weights; G.8 reward path updates them per outcome.
+    BanditState bandits[NUM_REGIMES];
+    int initialized_bandits;       // 0 = bandits not yet wired (Init phase only)
+    // Per-prediction tracking (G.7 + G.8 reward attribution)
+    int last_predicted_regime_id;  // regime AT predict-time (NOT current; for G.8 attribution)
+    int last_predicted_horizon_idx;// dominant horizon idx (display + G.8 reward)
+    char blend_mode[16];           // "weighted" or "selection" (cached from cfg)
+    // v5.10.0a.G.7 — kill-switch bitmask. Bit i set = horizon i disabled
+    // (skip predict + freeze its bandit weight). Set by parsing cfg's
+    // core_N_disabled_horizons CSV at boot via _SetDisabledHorizons.
+    uint32_t disabled_horizon_mask;
+    // v5.10.0a.G.7 — regime hysteresis dampening. When current_regime
+    // changes, blend OLD regime's weights with NEW for hysteresis cycles.
+    int regime_transition_cycles_remaining;  // 0 = stable
+    int prev_regime_id;            // regime BEFORE the transition
 };
 
 template <unsigned F>
@@ -634,6 +653,95 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     ezoo->exit_predictor_count = 0;
     ezoo->buy_signal_count = 0;
     ezoo->active = 0;
+    // v5.10.0a.G.7 — bandit state zero-init (full bandit init happens in
+    // _InitBandits AFTER LoadFromCfg / AutoDetect populates buy_signal_count
+    // so we know how many arms).
+    memset(ezoo->bandits, 0, sizeof(ezoo->bandits));
+    ezoo->initialized_bandits = 0;
+    ezoo->last_predicted_regime_id = 0;
+    ezoo->last_predicted_horizon_idx = -1;
+    strncpy(ezoo->blend_mode, "weighted", sizeof(ezoo->blend_mode) - 1);
+    ezoo->blend_mode[sizeof(ezoo->blend_mode) - 1] = '\0';
+    ezoo->disabled_horizon_mask = 0;
+    ezoo->regime_transition_cycles_remaining = 0;
+    ezoo->prev_regime_id = 0;
+}
+
+//======================================================================================================
+// [v5.10.0a.G.7 — INIT BANDITS]
+//======================================================================================================
+// Call AFTER LoadFromCfg / AutoDetectFromDir populates ezoo->buy_signal_count.
+// Initializes one BanditState per regime (NUM_REGIMES from FOREACH_REGIME),
+// each with n_arms = buy_signal_count. Uniform initial weights.
+//
+// eta: cfg.ensemble_bandit_eta (Bandit-Exp3 learning rate; 0.1 default)
+// min_warmup: cfg.ensemble_min_warmup_predictions (per regime; 100 default)
+//
+// Sets ezoo->initialized_bandits = 1 to gate G.7 dispatch (won't read bandits
+// before they're initialized).
+template <unsigned F>
+inline void EnsembleModelZoo_InitBandits(EnsembleModelZoo<F>* ezoo,
+                                           double eta, int min_warmup) {
+    if (!ezoo) return;
+    int n_arms = ezoo->buy_signal_count;
+    if (n_arms < 2) {
+        // Single-arm or empty ensemble — no point in bandits. Mark
+        // initialized so dispatch doesn't loop forever, but bandits won't
+        // be used (ezoo->active gates that anyway).
+        ezoo->initialized_bandits = 1;
+        return;
+    }
+    for (int r = 0; r < NUM_REGIMES; ++r) {
+        // Bandit_Init signature: (state, n_arms, gamma, eta_max,
+        //                          blend_ratio, min_samples, ramp_up)
+        // Map cfg.ensemble_bandit_eta → eta_max; min_warmup → min_samples.
+        // gamma + ramp_up + blend_ratio use sensible defaults.
+        Bandit_Init(&ezoo->bandits[r], n_arms,
+                    /*gamma=*/0.05,
+                    /*eta_max=*/(eta > 0.0 ? eta : 0.1),
+                    /*blend_ratio=*/1.0,         // full bandit influence in ensemble
+                    /*min_samples=*/(min_warmup > 0 ? min_warmup : 100),
+                    /*ramp_up=*/(min_warmup > 0 ? min_warmup * 2 : 200));
+        // Set arm names for logging/debug
+        for (int a = 0; a < n_arms; ++a) {
+            char nm[32];
+            snprintf(nm, sizeof(nm), "h%d", ezoo->horizon_ticks_at_idx[a]);
+            Bandit_SetArmName(&ezoo->bandits[r], a, nm);
+        }
+    }
+    ezoo->initialized_bandits = 1;
+}
+
+//======================================================================================================
+// [v5.10.0a.G.7 — KILL-SWITCH PARSER]
+//======================================================================================================
+// Parses CSV string ("100,500") → bitmask of horizon indices that match.
+// Disabled horizons skip predict (saves N×predict cost per disabled);
+// their bandit weights stay frozen at last value (skipped by Bandit_Update).
+template <unsigned F>
+inline void EnsembleModelZoo_SetDisabledHorizons(EnsembleModelZoo<F>* ezoo,
+                                                   const char* csv) {
+    if (!ezoo) return;
+    ezoo->disabled_horizon_mask = 0;
+    if (!csv || csv[0] == '\0') return;
+    const char* p = csv;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p) break;
+        char* end = nullptr;
+        long h = strtol(p, &end, 10);
+        if (end == p) break;
+        // Find which arm this horizon ticks corresponds to
+        for (int a = 0; a < ezoo->buy_signal_count; ++a) {
+            if (ezoo->horizon_ticks_at_idx[a] == (int)h) {
+                ezoo->disabled_horizon_mask |= (1u << a);
+                fprintf(stderr, "[ensemble] horizon %d (arm %d) DISABLED by cfg\n",
+                        (int)h, a);
+                break;
+            }
+        }
+        p = end;
+    }
 }
 
 template <unsigned F>
