@@ -766,6 +766,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         if (cfg.core_strategies[i] == STRATEGY_ML) {
             static CoreModelZoo<F> ml_zoos[MAX_EXECUTION_CORES];
             CoreModelZoo_Init(&ml_zoos[i]);
+            // v5.10.0a.G.5 — per-core ensemble zoo, mirrors single-zoo allocation.
+            // Default empty = ezoo->active=0 = single-zoo path runs unchanged.
+            static EnsembleModelZoo<F> ml_ensemble_zoos[MAX_EXECUTION_CORES];
+            EnsembleModelZoo_Init(&ml_ensemble_zoos[i]);
             int backend = cfg.ml_backend ? cfg.ml_backend : MODEL_BACKEND_XGBOOST;
 
             int loaded = 0;
@@ -819,6 +823,23 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         state.cores[i].model_handle = NULL;
                         // v5.9.0b: surface load failure to operator via TUI/health log
                         state.cores[i].model_load_failed = 1;
+                    }
+                }
+                // v5.10.0a.G.5 — try ensemble auto-detect on the base dir.
+                // No-op when no _horizon_<H> siblings present; ezoo->active=0
+                // → single-zoo path runs unchanged.
+                if (cfg.core_model_dir[i][0]) {
+                    int n_loaded = EnsembleModelZoo_AutoDetectFromDir(
+                        &ml_ensemble_zoos[i],
+                        cfg.core_model_dir[i],
+                        backend);
+                    if (n_loaded > 0 && ml_ensemble_zoos[i].active) {
+                        fprintf(stderr, "[sharded] core %d: ensemble active "
+                                        "(%d horizons; %d total models)\n",
+                                i, ml_ensemble_zoos[i].buy_signal_count, n_loaded);
+                        state.cores[i].ensemble_handle = &ml_ensemble_zoos[i];
+                    } else {
+                        state.cores[i].ensemble_handle = nullptr;
                     }
                 }
             } else {

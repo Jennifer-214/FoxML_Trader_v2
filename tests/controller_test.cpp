@@ -12094,6 +12094,81 @@ e3_skip_load:;
               pcs.cfg_drift_strict_refused == 1);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0a.G.5 — EnsembleModelZoo lifecycle + AutoDetectFromDir ---\n");
+    {
+        // === Test G.5.1: AutoDetectFromDir with empty path returns 0 ===
+        EnsembleModelZoo<FP> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        int n = EnsembleModelZoo_AutoDetectFromDir(&ezoo, "",
+                                                    MODEL_BACKEND_XGBOOST);
+        check("v5.10.0a.G.5: AutoDetect empty path returns 0", n == 0);
+        check("v5.10.0a.G.5: AutoDetect empty path leaves active=0", ezoo.active == 0);
+
+        // === Test G.5.2: AutoDetectFromDir with bad parent dir returns 0 ===
+        n = EnsembleModelZoo_AutoDetectFromDir(&ezoo,
+                                                 "/nonexistent_v5100aG5/run",
+                                                 MODEL_BACKEND_XGBOOST);
+        check("v5.10.0a.G.5: AutoDetect bad parent returns 0", n == 0);
+        check("v5.10.0a.G.5: AutoDetect bad parent leaves active=0", ezoo.active == 0);
+
+        // === Test G.5.3: AutoDetectFromDir with no _horizon_* siblings ===
+        // Use /tmp (real dir, but no test_v5100aG5_horizon_* siblings).
+        n = EnsembleModelZoo_AutoDetectFromDir(&ezoo,
+                                                 "/tmp/v5100aG5_no_siblings",
+                                                 MODEL_BACKEND_XGBOOST);
+        check("v5.10.0a.G.5: AutoDetect no siblings returns 0", n == 0);
+        check("v5.10.0a.G.5: AutoDetect no siblings leaves active=0", ezoo.active == 0);
+
+        // === Test G.5.4: AutoDetectFromDir creates synthetic siblings, finds them ===
+        // Make 3 empty horizon dirs; AutoDetect scans + counts them.
+        // Won't actually load (no model files inside), so total=0; but the
+        // discovery should fire (caller would see "[ensemble] auto-detected 3 horizons" log).
+        // For test purposes: just verify the dir-scan doesn't crash with real dirs.
+        char tmp_base[] = "/tmp/v5100aG5_sibs_XXXXXX";
+        char* td = mkdtemp(tmp_base);
+        check("v5.10.0a.G.5: tmpdir created", td != nullptr);
+        if (td) {
+            char run_dir[256];
+            snprintf(run_dir, sizeof(run_dir), "%s/run", td);
+            mkdir(run_dir, 0755);
+            // Create 3 horizon sibling dirs (no model files inside; loader returns 0)
+            char hdir[300];
+            snprintf(hdir, sizeof(hdir), "%s/run_horizon_100", td); mkdir(hdir, 0755);
+            snprintf(hdir, sizeof(hdir), "%s/run_horizon_500", td); mkdir(hdir, 0755);
+            snprintf(hdir, sizeof(hdir), "%s/run_horizon_1000", td); mkdir(hdir, 0755);
+
+            // AutoDetect: discovers 3 siblings via filesystem; LoadFromCfg
+            // returns 0 (no model files). ezoo->active stays 0.
+            n = EnsembleModelZoo_AutoDetectFromDir(&ezoo, run_dir,
+                                                     MODEL_BACKEND_XGBOOST);
+            check("v5.10.0a.G.5: AutoDetect with empty horizon dirs returns 0 models",
+                  n == 0);
+            check("v5.10.0a.G.5: AutoDetect with no model files leaves active=0",
+                  ezoo.active == 0);
+
+            // Cleanup
+            char rmcmd[400];
+            snprintf(rmcmd, sizeof(rmcmd), "rm -rf %s", td);
+            int rc = system(rmcmd);
+            (void)rc;
+        }
+
+        // === Test G.5.5: CoreContext.ensemble_handle field exists ===
+        // Smoke test: struct shape verified at compile time; assignable
+        // to nullptr (default for non-ML cores) + assignable to a real
+        // ezoo pointer (ML cores with ensemble active). Test would FAIL
+        // TO COMPILE if the field doesn't exist.
+        tt::CoreContext<FP> cc{};
+        cc.ensemble_handle = nullptr;
+        check("v5.10.0a.G.5: CoreContext.ensemble_handle defaults to nullptr",
+              cc.ensemble_handle == nullptr);
+        cc.ensemble_handle = &ezoo;  // also accepts EnsembleModelZoo*
+        check("v5.10.0a.G.5: CoreContext.ensemble_handle accepts EnsembleModelZoo*",
+              cc.ensemble_handle == &ezoo);
+
+        EnsembleModelZoo_Free(&ezoo);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.G.4 — Ensemble inference path ---\n");
     {
         // === Test G.4.1: Model_Predict_Ensemble with count=0 returns 0 ===

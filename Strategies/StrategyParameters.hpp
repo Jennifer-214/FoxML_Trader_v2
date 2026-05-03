@@ -136,6 +136,13 @@ struct MLBuildContext {
     void*               spread_state;       // const SpreadState<F, 1024>*
     double              current_spread;     // BookSnapshot::spread (FPN→double)
     double              current_mid_price;  // BookSnapshot::mid_price (FPN→double)
+    // v5.10.0a.G.5 — multi-horizon ensemble dispatch. nullptr default =
+    // single-model path (CoreModelZoo via model_handle, existing); when
+    // engine boot auto-detects N horizon siblings on disk, populates this
+    // pointer to the per-core EnsembleModelZoo. ML_BuildParameters checks
+    // ensemble_zoo first; if active, dispatches through Model_Predict_Ensemble;
+    // else falls through to single-zoo path bytewise-identical to pre-G.5.
+    void*               ensemble_zoo;        // EnsembleModelZoo<F>*  (nullptr = inactive)
 };
 
 //======================================================================================================
@@ -768,8 +775,25 @@ inline void ML_BuildParameters(
             out->strategy_id = STRATEGY_ML;
             return;
         }
-        // legacy single-binary: complementary interpretation
-        double pred_raw = (double)Model_Predict(&zoo->buy_signal, features, n);
+        // v5.10.0a.G.5 — ensemble dispatch when active. Uses
+        // Model_Predict_Ensemble (G.4 selection logic — argmax-confidence)
+        // until G.7 ships weighted blend variant.
+        // ensemble_zoo->buy_signal[] all share the SAME scaler (per G.3
+        // load-from-cfg invariant), so the standardize step above already
+        // produced the correct features for every horizon (G.7 caching
+        // optimization).
+        double pred_raw = 0.0;
+        EnsembleModelZoo<F>* ezoo = (EnsembleModelZoo<F>*)
+            (mctx ? mctx->ensemble_zoo : nullptr);
+        if (ezoo && ezoo->active && ezoo->buy_signal_count > 0) {
+            int dominant_idx = -1;
+            pred_raw = (double)Model_Predict_Ensemble(
+                ezoo->buy_signal, ezoo->buy_signal_count,
+                features, n, &dominant_idx);
+        } else {
+            // Single-zoo path (existing; bytewise unchanged from pre-G.5)
+            pred_raw = (double)Model_Predict(&zoo->buy_signal, features, n);
+        }
         if (std::isnan(pred_raw) || std::isinf(pred_raw)) {
             fprintf(stderr, "[ML] dispatch: buy_signal prediction NaN/Inf — no signal\n");
         } else {

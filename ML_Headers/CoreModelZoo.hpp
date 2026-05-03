@@ -38,7 +38,10 @@
 #include "../Version.hpp"        // v5.8.6: ENGINE_VERSION_STRING for boot log
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>      // v5.10.0a.G.5 — strtol for AutoDetect horizon parse
 #include <sys/stat.h>
+#include <sys/types.h>   // v5.10.0a.G.5 — dirent for AutoDetect filesystem scan
+#include <dirent.h>      // v5.10.0a.G.5 — opendir/readdir for AutoDetect
 
 // role bitmap — set in zoo->loaded_mask when a model is successfully loaded
 #define CORE_MODEL_BARRIER     (1u << 0)  // 3-class softmax: stable/peak/valley
@@ -734,6 +737,152 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
                 horizon_count, base_run_path);
     }
     return total_loaded;
+}
+
+//======================================================================================================
+// [v5.10.0a.G.5 — AUTO-DETECT ENSEMBLE FROM DISK]
+//======================================================================================================
+// Scans <base_dir>_horizon_* siblings on disk. For each sibling found:
+//   - Verify load via CoreModelZoo_TryLoadRole
+//   - Read stamp body's grid_member_count + grid_member_idx (v5.10.0a.G.2)
+//   - Validate consistency: all loaded siblings must agree on grid_member_count
+//   - Place each model at its grid_member_idx slot in the ensemble
+//
+// Operator workflow:
+//   1. Train Multi-Horizon (G.1) → models/<run>/<run>_horizon_<H>/role.json
+//   2. Cfg: core_N_model_dir=models/<run>  (NOTE: base path WITHOUT _horizon_<H>)
+//   3. Engine boot calls AutoDetectFromDir(ezoo, "models/<run>", ...)
+//   4. Function discovers all _horizon_* siblings + populates ezoo
+//
+// Returns total models loaded across all roles + horizons. Sets
+// ezoo->active=1 if any role got at least one horizon loaded; logs
+// the discovered horizon set.
+//
+// Backward-compat:
+//   - empty base_dir → no-op, returns 0
+//   - no siblings on disk → returns 0, ezoo->active stays 0; engine
+//     falls back to single-zoo path
+//   - inconsistent grid_member_count across siblings → log error +
+//     skip inconsistent ones (load only those that agree on count)
+//   - missing stamps → load anyway with warn (legacy multi-train
+//     pre-v5.10.0a.G.2 might not have grid_member_count stamped)
+//
+// v5.10.0a.next reader: if all loaded stamps have per_regime_val_acc
+// fields (added by future trainer-side ship), use as bandit init
+// priors. Currently no-op since the stamp fields don't exist yet.
+template <unsigned F>
+inline int EnsembleModelZoo_AutoDetectFromDir(
+    EnsembleModelZoo<F> *ezoo,
+    const char *base_dir,             // e.g. "models/test_case3" (no _horizon_<H> suffix)
+    int backend,
+    const char* held_out_stamp_secret = nullptr,
+    double gap_threshold = 0.05,
+    int held_out_gate_strict = 0,
+    int acknowledge_cross_binary_drift = 0) {
+    if (!ezoo || !base_dir || base_dir[0] == '\0') return 0;
+
+    // Step 1: scan filesystem for <base_dir>_horizon_<N> siblings.
+    // We need parent dir + base name to enumerate.
+    char parent_path[400];
+    char base_name[200];
+    {
+        size_t dlen = strnlen(base_dir, 400);
+        if (dlen == 0 || dlen >= 400) return 0;
+        // Strip trailing slash if any
+        char b[400];
+        memcpy(b, base_dir, dlen);
+        b[dlen] = '\0';
+        if (b[dlen - 1] == '/') { b[dlen - 1] = '\0'; dlen--; }
+        // Find last slash
+        const char *last_slash = strrchr(b, '/');
+        if (last_slash) {
+            size_t plen = (size_t)(last_slash - b);
+            if (plen >= sizeof(parent_path)) plen = sizeof(parent_path) - 1;
+            memcpy(parent_path, b, plen);
+            parent_path[plen] = '\0';
+            size_t blen = strnlen(last_slash + 1, sizeof(base_name) - 1);
+            memcpy(base_name, last_slash + 1, blen);
+            base_name[blen] = '\0';
+        } else {
+            // No slash: cwd-relative
+            parent_path[0] = '.';
+            parent_path[1] = '\0';
+            size_t blen = strnlen(b, sizeof(base_name) - 1);
+            memcpy(base_name, b, blen);
+            base_name[blen] = '\0';
+        }
+    }
+
+    DIR *dir = opendir(parent_path);
+    if (!dir) {
+        // Parent dir not readable (operator's base_dir doesn't exist) — silent
+        // fail. Caller falls back to single-zoo path.
+        return 0;
+    }
+
+    // Pattern to match: <base_name>_horizon_<digits>
+    char prefix[256];
+    int prefix_len = snprintf(prefix, sizeof(prefix), "%s_horizon_", base_name);
+
+    // Collect candidate horizon ticks (sorted ascending so dispatch is
+    // deterministic regardless of filesystem readdir order).
+    int discovered_horizons[ENSEMBLE_HORIZON_MAX] = {0};
+    int n_discovered = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (n_discovered >= ENSEMBLE_HORIZON_MAX) break;
+        // Match prefix
+        if (strncmp(entry->d_name, prefix, prefix_len) != 0) continue;
+        // Parse trailing number
+        char *suffix = entry->d_name + prefix_len;
+        char *end = nullptr;
+        long h = strtol(suffix, &end, 10);
+        if (end == suffix || *end != '\0') continue;  // non-numeric suffix
+        if (h <= 0 || h > 1000000) continue;          // sanity bounds
+        discovered_horizons[n_discovered++] = (int)h;
+    }
+    closedir(dir);
+
+    if (n_discovered == 0) {
+        // No siblings found; ezoo stays inactive
+        return 0;
+    }
+
+    // Sort ascending (insertion sort; n is tiny)
+    for (int i = 1; i < n_discovered; ++i) {
+        int v = discovered_horizons[i];
+        int j = i - 1;
+        while (j >= 0 && discovered_horizons[j] > v) {
+            discovered_horizons[j + 1] = discovered_horizons[j];
+            j--;
+        }
+        discovered_horizons[j + 1] = v;
+    }
+
+    // Step 2: load each horizon via existing LoadFromCfg machinery.
+    // This is identical to the operator-cfg-driven path; just wires from
+    // disk-discovery instead of cfg.horizon_list.
+    int total = EnsembleModelZoo_LoadFromCfg(ezoo, base_dir,
+                                               discovered_horizons, n_discovered,
+                                               backend,
+                                               held_out_stamp_secret,
+                                               gap_threshold,
+                                               held_out_gate_strict,
+                                               acknowledge_cross_binary_drift);
+
+    if (total > 0 && ezoo->active) {
+        // Build a comma-separated list for the log
+        char hlog[256];
+        int off = 0;
+        for (int h = 0; h < n_discovered && off < (int)sizeof(hlog) - 8; ++h) {
+            off += snprintf(hlog + off, sizeof(hlog) - off,
+                            "%s%d", h == 0 ? "" : ",", discovered_horizons[h]);
+        }
+        fprintf(stderr, "[ensemble] auto-detected %d horizons under '%s': {%s}\n",
+                n_discovered, base_dir, hlog);
+    }
+
+    return total;
 }
 
 #endif // CORE_MODEL_ZOO_HPP

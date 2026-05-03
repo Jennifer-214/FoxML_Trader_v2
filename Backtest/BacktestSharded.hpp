@@ -213,6 +213,11 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // run to avoid stale state when the user runs multiple backtests with
     // different ML configs in one suite session.
     static CoreModelZoo<BACKTEST_FP> ml_zoos[MAX_EXECUTION_CORES];
+    // v5.10.0a.G.5 — per-core ensemble zoo (multi-horizon). Allocated alongside
+    // single-zoo; populated by EnsembleModelZoo_AutoDetectFromDir if base_dir
+    // has _horizon_<H> siblings on disk. Default empty = ezoo->active=0 =
+    // single-zoo path runs unchanged.
+    static EnsembleModelZoo<BACKTEST_FP> ml_ensemble_zoos[MAX_EXECUTION_CORES];
 
     for (int i = 0; i < num_cores; ++i) {
         SPSCRing_Init(&tick_rings[i]);
@@ -242,6 +247,9 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             // without Free leaks the prior allocation.
             CoreModelZoo_Free(&ml_zoos[i]);
             CoreModelZoo_Init(&ml_zoos[i]);
+            // v5.10.0a.G.5 — same pattern for ensemble zoo
+            EnsembleModelZoo_Free(&ml_ensemble_zoos[i]);
+            EnsembleModelZoo_Init(&ml_ensemble_zoos[i]);
             int backend = cfg.ml_backend ? cfg.ml_backend : MODEL_BACKEND_XGBOOST;
             int loaded = 0;
             if (cfg.core_model_dir[i][0]) {
@@ -278,6 +286,27 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                                          "strict verify failure\n", i);
                         CoreModelZoo_Free(&ml_zoos[i]);
                         state.cores[i].model_handle = NULL;
+                    }
+                }
+                // v5.10.0a.G.5 — try ensemble auto-detect on the base dir
+                // (cfg.core_model_dir without _horizon_<H> suffix).
+                // No-op when no _horizon_* siblings present; ezoo->active=0
+                // so engine continues using single-zoo path.
+                if (cfg.core_model_dir[i][0]) {
+                    int n_loaded = EnsembleModelZoo_AutoDetectFromDir(
+                        &ml_ensemble_zoos[i],
+                        cfg.core_model_dir[i],
+                        backend);
+                    if (n_loaded > 0 && ml_ensemble_zoos[i].active) {
+                        fprintf(stderr, "[backtest sharded] core %d: ensemble active "
+                                        "(%d horizons; %d total models)\n",
+                                i, ml_ensemble_zoos[i].buy_signal_count, n_loaded);
+                        // Wire ensemble pointer into the per-core handle slot;
+                        // dispatcher's ml_ctx.ensemble_zoo reads from this.
+                        state.cores[i].ensemble_handle = &ml_ensemble_zoos[i];
+                    } else {
+                        // ensure stale handle from prior run cleared
+                        state.cores[i].ensemble_handle = nullptr;
                     }
                 }
             }

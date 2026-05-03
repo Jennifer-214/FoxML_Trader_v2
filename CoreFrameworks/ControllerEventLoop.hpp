@@ -158,7 +158,8 @@ struct CoreContext {
     uint8_t  strategy_id;          // STRATEGY_* constant; STRATEGY_NONE means "do not trade"
     uint8_t  dirty;                // 1 = pending_params should be pushed to the core
     uint8_t  _pad[6];
-    void*    model_handle;         // ModelHandle<F>* for STRATEGY_ML cores (nullptr for others)
+    void*    model_handle;         // CoreModelZoo<F>* for STRATEGY_ML cores (nullptr for others)
+    void*    ensemble_handle;      // v5.10.0a.G.5 — EnsembleModelZoo<F>* when multi-horizon active; nullptr = single-zoo path (default)
     uint64_t entries_processed;    // bumped on entry event
     uint64_t exits_processed;      // bumped on exit event
     // Phase 6prep (sharded c12-c14): per-core ML confidence loop. The scorer
@@ -507,6 +508,7 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].strategy_id = STRATEGY_NONE;  // pitfall P6.5: explicit init
         state->cores[i].dirty = 0;
         state->cores[i].model_handle = nullptr;
+        state->cores[i].ensemble_handle = nullptr;  // v5.10.0a.G.5 default
         state->cores[i].entries_processed = 0;
         state->cores[i].exits_processed = 0;
         // Phase 6prep sharded: ConfidenceScorer with safe defaults. EngineSharded
@@ -1892,6 +1894,7 @@ inline void EventLoop_RebuildOneCore(
         void* dispatch_ctx = nullptr;
         if (effective_strategy_id == STRATEGY_ML) {
             ml_ctx.model_handle   = state->cores[slot].model_handle;
+            ml_ctx.ensemble_zoo   = state->cores[slot].ensemble_handle;  // v5.10.0a.G.5 — nullptr-safe; single-zoo when null
             ml_ctx.confidence     = &state->cores[slot].confidence;
             ml_ctx.out_prediction = &state->cores[slot].staged_prediction;
             ml_ctx.out_confidence = &state->cores[slot].last_confidence;
