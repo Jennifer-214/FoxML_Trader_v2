@@ -1121,6 +1121,19 @@ struct TUISnapshot {
         // Only populated when engine_arch=per_core_slow.
         double   sp_breakdown_p50_ns[5];
         double   sp_breakdown_p99_ns[5];
+        // v5.10.0a.G.10 — ensemble (multi-horizon) visualization.
+        // Populated by TUI snapshot when ensemble_handle is set; default
+        // ensemble_active=0 keeps the GUI heatmap hidden for single-zoo
+        // deployments. NUM_REGIMES rows × ENSEMBLE_HORIZON_MAX cols.
+        uint8_t  ensemble_active;
+        uint8_t  ensemble_n_horizons;                  // 0 = inactive
+        int      ensemble_horizon_ticks[8];            // ENSEMBLE_HORIZON_MAX
+        int      ensemble_last_predicted_regime;
+        int      ensemble_last_predicted_horizon_idx;
+        double   ensemble_weights[5][8];               // [regime][horizon]; 5 = NUM_REGIMES
+        int      ensemble_n_updates_per_regime[5];     // total_steps per bandit
+        char     ensemble_blend_mode[16];              // "weighted" or "selection"
+        uint32_t ensemble_disabled_horizon_mask;       // bit i set = arm i disabled
     };
     PerCoreSnap per_core[16];      // up to MAX_EXECUTION_CORES
 };

@@ -26,6 +26,7 @@
 #include "imgui.h"
 #include "FoxmlTheme.hpp"
 #include "../DataStream/EngineTUI.hpp"
+#include "../Strategies/StrategyInterface.hpp"  // v5.10.0a.G.10 — REGIME_INFO
 
 namespace tt {
 
@@ -200,6 +201,103 @@ inline void MLStatus_Render(const TUISnapshot* snap) {
                     "non-zero values mean upstream state corruption — check\n"
                     "depth/orderbook WS, rolling stats, or recent retrain.");
                 ImGui::Unindent(20);
+            }
+        }
+
+        // v5.10.0a.G.10 — Ensemble (multi-horizon) section.
+        // Renders only when at least one core has ensemble active.
+        // Heatmap: regimes (rows) × horizons (cols), values are bandit
+        // probabilities (post-gamma + uniform mixing). Green = dominant,
+        // yellow = mid, dim = low. "Last:" callout shows what the most
+        // recent prediction picked.
+        bool any_ensemble = false;
+        for (int i = 0; i < snap->per_core_count && i < 16; ++i) {
+            if (snap->per_core[i].ensemble_active) {
+                any_ensemble = true;
+                break;
+            }
+        }
+        if (any_ensemble) {
+            ImGui::Separator();
+            if (ImGui::CollapsingHeader("Ensemble (multi-horizon)",
+                                          ImGuiTreeNodeFlags_DefaultOpen)) {
+                for (int i = 0; i < snap->per_core_count && i < 16; ++i) {
+                    const auto& cs = snap->per_core[i];
+                    if (!cs.ensemble_active) continue;
+
+                    ImGui::TextColored(FoxmlColors::sand,
+                        "core %d: %d horizons (mode: %s)",
+                        i, (int)cs.ensemble_n_horizons, cs.ensemble_blend_mode);
+                    // "Last predicted" callout — useful when bandit weights
+                    // look noisy: shows what the dispatcher actually picked.
+                    if (cs.ensemble_last_predicted_horizon_idx >= 0 &&
+                        cs.ensemble_last_predicted_horizon_idx < (int)cs.ensemble_n_horizons) {
+                        int reg = cs.ensemble_last_predicted_regime;
+                        const char* reg_name = (reg >= 0 && reg < NUM_REGIMES)
+                            ? REGIME_INFO[reg].short_name : "?";
+                        int h_ticks = cs.ensemble_horizon_ticks[
+                            cs.ensemble_last_predicted_horizon_idx];
+                        ImGui::SameLine(0, 14);
+                        ImGui::TextColored(FoxmlColors::comment,
+                            "(last: regime=%s, horizon=h%d)", reg_name, h_ticks);
+                    }
+
+                    char tbl_id[32];
+                    snprintf(tbl_id, sizeof(tbl_id), "ensemble_heatmap_c%d", i);
+                    int n_h = (int)cs.ensemble_n_horizons;
+                    if (n_h > 8) n_h = 8;
+                    if (ImGui::BeginTable(tbl_id, n_h + 1,
+                                            ImGuiTableFlags_Borders |
+                                            ImGuiTableFlags_RowBg |
+                                            ImGuiTableFlags_SizingFixedFit)) {
+                        ImGui::TableSetupColumn("regime",
+                                                 ImGuiTableColumnFlags_WidthFixed, 110.0f);
+                        for (int h = 0; h < n_h; ++h) {
+                            char hdr[24];
+                            int disabled = (cs.ensemble_disabled_horizon_mask & (1u << h)) ? 1 : 0;
+                            snprintf(hdr, sizeof(hdr), "%sh%d%s",
+                                     disabled ? "[" : "",
+                                     cs.ensemble_horizon_ticks[h],
+                                     disabled ? "]" : "");
+                            ImGui::TableSetupColumn(hdr,
+                                ImGuiTableColumnFlags_WidthFixed, 70.0f);
+                        }
+                        ImGui::TableHeadersRow();
+                        for (int r = 0; r < NUM_REGIMES; ++r) {
+                            ImGui::TableNextRow();
+                            ImGui::TableSetColumnIndex(0);
+                            ImGui::TextColored(FoxmlColors::sand,
+                                "%s (%d upd)",
+                                REGIME_INFO[r].short_name,
+                                cs.ensemble_n_updates_per_regime[r]);
+                            for (int h = 0; h < n_h; ++h) {
+                                ImGui::TableSetColumnIndex(h + 1);
+                                double w = cs.ensemble_weights[r][h];
+                                int disabled = (cs.ensemble_disabled_horizon_mask & (1u << h)) ? 1 : 0;
+                                if (disabled) {
+                                    ImGui::TextColored(FoxmlColors::comment, "—");
+                                } else {
+                                    // Color by magnitude: green=>0.4, yellow>0.2, dim otherwise
+                                    ImVec4 col = (w > 0.4) ? FoxmlColors::green
+                                               : (w > 0.2) ? FoxmlColors::sand
+                                                            : FoxmlColors::comment;
+                                    ImGui::TextColored(col, "%.3f", w);
+                                }
+                            }
+                        }
+                        ImGui::EndTable();
+                    }
+                    ImGui::SetItemTooltip(
+                        "Per-regime bandit probabilities. Each row is one\n"
+                        "regime; each column is one horizon (training window\n"
+                        "length, in ticks). Probabilities sum to 1.0 across\n"
+                        "horizons within a regime.\n\n"
+                        "Brackets [h100] = disabled by cfg (operator override).\n"
+                        "Disabled arms freeze at last weight + skip predict.\n\n"
+                        "Last: shows which regime + horizon dominated the\n"
+                        "most recent prediction (post-blend or post-selection).");
+                    ImGui::Spacing();
+                }
             }
         }
     }
