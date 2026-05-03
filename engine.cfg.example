@@ -370,6 +370,54 @@ wf_split_max_gb=8                   # advisory cap on WF split per-fold RAM
 held_out_max_gb=4                   # advisory cap on held-out split RAM
 
 #==============================================================================
+# MULTI-HORIZON ENSEMBLE (v5.10.0a.G.5+)
+#==============================================================================
+# Operator workflow: Train Multi-Horizon (foxml_suite) → N model files saved
+# to per-horizon dirs under models/<class>/<run>_horizon_<H>/. Set
+# core_N_model_dir to the BASE path (without _horizon_<H> suffix); engine
+# auto-detects all horizon siblings on disk + enables ensemble inference.
+#
+# Default empty horizon_list = single-model deployment (zero behavior change
+# from pre-v5.10.0a; ensemble_zoo->active stays 0).
+#
+# When ensemble active:
+#   - blend_mode=weighted (default): G.7 Bandit-Exp3 per-regime weighted blend
+#     over N horizons. Per-tick: classify regime → use that regime's bandit
+#     weights → weighted average across horizons. Bandit learns from outcomes
+#     (slow-path lookback + trade-close rewards).
+#   - blend_mode=selection: G.4 argmax-confidence — pick the single horizon
+#     with highest |p−0.5| each tick (no learning).
+
+# Bandit-Exp3 learning rate (0.01 .. 1.0); higher = faster adaptation, more
+# variance in weights. Default 0.1 conservative; bump to 0.2-0.3 if operator
+# observes weights converging too slowly.
+ensemble_bandit_eta=0.1
+
+# Per-regime predictions before bandit weights are trusted (uniform during
+# warmup). Lower = trust faster + noisier weights; higher = slower convergence.
+ensemble_min_warmup_predictions=100
+
+# Safety: ≥X fraction of non-disabled horizons must predict same direction
+# OR skip entry. Without this, weighted blend during regime transitions can
+# pass ml_buy_threshold even with split horizons.
+# 0.0 = disabled (any blended signal passes; pre-G.7 behavior)
+# 0.6 (default) = require 60% agreement
+# 1.0 = unanimous required (very conservative)
+ensemble_min_agreement_pct=0.6
+
+# Global blend mode (per-core override via core_N_ensemble_blend_mode)
+ensemble_blend_mode=weighted
+
+# Per-core overrides (omit to inherit global / auto-detect):
+# core_0_horizon_list=100,500,1000
+# core_0_ensemble_blend_mode=weighted
+# core_0_disabled_horizons=100             # CSV; freezes these horizons'
+                                           # weights at last value, skips
+                                           # their predict + reward updates.
+                                           # Use when operator KNOWS a horizon
+                                           # is bad before drift watchdog catches it.
+
+#==============================================================================
 # ML INFERENCE
 #==============================================================================
 # XGBoost or LightGBM model for buy signals. train in foxml_suite, load here.

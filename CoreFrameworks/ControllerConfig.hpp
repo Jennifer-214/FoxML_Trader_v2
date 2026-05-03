@@ -624,6 +624,19 @@ template <unsigned F> struct ControllerConfig {
   // supersedes legacy single-model). Config syntax:
   // core_0_model_dir=models/aggressive/
   char core_model_dir[16][256];
+  // v5.10.0a.G.6 — per-core multi-horizon ensemble cfg (string-typed, can't
+  // fit X-macro pattern). Default empty = inherit from global cfg.horizon_list /
+  // cfg.ensemble_blend_mode. Auto-detect (G.5) takes priority over both;
+  // these are overrides for operators who want explicit per-core control
+  // (e.g., core 0 deploys 5-horizon ensemble while core 1 stays single-model).
+  //
+  //   core_0_horizon_list=100,500,1000        # CSV; per-core horizon set
+  //   core_0_ensemble_blend_mode=weighted     # selection | weighted (default)
+  //   core_0_disabled_horizons=100            # CSV; kill-switch per horizon
+  //                                           # (skips predict; bandit weight frozen)
+  char core_horizon_list[16][128];
+  char core_ensemble_blend_mode[16][16];
+  char core_disabled_horizons[16][128];
   // Per-core full-tunable overrides (v4.0). One slot per execution core
   // (16 max). Each PerCoreOverrides field shadows a same-named field on
   // ControllerConfig — non-zero overrides global; zero inherits.
@@ -697,6 +710,26 @@ template <unsigned F> struct ControllerConfig {
   static constexpr int HORIZON_LIST_MAX = 8;
   int      horizon_list[HORIZON_LIST_MAX];  // 0 = unused slot
   int      horizon_count;                    // number of populated slots
+
+  // v5.10.0a.G.6 — global ensemble cfg (per-core overrides via
+  // core_N_ensemble_blend_mode / core_N_horizon_list / core_N_disabled_horizons).
+  // Used when ensemble auto-detect (G.5) finds horizon siblings on disk
+  // OR operator explicitly populates horizon_list.
+  //
+  //   ensemble_blend_mode    "weighted" (default) | "selection"
+  //                          weighted = G.7 Bandit-Exp3 per-regime weighted blend
+  //                          selection = G.4 argmax-confidence (single horizon per tick)
+  //   ensemble_bandit_eta    Bandit learning rate (0.01 .. 1.0); higher = faster
+  //                          adaptation but more variance. Default 0.1 conservative.
+  //   ensemble_min_warmup_predictions  predictions per regime before weights trusted
+  //                                    (uniform during warmup). Default 100.
+  //   ensemble_min_agreement_pct       safety: ≥X fraction of non-disabled horizons
+  //                                    must predict same direction OR skip entry.
+  //                                    Default 0.6 (60% agreement). Set 0 to disable.
+  char     ensemble_blend_mode[16];
+  double   ensemble_bandit_eta;
+  int      ensemble_min_warmup_predictions;
+  double   ensemble_min_agreement_pct;
 };
 
 //======================================================================================================
@@ -980,6 +1013,22 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   for (int i = 0; i < ControllerConfig<F>::HORIZON_LIST_MAX; ++i)
       cfg.horizon_list[i] = 0;
   cfg.horizon_count = 0;
+  // v5.10.0a.G.6 — ensemble cfg defaults. blend_mode "weighted" engages
+  // G.7 Bandit-Exp3 path when ensemble active; "selection" stays on G.4
+  // argmax-confidence. Other defaults are conservative (low eta, modest
+  // warmup, 60% agreement gate).
+  strncpy(cfg.ensemble_blend_mode, "weighted",
+          sizeof(cfg.ensemble_blend_mode) - 1);
+  cfg.ensemble_blend_mode[sizeof(cfg.ensemble_blend_mode) - 1] = '\0';
+  cfg.ensemble_bandit_eta = 0.1;
+  cfg.ensemble_min_warmup_predictions = 100;
+  cfg.ensemble_min_agreement_pct = 0.6;
+  // v5.10.0a.G.6 — per-core ensemble cfg defaults (empty = inherit global)
+  for (int i = 0; i < 16; ++i) {
+      cfg.core_horizon_list[i][0] = '\0';
+      cfg.core_ensemble_blend_mode[i][0] = '\0';
+      cfg.core_disabled_horizons[i][0] = '\0';
+  }
   cfg.health_log_level            = 0;                            // 0=info, 1=debug, 2=trace
   cfg.reconcile_interval_sec      = 0;                            // 0 = boot-only
   cfg.reconcile_dry_run           = 1;                            // safer default; flip to 0 deliberately
@@ -1371,6 +1420,37 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(feature_collect_max_gb)
     CFG_PARSE_INT(wf_split_max_gb)
     CFG_PARSE_INT(held_out_max_gb)
+    // v5.10.0a.G.6 — global ensemble cfg parsers (string + numeric).
+    if (strcmp(key, "ensemble_blend_mode") == 0) {
+        // Validate against known modes; reject unknown with WARN.
+        if (strcmp(val, "weighted") == 0 || strcmp(val, "selection") == 0) {
+            strncpy(cfg.ensemble_blend_mode, val,
+                    sizeof(cfg.ensemble_blend_mode) - 1);
+            cfg.ensemble_blend_mode[sizeof(cfg.ensemble_blend_mode) - 1] = '\0';
+        } else {
+            fprintf(stderr, "[cfg] ensemble_blend_mode='%s' unknown; "
+                    "valid: weighted|selection. Keeping default '%s'.\n",
+                    val, cfg.ensemble_blend_mode);
+        }
+        continue;
+    }
+    if (strcmp(key, "ensemble_bandit_eta") == 0) {
+        double v = atof(val);
+        // Clamp to safe range; out-of-range silently produces uninformative
+        // bandits (eta=0 = no learning; eta>1 = unstable).
+        if (v < 0.01) v = 0.01;
+        if (v > 1.0)  v = 1.0;
+        cfg.ensemble_bandit_eta = v;
+        continue;
+    }
+    CFG_PARSE_INT(ensemble_min_warmup_predictions)
+    if (strcmp(key, "ensemble_min_agreement_pct") == 0) {
+        double v = atof(val);
+        if (v < 0.0) v = 0.0;
+        if (v > 1.0) v = 1.0;
+        cfg.ensemble_min_agreement_pct = v;
+        continue;
+    }
     // v5.10.0a — horizon_list CSV parser. Comma-separated ints, max
     // HORIZON_LIST_MAX entries. Caller can't use CFG_PARSE_INT (single
     // int) or CFG_PARSE_FPN. Custom branch.
@@ -1572,6 +1652,36 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 #define _PARSE_OV_INT(name) if (strcmp(suffix, #name) == 0) { ov.name = (uint32_t)atoi(val); continue; }
         PER_CORE_OVERRIDE_INT_FIELDS(_PARSE_OV_INT)
 #undef _PARSE_OV_INT
+        // v5.10.0a.G.6 — string-typed per-core ensemble fields. X-macro
+        // doesn't support string types; explicit branches here. All three
+        // default empty (inherit global).
+        if (strcmp(suffix, "horizon_list") == 0) {
+            strncpy(cfg.core_horizon_list[core_idx], val,
+                    sizeof(cfg.core_horizon_list[core_idx]) - 1);
+            cfg.core_horizon_list[core_idx][
+                sizeof(cfg.core_horizon_list[core_idx]) - 1] = '\0';
+            continue;
+        }
+        if (strcmp(suffix, "ensemble_blend_mode") == 0) {
+            if (strcmp(val, "weighted") == 0 || strcmp(val, "selection") == 0) {
+                strncpy(cfg.core_ensemble_blend_mode[core_idx], val,
+                        sizeof(cfg.core_ensemble_blend_mode[core_idx]) - 1);
+                cfg.core_ensemble_blend_mode[core_idx][
+                    sizeof(cfg.core_ensemble_blend_mode[core_idx]) - 1] = '\0';
+            } else {
+                fprintf(stderr, "[cfg] core_%d_ensemble_blend_mode='%s' unknown; "
+                        "valid: weighted|selection. Falling back to global.\n",
+                        core_idx, val);
+            }
+            continue;
+        }
+        if (strcmp(suffix, "disabled_horizons") == 0) {
+            strncpy(cfg.core_disabled_horizons[core_idx], val,
+                    sizeof(cfg.core_disabled_horizons[core_idx]) - 1);
+            cfg.core_disabled_horizons[core_idx][
+                sizeof(cfg.core_disabled_horizons[core_idx]) - 1] = '\0';
+            continue;
+        }
       }
     }
     // Per-strategy TP/SL overrides (percentage, parsed with /100)

@@ -12094,6 +12094,99 @@ e3_skip_load:;
               pcs.cfg_drift_strict_refused == 1);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0a.G.6 — Per-core ensemble cfg fields ---\n");
+    {
+        // === Test G.6.1: ensemble cfg defaults ===
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        check("v5.10.0a.G.6: ensemble_blend_mode default 'weighted'",
+              strcmp(cfg.ensemble_blend_mode, "weighted") == 0);
+        check("v5.10.0a.G.6: ensemble_bandit_eta default 0.1",
+              fabs(cfg.ensemble_bandit_eta - 0.1) < 1e-6);
+        check("v5.10.0a.G.6: ensemble_min_warmup_predictions default 100",
+              cfg.ensemble_min_warmup_predictions == 100);
+        check("v5.10.0a.G.6: ensemble_min_agreement_pct default 0.6",
+              fabs(cfg.ensemble_min_agreement_pct - 0.6) < 1e-6);
+
+        // === Test G.6.2: per-core fields default empty (inherit global) ===
+        check("v5.10.0a.G.6: core_0_horizon_list defaults empty",
+              cfg.core_horizon_list[0][0] == '\0');
+        check("v5.10.0a.G.6: core_0_ensemble_blend_mode defaults empty",
+              cfg.core_ensemble_blend_mode[0][0] == '\0');
+        check("v5.10.0a.G.6: core_0_disabled_horizons defaults empty",
+              cfg.core_disabled_horizons[0][0] == '\0');
+
+        // === Test G.6.3: parser reads global ensemble fields ===
+        char path[] = "/tmp/v5100aG6_global_XXXXXX";
+        int fd = mkstemp(path);
+        check("v5.10.0a.G.6: tmpfile created (global)", fd >= 0);
+        if (fd >= 0) {
+            dprintf(fd,
+                    "ensemble_blend_mode=selection\n"
+                    "ensemble_bandit_eta=0.25\n"
+                    "ensemble_min_warmup_predictions=50\n"
+                    "ensemble_min_agreement_pct=0.75\n");
+            close(fd);
+            ControllerConfig<FP> parsed = ControllerConfig_Load<FP>(path);
+            check("v5.10.0a.G.6: parses ensemble_blend_mode=selection",
+                  strcmp(parsed.ensemble_blend_mode, "selection") == 0);
+            check("v5.10.0a.G.6: parses ensemble_bandit_eta=0.25",
+                  fabs(parsed.ensemble_bandit_eta - 0.25) < 1e-6);
+            check("v5.10.0a.G.6: parses ensemble_min_warmup_predictions=50",
+                  parsed.ensemble_min_warmup_predictions == 50);
+            check("v5.10.0a.G.6: parses ensemble_min_agreement_pct=0.75",
+                  fabs(parsed.ensemble_min_agreement_pct - 0.75) < 1e-6);
+            unlink(path);
+        }
+
+        // === Test G.6.4: parser rejects unknown blend_mode (keeps default) ===
+        char path2[] = "/tmp/v5100aG6_bad_mode_XXXXXX";
+        int fd2 = mkstemp(path2);
+        if (fd2 >= 0) {
+            dprintf(fd2, "ensemble_blend_mode=garbage\n");
+            close(fd2);
+            ControllerConfig<FP> parsed = ControllerConfig_Load<FP>(path2);
+            check("v5.10.0a.G.6: rejects unknown blend_mode, keeps 'weighted' default",
+                  strcmp(parsed.ensemble_blend_mode, "weighted") == 0);
+            unlink(path2);
+        }
+
+        // === Test G.6.5: bandit_eta clamps to safe range ===
+        char path3[] = "/tmp/v5100aG6_eta_clamp_XXXXXX";
+        int fd3 = mkstemp(path3);
+        if (fd3 >= 0) {
+            dprintf(fd3, "ensemble_bandit_eta=5.0\n");  // out of [0.01, 1.0]
+            close(fd3);
+            ControllerConfig<FP> parsed = ControllerConfig_Load<FP>(path3);
+            check("v5.10.0a.G.6: bandit_eta>1.0 clamps to 1.0",
+                  fabs(parsed.ensemble_bandit_eta - 1.0) < 1e-6);
+            unlink(path3);
+        }
+
+        // === Test G.6.6: parser reads per-core string fields ===
+        char path4[] = "/tmp/v5100aG6_per_core_XXXXXX";
+        int fd4 = mkstemp(path4);
+        if (fd4 >= 0) {
+            dprintf(fd4,
+                    "core_0_horizon_list=100,500,1000\n"
+                    "core_0_ensemble_blend_mode=weighted\n"
+                    "core_0_disabled_horizons=100\n"
+                    "core_2_ensemble_blend_mode=selection\n");
+            close(fd4);
+            ControllerConfig<FP> parsed = ControllerConfig_Load<FP>(path4);
+            check("v5.10.0a.G.6: parses core_0_horizon_list",
+                  strcmp(parsed.core_horizon_list[0], "100,500,1000") == 0);
+            check("v5.10.0a.G.6: parses core_0_ensemble_blend_mode=weighted",
+                  strcmp(parsed.core_ensemble_blend_mode[0], "weighted") == 0);
+            check("v5.10.0a.G.6: parses core_0_disabled_horizons=100",
+                  strcmp(parsed.core_disabled_horizons[0], "100") == 0);
+            check("v5.10.0a.G.6: per-core fields independent (core_2 overrides)",
+                  strcmp(parsed.core_ensemble_blend_mode[2], "selection") == 0);
+            check("v5.10.0a.G.6: per-core unspecified core stays empty",
+                  parsed.core_horizon_list[3][0] == '\0');
+            unlink(path4);
+        }
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.G.5 — EnsembleModelZoo lifecycle + AutoDetectFromDir ---\n");
     {
         // === Test G.5.1: AutoDetectFromDir with empty path returns 0 ===
