@@ -114,6 +114,19 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     fprintf(stderr, "[backtest sharded] mode=sharded cores=%u default_strategy=%d\n",
             (unsigned)cfg.num_execution_cores, cfg.default_strategy);
 
+    // v5.10.0 Item C-stub — csv_load_workers cfg field is wired in v5.10.0D
+    // but not yet consumed. Pipeline parallelism (load file f+1 while
+    // engine processes file f) deferred to v5.10.0a after we have
+    // phase-timer (Item A) data showing parse_ns is significant relative
+    // to fan_out_hot_ns. If parse << processing, parallel ingest is 0%
+    // speedup and not worth the thread-coordination complexity.
+    if (cfg.csv_load_workers > 1) {
+        fprintf(stderr, "[backtest sharded] NOTE: csv_load_workers=%d set but "
+                "parallel CSV ingest is reserved for v5.10.0a (this ship "
+                "loads serial). Use Item A phase timer output to decide if "
+                "parallel ingest is worth wiring.\n", cfg.csv_load_workers);
+    }
+
     // Partial exits P.1 — validate cfg before allocating cores. When
     // partial_exit_enabled=1, refuses to run if num_execution_cores*2
     // exceeds MAX_PORTFOLIO_POSITIONS. Mirrors the EngineSharded_Run
