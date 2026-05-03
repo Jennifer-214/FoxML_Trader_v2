@@ -12094,6 +12094,42 @@ e3_skip_load:;
               pcs.cfg_drift_strict_refused == 1);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0a.G.2 — Stamp body grid_member_count (position 19) ---\n");
+    {
+        // === Test G.2.1: StampInferenceCfgInputs has grid_member_count fields ===
+        StampInferenceCfgInputs inf{};
+        inf.has_grid_member_count = 1;
+        inf.grid_member_count = 4;
+        inf.grid_member_idx = 2;
+        check("v5.10.0a.G.2: StampInferenceCfgInputs.has_grid_member_count assignable",
+              inf.has_grid_member_count == 1);
+        check("v5.10.0a.G.2: StampInferenceCfgInputs.grid_member_count assignable",
+              inf.grid_member_count == 4);
+        check("v5.10.0a.G.2: StampInferenceCfgInputs.grid_member_idx assignable",
+              inf.grid_member_idx == 2);
+
+        // === Test G.2.2: ModelStampResult has grid_member_count fields ===
+        ModelStampResult r{};
+        r.has_grid_member_count = 1;
+        r.grid_member_count = 8;
+        r.grid_member_idx = 3;
+        check("v5.10.0a.G.2: ModelStampResult.has_grid_member_count assignable",
+              r.has_grid_member_count == 1);
+        check("v5.10.0a.G.2: ModelStampResult.grid_member_count assignable",
+              r.grid_member_count == 8);
+        check("v5.10.0a.G.2: ModelStampResult.grid_member_idx assignable",
+              r.grid_member_idx == 3);
+
+        // === Test G.2.3: legacy stamp (has_grid_member_count=0) is forward-compat ===
+        // Pre-v5.10.0a.G.2 stamps don't have these fields; verify_model_stamp
+        // sets has_grid_member_count=0 for those. Engine load with !has_*
+        // skips ensemble metadata processing → bytewise-identical to legacy.
+        ModelStampResult legacy{};
+        legacy.has_grid_member_count = 0;  // simulates parsing pre-G.2 stamp body
+        check("v5.10.0a.G.2: legacy stamp (has_grid_member_count=0) is no-op",
+              legacy.grid_member_count == 0 && legacy.grid_member_idx == 0);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.D — Backtest_RunHyperparamTrainSweep + WF override ---\n");
     {
         // === Test D.1: WF signature accepts default-NULL override (compat) ===

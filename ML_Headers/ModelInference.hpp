@@ -745,6 +745,11 @@ struct ModelStampResult {
     // v5.9.5h Phase 10 — build flags fingerprint
     uint8_t  has_build_flags_hash;
     uint64_t build_flags_hash;
+    // v5.10.0a.G.2 — multi-horizon ensemble member count (parsed from stamp).
+    // See StampInferenceCfgInputs above for canonical position 19 anchor.
+    uint8_t  has_grid_member_count;
+    int      grid_member_count;
+    int      grid_member_idx;
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -828,6 +833,10 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     r.xgb_tree_method[0] = '\0';
     r.has_build_flags_hash = 0;
     r.build_flags_hash = 0;
+    // v5.10.0a.G.2 — grid_member_count fields zero-init
+    r.has_grid_member_count = 0;
+    r.grid_member_count = 0;
+    r.grid_member_idx = 0;
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -994,6 +1003,15 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             else if (strcmp(key, "build_flags_hash") == 0) {
                 r.build_flags_hash = (uint64_t)strtoull(val, nullptr, 16);
                 r.has_build_flags_hash = 1;
+            }
+            // v5.10.0a.G.2 — multi-horizon ensemble member count (position 19)
+            else if (strcmp(key, "grid_member_count") == 0) {
+                r.grid_member_count = atoi(val);
+                r.has_grid_member_count = 1;
+            }
+            else if (strcmp(key, "grid_member_idx") == 0) {
+                r.grid_member_idx = atoi(val);
+                r.has_grid_member_count = 1;
             }
         }
         line = strtok_r(nullptr, "\n", &save);
@@ -1193,6 +1211,27 @@ struct StampInferenceCfgInputs {
     char     xgb_tree_method[16];
     int      has_build_flags_hash;
     uint64_t build_flags_hash;
+    // v5.10.0a.G.2 — multi-horizon ensemble member count.
+    //
+    // CANONICAL STAMP BODY POSITION ASSIGNMENT (v5.10.0a):
+    // Position 19: grid_member_count (this ship; locks order via Sprint B B2 ships first)
+    // Position 20: label_registry_hash (v5.10.0d / Sprint B B5; ships after this)
+    // New fields after v5.10.0a + v5.10.0d MUST take position 21+ per
+    // master plan canonical-order rule (only append at end). Sprint
+    // order is locked by master plan; do NOT reassign positions.
+    //
+    // grid_member_count = N where this stamp belongs to an ensemble of
+    // N models trained as a horizon set (cfg.horizon_list non-empty at
+    // train time). Single-horizon stamps have has_grid_member_count=0
+    // (forward-compat; legacy stamps load fine).
+    //
+    // Engine load: when has_grid_member_count=1, load proceeds normally
+    // BUT logs "[ensemble] this model is member <member_idx>/<count> of a
+    // multi-horizon ensemble; consider loading siblings via cfg.horizon_list
+    // for full ensemble inference." Operator-side hint only; no refuse.
+    int      has_grid_member_count;
+    int      grid_member_count;        // total members in the ensemble (N)
+    int      grid_member_idx;          // this model's index within (0..N-1)
 };
 
 inline StampWriteResult stamp_write_for_model(const char* model_path,
@@ -1376,6 +1415,20 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
         int wrote = snprintf(canonical + n, sizeof(canonical) - n,
             "build_flags_hash=%016lx\n",
             (unsigned long)inf->build_flags_hash);
+        if (wrote > 0) n += wrote;
+    }
+    // v5.10.0a.G.2 — multi-horizon ensemble metadata (position 19).
+    // Emitted when this model was trained as part of a horizon set
+    // (cfg.horizon_list non-empty at train time). Forward-compat:
+    // single-horizon stamps have has_grid_member_count=0 and skip
+    // this block; legacy verifiers (pre-v5.10.0a.G.2) tolerate missing
+    // fields. Engine load-time: when present, hint operator that
+    // siblings exist (informational; does not enforce ensemble load).
+    if (inf && inf->has_grid_member_count && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "grid_member_count=%d\n"
+            "grid_member_idx=%d\n",
+            inf->grid_member_count, inf->grid_member_idx);
         if (wrote > 0) n += wrote;
     }
 
