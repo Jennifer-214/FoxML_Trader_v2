@@ -1836,12 +1836,42 @@ static inline void *walkforward_worker_fn(void *arg) {
 struct FullValidationWorkerArgs {
     TrainingPanelState *state;
     const BacktestResults *data;
+    // v5.10.0E — snapshot operator-editable fields at click time, not in
+    // the worker. The ImGui input fields write into state->model_path /
+    // state->fv_auto_stamp_secret CONCURRENTLY with worker execution; if
+    // operator clicks Run Full Validation with empty model_path then
+    // types it AFTER, the worker reads empty (skip copy → auto_stamp_path
+    // empty), then status build reads the post-typed value, producing
+    // "model_path='X' did not propagate (worker race)" diagnostic.
+    // Capture-at-click eliminates the race.
+    char snap_model_path[256];
+    char snap_fv_auto_stamp_secret[64];
 };
 
 static inline void *fullvalidation_worker_fn(void *arg) {
     FullValidationWorkerArgs *args = (FullValidationWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
     const BacktestResults *data = args->data;
+    // v5.10.0E — local copies of click-time snapshots. Free args
+    // immediately so caller-side memory hygiene matches the legacy worker
+    // pattern (free as early as practical).
+    char model_path_snap[256];
+    char fv_auto_stamp_secret_snap[64];
+    {
+        size_t n = strnlen(args->snap_model_path,
+                           sizeof(args->snap_model_path));
+        if (n >= sizeof(model_path_snap)) n = sizeof(model_path_snap) - 1;
+        memcpy(model_path_snap, args->snap_model_path, n);
+        model_path_snap[n] = '\0';
+    }
+    {
+        size_t n = strnlen(args->snap_fv_auto_stamp_secret,
+                           sizeof(args->snap_fv_auto_stamp_secret));
+        if (n >= sizeof(fv_auto_stamp_secret_snap))
+            n = sizeof(fv_auto_stamp_secret_snap) - 1;
+        memcpy(fv_auto_stamp_secret_snap, args->snap_fv_auto_stamp_secret, n);
+        fv_auto_stamp_secret_snap[n] = '\0';
+    }
     free(args);
 
     // Build held-out split and unlock immediately. The friction-grade lock
@@ -1865,17 +1895,21 @@ static inline void *fullvalidation_worker_fn(void *arg) {
     memset(&state->fv_results, 0, sizeof(state->fv_results));
     int auto_stamp_enabled = data->config_used.auto_stamp_on_held_out;
     if (auto_stamp_enabled) {
-        size_t n = strlen(state->model_path);
+        // v5.10.0E — read from local snapshot (captured at click time),
+        // not from state->model_path which may have changed since.
+        size_t n = strnlen(model_path_snap, sizeof(model_path_snap));
         if (n >= sizeof(state->fv_results.auto_stamp_path))
             n = sizeof(state->fv_results.auto_stamp_path) - 1;
-        memcpy(state->fv_results.auto_stamp_path, state->model_path, n);
+        memcpy(state->fv_results.auto_stamp_path, model_path_snap, n);
         state->fv_results.auto_stamp_path[n] = '\0';
     }
     {
-        size_t n = strlen(state->fv_auto_stamp_secret);
+        // v5.10.0E — same race-free snapshot read for secret.
+        size_t n = strnlen(fv_auto_stamp_secret_snap,
+                           sizeof(fv_auto_stamp_secret_snap));
         if (n >= sizeof(state->fv_results.auto_stamp_secret))
             n = sizeof(state->fv_results.auto_stamp_secret) - 1;
-        memcpy(state->fv_results.auto_stamp_secret, state->fv_auto_stamp_secret, n);
+        memcpy(state->fv_results.auto_stamp_secret, fv_auto_stamp_secret_snap, n);
         state->fv_results.auto_stamp_secret[n] = '\0';
     }
     state->fv_results.auto_stamp_format_version = 0;  // 0 = use MODEL_FORMAT_VERSION
@@ -1902,16 +1936,26 @@ static inline void *fullvalidation_worker_fn(void *arg) {
         } else {
             // v5.9.4a — improved diagnostic. Pre-v5.9.4a always said
             // "model_path empty?" — operator had no info to debug.
-            // Now show what state was actually observed.
-            if (state->model_path[0] == '\0') {
+            // v5.10.0E — read model_path from local SNAPSHOT (captured at
+            // click time), not from state->model_path which the operator
+            // may have edited since worker started. This makes the
+            // diagnostic accurate ("at click time, model_path was empty"
+            // vs the false "did not propagate" message we used to print
+            // when operator typed model_path AFTER clicking).
+            if (model_path_snap[0] == '\0') {
                 snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
-                    "Held-out OK; auto-stamp skipped — model_path empty "
-                    "(set Model Path field before Run Full Validation)");
-            } else if (state->fv_results.auto_stamp_path[0] == '\0') {
-                snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
-                    "Held-out OK; auto-stamp skipped — model_path='%s' did not "
-                    "propagate to auto_stamp_path (worker race or copy failure)",
+                    "Held-out OK; auto-stamp skipped — model_path was empty "
+                    "AT CLICK TIME (set Model Path field BEFORE clicking "
+                    "Run Full Validation; current value: '%s')",
                     state->model_path);
+            } else if (state->fv_results.auto_stamp_path[0] == '\0') {
+                // Truly unexpected — snapshot was non-empty but copy didn't
+                // populate. Code path shouldn't fire post-v5.10.0E.
+                snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+                    "Held-out OK; auto-stamp skipped — model_path='%s' "
+                    "snapshot non-empty but auto_stamp_path empty "
+                    "(internal copy failure; report bug)",
+                    model_path_snap);
             } else {
                 snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
                     "Held-out OK; auto-stamp skipped — Backtest_RunFullValidation "
@@ -2800,6 +2844,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             state->model_trained = false;
             state->status_msg[0] = '\0';
             state->wf_has_results = false;
+            // v5.10.0E — also clear wf_results struct itself, not just the
+            // flag. Pre-fix, valid_folds (or any nonzero field) from the
+            // PRIOR WF run leaked into Save Run for THIS train cycle: the
+            // Save Run "valid_folds > 0" gate fired on stale data, writing
+            // val_accuracy=0 + train_val_gap=0 + valid_folds=4 from the
+            // last WF run. Past Runs then rendered "0.0%" RED for runs
+            // where WF was never re-run after the latest Train Model.
+            // Operator confusing diagnostic ("model has no edge") when
+            // really WF just wasn't run for that train.
+            memset(&state->wf_results, 0, sizeof(state->wf_results));
             state->tm_cancel = 0;
             state->tm_complete = 0;
             state->tm_running = 1;
@@ -3047,9 +3101,14 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 fprintf(sf, "label_lookahead_ticks: %d\n", state->label_forward_ticks);
                 // v4.3 — also persist Walk-Forward metrics if a WF run has
                 // been completed for this training. Past Runs viewer reads
-                // these to show val accuracy + overfit gap. valid_folds == 0
-                // means no WF was run; skip the block (older format).
-                if (state->wf_results.valid_folds > 0) {
+                // these to show val accuracy + overfit gap.
+                // v5.10.0E — gate on wf_has_results (true only after a
+                // CURRENT-cycle WF completes), NOT wf_results.valid_folds
+                // (which can leak across train cycles via stale state).
+                // Train Model click clears wf_has_results AND zeroes
+                // wf_results; this gate then correctly writes "no WF"
+                // (skip block) until a fresh WF actually runs.
+                if (state->wf_has_results && state->wf_results.valid_folds > 0) {
                     // label-kind-aware metric writeout. For binary/multiclass
                     // (label_kind != 1) WF populates mean_val_accuracy; for
                     // regression (label_kind == 1) WF populates correlation +
@@ -3524,6 +3583,26 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                     (FullValidationWorkerArgs *)malloc(sizeof(FullValidationWorkerArgs));
                 fv_args->state = state;
                 fv_args->data = fv_data;
+                // v5.10.0E — snapshot operator-editable fields at click
+                // time, not in worker. Fixes the auto_stamp_path race
+                // where typing model_path AFTER clicking produced a
+                // misleading "worker race or copy failure" diagnostic.
+                {
+                    size_t n = strnlen(state->model_path, sizeof(state->model_path));
+                    if (n >= sizeof(fv_args->snap_model_path))
+                        n = sizeof(fv_args->snap_model_path) - 1;
+                    memcpy(fv_args->snap_model_path, state->model_path, n);
+                    fv_args->snap_model_path[n] = '\0';
+                }
+                {
+                    size_t n = strnlen(state->fv_auto_stamp_secret,
+                                       sizeof(state->fv_auto_stamp_secret));
+                    if (n >= sizeof(fv_args->snap_fv_auto_stamp_secret))
+                        n = sizeof(fv_args->snap_fv_auto_stamp_secret) - 1;
+                    memcpy(fv_args->snap_fv_auto_stamp_secret,
+                           state->fv_auto_stamp_secret, n);
+                    fv_args->snap_fv_auto_stamp_secret[n] = '\0';
+                }
                 pthread_create(&state->fv_tid, NULL, fullvalidation_worker_fn, fv_args);
                 pthread_detach(state->fv_tid);
             }
