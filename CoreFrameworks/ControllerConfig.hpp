@@ -730,6 +730,13 @@ template <unsigned F> struct ControllerConfig {
   double   ensemble_bandit_eta;
   int      ensemble_min_warmup_predictions;
   double   ensemble_min_agreement_pct;
+  // v5.10.0a.G.8 — trade-close reward multiplier. Real money signal
+  // (TP/SL hit) gets weighted ×N over the slow-path lookback rewards
+  // (which are hypothetical "would have been correct" signals).
+  // Default 4.0 — operator-tunable. Higher = trust trade outcomes more
+  // (faster convergence to deployable weights); lower = faster cold-
+  // start learning from dense lookback signals.
+  double   ensemble_trade_reward_mult;
 };
 
 //======================================================================================================
@@ -1023,6 +1030,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.ensemble_bandit_eta = 0.1;
   cfg.ensemble_min_warmup_predictions = 100;
   cfg.ensemble_min_agreement_pct = 0.6;
+  cfg.ensemble_trade_reward_mult = 4.0;
   // v5.10.0a.G.6 — per-core ensemble cfg defaults (empty = inherit global)
   for (int i = 0; i < 16; ++i) {
       cfg.core_horizon_list[i][0] = '\0';
@@ -1449,6 +1457,16 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         if (v < 0.0) v = 0.0;
         if (v > 1.0) v = 1.0;
         cfg.ensemble_min_agreement_pct = v;
+        continue;
+    }
+    if (strcmp(key, "ensemble_trade_reward_mult") == 0) {
+        double v = atof(val);
+        // Clamp to sane range; 0 disables trade-close rewards entirely
+        // (only slow-path lookback feeds bandit). Upper bound prevents
+        // a single trade dominating thousands of slow-path signals.
+        if (v < 0.0) v = 0.0;
+        if (v > 100.0) v = 100.0;
+        cfg.ensemble_trade_reward_mult = v;
         continue;
     }
     // v5.10.0a — horizon_list CSV parser. Comma-separated ints, max

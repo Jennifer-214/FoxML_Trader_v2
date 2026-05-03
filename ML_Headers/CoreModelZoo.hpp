@@ -637,6 +637,33 @@ struct EnsembleModelZoo {
     // changes, blend OLD regime's weights with NEW for hysteresis cycles.
     int regime_transition_cycles_remaining;  // 0 = stable
     int prev_regime_id;            // regime BEFORE the transition
+    // v5.10.0a.G.8 — reward attribution ring buffer. Each predict writes
+    // a record (tick_index, regime_id, per-arm predictions, sample_price);
+    // slow-path lookback walks ring → for old-enough records, computes
+    // per-arm reward (direction match) → calls Bandit_Update.
+    static constexpr int REWARD_RING_SIZE = 256;
+    struct PredictionRecord {
+        uint64_t predict_call;        // monotonic counter (increments per predict)
+        int      regime_id;           // regime AT predict time (for attribution)
+        float    predictions[ENSEMBLE_HORIZON_MAX];  // per-arm raw outputs
+        float    sample_price;        // price at predict time
+        uint8_t  rewarded_lookback;   // 1 = already rewarded by slow-path lookback
+        uint8_t  rewarded_trade;      // 1 = already rewarded by trade-close
+    };
+    PredictionRecord reward_ring[REWARD_RING_SIZE];
+    int reward_ring_head;             // next write slot
+    uint64_t predict_call_count;      // monotonic predict counter (sets record.predict_call)
+    // v5.10.0a.G.8 — drift watchdog (perf #3). Per-arm rolling IC tracker;
+    // when IC drops below cfg.confidence_ic_floor, demote weight to ~0
+    // across all regimes (manual override of bandit's natural learning).
+    static constexpr int DRIFT_IC_HISTORY = 100;
+    struct PerArmDrift {
+        float    ic_history[DRIFT_IC_HISTORY];  // recent reward outcomes (1=correct, -1=wrong, 0=skip)
+        int      ic_count;                       // populated entries (capped at DRIFT_IC_HISTORY)
+        float    ic_avg;                         // running average over ic_history
+        uint8_t  demoted;                        // 1 = forced near-zero weight; sticky until recovery
+    };
+    PerArmDrift drift[ENSEMBLE_HORIZON_MAX];
 };
 
 template <unsigned F>
@@ -665,6 +692,194 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     ezoo->disabled_horizon_mask = 0;
     ezoo->regime_transition_cycles_remaining = 0;
     ezoo->prev_regime_id = 0;
+    // v5.10.0a.G.8 — reward state init
+    memset(ezoo->reward_ring, 0, sizeof(ezoo->reward_ring));
+    ezoo->reward_ring_head = 0;
+    ezoo->predict_call_count = 0;
+    memset(ezoo->drift, 0, sizeof(ezoo->drift));
+}
+
+//======================================================================================================
+// [v5.10.0a.G.8 — REWARD RING WRITE]
+//======================================================================================================
+// Called from ML_BuildParameters after each predict. Writes per-arm
+// predictions + regime + sample_price into the ring at head; head
+// advances modulo RING_SIZE (oldest record overwritten).
+//
+// predict_call_count is the monotonic predict counter; record's
+// predict_call field captures the value at write time. Slow-path
+// lookback uses (current_predict_call - record.predict_call) ≥
+// (forward_ticks / poll_interval) to decide if record is old enough
+// to reward.
+template <unsigned F>
+inline void EnsembleModelZoo_RecordPrediction(EnsembleModelZoo<F>* ezoo,
+                                                int regime_id,
+                                                const float* per_arm_preds,
+                                                int n_arms,
+                                                float sample_price) {
+    if (!ezoo || !ezoo->active) return;
+    int slot = ezoo->reward_ring_head % EnsembleModelZoo<F>::REWARD_RING_SIZE;
+    auto& rec = ezoo->reward_ring[slot];
+    ezoo->predict_call_count++;
+    rec.predict_call = ezoo->predict_call_count;
+    rec.regime_id = regime_id;
+    rec.sample_price = sample_price;
+    rec.rewarded_lookback = 0;
+    rec.rewarded_trade = 0;
+    int n = (n_arms < ENSEMBLE_HORIZON_MAX) ? n_arms : ENSEMBLE_HORIZON_MAX;
+    for (int a = 0; a < n; ++a) rec.predictions[a] = per_arm_preds[a];
+    for (int a = n; a < ENSEMBLE_HORIZON_MAX; ++a) rec.predictions[a] = 0.5f;
+    ezoo->reward_ring_head = (ezoo->reward_ring_head + 1)
+                             % EnsembleModelZoo<F>::REWARD_RING_SIZE;
+}
+
+//======================================================================================================
+// [v5.10.0a.G.8 — DRIFT WATCHDOG (perf optimization #3)]
+//======================================================================================================
+// Updates per-arm IC running history with reward outcome. If IC drops
+// below ic_floor for sustained window → demote (force near-zero weight
+// across all regimes). Recovery: IC rises above ic_floor + 0.02
+// hysteresis → un-demote, allow re-learn.
+template <unsigned F>
+inline void EnsembleModelZoo_UpdateDrift(EnsembleModelZoo<F>* ezoo,
+                                           int arm,
+                                           int correct,   // 1 = correct, 0 = wrong
+                                           double ic_floor) {
+    if (!ezoo || arm < 0 || arm >= ezoo->buy_signal_count) return;
+    auto& d = ezoo->drift[arm];
+    int idx = d.ic_count % EnsembleModelZoo<F>::DRIFT_IC_HISTORY;
+    d.ic_history[idx] = correct ? 1.0f : -1.0f;
+    if (d.ic_count < EnsembleModelZoo<F>::DRIFT_IC_HISTORY) d.ic_count++;
+    // Recompute running average (cheap; bounded N)
+    double sum = 0.0;
+    int n = d.ic_count;
+    if (n > EnsembleModelZoo<F>::DRIFT_IC_HISTORY) n = EnsembleModelZoo<F>::DRIFT_IC_HISTORY;
+    for (int i = 0; i < n; ++i) sum += d.ic_history[i];
+    d.ic_avg = (n > 0) ? (float)(sum / n) : 0.0f;
+    // Demote / recover
+    if (n >= 20 && d.ic_avg < (float)ic_floor && !d.demoted) {
+        // Force near-zero weight across all regimes (operator escape from
+        // a horizon that's gone bad faster than bandit's natural decay)
+        for (int r = 0; r < NUM_REGIMES; ++r) {
+            if (arm < ezoo->bandits[r].n_arms) {
+                ezoo->bandits[r].weights[arm] = 1e-9;
+            }
+        }
+        d.demoted = 1;
+        fprintf(stderr, "[ensemble] DRIFT-WATCHDOG: arm %d (h%d) demoted "
+                        "(IC=%.4f below floor %.4f); weights forced near 0.\n",
+                arm, ezoo->horizon_ticks_at_idx[arm], d.ic_avg, ic_floor);
+    } else if (d.demoted && d.ic_avg > (float)ic_floor + 0.02f) {
+        d.demoted = 0;
+        fprintf(stderr, "[ensemble] arm %d (h%d) recovered (IC=%.4f); "
+                        "weight allowed to re-learn.\n",
+                arm, ezoo->horizon_ticks_at_idx[arm], d.ic_avg);
+    }
+}
+
+//======================================================================================================
+// [v5.10.0a.G.8 — SLOW-PATH LOOKBACK REWARDS]
+//======================================================================================================
+// Walks reward ring; for records old enough that forward_ticks have
+// elapsed since predict time, computes per-arm reward based on whether
+// prediction direction matched the price move (current_price vs
+// record.sample_price). Calls Bandit_Update on the matching regime's
+// bandit. Marks records as rewarded to avoid double-rewarding.
+template <unsigned F>
+inline void EnsembleModelZoo_TickRewardsFromLookback(EnsembleModelZoo<F>* ezoo,
+                                                       float current_price,
+                                                       int forward_ticks,
+                                                       int poll_interval,
+                                                       double ic_floor) {
+    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return;
+    if (poll_interval <= 0) poll_interval = 100;
+    if (forward_ticks <= 0) forward_ticks = 1000;
+    uint64_t lookback_calls = (uint64_t)((forward_ticks + poll_interval - 1)
+                                          / poll_interval);
+    if (lookback_calls == 0) lookback_calls = 1;
+    uint64_t now = ezoo->predict_call_count;
+    int n_arms = ezoo->buy_signal_count;
+
+    // Walk all populated records; reward ones that are old enough + not
+    // yet rewarded.
+    for (int i = 0; i < EnsembleModelZoo<F>::REWARD_RING_SIZE; ++i) {
+        auto& rec = ezoo->reward_ring[i];
+        if (rec.predict_call == 0) continue;             // unpopulated slot
+        if (rec.rewarded_lookback) continue;             // already rewarded
+        if (now < rec.predict_call + lookback_calls) continue;  // too recent
+
+        // Compute price delta sign
+        if (rec.sample_price <= 0.0f) { rec.rewarded_lookback = 1; continue; }
+        double price_delta = ((double)current_price - (double)rec.sample_price)
+                              / (double)rec.sample_price;
+        int regime = rec.regime_id;
+        if (regime < 0 || regime >= NUM_REGIMES) regime = 0;
+
+        // Per-arm reward: 1 if predicted direction matched, 0 otherwise.
+        // Skip disabled arms (bitmask check).
+        for (int a = 0; a < n_arms; ++a) {
+            if (ezoo->disabled_horizon_mask & (1u << a)) continue;
+            float p = rec.predictions[a];
+            int correct = ((p > 0.5f) == (price_delta > 0.0)) ? 1 : 0;
+            // Reward signal in bps. Treat correct as +50bps, wrong as -50bps;
+            // Bandit_Update accumulates these.
+            double reward_bps = correct ? 50.0 : -50.0;
+            Bandit_Update(&ezoo->bandits[regime], a, reward_bps);
+            // Drift watchdog updates per-arm IC tracker
+            EnsembleModelZoo_UpdateDrift(ezoo, a, correct, ic_floor);
+        }
+        rec.rewarded_lookback = 1;
+    }
+}
+
+//======================================================================================================
+// [v5.10.0a.G.8 — TRADE-CLOSE REWARD HOOK]
+//======================================================================================================
+// Called from EventLoop_DrainPostFill when a position closes (TP/SL
+// exit). Looks up the MOST RECENT prediction record (proxy for "the
+// model recommendation that drove this trade") and rewards based on
+// realized P&L direction. Higher weight than slow-path (real money
+// signal includes fees + slippage).
+//
+// reward_mult: cfg.ensemble_trade_reward_mult (default 4.0). Scales
+// |reward_bps| × mult; correct predictions → positive bps, wrong →
+// negative.
+template <unsigned F>
+inline void EnsembleModelZoo_TradeCloseReward(EnsembleModelZoo<F>* ezoo,
+                                                double realized_pnl_bps,
+                                                double reward_mult) {
+    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return;
+    if (ezoo->predict_call_count == 0) return;  // no predictions yet
+
+    // Find the most recent record that hasn't been trade-rewarded.
+    // Walk ring backward from head.
+    int n_arms = ezoo->buy_signal_count;
+    int found = -1;
+    for (int back = 1; back <= EnsembleModelZoo<F>::REWARD_RING_SIZE; ++back) {
+        int idx = (ezoo->reward_ring_head - back +
+                   EnsembleModelZoo<F>::REWARD_RING_SIZE)
+                   % EnsembleModelZoo<F>::REWARD_RING_SIZE;
+        if (ezoo->reward_ring[idx].predict_call == 0) break;
+        if (ezoo->reward_ring[idx].rewarded_trade) continue;
+        found = idx;
+        break;
+    }
+    if (found < 0) return;
+
+    auto& rec = ezoo->reward_ring[found];
+    int regime = rec.regime_id;
+    if (regime < 0 || regime >= NUM_REGIMES) regime = 0;
+    int pnl_positive = (realized_pnl_bps > 0.0) ? 1 : 0;
+
+    for (int a = 0; a < n_arms; ++a) {
+        if (ezoo->disabled_horizon_mask & (1u << a)) continue;
+        float p = rec.predictions[a];
+        int correct = ((p > 0.5f) == (pnl_positive == 1)) ? 1 : 0;
+        // Trade-close reward weighted higher than slow-path lookback
+        double reward_bps = (correct ? 50.0 : -50.0) * reward_mult;
+        Bandit_Update(&ezoo->bandits[regime], a, reward_bps);
+    }
+    rec.rewarded_trade = 1;
 }
 
 //======================================================================================================

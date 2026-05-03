@@ -405,6 +405,14 @@ ensemble_min_warmup_predictions=100
 # 1.0 = unanimous required (very conservative)
 ensemble_min_agreement_pct=0.6
 
+# Trade-close reward multiplier (v5.10.0a.G.8). Real-money signal (incl.
+# fees + slippage) carries higher weight than slow-path lookback rewards.
+# default 4.0 = trade outcomes count 4× a tick-level lookback reward.
+# 0.0 = disable trade-close feedback (slow-path lookback only).
+# Higher (8-10) = aggressive bandit response to actual trade outcomes;
+# more variance in weights between trades.
+ensemble_trade_reward_mult=4.0
+
 # Global blend mode (per-core override via core_N_ensemble_blend_mode)
 ensemble_blend_mode=weighted
 

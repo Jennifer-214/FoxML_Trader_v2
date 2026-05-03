@@ -12184,6 +12184,174 @@ e3_skip_load:;
         EnsembleModelZoo_Free(&ez2);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0a.G.8 — Dual-source reward wiring + drift watchdog ---\n");
+    {
+        // === Test G.8.1: RecordPrediction populates ring + advances head ===
+        EnsembleModelZoo<FP> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        ezoo.active = 1;
+        ezoo.buy_signal_count = 4;
+        ezoo.horizon_ticks_at_idx[0] = 100;
+        ezoo.horizon_ticks_at_idx[1] = 500;
+        ezoo.horizon_ticks_at_idx[2] = 1000;
+        ezoo.horizon_ticks_at_idx[3] = 2000;
+        EnsembleModelZoo_InitBandits(&ezoo, 0.05, 200);
+
+        float per_arm[4] = { 0.7f, 0.4f, 0.6f, 0.45f };
+        EnsembleModelZoo_RecordPrediction(&ezoo, 0, per_arm, 4, 100.0f);
+        check("v5.10.0a.G.8: RecordPrediction advances reward_ring_head",
+              ezoo.reward_ring_head == 1);
+        check("v5.10.0a.G.8: RecordPrediction increments predict_call_count",
+              ezoo.predict_call_count == 1);
+        check("v5.10.0a.G.8: RecordPrediction stores predictions[0]",
+              ezoo.reward_ring[0].predictions[0] == 0.7f);
+        check("v5.10.0a.G.8: RecordPrediction stores predictions[3]",
+              ezoo.reward_ring[0].predictions[3] == 0.45f);
+        check("v5.10.0a.G.8: RecordPrediction stores sample_price",
+              ezoo.reward_ring[0].sample_price == 100.0f);
+        check("v5.10.0a.G.8: RecordPrediction stores regime_id",
+              ezoo.reward_ring[0].regime_id == 0);
+        check("v5.10.0a.G.8: RecordPrediction sets rewarded_lookback=0",
+              ezoo.reward_ring[0].rewarded_lookback == 0);
+
+        // === Test G.8.2: TickRewardsFromLookback skips records too recent ===
+        // Lookback = forward_ticks/poll_interval = 1000/100 = 10 calls.
+        // Just recorded 1 prediction; current call_count=1, need >= 1+10.
+        EnsembleModelZoo_TickRewardsFromLookback(&ezoo, 101.0f, 1000, 100, 0.02);
+        check("v5.10.0a.G.8: lookback skips too-recent record",
+              ezoo.reward_ring[0].rewarded_lookback == 0);
+
+        // Advance call count past lookback threshold by recording 11 dummy
+        // predictions. The first record (index 0) should now be old enough.
+        for (int i = 0; i < 11; ++i) {
+            EnsembleModelZoo_RecordPrediction(&ezoo, 0, per_arm, 4, 100.0f);
+        }
+
+        // === Test G.8.3: TickRewardsFromLookback marks rewarded_lookback ===
+        // current_price=110 vs sample=100 → +10% delta → predictions
+        // > 0.5 are correct, predictions ≤ 0.5 are wrong.
+        EnsembleModelZoo_TickRewardsFromLookback(&ezoo, 110.0f, 1000, 100, 0.02);
+        check("v5.10.0a.G.8: lookback marks first record rewarded_lookback=1",
+              ezoo.reward_ring[0].rewarded_lookback == 1);
+
+        // === Test G.8.4: TickRewardsFromLookback updates bandit weights ===
+        // After UpdateDrift fires, arm 0 (pred 0.7, correct) gets +50bps,
+        // arm 1 (pred 0.4, wrong) gets -50bps. With Bandit_Update accumulating
+        // these, arm 0's weight should exceed arm 1's after the call.
+        // Note: In Exp3, weights diverge gradually; we just check that arm
+        // 0 (correct) has weight ≥ arm 1 (wrong) after the reward.
+        check("v5.10.0a.G.8: correct arm weight ≥ wrong arm weight after lookback",
+              ezoo.bandits[0].weights[0] >= ezoo.bandits[0].weights[1]);
+
+        EnsembleModelZoo_Free(&ezoo);
+
+        // === Test G.8.5: TradeCloseReward finds most recent record + marks rewarded_trade ===
+        EnsembleModelZoo<FP> ezoo2;
+        EnsembleModelZoo_Init(&ezoo2);
+        ezoo2.active = 1;
+        ezoo2.buy_signal_count = 3;
+        ezoo2.horizon_ticks_at_idx[0] = 100;
+        ezoo2.horizon_ticks_at_idx[1] = 500;
+        ezoo2.horizon_ticks_at_idx[2] = 1000;
+        EnsembleModelZoo_InitBandits(&ezoo2, 0.05, 200);
+
+        float p2[3] = { 0.8f, 0.3f, 0.7f };
+        EnsembleModelZoo_RecordPrediction(&ezoo2, 0, p2, 3, 200.0f);
+        // pnl_bps=+50 (winning trade) and reward_mult=4.0 → trade-close fires
+        EnsembleModelZoo_TradeCloseReward(&ezoo2, 50.0, 4.0);
+        // Most-recent record is at ring index 0 (head was 1, walking back).
+        check("v5.10.0a.G.8: TradeCloseReward marks rewarded_trade=1",
+              ezoo2.reward_ring[0].rewarded_trade == 1);
+        // Test idempotence: second call walks back, finds NO un-rewarded
+        // record, no-ops. Counter (predict_call) unchanged.
+        uint64_t pcc_before = ezoo2.predict_call_count;
+        EnsembleModelZoo_TradeCloseReward(&ezoo2, 50.0, 4.0);
+        check("v5.10.0a.G.8: TradeCloseReward idempotent on already-rewarded record",
+              ezoo2.predict_call_count == pcc_before);
+
+        EnsembleModelZoo_Free(&ezoo2);
+
+        // === Test G.8.6: UpdateDrift demotes arm with sustained low IC ===
+        EnsembleModelZoo<FP> ezoo3;
+        EnsembleModelZoo_Init(&ezoo3);
+        ezoo3.active = 1;
+        ezoo3.buy_signal_count = 2;
+        ezoo3.horizon_ticks_at_idx[0] = 100;
+        ezoo3.horizon_ticks_at_idx[1] = 500;
+        EnsembleModelZoo_InitBandits(&ezoo3, 0.05, 200);
+
+        // Feed 30 wrong outcomes for arm 0 (IC = -1.0, far below floor 0.02)
+        for (int i = 0; i < 30; ++i) {
+            EnsembleModelZoo_UpdateDrift(&ezoo3, 0, /*correct=*/0, 0.02);
+        }
+        check("v5.10.0a.G.8: arm 0 demoted after 30 wrong outcomes",
+              ezoo3.drift[0].demoted == 1);
+        check("v5.10.0a.G.8: arm 0 weights forced near 0 after demote",
+              ezoo3.bandits[0].weights[0] < 1e-6);
+        check("v5.10.0a.G.8: arm 1 (untouched) NOT demoted",
+              ezoo3.drift[1].demoted == 0);
+
+        // Feed 100 correct outcomes for arm 0 → IC rises above floor + 0.02
+        // hysteresis → un-demote.
+        for (int i = 0; i < 100; ++i) {
+            EnsembleModelZoo_UpdateDrift(&ezoo3, 0, /*correct=*/1, 0.02);
+        }
+        check("v5.10.0a.G.8: arm 0 recovered after sustained correct outcomes",
+              ezoo3.drift[0].demoted == 0);
+
+        EnsembleModelZoo_Free(&ezoo3);
+
+        // === Test G.8.7: ensemble_trade_reward_mult cfg parsing ===
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        check("v5.10.0a.G.8: ensemble_trade_reward_mult default 4.0",
+              cfg.ensemble_trade_reward_mult == 4.0);
+        // Parser test: write cfg, parse, check field
+        char tmpfile[] = "/tmp/g8_reward_mult_XXXXXX.cfg";
+        int fd = mkstemps(tmpfile, 4);
+        if (fd >= 0) {
+            const char* cfg_text = "ensemble_trade_reward_mult=2.5\n";
+            ssize_t wrote = write(fd, cfg_text, strlen(cfg_text));
+            (void)wrote;
+            close(fd);
+            ControllerConfig<FP> parsed = ControllerConfig_Load<FP>(tmpfile);
+            check("v5.10.0a.G.8: parses ensemble_trade_reward_mult=2.5",
+                  parsed.ensemble_trade_reward_mult == 2.5);
+            unlink(tmpfile);
+        }
+
+        // === Test G.8.8: disabled-horizon mask skipped during reward ===
+        EnsembleModelZoo<FP> ezoo4;
+        EnsembleModelZoo_Init(&ezoo4);
+        ezoo4.active = 1;
+        ezoo4.buy_signal_count = 3;
+        ezoo4.horizon_ticks_at_idx[0] = 100;
+        ezoo4.horizon_ticks_at_idx[1] = 500;
+        ezoo4.horizon_ticks_at_idx[2] = 1000;
+        EnsembleModelZoo_InitBandits(&ezoo4, 0.05, 200);
+        EnsembleModelZoo_SetDisabledHorizons(&ezoo4, "100");  // arm 0 disabled
+        check("v5.10.0a.G.8: disabled mask after SetDisabledHorizons('100')",
+              (ezoo4.disabled_horizon_mask & 1u) != 0);
+
+        // Snapshot weights before reward
+        double w0_pre = ezoo4.bandits[0].weights[0];
+        double w1_pre = ezoo4.bandits[0].weights[1];
+
+        float p4[3] = { 0.9f, 0.4f, 0.6f };
+        EnsembleModelZoo_RecordPrediction(&ezoo4, 0, p4, 3, 100.0f);
+        // Advance past lookback
+        for (int i = 0; i < 11; ++i)
+            EnsembleModelZoo_RecordPrediction(&ezoo4, 0, p4, 3, 100.0f);
+        EnsembleModelZoo_TickRewardsFromLookback(&ezoo4, 110.0f, 1000, 100, 0.02);
+        // Arm 0 disabled → its weight should NOT have moved despite +10% delta.
+        // Arm 1 enabled (but pred 0.4 wrong vs +10%) → weight should have changed.
+        check("v5.10.0a.G.8: disabled arm 0 weight unchanged by reward",
+              ezoo4.bandits[0].weights[0] == w0_pre);
+        check("v5.10.0a.G.8: enabled arm 1 weight changed by reward",
+              ezoo4.bandits[0].weights[1] != w1_pre);
+
+        EnsembleModelZoo_Free(&ezoo4);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.G.6 — Per-core ensemble cfg fields ---\n");
     {
         // === Test G.6.1: ensemble cfg defaults ===

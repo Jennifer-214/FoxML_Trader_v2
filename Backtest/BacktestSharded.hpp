@@ -778,6 +778,10 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                     loss_count++;
                 }
                 last_realized_pnl = current_realized;
+                // (v5.10.0a.G.8 trade-close reward fires inside
+                // EventLoop_DrainPostFillOneCore — same hook as live,
+                // so backtest + live route through one path with
+                // bytewise-identical bandit feeding.)
 
                 // Equity curve sample (one per completed trade).
                 // dynamic growth — capping silently contaminates stats.

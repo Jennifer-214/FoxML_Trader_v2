@@ -995,7 +995,8 @@ template <unsigned F>
 inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                                              OrderManagerState<F>* oms,
                                              uint32_t sl_cooldown_cycles,
-                                             int core_id) {
+                                             int core_id,
+                                             double ensemble_trade_reward_mult = 4.0) {
     const int partial_on = oms->partial_exit_enabled ? 1 : 0;
     uint16_t my_mask = partial_on
         ? (uint16_t)((1u << (core_id * 2)) | (1u << (core_id * 2 + 1)))
@@ -1174,6 +1175,25 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 ctx.sl_cooldown_remaining = sl_cooldown_cycles;
             }
             RegressionFeederX_Push(&ctx.pnl_feeder, FPN_FromDouble<F>(realized));
+
+            // v5.10.0a.G.8 — trade-close reward hook for ensemble bandit.
+            // Real-money signal (incl. fees + slippage) carries higher
+            // weight than slow-path lookback (default ×4). Cast through
+            // void* since CoreContext can't depend on EnsembleModelZoo<F>
+            // directly (would force ML_Headers visibility). Bandit feed
+            // is rare (~1 per closed trade) — cost negligible.
+            if (ctx.ensemble_handle) {
+                auto* ezoo = static_cast<EnsembleModelZoo<F>*>(ctx.ensemble_handle);
+                if (ezoo->active && ezoo->initialized_bandits) {
+                    double bal_d = FPN_ToDouble(oms->balance);
+                    if (bal_d > 0.0) {
+                        double pnl_d = FPN_ToDouble(rec.exit_net_pnl);
+                        double pnl_bps = (pnl_d / bal_d) * 10000.0;
+                        EnsembleModelZoo_TradeCloseReward(ezoo, pnl_bps,
+                                                            ensemble_trade_reward_mult);
+                    }
+                }
+            }
         }
     }
     oms->last_closed_mask &= (uint16_t)~my_mask;  // clear only my bits
@@ -1183,9 +1203,11 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
 template <unsigned F>
 inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
                                      OrderManagerState<F>* oms,
-                                     uint32_t sl_cooldown_cycles) {
+                                     uint32_t sl_cooldown_cycles,
+                                     double ensemble_trade_reward_mult = 4.0) {
     for (int c = 0; c < state->registered_count; ++c) {
-        EventLoop_DrainPostFillOneCore(state, oms, sl_cooldown_cycles, c);
+        EventLoop_DrainPostFillOneCore(state, oms, sl_cooldown_cycles, c,
+                                         ensemble_trade_reward_mult);
     }
 }
 

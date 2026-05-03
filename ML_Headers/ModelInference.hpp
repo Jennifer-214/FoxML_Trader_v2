@@ -598,7 +598,8 @@ inline float Model_Predict_Ensemble_Weighted(
     const double* weights,
     uint32_t disabled_mask,
     double min_agreement_pct,
-    int* out_dominant_idx) {
+    int* out_dominant_idx,
+    float* out_per_arm_predictions = nullptr) {  // v5.10.0a.G.8: optional buffer for reward record
     if (count <= 0) {
         if (out_dominant_idx) *out_dominant_idx = -1;
         return 0.0f;
@@ -681,6 +682,11 @@ inline float Model_Predict_Ensemble_Weighted(
         return 0.5f;
     }
     if (out_dominant_idx) *out_dominant_idx = best_idx;
+    // v5.10.0a.G.8 — expose per-arm predictions for reward record write
+    if (out_per_arm_predictions) {
+        for (int i = 0; i < count; ++i)
+            out_per_arm_predictions[i] = predictions[i];
+    }
     return (float)(sum_wp / sum_w);
 }
 
