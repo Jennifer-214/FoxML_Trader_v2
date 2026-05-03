@@ -3454,7 +3454,23 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // train_model_worker_fn (above) walked the race surface + cancellation
     // path. UI shows a progress indicator + Cancel button while running;
     // results display (below) reads the same state fields the worker writes.
-    bool can_train = results->sample_count >= 10;
+    //
+    // v5.10.0a-bugfix1 — cross-worker mutual exclusion. Pre-bugfix, operator
+    // could click Run Walk-Forward then Run Full Validation, spawning two
+    // concurrent training pthreads. XGBoost's internal global state +
+    // PhaseTimer_Global() singleton are NOT safe under that concurrency on
+    // some builds; result was a segfault when GUI thread tried to read
+    // worker-mutating state on click-back. Fix: gate all training buttons
+    // on a single "any_worker_running" predicate so only ONE worker runs
+    // at a time. Operator-friendly: button is disabled with a tooltip
+    // "(another training task is running)" rather than crashing.
+    bool any_worker_running =
+        state->tm_running ||
+        state->wf_running ||
+        state->fv_running ||
+        state->hp_running ||
+        state->mh_running;
+    bool can_train = results->sample_count >= 10 && !any_worker_running;
 #ifndef USE_XGBOOST
     can_train = false;
 #endif
@@ -3919,7 +3935,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
     // run / cancel button
     {
-        bool can_wf = results->sample_count >= 50;
+        // v5.10.0a-bugfix1 — re-evaluate any_worker_running for WF gate
+        // (state may have flipped since the can_train computation above
+        // — e.g. if the operator clicked Train Model then renders fired
+        // before tm_running flipped). Recompute here for safety.
+        bool any_worker_running_wf =
+            state->tm_running ||
+            state->fv_running ||
+            state->hp_running ||
+            state->mh_running;  // intentionally exclude wf_running so WF can show its own cancel button
+        bool can_wf = results->sample_count >= 50 && !any_worker_running_wf;
 #ifndef USE_XGBOOST
         can_wf = false;
 #endif
@@ -4281,10 +4306,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         ImGui::PopItemWidth();
 
         const BacktestResults *hp_data = &run_control->results;
+        // v5.10.0a-bugfix1 — exclude other workers (recompute fresh)
+        bool any_worker_running_hp =
+            state->tm_running ||
+            state->wf_running ||
+            state->fv_running ||
+            state->mh_running;
         bool can_hp =
 #ifdef USE_XGBOOST
             hp_data->sample_count >= 100 && hp_total_cells > 0
-            && hp_total_cells <= OPT_MAX_GRID;
+            && hp_total_cells <= OPT_MAX_GRID && !any_worker_running_hp;
 #else
             false;
 #endif
@@ -4425,9 +4456,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                               "unsigned loads.");
 
         const BacktestResults *fv_data = &run_control->results;
+        // v5.10.0a-bugfix1 — exclude other workers (recompute fresh)
+        bool any_worker_running_fv =
+            state->tm_running ||
+            state->wf_running ||
+            state->hp_running ||
+            state->mh_running;
         bool can_fv =
 #ifdef USE_XGBOOST
-            fv_data->sample_count >= 50 && state->model_path[0] != '\0';
+            fv_data->sample_count >= 50 && state->model_path[0] != '\0'
+            && !any_worker_running_fv;
 #else
             false;
 #endif
