@@ -1692,6 +1692,16 @@ struct TrainingPanelState {
     // render after tm_complete=1 flips). Pre-v5.9.5d the SHA was only
     // logged via stderr — operator couldn't see it in foxml_suite.
     char scaler_sha256_hex[80];
+    // v5.9.5j — Train Model auto-stamp result (Option A: WF-only).
+    // Worker fires stamp_write_for_model post-Persist when cfg.auto_stamp_on_held_out=1.
+    // Stamp records WF mean accuracy + sentinel held_out=0.0 + sentinel
+    // gap_threshold=0.0 (engine treats as training-only; load-time WARN
+    // but no refuse). Operators wanting full held-out validation use
+    // Run Full Validation panel.
+    int  tm_auto_stamp_attempted;
+    int  tm_auto_stamp_ok;
+    char tm_auto_stamp_error[256];
+    char tm_auto_stamp_path_written[400];
     // walk-forward validation (Phase 6A — A7 GUI rework)
     int wf_n_splits;          // number of temporal folds (default 5)
     int wf_horizon_ticks;     // label horizon for purge gap calc (default 1000)
@@ -2206,6 +2216,107 @@ static inline void *train_model_worker_fn(void *arg) {
     XGBoosterFree(booster);
     free(train_features);
     free(train_labels);
+
+    // v5.9.5j — Train Model auto-stamp (Option A: WF-only). When operator
+    // has cfg.auto_stamp_on_held_out=1 + non-empty cfg.held_out_stamp_secret,
+    // fire stamp_write_for_model with WF mean accuracy as wf_mean_val,
+    // sentinel held_out=0.0 + sentinel gap_threshold=0.0. Engine load-time
+    // recognizes the sentinel as "training-only stamp" — info-level log,
+    // no refuse. Operators wanting full held-out validation use Run Full
+    // Validation panel (which produces a full stamp via Backtest_RunFullValidation).
+    state->tm_auto_stamp_attempted = 0;
+    state->tm_auto_stamp_ok = 0;
+    state->tm_auto_stamp_error[0] = '\0';
+    state->tm_auto_stamp_path_written[0] = '\0';
+    if (run_control->results.config_used.auto_stamp_on_held_out &&
+        run_control->results.config_used.held_out_stamp_secret[0] &&
+        !cancelled) {
+        state->tm_auto_stamp_attempted = 1;
+
+        // Build inf — mirror Backtest_RunFullValidation's pattern (v5.9.5b/h)
+        StampInferenceCfgInputs inf = {};
+        inf.has_inference_cfg = 1;
+        inf.confidence_threshold_scale =
+            FPN_ToDouble(run_control->results.config_used.confidence_threshold_scale);
+        inf.barrier_gate_enabled = run_control->results.config_used.barrier_gate_enabled;
+        inf.confidence_hard_block_threshold =
+            FPN_ToDouble(run_control->results.config_used.confidence_hard_block_threshold);
+        inf.held_out_fraction =
+            FPN_ToDouble(run_control->results.config_used.held_out_fraction);
+        inf.freshness_tau =
+            FPN_ToDouble(run_control->results.config_used.confidence_freshness_tau);
+        inf.has_training_poll_interval = 1;
+        inf.training_poll_interval = run_control->results.config_used.poll_interval;
+        // num_outputs derived from label_type
+        {
+            int K = LabelType_NumClasses(snap_label_type);
+            inf.has_num_outputs = 1;
+            inf.model_num_outputs = (K >= 2) ? K : 1;
+        }
+        // XGBoost hyperparams from operator's panel inputs (v5.9.5h)
+        inf.has_xgb_hyperparams = 1;
+        inf.xgb_max_depth = snap_max_depth;
+        inf.xgb_learning_rate = snap_learning_rate;
+        inf.xgb_n_estimators = snap_n_estimators;
+        inf.xgb_subsample = snap_subsample;
+        inf.xgb_colsample_bytree = snap_colsample_bytree;
+        inf.xgb_min_child_weight = snap_min_child_weight;
+        inf.xgb_seed = snap_seed;
+        {
+            static const char* tree_method_choices[] = { "hist", "exact", "approx", "auto" };
+            int tm_idx = (snap_tree_method_idx >= 0 && snap_tree_method_idx < 4)
+                         ? snap_tree_method_idx : 0;
+            size_t tmln = strnlen(tree_method_choices[tm_idx],
+                                   sizeof(inf.xgb_tree_method) - 1);
+            memcpy(inf.xgb_tree_method, tree_method_choices[tm_idx], tmln);
+            inf.xgb_tree_method[tmln] = '\0';
+        }
+        // Build flags fingerprint (v5.9.5h #10)
+        inf.has_build_flags_hash = 1;
+        inf.build_flags_hash = tt::BUILD_FLAGS_HASH();
+        // Scaler binding (v5.9.3a) — populate when scaler_persisted
+        if (scaler_persisted && state->scaler_sha256_hex[0]) {
+            inf.has_scaler = 1;
+            inf.feature_scaler_present = 1;
+            inf.scaler_sha256_hex = state->scaler_sha256_hex;
+        }
+
+        // ISO date for trained_on
+        char today[16] = {0};
+        time_t now = time(NULL);
+        struct tm tm_buf;
+        localtime_r(&now, &tm_buf);
+        strftime(today, sizeof(today), "%Y-%m-%d", &tm_buf);
+
+        // Convert WF mean (display %) to fraction (matches Full Validation's
+        // stamping convention: 0.0-1.0).
+        double wf_metric = (double)state->train_accuracy / 100.0;
+
+        StampWriteResult sr = stamp_write_for_model(
+            snap_model_path,
+            run_control->results.config_used.held_out_stamp_secret,
+            MODEL_FORMAT_VERSION,
+            today,
+            wf_metric,
+            /*held_out_metric=*/0.0,        // sentinel: training-only stamp
+            /*gap_threshold=*/0.0,           // sentinel: skip gap check
+            /*force=*/0,
+            FEATURE_REGISTRY_HASH(),
+            ENGINE_VERSION_STRING,
+            &inf);
+        state->tm_auto_stamp_ok = sr.ok;
+        if (sr.ok) {
+            size_t pn = strnlen(sr.stamp_path, sizeof(state->tm_auto_stamp_path_written) - 1);
+            memcpy(state->tm_auto_stamp_path_written, sr.stamp_path, pn);
+            state->tm_auto_stamp_path_written[pn] = '\0';
+            fprintf(stderr, "[train] auto-stamped: %s\n", sr.stamp_path);
+        } else {
+            size_t en = strnlen(sr.error, sizeof(state->tm_auto_stamp_error) - 1);
+            memcpy(state->tm_auto_stamp_error, sr.error, en);
+            state->tm_auto_stamp_error[en] = '\0';
+            fprintf(stderr, "[train] auto-stamp FAILED: %s\n", sr.error);
+        }
+    }
 
     // v5.9.4a — Gap I full closure: auto-unlink orphan scaler on cancel.
     // Pre-v5.9.4a (v5.9.3b) just logged "operator must rm orphan"; now we
@@ -2728,6 +2839,24 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                   "Run Full Validation auto-binds via in-process emit\n"
                                   "(v5.9.5b). For manual stamping via tools/stamp_model.sh,\n"
                                   "pass --scaler-sha256=<this value> + --feature-scaler-present=1.");
+        }
+        // v5.9.5j — Train Model auto-stamp result. Renders when worker
+        // attempted auto-stamp (cfg.auto_stamp_on_held_out=1 + non-empty
+        // cfg.held_out_stamp_secret). Operator gets visible feedback
+        // without leaving the Training panel.
+        if (state->tm_auto_stamp_attempted) {
+            if (state->tm_auto_stamp_ok) {
+                ImGui::TextColored(FoxmlColors::primary,
+                    "auto-stamped: %s", state->tm_auto_stamp_path_written);
+                ImGui::SetItemTooltip(
+                    "Train Model wrote a training-only stamp (Option A).\n"
+                    "Held-out metric is sentinel 0.0 — engine load treats\n"
+                    "as info-grade, not deploy-grade. For deploy-grade\n"
+                    "validation, use Run Full Validation panel.");
+            } else {
+                ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.35f, 1.0f),
+                    "auto-stamp FAILED: %s", state->tm_auto_stamp_error);
+            }
         }
         if (LabelType_IsRegression(state->label_type)) {
             ImGui::Text("Train MSE: %.6f  |  Pearson r: %.4f  (in-sample)",

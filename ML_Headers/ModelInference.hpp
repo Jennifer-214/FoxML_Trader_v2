@@ -1050,8 +1050,13 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
         }
     }
 
-    // 2. Gap acceptable
-    if (r.generalization_gap > r.gap_threshold) {
+    // 2. Gap acceptable. v5.9.5j sentinel: gap_threshold == 0.0 + held_out
+    // == 0.0 means "training-only stamp" (Train Model auto-stamp without
+    // held-out). Skip the gap check for these stamps; they're info-grade
+    // not deploy-grade. Operator wanting deploy validation runs Run Full
+    // Validation which produces a full stamp.
+    bool training_only_stamp = (r.gap_threshold == 0.0);
+    if (!training_only_stamp && r.generalization_gap > r.gap_threshold) {
         r.valid = 0;
         snprintf(r.reason, sizeof(r.reason),
             "generalization gap %.4f exceeds threshold %.4f",
