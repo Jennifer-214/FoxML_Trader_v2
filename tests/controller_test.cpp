@@ -12094,6 +12094,63 @@ e3_skip_load:;
               pcs.cfg_drift_strict_refused == 1);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0a.G.4 — Ensemble inference path ---\n");
+    {
+        // === Test G.4.1: Model_Predict_Ensemble with count=0 returns 0 ===
+        // No models = no prediction. Test the sentinel return.
+        ModelHandle<FP> empty_models[1];
+        Model_Init(&empty_models[0]);  // not loaded
+        float features[MODEL_MAX_FEATURES] = {0};
+        int sel_idx = -99;
+        float p = Model_Predict_Ensemble(empty_models, 0, features,
+                                          MODEL_NUM_FEATURES, &sel_idx);
+        check("v5.10.0a.G.4: count=0 returns 0.0", p == 0.0f);
+        check("v5.10.0a.G.4: count=0 sets selected_idx=-1", sel_idx == -1);
+        Model_Free(&empty_models[0]);
+
+        // === Test G.4.2: Model_Predict_Ensemble with count=1 single-model fallback ===
+        // count=1 = matches Model_Predict on models[0] exactly. Both return
+        // 0.0 here (no model loaded), but verifies path.
+        ModelHandle<FP> single[1];
+        Model_Init(&single[0]);
+        sel_idx = -99;
+        p = Model_Predict_Ensemble(single, 1, features, MODEL_NUM_FEATURES, &sel_idx);
+        check("v5.10.0a.G.4: count=1 falls back to single Model_Predict",
+              p == 0.0f);
+        check("v5.10.0a.G.4: count=1 sets selected_idx=0", sel_idx == 0);
+        Model_Free(&single[0]);
+
+        // === Test G.4.3: out_selected_idx = nullptr is allowed ===
+        // Caller may not care about which horizon won; nullptr should
+        // be safe.
+        ModelHandle<FP> two_unloaded[2];
+        Model_Init(&two_unloaded[0]);
+        Model_Init(&two_unloaded[1]);
+        p = Model_Predict_Ensemble(two_unloaded, 2, features,
+                                    MODEL_NUM_FEATURES, nullptr);
+        check("v5.10.0a.G.4: nullptr out_selected_idx is safe",
+              p == 0.0f || std::isfinite(p));  // either is OK; just no crash
+        Model_Free(&two_unloaded[0]);
+        Model_Free(&two_unloaded[1]);
+
+        // === Test G.4.4: MLStrategyState ensemble_zoo defaults nullptr ===
+        // After MLStrategy_Init, ensemble_zoo is nullptr (single-model path).
+        // Engine wiring assigns the pointer post-Init when cfg.horizon_list
+        // non-empty. Default-nullptr preserves pre-G.4 behavior.
+        MLStrategyState<FP> ml_state;
+        memset(&ml_state, 0, sizeof(ml_state));
+        Model_Init(&ml_state.buy_model);
+        // Construct minimal RollingStats + buy_conds for Init
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        BuySideGateConditions<FP> bc{};
+        MLStrategy_Init(&ml_state, &rolling, &bc);
+        check("v5.10.0a.G.4: MLStrategy_Init sets ensemble_zoo=nullptr",
+              ml_state.ensemble_zoo == nullptr);
+        check("v5.10.0a.G.4: MLStrategy_Init sets ensemble_last_selected_idx=-1",
+              ml_state.ensemble_last_selected_idx == -1);
+        Model_Free(&ml_state.buy_model);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.G.3 — EnsembleModelZoo sidecar ---\n");
     {
         // === Test G.3.1: ENSEMBLE_HORIZON_MAX matches plan (8) ===

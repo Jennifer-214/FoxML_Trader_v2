@@ -488,6 +488,78 @@ inline float Model_Predict(ModelHandle<F> *m, const float *features, int num_fea
 }
 
 //======================================================================================================
+// [v5.10.0a.G.4 — ENSEMBLE PREDICT (multi-horizon)]
+//======================================================================================================
+// Predict via N independent ModelHandles trained as a multi-horizon
+// ensemble. For each loaded model, compute prediction; return the
+// HIGHEST-ABSOLUTE-DEVIATION-FROM-NEUTRAL prediction (the most-confident
+// signal). Neutral = 0.5 for binary; this rule generalizes to "the
+// model that's surest about its prediction wins."
+//
+// Selection logic:
+//   - Binary models: distance from 0.5 = confidence; argmax(|p - 0.5|)
+//   - Regression: |p| as confidence proxy (zero = no edge)
+//
+// Returns:
+//   - The selected member's raw prediction value
+//   - *out_selected_idx (optional): which member won (0..count-1)
+//
+// Operator-side workflow:
+//   1. Train N horizons via Train Multi-Horizon (G.1)
+//   2. Engine boot loads N models per role into EnsembleModelZoo (G.3)
+//   3. Per slow-path predict, ensemble dispatch picks highest-confidence
+//      model's output (this function)
+//
+// Latency: linear in N (each member predicts independently). Operator
+// can measure via Item A timer; default cfg.horizon_count=0 keeps
+// single-model path with zero overhead.
+//
+// Single-model fallback: if count <= 1, returns Model_Predict on
+// models[0]. Safe to call from MLStrategy regardless of ensemble state.
+template <unsigned F>
+inline float Model_Predict_Ensemble(ModelHandle<F> *models,
+                                      int count,
+                                      const float *features,
+                                      int num_features,
+                                      int *out_selected_idx = nullptr) {
+    if (count <= 0) {
+        if (out_selected_idx) *out_selected_idx = -1;
+        return 0.0f;
+    }
+    if (count == 1) {
+        if (out_selected_idx) *out_selected_idx = 0;
+        return Model_Predict(&models[0], features, num_features);
+    }
+
+    float best_pred = 0.0f;
+    float best_conf = -1.0f;  // sentinel: "no valid prediction yet"
+    int   best_idx = 0;
+    for (int i = 0; i < count; ++i) {
+        if (!Model_IsLoaded(&models[i])) continue;
+        float p = Model_Predict(&models[i], features, num_features);
+        if (std::isnan(p) || std::isinf(p)) continue;
+        // Confidence = |p - 0.5| for binary (centered at neutral), or
+        // |p| for regression (zero = no edge). Both metrics: higher
+        // value = more-confident model.
+        float conf = (p > 1.0f || p < -1.0f) ? std::fabs(p)
+                                              : std::fabs(p - 0.5f);
+        if (conf > best_conf) {
+            best_conf = conf;
+            best_pred = p;
+            best_idx  = i;
+        }
+    }
+    if (best_conf < 0.0f) {
+        // No member produced a valid prediction; fall back to model[0]
+        // raw output (matches single-model failure mode).
+        if (out_selected_idx) *out_selected_idx = 0;
+        return Model_Predict(&models[0], features, num_features);
+    }
+    if (out_selected_idx) *out_selected_idx = best_idx;
+    return best_pred;
+}
+
+//======================================================================================================
 // [PREDICT MULTI — multi-class softmax output]
 //======================================================================================================
 // fills `out_buf` with up to max_outputs class probabilities. returns the number

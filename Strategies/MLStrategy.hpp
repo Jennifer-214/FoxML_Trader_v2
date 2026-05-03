@@ -20,6 +20,7 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/ModelInference.hpp"
+#include "../ML_Headers/CoreModelZoo.hpp"  // v5.10.0a.G.4: EnsembleModelZoo for multi-horizon
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
 #include "../CoreFrameworks/OrderGates.hpp"
 #include <cmath>  // v5.9.0: std::isnan/isinf for prediction validation
@@ -33,6 +34,14 @@ template <unsigned F> struct MLStrategyState {
     FPN<F> last_prediction;             // last model output (for display)
     BuySideGateConditions<F> buy_conds_initial; // anchor from warmup init
     int model_ready;                    // 1 if model loaded and features available
+    // v5.10.0a.G.4 — optional ensemble dispatch. nullptr default = single-
+    // model path (existing behavior). When engine sets this pointer +
+    // ensemble->active=1, BuySignal dispatches via Model_Predict_Ensemble
+    // over ensemble->buy_signal[0..buy_signal_count-1]. Plumbing is
+    // engine-side: PortfolioController owns the EnsembleModelZoo and
+    // assigns this pointer at MLStrategy_Init time.
+    EnsembleModelZoo<F>* ensemble_zoo;
+    int ensemble_last_selected_idx;     // for display: which horizon won
 };
 
 //======================================================================================================
@@ -48,6 +57,12 @@ inline void MLStrategy_Init(MLStrategyState<F> *state, const RollingStats<F> *ro
     state->buy_conds_initial = *buy_conds;
     state->model_ready = Model_IsLoaded(&state->buy_model);
     memset(state->feature_buf, 0, sizeof(state->feature_buf));
+    // v5.10.0a.G.4 — ensemble pointer defaults to nullptr. Engine wiring
+    // (PortfolioController boot) assigns it from cfg.horizon_list-loaded
+    // EnsembleModelZoo when ensemble inference is active. nullptr = single-
+    // model path; bytewise-equivalent to pre-v5.10.0a.G.4 behavior.
+    state->ensemble_zoo = nullptr;
+    state->ensemble_last_selected_idx = -1;
 
     if (state->model_ready)
         fprintf(stderr, "[ML] strategy initialized — model ready, %d features\n",
@@ -136,8 +151,24 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
         return conds;
     }
 
-    // run inference
-    float prediction = Model_Predict(&state->buy_model, state->feature_buf, n);
+    // v5.10.0a.G.4 — ensemble dispatch when active. Operator opts in via
+    // cfg.horizon_list non-empty; engine boot wires state->ensemble_zoo
+    // to the loaded EnsembleModelZoo. If ensemble inactive (nullptr or
+    // active=0), falls through to single-model Model_Predict — bytewise-
+    // equivalent to pre-v5.10.0a.G.4 behavior.
+    float prediction;
+    int   selected_horizon_idx = -1;
+    if (state->ensemble_zoo && state->ensemble_zoo->active &&
+        state->ensemble_zoo->buy_signal_count > 0) {
+        prediction = Model_Predict_Ensemble(state->ensemble_zoo->buy_signal,
+                                              state->ensemble_zoo->buy_signal_count,
+                                              state->feature_buf, n,
+                                              &selected_horizon_idx);
+    } else {
+        prediction = Model_Predict(&state->buy_model, state->feature_buf, n);
+    }
+    state->ensemble_last_selected_idx = selected_horizon_idx;
+
     // v5.9.0 — NaN/Inf in prediction → no entry. XGBoost can return NaN on
     // pathological inputs; `prediction > threshold` evaluates false on NaN
     // (silent miss). Guard explicitly + log.
