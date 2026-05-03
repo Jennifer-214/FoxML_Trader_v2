@@ -1983,8 +1983,13 @@ struct TrainingPanelState {
     pthread_t       hp_tid;
     bool            hp_has_results;
     // v5.10.0a.G.1 — Multi-Horizon training state. Operator clicks Train
-    // Multi-Horizon button (gated on cfg.horizon_count > 0); worker
-    // trains N models, one per horizon in cfg.horizon_list.
+    // Multi-Horizon button; worker trains N models, one per horizon.
+    // v5.10.0a-bugfix2 — horizons editable IN PANEL via CSV input
+    // (operator no longer needs to edit cfg.horizon_list + reload).
+    // ui_horizon_csv is the operator-typed string (e.g. "100,500,1000");
+    // ui_horizon_list/_count are parsed on each render. cfg.horizon_list
+    // still works as a fallback if ui_horizon_csv is empty (back-compat
+    // for operators who already set cfg).
     volatile int    mh_running;
     volatile int    mh_progress;            // 1..N as horizons complete
     volatile int    mh_total;                // N (set by worker)
@@ -1992,6 +1997,9 @@ struct TrainingPanelState {
     volatile int    mh_cancel;
     volatile int    mh_complete;
     pthread_t       mh_tid;
+    char            ui_horizon_csv[128];    // operator-typed; parsed → ui_horizon_*
+    int             ui_horizon_list[8];     // ENSEMBLE_HORIZON_MAX
+    int             ui_horizon_count;
 };
 
 static inline void TrainingPanel_Init(TrainingPanelState *state) {
@@ -2081,6 +2089,15 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->mh_current_horizon = 0;
     state->mh_cancel          = 0;
     state->mh_complete        = 0;
+    // v5.10.0a-bugfix2 — UI horizon list defaults empty; operator types
+    // CSV (or leaves blank to fall back to cfg.horizon_list). Pre-fill
+    // with a sensible suggestion that matches the original Idea #4 spec
+    // example so operators see what shape the field expects.
+    strncpy(state->ui_horizon_csv, "100,500,1000",
+            sizeof(state->ui_horizon_csv) - 1);
+    state->ui_horizon_csv[sizeof(state->ui_horizon_csv) - 1] = '\0';
+    for (int i = 0; i < 8; ++i) state->ui_horizon_list[i] = 0;
+    state->ui_horizon_count = 0;
 }
 
 // walk-forward worker thread
@@ -3525,16 +3542,67 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         }
 
         // v5.10.0a.G.1 — Train Multi-Horizon button. Adjacent to Train
-        // Model so operators see both options. Gated on
-        // cfg.horizon_count > 0 (operator must set horizon_list cfg first).
-        ImGui::SameLine();
+        // Model so operators see both options. Gated on horizons being
+        // configured (in-panel CSV input OR cfg.horizon_list fallback).
+        // v5.10.0a-bugfix2: in-panel CSV editor — operator no longer
+        // needs to edit cfg.horizon_list + reload to multi-horizon train.
         const auto& mh_cfg = run_control->results.config_used;
-        bool mh_can_train = can_train && (mh_cfg.horizon_count > 0);
+
+        // Parse the operator's CSV input on each render. Cheap (typically
+        // 1-8 entries; bounded loop). Updates state->ui_horizon_list/_count
+        // so the click handler reads from a stable snapshot.
+        {
+            int n = 0;
+            const char* p = state->ui_horizon_csv;
+            while (*p && n < 8) {
+                while (*p == ' ' || *p == '\t' || *p == ',') p++;
+                if (!*p) break;
+                char* end = nullptr;
+                long v = strtol(p, &end, 10);
+                if (end == p) break;
+                if (v > 0 && v <= 1000000)
+                    state->ui_horizon_list[n++] = (int)v;
+                p = end;
+            }
+            state->ui_horizon_count = n;
+        }
+
+        // Effective horizons: operator's UI input takes priority; if
+        // empty (CSV doesn't parse to any valid horizon), fall back to
+        // cfg.horizon_list (back-compat for operators who already wired
+        // the cfg).
+        int eff_horizon_count = state->ui_horizon_count > 0
+                              ? state->ui_horizon_count
+                              : mh_cfg.horizon_count;
+        const int *eff_horizons = state->ui_horizon_count > 0
+                                 ? state->ui_horizon_list
+                                 : mh_cfg.horizon_list;
+
+        // CSV input field. Operator types "100,500,1000" (or whatever);
+        // parse runs every render so the displayed cell-count reflects
+        // current input.
+        ImGui::PushItemWidth(220);
+        ImGui::InputText("Horizons (CSV)",
+                         state->ui_horizon_csv,
+                         sizeof(state->ui_horizon_csv));
+        ImGui::PopItemWidth();
+        ImGui::SetItemTooltip(
+            "Comma-separated forward-tick horizons for Train Multi-Horizon.\n"
+            "Example: 100,500,1000  →  trains 3 models with different\n"
+            "label_forward_ticks values, saves each to its own dir.\n\n"
+            "Empty falls back to cfg.horizon_list. Max 8 horizons.\n"
+            "Each horizon must be 1..1,000,000 ticks.");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%d horizon%s parsed)",
+                            state->ui_horizon_count,
+                            state->ui_horizon_count == 1 ? "" : "s");
+
+        bool mh_can_train = can_train && (eff_horizon_count > 0);
         if (!mh_can_train) ImGui::BeginDisabled();
         if (ImGui::Button("Train Multi-Horizon")) {
             state->mh_running = 1;
             state->mh_progress = 0;
-            state->mh_total = mh_cfg.horizon_count;
+            state->mh_total = eff_horizon_count;
             state->mh_current_horizon = 0;
             state->mh_cancel = 0;
             state->mh_complete = 0;
@@ -3568,25 +3636,32 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             mh_args->snap_min_child_weight = state->ui_min_child_weight;
             mh_args->snap_seed             = state->ui_seed;
             mh_args->snap_tree_method_idx  = state->ui_tree_method_idx;
-            mh_args->snap_horizon_count = mh_cfg.horizon_count;
-            for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i)
-                mh_args->snap_horizons[i] = mh_cfg.horizon_list[i];
+            // v5.10.0a-bugfix2 — snapshot effective horizons (UI takes
+            // priority over cfg fallback at click time).
+            mh_args->snap_horizon_count = eff_horizon_count;
+            for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
+                mh_args->snap_horizons[i] = (i < eff_horizon_count)
+                    ? eff_horizons[i] : 0;
+            }
             pthread_create(&state->mh_tid, NULL, train_multi_horizon_worker_fn, mh_args);
             pthread_detach(state->mh_tid);
         }
         if (!mh_can_train) {
             ImGui::EndDisabled();
-            if (mh_cfg.horizon_count == 0) {
+            if (eff_horizon_count == 0) {
                 ImGui::SameLine();
-                ImGui::TextDisabled("(set cfg.horizon_list=100,500,... to enable)");
+                ImGui::TextDisabled("(set Horizons CSV above OR cfg.horizon_list to enable)");
             }
         }
         ImGui::SetItemTooltip(
-            "Trains N XGBoost models, one per horizon in cfg.horizon_list.\n"
-            "Saves to models/<class>/<run_name>_horizon_<H>/<role>.json.\n\n"
-            "Operator manually picks which horizon to deploy (until\n"
-            "v5.10.0a.G.4 ships ensemble inference). Past Runs panel\n"
-            "treats each horizon as a separate row for Compare-to-Baseline.");
+            "Trains N XGBoost models, one per horizon in 'Horizons (CSV)' above.\n"
+            "Each horizon recomputes labels with that label_forward_ticks value,\n"
+            "trains a separate model, saves to:\n"
+            "  models/<class>/<run_name>_horizon_<H>/<role>.json\n\n"
+            "Operator manually picks which horizon to deploy (or relies on\n"
+            "v5.10.0a.G.4 ensemble inference once engine wiring lands). Past\n"
+            "Runs panel treats each horizon as a separate row for\n"
+            "Compare-to-Baseline.");
 
         // Multi-horizon progress bar (rendered when worker is running)
         if (state->mh_running) {
