@@ -1303,6 +1303,11 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         XGBoosterSetParam(booster, "nthread", "1");
         XGBoosterSetParam(booster, "verbosity", "0");
         XGBoosterSetParam(booster, "seed", "42");
+        // v5.9.5g — fast histogram tree construction. Without this, default
+        // `auto` often picks `exact` for these dataset sizes, making each
+        // iteration 10-30s on multi-million-sample WF folds. `hist` is
+        // 5-10x faster + accuracy-equivalent for binary/regression.
+        XGBoosterSetParam(booster, "tree_method", "hist");
         // class balance — kind-specific.
         // Binary: scale_pos_weight = n_neg/n_pos (single param).
         // Multiclass: per-sample inverse-frequency weights via DMatrix info.
@@ -1592,6 +1597,9 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
         XGBoosterSetParam(booster, "nthread", "1");
         XGBoosterSetParam(booster, "verbosity", "0");
         XGBoosterSetParam(booster, "seed", "42");
+        // v5.9.5g — fast histogram tree construction. See WF site above
+        // for rationale. Held-out path mirrors WF for train-serve parity.
+        XGBoosterSetParam(booster, "tree_method", "hist");
 
         if (!is_regression && !is_multiclass) {
             int n_pos = 0, n_neg = 0;

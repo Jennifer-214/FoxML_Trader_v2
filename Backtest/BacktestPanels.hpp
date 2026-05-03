@@ -1937,6 +1937,14 @@ static inline void *train_model_worker_fn(void *arg) {
     }
     XGBoosterSetParam(booster, "nthread", "4");
     XGBoosterSetParam(booster, "verbosity", "0");
+    // v5.9.5g — fast histogram tree construction. Without this, XGBoost
+    // defaults to `auto` which often picks `exact` for typical training
+    // sizes, making each iteration 10-30s on 3.9M-sample datasets. That
+    // makes Cancel Training feel broken (responsiveness = next iter time).
+    // `hist` is 5-10x faster + accuracy-equivalent for binary/regression.
+    // (XGBoost 2.x already defaults to this for large datasets; we set
+    // it explicitly to guarantee fast iters across versions.)
+    XGBoosterSetParam(booster, "tree_method", "hist");
 
     // v5.9.0d — iteration loop with tm_cancel poll. XGBoost has no
     // mid-iteration cancel; cancel response bounded by one iter time
