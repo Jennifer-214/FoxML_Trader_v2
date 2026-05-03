@@ -681,6 +681,22 @@ template <unsigned F> struct ControllerConfig {
   int      feature_collect_max_gb; // soft cap on feature_matrix RAM; default 12
   int      wf_split_max_gb;        // soft cap on WF split RAM; default 8
   int      held_out_max_gb;        // soft cap on held-out RAM; default 4
+
+  // v5.10.0a Item #4 — multi-horizon training. Comma-separated list of
+  // forward-tick horizons; Train Model worker iterates and trains one
+  // model per horizon. Empty (default) = single-horizon (uses
+  // label_forward_ticks from per-run state). Cfg field rather than
+  // RunConfig because operator typically standardizes horizons across
+  // training experiments.
+  // Example: horizon_list=100,500,1000,5000 → 4 trainings, saved as
+  // <model_dir>/horizon_100/<role>.json etc.
+  // LITE in v5.10.0a: trains + saves N models; operator manually picks
+  // one to deploy. Ensemble inference (load all N at runtime, blend
+  // predictions) deferred to v5.10.0a.x — needs stamp body extension +
+  // multi-model load in CoreModelZoo, both genuinely complex.
+  static constexpr int HORIZON_LIST_MAX = 8;
+  int      horizon_list[HORIZON_LIST_MAX];  // 0 = unused slot
+  int      horizon_count;                    // number of populated slots
 };
 
 //======================================================================================================
@@ -958,6 +974,12 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.feature_collect_max_gb  = 12;  // advisory cap; WARN-only
   cfg.wf_split_max_gb         = 8;
   cfg.held_out_max_gb         = 4;
+  // v5.10.0a — multi-horizon training. Default empty = single-horizon
+  // (Train Model uses TrainingPanel's label_forward_ticks). Operator opts
+  // in by setting cfg.horizon_list=100,500,1000.
+  for (int i = 0; i < ControllerConfig<F>::HORIZON_LIST_MAX; ++i)
+      cfg.horizon_list[i] = 0;
+  cfg.horizon_count = 0;
   cfg.health_log_level            = 0;                            // 0=info, 1=debug, 2=trace
   cfg.reconcile_interval_sec      = 0;                            // 0 = boot-only
   cfg.reconcile_dry_run           = 1;                            // safer default; flip to 0 deliberately
@@ -1349,6 +1371,31 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(feature_collect_max_gb)
     CFG_PARSE_INT(wf_split_max_gb)
     CFG_PARSE_INT(held_out_max_gb)
+    // v5.10.0a — horizon_list CSV parser. Comma-separated ints, max
+    // HORIZON_LIST_MAX entries. Caller can't use CFG_PARSE_INT (single
+    // int) or CFG_PARSE_FPN. Custom branch.
+    if (strcmp(key, "horizon_list") == 0) {
+        int n = 0;
+        const char* p = val;
+        while (*p && n < ControllerConfig<F>::HORIZON_LIST_MAX) {
+            // skip whitespace + commas
+            while (*p == ' ' || *p == '\t' || *p == ',') p++;
+            if (!*p) break;
+            char* end = NULL;
+            long v = strtol(p, &end, 10);
+            if (end == p) break;  // parse failure
+            if (v > 0 && v <= 1000000)  // sanity: 1 to 1M ticks
+                cfg.horizon_list[n++] = (int)v;
+            p = end;
+        }
+        cfg.horizon_count = n;
+        if (n == 0) {
+            fprintf(stderr, "[cfg] horizon_list='%s' parsed 0 valid horizons; "
+                    "expected CSV like '100,500,1000'. Multi-horizon disabled.\n",
+                    val);
+        }
+        continue;
+    }
     if (strcmp(key, "held_out_gate_strict") == 0) {
         cfg.held_out_gate_strict = atoi(val);
         continue;

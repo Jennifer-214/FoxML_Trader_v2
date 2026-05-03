@@ -592,6 +592,13 @@ struct PastRunsState {
     // v5.9.5i — stamp audit filter. 0 = all, 1 = stamped only, 2 = OK only,
     // 3 = FAIL only, 4 = unstamped only.
     int     stamp_filter;
+    // v5.10.0a — Compare-to-Baseline slots. Operator picks two runs from
+    // dropdowns; Compare button opens a modal showing metric deltas.
+    // -1 = unselected. Persists across rescans (modal closes on rescan
+    // for safety; indices may shift).
+    int     compare_baseline_idx;
+    int     compare_candidate_idx;
+    int     compare_modal_open;  // 1 = render modal next frame
 };
 
 static inline void PastRuns_Init(PastRunsState *s) {
@@ -599,6 +606,10 @@ static inline void PastRuns_Init(PastRunsState *s) {
     s->selected = -1;
     s->sort_column = 6;          // default sort by val_accuracy descending
     s->sort_descending = 1;
+    // v5.10.0a — Compare slots default to "unselected".
+    s->compare_baseline_idx = -1;
+    s->compare_candidate_idx = -1;
+    s->compare_modal_open = 0;
 }
 
 // helper: parse a key=value line into a (key, value) pair via simple split.
@@ -788,6 +799,168 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                             "Train a model and click 'Save Run' in the Training panel.");
         ImGui::End();
         return;
+    }
+
+    // v5.10.0a — Compare-to-Baseline. Two dropdowns + Compare button on
+    // the same line as Rescan; modal pops up showing metric deltas. Value:
+    // validates v5.10.0 perf optimizations didn't change model behavior
+    // (pick foundation-baseline vs post-fix run; metrics should match
+    // within tolerance). Headless backdoor: existing summary.txt files
+    // are diff-able with `diff models/A/summary.txt models/B/summary.txt`.
+    {
+        ImGui::Separator();
+        ImGui::TextDisabled("Compare:");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(180);
+        if (ImGui::BeginCombo("Baseline",
+                              s->compare_baseline_idx >= 0 && s->compare_baseline_idx < s->count
+                                ? s->runs[s->compare_baseline_idx].dir_name
+                                : "(pick a run)")) {
+            for (int i = 0; i < s->count; ++i) {
+                bool sel = (i == s->compare_baseline_idx);
+                if (ImGui::Selectable(s->runs[i].dir_name, sel))
+                    s->compare_baseline_idx = i;
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(180);
+        if (ImGui::BeginCombo("Candidate",
+                              s->compare_candidate_idx >= 0 && s->compare_candidate_idx < s->count
+                                ? s->runs[s->compare_candidate_idx].dir_name
+                                : "(pick a run)")) {
+            for (int i = 0; i < s->count; ++i) {
+                bool sel = (i == s->compare_candidate_idx);
+                if (ImGui::Selectable(s->runs[i].dir_name, sel))
+                    s->compare_candidate_idx = i;
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        bool can_compare = (s->compare_baseline_idx >= 0 &&
+                             s->compare_candidate_idx >= 0 &&
+                             s->compare_baseline_idx != s->compare_candidate_idx);
+        if (!can_compare) ImGui::BeginDisabled();
+        if (ImGui::Button("Compare")) {
+            s->compare_modal_open = 1;
+            ImGui::OpenPopup("Compare to Baseline");
+        }
+        if (!can_compare) ImGui::EndDisabled();
+
+        // Modal: render unconditionally (ImGui no-ops when not open). Inside:
+        // pull both rows, render metric deltas with color-coded thresholds.
+        // bool proxy so the int compare_modal_open can drive ImGui's bool*
+        // signature; sync back after the modal returns.
+        bool modal_open_b = (s->compare_modal_open != 0);
+        if (ImGui::BeginPopupModal("Compare to Baseline", &modal_open_b,
+                                    ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (s->compare_baseline_idx >= 0 && s->compare_baseline_idx < s->count &&
+                s->compare_candidate_idx >= 0 && s->compare_candidate_idx < s->count) {
+                const PastRun *base = &s->runs[s->compare_baseline_idx];
+                const PastRun *cand = &s->runs[s->compare_candidate_idx];
+
+                ImGui::Text("Baseline:  %s  (%s, %d-class)",
+                            base->dir_name, base->role,
+                            base->expected_num_classes);
+                ImGui::Text("Candidate: %s  (%s, %d-class)",
+                            cand->dir_name, cand->role,
+                            cand->expected_num_classes);
+                if (base->expected_num_classes != cand->expected_num_classes) {
+                    ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.30f, 1.0f),
+                        "WARN: different class counts; metrics may not be directly comparable");
+                }
+                ImGui::Separator();
+
+                // Helper: render one metric row. delta_pp = candidate - baseline
+                // in percentage points. green = candidate beats by >2pp,
+                // red = candidate worse by >2pp, yellow within ±2pp.
+                auto metric_row = [](const char* label, float base_val,
+                                      float cand_val, const char* fmt,
+                                      bool higher_is_better, double tol_pp) {
+                    double delta = (double)cand_val - (double)base_val;
+                    ImVec4 col;
+                    if (fabs(delta) <= tol_pp) col = ImVec4(0.85f, 0.80f, 0.50f, 1.0f); // yellow within tol
+                    else if ((delta > 0 && higher_is_better) ||
+                             (delta < 0 && !higher_is_better))
+                        col = ImVec4(0.55f, 0.76f, 0.51f, 1.0f); // green better
+                    else
+                        col = ImVec4(0.95f, 0.35f, 0.35f, 1.0f); // red worse
+                    char base_buf[32], cand_buf[32];
+                    snprintf(base_buf, sizeof(base_buf), fmt, base_val);
+                    snprintf(cand_buf, sizeof(cand_buf), fmt, cand_val);
+                    ImGui::Text("%-22s  base=%-8s  cand=%-8s",
+                                label, base_buf, cand_buf);
+                    ImGui::SameLine();
+                    ImGui::TextColored(col, " (Δ %+.3f)", delta);
+                };
+
+                ImGui::TextDisabled("Performance metrics");
+                metric_row("Train accuracy:",
+                           base->train_accuracy, cand->train_accuracy,
+                           "%.1f%%", true, 2.0);
+                if (base->has_wf_results && cand->has_wf_results) {
+                    if (base->expected_num_classes == 1 || cand->expected_num_classes == 1) {
+                        metric_row("Val correlation (r):",
+                                   base->val_correlation, cand->val_correlation,
+                                   "%.3f", true, 0.05);
+                        metric_row("Val MSE:",
+                                   base->val_mse, cand->val_mse,
+                                   "%.5f", false, 0.001);
+                    } else {
+                        metric_row("Val accuracy:",
+                                   base->val_accuracy, cand->val_accuracy,
+                                   "%.1f%%", true, 2.0);
+                    }
+                    metric_row("Train/val gap:",
+                               base->train_val_gap, cand->train_val_gap,
+                               "%.4f", false, 0.02);
+                    ImGui::Text("Overfit folds:        base=%-8d  cand=%-8d",
+                                base->overfit_folds, cand->overfit_folds);
+                } else if (!base->has_wf_results || !cand->has_wf_results) {
+                    ImGui::TextColored(ImVec4(0.85f, 0.80f, 0.50f, 1.0f),
+                        "WF metrics missing on %s%s%s — only train accuracy compared.",
+                        !base->has_wf_results ? "baseline" : "",
+                        (!base->has_wf_results && !cand->has_wf_results) ? " + " : "",
+                        !cand->has_wf_results ? "candidate" : "");
+                }
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Hyperparams (training-time)");
+                ImGui::Text("Max depth:            base=%-8d  cand=%-8d",
+                            base->max_depth, cand->max_depth);
+                ImGui::Text("Learning rate:        base=%-8.3f  cand=%-8.3f",
+                            base->learning_rate, cand->learning_rate);
+                ImGui::Text("N estimators:         base=%-8d  cand=%-8d",
+                            base->n_estimators, cand->n_estimators);
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Label config (sweep / drift detection)");
+                metric_row("Label TP %:",
+                           base->label_tp_pct, cand->label_tp_pct,
+                           "%.3f", true, 0.001);
+                metric_row("Label SL %:",
+                           base->label_sl_pct, cand->label_sl_pct,
+                           "%.3f", true, 0.001);
+                ImGui::Text("Lookahead ticks:      base=%-8d  cand=%-8d",
+                            base->label_lookahead_ticks, cand->label_lookahead_ticks);
+
+                ImGui::Separator();
+                if (ImGui::Button("Close")) {
+                    s->compare_modal_open = 0;
+                    ImGui::CloseCurrentPopup();
+                }
+            } else {
+                ImGui::Text("(invalid selection)");
+                if (ImGui::Button("Close")) {
+                    s->compare_modal_open = 0;
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::EndPopup();
+        }
+        // Sync proxy back to int storage (ImGui clears modal_open_b when
+        // operator clicks the X button on the modal).
+        s->compare_modal_open = modal_open_b ? 1 : 0;
     }
 
     // Split runs by label kind so each tab has its own column set.
@@ -1497,10 +1670,64 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
 
     ImGui::SliderInt("Parameters", &state->num_params, 1, 2);
 
+    // v5.10.0a — sweepable cfg key picker. Supports the cfg fields recognized
+    // by ConfigField_Set (BacktestEngine.hpp:1966+). Operator selects from
+    // dropdown to fill state->ranges[p].key; InputText still editable for
+    // operators who know which obscure key they want.
+    static const char* sweep_keys[] = {
+        // Existing pre-v5.10
+        "take_profit_pct", "stop_loss_pct", "fee_rate", "entry_offset_pct",
+        "slippage_pct", "max_exposure_pct", "risk_pct", "max_drawdown_pct",
+        "offset_stddev_mult", "spacing_multiplier",
+        "momentum_breakout_mult", "momentum_tp_mult", "momentum_sl_mult",
+        "tp_hold_score", "tp_trail_mult", "sl_trail_mult", "no_trade_band_mult",
+        "ml_buy_threshold", "danger_warn_stddevs", "danger_crash_stddevs",
+        "poll_interval", "warmup_ticks", "max_hold_ticks", "sl_cooldown_base",
+        // v5.10.0a — XGBoost hyperparam sweeping (cfg-bound since v5.9.5h
+        // + v5.10.0D thread counts). Common operator targets:
+        //   xgb_subsample / xgb_colsample_bytree → tree regularization
+        //   xgb_min_child_weight → leaf-purity gate
+        //   xgb_seed → reproducibility check (sweep multiple seeds, look at
+        //              variance to detect overfit-to-seed)
+        "xgb_subsample", "xgb_colsample_bytree", "xgb_min_child_weight",
+        "xgb_seed", "xgb_train_nthread", "xgb_eval_nthread"
+    };
+    constexpr int sweep_keys_count = (int)(sizeof(sweep_keys) / sizeof(sweep_keys[0]));
+
     for (int p = 0; p < state->num_params; p++) {
         ImGui::PushID(p);
         char hdr[32]; snprintf(hdr, sizeof(hdr), "Param %d", p + 1);
         if (ImGui::CollapsingHeader(hdr, ImGuiTreeNodeFlags_DefaultOpen)) {
+            // v5.10.0a — dropdown that fills the Key InputText on click.
+            // Compute current selection by matching state->ranges[p].key
+            // against the dropdown list; if not found, sentinel "(custom)"
+            // shows the operator they typed something off-list.
+            int sel_idx = -1;
+            for (int k = 0; k < sweep_keys_count; ++k) {
+                if (strcmp(state->ranges[p].key, sweep_keys[k]) == 0) {
+                    sel_idx = k;
+                    break;
+                }
+            }
+            int combo_idx = sel_idx;  // -1 indicates custom / unmatched
+            if (ImGui::BeginCombo("Quick-pick",
+                                  sel_idx >= 0 ? sweep_keys[sel_idx] : "(custom)",
+                                  0)) {
+                for (int k = 0; k < sweep_keys_count; ++k) {
+                    bool sel = (k == combo_idx);
+                    if (ImGui::Selectable(sweep_keys[k], sel)) {
+                        strncpy(state->ranges[p].key, sweep_keys[k],
+                                sizeof(state->ranges[p].key) - 1);
+                        state->ranges[p].key[sizeof(state->ranges[p].key) - 1] = '\0';
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SetItemTooltip(
+                "Pre-filled list of cfg fields ConfigField_Set knows.\n"
+                "Selecting fills the Key field below; operator can also\n"
+                "type any cfg field name that ConfigField_Set recognizes.");
+
             ImGui::InputText("Key", state->ranges[p].key, 32);
             ImGui::InputDouble("Min", &state->ranges[p].lo, 0.1, 1.0, "%.2f");
             ImGui::InputDouble("Max", &state->ranges[p].hi, 0.1, 1.0, "%.2f");

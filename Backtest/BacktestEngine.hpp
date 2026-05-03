@@ -1999,9 +1999,30 @@ static inline int ConfigField_Set(ControllerConfig<BACKTEST_FP> *cfg, const char
     OPT_SET_U32(max_hold_ticks)
     OPT_SET_U32(sl_cooldown_base)
 
+    // v5.10.0a — XGBoost hyperparam sweeping. Hyperparams have been
+    // cfg-bound since v5.9.5h; v5.10.0D added thread-count fields.
+    // Operator can now grid-search over these via OptimizerPanel.
+    // xgb_tree_method (string) is intentionally excluded — sweep over
+    // discrete categorical values is not supported by OptimizerRange's
+    // numeric step model.
+    #define OPT_SET_INT(name) \
+        if (strcmp(key, #name) == 0) { cfg->name = (int)value; return 1; }
+    OPT_SET_FPN(xgb_subsample)
+    OPT_SET_FPN(xgb_colsample_bytree)
+    OPT_SET_INT(xgb_min_child_weight)
+    OPT_SET_INT(xgb_seed)
+    OPT_SET_INT(xgb_train_nthread)
+    OPT_SET_INT(xgb_eval_nthread)
+    // Note: label_tp_pct / label_sl_pct / label_forward_ticks are on
+    // BacktestRunConfig (per-run), not ControllerConfig. Sweeping those
+    // requires a separate Sweep extension; deferred until operator
+    // demand. For now: train your candidates with TrainingPanel and use
+    // the Optimizer for ML hyperparams + engine cfg fields.
+
     #undef OPT_SET_PCT
     #undef OPT_SET_FPN
     #undef OPT_SET_U32
+    #undef OPT_SET_INT
     return 0;
 }
 
