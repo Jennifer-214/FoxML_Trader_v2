@@ -24,6 +24,7 @@
 #include "../GUI/CandleAccumulator.hpp"
 #include "LabelFunctions.hpp"
 #include "BacktestSnapshot.hpp"
+#include "XGBHyperparams.hpp"  // v5.9.5h: single source of truth for XGBoost hyperparams
 #include "ValidationSplit.hpp"
 #include "OverfitDetection.hpp"
 #include "HeldOutSplit.hpp"  // Phase 7prep — locked held-out test set discipline
@@ -1295,19 +1296,14 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         } else {
             XGBoosterSetParam(booster, "objective", "binary:logistic");
         }
-        XGBoosterSetParam(booster, "max_depth", "6");
-        XGBoosterSetParam(booster, "eta", "0.1");
-        XGBoosterSetParam(booster, "subsample", "0.8");
-        XGBoosterSetParam(booster, "colsample_bytree", "0.8");
-        XGBoosterSetParam(booster, "min_child_weight", "5");
-        XGBoosterSetParam(booster, "nthread", "1");
-        XGBoosterSetParam(booster, "verbosity", "0");
-        XGBoosterSetParam(booster, "seed", "42");
-        // v5.9.5g — fast histogram tree construction. Without this, default
-        // `auto` often picks `exact` for these dataset sizes, making each
-        // iteration 10-30s on multi-million-sample WF folds. `hist` is
-        // 5-10x faster + accuracy-equivalent for binary/regression.
-        XGBoosterSetParam(booster, "tree_method", "hist");
+        // v5.9.5h — XGBHyperparams struct + apply helper. Single source of
+        // truth shared with HeldOut training (BacktestEngine.hpp:~1592) and
+        // Train Model worker (BacktestPanels.hpp). Defaults match the
+        // pre-v5.9.5h hardcoded values bytewise; non-tuning operators get
+        // identical training output. nthread=1 for deterministic per-fold
+        // output (mirrors HeldOut; Train Model uses 4 for faster GUI iter).
+        tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
+        tt::XGBHyperparams_Apply(booster, hp, /*nthread=*/1);
         // class balance — kind-specific.
         // Binary: scale_pos_weight = n_neg/n_pos (single param).
         // Multiclass: per-sample inverse-frequency weights via DMatrix info.
@@ -1589,17 +1585,11 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
         } else {
             XGBoosterSetParam(booster, "objective", "binary:logistic");
         }
-        XGBoosterSetParam(booster, "max_depth", "6");
-        XGBoosterSetParam(booster, "eta", "0.1");
-        XGBoosterSetParam(booster, "subsample", "0.8");
-        XGBoosterSetParam(booster, "colsample_bytree", "0.8");
-        XGBoosterSetParam(booster, "min_child_weight", "5");
-        XGBoosterSetParam(booster, "nthread", "1");
-        XGBoosterSetParam(booster, "verbosity", "0");
-        XGBoosterSetParam(booster, "seed", "42");
-        // v5.9.5g — fast histogram tree construction. See WF site above
-        // for rationale. Held-out path mirrors WF for train-serve parity.
-        XGBoosterSetParam(booster, "tree_method", "hist");
+        // v5.9.5h — XGBHyperparams struct + apply helper. Mirrors WF site
+        // above for train-serve parity. nthread=1 for deterministic
+        // held-out training (single-threaded; metric must be reproducible).
+        tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
+        tt::XGBHyperparams_Apply(booster, hp, /*nthread=*/1);
 
         if (!is_regression && !is_multiclass) {
             int n_pos = 0, n_neg = 0;

@@ -1893,10 +1893,22 @@ static inline void *train_model_worker_fn(void *arg) {
     BoosterHandle booster;
     XGBoosterCreate(&dtrain, 1, &booster);
 
-    char depth_s[8]; snprintf(depth_s, 8, "%d", snap_max_depth);
-    char lr_s[16]; snprintf(lr_s, 16, "%f", snap_learning_rate);
-    XGBoosterSetParam(booster, "max_depth", depth_s);
-    XGBoosterSetParam(booster, "eta", lr_s);
+    // v5.9.5h — XGBHyperparams struct + apply helper. Operator-tunable
+    // max_depth/lr/n_estimators come from Train Model panel state
+    // (snapshot taken at worker entry); other 5 fields use defaults
+    // (will become cfg-tunable in v5.9.5h Phase 2). Single source of
+    // truth shared with WF + HeldOut paths (BacktestEngine.hpp).
+    tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
+    hp.max_depth     = snap_max_depth;
+    hp.learning_rate = snap_learning_rate;
+    hp.n_estimators  = snap_n_estimators;
+    // Apply tree shape + RNG params; nthread=4 for faster GUI iter
+    // (deterministic-per-fold not required here — Train Model is
+    // exploratory; held-out validation uses nthread=1 for parity).
+    // Objective is set per label-type below; XGBHyperparams_Apply
+    // handles the rest (max_depth, eta, subsample, colsample,
+    // min_child_weight, seed, tree_method, verbosity).
+    tt::XGBHyperparams_Apply(booster, hp, /*nthread=*/4);
 
     int num_classes = (snap_label_type >= 0 && snap_label_type < LABEL_COUNT)
                       ? label_table[snap_label_type].num_classes : 0;
@@ -1935,16 +1947,8 @@ static inline void *train_model_worker_fn(void *arg) {
                 n_pos == 0 ? "  WARNING: zero positives, model cannot learn" : "");
         fflush(stderr);
     }
-    XGBoosterSetParam(booster, "nthread", "4");
-    XGBoosterSetParam(booster, "verbosity", "0");
-    // v5.9.5g — fast histogram tree construction. Without this, XGBoost
-    // defaults to `auto` which often picks `exact` for typical training
-    // sizes, making each iteration 10-30s on 3.9M-sample datasets. That
-    // makes Cancel Training feel broken (responsiveness = next iter time).
-    // `hist` is 5-10x faster + accuracy-equivalent for binary/regression.
-    // (XGBoost 2.x already defaults to this for large datasets; we set
-    // it explicitly to guarantee fast iters across versions.)
-    XGBoosterSetParam(booster, "tree_method", "hist");
+    // (v5.9.5g tree_method=hist + v5.9.5h nthread=4 + verbosity=0 all
+    // applied above via XGBHyperparams_Apply.)
 
     // v5.9.0d — iteration loop with tm_cancel poll. XGBoost has no
     // mid-iteration cancel; cancel response bounded by one iter time
