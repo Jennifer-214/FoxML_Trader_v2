@@ -1968,6 +1968,20 @@ struct TrainingPanelState {
     volatile int tm_complete;
     volatile int tm_cancel;     // v5.9.0d: polled between XGBoost iterations
     pthread_t tm_tid;
+    // v5.10.0a.E — Hyperparam Sweep state. Mirrors wf_* / tm_* worker
+    // pattern. Operator clicks Run Hyperparam Sweep → spawn worker that
+    // calls Backtest_RunHyperparamTrainSweep using already-collected
+    // feature_matrix.
+    OptimizerRange  hp_ranges[OPT_MAX_PARAMS];
+    int             hp_num_params;          // 1 or 2 active params
+    OptimizerResults hp_results;
+    volatile int    hp_running;
+    volatile int    hp_progress;            // current cell index
+    volatile int    hp_total;                // total cells (set by worker)
+    volatile int    hp_cancel;
+    volatile int    hp_complete;
+    pthread_t       hp_tid;
+    bool            hp_has_results;
 };
 
 static inline void TrainingPanel_Init(TrainingPanelState *state) {
@@ -2031,6 +2045,25 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->tm_running = 0;
     state->tm_complete = 0;
     state->tm_cancel = 0;
+    // v5.10.0a.E — Hyperparam Sweep init. Default param 0 = sweep
+    // xgb_subsample 0.5 .. 0.9 step 0.1 (5 cells).
+    strncpy(state->hp_ranges[0].key, "xgb_subsample", sizeof(state->hp_ranges[0].key) - 1);
+    state->hp_ranges[0].key[sizeof(state->hp_ranges[0].key) - 1] = '\0';
+    state->hp_ranges[0].lo   = 0.5;
+    state->hp_ranges[0].hi   = 0.9;
+    state->hp_ranges[0].step = 0.1;
+    state->hp_ranges[1].key[0] = '\0';
+    state->hp_ranges[1].lo   = 0.0;
+    state->hp_ranges[1].hi   = 0.0;
+    state->hp_ranges[1].step = 0.0;
+    state->hp_num_params  = 1;
+    state->hp_running     = 0;
+    state->hp_progress    = 0;
+    state->hp_total       = 0;
+    state->hp_cancel      = 0;
+    state->hp_complete    = 0;
+    state->hp_has_results = false;
+    memset(&state->hp_results, 0, sizeof(state->hp_results));
 }
 
 // walk-forward worker thread
@@ -2054,6 +2087,66 @@ static inline void *walkforward_worker_fn(void *arg) {
     state->wf_has_results = true;
     state->wf_complete = 1;
     state->wf_running = 0;
+    return NULL;
+}
+
+// v5.10.0a.E — Hyperparam Sweep worker thread. Mirrors walkforward_worker_fn
+// but calls Backtest_RunHyperparamTrainSweep — trains N XGBoosters per cell
+// using the shared feature_matrix, varies xgb_* hyperparams via cfg_override
+// path. Operator must Collect Features first; data->config_used carries the
+// base cfg used at collect-time.
+//
+// Click-time snapshot: copies hp_ranges + hp_num_params + WF tuning fields
+// into worker args at click time (matches v5.10.0E pattern). Operator can
+// keep editing the input ranges while sweep runs without affecting the
+// in-flight cells.
+struct HyperparamSweepWorkerArgs {
+    TrainingPanelState *state;
+    const BacktestResults *data;
+    OptimizerRange snap_ranges[OPT_MAX_PARAMS];
+    int snap_num_params;
+    int snap_label_type;
+    int snap_wf_n_splits;
+    int snap_wf_horizon_ticks;
+    int snap_wf_buffer_ticks;
+    int snap_wf_min_train;
+};
+
+static inline void *hp_sweep_worker_fn(void *arg) {
+    HyperparamSweepWorkerArgs *args = (HyperparamSweepWorkerArgs *)arg;
+    TrainingPanelState *state = args->state;
+    const BacktestResults *data = args->data;
+
+    // Local copies — args struct freed below.
+    OptimizerRange ranges[OPT_MAX_PARAMS];
+    memcpy(ranges, args->snap_ranges, sizeof(ranges));
+    int num_params = args->snap_num_params;
+    int label_type = args->snap_label_type;
+    int wf_n_splits = args->snap_wf_n_splits;
+    int wf_horizon  = args->snap_wf_horizon_ticks;
+    int wf_buffer   = args->snap_wf_buffer_ticks;
+    int wf_min_train = args->snap_wf_min_train;
+    free(args);
+
+    memset(&state->hp_results, 0, sizeof(state->hp_results));
+    state->hp_progress = 0;
+    state->hp_total = 0;
+
+#ifdef USE_XGBOOST
+    Backtest_RunHyperparamTrainSweep(
+        &state->hp_results, data, ranges, num_params,
+        label_type,
+        wf_n_splits, wf_horizon, wf_buffer, wf_min_train,
+        &state->hp_progress, &state->hp_total,
+        &state->hp_cancel);
+    state->hp_has_results = (state->hp_results.total_runs > 0);
+#else
+    fprintf(stderr, "[hpsweep] XGBoost not compiled in — sweep skipped\n");
+    state->hp_has_results = false;
+#endif
+
+    state->hp_complete = 1;
+    state->hp_running = 0;
     return NULL;
 }
 
@@ -3758,6 +3851,165 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // This button is the ONLY UI path that exercises Backtest_RunFullValidation
     // (and therefore the v5.8.6 auto-stamp wiring). Pre-v5.8.7 the function
     // existed but was unreachable from the suite.
+    ImGui::Separator();
+    // ============================================================
+    // v5.10.0a.E — Hyperparam Sweep block. Placed between WF and FV
+    // since it logically follows WF (operator runs WF on best hyperparams
+    // they found via sweep). Disabled when no features collected yet.
+    // ============================================================
+    ImGui::Separator();
+    ImGui::Text("Hyperparam Sweep (XGBoost grid search over training)");
+    ImGui::SetItemTooltip(
+        "Trains N XGBoost models with different hyperparam values,\n"
+        "runs walk-forward on each, picks the best by val accuracy.\n\n"
+        "Workflow:\n"
+        "  1. Click Collect Features (above) to populate the dataset\n"
+        "  2. Pick 1-2 cfg fields + ranges below\n"
+        "  3. Click Run Hyperparam Sweep — trains all cells\n"
+        "  4. Inspect results table; best cell highlighted\n\n"
+        "Sweepable fields (ConfigField_Set whitelist):\n"
+        "  xgb_subsample / xgb_colsample_bytree / xgb_min_child_weight\n"
+        "  / xgb_seed / xgb_train_nthread / xgb_eval_nthread");
+    {
+        ImGui::PushItemWidth(-180);
+        ImGui::SliderInt("Sweep params (1 or 2)", &state->hp_num_params, 1, OPT_MAX_PARAMS);
+        for (int p = 0; p < state->hp_num_params; ++p) {
+            ImGui::PushID(p);
+            char hdr[32]; snprintf(hdr, sizeof(hdr), "Sweep Param %d", p + 1);
+            if (ImGui::CollapsingHeader(hdr, ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::InputText("Key", state->hp_ranges[p].key, 32);
+                ImGui::InputDouble("Min", &state->hp_ranges[p].lo, 0.05, 0.5, "%.3f");
+                ImGui::InputDouble("Max", &state->hp_ranges[p].hi, 0.05, 0.5, "%.3f");
+                ImGui::InputDouble("Step", &state->hp_ranges[p].step, 0.05, 0.25, "%.3f");
+                int steps = state->hp_ranges[p].steps();
+                ImGui::Text("%d steps", steps);
+            }
+            ImGui::PopID();
+        }
+        int hp_total_cells = state->hp_ranges[0].steps()
+                            * (state->hp_num_params > 1 ? state->hp_ranges[1].steps() : 1);
+        ImGui::Text("Total cells: %d", hp_total_cells);
+        ImGui::PopItemWidth();
+
+        const BacktestResults *hp_data = &run_control->results;
+        bool can_hp =
+#ifdef USE_XGBOOST
+            hp_data->sample_count >= 100 && hp_total_cells > 0
+            && hp_total_cells <= OPT_MAX_GRID;
+#else
+            false;
+#endif
+
+        if (state->hp_running) {
+            float pct = state->hp_total > 0
+                ? (float)state->hp_progress / state->hp_total : 0.0f;
+            char overlay[64];
+            snprintf(overlay, sizeof(overlay), "%d / %d cells",
+                     (int)state->hp_progress, (int)state->hp_total);
+            ImGui::ProgressBar(pct, ImVec2(-1, 0), overlay);
+            if (ImGui::Button("Cancel Hyperparam Sweep"))
+                state->hp_cancel = 1;
+        } else {
+            if (!can_hp) ImGui::BeginDisabled();
+            if (ImGui::Button("Run Hyperparam Sweep")) {
+                state->hp_running = 1;
+                state->hp_progress = 0;
+                state->hp_total = 0;
+                state->hp_cancel = 0;
+                state->hp_complete = 0;
+                state->hp_has_results = false;
+                memset(&state->hp_results, 0, sizeof(state->hp_results));
+
+                HyperparamSweepWorkerArgs *hp_args =
+                    (HyperparamSweepWorkerArgs *)malloc(sizeof(HyperparamSweepWorkerArgs));
+                hp_args->state = state;
+                hp_args->data = hp_data;
+                memcpy(hp_args->snap_ranges, state->hp_ranges, sizeof(hp_args->snap_ranges));
+                hp_args->snap_num_params = state->hp_num_params;
+                hp_args->snap_label_type = state->label_type;
+                hp_args->snap_wf_n_splits = state->wf_n_splits;
+                hp_args->snap_wf_horizon_ticks = state->wf_horizon_ticks;
+                hp_args->snap_wf_buffer_ticks = state->wf_buffer_ticks;
+                hp_args->snap_wf_min_train = state->wf_min_train;
+                pthread_create(&state->hp_tid, NULL, hp_sweep_worker_fn, hp_args);
+                pthread_detach(state->hp_tid);
+            }
+            if (!can_hp) {
+                ImGui::EndDisabled();
+#ifndef USE_XGBOOST
+                ImGui::SameLine();
+                ImGui::TextDisabled("Build with -DUSE_XGBOOST=ON");
+#else
+                if (hp_data->sample_count < 100) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("Need 100+ samples (Collect Features first)");
+                } else if (hp_total_cells == 0 || hp_total_cells > OPT_MAX_GRID) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("Cell count out of range (1..%d)", OPT_MAX_GRID);
+                }
+#endif
+            }
+        }
+
+        // Results table — kind-aware (WF metric: accuracy or correlation)
+        if (state->hp_has_results && state->hp_results.total_runs > 0) {
+            const OptimizerResults *opt = &state->hp_results;
+            ImGui::Separator();
+            ImGui::Text("Best cell: %s=%.3f",
+                        state->hp_ranges[0].key,
+                        opt->param_vals[0][opt->best_idx / opt->dims[1]]);
+            if (opt->num_params > 1) {
+                ImGui::SameLine();
+                ImGui::Text(" %s=%.3f", state->hp_ranges[1].key,
+                            opt->param_vals[1][opt->best_idx % opt->dims[1]]);
+            }
+            ImGui::Text("Metric (val accuracy or correlation): %.4f",
+                        opt->metric[opt->best_idx]);
+
+            ImGuiTableFlags flags = ImGuiTableFlags_Borders |
+                                     ImGuiTableFlags_RowBg |
+                                     ImGuiTableFlags_SizingFixedFit;
+            if (ImGui::BeginTable("hp_sweep_results",
+                                   opt->num_params == 1 ? 3 : 4, flags)) {
+                ImGui::TableSetupColumn("Cell", ImGuiTableColumnFlags_WidthFixed, 50);
+                ImGui::TableSetupColumn(state->hp_ranges[0].key,
+                                         ImGuiTableColumnFlags_WidthFixed, 120);
+                if (opt->num_params > 1) {
+                    ImGui::TableSetupColumn(state->hp_ranges[1].key,
+                                             ImGuiTableColumnFlags_WidthFixed, 120);
+                }
+                ImGui::TableSetupColumn("Metric",
+                                         ImGuiTableColumnFlags_WidthFixed, 100);
+                ImGui::TableHeadersRow();
+
+                for (int idx = 0; idx < opt->total_runs; ++idx) {
+                    int i0 = idx / opt->dims[1];
+                    int i1 = idx % opt->dims[1];
+                    bool is_best = (idx == opt->best_idx);
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    if (is_best) {
+                        ImGui::TextColored(ImVec4(0.55f, 0.76f, 0.51f, 1.0f),
+                                           "%d ★", idx);
+                    } else {
+                        ImGui::Text("%d", idx);
+                    }
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%.3f", opt->param_vals[0][i0]);
+                    if (opt->num_params > 1) {
+                        ImGui::TableSetColumnIndex(2);
+                        ImGui::Text("%.3f", opt->param_vals[1][i1]);
+                        ImGui::TableSetColumnIndex(3);
+                    } else {
+                        ImGui::TableSetColumnIndex(2);
+                    }
+                    ImGui::Text("%.4f", opt->metric[idx]);
+                }
+                ImGui::EndTable();
+            }
+        }
+    }
+
     ImGui::Separator();
     ImGui::Text("Full Validation (held-out + auto-stamp)");
     ImGui::SetItemTooltip("Trains on [0, trainval_end), evaluates on locked\n"
