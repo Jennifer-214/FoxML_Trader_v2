@@ -80,6 +80,16 @@ BANDIT_BLEND=""
 FEE_RATE_MAKER=""
 FEE_RATE_TAKER=""
 TRAINING_POLL_INTERVAL=""
+# v5.9.5h — XGBoost hyperparam defaults
+XGB_MAX_DEPTH=""
+XGB_LEARNING_RATE=""
+XGB_N_ESTIMATORS=""
+XGB_SUBSAMPLE=""
+XGB_COLSAMPLE_BYTREE=""
+XGB_MIN_CHILD_WEIGHT=""
+XGB_SEED=""
+XGB_TREE_METHOD=""
+BUILD_FLAGS_HASH_HEX=""
 FORCE=0
 
 usage() {
@@ -111,6 +121,17 @@ while [[ $# -gt 0 ]]; do
         --fee-rate-maker)                    FEE_RATE_MAKER="$2";        shift 2 ;;
         --fee-rate-taker)                    FEE_RATE_TAKER="$2";        shift 2 ;;
         --training-poll-interval)            TRAINING_POLL_INTERVAL="$2"; shift 2 ;;
+        # v5.9.5h — XGBoost hyperparam flags (8 total)
+        --xgb-max-depth)                     XGB_MAX_DEPTH="$2";          shift 2 ;;
+        --xgb-learning-rate)                 XGB_LEARNING_RATE="$2";      shift 2 ;;
+        --xgb-n-estimators)                  XGB_N_ESTIMATORS="$2";       shift 2 ;;
+        --xgb-subsample)                     XGB_SUBSAMPLE="$2";          shift 2 ;;
+        --xgb-colsample-bytree)              XGB_COLSAMPLE_BYTREE="$2";   shift 2 ;;
+        --xgb-min-child-weight)              XGB_MIN_CHILD_WEIGHT="$2";   shift 2 ;;
+        --xgb-seed)                          XGB_SEED="$2";               shift 2 ;;
+        --xgb-tree-method)                   XGB_TREE_METHOD="$2";        shift 2 ;;
+        # v5.9.5h Phase 10 — build flags fingerprint
+        --build-flags-hash)                  BUILD_FLAGS_HASH_HEX="$2";   shift 2 ;;
         --force)                  FORCE=1;                    shift ;;
         -h|--help)                usage ;;
         *) echo "[stamp] unknown arg: $1" >&2; usage ;;
@@ -254,6 +275,41 @@ fi
 # Order MUST match in-process emitter at ML_Headers/ModelInference.hpp.
 if [[ -n "$MODEL_NUM_OUTPUTS" ]]; then
     CANONICAL="${CANONICAL}model_num_outputs=${MODEL_NUM_OUTPUTS}
+"
+fi
+
+# v5.9.5h — XGBoost hyperparams (canonical body position 17). All 8
+# fields emit together as a block when ANY is supplied (matches
+# in-process has_xgb_hyperparams gate at ModelInference.hpp:~1230).
+# Order MUST match in-process emitter byte-for-byte (HMAC verify
+# checks the entire canonical body).
+if [[ -n "$XGB_MAX_DEPTH" || -n "$XGB_LEARNING_RATE" || -n "$XGB_N_ESTIMATORS" \
+   || -n "$XGB_SUBSAMPLE" || -n "$XGB_COLSAMPLE_BYTREE" || -n "$XGB_MIN_CHILD_WEIGHT" \
+   || -n "$XGB_SEED" || -n "$XGB_TREE_METHOD" ]]; then
+    XMD="${XGB_MAX_DEPTH:-6}"
+    XLR_FMT=$(awk -v v="${XGB_LEARNING_RATE:-0.1}"     'BEGIN { printf "%g", v }')
+    XNE="${XGB_N_ESTIMATORS:-200}"
+    XSS_FMT=$(awk -v v="${XGB_SUBSAMPLE:-0.8}"          'BEGIN { printf "%g", v }')
+    XCT_FMT=$(awk -v v="${XGB_COLSAMPLE_BYTREE:-0.8}"   'BEGIN { printf "%g", v }')
+    XMC="${XGB_MIN_CHILD_WEIGHT:-5}"
+    XSD="${XGB_SEED:-42}"
+    XTM="${XGB_TREE_METHOD:-hist}"
+    CANONICAL="${CANONICAL}xgb_max_depth=${XMD}
+xgb_learning_rate=${XLR_FMT}
+xgb_n_estimators=${XNE}
+xgb_subsample=${XSS_FMT}
+xgb_colsample_bytree=${XCT_FMT}
+xgb_min_child_weight=${XMC}
+xgb_seed=${XSD}
+xgb_tree_method=${XTM}
+"
+fi
+
+# v5.9.5h Phase 10 — build flags fingerprint (canonical body position 18).
+# Trainer's compile-time BUILD_FLAGS_HASH() in hex. Engine load-WARN
+# compares stamp's hash vs current build's at boot.
+if [[ -n "$BUILD_FLAGS_HASH_HEX" ]]; then
+    CANONICAL="${CANONICAL}build_flags_hash=${BUILD_FLAGS_HASH_HEX}
 "
 fi
 

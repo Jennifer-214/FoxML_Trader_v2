@@ -820,6 +820,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                 ImGui::TableSetupColumn("Gap",        ImGuiTableColumnFlags_WidthFixed, 70);
                 ImGui::TableSetupColumn("Overfit",    ImGuiTableColumnFlags_WidthFixed, 70);
                 ImGui::TableSetupColumn("Depth/LR/N", ImGuiTableColumnFlags_WidthFixed, 120);
+                ImGui::TableSetupColumn("Stamp",      ImGuiTableColumnFlags_WidthFixed, 60);
                 ImGui::TableHeadersRow();
 
                 for (int i = 0; i < s->count; ++i) {
@@ -883,6 +884,28 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
 
                     ImGui::TableNextColumn();
                     ImGui::Text("%d/%.2f/%d", r->max_depth, r->learning_rate, r->n_estimators);
+
+                    // v5.9.5h #19 — stamp_ok column. Four states:
+                    //   - missing:   dim "—" (no .stamp file in run dir)
+                    //   - unverified: yellow "?" (present, not yet verified)
+                    //   - verified OK: green "✓"
+                    //   - verified FAIL: red "✗" (Verify Stamp shows reason)
+                    ImGui::TableNextColumn();
+                    if (!r->has_stamp) {
+                        ImGui::TextDisabled("—");
+                    } else if (r->stamp_verify_state == 1) {
+                        ImGui::TextColored(ImVec4(0.55f, 0.76f, 0.51f, 1.0f), "✓");
+                        ImGui::SetItemTooltip("Stamp verified OK\n"
+                                              "Click 'Verify Stamp' below for full details.");
+                    } else if (r->stamp_verify_state == -1) {
+                        ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "✗");
+                        ImGui::SetItemTooltip("Stamp verification FAILED\n"
+                                              "Click 'Verify Stamp' below for reason.");
+                    } else {
+                        ImGui::TextColored(ImVec4(0.85f, 0.80f, 0.50f, 1.0f), "?");
+                        ImGui::SetItemTooltip("Stamp present, not yet verified\n"
+                                              "Click 'Verify Stamp' below to check.");
+                    }
                 }
                 ImGui::EndTable();
             }
@@ -909,6 +932,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                 ImGui::TableSetupColumn("Val MSE",    ImGuiTableColumnFlags_WidthFixed, 90);
                 ImGui::TableSetupColumn("Gap (r)",    ImGuiTableColumnFlags_WidthFixed, 80);
                 ImGui::TableSetupColumn("Depth/LR/N", ImGuiTableColumnFlags_WidthFixed, 120);
+                ImGui::TableSetupColumn("Stamp",      ImGuiTableColumnFlags_WidthFixed, 60);
                 ImGui::TableHeadersRow();
 
                 for (int i = 0; i < s->count; ++i) {
@@ -961,6 +985,28 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
 
                     ImGui::TableNextColumn();
                     ImGui::Text("%d/%.2f/%d", r->max_depth, r->learning_rate, r->n_estimators);
+
+                    // v5.9.5h #19 — stamp_ok column. Four states:
+                    //   - missing:   dim "—" (no .stamp file in run dir)
+                    //   - unverified: yellow "?" (present, not yet verified)
+                    //   - verified OK: green "✓"
+                    //   - verified FAIL: red "✗" (Verify Stamp shows reason)
+                    ImGui::TableNextColumn();
+                    if (!r->has_stamp) {
+                        ImGui::TextDisabled("—");
+                    } else if (r->stamp_verify_state == 1) {
+                        ImGui::TextColored(ImVec4(0.55f, 0.76f, 0.51f, 1.0f), "✓");
+                        ImGui::SetItemTooltip("Stamp verified OK\n"
+                                              "Click 'Verify Stamp' below for full details.");
+                    } else if (r->stamp_verify_state == -1) {
+                        ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "✗");
+                        ImGui::SetItemTooltip("Stamp verification FAILED\n"
+                                              "Click 'Verify Stamp' below for reason.");
+                    } else {
+                        ImGui::TextColored(ImVec4(0.85f, 0.80f, 0.50f, 1.0f), "?");
+                        ImGui::SetItemTooltip("Stamp present, not yet verified\n"
+                                              "Click 'Verify Stamp' below to check.");
+                    }
                 }
                 ImGui::EndTable();
             }

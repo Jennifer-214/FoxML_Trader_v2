@@ -44,6 +44,7 @@
 #include "Notify.hpp"                     // Phase 8b (post-coding c8)
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
+#include "../ML_Headers/BuildFlags.hpp"  // v5.9.5h: BUILD_FLAGS_HASH() for cross-build drift WARN
 #include "../Strategies/StrategyParameters.hpp"
 #include "../Strategies/StrategyLifecycle.hpp"  // v5.4.0 Phase 1.2: Strategy_InitPerCore / _FreePerCore
 #include "../DataStream/BinanceUserData.hpp"
@@ -898,6 +899,18 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                 i, role_names[r], h->stamp_xgb_tree_method,
                                 cfg.xgb_tree_method);
                         }
+                    }
+                    // v5.9.5h Phase 10 — build flags fingerprint WARN.
+                    // Detects cross-build deploys (-O2 dev → -O3 prod, etc.)
+                    if (handles[r]->has_build_flags_hash &&
+                        handles[r]->stamp_build_flags_hash != tt::BUILD_FLAGS_HASH()) {
+                        fprintf(stderr,
+                            "[build_flags] WARN: core %d role=%s stamp claims "
+                            "build_flags_hash=%016lx but current build is %016lx "
+                            "(cross-build drift; set acknowledge_cross_binary_version_drift=1 to suppress)\n",
+                            i, role_names[r],
+                            (unsigned long)handles[r]->stamp_build_flags_hash,
+                            (unsigned long)tt::BUILD_FLAGS_HASH());
                     }
                 }
             }

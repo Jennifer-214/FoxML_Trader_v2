@@ -207,6 +207,11 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
             memcpy(handle->stamp_xgb_tree_method, sr.xgb_tree_method, tmln);
             handle->stamp_xgb_tree_method[tmln] = '\0';
         }
+        // v5.9.5h Phase 10 — build flags fingerprint
+        if (sr.has_build_flags_hash) {
+            handle->has_build_flags_hash   = 1;
+            handle->stamp_build_flags_hash = sr.build_flags_hash;
+        }
         if (sr.has_model_num_outputs) {
             handle->stamp_model_num_outputs = sr.model_num_outputs;
             handle->has_stamp_num_outputs = 1;

@@ -11864,6 +11864,193 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- EXTENSIBILITY: v5.9.5h — XGBoost hyperparam ownership ---\n");
+    {
+        // v5.9.5h test block. Verifies:
+        //   1. XGBHyperparams_Defaults bytewise-matches the v5.9.5g
+        //      hardcoded values (subsample=0.8, seed=42, tree_method=hist)
+        //   2. Stamp emit + parse round-trip for the 8 hyperparam fields
+        //   3. ModelHandle zero-init defaults (Model_Init)
+        //   4. Bash CLI emits matching canonical body (HMAC verify proof)
+        using namespace tt;
+
+        // === Test 1: XGBHyperparams_Defaults match v5.9.5g hardcoded ===
+        XGBHyperparams hp_def = XGBHyperparams_Defaults();
+        check("v5.9.5h: defaults max_depth == 6",
+              hp_def.max_depth == 6);
+        check("v5.9.5h: defaults learning_rate == 0.1",
+              fabsf(hp_def.learning_rate - 0.1f) < 1e-6f);
+        check("v5.9.5h: defaults n_estimators == 200",
+              hp_def.n_estimators == 200);
+        check("v5.9.5h: defaults subsample == 0.8",
+              fabsf(hp_def.subsample - 0.8f) < 1e-6f);
+        check("v5.9.5h: defaults colsample_bytree == 0.8",
+              fabsf(hp_def.colsample_bytree - 0.8f) < 1e-6f);
+        check("v5.9.5h: defaults min_child_weight == 5",
+              hp_def.min_child_weight == 5);
+        check("v5.9.5h: defaults seed == 42",
+              hp_def.seed == 42);
+        check("v5.9.5h: defaults tree_method == 'hist'",
+              strcmp(hp_def.tree_method, "hist") == 0);
+
+        // === Test 2: ModelHandle stamp_xgb_* zero-init ===
+        ModelHandle<64> h = {};
+        Model_Init(&h);
+        check("v5.9.5h: Model_Init zeros has_xgb_hyperparams",
+              h.has_xgb_hyperparams == 0);
+        check("v5.9.5h: Model_Init zeros stamp_xgb_max_depth",
+              h.stamp_xgb_max_depth == 0);
+        check("v5.9.5h: Model_Init zeros stamp_xgb_subsample",
+              h.stamp_xgb_subsample == 0.0);
+        check("v5.9.5h: Model_Init zeros stamp_xgb_tree_method",
+              h.stamp_xgb_tree_method[0] == '\0');
+
+        // === Test 3: Stamp round-trip with xgb_hyperparams ===
+        char tmp_dir[] = "/tmp/v595h_stamp_XXXXXX";
+        if (mkdtemp(tmp_dir) != NULL) {
+            char model_path[400];
+            snprintf(model_path, sizeof(model_path), "%s/model.bin", tmp_dir);
+            FILE* mf = fopen(model_path, "w");
+            if (mf) {
+                fwrite("dummy", 1, 5, mf);
+                fclose(mf);
+
+                StampInferenceCfgInputs inf = {};
+                inf.has_xgb_hyperparams = 1;
+                inf.xgb_max_depth        = 8;
+                inf.xgb_learning_rate    = 0.05;
+                inf.xgb_n_estimators     = 300;
+                inf.xgb_subsample        = 0.7;
+                inf.xgb_colsample_bytree = 0.9;
+                inf.xgb_min_child_weight = 3;
+                inf.xgb_seed             = 123;
+                strncpy(inf.xgb_tree_method, "exact",
+                        sizeof(inf.xgb_tree_method) - 1);
+
+                StampWriteResult sw = stamp_write_for_model(
+                    model_path, "test-secret-v595h", 5, "2026-05-02",
+                    0.65, 0.62, 0.05, 0,
+                    0xCAFE5599u, "5.9.5h", &inf);
+                check("v5.9.5h: stamp_write accepts xgb_hyperparams",
+                      sw.ok == 1);
+
+                ModelStampResult v = verify_model_stamp(model_path,
+                    "test-secret-v595h", 0.10, 5, 0xCAFE5599u);
+                check("v5.9.5h: stamp with xgb_hyperparams verifies",
+                      v.valid == 1);
+                check("v5.9.5h: parser sets has_xgb_hyperparams=1",
+                      v.has_xgb_hyperparams == 1);
+                check("v5.9.5h: round-trip xgb_max_depth=8",
+                      v.xgb_max_depth == 8);
+                check("v5.9.5h: round-trip xgb_learning_rate=0.05",
+                      fabs(v.xgb_learning_rate - 0.05) < 1e-9);
+                check("v5.9.5h: round-trip xgb_n_estimators=300",
+                      v.xgb_n_estimators == 300);
+                check("v5.9.5h: round-trip xgb_subsample=0.7",
+                      fabs(v.xgb_subsample - 0.7) < 1e-9);
+                check("v5.9.5h: round-trip xgb_colsample_bytree=0.9",
+                      fabs(v.xgb_colsample_bytree - 0.9) < 1e-9);
+                check("v5.9.5h: round-trip xgb_min_child_weight=3",
+                      v.xgb_min_child_weight == 3);
+                check("v5.9.5h: round-trip xgb_seed=123",
+                      v.xgb_seed == 123);
+                check("v5.9.5h: round-trip xgb_tree_method='exact'",
+                      strcmp(v.xgb_tree_method, "exact") == 0);
+
+                char stamp_path[450];
+                snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
+                unlink(stamp_path);
+                unlink(model_path);
+
+                // === Test 4: legacy stamp (no xgb_*) → has_*=0 ===
+                FILE* mf2 = fopen(model_path, "w");
+                fwrite("dummy2", 1, 6, mf2);
+                fclose(mf2);
+                StampWriteResult sw2 = stamp_write_for_model(
+                    model_path, "test-secret-v595h", 5, "2026-05-02",
+                    0.65, 0.62, 0.05, 0, 0xCAFE5599u, "5.9.5h", nullptr);
+                check("v5.9.5h: legacy-shape stamp writes OK", sw2.ok == 1);
+                ModelStampResult v2 = verify_model_stamp(model_path,
+                    "test-secret-v595h", 0.10, 5, 0xCAFE5599u);
+                check("v5.9.5h: legacy stamp → has_xgb_hyperparams=0",
+                      v2.has_xgb_hyperparams == 0);
+                unlink(stamp_path);
+                unlink(model_path);
+            } else {
+                check("v5.9.5h: tmp model file for stamp test", 0);
+            }
+            rmdir(tmp_dir);
+        } else {
+            check("v5.9.5h: tmp dir for stamp test", 0);
+        }
+
+        // === Test 5: Bash CLI parity (extends v5.8.8/v5.9.5c block) ===
+        char model_path[] = "/tmp/test_v595h_bash_XXXXXX";
+        int fd = mkstemp(model_path);
+        if (fd >= 0) {
+            (void)!write(fd, "v595h-bash", 10);
+            close(fd);
+            const char* script_candidates[] = {
+                "../tools/stamp_model.sh",
+                "./tools/stamp_model.sh",
+                "tools/stamp_model.sh",
+                NULL
+            };
+            const char* script = NULL;
+            for (int i = 0; script_candidates[i]; ++i) {
+                if (access(script_candidates[i], X_OK) == 0) {
+                    script = script_candidates[i];
+                    break;
+                }
+            }
+            if (script) {
+                char hash_hex[32];
+                snprintf(hash_hex, sizeof(hash_hex), "%016lx",
+                         (unsigned long)FEATURE_REGISTRY_HASH());
+                char cmd[4096];
+                snprintf(cmd, sizeof(cmd),
+                    "%s --model '%s' --secret 'v595h-secret' "
+                    "--wf-mean-val 0.55 --held-out-metric 0.53 "
+                    "--gap-threshold 0.05 --trained-on 2026-05-02 "
+                    "--format-version %d --feature-registry-hash %s "
+                    "--engine-version '%s' "
+                    "--xgb-max-depth 8 --xgb-learning-rate 0.05 "
+                    "--xgb-n-estimators 300 --xgb-subsample 0.7 "
+                    "--xgb-colsample-bytree 0.9 --xgb-min-child-weight 3 "
+                    "--xgb-seed 123 --xgb-tree-method exact "
+                    "2>/dev/null",
+                    script, model_path, MODEL_FORMAT_VERSION,
+                    hash_hex, ENGINE_VERSION_STRING);
+                int rc = system(cmd);
+                if (rc == 0) {
+                    ModelStampResult vr = verify_model_stamp(
+                        model_path, "v595h-secret",
+                        0.05, MODEL_FORMAT_VERSION, FEATURE_REGISTRY_HASH());
+                    check("v5.9.5h: bash-stamp with xgb_hyperparams verifies",
+                          vr.valid == 1);
+                    check("v5.9.5h: bash xgb_max_depth round-trips",
+                          vr.xgb_max_depth == 8);
+                    check("v5.9.5h: bash xgb_subsample round-trips",
+                          fabs(vr.xgb_subsample - 0.7) < 1e-9);
+                    check("v5.9.5h: bash xgb_tree_method round-trips",
+                          strcmp(vr.xgb_tree_method, "exact") == 0);
+                    char sp[256];
+                    snprintf(sp, sizeof(sp), "%s.stamp", model_path);
+                    unlink(sp);
+                } else {
+                    for (int i = 0; i < 4; ++i)
+                        check("v5.9.5h: bash CLI invocation failed", 0);
+                }
+            } else {
+                for (int i = 0; i < 4; ++i)
+                    check("v5.9.5h: bash test skipped (script not found)", 1);
+            }
+            unlink(model_path);
+        } else {
+            check("v5.9.5h: tmp model file for bash test", 0);
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

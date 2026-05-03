@@ -20,6 +20,7 @@
 #include "../DataStream/TradeLog.hpp"
 #include "../ML_Headers/ModelInference.hpp"
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.6: FEATURE_REGISTRY_HASH() for auto-stamp
+#include "../ML_Headers/BuildFlags.hpp"       // v5.9.5h: BUILD_FLAGS_HASH() for cross-build drift detection
 #include "../Version.hpp"                      // v5.8.6: ENGINE_VERSION_STRING for auto-stamp
 #include "../GUI/CandleAccumulator.hpp"
 #include "LabelFunctions.hpp"
@@ -962,6 +963,11 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             memcpy(inf.xgb_tree_method, hp.tree_method, tmln);
             inf.xgb_tree_method[tmln] = '\0';
         }
+        // v5.9.5h Phase 10 — build flags fingerprint. Stamps the
+        // training-build's hash so engine load can detect cross-build
+        // deploy drift (e.g., trained -O2 dev box, deployed -O3 prod).
+        inf.has_build_flags_hash = 1;
+        inf.build_flags_hash = tt::BUILD_FLAGS_HASH();
 
         StampWriteResult sr = stamp_write_for_model(
             out->auto_stamp_path,

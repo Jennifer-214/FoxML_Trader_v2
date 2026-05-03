@@ -253,6 +253,9 @@ struct ModelHandle {
     int      stamp_xgb_min_child_weight;
     int      stamp_xgb_seed;
     char     stamp_xgb_tree_method[16];
+    // v5.9.5h Phase 10 — build flags fingerprint
+    uint8_t  has_build_flags_hash;
+    uint64_t stamp_build_flags_hash;
 };
 
 //======================================================================================================
@@ -284,6 +287,8 @@ inline void Model_Init(ModelHandle<F> *m) {
     m->stamp_xgb_min_child_weight = 0;
     m->stamp_xgb_seed = 0;
     m->stamp_xgb_tree_method[0] = '\0';
+    m->has_build_flags_hash = 0;
+    m->stamp_build_flags_hash = 0;
 }
 
 //======================================================================================================
@@ -712,6 +717,9 @@ struct ModelStampResult {
     int      xgb_min_child_weight;
     int      xgb_seed;
     char     xgb_tree_method[16];
+    // v5.9.5h Phase 10 — build flags fingerprint
+    uint8_t  has_build_flags_hash;
+    uint64_t build_flags_hash;
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -793,6 +801,8 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     r.xgb_min_child_weight = 0;
     r.xgb_seed = 0;
     r.xgb_tree_method[0] = '\0';
+    r.has_build_flags_hash = 0;
+    r.build_flags_hash = 0;
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -955,6 +965,11 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             }
             #undef PARSE_XGB_INT
             #undef PARSE_XGB_DOUBLE
+            // v5.9.5h Phase 10 — build flags hash (hex parse)
+            else if (strcmp(key, "build_flags_hash") == 0) {
+                r.build_flags_hash = (uint64_t)strtoull(val, nullptr, 16);
+                r.has_build_flags_hash = 1;
+            }
         }
         line = strtok_r(nullptr, "\n", &save);
     }
@@ -1146,6 +1161,8 @@ struct StampInferenceCfgInputs {
     int      xgb_min_child_weight;
     int      xgb_seed;
     char     xgb_tree_method[16];
+    int      has_build_flags_hash;
+    uint64_t build_flags_hash;
 };
 
 inline StampWriteResult stamp_write_for_model(const char* model_path,
@@ -1320,6 +1337,15 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
             inf->xgb_max_depth, inf->xgb_learning_rate, inf->xgb_n_estimators,
             inf->xgb_subsample, inf->xgb_colsample_bytree,
             inf->xgb_min_child_weight, inf->xgb_seed, inf->xgb_tree_method);
+        if (wrote > 0) n += wrote;
+    }
+    // v5.9.5h Phase 10 — build flags fingerprint (position 18). Emit
+    // when has_build_flags_hash=1; engine load-WARN compares stamp's
+    // hash vs current build's BUILD_FLAGS_HASH() (mismatch logged).
+    if (inf && inf->has_build_flags_hash && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "build_flags_hash=%016lx\n",
+            (unsigned long)inf->build_flags_hash);
         if (wrote > 0) n += wrote;
     }
 
