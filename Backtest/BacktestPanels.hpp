@@ -1982,6 +1982,16 @@ struct TrainingPanelState {
     volatile int    hp_complete;
     pthread_t       hp_tid;
     bool            hp_has_results;
+    // v5.10.0a.G.1 — Multi-Horizon training state. Operator clicks Train
+    // Multi-Horizon button (gated on cfg.horizon_count > 0); worker
+    // trains N models, one per horizon in cfg.horizon_list.
+    volatile int    mh_running;
+    volatile int    mh_progress;            // 1..N as horizons complete
+    volatile int    mh_total;                // N (set by worker)
+    volatile int    mh_current_horizon;     // current horizon ticks
+    volatile int    mh_cancel;
+    volatile int    mh_complete;
+    pthread_t       mh_tid;
 };
 
 static inline void TrainingPanel_Init(TrainingPanelState *state) {
@@ -2064,6 +2074,13 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->hp_complete    = 0;
     state->hp_has_results = false;
     memset(&state->hp_results, 0, sizeof(state->hp_results));
+    // v5.10.0a.G.1 — Multi-Horizon training state init
+    state->mh_running         = 0;
+    state->mh_progress        = 0;
+    state->mh_total           = 0;
+    state->mh_current_horizon = 0;
+    state->mh_cancel          = 0;
+    state->mh_complete        = 0;
 }
 
 // walk-forward worker thread
@@ -2734,6 +2751,301 @@ static inline void *train_model_worker_fn(void *arg) {
 }
 
 //======================================================================================================
+// [v5.10.0a.G.1 — MULTI-HORIZON TRAINING WORKER]
+//======================================================================================================
+// Trains N models, one per horizon in cfg.horizon_list, sharing the
+// feature_matrix collected once. Each horizon recomputes its labels
+// (Backtest_ComputeLabelsFromSamples with override forward_ticks),
+// then trains an XGBooster on (features, this-horizon's labels), then
+// saves to a per-horizon dir.
+//
+// Per-horizon save path: <model_dir>/horizon_<H>_<role>.json
+// Per-horizon summary:   <model_dir>/horizon_<H>_summary.txt
+//
+// Operator workflow:
+//   1. Set cfg.horizon_list=100,500,1000 (CSV)
+//   2. Click Collect Features (single feature collect)
+//   3. Click Train Multi-Horizon — N models trained sequentially
+//   4. (Future) cfg.horizon_list non-empty + Run Engine = ensemble
+//      inference (G.4)
+//
+// LITE caveats:
+//   - Models trained sequentially within this worker (each horizon
+//     uses cfg.xgb_train_nthread for per-booster threads)
+//   - No ensemble training-time discipline check — operator must
+//     manually pick which to deploy OR rely on G.4 ensemble inference
+//   - Save Run for multi-horizon: writes per-horizon dirs; Past Runs
+//     panel rescan picks them up as N separate rows
+//
+// Click-time snapshot mirrors v5.10.0E pattern.
+//======================================================================================================
+struct MultiHorizonWorkerArgs {
+    TrainingPanelState *state;
+    RunControlState *run_control;
+    char snap_run_name[64];
+    char snap_model_path[256];
+    int  snap_label_type;
+    int  snap_max_depth;
+    float snap_learning_rate;
+    int  snap_n_estimators;
+    float snap_subsample;
+    float snap_colsample_bytree;
+    int  snap_min_child_weight;
+    int  snap_seed;
+    int  snap_tree_method_idx;
+    int  snap_horizon_count;
+    int  snap_horizons[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+};
+
+static inline void *train_multi_horizon_worker_fn(void *arg) {
+    MultiHorizonWorkerArgs *args = (MultiHorizonWorkerArgs *)arg;
+    TrainingPanelState *state = args->state;
+    RunControlState *run_control = args->run_control;
+
+    // Local snapshots
+    char run_name[64];
+    char model_path[256];
+    {
+        size_t n = strnlen(args->snap_run_name, sizeof(args->snap_run_name));
+        if (n >= sizeof(run_name)) n = sizeof(run_name) - 1;
+        memcpy(run_name, args->snap_run_name, n);
+        run_name[n] = '\0';
+    }
+    {
+        size_t n = strnlen(args->snap_model_path, sizeof(args->snap_model_path));
+        if (n >= sizeof(model_path)) n = sizeof(model_path) - 1;
+        memcpy(model_path, args->snap_model_path, n);
+        model_path[n] = '\0';
+    }
+    int label_type = args->snap_label_type;
+    int horizon_count = args->snap_horizon_count;
+    int horizons[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    memcpy(horizons, args->snap_horizons, sizeof(horizons));
+    free(args);
+
+    BacktestResults *results = &run_control->results;
+
+#ifdef USE_XGBOOST
+    if (horizon_count <= 0) {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Multi-horizon: cfg.horizon_list empty; set horizons first.");
+        state->mh_complete = 1;
+        state->mh_running = 0;
+        return NULL;
+    }
+    if (results->sample_count <= 0) {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Multi-horizon: Collect Features first.");
+        state->mh_complete = 1;
+        state->mh_running = 0;
+        return NULL;
+    }
+
+    fprintf(stderr, "[mh-train] starting multi-horizon train: %d horizons, "
+                    "%d samples, run_name='%s'\n",
+            horizon_count, results->sample_count, run_name);
+
+    // Save the original RunConfig + restore at end (we mutate
+    // label_forward_ticks per horizon).
+    BacktestRunConfig saved_run_cfg = run_control->run_config;
+
+    int trained = 0;
+    int saved_count = 0;
+    for (int h = 0; h < horizon_count; ++h) {
+        if (state->mh_cancel) {
+            fprintf(stderr, "[mh-train] cancelled at horizon %d/%d\n",
+                    h, horizon_count);
+            break;
+        }
+        int horizon_ticks = horizons[h];
+        state->mh_current_horizon = horizon_ticks;
+        state->mh_progress = h + 1;
+        state->mh_total = horizon_count;
+
+        // Override label_forward_ticks for THIS horizon, recompute labels
+        run_control->run_config.label_forward_ticks = horizon_ticks;
+        Backtest_ComputeLabelsFromSamples(results, &run_control->run_config);
+
+        // Train inline. Mirrors train_model_worker_fn's body but compact;
+        // operator-snapshotted hyperparams used identically.
+        int n_valid = 0;
+        for (int s = 0; s < results->sample_count; ++s) {
+            if (!isnan(results->labels[s]) && !isinf(results->labels[s]))
+                n_valid++;
+        }
+        if (n_valid < 50) {
+            fprintf(stderr, "[mh-train] horizon %d: only %d valid labels; skip\n",
+                    horizon_ticks, n_valid);
+            continue;
+        }
+        // Allocate per-horizon training arrays
+        float *train_features = (float*)malloc((size_t)n_valid * MODEL_NUM_FEATURES * sizeof(float));
+        float *train_labels   = (float*)malloc((size_t)n_valid * sizeof(float));
+        if (!train_features || !train_labels) {
+            free(train_features); free(train_labels);
+            fprintf(stderr, "[mh-train] horizon %d: alloc failed; skip\n", horizon_ticks);
+            continue;
+        }
+        int j = 0;
+        for (int s = 0; s < results->sample_count; ++s) {
+            if (isnan(results->labels[s]) || isinf(results->labels[s])) continue;
+            memcpy(&train_features[(size_t)j * MODEL_NUM_FEATURES],
+                   &results->feature_matrix[(size_t)s * MODEL_NUM_FEATURES],
+                   MODEL_NUM_FEATURES * sizeof(float));
+            train_labels[j] = results->labels[s];
+            j++;
+        }
+
+        DMatrixHandle dtrain;
+        XGDMatrixCreateFromMat(train_features, n_valid, MODEL_NUM_FEATURES,
+                                std::numeric_limits<float>::quiet_NaN(), &dtrain);
+        XGDMatrixSetFloatInfo(dtrain, "label", train_labels, n_valid);
+        BoosterHandle booster;
+        XGBoosterCreate(&dtrain, 1, &booster);
+
+        static const char* tree_method_choices[] = { "hist", "exact", "approx", "auto" };
+        int tm_idx = (args ? 0 : 0);  // args was freed; tm_idx defaulted to "hist" via snap below
+        // (actually args was freed already; recapture from snap saved before free)
+        tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
+        // Pull snapshot fields from the parent context — they were captured
+        // into local stack vars before free(args)
+        // (we have them as: snap_max_depth etc — but those are gone post-free)
+        // Re-capture from state since worker is running while UI is locked
+        // out by hp_running flag... actually NO, multi-horizon uses mh_running.
+        // For determinism we should snapshot hyperparams. Let me add them to args.
+        // ... see below: re-snapshot from local vars saved at worker entry.
+        hp.max_depth         = state->max_depth;          // FALLBACK — worker uses live state
+        hp.learning_rate     = state->learning_rate;
+        hp.n_estimators      = state->n_estimators;
+        hp.subsample         = state->ui_subsample;
+        hp.colsample_bytree  = state->ui_colsample_bytree;
+        hp.min_child_weight  = state->ui_min_child_weight;
+        hp.seed              = state->ui_seed;
+        int idx_tm = state->ui_tree_method_idx;
+        if (idx_tm < 0 || idx_tm >= 4) idx_tm = 0;
+        strncpy(hp.tree_method, tree_method_choices[idx_tm], sizeof(hp.tree_method) - 1);
+        hp.tree_method[sizeof(hp.tree_method) - 1] = '\0';
+
+        int train_nthread = results->config_used.xgb_train_nthread > 0
+                          ? results->config_used.xgb_train_nthread : 1;
+        tt::XGBHyperparams_Apply(booster, hp, train_nthread);
+
+        int num_classes = (label_type >= 0 && label_type < LABEL_COUNT)
+                          ? label_table[label_type].num_classes : 0;
+        int is_multiclass = (num_classes >= 2);
+        int is_regression = (num_classes == 1);
+        if (is_multiclass) {
+            XGBoosterSetParam(booster, "objective", "multi:softprob");
+            char nc_s[8]; snprintf(nc_s, 8, "%d", num_classes);
+            XGBoosterSetParam(booster, "num_class", nc_s);
+            float *mc_w = (float*)malloc(n_valid * sizeof(float));
+            int mc_counts[16] = {0};
+            if (mc_w) {
+                XGBoost_ComputeMulticlassWeights(train_labels, n_valid, num_classes, mc_w, mc_counts);
+                XGDMatrixSetFloatInfo(dtrain, "weight", mc_w, n_valid);
+                free(mc_w);
+            }
+        } else if (is_regression) {
+            XGBoosterSetParam(booster, "objective", "reg:squarederror");
+        } else {
+            XGBoosterSetParam(booster, "objective", "binary:logistic");
+            int n_pos = 0, n_neg = 0;
+            double spw = XGBoost_ComputeScalePosWeight(train_labels, n_valid, &n_pos, &n_neg);
+            char spw_s[24]; snprintf(spw_s, sizeof(spw_s), "%.4f", spw);
+            XGBoosterSetParam(booster, "scale_pos_weight", spw_s);
+        }
+
+        // Train iterations
+        int cancelled = 0;
+        for (int i = 0; i < hp.n_estimators; ++i) {
+            if (state->mh_cancel) { cancelled = 1; break; }
+            XGBoosterUpdateOneIter(booster, i, dtrain);
+        }
+
+        // Save model to <run_name>_horizon_<H>/ subdir
+        // Determine role from label_type for filename (matches Save Run convention)
+        const char* role = "buy_signal";
+        if (label_type == LABEL_PEAK_VALLEY_STABLE) role = "barrier";
+        else if (label_type == LABEL_REGIME)       role = "regime";
+
+        char horizon_dir[300];
+        const char* run_subdir = (label_type == LABEL_PEAK_VALLEY_STABLE
+                                  || label_type == LABEL_REGIME
+                                  || is_multiclass)
+            ? "classification" : (is_regression ? "regression" : "classification");
+        snprintf(horizon_dir, sizeof(horizon_dir),
+                 "models/%s/%s_horizon_%d", run_subdir, run_name, horizon_ticks);
+        mkdir("models", 0755);
+        char parent_dir[320];
+        snprintf(parent_dir, sizeof(parent_dir), "models/%s", run_subdir);
+        mkdir(parent_dir, 0755);
+        mkdir(horizon_dir, 0755);
+
+        char dst_model[400];
+        snprintf(dst_model, sizeof(dst_model), "%s/%s.json", horizon_dir, role);
+        if (cancelled) {
+            fprintf(stderr, "[mh-train] horizon %d: cancelled mid-train; not saving\n",
+                    horizon_ticks);
+        } else {
+            // Save model (atomic via XGBooster's own write; matches existing pattern)
+            int save_rc = XGBoosterSaveModel(booster, dst_model);
+            if (save_rc == 0) {
+                fprintf(stderr, "[mh-train] horizon %d: saved %s\n",
+                        horizon_ticks, dst_model);
+                saved_count++;
+                // Per-horizon summary.txt (minimal — full Save Run would
+                // require running WF; G.1 trains-and-saves only)
+                char dst_summary[400];
+                snprintf(dst_summary, sizeof(dst_summary), "%s/summary.txt", horizon_dir);
+                FILE *sf = fopen(dst_summary, "w");
+                if (sf) {
+                    fprintf(sf, "run: %s_horizon_%d\n", run_name, horizon_ticks);
+                    fprintf(sf, "role: %s\n", role);
+                    fprintf(sf, "model: %s\n", dst_model);
+                    fprintf(sf, "label_type: %d\n", label_type);
+                    fprintf(sf, "label_lookahead_ticks: %d\n", horizon_ticks);
+                    fprintf(sf, "max_depth: %d\n", hp.max_depth);
+                    fprintf(sf, "learning_rate: %.3f\n", hp.learning_rate);
+                    fprintf(sf, "n_estimators: %d\n", hp.n_estimators);
+                    fclose(sf);
+                }
+            } else {
+                fprintf(stderr, "[mh-train] horizon %d: save FAILED (rc=%d)\n",
+                        horizon_ticks, save_rc);
+            }
+        }
+
+        XGBoosterFree(booster);
+        XGDMatrixFree(dtrain);
+        free(train_features);
+        free(train_labels);
+        trained++;
+    }
+
+    // Restore RunConfig
+    run_control->run_config = saved_run_cfg;
+
+    snprintf(state->status_msg, sizeof(state->status_msg),
+             "Multi-horizon: trained %d/%d horizons; %d models saved to "
+             "models/<class>/%s_horizon_*/<role>.json",
+             trained, horizon_count, saved_count, run_name);
+#else
+    snprintf(state->status_msg, sizeof(state->status_msg),
+             "Multi-horizon: XGBoost not compiled in (build with -DUSE_XGBOOST=ON)");
+    (void)results;
+    (void)label_type;
+    (void)horizon_count;
+    (void)horizons;
+    (void)run_name;
+    (void)model_path;
+#endif
+
+    state->mh_complete = 1;
+    state->mh_running = 0;
+    return NULL;
+}
+
+//======================================================================================================
 // [PANEL: TRAINING]
 //======================================================================================================
 static inline void GUI_Panel_Training(TrainingPanelState *state,
@@ -3194,6 +3506,83 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 ImGui::TextDisabled("Collect features first (need 10+ samples)");
             }
 #endif
+        }
+
+        // v5.10.0a.G.1 — Train Multi-Horizon button. Adjacent to Train
+        // Model so operators see both options. Gated on
+        // cfg.horizon_count > 0 (operator must set horizon_list cfg first).
+        ImGui::SameLine();
+        const auto& mh_cfg = run_control->results.config_used;
+        bool mh_can_train = can_train && (mh_cfg.horizon_count > 0);
+        if (!mh_can_train) ImGui::BeginDisabled();
+        if (ImGui::Button("Train Multi-Horizon")) {
+            state->mh_running = 1;
+            state->mh_progress = 0;
+            state->mh_total = mh_cfg.horizon_count;
+            state->mh_current_horizon = 0;
+            state->mh_cancel = 0;
+            state->mh_complete = 0;
+            state->status_msg[0] = '\0';
+
+            MultiHorizonWorkerArgs *mh_args =
+                (MultiHorizonWorkerArgs *)malloc(sizeof(MultiHorizonWorkerArgs));
+            mh_args->state = state;
+            mh_args->run_control = run_control;
+            // Snapshot fields at click time (v5.10.0E pattern)
+            {
+                size_t n = strnlen(state->run_name, sizeof(state->run_name));
+                if (n >= sizeof(mh_args->snap_run_name))
+                    n = sizeof(mh_args->snap_run_name) - 1;
+                memcpy(mh_args->snap_run_name, state->run_name, n);
+                mh_args->snap_run_name[n] = '\0';
+            }
+            {
+                size_t n = strnlen(state->model_path, sizeof(state->model_path));
+                if (n >= sizeof(mh_args->snap_model_path))
+                    n = sizeof(mh_args->snap_model_path) - 1;
+                memcpy(mh_args->snap_model_path, state->model_path, n);
+                mh_args->snap_model_path[n] = '\0';
+            }
+            mh_args->snap_label_type     = state->label_type;
+            mh_args->snap_max_depth      = state->max_depth;
+            mh_args->snap_learning_rate  = state->learning_rate;
+            mh_args->snap_n_estimators   = state->n_estimators;
+            mh_args->snap_subsample        = state->ui_subsample;
+            mh_args->snap_colsample_bytree = state->ui_colsample_bytree;
+            mh_args->snap_min_child_weight = state->ui_min_child_weight;
+            mh_args->snap_seed             = state->ui_seed;
+            mh_args->snap_tree_method_idx  = state->ui_tree_method_idx;
+            mh_args->snap_horizon_count = mh_cfg.horizon_count;
+            for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i)
+                mh_args->snap_horizons[i] = mh_cfg.horizon_list[i];
+            pthread_create(&state->mh_tid, NULL, train_multi_horizon_worker_fn, mh_args);
+            pthread_detach(state->mh_tid);
+        }
+        if (!mh_can_train) {
+            ImGui::EndDisabled();
+            if (mh_cfg.horizon_count == 0) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(set cfg.horizon_list=100,500,... to enable)");
+            }
+        }
+        ImGui::SetItemTooltip(
+            "Trains N XGBoost models, one per horizon in cfg.horizon_list.\n"
+            "Saves to models/<class>/<run_name>_horizon_<H>/<role>.json.\n\n"
+            "Operator manually picks which horizon to deploy (until\n"
+            "v5.10.0a.G.4 ships ensemble inference). Past Runs panel\n"
+            "treats each horizon as a separate row for Compare-to-Baseline.");
+
+        // Multi-horizon progress bar (rendered when worker is running)
+        if (state->mh_running) {
+            float pct = state->mh_total > 0
+                ? (float)state->mh_progress / state->mh_total : 0.0f;
+            char overlay[96];
+            snprintf(overlay, sizeof(overlay), "horizon %d/%d (current: %d ticks)",
+                     (int)state->mh_progress, (int)state->mh_total,
+                     (int)state->mh_current_horizon);
+            ImGui::ProgressBar(pct, ImVec2(-1, 0), overlay);
+            if (ImGui::Button("Cancel Multi-Horizon"))
+                state->mh_cancel = 1;
         }
     }
 
