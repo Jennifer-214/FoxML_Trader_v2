@@ -36,6 +36,8 @@
 #include <math.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#include <pthread.h>     // v5.10.0a.F — parallel hyperparam sweep workers
+#include <functional>    // v5.10.0a.F — std::function holder for sweep cell lambda
 
 // FPN width — must match the engine build
 #ifndef BACKTEST_FP
@@ -2218,49 +2220,110 @@ static inline void Backtest_RunHyperparamTrainSweep(
     // overrides specific hyperparam fields without disturbing the rest.
     ControllerConfig<BACKTEST_FP> base_cfg = feature_data->config_used;
 
-    fprintf(stderr, "[hpsweep] starting %d-cell sweep (sample_count=%d)\n",
-            opt->total_runs, feature_data->sample_count);
+    // v5.10.0a.F — parallel pthread training. cfg.xgb_train_nthread > 1
+    // dispatches cells across N pthread workers; each worker creates its
+    // own DMatrix + Booster (per XGBoost 3.3.0 thread-safety: independent
+    // booster instances are thread-safe across threads). Determinism
+    // preserved: per-booster nthread=1 inside parallel sweep so within-
+    // booster work stays single-threaded. Bytewise-equivalent to serial
+    // sweep for the same seed + data.
+    int n_workers = base_cfg.xgb_train_nthread > 0
+                  ? base_cfg.xgb_train_nthread : 1;
+    if (n_workers > opt->total_runs) n_workers = opt->total_runs;
 
-    for (int i0 = 0; i0 < opt->dims[0]; i0++) {
-        for (int i1 = 0; i1 < opt->dims[1]; i1++) {
+    fprintf(stderr, "[hpsweep] starting %d-cell sweep (sample_count=%d, n_workers=%d)\n",
+            opt->total_runs, feature_data->sample_count, n_workers);
+
+    // Per-cell helper — runs a single cell, writes to opt->stats[idx] +
+    // opt->metric[idx]. Single-writer per cell; no contention with other
+    // workers since each worker handles disjoint cell indices.
+    auto run_cell = [&](int idx) {
+        int i0 = idx / opt->dims[1];
+        int i1 = idx % opt->dims[1];
+        ControllerConfig<BACKTEST_FP> cell_cfg = base_cfg;
+        // Force per-booster nthread=1 in parallel mode for determinism;
+        // operator's xgb_eval_nthread is preserved in serial mode (only
+        // overridden when running parallel sweep).
+        if (n_workers > 1) cell_cfg.xgb_eval_nthread = 1;
+        ConfigField_Set(&cell_cfg, ranges[0].key, opt->param_vals[0][i0]);
+        if (num_params > 1)
+            ConfigField_Set(&cell_cfg, ranges[1].key, opt->param_vals[1][i1]);
+
+        WalkForwardResults wf_results;
+        int local_progress = 0;
+        Backtest_RunWalkForward(&wf_results, feature_data,
+                                 wf_n_splits, wf_horizon, wf_buffer,
+                                 wf_min_train, &local_progress,
+                                 cancel_flag, label_type, &cell_cfg);
+
+        memset(&opt->stats[idx], 0, sizeof(opt->stats[idx]));
+        double cell_metric = (wf_results.label_kind == 1)
+            ? (double)wf_results.mean_val_correlation
+            : (double)wf_results.mean_val_accuracy;
+        opt->metric[idx] = cell_metric;
+    };
+
+    if (n_workers <= 1) {
+        // SERIAL PATH (also used when total_runs == 1)
+        for (int idx = 0; idx < opt->total_runs; ++idx) {
             if (cancel_flag && *cancel_flag) {
                 fprintf(stderr, "[hpsweep] cancelled at cell %d/%d\n",
-                        (int)(i0 * opt->dims[1] + i1), opt->total_runs);
+                        idx, opt->total_runs);
                 return;
             }
-
-            int idx = i0 * opt->dims[1] + i1;
             *current_run = idx + 1;
-
-            // Apply per-cell hyperparam overrides
-            ControllerConfig<BACKTEST_FP> cell_cfg = base_cfg;
-            ConfigField_Set(&cell_cfg, ranges[0].key, opt->param_vals[0][i0]);
-            if (num_params > 1)
-                ConfigField_Set(&cell_cfg, ranges[1].key, opt->param_vals[1][i1]);
-
-            // Run WF with the per-cell cfg as override
-            WalkForwardResults wf_results;
-            int local_progress = 0;
-            Backtest_RunWalkForward(&wf_results, feature_data,
-                                     wf_n_splits, wf_horizon, wf_buffer,
-                                     wf_min_train, &local_progress,
-                                     cancel_flag, label_type, &cell_cfg);
-
-            // Record metric: val_accuracy (binary/multiclass) or
-            // val_correlation (regression). OptimizerResults.metric[]
-            // is double; populate per label_kind. stats[] is unused
-            // for hyperparam sweep (no backtest stats here); zero it.
-            memset(&opt->stats[idx], 0, sizeof(opt->stats[idx]));
-            double cell_metric = 0.0;
-            if (wf_results.label_kind == 1) {
-                cell_metric = (double)wf_results.mean_val_correlation;
-            } else {
-                cell_metric = (double)wf_results.mean_val_accuracy;
+            run_cell(idx);
+            if (opt->metric[idx] > best_metric) {
+                best_metric = opt->metric[idx];
+                opt->best_idx = idx;
             }
-            opt->metric[idx] = cell_metric;
+        }
+    } else {
+        // PARALLEL PATH — N workers in round-robin over cells.
+        // Worker_k handles cells {k, k+N, k+2*N, ...}. Disjoint indices,
+        // no shared writes to opt->. Coordinator joins all workers, then
+        // single-threaded best-cell selection.
+        struct WorkerCtx {
+            int worker_id;
+            int n_workers;
+            int total_runs;
+            volatile int *cancel_flag;
+            volatile int *current_run;
+            std::function<void(int)> *run_cell_fn;
+        };
 
-            if (cell_metric > best_metric) {
-                best_metric = cell_metric;
+        pthread_t tids[OPT_MAX_GRID];  // bound by total cell cap
+        WorkerCtx ctxs[OPT_MAX_GRID];
+        std::function<void(int)> run_cell_holder = run_cell;
+
+        auto worker_thunk = +[](void *arg) -> void* {
+            WorkerCtx *c = (WorkerCtx*)arg;
+            for (int idx = c->worker_id; idx < c->total_runs; idx += c->n_workers) {
+                if (c->cancel_flag && *c->cancel_flag) return nullptr;
+                (*c->run_cell_fn)(idx);
+                // current_run is monotonic-ish; workers write asynchronously
+                // (this is just for UI progress, exact ordering not required)
+                __atomic_store_n(c->current_run, idx + 1, __ATOMIC_RELAXED);
+            }
+            return nullptr;
+        };
+
+        for (int k = 0; k < n_workers; ++k) {
+            ctxs[k].worker_id = k;
+            ctxs[k].n_workers = n_workers;
+            ctxs[k].total_runs = opt->total_runs;
+            ctxs[k].cancel_flag = cancel_flag;
+            ctxs[k].current_run = current_run;
+            ctxs[k].run_cell_fn = &run_cell_holder;
+            pthread_create(&tids[k], nullptr, worker_thunk, &ctxs[k]);
+        }
+        for (int k = 0; k < n_workers; ++k) {
+            pthread_join(tids[k], nullptr);
+        }
+        // Single-threaded best-cell selection post-join.
+        for (int idx = 0; idx < opt->total_runs; ++idx) {
+            if (opt->metric[idx] > best_metric) {
+                best_metric = opt->metric[idx];
                 opt->best_idx = idx;
             }
         }
