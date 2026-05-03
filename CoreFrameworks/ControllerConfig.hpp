@@ -640,6 +640,20 @@ template <unsigned F> struct ControllerConfig {
   // production runs after the soak. default 0 so existing tests stay
   // green during the migration window.
   uint32_t oms_event_log_mode; // 0 = legacy (default), 1 = event log
+
+  // v5.9.5h — XGBoost training hyperparams (cfg-tunable subset).
+  // max_depth/learning_rate/n_estimators are operator-tunable via Train
+  // Model GUI panel only (NOT cfg-bound — they're per-experiment, not
+  // per-deploy). The 5 fields below were hardcoded pre-v5.9.5h; now
+  // operator-tunable via cfg. Defaults match pre-v5.9.5h hardcoded
+  // values bytewise. Stamp body records what trained the model
+  // (Surface G `has_xgb_hyperparams` flag); engine load-WARN fires
+  // when stamp's value differs from cfg's at boot.
+  FPN<F>   xgb_subsample;          // row subsample per tree (0.5-1.0); default 0.8
+  FPN<F>   xgb_colsample_bytree;   // column subsample per tree (0.5-1.0); default 0.8
+  int      xgb_min_child_weight;   // min sum-of-weights per leaf (1-50); default 5
+  int      xgb_seed;               // RNG seed for reproducible runs; default 42
+  char     xgb_tree_method[16];    // hist | exact | approx | auto; default "hist"
 };
 
 //======================================================================================================
@@ -892,6 +906,15 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.health_log_max_bytes        = 0;                            // 0 = no rotation (back-compat)
   cfg.health_log_keep_count       = 0;                            // 0 = no retained rotated files
   cfg.acknowledge_cross_binary_version_drift = 0;                 // v5.9.4 — default WARN on minor drift
+  // v5.9.5h — XGBoost training hyperparams (cfg-tunable subset).
+  // Defaults match pre-v5.9.5h hardcoded values bytewise; non-tuning
+  // operators get identical training output post-upgrade.
+  cfg.xgb_subsample           = FPN_FromDouble<F>(0.8);
+  cfg.xgb_colsample_bytree    = FPN_FromDouble<F>(0.8);
+  cfg.xgb_min_child_weight    = 5;
+  cfg.xgb_seed                = 42;
+  strncpy(cfg.xgb_tree_method, "hist", sizeof(cfg.xgb_tree_method) - 1);
+  cfg.xgb_tree_method[sizeof(cfg.xgb_tree_method) - 1] = '\0';
   cfg.health_log_level            = 0;                            // 0=info, 1=debug, 2=trace
   cfg.reconcile_interval_sec      = 0;                            // 0 = boot-only
   cfg.reconcile_dry_run           = 1;                            // safer default; flip to 0 deliberately
@@ -1260,6 +1283,18 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(held_out_fraction)
     CFG_PARSE_FPN(gap_acceptable_threshold)
     CFG_PARSE_INT(allow_cross_major_engine)
+    // v5.9.5h — XGBoost hyperparam parsers
+    CFG_PARSE_FPN_POS(xgb_subsample)
+    CFG_PARSE_FPN_POS(xgb_colsample_bytree)
+    CFG_PARSE_INT(xgb_min_child_weight)
+    CFG_PARSE_INT(xgb_seed)
+    if (strcmp(key, "xgb_tree_method") == 0) {
+        size_t n = strlen(val);
+        if (n >= sizeof(cfg.xgb_tree_method)) n = sizeof(cfg.xgb_tree_method) - 1;
+        memcpy(cfg.xgb_tree_method, val, n);
+        cfg.xgb_tree_method[n] = '\0';
+        continue;
+    }
     if (strcmp(key, "held_out_gate_strict") == 0) {
         cfg.held_out_gate_strict = atoi(val);
         continue;

@@ -314,6 +314,22 @@ engine_arch=per_core_slow
 # core_1_poll_interval=100
 
 #==============================================================================
+# ML TRAINING HYPERPARAMETERS (v5.9.5h)
+#==============================================================================
+# Cfg-tunable XGBoost training hyperparams. Live engine doesn't TRAIN, but
+# these fields participate in load-time WARN: when a model's stamp records
+# different values, engine logs "[xgb_hyperparams] WARN: stamp claims
+# subsample=0.X but cfg=0.Y." Set them to MATCH the values used to train
+# the model you're deploying — eliminates startup noise and provides
+# explicit drift detection. Suppressible via
+# acknowledge_cross_binary_version_drift=1.
+xgb_subsample=0.80                  # row subsample per tree (0.5-1.0)
+xgb_colsample_bytree=0.80           # column subsample per tree (0.5-1.0)
+xgb_min_child_weight=5              # min sum-of-weights per leaf (1-50)
+xgb_seed=42                         # RNG seed for reproducibility
+xgb_tree_method=hist                # hist | exact | approx | auto
+
+#==============================================================================
 # ML INFERENCE
 #==============================================================================
 # XGBoost or LightGBM model for buy signals. train in foxml_suite, load here.
