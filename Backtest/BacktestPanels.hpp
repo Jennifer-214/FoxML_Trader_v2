@@ -832,7 +832,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
         if (ImGui::BeginTabItem(class_label)) {
             if (n_class == 0) {
                 ImGui::TextDisabled("No classification runs saved yet.");
-            } else if (ImGui::BeginTable("past_runs_class", 12, flags)) {
+            } else if (ImGui::BeginTable("past_runs_class", 13, flags)) {  // v5.9.5h: +Stamp column
                 ImGui::TableSetupColumn("Run",        ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 220);
                 ImGui::TableSetupColumn("Role",       ImGuiTableColumnFlags_WidthFixed, 80);
                 ImGui::TableSetupColumn("Label",      ImGuiTableColumnFlags_WidthFixed, 50);
@@ -950,7 +950,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
         if (ImGui::BeginTabItem(regr_label)) {
             if (n_regr == 0) {
                 ImGui::TextDisabled("No regression runs saved yet.");
-            } else if (ImGui::BeginTable("past_runs_regr", 11, flags)) {
+            } else if (ImGui::BeginTable("past_runs_regr", 12, flags)) {  // v5.9.5h: +Stamp column
                 ImGui::TableSetupColumn("Run",        ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 220);
                 ImGui::TableSetupColumn("Role",       ImGuiTableColumnFlags_WidthFixed, 80);
                 ImGui::TableSetupColumn("Label",      ImGuiTableColumnFlags_WidthFixed, 50);
