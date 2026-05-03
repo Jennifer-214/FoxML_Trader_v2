@@ -12352,6 +12352,145 @@ e3_skip_load:;
         EnsembleModelZoo_Free(&ezoo4);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0a.G.9 — Bandit state JSON persistence ---\n");
+    {
+        // === Test G.9.1: Bandit_SaveJSON writes valid JSON ===
+        BanditState bandits[NUM_REGIMES];
+        for (int r = 0; r < NUM_REGIMES; ++r) {
+            Bandit_Init(&bandits[r], 4, 0.05, 0.1, 1.0, 100, 200);
+            // Set some non-uniform state
+            for (int a = 0; a < 4; ++a) {
+                bandits[r].weights[a] = 1.0 + 0.1 * r + 0.01 * a;
+                bandits[r].cum_reward[a] = 50.0 * r + 5.0 * a;
+                bandits[r].pulls[a] = 10 * r + a;
+            }
+            bandits[r].total_steps = 100 + r;
+        }
+        char savefile[] = "/tmp/v5100aG9_save_XXXXXX.json";
+        int fd = mkstemps(savefile, 5);
+        check("v5.10.0a.G.9: tmp file for save created", fd >= 0);
+        if (fd >= 0) {
+            close(fd);
+            unlink(savefile);  // Bandit_SaveJSON does atomic create itself
+            int ok = Bandit_SaveJSON(bandits, NUM_REGIMES, savefile,
+                                       "abc123def456_test_bundle_id", nullptr);
+            check("v5.10.0a.G.9: Bandit_SaveJSON returns 1 on success", ok == 1);
+            check("v5.10.0a.G.9: saved file exists at target path",
+                  access(savefile, F_OK) == 0);
+            // === Test G.9.2: Bandit_LoadJSON round-trips state ===
+            BanditState reloaded[NUM_REGIMES];
+            for (int r = 0; r < NUM_REGIMES; ++r) {
+                Bandit_Init(&reloaded[r], 4, 0.05, 0.1, 1.0, 100, 200);
+            }
+            int loaded = Bandit_LoadJSON(reloaded, NUM_REGIMES, savefile,
+                                           "abc123def456_test_bundle_id", 4);
+            check("v5.10.0a.G.9: Bandit_LoadJSON returns 1 on valid file",
+                  loaded == 1);
+            // Spot-check round-trip: a couple of regimes' weights match
+            check("v5.10.0a.G.9: regime 0 arm 0 weight round-trip",
+                  reloaded[0].weights[0] == bandits[0].weights[0]);
+            check("v5.10.0a.G.9: regime 2 arm 3 weight round-trip",
+                  reloaded[2].weights[3] == bandits[2].weights[3]);
+            check("v5.10.0a.G.9: regime 1 cum_reward round-trip",
+                  reloaded[1].cum_reward[2] == bandits[1].cum_reward[2]);
+            check("v5.10.0a.G.9: regime 0 pulls round-trip",
+                  reloaded[0].pulls[1] == bandits[0].pulls[1]);
+            check("v5.10.0a.G.9: regime 1 total_steps round-trip",
+                  reloaded[1].total_steps == bandits[1].total_steps);
+
+            // === Test G.9.3: load with mismatched SHA returns 0 ===
+            BanditState reloaded2[NUM_REGIMES];
+            for (int r = 0; r < NUM_REGIMES; ++r) {
+                Bandit_Init(&reloaded2[r], 4, 0.05, 0.1, 1.0, 100, 200);
+            }
+            int sha_fail = Bandit_LoadJSON(reloaded2, NUM_REGIMES, savefile,
+                                             "WRONG_BUNDLE_ID_xxxxxxxxxxxx", 4);
+            check("v5.10.0a.G.9: load with mismatched SHA returns 0",
+                  sha_fail == 0);
+            // Verify weights NOT overwritten — Bandit_Init sets all to 1.0
+            check("v5.10.0a.G.9: failed-load leaves init weights intact",
+                  reloaded2[0].weights[0] == 1.0);
+
+            // === Test G.9.4: load with missing file returns 0 ===
+            int missing = Bandit_LoadJSON(reloaded2, NUM_REGIMES,
+                                            "/tmp/this_file_does_not_exist_v5100aG9.json",
+                                            "abc", 4);
+            check("v5.10.0a.G.9: load with missing file returns 0",
+                  missing == 0);
+
+            // === Test G.9.5: load with mismatched n_arms returns 0 ===
+            BanditState reloaded3[NUM_REGIMES];
+            for (int r = 0; r < NUM_REGIMES; ++r) {
+                Bandit_Init(&reloaded3[r], 6, 0.05, 0.1, 1.0, 100, 200);  // 6 arms
+            }
+            int n_arms_fail = Bandit_LoadJSON(reloaded3, NUM_REGIMES, savefile,
+                                                "abc123def456_test_bundle_id", 6);
+            check("v5.10.0a.G.9: load with mismatched n_arms returns 0",
+                  n_arms_fail == 0);
+
+            // === Test G.9.6: empty SHA in expected → SHA check skipped ===
+            BanditState reloaded4[NUM_REGIMES];
+            for (int r = 0; r < NUM_REGIMES; ++r) {
+                Bandit_Init(&reloaded4[r], 4, 0.05, 0.1, 1.0, 100, 200);
+            }
+            int sha_skip = Bandit_LoadJSON(reloaded4, NUM_REGIMES, savefile,
+                                             "", 4);
+            check("v5.10.0a.G.9: empty expected_sha skips SHA check",
+                  sha_skip == 1);
+
+            unlink(savefile);
+        }
+
+        // === Test G.9.7: cfg field ensemble_bandit_save_interval ===
+        ControllerConfig<FP> g9_cfg = ControllerConfig_Default<FP>();
+        check("v5.10.0a.G.9: ensemble_bandit_save_interval default 5000",
+              g9_cfg.ensemble_bandit_save_interval == 5000);
+
+        // Parser test
+        char tmpcfg[] = "/tmp/g9_save_interval_XXXXXX.cfg";
+        int cfd = mkstemps(tmpcfg, 4);
+        if (cfd >= 0) {
+            const char* cfg_text = "ensemble_bandit_save_interval=12345\n";
+            ssize_t wrote = write(cfd, cfg_text, strlen(cfg_text));
+            (void)wrote;
+            close(cfd);
+            ControllerConfig<FP> parsed = ControllerConfig_Load<FP>(tmpcfg);
+            check("v5.10.0a.G.9: parses ensemble_bandit_save_interval=12345",
+                  parsed.ensemble_bandit_save_interval == 12345);
+            unlink(tmpcfg);
+        }
+
+        // === Test G.9.8: ComputeBundleId is deterministic ===
+        EnsembleModelZoo<FP> ez_a;
+        EnsembleModelZoo_Init(&ez_a);
+        ez_a.active = 1;
+        ez_a.buy_signal_count = 3;
+        // Inject deterministic training_fingerprints
+        const char* fps[] = {"aaaaaaaaffff1111", "bbbbbbbbffff2222", "ccccccccffff3333"};
+        for (int a = 0; a < 3; ++a) {
+            strncpy(ez_a.buy_signal[a].training_fingerprint, fps[a], 65);
+        }
+        char id1[65];
+        EnsembleModelZoo_ComputeBundleId(&ez_a, id1, sizeof(id1));
+        char id2[65];
+        EnsembleModelZoo_ComputeBundleId(&ez_a, id2, sizeof(id2));
+        check("v5.10.0a.G.9: ComputeBundleId is deterministic across calls",
+              memcmp(id1, id2, 64) == 0);
+        check("v5.10.0a.G.9: ComputeBundleId starts with first fp prefix",
+              memcmp(id1, "aaaaaaaa", 8) == 0);
+        check("v5.10.0a.G.9: ComputeBundleId mid section is second fp",
+              memcmp(id1 + 8, "bbbbbbbb", 8) == 0);
+
+        // Modify a fingerprint → bundle id should change
+        strncpy(ez_a.buy_signal[1].training_fingerprint, "MODIFIEDfffffffff", 65);
+        char id3[65];
+        EnsembleModelZoo_ComputeBundleId(&ez_a, id3, sizeof(id3));
+        check("v5.10.0a.G.9: ComputeBundleId changes when fingerprint changes",
+              memcmp(id1, id3, 64) != 0);
+
+        EnsembleModelZoo_Free(&ez_a);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.G.6 — Per-core ensemble cfg fields ---\n");
     {
         // === Test G.6.1: ensemble cfg defaults ===

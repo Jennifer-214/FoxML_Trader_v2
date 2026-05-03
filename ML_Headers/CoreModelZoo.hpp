@@ -43,6 +43,7 @@
 #include <stdlib.h>      // v5.10.0a.G.5 — strtol for AutoDetect horizon parse
 #include <sys/stat.h>
 #include <sys/types.h>   // v5.10.0a.G.5 — dirent for AutoDetect filesystem scan
+#include <unistd.h>      // v5.10.0a.G.9 — access() for bandit_state.json probe
 #include <dirent.h>      // v5.10.0a.G.5 — opendir/readdir for AutoDetect
 
 // role bitmap — set in zoo->loaded_mask when a model is successfully loaded
@@ -664,6 +665,13 @@ struct EnsembleModelZoo {
         uint8_t  demoted;                        // 1 = forced near-zero weight; sticky until recovery
     };
     PerArmDrift drift[ENSEMBLE_HORIZON_MAX];
+    // v5.10.0a.G.9 — bandit state persistence. base_dir is captured at
+    // AutoDetectFromDir / LoadFromCfg time so the periodic save trigger
+    // doesn't need ControllerConfig visibility from the bandit-update
+    // helpers. Empty path = persistence disabled (no save attempted).
+    char     bandit_save_path[400];     // <core_model_dir>/bandit_state.json
+    int      bandit_save_interval;      // 0 = no periodic save (shutdown only)
+    uint64_t bandit_update_count;       // monotonic; modulo'd against interval
 };
 
 template <unsigned F>
@@ -697,6 +705,10 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     ezoo->reward_ring_head = 0;
     ezoo->predict_call_count = 0;
     memset(ezoo->drift, 0, sizeof(ezoo->drift));
+    // v5.10.0a.G.9 — persistence config init (caller fills via _SetSavePath)
+    ezoo->bandit_save_path[0] = '\0';
+    ezoo->bandit_save_interval = 0;
+    ezoo->bandit_update_count = 0;
 }
 
 //======================================================================================================
@@ -817,6 +829,7 @@ inline void EnsembleModelZoo_TickRewardsFromLookback(EnsembleModelZoo<F>* ezoo,
 
         // Per-arm reward: 1 if predicted direction matched, 0 otherwise.
         // Skip disabled arms (bitmask check).
+        int updates_this_record = 0;
         for (int a = 0; a < n_arms; ++a) {
             if (ezoo->disabled_horizon_mask & (1u << a)) continue;
             float p = rec.predictions[a];
@@ -825,10 +838,16 @@ inline void EnsembleModelZoo_TickRewardsFromLookback(EnsembleModelZoo<F>* ezoo,
             // Bandit_Update accumulates these.
             double reward_bps = correct ? 50.0 : -50.0;
             Bandit_Update(&ezoo->bandits[regime], a, reward_bps);
+            updates_this_record++;
             // Drift watchdog updates per-arm IC tracker
             EnsembleModelZoo_UpdateDrift(ezoo, a, correct, ic_floor);
         }
         rec.rewarded_lookback = 1;
+        // v5.10.0a.G.9 — periodic save trigger after each ring record's
+        // updates land. Cheap when bandit_save_interval==0 (no-op early
+        // return). When fires (once every N updates), atomic file write
+        // takes ~1ms — acceptable on slow path.
+        EnsembleModelZoo_MaybeSaveBanditPeriodic(ezoo, updates_this_record);
     }
 }
 
@@ -871,6 +890,7 @@ inline void EnsembleModelZoo_TradeCloseReward(EnsembleModelZoo<F>* ezoo,
     if (regime < 0 || regime >= NUM_REGIMES) regime = 0;
     int pnl_positive = (realized_pnl_bps > 0.0) ? 1 : 0;
 
+    int trade_updates = 0;
     for (int a = 0; a < n_arms; ++a) {
         if (ezoo->disabled_horizon_mask & (1u << a)) continue;
         float p = rec.predictions[a];
@@ -878,8 +898,11 @@ inline void EnsembleModelZoo_TradeCloseReward(EnsembleModelZoo<F>* ezoo,
         // Trade-close reward weighted higher than slow-path lookback
         double reward_bps = (correct ? 50.0 : -50.0) * reward_mult;
         Bandit_Update(&ezoo->bandits[regime], a, reward_bps);
+        trade_updates++;
     }
     rec.rewarded_trade = 1;
+    // v5.10.0a.G.9 — periodic save check (no-op when interval==0)
+    EnsembleModelZoo_MaybeSaveBanditPeriodic(ezoo, trade_updates);
 }
 
 //======================================================================================================
@@ -1206,6 +1229,136 @@ inline int EnsembleModelZoo_AutoDetectFromDir(
     }
 
     return total;
+}
+
+//======================================================================================================
+// [v5.10.0a.G.9 — BUNDLE SHA + BANDIT STATE LOAD/SAVE]
+//======================================================================================================
+// "Bundle SHA": deterministic 64-char hex derived from each loaded
+// horizon's training_fingerprint. NOT a cryptographic SHA — just a
+// stable identifier for "this exact set of models." Detects when
+// operator swaps models without clearing the bandit_state.json;
+// mismatch → load returns 0 → caller falls back to uniform via
+// EnsembleModelZoo_InitBandits.
+//
+// Algorithm: concat first 8 chars of each loaded handle's
+// training_fingerprint (in horizon-sorted order) into a 64-char
+// hex string. Pads with '0' if fewer than 8 horizons. Same horizons
+// + same fingerprints → same bundle id.
+template <unsigned F>
+inline void EnsembleModelZoo_ComputeBundleId(
+    const EnsembleModelZoo<F>* ezoo, char* hex_out, size_t hex_cap) {
+    if (!ezoo || !hex_out || hex_cap < 65) return;
+    memset(hex_out, '0', 64);
+    hex_out[64] = '\0';
+    int n = ezoo->buy_signal_count;
+    if (n > 8) n = 8;
+    for (int a = 0; a < n; ++a) {
+        const ModelHandle<F>& h = ezoo->buy_signal[a];
+        // Copy first 8 hex chars of training_fingerprint into slot a.
+        // If fingerprint is empty or too short, leave zeros.
+        const char* fp = h.training_fingerprint;
+        size_t flen = strnlen(fp, 65);
+        if (flen >= 8) {
+            memcpy(hex_out + a * 8, fp, 8);
+        }
+    }
+}
+
+// Save bandit state to <base_dir>/bandit_state.json. Returns 1 on
+// success, 0 on failure (silent — caller logs if it cares).
+template <unsigned F>
+inline int EnsembleModelZoo_SaveBanditState(
+    const EnsembleModelZoo<F>* ezoo, const char* base_dir,
+    const char* const* regime_names) {
+    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return 0;
+    if (!base_dir || base_dir[0] == '\0') return 0;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/bandit_state.json", base_dir);
+    char bundle_id[65];
+    EnsembleModelZoo_ComputeBundleId(ezoo, bundle_id, sizeof(bundle_id));
+    return Bandit_SaveJSON(ezoo->bandits, NUM_REGIMES, path,
+                            bundle_id, regime_names);
+}
+
+// Load bandit state from <base_dir>/bandit_state.json. Returns 1 on
+// success (overlays weights/cum_reward/pulls onto pre-initialized
+// bandits), 0 on missing/corrupt/mismatched file.
+//
+// Also captures base_dir into ezoo->bandit_save_path so periodic +
+// shutdown save can find it without re-deriving from cfg later.
+//
+// Caller must call EnsembleModelZoo_InitBandits FIRST to set up the
+// uniform priors + arm count + gamma. This function only overlays.
+template <unsigned F>
+inline int EnsembleModelZoo_LoadBanditState(
+    EnsembleModelZoo<F>* ezoo, const char* base_dir) {
+    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return 0;
+    if (!base_dir || base_dir[0] == '\0') return 0;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/bandit_state.json", base_dir);
+    // Capture path for periodic + shutdown save triggers.
+    strncpy(ezoo->bandit_save_path, path, sizeof(ezoo->bandit_save_path) - 1);
+    ezoo->bandit_save_path[sizeof(ezoo->bandit_save_path) - 1] = '\0';
+    char expected_id[65];
+    EnsembleModelZoo_ComputeBundleId(ezoo, expected_id, sizeof(expected_id));
+    int loaded = Bandit_LoadJSON(ezoo->bandits, NUM_REGIMES, path,
+                                   expected_id, ezoo->buy_signal_count);
+    if (loaded) {
+        fprintf(stderr, "[ensemble] loaded bandit state from %s\n", path);
+    } else {
+        // Missing or mismatch → caller's prior _InitBandits uniform stays.
+        // Don't warn loudly: missing on first run is normal.
+        if (access(path, F_OK) == 0) {
+            fprintf(stderr, "[ensemble] bandit_state.json present but rejected "
+                            "(format/sha/n_arms mismatch); starting uniform\n");
+        }
+    }
+    return loaded;
+}
+
+// Configure periodic save cadence. Called once at boot after
+// _LoadBanditState. interval=0 disables periodic; shutdown save still
+// fires regardless.
+template <unsigned F>
+inline void EnsembleModelZoo_SetBanditSaveInterval(
+    EnsembleModelZoo<F>* ezoo, int interval) {
+    if (!ezoo) return;
+    ezoo->bandit_save_interval = (interval < 0) ? 0 : interval;
+    ezoo->bandit_update_count = 0;
+}
+
+// Periodic save trigger. Called after each Bandit_Update batch
+// (TickRewardsFromLookback / TradeCloseReward fold this in). Increments
+// bandit_update_count; when count crosses interval threshold, flush
+// state to bandit_save_path. No-op if path empty or interval==0.
+//
+// Locale: fprintf in Bandit_SaveJSON uses "C" locale via global
+// LC_NUMERIC; engine boot pins this. Render-thread safety: this fires
+// on the slow-path / drainer threads, never in hot path.
+template <unsigned F>
+inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
+    EnsembleModelZoo<F>* ezoo, int updates_this_call) {
+    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return;
+    if (ezoo->bandit_save_interval <= 0) return;
+    if (ezoo->bandit_save_path[0] == '\0') return;
+    if (updates_this_call <= 0) return;
+    uint64_t before = ezoo->bandit_update_count;
+    ezoo->bandit_update_count += (uint64_t)updates_this_call;
+    uint64_t threshold = (uint64_t)ezoo->bandit_save_interval;
+    // Cross threshold: did before/threshold differ from after/threshold?
+    if (before / threshold == ezoo->bandit_update_count / threshold) {
+        return;  // didn't cross
+    }
+    char expected_id[65];
+    EnsembleModelZoo_ComputeBundleId(ezoo, expected_id, sizeof(expected_id));
+    int ok = Bandit_SaveJSON(ezoo->bandits, NUM_REGIMES,
+                               ezoo->bandit_save_path, expected_id, nullptr);
+    if (!ok) {
+        fprintf(stderr, "[ensemble] periodic bandit save FAILED to %s "
+                        "(disk full?); next attempt at +%llu updates\n",
+                ezoo->bandit_save_path, (unsigned long long)threshold);
+    }
 }
 
 #endif // CORE_MODEL_ZOO_HPP

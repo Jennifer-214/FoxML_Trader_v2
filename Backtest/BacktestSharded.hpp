@@ -316,6 +316,14 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                         // v5.10.0a.G.7 — kill-switch: parse cfg.core_N_disabled_horizons
                         EnsembleModelZoo_SetDisabledHorizons(&ml_ensemble_zoos[i],
                             cfg.core_disabled_horizons[i]);
+                        // v5.10.0a.G.9 — overlay persisted bandit state from
+                        // <core_model_dir>/bandit_state.json onto uniform priors.
+                        // Missing/mismatched → uniform stays. Bundle-id check
+                        // catches model-swap-without-clearing-bandit-state.
+                        EnsembleModelZoo_LoadBanditState(&ml_ensemble_zoos[i],
+                                                          cfg.core_model_dir[i]);
+                        EnsembleModelZoo_SetBanditSaveInterval(&ml_ensemble_zoos[i],
+                            cfg.ensemble_bandit_save_interval);
                         // Wire ensemble pointer into the per-core handle slot;
                         // dispatcher's ml_ctx.ensemble_zoo reads from this.
                         state.cores[i].ensemble_handle = &ml_ensemble_zoos[i];
@@ -886,6 +894,27 @@ done:
 
     free(ticks);
     free(file_tick_counts);
+
+    // v5.10.0a.G.9 — save bandit state on backtest completion. Each
+    // core writes to its own <core_model_dir>/bandit_state.json. This
+    // is the "save at shutdown" trigger from the G.9 plan; periodic
+    // saves (cfg.ensemble_bandit_save_interval) cover the in-flight
+    // case but final flush ensures end-state is persisted even if
+    // total updates < interval.
+    for (int i = 0; i < num_cores; ++i) {
+        if (ml_ensemble_zoos[i].active &&
+            ml_ensemble_zoos[i].initialized_bandits &&
+            cfg.core_model_dir[i][0]) {
+            int saved = EnsembleModelZoo_SaveBanditState(
+                &ml_ensemble_zoos[i], cfg.core_model_dir[i],
+                /*regime_names=*/nullptr);
+            if (saved) {
+                fprintf(stderr, "[backtest sharded] core %d: saved bandit state to "
+                                "%s/bandit_state.json\n",
+                        i, cfg.core_model_dir[i]);
+            }
+        }
+    }
 
     fprintf(stderr, "[backtest sharded] completed: %d ticks in %.1fms, %u trades (%u/%u W/L), P&L $%.2f\n",
             total_processed, elapsed,

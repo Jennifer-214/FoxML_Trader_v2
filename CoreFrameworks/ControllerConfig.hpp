@@ -737,6 +737,13 @@ template <unsigned F> struct ControllerConfig {
   // (faster convergence to deployable weights); lower = faster cold-
   // start learning from dense lookback signals.
   double   ensemble_trade_reward_mult;
+  // v5.10.0a.G.9 — bandit state persistence cadence. Every N total
+  // bandit updates (across all regimes), flush bandit_state.json to
+  // <model_dir>/bandit_state.json. Default 5000 — with ~1 update per
+  // poll_interval ticks, that's roughly 1 save per 500K ticks (≈ 1
+  // save/hour at typical tick rates). Set to 0 to disable periodic
+  // saves (state still saved on engine clean shutdown).
+  int      ensemble_bandit_save_interval;
 };
 
 //======================================================================================================
@@ -1031,6 +1038,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.ensemble_min_warmup_predictions = 100;
   cfg.ensemble_min_agreement_pct = 0.6;
   cfg.ensemble_trade_reward_mult = 4.0;
+  cfg.ensemble_bandit_save_interval = 5000;  // v5.10.0a.G.9
   // v5.10.0a.G.6 — per-core ensemble cfg defaults (empty = inherit global)
   for (int i = 0; i < 16; ++i) {
       cfg.core_horizon_list[i][0] = '\0';
@@ -1467,6 +1475,15 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         if (v < 0.0) v = 0.0;
         if (v > 100.0) v = 100.0;
         cfg.ensemble_trade_reward_mult = v;
+        continue;
+    }
+    if (strcmp(key, "ensemble_bandit_save_interval") == 0) {
+        int v = atoi(val);
+        // 0 = disable periodic saves (still saves on shutdown); negative
+        // → clamp to 0. Upper bound prevents accidental every-tick saves.
+        if (v < 0) v = 0;
+        if (v > 10000000) v = 10000000;
+        cfg.ensemble_bandit_save_interval = v;
         continue;
     }
     // v5.10.0a — horizon_list CSV parser. Comma-separated ints, max

@@ -413,6 +413,17 @@ ensemble_min_agreement_pct=0.6
 # more variance in weights between trades.
 ensemble_trade_reward_mult=4.0
 
+# Bandit state persistence cadence (v5.10.0a.G.9). Bandit weights are
+# saved to <core_model_dir>/bandit_state.json on engine clean shutdown
+# AND every N total bandit updates during the session. Restart loads
+# the state back so weights resume rather than re-learn from uniform.
+# Bundle SHA in the JSON catches model-swap-without-clearing-bandit-state
+# (mismatch → uniform reset).
+# 0 = save only on shutdown.
+# 5000 (default) = ~1 save/hour at typical tick rates.
+# Lower (e.g. 1000) = more durable but more disk I/O.
+ensemble_bandit_save_interval=5000
+
 # Global blend mode (per-core override via core_N_ensemble_blend_mode)
 ensemble_blend_mode=weighted
 

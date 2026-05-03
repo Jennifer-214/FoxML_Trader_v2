@@ -850,6 +850,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                             sizeof(ml_ensemble_zoos[i].blend_mode) - 1] = '\0';
                         EnsembleModelZoo_SetDisabledHorizons(&ml_ensemble_zoos[i],
                             cfg.core_disabled_horizons[i]);
+                        // v5.10.0a.G.9 — overlay persisted bandit state (if any)
+                        EnsembleModelZoo_LoadBanditState(&ml_ensemble_zoos[i],
+                                                          cfg.core_model_dir[i]);
+                        EnsembleModelZoo_SetBanditSaveInterval(&ml_ensemble_zoos[i],
+                            cfg.ensemble_bandit_save_interval);
                         state.cores[i].ensemble_handle = &ml_ensemble_zoos[i];
                     } else {
                         state.cores[i].ensemble_handle = nullptr;
@@ -2804,6 +2809,30 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             fprintf(stderr, "[snapshot] final save: data/sharded_snapshot.dat\n");
         } else {
             fprintf(stderr, "[snapshot] final save FAILED — next restart starts fresh\n");
+        }
+    }
+
+    // v5.10.0a.G.9 — final bandit state save. Each active ensemble core
+    // flushes to its own <core_model_dir>/bandit_state.json. Survives
+    // restart so weights resume rather than re-learn from uniform.
+    // Live AND paper modes both save (live: deployed weights inform
+    // next session; paper: same thing for backtest-style sessions).
+    // Reaches the ezoo via ctx.ensemble_handle (registered at
+    // line ~853) since the static array's name is scope-limited
+    // to the init for-loop.
+    for (int i = 0; i < num_cores; ++i) {
+        auto* ezoo = static_cast<EnsembleModelZoo<F>*>(
+            state.cores[i].ensemble_handle);
+        if (ezoo && ezoo->active && ezoo->initialized_bandits &&
+            cfg.core_model_dir[i][0]) {
+            int saved = EnsembleModelZoo_SaveBanditState(
+                ezoo, cfg.core_model_dir[i],
+                /*regime_names=*/nullptr);
+            if (saved) {
+                fprintf(stderr, "[sharded] core %d: saved bandit state to "
+                                "%s/bandit_state.json\n",
+                        i, cfg.core_model_dir[i]);
+            }
         }
     }
 
