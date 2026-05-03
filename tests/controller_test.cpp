@@ -12607,6 +12607,159 @@ e3_skip_load:;
         EnsembleModelZoo_Free(&ez_src);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0a.next.2 — Bandit replay-determinism ---\n");
+    {
+        // Theory: bandit math (Bandit_Update + reward computation +
+        // RecordPrediction → TickRewardsFromLookback) is deterministic by
+        // construction — same input sequence → same output state. This
+        // test verifies that empirically: feed two ezoos the SAME sequence
+        // of reward events, save both to JSON, assert files are bytewise
+        // identical.
+        //
+        // Why this matters: the operator's backtest-to-deployment trust
+        // chain depends on this. If a backtest's bandit_state.json drifts
+        // run-over-run (even with identical inputs), the run snapshots are
+        // not reproducible and historical comparisons are meaningless.
+        //
+        // FULL backtest replay (with actual ML models, full predict-reward
+        // cycle) requires synthetic model fixtures — deferred until those
+        // exist. This test covers the bandit layer end-to-end.
+
+        // === Setup: two identically-initialized ezoos ===
+        EnsembleModelZoo<FP> ez1, ez2;
+        EnsembleModelZoo_Init(&ez1);
+        EnsembleModelZoo_Init(&ez2);
+        for (auto* ez : {&ez1, &ez2}) {
+            ez->active = 1;
+            ez->buy_signal_count = 4;
+            ez->horizon_ticks_at_idx[0] = 100;
+            ez->horizon_ticks_at_idx[1] = 500;
+            ez->horizon_ticks_at_idx[2] = 1000;
+            ez->horizon_ticks_at_idx[3] = 2000;
+            EnsembleModelZoo_InitBandits(ez, 0.05, 200);
+        }
+
+        // === Replay: identical sequence of predictions + price moves ===
+        // Use deterministic patterns. 50 cycles of:
+        //   - record per-arm predictions (varied by cycle)
+        //   - advance call counter past lookback threshold
+        //   - feed lookback rewards with deterministic price delta
+        const int N_CYCLES = 50;
+        for (int c = 0; c < N_CYCLES; ++c) {
+            // Per-arm predictions vary deterministically across cycles
+            float preds[4] = {
+                0.5f + 0.3f * sinf((float)c * 0.1f),
+                0.5f + 0.2f * cosf((float)c * 0.15f),
+                0.5f - 0.25f * sinf((float)c * 0.2f),
+                0.5f + 0.1f * cosf((float)c * 0.25f),
+            };
+            int regime = c % NUM_REGIMES;
+            float sample_price = 60000.0f + 100.0f * (float)c;
+
+            EnsembleModelZoo_RecordPrediction(&ez1, regime, preds, 4, sample_price);
+            EnsembleModelZoo_RecordPrediction(&ez2, regime, preds, 4, sample_price);
+
+            // Advance call counter so older records are old enough to reward.
+            // Each cycle: 11 dummy records advance count past 1000-tick / 100-poll
+            // = 10-call lookback threshold.
+            for (int d = 0; d < 11; ++d) {
+                EnsembleModelZoo_RecordPrediction(&ez1, regime, preds, 4, sample_price);
+                EnsembleModelZoo_RecordPrediction(&ez2, regime, preds, 4, sample_price);
+            }
+
+            // Feed lookback rewards. Price moved up 1% from sample.
+            float current_price = sample_price * 1.01f;
+            EnsembleModelZoo_TickRewardsFromLookback(&ez1, current_price, 1000, 100, 0.02);
+            EnsembleModelZoo_TickRewardsFromLookback(&ez2, current_price, 1000, 100, 0.02);
+
+            // Trade-close reward every 5 cycles (sparse signal).
+            if (c % 5 == 4) {
+                double pnl_bps = (c % 2 == 0) ? 50.0 : -25.0;
+                EnsembleModelZoo_TradeCloseReward(&ez1, pnl_bps, 4.0);
+                EnsembleModelZoo_TradeCloseReward(&ez2, pnl_bps, 4.0);
+            }
+        }
+
+        // === Save both bandit states to JSON, diff bytewise ===
+        char path1[] = "/tmp/v5100a_next2_state1_XXXXXX.json";
+        char path2[] = "/tmp/v5100a_next2_state2_XXXXXX.json";
+        int fd1 = mkstemps(path1, 5);
+        int fd2 = mkstemps(path2, 5);
+        check("v5.10.0a.next.2: tmp output files created", fd1 >= 0 && fd2 >= 0);
+        if (fd1 >= 0 && fd2 >= 0) {
+            close(fd1); close(fd2);
+            unlink(path1); unlink(path2);
+            // Use a stable bundle id (not derived from training_fingerprint
+            // since fingerprints are empty in this synthetic test → would
+            // both produce id of all zeros). Pin explicit constant.
+            const char* bundle_id_const = "replay_determinism_test_bundle";
+            int s1 = Bandit_SaveJSON(ez1.bandits, NUM_REGIMES, path1,
+                                       bundle_id_const, nullptr);
+            int s2 = Bandit_SaveJSON(ez2.bandits, NUM_REGIMES, path2,
+                                       bundle_id_const, nullptr);
+            check("v5.10.0a.next.2: ez1 bandit state saved", s1 == 1);
+            check("v5.10.0a.next.2: ez2 bandit state saved", s2 == 1);
+
+            // Read both files into memory + compare. Strip the
+            // saved_at_ts_ns field which differs by construction (one
+            // line difference is expected; everything else must match).
+            FILE* f1 = fopen(path1, "r");
+            FILE* f2 = fopen(path2, "r");
+            check("v5.10.0a.next.2: both saved files readable",
+                  f1 != nullptr && f2 != nullptr);
+            if (f1 && f2) {
+                fseek(f1, 0, SEEK_END); long sz1 = ftell(f1); fseek(f1, 0, SEEK_SET);
+                fseek(f2, 0, SEEK_END); long sz2 = ftell(f2); fseek(f2, 0, SEEK_SET);
+                check("v5.10.0a.next.2: file sizes within 64 bytes "
+                      "(saved_at_ts_ns is the only expected difference)",
+                      labs(sz1 - sz2) < 64);
+                char* buf1 = (char*)malloc(sz1 + 1);
+                char* buf2 = (char*)malloc(sz2 + 1);
+                size_t r1 = fread(buf1, 1, sz1, f1);
+                size_t r2 = fread(buf2, 1, sz2, f2);
+                buf1[r1] = '\0'; buf2[r2] = '\0';
+
+                // Strip the saved_at_ts_ns line from both before compare.
+                auto strip_ts = [](char* buf) {
+                    char* start = strstr(buf, "\"saved_at_ts_ns\":");
+                    if (!start) return;
+                    char* end = strchr(start, '\n');
+                    if (!end) return;
+                    end++;
+                    memmove(start, end, strlen(end) + 1);
+                };
+                strip_ts(buf1);
+                strip_ts(buf2);
+
+                check("v5.10.0a.next.2: bandit JSON bytewise-identical "
+                      "after identical reward sequence "
+                      "(determinism gate)",
+                      strcmp(buf1, buf2) == 0);
+
+                // Per-bandit field assertions for diagnostic if above fails
+                check("v5.10.0a.next.2: regime 0 weights[0] match",
+                      ez1.bandits[0].weights[0] == ez2.bandits[0].weights[0]);
+                check("v5.10.0a.next.2: regime 2 weights[3] match",
+                      ez1.bandits[2].weights[3] == ez2.bandits[2].weights[3]);
+                check("v5.10.0a.next.2: regime 1 cum_reward match",
+                      ez1.bandits[1].cum_reward[1] == ez2.bandits[1].cum_reward[1]);
+                check("v5.10.0a.next.2: regime 4 pulls match",
+                      ez1.bandits[4].pulls[2] == ez2.bandits[4].pulls[2]);
+                check("v5.10.0a.next.2: regime 3 total_steps match",
+                      ez1.bandits[3].total_steps == ez2.bandits[3].total_steps);
+                check("v5.10.0a.next.2: predict_call_count matches",
+                      ez1.predict_call_count == ez2.predict_call_count);
+
+                free(buf1); free(buf2);
+                fclose(f1); fclose(f2);
+            }
+            unlink(path1); unlink(path2);
+        }
+
+        EnsembleModelZoo_Free(&ez1);
+        EnsembleModelZoo_Free(&ez2);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.G.6 — Per-core ensemble cfg fields ---\n");
     {
         // === Test G.6.1: ensemble cfg defaults ===
