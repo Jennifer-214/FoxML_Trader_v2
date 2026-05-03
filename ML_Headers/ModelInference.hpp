@@ -677,6 +677,18 @@ struct ModelStampResult {
     // ModelHandle.num_outputs at CoreModelZoo load time.
     uint8_t  has_model_num_outputs;
     int      model_num_outputs;
+    // v5.9.5h — XGBoost training hyperparams (parsed from stamp body
+    // position 17). has_xgb_hyperparams=0 for legacy stamps; loader
+    // skips comparison.
+    uint8_t  has_xgb_hyperparams;
+    int      xgb_max_depth;
+    double   xgb_learning_rate;
+    int      xgb_n_estimators;
+    double   xgb_subsample;
+    double   xgb_colsample_bytree;
+    int      xgb_min_child_weight;
+    int      xgb_seed;
+    char     xgb_tree_method[16];
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -748,6 +760,16 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     // v5.9.4a — model num_outputs init.
     r.has_model_num_outputs = 0;
     r.model_num_outputs = 0;
+    // v5.9.5h — XGBoost hyperparam fields zero-init
+    r.has_xgb_hyperparams = 0;
+    r.xgb_max_depth = 0;
+    r.xgb_learning_rate = 0.0;
+    r.xgb_n_estimators = 0;
+    r.xgb_subsample = 0.0;
+    r.xgb_colsample_bytree = 0.0;
+    r.xgb_min_child_weight = 0;
+    r.xgb_seed = 0;
+    r.xgb_tree_method[0] = '\0';
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -879,6 +901,37 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 r.model_num_outputs = atoi(val);
                 r.has_model_num_outputs = 1;
             }
+            // v5.9.5h — XGBoost hyperparam parsing. Macro-expanded
+            // to keep the 8-field dispatch tight (vs an if/else
+            // chain). Each macro expands to one `else if` clause
+            // continuing the existing chain.
+            #define PARSE_XGB_INT(field) \
+                else if (strcmp(key, "xgb_" #field) == 0) { \
+                    r.xgb_##field = atoi(val); \
+                    r.has_xgb_hyperparams = 1; \
+                }
+            #define PARSE_XGB_DOUBLE(field) \
+                else if (strcmp(key, "xgb_" #field) == 0) { \
+                    r.xgb_##field = atof(val); \
+                    r.has_xgb_hyperparams = 1; \
+                }
+            PARSE_XGB_INT(max_depth)
+            PARSE_XGB_DOUBLE(learning_rate)
+            PARSE_XGB_INT(n_estimators)
+            PARSE_XGB_DOUBLE(subsample)
+            PARSE_XGB_DOUBLE(colsample_bytree)
+            PARSE_XGB_INT(min_child_weight)
+            PARSE_XGB_INT(seed)
+            // tree_method is a fixed-size string; inline (no macro).
+            else if (strcmp(key, "xgb_tree_method") == 0) {
+                size_t vl = strlen(val);
+                if (vl >= sizeof(r.xgb_tree_method)) vl = sizeof(r.xgb_tree_method) - 1;
+                memcpy(r.xgb_tree_method, val, vl);
+                r.xgb_tree_method[vl] = '\0';
+                r.has_xgb_hyperparams = 1;
+            }
+            #undef PARSE_XGB_INT
+            #undef PARSE_XGB_DOUBLE
         }
         line = strtok_r(nullptr, "\n", &save);
     }
@@ -1053,6 +1106,23 @@ struct StampInferenceCfgInputs {
     // Catches "stamp claims 3-class but binary model loaded" bug.
     int      has_num_outputs;
     int      model_num_outputs;
+    // v5.9.5h — XGBoost training hyperparams. Stamp body position 17
+    // (canonical-order locked: appended after model_num_outputs at
+    // position 16). Surface G has_*=0 forward-compat for legacy stamps.
+    // Engine load-WARN compares these vs cfg.xgb_* at boot; mismatch
+    // logs (no refuse — hyperparams don't affect inference, only
+    // forensics + reproducibility). max_depth/lr/n_est are the
+    // operator-tunable ones; subsample/colsample/min_child_weight/
+    // seed/tree_method are the cfg-tunable ones (v5.9.5h Phase 2).
+    int      has_xgb_hyperparams;
+    int      xgb_max_depth;
+    double   xgb_learning_rate;
+    int      xgb_n_estimators;
+    double   xgb_subsample;
+    double   xgb_colsample_bytree;
+    int      xgb_min_child_weight;
+    int      xgb_seed;
+    char     xgb_tree_method[16];
 };
 
 inline StampWriteResult stamp_write_for_model(const char* model_path,
@@ -1206,6 +1276,27 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     if (inf && inf->has_num_outputs && n > 0 && (size_t)n < sizeof(canonical)) {
         int wrote = snprintf(canonical + n, sizeof(canonical) - n,
             "model_num_outputs=%d\n", inf->model_num_outputs);
+        if (wrote > 0) n += wrote;
+    }
+    // v5.9.5h — XGBoost training hyperparams (stamp body position 17).
+    // 8 fields emit together as a block. Operator-tunable max_depth/lr/
+    // n_est come from Train Model panel; cfg-tunable subsample/colsample/
+    // min_child_weight/seed/tree_method come from cfg.xgb_*. Engine
+    // load-WARN compares to cfg at boot; mismatch logged (no refuse —
+    // hyperparams don't affect inference, only forensics + reproducibility).
+    if (inf && inf->has_xgb_hyperparams && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "xgb_max_depth=%d\n"
+            "xgb_learning_rate=%g\n"
+            "xgb_n_estimators=%d\n"
+            "xgb_subsample=%g\n"
+            "xgb_colsample_bytree=%g\n"
+            "xgb_min_child_weight=%d\n"
+            "xgb_seed=%d\n"
+            "xgb_tree_method=%s\n",
+            inf->xgb_max_depth, inf->xgb_learning_rate, inf->xgb_n_estimators,
+            inf->xgb_subsample, inf->xgb_colsample_bytree,
+            inf->xgb_min_child_weight, inf->xgb_seed, inf->xgb_tree_method);
         if (wrote > 0) n += wrote;
     }
 

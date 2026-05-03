@@ -932,6 +932,36 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             inf.has_num_outputs   = 1;
             inf.model_num_outputs = (K >= 2) ? K : 1;
         }
+        // v5.9.5h — XGBoost hyperparams binding. RFV uses
+        // XGBHyperparams_Defaults() (cfg-tunable subset overridden by
+        // config_used; Train Model overrides max_depth/lr/n_est too).
+        // Stamp records what trained the model for forensics +
+        // reproducibility; engine load-WARN compares to runtime cfg.
+        {
+            inf.has_xgb_hyperparams = 1;
+            tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
+            // RFV training uses cfg-tunable subset; pull from config_used
+            hp.subsample        = FPN_ToDouble(data->config_used.xgb_subsample);
+            hp.colsample_bytree = FPN_ToDouble(data->config_used.xgb_colsample_bytree);
+            hp.min_child_weight = data->config_used.xgb_min_child_weight;
+            hp.seed             = data->config_used.xgb_seed;
+            {
+                size_t tmln = strnlen(data->config_used.xgb_tree_method,
+                                       sizeof(hp.tree_method) - 1);
+                memcpy(hp.tree_method, data->config_used.xgb_tree_method, tmln);
+                hp.tree_method[tmln] = '\0';
+            }
+            inf.xgb_max_depth         = hp.max_depth;
+            inf.xgb_learning_rate     = (double)hp.learning_rate;
+            inf.xgb_n_estimators      = hp.n_estimators;
+            inf.xgb_subsample         = hp.subsample;
+            inf.xgb_colsample_bytree  = hp.colsample_bytree;
+            inf.xgb_min_child_weight  = hp.min_child_weight;
+            inf.xgb_seed              = hp.seed;
+            size_t tmln = strnlen(hp.tree_method, sizeof(inf.xgb_tree_method) - 1);
+            memcpy(inf.xgb_tree_method, hp.tree_method, tmln);
+            inf.xgb_tree_method[tmln] = '\0';
+        }
 
         StampWriteResult sr = stamp_write_for_model(
             out->auto_stamp_path,
