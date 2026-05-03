@@ -12051,6 +12051,48 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- EXTENSIBILITY: v5.9.5i — inference cfg load-time enforcement + drift counters ---\n");
+    {
+        // v5.9.5i closes the gap where v5.9.2b stamped inference cfg
+        // fields were never compared at load. Engine boot now WARNs
+        // (Tier 1 strict mode = REFUSE) on stamp ↔ runtime cfg drift.
+        // Tests verify the supporting infrastructure (cfg field, handle
+        // fields, snap counters); WARN-emit behavior is exercised
+        // manually via paper-test + stderr inspection.
+        using namespace tt;
+
+        // === Test 1: ModelHandle stamp_inf_* zero-init ===
+        ModelHandle<64> h = {};
+        Model_Init(&h);
+        check("v5.9.5i: Model_Init zeros has_stamp_inference_cfg",
+              h.has_stamp_inference_cfg == 0);
+        check("v5.9.5i: Model_Init zeros stamp_inf_freshness_tau",
+              h.stamp_inf_freshness_tau == 0.0);
+        check("v5.9.5i: Model_Init zeros stamp_inf_confidence_threshold_scale",
+              h.stamp_inf_confidence_threshold_scale == 0.0);
+        check("v5.9.5i: Model_Init zeros stamp_inf_barrier_gate_enabled",
+              h.stamp_inf_barrier_gate_enabled == 0);
+        check("v5.9.5i: Model_Init zeros has_stamp_bandit",
+              h.has_stamp_bandit == 0);
+        check("v5.9.5i: Model_Init zeros has_stamp_fees",
+              h.has_stamp_fees == 0);
+
+        // === Test 2: cfg field acknowledge_inference_cfg_drift defaults to 0 ===
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.9.5i: acknowledge_inference_cfg_drift defaults to 0",
+              cfg.acknowledge_inference_cfg_drift == 0);
+
+        // === Test 3: PerCoreSnap drift counter fields exist + assignable ===
+        TUISnapshot::PerCoreSnap pcs = {};
+        pcs.cfg_drift_tier1_count = 2;
+        pcs.cfg_drift_tier2_count = 5;
+        pcs.cfg_drift_strict_refused = 1;
+        check("v5.9.5i: PerCoreSnap drift counters assignable",
+              pcs.cfg_drift_tier1_count == 2 &&
+              pcs.cfg_drift_tier2_count == 5 &&
+              pcs.cfg_drift_strict_refused == 1);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

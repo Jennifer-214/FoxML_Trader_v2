@@ -184,6 +184,12 @@ struct CoreContext {
     // Surface model load failures, ML decision context, and NaN counters
     // to the operator via TUISnapshot + ML Status panel + entry log.
     int      model_load_failed;            // 1 = model attempted but refused/missing (distinct from "no model configured")
+    // v5.9.5i — cfg drift counters (populated in EngineSharded boot;
+    // TUI_CopySnapshotSharded mirrors to PerCoreSnap; ML Status panel
+    // renders summary).
+    uint8_t  cfg_drift_tier1_count;
+    uint8_t  cfg_drift_tier2_count;
+    uint8_t  cfg_drift_strict_refused;
     uint64_t last_ml_critical_log_us;      // rate-limit gate for ML→SimpleDip CRITICAL log (per-core)
     double   last_ml_threshold;            // ml_buy_threshold at last decision (display + entry log)
     double   last_ml_effective_threshold;  // post-confidence-damping threshold actually used
@@ -583,6 +589,9 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         // init above — every CoreContext field declared in v5.9 needs to
         // land here.
         state->cores[i].model_load_failed              = 0;
+        state->cores[i].cfg_drift_tier1_count          = 0;
+        state->cores[i].cfg_drift_tier2_count          = 0;
+        state->cores[i].cfg_drift_strict_refused       = 0;
         state->cores[i].last_ml_critical_log_us        = 0;
         state->cores[i].last_ml_threshold              = 0.0;
         state->cores[i].last_ml_effective_threshold    = 0.0;

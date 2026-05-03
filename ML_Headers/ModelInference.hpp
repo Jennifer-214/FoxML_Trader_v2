@@ -256,6 +256,20 @@ struct ModelHandle {
     // v5.9.5h Phase 10 — build flags fingerprint
     uint8_t  has_build_flags_hash;
     uint64_t stamp_build_flags_hash;
+    // v5.9.5i — stamp's recorded inference cfg fields. EngineSharded
+    // boot-WARN/REFUSE compares these vs cfg.* (Tier 1: freshness_tau,
+    // confidence_threshold_scale, barrier_gate_enabled — REFUSE strict;
+    // Tier 2: hard_block, bandit, fees — WARN).
+    uint8_t  has_stamp_inference_cfg;
+    double   stamp_inf_confidence_threshold_scale;
+    int      stamp_inf_barrier_gate_enabled;
+    double   stamp_inf_confidence_hard_block_threshold;
+    double   stamp_inf_freshness_tau;
+    uint8_t  has_stamp_bandit;
+    double   stamp_inf_bandit_blend_ratio;
+    uint8_t  has_stamp_fees;
+    double   stamp_inf_fee_rate_maker;
+    double   stamp_inf_fee_rate_taker;
 };
 
 //======================================================================================================
@@ -289,6 +303,17 @@ inline void Model_Init(ModelHandle<F> *m) {
     m->stamp_xgb_tree_method[0] = '\0';
     m->has_build_flags_hash = 0;
     m->stamp_build_flags_hash = 0;
+    // v5.9.5i — stamp inference cfg fields zero-init
+    m->has_stamp_inference_cfg = 0;
+    m->stamp_inf_confidence_threshold_scale = 0.0;
+    m->stamp_inf_barrier_gate_enabled = 0;
+    m->stamp_inf_confidence_hard_block_threshold = 0.0;
+    m->stamp_inf_freshness_tau = 0.0;
+    m->has_stamp_bandit = 0;
+    m->stamp_inf_bandit_blend_ratio = 0.0;
+    m->has_stamp_fees = 0;
+    m->stamp_inf_fee_rate_maker = 0.0;
+    m->stamp_inf_fee_rate_taker = 0.0;
 }
 
 //======================================================================================================

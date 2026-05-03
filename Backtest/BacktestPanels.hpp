@@ -589,6 +589,9 @@ struct PastRunsState {
     char    status_msg[256];     // last action status (e.g., "loaded", "deleted")
     int     sort_column;         // 0..N-1, which column to sort by
     int     sort_descending;     // 0 = asc, 1 = desc
+    // v5.9.5i — stamp audit filter. 0 = all, 1 = stamped only, 2 = OK only,
+    // 3 = FAIL only, 4 = unstamped only.
+    int     stamp_filter;
 };
 
 static inline void PastRuns_Init(PastRunsState *s) {
@@ -758,6 +761,28 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
     if (s->status_msg[0])
         ImGui::TextColored(FoxmlColors::comment, "(%s)", s->status_msg);
 
+    // v5.9.5i — Stamp audit filter. Operator can isolate runs by stamp
+    // status (all / stamped / OK only / FAIL / unstamped) for audit
+    // workflows. Per /plan-check 2026-05-02: dedicated Stamps panel
+    // would duplicate Past Runs's scan logic; filter inside Past Runs
+    // gives the same operator audit value with no panel duplication.
+    {
+        static const char* filter_names[] = {
+            "All", "Stamped", "Stamp OK", "Stamp FAIL", "Unstamped"
+        };
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120);
+        ImGui::Combo("##stamp_filter", &s->stamp_filter, filter_names, 5);
+        ImGui::SetItemTooltip("Filter runs by stamp status:\n"
+                              "All: every run\n"
+                              "Stamped: has .stamp file (any verify state)\n"
+                              "Stamp OK: Verify Stamp returned valid=1\n"
+                              "Stamp FAIL: Verify Stamp returned valid=0\n"
+                              "Unstamped: no .stamp file\n\n"
+                              "Click 'Verify Stamp' on a row to populate\n"
+                              "OK/FAIL state (default is unverified).");
+    }
+
     if (s->count == 0) {
         ImGui::TextDisabled("No saved runs found in models/. "
                             "Train a model and click 'Save Run' in the Training panel.");
@@ -826,6 +851,11 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                 for (int i = 0; i < s->count; ++i) {
                     PastRun *r = &s->runs[i];
                     if (r->label_kind == 1) continue;  // skip regression runs
+                    // v5.9.5i — stamp filter
+                    if (s->stamp_filter == 1 && !r->has_stamp) continue;
+                    if (s->stamp_filter == 2 && r->stamp_verify_state != 1) continue;
+                    if (s->stamp_filter == 3 && r->stamp_verify_state != -1) continue;
+                    if (s->stamp_filter == 4 && r->has_stamp) continue;
                     ImGui::TableNextRow();
 
                     render_run_cell(i);
@@ -938,6 +968,11 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                 for (int i = 0; i < s->count; ++i) {
                     PastRun *r = &s->runs[i];
                     if (r->label_kind != 1) continue;  // only regression
+                    // v5.9.5i — stamp filter
+                    if (s->stamp_filter == 1 && !r->has_stamp) continue;
+                    if (s->stamp_filter == 2 && r->stamp_verify_state != 1) continue;
+                    if (s->stamp_filter == 3 && r->stamp_verify_state != -1) continue;
+                    if (s->stamp_filter == 4 && r->has_stamp) continue;
                     ImGui::TableNextRow();
 
                     render_run_cell(i);

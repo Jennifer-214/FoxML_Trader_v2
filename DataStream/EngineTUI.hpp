@@ -1074,6 +1074,12 @@ struct TUISnapshot {
         //   present=0 + failed=0 → sand "scaler: NONE (legacy v5 model)"
         uint8_t  ml_scaler_present;
         uint8_t  ml_scaler_load_failed;
+        // v5.9.5i — cfg drift detection summary. Counts mismatches
+        // between stamp's recorded cfg + runtime cfg at boot. ML Status
+        // panel renders summary; details live in stderr boot log.
+        uint8_t  cfg_drift_tier1_count;  // freshness_tau, threshold_scale, barrier_gate
+        uint8_t  cfg_drift_tier2_count;  // hard_block, bandit, fees, hyperparams, build_flags
+        uint8_t  cfg_drift_strict_refused; // 1 = Tier 1 + strict mode
         // v4.0.4: per-core P&L breakdown for Account panel. Sourced from
         // CoreContext::core_realized / core_wins / core_losses / core_fees.
         // The aggregate equals oms->realized_pnl modulo timing (snapshot

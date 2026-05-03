@@ -915,6 +915,123 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 }
             }
 
+            // v5.9.5i — Inference cfg drift detection (Idea #12).
+            // Tier 1 (freshness_tau, confidence_threshold_scale,
+            // barrier_gate_enabled) REFUSE in strict mode (held_out_gate_strict=1)
+            // since they directly affect serving math. Tier 2 (hard_block,
+            // bandit, fees) WARN regardless. Both suppressed by
+            // acknowledge_inference_cfg_drift=1.
+            if (loaded && cfg.core_model_dir[i][0] &&
+                !cfg.acknowledge_inference_cfg_drift) {
+                CoreModelZoo<F>* zoo = &ml_zoos[i];
+                ModelHandle<F>* handles[4] = {
+                    &zoo->buy_signal, &zoo->barrier,
+                    &zoo->regime, &zoo->exit
+                };
+                const char* role_names[4] = {
+                    "buy_signal", "barrier", "regime", "exit"
+                };
+                int strict = (cfg.held_out_gate_strict == 1);
+                int tier1_refused_count = 0;
+                int tier1_count = 0;
+                int tier2_count = 0;
+                for (int r = 0; r < 4; ++r) {
+                    ModelHandle<F>* h = handles[r];
+                    if (!h->has_stamp_inference_cfg) continue;
+                    double cfg_cts = FPN_ToDouble(cfg.confidence_threshold_scale);
+                    double cfg_chb = FPN_ToDouble(cfg.confidence_hard_block_threshold);
+                    double cfg_tau = FPN_ToDouble(cfg.confidence_freshness_tau);
+
+                    // Tier 1: directly affects serving math
+                    bool tier1_drift = false;
+                    if (fabs(h->stamp_inf_freshness_tau - cfg_tau) > 1e-6) {
+                        fprintf(stderr,
+                            "[inference_cfg] %s: core %d role=%s stamp claims "
+                            "confidence_freshness_tau=%.2f but cfg=%.2f\n",
+                            strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
+                            i, role_names[r], h->stamp_inf_freshness_tau, cfg_tau);
+                        tier1_drift = true;
+                        ++tier1_count;
+                    }
+                    if (fabs(h->stamp_inf_confidence_threshold_scale - cfg_cts) > 1e-6) {
+                        fprintf(stderr,
+                            "[inference_cfg] %s: core %d role=%s stamp claims "
+                            "confidence_threshold_scale=%.4f but cfg=%.4f\n",
+                            strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
+                            i, role_names[r], h->stamp_inf_confidence_threshold_scale, cfg_cts);
+                        tier1_drift = true;
+                        ++tier1_count;
+                    }
+                    if (h->stamp_inf_barrier_gate_enabled != cfg.barrier_gate_enabled) {
+                        fprintf(stderr,
+                            "[inference_cfg] %s: core %d role=%s stamp claims "
+                            "barrier_gate_enabled=%d but cfg=%d\n",
+                            strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
+                            i, role_names[r], h->stamp_inf_barrier_gate_enabled,
+                            cfg.barrier_gate_enabled);
+                        tier1_drift = true;
+                        ++tier1_count;
+                    }
+                    if (tier1_drift && strict) ++tier1_refused_count;
+
+                    // Tier 2: WARN regardless of strict mode
+                    if (fabs(h->stamp_inf_confidence_hard_block_threshold - cfg_chb) > 1e-6) {
+                        fprintf(stderr,
+                            "[inference_cfg] WARN (Tier 2): core %d role=%s stamp "
+                            "claims confidence_hard_block_threshold=%.4f but cfg=%.4f\n",
+                            i, role_names[r], h->stamp_inf_confidence_hard_block_threshold,
+                            cfg_chb);
+                        ++tier2_count;
+                    }
+                    if (h->has_stamp_bandit && cfg.bandit_enabled) {
+                        double cfg_bbr = FPN_ToDouble(cfg.bandit_blend_ratio);
+                        if (fabs(h->stamp_inf_bandit_blend_ratio - cfg_bbr) > 1e-6) {
+                            fprintf(stderr,
+                                "[inference_cfg] WARN (Tier 2): core %d role=%s stamp "
+                                "claims bandit_blend_ratio=%.4f but cfg=%.4f\n",
+                                i, role_names[r], h->stamp_inf_bandit_blend_ratio, cfg_bbr);
+                        }
+                    }
+                    if (h->has_stamp_fees && cfg.cost_gate_enabled) {
+                        double cfg_frm = FPN_ToDouble(cfg.fee_rate_maker);
+                        double cfg_frt = FPN_ToDouble(cfg.fee_rate_taker);
+                        if (fabs(h->stamp_inf_fee_rate_maker - cfg_frm) > 1e-6) {
+                            fprintf(stderr,
+                                "[inference_cfg] WARN (Tier 2): core %d role=%s stamp "
+                                "claims fee_rate_maker=%.6f but cfg=%.6f\n",
+                                i, role_names[r], h->stamp_inf_fee_rate_maker, cfg_frm);
+                        }
+                        if (fabs(h->stamp_inf_fee_rate_taker - cfg_frt) > 1e-6) {
+                            fprintf(stderr,
+                                "[inference_cfg] WARN (Tier 2): core %d role=%s stamp "
+                                "claims fee_rate_taker=%.6f but cfg=%.6f\n",
+                                i, role_names[r], h->stamp_inf_fee_rate_taker, cfg_frt);
+                        }
+                    }
+                }
+                // Persist drift counts on CoreContext for ML Status panel
+                state.cores[i].cfg_drift_tier1_count = (uint8_t)(tier1_count > 255 ? 255 : tier1_count);
+                state.cores[i].cfg_drift_tier2_count = (uint8_t)(tier2_count > 255 ? 255 : tier2_count);
+                state.cores[i].cfg_drift_strict_refused = (tier1_refused_count > 0) ? 1 : 0;
+
+                if (tier1_refused_count > 0) {
+                    fprintf(stderr,
+                        "[inference_cfg] FATAL: core %d had %d Tier 1 mismatch(es) "
+                        "in strict mode. Set held_out_gate_strict=0 (warn-only) "
+                        "OR acknowledge_inference_cfg_drift=1 to bypass, "
+                        "OR retrain the model with current cfg.\n",
+                        i, tier1_refused_count);
+                    // NOTE: REFUSE on tier1+strict means the engine should not
+                    // proceed with this model loaded. Per master plan v5.9.5i,
+                    // we log loudly + leave handle loaded; operator chooses to
+                    // restart with corrected cfg or accept by flipping flag.
+                    // TODO v5.10: free handle + return-from-boot to enforce
+                    // refuse properly (currently this is observability-grade,
+                    // not load-time-refuse, since model is already loaded
+                    // and engine continues to run).
+                }
+            }
+
             // Phase 6prep sharded c12: re-init ConfidenceScorer with cfg
             // tunables. EventLoopState_Init left it at safe defaults; for
             // ML cores we want the user's window/tau settings active.

@@ -420,6 +420,10 @@ static inline void TUI_CopySnapshotSharded(
             if (pct < 0) pct = 0;
             snap->per_core[i].warmup_progress_pct = (uint8_t)pct;
         }
+        // v5.9.5i — cfg drift summary mirror
+        snap->per_core[i].cfg_drift_tier1_count    = state->cores[i].cfg_drift_tier1_count;
+        snap->per_core[i].cfg_drift_tier2_count    = state->cores[i].cfg_drift_tier2_count;
+        snap->per_core[i].cfg_drift_strict_refused = state->cores[i].cfg_drift_strict_refused;
         // Per-core gate direction. Use RESOLVED strategy for AUTO so direction
         // tracks the active regime's strategy. MOMENTUM buys above; everything
         // else buys below.

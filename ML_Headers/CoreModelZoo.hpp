@@ -212,6 +212,33 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
             handle->has_build_flags_hash   = 1;
             handle->stamp_build_flags_hash = sr.build_flags_hash;
         }
+        // v5.9.5i — copy stamp's inference cfg values. EngineSharded
+        // boot-WARN/REFUSE compares vs cfg.*. Forward-compat: legacy
+        // stamps (has_inference_cfg=0) leave handle's stamp_inf_* at
+        // Model_Init zero defaults; comparison skipped.
+        if (sr.has_inference_cfg) {
+            handle->has_stamp_inference_cfg = 1;
+            handle->stamp_inf_confidence_threshold_scale =
+                sr.inference_cfg_confidence_threshold_scale;
+            handle->stamp_inf_barrier_gate_enabled =
+                sr.inference_cfg_barrier_gate_enabled;
+            handle->stamp_inf_confidence_hard_block_threshold =
+                sr.inference_cfg_confidence_hard_block_threshold;
+            handle->stamp_inf_freshness_tau =
+                sr.inference_cfg_freshness_tau;
+        }
+        if (sr.has_inference_cfg_bandit) {
+            handle->has_stamp_bandit = 1;
+            handle->stamp_inf_bandit_blend_ratio =
+                sr.inference_cfg_bandit_blend_ratio;
+        }
+        if (sr.has_inference_cfg_fees) {
+            handle->has_stamp_fees = 1;
+            handle->stamp_inf_fee_rate_maker =
+                sr.inference_cfg_fee_rate_maker;
+            handle->stamp_inf_fee_rate_taker =
+                sr.inference_cfg_fee_rate_taker;
+        }
         if (sr.has_model_num_outputs) {
             handle->stamp_model_num_outputs = sr.model_num_outputs;
             handle->has_stamp_num_outputs = 1;

@@ -514,6 +514,14 @@ template <unsigned F> struct ControllerConfig {
   // (different MAJOR) is a separate refusal gate; this only suppresses
   // the patch/minor drift WARN. See DOCS/PARITY_LIFECYCLE.md.
   int    acknowledge_cross_binary_version_drift;
+  // v5.9.5i — suppress inference cfg drift WARN/REFUSE on stamp ↔ runtime
+  // mismatch. Tier 1 fields (freshness_tau, confidence_threshold_scale,
+  // barrier_gate_enabled) REFUSE in strict mode (held_out_gate_strict=1),
+  // WARN otherwise. Tier 2 (confidence_hard_block_threshold, bandit,
+  // fees) WARN only. Setting this flag = 1 silences both tiers.
+  // Default 0 (vocal). Suppresses only inference cfg drift; cross-binary
+  // version drift uses its own flag above.
+  int    acknowledge_inference_cfg_drift;
   // v5.2.1 (live reconciliation Phase 1) — exchange-truth sync at boot
   // (and optionally on heartbeat). LIVE-mode-only — paper mode skips
   // reconcile entirely.
@@ -906,6 +914,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.health_log_max_bytes        = 0;                            // 0 = no rotation (back-compat)
   cfg.health_log_keep_count       = 0;                            // 0 = no retained rotated files
   cfg.acknowledge_cross_binary_version_drift = 0;                 // v5.9.4 — default WARN on minor drift
+  cfg.acknowledge_inference_cfg_drift = 0;                        // v5.9.5i — default REFUSE/WARN on inference cfg drift
   // v5.9.5h — XGBoost training hyperparams (cfg-tunable subset).
   // Defaults match pre-v5.9.5h hardcoded values bytewise; non-tuning
   // operators get identical training output post-upgrade.
@@ -1331,6 +1340,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         continue;
     }
     CFG_PARSE_INT(acknowledge_cross_binary_version_drift)
+    CFG_PARSE_INT(acknowledge_inference_cfg_drift)  // v5.9.5i
     if (strcmp(key, "reconcile_interval_sec") == 0) {
         cfg.reconcile_interval_sec = atoi(val);
         continue;

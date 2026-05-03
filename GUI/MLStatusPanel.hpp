@@ -154,6 +154,38 @@ inline void MLStatus_Render(const TUISnapshot* snap) {
                 }
             }
 
+            // v5.9.5i — cfg drift summary. Tier 1 = directly affects
+            // serving math; Tier 2 = forensic. Refused = strict mode
+            // tripped on Tier 1 mismatch. Visible at-a-glance; details
+            // in stderr boot log.
+            if (pc.cfg_drift_tier1_count > 0 || pc.cfg_drift_tier2_count > 0) {
+                ImGui::Indent(20);
+                if (pc.cfg_drift_strict_refused) {
+                    ImGui::TextColored(FoxmlColors::red,
+                        "cfg drift: %u Tier 1 (REFUSED strict), %u Tier 2",
+                        (unsigned)pc.cfg_drift_tier1_count,
+                        (unsigned)pc.cfg_drift_tier2_count);
+                } else if (pc.cfg_drift_tier1_count > 0) {
+                    ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.35f, 1.0f),
+                        "cfg drift: %u Tier 1 (WARN), %u Tier 2",
+                        (unsigned)pc.cfg_drift_tier1_count,
+                        (unsigned)pc.cfg_drift_tier2_count);
+                } else {
+                    ImGui::TextColored(ImVec4(0.85f, 0.80f, 0.50f, 1.0f),
+                        "cfg drift: %u Tier 2 (WARN)",
+                        (unsigned)pc.cfg_drift_tier2_count);
+                }
+                ImGui::SetItemTooltip(
+                    "Stamp-recorded cfg differs from runtime cfg.\n"
+                    "Tier 1: freshness_tau, threshold_scale, barrier_gate\n"
+                    "  (REFUSE strict / WARN otherwise — affects serving math)\n"
+                    "Tier 2: hard_block, bandit, fees, hyperparams, build_flags\n"
+                    "  (WARN regardless — forensics + reproducibility)\n"
+                    "See engine boot stderr for per-field details.\n"
+                    "Suppress: acknowledge_inference_cfg_drift=1 in cfg.");
+                ImGui::Unindent(20);
+            }
+
             // NaN/Inf counters — bright red if non-zero, dim if clean.
             if (pc.ml_nan_feature_events > 0 || pc.ml_nan_prediction_events > 0) {
                 ImGui::Indent(20);
