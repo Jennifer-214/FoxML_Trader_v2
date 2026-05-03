@@ -12094,6 +12094,171 @@ e3_skip_load:;
               pcs.cfg_drift_strict_refused == 1);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0 Item B — streaming label compute (sliding 2-file window) ---\n");
+    {
+        // Helper — write a synthetic TickRecorder-format CSV with N ticks
+        // starting at base_idx. Each tick: ts_us = 1.5e15 + global_idx,
+        // price = price_fn(global_idx), qty = 1.0, is_buyer_maker = 0.
+        auto write_csv = [](const char* path, int n_ticks, int base_idx,
+                            double (*price_fn)(int)) {
+            FILE* f = fopen(path, "w");
+            if (!f) return false;
+            fprintf(f, "timestamp_us,price,quantity,is_buyer_maker\n");
+            for (int i = 0; i < n_ticks; i++) {
+                int g = base_idx + i;
+                int64_t ts = 1500000000000000LL + (int64_t)g;
+                fprintf(f, "%lld,%.6f,1.000000,0\n",
+                        (long long)ts, price_fn(g));
+            }
+            fclose(f);
+            return true;
+        };
+
+        // Price function: 300 ticks
+        //   ticks 0-99   price = 100.0  (flat — sample 0's TP/SL won't hit here)
+        //   ticks 100-199 price = 100.7 (jump up — sample 0's TP=0.5% target 100.5 hits)
+        //   ticks 200-299 price = 99.0  (jump down — sample 1's SL=0.5% target 100.0 hits since baseline)
+        // Sample 0 at tidx=20, price=100, TP=0.5% / SL=0.5%
+        //   → TP target 100.5, SL target 99.5
+        //   → Forward scan: ticks 21-99 stay at 100, ticks 100+ are 100.7 ≥ 100.5 → TP hit → label=1
+        // Sample 1 at tidx=110, price=100.7, TP=0.5% / SL=0.5%
+        //   → TP target 101.2035, SL target 100.1965
+        //   → Forward scan: ticks 111-199 stay at 100.7 (no TP), tick 200+ = 99.0 ≤ SL → SL hit → label=0
+        // Sample 2 at tidx=250, price=99.0, TP=0.5% / SL=0.5%
+        //   → TP target 99.495, SL target 98.505
+        //   → Forward scan: ticks 251-299 all 99.0 (no hit either way)
+        //   → label=0 (WinLoss "ran out = loss")
+        auto price_fn = [](int g) -> double {
+            if (g < 100) return 100.0;
+            if (g < 200) return 100.7;
+            return 99.0;
+        };
+
+        // Test scenario A: ALL ticks in 1 file
+        {
+            char path[] = "/tmp/v5100B_label_a_XXXXXX";
+            int fd = mkstemp(path);
+            check("v5.10.0B: tmpfile A created", fd >= 0);
+            if (fd >= 0) close(fd);
+            check("v5.10.0B: write 1-file fixture",
+                  write_csv(path, 300, 0, +[](int g) -> double {
+                      if (g < 100) return 100.0;
+                      if (g < 200) return 100.7;
+                      return 99.0;
+                  }));
+
+            BacktestResults r;
+            BacktestResults_Init(&r);
+            r.sample_count = 3;
+            r.sample_tick_indices[0] = 20;
+            r.sample_tick_indices[1] = 110;
+            r.sample_tick_indices[2] = 250;
+            r.sample_prices[0] = 100.0;
+            r.sample_prices[1] = 100.7;
+            r.sample_prices[2] = 99.0;
+            r.sample_regimes[0] = 0;
+            r.sample_regimes[1] = 0;
+            r.sample_regimes[2] = 0;
+
+            BacktestRunConfig run_cfg{};
+            run_cfg.collect_features = 1;
+            run_cfg.label_type = LABEL_WIN_LOSS;
+            run_cfg.label_tp_pct = 0.5;
+            run_cfg.label_sl_pct = 0.5;
+            run_cfg.label_forward_ticks = 0;  // WinLoss ignores
+            run_cfg.num_data_files = 1;
+            strncpy(run_cfg.data_paths[0], path, 255);
+
+            Backtest_ComputeLabelsFromSamples(&r, &run_cfg);
+
+            check("v5.10.0B: 1-file scenario sample 0 label = 1.0 (TP hit at tick 100)",
+                  r.labels[0] == 1.0f);
+            check("v5.10.0B: 1-file scenario sample 1 label = 0.0 (SL hit at tick 200)",
+                  r.labels[1] == 0.0f);
+            check("v5.10.0B: 1-file scenario sample 2 label = 0.0 (WinLoss buffer-exhaust)",
+                  r.labels[2] == 0.0f);
+
+            BacktestResults_Free(&r);
+            unlink(path);
+        }
+
+        // Test scenario B: SAME ticks split across 3 files (100 ticks each)
+        // Verifies the 2-file sliding-window streaming produces identical labels
+        // since sample forward scans fit within the 2-file window. This is the
+        // file-boundary correctness test — local_tidx computation, sample cursor
+        // walk, memmove logic, all exercised.
+        {
+            char p0[] = "/tmp/v5100B_label_b0_XXXXXX";
+            char p1[] = "/tmp/v5100B_label_b1_XXXXXX";
+            char p2[] = "/tmp/v5100B_label_b2_XXXXXX";
+            int fd0 = mkstemp(p0); int fd1 = mkstemp(p1); int fd2 = mkstemp(p2);
+            check("v5.10.0B: tmpfiles B created",
+                  fd0 >= 0 && fd1 >= 0 && fd2 >= 0);
+            if (fd0 >= 0) close(fd0);
+            if (fd1 >= 0) close(fd1);
+            if (fd2 >= 0) close(fd2);
+            auto pfn = +[](int g) -> double {
+                if (g < 100) return 100.0;
+                if (g < 200) return 100.7;
+                return 99.0;
+            };
+            check("v5.10.0B: write 3-file fixture",
+                  write_csv(p0, 100, 0,   pfn) &&
+                  write_csv(p1, 100, 100, pfn) &&
+                  write_csv(p2, 100, 200, pfn));
+
+            BacktestResults r;
+            BacktestResults_Init(&r);
+            r.sample_count = 3;
+            r.sample_tick_indices[0] = 20;
+            r.sample_tick_indices[1] = 110;
+            r.sample_tick_indices[2] = 250;
+            r.sample_prices[0] = 100.0;
+            r.sample_prices[1] = 100.7;
+            r.sample_prices[2] = 99.0;
+            r.sample_regimes[0] = 0;
+            r.sample_regimes[1] = 0;
+            r.sample_regimes[2] = 0;
+
+            BacktestRunConfig run_cfg{};
+            run_cfg.collect_features = 1;
+            run_cfg.label_type = LABEL_WIN_LOSS;
+            run_cfg.label_tp_pct = 0.5;
+            run_cfg.label_sl_pct = 0.5;
+            run_cfg.label_forward_ticks = 0;
+            run_cfg.num_data_files = 3;
+            strncpy(run_cfg.data_paths[0], p0, 255);
+            strncpy(run_cfg.data_paths[1], p1, 255);
+            strncpy(run_cfg.data_paths[2], p2, 255);
+
+            Backtest_ComputeLabelsFromSamples(&r, &run_cfg);
+
+            check("v5.10.0B: 3-file scenario sample 0 label = 1.0 (cross-file TP hit)",
+                  r.labels[0] == 1.0f);
+            check("v5.10.0B: 3-file scenario sample 1 label = 0.0 (cross-file SL hit)",
+                  r.labels[1] == 0.0f);
+            check("v5.10.0B: 3-file scenario sample 2 label = 0.0 (in-file buffer-exhaust)",
+                  r.labels[2] == 0.0f);
+
+            BacktestResults_Free(&r);
+            unlink(p0); unlink(p1); unlink(p2);
+        }
+
+        // Test scenario C: empty / no-data — ensure graceful no-op (no crash).
+        {
+            BacktestResults r;
+            BacktestResults_Init(&r);
+            r.sample_count = 0;
+            BacktestRunConfig run_cfg{};
+            run_cfg.collect_features = 1;
+            run_cfg.label_type = LABEL_WIN_LOSS;
+            run_cfg.num_data_files = 0;
+            Backtest_ComputeLabelsFromSamples(&r, &run_cfg);
+            check("v5.10.0B: empty config → no-op (no crash)", true);
+            BacktestResults_Free(&r);
+        }
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0 Item A — per-phase backtest timers ---\n");
     {
         // === Test 1: Reset zeroes all fields + populated flag ===

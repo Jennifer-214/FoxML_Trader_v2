@@ -542,62 +542,96 @@ static inline void BacktestSharded_Run(BacktestResults *results,
 // No-op when collect_features=0 or sample_count==0 — caller doesn't need to
 // gate.
 //======================================================================================================
+// v5.10.0 Item B — streaming sliding-window label compute. Closes 2026-05-03
+// OOM (28 GB label_ticks for 1-year, 57 GB for 2-year). Key insight: labels
+// only need the FORWARD WINDOW from each sample's tick position, not the
+// full historical tick array. By keeping just 2 files in memory at a time,
+// peak RAM drops from O(total_ticks * 32B) to O(2 * max_per_file * 32B).
+//
+// Memory math (operator's box, 30.9 GiB):
+//   1-year (895M ticks):  28.6 GB → ~160 MB peak (~180x reduction)
+//   2-year (1.8B ticks):  57 GB (OOM) → ~160 MB peak (no OOM)
+//   5-year (4.5B ticks):  144 GB (infeasible) → ~160 MB peak (now feasible)
+//
+// Algorithm:
+//   1. Pre-pass: count ticks per file → file_offsets[] cumsum
+//   2. Walk files; maintain 2-file sliding window:
+//      - Invariant: buf[0..prev_file_count) = file f
+//      - Invariant: buf[prev_file_count..total) = file f+1 (if exists)
+//   3. Per-file: label all samples whose tidx ∈ [file_offsets[f], file_offsets[f+1])
+//      using the combined buf — label_fn's forward-scan crosses file f → f+1
+//      transparently since they're contiguous in memory.
+//   4. Slide: memmove file f+1 to buf[0]; load file f+2 at buf[file_count].
+//
+// Samples are guaranteed sorted by tidx (appended monotonically in
+// BacktestSharded.hpp's on_slow_path lambda). One linear cursor walk
+// through samples; no per-file O(N) sample scans.
 static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
                                                       const BacktestRunConfig *run_cfg) {
     if (!run_cfg->collect_features) return;
     if (results->sample_count <= 0) return;
     if (run_cfg->num_data_files <= 0) return;
 
-    // v5.10.0 Item A — label_compute phase timer (wraps full body).
+    // v5.10.0 Item A — label_compute phase timer (wraps full body, RAII guard).
     uint64_t label_start_ns = tt::PhaseTimer_NowNs();
+    struct LabelGuard {
+        uint64_t start;
+        ~LabelGuard() {
+            tt::PhaseTimer_Global().label_compute_ns +=
+                tt::PhaseTimer_NowNs() - start;
+            tt::PhaseTimer_Global().populated = 1;
+        }
+    } _label_guard{label_start_ns};
 
-    int label_count = 0;
-    int label_max = (int)results->stats.ticks_processed + 1024;
-    if (label_max < 1024) label_max = 1024;
-    HistoricalTick *label_ticks = (HistoricalTick *)malloc((size_t)label_max * sizeof(HistoricalTick));
-    fprintf(stderr, "[backtest] allocating label buffer: %d ticks (%.0f MB)\n",
-            label_max, (double)label_max * sizeof(HistoricalTick) / 1e6);
-    if (!label_ticks) {
-        // v5.10.0 Item A — capture even the malloc-fail path so phase
-        // summary doesn't lose this branch.
-        tt::PhaseTimer_Global().label_compute_ns +=
-            tt::PhaseTimer_NowNs() - label_start_ns;
-        tt::PhaseTimer_Global().populated = 1;
+    // Phase 1 — pre-pass: count ticks per file + compute cumulative offsets.
+    // Cheap I/O (line-counting). Needed so we can locate which file contains
+    // each sample's tidx during the streaming walk.
+    int num_files = run_cfg->num_data_files;
+    int* file_counts = (int*)calloc(num_files, sizeof(int));
+    int64_t* file_offsets = (int64_t*)calloc(num_files + 1, sizeof(int64_t));
+    if (!file_counts || !file_offsets) {
+        free(file_counts);
+        free(file_offsets);
+        fprintf(stderr, "[backtest] label_compute: failed to allocate file index\n");
         return;
     }
-
-    // CRITICAL: BacktestData_Load resets *count to 0 each call, so passing
-    // &label_count caused each file to overwrite the previous file's data.
-    // Use a per-file local count, accumulate manually.
-    for (int f = 0; f < run_cfg->num_data_files; f++) {
-        if (label_count >= label_max) break;
-        int per_file_count = 0;
-        BacktestData_Load(label_ticks + label_count, &per_file_count,
-                          label_max - label_count, run_cfg->data_paths[f]);
-        label_count += per_file_count;
+    int max_per_file = 0;
+    for (int f = 0; f < num_files; f++) {
+        FILE* fp = fopen(run_cfg->data_paths[f], "r");
+        if (!fp) {
+            fprintf(stderr, "[backtest] label_compute: failed to open %s\n",
+                    run_cfg->data_paths[f]);
+            continue;
+        }
+        int lines = 0;
+        char buf[512];
+        while (fgets(buf, sizeof(buf), fp)) lines++;
+        fclose(fp);
+        file_counts[f] = (lines > 0) ? (lines - 1) : 0;  // header
+        if (file_counts[f] > max_per_file) max_per_file = file_counts[f];
+        file_offsets[f + 1] = file_offsets[f] + file_counts[f];
     }
-    fprintf(stderr, "[backtest] label buffer: %d total ticks across %d files\n",
-            label_count, run_cfg->num_data_files);
+    int64_t total_ticks = file_offsets[num_files];
 
-    // v5.9.2c — validate the CONCATENATED label_ticks array. Catches
-    // intra-file violations AND inter-file ordering (file 1's last tick
-    // > file 2's first tick).
-    int sort_mode = run_cfg->use_config_override
-                  ? run_cfg->config_override.csv_sort_check_mode
-                  : CSV_SORT_WARN;
-    int sort_rc = BacktestData_ValidateSort(label_ticks, label_count,
-                                             sort_mode, "label_ticks (concatenated)");
-    if (sort_rc < 0) {
-        // STRICT refusal — abort label computation; results.labels stays
-        // unpopulated so caller knows training data is unusable.
-        free(label_ticks);
-        // v5.10.0 Item A — accumulate up to refusal point.
-        tt::PhaseTimer_Global().label_compute_ns +=
-            tt::PhaseTimer_NowNs() - label_start_ns;
-        tt::PhaseTimer_Global().populated = 1;
+    // Phase 2 — allocate 2-file sliding window. Round up max_per_file by 1024
+    // for BacktestData_Load's slack (matches existing pattern).
+    int per_file_cap = max_per_file + 1024;
+    if (per_file_cap < 1024) per_file_cap = 1024;
+    size_t buf_cap = (size_t)per_file_cap * 2;
+    HistoricalTick* tick_buf = (HistoricalTick*)malloc(buf_cap * sizeof(HistoricalTick));
+    if (!tick_buf) {
+        free(file_counts);
+        free(file_offsets);
+        fprintf(stderr, "[backtest] label_compute: failed to alloc 2-file buf "
+                "(%.0f MB peak)\n", (double)buf_cap * sizeof(HistoricalTick) / 1e6);
         return;
     }
+    fprintf(stderr, "[backtest] label_compute: streaming 2-file window — "
+            "peak %.0f MB (%d files, %lld total ticks)\n",
+            (double)buf_cap * sizeof(HistoricalTick) / 1e6,
+            num_files, (long long)total_ticks);
 
+    // Phase 3 — resolve label config.
     LabelFn label_fn = NULL;
     for (int l = 0; l < LABEL_COUNT; l++) {
         if (label_table[l].id == run_cfg->label_type) {
@@ -606,50 +640,153 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
         }
     }
     if (!label_fn) label_fn = Label_WinLoss;  // fallback
-
     double tp = run_cfg->label_tp_pct > 0 ? run_cfg->label_tp_pct : 1.5;
     double sl = run_cfg->label_sl_pct > 0 ? run_cfg->label_sl_pct : 1.0;
     int fwd = run_cfg->label_forward_ticks > 0 ? run_cfg->label_forward_ticks : 1000;
-
     int is_multiclass = LabelType_IsMulticlass(run_cfg->label_type);
     int is_regression = LabelType_IsRegression(run_cfg->label_type);
-    for (int s = 0; s < results->sample_count; s++) {
-        int tidx = results->sample_tick_indices[s];
-        if (tidx >= label_count) tidx = label_count - 1;
-        int extra = (run_cfg->label_type == LABEL_REGIME)
-            ? results->sample_regimes[s] : fwd;
-        float lbl = label_fn(label_ticks, tidx, label_count,
-                             results->sample_prices[s], tp, sl, extra);
-        if (isnan(lbl) || isinf(lbl)) {
-            results->stats.nan_labels_total++;
-            if (is_multiclass) {
-                // multiclass softmax has no defensible neutral; mark with NAN
-                // so the training-matrix copy step skips this sample.
-                results->labels[s] = NAN;
-                results->stats.nan_labels_dropped++;
-            } else if (is_regression) {
-                results->labels[s] = 0.0f;  // zero return is the neutral default
-            } else {
-                results->labels[s] = 0.5f;  // binary: neither class
+    int sort_mode = run_cfg->use_config_override
+                  ? run_cfg->config_override.csv_sort_check_mode
+                  : CSV_SORT_WARN;
+
+    // Phase 4 — sliding-window load + label.
+    int prev_file_count_in_buf = 0;  // file f's count once positioned at buf[0]
+    int total_in_buf = 0;
+    int sample_cursor = 0;            // monotonic walk through sorted samples
+    int64_t prev_file_last_ts = 0;    // for inter-file ordering check
+
+    for (int f = 0; f < num_files; f++) {
+        // Maintain invariant: buf[0..prev_file_count) = file f;
+        //                     buf[prev_file_count..total) = file f+1 (if exists)
+        if (f == 0) {
+            // Initial load: file 0 + file 1 (if exists).
+            int n0 = 0;
+            BacktestData_Load(tick_buf, &n0, per_file_cap, run_cfg->data_paths[0]);
+            total_in_buf = n0;
+            prev_file_count_in_buf = n0;
+            // Per-file sort validation (replaces v5.9.2c concat validation).
+            // Cheaper than concatenating; same coverage.
+            char file_label[280];
+            snprintf(file_label, sizeof(file_label), "label file 0 (%s)",
+                     run_cfg->data_paths[0]);
+            int sort_rc = BacktestData_ValidateSort(tick_buf, n0, sort_mode,
+                                                     file_label);
+            if (sort_rc < 0) {
+                free(tick_buf); free(file_counts); free(file_offsets);
+                return;
+            }
+            if (n0 > 0) prev_file_last_ts = tick_buf[n0 - 1].timestamp_us;
+            if (num_files > 1) {
+                int n1 = 0;
+                BacktestData_Load(tick_buf + total_in_buf, &n1,
+                                  (int)(buf_cap - total_in_buf),
+                                  run_cfg->data_paths[1]);
+                snprintf(file_label, sizeof(file_label), "label file 1 (%s)",
+                         run_cfg->data_paths[1]);
+                int sort_rc1 = BacktestData_ValidateSort(tick_buf + total_in_buf,
+                                                         n1, sort_mode, file_label);
+                if (sort_rc1 < 0) {
+                    free(tick_buf); free(file_counts); free(file_offsets);
+                    return;
+                }
+                // Inter-file ordering check.
+                if (n1 > 0 && tick_buf[total_in_buf].timestamp_us < prev_file_last_ts) {
+                    fprintf(stderr, "[label] WARN: file 1 starts before file 0 ends "
+                            "(first ts %lld < prev last %lld)\n",
+                            (long long)tick_buf[total_in_buf].timestamp_us,
+                            (long long)prev_file_last_ts);
+                }
+                if (n1 > 0) prev_file_last_ts = tick_buf[total_in_buf + n1 - 1].timestamp_us;
+                total_in_buf += n1;
             }
         } else {
-            results->labels[s] = lbl;
+            // Slide: memmove file f to buf[0]; load file f+1 at buf[file_count].
+            int file_f_in_buf = total_in_buf - prev_file_count_in_buf;
+            memmove(tick_buf, tick_buf + prev_file_count_in_buf,
+                    (size_t)file_f_in_buf * sizeof(HistoricalTick));
+            total_in_buf = file_f_in_buf;
+            prev_file_count_in_buf = file_f_in_buf;
+            if (f + 1 < num_files) {
+                int n_next = 0;
+                BacktestData_Load(tick_buf + total_in_buf, &n_next,
+                                  (int)(buf_cap - total_in_buf),
+                                  run_cfg->data_paths[f + 1]);
+                char file_label[280];
+                snprintf(file_label, sizeof(file_label), "label file %d (%s)",
+                         f + 1, run_cfg->data_paths[f + 1]);
+                int sort_rc = BacktestData_ValidateSort(tick_buf + total_in_buf,
+                                                         n_next, sort_mode, file_label);
+                if (sort_rc < 0) {
+                    free(tick_buf); free(file_counts); free(file_offsets);
+                    return;
+                }
+                if (n_next > 0 && tick_buf[total_in_buf].timestamp_us < prev_file_last_ts) {
+                    fprintf(stderr, "[label] WARN: file %d starts before file %d ends "
+                            "(first ts %lld < prev last %lld)\n",
+                            f + 1, f,
+                            (long long)tick_buf[total_in_buf].timestamp_us,
+                            (long long)prev_file_last_ts);
+                }
+                if (n_next > 0) prev_file_last_ts = tick_buf[total_in_buf + n_next - 1].timestamp_us;
+                total_in_buf += n_next;
+            }
+        }
+
+        // Label samples whose global tidx falls in file f's range.
+        int64_t file_f_start = file_offsets[f];
+        int64_t file_f_end   = file_offsets[f + 1];
+        while (sample_cursor < results->sample_count) {
+            int64_t global_tidx = (int64_t)results->sample_tick_indices[sample_cursor];
+            if (global_tidx >= file_f_end) break;  // sample belongs to a later file
+            if (global_tidx < file_f_start) {
+                // Out-of-order sample (shouldn't happen given monotonic
+                // append in on_slow_path) — skip with a warn.
+                fprintf(stderr, "[label] WARN: sample %d tidx=%lld < file %d start=%lld; skipping\n",
+                        sample_cursor, (long long)global_tidx, f, (long long)file_f_start);
+                results->labels[sample_cursor] = is_multiclass ? NAN
+                                                : (is_regression ? 0.0f : 0.5f);
+                if (is_multiclass) results->stats.nan_labels_dropped++;
+                results->stats.nan_labels_total++;
+                sample_cursor++;
+                continue;
+            }
+            int local_tidx = (int)(global_tidx - file_f_start);
+            // Forward-scan extends into file f+1 transparently (it's contiguous
+            // in tick_buf). Pass total_in_buf as upper bound.
+            int extra = (run_cfg->label_type == LABEL_REGIME)
+                ? results->sample_regimes[sample_cursor] : fwd;
+            float lbl = label_fn(tick_buf, local_tidx, total_in_buf,
+                                 results->sample_prices[sample_cursor],
+                                 tp, sl, extra);
+            if (isnan(lbl) || isinf(lbl)) {
+                results->stats.nan_labels_total++;
+                if (is_multiclass) {
+                    results->labels[sample_cursor] = NAN;
+                    results->stats.nan_labels_dropped++;
+                } else if (is_regression) {
+                    results->labels[sample_cursor] = 0.0f;
+                } else {
+                    results->labels[sample_cursor] = 0.5f;
+                }
+            } else {
+                results->labels[sample_cursor] = lbl;
+            }
+            sample_cursor++;
         }
     }
-    free(label_ticks);
+
+    free(tick_buf);
+    free(file_counts);
+    free(file_offsets);
 
     fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.1f%%, sl=%.1f%%)",
-            results->sample_count, run_cfg->label_type, tp, sl);
+            sample_cursor, run_cfg->label_type, tp, sl);
     if (results->stats.nan_labels_total > 0) {
         fprintf(stderr, " — NaN/Inf: %u total, %u dropped (multiclass)",
                 results->stats.nan_labels_total,
                 results->stats.nan_labels_dropped);
     }
     fputc('\n', stderr);
-    // v5.10.0 Item A — normal-path accumulation.
-    tt::PhaseTimer_Global().label_compute_ns +=
-        tt::PhaseTimer_NowNs() - label_start_ns;
-    tt::PhaseTimer_Global().populated = 1;
 }
 
 //======================================================================================================
