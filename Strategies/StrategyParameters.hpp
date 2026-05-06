@@ -136,6 +136,19 @@ struct MLBuildContext {
     void*               spread_state;       // const SpreadState<F, 1024>*
     double              current_spread;     // BookSnapshot::spread (FPN→double)
     double              current_mid_price;  // BookSnapshot::mid_price (FPN→double)
+    // v5.10.0a.G.5 — multi-horizon ensemble dispatch. nullptr default =
+    // single-model path (CoreModelZoo via model_handle, existing); when
+    // engine boot auto-detects N horizon siblings on disk, populates this
+    // pointer to the per-core EnsembleModelZoo. ML_BuildParameters checks
+    // ensemble_zoo first; if active, dispatches through Model_Predict_Ensemble;
+    // else falls through to single-zoo path bytewise-identical to pre-G.5.
+    void*               ensemble_zoo;        // EnsembleModelZoo<F>*  (nullptr = inactive)
+    // v5.10.0a.G.7 — current regime classification. Used by ensemble
+    // weighted-blend dispatch to select the correct per-regime bandit's
+    // weights. Updated by slow-path regime classifier (RegimeDetector)
+    // before each ML_BuildParameters call. Default 0 = REGIME_RANGING
+    // (safe fallback when classifier hasn't run yet).
+    int                 current_regime_id;
 };
 
 //======================================================================================================
@@ -768,8 +781,112 @@ inline void ML_BuildParameters(
             out->strategy_id = STRATEGY_ML;
             return;
         }
-        // legacy single-binary: complementary interpretation
-        double pred_raw = (double)Model_Predict(&zoo->buy_signal, features, n);
+        // v5.10.0a.G.5/G.7 — ensemble dispatch when active.
+        // Two modes (cfg.ensemble_blend_mode):
+        //   "selection" → G.4 argmax-confidence (single horizon per tick)
+        //   "weighted"  → G.7 Bandit-Exp3 per-regime weighted blend (default)
+        // ensemble_zoo->buy_signal[] all share the SAME scaler (per G.3
+        // load-from-cfg invariant), so the standardize step above already
+        // produced the correct features for every horizon (G.7 perf opt #1
+        // — caching across horizons).
+        double pred_raw = 0.0;
+        EnsembleModelZoo<F>* ezoo = (EnsembleModelZoo<F>*)
+            (mctx ? mctx->ensemble_zoo : nullptr);
+        if (ezoo && ezoo->active && ezoo->buy_signal_count > 0) {
+            int dominant_idx = -1;
+            // Mode dispatch: weighted (default) uses bandit weights;
+            // selection falls back to G.4 argmax-confidence.
+            bool use_weighted = (strcmp(ezoo->blend_mode, "weighted") == 0);
+            // v5.10.0a.G.8 — buffer for per-arm predictions written by the
+            // weighted helper; used to populate the reward ring record so
+            // slow-path lookback can attribute rewards correctly later.
+            float per_arm_preds[ENSEMBLE_HORIZON_MAX];
+            for (int a = 0; a < ENSEMBLE_HORIZON_MAX; ++a)
+                per_arm_preds[a] = 0.5f;
+            if (use_weighted && ezoo->initialized_bandits) {
+                // G.7 path: per-regime bandit weights drive blend.
+                int regime_id = mctx ? mctx->current_regime_id : 0;
+                if (regime_id < 0 || regime_id >= NUM_REGIMES) regime_id = 0;
+                ezoo->last_predicted_regime_id = regime_id;
+                // G.7 #7 — regime hysteresis dampening. When regime just
+                // changed, blend OLD bandit's weights with NEW for
+                // hysteresis cycles. Otherwise use current bandit directly.
+                double weights_buf[ENSEMBLE_HORIZON_MAX];
+                if (ezoo->regime_transition_cycles_remaining > 0) {
+                    double w_curr[ENSEMBLE_HORIZON_MAX];
+                    double w_prev[ENSEMBLE_HORIZON_MAX];
+                    Bandit_GetProbabilities(&ezoo->bandits[regime_id], w_curr);
+                    Bandit_GetProbabilities(&ezoo->bandits[ezoo->prev_regime_id], w_prev);
+                    int hyst = config->regime_hysteresis > 0
+                             ? (int)config->regime_hysteresis : 5;
+                    double alpha = (double)(hyst - ezoo->regime_transition_cycles_remaining) /
+                                   (double)hyst;
+                    if (alpha < 0.0) alpha = 0.0;
+                    if (alpha > 1.0) alpha = 1.0;
+                    for (int h = 0; h < ezoo->buy_signal_count; ++h) {
+                        weights_buf[h] = alpha * w_curr[h] + (1.0 - alpha) * w_prev[h];
+                    }
+                    ezoo->regime_transition_cycles_remaining--;
+                } else {
+                    Bandit_GetProbabilities(&ezoo->bandits[regime_id], weights_buf);
+                }
+                pred_raw = (double)Model_Predict_Ensemble_Weighted(
+                    ezoo->buy_signal, ezoo->buy_signal_count,
+                    features, n,
+                    weights_buf,
+                    ezoo->disabled_horizon_mask,
+                    config->ensemble_min_agreement_pct,
+                    &dominant_idx,
+                    per_arm_preds);
+            } else {
+                // Selection path (G.4 argmax-confidence). Bandit-uninit
+                // ensembles also fall here (cold-start before _InitBandits).
+                // We still want per-arm predictions for G.8 reward records;
+                // run them inline.
+                for (int a = 0; a < ezoo->buy_signal_count; ++a) {
+                    if (Model_IsLoaded(&ezoo->buy_signal[a])) {
+                        per_arm_preds[a] = Model_Predict(&ezoo->buy_signal[a],
+                                                          features, n);
+                    } else {
+                        per_arm_preds[a] = 0.5f;
+                    }
+                }
+                pred_raw = (double)Model_Predict_Ensemble(
+                    ezoo->buy_signal, ezoo->buy_signal_count,
+                    features, n, &dominant_idx);
+            }
+            ezoo->last_predicted_horizon_idx = dominant_idx;
+            // v5.10.0a.G.8 — record this prediction for later reward
+            // attribution (slow-path lookback + trade-close hooks).
+            // Use rolling->price_avg as a stable proxy for "current price"
+            // (per-tick price isn't directly available in mctx).
+            float current_price = (float)FPN_ToDouble(rolling->price_avg);
+            if (current_price > 0.0f) {
+                EnsembleModelZoo_RecordPrediction(
+                    ezoo,
+                    ezoo->last_predicted_regime_id,
+                    per_arm_preds,
+                    ezoo->buy_signal_count,
+                    current_price);
+                // Process any old-enough records: compute reward + Bandit_Update.
+                // Forward horizon = 1000 ticks (matches training label
+                // default; live cfg has no `label_forward_ticks` field —
+                // that's a BacktestRunConfig-only setting). When per-arm
+                // horizons differ in v5.10.0a.next, replace with arm-
+                // specific lookback walking ezoo->barrier_horizons[].
+                // ic_floor 0.02 keeps drift watchdog safely inert at low
+                // sample counts; v5.10.0e will pull it from cfg.
+                EnsembleModelZoo_TickRewardsFromLookback(
+                    ezoo,
+                    current_price,
+                    /*forward_ticks=*/1000,
+                    (int)config->poll_interval,
+                    /*ic_floor=*/0.02);
+            }
+        } else {
+            // Single-zoo path (existing; bytewise unchanged from pre-G.5)
+            pred_raw = (double)Model_Predict(&zoo->buy_signal, features, n);
+        }
         if (std::isnan(pred_raw) || std::isinf(pred_raw)) {
             fprintf(stderr, "[ML] dispatch: buy_signal prediction NaN/Inf — no signal\n");
         } else {

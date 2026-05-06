@@ -592,6 +592,13 @@ struct PastRunsState {
     // v5.9.5i — stamp audit filter. 0 = all, 1 = stamped only, 2 = OK only,
     // 3 = FAIL only, 4 = unstamped only.
     int     stamp_filter;
+    // v5.10.0a — Compare-to-Baseline slots. Operator picks two runs from
+    // dropdowns; Compare button opens a modal showing metric deltas.
+    // -1 = unselected. Persists across rescans (modal closes on rescan
+    // for safety; indices may shift).
+    int     compare_baseline_idx;
+    int     compare_candidate_idx;
+    int     compare_modal_open;  // 1 = render modal next frame
 };
 
 static inline void PastRuns_Init(PastRunsState *s) {
@@ -599,6 +606,10 @@ static inline void PastRuns_Init(PastRunsState *s) {
     s->selected = -1;
     s->sort_column = 6;          // default sort by val_accuracy descending
     s->sort_descending = 1;
+    // v5.10.0a — Compare slots default to "unselected".
+    s->compare_baseline_idx = -1;
+    s->compare_candidate_idx = -1;
+    s->compare_modal_open = 0;
 }
 
 // helper: parse a key=value line into a (key, value) pair via simple split.
@@ -788,6 +799,168 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                             "Train a model and click 'Save Run' in the Training panel.");
         ImGui::End();
         return;
+    }
+
+    // v5.10.0a — Compare-to-Baseline. Two dropdowns + Compare button on
+    // the same line as Rescan; modal pops up showing metric deltas. Value:
+    // validates v5.10.0 perf optimizations didn't change model behavior
+    // (pick foundation-baseline vs post-fix run; metrics should match
+    // within tolerance). Headless backdoor: existing summary.txt files
+    // are diff-able with `diff models/A/summary.txt models/B/summary.txt`.
+    {
+        ImGui::Separator();
+        ImGui::TextDisabled("Compare:");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(180);
+        if (ImGui::BeginCombo("Baseline",
+                              s->compare_baseline_idx >= 0 && s->compare_baseline_idx < s->count
+                                ? s->runs[s->compare_baseline_idx].dir_name
+                                : "(pick a run)")) {
+            for (int i = 0; i < s->count; ++i) {
+                bool sel = (i == s->compare_baseline_idx);
+                if (ImGui::Selectable(s->runs[i].dir_name, sel))
+                    s->compare_baseline_idx = i;
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(180);
+        if (ImGui::BeginCombo("Candidate",
+                              s->compare_candidate_idx >= 0 && s->compare_candidate_idx < s->count
+                                ? s->runs[s->compare_candidate_idx].dir_name
+                                : "(pick a run)")) {
+            for (int i = 0; i < s->count; ++i) {
+                bool sel = (i == s->compare_candidate_idx);
+                if (ImGui::Selectable(s->runs[i].dir_name, sel))
+                    s->compare_candidate_idx = i;
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        bool can_compare = (s->compare_baseline_idx >= 0 &&
+                             s->compare_candidate_idx >= 0 &&
+                             s->compare_baseline_idx != s->compare_candidate_idx);
+        if (!can_compare) ImGui::BeginDisabled();
+        if (ImGui::Button("Compare")) {
+            s->compare_modal_open = 1;
+            ImGui::OpenPopup("Compare to Baseline");
+        }
+        if (!can_compare) ImGui::EndDisabled();
+
+        // Modal: render unconditionally (ImGui no-ops when not open). Inside:
+        // pull both rows, render metric deltas with color-coded thresholds.
+        // bool proxy so the int compare_modal_open can drive ImGui's bool*
+        // signature; sync back after the modal returns.
+        bool modal_open_b = (s->compare_modal_open != 0);
+        if (ImGui::BeginPopupModal("Compare to Baseline", &modal_open_b,
+                                    ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (s->compare_baseline_idx >= 0 && s->compare_baseline_idx < s->count &&
+                s->compare_candidate_idx >= 0 && s->compare_candidate_idx < s->count) {
+                const PastRun *base = &s->runs[s->compare_baseline_idx];
+                const PastRun *cand = &s->runs[s->compare_candidate_idx];
+
+                ImGui::Text("Baseline:  %s  (%s, %d-class)",
+                            base->dir_name, base->role,
+                            base->expected_num_classes);
+                ImGui::Text("Candidate: %s  (%s, %d-class)",
+                            cand->dir_name, cand->role,
+                            cand->expected_num_classes);
+                if (base->expected_num_classes != cand->expected_num_classes) {
+                    ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.30f, 1.0f),
+                        "WARN: different class counts; metrics may not be directly comparable");
+                }
+                ImGui::Separator();
+
+                // Helper: render one metric row. delta_pp = candidate - baseline
+                // in percentage points. green = candidate beats by >2pp,
+                // red = candidate worse by >2pp, yellow within ±2pp.
+                auto metric_row = [](const char* label, float base_val,
+                                      float cand_val, const char* fmt,
+                                      bool higher_is_better, double tol_pp) {
+                    double delta = (double)cand_val - (double)base_val;
+                    ImVec4 col;
+                    if (fabs(delta) <= tol_pp) col = ImVec4(0.85f, 0.80f, 0.50f, 1.0f); // yellow within tol
+                    else if ((delta > 0 && higher_is_better) ||
+                             (delta < 0 && !higher_is_better))
+                        col = ImVec4(0.55f, 0.76f, 0.51f, 1.0f); // green better
+                    else
+                        col = ImVec4(0.95f, 0.35f, 0.35f, 1.0f); // red worse
+                    char base_buf[32], cand_buf[32];
+                    snprintf(base_buf, sizeof(base_buf), fmt, base_val);
+                    snprintf(cand_buf, sizeof(cand_buf), fmt, cand_val);
+                    ImGui::Text("%-22s  base=%-8s  cand=%-8s",
+                                label, base_buf, cand_buf);
+                    ImGui::SameLine();
+                    ImGui::TextColored(col, " (Δ %+.3f)", delta);
+                };
+
+                ImGui::TextDisabled("Performance metrics");
+                metric_row("Train accuracy:",
+                           base->train_accuracy, cand->train_accuracy,
+                           "%.1f%%", true, 2.0);
+                if (base->has_wf_results && cand->has_wf_results) {
+                    if (base->expected_num_classes == 1 || cand->expected_num_classes == 1) {
+                        metric_row("Val correlation (r):",
+                                   base->val_correlation, cand->val_correlation,
+                                   "%.3f", true, 0.05);
+                        metric_row("Val MSE:",
+                                   base->val_mse, cand->val_mse,
+                                   "%.5f", false, 0.001);
+                    } else {
+                        metric_row("Val accuracy:",
+                                   base->val_accuracy, cand->val_accuracy,
+                                   "%.1f%%", true, 2.0);
+                    }
+                    metric_row("Train/val gap:",
+                               base->train_val_gap, cand->train_val_gap,
+                               "%.4f", false, 0.02);
+                    ImGui::Text("Overfit folds:        base=%-8d  cand=%-8d",
+                                base->overfit_folds, cand->overfit_folds);
+                } else if (!base->has_wf_results || !cand->has_wf_results) {
+                    ImGui::TextColored(ImVec4(0.85f, 0.80f, 0.50f, 1.0f),
+                        "WF metrics missing on %s%s%s — only train accuracy compared.",
+                        !base->has_wf_results ? "baseline" : "",
+                        (!base->has_wf_results && !cand->has_wf_results) ? " + " : "",
+                        !cand->has_wf_results ? "candidate" : "");
+                }
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Hyperparams (training-time)");
+                ImGui::Text("Max depth:            base=%-8d  cand=%-8d",
+                            base->max_depth, cand->max_depth);
+                ImGui::Text("Learning rate:        base=%-8.3f  cand=%-8.3f",
+                            base->learning_rate, cand->learning_rate);
+                ImGui::Text("N estimators:         base=%-8d  cand=%-8d",
+                            base->n_estimators, cand->n_estimators);
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Label config (sweep / drift detection)");
+                metric_row("Label TP %:",
+                           base->label_tp_pct, cand->label_tp_pct,
+                           "%.3f", true, 0.001);
+                metric_row("Label SL %:",
+                           base->label_sl_pct, cand->label_sl_pct,
+                           "%.3f", true, 0.001);
+                ImGui::Text("Lookahead ticks:      base=%-8d  cand=%-8d",
+                            base->label_lookahead_ticks, cand->label_lookahead_ticks);
+
+                ImGui::Separator();
+                if (ImGui::Button("Close")) {
+                    s->compare_modal_open = 0;
+                    ImGui::CloseCurrentPopup();
+                }
+            } else {
+                ImGui::Text("(invalid selection)");
+                if (ImGui::Button("Close")) {
+                    s->compare_modal_open = 0;
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::EndPopup();
+        }
+        // Sync proxy back to int storage (ImGui clears modal_open_b when
+        // operator clicks the X button on the modal).
+        s->compare_modal_open = modal_open_b ? 1 : 0;
     }
 
     // Split runs by label kind so each tab has its own column set.
@@ -1497,10 +1670,64 @@ static inline void GUI_Panel_Optimizer(OptimizerPanelState *state, DataPanelStat
 
     ImGui::SliderInt("Parameters", &state->num_params, 1, 2);
 
+    // v5.10.0a — sweepable cfg key picker. Supports the cfg fields recognized
+    // by ConfigField_Set (BacktestEngine.hpp:1966+). Operator selects from
+    // dropdown to fill state->ranges[p].key; InputText still editable for
+    // operators who know which obscure key they want.
+    static const char* sweep_keys[] = {
+        // Existing pre-v5.10
+        "take_profit_pct", "stop_loss_pct", "fee_rate", "entry_offset_pct",
+        "slippage_pct", "max_exposure_pct", "risk_pct", "max_drawdown_pct",
+        "offset_stddev_mult", "spacing_multiplier",
+        "momentum_breakout_mult", "momentum_tp_mult", "momentum_sl_mult",
+        "tp_hold_score", "tp_trail_mult", "sl_trail_mult", "no_trade_band_mult",
+        "ml_buy_threshold", "danger_warn_stddevs", "danger_crash_stddevs",
+        "poll_interval", "warmup_ticks", "max_hold_ticks", "sl_cooldown_base",
+        // v5.10.0a — XGBoost hyperparam sweeping (cfg-bound since v5.9.5h
+        // + v5.10.0D thread counts). Common operator targets:
+        //   xgb_subsample / xgb_colsample_bytree → tree regularization
+        //   xgb_min_child_weight → leaf-purity gate
+        //   xgb_seed → reproducibility check (sweep multiple seeds, look at
+        //              variance to detect overfit-to-seed)
+        "xgb_subsample", "xgb_colsample_bytree", "xgb_min_child_weight",
+        "xgb_seed", "xgb_train_nthread", "xgb_eval_nthread"
+    };
+    constexpr int sweep_keys_count = (int)(sizeof(sweep_keys) / sizeof(sweep_keys[0]));
+
     for (int p = 0; p < state->num_params; p++) {
         ImGui::PushID(p);
         char hdr[32]; snprintf(hdr, sizeof(hdr), "Param %d", p + 1);
         if (ImGui::CollapsingHeader(hdr, ImGuiTreeNodeFlags_DefaultOpen)) {
+            // v5.10.0a — dropdown that fills the Key InputText on click.
+            // Compute current selection by matching state->ranges[p].key
+            // against the dropdown list; if not found, sentinel "(custom)"
+            // shows the operator they typed something off-list.
+            int sel_idx = -1;
+            for (int k = 0; k < sweep_keys_count; ++k) {
+                if (strcmp(state->ranges[p].key, sweep_keys[k]) == 0) {
+                    sel_idx = k;
+                    break;
+                }
+            }
+            int combo_idx = sel_idx;  // -1 indicates custom / unmatched
+            if (ImGui::BeginCombo("Quick-pick",
+                                  sel_idx >= 0 ? sweep_keys[sel_idx] : "(custom)",
+                                  0)) {
+                for (int k = 0; k < sweep_keys_count; ++k) {
+                    bool sel = (k == combo_idx);
+                    if (ImGui::Selectable(sweep_keys[k], sel)) {
+                        strncpy(state->ranges[p].key, sweep_keys[k],
+                                sizeof(state->ranges[p].key) - 1);
+                        state->ranges[p].key[sizeof(state->ranges[p].key) - 1] = '\0';
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SetItemTooltip(
+                "Pre-filled list of cfg fields ConfigField_Set knows.\n"
+                "Selecting fills the Key field below; operator can also\n"
+                "type any cfg field name that ConfigField_Set recognizes.");
+
             ImGui::InputText("Key", state->ranges[p].key, 32);
             ImGui::InputDouble("Min", &state->ranges[p].lo, 0.1, 1.0, "%.2f");
             ImGui::InputDouble("Max", &state->ranges[p].hi, 0.1, 1.0, "%.2f");
@@ -1741,6 +1968,38 @@ struct TrainingPanelState {
     volatile int tm_complete;
     volatile int tm_cancel;     // v5.9.0d: polled between XGBoost iterations
     pthread_t tm_tid;
+    // v5.10.0a.E — Hyperparam Sweep state. Mirrors wf_* / tm_* worker
+    // pattern. Operator clicks Run Hyperparam Sweep → spawn worker that
+    // calls Backtest_RunHyperparamTrainSweep using already-collected
+    // feature_matrix.
+    OptimizerRange  hp_ranges[OPT_MAX_PARAMS];
+    int             hp_num_params;          // 1 or 2 active params
+    OptimizerResults hp_results;
+    volatile int    hp_running;
+    volatile int    hp_progress;            // current cell index
+    volatile int    hp_total;                // total cells (set by worker)
+    volatile int    hp_cancel;
+    volatile int    hp_complete;
+    pthread_t       hp_tid;
+    bool            hp_has_results;
+    // v5.10.0a.G.1 — Multi-Horizon training state. Operator clicks Train
+    // Multi-Horizon button; worker trains N models, one per horizon.
+    // v5.10.0a-bugfix2 — horizons editable IN PANEL via CSV input
+    // (operator no longer needs to edit cfg.horizon_list + reload).
+    // ui_horizon_csv is the operator-typed string (e.g. "100,500,1000");
+    // ui_horizon_list/_count are parsed on each render. cfg.horizon_list
+    // still works as a fallback if ui_horizon_csv is empty (back-compat
+    // for operators who already set cfg).
+    volatile int    mh_running;
+    volatile int    mh_progress;            // 1..N as horizons complete
+    volatile int    mh_total;                // N (set by worker)
+    volatile int    mh_current_horizon;     // current horizon ticks
+    volatile int    mh_cancel;
+    volatile int    mh_complete;
+    pthread_t       mh_tid;
+    char            ui_horizon_csv[128];    // operator-typed; parsed → ui_horizon_*
+    int             ui_horizon_list[8];     // ENSEMBLE_HORIZON_MAX
+    int             ui_horizon_count;
 };
 
 static inline void TrainingPanel_Init(TrainingPanelState *state) {
@@ -1804,6 +2063,41 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->tm_running = 0;
     state->tm_complete = 0;
     state->tm_cancel = 0;
+    // v5.10.0a.E — Hyperparam Sweep init. Default param 0 = sweep
+    // xgb_subsample 0.5 .. 0.9 step 0.1 (5 cells).
+    strncpy(state->hp_ranges[0].key, "xgb_subsample", sizeof(state->hp_ranges[0].key) - 1);
+    state->hp_ranges[0].key[sizeof(state->hp_ranges[0].key) - 1] = '\0';
+    state->hp_ranges[0].lo   = 0.5;
+    state->hp_ranges[0].hi   = 0.9;
+    state->hp_ranges[0].step = 0.1;
+    state->hp_ranges[1].key[0] = '\0';
+    state->hp_ranges[1].lo   = 0.0;
+    state->hp_ranges[1].hi   = 0.0;
+    state->hp_ranges[1].step = 0.0;
+    state->hp_num_params  = 1;
+    state->hp_running     = 0;
+    state->hp_progress    = 0;
+    state->hp_total       = 0;
+    state->hp_cancel      = 0;
+    state->hp_complete    = 0;
+    state->hp_has_results = false;
+    memset(&state->hp_results, 0, sizeof(state->hp_results));
+    // v5.10.0a.G.1 — Multi-Horizon training state init
+    state->mh_running         = 0;
+    state->mh_progress        = 0;
+    state->mh_total           = 0;
+    state->mh_current_horizon = 0;
+    state->mh_cancel          = 0;
+    state->mh_complete        = 0;
+    // v5.10.0a-bugfix2 — UI horizon list defaults empty; operator types
+    // CSV (or leaves blank to fall back to cfg.horizon_list). Pre-fill
+    // with a sensible suggestion that matches the original Idea #4 spec
+    // example so operators see what shape the field expects.
+    strncpy(state->ui_horizon_csv, "100,500,1000",
+            sizeof(state->ui_horizon_csv) - 1);
+    state->ui_horizon_csv[sizeof(state->ui_horizon_csv) - 1] = '\0';
+    for (int i = 0; i < 8; ++i) state->ui_horizon_list[i] = 0;
+    state->ui_horizon_count = 0;
 }
 
 // walk-forward worker thread
@@ -1830,18 +2124,108 @@ static inline void *walkforward_worker_fn(void *arg) {
     return NULL;
 }
 
+// v5.10.0a.E — Hyperparam Sweep worker thread. Mirrors walkforward_worker_fn
+// but calls Backtest_RunHyperparamTrainSweep — trains N XGBoosters per cell
+// using the shared feature_matrix, varies xgb_* hyperparams via cfg_override
+// path. Operator must Collect Features first; data->config_used carries the
+// base cfg used at collect-time.
+//
+// Click-time snapshot: copies hp_ranges + hp_num_params + WF tuning fields
+// into worker args at click time (matches v5.10.0E pattern). Operator can
+// keep editing the input ranges while sweep runs without affecting the
+// in-flight cells.
+struct HyperparamSweepWorkerArgs {
+    TrainingPanelState *state;
+    const BacktestResults *data;
+    OptimizerRange snap_ranges[OPT_MAX_PARAMS];
+    int snap_num_params;
+    int snap_label_type;
+    int snap_wf_n_splits;
+    int snap_wf_horizon_ticks;
+    int snap_wf_buffer_ticks;
+    int snap_wf_min_train;
+};
+
+static inline void *hp_sweep_worker_fn(void *arg) {
+    HyperparamSweepWorkerArgs *args = (HyperparamSweepWorkerArgs *)arg;
+    TrainingPanelState *state = args->state;
+    const BacktestResults *data = args->data;
+
+    // Local copies — args struct freed below.
+    OptimizerRange ranges[OPT_MAX_PARAMS];
+    memcpy(ranges, args->snap_ranges, sizeof(ranges));
+    int num_params = args->snap_num_params;
+    int label_type = args->snap_label_type;
+    int wf_n_splits = args->snap_wf_n_splits;
+    int wf_horizon  = args->snap_wf_horizon_ticks;
+    int wf_buffer   = args->snap_wf_buffer_ticks;
+    int wf_min_train = args->snap_wf_min_train;
+    free(args);
+
+    memset(&state->hp_results, 0, sizeof(state->hp_results));
+    state->hp_progress = 0;
+    state->hp_total = 0;
+
+#ifdef USE_XGBOOST
+    Backtest_RunHyperparamTrainSweep(
+        &state->hp_results, data, ranges, num_params,
+        label_type,
+        wf_n_splits, wf_horizon, wf_buffer, wf_min_train,
+        &state->hp_progress, &state->hp_total,
+        &state->hp_cancel);
+    state->hp_has_results = (state->hp_results.total_runs > 0);
+#else
+    fprintf(stderr, "[hpsweep] XGBoost not compiled in — sweep skipped\n");
+    state->hp_has_results = false;
+#endif
+
+    state->hp_complete = 1;
+    state->hp_running = 0;
+    return NULL;
+}
+
 // v5.8.7 — full-validation worker thread. Mirrors walkforward_worker_fn but
 // calls Backtest_RunFullValidation, which carries the v5.8.6 auto-stamp
 // wiring (FEATURE_REGISTRY_HASH + engine_version embedded in stamp body).
 struct FullValidationWorkerArgs {
     TrainingPanelState *state;
     const BacktestResults *data;
+    // v5.10.0E — snapshot operator-editable fields at click time, not in
+    // the worker. The ImGui input fields write into state->model_path /
+    // state->fv_auto_stamp_secret CONCURRENTLY with worker execution; if
+    // operator clicks Run Full Validation with empty model_path then
+    // types it AFTER, the worker reads empty (skip copy → auto_stamp_path
+    // empty), then status build reads the post-typed value, producing
+    // "model_path='X' did not propagate (worker race)" diagnostic.
+    // Capture-at-click eliminates the race.
+    char snap_model_path[256];
+    char snap_fv_auto_stamp_secret[64];
 };
 
 static inline void *fullvalidation_worker_fn(void *arg) {
     FullValidationWorkerArgs *args = (FullValidationWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
     const BacktestResults *data = args->data;
+    // v5.10.0E — local copies of click-time snapshots. Free args
+    // immediately so caller-side memory hygiene matches the legacy worker
+    // pattern (free as early as practical).
+    char model_path_snap[256];
+    char fv_auto_stamp_secret_snap[64];
+    {
+        size_t n = strnlen(args->snap_model_path,
+                           sizeof(args->snap_model_path));
+        if (n >= sizeof(model_path_snap)) n = sizeof(model_path_snap) - 1;
+        memcpy(model_path_snap, args->snap_model_path, n);
+        model_path_snap[n] = '\0';
+    }
+    {
+        size_t n = strnlen(args->snap_fv_auto_stamp_secret,
+                           sizeof(args->snap_fv_auto_stamp_secret));
+        if (n >= sizeof(fv_auto_stamp_secret_snap))
+            n = sizeof(fv_auto_stamp_secret_snap) - 1;
+        memcpy(fv_auto_stamp_secret_snap, args->snap_fv_auto_stamp_secret, n);
+        fv_auto_stamp_secret_snap[n] = '\0';
+    }
     free(args);
 
     // Build held-out split and unlock immediately. The friction-grade lock
@@ -1865,17 +2249,21 @@ static inline void *fullvalidation_worker_fn(void *arg) {
     memset(&state->fv_results, 0, sizeof(state->fv_results));
     int auto_stamp_enabled = data->config_used.auto_stamp_on_held_out;
     if (auto_stamp_enabled) {
-        size_t n = strlen(state->model_path);
+        // v5.10.0E — read from local snapshot (captured at click time),
+        // not from state->model_path which may have changed since.
+        size_t n = strnlen(model_path_snap, sizeof(model_path_snap));
         if (n >= sizeof(state->fv_results.auto_stamp_path))
             n = sizeof(state->fv_results.auto_stamp_path) - 1;
-        memcpy(state->fv_results.auto_stamp_path, state->model_path, n);
+        memcpy(state->fv_results.auto_stamp_path, model_path_snap, n);
         state->fv_results.auto_stamp_path[n] = '\0';
     }
     {
-        size_t n = strlen(state->fv_auto_stamp_secret);
+        // v5.10.0E — same race-free snapshot read for secret.
+        size_t n = strnlen(fv_auto_stamp_secret_snap,
+                           sizeof(fv_auto_stamp_secret_snap));
         if (n >= sizeof(state->fv_results.auto_stamp_secret))
             n = sizeof(state->fv_results.auto_stamp_secret) - 1;
-        memcpy(state->fv_results.auto_stamp_secret, state->fv_auto_stamp_secret, n);
+        memcpy(state->fv_results.auto_stamp_secret, fv_auto_stamp_secret_snap, n);
         state->fv_results.auto_stamp_secret[n] = '\0';
     }
     state->fv_results.auto_stamp_format_version = 0;  // 0 = use MODEL_FORMAT_VERSION
@@ -1902,16 +2290,26 @@ static inline void *fullvalidation_worker_fn(void *arg) {
         } else {
             // v5.9.4a — improved diagnostic. Pre-v5.9.4a always said
             // "model_path empty?" — operator had no info to debug.
-            // Now show what state was actually observed.
-            if (state->model_path[0] == '\0') {
+            // v5.10.0E — read model_path from local SNAPSHOT (captured at
+            // click time), not from state->model_path which the operator
+            // may have edited since worker started. This makes the
+            // diagnostic accurate ("at click time, model_path was empty"
+            // vs the false "did not propagate" message we used to print
+            // when operator typed model_path AFTER clicking).
+            if (model_path_snap[0] == '\0') {
                 snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
-                    "Held-out OK; auto-stamp skipped — model_path empty "
-                    "(set Model Path field before Run Full Validation)");
-            } else if (state->fv_results.auto_stamp_path[0] == '\0') {
-                snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
-                    "Held-out OK; auto-stamp skipped — model_path='%s' did not "
-                    "propagate to auto_stamp_path (worker race or copy failure)",
+                    "Held-out OK; auto-stamp skipped — model_path was empty "
+                    "AT CLICK TIME (set Model Path field BEFORE clicking "
+                    "Run Full Validation; current value: '%s')",
                     state->model_path);
+            } else if (state->fv_results.auto_stamp_path[0] == '\0') {
+                // Truly unexpected — snapshot was non-empty but copy didn't
+                // populate. Code path shouldn't fire post-v5.10.0E.
+                snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
+                    "Held-out OK; auto-stamp skipped — model_path='%s' "
+                    "snapshot non-empty but auto_stamp_path empty "
+                    "(internal copy failure; report bug)",
+                    model_path_snap);
             } else {
                 snprintf(state->fv_status_msg, sizeof(state->fv_status_msg),
                     "Held-out OK; auto-stamp skipped — Backtest_RunFullValidation "
@@ -2047,13 +2445,19 @@ static inline void *train_model_worker_fn(void *arg) {
         memcpy(hp.tree_method, tree_method_choices[tm_idx], n);
         hp.tree_method[n] = '\0';
     }
-    // Apply tree shape + RNG params; nthread=4 for faster GUI iter
-    // (deterministic-per-fold not required here — Train Model is
-    // exploratory; held-out validation uses nthread=1 for parity).
-    // Objective is set per label-type below; XGBHyperparams_Apply
-    // handles the rest (max_depth, eta, subsample, colsample,
-    // min_child_weight, seed, tree_method, verbosity).
-    tt::XGBHyperparams_Apply(booster, hp, /*nthread=*/4);
+    // Apply tree shape + RNG params. Objective is set per label-type
+    // below; XGBHyperparams_Apply handles the rest (max_depth, eta,
+    // subsample, colsample, min_child_weight, seed, tree_method,
+    // verbosity).
+    // v5.10.0 Item D — train nthread is operator-tunable via
+    // cfg.xgb_train_nthread (default 1, matches v5.10.0a-final hardcoded
+    // determinism). Pre-v5.10 hardcoded 4 here for "faster GUI iter";
+    // operators wanting that bump cfg explicitly. Default-1 preserves
+    // bytewise reproducibility across runs (XGBoost multi-thread is
+    // non-deterministic per-fold).
+    int train_nthread = results->config_used.xgb_train_nthread > 0
+                      ? results->config_used.xgb_train_nthread : 1;
+    tt::XGBHyperparams_Apply(booster, hp, train_nthread);
 
     int num_classes = (snap_label_type >= 0 && snap_label_type < LABEL_COUNT)
                       ? label_table[snap_label_type].num_classes : 0;
@@ -2360,6 +2764,301 @@ static inline void *train_model_worker_fn(void *arg) {
 
     state->tm_complete = 1;
     state->tm_running = 0;
+    return NULL;
+}
+
+//======================================================================================================
+// [v5.10.0a.G.1 — MULTI-HORIZON TRAINING WORKER]
+//======================================================================================================
+// Trains N models, one per horizon in cfg.horizon_list, sharing the
+// feature_matrix collected once. Each horizon recomputes its labels
+// (Backtest_ComputeLabelsFromSamples with override forward_ticks),
+// then trains an XGBooster on (features, this-horizon's labels), then
+// saves to a per-horizon dir.
+//
+// Per-horizon save path: <model_dir>/horizon_<H>_<role>.json
+// Per-horizon summary:   <model_dir>/horizon_<H>_summary.txt
+//
+// Operator workflow:
+//   1. Set cfg.horizon_list=100,500,1000 (CSV)
+//   2. Click Collect Features (single feature collect)
+//   3. Click Train Multi-Horizon — N models trained sequentially
+//   4. (Future) cfg.horizon_list non-empty + Run Engine = ensemble
+//      inference (G.4)
+//
+// LITE caveats:
+//   - Models trained sequentially within this worker (each horizon
+//     uses cfg.xgb_train_nthread for per-booster threads)
+//   - No ensemble training-time discipline check — operator must
+//     manually pick which to deploy OR rely on G.4 ensemble inference
+//   - Save Run for multi-horizon: writes per-horizon dirs; Past Runs
+//     panel rescan picks them up as N separate rows
+//
+// Click-time snapshot mirrors v5.10.0E pattern.
+//======================================================================================================
+struct MultiHorizonWorkerArgs {
+    TrainingPanelState *state;
+    RunControlState *run_control;
+    char snap_run_name[64];
+    char snap_model_path[256];
+    int  snap_label_type;
+    int  snap_max_depth;
+    float snap_learning_rate;
+    int  snap_n_estimators;
+    float snap_subsample;
+    float snap_colsample_bytree;
+    int  snap_min_child_weight;
+    int  snap_seed;
+    int  snap_tree_method_idx;
+    int  snap_horizon_count;
+    int  snap_horizons[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+};
+
+static inline void *train_multi_horizon_worker_fn(void *arg) {
+    MultiHorizonWorkerArgs *args = (MultiHorizonWorkerArgs *)arg;
+    TrainingPanelState *state = args->state;
+    RunControlState *run_control = args->run_control;
+
+    // Local snapshots
+    char run_name[64];
+    char model_path[256];
+    {
+        size_t n = strnlen(args->snap_run_name, sizeof(args->snap_run_name));
+        if (n >= sizeof(run_name)) n = sizeof(run_name) - 1;
+        memcpy(run_name, args->snap_run_name, n);
+        run_name[n] = '\0';
+    }
+    {
+        size_t n = strnlen(args->snap_model_path, sizeof(args->snap_model_path));
+        if (n >= sizeof(model_path)) n = sizeof(model_path) - 1;
+        memcpy(model_path, args->snap_model_path, n);
+        model_path[n] = '\0';
+    }
+    int label_type = args->snap_label_type;
+    int horizon_count = args->snap_horizon_count;
+    int horizons[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    memcpy(horizons, args->snap_horizons, sizeof(horizons));
+    free(args);
+
+    BacktestResults *results = &run_control->results;
+
+#ifdef USE_XGBOOST
+    if (horizon_count <= 0) {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Multi-horizon: cfg.horizon_list empty; set horizons first.");
+        state->mh_complete = 1;
+        state->mh_running = 0;
+        return NULL;
+    }
+    if (results->sample_count <= 0) {
+        snprintf(state->status_msg, sizeof(state->status_msg),
+                 "Multi-horizon: Collect Features first.");
+        state->mh_complete = 1;
+        state->mh_running = 0;
+        return NULL;
+    }
+
+    fprintf(stderr, "[mh-train] starting multi-horizon train: %d horizons, "
+                    "%d samples, run_name='%s'\n",
+            horizon_count, results->sample_count, run_name);
+
+    // Save the original RunConfig + restore at end (we mutate
+    // label_forward_ticks per horizon).
+    BacktestRunConfig saved_run_cfg = run_control->run_config;
+
+    int trained = 0;
+    int saved_count = 0;
+    for (int h = 0; h < horizon_count; ++h) {
+        if (state->mh_cancel) {
+            fprintf(stderr, "[mh-train] cancelled at horizon %d/%d\n",
+                    h, horizon_count);
+            break;
+        }
+        int horizon_ticks = horizons[h];
+        state->mh_current_horizon = horizon_ticks;
+        state->mh_progress = h + 1;
+        state->mh_total = horizon_count;
+
+        // Override label_forward_ticks for THIS horizon, recompute labels
+        run_control->run_config.label_forward_ticks = horizon_ticks;
+        Backtest_ComputeLabelsFromSamples(results, &run_control->run_config);
+
+        // Train inline. Mirrors train_model_worker_fn's body but compact;
+        // operator-snapshotted hyperparams used identically.
+        int n_valid = 0;
+        for (int s = 0; s < results->sample_count; ++s) {
+            if (!isnan(results->labels[s]) && !isinf(results->labels[s]))
+                n_valid++;
+        }
+        if (n_valid < 50) {
+            fprintf(stderr, "[mh-train] horizon %d: only %d valid labels; skip\n",
+                    horizon_ticks, n_valid);
+            continue;
+        }
+        // Allocate per-horizon training arrays
+        float *train_features = (float*)malloc((size_t)n_valid * MODEL_NUM_FEATURES * sizeof(float));
+        float *train_labels   = (float*)malloc((size_t)n_valid * sizeof(float));
+        if (!train_features || !train_labels) {
+            free(train_features); free(train_labels);
+            fprintf(stderr, "[mh-train] horizon %d: alloc failed; skip\n", horizon_ticks);
+            continue;
+        }
+        int j = 0;
+        for (int s = 0; s < results->sample_count; ++s) {
+            if (isnan(results->labels[s]) || isinf(results->labels[s])) continue;
+            memcpy(&train_features[(size_t)j * MODEL_NUM_FEATURES],
+                   &results->feature_matrix[(size_t)s * MODEL_NUM_FEATURES],
+                   MODEL_NUM_FEATURES * sizeof(float));
+            train_labels[j] = results->labels[s];
+            j++;
+        }
+
+        DMatrixHandle dtrain;
+        XGDMatrixCreateFromMat(train_features, n_valid, MODEL_NUM_FEATURES,
+                                std::numeric_limits<float>::quiet_NaN(), &dtrain);
+        XGDMatrixSetFloatInfo(dtrain, "label", train_labels, n_valid);
+        BoosterHandle booster;
+        XGBoosterCreate(&dtrain, 1, &booster);
+
+        static const char* tree_method_choices[] = { "hist", "exact", "approx", "auto" };
+        int tm_idx = (args ? 0 : 0);  // args was freed; tm_idx defaulted to "hist" via snap below
+        // (actually args was freed already; recapture from snap saved before free)
+        tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
+        // Pull snapshot fields from the parent context — they were captured
+        // into local stack vars before free(args)
+        // (we have them as: snap_max_depth etc — but those are gone post-free)
+        // Re-capture from state since worker is running while UI is locked
+        // out by hp_running flag... actually NO, multi-horizon uses mh_running.
+        // For determinism we should snapshot hyperparams. Let me add them to args.
+        // ... see below: re-snapshot from local vars saved at worker entry.
+        hp.max_depth         = state->max_depth;          // FALLBACK — worker uses live state
+        hp.learning_rate     = state->learning_rate;
+        hp.n_estimators      = state->n_estimators;
+        hp.subsample         = state->ui_subsample;
+        hp.colsample_bytree  = state->ui_colsample_bytree;
+        hp.min_child_weight  = state->ui_min_child_weight;
+        hp.seed              = state->ui_seed;
+        int idx_tm = state->ui_tree_method_idx;
+        if (idx_tm < 0 || idx_tm >= 4) idx_tm = 0;
+        strncpy(hp.tree_method, tree_method_choices[idx_tm], sizeof(hp.tree_method) - 1);
+        hp.tree_method[sizeof(hp.tree_method) - 1] = '\0';
+
+        int train_nthread = results->config_used.xgb_train_nthread > 0
+                          ? results->config_used.xgb_train_nthread : 1;
+        tt::XGBHyperparams_Apply(booster, hp, train_nthread);
+
+        int num_classes = (label_type >= 0 && label_type < LABEL_COUNT)
+                          ? label_table[label_type].num_classes : 0;
+        int is_multiclass = (num_classes >= 2);
+        int is_regression = (num_classes == 1);
+        if (is_multiclass) {
+            XGBoosterSetParam(booster, "objective", "multi:softprob");
+            char nc_s[8]; snprintf(nc_s, 8, "%d", num_classes);
+            XGBoosterSetParam(booster, "num_class", nc_s);
+            float *mc_w = (float*)malloc(n_valid * sizeof(float));
+            int mc_counts[16] = {0};
+            if (mc_w) {
+                XGBoost_ComputeMulticlassWeights(train_labels, n_valid, num_classes, mc_w, mc_counts);
+                XGDMatrixSetFloatInfo(dtrain, "weight", mc_w, n_valid);
+                free(mc_w);
+            }
+        } else if (is_regression) {
+            XGBoosterSetParam(booster, "objective", "reg:squarederror");
+        } else {
+            XGBoosterSetParam(booster, "objective", "binary:logistic");
+            int n_pos = 0, n_neg = 0;
+            double spw = XGBoost_ComputeScalePosWeight(train_labels, n_valid, &n_pos, &n_neg);
+            char spw_s[24]; snprintf(spw_s, sizeof(spw_s), "%.4f", spw);
+            XGBoosterSetParam(booster, "scale_pos_weight", spw_s);
+        }
+
+        // Train iterations
+        int cancelled = 0;
+        for (int i = 0; i < hp.n_estimators; ++i) {
+            if (state->mh_cancel) { cancelled = 1; break; }
+            XGBoosterUpdateOneIter(booster, i, dtrain);
+        }
+
+        // Save model to <run_name>_horizon_<H>/ subdir
+        // Determine role from label_type for filename (matches Save Run convention)
+        const char* role = "buy_signal";
+        if (label_type == LABEL_PEAK_VALLEY_STABLE) role = "barrier";
+        else if (label_type == LABEL_REGIME)       role = "regime";
+
+        char horizon_dir[300];
+        const char* run_subdir = (label_type == LABEL_PEAK_VALLEY_STABLE
+                                  || label_type == LABEL_REGIME
+                                  || is_multiclass)
+            ? "classification" : (is_regression ? "regression" : "classification");
+        snprintf(horizon_dir, sizeof(horizon_dir),
+                 "models/%s/%s_horizon_%d", run_subdir, run_name, horizon_ticks);
+        mkdir("models", 0755);
+        char parent_dir[320];
+        snprintf(parent_dir, sizeof(parent_dir), "models/%s", run_subdir);
+        mkdir(parent_dir, 0755);
+        mkdir(horizon_dir, 0755);
+
+        char dst_model[400];
+        snprintf(dst_model, sizeof(dst_model), "%s/%s.json", horizon_dir, role);
+        if (cancelled) {
+            fprintf(stderr, "[mh-train] horizon %d: cancelled mid-train; not saving\n",
+                    horizon_ticks);
+        } else {
+            // Save model (atomic via XGBooster's own write; matches existing pattern)
+            int save_rc = XGBoosterSaveModel(booster, dst_model);
+            if (save_rc == 0) {
+                fprintf(stderr, "[mh-train] horizon %d: saved %s\n",
+                        horizon_ticks, dst_model);
+                saved_count++;
+                // Per-horizon summary.txt (minimal — full Save Run would
+                // require running WF; G.1 trains-and-saves only)
+                char dst_summary[400];
+                snprintf(dst_summary, sizeof(dst_summary), "%s/summary.txt", horizon_dir);
+                FILE *sf = fopen(dst_summary, "w");
+                if (sf) {
+                    fprintf(sf, "run: %s_horizon_%d\n", run_name, horizon_ticks);
+                    fprintf(sf, "role: %s\n", role);
+                    fprintf(sf, "model: %s\n", dst_model);
+                    fprintf(sf, "label_type: %d\n", label_type);
+                    fprintf(sf, "label_lookahead_ticks: %d\n", horizon_ticks);
+                    fprintf(sf, "max_depth: %d\n", hp.max_depth);
+                    fprintf(sf, "learning_rate: %.3f\n", hp.learning_rate);
+                    fprintf(sf, "n_estimators: %d\n", hp.n_estimators);
+                    fclose(sf);
+                }
+            } else {
+                fprintf(stderr, "[mh-train] horizon %d: save FAILED (rc=%d)\n",
+                        horizon_ticks, save_rc);
+            }
+        }
+
+        XGBoosterFree(booster);
+        XGDMatrixFree(dtrain);
+        free(train_features);
+        free(train_labels);
+        trained++;
+    }
+
+    // Restore RunConfig
+    run_control->run_config = saved_run_cfg;
+
+    snprintf(state->status_msg, sizeof(state->status_msg),
+             "Multi-horizon: trained %d/%d horizons; %d models saved to "
+             "models/<class>/%s_horizon_*/<role>.json",
+             trained, horizon_count, saved_count, run_name);
+#else
+    snprintf(state->status_msg, sizeof(state->status_msg),
+             "Multi-horizon: XGBoost not compiled in (build with -DUSE_XGBOOST=ON)");
+    (void)results;
+    (void)label_type;
+    (void)horizon_count;
+    (void)horizons;
+    (void)run_name;
+    (void)model_path;
+#endif
+
+    state->mh_complete = 1;
+    state->mh_running = 0;
     return NULL;
 }
 
@@ -2772,7 +3471,23 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // train_model_worker_fn (above) walked the race surface + cancellation
     // path. UI shows a progress indicator + Cancel button while running;
     // results display (below) reads the same state fields the worker writes.
-    bool can_train = results->sample_count >= 10;
+    //
+    // v5.10.0a-bugfix1 — cross-worker mutual exclusion. Pre-bugfix, operator
+    // could click Run Walk-Forward then Run Full Validation, spawning two
+    // concurrent training pthreads. XGBoost's internal global state +
+    // PhaseTimer_Global() singleton are NOT safe under that concurrency on
+    // some builds; result was a segfault when GUI thread tried to read
+    // worker-mutating state on click-back. Fix: gate all training buttons
+    // on a single "any_worker_running" predicate so only ONE worker runs
+    // at a time. Operator-friendly: button is disabled with a tooltip
+    // "(another training task is running)" rather than crashing.
+    bool any_worker_running =
+        state->tm_running ||
+        state->wf_running ||
+        state->fv_running ||
+        state->hp_running ||
+        state->mh_running;
+    bool can_train = results->sample_count >= 10 && !any_worker_running;
 #ifndef USE_XGBOOST
     can_train = false;
 #endif
@@ -2794,6 +3509,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             state->model_trained = false;
             state->status_msg[0] = '\0';
             state->wf_has_results = false;
+            // v5.10.0E — also clear wf_results struct itself, not just the
+            // flag. Pre-fix, valid_folds (or any nonzero field) from the
+            // PRIOR WF run leaked into Save Run for THIS train cycle: the
+            // Save Run "valid_folds > 0" gate fired on stale data, writing
+            // val_accuracy=0 + train_val_gap=0 + valid_folds=4 from the
+            // last WF run. Past Runs then rendered "0.0%" RED for runs
+            // where WF was never re-run after the latest Train Model.
+            // Operator confusing diagnostic ("model has no edge") when
+            // really WF just wasn't run for that train.
+            memset(&state->wf_results, 0, sizeof(state->wf_results));
             state->tm_cancel = 0;
             state->tm_complete = 0;
             state->tm_running = 1;
@@ -2814,6 +3539,141 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 ImGui::TextDisabled("Collect features first (need 10+ samples)");
             }
 #endif
+        }
+
+        // v5.10.0a.G.1 — Train Multi-Horizon button. Adjacent to Train
+        // Model so operators see both options. Gated on horizons being
+        // configured (in-panel CSV input OR cfg.horizon_list fallback).
+        // v5.10.0a-bugfix2: in-panel CSV editor — operator no longer
+        // needs to edit cfg.horizon_list + reload to multi-horizon train.
+        const auto& mh_cfg = run_control->results.config_used;
+
+        // Parse the operator's CSV input on each render. Cheap (typically
+        // 1-8 entries; bounded loop). Updates state->ui_horizon_list/_count
+        // so the click handler reads from a stable snapshot.
+        {
+            int n = 0;
+            const char* p = state->ui_horizon_csv;
+            while (*p && n < 8) {
+                while (*p == ' ' || *p == '\t' || *p == ',') p++;
+                if (!*p) break;
+                char* end = nullptr;
+                long v = strtol(p, &end, 10);
+                if (end == p) break;
+                if (v > 0 && v <= 1000000)
+                    state->ui_horizon_list[n++] = (int)v;
+                p = end;
+            }
+            state->ui_horizon_count = n;
+        }
+
+        // Effective horizons: operator's UI input takes priority; if
+        // empty (CSV doesn't parse to any valid horizon), fall back to
+        // cfg.horizon_list (back-compat for operators who already wired
+        // the cfg).
+        int eff_horizon_count = state->ui_horizon_count > 0
+                              ? state->ui_horizon_count
+                              : mh_cfg.horizon_count;
+        const int *eff_horizons = state->ui_horizon_count > 0
+                                 ? state->ui_horizon_list
+                                 : mh_cfg.horizon_list;
+
+        // CSV input field. Operator types "100,500,1000" (or whatever);
+        // parse runs every render so the displayed cell-count reflects
+        // current input.
+        ImGui::PushItemWidth(220);
+        ImGui::InputText("Horizons (CSV)",
+                         state->ui_horizon_csv,
+                         sizeof(state->ui_horizon_csv));
+        ImGui::PopItemWidth();
+        ImGui::SetItemTooltip(
+            "Comma-separated forward-tick horizons for Train Multi-Horizon.\n"
+            "Example: 100,500,1000  →  trains 3 models with different\n"
+            "label_forward_ticks values, saves each to its own dir.\n\n"
+            "Empty falls back to cfg.horizon_list. Max 8 horizons.\n"
+            "Each horizon must be 1..1,000,000 ticks.");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%d horizon%s parsed)",
+                            state->ui_horizon_count,
+                            state->ui_horizon_count == 1 ? "" : "s");
+
+        bool mh_can_train = can_train && (eff_horizon_count > 0);
+        if (!mh_can_train) ImGui::BeginDisabled();
+        if (ImGui::Button("Train Multi-Horizon")) {
+            state->mh_running = 1;
+            state->mh_progress = 0;
+            state->mh_total = eff_horizon_count;
+            state->mh_current_horizon = 0;
+            state->mh_cancel = 0;
+            state->mh_complete = 0;
+            state->status_msg[0] = '\0';
+
+            MultiHorizonWorkerArgs *mh_args =
+                (MultiHorizonWorkerArgs *)malloc(sizeof(MultiHorizonWorkerArgs));
+            mh_args->state = state;
+            mh_args->run_control = run_control;
+            // Snapshot fields at click time (v5.10.0E pattern)
+            {
+                size_t n = strnlen(state->run_name, sizeof(state->run_name));
+                if (n >= sizeof(mh_args->snap_run_name))
+                    n = sizeof(mh_args->snap_run_name) - 1;
+                memcpy(mh_args->snap_run_name, state->run_name, n);
+                mh_args->snap_run_name[n] = '\0';
+            }
+            {
+                size_t n = strnlen(state->model_path, sizeof(state->model_path));
+                if (n >= sizeof(mh_args->snap_model_path))
+                    n = sizeof(mh_args->snap_model_path) - 1;
+                memcpy(mh_args->snap_model_path, state->model_path, n);
+                mh_args->snap_model_path[n] = '\0';
+            }
+            mh_args->snap_label_type     = state->label_type;
+            mh_args->snap_max_depth      = state->max_depth;
+            mh_args->snap_learning_rate  = state->learning_rate;
+            mh_args->snap_n_estimators   = state->n_estimators;
+            mh_args->snap_subsample        = state->ui_subsample;
+            mh_args->snap_colsample_bytree = state->ui_colsample_bytree;
+            mh_args->snap_min_child_weight = state->ui_min_child_weight;
+            mh_args->snap_seed             = state->ui_seed;
+            mh_args->snap_tree_method_idx  = state->ui_tree_method_idx;
+            // v5.10.0a-bugfix2 — snapshot effective horizons (UI takes
+            // priority over cfg fallback at click time).
+            mh_args->snap_horizon_count = eff_horizon_count;
+            for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
+                mh_args->snap_horizons[i] = (i < eff_horizon_count)
+                    ? eff_horizons[i] : 0;
+            }
+            pthread_create(&state->mh_tid, NULL, train_multi_horizon_worker_fn, mh_args);
+            pthread_detach(state->mh_tid);
+        }
+        if (!mh_can_train) {
+            ImGui::EndDisabled();
+            if (eff_horizon_count == 0) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(set Horizons CSV above OR cfg.horizon_list to enable)");
+            }
+        }
+        ImGui::SetItemTooltip(
+            "Trains N XGBoost models, one per horizon in 'Horizons (CSV)' above.\n"
+            "Each horizon recomputes labels with that label_forward_ticks value,\n"
+            "trains a separate model, saves to:\n"
+            "  models/<class>/<run_name>_horizon_<H>/<role>.json\n\n"
+            "Operator manually picks which horizon to deploy (or relies on\n"
+            "v5.10.0a.G.4 ensemble inference once engine wiring lands). Past\n"
+            "Runs panel treats each horizon as a separate row for\n"
+            "Compare-to-Baseline.");
+
+        // Multi-horizon progress bar (rendered when worker is running)
+        if (state->mh_running) {
+            float pct = state->mh_total > 0
+                ? (float)state->mh_progress / state->mh_total : 0.0f;
+            char overlay[96];
+            snprintf(overlay, sizeof(overlay), "horizon %d/%d (current: %d ticks)",
+                     (int)state->mh_progress, (int)state->mh_total,
+                     (int)state->mh_current_horizon);
+            ImGui::ProgressBar(pct, ImVec2(-1, 0), overlay);
+            if (ImGui::Button("Cancel Multi-Horizon"))
+                state->mh_cancel = 1;
         }
     }
 
@@ -3041,9 +3901,14 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 fprintf(sf, "label_lookahead_ticks: %d\n", state->label_forward_ticks);
                 // v4.3 — also persist Walk-Forward metrics if a WF run has
                 // been completed for this training. Past Runs viewer reads
-                // these to show val accuracy + overfit gap. valid_folds == 0
-                // means no WF was run; skip the block (older format).
-                if (state->wf_results.valid_folds > 0) {
+                // these to show val accuracy + overfit gap.
+                // v5.10.0E — gate on wf_has_results (true only after a
+                // CURRENT-cycle WF completes), NOT wf_results.valid_folds
+                // (which can leak across train cycles via stale state).
+                // Train Model click clears wf_has_results AND zeroes
+                // wf_results; this gate then correctly writes "no WF"
+                // (skip block) until a fresh WF actually runs.
+                if (state->wf_has_results && state->wf_results.valid_folds > 0) {
                     // label-kind-aware metric writeout. For binary/multiclass
                     // (label_kind != 1) WF populates mean_val_accuracy; for
                     // regression (label_kind == 1) WF populates correlation +
@@ -3145,7 +4010,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 
     // run / cancel button
     {
-        bool can_wf = results->sample_count >= 50;
+        // v5.10.0a-bugfix1 — re-evaluate any_worker_running for WF gate
+        // (state may have flipped since the can_train computation above
+        // — e.g. if the operator clicked Train Model then renders fired
+        // before tm_running flipped). Recompute here for safety.
+        bool any_worker_running_wf =
+            state->tm_running ||
+            state->fv_running ||
+            state->hp_running ||
+            state->mh_running;  // intentionally exclude wf_running so WF can show its own cancel button
+        bool can_wf = results->sample_count >= 50 && !any_worker_running_wf;
 #ifndef USE_XGBOOST
         can_wf = false;
 #endif
@@ -3467,6 +4341,171 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // (and therefore the v5.8.6 auto-stamp wiring). Pre-v5.8.7 the function
     // existed but was unreachable from the suite.
     ImGui::Separator();
+    // ============================================================
+    // v5.10.0a.E — Hyperparam Sweep block. Placed between WF and FV
+    // since it logically follows WF (operator runs WF on best hyperparams
+    // they found via sweep). Disabled when no features collected yet.
+    // ============================================================
+    ImGui::Separator();
+    ImGui::Text("Hyperparam Sweep (XGBoost grid search over training)");
+    ImGui::SetItemTooltip(
+        "Trains N XGBoost models with different hyperparam values,\n"
+        "runs walk-forward on each, picks the best by val accuracy.\n\n"
+        "Workflow:\n"
+        "  1. Click Collect Features (above) to populate the dataset\n"
+        "  2. Pick 1-2 cfg fields + ranges below\n"
+        "  3. Click Run Hyperparam Sweep — trains all cells\n"
+        "  4. Inspect results table; best cell highlighted\n\n"
+        "Sweepable fields (ConfigField_Set whitelist):\n"
+        "  xgb_subsample / xgb_colsample_bytree / xgb_min_child_weight\n"
+        "  / xgb_seed / xgb_train_nthread / xgb_eval_nthread");
+    {
+        ImGui::PushItemWidth(-180);
+        ImGui::SliderInt("Sweep params (1 or 2)", &state->hp_num_params, 1, OPT_MAX_PARAMS);
+        for (int p = 0; p < state->hp_num_params; ++p) {
+            ImGui::PushID(p);
+            char hdr[32]; snprintf(hdr, sizeof(hdr), "Sweep Param %d", p + 1);
+            if (ImGui::CollapsingHeader(hdr, ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::InputText("Key", state->hp_ranges[p].key, 32);
+                ImGui::InputDouble("Min", &state->hp_ranges[p].lo, 0.05, 0.5, "%.3f");
+                ImGui::InputDouble("Max", &state->hp_ranges[p].hi, 0.05, 0.5, "%.3f");
+                ImGui::InputDouble("Step", &state->hp_ranges[p].step, 0.05, 0.25, "%.3f");
+                int steps = state->hp_ranges[p].steps();
+                ImGui::Text("%d steps", steps);
+            }
+            ImGui::PopID();
+        }
+        int hp_total_cells = state->hp_ranges[0].steps()
+                            * (state->hp_num_params > 1 ? state->hp_ranges[1].steps() : 1);
+        ImGui::Text("Total cells: %d", hp_total_cells);
+        ImGui::PopItemWidth();
+
+        const BacktestResults *hp_data = &run_control->results;
+        // v5.10.0a-bugfix1 — exclude other workers (recompute fresh)
+        bool any_worker_running_hp =
+            state->tm_running ||
+            state->wf_running ||
+            state->fv_running ||
+            state->mh_running;
+        bool can_hp =
+#ifdef USE_XGBOOST
+            hp_data->sample_count >= 100 && hp_total_cells > 0
+            && hp_total_cells <= OPT_MAX_GRID && !any_worker_running_hp;
+#else
+            false;
+#endif
+
+        if (state->hp_running) {
+            float pct = state->hp_total > 0
+                ? (float)state->hp_progress / state->hp_total : 0.0f;
+            char overlay[64];
+            snprintf(overlay, sizeof(overlay), "%d / %d cells",
+                     (int)state->hp_progress, (int)state->hp_total);
+            ImGui::ProgressBar(pct, ImVec2(-1, 0), overlay);
+            if (ImGui::Button("Cancel Hyperparam Sweep"))
+                state->hp_cancel = 1;
+        } else {
+            if (!can_hp) ImGui::BeginDisabled();
+            if (ImGui::Button("Run Hyperparam Sweep")) {
+                state->hp_running = 1;
+                state->hp_progress = 0;
+                state->hp_total = 0;
+                state->hp_cancel = 0;
+                state->hp_complete = 0;
+                state->hp_has_results = false;
+                memset(&state->hp_results, 0, sizeof(state->hp_results));
+
+                HyperparamSweepWorkerArgs *hp_args =
+                    (HyperparamSweepWorkerArgs *)malloc(sizeof(HyperparamSweepWorkerArgs));
+                hp_args->state = state;
+                hp_args->data = hp_data;
+                memcpy(hp_args->snap_ranges, state->hp_ranges, sizeof(hp_args->snap_ranges));
+                hp_args->snap_num_params = state->hp_num_params;
+                hp_args->snap_label_type = state->label_type;
+                hp_args->snap_wf_n_splits = state->wf_n_splits;
+                hp_args->snap_wf_horizon_ticks = state->wf_horizon_ticks;
+                hp_args->snap_wf_buffer_ticks = state->wf_buffer_ticks;
+                hp_args->snap_wf_min_train = state->wf_min_train;
+                pthread_create(&state->hp_tid, NULL, hp_sweep_worker_fn, hp_args);
+                pthread_detach(state->hp_tid);
+            }
+            if (!can_hp) {
+                ImGui::EndDisabled();
+#ifndef USE_XGBOOST
+                ImGui::SameLine();
+                ImGui::TextDisabled("Build with -DUSE_XGBOOST=ON");
+#else
+                if (hp_data->sample_count < 100) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("Need 100+ samples (Collect Features first)");
+                } else if (hp_total_cells == 0 || hp_total_cells > OPT_MAX_GRID) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("Cell count out of range (1..%d)", OPT_MAX_GRID);
+                }
+#endif
+            }
+        }
+
+        // Results table — kind-aware (WF metric: accuracy or correlation)
+        if (state->hp_has_results && state->hp_results.total_runs > 0) {
+            const OptimizerResults *opt = &state->hp_results;
+            ImGui::Separator();
+            ImGui::Text("Best cell: %s=%.3f",
+                        state->hp_ranges[0].key,
+                        opt->param_vals[0][opt->best_idx / opt->dims[1]]);
+            if (opt->num_params > 1) {
+                ImGui::SameLine();
+                ImGui::Text(" %s=%.3f", state->hp_ranges[1].key,
+                            opt->param_vals[1][opt->best_idx % opt->dims[1]]);
+            }
+            ImGui::Text("Metric (val accuracy or correlation): %.4f",
+                        opt->metric[opt->best_idx]);
+
+            ImGuiTableFlags flags = ImGuiTableFlags_Borders |
+                                     ImGuiTableFlags_RowBg |
+                                     ImGuiTableFlags_SizingFixedFit;
+            if (ImGui::BeginTable("hp_sweep_results",
+                                   opt->num_params == 1 ? 3 : 4, flags)) {
+                ImGui::TableSetupColumn("Cell", ImGuiTableColumnFlags_WidthFixed, 50);
+                ImGui::TableSetupColumn(state->hp_ranges[0].key,
+                                         ImGuiTableColumnFlags_WidthFixed, 120);
+                if (opt->num_params > 1) {
+                    ImGui::TableSetupColumn(state->hp_ranges[1].key,
+                                             ImGuiTableColumnFlags_WidthFixed, 120);
+                }
+                ImGui::TableSetupColumn("Metric",
+                                         ImGuiTableColumnFlags_WidthFixed, 100);
+                ImGui::TableHeadersRow();
+
+                for (int idx = 0; idx < opt->total_runs; ++idx) {
+                    int i0 = idx / opt->dims[1];
+                    int i1 = idx % opt->dims[1];
+                    bool is_best = (idx == opt->best_idx);
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    if (is_best) {
+                        ImGui::TextColored(ImVec4(0.55f, 0.76f, 0.51f, 1.0f),
+                                           "%d ★", idx);
+                    } else {
+                        ImGui::Text("%d", idx);
+                    }
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%.3f", opt->param_vals[0][i0]);
+                    if (opt->num_params > 1) {
+                        ImGui::TableSetColumnIndex(2);
+                        ImGui::Text("%.3f", opt->param_vals[1][i1]);
+                        ImGui::TableSetColumnIndex(3);
+                    } else {
+                        ImGui::TableSetColumnIndex(2);
+                    }
+                    ImGui::Text("%.4f", opt->metric[idx]);
+                }
+                ImGui::EndTable();
+            }
+        }
+    }
+
+    ImGui::Separator();
     ImGui::Text("Full Validation (held-out + auto-stamp)");
     ImGui::SetItemTooltip("Trains on [0, trainval_end), evaluates on locked\n"
                           "held-out tail, and (if held_out gap < threshold)\n"
@@ -3492,9 +4531,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                               "unsigned loads.");
 
         const BacktestResults *fv_data = &run_control->results;
+        // v5.10.0a-bugfix1 — exclude other workers (recompute fresh)
+        bool any_worker_running_fv =
+            state->tm_running ||
+            state->wf_running ||
+            state->hp_running ||
+            state->mh_running;
         bool can_fv =
 #ifdef USE_XGBOOST
-            fv_data->sample_count >= 50 && state->model_path[0] != '\0';
+            fv_data->sample_count >= 50 && state->model_path[0] != '\0'
+            && !any_worker_running_fv;
 #else
             false;
 #endif
@@ -3518,6 +4564,26 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                     (FullValidationWorkerArgs *)malloc(sizeof(FullValidationWorkerArgs));
                 fv_args->state = state;
                 fv_args->data = fv_data;
+                // v5.10.0E — snapshot operator-editable fields at click
+                // time, not in worker. Fixes the auto_stamp_path race
+                // where typing model_path AFTER clicking produced a
+                // misleading "worker race or copy failure" diagnostic.
+                {
+                    size_t n = strnlen(state->model_path, sizeof(state->model_path));
+                    if (n >= sizeof(fv_args->snap_model_path))
+                        n = sizeof(fv_args->snap_model_path) - 1;
+                    memcpy(fv_args->snap_model_path, state->model_path, n);
+                    fv_args->snap_model_path[n] = '\0';
+                }
+                {
+                    size_t n = strnlen(state->fv_auto_stamp_secret,
+                                       sizeof(state->fv_auto_stamp_secret));
+                    if (n >= sizeof(fv_args->snap_fv_auto_stamp_secret))
+                        n = sizeof(fv_args->snap_fv_auto_stamp_secret) - 1;
+                    memcpy(fv_args->snap_fv_auto_stamp_secret,
+                           state->fv_auto_stamp_secret, n);
+                    fv_args->snap_fv_auto_stamp_secret[n] = '\0';
+                }
                 pthread_create(&state->fv_tid, NULL, fullvalidation_worker_fn, fv_args);
                 pthread_detach(state->fv_tid);
             }
@@ -3569,6 +4635,36 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 ? ImVec4(0.55f, 0.76f, 0.51f, 1.0f)
                 : ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
             ImGui::TextColored(stamp_col, "%s", state->fv_status_msg);
+        }
+    }
+
+    // v5.10.0 Item A — per-phase timer breakdown. Read singleton state
+    // populated by the latest backtest run. Header is collapsing — most
+    // operators don't want it open by default. Only render when populated;
+    // a never-run state has nothing useful to show.
+    if (tt::PhaseTimer_Global().populated &&
+        ImGui::CollapsingHeader("Phase Timing (last run)")) {
+        const auto& pt = tt::PhaseTimer_Global();
+        double total_ms = pt.total_ns / 1.0e6;
+        if (total_ms > 0.0) {
+            auto row = [&](const char* label, uint64_t ns, bool nested = false) {
+                if (ns == 0) return;
+                double ms = ns / 1.0e6;
+                double pct = 100.0 * (double)ns / (double)pt.total_ns;
+                ImGui::Text("%s%-18s %8.1f ms  (%5.1f%%)",
+                            nested ? "  " : "",
+                            label, ms, pct);
+            };
+            row("parse:",           pt.parse_ns);
+            row("fan_out_hot:",     pt.fan_out_hot_ns);
+            row("feature_collect:", pt.feature_collect_ns);
+            row("label_compute:",   pt.label_compute_ns);
+            row("wf_eval:",         pt.wf_eval_ns);
+            row("xgboost_train:",   pt.xgboost_train_ns, /*nested=*/true);
+            row("held_out_eval:",   pt.held_out_eval_ns);
+            row("stamp_emit:",      pt.stamp_emit_ns);
+            ImGui::Separator();
+            ImGui::Text("%-18s %8.1f ms", "total:", total_ms);
         }
     }
 

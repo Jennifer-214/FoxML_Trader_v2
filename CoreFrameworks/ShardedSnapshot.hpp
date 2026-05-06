@@ -552,12 +552,65 @@ static inline void TUI_CopySnapshotSharded(
             }
             snap->per_core[i].ml_scaler_present     = any_scaler_present;
             snap->per_core[i].ml_scaler_load_failed = any_scaler_failed;
+            // v5.10.0a.G.10 — populate ensemble snapshot from ezoo (when active).
+            // The cast through void* matches the dispatcher; ml_zoo_ensemble's
+            // type isn't visible here without a forward decl. Empty when
+            // ensemble inactive (single-zoo path) → GUI hides the section.
+            auto* ezoo = static_cast<EnsembleModelZoo<F>*>(
+                state->cores[i].ensemble_handle);
+            if (ezoo && ezoo->active) {
+                auto& es = snap->per_core[i];
+                es.ensemble_active = 1;
+                int n_h = ezoo->buy_signal_count;
+                if (n_h > 8) n_h = 8;
+                es.ensemble_n_horizons = (uint8_t)n_h;
+                for (int h = 0; h < n_h; ++h) {
+                    es.ensemble_horizon_ticks[h] = ezoo->horizon_ticks_at_idx[h];
+                }
+                for (int h = n_h; h < 8; ++h) {
+                    es.ensemble_horizon_ticks[h] = 0;
+                }
+                es.ensemble_last_predicted_regime = ezoo->last_predicted_regime_id;
+                es.ensemble_last_predicted_horizon_idx = ezoo->last_predicted_horizon_idx;
+                strncpy(es.ensemble_blend_mode, ezoo->blend_mode,
+                        sizeof(es.ensemble_blend_mode) - 1);
+                es.ensemble_blend_mode[sizeof(es.ensemble_blend_mode) - 1] = '\0';
+                es.ensemble_disabled_horizon_mask = ezoo->disabled_horizon_mask;
+                // Per-regime probability matrix (preferred over raw weights —
+                // probabilities are normalized so the heatmap is interpretable).
+                for (int r = 0; r < 5; ++r) {  // NUM_REGIMES = 5
+                    if (ezoo->initialized_bandits) {
+                        double probs[8];
+                        Bandit_GetProbabilities(&ezoo->bandits[r], probs);
+                        for (int h = 0; h < n_h; ++h) {
+                            es.ensemble_weights[r][h] = probs[h];
+                        }
+                        for (int h = n_h; h < 8; ++h) {
+                            es.ensemble_weights[r][h] = 0.0;
+                        }
+                        es.ensemble_n_updates_per_regime[r] = ezoo->bandits[r].total_steps;
+                    } else {
+                        // Pre-init: uniform 1/N for visualization
+                        for (int h = 0; h < 8; ++h) {
+                            es.ensemble_weights[r][h] = (h < n_h)
+                                ? (1.0 / n_h) : 0.0;
+                        }
+                        es.ensemble_n_updates_per_regime[r] = 0;
+                    }
+                }
+            } else {
+                snap->per_core[i].ensemble_active = 0;
+                snap->per_core[i].ensemble_n_horizons = 0;
+            }
             // Track the highest-confidence ML core for the headline summary.
             // Tie-break: prefer the lowest core index (deterministic).
             if (state->cores[i].last_confidence > headline_conf) {
                 headline_conf = state->cores[i].last_confidence;
                 headline_ml_core = i;
             }
+        } else {
+            snap->per_core[i].ensemble_active = 0;
+            snap->per_core[i].ensemble_n_horizons = 0;
         }
     }
 

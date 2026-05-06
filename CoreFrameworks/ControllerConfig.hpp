@@ -522,6 +522,32 @@ template <unsigned F> struct ControllerConfig {
   // Default 0 (vocal). Suppresses only inference cfg drift; cross-binary
   // version drift uses its own flag above.
   int    acknowledge_inference_cfg_drift;
+  // v5.10.0c — hot model swap behavior when a position is open.
+  //   0 (default) = swap is deferred until the position closes naturally
+  //                 (next slow-path retries; safer — entry & exit use
+  //                 the same model);
+  //   1           = swap proceeds immediately, open positions exit on
+  //                 whatever model fires next (operator opt-in for
+  //                 emergency model retraction).
+  // Setting this flag = 1 acknowledges that a single position may have
+  // its entry and exit driven by different models, which can produce
+  // unintuitive realized P&L. Default 0 keeps the entry-exit symmetry.
+  int    acknowledge_hot_swap_with_open_positions;
+  // v5.10.0e — runtime IC drift detection. Sampled post-fill on ML cores;
+  // sustained breach (avg IC over `confidence_ic_floor_window` seconds
+  // below `confidence_ic_floor`) emits CRITICAL log. When `auto_kill_on_drift=1`
+  // also trips the per-core kill_switch — engine stops opening new
+  // positions on that core; existing positions exit naturally.
+  //
+  // confidence_ic_floor       — min acceptable rolling IC. Default 0.02
+  //                              (Spearman correlation; > random chance).
+  // confidence_ic_floor_window — sustained-breach window in SECONDS.
+  //                              Default 86400 (24 hours).
+  // auto_kill_on_drift        — 0 (default) = log only; 1 = also trip
+  //                              per-core kill_switch on first breach.
+  double   confidence_ic_floor;
+  uint32_t confidence_ic_floor_window;
+  int      auto_kill_on_drift;
   // v5.2.1 (live reconciliation Phase 1) — exchange-truth sync at boot
   // (and optionally on heartbeat). LIVE-mode-only — paper mode skips
   // reconcile entirely.
@@ -624,6 +650,19 @@ template <unsigned F> struct ControllerConfig {
   // supersedes legacy single-model). Config syntax:
   // core_0_model_dir=models/aggressive/
   char core_model_dir[16][256];
+  // v5.10.0a.G.6 — per-core multi-horizon ensemble cfg (string-typed, can't
+  // fit X-macro pattern). Default empty = inherit from global cfg.horizon_list /
+  // cfg.ensemble_blend_mode. Auto-detect (G.5) takes priority over both;
+  // these are overrides for operators who want explicit per-core control
+  // (e.g., core 0 deploys 5-horizon ensemble while core 1 stays single-model).
+  //
+  //   core_0_horizon_list=100,500,1000        # CSV; per-core horizon set
+  //   core_0_ensemble_blend_mode=weighted     # selection | weighted (default)
+  //   core_0_disabled_horizons=100            # CSV; kill-switch per horizon
+  //                                           # (skips predict; bandit weight frozen)
+  char core_horizon_list[16][128];
+  char core_ensemble_blend_mode[16][16];
+  char core_disabled_horizons[16][128];
   // Per-core full-tunable overrides (v4.0). One slot per execution core
   // (16 max). Each PerCoreOverrides field shadows a same-named field on
   // ControllerConfig — non-zero overrides global; zero inherits.
@@ -662,6 +701,75 @@ template <unsigned F> struct ControllerConfig {
   int      xgb_min_child_weight;   // min sum-of-weights per leaf (1-50); default 5
   int      xgb_seed;               // RNG seed for reproducible runs; default 42
   char     xgb_tree_method[16];    // hist | exact | approx | auto; default "hist"
+
+  // v5.10.0 Item D — hardware-aware cfg. Operator-tunable thread counts
+  // and RAM budgets; defaults match v5.9.5j-final behavior bytewise so
+  // upgrades don't silently flip defaults. Operator opts in to multi-thread
+  // training / parallel CSV / larger budgets.
+  //
+  // Thread counts (default=1 matches current hardcoded behavior at
+  // BacktestEngine.hpp:1352, 1638). Setting >1 breaks bytewise reproducibility;
+  // boot-time WARN fires when operator sets >1 to make the tradeoff explicit.
+  int      xgb_train_nthread;      // XGBoost Train Model worker nthread; default 4 (matches pre-v5.10 BacktestPanels.hpp hardcoded)
+  int      xgb_eval_nthread;       // XGBoost WF/HeldOut eval nthread; default 1 (deterministic per-fold)
+  int      csv_load_workers;       // parallel CSV worker threads (Item C); default 1 (serial)
+
+  // RAM budgets (advisory soft caps — emit WARN at boot if dataset projects
+  // to exceed; no hard refuse since the streaming label compute closes
+  // OOM regardless). Operator hint when sizing the box.
+  int      feature_collect_max_gb; // soft cap on feature_matrix RAM; default 12
+  int      wf_split_max_gb;        // soft cap on WF split RAM; default 8
+  int      held_out_max_gb;        // soft cap on held-out RAM; default 4
+
+  // v5.10.0a Item #4 — multi-horizon training. Comma-separated list of
+  // forward-tick horizons; Train Model worker iterates and trains one
+  // model per horizon. Empty (default) = single-horizon (uses
+  // label_forward_ticks from per-run state). Cfg field rather than
+  // RunConfig because operator typically standardizes horizons across
+  // training experiments.
+  // Example: horizon_list=100,500,1000,5000 → 4 trainings, saved as
+  // <model_dir>/horizon_100/<role>.json etc.
+  // LITE in v5.10.0a: trains + saves N models; operator manually picks
+  // one to deploy. Ensemble inference (load all N at runtime, blend
+  // predictions) deferred to v5.10.0a.x — needs stamp body extension +
+  // multi-model load in CoreModelZoo, both genuinely complex.
+  static constexpr int HORIZON_LIST_MAX = 8;
+  int      horizon_list[HORIZON_LIST_MAX];  // 0 = unused slot
+  int      horizon_count;                    // number of populated slots
+
+  // v5.10.0a.G.6 — global ensemble cfg (per-core overrides via
+  // core_N_ensemble_blend_mode / core_N_horizon_list / core_N_disabled_horizons).
+  // Used when ensemble auto-detect (G.5) finds horizon siblings on disk
+  // OR operator explicitly populates horizon_list.
+  //
+  //   ensemble_blend_mode    "weighted" (default) | "selection"
+  //                          weighted = G.7 Bandit-Exp3 per-regime weighted blend
+  //                          selection = G.4 argmax-confidence (single horizon per tick)
+  //   ensemble_bandit_eta    Bandit learning rate (0.01 .. 1.0); higher = faster
+  //                          adaptation but more variance. Default 0.1 conservative.
+  //   ensemble_min_warmup_predictions  predictions per regime before weights trusted
+  //                                    (uniform during warmup). Default 100.
+  //   ensemble_min_agreement_pct       safety: ≥X fraction of non-disabled horizons
+  //                                    must predict same direction OR skip entry.
+  //                                    Default 0.6 (60% agreement). Set 0 to disable.
+  char     ensemble_blend_mode[16];
+  double   ensemble_bandit_eta;
+  int      ensemble_min_warmup_predictions;
+  double   ensemble_min_agreement_pct;
+  // v5.10.0a.G.8 — trade-close reward multiplier. Real money signal
+  // (TP/SL hit) gets weighted ×N over the slow-path lookback rewards
+  // (which are hypothetical "would have been correct" signals).
+  // Default 4.0 — operator-tunable. Higher = trust trade outcomes more
+  // (faster convergence to deployable weights); lower = faster cold-
+  // start learning from dense lookback signals.
+  double   ensemble_trade_reward_mult;
+  // v5.10.0a.G.9 — bandit state persistence cadence. Every N total
+  // bandit updates (across all regimes), flush bandit_state.json to
+  // <model_dir>/bandit_state.json. Default 5000 — with ~1 update per
+  // poll_interval ticks, that's roughly 1 save per 500K ticks (≈ 1
+  // save/hour at typical tick rates). Set to 0 to disable periodic
+  // saves (state still saved on engine clean shutdown).
+  int      ensemble_bandit_save_interval;
 };
 
 //======================================================================================================
@@ -915,6 +1023,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.health_log_keep_count       = 0;                            // 0 = no retained rotated files
   cfg.acknowledge_cross_binary_version_drift = 0;                 // v5.9.4 — default WARN on minor drift
   cfg.acknowledge_inference_cfg_drift = 0;                        // v5.9.5i — default REFUSE/WARN on inference cfg drift
+  cfg.acknowledge_hot_swap_with_open_positions = 0;               // v5.10.0c — default DEFER swap until position close
+  cfg.confidence_ic_floor                       = 0.02;           // v5.10.0e — Spearman correlation > random
+  cfg.confidence_ic_floor_window                = 86400u;          // v5.10.0e — 24h sustained-breach window
+  cfg.auto_kill_on_drift                        = 0;              // v5.10.0e — log only by default; opt-in to auto-kill
   // v5.9.5h — XGBoost training hyperparams (cfg-tunable subset).
   // Defaults match pre-v5.9.5h hardcoded values bytewise; non-tuning
   // operators get identical training output post-upgrade.
@@ -924,6 +1036,45 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.xgb_seed                = 42;
   strncpy(cfg.xgb_tree_method, "hist", sizeof(cfg.xgb_tree_method) - 1);
   cfg.xgb_tree_method[sizeof(cfg.xgb_tree_method) - 1] = '\0';
+  // v5.10.0 Item D — hardware-aware cfg. Defaults match pre-v5.10
+  // hardcoded behavior. Two distinct defaults reflect two distinct
+  // pre-v5.10 hardcoded sites:
+  //   - Train Model worker (BacktestPanels.hpp:2056) was nthread=4 for
+  //     faster GUI iter (exploratory; reproducibility not required)
+  //   - WF + HeldOut (BacktestEngine.hpp:1352, 1638) were nthread=1
+  //     for deterministic per-fold output (validation parity)
+  // Setting these NOW separable. Operators wanting all-deterministic
+  // workflow set both to 1; operators with bigger boxes can bump both.
+  cfg.xgb_train_nthread       = 4;   // matches BacktestPanels.hpp:2056 pre-v5.10
+  cfg.xgb_eval_nthread        = 1;   // matches BacktestEngine.hpp:1352, 1638
+  cfg.csv_load_workers        = 1;   // serial CSV load (matches pre-v5.10 behavior)
+  cfg.feature_collect_max_gb  = 12;  // advisory cap; WARN-only
+  cfg.wf_split_max_gb         = 8;
+  cfg.held_out_max_gb         = 4;
+  // v5.10.0a — multi-horizon training. Default empty = single-horizon
+  // (Train Model uses TrainingPanel's label_forward_ticks). Operator opts
+  // in by setting cfg.horizon_list=100,500,1000.
+  for (int i = 0; i < ControllerConfig<F>::HORIZON_LIST_MAX; ++i)
+      cfg.horizon_list[i] = 0;
+  cfg.horizon_count = 0;
+  // v5.10.0a.G.6 — ensemble cfg defaults. blend_mode "weighted" engages
+  // G.7 Bandit-Exp3 path when ensemble active; "selection" stays on G.4
+  // argmax-confidence. Other defaults are conservative (low eta, modest
+  // warmup, 60% agreement gate).
+  strncpy(cfg.ensemble_blend_mode, "weighted",
+          sizeof(cfg.ensemble_blend_mode) - 1);
+  cfg.ensemble_blend_mode[sizeof(cfg.ensemble_blend_mode) - 1] = '\0';
+  cfg.ensemble_bandit_eta = 0.1;
+  cfg.ensemble_min_warmup_predictions = 100;
+  cfg.ensemble_min_agreement_pct = 0.6;
+  cfg.ensemble_trade_reward_mult = 4.0;
+  cfg.ensemble_bandit_save_interval = 5000;  // v5.10.0a.G.9
+  // v5.10.0a.G.6 — per-core ensemble cfg defaults (empty = inherit global)
+  for (int i = 0; i < 16; ++i) {
+      cfg.core_horizon_list[i][0] = '\0';
+      cfg.core_ensemble_blend_mode[i][0] = '\0';
+      cfg.core_disabled_horizons[i][0] = '\0';
+  }
   cfg.health_log_level            = 0;                            // 0=info, 1=debug, 2=trace
   cfg.reconcile_interval_sec      = 0;                            // 0 = boot-only
   cfg.reconcile_dry_run           = 1;                            // safer default; flip to 0 deliberately
@@ -1304,6 +1455,92 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.xgb_tree_method[n] = '\0';
         continue;
     }
+    // v5.10.0 Item D — hardware-aware cfg parsers. CFG_PARSE_INT clamps
+    // negatives to defaults; we want >=0 (0 = auto-detect via nproc, NOT
+    // currently implemented; reserved for future). Setting nthread or
+    // workers > 1 emits a one-shot WARN at boot (handled in engine boot
+    // path, not parser).
+    CFG_PARSE_INT(xgb_train_nthread)
+    CFG_PARSE_INT(xgb_eval_nthread)
+    CFG_PARSE_INT(csv_load_workers)
+    CFG_PARSE_INT(feature_collect_max_gb)
+    CFG_PARSE_INT(wf_split_max_gb)
+    CFG_PARSE_INT(held_out_max_gb)
+    // v5.10.0a.G.6 — global ensemble cfg parsers (string + numeric).
+    if (strcmp(key, "ensemble_blend_mode") == 0) {
+        // Validate against known modes; reject unknown with WARN.
+        if (strcmp(val, "weighted") == 0 || strcmp(val, "selection") == 0) {
+            strncpy(cfg.ensemble_blend_mode, val,
+                    sizeof(cfg.ensemble_blend_mode) - 1);
+            cfg.ensemble_blend_mode[sizeof(cfg.ensemble_blend_mode) - 1] = '\0';
+        } else {
+            fprintf(stderr, "[cfg] ensemble_blend_mode='%s' unknown; "
+                    "valid: weighted|selection. Keeping default '%s'.\n",
+                    val, cfg.ensemble_blend_mode);
+        }
+        continue;
+    }
+    if (strcmp(key, "ensemble_bandit_eta") == 0) {
+        double v = atof(val);
+        // Clamp to safe range; out-of-range silently produces uninformative
+        // bandits (eta=0 = no learning; eta>1 = unstable).
+        if (v < 0.01) v = 0.01;
+        if (v > 1.0)  v = 1.0;
+        cfg.ensemble_bandit_eta = v;
+        continue;
+    }
+    CFG_PARSE_INT(ensemble_min_warmup_predictions)
+    if (strcmp(key, "ensemble_min_agreement_pct") == 0) {
+        double v = atof(val);
+        if (v < 0.0) v = 0.0;
+        if (v > 1.0) v = 1.0;
+        cfg.ensemble_min_agreement_pct = v;
+        continue;
+    }
+    if (strcmp(key, "ensemble_trade_reward_mult") == 0) {
+        double v = atof(val);
+        // Clamp to sane range; 0 disables trade-close rewards entirely
+        // (only slow-path lookback feeds bandit). Upper bound prevents
+        // a single trade dominating thousands of slow-path signals.
+        if (v < 0.0) v = 0.0;
+        if (v > 100.0) v = 100.0;
+        cfg.ensemble_trade_reward_mult = v;
+        continue;
+    }
+    if (strcmp(key, "ensemble_bandit_save_interval") == 0) {
+        int v = atoi(val);
+        // 0 = disable periodic saves (still saves on shutdown); negative
+        // → clamp to 0. Upper bound prevents accidental every-tick saves.
+        if (v < 0) v = 0;
+        if (v > 10000000) v = 10000000;
+        cfg.ensemble_bandit_save_interval = v;
+        continue;
+    }
+    // v5.10.0a — horizon_list CSV parser. Comma-separated ints, max
+    // HORIZON_LIST_MAX entries. Caller can't use CFG_PARSE_INT (single
+    // int) or CFG_PARSE_FPN. Custom branch.
+    if (strcmp(key, "horizon_list") == 0) {
+        int n = 0;
+        const char* p = val;
+        while (*p && n < ControllerConfig<F>::HORIZON_LIST_MAX) {
+            // skip whitespace + commas
+            while (*p == ' ' || *p == '\t' || *p == ',') p++;
+            if (!*p) break;
+            char* end = NULL;
+            long v = strtol(p, &end, 10);
+            if (end == p) break;  // parse failure
+            if (v > 0 && v <= 1000000)  // sanity: 1 to 1M ticks
+                cfg.horizon_list[n++] = (int)v;
+            p = end;
+        }
+        cfg.horizon_count = n;
+        if (n == 0) {
+            fprintf(stderr, "[cfg] horizon_list='%s' parsed 0 valid horizons; "
+                    "expected CSV like '100,500,1000'. Multi-horizon disabled.\n",
+                    val);
+        }
+        continue;
+    }
     if (strcmp(key, "held_out_gate_strict") == 0) {
         cfg.held_out_gate_strict = atoi(val);
         continue;
@@ -1341,6 +1578,16 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     CFG_PARSE_INT(acknowledge_cross_binary_version_drift)
     CFG_PARSE_INT(acknowledge_inference_cfg_drift)  // v5.9.5i
+    CFG_PARSE_INT(acknowledge_hot_swap_with_open_positions)  // v5.10.0c
+    if (strcmp(key, "confidence_ic_floor") == 0) {
+        cfg.confidence_ic_floor = atof(val);
+        continue;
+    }
+    if (strcmp(key, "confidence_ic_floor_window") == 0) {
+        cfg.confidence_ic_floor_window = (uint32_t)strtoul(val, nullptr, 10);
+        continue;
+    }
+    CFG_PARSE_INT(auto_kill_on_drift)  // v5.10.0e
     if (strcmp(key, "reconcile_interval_sec") == 0) {
         cfg.reconcile_interval_sec = atoi(val);
         continue;
@@ -1480,6 +1727,36 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 #define _PARSE_OV_INT(name) if (strcmp(suffix, #name) == 0) { ov.name = (uint32_t)atoi(val); continue; }
         PER_CORE_OVERRIDE_INT_FIELDS(_PARSE_OV_INT)
 #undef _PARSE_OV_INT
+        // v5.10.0a.G.6 — string-typed per-core ensemble fields. X-macro
+        // doesn't support string types; explicit branches here. All three
+        // default empty (inherit global).
+        if (strcmp(suffix, "horizon_list") == 0) {
+            strncpy(cfg.core_horizon_list[core_idx], val,
+                    sizeof(cfg.core_horizon_list[core_idx]) - 1);
+            cfg.core_horizon_list[core_idx][
+                sizeof(cfg.core_horizon_list[core_idx]) - 1] = '\0';
+            continue;
+        }
+        if (strcmp(suffix, "ensemble_blend_mode") == 0) {
+            if (strcmp(val, "weighted") == 0 || strcmp(val, "selection") == 0) {
+                strncpy(cfg.core_ensemble_blend_mode[core_idx], val,
+                        sizeof(cfg.core_ensemble_blend_mode[core_idx]) - 1);
+                cfg.core_ensemble_blend_mode[core_idx][
+                    sizeof(cfg.core_ensemble_blend_mode[core_idx]) - 1] = '\0';
+            } else {
+                fprintf(stderr, "[cfg] core_%d_ensemble_blend_mode='%s' unknown; "
+                        "valid: weighted|selection. Falling back to global.\n",
+                        core_idx, val);
+            }
+            continue;
+        }
+        if (strcmp(suffix, "disabled_horizons") == 0) {
+            strncpy(cfg.core_disabled_horizons[core_idx], val,
+                    sizeof(cfg.core_disabled_horizons[core_idx]) - 1);
+            cfg.core_disabled_horizons[core_idx][
+                sizeof(cfg.core_disabled_horizons[core_idx]) - 1] = '\0';
+            continue;
+        }
       }
     }
     // Per-strategy TP/SL overrides (percentage, parsed with /100)

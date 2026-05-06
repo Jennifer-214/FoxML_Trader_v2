@@ -29,14 +29,39 @@ struct HistoricalTick {
     int is_buyer_maker;
 };
 
-#define LABEL_WIN_LOSS     0   // 1 = next trade was profitable after fees, 0 = loss
-#define LABEL_BARRIER      1   // 1 = price hits +tp% before -sl% (first-passage)
-#define LABEL_FORWARD_PNL  2   // continuous: forward return over N ticks (regression target)
-#define LABEL_REGIME       3   // regime that was active (multi-class)
-#define LABEL_VOL_BARRIER  4   // vol-scaled barrier: k * rolling_vol (from FoxML barrier.py)
-#define LABEL_WILL_PEAK    5   // 1 = price peaks within N ticks (barrier gate training)
-#define LABEL_WILL_VALLEY  6   // 1 = price valleys within N ticks (barrier gate training)
-#define LABEL_PEAK_VALLEY_STABLE 7  // 3-class softmax: 0=stable, 1=peak, 2=valley (BarrierGate primary)
+// v5.10.0d — FOREACH_TARGET X-macro registry (audit Idea #2). Mirrors
+// FOREACH_FEATURE / FOREACH_STRATEGY pattern from v5.8.x. Adding,
+// removing, or reordering labels flips LABEL_REGISTRY_HASH() →
+// load-time stamp refusal, preventing silent label-set drift between
+// trainer and serve.
+//
+// Row schema:
+//   X(id_suffix, "key_name", "Display", "Description", Compute_Fn, num_classes)
+//   - id_suffix: appended to LABEL_<id_suffix> auto-generated constant
+//   - key_name: cfg parser key + stamp body identifier (load-bearing)
+//   - num_classes: 0 = binary, 1 = regression, ≥2 = multiclass
+//
+// APPEND-ONLY discipline. Reordering or removing a row flips the hash
+// → all stamps signed under the prior order refuse to load. Append at
+// the end.
+#define FOREACH_TARGET(X) \
+    X(WIN_LOSS,           "win_loss",           "Win/Loss",           "Binary: 1=profitable entry, 0=loss",                 Label_WinLoss,           0) \
+    X(BARRIER,            "barrier",            "Barrier",            "First-passage: +tp% before -sl% (0.5=neutral)",      Label_Barrier,           0) \
+    X(FORWARD_PNL,        "forward_pnl",        "Forward P&L",        "Continuous: % return over N ticks",                  Label_ForwardPnl,        1) \
+    X(REGIME,             "regime",             "Regime",             "Multi-class: regime at sample point",                Label_Regime,            4) \
+    X(VOL_BARRIER,        "vol_barrier",        "Vol Barrier",        "Vol-scaled: k*sigma barrier (FoxML)",                Label_VolBarrier,        0) \
+    X(WILL_PEAK,          "will_peak",          "Will Peak",          "Binary: 1=price peaks within N ticks",               Label_WillPeak,          0) \
+    X(WILL_VALLEY,        "will_valley",        "Will Valley",        "Binary: 1=price valleys within N ticks",             Label_WillValley,        0) \
+    X(PEAK_VALLEY_STABLE, "peak_valley_stable", "Peak/Valley/Stable", "3-class: 0=stable, 1=peak, 2=valley (softmax)",      Label_PeakValleyStable,  3)
+
+// Auto-generated LABEL_* constants. Order matches FOREACH_TARGET.
+// Trailing LABEL_COUNT_AUTO acts as the count (one past the last value).
+enum {
+#define X(id_suffix, name, display, desc, fn, nc) LABEL_##id_suffix,
+    FOREACH_TARGET(X)
+#undef X
+    LABEL_COUNT_AUTO
+};
 
 //======================================================================================================
 // [WIN/LOSS]
@@ -273,26 +298,54 @@ struct LabelDef {
     int num_classes;
 };
 
+// v5.10.0d — auto-generated from FOREACH_TARGET(X). Adding/removing/
+// reordering rows must happen by editing the X-macro above; this table
+// regenerates automatically. Eliminates the silent-divergence hazard
+// between LABEL_* constants, label_table rows, and dispatcher sites.
+#define X(id_suffix, name, display, desc, fn, nc) \
+    { LABEL_##id_suffix, name, display, desc, fn, nc },
 static const LabelDef label_table[] = {
-    { LABEL_WIN_LOSS,    "win_loss",     "Win/Loss",
-      "Binary: 1=profitable entry, 0=loss",                 Label_WinLoss,    0 },
-    { LABEL_BARRIER,     "barrier",      "Barrier",
-      "First-passage: +tp% before -sl% (0.5=neutral)",      Label_Barrier,    0 },
-    { LABEL_FORWARD_PNL, "forward_pnl",  "Forward P&L",
-      "Continuous: % return over N ticks",                  Label_ForwardPnl, 1 },
-    { LABEL_REGIME,      "regime",       "Regime",
-      "Multi-class: regime at sample point",                Label_Regime,     4 },
-    { LABEL_VOL_BARRIER, "vol_barrier",  "Vol Barrier",
-      "Vol-scaled: k*sigma barrier (FoxML)",                Label_VolBarrier, 0 },
-    { LABEL_WILL_PEAK,   "will_peak",    "Will Peak",
-      "Binary: 1=price peaks within N ticks",               Label_WillPeak,   0 },
-    { LABEL_WILL_VALLEY, "will_valley",  "Will Valley",
-      "Binary: 1=price valleys within N ticks",             Label_WillValley, 0 },
-    { LABEL_PEAK_VALLEY_STABLE, "peak_valley_stable", "Peak/Valley/Stable",
-      "3-class: 0=stable, 1=peak, 2=valley (softmax)",      Label_PeakValleyStable, 3 },
+    FOREACH_TARGET(X)
 };
+#undef X
 
-static const int LABEL_COUNT = sizeof(label_table) / sizeof(label_table[0]);
+// Preserve the existing LABEL_COUNT name for call-site compatibility.
+// LABEL_COUNT_AUTO comes from the enum; equals LABEL_PEAK_VALLEY_STABLE+1.
+static const int LABEL_COUNT = LABEL_COUNT_AUTO;
+
+// v5.10.0d — FNV-1a registry hash over the X-macro's stable identifiers
+// (key_name + ":nc" + num_classes). Adding, removing, or reordering rows
+// flips this hash → stamp body's label_registry_hash mismatch on load
+// → engine refuses to deploy a model trained against a different label
+// set (mirrors v5.8.6 feature_registry_hash).
+//
+// Why num_classes contributes: if a label flips from binary (nc=0) to
+// multiclass (nc=K), the prediction shape changes; a model trained as
+// binary can't be deployed as multiclass even if the name matches.
+namespace tt {
+constexpr uint64_t LABEL_FNV_OFFSET_64 = 0xcbf29ce484222325ULL;
+constexpr uint64_t LABEL_FNV_PRIME_64  = 0x100000001b3ULL;
+}
+
+inline uint64_t label_registry_hash_compute() {
+    uint64_t h = tt::LABEL_FNV_OFFSET_64;
+#define X(id_suffix, name, display, desc, fn, nc) \
+    do { \
+        for (const char* p = name; *p; ++p) \
+            h = (h ^ (uint64_t)(uint8_t)*p) * tt::LABEL_FNV_PRIME_64; \
+        const char* nstr = ":nc" #nc; \
+        for (const char* p = nstr; *p; ++p) \
+            h = (h ^ (uint64_t)(uint8_t)*p) * tt::LABEL_FNV_PRIME_64; \
+    } while (0);
+    FOREACH_TARGET(X)
+#undef X
+    return h;
+}
+
+inline uint64_t LABEL_REGISTRY_HASH() {
+    static const uint64_t h = label_registry_hash_compute();
+    return h;
+}
 
 //======================================================================================================
 // [LABEL KIND HELPERS]

@@ -1121,6 +1121,19 @@ struct TUISnapshot {
         // Only populated when engine_arch=per_core_slow.
         double   sp_breakdown_p50_ns[5];
         double   sp_breakdown_p99_ns[5];
+        // v5.10.0a.G.10 — ensemble (multi-horizon) visualization.
+        // Populated by TUI snapshot when ensemble_handle is set; default
+        // ensemble_active=0 keeps the GUI heatmap hidden for single-zoo
+        // deployments. NUM_REGIMES rows × ENSEMBLE_HORIZON_MAX cols.
+        uint8_t  ensemble_active;
+        uint8_t  ensemble_n_horizons;                  // 0 = inactive
+        int      ensemble_horizon_ticks[8];            // ENSEMBLE_HORIZON_MAX
+        int      ensemble_last_predicted_regime;
+        int      ensemble_last_predicted_horizon_idx;
+        double   ensemble_weights[5][8];               // [regime][horizon]; 5 = NUM_REGIMES
+        int      ensemble_n_updates_per_regime[5];     // total_steps per bandit
+        char     ensemble_blend_mode[16];              // "weighted" or "selection"
+        uint32_t ensemble_disabled_horizon_mask;       // bit i set = arm i disabled
     };
     PerCoreSnap per_core[16];      // up to MAX_EXECUTION_CORES
 };
@@ -1170,6 +1183,19 @@ struct TUISharedState {
     // (sp_state=3, sp_yield_count++). Single-writer (GUI) per bit; per-
     // core thread c is single-reader of bit c. Doesn't affect hot-path.
     volatile uint16_t paused_engines_mask;
+    // v5.10.0c — Hot model swap. GUI's "Apply (live)" button next to the
+    // Model Dir Combo writes the new path + sets the request flag for
+    // that core. Engine slow-path consumes: verifies the new model via
+    // CoreModelZoo_TryLoadRole, swaps the active handle on success, frees
+    // the old handle after one slow-path grace period. Single-writer
+    // (GUI) / single-reader (engine slow-path); per-core array.
+    // Sentinel: pending_model_path[c][0]=='\0' AND swap_model_path_requested[c]==0
+    // means "no pending swap". Both fields write-then-flag pattern: GUI
+    // writes pending_model_path FIRST, then atomic-stores
+    // swap_model_path_requested with __ATOMIC_RELEASE; engine reads with
+    // __ATOMIC_ACQUIRE.
+    volatile uint8_t swap_model_path_requested[16];
+    char pending_model_path[16][256];
     EngineTUI tui;
     const char *config_path;
     void *candle_acc;  // CandleAccumulator* (GUI build only, NULL for ANSI)

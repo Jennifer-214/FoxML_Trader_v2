@@ -333,17 +333,20 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
         sig->cumdelta = FPN_Zero<F>();
     }
 
-    // FEAT_HOUR_SIN / FEAT_HOUR_COS — cyclical hour-of-day encoding
-    // timestamp_us=0 (e.g. tests / no-clock paths) → both zero
+    // FEAT_HOUR_SIN / FEAT_HOUR_COS — cyclical hour-of-day encoding.
+    // timestamp_us=0 (e.g. tests / no-clock paths) → both zero.
+    // v5.10.0b.2: sin/cos via FPN_Sin/FPN_Cos (bytewise-deterministic
+    // Taylor with range reduction); double API stays for boundary-stable
+    // scope (RegimeSignals.hour_sin/cos are double).
     if (timestamp_us > 0) {
         time_t t = (time_t)(timestamp_us / 1000000ULL);
         struct tm utc;
         gmtime_r(&t, &utc);
-        // hour with fractional component for smoother cyclical encoding
         double hour_f = (double)utc.tm_hour + (double)utc.tm_min / 60.0;
         const double TAU = 2.0 * 3.14159265358979323846;
-        sig->hour_sin = sin(TAU * hour_f / 24.0);
-        sig->hour_cos = cos(TAU * hour_f / 24.0);
+        FPN<F> arg = FPN_FromDouble<F>(TAU * hour_f / 24.0);
+        sig->hour_sin = FPN_ToDouble(FPN_Sin(arg));
+        sig->hour_cos = FPN_ToDouble(FPN_Cos(arg));
     } else {
         sig->hour_sin = 0.0;
         sig->hour_cos = 0.0;

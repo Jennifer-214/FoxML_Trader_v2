@@ -43,7 +43,7 @@ built from scratch, self-taught, ~60k lines across engine + backtest suite + ML 
 | **Backtest suite operator** | [`DOCS/CLAUDE_FOXML_SUITE.md`](DOCS/CLAUDE_FOXML_SUITE.md) + [`DOCS/ML_TRAINING.md`](DOCS/ML_TRAINING.md) |
 | **Sprint planning** | [`plans/`](plans/) (gitignored — synced privately to workspace repo) — master plan + per-ship sub-plans |
 | **Looking for what shipped when** | [`DOCS/CHANGELOG.md`](DOCS/CHANGELOG.md) (elevator pitches) → [`DOCS/changelogs/INDEX.md`](DOCS/changelogs/INDEX.md) (per-sprint detailed write-ups) |
-| **Tracking future work** | [`DOCS/v5.10-design-notes.md`](DOCS/v5.10-design-notes.md) — captured ideas not yet planned |
+| **Tracking future work** | shipped items: [`DOCS/CHANGELOG.md`](DOCS/CHANGELOG.md). roadmap + unshipped ideas live in operator-private working notes (gitignored). |
 | **Recurring bug avoidance** | [`DOCS/RECURRING_BUG_PATTERNS.md`](DOCS/RECURRING_BUG_PATTERNS.md) — bug classes that have happened more than once |
 | **Code-map / function lookup** | [`DOCS/CODE_MAP.md`](DOCS/CODE_MAP.md) — auto-generated `Pattern_FunctionName` index. Run `tools/gen_code_map.sh` to refresh. |
 | **Testing invariants** | [`tests/INVARIANTS_MAP.md`](tests/INVARIANTS_MAP.md) — which test group covers each documented invariant |

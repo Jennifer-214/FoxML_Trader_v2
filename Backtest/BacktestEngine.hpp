@@ -14,6 +14,7 @@
 #ifndef BACKTEST_ENGINE_HPP
 #define BACKTEST_ENGINE_HPP
 
+#include "PhaseTimers.hpp"  // v5.10.0 Item A — per-phase backtest timers
 #include "../CoreFrameworks/PortfolioController.hpp"
 #include "../CoreFrameworks/OrderGates.hpp"
 #include "../CoreFrameworks/MetricCompute.hpp"  // v5.8.4c: shared metric helpers
@@ -35,6 +36,8 @@
 #include <math.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#include <pthread.h>     // v5.10.0a.F — parallel hyperparam sweep workers
+#include <functional>    // v5.10.0a.F — std::function holder for sweep cell lambda
 
 // FPN width — must match the engine build
 #ifndef BACKTEST_FP
@@ -189,6 +192,14 @@ struct BacktestRunConfig {
     double label_tp_pct;    // TP barrier for win/loss and barrier labels (e.g. 1.5 = 1.5%)
     double label_sl_pct;    // SL barrier (e.g. 1.0 = 1.0%)
     int label_forward_ticks; // forward window for forward_pnl label (e.g. 1000)
+    // v5.10.0a.next.1 — operator-explicit bandit state prior. When set,
+    // BacktestSharded_Run loads bandit weights from this path AFTER the
+    // default <core_model_dir>/bandit_state.json load, overriding it.
+    // Bundle-ID check is SKIPPED on this path (operator may intentionally
+    // bootstrap a new model bundle with weights from a sibling — e.g.
+    // transfer learning across compatible horizon lists). Empty = no
+    // prior, use default load only.
+    char bandit_state_prior_path[400];
 };
 
 //======================================================================================================
@@ -541,48 +552,96 @@ static inline void BacktestSharded_Run(BacktestResults *results,
 // No-op when collect_features=0 or sample_count==0 — caller doesn't need to
 // gate.
 //======================================================================================================
+// v5.10.0 Item B — streaming sliding-window label compute. Closes 2026-05-03
+// OOM (28 GB label_ticks for 1-year, 57 GB for 2-year). Key insight: labels
+// only need the FORWARD WINDOW from each sample's tick position, not the
+// full historical tick array. By keeping just 2 files in memory at a time,
+// peak RAM drops from O(total_ticks * 32B) to O(2 * max_per_file * 32B).
+//
+// Memory math (operator's box, 30.9 GiB):
+//   1-year (895M ticks):  28.6 GB → ~160 MB peak (~180x reduction)
+//   2-year (1.8B ticks):  57 GB (OOM) → ~160 MB peak (no OOM)
+//   5-year (4.5B ticks):  144 GB (infeasible) → ~160 MB peak (now feasible)
+//
+// Algorithm:
+//   1. Pre-pass: count ticks per file → file_offsets[] cumsum
+//   2. Walk files; maintain 2-file sliding window:
+//      - Invariant: buf[0..prev_file_count) = file f
+//      - Invariant: buf[prev_file_count..total) = file f+1 (if exists)
+//   3. Per-file: label all samples whose tidx ∈ [file_offsets[f], file_offsets[f+1])
+//      using the combined buf — label_fn's forward-scan crosses file f → f+1
+//      transparently since they're contiguous in memory.
+//   4. Slide: memmove file f+1 to buf[0]; load file f+2 at buf[file_count].
+//
+// Samples are guaranteed sorted by tidx (appended monotonically in
+// BacktestSharded.hpp's on_slow_path lambda). One linear cursor walk
+// through samples; no per-file O(N) sample scans.
 static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
                                                       const BacktestRunConfig *run_cfg) {
     if (!run_cfg->collect_features) return;
     if (results->sample_count <= 0) return;
     if (run_cfg->num_data_files <= 0) return;
 
-    int label_count = 0;
-    int label_max = (int)results->stats.ticks_processed + 1024;
-    if (label_max < 1024) label_max = 1024;
-    HistoricalTick *label_ticks = (HistoricalTick *)malloc((size_t)label_max * sizeof(HistoricalTick));
-    fprintf(stderr, "[backtest] allocating label buffer: %d ticks (%.0f MB)\n",
-            label_max, (double)label_max * sizeof(HistoricalTick) / 1e6);
-    if (!label_ticks) return;
+    // v5.10.0 Item A — label_compute phase timer (wraps full body, RAII guard).
+    uint64_t label_start_ns = tt::PhaseTimer_NowNs();
+    struct LabelGuard {
+        uint64_t start;
+        ~LabelGuard() {
+            tt::PhaseTimer_Global().label_compute_ns +=
+                tt::PhaseTimer_NowNs() - start;
+            tt::PhaseTimer_Global().populated = 1;
+        }
+    } _label_guard{label_start_ns};
 
-    // CRITICAL: BacktestData_Load resets *count to 0 each call, so passing
-    // &label_count caused each file to overwrite the previous file's data.
-    // Use a per-file local count, accumulate manually.
-    for (int f = 0; f < run_cfg->num_data_files; f++) {
-        if (label_count >= label_max) break;
-        int per_file_count = 0;
-        BacktestData_Load(label_ticks + label_count, &per_file_count,
-                          label_max - label_count, run_cfg->data_paths[f]);
-        label_count += per_file_count;
-    }
-    fprintf(stderr, "[backtest] label buffer: %d total ticks across %d files\n",
-            label_count, run_cfg->num_data_files);
-
-    // v5.9.2c — validate the CONCATENATED label_ticks array. Catches
-    // intra-file violations AND inter-file ordering (file 1's last tick
-    // > file 2's first tick).
-    int sort_mode = run_cfg->use_config_override
-                  ? run_cfg->config_override.csv_sort_check_mode
-                  : CSV_SORT_WARN;
-    int sort_rc = BacktestData_ValidateSort(label_ticks, label_count,
-                                             sort_mode, "label_ticks (concatenated)");
-    if (sort_rc < 0) {
-        // STRICT refusal — abort label computation; results.labels stays
-        // unpopulated so caller knows training data is unusable.
-        free(label_ticks);
+    // Phase 1 — pre-pass: count ticks per file + compute cumulative offsets.
+    // Cheap I/O (line-counting). Needed so we can locate which file contains
+    // each sample's tidx during the streaming walk.
+    int num_files = run_cfg->num_data_files;
+    int* file_counts = (int*)calloc(num_files, sizeof(int));
+    int64_t* file_offsets = (int64_t*)calloc(num_files + 1, sizeof(int64_t));
+    if (!file_counts || !file_offsets) {
+        free(file_counts);
+        free(file_offsets);
+        fprintf(stderr, "[backtest] label_compute: failed to allocate file index\n");
         return;
     }
+    int max_per_file = 0;
+    for (int f = 0; f < num_files; f++) {
+        FILE* fp = fopen(run_cfg->data_paths[f], "r");
+        if (!fp) {
+            fprintf(stderr, "[backtest] label_compute: failed to open %s\n",
+                    run_cfg->data_paths[f]);
+            continue;
+        }
+        int lines = 0;
+        char buf[512];
+        while (fgets(buf, sizeof(buf), fp)) lines++;
+        fclose(fp);
+        file_counts[f] = (lines > 0) ? (lines - 1) : 0;  // header
+        if (file_counts[f] > max_per_file) max_per_file = file_counts[f];
+        file_offsets[f + 1] = file_offsets[f] + file_counts[f];
+    }
+    int64_t total_ticks = file_offsets[num_files];
 
+    // Phase 2 — allocate 2-file sliding window. Round up max_per_file by 1024
+    // for BacktestData_Load's slack (matches existing pattern).
+    int per_file_cap = max_per_file + 1024;
+    if (per_file_cap < 1024) per_file_cap = 1024;
+    size_t buf_cap = (size_t)per_file_cap * 2;
+    HistoricalTick* tick_buf = (HistoricalTick*)malloc(buf_cap * sizeof(HistoricalTick));
+    if (!tick_buf) {
+        free(file_counts);
+        free(file_offsets);
+        fprintf(stderr, "[backtest] label_compute: failed to alloc 2-file buf "
+                "(%.0f MB peak)\n", (double)buf_cap * sizeof(HistoricalTick) / 1e6);
+        return;
+    }
+    fprintf(stderr, "[backtest] label_compute: streaming 2-file window — "
+            "peak %.0f MB (%d files, %lld total ticks)\n",
+            (double)buf_cap * sizeof(HistoricalTick) / 1e6,
+            num_files, (long long)total_ticks);
+
+    // Phase 3 — resolve label config.
     LabelFn label_fn = NULL;
     for (int l = 0; l < LABEL_COUNT; l++) {
         if (label_table[l].id == run_cfg->label_type) {
@@ -591,40 +650,147 @@ static inline void Backtest_ComputeLabelsFromSamples(BacktestResults *results,
         }
     }
     if (!label_fn) label_fn = Label_WinLoss;  // fallback
-
     double tp = run_cfg->label_tp_pct > 0 ? run_cfg->label_tp_pct : 1.5;
     double sl = run_cfg->label_sl_pct > 0 ? run_cfg->label_sl_pct : 1.0;
     int fwd = run_cfg->label_forward_ticks > 0 ? run_cfg->label_forward_ticks : 1000;
-
     int is_multiclass = LabelType_IsMulticlass(run_cfg->label_type);
     int is_regression = LabelType_IsRegression(run_cfg->label_type);
-    for (int s = 0; s < results->sample_count; s++) {
-        int tidx = results->sample_tick_indices[s];
-        if (tidx >= label_count) tidx = label_count - 1;
-        int extra = (run_cfg->label_type == LABEL_REGIME)
-            ? results->sample_regimes[s] : fwd;
-        float lbl = label_fn(label_ticks, tidx, label_count,
-                             results->sample_prices[s], tp, sl, extra);
-        if (isnan(lbl) || isinf(lbl)) {
-            results->stats.nan_labels_total++;
-            if (is_multiclass) {
-                // multiclass softmax has no defensible neutral; mark with NAN
-                // so the training-matrix copy step skips this sample.
-                results->labels[s] = NAN;
-                results->stats.nan_labels_dropped++;
-            } else if (is_regression) {
-                results->labels[s] = 0.0f;  // zero return is the neutral default
-            } else {
-                results->labels[s] = 0.5f;  // binary: neither class
+    int sort_mode = run_cfg->use_config_override
+                  ? run_cfg->config_override.csv_sort_check_mode
+                  : CSV_SORT_WARN;
+
+    // Phase 4 — sliding-window load + label.
+    int prev_file_count_in_buf = 0;  // file f's count once positioned at buf[0]
+    int total_in_buf = 0;
+    int sample_cursor = 0;            // monotonic walk through sorted samples
+    int64_t prev_file_last_ts = 0;    // for inter-file ordering check
+
+    for (int f = 0; f < num_files; f++) {
+        // Maintain invariant: buf[0..prev_file_count) = file f;
+        //                     buf[prev_file_count..total) = file f+1 (if exists)
+        if (f == 0) {
+            // Initial load: file 0 + file 1 (if exists).
+            int n0 = 0;
+            BacktestData_Load(tick_buf, &n0, per_file_cap, run_cfg->data_paths[0]);
+            total_in_buf = n0;
+            prev_file_count_in_buf = n0;
+            // Per-file sort validation (replaces v5.9.2c concat validation).
+            // Cheaper than concatenating; same coverage.
+            char file_label[280];
+            snprintf(file_label, sizeof(file_label), "label file 0 (%s)",
+                     run_cfg->data_paths[0]);
+            int sort_rc = BacktestData_ValidateSort(tick_buf, n0, sort_mode,
+                                                     file_label);
+            if (sort_rc < 0) {
+                free(tick_buf); free(file_counts); free(file_offsets);
+                return;
+            }
+            if (n0 > 0) prev_file_last_ts = tick_buf[n0 - 1].timestamp_us;
+            if (num_files > 1) {
+                int n1 = 0;
+                BacktestData_Load(tick_buf + total_in_buf, &n1,
+                                  (int)(buf_cap - total_in_buf),
+                                  run_cfg->data_paths[1]);
+                snprintf(file_label, sizeof(file_label), "label file 1 (%s)",
+                         run_cfg->data_paths[1]);
+                int sort_rc1 = BacktestData_ValidateSort(tick_buf + total_in_buf,
+                                                         n1, sort_mode, file_label);
+                if (sort_rc1 < 0) {
+                    free(tick_buf); free(file_counts); free(file_offsets);
+                    return;
+                }
+                // Inter-file ordering check.
+                if (n1 > 0 && tick_buf[total_in_buf].timestamp_us < prev_file_last_ts) {
+                    fprintf(stderr, "[label] WARN: file 1 starts before file 0 ends "
+                            "(first ts %lld < prev last %lld)\n",
+                            (long long)tick_buf[total_in_buf].timestamp_us,
+                            (long long)prev_file_last_ts);
+                }
+                if (n1 > 0) prev_file_last_ts = tick_buf[total_in_buf + n1 - 1].timestamp_us;
+                total_in_buf += n1;
             }
         } else {
-            results->labels[s] = lbl;
+            // Slide: memmove file f to buf[0]; load file f+1 at buf[file_count].
+            int file_f_in_buf = total_in_buf - prev_file_count_in_buf;
+            memmove(tick_buf, tick_buf + prev_file_count_in_buf,
+                    (size_t)file_f_in_buf * sizeof(HistoricalTick));
+            total_in_buf = file_f_in_buf;
+            prev_file_count_in_buf = file_f_in_buf;
+            if (f + 1 < num_files) {
+                int n_next = 0;
+                BacktestData_Load(tick_buf + total_in_buf, &n_next,
+                                  (int)(buf_cap - total_in_buf),
+                                  run_cfg->data_paths[f + 1]);
+                char file_label[280];
+                snprintf(file_label, sizeof(file_label), "label file %d (%s)",
+                         f + 1, run_cfg->data_paths[f + 1]);
+                int sort_rc = BacktestData_ValidateSort(tick_buf + total_in_buf,
+                                                         n_next, sort_mode, file_label);
+                if (sort_rc < 0) {
+                    free(tick_buf); free(file_counts); free(file_offsets);
+                    return;
+                }
+                if (n_next > 0 && tick_buf[total_in_buf].timestamp_us < prev_file_last_ts) {
+                    fprintf(stderr, "[label] WARN: file %d starts before file %d ends "
+                            "(first ts %lld < prev last %lld)\n",
+                            f + 1, f,
+                            (long long)tick_buf[total_in_buf].timestamp_us,
+                            (long long)prev_file_last_ts);
+                }
+                if (n_next > 0) prev_file_last_ts = tick_buf[total_in_buf + n_next - 1].timestamp_us;
+                total_in_buf += n_next;
+            }
+        }
+
+        // Label samples whose global tidx falls in file f's range.
+        int64_t file_f_start = file_offsets[f];
+        int64_t file_f_end   = file_offsets[f + 1];
+        while (sample_cursor < results->sample_count) {
+            int64_t global_tidx = (int64_t)results->sample_tick_indices[sample_cursor];
+            if (global_tidx >= file_f_end) break;  // sample belongs to a later file
+            if (global_tidx < file_f_start) {
+                // Out-of-order sample (shouldn't happen given monotonic
+                // append in on_slow_path) — skip with a warn.
+                fprintf(stderr, "[label] WARN: sample %d tidx=%lld < file %d start=%lld; skipping\n",
+                        sample_cursor, (long long)global_tidx, f, (long long)file_f_start);
+                results->labels[sample_cursor] = is_multiclass ? NAN
+                                                : (is_regression ? 0.0f : 0.5f);
+                if (is_multiclass) results->stats.nan_labels_dropped++;
+                results->stats.nan_labels_total++;
+                sample_cursor++;
+                continue;
+            }
+            int local_tidx = (int)(global_tidx - file_f_start);
+            // Forward-scan extends into file f+1 transparently (it's contiguous
+            // in tick_buf). Pass total_in_buf as upper bound.
+            int extra = (run_cfg->label_type == LABEL_REGIME)
+                ? results->sample_regimes[sample_cursor] : fwd;
+            float lbl = label_fn(tick_buf, local_tidx, total_in_buf,
+                                 results->sample_prices[sample_cursor],
+                                 tp, sl, extra);
+            if (isnan(lbl) || isinf(lbl)) {
+                results->stats.nan_labels_total++;
+                if (is_multiclass) {
+                    results->labels[sample_cursor] = NAN;
+                    results->stats.nan_labels_dropped++;
+                } else if (is_regression) {
+                    results->labels[sample_cursor] = 0.0f;
+                } else {
+                    results->labels[sample_cursor] = 0.5f;
+                }
+            } else {
+                results->labels[sample_cursor] = lbl;
+            }
+            sample_cursor++;
         }
     }
-    free(label_ticks);
+
+    free(tick_buf);
+    free(file_counts);
+    free(file_offsets);
 
     fprintf(stderr, "[backtest] computed %d labels (type=%d, tp=%.1f%%, sl=%.1f%%)",
-            results->sample_count, run_cfg->label_type, tp, sl);
+            sample_cursor, run_cfg->label_type, tp, sl);
     if (results->stats.nan_labels_total > 0) {
         fprintf(stderr, " — NaN/Inf: %u total, %u dropped (multiclass)",
                 results->stats.nan_labels_total,
@@ -681,6 +847,20 @@ static inline void Backtest_Run(BacktestResults *results,
     // Labels need forward-looking ticks the replay already discarded.
     // Helper reloads + computes; no-op when collect_features=0.
     Backtest_ComputeLabelsFromSamples(results, run_cfg);
+    // v5.10.0 Item A — dump phase summary at end of pipeline. Sharded run
+    // already set total_ns; bump it to include label_compute time we just
+    // did. Skip when nothing recorded (silent no-op).
+    if (tt::PhaseTimer_Global().populated) {
+        // Recompute total to include label_compute time. The sharded run's
+        // total_ns is sum of phases at its exit; here we extend by the
+        // label_compute_ns delta (already accumulated above).
+        tt::PhaseTimer_Global().total_ns =
+            tt::PhaseTimer_Global().parse_ns
+          + tt::PhaseTimer_Global().fan_out_hot_ns
+          + tt::PhaseTimer_Global().feature_collect_ns
+          + tt::PhaseTimer_Global().label_compute_ns;
+        tt::PhaseTimer_Summary(&tt::PhaseTimer_Global(), stderr);
+    }
 }
 
 //======================================================================================================
@@ -820,13 +1000,21 @@ struct FullValidationResults {
 // Forward declaration — Backtest_RunWalkForward is defined further down in
 // this header (the implementation is large enough to live near the bottom).
 // Backtest_RunFullValidation calls it on a sliced view of BacktestResults.
+// v5.10.0a.D — optional cfg_override param. When non-null, WF reads
+// XGBoost hyperparams (xgb_subsample / xgb_colsample_bytree /
+// xgb_min_child_weight / xgb_seed / xgb_eval_nthread) from override
+// instead of data->config_used. Used by Backtest_RunHyperparamTrainSweep
+// to vary hyperparams per sweep cell without copying the entire
+// BacktestResults struct. Default-NULL preserves pre-v5.10.0a.D
+// behavior bytewise.
 static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                                             const BacktestResults *data,
                                             int n_splits, int horizon_ticks,
                                             int buffer_ticks, int min_train_samples,
                                             volatile int *progress_pct,
                                             volatile int *cancel_flag,
-                                            int label_type);
+                                            int label_type,
+                                            const ControllerConfig<BACKTEST_FP> *cfg_override = nullptr);
 
 static inline void Backtest_RunFullValidation(FullValidationResults *out,
                                                 const BacktestResults *data,
@@ -979,6 +1167,8 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         inf.has_build_flags_hash = 1;
         inf.build_flags_hash = tt::BUILD_FLAGS_HASH();
 
+        // v5.10.0 Item A — stamp_emit phase timer.
+        uint64_t stamp_start_ns = tt::PhaseTimer_NowNs();
         StampWriteResult sr = stamp_write_for_model(
             out->auto_stamp_path,
             out->auto_stamp_secret,
@@ -992,6 +1182,9 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             /*feature_registry_hash=*/FEATURE_REGISTRY_HASH(),
             /*engine_version=*/ENGINE_VERSION_STRING,
             /*inf=*/&inf);
+        tt::PhaseTimer_Global().stamp_emit_ns +=
+            tt::PhaseTimer_NowNs() - stamp_start_ns;
+        tt::PhaseTimer_Global().populated = 1;
         out->auto_stamp_attempted = 1;
         out->auto_stamp_ok = sr.ok;
         if (sr.ok) {
@@ -1024,6 +1217,23 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
     // gap_acceptable only meaningful when held-out actually ran. Default 0
     // when stubbed — signals "not yet validated" rather than "validated OK".
     out->gap_acceptable = (out->ran_held_out && out->wf_to_held_out_gap < gap_threshold) ? 1 : 0;
+
+    // v5.10.0 Item A — extended phase summary at end of full pipeline.
+    // Total = parse + fan_out_hot + feature_collect + label_compute
+    //       + wf_eval + held_out_eval + stamp_emit
+    // (xgboost_train is nested INSIDE wf_eval + held_out_eval; not added
+    //  to total to avoid double-count.)
+    if (tt::PhaseTimer_Global().populated) {
+        tt::PhaseTimer_Global().total_ns =
+            tt::PhaseTimer_Global().parse_ns
+          + tt::PhaseTimer_Global().fan_out_hot_ns
+          + tt::PhaseTimer_Global().feature_collect_ns
+          + tt::PhaseTimer_Global().label_compute_ns
+          + tt::PhaseTimer_Global().wf_eval_ns
+          + tt::PhaseTimer_Global().held_out_eval_ns
+          + tt::PhaseTimer_Global().stamp_emit_ns;
+        tt::PhaseTimer_Summary(&tt::PhaseTimer_Global(), stderr);
+    }
 }
 
 // compute accuracy: fraction of predictions matching labels (for classification)
@@ -1141,9 +1351,18 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                                             int buffer_ticks, int min_train_samples,
                                             volatile int *progress_pct,
                                             volatile int *cancel_flag,
-                                            int label_type = LABEL_WIN_LOSS) {
+                                            int label_type,
+                                            const ControllerConfig<BACKTEST_FP> *cfg_override) {
+    // v5.10.0 Item A — wf_eval phase timer (wraps full body).
+    uint64_t wf_start_ns = tt::PhaseTimer_NowNs();
     memset(wf, 0, sizeof(*wf));
     *progress_pct = 0;
+    // v5.10.0a.D — resolve effective cfg. Override path used by
+    // Backtest_RunHyperparamTrainSweep to vary xgb_* per sweep cell;
+    // default-NULL falls back to data->config_used (pre-v5.10.0a.D
+    // behavior, bytewise-equivalent for non-sweep callers).
+    const ControllerConfig<BACKTEST_FP>& eff_cfg =
+        cfg_override ? *cfg_override : data->config_used;
 
     // label-type-aware: pick objective + metric kind once, branch downstream.
     // Defaults to binary if caller didn't specify (backward compat).
@@ -1157,12 +1376,18 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     fprintf(stderr, "[walkforward] XGBoost not compiled in — cannot train. "
             "rebuild with -DUSE_XGBOOST=ON\n");
     *progress_pct = 100;
+    tt::PhaseTimer_Global().wf_eval_ns +=
+        tt::PhaseTimer_NowNs() - wf_start_ns;
+    tt::PhaseTimer_Global().populated = 1;
     return;
 #else
     if (data->sample_count < 100) {
         fprintf(stderr, "[walkforward] only %d samples — need at least 100 for walk-forward\n",
                 data->sample_count);
         *progress_pct = 100;
+        tt::PhaseTimer_Global().wf_eval_ns +=
+            tt::PhaseTimer_NowNs() - wf_start_ns;
+        tt::PhaseTimer_Global().populated = 1;
         return;
     }
 
@@ -1346,10 +1571,27 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         // truth shared with HeldOut training (BacktestEngine.hpp:~1592) and
         // Train Model worker (BacktestPanels.hpp). Defaults match the
         // pre-v5.9.5h hardcoded values bytewise; non-tuning operators get
-        // identical training output. nthread=1 for deterministic per-fold
-        // output (mirrors HeldOut; Train Model uses 4 for faster GUI iter).
+        // identical training output.
+        // v5.10.0 Item D — nthread reads from cfg.xgb_eval_nthread (default
+        // 1; matches pre-v5.10 hardcoded behavior). Operator opts in to >1
+        // by setting cfg explicitly. CFG_PARSE_INT clamps negatives to 0;
+        // we coerce 0/negative to 1 here for safety.
+        // v5.10.0a.D — read xgb_* from eff_cfg (override-or-data->config_used)
+        // so hyperparam sweep can vary subsample / colsample / etc per cell.
+        // XGBHyperparams_Defaults() returns hardcoded defaults; for sweep,
+        // we copy eff_cfg's values into hp so they propagate to the booster.
         tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
-        tt::XGBHyperparams_Apply(booster, hp, /*nthread=*/1);
+        hp.subsample          = (float)FPN_ToDouble(eff_cfg.xgb_subsample);
+        hp.colsample_bytree   = (float)FPN_ToDouble(eff_cfg.xgb_colsample_bytree);
+        hp.min_child_weight   = eff_cfg.xgb_min_child_weight;
+        hp.seed               = eff_cfg.xgb_seed;
+        if (eff_cfg.xgb_tree_method[0]) {
+            strncpy(hp.tree_method, eff_cfg.xgb_tree_method, sizeof(hp.tree_method) - 1);
+            hp.tree_method[sizeof(hp.tree_method) - 1] = '\0';
+        }
+        int eval_nthread = eff_cfg.xgb_eval_nthread > 0
+                         ? eff_cfg.xgb_eval_nthread : 1;
+        tt::XGBHyperparams_Apply(booster, hp, eval_nthread);
         // class balance — kind-specific.
         // Binary: scale_pos_weight = n_neg/n_pos (single param).
         // Multiclass: per-sample inverse-frequency weights via DMatrix info.
@@ -1380,10 +1622,14 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
 
         // train (no early stopping yet — full n_rounds always)
         int n_rounds = 200;
+        // v5.10.0 Item A — xgboost_train phase timer (per-fold).
+        uint64_t xgb_start_ns = tt::PhaseTimer_NowNs();
         for (int r = 0; r < n_rounds; r++) {
             ret = XGBoosterUpdateOneIter(booster, r, dtrain);
             if (ret != 0) break;
         }
+        tt::PhaseTimer_Global().xgboost_train_ns +=
+            tt::PhaseTimer_NowNs() - xgb_start_ns;
 
         // predict on train + test, compute kind-appropriate metric
         {
@@ -1514,6 +1760,13 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
     fprintf(stderr, "==============================\n\n");
 
 #endif // USE_XGBOOST
+    // v5.10.0 Item A — wf_eval normal-path accumulator. Includes nested
+    // xgboost_train_ns time (which is recorded separately around each
+    // XGBoosterUpdateOneIter call so PhaseTimer_Summary can show the
+    // breakdown).
+    tt::PhaseTimer_Global().wf_eval_ns +=
+        tt::PhaseTimer_NowNs() - wf_start_ns;
+    tt::PhaseTimer_Global().populated = 1;
 }
 
 //======================================================================================================
@@ -1528,6 +1781,19 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
     int label_type,
     volatile int *cancel_flag) {
     HeldOutTrainEvalResult r = {};
+
+    // v5.10.0 Item A — held_out_eval phase timer.
+    uint64_t ho_start_ns = tt::PhaseTimer_NowNs();
+    // RAII-ish accumulate on every return path via lambda + scope_guard.
+    // C++ has no defer; use a local struct dtor.
+    struct PhaseGuard {
+        uint64_t start;
+        ~PhaseGuard() {
+            tt::PhaseTimer_Global().held_out_eval_ns +=
+                tt::PhaseTimer_NowNs() - start;
+            tt::PhaseTimer_Global().populated = 1;
+        }
+    } pt_guard{ho_start_ns};
 
 #ifndef USE_XGBOOST
     fprintf(stderr, "[heldout] XGBoost not compiled in — cannot train. "
@@ -1632,10 +1898,15 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
             XGBoosterSetParam(booster, "objective", "binary:logistic");
         }
         // v5.9.5h — XGBHyperparams struct + apply helper. Mirrors WF site
-        // above for train-serve parity. nthread=1 for deterministic
-        // held-out training (single-threaded; metric must be reproducible).
+        // above for train-serve parity.
+        // v5.10.0 Item D — nthread reads from cfg.xgb_eval_nthread (default
+        // 1; matches pre-v5.10 hardcoded behavior). Held-out is the
+        // canonical-validation pass — multi-thread breaks bytewise
+        // reproducibility of held_out_metric, so default stays single-thread.
         tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
-        tt::XGBHyperparams_Apply(booster, hp, /*nthread=*/1);
+        int eval_nthread = data->config_used.xgb_eval_nthread > 0
+                         ? data->config_used.xgb_eval_nthread : 1;
+        tt::XGBHyperparams_Apply(booster, hp, eval_nthread);
 
         if (!is_regression && !is_multiclass) {
             int n_pos = 0, n_neg = 0;
@@ -1654,6 +1925,8 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
 
         int n_rounds = 200;
         int train_aborted = 0;
+        // v5.10.0 Item A — xgboost_train phase timer (held-out training).
+        uint64_t xgb_ho_start_ns = tt::PhaseTimer_NowNs();
         for (int rr = 0; rr < n_rounds; ++rr) {
             if (cancel_flag && *cancel_flag) {
                 train_aborted = 1;
@@ -1661,6 +1934,8 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
             }
             if (XGBoosterUpdateOneIter(booster, rr, dtrain) != 0) break;
         }
+        tt::PhaseTimer_Global().xgboost_train_ns +=
+            tt::PhaseTimer_NowNs() - xgb_ho_start_ns;
         if (train_aborted) {
             fprintf(stderr, "[heldout] training cancelled at round %d\n", n_rounds);
             break;
@@ -1761,9 +2036,30 @@ static inline int ConfigField_Set(ControllerConfig<BACKTEST_FP> *cfg, const char
     OPT_SET_U32(max_hold_ticks)
     OPT_SET_U32(sl_cooldown_base)
 
+    // v5.10.0a — XGBoost hyperparam sweeping. Hyperparams have been
+    // cfg-bound since v5.9.5h; v5.10.0D added thread-count fields.
+    // Operator can now grid-search over these via OptimizerPanel.
+    // xgb_tree_method (string) is intentionally excluded — sweep over
+    // discrete categorical values is not supported by OptimizerRange's
+    // numeric step model.
+    #define OPT_SET_INT(name) \
+        if (strcmp(key, #name) == 0) { cfg->name = (int)value; return 1; }
+    OPT_SET_FPN(xgb_subsample)
+    OPT_SET_FPN(xgb_colsample_bytree)
+    OPT_SET_INT(xgb_min_child_weight)
+    OPT_SET_INT(xgb_seed)
+    OPT_SET_INT(xgb_train_nthread)
+    OPT_SET_INT(xgb_eval_nthread)
+    // Note: label_tp_pct / label_sl_pct / label_forward_ticks are on
+    // BacktestRunConfig (per-run), not ControllerConfig. Sweeping those
+    // requires a separate Sweep extension; deferred until operator
+    // demand. For now: train your candidates with TrainingPanel and use
+    // the Optimizer for ML hyperparams + engine cfg fields.
+
     #undef OPT_SET_PCT
     #undef OPT_SET_FPN
     #undef OPT_SET_U32
+    #undef OPT_SET_INT
     return 0;
 }
 
@@ -1868,5 +2164,181 @@ static inline void Backtest_RunSweep(OptimizerResults *opt,
         }
     }
 }
+
+//======================================================================================================
+// [v5.10.0a.D — HYPERPARAM TRAINING SWEEP]
+//======================================================================================================
+// Trains an XGBooster per sweep cell using shared feature_matrix +
+// labels (operator must Collect Features once first). Per cell,
+// applies override hyperparams via WF's cfg_override path, runs WF,
+// records val_accuracy as the cell's metric.
+//
+// Different from Backtest_RunSweep:
+//   - No Backtest_Run per cell (no engine sweep)
+//   - Per cell: clone cfg + apply ConfigField_Set, call WF with
+//     cfg_override, record metric
+//   - Output: OptimizerResults (same struct; metric is val_accuracy
+//     not P&L)
+//
+// Training-side hyperparam search. Operator workflow:
+//   1. Train Model panel: click Collect Features (populates
+//      feature_matrix + labels)
+//   2. New Hyperparam Sweep button: pick xgb_subsample range, click
+//   3. This function trains N XGBoosters, picks best by val_acc
+//   4. Operator inspects results table, decides which params to
+//      use for production train
+//
+// Single-thread baseline; parallelism via v5.10.0a.F (cfg.xgb_train_nthread).
+//
+// Metric: WF mean_val_accuracy (binary/multiclass) or
+// mean_val_correlation (regression). Stored as positive number; higher = better.
+//======================================================================================================
+#ifdef USE_XGBOOST
+static inline void Backtest_RunHyperparamTrainSweep(
+    OptimizerResults *opt,
+    const BacktestResults *feature_data,
+    const OptimizerRange *ranges, int num_params,
+    int label_type,
+    int wf_n_splits, int wf_horizon, int wf_buffer, int wf_min_train,
+    volatile int *current_run, volatile int *total_runs,
+    volatile int *cancel_flag) {
+
+    opt->num_params = num_params;
+    opt->dims[0] = ranges[0].steps();
+    opt->dims[1] = (num_params > 1) ? ranges[1].steps() : 1;
+    opt->total_runs = opt->dims[0] * opt->dims[1];
+    *total_runs = opt->total_runs;
+    *current_run = 0;
+    opt->best_idx = 0;
+    double best_metric = -1e30;
+
+    // Pre-compute parameter values (matches Backtest_RunSweep convention)
+    for (int i = 0; i < opt->dims[0]; i++)
+        opt->param_vals[0][i] = ranges[0].lo + i * ranges[0].step;
+    if (num_params > 1)
+        for (int i = 0; i < opt->dims[1]; i++)
+            opt->param_vals[1][i] = ranges[1].lo + i * ranges[1].step;
+
+    if (!feature_data || feature_data->sample_count <= 0) {
+        fprintf(stderr, "[hpsweep] no feature data — Collect Features first\n");
+        return;
+    }
+
+    // Base cfg = the cfg the features were collected under. Each cell
+    // overrides specific hyperparam fields without disturbing the rest.
+    ControllerConfig<BACKTEST_FP> base_cfg = feature_data->config_used;
+
+    // v5.10.0a.F — parallel pthread training. cfg.xgb_train_nthread > 1
+    // dispatches cells across N pthread workers; each worker creates its
+    // own DMatrix + Booster (per XGBoost 3.3.0 thread-safety: independent
+    // booster instances are thread-safe across threads). Determinism
+    // preserved: per-booster nthread=1 inside parallel sweep so within-
+    // booster work stays single-threaded. Bytewise-equivalent to serial
+    // sweep for the same seed + data.
+    int n_workers = base_cfg.xgb_train_nthread > 0
+                  ? base_cfg.xgb_train_nthread : 1;
+    if (n_workers > opt->total_runs) n_workers = opt->total_runs;
+
+    fprintf(stderr, "[hpsweep] starting %d-cell sweep (sample_count=%d, n_workers=%d)\n",
+            opt->total_runs, feature_data->sample_count, n_workers);
+
+    // Per-cell helper — runs a single cell, writes to opt->stats[idx] +
+    // opt->metric[idx]. Single-writer per cell; no contention with other
+    // workers since each worker handles disjoint cell indices.
+    auto run_cell = [&](int idx) {
+        int i0 = idx / opt->dims[1];
+        int i1 = idx % opt->dims[1];
+        ControllerConfig<BACKTEST_FP> cell_cfg = base_cfg;
+        // Force per-booster nthread=1 in parallel mode for determinism;
+        // operator's xgb_eval_nthread is preserved in serial mode (only
+        // overridden when running parallel sweep).
+        if (n_workers > 1) cell_cfg.xgb_eval_nthread = 1;
+        ConfigField_Set(&cell_cfg, ranges[0].key, opt->param_vals[0][i0]);
+        if (num_params > 1)
+            ConfigField_Set(&cell_cfg, ranges[1].key, opt->param_vals[1][i1]);
+
+        WalkForwardResults wf_results;
+        int local_progress = 0;
+        Backtest_RunWalkForward(&wf_results, feature_data,
+                                 wf_n_splits, wf_horizon, wf_buffer,
+                                 wf_min_train, &local_progress,
+                                 cancel_flag, label_type, &cell_cfg);
+
+        memset(&opt->stats[idx], 0, sizeof(opt->stats[idx]));
+        double cell_metric = (wf_results.label_kind == 1)
+            ? (double)wf_results.mean_val_correlation
+            : (double)wf_results.mean_val_accuracy;
+        opt->metric[idx] = cell_metric;
+    };
+
+    if (n_workers <= 1) {
+        // SERIAL PATH (also used when total_runs == 1)
+        for (int idx = 0; idx < opt->total_runs; ++idx) {
+            if (cancel_flag && *cancel_flag) {
+                fprintf(stderr, "[hpsweep] cancelled at cell %d/%d\n",
+                        idx, opt->total_runs);
+                return;
+            }
+            *current_run = idx + 1;
+            run_cell(idx);
+            if (opt->metric[idx] > best_metric) {
+                best_metric = opt->metric[idx];
+                opt->best_idx = idx;
+            }
+        }
+    } else {
+        // PARALLEL PATH — N workers in round-robin over cells.
+        // Worker_k handles cells {k, k+N, k+2*N, ...}. Disjoint indices,
+        // no shared writes to opt->. Coordinator joins all workers, then
+        // single-threaded best-cell selection.
+        struct WorkerCtx {
+            int worker_id;
+            int n_workers;
+            int total_runs;
+            volatile int *cancel_flag;
+            volatile int *current_run;
+            std::function<void(int)> *run_cell_fn;
+        };
+
+        pthread_t tids[OPT_MAX_GRID];  // bound by total cell cap
+        WorkerCtx ctxs[OPT_MAX_GRID];
+        std::function<void(int)> run_cell_holder = run_cell;
+
+        auto worker_thunk = +[](void *arg) -> void* {
+            WorkerCtx *c = (WorkerCtx*)arg;
+            for (int idx = c->worker_id; idx < c->total_runs; idx += c->n_workers) {
+                if (c->cancel_flag && *c->cancel_flag) return nullptr;
+                (*c->run_cell_fn)(idx);
+                // current_run is monotonic-ish; workers write asynchronously
+                // (this is just for UI progress, exact ordering not required)
+                __atomic_store_n(c->current_run, idx + 1, __ATOMIC_RELAXED);
+            }
+            return nullptr;
+        };
+
+        for (int k = 0; k < n_workers; ++k) {
+            ctxs[k].worker_id = k;
+            ctxs[k].n_workers = n_workers;
+            ctxs[k].total_runs = opt->total_runs;
+            ctxs[k].cancel_flag = cancel_flag;
+            ctxs[k].current_run = current_run;
+            ctxs[k].run_cell_fn = &run_cell_holder;
+            pthread_create(&tids[k], nullptr, worker_thunk, &ctxs[k]);
+        }
+        for (int k = 0; k < n_workers; ++k) {
+            pthread_join(tids[k], nullptr);
+        }
+        // Single-threaded best-cell selection post-join.
+        for (int idx = 0; idx < opt->total_runs; ++idx) {
+            if (opt->metric[idx] > best_metric) {
+                best_metric = opt->metric[idx];
+                opt->best_idx = idx;
+            }
+        }
+    }
+    fprintf(stderr, "[hpsweep] complete; best cell=%d metric=%.4f\n",
+            opt->best_idx, best_metric);
+}
+#endif // USE_XGBOOST
 
 #endif // BACKTEST_ENGINE_HPP

@@ -330,6 +330,113 @@ xgb_seed=42                         # RNG seed for reproducibility
 xgb_tree_method=hist                # hist | exact | approx | auto
 
 #==============================================================================
+# HARDWARE-AWARE TUNING (v5.10.0 Item D)
+#==============================================================================
+# Operator-tunable thread counts and RAM budgets. Defaults match v5.9.5j
+# pre-v5.10 hardcoded behavior bytewise — non-tuning operators see no
+# change after upgrade.
+#
+# THREAD COUNTS
+# Setting any nthread > 1 BREAKS bytewise reproducibility of training
+# output (XGBoost multi-thread is non-deterministic per fold). For
+# deployment-grade models (validate locally then ship), operators want
+# nthread=1 everywhere. For exploratory iteration (tweaking and rerunning),
+# multi-thread is faster.
+xgb_train_nthread=4                 # Train Model worker thread count.
+                                    # Pre-v5.10 hardcoded 4. Set to 1 for
+                                    # bytewise-deterministic training output;
+                                    # bump higher for faster GUI iteration on
+                                    # multi-core boxes.
+xgb_eval_nthread=1                  # WF + HeldOut eval thread count.
+                                    # Pre-v5.10 hardcoded 1 for deterministic
+                                    # per-fold metrics. Bumping breaks bytewise
+                                    # repro of held_out_metric across runs.
+csv_load_workers=1                  # Parallel CSV load worker count (Item C).
+                                    # Pre-v5.10 serial. Bump to 4-8 on multi-
+                                    # core boxes with NVMe storage for faster
+                                    # data prep (~30-45 min saved per 1-year
+                                    # backtest). Diminishing returns past nproc.
+                                    # Output is bytewise-deterministic regardless
+                                    # of worker count (concatenation in file-date
+                                    # order).
+
+# RAM BUDGETS (advisory soft caps)
+# Item B's streaming label compute closes the OOM regardless of these caps;
+# they exist for operator-side hint sizing on bigger boxes / longer datasets.
+# Currently informational only (no boot-time refusal). Future v5.10.x ships
+# may add hard-refuse-on-projection-exceed if operator demand surfaces.
+feature_collect_max_gb=12           # advisory cap on feature_matrix RAM
+wf_split_max_gb=8                   # advisory cap on WF split per-fold RAM
+held_out_max_gb=4                   # advisory cap on held-out split RAM
+
+#==============================================================================
+# MULTI-HORIZON ENSEMBLE (v5.10.0a.G.5+)
+#==============================================================================
+# Operator workflow: Train Multi-Horizon (foxml_suite) → N model files saved
+# to per-horizon dirs under models/<class>/<run>_horizon_<H>/. Set
+# core_N_model_dir to the BASE path (without _horizon_<H> suffix); engine
+# auto-detects all horizon siblings on disk + enables ensemble inference.
+#
+# Default empty horizon_list = single-model deployment (zero behavior change
+# from pre-v5.10.0a; ensemble_zoo->active stays 0).
+#
+# When ensemble active:
+#   - blend_mode=weighted (default): G.7 Bandit-Exp3 per-regime weighted blend
+#     over N horizons. Per-tick: classify regime → use that regime's bandit
+#     weights → weighted average across horizons. Bandit learns from outcomes
+#     (slow-path lookback + trade-close rewards).
+#   - blend_mode=selection: G.4 argmax-confidence — pick the single horizon
+#     with highest |p−0.5| each tick (no learning).
+
+# Bandit-Exp3 learning rate (0.01 .. 1.0); higher = faster adaptation, more
+# variance in weights. Default 0.1 conservative; bump to 0.2-0.3 if operator
+# observes weights converging too slowly.
+ensemble_bandit_eta=0.1
+
+# Per-regime predictions before bandit weights are trusted (uniform during
+# warmup). Lower = trust faster + noisier weights; higher = slower convergence.
+ensemble_min_warmup_predictions=100
+
+# Safety: ≥X fraction of non-disabled horizons must predict same direction
+# OR skip entry. Without this, weighted blend during regime transitions can
+# pass ml_buy_threshold even with split horizons.
+# 0.0 = disabled (any blended signal passes; pre-G.7 behavior)
+# 0.6 (default) = require 60% agreement
+# 1.0 = unanimous required (very conservative)
+ensemble_min_agreement_pct=0.6
+
+# Trade-close reward multiplier (v5.10.0a.G.8). Real-money signal (incl.
+# fees + slippage) carries higher weight than slow-path lookback rewards.
+# default 4.0 = trade outcomes count 4× a tick-level lookback reward.
+# 0.0 = disable trade-close feedback (slow-path lookback only).
+# Higher (8-10) = aggressive bandit response to actual trade outcomes;
+# more variance in weights between trades.
+ensemble_trade_reward_mult=4.0
+
+# Bandit state persistence cadence (v5.10.0a.G.9). Bandit weights are
+# saved to <core_model_dir>/bandit_state.json on engine clean shutdown
+# AND every N total bandit updates during the session. Restart loads
+# the state back so weights resume rather than re-learn from uniform.
+# Bundle SHA in the JSON catches model-swap-without-clearing-bandit-state
+# (mismatch → uniform reset).
+# 0 = save only on shutdown.
+# 5000 (default) = ~1 save/hour at typical tick rates.
+# Lower (e.g. 1000) = more durable but more disk I/O.
+ensemble_bandit_save_interval=5000
+
+# Global blend mode (per-core override via core_N_ensemble_blend_mode)
+ensemble_blend_mode=weighted
+
+# Per-core overrides (omit to inherit global / auto-detect):
+# core_0_horizon_list=100,500,1000
+# core_0_ensemble_blend_mode=weighted
+# core_0_disabled_horizons=100             # CSV; freezes these horizons'
+                                           # weights at last value, skips
+                                           # their predict + reward updates.
+                                           # Use when operator KNOWS a horizon
+                                           # is bad before drift watchdog catches it.
+
+#==============================================================================
 # ML INFERENCE
 #==============================================================================
 # XGBoost or LightGBM model for buy signals. train in foxml_suite, load here.
@@ -466,6 +573,28 @@ allow_cross_major_engine=0      # 0=refuse cross-major (safe), 1=allow with warn
 # Cross-major drift is gated separately by allow_cross_major_engine
 # above + the held_out_gate_strict refusal path.
 acknowledge_cross_binary_version_drift=0   # 0=warn (safe), 1=suppress minor WARN
+
+# v5.10.0c — Hot model swap behavior when a position is open at swap time.
+# 0 (default) = swap is deferred until position closes naturally; safer
+#               since entry & exit use the same model.
+# 1           = swap proceeds immediately, open positions exit on whatever
+#               model fires next; entry & exit may be driven by different
+#               models. Operator opt-in for emergency model retraction.
+acknowledge_hot_swap_with_open_positions=0
+
+# v5.10.0e — Runtime IC drift detection. Sampled post-fill (when a
+# position closes and the ConfidenceScorer ingests realized return).
+# Sustained breach = avg rolling IC over the past `window` seconds is
+# below `floor`, with at least 5 samples in the window.
+#
+# On first breach: emit CRITICAL log line ("[drift] core %d IC=...
+# below floor=... over %ds, %d samples").
+# When auto_kill_on_drift=1: also trip per-core kill_switch — engine
+# stops opening new positions on that core; existing positions exit
+# naturally. Surfaced via state.cores[c].core_kill_tripped + halt code.
+confidence_ic_floor=0.02            # min Spearman rank correlation (> random)
+confidence_ic_floor_window=86400    # sustained-breach window in seconds (default 24h)
+auto_kill_on_drift=0                # 0=log only, 1=trip per-core kill_switch on breach
 held_out_stamp_secret=          # HMAC-SHA256 secret. Empty = devmode (signs but accepts any sig)
 
 # Auto-stamp on held-out completion (v5.3.2 + v5.8.7 + v5.8.10).

@@ -43,6 +43,7 @@
 #include "../CoreFrameworks/ExecutionCore.hpp"
 #include "../CoreFrameworks/ShardedBacktestDriver.hpp"
 #include "../CoreFrameworks/ShardedSnapshot.hpp"  // Track E.7 — TUI_CopySnapshotSharded
+#include "PhaseTimers.hpp"  // v5.10.0 Item A — per-phase backtest timers
 #include "../CoreFrameworks/Tick.hpp"
 #include "../DataStream/DepthReplayState.hpp"  // Track E.3 — depth replay
 #include "../DataStream/EngineTUI.hpp"  // for TUISnapshot
@@ -112,6 +113,19 @@ static inline void BacktestSharded_Run(BacktestResults *results,
 
     fprintf(stderr, "[backtest sharded] mode=sharded cores=%u default_strategy=%d\n",
             (unsigned)cfg.num_execution_cores, cfg.default_strategy);
+
+    // v5.10.0 Item C-stub — csv_load_workers cfg field is wired in v5.10.0D
+    // but not yet consumed. Pipeline parallelism (load file f+1 while
+    // engine processes file f) deferred to v5.10.0a after we have
+    // phase-timer (Item A) data showing parse_ns is significant relative
+    // to fan_out_hot_ns. If parse << processing, parallel ingest is 0%
+    // speedup and not worth the thread-coordination complexity.
+    if (cfg.csv_load_workers > 1) {
+        fprintf(stderr, "[backtest sharded] NOTE: csv_load_workers=%d set but "
+                "parallel CSV ingest is reserved for v5.10.0a (this ship "
+                "loads serial). Use Item A phase timer output to decide if "
+                "parallel ingest is worth wiring.\n", cfg.csv_load_workers);
+    }
 
     // Partial exits P.1 — validate cfg before allocating cores. When
     // partial_exit_enabled=1, refuses to run if num_execution_cores*2
@@ -199,6 +213,11 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // run to avoid stale state when the user runs multiple backtests with
     // different ML configs in one suite session.
     static CoreModelZoo<BACKTEST_FP> ml_zoos[MAX_EXECUTION_CORES];
+    // v5.10.0a.G.5 — per-core ensemble zoo (multi-horizon). Allocated alongside
+    // single-zoo; populated by EnsembleModelZoo_AutoDetectFromDir if base_dir
+    // has _horizon_<H> siblings on disk. Default empty = ezoo->active=0 =
+    // single-zoo path runs unchanged.
+    static EnsembleModelZoo<BACKTEST_FP> ml_ensemble_zoos[MAX_EXECUTION_CORES];
 
     for (int i = 0; i < num_cores; ++i) {
         SPSCRing_Init(&tick_rings[i]);
@@ -228,6 +247,9 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             // without Free leaks the prior allocation.
             CoreModelZoo_Free(&ml_zoos[i]);
             CoreModelZoo_Init(&ml_zoos[i]);
+            // v5.10.0a.G.5 — same pattern for ensemble zoo
+            EnsembleModelZoo_Free(&ml_ensemble_zoos[i]);
+            EnsembleModelZoo_Init(&ml_ensemble_zoos[i]);
             int backend = cfg.ml_backend ? cfg.ml_backend : MODEL_BACKEND_XGBOOST;
             int loaded = 0;
             if (cfg.core_model_dir[i][0]) {
@@ -264,6 +286,60 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                                          "strict verify failure\n", i);
                         CoreModelZoo_Free(&ml_zoos[i]);
                         state.cores[i].model_handle = NULL;
+                    }
+                }
+                // v5.10.0a.G.5 — try ensemble auto-detect on the base dir
+                // (cfg.core_model_dir without _horizon_<H> suffix).
+                // No-op when no _horizon_* siblings present; ezoo->active=0
+                // so engine continues using single-zoo path.
+                if (cfg.core_model_dir[i][0]) {
+                    int n_loaded = EnsembleModelZoo_AutoDetectFromDir(
+                        &ml_ensemble_zoos[i],
+                        cfg.core_model_dir[i],
+                        backend);
+                    if (n_loaded > 0 && ml_ensemble_zoos[i].active) {
+                        fprintf(stderr, "[backtest sharded] core %d: ensemble active "
+                                        "(%d horizons; %d total models)\n",
+                                i, ml_ensemble_zoos[i].buy_signal_count, n_loaded);
+                        // v5.10.0a.G.7 — initialize per-regime bandits + cache
+                        // blend mode from cfg (per-core override → global fallback).
+                        EnsembleModelZoo_InitBandits(&ml_ensemble_zoos[i],
+                                                       cfg.ensemble_bandit_eta,
+                                                       cfg.ensemble_min_warmup_predictions);
+                        const char* mode = cfg.core_ensemble_blend_mode[i][0]
+                                          ? cfg.core_ensemble_blend_mode[i]
+                                          : cfg.ensemble_blend_mode;
+                        strncpy(ml_ensemble_zoos[i].blend_mode, mode,
+                                sizeof(ml_ensemble_zoos[i].blend_mode) - 1);
+                        ml_ensemble_zoos[i].blend_mode[
+                            sizeof(ml_ensemble_zoos[i].blend_mode) - 1] = '\0';
+                        // v5.10.0a.G.7 — kill-switch: parse cfg.core_N_disabled_horizons
+                        EnsembleModelZoo_SetDisabledHorizons(&ml_ensemble_zoos[i],
+                            cfg.core_disabled_horizons[i]);
+                        // v5.10.0a.G.9 — overlay persisted bandit state from
+                        // <core_model_dir>/bandit_state.json onto uniform priors.
+                        // Missing/mismatched → uniform stays. Bundle-id check
+                        // catches model-swap-without-clearing-bandit-state.
+                        EnsembleModelZoo_LoadBanditState(&ml_ensemble_zoos[i],
+                                                          cfg.core_model_dir[i]);
+                        // v5.10.0a.next.1 — operator-explicit prior path
+                        // overrides the default model_dir load. Skips
+                        // bundle-id check (operator may be transferring
+                        // weights from a sibling bundle deliberately).
+                        if (run_cfg && run_cfg->bandit_state_prior_path[0]) {
+                            EnsembleModelZoo_LoadBanditStateFromPath(
+                                &ml_ensemble_zoos[i],
+                                run_cfg->bandit_state_prior_path,
+                                /*skip_bundle_check=*/1);
+                        }
+                        EnsembleModelZoo_SetBanditSaveInterval(&ml_ensemble_zoos[i],
+                            cfg.ensemble_bandit_save_interval);
+                        // Wire ensemble pointer into the per-core handle slot;
+                        // dispatcher's ml_ctx.ensemble_zoo reads from this.
+                        state.cores[i].ensemble_handle = &ml_ensemble_zoos[i];
+                    } else {
+                        // ensure stale handle from prior run cleared
+                        state.cores[i].ensemble_handle = nullptr;
                     }
                 }
             }
@@ -420,6 +496,9 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             // Capacity guard — silent truncation contaminates ML training.
             if (!BacktestResults_EnsureCapacity(fc->results,
                                                  fc->results->sample_count + 1)) return;
+            // v5.10.0 Item A — feature_collect phase timer (post-gates so
+            // the warmup branch noise doesn't pollute the metric).
+            uint64_t fc_start_ns = tt::PhaseTimer_NowNs();
 
             // Regime_ComputeSignals with the EXACT inputs the live ML serve
             // path uses (mirrors StrategyParameters.hpp:469). When the driver
@@ -470,6 +549,12 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                         fprintf(stderr, "[backtest] WARN: NaN/Inf in feature pack at tick %d — skipping sample (further skips silent)\n", tick_index);
                         nan_skip_warn_emitted = 1;
                     }
+                    // v5.10.0 Item A — count the wasted Features_PackAll
+                    // compute; otherwise feature_collect_ns under-reports
+                    // when NaN-skip rate is high.
+                    tt::PhaseTimer_Global().feature_collect_ns +=
+                        tt::PhaseTimer_NowNs() - fc_start_ns;
+                    tt::PhaseTimer_Global().populated = 1;
                     return;  // exit the lambda; this sample dropped
                 }
             }
@@ -481,6 +566,10 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             fc->results->sample_regimes[fc->results->sample_count] = 0;
             fc->results->labels[fc->results->sample_count] = 0.0f;  // post-pass
             fc->results->sample_count++;
+            // v5.10.0 Item A — accumulate feature_collect time.
+            tt::PhaseTimer_Global().feature_collect_ns +=
+                tt::PhaseTimer_NowNs() - fc_start_ns;
+            tt::PhaseTimer_Global().populated = 1;
         };
     }
 
@@ -489,6 +578,12 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     //----------------------------------------------------------------------
     struct timeval t_start, t_end;
     gettimeofday(&t_start, NULL);
+
+    // v5.10.0 Item A — phase timer reset + wall-clock anchor for total_ns.
+    // Reset clears prior runs (suite reuses the singleton across Backtest_Run
+    // calls). populated flag flips once any phase records nonzero time.
+    tt::PhaseTimer_Reset(&tt::PhaseTimer_Global());
+    uint64_t pt_run_start_ns = tt::PhaseTimer_NowNs();
 
     int total_processed = 0;
     int total_ticks_all_files = 0;
@@ -544,7 +639,13 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     int64_t prev_file_last_ts = 0;  // v5.9.2c: track for inter-file ordering check
     for (int f = 0; f < run_cfg->num_data_files; f++) {
         int count = 0;
-        if (!BacktestData_Load(ticks, &count, max_ticks, run_cfg->data_paths[f]))
+        // v5.10.0 Item A — parse phase timer.
+        uint64_t parse_start_ns = tt::PhaseTimer_NowNs();
+        bool parse_ok = BacktestData_Load(ticks, &count, max_ticks, run_cfg->data_paths[f]);
+        tt::PhaseTimer_Global().parse_ns +=
+            tt::PhaseTimer_NowNs() - parse_start_ns;
+        tt::PhaseTimer_Global().populated = 1;
+        if (!parse_ok)
             continue;
         // v5.9.2c — validate intra-file ordering on each file
         // (sharded loads files one at a time, can't concat-validate
@@ -566,6 +667,13 @@ static inline void BacktestSharded_Run(BacktestResults *results,
         }
         if (count > 0) prev_file_last_ts = ticks[count - 1].timestamp_us;
 
+        // v5.10.0 Item A — fan_out_hot phase timer wraps the inner tick
+        // loop. Includes producer fan_out + per-core hot path execution.
+        // feature_collect time is accounted separately inside the
+        // on_slow_path lambda; subtract at end so fan_out_hot doesn't
+        // double-count it.
+        uint64_t hot_loop_start_ns = tt::PhaseTimer_NowNs();
+        uint64_t fc_baseline_ns = tt::PhaseTimer_Global().feature_collect_ns;
         for (int i = 0; i < count; i++) {
             if (*cancel_flag) goto done;
 
@@ -688,6 +796,10 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                     loss_count++;
                 }
                 last_realized_pnl = current_realized;
+                // (v5.10.0a.G.8 trade-close reward fires inside
+                // EventLoop_DrainPostFillOneCore — same hook as live,
+                // so backtest + live route through one path with
+                // bytewise-identical bandit feeding.)
 
                 // Equity curve sample (one per completed trade).
                 // dynamic growth — capping silently contaminates stats.
@@ -710,6 +822,18 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 *progress_pct = (int)(100.0 * total_processed / total_ticks_all_files);
             }
         }
+        // v5.10.0 Item A — accumulate fan_out_hot for this file's tick loop.
+        // Subtract feature_collect delta accumulated during this file so the
+        // two phases don't double-count slow-path time.
+        uint64_t fc_delta_ns =
+            tt::PhaseTimer_Global().feature_collect_ns - fc_baseline_ns;
+        uint64_t hot_loop_total_ns =
+            tt::PhaseTimer_NowNs() - hot_loop_start_ns;
+        if (hot_loop_total_ns > fc_delta_ns) {
+            tt::PhaseTimer_Global().fan_out_hot_ns +=
+                (hot_loop_total_ns - fc_delta_ns);
+        }
+        tt::PhaseTimer_Global().populated = 1;
     }
 
 done:
@@ -717,6 +841,13 @@ done:
 
     // Final drain to flush anything still in flight from the last tick
     EventLoop_DrainEvents(&state);
+    // v5.10.0 Item A — capture wall-clock total for the sharded run.
+    // Caller (Backtest_Run / Backtest_RunFullValidation) may extend with
+    // label_compute / wf_eval / held_out_eval / stamp_emit and bump
+    // total_ns again at end-of-pipeline. Multiple writes are OK — the
+    // last one wins, which is what Summary cares about.
+    tt::PhaseTimer_Global().total_ns =
+        tt::PhaseTimer_NowNs() - pt_run_start_ns;
 
     gettimeofday(&t_end, NULL);
     double elapsed = (t_end.tv_sec - t_start.tv_sec) * 1000.0
@@ -773,6 +904,27 @@ done:
 
     free(ticks);
     free(file_tick_counts);
+
+    // v5.10.0a.G.9 — save bandit state on backtest completion. Each
+    // core writes to its own <core_model_dir>/bandit_state.json. This
+    // is the "save at shutdown" trigger from the G.9 plan; periodic
+    // saves (cfg.ensemble_bandit_save_interval) cover the in-flight
+    // case but final flush ensures end-state is persisted even if
+    // total updates < interval.
+    for (int i = 0; i < num_cores; ++i) {
+        if (ml_ensemble_zoos[i].active &&
+            ml_ensemble_zoos[i].initialized_bandits &&
+            cfg.core_model_dir[i][0]) {
+            int saved = EnsembleModelZoo_SaveBanditState(
+                &ml_ensemble_zoos[i], cfg.core_model_dir[i],
+                /*regime_names=*/nullptr);
+            if (saved) {
+                fprintf(stderr, "[backtest sharded] core %d: saved bandit state to "
+                                "%s/bandit_state.json\n",
+                        i, cfg.core_model_dir[i]);
+            }
+        }
+    }
 
     fprintf(stderr, "[backtest sharded] completed: %d ticks in %.1fms, %u trades (%u/%u W/L), P&L $%.2f\n",
             total_processed, elapsed,

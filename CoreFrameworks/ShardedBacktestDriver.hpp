@@ -232,7 +232,8 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
     //     zero (no fills this tick) — the function early-exits per slot.
     if (drv->oms && drv->oms->event_log_mode != 0 && drv->config) {
         EventLoop_DrainPostFill(drv->state, drv->oms,
-                                 drv->config->sl_cooldown_cycles);
+                                 drv->config->sl_cooldown_cycles,
+                                 drv->config->ensemble_trade_reward_mult);
     }
 
     // 3. Slow path on cadence. tick_index is 0-based so we fire every
@@ -400,7 +401,8 @@ inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
     // FillRecords sit in the OMS buffers and never apply to CoreContexts.
     if (drv->oms && drv->oms->event_log_mode != 0 && drv->config) {
         EventLoop_DrainPostFill(drv->state, drv->oms,
-                                 drv->config->sl_cooldown_cycles);
+                                 drv->config->sl_cooldown_cycles,
+                                 drv->config->ensemble_trade_reward_mult);
     }
 }
 

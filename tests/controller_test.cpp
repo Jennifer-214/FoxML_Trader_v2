@@ -27,6 +27,7 @@
 #include "../CoreFrameworks/Reconcile.hpp"                // v5.2.1 — live reconciliation tests
 #include "../ML_Headers/CoreModelZoo.hpp"                // Track E.2 tests
 #include "../ML_Headers/FeatureRegistry.hpp"              // v5.8.1a tests
+#include "../Backtest/PhaseTimers.hpp"                    // v5.10.0 Item A — phase timer tests
 #include "../DataStream/DepthReplayState.hpp"            // Track E.3 tests
 #include "../ML_Headers/FlowFeatures.hpp"                // v4.5 Wave 1 tests
 #include "../DataStream/BinanceUserData.hpp"
@@ -9203,10 +9204,10 @@ e3_skip_load:;
         check("v5.8.1b: Features_PackAll bytewise-equivalent to ModelFeatures_Pack for ALL 34 indices",
               equiv);
 
-        // MODEL_FORMAT_VERSION bumped 4 → 5 in v5.8.1a; stays at 5 across
-        // v5.8.1b since the wire format (stamp body fields) is unchanged
-        // — only the registry hash value flips.
-        check("v5.8.1b: MODEL_FORMAT_VERSION == 5", MODEL_FORMAT_VERSION == 5);
+        // MODEL_FORMAT_VERSION bumped 4 → 5 in v5.8.1a; bumped 5 → 6 in
+        // v5.10.0b for FPN-end-to-end slow path (the bit-level math shift
+        // requires retraining; old v5 stamps refuse to load).
+        check("v5.10.0b: MODEL_FORMAT_VERSION == 6", MODEL_FORMAT_VERSION == 6);
 
         // Drift detection — verifier rejects stamp with mutated hash when
         // caller passes expected_feature_registry_hash != 0. Construct a
@@ -12091,6 +12092,2010 @@ e3_skip_load:;
               pcs.cfg_drift_tier1_count == 2 &&
               pcs.cfg_drift_tier2_count == 5 &&
               pcs.cfg_drift_strict_refused == 1);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0a.G.7 — Per-regime BanditState + weighted blend ---\n");
+    {
+        // === Test G.7.1: EnsembleModelZoo_InitBandits initializes all NUM_REGIMES ===
+        EnsembleModelZoo<FP> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        check("v5.10.0a.G.7: EnsembleModelZoo init clears initialized_bandits flag",
+              ezoo.initialized_bandits == 0);
+        // Simulate populated ezoo (bypass LoadFromCfg for unit test)
+        ezoo.buy_signal_count = 3;
+        ezoo.horizon_ticks_at_idx[0] = 100;
+        ezoo.horizon_ticks_at_idx[1] = 500;
+        ezoo.horizon_ticks_at_idx[2] = 1000;
+        EnsembleModelZoo_InitBandits(&ezoo, 0.1, 100);
+        check("v5.10.0a.G.7: InitBandits sets initialized_bandits=1",
+              ezoo.initialized_bandits == 1);
+        // Each regime's bandit has n_arms = 3
+        for (int r = 0; r < NUM_REGIMES; ++r) {
+            char msg[64];
+            snprintf(msg, 64, "v5.10.0a.G.7: regime %d bandit has 3 arms", r);
+            check(msg, ezoo.bandits[r].n_arms == 3);
+        }
+        // Uniform initial weights → Bandit_GetProbabilities returns 1/N
+        double probs[8];
+        Bandit_GetProbabilities(&ezoo.bandits[0], probs);
+        check("v5.10.0a.G.7: uniform weights give probs near 1/N",
+              fabs(probs[0] - 1.0/3.0) < 0.01 &&
+              fabs(probs[1] - 1.0/3.0) < 0.01 &&
+              fabs(probs[2] - 1.0/3.0) < 0.01);
+
+        // === Test G.7.2: Model_Predict_Ensemble_Weighted with no models returns sentinel ===
+        ModelHandle<FP> empty[1];
+        Model_Init(&empty[0]);
+        float feats[MODEL_MAX_FEATURES] = {0};
+        double weights[8] = {0.5, 0.3, 0.2, 0, 0, 0, 0, 0};
+        int sel = -99;
+        float p = Model_Predict_Ensemble_Weighted(empty, 0, feats,
+                                                    MODEL_NUM_FEATURES,
+                                                    weights, 0, 0.0, &sel);
+        check("v5.10.0a.G.7: weighted ensemble count=0 returns 0", p == 0.0f);
+        check("v5.10.0a.G.7: weighted ensemble count=0 sets dominant_idx=-1",
+              sel == -1);
+        Model_Free(&empty[0]);
+
+        // === Test G.7.3: Agreement filter blocks split predictions ===
+        // No real models → all predictions are 0 (or NaN-skipped).
+        // n_active=0 → agreement skipped; returns sentinel 0.5 on no signal.
+        ModelHandle<FP> three[3];
+        for (int i = 0; i < 3; ++i) Model_Init(&three[i]);
+        sel = -99;
+        p = Model_Predict_Ensemble_Weighted(three, 3, feats,
+                                              MODEL_NUM_FEATURES,
+                                              weights, 0, 0.6, &sel);
+        check("v5.10.0a.G.7: all-unloaded models → no-edge sentinel 0.5",
+              fabs(p - 0.5f) < 1e-6);
+        check("v5.10.0a.G.7: no-signal sets dominant_idx=-1", sel == -1);
+        for (int i = 0; i < 3; ++i) Model_Free(&three[i]);
+
+        // === Test G.7.4: Kill-switch parser sets bitmask correctly ===
+        EnsembleModelZoo<FP> ez2;
+        EnsembleModelZoo_Init(&ez2);
+        ez2.buy_signal_count = 4;
+        ez2.horizon_ticks_at_idx[0] = 100;
+        ez2.horizon_ticks_at_idx[1] = 500;
+        ez2.horizon_ticks_at_idx[2] = 1000;
+        ez2.horizon_ticks_at_idx[3] = 2000;
+        EnsembleModelZoo_SetDisabledHorizons(&ez2, "100,1000");
+        check("v5.10.0a.G.7: kill-switch disables arm 0 (h100)",
+              (ez2.disabled_horizon_mask & 0x1) != 0);
+        check("v5.10.0a.G.7: kill-switch leaves arm 1 (h500) enabled",
+              (ez2.disabled_horizon_mask & 0x2) == 0);
+        check("v5.10.0a.G.7: kill-switch disables arm 2 (h1000)",
+              (ez2.disabled_horizon_mask & 0x4) != 0);
+        check("v5.10.0a.G.7: kill-switch leaves arm 3 (h2000) enabled",
+              (ez2.disabled_horizon_mask & 0x8) == 0);
+
+        // === Test G.7.5: Empty CSV clears bitmask ===
+        ez2.disabled_horizon_mask = 0xFF;  // pre-pollute
+        EnsembleModelZoo_SetDisabledHorizons(&ez2, "");
+        check("v5.10.0a.G.7: empty CSV clears disabled mask",
+              ez2.disabled_horizon_mask == 0);
+
+        // === Test G.7.6: Unknown horizon CSV silently skipped ===
+        EnsembleModelZoo_SetDisabledHorizons(&ez2, "9999");  // not in horizon list
+        check("v5.10.0a.G.7: unknown horizon CSV → mask stays 0",
+              ez2.disabled_horizon_mask == 0);
+
+        EnsembleModelZoo_Free(&ezoo);
+        EnsembleModelZoo_Free(&ez2);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0a.G.8 — Dual-source reward wiring + drift watchdog ---\n");
+    {
+        // === Test G.8.1: RecordPrediction populates ring + advances head ===
+        EnsembleModelZoo<FP> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        ezoo.active = 1;
+        ezoo.buy_signal_count = 4;
+        ezoo.horizon_ticks_at_idx[0] = 100;
+        ezoo.horizon_ticks_at_idx[1] = 500;
+        ezoo.horizon_ticks_at_idx[2] = 1000;
+        ezoo.horizon_ticks_at_idx[3] = 2000;
+        EnsembleModelZoo_InitBandits(&ezoo, 0.05, 200);
+
+        float per_arm[4] = { 0.7f, 0.4f, 0.6f, 0.45f };
+        EnsembleModelZoo_RecordPrediction(&ezoo, 0, per_arm, 4, 100.0f);
+        check("v5.10.0a.G.8: RecordPrediction advances reward_ring_head",
+              ezoo.reward_ring_head == 1);
+        check("v5.10.0a.G.8: RecordPrediction increments predict_call_count",
+              ezoo.predict_call_count == 1);
+        check("v5.10.0a.G.8: RecordPrediction stores predictions[0]",
+              ezoo.reward_ring[0].predictions[0] == 0.7f);
+        check("v5.10.0a.G.8: RecordPrediction stores predictions[3]",
+              ezoo.reward_ring[0].predictions[3] == 0.45f);
+        check("v5.10.0a.G.8: RecordPrediction stores sample_price",
+              ezoo.reward_ring[0].sample_price == 100.0f);
+        check("v5.10.0a.G.8: RecordPrediction stores regime_id",
+              ezoo.reward_ring[0].regime_id == 0);
+        check("v5.10.0a.G.8: RecordPrediction sets rewarded_lookback=0",
+              ezoo.reward_ring[0].rewarded_lookback == 0);
+
+        // === Test G.8.2: TickRewardsFromLookback skips records too recent ===
+        // Lookback = forward_ticks/poll_interval = 1000/100 = 10 calls.
+        // Just recorded 1 prediction; current call_count=1, need >= 1+10.
+        EnsembleModelZoo_TickRewardsFromLookback(&ezoo, 101.0f, 1000, 100, 0.02);
+        check("v5.10.0a.G.8: lookback skips too-recent record",
+              ezoo.reward_ring[0].rewarded_lookback == 0);
+
+        // Advance call count past lookback threshold by recording 11 dummy
+        // predictions. The first record (index 0) should now be old enough.
+        for (int i = 0; i < 11; ++i) {
+            EnsembleModelZoo_RecordPrediction(&ezoo, 0, per_arm, 4, 100.0f);
+        }
+
+        // === Test G.8.3: TickRewardsFromLookback marks rewarded_lookback ===
+        // current_price=110 vs sample=100 → +10% delta → predictions
+        // > 0.5 are correct, predictions ≤ 0.5 are wrong.
+        EnsembleModelZoo_TickRewardsFromLookback(&ezoo, 110.0f, 1000, 100, 0.02);
+        check("v5.10.0a.G.8: lookback marks first record rewarded_lookback=1",
+              ezoo.reward_ring[0].rewarded_lookback == 1);
+
+        // === Test G.8.4: TickRewardsFromLookback updates bandit weights ===
+        // After UpdateDrift fires, arm 0 (pred 0.7, correct) gets +50bps,
+        // arm 1 (pred 0.4, wrong) gets -50bps. With Bandit_Update accumulating
+        // these, arm 0's weight should exceed arm 1's after the call.
+        // Note: In Exp3, weights diverge gradually; we just check that arm
+        // 0 (correct) has weight ≥ arm 1 (wrong) after the reward.
+        check("v5.10.0a.G.8: correct arm weight ≥ wrong arm weight after lookback",
+              ezoo.bandits[0].weights[0] >= ezoo.bandits[0].weights[1]);
+
+        EnsembleModelZoo_Free(&ezoo);
+
+        // === Test G.8.5: TradeCloseReward finds most recent record + marks rewarded_trade ===
+        EnsembleModelZoo<FP> ezoo2;
+        EnsembleModelZoo_Init(&ezoo2);
+        ezoo2.active = 1;
+        ezoo2.buy_signal_count = 3;
+        ezoo2.horizon_ticks_at_idx[0] = 100;
+        ezoo2.horizon_ticks_at_idx[1] = 500;
+        ezoo2.horizon_ticks_at_idx[2] = 1000;
+        EnsembleModelZoo_InitBandits(&ezoo2, 0.05, 200);
+
+        float p2[3] = { 0.8f, 0.3f, 0.7f };
+        EnsembleModelZoo_RecordPrediction(&ezoo2, 0, p2, 3, 200.0f);
+        // pnl_bps=+50 (winning trade) and reward_mult=4.0 → trade-close fires
+        EnsembleModelZoo_TradeCloseReward(&ezoo2, 50.0, 4.0);
+        // Most-recent record is at ring index 0 (head was 1, walking back).
+        check("v5.10.0a.G.8: TradeCloseReward marks rewarded_trade=1",
+              ezoo2.reward_ring[0].rewarded_trade == 1);
+        // Test idempotence: second call walks back, finds NO un-rewarded
+        // record, no-ops. Counter (predict_call) unchanged.
+        uint64_t pcc_before = ezoo2.predict_call_count;
+        EnsembleModelZoo_TradeCloseReward(&ezoo2, 50.0, 4.0);
+        check("v5.10.0a.G.8: TradeCloseReward idempotent on already-rewarded record",
+              ezoo2.predict_call_count == pcc_before);
+
+        EnsembleModelZoo_Free(&ezoo2);
+
+        // === Test G.8.6: UpdateDrift demotes arm with sustained low IC ===
+        EnsembleModelZoo<FP> ezoo3;
+        EnsembleModelZoo_Init(&ezoo3);
+        ezoo3.active = 1;
+        ezoo3.buy_signal_count = 2;
+        ezoo3.horizon_ticks_at_idx[0] = 100;
+        ezoo3.horizon_ticks_at_idx[1] = 500;
+        EnsembleModelZoo_InitBandits(&ezoo3, 0.05, 200);
+
+        // Feed 30 wrong outcomes for arm 0 (IC = -1.0, far below floor 0.02)
+        for (int i = 0; i < 30; ++i) {
+            EnsembleModelZoo_UpdateDrift(&ezoo3, 0, /*correct=*/0, 0.02);
+        }
+        check("v5.10.0a.G.8: arm 0 demoted after 30 wrong outcomes",
+              ezoo3.drift[0].demoted == 1);
+        check("v5.10.0a.G.8: arm 0 weights forced near 0 after demote",
+              ezoo3.bandits[0].weights[0] < 1e-6);
+        check("v5.10.0a.G.8: arm 1 (untouched) NOT demoted",
+              ezoo3.drift[1].demoted == 0);
+
+        // Feed 100 correct outcomes for arm 0 → IC rises above floor + 0.02
+        // hysteresis → un-demote.
+        for (int i = 0; i < 100; ++i) {
+            EnsembleModelZoo_UpdateDrift(&ezoo3, 0, /*correct=*/1, 0.02);
+        }
+        check("v5.10.0a.G.8: arm 0 recovered after sustained correct outcomes",
+              ezoo3.drift[0].demoted == 0);
+
+        EnsembleModelZoo_Free(&ezoo3);
+
+        // === Test G.8.7: ensemble_trade_reward_mult cfg parsing ===
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        check("v5.10.0a.G.8: ensemble_trade_reward_mult default 4.0",
+              cfg.ensemble_trade_reward_mult == 4.0);
+        // Parser test: write cfg, parse, check field
+        char tmpfile[] = "/tmp/g8_reward_mult_XXXXXX.cfg";
+        int fd = mkstemps(tmpfile, 4);
+        if (fd >= 0) {
+            const char* cfg_text = "ensemble_trade_reward_mult=2.5\n";
+            ssize_t wrote = write(fd, cfg_text, strlen(cfg_text));
+            (void)wrote;
+            close(fd);
+            ControllerConfig<FP> parsed = ControllerConfig_Load<FP>(tmpfile);
+            check("v5.10.0a.G.8: parses ensemble_trade_reward_mult=2.5",
+                  parsed.ensemble_trade_reward_mult == 2.5);
+            unlink(tmpfile);
+        }
+
+        // === Test G.8.8: disabled-horizon mask skipped during reward ===
+        EnsembleModelZoo<FP> ezoo4;
+        EnsembleModelZoo_Init(&ezoo4);
+        ezoo4.active = 1;
+        ezoo4.buy_signal_count = 3;
+        ezoo4.horizon_ticks_at_idx[0] = 100;
+        ezoo4.horizon_ticks_at_idx[1] = 500;
+        ezoo4.horizon_ticks_at_idx[2] = 1000;
+        EnsembleModelZoo_InitBandits(&ezoo4, 0.05, 200);
+        EnsembleModelZoo_SetDisabledHorizons(&ezoo4, "100");  // arm 0 disabled
+        check("v5.10.0a.G.8: disabled mask after SetDisabledHorizons('100')",
+              (ezoo4.disabled_horizon_mask & 1u) != 0);
+
+        // Snapshot weights before reward
+        double w0_pre = ezoo4.bandits[0].weights[0];
+        double w1_pre = ezoo4.bandits[0].weights[1];
+
+        float p4[3] = { 0.9f, 0.4f, 0.6f };
+        EnsembleModelZoo_RecordPrediction(&ezoo4, 0, p4, 3, 100.0f);
+        // Advance past lookback
+        for (int i = 0; i < 11; ++i)
+            EnsembleModelZoo_RecordPrediction(&ezoo4, 0, p4, 3, 100.0f);
+        EnsembleModelZoo_TickRewardsFromLookback(&ezoo4, 110.0f, 1000, 100, 0.02);
+        // Arm 0 disabled → its weight should NOT have moved despite +10% delta.
+        // Arm 1 enabled (but pred 0.4 wrong vs +10%) → weight should have changed.
+        check("v5.10.0a.G.8: disabled arm 0 weight unchanged by reward",
+              ezoo4.bandits[0].weights[0] == w0_pre);
+        check("v5.10.0a.G.8: enabled arm 1 weight changed by reward",
+              ezoo4.bandits[0].weights[1] != w1_pre);
+
+        EnsembleModelZoo_Free(&ezoo4);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0a.G.9 — Bandit state JSON persistence ---\n");
+    {
+        // === Test G.9.1: Bandit_SaveJSON writes valid JSON ===
+        BanditState bandits[NUM_REGIMES];
+        for (int r = 0; r < NUM_REGIMES; ++r) {
+            Bandit_Init(&bandits[r], 4, 0.05, 0.1, 1.0, 100, 200);
+            // Set some non-uniform state
+            for (int a = 0; a < 4; ++a) {
+                bandits[r].weights[a] = 1.0 + 0.1 * r + 0.01 * a;
+                bandits[r].cum_reward[a] = 50.0 * r + 5.0 * a;
+                bandits[r].pulls[a] = 10 * r + a;
+            }
+            bandits[r].total_steps = 100 + r;
+        }
+        char savefile[] = "/tmp/v5100aG9_save_XXXXXX.json";
+        int fd = mkstemps(savefile, 5);
+        check("v5.10.0a.G.9: tmp file for save created", fd >= 0);
+        if (fd >= 0) {
+            close(fd);
+            unlink(savefile);  // Bandit_SaveJSON does atomic create itself
+            int ok = Bandit_SaveJSON(bandits, NUM_REGIMES, savefile,
+                                       "abc123def456_test_bundle_id", nullptr);
+            check("v5.10.0a.G.9: Bandit_SaveJSON returns 1 on success", ok == 1);
+            check("v5.10.0a.G.9: saved file exists at target path",
+                  access(savefile, F_OK) == 0);
+            // === Test G.9.2: Bandit_LoadJSON round-trips state ===
+            BanditState reloaded[NUM_REGIMES];
+            for (int r = 0; r < NUM_REGIMES; ++r) {
+                Bandit_Init(&reloaded[r], 4, 0.05, 0.1, 1.0, 100, 200);
+            }
+            int loaded = Bandit_LoadJSON(reloaded, NUM_REGIMES, savefile,
+                                           "abc123def456_test_bundle_id", 4);
+            check("v5.10.0a.G.9: Bandit_LoadJSON returns 1 on valid file",
+                  loaded == 1);
+            // Spot-check round-trip: a couple of regimes' weights match
+            check("v5.10.0a.G.9: regime 0 arm 0 weight round-trip",
+                  reloaded[0].weights[0] == bandits[0].weights[0]);
+            check("v5.10.0a.G.9: regime 2 arm 3 weight round-trip",
+                  reloaded[2].weights[3] == bandits[2].weights[3]);
+            check("v5.10.0a.G.9: regime 1 cum_reward round-trip",
+                  reloaded[1].cum_reward[2] == bandits[1].cum_reward[2]);
+            check("v5.10.0a.G.9: regime 0 pulls round-trip",
+                  reloaded[0].pulls[1] == bandits[0].pulls[1]);
+            check("v5.10.0a.G.9: regime 1 total_steps round-trip",
+                  reloaded[1].total_steps == bandits[1].total_steps);
+
+            // === Test G.9.3: load with mismatched SHA returns 0 ===
+            BanditState reloaded2[NUM_REGIMES];
+            for (int r = 0; r < NUM_REGIMES; ++r) {
+                Bandit_Init(&reloaded2[r], 4, 0.05, 0.1, 1.0, 100, 200);
+            }
+            int sha_fail = Bandit_LoadJSON(reloaded2, NUM_REGIMES, savefile,
+                                             "WRONG_BUNDLE_ID_xxxxxxxxxxxx", 4);
+            check("v5.10.0a.G.9: load with mismatched SHA returns 0",
+                  sha_fail == 0);
+            // Verify weights NOT overwritten — Bandit_Init sets all to 1.0
+            check("v5.10.0a.G.9: failed-load leaves init weights intact",
+                  reloaded2[0].weights[0] == 1.0);
+
+            // === Test G.9.4: load with missing file returns 0 ===
+            int missing = Bandit_LoadJSON(reloaded2, NUM_REGIMES,
+                                            "/tmp/this_file_does_not_exist_v5100aG9.json",
+                                            "abc", 4);
+            check("v5.10.0a.G.9: load with missing file returns 0",
+                  missing == 0);
+
+            // === Test G.9.5: load with mismatched n_arms returns 0 ===
+            BanditState reloaded3[NUM_REGIMES];
+            for (int r = 0; r < NUM_REGIMES; ++r) {
+                Bandit_Init(&reloaded3[r], 6, 0.05, 0.1, 1.0, 100, 200);  // 6 arms
+            }
+            int n_arms_fail = Bandit_LoadJSON(reloaded3, NUM_REGIMES, savefile,
+                                                "abc123def456_test_bundle_id", 6);
+            check("v5.10.0a.G.9: load with mismatched n_arms returns 0",
+                  n_arms_fail == 0);
+
+            // === Test G.9.6: empty SHA in expected → SHA check skipped ===
+            BanditState reloaded4[NUM_REGIMES];
+            for (int r = 0; r < NUM_REGIMES; ++r) {
+                Bandit_Init(&reloaded4[r], 4, 0.05, 0.1, 1.0, 100, 200);
+            }
+            int sha_skip = Bandit_LoadJSON(reloaded4, NUM_REGIMES, savefile,
+                                             "", 4);
+            check("v5.10.0a.G.9: empty expected_sha skips SHA check",
+                  sha_skip == 1);
+
+            unlink(savefile);
+        }
+
+        // === Test G.9.7: cfg field ensemble_bandit_save_interval ===
+        ControllerConfig<FP> g9_cfg = ControllerConfig_Default<FP>();
+        check("v5.10.0a.G.9: ensemble_bandit_save_interval default 5000",
+              g9_cfg.ensemble_bandit_save_interval == 5000);
+
+        // Parser test
+        char tmpcfg[] = "/tmp/g9_save_interval_XXXXXX.cfg";
+        int cfd = mkstemps(tmpcfg, 4);
+        if (cfd >= 0) {
+            const char* cfg_text = "ensemble_bandit_save_interval=12345\n";
+            ssize_t wrote = write(cfd, cfg_text, strlen(cfg_text));
+            (void)wrote;
+            close(cfd);
+            ControllerConfig<FP> parsed = ControllerConfig_Load<FP>(tmpcfg);
+            check("v5.10.0a.G.9: parses ensemble_bandit_save_interval=12345",
+                  parsed.ensemble_bandit_save_interval == 12345);
+            unlink(tmpcfg);
+        }
+
+        // === Test G.9.8: ComputeBundleId is deterministic ===
+        EnsembleModelZoo<FP> ez_a;
+        EnsembleModelZoo_Init(&ez_a);
+        ez_a.active = 1;
+        ez_a.buy_signal_count = 3;
+        // Inject deterministic training_fingerprints
+        const char* fps[] = {"aaaaaaaaffff1111", "bbbbbbbbffff2222", "ccccccccffff3333"};
+        for (int a = 0; a < 3; ++a) {
+            strncpy(ez_a.buy_signal[a].training_fingerprint, fps[a], 65);
+        }
+        char id1[65];
+        EnsembleModelZoo_ComputeBundleId(&ez_a, id1, sizeof(id1));
+        char id2[65];
+        EnsembleModelZoo_ComputeBundleId(&ez_a, id2, sizeof(id2));
+        check("v5.10.0a.G.9: ComputeBundleId is deterministic across calls",
+              memcmp(id1, id2, 64) == 0);
+        check("v5.10.0a.G.9: ComputeBundleId starts with first fp prefix",
+              memcmp(id1, "aaaaaaaa", 8) == 0);
+        check("v5.10.0a.G.9: ComputeBundleId mid section is second fp",
+              memcmp(id1 + 8, "bbbbbbbb", 8) == 0);
+
+        // Modify a fingerprint → bundle id should change
+        strncpy(ez_a.buy_signal[1].training_fingerprint, "MODIFIEDfffffffff", 65);
+        char id3[65];
+        EnsembleModelZoo_ComputeBundleId(&ez_a, id3, sizeof(id3));
+        check("v5.10.0a.G.9: ComputeBundleId changes when fingerprint changes",
+              memcmp(id1, id3, 64) != 0);
+
+        EnsembleModelZoo_Free(&ez_a);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0a.next.1 — Backtest bandit_state_prior_path ---\n");
+    {
+        // === Test next.1.1: LoadBanditStateFromPath with skip_bundle_check
+        // succeeds even when bundle id would mismatch ===
+        EnsembleModelZoo<FP> ez_src;
+        EnsembleModelZoo_Init(&ez_src);
+        ez_src.active = 1;
+        ez_src.buy_signal_count = 3;
+        ez_src.horizon_ticks_at_idx[0] = 100;
+        ez_src.horizon_ticks_at_idx[1] = 500;
+        ez_src.horizon_ticks_at_idx[2] = 1000;
+        // Inject deterministic fingerprints for SOURCE bundle
+        const char* src_fps[] = {"sourceaa11112222", "sourcebb33334444",
+                                  "sourcecc55556666"};
+        for (int a = 0; a < 3; ++a)
+            strncpy(ez_src.buy_signal[a].training_fingerprint, src_fps[a], 65);
+        EnsembleModelZoo_InitBandits(&ez_src, 0.05, 200);
+        // Set non-uniform weights to verify round-trip
+        for (int r = 0; r < NUM_REGIMES; ++r) {
+            for (int a = 0; a < 3; ++a) {
+                ez_src.bandits[r].weights[a] = 1.0 + 0.1 * r + 0.5 * a;
+                ez_src.bandits[r].pulls[a] = 100 * r + 10 * a;
+            }
+            ez_src.bandits[r].total_steps = 1000 + r;
+        }
+
+        // Save source bundle's bandit state to disk (using a sibling-bundle
+        // bundle_id — this represents the prior file)
+        char prior_path[] = "/tmp/v5100a_next1_prior_XXXXXX.json";
+        int pfd = mkstemps(prior_path, 5);
+        check("v5.10.0a.next.1: tmp prior file created", pfd >= 0);
+        if (pfd >= 0) {
+            close(pfd);
+            unlink(prior_path);
+            char src_id[65];
+            EnsembleModelZoo_ComputeBundleId(&ez_src, src_id, sizeof(src_id));
+            int saved = Bandit_SaveJSON(ez_src.bandits, NUM_REGIMES,
+                                          prior_path, src_id, nullptr);
+            check("v5.10.0a.next.1: source bandit state saved", saved == 1);
+
+            // Now build a DESTINATION ezoo with DIFFERENT fingerprints —
+            // simulates "operator wants to bootstrap new bundle from sibling".
+            // Bundle IDs deliberately mismatch.
+            EnsembleModelZoo<FP> ez_dst;
+            EnsembleModelZoo_Init(&ez_dst);
+            ez_dst.active = 1;
+            ez_dst.buy_signal_count = 3;
+            ez_dst.horizon_ticks_at_idx[0] = 100;
+            ez_dst.horizon_ticks_at_idx[1] = 500;
+            ez_dst.horizon_ticks_at_idx[2] = 1000;
+            const char* dst_fps[] = {"destxxxx00000000", "destyyyy00000000",
+                                      "destzzzz00000000"};
+            for (int a = 0; a < 3; ++a)
+                strncpy(ez_dst.buy_signal[a].training_fingerprint,
+                        dst_fps[a], 65);
+            EnsembleModelZoo_InitBandits(&ez_dst, 0.05, 200);
+            // Snapshot uniform-init weight for sentinel
+            double uniform_w0 = ez_dst.bandits[0].weights[0];
+
+            // Test: with skip_bundle_check=0, load fails (id mismatch)
+            int strict_load = EnsembleModelZoo_LoadBanditStateFromPath(
+                &ez_dst, prior_path, /*skip_bundle_check=*/0);
+            check("v5.10.0a.next.1: strict load rejects mismatched bundle id",
+                  strict_load == 0);
+            check("v5.10.0a.next.1: strict-load failure leaves uniform priors intact",
+                  ez_dst.bandits[0].weights[0] == uniform_w0);
+
+            // Test: with skip_bundle_check=1, load succeeds despite mismatch
+            int override_load = EnsembleModelZoo_LoadBanditStateFromPath(
+                &ez_dst, prior_path, /*skip_bundle_check=*/1);
+            check("v5.10.0a.next.1: skip_bundle_check=1 allows mismatched-id load",
+                  override_load == 1);
+            check("v5.10.0a.next.1: skip-check load overlays source weights[0][0]",
+                  ez_dst.bandits[0].weights[0] == ez_src.bandits[0].weights[0]);
+            check("v5.10.0a.next.1: skip-check load overlays source weights[3][2]",
+                  ez_dst.bandits[3].weights[2] == ez_src.bandits[3].weights[2]);
+            check("v5.10.0a.next.1: skip-check load overlays pulls",
+                  ez_dst.bandits[2].pulls[1] == ez_src.bandits[2].pulls[1]);
+            check("v5.10.0a.next.1: skip-check load overlays total_steps",
+                  ez_dst.bandits[1].total_steps == ez_src.bandits[1].total_steps);
+
+            // Test: missing file returns 0 regardless of skip flag
+            int missing = EnsembleModelZoo_LoadBanditStateFromPath(
+                &ez_dst, "/tmp/this_file_does_not_exist_v5100a_next1.json",
+                /*skip_bundle_check=*/1);
+            check("v5.10.0a.next.1: missing file returns 0",
+                  missing == 0);
+
+            // Test: empty path returns 0
+            int empty_path = EnsembleModelZoo_LoadBanditStateFromPath(
+                &ez_dst, "", /*skip_bundle_check=*/1);
+            check("v5.10.0a.next.1: empty path returns 0",
+                  empty_path == 0);
+
+            EnsembleModelZoo_Free(&ez_dst);
+            unlink(prior_path);
+        }
+
+        // === Test next.1.2: BacktestRunConfig has bandit_state_prior_path
+        // field that defaults to empty after memset ===
+        BacktestRunConfig run;
+        memset(&run, 0, sizeof(run));
+        check("v5.10.0a.next.1: BacktestRunConfig.bandit_state_prior_path "
+              "zero-init = empty",
+              run.bandit_state_prior_path[0] == '\0');
+        // Field accepts at least 399 chars + null terminator
+        snprintf(run.bandit_state_prior_path,
+                 sizeof(run.bandit_state_prior_path),
+                 "/path/to/some/bundle/bandit_state.json");
+        check("v5.10.0a.next.1: bandit_state_prior_path accepts assignment",
+              strncmp(run.bandit_state_prior_path,
+                      "/path/to/some/bundle/bandit_state.json", 256) == 0);
+
+        EnsembleModelZoo_Free(&ez_src);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0a.next.2 — Bandit replay-determinism ---\n");
+    {
+        // Theory: bandit math (Bandit_Update + reward computation +
+        // RecordPrediction → TickRewardsFromLookback) is deterministic by
+        // construction — same input sequence → same output state. This
+        // test verifies that empirically: feed two ezoos the SAME sequence
+        // of reward events, save both to JSON, assert files are bytewise
+        // identical.
+        //
+        // Why this matters: the operator's backtest-to-deployment trust
+        // chain depends on this. If a backtest's bandit_state.json drifts
+        // run-over-run (even with identical inputs), the run snapshots are
+        // not reproducible and historical comparisons are meaningless.
+        //
+        // FULL backtest replay (with actual ML models, full predict-reward
+        // cycle) requires synthetic model fixtures — deferred until those
+        // exist. This test covers the bandit layer end-to-end.
+
+        // === Setup: two identically-initialized ezoos ===
+        EnsembleModelZoo<FP> ez1, ez2;
+        EnsembleModelZoo_Init(&ez1);
+        EnsembleModelZoo_Init(&ez2);
+        for (auto* ez : {&ez1, &ez2}) {
+            ez->active = 1;
+            ez->buy_signal_count = 4;
+            ez->horizon_ticks_at_idx[0] = 100;
+            ez->horizon_ticks_at_idx[1] = 500;
+            ez->horizon_ticks_at_idx[2] = 1000;
+            ez->horizon_ticks_at_idx[3] = 2000;
+            EnsembleModelZoo_InitBandits(ez, 0.05, 200);
+        }
+
+        // === Replay: identical sequence of predictions + price moves ===
+        // Use deterministic patterns. 50 cycles of:
+        //   - record per-arm predictions (varied by cycle)
+        //   - advance call counter past lookback threshold
+        //   - feed lookback rewards with deterministic price delta
+        const int N_CYCLES = 50;
+        for (int c = 0; c < N_CYCLES; ++c) {
+            // Per-arm predictions vary deterministically across cycles
+            float preds[4] = {
+                0.5f + 0.3f * sinf((float)c * 0.1f),
+                0.5f + 0.2f * cosf((float)c * 0.15f),
+                0.5f - 0.25f * sinf((float)c * 0.2f),
+                0.5f + 0.1f * cosf((float)c * 0.25f),
+            };
+            int regime = c % NUM_REGIMES;
+            float sample_price = 60000.0f + 100.0f * (float)c;
+
+            EnsembleModelZoo_RecordPrediction(&ez1, regime, preds, 4, sample_price);
+            EnsembleModelZoo_RecordPrediction(&ez2, regime, preds, 4, sample_price);
+
+            // Advance call counter so older records are old enough to reward.
+            // Each cycle: 11 dummy records advance count past 1000-tick / 100-poll
+            // = 10-call lookback threshold.
+            for (int d = 0; d < 11; ++d) {
+                EnsembleModelZoo_RecordPrediction(&ez1, regime, preds, 4, sample_price);
+                EnsembleModelZoo_RecordPrediction(&ez2, regime, preds, 4, sample_price);
+            }
+
+            // Feed lookback rewards. Price moved up 1% from sample.
+            float current_price = sample_price * 1.01f;
+            EnsembleModelZoo_TickRewardsFromLookback(&ez1, current_price, 1000, 100, 0.02);
+            EnsembleModelZoo_TickRewardsFromLookback(&ez2, current_price, 1000, 100, 0.02);
+
+            // Trade-close reward every 5 cycles (sparse signal).
+            if (c % 5 == 4) {
+                double pnl_bps = (c % 2 == 0) ? 50.0 : -25.0;
+                EnsembleModelZoo_TradeCloseReward(&ez1, pnl_bps, 4.0);
+                EnsembleModelZoo_TradeCloseReward(&ez2, pnl_bps, 4.0);
+            }
+        }
+
+        // === Save both bandit states to JSON, diff bytewise ===
+        char path1[] = "/tmp/v5100a_next2_state1_XXXXXX.json";
+        char path2[] = "/tmp/v5100a_next2_state2_XXXXXX.json";
+        int fd1 = mkstemps(path1, 5);
+        int fd2 = mkstemps(path2, 5);
+        check("v5.10.0a.next.2: tmp output files created", fd1 >= 0 && fd2 >= 0);
+        if (fd1 >= 0 && fd2 >= 0) {
+            close(fd1); close(fd2);
+            unlink(path1); unlink(path2);
+            // Use a stable bundle id (not derived from training_fingerprint
+            // since fingerprints are empty in this synthetic test → would
+            // both produce id of all zeros). Pin explicit constant.
+            const char* bundle_id_const = "replay_determinism_test_bundle";
+            int s1 = Bandit_SaveJSON(ez1.bandits, NUM_REGIMES, path1,
+                                       bundle_id_const, nullptr);
+            int s2 = Bandit_SaveJSON(ez2.bandits, NUM_REGIMES, path2,
+                                       bundle_id_const, nullptr);
+            check("v5.10.0a.next.2: ez1 bandit state saved", s1 == 1);
+            check("v5.10.0a.next.2: ez2 bandit state saved", s2 == 1);
+
+            // Read both files into memory + compare. Strip the
+            // saved_at_ts_ns field which differs by construction (one
+            // line difference is expected; everything else must match).
+            FILE* f1 = fopen(path1, "r");
+            FILE* f2 = fopen(path2, "r");
+            check("v5.10.0a.next.2: both saved files readable",
+                  f1 != nullptr && f2 != nullptr);
+            if (f1 && f2) {
+                fseek(f1, 0, SEEK_END); long sz1 = ftell(f1); fseek(f1, 0, SEEK_SET);
+                fseek(f2, 0, SEEK_END); long sz2 = ftell(f2); fseek(f2, 0, SEEK_SET);
+                check("v5.10.0a.next.2: file sizes within 64 bytes "
+                      "(saved_at_ts_ns is the only expected difference)",
+                      labs(sz1 - sz2) < 64);
+                char* buf1 = (char*)malloc(sz1 + 1);
+                char* buf2 = (char*)malloc(sz2 + 1);
+                size_t r1 = fread(buf1, 1, sz1, f1);
+                size_t r2 = fread(buf2, 1, sz2, f2);
+                buf1[r1] = '\0'; buf2[r2] = '\0';
+
+                // Strip the saved_at_ts_ns line from both before compare.
+                auto strip_ts = [](char* buf) {
+                    char* start = strstr(buf, "\"saved_at_ts_ns\":");
+                    if (!start) return;
+                    char* end = strchr(start, '\n');
+                    if (!end) return;
+                    end++;
+                    memmove(start, end, strlen(end) + 1);
+                };
+                strip_ts(buf1);
+                strip_ts(buf2);
+
+                check("v5.10.0a.next.2: bandit JSON bytewise-identical "
+                      "after identical reward sequence "
+                      "(determinism gate)",
+                      strcmp(buf1, buf2) == 0);
+
+                // Per-bandit field assertions for diagnostic if above fails
+                check("v5.10.0a.next.2: regime 0 weights[0] match",
+                      ez1.bandits[0].weights[0] == ez2.bandits[0].weights[0]);
+                check("v5.10.0a.next.2: regime 2 weights[3] match",
+                      ez1.bandits[2].weights[3] == ez2.bandits[2].weights[3]);
+                check("v5.10.0a.next.2: regime 1 cum_reward match",
+                      ez1.bandits[1].cum_reward[1] == ez2.bandits[1].cum_reward[1]);
+                check("v5.10.0a.next.2: regime 4 pulls match",
+                      ez1.bandits[4].pulls[2] == ez2.bandits[4].pulls[2]);
+                check("v5.10.0a.next.2: regime 3 total_steps match",
+                      ez1.bandits[3].total_steps == ez2.bandits[3].total_steps);
+                check("v5.10.0a.next.2: predict_call_count matches",
+                      ez1.predict_call_count == ez2.predict_call_count);
+
+                free(buf1); free(buf2);
+                fclose(f1); fclose(f2);
+            }
+            unlink(path1); unlink(path2);
+        }
+
+        EnsembleModelZoo_Free(&ez1);
+        EnsembleModelZoo_Free(&ez2);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0b.1 — FPN_FromInt pure-integer constructor ---\n");
+    {
+        // Theory: FPN_FromInt avoids the IEEE-754 reorderings that
+        // FPN_FromDouble<F>((double)int) can introduce across compilers / -O
+        // levels. For small integers (indices, counts, precomputed sums) the
+        // pure-integer path is bytewise-deterministic across builds.
+        // v5.10.0b.1 prerequisite for the FPN-end-to-end conversion.
+
+        // Round-trip basic values
+        FPN<64> z = FPN_FromInt<64>(0);
+        check("v5.10.0b.1: FPN_FromInt(0) zero magnitude",
+              z.sign == 0 && FPN_IsZero(z));
+
+        FPN<64> one = FPN_FromInt<64>(1);
+        check("v5.10.0b.1: FPN_FromInt(1) round-trips to double",
+              FPN_ToDouble(one) == 1.0 && one.sign == 0);
+
+        FPN<64> neg = FPN_FromInt<64>(-42);
+        check("v5.10.0b.1: FPN_FromInt(-42) preserves sign + magnitude",
+              FPN_ToDouble(neg) == -42.0 && neg.sign == 1);
+
+        // Field-equal helper (memcmp would compare uninitialized struct
+        // padding bytes; compare meaningful fields instead).
+        auto fpn_field_eq = [](const FPN<64>& a, const FPN<64>& b) -> bool {
+            if (a.sign != b.sign) return false;
+            for (unsigned i = 0; i < FPN<64>::N; i++)
+                if (a.w[i] != b.w[i]) return false;
+            return true;
+        };
+
+        // Field-equal with FromDouble for small ints (indices / counts).
+        // For i < 2^53, double exactly represents i, so FromInt and
+        // FromDouble must produce identical FPN values.
+        bool int_dbl_match_all = true;
+        for (int i = 0; i < 128; i++) {
+            FPN<64> via_int = FPN_FromInt<64>(i);
+            FPN<64> via_dbl = FPN_FromDouble<64>((double)i);
+            if (!fpn_field_eq(via_int, via_dbl)) {
+                printf("  [v5.10.0b.1 DIAG] i=%d FromInt != FromDouble (sign or w[])\n", i);
+                int_dbl_match_all = false;
+                break;
+            }
+        }
+        check("v5.10.0b.1: FPN_FromInt(i) field-equal FPN_FromDouble((double)i) for i=0..127",
+              int_dbl_match_all);
+
+        // Computed integer values used in RollingStats sum_x / sum_x2.
+        // n=128 max: sum_x = 128*127/2 = 8128; sum_x2 = 128*127*255/6 = 691,520
+        bool sumx_match_all = true;
+        for (int n = 2; n <= 128; n++) {
+            int64_t n_l = (int64_t)n;
+            int64_t sum_x_int  = n_l * (n_l - 1) / 2;
+            int64_t sum_x2_int = n_l * (n_l - 1) * (2 * n_l - 1) / 6;
+            FPN<64> via_int  = FPN_FromInt<64>(sum_x_int);
+            FPN<64> via_dbl  = FPN_FromDouble<64>((double)n * (double)(n - 1) / 2.0);
+            FPN<64> via_int2 = FPN_FromInt<64>(sum_x2_int);
+            FPN<64> via_dbl2 = FPN_FromDouble<64>((double)n * (double)(n - 1) * (double)(2 * n - 1) / 6.0);
+            if (!fpn_field_eq(via_int, via_dbl) || !fpn_field_eq(via_int2, via_dbl2)) {
+                printf("  [v5.10.0b.1 DIAG] n=%d sum_x or sum_x2 diverges\n", n);
+                sumx_match_all = false;
+                break;
+            }
+        }
+        check("v5.10.0b.1: precomputed sum_x/sum_x2 field-equal int vs double for n=2..128",
+              sumx_match_all);
+
+        // Boundary: large positive + INT64_MIN safety (no UB)
+        FPN<64> big = FPN_FromInt<64>(1234567890LL);
+        check("v5.10.0b.1: FPN_FromInt(1234567890) round-trips",
+              FPN_ToDouble(big) == 1234567890.0 && big.sign == 0);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0b.2.5.A — FPN-native Newton-Raphson sqrt ---\n");
+    {
+        // Theory: FPN_Sqrt was a stub round-tripping through IEEE-754 sqrt
+        // (FPN_FromDouble(sqrt(FPN_ToDouble(value)))). Replaced with pure
+        // integer Newton-Raphson on FPN bit-scan seed → bytewise-deterministic
+        // across compilers / -O levels / FMA support. Required by FlowFeatures
+        // z-score conversion (B.2.5.C).
+
+        // Edge: sqrt(0) = 0
+        check("v5.10.0b.2.5.A: sqrt(0) = 0",
+              FPN_IsZero(FPN_Sqrt(FPN_Zero<64>())));
+
+        // Edge: sqrt(neg) = 0 (graceful; old stub would assert)
+        FPN<64> neg = FPN_FromInt<64>(-4);
+        check("v5.10.0b.2.5.A: sqrt(negative) = 0 (graceful)",
+              FPN_IsZero(FPN_Sqrt(neg)));
+
+        // Perfect squares: sqrt(4) = 2, sqrt(100) = 10, sqrt(10000) = 100
+        auto sqrt_close = [](double expected, FPN<64> v, double rel_eps) -> bool {
+            double got = FPN_ToDouble(FPN_Sqrt(v));
+            double err = (got - expected) / expected;
+            if (err < 0) err = -err;
+            return err < rel_eps;
+        };
+        check("v5.10.0b.2.5.A: sqrt(4) ≈ 2 (rel < 1e-10)",
+              sqrt_close(2.0, FPN_FromInt<64>(4), 1e-10));
+        check("v5.10.0b.2.5.A: sqrt(100) ≈ 10",
+              sqrt_close(10.0, FPN_FromInt<64>(100), 1e-10));
+        check("v5.10.0b.2.5.A: sqrt(10000) ≈ 100",
+              sqrt_close(100.0, FPN_FromInt<64>(10000), 1e-10));
+
+        // Non-perfect squares vs IEEE-754 reference
+        check("v5.10.0b.2.5.A: sqrt(2) ≈ 1.41421356 (vs IEEE)",
+              sqrt_close(sqrt(2.0), FPN_FromInt<64>(2), 1e-10));
+        check("v5.10.0b.2.5.A: sqrt(3) ≈ 1.732050808 (vs IEEE)",
+              sqrt_close(sqrt(3.0), FPN_FromInt<64>(3), 1e-10));
+        check("v5.10.0b.2.5.A: sqrt(7) ≈ 2.645751311 (vs IEEE)",
+              sqrt_close(sqrt(7.0), FPN_FromInt<64>(7), 1e-10));
+
+        // Larger values typical for trade-size variance (1e6 to 1e10)
+        check("v5.10.0b.2.5.A: sqrt(1e6) ≈ 1000",
+              sqrt_close(1000.0, FPN_FromInt<64>(1000000), 1e-10));
+        check("v5.10.0b.2.5.A: sqrt(123456789) ≈ ~11111.111",
+              sqrt_close(sqrt(123456789.0), FPN_FromInt<64>(123456789LL), 1e-10));
+
+        // Determinism: same input → same output bytes (run twice, field-equal)
+        FPN<64> two = FPN_FromInt<64>(2);
+        FPN<64> r1  = FPN_Sqrt(two);
+        FPN<64> r2  = FPN_Sqrt(two);
+        bool det = (r1.sign == r2.sign);
+        for (unsigned i = 0; i < FPN<64>::N; i++) det = det && (r1.w[i] == r2.w[i]);
+        check("v5.10.0b.2.5.A: sqrt(x) is deterministic (bytewise-equal repeat)",
+              det);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0b.2.5.B — FPN-native Taylor exp ---\n");
+    {
+        // Theory: FPN_Exp was a stub round-tripping through IEEE-754 exp.
+        // Replaced with range reduction (x = k*ln(2) + r) + Taylor on r.
+        // 2^k is a bit-shift; exp(r) for |r| < ln(2)/2 converges in 9 terms.
+        // Required by FlowFeatures EWMA decay (B.2.5.C).
+
+        auto exp_close = [](double expected, FPN<64> v, double rel_eps) -> bool {
+            double got = FPN_ToDouble(FPN_Exp(v));
+            if (expected == 0.0) return got < rel_eps;  // absolute for ~0
+            double err = (got - expected) / expected;
+            if (err < 0) err = -err;
+            return err < rel_eps;
+        };
+
+        // exp(0) = 1
+        check("v5.10.0b.2.5.B: exp(0) = 1",
+              exp_close(1.0, FPN_Zero<64>(), 1e-12));
+
+        // exp(1) = e ≈ 2.71828
+        check("v5.10.0b.2.5.B: exp(1) ≈ e",
+              exp_close(M_E, FPN_FromInt<64>(1), 1e-9));
+
+        // exp(2) ≈ 7.389
+        check("v5.10.0b.2.5.B: exp(2) ≈ 7.389",
+              exp_close(exp(2.0), FPN_FromInt<64>(2), 1e-9));
+
+        // Negative inputs (the EWMA decay use case): exp(-1) ≈ 0.368
+        FPN<64> neg_one = FPN_FromInt<64>(-1);
+        check("v5.10.0b.2.5.B: exp(-1) ≈ 1/e",
+              exp_close(1.0/M_E, neg_one, 1e-9));
+
+        // EWMA decay range: exp(-0.1) ≈ 0.905, exp(-0.5) ≈ 0.607
+        // Use FPN_FromDouble directly for fractional inputs (those are
+        // bytewise-stable IEEE-754 literals)
+        FPN<64> neg_half = FPN_FromDouble<64>(-0.5);
+        check("v5.10.0b.2.5.B: exp(-0.5) ≈ 0.6065",
+              exp_close(exp(-0.5), neg_half, 1e-9));
+
+        // Larger negative: exp(-5) ≈ 6.74e-3
+        FPN<64> neg_five = FPN_FromInt<64>(-5);
+        check("v5.10.0b.2.5.B: exp(-5) ≈ 6.74e-3",
+              exp_close(exp(-5.0), neg_five, 1e-9));
+
+        // Far negative: exp(-10) ≈ 4.54e-5
+        FPN<64> neg_ten = FPN_FromInt<64>(-10);
+        check("v5.10.0b.2.5.B: exp(-10) ≈ 4.54e-5",
+              exp_close(exp(-10.0), neg_ten, 1e-8));
+
+        // Determinism: same input → same output bytes
+        FPN<64> input = FPN_FromInt<64>(-3);
+        FPN<64> r1 = FPN_Exp(input);
+        FPN<64> r2 = FPN_Exp(input);
+        bool det = (r1.sign == r2.sign);
+        for (unsigned i = 0; i < FPN<64>::N; i++) det = det && (r1.w[i] == r2.w[i]);
+        check("v5.10.0b.2.5.B: exp(x) is deterministic (bytewise-equal repeat)",
+              det);
+
+        // Identity check: exp(a) * exp(b) ≈ exp(a + b)
+        // Use FPN values, multiply, compare to FPN_Exp(sum)
+        FPN<64> a = FPN_FromDouble<64>(-1.5);
+        FPN<64> b = FPN_FromDouble<64>(-2.3);
+        FPN<64> sum = FPN_Add(a, b);
+        FPN<64> exp_a = FPN_Exp(a);
+        FPN<64> exp_b = FPN_Exp(b);
+        FPN<64> exp_sum = FPN_Exp(sum);
+        FPN<64> product = FPN_Mul(exp_a, exp_b);
+        double diff = FPN_ToDouble(FPN_Sub(product, exp_sum));
+        if (diff < 0) diff = -diff;
+        double scale = FPN_ToDouble(exp_sum);
+        check("v5.10.0b.2.5.B: exp(a)*exp(b) ≈ exp(a+b) (relative < 1e-8)",
+              diff / scale < 1e-8);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0b.2.5.D — FPN-native Taylor sin/cos ---\n");
+    {
+        // Theory: FPN_Sin/Cos were stubs round-tripping through IEEE-754.
+        // Replaced with range reduction to [0, π/2] + 8-term Taylor on x²
+        // (so 9 odd-power terms total, covering up to x^17/17!).
+        // FPN_Cos(x) = FPN_Sin(x + π/2). Required by RegimeDetector
+        // hour_sin/hour_cos (sin(2π·hour/24) cyclical hour encoding).
+
+        auto sincos_close = [](double expected, FPN<64> got, double abs_eps) -> bool {
+            double v = FPN_ToDouble(got);
+            double err = v - expected;
+            if (err < 0) err = -err;
+            return err < abs_eps;
+        };
+
+        FPN<64> zero = FPN_Zero<64>();
+        check("v5.10.0b.2.5.D: sin(0) = 0",
+              sincos_close(0.0, FPN_Sin(zero), 1e-12));
+        check("v5.10.0b.2.5.D: cos(0) = 1",
+              sincos_close(1.0, FPN_Cos(zero), 1e-9));
+
+        // π/2 → sin = 1, cos = 0
+        FPN<64> hpi = FPN_FromDouble<64>(1.5707963267948966);
+        check("v5.10.0b.2.5.D: sin(π/2) ≈ 1",
+              sincos_close(1.0, FPN_Sin(hpi), 1e-9));
+        check("v5.10.0b.2.5.D: cos(π/2) ≈ 0",
+              sincos_close(0.0, FPN_Cos(hpi), 1e-9));
+
+        // π → sin = 0, cos = -1
+        FPN<64> pi_v = FPN_FromDouble<64>(3.141592653589793);
+        check("v5.10.0b.2.5.D: sin(π) ≈ 0",
+              sincos_close(0.0, FPN_Sin(pi_v), 1e-9));
+        check("v5.10.0b.2.5.D: cos(π) ≈ -1",
+              sincos_close(-1.0, FPN_Cos(pi_v), 1e-9));
+
+        // 3π/2 → sin = -1, cos = 0 (range reduction past π)
+        FPN<64> three_hpi = FPN_FromDouble<64>(4.71238898038469);
+        check("v5.10.0b.2.5.D: sin(3π/2) ≈ -1 (range-reduces past π)",
+              sincos_close(-1.0, FPN_Sin(three_hpi), 1e-9));
+        check("v5.10.0b.2.5.D: cos(3π/2) ≈ 0",
+              sincos_close(0.0, FPN_Cos(three_hpi), 1e-9));
+
+        // Negative input: sin(-π/4) = -sin(π/4) ≈ -0.707
+        FPN<64> neg_qpi = FPN_FromDouble<64>(-0.7853981633974483);
+        check("v5.10.0b.2.5.D: sin(-π/4) ≈ -0.7071",
+              sincos_close(-sin(0.7853981633974483), FPN_Sin(neg_qpi), 1e-9));
+        check("v5.10.0b.2.5.D: cos(-π/4) ≈ 0.7071 (cos is even)",
+              sincos_close(cos(0.7853981633974483), FPN_Cos(neg_qpi), 1e-9));
+
+        // Period: sin(x + 2π) = sin(x); spot-check at 5π
+        FPN<64> five_pi = FPN_FromDouble<64>(15.707963267948966);
+        check("v5.10.0b.2.5.D: sin(5π) ≈ 0 (huge range reduction)",
+              sincos_close(0.0, FPN_Sin(five_pi), 1e-7));
+
+        // Pythagorean identity: sin²(x) + cos²(x) = 1
+        FPN<64> x_test = FPN_FromDouble<64>(1.234);
+        FPN<64> sx = FPN_Sin(x_test);
+        FPN<64> cx = FPN_Cos(x_test);
+        FPN<64> id = FPN_Add(FPN_Mul(sx, sx), FPN_Mul(cx, cx));
+        check("v5.10.0b.2.5.D: sin²(1.234) + cos²(1.234) ≈ 1",
+              sincos_close(1.0, id, 1e-9));
+
+        // Hour encoding (use case): sin(2π·6/24) = sin(π/2) = 1
+        FPN<64> hour_6 = FPN_FromDouble<64>(2.0 * 3.141592653589793 * 6.0 / 24.0);
+        check("v5.10.0b.2.5.D: sin(2π·6/24) ≈ 1 (hour-of-day cyclical encoding)",
+              sincos_close(1.0, FPN_Sin(hour_6), 1e-9));
+
+        // Determinism
+        FPN<64> r1 = FPN_Sin(x_test);
+        FPN<64> r2 = FPN_Sin(x_test);
+        bool det = (r1.sign == r2.sign);
+        for (unsigned i = 0; i < FPN<64>::N; i++) det = det && (r1.w[i] == r2.w[i]);
+        check("v5.10.0b.2.5.D: sin(x) is deterministic (bytewise-equal repeat)",
+              det);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0b.2.5.C — FlowFeatures internal FPN math ---\n");
+    {
+        // Theory: FlowState_Push, LargeTradeState_ZScore, SpreadState_ZScore
+        // now compute decay/sqrt via FPN_Exp/FPN_Sqrt internally — bytewise-
+        // deterministic across compilers / -O levels. Public API stays
+        // double (boundary-stable refactor; reduces touch sites). The
+        // bytewise contract: identical input sequence → identical stored
+        // bytes (modulo FPN_ToDouble's deterministic float conversion).
+
+        // FlowState bytewise determinism: run two identical sequences, the
+        // resulting struct contents must be identical down to each double
+        // bit pattern.
+        FlowState f1, f2;
+        FlowState_Init(&f1);
+        FlowState_Init(&f2);
+        struct { uint64_t ts; double sv; } seq[] = {
+            {1000000ULL,                       3.5},
+            {1000000ULL + 5  * 1000000ULL,    -1.2},
+            {1000000ULL + 17 * 1000000ULL,     2.8},
+            {1000000ULL + 60 * 1000000ULL,    -0.4},
+            {1000000ULL + 122* 1000000ULL,     5.1},
+            {1000000ULL + 300* 1000000ULL,    -3.7},
+        };
+        for (auto& step : seq) {
+            FlowState_Push(&f1, step.ts, step.sv);
+            FlowState_Push(&f2, step.ts, step.sv);
+        }
+        // Compare raw bytes of EWMA fields (doubles)
+        bool det_flow =
+            memcmp(&f1.ewma_10s, &f2.ewma_10s, sizeof(double)) == 0 &&
+            memcmp(&f1.ewma_1m,  &f2.ewma_1m,  sizeof(double)) == 0 &&
+            memcmp(&f1.ewma_5m,  &f2.ewma_5m,  sizeof(double)) == 0 &&
+            f1.last_us == f2.last_us;
+        check("v5.10.0b.2.5.C: FlowState_Push bytewise-deterministic across 6-step sequence",
+              det_flow);
+
+        // EWMA values are within IEEE-754 reference epsilon (decay precision
+        // matches Taylor's ~1e-9 relative bound)
+        // After 5 sec from first push at 3.5, second push -1.2:
+        // expected ewma_10s ≈ 3.5 * exp(-0.5) + (-1.2) ≈ 3.5 * 0.6065 - 1.2 ≈ 0.923
+        FlowState ref;
+        FlowState_Init(&ref);
+        FlowState_Push(&ref, 1000000ULL, 3.5);
+        FlowState_Push(&ref, 1000000ULL + 5*1000000ULL, -1.2);
+        double expected_10s = 3.5 * exp(-0.5) + (-1.2);
+        check("v5.10.0b.2.5.C: FlowState_Push 5s-decay matches IEEE within 1e-8",
+              fabs(ref.ewma_10s - expected_10s) < 1e-8);
+
+        // LargeTradeState_ZScore determinism + correctness
+        LargeTradeState<64, 8> lt1, lt2;
+        LargeTradeState_Init(&lt1);
+        LargeTradeState_Init(&lt2);
+        double sizes[] = {10.0, 12.0, 11.5, 9.8, 13.2, 10.7, 14.0, 11.0};
+        for (double s : sizes) {
+            LargeTradeState_Push(&lt1, FPN_FromDouble<64>(s));
+            LargeTradeState_Push(&lt2, FPN_FromDouble<64>(s));
+        }
+        FPN<64> probe = FPN_FromDouble<64>(13.5);
+        double z1 = LargeTradeState_ZScore(&lt1, probe);
+        double z2 = LargeTradeState_ZScore(&lt2, probe);
+        check("v5.10.0b.2.5.C: LargeTradeState_ZScore bytewise-deterministic",
+              memcmp(&z1, &z2, sizeof(double)) == 0);
+
+        // Sanity: 13.5 is above the mean (≈11.5), so z > 0
+        check("v5.10.0b.2.5.C: LargeTradeState_ZScore(above_mean) > 0",
+              z1 > 0.0);
+
+        // SpreadState_ZScore determinism + correctness
+        SpreadState<64, 8> ss1, ss2;
+        SpreadState_Init(&ss1);
+        SpreadState_Init(&ss2);
+        for (double s : sizes) {
+            SpreadState_Push(&ss1, FPN_FromDouble<64>(s));
+            SpreadState_Push(&ss2, FPN_FromDouble<64>(s));
+        }
+        double sz1 = SpreadState_ZScore(&ss1, FPN_FromDouble<64>(8.0));
+        double sz2 = SpreadState_ZScore(&ss2, FPN_FromDouble<64>(8.0));
+        check("v5.10.0b.2.5.C: SpreadState_ZScore bytewise-deterministic",
+              memcmp(&sz1, &sz2, sizeof(double)) == 0);
+        check("v5.10.0b.2.5.C: SpreadState_ZScore(below_mean) < 0",
+              sz1 < 0.0);
+
+        // Edge: count < 2 returns exactly 0 (degenerate path)
+        LargeTradeState<64, 8> empty;
+        LargeTradeState_Init(&empty);
+        check("v5.10.0b.2.5.C: ZScore returns 0 on empty buffer",
+              LargeTradeState_ZScore(&empty, FPN_FromDouble<64>(1.0)) == 0.0);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0b.2 — RegimeDetector hour_sin/cos via FPN_Sin/Cos ---\n");
+    {
+        // Theory: hour_sin/cos in Regime_ComputeSignals computed sin/cos
+        // via IEEE-754 reordering-prone math; now uses FPN_Sin/FPN_Cos
+        // (bytewise-deterministic Taylor). Boundary-stable: hour_sin/cos
+        // fields stay double.
+        // Use FPN_Sin/Cos directly here as a unit-level proxy — the actual
+        // call site lives in Regime_ComputeSignals at RegimeDetector.hpp:345
+        // and is exercised by the existing regime tests + the v5.9.2
+        // replay-determinism test (controller_test.cpp:10251).
+
+        const double TAU = 2.0 * 3.14159265358979323846;
+
+        // Cyclical encoding for hour 0..23 — verify sin² + cos² ≈ 1 for each
+        bool all_unit_circle = true;
+        for (int h = 0; h < 24; h++) {
+            FPN<64> arg = FPN_FromDouble<64>(TAU * (double)h / 24.0);
+            double s = FPN_ToDouble(FPN_Sin(arg));
+            double c = FPN_ToDouble(FPN_Cos(arg));
+            double mag = s*s + c*c;
+            if (fabs(mag - 1.0) > 1e-9) {
+                printf("  [v5.10.0b.2 DIAG] h=%d sin²+cos²=%.12g (off-unit)\n", h, mag);
+                all_unit_circle = false;
+                break;
+            }
+        }
+        check("v5.10.0b.2: hour-encoding sin²+cos² ≈ 1 for h=0..23",
+              all_unit_circle);
+
+        // Determinism: two computations of the same hour give bytewise-equal
+        // double output (the contract the conversion is buying)
+        FPN<64> arg = FPN_FromDouble<64>(TAU * 13.5 / 24.0);
+        double s1 = FPN_ToDouble(FPN_Sin(arg));
+        double s2 = FPN_ToDouble(FPN_Sin(arg));
+        double c1 = FPN_ToDouble(FPN_Cos(arg));
+        double c2 = FPN_ToDouble(FPN_Cos(arg));
+        check("v5.10.0b.2: hour_sin/cos bytewise-deterministic across repeats",
+              memcmp(&s1, &s2, sizeof(double)) == 0 &&
+              memcmp(&c1, &c2, sizeof(double)) == 0);
+
+        // Epsilon vs IEEE-754 reference
+        double ref_s = sin(TAU * 13.5 / 24.0);
+        double ref_c = cos(TAU * 13.5 / 24.0);
+        check("v5.10.0b.2: hour_sin matches IEEE within 1e-9",
+              fabs(s1 - ref_s) < 1e-9);
+        check("v5.10.0b.2: hour_cos matches IEEE within 1e-9",
+              fabs(c1 - ref_c) < 1e-9);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0e — runtime IC drift detection ---\n");
+    {
+        // Theory: DriftHistory time-series ring buffer of (IC, ts_us)
+        // pairs sampled at slow-path cadence post-fill. Sustained breach =
+        // avg IC over the past `window_us` is below `floor` AND >= 5
+        // samples in the window. Engine emits CRITICAL log on first
+        // breach + optionally trips per-core kill_switch.
+
+        DriftHistory dh;
+        DriftHistory_Init(&dh);
+        check("v5.10.0e: DriftHistory_Init zeroes count + head + breached",
+              dh.count == 0 && dh.head == 0 && dh.breached == 0 &&
+              dh.kill_tripped == 0);
+
+        // Push 3 samples below floor (insufficient — < 5 samples returns 0)
+        DriftHistory_Push(&dh, 0.005, 1000ULL);
+        DriftHistory_Push(&dh, 0.005, 2000ULL);
+        DriftHistory_Push(&dh, 0.005, 3000ULL);
+        check("v5.10.0e: Push updates count",        dh.count == 3);
+        check("v5.10.0e: Push updates head",         dh.head == 3);
+        double avg; int n;
+        int b = DriftHistory_CheckBreach(&dh, 4000ULL, 100000ULL, 0.02, &avg, &n);
+        check("v5.10.0e: CheckBreach < 5 samples returns 0 (insufficient)",
+              b == 0);
+
+        // Push 5 more samples below floor (8 total) — should trigger breach
+        DriftHistory_Push(&dh, 0.005, 4000ULL);
+        DriftHistory_Push(&dh, 0.005, 5000ULL);
+        DriftHistory_Push(&dh, 0.005, 6000ULL);
+        DriftHistory_Push(&dh, 0.005, 7000ULL);
+        DriftHistory_Push(&dh, 0.005, 8000ULL);
+        b = DriftHistory_CheckBreach(&dh, 9000ULL, 100000ULL, 0.02, &avg, &n);
+        check("v5.10.0e: CheckBreach 8 samples below floor → BREACH",
+              b == 1);
+        check("v5.10.0e: avg_ic ≈ 0.005",
+              avg > 0.004 && avg < 0.006);
+        check("v5.10.0e: samples_in_window == 8",
+              n == 8);
+
+        // Healthy IC: 10 samples above floor → no breach
+        DriftHistory dh2;
+        DriftHistory_Init(&dh2);
+        for (uint64_t t = 1000; t <= 10000; t += 1000) {
+            DriftHistory_Push(&dh2, 0.15, t);
+        }
+        b = DriftHistory_CheckBreach(&dh2, 11000ULL, 100000ULL, 0.02, &avg, &n);
+        check("v5.10.0e: healthy IC (0.15 > floor 0.02) → no breach",
+              b == 0);
+        check("v5.10.0e: healthy avg_ic ≈ 0.15",
+              avg > 0.14 && avg < 0.16);
+
+        // Window expiry: samples outside window are excluded
+        DriftHistory dh3;
+        DriftHistory_Init(&dh3);
+        // 6 samples at ts=1000..6000 (all far in the past relative to "now")
+        for (uint64_t t = 1000; t <= 6000; t += 1000) {
+            DriftHistory_Push(&dh3, 0.005, t);
+        }
+        // CheckBreach at ts=10000000 with window=100us → all samples outside window
+        b = DriftHistory_CheckBreach(&dh3, 10000000ULL, 100ULL, 0.02, &avg, &n);
+        check("v5.10.0e: samples outside window are excluded",
+              b == 0 && n == 0);
+
+        // Mixed: 3 healthy + 5 below floor → average above floor → no breach
+        DriftHistory dh4;
+        DriftHistory_Init(&dh4);
+        for (int i = 0; i < 3; i++) DriftHistory_Push(&dh4, 0.30, (uint64_t)(1000 + i * 100));
+        for (int i = 0; i < 5; i++) DriftHistory_Push(&dh4, 0.005, (uint64_t)(2000 + i * 100));
+        b = DriftHistory_CheckBreach(&dh4, 3000ULL, 100000ULL, 0.02, &avg, &n);
+        // avg = (3*0.30 + 5*0.005) / 8 = (0.9 + 0.025) / 8 = 0.115625
+        check("v5.10.0e: mixed avg above floor → no breach",
+              b == 0);
+        check("v5.10.0e: mixed avg ≈ 0.116",
+              avg > 0.11 && avg < 0.12);
+
+        // Boundary: avg exactly at floor → no breach (strict <)
+        DriftHistory dh5;
+        DriftHistory_Init(&dh5);
+        for (int i = 0; i < 8; i++) DriftHistory_Push(&dh5, 0.02, (uint64_t)(1000 + i * 100));
+        b = DriftHistory_CheckBreach(&dh5, 2000ULL, 100000ULL, 0.02, &avg, &n);
+        check("v5.10.0e: avg exactly at floor → no breach (strict <)",
+              b == 0);
+
+        // Boundary: avg just below floor → breach
+        DriftHistory dh6;
+        DriftHistory_Init(&dh6);
+        for (int i = 0; i < 8; i++) DriftHistory_Push(&dh6, 0.019, (uint64_t)(1000 + i * 100));
+        b = DriftHistory_CheckBreach(&dh6, 2000ULL, 100000ULL, 0.02, &avg, &n);
+        check("v5.10.0e: avg just below floor → breach",
+              b == 1);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0d — FOREACH_TARGET label registry + LABEL_REGISTRY_HASH ---\n");
+    {
+        // Theory: label set is now defined via FOREACH_TARGET(X) X-macro.
+        // The label_table[] array, the LABEL_<NAME> enum constants, and
+        // LABEL_REGISTRY_HASH() are all auto-generated from the macro,
+        // eliminating the silent-divergence hazard between the constants,
+        // the table rows, and any dispatcher sites. Stamp body position
+        // 20 (locked per master plan integration matrix; corrected from
+        // 19 by /plan-check 2026-05-06 since 0a took 19).
+
+        // Auto-generated count matches the canonical 8-label set
+        check("v5.10.0d: LABEL_COUNT == 8 (canonical label set size)",
+              LABEL_COUNT == 8);
+        check("v5.10.0d: LABEL_COUNT == LABEL_COUNT_AUTO (X-macro count match)",
+              LABEL_COUNT == LABEL_COUNT_AUTO);
+
+        // LABEL_* constant values preserved (binary compat for cfg files,
+        // serialized snapshots, training labels). v5.10.0d retrofit MUST
+        // NOT shift any existing constant — APPEND-ONLY discipline.
+        check("v5.10.0d: LABEL_WIN_LOSS == 0 (preserved post X-macro)",
+              LABEL_WIN_LOSS == 0);
+        check("v5.10.0d: LABEL_BARRIER == 1",            LABEL_BARRIER == 1);
+        check("v5.10.0d: LABEL_FORWARD_PNL == 2",        LABEL_FORWARD_PNL == 2);
+        check("v5.10.0d: LABEL_REGIME == 3",             LABEL_REGIME == 3);
+        check("v5.10.0d: LABEL_VOL_BARRIER == 4",        LABEL_VOL_BARRIER == 4);
+        check("v5.10.0d: LABEL_WILL_PEAK == 5",          LABEL_WILL_PEAK == 5);
+        check("v5.10.0d: LABEL_WILL_VALLEY == 6",        LABEL_WILL_VALLEY == 6);
+        check("v5.10.0d: LABEL_PEAK_VALLEY_STABLE == 7", LABEL_PEAK_VALLEY_STABLE == 7);
+
+        // label_table rows match the constants (X-macro generates both
+        // from the same source).
+        check("v5.10.0d: label_table[0].id == LABEL_WIN_LOSS",
+              label_table[0].id == LABEL_WIN_LOSS);
+        check("v5.10.0d: label_table[7].id == LABEL_PEAK_VALLEY_STABLE",
+              label_table[7].id == LABEL_PEAK_VALLEY_STABLE);
+        check("v5.10.0d: label_table[3].num_classes == 4 (regime is 4-class)",
+              label_table[3].num_classes == 4);
+        check("v5.10.0d: label_table[7].num_classes == 3 (peak/valley/stable)",
+              label_table[7].num_classes == 3);
+
+        // LABEL_REGISTRY_HASH() is non-zero (FNV-1a chain over actual content)
+        uint64_t h = LABEL_REGISTRY_HASH();
+        check("v5.10.0d: LABEL_REGISTRY_HASH() is non-zero",
+              h != 0);
+
+        // Hash is stable across calls (memoized)
+        uint64_t h2 = LABEL_REGISTRY_HASH();
+        check("v5.10.0d: LABEL_REGISTRY_HASH() is stable across calls",
+              h == h2);
+
+        // Hash is distinct from FEATURE_REGISTRY_HASH() (different domains)
+        uint64_t feat_h = FEATURE_REGISTRY_HASH();
+        check("v5.10.0d: LABEL_REGISTRY_HASH() != FEATURE_REGISTRY_HASH() (distinct domains)",
+              h != feat_h);
+
+        // Stamp body round-trip: emit with label_registry_hash, parse, verify
+        char tmp_model[L_tmpnam];
+        std::tmpnam(tmp_model);
+        FILE* mf = fopen(tmp_model, "wb"); fwrite("test", 1, 4, mf); fclose(mf);
+
+        StampInferenceCfgInputs inf = {};
+        inf.has_label_registry_hash = 1;
+        inf.label_registry_hash = h;
+        StampWriteResult sw = stamp_write_for_model(
+            tmp_model, "test-secret", MODEL_FORMAT_VERSION,
+            "2026-05-06", 0.6, 0.55, 0.05, 0.10,
+            FEATURE_REGISTRY_HASH(),
+            ENGINE_VERSION_STRING, &inf);
+        check("v5.10.0d: stamp_write_for_model emits hash field successfully",
+              sw.ok);
+
+        ModelStampResult vr = verify_model_stamp(
+            tmp_model, "test-secret", 0.10, MODEL_FORMAT_VERSION,
+            FEATURE_REGISTRY_HASH(), h);
+        check("v5.10.0d: verify accepts matching label hash",
+              vr.valid == 1);
+        check("v5.10.0d: parsed label hash matches emitted",
+              vr.label_registry_hash == h);
+        check("v5.10.0d: has_label_registry_hash flag set on parse",
+              vr.has_label_registry_hash == 1);
+
+        // Mismatch: stamp says hash A, engine wants hash B → REFUSE
+        uint64_t fake_engine_hash = h ^ 0xDEADBEEFULL;
+        ModelStampResult vr_mis = verify_model_stamp(
+            tmp_model, "test-secret", 0.10, MODEL_FORMAT_VERSION,
+            FEATURE_REGISTRY_HASH(), fake_engine_hash);
+        check("v5.10.0d: verify REFUSES on label hash mismatch",
+              vr_mis.valid == 0);
+        check("v5.10.0d: refusal reason mentions label-registry-hash",
+              strstr(vr_mis.reason, "label-registry-hash") != nullptr);
+
+        // Legacy: stamp without label hash field → WARN, accept
+        // (mirrors v5.8.6 feature_registry_hash legacy handling)
+        StampInferenceCfgInputs inf_legacy = {};
+        // has_label_registry_hash = 0 → field NOT emitted
+        StampWriteResult sw_legacy = stamp_write_for_model(
+            tmp_model, "test-secret", MODEL_FORMAT_VERSION,
+            "2026-05-06", 0.6, 0.55, 0.05, 0.10,
+            FEATURE_REGISTRY_HASH(),
+            ENGINE_VERSION_STRING, &inf_legacy);
+        check("v5.10.0d: legacy stamp (no label hash) emits successfully",
+              sw_legacy.ok);
+
+        ModelStampResult vr_legacy = verify_model_stamp(
+            tmp_model, "test-secret", 0.10, MODEL_FORMAT_VERSION,
+            FEATURE_REGISTRY_HASH(), h);
+        check("v5.10.0d: legacy stamp without label hash WARNS not REFUSES",
+              vr_legacy.valid == 1);
+        check("v5.10.0d: legacy stamp parsed label hash == 0 (sentinel)",
+              vr_legacy.label_registry_hash == 0);
+        check("v5.10.0d: legacy stamp has_label_registry_hash == 0",
+              vr_legacy.has_label_registry_hash == 0);
+
+        // Skip-check path: caller passes 0 → no comparison even with mismatched stamp
+        ModelStampResult vr_skip = verify_model_stamp(
+            tmp_model, "test-secret", 0.10, MODEL_FORMAT_VERSION,
+            FEATURE_REGISTRY_HASH(), 0);
+        check("v5.10.0d: caller-skip path (expected_label_hash=0) accepts",
+              vr_skip.valid == 1);
+
+        unlink(tmp_model);
+        char stamp_path[512];
+        snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", tmp_model);
+        unlink(stamp_path);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0b.3 — FP64_DivNoAssert pure-integer 192/128 long division ---\n");
+    {
+        // Theory: FP64_DivNoAssert was a long-double FPU round-trip
+        // (non-deterministic across compilers / -O levels / FMA support).
+        // Replaced with bit-by-bit 192-by-128 schoolbook long division on
+        // the integer pipeline. Result is bytewise-deterministic AND more
+        // precise than the prior IEEE-754 path. Tested through the public
+        // FPN<64> API which dispatches to FP64_DivNoAssert via the F=64
+        // specialization (FixedPointN.hpp:1162-1163).
+
+        auto fdiv_close = [](double expected, FPN<64> q, double rel_eps) -> bool {
+            double got = FPN_ToDouble(q);
+            if (expected == 0.0) return fabs(got) < rel_eps;
+            double err = (got - expected) / expected;
+            if (err < 0) err = -err;
+            return err < rel_eps;
+        };
+
+        FPN<64> one = FPN_FromDouble<64>(1.0);
+        FPN<64> two = FPN_FromDouble<64>(2.0);
+        FPN<64> four = FPN_FromDouble<64>(4.0);
+        check("v5.10.0b.3: 1/1 = 1",
+              fdiv_close(1.0, FPN_DivNoAssert(one, one), 1e-15));
+        check("v5.10.0b.3: 4/2 = 2",
+              fdiv_close(2.0, FPN_DivNoAssert(four, two), 1e-15));
+        check("v5.10.0b.3: 1/2 = 0.5 (exact)",
+              fdiv_close(0.5, FPN_DivNoAssert(one, two), 1e-15));
+
+        FPN<64> three = FPN_FromDouble<64>(3.0);
+        check("v5.10.0b.3: 1/3 ≈ 0.3333... within 1e-15",
+              fdiv_close(1.0/3.0, FPN_DivNoAssert(one, three), 1e-15));
+        FPN<64> seven = FPN_FromDouble<64>(7.0);
+        FPN<64> ten = FPN_FromDouble<64>(10.0);
+        check("v5.10.0b.3: 7/10 = 0.7 within 1e-15",
+              fdiv_close(0.7, FPN_DivNoAssert(seven, ten), 1e-15));
+
+        // Trading-relevant magnitudes: 70000 / 1.5 ≈ 46666.67
+        FPN<64> price = FPN_FromDouble<64>(70000.0);
+        FPN<64> small = FPN_FromDouble<64>(1.5);
+        check("v5.10.0b.3: 70000/1.5 ≈ 46666.67",
+              fdiv_close(70000.0/1.5, FPN_DivNoAssert(price, small), 1e-12));
+
+        // Sign handling
+        FPN<64> neg_eight = FPN_FromDouble<64>(-8.0);
+        FPN<64> neg_two   = FPN_FromDouble<64>(-2.0);
+        check("v5.10.0b.3: (-8)/4 = -2",
+              fdiv_close(-2.0, FPN_DivNoAssert(neg_eight, four), 1e-15));
+        check("v5.10.0b.3: (-8)/(-2) = 4",
+              fdiv_close(4.0, FPN_DivNoAssert(neg_eight, neg_two), 1e-15));
+        check("v5.10.0b.3: 8/(-2) = -4",
+              fdiv_close(-4.0, FPN_DivNoAssert(FPN_FromDouble<64>(8.0), neg_two), 1e-15));
+
+        // Determinism: same input → same FPN bytes
+        FPN<64> d1 = FPN_DivNoAssert(price, small);
+        FPN<64> d2 = FPN_DivNoAssert(price, small);
+        bool det = (d1.sign == d2.sign);
+        for (unsigned i = 0; i < FPN<64>::N; i++) det = det && (d1.w[i] == d2.w[i]);
+        check("v5.10.0b.3: divide is bytewise-deterministic (repeat)",
+              det);
+
+        // Edge: very small / very large (near-zero result).
+        // FPN<64> has 64 fractional bits → 1 ULP at result 1e-12 is
+        // ~5e-8 relative (= 2^-64 / 1e-12). Loosen to 1e-7 since the
+        // quantization, not the algorithm, dominates here.
+        FPN<64> tiny = FPN_FromDouble<64>(1e-6);
+        FPN<64> huge = FPN_FromDouble<64>(1e6);
+        check("v5.10.0b.3: 1e-6 / 1e6 ≈ 1e-12 (FPN<64> quantization-bounded)",
+              fdiv_close(1e-12, FPN_DivNoAssert(tiny, huge), 1e-7));
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0a.G.6 — Per-core ensemble cfg fields ---\n");
+    {
+        // === Test G.6.1: ensemble cfg defaults ===
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        check("v5.10.0a.G.6: ensemble_blend_mode default 'weighted'",
+              strcmp(cfg.ensemble_blend_mode, "weighted") == 0);
+        check("v5.10.0a.G.6: ensemble_bandit_eta default 0.1",
+              fabs(cfg.ensemble_bandit_eta - 0.1) < 1e-6);
+        check("v5.10.0a.G.6: ensemble_min_warmup_predictions default 100",
+              cfg.ensemble_min_warmup_predictions == 100);
+        check("v5.10.0a.G.6: ensemble_min_agreement_pct default 0.6",
+              fabs(cfg.ensemble_min_agreement_pct - 0.6) < 1e-6);
+
+        // === Test G.6.2: per-core fields default empty (inherit global) ===
+        check("v5.10.0a.G.6: core_0_horizon_list defaults empty",
+              cfg.core_horizon_list[0][0] == '\0');
+        check("v5.10.0a.G.6: core_0_ensemble_blend_mode defaults empty",
+              cfg.core_ensemble_blend_mode[0][0] == '\0');
+        check("v5.10.0a.G.6: core_0_disabled_horizons defaults empty",
+              cfg.core_disabled_horizons[0][0] == '\0');
+
+        // === Test G.6.3: parser reads global ensemble fields ===
+        char path[] = "/tmp/v5100aG6_global_XXXXXX";
+        int fd = mkstemp(path);
+        check("v5.10.0a.G.6: tmpfile created (global)", fd >= 0);
+        if (fd >= 0) {
+            dprintf(fd,
+                    "ensemble_blend_mode=selection\n"
+                    "ensemble_bandit_eta=0.25\n"
+                    "ensemble_min_warmup_predictions=50\n"
+                    "ensemble_min_agreement_pct=0.75\n");
+            close(fd);
+            ControllerConfig<FP> parsed = ControllerConfig_Load<FP>(path);
+            check("v5.10.0a.G.6: parses ensemble_blend_mode=selection",
+                  strcmp(parsed.ensemble_blend_mode, "selection") == 0);
+            check("v5.10.0a.G.6: parses ensemble_bandit_eta=0.25",
+                  fabs(parsed.ensemble_bandit_eta - 0.25) < 1e-6);
+            check("v5.10.0a.G.6: parses ensemble_min_warmup_predictions=50",
+                  parsed.ensemble_min_warmup_predictions == 50);
+            check("v5.10.0a.G.6: parses ensemble_min_agreement_pct=0.75",
+                  fabs(parsed.ensemble_min_agreement_pct - 0.75) < 1e-6);
+            unlink(path);
+        }
+
+        // === Test G.6.4: parser rejects unknown blend_mode (keeps default) ===
+        char path2[] = "/tmp/v5100aG6_bad_mode_XXXXXX";
+        int fd2 = mkstemp(path2);
+        if (fd2 >= 0) {
+            dprintf(fd2, "ensemble_blend_mode=garbage\n");
+            close(fd2);
+            ControllerConfig<FP> parsed = ControllerConfig_Load<FP>(path2);
+            check("v5.10.0a.G.6: rejects unknown blend_mode, keeps 'weighted' default",
+                  strcmp(parsed.ensemble_blend_mode, "weighted") == 0);
+            unlink(path2);
+        }
+
+        // === Test G.6.5: bandit_eta clamps to safe range ===
+        char path3[] = "/tmp/v5100aG6_eta_clamp_XXXXXX";
+        int fd3 = mkstemp(path3);
+        if (fd3 >= 0) {
+            dprintf(fd3, "ensemble_bandit_eta=5.0\n");  // out of [0.01, 1.0]
+            close(fd3);
+            ControllerConfig<FP> parsed = ControllerConfig_Load<FP>(path3);
+            check("v5.10.0a.G.6: bandit_eta>1.0 clamps to 1.0",
+                  fabs(parsed.ensemble_bandit_eta - 1.0) < 1e-6);
+            unlink(path3);
+        }
+
+        // === Test G.6.6: parser reads per-core string fields ===
+        char path4[] = "/tmp/v5100aG6_per_core_XXXXXX";
+        int fd4 = mkstemp(path4);
+        if (fd4 >= 0) {
+            dprintf(fd4,
+                    "core_0_horizon_list=100,500,1000\n"
+                    "core_0_ensemble_blend_mode=weighted\n"
+                    "core_0_disabled_horizons=100\n"
+                    "core_2_ensemble_blend_mode=selection\n");
+            close(fd4);
+            ControllerConfig<FP> parsed = ControllerConfig_Load<FP>(path4);
+            check("v5.10.0a.G.6: parses core_0_horizon_list",
+                  strcmp(parsed.core_horizon_list[0], "100,500,1000") == 0);
+            check("v5.10.0a.G.6: parses core_0_ensemble_blend_mode=weighted",
+                  strcmp(parsed.core_ensemble_blend_mode[0], "weighted") == 0);
+            check("v5.10.0a.G.6: parses core_0_disabled_horizons=100",
+                  strcmp(parsed.core_disabled_horizons[0], "100") == 0);
+            check("v5.10.0a.G.6: per-core fields independent (core_2 overrides)",
+                  strcmp(parsed.core_ensemble_blend_mode[2], "selection") == 0);
+            check("v5.10.0a.G.6: per-core unspecified core stays empty",
+                  parsed.core_horizon_list[3][0] == '\0');
+            unlink(path4);
+        }
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0a.G.5 — EnsembleModelZoo lifecycle + AutoDetectFromDir ---\n");
+    {
+        // === Test G.5.1: AutoDetectFromDir with empty path returns 0 ===
+        EnsembleModelZoo<FP> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        int n = EnsembleModelZoo_AutoDetectFromDir(&ezoo, "",
+                                                    MODEL_BACKEND_XGBOOST);
+        check("v5.10.0a.G.5: AutoDetect empty path returns 0", n == 0);
+        check("v5.10.0a.G.5: AutoDetect empty path leaves active=0", ezoo.active == 0);
+
+        // === Test G.5.2: AutoDetectFromDir with bad parent dir returns 0 ===
+        n = EnsembleModelZoo_AutoDetectFromDir(&ezoo,
+                                                 "/nonexistent_v5100aG5/run",
+                                                 MODEL_BACKEND_XGBOOST);
+        check("v5.10.0a.G.5: AutoDetect bad parent returns 0", n == 0);
+        check("v5.10.0a.G.5: AutoDetect bad parent leaves active=0", ezoo.active == 0);
+
+        // === Test G.5.3: AutoDetectFromDir with no _horizon_* siblings ===
+        // Use /tmp (real dir, but no test_v5100aG5_horizon_* siblings).
+        n = EnsembleModelZoo_AutoDetectFromDir(&ezoo,
+                                                 "/tmp/v5100aG5_no_siblings",
+                                                 MODEL_BACKEND_XGBOOST);
+        check("v5.10.0a.G.5: AutoDetect no siblings returns 0", n == 0);
+        check("v5.10.0a.G.5: AutoDetect no siblings leaves active=0", ezoo.active == 0);
+
+        // === Test G.5.4: AutoDetectFromDir creates synthetic siblings, finds them ===
+        // Make 3 empty horizon dirs; AutoDetect scans + counts them.
+        // Won't actually load (no model files inside), so total=0; but the
+        // discovery should fire (caller would see "[ensemble] auto-detected 3 horizons" log).
+        // For test purposes: just verify the dir-scan doesn't crash with real dirs.
+        char tmp_base[] = "/tmp/v5100aG5_sibs_XXXXXX";
+        char* td = mkdtemp(tmp_base);
+        check("v5.10.0a.G.5: tmpdir created", td != nullptr);
+        if (td) {
+            char run_dir[256];
+            snprintf(run_dir, sizeof(run_dir), "%s/run", td);
+            mkdir(run_dir, 0755);
+            // Create 3 horizon sibling dirs (no model files inside; loader returns 0)
+            char hdir[300];
+            snprintf(hdir, sizeof(hdir), "%s/run_horizon_100", td); mkdir(hdir, 0755);
+            snprintf(hdir, sizeof(hdir), "%s/run_horizon_500", td); mkdir(hdir, 0755);
+            snprintf(hdir, sizeof(hdir), "%s/run_horizon_1000", td); mkdir(hdir, 0755);
+
+            // AutoDetect: discovers 3 siblings via filesystem; LoadFromCfg
+            // returns 0 (no model files). ezoo->active stays 0.
+            n = EnsembleModelZoo_AutoDetectFromDir(&ezoo, run_dir,
+                                                     MODEL_BACKEND_XGBOOST);
+            check("v5.10.0a.G.5: AutoDetect with empty horizon dirs returns 0 models",
+                  n == 0);
+            check("v5.10.0a.G.5: AutoDetect with no model files leaves active=0",
+                  ezoo.active == 0);
+
+            // Cleanup
+            char rmcmd[400];
+            snprintf(rmcmd, sizeof(rmcmd), "rm -rf %s", td);
+            int rc = system(rmcmd);
+            (void)rc;
+        }
+
+        // === Test G.5.5: CoreContext.ensemble_handle field exists ===
+        // Smoke test: struct shape verified at compile time; assignable
+        // to nullptr (default for non-ML cores) + assignable to a real
+        // ezoo pointer (ML cores with ensemble active). Test would FAIL
+        // TO COMPILE if the field doesn't exist.
+        tt::CoreContext<FP> cc{};
+        cc.ensemble_handle = nullptr;
+        check("v5.10.0a.G.5: CoreContext.ensemble_handle defaults to nullptr",
+              cc.ensemble_handle == nullptr);
+        cc.ensemble_handle = &ezoo;  // also accepts EnsembleModelZoo*
+        check("v5.10.0a.G.5: CoreContext.ensemble_handle accepts EnsembleModelZoo*",
+              cc.ensemble_handle == &ezoo);
+
+        EnsembleModelZoo_Free(&ezoo);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0a.G.4 — Ensemble inference path ---\n");
+    {
+        // === Test G.4.1: Model_Predict_Ensemble with count=0 returns 0 ===
+        // No models = no prediction. Test the sentinel return.
+        ModelHandle<FP> empty_models[1];
+        Model_Init(&empty_models[0]);  // not loaded
+        float features[MODEL_MAX_FEATURES] = {0};
+        int sel_idx = -99;
+        float p = Model_Predict_Ensemble(empty_models, 0, features,
+                                          MODEL_NUM_FEATURES, &sel_idx);
+        check("v5.10.0a.G.4: count=0 returns 0.0", p == 0.0f);
+        check("v5.10.0a.G.4: count=0 sets selected_idx=-1", sel_idx == -1);
+        Model_Free(&empty_models[0]);
+
+        // === Test G.4.2: Model_Predict_Ensemble with count=1 single-model fallback ===
+        // count=1 = matches Model_Predict on models[0] exactly. Both return
+        // 0.0 here (no model loaded), but verifies path.
+        ModelHandle<FP> single[1];
+        Model_Init(&single[0]);
+        sel_idx = -99;
+        p = Model_Predict_Ensemble(single, 1, features, MODEL_NUM_FEATURES, &sel_idx);
+        check("v5.10.0a.G.4: count=1 falls back to single Model_Predict",
+              p == 0.0f);
+        check("v5.10.0a.G.4: count=1 sets selected_idx=0", sel_idx == 0);
+        Model_Free(&single[0]);
+
+        // === Test G.4.3: out_selected_idx = nullptr is allowed ===
+        // Caller may not care about which horizon won; nullptr should
+        // be safe.
+        ModelHandle<FP> two_unloaded[2];
+        Model_Init(&two_unloaded[0]);
+        Model_Init(&two_unloaded[1]);
+        p = Model_Predict_Ensemble(two_unloaded, 2, features,
+                                    MODEL_NUM_FEATURES, nullptr);
+        check("v5.10.0a.G.4: nullptr out_selected_idx is safe",
+              p == 0.0f || std::isfinite(p));  // either is OK; just no crash
+        Model_Free(&two_unloaded[0]);
+        Model_Free(&two_unloaded[1]);
+
+        // === Test G.4.4: MLStrategyState ensemble_zoo defaults nullptr ===
+        // After MLStrategy_Init, ensemble_zoo is nullptr (single-model path).
+        // Engine wiring assigns the pointer post-Init when cfg.horizon_list
+        // non-empty. Default-nullptr preserves pre-G.4 behavior.
+        MLStrategyState<FP> ml_state;
+        memset(&ml_state, 0, sizeof(ml_state));
+        Model_Init(&ml_state.buy_model);
+        // Construct minimal RollingStats + buy_conds for Init
+        RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+        BuySideGateConditions<FP> bc{};
+        MLStrategy_Init(&ml_state, &rolling, &bc);
+        check("v5.10.0a.G.4: MLStrategy_Init sets ensemble_zoo=nullptr",
+              ml_state.ensemble_zoo == nullptr);
+        check("v5.10.0a.G.4: MLStrategy_Init sets ensemble_last_selected_idx=-1",
+              ml_state.ensemble_last_selected_idx == -1);
+        Model_Free(&ml_state.buy_model);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0a.G.3 — EnsembleModelZoo sidecar ---\n");
+    {
+        // === Test G.3.1: ENSEMBLE_HORIZON_MAX matches plan (8) ===
+        check("v5.10.0a.G.3: ENSEMBLE_HORIZON_MAX == 8 (matches HORIZON_LIST_MAX)",
+              ENSEMBLE_HORIZON_MAX == 8);
+
+        // === Test G.3.2: EnsembleModelZoo_Init zeros all counts + active flag ===
+        EnsembleModelZoo<FP> ezoo;
+        // Pre-populate with non-zero values to verify Init zeros them
+        ezoo.barrier_count = 5;
+        ezoo.regime_count = 3;
+        ezoo.exit_predictor_count = 2;
+        ezoo.buy_signal_count = 7;
+        ezoo.active = 1;
+        EnsembleModelZoo_Init(&ezoo);
+        check("v5.10.0a.G.3: Init zeros barrier_count",     ezoo.barrier_count == 0);
+        check("v5.10.0a.G.3: Init zeros regime_count",      ezoo.regime_count == 0);
+        check("v5.10.0a.G.3: Init zeros exit_predictor_count", ezoo.exit_predictor_count == 0);
+        check("v5.10.0a.G.3: Init zeros buy_signal_count",  ezoo.buy_signal_count == 0);
+        check("v5.10.0a.G.3: Init clears active flag",      ezoo.active == 0);
+
+        // === Test G.3.3: EnsembleModelZoo_Free is callable + zeros active ===
+        ezoo.active = 1;
+        ezoo.barrier_count = 3;
+        EnsembleModelZoo_Free(&ezoo);
+        check("v5.10.0a.G.3: Free clears active flag",      ezoo.active == 0);
+        check("v5.10.0a.G.3: Free zeros barrier_count",     ezoo.barrier_count == 0);
+
+        // === Test G.3.4: EnsembleModelZoo_LoadFromCfg with no horizons no-op ===
+        EnsembleModelZoo_Init(&ezoo);
+        int loaded = EnsembleModelZoo_LoadFromCfg(&ezoo,
+                                                    "models/test_baseline",
+                                                    nullptr, 0,
+                                                    MODEL_BACKEND_XGBOOST);
+        check("v5.10.0a.G.3: LoadFromCfg with horizon_count=0 returns 0",
+              loaded == 0);
+        check("v5.10.0a.G.3: LoadFromCfg with horizon_count=0 leaves active=0",
+              ezoo.active == 0);
+
+        // === Test G.3.5: LoadFromCfg with non-existent paths returns 0 ===
+        // No models present at the made-up base path; loader gracefully
+        // reports 0 loaded + leaves active=0 (forward-compat with single-zoo
+        // path).
+        int horizons[3] = {100, 500, 1000};
+        loaded = EnsembleModelZoo_LoadFromCfg(&ezoo,
+                                               "/tmp/nonexistent_v5100aG3",
+                                               horizons, 3,
+                                               MODEL_BACKEND_XGBOOST);
+        check("v5.10.0a.G.3: LoadFromCfg with bad paths returns 0 (no models found)",
+              loaded == 0);
+        check("v5.10.0a.G.3: LoadFromCfg with bad paths keeps active=0",
+              ezoo.active == 0);
+
+        EnsembleModelZoo_Free(&ezoo);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0a.G.2 — Stamp body grid_member_count (position 19) ---\n");
+    {
+        // === Test G.2.1: StampInferenceCfgInputs has grid_member_count fields ===
+        StampInferenceCfgInputs inf{};
+        inf.has_grid_member_count = 1;
+        inf.grid_member_count = 4;
+        inf.grid_member_idx = 2;
+        check("v5.10.0a.G.2: StampInferenceCfgInputs.has_grid_member_count assignable",
+              inf.has_grid_member_count == 1);
+        check("v5.10.0a.G.2: StampInferenceCfgInputs.grid_member_count assignable",
+              inf.grid_member_count == 4);
+        check("v5.10.0a.G.2: StampInferenceCfgInputs.grid_member_idx assignable",
+              inf.grid_member_idx == 2);
+
+        // === Test G.2.2: ModelStampResult has grid_member_count fields ===
+        ModelStampResult r{};
+        r.has_grid_member_count = 1;
+        r.grid_member_count = 8;
+        r.grid_member_idx = 3;
+        check("v5.10.0a.G.2: ModelStampResult.has_grid_member_count assignable",
+              r.has_grid_member_count == 1);
+        check("v5.10.0a.G.2: ModelStampResult.grid_member_count assignable",
+              r.grid_member_count == 8);
+        check("v5.10.0a.G.2: ModelStampResult.grid_member_idx assignable",
+              r.grid_member_idx == 3);
+
+        // === Test G.2.3: legacy stamp (has_grid_member_count=0) is forward-compat ===
+        // Pre-v5.10.0a.G.2 stamps don't have these fields; verify_model_stamp
+        // sets has_grid_member_count=0 for those. Engine load with !has_*
+        // skips ensemble metadata processing → bytewise-identical to legacy.
+        ModelStampResult legacy{};
+        legacy.has_grid_member_count = 0;  // simulates parsing pre-G.2 stamp body
+        check("v5.10.0a.G.2: legacy stamp (has_grid_member_count=0) is no-op",
+              legacy.grid_member_count == 0 && legacy.grid_member_idx == 0);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0a.D — Backtest_RunHyperparamTrainSweep + WF override ---\n");
+    {
+        // === Test D.1: WF signature accepts default-NULL override (compat) ===
+        // Verifies that the new optional cfg_override param defaults to nullptr,
+        // preserving pre-v5.10.0a.D call shape. Smoke test: a ControllerConfig
+        // can be built and the override pointer is accepted by the type system.
+        ControllerConfig<FP> override_cfg = ControllerConfig_Default<FP>();
+        override_cfg.xgb_subsample = FPN_FromDouble<FP>(0.6);  // sweep value
+        const ControllerConfig<FP>* override_ptr = &override_cfg;
+        check("v5.10.0a.D: WF cfg_override pointer type accepts ControllerConfig<FP>*",
+              override_ptr != nullptr && FPN_ToDouble(override_ptr->xgb_subsample) > 0.55);
+
+        // === Test D.2: OptimizerResults can hold sweep results ===
+        // Hyperparam sweep populates OptimizerResults same struct as engine
+        // sweep; verify the struct is shape-compatible.
+        OptimizerResults opt = {};
+        opt.num_params = 1;
+        opt.dims[0] = 3;
+        opt.total_runs = 3;
+        opt.metric[0] = 0.46f;  opt.metric[1] = 0.52f;  opt.metric[2] = 0.49f;
+        opt.best_idx = 1;  // .52 beats both
+        check("v5.10.0a.D: OptimizerResults total_runs populated",
+              opt.total_runs == 3);
+        check("v5.10.0a.D: OptimizerResults best_idx tracks max metric",
+              opt.metric[opt.best_idx] > 0.50f);
+
+        // === Test D.3: ConfigField_Set accepts xgb_* keys ===
+        // Phase a extended ConfigField_Set; verify each new xgb_* field
+        // round-trips a value. Sweep cells will mutate cfg via this fn.
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        check("v5.10.0a.D: ConfigField_Set xgb_subsample accepted",
+              ConfigField_Set(&cfg, "xgb_subsample", 0.65) == 1);
+        check("v5.10.0a.D: ConfigField_Set xgb_min_child_weight accepted",
+              ConfigField_Set(&cfg, "xgb_min_child_weight", 7) == 1);
+        check("v5.10.0a.D: ConfigField_Set xgb_seed accepted",
+              ConfigField_Set(&cfg, "xgb_seed", 99) == 1);
+        check("v5.10.0a.D: xgb_subsample mutated to 0.65",
+              fabs(FPN_ToDouble(cfg.xgb_subsample) - 0.65) < 1e-6);
+        check("v5.10.0a.D: xgb_min_child_weight mutated to 7",
+              cfg.xgb_min_child_weight == 7);
+        check("v5.10.0a.D: xgb_seed mutated to 99",
+              cfg.xgb_seed == 99);
+
+        // === Test D.4: ConfigField_Set rejects unknown keys ===
+        // Defensive: passing a typo'd key returns 0; sweep cell would
+        // silently fail without this check.
+        check("v5.10.0a.D: ConfigField_Set rejects unknown key",
+              ConfigField_Set(&cfg, "totally_made_up_field", 1.0) == 0);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0 Item D — hardware-aware cfg ---\n");
+    {
+        // === Test 1: defaults match v5.9.5j-final hardcoded behavior ===
+        ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+        check("v5.10.0D: xgb_train_nthread default = 4 (Train Model panel pre-v5.10)",
+              cfg.xgb_train_nthread == 4);
+        check("v5.10.0D: xgb_eval_nthread default = 1 (WF/HeldOut determinism)",
+              cfg.xgb_eval_nthread == 1);
+        check("v5.10.0D: csv_load_workers default = 1 (serial CSV; pre-v5.10)",
+              cfg.csv_load_workers == 1);
+        check("v5.10.0D: feature_collect_max_gb default = 12",
+              cfg.feature_collect_max_gb == 12);
+        check("v5.10.0D: wf_split_max_gb default = 8",
+              cfg.wf_split_max_gb == 8);
+        check("v5.10.0D: held_out_max_gb default = 4",
+              cfg.held_out_max_gb == 4);
+
+        // === Test 2: parser reads each field from cfg file ===
+        char path[] = "/tmp/v5100D_cfg_XXXXXX";
+        int fd = mkstemp(path);
+        check("v5.10.0D: tmpfile created", fd >= 0);
+        if (fd >= 0) {
+            dprintf(fd,
+                    "xgb_train_nthread=8\n"
+                    "xgb_eval_nthread=2\n"
+                    "csv_load_workers=4\n"
+                    "feature_collect_max_gb=24\n"
+                    "wf_split_max_gb=16\n"
+                    "held_out_max_gb=8\n");
+            close(fd);
+            ControllerConfig<FP> parsed = ControllerConfig_Load<FP>(path);
+            check("v5.10.0D: parses xgb_train_nthread=8",
+                  parsed.xgb_train_nthread == 8);
+            check("v5.10.0D: parses xgb_eval_nthread=2",
+                  parsed.xgb_eval_nthread == 2);
+            check("v5.10.0D: parses csv_load_workers=4",
+                  parsed.csv_load_workers == 4);
+            check("v5.10.0D: parses feature_collect_max_gb=24",
+                  parsed.feature_collect_max_gb == 24);
+            check("v5.10.0D: parses wf_split_max_gb=16",
+                  parsed.wf_split_max_gb == 16);
+            check("v5.10.0D: parses held_out_max_gb=8",
+                  parsed.held_out_max_gb == 8);
+            unlink(path);
+        }
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0 Item B — streaming label compute (sliding 2-file window) ---\n");
+    {
+        // Helper — write a synthetic TickRecorder-format CSV with N ticks
+        // starting at base_idx. Each tick: ts_us = 1.5e15 + global_idx,
+        // price = price_fn(global_idx), qty = 1.0, is_buyer_maker = 0.
+        auto write_csv = [](const char* path, int n_ticks, int base_idx,
+                            double (*price_fn)(int)) {
+            FILE* f = fopen(path, "w");
+            if (!f) return false;
+            fprintf(f, "timestamp_us,price,quantity,is_buyer_maker\n");
+            for (int i = 0; i < n_ticks; i++) {
+                int g = base_idx + i;
+                int64_t ts = 1500000000000000LL + (int64_t)g;
+                fprintf(f, "%lld,%.6f,1.000000,0\n",
+                        (long long)ts, price_fn(g));
+            }
+            fclose(f);
+            return true;
+        };
+
+        // Price function: 300 ticks
+        //   ticks 0-99   price = 100.0  (flat — sample 0's TP/SL won't hit here)
+        //   ticks 100-199 price = 100.7 (jump up — sample 0's TP=0.5% target 100.5 hits)
+        //   ticks 200-299 price = 99.0  (jump down — sample 1's SL=0.5% target 100.0 hits since baseline)
+        // Sample 0 at tidx=20, price=100, TP=0.5% / SL=0.5%
+        //   → TP target 100.5, SL target 99.5
+        //   → Forward scan: ticks 21-99 stay at 100, ticks 100+ are 100.7 ≥ 100.5 → TP hit → label=1
+        // Sample 1 at tidx=110, price=100.7, TP=0.5% / SL=0.5%
+        //   → TP target 101.2035, SL target 100.1965
+        //   → Forward scan: ticks 111-199 stay at 100.7 (no TP), tick 200+ = 99.0 ≤ SL → SL hit → label=0
+        // Sample 2 at tidx=250, price=99.0, TP=0.5% / SL=0.5%
+        //   → TP target 99.495, SL target 98.505
+        //   → Forward scan: ticks 251-299 all 99.0 (no hit either way)
+        //   → label=0 (WinLoss "ran out = loss")
+        auto price_fn = [](int g) -> double {
+            if (g < 100) return 100.0;
+            if (g < 200) return 100.7;
+            return 99.0;
+        };
+
+        // Test scenario A: ALL ticks in 1 file
+        {
+            char path[] = "/tmp/v5100B_label_a_XXXXXX";
+            int fd = mkstemp(path);
+            check("v5.10.0B: tmpfile A created", fd >= 0);
+            if (fd >= 0) close(fd);
+            check("v5.10.0B: write 1-file fixture",
+                  write_csv(path, 300, 0, +[](int g) -> double {
+                      if (g < 100) return 100.0;
+                      if (g < 200) return 100.7;
+                      return 99.0;
+                  }));
+
+            BacktestResults r;
+            BacktestResults_Init(&r);
+            r.sample_count = 3;
+            r.sample_tick_indices[0] = 20;
+            r.sample_tick_indices[1] = 110;
+            r.sample_tick_indices[2] = 250;
+            r.sample_prices[0] = 100.0;
+            r.sample_prices[1] = 100.7;
+            r.sample_prices[2] = 99.0;
+            r.sample_regimes[0] = 0;
+            r.sample_regimes[1] = 0;
+            r.sample_regimes[2] = 0;
+
+            BacktestRunConfig run_cfg{};
+            run_cfg.collect_features = 1;
+            run_cfg.label_type = LABEL_WIN_LOSS;
+            run_cfg.label_tp_pct = 0.5;
+            run_cfg.label_sl_pct = 0.5;
+            run_cfg.label_forward_ticks = 0;  // WinLoss ignores
+            run_cfg.num_data_files = 1;
+            strncpy(run_cfg.data_paths[0], path, 255);
+
+            Backtest_ComputeLabelsFromSamples(&r, &run_cfg);
+
+            check("v5.10.0B: 1-file scenario sample 0 label = 1.0 (TP hit at tick 100)",
+                  r.labels[0] == 1.0f);
+            check("v5.10.0B: 1-file scenario sample 1 label = 0.0 (SL hit at tick 200)",
+                  r.labels[1] == 0.0f);
+            check("v5.10.0B: 1-file scenario sample 2 label = 0.0 (WinLoss buffer-exhaust)",
+                  r.labels[2] == 0.0f);
+
+            BacktestResults_Free(&r);
+            unlink(path);
+        }
+
+        // Test scenario B: SAME ticks split across 3 files (100 ticks each)
+        // Verifies the 2-file sliding-window streaming produces identical labels
+        // since sample forward scans fit within the 2-file window. This is the
+        // file-boundary correctness test — local_tidx computation, sample cursor
+        // walk, memmove logic, all exercised.
+        {
+            char p0[] = "/tmp/v5100B_label_b0_XXXXXX";
+            char p1[] = "/tmp/v5100B_label_b1_XXXXXX";
+            char p2[] = "/tmp/v5100B_label_b2_XXXXXX";
+            int fd0 = mkstemp(p0); int fd1 = mkstemp(p1); int fd2 = mkstemp(p2);
+            check("v5.10.0B: tmpfiles B created",
+                  fd0 >= 0 && fd1 >= 0 && fd2 >= 0);
+            if (fd0 >= 0) close(fd0);
+            if (fd1 >= 0) close(fd1);
+            if (fd2 >= 0) close(fd2);
+            auto pfn = +[](int g) -> double {
+                if (g < 100) return 100.0;
+                if (g < 200) return 100.7;
+                return 99.0;
+            };
+            check("v5.10.0B: write 3-file fixture",
+                  write_csv(p0, 100, 0,   pfn) &&
+                  write_csv(p1, 100, 100, pfn) &&
+                  write_csv(p2, 100, 200, pfn));
+
+            BacktestResults r;
+            BacktestResults_Init(&r);
+            r.sample_count = 3;
+            r.sample_tick_indices[0] = 20;
+            r.sample_tick_indices[1] = 110;
+            r.sample_tick_indices[2] = 250;
+            r.sample_prices[0] = 100.0;
+            r.sample_prices[1] = 100.7;
+            r.sample_prices[2] = 99.0;
+            r.sample_regimes[0] = 0;
+            r.sample_regimes[1] = 0;
+            r.sample_regimes[2] = 0;
+
+            BacktestRunConfig run_cfg{};
+            run_cfg.collect_features = 1;
+            run_cfg.label_type = LABEL_WIN_LOSS;
+            run_cfg.label_tp_pct = 0.5;
+            run_cfg.label_sl_pct = 0.5;
+            run_cfg.label_forward_ticks = 0;
+            run_cfg.num_data_files = 3;
+            strncpy(run_cfg.data_paths[0], p0, 255);
+            strncpy(run_cfg.data_paths[1], p1, 255);
+            strncpy(run_cfg.data_paths[2], p2, 255);
+
+            Backtest_ComputeLabelsFromSamples(&r, &run_cfg);
+
+            check("v5.10.0B: 3-file scenario sample 0 label = 1.0 (cross-file TP hit)",
+                  r.labels[0] == 1.0f);
+            check("v5.10.0B: 3-file scenario sample 1 label = 0.0 (cross-file SL hit)",
+                  r.labels[1] == 0.0f);
+            check("v5.10.0B: 3-file scenario sample 2 label = 0.0 (in-file buffer-exhaust)",
+                  r.labels[2] == 0.0f);
+
+            BacktestResults_Free(&r);
+            unlink(p0); unlink(p1); unlink(p2);
+        }
+
+        // Test scenario C: empty / no-data — ensure graceful no-op (no crash).
+        {
+            BacktestResults r;
+            BacktestResults_Init(&r);
+            r.sample_count = 0;
+            BacktestRunConfig run_cfg{};
+            run_cfg.collect_features = 1;
+            run_cfg.label_type = LABEL_WIN_LOSS;
+            run_cfg.num_data_files = 0;
+            Backtest_ComputeLabelsFromSamples(&r, &run_cfg);
+            check("v5.10.0B: empty config → no-op (no crash)", true);
+            BacktestResults_Free(&r);
+        }
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.10.0 Item A — per-phase backtest timers ---\n");
+    {
+        // === Test 1: Reset zeroes all fields + populated flag ===
+        tt::PhaseTimer pt = {};
+        pt.parse_ns = 100;
+        pt.fan_out_hot_ns = 200;
+        pt.feature_collect_ns = 300;
+        pt.label_compute_ns = 400;
+        pt.xgboost_train_ns = 500;
+        pt.wf_eval_ns = 600;
+        pt.held_out_eval_ns = 700;
+        pt.stamp_emit_ns = 800;
+        pt.total_ns = 5000;
+        pt.populated = 1;
+        tt::PhaseTimer_Reset(&pt);
+        check("v5.10.0A: Reset zeroes parse_ns",           pt.parse_ns == 0);
+        check("v5.10.0A: Reset zeroes fan_out_hot_ns",     pt.fan_out_hot_ns == 0);
+        check("v5.10.0A: Reset zeroes feature_collect_ns", pt.feature_collect_ns == 0);
+        check("v5.10.0A: Reset zeroes label_compute_ns",   pt.label_compute_ns == 0);
+        check("v5.10.0A: Reset zeroes xgboost_train_ns",   pt.xgboost_train_ns == 0);
+        check("v5.10.0A: Reset zeroes wf_eval_ns",         pt.wf_eval_ns == 0);
+        check("v5.10.0A: Reset zeroes held_out_eval_ns",   pt.held_out_eval_ns == 0);
+        check("v5.10.0A: Reset zeroes stamp_emit_ns",      pt.stamp_emit_ns == 0);
+        check("v5.10.0A: Reset zeroes total_ns",           pt.total_ns == 0);
+        check("v5.10.0A: Reset clears populated flag",     pt.populated == 0);
+
+        // === Test 2: NowNs is monotonic (returns increasing values) ===
+        uint64_t t0 = tt::PhaseTimer_NowNs();
+        uint64_t t1 = tt::PhaseTimer_NowNs();
+        check("v5.10.0A: NowNs is monotonic (t1 >= t0)", t1 >= t0);
+
+        // === Test 3: Snapshot copies state correctly ===
+        pt.parse_ns = 1000;
+        pt.fan_out_hot_ns = 2000;
+        pt.feature_collect_ns = 3000;
+        pt.label_compute_ns = 4000;
+        pt.xgboost_train_ns = 5000;
+        pt.wf_eval_ns = 6000;
+        pt.held_out_eval_ns = 7000;
+        pt.stamp_emit_ns = 8000;
+        pt.total_ns = 30000;
+        pt.populated = 1;
+        tt::PhaseTimerSnapshot snap = {};
+        tt::PhaseTimer_PopulateSnapshot(&pt, &snap);
+        check("v5.10.0A: Snapshot copies parse_ns",           snap.parse_ns == 1000);
+        check("v5.10.0A: Snapshot copies fan_out_hot_ns",     snap.fan_out_hot_ns == 2000);
+        check("v5.10.0A: Snapshot copies feature_collect_ns", snap.feature_collect_ns == 3000);
+        check("v5.10.0A: Snapshot copies total_ns",           snap.total_ns == 30000);
+        check("v5.10.0A: Snapshot copies valid flag",         snap.valid == 1);
+
+        // === Test 4: Global singleton accessible + Reset works on it ===
+        tt::PhaseTimer_Global().parse_ns = 999;
+        tt::PhaseTimer_Reset(&tt::PhaseTimer_Global());
+        check("v5.10.0A: Global singleton accessible + reset", tt::PhaseTimer_Global().parse_ns == 0);
     }
 
     printf("\n======================================\n");

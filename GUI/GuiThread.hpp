@@ -367,7 +367,8 @@ static inline void *gui_thread_fn(void *arg) {
         // v5.9.0c: pass snap so cfg path renders too
         tt::EngineHeader_Render(snap);
         // v5.9.0b: ML status — per-core load state, prediction context, NaN counters
-        tt::MLStatus_Render(snap);
+        // v5.10.0c: shared state passed through for hot-swap pending row
+        tt::MLStatus_Render(snap, shared);
 
         // dashboard panels (right side)
         GUI_RenderDashboard(snap, snap->start_time ? snap->start_time : gui_start, shared);

@@ -158,7 +158,8 @@ struct CoreContext {
     uint8_t  strategy_id;          // STRATEGY_* constant; STRATEGY_NONE means "do not trade"
     uint8_t  dirty;                // 1 = pending_params should be pushed to the core
     uint8_t  _pad[6];
-    void*    model_handle;         // ModelHandle<F>* for STRATEGY_ML cores (nullptr for others)
+    void*    model_handle;         // CoreModelZoo<F>* for STRATEGY_ML cores (nullptr for others)
+    void*    ensemble_handle;      // v5.10.0a.G.5 — EnsembleModelZoo<F>* when multi-horizon active; nullptr = single-zoo path (default)
     uint64_t entries_processed;    // bumped on entry event
     uint64_t exits_processed;      // bumped on exit event
     // Phase 6prep (sharded c12-c14): per-core ML confidence loop. The scorer
@@ -177,6 +178,11 @@ struct CoreContext {
     // Single-position-per-core invariant means active_prediction is plenty;
     // multi-position would need a per-position ring.
     ConfidenceScorer confidence;
+    // v5.10.0e — drift detection. Sampled post-fill (when
+    // ConfidenceScorer_Update fires for ML cores). Engine emits CRITICAL
+    // log on sustained-breach + optionally trips per-core kill_switch
+    // when cfg.auto_kill_on_drift=1. See ConfidenceScore.hpp DriftHistory.
+    DriftHistory drift_history;
     double staged_prediction;      // prediction from last ML rebuild
     double active_prediction;      // prediction at last entry submit (0 = no open pos)
     double last_confidence;        // most recent ConfidenceScorer_Compute result
@@ -507,6 +513,7 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].strategy_id = STRATEGY_NONE;  // pitfall P6.5: explicit init
         state->cores[i].dirty = 0;
         state->cores[i].model_handle = nullptr;
+        state->cores[i].ensemble_handle = nullptr;  // v5.10.0a.G.5 default
         state->cores[i].entries_processed = 0;
         state->cores[i].exits_processed = 0;
         // Phase 6prep sharded: ConfidenceScorer with safe defaults. EngineSharded
@@ -515,6 +522,8 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         ConfidenceScorer_Init(&state->cores[i].confidence,
                               CONFIDENCE_IC_WINDOW_DEFAULT,
                               CONFIDENCE_FRESHNESS_TAU_DEFAULT);
+        // v5.10.0e — drift history starts empty; samples land post-fill.
+        DriftHistory_Init(&state->cores[i].drift_history);
         state->cores[i].staged_prediction = 0.0;
         state->cores[i].active_prediction = 0.0;
         state->cores[i].last_confidence = 0.0;
@@ -993,7 +1002,15 @@ template <unsigned F>
 inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                                              OrderManagerState<F>* oms,
                                              uint32_t sl_cooldown_cycles,
-                                             int core_id) {
+                                             int core_id,
+                                             double ensemble_trade_reward_mult = 4.0,
+                                             // v5.10.0e — runtime IC drift detection.
+                                             // Defaults preserve pre-v5.10.0e behavior:
+                                             // floor=0 → DriftHistory_CheckBreach skip
+                                             // (avg < 0 floor never fires).
+                                             double drift_floor                = 0.0,
+                                             uint32_t drift_window_seconds     = 86400u,
+                                             int      drift_auto_kill          = 0) {
     const int partial_on = oms->partial_exit_enabled ? 1 : 0;
     uint16_t my_mask = partial_on
         ? (uint16_t)((1u << (core_id * 2)) | (1u << (core_id * 2 + 1)))
@@ -1167,11 +1184,78 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 ConfidenceScorer_Update(&ctx.confidence,
                                         ctx.active_prediction, realized);
                 ctx.active_prediction = 0.0;
+
+                // v5.10.0e — runtime IC drift detection. Sample current IC
+                // post-update; push to drift history; check sustained breach.
+                // Only meaningful when operator has set drift_floor > 0.
+                if (drift_floor > 0.0) {
+                    double ic_now = RollingIC_Compute(&ctx.confidence.ic);
+                    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+                    uint64_t now_us = (uint64_t)ts.tv_sec * 1000000ULL +
+                                      (uint64_t)ts.tv_nsec / 1000ULL;
+                    DriftHistory_Push(&ctx.drift_history, ic_now, now_us);
+                    double avg_ic = 0.0;
+                    int    n_samples = 0;
+                    int    breach = DriftHistory_CheckBreach(
+                        &ctx.drift_history, now_us,
+                        (uint64_t)drift_window_seconds * 1000000ULL,
+                        drift_floor, &avg_ic, &n_samples);
+                    if (breach && !ctx.drift_history.breached) {
+                        // First breach — log CRITICAL + record onset.
+                        // Rate-limit at 60s per core to avoid log spam if
+                        // breach toggles around the threshold.
+                        ctx.drift_history.breached = 1;
+                        ctx.drift_history.breach_first_us = now_us;
+                        static uint64_t s_drift_log_us[16] = {0};
+                        Health_LogCriticalRateLimited(
+                            &s_drift_log_us[core_id & 15], 60000000ULL,
+                            core_id, "drift",
+                            "IC=%.4f below floor=%.4f over %us window (%d samples)",
+                            avg_ic, drift_floor,
+                            (unsigned)drift_window_seconds, n_samples);
+                        if (drift_auto_kill && !ctx.drift_history.kill_tripped) {
+                            state->cores[core_id].core_kill_tripped = 1;
+                            state->cores[core_id].core_ks_trips_total++;
+                            ctx.drift_history.kill_tripped = 1;
+                            static uint64_t s_drift_kill_log_us[16] = {0};
+                            Health_LogCriticalRateLimited(
+                                &s_drift_kill_log_us[core_id & 15], 60000000ULL,
+                                core_id, "drift",
+                                "AUTO-KILL: per-core kill_switch tripped due to "
+                                "sustained IC drift");
+                        }
+                    } else if (!breach && ctx.drift_history.breached) {
+                        // Recovery — clear breach state, log info
+                        ctx.drift_history.breached = 0;
+                        fprintf(stderr,
+                            "[drift] core %d RECOVERED: IC=%.4f above floor=%.4f\n",
+                            core_id, avg_ic, drift_floor);
+                    }
+                }
             }
             if (realized < 0.0 && sl_cooldown_cycles > 0) {
                 ctx.sl_cooldown_remaining = sl_cooldown_cycles;
             }
             RegressionFeederX_Push(&ctx.pnl_feeder, FPN_FromDouble<F>(realized));
+
+            // v5.10.0a.G.8 — trade-close reward hook for ensemble bandit.
+            // Real-money signal (incl. fees + slippage) carries higher
+            // weight than slow-path lookback (default ×4). Cast through
+            // void* since CoreContext can't depend on EnsembleModelZoo<F>
+            // directly (would force ML_Headers visibility). Bandit feed
+            // is rare (~1 per closed trade) — cost negligible.
+            if (ctx.ensemble_handle) {
+                auto* ezoo = static_cast<EnsembleModelZoo<F>*>(ctx.ensemble_handle);
+                if (ezoo->active && ezoo->initialized_bandits) {
+                    double bal_d = FPN_ToDouble(oms->balance);
+                    if (bal_d > 0.0) {
+                        double pnl_d = FPN_ToDouble(rec.exit_net_pnl);
+                        double pnl_bps = (pnl_d / bal_d) * 10000.0;
+                        EnsembleModelZoo_TradeCloseReward(ezoo, pnl_bps,
+                                                            ensemble_trade_reward_mult);
+                    }
+                }
+            }
         }
     }
     oms->last_closed_mask &= (uint16_t)~my_mask;  // clear only my bits
@@ -1181,9 +1265,19 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
 template <unsigned F>
 inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
                                      OrderManagerState<F>* oms,
-                                     uint32_t sl_cooldown_cycles) {
+                                     uint32_t sl_cooldown_cycles,
+                                     double ensemble_trade_reward_mult = 4.0,
+                                     // v5.10.0e — drift detection params (forwarded
+                                     // to OneCore; defaults preserve pre-v5.10.0e
+                                     // behavior).
+                                     double drift_floor                = 0.0,
+                                     uint32_t drift_window_seconds     = 86400u,
+                                     int      drift_auto_kill          = 0) {
     for (int c = 0; c < state->registered_count; ++c) {
-        EventLoop_DrainPostFillOneCore(state, oms, sl_cooldown_cycles, c);
+        EventLoop_DrainPostFillOneCore(state, oms, sl_cooldown_cycles, c,
+                                         ensemble_trade_reward_mult,
+                                         drift_floor, drift_window_seconds,
+                                         drift_auto_kill);
     }
 }
 
@@ -1892,6 +1986,8 @@ inline void EventLoop_RebuildOneCore(
         void* dispatch_ctx = nullptr;
         if (effective_strategy_id == STRATEGY_ML) {
             ml_ctx.model_handle   = state->cores[slot].model_handle;
+            ml_ctx.ensemble_zoo   = state->cores[slot].ensemble_handle;  // v5.10.0a.G.5 — nullptr-safe; single-zoo when null
+            ml_ctx.current_regime_id = state->cores[slot].regime_state.current_regime;  // v5.10.0a.G.7
             ml_ctx.confidence     = &state->cores[slot].confidence;
             ml_ctx.out_prediction = &state->cores[slot].staged_prediction;
             ml_ctx.out_confidence = &state->cores[slot].last_confidence;

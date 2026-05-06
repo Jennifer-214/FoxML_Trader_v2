@@ -147,9 +147,14 @@ static inline void FlowState_Init(FlowState *s) {
     s->last_us  = 0;
 }
 
+// v5.10.0b.2.5.C: decay computation goes through FPN_Exp (bytewise-
+// deterministic across compilers / -O levels) instead of IEEE-754 exp.
+// EWMA storage stays double for RegimeSignals compatibility; the
+// bytewise contract is "same input → same stored bytes" guaranteed by
+// FPN_FromDouble + FPN_Exp + FPN_ToDouble all being deterministic.
+// Full RegimeSignals→FPN cascade is a v5.11 ship (large blast radius).
 static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double signed_volume) {
     if (s->last_us == 0) {
-        // First sample — seed all EWMAs with signed_volume
         s->ewma_10s = signed_volume;
         s->ewma_1m  = signed_volume;
         s->ewma_5m  = signed_volume;
@@ -157,16 +162,27 @@ static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double si
         return;
     }
     if (timestamp_us <= s->last_us) {
-        // Backward / same timestamp — just add signed_volume without decay
         s->ewma_10s += signed_volume;
         s->ewma_1m  += signed_volume;
         s->ewma_5m  += signed_volume;
         return;
     }
     double dt = (double)(timestamp_us - s->last_us) / 1e6;  // seconds
-    double decay_10s = exp(-dt / 10.0);
-    double decay_1m  = exp(-dt / 60.0);
-    double decay_5m  = exp(-dt / 300.0);
+
+    // FPN-native decay: -dt / halflife → exp via Taylor.
+    FPN<64> dt_fpn = FPN_FromDouble<64>(dt);
+    FPN<64> hl_10s = FPN_FromDouble<64>(10.0);
+    FPN<64> hl_1m  = FPN_FromDouble<64>(60.0);
+    FPN<64> hl_5m  = FPN_FromDouble<64>(300.0);
+
+    FPN<64> arg_10s = FPN_DivNoAssert(dt_fpn, hl_10s); arg_10s.sign = 1;
+    FPN<64> arg_1m  = FPN_DivNoAssert(dt_fpn, hl_1m);  arg_1m.sign  = 1;
+    FPN<64> arg_5m  = FPN_DivNoAssert(dt_fpn, hl_5m);  arg_5m.sign  = 1;
+
+    double decay_10s = FPN_ToDouble(FPN_Exp(arg_10s));
+    double decay_1m  = FPN_ToDouble(FPN_Exp(arg_1m));
+    double decay_5m  = FPN_ToDouble(FPN_Exp(arg_5m));
+
     s->ewma_10s = s->ewma_10s * decay_10s + signed_volume;
     s->ewma_1m  = s->ewma_1m  * decay_1m  + signed_volume;
     s->ewma_5m  = s->ewma_5m  * decay_5m  + signed_volume;
@@ -220,18 +236,25 @@ static inline void LargeTradeState_Push(LargeTradeState<F, W> *s, FPN<F> size) {
 
 // Z-score of `current_size` against the window's distribution.
 // Returns 0 if count < 2 or stddev == 0 (degenerate / cold start).
+// v5.10.0b.2.5.C: variance + stddev computed in FPN<F> via FPN_Sqrt
+// (bytewise-deterministic). Return type stays `double` to keep
+// touch-site count low — the RegimeSignals.large_trade_z field stays
+// double, so downstream consumers don't change. The bytewise contract
+// is enforced through deterministic FPN_Sub/Mul/Sqrt/DivNoAssert and
+// the final FPN_ToDouble.
 template <unsigned F, unsigned W = 1024>
 static inline double LargeTradeState_ZScore(const LargeTradeState<F, W> *s, FPN<F> current_size) {
     if (s->count < 2) return 0.0;
-    double n = (double)s->count;
-    double mean = FPN_ToDouble(s->sum) / n;
-    double mean_sq = FPN_ToDouble(s->sum_sq) / n;
-    double var = mean_sq - mean * mean;
-    if (var <= 0.0) return 0.0;
-    double stddev = sqrt(var);
-    if (stddev <= 1e-12) return 0.0;
-    double cur = FPN_ToDouble(current_size);
-    return (cur - mean) / stddev;
+    FPN<F> n_fpn   = FPN_FromInt<F>(s->count);
+    FPN<F> mean    = FPN_DivNoAssert(s->sum, n_fpn);
+    FPN<F> mean_sq = FPN_DivNoAssert(s->sum_sq, n_fpn);
+    FPN<F> var     = FPN_Sub(mean_sq, FPN_Mul(mean, mean));
+    if (FPN_IsZero(var) || var.sign != 0) return 0.0;  // var <= 0 → degenerate
+
+    FPN<F> stddev = FPN_Sqrt(var);
+    if (FPN_IsZero(stddev)) return 0.0;
+    FPN<F> z = FPN_DivNoAssert(FPN_Sub(current_size, mean), stddev);
+    return FPN_ToDouble(z);
 }
 
 // Most recent pushed size. Zero when empty.
@@ -291,18 +314,22 @@ static inline void SpreadState_Push(SpreadState<F, W> *s, FPN<F> sample) {
     s->head = (s->head + 1) % W;
 }
 
+// v5.10.0b.2.5.C: variance + stddev computed in FPN<F> via FPN_Sqrt.
+// Same boundary-stable shape as LargeTradeState_ZScore — return double
+// to avoid cascading into RegimeSignals.spread_zscore consumers.
 template <unsigned F, unsigned W = 1024>
 static inline double SpreadState_ZScore(const SpreadState<F, W> *s, FPN<F> current_spread) {
     if (s->count < 2) return 0.0;
-    double n = (double)s->count;
-    double mean = FPN_ToDouble(s->sum) / n;
-    double mean_sq = FPN_ToDouble(s->sum_sq) / n;
-    double var = mean_sq - mean * mean;
-    if (var <= 0.0) return 0.0;
-    double stddev = sqrt(var);
-    if (stddev <= 1e-12) return 0.0;
-    double cur = FPN_ToDouble(current_spread);
-    return (cur - mean) / stddev;
+    FPN<F> n_fpn   = FPN_FromInt<F>(s->count);
+    FPN<F> mean    = FPN_DivNoAssert(s->sum, n_fpn);
+    FPN<F> mean_sq = FPN_DivNoAssert(s->sum_sq, n_fpn);
+    FPN<F> var     = FPN_Sub(mean_sq, FPN_Mul(mean, mean));
+    if (FPN_IsZero(var) || var.sign != 0) return 0.0;
+
+    FPN<F> stddev = FPN_Sqrt(var);
+    if (FPN_IsZero(stddev)) return 0.0;
+    FPN<F> z = FPN_DivNoAssert(FPN_Sub(current_spread, mean), stddev);
+    return FPN_ToDouble(z);
 }
 
 template <unsigned F, unsigned W = 1024>

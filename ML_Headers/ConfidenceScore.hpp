@@ -246,4 +246,71 @@ static inline double ConfidenceScorer_Compute(ConfidenceScorer *cs, double data_
     return cs->last_confidence;
 }
 
+//======================================================================================================
+// [DRIFT HISTORY — v5.10.0e runtime IC monitoring]
+//======================================================================================================
+// Time-series ring buffer of (IC, timestamp) pairs sampled at slow-path
+// cadence (typically post-fill drain when ConfidenceScorer_Update fires).
+// Sustained-breach detection: average IC over the last `window_us` is
+// below `floor` AND we have at least 5 samples in that window. Engine
+// emits CRITICAL log on first breach + optionally trips kill_switch.
+//
+// Capacity 256 covers a wide range of cadences. At 1 sample/sec that's
+// ~4 minutes of history; at 1 sample/30s that's ~2 hours; the breach
+// window is operator-tunable via cfg.confidence_ic_floor_window so
+// fast-cadence operators get longer effective coverage.
+//======================================================================================================
+#define DRIFT_HISTORY_CAPACITY 256
+
+struct DriftHistory {
+    double   ic_samples[DRIFT_HISTORY_CAPACITY];
+    uint64_t ts_us[DRIFT_HISTORY_CAPACITY];
+    int      count;             // monotonic insert count (saturates at CAPACITY)
+    int      head;              // next write index modulo CAPACITY
+    int      breached;          // 1 = sustained breach currently active
+    uint64_t breach_first_us;   // wall-clock when breach was first detected
+    int      kill_tripped;      // 1 = kill_switch was tripped due to drift
+};
+
+static inline void DriftHistory_Init(DriftHistory *dh) {
+    memset(dh, 0, sizeof(*dh));
+}
+
+static inline void DriftHistory_Push(DriftHistory *dh, double ic, uint64_t now_us) {
+    int idx = dh->head % DRIFT_HISTORY_CAPACITY;
+    dh->ic_samples[idx] = ic;
+    dh->ts_us[idx]      = now_us;
+    dh->head++;
+    if (dh->count < DRIFT_HISTORY_CAPACITY) dh->count++;
+}
+
+// Returns 1 if sustained breach: average IC across samples whose
+// timestamps fall within (now_us - window_us, now_us] is below `floor`,
+// AND at least 5 such samples exist (avoid noise-triggered false alarm).
+// out_avg_ic / out_samples are optional diagnostic outputs.
+static inline int DriftHistory_CheckBreach(const DriftHistory *dh, uint64_t now_us,
+                                            uint64_t window_us, double floor,
+                                            double *out_avg_ic, int *out_samples) {
+    if (out_avg_ic) *out_avg_ic = 0.0;
+    if (out_samples) *out_samples = 0;
+    if (dh->count < 5) return 0;
+
+    // Walk backward from head until we run out of samples or fall outside the window
+    double sum = 0.0;
+    int    n   = 0;
+    int    cap = (dh->count < DRIFT_HISTORY_CAPACITY) ? dh->count : DRIFT_HISTORY_CAPACITY;
+    uint64_t cutoff = (now_us > window_us) ? (now_us - window_us) : 0ULL;
+    for (int i = 0; i < cap; i++) {
+        int idx = (dh->head - 1 - i + DRIFT_HISTORY_CAPACITY) % DRIFT_HISTORY_CAPACITY;
+        if (dh->ts_us[idx] <= cutoff) break;  // outside window
+        sum += dh->ic_samples[idx];
+        n++;
+    }
+    if (n < 5) return 0;
+    double avg = sum / (double)n;
+    if (out_avg_ic)  *out_avg_ic  = avg;
+    if (out_samples) *out_samples = n;
+    return (avg < floor) ? 1 : 0;
+}
+
 #endif // CONFIDENCE_SCORE_HPP

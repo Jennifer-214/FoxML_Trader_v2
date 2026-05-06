@@ -766,6 +766,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         if (cfg.core_strategies[i] == STRATEGY_ML) {
             static CoreModelZoo<F> ml_zoos[MAX_EXECUTION_CORES];
             CoreModelZoo_Init(&ml_zoos[i]);
+            // v5.10.0a.G.5 — per-core ensemble zoo, mirrors single-zoo allocation.
+            // Default empty = ezoo->active=0 = single-zoo path runs unchanged.
+            static EnsembleModelZoo<F> ml_ensemble_zoos[MAX_EXECUTION_CORES];
+            EnsembleModelZoo_Init(&ml_ensemble_zoos[i]);
             int backend = cfg.ml_backend ? cfg.ml_backend : MODEL_BACKEND_XGBOOST;
 
             int loaded = 0;
@@ -819,6 +823,41 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         state.cores[i].model_handle = NULL;
                         // v5.9.0b: surface load failure to operator via TUI/health log
                         state.cores[i].model_load_failed = 1;
+                    }
+                }
+                // v5.10.0a.G.5 — try ensemble auto-detect on the base dir.
+                // No-op when no _horizon_<H> siblings present; ezoo->active=0
+                // → single-zoo path runs unchanged.
+                if (cfg.core_model_dir[i][0]) {
+                    int n_loaded = EnsembleModelZoo_AutoDetectFromDir(
+                        &ml_ensemble_zoos[i],
+                        cfg.core_model_dir[i],
+                        backend);
+                    if (n_loaded > 0 && ml_ensemble_zoos[i].active) {
+                        fprintf(stderr, "[sharded] core %d: ensemble active "
+                                        "(%d horizons; %d total models)\n",
+                                i, ml_ensemble_zoos[i].buy_signal_count, n_loaded);
+                        // v5.10.0a.G.7 — initialize per-regime bandits + cfg-driven mode
+                        EnsembleModelZoo_InitBandits(&ml_ensemble_zoos[i],
+                                                       cfg.ensemble_bandit_eta,
+                                                       cfg.ensemble_min_warmup_predictions);
+                        const char* mode = cfg.core_ensemble_blend_mode[i][0]
+                                          ? cfg.core_ensemble_blend_mode[i]
+                                          : cfg.ensemble_blend_mode;
+                        strncpy(ml_ensemble_zoos[i].blend_mode, mode,
+                                sizeof(ml_ensemble_zoos[i].blend_mode) - 1);
+                        ml_ensemble_zoos[i].blend_mode[
+                            sizeof(ml_ensemble_zoos[i].blend_mode) - 1] = '\0';
+                        EnsembleModelZoo_SetDisabledHorizons(&ml_ensemble_zoos[i],
+                            cfg.core_disabled_horizons[i]);
+                        // v5.10.0a.G.9 — overlay persisted bandit state (if any)
+                        EnsembleModelZoo_LoadBanditState(&ml_ensemble_zoos[i],
+                                                          cfg.core_model_dir[i]);
+                        EnsembleModelZoo_SetBanditSaveInterval(&ml_ensemble_zoos[i],
+                            cfg.ensemble_bandit_save_interval);
+                        state.cores[i].ensemble_handle = &ml_ensemble_zoos[i];
+                    } else {
+                        state.cores[i].ensemble_handle = nullptr;
                     }
                 }
             } else {
@@ -1178,6 +1217,12 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     g_shared.drag_slot = -1;
     for (int i = 0; i < 16; ++i) g_shared.swap_strategy_requested[i] = STRATEGY_NONE;
     for (int i = 0; i < 16; ++i) g_shared.manual_close_requested[i]  = 0;
+    // v5.10.0c — hot model swap state. memset above already zeroed
+    // these, but explicit init clarifies intent: 0 = no pending swap.
+    for (int i = 0; i < 16; ++i) {
+        g_shared.swap_model_path_requested[i] = 0;
+        g_shared.pending_model_path[i][0]     = '\0';
+    }
     // Wire the signal handler's GUI-quit pointer to this g_shared. After
     // this assignment, SIGINT will set BOTH g_engine_sharded_shutdown AND
     // g_shared.quit_requested in one atomic-ish step, ensuring the GUI
@@ -2053,7 +2098,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // OrderManager_Tick produces. Extracted to a standalone function so
     // it's directly unit-testable without standing up a producer thread.
     auto drain_post_fill = [&state, &oms, &cfg]() {
-        EventLoop_DrainPostFill(&state, &oms, cfg.sl_cooldown_cycles);
+        EventLoop_DrainPostFill(&state, &oms, cfg.sl_cooldown_cycles,
+                                 cfg.ensemble_trade_reward_mult,
+                                 cfg.confidence_ic_floor,
+                                 cfg.confidence_ic_floor_window,
+                                 cfg.auto_kill_on_drift);
     };
 
     // v4.7.8: manual force-close requests from the GUI. User clicks a
@@ -2363,6 +2412,96 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                 }
                             }
                             // else: position open; leave pending — try next cycle
+                        }
+                    }
+                    // === v5.10.0c — Per-core model hot-swap pickup ===
+                    // Mirrors the strategy hot-swap pattern above, but the
+                    // payload is a directory path (string) instead of a
+                    // strategy id (uint8). On request: free + reinit + reload
+                    // ml_zoos[c] from the new dir; update model_handle on
+                    // success, NULL it on failure (engine falls back to
+                    // SimpleDip via ML_BuildParameters dispatcher).
+                    {
+                        uint8_t mswap = __atomic_load_n(
+                            &g_shared.swap_model_path_requested[c],
+                            __ATOMIC_ACQUIRE);
+                        if (mswap) {
+                            int partial_on = state.oms->partial_exit_enabled ? 1 : 0;
+                            uint16_t open_mask = partial_on
+                                ? (uint16_t)((1u << (c * 2)) | (1u << (c * 2 + 1)))
+                                : (uint16_t)(1u << c);
+                            int has_open = (state.oms->portfolio.active_bitmap & open_mask) != 0;
+
+                            if (has_open && !cfg.acknowledge_hot_swap_with_open_positions) {
+                                // Defer: leave flag set, retry next slow-path cycle.
+                                // Operator opts in via cfg field if they want
+                                // entry+exit on different models.
+                            } else {
+                                char new_path[256];
+                                strncpy(new_path, g_shared.pending_model_path[c], 255);
+                                new_path[255] = '\0';
+
+                                if (new_path[0] == '\0') {
+                                    fprintf(stderr,
+                                        "[hot_swap] core %d REFUSED: empty path\n", c);
+                                    __atomic_store_n(
+                                        &g_shared.swap_model_path_requested[c], 0,
+                                        __ATOMIC_RELEASE);
+                                } else {
+                                    // Cast model_handle back to the typed zoo
+                                    // pointer set at boot (line ~805). NULL
+                                    // means the core wasn't STRATEGY_ML at
+                                    // boot, so no zoo storage was allocated;
+                                    // hot-swap requires operator pre-config.
+                                    CoreModelZoo<F>* swap_zoo =
+                                        (CoreModelZoo<F>*)state.cores[c].model_handle;
+                                    if (swap_zoo == nullptr) {
+                                        fprintf(stderr,
+                                            "[hot_swap] core %d REFUSED: "
+                                            "core not ML at boot (set "
+                                            "core_%d_strategy=ml + restart "
+                                            "to enable hot-swap)\n", c, c);
+                                        __atomic_store_n(
+                                            &g_shared.swap_model_path_requested[c], 0,
+                                            __ATOMIC_RELEASE);
+                                    } else {
+                                        int swap_backend = cfg.ml_backend
+                                            ? cfg.ml_backend
+                                            : MODEL_BACKEND_XGBOOST;
+                                        // Free old + reinit + reload. Same-thread
+                                        // (slow-path c is single-reader/writer for
+                                        // its zoo); brief window with empty zoo
+                                        // is safe — ML inference also runs on this
+                                        // same slow-path thread, can't preempt itself.
+                                        CoreModelZoo_Free(swap_zoo);
+                                        CoreModelZoo_Init(swap_zoo);
+                                        int loaded = CoreModelZoo_LoadFromDir(
+                                            swap_zoo, new_path, swap_backend,
+                                            /*secret=*/nullptr, /*gap=*/0.05,
+                                            /*strict=*/cfg.held_out_gate_strict,
+                                            cfg.acknowledge_cross_binary_version_drift);
+                                        if (loaded > 0) {
+                                            state.cores[c].model_load_failed = 0;
+                                            fprintf(stderr,
+                                                "[hot_swap] core %d swapped to %s "
+                                                "(%d roles loaded)\n",
+                                                c, new_path, loaded);
+                                        } else {
+                                            // Load failed; null the handle so
+                                            // dispatcher falls back to SimpleDip.
+                                            state.cores[c].model_handle = NULL;
+                                            state.cores[c].model_load_failed = 1;
+                                            fprintf(stderr,
+                                                "[hot_swap] core %d REFUSED: "
+                                                "no roles loaded from %s\n",
+                                                c, new_path);
+                                        }
+                                        __atomic_store_n(
+                                            &g_shared.swap_model_path_requested[c], 0,
+                                            __ATOMIC_RELEASE);
+                                    }
+                                }
+                            }
                         }
                     }
 #endif
@@ -2769,6 +2908,30 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             fprintf(stderr, "[snapshot] final save: data/sharded_snapshot.dat\n");
         } else {
             fprintf(stderr, "[snapshot] final save FAILED — next restart starts fresh\n");
+        }
+    }
+
+    // v5.10.0a.G.9 — final bandit state save. Each active ensemble core
+    // flushes to its own <core_model_dir>/bandit_state.json. Survives
+    // restart so weights resume rather than re-learn from uniform.
+    // Live AND paper modes both save (live: deployed weights inform
+    // next session; paper: same thing for backtest-style sessions).
+    // Reaches the ezoo via ctx.ensemble_handle (registered at
+    // line ~853) since the static array's name is scope-limited
+    // to the init for-loop.
+    for (int i = 0; i < num_cores; ++i) {
+        auto* ezoo = static_cast<EnsembleModelZoo<F>*>(
+            state.cores[i].ensemble_handle);
+        if (ezoo && ezoo->active && ezoo->initialized_bandits &&
+            cfg.core_model_dir[i][0]) {
+            int saved = EnsembleModelZoo_SaveBanditState(
+                ezoo, cfg.core_model_dir[i],
+                /*regime_names=*/nullptr);
+            if (saved) {
+                fprintf(stderr, "[sharded] core %d: saved bandit state to "
+                                "%s/bandit_state.json\n",
+                        i, cfg.core_model_dir[i]);
+            }
         }
     }
 

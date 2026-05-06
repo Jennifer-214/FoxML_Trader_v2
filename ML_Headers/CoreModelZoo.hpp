@@ -35,10 +35,16 @@
 
 #include "ModelInference.hpp"
 #include "FeatureRegistry.hpp"  // v5.8.6: FEATURE_REGISTRY_HASH() drift catch
+#include "BanditLearning.hpp"   // v5.10.0a.G.7 — per-regime BanditState in EnsembleModelZoo
+#include "../Strategies/StrategyInterface.hpp"  // v5.10.0a.G.7 — NUM_REGIMES
 #include "../Version.hpp"        // v5.8.6: ENGINE_VERSION_STRING for boot log
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>      // v5.10.0a.G.5 — strtol for AutoDetect horizon parse
 #include <sys/stat.h>
+#include <sys/types.h>   // v5.10.0a.G.5 — dirent for AutoDetect filesystem scan
+#include <unistd.h>      // v5.10.0a.G.9 — access() for bandit_state.json probe
+#include <dirent.h>      // v5.10.0a.G.5 — opendir/readdir for AutoDetect
 
 // role bitmap — set in zoo->loaded_mask when a model is successfully loaded
 #define CORE_MODEL_BARRIER     (1u << 0)  // 3-class softmax: stable/peak/valley
@@ -579,6 +585,816 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
                         "                fix engine.cfg to silence these warnings.\n",
                 core_id, mismatches);
         return 1;
+    }
+}
+
+//======================================================================================================
+// [v5.10.0a.G.3 — ENSEMBLE MODEL ZOO (multi-horizon sidecar struct)]
+//======================================================================================================
+// EnsembleModelZoo lives ALONGSIDE CoreModelZoo (not replacing it).
+// Single-horizon callers use CoreModelZoo unchanged; multi-horizon
+// callers populate EnsembleModelZoo when cfg.horizon_list non-empty.
+//
+// G.4 inference path: at per-tick predict, if ensemble->active, iterate
+// loaded horizons + select highest-confidence prediction; else fall
+// through to single-zoo (existing path).
+//
+// Storage shape: 4 roles × N horizons (HORIZON_LIST_MAX=8). Memory
+// upper bound: 4 × 8 × ~5-50MB per ModelHandle = up to ~1.6GB per core.
+// Operator opt-in via cfg.horizon_list; default empty = no extra memory.
+
+// Mirror ControllerConfig::HORIZON_LIST_MAX. Avoids template instantiation
+// circular dep; the value is small enough to hardcode.
+#define ENSEMBLE_HORIZON_MAX 8
+
+template <unsigned F>
+struct EnsembleModelZoo {
+    ModelHandle<F> barrier[ENSEMBLE_HORIZON_MAX];
+    ModelHandle<F> regime[ENSEMBLE_HORIZON_MAX];
+    ModelHandle<F> exit_predictor[ENSEMBLE_HORIZON_MAX];
+    ModelHandle<F> buy_signal[ENSEMBLE_HORIZON_MAX];
+    int barrier_count;
+    int regime_count;
+    int exit_predictor_count;
+    int buy_signal_count;
+    // Per-member horizon ticks (e.g. {100, 500, 1000} → ezoo populated
+    // at indices 0..2 with horizon_ticks_at_idx[0..2] = {100, 500, 1000}).
+    int horizon_ticks_at_idx[ENSEMBLE_HORIZON_MAX];
+    int active;  // 0 = use single-zoo (existing); 1 = ensemble path
+    // v5.10.0a.G.7 — per-regime bandit state (NUM_REGIMES from
+    // FOREACH_REGIME X-macro). Each bandit has N arms = ezoo->buy_signal_count.
+    // Cold start: uniform weights; G.8 reward path updates them per outcome.
+    BanditState bandits[NUM_REGIMES];
+    int initialized_bandits;       // 0 = bandits not yet wired (Init phase only)
+    // Per-prediction tracking (G.7 + G.8 reward attribution)
+    int last_predicted_regime_id;  // regime AT predict-time (NOT current; for G.8 attribution)
+    int last_predicted_horizon_idx;// dominant horizon idx (display + G.8 reward)
+    char blend_mode[16];           // "weighted" or "selection" (cached from cfg)
+    // v5.10.0a.G.7 — kill-switch bitmask. Bit i set = horizon i disabled
+    // (skip predict + freeze its bandit weight). Set by parsing cfg's
+    // core_N_disabled_horizons CSV at boot via _SetDisabledHorizons.
+    uint32_t disabled_horizon_mask;
+    // v5.10.0a.G.7 — regime hysteresis dampening. When current_regime
+    // changes, blend OLD regime's weights with NEW for hysteresis cycles.
+    int regime_transition_cycles_remaining;  // 0 = stable
+    int prev_regime_id;            // regime BEFORE the transition
+    // v5.10.0a.G.8 — reward attribution ring buffer. Each predict writes
+    // a record (tick_index, regime_id, per-arm predictions, sample_price);
+    // slow-path lookback walks ring → for old-enough records, computes
+    // per-arm reward (direction match) → calls Bandit_Update.
+    static constexpr int REWARD_RING_SIZE = 256;
+    struct PredictionRecord {
+        uint64_t predict_call;        // monotonic counter (increments per predict)
+        int      regime_id;           // regime AT predict time (for attribution)
+        float    predictions[ENSEMBLE_HORIZON_MAX];  // per-arm raw outputs
+        float    sample_price;        // price at predict time
+        uint8_t  rewarded_lookback;   // 1 = already rewarded by slow-path lookback
+        uint8_t  rewarded_trade;      // 1 = already rewarded by trade-close
+    };
+    PredictionRecord reward_ring[REWARD_RING_SIZE];
+    int reward_ring_head;             // next write slot
+    uint64_t predict_call_count;      // monotonic predict counter (sets record.predict_call)
+    // v5.10.0a.G.8 — drift watchdog (perf #3). Per-arm rolling IC tracker;
+    // when IC drops below cfg.confidence_ic_floor, demote weight to ~0
+    // across all regimes (manual override of bandit's natural learning).
+    static constexpr int DRIFT_IC_HISTORY = 100;
+    struct PerArmDrift {
+        float    ic_history[DRIFT_IC_HISTORY];  // recent reward outcomes (1=correct, -1=wrong, 0=skip)
+        int      ic_count;                       // populated entries (capped at DRIFT_IC_HISTORY)
+        float    ic_avg;                         // running average over ic_history
+        uint8_t  demoted;                        // 1 = forced near-zero weight; sticky until recovery
+    };
+    PerArmDrift drift[ENSEMBLE_HORIZON_MAX];
+    // v5.10.0a.G.9 — bandit state persistence. base_dir is captured at
+    // AutoDetectFromDir / LoadFromCfg time so the periodic save trigger
+    // doesn't need ControllerConfig visibility from the bandit-update
+    // helpers. Empty path = persistence disabled (no save attempted).
+    char     bandit_save_path[400];     // <core_model_dir>/bandit_state.json
+    int      bandit_save_interval;      // 0 = no periodic save (shutdown only)
+    uint64_t bandit_update_count;       // monotonic; modulo'd against interval
+};
+
+template <unsigned F>
+inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
+    for (int i = 0; i < ENSEMBLE_HORIZON_MAX; ++i) {
+        Model_Init(&ezoo->barrier[i]);
+        Model_Init(&ezoo->regime[i]);
+        Model_Init(&ezoo->exit_predictor[i]);
+        Model_Init(&ezoo->buy_signal[i]);
+        ezoo->horizon_ticks_at_idx[i] = 0;
+    }
+    ezoo->barrier_count = 0;
+    ezoo->regime_count = 0;
+    ezoo->exit_predictor_count = 0;
+    ezoo->buy_signal_count = 0;
+    ezoo->active = 0;
+    // v5.10.0a.G.7 — bandit state zero-init (full bandit init happens in
+    // _InitBandits AFTER LoadFromCfg / AutoDetect populates buy_signal_count
+    // so we know how many arms).
+    memset(ezoo->bandits, 0, sizeof(ezoo->bandits));
+    ezoo->initialized_bandits = 0;
+    ezoo->last_predicted_regime_id = 0;
+    ezoo->last_predicted_horizon_idx = -1;
+    strncpy(ezoo->blend_mode, "weighted", sizeof(ezoo->blend_mode) - 1);
+    ezoo->blend_mode[sizeof(ezoo->blend_mode) - 1] = '\0';
+    ezoo->disabled_horizon_mask = 0;
+    ezoo->regime_transition_cycles_remaining = 0;
+    ezoo->prev_regime_id = 0;
+    // v5.10.0a.G.8 — reward state init
+    memset(ezoo->reward_ring, 0, sizeof(ezoo->reward_ring));
+    ezoo->reward_ring_head = 0;
+    ezoo->predict_call_count = 0;
+    memset(ezoo->drift, 0, sizeof(ezoo->drift));
+    // v5.10.0a.G.9 — persistence config init (caller fills via _SetSavePath)
+    ezoo->bandit_save_path[0] = '\0';
+    ezoo->bandit_save_interval = 0;
+    ezoo->bandit_update_count = 0;
+}
+
+//======================================================================================================
+// [v5.10.0a.G.8 — REWARD RING WRITE]
+//======================================================================================================
+// Called from ML_BuildParameters after each predict. Writes per-arm
+// predictions + regime + sample_price into the ring at head; head
+// advances modulo RING_SIZE (oldest record overwritten).
+//
+// predict_call_count is the monotonic predict counter; record's
+// predict_call field captures the value at write time. Slow-path
+// lookback uses (current_predict_call - record.predict_call) ≥
+// (forward_ticks / poll_interval) to decide if record is old enough
+// to reward.
+template <unsigned F>
+inline void EnsembleModelZoo_RecordPrediction(EnsembleModelZoo<F>* ezoo,
+                                                int regime_id,
+                                                const float* per_arm_preds,
+                                                int n_arms,
+                                                float sample_price) {
+    if (!ezoo || !ezoo->active) return;
+    int slot = ezoo->reward_ring_head % EnsembleModelZoo<F>::REWARD_RING_SIZE;
+    auto& rec = ezoo->reward_ring[slot];
+    ezoo->predict_call_count++;
+    rec.predict_call = ezoo->predict_call_count;
+    rec.regime_id = regime_id;
+    rec.sample_price = sample_price;
+    rec.rewarded_lookback = 0;
+    rec.rewarded_trade = 0;
+    int n = (n_arms < ENSEMBLE_HORIZON_MAX) ? n_arms : ENSEMBLE_HORIZON_MAX;
+    for (int a = 0; a < n; ++a) rec.predictions[a] = per_arm_preds[a];
+    for (int a = n; a < ENSEMBLE_HORIZON_MAX; ++a) rec.predictions[a] = 0.5f;
+    ezoo->reward_ring_head = (ezoo->reward_ring_head + 1)
+                             % EnsembleModelZoo<F>::REWARD_RING_SIZE;
+}
+
+//======================================================================================================
+// [v5.10.0a.G.8 — DRIFT WATCHDOG (perf optimization #3)]
+//======================================================================================================
+// Updates per-arm IC running history with reward outcome. If IC drops
+// below ic_floor for sustained window → demote (force near-zero weight
+// across all regimes). Recovery: IC rises above ic_floor + 0.02
+// hysteresis → un-demote, allow re-learn.
+template <unsigned F>
+inline void EnsembleModelZoo_UpdateDrift(EnsembleModelZoo<F>* ezoo,
+                                           int arm,
+                                           int correct,   // 1 = correct, 0 = wrong
+                                           double ic_floor) {
+    if (!ezoo || arm < 0 || arm >= ezoo->buy_signal_count) return;
+    auto& d = ezoo->drift[arm];
+    int idx = d.ic_count % EnsembleModelZoo<F>::DRIFT_IC_HISTORY;
+    d.ic_history[idx] = correct ? 1.0f : -1.0f;
+    if (d.ic_count < EnsembleModelZoo<F>::DRIFT_IC_HISTORY) d.ic_count++;
+    // Recompute running average (cheap; bounded N)
+    double sum = 0.0;
+    int n = d.ic_count;
+    if (n > EnsembleModelZoo<F>::DRIFT_IC_HISTORY) n = EnsembleModelZoo<F>::DRIFT_IC_HISTORY;
+    for (int i = 0; i < n; ++i) sum += d.ic_history[i];
+    d.ic_avg = (n > 0) ? (float)(sum / n) : 0.0f;
+    // Demote / recover
+    if (n >= 20 && d.ic_avg < (float)ic_floor && !d.demoted) {
+        // Force near-zero weight across all regimes (operator escape from
+        // a horizon that's gone bad faster than bandit's natural decay)
+        for (int r = 0; r < NUM_REGIMES; ++r) {
+            if (arm < ezoo->bandits[r].n_arms) {
+                ezoo->bandits[r].weights[arm] = 1e-9;
+            }
+        }
+        d.demoted = 1;
+        fprintf(stderr, "[ensemble] DRIFT-WATCHDOG: arm %d (h%d) demoted "
+                        "(IC=%.4f below floor %.4f); weights forced near 0.\n",
+                arm, ezoo->horizon_ticks_at_idx[arm], d.ic_avg, ic_floor);
+    } else if (d.demoted && d.ic_avg > (float)ic_floor + 0.02f) {
+        d.demoted = 0;
+        fprintf(stderr, "[ensemble] arm %d (h%d) recovered (IC=%.4f); "
+                        "weight allowed to re-learn.\n",
+                arm, ezoo->horizon_ticks_at_idx[arm], d.ic_avg);
+    }
+}
+
+//======================================================================================================
+// [v5.10.0a.G.8 — SLOW-PATH LOOKBACK REWARDS]
+//======================================================================================================
+// Walks reward ring; for records old enough that forward_ticks have
+// elapsed since predict time, computes per-arm reward based on whether
+// prediction direction matched the price move (current_price vs
+// record.sample_price). Calls Bandit_Update on the matching regime's
+// bandit. Marks records as rewarded to avoid double-rewarding.
+template <unsigned F>
+inline void EnsembleModelZoo_TickRewardsFromLookback(EnsembleModelZoo<F>* ezoo,
+                                                       float current_price,
+                                                       int forward_ticks,
+                                                       int poll_interval,
+                                                       double ic_floor) {
+    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return;
+    if (poll_interval <= 0) poll_interval = 100;
+    if (forward_ticks <= 0) forward_ticks = 1000;
+    uint64_t lookback_calls = (uint64_t)((forward_ticks + poll_interval - 1)
+                                          / poll_interval);
+    if (lookback_calls == 0) lookback_calls = 1;
+    uint64_t now = ezoo->predict_call_count;
+    int n_arms = ezoo->buy_signal_count;
+
+    // Walk all populated records; reward ones that are old enough + not
+    // yet rewarded.
+    for (int i = 0; i < EnsembleModelZoo<F>::REWARD_RING_SIZE; ++i) {
+        auto& rec = ezoo->reward_ring[i];
+        if (rec.predict_call == 0) continue;             // unpopulated slot
+        if (rec.rewarded_lookback) continue;             // already rewarded
+        if (now < rec.predict_call + lookback_calls) continue;  // too recent
+
+        // Compute price delta sign
+        if (rec.sample_price <= 0.0f) { rec.rewarded_lookback = 1; continue; }
+        double price_delta = ((double)current_price - (double)rec.sample_price)
+                              / (double)rec.sample_price;
+        int regime = rec.regime_id;
+        if (regime < 0 || regime >= NUM_REGIMES) regime = 0;
+
+        // Per-arm reward: 1 if predicted direction matched, 0 otherwise.
+        // Skip disabled arms (bitmask check).
+        int updates_this_record = 0;
+        for (int a = 0; a < n_arms; ++a) {
+            if (ezoo->disabled_horizon_mask & (1u << a)) continue;
+            float p = rec.predictions[a];
+            int correct = ((p > 0.5f) == (price_delta > 0.0)) ? 1 : 0;
+            // Reward signal in bps. Treat correct as +50bps, wrong as -50bps;
+            // Bandit_Update accumulates these.
+            double reward_bps = correct ? 50.0 : -50.0;
+            Bandit_Update(&ezoo->bandits[regime], a, reward_bps);
+            updates_this_record++;
+            // Drift watchdog updates per-arm IC tracker
+            EnsembleModelZoo_UpdateDrift(ezoo, a, correct, ic_floor);
+        }
+        rec.rewarded_lookback = 1;
+        // v5.10.0a.G.9 — periodic save trigger after each ring record's
+        // updates land. Cheap when bandit_save_interval==0 (no-op early
+        // return). When fires (once every N updates), atomic file write
+        // takes ~1ms — acceptable on slow path.
+        EnsembleModelZoo_MaybeSaveBanditPeriodic(ezoo, updates_this_record);
+    }
+}
+
+//======================================================================================================
+// [v5.10.0a.G.8 — TRADE-CLOSE REWARD HOOK]
+//======================================================================================================
+// Called from EventLoop_DrainPostFill when a position closes (TP/SL
+// exit). Looks up the MOST RECENT prediction record (proxy for "the
+// model recommendation that drove this trade") and rewards based on
+// realized P&L direction. Higher weight than slow-path (real money
+// signal includes fees + slippage).
+//
+// reward_mult: cfg.ensemble_trade_reward_mult (default 4.0). Scales
+// |reward_bps| × mult; correct predictions → positive bps, wrong →
+// negative.
+template <unsigned F>
+inline void EnsembleModelZoo_TradeCloseReward(EnsembleModelZoo<F>* ezoo,
+                                                double realized_pnl_bps,
+                                                double reward_mult) {
+    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return;
+    if (ezoo->predict_call_count == 0) return;  // no predictions yet
+
+    // Find the most recent record that hasn't been trade-rewarded.
+    // Walk ring backward from head.
+    int n_arms = ezoo->buy_signal_count;
+    int found = -1;
+    for (int back = 1; back <= EnsembleModelZoo<F>::REWARD_RING_SIZE; ++back) {
+        int idx = (ezoo->reward_ring_head - back +
+                   EnsembleModelZoo<F>::REWARD_RING_SIZE)
+                   % EnsembleModelZoo<F>::REWARD_RING_SIZE;
+        if (ezoo->reward_ring[idx].predict_call == 0) break;
+        if (ezoo->reward_ring[idx].rewarded_trade) continue;
+        found = idx;
+        break;
+    }
+    if (found < 0) return;
+
+    auto& rec = ezoo->reward_ring[found];
+    int regime = rec.regime_id;
+    if (regime < 0 || regime >= NUM_REGIMES) regime = 0;
+    int pnl_positive = (realized_pnl_bps > 0.0) ? 1 : 0;
+
+    int trade_updates = 0;
+    for (int a = 0; a < n_arms; ++a) {
+        if (ezoo->disabled_horizon_mask & (1u << a)) continue;
+        float p = rec.predictions[a];
+        int correct = ((p > 0.5f) == (pnl_positive == 1)) ? 1 : 0;
+        // Trade-close reward weighted higher than slow-path lookback
+        double reward_bps = (correct ? 50.0 : -50.0) * reward_mult;
+        Bandit_Update(&ezoo->bandits[regime], a, reward_bps);
+        trade_updates++;
+    }
+    rec.rewarded_trade = 1;
+    // v5.10.0a.G.9 — periodic save check (no-op when interval==0)
+    EnsembleModelZoo_MaybeSaveBanditPeriodic(ezoo, trade_updates);
+}
+
+//======================================================================================================
+// [v5.10.0a.G.7 — INIT BANDITS]
+//======================================================================================================
+// Call AFTER LoadFromCfg / AutoDetectFromDir populates ezoo->buy_signal_count.
+// Initializes one BanditState per regime (NUM_REGIMES from FOREACH_REGIME),
+// each with n_arms = buy_signal_count. Uniform initial weights.
+//
+// eta: cfg.ensemble_bandit_eta (Bandit-Exp3 learning rate; 0.1 default)
+// min_warmup: cfg.ensemble_min_warmup_predictions (per regime; 100 default)
+//
+// Sets ezoo->initialized_bandits = 1 to gate G.7 dispatch (won't read bandits
+// before they're initialized).
+template <unsigned F>
+inline void EnsembleModelZoo_InitBandits(EnsembleModelZoo<F>* ezoo,
+                                           double eta, int min_warmup) {
+    if (!ezoo) return;
+    int n_arms = ezoo->buy_signal_count;
+    if (n_arms < 2) {
+        // Single-arm or empty ensemble — no point in bandits. Mark
+        // initialized so dispatch doesn't loop forever, but bandits won't
+        // be used (ezoo->active gates that anyway).
+        ezoo->initialized_bandits = 1;
+        return;
+    }
+    for (int r = 0; r < NUM_REGIMES; ++r) {
+        // Bandit_Init signature: (state, n_arms, gamma, eta_max,
+        //                          blend_ratio, min_samples, ramp_up)
+        // Map cfg.ensemble_bandit_eta → eta_max; min_warmup → min_samples.
+        // gamma + ramp_up + blend_ratio use sensible defaults.
+        Bandit_Init(&ezoo->bandits[r], n_arms,
+                    /*gamma=*/0.05,
+                    /*eta_max=*/(eta > 0.0 ? eta : 0.1),
+                    /*blend_ratio=*/1.0,         // full bandit influence in ensemble
+                    /*min_samples=*/(min_warmup > 0 ? min_warmup : 100),
+                    /*ramp_up=*/(min_warmup > 0 ? min_warmup * 2 : 200));
+        // Set arm names for logging/debug
+        for (int a = 0; a < n_arms; ++a) {
+            char nm[32];
+            snprintf(nm, sizeof(nm), "h%d", ezoo->horizon_ticks_at_idx[a]);
+            Bandit_SetArmName(&ezoo->bandits[r], a, nm);
+        }
+    }
+    ezoo->initialized_bandits = 1;
+}
+
+//======================================================================================================
+// [v5.10.0a.G.7 — KILL-SWITCH PARSER]
+//======================================================================================================
+// Parses CSV string ("100,500") → bitmask of horizon indices that match.
+// Disabled horizons skip predict (saves N×predict cost per disabled);
+// their bandit weights stay frozen at last value (skipped by Bandit_Update).
+template <unsigned F>
+inline void EnsembleModelZoo_SetDisabledHorizons(EnsembleModelZoo<F>* ezoo,
+                                                   const char* csv) {
+    if (!ezoo) return;
+    ezoo->disabled_horizon_mask = 0;
+    if (!csv || csv[0] == '\0') return;
+    const char* p = csv;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p) break;
+        char* end = nullptr;
+        long h = strtol(p, &end, 10);
+        if (end == p) break;
+        // Find which arm this horizon ticks corresponds to
+        for (int a = 0; a < ezoo->buy_signal_count; ++a) {
+            if (ezoo->horizon_ticks_at_idx[a] == (int)h) {
+                ezoo->disabled_horizon_mask |= (1u << a);
+                fprintf(stderr, "[ensemble] horizon %d (arm %d) DISABLED by cfg\n",
+                        (int)h, a);
+                break;
+            }
+        }
+        p = end;
+    }
+}
+
+template <unsigned F>
+inline void EnsembleModelZoo_Free(EnsembleModelZoo<F> *ezoo) {
+    for (int i = 0; i < ENSEMBLE_HORIZON_MAX; ++i) {
+        Model_Free(&ezoo->barrier[i]);
+        Model_Free(&ezoo->regime[i]);
+        Model_Free(&ezoo->exit_predictor[i]);
+        Model_Free(&ezoo->buy_signal[i]);
+    }
+    ezoo->barrier_count = 0;
+    ezoo->regime_count = 0;
+    ezoo->exit_predictor_count = 0;
+    ezoo->buy_signal_count = 0;
+    ezoo->active = 0;
+}
+
+// Load N models per role from per-horizon directories. Operator's
+// Train Multi-Horizon worker (v5.10.0a.G.1) saves to:
+//   models/<class_or_regr>/<run_name>_horizon_<H>/<role>.json
+//
+// This loader expects:
+//   base_run_path = "models/<class>/<run_name>" (without _horizon_<H> suffix)
+// Per horizon h in horizon_list[]:
+//   try load <base_run_path>_horizon_<H>/<role>.json for each role
+//
+// Returns total models loaded across all roles + horizons. Sets
+// ezoo->active=1 if any role got at least one horizon loaded.
+template <unsigned F>
+inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
+                                         const char *base_run_path,
+                                         const int *horizon_list,
+                                         int horizon_count,
+                                         int backend,
+                                         const char* held_out_stamp_secret = nullptr,
+                                         double gap_threshold = 0.05,
+                                         int held_out_gate_strict = 0,
+                                         int acknowledge_cross_binary_drift = 0) {
+    if (!ezoo || !base_run_path || base_run_path[0] == '\0' ||
+        !horizon_list || horizon_count <= 0) return 0;
+
+    if (horizon_count > ENSEMBLE_HORIZON_MAX) horizon_count = ENSEMBLE_HORIZON_MAX;
+
+    int total_loaded = 0;
+    char per_horizon_dir[512];
+    for (int h = 0; h < horizon_count; ++h) {
+        int H = horizon_list[h];
+        if (H <= 0) continue;
+        snprintf(per_horizon_dir, sizeof(per_horizon_dir),
+                 "%s_horizon_%d", base_run_path, H);
+
+        // Try each role at this horizon's dir
+        if (CoreModelZoo_TryLoadRole(&ezoo->barrier[ezoo->barrier_count],
+                                       per_horizon_dir, "barrier", backend,
+                                       held_out_stamp_secret, gap_threshold,
+                                       held_out_gate_strict,
+                                       acknowledge_cross_binary_drift)) {
+            ezoo->horizon_ticks_at_idx[ezoo->barrier_count] = H;
+            ezoo->barrier_count++;
+            total_loaded++;
+        }
+        if (CoreModelZoo_TryLoadRole(&ezoo->regime[ezoo->regime_count],
+                                       per_horizon_dir, "regime", backend,
+                                       held_out_stamp_secret, gap_threshold,
+                                       held_out_gate_strict,
+                                       acknowledge_cross_binary_drift)) {
+            ezoo->regime_count++;
+            total_loaded++;
+        }
+        if (CoreModelZoo_TryLoadRole(&ezoo->exit_predictor[ezoo->exit_predictor_count],
+                                       per_horizon_dir, "exit", backend,
+                                       held_out_stamp_secret, gap_threshold,
+                                       held_out_gate_strict,
+                                       acknowledge_cross_binary_drift)) {
+            ezoo->exit_predictor_count++;
+            total_loaded++;
+        }
+        if (CoreModelZoo_TryLoadRole(&ezoo->buy_signal[ezoo->buy_signal_count],
+                                       per_horizon_dir, "buy_signal", backend,
+                                       held_out_stamp_secret, gap_threshold,
+                                       held_out_gate_strict,
+                                       acknowledge_cross_binary_drift)) {
+            ezoo->buy_signal_count++;
+            total_loaded++;
+        }
+    }
+
+    if (total_loaded > 0) {
+        ezoo->active = 1;
+        fprintf(stderr, "[ML] ensemble zoo: %d total models loaded "
+                        "(barrier=%d, regime=%d, exit=%d, buy_signal=%d) "
+                        "across %d horizons\n",
+                total_loaded,
+                ezoo->barrier_count, ezoo->regime_count,
+                ezoo->exit_predictor_count, ezoo->buy_signal_count,
+                horizon_count);
+    } else {
+        fprintf(stderr, "[ML] ensemble zoo: no models loaded "
+                        "(checked %d horizons under base '%s'; falling back "
+                        "to single-zoo)\n",
+                horizon_count, base_run_path);
+    }
+    return total_loaded;
+}
+
+//======================================================================================================
+// [v5.10.0a.G.5 — AUTO-DETECT ENSEMBLE FROM DISK]
+//======================================================================================================
+// Scans <base_dir>_horizon_* siblings on disk. For each sibling found:
+//   - Verify load via CoreModelZoo_TryLoadRole
+//   - Read stamp body's grid_member_count + grid_member_idx (v5.10.0a.G.2)
+//   - Validate consistency: all loaded siblings must agree on grid_member_count
+//   - Place each model at its grid_member_idx slot in the ensemble
+//
+// Operator workflow:
+//   1. Train Multi-Horizon (G.1) → models/<run>/<run>_horizon_<H>/role.json
+//   2. Cfg: core_N_model_dir=models/<run>  (NOTE: base path WITHOUT _horizon_<H>)
+//   3. Engine boot calls AutoDetectFromDir(ezoo, "models/<run>", ...)
+//   4. Function discovers all _horizon_* siblings + populates ezoo
+//
+// Returns total models loaded across all roles + horizons. Sets
+// ezoo->active=1 if any role got at least one horizon loaded; logs
+// the discovered horizon set.
+//
+// Backward-compat:
+//   - empty base_dir → no-op, returns 0
+//   - no siblings on disk → returns 0, ezoo->active stays 0; engine
+//     falls back to single-zoo path
+//   - inconsistent grid_member_count across siblings → log error +
+//     skip inconsistent ones (load only those that agree on count)
+//   - missing stamps → load anyway with warn (legacy multi-train
+//     pre-v5.10.0a.G.2 might not have grid_member_count stamped)
+//
+// v5.10.0a.next reader: if all loaded stamps have per_regime_val_acc
+// fields (added by future trainer-side ship), use as bandit init
+// priors. Currently no-op since the stamp fields don't exist yet.
+template <unsigned F>
+inline int EnsembleModelZoo_AutoDetectFromDir(
+    EnsembleModelZoo<F> *ezoo,
+    const char *base_dir,             // e.g. "models/test_case3" (no _horizon_<H> suffix)
+    int backend,
+    const char* held_out_stamp_secret = nullptr,
+    double gap_threshold = 0.05,
+    int held_out_gate_strict = 0,
+    int acknowledge_cross_binary_drift = 0) {
+    if (!ezoo || !base_dir || base_dir[0] == '\0') return 0;
+
+    // Step 1: scan filesystem for <base_dir>_horizon_<N> siblings.
+    // We need parent dir + base name to enumerate.
+    char parent_path[400];
+    char base_name[200];
+    {
+        size_t dlen = strnlen(base_dir, 400);
+        if (dlen == 0 || dlen >= 400) return 0;
+        // Strip trailing slash if any
+        char b[400];
+        memcpy(b, base_dir, dlen);
+        b[dlen] = '\0';
+        if (b[dlen - 1] == '/') { b[dlen - 1] = '\0'; dlen--; }
+        // Find last slash
+        const char *last_slash = strrchr(b, '/');
+        if (last_slash) {
+            size_t plen = (size_t)(last_slash - b);
+            if (plen >= sizeof(parent_path)) plen = sizeof(parent_path) - 1;
+            memcpy(parent_path, b, plen);
+            parent_path[plen] = '\0';
+            size_t blen = strnlen(last_slash + 1, sizeof(base_name) - 1);
+            memcpy(base_name, last_slash + 1, blen);
+            base_name[blen] = '\0';
+        } else {
+            // No slash: cwd-relative
+            parent_path[0] = '.';
+            parent_path[1] = '\0';
+            size_t blen = strnlen(b, sizeof(base_name) - 1);
+            memcpy(base_name, b, blen);
+            base_name[blen] = '\0';
+        }
+    }
+
+    DIR *dir = opendir(parent_path);
+    if (!dir) {
+        // Parent dir not readable (operator's base_dir doesn't exist) — silent
+        // fail. Caller falls back to single-zoo path.
+        return 0;
+    }
+
+    // Pattern to match: <base_name>_horizon_<digits>
+    char prefix[256];
+    int prefix_len = snprintf(prefix, sizeof(prefix), "%s_horizon_", base_name);
+
+    // Collect candidate horizon ticks (sorted ascending so dispatch is
+    // deterministic regardless of filesystem readdir order).
+    int discovered_horizons[ENSEMBLE_HORIZON_MAX] = {0};
+    int n_discovered = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (n_discovered >= ENSEMBLE_HORIZON_MAX) break;
+        // Match prefix
+        if (strncmp(entry->d_name, prefix, prefix_len) != 0) continue;
+        // Parse trailing number
+        char *suffix = entry->d_name + prefix_len;
+        char *end = nullptr;
+        long h = strtol(suffix, &end, 10);
+        if (end == suffix || *end != '\0') continue;  // non-numeric suffix
+        if (h <= 0 || h > 1000000) continue;          // sanity bounds
+        discovered_horizons[n_discovered++] = (int)h;
+    }
+    closedir(dir);
+
+    if (n_discovered == 0) {
+        // No siblings found; ezoo stays inactive
+        return 0;
+    }
+
+    // Sort ascending (insertion sort; n is tiny)
+    for (int i = 1; i < n_discovered; ++i) {
+        int v = discovered_horizons[i];
+        int j = i - 1;
+        while (j >= 0 && discovered_horizons[j] > v) {
+            discovered_horizons[j + 1] = discovered_horizons[j];
+            j--;
+        }
+        discovered_horizons[j + 1] = v;
+    }
+
+    // Step 2: load each horizon via existing LoadFromCfg machinery.
+    // This is identical to the operator-cfg-driven path; just wires from
+    // disk-discovery instead of cfg.horizon_list.
+    int total = EnsembleModelZoo_LoadFromCfg(ezoo, base_dir,
+                                               discovered_horizons, n_discovered,
+                                               backend,
+                                               held_out_stamp_secret,
+                                               gap_threshold,
+                                               held_out_gate_strict,
+                                               acknowledge_cross_binary_drift);
+
+    if (total > 0 && ezoo->active) {
+        // Build a comma-separated list for the log
+        char hlog[256];
+        int off = 0;
+        for (int h = 0; h < n_discovered && off < (int)sizeof(hlog) - 8; ++h) {
+            off += snprintf(hlog + off, sizeof(hlog) - off,
+                            "%s%d", h == 0 ? "" : ",", discovered_horizons[h]);
+        }
+        fprintf(stderr, "[ensemble] auto-detected %d horizons under '%s': {%s}\n",
+                n_discovered, base_dir, hlog);
+    }
+
+    return total;
+}
+
+//======================================================================================================
+// [v5.10.0a.G.9 — BUNDLE SHA + BANDIT STATE LOAD/SAVE]
+//======================================================================================================
+// "Bundle SHA": deterministic 64-char hex derived from each loaded
+// horizon's training_fingerprint. NOT a cryptographic SHA — just a
+// stable identifier for "this exact set of models." Detects when
+// operator swaps models without clearing the bandit_state.json;
+// mismatch → load returns 0 → caller falls back to uniform via
+// EnsembleModelZoo_InitBandits.
+//
+// Algorithm: concat first 8 chars of each loaded handle's
+// training_fingerprint (in horizon-sorted order) into a 64-char
+// hex string. Pads with '0' if fewer than 8 horizons. Same horizons
+// + same fingerprints → same bundle id.
+template <unsigned F>
+inline void EnsembleModelZoo_ComputeBundleId(
+    const EnsembleModelZoo<F>* ezoo, char* hex_out, size_t hex_cap) {
+    if (!ezoo || !hex_out || hex_cap < 65) return;
+    memset(hex_out, '0', 64);
+    hex_out[64] = '\0';
+    int n = ezoo->buy_signal_count;
+    if (n > 8) n = 8;
+    for (int a = 0; a < n; ++a) {
+        const ModelHandle<F>& h = ezoo->buy_signal[a];
+        // Copy first 8 hex chars of training_fingerprint into slot a.
+        // If fingerprint is empty or too short, leave zeros.
+        const char* fp = h.training_fingerprint;
+        size_t flen = strnlen(fp, 65);
+        if (flen >= 8) {
+            memcpy(hex_out + a * 8, fp, 8);
+        }
+    }
+}
+
+// Save bandit state to <base_dir>/bandit_state.json. Returns 1 on
+// success, 0 on failure (silent — caller logs if it cares).
+template <unsigned F>
+inline int EnsembleModelZoo_SaveBanditState(
+    const EnsembleModelZoo<F>* ezoo, const char* base_dir,
+    const char* const* regime_names) {
+    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return 0;
+    if (!base_dir || base_dir[0] == '\0') return 0;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/bandit_state.json", base_dir);
+    char bundle_id[65];
+    EnsembleModelZoo_ComputeBundleId(ezoo, bundle_id, sizeof(bundle_id));
+    return Bandit_SaveJSON(ezoo->bandits, NUM_REGIMES, path,
+                            bundle_id, regime_names);
+}
+
+// Load bandit state from <base_dir>/bandit_state.json. Returns 1 on
+// success (overlays weights/cum_reward/pulls onto pre-initialized
+// bandits), 0 on missing/corrupt/mismatched file.
+//
+// Also captures base_dir into ezoo->bandit_save_path so periodic +
+// shutdown save can find it without re-deriving from cfg later.
+//
+// Caller must call EnsembleModelZoo_InitBandits FIRST to set up the
+// uniform priors + arm count + gamma. This function only overlays.
+template <unsigned F>
+inline int EnsembleModelZoo_LoadBanditState(
+    EnsembleModelZoo<F>* ezoo, const char* base_dir) {
+    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return 0;
+    if (!base_dir || base_dir[0] == '\0') return 0;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/bandit_state.json", base_dir);
+    // Capture path for periodic + shutdown save triggers.
+    strncpy(ezoo->bandit_save_path, path, sizeof(ezoo->bandit_save_path) - 1);
+    ezoo->bandit_save_path[sizeof(ezoo->bandit_save_path) - 1] = '\0';
+    char expected_id[65];
+    EnsembleModelZoo_ComputeBundleId(ezoo, expected_id, sizeof(expected_id));
+    int loaded = Bandit_LoadJSON(ezoo->bandits, NUM_REGIMES, path,
+                                   expected_id, ezoo->buy_signal_count);
+    if (loaded) {
+        fprintf(stderr, "[ensemble] loaded bandit state from %s\n", path);
+    } else {
+        // Missing or mismatch → caller's prior _InitBandits uniform stays.
+        // Don't warn loudly: missing on first run is normal.
+        if (access(path, F_OK) == 0) {
+            fprintf(stderr, "[ensemble] bandit_state.json present but rejected "
+                            "(format/sha/n_arms mismatch); starting uniform\n");
+        }
+    }
+    return loaded;
+}
+
+// v5.10.0a.next.1 — load bandit state from an EXPLICIT path with optional
+// bundle-id check skip. Used by BacktestRunConfig.bandit_state_prior_path
+// when operator wants to bootstrap a new ensemble from a sibling bundle's
+// learned weights (e.g. transfer learning across runs with the same N
+// horizons but different model contents). Returns 1 if loaded.
+//
+// skip_bundle_check=1 → operator-explicit override; bundle-id mismatch
+// is allowed (typical when transferring between sibling models).
+// skip_bundle_check=0 → normal path; behaves like _LoadBanditState.
+//
+// Does NOT update ezoo->bandit_save_path — caller's _LoadBanditState
+// (if it ran first) wins for periodic-save destination, OR caller can
+// set bandit_save_path explicitly via _LoadBanditState before this.
+template <unsigned F>
+inline int EnsembleModelZoo_LoadBanditStateFromPath(
+    EnsembleModelZoo<F>* ezoo, const char* path, int skip_bundle_check) {
+    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return 0;
+    if (!path || path[0] == '\0') return 0;
+    char expected_id[65];
+    if (skip_bundle_check) {
+        expected_id[0] = '\0';  // empty SHA → Bandit_LoadJSON skips check
+    } else {
+        EnsembleModelZoo_ComputeBundleId(ezoo, expected_id, sizeof(expected_id));
+    }
+    int loaded = Bandit_LoadJSON(ezoo->bandits, NUM_REGIMES, path,
+                                   expected_id, ezoo->buy_signal_count);
+    if (loaded) {
+        fprintf(stderr, "[ensemble] loaded bandit prior from %s%s\n", path,
+                skip_bundle_check ? " (bundle-id check SKIPPED — operator override)"
+                                   : "");
+    } else if (access(path, F_OK) == 0) {
+        fprintf(stderr, "[ensemble] bandit prior at %s present but rejected "
+                        "(format/n_arms mismatch)\n", path);
+    }
+    return loaded;
+}
+
+// Configure periodic save cadence. Called once at boot after
+// _LoadBanditState. interval=0 disables periodic; shutdown save still
+// fires regardless.
+template <unsigned F>
+inline void EnsembleModelZoo_SetBanditSaveInterval(
+    EnsembleModelZoo<F>* ezoo, int interval) {
+    if (!ezoo) return;
+    ezoo->bandit_save_interval = (interval < 0) ? 0 : interval;
+    ezoo->bandit_update_count = 0;
+}
+
+// Periodic save trigger. Called after each Bandit_Update batch
+// (TickRewardsFromLookback / TradeCloseReward fold this in). Increments
+// bandit_update_count; when count crosses interval threshold, flush
+// state to bandit_save_path. No-op if path empty or interval==0.
+//
+// Locale: fprintf in Bandit_SaveJSON uses "C" locale via global
+// LC_NUMERIC; engine boot pins this. Render-thread safety: this fires
+// on the slow-path / drainer threads, never in hot path.
+template <unsigned F>
+inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
+    EnsembleModelZoo<F>* ezoo, int updates_this_call) {
+    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return;
+    if (ezoo->bandit_save_interval <= 0) return;
+    if (ezoo->bandit_save_path[0] == '\0') return;
+    if (updates_this_call <= 0) return;
+    uint64_t before = ezoo->bandit_update_count;
+    ezoo->bandit_update_count += (uint64_t)updates_this_call;
+    uint64_t threshold = (uint64_t)ezoo->bandit_save_interval;
+    // Cross threshold: did before/threshold differ from after/threshold?
+    if (before / threshold == ezoo->bandit_update_count / threshold) {
+        return;  // didn't cross
+    }
+    char expected_id[65];
+    EnsembleModelZoo_ComputeBundleId(ezoo, expected_id, sizeof(expected_id));
+    int ok = Bandit_SaveJSON(ezoo->bandits, NUM_REGIMES,
+                               ezoo->bandit_save_path, expected_id, nullptr);
+    if (!ok) {
+        fprintf(stderr, "[ensemble] periodic bandit save FAILED to %s "
+                        "(disk full?); next attempt at +%llu updates\n",
+                ezoo->bandit_save_path, (unsigned long long)threshold);
     }
 }
 

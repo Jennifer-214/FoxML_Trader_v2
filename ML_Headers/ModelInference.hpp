@@ -102,7 +102,17 @@
 //           versions (see FeatureRegistry.hpp). Stamps signed under one
 //           registry refuse to load under a different registry. v4 stamps
 //           lack the field and fail format-version check.
-#define MODEL_FORMAT_VERSION 5
+// v6 (v5.10.0b): bytewise-deterministic FPN-end-to-end slow path.
+//           Multiple slow-path math primitives migrated from IEEE-754 to
+//           pure-integer FPN: FlowFeatures EWMA decay (FPN_Exp), z-score
+//           sqrt (FPN_Sqrt), RegimeDetector hour_sin/cos (FPN_Sin/Cos),
+//           and FP64 divide (192-by-128 long division replaces long-double
+//           FPU path). All slow-path features now produce bytewise-
+//           identical output across compilers / -O levels / FMA support
+//           given identical inputs. Bit-level shifts vs. v5 absorbed by
+//           retraining; v5 stamps refuse to load with a "model trained
+//           with pre-v5.10 IEEE-754 math; retrain required" message.
+#define MODEL_FORMAT_VERSION 6
 
 //======================================================================================================
 // [FEATURE LOOKBACK REGISTRY]
@@ -488,6 +498,209 @@ inline float Model_Predict(ModelHandle<F> *m, const float *features, int num_fea
 }
 
 //======================================================================================================
+// [v5.10.0a.G.4 — ENSEMBLE PREDICT (multi-horizon)]
+//======================================================================================================
+// Predict via N independent ModelHandles trained as a multi-horizon
+// ensemble. For each loaded model, compute prediction; return the
+// HIGHEST-ABSOLUTE-DEVIATION-FROM-NEUTRAL prediction (the most-confident
+// signal). Neutral = 0.5 for binary; this rule generalizes to "the
+// model that's surest about its prediction wins."
+//
+// Selection logic:
+//   - Binary models: distance from 0.5 = confidence; argmax(|p - 0.5|)
+//   - Regression: |p| as confidence proxy (zero = no edge)
+//
+// Returns:
+//   - The selected member's raw prediction value
+//   - *out_selected_idx (optional): which member won (0..count-1)
+//
+// Operator-side workflow:
+//   1. Train N horizons via Train Multi-Horizon (G.1)
+//   2. Engine boot loads N models per role into EnsembleModelZoo (G.3)
+//   3. Per slow-path predict, ensemble dispatch picks highest-confidence
+//      model's output (this function)
+//
+// Latency: linear in N (each member predicts independently). Operator
+// can measure via Item A timer; default cfg.horizon_count=0 keeps
+// single-model path with zero overhead.
+//
+// Single-model fallback: if count <= 1, returns Model_Predict on
+// models[0]. Safe to call from MLStrategy regardless of ensemble state.
+template <unsigned F>
+inline float Model_Predict_Ensemble(ModelHandle<F> *models,
+                                      int count,
+                                      const float *features,
+                                      int num_features,
+                                      int *out_selected_idx = nullptr) {
+    if (count <= 0) {
+        if (out_selected_idx) *out_selected_idx = -1;
+        return 0.0f;
+    }
+    if (count == 1) {
+        if (out_selected_idx) *out_selected_idx = 0;
+        return Model_Predict(&models[0], features, num_features);
+    }
+
+    float best_pred = 0.0f;
+    float best_conf = -1.0f;  // sentinel: "no valid prediction yet"
+    int   best_idx = 0;
+    for (int i = 0; i < count; ++i) {
+        if (!Model_IsLoaded(&models[i])) continue;
+        float p = Model_Predict(&models[i], features, num_features);
+        if (std::isnan(p) || std::isinf(p)) continue;
+        // Confidence = |p - 0.5| for binary (centered at neutral), or
+        // |p| for regression (zero = no edge). Both metrics: higher
+        // value = more-confident model.
+        float conf = (p > 1.0f || p < -1.0f) ? std::fabs(p)
+                                              : std::fabs(p - 0.5f);
+        if (conf > best_conf) {
+            best_conf = conf;
+            best_pred = p;
+            best_idx  = i;
+        }
+    }
+    if (best_conf < 0.0f) {
+        // No member produced a valid prediction; fall back to model[0]
+        // raw output (matches single-model failure mode).
+        if (out_selected_idx) *out_selected_idx = 0;
+        return Model_Predict(&models[0], features, num_features);
+    }
+    if (out_selected_idx) *out_selected_idx = best_idx;
+    return best_pred;
+}
+
+//======================================================================================================
+// [v5.10.0a.G.7 — WEIGHTED ENSEMBLE PREDICT (Bandit-Exp3 blend)]
+//======================================================================================================
+// Run prediction across N independent boosters; combine via weighted
+// blend: final = Σ weight_i × pred_i / Σ weight_i (NaN-skipped + agreement-
+// gated). Replaces G.4's argmax-confidence selection when operator sets
+// ensemble_blend_mode=weighted (default).
+//
+// Inputs:
+//   models: array of N independent ModelHandles (caller's responsibility
+//           to ensure they share the same scaler — true by G.3 LoadFromCfg
+//           invariant)
+//   count: how many models populated (1..ENSEMBLE_HORIZON_MAX)
+//   weights: per-arm weights from BanditState (already-normalized
+//            probabilities, OR raw weights — function renormalizes)
+//   disabled_mask: bit i set = skip horizon i (operator kill-switch via
+//                  cfg.core_N_disabled_horizons, parsed by
+//                  EnsembleModelZoo_SetDisabledHorizons)
+//   min_agreement_pct: ≥X fraction of non-disabled horizons must predict
+//                       same direction OR return 0.5 (no-edge sentinel,
+//                       MLStrategy treats as no-entry). 0.0 = disabled.
+//
+// Outputs:
+//   *out_dominant_idx: which arm contributed most to signal direction
+//                       (argmax weight × |p − 0.5|); -1 if no entry
+//   Returns: blended prediction, OR 0.5 if agreement check failed.
+//
+// Latency: linear in N (each model predicts independently). G.7 perf
+// optimization #1: features are pre-standardized once before this call;
+// each Model_Predict skips its own scaler.
+template <unsigned F>
+inline float Model_Predict_Ensemble_Weighted(
+    ModelHandle<F>* models,
+    int count,
+    const float* features,
+    int num_features,
+    const double* weights,
+    uint32_t disabled_mask,
+    double min_agreement_pct,
+    int* out_dominant_idx,
+    float* out_per_arm_predictions = nullptr) {  // v5.10.0a.G.8: optional buffer for reward record
+    if (count <= 0) {
+        if (out_dominant_idx) *out_dominant_idx = -1;
+        return 0.0f;
+    }
+    if (count == 1) {
+        if (disabled_mask & 1u) {
+            if (out_dominant_idx) *out_dominant_idx = -1;
+            return 0.5f;
+        }
+        if (out_dominant_idx) *out_dominant_idx = 0;
+        return Model_Predict(&models[0], features, num_features);
+    }
+
+    // Local buffers sized to match ENSEMBLE_HORIZON_MAX (CoreModelZoo.hpp);
+    // hardcoded 8 here to avoid circular include (this header is included
+    // by CoreModelZoo.hpp).
+    float predictions[8];
+    int   valid[8];
+    if (count > 8) count = 8;  // bound safety
+    int   n_active = 0;
+    int   n_long = 0, n_short = 0;
+    for (int i = 0; i < count; ++i) {
+        if (disabled_mask & (1u << i)) {
+            valid[i] = 0;
+            predictions[i] = 0.5f;
+            continue;
+        }
+        if (!Model_IsLoaded(&models[i])) {
+            valid[i] = 0;
+            predictions[i] = 0.5f;
+            continue;
+        }
+        float p = Model_Predict(&models[i], features, num_features);
+        if (std::isnan(p) || std::isinf(p)) {
+            valid[i] = 0;
+            predictions[i] = 0.5f;
+            continue;
+        }
+        valid[i] = 1;
+        predictions[i] = p;
+        n_active++;
+        if (p > 0.5f) n_long++;
+        else if (p < 0.5f) n_short++;
+    }
+
+    // Agreement filter (G.7 #5b safety check). Skips entry when ensemble
+    // is internally split — high-conviction entries only.
+    if (n_active > 0 && min_agreement_pct > 0.0) {
+        double frac_long  = (double)n_long  / n_active;
+        double frac_short = (double)n_short / n_active;
+        double agreement  = (frac_long > frac_short) ? frac_long : frac_short;
+        if (agreement < min_agreement_pct) {
+            if (out_dominant_idx) *out_dominant_idx = -1;
+            return 0.5f;  // no-edge sentinel; MLStrategy → no entry
+        }
+    }
+
+    // Weighted blend across valid arms.
+    double sum_w = 0.0, sum_wp = 0.0;
+    double best_contrib = 0.0;
+    int    best_idx = -1;
+    for (int i = 0; i < count; ++i) {
+        if (!valid[i]) continue;
+        double w = weights[i];
+        if (w <= 0.0) w = 1e-9;  // avoid zero-weight degenerate
+        sum_w  += w;
+        sum_wp += w * (double)predictions[i];
+        // Track dominant arm: largest weight × |p - 0.5| contribution
+        double contrib = w * std::fabs((double)predictions[i] - 0.5);
+        if (contrib > best_contrib) {
+            best_contrib = contrib;
+            best_idx = i;
+        }
+    }
+    if (sum_w <= 0.0 || n_active == 0) {
+        // All-NaN or all-disabled: no signal. Fall back to first-loaded
+        // model's raw predict for robustness (matches single-model failure
+        // mode); if even that fails caller sees 0.0 / NaN.
+        if (out_dominant_idx) *out_dominant_idx = -1;
+        return 0.5f;
+    }
+    if (out_dominant_idx) *out_dominant_idx = best_idx;
+    // v5.10.0a.G.8 — expose per-arm predictions for reward record write
+    if (out_per_arm_predictions) {
+        for (int i = 0; i < count; ++i)
+            out_per_arm_predictions[i] = predictions[i];
+    }
+    return (float)(sum_wp / sum_w);
+}
+
+//======================================================================================================
 // [PREDICT MULTI — multi-class softmax output]
 //======================================================================================================
 // fills `out_buf` with up to max_outputs class probabilities. returns the number
@@ -745,6 +958,18 @@ struct ModelStampResult {
     // v5.9.5h Phase 10 — build flags fingerprint
     uint8_t  has_build_flags_hash;
     uint64_t build_flags_hash;
+    // v5.10.0a.G.2 — multi-horizon ensemble member count (parsed from stamp).
+    // See StampInferenceCfgInputs above for canonical position 19 anchor.
+    uint8_t  has_grid_member_count;
+    int      grid_member_count;
+    int      grid_member_idx;
+    // v5.10.0d — label registry hash (canonical position 20). 0 if absent
+    // (stamps from before v5.10.0d). Verifier compares against current
+    // build's LABEL_REGISTRY_HASH() — mismatch refuses load with
+    // "label set drift; retrain required" message. Mirrors v5.8.6
+    // feature_registry_hash refusal flow.
+    uint8_t  has_label_registry_hash;
+    uint64_t label_registry_hash;
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -781,7 +1006,8 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                                             const char* secret,
                                             double gap_threshold,
                                             int expected_format_version,
-                                            uint64_t expected_feature_registry_hash = 0) {
+                                            uint64_t expected_feature_registry_hash = 0,
+                                            uint64_t expected_label_registry_hash = 0) {
     ModelStampResult r;
     r.valid = -1;
     r.reason[0] = '\0';
@@ -828,6 +1054,13 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     r.xgb_tree_method[0] = '\0';
     r.has_build_flags_hash = 0;
     r.build_flags_hash = 0;
+    // v5.10.0a.G.2 — grid_member_count fields zero-init
+    r.has_grid_member_count = 0;
+    r.grid_member_count = 0;
+    r.grid_member_idx = 0;
+    // v5.10.0d — label_registry_hash zero-init (absent in legacy stamps)
+    r.has_label_registry_hash = 0;
+    r.label_registry_hash = 0;
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -995,6 +1228,20 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 r.build_flags_hash = (uint64_t)strtoull(val, nullptr, 16);
                 r.has_build_flags_hash = 1;
             }
+            // v5.10.0a.G.2 — multi-horizon ensemble member count (position 19)
+            else if (strcmp(key, "grid_member_count") == 0) {
+                r.grid_member_count = atoi(val);
+                r.has_grid_member_count = 1;
+            }
+            else if (strcmp(key, "grid_member_idx") == 0) {
+                r.grid_member_idx = atoi(val);
+                r.has_grid_member_count = 1;
+            }
+            // v5.10.0d — label registry hash (position 20)
+            else if (strcmp(key, "label_registry_hash") == 0) {
+                r.label_registry_hash = (uint64_t)strtoull(val, nullptr, 16);
+                r.has_label_registry_hash = 1;
+            }
         }
         line = strtok_r(nullptr, "\n", &save);
     }
@@ -1046,6 +1293,29 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 "(retrain required)",
                 (unsigned long)r.feature_registry_hash,
                 (unsigned long)expected_feature_registry_hash);
+            return r;
+        }
+    }
+
+    // 1c. v5.10.0d — label registry hash match. Same shape as 1b but for
+    // the LABEL_REGISTRY_HASH (FOREACH_TARGET X-macro). Caller passes
+    // expected_label_registry_hash from LABEL_REGISTRY_HASH() at engine
+    // boot. Default 0 = "skip check" (legacy callers + non-ML cores).
+    // Pre-v5.10.0d stamps lack the field (parses as 0) → WARN, accept.
+    // Drift catch fires only when both sides have the data and disagree.
+    if (expected_label_registry_hash != 0) {
+        if (r.label_registry_hash == 0) {
+            fprintf(stderr,
+                "[stamp] WARN: %s stamp lacks label_registry_hash "
+                "(pre-v5.10.0d) — label drift NOT verified\n",
+                stamp_path);
+        } else if (r.label_registry_hash != expected_label_registry_hash) {
+            r.valid = 0;
+            snprintf(r.reason, sizeof(r.reason),
+                "label-registry-hash mismatch: stamp=%016lx engine=%016lx "
+                "(label set drift; retrain required)",
+                (unsigned long)r.label_registry_hash,
+                (unsigned long)expected_label_registry_hash);
             return r;
         }
     }
@@ -1193,6 +1463,33 @@ struct StampInferenceCfgInputs {
     char     xgb_tree_method[16];
     int      has_build_flags_hash;
     uint64_t build_flags_hash;
+    // v5.10.0a.G.2 — multi-horizon ensemble member count.
+    //
+    // CANONICAL STAMP BODY POSITION ASSIGNMENT (v5.10.0a):
+    // Position 19: grid_member_count (this ship; locks order via Sprint B B2 ships first)
+    // Position 20: label_registry_hash (v5.10.0d / Sprint B B5; ships after this)
+    // New fields after v5.10.0a + v5.10.0d MUST take position 21+ per
+    // master plan canonical-order rule (only append at end). Sprint
+    // order is locked by master plan; do NOT reassign positions.
+    //
+    // grid_member_count = N where this stamp belongs to an ensemble of
+    // N models trained as a horizon set (cfg.horizon_list non-empty at
+    // train time). Single-horizon stamps have has_grid_member_count=0
+    // (forward-compat; legacy stamps load fine).
+    //
+    // Engine load: when has_grid_member_count=1, load proceeds normally
+    // BUT logs "[ensemble] this model is member <member_idx>/<count> of a
+    // multi-horizon ensemble; consider loading siblings via cfg.horizon_list
+    // for full ensemble inference." Operator-side hint only; no refuse.
+    int      has_grid_member_count;
+    int      grid_member_count;        // total members in the ensemble (N)
+    int      grid_member_idx;          // this model's index within (0..N-1)
+    // v5.10.0d — label registry hash (canonical position 20). Set
+    // has_label_registry_hash=1 to emit; verifier compares stamp's value
+    // vs current build's LABEL_REGISTRY_HASH() — mismatch refuses load.
+    // Mirrors v5.8.6 feature_registry_hash refusal flow.
+    int      has_label_registry_hash;
+    uint64_t label_registry_hash;
 };
 
 inline StampWriteResult stamp_write_for_model(const char* model_path,
@@ -1376,6 +1673,31 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
         int wrote = snprintf(canonical + n, sizeof(canonical) - n,
             "build_flags_hash=%016lx\n",
             (unsigned long)inf->build_flags_hash);
+        if (wrote > 0) n += wrote;
+    }
+    // v5.10.0a.G.2 — multi-horizon ensemble metadata (position 19).
+    // Emitted when this model was trained as part of a horizon set
+    // (cfg.horizon_list non-empty at train time). Forward-compat:
+    // single-horizon stamps have has_grid_member_count=0 and skip
+    // this block; legacy verifiers (pre-v5.10.0a.G.2) tolerate missing
+    // fields. Engine load-time: when present, hint operator that
+    // siblings exist (informational; does not enforce ensemble load).
+    if (inf && inf->has_grid_member_count && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "grid_member_count=%d\n"
+            "grid_member_idx=%d\n",
+            inf->grid_member_count, inf->grid_member_idx);
+        if (wrote > 0) n += wrote;
+    }
+
+    // v5.10.0d — label_registry_hash (canonical position 20). Set
+    // inf->has_label_registry_hash=1 to emit; verifier compares against
+    // engine's LABEL_REGISTRY_HASH() and refuses on mismatch (mirrors
+    // feature_registry_hash refusal flow).
+    if (inf && inf->has_label_registry_hash && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "label_registry_hash=%016lx\n",
+            (unsigned long)inf->label_registry_hash);
         if (wrote > 0) n += wrote;
     }
 
