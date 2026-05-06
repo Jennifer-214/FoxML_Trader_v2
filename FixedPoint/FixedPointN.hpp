@@ -200,6 +200,29 @@ template <unsigned F> inline double FPN_ToDouble(FPN<F> value) {
 }
 
 //======================================================================================================
+// [INTEGER CONVERSION — pure integer, no double round-trip]
+//======================================================================================================
+// FPN_FromInt avoids the IEEE-754 reorderings that FPN_FromDouble<F>((double)int)
+// can introduce across compilers / -O levels. Use this for any FPN value
+// derived from an integer (loop indices, sample counts, precomputed sums like
+// n*(n-1)/2). Bytewise-deterministic across builds. v5.10.0b prerequisite.
+//======================================================================================================
+template <unsigned F> inline FPN<F> FPN_FromInt(int64_t input) {
+    constexpr unsigned N  = FPN<F>::N;
+    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
+
+    FPN<F> result = FPN_Zero<F>();
+    int neg = (input < 0);
+    // careful negation: avoid -INT64_MIN UB by going through unsigned
+    uint64_t mag = neg ? (uint64_t)(-(input + 1)) + 1u : (uint64_t)input;
+
+    if (FW < N)
+        result.w[FW] = mag;
+    result.sign = (uint8_t)neg;
+    return result;
+}
+
+//======================================================================================================
 // [STRING CONVERSION - FULL PRECISION]
 //======================================================================================================
 // not limited by double's 52-bit mantissa - these preserve every bit

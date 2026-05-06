@@ -79,7 +79,7 @@ inline LinearRegression3XResult<F> RORRegressor_Compute(RORRegressor<F> *reg) {
     for (int i = 0; i < reg->count; i++) {
         int idx       = (reg->head - reg->count + i + MAX_WINDOW) & (MAX_WINDOW - 1);
         linearized[i] = reg->slope_samples[idx];
-        time_index[i] = FPN_FromDouble<F>((double)i);
+        time_index[i] = FPN_FromInt<F>(i);  // v5.10.0b.1: integer constructor (no double round-trip)
     }
 
     return LinearRegression3X_Fit(time_index, linearized, reg->count);

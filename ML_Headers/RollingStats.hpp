@@ -175,7 +175,7 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN<F> price, FPN<F> volum
         int idx = (rs->head - n + i + (int)W) & ((int)W - 1);
         FPN<F> p = rs->price_buf[idx];
         FPN<F> v = rs->volume_buf[idx];
-        FPN<F> i_fp = FPN_FromDouble<F>((double)i);
+        FPN<F> i_fp = FPN_FromInt<F>(i);  // v5.10.0b.1: integer constructor (no double round-trip)
 
         price_sum    = FPN_AddSat(price_sum, p);
         volume_sum   = FPN_AddSat(volume_sum, v);
@@ -191,9 +191,12 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN<F> price, FPN<F> volum
     // precompute x-sums from count (x = 0, 1, ..., n-1)
     // sum_x  = n*(n-1)/2
     // sum_x2 = n*(n-1)*(2n-1)/6
-    FPN<F> n_fp   = FPN_FromDouble<F>((double)n);
-    FPN<F> sum_x  = FPN_FromDouble<F>((double)n * (double)(n - 1) / 2.0);
-    FPN<F> sum_x2 = FPN_FromDouble<F>((double)n * (double)(n - 1) * (double)(2 * n - 1) / 6.0);
+    // v5.10.0b.1: pure integer math (no IEEE-754 reordering across builds);
+    // n is bounded by W=128 so sum_x2 max = 128*127*255/6 = 691,520 — fits in int64
+    FPN<F> n_fp   = FPN_FromInt<F>(n);
+    int64_t n_l = (int64_t)n;
+    FPN<F> sum_x  = FPN_FromInt<F>(n_l * (n_l - 1) / 2);
+    FPN<F> sum_x2 = FPN_FromInt<F>(n_l * (n_l - 1) * (2 * n_l - 1) / 6);
 
     // averages and range
     rs->price_avg  = FPN_DivNoAssert(price_sum, n_fp);

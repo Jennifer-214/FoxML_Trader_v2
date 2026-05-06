@@ -12760,6 +12760,78 @@ e3_skip_load:;
         EnsembleModelZoo_Free(&ez2);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0b.1 — FPN_FromInt pure-integer constructor ---\n");
+    {
+        // Theory: FPN_FromInt avoids the IEEE-754 reorderings that
+        // FPN_FromDouble<F>((double)int) can introduce across compilers / -O
+        // levels. For small integers (indices, counts, precomputed sums) the
+        // pure-integer path is bytewise-deterministic across builds.
+        // v5.10.0b.1 prerequisite for the FPN-end-to-end conversion.
+
+        // Round-trip basic values
+        FPN<64> z = FPN_FromInt<64>(0);
+        check("v5.10.0b.1: FPN_FromInt(0) zero magnitude",
+              z.sign == 0 && FPN_IsZero(z));
+
+        FPN<64> one = FPN_FromInt<64>(1);
+        check("v5.10.0b.1: FPN_FromInt(1) round-trips to double",
+              FPN_ToDouble(one) == 1.0 && one.sign == 0);
+
+        FPN<64> neg = FPN_FromInt<64>(-42);
+        check("v5.10.0b.1: FPN_FromInt(-42) preserves sign + magnitude",
+              FPN_ToDouble(neg) == -42.0 && neg.sign == 1);
+
+        // Field-equal helper (memcmp would compare uninitialized struct
+        // padding bytes; compare meaningful fields instead).
+        auto fpn_field_eq = [](const FPN<64>& a, const FPN<64>& b) -> bool {
+            if (a.sign != b.sign) return false;
+            for (unsigned i = 0; i < FPN<64>::N; i++)
+                if (a.w[i] != b.w[i]) return false;
+            return true;
+        };
+
+        // Field-equal with FromDouble for small ints (indices / counts).
+        // For i < 2^53, double exactly represents i, so FromInt and
+        // FromDouble must produce identical FPN values.
+        bool int_dbl_match_all = true;
+        for (int i = 0; i < 128; i++) {
+            FPN<64> via_int = FPN_FromInt<64>(i);
+            FPN<64> via_dbl = FPN_FromDouble<64>((double)i);
+            if (!fpn_field_eq(via_int, via_dbl)) {
+                printf("  [v5.10.0b.1 DIAG] i=%d FromInt != FromDouble (sign or w[])\n", i);
+                int_dbl_match_all = false;
+                break;
+            }
+        }
+        check("v5.10.0b.1: FPN_FromInt(i) field-equal FPN_FromDouble((double)i) for i=0..127",
+              int_dbl_match_all);
+
+        // Computed integer values used in RollingStats sum_x / sum_x2.
+        // n=128 max: sum_x = 128*127/2 = 8128; sum_x2 = 128*127*255/6 = 691,520
+        bool sumx_match_all = true;
+        for (int n = 2; n <= 128; n++) {
+            int64_t n_l = (int64_t)n;
+            int64_t sum_x_int  = n_l * (n_l - 1) / 2;
+            int64_t sum_x2_int = n_l * (n_l - 1) * (2 * n_l - 1) / 6;
+            FPN<64> via_int  = FPN_FromInt<64>(sum_x_int);
+            FPN<64> via_dbl  = FPN_FromDouble<64>((double)n * (double)(n - 1) / 2.0);
+            FPN<64> via_int2 = FPN_FromInt<64>(sum_x2_int);
+            FPN<64> via_dbl2 = FPN_FromDouble<64>((double)n * (double)(n - 1) * (double)(2 * n - 1) / 6.0);
+            if (!fpn_field_eq(via_int, via_dbl) || !fpn_field_eq(via_int2, via_dbl2)) {
+                printf("  [v5.10.0b.1 DIAG] n=%d sum_x or sum_x2 diverges\n", n);
+                sumx_match_all = false;
+                break;
+            }
+        }
+        check("v5.10.0b.1: precomputed sum_x/sum_x2 field-equal int vs double for n=2..128",
+              sumx_match_all);
+
+        // Boundary: large positive + INT64_MIN safety (no UB)
+        FPN<64> big = FPN_FromInt<64>(1234567890LL);
+        check("v5.10.0b.1: FPN_FromInt(1234567890) round-trips",
+              FPN_ToDouble(big) == 1234567890.0 && big.sign == 0);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.G.6 — Per-core ensemble cfg fields ---\n");
     {
         // === Test G.6.1: ensemble cfg defaults ===
