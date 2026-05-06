@@ -55,23 +55,31 @@ baseline_run/
 compile_commands.json
 .cache/
 .clangd/
+nohup.out
 
 # private — going-forward rule for edge-sensitive doc surfaces
 # (existing tracked files in public history retain their tracking; only
 # new files matching these patterns auto-stay-private. backups land in
 # workspace plans/ via the standard /sync-workspace skill.)
-# *_AUDIT.md          — optimization audits, latency findings, etc.
-# FUTURE_*.md         — roadmap / planned-strategy direction
-# *-design-notes.md   — versioned design idea backlogs
-# *-suggestions.md    — HFT / optimization research outputs
-# *-hft-*.md          — HFT-flavored notes
+# *_AUDIT.md             — optimization audits, latency findings, etc.
+# FUTURE_*.md            — roadmap / planned-strategy direction
+# *-design-notes.md      — versioned design idea backlogs
+# *-suggestions.md       — HFT / optimization research outputs
+# *-hft-*.md             — HFT-flavored notes
+# *-OPTIMIZATION-*.md    — surgical optimization references
+# *-plan-check.md        — agent-generated plan-check reports
 # STRATEGY_AND_CODING_RULES.md — Gemini-distilled coding invariants
+# GEMINI.md              — Gemini agent's project memory file (analog of CLAUDE.local.md)
 *_AUDIT.md
 FUTURE_*.md
 *-design-notes.md
 *-suggestions.md
 *-hft-*.md
+*-OPTIMIZATION-*.md
+*-plan-check.md
 STRATEGY_AND_CODING_RULES.md
+GEMINI.md
+GEMINI.local.md
 
 # local Claude Code memory overlays (private — auto-loaded alongside CLAUDE.md)
 CLAUDE.local.md
