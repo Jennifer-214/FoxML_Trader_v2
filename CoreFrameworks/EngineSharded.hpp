@@ -2411,6 +2411,96 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                             // else: position open; leave pending — try next cycle
                         }
                     }
+                    // === v5.10.0c — Per-core model hot-swap pickup ===
+                    // Mirrors the strategy hot-swap pattern above, but the
+                    // payload is a directory path (string) instead of a
+                    // strategy id (uint8). On request: free + reinit + reload
+                    // ml_zoos[c] from the new dir; update model_handle on
+                    // success, NULL it on failure (engine falls back to
+                    // SimpleDip via ML_BuildParameters dispatcher).
+                    {
+                        uint8_t mswap = __atomic_load_n(
+                            &g_shared.swap_model_path_requested[c],
+                            __ATOMIC_ACQUIRE);
+                        if (mswap) {
+                            int partial_on = state.oms->partial_exit_enabled ? 1 : 0;
+                            uint16_t open_mask = partial_on
+                                ? (uint16_t)((1u << (c * 2)) | (1u << (c * 2 + 1)))
+                                : (uint16_t)(1u << c);
+                            int has_open = (state.oms->portfolio.active_bitmap & open_mask) != 0;
+
+                            if (has_open && !cfg.acknowledge_hot_swap_with_open_positions) {
+                                // Defer: leave flag set, retry next slow-path cycle.
+                                // Operator opts in via cfg field if they want
+                                // entry+exit on different models.
+                            } else {
+                                char new_path[256];
+                                strncpy(new_path, g_shared.pending_model_path[c], 255);
+                                new_path[255] = '\0';
+
+                                if (new_path[0] == '\0') {
+                                    fprintf(stderr,
+                                        "[hot_swap] core %d REFUSED: empty path\n", c);
+                                    __atomic_store_n(
+                                        &g_shared.swap_model_path_requested[c], 0,
+                                        __ATOMIC_RELEASE);
+                                } else {
+                                    // Cast model_handle back to the typed zoo
+                                    // pointer set at boot (line ~805). NULL
+                                    // means the core wasn't STRATEGY_ML at
+                                    // boot, so no zoo storage was allocated;
+                                    // hot-swap requires operator pre-config.
+                                    CoreModelZoo<F>* swap_zoo =
+                                        (CoreModelZoo<F>*)state.cores[c].model_handle;
+                                    if (swap_zoo == nullptr) {
+                                        fprintf(stderr,
+                                            "[hot_swap] core %d REFUSED: "
+                                            "core not ML at boot (set "
+                                            "core_%d_strategy=ml + restart "
+                                            "to enable hot-swap)\n", c, c);
+                                        __atomic_store_n(
+                                            &g_shared.swap_model_path_requested[c], 0,
+                                            __ATOMIC_RELEASE);
+                                    } else {
+                                        int swap_backend = cfg.ml_backend
+                                            ? cfg.ml_backend
+                                            : MODEL_BACKEND_XGBOOST;
+                                        // Free old + reinit + reload. Same-thread
+                                        // (slow-path c is single-reader/writer for
+                                        // its zoo); brief window with empty zoo
+                                        // is safe — ML inference also runs on this
+                                        // same slow-path thread, can't preempt itself.
+                                        CoreModelZoo_Free(swap_zoo);
+                                        CoreModelZoo_Init(swap_zoo);
+                                        int loaded = CoreModelZoo_LoadFromDir(
+                                            swap_zoo, new_path, swap_backend,
+                                            /*secret=*/nullptr, /*gap=*/0.05,
+                                            /*strict=*/cfg.held_out_gate_strict,
+                                            cfg.acknowledge_cross_binary_version_drift);
+                                        if (loaded > 0) {
+                                            state.cores[c].model_load_failed = 0;
+                                            fprintf(stderr,
+                                                "[hot_swap] core %d swapped to %s "
+                                                "(%d roles loaded)\n",
+                                                c, new_path, loaded);
+                                        } else {
+                                            // Load failed; null the handle so
+                                            // dispatcher falls back to SimpleDip.
+                                            state.cores[c].model_handle = NULL;
+                                            state.cores[c].model_load_failed = 1;
+                                            fprintf(stderr,
+                                                "[hot_swap] core %d REFUSED: "
+                                                "no roles loaded from %s\n",
+                                                c, new_path);
+                                        }
+                                        __atomic_store_n(
+                                            &g_shared.swap_model_path_requested[c], 0,
+                                            __ATOMIC_RELEASE);
+                                    }
+                                }
+                            }
+                        }
+                    }
 #endif
                     // === Read shared market state (eventually-consistent) ===
                     // Producer is single writer; slow-paths read with relaxed

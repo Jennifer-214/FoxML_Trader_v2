@@ -1074,6 +1074,60 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
         }
         ImGui::PopID();
         ImGui::SetItemTooltip("Rescan models/ directory");
+
+        // v5.10.0c — "Apply (live)" hot-swap button. Writes the current
+        // Model Dir into TUISharedState's pending_model_path[core_id]
+        // then atomic-stores the request flag. Engine slow-path consumer
+        // reads with __ATOMIC_ACQUIRE, frees+reloads ml_zoos[c], swaps
+        // the handle. Mirrors the strategy hot-swap pattern at
+        // SettingsPanel.hpp:945.
+        ImGui::SameLine();
+        bool can_swap = (shared != nullptr) &&
+                        (s->per_core_model_dir[core_id][0] != '\0') &&
+                        (core_id < 16);
+        uint8_t pending_swap = (shared && core_id < 16)
+            ? __atomic_load_n(&shared->swap_model_path_requested[core_id],
+                              __ATOMIC_ACQUIRE)
+            : 0;
+        if (pending_swap) {
+            ImGui::BeginDisabled();
+            ImGui::Button("swapping...");
+            ImGui::EndDisabled();
+            ImGui::SetItemTooltip("Hot-swap pending — engine slow-path consuming.\n"
+                                   "If a position is open and "
+                                   "acknowledge_hot_swap_with_open_positions=0,\n"
+                                   "swap is deferred until close.");
+        } else if (!can_swap) {
+            ImGui::BeginDisabled();
+            ImGui::Button("Apply (live)");
+            ImGui::EndDisabled();
+            ImGui::SetItemTooltip(
+                shared == nullptr
+                    ? "Hot-swap unavailable (no shared state)"
+                    : "Set Model Dir first");
+        } else {
+            ImGui::PushID("mdir_apply_live");
+            if (ImGui::Button("Apply (live)")) {
+                // Write-then-flag pattern: copy path, then atomic-store flag.
+                // Reader uses __ATOMIC_ACQUIRE so the path is visible.
+                size_t n = strnlen(s->per_core_model_dir[core_id], 255);
+                memcpy(shared->pending_model_path[core_id],
+                        s->per_core_model_dir[core_id], n);
+                shared->pending_model_path[core_id][n] = '\0';
+                __atomic_store_n(&shared->swap_model_path_requested[core_id],
+                                 (uint8_t)1, __ATOMIC_RELEASE);
+            }
+            ImGui::PopID();
+            ImGui::SetItemTooltip(
+                "Hot-swap to this Model Dir without restarting the engine.\n"
+                "Engine reloads all 4 roles (barrier, regime, exit, buy_signal)\n"
+                "from the new dir on the next slow-path cycle.\n\n"
+                "If a position is open at swap time, behavior depends on cfg:\n"
+                "  acknowledge_hot_swap_with_open_positions=0 (default):\n"
+                "    swap is deferred until position closes (safer)\n"
+                "  acknowledge_hot_swap_with_open_positions=1:\n"
+                "    swap proceeds immediately, position exits on new model");
+        }
     }
 
     // v4.7.23: resolve this core's strategy for the strategy-aware filter.
