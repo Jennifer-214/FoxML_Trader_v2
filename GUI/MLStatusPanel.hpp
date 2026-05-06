@@ -30,7 +30,10 @@
 
 namespace tt {
 
-inline void MLStatus_Render(const TUISnapshot* snap) {
+// v5.10.0c — optional `shared` parameter exposes the pending hot-swap
+// state so the panel can show "swap pending" hints. Callers can pass
+// nullptr; the row is rendered only when a swap is actually pending.
+inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* shared = nullptr) {
     if (!snap) return;
     if (ImGui::Begin("ML Status")) {
         if (snap->per_core_count == 0) {
@@ -87,6 +90,29 @@ inline void MLStatus_Render(const TUISnapshot* snap) {
                 ImGui::TextColored(FoxmlColors::green, "model: loaded");
             } else {
                 ImGui::TextColored(FoxmlColors::sand, "model: (none configured)");
+            }
+
+            // v5.10.0c — Hot-swap pending row. Renders only when shared
+            // state is available AND a swap is currently pending for this
+            // core. Operator's "Apply (live)" button in SettingsPanel sets
+            // the request; engine slow-path consumer clears it on swap or
+            // refusal. Pending state usually visible for at most one
+            // slow-path cycle; sticks longer when deferred for open
+            // position (acknowledge_hot_swap_with_open_positions=0).
+            if (shared && i < 16) {
+                uint8_t pending = __atomic_load_n(
+                    &shared->swap_model_path_requested[i], __ATOMIC_ACQUIRE);
+                if (pending) {
+                    ImGui::SameLine(0, 14);
+                    ImGui::TextColored(FoxmlColors::yellow, "→ swap pending:");
+                    ImGui::SameLine();
+                    ImGui::TextColored(FoxmlColors::sand, "%s",
+                        shared->pending_model_path[i]);
+                    ImGui::SetItemTooltip(
+                        "Hot-swap requested via Settings → Apply (live).\n"
+                        "Engine slow-path will reload the zoo on next cycle\n"
+                        "unless deferred for an open position.");
+                }
             }
 
             // Decision context — only meaningful when model loaded.
