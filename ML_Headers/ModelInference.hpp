@@ -963,6 +963,13 @@ struct ModelStampResult {
     uint8_t  has_grid_member_count;
     int      grid_member_count;
     int      grid_member_idx;
+    // v5.10.0d — label registry hash (canonical position 20). 0 if absent
+    // (stamps from before v5.10.0d). Verifier compares against current
+    // build's LABEL_REGISTRY_HASH() — mismatch refuses load with
+    // "label set drift; retrain required" message. Mirrors v5.8.6
+    // feature_registry_hash refusal flow.
+    uint8_t  has_label_registry_hash;
+    uint64_t label_registry_hash;
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -999,7 +1006,8 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                                             const char* secret,
                                             double gap_threshold,
                                             int expected_format_version,
-                                            uint64_t expected_feature_registry_hash = 0) {
+                                            uint64_t expected_feature_registry_hash = 0,
+                                            uint64_t expected_label_registry_hash = 0) {
     ModelStampResult r;
     r.valid = -1;
     r.reason[0] = '\0';
@@ -1050,6 +1058,9 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     r.has_grid_member_count = 0;
     r.grid_member_count = 0;
     r.grid_member_idx = 0;
+    // v5.10.0d — label_registry_hash zero-init (absent in legacy stamps)
+    r.has_label_registry_hash = 0;
+    r.label_registry_hash = 0;
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -1226,6 +1237,11 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 r.grid_member_idx = atoi(val);
                 r.has_grid_member_count = 1;
             }
+            // v5.10.0d — label registry hash (position 20)
+            else if (strcmp(key, "label_registry_hash") == 0) {
+                r.label_registry_hash = (uint64_t)strtoull(val, nullptr, 16);
+                r.has_label_registry_hash = 1;
+            }
         }
         line = strtok_r(nullptr, "\n", &save);
     }
@@ -1277,6 +1293,29 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 "(retrain required)",
                 (unsigned long)r.feature_registry_hash,
                 (unsigned long)expected_feature_registry_hash);
+            return r;
+        }
+    }
+
+    // 1c. v5.10.0d — label registry hash match. Same shape as 1b but for
+    // the LABEL_REGISTRY_HASH (FOREACH_TARGET X-macro). Caller passes
+    // expected_label_registry_hash from LABEL_REGISTRY_HASH() at engine
+    // boot. Default 0 = "skip check" (legacy callers + non-ML cores).
+    // Pre-v5.10.0d stamps lack the field (parses as 0) → WARN, accept.
+    // Drift catch fires only when both sides have the data and disagree.
+    if (expected_label_registry_hash != 0) {
+        if (r.label_registry_hash == 0) {
+            fprintf(stderr,
+                "[stamp] WARN: %s stamp lacks label_registry_hash "
+                "(pre-v5.10.0d) — label drift NOT verified\n",
+                stamp_path);
+        } else if (r.label_registry_hash != expected_label_registry_hash) {
+            r.valid = 0;
+            snprintf(r.reason, sizeof(r.reason),
+                "label-registry-hash mismatch: stamp=%016lx engine=%016lx "
+                "(label set drift; retrain required)",
+                (unsigned long)r.label_registry_hash,
+                (unsigned long)expected_label_registry_hash);
             return r;
         }
     }
@@ -1445,6 +1484,12 @@ struct StampInferenceCfgInputs {
     int      has_grid_member_count;
     int      grid_member_count;        // total members in the ensemble (N)
     int      grid_member_idx;          // this model's index within (0..N-1)
+    // v5.10.0d — label registry hash (canonical position 20). Set
+    // has_label_registry_hash=1 to emit; verifier compares stamp's value
+    // vs current build's LABEL_REGISTRY_HASH() — mismatch refuses load.
+    // Mirrors v5.8.6 feature_registry_hash refusal flow.
+    int      has_label_registry_hash;
+    uint64_t label_registry_hash;
 };
 
 inline StampWriteResult stamp_write_for_model(const char* model_path,
@@ -1642,6 +1687,17 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
             "grid_member_count=%d\n"
             "grid_member_idx=%d\n",
             inf->grid_member_count, inf->grid_member_idx);
+        if (wrote > 0) n += wrote;
+    }
+
+    // v5.10.0d — label_registry_hash (canonical position 20). Set
+    // inf->has_label_registry_hash=1 to emit; verifier compares against
+    // engine's LABEL_REGISTRY_HASH() and refuses on mismatch (mirrors
+    // feature_registry_hash refusal flow).
+    if (inf && inf->has_label_registry_hash && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "label_registry_hash=%016lx\n",
+            (unsigned long)inf->label_registry_hash);
         if (wrote > 0) n += wrote;
     }
 

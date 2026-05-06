@@ -13175,6 +13175,132 @@ e3_skip_load:;
               fabs(c1 - ref_c) < 1e-9);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0d — FOREACH_TARGET label registry + LABEL_REGISTRY_HASH ---\n");
+    {
+        // Theory: label set is now defined via FOREACH_TARGET(X) X-macro.
+        // The label_table[] array, the LABEL_<NAME> enum constants, and
+        // LABEL_REGISTRY_HASH() are all auto-generated from the macro,
+        // eliminating the silent-divergence hazard between the constants,
+        // the table rows, and any dispatcher sites. Stamp body position
+        // 20 (locked per master plan integration matrix; corrected from
+        // 19 by /plan-check 2026-05-06 since 0a took 19).
+
+        // Auto-generated count matches the canonical 8-label set
+        check("v5.10.0d: LABEL_COUNT == 8 (canonical label set size)",
+              LABEL_COUNT == 8);
+        check("v5.10.0d: LABEL_COUNT == LABEL_COUNT_AUTO (X-macro count match)",
+              LABEL_COUNT == LABEL_COUNT_AUTO);
+
+        // LABEL_* constant values preserved (binary compat for cfg files,
+        // serialized snapshots, training labels). v5.10.0d retrofit MUST
+        // NOT shift any existing constant — APPEND-ONLY discipline.
+        check("v5.10.0d: LABEL_WIN_LOSS == 0 (preserved post X-macro)",
+              LABEL_WIN_LOSS == 0);
+        check("v5.10.0d: LABEL_BARRIER == 1",            LABEL_BARRIER == 1);
+        check("v5.10.0d: LABEL_FORWARD_PNL == 2",        LABEL_FORWARD_PNL == 2);
+        check("v5.10.0d: LABEL_REGIME == 3",             LABEL_REGIME == 3);
+        check("v5.10.0d: LABEL_VOL_BARRIER == 4",        LABEL_VOL_BARRIER == 4);
+        check("v5.10.0d: LABEL_WILL_PEAK == 5",          LABEL_WILL_PEAK == 5);
+        check("v5.10.0d: LABEL_WILL_VALLEY == 6",        LABEL_WILL_VALLEY == 6);
+        check("v5.10.0d: LABEL_PEAK_VALLEY_STABLE == 7", LABEL_PEAK_VALLEY_STABLE == 7);
+
+        // label_table rows match the constants (X-macro generates both
+        // from the same source).
+        check("v5.10.0d: label_table[0].id == LABEL_WIN_LOSS",
+              label_table[0].id == LABEL_WIN_LOSS);
+        check("v5.10.0d: label_table[7].id == LABEL_PEAK_VALLEY_STABLE",
+              label_table[7].id == LABEL_PEAK_VALLEY_STABLE);
+        check("v5.10.0d: label_table[3].num_classes == 4 (regime is 4-class)",
+              label_table[3].num_classes == 4);
+        check("v5.10.0d: label_table[7].num_classes == 3 (peak/valley/stable)",
+              label_table[7].num_classes == 3);
+
+        // LABEL_REGISTRY_HASH() is non-zero (FNV-1a chain over actual content)
+        uint64_t h = LABEL_REGISTRY_HASH();
+        check("v5.10.0d: LABEL_REGISTRY_HASH() is non-zero",
+              h != 0);
+
+        // Hash is stable across calls (memoized)
+        uint64_t h2 = LABEL_REGISTRY_HASH();
+        check("v5.10.0d: LABEL_REGISTRY_HASH() is stable across calls",
+              h == h2);
+
+        // Hash is distinct from FEATURE_REGISTRY_HASH() (different domains)
+        uint64_t feat_h = FEATURE_REGISTRY_HASH();
+        check("v5.10.0d: LABEL_REGISTRY_HASH() != FEATURE_REGISTRY_HASH() (distinct domains)",
+              h != feat_h);
+
+        // Stamp body round-trip: emit with label_registry_hash, parse, verify
+        char tmp_model[L_tmpnam];
+        std::tmpnam(tmp_model);
+        FILE* mf = fopen(tmp_model, "wb"); fwrite("test", 1, 4, mf); fclose(mf);
+
+        StampInferenceCfgInputs inf = {};
+        inf.has_label_registry_hash = 1;
+        inf.label_registry_hash = h;
+        StampWriteResult sw = stamp_write_for_model(
+            tmp_model, "test-secret", MODEL_FORMAT_VERSION,
+            "2026-05-06", 0.6, 0.55, 0.05, 0.10,
+            FEATURE_REGISTRY_HASH(),
+            ENGINE_VERSION_STRING, &inf);
+        check("v5.10.0d: stamp_write_for_model emits hash field successfully",
+              sw.ok);
+
+        ModelStampResult vr = verify_model_stamp(
+            tmp_model, "test-secret", 0.10, MODEL_FORMAT_VERSION,
+            FEATURE_REGISTRY_HASH(), h);
+        check("v5.10.0d: verify accepts matching label hash",
+              vr.valid == 1);
+        check("v5.10.0d: parsed label hash matches emitted",
+              vr.label_registry_hash == h);
+        check("v5.10.0d: has_label_registry_hash flag set on parse",
+              vr.has_label_registry_hash == 1);
+
+        // Mismatch: stamp says hash A, engine wants hash B → REFUSE
+        uint64_t fake_engine_hash = h ^ 0xDEADBEEFULL;
+        ModelStampResult vr_mis = verify_model_stamp(
+            tmp_model, "test-secret", 0.10, MODEL_FORMAT_VERSION,
+            FEATURE_REGISTRY_HASH(), fake_engine_hash);
+        check("v5.10.0d: verify REFUSES on label hash mismatch",
+              vr_mis.valid == 0);
+        check("v5.10.0d: refusal reason mentions label-registry-hash",
+              strstr(vr_mis.reason, "label-registry-hash") != nullptr);
+
+        // Legacy: stamp without label hash field → WARN, accept
+        // (mirrors v5.8.6 feature_registry_hash legacy handling)
+        StampInferenceCfgInputs inf_legacy = {};
+        // has_label_registry_hash = 0 → field NOT emitted
+        StampWriteResult sw_legacy = stamp_write_for_model(
+            tmp_model, "test-secret", MODEL_FORMAT_VERSION,
+            "2026-05-06", 0.6, 0.55, 0.05, 0.10,
+            FEATURE_REGISTRY_HASH(),
+            ENGINE_VERSION_STRING, &inf_legacy);
+        check("v5.10.0d: legacy stamp (no label hash) emits successfully",
+              sw_legacy.ok);
+
+        ModelStampResult vr_legacy = verify_model_stamp(
+            tmp_model, "test-secret", 0.10, MODEL_FORMAT_VERSION,
+            FEATURE_REGISTRY_HASH(), h);
+        check("v5.10.0d: legacy stamp without label hash WARNS not REFUSES",
+              vr_legacy.valid == 1);
+        check("v5.10.0d: legacy stamp parsed label hash == 0 (sentinel)",
+              vr_legacy.label_registry_hash == 0);
+        check("v5.10.0d: legacy stamp has_label_registry_hash == 0",
+              vr_legacy.has_label_registry_hash == 0);
+
+        // Skip-check path: caller passes 0 → no comparison even with mismatched stamp
+        ModelStampResult vr_skip = verify_model_stamp(
+            tmp_model, "test-secret", 0.10, MODEL_FORMAT_VERSION,
+            FEATURE_REGISTRY_HASH(), 0);
+        check("v5.10.0d: caller-skip path (expected_label_hash=0) accepts",
+              vr_skip.valid == 1);
+
+        unlink(tmp_model);
+        char stamp_path[512];
+        snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", tmp_model);
+        unlink(stamp_path);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0b.3 — FP64_DivNoAssert pure-integer 192/128 long division ---\n");
     {
         // Theory: FP64_DivNoAssert was a long-double FPU round-trip
