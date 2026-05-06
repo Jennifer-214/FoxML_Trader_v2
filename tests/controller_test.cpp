@@ -12832,6 +12832,61 @@ e3_skip_load:;
               FPN_ToDouble(big) == 1234567890.0 && big.sign == 0);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0b.2.5.A — FPN-native Newton-Raphson sqrt ---\n");
+    {
+        // Theory: FPN_Sqrt was a stub round-tripping through IEEE-754 sqrt
+        // (FPN_FromDouble(sqrt(FPN_ToDouble(value)))). Replaced with pure
+        // integer Newton-Raphson on FPN bit-scan seed → bytewise-deterministic
+        // across compilers / -O levels / FMA support. Required by FlowFeatures
+        // z-score conversion (B.2.5.C).
+
+        // Edge: sqrt(0) = 0
+        check("v5.10.0b.2.5.A: sqrt(0) = 0",
+              FPN_IsZero(FPN_Sqrt(FPN_Zero<64>())));
+
+        // Edge: sqrt(neg) = 0 (graceful; old stub would assert)
+        FPN<64> neg = FPN_FromInt<64>(-4);
+        check("v5.10.0b.2.5.A: sqrt(negative) = 0 (graceful)",
+              FPN_IsZero(FPN_Sqrt(neg)));
+
+        // Perfect squares: sqrt(4) = 2, sqrt(100) = 10, sqrt(10000) = 100
+        auto sqrt_close = [](double expected, FPN<64> v, double rel_eps) -> bool {
+            double got = FPN_ToDouble(FPN_Sqrt(v));
+            double err = (got - expected) / expected;
+            if (err < 0) err = -err;
+            return err < rel_eps;
+        };
+        check("v5.10.0b.2.5.A: sqrt(4) ≈ 2 (rel < 1e-10)",
+              sqrt_close(2.0, FPN_FromInt<64>(4), 1e-10));
+        check("v5.10.0b.2.5.A: sqrt(100) ≈ 10",
+              sqrt_close(10.0, FPN_FromInt<64>(100), 1e-10));
+        check("v5.10.0b.2.5.A: sqrt(10000) ≈ 100",
+              sqrt_close(100.0, FPN_FromInt<64>(10000), 1e-10));
+
+        // Non-perfect squares vs IEEE-754 reference
+        check("v5.10.0b.2.5.A: sqrt(2) ≈ 1.41421356 (vs IEEE)",
+              sqrt_close(sqrt(2.0), FPN_FromInt<64>(2), 1e-10));
+        check("v5.10.0b.2.5.A: sqrt(3) ≈ 1.732050808 (vs IEEE)",
+              sqrt_close(sqrt(3.0), FPN_FromInt<64>(3), 1e-10));
+        check("v5.10.0b.2.5.A: sqrt(7) ≈ 2.645751311 (vs IEEE)",
+              sqrt_close(sqrt(7.0), FPN_FromInt<64>(7), 1e-10));
+
+        // Larger values typical for trade-size variance (1e6 to 1e10)
+        check("v5.10.0b.2.5.A: sqrt(1e6) ≈ 1000",
+              sqrt_close(1000.0, FPN_FromInt<64>(1000000), 1e-10));
+        check("v5.10.0b.2.5.A: sqrt(123456789) ≈ ~11111.111",
+              sqrt_close(sqrt(123456789.0), FPN_FromInt<64>(123456789LL), 1e-10));
+
+        // Determinism: same input → same output bytes (run twice, field-equal)
+        FPN<64> two = FPN_FromInt<64>(2);
+        FPN<64> r1  = FPN_Sqrt(two);
+        FPN<64> r2  = FPN_Sqrt(two);
+        bool det = (r1.sign == r2.sign);
+        for (unsigned i = 0; i < FPN<64>::N; i++) det = det && (r1.w[i] == r2.w[i]);
+        check("v5.10.0b.2.5.A: sqrt(x) is deterministic (bytewise-equal repeat)",
+              det);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.G.6 — Per-core ensemble cfg fields ---\n");
     {
         // === Test G.6.1: ensemble cfg defaults ===

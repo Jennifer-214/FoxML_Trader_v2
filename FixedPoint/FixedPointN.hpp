@@ -780,9 +780,41 @@ template <unsigned F> inline FPN<F> FPN_Sign(FPN<F> value) {
 //======================================================================================================
 // all go through double conversion - precision limited but these are convenience functions
 //======================================================================================================
+// v5.10.0b.2.5.A: FPN-native Newton-Raphson square root.
+// Bytewise-deterministic across compilers — bit-scan seed + integer
+// FPN ops only; no IEEE-754 round-trip. Converges quadratically;
+// 12 NR iterations from the bit-scan seed reach FPN<64> precision
+// for any positive input. Returns 0 for zero or negative input
+// (matches stub-era assert behavior in release builds).
 template <unsigned F> inline FPN<F> FPN_Sqrt(FPN<F> value) {
-    assert(value.sign == 0 || FPN_MagIsZero(value));
-    return FPN_FromDouble<F>(sqrt(FPN_ToDouble(value)));
+    if (FPN_MagIsZero(value) || value.sign != 0) return FPN_Zero<F>();
+
+    // Find highest set bit position in the integer magnitude.
+    // FPN<F> has F fractional bits; bit position k corresponds to value 2^(k - F).
+    // sqrt(2^(k - F)) = 2^((k - F) / 2), which in FPN bit position is (k + F) / 2.
+    int top_bit = -1;
+    #pragma GCC unroll 65534
+    for (int i = (int)FPN<F>::N - 1; i >= 0; i--) {
+        if (value.w[i] != 0 && top_bit < 0) {
+            int hi  = 63 - __builtin_clzll(value.w[i]);
+            top_bit = i * 64 + hi;
+        }
+    }
+    int seed_bit = (top_bit + (int)F) / 2;
+    FPN<F> y = FPN_Zero<F>();
+    int word_idx = seed_bit / 64;
+    int bit_idx  = seed_bit % 64;
+    if (word_idx < (int)FPN<F>::N) y.w[word_idx] = (uint64_t)1 << bit_idx;
+
+    // 12 Newton-Raphson iterations: y_{n+1} = (y_n + x/y_n) / 2.
+    // Quadratic convergence; 12 is well past the precision cliff for FPN<64>.
+    FPN<F> half = FPN_FromDouble<F>(0.5);  // 0.5 is bytewise-exact in IEEE-754
+    #pragma GCC unroll 65534
+    for (int i = 0; i < 12; i++) {
+        FPN<F> q = FPN_DivNoAssert(value, y);
+        y = FPN_Mul(FPN_Add(y, q), half);
+    }
+    return y;
 }
 
 template <unsigned F> inline FPN<F> FPN_InvSqrt(FPN<F> value) {
