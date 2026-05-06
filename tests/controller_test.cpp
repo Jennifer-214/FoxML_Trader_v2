@@ -13126,6 +13126,55 @@ e3_skip_load:;
               LargeTradeState_ZScore(&empty, FPN_FromDouble<64>(1.0)) == 0.0);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0b.2 — RegimeDetector hour_sin/cos via FPN_Sin/Cos ---\n");
+    {
+        // Theory: hour_sin/cos in Regime_ComputeSignals computed sin/cos
+        // via IEEE-754 reordering-prone math; now uses FPN_Sin/FPN_Cos
+        // (bytewise-deterministic Taylor). Boundary-stable: hour_sin/cos
+        // fields stay double.
+        // Use FPN_Sin/Cos directly here as a unit-level proxy — the actual
+        // call site lives in Regime_ComputeSignals at RegimeDetector.hpp:345
+        // and is exercised by the existing regime tests + the v5.9.2
+        // replay-determinism test (controller_test.cpp:10251).
+
+        const double TAU = 2.0 * 3.14159265358979323846;
+
+        // Cyclical encoding for hour 0..23 — verify sin² + cos² ≈ 1 for each
+        bool all_unit_circle = true;
+        for (int h = 0; h < 24; h++) {
+            FPN<64> arg = FPN_FromDouble<64>(TAU * (double)h / 24.0);
+            double s = FPN_ToDouble(FPN_Sin(arg));
+            double c = FPN_ToDouble(FPN_Cos(arg));
+            double mag = s*s + c*c;
+            if (fabs(mag - 1.0) > 1e-9) {
+                printf("  [v5.10.0b.2 DIAG] h=%d sin²+cos²=%.12g (off-unit)\n", h, mag);
+                all_unit_circle = false;
+                break;
+            }
+        }
+        check("v5.10.0b.2: hour-encoding sin²+cos² ≈ 1 for h=0..23",
+              all_unit_circle);
+
+        // Determinism: two computations of the same hour give bytewise-equal
+        // double output (the contract the conversion is buying)
+        FPN<64> arg = FPN_FromDouble<64>(TAU * 13.5 / 24.0);
+        double s1 = FPN_ToDouble(FPN_Sin(arg));
+        double s2 = FPN_ToDouble(FPN_Sin(arg));
+        double c1 = FPN_ToDouble(FPN_Cos(arg));
+        double c2 = FPN_ToDouble(FPN_Cos(arg));
+        check("v5.10.0b.2: hour_sin/cos bytewise-deterministic across repeats",
+              memcmp(&s1, &s2, sizeof(double)) == 0 &&
+              memcmp(&c1, &c2, sizeof(double)) == 0);
+
+        // Epsilon vs IEEE-754 reference
+        double ref_s = sin(TAU * 13.5 / 24.0);
+        double ref_c = cos(TAU * 13.5 / 24.0);
+        check("v5.10.0b.2: hour_sin matches IEEE within 1e-9",
+              fabs(s1 - ref_s) < 1e-9);
+        check("v5.10.0b.2: hour_cos matches IEEE within 1e-9",
+              fabs(c1 - ref_c) < 1e-9);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.G.6 — Per-core ensemble cfg fields ---\n");
     {
         // === Test G.6.1: ensemble cfg defaults ===
