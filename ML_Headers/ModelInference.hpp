@@ -102,7 +102,17 @@
 //           versions (see FeatureRegistry.hpp). Stamps signed under one
 //           registry refuse to load under a different registry. v4 stamps
 //           lack the field and fail format-version check.
-#define MODEL_FORMAT_VERSION 5
+// v6 (v5.10.0b): bytewise-deterministic FPN-end-to-end slow path.
+//           Multiple slow-path math primitives migrated from IEEE-754 to
+//           pure-integer FPN: FlowFeatures EWMA decay (FPN_Exp), z-score
+//           sqrt (FPN_Sqrt), RegimeDetector hour_sin/cos (FPN_Sin/Cos),
+//           and FP64 divide (192-by-128 long division replaces long-double
+//           FPU path). All slow-path features now produce bytewise-
+//           identical output across compilers / -O levels / FMA support
+//           given identical inputs. Bit-level shifts vs. v5 absorbed by
+//           retraining; v5 stamps refuse to load with a "model trained
+//           with pre-v5.10 IEEE-754 math; retrain required" message.
+#define MODEL_FORMAT_VERSION 6
 
 //======================================================================================================
 // [FEATURE LOOKBACK REGISTRY]

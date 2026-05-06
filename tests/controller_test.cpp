@@ -9204,10 +9204,10 @@ e3_skip_load:;
         check("v5.8.1b: Features_PackAll bytewise-equivalent to ModelFeatures_Pack for ALL 34 indices",
               equiv);
 
-        // MODEL_FORMAT_VERSION bumped 4 → 5 in v5.8.1a; stays at 5 across
-        // v5.8.1b since the wire format (stamp body fields) is unchanged
-        // — only the registry hash value flips.
-        check("v5.8.1b: MODEL_FORMAT_VERSION == 5", MODEL_FORMAT_VERSION == 5);
+        // MODEL_FORMAT_VERSION bumped 4 → 5 in v5.8.1a; bumped 5 → 6 in
+        // v5.10.0b for FPN-end-to-end slow path (the bit-level math shift
+        // requires retraining; old v5 stamps refuse to load).
+        check("v5.10.0b: MODEL_FORMAT_VERSION == 6", MODEL_FORMAT_VERSION == 6);
 
         // Drift detection — verifier rejects stamp with mutated hash when
         // caller passes expected_feature_registry_hash != 0. Construct a
