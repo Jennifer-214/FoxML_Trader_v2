@@ -822,12 +822,73 @@ template <unsigned F> inline FPN<F> FPN_InvSqrt(FPN<F> value) {
     return FPN_FromDouble<F>(1.0 / sqrt(FPN_ToDouble(value)));
 }
 
+// v5.10.0b.2.5.D: FPN-native Taylor sin via range reduction to [0, π/2].
+// 1. Reduce x to [-π, π] by x = x - n*2π where n = round(x / 2π).
+// 2. Use sin oddness to make x ≥ 0; track sign flip for later.
+// 3. If x > π/2, use sin(π - x) = sin(x) to bring into [0, π/2].
+// 4. Taylor: sin(x) = x - x³/6 + x⁵/120 - ... (8 odd-power terms past x).
+// At |x| ≤ π/2 ≈ 1.57, the 17! term hits ~3e-13 — past FPN<64> noise.
+// Bytewise-deterministic across compilers; no IEEE-754 round-trip.
 template <unsigned F> inline FPN<F> FPN_Sin(FPN<F> value) {
-    return FPN_FromDouble<F>(sin(FPN_ToDouble(value)));
+    constexpr unsigned N  = FPN<F>::N;
+    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
+
+    if (FPN_IsZero(value)) return FPN_Zero<F>();
+
+    // Constants (bytewise-stable IEEE-754 literals)
+    FPN<F> pi         = FPN_FromDouble<F>(3.141592653589793);
+    FPN<F> two_pi     = FPN_FromDouble<F>(6.283185307179586);
+    FPN<F> half_pi    = FPN_FromDouble<F>(1.5707963267948966);
+    FPN<F> inv_two_pi = FPN_FromDouble<F>(0.15915494309189535);
+    FPN<F> half_const = FPN_FromDouble<F>(0.5);
+
+    // Step 1: reduce to [-π, π] via x = value - n*2π, n = round(value/2π)
+    FPN<F> q = FPN_Mul(value, inv_two_pi);
+    FPN<F> q_rounded = q.sign ? FPN_Sub(q, half_const) : FPN_Add(q, half_const);
+    int64_t n_int = (FW < N) ? (int64_t)q_rounded.w[FW] : 0;
+    if (q_rounded.sign) n_int = -n_int;
+    FPN<F> n_abs    = FPN_FromInt<F>(n_int < 0 ? -n_int : n_int);
+    FPN<F> n_two_pi = FPN_Mul(n_abs, two_pi);
+    if (n_int < 0) n_two_pi.sign = 1;
+    FPN<F> x = FPN_Sub(value, n_two_pi);
+
+    // Step 2: sin is odd — make x ≥ 0, remember to flip the result
+    int sign_flip = (int)x.sign;
+    x.sign = 0;
+
+    // Step 3: if x > π/2, use sin(π - x) = sin(x). Now x ∈ [0, π/2].
+    if (FPN_GreaterThanOrEqual(x, half_pi)) x = FPN_Sub(pi, x);
+
+    // Step 4: Taylor — sin(x) = x - x³/6 + x⁵/120 - x⁷/5040 + ...
+    // 8 odd-power terms past the x term: stops at x^17/17!.
+    FPN<F> result = x;             // x term (k=0)
+    FPN<F> x_pow  = x;
+    FPN<F> x_sq   = FPN_Mul(x, x);
+    static const double inv_fact_odd[8] = {
+        -1.0 / 6.0,                   // 3!
+         1.0 / 120.0,                 // 5!
+        -1.0 / 5040.0,                // 7!
+         1.0 / 362880.0,              // 9!
+        -1.0 / 39916800.0,            // 11!
+         1.0 / 6227020800.0,          // 13!
+        -1.0 / 1307674368000.0,       // 15!
+         1.0 / 355687428096000.0      // 17!
+    };
+    #pragma GCC unroll 65534
+    for (int k = 0; k < 8; k++) {
+        x_pow = FPN_Mul(x_pow, x_sq);
+        FPN<F> term = FPN_Mul(x_pow, FPN_FromDouble<F>(inv_fact_odd[k]));
+        result = FPN_Add(result, term);
+    }
+
+    if (sign_flip) result.sign = 1 - result.sign;
+    return result;
 }
 
+// FPN_Cos via identity cos(x) = sin(x + π/2). Trivially deterministic.
 template <unsigned F> inline FPN<F> FPN_Cos(FPN<F> value) {
-    return FPN_FromDouble<F>(cos(FPN_ToDouble(value)));
+    FPN<F> half_pi = FPN_FromDouble<F>(1.5707963267948966);
+    return FPN_Sin(FPN_Add(value, half_pi));
 }
 
 template <unsigned F> inline FPN<F> FPN_Tan(FPN<F> value) {

@@ -12961,6 +12961,82 @@ e3_skip_load:;
               diff / scale < 1e-8);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0b.2.5.D — FPN-native Taylor sin/cos ---\n");
+    {
+        // Theory: FPN_Sin/Cos were stubs round-tripping through IEEE-754.
+        // Replaced with range reduction to [0, π/2] + 8-term Taylor on x²
+        // (so 9 odd-power terms total, covering up to x^17/17!).
+        // FPN_Cos(x) = FPN_Sin(x + π/2). Required by RegimeDetector
+        // hour_sin/hour_cos (sin(2π·hour/24) cyclical hour encoding).
+
+        auto sincos_close = [](double expected, FPN<64> got, double abs_eps) -> bool {
+            double v = FPN_ToDouble(got);
+            double err = v - expected;
+            if (err < 0) err = -err;
+            return err < abs_eps;
+        };
+
+        FPN<64> zero = FPN_Zero<64>();
+        check("v5.10.0b.2.5.D: sin(0) = 0",
+              sincos_close(0.0, FPN_Sin(zero), 1e-12));
+        check("v5.10.0b.2.5.D: cos(0) = 1",
+              sincos_close(1.0, FPN_Cos(zero), 1e-9));
+
+        // π/2 → sin = 1, cos = 0
+        FPN<64> hpi = FPN_FromDouble<64>(1.5707963267948966);
+        check("v5.10.0b.2.5.D: sin(π/2) ≈ 1",
+              sincos_close(1.0, FPN_Sin(hpi), 1e-9));
+        check("v5.10.0b.2.5.D: cos(π/2) ≈ 0",
+              sincos_close(0.0, FPN_Cos(hpi), 1e-9));
+
+        // π → sin = 0, cos = -1
+        FPN<64> pi_v = FPN_FromDouble<64>(3.141592653589793);
+        check("v5.10.0b.2.5.D: sin(π) ≈ 0",
+              sincos_close(0.0, FPN_Sin(pi_v), 1e-9));
+        check("v5.10.0b.2.5.D: cos(π) ≈ -1",
+              sincos_close(-1.0, FPN_Cos(pi_v), 1e-9));
+
+        // 3π/2 → sin = -1, cos = 0 (range reduction past π)
+        FPN<64> three_hpi = FPN_FromDouble<64>(4.71238898038469);
+        check("v5.10.0b.2.5.D: sin(3π/2) ≈ -1 (range-reduces past π)",
+              sincos_close(-1.0, FPN_Sin(three_hpi), 1e-9));
+        check("v5.10.0b.2.5.D: cos(3π/2) ≈ 0",
+              sincos_close(0.0, FPN_Cos(three_hpi), 1e-9));
+
+        // Negative input: sin(-π/4) = -sin(π/4) ≈ -0.707
+        FPN<64> neg_qpi = FPN_FromDouble<64>(-0.7853981633974483);
+        check("v5.10.0b.2.5.D: sin(-π/4) ≈ -0.7071",
+              sincos_close(-sin(0.7853981633974483), FPN_Sin(neg_qpi), 1e-9));
+        check("v5.10.0b.2.5.D: cos(-π/4) ≈ 0.7071 (cos is even)",
+              sincos_close(cos(0.7853981633974483), FPN_Cos(neg_qpi), 1e-9));
+
+        // Period: sin(x + 2π) = sin(x); spot-check at 5π
+        FPN<64> five_pi = FPN_FromDouble<64>(15.707963267948966);
+        check("v5.10.0b.2.5.D: sin(5π) ≈ 0 (huge range reduction)",
+              sincos_close(0.0, FPN_Sin(five_pi), 1e-7));
+
+        // Pythagorean identity: sin²(x) + cos²(x) = 1
+        FPN<64> x_test = FPN_FromDouble<64>(1.234);
+        FPN<64> sx = FPN_Sin(x_test);
+        FPN<64> cx = FPN_Cos(x_test);
+        FPN<64> id = FPN_Add(FPN_Mul(sx, sx), FPN_Mul(cx, cx));
+        check("v5.10.0b.2.5.D: sin²(1.234) + cos²(1.234) ≈ 1",
+              sincos_close(1.0, id, 1e-9));
+
+        // Hour encoding (use case): sin(2π·6/24) = sin(π/2) = 1
+        FPN<64> hour_6 = FPN_FromDouble<64>(2.0 * 3.141592653589793 * 6.0 / 24.0);
+        check("v5.10.0b.2.5.D: sin(2π·6/24) ≈ 1 (hour-of-day cyclical encoding)",
+              sincos_close(1.0, FPN_Sin(hour_6), 1e-9));
+
+        // Determinism
+        FPN<64> r1 = FPN_Sin(x_test);
+        FPN<64> r2 = FPN_Sin(x_test);
+        bool det = (r1.sign == r2.sign);
+        for (unsigned i = 0; i < FPN<64>::N; i++) det = det && (r1.w[i] == r2.w[i]);
+        check("v5.10.0b.2.5.D: sin(x) is deterministic (bytewise-equal repeat)",
+              det);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.G.6 — Per-core ensemble cfg fields ---\n");
     {
         // === Test G.6.1: ensemble cfg defaults ===
