@@ -13175,6 +13175,98 @@ e3_skip_load:;
               fabs(c1 - ref_c) < 1e-9);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0e — runtime IC drift detection ---\n");
+    {
+        // Theory: DriftHistory time-series ring buffer of (IC, ts_us)
+        // pairs sampled at slow-path cadence post-fill. Sustained breach =
+        // avg IC over the past `window_us` is below `floor` AND >= 5
+        // samples in the window. Engine emits CRITICAL log on first
+        // breach + optionally trips per-core kill_switch.
+
+        DriftHistory dh;
+        DriftHistory_Init(&dh);
+        check("v5.10.0e: DriftHistory_Init zeroes count + head + breached",
+              dh.count == 0 && dh.head == 0 && dh.breached == 0 &&
+              dh.kill_tripped == 0);
+
+        // Push 3 samples below floor (insufficient — < 5 samples returns 0)
+        DriftHistory_Push(&dh, 0.005, 1000ULL);
+        DriftHistory_Push(&dh, 0.005, 2000ULL);
+        DriftHistory_Push(&dh, 0.005, 3000ULL);
+        check("v5.10.0e: Push updates count",        dh.count == 3);
+        check("v5.10.0e: Push updates head",         dh.head == 3);
+        double avg; int n;
+        int b = DriftHistory_CheckBreach(&dh, 4000ULL, 100000ULL, 0.02, &avg, &n);
+        check("v5.10.0e: CheckBreach < 5 samples returns 0 (insufficient)",
+              b == 0);
+
+        // Push 5 more samples below floor (8 total) — should trigger breach
+        DriftHistory_Push(&dh, 0.005, 4000ULL);
+        DriftHistory_Push(&dh, 0.005, 5000ULL);
+        DriftHistory_Push(&dh, 0.005, 6000ULL);
+        DriftHistory_Push(&dh, 0.005, 7000ULL);
+        DriftHistory_Push(&dh, 0.005, 8000ULL);
+        b = DriftHistory_CheckBreach(&dh, 9000ULL, 100000ULL, 0.02, &avg, &n);
+        check("v5.10.0e: CheckBreach 8 samples below floor → BREACH",
+              b == 1);
+        check("v5.10.0e: avg_ic ≈ 0.005",
+              avg > 0.004 && avg < 0.006);
+        check("v5.10.0e: samples_in_window == 8",
+              n == 8);
+
+        // Healthy IC: 10 samples above floor → no breach
+        DriftHistory dh2;
+        DriftHistory_Init(&dh2);
+        for (uint64_t t = 1000; t <= 10000; t += 1000) {
+            DriftHistory_Push(&dh2, 0.15, t);
+        }
+        b = DriftHistory_CheckBreach(&dh2, 11000ULL, 100000ULL, 0.02, &avg, &n);
+        check("v5.10.0e: healthy IC (0.15 > floor 0.02) → no breach",
+              b == 0);
+        check("v5.10.0e: healthy avg_ic ≈ 0.15",
+              avg > 0.14 && avg < 0.16);
+
+        // Window expiry: samples outside window are excluded
+        DriftHistory dh3;
+        DriftHistory_Init(&dh3);
+        // 6 samples at ts=1000..6000 (all far in the past relative to "now")
+        for (uint64_t t = 1000; t <= 6000; t += 1000) {
+            DriftHistory_Push(&dh3, 0.005, t);
+        }
+        // CheckBreach at ts=10000000 with window=100us → all samples outside window
+        b = DriftHistory_CheckBreach(&dh3, 10000000ULL, 100ULL, 0.02, &avg, &n);
+        check("v5.10.0e: samples outside window are excluded",
+              b == 0 && n == 0);
+
+        // Mixed: 3 healthy + 5 below floor → average above floor → no breach
+        DriftHistory dh4;
+        DriftHistory_Init(&dh4);
+        for (int i = 0; i < 3; i++) DriftHistory_Push(&dh4, 0.30, (uint64_t)(1000 + i * 100));
+        for (int i = 0; i < 5; i++) DriftHistory_Push(&dh4, 0.005, (uint64_t)(2000 + i * 100));
+        b = DriftHistory_CheckBreach(&dh4, 3000ULL, 100000ULL, 0.02, &avg, &n);
+        // avg = (3*0.30 + 5*0.005) / 8 = (0.9 + 0.025) / 8 = 0.115625
+        check("v5.10.0e: mixed avg above floor → no breach",
+              b == 0);
+        check("v5.10.0e: mixed avg ≈ 0.116",
+              avg > 0.11 && avg < 0.12);
+
+        // Boundary: avg exactly at floor → no breach (strict <)
+        DriftHistory dh5;
+        DriftHistory_Init(&dh5);
+        for (int i = 0; i < 8; i++) DriftHistory_Push(&dh5, 0.02, (uint64_t)(1000 + i * 100));
+        b = DriftHistory_CheckBreach(&dh5, 2000ULL, 100000ULL, 0.02, &avg, &n);
+        check("v5.10.0e: avg exactly at floor → no breach (strict <)",
+              b == 0);
+
+        // Boundary: avg just below floor → breach
+        DriftHistory dh6;
+        DriftHistory_Init(&dh6);
+        for (int i = 0; i < 8; i++) DriftHistory_Push(&dh6, 0.019, (uint64_t)(1000 + i * 100));
+        b = DriftHistory_CheckBreach(&dh6, 2000ULL, 100000ULL, 0.02, &avg, &n);
+        check("v5.10.0e: avg just below floor → breach",
+              b == 1);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0d — FOREACH_TARGET label registry + LABEL_REGISTRY_HASH ---\n");
     {
         // Theory: label set is now defined via FOREACH_TARGET(X) X-macro.

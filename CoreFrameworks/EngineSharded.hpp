@@ -2099,7 +2099,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // it's directly unit-testable without standing up a producer thread.
     auto drain_post_fill = [&state, &oms, &cfg]() {
         EventLoop_DrainPostFill(&state, &oms, cfg.sl_cooldown_cycles,
-                                 cfg.ensemble_trade_reward_mult);
+                                 cfg.ensemble_trade_reward_mult,
+                                 cfg.confidence_ic_floor,
+                                 cfg.confidence_ic_floor_window,
+                                 cfg.auto_kill_on_drift);
     };
 
     // v4.7.8: manual force-close requests from the GUI. User clicks a

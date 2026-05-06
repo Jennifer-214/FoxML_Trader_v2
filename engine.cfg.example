@@ -581,6 +581,20 @@ acknowledge_cross_binary_version_drift=0   # 0=warn (safe), 1=suppress minor WAR
 #               model fires next; entry & exit may be driven by different
 #               models. Operator opt-in for emergency model retraction.
 acknowledge_hot_swap_with_open_positions=0
+
+# v5.10.0e — Runtime IC drift detection. Sampled post-fill (when a
+# position closes and the ConfidenceScorer ingests realized return).
+# Sustained breach = avg rolling IC over the past `window` seconds is
+# below `floor`, with at least 5 samples in the window.
+#
+# On first breach: emit CRITICAL log line ("[drift] core %d IC=...
+# below floor=... over %ds, %d samples").
+# When auto_kill_on_drift=1: also trip per-core kill_switch — engine
+# stops opening new positions on that core; existing positions exit
+# naturally. Surfaced via state.cores[c].core_kill_tripped + halt code.
+confidence_ic_floor=0.02            # min Spearman rank correlation (> random)
+confidence_ic_floor_window=86400    # sustained-breach window in seconds (default 24h)
+auto_kill_on_drift=0                # 0=log only, 1=trip per-core kill_switch on breach
 held_out_stamp_secret=          # HMAC-SHA256 secret. Empty = devmode (signs but accepts any sig)
 
 # Auto-stamp on held-out completion (v5.3.2 + v5.8.7 + v5.8.10).

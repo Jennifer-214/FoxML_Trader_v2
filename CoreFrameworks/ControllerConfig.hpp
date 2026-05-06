@@ -533,6 +533,21 @@ template <unsigned F> struct ControllerConfig {
   // its entry and exit driven by different models, which can produce
   // unintuitive realized P&L. Default 0 keeps the entry-exit symmetry.
   int    acknowledge_hot_swap_with_open_positions;
+  // v5.10.0e — runtime IC drift detection. Sampled post-fill on ML cores;
+  // sustained breach (avg IC over `confidence_ic_floor_window` seconds
+  // below `confidence_ic_floor`) emits CRITICAL log. When `auto_kill_on_drift=1`
+  // also trips the per-core kill_switch — engine stops opening new
+  // positions on that core; existing positions exit naturally.
+  //
+  // confidence_ic_floor       — min acceptable rolling IC. Default 0.02
+  //                              (Spearman correlation; > random chance).
+  // confidence_ic_floor_window — sustained-breach window in SECONDS.
+  //                              Default 86400 (24 hours).
+  // auto_kill_on_drift        — 0 (default) = log only; 1 = also trip
+  //                              per-core kill_switch on first breach.
+  double   confidence_ic_floor;
+  uint32_t confidence_ic_floor_window;
+  int      auto_kill_on_drift;
   // v5.2.1 (live reconciliation Phase 1) — exchange-truth sync at boot
   // (and optionally on heartbeat). LIVE-mode-only — paper mode skips
   // reconcile entirely.
@@ -1009,6 +1024,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.acknowledge_cross_binary_version_drift = 0;                 // v5.9.4 — default WARN on minor drift
   cfg.acknowledge_inference_cfg_drift = 0;                        // v5.9.5i — default REFUSE/WARN on inference cfg drift
   cfg.acknowledge_hot_swap_with_open_positions = 0;               // v5.10.0c — default DEFER swap until position close
+  cfg.confidence_ic_floor                       = 0.02;           // v5.10.0e — Spearman correlation > random
+  cfg.confidence_ic_floor_window                = 86400u;          // v5.10.0e — 24h sustained-breach window
+  cfg.auto_kill_on_drift                        = 0;              // v5.10.0e — log only by default; opt-in to auto-kill
   // v5.9.5h — XGBoost training hyperparams (cfg-tunable subset).
   // Defaults match pre-v5.9.5h hardcoded values bytewise; non-tuning
   // operators get identical training output post-upgrade.
@@ -1561,6 +1579,15 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(acknowledge_cross_binary_version_drift)
     CFG_PARSE_INT(acknowledge_inference_cfg_drift)  // v5.9.5i
     CFG_PARSE_INT(acknowledge_hot_swap_with_open_positions)  // v5.10.0c
+    if (strcmp(key, "confidence_ic_floor") == 0) {
+        cfg.confidence_ic_floor = atof(val);
+        continue;
+    }
+    if (strcmp(key, "confidence_ic_floor_window") == 0) {
+        cfg.confidence_ic_floor_window = (uint32_t)strtoul(val, nullptr, 10);
+        continue;
+    }
+    CFG_PARSE_INT(auto_kill_on_drift)  // v5.10.0e
     if (strcmp(key, "reconcile_interval_sec") == 0) {
         cfg.reconcile_interval_sec = atoi(val);
         continue;

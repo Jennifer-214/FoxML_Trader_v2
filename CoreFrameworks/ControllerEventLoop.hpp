@@ -178,6 +178,11 @@ struct CoreContext {
     // Single-position-per-core invariant means active_prediction is plenty;
     // multi-position would need a per-position ring.
     ConfidenceScorer confidence;
+    // v5.10.0e — drift detection. Sampled post-fill (when
+    // ConfidenceScorer_Update fires for ML cores). Engine emits CRITICAL
+    // log on sustained-breach + optionally trips per-core kill_switch
+    // when cfg.auto_kill_on_drift=1. See ConfidenceScore.hpp DriftHistory.
+    DriftHistory drift_history;
     double staged_prediction;      // prediction from last ML rebuild
     double active_prediction;      // prediction at last entry submit (0 = no open pos)
     double last_confidence;        // most recent ConfidenceScorer_Compute result
@@ -517,6 +522,8 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         ConfidenceScorer_Init(&state->cores[i].confidence,
                               CONFIDENCE_IC_WINDOW_DEFAULT,
                               CONFIDENCE_FRESHNESS_TAU_DEFAULT);
+        // v5.10.0e — drift history starts empty; samples land post-fill.
+        DriftHistory_Init(&state->cores[i].drift_history);
         state->cores[i].staged_prediction = 0.0;
         state->cores[i].active_prediction = 0.0;
         state->cores[i].last_confidence = 0.0;
@@ -996,7 +1003,14 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                                              OrderManagerState<F>* oms,
                                              uint32_t sl_cooldown_cycles,
                                              int core_id,
-                                             double ensemble_trade_reward_mult = 4.0) {
+                                             double ensemble_trade_reward_mult = 4.0,
+                                             // v5.10.0e — runtime IC drift detection.
+                                             // Defaults preserve pre-v5.10.0e behavior:
+                                             // floor=0 → DriftHistory_CheckBreach skip
+                                             // (avg < 0 floor never fires).
+                                             double drift_floor                = 0.0,
+                                             uint32_t drift_window_seconds     = 86400u,
+                                             int      drift_auto_kill          = 0) {
     const int partial_on = oms->partial_exit_enabled ? 1 : 0;
     uint16_t my_mask = partial_on
         ? (uint16_t)((1u << (core_id * 2)) | (1u << (core_id * 2 + 1)))
@@ -1170,6 +1184,54 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 ConfidenceScorer_Update(&ctx.confidence,
                                         ctx.active_prediction, realized);
                 ctx.active_prediction = 0.0;
+
+                // v5.10.0e — runtime IC drift detection. Sample current IC
+                // post-update; push to drift history; check sustained breach.
+                // Only meaningful when operator has set drift_floor > 0.
+                if (drift_floor > 0.0) {
+                    double ic_now = RollingIC_Compute(&ctx.confidence.ic);
+                    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+                    uint64_t now_us = (uint64_t)ts.tv_sec * 1000000ULL +
+                                      (uint64_t)ts.tv_nsec / 1000ULL;
+                    DriftHistory_Push(&ctx.drift_history, ic_now, now_us);
+                    double avg_ic = 0.0;
+                    int    n_samples = 0;
+                    int    breach = DriftHistory_CheckBreach(
+                        &ctx.drift_history, now_us,
+                        (uint64_t)drift_window_seconds * 1000000ULL,
+                        drift_floor, &avg_ic, &n_samples);
+                    if (breach && !ctx.drift_history.breached) {
+                        // First breach — log CRITICAL + record onset.
+                        // Rate-limit at 60s per core to avoid log spam if
+                        // breach toggles around the threshold.
+                        ctx.drift_history.breached = 1;
+                        ctx.drift_history.breach_first_us = now_us;
+                        static uint64_t s_drift_log_us[16] = {0};
+                        Health_LogCriticalRateLimited(
+                            &s_drift_log_us[core_id & 15], 60000000ULL,
+                            core_id, "drift",
+                            "IC=%.4f below floor=%.4f over %us window (%d samples)",
+                            avg_ic, drift_floor,
+                            (unsigned)drift_window_seconds, n_samples);
+                        if (drift_auto_kill && !ctx.drift_history.kill_tripped) {
+                            state->cores[core_id].core_kill_tripped = 1;
+                            state->cores[core_id].core_ks_trips_total++;
+                            ctx.drift_history.kill_tripped = 1;
+                            static uint64_t s_drift_kill_log_us[16] = {0};
+                            Health_LogCriticalRateLimited(
+                                &s_drift_kill_log_us[core_id & 15], 60000000ULL,
+                                core_id, "drift",
+                                "AUTO-KILL: per-core kill_switch tripped due to "
+                                "sustained IC drift");
+                        }
+                    } else if (!breach && ctx.drift_history.breached) {
+                        // Recovery — clear breach state, log info
+                        ctx.drift_history.breached = 0;
+                        fprintf(stderr,
+                            "[drift] core %d RECOVERED: IC=%.4f above floor=%.4f\n",
+                            core_id, avg_ic, drift_floor);
+                    }
+                }
             }
             if (realized < 0.0 && sl_cooldown_cycles > 0) {
                 ctx.sl_cooldown_remaining = sl_cooldown_cycles;
@@ -1204,10 +1266,18 @@ template <unsigned F>
 inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
                                      OrderManagerState<F>* oms,
                                      uint32_t sl_cooldown_cycles,
-                                     double ensemble_trade_reward_mult = 4.0) {
+                                     double ensemble_trade_reward_mult = 4.0,
+                                     // v5.10.0e — drift detection params (forwarded
+                                     // to OneCore; defaults preserve pre-v5.10.0e
+                                     // behavior).
+                                     double drift_floor                = 0.0,
+                                     uint32_t drift_window_seconds     = 86400u,
+                                     int      drift_auto_kill          = 0) {
     for (int c = 0; c < state->registered_count; ++c) {
         EventLoop_DrainPostFillOneCore(state, oms, sl_cooldown_cycles, c,
-                                         ensemble_trade_reward_mult);
+                                         ensemble_trade_reward_mult,
+                                         drift_floor, drift_window_seconds,
+                                         drift_auto_kill);
     }
 }
 
