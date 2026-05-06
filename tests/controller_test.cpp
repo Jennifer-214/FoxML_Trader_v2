@@ -13037,6 +13037,95 @@ e3_skip_load:;
               det);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0b.2.5.C — FlowFeatures internal FPN math ---\n");
+    {
+        // Theory: FlowState_Push, LargeTradeState_ZScore, SpreadState_ZScore
+        // now compute decay/sqrt via FPN_Exp/FPN_Sqrt internally — bytewise-
+        // deterministic across compilers / -O levels. Public API stays
+        // double (boundary-stable refactor; reduces touch sites). The
+        // bytewise contract: identical input sequence → identical stored
+        // bytes (modulo FPN_ToDouble's deterministic float conversion).
+
+        // FlowState bytewise determinism: run two identical sequences, the
+        // resulting struct contents must be identical down to each double
+        // bit pattern.
+        FlowState f1, f2;
+        FlowState_Init(&f1);
+        FlowState_Init(&f2);
+        struct { uint64_t ts; double sv; } seq[] = {
+            {1000000ULL,                       3.5},
+            {1000000ULL + 5  * 1000000ULL,    -1.2},
+            {1000000ULL + 17 * 1000000ULL,     2.8},
+            {1000000ULL + 60 * 1000000ULL,    -0.4},
+            {1000000ULL + 122* 1000000ULL,     5.1},
+            {1000000ULL + 300* 1000000ULL,    -3.7},
+        };
+        for (auto& step : seq) {
+            FlowState_Push(&f1, step.ts, step.sv);
+            FlowState_Push(&f2, step.ts, step.sv);
+        }
+        // Compare raw bytes of EWMA fields (doubles)
+        bool det_flow =
+            memcmp(&f1.ewma_10s, &f2.ewma_10s, sizeof(double)) == 0 &&
+            memcmp(&f1.ewma_1m,  &f2.ewma_1m,  sizeof(double)) == 0 &&
+            memcmp(&f1.ewma_5m,  &f2.ewma_5m,  sizeof(double)) == 0 &&
+            f1.last_us == f2.last_us;
+        check("v5.10.0b.2.5.C: FlowState_Push bytewise-deterministic across 6-step sequence",
+              det_flow);
+
+        // EWMA values are within IEEE-754 reference epsilon (decay precision
+        // matches Taylor's ~1e-9 relative bound)
+        // After 5 sec from first push at 3.5, second push -1.2:
+        // expected ewma_10s ≈ 3.5 * exp(-0.5) + (-1.2) ≈ 3.5 * 0.6065 - 1.2 ≈ 0.923
+        FlowState ref;
+        FlowState_Init(&ref);
+        FlowState_Push(&ref, 1000000ULL, 3.5);
+        FlowState_Push(&ref, 1000000ULL + 5*1000000ULL, -1.2);
+        double expected_10s = 3.5 * exp(-0.5) + (-1.2);
+        check("v5.10.0b.2.5.C: FlowState_Push 5s-decay matches IEEE within 1e-8",
+              fabs(ref.ewma_10s - expected_10s) < 1e-8);
+
+        // LargeTradeState_ZScore determinism + correctness
+        LargeTradeState<64, 8> lt1, lt2;
+        LargeTradeState_Init(&lt1);
+        LargeTradeState_Init(&lt2);
+        double sizes[] = {10.0, 12.0, 11.5, 9.8, 13.2, 10.7, 14.0, 11.0};
+        for (double s : sizes) {
+            LargeTradeState_Push(&lt1, FPN_FromDouble<64>(s));
+            LargeTradeState_Push(&lt2, FPN_FromDouble<64>(s));
+        }
+        FPN<64> probe = FPN_FromDouble<64>(13.5);
+        double z1 = LargeTradeState_ZScore(&lt1, probe);
+        double z2 = LargeTradeState_ZScore(&lt2, probe);
+        check("v5.10.0b.2.5.C: LargeTradeState_ZScore bytewise-deterministic",
+              memcmp(&z1, &z2, sizeof(double)) == 0);
+
+        // Sanity: 13.5 is above the mean (≈11.5), so z > 0
+        check("v5.10.0b.2.5.C: LargeTradeState_ZScore(above_mean) > 0",
+              z1 > 0.0);
+
+        // SpreadState_ZScore determinism + correctness
+        SpreadState<64, 8> ss1, ss2;
+        SpreadState_Init(&ss1);
+        SpreadState_Init(&ss2);
+        for (double s : sizes) {
+            SpreadState_Push(&ss1, FPN_FromDouble<64>(s));
+            SpreadState_Push(&ss2, FPN_FromDouble<64>(s));
+        }
+        double sz1 = SpreadState_ZScore(&ss1, FPN_FromDouble<64>(8.0));
+        double sz2 = SpreadState_ZScore(&ss2, FPN_FromDouble<64>(8.0));
+        check("v5.10.0b.2.5.C: SpreadState_ZScore bytewise-deterministic",
+              memcmp(&sz1, &sz2, sizeof(double)) == 0);
+        check("v5.10.0b.2.5.C: SpreadState_ZScore(below_mean) < 0",
+              sz1 < 0.0);
+
+        // Edge: count < 2 returns exactly 0 (degenerate path)
+        LargeTradeState<64, 8> empty;
+        LargeTradeState_Init(&empty);
+        check("v5.10.0b.2.5.C: ZScore returns 0 on empty buffer",
+              LargeTradeState_ZScore(&empty, FPN_FromDouble<64>(1.0)) == 0.0);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.G.6 — Per-core ensemble cfg fields ---\n");
     {
         // === Test G.6.1: ensemble cfg defaults ===
