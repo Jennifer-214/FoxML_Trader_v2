@@ -13175,6 +13175,76 @@ e3_skip_load:;
               fabs(c1 - ref_c) < 1e-9);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0b.3 — FP64_DivNoAssert pure-integer 192/128 long division ---\n");
+    {
+        // Theory: FP64_DivNoAssert was a long-double FPU round-trip
+        // (non-deterministic across compilers / -O levels / FMA support).
+        // Replaced with bit-by-bit 192-by-128 schoolbook long division on
+        // the integer pipeline. Result is bytewise-deterministic AND more
+        // precise than the prior IEEE-754 path. Tested through the public
+        // FPN<64> API which dispatches to FP64_DivNoAssert via the F=64
+        // specialization (FixedPointN.hpp:1162-1163).
+
+        auto fdiv_close = [](double expected, FPN<64> q, double rel_eps) -> bool {
+            double got = FPN_ToDouble(q);
+            if (expected == 0.0) return fabs(got) < rel_eps;
+            double err = (got - expected) / expected;
+            if (err < 0) err = -err;
+            return err < rel_eps;
+        };
+
+        FPN<64> one = FPN_FromDouble<64>(1.0);
+        FPN<64> two = FPN_FromDouble<64>(2.0);
+        FPN<64> four = FPN_FromDouble<64>(4.0);
+        check("v5.10.0b.3: 1/1 = 1",
+              fdiv_close(1.0, FPN_DivNoAssert(one, one), 1e-15));
+        check("v5.10.0b.3: 4/2 = 2",
+              fdiv_close(2.0, FPN_DivNoAssert(four, two), 1e-15));
+        check("v5.10.0b.3: 1/2 = 0.5 (exact)",
+              fdiv_close(0.5, FPN_DivNoAssert(one, two), 1e-15));
+
+        FPN<64> three = FPN_FromDouble<64>(3.0);
+        check("v5.10.0b.3: 1/3 ≈ 0.3333... within 1e-15",
+              fdiv_close(1.0/3.0, FPN_DivNoAssert(one, three), 1e-15));
+        FPN<64> seven = FPN_FromDouble<64>(7.0);
+        FPN<64> ten = FPN_FromDouble<64>(10.0);
+        check("v5.10.0b.3: 7/10 = 0.7 within 1e-15",
+              fdiv_close(0.7, FPN_DivNoAssert(seven, ten), 1e-15));
+
+        // Trading-relevant magnitudes: 70000 / 1.5 ≈ 46666.67
+        FPN<64> price = FPN_FromDouble<64>(70000.0);
+        FPN<64> small = FPN_FromDouble<64>(1.5);
+        check("v5.10.0b.3: 70000/1.5 ≈ 46666.67",
+              fdiv_close(70000.0/1.5, FPN_DivNoAssert(price, small), 1e-12));
+
+        // Sign handling
+        FPN<64> neg_eight = FPN_FromDouble<64>(-8.0);
+        FPN<64> neg_two   = FPN_FromDouble<64>(-2.0);
+        check("v5.10.0b.3: (-8)/4 = -2",
+              fdiv_close(-2.0, FPN_DivNoAssert(neg_eight, four), 1e-15));
+        check("v5.10.0b.3: (-8)/(-2) = 4",
+              fdiv_close(4.0, FPN_DivNoAssert(neg_eight, neg_two), 1e-15));
+        check("v5.10.0b.3: 8/(-2) = -4",
+              fdiv_close(-4.0, FPN_DivNoAssert(FPN_FromDouble<64>(8.0), neg_two), 1e-15));
+
+        // Determinism: same input → same FPN bytes
+        FPN<64> d1 = FPN_DivNoAssert(price, small);
+        FPN<64> d2 = FPN_DivNoAssert(price, small);
+        bool det = (d1.sign == d2.sign);
+        for (unsigned i = 0; i < FPN<64>::N; i++) det = det && (d1.w[i] == d2.w[i]);
+        check("v5.10.0b.3: divide is bytewise-deterministic (repeat)",
+              det);
+
+        // Edge: very small / very large (near-zero result).
+        // FPN<64> has 64 fractional bits → 1 ULP at result 1e-12 is
+        // ~5e-8 relative (= 2^-64 / 1e-12). Loosen to 1e-7 since the
+        // quantization, not the algorithm, dominates here.
+        FPN<64> tiny = FPN_FromDouble<64>(1e-6);
+        FPN<64> huge = FPN_FromDouble<64>(1e6);
+        check("v5.10.0b.3: 1e-6 / 1e6 ≈ 1e-12 (FPN<64> quantization-bounded)",
+              fdiv_close(1e-12, FPN_DivNoAssert(tiny, huge), 1e-7));
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.G.6 — Per-core ensemble cfg fields ---\n");
     {
         // === Test G.6.1: ensemble cfg defaults ===
