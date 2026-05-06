@@ -1183,6 +1183,19 @@ struct TUISharedState {
     // (sp_state=3, sp_yield_count++). Single-writer (GUI) per bit; per-
     // core thread c is single-reader of bit c. Doesn't affect hot-path.
     volatile uint16_t paused_engines_mask;
+    // v5.10.0c — Hot model swap. GUI's "Apply (live)" button next to the
+    // Model Dir Combo writes the new path + sets the request flag for
+    // that core. Engine slow-path consumes: verifies the new model via
+    // CoreModelZoo_TryLoadRole, swaps the active handle on success, frees
+    // the old handle after one slow-path grace period. Single-writer
+    // (GUI) / single-reader (engine slow-path); per-core array.
+    // Sentinel: pending_model_path[c][0]=='\0' AND swap_model_path_requested[c]==0
+    // means "no pending swap". Both fields write-then-flag pattern: GUI
+    // writes pending_model_path FIRST, then atomic-stores
+    // swap_model_path_requested with __ATOMIC_RELEASE; engine reads with
+    // __ATOMIC_ACQUIRE.
+    volatile uint8_t swap_model_path_requested[16];
+    char pending_model_path[16][256];
     EngineTUI tui;
     const char *config_path;
     void *candle_acc;  // CandleAccumulator* (GUI build only, NULL for ANSI)

@@ -1217,6 +1217,12 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     g_shared.drag_slot = -1;
     for (int i = 0; i < 16; ++i) g_shared.swap_strategy_requested[i] = STRATEGY_NONE;
     for (int i = 0; i < 16; ++i) g_shared.manual_close_requested[i]  = 0;
+    // v5.10.0c — hot model swap state. memset above already zeroed
+    // these, but explicit init clarifies intent: 0 = no pending swap.
+    for (int i = 0; i < 16; ++i) {
+        g_shared.swap_model_path_requested[i] = 0;
+        g_shared.pending_model_path[i][0]     = '\0';
+    }
     // Wire the signal handler's GUI-quit pointer to this g_shared. After
     // this assignment, SIGINT will set BOTH g_engine_sharded_shutdown AND
     // g_shared.quit_requested in one atomic-ish step, ensuring the GUI

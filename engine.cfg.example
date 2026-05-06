@@ -573,6 +573,14 @@ allow_cross_major_engine=0      # 0=refuse cross-major (safe), 1=allow with warn
 # Cross-major drift is gated separately by allow_cross_major_engine
 # above + the held_out_gate_strict refusal path.
 acknowledge_cross_binary_version_drift=0   # 0=warn (safe), 1=suppress minor WARN
+
+# v5.10.0c — Hot model swap behavior when a position is open at swap time.
+# 0 (default) = swap is deferred until position closes naturally; safer
+#               since entry & exit use the same model.
+# 1           = swap proceeds immediately, open positions exit on whatever
+#               model fires next; entry & exit may be driven by different
+#               models. Operator opt-in for emergency model retraction.
+acknowledge_hot_swap_with_open_positions=0
 held_out_stamp_secret=          # HMAC-SHA256 secret. Empty = devmode (signs but accepts any sig)
 
 # Auto-stamp on held-out completion (v5.3.2 + v5.8.7 + v5.8.10).

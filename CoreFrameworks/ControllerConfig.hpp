@@ -522,6 +522,17 @@ template <unsigned F> struct ControllerConfig {
   // Default 0 (vocal). Suppresses only inference cfg drift; cross-binary
   // version drift uses its own flag above.
   int    acknowledge_inference_cfg_drift;
+  // v5.10.0c — hot model swap behavior when a position is open.
+  //   0 (default) = swap is deferred until the position closes naturally
+  //                 (next slow-path retries; safer — entry & exit use
+  //                 the same model);
+  //   1           = swap proceeds immediately, open positions exit on
+  //                 whatever model fires next (operator opt-in for
+  //                 emergency model retraction).
+  // Setting this flag = 1 acknowledges that a single position may have
+  // its entry and exit driven by different models, which can produce
+  // unintuitive realized P&L. Default 0 keeps the entry-exit symmetry.
+  int    acknowledge_hot_swap_with_open_positions;
   // v5.2.1 (live reconciliation Phase 1) — exchange-truth sync at boot
   // (and optionally on heartbeat). LIVE-mode-only — paper mode skips
   // reconcile entirely.
@@ -997,6 +1008,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.health_log_keep_count       = 0;                            // 0 = no retained rotated files
   cfg.acknowledge_cross_binary_version_drift = 0;                 // v5.9.4 — default WARN on minor drift
   cfg.acknowledge_inference_cfg_drift = 0;                        // v5.9.5i — default REFUSE/WARN on inference cfg drift
+  cfg.acknowledge_hot_swap_with_open_positions = 0;               // v5.10.0c — default DEFER swap until position close
   // v5.9.5h — XGBoost training hyperparams (cfg-tunable subset).
   // Defaults match pre-v5.9.5h hardcoded values bytewise; non-tuning
   // operators get identical training output post-upgrade.
@@ -1548,6 +1560,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     CFG_PARSE_INT(acknowledge_cross_binary_version_drift)
     CFG_PARSE_INT(acknowledge_inference_cfg_drift)  // v5.9.5i
+    CFG_PARSE_INT(acknowledge_hot_swap_with_open_positions)  // v5.10.0c
     if (strcmp(key, "reconcile_interval_sec") == 0) {
         cfg.reconcile_interval_sec = atoi(val);
         continue;
