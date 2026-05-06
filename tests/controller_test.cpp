@@ -12887,6 +12887,80 @@ e3_skip_load:;
               det);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.0b.2.5.B — FPN-native Taylor exp ---\n");
+    {
+        // Theory: FPN_Exp was a stub round-tripping through IEEE-754 exp.
+        // Replaced with range reduction (x = k*ln(2) + r) + Taylor on r.
+        // 2^k is a bit-shift; exp(r) for |r| < ln(2)/2 converges in 9 terms.
+        // Required by FlowFeatures EWMA decay (B.2.5.C).
+
+        auto exp_close = [](double expected, FPN<64> v, double rel_eps) -> bool {
+            double got = FPN_ToDouble(FPN_Exp(v));
+            if (expected == 0.0) return got < rel_eps;  // absolute for ~0
+            double err = (got - expected) / expected;
+            if (err < 0) err = -err;
+            return err < rel_eps;
+        };
+
+        // exp(0) = 1
+        check("v5.10.0b.2.5.B: exp(0) = 1",
+              exp_close(1.0, FPN_Zero<64>(), 1e-12));
+
+        // exp(1) = e ≈ 2.71828
+        check("v5.10.0b.2.5.B: exp(1) ≈ e",
+              exp_close(M_E, FPN_FromInt<64>(1), 1e-9));
+
+        // exp(2) ≈ 7.389
+        check("v5.10.0b.2.5.B: exp(2) ≈ 7.389",
+              exp_close(exp(2.0), FPN_FromInt<64>(2), 1e-9));
+
+        // Negative inputs (the EWMA decay use case): exp(-1) ≈ 0.368
+        FPN<64> neg_one = FPN_FromInt<64>(-1);
+        check("v5.10.0b.2.5.B: exp(-1) ≈ 1/e",
+              exp_close(1.0/M_E, neg_one, 1e-9));
+
+        // EWMA decay range: exp(-0.1) ≈ 0.905, exp(-0.5) ≈ 0.607
+        // Use FPN_FromDouble directly for fractional inputs (those are
+        // bytewise-stable IEEE-754 literals)
+        FPN<64> neg_half = FPN_FromDouble<64>(-0.5);
+        check("v5.10.0b.2.5.B: exp(-0.5) ≈ 0.6065",
+              exp_close(exp(-0.5), neg_half, 1e-9));
+
+        // Larger negative: exp(-5) ≈ 6.74e-3
+        FPN<64> neg_five = FPN_FromInt<64>(-5);
+        check("v5.10.0b.2.5.B: exp(-5) ≈ 6.74e-3",
+              exp_close(exp(-5.0), neg_five, 1e-9));
+
+        // Far negative: exp(-10) ≈ 4.54e-5
+        FPN<64> neg_ten = FPN_FromInt<64>(-10);
+        check("v5.10.0b.2.5.B: exp(-10) ≈ 4.54e-5",
+              exp_close(exp(-10.0), neg_ten, 1e-8));
+
+        // Determinism: same input → same output bytes
+        FPN<64> input = FPN_FromInt<64>(-3);
+        FPN<64> r1 = FPN_Exp(input);
+        FPN<64> r2 = FPN_Exp(input);
+        bool det = (r1.sign == r2.sign);
+        for (unsigned i = 0; i < FPN<64>::N; i++) det = det && (r1.w[i] == r2.w[i]);
+        check("v5.10.0b.2.5.B: exp(x) is deterministic (bytewise-equal repeat)",
+              det);
+
+        // Identity check: exp(a) * exp(b) ≈ exp(a + b)
+        // Use FPN values, multiply, compare to FPN_Exp(sum)
+        FPN<64> a = FPN_FromDouble<64>(-1.5);
+        FPN<64> b = FPN_FromDouble<64>(-2.3);
+        FPN<64> sum = FPN_Add(a, b);
+        FPN<64> exp_a = FPN_Exp(a);
+        FPN<64> exp_b = FPN_Exp(b);
+        FPN<64> exp_sum = FPN_Exp(sum);
+        FPN<64> product = FPN_Mul(exp_a, exp_b);
+        double diff = FPN_ToDouble(FPN_Sub(product, exp_sum));
+        if (diff < 0) diff = -diff;
+        double scale = FPN_ToDouble(exp_sum);
+        check("v5.10.0b.2.5.B: exp(a)*exp(b) ≈ exp(a+b) (relative < 1e-8)",
+              diff / scale < 1e-8);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0a.G.6 — Per-core ensemble cfg fields ---\n");
     {
         // === Test G.6.1: ensemble cfg defaults ===

@@ -838,8 +838,80 @@ template <unsigned F> inline FPN<F> FPN_Atan2(FPN<F> y, FPN<F> x) {
     return FPN_FromDouble<F>(atan2(FPN_ToDouble(y), FPN_ToDouble(x)));
 }
 
+// v5.10.0b.2.5.B: FPN-native exponential via range reduction + Taylor.
+// x = k*ln(2) + r where k = trunc(x / ln(2)), |r| < ln(2).
+// exp(x) = 2^k * exp(r); 2^k is a bit-shift, exp(r) Taylor-expands fast.
+// Bytewise-deterministic across builds. Designed for EWMA decay range
+// [-30, 0]: typical exp(-30) ≈ 9.36e-14 (representable in FPN<64>'s
+// 64 fractional bits as ~2^-43.6).
 template <unsigned F> inline FPN<F> FPN_Exp(FPN<F> value) {
-    return FPN_FromDouble<F>(exp(FPN_ToDouble(value)));
+    constexpr unsigned N  = FPN<F>::N;
+    constexpr unsigned FW = FPN<F>::FRAC_WORDS;
+
+    // exp(0) = 1
+    if (FPN_IsZero(value)) {
+        FPN<F> one = FPN_Zero<F>();
+        if (FW < N) one.w[FW] = 1ULL;
+        return one;
+    }
+
+    // ln(2) ≈ 0.6931471805599453, 1/ln(2) ≈ 1.4426950408889634.
+    // Constants via FPN_FromDouble — bytewise-stable for small IEEE-754
+    // literals (the round-trip happens once per call at known constants;
+    // determinism preserved as long as the literal bytes match across
+    // compilers, which they do per IEEE-754).
+    FPN<F> ln2     = FPN_FromDouble<F>(0.6931471805599453);
+    FPN<F> inv_ln2 = FPN_FromDouble<F>(1.4426950408889634);
+
+    // k = round(value / ln(2)) (round-to-nearest, half-away-from-zero).
+    // Round-to-nearest bounds |r| ≤ ln(2)/2 ≈ 0.347; Taylor with 9 terms
+    // then gives |error| ≈ 0.347^9 / 9! ≈ 1.5e-10 relative — past 1e-9.
+    // Truncation (the prior approach) left |r| up to ln(2) ≈ 0.69, which
+    // failed the 1e-9 bound for inputs with q ≈ ±0.5 ± k.
+    FPN<F> q = FPN_Mul(value, inv_ln2);
+    FPN<F> half_const = FPN_FromDouble<F>(0.5);
+    FPN<F> q_rounded  = q.sign ? FPN_Sub(q, half_const) : FPN_Add(q, half_const);
+    int64_t k = (FW < N) ? (int64_t)q_rounded.w[FW] : 0;
+    if (q_rounded.sign) k = -k;
+
+    // r = value - k * ln(2)
+    FPN<F> k_abs = FPN_FromInt<F>(k < 0 ? -k : k);
+    FPN<F> k_ln2 = FPN_Mul(k_abs, ln2);
+    if (k < 0) k_ln2.sign = 1;
+    FPN<F> r = FPN_Sub(value, k_ln2);
+
+    // Taylor: exp(r) = sum_{n=0}^{8} r^n / n!
+    // 9 terms is past the precision cliff for |r| < ln(2)/2 ≈ 0.347.
+    // r^8 / 8! ≈ 0.347^8 / 40320 ≈ 5e-9; r^9 way past FPN<64> noise floor.
+    FPN<F> result = FPN_Zero<F>();
+    if (FW < N) result.w[FW] = 1ULL;       // term n=0: 1
+    FPN<F> r_pow = result;                 // r^0
+    static const double inv_fact[9] = {
+        1.0, 1.0, 0.5, 1.0/6.0, 1.0/24.0,
+        1.0/120.0, 1.0/720.0, 1.0/5040.0, 1.0/40320.0
+    };
+    #pragma GCC unroll 65534
+    for (int n = 1; n < 9; n++) {
+        r_pow = FPN_Mul(r_pow, r);
+        FPN<F> term = FPN_Mul(r_pow, FPN_FromDouble<F>(inv_fact[n]));
+        result = FPN_Add(result, term);
+    }
+
+    // Multiply by 2^k via bit position: 1.0 in FPN is at bit F, so
+    // 2^k value = bit position F + k.
+    int seed_bit = (int)F + (int)k;
+    if (seed_bit < 0) {
+        // 2^k underflows below FPN precision → result rounds to 0
+        return FPN_Zero<F>();
+    }
+    if (seed_bit >= (int)(N * 64)) {
+        // overflow: saturate to current Taylor result (no shift) — caller
+        // should not feed in inputs that overflow exp range
+        return result;
+    }
+    FPN<F> two_k = FPN_Zero<F>();
+    two_k.w[seed_bit / 64] = (uint64_t)1 << (seed_bit % 64);
+    return FPN_Mul(result, two_k);
 }
 
 template <unsigned F> inline FPN<F> FPN_Log(FPN<F> value) {
