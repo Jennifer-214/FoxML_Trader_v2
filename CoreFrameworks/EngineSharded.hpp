@@ -1278,7 +1278,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     static TUISharedState g_shared;
     memset(&g_shared, 0, sizeof(g_shared));
     g_shared.config_path = "engine_sharded.cfg";
-    g_shared.active_idx = 0;
+    TUISnapshot_InitSeq(&g_shared);  // v5.11.3.B — seq starts at 0 (idx=0, parity=stable)
     g_shared.quit_requested = 0;
     g_shared.pause_requested = 0;
     g_shared.reload_requested = 0;
@@ -1783,10 +1783,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // Populate TUISnapshot for the GUI — same double-buffered
                 // pattern as legacy engine in main.cpp:845-912.
                 {
-                    int back = !__atomic_load_n(&g_shared.active_idx, __ATOMIC_ACQUIRE);
-                    int front = !back;
-                    TUISnapshot *bs = &g_shared.snapshots[back];
-                    const TUISnapshot *fs = &g_shared.snapshots[front];
+                    // v5.11.3.B — seqlock publish: parity bit flips odd → fill
+                    // back → flip even (idx toggled). Reader retries if mid-write.
+                    auto pub = TUISnapshot_Publish_Begin(&g_shared);
+                    TUISnapshot *bs = pub.back;
+                    const TUISnapshot *fs = pub.front;
                     // carry graph history ring buffers from front buffer
                     memcpy(bs->price_history, fs->price_history, sizeof(bs->price_history));
                     memcpy(bs->volume_history, fs->volume_history, sizeof(bs->volume_history));
@@ -1821,7 +1822,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     bs->pnl_history[bs->graph_head] = bs->total_pnl;
                     bs->graph_head = (bs->graph_head + 1) % TUISnapshot::GRAPH_LEN;
                     if (bs->graph_count < TUISnapshot::GRAPH_LEN) bs->graph_count++;
-                    __atomic_store_n(&g_shared.active_idx, back, __ATOMIC_RELEASE);
+                    TUISnapshot_Publish_End(&g_shared);  // v5.11.3.B — flips parity even, idx toggled
                 }
                 // check GUI quit request
                 if (g_shared.quit_requested) {

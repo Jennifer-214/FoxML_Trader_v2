@@ -16,6 +16,8 @@
 #include <sys/resource.h>  // v5.11.0.B — getrlimit / RLIMIT_MEMLOCK
 #include <unistd.h>
 #include <limits>  // v5.9.0: std::numeric_limits<double>::quiet_NaN() in NaN guard tests
+#include <thread>  // v5.11.3.B: std::thread for seqlock tear-free regression test
+#include <atomic>  // v5.11.3.B: std::atomic for cross-thread coordination in tests
 #include "../DataStream/MockGenerator.hpp"
 #include "../CoreFrameworks/PortfolioController.hpp"
 #include "../CoreFrameworks/Order.hpp"
@@ -13676,6 +13678,88 @@ e3_skip_load:;
             check("v5.11.2.C: FPN_BlendOnMask preserves negative sign (b path)",
                   blend_b.sign == b.sign);
         }
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.3.B — TUISnapshot seqlock tear-free read ---\n");
+    {
+        // Theory: pre-v5.11.3.B, TUISharedState had `volatile int active_idx`
+        // and the writer/reader pattern was atomic-store (writer) + atomic-load
+        // (reader). Tear hazard: if the writer published twice between two
+        // reader frames, the second publish wrote into the buffer the reader
+        // was holding a pointer into. GUI rendered a partially-overwritten
+        // TUISnapshot.
+        //
+        // Post-v5.11.3.B: seqlock pattern with parity bit (mid-write signal)
+        // and active-idx bit (encoded in seq bit 1). Reader memcpys into
+        // local + retries on tear. Writer protocol matches ParameterSlot.
+        //
+        // Test: spawn a writer thread that publishes a sequence of
+        // (price=N, seq_marker=N) pairs at high rate; main thread reads
+        // tear-free copies and asserts price == seq_marker on every read
+        // (i.e. each read sees a self-consistent snapshot, no field crossover
+        // from a prior publication). Pre-v5.11.3.B this would fail under
+        // even modest contention; post-v5.11.3.B it passes regardless.
+
+        TUISharedState shared = {};
+        TUISnapshot_InitSeq(&shared);
+
+        constexpr int N_WRITES = 10000;
+        std::atomic<int> writer_done{0};
+        std::atomic<int> tear_count{0};
+        std::atomic<int> read_count{0};
+
+        std::thread writer([&]() {
+            for (int i = 1; i <= N_WRITES; ++i) {
+                auto pub = TUISnapshot_Publish_Begin(&shared);
+                pub.back->price = (double)i;
+                // Use start_time as a distinct field that should always
+                // match price post-publish. If the reader sees price == X
+                // but start_time == Y where X != Y, that's a tear.
+                pub.back->start_time = (uint64_t)i;
+                TUISnapshot_Publish_End(&shared);
+            }
+            writer_done.store(1, std::memory_order_release);
+        });
+
+        // Reader loop: keep reading until writer is done + drain
+        TUISnapshot snap;
+        while (writer_done.load(std::memory_order_acquire) == 0) {
+            TUISnapshot_ReadInto(&shared, &snap);
+            read_count.fetch_add(1, std::memory_order_relaxed);
+            if (snap.start_time != 0 && (double)snap.start_time != snap.price) {
+                tear_count.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        // Final drain read
+        TUISnapshot_ReadInto(&shared, &snap);
+        if (snap.start_time != 0 && (double)snap.start_time != snap.price) {
+            tear_count.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        writer.join();
+
+        check("v5.11.3.B: writer published all N_WRITES",
+              snap.price == (double)N_WRITES);
+        check("v5.11.3.B: reader observed >= 100 snapshots",
+              read_count.load() >= 100);
+        check("v5.11.3.B: zero torn reads across thousands of writer publishes",
+              tear_count.load() == 0);
+
+        // Verify seq encoding invariants
+        uint64_t final_seq = TUISnapshot_Sequence(&shared);
+        check("v5.11.3.B: final seq parity is even (writer at rest)",
+              (final_seq & 1ULL) == 0);
+        check("v5.11.3.B: seq advanced exactly 2 per publish",
+              final_seq == (uint64_t)(2 * N_WRITES));
+
+        // Verify reader's local memcpy is independent of shared state
+        // (mutating shared.snapshots[0] after read shouldn't change snap)
+        TUISnapshot_ReadInto(&shared, &snap);
+        double saved = snap.price;
+        shared.snapshots[0].price = -99999.0;
+        shared.snapshots[1].price = -99999.0;
+        check("v5.11.3.B: reader's local copy is independent of subsequent shared mutation",
+              snap.price == saved);
     }
 
     printf("\n--- EXTENSIBILITY: v5.11.1.2 — Branchless leg-B via PAIR_BRANCHLESS template ---\n");

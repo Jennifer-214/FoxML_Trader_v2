@@ -418,7 +418,7 @@ int main(int argc, char *argv[]) {
     // multicore: TUI runs on separate thread, engine thread never renders
     TUISharedState shared = {};
     shared.config_path = cfg_path;
-    shared.active_idx = 0;
+    TUISnapshot_InitSeq(&shared);  // v5.11.3.B — seq starts at 0 (idx=0, parity=stable)
     shared.quit_requested = 0;
     shared.pause_requested = 0;
     shared.reload_requested = 0;
@@ -731,8 +731,13 @@ int main(int argc, char *argv[]) {
             // live update to active snapshot — 3 stores, 1 cache line, no FPN_ToDouble
             // price/volume from stashed doubles (atof during websocket parse)
             // active_count from hot-path bitmap (already in L1 from ExitGate)
+            // v5.11.3.B — legacy single-core live-update: derive active idx from
+            // seq counter (replaces former direct read of active_idx). Functionally
+            // equivalent — same per-field tear envelope as before; the legacy text
+            // TUI tolerates a frame of stale price by design.
             {
-                int tui_idx = __atomic_load_n(&shared.active_idx, __ATOMIC_ACQUIRE);
+                uint64_t s = shared.seq.load(std::memory_order_acquire);
+                int tui_idx = (int)((s >> 1) & 1ULL);
                 shared.snapshots[tui_idx].price = last_stream.price_d;
                 shared.snapshots[tui_idx].volume = last_stream.volume_d;
                 shared.snapshots[tui_idx].active_count = __builtin_popcount(ctrl.portfolio.active_bitmap);
@@ -1068,11 +1073,10 @@ int main(int argc, char *argv[]) {
                 // L1 already warm from rolling stats, regime, balance, strategy dispatch
                 // so this copy reads from L1 hits, not L2 misses (zero additional pollution)
                 {
-                    int back = !__atomic_load_n(&shared.active_idx, __ATOMIC_ACQUIRE);
-                    int front = !back;
-                    // carry graph history from front buffer before overwriting
-                    TUISnapshot *bs = &shared.snapshots[back];
-                    const TUISnapshot *fs = &shared.snapshots[front];
+                    // v5.11.3.B — seqlock publish (legacy single-core mode)
+                    auto pub = TUISnapshot_Publish_Begin(&shared);
+                    TUISnapshot *bs = pub.back;
+                    const TUISnapshot *fs = pub.front;
                     memcpy(bs->price_history, fs->price_history, sizeof(bs->price_history));
                     memcpy(bs->volume_history, fs->volume_history, sizeof(bs->volume_history));
                     memcpy(bs->pnl_history, fs->pnl_history, sizeof(bs->pnl_history));
@@ -1135,7 +1139,7 @@ int main(int argc, char *argv[]) {
                         bs->slow_count  = tui.slow_count;
                     }
 #endif
-                    __atomic_store_n(&shared.active_idx, back, __ATOMIC_RELEASE);
+                    TUISnapshot_Publish_End(&shared);  // v5.11.3.B
                 }
 #endif
             }

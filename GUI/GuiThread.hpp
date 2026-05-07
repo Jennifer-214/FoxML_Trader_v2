@@ -348,9 +348,14 @@ static inline void *gui_thread_fn(void *arg) {
             first_frame = false;
         }
 
-        // read current snapshot
-        int idx = __atomic_load_n(&shared->active_idx, __ATOMIC_ACQUIRE);
-        const TUISnapshot *snap = &shared->snapshots[idx];
+        // v5.11.3.B — read current snapshot tear-free into stack-local copy.
+        // Replaces the prior pointer-into-shared pattern, which could observe
+        // a torn buffer when the engine slow-path lapped the renderer (publish
+        // cadence > frame rate under heavy update). The memcpy is ~one TUISnapshot
+        // per frame at 60 Hz — negligible (~5 µs of the 16 ms budget).
+        TUISnapshot snap_local;
+        TUISnapshot_ReadInto(shared, &snap_local);
+        const TUISnapshot *snap = &snap_local;
 
         // keyboard controls
         Gui_HandleKeys(shared);
