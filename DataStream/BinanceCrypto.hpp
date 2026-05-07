@@ -433,8 +433,23 @@ static inline int binance_ws_send_close(BinanceStream *bs) {
 //
 // no allocations, no recursion, no tree building - just two string scans
 // returns 1 if both fields found, 0 otherwise
+//
+// v5.11.16 (2026-05-07) — DataStream parsing audit. The strstr/strchr calls
+// below are safe to use without explicit length bounds because the caller
+// (binance_ws_read_frame at line 365) writes `buf[pay_len] = '\0'` after
+// every frame read AND clamps pay_len <= buf_size-1, so the null terminator
+// is guaranteed to land within the buffer. v5.11.4.A locale-immune parsing
+// covered the actual number-extraction (FPN_FromString is digit-by-digit;
+// out->price_d / out->volume_d use tt::parse_double_fast). Audit verdict:
+// no behavior change needed; using the `len` parameter (previously unused)
+// as a min-size sanity guard catches truncated frames without scanning.
 //======================================================================================================
 static inline int binance_parse_trade(const char *json, int len, char *price_str, char *qty_str, int *is_buyer_maker) {
+    // v5.11.16 — sanity floor. A real Binance trade message is >= ~120 bytes
+    // (event type + symbol + ids + price + qty + timestamps). Anything under
+    // 20 is a truncated/non-trade frame; bail before scanning.
+    if (len < 20) return 0;
+
     // find "p":" - the price field
     const char *p_key = "\"p\":\"";
     const char *p_pos = strstr(json, p_key);

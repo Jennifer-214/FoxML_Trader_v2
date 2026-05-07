@@ -94,9 +94,23 @@ template <unsigned F> struct DepthSharedState {
 //======================================================================================================
 // parses Binance @depth5 format:
 // {"lastUpdateId":123,"bids":[["price","qty"],...],"asks":[["price","qty"],...]}
+//
+// v5.11.16 (2026-05-07) — DataStream parsing audit. strstr/strchr scans on
+// the JSON buffer are bounded by null termination — `ws_read_frame` at
+// WebSocketUtil.hpp:140 writes `out[plen] = '\0'` on every frame, clamped
+// to plen <= max_len. v5.11.4.A locale-immune parsing already covered
+// number extraction (FPN_FromString is digit-by-digit; lastUpdateId reads
+// via strtoull which is locale-stable for base-10 unsigned integers).
+// Using the `len` parameter (previously unused) as a min-size sanity
+// guard catches truncated frames before any scanning.
 //======================================================================================================
 template <unsigned F>
 static inline int depth_parse_json(const char *json, int len, BookSnapshot<F> *snap) {
+    // v5.11.16 — sanity floor. A real Binance @depth5 message is >= ~150
+    // bytes (lastUpdateId + 5 bid pairs + 5 ask pairs). Under 30 is
+    // a truncated frame; bail before scanning.
+    if (len < 30) return 0;
+
     // lastUpdateId — monotonic per-symbol update id from Binance.
     // If absent (shouldn't be on @depth5@100ms but defensive), stays 0.
     // Recorder uses a backward jump in this id (0 sentinel excluded) as one
