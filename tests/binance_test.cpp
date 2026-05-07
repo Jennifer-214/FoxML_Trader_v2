@@ -137,7 +137,7 @@ done:
 
     TradeLog_Close(&log);
     BinanceStream_Close(&bs);
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 
     return passed ? 0 : 1;
 }

@@ -265,7 +265,7 @@ static void test_fix_to_gates_to_portfolio() {
     Portfolio_ClearPositions(&portfolio);
     check("clear zeros count", portfolio.position_count == 0);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================

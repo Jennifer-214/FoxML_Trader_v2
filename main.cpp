@@ -1263,7 +1263,7 @@ int main(int argc, char *argv[]) {
     TickRecorder_Close(&tick_rec);
     DepthRecorder_Close(&depth_rec);
     BinanceStream_Close(&bs);
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
     free(ctrl.rolling_long);
 
     return 0;

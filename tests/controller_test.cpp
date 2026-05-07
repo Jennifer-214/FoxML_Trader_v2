@@ -362,7 +362,7 @@ static void test_fill_timing() {
     check("TP price computed", fabs(tp - expected_tp) < 0.1);
     check("SL price computed", fabs(sl - expected_sl) < 0.1);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -409,7 +409,7 @@ static void test_backpressure() {
     check("still 16 (backpressure)", Portfolio_CountActive(&ctrl.portfolio) == 16);
     check("pool slot remains", (pool.bitmap & (1ULL << 20)) != 0);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -454,7 +454,7 @@ static void test_warmup() {
     // initial anchor should match
     check("initial anchor set", FPN_Equal(ctrl.buy_conds.price, ctrl.mean_rev.buy_conds_initial.price));
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -507,7 +507,7 @@ static void test_regression_feedback() {
     int shifted = !FPN_Equal(ctrl.buy_conds.price, initial_price);
     check("buy conditions shifted", shifted);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -606,7 +606,7 @@ static void test_branchless() {
     double final_price = FPN_ToDouble(ctrl.buy_conds.price);
     check("noisy data: conditions near initial", fabs(final_price - 100.0) < 10.0);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -661,7 +661,7 @@ static void test_max_shift() {
     double max_shift_abs = rolling_avg * 0.02;
     check("shift clamped to max_shift", shift_from_rolling <= max_shift_abs + 0.5);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -700,7 +700,7 @@ static void test_empty_regression() {
     double pnl = FPN_ToDouble(ctrl.portfolio_delta);
     check("P&L stays zero", fabs(pnl) < 0.01);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -728,7 +728,7 @@ static void test_tick_counter() {
     }
     check("total_ticks = 20", ctrl.total_ticks == 20);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -801,7 +801,7 @@ static void test_full_pipeline() {
     check("total ticks = 500", ctrl.total_ticks == 500);
 
     TradeLog_Close(&log);
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 
     // check log file exists and has content
     FILE *f = fopen("logging/INTG_order_history.csv", "r");
@@ -874,7 +874,7 @@ static void test_stddev_offset() {
     double pct_buy_p = FPN_ToDouble(ctrl2.buy_conds.price);
     check("stddev: different from pct mode", fabs(buy_p - pct_buy_p) > 0.01);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -929,7 +929,7 @@ static void test_stddev_adaptation() {
     double init_op = FPN_ToDouble(cfg.entry_offset_pct);
     check("stddev: offset_pct unchanged in stddev mode", fabs(op - init_op) < 0.0001);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -979,7 +979,7 @@ static void test_multi_timeframe() {
     double buy_p_falling = FPN_ToDouble(ctrl.buy_conds.price);
     check("mt: buys blocked with falling long slope", buy_p_falling < 0.01);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -1016,7 +1016,7 @@ static void test_multi_timeframe_disabled() {
     double buy_p = FPN_ToDouble(ctrl.buy_conds.price);
     check("mt disabled: buys allowed despite falling slope", buy_p > 0);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -1061,7 +1061,7 @@ static void test_trailing_disabled() {
     double final_tp = FPN_ToDouble(ctrl.portfolio.positions[slot].take_profit_price);
     check("trailing disabled: TP unchanged", fabs(final_tp - 103.0) < 0.01);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -1119,7 +1119,7 @@ static void test_trailing_activates() {
     double final_price = 104.0 + 49.0 * 0.2; // 113.8
     check("trailing: TP below current price (trailing distance)", final_tp < final_price);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -1172,7 +1172,7 @@ static void test_trailing_ratchet() {
 
     check("ratchet: TP did not decrease during dip", tp_after_dip >= tp_after_rise - 0.01);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -1223,7 +1223,7 @@ static void test_original_tp_sl() {
         check("position was created", 0);
     }
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -1261,7 +1261,7 @@ static void test_slippage() {
         double entry = FPN_ToDouble(ctrl.portfolio.positions[0].entry_price);
         // 100 + 100*0.01 = 101
         check("slippage buy: entry price adjusted", fabs(entry - 101.0) < 0.1);
-        free(pool.slots);
+        OrderPool_DestroyBacking(&pool);
     }
 
     // TEST 2: sell slippage — realized P&L should reflect worse exit
@@ -1324,7 +1324,7 @@ static void test_slippage() {
         check("slippage disabled: position created", Portfolio_CountActive(&ctrl.portfolio) == 1);
         double entry = FPN_ToDouble(ctrl.portfolio.positions[0].entry_price);
         check("slippage disabled: entry price exact", fabs(entry - 100.0) < 0.01);
-        free(pool.slots);
+        OrderPool_DestroyBacking(&pool);
     }
 }
 
@@ -1372,7 +1372,7 @@ static void test_max_positions() {
         check("max_pos=1: second fill rejected", Portfolio_CountActive(&ctrl.portfolio) == 1);
         check("max_pos=1: pool slot 1 remains", (pool.bitmap & (1ULL << 1)) != 0);
 
-        free(pool.slots);
+        OrderPool_DestroyBacking(&pool);
     }
 
     // TEST 2: max_positions=2 accepts two, rejects third
@@ -1414,7 +1414,7 @@ static void test_max_positions() {
                                   FPN_FromDouble<FP>(500.0), &log);
         check("max_pos=2: third fill rejected", Portfolio_CountActive(&ctrl.portfolio) == 2);
 
-        free(pool.slots);
+        OrderPool_DestroyBacking(&pool);
     }
 
     // TEST 3: config parser clamps values
@@ -1804,7 +1804,7 @@ int main() {
                                       FPN_FromDouble<FP>(500.0), &log);
         check("same_tick: losses counted", ctrl.losses > 0);
 
-        free(pool.slots);
+        OrderPool_DestroyBacking(&pool);
     }
 
     {
@@ -2425,12 +2425,12 @@ int main() {
                   sk.kill_reason == 1);
 
             TradeLog_Close(&sl);
-            free(sp.slots);
+            OrderPool_DestroyBacking(&sp);
             remove("logging/KILL_SMALL_TEST_order_history.csv");
         }
 
         TradeLog_Close(&log);
-        free(pool.slots);
+        OrderPool_DestroyBacking(&pool);
         remove("logging/HALT_TEST_order_history.csv");
     }
 
@@ -2474,7 +2474,7 @@ int main() {
               Portfolio_CountActive(&ctrl.portfolio) == 1);
 
         TradeLog_Close(&log);
-        free(pool.slots);
+        OrderPool_DestroyBacking(&pool);
         remove("logging/PUSHBUY_TEST_order_history.csv");
     }
 
@@ -2625,7 +2625,7 @@ int main() {
                    bal_final, expected_final, bal_final - expected_final);
 
             TradeLog_Close(&log);
-            free(pool.slots);
+            OrderPool_DestroyBacking(&pool);
             remove("logging/DRIFT_TEST1_order_history.csv");
         }
 
@@ -2686,7 +2686,7 @@ int main() {
                    manual_pv, computed_pv, computed_pv - manual_pv);
 
             TradeLog_Close(&log);
-            free(pool.slots);
+            OrderPool_DestroyBacking(&pool);
             remove("logging/DRIFT_TEST2_order_history.csv");
         }
 
@@ -2729,7 +2729,7 @@ int main() {
             }
 
             TradeLog_Close(&log);
-            free(pool.slots);
+            OrderPool_DestroyBacking(&pool);
             remove("logging/DRIFT_TEST3_order_history.csv");
         }
     }
