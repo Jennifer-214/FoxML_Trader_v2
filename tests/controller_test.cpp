@@ -13400,6 +13400,81 @@ e3_skip_load:;
         unlink(stamp_path);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.11.1.1 — Template-bool elision of lat_enabled ---\n");
+    {
+        // Theory (audit Part 1.1): pre-v5.11.1.1 the hot path read
+        // `core->latency_stats.enabled` every tick (relaxed atomic load) +
+        // branched on `__builtin_expect(lat_enabled, 0)`. Even predicted
+        // not-taken, the load + branch occupy execution ports.
+        //
+        // Post-v5.11.1.1, ExecutionCore_Tick_Impl is templated on bool LAT_ENABLED.
+        // When LAT_ENABLED=false, the entire rdtsc + load + branch block is
+        // compiled out (`if constexpr (LAT_ENABLED)` elides it).
+        //
+        // Tests verify behavioral equivalence: with LAT_ENABLED=false, even
+        // when `enabled=1` is set on latency_stats, NO sample gets recorded
+        // (the elided block never runs). With LAT_ENABLED=true, samples DO
+        // get recorded when enabled=1.
+
+        using namespace tt;
+
+        // Setup a minimal ExecutionCore + Tick.
+        ExecutionCore<FP> core;
+        SPSCRing<Tick<FP>, EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
+        SPSCRing_Init(&tick_ring);
+        ExecutionCore_Init<FP>(&core, /*core_id=*/0, &tick_ring);
+
+        Tick<FP> tick{};
+        tick.price = FPN_FromDouble<FP>(100.0);
+        tick.volume = FPN_FromDouble<FP>(1.0);
+        tick.timestamp = 1234567890ULL;
+        tick.sequence = 1;
+
+        // === Test 1: LAT_ENABLED=false elides sampling regardless of enabled flag ===
+        core.latency_stats.enabled.store(1, std::memory_order_relaxed);
+        uint64_t before_false = core.latency_stats.total_count;
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/false>(&core, tick);
+        uint64_t after_false = core.latency_stats.total_count;
+        check("v5.11.1.1: LAT_ENABLED=false elides rdtsc sample even when enabled=1",
+              after_false == before_false);
+
+        // === Test 2: LAT_ENABLED=true respects runtime enabled flag (1 = sample) ===
+        // Reset stats so we can detect a fresh sample
+        CoreLatencyStats_Init(&core.latency_stats);
+        core.latency_stats.enabled.store(1, std::memory_order_relaxed);
+        uint64_t before_true = core.latency_stats.total_count;
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/true>(&core, tick);
+        uint64_t after_true = core.latency_stats.total_count;
+        check("v5.11.1.1: LAT_ENABLED=true + enabled=1 records a sample",
+              after_true > before_true);
+
+        // === Test 3: LAT_ENABLED=true with runtime enabled=0 still elides at runtime ===
+        // (The compile-time path is in; runtime gate still works.)
+        CoreLatencyStats_Init(&core.latency_stats);
+        core.latency_stats.enabled.store(0, std::memory_order_relaxed);
+        uint64_t before_runtime = core.latency_stats.total_count;
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/true>(&core, tick);
+        uint64_t after_runtime = core.latency_stats.total_count;
+        check("v5.11.1.1: LAT_ENABLED=true + enabled=0 skips sample (runtime gate)",
+              after_runtime == before_runtime);
+
+        // === Test 4: Wrapper ExecutionCore_Tick<F> dispatches based on LATENCY_PROFILING ===
+        // Tests build without LATENCY_PROFILING, so wrapper picks LAT_ENABLED=false.
+        // Verify by setting enabled=1 + running the wrapper + checking no sample.
+        CoreLatencyStats_Init(&core.latency_stats);
+        core.latency_stats.enabled.store(1, std::memory_order_relaxed);
+        uint64_t before_wrap = core.latency_stats.total_count;
+        ExecutionCore_Tick<FP>(&core, tick);  // wrapper dispatch
+        uint64_t after_wrap = core.latency_stats.total_count;
+#ifdef LATENCY_PROFILING
+        check("v5.11.1.1: wrapper dispatches LAT_ENABLED=true when LATENCY_PROFILING defined",
+              after_wrap > before_wrap);
+#else
+        check("v5.11.1.1: wrapper dispatches LAT_ENABLED=false when LATENCY_PROFILING undefined",
+              after_wrap == before_wrap);
+#endif
+    }
+
     printf("\n--- EXTENSIBILITY: v5.11.0.B — RLIMIT_MEMLOCK preflight ---\n");
     {
         // Theory (audit Part 12.2): mlockall(MCL_CURRENT | MCL_FUTURE) locks

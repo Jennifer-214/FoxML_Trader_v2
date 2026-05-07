@@ -242,18 +242,34 @@ static inline void ExecutionCore_SetPermission(ExecutionCore<F>* core, uint8_t v
 // not-taken in the common case), so disabled cost is ~1ns. Enabled cost adds
 // ~25-30ns for the rdtsc + sample, which roughly doubles the hot path — use
 // for diagnostics, not always-on monitoring.
-template <unsigned F>
+// v5.11.1.1 — Compile-time elision of latency sampling via template-bool
+// LAT_ENABLED. When LAT_ENABLED=false (production builds without -DLATENCY_PROFILING),
+// the entire rdtsc + sample block compiles out — zero runtime cost, zero loads
+// of the lat_enabled atomic. When LAT_ENABLED=true (latency-profiled builds),
+// runtime still gates on `core->latency_stats.enabled.load(...)` so the
+// controller can flip sampling on/off at runtime within the profiled binary.
+//
+// RDTSC standardization (Finding D from pre-v5.11.1 review): both entry +
+// exit now use `rdtscp; lfence`. rdtscp is serializing post-execution (no
+// need for mfence+lfence pre-amble); gives a consistent measurement bracket.
+//
+// Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 1.1
+template <unsigned F, bool LAT_ENABLED>
 __attribute__((always_inline))
-static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tick) {
-    // Latency sampling — read enable flag with relaxed ordering. The enable
-    // flip is rare (controller flips it once when diagnostics start), so the
-    // branch predictor pins this to "not taken" in steady state.
-    uint8_t lat_enabled = core->latency_stats.enabled.load(std::memory_order_relaxed);
+static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>& tick) {
+    // Latency sampling — only loaded + checked in LAT_ENABLED=true builds.
+    // The runtime gate (`core->latency_stats.enabled`) lets the controller
+    // flip sampling on/off within an LAT_ENABLED=true binary; non-profiled
+    // production builds (LAT_ENABLED=false) skip the entire block.
+    uint8_t lat_enabled = 0;
     uint64_t lat_t0 = 0;
-    if (__builtin_expect(lat_enabled, 0)) {
-        uint32_t hi, lo;
-        asm volatile("mfence\n\tlfence\n\trdtsc\n\t" : "=a"(lo), "=d"(hi));
-        lat_t0 = ((uint64_t)hi << 32) | lo;
+    if constexpr (LAT_ENABLED) {
+        lat_enabled = core->latency_stats.enabled.load(std::memory_order_relaxed);
+        if (__builtin_expect(lat_enabled, 0)) {
+            uint32_t hi, lo;
+            asm volatile("rdtscp\n\tlfence\n\t" : "=a"(lo), "=d"(hi) : : "rcx");
+            lat_t0 = ((uint64_t)hi << 32) | lo;
+        }
     }
 
     // Cached parameter slot read (phase 14 perf optimization).
@@ -511,13 +527,30 @@ static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tic
     core->active   = (uint8_t)((active   | enter_a_eff) & ~exit_a_eff);
     core->active_b = (uint8_t)((active_b | enter_b_eff) & ~exit_b_eff);
 
-    // Latency sample close — only when enabled (predicted not-taken).
-    if (__builtin_expect(lat_enabled, 0)) {
-        uint32_t hi, lo;
-        asm volatile("rdtscp\n\tlfence\n\t" : "=a"(lo), "=d"(hi) : : "rcx");
-        uint64_t lat_t1 = ((uint64_t)hi << 32) | lo;
-        CoreLatencyStats_Sample(&core->latency_stats, lat_t1 - lat_t0, lat_t1);
+    // Latency sample close — only when LAT_ENABLED at compile time + runtime gate set.
+    if constexpr (LAT_ENABLED) {
+        if (__builtin_expect(lat_enabled, 0)) {
+            uint32_t hi, lo;
+            asm volatile("rdtscp\n\tlfence\n\t" : "=a"(lo), "=d"(hi) : : "rcx");
+            uint64_t lat_t1 = ((uint64_t)hi << 32) | lo;
+            CoreLatencyStats_Sample(&core->latency_stats, lat_t1 - lat_t0, lat_t1);
+        }
     }
+}
+
+// v5.11.1.1 — Build-flag-driven dispatch wrapper. Callers use the same
+// `ExecutionCore_Tick<F>(...)` shape as before; the LAT_ENABLED template
+// arg is selected here based on `LATENCY_PROFILING` macro (CMake option).
+// This avoids forcing every call site to specify LAT_ENABLED explicitly
+// (production: 2 sites; tests: 6 sites; would be 8 touch sites otherwise).
+template <unsigned F>
+__attribute__((always_inline))
+static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tick) {
+#ifdef LATENCY_PROFILING
+    ExecutionCore_Tick_Impl<F, /*LAT_ENABLED=*/true>(core, tick);
+#else
+    ExecutionCore_Tick_Impl<F, /*LAT_ENABLED=*/false>(core, tick);
+#endif
 }
 
 }  // namespace tt
