@@ -13516,6 +13516,168 @@ e3_skip_load:;
               !FPN_IsZero(rolling.vwap));
     }
 
+    printf("\n--- EXTENSIBILITY: v5.11.2.C — O(1) running sums + monotonic deque ---\n");
+    {
+        // Theory: pre-v5.11.2.C, RollingStats_Push ran an O(W) accumulator loop
+        // every Push to compute sum_y, sum_y2, sum_xy, sum_v, sum_v_xy + min/max.
+        // Post-v5.11.2.C: running sums updated incrementally O(1) per Push,
+        // monotonic deques track sliding-window min/max O(1) amortized.
+        //
+        // Verification strategy: push a sequence of (price, volume) samples
+        // and at each step recompute the same sums by brute-force scan over
+        // the ring buffer's currently-valid window. The running sums must
+        // match the brute-force result exactly (FPN integer math is
+        // associative so order doesn't matter).
+        //
+        // Min/max from deque must equal min/max from a linear scan.
+        //
+        // Tests cover both warmup (count < W) and full-window (count == W,
+        // eviction active) regimes, plus monotonic-extreme inputs that
+        // exercise the deque back-pop while-loops.
+
+        using namespace tt;
+        constexpr unsigned WTEST = 8;  // small W so we hit eviction quickly
+
+        auto brute_sum_y = [](const RollingStats<FP, WTEST>& rs) {
+            FPN<FP> s = FPN_Zero<FP>();
+            int n = rs.count;
+            for (int i = 0; i < n; ++i) {
+                int idx = (rs.head - n + i + (int)WTEST) & ((int)WTEST - 1);
+                s = FPN_AddSat(s, rs.price_buf[idx]);
+            }
+            return s;
+        };
+        auto brute_sum_y2 = [](const RollingStats<FP, WTEST>& rs) {
+            FPN<FP> s = FPN_Zero<FP>();
+            int n = rs.count;
+            for (int i = 0; i < n; ++i) {
+                int idx = (rs.head - n + i + (int)WTEST) & ((int)WTEST - 1);
+                FPN<FP> p = rs.price_buf[idx];
+                s = FPN_AddSat(s, FPN_Mul(p, p));
+            }
+            return s;
+        };
+        auto brute_sum_xy = [](const RollingStats<FP, WTEST>& rs) {
+            FPN<FP> s = FPN_Zero<FP>();
+            int n = rs.count;
+            for (int i = 0; i < n; ++i) {
+                int idx = (rs.head - n + i + (int)WTEST) & ((int)WTEST - 1);
+                s = FPN_AddSat(s, FPN_Mul(FPN_FromInt<FP>(i), rs.price_buf[idx]));
+            }
+            return s;
+        };
+        auto brute_min = [](const RollingStats<FP, WTEST>& rs) {
+            int n = rs.count;
+            int idx0 = (rs.head - n + (int)WTEST) & ((int)WTEST - 1);
+            FPN<FP> m = rs.price_buf[idx0];
+            for (int i = 1; i < n; ++i) {
+                int idx = (rs.head - n + i + (int)WTEST) & ((int)WTEST - 1);
+                m = FPN_Min(m, rs.price_buf[idx]);
+            }
+            return m;
+        };
+        auto brute_max = [](const RollingStats<FP, WTEST>& rs) {
+            int n = rs.count;
+            int idx0 = (rs.head - n + (int)WTEST) & ((int)WTEST - 1);
+            FPN<FP> m = rs.price_buf[idx0];
+            for (int i = 1; i < n; ++i) {
+                int idx = (rs.head - n + i + (int)WTEST) & ((int)WTEST - 1);
+                m = FPN_Max(m, rs.price_buf[idx]);
+            }
+            return m;
+        };
+
+        // --- Test 1: arbitrary mixed sequence (warmup → full → eviction) ---
+        {
+            RollingStats<FP, WTEST> rs = RollingStats_Init<FP, WTEST>();
+            // 16 pushes (2× window) — exercises both warmup (count<W) and
+            // full-window (count==W, slot reuse) regimes.
+            const double prices[] = {100, 105, 102, 110, 108, 115, 112, 118,
+                                      120, 117, 125, 122, 130, 128, 135, 132};
+            int sum_xy_match = 1, sum_y_match = 1, sum_y2_match = 1;
+            int min_match = 1, max_match = 1;
+            for (int i = 0; i < 16; ++i) {
+                RollingStats_Push(&rs, FPN_FromDouble<FP>(prices[i]),
+                                       FPN_FromDouble<FP>(1.0));
+                if (rs.count < 1) continue;
+                sum_y_match  &= FPN_Equal(rs.price_sum_running,    brute_sum_y(rs));
+                sum_y2_match &= FPN_Equal(rs.price_sum_y2_running, brute_sum_y2(rs));
+                sum_xy_match &= FPN_Equal(rs.price_sum_xy_running, brute_sum_xy(rs));
+                min_match    &= FPN_Equal(rs.price_min, brute_min(rs));
+                max_match    &= FPN_Equal(rs.price_max, brute_max(rs));
+            }
+            check("v5.11.2.C: running price_sum matches brute-force at every step", sum_y_match);
+            check("v5.11.2.C: running price_sum_y2 matches brute-force at every step", sum_y2_match);
+            check("v5.11.2.C: running price_sum_xy matches brute-force at every step", sum_xy_match);
+            check("v5.11.2.C: deque price_min matches brute-force at every step", min_match);
+            check("v5.11.2.C: deque price_max matches brute-force at every step", max_match);
+        }
+
+        // --- Test 2: monotonically increasing — exercises max-deque back-pop ---
+        // Each new value > all in deque → back-pop strips deque to size 1
+        // every push; deque's amortized O(1) is delivered via this case.
+        {
+            RollingStats<FP, WTEST> rs = RollingStats_Init<FP, WTEST>();
+            for (int i = 0; i < 12; ++i) {
+                RollingStats_Push(&rs, FPN_FromDouble<FP>(100.0 + i * 10.0),
+                                       FPN_FromDouble<FP>(1.0));
+            }
+            // After 12 pushes with W=8: window holds prices[4..11] = 140..210
+            check("v5.11.2.C: monotonic-up: max == latest (210)",
+                  FPN_Equal(rs.price_max, FPN_FromDouble<FP>(210.0)));
+            check("v5.11.2.C: monotonic-up: min == oldest in window (140)",
+                  FPN_Equal(rs.price_min, FPN_FromDouble<FP>(140.0)));
+        }
+
+        // --- Test 3: monotonically decreasing — exercises min-deque back-pop ---
+        {
+            RollingStats<FP, WTEST> rs = RollingStats_Init<FP, WTEST>();
+            for (int i = 0; i < 12; ++i) {
+                RollingStats_Push(&rs, FPN_FromDouble<FP>(200.0 - i * 10.0),
+                                       FPN_FromDouble<FP>(1.0));
+            }
+            // After 12 pushes with W=8: window holds prices[4..11] = 160..90
+            check("v5.11.2.C: monotonic-down: min == latest (90)",
+                  FPN_Equal(rs.price_min, FPN_FromDouble<FP>(90.0)));
+            check("v5.11.2.C: monotonic-down: max == oldest in window (160)",
+                  FPN_Equal(rs.price_max, FPN_FromDouble<FP>(160.0)));
+        }
+
+        // --- Test 4: deque fronts must NEVER reference an evicted slot ---
+        // Probe invariant by checking deque sizes stay ≤ W at all times.
+        {
+            RollingStats<FP, WTEST> rs = RollingStats_Init<FP, WTEST>();
+            int size_ok = 1;
+            for (int i = 0; i < 100; ++i) {
+                double p = 50.0 + (double)((i * 13) % 23);  // pseudo-noisy
+                RollingStats_Push(&rs, FPN_FromDouble<FP>(p), FPN_FromDouble<FP>(1.0));
+                size_ok &= (rs.min_dq_size  <= (int)WTEST);
+                size_ok &= (rs.max_dq_size  <= (int)WTEST);
+                size_ok &= (rs.vmax_dq_size <= (int)WTEST);
+                size_ok &= (rs.min_dq_size  <= rs.count);
+                size_ok &= (rs.max_dq_size  <= rs.count);
+            }
+            check("v5.11.2.C: deque sizes stay bounded by W and count", size_ok);
+        }
+
+        // --- Test 5: FPN_BlendOnMask correctness (Rule 8 helper) ---
+        {
+            FPN<FP> a = FPN_FromDouble<FP>(42.0);
+            FPN<FP> b = FPN_FromDouble<FP>(-17.5);
+            check("v5.11.2.C: FPN_BlendOnMask(a, b, all-1s) == a",
+                  FPN_Equal(FPN_BlendOnMask(a, b, (uint64_t)-1), a));
+            check("v5.11.2.C: FPN_BlendOnMask(a, b, 0) == b",
+                  FPN_Equal(FPN_BlendOnMask(a, b, (uint64_t)0),  b));
+            // Sign-bit blending: a is positive, b is negative → blend preserves
+            FPN<FP> blend_a = FPN_BlendOnMask(a, b, (uint64_t)-1);
+            FPN<FP> blend_b = FPN_BlendOnMask(a, b, (uint64_t)0);
+            check("v5.11.2.C: FPN_BlendOnMask preserves positive sign (a path)",
+                  blend_a.sign == a.sign);
+            check("v5.11.2.C: FPN_BlendOnMask preserves negative sign (b path)",
+                  blend_b.sign == b.sign);
+        }
+    }
+
     printf("\n--- EXTENSIBILITY: v5.11.1.2 — Branchless leg-B via PAIR_BRANCHLESS template ---\n");
     {
         // Theory (audit Part 1.2): leg-B SG_Evaluate is currently branch-gated
