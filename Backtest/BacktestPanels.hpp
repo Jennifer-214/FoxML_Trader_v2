@@ -3364,10 +3364,35 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "Final results->labels[] holds the LAST horizon's labels;\n"
         "Train Multi-Horizon will recompute per horizon during\n"
         "training, so nothing is lost.");
-    if (!mh_can_collect && state->ui_horizon_count == 0) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("(set Horizons CSV below)");
-    }
+
+    // v5.11.28 — Horizons (CSV) input rendered AT THE TOP next to
+    // Collect Multi-Horizon (operator-flagged 2026-05-07: "probably
+    // need a multi horizon entry point where you list them"). Same
+    // buffer as the Train Multi-Horizon side (state->ui_horizon_csv,
+    // single source of truth) — `##collect` suffix makes the ImGui
+    // widget ID unique without changing the visible label. Operator
+    // can type horizons here OR down by Train Multi-Horizon; both
+    // edit the same string. Parsed every render frame at the
+    // existing parser block (line ~3563+) which feeds
+    // state->ui_horizon_list/_count for both buttons.
+    ImGui::PushItemWidth(220);
+    ImGui::InputText("Horizons (CSV)##collect",
+                     state->ui_horizon_csv,
+                     sizeof(state->ui_horizon_csv));
+    ImGui::PopItemWidth();
+    ImGui::SetItemTooltip(
+        "Comma-separated forward-tick horizons used by both\n"
+        "Collect Multi-Horizon (above) and Train Multi-Horizon\n"
+        "(below). Same buffer — type here OR there, both stay in\n"
+        "sync.\n\n"
+        "Example: 100,500,1000  →  3 horizons, recompute labels\n"
+        "(or train models) at each forward window.\n\n"
+        "Empty falls back to cfg.horizon_list. Max 8 horizons,\n"
+        "each 1..1,000,000 ticks.");
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%d horizon%s parsed; shared with Train Multi-Horizon)",
+                        state->ui_horizon_count,
+                        state->ui_horizon_count == 1 ? "" : "s");
 
     // results pointer for Train Model + Walk-Forward sections below — they
     // need sample_count + feature_matrix + labels, all of which are safe to
