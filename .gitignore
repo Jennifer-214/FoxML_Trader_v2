@@ -60,13 +60,17 @@ compile_commands.json
 # (existing tracked files in public history retain their tracking; only
 # new files matching these patterns auto-stay-private. backups land in
 # workspace plans/ via the standard /sync-workspace skill.)
-# *_AUDIT.md       — optimization audits, latency findings, etc.
-# FUTURE_*.md      — roadmap / planned-strategy direction
-# *-design-notes.md — versioned design idea backlogs
+# *_AUDIT.md          — optimization audits, latency findings, etc.
+# FUTURE_*.md         — roadmap / planned-strategy direction
+# *-design-notes.md   — versioned design idea backlogs
+# *-suggestions.md    — HFT / optimization research outputs
+# *-hft-*.md          — HFT-flavored notes
 # STRATEGY_AND_CODING_RULES.md — Gemini-distilled coding invariants
 *_AUDIT.md
 FUTURE_*.md
 *-design-notes.md
+*-suggestions.md
+*-hft-*.md
 STRATEGY_AND_CODING_RULES.md
 
 # local Claude Code memory overlays (private — auto-loaded alongside CLAUDE.md)
