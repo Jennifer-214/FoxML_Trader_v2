@@ -307,6 +307,69 @@ public. Operator-tuned values + secrets stay local.
 For off-machine backup: cfgs are mirrored to the workspace repo at
 `tick-trader-percore-workspace/configs/` (private GitHub remote).
 
+### `is_buyer_maker` dropped between SPSC ring and slow-path RollingStats (since v5.1.2; v5.10.3.C documented)
+
+**Symptom:** `FEAT_VOLUME_DELTA` values cluster tightly near +1.0 instead
+of being distributed [-1, +1]. Models trained on this feature can't learn
+from it productively.
+
+**Root cause:** The v5.1.2 sharded slow-path scalar bus doesn't carry
+`is_buyer_maker`; `EventLoop_UpdateRollingStateOneCore` calls
+`RollingStats_Push` with `is_buyer_maker=0` hardcoded
+(`CoreFrameworks/EngineSharded.hpp:2663`). `CumDelta` and
+`FlowState_Push` get the correct flag (line 1641, 1650-1652);
+RollingStats does NOT.
+
+**Parity status:** Train-serve parity PRESERVED. `BacktestSharded`
+mirrors the live behavior via `SharedBacktest_FromHistorical` zeroing
+the field (`Backtest/BacktestSharded.hpp:78-86`). Both training and
+serving see the same degraded feature → no drift, no silent
+miscalibration. Models simply can't learn from this signal.
+
+**Mitigation:** None needed for parity. Feature is zero-information;
+models that don't depend on it are unaffected. The `volume_delta`
+docstring at `Strategies/RegimeDetector.hpp:67` overpromises ("net
+buy/sell pressure ... -1.0 to +1.0") relative to actual behavior.
+
+**Full closure (~4h, v5.10.X or v5.11+):**
+- Plumb `is_buyer_maker` through the scalar bus
+  (`g_last_buyer_maker.store(...)` per producer tick)
+- Read it in `EventLoop_UpdateRollingStateOneCore`
+- Pass to `RollingStats_Push`
+- Patch `SharedBacktest_FromHistorical` to copy `h->is_buyer_maker`
+- Re-run `v5.9.2` replay-determinism test to verify bytewise unchanged
+  (it'll diverge — VOLUME_DELTA values will redistribute — so this
+  requires retraining downstream models)
+
+See `plans/plan_checks/parity-2026-05-06-full.md` Finding #5 for
+the full audit context.
+
+### `drift_history` not persisted across snapshot save/restore (v5.10.0e + v5.10.3.C documented)
+
+**Symptom:** After engine restart from a snapshot, drift detection
+re-warms from empty. Up to `confidence_ic_floor_window` seconds
+(default 86400 = 24h) of IC samples must accumulate before the drift
+detector can re-arm. Operator running `auto_kill_on_drift=1` loses 24h
+of drift coverage on each restart.
+
+**Root cause:** `SHARDED_SNAPSHOT_VERSION=6` doesn't serialize
+`CoreContext.drift_history` (struct introduced at v5.10.0e;
+`ML_Headers/ConfidenceScore.hpp:265-273`). The 256-slot ring buffer of
+`(ic, ts_us)` samples + `breached` / `kill_tripped` flags rebuilds from
+zero post-restart.
+
+**Mitigation:** Lower `confidence_ic_floor_window` (e.g. to 3600 = 1h)
+if you restart frequently and want faster re-arming. Trade-off:
+more false-positive breaches from short-window noise.
+
+**Full closure (~2.5h, v5.10.X or v5.11+):**
+- Bump `SHARDED_SNAPSHOT_VERSION` to 7
+- Serialize `ic_samples[]` + `ts_us[]` + `count` + `head` + `breached`
+  + `breach_first_us` + `kill_tripped`
+- Add back-compat read for v6 stamps (zero-fill drift_history on
+  upgrade)
+- See `plans/plan_checks/parity-2026-05-06-full.md` Finding #11.
+
 ---
 
 ## How to update this doc

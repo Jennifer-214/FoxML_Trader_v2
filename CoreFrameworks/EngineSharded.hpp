@@ -1464,8 +1464,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
             // Phase 8a (post-coding c7) — record raw tick to CSV when enabled.
             // No-op when record_ticks=0 (the gate is inside TickRecorder_Push).
-            // is_buyer_maker not available from the sharded fan_out yet; pass 0.
-            // (Legacy path passes the real value from BinanceStream tick read.)
+            // v5.1.2 architectural carry-forward — is_buyer_maker isn't available
+            // on the sharded fan_out's scalar bus; producer + recorder + slow-path
+            // all pass 0. (Legacy path passes the real value from BinanceStream
+            // tick read.) Train-serve parity preserved (both broken the same way)
+            // but FEAT_VOLUME_DELTA in slow-path RollingStats is locked at +1.0
+            // → effectively zero-information. Full closure (~4h) plumbs through
+            // a g_last_buyer_maker scalar; deferred to v5.10.X or v5.11+.
+            // See plans/plan_checks/parity-2026-05-06-full.md Finding #5.
             TickRecorder_Push(&g_tick_rec, price_d, volume_d, (int64_t)ts_us, 0);
 
 #ifdef USE_IMGUI_GUI
@@ -2660,7 +2666,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     EventLoop_UpdateRollingStateOneCore(
                         &state, c,
                         mtm_price, vol, rebuild_ts_us,
-                        /*is_buyer_maker=*/0,
+                        /*is_buyer_maker=*/0, // TODO(parity-check Finding #5): plumb through scalar bus (v5.10.X)
                         cfg.depth_enabled ? book_imb : FPN_Zero<F>(),
                         bs,
                         cfg.depth_enabled ? 1 : 0);

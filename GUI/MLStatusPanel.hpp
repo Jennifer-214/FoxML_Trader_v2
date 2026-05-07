@@ -213,6 +213,31 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                 ImGui::Unindent(20);
             }
 
+            // v5.10.3.B — Runtime IC drift detection observability (parity-check
+            // Finding #9 closure; v5.10.0e). Distinguishes drift-kill from
+            // MTM-kill / manual-kill (all of which set core_kill_tripped).
+            if (pc.drift_breached) {
+                ImGui::Indent(20);
+                if (pc.drift_kill_tripped) {
+                    ImGui::TextColored(FoxmlColors::red,
+                        "drift: KILLED (avg_ic=%.4f, n=%u)",
+                        pc.drift_avg_ic, (unsigned)pc.drift_n_samples);
+                } else {
+                    ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.35f, 1.0f),
+                        "drift: BREACHED (avg_ic=%.4f, n=%u)",
+                        pc.drift_avg_ic, (unsigned)pc.drift_n_samples);
+                }
+                ImGui::SetItemTooltip(
+                    "Runtime IC (information coefficient) drift detection.\n"
+                    "BREACHED: rolling avg IC stayed below floor for the\n"
+                    "  configured window — model predictions diverging from\n"
+                    "  realized P&L direction.\n"
+                    "KILLED: auto_kill_on_drift=1 + breach → core gated off.\n"
+                    "Recovery: restart engine OR retrain model.\n"
+                    "Floor + window cfg: confidence_ic_floor / _floor_window.");
+                ImGui::Unindent(20);
+            }
+
             // NaN/Inf counters — bright red if non-zero, dim if clean.
             if (pc.ml_nan_feature_events > 0 || pc.ml_nan_prediction_events > 0) {
                 ImGui::Indent(20);

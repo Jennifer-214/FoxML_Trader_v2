@@ -476,6 +476,16 @@ static inline void TUI_CopySnapshotSharded(
         snap->per_core[i].core_dd_pct          = FPN_ToDouble(state->cores[i].core_dd_pct);
         snap->per_core[i].core_ks_trips_total  = state->cores[i].core_ks_trips_total;
         snap->per_core[i].core_kill_tripped    = state->cores[i].core_kill_tripped;
+        // v5.10.3.B — runtime IC drift observability (parity-check Finding #9).
+        snap->per_core[i].drift_breached     = (uint8_t)state->cores[i].drift_history.breached;
+        snap->per_core[i].drift_kill_tripped = (uint8_t)state->cores[i].drift_history.kill_tripped;
+        snap->per_core[i].drift_n_samples    = (uint16_t)state->cores[i].drift_history.count;
+        {
+            double sum = 0.0;
+            int cnt = state->cores[i].drift_history.count;
+            for (int k = 0; k < cnt; ++k) sum += state->cores[i].drift_history.ic_samples[k];
+            snap->per_core[i].drift_avg_ic = (cnt > 0) ? (sum / (double)cnt) : 0.0;
+        }
         tt::ExecutionCore<F>* core = state->cores[i].core;
         if (core) {
             tt::GateParameters<F> params;

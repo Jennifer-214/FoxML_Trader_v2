@@ -903,7 +903,12 @@ struct TUISnapshot {
       double pnl;
       uint32_t wins, losses, total;
     };
-    StrategyStatsSnap strat_stats[5];
+    // v5.10.3.A — Sized to NUM_STRATEGIES (= NUM_STRATEGIES_REAL + 1 for AUTO
+    // sentinel) per parity-check Finding #8. Pre-fix this was [5] but TUIAnsi
+    // iterations used NUM_STRATEGIES (=6) → UB at index 5. AUTO bin (idx=5)
+    // populated as zero-init by Populate; per-strategy aggregation deferred
+    // to v5.11.X polish.
+    StrategyStatsSnap strat_stats[NUM_STRATEGIES];
     // right panel: session stats + fill diagnostics
     double session_high, session_low;
     double tick_rate;
@@ -1101,6 +1106,14 @@ struct TUISnapshot {
         double   core_dd_pct;          // current drawdown fraction (0..1)
         uint32_t core_ks_trips_total;  // historical trip count
         uint8_t  core_kill_tripped;    // 1 = kill-halted right now
+        // v5.10.3.B — runtime IC drift detection observability (parity-check
+        // Finding #9 closure). Section J discipline: each silent-failure mode
+        // gets a distinct field so operators can distinguish drift-kill from
+        // MTM-kill / manual-kill (all of which set core_kill_tripped).
+        uint8_t  drift_breached;       // 1 = drift_history.breached at snapshot
+        uint8_t  drift_kill_tripped;   // 1 = auto_kill_on_drift triggered
+        uint16_t drift_n_samples;      // current ic_samples count (0..256)
+        double   drift_avg_ic;         // live-computed avg IC over the ring
         // v5.0.2 (Engine Topology): per-core thread layout
         int16_t  hot_path_cpu;         // pinned CPU (-1 if unpinned)
         int16_t  slow_path_cpu;        // pinned CPU (-1 if unpinned/centralized)
@@ -1401,12 +1414,18 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
     // FoxML integration (Phase 6C) — single populate function
     MLSnapshot_Populate(&snap->ml, ctrl);
     // per-strategy reward attribution
-    for (int i = 0; i < 5; i++) {
+    // v5.10.3.A — Source array `ctrl->strategy_stats` is sized NUM_STRATEGIES_REAL=5
+    // (no AUTO entry on the source side; AUTO is a dispatcher sentinel). Snapshot
+    // array is sized NUM_STRATEGIES=6 (including AUTO). Iterate REAL for the
+    // populated indices; explicitly zero the AUTO bin so TUIAnsi iterations
+    // through NUM_STRATEGIES read valid data at every index.
+    for (int i = 0; i < NUM_STRATEGIES_REAL; i++) {
       snap->strat_stats[i].pnl   = FPN_ToDouble(ctrl->strategy_stats[i].realized_pnl);
       snap->strat_stats[i].wins  = ctrl->strategy_stats[i].wins;
       snap->strat_stats[i].losses = ctrl->strategy_stats[i].losses;
       snap->strat_stats[i].total = ctrl->strategy_stats[i].total_trades;
     }
+    snap->strat_stats[NUM_STRATEGIES_REAL] = {};  // AUTO bin: no per-strategy stats
     // session stats + fill diagnostics
     snap->session_high = ctrl->session_high;
     snap->session_low = ctrl->session_low;

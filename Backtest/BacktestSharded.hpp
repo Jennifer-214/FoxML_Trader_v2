@@ -82,6 +82,13 @@ static inline Tick<F> SharedBacktest_FromHistorical(const HistoricalTick* h, uin
     t.volume    = FPN_FromDouble<F>(h->qty);
     t.timestamp = (uint64_t)h->timestamp_us;
     t.sequence  = seq;
+    // v5.1.2 carry-forward — TODO(parity-check Finding #5):
+    // h->is_buyer_maker IS available; the conversion drops it to mirror the
+    // live slow-path's hardcoded-0 (parity-preserving for now). When the
+    // live scalar-bus plumb-through happens (v5.10.X or v5.11+), change to:
+    //   t.is_buyer_maker = (uint8_t)(h->is_buyer_maker ? 1 : 0);
+    // AND update both live + backtest slow-paths simultaneously.
+    // See plans/plan_checks/parity-2026-05-06-full.md Finding #5.
     return t;
 }
 
