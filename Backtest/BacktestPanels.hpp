@@ -2051,6 +2051,17 @@ struct TrainingPanelState {
     // progress bar was indeterminate (-1 fed into ImGui as a pulse).
     volatile int tm_progress_iter;
     volatile int tm_progress_total;
+    // v5.11.29 — post-iter phase indicator. After the iter loop completes
+    // (tm_progress_iter == tm_progress_total), the worker still does
+    // significant work: XGBoosterSaveModel (slow JSON serialization for
+    // 400+ trees, 1-5s), train-set predict + accuracy, scaler compute +
+    // persist + SHA-256, optional auto-stamp. Pre-v5.11.29 the GUI
+    // showed "iter 400/400" stuck at 100% for several seconds — operator
+    // couldn't tell if it was hung. Worker now writes a short phase
+    // string here at each post-iter transition; GUI uses it as the
+    // ProgressBar overlay during the post-iter window. Empty string =
+    // either pre-iter or iter-running (overlay falls back to iter count).
+    char tm_phase_msg[64];
     // v5.10.0a.E — Hyperparam Sweep state. Mirrors wf_* / tm_* worker
     // pattern. Operator clicks Run Hyperparam Sweep → spawn worker that
     // calls Backtest_RunHyperparamTrainSweep using already-collected
@@ -2148,6 +2159,7 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->tm_cancel = 0;
     state->tm_progress_iter = 0;   // v5.11.25
     state->tm_progress_total = 0;  // v5.11.25
+    state->tm_phase_msg[0] = '\0'; // v5.11.29 — clear post-iter phase indicator
     // v5.10.0a.E — Hyperparam Sweep init. Default param 0 = sweep
     // xgb_subsample 0.5 .. 0.9 step 0.1 (5 cells).
     strncpy(state->hp_ranges[0].key, "xgb_subsample", sizeof(state->hp_ranges[0].key) - 1);
@@ -2615,6 +2627,12 @@ static inline void *train_model_worker_fn(void *arg) {
         return NULL;
     }
 
+    // v5.11.29 — post-iter phase indicators (operator-flagged 2026-05-07
+    // "stuck at iter 400/400"). The remaining work after iters complete is
+    // 1-5s of XGBoosterSaveModel + ~ms scaler/stamp; GUI now reflects each.
+    snprintf((char*)state->tm_phase_msg, sizeof(state->tm_phase_msg),
+             "Saving model JSON...");
+
     // embed model format version + fingerprint
     char ver_s[8]; snprintf(ver_s, 8, "%d", MODEL_FORMAT_VERSION);
     XGBoosterSetAttr(booster, "foxml_version", ver_s);
@@ -2630,6 +2648,10 @@ static inline void *train_model_worker_fn(void *arg) {
     }
 
     XGBoosterSaveModel(booster, snap_model_path);
+
+    // v5.11.29 — phase update post-save
+    snprintf((char*)state->tm_phase_msg, sizeof(state->tm_phase_msg),
+             "Computing in-sample accuracy...");
 
     // compute in-sample training metric
     bst_ulong out_len;
@@ -2655,6 +2677,10 @@ static inline void *train_model_worker_fn(void *arg) {
     XGDMatrixFree(dpred);
 
     memset(state->feature_importance, 0, sizeof(state->feature_importance));
+
+    // v5.11.29 — phase update before scaler persist
+    snprintf((char*)state->tm_phase_msg, sizeof(state->tm_phase_msg),
+             "Persisting scaler sidecar...");
 
     // v5.9.3b — train-time scaler computation + sidecar persist (Gap G).
     // Reads train_features (still alive at this point, freed below).
@@ -2724,6 +2750,9 @@ static inline void *train_model_worker_fn(void *arg) {
     if (run_control->results.config_used.auto_stamp_on_held_out &&
         run_control->results.config_used.held_out_stamp_secret[0] &&
         !cancelled) {
+        // v5.11.29 — phase update for auto-stamp
+        snprintf((char*)state->tm_phase_msg, sizeof(state->tm_phase_msg),
+                 "Auto-stamping...");
         state->tm_auto_stamp_attempted = 1;
 
         // Build inf — mirror Backtest_RunFullValidation's pattern (v5.9.5b/h)
@@ -3693,18 +3722,36 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // (added for cancel support, v5.9.0d), so the worker can
         // publish current_iter to a volatile field cheaply. Operator
         // sees actual % done + iter count.
+        // v5.11.29 — post-iter phases. After iter loop completes the
+        // worker still does 1-5s of save-model + scaler + auto-stamp;
+        // tm_phase_msg gets updated at each transition. GUI shows the
+        // phase msg as the overlay when set, else falls back to iter
+        // count.
         int p_total = state->tm_progress_total;
         int p_iter  = state->tm_progress_iter;
+        const char* phase = (const char*)state->tm_phase_msg;
+        bool have_phase = phase[0] != '\0';
         if (p_total > 0) {
             float frac = (float)p_iter / (float)p_total;
-            char overlay[64];
-            snprintf(overlay, sizeof(overlay),
-                     "Training XGBoost... iter %d / %d", p_iter, p_total);
-            ImGui::ProgressBar(frac, ImVec2(-1, 0), overlay);
+            char overlay[96];
+            if (have_phase) {
+                // post-iter phase active — keep bar full + show phase
+                snprintf(overlay, sizeof(overlay),
+                         "Training XGBoost... %s", phase);
+                ImGui::ProgressBar(1.0f, ImVec2(-1, 0), overlay);
+            } else {
+                snprintf(overlay, sizeof(overlay),
+                         "Training XGBoost... iter %d / %d", p_iter, p_total);
+                ImGui::ProgressBar(frac, ImVec2(-1, 0), overlay);
+            }
         } else {
             // Pre-loop: still allocating dtrain, no iters started yet.
+            const char* preparing = have_phase ? phase : "(preparing)";
+            char overlay[96];
+            snprintf(overlay, sizeof(overlay),
+                     "Training XGBoost... %s", preparing);
             ImGui::ProgressBar(-1.0f * (float)ImGui::GetTime(),
-                               ImVec2(-1, 0), "Training XGBoost... (preparing)");
+                               ImVec2(-1, 0), overlay);
         }
         if (ImGui::Button("Cancel Training")) {
             state->tm_cancel = 1;
@@ -3732,6 +3779,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             // don't briefly flash before the worker overwrites them.
             state->tm_progress_iter = 0;
             state->tm_progress_total = 0;
+            state->tm_phase_msg[0] = '\0';  // v5.11.29
             state->tm_running = 1;
             TrainModelWorkerArgs *args = (TrainModelWorkerArgs *)malloc(sizeof(TrainModelWorkerArgs));
             args->state = state;
