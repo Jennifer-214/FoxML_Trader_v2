@@ -1291,7 +1291,8 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                         /*gap_threshold=*/(double)r->gap_acceptable_threshold > 0.0
                             ? (double)r->gap_acceptable_threshold : 0.05,
                         /*expected_format_version=*/MODEL_FORMAT_VERSION,
-                        /*expected_feature_registry_hash=*/FEATURE_REGISTRY_HASH());
+                        /*expected_feature_registry_hash=*/FEATURE_REGISTRY_HASH(),
+                        /*expected_label_registry_hash=*/LABEL_REGISTRY_HASH());  // v5.10.1.A — close Finding #1 consume side (UI Verify Stamp)
                     r->stamp_verify_state = vr.valid;
                     // v5.9.5d — capture full result for "Stamp details"
                     // expansion below. Operator audits recorded vs runtime
@@ -2678,6 +2679,12 @@ static inline void *train_model_worker_fn(void *arg) {
         // Build flags fingerprint (v5.9.5h #10)
         inf.has_build_flags_hash = 1;
         inf.build_flags_hash = tt::BUILD_FLAGS_HASH();
+        // v5.10.1.A — LABEL_REGISTRY_HASH plumb-through (parity-check Finding #1).
+        // Train Model worker now stamps the label-set fingerprint alongside
+        // the feature-set + build-flags fingerprints; engine load REFUSES
+        // on label drift in strict mode.
+        inf.has_label_registry_hash = 1;
+        inf.label_registry_hash     = LABEL_REGISTRY_HASH();
         // Scaler binding (v5.9.3a) — populate when scaler_persisted
         if (scaler_persisted && state->scaler_sha256_hex[0]) {
             inf.has_scaler = 1;

@@ -35,6 +35,7 @@
 
 #include "ModelInference.hpp"
 #include "FeatureRegistry.hpp"  // v5.8.6: FEATURE_REGISTRY_HASH() drift catch
+#include "../Backtest/LabelFunctions.hpp"  // v5.10.1.A: LABEL_REGISTRY_HASH() drift catch
 #include "BanditLearning.hpp"   // v5.10.0a.G.7 — per-regime BanditState in EnsembleModelZoo
 #include "../Strategies/StrategyInterface.hpp"  // v5.10.0a.G.7 — NUM_REGIMES
 #include "../Version.hpp"        // v5.8.6: ENGINE_VERSION_STRING for boot log
@@ -135,7 +136,8 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
             held_out_stamp_secret ? held_out_stamp_secret : "",
             gap_threshold,
             MODEL_FORMAT_VERSION,
-            FEATURE_REGISTRY_HASH());
+            FEATURE_REGISTRY_HASH(),
+            LABEL_REGISTRY_HASH());  // v5.10.1.A — close Finding #1 consume side
         have_sr = 1;
         if (sr.valid <= 0) {
             if (held_out_gate_strict == 1) {

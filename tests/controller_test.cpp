@@ -13393,6 +13393,78 @@ e3_skip_load:;
         unlink(stamp_path);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.1.A — LABEL_REGISTRY_HASH production-caller plumb-through ---\n");
+    {
+        // Theory (parity-check Finding #1): pre-v5.10.1.A, the production
+        // callers of verify_model_stamp (CoreModelZoo_TryLoadRole, BacktestPanels
+        // Verify Stamp UI) called the verifier with 5 args. The 6th arg
+        // (expected_label_registry_hash) defaulted to 0, and verify_model_stamp's
+        // `if (expected_label_registry_hash != 0)` guard SKIPPED the check.
+        // → Models with wrong (or missing) label_registry_hash loaded silently.
+        //
+        // Post-v5.10.1.A, production callers pass LABEL_REGISTRY_HASH() (non-zero)
+        // → the check fires → mismatched stamps are REFUSED.
+        //
+        // This test models the production flow: emit a stamp with a wrong hash,
+        // call verify_model_stamp the way production now does, and assert REFUSE.
+
+        check("v5.10.1.A: LABEL_REGISTRY_HASH() returns non-zero (sanity)",
+              LABEL_REGISTRY_HASH() != 0);
+
+        char tmp_model[L_tmpnam];
+        std::tmpnam(tmp_model);
+        FILE* mf = fopen(tmp_model, "wb"); fwrite("test", 1, 4, mf); fclose(mf);
+
+        // Emit stamp with WRONG label_registry_hash (engine's actual XOR'd).
+        uint64_t wrong_hash = LABEL_REGISTRY_HASH() ^ 0xDEADBEEFULL;
+        StampInferenceCfgInputs inf_wrong = {};
+        inf_wrong.has_label_registry_hash = 1;
+        inf_wrong.label_registry_hash     = wrong_hash;
+        StampWriteResult sw = stamp_write_for_model(
+            tmp_model, "v5.10.1.A-test", MODEL_FORMAT_VERSION,
+            "2026-05-06", 0.6, 0.55, 0.05, 0.10,
+            FEATURE_REGISTRY_HASH(),
+            ENGINE_VERSION_STRING, &inf_wrong);
+        check("v5.10.1.A: stamp emit with wrong label hash succeeds (test setup)",
+              sw.ok);
+
+        // Production-path verify call shape (matches what CoreModelZoo_TryLoadRole
+        // and BacktestPanels Verify Stamp UI now do post-v5.10.1.A — passing
+        // LABEL_REGISTRY_HASH() instead of relying on the default 0).
+        ModelStampResult vr = verify_model_stamp(
+            tmp_model, "v5.10.1.A-test", 0.10, MODEL_FORMAT_VERSION,
+            FEATURE_REGISTRY_HASH(),
+            LABEL_REGISTRY_HASH());
+        check("v5.10.1.A: production-path verify REFUSES wrong label_registry_hash",
+              vr.valid == 0);
+        check("v5.10.1.A: refusal reason mentions label-registry-hash",
+              strstr(vr.reason, "label-registry-hash") != nullptr);
+
+        // Sanity: a CORRECT label_registry_hash loads via the same production-path
+        // call shape.
+        StampInferenceCfgInputs inf_right = {};
+        inf_right.has_label_registry_hash = 1;
+        inf_right.label_registry_hash     = LABEL_REGISTRY_HASH();
+        StampWriteResult sw2 = stamp_write_for_model(
+            tmp_model, "v5.10.1.A-test", MODEL_FORMAT_VERSION,
+            "2026-05-06", 0.6, 0.55, 0.05, 0.10,
+            FEATURE_REGISTRY_HASH(),
+            ENGINE_VERSION_STRING, &inf_right);
+        check("v5.10.1.A: stamp emit with correct label hash succeeds",
+              sw2.ok);
+        ModelStampResult vr2 = verify_model_stamp(
+            tmp_model, "v5.10.1.A-test", 0.10, MODEL_FORMAT_VERSION,
+            FEATURE_REGISTRY_HASH(),
+            LABEL_REGISTRY_HASH());
+        check("v5.10.1.A: production-path verify ACCEPTS matching label_registry_hash",
+              vr2.valid == 1);
+
+        unlink(tmp_model);
+        char stamp_path[512];
+        snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", tmp_model);
+        unlink(stamp_path);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.0b.3 — FP64_DivNoAssert pure-integer 192/128 long division ---\n");
     {
         // Theory: FP64_DivNoAssert was a long-double FPU round-trip

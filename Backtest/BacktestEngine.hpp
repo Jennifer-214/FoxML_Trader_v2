@@ -1161,6 +1161,10 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             memcpy(inf.xgb_tree_method, hp.tree_method, tmln);
             inf.xgb_tree_method[tmln] = '\0';
         }
+        // v5.10.1.A — LABEL_REGISTRY_HASH plumb-through (parity-check Finding #1).
+        // Without this, engine accepts any model regardless of label-set drift.
+        inf.has_label_registry_hash = 1;
+        inf.label_registry_hash     = LABEL_REGISTRY_HASH();
         // v5.9.5h Phase 10 — build flags fingerprint. Stamps the
         // training-build's hash so engine load can detect cross-build
         // deploy drift (e.g., trained -O2 dev box, deployed -O3 prod).
