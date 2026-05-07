@@ -260,8 +260,18 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             int backend = cfg.ml_backend ? cfg.ml_backend : MODEL_BACKEND_XGBOOST;
             int loaded = 0;
             if (cfg.core_model_dir[i][0]) {
+                // v5.10.4 — Plumb cfg-derived strict/gap/secret/drift args
+                // (parity-check Finding #13). v5.10.1.C closed the matching
+                // AutoDetectFromDir call at line ~306 but this LoadFromDir
+                // sibling at line 263 was missed in the same file. Same
+                // fix shape — without these, backtest path silently bypasses
+                // operator's held_out_gate_strict cfg.
                 loaded = CoreModelZoo_LoadFromDir(&ml_zoos[i],
-                                                   cfg.core_model_dir[i], backend);
+                                                   cfg.core_model_dir[i], backend,
+                                                   cfg.held_out_stamp_secret,
+                                                   FPN_ToDouble(cfg.gap_acceptable_threshold),
+                                                   cfg.held_out_gate_strict,
+                                                   cfg.acknowledge_cross_binary_version_drift);
                 fprintf(stderr, "[backtest sharded] core %d: zoo from %s, %d role(s) loaded\n",
                         i, cfg.core_model_dir[i], loaded);
             } else {
