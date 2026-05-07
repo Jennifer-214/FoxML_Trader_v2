@@ -1,6 +1,6 @@
 # Known Issues, Active Testing, and Operator Workarounds
 
-**Last updated:** 2026-05-03 (post-v5.9.5j.2)
+**Last updated:** 2026-05-06 (post-v5.10.0a.next.2)
 **Earlier audit:** `DOCS/changelogs/2026-03-27-known-issues-audit.md`
 (legacy PortfolioController items; mostly superseded by sharded
 architecture v5.0+)
@@ -19,66 +19,73 @@ genuine bug — open an issue or check the sprint plan in `plans/`.
 
 ---
 
-## Active operator testing (Sprint A, v5.9.5h-j just shipped)
+## Active operator testing (Sprint B, v5.10 in flight)
 
-**Status:** Sprint A complete (2026-05-02). Branch
-`feat/v5.9-ml-hardening` not yet merged to
-`experiment/per-core-sharding` pending paper-test validation.
+**Status:** Sprint A merged 2026-05-03 (commit `5ea002c`,
+`v5.9.5j-final`). Sprint B 2/6 shipped on `feat/v5.10-foundation`:
+v5.10.0 (foundation) + v5.10.0a-final (multi-horizon ensemble).
 
-What to validate end-to-end:
+What to validate end-to-end on v5.10 ships:
 
-1. **Hyperparam ownership (v5.9.5h)** — Train Model panel "Advanced"
-   section sliders adjust `xgb_subsample`, `xgb_colsample_bytree`,
-   `xgb_min_child_weight`, `xgb_seed`, `xgb_tree_method`. Stamp body
-   records all 8 hyperparams. Engine load WARNs on cfg drift.
-2. **Build flags fingerprint (v5.9.5h #10)** — stamp records
-   `build_flags_hash` (USE_NATIVE_128 / USE_XGBOOST / __OPTIMIZE__).
-   Cross-build deploy → `[build_flags] WARN` at boot.
-3. **Past Runs stamp_ok column (v5.9.5h #19)** — column shows
-   `—` (no stamp) / `?` (unverified) / `✓` (OK) / `✗` (FAIL).
-4. **Inference cfg load-WARN (v5.9.5i #12)** — Tier 1 (freshness_tau,
-   confidence_threshold_scale, barrier_gate_enabled) REFUSE in strict
-   mode / WARN otherwise. Tier 2 (hard_block, bandit, fees) WARN.
-5. **ML Status drift row (v5.9.5i #16)** — engine_gui shows per-core
-   "cfg drift: N Tier 1 (...), M Tier 2".
-6. **Past Runs stamp filter (v5.9.5i #14 slim)** — filter combo
-   isolates runs by stamp status.
-7. **Train Model auto-stamp (v5.9.5j #6)** — when
-   `cfg.auto_stamp_on_held_out=1` + `cfg.held_out_stamp_secret` set,
-   worker auto-emits training-only stamp post-Persist.
+1. **Per-phase timers (v5.10.0A)** — Backtest panel shows feature
+   collect / train / WF / held-out / stamp emit timings. Operator
+   confirms expected order-of-magnitude per phase before any further
+   perf claims.
+2. **Streaming label compute (v5.10.0B)** — 2-year feature collect
+   runs without OOM (closes 2026-05-03 incident). Per-sample
+   allocation, not per-tick.
+3. **Hardware-aware cfg (v5.10.0D)** — `xgb_train_nthread`,
+   `csv_load_workers`, `feature_collect_max_gb`, `wf_split_max_gb`,
+   `held_out_max_gb`, `xgb_eval_nthread` all parse + reach
+   compute paths. Defaults match pre-v5.10 bytewise.
+4. **Save Run race (v5.10.0E)** — `auto_stamp_path` doesn't race
+   with stale `wf_results`; Save Run emits a coherent bundle.
+5. **Multi-horizon training (v5.10.0a.G.1)** — Train Multi-Horizon
+   button trains N models, one per horizon in `horizon_list` cfg.
+   Per-horizon dirs land at `<base>_horizon_<H>/`.
+6. **Ensemble inference (v5.10.0a.G.5–G.7)** — engine boot
+   auto-detects N horizons from disk; per-regime BanditState blends
+   predictions. ML Status panel ensemble heatmap (G.10) shows
+   regimes × horizons weight grid.
+7. **Bandit reward + persistence (v5.10.0a.G.8 / G.9)** —
+   slow-path lookback + trade-close rewards stream into bandit
+   weights; `bandit_state.json` survives restart bytewise.
+8. **Bandit replay-determinism (v5.10.0a.next.2)** — same input
+   sequence + same prior weights → bytewise-identical bandit
+   trajectory in backtest replay.
 
-**Validation gate before merge:** at minimum, exercise Train Model →
-Verify Stamp → engine_gui load → confirm WARNs fire on intentional
-cfg mismatch + don't fire on matching cfg.
+**Validation gate before merging Sprint B back to
+`experiment/per-core-sharding`:** all six v5.10 ships exercised
+end-to-end on operator hardware; ML Status panel ensemble heatmap
+shows live updates; `bandit_state.json` round-trips across restart.
 
 ---
 
-## Hardware constraints + customization gaps
+## Hardware constraints + customization gaps (closed in v5.10.0D)
 
-**Operator-flagged 2026-05-03:** several engine + ML pipeline
-parameters are tuned for the dev machine and don't scale automatically
-when operator moves to a bigger box (Xeon, more RAM, more cores).
-Hardware-aware cfg fields are tracked as v5.10 candidate — see
-`v5.10-design-notes.md` Idea #14 ("hardware-aware tunables").
+**Closed 2026-05-03 in v5.10.0D ("hardware-aware cfg").** The
+parameters below are now cfg-driven; defaults preserve pre-v5.10
+behavior bytewise so existing operators see no change unless they
+opt in.
 
-What's currently dev-machine-tuned:
-
-| Parameter | Current value | Where set | Should be cfg-tunable |
+| Parameter | Cfg field (v5.10.0D) | Default | Notes |
 |---|---|---|---|
-| Train Model XGBoost `nthread` | 4 (hardcoded) | `BacktestPanels.hpp:1898` (post-v5.9.5h XGBHyperparams_Apply) | Yes — `xgb_train_nthread` cfg |
-| WF / HeldOut XGBoost `nthread` | 1 (hardcoded for determinism) | `BacktestEngine.hpp:1308`, `:1604` | Yes — but with WARN that >1 breaks bytewise reproducibility |
-| Tick / label buffer initial allocation | `BACKTEST_SAMPLES_INIT` | `BacktestEngine.hpp` | Already grows dynamically; cap is RAM-driven |
-| `MAX_PORTFOLIO_POSITIONS` | 16 | `Limits.hpp` | NO — bitmap is `uint16_t`; bumping means struct redesign |
-| `MAX_EXECUTION_CORES` | 16 | `Limits.hpp` | Same — covered by `num_execution_cores` cfg already |
-| CSV-load thread count (when v5.10 ships) | 1 (serial) | `BacktestData_Load` | Yes — `csv_load_workers` cfg |
+| Train Model XGBoost `nthread` | `xgb_train_nthread` | 1 | matches pre-v5.10 hardcoded; opt-in >1 |
+| WF / HeldOut XGBoost `nthread` | `xgb_eval_nthread` | 1 | >1 breaks bytewise reproducibility — WARN at apply |
+| CSV-load thread count | `csv_load_workers` | 1 | parallel CSV ingest in v5.10.0 foundation |
+| Feature collect RAM cap | `feature_collect_max_gb` | 12 | abort with clear msg if budget exceeded |
+| WF split RAM cap | `wf_split_max_gb` | 8 | same abort behavior |
+| Held-out RAM cap | `held_out_max_gb` | 4 | same |
 
-**Until v5.10 ships hardware-aware cfg:** if you move to a Xeon with
-more RAM/cores, you'll need to manually adjust hardcoded values OR
-just live with the dev-machine defaults (slow but functional).
+**Still hardware-fixed (struct redesign required to change):**
+- `MAX_PORTFOLIO_POSITIONS` = 16 (`Limits.hpp`) — `uint16_t` bitmap
+- `MAX_EXECUTION_CORES` = 16 (`Limits.hpp`) — covered by
+  `num_execution_cores` cfg
 
-**Workaround for RAM-constrained dev machine:** reduce dataset days,
-bump `poll_interval` (fewer feature collection runs), reduce
-`label_forward_ticks` (smaller label compute per sample).
+**Migrating to bigger hardware:** bump `xgb_train_nthread` first
+(largest wall-clock win on multi-core boxes). Leave eval threads at
+1 unless you accept non-bytewise WF/HeldOut output. Bump
+`csv_load_workers` to ~nproc/2 for diminishing returns past that.
 
 ---
 
@@ -184,68 +191,84 @@ sentinels (Option A: WF-only). Engine treats as info-grade
 **For deploy-grade stamps:** use Run Full Validation panel which runs
 held-out training + emits a stamp with real metrics.
 
-### Backtest hot-loop perf is dev-machine-tuned
+### Backtest hot-loop perf (partial close in v5.10.0)
 
 89 minutes for 895M ticks (~167K ticks/sec) on a 4-core dev box. ML
 pipeline itself is <1 minute of that — cost is dominated by CSV
 parsing + 4-core hot-path simulation + slow-path feature collection.
-Optimization candidates (parallel CSV load, sparse label buffer, SIMD
-RegimeSignals) tracked as `v5.10-design-notes.md` Idea #15+.
+
+**Closed in v5.10.0 foundation:** parallel CSV ingest
+(`csv_load_workers`) + sparse label buffer (Idea #15, see below).
+
+**Still pending:** SIMD RegimeSignals — tracked as
+`v5.10-design-notes.md` Idea #15+ pre-v5.10.0; deferred behind
+v5.10.0b (FPN-end-to-end refactor, target MODEL_FORMAT_VERSION 6)
+since FPN refactor will move RegimeSignals math out of float
+anyway.
 
 For now: reduce dataset days for iteration loops; full 365-day
 training is a one-shot that you tolerate.
 
-### Label buffer OOMs on 2+ year datasets (HIGH priority for v5.10)
+### Label buffer OOMs on 2+ year datasets (closed in v5.10.0B)
 
 **Observed 2026-05-03:** operator attempted 2-year feature collection
 on 30.9 GiB RAM box → OOM crash during feature collection.
 
-**Math:**
+**Math (pre-fix):**
 - 1 year (~895M ticks) → label buffer 28.6 GB
 - 2 years (~1.8B ticks) → label buffer ~57 GB → exceeds RAM
 - Allocation pattern: per-tick label slot (32 bytes), but only
-  sample-point labels (every poll_interval ticks) are actually used
+  sample-point labels (every poll_interval ticks) actually used
 
-**Root cause:** label buffer sized at full tick granularity. With
-`poll_interval=100`, 99 of every 100 buffer slots are unused. Should
-be sized by `sample_count` not `tick_count` (100x reduction →
-57GB shrinks to 570MB).
+**Closed 2026-05-03 in v5.10.0B ("streaming label compute").**
+Per-sample allocation, not per-tick. With `poll_interval=100`, the
+buffer is now 100x smaller (~286 MB for 1 year, ~570 MB for 2
+years). Bytewise-equivalent label output to the prior dense path —
+verified against a small-dataset round-trip test before merge.
 
-**Workarounds today:**
-- Reduce dataset to ≤ 1 year for iteration loops
-- Bump `poll_interval` to 200+ (halves buffer + halves compute)
-- Wait for v5.10 sparse-buffer fix
-
-**Tracking:** `v5.10-design-notes.md` Idea #15 (sparse label buffer).
-HIGH priority — real crash, not theoretical.
+**Confirm a 2-year run works** on RAM-constrained boxes after pull;
+this was the highest-impact v5.10 fix for operators with multi-year
+historical data.
 
 ---
 
 ## Deferred features (planned, not shipped)
 
-These were explicitly scoped out of Sprint A and tracked for v5.10+.
-If you wanted these and they're not there, that's why:
+Tracking what shipped in v5.10 and what's still pending. If you
+wanted something and it's not here, that's why:
 
-- **Per-class accuracy display** (#8) — multiclass WF results would
-  show per-class TP/FP. Display polish; v5.10 candidate.
-- **ConfidenceScorer extended snapshot tests** (#9) — formula
-  regression protection. Internal; existing 4 tests cover the formula.
-- **Dedicated Stamps Inspection panel** (#14 full) — v5.9.5i shipped
-  the **filter inside Past Runs** instead of a new panel. Dedicated
-  panel is v5.10 polish if operator demand surfaces.
-- **Operator-tunable XGBoost `nthread` via cfg** — currently
-  hardcoded (4 for Train Model, 1 for WF/HeldOut). Hardware-aware
-  cfg is v5.10 Idea #14.
-- **Multi-symbol** — see "BTC-only" above.
-- **FPN-end-to-end** — see "Cross-build" above.
-- **Hot model swap** — engine reloads on cfg-change without restart.
-  v5.10.0c.
-- **ML pipeline performance optimizations** — parallel CSV load,
-  sparse label buffer (28GB → 286MB), SIMD RegimeSignals. v5.10
-  Idea #15+.
+**Closed in Sprint A (v5.9):**
+- ✅ Per-class accuracy display (#8) — v5.9.5j
+- ✅ ConfidenceScorer extended snapshot tests (#9) — v5.9.5j
 
-Full list: `DOCS/v5.10-design-notes.md` +
-`plans/2026-05-08-v5.11-deferred-items.md`.
+**Closed in Sprint B (v5.10) so far:**
+- ✅ Operator-tunable XGBoost `nthread` via cfg — v5.10.0D
+- ✅ Parallel CSV load — v5.10.0 foundation
+- ✅ Sparse label buffer (28GB → 286MB) — v5.10.0B
+- ✅ Multi-horizon ensemble + per-regime bandit blend —
+  v5.10.0a-final + .next.1 + .next.2
+
+**Still pending in v5.10:**
+- **FPN-end-to-end** — v5.10.0b (next ship). Bumps
+  MODEL_FORMAT_VERSION 5→6; closes "Cross-build determinism" above.
+- **Hot model swap** — v5.10.0c. Engine reloads on cfg-change
+  without restart. Depends on v5.10.0b for format-6 swap targets.
+- **FOREACH_TARGET label registry** — v5.10.0d. X-macro retrofit
+  for labels (mirrors v5.8.x FOREACH_FEATURE pattern).
+- **Drift detection / model retirement** — v5.10.0e. Runtime IC
+  monitoring + auto-retire on threshold breach.
+- **SIMD RegimeSignals** — folded into v5.10.0b (FPN refactor will
+  move regime math out of float anyway).
+
+**Deferred to v5.11 (Sprint C):**
+- Multi-symbol (see "BTC-only" above)
+- Per-core feature mask cfg
+- Scaler comparison tool
+- RFV scaler binding
+- Operator quickstart docs gap
+- Test file split (controller_test.cpp at ~12k lines)
+
+Full list: `DOCS/v5.10-design-notes.md` (current sprint backlog).
 
 ---
 
