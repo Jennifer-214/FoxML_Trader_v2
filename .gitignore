@@ -39,6 +39,11 @@ continue.md
 *.log
 baseline_run/
 
+# runtime output: per-symbol metrics + order history (e.g., btcusdt_*.csv)
+# emitted by engine main loop alongside *.log; same risk class as logs
+*_metrics.csv
+*_order_history.csv
+
 # secrets — just-in-case (we already pin secrets.cfg above)
 .env
 .env.*
