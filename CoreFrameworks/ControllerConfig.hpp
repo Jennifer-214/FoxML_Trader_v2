@@ -1240,6 +1240,33 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     char *key = line;
     char *val = &line[eq_pos + 1];
 
+    // v5.11.33 — strip inline `# comment` from value, then strip trailing
+    // whitespace. Pre-fix the parser only stripped `\n`/`\r`, so a cfg line
+    // like `xgb_tree_method=hist                # comment` left the value
+    // as `"hist                # comment"`. For numeric fields atof/atoi
+    // stop at the first non-numeric char (silently OK), but string fields
+    // (xgb_tree_method, ml_model_path, etc.) used the literal string
+    // verbatim — XGBoost's strcmp-match rejected `"hist           "` with
+    // an `Invalid Input: 'hist           ', valid values are: {...}` error
+    // that surfaced as WF train+val 0.0 across all folds (pred fails →
+    // shape-mismatch SKIP at the WF accuracy compute). Operator-flagged
+    // 2026-05-07; root-caused via v5.11.30/31/32 observability work.
+    {
+        // find first unescaped '#' on the value line (start scanning from
+        // val[0]; the `=` already split key from val so the only `#`
+        // we'd see is an inline comment marker)
+        char *hash = strchr(val, '#');
+        if (hash) *hash = '\0';
+        // strip trailing whitespace (space, tab) — both cfg-style padding
+        // and editor-auto-trim leftovers
+        size_t vl = strlen(val);
+        while (vl > 0 && (val[vl - 1] == ' ' || val[vl - 1] == '\t')) {
+            val[--vl] = '\0';
+        }
+        // also strip leading whitespace (less common but cheap)
+        while (*val == ' ' || *val == '\t') ++val;
+    }
+
 // table-driven parser: FPN fields parsed as atof(val) directly
 // adding a new field = add ONE line to the matching table below
 #define CFG_PARSE_FPN(name)                                                    \
