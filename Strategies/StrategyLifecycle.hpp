@@ -396,28 +396,26 @@ inline void Strategy_FreePerCore(EventLoopState<F>* state, int slot) {
 #undef X
         case STRATEGY_AUTO:
         case STRATEGY_NONE:
-            // 2026-05-08: AUTO/NONE sentinels should never have a state
-            // pointer (Strategy_InitPerCore's switch sets state=nullptr in
-            // the AUTO/NONE/default branch). If we're here, something
-            // earlier set strategy_state to a non-null value with the
-            // kind still recorded as AUTO/NONE — likely a stale pointer
-            // from a prior strategy that didn't get nulled on free, OR
-            // a resolution path that allocated state on demand without
-            // updating the kind to the resolved concrete strategy.
+            // v5.11.11 (2026-05-07): symptom-quieted the WARN that this
+            // branch used to fire (it lived in `default:` pre-v5.11.11).
+            // v5.11.15 (2026-05-07): root cause found and fixed at
+            // `CoreFrameworks/ShardedSnapshotPersist.hpp:498` — snapshot
+            // Load was restoring `ctx.strategy_state_kind` from a
+            // previous run's persisted byte, overwriting the kind that
+            // Strategy_InitPerCore had just set correctly from
+            // cfg.strategy_id. With that restore removed, the kind
+            // invariant ("kind describes the C++ type of the
+            // strategy_state pointer") holds and this branch should be
+            // unreachable in normal operation.
             //
-            // Without knowing the concrete type, we cannot safely delete
-            // (would be type-cast UB). Null the pointer — the arena
-            // owns the memory (v5.11.6.A) so the actual reclamation
-            // happens at engine shutdown via InitArena_Destroy. Pre-arena
-            // builds leak ~1-4 KB; bounded + harmless on process exit.
-            //
-            // Quiet (no fprintf) because this fires under common cfg
-            // patterns (cfg has duplicate `core_N_strategy=` lines, or
-            // operator hot-swapped strategies) and the pre-fix WARN
-            // cluttered shutdown logs without pointing to actionable
-            // operator response. Root-cause investigation tracked in
-            // plans/2026-05-07-deferred-items.md if it ever proves to
-            // be a real-memory-leak issue.
+            // Kept defensively for two reasons: (1) tests can still
+            // exercise unusual lifecycle orderings, (2) future paths
+            // (hot-swap, AUTO regime re-allocation per Phase 3) could
+            // re-introduce the mismatch and we'd rather null-out than
+            // crash. Without knowing the concrete type, we cannot
+            // safely delete (type-cast UB). Null the pointer — the
+            // arena owns the memory (v5.11.6.A) so reclamation happens
+            // at engine shutdown via InitArena_Destroy.
             break;
         default:
             // Genuinely unknown kind value (corrupted state). Worth

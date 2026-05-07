@@ -15552,6 +15552,91 @@ e3_skip_load:;
         check("v5.10.0A: Global singleton accessible + reset", tt::PhaseTimer_Global().parse_ns == 0);
     }
 
+    printf("\n--- v5.11.15: Strategy_FreePerCore AUTO/NONE root-cause regression ---\n");
+    {
+        // v5.11.15 (2026-05-07) — root cause for the v5.11.11 symptom-quiet
+        // was identified at CoreFrameworks/ShardedSnapshotPersist.hpp:498:
+        // snapshot Load was restoring strategy_state_kind from the
+        // persisted byte AFTER Strategy_InitPerCore had already set kind
+        // correctly from cfg.strategy_id. Result: state ptr (non-null,
+        // typed e.g. MR) + kind (overwritten to a previous-run value
+        // e.g. AUTO) — Strategy_FreePerCore at shutdown couldn't dispatch
+        // the type-correct delete; pre-v5.11.11 hit `default:` and WARN'd,
+        // post-v5.11.11 took the AUTO/NONE branch and leaked.
+        //
+        // Fix: stop applying s.strategy_state_kind to ctx.strategy_state_kind
+        // in the snapshot Load path. The persisted byte stays in the file
+        // format (snapshot v4+ back-compat — still READ, just not APPLIED).
+        // The kind invariant is now: set ONLY by Strategy_InitPerCore at
+        // boot and Strategy_FreePerCore on teardown.
+
+        // === Test 1: post-fix kind invariant after Strategy_InitPerCore ===
+        // After Init with a concrete strategy, state ptr is non-null AND
+        // kind matches the strategy_id. This is the invariant the snapshot
+        // Load fix preserves (pre-fix, Load could overwrite kind even
+        // though state ptr was unchanged).
+        {
+            tt::OrderManagerState<FP> oms;
+            tt::EventLoopState<FP> state;
+            tt::EventLoopState_Init(&state, &oms);
+            ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+            RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+            tt::Strategy_InitPerCore(&state, 0, STRATEGY_MEAN_REVERSION, &rolling, &cfg);
+
+            check("v5.11.15: post-Init kind matches strategy_id",
+                  state.cores[0].strategy_state_kind == STRATEGY_MEAN_REVERSION);
+            check("v5.11.15: post-Init state ptr is non-null for concrete strategy",
+                  state.cores[0].strategy_state != nullptr);
+
+            tt::Strategy_FreePerCore(&state, 0);
+            check("v5.11.15: post-Free kind reset to 0xFF (uninitialized sentinel)",
+                  state.cores[0].strategy_state_kind == 0xFF);
+            check("v5.11.15: post-Free state ptr is nullptr",
+                  state.cores[0].strategy_state == nullptr);
+
+            tt::EventLoopState_Free(&state);
+        }
+
+        // === Test 2: AUTO/NONE branch defensiveness (synthetic mismatch) ===
+        // Even with the root cause fixed, the AUTO/NONE branch is kept
+        // defensively for unusual lifecycle orderings (test harnesses,
+        // future hot-swap paths). Verify it nulls the state ptr cleanly
+        // without crashing OR mistakenly invoking `delete` on an
+        // unknown-type pointer. Use a non-allocated dummy pointer that
+        // would crash on delete, to prove no `delete` is called on this
+        // branch.
+        {
+            tt::OrderManagerState<FP> oms;
+            tt::EventLoopState<FP> state;
+            tt::EventLoopState_Init(&state, &oms);
+
+            // Synthesize the kind/state mismatch the pre-v5.11.15 snapshot
+            // Load would create: state ptr non-null, kind=AUTO. Use an
+            // arena-style dummy address that Strategy_FreePerCore must
+            // NOT call delete on (would crash if it did).
+            char on_stack_dummy[64] = {0};
+            state.cores[0].strategy_state      = on_stack_dummy;
+            state.cores[0].strategy_state_kind = STRATEGY_AUTO;
+
+            // Should hit AUTO/NONE branch defensively. No crash, no delete.
+            tt::Strategy_FreePerCore(&state, 0);
+
+            check("v5.11.15: AUTO/NONE branch nulls state ptr",
+                  state.cores[0].strategy_state == nullptr);
+            check("v5.11.15: AUTO/NONE branch sets kind=0xFF",
+                  state.cores[0].strategy_state_kind == 0xFF);
+
+            // Same shape but kind=NONE
+            state.cores[0].strategy_state      = on_stack_dummy;
+            state.cores[0].strategy_state_kind = STRATEGY_NONE;
+            tt::Strategy_FreePerCore(&state, 0);
+            check("v5.11.15: NONE branch also nulls state ptr without crash",
+                  state.cores[0].strategy_state == nullptr);
+
+            tt::EventLoopState_Free(&state);
+        }
+    }
+
     printf("\n--- v5.11.14: scaler comparison diff math + flag threshold ---\n");
     {
         // Validates the math compare_scalers does per-feature:
