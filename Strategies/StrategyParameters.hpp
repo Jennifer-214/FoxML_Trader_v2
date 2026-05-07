@@ -149,6 +149,23 @@ struct MLBuildContext {
     // before each ML_BuildParameters call. Default 0 = REGIME_RANGING
     // (safe fallback when classifier hasn't run yet).
     int                 current_regime_id;
+    // v5.11.18 main — per-core feature mask. Threaded from
+    // ControllerConfig::core_feature_mask[core_id] (set up in
+    // v5.11.18a's cfg parser). When non-null, Features_PackAll
+    // checks the bit-per-feature mask and writes 0.0f to the
+    // corresponding output slot for any unset bit (sparse-zero,
+    // not dense compression — caller still gets
+    // NUM_REGISTERED_FEATURES floats out, but unset features are
+    // zeroed before compute). nullptr = legacy path = no masking
+    // (every feature computed normally; bytewise-identical to
+    // pre-v5.11.18 builds).
+    //
+    // Stamp parity: when this points to a non-default mask, the
+    // model's stamp body MUST carry has_feature_mask=1 +
+    // feature_mask_train matching. v5.11.18a's stamp_write +
+    // verify_model_stamp pipeline already supports this; load-time
+    // refusal fires on mismatch.
+    const uint64_t*     feature_mask;
 };
 
 //======================================================================================================
@@ -700,11 +717,18 @@ inline void ML_BuildParameters(
     // pack features once — used by whichever model role is loaded.
     // v5.8.1b: registry-driven via Features_PackAll. Same contract as the
     // legacy ModelFeatures_Pack (validated bytewise in EXTENSIBILITY tests).
+    // v5.11.18 main: thread per-core feature_mask from MLBuildContext.
+    // When mctx->feature_mask is null (default; legacy callers), pack all
+    // enabled features identically to pre-v5.11.18. When non-null, packs
+    // sparse-zero (zeroed slot for any unset bit). The model's stamp must
+    // have feature_mask_train matching the runtime mask — verified at
+    // load-time by verify_model_stamp's expected_feature_mask param.
     float features[MODEL_MAX_FEATURES];
     FeatureComputeCtx<F> ctx{};
     ctx.signals       = &sig;
     ctx.short_rolling = rolling;
-    int n = Features_PackAll(&ctx, features);
+    const uint64_t* eff_mask = (mctx && mctx->feature_mask) ? mctx->feature_mask : nullptr;
+    int n = Features_PackAll(&ctx, features, eff_mask);
     // v5.9.0 — NaN/Inf in feature pack → fall through to SimpleDip.
     // Features_PackAll returns -1 sentinel; never feed garbage to XGBoost.
     // v5.9.0b — bump per-core NaN counter + emit rate-limited CRITICAL.

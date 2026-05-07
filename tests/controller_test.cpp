@@ -15898,6 +15898,138 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.11.18 main: Features_PackAll mask-aware overload ---\n");
+    {
+        // v5.11.18 main (2026-05-07) — sparse-zero mask-aware overload of
+        // Features_PackAll. Per /parity-check 2026-05-07 CRITICAL/HIGH gaps
+        // (scaler binding + index contract). Caller pattern: pass null mask
+        // (legacy bytewise-identical), all-on mask (no-op masking), or
+        // partial mask (zeroed slots for unset bits). Returned n always =
+        // NUM_REGISTERED_FEATURES (sparse-zero, not dense compression).
+
+        // Synthetic ctx that produces valid features (mirrors v5.9.0 NaN
+        // guard test pattern at line 9764+).
+        RegimeSignals<64> sig{};
+        sig.short_slope    = FPN_FromDouble<64>(0.0042);
+        sig.short_r2       = FPN_FromDouble<64>(0.78);
+        sig.short_variance = FPN_FromDouble<64>(0.000123);
+        sig.long_slope     = FPN_FromDouble<64>(0.0019);
+        sig.long_r2        = FPN_FromDouble<64>(0.45);
+        sig.long_variance  = FPN_FromDouble<64>(0.000456);
+        sig.vol_ratio      = FPN_FromDouble<64>(2.7);
+        sig.ror_slope      = FPN_FromDouble<64>(-0.0001);
+        sig.volume_slope   = FPN_FromDouble<64>(0.005);
+        sig.volume_delta   = FPN_FromDouble<64>(0.013);
+        sig.hour_sin       = 0.7071;
+        sig.hour_cos       = 0.7071;
+
+        RollingStats<64, 128> r{};
+        r.vwap_deviation = FPN_FromDouble<64>(0.00018);
+        r.price_stddev   = FPN_FromDouble<64>(0.011);
+        r.price_avg      = FPN_FromDouble<64>(48000.0);
+        r.volume_avg     = FPN_FromDouble<64>(0.92);
+
+        FeatureComputeCtx<64> ctx{};
+        ctx.signals       = &sig;
+        ctx.short_rolling = &r;
+
+        // === Test 1: mask=nullptr delegates to no-mask overload ===
+        // Bytewise identical to pre-v5.11.18 path.
+        {
+            float buf_nomask[MODEL_MAX_FEATURES] = {0};
+            float buf_nullmask[MODEL_MAX_FEATURES] = {0};
+            int n_nomask  = Features_PackAll(&ctx, buf_nomask);
+            int n_nullmask = Features_PackAll(&ctx, buf_nullmask, nullptr);
+            check("v5.11.18 main: null mask returns same n as no-mask",
+                  n_nomask == n_nullmask);
+            check("v5.11.18 main: null mask produces bytewise-identical output to no-mask",
+                  memcmp(buf_nomask, buf_nullmask, sizeof(buf_nomask)) == 0);
+        }
+
+        // === Test 2: all-on mask is bytewise-identical to no-mask ===
+        // Provides operator-flagged regression target — when cfg has the
+        // default mask 0xFFFF..F, output must match pre-v5.11.18.
+        {
+            float buf_nomask[MODEL_MAX_FEATURES] = {0};
+            float buf_allon[MODEL_MAX_FEATURES] = {0};
+            int n_nomask = Features_PackAll(&ctx, buf_nomask);
+            uint64_t all_on = 0xFFFFFFFFFFFFFFFFULL;
+            int n_allon  = Features_PackAll(&ctx, buf_allon, &all_on);
+            check("v5.11.18 main: all-on mask returns same n as no-mask",
+                  n_allon == n_nomask);
+            check("v5.11.18 main: all-on mask produces bytewise-identical output",
+                  memcmp(buf_nomask, buf_allon, sizeof(buf_nomask)) == 0);
+        }
+
+        // === Test 3: partial mask zeros out unselected slots ===
+        // Bits 0-9 set, bits 10+ cleared. Verify out[0..9] match no-mask,
+        // out[10..NUM_REGISTERED_FEATURES-1] are 0.0f.
+        {
+            float buf_nomask[MODEL_MAX_FEATURES] = {0};
+            float buf_partial[MODEL_MAX_FEATURES] = {0};
+            int n_nomask = Features_PackAll(&ctx, buf_nomask);
+            uint64_t partial = 0x3FFULL;  // bits 0-9 set
+            int n_partial = Features_PackAll(&ctx, buf_partial, &partial);
+            check("v5.11.18 main: partial mask returns same n (sparse-zero contract)",
+                  n_partial == n_nomask);
+            // Bits 0-9: must match no-mask output exactly (selected features).
+            int matches_selected = 1;
+            for (int i = 0; i < 10 && i < (int)NUM_REGISTERED_FEATURES; ++i) {
+                if (buf_partial[i] != buf_nomask[i]) { matches_selected = 0; break; }
+            }
+            check("v5.11.18 main: partial mask preserves selected features",
+                  matches_selected);
+            // Bits 10+: must be 0.0f (masked out).
+            int all_zeros_unselected = 1;
+            for (int i = 10; i < (int)NUM_REGISTERED_FEATURES; ++i) {
+                if (buf_partial[i] != 0.0f) { all_zeros_unselected = 0; break; }
+            }
+            check("v5.11.18 main: partial mask zeros unselected slots",
+                  all_zeros_unselected);
+        }
+
+        // === Test 4: zero mask zeros all slots, returns full n ===
+        // Edge case — operator typo. cfg parser already WARNs; verify the
+        // function itself handles gracefully.
+        {
+            float buf_zero[MODEL_MAX_FEATURES] = {0};
+            // pre-fill with junk to verify the zero-write actually happens
+            for (int i = 0; i < MODEL_MAX_FEATURES; ++i) buf_zero[i] = 99.0f;
+            uint64_t zero_mask = 0;
+            int n_zero = Features_PackAll(&ctx, buf_zero, &zero_mask);
+            check("v5.11.18 main: zero mask returns NUM_REGISTERED_FEATURES",
+                  n_zero == (int)NUM_REGISTERED_FEATURES);
+            int all_zero = 1;
+            for (int i = 0; i < (int)NUM_REGISTERED_FEATURES; ++i) {
+                if (buf_zero[i] != 0.0f) { all_zero = 0; break; }
+            }
+            check("v5.11.18 main: zero mask zeros every slot (no leftover junk)",
+                  all_zero);
+        }
+
+        // === Test 5: NaN sentinel still works with mask ===
+        // FPN_IsValidFinite + std::isnan guards are inside the per-feature
+        // compute fn — when mask bit is set, they fire. When mask bit
+        // is clear, fn isn't called → no NaN check (the slot is just
+        // zeroed). So a NaN-producing feature only triggers the sentinel
+        // if it's actually selected by the mask.
+        {
+            float buf[MODEL_MAX_FEATURES] = {0};
+            sig.short_slope = FPN_FromDouble<64>(1e16);  // FPN_IsValidFinite-busting
+            // With mask bit 0 (FEATURE_SHORT_SLOPE) set: should return -1
+            uint64_t m_with_slope = 0x1ULL;  // bit 0 set
+            int n1 = Features_PackAll(&ctx, buf, &m_with_slope);
+            check("v5.11.18 main: NaN sentinel fires when masked-in feature is invalid",
+                  n1 < 0);
+            // With mask bit 0 cleared: short_slope skipped, no sentinel
+            uint64_t m_without_slope = 0xFFFFFFFFFFFFFFFEULL;  // all bits except 0
+            int n2 = Features_PackAll(&ctx, buf, &m_without_slope);
+            check("v5.11.18 main: NaN sentinel skipped when masked-out feature is invalid",
+                  n2 == (int)NUM_REGISTERED_FEATURES);
+            sig.short_slope = FPN_FromDouble<64>(0.0042);  // restore
+        }
+    }
+
     printf("\n--- v5.11.14: scaler comparison diff math + flag threshold ---\n");
     {
         // Validates the math compare_scalers does per-feature:

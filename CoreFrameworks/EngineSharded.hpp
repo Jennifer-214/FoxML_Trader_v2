@@ -1042,10 +1042,19 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // through so per-role load suppresses minor-drift WARN
                 // when operator deliberately deploys a v5.x.y model on
                 // a v5.x.z engine.
+                // v5.11.18 main — pass per-core feature_mask through. When
+                // operator's cfg has core_<i>_feature_mask=0xHEXVAL set
+                // (default 0xFFFF..F = all features enabled), the stamp's
+                // feature_mask_train must match or load refuses. When mask
+                // is the all-on default, expected_feature_mask=0 (skip
+                // check; legacy stamps still load).
+                uint64_t mask_for_load = (cfg.core_feature_mask[i] != 0xFFFFFFFFFFFFFFFFULL)
+                    ? cfg.core_feature_mask[i] : 0;
                 loaded = CoreModelZoo_LoadFromDir(&ml_zoos[i], cfg.core_model_dir[i],
                     backend, /*secret=*/nullptr, /*gap=*/0.05,
                     /*strict=*/cfg.held_out_gate_strict,
-                    cfg.acknowledge_cross_binary_version_drift);
+                    cfg.acknowledge_cross_binary_version_drift,
+                    /*expected_feature_mask=*/mask_for_load);
                 fprintf(stderr, "[sharded] core %d: zoo from %s, %d role(s) loaded\n",
                         i, cfg.core_model_dir[i], loaded);
             } else {

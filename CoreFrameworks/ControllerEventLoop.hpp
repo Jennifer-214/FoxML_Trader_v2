@@ -2057,6 +2057,14 @@ inline void EventLoop_RebuildOneCore(
             // parameter; ml_ctx is the only path ML_BuildParameters has into
             // it without changing the dispatcher signature.
             ml_ctx.out_strategy_halt_reason    = &state->cores[slot].strategy_halt_reason;
+            // v5.11.18 main — per-core feature mask. Pointer to the cfg
+            // field directly; no copy. Features_PackAll inside
+            // ML_BuildParameters reads through this pointer when non-null.
+            // When operator hasn't set core_<slot>_feature_mask in cfg,
+            // the cfg parser at v5.11.18a defaults to 0xFFFF..F (all
+            // features enabled); pointer is non-null but mask = all-on
+            // produces bytewise-identical output to pre-v5.11.18.
+            ml_ctx.feature_mask = &resolved_cfg.core_feature_mask[slot];
             dispatch_ctx = &ml_ctx;
         }
         // v4.0.4: stash the resolved strategy for GUI display. For non-AUTO

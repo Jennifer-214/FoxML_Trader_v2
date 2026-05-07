@@ -91,7 +91,15 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                                     // minor-version drift WARN. Cross-major
                                     // is still always refused/warned per
                                     // ModelStampResult.cross_major_engine.
-                                    int acknowledge_cross_binary_drift = 0) {
+                                    int acknowledge_cross_binary_drift = 0,
+                                    // v5.11.18 main — runtime cfg's per-core
+                                    // feature_mask. Default 0 = skip check
+                                    // (v5.11.18a infrastructure default; legacy
+                                    // path stays bytewise-identical). When
+                                    // non-zero, verify_model_stamp refuses
+                                    // load if stamp's feature_mask_train
+                                    // doesn't match this value.
+                                    uint64_t expected_feature_mask = 0) {
     char path[512];
     struct stat st;
     const char* found_path = nullptr;
@@ -137,7 +145,8 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
             gap_threshold,
             MODEL_FORMAT_VERSION,
             FEATURE_REGISTRY_HASH(),
-            LABEL_REGISTRY_HASH());  // v5.10.1.A — close Finding #1 consume side
+            LABEL_REGISTRY_HASH(),  // v5.10.1.A — close Finding #1 consume side
+            expected_feature_mask);  // v5.11.18 main — feature mask binding
         have_sr = 1;
         if (sr.valid <= 0) {
             if (held_out_gate_strict == 1) {
@@ -339,31 +348,36 @@ inline int CoreModelZoo_LoadFromDir(CoreModelZoo<F> *zoo, const char *dir, int b
                                      int held_out_gate_strict = 0,
                                      // v5.9.4 — operator opt-in, threaded
                                      // through to per-role load.
-                                     int acknowledge_cross_binary_drift = 0) {
+                                     int acknowledge_cross_binary_drift = 0,
+                                     // v5.11.18 main — runtime cfg's
+                                     // per-core feature_mask, threaded to
+                                     // each role's verify_model_stamp call.
+                                     // Default 0 = skip mask check.
+                                     uint64_t expected_feature_mask = 0) {
     if (!dir || dir[0] == '\0') return 0;
 
     int loaded = 0;
     if (CoreModelZoo_TryLoadRole(&zoo->barrier, dir, "barrier", backend,
             held_out_stamp_secret, gap_threshold, held_out_gate_strict,
-            acknowledge_cross_binary_drift)) {
+            acknowledge_cross_binary_drift, expected_feature_mask)) {
         zoo->loaded_mask |= CORE_MODEL_BARRIER;
         loaded++;
     }
     if (CoreModelZoo_TryLoadRole(&zoo->regime, dir, "regime", backend,
             held_out_stamp_secret, gap_threshold, held_out_gate_strict,
-            acknowledge_cross_binary_drift)) {
+            acknowledge_cross_binary_drift, expected_feature_mask)) {
         zoo->loaded_mask |= CORE_MODEL_REGIME;
         loaded++;
     }
     if (CoreModelZoo_TryLoadRole(&zoo->exit, dir, "exit", backend,
             held_out_stamp_secret, gap_threshold, held_out_gate_strict,
-            acknowledge_cross_binary_drift)) {
+            acknowledge_cross_binary_drift, expected_feature_mask)) {
         zoo->loaded_mask |= CORE_MODEL_EXIT;
         loaded++;
     }
     if (CoreModelZoo_TryLoadRole(&zoo->buy_signal, dir, "buy_signal", backend,
             held_out_stamp_secret, gap_threshold, held_out_gate_strict,
-            acknowledge_cross_binary_drift)) {
+            acknowledge_cross_binary_drift, expected_feature_mask)) {
         zoo->loaded_mask |= CORE_MODEL_BUY_SIGNAL;
         loaded++;
     }
