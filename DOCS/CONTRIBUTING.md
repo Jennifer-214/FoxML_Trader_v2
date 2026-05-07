@@ -154,7 +154,7 @@ The volatile regime currently pauses buying. To add active management:
 1. Create `Strategies/VolatileHandler.hpp` following the strategy pattern
 2. Register as `STRATEGY_VOLATILE = 2`
 3. Update `Regime_ToStrategy()` to map `REGIME_VOLATILE → STRATEGY_VOLATILE`
-4. See `DOCS/FUTURE_VOLATILE_STRATEGY.md` for design options
+4. Sketch out the entry/exit logic — open an issue if you want a design review
 
 ## Project Structure
 

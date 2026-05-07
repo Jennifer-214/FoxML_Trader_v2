@@ -10,7 +10,6 @@ not bugs requiring action**. Distinct from:
 
 - `RECURRING_BUG_PATTERNS.md` — historical bug classes that have been
   fixed but should be remembered to avoid regressions
-- `v5.10-design-notes.md` — future work / planned features
 - `DOCS/changelogs/` — what shipped when (per-sprint detail)
 
 If you hit something here, the workaround / explanation lives in the
@@ -158,7 +157,7 @@ train on BTCUSDT and deploy on ETHUSDT (same data shape), engine
 doesn't notice. Stamp body needs `trained_symbol` field for
 symbol-aware verification.
 
-**Tracking:** `v5.10-design-notes.md` — multi-symbol candidate.
+**Tracking:** internal roadmap — multi-symbol candidate.
 
 ### Cross-build determinism: detection-only
 
@@ -200,11 +199,9 @@ parsing + 4-core hot-path simulation + slow-path feature collection.
 **Closed in v5.10.0 foundation:** parallel CSV ingest
 (`csv_load_workers`) + sparse label buffer (Idea #15, see below).
 
-**Still pending:** SIMD RegimeSignals — tracked as
-`v5.10-design-notes.md` Idea #15+ pre-v5.10.0; deferred behind
-v5.10.0b (FPN-end-to-end refactor, target MODEL_FORMAT_VERSION 6)
-since FPN refactor will move RegimeSignals math out of float
-anyway.
+**Still pending:** SIMD RegimeSignals deferred behind v5.10.0b
+(FPN-end-to-end refactor, target MODEL_FORMAT_VERSION 6) since FPN
+refactor will move RegimeSignals math out of float anyway.
 
 For now: reduce dataset days for iteration loops; full 365-day
 training is a one-shot that you tolerate.
@@ -268,7 +265,7 @@ wanted something and it's not here, that's why:
 - Operator quickstart docs gap
 - Test file split (controller_test.cpp at ~12k lines)
 
-Full list: `DOCS/v5.10-design-notes.md` (current sprint backlog).
+Full list lives in internal roadmap (gitignored — operator-private).
 
 ---
 

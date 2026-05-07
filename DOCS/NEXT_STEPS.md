@@ -8,12 +8,12 @@ docs.**
 
 | For | See |
 |---|---|
-| Current sprint roadmap (Sprint B / v5.10 epic) | `DOCS/v5.10-design-notes.md` — 19 ideas, ~10 shipped, ~9 in flight |
+| Current sprint roadmap | operator-private working notes (gitignored; not on the public repo) |
 | What just shipped | `DOCS/CHANGELOG.md` — v5.9.5h–j Sprint A close + v5.10.0/0a Sprint B in progress |
 | Known limitations + workarounds | `DOCS/KNOWN_ISSUES.md` |
 | Architectural invariants per area | `DOCS/CLAUDE_INVARIANTS.md`, `DOCS/CLAUDE_ML_INVARIANTS.md` |
 | Hot path perf changelog | `DOCS/HOT_PATH_CHANGELOG.md` |
-| Deferred to next major (v5.11) | `DOCS/v5.10-design-notes.md` Sprint C section |
+| Deferred items / next major | operator-private working notes (gitignored) |
 
 ## Sprint state at a glance (as of 2026-05-06)
 

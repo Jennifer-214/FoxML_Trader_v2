@@ -56,10 +56,19 @@ compile_commands.json
 .cache/
 .clangd/
 
-# audit documents (private — Gemini optimization research; backups in workspace plans/)
-LATENCY_OPTIMIZATION_AUDIT.md
+# private — going-forward rule for edge-sensitive doc surfaces
+# (existing tracked files in public history retain their tracking; only
+# new files matching these patterns auto-stay-private. backups land in
+# workspace plans/ via the standard /sync-workspace skill.)
+# *_AUDIT.md       — optimization audits, latency findings, etc.
+# FUTURE_*.md      — roadmap / planned-strategy direction
+# *-design-notes.md — versioned design idea backlogs
+# STRATEGY_AND_CODING_RULES.md — Gemini-distilled coding invariants
+*_AUDIT.md
+FUTURE_*.md
+*-design-notes.md
 STRATEGY_AND_CODING_RULES.md
 
-# local Claude Code memory overlays (private — references the audit docs above)
+# local Claude Code memory overlays (private — auto-loaded alongside CLAUDE.md)
 CLAUDE.local.md
 *.local.md
