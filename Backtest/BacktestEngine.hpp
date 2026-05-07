@@ -1628,9 +1628,25 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         int n_rounds = 200;
         // v5.10.0 Item A — xgboost_train phase timer (per-fold).
         uint64_t xgb_start_ns = tt::PhaseTimer_NowNs();
+        // v5.11.31 — log first iter ret + last iter completed
+        int last_iter_ret = 0;
+        int last_iter_idx = -1;
         for (int r = 0; r < n_rounds; r++) {
             ret = XGBoosterUpdateOneIter(booster, r, dtrain);
-            if (ret != 0) break;
+            last_iter_ret = ret;
+            last_iter_idx = r;
+            if (ret != 0) {
+                fprintf(stderr,
+                    "[wf-diag] fold %d UpdateOneIter ret=%d at iter %d — XGB err: %s\n",
+                    f + 1, ret, r,
+                    XGBGetLastError() ? XGBGetLastError() : "(null)");
+                break;
+            }
+        }
+        if (last_iter_ret == 0) {
+            fprintf(stderr,
+                "[wf-diag] fold %d trained %d/%d iters successfully\n",
+                f + 1, last_iter_idx + 1, n_rounds);
         }
         tt::PhaseTimer_Global().xgboost_train_ns +=
             tt::PhaseTimer_NowNs() - xgb_start_ns;
@@ -1639,8 +1655,23 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         {
             bst_ulong out_len_tr = 0, out_len_te = 0;
             const float *pred_tr = nullptr, *pred_te = nullptr;
-            int pred_tr_ok = (XGBoosterPredict(booster, dtrain, 0, 0, 0, &out_len_tr, &pred_tr) == 0);
-            int pred_te_ok = (XGBoosterPredict(booster, dtest,  0, 0, 0, &out_len_te, &pred_te) == 0);
+            int predict_tr_ret = XGBoosterPredict(booster, dtrain, 0, 0, 0, &out_len_tr, &pred_tr);
+            int predict_te_ret = XGBoosterPredict(booster, dtest,  0, 0, 0, &out_len_te, &pred_te);
+            int pred_tr_ok = (predict_tr_ret == 0);
+            int pred_te_ok = (predict_te_ret == 0);
+            // v5.11.31 — log XGB error when predict fails
+            if (!pred_tr_ok) {
+                fprintf(stderr,
+                    "[wf-diag] fold %d Predict(train) ret=%d — XGB err: %s\n",
+                    f + 1, predict_tr_ret,
+                    XGBGetLastError() ? XGBGetLastError() : "(null)");
+            }
+            if (!pred_te_ok) {
+                fprintf(stderr,
+                    "[wf-diag] fold %d Predict(test) ret=%d — XGB err: %s\n",
+                    f + 1, predict_te_ret,
+                    XGBGetLastError() ? XGBGetLastError() : "(null)");
+            }
 
             if (is_regression) {
                 if (pred_tr_ok && (int)out_len_tr == n_train) {
