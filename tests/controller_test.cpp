@@ -15552,6 +15552,49 @@ e3_skip_load:;
         check("v5.10.0A: Global singleton accessible + reset", tt::PhaseTimer_Global().parse_ns == 0);
     }
 
+    printf("\n--- v5.11.14: scaler comparison diff math + flag threshold ---\n");
+    {
+        // Validates the math compare_scalers does per-feature:
+        //   pct_change_stddev = (sb - sa) / sa * 100.0
+        //   flag = |pct_change_stddev| > threshold_pct
+        //
+        // The CLI itself (tools/compare_scalers.cpp) drives this same
+        // formula over each FOREACH_FEATURE entry. No CLI subprocess
+        // here — just inline math validation against known synthetic
+        // values. The save/load path is already tested under the
+        // v5.9.3a scaler-binding suite elsewhere.
+
+        // === Test 1: identical scalers → 0% delta, no flag ===
+        double mean_a = 0.5,  stddev_a = 1.0;
+        double mean_b = 0.5,  stddev_b = 1.0;
+        double pct_change = ((stddev_b - stddev_a) / stddev_a) * 100.0;
+        check("v5.11.14: identical stddev → 0% change",
+              std::fabs(pct_change) < 1e-9);
+        check("v5.11.14: identical mean → 0 abs delta",
+              std::fabs(mean_b - mean_a) < 1e-9);
+
+        // === Test 2: 100% stddev change → flagged at default threshold (50) ===
+        double sa2 = 1.0, sb2 = 2.0;
+        double pct2 = ((sb2 - sa2) / sa2) * 100.0;
+        bool flag2 = std::fabs(pct2) > 50.0;
+        check("v5.11.14: 1.0→2.0 stddev = +100%", std::fabs(pct2 - 100.0) < 1e-9);
+        check("v5.11.14: +100% > 50% threshold → flagged", flag2);
+
+        // === Test 3: 25% stddev change → NOT flagged at default threshold ===
+        double sa3 = 1.0, sb3 = 1.25;
+        double pct3 = ((sb3 - sa3) / sa3) * 100.0;
+        bool flag3 = std::fabs(pct3) > 50.0;
+        check("v5.11.14: 1.0→1.25 stddev = +25%", std::fabs(pct3 - 25.0) < 1e-9);
+        check("v5.11.14: +25% < 50% threshold → not flagged", !flag3);
+
+        // === Test 4: negative delta also flags by absolute value ===
+        double sa4 = 2.0, sb4 = 0.5;
+        double pct4 = ((sb4 - sa4) / sa4) * 100.0;
+        bool flag4 = std::fabs(pct4) > 50.0;
+        check("v5.11.14: 2.0→0.5 stddev = -75%", std::fabs(pct4 - (-75.0)) < 1e-9);
+        check("v5.11.14: -75% triggers absolute-value flag", flag4);
+    }
+
     printf("\n--- v5.11.13: BuddyAllocator typo fix + O(1) order lookup ---\n");
     {
         // Pre-v5.11.13: buddy_internal_order_to_size returned `1u <

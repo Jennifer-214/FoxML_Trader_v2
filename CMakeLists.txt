@@ -237,6 +237,15 @@ target_include_directories(parity_harness PRIVATE ${CMAKE_SOURCE_DIR}/..)
 target_compile_definitions(parity_harness PRIVATE MULTICORE_TUI)
 target_link_libraries(parity_harness PRIVATE Threads::Threads ssl crypto)
 
+# v5.11.14 — standalone CLI that diffs two FeatureStandardizer .scaler
+# binaries per-feature. Reports |Δmean|, |Δstddev|, and percent change.
+# Linked against ssl + crypto for the SHA-256 verifier the loader runs
+# on each sidecar. No MULTICORE_TUI / no test framework — pure CLI tool.
+add_executable(compare_scalers tools/compare_scalers.cpp)
+target_compile_options(compare_scalers PRIVATE -O2 -march=native)
+target_include_directories(compare_scalers PRIVATE ${CMAKE_SOURCE_DIR}/..)
+target_link_libraries(compare_scalers PRIVATE ssl crypto)
+
 enable_testing()
 add_test(NAME controller_test COMMAND controller_test)
 add_test(NAME depth_recorder_test COMMAND depth_recorder_test)
