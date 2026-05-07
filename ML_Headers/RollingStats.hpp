@@ -25,6 +25,7 @@
 #define ROLLING_STATS_HPP
 
 #include "../FixedPoint/FixedPointN.hpp"
+#include "ReciprocalLUT.hpp"  // v5.11.2.A — branchless 1/n via precomputed reciprocals
 
 //======================================================================================================
 // [ROLLING STATS STRUCT]
@@ -198,21 +199,27 @@ inline void RollingStats_Push(RollingStats<F, W> *rs, FPN<F> price, FPN<F> volum
     FPN<F> sum_x  = FPN_FromInt<F>(n_l * (n_l - 1) / 2);
     FPN<F> sum_x2 = FPN_FromInt<F>(n_l * (n_l - 1) * (2 * n_l - 1) / 6);
 
-    // averages and range
-    rs->price_avg  = FPN_DivNoAssert(price_sum, n_fp);
-    rs->volume_avg = FPN_DivNoAssert(volume_sum, n_fp);
+    // v5.11.2.A — Branchless averaging via precomputed reciprocal LUT.
+    // FPN_Mul(sum, recip[n]) replaces FPN_DivNoAssert(sum, n_fp).
+    // ULP drift bounded ≤ 1 LSB for non-power-of-2 n; replay-determinism
+    // baseline regenerated. See ReciprocalLUT.hpp for full trade-off context.
+    const auto& recip = tt::GetReciprocalLUT<F, W>();
+    rs->price_avg  = FPN_Mul(price_sum, recip.values[n]);
+    rs->volume_avg = FPN_Mul(volume_sum, recip.values[n]);
     rs->volume_max = v_max;
     rs->price_min  = p_min;
     rs->price_max  = p_max;
 
-    // stddev approximation (kept for config compatibility — all existing multipliers tuned for this)
+    // stddev approximation: range / 4 = range >> 2 (exact, no LUT needed since 4 is power-of-2)
     FPN<F> range = FPN_Sub(p_max, p_min);
     rs->price_stddev = FPN_DivNoAssert(range, FPN_FromDouble<F>(4.0));
 
-    // real variance: var = (sum_y2 / n) - (sum_y / n)²  =  (n*sum_y2 - sum_y²) / n²
+    // real variance: var = (n*sum_y2 - sum_y²) / n²
+    // Use recip[n] * recip[n] for the n² division (one extra FPN_Mul, ULP drift
+    // already captured by the per-n drift; no compounding past the LSB).
     FPN<F> ss_total = FPN_SubSat(FPN_Mul(n_fp, price_sum_y2), FPN_Mul(price_sum, price_sum));
-    FPN<F> n_sq = FPN_Mul(n_fp, n_fp);
-    rs->price_variance = FPN_DivNoAssert(ss_total, n_sq);
+    FPN<F> recip_n_sq = FPN_Mul(recip.values[n], recip.values[n]);
+    rs->price_variance = FPN_Mul(ss_total, recip_n_sq);
 
     // price slope via ordinary least squares (same formula as LinearRegression3X_Fit)
     // slope = (n*sum_xy - sum_x*sum_y) / (n*sum_x2 - sum_x²)

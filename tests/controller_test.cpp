@@ -13400,6 +13400,69 @@ e3_skip_load:;
         unlink(stamp_path);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.11.2.A — Reciprocal LUT for 1/n ---\n");
+    {
+        // Theory (audit Part 2.3): replace FPN_DivNoAssert(sum, n_fp) with
+        // FPN_Mul(sum, recip[n]) where recip[n] is precomputed at boot.
+        // Branchless across all n; ULP drift accepted for non-power-of-2 n.
+
+        using namespace tt;
+
+        // === Test 1: LUT initializes with non-zero values for n=1..W ===
+        const auto& lut = GetReciprocalLUT<FP, 128>();
+        check("v5.11.2.A: LUT[0] is sentinel zero",
+              FPN_IsZero(lut.values[0]));
+        check("v5.11.2.A: LUT[1] is non-zero (= 1.0)",
+              !FPN_IsZero(lut.values[1]));
+        check("v5.11.2.A: LUT[128] is non-zero (= 1/128)",
+              !FPN_IsZero(lut.values[128]));
+
+        // === Test 2: LUT[2] is exactly 0.5 (power-of-2 reciprocal is exact) ===
+        FPN<FP> half = FPN_FromDouble<FP>(0.5);
+        check("v5.11.2.A: LUT[2] == FPN(0.5) bytewise (power-of-2 exact)",
+              lut.values[2].w[0] == half.w[0] &&
+              lut.values[2].w[1] == half.w[1]);
+
+        // === Test 3: LUT[128] is exactly 1/128 (power-of-2) ===
+        FPN<FP> recip128 = FPN_FromDouble<FP>(1.0 / 128.0);
+        check("v5.11.2.A: LUT[128] == FPN(1/128) bytewise (power-of-2 exact)",
+              lut.values[128].w[0] == recip128.w[0] &&
+              lut.values[128].w[1] == recip128.w[1]);
+
+        // === Test 4: For power-of-2 n, FPN_Mul(sum, LUT[n]) == FPN_DivNoAssert(sum, n) bytewise ===
+        // (Audit's claim; verifies no drift for the steady-state case n=W.)
+        FPN<FP> sum = FPN_FromDouble<FP>(12345.6789);
+        for (int n_test : {2, 4, 8, 16, 32, 64, 128}) {
+            FPN<FP> n_fp = FPN_FromInt<FP>((int64_t)n_test);
+            FPN<FP> via_div = FPN_DivNoAssert(sum, n_fp);
+            FPN<FP> via_mul = FPN_Mul(sum, lut.values[n_test]);
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                "v5.11.2.A: FPN_Mul(LUT[%d]) == FPN_DivNoAssert (power-of-2)", n_test);
+            check(msg,
+                  via_div.w[0] == via_mul.w[0] && via_div.w[1] == via_mul.w[1]);
+        }
+
+        // === Test 5: For non-power-of-2 n, drift bounded in REAL VALUE terms ===
+        // Bytewise drift can be many LSBs (truncation cascades) but real-value
+        // drift should be < 1e-10 of the result. This is the actual contract
+        // the engine relies on (downstream consumers truncate to ~1e-7 anyway).
+        for (int n_test : {3, 5, 6, 7, 9, 10, 11, 13, 100}) {
+            FPN<FP> n_fp = FPN_FromInt<FP>((int64_t)n_test);
+            FPN<FP> via_div = FPN_DivNoAssert(sum, n_fp);
+            FPN<FP> via_mul = FPN_Mul(sum, lut.values[n_test]);
+            double via_div_d = FPN_ToDouble(via_div);
+            double via_mul_d = FPN_ToDouble(via_mul);
+            double rel_drift = (via_div_d != 0.0)
+                ? std::abs(via_mul_d - via_div_d) / std::abs(via_div_d)
+                : std::abs(via_mul_d - via_div_d);
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                "v5.11.2.A: relative drift LUT vs Div < 1e-10 for n=%d", n_test);
+            check(msg, rel_drift < 1e-10);
+        }
+    }
+
     printf("\n--- EXTENSIBILITY: v5.11.1.2 — Branchless leg-B via PAIR_BRANCHLESS template ---\n");
     {
         // Theory (audit Part 1.2): leg-B SG_Evaluate is currently branch-gated
