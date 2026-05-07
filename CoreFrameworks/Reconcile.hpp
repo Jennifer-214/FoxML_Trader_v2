@@ -36,6 +36,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "ParseFast.hpp"  // v5.11.4.A — std::from_chars wrapper for double parsing
+
 namespace tt {
 
 //======================================================================================================
@@ -141,13 +143,17 @@ static inline double reconcile_get_double(const char* obj_start, const char* obj
     snprintf(search, sizeof(search), "\"%s\":\"", key);
     const char* p = strstr(obj_start, search);
     if (p && p < obj_end) {
-        return atof(p + strlen(search));
+        // v5.11.4.A — locale-immune via std::from_chars. atof respects
+        // LC_NUMERIC; reconcile parses Binance REST responses where the
+        // server emits '.' decimals. A stray locale flip elsewhere in
+        // the process would corrupt every reconciled price/qty silently.
+        return tt::parse_double_fast(p + strlen(search));
     }
     // Numeric form
     snprintf(search, sizeof(search), "\"%s\":", key);
     p = strstr(obj_start, search);
     if (p && p < obj_end) {
-        return atof(p + strlen(search));
+        return tt::parse_double_fast(p + strlen(search));
     }
     return 0.0;
 }
