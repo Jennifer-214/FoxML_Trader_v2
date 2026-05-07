@@ -1118,6 +1118,95 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
 // v5.10.0a.next reader: if all loaded stamps have per_regime_val_acc
 // fields (added by future trainer-side ship), use as bandit init
 // priors. Currently no-op since the stamp fields don't exist yet.
+
+// v5.10.1.B — Cross-handle grid_member_count consistency check
+// (parity-check Finding #2 consume-side closure; Option C).
+//
+// Walks every loaded handle across the 4 ensemble roles and verifies that
+// all stamps agree on grid_member_count. Re-parses each stamp via
+// verify_model_stamp() rather than caching the value on ModelHandle.
+// Wasteful (re-opens file at boot) but boundary-stable per CLAUDE.local.md
+// "boundary-stable refactor" rule (no struct schema cascade).
+//
+// Back-compat: legacy stamps without grid_member_count log a WARN-and-load
+// note explaining that train_multi_horizon_worker_fn doesn't emit stamps yet.
+// Closure of the emit side is deferred to v5.10.X.
+//
+// Returns:
+//   1 — OK (uniform grid_member_count or all-legacy WARN-and-load)
+//   0 — REFUSE (mismatched grid_member_count across siblings; caller unwinds)
+//
+// Extracted from EnsembleModelZoo_AutoDetectFromDir for unit-testable isolation.
+template <unsigned F>
+inline int EnsembleZoo_VerifyGridMemberConsistency(
+    EnsembleModelZoo<F> *ezoo,
+    const char *held_out_stamp_secret,
+    double gap_threshold)
+{
+    int agreed_count   = -1;
+    int legacy_count   = 0;
+    int total_handles  = 0;
+
+    for (int role = 0; role < 4; ++role) {
+        ModelHandle<F> *role_arr;
+        int count;
+        switch (role) {
+            case 0: role_arr = ezoo->buy_signal;     count = ezoo->buy_signal_count;     break;
+            case 1: role_arr = ezoo->barrier;        count = ezoo->barrier_count;        break;
+            case 2: role_arr = ezoo->regime;         count = ezoo->regime_count;         break;
+            case 3: role_arr = ezoo->exit_predictor; count = ezoo->exit_predictor_count; break;
+            default: continue;
+        }
+        for (int h = 0; h < count; ++h) {
+            const ModelHandle<F> *m = &role_arr[h];
+            if (!Model_IsLoaded(m) || m->model_path[0] == '\0') continue;
+            ++total_handles;
+
+            // Re-parse stamp file from disk. Pass 0 for the registry hashes —
+            // we already verified them on the original load via
+            // EnsembleModelZoo_LoadFromCfg → CoreModelZoo_TryLoadRole; here we
+            // just need grid_member_count out of the body.
+            ModelStampResult sr = verify_model_stamp(
+                m->model_path,
+                held_out_stamp_secret ? held_out_stamp_secret : "",
+                gap_threshold,
+                MODEL_FORMAT_VERSION,
+                /*expected_feature_registry_hash=*/0,
+                /*expected_label_registry_hash=*/0);
+
+            if (!sr.has_grid_member_count) {
+                ++legacy_count;
+                continue; // back-compat: unstamped multi-horizon model
+            }
+            if (agreed_count < 0) {
+                agreed_count = (int)sr.grid_member_count;
+            } else if ((int)sr.grid_member_count != agreed_count) {
+                fprintf(stderr,
+                    "[ensemble_auto_detect] REFUSED: handle role=%d h=%d "
+                    "stamps grid_member_count=%u; expected %d. "
+                    "Mixed-training-run ensemble.\n",
+                    role, h, (unsigned)sr.grid_member_count, agreed_count);
+                return 0;  // refuse
+            }
+        }
+    }
+
+    if (agreed_count > 0) {
+        fprintf(stderr,
+            "[ensemble_auto_detect] OK: %d/%d handles agree on grid_member_count=%d\n",
+            (total_handles - legacy_count), total_handles, agreed_count);
+    } else if (legacy_count > 0) {
+        fprintf(stderr,
+            "[ensemble_auto_detect] WARN: %d/%d handles missing grid_member_count "
+            "(unstamped multi-horizon model OR pre-v5.10.0a.G.2 ensemble); "
+            "consistency check skipped. "
+            "TODO(v5.10.X): wire stamp_write_for_model into "
+            "train_multi_horizon_worker_fn to emit stamps.\n",
+            legacy_count, total_handles);
+    }
+    return 1;  // ok (uniform or all-legacy)
+}
+
 template <unsigned F>
 inline int EnsembleModelZoo_AutoDetectFromDir(
     EnsembleModelZoo<F> *ezoo,
@@ -1217,6 +1306,20 @@ inline int EnsembleModelZoo_AutoDetectFromDir(
                                                gap_threshold,
                                                held_out_gate_strict,
                                                acknowledge_cross_binary_drift);
+
+    // v5.10.1.B — Cross-handle grid_member_count consistency check
+    // (parity-check Finding #2 consume-side closure; Option C).
+    // Validator extracted into EnsembleZoo_VerifyGridMemberConsistency for
+    // unit-testable isolation; runs only when models actually loaded.
+    if (total > 0 && ezoo->active) {
+        int validator_rc = EnsembleZoo_VerifyGridMemberConsistency(
+            ezoo, held_out_stamp_secret, gap_threshold);
+        if (validator_rc == 0) {
+            // Mismatched grid_member_count across siblings → unwind + refuse.
+            EnsembleModelZoo_Free(ezoo);
+            return 0;  // match function contract: returns "total models loaded"
+        }
+    }
 
     if (total > 0 && ezoo->active) {
         // Build a comma-separated list for the log

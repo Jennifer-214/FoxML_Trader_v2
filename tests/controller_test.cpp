@@ -13393,6 +13393,168 @@ e3_skip_load:;
         unlink(stamp_path);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.10.1.B — Ensemble grid_member_count consistency validator ---\n");
+    {
+        // Theory (parity-check Finding #2): pre-v5.10.1.B,
+        // EnsembleModelZoo_AutoDetectFromDir populated per-horizon handles but
+        // never validated that all loaded stamps agreed on grid_member_count.
+        // Operator could mix horizons across different training runs without
+        // detection. The docstring at CoreModelZoo.hpp:1093-1114 described the
+        // check; the implementation didn't exist.
+        //
+        // Post-v5.10.1.B, EnsembleZoo_VerifyGridMemberConsistency is the
+        // consume-side validator extracted into a unit-testable helper. Re-parses
+        // each loaded handle's stamp file (boundary-stable per CLAUDE.local.md
+        // memory rule — no ModelHandle struct cascade), returns 0 (REFUSE) on
+        // mismatch or 1 (OK) on uniform / all-legacy.
+        //
+        // Tests fake the "loaded" state by setting backend=XGBOOST + handle to
+        // a non-null sentinel, since real model loading requires USE_XGBOOST=ON.
+        // The handle is reset to null pre-Free to avoid double-free on the
+        // bogus pointer.
+
+        // === Test B.1: Uniform grid_member_count → OK (return 1) ===
+        {
+            char tmp_base[] = "/tmp/v5101b_uniform_XXXXXX";
+            char *td = mkdtemp(tmp_base);
+            check("v5.10.1.B uniform: tmpdir created", td != nullptr);
+            if (td) {
+                char m_path[3][256];
+                for (int i = 0; i < 3; ++i) {
+                    snprintf(m_path[i], sizeof(m_path[i]), "%s/h%d.bin", td, i);
+                    FILE *mf = fopen(m_path[i], "wb"); fwrite("test", 1, 4, mf); fclose(mf);
+
+                    StampInferenceCfgInputs inf = {};
+                    inf.has_grid_member_count = 1;
+                    inf.grid_member_count = 3;
+                    inf.grid_member_idx = i;
+                    StampWriteResult sw = stamp_write_for_model(
+                        m_path[i], "v5101b-test", MODEL_FORMAT_VERSION,
+                        "2026-05-06", 0.6, 0.55, 0.05, 0,
+                        FEATURE_REGISTRY_HASH(),
+                        ENGINE_VERSION_STRING, &inf);
+                    check("v5.10.1.B uniform: stamp emit ok", sw.ok);
+                }
+
+                EnsembleModelZoo<FP> ezoo;
+                EnsembleModelZoo_Init(&ezoo);
+                ezoo.active = 1;
+                ezoo.buy_signal_count = 3;
+                for (int i = 0; i < 3; ++i) {
+                    ezoo.buy_signal[i].backend = MODEL_BACKEND_XGBOOST;
+                    ezoo.buy_signal[i].handle  = (void*)0xDEADBEEF;  // fake "loaded"
+                    strncpy(ezoo.buy_signal[i].model_path, m_path[i],
+                            sizeof(ezoo.buy_signal[i].model_path) - 1);
+                }
+
+                int rc = EnsembleZoo_VerifyGridMemberConsistency<FP>(
+                    &ezoo, "v5101b-test", 0.10);
+                check("v5.10.1.B uniform: validator returns OK (1)", rc == 1);
+
+                // Reset handles before Free to avoid double-free of fake pointer.
+                for (int i = 0; i < 3; ++i) ezoo.buy_signal[i].handle = nullptr;
+                EnsembleModelZoo_Free(&ezoo);
+
+                char rmcmd[400];
+                snprintf(rmcmd, sizeof(rmcmd), "rm -rf %s", td);
+                int rc2 = system(rmcmd); (void)rc2;
+            }
+        }
+
+        // === Test B.2: Mismatched grid_member_count → REFUSE (return 0) ===
+        {
+            char tmp_base[] = "/tmp/v5101b_mismatch_XXXXXX";
+            char *td = mkdtemp(tmp_base);
+            check("v5.10.1.B mismatch: tmpdir created", td != nullptr);
+            if (td) {
+                char m_path[3][256];
+                int member_counts[3] = {3, 3, 5};  // last one mismatched
+                for (int i = 0; i < 3; ++i) {
+                    snprintf(m_path[i], sizeof(m_path[i]), "%s/h%d.bin", td, i);
+                    FILE *mf = fopen(m_path[i], "wb"); fwrite("test", 1, 4, mf); fclose(mf);
+
+                    StampInferenceCfgInputs inf = {};
+                    inf.has_grid_member_count = 1;
+                    inf.grid_member_count = member_counts[i];
+                    inf.grid_member_idx = i;
+                    stamp_write_for_model(
+                        m_path[i], "v5101b-test", MODEL_FORMAT_VERSION,
+                        "2026-05-06", 0.6, 0.55, 0.05, 0,
+                        FEATURE_REGISTRY_HASH(),
+                        ENGINE_VERSION_STRING, &inf);
+                }
+
+                EnsembleModelZoo<FP> ezoo;
+                EnsembleModelZoo_Init(&ezoo);
+                ezoo.active = 1;
+                ezoo.buy_signal_count = 3;
+                for (int i = 0; i < 3; ++i) {
+                    ezoo.buy_signal[i].backend = MODEL_BACKEND_XGBOOST;
+                    ezoo.buy_signal[i].handle  = (void*)0xDEADBEEF;
+                    strncpy(ezoo.buy_signal[i].model_path, m_path[i],
+                            sizeof(ezoo.buy_signal[i].model_path) - 1);
+                }
+
+                int rc = EnsembleZoo_VerifyGridMemberConsistency<FP>(
+                    &ezoo, "v5101b-test", 0.10);
+                check("v5.10.1.B mismatch: validator returns REFUSE (0)", rc == 0);
+
+                for (int i = 0; i < 3; ++i) ezoo.buy_signal[i].handle = nullptr;
+                EnsembleModelZoo_Free(&ezoo);
+
+                char rmcmd[400];
+                snprintf(rmcmd, sizeof(rmcmd), "rm -rf %s", td);
+                int rc2 = system(rmcmd); (void)rc2;
+            }
+        }
+
+        // === Test B.3: Legacy stamps (no grid_member_count) → OK with WARN (return 1) ===
+        // Models in this state today: train_multi_horizon_worker_fn doesn't emit
+        // stamps yet. Validator must back-compat WARN-and-load.
+        {
+            char tmp_base[] = "/tmp/v5101b_legacy_XXXXXX";
+            char *td = mkdtemp(tmp_base);
+            check("v5.10.1.B legacy: tmpdir created", td != nullptr);
+            if (td) {
+                char m_path[3][256];
+                for (int i = 0; i < 3; ++i) {
+                    snprintf(m_path[i], sizeof(m_path[i]), "%s/h%d.bin", td, i);
+                    FILE *mf = fopen(m_path[i], "wb"); fwrite("test", 1, 4, mf); fclose(mf);
+
+                    StampInferenceCfgInputs inf = {};
+                    // has_grid_member_count = 0 → field NOT emitted
+                    stamp_write_for_model(
+                        m_path[i], "v5101b-test", MODEL_FORMAT_VERSION,
+                        "2026-05-06", 0.6, 0.55, 0.05, 0,
+                        FEATURE_REGISTRY_HASH(),
+                        ENGINE_VERSION_STRING, &inf);
+                }
+
+                EnsembleModelZoo<FP> ezoo;
+                EnsembleModelZoo_Init(&ezoo);
+                ezoo.active = 1;
+                ezoo.buy_signal_count = 3;
+                for (int i = 0; i < 3; ++i) {
+                    ezoo.buy_signal[i].backend = MODEL_BACKEND_XGBOOST;
+                    ezoo.buy_signal[i].handle  = (void*)0xDEADBEEF;
+                    strncpy(ezoo.buy_signal[i].model_path, m_path[i],
+                            sizeof(ezoo.buy_signal[i].model_path) - 1);
+                }
+
+                int rc = EnsembleZoo_VerifyGridMemberConsistency<FP>(
+                    &ezoo, "v5101b-test", 0.10);
+                check("v5.10.1.B legacy: validator returns OK with WARN (1)", rc == 1);
+
+                for (int i = 0; i < 3; ++i) ezoo.buy_signal[i].handle = nullptr;
+                EnsembleModelZoo_Free(&ezoo);
+
+                char rmcmd[400];
+                snprintf(rmcmd, sizeof(rmcmd), "rm -rf %s", td);
+                int rc2 = system(rmcmd); (void)rc2;
+            }
+        }
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.1.A — LABEL_REGISTRY_HASH production-caller plumb-through ---\n");
     {
         // Theory (parity-check Finding #1): pre-v5.10.1.A, the production
