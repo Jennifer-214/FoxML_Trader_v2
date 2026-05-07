@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "../CoreFrameworks/SystemInit.hpp"  // v5.11.0.A — engine_set_mxcsr_ftz_daz
 #include <cmath>
 #include "../Backtest/BacktestEngine.hpp"
 #include "../Backtest/BacktestSharded.hpp"  // pulls the sharded body for linking
@@ -117,6 +118,10 @@ static int run_one_path(BacktestResults* out_results,
 }
 
 int main(int argc, char** argv) {
+    // v5.11.0.A — Match engine's MXCSR state so parity harness compares
+    // feature output under identical FP regime (no subnormal-region divergence).
+    tt::engine_set_mxcsr_ftz_daz();
+
     if (argc < 2) {
         fprintf(stderr,
                 "usage: %s <tick_file.csv> [config_file] [--tolerance 1e-6]\n"

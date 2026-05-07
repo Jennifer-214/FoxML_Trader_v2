@@ -20,6 +20,7 @@
 #include "../CoreFrameworks/Order.hpp"
 #include "../CoreFrameworks/OrderManager.hpp"
 #include "../CoreFrameworks/ControllerEventLoop.hpp"  // Phase 2.1 tests
+#include "../CoreFrameworks/SystemInit.hpp"            // v5.11.0.A — engine_set_mxcsr_ftz_daz
 #include "../CoreFrameworks/ExecutionCore.hpp"        // Phase 2.1 tests
 #include "../CoreFrameworks/ShardedSnapshotPersist.hpp"  // Phase 4 tests
 #include "../CoreFrameworks/ShardedBacktestDriver.hpp"   // Track E.1 tests
@@ -1421,6 +1422,11 @@ static void test_max_positions() {
 // [MAIN]
 //======================================================================================================
 int main() {
+    // v5.11.0.A — Match engine's MXCSR state so snapshot tests for feature
+    // compute don't silently diverge in subnormal territory. See
+    // CoreFrameworks/SystemInit.hpp.
+    tt::engine_set_mxcsr_ftz_daz();
+
     mkdir("logging", 0755); // tests write trade logs here now
     printf("======================================\n");
     printf("  CONTROLLER TEST SUITE\n");
@@ -13391,6 +13397,33 @@ e3_skip_load:;
         char stamp_path[512];
         snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", tmp_model);
         unlink(stamp_path);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.0.A — FTZ/DAZ MXCSR state ---\n");
+    {
+        // Theory (audit Part 12.3): subnormal floats trigger microcode traps
+        // costing up to 100x FPU throughput. tt::engine_set_mxcsr_ftz_daz()
+        // sets FTZ + DAZ bits at main() entry to flush subnormals to zero.
+        // This test runs AFTER controller_test main() called the helper at
+        // line 1424; verify the bits are still set (Linux pthread inherits
+        // MXCSR but the test runs on the main thread, so direct check works).
+
+        unsigned int mxcsr = _mm_getcsr();
+
+        // FTZ bit = 0x8000 (bit 15)
+        // DAZ bit = 0x0040 (bit 6)
+        check("v5.11.0.A: FTZ bit set in MXCSR (0x8000)",
+              (mxcsr & 0x8000) != 0);
+        check("v5.11.0.A: DAZ bit set in MXCSR (0x0040)",
+              (mxcsr & 0x0040) != 0);
+
+        // Smoke: idempotent — calling again leaves bits set
+        tt::engine_set_mxcsr_ftz_daz();
+        unsigned int mxcsr2 = _mm_getcsr();
+        check("v5.11.0.A: FTZ idempotent under second call",
+              (mxcsr2 & 0x8000) != 0);
+        check("v5.11.0.A: DAZ idempotent under second call",
+              (mxcsr2 & 0x0040) != 0);
     }
 
     printf("\n--- EXTENSIBILITY: v5.10.1.B — Ensemble grid_member_count consistency validator ---\n");

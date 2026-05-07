@@ -32,6 +32,7 @@
 #include "DataStream/TradeLog.hpp"
 #include "DataStream/MetricsLog.hpp"
 #include "DataStream/TickRecorder.hpp"
+#include "CoreFrameworks/SystemInit.hpp"  // v5.11.0.A — engine_set_mxcsr_ftz_daz
 
 #ifdef USE_IMGUI_GUI
 #include "GUI/CandleAccumulator.hpp"
@@ -117,6 +118,12 @@ static inline void engine_force_close_all(PortfolioController<FP> *ctrl, TradeLo
 // [MAIN]
 //======================================================================================================
 int main(int argc, char *argv[]) {
+    // v5.11.0.A — Set FTZ/DAZ as the FIRST thing in main(). Subnormal stalls
+    // cost up to 100x FPU throughput (microcode trap); critical for HFT
+    // determinism. Linux pthread_create inherits MXCSR, so this covers all
+    // slow-path threads. Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 12.3.
+    tt::engine_set_mxcsr_ftz_daz();
+
     fprintf(stderr, "Tick Trader — Copyright (c) 2026 Jennifer Lewis. All rights reserved.\n");
     fprintf(stderr, "Licensed under AGPL-3.0-or-later. Commercial license: jenn.lewis5789@gmail.com\n\n");
 

@@ -33,6 +33,7 @@
 #include "GUI/MLStatusPanel.hpp"      // v5.9.0b: per-core ML observability
 
 #include "Backtest/BacktestPanels.hpp"
+#include "CoreFrameworks/SystemInit.hpp"  // v5.11.0.A — engine_set_mxcsr_ftz_daz
 
 #include <sys/stat.h>  // mkdir
 
@@ -83,6 +84,11 @@ static void Suite_SetupDefaultLayout(ImGuiID dockspace_id) {
 // [MAIN]
 //======================================================================================================
 int main(int argc, char *argv[]) {
+    // v5.11.0.A — Suite does FP math during model training (XGBoost feature
+    // standardizer, label binning, walk-forward scoring). Match engine's
+    // MXCSR state so trained models score identically at serve time.
+    tt::engine_set_mxcsr_ftz_daz();
+
     fprintf(stderr, "foxml suite — backtesting + ML training workstation\n");
     fprintf(stderr, "Copyright (c) 2026 Jennifer Lewis. All rights reserved.\n\n");
 
