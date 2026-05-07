@@ -971,6 +971,20 @@ struct ModelStampResult {
     // feature_registry_hash refusal flow.
     uint8_t  has_label_registry_hash;
     uint64_t label_registry_hash;
+    // v5.11.18a — per-core feature_mask binding (stamp-side anchor for the
+    // runtime cfg field at ControllerConfig::core_feature_mask[16]). The
+    // stamp persists ONE mask (the training-time mask, which must equal
+    // the cfg mask of the core that produced this model). v5.11.18a only
+    // emits + verifies this field when the mask differs from the all-on
+    // default — legacy stamps + default-cfg-trained models load with
+    // has_feature_mask=0 (skip check), preserving backward compat.
+    //
+    // Verifier compares stamp's feature_mask_train against the runtime
+    // cfg's per-core mask (caller passes which core is loading) and
+    // refuses on mismatch in strict mode. v5.11.18a writes infrastructure
+    // only; v5.11.18 wires Features_PackAll to actually act on the mask.
+    uint8_t  has_feature_mask;
+    uint64_t feature_mask_train;
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -1008,7 +1022,11 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                                             double gap_threshold,
                                             int expected_format_version,
                                             uint64_t expected_feature_registry_hash = 0,
-                                            uint64_t expected_label_registry_hash = 0) {
+                                            uint64_t expected_label_registry_hash = 0,
+                                            // v5.11.18a — feature_mask of the core
+                                            // loading the model. 0 = skip check
+                                            // (legacy callers + default mask).
+                                            uint64_t expected_feature_mask = 0) {
     ModelStampResult r;
     r.valid = -1;
     r.reason[0] = '\0';
@@ -1062,6 +1080,11 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     // v5.10.0d — label_registry_hash zero-init (absent in legacy stamps)
     r.has_label_registry_hash = 0;
     r.label_registry_hash = 0;
+    // v5.11.18a — feature_mask zero-init (absent in legacy stamps + in
+    // v5.11.18a stamps trained with the all-on default mask). Caller's
+    // load-time check skips when has_feature_mask=0.
+    r.has_feature_mask = 0;
+    r.feature_mask_train = 0;
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -1243,6 +1266,15 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 r.label_registry_hash = (uint64_t)strtoull(val, nullptr, 16);
                 r.has_label_registry_hash = 1;
             }
+            // v5.11.18a — feature mask (position 21). Hex-encoded uint64
+            // bitmap of features active during training. Stamp emits
+            // %016lx (no prefix). Verifier compares against runtime cfg
+            // mask in 3-tier strict-mode. Legacy stamps (no field) load
+            // with has_feature_mask=0 → check skipped.
+            else if (strcmp(key, "feature_mask") == 0) {
+                r.feature_mask_train = (uint64_t)strtoull(val, nullptr, 16);
+                r.has_feature_mask = 1;
+            }
         }
         line = strtok_r(nullptr, "\n", &save);
     }
@@ -1317,6 +1349,32 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 "(label set drift; retrain required)",
                 (unsigned long)r.label_registry_hash,
                 (unsigned long)expected_label_registry_hash);
+            return r;
+        }
+    }
+
+    // 1d. v5.11.18a — feature_mask match. Caller passes the runtime cfg's
+    // per-core mask for the core loading this model. Default 0 = skip
+    // check. Pre-v5.11.18a stamps lack the field (parses as 0) → caller
+    // can decide WARN vs accept based on operator strictness; here we
+    // WARN-and-accept by default (informational; behavior change is
+    // v5.11.18 territory). When both sides have the data and disagree,
+    // refuse — masked-feature drift is a parity-critical failure mode
+    // (CRITICAL gap from /parity-check 2026-05-07).
+    if (expected_feature_mask != 0) {
+        if (!r.has_feature_mask) {
+            fprintf(stderr,
+                "[stamp] WARN: %s stamp lacks feature_mask "
+                "(pre-v5.11.18a) — feature-mask drift NOT verified\n",
+                stamp_path);
+        } else if (r.feature_mask_train != expected_feature_mask) {
+            r.valid = 0;
+            snprintf(r.reason, sizeof(r.reason),
+                "feature_mask mismatch: stamp=%016lx engine=%016lx "
+                "(per-core feature subset drift; retrain or restore "
+                "feature_mask cfg to training-time value)",
+                (unsigned long)r.feature_mask_train,
+                (unsigned long)expected_feature_mask);
             return r;
         }
     }
@@ -1491,6 +1549,19 @@ struct StampInferenceCfgInputs {
     // Mirrors v5.8.6 feature_registry_hash refusal flow.
     int      has_label_registry_hash;
     uint64_t label_registry_hash;
+    // v5.11.18a — feature_mask (canonical position 21). Per-core uint64
+    // bitmap of which features were active at training time. Ship is
+    // infrastructure-only — Features_PackAll still consumes ALL features
+    // until v5.11.18 wires the mask through MLBuildContext. Surface G
+    // has_*=0 forward-compat for legacy stamps + default-cfg trains
+    // (where the mask is the all-on default 0xFFFFFFFFFFFFFFFF).
+    //
+    // Convention: emit only when caller explicitly passes a non-default
+    // mask. This keeps stamps trained against the all-on default
+    // bytewise-identical to pre-v5.11.18a stamps (the field is absent
+    // from the canonical body, so the HMAC signature is unchanged).
+    int      has_feature_mask;
+    uint64_t feature_mask_train;
 };
 
 inline StampWriteResult stamp_write_for_model(const char* model_path,
@@ -1699,6 +1770,20 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
         int wrote = snprintf(canonical + n, sizeof(canonical) - n,
             "label_registry_hash=%016lx\n",
             (unsigned long)inf->label_registry_hash);
+        if (wrote > 0) n += wrote;
+    }
+
+    // v5.11.18a — feature_mask (canonical position 21). Set
+    // inf->has_feature_mask=1 to emit; verifier compares against the
+    // runtime cfg's per-core feature_mask at load time. Convention:
+    // emit only when caller explicitly passes a non-default mask
+    // (training-time mask differs from 0xFFFF..F all-on default). This
+    // keeps stamps trained against the default mask bytewise-identical
+    // to pre-v5.11.18a stamps + their HMAC signatures unchanged.
+    if (inf && inf->has_feature_mask && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "feature_mask=%016lx\n",
+            (unsigned long)inf->feature_mask_train);
         if (wrote > 0) n += wrote;
     }
 

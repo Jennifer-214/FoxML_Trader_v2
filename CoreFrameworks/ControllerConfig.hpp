@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>      // v5.11.18a: ERANGE detection in feature_mask hex parser
 
 //======================================================================================================
 // [ENGINE MODE]
@@ -669,6 +670,25 @@ template <unsigned F> struct ControllerConfig {
   char core_horizon_list[16][128];
   char core_ensemble_blend_mode[16][16];
   char core_disabled_horizons[16][128];
+  // v5.11.18a — per-core feature mask. Bit i set = feature index i is
+  // computed + packed for this core; bit i clear = packed as 0.0f
+  // (NOT skipped; sparse-zero array contract per parity-check finding).
+  // Default 0xFFFFFFFFFFFFFFFF (all features enabled) — preserves
+  // pre-v5.11.18a behavior bytewise.
+  //
+  // Config syntax: `core_0_feature_mask=0xFFFFFFFFFFFFFFFF` (matches the
+  // existing per-core field convention: core_N_strategy, core_N_risk_pct,
+  // etc.). Parser accepts 0x-prefixed hex (any case) or plain decimal.
+  // Stored uint64_t.
+  // Parity binding (Surface G stamp body extension at v5.11.18a, ML
+  // wiring at v5.11.18) ensures runtime-mask vs training-mask drift is
+  // caught at model load.
+  //
+  // Safety: v5.11.18a ships this cfg field + stamp infra ONLY. Behavior
+  // change (Features_PackAll respecting the mask) lands in v5.11.18.
+  // Default-on bitmap means any cfg without `feature_mask_<N>=` lines
+  // produces identical features to pre-v5.11.18a builds.
+  uint64_t core_feature_mask[16];
   // Per-core full-tunable overrides (v4.0). One slot per execution core
   // (16 max). Each PerCoreOverrides field shadows a same-named field on
   // ControllerConfig — non-zero overrides global; zero inherits.
@@ -1078,10 +1098,12 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.ensemble_trade_reward_mult = 4.0;
   cfg.ensemble_bandit_save_interval = 5000;  // v5.10.0a.G.9
   // v5.10.0a.G.6 — per-core ensemble cfg defaults (empty = inherit global)
+  // v5.11.18a — per-core feature_mask defaults (all-bits-on = no masking)
   for (int i = 0; i < 16; ++i) {
       cfg.core_horizon_list[i][0] = '\0';
       cfg.core_ensemble_blend_mode[i][0] = '\0';
       cfg.core_disabled_horizons[i][0] = '\0';
+      cfg.core_feature_mask[i] = 0xFFFFFFFFFFFFFFFFULL;  // all features enabled
   }
   cfg.health_log_level            = 0;                            // 0=info, 1=debug, 2=trace
   cfg.reconcile_interval_sec      = 0;                            // 0 = boot-only
@@ -1764,6 +1786,38 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
                     sizeof(cfg.core_disabled_horizons[core_idx]) - 1);
             cfg.core_disabled_horizons[core_idx][
                 sizeof(cfg.core_disabled_horizons[core_idx]) - 1] = '\0';
+            continue;
+        }
+        // v5.11.18a — per-core feature_mask (uint64_t, hex or decimal).
+        // Accepts `0xDEADBEEFCAFEBABE` (any case), `0XDEADBEEF`, or plain
+        // decimal `18446744073709551615`. Out-of-range / unparseable
+        // values fall back to default 0xFFFF..F (all features enabled)
+        // with a WARN — never silently zero-out the mask, which would
+        // disable ALL features for that core.
+        if (strcmp(suffix, "feature_mask") == 0) {
+            char* end = nullptr;
+            errno = 0;
+            uint64_t parsed;
+            if ((val[0] == '0' && (val[1] == 'x' || val[1] == 'X'))) {
+                parsed = strtoull(val + 2, &end, 16);
+            } else {
+                parsed = strtoull(val, &end, 10);
+            }
+            if (end == val || (end != nullptr && *end != '\0' && *end != '\n')
+                    || errno == ERANGE) {
+                fprintf(stderr, "[cfg] core_%d_feature_mask='%s' unparseable; "
+                        "expected 0xHEX or decimal. Falling back to all-on "
+                        "(0xFFFFFFFFFFFFFFFF).\n", core_idx, val);
+                cfg.core_feature_mask[core_idx] = 0xFFFFFFFFFFFFFFFFULL;
+            } else {
+                cfg.core_feature_mask[core_idx] = parsed;
+                if (parsed == 0ULL) {
+                    fprintf(stderr, "[cfg] WARN: core_%d_feature_mask=0x0 "
+                            "disables ALL features for this core. Did you "
+                            "mean 0xFFFFFFFFFFFFFFFF (all enabled)?\n",
+                            core_idx);
+                }
+            }
             continue;
         }
       }

@@ -15637,6 +15637,158 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.11.18a: feature_mask cfg + stamp infrastructure ---\n");
+    {
+        // v5.11.18a (2026-05-07) — per-core feature_mask cfg field +
+        // stamp body extension (Surface G has_*=0 forward-compat).
+        // No ML behavior change yet (Features_PackAll still ignores the
+        // mask until v5.11.18 lands). This block tests the prep
+        // infrastructure: cfg parser, default value, stamp emit + parse
+        // round-trip, mismatch refuse, legacy-stamp accept.
+
+        // === Test 1: Default cfg has all-on mask ===
+        {
+            ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+            check("v5.11.18a: default core_feature_mask[0] is all-on",
+                  cfg.core_feature_mask[0] == 0xFFFFFFFFFFFFFFFFULL);
+            check("v5.11.18a: default core_feature_mask[15] is all-on",
+                  cfg.core_feature_mask[15] == 0xFFFFFFFFFFFFFFFFULL);
+        }
+
+        // === Test 2: cfg parser accepts hex-prefixed value ===
+        {
+            char tmp_cfg[] = "/tmp/v51118a_cfg_hex_XXXXXX";
+            int fd = mkstemp(tmp_cfg);
+            check("v5.11.18a: tmp cfg file creation", fd >= 0);
+            if (fd >= 0) {
+                FILE* f = fdopen(fd, "w");
+                fprintf(f, "core_0_feature_mask=0xDEADBEEFCAFEBABE\n");
+                fprintf(f, "core_3_feature_mask=0x00000000000003ff\n");
+                fclose(f);
+
+                ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(tmp_cfg);
+                check("v5.11.18a: parser reads 0xDEADBEEFCAFEBABE for core 0",
+                      cfg.core_feature_mask[0] == 0xDEADBEEFCAFEBABEULL);
+                check("v5.11.18a: parser reads 0x3ff for core 3",
+                      cfg.core_feature_mask[3] == 0x3FFULL);
+                check("v5.11.18a: untouched core stays at all-on default",
+                      cfg.core_feature_mask[1] == 0xFFFFFFFFFFFFFFFFULL);
+                unlink(tmp_cfg);
+            }
+        }
+
+        // === Test 3: cfg parser accepts decimal value ===
+        {
+            char tmp_cfg[] = "/tmp/v51118a_cfg_dec_XXXXXX";
+            int fd = mkstemp(tmp_cfg);
+            if (fd >= 0) {
+                FILE* f = fdopen(fd, "w");
+                fprintf(f, "core_2_feature_mask=18446744073709551615\n");
+                fclose(f);
+
+                ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(tmp_cfg);
+                check("v5.11.18a: parser reads decimal max-uint64",
+                      cfg.core_feature_mask[2] == 0xFFFFFFFFFFFFFFFFULL);
+                unlink(tmp_cfg);
+            }
+        }
+
+        // === Test 4: stamp emit + parse round-trip with feature_mask set ===
+        {
+            char tmp_model[] = "/tmp/v51118a_stamp_model_XXXXXX";
+            char tmp_stamp[600];
+            int fd = mkstemp(tmp_model);
+            check("v5.11.18a: tmp model file creation", fd >= 0);
+            if (fd >= 0) {
+                FILE* mf = fdopen(fd, "wb");
+                const char* dummy = "model-payload-v51118a";
+                fwrite(dummy, 1, strlen(dummy), mf);
+                fclose(mf);
+                snprintf(tmp_stamp, sizeof(tmp_stamp), "%s.stamp", tmp_model);
+
+                StampInferenceCfgInputs inf{};
+                inf.has_feature_mask = 1;
+                inf.feature_mask_train = 0xDEADBEEFCAFEBABEULL;
+
+                StampWriteResult wr = stamp_write_for_model(
+                    tmp_model, "", MODEL_FORMAT_VERSION,
+                    "2026-05-07", 0.55, 0.53, 0.05, 0,
+                    /*feature_registry_hash=*/0,
+                    /*engine_version=*/nullptr,
+                    /*inf=*/&inf);
+                check("v5.11.18a: stamp_write_for_model accepts feature_mask in inf",
+                      wr.ok == 1);
+
+                // Verifier WITHOUT expected_feature_mask: round-trip reads
+                // the field but doesn't enforce a comparison.
+                ModelStampResult vr = verify_model_stamp(
+                    tmp_model, "", 0.05, MODEL_FORMAT_VERSION);
+                check("v5.11.18a: verifier reads has_feature_mask=1 from stamp",
+                      vr.has_feature_mask == 1);
+                check("v5.11.18a: verifier reads feature_mask_train round-trip",
+                      vr.feature_mask_train == 0xDEADBEEFCAFEBABEULL);
+
+                // Verifier WITH matching expected_feature_mask: accept.
+                ModelStampResult vr_match = verify_model_stamp(
+                    tmp_model, "", 0.05, MODEL_FORMAT_VERSION,
+                    /*expected_feature_registry_hash=*/0,
+                    /*expected_label_registry_hash=*/0,
+                    /*expected_feature_mask=*/0xDEADBEEFCAFEBABEULL);
+                check("v5.11.18a: matching feature_mask accepts",
+                      vr_match.valid == 1);
+
+                // Verifier WITH mismatched expected_feature_mask: REFUSE.
+                ModelStampResult vr_mismatch = verify_model_stamp(
+                    tmp_model, "", 0.05, MODEL_FORMAT_VERSION,
+                    /*expected_feature_registry_hash=*/0,
+                    /*expected_label_registry_hash=*/0,
+                    /*expected_feature_mask=*/0x00000000000000FFULL);
+                check("v5.11.18a: mismatched feature_mask REFUSES load",
+                      vr_mismatch.valid == 0);
+                check("v5.11.18a: refuse reason mentions feature_mask mismatch",
+                      strstr(vr_mismatch.reason, "feature_mask mismatch") != nullptr);
+
+                unlink(tmp_model);
+                unlink(tmp_stamp);
+            }
+        }
+
+        // === Test 5: Legacy stamp (no feature_mask field) accepts with WARN ===
+        {
+            char tmp_model[] = "/tmp/v51118a_legacy_XXXXXX";
+            char tmp_stamp[600];
+            int fd = mkstemp(tmp_model);
+            if (fd >= 0) {
+                FILE* mf = fdopen(fd, "wb");
+                const char* dummy = "legacy-stamp-payload";
+                fwrite(dummy, 1, strlen(dummy), mf);
+                fclose(mf);
+                snprintf(tmp_stamp, sizeof(tmp_stamp), "%s.stamp", tmp_model);
+
+                // Stamp WITHOUT inf (legacy emit; no feature_mask line)
+                StampWriteResult wr = stamp_write_for_model(
+                    tmp_model, "", MODEL_FORMAT_VERSION,
+                    "2026-05-07", 0.55, 0.53, 0.05, 0);
+                check("v5.11.18a: legacy stamp (no inf) writes",
+                      wr.ok == 1);
+
+                // Verifier reads has_feature_mask=0 (field absent).
+                ModelStampResult vr = verify_model_stamp(
+                    tmp_model, "", 0.05, MODEL_FORMAT_VERSION,
+                    /*expected_feature_registry_hash=*/0,
+                    /*expected_label_registry_hash=*/0,
+                    /*expected_feature_mask=*/0xDEADBEEFCAFEBABEULL);
+                check("v5.11.18a: legacy stamp parses has_feature_mask=0",
+                      vr.has_feature_mask == 0);
+                check("v5.11.18a: legacy stamp + non-zero expected → ACCEPT (warn, not reject)",
+                      vr.valid == 1);
+
+                unlink(tmp_model);
+                unlink(tmp_stamp);
+            }
+        }
+    }
+
     printf("\n--- v5.11.14: scaler comparison diff math + flag threshold ---\n");
     {
         // Validates the math compare_scalers does per-feature:
