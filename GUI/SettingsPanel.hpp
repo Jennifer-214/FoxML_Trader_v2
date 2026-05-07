@@ -1224,6 +1224,25 @@ static inline void GUI_Panel_Settings(SettingsState *s,
     ImGui::TextColored(FoxmlColors::comment, "edit + press Enter to apply");
     ImGui::Separator();
 
+    // v5.11.10 — font scale slider. Session-only (no cfg persistence yet).
+    // ImGuiIO::FontGlobalScale is a runtime multiplier on the loaded font
+    // size; values < 1.0 shrink, > 1.0 enlarge. Slightly blurry on
+    // non-integer scales (mitigated by Hack Nerd Font's hinting). For
+    // crisp text on a different size, rebuild the font atlas at startup
+    // with a smaller pixel size — deferred polish.
+    {
+        float font_scale = ImGui::GetIO().FontGlobalScale;
+        ImGui::PushItemWidth(140.0f);
+        if (ImGui::SliderFloat("font scale", &font_scale, 0.7f, 1.5f, "%.2fx")) {
+            ImGui::GetIO().FontGlobalScale = font_scale;
+        }
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        ImGui::TextColored(FoxmlColors::comment,
+            "(session-only; resets to 1.0 on relaunch)");
+        ImGui::Separator();
+    }
+
     // Tabs match live registered cores when available; else fall back to
     // cfg num_execution_cores; else default 4. Avoids the "I have 4 cores
     // but only 1 tab" bug when num_execution_cores is missing from cfg

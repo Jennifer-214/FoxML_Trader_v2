@@ -545,7 +545,23 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                 } else if (s->positions[i].idx >= 0) {
                     ImGui::TextColored(FoxmlColors::comment, "in pos");
                 } else if (pc->permission == 0) {
-                    ImGui::TextColored(FoxmlColors::yellow, "PERM_OFF");
+                    // v5.11.10 — break out the specific PERM_OFF cause
+                    // instead of a generic label. permission=0 covers three
+                    // distinct conditions; each warrants a different operator
+                    // response.
+                    if (s->state_warmup) {
+                        ImGui::TextColored(FoxmlColors::yellow, "WARMUP");
+                    } else if (pc->core_kill_tripped) {
+                        ImGui::TextColored(FoxmlColors::red, "KILL");
+                    } else if (pc->strategy_id_display == STRATEGY_AUTO &&
+                               pc->resolved_strategy_id == STRATEGY_NONE) {
+                        ImGui::TextColored(FoxmlColors::yellow, "AUTO RES");
+                    } else {
+                        // Fallback: permission=0 for some other reason
+                        // (e.g. process-wide kill switch, or a transitional
+                        // state). The historical PERM_OFF label.
+                        ImGui::TextColored(FoxmlColors::yellow, "PERM_OFF");
+                    }
                 } else if (pc->gate_flags & GUI_GATE_FLAG_BUY_BLOCKED) {
                     // v5.6.2: prefer the specific SHALT code (fee-floor /
                     // cost-gate) over generic "blocked" when set.
@@ -659,9 +675,25 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                 // controller (kill switch / startup gate). The Risk panel
                 // already shows kill-switch state, but this surface ties
                 // the visibility to the same row as the gate state.
+                //
+                // v5.11.10 — same refinement as the per-core summary table:
+                // break out specific causes (WARMUP / KILL / AUTO RES) so
+                // operator can act on the right diagnostic.
                 if (pc->permission == 0) {
                     ImGui::SameLine(0, 15);
-                    ImGui::TextColored(FoxmlColors::red, "PERM_OFF");
+                    const char* perm_label = "PERM_OFF";
+                    ImVec4 perm_color = FoxmlColors::red;
+                    if (s->state_warmup) {
+                        perm_label = "WARMUP";
+                        perm_color = FoxmlColors::yellow;
+                    } else if (pc->core_kill_tripped) {
+                        perm_label = "KILL";
+                    } else if (pc->strategy_id_display == STRATEGY_AUTO &&
+                               pc->resolved_strategy_id == STRATEGY_NONE) {
+                        perm_label = "AUTO RES";
+                        perm_color = FoxmlColors::yellow;
+                    }
+                    ImGui::TextColored(perm_color, "%s", perm_label);
                 }
                 // v5.6.1: bitmap drift — Class 2c regression detector. The
                 // hot path's any_active mask and the GUI's positions
