@@ -3183,16 +3183,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     fprintf(stderr, "[sharded]   shutting down OMS...\n");
     OrderManager_Shutdown(&oms);
 
-    // v5.11.6.A — destroy the init-time arena AFTER all threads have
-    // joined and all per-struct cleanup (which checks InitArena_Owns)
-    // has run. The arena's munmap reclaims the entire mmap'd region in
-    // a single syscall. Reset the global so any post-shutdown teardown
-    // sees a clean nullptr.
-    fprintf(stderr, "[sharded]   destroying init arena (%zu/%zu bytes used)...\n",
-            tt::InitArena_Used(&g_init_arena),
-            g_init_arena.capacity);
-    tt::InitArena_Global() = nullptr;
-    tt::InitArena_Destroy(&g_init_arena);
+    // v5.11.6.A — InitArena destroy MOVED to after per-struct frees
+    // (Strategy_FreePerCore loop below at line ~3274). Pre-fix ordering
+    // had InitArena_Destroy here BEFORE the strategy free loop, which
+    // would zero out InitArena_Global() while strategy frees were still
+    // running — InitArena_Owns check in Strategy_FreePerCore would
+    // return 0 and `delete` would run on already-unmapped memory.
+    // Closes parity-check 2026-05-07 v5.11.6 sprint-exit Finding 7b.
 
     fprintf(stderr, "[sharded] all threads joined.\n");
     fprintf(stderr, "[sharded] final: produced=%lu consumed=%lu entries=%lu exits=%lu balance=%.4f\n",
@@ -3273,6 +3270,22 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     for (int c = 0; c < state.registered_count; ++c) {
         tt::Strategy_FreePerCore(&state, c);
     }
+
+    // v5.11.6.D — destroy the init-time arena AFTER all per-struct frees
+    // (above + EventLoopState_Free path). The arena's munmap reclaims
+    // the entire mmap'd region in one syscall. Reset the global FIRST
+    // so any caller that observes the global post-shutdown sees nullptr
+    // (clean fallback). Closes parity-check 2026-05-07 v5.11.6
+    // sprint-exit Finding 7b — the prior ordering ran arena Destroy
+    // BEFORE Strategy_FreePerCore, which would have caused
+    // InitArena_Owns to return 0 and `delete` to run on already-unmapped
+    // memory. Restart path was the trigger; main shutdown path was
+    // OK because process-exit reclaims everything.
+    fprintf(stderr, "[sharded]   destroying init arena (%zu/%zu bytes used)...\n",
+            tt::InitArena_Used(&g_init_arena),
+            g_init_arena.capacity);
+    tt::InitArena_Global() = nullptr;
+    tt::InitArena_Destroy(&g_init_arena);
 
     // Restore previous signal handlers so subsequent code paths see the
     // original behavior (legacy engine doesn't install one, so this resets
