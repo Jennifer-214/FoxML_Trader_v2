@@ -128,10 +128,21 @@ inline void Strategy_InitPerCore(EventLoopState<F>* state, int slot,
     // not via BuySideGateConditions.
     BuySideGateConditions<F> buy_conds_scratch{};
 
+    // v5.11.6.A — InitArena-backed strategy state allocation when the
+    // engine has set the global arena (production path); placement-new
+    // on the arena slot. Tests + non-engine consumers fall back to
+    // standard `new`.
     switch (strategy_id) {
 #define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn) \
         case STRATEGY_##id: { \
-            auto* s = new state_t<F>{}; \
+            state_t<F>* s; \
+            if (auto* arena = tt::InitArena_Global()) { \
+                void* mem = tt::InitArena_Alloc(arena, sizeof(state_t<F>), \
+                                                 alignof(state_t<F>)); \
+                s = mem ? new (mem) state_t<F>{} : new state_t<F>{}; \
+            } else { \
+                s = new state_t<F>{}; \
+            } \
             Strategy_SeedFromCfg(s, cfg); \
             init_fn(s, rolling, &buy_conds_scratch); \
             ctx.strategy_state = s; \
@@ -368,10 +379,18 @@ inline void Strategy_FreePerCore(EventLoopState<F>* state, int slot) {
     // v5.8.0: dispatch via FOREACH_STRATEGY(X). Each row generates one
     // case that deletes the registered state type. Unknown kinds leak
     // (defensive) — see default branch.
+    //
+    // v5.11.6.A — when arena-allocated, skip `delete` (arena owns the
+    // memory; freed by InitArena_Destroy at engine shutdown). For the
+    // arena path, also skip the destructor call since strategy state
+    // structs are trivially destructible (POD-only fields verified by
+    // construction at v5.4.0 strategy spec).
     switch (ctx.strategy_state_kind) {
 #define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn) \
         case STRATEGY_##id: \
-            delete static_cast<state_t<F>*>(ctx.strategy_state); \
+            if (!tt::InitArena_Owns(tt::InitArena_Global(), ctx.strategy_state)) { \
+                delete static_cast<state_t<F>*>(ctx.strategy_state); \
+            } \
             break;
         FOREACH_STRATEGY(X)
 #undef X

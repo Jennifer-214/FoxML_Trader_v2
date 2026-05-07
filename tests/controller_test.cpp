@@ -13847,6 +13847,80 @@ e3_skip_load:;
               parse_uint64_fast(nullptr) == 0ULL);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.11.6.A — InitArena unified mmap allocator ---\n");
+    {
+        // Theory: pre-v5.11.6.A, init-time allocations (RollingStats × 3,
+        // CumDeltaState, per-core CoreSlowState, strategy state factories)
+        // each called malloc/new individually. Scattered across libc heap;
+        // page-fault tail on first slow-path cycle.
+        //
+        // Post-v5.11.6.A: single mmap(MAP_POPULATE) arena bumps these
+        // allocations contiguously. Tests verify the bump-pointer + alignment
+        // + ownership-check + destroy semantics.
+
+        using namespace tt;
+
+        InitArena a = InitArena_Create(64 * 1024);  // 64 KB test arena
+        check("v5.11.6.A: InitArena_Create succeeds", a.base != nullptr);
+        check("v5.11.6.A: capacity equals requested bytes", a.capacity == 64 * 1024);
+        check("v5.11.6.A: used starts at 0", a.used == 0);
+
+        // Bump-pointer alloc + alignment
+        void* p1 = InitArena_Alloc(&a, 100, 8);
+        check("v5.11.6.A: first alloc returns non-null", p1 != nullptr);
+        check("v5.11.6.A: first alloc 8-byte aligned",
+              ((uintptr_t)p1 & 7u) == 0);
+        check("v5.11.6.A: used advanced by ≥100 bytes", a.used >= 100);
+
+        // Second alloc with stricter alignment
+        void* p2 = InitArena_Alloc(&a, 200, 64);
+        check("v5.11.6.A: second alloc 64-byte aligned",
+              ((uintptr_t)p2 & 63u) == 0);
+        check("v5.11.6.A: distinct ranges (no overlap)",
+              (uint8_t*)p2 >= (uint8_t*)p1 + 100);
+
+        // Ownership check
+        check("v5.11.6.A: InitArena_Owns(p1) returns 1",
+              InitArena_Owns(&a, p1) == 1);
+        check("v5.11.6.A: InitArena_Owns(p2) returns 1",
+              InitArena_Owns(&a, p2) == 1);
+        int stack_var;
+        check("v5.11.6.A: InitArena_Owns(stack ptr) returns 0",
+              InitArena_Owns(&a, &stack_var) == 0);
+        check("v5.11.6.A: InitArena_Owns(NULL) returns 0",
+              InitArena_Owns(&a, nullptr) == 0);
+
+        // Type-safe convenience
+        struct Foo { uint64_t x; uint32_t y; };
+        Foo* f = InitArena_AllocOne<Foo>(&a);
+        check("v5.11.6.A: InitArena_AllocOne<Foo> returns aligned pointer",
+              f != nullptr && ((uintptr_t)f & (alignof(Foo) - 1)) == 0);
+        f->x = 0xDEADBEEF;
+        f->y = 0xCAFE;
+        check("v5.11.6.A: arena memory is writable post-alloc",
+              f->x == 0xDEADBEEF && f->y == 0xCAFE);
+
+        // Exhaustion: alloc beyond capacity returns nullptr
+        size_t remaining = InitArena_Remaining(&a);
+        void* big = InitArena_Alloc(&a, remaining + 1, 8);
+        check("v5.11.6.A: alloc beyond capacity returns NULL", big == nullptr);
+
+        // Global accessor
+        check("v5.11.6.A: InitArena_Global() starts at nullptr (test path)",
+              InitArena_Global() == nullptr);
+        InitArena_Global() = &a;
+        check("v5.11.6.A: InitArena_Global() reads set value",
+              InitArena_Global() == &a);
+        InitArena_Global() = nullptr;  // restore for subsequent tests
+
+        // Destroy clean
+        InitArena_Destroy(&a);
+        check("v5.11.6.A: Destroy clears base", a.base == nullptr);
+        check("v5.11.6.A: Destroy clears capacity", a.capacity == 0);
+        check("v5.11.6.A: Destroy is idempotent",
+              (InitArena_Destroy(&a), a.base == nullptr));
+    }
+
     printf("\n--- EXTENSIBILITY: v5.11.5.C — mmap pre-alloc OrderEventLog ---\n");
     {
         // Theory: pre-v5.11.5.C, OrderEventLog.entries was malloc'd at

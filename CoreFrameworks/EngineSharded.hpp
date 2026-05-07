@@ -834,6 +834,22 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     ShardedTradeLog_Init(&g_sharded_trade_log, bcfg.symbol);
     oms.trade_log = &g_sharded_trade_log;
 
+    // v5.11.6.A — InitArena: single mmap'd region for all init-time
+    // allocations (PortfolioController rolling stats × 3 + cumdelta_state +
+    // per-core CoreSlowState + per-core strategy state). MAP_POPULATE
+    // pre-faults all pages at boot so first slow-path cycle never page-faults.
+    //
+    // Sizing (measured at boot 2026-05-07):
+    //   - CoreSlowState<64> ≈ 278 KB / core × 16 cores = 4.4 MB
+    //   - RollingStats × 3 + CumDeltaState  ≈ 60 KB
+    //   - Strategy state × 16 cores         ≈ 80 KB
+    //   - Headroom for future growth        ≈ ~3 MB
+    //   Total: 8 MB. Within the mlockall envelope (RLIMIT_MEMLOCK ≥ 256 MB
+    //   per the deployment runbook).
+    static tt::InitArena g_init_arena;
+    g_init_arena = tt::InitArena_Create(8 * 1024 * 1024);  // 8 MB
+    tt::InitArena_Global() = &g_init_arena;
+
     EventLoopState<F> state;
     EventLoopState_Init(&state, &oms);
 
@@ -3166,6 +3182,17 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     }
     fprintf(stderr, "[sharded]   shutting down OMS...\n");
     OrderManager_Shutdown(&oms);
+
+    // v5.11.6.A — destroy the init-time arena AFTER all threads have
+    // joined and all per-struct cleanup (which checks InitArena_Owns)
+    // has run. The arena's munmap reclaims the entire mmap'd region in
+    // a single syscall. Reset the global so any post-shutdown teardown
+    // sees a clean nullptr.
+    fprintf(stderr, "[sharded]   destroying init arena (%zu/%zu bytes used)...\n",
+            tt::InitArena_Used(&g_init_arena),
+            g_init_arena.capacity);
+    tt::InitArena_Global() = nullptr;
+    tt::InitArena_Destroy(&g_init_arena);
 
     fprintf(stderr, "[sharded] all threads joined.\n");
     fprintf(stderr, "[sharded] final: produced=%lu consumed=%lu entries=%lu exits=%lu balance=%.4f\n",
