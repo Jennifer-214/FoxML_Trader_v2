@@ -31,6 +31,8 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netdb.h>
+#include <netinet/tcp.h>  // v5.11.0.C — TCP_NODELAY / IPPROTO_TCP
+#include <errno.h>        // v5.11.0.C — strerror(errno) on setsockopt fail
 #include <poll.h>
 #include <time.h>
 #include <csignal>
@@ -148,6 +150,20 @@ static inline int binance_tcp_connect(const char *host, const char *port) {
     }
 
     freeaddrinfo(res);
+
+    if (sockfd != -1) {
+        // v5.11.0.C — Disable Nagle's algorithm. Without this, TCP can
+        // buffer outgoing packets up to 40ms waiting to coalesce — fine
+        // for bulk transfers, catastrophic for HFT order submit.
+        // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 12.1.
+        // Not fatal if this fails — log it and continue (some interfaces
+        // are TCP_NODELAY-by-default at the NIC level).
+        int one = 1;
+        if (setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) < 0) {
+            fprintf(stderr, "[BINANCE] setsockopt(TCP_NODELAY) failed: %s\n",
+                    strerror(errno));
+        }
+    }
 
     if (sockfd == -1) {
         fprintf(stderr, "[BINANCE] TCP connect failed to %s:%s\n", host, port);

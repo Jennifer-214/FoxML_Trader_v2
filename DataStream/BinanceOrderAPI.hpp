@@ -32,6 +32,8 @@
 #include <sys/types.h>
 #include <sys/time.h>
 #include <netdb.h>
+#include <netinet/tcp.h>  // v5.11.0.C — TCP_NODELAY / IPPROTO_TCP
+#include <errno.h>        // v5.11.0.C — strerror(errno) on setsockopt fail
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -213,6 +215,17 @@ static inline int binance_rest_tcp_connect(const char *host, const char *port) {
     if (sockfd == -1) {
         fprintf(stderr, "[REST] TCP connect failed to %s:%s\n", host, port);
         return -1;
+    }
+
+    // v5.11.0.C — Disable Nagle's algorithm. Order packets must hit the
+    // wire immediately; default Linux TCP buffers up to 40ms for coalescing.
+    // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 12.1.
+    {
+        int one = 1;
+        if (setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) < 0) {
+            fprintf(stderr, "[REST] setsockopt(TCP_NODELAY) failed: %s\n",
+                    strerror(errno));
+        }
     }
 
     // set socket read timeout — prevents SSL_read from blocking on keep-alive
