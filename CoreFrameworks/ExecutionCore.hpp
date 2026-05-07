@@ -60,40 +60,45 @@ constexpr size_t EXECUTION_CORE_EVENT_RING_SIZE = 1024;
 
 template <unsigned F>
 struct alignas(64) ExecutionCore {
-    // --- Hot fields (read every tick) ---
-    // permission and active are single bytes; entry_price needs 8-byte alignment.
-    // The explicit padding makes the layout deterministic across compilers.
-    uint8_t  permission;       // controller writes (atomic), core reads
-    uint8_t  active;           // core writes and reads
-    uint8_t  _pad0[6];
-    FPN<F>   entry_price;      // core writes on entry, reads on SG check
-    // Phase 14: live TP/SL computed on actual fill, not on the controller's
-    // expected entry. The execution core sets these when can_enter fires
-    // using the percentage from the gate parameter pack. SG_Evaluate reads
-    // them instead of params.sg_take_profit_price / sg_stop_loss_price when
-    // the percentage path is active. Fixes the structural loss bias from
-    // phase 13 head-to-head.
-    FPN<F>   live_tp;
-    FPN<F>   live_sl;
-
-    // --- P.2 (partial exits, 2026-04-27): leg-B fields ---
-    // Two-position-per-core model: when partial_exit_enabled=1, a single
-    // entry signal opens BOTH leg A (TP=TP1) AND leg B (TP=TP2), sharing
-    // SL. Hot path evaluates SG on both legs branchlessly; either or both
-    // can fire on a given tick. Whichever fires emits a TradeEvent with
-    // .leg = 0 (A) or 1 (B); drainer maps to portfolio slot via
-    // Sharded_LegSlot(core_id, leg, partial_exit_enabled).
+    // ── CACHE LINE 0 (64B): steady-state HOT READS only ──
+    // v5.11.1.5 layout reorder: the per-tick CMOV at hot path lines ~287-288
+    // reads `live_tp` + `live_sl` every tick. Pre-v5.11.1.5 layout had
+    // `live_sl` spanning offsets 56-80 (cache line 0 → 1) due to FPN<64>=24B
+    // sizing — every tick loaded 2 cache lines instead of 1.
     //
-    // When partial_exit_enabled=0 (default cfg), Strategy_BuildParameters
-    // never sets GATE_FLAG_PAIR_ACTIVE. core->active_b stays at 0; leg-B
-    // fields stay at zero; SG_Evaluate on (0, 0) is masked out by
-    // active_b=0; cost is the unused FPN comparisons (~1-2ns, pipelined
-    // into otherwise-idle CPU slots).
-    uint8_t  active_b;
-    uint8_t  _pad_b[7];
+    // New layout: 2 byte flags + 6 pad + 24 (live_tp) + 24 (live_sl) + 8 pad
+    //           = 64B total → fits exactly in cache line 0.
+    // entry_price MOVED to line 1 (write-only on entry events; not in steady
+    // CMOV). leg-B fields gated by `if (active_b)` → line never touched in
+    // steady state when leg B is inactive (the common case).
+    //
+    // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 1.5 (permission isolation)
+    //      + plans/2026-05-06-latency-path-discipline.md Rule 1 (Finding A)
+    uint8_t  active;           // hot read: core writes and reads
+    uint8_t  active_b;         // hot read: 0 in steady state when leg B inactive
+    uint8_t  _pad_hot[6];
+    FPN<F>   live_tp;          // 24B at offset 8 — fits in line 0
+    FPN<F>   live_sl;          // 24B at offset 32 — fits in line 0 (Finding A)
+    uint8_t  _pad_line0[8];    // pad cache line 0 to 64
+
+    // ── CACHE LINE 1+ (cold in steady state — only entry/leg-B paths touch) ──
+    // entry_price is WRITE-only on entry events (not read in steady CMOV).
+    // leg-B fields gated by `if (__builtin_expect(active_b, 0))` — line never
+    // touched when leg B is inactive (steady-state default cfg).
+    FPN<F>   entry_price;      // write-on-entry only; cold in steady state
     FPN<F>   entry_price_b;
     FPN<F>   live_tp_b;
     FPN<F>   live_sl_b;
+
+    // ── permission isolated to its OWN cache line (audit Part 1.5) ──
+    // Controller atomic-stores `permission` from a different CPU than the
+    // hot path's read. Pre-v5.11.1.5: permission shared cache line 0 with
+    // active/entry_price/live_tp/live_sl → controller writes invalidated the
+    // line, causing ~30-50ns reload stall on the next hot-path tick.
+    // Post-v5.11.1.5: permission alone on its own 64B line → controller
+    // writes don't invalidate the hot-fields line.
+    alignas(64) uint8_t permission;
+    uint8_t  _pad_perm[63];
 
     // --- Parameter pack pushed by controller (phase 05) ---
     // Seqlock atomic slot. The controller calls ExecutionCore_SetParameters
@@ -159,6 +164,20 @@ struct alignas(64) ExecutionCore {
 // adding a virtual function fails at compile.
 static_assert(!std::is_polymorphic<ExecutionCore<64>>::value,
               "ExecutionCore must remain non-polymorphic — Part 3 invariant");
+
+// v5.11.1.5 — Cache layout invariants. Future field reorders must preserve
+// these to avoid regressing the hot-path single-cache-line load.
+// See plans/2026-05-06-latency-path-discipline.md Rule 1.
+static_assert(offsetof(ExecutionCore<64>, live_sl) + sizeof(FPN<64>) <= 64,
+              "live_sl must fit entirely in cache line 0 — see latency-path-discipline.md Rule 1");
+static_assert((offsetof(ExecutionCore<64>, permission) % 64) == 0,
+              "permission must be cache-line-aligned to prevent false sharing — audit Part 1.5");
+static_assert(offsetof(ExecutionCore<64>, active) == 0,
+              "active byte must sit at struct offset 0 (hot field, line 0)");
+static_assert(offsetof(ExecutionCore<64>, active_b) == 1,
+              "active_b byte must sit at struct offset 1 (hot field, line 0)");
+static_assert(offsetof(ExecutionCore<64>, live_tp) >= 8,
+              "live_tp must be 8-byte aligned (after byte flags + pad)");
 
 // Initialize an execution core. Defaults: permission=0 (controller must explicitly
 // grant), active=0, entry_price=0, parameter slot installed with safe defaults
