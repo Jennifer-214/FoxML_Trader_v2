@@ -1844,6 +1844,24 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                             }
                             prev_realloc_failed = bs->oms_log_writer_realloc_failed;
                         }
+                        // v5.11.5.D — log_full_drops first-non-zero WARN
+                        // (parity-check J.1). Distinct from ring_full_spins:
+                        // log_full_drops fires when the mmap'd entries[]
+                        // buffer is saturated; events have been DROPPED.
+                        // Operator may need to bump
+                        // ORDER_EVENT_LOG_MAX_CAPACITY or run an offline
+                        // log-rotation step.
+                        static uint64_t prev_log_drops = 0;
+                        if (bs->oms_log_full_drops != prev_log_drops) {
+                            if (prev_log_drops == 0) {
+                                tt::Health_Log(tt::HEALTH_CRITICAL, "oms_log", -1,
+                                    "event log capacity exhausted: log_full_drops=%llu "
+                                    "(events DROPPED; bump ORDER_EVENT_LOG_MAX_CAPACITY "
+                                    "or rotate the log)",
+                                    (unsigned long long)bs->oms_log_full_drops);
+                            }
+                            prev_log_drops = bs->oms_log_full_drops;
+                        }
                     }
                     // append current data point to graph ring buffers
                     bs->price_history[bs->graph_head] = bs->price;

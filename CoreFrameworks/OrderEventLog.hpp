@@ -106,18 +106,19 @@ constexpr size_t ORDER_EVENT_LOG_INIT_CAPACITY = 16384;
 
 // v5.11.5.C — fixed mmap-allocated capacity. Replaces malloc + realloc
 // growth pattern with a single mmap(MAP_POPULATE) at boot. Trade-off:
-// - Pre-faults all pages at boot (~2.8 MB pre-touched at 16384 cap × 176 B)
-//   so first-write never hits a page-fault tail.
+// - Pre-faults all pages at boot so first-write never hits a page-fault tail.
 // - Capacity is FIXED at boot — overflow drops events with a counter
 //   bump (silent failure → operator sees the counter via the GUI).
 // - Eliminates realloc-mid-trading from the writer thread (which v5.11.3.C
 //   moved off the drainer; v5.11.5.C now eliminates it entirely).
 //
-// Sized at the historical INIT capacity (~160 days at SimpleDip rates).
-// For long-running deployments tune by editing this constant; runtime
-// cfg-binding deferred (none of the current operators run > 30 days
-// continuous).
-constexpr size_t ORDER_EVENT_LOG_MAX_CAPACITY = ORDER_EVENT_LOG_INIT_CAPACITY;
+// v5.11.5.D — bumped to 32768 (~5.6 MB pre-touched at F=64) per
+// parity-check 2026-05-07 Section N finding: 16384 truncates on load
+// for any pre-v5.11.5.C log file with > 16384 events (roughly 30 days
+// at SimpleDip rates × 4 cores). 32768 gives ~320 days headroom,
+// which covers all realistic continuous-deployment scenarios while
+// keeping the mmap'd buffer comfortably small (5.6 MB << page cache).
+constexpr size_t ORDER_EVENT_LOG_MAX_CAPACITY = 32768;
 
 // Phase 07 file header — written at the start of the event log file.
 // Carries the FPN width and entry size for forward compatibility.

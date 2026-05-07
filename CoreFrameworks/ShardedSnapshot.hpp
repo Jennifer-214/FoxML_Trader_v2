@@ -108,6 +108,12 @@ static inline void TUI_CopySnapshotSharded(
         state->oms->event_log.ring_full_spins.load(std::memory_order_relaxed);
     snap->oms_log_writer_realloc_failed =
         state->oms->event_log.writer_realloc_failed_count.load(std::memory_order_relaxed);
+    // v5.11.5.D — closes parity-check J.1: log_full_drops was added in
+    // v5.11.5.C but not surfaced. Sibling counter to ring_full_spins; both
+    // signal async-log-writer distress (former = ring saturation, latter =
+    // mmap capacity exhausted).
+    snap->oms_log_full_drops =
+        state->oms->event_log.log_full_drops.load(std::memory_order_relaxed);
     snap->return_pct   = (snap->starting > 0.0) ? (snap->total_pnl / snap->starting * 100.0) : 0.0;
     // active_count under partials: agg counts raw bitmap bits, but slot
     // 2c+0 + slot 2c+1 are ONE logical trade (both legs of one core's

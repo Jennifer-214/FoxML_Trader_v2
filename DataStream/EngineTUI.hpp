@@ -927,7 +927,8 @@ struct TUISnapshot {
     // value; non-zero = something to investigate. Health log emits WARN on
     // first non-zero observation (rate-limited).
     uint64_t oms_log_ring_full_spins;        // total spin/usleep iters in OrderEventLog_Append
-    uint64_t oms_log_writer_realloc_failed;  // realloc failures inside async writer thread
+    uint64_t oms_log_writer_realloc_failed;  // realloc failures inside async writer thread (legacy — should stay 0 post-v5.11.5.C)
+    uint64_t oms_log_full_drops;             // v5.11.5.D — events dropped because mmap'd capacity exhausted (parity-check J.1)
     // Phase 14: per-core latency stats. Populated only when engine_mode ==
     // sharded AND CoreLatencyStats are enabled. Display panel renders only
     // when sharded_mode_active is set.
