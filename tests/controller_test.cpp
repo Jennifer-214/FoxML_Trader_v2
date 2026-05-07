@@ -33,6 +33,7 @@
 #include "../ML_Headers/CoreModelZoo.hpp"                // Track E.2 tests
 #include "../ML_Headers/FeatureRegistry.hpp"              // v5.8.1a tests
 #include "../Backtest/PhaseTimers.hpp"                    // v5.10.0 Item A — phase timer tests
+#include "../MemHeaders/BuddyAllocator.hpp"                // v5.11.13 — typo fix + O(1) order lookup tests
 #include "../DataStream/DepthReplayState.hpp"            // Track E.3 tests
 #include "../ML_Headers/FlowFeatures.hpp"                // v4.5 Wave 1 tests
 #include "../DataStream/BinanceUserData.hpp"
@@ -15549,6 +15550,75 @@ e3_skip_load:;
         tt::PhaseTimer_Global().parse_ns = 999;
         tt::PhaseTimer_Reset(&tt::PhaseTimer_Global());
         check("v5.10.0A: Global singleton accessible + reset", tt::PhaseTimer_Global().parse_ns == 0);
+    }
+
+    printf("\n--- v5.11.13: BuddyAllocator typo fix + O(1) order lookup ---\n");
+    {
+        // Pre-v5.11.13: buddy_internal_order_to_size returned `1u <
+        // order` (a bool: 0 or 1) instead of `1u << order` (the
+        // power-of-2 block size). buddy_internal_buddy_offset called
+        // size_to_order(order) instead of order_to_size(order).
+        // Both bugs masked each other in arithmetic so the absent
+        // production caller never noticed.
+        //
+        // Post-fix: order_to_size(N) == (1 << N) bytes for valid
+        // orders, buddy XOR uses block size in bytes, and the alloc
+        // path uses an O(1) free_list_bitmap + __builtin_ctz instead
+        // of a 17-iteration linear scan.
+
+        using namespace fox_ml::mem;
+
+        // === Test 1: order_to_size correctness (the typo fix) ===
+        check("v5.11.13: order_to_size(4) == 16",   buddy_internal_order_to_size(4)  == 16u);
+        check("v5.11.13: order_to_size(10) == 1024", buddy_internal_order_to_size(10) == 1024u);
+        check("v5.11.13: order_to_size(20) == 1MB",  buddy_internal_order_to_size(20) == (1u << 20));
+
+        // === Test 2: buddy_offset uses block size in bytes ===
+        // For order=4 (16-byte blocks): offset=0 buddy = 16 (XOR 16 = 16).
+        check("v5.11.13: buddy_offset(0, 4) == 16",
+              buddy_internal_buddy_offset(0u, 4u) == 16u);
+        // For order=5 (32-byte blocks): offset=32 buddy = 0 (XOR 32 = 0).
+        check("v5.11.13: buddy_offset(32, 5) == 0",
+              buddy_internal_buddy_offset(32u, 5u) == 0u);
+
+        // === Test 3: bitmap of free list orders is maintained on init ===
+        BuddyAllocatorState *state = (BuddyAllocatorState *)aligned_alloc(64, sizeof(BuddyAllocatorState));
+        check("v5.11.13: state alloc succeeds", state != nullptr);
+        if (state) {
+            buddy_init_state(state);
+            uint32_t expect_init_bits = (1u << (BUDDY_MAX_ORDER - BUDDY_MIN_ORDER));
+            check("v5.11.13: post-init bitmap has only MAX_ORDER bit set",
+                  state->free_list_bitmap == expect_init_bits);
+
+            // === Test 4: O(1) alloc path picks the right order ===
+            // Allocate a small block: requires splitting from MAX
+            // down to the smallest level. Should succeed; bitmap
+            // should now reflect intermediate orders also having
+            // entries (one block each from the split chain).
+            void *p1 = buddy_alloc_bytes(state, 16);  // smallest block
+            check("v5.11.13: small alloc succeeds via O(1) lookup", p1 != nullptr);
+
+            // After split chain: the splitter takes a MAX-order block,
+            // halves it down to target_order, and pushes one buddy to
+            // the free list at each intermediate order. So one free
+            // block at every order MIN .. MAX-1 (the consumed leg
+            // becomes the allocation; the buddy stays free).
+            uint32_t expected_bits_after = 0u;
+            for (uint32_t ord = BUDDY_MIN_ORDER; ord < BUDDY_MAX_ORDER; ++ord) {
+                expected_bits_after |= (1u << (ord - BUDDY_MIN_ORDER));
+            }
+            check("v5.11.13: bitmap reflects split chain post-alloc",
+                  state->free_list_bitmap == expected_bits_after);
+
+            // === Test 5: O(1) lookup returns nullptr when no order ≥ target has free blocks ===
+            // Small alloc has consumed all min-order capacity for
+            // this branch. Now try the largest alloc (1MB) — there
+            // are no free MAX-order blocks left because we split it.
+            void *p2 = buddy_alloc_bytes(state, 1u << BUDDY_MAX_ORDER);
+            check("v5.11.13: O(1) lookup returns nullptr on no-fit", p2 == nullptr);
+
+            free(state);
+        }
     }
 
     printf("\n======================================\n");

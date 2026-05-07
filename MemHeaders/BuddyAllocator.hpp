@@ -4,12 +4,29 @@
 
 //======================================================================================================
 // [BUDDY ALLOCATOR]
+//
+// v5.11.13 (2026-05-07) — typo fixes + O(1) order lookup.
+//
+// Status: NOT WIRED INTO PRODUCTION YET. Engine uses PoolAllocator
+// (bitmap-indexed slot pool) for orders + InitArena (bump-pointer
+// over mmap) for slow-state. BuddyAllocator is reserved for future
+// variable-size allocation (e.g. backtest-side scratch buffers).
+//
+// Known design gap (NOT fixed in v5.11.13 because no production
+// caller exists): buddy_internal_bitmap_index(offset, order) uses
+// `(offset >> order)` as the bitmap index, which collides across
+// orders — order=4 offset=0 and order=5 offset=0 both index bit 0
+// of the same bitmap. The right encoding is heap-tree-style,
+// `(1u << (BUDDY_MAX_ORDER - order)) + (offset >> order) - 1`,
+// which gives each (order, offset) pair a unique bit. Defer until
+// the allocator is actually wired in production so the design
+// intent is clear. Flagged here so the next person doesn't have
+// to re-derive the bug.
 //======================================================================================================
 #ifndef BUDDY_ALLOCATOR_H
 #define BUDDY_ALLOCATOR_H
 
 #include <array>
-#include <bit>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -43,32 +60,55 @@ struct BuddyAllocatorState {
     uint64_t total_free_bytes;
     uint32_t alloc_count;
     uint32_t free_count;
+    // v5.11.13: bit N set ⇔ free_lists[N] non-empty. Maintained by
+    // buddy_freelist_push/remove. Lets buddy_alloc_bytes skip the
+    // O(BUDDY_NUM_ORDERS=17) scan for the lowest available order
+    // ≥ target by masking the high bits and __builtin_ctz'ing.
+    uint32_t free_list_bitmap;
 };
 
 //==================================================================================
 // [INTERNAL HELPERS] (buddy_internal_*)
 //==================================================================================
+// v5.11.13: rewrote in C++17 idioms (__builtin_clz / power-of-2 round-up)
+// — engine target is C++17. The pre-fix used <bit> (C++20 only),
+// which compiled standalone but broke when the test included this
+// header (controller_test compiled at -std=c++17).
 [[nodiscard]] static inline uint32_t buddy_internal_size_to_order(size_t const size) noexcept {
     uint32_t const min_size = (size < (1u << BUDDY_MIN_ORDER)) ? (1u << BUDDY_MIN_ORDER) : static_cast<uint32_t>(size);
-    // round up to the next power of 2
-    uint32_t const rounded = std::bit_ceil(min_size);
-    return static_cast<uint32_t>(std::countr_zero(rounded));
+    // Round up to next power of 2 (C++17-friendly bit_ceil).
+    // For min_size already a power of 2, returns min_size unchanged.
+    // 1u << (32 - clz(x-1)) is the canonical idiom; guard min_size==1
+    // since clz(0) is UB. (We already enforce min_size >= 16 above,
+    // so the guard is defensive — keeps the helper safe in isolation.)
+    uint32_t const rounded = (min_size <= 1u) ? 1u
+                                              : (1u << (32u - static_cast<uint32_t>(__builtin_clz(min_size - 1u))));
+    return static_cast<uint32_t>(__builtin_ctz(rounded));
 }
-// gonna fix the errors here in a min
+// v5.11.13 (2026-05-07): typo cleanup. Pre-fix this function returned
+// `1u < order` (a bool) instead of `1u << order` (the actual block
+// size in bytes for the given order). Buddy_offset's helper call was
+// also wrong: it took an order, but called size_to_order(order)
+// which is the inverse. Both were caught simultaneously because
+// they masked each other's badness in arithmetic — no production
+// caller existed yet, so the bug was harmless until now.
 
 [[nodiscard]] static inline uint32_t buddy_internal_order_to_size(uint32_t const order) noexcept {
-    return 1u < order;
+    return 1u << order;
 }
 
 [[nodiscard]] static inline uint32_t buddy_internal_buddy_offset(uint32_t const offset, uint32_t const order) noexcept {
-    return offset ^ buddy_internal_size_to_order(order);
+    return offset ^ buddy_internal_order_to_size(order);
 }
 
 [[nodiscard]] static inline uint32_t buddy_internal_bitmap_index(uint32_t const offset, uint32_t const order) noexcept {
     return (offset >> order);
 }
 
-[[nodiscard]] static inline uint32_t buddy_internal_bitmap_set(uint8_t *const bitmap, uint32_t const idx) noexcept {
+// v5.11.13: was [[nodiscard]] uint32_t but body returns nothing — UB.
+// The function only mutates; void is the correct shape and matches
+// buddy_internal_bitmap_clear below.
+static inline void buddy_internal_bitmap_set(uint8_t *const bitmap, uint32_t const idx) noexcept {
     bitmap[idx >> 3] |= static_cast<uint8_t>(1u << (idx & 7u));
 }
 
@@ -96,6 +136,9 @@ static inline void buddy_freelist_push(BuddyAllocatorState *const state, uint32_
     }
 
     state->free_lists[list_idx] = offset;
+    // v5.11.13: maintain free_list_bitmap (set this list's bit since
+    // it now has at least one entry).
+    state->free_list_bitmap |= (1u << list_idx);
 }
 
 static inline void buddy_freelist_remove(BuddyAllocatorState *const state, uint32_t const order, uint32_t const offset) noexcept {
@@ -113,6 +156,13 @@ static inline void buddy_freelist_remove(BuddyAllocatorState *const state, uint3
         BuddyFreeNode *const next = reinterpret_cast<BuddyFreeNode *>(state->pool + node->next_offset);
 
         next->prev_offset = node->prev_offset;
+    }
+
+    // v5.11.13: maintain free_list_bitmap (clear this list's bit if
+    // it just became empty). A removal at a non-head position leaves
+    // the head intact, so check the head pointer post-mutation.
+    if (state->free_lists[list_idx] == BUDDY_SENTINEL) {
+        state->free_list_bitmap &= ~(1u << list_idx);
     }
 }
 
@@ -150,17 +200,18 @@ void buddy_init_state(BuddyAllocatorState *const state) noexcept {
     if (target_order > BUDDY_MAX_ORDER)
         return nullptr;
 
-    uint32_t found_order = BUDDY_MAX_ORDER + 1;
-    for (uint32_t ord = target_order; ord <= BUDDY_MAX_ORDER; ++ord) {
-        uint32_t const list_idx = ord - BUDDY_MIN_ORDER;
-        if (state->free_lists[list_idx] != BUDDY_SENTINEL) {
-            found_order = ord;
-            break;
-        }
-    }
-
-    if (found_order > BUDDY_MAX_ORDER)
+    // v5.11.13: O(1) lowest-available-order lookup via free_list_bitmap.
+    // Pre-fix: linear scan of state->free_lists[target_order-MIN ..
+    // MAX-MIN], O(BUDDY_NUM_ORDERS=17) worst-case. Post-fix: mask off
+    // the bits below target_order's list_idx, then __builtin_ctz to
+    // find the lowest set bit. ctz on 0 is UB, so we test for the
+    // empty-mask case first (= no order ≥ target has any free block).
+    uint32_t const target_list_idx = target_order - BUDDY_MIN_ORDER;
+    uint32_t const masked_bitmap   = state->free_list_bitmap & ~((1u << target_list_idx) - 1u);
+    if (masked_bitmap == 0u)
         return nullptr;
+    uint32_t const found_list_idx  = static_cast<uint32_t>(__builtin_ctz(masked_bitmap));
+    uint32_t found_order           = found_list_idx + BUDDY_MIN_ORDER;
 
     uint32_t offset = buddy_freelist_pop(state, found_order);
 
