@@ -293,10 +293,17 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                 // No-op when no _horizon_* siblings present; ezoo->active=0
                 // so engine continues using single-zoo path.
                 if (cfg.core_model_dir[i][0]) {
+                    // v5.10.1.C — Plumb cfg-derived strict/gap/secret/drift args
+                    // (parity-check Finding #6). Backtest path now respects
+                    // cfg.held_out_gate_strict in ensemble mode (was silently 0).
                     int n_loaded = EnsembleModelZoo_AutoDetectFromDir(
                         &ml_ensemble_zoos[i],
                         cfg.core_model_dir[i],
-                        backend);
+                        backend,
+                        cfg.held_out_stamp_secret,
+                        FPN_ToDouble(cfg.gap_acceptable_threshold),
+                        cfg.held_out_gate_strict,
+                        cfg.acknowledge_cross_binary_version_drift);
                     if (n_loaded > 0 && ml_ensemble_zoos[i].active) {
                         fprintf(stderr, "[backtest sharded] core %d: ensemble active "
                                         "(%d horizons; %d total models)\n",

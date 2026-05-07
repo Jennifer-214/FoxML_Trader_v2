@@ -829,10 +829,17 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // No-op when no _horizon_<H> siblings present; ezoo->active=0
                 // → single-zoo path runs unchanged.
                 if (cfg.core_model_dir[i][0]) {
+                    // v5.10.1.C — Plumb cfg-derived strict/gap/secret/drift args
+                    // (parity-check Finding #6). Without these, ensemble auto-detect
+                    // silently bypassed cfg.held_out_gate_strict in ensemble mode.
                     int n_loaded = EnsembleModelZoo_AutoDetectFromDir(
                         &ml_ensemble_zoos[i],
                         cfg.core_model_dir[i],
-                        backend);
+                        backend,
+                        cfg.held_out_stamp_secret,
+                        FPN_ToDouble(cfg.gap_acceptable_threshold),
+                        cfg.held_out_gate_strict,
+                        cfg.acknowledge_cross_binary_version_drift);
                     if (n_loaded > 0 && ml_ensemble_zoos[i].active) {
                         fprintf(stderr, "[sharded] core %d: ensemble active "
                                         "(%d horizons; %d total models)\n",
