@@ -667,6 +667,10 @@ inline void EventLoopState_InitLegacy(EventLoopState<F>* state,
 //======================================================================================================
 template <unsigned F>
 inline void EventLoopState_Free(EventLoopState<F>* state) {
+    // v5.11.26 NOTE: writer thread cleanup happens at OrderManagerState's
+    // destructor (RAII at scope exit, OrderManager.hpp:316). Don't stop
+    // the writer here — the test might still use `oms` after this Free
+    // returns; premature stop would race with subsequent OMS work.
     for (int i = 0; i < MAX_EXECUTION_CORES; ++i) {
         if (state->cores[i].slow_state) {
             // v5.11.6.A — if the arena owns this allocation, it's freed

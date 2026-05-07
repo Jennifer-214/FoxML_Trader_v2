@@ -311,6 +311,35 @@ struct OrderManagerState {
     std::atomic<uint64_t> total_submitted;
     std::atomic<uint64_t> total_filled;
     std::atomic<uint64_t> total_rejected;
+
+    // v5.11.26 — RAII destructor. Stops the OrderEventLog async writer
+    // thread (v5.11.3.B feature) + closes the disk file + frees the
+    // mmap'd entry buffer when this struct goes out of scope. Idempotent
+    // on default-init / never-Init'd state (StopAsyncWriter checks
+    // writer_thread_active; OrderEventLog_Free checks disk_file/entries
+    // before closing/freeing). Safe to call on stack-allocated test OMS
+    // OR production engine OMS.
+    //
+    // Why RAII (vs explicit OrderManager_Shutdown at every site):
+    //  - 113 OrderManagerState declarations across the codebase, ZERO
+    //    callers of OrderManager_Shutdown today (production-side
+    //    EngineSharded_Run never calls it; OS cleanup at exit only).
+    //  - Tests: 9 sites call OrderManager_Init directly; none call
+    //    Shutdown. Each previously leaked the writer thread; ASAN
+    //    flagged stack-use-after-scope at SPSCRing_TryPop because the
+    //    writer outlived the test scope and read stale stack data.
+    //  - One destructor closes both classes of leak in one place.
+    //
+    // Why safe (no copy/move concerns):
+    //  - grep verified zero copy-init / memcpy of OrderManagerState
+    //    across the codebase. struct is always declared then used by
+    //    pointer; never duplicated.
+    //  - Compiler-generated copy/move constructors would be deleted by
+    //    SPSCRing's deleted copy semantics anyway (mutex-like guarantee
+    //    via std::atomic<uint64_t>).
+    ~OrderManagerState() {
+        OrderManager_Shutdown(this);
+    }
 };
 
 //======================================================================================================
