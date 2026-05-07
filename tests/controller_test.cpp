@@ -15898,6 +15898,89 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.11.40: per-horizon TP/SL CSV parser (broadcast or match) ---\n");
+    {
+        // v5.11.40 — TP Barrier % / SL Barrier % accept comma-separated
+        // values for per-horizon mapping (broadcast-or-match rule):
+        //   - Single value (count==1): broadcasts to all horizons
+        //   - N values where N == horizon_count: positional mapping
+        //   - Anything else: misaligned → button disabled with hint
+        //
+        // The parser at BacktestPanels.hpp:3300+ runs on each render
+        // frame. Tests below validate the parser logic standalone (the
+        // GUI plumbing + button-enable gate is functional only via
+        // visual inspection; covered in operator paper-test).
+
+        // Match the parse_pct_csv lambda body in BacktestPanels.hpp.
+        auto parse = [](const char* csv, float* out, int* n_out) {
+            int n = 0;
+            const char* p = csv;
+            while (*p && n < 8) {
+                while (*p == ' ' || *p == '\t' || *p == ',') p++;
+                if (!*p) break;
+                char* end = nullptr;
+                float v = strtof(p, &end);
+                if (end == p) break;
+                if (v >= 0.0f && v <= 100.0f) out[n++] = v;
+                p = end;
+            }
+            *n_out = n;
+        };
+
+        // === Test 1: single value parses + count==1 ===
+        {
+            float buf[8] = {0};
+            int n = 0;
+            parse("0.030", buf, &n);
+            check("v5.11.40: single value parses to count=1",
+                  n == 1 && buf[0] == 0.030f);
+        }
+
+        // === Test 2: 3-value CSV parses positionally ===
+        {
+            float buf[8] = {0};
+            int n = 0;
+            parse("0.020,0.030,0.040", buf, &n);
+            check("v5.11.40: 3-value CSV parses to count=3",
+                  n == 3 && buf[0] == 0.020f && buf[1] == 0.030f && buf[2] == 0.040f);
+        }
+
+        // === Test 3: empty / whitespace input parses to count=0 ===
+        {
+            float buf[8] = {0};
+            int n = 0;
+            parse("   ", buf, &n);
+            check("v5.11.40: whitespace-only input parses to count=0", n == 0);
+            parse("", buf, &n);
+            check("v5.11.40: empty input parses to count=0", n == 0);
+        }
+
+        // === Test 4: out-of-range values silently dropped ===
+        {
+            float buf[8] = {0};
+            int n = 0;
+            parse("0.030,200.0,0.040", buf, &n);  // 200.0 > 100.0 cap
+            check("v5.11.40: out-of-range value (200.0) dropped",
+                  n == 2 && buf[0] == 0.030f && buf[1] == 0.040f);
+        }
+
+        // === Test 5: broadcast-or-match alignment rule ===
+        // Mirrors the GUI gate: aligned iff (n_csv <= 1) || (n_csv == horizon_count).
+        {
+            auto aligned = [](int n_csv, int horizon_count) -> bool {
+                return (n_csv <= 1) || (n_csv == horizon_count);
+            };
+            check("v5.11.40: count=1 is always aligned (broadcast)",
+                  aligned(1, 3) && aligned(1, 8));
+            check("v5.11.40: count=N matches horizon_count==N",
+                  aligned(3, 3) && aligned(8, 8));
+            check("v5.11.40: count=N != horizon_count is misaligned",
+                  !aligned(2, 3) && !aligned(4, 3));
+            check("v5.11.40: count=0 is aligned (single-field fallback)",
+                  aligned(0, 3));
+        }
+    }
+
     printf("\n--- v5.11.18 main: Features_PackAll mask-aware overload ---\n");
     {
         // v5.11.18 main (2026-05-07) — sparse-zero mask-aware overload of

@@ -246,6 +246,13 @@ struct CollectMultiHorizonWorkerArgs {
     RunControlState *run_control;
     int snap_horizon_count;
     int snap_horizons[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    // v5.11.40 — per-horizon TP/SL. Snap-time arrays parallel to
+    // snap_horizons[]. snap_tp_pct[h] is the TP barrier for horizon h.
+    // For broadcast (single-value) mode, the click handler fills all
+    // entries with the same value. Arrays are always horizon_count
+    // wide; aligned 1:1 with snap_horizons.
+    float snap_tp_pct[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    float snap_sl_pct[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
 };
 
 static inline void *collect_multi_horizon_worker_fn(void *arg) {
@@ -253,7 +260,11 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
     RunControlState *rc = args->run_control;
     int horizon_count = args->snap_horizon_count;
     int horizons[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    float tp_pcts[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    float sl_pcts[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
     memcpy(horizons, args->snap_horizons, sizeof(horizons));
+    memcpy(tp_pcts,  args->snap_tp_pct,   sizeof(tp_pcts));
+    memcpy(sl_pcts,  args->snap_sl_pct,   sizeof(sl_pcts));
     free(args);
 
     // 1. Collect features ONCE. label_forward_ticks at this point is
@@ -265,7 +276,11 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
 
     // 2. Per-horizon label recompute + diagnostic. Iterate horizons,
     //    count valid (non-NaN) labels, log to stderr.
+    // v5.11.40 — also rotate label_tp_pct + label_sl_pct per horizon
+    //            (broadcast or per-horizon CSV from operator).
     int saved_forward_ticks = rc->run_config.label_forward_ticks;
+    double saved_tp = rc->run_config.label_tp_pct;
+    double saved_sl = rc->run_config.label_sl_pct;
     for (int h = 0; h < horizon_count; ++h) {
         if (rc->cancel_flag) {
             fprintf(stderr, "[collect-mh] cancelled at horizon %d/%d\n",
@@ -273,6 +288,11 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
             break;
         }
         rc->run_config.label_forward_ticks = horizons[h];
+        // BacktestRunConfig::label_tp_pct is double-typed (not FPN);
+        // operator's CSV value is a percent (e.g. 0.030 = 0.03%) so
+        // pass through directly without /100.
+        rc->run_config.label_tp_pct = (double)tp_pcts[h];
+        rc->run_config.label_sl_pct = (double)sl_pcts[h];
         Backtest_ComputeLabelsFromSamples(&rc->results, &rc->run_config);
 
         int n_valid = 0, n_pos = 0, n_neg = 0;
@@ -283,12 +303,14 @@ static inline void *collect_multi_horizon_worker_fn(void *arg) {
             if (lab > 0.5f) n_pos++;
             else if (lab < 0.5f) n_neg++;
         }
-        fprintf(stderr, "[collect-mh] horizon=%d ticks: %d valid samples "
-                        "(%d pos, %d neg, %d neutral) of %d total\n",
-                horizons[h], n_valid, n_pos, n_neg,
+        fprintf(stderr, "[collect-mh] horizon=%d ticks tp=%.3f%% sl=%.3f%%: "
+                        "%d valid samples (%d pos, %d neg, %d neutral) of %d total\n",
+                horizons[h], tp_pcts[h], sl_pcts[h], n_valid, n_pos, n_neg,
                 n_valid - n_pos - n_neg, rc->results.sample_count);
     }
     rc->run_config.label_forward_ticks = saved_forward_ticks;
+    rc->run_config.label_tp_pct = saved_tp;
+    rc->run_config.label_sl_pct = saved_sl;
 
     // 3. Final SamplesSnapshot from whatever the last horizon's labels are
     //    (operator's "current" view — Train Multi-Horizon will recompute
@@ -2094,6 +2116,22 @@ struct TrainingPanelState {
     char            ui_horizon_csv[128];    // operator-typed; parsed → ui_horizon_*
     int             ui_horizon_list[8];     // ENSEMBLE_HORIZON_MAX
     int             ui_horizon_count;
+    // v5.11.40 — per-horizon TP/SL CSV (operator-flagged 2026-05-07).
+    // Broadcast-or-match rule: 1 value applies to all horizons; N values
+    // map positionally where N == ui_horizon_count; anything else is
+    // misaligned and disables the Multi-Horizon button with a hint.
+    //
+    // Backward compat: when CSV is empty OR parses to 1 value, the
+    // existing single-value label_tp_pct/label_sl_pct fields are used
+    // (single-horizon Train Model + cfg load + Save Run output paths
+    // all read from those float fields). Per-horizon arrays here drive
+    // the multi-horizon worker only.
+    char            ui_tp_pct_csv[64];   // e.g. "0.030" or "0.020,0.030,0.040"
+    char            ui_sl_pct_csv[64];
+    float           ui_tp_per_horizon[8];   // parsed values (broadcast or positional)
+    float           ui_sl_per_horizon[8];
+    int             ui_tp_per_horizon_count;  // 0 = empty/use single field; 1 = broadcast; N = positional
+    int             ui_sl_per_horizon_count;
 };
 
 static inline void TrainingPanel_Init(TrainingPanelState *state) {
@@ -2110,6 +2148,15 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->label_type = LABEL_WIN_LOSS;
     state->label_tp_pct = 1.5f;
     state->label_sl_pct = 1.0f;
+    // v5.11.40 — CSV-aware TP/SL per-horizon. Default: empty CSV =
+    // single-value mode (uses label_tp_pct/_sl_pct directly). Operator
+    // types comma-separated values to opt in to per-horizon.
+    state->ui_tp_pct_csv[0] = '\0';
+    state->ui_sl_pct_csv[0] = '\0';
+    for (int i = 0; i < 8; ++i) state->ui_tp_per_horizon[i] = 0.0f;
+    for (int i = 0; i < 8; ++i) state->ui_sl_per_horizon[i] = 0.0f;
+    state->ui_tp_per_horizon_count = 0;
+    state->ui_sl_per_horizon_count = 0;
     strncpy(state->run_name, "run_01", sizeof(state->run_name) - 1);
     state->label_forward_ticks = 1000;
     strncpy(state->model_path, "models/buy_signal.json", sizeof(state->model_path) - 1);
@@ -2975,6 +3022,11 @@ struct MultiHorizonWorkerArgs {
     int  snap_tree_method_idx;
     int  snap_horizon_count;
     int  snap_horizons[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    // v5.11.40 — per-horizon TP/SL. snap_tp_pct[h] / snap_sl_pct[h]
+    // are the barrier values for horizon h (broadcast or positional
+    // per the operator's CSV input + the broadcast-or-match rule).
+    float snap_tp_pct[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    float snap_sl_pct[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
 };
 
 static inline void *train_multi_horizon_worker_fn(void *arg) {
@@ -3000,7 +3052,11 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
     int label_type = args->snap_label_type;
     int horizon_count = args->snap_horizon_count;
     int horizons[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    float tp_pcts[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    float sl_pcts[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
     memcpy(horizons, args->snap_horizons, sizeof(horizons));
+    memcpy(tp_pcts,  args->snap_tp_pct,   sizeof(tp_pcts));
+    memcpy(sl_pcts,  args->snap_sl_pct,   sizeof(sl_pcts));
     free(args);
 
     BacktestResults *results = &run_control->results;
@@ -3042,8 +3098,13 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
         state->mh_progress = h + 1;
         state->mh_total = horizon_count;
 
-        // Override label_forward_ticks for THIS horizon, recompute labels
+        // Override label_forward_ticks for THIS horizon, recompute labels.
+        // v5.11.40 — also rotate label_tp_pct + label_sl_pct per horizon
+        //            (snap'd from operator's CSV at click time). Field
+        //            is double-typed; pass through verbatim.
         run_control->run_config.label_forward_ticks = horizon_ticks;
+        run_control->run_config.label_tp_pct = (double)tp_pcts[h];
+        run_control->run_config.label_sl_pct = (double)sl_pcts[h];
         Backtest_ComputeLabelsFromSamples(results, &run_control->run_config);
 
         // Train inline. Mirrors train_model_worker_fn's body but compact;
@@ -3288,19 +3349,74 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // TP/SL barriers — used by win_loss, barrier, vol_barrier, peak_valley_stable
     if (state->label_type == LABEL_WIN_LOSS || state->label_type == LABEL_BARRIER ||
         state->label_type == LABEL_VOL_BARRIER || state->label_type == LABEL_PEAK_VALLEY_STABLE) {
-        // 3 decimals + 0.01 step lets users dial in tight barriers (5 bps = 0.050)
-        // for short lookahead horizons where 0.1+ rarely triggers. Pre-fix, the
-        // 0.1 step + "%.1f" format clamped at 0.1 — anything tighter rounded to 0.
-        ImGui::InputFloat("TP Barrier %", &state->label_tp_pct, 0.01f, 0.1f, "%.3f");
+        // v5.11.40 — TP/SL fields now accept comma-separated values for
+        // per-horizon mapping (broadcast-or-match rule). Single value
+        // (e.g. "0.030") works as before — applies to every horizon.
+        // CSV "0.020,0.030,0.040" maps positionally where N matches
+        // the horizon count. Misalignment disables the Multi-Horizon
+        // button with a hint (see render below).
+        //
+        // Backward compat: state->label_tp_pct / _sl_pct floats remain
+        // the source-of-truth for single-horizon Train Model + cfg I/O
+        // + Save Run output. The parser keeps them in sync with
+        // ui_tp_pct_csv[0] / ui_sl_pct_csv[0] (first parsed value).
+        //
+        // First-time render: if CSV string is empty, seed it from the
+        // existing label_tp_pct float (operator's stored cfg value).
+        if (state->ui_tp_pct_csv[0] == '\0') {
+            snprintf(state->ui_tp_pct_csv, sizeof(state->ui_tp_pct_csv),
+                     "%.3f", state->label_tp_pct);
+        }
+        if (state->ui_sl_pct_csv[0] == '\0') {
+            snprintf(state->ui_sl_pct_csv, sizeof(state->ui_sl_pct_csv),
+                     "%.3f", state->label_sl_pct);
+        }
+
+        ImGui::InputText("TP Barrier %",
+                         state->ui_tp_pct_csv, sizeof(state->ui_tp_pct_csv));
         ImGui::SetItemTooltip("Take-profit barrier as %% of price\n"
                               "label = 1 (or VALLEY for 3-class) if price moves up this much before SL is hit\n"
                               "wider = fewer but higher-confidence labels\n"
                               "tip: 0.050 = 5 bps. For short horizons (~1k ticks) at BTC scale,\n"
-                              "0.05-0.10%% gives balanced labels; 0.3+ usually = 99%% \"stable\".");
-        ImGui::InputFloat("SL Barrier %", &state->label_sl_pct, 0.01f, 0.1f, "%.3f");
+                              "0.05-0.10%% gives balanced labels; 0.3+ usually = 99%% \"stable\".\n\n"
+                              "v5.11.40 multi-horizon: comma-separated values map positionally\n"
+                              "to Horizons (CSV), e.g. '0.020,0.030,0.040' for 3 horizons.\n"
+                              "A single value (e.g. '0.030') broadcasts to all horizons.");
+        ImGui::InputText("SL Barrier %",
+                         state->ui_sl_pct_csv, sizeof(state->ui_sl_pct_csv));
         ImGui::SetItemTooltip("Stop-loss barrier as %% of price\n"
                               "label = 0 (or PEAK for 3-class) if price drops this much before TP is hit\n"
-                              "wider = fewer but higher-confidence labels");
+                              "wider = fewer but higher-confidence labels\n\n"
+                              "v5.11.40 multi-horizon: same CSV format as TP — single value\n"
+                              "broadcasts; N values map positionally to Horizons (CSV).");
+
+        // Parse CSVs every render frame (cheap; max 8 entries, bounded loop).
+        // Same shape as the horizons-CSV parser. After parsing, sync
+        // ui_*_per_horizon[] arrays + index-0 → label_*_pct floats.
+        auto parse_pct_csv = [](const char* csv, float* out, int* n_out) {
+            int n = 0;
+            const char* p = csv;
+            while (*p && n < 8) {
+                while (*p == ' ' || *p == '\t' || *p == ',') p++;
+                if (!*p) break;
+                char* end = nullptr;
+                float v = strtof(p, &end);
+                if (end == p) break;
+                if (v >= 0.0f && v <= 100.0f) out[n++] = v;
+                p = end;
+            }
+            *n_out = n;
+        };
+        parse_pct_csv(state->ui_tp_pct_csv,
+                      state->ui_tp_per_horizon, &state->ui_tp_per_horizon_count);
+        parse_pct_csv(state->ui_sl_pct_csv,
+                      state->ui_sl_per_horizon, &state->ui_sl_per_horizon_count);
+        // Keep label_tp_pct / _sl_pct in sync with index 0 — the
+        // backward-compat path for single-horizon Train Model.
+        if (state->ui_tp_per_horizon_count > 0)
+            state->label_tp_pct = state->ui_tp_per_horizon[0];
+        if (state->ui_sl_per_horizon_count > 0)
+            state->label_sl_pct = state->ui_sl_per_horizon[0];
     }
     if (state->label_type == LABEL_FORWARD_PNL) {
         ImGui::InputInt("Forward Ticks", &state->label_forward_ticks, 100, 1000);
@@ -3393,8 +3509,17 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // during training, so no data loss).
     ImGui::SameLine();
     int mh_collect_horizon_count = state->ui_horizon_count;
+    // v5.11.40 — broadcast-or-match alignment for per-horizon TP/SL.
+    // Allowed: single value (broadcasts) OR N values where N matches
+    // horizon count. Anything else disables the Multi-Horizon button
+    // with a hint. tp_aligned + sl_aligned both must be true.
+    int tp_n = state->ui_tp_per_horizon_count;
+    int sl_n = state->ui_sl_per_horizon_count;
+    bool tp_aligned = (tp_n <= 1) || (tp_n == mh_collect_horizon_count);
+    bool sl_aligned = (sl_n <= 1) || (sl_n == mh_collect_horizon_count);
     bool mh_can_collect = has_data && !run_control->running
-                          && mh_collect_horizon_count > 0;
+                          && mh_collect_horizon_count > 0
+                          && tp_aligned && sl_aligned;
     if (!mh_can_collect) ImGui::BeginDisabled();
     if (ImGui::Button("Collect Multi-Horizon")) {
         // clear previous training/walk-forward results
@@ -3432,9 +3557,23 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             sizeof(CollectMultiHorizonWorkerArgs));
         args->run_control = run_control;
         args->snap_horizon_count = mh_collect_horizon_count;
+        // v5.11.40 — snap per-horizon TP/SL using broadcast-or-match.
+        // single value (count==1) broadcasts to all horizons; N values
+        // map positionally. Single label_tp_pct/_sl_pct float as
+        // ultimate fallback (CSV totally empty).
+        float bcast_tp = (state->ui_tp_per_horizon_count > 0)
+            ? state->ui_tp_per_horizon[0] : state->label_tp_pct;
+        float bcast_sl = (state->ui_sl_per_horizon_count > 0)
+            ? state->ui_sl_per_horizon[0] : state->label_sl_pct;
         for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
             args->snap_horizons[i] = (i < mh_collect_horizon_count)
                 ? state->ui_horizon_list[i] : 0;
+            args->snap_tp_pct[i] = (state->ui_tp_per_horizon_count > 1
+                                    && i < state->ui_tp_per_horizon_count)
+                ? state->ui_tp_per_horizon[i] : bcast_tp;
+            args->snap_sl_pct[i] = (state->ui_sl_per_horizon_count > 1
+                                    && i < state->ui_sl_per_horizon_count)
+                ? state->ui_sl_per_horizon[i] : bcast_sl;
         }
         pthread_t tid;
         pthread_create(&tid, NULL, collect_multi_horizon_worker_fn, args);
@@ -3450,6 +3589,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         "Final results->labels[] holds the LAST horizon's labels;\n"
         "Train Multi-Horizon will recompute per horizon during\n"
         "training, so nothing is lost.");
+
+    // v5.11.40 — TP/SL misalignment hint. When operator typed a
+    // multi-value TP/SL CSV that doesn't broadcast or match horizon
+    // count, surface an explicit reason next to the disabled button.
+    if (mh_collect_horizon_count > 0 && (!tp_aligned || !sl_aligned)) {
+        ImGui::SameLine();
+        ImGui::TextColored(FoxmlColors::yellow,
+            "(misaligned: TP=%d, SL=%d, horizons=%d — need 1 or %d each)",
+            tp_n, sl_n, mh_collect_horizon_count, mh_collect_horizon_count);
+    }
 
     // v5.11.28 — Horizons (CSV) input rendered AT THE TOP next to
     // Collect Multi-Horizon (operator-flagged 2026-05-07: "probably
@@ -3913,7 +4062,17 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                             state->ui_horizon_count,
                             state->ui_horizon_count == 1 ? "" : "s");
 
-        bool mh_can_train = can_train && (eff_horizon_count > 0);
+        // v5.11.40 — broadcast-or-match for TP/SL on the train side too.
+        // Same validation as Collect Multi-Horizon (above). When eff_horizon
+        // came from cfg.horizon_list fallback (operator didn't type a CSV),
+        // ui_horizon_count is 0; in that case alignment uses
+        // eff_horizon_count for the match.
+        int train_tp_n = state->ui_tp_per_horizon_count;
+        int train_sl_n = state->ui_sl_per_horizon_count;
+        bool train_tp_aligned = (train_tp_n <= 1) || (train_tp_n == eff_horizon_count);
+        bool train_sl_aligned = (train_sl_n <= 1) || (train_sl_n == eff_horizon_count);
+        bool mh_can_train = can_train && (eff_horizon_count > 0)
+                            && train_tp_aligned && train_sl_aligned;
         if (!mh_can_train) ImGui::BeginDisabled();
         if (ImGui::Button("Train Multi-Horizon")) {
             state->mh_running = 1;
@@ -3955,9 +4114,22 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             // v5.10.0a-bugfix2 — snapshot effective horizons (UI takes
             // priority over cfg fallback at click time).
             mh_args->snap_horizon_count = eff_horizon_count;
+            // v5.11.40 — snap per-horizon TP/SL (broadcast-or-match
+            // rule). Single-value broadcasts; N values map positional.
+            // Empty CSV falls back to label_tp_pct/_sl_pct float.
+            float bcast_tp = (state->ui_tp_per_horizon_count > 0)
+                ? state->ui_tp_per_horizon[0] : state->label_tp_pct;
+            float bcast_sl = (state->ui_sl_per_horizon_count > 0)
+                ? state->ui_sl_per_horizon[0] : state->label_sl_pct;
             for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
                 mh_args->snap_horizons[i] = (i < eff_horizon_count)
                     ? eff_horizons[i] : 0;
+                mh_args->snap_tp_pct[i] = (state->ui_tp_per_horizon_count > 1
+                                           && i < state->ui_tp_per_horizon_count)
+                    ? state->ui_tp_per_horizon[i] : bcast_tp;
+                mh_args->snap_sl_pct[i] = (state->ui_sl_per_horizon_count > 1
+                                           && i < state->ui_sl_per_horizon_count)
+                    ? state->ui_sl_per_horizon[i] : bcast_sl;
             }
             pthread_create(&state->mh_tid, NULL, train_multi_horizon_worker_fn, mh_args);
             pthread_detach(state->mh_tid);
@@ -3967,6 +4139,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             if (eff_horizon_count == 0) {
                 ImGui::SameLine();
                 ImGui::TextDisabled("(set Horizons CSV above OR cfg.horizon_list to enable)");
+            } else if (!train_tp_aligned || !train_sl_aligned) {
+                // v5.11.40 — same misalignment hint as Collect side
+                ImGui::SameLine();
+                ImGui::TextColored(FoxmlColors::yellow,
+                    "(misaligned: TP=%d, SL=%d, horizons=%d — need 1 or %d each)",
+                    train_tp_n, train_sl_n, eff_horizon_count, eff_horizon_count);
             }
         }
         ImGui::SetItemTooltip(
