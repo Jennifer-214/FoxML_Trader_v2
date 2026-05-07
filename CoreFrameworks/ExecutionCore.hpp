@@ -140,6 +140,16 @@ struct alignas(64) ExecutionCore {
     // (the controller's snapshot helper). Disabled by default; flip the
     // enable flag from the controller to start sampling.
     CoreLatencyStats latency_stats;
+
+    // --- v5.11.0.1: Hot-path failure counters (no I/O on hot path) ---
+    // Replaces inline fprintf on the rare ring-push-failure branch
+    // (cascading libc-mutex stall risk under degraded conditions).
+    // Single writer (this core's hot path), relaxed-load by slow path
+    // for surfacing via TUISnapshot. No false sharing — accessed only
+    // by this core's threads. Position at struct tail keeps the cold
+    // failure-path cache line out of line 0.
+    // See plans/2026-05-06-hot-path-discipline.md Rule 2 for the pattern.
+    uint64_t ring_push_failures;
 };
 
 // v5.11.0.E — Part 3 architectural invariant (LATENCY_OPTIMIZATION_AUDIT.md
@@ -187,6 +197,7 @@ static inline void ExecutionCore_Init(
     core->cached_seq    = (uint64_t)-1;
     SPSCRing_Init(&core->event_ring);
     CoreLatencyStats_Init(&core->latency_stats);
+    core->ring_push_failures = 0;  // v5.11.0.1: hot-path failure counter
 }
 
 // Atomic parameter push from the controller. Wraps ParameterSlot_Write so the
@@ -470,17 +481,16 @@ static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tic
                 }
             }
         }
-        // Surface push failures so we know if the ring is filling. Predicted
-        // not-taken in steady state — if this fires, something upstream is
-        // backed up and we'd rather know than silently retry.
+        // v5.11.0.1: Surface push failures via counter (NO I/O on hot path).
+        // Pre-fix this was an inline fprintf(stderr) — libc stdio mutex
+        // acquisition during a ring-full condition (drainer already stalled)
+        // could cascade-stall the hot path further. Now: single store to a
+        // per-core counter; slow path picks it up via TUISnapshot for surfacing
+        // (slow-path log/render landing in v5.11.3's async log thread).
+        // See plans/2026-05-06-latency-path-discipline.md Rule 2.
         if (__builtin_expect(!(exit_a_pushed & exit_b_pushed &
                                 entry_a_pushed & entry_b_pushed), 0)) {
-            std::fprintf(stderr,
-                "[execution-core] core %d: event ring push FAILED "
-                "(exit_a=%u exit_b=%u entry_a=%u entry_b=%u) — "
-                "active flag preserved, will retry next tick\n",
-                core->core_id, exit_a_pushed, exit_b_pushed,
-                entry_a_pushed, entry_b_pushed);
+            core->ring_push_failures++;
         }
     }
 
