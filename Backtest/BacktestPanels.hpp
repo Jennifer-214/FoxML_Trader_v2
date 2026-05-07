@@ -2610,7 +2610,27 @@ static inline void *train_model_worker_fn(void *arg) {
             fflush(stderr);
             break;
         }
-        XGBoosterUpdateOneIter(booster, i, dtrain);
+        // v5.11.34 — log XGBoost training errors. Same shape as the
+        // WF audit (BacktestEngine.hpp, v5.11.32). Pre-fix
+        // UpdateOneIter ret was discarded; an XGBoost rejection
+        // (e.g. invalid hyperparam from cfg-parse-bug-class)
+        // silently no-op'd the rest of training. Now WARN'd to
+        // engine.log with the actual XGBGetLastError() string.
+        int ret_iter = XGBoosterUpdateOneIter(booster, i, dtrain);
+        if (ret_iter != 0) {
+            tt::Health_Log(tt::HEALTH_WARN, "train-xgb", -1,
+                "UpdateOneIter ret=%d at iter %d — XGB err: %s",
+                ret_iter, i,
+                XGBGetLastError() ? XGBGetLastError() : "(null)");
+            // bail out — model will be unfit; subsequent predict
+            // will fail; better to surface the error early than
+            // continue and produce garbage accuracy
+            cancelled = 1;
+            snprintf(state->status_msg, sizeof(state->status_msg),
+                     "Training XGBoost rejected at iter %d: %s",
+                     i, XGBGetLastError() ? XGBGetLastError() : "(error)");
+            break;
+        }
         state->tm_progress_iter = i + 1;
     }
 
@@ -2647,7 +2667,18 @@ static inline void *train_model_worker_fn(void *arg) {
         fprintf(stderr, "[TRAIN] model fingerprint: %.12s...\n", fp_hex);
     }
 
-    XGBoosterSaveModel(booster, snap_model_path);
+    // v5.11.34 — log SaveModel failures (silent overwrite vs no-write
+    // is invisible without this). Operator workflow assumes the file
+    // exists post-train; if save fails, the next "load model" will
+    // hit a missing-file or stale-file error far from the actual
+    // failure point.
+    int ret_save = XGBoosterSaveModel(booster, snap_model_path);
+    if (ret_save != 0) {
+        tt::Health_Log(tt::HEALTH_WARN, "train-xgb", -1,
+            "SaveModel(%s) ret=%d — XGB err: %s",
+            snap_model_path, ret_save,
+            XGBGetLastError() ? XGBGetLastError() : "(null)");
+    }
 
     // v5.11.29 — phase update post-save
     snprintf((char*)state->tm_phase_msg, sizeof(state->tm_phase_msg),
@@ -2658,7 +2689,15 @@ static inline void *train_model_worker_fn(void *arg) {
     const float *out_result;
     DMatrixHandle dpred;
     XGDMatrixCreateFromMat(train_features, n_valid, MODEL_NUM_FEATURES, NAN, &dpred);
-    XGBoosterPredict(booster, dpred, 0, 0, 0, &out_len, &out_result);
+    // v5.11.34 — log Predict failures. Pre-fix the in-sample accuracy
+    // could silently default-zero with no operator visibility.
+    int ret_pred = XGBoosterPredict(booster, dpred, 0, 0, 0, &out_len, &out_result);
+    if (ret_pred != 0) {
+        tt::Health_Log(tt::HEALTH_WARN, "train-xgb", -1,
+            "Predict(in-sample) ret=%d — XGB err: %s",
+            ret_pred,
+            XGBGetLastError() ? XGBGetLastError() : "(null)");
+    }
     if (is_multiclass) {
         state->train_accuracy = WalkForward_ComputeMulticlassAccuracy(
             out_result, train_labels, n_valid, num_classes) * 100.0f;
@@ -3100,7 +3139,17 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
         int cancelled = 0;
         for (int i = 0; i < hp.n_estimators; ++i) {
             if (state->mh_cancel) { cancelled = 1; break; }
-            XGBoosterUpdateOneIter(booster, i, dtrain);
+            // v5.11.34 — log XGB iter errors (same as Train Model worker)
+            int ret_iter = XGBoosterUpdateOneIter(booster, i, dtrain);
+            if (ret_iter != 0) {
+                tt::Health_Log(tt::HEALTH_WARN, "mh-train-xgb",
+                    horizons[h],
+                    "UpdateOneIter ret=%d at iter %d — XGB err: %s",
+                    ret_iter, i,
+                    XGBGetLastError() ? XGBGetLastError() : "(null)");
+                cancelled = 1;  // bail; subsequent SaveModel/Predict will fail
+                break;
+            }
         }
 
         // Save model to <run_name>_horizon_<H>/ subdir
@@ -3130,6 +3179,14 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
         } else {
             // Save model (atomic via XGBooster's own write; matches existing pattern)
             int save_rc = XGBoosterSaveModel(booster, dst_model);
+            if (save_rc != 0) {
+                // v5.11.34 — log XGB SaveModel error
+                tt::Health_Log(tt::HEALTH_WARN, "mh-train-xgb",
+                    horizon_ticks,
+                    "SaveModel(%s) ret=%d — XGB err: %s",
+                    dst_model, save_rc,
+                    XGBGetLastError() ? XGBGetLastError() : "(null)");
+            }
             if (save_rc == 0) {
                 fprintf(stderr, "[mh-train] horizon %d: saved %s\n",
                         horizon_ticks, dst_model);
