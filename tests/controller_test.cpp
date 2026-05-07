@@ -13847,6 +13847,95 @@ e3_skip_load:;
               parse_uint64_fast(nullptr) == 0ULL);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.11.5.B — clientOrderId slot encoding (O(1) lookup) ---\n");
+    {
+        // Theory: pre-v5.11.5.B, OrderManager_ProcessFillCommand scanned
+        // MAX_INFLIGHT_ORDERS (=16) bitmap entries linearly to find the slot
+        // matching cmd.order_id. With slot encoded in the upper 4 bits of
+        // the order id, ProcessFillCommand can decode the slot directly
+        // and verify in O(1).
+        //
+        // Encoding: bits 63..60 = slot, bits 59..0 = monotonic counter.
+        //
+        // Tests:
+        //  1. Submitted order_ids carry slot in upper 4 bits
+        //  2. Slot decoded from order_id matches the bitmap slot allocated
+        //  3. Distinct orders get distinct encoded ids even if slots reuse
+        //     after a fill
+        //  4. ProcessFillCommand path: slot decode + verify
+
+        using namespace tt;
+
+        OrderManagerState<64> oms;
+        ExchangeAdapter<64> empty_adapter{};
+        // event_log_mode=1 forces paper mode through the slot-allocation
+        // path (mode 0 shortcuts past the table for legacy compat). We need
+        // the table populated to test the slot encoding.
+        OrderManager_Init(&oms, empty_adapter, /*live=*/0,
+                          FPN_FromDouble<64>(10000.0),
+                          FPN_FromDouble<64>(0.001),
+                          /*event_log_mode=*/1, /*event_log_path=*/nullptr);
+
+        // First submit — paper mode (mode=1), fills synthetically. The returned
+        // order id should have slot in the upper 4 bits.
+        uint64_t oid1 = OrderManager_Submit(&oms,
+            /*core_id=*/0, ORDER_MARKET_BUY,
+            FPN_FromDouble<64>(0.001),
+            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+
+        int decoded_slot1 = (int)((oid1 >> 60) & 0xFu);
+        check("v5.11.5.B: first submit's id encodes slot 0 in bits 63..60",
+              decoded_slot1 == 0);
+        check("v5.11.5.B: lower 60 bits of encoded id are non-zero (monotonic counter)",
+              (oid1 & ((1ULL << 60) - 1)) != 0);
+        check("v5.11.5.B: bitmap reflects slot 0 occupied",
+              (oms.order_bitmap & 0x1u) != 0);
+        check("v5.11.5.B: orders[0].id == returned encoded id",
+              oms.orders[0].id == oid1);
+
+        // Submit a second order. Slot 0 still holds order 1; slot 1 should be
+        // allocated.
+        uint64_t oid2 = OrderManager_Submit(&oms,
+            /*core_id=*/0, ORDER_MARKET_BUY,
+            FPN_FromDouble<64>(0.002),
+            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+        int decoded_slot2 = (int)((oid2 >> 60) & 0xFu);
+        check("v5.11.5.B: second submit's id encodes slot 1",
+              decoded_slot2 == 1);
+        check("v5.11.5.B: distinct orders get distinct encoded ids",
+              oid1 != oid2);
+        check("v5.11.5.B: lower 60 bits monotonic across submits",
+              (oid2 & ((1ULL << 60) - 1)) > (oid1 & ((1ULL << 60) - 1)));
+
+        // ProcessFillCommand path — the O(1) decode + verify lookup.
+        Command cmd{};
+        cmd.type     = (uint8_t)CMD_FILL_RESULT;
+        cmd.order_id = oid1;  // hit slot 0 directly via the encoded id
+        std::memset(&cmd.result, 0, sizeof(cmd.result));
+        cmd.result.success         = 1;
+        cmd.result.avg_fill_price  = 60100.0;
+        cmd.result.fill_qty        = 0.001;
+        cmd.result.order_complete  = 1;  // ORDER_FILLED (vs PARTIAL=0)
+        std::strncpy(cmd.result.exchange_id, "TEST_EX",
+                     sizeof(cmd.result.exchange_id) - 1);
+        int processed = OrderManager_ProcessFillCommand(&oms, cmd);
+        check("v5.11.5.B: ProcessFillCommand routes via decoded slot to slot 0",
+              processed == 1 && oms.orders[0].state == ORDER_FILLED);
+
+        // Stale-callback safety: a cmd with a stale encoded id (slot now
+        // freed or reused for a different order) must NOT match. Free slot 0
+        // and try the same cmd — should be rejected.
+        oms.order_bitmap &= ~(uint16_t)0x1u;  // free slot 0
+        Command stale_cmd = cmd;
+        int stale_result = OrderManager_ProcessFillCommand(&oms, stale_cmd);
+        check("v5.11.5.B: ProcessFillCommand rejects callback for freed slot",
+              stale_result == 0);
+
+        OrderEventLog_Free(&oms.event_log);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.11.3.C — Async log thread (drainer I/O isolation) ---\n");
     {
         // Theory: pre-v5.11.3.C, every OrderEventLog_Append on the drainer
