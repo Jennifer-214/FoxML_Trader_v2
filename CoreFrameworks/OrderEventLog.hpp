@@ -40,6 +40,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>      // v5.11.3.C — async writer thread coordination
+#include <pthread.h>   // v5.11.3.C — async writer pthread
+#include <unistd.h>    // v5.11.3.C — usleep in writer idle path
+
+#include "SPSCRing.hpp"  // v5.11.3.C — drainer → writer queue
 
 namespace tt {
 
@@ -107,17 +112,54 @@ struct OrderEventLogFileHeader {
     uint64_t reserved[2];    // future: checksum, version
 };
 
+// v5.11.3.C — async writer SPSC ring size. 256 events × ~176B/event = ~45 KB.
+// Default-strategy burst is far below this (SimpleDip ~50-100 events/day total
+// across all cores); the ring exists to absorb micro-bursts (drainer cycles
+// processing many fills at once) without blocking the drainer on fwrite.
+constexpr size_t ORDER_EVENT_LOG_ASYNC_RING_SIZE = 256;
+
 template <unsigned F>
 struct OrderEventLog {
     OrderEvent<F>* entries;
     size_t         capacity;
     size_t         count;
-    uint64_t       next_event_id;
+    std::atomic<uint64_t> next_event_id;  // v5.11.3.C — atomic so the producer
+                                           // (drainer) and writer (consumer) can
+                                           // coexist without races on event_id
+                                           // assignment.
     // Phase 07: optional disk persistence. When non-null, every Append
     // also fwrites the event to this file. Opened by InitWithFile,
     // flushed periodically, closed by Free.
     FILE*          disk_file;
     char           disk_path[256];
+
+    // v5.11.3.C — async writer thread plumbing.
+    //
+    // Drainer thread calls OrderEventLog_Append → SPSCRing_TryPush onto
+    // async_ring (no I/O, no realloc, ~5ns). The dedicated writer thread
+    // sleeps when the ring is empty, wakes on usleep cadence, drains the
+    // ring + applies each event (realloc + memcpy + fwrite). Disk-stall
+    // isolation: a kernel page-cache flush blocking fwrite no longer pauses
+    // the drainer.
+    //
+    // SPSC discipline: drainer is the SOLE producer (per OMS_DrainSubmit
+    // single-caller invariant); writer thread is the SOLE consumer.
+    //
+    // Lifecycle:
+    //   Init                 → ring initialized, writer NOT started
+    //   StartAsyncWriter     → spawns pthread, sets writer_thread_active=1
+    //   Append (active=1)    → push to ring; sync fallback if push fails (rare)
+    //   Append (active=0)    → original sync path (test mode, init time)
+    //   StopAsyncWriter      → signal stop, join, drain remaining events
+    //   Free                 → calls Stop first if still active
+    //
+    // Fields below are touched by both threads — careful with ordering.
+    SPSCRing<OrderEvent<F>, ORDER_EVENT_LOG_ASYNC_RING_SIZE> async_ring;
+    pthread_t      writer_thread;        // pthread handle (only valid when active)
+    std::atomic<int> writer_thread_active;  // 1 = writer thread is running
+    std::atomic<int> writer_should_stop;    // writer polls this; set on Stop
+    std::atomic<uint64_t> ring_full_spins;  // total pause/usleep iterations spent waiting for ring slots
+    std::atomic<uint64_t> writer_realloc_failed_count;  // writer realloc failures
 };
 
 //======================================================================================================
@@ -129,9 +171,17 @@ inline void OrderEventLog_Init(OrderEventLog<F>* log) {
         ORDER_EVENT_LOG_INIT_CAPACITY * sizeof(OrderEvent<F>));
     log->capacity      = log->entries ? ORDER_EVENT_LOG_INIT_CAPACITY : 0;
     log->count         = 0;
-    log->next_event_id = 1;
+    log->next_event_id.store(1, std::memory_order_relaxed);
     log->disk_file     = nullptr;
     log->disk_path[0]  = '\0';
+    // v5.11.3.C — async writer state. Ring initialized, writer thread NOT
+    // running until StartAsyncWriter is called. Pre-Start, Append falls back
+    // to the original sync path (zero behavior change for tests).
+    SPSCRing_Init(&log->async_ring);
+    log->writer_thread_active.store(0, std::memory_order_relaxed);
+    log->writer_should_stop.store(0, std::memory_order_relaxed);
+    log->ring_full_spins.store(0, std::memory_order_relaxed);
+    log->writer_realloc_failed_count.store(0, std::memory_order_relaxed);
     if (!log->entries) {
         std::fprintf(stderr, "[OrderEventLog] WARN: initial malloc failed, "
                      "event logging disabled\n");
@@ -143,6 +193,10 @@ inline void OrderEventLog_Init(OrderEventLog<F>* log) {
 //======================================================================================================
 template <unsigned F>
 inline void OrderEventLog_Free(OrderEventLog<F>* log) {
+    // v5.11.3.C — stop the async writer thread first so it stops touching
+    // entries[] and disk_file before we free them. StopAsyncWriter is a
+    // no-op if writer was never started (test path).
+    OrderEventLog_StopAsyncWriter(log);
     if (log->disk_file) {
         std::fflush(log->disk_file);
         std::fclose(log->disk_file);
@@ -154,7 +208,7 @@ inline void OrderEventLog_Free(OrderEventLog<F>* log) {
     }
     log->capacity      = 0;
     log->count         = 0;
-    log->next_event_id = 0;
+    log->next_event_id.store(0, std::memory_order_relaxed);
 }
 
 //======================================================================================================
@@ -166,26 +220,30 @@ inline void OrderEventLog_Free(OrderEventLog<F>* log) {
 // The caller fills in all fields except event_id, which is assigned by
 // this function from next_event_id.
 //======================================================================================================
+// Apply one event to the in-memory log + disk. The realloc + memcpy +
+// fwrite pieces of the original Append. Caller is responsible for any
+// thread-safety: this body assumes single-threaded access to log->entries
+// and log->disk_file.
+//
+// Used by:
+//   - OrderEventLog_Append in sync mode (caller is the drainer)
+//   - OrderEventLog_AsyncWriterRoutine (caller is the writer thread)
 template <unsigned F>
-inline int OrderEventLog_Append(OrderEventLog<F>* log, OrderEvent<F> event) {
-    if (log->entries == nullptr) return 0;  // logging disabled (malloc failed)
-
+inline int OrderEventLog_ApplyEvent(OrderEventLog<F>* log, const OrderEvent<F>& event) {
     if (log->count >= log->capacity) {
         size_t new_cap = log->capacity * 2;
-        if (new_cap < 256) new_cap = 256;  // safety floor
+        if (new_cap < 256) new_cap = 256;
         OrderEvent<F>* new_buf = (OrderEvent<F>*)std::realloc(
             log->entries, new_cap * sizeof(OrderEvent<F>));
         if (!new_buf) {
             std::fprintf(stderr, "[OrderEventLog] WARN: realloc to %zu failed, "
                          "event %llu dropped\n",
-                         new_cap, (unsigned long long)log->next_event_id);
+                         new_cap, (unsigned long long)event.event_id);
             return 0;
         }
         log->entries  = new_buf;
         log->capacity = new_cap;
     }
-
-    event.event_id = log->next_event_id++;
     log->entries[log->count++] = event;
 
     // Phase 07: write-through to disk. Best-effort — a failed fwrite
@@ -199,6 +257,98 @@ inline int OrderEventLog_Append(OrderEventLog<F>* log, OrderEvent<F> event) {
         if ((log->count & 15) == 0) std::fflush(log->disk_file);
     }
     return 1;
+}
+
+template <unsigned F>
+inline int OrderEventLog_Append(OrderEventLog<F>* log, OrderEvent<F> event) {
+    if (log->entries == nullptr) return 0;  // logging disabled (malloc failed)
+
+    // Assign event_id atomically — works for both sync and async paths.
+    // fetch_add(1) on uint64_t is contention-safe even though only the
+    // drainer calls Append in production (reader threads never assign IDs).
+    event.event_id = log->next_event_id.fetch_add(1, std::memory_order_relaxed);
+
+    // v5.11.3.C — async path: enqueue + return. No realloc, no I/O on the
+    // drainer thread. The writer thread dequeues and applies.
+    if (log->writer_thread_active.load(std::memory_order_acquire)) {
+        // Spin-wait if the ring is momentarily full. Writer thread drains
+        // within its usleep cadence (~1ms), so spin time is bounded. We
+        // CANNOT fall back to inline ApplyEvent here — that would race
+        // with the writer thread's ApplyEvent on log->entries / disk_file
+        // (they're SPSC-disciplined to be writer-thread-only post-Start).
+        for (int spin = 0; !SPSCRing_TryPush(&log->async_ring, event); ++spin) {
+            log->ring_full_spins.fetch_add(1, std::memory_order_relaxed);
+            if (spin < 64) {
+                __builtin_ia32_pause();   // tight spin while writer drains
+            } else {
+                usleep(100);              // back off to 0.1ms after 64 pauses
+            }
+        }
+        return 1;
+    }
+
+    // Sync path (writer thread not active — test mode or pre-Start init).
+    return OrderEventLog_ApplyEvent(log, event);
+}
+
+//======================================================================================================
+// [ASYNC WRITER THREAD (v5.11.3.C)]
+//======================================================================================================
+template <unsigned F>
+inline void* OrderEventLog_AsyncWriterRoutine(void* arg) {
+    OrderEventLog<F>* log = (OrderEventLog<F>*)arg;
+    OrderEvent<F> event;
+    for (;;) {
+        // Drain whatever's in the ring right now.
+        int drained = 0;
+        while (SPSCRing_TryPop(&log->async_ring, &event)) {
+            if (!OrderEventLog_ApplyEvent(log, event)) {
+                log->writer_realloc_failed_count.fetch_add(
+                    1, std::memory_order_relaxed);
+            }
+            drained++;
+        }
+        // After draining, check stop signal. We drain BEFORE checking stop
+        // so shutdown still flushes everything the drainer pushed before
+        // signaling.
+        if (log->writer_should_stop.load(std::memory_order_acquire)) {
+            // Final drain pass to catch anything pushed between "ring empty"
+            // and stop check (rare but possible under shutdown race).
+            while (SPSCRing_TryPop(&log->async_ring, &event)) {
+                OrderEventLog_ApplyEvent(log, event);
+            }
+            // Final flush so the disk file is consistent post-shutdown.
+            if (log->disk_file) std::fflush(log->disk_file);
+            return nullptr;
+        }
+        // Empty + not stopping — sleep. 1ms is plenty given event cadence
+        // (default strategy fires ~1 event every ~200 sec; even a 100ms
+        // sleep would be fine, but 1ms minimizes shutdown latency).
+        if (drained == 0) usleep(1000);
+    }
+}
+
+template <unsigned F>
+inline int OrderEventLog_StartAsyncWriter(OrderEventLog<F>* log) {
+    if (log->writer_thread_active.load(std::memory_order_acquire)) return 0;
+    log->writer_should_stop.store(0, std::memory_order_relaxed);
+    int rc = pthread_create(&log->writer_thread, nullptr,
+                             OrderEventLog_AsyncWriterRoutine<F>, log);
+    if (rc != 0) {
+        std::fprintf(stderr, "[OrderEventLog] WARN: pthread_create failed (%d), "
+                     "async writer disabled — falling back to sync Append\n", rc);
+        return 0;
+    }
+    log->writer_thread_active.store(1, std::memory_order_release);
+    return 1;
+}
+
+template <unsigned F>
+inline void OrderEventLog_StopAsyncWriter(OrderEventLog<F>* log) {
+    if (!log->writer_thread_active.load(std::memory_order_acquire)) return;
+    log->writer_should_stop.store(1, std::memory_order_release);
+    pthread_join(log->writer_thread, nullptr);
+    log->writer_thread_active.store(0, std::memory_order_release);
 }
 
 //======================================================================================================
@@ -261,7 +411,7 @@ template <unsigned F>
 inline void OrderEventLog_Reset(OrderEventLog<F>* log) {
     // In-memory: clear count + reset id sequence. Buffer stays allocated.
     log->count = 0;
-    log->next_event_id = 1;
+    log->next_event_id.store(1, std::memory_order_relaxed);
 
     if (!log->disk_file || log->disk_path[0] == '\0') return;
 
@@ -348,8 +498,9 @@ inline int OrderEventLog_LoadFromDisk(OrderEventLog<F>* log, const char* path) {
             log->capacity = new_cap;
         }
         log->entries[log->count++] = event;
-        if (event.event_id >= log->next_event_id) {
-            log->next_event_id = event.event_id + 1;
+        uint64_t cur = log->next_event_id.load(std::memory_order_relaxed);
+        if (event.event_id >= cur) {
+            log->next_event_id.store(event.event_id + 1, std::memory_order_relaxed);
         }
         loaded++;
     }

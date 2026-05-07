@@ -477,6 +477,13 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
         // mode=0 OR mode=1+no-path → in-memory only.
         OrderEventLog_Init(&oms->event_log);
     }
+    // v5.11.3.C — start the async writer thread. From here on, the drainer's
+    // OrderEventLog_Append calls enqueue + return; the writer thread does
+    // realloc + fwrite + fflush off the drainer's tail-latency path. If
+    // pthread_create fails (rare), Append falls back to inline sync apply
+    // — same correctness guarantees, just no isolation. Tests that don't
+    // want the thread can call OrderEventLog_StopAsyncWriter immediately.
+    OrderEventLog_StartAsyncWriter(&oms->event_log);
 }
 
 //======================================================================================================

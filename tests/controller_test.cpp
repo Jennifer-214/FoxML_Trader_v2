@@ -13762,6 +13762,115 @@ e3_skip_load:;
               snap.price == saved);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.11.3.C — Async log thread (drainer I/O isolation) ---\n");
+    {
+        // Theory: pre-v5.11.3.C, every OrderEventLog_Append on the drainer
+        // thread synchronously did realloc + fwrite + periodic fflush. Disk
+        // stalls (page cache flush, fsync from another process) blocked the
+        // drainer for arbitrary microseconds → tail variance.
+        //
+        // Post-v5.11.3.C: drainer pushes the event onto a SPSC ring + returns
+        // (~5ns); a dedicated writer pthread drains the ring and does the
+        // realloc + fwrite + fflush off the drainer's tail-latency path.
+        //
+        // Test strategy: instantiate an OrderEventLog with the async writer
+        // started, push N events from the test thread (analog of the drainer
+        // role), then call StopAsyncWriter (which joins the writer after
+        // its final drain pass). Assert that all N events landed in entries[]
+        // with monotonic event_ids 1..N. Verifies the SPSC pipe + apply
+        // ordering + shutdown drain.
+        using namespace tt;
+        constexpr int N_EVENTS = 500;
+
+        // Use a stack-allocated OrderEventLog; no disk persistence (focuses
+        // the test on the ring + apply path, not Phase 07 disk).
+        OrderEventLog<FP> log;
+        OrderEventLog_Init(&log);
+
+        // Sync mode baseline: Append works without writer thread.
+        OrderEvent<FP> ev0{};
+        ev0.type = OEVT_FULL_FILL;
+        ev0.order_id = 999;
+        int rc_sync = OrderEventLog_Append(&log, ev0);
+        check("v5.11.3.C: sync-mode Append succeeds when writer not started",
+              rc_sync == 1 && log.count == 1);
+        check("v5.11.3.C: sync-mode Append assigned event_id=1",
+              log.entries[0].event_id == 1);
+
+        // Reset for the async test (count=0, next_event_id=1)
+        OrderEventLog_Reset(&log);
+        check("v5.11.3.C: Reset zeros count and rewinds next_event_id",
+              log.count == 0 && log.next_event_id.load() == 1);
+
+        // Start the async writer. From here on, Append enqueues + returns.
+        int started = OrderEventLog_StartAsyncWriter(&log);
+        check("v5.11.3.C: StartAsyncWriter succeeds (pthread_create OK)",
+              started == 1);
+        check("v5.11.3.C: writer_thread_active flag set after Start",
+              log.writer_thread_active.load() == 1);
+
+        // Push N events as fast as possible — exercises the SPSC ring + the
+        // writer's drain-loop. The 1ms writer sleep is the steady-state
+        // cadence; with a 256-slot ring, bursts of <256 fit cleanly.
+        for (int i = 0; i < N_EVENTS; ++i) {
+            OrderEvent<FP> ev{};
+            ev.type     = OEVT_FULL_FILL;
+            ev.order_id = (uint64_t)(2000 + i);
+            OrderEventLog_Append(&log, ev);
+        }
+
+        // Stop the writer — joins the thread after its final drain pass.
+        // This is the test's synchronization point: post-Stop, all pushed
+        // events MUST be in entries[] (or in ring_drop_count if overflow).
+        OrderEventLog_StopAsyncWriter(&log);
+        check("v5.11.3.C: writer_thread_active=0 after Stop",
+              log.writer_thread_active.load() == 0);
+
+        // Verify drain completeness — every event MUST land in entries[].
+        // The producer spin-waits on ring-full, so no events drop; we expect
+        // count == N_EVENTS exactly. ring_full_spins may be non-zero if the
+        // burst exceeded ring capacity (just observability).
+        check("v5.11.3.C: every pushed event landed in entries (count == N_EVENTS)",
+              log.count == (size_t)N_EVENTS);
+        check("v5.11.3.C: zero realloc failures during async drain",
+              log.writer_realloc_failed_count.load() == 0);
+
+        // Verify event_id monotonicity in entries[]. Even if some events
+        // dropped via ring overflow, the IDs that landed should be a
+        // monotonic prefix (since drops happen on the producer side AFTER
+        // event_id assignment when the inline fallback also fires).
+        int monotonic = 1;
+        for (size_t i = 1; i < log.count; ++i) {
+            if (log.entries[i].event_id <= log.entries[i-1].event_id) {
+                monotonic = 0;
+                break;
+            }
+        }
+        check("v5.11.3.C: entries[] event_ids are strictly monotonic", monotonic);
+
+        // Verify that order_ids are preserved (i.e. the writer applied the
+        // events the producer pushed, not torn / random).
+        // entries[0] should be order_id=2000 (first push), since we Reset
+        // before the async loop.
+        check("v5.11.3.C: first entry's order_id matches first push",
+              log.count > 0 && log.entries[0].order_id == 2000);
+
+        OrderEventLog_Free(&log);
+        check("v5.11.3.C: Free is idempotent on already-stopped writer",
+              log.entries == nullptr);
+
+        // Test 2: Free without explicit Stop should still tear down the writer.
+        OrderEventLog<FP> log2;
+        OrderEventLog_Init(&log2);
+        OrderEventLog_StartAsyncWriter(&log2);
+        OrderEvent<FP> ev2{};
+        ev2.type = OEVT_FULL_FILL;
+        OrderEventLog_Append(&log2, ev2);
+        OrderEventLog_Free(&log2);  // calls StopAsyncWriter internally
+        check("v5.11.3.C: Free correctly stops writer + frees memory",
+              log2.entries == nullptr && log2.writer_thread_active.load() == 0);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.11.1.2 — Branchless leg-B via PAIR_BRANCHLESS template ---\n");
     {
         // Theory (audit Part 1.2): leg-B SG_Evaluate is currently branch-gated
