@@ -170,6 +170,35 @@ build_gui_lite() {
     update_bin_links
 }
 
+build_debug() {
+    # v5.11.32 — engine debug-logging build. Same as build_gui (ImGui +
+    # LATENCY_PROFILING + XGBoost) PLUS -DFOXML_DEBUG_LOGS=ON which
+    # enables LOG_DEBUG_ENGINE / LOG_DEBUG_HOT macros (see
+    # MemHeaders/DebugLog.hpp). Default release builds compile those
+    # macros to ((void)0) — zero bytes, zero cost. The debug build
+    # emits HEALTH_DEBUG records to engine.log on every macro call,
+    # which is invaluable for reproducing tricky bugs (e.g. the WF
+    # 0% accuracy regression that motivated this discipline).
+    #
+    # Use when reproducing a bug; do NOT use as a default development
+    # build (the debug logging adds 5-10µs per fired site, which is
+    # unacceptable on engine slow path even though the data is on a
+    # separate cache line). Switch back to `./build.sh gui` for normal
+    # work after diagnosing.
+    [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_debug
+    cmake -B build_debug -DUSE_IMGUI_GUI=ON -DLATENCY_PROFILING=ON \
+                          -DUSE_XGBOOST=ON \
+                          -DCMAKE_CXX_FLAGS="-DFOXML_DEBUG_LOGS=ON"
+    cmake --build build_debug -j"$JOBS"
+    link_cfg build_debug
+    # Note: update_bin_links points bin/ at build_gui by default; for
+    # debug runs, invoke build_debug/foxml_suite directly so a normal
+    # `./bin/foxml_suite` invocation doesn't surprise-pick the slower
+    # debug binary.
+    echo "[debug] OK — debug binaries at build_debug/{engine_gui,foxml_suite}"
+    echo "[debug] (bin/ symlinks intentionally NOT updated — invoke directly)"
+}
+
 build_suite() {
     # Backward-compat alias — build_suite is now the same as build_gui.
     [[ "$CLEAN_FLAG" == "--clean" ]] && rm -rf build_suite
@@ -250,15 +279,18 @@ case "$TARGET" in
     asan)
         build_asan
         ;;
+    debug)
+        build_debug
+        ;;
     clean)
         rm -rf build build_gui build_gui_lite build_suite build_lat \
                build_pgo_gen build_pgo pgo_profile \
-               build_tsan build_asan bin
+               build_tsan build_asan build_debug bin
         echo "all build dirs + bin/ symlinks removed"
         ;;
     *)
         echo "unknown target: $TARGET" >&2
-        echo "usage: $0 {engine|gui|gui-lite|suite|all|test|latency|pgo|tsan|asan|clean} [--clean]" >&2
+        echo "usage: $0 {engine|gui|gui-lite|suite|all|test|latency|pgo|tsan|asan|debug|clean} [--clean]" >&2
         exit 1
         ;;
 esac

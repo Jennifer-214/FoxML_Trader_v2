@@ -23,6 +23,8 @@
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.6: FEATURE_REGISTRY_HASH() for auto-stamp
 #include "../ML_Headers/BuildFlags.hpp"       // v5.9.5h: BUILD_FLAGS_HASH() for cross-build drift detection
 #include "../Version.hpp"                      // v5.8.6: ENGINE_VERSION_STRING for auto-stamp
+#include "../MemHeaders/HealthLog.hpp"        // v5.11.32: Health_Log for WF observability
+#include "../MemHeaders/DebugLog.hpp"         // v5.11.32: LOG_DEBUG_ENGINE for compile-time-only diags
 #include "../GUI/CandleAccumulator.hpp"
 #include "LabelFunctions.hpp"
 #include "BacktestSnapshot.hpp"
@@ -1628,7 +1630,11 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         int n_rounds = 200;
         // v5.10.0 Item A — xgboost_train phase timer (per-fold).
         uint64_t xgb_start_ns = tt::PhaseTimer_NowNs();
-        // v5.11.31 — log first iter ret + last iter completed
+        // v5.11.31/.32 — track first failing iter + last successful iter.
+        // Categorization: train-iter failure with XGB err string is a
+        // WARN (always-on observability — operator wants to see this
+        // without rebuilding); the per-fold "trained N/N successfully"
+        // banner is INFO (cheap, only 1 line per fold).
         int last_iter_ret = 0;
         int last_iter_idx = -1;
         for (int r = 0; r < n_rounds; r++) {
@@ -1636,17 +1642,16 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             last_iter_ret = ret;
             last_iter_idx = r;
             if (ret != 0) {
-                fprintf(stderr,
-                    "[wf-diag] fold %d UpdateOneIter ret=%d at iter %d — XGB err: %s\n",
-                    f + 1, ret, r,
-                    XGBGetLastError() ? XGBGetLastError() : "(null)");
+                tt::Health_Log(tt::HEALTH_WARN, "wf-xgb", f + 1,
+                    "UpdateOneIter ret=%d at iter %d — XGB err: %s",
+                    ret, r, XGBGetLastError() ? XGBGetLastError() : "(null)");
                 break;
             }
         }
-        if (last_iter_ret == 0) {
-            fprintf(stderr,
-                "[wf-diag] fold %d trained %d/%d iters successfully\n",
-                f + 1, last_iter_idx + 1, n_rounds);
+        if (last_iter_ret == 0 && tt::Health_LogEnabled(tt::HEALTH_INFO)) {
+            tt::Health_Log(tt::HEALTH_INFO, "wf-xgb", f + 1,
+                "trained %d/%d iters successfully",
+                last_iter_idx + 1, n_rounds);
         }
         tt::PhaseTimer_Global().xgboost_train_ns +=
             tt::PhaseTimer_NowNs() - xgb_start_ns;
@@ -1659,17 +1664,19 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             int predict_te_ret = XGBoosterPredict(booster, dtest,  0, 0, 0, &out_len_te, &pred_te);
             int pred_tr_ok = (predict_tr_ret == 0);
             int pred_te_ok = (predict_te_ret == 0);
-            // v5.11.31 — log XGB error when predict fails
+            // v5.11.32 — predict failure → WARN (always-on; this is the
+            // class of bug that left WF accuracy at default 0.0 silently
+            // pre-fix). XGBGetLastError() string is the smoking gun.
             if (!pred_tr_ok) {
-                fprintf(stderr,
-                    "[wf-diag] fold %d Predict(train) ret=%d — XGB err: %s\n",
-                    f + 1, predict_tr_ret,
+                tt::Health_Log(tt::HEALTH_WARN, "wf-xgb", f + 1,
+                    "Predict(train) ret=%d — XGB err: %s",
+                    predict_tr_ret,
                     XGBGetLastError() ? XGBGetLastError() : "(null)");
             }
             if (!pred_te_ok) {
-                fprintf(stderr,
-                    "[wf-diag] fold %d Predict(test) ret=%d — XGB err: %s\n",
-                    f + 1, predict_te_ret,
+                tt::Health_Log(tt::HEALTH_WARN, "wf-xgb", f + 1,
+                    "Predict(test) ret=%d — XGB err: %s",
+                    predict_te_ret,
                     XGBGetLastError() ? XGBGetLastError() : "(null)");
             }
 
@@ -1684,62 +1691,95 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 }
             } else if (is_multiclass) {
                 int K = num_classes_lt;
-                // v5.11.30 — diagnostic logging for WF 0% accuracy
-                // regression. Pre-fix the per-fold accuracy could stay
-                // at default 0.0f when XGBoost output shape didn't match
-                // n_samples * K (silently skipped). Log enough info to
-                // discriminate Case A (shape mismatch) vs Case B (shapes
-                // OK but predictions all wrong).
-                fprintf(stderr,
-                    "[wf-diag] fold %d multiclass: pred_tr_ok=%d "
-                    "out_len_tr=%lu expected=%d (n_train=%d K=%d) "
-                    "pred_te_ok=%d out_len_te=%lu expected=%d (n_test=%d)\n",
-                    f + 1, pred_tr_ok,
-                    (unsigned long)out_len_tr, n_train * K, n_train, K,
-                    pred_te_ok, (unsigned long)out_len_te, n_test * K, n_test);
+                // v5.11.32 — observability discipline (suite-side, no
+                // engine-slow-path latency cost). Categorization:
+                //   * shape-mismatch SKIP → WARN (always-on; this is
+                //     the silent-bug class that masked the WF
+                //     regression for hours).
+                //   * per-sample (argmax→label) sampling → DEBUG via
+                //     LOG_DEBUG_ENGINE (compile-time gated; off in
+                //     release; rebuild with ./build.sh debug to enable
+                //     when reproducing a tricky bug).
+                //   * post-compute accuracy summary → INFO (cheap,
+                //     1 line per fold; aggregates the per-fold result).
                 if (pred_tr_ok && (int)out_len_tr == n_train * K) {
                     fr->train_accuracy = WalkForward_ComputeMulticlassAccuracy(
                         pred_tr, train_labels, n_train, K);
-                    // Sample first 5 (argmax, label) pairs to see what
-                    // the model is predicting vs ground truth.
-                    int show = n_train < 5 ? n_train : 5;
-                    fprintf(stderr, "[wf-diag] fold %d train sample (argmax, label):", f + 1);
-                    for (int i = 0; i < show; i++) {
-                        int best = 0;
-                        float best_p = pred_tr[i * K];
-                        for (int k = 1; k < K; k++) {
-                            float p = pred_tr[i * K + k];
-                            if (p > best_p) { best_p = p; best = k; }
+#ifdef FOXML_DEBUG_LOGS
+                    {
+                        // Sample first 5 (argmax, label) pairs.
+                        char sample_buf[128] = {0};
+                        size_t off = 0;
+                        int show = n_train < 5 ? n_train : 5;
+                        for (int i = 0; i < show; i++) {
+                            int best = 0;
+                            float best_p = pred_tr[i * K];
+                            for (int k = 1; k < K; k++) {
+                                float p = pred_tr[i * K + k];
+                                if (p > best_p) { best_p = p; best = k; }
+                            }
+                            int truth = (int)(train_labels[i] + 0.5f);
+                            int wrote = snprintf(sample_buf + off,
+                                                  sizeof(sample_buf) - off,
+                                                  " (%d->%d)", best, truth);
+                            if (wrote > 0) off += wrote;
+                            else break;
                         }
-                        int truth = (int)(train_labels[i] + 0.5f);
-                        fprintf(stderr, " (%d→%d)", best, truth);
+                        LOG_DEBUG_ENGINE("wf-fold-train", f + 1,
+                            "argmax/label samples:%s acc=%.4f",
+                            sample_buf, fr->train_accuracy);
                     }
-                    fprintf(stderr, " train_accuracy=%.4f\n", fr->train_accuracy);
+#endif
+                    if (tt::Health_LogEnabled(tt::HEALTH_INFO)) {
+                        tt::Health_Log(tt::HEALTH_INFO, "wf-fold", f + 1,
+                            "train_accuracy=%.4f n_train=%d K=%d",
+                            fr->train_accuracy, n_train, K);
+                    }
                 } else {
-                    fprintf(stderr, "[wf-diag] fold %d train SKIPPED — shape "
-                            "mismatch leaves train_accuracy at default 0.0\n",
-                            f + 1);
+                    tt::Health_Log(tt::HEALTH_WARN, "wf-fold", f + 1,
+                        "train SKIP — pred_tr_ok=%d out_len_tr=%lu expected=%d "
+                        "(n_train=%d K=%d) → train_accuracy stays at 0.0 default",
+                        pred_tr_ok, (unsigned long)out_len_tr, n_train * K,
+                        n_train, K);
                 }
                 if (pred_te_ok && (int)out_len_te == n_test * K) {
                     fr->val_accuracy = WalkForward_ComputeMulticlassAccuracy(
                         pred_te, test_labels, n_test, K);
-                    int show = n_test < 5 ? n_test : 5;
-                    fprintf(stderr, "[wf-diag] fold %d val sample (argmax, label):", f + 1);
-                    for (int i = 0; i < show; i++) {
-                        int best = 0;
-                        float best_p = pred_te[i * K];
-                        for (int k = 1; k < K; k++) {
-                            float p = pred_te[i * K + k];
-                            if (p > best_p) { best_p = p; best = k; }
+#ifdef FOXML_DEBUG_LOGS
+                    {
+                        char sample_buf[128] = {0};
+                        size_t off = 0;
+                        int show = n_test < 5 ? n_test : 5;
+                        for (int i = 0; i < show; i++) {
+                            int best = 0;
+                            float best_p = pred_te[i * K];
+                            for (int k = 1; k < K; k++) {
+                                float p = pred_te[i * K + k];
+                                if (p > best_p) { best_p = p; best = k; }
+                            }
+                            int truth = (int)(test_labels[i] + 0.5f);
+                            int wrote = snprintf(sample_buf + off,
+                                                  sizeof(sample_buf) - off,
+                                                  " (%d->%d)", best, truth);
+                            if (wrote > 0) off += wrote;
+                            else break;
                         }
-                        int truth = (int)(test_labels[i] + 0.5f);
-                        fprintf(stderr, " (%d→%d)", best, truth);
+                        LOG_DEBUG_ENGINE("wf-fold-val", f + 1,
+                            "argmax/label samples:%s acc=%.4f",
+                            sample_buf, fr->val_accuracy);
                     }
-                    fprintf(stderr, " val_accuracy=%.4f\n", fr->val_accuracy);
+#endif
+                    if (tt::Health_LogEnabled(tt::HEALTH_INFO)) {
+                        tt::Health_Log(tt::HEALTH_INFO, "wf-fold", f + 1,
+                            "val_accuracy=%.4f n_test=%d K=%d",
+                            fr->val_accuracy, n_test, K);
+                    }
                 } else {
-                    fprintf(stderr, "[wf-diag] fold %d val SKIPPED — shape "
-                            "mismatch leaves val_accuracy at default 0.0\n",
-                            f + 1);
+                    tt::Health_Log(tt::HEALTH_WARN, "wf-fold", f + 1,
+                        "val SKIP — pred_te_ok=%d out_len_te=%lu expected=%d "
+                        "(n_test=%d K=%d) → val_accuracy stays at 0.0 default",
+                        pred_te_ok, (unsigned long)out_len_te, n_test * K,
+                        n_test, K);
                 }
             } else {
                 if (pred_tr_ok && (int)out_len_tr == n_train) {
