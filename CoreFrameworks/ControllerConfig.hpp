@@ -378,6 +378,12 @@ template <unsigned F> struct ControllerConfig {
   // fire regardless of regime. Setting this to 1 is the operator
   // saying "I know what I'm doing" and is logged.
   int acknowledge_hardcoded_strategy_in_live;
+  // v5.11.3 — mlockall failure handling. 1 (default) = HFT-correct: fatal
+  // exit if pages can't be locked into RAM (deployment must have enough
+  // RLIMIT_MEMLOCK + CAP_IPC_LOCK). 0 = laptop / dev: warn and continue
+  // when mlockall fails. Setting this to 0 in production trades determinism
+  // for portability — operator should explicitly opt out.
+  int require_mlockall;
   // kill switch (sticky — stays active until session reset or manual TUI 'k')
   int kill_switch_enabled; // 0=disabled, 1=enabled
   FPN<F>
@@ -957,6 +963,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
                                                     // must set to 1 to
                                                     // run hardcoded
                                                     // strategies live
+  cfg.require_mlockall = 1;  // v5.11.3 — HFT-correct default; set to 0
+                              // for laptop dev where RLIMIT_MEMLOCK is tight
   // kill switch
   cfg.kill_switch_enabled = 1; // on by default — safety first
   cfg.kill_switch_daily_loss_pct =
@@ -1364,6 +1372,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(depth_enabled)
     CFG_PARSE_INT(use_real_money)
     CFG_PARSE_INT(acknowledge_hardcoded_strategy_in_live)  // v5.7.2
+    CFG_PARSE_INT(require_mlockall)  // v5.11.3
     CFG_PARSE_INT(session_filter_enabled)
     CFG_PARSE_INT(gate_ema_enabled)
     CFG_PARSE_INT(default_strategy)

@@ -128,7 +128,7 @@ int main(int argc, char *argv[]) {
     // slow-path threads. Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 12.3.
     tt::engine_set_mxcsr_ftz_daz();
 
-    fprintf(stderr, "Tick Trader — Copyright (c) 2026 Jennifer Lewis. All rights reserved.\n");
+    fprintf(stderr, "FoxML_Trader_v2 — Copyright (c) 2026 Jennifer Lewis. All rights reserved.\n");
     fprintf(stderr, "Licensed under AGPL-3.0-or-later. Commercial license: jenn.lewis5789@gmail.com\n\n");
 
     const char *cfg_path = (argc > 1) ? argv[1] : "engine.cfg";
@@ -195,14 +195,18 @@ int main(int argc, char *argv[]) {
             }
         }
         if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+            const int level_required = (ccfg.require_mlockall != 0);
             fprintf(stderr,
-                "[v5.11.0.B] FATAL: mlockall failed: %s. "
+                "[v5.11.0.B] %s: mlockall failed: %s. "
                 "Engine cannot guarantee deterministic latency without locked pages. "
                 "Run with CAP_IPC_LOCK or as root, and ensure RLIMIT_MEMLOCK is raised "
                 "(`ulimit -l unlimited` for this shell, or /etc/security/limits.conf "
-                "for persistent config).\n",
-                strerror(errno));
-            return 1;
+                "for persistent config).%s\n",
+                level_required ? "FATAL" : "WARN",
+                strerror(errno),
+                level_required ? "" :
+                    " Continuing because require_mlockall=0 (laptop/dev mode).");
+            if (level_required) return 1;
         }
     }
 
