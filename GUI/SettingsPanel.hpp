@@ -1231,15 +1231,31 @@ static inline void GUI_Panel_Settings(SettingsState *s,
     // crisp text on a different size, rebuild the font atlas at startup
     // with a smaller pixel size — deferred polish.
     {
+        // v5.11.37 — slider min lowered 0.7 → 0.5 for 1080p operators.
+        // Default 0.6 (set at GuiThread.hpp boot). Persists across
+        // sessions via data/foxml_gui_state.txt. Operator drags →
+        // immediate FontGlobalScale change → atomic-rename write to
+        // disk. Next boot reads back.
         float font_scale = ImGui::GetIO().FontGlobalScale;
         ImGui::PushItemWidth(140.0f);
-        if (ImGui::SliderFloat("font scale", &font_scale, 0.7f, 1.5f, "%.2fx")) {
+        if (ImGui::SliderFloat("font scale", &font_scale, 0.5f, 1.5f, "%.2fx")) {
             ImGui::GetIO().FontGlobalScale = font_scale;
+            // Persist. Atomic write: tmp + rename so a concurrent boot
+            // never sees a partial file. Best-effort; failures are
+            // silent (worst case = next boot uses default 0.6).
+            mkdir("data", 0755);  // EEXIST is fine
+            FILE* tmp = fopen("data/foxml_gui_state.txt.tmp", "w");
+            if (tmp) {
+                fprintf(tmp, "font_scale=%.3f\n", font_scale);
+                fclose(tmp);
+                rename("data/foxml_gui_state.txt.tmp",
+                       "data/foxml_gui_state.txt");
+            }
         }
         ImGui::PopItemWidth();
         ImGui::SameLine();
         ImGui::TextColored(FoxmlColors::comment,
-            "(session-only; resets to 1.0 on relaunch)");
+            "(persisted: data/foxml_gui_state.txt)");
         ImGui::Separator();
     }
 

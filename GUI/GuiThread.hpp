@@ -159,6 +159,32 @@ static inline bool Gui_Init(GuiContext *gui, const char *title, int w, int h) {
         }
     }
 
+    // v5.11.37 — font scale persistence (operator-flagged 2026-05-07).
+    // Operator wants 0.6 default for 1080p, persisted across sessions.
+    // Pre-fix: FontGlobalScale = 1.0f (ImGui default) every launch
+    // regardless of slider drag. Now read from data/foxml_gui_state.txt
+    // on boot; SettingsPanel writes back when operator drags the slider.
+    //
+    // Format: simple key=value lines. Robust to missing file (use 0.6
+    // default), malformed value (clamp to 0.5..1.5), or missing dir
+    // (mkdir -p data/ on first write).
+    {
+        FILE* f = fopen("data/foxml_gui_state.txt", "r");
+        float saved_scale = 0.6f;  // 0.6 default — operator-set baseline
+        if (f) {
+            char line[128];
+            while (fgets(line, sizeof(line), f)) {
+                float v;
+                if (sscanf(line, "font_scale=%f", &v) == 1) {
+                    if (v >= 0.5f && v <= 1.5f) saved_scale = v;
+                    break;
+                }
+            }
+            fclose(f);
+        }
+        io.FontGlobalScale = saved_scale;
+    }
+
     // theme + transparency
     Foxml_ApplyTheme();
 
