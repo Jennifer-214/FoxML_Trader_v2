@@ -13,6 +13,7 @@
 #include <string.h>
 #include <math.h>
 #include <sys/stat.h>
+#include <sys/resource.h>  // v5.11.0.B — getrlimit / RLIMIT_MEMLOCK
 #include <unistd.h>
 #include <limits>  // v5.9.0: std::numeric_limits<double>::quiet_NaN() in NaN guard tests
 #include "../DataStream/MockGenerator.hpp"
@@ -13397,6 +13398,41 @@ e3_skip_load:;
         char stamp_path[512];
         snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", tmp_model);
         unlink(stamp_path);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.0.B — RLIMIT_MEMLOCK preflight ---\n");
+    {
+        // Theory (audit Part 12.2): mlockall(MCL_CURRENT | MCL_FUTURE) locks
+        // engine memory pages into physical RAM, preventing kernel page swap
+        // stalls on hot path. Preflight via getrlimit(RLIMIT_MEMLOCK) catches
+        // operator misconfig (soft limit too low) before mlockall fails.
+        //
+        // Test scope: getrlimit smoke (always succeeds on Linux for valid
+        // resource); validate fields are sensible. We do NOT call mlockall
+        // directly in the test process (would lock the test's pages until
+        // exit + would fail in CI without CAP_IPC_LOCK).
+
+        struct rlimit rl;
+        int rc = getrlimit(RLIMIT_MEMLOCK, &rl);
+        check("v5.11.0.B: getrlimit(RLIMIT_MEMLOCK) succeeds", rc == 0);
+
+        // rlim_cur ≤ rlim_max (kernel invariant)
+        bool soft_le_hard = (rl.rlim_cur == RLIM_INFINITY) ||
+                            (rl.rlim_max == RLIM_INFINITY) ||
+                            (rl.rlim_cur <= rl.rlim_max);
+        check("v5.11.0.B: rlim_cur <= rlim_max (kernel invariant)",
+              soft_le_hard);
+
+        // Operator-visibility: print the resolved limit so the test log shows
+        // what the engine boot will see. Not an assertion — different boxes
+        // will report different values (CI vs dev vs prod). Just informational.
+        if (rl.rlim_cur == RLIM_INFINITY) {
+            printf("  [info] RLIMIT_MEMLOCK soft limit: unlimited\n");
+        } else {
+            printf("  [info] RLIMIT_MEMLOCK soft limit: %llu bytes (%llu MB)\n",
+                   (unsigned long long)rl.rlim_cur,
+                   (unsigned long long)(rl.rlim_cur / (1024 * 1024)));
+        }
     }
 
     printf("\n--- EXTENSIBILITY: v5.11.0.A — FTZ/DAZ MXCSR state ---\n");

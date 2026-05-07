@@ -42,6 +42,10 @@
 #include "Licensing.hpp"
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>     // v5.11.0.B — mlockall
+#include <sys/resource.h> // v5.11.0.B — getrlimit / RLIMIT_MEMLOCK
+#include <errno.h>        // v5.11.0.B — strerror(errno) on mlockall fail
+#include <string.h>       // v5.11.0.B — strerror
 
 #ifdef LATENCY_PROFILING
 #include <x86intrin.h>
@@ -150,6 +154,55 @@ int main(int argc, char *argv[]) {
             perror("freopen log_file");
         } else {
             setvbuf(stderr, NULL, _IOLBF, 0); // line-buffered so tail -f works
+        }
+    }
+
+    //==================================================================================================
+    // [v5.11.0.B — LOCK MEMORY PAGES INTO RAM]
+    //==================================================================================================
+    // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 12.2 — page swap stalls cost
+    // hundreds of microseconds. mlockall locks all pages into physical RAM,
+    // preventing the kernel from swapping out critical execution memory.
+    //
+    // Ordering matters: this fires AFTER freopen(log_file) above, so a fatal
+    // mlockall failure prints to logging/engine.log rather than terminal
+    // stderr (where headless / systemd / nohup operators wouldn't see it).
+    // Trade-off: cfg-parsing memory at lines ~128-129 isn't locked, but cfg
+    // is parsed-and-discarded outside the hot path; not a regression.
+    //
+    // Failure modes:
+    //   1. RLIMIT_MEMLOCK soft limit too low → mlockall returns EAGAIN.
+    //      We probe the limit first and emit a clear WARN before attempting.
+    //   2. Process lacks CAP_IPC_LOCK on non-root → mlockall returns EPERM.
+    //      Operator must run with appropriate caps or as root.
+    // An HFT engine that can't lock its memory is a fail-fast condition
+    // (per HFT-suggestion annotation in plan).
+    //==================================================================================================
+    {
+        struct rlimit rl;
+        if (getrlimit(RLIMIT_MEMLOCK, &rl) == 0) {
+            // Heuristic: need at least the engine's typical resident size.
+            // 256 MB is generous for current sizing (zoo + scaler + bandit
+            // state + cfg + ring buffers); alarm if soft limit is below.
+            const rlim_t kMinMemlock = 256ULL * 1024 * 1024;
+            if (rl.rlim_cur != RLIM_INFINITY && rl.rlim_cur < kMinMemlock) {
+                fprintf(stderr,
+                    "[v5.11.0.B] WARNING: RLIMIT_MEMLOCK soft limit is %llu bytes, "
+                    "want >= %llu. mlockall may fail. Raise via "
+                    "`ulimit -l unlimited` or /etc/security/limits.conf.\n",
+                    (unsigned long long)rl.rlim_cur,
+                    (unsigned long long)kMinMemlock);
+            }
+        }
+        if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+            fprintf(stderr,
+                "[v5.11.0.B] FATAL: mlockall failed: %s. "
+                "Engine cannot guarantee deterministic latency without locked pages. "
+                "Run with CAP_IPC_LOCK or as root, and ensure RLIMIT_MEMLOCK is raised "
+                "(`ulimit -l unlimited` for this shell, or /etc/security/limits.conf "
+                "for persistent config).\n",
+                strerror(errno));
+            return 1;
         }
     }
 
