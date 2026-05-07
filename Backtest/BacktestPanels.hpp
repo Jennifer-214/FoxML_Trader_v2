@@ -229,6 +229,79 @@ static inline void *backtest_worker_fn(void *arg) {
     return NULL;
 }
 
+// v5.11.24 — multi-horizon Collect Features. Mirrors Train Multi-Horizon's
+// pattern: snap horizons at click time, collect features ONCE, then loop
+// recomputing labels per horizon and fprintf'ing valid-sample counts to
+// stderr (engine.log → operator's LogViewer panel).
+//
+// Final state: results->labels[] contains the LAST horizon's labels.
+// Operator who wants per-horizon training next clicks Train Multi-Horizon
+// which recomputes labels per horizon during training (no data loss).
+//
+// The point of this button isn't per-horizon label persistence (that's
+// what Train Multi-Horizon does) — it's giving operator a quick way to
+// see label class distribution for each candidate horizon BEFORE
+// committing to a multi-horizon train run.
+struct CollectMultiHorizonWorkerArgs {
+    RunControlState *run_control;
+    int snap_horizon_count;
+    int snap_horizons[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+};
+
+static inline void *collect_multi_horizon_worker_fn(void *arg) {
+    auto *args = (CollectMultiHorizonWorkerArgs *)arg;
+    RunControlState *rc = args->run_control;
+    int horizon_count = args->snap_horizon_count;
+    int horizons[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    memcpy(horizons, args->snap_horizons, sizeof(horizons));
+    free(args);
+
+    // 1. Collect features ONCE. label_forward_ticks at this point is
+    //    whatever was set when the button was clicked — we'll overwrite
+    //    labels per horizon afterwards.
+    Backtest_Run(&rc->results, &rc->run_config,
+                  &rc->progress_pct, &rc->cancel_flag,
+                  rc->candle_acc, rc->snapshot);
+
+    // 2. Per-horizon label recompute + diagnostic. Iterate horizons,
+    //    count valid (non-NaN) labels, log to stderr.
+    int saved_forward_ticks = rc->run_config.label_forward_ticks;
+    for (int h = 0; h < horizon_count; ++h) {
+        if (rc->cancel_flag) {
+            fprintf(stderr, "[collect-mh] cancelled at horizon %d/%d\n",
+                    h, horizon_count);
+            break;
+        }
+        rc->run_config.label_forward_ticks = horizons[h];
+        Backtest_ComputeLabelsFromSamples(&rc->results, &rc->run_config);
+
+        int n_valid = 0, n_pos = 0, n_neg = 0;
+        for (int s = 0; s < rc->results.sample_count; ++s) {
+            float lab = rc->results.labels[s];
+            if (isnan(lab) || isinf(lab)) continue;
+            n_valid++;
+            if (lab > 0.5f) n_pos++;
+            else if (lab < 0.5f) n_neg++;
+        }
+        fprintf(stderr, "[collect-mh] horizon=%d ticks: %d valid samples "
+                        "(%d pos, %d neg, %d neutral) of %d total\n",
+                horizons[h], n_valid, n_pos, n_neg,
+                n_valid - n_pos - n_neg, rc->results.sample_count);
+    }
+    rc->run_config.label_forward_ticks = saved_forward_ticks;
+
+    // 3. Final SamplesSnapshot from whatever the last horizon's labels are
+    //    (operator's "current" view — Train Multi-Horizon will recompute
+    //    per-horizon during training so this just reflects the last loop
+    //    iteration's distribution).
+    SamplesSnapshot_Compute(&rc->stats_snapshot, &rc->results,
+                              rc->run_config.label_type);
+
+    rc->complete = 1;
+    rc->running = 0;
+    return NULL;
+}
+
 static inline void RunControl_Start(RunControlState *state, DataPanelState *data) {
     if (state->running) return;
 
@@ -3207,6 +3280,78 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         // safety belt: if running flag flipped while button was enabled (race), still warn
         ImGui::SameLine();
         ImGui::TextColored(FoxmlColors::yellow, "running... (%d%%)", run_control->progress_pct);
+    }
+
+    // v5.11.24 — Collect Multi-Horizon button. Mirrors Train Multi-Horizon's
+    // pattern (uses state->ui_horizon_csv populated by the input field below).
+    // Disabled when no horizons configured OR a backtest is already running.
+    // Clicking spawns collect_multi_horizon_worker_fn which collects features
+    // ONCE then loops over horizons recomputing labels + logging valid-sample
+    // counts to engine.log. Final state: last horizon's labels in
+    // results->labels[] (Train Multi-Horizon will recompute per horizon
+    // during training, so no data loss).
+    ImGui::SameLine();
+    int mh_collect_horizon_count = state->ui_horizon_count;
+    bool mh_can_collect = has_data && !run_control->running
+                          && mh_collect_horizon_count > 0;
+    if (!mh_can_collect) ImGui::BeginDisabled();
+    if (ImGui::Button("Collect Multi-Horizon")) {
+        // clear previous training/walk-forward results
+        state->model_trained = false;
+        state->status_msg[0] = '\0';
+        state->wf_has_results = false;
+        // build run_config (mirrors single-horizon Collect Features above)
+        run_control->run_config.num_data_files = 0;
+        for (int i = 0; i < data->file_count
+                          && run_control->run_config.num_data_files < MAX_DATA_FILES; i++) {
+            if (data->selected[i]) {
+                strncpy(run_control->run_config.data_paths[run_control->run_config.num_data_files],
+                        data->files[i], 255);
+                run_control->run_config.num_data_files++;
+            }
+        }
+        strncpy(run_control->run_config.config_path, run_control->config_path, 255);
+        run_control->run_config.use_config_override = 0;
+        run_control->run_config.collect_features = 1;
+        run_control->run_config.label_type = state->label_type;
+        run_control->run_config.label_tp_pct = state->label_tp_pct;
+        run_control->run_config.label_sl_pct = state->label_sl_pct;
+        run_control->run_config.label_forward_ticks = state->label_forward_ticks;
+
+        run_control->progress_pct = 0;
+        run_control->cancel_flag = 0;
+        run_control->complete = 0;
+        memset(&run_control->stats_snapshot, 0, sizeof(run_control->stats_snapshot));
+        run_control->running = 1;
+
+        if (run_control->candle_acc)
+            CandleAccumulator_Init(run_control->candle_acc, 60);
+
+        auto *args = (CollectMultiHorizonWorkerArgs *)malloc(
+            sizeof(CollectMultiHorizonWorkerArgs));
+        args->run_control = run_control;
+        args->snap_horizon_count = mh_collect_horizon_count;
+        for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
+            args->snap_horizons[i] = (i < mh_collect_horizon_count)
+                ? state->ui_horizon_list[i] : 0;
+        }
+        pthread_t tid;
+        pthread_create(&tid, NULL, collect_multi_horizon_worker_fn, args);
+        pthread_detach(tid);
+    }
+    if (!mh_can_collect) ImGui::EndDisabled();
+    ImGui::SetItemTooltip(
+        "v5.11.24 — Collects features ONCE, then loops over each horizon\n"
+        "in 'Horizons (CSV)' (below) recomputing labels per horizon.\n\n"
+        "Useful for inspecting per-horizon label class distribution\n"
+        "BEFORE committing to a multi-horizon train run. Per-horizon\n"
+        "valid-sample counts go to engine.log.\n\n"
+        "Final results->labels[] holds the LAST horizon's labels;\n"
+        "Train Multi-Horizon will recompute per horizon during\n"
+        "training, so nothing is lost.");
+    if (!mh_can_collect && state->ui_horizon_count == 0) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(set Horizons CSV below)");
     }
 
     // results pointer for Train Model + Walk-Forward sections below — they
