@@ -491,14 +491,14 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
         while (vend > val && (*(vend-1) == ' ' || *(vend-1) == '\t')) { *(--vend) = '\0'; }
 
         if (strcmp(key, "barrier_gate_enabled") == 0)        expected_barrier_gate = atoi(val);
-        else if (strcmp(key, "ml_buy_threshold") == 0)       expected_threshold = atof(val);
+        else if (strcmp(key, "ml_buy_threshold") == 0)       expected_threshold = tt::parse_double_fast(val);
         else if (strcmp(key, "expected_num_classes") == 0)   expected_num_classes = atoi(val);
         else if (strcmp(key, "expected_role") == 0) {
             strncpy(expected_role, val, sizeof(expected_role) - 1);
             expected_role[sizeof(expected_role) - 1] = '\0';
         }
-        else if (strcmp(key, "held_out_fraction") == 0)        expected_held_out_fraction = atof(val);
-        else if (strcmp(key, "gap_acceptable_threshold") == 0) expected_gap_threshold     = atof(val);
+        else if (strcmp(key, "held_out_fraction") == 0)        expected_held_out_fraction = tt::parse_double_fast(val);
+        else if (strcmp(key, "gap_acceptable_threshold") == 0) expected_gap_threshold     = tt::parse_double_fast(val);
         else if (strcmp(key, "expected_poll_interval") == 0)         expected_poll_interval = atoi(val);
         else if (strcmp(key, "expected_feature_format_version") == 0) expected_feature_format_ver = atoi(val);
         else if (strcmp(key, "expected_num_features") == 0)          expected_num_features = atoi(val);

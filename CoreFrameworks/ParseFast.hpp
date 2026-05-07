@@ -69,4 +69,18 @@ static inline uint64_t parse_uint64_fast(const char *s) {
     return (r.ec == std::errc()) ? v : 0;
 }
 
+// Parse a double + return how many bytes were consumed via *end_out.
+// Locale-immune drop-in for strtod (which depends on LC_NUMERIC). On
+// parse failure leaves *end_out == p (no progress) and returns 0.0 —
+// matches strtod's "no number consumed" sentinel via the same pointer
+// equality test used by callers.
+static inline double parse_double_fast_advance(const char *p, const char **end_out) {
+    if (p == nullptr) { if (end_out) *end_out = nullptr; return 0.0; }
+    size_t n = std::strlen(p);
+    double v;
+    auto r = std::from_chars(p, p + n, v);
+    if (end_out) *end_out = (r.ec == std::errc()) ? r.ptr : p;
+    return (r.ec == std::errc()) ? v : 0.0;
+}
+
 } // namespace tt

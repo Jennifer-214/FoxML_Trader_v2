@@ -98,12 +98,13 @@ static inline void TradeHistory_Refresh(TradeHistory *th) {
         csv_field(line, 8,  fees_s,  sizeof(fees_s));
         csv_field(line, 10, qty_s,   sizeof(qty_s));
 
+        // v5.11.4.C — locale-immune CSV parsing (transitive via TradeReader.hpp)
         TradeHistoryEntry *e = &th->entries[th->count++];
-        e->entry_price = atof(entry_s);
-        e->exit_price  = atof(exit_s);
-        e->qty         = atof(qty_s);
-        e->pnl         = atof(pnl_s);
-        e->fee         = atof(fees_s);
+        e->entry_price = tt::parse_double_fast(entry_s);
+        e->exit_price  = tt::parse_double_fast(exit_s);
+        e->qty         = tt::parse_double_fast(qty_s);
+        e->pnl         = tt::parse_double_fast(pnl_s);
+        e->fee         = tt::parse_double_fast(fees_s);
         e->tick        = (int)atoll(tick_s);
         e->core_id     = atoi(core_s);
 

@@ -45,6 +45,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.C — std::from_chars wrapper for locale-immune parsing
 #include <unistd.h>     // unlink, write
 
 // default parameters (from FoxML bandit.py + weight_optimizer.py)
@@ -403,8 +404,10 @@ static inline int Bandit_JsonParseDoubleArray(const char* p, double* out,
     while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '[') ++p;
     int count = 0;
     while (*p && *p != ']' && count < max_count) {
-        char* end_ptr = NULL;
-        double v = strtod(p, &end_ptr);
+        // v5.11.4.C — locale-immune via std::from_chars (replaces strtod
+        // which honors LC_NUMERIC). Same end-pointer "no progress" sentinel.
+        const char* end_ptr = nullptr;
+        double v = tt::parse_double_fast_advance(p, &end_ptr);
         if (end_ptr == p) break;  // no number consumed
         out[count++] = v;
         p = end_ptr;

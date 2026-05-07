@@ -24,6 +24,7 @@
 #include "../MemHeaders/HmacSha256.hpp"  // v5.3.0 Phase B — in-process HMAC + SHA-256 (replaces popen paths)
 #include "../Version.hpp"                 // v5.9.2b — ENGINE_VERSION_STRING for cross-major detection
 #include "FeatureStandardizer.hpp"       // v5.9.3a — inline scaler struct on ModelHandle
+#include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.C — std::from_chars wrapper (locale immunity)
 #include <stdio.h>
 #include <string.h>
 #include <locale.h>                       // v5.3.0 Phase B — uselocale for canonical body LC_NUMERIC pinning
@@ -1124,9 +1125,9 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 memcpy(model_sha, val, vl);
                 model_sha[vl] = '\0';
             } else if (strcmp(key, "gap") == 0) {
-                r.generalization_gap = atof(val);
+                r.generalization_gap = tt::parse_double_fast(val);
             } else if (strcmp(key, "gap_threshold") == 0) {
-                r.gap_threshold = atof(val);
+                r.gap_threshold = tt::parse_double_fast(val);
             } else if (strcmp(key, "feature_registry_hash") == 0) {
                 // v5.8.1a: parse hex-encoded 64-bit hash. strtoull accepts
                 // 0x-prefix or bare hex. Stamp emits %016lx (no prefix).
@@ -1149,28 +1150,28 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             // sets the relevant has_* flag. Verifier compares against
             // current cfg later (caller-side).
             else if (strcmp(key, "inference_cfg_confidence_threshold_scale") == 0) {
-                r.inference_cfg_confidence_threshold_scale = atof(val);
+                r.inference_cfg_confidence_threshold_scale = tt::parse_double_fast(val);
                 r.has_inference_cfg = 1;
             } else if (strcmp(key, "inference_cfg_barrier_gate_enabled") == 0) {
                 r.inference_cfg_barrier_gate_enabled = atoi(val);
                 r.has_inference_cfg = 1;
             } else if (strcmp(key, "inference_cfg_confidence_hard_block_threshold") == 0) {
-                r.inference_cfg_confidence_hard_block_threshold = atof(val);
+                r.inference_cfg_confidence_hard_block_threshold = tt::parse_double_fast(val);
                 r.has_inference_cfg = 1;
             } else if (strcmp(key, "inference_cfg_held_out_fraction") == 0) {
-                r.inference_cfg_held_out_fraction = atof(val);
+                r.inference_cfg_held_out_fraction = tt::parse_double_fast(val);
                 r.has_inference_cfg = 1;
             } else if (strcmp(key, "inference_cfg_freshness_tau") == 0) {
-                r.inference_cfg_freshness_tau = atof(val);
+                r.inference_cfg_freshness_tau = tt::parse_double_fast(val);
                 r.has_inference_cfg = 1;
             } else if (strcmp(key, "inference_cfg_bandit_blend_ratio") == 0) {
-                r.inference_cfg_bandit_blend_ratio = atof(val);
+                r.inference_cfg_bandit_blend_ratio = tt::parse_double_fast(val);
                 r.has_inference_cfg_bandit = 1;
             } else if (strcmp(key, "inference_cfg_fee_rate_maker") == 0) {
-                r.inference_cfg_fee_rate_maker = atof(val);
+                r.inference_cfg_fee_rate_maker = tt::parse_double_fast(val);
                 r.has_inference_cfg_fees = 1;
             } else if (strcmp(key, "inference_cfg_fee_rate_taker") == 0) {
-                r.inference_cfg_fee_rate_taker = atof(val);
+                r.inference_cfg_fee_rate_taker = tt::parse_double_fast(val);
                 r.has_inference_cfg_fees = 1;
             } else if (strcmp(key, "training_poll_interval") == 0) {
                 r.training_poll_interval = (uint32_t)strtoul(val, nullptr, 10);
@@ -1203,7 +1204,7 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 }
             #define PARSE_XGB_DOUBLE(field) \
                 else if (strcmp(key, "xgb_" #field) == 0) { \
-                    r.xgb_##field = atof(val); \
+                    r.xgb_##field = tt::parse_double_fast(val); \
                     r.has_xgb_hyperparams = 1; \
                 }
             PARSE_XGB_INT(max_depth)
