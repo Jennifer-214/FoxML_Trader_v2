@@ -139,12 +139,40 @@ struct BinanceAdapterState {
 //======================================================================================================
 static inline void BinanceAdapter_WorkerLoop(BinanceAdapterState* state, int worker_index) {
     BinanceOrderAPI* api = &state->workers_api[worker_index];
+
+    // v5.11.5.A — adaptive spin-then-sleep replaces the prior fixed
+    // sleep_for(200μs). Hot-burst orders (the latency-critical case)
+    // get picked up within ~3-6μs of arrival via tight pause-spin;
+    // sustained idle falls back to a brief sleep so the worker doesn't
+    // burn a core during quiet periods.
+    //
+    // Trade-off geometry:
+    //   - SPIN_BUDGET=2048 pauses ≈ 3-6μs on modern Intel (pause is
+    //     5-15 cycles). Worker is "at full attention" for that long
+    //     after each completed order.
+    //   - SLEEP_US=50 caps the worst-case pickup at ~50μs vs the
+    //     prior 200μs, even after long idle.
+    //
+    // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 4.2 — "kill 200μs
+    // tail on order submit". Closes plans/2026-05-06-MASTER v5.11.5
+    // item 1. Futex / cond_var notification deferred (would add
+    // producer-side overhead; defer until p99 measurement shows the
+    // adaptive spin floor isn't sufficient).
+    constexpr int SPIN_BUDGET = 2048;
+    int idle_spins = 0;
+
     while (state->shutdown_requested.load(std::memory_order_acquire) == 0) {
         PendingSubmission p;
         if (!SPSCRing_TryPop(&state->submission_queue, &p)) {
-            std::this_thread::sleep_for(std::chrono::microseconds(200));
+            if (idle_spins < SPIN_BUDGET) {
+                __builtin_ia32_pause();
+                idle_spins++;
+            } else {
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+            }
             continue;
         }
+        idle_spins = 0;  // reset budget after each successful pickup
 
         // Build the result struct on the stack so the callback gets a
         // self-contained copy. error_message is zeroed in case the
