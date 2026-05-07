@@ -56,5 +56,10 @@ compile_commands.json
 .cache/
 .clangd/
 
-# audit documents
+# audit documents (private — Gemini optimization research; backups in workspace plans/)
 LATENCY_OPTIMIZATION_AUDIT.md
+STRATEGY_AND_CODING_RULES.md
+
+# local Claude Code memory overlays (private — references the audit docs above)
+CLAUDE.local.md
+*.local.md
