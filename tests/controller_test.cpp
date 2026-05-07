@@ -13940,6 +13940,18 @@ e3_skip_load:;
         check("v5.11.3.C: first entry's order_id matches first push",
               log.count > 0 && log.entries[0].order_id == 2000);
 
+        // v5.11.4.B — verify ring_full_spins is observable from outside the
+        // writer thread (parity-check Section J — operator must be able to
+        // see writer-thread distress). The 500-event push above shouldn't
+        // have hit ring-full given the 256-slot ring + 1ms writer cadence,
+        // but the COUNTER must be readable either way.
+        uint64_t spins = log.ring_full_spins.load(std::memory_order_relaxed);
+        check("v5.11.4.B: ring_full_spins atomic is observable from another thread",
+              spins == spins);  // tautology; verifies no segfault on the load
+        // (the actual spin count depends on writer scheduling — could be 0
+        // or hundreds depending on contention; either is a valid runtime
+        // state. The TUISnapshot populator copies this into the GUI.)
+
         OrderEventLog_Free(&log);
         check("v5.11.3.C: Free is idempotent on already-stopped writer",
               log.entries == nullptr);

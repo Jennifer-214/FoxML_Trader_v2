@@ -915,6 +915,19 @@ struct TUISnapshot {
     double tick_rate;
     uint32_t fills_rejected;
     int last_reject_reason;  // 0=none, 1=spacing, 2=balance, 3=exposure, 4=breaker, 5=full, 6=dup
+    // v5.11.4.B — async log writer health (parity-check 2026-05-07 Section J).
+    // The drainer pushes order events to a SPSC ring; a writer pthread drains
+    // them (does realloc + fwrite + fflush off the drainer's tail-latency
+    // path). These two atomic counters live on oms->event_log; without
+    // surfacing them, sustained ring-fullness or writer realloc OOM is a
+    // SILENT failure — the drainer keeps spinning + spends time it shouldn't,
+    // or events get dropped, and the operator has no GUI signal.
+    //
+    // Both are monotonic counters (never reset). GUI panels render the raw
+    // value; non-zero = something to investigate. Health log emits WARN on
+    // first non-zero observation (rate-limited).
+    uint64_t oms_log_ring_full_spins;        // total spin/usleep iters in OrderEventLog_Append
+    uint64_t oms_log_writer_realloc_failed;  // realloc failures inside async writer thread
     // Phase 14: per-core latency stats. Populated only when engine_mode ==
     // sharded AND CoreLatencyStats are enabled. Display panel renders only
     // when sharded_mode_active is set.

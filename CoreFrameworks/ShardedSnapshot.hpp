@@ -100,6 +100,14 @@ static inline void TUI_CopySnapshotSharded(
     snap->taker_fills_count = state->oms->taker_fills_count;
     snap->total_maker_fees  = FPN_ToDouble(state->oms->total_maker_fees);
     snap->total_taker_fees  = FPN_ToDouble(state->oms->total_taker_fees);
+    // v5.11.4.B — surface async log writer health (parity-check Section J).
+    // Both counters are atomic on the writer-thread side; relaxed loads on
+    // the publish thread are fine — these are advisory observability metrics,
+    // not transactional state.
+    snap->oms_log_ring_full_spins =
+        state->oms->event_log.ring_full_spins.load(std::memory_order_relaxed);
+    snap->oms_log_writer_realloc_failed =
+        state->oms->event_log.writer_realloc_failed_count.load(std::memory_order_relaxed);
     snap->return_pct   = (snap->starting > 0.0) ? (snap->total_pnl / snap->starting * 100.0) : 0.0;
     // active_count under partials: agg counts raw bitmap bits, but slot
     // 2c+0 + slot 2c+1 are ONE logical trade (both legs of one core's

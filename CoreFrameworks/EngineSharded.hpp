@@ -1816,6 +1816,35 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     TUI_PopulateAdvancedTopology(bs, &state, &oms);
                     // v4.7.18: paper-reset seq for history-clearing panels
                     bs->paper_reset_seq = (uint32_t)g_shared.paper_reset_seq;
+                    // v5.11.4.B — health log WARN on first non-zero observation
+                    // of async log writer trouble (parity-check Section J).
+                    // One-shot per process: the moment ring_full_spins or
+                    // writer_realloc_failed_count cross zero, emit a single
+                    // WARN line. Operator can grep the health log for the
+                    // string to detect silent writer-thread distress.
+                    {
+                        static uint64_t prev_ring_full = 0;
+                        static uint64_t prev_realloc_failed = 0;
+                        if (bs->oms_log_ring_full_spins != prev_ring_full) {
+                            if (prev_ring_full == 0) {
+                                tt::Health_Log(tt::HEALTH_WARN, "oms_log", -1,
+                                    "async writer ring saturation: ring_full_spins=%llu "
+                                    "(drainer is spin-waiting for writer to drain; "
+                                    "investigate disk health or bump ring size)",
+                                    (unsigned long long)bs->oms_log_ring_full_spins);
+                            }
+                            prev_ring_full = bs->oms_log_ring_full_spins;
+                        }
+                        if (bs->oms_log_writer_realloc_failed != prev_realloc_failed) {
+                            if (prev_realloc_failed == 0) {
+                                tt::Health_Log(tt::HEALTH_CRITICAL, "oms_log", -1,
+                                    "async writer realloc OOM: writer_realloc_failed=%llu "
+                                    "(events may be dropped; entries[] cannot grow)",
+                                    (unsigned long long)bs->oms_log_writer_realloc_failed);
+                            }
+                            prev_realloc_failed = bs->oms_log_writer_realloc_failed;
+                        }
+                    }
                     // append current data point to graph ring buffers
                     bs->price_history[bs->graph_head] = bs->price;
                     bs->volume_history[bs->graph_head] = bs->volume;
