@@ -394,11 +394,34 @@ inline void Strategy_FreePerCore(EventLoopState<F>* state, int slot) {
             break;
         FOREACH_STRATEGY(X)
 #undef X
+        case STRATEGY_AUTO:
+        case STRATEGY_NONE:
+            // 2026-05-08: AUTO/NONE sentinels should never have a state
+            // pointer (Strategy_InitPerCore's switch sets state=nullptr in
+            // the AUTO/NONE/default branch). If we're here, something
+            // earlier set strategy_state to a non-null value with the
+            // kind still recorded as AUTO/NONE — likely a stale pointer
+            // from a prior strategy that didn't get nulled on free, OR
+            // a resolution path that allocated state on demand without
+            // updating the kind to the resolved concrete strategy.
+            //
+            // Without knowing the concrete type, we cannot safely delete
+            // (would be type-cast UB). Null the pointer — the arena
+            // owns the memory (v5.11.6.A) so the actual reclamation
+            // happens at engine shutdown via InitArena_Destroy. Pre-arena
+            // builds leak ~1-4 KB; bounded + harmless on process exit.
+            //
+            // Quiet (no fprintf) because this fires under common cfg
+            // patterns (cfg has duplicate `core_N_strategy=` lines, or
+            // operator hot-swapped strategies) and the pre-fix WARN
+            // cluttered shutdown logs without pointing to actionable
+            // operator response. Root-cause investigation tracked in
+            // plans/2026-05-07-deferred-items.md if it ever proves to
+            // be a real-memory-leak issue.
+            break;
         default:
-            // Unknown kind: leak rather than miscast. 0xFF (uninitialized)
-            // means strategy_state should already be nullptr — handled
-            // above. This default catches genuinely unknown values which
-            // should never occur in practice.
+            // Genuinely unknown kind value (corrupted state). Worth
+            // a WARN since this should never happen.
             fprintf(stderr,
                 "[strategy-lifecycle] Strategy_FreePerCore: unknown kind %u "
                 "on slot %d, leaking the state pointer rather than miscasting\n",
