@@ -46,6 +46,7 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../CoreFrameworks/OrderGates.hpp"
 #include "../CoreFrameworks/Notify.hpp"  // Phase 8b — disconnect alerts
+#include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.A — std::from_chars wrapper
 
 using namespace std;
 
@@ -727,8 +728,10 @@ static inline int BinanceStream_ReadTick(BinanceStream *bs, DataStream<F> *out) 
 
             out->price  = FPN_FromString<F>(price_str);
             out->volume = FPN_FromString<F>(qty_str);
-            out->price_d  = atof(price_str);   // stash double for TUI (hidden in I/O path)
-            out->volume_d = atof(qty_str);
+            // v5.11.4.A — std::from_chars: locale-immune, branchless on
+            // well-formed inputs. ~3-5× quicker than atof on libstdc++.
+            out->price_d  = tt::parse_double_fast(price_str);
+            out->volume_d = tt::parse_double_fast(qty_str);
             out->is_buyer_maker = is_buyer_maker;
             bs->tick_count++;
             return 1;

@@ -18,6 +18,7 @@
 #include <limits>  // v5.9.0: std::numeric_limits<double>::quiet_NaN() in NaN guard tests
 #include <thread>  // v5.11.3.B: std::thread for seqlock tear-free regression test
 #include <atomic>  // v5.11.3.B: std::atomic for cross-thread coordination in tests
+#include <locale.h>  // v5.11.4.A: setlocale for locale-immunity test
 #include "../DataStream/MockGenerator.hpp"
 #include "../CoreFrameworks/PortfolioController.hpp"
 #include "../CoreFrameworks/Order.hpp"
@@ -13760,6 +13761,90 @@ e3_skip_load:;
         shared.snapshots[1].price = -99999.0;
         check("v5.11.3.B: reader's local copy is independent of subsequent shared mutation",
               snap.price == saved);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.4.A — std::from_chars-based fast parsing ---\n");
+    {
+        // Theory: pre-v5.11.4.A, atof was used in binance_json_extract_double
+        // (WS userData drainer path) and BinanceCrypto.hpp's price_d/volume_d
+        // stash (every WS trade tick). atof depends on the global C locale —
+        // a stray setlocale("de_DE") elsewhere flips '.' to ',' and silently
+        // corrupts every parsed price.
+        //
+        // Post-v5.11.4.A: tt::parse_double_fast / parse_double_fast_n /
+        // parse_uint64_fast wrap std::from_chars. Locale-immune, branchless
+        // on well-formed inputs, ~3-5× quicker on libstdc++ ≥11.
+        //
+        // Tests verify: (1) parity vs atof on representative trade values,
+        // (2) locale-immunity, (3) edge cases (NULL, empty, malformed),
+        // (4) length-aware variant doesn't over-read its slice.
+        using namespace tt;
+
+        // Parity vs atof on a sweep of representative price/qty strings
+        const char *cases[] = {
+            "70000.00", "70000.12345678", "0.001", "0.00012345",
+            "1", "1.0", "100000.99999999", "12345.6789",
+            "0", "0.0", "1e-5", "1.5e10",
+        };
+        int parity_match = 1;
+        for (const char *s : cases) {
+            double a = atof(s);
+            double f = parse_double_fast(s);
+            if (a != f) parity_match = 0;
+        }
+        check("v5.11.4.A: parse_double_fast matches atof on representative values",
+              parity_match);
+
+        // Length-aware variant for JSON-extracted slices (non-NUL-terminated)
+        const char *json = "{\"p\":\"70123.45\",\"q\":\"0.001\"}";
+        // Manually find the price slice
+        const char *p_start = strstr(json, "\"p\":\"") + 5;
+        const char *p_end = strchr(p_start, '"');
+        size_t p_len = (size_t)(p_end - p_start);
+        double price = parse_double_fast_n(p_start, p_len);
+        check("v5.11.4.A: parse_double_fast_n extracts 70123.45 from JSON slice",
+              price == 70123.45);
+
+        // Verify the length-aware variant doesn't read past the slice end
+        // (tail of the source string has data we shouldn't include)
+        const char *tail = "12345junk";
+        double v = parse_double_fast_n(tail, 5);
+        check("v5.11.4.A: parse_double_fast_n stops at length boundary (12345)",
+              v == 12345.0);
+
+        // Edge cases: NULL + empty + malformed
+        check("v5.11.4.A: parse_double_fast(NULL) returns 0.0",
+              parse_double_fast(nullptr) == 0.0);
+        check("v5.11.4.A: parse_double_fast(\"\") returns 0.0",
+              parse_double_fast("") == 0.0);
+        check("v5.11.4.A: parse_double_fast on non-numeric returns 0.0",
+              parse_double_fast("abc") == 0.0);
+
+        // Locale immunity: explicitly set a non-C locale and verify behavior.
+        // atof respects LC_NUMERIC; std::from_chars does NOT. Try both — if
+        // de_DE.UTF-8 is unavailable on this system, skip the locale test
+        // (don't fail just because the locale isn't installed).
+        const char *prev_locale = setlocale(LC_NUMERIC, "de_DE.UTF-8");
+        if (prev_locale && strcmp(prev_locale, "de_DE.UTF-8") == 0) {
+            // Under de_DE, "0.55" should still parse as 0.55 with from_chars
+            // (atof under this locale would parse "0.55" as 0 because '.' is
+            // the thousands separator, not the decimal).
+            double under_locale = parse_double_fast("0.55");
+            check("v5.11.4.A: parse_double_fast is locale-immune under de_DE.UTF-8",
+                  under_locale == 0.55);
+            // Restore C locale so subsequent tests don't see stray locale state
+            setlocale(LC_NUMERIC, "C");
+        }
+        // (else: locale not available on this dev box — skip silently;
+        // CI / deploy boxes will have it.)
+
+        // parse_uint64_fast for trade IDs / timestamps
+        check("v5.11.4.A: parse_uint64_fast(\"1234567890\") == 1234567890",
+              parse_uint64_fast("1234567890") == 1234567890ULL);
+        check("v5.11.4.A: parse_uint64_fast(\"0\") == 0",
+              parse_uint64_fast("0") == 0ULL);
+        check("v5.11.4.A: parse_uint64_fast(NULL) == 0",
+              parse_uint64_fast(nullptr) == 0ULL);
     }
 
     printf("\n--- EXTENSIBILITY: v5.11.3.C — Async log thread (drainer I/O isolation) ---\n");

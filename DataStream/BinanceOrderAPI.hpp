@@ -33,6 +33,7 @@
 #include <sys/time.h>
 #include <netdb.h>
 #include <netinet/tcp.h>  // v5.11.0.C — TCP_NODELAY / IPPROTO_TCP
+#include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.A — std::from_chars wrapper
 #include <errno.h>        // v5.11.0.C — strerror(errno) on setsockopt fail
 
 #include <openssl/ssl.h>
@@ -166,11 +167,10 @@ static inline double binance_json_extract_double(const char *json, const char *k
     int len;
     const char *val = binance_json_extract(json, key, &len);
     if (!val || len == 0) return 0.0;
-    char buf[64];
-    if (len >= (int)sizeof(buf)) len = sizeof(buf) - 1;
-    memcpy(buf, val, len);
-    buf[len] = '\0';
-    return atof(buf);
+    // v5.11.4.A — std::from_chars: locale-immune (no LC_NUMERIC dependency)
+    // + branchless on well-formed inputs. parse_double_fast_n takes the
+    // (val, len) span directly; no NUL-termination round-trip needed.
+    return tt::parse_double_fast_n(val, (size_t)len);
 }
 
 // truncate quantity to exchange step size (always rounds down, no math.h needed)
