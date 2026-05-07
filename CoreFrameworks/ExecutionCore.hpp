@@ -273,7 +273,7 @@ static inline void ExecutionCore_SetPermission(ExecutionCore<F>* core, uint8_t v
 // need for mfence+lfence pre-amble); gives a consistent measurement bracket.
 //
 // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 1.1
-template <unsigned F, bool LAT_ENABLED>
+template <unsigned F, bool LAT_ENABLED, bool PAIR_BRANCHLESS>
 __attribute__((always_inline))
 static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>& tick) {
     // Latency sampling — only loaded + checked in LAT_ENABLED=true builds.
@@ -386,17 +386,37 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
     uint64_t tp_hit_a   = (uint64_t)FPN_GreaterThanOrEqual(tick.price, effective_tp);
     uint64_t sl_hit_a   = (uint64_t)FPN_LessThanOrEqual(tick.price, effective_sl);
     uint64_t sg_fires_a = (tp_enabled & tp_hit_a) | (sl_enabled & sl_hit_a);
-    // Leg B SG — gated. Variable defaults to 0 so can_exit_b stays 0
-    // when active_b=0 (the steady state).
+    // v5.11.1.2 — Leg B SG. Two compile-time-selected paths via PAIR_BRANCHLESS:
+    //   - PAIR_BRANCHLESS=true (always-pair deployments where active_b is set
+    //     most ticks): unconditional compute + mask. CPU pipelines leg-A and
+    //     leg-B compares together; no branch mispredict cost when leg B fires.
+    //   - PAIR_BRANCHLESS=false (default-cfg deployments): original predicted-
+    //     not-taken branch. ~0ns cost when active_b=0 (the common steady state).
+    // Wrapper dispatches via cached_params.flags & GATE_FLAG_PAIR_ACTIVE — one
+    // predicted runtime branch per tick (~0ns once predictor warms).
+    // Both code paths produce bytewise-identical output for any (active_b, FPN)
+    // input — the branchless path masks the unconditional compute with active_b.
     uint64_t sg_fires_b = 0;
-    if (__builtin_expect(active_b, 0)) {
-        FPN<F> tp_b           = core->live_tp_b;
-        FPN<F> sl_b           = core->live_sl_b;
-        FPN<F> effective_sl_b = FPN_Max(sl_b, core->cached_params.ratchet_sl);
-        FPN<F> effective_tp_b = FPN_Max(tp_b, core->cached_params.ratchet_tp);
+    if constexpr (PAIR_BRANCHLESS) {
+        // Unconditional leg-B compute. Loads live_tp_b + live_sl_b every tick;
+        // for always-pair deployments these stay hot in L1d.
+        FPN<F> effective_sl_b = FPN_Max(core->live_sl_b, core->cached_params.ratchet_sl);
+        FPN<F> effective_tp_b = FPN_Max(core->live_tp_b, core->cached_params.ratchet_tp);
         uint64_t tp_hit_b     = (uint64_t)FPN_GreaterThanOrEqual(tick.price, effective_tp_b);
         uint64_t sl_hit_b     = (uint64_t)FPN_LessThanOrEqual(tick.price, effective_sl_b);
-        sg_fires_b            = (tp_enabled & tp_hit_b) | (sl_enabled & sl_hit_b);
+        // Mask with active_b — when leg B isn't open, mask=0 zeros the result.
+        sg_fires_b = ((tp_enabled & tp_hit_b) | (sl_enabled & sl_hit_b))
+                     & -((uint64_t)active_b);
+    } else {
+        if (__builtin_expect(active_b, 0)) {
+            FPN<F> tp_b           = core->live_tp_b;
+            FPN<F> sl_b           = core->live_sl_b;
+            FPN<F> effective_sl_b = FPN_Max(sl_b, core->cached_params.ratchet_sl);
+            FPN<F> effective_tp_b = FPN_Max(tp_b, core->cached_params.ratchet_tp);
+            uint64_t tp_hit_b     = (uint64_t)FPN_GreaterThanOrEqual(tick.price, effective_tp_b);
+            uint64_t sl_hit_b     = (uint64_t)FPN_LessThanOrEqual(tick.price, effective_sl_b);
+            sg_fires_b            = (tp_enabled & tp_hit_b) | (sl_enabled & sl_hit_b);
+        }
     }
 
     // Mask events. ~(active_a | active_b) means "not currently in any leg".
@@ -557,18 +577,45 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
     }
 }
 
-// v5.11.1.1 — Build-flag-driven dispatch wrapper. Callers use the same
-// `ExecutionCore_Tick<F>(...)` shape as before; the LAT_ENABLED template
-// arg is selected here based on `LATENCY_PROFILING` macro (CMake option).
-// This avoids forcing every call site to specify LAT_ENABLED explicitly
-// (production: 2 sites; tests: 6 sites; would be 8 touch sites otherwise).
+// v5.11.1.1 + v5.11.1.2 — Two-axis dispatch wrapper.
+//   1. LAT_ENABLED: build-flag (LATENCY_PROFILING macro) — compile-time
+//   2. PAIR_BRANCHLESS: cfg-flag (GATE_FLAG_PAIR_ACTIVE) — runtime predicted
+//      branch on cached_params.flags. Selects branchless leg-B compute path
+//      when operator runs partial-exit-always cfg (every entry pairs).
+//
+// 4 template instantiations live in the binary (LAT × PAIR = 2×2). The cfg
+// branch is predicted nearly perfectly (cfg flag changes only via slow-path
+// param push, ~once per ~256 ticks at most) → ~0ns steady-state cost.
+//
+// The wrapper reads `cached_params.flags` directly (single-byte load from
+// line ~3 of struct). One-tick staleness vs the body's own cached_params
+// read is benign: both template paths produce bytewise-identical output for
+// any (active_b, threshold) input — the branchless path masks the result
+// with active_b. Dispatch staleness affects perf path only, never correctness.
+//
+// Hot-swap: cfg.partial_exit_enabled flip → Strategy_BuildParameters →
+// ParameterSlot_Write → next tick's cached_params has new flags → next
+// tick dispatches to the other instantiation. Predictor takes ~2-3 ticks
+// to relearn; transient cost negligible.
+//
+// Preserves callers (still call ExecutionCore_Tick<F>(core, tick)).
 template <unsigned F>
 __attribute__((always_inline))
 static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tick) {
+    uint8_t flags = core->cached_params.flags;
+    bool pair_branchless = (flags & GATE_FLAG_PAIR_ACTIVE) != 0;
 #ifdef LATENCY_PROFILING
-    ExecutionCore_Tick_Impl<F, /*LAT_ENABLED=*/true>(core, tick);
+    if (pair_branchless) {
+        ExecutionCore_Tick_Impl<F, /*LAT_ENABLED=*/true,  /*PAIR_BRANCHLESS=*/true>(core, tick);
+    } else {
+        ExecutionCore_Tick_Impl<F, /*LAT_ENABLED=*/true,  /*PAIR_BRANCHLESS=*/false>(core, tick);
+    }
 #else
-    ExecutionCore_Tick_Impl<F, /*LAT_ENABLED=*/false>(core, tick);
+    if (pair_branchless) {
+        ExecutionCore_Tick_Impl<F, /*LAT_ENABLED=*/false, /*PAIR_BRANCHLESS=*/true>(core, tick);
+    } else {
+        ExecutionCore_Tick_Impl<F, /*LAT_ENABLED=*/false, /*PAIR_BRANCHLESS=*/false>(core, tick);
+    }
 #endif
 }
 

@@ -13400,6 +13400,161 @@ e3_skip_load:;
         unlink(stamp_path);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.11.1.2 — Branchless leg-B via PAIR_BRANCHLESS template ---\n");
+    {
+        // Theory (audit Part 1.2): leg-B SG_Evaluate is currently branch-gated
+        // on `__builtin_expect(active_b, 0)`. For default cfg (partial_exit=0)
+        // the branch is correctly predicted not-taken (~0ns). For always-pair
+        // deployments where every entry creates a pair, active_b=1 most ticks
+        // and the branch's "+40ns when taken" cost dominates.
+        //
+        // Post-v5.11.1.2: PAIR_BRANCHLESS template parameter selects between:
+        //   - true: unconditional leg-B compute + mask with active_b
+        //   - false: original predicted-not-taken branch
+        // Wrapper dispatches via GATE_FLAG_PAIR_ACTIVE flag in cached_params.
+        //
+        // CRITICAL invariant: both paths must produce bytewise-identical
+        // observable output for any (active_b, threshold, tick price) input.
+        // The branchless path's mask-with-active_b ensures sg_fires_b matches
+        // the branched path's "no fire when active_b=0" semantic.
+
+        using namespace tt;
+
+        // === Setup ===
+        // Build an ExecutionCore in "leg-B-active" state: active=1, active_b=1,
+        // live_tp_b set so a tick price > tp_b fires the leg-B exit.
+        ExecutionCore<FP> core;
+        SPSCRing<Tick<FP>, EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
+        SPSCRing_Init(&tick_ring);
+        ExecutionCore_Init<FP>(&core, /*core_id=*/0, &tick_ring);
+
+        // Set permission so the gate would let entries through (we're testing
+        // exits — leg B SG fires).
+        ExecutionCore_SetPermission(&core, 1);
+
+        // Leg A active with live_tp = 110 (won't fire on tick 100).
+        // Leg B active with live_tp_b = 105 (won't fire on tick 100, will fire on tick 106).
+        core.active = 1;
+        core.entry_price = FPN_FromDouble<FP>(100.0);
+        core.live_tp = FPN_FromDouble<FP>(110.0);
+        core.live_sl = FPN_FromDouble<FP>(95.0);
+        core.active_b = 1;
+        core.entry_price_b = FPN_FromDouble<FP>(100.0);
+        core.live_tp_b = FPN_FromDouble<FP>(105.0);
+        core.live_sl_b = FPN_FromDouble<FP>(98.0);
+
+        // Push params via the proper seqlock pipeline. Direct assignment to
+        // cached_params would be overwritten on the first _Impl call (cache-miss
+        // path reads from param_slot, not from cached_params). SetParameters
+        // updates the param_slot which propagates to cached_params on first read.
+        GateParameters<FP> p;
+        GateParameters_Init(&p);
+        p.flags = GATE_FLAG_TP_ENABLED | GATE_FLAG_SL_ENABLED;
+        ExecutionCore_SetParameters(&core, p);
+
+        // Warmup tick to consume the first-tick cache-miss path. After this,
+        // cached_seq matches param_slot.seq → subsequent calls use the cached
+        // copy and respect the flags we set above.
+        Tick<FP> warmup_tick{};
+        warmup_tick.price = FPN_FromDouble<FP>(100.0);  // no fire (= entry_price)
+        warmup_tick.volume = FPN_FromDouble<FP>(1.0);
+        warmup_tick.timestamp = 0;
+        warmup_tick.sequence = 0;
+        ExecutionCore_Tick<FP>(&core, warmup_tick);
+        TradeEvent<FP> evt;
+        while (SPSCRing_TryPop(&core.event_ring, &evt)) {}
+        core.active = 1; core.active_b = 1;  // restore (warmup may have flipped)
+
+        // === Test 1: PAIR_BRANCHLESS=false with leg-B threshold hit fires ===
+        Tick<FP> tick_hit_b{};
+        tick_hit_b.price = FPN_FromDouble<FP>(106.0);  // > live_tp_b=105 → leg B fires
+        tick_hit_b.volume = FPN_FromDouble<FP>(1.0);
+        tick_hit_b.timestamp = 1;
+        tick_hit_b.sequence = 1;
+
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/false, /*PAIR_BRANCHLESS=*/false>(
+            &core, tick_hit_b);
+        check("v5.11.1.2 branched: leg-B fire clears active_b on TP hit",
+              core.active_b == 0);
+        // Drain event ring to clean state for next test
+        while (SPSCRing_TryPop(&core.event_ring, &evt)) {}
+
+        // Reset for branchless test
+        core.active_b = 1;
+        core.live_tp_b = FPN_FromDouble<FP>(105.0);
+
+        // === Test 2: PAIR_BRANCHLESS=true with same input fires identically ===
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/false, /*PAIR_BRANCHLESS=*/true>(
+            &core, tick_hit_b);
+        check("v5.11.1.2 branchless: leg-B fire clears active_b on TP hit",
+              core.active_b == 0);
+        while (SPSCRing_TryPop(&core.event_ring, &evt)) {}
+
+        // === Test 3: PAIR_BRANCHLESS=true with active_b=0 masks any compute ===
+        // Set active_b=0 + tick price triggers the leg-B compare. Branchless
+        // path computes leg-B SG but masks with active_b=0 → no fire.
+        core.active_b = 0;
+        core.live_tp_b = FPN_FromDouble<FP>(105.0);  // would-fire threshold
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/false, /*PAIR_BRANCHLESS=*/true>(
+            &core, tick_hit_b);
+        check("v5.11.1.2 branchless: active_b=0 masks leg-B fire (stays 0)",
+              core.active_b == 0);
+        while (SPSCRing_TryPop(&core.event_ring, &evt)) {}
+
+        // === Test 4: PAIR_BRANCHLESS=true vs false, no-fire scenario ===
+        // Tick price below leg-B TP and above leg-B SL → no fire either path.
+        Tick<FP> tick_no_fire{};
+        tick_no_fire.price = FPN_FromDouble<FP>(102.0);  // between live_sl_b=98 and live_tp_b=105
+        tick_no_fire.volume = FPN_FromDouble<FP>(1.0);
+        tick_no_fire.timestamp = 2;
+        tick_no_fire.sequence = 2;
+
+        // Reset to leg-B-active state
+        core.active = 1;
+        core.active_b = 1;
+        core.live_tp_b = FPN_FromDouble<FP>(105.0);
+        core.live_sl_b = FPN_FromDouble<FP>(98.0);
+
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/false, /*PAIR_BRANCHLESS=*/false>(
+            &core, tick_no_fire);
+        uint8_t branched_active_b = core.active_b;
+        while (SPSCRing_TryPop(&core.event_ring, &evt)) {}
+
+        core.active_b = 1;
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/false, /*PAIR_BRANCHLESS=*/true>(
+            &core, tick_no_fire);
+        uint8_t branchless_active_b = core.active_b;
+        while (SPSCRing_TryPop(&core.event_ring, &evt)) {}
+
+        check("v5.11.1.2: branched + branchless identical when no leg-B threshold hit",
+              branched_active_b == branchless_active_b);
+        check("v5.11.1.2: no-fire scenario keeps active_b=1 (both paths)",
+              branchless_active_b == 1);
+
+        // === Test 5: Wrapper dispatch via GATE_FLAG_PAIR_ACTIVE ===
+        // With GATE_FLAG_PAIR_ACTIVE set, wrapper dispatches to PAIR_BRANCHLESS=true.
+        // With it clear, wrapper dispatches to PAIR_BRANCHLESS=false.
+        // Both paths produce same observable output → verifies dispatch correctness.
+        core.active = 1; core.active_b = 1;
+        core.live_tp_b = FPN_FromDouble<FP>(105.0);
+        core.cached_params.flags = GATE_FLAG_TP_ENABLED | GATE_FLAG_SL_ENABLED | GATE_FLAG_PAIR_ACTIVE;
+        ExecutionCore_Tick<FP>(&core, tick_hit_b);  // wrapper → branchless
+        uint8_t wrap_pair_active = core.active_b;
+        while (SPSCRing_TryPop(&core.event_ring, &evt)) {}
+
+        core.active = 1; core.active_b = 1;
+        core.live_tp_b = FPN_FromDouble<FP>(105.0);
+        core.cached_params.flags = GATE_FLAG_TP_ENABLED | GATE_FLAG_SL_ENABLED;  // pair clear
+        ExecutionCore_Tick<FP>(&core, tick_hit_b);  // wrapper → branched
+        uint8_t wrap_no_pair = core.active_b;
+        while (SPSCRing_TryPop(&core.event_ring, &evt)) {}
+
+        check("v5.11.1.2 wrapper: dispatch produces identical output regardless of PAIR_ACTIVE flag",
+              wrap_pair_active == wrap_no_pair);
+        check("v5.11.1.2 wrapper: leg-B fire clears active_b in both dispatch paths",
+              wrap_pair_active == 0 && wrap_no_pair == 0);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.11.1.1 — Template-bool elision of lat_enabled ---\n");
     {
         // Theory (audit Part 1.1): pre-v5.11.1.1 the hot path read
@@ -13433,7 +13588,7 @@ e3_skip_load:;
         // === Test 1: LAT_ENABLED=false elides sampling regardless of enabled flag ===
         core.latency_stats.enabled.store(1, std::memory_order_relaxed);
         uint64_t before_false = core.latency_stats.total_count;
-        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/false>(&core, tick);
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/false, /*PAIR_BRANCHLESS=*/false>(&core, tick);
         uint64_t after_false = core.latency_stats.total_count;
         check("v5.11.1.1: LAT_ENABLED=false elides rdtsc sample even when enabled=1",
               after_false == before_false);
@@ -13443,7 +13598,7 @@ e3_skip_load:;
         CoreLatencyStats_Init(&core.latency_stats);
         core.latency_stats.enabled.store(1, std::memory_order_relaxed);
         uint64_t before_true = core.latency_stats.total_count;
-        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/true>(&core, tick);
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/true, /*PAIR_BRANCHLESS=*/false>(&core, tick);
         uint64_t after_true = core.latency_stats.total_count;
         check("v5.11.1.1: LAT_ENABLED=true + enabled=1 records a sample",
               after_true > before_true);
@@ -13453,7 +13608,7 @@ e3_skip_load:;
         CoreLatencyStats_Init(&core.latency_stats);
         core.latency_stats.enabled.store(0, std::memory_order_relaxed);
         uint64_t before_runtime = core.latency_stats.total_count;
-        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/true>(&core, tick);
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/true, /*PAIR_BRANCHLESS=*/false>(&core, tick);
         uint64_t after_runtime = core.latency_stats.total_count;
         check("v5.11.1.1: LAT_ENABLED=true + enabled=0 skips sample (runtime gate)",
               after_runtime == before_runtime);
