@@ -457,48 +457,55 @@ static inline int Bandit_LoadJSON(BanditState* bandits,
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (fsize <= 0 || fsize > 1024 * 1024) {  // 1MB cap; bandit JSON is tiny
+    // v5.11.6.C — replace malloc with thread-local static buffer.
+    // bandit_state.json is operator-controlled and tiny (<100 KB in
+    // realistic deployments). Cap at 256 KB to keep the buffer on .bss
+    // not the stack and to enforce a tighter bound than the prior 1 MB.
+    // Removes the 13 `free(buf)` cleanup sites that previously had to
+    // be threaded through every error-return.
+    constexpr size_t BUF_CAP = 256 * 1024;
+    if (fsize <= 0 || (size_t)fsize >= BUF_CAP) {
         fclose(f);
         return 0;
     }
-    char* buf = (char*)malloc((size_t)fsize + 1);
-    if (!buf) { fclose(f); return 0; }
+    static thread_local char buf_storage[BUF_CAP];
+    char* buf = buf_storage;
     size_t read_n = fread(buf, 1, (size_t)fsize, f);
     fclose(f);
     buf[read_n] = '\0';
 
     // format_version check
     const char* p = Bandit_JsonFindKey(buf, "format_version");
-    if (!p) { free(buf); return 0; }
+    if (!p) { return 0; }
     int fmt = (int)strtol(p, NULL, 10);
-    if (fmt != BANDIT_STATE_FORMAT_VERSION) { free(buf); return 0; }
+    if (fmt != BANDIT_STATE_FORMAT_VERSION) { return 0; }
 
     // n_arms check
     p = Bandit_JsonFindKey(buf, "n_arms");
-    if (!p) { free(buf); return 0; }
+    if (!p) { return 0; }
     int file_n_arms = (int)strtol(p, NULL, 10);
-    if (file_n_arms != expected_n_arms) { free(buf); return 0; }
+    if (file_n_arms != expected_n_arms) { return 0; }
 
     // n_regimes check (file may have more, never fewer)
     p = Bandit_JsonFindKey(buf, "n_regimes");
-    if (!p) { free(buf); return 0; }
+    if (!p) { return 0; }
     int file_n_regimes = (int)strtol(p, NULL, 10);
-    if (file_n_regimes < n_regimes) { free(buf); return 0; }
+    if (file_n_regimes < n_regimes) { return 0; }
 
     // SHA check (only if caller supplied expected)
     if (expected_model_bundle_sha256_hex && expected_model_bundle_sha256_hex[0]) {
         p = Bandit_JsonFindKey(buf, "model_bundle_sha256");
-        if (!p) { free(buf); return 0; }
+        if (!p) { return 0; }
         // Skip leading whitespace + open quote
         while (*p == ' ' || *p == '\t') ++p;
-        if (*p != '"') { free(buf); return 0; }
+        if (*p != '"') { return 0; }
         ++p;
         const char* end = strchr(p, '"');
-        if (!end) { free(buf); return 0; }
+        if (!end) { return 0; }
         size_t sha_len = (size_t)(end - p);
         if (sha_len != strlen(expected_model_bundle_sha256_hex) ||
             memcmp(p, expected_model_bundle_sha256_hex, sha_len) != 0) {
-            free(buf);
+            
             return 0;
         }
     }
@@ -506,14 +513,14 @@ static inline int Bandit_LoadJSON(BanditState* bandits,
     // Per-regime parse: walk to "regimes" array, then for each "regime_id"
     // entry, populate weights / cum_reward / pulls.
     p = Bandit_JsonFindKey(buf, "regimes");
-    if (!p) { free(buf); return 0; }
+    if (!p) { return 0; }
     while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '[') ++p;
 
     for (int r = 0; r < n_regimes; ++r) {
         // Find next "regime_id" past current p
         const char* rid_p = Bandit_JsonFindKey(p, "regime_id");
         if (!rid_p) {
-            free(buf);
+            
             return 0;
         }
         int regime_id = (int)strtol(rid_p, NULL, 10);
@@ -562,7 +569,7 @@ static inline int Bandit_LoadJSON(BanditState* bandits,
         p = end_brace ? end_brace + 1 : rid_p + 1;
     }
 
-    free(buf);
+    
     return 1;
 }
 
