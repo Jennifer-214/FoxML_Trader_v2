@@ -26,6 +26,7 @@
 
 #include "../FixedPoint/FixedPointN.hpp"
 #include "ReciprocalLUT.hpp"  // v5.11.2.A — branchless 1/n via precomputed reciprocals
+#include <cstddef>            // v5.11.2.B — offsetof() for cache-layout static_asserts
 
 //======================================================================================================
 // [ROLLING STATS STRUCT]
@@ -36,10 +37,17 @@
 template <unsigned F, unsigned W = 128> struct RollingStats {
     static_assert(W > 0 && (W & (W - 1)) == 0, "W must be power of 2");
 
-    // OUTPUTS FIRST — read by strategies, regime detector, and TUI every slow-path cycle
-    // these were at offset 6,664 (behind 6.6KB of ring buffers) — now at offset 0
-    int head;
-    int count;
+    // ── READ-HEAVY OUTPUTS (cache lines 0..4) ──
+    // v5.11.2.B layout reorder: outputs cluster at struct head; engine writes
+    // them once per slow-path cycle. GUI thread + strategies + regime detector
+    // read every cycle. Pre-v5.11.2.B: head/count interleaved with outputs at
+    // offset 0-7 → cross-thread false sharing with GUI on every Push.
+    // Post-v5.11.2.B: head/count moved past the 5-cache-line output cluster
+    // via alignas(64). Engine's per-Push writes to head/count don't invalidate
+    // the GUI's L1d copy of outputs.
+    //
+    // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 2.4
+    // Discipline: plans/2026-05-06-latency-path-discipline.md Rule 1 + Rule 7
     FPN<F> price_avg;          // mean price over window
     FPN<F> price_slope;        // least-squares regression slope (positive = rising)
     FPN<F> price_r_squared;    // regression R² (0-1, trend consistency)
@@ -50,24 +58,45 @@ template <unsigned F, unsigned W = 128> struct RollingStats {
     FPN<F> volume_avg;         // mean volume over window
     FPN<F> volume_slope;       // least-squares regression slope of volume
     FPN<F> volume_max;         // max volume in window (for spike detection)
-
-    // directional volume tracking (buy/sell pressure)
-    FPN<F> buy_volume_sum;     // sum of buyer-initiated volume in window
-    FPN<F> sell_volume_sum;    // sum of seller-initiated volume in window
     FPN<F> volume_delta;       // (buy - sell) / (buy + sell), range [-1.0, +1.0]
-
-    // VWAP running sums (read by strategies)
-    FPN<F> pv_sum;             // running sum(price * volume)
-    FPN<F> vol_sum;            // running sum(volume) — separate from volume_sum in loop
     FPN<F> vwap;               // pv_sum / vol_sum
     FPN<F> vwap_deviation;     // (price - vwap) / vwap (negative = below VWAP)
+    // 13 × FPN<64>=24B = 312 bytes ≈ 5 cache lines (0-4)
 
-    // RING BUFFERS — only iterated during RollingStats_Push (slow path)
+    // ── WRITE-HEAVY INTERNAL STATE (cache-line-isolated from outputs) ──
+    // alignas(64) on `head` forces it to start on a fresh cache line. The
+    // running sums following stay clustered with head/count; engine mutates
+    // all of these every Push, so co-locating them keeps write-side L1d
+    // dirtying tight.
+    alignas(64) int head;
+    int count;
+    FPN<F> buy_volume_sum;     // running sum of buyer-initiated volume
+    FPN<F> sell_volume_sum;    // running sum of seller-initiated volume
+    FPN<F> pv_sum;             // running sum(price * volume)
+    FPN<F> vol_sum;            // running sum(volume) — separate from volume_sum in loop
+
+    // ── RING BUFFERS (large; only iterated during periodic resync) ──
     FPN<F> price_buf[W];
     FPN<F> volume_buf[W];
     FPN<F> pv_buf[W];          // price*volume per sample (for eviction)
     int side_buf[W];           // is_buyer_maker flags for directional volume eviction
 };
+
+// v5.11.2.B layout invariants — compile-time enforced.
+// Verified for W=128 (default); alignas(64) on `head` propagates the discipline
+// to all W instantiations (W=256/512/1024 also instantiated for rolling_medium /
+// rolling_long / rolling_baseline per StrategyParameters.hpp).
+//
+// offsetof() is a preprocessor macro that splits on commas — wrap the
+// templated type in a using-alias so the comma stays inside the type.
+namespace detail { using RollingStats_64_128 = RollingStats<64, 128>; }
+static_assert((offsetof(detail::RollingStats_64_128, head) % 64) == 0,
+              "head must be cache-line-aligned (alignas(64) on field) — "
+              "see plans/2026-05-06-latency-path-discipline.md Rule 1");
+static_assert(offsetof(detail::RollingStats_64_128, head) >= 64 * 5,
+              "head must come AFTER the 5-cache-line output cluster — "
+              "outputs (price_avg through vwap_deviation) read by GUI thread; "
+              "head writes by engine must not share line with them");
 
 //======================================================================================================
 // [INIT]

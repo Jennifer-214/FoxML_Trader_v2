@@ -376,6 +376,40 @@ p99 / p99.9 wins come from THIS document.
 
 ---
 
+## Thermal monitoring (added v5.11.2 context)
+
+Sustained engine operation can push CPU thermals into throttling territory,
+especially on laptop chassis (limited cooling). Thermal throttling drops
+frequency mid-tick → catastrophic tail latency spikes (observed up to ~1ms
+p99 on slow path during sustained load on a non-deployment laptop).
+
+**Monitor during sustained operation:**
+```bash
+# Watch core temperatures (interval 1s):
+watch -n1 'sensors | grep -E "Core|Tdie"'
+
+# Watch CPU frequency (drops below base = throttling):
+watch -n1 'cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq | head -8'
+
+# Detect throttle events (intel_pstate cumulative count):
+cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver
+# If intel_pstate, check `turbostat` while engine runs for "PkgWatt" + "PkgTmp"
+```
+
+**Mitigation paths:**
+- Run engine on a properly-cooled deployment box (server chassis, not laptop).
+- If laptop is the only option: undervolt + cap turbo to base clock (`./build.sh`
+  with `intel_pstate=disable` boot param + `cpupower frequency-set --max <base>`).
+- Disable turbo entirely: `echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo`
+  (already in Step 2 above; trades ~10% peak throughput for ~5x lower p99.99 jitter).
+
+**Diagnostic context:** if you see slow-path p99 > 100µs during sustained load
+on a properly-tuned (isolcpus + SCHED_FIFO) box, thermal throttling is the most
+common cause before architectural bottlenecks. Check thermals BEFORE blaming
+code-side latency.
+
+---
+
 ## Troubleshooting
 
 ### `mlockall` fails with `EAGAIN`

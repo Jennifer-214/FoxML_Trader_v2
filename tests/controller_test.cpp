@@ -13463,6 +13463,59 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- EXTENSIBILITY: v5.11.2.B — RollingStats cache-line layout ---\n");
+    {
+        // Theory: GUI reads outputs every frame; engine writes head/count + ring
+        // buffers every Push. Pre-reorder: head at offset 0 shared a 64-byte
+        // line with price_avg → engine's head write evicted GUI's L1d copy of
+        // outputs every Push. Post-reorder: outputs in lines 0-4, head pushed
+        // to line 5 via alignas(64). The compile-time static_assert enforces
+        // this; these runtime checks are an extra-paranoid mirror.
+        //
+        // Also exercises Push to confirm the field reorder didn't break
+        // functional correctness — Init writes every field by name, Push
+        // reads/writes by name, no positional dependency.
+
+        using namespace tt;
+        using RS128 = RollingStats<FP, 128>;
+        using RS256 = RollingStats<FP, 256>;
+        using RS512 = RollingStats<FP, 512>;
+        using RS1024 = RollingStats<FP, 1024>;
+
+        // Cache-line discipline (mirror of static_assert at the type level)
+        check("v5.11.2.B: head offset is 64B-aligned (W=128)",
+              (offsetof(RS128, head) % 64) == 0);
+        check("v5.11.2.B: head past 5-output-line cluster (W=128)",
+              offsetof(RS128, head) >= 64 * 5);
+        // Layout up to head is W-independent (outputs come first)
+        check("v5.11.2.B: head offset same across W=128/256",
+              offsetof(RS128, head) == offsetof(RS256, head));
+        check("v5.11.2.B: head offset same across W=128/512",
+              offsetof(RS128, head) == offsetof(RS512, head));
+        check("v5.11.2.B: head offset same across W=128/1024",
+              offsetof(RS128, head) == offsetof(RS1024, head));
+        // Output cluster sits at the very front (line 0)
+        check("v5.11.2.B: price_avg at offset 0 (struct head)",
+              offsetof(RS128, price_avg) == 0);
+        // Outputs occupy lines 0-4 — last output `vwap_deviation` < line 5 boundary
+        check("v5.11.2.B: vwap_deviation in cache lines 0-4 (output cluster)",
+              offsetof(RS128, vwap_deviation) < 64 * 5);
+
+        // Functional correctness — Push still computes valid outputs after reorder
+        RS128 rolling = RollingStats_Init<FP, 128>();
+        for (int i = 0; i < 16; ++i) {
+            FPN<FP> p = FPN_FromDouble<FP>(100.0 + i * 0.5);
+            FPN<FP> v = FPN_FromDouble<FP>(1.0);
+            RollingStats_Push(&rolling, p, v, /*is_buyer_maker=*/0);
+        }
+        check("v5.11.2.B: post-reorder count populated",
+              rolling.count == 16);
+        check("v5.11.2.B: post-reorder price_avg non-zero",
+              !FPN_IsZero(rolling.price_avg));
+        check("v5.11.2.B: post-reorder vwap non-zero",
+              !FPN_IsZero(rolling.vwap));
+    }
+
     printf("\n--- EXTENSIBILITY: v5.11.1.2 — Branchless leg-B via PAIR_BRANCHLESS template ---\n");
     {
         // Theory (audit Part 1.2): leg-B SG_Evaluate is currently branch-gated
