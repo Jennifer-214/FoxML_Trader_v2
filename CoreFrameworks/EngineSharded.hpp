@@ -326,6 +326,247 @@ static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* cores,
 // shutdown_flag is the same volatile int main.cpp uses for SIGINT/SIGTERM.
 // Pass &g_shutdown_requested or whichever variable you have.
 //======================================================================================================
+
+//======================================================================================================
+// [v5.10.2.A — POST-LOAD VALIDATOR]
+//======================================================================================================
+// Cross-zoo validator extracted from EngineSharded_Run boot loop body
+// (parity-check Findings #3 + #7 + #10). Subsumes THREE existing WARN/REFUSE
+// subgroups uniformly across single zoo + ensemble parallel-array handles:
+//
+//   1. v5.9.4 + v5.9.5h xgb-and-friends WARN
+//      (training_poll_interval + xgb_hyperparams + build_flags_hash)
+//      gated by !acknowledge_cross_binary_version_drift
+//   2. v5.9.5i inference_cfg drift detection
+//      Tier 1 (freshness_tau, threshold_scale, barrier_gate_enabled) REFUSE in strict
+//      Tier 2 (hard_block, bandit, fees) WARN regardless
+//      gated by !acknowledge_inference_cfg_drift
+//
+// Writes cfg_drift_tier1/tier2_count + strict_refused into ctx.
+// Returns 0 on accept, -1 on REFUSE in strict mode (Tier 1 mismatch).
+//
+// Callable from:
+//   - EngineSharded_Run boot loop (replaces inline blocks)
+//   - EngineSharded_Run hot swap branch (post-CoreModelZoo_LoadFromDir)
+//
+// Ensemble support: pass &ml_ensemble_zoos[i] for ezoo when
+// state.cores[i].ensemble_handle != nullptr, else nullptr.
+// Closes parity-check Finding #7 (drift block iterated single-zoo only).
+//
+// Hot-swap rollback semantics: helper returns -1 on Tier 1 REFUSE, but
+// caller in hot-swap context logs + leaves (model_load_failed=1) rather
+// than crashing the engine — pre-swap state isn't snapshotted, so true
+// rollback would require additional infrastructure (deferred to v5.10.X).
+//======================================================================================================
+template <unsigned F>
+static inline int CoreModelZoo_ValidateAgainstCfg(
+    CoreModelZoo<F>* zoo,
+    EnsembleModelZoo<F>* ezoo,                       // nullptr when ensemble inactive
+    const ControllerConfig<F>& cfg,
+    int core_id,
+    int strict_mode,                                  // cfg.held_out_gate_strict
+    int acknowledge_inference_cfg_drift,              // suppresses drift block
+    int acknowledge_cross_binary_version_drift,       // suppresses xgb/poll/build_flags WARN
+    CoreContext<F>* ctx                               // for cfg_drift_* counter writeback
+) {
+    int strict = (strict_mode == 1);
+    int tier1_count = 0;
+    int tier2_count = 0;
+    int tier1_refused_count = 0;
+
+    // Inner check: applies xgb-and-friends WARN (subgroup 1) + drift (subgroup 2)
+    // to a single ModelHandle. Lambda captures the per-core context (logs,
+    // counters) so per-handle work stays tight. h_idx >= 0 means ensemble
+    // member at slot [h_idx]; -1 means single-zoo.
+    auto check_handle = [&](ModelHandle<F>* h, const char* role_name, int h_idx) {
+        if (!h) return;
+        // Distinguishable log prefix: "core 0" vs "core 0 ensemble[2]"
+        char loc[64];
+        if (h_idx < 0) {
+            snprintf(loc, sizeof(loc), "core %d", core_id);
+        } else {
+            snprintf(loc, sizeof(loc), "core %d ensemble[%d]", core_id, h_idx);
+        }
+
+        // === Subgroup 1: xgb-and-friends WARN (training_poll_interval +
+        //                  xgb_hyperparams + build_flags_hash) ===
+        if (!acknowledge_cross_binary_version_drift) {
+            if (h->has_training_poll_interval &&
+                h->training_poll_interval != cfg.poll_interval) {
+                fprintf(stderr,
+                    "[poll_interval] WARN: %s role=%s stamp claims "
+                    "training_poll_interval=%u but cfg.poll_interval=%u "
+                    "(set acknowledge_cross_binary_version_drift=1 to suppress)\n",
+                    loc, role_name,
+                    (unsigned)h->training_poll_interval,
+                    (unsigned)cfg.poll_interval);
+            }
+            if (h->has_xgb_hyperparams) {
+                double cfg_subsample = FPN_ToDouble(cfg.xgb_subsample);
+                double cfg_colsample = FPN_ToDouble(cfg.xgb_colsample_bytree);
+                if (fabs(h->stamp_xgb_subsample - cfg_subsample) > 1e-6) {
+                    fprintf(stderr,
+                        "[xgb_hyperparams] WARN: %s role=%s stamp "
+                        "claims xgb_subsample=%.4f but cfg=%.4f\n",
+                        loc, role_name, h->stamp_xgb_subsample, cfg_subsample);
+                }
+                if (fabs(h->stamp_xgb_colsample_bytree - cfg_colsample) > 1e-6) {
+                    fprintf(stderr,
+                        "[xgb_hyperparams] WARN: %s role=%s stamp "
+                        "claims xgb_colsample_bytree=%.4f but cfg=%.4f\n",
+                        loc, role_name, h->stamp_xgb_colsample_bytree,
+                        cfg_colsample);
+                }
+                if (h->stamp_xgb_min_child_weight != cfg.xgb_min_child_weight) {
+                    fprintf(stderr,
+                        "[xgb_hyperparams] WARN: %s role=%s stamp "
+                        "claims xgb_min_child_weight=%d but cfg=%d\n",
+                        loc, role_name, h->stamp_xgb_min_child_weight,
+                        cfg.xgb_min_child_weight);
+                }
+                if (h->stamp_xgb_seed != cfg.xgb_seed) {
+                    fprintf(stderr,
+                        "[xgb_hyperparams] WARN: %s role=%s stamp "
+                        "claims xgb_seed=%d but cfg=%d\n",
+                        loc, role_name, h->stamp_xgb_seed, cfg.xgb_seed);
+                }
+                if (strcmp(h->stamp_xgb_tree_method, cfg.xgb_tree_method) != 0) {
+                    fprintf(stderr,
+                        "[xgb_hyperparams] WARN: %s role=%s stamp "
+                        "claims xgb_tree_method=%s but cfg=%s\n",
+                        loc, role_name, h->stamp_xgb_tree_method,
+                        cfg.xgb_tree_method);
+                }
+            }
+            if (h->has_build_flags_hash &&
+                h->stamp_build_flags_hash != tt::BUILD_FLAGS_HASH()) {
+                fprintf(stderr,
+                    "[build_flags] WARN: %s role=%s stamp claims "
+                    "build_flags_hash=%016lx but current build is %016lx "
+                    "(cross-build drift; set acknowledge_cross_binary_version_drift=1 to suppress)\n",
+                    loc, role_name,
+                    (unsigned long)h->stamp_build_flags_hash,
+                    (unsigned long)tt::BUILD_FLAGS_HASH());
+            }
+        }
+
+        // === Subgroup 2: inference_cfg drift (Tier 1 REFUSE in strict;
+        //                  Tier 2 WARN regardless) ===
+        if (!acknowledge_inference_cfg_drift && h->has_stamp_inference_cfg) {
+            double cfg_cts = FPN_ToDouble(cfg.confidence_threshold_scale);
+            double cfg_chb = FPN_ToDouble(cfg.confidence_hard_block_threshold);
+            double cfg_tau = FPN_ToDouble(cfg.confidence_freshness_tau);
+
+            // Tier 1: directly affects serving math
+            bool tier1_drift = false;
+            if (fabs(h->stamp_inf_freshness_tau - cfg_tau) > 1e-6) {
+                fprintf(stderr,
+                    "[inference_cfg] %s: %s role=%s stamp claims "
+                    "confidence_freshness_tau=%.2f but cfg=%.2f\n",
+                    strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
+                    loc, role_name, h->stamp_inf_freshness_tau, cfg_tau);
+                tier1_drift = true;
+                ++tier1_count;
+            }
+            if (fabs(h->stamp_inf_confidence_threshold_scale - cfg_cts) > 1e-6) {
+                fprintf(stderr,
+                    "[inference_cfg] %s: %s role=%s stamp claims "
+                    "confidence_threshold_scale=%.4f but cfg=%.4f\n",
+                    strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
+                    loc, role_name, h->stamp_inf_confidence_threshold_scale, cfg_cts);
+                tier1_drift = true;
+                ++tier1_count;
+            }
+            if (h->stamp_inf_barrier_gate_enabled != cfg.barrier_gate_enabled) {
+                fprintf(stderr,
+                    "[inference_cfg] %s: %s role=%s stamp claims "
+                    "barrier_gate_enabled=%d but cfg=%d\n",
+                    strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
+                    loc, role_name, h->stamp_inf_barrier_gate_enabled,
+                    cfg.barrier_gate_enabled);
+                tier1_drift = true;
+                ++tier1_count;
+            }
+            if (tier1_drift && strict) ++tier1_refused_count;
+
+            // Tier 2: WARN regardless of strict mode
+            if (fabs(h->stamp_inf_confidence_hard_block_threshold - cfg_chb) > 1e-6) {
+                fprintf(stderr,
+                    "[inference_cfg] WARN (Tier 2): %s role=%s stamp "
+                    "claims confidence_hard_block_threshold=%.4f but cfg=%.4f\n",
+                    loc, role_name, h->stamp_inf_confidence_hard_block_threshold,
+                    cfg_chb);
+                ++tier2_count;
+            }
+            if (h->has_stamp_bandit && cfg.bandit_enabled) {
+                double cfg_bbr = FPN_ToDouble(cfg.bandit_blend_ratio);
+                if (fabs(h->stamp_inf_bandit_blend_ratio - cfg_bbr) > 1e-6) {
+                    fprintf(stderr,
+                        "[inference_cfg] WARN (Tier 2): %s role=%s stamp "
+                        "claims bandit_blend_ratio=%.4f but cfg=%.4f\n",
+                        loc, role_name, h->stamp_inf_bandit_blend_ratio, cfg_bbr);
+                }
+            }
+            if (h->has_stamp_fees && cfg.cost_gate_enabled) {
+                double cfg_frm = FPN_ToDouble(cfg.fee_rate_maker);
+                double cfg_frt = FPN_ToDouble(cfg.fee_rate_taker);
+                if (fabs(h->stamp_inf_fee_rate_maker - cfg_frm) > 1e-6) {
+                    fprintf(stderr,
+                        "[inference_cfg] WARN (Tier 2): %s role=%s stamp "
+                        "claims fee_rate_maker=%.6f but cfg=%.6f\n",
+                        loc, role_name, h->stamp_inf_fee_rate_maker, cfg_frm);
+                }
+                if (fabs(h->stamp_inf_fee_rate_taker - cfg_frt) > 1e-6) {
+                    fprintf(stderr,
+                        "[inference_cfg] WARN (Tier 2): %s role=%s stamp "
+                        "claims fee_rate_taker=%.6f but cfg=%.6f\n",
+                        loc, role_name, h->stamp_inf_fee_rate_taker, cfg_frt);
+                }
+            }
+        }
+    };
+
+    // 1. Single zoo: 4 roles
+    //    CoreModelZoo struct uses `exit` (singular) per CoreModelZoo.hpp:60
+    if (zoo) {
+        check_handle(&zoo->buy_signal, "buy_signal", -1);
+        check_handle(&zoo->barrier,    "barrier",    -1);
+        check_handle(&zoo->regime,     "regime",     -1);
+        check_handle(&zoo->exit,       "exit",       -1);
+    }
+    // 2. Ensemble handles (Finding #7 closure): 4 roles × N horizons
+    //    EnsembleModelZoo struct uses `exit_predictor` (NOT `exit`)
+    //    per CoreModelZoo.hpp:616
+    if (ezoo && ezoo->active) {
+        for (int h = 0; h < ezoo->buy_signal_count; ++h)
+            check_handle(&ezoo->buy_signal[h], "buy_signal", h);
+        for (int h = 0; h < ezoo->barrier_count; ++h)
+            check_handle(&ezoo->barrier[h], "barrier", h);
+        for (int h = 0; h < ezoo->regime_count; ++h)
+            check_handle(&ezoo->regime[h], "regime", h);
+        for (int h = 0; h < ezoo->exit_predictor_count; ++h)
+            check_handle(&ezoo->exit_predictor[h], "exit", h);
+    }
+
+    // Writeback drift counters (Finding #10 closure: now updated on hot-swap too)
+    if (ctx) {
+        ctx->cfg_drift_tier1_count = (uint8_t)(tier1_count > 255 ? 255 : tier1_count);
+        ctx->cfg_drift_tier2_count = (uint8_t)(tier2_count > 255 ? 255 : tier2_count);
+        ctx->cfg_drift_strict_refused = (tier1_refused_count > 0) ? 1 : 0;
+    }
+
+    if (tier1_refused_count > 0 && strict) {
+        fprintf(stderr,
+            "[inference_cfg] FATAL: core %d had %d Tier 1 mismatch(es) "
+            "in strict mode. Set held_out_gate_strict=0 (warn-only) "
+            "OR acknowledge_inference_cfg_drift=1 to bypass, "
+            "OR retrain the model with current cfg.\n",
+            core_id, tier1_refused_count);
+        return -1;  // REFUSE
+    }
+    return 0;
+}
+
 template <unsigned F>
 static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                       const BinanceConfig& bcfg) {
@@ -875,207 +1116,27 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 state.cores[i].model_load_failed = 1;
             }
 
-            // v5.9.4a — Phase 6 cadence parity check. For each loaded
-            // role, compare stamp's training_poll_interval vs cfg's
-            // poll_interval. Mismatch = model trained at one cadence but
-            // engine running at another → silent feature distribution
-            // shift. WARN only (operational, not refusal). Operator can
-            // suppress with acknowledge_cross_binary_version_drift=1
-            // (added v5.9.4 — same flag covers minor-version + cadence).
-            if (loaded && cfg.core_model_dir[i][0] &&
-                !cfg.acknowledge_cross_binary_version_drift) {
+            // v5.10.2.A — POST-LOAD VALIDATOR (extracted; closes parity-check
+            // Findings #3 + #7 + #10). Replaces the v5.9.4a + v5.9.5h xgb-and-
+            // friends WARN block AND the v5.9.5i inference_cfg drift block with
+            // a single call. Now iterates ensemble parallel-array handles too
+            // (Finding #7), and is callable from the hot-swap branch (Finding #3).
+            if (loaded && cfg.core_model_dir[i][0]) {
                 CoreModelZoo<F>* zoo = &ml_zoos[i];
-                ModelHandle<F>* handles[4] = {
-                    &zoo->buy_signal, &zoo->barrier,
-                    &zoo->regime, &zoo->exit
-                };
-                const char* role_names[4] = {
-                    "buy_signal", "barrier", "regime", "exit"
-                };
-                for (int r = 0; r < 4; ++r) {
-                    if (handles[r]->has_training_poll_interval &&
-                        handles[r]->training_poll_interval != cfg.poll_interval) {
-                        fprintf(stderr,
-                            "[poll_interval] WARN: core %d role=%s stamp claims "
-                            "training_poll_interval=%u but cfg.poll_interval=%u "
-                            "(set acknowledge_cross_binary_version_drift=1 to suppress)\n",
-                            i, role_names[r],
-                            (unsigned)handles[r]->training_poll_interval,
-                            (unsigned)cfg.poll_interval);
-                    }
-                    // v5.9.5h — XGBoost hyperparam drift WARN. Hyperparams
-                    // don't affect inference; this is forensic ("you trained
-                    // with these settings, you're running with cfg saying
-                    // something different"). Drift logged per-field; same
-                    // suppression flag as v5.9.4a poll_interval pattern.
-                    if (handles[r]->has_xgb_hyperparams) {
-                        const ModelHandle<F>* h = handles[r];
-                        double cfg_subsample = FPN_ToDouble(cfg.xgb_subsample);
-                        double cfg_colsample = FPN_ToDouble(cfg.xgb_colsample_bytree);
-                        if (fabs(h->stamp_xgb_subsample - cfg_subsample) > 1e-6) {
-                            fprintf(stderr,
-                                "[xgb_hyperparams] WARN: core %d role=%s stamp "
-                                "claims xgb_subsample=%.4f but cfg=%.4f\n",
-                                i, role_names[r], h->stamp_xgb_subsample, cfg_subsample);
-                        }
-                        if (fabs(h->stamp_xgb_colsample_bytree - cfg_colsample) > 1e-6) {
-                            fprintf(stderr,
-                                "[xgb_hyperparams] WARN: core %d role=%s stamp "
-                                "claims xgb_colsample_bytree=%.4f but cfg=%.4f\n",
-                                i, role_names[r], h->stamp_xgb_colsample_bytree,
-                                cfg_colsample);
-                        }
-                        if (h->stamp_xgb_min_child_weight != cfg.xgb_min_child_weight) {
-                            fprintf(stderr,
-                                "[xgb_hyperparams] WARN: core %d role=%s stamp "
-                                "claims xgb_min_child_weight=%d but cfg=%d\n",
-                                i, role_names[r], h->stamp_xgb_min_child_weight,
-                                cfg.xgb_min_child_weight);
-                        }
-                        if (h->stamp_xgb_seed != cfg.xgb_seed) {
-                            fprintf(stderr,
-                                "[xgb_hyperparams] WARN: core %d role=%s stamp "
-                                "claims xgb_seed=%d but cfg=%d\n",
-                                i, role_names[r], h->stamp_xgb_seed, cfg.xgb_seed);
-                        }
-                        if (strcmp(h->stamp_xgb_tree_method, cfg.xgb_tree_method) != 0) {
-                            fprintf(stderr,
-                                "[xgb_hyperparams] WARN: core %d role=%s stamp "
-                                "claims xgb_tree_method=%s but cfg=%s\n",
-                                i, role_names[r], h->stamp_xgb_tree_method,
-                                cfg.xgb_tree_method);
-                        }
-                    }
-                    // v5.9.5h Phase 10 — build flags fingerprint WARN.
-                    // Detects cross-build deploys (-O2 dev → -O3 prod, etc.)
-                    if (handles[r]->has_build_flags_hash &&
-                        handles[r]->stamp_build_flags_hash != tt::BUILD_FLAGS_HASH()) {
-                        fprintf(stderr,
-                            "[build_flags] WARN: core %d role=%s stamp claims "
-                            "build_flags_hash=%016lx but current build is %016lx "
-                            "(cross-build drift; set acknowledge_cross_binary_version_drift=1 to suppress)\n",
-                            i, role_names[r],
-                            (unsigned long)handles[r]->stamp_build_flags_hash,
-                            (unsigned long)tt::BUILD_FLAGS_HASH());
-                    }
-                }
-            }
-
-            // v5.9.5i — Inference cfg drift detection (Idea #12).
-            // Tier 1 (freshness_tau, confidence_threshold_scale,
-            // barrier_gate_enabled) REFUSE in strict mode (held_out_gate_strict=1)
-            // since they directly affect serving math. Tier 2 (hard_block,
-            // bandit, fees) WARN regardless. Both suppressed by
-            // acknowledge_inference_cfg_drift=1.
-            if (loaded && cfg.core_model_dir[i][0] &&
-                !cfg.acknowledge_inference_cfg_drift) {
-                CoreModelZoo<F>* zoo = &ml_zoos[i];
-                ModelHandle<F>* handles[4] = {
-                    &zoo->buy_signal, &zoo->barrier,
-                    &zoo->regime, &zoo->exit
-                };
-                const char* role_names[4] = {
-                    "buy_signal", "barrier", "regime", "exit"
-                };
-                int strict = (cfg.held_out_gate_strict == 1);
-                int tier1_refused_count = 0;
-                int tier1_count = 0;
-                int tier2_count = 0;
-                for (int r = 0; r < 4; ++r) {
-                    ModelHandle<F>* h = handles[r];
-                    if (!h->has_stamp_inference_cfg) continue;
-                    double cfg_cts = FPN_ToDouble(cfg.confidence_threshold_scale);
-                    double cfg_chb = FPN_ToDouble(cfg.confidence_hard_block_threshold);
-                    double cfg_tau = FPN_ToDouble(cfg.confidence_freshness_tau);
-
-                    // Tier 1: directly affects serving math
-                    bool tier1_drift = false;
-                    if (fabs(h->stamp_inf_freshness_tau - cfg_tau) > 1e-6) {
-                        fprintf(stderr,
-                            "[inference_cfg] %s: core %d role=%s stamp claims "
-                            "confidence_freshness_tau=%.2f but cfg=%.2f\n",
-                            strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
-                            i, role_names[r], h->stamp_inf_freshness_tau, cfg_tau);
-                        tier1_drift = true;
-                        ++tier1_count;
-                    }
-                    if (fabs(h->stamp_inf_confidence_threshold_scale - cfg_cts) > 1e-6) {
-                        fprintf(stderr,
-                            "[inference_cfg] %s: core %d role=%s stamp claims "
-                            "confidence_threshold_scale=%.4f but cfg=%.4f\n",
-                            strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
-                            i, role_names[r], h->stamp_inf_confidence_threshold_scale, cfg_cts);
-                        tier1_drift = true;
-                        ++tier1_count;
-                    }
-                    if (h->stamp_inf_barrier_gate_enabled != cfg.barrier_gate_enabled) {
-                        fprintf(stderr,
-                            "[inference_cfg] %s: core %d role=%s stamp claims "
-                            "barrier_gate_enabled=%d but cfg=%d\n",
-                            strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
-                            i, role_names[r], h->stamp_inf_barrier_gate_enabled,
-                            cfg.barrier_gate_enabled);
-                        tier1_drift = true;
-                        ++tier1_count;
-                    }
-                    if (tier1_drift && strict) ++tier1_refused_count;
-
-                    // Tier 2: WARN regardless of strict mode
-                    if (fabs(h->stamp_inf_confidence_hard_block_threshold - cfg_chb) > 1e-6) {
-                        fprintf(stderr,
-                            "[inference_cfg] WARN (Tier 2): core %d role=%s stamp "
-                            "claims confidence_hard_block_threshold=%.4f but cfg=%.4f\n",
-                            i, role_names[r], h->stamp_inf_confidence_hard_block_threshold,
-                            cfg_chb);
-                        ++tier2_count;
-                    }
-                    if (h->has_stamp_bandit && cfg.bandit_enabled) {
-                        double cfg_bbr = FPN_ToDouble(cfg.bandit_blend_ratio);
-                        if (fabs(h->stamp_inf_bandit_blend_ratio - cfg_bbr) > 1e-6) {
-                            fprintf(stderr,
-                                "[inference_cfg] WARN (Tier 2): core %d role=%s stamp "
-                                "claims bandit_blend_ratio=%.4f but cfg=%.4f\n",
-                                i, role_names[r], h->stamp_inf_bandit_blend_ratio, cfg_bbr);
-                        }
-                    }
-                    if (h->has_stamp_fees && cfg.cost_gate_enabled) {
-                        double cfg_frm = FPN_ToDouble(cfg.fee_rate_maker);
-                        double cfg_frt = FPN_ToDouble(cfg.fee_rate_taker);
-                        if (fabs(h->stamp_inf_fee_rate_maker - cfg_frm) > 1e-6) {
-                            fprintf(stderr,
-                                "[inference_cfg] WARN (Tier 2): core %d role=%s stamp "
-                                "claims fee_rate_maker=%.6f but cfg=%.6f\n",
-                                i, role_names[r], h->stamp_inf_fee_rate_maker, cfg_frm);
-                        }
-                        if (fabs(h->stamp_inf_fee_rate_taker - cfg_frt) > 1e-6) {
-                            fprintf(stderr,
-                                "[inference_cfg] WARN (Tier 2): core %d role=%s stamp "
-                                "claims fee_rate_taker=%.6f but cfg=%.6f\n",
-                                i, role_names[r], h->stamp_inf_fee_rate_taker, cfg_frt);
-                        }
-                    }
-                }
-                // Persist drift counts on CoreContext for ML Status panel
-                state.cores[i].cfg_drift_tier1_count = (uint8_t)(tier1_count > 255 ? 255 : tier1_count);
-                state.cores[i].cfg_drift_tier2_count = (uint8_t)(tier2_count > 255 ? 255 : tier2_count);
-                state.cores[i].cfg_drift_strict_refused = (tier1_refused_count > 0) ? 1 : 0;
-
-                if (tier1_refused_count > 0) {
-                    fprintf(stderr,
-                        "[inference_cfg] FATAL: core %d had %d Tier 1 mismatch(es) "
-                        "in strict mode. Set held_out_gate_strict=0 (warn-only) "
-                        "OR acknowledge_inference_cfg_drift=1 to bypass, "
-                        "OR retrain the model with current cfg.\n",
-                        i, tier1_refused_count);
-                    // NOTE: REFUSE on tier1+strict means the engine should not
-                    // proceed with this model loaded. Per master plan v5.9.5i,
-                    // we log loudly + leave handle loaded; operator chooses to
-                    // restart with corrected cfg or accept by flipping flag.
-                    // TODO v5.10: free handle + return-from-boot to enforce
-                    // refuse properly (currently this is observability-grade,
-                    // not load-time-refuse, since model is already loaded
-                    // and engine continues to run).
-                }
+                EnsembleModelZoo<F>* ezoo = state.cores[i].ensemble_handle
+                    ? &ml_ensemble_zoos[i] : nullptr;
+                CoreModelZoo_ValidateAgainstCfg<F>(
+                    zoo, ezoo, cfg, /*core_id=*/i,
+                    cfg.held_out_gate_strict,
+                    cfg.acknowledge_inference_cfg_drift,
+                    cfg.acknowledge_cross_binary_version_drift,
+                    &state.cores[i]);
+                // Note: validator returns -1 on REFUSE in strict mode but the
+                // existing v5.9.5i semantics here were "log loudly + leave
+                // handle loaded" (TODO v5.10: free handle + return-from-boot
+                // to enforce refuse properly). The validator preserves this:
+                // counters are written, FATAL log fires, but engine continues.
+                // Hot-swap branch handles REFUSE differently (model_load_failed).
             }
 
             // Phase 6prep sharded c12: re-init ConfidenceScorer with cfg
@@ -2471,6 +2532,26 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                         __atomic_store_n(
                                             &g_shared.swap_model_path_requested[c], 0,
                                             __ATOMIC_RELEASE);
+                                    } else if (state.cores[c].ensemble_handle != nullptr) {
+                                        // v5.10.2.B — REFUSE hot swap when ensemble
+                                        // is active (parity-check Finding #4).
+                                        // Dispatcher reads ensemble_zoo first
+                                        // (StrategyParameters.hpp:794); a single-zoo
+                                        // swap would be a silent no-op for actual
+                                        // inference. Operator must restart engine
+                                        // to swap the horizon set.
+                                        // Full ensemble swap (Free + Init + AutoDetect
+                                        // + bandit reload) is Option B, deferred to
+                                        // v5.10.2.X if operator wants it.
+                                        fprintf(stderr,
+                                            "[hot_swap] core %d REFUSED: ensemble inference "
+                                            "active; swap of single-zoo model would not "
+                                            "affect actual predictions. Restart engine "
+                                            "with new core_%d_model_dir to swap horizon set.\n",
+                                            c, c);
+                                        __atomic_store_n(
+                                            &g_shared.swap_model_path_requested[c], 0,
+                                            __ATOMIC_RELEASE);
                                     } else {
                                         int swap_backend = cfg.ml_backend
                                             ? cfg.ml_backend
@@ -2493,6 +2574,31 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 "[hot_swap] core %d swapped to %s "
                                                 "(%d roles loaded)\n",
                                                 c, new_path, loaded);
+                                            // v5.10.2.A — Run post-load validator
+                                            // on the newly-swapped zoo (parity-check
+                                            // Finding #3 closure: hot swap was
+                                            // bypassing inference_cfg drift detection
+                                            // + xgb_hyperparams WARN at boot).
+                                            // Hot-swap context: log-and-leave on
+                                            // Tier 1 REFUSE; operator manually reverts
+                                            // via cfg+restart (true rollback deferred
+                                            // — pre-swap state isn't snapshotted).
+                                            int validate_rc = CoreModelZoo_ValidateAgainstCfg<F>(
+                                                swap_zoo,
+                                                /*ezoo=*/nullptr,  // single-zoo only here; ensemble swap REFUSED in B
+                                                cfg, /*core_id=*/c,
+                                                cfg.held_out_gate_strict,
+                                                cfg.acknowledge_inference_cfg_drift,
+                                                cfg.acknowledge_cross_binary_version_drift,
+                                                &state.cores[c]);
+                                            if (validate_rc < 0) {
+                                                state.cores[c].model_load_failed = 1;
+                                                fprintf(stderr,
+                                                    "[hot_swap] core %d REFUSED post-load "
+                                                    "validation in strict mode; new model "
+                                                    "loaded but flagged degraded. Operator "
+                                                    "must reconcile cfg vs stamp + restart.\n", c);
+                                            }
                                         } else {
                                             // Load failed; null the handle so
                                             // dispatcher falls back to SimpleDip.
