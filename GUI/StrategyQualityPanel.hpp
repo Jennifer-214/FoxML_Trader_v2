@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <ctime>
+#include <cerrno>      // v5.11.23 — strerror + ENOENT for friendly empty-state
 #include <locale.h>
 #include "imgui.h"
 #include "FoxmlTheme.hpp"
@@ -95,7 +96,19 @@ inline int sq_tail_read(const char* path, int max_lines, int line_cap,
                          char* lines_buf, char* error_out, size_t error_cap) {
     FILE* f = fopen(path, "rb");
     if (!f) {
-        snprintf(error_out, error_cap, "fopen failed: %s", path);
+        // v5.11.23 — friendlier empty-state copy. errno=ENOENT is the
+        // common case (operator hasn't set health_log_path or the
+        // engine hasn't written records yet); other errno values
+        // (permission, io error) get a less friendly but accurate
+        // message so the operator can debug.
+        if (errno == ENOENT) {
+            snprintf(error_out, error_cap,
+                     "no health log yet at %s — set health_log_path "
+                     "in engine.cfg + run a trade to populate", path);
+        } else {
+            snprintf(error_out, error_cap, "open failed: %s (%s)",
+                     path, strerror(errno));
+        }
         return 0;
     }
     // Find file size, seek to ~max_lines × 256 bytes from end (heuristic).

@@ -102,6 +102,14 @@ inline HealthLogState* HealthLog_Singleton() {
 //
 // v5.9.4 — overload accepting rotation params. Old single-arg form
 // preserved for legacy callers (rotation disabled = max_bytes=0).
+//
+// v5.11.23 — auto-create the parent directory of `path` if missing.
+// The Strategy Quality panel's "fopen failed: logging/health.jsonl"
+// empty-state pre-fix happened when operator set
+// `health_log_path=logging/health.jsonl` but the `logging/`
+// directory wasn't pre-created. Best-effort mkdir; failures are
+// silent (Health_Log will surface its own fopen failure if the
+// directory still doesn't exist).
 inline void Health_LogConfigureWithRotation(const char* path, int min_level,
                                               uint64_t max_bytes, int keep_count) {
     HealthLogState* s = HealthLog_Singleton();
@@ -119,6 +127,23 @@ inline void Health_LogConfigureWithRotation(const char* path, int min_level,
     s->min_level = min_level;
     s->max_bytes = max_bytes;
     s->keep_count = (keep_count < 0) ? 0 : keep_count;
+
+    // v5.11.23 — find last '/' in the path; everything before is the
+    // parent dir. Skip if path is a bare filename (no slash) or starts
+    // with '/' (absolute path; assume operator pre-created).
+    const char* slash = strrchr(s->path, '/');
+    if (slash && slash != s->path) {
+        size_t dirlen = (size_t)(slash - s->path);
+        char dir[256];
+        if (dirlen < sizeof(dir)) {
+            memcpy(dir, s->path, dirlen);
+            dir[dirlen] = '\0';
+            // Best-effort mkdir. EEXIST is fine. Other errors silently
+            // ignored — Health_Log's first fopen will surface if the
+            // directory genuinely couldn't be created.
+            mkdir(dir, 0755);
+        }
+    }
 }
 
 inline void Health_LogConfigure(const char* path, int min_level) {
