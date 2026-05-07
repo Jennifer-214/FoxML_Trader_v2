@@ -59,15 +59,32 @@ struct InitArena {
 // MAP_POPULATE so subsequent allocations + first-write never page-fault.
 // On mmap failure, falls back to malloc with a stderr WARN; the caller can
 // continue but loses the pre-fault guarantee.
-inline InitArena InitArena_Create(size_t bytes) {
+//
+// v5.11.22 — extra_flags lets the caller request additional mmap flags
+// beyond the baseline (MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE).
+// Currently used for MAP_HUGETLB (operator-gated via cfg.init_arena_use_hugepages).
+// On MAP_HUGETLB failure (no hugepages reserved), retry without HUGETLB
+// before falling back to malloc — operator missing the OS-level
+// reservation gets a non-fatal degraded-but-functional path.
+inline InitArena InitArena_Create(size_t bytes, int extra_flags = 0) {
     InitArena a;
     a.capacity = bytes;
     a.used     = 0;
     a.is_mmap  = 0;
     a.base     = nullptr;
-    void* mem = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
-                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE,
-                        -1, 0);
+    int base_flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE;
+    int flags      = base_flags | extra_flags;
+    void* mem = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, flags, -1, 0);
+    if (mem == MAP_FAILED && extra_flags != 0) {
+        // v5.11.22 — retry without extra_flags (most likely cause is
+        // MAP_HUGETLB asked but no hugepages reserved at the OS level).
+        // WARN so operator can see the fallback happened.
+        std::fprintf(stderr, "[InitArena] WARN: mmap(%zu, flags=0x%x) failed (%s); "
+                     "retrying without extra_flags=0x%x — likely missing OS-level "
+                     "hugepage reservation. See DOCS/OPERATOR_DEPLOYMENT.md.\n",
+                     bytes, flags, std::strerror(errno), extra_flags);
+        mem = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, base_flags, -1, 0);
+    }
     if (mem != MAP_FAILED) {
         a.base = (uint8_t*)mem;
         a.is_mmap = 1;

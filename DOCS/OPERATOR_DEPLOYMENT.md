@@ -245,21 +245,45 @@ echo always | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
 echo always | sudo tee /sys/kernel/mm/transparent_hugepage/defrag
 ```
 
-### Or: explicit 2MB huge pages for engine arena (v5.11.6 will use these)
+### Or: explicit 2MB huge pages for engine arena (v5.11.22 — opt-in)
 
 ```bash
-# Reserve 1024 × 2MB pages = 2GB
+# Reserve at least 4 × 2MB pages = 8MB to fit the v5.11.6.A InitArena
+echo 4 | sudo tee /proc/sys/vm/nr_hugepages
+
+# Or generously, 1024 × 2MB = 2GB:
 echo 1024 | sudo tee /proc/sys/vm/nr_hugepages
 
 # Persistent in /etc/sysctl.d/40-hugepages.conf:
 vm.nr_hugepages = 1024
 ```
 
+Then enable in `engine.cfg`:
+
+```
+init_arena_use_hugepages=1
+```
+
 The engine's `mlockall(MCL_CURRENT | MCL_FUTURE)` (v5.11.0.B) keeps
 all pages resident; huge pages reduce the *number* of page mappings.
-v5.11.6 will explicitly request `MAP_HUGETLB` on the unified arena
-allocation; until then transparent huge pages cover the bulk
-allocations.
+v5.11.22 explicitly requests `MAP_HUGETLB` on the InitArena (the
+single mmap'd backing for boot-time slow-state allocations) when
+`init_arena_use_hugepages=1`. ~512× fewer TLB entries on the 8 MB
+arena (4 × 2 MB hugepages vs 2048 × 4 KB pages).
+
+If hugepages are NOT reserved at the OS level when this cfg flag is
+set, the engine emits a stderr WARN and silently falls back to
+normal pages (non-fatal). Engine continues with the TLB-optimization
+disabled. Look for:
+
+```
+[InitArena] WARN: mmap(8388608, flags=0x40072) failed (Cannot allocate
+memory); retrying without extra_flags=0x40000 — likely missing
+OS-level hugepage reservation. See DOCS/OPERATOR_DEPLOYMENT.md.
+```
+
+If this fires, your `vm.nr_hugepages` is too small — bump to ≥4 and
+restart the engine, OR set `init_arena_use_hugepages=0` to silence.
 
 ---
 

@@ -34,6 +34,8 @@
 #include "../ML_Headers/FeatureRegistry.hpp"              // v5.8.1a tests
 #include "../Backtest/PhaseTimers.hpp"                    // v5.10.0 Item A — phase timer tests
 #include "../MemHeaders/BuddyAllocator.hpp"                // v5.11.13 — typo fix + O(1) order lookup tests
+#include "../MemHeaders/InitArena.hpp"                     // v5.11.22 — MAP_HUGETLB opt-in tests
+#include <sys/mman.h>                                       // v5.11.22 — MAP_HUGETLB constant
 #include "../DataStream/DepthReplayState.hpp"            // Track E.3 tests
 #include "../ML_Headers/FlowFeatures.hpp"                // v4.5 Wave 1 tests
 #include "../DataStream/BinanceUserData.hpp"
@@ -15634,6 +15636,67 @@ e3_skip_load:;
                   state.cores[0].strategy_state == nullptr);
 
             tt::EventLoopState_Free(&state);
+        }
+    }
+
+    printf("\n--- v5.11.22: InitArena MAP_HUGETLB opt-in cfg + fallback ---\n");
+    {
+        // v5.11.22 (2026-05-07) — operator-gated MAP_HUGETLB on the
+        // boot InitArena. Default cfg.init_arena_use_hugepages=0 (no
+        // OS dependency); 1 = request 2MB hugepages with non-fatal
+        // fallback to normal pages on failure.
+
+        // === Test 1: cfg field defaults to 0 ===
+        {
+            ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+            check("v5.11.22: init_arena_use_hugepages defaults to 0",
+                  cfg.init_arena_use_hugepages == 0);
+        }
+
+        // === Test 2: cfg parser reads "init_arena_use_hugepages=1" ===
+        {
+            char tmp_cfg[] = "/tmp/v51122_cfg_XXXXXX";
+            int fd = mkstemp(tmp_cfg);
+            check("v5.11.22: tmp cfg file creation", fd >= 0);
+            if (fd >= 0) {
+                FILE* f = fdopen(fd, "w");
+                fprintf(f, "init_arena_use_hugepages=1\n");
+                fclose(f);
+
+                ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(tmp_cfg);
+                check("v5.11.22: parser reads init_arena_use_hugepages=1",
+                      cfg.init_arena_use_hugepages == 1);
+                unlink(tmp_cfg);
+            }
+        }
+
+        // === Test 3: InitArena_Create with extra_flags=0 succeeds ===
+        // (baseline path; same as pre-v5.11.22 behavior)
+        {
+            tt::InitArena a = tt::InitArena_Create(64 * 1024, 0);
+            check("v5.11.22: InitArena_Create(64KB, 0) succeeds", a.base != nullptr);
+            check("v5.11.22: InitArena_Create(64KB, 0) reports is_mmap=1",
+                  a.is_mmap == 1);
+            tt::InitArena_Destroy(&a);
+        }
+
+        // === Test 4: InitArena_Create with MAP_HUGETLB falls back gracefully ===
+        // Most CI / dev machines don't have hugepages reserved — the path
+        // below exercises the v5.11.22 fallback (retry without HUGETLB,
+        // emit a stderr WARN, return a working arena anyway).
+        // We can't deterministically assert WHICH path runs (operator
+        // machines with hugepages WILL succeed on the first try), but
+        // either way the resulting arena must be usable.
+        {
+            tt::InitArena a = tt::InitArena_Create(64 * 1024, MAP_HUGETLB);
+            check("v5.11.22: InitArena_Create(64KB, MAP_HUGETLB) returns usable arena",
+                  a.base != nullptr && a.capacity == 64 * 1024);
+            // Test that we can actually allocate from it (proves the
+            // fallback or HUGETLB path produced a working backing).
+            void* p = tt::InitArena_Alloc(&a, 1024, 64);
+            check("v5.11.22: arena alloc works regardless of HUGETLB success",
+                  p != nullptr);
+            tt::InitArena_Destroy(&a);
         }
     }
 

@@ -385,6 +385,21 @@ template <unsigned F> struct ControllerConfig {
   // when mlockall fails. Setting this to 0 in production trades determinism
   // for portability — operator should explicitly opt out.
   int require_mlockall;
+  // v5.11.22 — InitArena MAP_HUGETLB opt-in. Default 0 = use 4 KB pages
+  // (no OS dependency); set to 1 to request 2 MB hugepages for the 8 MB
+  // boot arena, reducing TLB pressure on slow-path CoreSlowState +
+  // strategy state access.
+  //
+  // Requires OS-level hugepage reservation:
+  //   sudo sysctl -w vm.nr_hugepages=4   # 4 × 2 MB = 8 MB to fit arena
+  // OR persistent in /etc/sysctl.d/99-foxml.conf:
+  //   vm.nr_hugepages=4
+  //
+  // On boot, if the cfg flag is 1 but hugepages are not available,
+  // InitArena_Create retries WITHOUT MAP_HUGETLB and emits a stderr
+  // WARN — engine continues with normal pages, no fatal. See
+  // DOCS/OPERATOR_DEPLOYMENT.md for the production-machine recipe.
+  int init_arena_use_hugepages;
   // kill switch (sticky — stays active until session reset or manual TUI 'k')
   int kill_switch_enabled; // 0=disabled, 1=enabled
   FPN<F>
@@ -983,6 +998,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
                                                     // must set to 1 to
                                                     // run hardcoded
                                                     // strategies live
+  cfg.init_arena_use_hugepages = 0;  // v5.11.22 — opt-in; requires OS reservation
   cfg.require_mlockall = 1;  // v5.11.3 — HFT-correct default; set to 0
                               // for laptop dev where RLIMIT_MEMLOCK is tight
   // kill switch
@@ -1395,6 +1411,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(use_real_money)
     CFG_PARSE_INT(acknowledge_hardcoded_strategy_in_live)  // v5.7.2
     CFG_PARSE_INT(require_mlockall)  // v5.11.3
+    CFG_PARSE_INT(init_arena_use_hugepages)  // v5.11.22
     CFG_PARSE_INT(session_filter_enabled)
     CFG_PARSE_INT(gate_ema_enabled)
     CFG_PARSE_INT(default_strategy)

@@ -847,7 +847,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     //   Total: 8 MB. Within the mlockall envelope (RLIMIT_MEMLOCK ≥ 256 MB
     //   per the deployment runbook).
     static tt::InitArena g_init_arena;
-    g_init_arena = tt::InitArena_Create(8 * 1024 * 1024);  // 8 MB
+    // v5.11.22 — operator-gated MAP_HUGETLB. Default 0 = use 4 KB pages.
+    // Set cfg.init_arena_use_hugepages=1 + reserve hugepages at the OS
+    // level (sudo sysctl -w vm.nr_hugepages=4) for ~512× fewer TLB
+    // entries on the 8 MB arena. InitArena_Create silently falls back
+    // to non-HUGETLB on failure (with a stderr WARN) — never fatal.
+    int arena_extra_flags = cfg.init_arena_use_hugepages ? MAP_HUGETLB : 0;
+    g_init_arena = tt::InitArena_Create(8 * 1024 * 1024, arena_extra_flags);
     tt::InitArena_Global() = &g_init_arena;
 
     EventLoopState<F> state;
