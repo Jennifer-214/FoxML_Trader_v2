@@ -1653,13 +1653,62 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 }
             } else if (is_multiclass) {
                 int K = num_classes_lt;
+                // v5.11.30 — diagnostic logging for WF 0% accuracy
+                // regression. Pre-fix the per-fold accuracy could stay
+                // at default 0.0f when XGBoost output shape didn't match
+                // n_samples * K (silently skipped). Log enough info to
+                // discriminate Case A (shape mismatch) vs Case B (shapes
+                // OK but predictions all wrong).
+                fprintf(stderr,
+                    "[wf-diag] fold %d multiclass: pred_tr_ok=%d "
+                    "out_len_tr=%lu expected=%d (n_train=%d K=%d) "
+                    "pred_te_ok=%d out_len_te=%lu expected=%d (n_test=%d)\n",
+                    f + 1, pred_tr_ok,
+                    (unsigned long)out_len_tr, n_train * K, n_train, K,
+                    pred_te_ok, (unsigned long)out_len_te, n_test * K, n_test);
                 if (pred_tr_ok && (int)out_len_tr == n_train * K) {
                     fr->train_accuracy = WalkForward_ComputeMulticlassAccuracy(
                         pred_tr, train_labels, n_train, K);
+                    // Sample first 5 (argmax, label) pairs to see what
+                    // the model is predicting vs ground truth.
+                    int show = n_train < 5 ? n_train : 5;
+                    fprintf(stderr, "[wf-diag] fold %d train sample (argmax, label):", f + 1);
+                    for (int i = 0; i < show; i++) {
+                        int best = 0;
+                        float best_p = pred_tr[i * K];
+                        for (int k = 1; k < K; k++) {
+                            float p = pred_tr[i * K + k];
+                            if (p > best_p) { best_p = p; best = k; }
+                        }
+                        int truth = (int)(train_labels[i] + 0.5f);
+                        fprintf(stderr, " (%d→%d)", best, truth);
+                    }
+                    fprintf(stderr, " train_accuracy=%.4f\n", fr->train_accuracy);
+                } else {
+                    fprintf(stderr, "[wf-diag] fold %d train SKIPPED — shape "
+                            "mismatch leaves train_accuracy at default 0.0\n",
+                            f + 1);
                 }
                 if (pred_te_ok && (int)out_len_te == n_test * K) {
                     fr->val_accuracy = WalkForward_ComputeMulticlassAccuracy(
                         pred_te, test_labels, n_test, K);
+                    int show = n_test < 5 ? n_test : 5;
+                    fprintf(stderr, "[wf-diag] fold %d val sample (argmax, label):", f + 1);
+                    for (int i = 0; i < show; i++) {
+                        int best = 0;
+                        float best_p = pred_te[i * K];
+                        for (int k = 1; k < K; k++) {
+                            float p = pred_te[i * K + k];
+                            if (p > best_p) { best_p = p; best = k; }
+                        }
+                        int truth = (int)(test_labels[i] + 0.5f);
+                        fprintf(stderr, " (%d→%d)", best, truth);
+                    }
+                    fprintf(stderr, " val_accuracy=%.4f\n", fr->val_accuracy);
+                } else {
+                    fprintf(stderr, "[wf-diag] fold %d val SKIPPED — shape "
+                            "mismatch leaves val_accuracy at default 0.0\n",
+                            f + 1);
                 }
             } else {
                 if (pred_tr_ok && (int)out_len_tr == n_train) {
