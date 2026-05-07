@@ -2042,6 +2042,15 @@ struct TrainingPanelState {
     volatile int tm_complete;
     volatile int tm_cancel;     // v5.9.0d: polled between XGBoost iterations
     pthread_t tm_tid;
+    // v5.11.25 — XGBoost iteration progress (operator-flagged 2026-05-07).
+    // Worker writes tm_progress_iter (current_iter+1, 1..n_estimators) and
+    // tm_progress_total (snapshotted n_estimators) every iteration; GUI
+    // renders ImGui::ProgressBar(tm_progress_iter / tm_progress_total).
+    // Both reset to 0 on entry; written single-writer (worker thread)
+    // with volatile to prevent compiler reordering. Pre-v5.11.25 the
+    // progress bar was indeterminate (-1 fed into ImGui as a pulse).
+    volatile int tm_progress_iter;
+    volatile int tm_progress_total;
     // v5.10.0a.E — Hyperparam Sweep state. Mirrors wf_* / tm_* worker
     // pattern. Operator clicks Run Hyperparam Sweep → spawn worker that
     // calls Backtest_RunHyperparamTrainSweep using already-collected
@@ -2137,6 +2146,8 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     state->tm_running = 0;
     state->tm_complete = 0;
     state->tm_cancel = 0;
+    state->tm_progress_iter = 0;   // v5.11.25
+    state->tm_progress_total = 0;  // v5.11.25
     // v5.10.0a.E — Hyperparam Sweep init. Default param 0 = sweep
     // xgb_subsample 0.5 .. 0.9 step 0.1 (5 cells).
     strncpy(state->hp_ranges[0].key, "xgb_subsample", sizeof(state->hp_ranges[0].key) - 1);
@@ -2576,6 +2587,9 @@ static inline void *train_model_worker_fn(void *arg) {
     // v5.9.0d — iteration loop with tm_cancel poll. XGBoost has no
     // mid-iteration cancel; cancel response bounded by one iter time
     // (typically 100ms-1s for typical hyperparameters).
+    // v5.11.25 — publish per-iteration progress for the GUI ProgressBar.
+    state->tm_progress_iter = 0;
+    state->tm_progress_total = snap_n_estimators;
     int cancelled = 0;
     for (int i = 0; i < snap_n_estimators; i++) {
         if (state->tm_cancel) {
@@ -2585,6 +2599,7 @@ static inline void *train_model_worker_fn(void *arg) {
             break;
         }
         XGBoosterUpdateOneIter(booster, i, dtrain);
+        state->tm_progress_iter = i + 1;
     }
 
     if (cancelled) {
@@ -3645,12 +3660,27 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
 #endif
 
     if (state->tm_running) {
-        // Worker is mid-train. Show indeterminate progress + cancel button.
-        // XGBoost has no native iteration-progress callback; we use a
-        // pulsing bar as a "still alive" signal. Cancel polls between
-        // XGBoosterUpdateOneIter calls (bounded latency = one iter time).
-        ImGui::ProgressBar(-1.0f * (float)ImGui::GetTime(),
-                           ImVec2(-1, 0), "Training XGBoost...");
+        // v5.11.25 — real per-iteration progress bar. Pre-fix used a
+        // pulsing indeterminate bar (`-1.0f * GetTime()`) as a "still
+        // alive" signal because the XGBoost C-API had no progress
+        // callback hook — but the per-iteration loop at
+        // BacktestPanels.hpp:2580+ already uses XGBoosterUpdateOneIter
+        // (added for cancel support, v5.9.0d), so the worker can
+        // publish current_iter to a volatile field cheaply. Operator
+        // sees actual % done + iter count.
+        int p_total = state->tm_progress_total;
+        int p_iter  = state->tm_progress_iter;
+        if (p_total > 0) {
+            float frac = (float)p_iter / (float)p_total;
+            char overlay[64];
+            snprintf(overlay, sizeof(overlay),
+                     "Training XGBoost... iter %d / %d", p_iter, p_total);
+            ImGui::ProgressBar(frac, ImVec2(-1, 0), overlay);
+        } else {
+            // Pre-loop: still allocating dtrain, no iters started yet.
+            ImGui::ProgressBar(-1.0f * (float)ImGui::GetTime(),
+                               ImVec2(-1, 0), "Training XGBoost... (preparing)");
+        }
         if (ImGui::Button("Cancel Training")) {
             state->tm_cancel = 1;
         }
@@ -3673,6 +3703,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             memset(&state->wf_results, 0, sizeof(state->wf_results));
             state->tm_cancel = 0;
             state->tm_complete = 0;
+            // v5.11.25 — reset progress so stale values from a prior run
+            // don't briefly flash before the worker overwrites them.
+            state->tm_progress_iter = 0;
+            state->tm_progress_total = 0;
             state->tm_running = 1;
             TrainModelWorkerArgs *args = (TrainModelWorkerArgs *)malloc(sizeof(TrainModelWorkerArgs));
             args->state = state;
