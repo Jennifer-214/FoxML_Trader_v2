@@ -4946,11 +4946,19 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         }
 
         // Auto-stamp result line. Sourced from the worker's status_msg.
+        // v5.11.36 — operator-flagged 2026-05-07: long status lines (e.g.
+        // "Held-out OK; auto-stamp skipped — model_path='...' snapshot
+        // non-empty but auto_stamp_path empty (internal copy failure;
+        // report bug)") ran off the panel right edge on 1080p. Use
+        // PushStyleColor + TextWrapped instead of TextColored so the
+        // text wraps at panel width with color preserved.
         if (state->fv_status_msg[0]) {
             ImVec4 stamp_col = fv->auto_stamp_attempted && fv->auto_stamp_ok
                 ? ImVec4(0.55f, 0.76f, 0.51f, 1.0f)
                 : ImVec4(0.95f, 0.75f, 0.30f, 1.0f);
-            ImGui::TextColored(stamp_col, "%s", state->fv_status_msg);
+            ImGui::PushStyleColor(ImGuiCol_Text, stamp_col);
+            ImGui::TextWrapped("%s", state->fv_status_msg);
+            ImGui::PopStyleColor();
         }
     }
 
