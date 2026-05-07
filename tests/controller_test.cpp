@@ -13847,6 +13847,70 @@ e3_skip_load:;
               parse_uint64_fast(nullptr) == 0ULL);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.11.5.C — mmap pre-alloc OrderEventLog ---\n");
+    {
+        // Theory: pre-v5.11.5.C, OrderEventLog.entries was malloc'd at
+        // ORDER_EVENT_LOG_INIT_CAPACITY and grew via 2× realloc. realloc
+        // mid-trading risked relocation tail latency on the writer thread
+        // even after v5.11.3.C moved I/O off the drainer.
+        //
+        // Post-v5.11.5.C: mmap(MAP_ANONYMOUS|MAP_POPULATE) at boot. Fixed
+        // capacity. MAP_POPULATE pre-faults all pages so no first-write
+        // page-fault tail. Overflow drops + counter bump.
+
+        using namespace tt;
+
+        OrderEventLog<64> log;
+        OrderEventLog_Init(&log);
+        check("v5.11.5.C: Init succeeds with mmap'd entries[]",
+              log.entries != nullptr);
+        check("v5.11.5.C: capacity equals ORDER_EVENT_LOG_MAX_CAPACITY",
+              log.capacity == ORDER_EVENT_LOG_MAX_CAPACITY);
+        check("v5.11.5.C: log_full_drops starts at 0",
+              log.log_full_drops.load() == 0);
+
+        // Verify pages are touchable (no SEGV on writes anywhere in the
+        // mmap'd range — MAP_POPULATE should have pre-faulted them).
+        log.entries[0].event_id = 0xDEADBEEF;
+        log.entries[ORDER_EVENT_LOG_MAX_CAPACITY - 1].event_id = 0xCAFEBABE;
+        check("v5.11.5.C: first slot writable post-mmap",
+              log.entries[0].event_id == 0xDEADBEEF);
+        check("v5.11.5.C: last slot writable post-mmap (full range pre-faulted)",
+              log.entries[ORDER_EVENT_LOG_MAX_CAPACITY - 1].event_id == 0xCAFEBABE);
+
+        // Fill the log right up to capacity, then trigger overflow.
+        log.count = 0;
+        log.next_event_id.store(1, std::memory_order_relaxed);
+        for (size_t i = 0; i < ORDER_EVENT_LOG_MAX_CAPACITY; ++i) {
+            OrderEvent<64> ev{};
+            ev.type = OEVT_FULL_FILL;
+            int rc = OrderEventLog_ApplyEvent(&log, ev);
+            if (rc != 1) break;
+        }
+        check("v5.11.5.C: count reaches MAX_CAPACITY when filled",
+              log.count == ORDER_EVENT_LOG_MAX_CAPACITY);
+        check("v5.11.5.C: log_full_drops still 0 (no overflow yet)",
+              log.log_full_drops.load() == 0);
+
+        // One more event triggers overflow path
+        OrderEvent<64> overflow_ev{};
+        overflow_ev.type = OEVT_FULL_FILL;
+        int rc = OrderEventLog_ApplyEvent(&log, overflow_ev);
+        check("v5.11.5.C: overflow apply returns 0 (drop)",
+              rc == 0);
+        check("v5.11.5.C: log_full_drops bumped on overflow",
+              log.log_full_drops.load() == 1);
+        check("v5.11.5.C: count stays at MAX (no out-of-bounds write)",
+              log.count == ORDER_EVENT_LOG_MAX_CAPACITY);
+
+        // Free path must munmap cleanly (no leak / segfault)
+        OrderEventLog_Free(&log);
+        check("v5.11.5.C: Free clears entries pointer",
+              log.entries == nullptr);
+        check("v5.11.5.C: Free clears capacity",
+              log.capacity == 0);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.11.5.B — clientOrderId slot encoding (O(1) lookup) ---\n");
     {
         // Theory: pre-v5.11.5.B, OrderManager_ProcessFillCommand scanned

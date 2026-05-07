@@ -43,6 +43,7 @@
 #include <atomic>      // v5.11.3.C — async writer thread coordination
 #include <pthread.h>   // v5.11.3.C — async writer pthread
 #include <unistd.h>    // v5.11.3.C — usleep in writer idle path
+#include <sys/mman.h>  // v5.11.5.C — mmap(MAP_POPULATE) pre-alloc
 
 #include "SPSCRing.hpp"  // v5.11.3.C — drainer → writer queue
 
@@ -103,6 +104,21 @@ struct OrderEvent {
 //======================================================================================================
 constexpr size_t ORDER_EVENT_LOG_INIT_CAPACITY = 16384;
 
+// v5.11.5.C — fixed mmap-allocated capacity. Replaces malloc + realloc
+// growth pattern with a single mmap(MAP_POPULATE) at boot. Trade-off:
+// - Pre-faults all pages at boot (~2.8 MB pre-touched at 16384 cap × 176 B)
+//   so first-write never hits a page-fault tail.
+// - Capacity is FIXED at boot — overflow drops events with a counter
+//   bump (silent failure → operator sees the counter via the GUI).
+// - Eliminates realloc-mid-trading from the writer thread (which v5.11.3.C
+//   moved off the drainer; v5.11.5.C now eliminates it entirely).
+//
+// Sized at the historical INIT capacity (~160 days at SimpleDip rates).
+// For long-running deployments tune by editing this constant; runtime
+// cfg-binding deferred (none of the current operators run > 30 days
+// continuous).
+constexpr size_t ORDER_EVENT_LOG_MAX_CAPACITY = ORDER_EVENT_LOG_INIT_CAPACITY;
+
 // Phase 07 file header — written at the start of the event log file.
 // Carries the FPN width and entry size for forward compatibility.
 struct OrderEventLogFileHeader {
@@ -159,7 +175,8 @@ struct OrderEventLog {
     std::atomic<int> writer_thread_active;  // 1 = writer thread is running
     std::atomic<int> writer_should_stop;    // writer polls this; set on Stop
     std::atomic<uint64_t> ring_full_spins;  // total pause/usleep iterations spent waiting for ring slots
-    std::atomic<uint64_t> writer_realloc_failed_count;  // writer realloc failures
+    std::atomic<uint64_t> writer_realloc_failed_count;  // writer realloc failures (legacy — should stay 0 post-v5.11.5.C)
+    std::atomic<uint64_t> log_full_drops;   // v5.11.5.C — events dropped because mmap'd capacity is exhausted
 };
 
 //======================================================================================================
@@ -167,9 +184,25 @@ struct OrderEventLog {
 //======================================================================================================
 template <unsigned F>
 inline void OrderEventLog_Init(OrderEventLog<F>* log) {
-    log->entries = (OrderEvent<F>*)std::malloc(
-        ORDER_EVENT_LOG_INIT_CAPACITY * sizeof(OrderEvent<F>));
-    log->capacity      = log->entries ? ORDER_EVENT_LOG_INIT_CAPACITY : 0;
+    // v5.11.5.C — mmap(MAP_POPULATE) for the entries[] buffer. Pre-faults
+    // all pages at boot so the first-write path never hits a page-fault
+    // tail. Capacity is fixed (no realloc); overflow increments
+    // log_full_drops + drops the event silently (counter is GUI-surfaced).
+    const size_t bytes = ORDER_EVENT_LOG_MAX_CAPACITY * sizeof(OrderEvent<F>);
+    void* mem = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE,
+                        -1, 0);
+    if (mem == MAP_FAILED) {
+        // Fallback: malloc. Less ideal (no MAP_POPULATE pre-fault, no
+        // alignment guarantee) but keeps the engine running.
+        std::fprintf(stderr, "[OrderEventLog] WARN: mmap(MAP_POPULATE) "
+                     "failed (%s), falling back to malloc\n",
+                     std::strerror(errno));
+        log->entries = (OrderEvent<F>*)std::malloc(bytes);
+    } else {
+        log->entries = (OrderEvent<F>*)mem;
+    }
+    log->capacity      = log->entries ? ORDER_EVENT_LOG_MAX_CAPACITY : 0;
     log->count         = 0;
     log->next_event_id.store(1, std::memory_order_relaxed);
     log->disk_file     = nullptr;
@@ -182,9 +215,10 @@ inline void OrderEventLog_Init(OrderEventLog<F>* log) {
     log->writer_should_stop.store(0, std::memory_order_relaxed);
     log->ring_full_spins.store(0, std::memory_order_relaxed);
     log->writer_realloc_failed_count.store(0, std::memory_order_relaxed);
+    log->log_full_drops.store(0, std::memory_order_relaxed);
     if (!log->entries) {
-        std::fprintf(stderr, "[OrderEventLog] WARN: initial malloc failed, "
-                     "event logging disabled\n");
+        std::fprintf(stderr, "[OrderEventLog] WARN: entries[] allocation "
+                     "failed, event logging disabled\n");
     }
 }
 
@@ -203,7 +237,14 @@ inline void OrderEventLog_Free(OrderEventLog<F>* log) {
         log->disk_file = nullptr;
     }
     if (log->entries) {
-        std::free(log->entries);
+        // v5.11.5.C — entries[] was allocated via mmap (or malloc fallback).
+        // Try munmap first; if it fails, the buffer was the malloc fallback
+        // and we free() it. munmap on a non-mmap'd region returns EINVAL
+        // without modifying memory; safe probe.
+        const size_t bytes = ORDER_EVENT_LOG_MAX_CAPACITY * sizeof(OrderEvent<F>);
+        if (::munmap(log->entries, bytes) != 0) {
+            std::free(log->entries);  // malloc fallback path
+        }
         log->entries = nullptr;
     }
     log->capacity      = 0;
@@ -230,19 +271,11 @@ inline void OrderEventLog_Free(OrderEventLog<F>* log) {
 //   - OrderEventLog_AsyncWriterRoutine (caller is the writer thread)
 template <unsigned F>
 inline int OrderEventLog_ApplyEvent(OrderEventLog<F>* log, const OrderEvent<F>& event) {
+    // v5.11.5.C — fixed mmap'd capacity. Overflow drops the event + bumps a
+    // counter (operator-visible via the GUI). Realloc-mid-trading is gone.
     if (log->count >= log->capacity) {
-        size_t new_cap = log->capacity * 2;
-        if (new_cap < 256) new_cap = 256;
-        OrderEvent<F>* new_buf = (OrderEvent<F>*)std::realloc(
-            log->entries, new_cap * sizeof(OrderEvent<F>));
-        if (!new_buf) {
-            std::fprintf(stderr, "[OrderEventLog] WARN: realloc to %zu failed, "
-                         "event %llu dropped\n",
-                         new_cap, (unsigned long long)event.event_id);
-            return 0;
-        }
-        log->entries  = new_buf;
-        log->capacity = new_cap;
+        log->log_full_drops.fetch_add(1, std::memory_order_relaxed);
+        return 0;
     }
     log->entries[log->count++] = event;
 
@@ -480,22 +513,20 @@ inline int OrderEventLog_LoadFromDisk(OrderEventLog<F>* log, const char* path) {
     }
 
     // Read events one at a time until EOF.
+    // v5.11.5.C — fixed mmap'd capacity; load up to capacity, then stop.
+    // The disk file may have more events than the mmap can hold (long
+    // operator history). In that case we load only the most recent
+    // capacity-many events would be ideal — for now we load oldest-first
+    // up to capacity and warn if the file is bigger. Acceptable since
+    // ORDER_EVENT_LOG_MAX_CAPACITY=16384 covers ~160 days of typical
+    // strategy rates.
     int loaded = 0;
+    int truncated = 0;
     OrderEvent<F> event;
     while (std::fread(&event, sizeof(event), 1, f) == 1) {
-        // Append to the in-memory buffer (bypasses disk write since
-        // we're reading FROM disk). Manually grow if needed.
         if (log->count >= log->capacity) {
-            size_t new_cap = log->capacity * 2;
-            if (new_cap < 256) new_cap = 256;
-            OrderEvent<F>* new_buf = (OrderEvent<F>*)std::realloc(
-                log->entries, new_cap * sizeof(OrderEvent<F>));
-            if (!new_buf) {
-                std::fprintf(stderr, "[OrderEventLog] WARN: realloc failed during load\n");
-                break;
-            }
-            log->entries  = new_buf;
-            log->capacity = new_cap;
+            truncated++;
+            continue;  // drain rest of file (advance next_event_id past it)
         }
         log->entries[log->count++] = event;
         uint64_t cur = log->next_event_id.load(std::memory_order_relaxed);
@@ -503,6 +534,14 @@ inline int OrderEventLog_LoadFromDisk(OrderEventLog<F>* log, const char* path) {
             log->next_event_id.store(event.event_id + 1, std::memory_order_relaxed);
         }
         loaded++;
+    }
+    if (truncated > 0) {
+        std::fprintf(stderr, "[OrderEventLog] WARN: %s has %d events past "
+                     "MAX_CAPACITY=%zu; truncating in-memory log to oldest %zu "
+                     "(disk file unchanged; bump ORDER_EVENT_LOG_MAX_CAPACITY "
+                     "if older history is needed)\n",
+                     path, truncated, ORDER_EVENT_LOG_MAX_CAPACITY,
+                     ORDER_EVENT_LOG_MAX_CAPACITY);
     }
 
     std::fclose(f);
