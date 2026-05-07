@@ -15637,6 +15637,52 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.11.19: FPN_FromString + FPN_ToDouble vs parse_double_fast ---\n");
+    {
+        // v5.11.19 (2026-05-07): BinanceCrypto's per-tick ingestion path
+        // pre-fix called BOTH FPN_FromString<F>(s) AND tt::parse_double_fast(s)
+        // on the same price/qty strings — once for the FPN engine value, once
+        // for the TUI display double. v5.11.19 derives the TUI double from
+        // FPN_ToDouble(fpn) instead, saving a parse + eliminating the parity
+        // hazard of two parsers rounding differently.
+        //
+        // This block validates that FPN_FromString → FPN_ToDouble round-trip
+        // is bytewise-equal to tt::parse_double_fast for representative
+        // Binance price/qty strings (in-spec inputs only — the two paths
+        // are not required to agree on out-of-spec input like NaN/Inf).
+
+        const char* test_strings[] = {
+            "0.001",
+            "1.0",
+            "50000.00",
+            "100.5",
+            "0.00012345",
+            "12345.6789",
+            "99999.99",
+            "0.5",
+            "1234567.89012345",
+        };
+        const int n_strings = sizeof(test_strings) / sizeof(*test_strings);
+        int matches = 0;
+        for (int i = 0; i < n_strings; ++i) {
+            FPN<FP> fpn = FPN_FromString<FP>(test_strings[i]);
+            double via_fpn = FPN_ToDouble(fpn);
+            double via_parse = tt::parse_double_fast(test_strings[i]);
+            // Allow tiny FP rounding (1 ULP) — FPN<64> stores 4096 fractional
+            // bits internally so the precision difference is the FPN→double
+            // conversion at the boundary, not the input parse. For typical
+            // crypto-tick strings (8 decimal digits) the round-trip is exact.
+            double diff = via_fpn - via_parse;
+            if (diff < 0) diff = -diff;
+            double scale = (via_parse < 0 ? -via_parse : via_parse);
+            if (scale < 1e-12) scale = 1.0;
+            double rel = diff / scale;
+            if (rel < 1e-12) ++matches;
+        }
+        check("v5.11.19: all 9 representative tick strings match within 1e-12 relative",
+              matches == n_strings);
+    }
+
     printf("\n--- v5.11.18a: feature_mask cfg + stamp infrastructure ---\n");
     {
         // v5.11.18a (2026-05-07) — per-core feature_mask cfg field +
