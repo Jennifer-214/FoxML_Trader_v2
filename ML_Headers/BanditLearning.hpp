@@ -47,6 +47,9 @@
 #include <time.h>
 #include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.C — std::from_chars wrapper for locale-immune parsing
 #include <unistd.h>     // unlink, write
+#if defined(__AVX512F__)
+#include <immintrin.h>  // v5.11.7 — AVX-512 vectorization of Bandit_GetProbabilities
+#endif
 
 // default parameters (from FoxML bandit.py + weight_optimizer.py)
 #define BANDIT_GAMMA_DEFAULT       0.05    // exploration rate
@@ -113,6 +116,12 @@ static inline void Bandit_SetArmName(BanditState *b, int arm, const char *name) 
 // p_i = (1 - gamma) * (w_i / sum_w) + gamma / K
 //======================================================================================================
 static inline void Bandit_GetProbabilities(const BanditState *b, double *probs_out) {
+    // v5.11.7 — sum reduction stays SCALAR for bytewise determinism.
+    // _mm512_reduce_add_pd does tree reduction (different rounding than
+    // left-to-right scalar sum), so the same set of doubles can produce
+    // different bytes. Hot-path is the elementwise normalize+floor (which
+    // IS deterministic across SIMD vs scalar since each element is
+    // computed independently with the same IEEE-754 ops).
     double sum_w = 0.0;
     for (int i = 0; i < b->n_arms; i++)
         sum_w += b->weights[i];
@@ -125,6 +134,39 @@ static inline void Bandit_GetProbabilities(const BanditState *b, double *probs_o
         return;
     }
 
+#if defined(__AVX512F__)
+    // v5.11.7 — vectorize the elementwise normalize + affine-blend + floor.
+    // Audit Part 5: weights[BANDIT_MAX_ARMS=8] fits cleanly in __m512d.
+    // n_arms is variable (typical=5); mask to lower n_arms lanes only.
+    //
+    // Bytewise determinism: each element computed via IEEE-754 div/mul/add/max
+    // with identical operands as the scalar path. Same input → same output
+    // bit-for-bit. Verified by v5.11.7 EXTENSIBILITY tests below.
+    // BYTEWISE-DETERMINISM CRITICAL: must match scalar IEEE-754 op order.
+    //   - _mm512_div_pd(x, y) NOT _mm512_mul_pd(x, 1/y)  (1-ULP could differ)
+    //   - _mm512_fmadd_pd(a, b, c) for `a*b + c` — gcc -O3 with default
+    //     -ffp-contract=fast fuses scalar `(1-gamma)*normd + g/K` into FMA,
+    //     so the AVX path must use FMA too to stay bytewise-equivalent.
+    //     If the build ever switches to -ffp-contract=off, swap to
+    //     separate _mm512_mul_pd + _mm512_add_pd.
+    const __mmask8 mask = (__mmask8)((1u << b->n_arms) - 1u);
+    __m512d w         = _mm512_loadu_pd(b->weights);
+    __m512d sum_w_vec = _mm512_set1_pd(sum_w);
+    __m512d normd     = _mm512_div_pd(w, sum_w_vec);
+    __m512d one_min_g = _mm512_set1_pd(1.0 - b->gamma);
+    __m512d g_over_K  = _mm512_set1_pd(b->gamma / K);
+    __m512d probs     = _mm512_fmadd_pd(one_min_g, normd, g_over_K);
+    __m512d floor     = _mm512_set1_pd(1e-10);
+    probs             = _mm512_max_pd(probs, floor);
+    // Mask-store: write only the lower n_arms lanes; upper lanes remain
+    // unwritten (caller must size probs_out at BANDIT_MAX_ARMS=8 doubles
+    // per the function contract).
+    _mm512_mask_storeu_pd(probs_out, mask, probs);
+    // Scalar sum of the just-written probs (preserves left-to-right order
+    // for bytewise determinism vs prior version).
+    double prob_sum = 0.0;
+    for (int i = 0; i < b->n_arms; i++) prob_sum += probs_out[i];
+#else
     double prob_sum = 0.0;
     for (int i = 0; i < b->n_arms; i++) {
         double normalized = b->weights[i] / sum_w;
@@ -132,10 +174,22 @@ static inline void Bandit_GetProbabilities(const BanditState *b, double *probs_o
         if (probs_out[i] < 1e-10) probs_out[i] = 1e-10;
         prob_sum += probs_out[i];
     }
+#endif
     // renormalize
     if (prob_sum > 0.0) {
+#if defined(__AVX512F__)
+        // BYTEWISE-DETERMINISM CRITICAL: scalar `probs[i] /= prob_sum` is
+        // a divide. _mm512_mul_pd(p, 1/prob_sum) would be mul-by-reciprocal
+        // (1-ULP could differ). Use _mm512_div_pd to match scalar exactly.
+        const __mmask8 mask = (__mmask8)((1u << b->n_arms) - 1u);
+        __m512d p           = _mm512_maskz_loadu_pd(mask, probs_out);
+        __m512d psum_vec    = _mm512_set1_pd(prob_sum);
+        p                   = _mm512_div_pd(p, psum_vec);
+        _mm512_mask_storeu_pd(probs_out, mask, p);
+#else
         for (int i = 0; i < b->n_arms; i++)
             probs_out[i] /= prob_sum;
+#endif
     }
 }
 

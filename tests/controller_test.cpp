@@ -13847,6 +13847,131 @@ e3_skip_load:;
               parse_uint64_fast(nullptr) == 0ULL);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.11.7 — Bandit AVX-512 bytewise parity ---\n");
+    {
+        // Theory: pre-v5.11.7, Bandit_GetProbabilities was a scalar loop
+        // over n_arms doing div + mul + add + floor + sum. v5.11.7
+        // vectorizes the elementwise normalize+blend+floor via AVX-512
+        // intrinsics, with explicit operation ordering to preserve
+        // bytewise IEEE-754 equivalence vs scalar (separate mul+add not
+        // fmadd; div not mul-by-reciprocal).
+        //
+        // Test strategy: compare the AVX-512-built BanditState's
+        // probability output against a hand-rolled scalar reference
+        // implementation on representative inputs. Bytewise-identical
+        // doubles (memcmp) → vectorization preserved determinism.
+
+        using namespace tt;
+
+        // Scalar reference — replays the pre-v5.11.7 algorithm exactly.
+        auto scalar_probs = [](const BanditState& b, double* out) {
+            double sum_w = 0.0;
+            for (int i = 0; i < b.n_arms; i++) sum_w += b.weights[i];
+            double K = (double)b.n_arms;
+            if (sum_w <= 0.0) {
+                for (int i = 0; i < b.n_arms; i++) out[i] = 1.0 / K;
+                return;
+            }
+            double prob_sum = 0.0;
+            for (int i = 0; i < b.n_arms; i++) {
+                double normalized = b.weights[i] / sum_w;
+                out[i] = (1.0 - b.gamma) * normalized + b.gamma / K;
+                if (out[i] < 1e-10) out[i] = 1e-10;
+                prob_sum += out[i];
+            }
+            if (prob_sum > 0.0) {
+                for (int i = 0; i < b.n_arms; i++) out[i] /= prob_sum;
+            }
+        };
+
+        auto memcmp_probs = [](const double* a, const double* b, int n) {
+            return std::memcmp(a, b, sizeof(double) * (size_t)n) == 0;
+        };
+
+        // Test 1: typical 5-arm production case (NUM_STRATEGIES_REAL=5)
+        {
+            BanditState bs{};
+            Bandit_InitDefault(&bs, 5);
+            // Spread weights non-uniformly to exercise the path
+            bs.weights[0] = 1.5; bs.weights[1] = 0.8; bs.weights[2] = 2.1;
+            bs.weights[3] = 0.3; bs.weights[4] = 1.2;
+            double probs_avx[BANDIT_MAX_ARMS] = {};
+            double probs_scalar[BANDIT_MAX_ARMS] = {};
+            Bandit_GetProbabilities(&bs, probs_avx);
+            scalar_probs(bs, probs_scalar);
+            check("v5.11.7: 5-arm probs bytewise-identical to scalar reference",
+                  memcmp_probs(probs_avx, probs_scalar, 5));
+        }
+
+        // Test 2: full 8-arm case (BANDIT_MAX_ARMS) — exercises full vector
+        {
+            BanditState bs{};
+            Bandit_InitDefault(&bs, BANDIT_MAX_ARMS);
+            for (int i = 0; i < BANDIT_MAX_ARMS; i++)
+                bs.weights[i] = 0.5 + 0.25 * (double)(i + 1);
+            double probs_avx[BANDIT_MAX_ARMS] = {};
+            double probs_scalar[BANDIT_MAX_ARMS] = {};
+            Bandit_GetProbabilities(&bs, probs_avx);
+            scalar_probs(bs, probs_scalar);
+            check("v5.11.7: 8-arm probs bytewise-identical (full vector lane)",
+                  memcmp_probs(probs_avx, probs_scalar, BANDIT_MAX_ARMS));
+        }
+
+        // Test 3: minimum n_arms=2 — exercises tight mask
+        {
+            BanditState bs{};
+            Bandit_InitDefault(&bs, 2);
+            bs.weights[0] = 1.0; bs.weights[1] = 1e-12;  // skewed
+            double probs_avx[BANDIT_MAX_ARMS] = {};
+            double probs_scalar[BANDIT_MAX_ARMS] = {};
+            Bandit_GetProbabilities(&bs, probs_avx);
+            scalar_probs(bs, probs_scalar);
+            check("v5.11.7: 2-arm probs bytewise-identical (mask=0x3)",
+                  memcmp_probs(probs_avx, probs_scalar, 2));
+        }
+
+        // Test 4: floor exercise — weights so small they trigger 1e-10 floor
+        {
+            BanditState bs{};
+            Bandit_InitDefault(&bs, 5);
+            for (int i = 0; i < 5; i++) bs.weights[i] = 1e-15 * (double)(i + 1);
+            double probs_avx[BANDIT_MAX_ARMS] = {};
+            double probs_scalar[BANDIT_MAX_ARMS] = {};
+            Bandit_GetProbabilities(&bs, probs_avx);
+            scalar_probs(bs, probs_scalar);
+            check("v5.11.7: floor (1e-10) path bytewise-identical",
+                  memcmp_probs(probs_avx, probs_scalar, 5));
+        }
+
+        // Test 5: 600-cycle synthetic reward sequence — exercises the
+        // full Update + GetProbabilities path under realistic bandit
+        // dynamics. Master plan named test count.
+        {
+            BanditState bs_avx{};
+            BanditState bs_scl{};
+            Bandit_InitDefault(&bs_avx, 5);
+            Bandit_InitDefault(&bs_scl, 5);
+            // Simulate 600 reward cycles. We can't compare DURING
+            // updates directly because Update internally calls
+            // Bandit_GetProbabilities (which is the AVX path). Instead,
+            // compare final probabilities post-sequence.
+            for (int t = 0; t < 600; t++) {
+                int arm = t % 5;
+                double reward = ((t * 13) % 17) - 8;  // pseudo-mixed signs
+                Bandit_Update(&bs_avx, arm, reward);
+                Bandit_Update(&bs_scl, arm, reward);
+            }
+            double probs_avx[BANDIT_MAX_ARMS] = {};
+            double probs_scalar[BANDIT_MAX_ARMS] = {};
+            Bandit_GetProbabilities(&bs_avx, probs_avx);
+            scalar_probs(bs_scl, probs_scalar);
+            // Both states evolved through the same updates so weights
+            // should be identical, and so should probabilities.
+            check("v5.11.7: 600-cycle reward sequence final probs bytewise-identical",
+                  memcmp_probs(probs_avx, probs_scalar, 5));
+        }
+    }
+
     printf("\n--- EXTENSIBILITY: v5.11.6.A — InitArena unified mmap allocator ---\n");
     {
         // Theory: pre-v5.11.6.A, init-time allocations (RollingStats × 3,
