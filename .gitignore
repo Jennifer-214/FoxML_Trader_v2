@@ -55,3 +55,6 @@ baseline_run/
 compile_commands.json
 .cache/
 .clangd/
+
+# audit documents
+LATENCY_OPTIMIZATION_AUDIT.md
