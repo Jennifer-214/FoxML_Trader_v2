@@ -50,6 +50,7 @@
 #include "TradeEvent.hpp"
 
 #include <cstdint>
+#include <type_traits>  // v5.11.0.E — static_assert(!std::is_polymorphic<...>)
 
 namespace tt {
 
@@ -140,6 +141,14 @@ struct alignas(64) ExecutionCore {
     // enable flag from the controller to start sampling.
     CoreLatencyStats latency_stats;
 };
+
+// v5.11.0.E — Part 3 architectural invariant (LATENCY_OPTIMIZATION_AUDIT.md
+// §3.1 Zero-VTable Architecture). ExecutionCore must remain non-polymorphic
+// — virtual functions introduce vtable lookups + indirect jumps that bypass
+// the CPU branch predictor, causing pipeline stalls on hot path. Future PR
+// adding a virtual function fails at compile.
+static_assert(!std::is_polymorphic<ExecutionCore<64>>::value,
+              "ExecutionCore must remain non-polymorphic — Part 3 invariant");
 
 // Initialize an execution core. Defaults: permission=0 (controller must explicitly
 // grant), active=0, entry_price=0, parameter slot installed with safe defaults

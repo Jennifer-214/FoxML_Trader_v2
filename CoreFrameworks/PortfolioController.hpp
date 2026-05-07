@@ -35,6 +35,7 @@
 #include "../ML_Headers/WelfordStats.hpp"
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
 #include <cmath>                               // v5.9.0: std::isnan/isinf for prediction validation
+#include <type_traits>                         // v5.11.0.E — static_assert(!std::is_polymorphic<...>)
 #include "../Strategies/MeanReversion.hpp"
 #include "../Strategies/Momentum.hpp"
 #include "../Strategies/SimpleDip.hpp"
@@ -266,6 +267,13 @@ template <unsigned F> struct PortfolioController {
   FPN<F> total_maker_fees;
   FPN<F> total_taker_fees;
 };
+
+// v5.11.0.E — Part 3 architectural invariant (LATENCY_OPTIMIZATION_AUDIT.md
+// §3.1 Zero-VTable Architecture). PortfolioController is the legacy single-
+// threaded controller (still used by tests + benchmark); also non-polymorphic.
+static_assert(!std::is_polymorphic<PortfolioController<64>>::value,
+              "PortfolioController must remain non-polymorphic — Part 3 invariant");
+
 //======================================================================================================
 // [INIT]
 //======================================================================================================
