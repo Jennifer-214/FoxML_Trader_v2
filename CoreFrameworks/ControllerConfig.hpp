@@ -427,6 +427,16 @@ template <unsigned F> struct ControllerConfig {
   // Auto-clears when now_us crosses the deadline, on the next slow-path
   // cycle to detect the expiry.
   int recovery_delay_secs;                   // recovery refusal window (default 30)
+  // v5.12.1.B.3 — hot-path parameter freshness gate. Slow-path stalls
+  // (GC pause, OS scheduler hiccup, blocking I/O on health log) leave the
+  // hot path executing on stale GateParameters. ConfidenceScorer freshness
+  // damping is a soft signal; this is the HARD gate. Hot-path checks
+  // (tick.sequence - publish_tick) > param_max_age_ticks → BUY_BLOCKED
+  // via branchless mask. SHALT_PARAM_STALE on strategy_halt_reason.
+  // Disabled by default; flip to 1 BEFORE live deployment after
+  // measuring slow-path p99 latency on operator hardware.
+  int param_staleness_gate_enabled;          // 0=disabled (default), 1=enabled
+  uint64_t param_max_age_ticks;              // gap threshold (default 1000 = 10x default poll_interval=100)
   // vol-scaled position sizing
   int vol_sizing_enabled; // 0=disabled, 1=scale qty inversely with volatility
   FPN<F> vol_scale_min; // min scale factor (e.g. 0.25 = never less than 25% of
@@ -1206,6 +1216,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // up to exchange truth. After window expires, flatten_pending +
   // recovery_until_us auto-clear; trading resumes (assuming WS healthy).
   cfg.recovery_delay_secs = 30;
+  // v5.12.1.B.3 — disabled by default; flip after measuring slow-path p99.
+  cfg.param_staleness_gate_enabled = 0;
+  cfg.param_max_age_ticks = 1000;
   for (int i = 0; i < 16; ++i) cfg.core_model_path[i][0] = '\0';    // empty = shared
   for (int i = 0; i < 16; ++i) cfg.core_model_dir[i][0] = '\0';     // empty = use model_path or shared
   // v4.0 per-core overrides — zero in every field = "inherit global".
@@ -1434,6 +1447,13 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(ws_dead_time_flatten_threshold_secs)
     // v5.12.1.A.3 — post-flatten recovery refusal window
     CFG_PARSE_INT(recovery_delay_secs)
+    // v5.12.1.B.3 — hot-path parameter freshness gate
+    CFG_PARSE_INT(param_staleness_gate_enabled)
+    // param_max_age_ticks is uint64_t; can't use CFG_PARSE_INT (atoi returns int).
+    if (strcmp(key, "param_max_age_ticks") == 0) {
+      cfg.param_max_age_ticks = (uint64_t)atoll(val);
+      continue;
+    }
     CFG_PARSE_PCT(max_exposure_pct)
     CFG_PARSE_PCT(min_hold_gain_pct)
     CFG_PARSE_PCT(regime_r2_threshold)

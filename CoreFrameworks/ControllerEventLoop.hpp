@@ -2176,6 +2176,17 @@ inline void EventLoop_RebuildOneCore(
         // v5.12.1.B (clock hoist): if caller passed now_us != 0, reuse
         // it. Saves ~50ns/cycle in flatten-recovery window. Default 0
         // (tests, legacy paths) → fall back to internal clock read.
+        // v5.12.1.B.3 — staleness-gate post-pass. Fills GateParameters
+        // fields from cfg uniformly across all strategies. Branchless: flag
+        // bit is OR'd in; max_age value is unconditional. Hot path's
+        // branchless mask check uses these.
+        if (config->param_staleness_gate_enabled) {
+            state->cores[slot].pending_params.flags
+                |= GATE_FLAG_STALENESS_ENABLED;
+        }
+        state->cores[slot].pending_params.param_max_age_ticks
+            = config->param_max_age_ticks;
+
         {
             uint64_t recovery_until = state->oms->recovery_until_us.load(
                 std::memory_order_acquire);

@@ -125,6 +125,11 @@ struct alignas(64) ExecutionCore {
     // on the cache fields themselves — they're only read by this core.
     uint64_t cached_seq;
     GateParameters<F> cached_params;
+    // v5.12.1.B.3 — paired with cached_params; refreshed every time
+    // ParameterSlot_Read fires (cached_seq miss). Used by hot-path
+    // staleness gate: gap = tick.sequence - cached_publish_tick.
+    // Single-writer (this core's hot path); no atomic needed.
+    uint64_t cached_publish_tick;
 
     // --- Identity ---
     uint16_t core_id;
@@ -214,6 +219,8 @@ static inline void ExecutionCore_Init(
     // any controller writes that landed between Init and the first tick).
     core->cached_params = initial;
     core->cached_seq    = (uint64_t)-1;
+    // v5.12.1.B.3 — warmup sentinel; hot-path treats 0 as "no stamp" → no gate fires.
+    core->cached_publish_tick = 0;
     SPSCRing_Init(&core->event_ring);
     CoreLatencyStats_Init(&core->latency_stats);
     core->ring_push_failures = 0;  // v5.11.0.1: hot-path failure counter
@@ -309,7 +316,10 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
         // Cache miss or producer mid-write. Run the full retry-protected
         // read into the cache. The miss path is rare (one per slow-path
         // parameter push, ~once per ~256 ticks).
-        ParameterSlot_Read(&core->param_slot, &core->cached_params);
+        // v5.12.1.B.3 — refresh cached_publish_tick alongside cached_params
+        // inside the same seqlock retry bracket (paired by ParameterSlot_Read).
+        ParameterSlot_Read(&core->param_slot, &core->cached_params,
+                           &core->cached_publish_tick);
         core->cached_seq = core->param_slot.seq.load(std::memory_order_acquire) & ~1ULL;
     }
 
@@ -356,6 +366,34 @@ static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>
     uint64_t blocked       = (uint64_t)((flags & GATE_FLAG_BUY_BLOCKED) != 0);
     uint64_t blocked_mask  = -blocked;
     uint64_t bg_fires      = (price_ok & volume_check) & ~blocked_mask;
+
+    // === v5.12.1.B.3 — branchless staleness gate ===
+    // Predicate is true when ALL hold:
+    //   - GATE_FLAG_STALENESS_ENABLED is set (cfg.param_staleness_gate_enabled=1
+    //     was active when slow-path published)
+    //   - cached_publish_tick != 0 (slow-path has published at least once)
+    //   - tick.sequence > cached_publish_tick (catches counter-wrap defense;
+    //     the very rare case where slow-path observed ticks_produced ahead
+    //     of what hot-path has currently consumed → treat as gap=0)
+    //   - (tick.sequence - cached_publish_tick) > cached_params.param_max_age_ticks
+    //
+    // When true, masks bg_fires off (entries blocked) and OR's
+    // SHALT_PARAM_STALE into the staleness_signal field — surfaces in the
+    // GUI strategy_halt_reason channel via the slow-path observability tap.
+    //
+    // Cost: 5 mask ops + 1 sub + 3 unsigned compares = ~5-7ns extra.
+    // Default (cfg.param_staleness_gate_enabled=0 → flag bit 0): all three
+    // predicates compute but stale_mask is 0 → bg_fires unchanged.
+    uint64_t stale_enabled  = (uint64_t)((flags & GATE_FLAG_STALENESS_ENABLED) != 0);
+    uint64_t has_stamp      = (uint64_t)(core->cached_publish_tick != 0);
+    uint64_t tick_ge_stamp  = (uint64_t)(tick.sequence >= core->cached_publish_tick);
+    // Branchless gap clamp: subtract unconditionally; mask to 0 if wrap.
+    uint64_t param_gap      = (tick.sequence - core->cached_publish_tick)
+                              & (uint64_t)(-(int64_t)tick_ge_stamp);
+    uint64_t over_age       = (uint64_t)(param_gap > core->cached_params.param_max_age_ticks);
+    uint64_t stale          = stale_enabled & has_stamp & over_age;
+    uint64_t stale_mask     = (uint64_t)(-(int64_t)stale);
+    bg_fires &= ~stale_mask;
 
     // === Inlined SG_Evaluate ===
     // Leg A: always evaluated (single-position case + when paired). Leg B:

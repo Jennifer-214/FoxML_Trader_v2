@@ -258,7 +258,8 @@ static_assert(sizeof(REGIME_STRATEGY_TABLE) / sizeof(*REGIME_STRATEGY_TABLE) == 
     X(MOM_NO_FLOW,      "mom:no-flow",    "momentum_min_buy_delta_recent unmet") \
     X(MOM_LOW_R2,       "mom:low-r2",     "momentum_min_r2 unmet") \
     X(MOM_LAST_LOST,    "mom:last-lost",  "momentum_require_last_win + last exit was loss") \
-    X(RECOVERY,         "recovery",       "post-flatten recovery window — new entries blocked (v5.12.1.A.3)")
+    X(RECOVERY,         "recovery",       "post-flatten recovery window — new entries blocked (v5.12.1.A.3)") \
+    X(PARAM_STALE,      "param-stale",    "slow-path params older than max_age_ticks (v5.12.1.B.3)")
 
 // Auto-generated SHALT_<id> constants. Underlying type uint8_t for
 // compact storage in TradeEvent / per-core snapshot fields.

@@ -69,6 +69,14 @@ constexpr uint8_t GATE_FLAG_BUY_BLOCKED      = 0x20;
 // out, hot path costs ~1ns extra (the unused FPN comparisons pipeline
 // into otherwise-idle CPU slots).
 constexpr uint8_t GATE_FLAG_PAIR_ACTIVE      = 0x40;
+// v5.12.1.B.3 (2026-05-08): hot-path staleness gate. When set, the
+// execution core compares (tick.sequence - publish_tick) against
+// GateParameters.param_max_age_ticks; if the gap exceeds the threshold,
+// bg_fires is masked off and SHALT_PARAM_STALE is surfaced via
+// strategy_halt_reason. publish_tick = 0 (warmup) skips the check
+// regardless of this flag. Slow-path sets this flag based on
+// cfg.param_staleness_gate_enabled in EventLoop_RebuildOneCore.
+constexpr uint8_t GATE_FLAG_STALENESS_ENABLED = 0x80;
 
 // Strategy IDs come from Strategies/StrategyInterface.hpp (single source of
 // truth shared with the legacy strategies). STRATEGY_NONE = 0xFF means
@@ -130,7 +138,14 @@ struct alignas(64) GateParameters {
     // --- Identification ---
     uint8_t strategy_id;             // STRATEGY_* constant
     uint8_t flags;                   // GATE_FLAG_* bitmask
-    uint8_t _pad[6];                 // explicit padding for layout stability
+    uint8_t _pad[6];                 // pad to 8-byte alignment for the field below
+
+    // v5.12.1.B.3 — hot-path staleness gate threshold. When
+    // GATE_FLAG_STALENESS_ENABLED is set on flags, the execution core checks
+    // (tick.sequence - cached_publish_tick) > param_max_age_ticks and masks
+    // off bg_fires when stale. Filled by EventLoop_RebuildOneCore from
+    // cfg.param_max_age_ticks. Branchless mask compute on hot path; ~3-5ns.
+    uint64_t param_max_age_ticks;
 };
 
 static_assert(std::is_trivially_copyable<GateParameters<64>>::value, "GateParameters<64> must be trivially copyable");
