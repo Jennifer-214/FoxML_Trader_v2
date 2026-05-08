@@ -128,7 +128,12 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
             }
 
             // Decision context — only meaningful when model loaded.
-            if (pc.ml_model_loaded) {
+            // v5.11.62 — also count ensemble as "loaded" so the prediction
+            // / threshold / confidence row shows for ensemble cores even
+            // when single-zoo buy_model is empty.
+            bool any_model_active = pc.ml_model_loaded ||
+                (pc.ensemble_active && pc.ensemble_n_horizons > 0);
+            if (any_model_active) {
                 ImGui::SameLine(0, 14);
                 ImGui::TextColored(FoxmlColors::sand, "pred:");
                 ImGui::SameLine();

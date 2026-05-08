@@ -767,15 +767,24 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     ImGui::SameLine();
                     ImGui::Text("%.3f%%", pc->diag_tp_pct_floor * 100.0);
                 }
-                // ML extras
+                // ML extras — v5.11.62 ensemble awareness: a core can have
+                // ml_model_loaded=0 (no single-zoo) but still be running
+                // predictions via ensemble_active=1 (multi-horizon zoo).
+                // Show the ensemble state in that case so the panel doesn't
+                // misleadingly say "model: none" when 4 horizons are active.
                 if (pc->is_ml) {
                     ImGui::TextColored(FoxmlColors::sand, "  ML:");
                     ImGui::SameLine();
                     ImGui::TextColored(FoxmlColors::comment, "model:");
                     ImGui::SameLine();
-                    ImGui::TextColored(pc->ml_model_loaded
-                                       ? FoxmlColors::green : FoxmlColors::yellow,
-                        "%s", pc->ml_model_loaded ? "loaded" : "none");
+                    if (pc->ml_model_loaded) {
+                        ImGui::TextColored(FoxmlColors::green, "loaded");
+                    } else if (pc->ensemble_active && pc->ensemble_n_horizons > 0) {
+                        ImGui::TextColored(FoxmlColors::green,
+                            "ensemble (%d)", (int)pc->ensemble_n_horizons);
+                    } else {
+                        ImGui::TextColored(FoxmlColors::yellow, "none");
+                    }
                     ImGui::SameLine(0, 10);
                     ImGui::TextColored(FoxmlColors::comment, "pred:");
                     ImGui::SameLine();
@@ -1694,6 +1703,19 @@ static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
     int any_active = s->ml.cost_gate_enabled | s->ml.foxml_vol_scaling_enabled |
                      s->ml.confidence_enabled | s->ml.bandit_enabled |
                      s->ml.ml_model_loaded | s->ml.regime_model_loaded;
+    // v5.11.62 — sharded ensemble: per-core handles populated even when
+    // centralized snap isn't. Check per_core too so the panel doesn't
+    // hide itself when only ensemble is active.
+    if (!any_active && s->sharded_mode_active) {
+        for (int i = 0; i < s->per_core_count && i < 16; ++i) {
+            if (s->per_core[i].ml_model_loaded ||
+                (s->per_core[i].ensemble_active &&
+                 s->per_core[i].ensemble_n_horizons > 0)) {
+                any_active = 1;
+                break;
+            }
+        }
+    }
     if (!any_active) return; // no ML features enabled — skip entirely
 
     ImGui::Begin("ML Intelligence");
@@ -1812,8 +1834,13 @@ static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
                     ImGui::TableNextColumn();
                     ImGui::Text("%d", i);
                     ImGui::TableNextColumn();
+                    // v5.11.62 — ensemble awareness
                     if (s->per_core[i].ml_model_loaded) {
                         ImGui::TextColored(FoxmlColors::green, "loaded");
+                    } else if (s->per_core[i].ensemble_active &&
+                               s->per_core[i].ensemble_n_horizons > 0) {
+                        ImGui::TextColored(FoxmlColors::green,
+                            "ensemble(%d)", (int)s->per_core[i].ensemble_n_horizons);
                     } else {
                         ImGui::TextColored(FoxmlColors::comment, "none");
                     }

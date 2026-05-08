@@ -208,7 +208,20 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
     ImGui::SameLine(); ImGui::Checkbox("Sessions", &settings->show_session_div);
     ImGui::SameLine(); ImGui::Checkbox("H/L", &settings->show_session_hl);
     ImGui::SameLine(); ImGui::Checkbox("Tag", &settings->show_price_tag);
-    if (snap->ml.ml_model_loaded) {
+    // v5.11.62 — show ML overlay checkbox if ANY core has a model active,
+    // either single-zoo (centralized snap) or ensemble (per-core).
+    bool any_ml_active = snap->ml.ml_model_loaded != 0;
+    if (!any_ml_active && snap->sharded_mode_active) {
+        for (int i = 0; i < snap->per_core_count && i < 16; ++i) {
+            if (snap->per_core[i].ml_model_loaded ||
+                (snap->per_core[i].ensemble_active &&
+                 snap->per_core[i].ensemble_n_horizons > 0)) {
+                any_ml_active = true;
+                break;
+            }
+        }
+    }
+    if (any_ml_active) {
         ImGui::SameLine(); ImGui::Checkbox("ML", &settings->show_ml_overlay);
     }
 
@@ -689,17 +702,36 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
             }
             if (already_drawn) continue;
 
-            // find highest di in this entry group for fade
+            // v5.11.64 — emit #core.leg notation so chart labels match the
+            // Positions table format. Pre-fix: "#0,1,2,3 $80141" — slot
+            // indices, opaque. Post-fix: "#0.A,0.B,1.A,1.B $80141" — core
+            // and leg explicit, mirroring the Positions panel.
             int max_di = 0;
-            char group_ids[32] = {};
+            char group_ids[96] = {};
             int group_len = 0;
+            int partials = snap->partial_exit_enabled ? 1 : 0;
             for (int j = 0; j < 16; j++) {
                 if (snap->positions[j].idx < 0) continue;
                 if (fabs(snap->positions[j].entry - ps->entry) < 0.01) {
-                    if (group_len > 0) { group_ids[group_len++] = ','; }
+                    if (group_len > 0 && group_len < (int)sizeof(group_ids) - 1) {
+                        group_ids[group_len++] = ',';
+                    }
+                    int slot = snap->positions[j].idx;
+                    int row_core = partials ? (slot >> 1) : slot;
+                    int row_leg  = partials ? (slot & 1)  : 0;
+                    int wrote = 0;
+                    if (partials) {
+                        wrote = snprintf(group_ids + group_len,
+                                         sizeof(group_ids) - group_len,
+                                         "%d.%c", row_core,
+                                         row_leg == 0 ? 'A' : 'B');
+                    } else {
+                        wrote = snprintf(group_ids + group_len,
+                                         sizeof(group_ids) - group_len,
+                                         "%d", row_core);
+                    }
+                    if (wrote > 0) group_len += wrote;
                     int dj = display_idx[j];
-                    if (dj < 10) group_ids[group_len++] = '0' + dj;
-                    else { group_ids[group_len++] = '1'; group_ids[group_len++] = '0' + (dj - 10); }
                     if (dj > max_di) max_di = dj;
                 }
             }
@@ -777,8 +809,20 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                     : ImVec4(FoxmlColors::red.x, FoxmlColors::red.y,
                              FoxmlColors::red.z, age_alpha);
                 // show P&L at this exit level
+                // v5.11.64 — #core.leg notation matches Positions table.
                 double pnl = price - ps->entry;
-                snprintf(cl.text, 32, "#%d %s %+.0f", di, is_tp ? "TP" : "SL", pnl);
+                int slot = ps->idx;
+                int partials = snap->partial_exit_enabled ? 1 : 0;
+                int lbl_core = partials ? (slot >> 1) : slot;
+                int lbl_leg  = partials ? (slot & 1)  : 0;
+                if (partials) {
+                    snprintf(cl.text, 32, "#%d.%c %s %+.0f",
+                             lbl_core, lbl_leg == 0 ? 'A' : 'B',
+                             is_tp ? "TP" : "SL", pnl);
+                } else {
+                    snprintf(cl.text, 32, "#%d %s %+.0f", lbl_core,
+                             is_tp ? "TP" : "SL", pnl);
+                }
             }
         }
 
@@ -858,8 +902,19 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
                                                              : snap->positions[drag.slot].sl)) < 0.01) {
                         clabels[li].price = drag.price;
                         clabels[li].y_px = dl_l.y;
-                        snprintf(clabels[li].text, 32, "#%d %s %+.0f",
-                                 display_idx[drag.slot], drag.is_tp ? "TP" : "SL", pnl);
+                        // v5.11.64 — #core.leg matches Positions table.
+                        int slot = drag.slot;
+                        int partials = snap->partial_exit_enabled ? 1 : 0;
+                        int lbl_core = partials ? (slot >> 1) : slot;
+                        int lbl_leg  = partials ? (slot & 1)  : 0;
+                        if (partials) {
+                            snprintf(clabels[li].text, 32, "#%d.%c %s %+.0f",
+                                     lbl_core, lbl_leg == 0 ? 'A' : 'B',
+                                     drag.is_tp ? "TP" : "SL", pnl);
+                        } else {
+                            snprintf(clabels[li].text, 32, "#%d %s %+.0f",
+                                     lbl_core, drag.is_tp ? "TP" : "SL", pnl);
+                        }
                     }
                 }
 
