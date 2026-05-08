@@ -335,7 +335,9 @@ int main(int argc, char *argv[]) {
         GUI_Panel_RunControl(&run_control, &data_panel);
         GUI_Panel_Results(&run_control.results);
         GUI_Panel_Comparison(&comparison, &run_control.results);
-        GUI_Panel_PastRuns(&past_runs);
+        // v5.11.57 — pass cfg for Verify Stamp HMAC verification (uses
+        // cfg.auto_stamp_secret if set, falls back to devmode otherwise).
+        GUI_Panel_PastRuns(&past_runs, &run_control.results.config_used);
         GUI_Panel_Optimizer(&optimizer, &data_panel);
         GUI_Panel_Training(&training, &run_control, &data_panel);
         GUI_Panel_LogViewer(&log_viewer);

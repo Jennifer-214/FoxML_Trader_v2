@@ -1005,7 +1005,12 @@ static inline const char* PastRun_MetricLabel(int expected_num_classes) {
     return "Acc (bin)";                                  // binary (0)
 }
 
-static inline void GUI_Panel_PastRuns(PastRunsState *s) {
+// v5.11.57 — `cfg_for_verify` exposes ControllerConfig (typically
+// &run_control->results.config_used) so Verify Stamp can use the
+// real cfg.auto_stamp_secret for HMAC-verification (not just devmode).
+// Pass NULL to keep pre-v5.11.57 behavior (devmode-only).
+static inline void GUI_Panel_PastRuns(PastRunsState *s,
+                                        const ControllerConfig<BACKTEST_FP> *cfg_for_verify = nullptr) {
     ImGui::Begin("Past Runs");
     SectionHeader("PAST RUNS");
 
@@ -1642,13 +1647,17 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                         "no model file found in %s/", r->full_path);
                     r->stamp_verify_state = -1;
                 } else {
-                    // Empty secret = devmode (accepts any signature, just
-                    // checks format version + sha + registry hash).
-                    // Operators verifying for deploy should set the secret
-                    // here once we expose a UI input — for now devmode keeps
-                    // the button low-friction.
+                    // v5.11.57 — use cfg.auto_stamp_secret if available
+                    // (caller passed cfg_for_verify). Empty fallback =
+                    // devmode (accepts any signature). Operator's engine
+                    // load uses the same secret; matching path here means
+                    // suite-side verify reflects what the engine will do.
+                    const char *verify_secret =
+                        (cfg_for_verify && cfg_for_verify->auto_stamp_secret[0])
+                            ? cfg_for_verify->auto_stamp_secret
+                            : "";
                     ModelStampResult vr = verify_model_stamp(
-                        found, /*secret=*/"",
+                        found, /*secret=*/verify_secret,
                         /*gap_threshold=*/(double)r->gap_acceptable_threshold > 0.0
                             ? (double)r->gap_acceptable_threshold : 0.05,
                         /*expected_format_version=*/MODEL_FORMAT_VERSION,
@@ -1661,16 +1670,16 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                     r->stamp_verify_full = vr;
                     r->stamp_verify_has_full = (vr.valid == 1) ? 1 : 0;
                     if (vr.valid == 1) {
-                        // v5.11.56 — clarify that "OK" doesn't include HMAC
-                        // signature verification (Verify Stamp here always
-                        // uses empty secret = devmode). For real signature
-                        // check, set auto_stamp_secret=<your-secret> in
-                        // engine.cfg + the engine load will HMAC-verify
-                        // (will refuse mismatched signatures unless
-                        // held_out_gate_strict=0).
+                        // v5.11.57 — secret-aware OK message. When verify
+                        // ran with a real secret, "OK — signature verified".
+                        // When devmode (empty secret), surface the caveat
+                        // so operator knows engine load is the real gate.
+                        const char *mode_str = verify_secret[0]
+                            ? "signature verified"
+                            : "devmode, signature UNVERIFIED — set auto_stamp_secret in engine.cfg";
                         snprintf(r->stamp_verify_msg, sizeof(r->stamp_verify_msg),
-                            "OK (devmode, signature unverified) — engine=%s registry=%016lx. "
-                            "Set auto_stamp_secret in engine.cfg for real HMAC check at engine load.",
+                            "OK (%s) — engine=%s registry=%016lx",
+                            mode_str,
                             vr.engine_version[0] ? vr.engine_version : "unknown",
                             (unsigned long)vr.feature_registry_hash);
                     } else {
