@@ -15,6 +15,7 @@
 
 #include "../FixedPoint/FixedPointN.hpp"
 #include <stdio.h>
+#include <time.h>      // v5.11.65 — clock_gettime(CLOCK_REALTIME) for entry_timestamp_us
 //======================================================================================================
 // [STRUCTS]
 //======================================================================================================
@@ -32,9 +33,18 @@ template <unsigned F> struct Position {
     // cold fields: only read by trailing logic on slow path
     FPN<F> original_tp;       // set at fill, never modified — used to detect "running" positions
     FPN<F> original_sl;       // set at fill, never modified — baseline for trailing SL
+    // v5.11.65 — wall-clock entry timestamp (microseconds since epoch).
+    // Set by Portfolio_OpenSlot via clock_gettime(CLOCK_REALTIME). Survives
+    // engine restart via snapshot persistence (vs last_entry_tick which
+    // lives in CoreContext and gets reset by snapshot-drift guard at
+    // restart). Trade-history Hold computes from this so cross-restart
+    // hold time is accurate. Also feeds future ML-training "optimal exit
+    // timing" features. 0 = pre-v5.11.65 entry (legacy snapshot loaded
+    // without the field — display falls back to tick-derived hold).
+    uint64_t entry_timestamp_us;
     // partial exit pairing: -1 = no pair, 0-15 = paired slot index
     int8_t pair_index;
-    uint8_t _pad_pos[7];     // keep alignment
+    uint8_t _pad_pos[7];     // keep alignment (Position size now +8)
 };
 // Position = 6 FPN fields + pair_index + padding
 //======================================================================================================
@@ -210,6 +220,19 @@ inline void Portfolio_OpenSlot(Portfolio<F> *portfolio, int slot,
     portfolio->positions[slot].original_tp       = take_profit_price;
     portfolio->positions[slot].original_sl       = stop_loss_price;
     portfolio->positions[slot].pair_index        = -1;
+    // v5.11.65 — wall-clock entry timestamp for cross-restart hold tracking
+    // and future ML-training optimal-exit features. CLOCK_REALTIME (not
+    // _MONOTONIC) so the value survives engine restart and reboots.
+    {
+        struct timespec ts;
+        if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+            portfolio->positions[slot].entry_timestamp_us =
+                (uint64_t)ts.tv_sec * 1000000ULL +
+                (uint64_t)ts.tv_nsec / 1000ULL;
+        } else {
+            portfolio->positions[slot].entry_timestamp_us = 0;
+        }
+    }
     portfolio->active_bitmap |= (uint16_t)(1 << slot);
 }
 

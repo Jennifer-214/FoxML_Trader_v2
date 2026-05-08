@@ -72,7 +72,14 @@ namespace tt {
 // taker_fills_count — were never persisted, so session forensics
 // reset on every restart even though balance + realized_pnl
 // continued. v5 files rejected on load with version-mismatch.
-#define SHARDED_SNAPSHOT_VERSION  6u
+//
+// v7 (v5.11.65): Position gains uint64_t entry_timestamp_us field
+// (wall-clock microseconds since epoch). Survives restart so trade
+// history can compute accurate hold time across engine restarts.
+// Replaces the tick-derived hold (which got reset by snapshot-drift
+// guard at restart). Also feeds future ML-training "optimal exit
+// timing" features. v6 files rejected on load with version-mismatch.
+#define SHARDED_SNAPSHOT_VERSION  7u
 
 //======================================================================================================
 // [SAVE]

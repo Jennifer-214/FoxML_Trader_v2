@@ -247,19 +247,26 @@ static inline void TUI_CopySnapshotSharded(
             ps->net_pnl   = ps->gross_pnl - (fee_r * 200.0);
         }
         ps->is_trailing = (ps->tp != ps->orig_tp) ? 1 : 0;
-        // v4.7.6: hold_minutes from per-core last_entry_wall_us. Both
-        // legs of a paired trade share the same core's stamp (only leg A
-        // stamps it on entry), so map slot → core_id and read from there.
-        int core_id = partial_on ? (idx >> 1) : idx;
-        if (core_id >= 0 && core_id < state->registered_count) {
-            uint64_t entry_wall = state->cores[core_id].last_entry_wall_us;
-            if (entry_wall > 0 && now_wall_us > entry_wall) {
-                ps->hold_minutes = (double)(now_wall_us - entry_wall) / 60000000.0;
-            } else {
-                ps->hold_minutes = 0.0;
+        // v5.11.65 — prefer Position.entry_timestamp_us (per-slot, persisted
+        // in snapshot via the Position struct dump → survives engine restart).
+        // Fall back to CoreContext.last_entry_wall_us (per-core, NOT persisted)
+        // for in-memory state that hasn't been re-entered yet under v5.11.65.
+        // Pre-fix: hold display always read last_entry_wall_us, which reset
+        // to 0 on every restart → Hold column showed "0m" forever for
+        // positions loaded from snapshot.
+        uint64_t entry_wall = state->oms->portfolio.positions[idx].entry_timestamp_us;
+        if (entry_wall == 0) {
+            int core_id = partial_on ? (idx >> 1) : idx;
+            if (core_id >= 0 && core_id < state->registered_count) {
+                entry_wall = state->cores[core_id].last_entry_wall_us;
             }
-            ps->entry_time = (time_t)(entry_wall / 1000000ULL);
         }
+        if (entry_wall > 0 && now_wall_us > entry_wall) {
+            ps->hold_minutes = (double)(now_wall_us - entry_wall) / 60000000.0;
+        } else {
+            ps->hold_minutes = 0.0;
+        }
+        ps->entry_time = (time_t)(entry_wall / 1000000ULL);
         total_value += ps->value;
         total_qty   += ps->qty;
     }
