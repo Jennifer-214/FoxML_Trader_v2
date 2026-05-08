@@ -2174,7 +2174,11 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     for (int i = 0; i < 8; ++i) state->ui_sl_per_horizon[i] = 0.0f;
     state->ui_tp_per_horizon_count = 0;
     state->ui_sl_per_horizon_count = 0;
-    strncpy(state->run_name, "run_01", sizeof(state->run_name) - 1);
+    // v5.11.48 — default "run" instead of "run_01". Operator typically
+    // overrides with their own prefix (e.g. "btc_5min", "regime_v2"); the
+    // generic "run" surfaces less misleading than a specific-looking number.
+    // Worker appends "_horizon_<H>" so even default produces "run_horizon_*".
+    strncpy(state->run_name, "run", sizeof(state->run_name) - 1);
     state->label_forward_ticks = 1000;
     strncpy(state->model_path, "models/buy_signal.json", sizeof(state->model_path) - 1);
     // feature names from ModelInference.hpp constants
@@ -4207,16 +4211,50 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                               "auto: XGBoost picks (varies by version)");
     }
 
-    ImGui::InputText("Model Path (re-validate)", state->model_path, sizeof(state->model_path));
+    // v5.11.48 — only show Model Path in single-horizon mode. In multi-mode
+    // the worker auto-generates save paths from run_name + horizon dir, so
+    // Model Path is unused noise. Run Walk-Forward worker doesn't use it
+    // either (operates on results->* in memory). Run Full Validation worker
+    // uses it for auto_stamp_path output, but Multi-Horizon worker has its
+    // own per-horizon stamp path already.
+    if (single_horizon_mode) {
+        ImGui::InputText("Model Path (Save Run output)", state->model_path, sizeof(state->model_path));
+        ImGui::SetItemTooltip(
+            "Output path for Run Full Validation auto-stamp.\n"
+            "Single-horizon mode only.\n\n"
+            "NOT used by Train Model / Train Multi-Horizon — those auto-generate\n"
+            "save paths from Run Name + horizon dir naming convention\n"
+            "(models/<class>/<run_name>_horizon_<H>/<role>.json).");
+    }
+
+    // v5.11.48 — Run Name prefix input rendered HERE (before Train buttons)
+    // so operator sees + sets it BEFORE clicking train. The same field is
+    // also rendered post-train near Save Run (legacy location, line ~4691)
+    // so operator can rename for Save Run if needed. Both edit the same
+    // state->run_name buffer.
+    ImGui::InputText("Run Name (prefix)", state->run_name, sizeof(state->run_name));
     ImGui::SetItemTooltip(
-        "Path to an EXISTING saved model — used by the buttons below:\n"
-        "  • Run Walk-Forward — re-runs WF cross-validation on the model\n"
-        "  • Run Full Validation — re-runs WF + held-out eval + auto-stamp\n\n"
-        "Useful when you change wf_n_splits or want to re-stamp without\n"
-        "retraining from scratch.\n\n"
-        "NOT used by Train Model / Train Multi-Horizon — those auto-generate\n"
-        "save paths from Run Name + horizon dir naming convention\n"
-        "(models/<class>/<run_name>_horizon_<H>/<role>.json).");
+        "Prefix for save paths. Worker auto-appends \"_horizon_<H>\" per horizon.\n\n"
+        "Example: Run Name \"btc_5min\" + horizons 1000,7500,15000 →\n"
+        "  models/<class>/btc_5min_horizon_1000/barrier.json\n"
+        "  models/<class>/btc_5min_horizon_7500/barrier.json\n"
+        "  models/<class>/btc_5min_horizon_15000/barrier.json\n\n"
+        "Re-running with the same prefix overwrites previous results — pick\n"
+        "a unique name per experiment (e.g. btc_5min_v1, btc_5min_v2, ...).");
+    // Live preview of what dirs will be created
+    if (state->run_name[0] != '\0' && state->ui_horizon_count > 0) {
+        const char* role_preview = "buy_signal";
+        if (state->label_type == LABEL_PEAK_VALLEY_STABLE) role_preview = "barrier";
+        else if (state->label_type == LABEL_REGIME)        role_preview = "regime";
+        const char* class_preview =
+            (state->label_type == LABEL_PEAK_VALLEY_STABLE
+             || state->label_type == LABEL_REGIME)
+            ? "classification" : "classification";  // simplified
+        ImGui::TextDisabled("Will write to: models/%s/%s_horizon_<%s>/%s.json",
+                            class_preview, state->run_name,
+                            state->ui_horizon_count == 1 ? "H" : "H1,H2,...",
+                            role_preview);
+    }
 
     // v5.9.0d — Train Model now runs in a worker thread. The audit at
     // train_model_worker_fn (above) walked the race surface + cancellation
