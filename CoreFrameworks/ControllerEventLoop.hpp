@@ -1615,7 +1615,8 @@ inline int EventLoop_RebuildAllParameters(
     // spread / mid_price from BookSnapshot. Same null-safe pattern.
     const void* spread_state    = nullptr,    // const SpreadState<F, 1024>*
     double      current_spread  = 0.0,        // BookSnapshot::spread → double
-    double      current_mid_price = 0.0       // BookSnapshot::mid_price → double
+    double      current_mid_price = 0.0,      // BookSnapshot::mid_price → double
+    uint64_t    now_us          = 0           // v5.12.1.B clock hoist; 0 = legacy
 ) {
     int rebuilt = 0;
     // Track E.3: compute the book-imbalance veto once before the per-core
@@ -1640,7 +1641,8 @@ inline int EventLoop_RebuildAllParameters(
             current_price, rolling_medium, rolling_baseline, cumdelta_state,
             tick_rate_state, timestamp_us, book_imbalance, book_imb_history,
             flow_state, large_trade_state, spread_state, current_spread,
-            current_mid_price, book_imbalance_blocked);
+            current_mid_price, book_imbalance_blocked,
+            now_us);  // v5.12.1.B clock hoist passthrough
         ++rebuilt;
     }
     return rebuilt;
@@ -1749,7 +1751,8 @@ inline int EventLoop_RebuildAllParameters_PerCore(
     uint64_t timestamp_us,
     const FPN<F>* book_imbalance,   // nullptr if depth disabled
     double current_spread,
-    double current_mid_price) {
+    double current_mid_price,
+    uint64_t now_us = 0) {  // v5.12.1.B clock hoist; 0 = compute internally
     int rebuilt = 0;
     int book_imbalance_blocked = 0;
     if (book_imbalance && !FPN_IsZero(config->min_book_imbalance)) {
@@ -1771,7 +1774,8 @@ inline int EventLoop_RebuildAllParameters_PerCore(
             book_imbalance,
             &sst->book_imb_history, &sst->flow_state,
             &sst->large_trade_state, &sst->spread_state,
-            current_spread, current_mid_price, book_imbalance_blocked);
+            current_spread, current_mid_price, book_imbalance_blocked,
+            now_us);  // v5.12.1.B clock hoist
         ++rebuilt;
     }
     return rebuilt;
@@ -1780,6 +1784,12 @@ inline int EventLoop_RebuildAllParameters_PerCore(
 // v4.7.38 (Phase C.1): single-core variant of RebuildAllParameters.
 // Caller must precompute book_imbalance_blocked (cheap — one FPN compare)
 // and skip cores with strategy_id == STRATEGY_NONE before calling.
+//
+// v5.12.1.B (clock hoist): optional `now_us` param at end. When non-zero,
+// caller has already read system_clock at slow-path entry; recovery check
+// uses it instead of doing its own clock_gettime. Default 0 = back-compat
+// (legacy callers, tests). Saves ~50ns/cycle in flatten-recovery window
+// when caller hoists. See CLAUDE.md item 16 (reuse-audit principle).
 template <unsigned F, unsigned W = 128, unsigned WL = 512>
 inline void EventLoop_RebuildOneCore(
     EventLoopState<F>* state,
@@ -1802,7 +1812,8 @@ inline void EventLoop_RebuildOneCore(
     const void* spread_state,
     double      current_spread,
     double      current_mid_price,
-    int         book_imbalance_blocked) {
+    int         book_imbalance_blocked,
+    uint64_t    now_us = 0) {  // v5.12.1.B clock hoist; 0 = compute internally
     {
         // Single-iteration scope (was inside `for` loop body before extraction).
         // v4.0 per-core overrides: resolve the cfg for this core. Stack-local
@@ -2161,22 +2172,18 @@ inline void EventLoop_RebuildOneCore(
         // pays just one atomic load (~5ns); active case adds one clock
         // read (~50ns) only while in the recovery window. Auto-clears
         // via EventLoop_TryClearRecovery once the deadline elapses.
-        // FUTURE OPPORTUNITY: hoist now_us read to slow-path entry and
-        // share with sp_last_tick_us update (line ~2890) +
-        // CheckWsStaleness — saves ~50ns/cycle on per-core slow-path.
-        // Deferred to a v5.12.2.X "slow-path clock unification" if
-        // profiling justifies; cost of plumbing now_us through 3
-        // function signatures (RebuildOneCore /
-        // RebuildAllParameters_PerCore / RebuildAllParameters) outweighs
-        // the savings until measurement says otherwise.
+        //
+        // v5.12.1.B (clock hoist): if caller passed now_us != 0, reuse
+        // it. Saves ~50ns/cycle in flatten-recovery window. Default 0
+        // (tests, legacy paths) → fall back to internal clock read.
         {
             uint64_t recovery_until = state->oms->recovery_until_us.load(
                 std::memory_order_acquire);
             if (recovery_until > 0) {
-                uint64_t now_us = (uint64_t)
-                    std::chrono::duration_cast<std::chrono::microseconds>(
+                uint64_t effective_now_us = (now_us != 0) ? now_us :
+                    (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::system_clock::now().time_since_epoch()).count();
-                if (now_us < recovery_until) {
+                if (effective_now_us < recovery_until) {
                     // Refuse new entries this cycle. Block via flag —
                     // works for buy-above (Momentum) AND buy-below
                     // (DIP/MR) strategies. SHALT_RECOVERY surfaces in
@@ -2188,7 +2195,7 @@ inline void EventLoop_RebuildOneCore(
                     // Recovery window elapsed — clear flatten state so
                     // a future staleness event can re-fire. CAS-based;
                     // only one slow-path thread wins the clear.
-                    EventLoop_TryClearRecovery(state->oms, now_us);
+                    EventLoop_TryClearRecovery(state->oms, effective_now_us);
                 }
             }
         }

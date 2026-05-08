@@ -2834,6 +2834,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // === Strategy dispatch + gate parameter rebuild ===
                     // v5.1.0: pass per-core slow_state pointers instead of
                     // producer-shared state. Each engine reads ONLY its own.
+                    // v5.12.1.B clock hoist: pass rebuild_ts_us as now_us so
+                    // the recovery refusal check inside RebuildOneCore reuses
+                    // it instead of doing its own clock_gettime. Saves ~50ns/
+                    // cycle in the post-flatten recovery window.
                     EventLoop_RebuildOneCore(
                         &state, c, &sst->rolling_short, &cfg, &sst->rolling_long,
                         &sst->regime_ror, &sst->ema_price,
@@ -2843,7 +2847,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         cfg.depth_enabled ? &book_imb : nullptr,
                         &sst->book_imb_history, &sst->flow_state,
                         &sst->large_trade_state, &sst->spread_state,
-                        book_spread_d, book_mid_d, book_imbalance_blocked);
+                        book_spread_d, book_mid_d, book_imbalance_blocked,
+                        /*now_us (clock hoist)=*/rebuild_ts_us);
 
                     // v5.1.1: bracket REBUILD section.
                     uint64_t _sec_t_push_start = __rdtsc();
@@ -2908,27 +2913,23 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     CoreLatencyStats_Sample(&state.cores[c].slow_path_latency,
                                              _sp_t1 - _sp_t0, _sp_t1);
 
-                    // v5.0.3: post-cycle book-keeping for the topology panel.
-                    // v5.12.1.A.2 — single system_clock::now() read here is
-                    // SHARED with EventLoop_CheckWsStaleness immediately
-                    // below. Pre-v5.12.1.A.2 the gate had its own clock
-                    // read (~50-100ns extra per cycle per core). Sharing
-                    // saves that cost; sp_last_tick_us semantics preserved
-                    // (post-cycle wall-clock).
+                    // v5.12.1.B clock hoist: reuse rebuild_ts_us captured at
+                    // slow-path entry (line ~2810) instead of taking another
+                    // system_clock::now() read here. Saves ~50ns/cycle/core.
+                    // sp_last_tick_us semantic shifts from "wall-clock at
+                    // end of cycle" to "wall-clock at start of cycle" —
+                    // sub-100us drift across the slow-path body, irrelevant
+                    // for both operator liveness display + CheckWsStaleness
+                    // 60s+ threshold math. Pre-v5.12.1.B was: own clock read
+                    // here, plus another inside RebuildOneCore's recovery
+                    // check when active = up to 3 reads/cycle/core. Now: 1.
                     {
-                        uint64_t now_us =
-                            (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
-                                std::chrono::system_clock::now().time_since_epoch()).count();
-                        state.cores[c].sp_last_tick_us.store(now_us, std::memory_order_relaxed);
-                        state.cores[c].sp_cycles_total.fetch_add(1, std::memory_order_relaxed);
-                        // v5.12.1.A.2 — WS-staleness emergency-flatten gate.
-                        // Reuses now_us above (no extra clock read). Default
-                        // cfg.ws_dead_time_flatten_enabled=0 → 5ns early
-                        // return. CAS in CheckWsStaleness ensures only one
-                        // core's slow-path wins the flatten across all
-                        // concurrent calls.
+                        state.cores[c].sp_last_tick_us.store(rebuild_ts_us,
+                                                              std::memory_order_relaxed);
+                        state.cores[c].sp_cycles_total.fetch_add(1,
+                                                                  std::memory_order_relaxed);
                         EventLoop_CheckWsStaleness(&state, cfg, price_d,
-                                                    now_us);
+                                                    rebuild_ts_us);
                     }
 
                     // NOTE: DrainPostFill stays on the drainer thread (single
