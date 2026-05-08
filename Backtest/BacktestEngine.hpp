@@ -1646,16 +1646,44 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             if (mc_weights) {
                 XGBoost_ComputeMulticlassWeights(train_labels, n_train, num_classes_lt,
                                                   mc_weights, mc_counts);
+                // v5.11.46 — cap per-sample weight at 5.0 to prevent
+                // numerical issues during XGBoost gradient computation
+                // when one class is very rare (e.g. c0=1.2% gives raw
+                // weight ~27, large enough to cause gradient overflow
+                // in some XGBoost versions → segfault in histogram
+                // split-finding). Capping caps the importance weighting
+                // for very rare classes; you lose some signal but stop
+                // crashing.
+                const float WEIGHT_CAP = 5.0f;
+                int capped_count = 0;
+                for (int wi = 0; wi < n_train; ++wi) {
+                    if (mc_weights[wi] > WEIGHT_CAP) {
+                        mc_weights[wi] = WEIGHT_CAP;
+                        capped_count++;
+                    }
+                }
                 XGDMatrixSetFloatInfo(dtrain, "weight", mc_weights, n_train);
                 fprintf(stderr, "[walkforward] fold %d: multiclass class counts:", f + 1);
                 for (int k = 0; k < num_classes_lt && k < 16; k++) {
                     fprintf(stderr, " c%d=%d (%.1f%%)", k, mc_counts[k],
                             n_train > 0 ? 100.0f * mc_counts[k] / n_train : 0.0f);
                 }
-                fprintf(stderr, " — per-sample weights applied\n");
+                if (capped_count > 0) {
+                    fprintf(stderr, " — per-sample weights applied (capped %d at %.1f)\n",
+                            capped_count, WEIGHT_CAP);
+                } else {
+                    fprintf(stderr, " — per-sample weights applied\n");
+                }
                 free(mc_weights);
             }
         }
+        // v5.11.46 — bisection markers for fold 2 segfault diagnosis.
+        // If crash is in XGBoosterUpdateOneIter, we'll see "[WF marker]
+        // fold N: pre-iter R" before crash. If pre-predict, see "[WF
+        // marker] fold N: pre-predict". Helps narrow without ASAN.
+        fprintf(stderr, "[WF marker] fold %d: pre-train-loop (booster=%p, dtrain=%p, n_train=%d)\n",
+                f + 1, (void*)booster, (void*)dtrain, n_train);
+        fflush(stderr);
 
         // train (no early stopping yet — full n_rounds always)
         int n_rounds = 200;
@@ -1669,6 +1697,11 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         int last_iter_ret = 0;
         int last_iter_idx = -1;
         for (int r = 0; r < n_rounds; r++) {
+            // v5.11.46 — log every 10 iters to bisect crash location
+            if (r == 0 || r % 10 == 0) {
+                fprintf(stderr, "[WF marker] fold %d: pre-iter %d\n", f + 1, r);
+                fflush(stderr);
+            }
             ret = XGBoosterUpdateOneIter(booster, r, dtrain);
             last_iter_ret = ret;
             last_iter_idx = r;
@@ -1679,6 +1712,9 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 break;
             }
         }
+        fprintf(stderr, "[WF marker] fold %d: train-loop complete (last_iter=%d)\n",
+                f + 1, last_iter_idx);
+        fflush(stderr);
         if (last_iter_ret == 0 && tt::Health_LogEnabled(tt::HEALTH_INFO)) {
             tt::Health_Log(tt::HEALTH_INFO, "wf-xgb", f + 1,
                 "trained %d/%d iters successfully",
@@ -1691,8 +1727,17 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         {
             bst_ulong out_len_tr = 0, out_len_te = 0;
             const float *pred_tr = nullptr, *pred_te = nullptr;
+            // v5.11.46 — bisection markers
+            fprintf(stderr, "[WF marker] fold %d: pre-predict-train\n", f + 1);
+            fflush(stderr);
             int predict_tr_ret = XGBoosterPredict(booster, dtrain, 0, 0, 0, &out_len_tr, &pred_tr);
+            fprintf(stderr, "[WF marker] fold %d: post-predict-train (ret=%d, out_len=%lu)\n",
+                    f + 1, predict_tr_ret, (unsigned long)out_len_tr);
+            fflush(stderr);
             int predict_te_ret = XGBoosterPredict(booster, dtest,  0, 0, 0, &out_len_te, &pred_te);
+            fprintf(stderr, "[WF marker] fold %d: post-predict-test (ret=%d, out_len=%lu)\n",
+                    f + 1, predict_te_ret, (unsigned long)out_len_te);
+            fflush(stderr);
             int pred_tr_ok = (predict_tr_ret == 0);
             int pred_te_ok = (predict_te_ret == 0);
             // v5.11.32 — predict failure → WARN (always-on; this is the
