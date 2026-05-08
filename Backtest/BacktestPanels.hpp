@@ -4250,6 +4250,55 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             if (ImGui::Button("Cancel Multi-Horizon"))
                 state->mh_cancel = 1;
         }
+
+        // v5.11.41 — per-horizon results table. Renders during run AND
+        // post-completion so operator can review metrics without scrolling
+        // through stderr. Each row = one horizon's WF + held-out + stamp
+        // status. Columns:
+        //   Horizon  | Progress  | Status   | Metrics
+        // (status string is built by the worker's per-horizon block).
+        // Empty when no Multi-Horizon run has fired yet.
+        if (state->mh_total > 0) {
+            ImGui::Separator();
+            ImGui::TextDisabled("Per-horizon results");
+            if (ImGui::BeginTable("mh_horizons", 4,
+                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                ImGui::TableSetupColumn("Horizon");
+                ImGui::TableSetupColumn("WF %");
+                ImGui::TableSetupColumn("State");
+                ImGui::TableSetupColumn("Metrics");
+                ImGui::TableHeadersRow();
+
+                int n_show = state->mh_total < 8 ? state->mh_total : 8;
+                for (int h = 0; h < n_show; ++h) {
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%d", state->ui_horizon_list[h]);
+
+                    ImGui::TableNextColumn();
+                    int prog = state->mh_horizon_progress[h];
+                    if (prog > 0) ImGui::Text("%d%%", prog);
+                    else          ImGui::TextDisabled("--");
+
+                    ImGui::TableNextColumn();
+                    if (state->mh_horizon_complete[h]) {
+                        ImGui::TextColored(FoxmlColors::green, "DONE");
+                    } else if (state->mh_running && h == (state->mh_progress - 1)) {
+                        ImGui::TextColored(FoxmlColors::yellow, "running");
+                    } else {
+                        ImGui::TextDisabled("waiting");
+                    }
+
+                    ImGui::TableNextColumn();
+                    if (state->mh_horizon_status[h][0] != '\0') {
+                        ImGui::TextWrapped("%s", state->mh_horizon_status[h]);
+                    } else {
+                        ImGui::TextDisabled("--");
+                    }
+                }
+                ImGui::EndTable();
+            }
+        }
     }
 
     // training results — kind-appropriate display.
