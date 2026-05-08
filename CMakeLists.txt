@@ -189,6 +189,10 @@ if(USE_IMGUI_GUI)
         ${SDL2_LIBRARIES}
         OpenGL::GL
         ssl crypto pthread
+        gomp  # v5.11.44 hotfix — omp_set_num_threads + omp_set_dynamic in
+              # mh_per_horizon_parallel_worker (caps libgomp thread pool
+              # per-pthread to prevent OpenMP team collisions across
+              # parallel multi-horizon workers running XGBoost)
     )
     if(USE_NATIVE_128)
         target_compile_definitions(foxml_suite PRIVATE USE_NATIVE_128)

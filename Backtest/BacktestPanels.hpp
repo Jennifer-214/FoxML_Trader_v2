@@ -21,6 +21,12 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include <omp.h>          // v5.11.44 hotfix — omp_set_num_threads(1) in
+                          // per-horizon parallel workers to cap libgomp's
+                          // thread pool. Without this, multiple pthreads
+                          // each running XGBoost (which uses libgomp
+                          // internally) cause OpenMP team collisions in
+                          // RowsWiseBuildHistKernel → segfault.
 
 //======================================================================================================
 // [DATA PANEL STATE]
@@ -3264,6 +3270,15 @@ struct MultiHorizonParallelJob {
 
 static inline void *mh_per_horizon_parallel_worker(void *arg) {
     MultiHorizonParallelJob *job = (MultiHorizonParallelJob *)arg;
+    // v5.11.44 hotfix — cap libgomp's OpenMP thread pool to 1 in this
+    // pthread context. XGBoost uses libgomp for its internal histogram-
+    // building parallel-for; with multiple pthreads each spawning their
+    // own OpenMP teams, libgomp's shared thread pool collides → segfault
+    // in RowsWiseBuildHistKernel. Pinning OMP threads per pthread context
+    // serializes XGBoost's inner work; outer parallelism (N pthreads) still
+    // gives N-x speedup vs serial.
+    omp_set_num_threads(1);
+    omp_set_dynamic(0);
     mh_run_one_horizon_fv(
         job->state,
         &job->isolated_results,
@@ -3419,9 +3434,14 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
                 free(job);
                 continue;
             }
-            // Pin xgb_train_nthread=1 in the isolated cfg for parity vs
-            // serial mode running with nthread=1.
+            // Pin xgb_train_nthread=1 + xgb_eval_nthread=1 in the isolated
+            // cfg for parity vs serial-mode-with-nthread=1 AND for parallel-
+            // mode safety (WF folds inside RFV use xgb_eval_nthread). Both
+            // must be 1 to prevent libgomp OpenMP team collisions across
+            // pthreads (v5.11.44 hotfix: also paired with omp_set_num_threads(1)
+            // in the worker entry).
             job->isolated_results.config_used.xgb_train_nthread = 1;
+            job->isolated_results.config_used.xgb_eval_nthread  = 1;
             job->h = h;
             job->horizon_ticks = horizons[h];
             job->tp_pct = tp_pcts[h];
@@ -4186,6 +4206,11 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     can_train = false;
 #endif
 
+    // v5.11.44 — single-mode now routes through Multi-Horizon worker. We
+    // gate the legacy tm_running progress bar on tm_running specifically
+    // (legacy worker still exists for back-compat callers). Multi-Horizon
+    // running state is shown by the per-horizon table + mh progress bar
+    // further down. New mh_running covers BOTH single (N=1) + multi (N>1).
     if (state->tm_running) {
         // v5.11.25 — real per-iteration progress bar. Pre-fix used a
         // pulsing indeterminate bar (`-1.0f * GetTime()`) as a "still
@@ -4235,33 +4260,84 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         if (single_horizon_mode) {
         if (!can_train) ImGui::BeginDisabled();
         if (ImGui::Button("Train Model")) {
-            // clear previous results + spawn worker
+            // v5.11.44 — route Train Model through the Multi-Horizon worker
+            // with N=1. This makes single-horizon training run the same
+            // train+WF+held-out+stamp pipeline that Multi-Horizon does, in
+            // ONE click (no separate Run Walk-Forward / Run Full Validation
+            // needed). Per-horizon results table renders 1 row.
             state->model_trained = false;
             state->status_msg[0] = '\0';
             state->wf_has_results = false;
-            // v5.10.0E — also clear wf_results struct itself, not just the
-            // flag. Pre-fix, valid_folds (or any nonzero field) from the
-            // PRIOR WF run leaked into Save Run for THIS train cycle: the
-            // Save Run "valid_folds > 0" gate fired on stale data, writing
-            // val_accuracy=0 + train_val_gap=0 + valid_folds=4 from the
-            // last WF run. Past Runs then rendered "0.0%" RED for runs
-            // where WF was never re-run after the latest Train Model.
-            // Operator confusing diagnostic ("model has no edge") when
-            // really WF just wasn't run for that train.
             memset(&state->wf_results, 0, sizeof(state->wf_results));
-            state->tm_cancel = 0;
-            state->tm_complete = 0;
-            // v5.11.25 — reset progress so stale values from a prior run
-            // don't briefly flash before the worker overwrites them.
-            state->tm_progress_iter = 0;
-            state->tm_progress_total = 0;
-            state->tm_phase_msg[0] = '\0';  // v5.11.29
-            state->tm_running = 1;
-            TrainModelWorkerArgs *args = (TrainModelWorkerArgs *)malloc(sizeof(TrainModelWorkerArgs));
-            args->state = state;
-            args->run_control = run_control;
-            pthread_create(&state->tm_tid, NULL, train_model_worker_fn, args);
-            pthread_detach(state->tm_tid);
+            state->mh_running = 1;
+            state->mh_progress = 0;
+            state->mh_total = 1;  // N=1 in single-horizon mode
+            state->mh_current_horizon = 0;
+            state->mh_cancel = 0;
+            state->mh_complete = 0;
+
+            // Build MultiHorizonWorkerArgs (same as Train Multi-Horizon
+            // click handler below, but with N=1 horizon).
+            int single_h = (state->ui_horizon_count >= 1)
+                         ? state->ui_horizon_list[0]
+                         : (state->label_forward_ticks > 0
+                            ? state->label_forward_ticks : 1000);
+            float single_tp = (state->ui_tp_per_horizon_count > 0)
+                            ? state->ui_tp_per_horizon[0] : state->label_tp_pct;
+            float single_sl = (state->ui_sl_per_horizon_count > 0)
+                            ? state->ui_sl_per_horizon[0] : state->label_sl_pct;
+
+            MultiHorizonWorkerArgs *mh_args =
+                (MultiHorizonWorkerArgs *)malloc(sizeof(MultiHorizonWorkerArgs));
+            mh_args->state = state;
+            mh_args->run_control = run_control;
+            {
+                size_t n = strnlen(state->run_name, sizeof(state->run_name));
+                if (n >= sizeof(mh_args->snap_run_name))
+                    n = sizeof(mh_args->snap_run_name) - 1;
+                memcpy(mh_args->snap_run_name, state->run_name, n);
+                mh_args->snap_run_name[n] = '\0';
+            }
+            {
+                size_t n = strnlen(state->model_path, sizeof(state->model_path));
+                if (n >= sizeof(mh_args->snap_model_path))
+                    n = sizeof(mh_args->snap_model_path) - 1;
+                memcpy(mh_args->snap_model_path, state->model_path, n);
+                mh_args->snap_model_path[n] = '\0';
+            }
+            mh_args->snap_label_type     = state->label_type;
+            mh_args->snap_max_depth      = state->max_depth;
+            mh_args->snap_learning_rate  = state->learning_rate;
+            mh_args->snap_n_estimators   = state->n_estimators;
+            mh_args->snap_subsample        = state->ui_subsample;
+            mh_args->snap_colsample_bytree = state->ui_colsample_bytree;
+            mh_args->snap_min_child_weight = state->ui_min_child_weight;
+            mh_args->snap_seed             = state->ui_seed;
+            mh_args->snap_tree_method_idx  = state->ui_tree_method_idx;
+            mh_args->snap_horizon_count = 1;
+            for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
+                mh_args->snap_horizons[i] = (i == 0) ? single_h : 0;
+                mh_args->snap_tp_pct[i]   = single_tp;
+                mh_args->snap_sl_pct[i]   = single_sl;
+            }
+            {
+                size_t n = strnlen(state->fv_auto_stamp_secret,
+                                   sizeof(state->fv_auto_stamp_secret));
+                if (n >= sizeof(mh_args->snap_auto_stamp_secret))
+                    n = sizeof(mh_args->snap_auto_stamp_secret) - 1;
+                memcpy(mh_args->snap_auto_stamp_secret,
+                       state->fv_auto_stamp_secret, n);
+                mh_args->snap_auto_stamp_secret[n] = '\0';
+            }
+            mh_args->snap_auto_stamp_enabled  =
+                run_control->results.config_used.auto_stamp_on_held_out;
+            mh_args->snap_n_splits            = state->wf_n_splits;
+            mh_args->snap_buffer_ticks        = state->wf_buffer_ticks;
+            mh_args->snap_min_train           = state->wf_min_train;
+            mh_args->snap_gap_threshold       = state->fv_gap_threshold;
+            mh_args->snap_held_out_fraction   = state->fv_held_out_fraction;
+            pthread_create(&state->mh_tid, NULL, train_multi_horizon_worker_fn, mh_args);
+            pthread_detach(state->mh_tid);
         }
         if (!can_train) {
             ImGui::EndDisabled();
