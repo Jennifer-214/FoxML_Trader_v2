@@ -21,6 +21,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include <ftw.h>          // v5.11.51 — nftw() for recursive directory delete
 #include <omp.h>          // v5.11.44 hotfix — omp_set_num_threads(1) in
                           // per-horizon parallel workers to cap libgomp's
                           // thread pool. Without this, multiple pthreads
@@ -681,6 +682,15 @@ struct PastRun {
     // those values actually visible for cross-cfg audit.
     ModelStampResult stamp_verify_full;
     int   stamp_verify_has_full;  // 1 = stamp_verify_full populated
+    // v5.11.51 — Date column + multi-horizon grouping. mtime_sec = directory
+    // mtime (sortable + display). prefix + horizon_ticks let the renderer
+    // detect multi-horizon siblings (dirs matching <prefix>_horizon_<H>) and
+    // collapse them into a single visual row.
+    time_t mtime_sec;            // directory mtime; 0 if stat failed
+    char   prefix[128];          // dir_name with "_horizon_<N>" stripped (or full dir_name)
+    int    horizon_ticks;        // parsed from dir_name; 0 if not multi-horizon row
+    char   full_path[400];       // full path under models/ (e.g. "models/classification/foo");
+                                  // populated by PastRuns_LoadOne. Used by Delete button.
 };
 
 struct PastRunsState {
@@ -746,6 +756,8 @@ static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
     const char *base = strrchr(run_dir, '/');
     base = base ? base + 1 : run_dir;
     strncpy(r->dir_name, base, sizeof(r->dir_name) - 1);
+    // v5.11.51 — full path for Delete button
+    strncpy(r->full_path, run_dir, sizeof(r->full_path) - 1);
 
     char path[400];
     char line[512];
@@ -828,6 +840,67 @@ static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
 // v4.3 — scan one directory for run subdirs containing summary.txt. Used
 // recursively for the two-level models/{kind}/{run_name}/ layout AND for
 // backward compat with flat models/{run_name}/ runs from before v4.3.
+// v5.11.51 — recursive directory delete via nftw. Used by Past Runs
+// "Delete" button. Returns 0 on success, -1 on any error.
+static inline int past_runs_unlink_cb(const char *fpath, const struct stat *sb,
+                                          int typeflag, struct FTW *ftwbuf) {
+    (void)sb; (void)ftwbuf;
+    if (typeflag == FTW_DP || typeflag == FTW_D) {
+        return rmdir(fpath);
+    }
+    return unlink(fpath);
+}
+
+static inline int PastRuns_DeleteDir(const char *path) {
+    // FTW_DEPTH = post-order traversal so files deleted before parent dir
+    // FTW_PHYS = don't follow symlinks (avoid accidentally walking into other
+    //            dirs if operator has bizarre symlink configuration)
+    return nftw(path, past_runs_unlink_cb, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+// v5.11.51 — parse "<prefix>_horizon_<N>" from dir_name. Returns 1 if it
+// matches the multi-horizon pattern (sets out_prefix + out_horizon_ticks).
+// Returns 0 if not a multi-horizon dir (out_prefix gets dir_name copy,
+// out_horizon_ticks = 0).
+static inline int PastRun_ParseHorizon(const char *dir_name, char *out_prefix,
+                                          size_t out_prefix_size, int *out_horizon_ticks) {
+    *out_horizon_ticks = 0;
+    out_prefix[0] = '\0';
+    const char *match = strstr(dir_name, "_horizon_");
+    if (!match) {
+        // Not a multi-horizon dir; whole name is the prefix.
+        size_t n = strnlen(dir_name, out_prefix_size - 1);
+        memcpy(out_prefix, dir_name, n);
+        out_prefix[n] = '\0';
+        return 0;
+    }
+    // Verify suffix is purely digits
+    const char *digits = match + 9;  // strlen("_horizon_")
+    if (!*digits) {
+        // "_horizon_" with nothing after; treat as not-multi-horizon
+        size_t n = strnlen(dir_name, out_prefix_size - 1);
+        memcpy(out_prefix, dir_name, n);
+        out_prefix[n] = '\0';
+        return 0;
+    }
+    char *end = nullptr;
+    long h = strtol(digits, &end, 10);
+    if (end == digits || *end != '\0' || h <= 0) {
+        // Not pure digits or 0/negative; treat as not-multi-horizon.
+        size_t n = strnlen(dir_name, out_prefix_size - 1);
+        memcpy(out_prefix, dir_name, n);
+        out_prefix[n] = '\0';
+        return 0;
+    }
+    // Match — copy prefix (up to but not including "_horizon_")
+    size_t prefix_len = (size_t)(match - dir_name);
+    if (prefix_len >= out_prefix_size) prefix_len = out_prefix_size - 1;
+    memcpy(out_prefix, dir_name, prefix_len);
+    out_prefix[prefix_len] = '\0';
+    *out_horizon_ticks = (int)h;
+    return 1;
+}
+
 static inline void PastRuns_ScanOneDir(PastRunsState *s, const char *path) {
     DIR *d = opendir(path);
     if (!d) return;
@@ -838,7 +911,14 @@ static inline void PastRuns_ScanOneDir(PastRunsState *s, const char *path) {
         snprintf(sub, sizeof(sub), "%s/%s", path, entry->d_name);
         struct stat st;
         if (stat(sub, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
-        if (PastRuns_LoadOne(&s->runs[s->count], sub)) s->count++;
+        if (PastRuns_LoadOne(&s->runs[s->count], sub)) {
+            // v5.11.51 — capture mtime + parse multi-horizon prefix
+            PastRun *r = &s->runs[s->count];
+            r->mtime_sec = st.st_mtime;
+            PastRun_ParseHorizon(entry->d_name, r->prefix, sizeof(r->prefix),
+                                   &r->horizon_ticks);
+            s->count++;
+        }
     }
     closedir(d);
 }
@@ -852,8 +932,23 @@ static inline void PastRuns_Scan(PastRunsState *s) {
     // Backward compat: also scan models/ directly for runs saved before v4.3
     // (those still have summary.txt at models/{run_name}/).
     PastRuns_ScanOneDir(s, "models");
+
+    // v5.11.51 — sort runs by mtime descending (newest first). Operator
+    // typically wants recent runs at top. Sort happens here at scan time
+    // so the table renders pre-sorted (no need for ImGui's per-frame sort
+    // callback).
+    for (int i = 0; i < s->count - 1; ++i) {
+        for (int j = i + 1; j < s->count; ++j) {
+            if (s->runs[j].mtime_sec > s->runs[i].mtime_sec) {
+                PastRun tmp = s->runs[i];
+                s->runs[i] = s->runs[j];
+                s->runs[j] = tmp;
+            }
+        }
+    }
+
     snprintf(s->status_msg, sizeof(s->status_msg),
-             "scanned %d run(s) in models/{classification,regression,...}",
+             "scanned %d run(s) in models/{classification,regression,...} (newest first)",
              s->count);
 }
 
@@ -1106,8 +1201,9 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
         if (ImGui::BeginTabItem(class_label)) {
             if (n_class == 0) {
                 ImGui::TextDisabled("No classification runs saved yet.");
-            } else if (ImGui::BeginTable("past_runs_class", 13, flags)) {  // v5.9.5h: +Stamp column
+            } else if (ImGui::BeginTable("past_runs_class", 15, flags)) {  // v5.11.51: +Date +Delete columns
                 ImGui::TableSetupColumn("Run",        ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 220);
+                ImGui::TableSetupColumn("Date",       ImGuiTableColumnFlags_WidthFixed, 100);  // v5.11.51
                 ImGui::TableSetupColumn("Role",       ImGuiTableColumnFlags_WidthFixed, 80);
                 ImGui::TableSetupColumn("Label",      ImGuiTableColumnFlags_WidthFixed, 50);
                 ImGui::TableSetupColumn("Classes",    ImGuiTableColumnFlags_WidthFixed, 70);
@@ -1120,6 +1216,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                 ImGui::TableSetupColumn("Overfit",    ImGuiTableColumnFlags_WidthFixed, 70);
                 ImGui::TableSetupColumn("Depth/LR/N", ImGuiTableColumnFlags_WidthFixed, 120);
                 ImGui::TableSetupColumn("Stamp",      ImGuiTableColumnFlags_WidthFixed, 60);
+                ImGui::TableSetupColumn("",           ImGuiTableColumnFlags_WidthFixed, 30);  // v5.11.51 Delete
                 ImGui::TableHeadersRow();
 
                 for (int i = 0; i < s->count; ++i) {
@@ -1133,6 +1230,17 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                     ImGui::TableNextRow();
 
                     render_run_cell(i);
+                    // v5.11.51 — Date column (2nd col); shows "MM-DD HH:MM" in local time
+                    ImGui::TableNextColumn();
+                    if (r->mtime_sec > 0) {
+                        char dbuf[24];
+                        struct tm tm_buf;
+                        localtime_r(&r->mtime_sec, &tm_buf);
+                        strftime(dbuf, sizeof(dbuf), "%m-%d %H:%M", &tm_buf);
+                        ImGui::TextDisabled("%s", dbuf);
+                    } else {
+                        ImGui::TextDisabled("-");
+                    }
                     ImGui::TableNextColumn(); ImGui::TextDisabled("%s", r->role);
                     ImGui::TableNextColumn(); ImGui::Text("%d", r->label_type);
                     ImGui::TableNextColumn();
@@ -1210,6 +1318,38 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                         ImGui::SetItemTooltip("Stamp present, not yet verified\n"
                                               "Click 'Verify Stamp' below to check.");
                     }
+
+                    // v5.11.51 — Delete button column. Confirm popup before
+                    // recursive rmdir. PushID(i) so the button + popup are
+                    // unique per row.
+                    ImGui::TableNextColumn();
+                    ImGui::PushID(i);
+                    if (ImGui::SmallButton("X")) {
+                        ImGui::OpenPopup("DeleteConfirm");
+                    }
+                    ImGui::SetItemTooltip("Delete this run (recursive)");
+                    if (ImGui::BeginPopup("DeleteConfirm")) {
+                        ImGui::Text("Delete %s?", r->dir_name);
+                        ImGui::TextDisabled("(removes %s recursively)", r->full_path);
+                        ImGui::Separator();
+                        if (ImGui::Button("Delete")) {
+                            int rc = PastRuns_DeleteDir(r->full_path);
+                            if (rc == 0) {
+                                snprintf(s->status_msg, sizeof(s->status_msg),
+                                         "deleted: %s", r->full_path);
+                            } else {
+                                snprintf(s->status_msg, sizeof(s->status_msg),
+                                         "delete FAILED: %s (errno=%d)",
+                                         r->full_path, errno);
+                            }
+                            PastRuns_Scan(s);  // refresh
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+                        ImGui::EndPopup();
+                    }
+                    ImGui::PopID();
                 }
                 ImGui::EndTable();
             }
