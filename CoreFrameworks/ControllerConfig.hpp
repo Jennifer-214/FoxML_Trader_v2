@@ -408,6 +408,19 @@ template <unsigned F> struct ControllerConfig {
                                    // (e.g. 0.05 = 5%)
   uint32_t kill_recovery_warmup; // slow-path cycles to observe after kill reset
                                  // before trading
+  // v5.12.1.A — WS dead-time emergency-flatten policy (live-only).
+  // Slow-path reads producer's last_ws_tick_us (set in EngineSharded fan_out),
+  // computes (local_now_us - last_ws_tick_us). When the gap exceeds
+  // ws_dead_time_flatten_threshold_secs AND ws_dead_time_flatten_enabled=1,
+  // CAS-wins one slow-path thread invokes EventLoop_FlattenAll to emergency-
+  // close all open positions via the standard drainer queue.
+  // Disabled by default (0); flip to 1 BEFORE live-capital deployment.
+  // Pre-warmup (last_ws_tick_us == 0) is always treated as "no flatten".
+  // Backtest: cfg.ws_dead_time_flatten_enabled MUST stay 0; backtest's
+  // tick-driven last_ws_tick_us would otherwise produce a huge gap vs
+  // local clock and fire a phantom flatten on every cycle.
+  int ws_dead_time_flatten_enabled;          // 0=disabled (default), 1=enabled
+  int ws_dead_time_flatten_threshold_secs;   // gap threshold (default 60)
   // vol-scaled position sizing
   int vol_sizing_enabled; // 0=disabled, 1=scale qty inversely with volatility
   FPN<F> vol_scale_min; // min scale factor (e.g. 0.25 = never less than 25% of
@@ -1178,6 +1191,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   for (int i = 0; i < 16; ++i) cfg.core_max_drawdown_pct[i] = FPN_Zero<F>();
   cfg.min_kill_loss = FPN_FromDouble<F>(5.0);   // $5 absolute-loss floor for trip
   cfg.enable_mtm_kill_switch = 1;                // mark-to-market enabled by default
+  // v5.12.1.A — disabled by default. Operator opts in for live deployment;
+  // backtest MUST keep this off (live-only safety net).
+  cfg.ws_dead_time_flatten_enabled = 0;
+  cfg.ws_dead_time_flatten_threshold_secs = 60;
   for (int i = 0; i < 16; ++i) cfg.core_model_path[i][0] = '\0';    // empty = shared
   for (int i = 0; i < 16; ++i) cfg.core_model_dir[i][0] = '\0';     // empty = use model_path or shared
   // v4.0 per-core overrides — zero in every field = "inherit global".
@@ -1401,6 +1418,9 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // Phase 3: kill switch tunables
     CFG_PARSE_FPN_POS(min_kill_loss)
     CFG_PARSE_U32(enable_mtm_kill_switch)
+    // v5.12.1.A — WS dead-time emergency-flatten (live-only safety net)
+    CFG_PARSE_INT(ws_dead_time_flatten_enabled)
+    CFG_PARSE_INT(ws_dead_time_flatten_threshold_secs)
     CFG_PARSE_PCT(max_exposure_pct)
     CFG_PARSE_PCT(min_hold_gain_pct)
     CFG_PARSE_PCT(regime_r2_threshold)

@@ -306,15 +306,28 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
                 (SpreadState<F, 1024>*)drv->spread_state,
                 *drv->current_spread);
         }
-        // v5.12.1.A — publish synthetic tick timestamp to
-        // EventLoopState::last_ws_tick_us so backtest preserves train-serve
-        // parity with the live producer's publish at EngineSharded fan_out.
-        // Backtest staleness gate is harmless (gap stays tiny because each
-        // backtest tick is consumed immediately AND cfg.ws_dead_time_flatten_enabled
-        // defaults 0 outside live deployment).
+        // v5.12.1.A.1+.2 — publish synthetic tick timestamp to
+        // EventLoopState::last_ws_tick_us. Backtest stays on tick.timestamp
+        // (deterministic + replay-safe) while LIVE producer (.A.2) switched
+        // to local system_clock. Backtest+live mismatch is harmless ONLY
+        // when cfg.ws_dead_time_flatten_enabled=0 (the default outside
+        // live deployment) — the staleness check returns immediately.
+        // Operator MUST NOT enable the flatten gate during backtest.
         if (drv->state) {
             drv->state->last_ws_tick_us.store(tick.timestamp,
                                                std::memory_order_release);
+            // v5.12.1.A.2 — backtest also runs CheckWsStaleness for parity
+            // with live slow-path call sites. Pass tick.timestamp as
+            // now_us (deterministic; matches the field we just published).
+            // Gate is inert at default cfg flag = 0; if operator enables
+            // it during backtest, gap == 0 → still no flatten (publish
+            // and check use same value). Determinism preserved.
+            if (drv->config && drv->oms) {
+                double current_price = FPN_ToDouble(tick.price);
+                EventLoop_CheckWsStaleness(drv->state, *drv->config,
+                                            current_price,
+                                            tick.timestamp);
+            }
         }
         if (drv->rolling && drv->config) {
             // v5.1.2 (full symmetric decoupling): backtest pushes to per-

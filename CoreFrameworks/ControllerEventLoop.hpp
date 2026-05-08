@@ -66,6 +66,7 @@
 
 #include <cstdint>
 #include <ctime>
+#include <chrono>      // v5.12.1.A.2 — system_clock for WS staleness math
 
 namespace tt {
 
@@ -2723,6 +2724,134 @@ inline void EventLoop_TimeExit(EventLoopState<F>* state,
     for (int c = 0; c < state->registered_count; ++c) {
         EventLoop_TimeExitOneCore(state, oms, cfg, now_tick, current_price, c);
     }
+}
+
+//======================================================================================================
+// [WS-STALENESS EMERGENCY FLATTEN] (v5.12.1.A.2)
+//======================================================================================================
+// Live-only safety net for extended WS dropouts during real-money trading.
+// Slow-path reads producer's last_ws_tick_us (set in EngineSharded fan_out
+// at every WS tick); when the gap to local_now_us exceeds
+// cfg.ws_dead_time_flatten_threshold_secs and the gate cfg flag is set,
+// CAS-wins one slow-path thread invokes EventLoop_FlattenAll to push
+// market-exit commands for every active position into the standard
+// drainer queue.
+//
+// Disabled by default (cfg.ws_dead_time_flatten_enabled = 0); flip to 1
+// BEFORE live-capital deployment. Backtest must keep it 0 — backtest's
+// tick-driven last_ws_tick_us would otherwise produce a huge gap vs
+// local clock and fire phantom flattens.
+//
+// SLOW PATH only. NOT branchless (early returns are cheaper than
+// branchless mask compute when the predicate is almost-always false —
+// cfg flag default 0 → first branch returns immediately, ~5ns total).
+// When enabled, full check costs ~100-200ns (clock_gettime via vDSO +
+// atomic load + comparisons). Well within 100μs slow-path budget.
+//
+// Hot path UNTOUCHED.
+//======================================================================================================
+// EventLoop_FlattenAll: walk active-position bitmap, push market exits
+// via OMS_PushSubmit. Drainer is sole Submit caller (CLAUDE.md item 5)
+// so we go through PushSubmit, not Submit directly. Returns count of
+// commands queued (0 if portfolio empty). Idempotent — caller (CAS
+// winner) invokes once per flatten event; subsequent CAS-failed callers
+// don't re-enter.
+template <unsigned F>
+inline int EventLoop_FlattenAll(EventLoopState<F>* state,
+                                 OrderManagerState<F>* oms,
+                                 double current_price,
+                                 int reason_code) {
+    int submitted = 0;
+    uint16_t bm = oms->portfolio.active_bitmap;
+    // event_price is for log/audit (the actual market fill happens at
+    // exchange-side price). FPN_Zero on degenerate price preserves
+    // existing OMS conventions.
+    FPN<F> price_fpn = (current_price > 0.0)
+        ? FPN_FromDouble<F>(current_price)
+        : FPN_Zero<F>();
+    int partial_on = oms->partial_exit_enabled ? 1 : 0;
+    while (bm) {
+        int slot = __builtin_ctz(bm);
+        bm &= (uint16_t)(bm - 1);
+        // logical_core: with partials, slots 2c+0/+1 → core c (shift-1).
+        // No partials, slot == core. Branchless via partial_on multiplier
+        // would obscure intent; 100us slow-path budget makes branch fine.
+        int logical_core = partial_on ? (slot >> 1) : slot;
+        FPN<F> qty = oms->portfolio.positions[slot].quantity;
+        uint8_t sid = state->cores[logical_core].strategy_id;
+        OMS_PushSubmit(oms, (int16_t)slot, ORDER_MARKET_SELL,
+                        qty, FPN_Zero<F>(), FPN_Zero<F>(),
+                        sid, price_fpn);
+        submitted++;
+    }
+    if (submitted > 0) {
+        std::fprintf(stderr,
+            "[OMS] FlattenAll: %d position(s) submitted "
+            "(reason=%d, price=%.2f)\n",
+            submitted, reason_code, current_price);
+    }
+    return submitted;
+}
+
+// EventLoop_CheckWsStaleness: read producer's last_ws_tick_us, compute
+// gap vs caller-supplied now_us, fire EventLoop_FlattenAll on CAS-win
+// when gap exceeds threshold. Pre-warmup (last_ws_tick_us == 0) is "no
+// flatten".
+//
+// LATENCY OPTIMIZATION (v5.12.1.A.2): now_us is a PARAMETER, not read
+// internally. This lets per-core slow-path share its single
+// system_clock::now() read with the existing sp_last_tick_us update
+// (EngineSharded.hpp:2890) — saves ~50-100ns of vDSO clock_gettime
+// per slow-path cycle per core. Caller passes its own measurement
+// (live: system_clock; backtest: tick.timestamp for determinism).
+//
+// Returns: 0 if not breached or CAS lost; > 0 (count of submits) when
+// this thread won the CAS and fired the flatten.
+//
+// Branchless considerations: cfg-flag check is the dominant fast path
+// (cfg.ws_dead_time_flatten_enabled = 0 by default → early return ~5ns,
+// no atomic load). Once enabled, the predicates are sequential branches
+// — slow-path branches are fine; the rare-true outcome justifies branch
+// over branchless mask compute.
+template <unsigned F>
+inline int EventLoop_CheckWsStaleness(EventLoopState<F>* state,
+                                       const ControllerConfig<F>& cfg,
+                                       double current_price,
+                                       uint64_t now_us) {
+    // Fast-path: gate disabled (default). Inlined check; no atomic load.
+    if (!cfg.ws_dead_time_flatten_enabled) return 0;
+
+    // Pre-warmup sentinel: producer hasn't published any tick yet.
+    uint64_t last = state->last_ws_tick_us.load(std::memory_order_acquire);
+    if (last == 0) return 0;
+
+    // Defensive: clock skew or NTP reset could leave now_us < last;
+    // treat as 0 gap. Avoids spurious flatten on clock anomalies.
+    uint64_t gap_us = (now_us > last) ? (now_us - last) : 0;
+    uint64_t threshold_us =
+        (uint64_t)cfg.ws_dead_time_flatten_threshold_secs * 1000000ULL;
+
+    if (gap_us < threshold_us) return 0;
+
+    // CAS: only one slow-path thread wins the flatten across multiple
+    // cores' concurrent calls. Subsequent calls in the same staleness
+    // window see flatten_pending == 1 and short-circuit. Reset of the
+    // flag (post-reconcile) lands in v5.12.1.A.3.
+    int expected = 0;
+    if (!state->oms->flatten_pending.compare_exchange_strong(
+            expected, 1,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+        return 0;  // another core already won; no double-flatten
+    }
+
+    std::fprintf(stderr,
+        "[OMS] WS staleness: gap=%.1fs > threshold=%ds; "
+        "firing OMS_FlattenAll.\n",
+        (double)gap_us / 1.0e6,
+        cfg.ws_dead_time_flatten_threshold_secs);
+    return EventLoop_FlattenAll(state, state->oms, current_price,
+                                 /*reason*/1);
 }
 
 //======================================================================================================

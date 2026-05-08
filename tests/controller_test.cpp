@@ -16545,6 +16545,131 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.12.1.A.2: WS-staleness gate + EventLoop_FlattenAll ---\n");
+    {
+        // Phase A.2 of v5.12.1.A. Adds EventLoop_FlattenAll +
+        // EventLoop_CheckWsStaleness in ControllerEventLoop.hpp. Slow-path
+        // CAS-coordinates so only one core fires the flatten when the
+        // producer's last_ws_tick_us gap exceeds the threshold.
+        //
+        // Tests use synthetic now_us (caller-supplied) so the gate's math
+        // is exercised deterministically without sleep/wallclock.
+
+        tt::OrderManagerState<64> oms;
+        tt::ExchangeAdapter<64> empty_adapter{};
+        tt::OrderManager_Init(&oms, empty_adapter, /*live=*/0,
+                              FPN_FromDouble<64>(10000.0),
+                              FPN_FromDouble<64>(0.001));
+        tt::EventLoopState<64> state;
+        tt::EventLoopState_Init(&state, &oms);
+
+        // Make a default config; verify our cfg fields parsed.
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.12.1.A.2: default cfg.ws_dead_time_flatten_enabled == 0",
+              cfg.ws_dead_time_flatten_enabled == 0);
+        check("v5.12.1.A.2: default cfg.ws_dead_time_flatten_threshold_secs == 60",
+              cfg.ws_dead_time_flatten_threshold_secs == 60);
+
+        // === Test 1: cfg flag=0 (default) → no flatten regardless of gap ===
+        {
+            state.last_ws_tick_us.store(1000ULL, std::memory_order_release);
+            uint64_t huge_now_us = 1000000000000ULL;  // gap >> threshold
+            int n = tt::EventLoop_CheckWsStaleness(&state, cfg, /*price*/100.0,
+                                                    huge_now_us);
+            check("v5.12.1.A.2: cfg flag=0 → CheckWsStaleness returns 0 "
+                  "(no flatten path entered)", n == 0);
+            check("v5.12.1.A.2: cfg flag=0 → flatten_pending stays 0",
+                  oms.flatten_pending.load(std::memory_order_acquire) == 0);
+        }
+
+        // === Test 2: enabled + last==0 (warmup) → no flatten ===
+        {
+            cfg.ws_dead_time_flatten_enabled = 1;
+            state.last_ws_tick_us.store(0ULL, std::memory_order_release);
+            uint64_t huge_now_us = 1000000000000ULL;
+            int n = tt::EventLoop_CheckWsStaleness(&state, cfg, 100.0, huge_now_us);
+            check("v5.12.1.A.2: enabled + last==0 (warmup) → no flatten",
+                  n == 0);
+            check("v5.12.1.A.2: warmup → flatten_pending stays 0",
+                  oms.flatten_pending.load(std::memory_order_acquire) == 0);
+        }
+
+        // === Test 3: enabled + gap < threshold → no flatten ===
+        {
+            uint64_t last_us  = 1000000000000ULL;             // some baseline
+            uint64_t now_us   = last_us + 30ULL * 1000000ULL; // 30s gap
+            state.last_ws_tick_us.store(last_us, std::memory_order_release);
+            oms.flatten_pending.store(0, std::memory_order_release);
+            int n = tt::EventLoop_CheckWsStaleness(&state, cfg, 100.0, now_us);
+            check("v5.12.1.A.2: enabled + gap<threshold (30s vs 60s) → "
+                  "no flatten",
+                  n == 0);
+            check("v5.12.1.A.2: gap<threshold → flatten_pending stays 0",
+                  oms.flatten_pending.load(std::memory_order_acquire) == 0);
+        }
+
+        // === Test 4: enabled + gap > threshold + empty portfolio →
+        //             CAS fires, but FlattenAll returns 0 (no positions) ===
+        {
+            uint64_t last_us  = 1000000000000ULL;
+            uint64_t now_us   = last_us + 90ULL * 1000000ULL; // 90s gap
+            state.last_ws_tick_us.store(last_us, std::memory_order_release);
+            oms.flatten_pending.store(0, std::memory_order_release);
+            // Portfolio is empty by default — bitmap=0 → FlattenAll
+            // returns 0 but flatten_pending CAS still wins.
+            int n = tt::EventLoop_CheckWsStaleness(&state, cfg, 100.0, now_us);
+            check("v5.12.1.A.2: gap>threshold + empty portfolio → "
+                  "FlattenAll returns 0 (no positions to close)", n == 0);
+            check("v5.12.1.A.2: gap>threshold → flatten_pending=1 (CAS won)",
+                  oms.flatten_pending.load(std::memory_order_acquire) == 1);
+        }
+
+        // === Test 5: second call after first fired → CAS loses, returns 0 ===
+        {
+            // flatten_pending is still 1 from Test 4. Caller should not
+            // re-enter the flatten path.
+            uint64_t last_us  = 1000000000000ULL;
+            uint64_t now_us   = last_us + 90ULL * 1000000ULL;
+            state.last_ws_tick_us.store(last_us, std::memory_order_release);
+            int n = tt::EventLoop_CheckWsStaleness(&state, cfg, 100.0, now_us);
+            check("v5.12.1.A.2: second call after fire → CAS lost, "
+                  "no double-flatten",
+                  n == 0);
+            check("v5.12.1.A.2: flatten_pending stays 1 after duplicate call",
+                  oms.flatten_pending.load(std::memory_order_acquire) == 1);
+        }
+
+        // === Test 6: FlattenAll on empty portfolio returns 0 ===
+        {
+            int n = tt::EventLoop_FlattenAll(&state, &oms, /*price*/100.0,
+                                              /*reason*/9);
+            check("v5.12.1.A.2: FlattenAll on empty bitmap returns 0",
+                  n == 0);
+        }
+
+        // === Test 7: FlattenAll on portfolio with one open position ===
+        {
+            // Manually open a position in slot 0 to verify FlattenAll
+            // pushes a market exit. With partial_exit_enabled=0 (default),
+            // slot 0 == core 0.
+            oms.flatten_pending.store(0, std::memory_order_release);
+            oms.portfolio.active_bitmap = (uint16_t)0x0001;
+            oms.portfolio.positions[0].quantity = FPN_FromDouble<64>(1.5);
+            oms.portfolio.positions[0].entry_price = FPN_FromDouble<64>(50000.0);
+            // Pre-condition: submit queue 0 should be empty (drainer
+            // hasn't run). Capture head before; verify head increased.
+            int submitted = tt::EventLoop_FlattenAll(&state, &oms, 50000.0,
+                                                      /*reason*/2);
+            check("v5.12.1.A.2: FlattenAll on 1-position portfolio "
+                  "submits 1 exit",
+                  submitted == 1);
+            // Reset for cleanup
+            oms.portfolio.active_bitmap = 0;
+        }
+
+        tt::OrderManager_Shutdown(&oms);
+    }
+
     printf("\n--- v5.12.1.A.1: last_ws_tick_us field on EventLoopState ---\n");
     {
         // Phase A.1 of v5.12.1.A (Disconnect-flatten policy). Adds a

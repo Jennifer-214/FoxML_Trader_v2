@@ -1497,12 +1497,22 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             ticks_produced.fetch_add(1, std::memory_order_relaxed);
             last_price.store(price_d, std::memory_order_relaxed);
             last_volume.store(volume_d, std::memory_order_relaxed);
-            // v5.12.1.A — publish wall-clock us of this tick to
+            // v5.12.1.A.1+.2 — publish LOCAL wall-clock us of this tick to
             // EventLoopState::last_ws_tick_us. Producer is the SOLE writer;
-            // slow-path threads + GUI read with acquire ordering. Used by
-            // the v5.12.1.A WS-staleness emergency-flatten gate (added in
-            // sub-tag .A.2) and the v5.12.1.C heartbeat indicator.
-            state.last_ws_tick_us.store(ts_us, std::memory_order_release);
+            // slow-path threads + GUI read with acquire ordering.
+            //
+            // SEMANTICS REFINED in .A.2: was ts_us (Binance exchange time)
+            // in the .A.1 commit; switched to local system_clock here so
+            // EventLoop_CheckWsStaleness can compare against another local
+            // clock read self-consistently (no NTP/skew dependency).
+            // Backtest still uses tick.timestamp (synthetic, deterministic);
+            // operator MUST keep cfg.ws_dead_time_flatten_enabled=0 in
+            // backtest to avoid phantom-flatten under that mismatch.
+            uint64_t local_now_us = (uint64_t)
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+            state.last_ws_tick_us.store(local_now_us, std::memory_order_release);
+            (void)ts_us;  // ts_us still used by other fan_out consumers
 
             // v5.1.4: GUI drag-TP/SL pickup runs per-tick, NOT at slow-path
             // cadence. Pre-v5.1.4 this lived in the cadence block and gave
@@ -1859,6 +1869,19 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         EventLoop_TrailingSLRatchet(&state, cfg,
                             state.cores[0].slow_state->rolling_short, current_price);
                     }
+                    // v5.12.1.A.2 — WS-staleness emergency-flatten gate.
+                    // Default cfg.ws_dead_time_flatten_enabled=0 → 5ns
+                    // early return. Live deployment (=1) → ~150ns/cycle
+                    // including vDSO clock_gettime; fires OMS_FlattenAll
+                    // when producer goes silent for > threshold seconds.
+                    // Centralized arch reads clock once for the gate;
+                    // per_core_slow path (below) shares clock with the
+                    // existing sp_last_tick_us update (~50ns saving).
+                    uint64_t centralized_now_us = (uint64_t)
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count();
+                    EventLoop_CheckWsStaleness(&state, cfg, current_price,
+                                                centralized_now_us);
                 }
 
 #ifdef USE_IMGUI_GUI
@@ -2886,12 +2909,26 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                              _sp_t1 - _sp_t0, _sp_t1);
 
                     // v5.0.3: post-cycle book-keeping for the topology panel.
+                    // v5.12.1.A.2 — single system_clock::now() read here is
+                    // SHARED with EventLoop_CheckWsStaleness immediately
+                    // below. Pre-v5.12.1.A.2 the gate had its own clock
+                    // read (~50-100ns extra per cycle per core). Sharing
+                    // saves that cost; sp_last_tick_us semantics preserved
+                    // (post-cycle wall-clock).
                     {
                         uint64_t now_us =
                             (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
                                 std::chrono::system_clock::now().time_since_epoch()).count();
                         state.cores[c].sp_last_tick_us.store(now_us, std::memory_order_relaxed);
                         state.cores[c].sp_cycles_total.fetch_add(1, std::memory_order_relaxed);
+                        // v5.12.1.A.2 — WS-staleness emergency-flatten gate.
+                        // Reuses now_us above (no extra clock read). Default
+                        // cfg.ws_dead_time_flatten_enabled=0 → 5ns early
+                        // return. CAS in CheckWsStaleness ensures only one
+                        // core's slow-path wins the flatten across all
+                        // concurrent calls.
+                        EventLoop_CheckWsStaleness(&state, cfg, price_d,
+                                                    now_us);
                     }
 
                     // NOTE: DrainPostFill stays on the drainer thread (single

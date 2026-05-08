@@ -283,6 +283,16 @@ struct OrderManagerState {
     uint8_t kill_switch_tripped;  // 1 once tripped (idempotent)
     uint8_t _pad_ks[7];
     uint64_t ks_trips_total;      // count of trip events (observability)
+    // v5.12.1.A.2 — WS-staleness emergency-flatten flag. CAS-set by
+    // EventLoop_CheckWsStaleness when the producer's last-tick gap exceeds
+    // cfg.ws_dead_time_flatten_threshold_secs. Multiple slow-paths may
+    // race for the CAS; only one wins and submits the flatten via
+    // EventLoop_FlattenAll. Read by Strategy_BuildParameters (.A.3) for
+    // recovery-refusal gating during the post-flatten reconcile window.
+    // std::atomic<int> for the compare_exchange_strong primitive; raw
+    // uint8_t kill_switch_tripped above is read-only after init in non-
+    // CAS contexts so atomicity is implicit on x86.
+    std::atomic<int> flatten_pending;  // 0 = normal, 1 = flatten fired
 
     // === TRADE LOG (moved from EventLoopState in phase 03 chunk 1) ===
     // Optional CSV trade log. nullptr → no logging (default). Not owned —
@@ -468,6 +478,8 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     oms->kill_switch_tripped = 0;
     oms->ks_trips_total      = 0;
     oms->trade_log           = nullptr;
+    // v5.12.1.A.2 — emergency-flatten flag init.
+    oms->flatten_pending.store(0, std::memory_order_relaxed);
 
     oms->total_submitted.store(0, std::memory_order_relaxed);
     oms->total_filled.store(0, std::memory_order_relaxed);
