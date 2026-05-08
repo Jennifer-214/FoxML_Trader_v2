@@ -4,49 +4,25 @@ per-core risk-sharded crypto trading engine in C++17. one position per pinned CP
 
 ![per-core latency panel](assets/per-core-latency.png)
 
-> **measured on i9-9980HK, 4 cores, GUI running, no isolcpus, no chrt:**
-> min 40 ns · p50 73-196 ns · p95 261-538 ns · **p99 494-912 ns** · max 1.0-4.9 µs
+> **measured live, GUI running, no isolcpus, no chrt, consumer hardware:**
+> p50 hot-path: **30-40 ns real** (after subtracting ~25-30 ns rdtsc bracket overhead) · p99: **400-570 ns** · slow path p50: **90-100 µs** · slow path p99: **115-220 µs**
 >
-> rdtsc bracket overhead is ~8 ns on this CPU, so real per-tick work sits around **32-40 ns** in live multi-threaded execution. single-thread cache-resident algorithmic floor is **11.56 ns/tick** (see bench table below).
+> single-thread cache-resident algorithmic floor: **11.56 ns/tick** (see `bench_batch_floor`). sub-100ns p50 on consumer hardware is in the same neighborhood as colo-tier HFT engines for similar branchless dispatch logic.
 
-### minimum p99 observed in live trading
+built from scratch, self-taught. reusable primitives extracted as a public C++20 header-only library: [**FoxLIB**](https://github.com/Jennyfirrr/FoxLIB).
 
-![min per-core p99 — 76ns](assets/per-core-latency-best.png)
+**LOC breakdown** (the size that matters is the hot path, not the total):
 
-> **44,500 samples per core, live Binance feed, GUI rendering at the same time.**
-> This is the **floor** I've seen — typical live p99 sits in the **200-700 ns** band depending on system load, GUI activity, and kernel preemption. The 76 ns reading is a best-observed cherry-pick, not the average.
->
-> What it shows: with the kernel cooperating, the algorithmic floor is genuinely deep. Core 3 SimpleDip · p99 = **76 ns** · subtract ~25–30 ns rdtsc floor → effective **~46 ns p99**. Core 2 AUTO · p99 = **78 ns**.
->
-> p50 across all cores: 43 ns raw → ~13 ns effective. The p99 tail variance comes from kernel preemption / scheduler steal — `chrt -f 90 taskset -c 4-7` would lock it closer to the floor consistently.
->
-> measured on i9-9980HK (Coffee Lake H, 2.4 GHz base / 5.0 GHz turbo, 2018-2019).
+| component | code LOC |
+|---|---:|
+| **hot path** (executor per-tick math: ExecutionCore + OrderGates + ParameterSlot) | **389** |
+| engine (CoreFrameworks + Strategies + ML_Headers + DataStream + FixedPoint + MemHeaders) | 24,546 |
+| backtest + training pipeline | ~11,000 |
+| GUI (Dear ImGui panels) | ~7,400 |
+| tests (1879 assertions) | ~17,800 |
+| **total project** | **~89,000** |
 
-built from scratch, self-taught, ~60k lines across engine + backtest suite + ML pipeline. reusable primitives extracted as a public C++20 header-only library: [**FoxLIB**](https://github.com/Jennyfirrr/FoxLIB).
-
-**recent (v5.9.x):**
-- 🛡 ML hardening sprint: silent-failure surfacing + train-serve parity. 27 audit findings closed, 27 tags shipped. Stamp body extended with `engine_version`, `feature_registry_hash`, `scaler_sha256`, XGBoost hyperparams, and build flags fingerprint. Engine refuses model loads on cross-build / cross-cfg / cross-feature-registry drift. ([v5.9.x](DOCS/changelogs/2026-05-02-v5.9-ml-hardening.md))
-- 🧩 Easy Additions: X-macro registries everywhere (FOREACH_STRATEGY, FOREACH_FEATURE, FOREACH_PANEL). Adding a new strategy / feature / panel = 1 line. ([v5.8.x](DOCS/changelogs/2026-05-01-v5.8-easy-additions.md))
-- 🎯 Strategy quality: regime classifier audit, MOM quality filters (opt-in), Strategy Quality GUI panel. ([v5.7.x](DOCS/changelogs/2026-04-30-v5.7-strategy-quality.md))
-- 🔭 Execution / display divergence: every hot-path predicate term must have a GUI surface. ([v5.6.x](DOCS/changelogs/2026-04-30-v5.6-execution-display.md))
-- 1326+ unit tests across engine + parity harness + train-serve replay determinism
-
-## documentation
-
-| If you're... | Read |
-|---|---|
-| **New to the codebase** | [`CLAUDE.md`](CLAUDE.md) (always-loaded reference) → [`DOCS/KNOWN_ISSUES.md`](DOCS/KNOWN_ISSUES.md) (current state + active testing + workarounds) → this README's *architecture* + *build* sections |
-| **Adding a feature / strategy / ML feature** | [`DOCS/CLAUDE_INTEGRATION.md`](DOCS/CLAUDE_INTEGRATION.md) → relevant interface doc: [`STRATEGY_INTERFACE.md`](DOCS/STRATEGY_INTERFACE.md), [`FEATURE_INTERFACE.md`](DOCS/FEATURE_INTERFACE.md), [`TARGET_INTERFACE.md`](DOCS/TARGET_INTERFACE.md), or [`STRATEGY_TEMPLATE.hpp`](DOCS/STRATEGY_TEMPLATE.hpp) |
-| **Working on the hot path / OMS / kill switch / snapshots** | [`DOCS/CLAUDE_INVARIANTS.md`](DOCS/CLAUDE_INVARIANTS.md) — load-bearing rules |
-| **Working on the ML pipeline (features, labels, scaler, stamps)** | [`DOCS/CLAUDE_ML_INVARIANTS.md`](DOCS/CLAUDE_ML_INVARIANTS.md) + [`DOCS/PARITY_LIFECYCLE.md`](DOCS/PARITY_LIFECYCLE.md) + [`DOCS/PARITY_VERIFICATION_CHECKLIST.md`](DOCS/PARITY_VERIFICATION_CHECKLIST.md) |
-| **Reviewing changes** | [`DOCS/CLAUDE_REVIEW.md`](DOCS/CLAUDE_REVIEW.md) — 10-item readiness checklist |
-| **Backtest suite operator** | [`DOCS/CLAUDE_FOXML_SUITE.md`](DOCS/CLAUDE_FOXML_SUITE.md) + [`DOCS/ML_TRAINING.md`](DOCS/ML_TRAINING.md) |
-| **Sprint planning** | [`plans/`](plans/) (gitignored — synced privately to workspace repo) — master plan + per-ship sub-plans |
-| **Looking for what shipped when** | [`DOCS/CHANGELOG.md`](DOCS/CHANGELOG.md) (elevator pitches) → [`DOCS/changelogs/INDEX.md`](DOCS/changelogs/INDEX.md) (per-sprint detailed write-ups) |
-| **Tracking future work** | shipped items: [`DOCS/CHANGELOG.md`](DOCS/CHANGELOG.md). roadmap + unshipped ideas live in operator-private working notes (gitignored). |
-| **Recurring bug avoidance** | [`DOCS/RECURRING_BUG_PATTERNS.md`](DOCS/RECURRING_BUG_PATTERNS.md) — bug classes that have happened more than once |
-| **Code-map / function lookup** | [`DOCS/CODE_MAP.md`](DOCS/CODE_MAP.md) — auto-generated `Pattern_FunctionName` index. Run `tools/gen_code_map.sh` to refresh. |
-| **Testing invariants** | [`tests/INVARIANTS_MAP.md`](tests/INVARIANTS_MAP.md) — which test group covers each documented invariant |
+The hot path is **0.4% of the project**. The rest is supporting infrastructure — training pipeline (so models get the right features), parity tests (so train + serve produce bytewise-identical output), backtest harness (so strategies validate before paper), GUI (so the operator sees what's happening), invariants tests (so future changes don't silently break load-bearing rules). All in service of keeping the executor tiny and trustworthy.
 
 [![Donate](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.com/ncp/payment/8M6XLK7M8569C) [![Discord](https://img.shields.io/badge/Discord-Community-5865F2.svg)](https://discord.gg/asSDcYwPz)
 
@@ -54,9 +30,22 @@ built from scratch, self-taught, ~60k lines across engine + backtest suite + ML 
 
 ---
 
+## recent (v5.11.x)
+
+- 🔬 **slow path 30x faster.** v5.11 sprint (9 phases, 65 sub-ships) collapsed slow-path p99 from ~3000µs to ~220µs. AVX-512 Bandit_GetProbabilities, FPN<F=64> end-to-end determinism, locale-immune parsing, allocator eradication, mmap arenas, async log writer, branchless ring buffer commit.
+- 🤖 **multi-horizon ML ensemble.** Bandit-Exp3 weighted blend per regime over N horizons. Train multi-horizon at v5.11.41+; live engine auto-detects sibling `_horizon_<N>` dirs + per-regime bandit weights. Runtime IC drift detection auto-demotes degraded horizons.
+- 🎯 **role-agnostic strategy** (v5.11.62). Strategy code never touches role names — adding a new model role is a 5-step procedure that doesn't change the strategy at all. Trains barrier 3-class, regression, binary buy_signal — all work transparently.
+- 🛡 **train-serve parity locked** by FEATURE_REGISTRY_HASH + LABEL_REGISTRY_HASH + scaler_sha256 + HMAC stamp body. Cross-build / cross-cfg / cross-feature drift refused at engine load.
+- 🔄 **hot model swap** without engine restart, safety-gated by open-position semantics.
+- 1879 unit tests · 30+ snapshot parity tests · replay-determinism baseline
+
+[full version history → `DOCS/CHANGELOG.md`](DOCS/CHANGELOG.md)
+
+---
+
 ## hire me
 
-built this from the ground up — branchless fixed-point math, lock-free SPSC plumbing, per-core sharding, ML inference pipeline, regime detection. ~60k lines, 890+ tests. self-taught. if you're building HFT, low-latency, or quantitative systems, i'd love to talk.
+built this from the ground up — branchless fixed-point math, lock-free SPSC plumbing, per-core sharding, ML inference pipeline, regime detection, multi-horizon Bandit-Exp3 ensemble, train-serve parity infrastructure. self-taught. if you're building HFT, low-latency, or quantitative systems, i'd love to talk.
 
 - email: jenn.lewis5789@gmail.com
 - phone: 205-413-7057
@@ -69,11 +58,11 @@ built this from the ground up — branchless fixed-point math, lock-free SPSC pl
 
 ![price chart with gate overlays](assets/gui-chart.png)
 
-> live chart, BTCUSDT 1m bars. entry tag `#0,1 $76460` mid-frame, TP +1066 / SL -390 lines extending across, per-core gate lines (C0 MR, C1 EMA, C2 AUTO, C3 DIP) stacked on the left and staggered to avoid label collision. SMA ribbon, VWAP, EU session marker rendered together without fighting each other.
+> live chart, BTCUSDT 1m bars. entry tags use `#core.leg` notation (`#0.A`, `#0.B`, etc.) matching the Positions panel. TP / SL lines extending across, per-core gate lines stacked on the left and staggered to avoid label collision. SMA ribbon, VWAP, EU session marker rendered together.
 
 ![full GUI dashboard](assets/gui-dashboard.png)
 
-> full layout. 4 cores running different strategies (MR / EMA / AUTO / DIP), regime detector classifying `TRENDING_DOWN`, partials paired across slots `#3.A` and `#3.B`, per-core latency p50 35-58 ns over 513k samples, account + risk panels with kill switch armed per core. all from a single tick stream fanned across SPSC rings.
+> 4 cores running different strategies (ML / DIP / AUTO / EMA), regime classifier active, partial exits paired across slots `#3.A` and `#3.B`, per-core latency panel, ML Ensemble panel showing per-horizon bandit weights per regime, account + risk panels with kill switch armed per core. all from a single tick stream fanned across SPSC rings.
 
 ---
 
@@ -88,13 +77,15 @@ raw nanoseconds are abstract. context for what 500 ns p99 buys you:
 | cross-core cache line bounce (HITM) | 50–100 ns |
 | L3 cache hit | 10–15 ns |
 | local DRAM access | 80–100 ns |
-| **this engine, full gate eval p99 (no isolation)** | **500–900 ns** |
+| **this engine, full gate eval p99** | **400–570 ns** |
 | TCP loopback round-trip | ~10–20 µs |
 | `recvmsg()` through kernel network stack | 1–5 µs |
 | DPDK userspace networking | 1–3 µs |
 | typical exchange round-trip (colocated) | 20–100 µs |
 
-end-to-end gate evaluation p99 in 500–900 ns on a desktop laptop with no kernel bypass is in the same neighborhood as commercial HFT engines. the p99 tail is mostly kernel preemption (scheduler stealing timeslices), not the algorithm — `chrt -f 90 taskset -c 4-7` would flatten it into the low-100s.
+end-to-end gate evaluation p99 in 400–570 ns on a consumer laptop with no kernel bypass is in the same neighborhood as commercial HFT engines for branchless dispatch logic. p99 tail variance comes from kernel preemption — `chrt -f 90 taskset -c 4-7` + isolcpus would flatten it into the low-100s. see `DOCS/OPERATOR_DEPLOYMENT.md` for the deployment runbook.
+
+---
 
 ## architecture
 
@@ -106,10 +97,10 @@ HOT PATH (every tick, per-core, ~30-40 ns measured work):
     ↓ branchless BG/SG evaluation (4 FPN comparisons)
     ↓ on entry/exit: push TradeEvent → SPSC ring
 
-SLOW PATH (per-core pthread, every ~256 ticks per cadence override):
-  ↓ RollingStats (least-squares regression, R², variance) — per-core slow_state
-  ↓ RegimeSignals (7 features, score-based classifier) — per-core
-  ↓ ML inference (XGBoost/LightGBM single-row, ~1-5 µs) — per-core model
+SLOW PATH (per-core pthread, every poll_interval ticks):
+  ↓ RollingStats (least-squares regression, R², variance)
+  ↓ RegimeSignals (7 features → score-based classifier)
+  ↓ ML inference (XGBoost single-row predict, ~1-5 µs)
   ↓ Strategy_BuildParameters → GateParameters
   ↓ ParameterSlot_Write (seqlock, wait-free producer)
 
@@ -125,162 +116,126 @@ DRAINER (single thread):
   ↓ routes through Order Management System
   ↓ portfolio mutation via extracted fill handler
 
-ORDER MANAGEMENT SYSTEM:
-  per-core SPSC submit queues funnel into the single drainer
-  three input rings: REST fills, WebSocket fills, reconciliation
-  async submission via BinanceAdapter worker thread
-  idempotency keys, error-aware retry, rate limit tracking
-  binary event log with disk persistence + deterministic fold
-
 GUI (Dear ImGui, SDL2/OpenGL3):
   double-buffered TUISnapshot from producer thread
-  per-core buy gate overlays on price chart
-  per-strategy settings panel with hot-swap
+  per-core buy gate overlays, ML Ensemble panel, settings hot-swap
 ```
 
-the key insight: **the hot path is immune to model complexity.** XGBoost, LightGBM, LSTM, no model — the executor cores see only the resulting `GateParameters` struct. swap the model, the per-tick cost is unchanged.
+**The key insight: the hot path is immune to model complexity.** XGBoost, LightGBM, transformer, no model — the executor cores see only the resulting `GateParameters` struct. swap the model, the per-tick cost is unchanged.
 
-## the seqlock postmortem (one war story)
+---
 
-the original design called for a triple buffer between the slow-path producer and the per-core executors. wait-free, lock-free, three slots, atomic index swap. textbook.
+## the seqlock story
 
-then phase 5 stress test produced torn reads at high producer rate. wrote the test, expected it to pass, didn't. the triple buffer had a race window when the producer wrote a new slot while a consumer was mid-read of the slot the producer was about to claim. classic ABA-adjacent.
+original design: triple buffer between the slow-path producer and per-core executors. wait-free, lock-free, three slots, atomic index swap. textbook.
 
-switched to a [seqlock](https://en.wikipedia.org/wiki/Seqlock) — same pattern Linux kernel uses for `seqcount_t`. wait-free producer increments the seq counter, writes the payload, increments again. lock-free consumer reads seq, reads payload, re-reads seq, retries on mismatch.
+stress test produced torn reads at high producer rate. switched to a [seqlock](https://en.wikipedia.org/wiki/Seqlock) — same pattern Linux kernel uses for `seqcount_t`. wait-free producer increments the seq counter, writes payload, increments again. lock-free consumer reads seq, payload, re-reads seq, retries on mismatch.
 
-the catch: on a 192-byte payload, the byte-level read during a producer write IS technically a data race. ThreadSanitizer correctly flags it. the fix is `__attribute__((no_sanitize("thread")))` on the read path — same annotation Linux uses, because that race is the whole point of the seqlock invariant.
+cached the parameter snapshot in the executor itself — every tick does one acquire-load of `seq`, compares against `cached_seq`, skips the memcpy on match. steady-state cost: **~1 ns**. miss path: ~6 ns.
 
-```cpp
-// see ParameterSlot.hpp comment block for the full reasoning
-__attribute__((no_sanitize("thread")))
-static inline bool ParameterSlot_Read(...) {
-    uint32_t seq1 = atomic_load(&slot->seq, memory_order_acquire);
-    if (seq1 & 1) return false;       // producer mid-write
-    memcpy(out, &slot->params, sizeof(*out));
-    uint32_t seq2 = atomic_load(&slot->seq, memory_order_acquire);
-    return seq1 == seq2;              // retry if changed
-}
-```
+trust the stress test over the plan. plan said triple buffer, test said torn reads, test won. full reasoning in `CoreFrameworks/ParameterSlot.hpp`.
 
-then we cached the parameter snapshot in the executor itself — every tick does one acquire-load of `seq`, compares against `cached_seq`, skips the memcpy on match. steady-state cost: **~1 ns**. miss path: ~6 ns. inferring a 192-byte cache miss out of the per-tick budget unless parameters actually changed.
-
-moral: trust the stress test over the plan. the plan said triple buffer, the test said torn reads, the test won.
+---
 
 ## measurement methodology
 
-per-call `rdtsc` has a structural overhead — the bracket itself costs more than what you're measuring on a fast hot path. on this i9-9980HK, the rdtsc bracket overhead is **~8 ns** (it was ~27 ns on the older Ice Lake i5). a per-tick latency number that doesn't subtract this is wrong by 25–60%.
+per-call `rdtsc` has structural overhead — the bracket itself costs more than what you're measuring on a fast hot path. on this CPU, the rdtsc bracket overhead is **~25-30 ns**. a per-tick latency number that doesn't subtract this is wrong by 25-60%.
 
-`bench_batch_floor.cpp` brackets `rdtsc` ONCE around N=1M iterations of `ExecutionCore_Tick` and divides. amortizes the rdtsc tax to ~0 and reports the actual steady-state per-tick work in nanoseconds:
+`bench_batch_floor.cpp` brackets `rdtsc` ONCE around N=1M iterations of `ExecutionCore_Tick` and divides — amortizes the rdtsc tax to ~0:
 
-| variant | ns/tick (i9-9980HK, perf governor) |
+| variant | ns/tick (measured) |
 |---|---:|
 | orig (full 192B memcpy every tick) | 13.35 |
-| cached (skip memcpy on seq match) | 15.04 |
-| cached_v2 (no local copy) | 13.08 |
-| cached_v3 (branch for active state) | 12.95 |
+| cached (skip memcpy on seq match) | 13.08 |
 | **floor (gates + permission load only)** | **11.56** |
 | **abs floor (1 cmp + 1 atomic load)** | **2.94** |
 
-the `floor` is the algorithmic limit — what the gate evaluation itself costs without parameter caching, exit overrides, or the active-state branch. the `abs floor` is the loop infrastructure ceiling: 14.7 cycles at 5 GHz for 1 FPN compare + 1 acquire load + loop overhead. the CPU isn't going to do this faster.
+the `floor` is the algorithmic limit — what gate evaluation costs without parameter caching. the `abs floor` is the loop infrastructure ceiling. the CPU isn't going to do this faster.
 
-at 5 GHz, the 192-byte memcpy is basically free, so the cache optimization barely shows on this hardware. the wins compound on slower CPUs or under cache pressure — on the older Ice Lake i5, the same optimization saved ~10 ns/tick.
+---
 
-## per-core strategies
+## ML pipeline
 
-each execution core runs a different strategy with independent tuning:
+cores running `core_N_strategy=ml` load XGBoost models via `core_N_model_dir=<base_path>`. engine auto-detects multi-horizon siblings (`<base>_horizon_<N>/`) and runs Bandit-Exp3 weighted blend per regime.
 
+**training:** foxml_suite GUI runs walk-forward CV + held-out validation + auto-stamp. label kinds: binary buy_signal, 3-class barrier (PEAK_VALLEY_STABLE), regression. multi-horizon training writes per-horizon model files; live engine auto-detects.
+
+**ML never runs on the hot path.** model produces gate parameters at slow-path cadence; executor consumes them in single-digit ns. swap model class entirely — hot path cost unchanged.
+
+train-serve parity locked via:
+- `FEATURE_REGISTRY_HASH` (FOREACH_FEATURE X-macro fingerprint)
+- `LABEL_REGISTRY_HASH` (FOREACH_TARGET X-macro fingerprint)
+- `scaler_sha256` (FeatureStandardizer sidecar binding)
+- HMAC-signed stamp body (cross-build / cross-cfg / cross-feature drift refused)
+
+see `DOCS/CLAUDE_ML_INVARIANTS.md` + `DOCS/PARITY_LIFECYCLE.md` for the full contract.
+
+---
+
+## build
+
+```bash
+./build.sh test     # ANSI TUI engine + controller_test (1879 tests)
+./build.sh gui      # ImGui GUI (engine_gui + foxml_suite)
+./build.sh suite    # GUI + XGBoost training (requires xgboost C lib)
+./build.sh tsan     # ThreadSanitizer build
+./build.sh asan     # AddressSanitizer build
+./build.sh all      # everything
 ```
-core_0_strategy = simple_dip
-core_0_risk_pct = 20.0
 
-core_1_strategy = momentum
-core_1_risk_pct = 5.0
+requires: g++ (C++17), OpenSSL, CMake 3.14+. GUI adds SDL2 + OpenGL3. ML adds XGBoost C library (build from source — see `DOCS/QUICKSTART.md`).
 
-core_2_strategy = ml
-core_2_model_path = models/trend_model.xgb
-core_2_risk_pct = 10.0
+---
 
-core_3_strategy = ema_cross
+## config
+
+```ini
+# engine.cfg — minimal example
+engine_mode = sharded
+engine_arch = per_core_slow      # v5.0+ default
+num_execution_cores = 4
+use_real_money = 0               # paper trading (default)
+
+starting_balance = 10000.00
+fee_rate_taker = 0.00100
+risk_pct = 5.00                  # per-core risk %
+
+# per-core strategy + ML model
+core_0_strategy = ml
+core_0_model_dir = models/classification/my_run
+core_0_disabled_horizons = 1000  # CSV; freeze underperforming horizons
+
+# train-serve parity gate
+held_out_gate_strict = 0         # 0 = warn-only, 1 = refuse on stamp failure
+held_out_stamp_secret =          # HMAC secret (empty = devmode)
+gap_acceptable_threshold = 0.05  # WF/held-out gap that fails the stamp
 ```
 
-available strategies: `simple_dip`, `momentum`, `mean_reversion`, `ema_cross`, `ml`, `none`
+hot-reloadable with `r` in the TUI. per-core strategy and risk can be changed at runtime via the Settings panel. full reference: `DOCS/CONFIGURATION.md`.
 
-per-strategy TP/SL overrides so different strategies get different tuning:
+---
+
+## tests
+
+```bash
+./build/controller_test           # 1879 assertions
+./build/depth_recorder_test       # depth recorder
+./build/parity_harness            # legacy single_core ↔ sharded backtest byte-identity
+./build_lat/bench_batch_floor     # latency bench (rdtsc-bracketed)
 ```
-simpledip_tp_pct = 0.15
-simpledip_sl_pct = 0.10
-momentum_tp_mult = 3.0      # stddev multipliers, not percentage
-momentum_sl_mult = 1.5
-emacross_tp_pct = 0.20
-```
 
-risk allocation is per-core — one position per pinned CPU, no contention, no shared bitmap. portfolio aggregation is a slow-path concern, not a hot-path one.
+`controller_test` covers engine + ML pipeline + OMS + reconcile + train-serve parity. `parity_harness` runs both engine paths on the same input and asserts byte-identical training data — pins train-serve symmetry by construction. seqlock test catches torn reads at high producer rate; that's how the original triple buffer plan got rejected.
 
-## ML inference
+ThreadSanitizer build (`./build.sh tsan`) validates lock-free patterns. AddressSanitizer (`./build.sh asan`) catches memory hazards.
 
-cores running `strategy = ml` load an XGBoost or LightGBM model and run single-row inference on every slow-path cycle (~1–5 µs). 16 features packed from rolling stats: short/long slopes, R², variance, volume delta, VWAP deviation, regime signals.
+---
 
-train models in the foxml_suite backtest GUI, export to `.xgb`, point config at them. each core can load a different model — run an aggressive model on one core and a conservative model on another, each with its own risk allocation.
-
-**ML never runs on the hot path.** the model produces gate parameters, the parameter slot ferries them across, the executor consumes them in single-digit ns. swap the model class entirely (XGBoost → LSTM → transformer → none) and the executor's per-tick cost doesn't change.
-
-## trained model results
-
-> **Status:** held-out training pipeline runs end-to-end (v5.3.0 Phase A) and the load-time gate is enforced (v5.2.0). Numbers below get filled in when a model with non-zero held-out Pearson r exists. Section is template-only until then.
-
-### methodology
-
-- **Walk-forward** for hyperparameter selection (purged temporal CV — train on `[0, t)`, test on `[t+buffer, t+buffer+horizon)`, advance, repeat). Per-fold metric: accuracy for binary/multiclass, Pearson r for regression. Aggregated as mean ± stddev across folds.
-- **Held-out** for the unbiased generalization estimate. A locked portion (default 20%, configurable via `held_out_fraction`) is reserved BEFORE any tuning. Code refuses to peek without an explicit unlock + audit log (`HeldOutSplit_Unlock`). After WF picks hyperparameters, `Backtest_RunFullValidation` calls `HeldOutSplit_TrainEval` which trains one model on `[0, trainval_end_idx)` with those hyperparameters and evaluates on the held-out portion. Same hyperparameters as a WF fold so the gap is apples-to-apples.
-- **Generalization gap**: `|WF_mean_val - held_out|`. Threshold is `gap_acceptable_threshold` (default 0.05). Gap above threshold = WF was overfit despite per-fold OK numbers — model doesn't ship.
-- **Load-time gate** (v5.2.0 + v5.3.0): each `model.bin` has a sibling `model.stamp` containing format-version, sha256 of the binary, wf_mean_val, held_out_metric, gap, gap_threshold, plus an HMAC-SHA256 signature. At engine boot in strict mode, `verify_model_stamp` checks all four; any failure refuses the load. Stamps are generated either via `tools/stamp_model.sh` (CLI) or in-process via `stamp_write_for_model` (auto-stamp wiring lands in v5.3.2).
-- **Reproducibility**: model bundles save `expected.cfg` capturing label_type, `held_out_fraction`, `gap_acceptable_threshold`, threshold values. Live engine logs these at load time so future-you sees the discipline values the model was trained under.
-
-### walk-forward validation
-
-| fold | train range | val range | metric | overfit? |
-|------|-------------|-----------|--------|----------|
-| 1/5  | TBD         | TBD       | TBD    | TBD      |
-| 2/5  | TBD         | TBD       | TBD    | TBD      |
-| ...  |             |           |        |          |
-
-- Mean validation metric: TBD
-- Train/val gap: TBD
-- Folds flagged as overfit: TBD/5
-
-### held-out test
-
-- Held-out fraction: 0.20 (last 20% of dataset, ~2 months of 12-month BTCUSDT)
-- Held-out metric: TBD
-- WF → held-out gap: TBD
-- Gap acceptable threshold: 0.05
-- **Verdict: TBD** (PASS = gap < threshold; FAIL = gap ≥ threshold, model doesn't ship)
-
-### strategy comparison
-
-| strategy | total P&L (%) | Sharpe | max DD (%) | win rate (%) |
-|----------|---------------|--------|------------|--------------|
-| SimpleDip (vanilla)      | TBD | TBD | TBD | TBD |
-| SimpleDip + ML gate      | TBD | TBD | TBD | TBD |
-
-### equity curve
-
-[screenshot placeholder — fill from Compare panel after held-out evaluation]
-
-### reproducibility
-
-- Model fingerprint: TBD (SHA256 of training cfg + data)
-- Config bundle: `models/{run_name}/expected.cfg`
-- Data: BTCUSDT aggTrades, [start_date] – [end_date]
-- Engine version: TBD (see `Version.hpp`)
-- Tag at release: TBD
-
-## order management system (OMS)
+## order management system
 
 8 phases, all shipped:
 
 | phase | what |
-|-------|------|
+|---|---|
 | 01 | order state machine (PENDING → SUBMITTED → FILLED/REJECTED) |
 | 02 | async REST submission via BinanceAdapter (drainer never blocks) |
 | 03 | order event log + portfolio fold (deterministic replay) |
@@ -290,81 +245,37 @@ train models in the foxml_suite backtest GUI, export to `.xgb`, point config at 
 | 07 | disk persistence (binary event log, survives restarts) |
 | 08 | per-core strategy config |
 
-three concurrent SPSC rings feed the OMS drainer: REST results, WebSocket fills, reconciliation corrections. each has exactly one producer and one consumer. no MPSC needed. drainer drains all three sequentially in `OrderManager_Tick`.
+three concurrent SPSC rings feed the OMS drainer: REST results, WebSocket fills, reconciliation corrections. each has exactly one producer and one consumer. drainer drains all three sequentially in `OrderManager_Tick`.
 
-## build
+---
 
-```bash
-# ANSI TUI (zero deps beyond OpenSSL)
-cmake -B build -DUSE_NATIVE_128=ON && cmake --build build
+## documentation
 
-# ImGui GUI (SDL2 + OpenGL3)
-cmake -B build_gui -DUSE_IMGUI_GUI=ON -DUSE_NATIVE_128=ON && cmake --build build_gui
+| If you're... | Read |
+|---|---|
+| **New to the codebase** | [`CLAUDE.md`](CLAUDE.md) → [`DOCS/QUICKSTART.md`](DOCS/QUICKSTART.md) → architecture + build sections above |
+| **Adding a feature / strategy / ML feature** | [`DOCS/CLAUDE_INTEGRATION.md`](DOCS/CLAUDE_INTEGRATION.md) — recipes per category |
+| **Working on the hot path / OMS / kill switch** | [`DOCS/CLAUDE_INVARIANTS.md`](DOCS/CLAUDE_INVARIANTS.md) — load-bearing rules |
+| **Working on the ML pipeline** | [`DOCS/CLAUDE_ML_INVARIANTS.md`](DOCS/CLAUDE_ML_INVARIANTS.md) + [`DOCS/PARITY_LIFECYCLE.md`](DOCS/PARITY_LIFECYCLE.md) |
+| **Backtest / training operator** | [`DOCS/ML_TRAINING.md`](DOCS/ML_TRAINING.md) + [`DOCS/ML_USAGE.md`](DOCS/ML_USAGE.md) |
+| **Going to live trading** | [`DOCS/OPERATOR_DEPLOYMENT.md`](DOCS/OPERATOR_DEPLOYMENT.md) — kernel tuning, isolcpus, SCHED_FIFO, IRQ affinity |
+| **Looking for what shipped when** | [`DOCS/CHANGELOG.md`](DOCS/CHANGELOG.md) |
+| **Code-map / function lookup** | [`DOCS/CODE_MAP.md`](DOCS/CODE_MAP.md) — auto-generated `Pattern_FunctionName` index |
 
-# with ML model support
-cmake -B build_gui -DUSE_IMGUI_GUI=ON -DUSE_NATIVE_128=ON -DUSE_XGBOOST=ON && cmake --build build_gui
+---
 
-cd build_gui && ./engine_gui
-```
+## current state
 
-requires: g++ (C++17), OpenSSL, CMake 3.14+. GUI adds SDL2 + OpenGL3. ML adds XGBoost C library (build from source — see [DOCS](DOCS/)).
+- ✅ engine architecture, hot path, slow path, OMS, ML pipeline, GUI — all stable
+- ✅ multi-horizon ensemble training + live deployment working end-to-end
+- ✅ train-serve parity infrastructure complete (v5.9 hardening sprint + v5.11.62 role-agnostic refactor)
+- ✅ paper trading on real Binance feed validated
+- 🚧 live capital deployment — gated on disconnect-flatten policy + latency staleness gate (deferred work, ~1.5 days when triggered)
+- 🚧 testnet 24-hour soak — pending before mainnet
 
-## config
+unshipped roadmap items live in operator-private working notes (gitignored). [`DOCS/CHANGELOG.md`](DOCS/CHANGELOG.md) has the public per-version highlights.
 
-set `engine_mode = sharded` in engine.cfg. key settings:
-
-```
-engine_mode = sharded
-engine_arch = per_core_slow    # v5.0+ default. legacy: centralized (single shared slow-path)
-num_execution_cores = 4
-sharded_force_synthetic = 0    # 1 = offline testing with synthetic ticks
-use_real_money = 0             # paper trading (default)
-
-starting_balance = 10000.00
-fee_rate = 0.10
-fee_rate_taker = 0.00100       # taker rate (Binance tier 0)
-fee_rate_maker = 0.00075       # maker rate (Binance tier 0)
-risk_pct = 15.00               # default per-core risk (override with core_N_risk_pct)
-
-take_profit_pct = 0.15         # shared TP (override per-strategy)
-stop_loss_pct = 0.10           # shared SL (override per-strategy)
-
-# held-out validation gate (v5.2.0 + v5.3.0)
-held_out_gate_strict = 0       # 0 = warn-only (default), 1 = refuse load on stamp failure
-held_out_stamp_secret =        # HMAC-SHA256 secret; empty = accept-any (dev convenience)
-gap_acceptable_threshold = 0.05
-
-# live exchange reconciliation (v5.2.1)
-reconcile_dry_run = 1          # 1 = log what would change, don't apply (default)
-reconcile_interval_sec = 0     # 0 = boot-only; >0 = heartbeat poll cadence
-```
-
-hot-reloadable with `R` in the GUI. per-core strategy and risk can be changed at runtime via the settings panel.
-
-## tests
-
-```bash
-./build/controller_test           # 892 assertions across the engine + ML + OMS + reconcile
-./build/depth_recorder_test       # 17 assertions (depth recorder)
-./build/parity_harness            # legacy single_core ↔ sharded backtest byte-identity
-./build_lat/bench_batch_floor     # latency bench (rdtsc-bracketed)
-
-# sanitizer builds
-./build.sh tsan                   # ThreadSanitizer build (controller_test + engine)
-./build.sh asan                   # AddressSanitizer build
-```
-
-concurrent tests run under TSan (`./build.sh tsan`) to validate the lock-free patterns. the seqlock test catches torn reads at high producer rate; that's how the original triple buffer plan got rejected. `parity_harness` runs the legacy single_core path and the sharded backtest path on the same input and asserts byte-identical training data — pins train-serve symmetry by construction.
-
-## what's still raw
-
-honest TODOs:
-
-- **testnet soak** — 24-hour continuous live run on Binance testnet (`use_real_money=1, use_testnet=1`) to verify WS fills + reconciler drift + listen key refresh under real network conditions hasn't been done yet. Paper-mode soaks have run; testnet is the next gate before mainnet.
-- **reconcile Phase 2 (apply path)** — boot reconciliation in v5.2.1+ is dry-run only: it logs disagreement and refuses to boot on catastrophic state drift, but doesn't yet cancel orphan exchange orders, replay missed fills, or force-close stale local positions. That's the v5.3.x or v5.4.x ship once paper soak validates the dry-run reports.
-- **WS reconnect reconcile** — reconcile fires only at boot. A mid-session WS disconnect + reconnect is currently trusted to deliver any missed events; a re-fetch of openOrders + myTrades on every reconnect would close that hole.
-- **suite ↔ held-out wiring** — held-out training works end-to-end via `Backtest_RunFullValidation` and tests, but the foxml_suite training panel still uses `Backtest_RunWalkForward` directly. Switching the suite over (so the GUI's pipeline button fires the full validation including held-out + auto-stamp) is the v5.4.x ML QOL bundle (Stamps inspection panel + auto-versioned model saves with symlink + Train+Validate+Stamp pipeline button).
-- **per-fill maker/taker observability in GUI** — engine tracks `maker_fills_count` / `taker_fills_count` / `total_maker_fees` / `total_taker_fees` separately, but the per-core display only shows the sum. Splitting the column would help spot maker-vs-taker mix shifts during live runs.
+---
 
 ## license
 
