@@ -224,12 +224,17 @@ static inline void ExecutionCore_Init(
 // controller's slow path or from the parameter-push step of the event loop.
 // Wait-free on the consumer side (execution core can keep ticking through
 // the swap).
+//
+// v5.12.1.B.2 — optional publish_tick. Slow-path passes ticks_produced.load()
+// at publish time so the hot path can detect stale params via the v5.12.1.B
+// mask gate. Default 0 = back-compat (warmup sentinel; no gate fires).
 template <unsigned F>
 static inline void ExecutionCore_SetParameters(
     ExecutionCore<F>* core,
-    const GateParameters<F>& new_params
+    const GateParameters<F>& new_params,
+    uint64_t publish_tick = 0
 ) {
-    ParameterSlot_Write(&core->param_slot, new_params);
+    ParameterSlot_Write(&core->param_slot, new_params, publish_tick);
 }
 
 // Atomic permission set. Phase 09 (kill switch) calls this from the controller

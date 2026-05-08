@@ -1806,7 +1806,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // v4.7.39 (Phase C.2): per_core_slow inlines the push inside
                 // each slow-path thread (after RebuildOneCore). Producer skips.
                 if (cfg.engine_arch != ENGINE_ARCH_PER_CORE_SLOW)
-                EventLoop_PushParameters(&state);
+                // v5.12.1.B.2 — publish_tick = current ticks_produced so
+                // the hot-path freshness gate can detect slow-path stalls.
+                EventLoop_PushParameters(&state,
+                    ticks_produced.load(std::memory_order_relaxed));
                 // KNOWN RACE (audit 2026-04-09): KillSwitchEvaluate reads
                 // oms->balance from this (producer) thread while the drainer
                 // thread writes it via OnEvent / OMS_Tick fill handler.
@@ -2858,11 +2861,16 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
                     // === Push pending_params via seqlock (was inside
                     // PushParameters wrapper; inline for per-core path).
+                    // v5.12.1.B.2 — pass publish_tick = ticks_produced load
+                    // so hot-path staleness gate sees fresh tick stamp.
                     if (state.cores[c].dirty) {
                         ExecutionCore<F>* core = state.cores[c].core;
                         if (core) {
+                            uint64_t pp_now_tick = ticks_produced.load(
+                                std::memory_order_relaxed);
                             ExecutionCore_SetParameters(core,
-                                state.cores[c].pending_params);
+                                state.cores[c].pending_params,
+                                pp_now_tick);
                         }
                         state.cores[c].dirty = 0;
                     }

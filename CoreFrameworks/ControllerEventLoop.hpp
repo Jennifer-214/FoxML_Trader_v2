@@ -2546,7 +2546,11 @@ inline void EventLoop_RebuildOneCore(
 // controller-side Portfolio + balance + intended_tp/sl/qty.
 //======================================================================================================
 template <unsigned F>
-inline int EventLoop_PushParameters(EventLoopState<F>* state) {
+inline int EventLoop_PushParameters(EventLoopState<F>* state,
+                                     uint64_t publish_tick = 0) {
+    // v5.12.1.B.2 — publish_tick threads through to ParameterSlot_Write so
+    // hot-path's staleness gate can detect stale slow-path. Default 0 =
+    // back-compat for legacy + test callers (warmup sentinel; gate inert).
     int pushed = 0;
     for (int slot = 0; slot < state->registered_count; ++slot) {
         if (state->cores[slot].dirty == 0) continue;
@@ -2555,7 +2559,8 @@ inline int EventLoop_PushParameters(EventLoopState<F>* state) {
             state->cores[slot].dirty = 0;
             continue;
         }
-        ExecutionCore_SetParameters(core, state->cores[slot].pending_params);
+        ExecutionCore_SetParameters(core, state->cores[slot].pending_params,
+                                     publish_tick);
         state->cores[slot].dirty = 0;
         ++pushed;
     }
