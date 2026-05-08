@@ -55,11 +55,20 @@
 
 template <unsigned F>
 struct CoreModelZoo {
-    ModelHandle<F> barrier;     // primary: 3-class P(stable)/P(peak)/P(valley)
-    ModelHandle<F> regime;      // future: multi-class regime
-    ModelHandle<F> exit;        // future: exit timing
+    ModelHandle<F> barrier;     // 3-class P(stable)/P(peak)/P(valley) when num_outputs=3
+    ModelHandle<F> regime;      // multi-class regime
+    ModelHandle<F> exit;        // exit timing
     ModelHandle<F> buy_signal;  // legacy single-binary
     unsigned int loaded_mask;   // bitmap of loaded roles (CORE_MODEL_*)
+    // v5.11.62 — primary-role indirection. Strategy code reads
+    // zoo->primary_handle (set by LoadFromDir to whichever role file was
+    // actually present in priority order: buy_signal > barrier > regime).
+    // Decouples strategy logic from "which role file did the trainer save
+    // under" — operator can train barrier 3-class OR buy_signal binary
+    // and the engine handles both transparently. nullptr = no model loaded.
+    ModelHandle<F> *primary_handle;
+    int             primary_target_class;   // mirrors primary_handle->buy_class_idx for snapshot
+    char            primary_role_name[16];  // "buy_signal" | "barrier" | "regime" | ""
 };
 
 //======================================================================================================
@@ -70,6 +79,9 @@ inline void CoreModelZoo_Init(CoreModelZoo<F> *zoo) {
     Model_Init(&zoo->exit);
     Model_Init(&zoo->buy_signal);
     zoo->loaded_mask = 0;
+    zoo->primary_handle = nullptr;
+    zoo->primary_target_class = 0;
+    zoo->primary_role_name[0] = '\0';
 }
 
 //======================================================================================================
@@ -433,8 +445,39 @@ inline int CoreModelZoo_LoadFromDir(CoreModelZoo<F> *zoo, const char *dir, int b
         loaded++;
     }
 
-    fprintf(stderr, "[ML] zoo loaded %d role(s) from %s (mask=0x%x)\n",
-            loaded, dir, zoo->loaded_mask);
+    // v5.11.62 — primary-role indirection. Strategy code reads
+    // zoo->primary_handle (single ModelHandle*) instead of one specific
+    // role slot. Loader picks the first available role in priority
+    // order: buy_signal > barrier > regime. For multiclass barrier
+    // (PEAK_VALLEY_STABLE 3-class), buy_class_idx is set on the handle
+    // so Model_Predict returns P(peak) as buy probability.
+    zoo->primary_handle = nullptr;
+    zoo->primary_target_class = 0;
+    zoo->primary_role_name[0] = '\0';
+    if (zoo->loaded_mask & CORE_MODEL_BUY_SIGNAL) {
+        zoo->primary_handle = &zoo->buy_signal;
+        zoo->buy_signal.buy_class_idx = 0;
+        strncpy(zoo->primary_role_name, "buy_signal",
+                sizeof(zoo->primary_role_name) - 1);
+    } else if (zoo->loaded_mask & CORE_MODEL_BARRIER) {
+        zoo->primary_handle = &zoo->barrier;
+        zoo->barrier.buy_class_idx = (zoo->barrier.num_outputs >= 2) ? 1 : 0;
+        zoo->primary_target_class = zoo->barrier.buy_class_idx;
+        strncpy(zoo->primary_role_name, "barrier",
+                sizeof(zoo->primary_role_name) - 1);
+    } else if (zoo->loaded_mask & CORE_MODEL_REGIME) {
+        zoo->primary_handle = &zoo->regime;
+        zoo->regime.buy_class_idx = 0;  // operator opts in via cfg if 3-class regime
+        strncpy(zoo->primary_role_name, "regime",
+                sizeof(zoo->primary_role_name) - 1);
+    }
+    zoo->primary_role_name[sizeof(zoo->primary_role_name) - 1] = '\0';
+
+    fprintf(stderr, "[ML] zoo loaded %d role(s) from %s (mask=0x%x); primary=%s "
+                    "(class=%d)\n",
+            loaded, dir, zoo->loaded_mask,
+            zoo->primary_role_name[0] ? zoo->primary_role_name : "(none)",
+            zoo->primary_target_class);
     return loaded;
 }
 
@@ -739,6 +782,15 @@ struct EnsembleModelZoo {
     char     bandit_save_path[400];     // <core_model_dir>/bandit_state.json
     int      bandit_save_interval;      // 0 = no periodic save (shutdown only)
     uint64_t bandit_update_count;       // monotonic; modulo'd against interval
+    // v5.11.62 — primary-role indirection (mirrors CoreModelZoo). Strategy
+    // + bandit code reads ezoo->primary_handles[0..primary_count) instead
+    // of ezoo->buy_signal directly. Loader picks role at end of LoadFromCfg
+    // based on which slots are populated, priority: buy_signal > barrier >
+    // regime. nullptr = no primary role available.
+    ModelHandle<F> *primary_handles;        // points into one of {buy_signal, barrier, regime}
+    int             primary_count;          // mirrors *_count of chosen role
+    int             primary_target_class;   // class index for buy probability extraction
+    char            primary_role_name[16];  // "buy_signal" | "barrier" | "regime" | ""
 };
 
 template <unsigned F>
@@ -776,6 +828,49 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     ezoo->bandit_save_path[0] = '\0';
     ezoo->bandit_save_interval = 0;
     ezoo->bandit_update_count = 0;
+    // v5.11.62 — primary-role indirection (set at end of LoadFromCfg /
+    // AutoDetectFromDir; nullptr until a load populates it).
+    ezoo->primary_handles = nullptr;
+    ezoo->primary_count = 0;
+    ezoo->primary_target_class = 0;
+    ezoo->primary_role_name[0] = '\0';
+}
+
+// v5.11.62 — backstop helper: when callers (tests + ad-hoc paths)
+// synthesize ezoo state by setting buy_signal_count directly without
+// going through LoadFromCfg / AutoDetectFromDir, the primary_* fields
+// stay zero. Bandit ops + ProcessPredictionRecord need primary_count
+// to size their state. This helper auto-promotes buy_signal to primary
+// when primary is unset and buy_signal is populated. Idempotent —
+// post-loader callers that already set primary_handles bypass it.
+template <unsigned F>
+inline void EnsembleModelZoo_EnsurePrimary(EnsembleModelZoo<F>* ezoo) {
+    if (!ezoo) return;
+    if (ezoo->primary_handles || ezoo->primary_count > 0) return;
+    if (ezoo->buy_signal_count > 0) {
+        ezoo->primary_handles = ezoo->buy_signal;
+        ezoo->primary_count = ezoo->buy_signal_count;
+        ezoo->primary_target_class = 0;
+        strncpy(ezoo->primary_role_name, "buy_signal",
+                sizeof(ezoo->primary_role_name) - 1);
+    } else if (ezoo->barrier_count > 0) {
+        ezoo->primary_handles = ezoo->barrier;
+        ezoo->primary_count = ezoo->barrier_count;
+        ezoo->primary_target_class =
+            (ezoo->barrier[0].num_outputs >= 2) ? 1 : 0;
+        for (int i = 0; i < ezoo->barrier_count; ++i) {
+            ezoo->barrier[i].buy_class_idx =
+                (ezoo->barrier[i].num_outputs >= 2) ? 1 : 0;
+        }
+        strncpy(ezoo->primary_role_name, "barrier",
+                sizeof(ezoo->primary_role_name) - 1);
+    } else if (ezoo->regime_count > 0) {
+        ezoo->primary_handles = ezoo->regime;
+        ezoo->primary_count = ezoo->regime_count;
+        strncpy(ezoo->primary_role_name, "regime",
+                sizeof(ezoo->primary_role_name) - 1);
+    }
+    ezoo->primary_role_name[sizeof(ezoo->primary_role_name) - 1] = '\0';
 }
 
 //======================================================================================================
@@ -824,7 +919,9 @@ inline void EnsembleModelZoo_UpdateDrift(EnsembleModelZoo<F>* ezoo,
                                            int arm,
                                            int correct,   // 1 = correct, 0 = wrong
                                            double ic_floor) {
-    if (!ezoo || arm < 0 || arm >= ezoo->buy_signal_count) return;
+    if (!ezoo) return;
+    EnsembleModelZoo_EnsurePrimary(ezoo);
+    if (arm < 0 || arm >= ezoo->primary_count) return;
     auto& d = ezoo->drift[arm];
     int idx = d.ic_count % EnsembleModelZoo<F>::DRIFT_IC_HISTORY;
     d.ic_history[idx] = correct ? 1.0f : -1.0f;
@@ -877,7 +974,9 @@ inline void EnsembleModelZoo_TickRewardsFromLookback(EnsembleModelZoo<F>* ezoo,
                                           / poll_interval);
     if (lookback_calls == 0) lookback_calls = 1;
     uint64_t now = ezoo->predict_call_count;
-    int n_arms = ezoo->buy_signal_count;
+    // v5.11.62 — n_arms = primary_count (matches ezoo->primary_handles)
+    EnsembleModelZoo_EnsurePrimary(ezoo);
+    int n_arms = ezoo->primary_count;
 
     // Walk all populated records; reward ones that are old enough + not
     // yet rewarded.
@@ -939,7 +1038,8 @@ inline void EnsembleModelZoo_TradeCloseReward(EnsembleModelZoo<F>* ezoo,
 
     // Find the most recent record that hasn't been trade-rewarded.
     // Walk ring backward from head.
-    int n_arms = ezoo->buy_signal_count;
+    EnsembleModelZoo_EnsurePrimary(ezoo);
+    int n_arms = ezoo->primary_count;
     int found = -1;
     for (int back = 1; back <= EnsembleModelZoo<F>::REWARD_RING_SIZE; ++back) {
         int idx = (ezoo->reward_ring_head - back +
@@ -988,7 +1088,12 @@ template <unsigned F>
 inline void EnsembleModelZoo_InitBandits(EnsembleModelZoo<F>* ezoo,
                                            double eta, int min_warmup) {
     if (!ezoo) return;
-    int n_arms = ezoo->buy_signal_count;
+    EnsembleModelZoo_EnsurePrimary(ezoo);
+    // v5.11.62 — bandit operates on primary handles (set at load time
+    // to whichever role was actually loaded). Fixes the case where
+    // barrier role was loaded but buy_signal_count==0 → bandit
+    // never initialized → predictions stayed uniform forever.
+    int n_arms = ezoo->primary_count;
     if (n_arms < 2) {
         // Single-arm or empty ensemble — no point in bandits. Mark
         // initialized so dispatch doesn't loop forever, but bandits won't
@@ -1027,6 +1132,7 @@ template <unsigned F>
 inline void EnsembleModelZoo_SetDisabledHorizons(EnsembleModelZoo<F>* ezoo,
                                                    const char* csv) {
     if (!ezoo) return;
+    EnsembleModelZoo_EnsurePrimary(ezoo);
     ezoo->disabled_horizon_mask = 0;
     if (!csv || csv[0] == '\0') return;
     const char* p = csv;
@@ -1037,7 +1143,8 @@ inline void EnsembleModelZoo_SetDisabledHorizons(EnsembleModelZoo<F>* ezoo,
         long h = strtol(p, &end, 10);
         if (end == p) break;
         // Find which arm this horizon ticks corresponds to
-        for (int a = 0; a < ezoo->buy_signal_count; ++a) {
+        // v5.11.62 — primary_count (matches primary_handles array length)
+        for (int a = 0; a < ezoo->primary_count; ++a) {
             if (ezoo->horizon_ticks_at_idx[a] == (int)h) {
                 ezoo->disabled_horizon_mask |= (1u << a);
                 fprintf(stderr, "[ensemble] horizon %d (arm %d) DISABLED by cfg\n",
@@ -1144,6 +1251,48 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
             total_loaded++;
         }
     }
+
+    // v5.11.62 — primary-role indirection (ensemble). Pick the first
+    // available role and point ezoo->primary_handles at its array.
+    // Priority: buy_signal > barrier > regime. Set per-handle
+    // buy_class_idx so Model_Predict returns the right class probability
+    // (class 1 = peak for PEAK_VALLEY_STABLE 3-class barrier; class 0
+    // for binary). Strategy + bandit code reads primary_*, not buy_signal_*.
+    ezoo->primary_handles = nullptr;
+    ezoo->primary_count = 0;
+    ezoo->primary_target_class = 0;
+    ezoo->primary_role_name[0] = '\0';
+    if (ezoo->buy_signal_count > 0) {
+        ezoo->primary_handles = ezoo->buy_signal;
+        ezoo->primary_count = ezoo->buy_signal_count;
+        ezoo->primary_target_class = 0;
+        for (int i = 0; i < ezoo->buy_signal_count; ++i) {
+            ezoo->buy_signal[i].buy_class_idx = 0;
+        }
+        strncpy(ezoo->primary_role_name, "buy_signal",
+                sizeof(ezoo->primary_role_name) - 1);
+    } else if (ezoo->barrier_count > 0) {
+        ezoo->primary_handles = ezoo->barrier;
+        ezoo->primary_count = ezoo->barrier_count;
+        int class_idx = (ezoo->barrier[0].num_outputs >= 2) ? 1 : 0;
+        ezoo->primary_target_class = class_idx;
+        for (int i = 0; i < ezoo->barrier_count; ++i) {
+            ezoo->barrier[i].buy_class_idx =
+                (ezoo->barrier[i].num_outputs >= 2) ? 1 : 0;
+        }
+        strncpy(ezoo->primary_role_name, "barrier",
+                sizeof(ezoo->primary_role_name) - 1);
+    } else if (ezoo->regime_count > 0) {
+        ezoo->primary_handles = ezoo->regime;
+        ezoo->primary_count = ezoo->regime_count;
+        ezoo->primary_target_class = 0;
+        for (int i = 0; i < ezoo->regime_count; ++i) {
+            ezoo->regime[i].buy_class_idx = 0;
+        }
+        strncpy(ezoo->primary_role_name, "regime",
+                sizeof(ezoo->primary_role_name) - 1);
+    }
+    ezoo->primary_role_name[sizeof(ezoo->primary_role_name) - 1] = '\0';
 
     if (total_loaded > 0) {
         ezoo->active = 1;
@@ -1467,10 +1616,13 @@ inline void EnsembleModelZoo_ComputeBundleId(
     if (!ezoo || !hex_out || hex_cap < 65) return;
     memset(hex_out, '0', 64);
     hex_out[64] = '\0';
-    int n = ezoo->buy_signal_count;
+    // v5.11.62 — bundle ID computed from primary handles (matches what
+    // strategy actually uses). Same handle array bandit weights bind to.
+    EnsembleModelZoo_EnsurePrimary(const_cast<EnsembleModelZoo<F>*>(ezoo));
+    int n = ezoo->primary_count;
     if (n > 8) n = 8;
-    for (int a = 0; a < n; ++a) {
-        const ModelHandle<F>& h = ezoo->buy_signal[a];
+    for (int a = 0; a < n && ezoo->primary_handles; ++a) {
+        const ModelHandle<F>& h = ezoo->primary_handles[a];
         // Copy first 8 hex chars of training_fingerprint into slot a.
         // If fingerprint is empty or too short, leave zeros.
         const char* fp = h.training_fingerprint;
@@ -1519,7 +1671,7 @@ inline int EnsembleModelZoo_LoadBanditState(
     char expected_id[65];
     EnsembleModelZoo_ComputeBundleId(ezoo, expected_id, sizeof(expected_id));
     int loaded = Bandit_LoadJSON(ezoo->bandits, NUM_REGIMES, path,
-                                   expected_id, ezoo->buy_signal_count);
+                                   expected_id, ezoo->primary_count);
     if (loaded) {
         fprintf(stderr, "[ensemble] loaded bandit state from %s\n", path);
     } else {
@@ -1558,7 +1710,7 @@ inline int EnsembleModelZoo_LoadBanditStateFromPath(
         EnsembleModelZoo_ComputeBundleId(ezoo, expected_id, sizeof(expected_id));
     }
     int loaded = Bandit_LoadJSON(ezoo->bandits, NUM_REGIMES, path,
-                                   expected_id, ezoo->buy_signal_count);
+                                   expected_id, ezoo->primary_count);
     if (loaded) {
         fprintf(stderr, "[ensemble] loaded bandit prior from %s%s\n", path,
                 skip_bundle_check ? " (bundle-id check SKIPPED — operator override)"

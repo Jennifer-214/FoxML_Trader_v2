@@ -156,12 +156,17 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
     // to the loaded EnsembleModelZoo. If ensemble inactive (nullptr or
     // active=0), falls through to single-model Model_Predict — bytewise-
     // equivalent to pre-v5.10.0a.G.4 behavior.
+    // v5.11.62 — read from ezoo->primary_handles (set at load time to
+    // whichever role file was actually present: buy_signal > barrier >
+    // regime). Per-handle buy_class_idx is also set then, so
+    // Model_Predict returns the right class probability transparently.
     float prediction;
     int   selected_horizon_idx = -1;
     if (state->ensemble_zoo && state->ensemble_zoo->active &&
-        state->ensemble_zoo->buy_signal_count > 0) {
-        prediction = Model_Predict_Ensemble(state->ensemble_zoo->buy_signal,
-                                              state->ensemble_zoo->buy_signal_count,
+        state->ensemble_zoo->primary_count > 0 &&
+        state->ensemble_zoo->primary_handles) {
+        prediction = Model_Predict_Ensemble(state->ensemble_zoo->primary_handles,
+                                              state->ensemble_zoo->primary_count,
                                               state->feature_buf, n,
                                               &selected_horizon_idx);
     } else {

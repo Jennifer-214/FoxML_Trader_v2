@@ -1151,8 +1151,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     cfg.acknowledge_cross_binary_version_drift);
                 if (n_loaded > 0 && ml_ensemble_zoos[i].active) {
                     fprintf(stderr, "[sharded] core %d: ensemble active "
-                                    "(%d horizons; %d total models)\n",
-                            i, ml_ensemble_zoos[i].buy_signal_count, n_loaded);
+                                    "(primary=%s, %d horizons; %d total models)\n",
+                            i,
+                            ml_ensemble_zoos[i].primary_role_name[0]
+                                ? ml_ensemble_zoos[i].primary_role_name : "(none)",
+                            ml_ensemble_zoos[i].primary_count, n_loaded);
                     // v5.10.0a.G.7 — initialize per-regime bandits + cfg-driven mode
                     EnsembleModelZoo_InitBandits(&ml_ensemble_zoos[i],
                                                    cfg.ensemble_bandit_eta,

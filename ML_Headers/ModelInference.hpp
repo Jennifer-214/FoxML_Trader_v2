@@ -306,6 +306,16 @@ struct ModelHandle {
     // sessions or accidental sidecar copy mistake).
     uint8_t  has_stamp_scaler_sha256;
     char     stamp_scaler_sha256[65];
+    // v5.11.62 — for multiclass models, which class index is the
+    // "buy probability"? Default 0 (binary positive class) preserves
+    // legacy semantics. CoreModelZoo loader sets:
+    //   - 0 for buy_signal role (binary)
+    //   - 1 for barrier role with num_outputs=3 (PEAK_VALLEY_STABLE class 1
+    //     = peak = price expected to rise = entry signal)
+    //   - 0 for regime role (operator chooses semantics via cfg)
+    // Model_Predict returns out_result[buy_class_idx]. Out-of-range
+    // index falls back to 0.
+    int      buy_class_idx;
 };
 
 //======================================================================================================
@@ -359,6 +369,8 @@ inline void Model_Init(ModelHandle<F> *m) {
     m->stamp_label_sl_pct = 0.0;
     m->has_stamp_scaler_sha256 = 0;
     m->stamp_scaler_sha256[0] = '\0';
+    // v5.11.62 — buy class default = 0 (binary positive class).
+    m->buy_class_idx = 0;
 }
 
 //======================================================================================================
@@ -509,7 +521,15 @@ inline float Model_Predict(ModelHandle<F> *m, const float *features, int num_fea
         XGDMatrixFree(dmat);
 
         if (ret != 0 || out_len == 0) return 0.0f;
-        return out_result[0];
+        // v5.11.62 — for multiclass models (out_len > 1), return the
+        // configured "buy class" probability instead of out_result[0].
+        // Default buy_class_idx=0 preserves binary semantics; loader sets
+        // buy_class_idx=1 when aliasing PEAK_VALLEY_STABLE 3-class barrier
+        // handles (class 1 = peak = price expected to rise = buy signal).
+        // Out-of-range index falls back to 0 (defensive).
+        int idx = m->buy_class_idx;
+        if (idx < 0 || (unsigned long)idx >= out_len) idx = 0;
+        return out_result[idx];
     }
 #endif
 

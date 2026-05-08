@@ -816,7 +816,12 @@ inline void ML_BuildParameters(
         double pred_raw = 0.0;
         EnsembleModelZoo<F>* ezoo = (EnsembleModelZoo<F>*)
             (mctx ? mctx->ensemble_zoo : nullptr);
-        if (ezoo && ezoo->active && ezoo->buy_signal_count > 0) {
+        // v5.11.62 — read primary_handles + primary_count instead of
+        // buy_signal_*. Loader picks role at boot (priority: buy_signal
+        // > barrier > regime); per-handle buy_class_idx makes
+        // Model_Predict transparently extract the right class.
+        if (ezoo && ezoo->active && ezoo->primary_count > 0 &&
+            ezoo->primary_handles) {
             int dominant_idx = -1;
             // Mode dispatch: weighted (default) uses bandit weights;
             // selection falls back to G.4 argmax-confidence.
@@ -847,7 +852,7 @@ inline void ML_BuildParameters(
                                    (double)hyst;
                     if (alpha < 0.0) alpha = 0.0;
                     if (alpha > 1.0) alpha = 1.0;
-                    for (int h = 0; h < ezoo->buy_signal_count; ++h) {
+                    for (int h = 0; h < ezoo->primary_count; ++h) {
                         weights_buf[h] = alpha * w_curr[h] + (1.0 - alpha) * w_prev[h];
                     }
                     ezoo->regime_transition_cycles_remaining--;
@@ -855,7 +860,7 @@ inline void ML_BuildParameters(
                     Bandit_GetProbabilities(&ezoo->bandits[regime_id], weights_buf);
                 }
                 pred_raw = (double)Model_Predict_Ensemble_Weighted(
-                    ezoo->buy_signal, ezoo->buy_signal_count,
+                    ezoo->primary_handles, ezoo->primary_count,
                     features, n,
                     weights_buf,
                     ezoo->disabled_horizon_mask,
@@ -867,16 +872,16 @@ inline void ML_BuildParameters(
                 // ensembles also fall here (cold-start before _InitBandits).
                 // We still want per-arm predictions for G.8 reward records;
                 // run them inline.
-                for (int a = 0; a < ezoo->buy_signal_count; ++a) {
-                    if (Model_IsLoaded(&ezoo->buy_signal[a])) {
-                        per_arm_preds[a] = Model_Predict(&ezoo->buy_signal[a],
+                for (int a = 0; a < ezoo->primary_count; ++a) {
+                    if (Model_IsLoaded(&ezoo->primary_handles[a])) {
+                        per_arm_preds[a] = Model_Predict(&ezoo->primary_handles[a],
                                                           features, n);
                     } else {
                         per_arm_preds[a] = 0.5f;
                     }
                 }
                 pred_raw = (double)Model_Predict_Ensemble(
-                    ezoo->buy_signal, ezoo->buy_signal_count,
+                    ezoo->primary_handles, ezoo->primary_count,
                     features, n, &dominant_idx);
             }
             ezoo->last_predicted_horizon_idx = dominant_idx;
@@ -890,7 +895,7 @@ inline void ML_BuildParameters(
                     ezoo,
                     ezoo->last_predicted_regime_id,
                     per_arm_preds,
-                    ezoo->buy_signal_count,
+                    ezoo->primary_count,
                     current_price);
                 // Process any old-enough records: compute reward + Bandit_Update.
                 // Forward horizon = 1000 ticks (matches training label

@@ -585,7 +585,12 @@ static inline void TUI_CopySnapshotSharded(
             if (ezoo && ezoo->active) {
                 auto& es = snap->per_core[i];
                 es.ensemble_active = 1;
-                int n_h = ezoo->buy_signal_count;
+                // v5.11.62 — n_horizons reflects primary handles (set at
+                // load to whichever role was actually populated). Pre-fix
+                // this read buy_signal_count which was 0 for barrier-only
+                // multi-horizon deployments — Settings panel showed
+                // "n_horizons: 0" even though 4 barrier models loaded.
+                int n_h = ezoo->primary_count;
                 if (n_h > 8) n_h = 8;
                 es.ensemble_n_horizons = (uint8_t)n_h;
                 for (int h = 0; h < n_h; ++h) {
