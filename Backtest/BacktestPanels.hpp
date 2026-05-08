@@ -2344,6 +2344,13 @@ struct FullValidationWorkerArgs {
     // Capture-at-click eliminates the race.
     char snap_model_path[256];
     char snap_fv_auto_stamp_secret[64];
+    // v5.11.41 — capture label params from run_control->run_config at click
+    // time so RFV can stamp them into the body. Live in BacktestRunConfig,
+    // not in ControllerConfig (= data->config_used) so RFV can't reach
+    // them otherwise. Closes /parity-check 2026-05-07-stamp CRITICAL-1.
+    int     snap_label_forward_ticks;
+    double  snap_label_tp_pct;
+    double  snap_label_sl_pct;
 };
 
 static inline void *fullvalidation_worker_fn(void *arg) {
@@ -2355,6 +2362,11 @@ static inline void *fullvalidation_worker_fn(void *arg) {
     // pattern (free as early as practical).
     char model_path_snap[256];
     char fv_auto_stamp_secret_snap[64];
+    // v5.11.41 — local copies of label params (live in BacktestRunConfig
+    // which is operator-mutable; capture at click time avoids race).
+    int    snap_label_forward_ticks = args->snap_label_forward_ticks;
+    double snap_label_tp_pct        = args->snap_label_tp_pct;
+    double snap_label_sl_pct        = args->snap_label_sl_pct;
     {
         size_t n = strnlen(args->snap_model_path,
                            sizeof(args->snap_model_path));
@@ -2411,6 +2423,15 @@ static inline void *fullvalidation_worker_fn(void *arg) {
         state->fv_results.auto_stamp_secret[n] = '\0';
     }
     state->fv_results.auto_stamp_format_version = 0;  // 0 = use MODEL_FORMAT_VERSION
+
+    // v5.11.41 — populate per-horizon label params from snap'd BacktestRunConfig
+    // (captured at click time alongside model_path + secret). Single-horizon
+    // path; multi-horizon worker populates these per horizon directly.
+    // Closes pre-existing schema gap so single-horizon stamps also gain
+    // forensic horizon record.
+    state->fv_results.req_label_lookahead_ticks = snap_label_forward_ticks;
+    state->fv_results.req_label_tp_pct = snap_label_tp_pct;
+    state->fv_results.req_label_sl_pct = snap_label_sl_pct;
 
     Backtest_RunFullValidation(&state->fv_results, data, &split,
                                 state->wf_n_splits, state->wf_horizon_ticks,
@@ -5078,6 +5099,14 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                            state->fv_auto_stamp_secret, n);
                     fv_args->snap_fv_auto_stamp_secret[n] = '\0';
                 }
+                // v5.11.41 — snap label params from BacktestRunConfig at click time.
+                // Live in run_control->run_config (BacktestRunConfig) which is
+                // operator-mutable. Worker uses these to populate fv_results.req_label_*
+                // before calling Backtest_RunFullValidation, which embeds them in
+                // the stamp body. Closes /parity-check 2026-05-07-stamp CRITICAL-1.
+                fv_args->snap_label_forward_ticks = run_control->run_config.label_forward_ticks;
+                fv_args->snap_label_tp_pct        = run_control->run_config.label_tp_pct;
+                fv_args->snap_label_sl_pct        = run_control->run_config.label_sl_pct;
                 pthread_create(&state->fv_tid, NULL, fullvalidation_worker_fn, fv_args);
                 pthread_detach(state->fv_tid);
             }

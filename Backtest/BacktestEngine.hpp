@@ -997,6 +997,17 @@ struct FullValidationResults {
     int  auto_stamp_ok;                    // result: 1 if stamp written successfully
     char auto_stamp_error[256];            // result: failure reason (if attempted && !ok)
     char auto_stamp_path_written[520];     // result: path of written stamp file
+    // v5.11.41 — caller-populated request fields for per-horizon stamp body
+    // forensics. label_lookahead_ticks/tp_pct/sl_pct live in BacktestRunConfig,
+    // not in ControllerConfig (which is what RFV reads via data->config_used).
+    // So multi-horizon worker (and single-horizon RFV button) populate these
+    // BEFORE calling Backtest_RunFullValidation; RFV reads them when building
+    // StampInferenceCfgInputs. Zero req_label_lookahead_ticks = skip emit
+    // (legacy behavior preserved for callers that don't care). Closes
+    // /parity-check 2026-05-07-stamp CRITICAL-1.
+    int       req_label_lookahead_ticks;
+    double    req_label_tp_pct;
+    double    req_label_sl_pct;
 };
 
 // Forward declaration — Backtest_RunWalkForward is defined further down in
@@ -1172,6 +1183,26 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         // deploy drift (e.g., trained -O2 dev box, deployed -O3 prod).
         inf.has_build_flags_hash = 1;
         inf.build_flags_hash = tt::BUILD_FLAGS_HASH();
+        // v5.11.41 — XGBoost training thread count. Forensic record of
+        // serial mode (operator's cfg.xgb_train_nthread, default 4) vs
+        // parallel multi-horizon mode (pinned to 1 by per-horizon worker
+        // for bytewise determinism). Closes /parity-check 2026-05-07-stamp
+        // CRITICAL-2 + CRITICAL-3.
+        inf.has_xgb_train_nthread = 1;
+        inf.xgb_train_nthread     = data->config_used.xgb_train_nthread > 0
+                                  ? data->config_used.xgb_train_nthread : 1;
+        // v5.11.41 — per-horizon label parameters. label_lookahead_ticks /
+        // tp_pct / sl_pct live in BacktestRunConfig, not ControllerConfig
+        // (data->config_used). Caller (multi-horizon worker OR single-
+        // horizon RFV button) populates out->req_label_* before calling
+        // RFV; we propagate to stamp body when non-zero. Closes
+        // /parity-check 2026-05-07-stamp CRITICAL-1.
+        if (out->req_label_lookahead_ticks > 0) {
+            inf.has_label_params      = 1;
+            inf.label_lookahead_ticks = out->req_label_lookahead_ticks;
+            inf.label_tp_pct          = out->req_label_tp_pct;
+            inf.label_sl_pct          = out->req_label_sl_pct;
+        }
 
         // v5.10.0 Item A — stamp_emit phase timer.
         uint64_t stamp_start_ns = tt::PhaseTimer_NowNs();

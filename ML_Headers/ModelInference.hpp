@@ -985,6 +985,19 @@ struct ModelStampResult {
     // only; v5.11.18 wires Features_PackAll to actually act on the mask.
     uint8_t  has_feature_mask;
     uint64_t feature_mask_train;
+    // v5.11.41 — per-horizon label parameters (parsed from stamp body
+    // canonical position 22). Forensic record; no load-time refusal.
+    // Operator can read these via stamp_inspect.sh + grep to identify
+    // which horizon a stamped model belongs to.
+    uint8_t  has_label_params;
+    int      label_lookahead_ticks;
+    double   label_tp_pct;
+    double   label_sl_pct;
+    // v5.11.41 — XGBoost training thread count (canonical position 23).
+    // Forensic; lets operator post-hoc identify which mode (serial
+    // vs parallel multi-horizon) produced a given stamp.
+    uint8_t  has_xgb_train_nthread;
+    int      xgb_train_nthread;
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -1085,6 +1098,14 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     // load-time check skips when has_feature_mask=0.
     r.has_feature_mask = 0;
     r.feature_mask_train = 0;
+    // v5.11.41 — per-horizon label params + xgb_train_nthread zero-init.
+    // Legacy stamps (pre-v5.11.41) load with has_*=0 → fields skipped.
+    r.has_label_params = 0;
+    r.label_lookahead_ticks = 0;
+    r.label_tp_pct = 0.0;
+    r.label_sl_pct = 0.0;
+    r.has_xgb_train_nthread = 0;
+    r.xgb_train_nthread = 0;
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -1274,6 +1295,22 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             else if (strcmp(key, "feature_mask") == 0) {
                 r.feature_mask_train = (uint64_t)strtoull(val, nullptr, 16);
                 r.has_feature_mask = 1;
+            }
+            // v5.11.41 — per-horizon label params (canonical position 22).
+            else if (strcmp(key, "label_lookahead_ticks") == 0) {
+                r.label_lookahead_ticks = atoi(val);
+                r.has_label_params = 1;
+            }
+            else if (strcmp(key, "label_tp_pct") == 0) {
+                r.label_tp_pct = tt::parse_double_fast(val);
+            }
+            else if (strcmp(key, "label_sl_pct") == 0) {
+                r.label_sl_pct = tt::parse_double_fast(val);
+            }
+            // v5.11.41 — XGBoost train-time thread count (position 23).
+            else if (strcmp(key, "xgb_train_nthread") == 0) {
+                r.xgb_train_nthread = atoi(val);
+                r.has_xgb_train_nthread = 1;
             }
         }
         line = strtok_r(nullptr, "\n", &save);
@@ -1562,6 +1599,24 @@ struct StampInferenceCfgInputs {
     // from the canonical body, so the HMAC signature is unchanged).
     int      has_feature_mask;
     uint64_t feature_mask_train;
+    // v5.11.41 — per-horizon label parameters (canonical position 22).
+    // Forensic-only: verifier records into ModelStampResult so operator
+    // can grep stamp file to identify which horizon produced this model.
+    // No load-time refusal — engine has no "expected horizon" cfg-side
+    // to compare against (multi-horizon ensemble auto-detects via dir
+    // naming `_horizon_<H>` per v5.10.0a-final). Recording closes a
+    // pre-existing schema gap surfaced by /parity-check 2026-05-07-stamp.
+    int      has_label_params;
+    int      label_lookahead_ticks;        // aka label_forward_ticks
+    double   label_tp_pct;                  // 0.05 means 0.05% (BacktestRunConfig convention)
+    double   label_sl_pct;
+    // v5.11.41 — XGBoost train-time thread count (canonical position 23).
+    // Forensic-only: lets operator post-hoc detect mode divergence
+    // (serial mode = cfg.xgb_train_nthread; parallel multi-horizon
+    // mode = pinned to 1 for bytewise determinism vs serial-with-1).
+    // Recording closes /parity-check 2026-05-07-stamp CRITICAL-2.
+    int      has_xgb_train_nthread;
+    int      xgb_train_nthread;
 };
 
 inline StampWriteResult stamp_write_for_model(const char* model_path,
@@ -1784,6 +1839,37 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
         int wrote = snprintf(canonical + n, sizeof(canonical) - n,
             "feature_mask=%016lx\n",
             (unsigned long)inf->feature_mask_train);
+        if (wrote > 0) n += wrote;
+    }
+
+    // v5.11.41 — per-horizon label params (canonical position 22). Set
+    // inf->has_label_params=1 to emit. Forensic-only: verifier records
+    // into ModelStampResult; no load-time refusal because engine has no
+    // expected horizon cfg-side. Multi-horizon ensemble auto-detects
+    // siblings via dir naming `_horizon_<H>` (v5.10.0a-final). Recording
+    // closes /parity-check 2026-05-07-stamp CRITICAL-1 + lets operator
+    // grep stamp file to identify which horizon a model belongs to.
+    if (inf && inf->has_label_params && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "label_lookahead_ticks=%d\n"
+            "label_tp_pct=%.6g\n"
+            "label_sl_pct=%.6g\n",
+            inf->label_lookahead_ticks,
+            inf->label_tp_pct,
+            inf->label_sl_pct);
+        if (wrote > 0) n += wrote;
+    }
+
+    // v5.11.41 — XGBoost training thread count (canonical position 23).
+    // Set inf->has_xgb_train_nthread=1 to emit. Forensic-only: lets
+    // operator post-hoc detect whether a stamp came from serial mode
+    // (cfg.xgb_train_nthread default 4) or parallel multi-horizon mode
+    // (pinned to 1). Recording closes /parity-check 2026-05-07-stamp
+    // CRITICAL-2.
+    if (inf && inf->has_xgb_train_nthread && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "xgb_train_nthread=%d\n",
+            inf->xgb_train_nthread);
         if (wrote > 0) n += wrote;
     }
 

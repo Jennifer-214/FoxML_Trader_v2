@@ -15981,6 +15981,181 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.11.41.0: stamp body schema closure (label params + xgb_train_nthread) ---\n");
+    {
+        // v5.11.41.0 (2026-05-07) — close pre-existing stamp schema gaps
+        // surfaced by /parity-check 2026-05-07-stamp:
+        //  CRITICAL-1: label_lookahead_ticks/tp_pct/sl_pct missing (no
+        //              way to identify which horizon a stamp belongs to)
+        //  CRITICAL-2: xgb_train_nthread missing (no forensic record of
+        //              serial-vs-parallel mode that produced the stamp)
+        //  CRITICAL-3: Backtest_RunFullValidation didn't populate nthread
+        //
+        // Tests verify: (1) emit with has_*=1 produces canonical body
+        // lines; (2) parser round-trips values into ModelStampResult;
+        // (3) emit without has_*=0 produces no lines (legacy compat);
+        // (4) legacy stamp (no v5.11.41 fields) parses cleanly with
+        //     has_*=0 (forward-compat preserved).
+        //
+        // Forensic-only: no load-time refusal because engine has no
+        // expected horizon cfg-side; tests don't check refusal logic.
+
+        // === Test 1: Per-horizon label params round-trip ===
+        {
+            char tmp_model[] = "/tmp/v51141_labelparams_XXXXXX";
+            char tmp_stamp[600];
+            int fd = mkstemp(tmp_model);
+            check("v5.11.41.0: tmp model file creation", fd >= 0);
+            if (fd >= 0) {
+                FILE* mf = fdopen(fd, "wb");
+                const char* dummy = "model-payload-v51141";
+                fwrite(dummy, 1, strlen(dummy), mf);
+                fclose(mf);
+                snprintf(tmp_stamp, sizeof(tmp_stamp), "%s.stamp", tmp_model);
+
+                StampInferenceCfgInputs inf{};
+                inf.has_label_params = 1;
+                inf.label_lookahead_ticks = 7500;
+                inf.label_tp_pct = 0.05;
+                inf.label_sl_pct = 0.03;
+
+                StampWriteResult wr = stamp_write_for_model(
+                    tmp_model, "", MODEL_FORMAT_VERSION,
+                    "2026-05-07", 0.55, 0.53, 0.05, 0,
+                    /*feature_registry_hash=*/0,
+                    /*engine_version=*/nullptr,
+                    /*inf=*/&inf);
+                check("v5.11.41.0: stamp_write_for_model accepts label params in inf",
+                      wr.ok == 1);
+
+                ModelStampResult vr = verify_model_stamp(
+                    tmp_model, "", 0.05, MODEL_FORMAT_VERSION);
+                check("v5.11.41.0: verifier reads has_label_params=1 from stamp",
+                      vr.has_label_params == 1);
+                check("v5.11.41.0: verifier reads label_lookahead_ticks round-trip",
+                      vr.label_lookahead_ticks == 7500);
+                check("v5.11.41.0: verifier reads label_tp_pct round-trip (within 1e-6)",
+                      vr.label_tp_pct > 0.0499 && vr.label_tp_pct < 0.0501);
+                check("v5.11.41.0: verifier reads label_sl_pct round-trip (within 1e-6)",
+                      vr.label_sl_pct > 0.0299 && vr.label_sl_pct < 0.0301);
+
+                unlink(tmp_model);
+                unlink(tmp_stamp);
+            }
+        }
+
+        // === Test 2: xgb_train_nthread round-trip ===
+        {
+            char tmp_model[] = "/tmp/v51141_nthread_XXXXXX";
+            char tmp_stamp[600];
+            int fd = mkstemp(tmp_model);
+            if (fd >= 0) {
+                FILE* mf = fdopen(fd, "wb");
+                const char* dummy = "model-payload-nthread";
+                fwrite(dummy, 1, strlen(dummy), mf);
+                fclose(mf);
+                snprintf(tmp_stamp, sizeof(tmp_stamp), "%s.stamp", tmp_model);
+
+                StampInferenceCfgInputs inf{};
+                inf.has_xgb_train_nthread = 1;
+                inf.xgb_train_nthread = 4;
+
+                StampWriteResult wr = stamp_write_for_model(
+                    tmp_model, "", MODEL_FORMAT_VERSION,
+                    "2026-05-07", 0.55, 0.53, 0.05, 0,
+                    /*feature_registry_hash=*/0,
+                    /*engine_version=*/nullptr,
+                    /*inf=*/&inf);
+                check("v5.11.41.0: stamp_write_for_model accepts xgb_train_nthread",
+                      wr.ok == 1);
+
+                ModelStampResult vr = verify_model_stamp(
+                    tmp_model, "", 0.05, MODEL_FORMAT_VERSION);
+                check("v5.11.41.0: verifier reads has_xgb_train_nthread=1",
+                      vr.has_xgb_train_nthread == 1);
+                check("v5.11.41.0: verifier reads xgb_train_nthread=4 round-trip",
+                      vr.xgb_train_nthread == 4);
+
+                unlink(tmp_model);
+                unlink(tmp_stamp);
+            }
+        }
+
+        // === Test 3: Combined label params + nthread (per-horizon stamp shape) ===
+        {
+            char tmp_model[] = "/tmp/v51141_combined_XXXXXX";
+            char tmp_stamp[600];
+            int fd = mkstemp(tmp_model);
+            if (fd >= 0) {
+                FILE* mf = fdopen(fd, "wb");
+                const char* dummy = "model-payload-combined";
+                fwrite(dummy, 1, strlen(dummy), mf);
+                fclose(mf);
+                snprintf(tmp_stamp, sizeof(tmp_stamp), "%s.stamp", tmp_model);
+
+                StampInferenceCfgInputs inf{};
+                inf.has_label_params = 1;
+                inf.label_lookahead_ticks = 15000;
+                inf.label_tp_pct = 0.07;
+                inf.label_sl_pct = 0.07;
+                inf.has_xgb_train_nthread = 1;
+                inf.xgb_train_nthread = 1;  // parallel-mode pinned
+
+                StampWriteResult wr = stamp_write_for_model(
+                    tmp_model, "", MODEL_FORMAT_VERSION,
+                    "2026-05-07", 0.55, 0.53, 0.05, 0,
+                    /*feature_registry_hash=*/0,
+                    /*engine_version=*/nullptr,
+                    /*inf=*/&inf);
+                check("v5.11.41.0: combined per-horizon stamp writes",
+                      wr.ok == 1);
+
+                ModelStampResult vr = verify_model_stamp(
+                    tmp_model, "", 0.05, MODEL_FORMAT_VERSION);
+                check("v5.11.41.0: combined stamp parses both field blocks",
+                      vr.has_label_params == 1 && vr.has_xgb_train_nthread == 1);
+                check("v5.11.41.0: combined stamp horizon=15000 + nthread=1 (parallel mode shape)",
+                      vr.label_lookahead_ticks == 15000 && vr.xgb_train_nthread == 1);
+
+                unlink(tmp_model);
+                unlink(tmp_stamp);
+            }
+        }
+
+        // === Test 4: Legacy stamp (no v5.11.41 fields) — forward-compat ===
+        {
+            char tmp_model[] = "/tmp/v51141_legacy_XXXXXX";
+            char tmp_stamp[600];
+            int fd = mkstemp(tmp_model);
+            if (fd >= 0) {
+                FILE* mf = fdopen(fd, "wb");
+                const char* dummy = "model-legacy-payload";
+                fwrite(dummy, 1, strlen(dummy), mf);
+                fclose(mf);
+                snprintf(tmp_stamp, sizeof(tmp_stamp), "%s.stamp", tmp_model);
+
+                // Emit without inf — legacy stamp shape
+                StampWriteResult wr = stamp_write_for_model(
+                    tmp_model, "", MODEL_FORMAT_VERSION,
+                    "2026-05-07", 0.55, 0.53, 0.05, 0);
+                check("v5.11.41.0: legacy stamp (no inf) writes",
+                      wr.ok == 1);
+
+                ModelStampResult vr = verify_model_stamp(
+                    tmp_model, "", 0.05, MODEL_FORMAT_VERSION);
+                check("v5.11.41.0: legacy stamp parses has_label_params=0",
+                      vr.has_label_params == 0);
+                check("v5.11.41.0: legacy stamp parses has_xgb_train_nthread=0",
+                      vr.has_xgb_train_nthread == 0);
+                check("v5.11.41.0: legacy stamp valid (forward-compat)",
+                      vr.valid == 1);
+
+                unlink(tmp_model);
+                unlink(tmp_stamp);
+            }
+        }
+    }
+
     printf("\n--- v5.11.18 main: Features_PackAll mask-aware overload ---\n");
     {
         // v5.11.18 main (2026-05-07) — sparse-zero mask-aware overload of
