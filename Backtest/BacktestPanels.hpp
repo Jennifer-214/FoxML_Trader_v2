@@ -1661,8 +1661,16 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                     r->stamp_verify_full = vr;
                     r->stamp_verify_has_full = (vr.valid == 1) ? 1 : 0;
                     if (vr.valid == 1) {
+                        // v5.11.56 — clarify that "OK" doesn't include HMAC
+                        // signature verification (Verify Stamp here always
+                        // uses empty secret = devmode). For real signature
+                        // check, set auto_stamp_secret=<your-secret> in
+                        // engine.cfg + the engine load will HMAC-verify
+                        // (will refuse mismatched signatures unless
+                        // held_out_gate_strict=0).
                         snprintf(r->stamp_verify_msg, sizeof(r->stamp_verify_msg),
-                            "OK — engine=%s registry=%016lx",
+                            "OK (devmode, signature unverified) — engine=%s registry=%016lx. "
+                            "Set auto_stamp_secret in engine.cfg for real HMAC check at engine load.",
                             vr.engine_version[0] ? vr.engine_version : "unknown",
                             (unsigned long)vr.feature_registry_hash);
                     } else {
