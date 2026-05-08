@@ -15981,6 +15981,62 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.11.53: Backtest_RunFullValidation preserves request fields across memset ---\n");
+    {
+        // v5.11.53 — regression test for v5.11.49 bug class (RFV's
+        // memset(out, 0, sizeof(*out)) at function entry wiped the
+        // auto_stamp_path / auto_stamp_secret / req_label_* fields the
+        // CALLER pre-set as inputs). Test: pre-fill the request fields
+        // on a FullValidationResults, call RFV with minimal/null data
+        // (so it returns early without doing real WF), assert the
+        // request fields SURVIVE.
+        FullValidationResults fv;
+        memset(&fv, 0, sizeof(fv));
+        // Pre-fill request fields (caller's inputs)
+        const char *test_path   = "/tmp/v51153_test_model.json";
+        const char *test_secret = "test-secret-32-chars-long-enough-here";
+        strncpy(fv.auto_stamp_path,   test_path,   sizeof(fv.auto_stamp_path) - 1);
+        strncpy(fv.auto_stamp_secret, test_secret, sizeof(fv.auto_stamp_secret) - 1);
+        fv.auto_stamp_format_version = 7;
+        fv.req_label_lookahead_ticks = 1234;
+        fv.req_label_tp_pct          = 0.0567;
+        fv.req_label_sl_pct          = 0.0345;
+
+        // Call RFV with NULL data → should early-return after the request-
+        // field preservation block + memset
+        HeldOutSplit dummy_split = {};
+        dummy_split.locked = 0;  // unlocked so we get past the locked check
+        // NOTE: data=nullptr triggers early-return at "no samples" check;
+        // request-field preservation MUST happen BEFORE that early-return
+        // (per v5.11.49 fix at start of RFV).
+        volatile int progress = 0;
+        volatile int cancel = 0;
+        Backtest_RunFullValidation(&fv, /*data=*/nullptr, &dummy_split,
+                                    /*n_splits=*/5, /*horizon=*/1000,
+                                    /*buffer=*/100, /*min_train=*/100,
+                                    &progress, &cancel,
+                                    /*label_type=*/7,
+                                    /*gap_threshold=*/0.05f);
+        // Assert request fields SURVIVED the memset
+        check("v5.11.53: RFV preserves auto_stamp_path across memset",
+              strcmp(fv.auto_stamp_path, test_path) == 0);
+        check("v5.11.53: RFV preserves auto_stamp_secret across memset",
+              strcmp(fv.auto_stamp_secret, test_secret) == 0);
+        check("v5.11.53: RFV preserves auto_stamp_format_version=7",
+              fv.auto_stamp_format_version == 7);
+        check("v5.11.53: RFV preserves req_label_lookahead_ticks=1234",
+              fv.req_label_lookahead_ticks == 1234);
+        check("v5.11.53: RFV preserves req_label_tp_pct≈0.0567",
+              fv.req_label_tp_pct > 0.056 && fv.req_label_tp_pct < 0.057);
+        check("v5.11.53: RFV preserves req_label_sl_pct≈0.0345",
+              fv.req_label_sl_pct > 0.034 && fv.req_label_sl_pct < 0.035);
+        // Result fields should be zeroed by the memset
+        check("v5.11.53: RFV memsets ran_held_out=0 (result field)",
+              fv.ran_held_out == 0);
+        check("v5.11.53: RFV memsets auto_stamp_attempted=0 (result field)",
+              fv.auto_stamp_attempted == 0);
+    }
+
     printf("\n--- v5.11.42 D.1: ModelHandle.stamp_xgb_train_nthread propagation ---\n");
     {
         // v5.11.42 D.1 — verify that ModelHandle picks up xgb_train_nthread
