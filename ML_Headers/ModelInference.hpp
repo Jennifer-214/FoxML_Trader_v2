@@ -281,6 +281,31 @@ struct ModelHandle {
     uint8_t  has_stamp_fees;
     double   stamp_inf_fee_rate_maker;
     double   stamp_inf_fee_rate_taker;
+    // v5.11.42 D.1 — xgb_train_nthread recorded at training time. Stamp's
+    // value is forensic — engine boot-WARN compares vs cfg.xgb_train_nthread
+    // when stamp's nthread was 1 (indicates parallel multi-horizon mode)
+    // but engine cfg has nthread > 1 (= reload would produce different
+    // model bytes). Doesn't refuse — XGBoost output already trained,
+    // just operator notification.
+    uint8_t  has_stamp_xgb_train_nthread;
+    int      stamp_xgb_train_nthread;
+    // v5.11.42 D.2 — label_lookahead_ticks (aka horizon ticks) recorded
+    // at training time. Engine ensemble auto-detect (CoreModelZoo_AutoDetectEnsemble)
+    // parses horizon from dir name `_horizon_<N>` and compares vs this
+    // field at load. Mismatch = REFUSE load with "stamp says horizon=X
+    // but loaded from dir=horizon_Y" (catches dir rename / copy mistake).
+    uint8_t  has_stamp_label_params;
+    int      stamp_label_lookahead_ticks;
+    double   stamp_label_tp_pct;
+    double   stamp_label_sl_pct;
+    // v5.11.42 D.3 — stamp's scaler_sha256 (forensic; for ensemble-sibling
+    // consistency check). Per-horizon scalers in a Multi-Horizon ensemble
+    // SHOULD be identical (scaler is derived from the shared feature matrix,
+    // not from per-horizon labels). EnsembleModelZoo_LoadFromCfg post-loop
+    // WARNs if siblings have different scaler_sha256 (= mixed training
+    // sessions or accidental sidecar copy mistake).
+    uint8_t  has_stamp_scaler_sha256;
+    char     stamp_scaler_sha256[65];
 };
 
 //======================================================================================================
@@ -325,6 +350,15 @@ inline void Model_Init(ModelHandle<F> *m) {
     m->has_stamp_fees = 0;
     m->stamp_inf_fee_rate_maker = 0.0;
     m->stamp_inf_fee_rate_taker = 0.0;
+    // v5.11.42 — stamp xgb_train_nthread + label params zero-init
+    m->has_stamp_xgb_train_nthread = 0;
+    m->stamp_xgb_train_nthread = 0;
+    m->has_stamp_label_params = 0;
+    m->stamp_label_lookahead_ticks = 0;
+    m->stamp_label_tp_pct = 0.0;
+    m->stamp_label_sl_pct = 0.0;
+    m->has_stamp_scaler_sha256 = 0;
+    m->stamp_scaler_sha256[0] = '\0';
 }
 
 //======================================================================================================

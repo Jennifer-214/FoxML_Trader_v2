@@ -15981,6 +15981,74 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.11.42 D.1: ModelHandle.stamp_xgb_train_nthread propagation ---\n");
+    {
+        // v5.11.42 D.1 — verify that ModelHandle picks up xgb_train_nthread
+        // from the stamp body. EngineSharded boot WARN compares stamp's
+        // value vs cfg.xgb_train_nthread; mode-divergence (stamp=1 +
+        // cfg>1) indicates parallel multi-horizon trained model loaded
+        // under serial-mode cfg. Forensic only — no refusal.
+        ModelHandle<64> mh;
+        Model_Init(&mh);
+        check("v5.11.42 D.1: Model_Init zeroes has_stamp_xgb_train_nthread",
+              mh.has_stamp_xgb_train_nthread == 0);
+        check("v5.11.42 D.1: Model_Init zeroes stamp_xgb_train_nthread",
+              mh.stamp_xgb_train_nthread == 0);
+
+        // Simulate post-load population (mirrors CoreModelZoo path)
+        mh.has_stamp_xgb_train_nthread = 1;
+        mh.stamp_xgb_train_nthread = 1;
+        check("v5.11.42 D.1: handle field assignable to 1 (parallel mode)",
+              mh.has_stamp_xgb_train_nthread == 1 &&
+              mh.stamp_xgb_train_nthread == 1);
+    }
+
+    printf("\n--- v5.11.42 D.2: ModelHandle.stamp_label_lookahead_ticks propagation ---\n");
+    {
+        // v5.11.42 D.2 — verify ModelHandle picks up label_lookahead_ticks
+        // from stamp. EnsembleModelZoo_LoadFromCfg passes the dir-name-
+        // parsed horizon as expected_horizon_ticks; CoreModelZoo_TryLoadRole
+        // refuses on mismatch (catches dir rename/copy mistake).
+        ModelHandle<64> mh;
+        Model_Init(&mh);
+        check("v5.11.42 D.2: Model_Init zeroes has_stamp_label_params",
+              mh.has_stamp_label_params == 0);
+        check("v5.11.42 D.2: Model_Init zeroes stamp_label_lookahead_ticks",
+              mh.stamp_label_lookahead_ticks == 0);
+
+        // Simulate post-load population
+        mh.has_stamp_label_params = 1;
+        mh.stamp_label_lookahead_ticks = 7500;
+        mh.stamp_label_tp_pct = 0.05;
+        mh.stamp_label_sl_pct = 0.05;
+        check("v5.11.42 D.2: handle stamp_label_lookahead_ticks=7500",
+              mh.stamp_label_lookahead_ticks == 7500);
+        check("v5.11.42 D.2: handle stamp_label_tp_pct=0.05",
+              mh.stamp_label_tp_pct > 0.049 && mh.stamp_label_tp_pct < 0.051);
+    }
+
+    printf("\n--- v5.11.42 D.3: ModelHandle.stamp_scaler_sha256 propagation ---\n");
+    {
+        // v5.11.42 D.3 — verify ModelHandle picks up scaler_sha256 from
+        // stamp for ensemble-sibling consistency check. Per-horizon
+        // scalers SHOULD be identical across siblings (scaler is derived
+        // from shared feature matrix); WARN if they differ.
+        ModelHandle<64> mh;
+        Model_Init(&mh);
+        check("v5.11.42 D.3: Model_Init zeroes has_stamp_scaler_sha256",
+              mh.has_stamp_scaler_sha256 == 0);
+        check("v5.11.42 D.3: Model_Init nul-terminates stamp_scaler_sha256",
+              mh.stamp_scaler_sha256[0] == '\0');
+
+        // Simulate post-load population (64-char hex SHA + null)
+        mh.has_stamp_scaler_sha256 = 1;
+        const char* sample_sha = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        memcpy(mh.stamp_scaler_sha256, sample_sha, 64);
+        mh.stamp_scaler_sha256[64] = '\0';
+        check("v5.11.42 D.3: handle stamp_scaler_sha256 round-trip",
+              strcmp(mh.stamp_scaler_sha256, sample_sha) == 0);
+    }
+
     printf("\n--- v5.11.41.C: multi_horizon_max_threads cfg + auto-default ---\n");
     {
         // v5.11.41.C — Multi-Horizon parallelism control. cfg field

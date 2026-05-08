@@ -448,6 +448,25 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
                     (unsigned long)h->stamp_build_flags_hash,
                     (unsigned long)tt::BUILD_FLAGS_HASH());
             }
+            // v5.11.42 D.1 — xgb_train_nthread mode-divergence WARN.
+            // Stamp's nthread=1 + cfg nthread>1 → operator trained in
+            // parallel multi-horizon mode (which pins to 1) but engine
+            // would now retrain at higher nthread → bytewise model
+            // divergence. Forensic only — model already trained, can't
+            // be retrained at load. Operator notification.
+            if (h->has_stamp_xgb_train_nthread &&
+                h->stamp_xgb_train_nthread != cfg.xgb_train_nthread) {
+                fprintf(stderr,
+                    "[xgb_train_nthread] WARN: %s role=%s stamp claims "
+                    "xgb_train_nthread=%d but cfg.xgb_train_nthread=%d "
+                    "(mode divergence; stamp=1 indicates parallel multi-horizon "
+                    "training, cfg>1 indicates serial mode would diverge "
+                    "bytewise on retrain; set acknowledge_cross_binary_version_drift=1 "
+                    "to suppress)\n",
+                    loc, role_name,
+                    h->stamp_xgb_train_nthread,
+                    cfg.xgb_train_nthread);
+            }
         }
 
         // === Subgroup 2: inference_cfg drift (Tier 1 REFUSE in strict;
