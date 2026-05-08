@@ -1355,6 +1355,17 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                     } else {
                         ImGui::TextDisabled("-");
                     }
+                    // v5.11.55 — Overfit column tooltip
+                    ImGui::SetItemTooltip(
+                        "Number of WF folds where train_accuracy - val_accuracy\n"
+                        "exceeded the overfit threshold (~3-5%% gap).\n\n"
+                        "  0      = no folds overfit (model generalizes well)\n"
+                        "  1      = 1 fold overfit (mostly generalizes; minor concern)\n"
+                        "  2-3    = multiple folds overfit (concerning; review hyperparams)\n"
+                        "  4-5    = ALL folds overfit (model memorized; lower n_estimators\n"
+                        "           or max_depth, or add subsample/colsample regularization)\n\n"
+                        "Red = >0 (any overfit). Goal: 0 across all folds.\n"
+                        "See WalkForwardFoldResult.overfit_count in BacktestEngine.hpp.");
 
                     ImGui::TableNextColumn();
                     ImGui::Text("%d/%.2f/%d", r->max_depth, r->learning_rate, r->n_estimators);
@@ -1426,8 +1437,9 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
         if (ImGui::BeginTabItem(regr_label)) {
             if (n_regr == 0) {
                 ImGui::TextDisabled("No regression runs saved yet.");
-            } else if (ImGui::BeginTable("past_runs_regr", 12, flags)) {  // v5.9.5h: +Stamp column
+            } else if (ImGui::BeginTable("past_runs_regr", 14, flags)) {  // v5.11.55: +Date +Delete columns
                 ImGui::TableSetupColumn("Run",        ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 220);
+                ImGui::TableSetupColumn("Date",       ImGuiTableColumnFlags_WidthFixed, 100);  // v5.11.55
                 ImGui::TableSetupColumn("Role",       ImGuiTableColumnFlags_WidthFixed, 80);
                 ImGui::TableSetupColumn("Label",      ImGuiTableColumnFlags_WidthFixed, 50);
                 ImGui::TableSetupColumn("TP bps",     ImGuiTableColumnFlags_WidthFixed, 75);
@@ -1439,6 +1451,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                 ImGui::TableSetupColumn("Gap (r)",    ImGuiTableColumnFlags_WidthFixed, 80);
                 ImGui::TableSetupColumn("Depth/LR/N", ImGuiTableColumnFlags_WidthFixed, 120);
                 ImGui::TableSetupColumn("Stamp",      ImGuiTableColumnFlags_WidthFixed, 60);
+                ImGui::TableSetupColumn("",           ImGuiTableColumnFlags_WidthFixed, 30);  // v5.11.55 Delete
                 ImGui::TableHeadersRow();
 
                 for (int i = 0; i < s->count; ++i) {
@@ -1452,6 +1465,17 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                     ImGui::TableNextRow();
 
                     render_run_cell(i);
+                    // v5.11.55 — Date column for regression tab (parity with classification)
+                    ImGui::TableNextColumn();
+                    if (r->mtime_sec > 0) {
+                        char dbuf[24];
+                        struct tm tm_buf;
+                        localtime_r(&r->mtime_sec, &tm_buf);
+                        strftime(dbuf, sizeof(dbuf), "%m-%d %H:%M", &tm_buf);
+                        ImGui::TextDisabled("%s", dbuf);
+                    } else {
+                        ImGui::TextDisabled("-");
+                    }
                     ImGui::TableNextColumn(); ImGui::TextDisabled("%s", r->role);
                     ImGui::TableNextColumn(); ImGui::Text("%d", r->label_type);
 
@@ -1518,6 +1542,36 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                         ImGui::SetItemTooltip("Stamp present, not yet verified\n"
                                               "Click 'Verify Stamp' below to check.");
                     }
+
+                    // v5.11.55 — Delete button column (parity with classification)
+                    ImGui::TableNextColumn();
+                    ImGui::PushID(i);
+                    if (ImGui::SmallButton("X")) {
+                        ImGui::OpenPopup("DeleteConfirmRegr");
+                    }
+                    ImGui::SetItemTooltip("Delete this run (recursive)");
+                    if (ImGui::BeginPopup("DeleteConfirmRegr")) {
+                        ImGui::Text("Delete %s?", r->dir_name);
+                        ImGui::TextDisabled("(removes %s recursively)", r->full_path);
+                        ImGui::Separator();
+                        if (ImGui::Button("Delete")) {
+                            int rc = PastRuns_DeleteDir(r->full_path);
+                            if (rc == 0) {
+                                snprintf(s->status_msg, sizeof(s->status_msg),
+                                         "deleted: %s", r->full_path);
+                            } else {
+                                snprintf(s->status_msg, sizeof(s->status_msg),
+                                         "delete FAILED: %s (errno=%d)",
+                                         r->full_path, errno);
+                            }
+                            PastRuns_Scan(s);
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+                        ImGui::EndPopup();
+                    }
+                    ImGui::PopID();
                 }
                 ImGui::EndTable();
             }
@@ -1536,21 +1590,20 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
             r->role, r->label_type, r->expected_num_classes,
             r->held_out_fraction, r->gap_acceptable_threshold);
 
-        // Path hint for engine.cfg
+        // Path hint for engine.cfg — v5.11.55 use full_path so kind-
+        // organized subdirs (classification/, regression/) appear correctly.
         ImGui::TextColored(FoxmlColors::sand,
-            "To use in engine: set core_N_model_dir=models/%s/ in engine.cfg",
-            r->dir_name);
+            "To use in engine: set core_N_model_dir=%s/ in engine.cfg",
+            r->full_path);
 
         if (ImGui::Button("Open Folder Path")) {
-            // copy the path to status_msg as a hint (no shell exec from here)
             snprintf(s->status_msg, sizeof(s->status_msg),
-                     "models/%s/", r->dir_name);
+                     "%s/", r->full_path);
         }
         ImGui::SameLine();
         if (ImGui::Button("Delete (manual)")) {
-            // safety: don't actually rm here. show user the command to run.
             snprintf(s->status_msg, sizeof(s->status_msg),
-                     "to delete: rm -r models/%s/", r->dir_name);
+                     "to delete: rm -r %s/", r->full_path);
         }
 
         // v5.8.9 — Verify Stamp: runs verify_model_stamp on the saved
@@ -1561,18 +1614,23 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
         if (r->has_stamp) {
             ImGui::SameLine();
             if (ImGui::Button("Verify Stamp")) {
-                // Try common role files in priority order — same shape as
-                // PastRuns_LoadOne's stat() check above.
+                // v5.11.55 — use r->full_path (the actual scanned dir under
+                // models/<class>/...) instead of synthesizing "models/<dir_name>".
+                // Pre-fix synthesized path missed the "classification/" or
+                // "regression/" intermediate dir that v4.3+ Save Run +
+                // v5.11.41.A Multi-Horizon use, so Verify Stamp always
+                // failed with "no model file found in models/<dir>/" for
+                // any kind-organized run.
                 const char *role_files[] = {
                     "barrier.json", "buy_signal.json", "regime.json",
                     "barrier.xgb",  "buy_signal.xgb",  "regime.xgb",
                     NULL
                 };
-                char model_path[512];
+                char model_path[640];
                 const char *found = NULL;
                 for (int i = 0; role_files[i]; ++i) {
-                    snprintf(model_path, sizeof(model_path), "models/%s/%s",
-                             r->dir_name, role_files[i]);
+                    snprintf(model_path, sizeof(model_path), "%s/%s",
+                             r->full_path, role_files[i]);
                     struct stat mst;
                     if (stat(model_path, &mst) == 0) {
                         found = model_path;
@@ -1581,7 +1639,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
                 }
                 if (!found) {
                     snprintf(r->stamp_verify_msg, sizeof(r->stamp_verify_msg),
-                        "no model file found in models/%s/", r->dir_name);
+                        "no model file found in %s/", r->full_path);
                     r->stamp_verify_state = -1;
                 } else {
                     // Empty secret = devmode (accepts any signature, just
