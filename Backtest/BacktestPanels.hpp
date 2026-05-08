@@ -691,6 +691,12 @@ struct PastRun {
     int    horizon_ticks;        // parsed from dir_name; 0 if not multi-horizon row
     char   full_path[400];       // full path under models/ (e.g. "models/classification/foo");
                                   // populated by PastRuns_LoadOne. Used by Delete button.
+    // v5.11.54 — multi-horizon visual grouping. group_size=N means this row
+    // is part of a cluster of N rows sharing the same prefix (all multi-
+    // horizon siblings). group_idx=0 = first/header; >=1 = continuation
+    // (rendered with indent). group_size=1 = singleton (not a group).
+    int    group_size;
+    int    group_idx;
 };
 
 struct PastRunsState {
@@ -933,13 +939,31 @@ static inline void PastRuns_Scan(PastRunsState *s) {
     // (those still have summary.txt at models/{run_name}/).
     PastRuns_ScanOneDir(s, "models");
 
-    // v5.11.51 — sort runs by mtime descending (newest first). Operator
-    // typically wants recent runs at top. Sort happens here at scan time
-    // so the table renders pre-sorted (no need for ImGui's per-frame sort
-    // callback).
+    // v5.11.51 — sort runs by mtime descending (newest first). v5.11.54
+    // refines: secondary sort key = (prefix asc, horizon_ticks asc) so
+    // multi-horizon siblings cluster together within their mtime cohort.
+    // Group-leader's mtime determines the group's position in the list.
     for (int i = 0; i < s->count - 1; ++i) {
         for (int j = i + 1; j < s->count; ++j) {
-            if (s->runs[j].mtime_sec > s->runs[i].mtime_sec) {
+            // Primary: mtime desc (newer first)
+            int swap = 0;
+            if (s->runs[j].mtime_sec > s->runs[i].mtime_sec + 60) {
+                // 60s grace = treat near-simultaneous as same cohort, then
+                // sort by prefix within cohort
+                swap = 1;
+            } else if (s->runs[i].mtime_sec > s->runs[j].mtime_sec + 60) {
+                swap = 0;
+            } else {
+                // Same cohort — sort by prefix asc, horizon_ticks asc
+                int cmp = strcmp(s->runs[j].prefix, s->runs[i].prefix);
+                if (cmp < 0) {
+                    swap = 1;
+                } else if (cmp == 0 &&
+                           s->runs[j].horizon_ticks < s->runs[i].horizon_ticks) {
+                    swap = 1;
+                }
+            }
+            if (swap) {
                 PastRun tmp = s->runs[i];
                 s->runs[i] = s->runs[j];
                 s->runs[j] = tmp;
@@ -947,8 +971,30 @@ static inline void PastRuns_Scan(PastRunsState *s) {
         }
     }
 
+    // v5.11.54 — compute group_size + group_idx for visual grouping in
+    // render. Walk runs, group consecutive same-prefix multi-horizon
+    // siblings. Singletons (horizon_ticks=0 OR no siblings) get
+    // group_size=1, group_idx=0 (rendered as standalone row).
+    for (int i = 0; i < s->count; ) {
+        int group_end = i + 1;
+        // Only multi-horizon runs (horizon_ticks > 0) form groups
+        if (s->runs[i].horizon_ticks > 0) {
+            while (group_end < s->count &&
+                   s->runs[group_end].horizon_ticks > 0 &&
+                   strcmp(s->runs[group_end].prefix, s->runs[i].prefix) == 0) {
+                group_end++;
+            }
+        }
+        int gsize = group_end - i;
+        for (int g = i; g < group_end; ++g) {
+            s->runs[g].group_size = gsize;
+            s->runs[g].group_idx  = g - i;
+        }
+        i = group_end;
+    }
+
     snprintf(s->status_msg, sizeof(s->status_msg),
-             "scanned %d run(s) in models/{classification,regression,...} (newest first)",
+             "scanned %d run(s) in models/{classification,regression,...} (newest first; multi-horizon grouped)",
              s->count);
 }
 
@@ -1175,17 +1221,33 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s) {
 
     // Helper: render one selectable row's leading "Run" cell. Shared between
     // both tabs since selection is global across runs.
+    // v5.11.54 — Multi-horizon visual grouping. When this row is part of a
+    // group (group_size > 1), render differently:
+    //   - First row of group (group_idx == 0): show prefix + " [N horizons]"
+    //     badge so operator sees the group at a glance
+    //   - Continuation rows (group_idx > 0): indent with "  └ horizon <H>"
+    //     so the cluster visually groups under the header row
+    // Singleton rows (group_size == 1) render with full dir_name as before.
     auto render_run_cell = [&](int i) {
         PastRun *r = &s->runs[i];
         ImGui::TableSetColumnIndex(0);
         char rowid[200];
-        // v5.8.9 — surface stamp presence inline in the run name. "[stamped]"
-        // prefix means a .stamp file exists alongside the saved model;
-        // operators can filter visually for deploy-ready runs without a
-        // separate column. Verify Stamp button (inspector below) actually
-        // validates signature + drift hash.
         const char *stamp_tag = r->has_stamp ? "[stamped] " : "";
-        snprintf(rowid, sizeof(rowid), "%s%s##run%d", stamp_tag, r->dir_name, i);
+        if (r->group_size > 1 && r->group_idx == 0) {
+            // Group header — show prefix + count badge
+            snprintf(rowid, sizeof(rowid),
+                     "%s%s [%d horizons]##run%d",
+                     stamp_tag, r->prefix, r->group_size, i);
+        } else if (r->group_size > 1 && r->group_idx > 0) {
+            // Continuation — indented
+            snprintf(rowid, sizeof(rowid),
+                     "%s    └ horizon %d##run%d",
+                     stamp_tag, r->horizon_ticks, i);
+        } else {
+            // Singleton (single-horizon or non-multi run)
+            snprintf(rowid, sizeof(rowid), "%s%s##run%d",
+                     stamp_tag, r->dir_name, i);
+        }
         bool sel = (s->selected == i);
         if (ImGui::Selectable(rowid, sel, ImGuiSelectableFlags_SpanAllColumns)) {
             s->selected = i;
