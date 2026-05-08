@@ -3322,8 +3322,99 @@ static inline void mh_run_one_horizon_fv(
     fv->req_label_tp_pct          = (double)tp_pct;
     fv->req_label_sl_pct          = (double)sl_pct;
 
+    // v5.11.52 — train + save the FINAL deployable model BEFORE calling
+    // RFV. RFV computes WF + held-out metrics + auto-stamps the file at
+    // fv->auto_stamp_path, but it doesn't save a model itself (it trains
+    // boosters internally for WF folds + held-out then discards). The
+    // pre-v5.11.41.A worker had this train+save inline; my v5.11.41.A
+    // refactor dropped it when replacing inline XGB with RFV. Without
+    // a saved model file, stamp_write_for_model failed at SHA256 of
+    // model_path → "could not sha256 ..." status. Restoring train+save
+    // here closes that bug.
+    //
+    // Model trained on full feature_matrix (NaN-filtered labels). This
+    // matches the held-out training's training portion ([0, trainval_end))
+    // closely enough for deployment purposes — operator gets a model
+    // that learned from the most data possible.
+#ifdef USE_XGBOOST
+    {
+        snprintf(state->mh_horizon_status[h], 128,
+                 "h=%d: training final model for save+stamp...", horizon_ticks);
+
+        // count valid (non-NaN, non-Inf) labels
+        int n_valid = 0;
+        for (int s = 0; s < results->sample_count; ++s) {
+            if (!isnan(results->labels[s]) && !isinf(results->labels[s]))
+                n_valid++;
+        }
+        if (n_valid >= 50) {
+            float *train_features = (float*)malloc((size_t)n_valid * MODEL_NUM_FEATURES * sizeof(float));
+            float *train_labels   = (float*)malloc((size_t)n_valid * sizeof(float));
+            if (train_features && train_labels) {
+                int j = 0;
+                for (int s = 0; s < results->sample_count; ++s) {
+                    if (isnan(results->labels[s]) || isinf(results->labels[s])) continue;
+                    memcpy(&train_features[(size_t)j * MODEL_NUM_FEATURES],
+                           &results->feature_matrix[(size_t)s * MODEL_NUM_FEATURES],
+                           MODEL_NUM_FEATURES * sizeof(float));
+                    train_labels[j] = results->labels[s];
+                    j++;
+                }
+                DMatrixHandle dtrain = nullptr;
+                XGDMatrixCreateFromMat(train_features, n_valid, MODEL_NUM_FEATURES,
+                                        std::numeric_limits<float>::quiet_NaN(), &dtrain);
+                XGDMatrixSetFloatInfo(dtrain, "label", train_labels, n_valid);
+                BoosterHandle booster = nullptr;
+                XGBoosterCreate(&dtrain, 1, &booster);
+                tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
+                hp.max_depth        = state->max_depth;
+                hp.learning_rate    = state->learning_rate;
+                hp.n_estimators     = state->n_estimators;
+                hp.subsample        = state->ui_subsample;
+                hp.colsample_bytree = state->ui_colsample_bytree;
+                hp.min_child_weight = state->ui_min_child_weight;
+                hp.seed             = state->ui_seed;
+                static const char* tree_method_choices[] = {"hist","exact","approx","auto"};
+                int tm_idx = state->ui_tree_method_idx;
+                if (tm_idx < 0 || tm_idx >= 4) tm_idx = 0;
+                strncpy(hp.tree_method, tree_method_choices[tm_idx], sizeof(hp.tree_method) - 1);
+                int eval_nthread = results->config_used.xgb_eval_nthread > 0
+                                 ? results->config_used.xgb_eval_nthread : 1;
+                tt::XGBHyperparams_Apply(booster, hp, eval_nthread);
+                int K_classes = (label_type >= 0 && label_type < LABEL_COUNT)
+                              ? label_table[label_type].num_classes : 0;
+                int is_multi  = (K_classes >= 2);
+                int is_regr   = (K_classes == 1);
+                if (is_multi) {
+                    XGBoosterSetParam(booster, "objective", "multi:softprob");
+                    char nc_s[8]; snprintf(nc_s, 8, "%d", K_classes);
+                    XGBoosterSetParam(booster, "num_class", nc_s);
+                } else if (is_regr) {
+                    XGBoosterSetParam(booster, "objective", "reg:squarederror");
+                } else {
+                    XGBoosterSetParam(booster, "objective", "binary:logistic");
+                }
+                for (int it = 0; it < hp.n_estimators; ++it) {
+                    if (state->mh_cancel) break;
+                    if (XGBoosterUpdateOneIter(booster, it, dtrain) != 0) break;
+                }
+                int save_rc = XGBoosterSaveModel(booster, fv->auto_stamp_path);
+                if (save_rc != 0) {
+                    fprintf(stderr, "[mh-train] horizon %d: SaveModel(%s) failed: %s\n",
+                            horizon_ticks, fv->auto_stamp_path,
+                            XGBGetLastError() ? XGBGetLastError() : "(null)");
+                }
+                XGBoosterFree(booster);
+                XGDMatrixFree(dtrain);
+            }
+            free(train_features);
+            free(train_labels);
+        }
+    }
+#endif
+
     snprintf(state->mh_horizon_status[h], 128,
-             "h=%d: training + WF + held-out (%d folds)...",
+             "h=%d: WF + held-out (%d folds)...",
              horizon_ticks, snap_n_splits);
 
     Backtest_RunFullValidation(fv, results, &split,
