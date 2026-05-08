@@ -3379,20 +3379,34 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
     }
     state->mh_total = horizon_count;
 
-    // v5.11.41.C — parallelism dispatch. Compute effective worker count from
-    // cfg.multi_horizon_max_threads (0 = auto = min(8, ncores/2)). Cap at
-    // horizon_count + 8 (HORIZON_LIST_MAX). Forced serial when
-    // mh_max_threads=1 OR horizon_count==1.
+    // v5.11.41.C — parallelism dispatch. v5.11.45: default changed to
+    // serial (cfg.multi_horizon_max_threads=1) after segfault reports.
+    // XGBoost + libgomp + pthread is fragile; per-pthread omp_set_num_threads(1)
+    // doesn't fully prevent libgomp state collisions across concurrent
+    // XGBoost trainings. Operator opts into parallel by setting
+    // cfg.multi_horizon_max_threads >= 2. If they do, fire a one-shot
+    // CRITICAL warning so they know the risk.
     int mh_max_threads = results->config_used.multi_horizon_max_threads;
     if (mh_max_threads <= 0) {
-        long ncores = sysconf(_SC_NPROCESSORS_ONLN);
-        if (ncores < 2) ncores = 2;
-        mh_max_threads = (int)(ncores / 2);
-        if (mh_max_threads < 1) mh_max_threads = 1;
-        if (mh_max_threads > 8) mh_max_threads = 8;
+        // 0 = auto, but post-v5.11.45 defaults to 1 (serial) for stability.
+        // Treat 0 the same as 1 here — operator must explicitly request >=2.
+        mh_max_threads = 1;
     }
     int n_parallel = horizon_count < mh_max_threads ? horizon_count : mh_max_threads;
     int parallel_mode = (n_parallel >= 2 && horizon_count >= 2);
+    if (parallel_mode) {
+        // v5.11.45 — experimental opt-in. Operator explicitly set cfg
+        // multi_horizon_max_threads >= 2. Log warning so they know the risk.
+        // (One-shot per worker invocation; rate-limit not needed since
+        // training is rare.)
+        fprintf(stderr,
+            "[mh-train] WARN: parallel mode enabled "
+            "(cfg.multi_horizon_max_threads=%d). XGBoost+libgomp+pthread "
+            "interaction is unstable and may segfault under load. If you "
+            "see SIGSEGV in RowsWiseBuildHistKernel or PredictDMatrix, "
+            "set cfg.multi_horizon_max_threads=1 and retry serial.\n",
+            results->config_used.multi_horizon_max_threads);
+    }
 
     int trained = 0;
     int saved_count = 0;
@@ -4177,9 +4191,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                               "auto: XGBoost picks (varies by version)");
     }
 
-    ImGui::InputText("Model Path", state->model_path, sizeof(state->model_path));
-    ImGui::SetItemTooltip("Where to save the trained model\n"
-                          "used by the engine at runtime for ML buy signals");
+    ImGui::InputText("Model Path (re-validate)", state->model_path, sizeof(state->model_path));
+    ImGui::SetItemTooltip(
+        "Path to an EXISTING saved model — used by the buttons below:\n"
+        "  • Run Walk-Forward — re-runs WF cross-validation on the model\n"
+        "  • Run Full Validation — re-runs WF + held-out eval + auto-stamp\n\n"
+        "Useful when you change wf_n_splits or want to re-stamp without\n"
+        "retraining from scratch.\n\n"
+        "NOT used by Train Model / Train Multi-Horizon — those auto-generate\n"
+        "save paths from Run Name + horizon dir naming convention\n"
+        "(models/<class>/<run_name>_horizon_<H>/<role>.json).");
 
     // v5.9.0d — Train Model now runs in a worker thread. The audit at
     // train_model_worker_fn (above) walked the race surface + cancellation

@@ -1101,7 +1101,12 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.xgb_train_nthread       = 4;   // matches BacktestPanels.hpp:2056 pre-v5.10
   cfg.xgb_eval_nthread        = 1;   // matches BacktestEngine.hpp:1352, 1638
   cfg.csv_load_workers        = 1;   // serial CSV load (matches pre-v5.10 behavior)
-  cfg.multi_horizon_max_threads = 0; // 0 = auto (min(8, ncores/2)); 1 = forced serial
+  cfg.multi_horizon_max_threads = 1; // 1 = forced serial (DEFAULT; stable). v5.11.45:
+                                      // changed from 0 (auto) -> 1 after segfault reports.
+                                      // XGBoost + libgomp + pthread interaction is fragile;
+                                      // even with per-pthread omp_set_num_threads(1), libgomp
+                                      // state can race across pthreads. Set >1 to opt into
+                                      // experimental parallel mode (may segfault).
   cfg.feature_collect_max_gb  = 12;  // advisory cap; WARN-only
   cfg.wf_split_max_gb         = 8;
   cfg.held_out_max_gb         = 4;

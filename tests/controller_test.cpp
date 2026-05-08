@@ -16055,8 +16055,11 @@ e3_skip_load:;
         // multi_horizon_max_threads. Default 0 = auto (computed at runtime
         // as min(8, ncores/2)). 1 = forced serial. >1 = parallel cap.
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        check("v5.11.41.C: default multi_horizon_max_threads = 0 (auto)",
-              cfg.multi_horizon_max_threads == 0);
+        // v5.11.45 — default changed from 0 (auto) to 1 (forced serial) after
+        // segfault reports under XGBoost+libgomp+pthread interaction. Parallel
+        // mode is opt-in only.
+        check("v5.11.45: default multi_horizon_max_threads = 1 (forced serial post-segfault)",
+              cfg.multi_horizon_max_threads == 1);
 
         // Verify the cfg field type is int (assignment + read-back)
         cfg.multi_horizon_max_threads = 4;
