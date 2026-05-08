@@ -1144,6 +1144,128 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
         core_strategy = snap->per_core[core_id].strategy_id_display;
     }
 
+    // v5.11.61 — ML Ensemble panel. Surfaces what
+    // EnsembleModelZoo_AutoDetectFromDir found at boot (per-horizon
+    // detection, scaler/stamp state, current bandit weights per regime).
+    // Read-only display + checkbox writes core_N_disabled_horizons CSV
+    // back to cfg (operator must restart or 'r' reload to apply). Only
+    // renders when this core is ML (strategy filter) AND ensemble is active.
+    if (core_strategy == STRATEGY_ML && snap && snap->sharded_mode_active &&
+        core_id < snap->per_core_count &&
+        snap->per_core[core_id].ensemble_active) {
+        if (ImGui::CollapsingHeader("ML Ensemble", ImGuiTreeNodeFlags_DefaultOpen)) {
+            const auto &pcs = snap->per_core[core_id];
+            int n_h = (int)pcs.ensemble_n_horizons;
+            ImGui::Text("Blend mode: %s   n_horizons: %d",
+                        pcs.ensemble_blend_mode, n_h);
+            const char* regime_names[] = {"RANGING", "TRENDING", "VOLATILE", "MILD_TREND", "(r4)"};
+            int last_r = pcs.ensemble_last_predicted_regime;
+            int last_h = pcs.ensemble_last_predicted_horizon_idx;
+            if (last_r >= 0 && last_r < 5 && last_h >= 0 && last_h < n_h) {
+                ImGui::TextColored(FoxmlColors::comment,
+                    "Last predict: regime=%s, dominant horizon=%d",
+                    regime_names[last_r], pcs.ensemble_horizon_ticks[last_h]);
+            }
+            ImGui::Separator();
+
+            // Header row
+            if (ImGui::BeginTable("ensemble_horizons", 7,
+                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+                ImGui::TableSetupColumn("Enabled", ImGuiTableColumnFlags_WidthFixed, 60);
+                ImGui::TableSetupColumn("Horizon", ImGuiTableColumnFlags_WidthFixed, 80);
+                for (int r = 0; r < 4; ++r) {
+                    ImGui::TableSetupColumn(regime_names[r],
+                        ImGuiTableColumnFlags_WidthFixed, 80);
+                }
+                ImGui::TableSetupColumn("Updates", ImGuiTableColumnFlags_WidthFixed, 70);
+                ImGui::TableHeadersRow();
+
+                bool any_toggle = false;
+                uint32_t new_mask = pcs.ensemble_disabled_horizon_mask;
+                for (int h = 0; h < n_h; ++h) {
+                    int H = pcs.ensemble_horizon_ticks[h];
+                    bool enabled = !(pcs.ensemble_disabled_horizon_mask & (1u << h));
+                    ImGui::TableNextRow();
+                    // Enabled checkbox — writes core_N_disabled_horizons CSV
+                    ImGui::TableNextColumn();
+                    ImGui::PushID(h);
+                    bool prev_enabled = enabled;
+                    if (ImGui::Checkbox("##en", &enabled)) {
+                        if (prev_enabled != enabled) {
+                            if (enabled) new_mask &= ~(1u << h);
+                            else         new_mask |=  (1u << h);
+                            any_toggle = true;
+                        }
+                    }
+                    ImGui::PopID();
+                    // Horizon ticks
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%d", H);
+                    // Per-regime bandit weight columns (4 main regimes)
+                    for (int r = 0; r < 4; ++r) {
+                        ImGui::TableNextColumn();
+                        double w = pcs.ensemble_weights[r][h];
+                        // Tint by weight: high weight = primary color
+                        if (w > 0.4) {
+                            ImGui::TextColored(FoxmlColors::primary, "%.3f", w);
+                        } else if (w > 0.1) {
+                            ImGui::Text("%.3f", w);
+                        } else {
+                            ImGui::TextDisabled("%.3f", w);
+                        }
+                    }
+                    // Updates count column (use first regime's count as proxy)
+                    ImGui::TableNextColumn();
+                    int n_upd = pcs.ensemble_n_updates_per_regime[0];
+                    ImGui::Text("%d", n_upd);
+                }
+                ImGui::EndTable();
+
+                // If operator toggled any checkbox, recompute the
+                // disabled_horizons CSV and write to cfg. Engine picks
+                // it up on next 'r' reload or restart.
+                if (any_toggle) {
+                    char csv[128] = {0};
+                    size_t off = 0;
+                    int n_disabled = 0;
+                    for (int h = 0; h < n_h; ++h) {
+                        if (new_mask & (1u << h)) {
+                            int wrote = snprintf(csv + off, sizeof(csv) - off,
+                                "%s%d", n_disabled == 0 ? "" : ",",
+                                pcs.ensemble_horizon_ticks[h]);
+                            if (wrote > 0) off += wrote;
+                            n_disabled++;
+                        }
+                    }
+                    char key[64];
+                    snprintf(key, sizeof(key), "core_%d_disabled_horizons", core_id);
+                    cfg_write_field(s->cfg_path, key, csv);
+                    fprintf(stderr, "[settings] wrote %s=%s — press 'r' in "
+                                    "TUI or restart engine to apply\n",
+                            key, csv[0] ? csv : "(none)");
+                    changed = true;
+                }
+            }
+            ImGui::TextColored(FoxmlColors::comment,
+                "Toggle requires engine restart OR 'r' hot-reload to apply.\n"
+                "Bandit weights drift toward better-performing horizons per regime.");
+        }
+    } else if (core_strategy == STRATEGY_ML && snap && snap->sharded_mode_active &&
+               core_id < snap->per_core_count &&
+               !snap->per_core[core_id].ensemble_active) {
+        // ML core but no ensemble active — surface why
+        if (ImGui::CollapsingHeader("ML Ensemble", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::TextColored(FoxmlColors::comment,
+                "Ensemble not active — single-zoo path or no _horizon_<N> "
+                "siblings detected at base path.");
+            ImGui::TextColored(FoxmlColors::comment,
+                "If you trained multi-horizon models, check that "
+                "core_%d_model_dir points at the BASE path "
+                "(without _horizon_<H> suffix) and engine.log shows "
+                "[sharded] core %d: ensemble active.", core_id, core_id);
+        }
+    }
+
     const char *current_section = NULL;
     bool current_section_open = false;
     for (int j = 0; j < NUM_PER_CORE_FIELDS; ++j) {
