@@ -78,16 +78,28 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                 ImGui::SameLine(0, 14);
             }
 
-            // Model state — tri-state.
+            // Model state — tri-state, with ensemble awareness (v5.11.62+).
+            // Ensemble counts as "loaded" even when single-zoo buy_model
+            // isn't populated — the strategy reads ezoo->primary_handles.
             if (pc.ml_model_load_failed) {
                 ImGui::TextColored(FoxmlColors::red, "model: LOAD FAILED");
                 ImGui::SetItemTooltip(
-                    "ML strategy was selected but the model file refused to load.\n"
-                    "Stamp validation failed, file missing, or held_out_gate_strict=1\n"
+                    "ML strategy was selected but no model could be loaded.\n"
+                    "Stamp validation failed, role file missing under any name\n"
+                    "(buy_signal/barrier/regime), or held_out_gate_strict=1\n"
                     "with mismatched registry hash. Check the boot log for details.\n"
                     "Operator action: verify cfg path + retrain if needed.");
             } else if (pc.ml_model_loaded) {
                 ImGui::TextColored(FoxmlColors::green, "model: loaded");
+            } else if (pc.ensemble_active && pc.ensemble_n_horizons > 0) {
+                ImGui::TextColored(FoxmlColors::green,
+                    "model: ensemble (%d horizons)", pc.ensemble_n_horizons);
+                ImGui::SetItemTooltip(
+                    "Multi-horizon ensemble is active. Single-zoo handle is\n"
+                    "unset (no buy_signal.json at base path) but ezoo->primary\n"
+                    "is wired to whichever role file was found in the _horizon_<H>\n"
+                    "siblings (priority: buy_signal > barrier > regime). The\n"
+                    "strategy uses ezoo->primary_handles for predictions.");
             } else {
                 ImGui::TextColored(FoxmlColors::sand, "model: (none configured)");
             }

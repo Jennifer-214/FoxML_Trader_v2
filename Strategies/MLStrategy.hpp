@@ -65,10 +65,15 @@ inline void MLStrategy_Init(MLStrategyState<F> *state, const RollingStats<F> *ro
     state->ensemble_last_selected_idx = -1;
 
     if (state->model_ready)
-        fprintf(stderr, "[ML] strategy initialized — model ready, %d features\n",
+        fprintf(stderr, "[ML] strategy initialized — single-zoo model ready, %d features\n",
                 state->buy_model.num_features);
     else
-        fprintf(stderr, "[ML] strategy initialized — no model loaded (predictions disabled)\n");
+        // v5.11.62 — phrasing reflects that ensemble may be wired later.
+        // EngineSharded boot assigns state->ensemble_zoo AFTER MLStrategy_Init
+        // runs. Look for the "[sharded] core N: ensemble active" line below
+        // to confirm ensemble path is active.
+        fprintf(stderr, "[ML] strategy initialized — single-zoo not loaded "
+                        "(ensemble may attach below)\n");
 }
 
 //======================================================================================================
