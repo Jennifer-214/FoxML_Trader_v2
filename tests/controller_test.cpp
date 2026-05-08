@@ -16545,6 +16545,52 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.12.1.A.1: last_ws_tick_us field on EventLoopState ---\n");
+    {
+        // Phase A.1 of v5.12.1.A (Disconnect-flatten policy). Adds a
+        // single global atomic on EventLoopState — wall-clock us of last
+        // WS tick received. Producer (or backtest driver) is sole writer;
+        // slow-path threads + GUI read with acquire ordering. Used by the
+        // forthcoming staleness gate (sub-tag .A.2) to fire OMS_FlattenAll
+        // when WS dropouts exceed cfg.ws_dead_time_flatten_threshold_secs.
+
+        tt::OrderManagerState<64> oms;
+        tt::ExchangeAdapter<64> empty_adapter{};
+        tt::OrderManager_Init(&oms, empty_adapter, /*live=*/0,
+                              FPN_FromDouble<64>(10000.0),
+                              FPN_FromDouble<64>(0.001));
+        tt::EventLoopState<64> state;
+        tt::EventLoopState_Init(&state, &oms);
+
+        // === Test 1: post-Init value is 0 (warmup sentinel) ===
+        check("v5.12.1.A.1: last_ws_tick_us defaults to 0 post-Init",
+              state.last_ws_tick_us.load(std::memory_order_acquire) == 0);
+
+        // === Test 2: store + load round-trips ===
+        const uint64_t synthetic_ts = 1778145938ULL;
+        state.last_ws_tick_us.store(synthetic_ts, std::memory_order_release);
+        check("v5.12.1.A.1: store + acquire-load returns the published value",
+              state.last_ws_tick_us.load(std::memory_order_acquire) == synthetic_ts);
+
+        // === Test 3: monotonic-on-store contract ===
+        // Producer/backtest drivers publish strictly-increasing wall-clock
+        // values. We verify successive stores update the read result; the
+        // single-writer single-reader semantics make this trivial in a
+        // unit test, but the field is sized + ordered for the multi-reader
+        // case in production (slow-path + GUI both read concurrently).
+        int monotonic_pass = 1;
+        for (uint64_t k = 1; k <= 10; ++k) {
+            uint64_t ts = synthetic_ts + k * 1000ULL;
+            state.last_ws_tick_us.store(ts, std::memory_order_release);
+            uint64_t got = state.last_ws_tick_us.load(std::memory_order_acquire);
+            if (got != ts) { monotonic_pass = 0; break; }
+        }
+        check("v5.12.1.A.1: monotonic store/load on every step",
+              monotonic_pass);
+
+        tt::OrderManager_Shutdown(&oms);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

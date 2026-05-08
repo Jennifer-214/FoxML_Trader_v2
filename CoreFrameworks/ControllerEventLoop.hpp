@@ -478,6 +478,18 @@ struct alignas(64) EventLoopState {
     // the OMS pointer as its second argument and stores it here. callers that
     // pass nullptr will get crashes in any accessor or OnEvent call.
     OrderManagerState<F>* oms;
+    // v5.12.1.A — wall-clock us of last WS tick received. Single-writer
+    // (the producer thread in live, or the backtest driver in offline);
+    // multiple-reader (per-core slow paths for the v5.12.1.A WS-staleness
+    // emergency-flatten gate, and the GUI/TUI heartbeat indicator added in
+    // v5.12.1.C). Initialized to 0 in EventLoopState_Init; rises
+    // monotonically once ticks start flowing. The slow-path check is
+    //   gap_us = now_us - last_ws_tick_us;
+    //   if (gap_us >= cfg.ws_dead_time_flatten_threshold_secs * 1e6 &&
+    //       cfg.ws_dead_time_flatten_enabled) → OMS_FlattenAll(...)
+    // Pre-warmup (last_ws_tick_us == 0) is treated as "no flatten" so the
+    // engine doesn't fire a phantom flatten before the first tick arrives.
+    std::atomic<uint64_t> last_ws_tick_us;
 };
 
 }  // namespace tt
@@ -504,6 +516,9 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
     state->total_entries = 0;
     state->total_exits = 0;
     state->oms = oms;
+    // v5.12.1.A — pre-warmup sentinel; first tick from producer/backtest
+    // sets it to a monotonic wall-clock us value.
+    state->last_ws_tick_us.store(0, std::memory_order_relaxed);
     for (int i = 0; i < MAX_EXECUTION_CORES; i++) {
         state->cores[i].core = nullptr;
         state->cores[i].intended_tp = FPN_Zero<F>();

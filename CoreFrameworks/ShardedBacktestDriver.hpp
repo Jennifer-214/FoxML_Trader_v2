@@ -306,6 +306,16 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
                 (SpreadState<F, 1024>*)drv->spread_state,
                 *drv->current_spread);
         }
+        // v5.12.1.A — publish synthetic tick timestamp to
+        // EventLoopState::last_ws_tick_us so backtest preserves train-serve
+        // parity with the live producer's publish at EngineSharded fan_out.
+        // Backtest staleness gate is harmless (gap stays tiny because each
+        // backtest tick is consumed immediately AND cfg.ws_dead_time_flatten_enabled
+        // defaults 0 outside live deployment).
+        if (drv->state) {
+            drv->state->last_ws_tick_us.store(tick.timestamp,
+                                               std::memory_order_release);
+        }
         if (drv->rolling && drv->config) {
             // v5.1.2 (full symmetric decoupling): backtest pushes to per-
             // core slow_state via the shared helper, then rebuilds via

@@ -1497,6 +1497,12 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             ticks_produced.fetch_add(1, std::memory_order_relaxed);
             last_price.store(price_d, std::memory_order_relaxed);
             last_volume.store(volume_d, std::memory_order_relaxed);
+            // v5.12.1.A — publish wall-clock us of this tick to
+            // EventLoopState::last_ws_tick_us. Producer is the SOLE writer;
+            // slow-path threads + GUI read with acquire ordering. Used by
+            // the v5.12.1.A WS-staleness emergency-flatten gate (added in
+            // sub-tag .A.2) and the v5.12.1.C heartbeat indicator.
+            state.last_ws_tick_us.store(ts_us, std::memory_order_release);
 
             // v5.1.4: GUI drag-TP/SL pickup runs per-tick, NOT at slow-path
             // cadence. Pre-v5.1.4 this lived in the cadence block and gave
