@@ -3235,31 +3235,51 @@ static inline void mh_run_one_horizon_fv(
     snprintf(dst_summary, sizeof(dst_summary), "%s/summary.txt", horizon_dir);
     FILE *sf = fopen(dst_summary, "w");
     if (sf) {
+        // v5.11.50 — use CANONICAL summary.txt field names that past_runs
+        // reads (line 760-779). Pre-fix v5.11.41.A used made-up wf_*
+        // names; past_runs ignored them, leaving Train Acc/Val Acc/Gap
+        // columns blank. NOW uses the same names Save Run uses so
+        // multi-horizon runs render the same as single-horizon Save Run
+        // bundles. Plus expected_num_classes (v5.11.49) for Classes col.
         fprintf(sf, "run: %s_horizon_%d\n", run_name, horizon_ticks);
         fprintf(sf, "role: %s\n", role);
         fprintf(sf, "model: %s/%s.json\n", horizon_dir, role);
         fprintf(sf, "label_type: %d\n", label_type);
-        // v5.11.49 — expected_num_classes drives Past Runs "Classes"
-        // column rendering. Without this, past_runs reads 0 (default)
-        // → renders "binary" even for multiclass models. K=0 binary,
-        // K=1 regression, K>=2 multiclass.
         fprintf(sf, "expected_num_classes: %d\n", num_classes);
+        fprintf(sf, "max_depth: %d\n", state->max_depth);
+        fprintf(sf, "learning_rate: %.3f\n", state->learning_rate);
+        fprintf(sf, "n_estimators: %d\n", state->n_estimators);
+        fprintf(sf, "label_tp_pct: %.4f\n", (double)tp_pct);
+        fprintf(sf, "label_sl_pct: %.4f\n", (double)sl_pct);
         fprintf(sf, "label_lookahead_ticks: %d\n", horizon_ticks);
-        fprintf(sf, "label_tp_pct: %.6g\n", (double)tp_pct);
-        fprintf(sf, "label_sl_pct: %.6g\n", (double)sl_pct);
-        fprintf(sf, "wf_n_folds: %d\n", fv->walkforward.valid_folds);
-        fprintf(sf, "wf_mean_val_accuracy: %.6f\n",
-                (double)fv->walkforward.mean_val_accuracy);
-        fprintf(sf, "wf_std_val_accuracy: %.6f\n",
-                (double)fv->walkforward.std_val_accuracy);
-        fprintf(sf, "wf_mean_val_correlation: %.6f\n",
-                (double)fv->walkforward.mean_val_correlation);
-        fprintf(sf, "held_out_metric: %.6f\n", (double)fv->held_out_metric);
-        fprintf(sf, "held_out_count: %d\n", fv->held_out_count);
-        fprintf(sf, "wf_to_held_out_gap: %.6f\n",
+        fprintf(sf, "label_kind: %d\n", fv->label_kind);
+        fprintf(sf, "valid_folds: %d\n", fv->walkforward.valid_folds);
+        // val_accuracy / val_correlation: pick whichever fits the kind.
+        // past_runs reader sets has_wf_results=1 when EITHER is read.
+        if (fv->label_kind == 2) {  // regression
+            fprintf(sf, "val_correlation: %.4f\n",
+                    (double)fv->walkforward.mean_val_correlation);
+            fprintf(sf, "val_mse: %.6f\n",
+                    (double)fv->walkforward.mean_val_mse);
+        } else {  // binary or multiclass
+            fprintf(sf, "val_accuracy: %.2f\n",
+                    100.0 * (double)fv->walkforward.mean_val_accuracy);
+            fprintf(sf, "val_stddev: %.2f\n",
+                    100.0 * (double)fv->walkforward.std_val_accuracy);
+        }
+        fprintf(sf, "train_val_gap: %.4f\n",
                 (double)fv->wf_to_held_out_gap);
-        fprintf(sf, "gap_acceptable: %d\n", fv->gap_acceptable);
-        fprintf(sf, "gap_threshold: %.6f\n", (double)fv->gap_threshold);
+        fprintf(sf, "overfit_folds: %d\n", fv->walkforward.overfit_count);
+        fprintf(sf, "held_out_metric: %.4f\n", (double)fv->held_out_metric);
+        fprintf(sf, "held_out_count: %d\n", fv->held_out_count);
+        // accuracy = train accuracy. Past_runs reads this as `r->train_accuracy`.
+        // Use mean_train_accuracy from WF folds (closest analog).
+        if (fv->label_kind != 2) {
+            fprintf(sf, "accuracy: %.2f\n",
+                    100.0 * (double)fv->walkforward.mean_train_accuracy);
+        }
+        // Bookkeeping (operator may grep for these even though past_runs
+        // doesn't use them):
         fprintf(sf, "ran_held_out: %d\n", fv->ran_held_out);
         fprintf(sf, "auto_stamp_attempted: %d\n", fv->auto_stamp_attempted);
         fprintf(sf, "auto_stamp_ok: %d\n", fv->auto_stamp_ok);
