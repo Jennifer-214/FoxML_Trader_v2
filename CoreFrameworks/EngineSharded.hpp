@@ -1116,49 +1116,72 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         state.cores[i].model_load_failed = 1;
                     }
                 }
-                // v5.10.0a.G.5 — try ensemble auto-detect on the base dir.
-                // No-op when no _horizon_<H> siblings present; ezoo->active=0
-                // → single-zoo path runs unchanged.
-                if (cfg.core_model_dir[i][0]) {
-                    // v5.10.1.C — Plumb cfg-derived strict/gap/secret/drift args
-                    // (parity-check Finding #6). Without these, ensemble auto-detect
-                    // silently bypassed cfg.held_out_gate_strict in ensemble mode.
-                    int n_loaded = EnsembleModelZoo_AutoDetectFromDir(
-                        &ml_ensemble_zoos[i],
-                        cfg.core_model_dir[i],
-                        backend,
-                        cfg.held_out_stamp_secret,
-                        FPN_ToDouble(cfg.gap_acceptable_threshold),
-                        cfg.held_out_gate_strict,
-                        cfg.acknowledge_cross_binary_version_drift);
-                    if (n_loaded > 0 && ml_ensemble_zoos[i].active) {
-                        fprintf(stderr, "[sharded] core %d: ensemble active "
-                                        "(%d horizons; %d total models)\n",
-                                i, ml_ensemble_zoos[i].buy_signal_count, n_loaded);
-                        // v5.10.0a.G.7 — initialize per-regime bandits + cfg-driven mode
-                        EnsembleModelZoo_InitBandits(&ml_ensemble_zoos[i],
-                                                       cfg.ensemble_bandit_eta,
-                                                       cfg.ensemble_min_warmup_predictions);
-                        const char* mode = cfg.core_ensemble_blend_mode[i][0]
-                                          ? cfg.core_ensemble_blend_mode[i]
-                                          : cfg.ensemble_blend_mode;
-                        strncpy(ml_ensemble_zoos[i].blend_mode, mode,
-                                sizeof(ml_ensemble_zoos[i].blend_mode) - 1);
-                        ml_ensemble_zoos[i].blend_mode[
-                            sizeof(ml_ensemble_zoos[i].blend_mode) - 1] = '\0';
-                        EnsembleModelZoo_SetDisabledHorizons(&ml_ensemble_zoos[i],
-                            cfg.core_disabled_horizons[i]);
-                        // v5.10.0a.G.9 — overlay persisted bandit state (if any)
-                        EnsembleModelZoo_LoadBanditState(&ml_ensemble_zoos[i],
-                                                          cfg.core_model_dir[i]);
-                        EnsembleModelZoo_SetBanditSaveInterval(&ml_ensemble_zoos[i],
-                            cfg.ensemble_bandit_save_interval);
-                        state.cores[i].ensemble_handle = &ml_ensemble_zoos[i];
-                    } else {
-                        state.cores[i].ensemble_handle = nullptr;
-                    }
+            }
+            // v5.11.60 — ensemble auto-detect MUST run regardless of single-zoo
+            // load result. Pre-fix this was inside the `if (loaded)` block,
+            // which meant multi-horizon-only deployments (where the base path
+            // models/<dir> doesn't exist — only `<dir>_horizon_<H>` siblings
+            // do) silently failed: single-zoo load returns 0 because base
+            // path is absent, then ensemble auto-detect is skipped, then the
+            // ML core boots with NO model and `model_load_failed=1`.
+            //
+            // Symptom: engine.log shows
+            //   [ML] zoo loaded 0 role(s) from <base> (mask=0x0)
+            //   [ML] strategy initialized — no model loaded (predictions disabled)
+            // and ML Status panel shows "core N: model: LOAD FAILED" forever,
+            // even though the _horizon_<H> sibling dirs are fully populated.
+            // Operator hit this on a multi-horizon training output that
+            // produced only sibling dirs, no base.
+            //
+            // v5.10.0a.G.5 — try ensemble auto-detect on the base dir.
+            // No-op when no _horizon_<H> siblings present; ezoo->active=0
+            // → single-zoo path runs unchanged.
+            int ensemble_loaded = 0;
+            if (cfg.core_model_dir[i][0]) {
+                // v5.10.1.C — Plumb cfg-derived strict/gap/secret/drift args
+                // (parity-check Finding #6). Without these, ensemble auto-detect
+                // silently bypassed cfg.held_out_gate_strict in ensemble mode.
+                int n_loaded = EnsembleModelZoo_AutoDetectFromDir(
+                    &ml_ensemble_zoos[i],
+                    cfg.core_model_dir[i],
+                    backend,
+                    cfg.held_out_stamp_secret,
+                    FPN_ToDouble(cfg.gap_acceptable_threshold),
+                    cfg.held_out_gate_strict,
+                    cfg.acknowledge_cross_binary_version_drift);
+                if (n_loaded > 0 && ml_ensemble_zoos[i].active) {
+                    fprintf(stderr, "[sharded] core %d: ensemble active "
+                                    "(%d horizons; %d total models)\n",
+                            i, ml_ensemble_zoos[i].buy_signal_count, n_loaded);
+                    // v5.10.0a.G.7 — initialize per-regime bandits + cfg-driven mode
+                    EnsembleModelZoo_InitBandits(&ml_ensemble_zoos[i],
+                                                   cfg.ensemble_bandit_eta,
+                                                   cfg.ensemble_min_warmup_predictions);
+                    const char* mode = cfg.core_ensemble_blend_mode[i][0]
+                                      ? cfg.core_ensemble_blend_mode[i]
+                                      : cfg.ensemble_blend_mode;
+                    strncpy(ml_ensemble_zoos[i].blend_mode, mode,
+                            sizeof(ml_ensemble_zoos[i].blend_mode) - 1);
+                    ml_ensemble_zoos[i].blend_mode[
+                        sizeof(ml_ensemble_zoos[i].blend_mode) - 1] = '\0';
+                    EnsembleModelZoo_SetDisabledHorizons(&ml_ensemble_zoos[i],
+                        cfg.core_disabled_horizons[i]);
+                    // v5.10.0a.G.9 — overlay persisted bandit state (if any)
+                    EnsembleModelZoo_LoadBanditState(&ml_ensemble_zoos[i],
+                                                      cfg.core_model_dir[i]);
+                    EnsembleModelZoo_SetBanditSaveInterval(&ml_ensemble_zoos[i],
+                        cfg.ensemble_bandit_save_interval);
+                    state.cores[i].ensemble_handle = &ml_ensemble_zoos[i];
+                    ensemble_loaded = 1;
+                } else {
+                    state.cores[i].ensemble_handle = nullptr;
                 }
-            } else {
+            }
+            // v5.11.60 — model_load_failed only fires if BOTH single-zoo AND
+            // ensemble paths failed. Pre-fix the `else` block fired even when
+            // ensemble would have succeeded (because ensemble was inside `if
+            // (loaded)`).
+            if (!loaded && !ensemble_loaded) {
                 // v5.9.0b: ML strategy was selected but model didn't load.
                 // Distinct from "no model configured" (which is operator
                 // intent — leave flag at 0). Here: strategy=ML + load
