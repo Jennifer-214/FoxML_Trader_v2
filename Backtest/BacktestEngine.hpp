@@ -1757,6 +1757,33 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             fprintf(stderr, "[WF marker] fold %d: post-predict-train (ret=%d, out_len=%lu)\n",
                     f + 1, predict_tr_ret, (unsigned long)out_len_tr);
             fflush(stderr);
+            // v5.11.58 — XGBoost C API: XGBoosterPredict's `out_result` is
+            // a pointer into Booster-owned memory (HostDeviceVector reused
+            // across calls). A second Predict realloc-and-fills the same
+            // buffer; at large sample counts (1.5M+ × num_classes), the
+            // realloc moves the address and INVALIDATES the previous
+            // pointer. Symptom: WF segfaults after post-predict-test marker
+            // when train_accuracy computation reads stale pred_tr. Latent
+            // since multiclass support; only triggered at scale (operator
+            // hit it on 2-year × 3-horizon × multiclass run).
+            //
+            // Fix: snapshot pred_tr to caller-owned heap before second
+            // Predict invalidates it. Free at end of predict block.
+            float *pred_tr_copy = nullptr;
+            if (predict_tr_ret == 0 && pred_tr != nullptr && out_len_tr > 0) {
+                pred_tr_copy = (float*)malloc((size_t)out_len_tr * sizeof(float));
+                if (pred_tr_copy) {
+                    memcpy(pred_tr_copy, pred_tr, (size_t)out_len_tr * sizeof(float));
+                    pred_tr = pred_tr_copy;  // downstream uses stable copy
+                } else {
+                    tt::Health_Log(tt::HEALTH_WARN, "wf-xgb", f + 1,
+                        "pred_tr snapshot malloc failed (out_len=%lu) — "
+                        "skipping train metrics this fold",
+                        (unsigned long)out_len_tr);
+                    pred_tr = nullptr;
+                    predict_tr_ret = -1;  // forces pred_tr_ok=0 below
+                }
+            }
             int predict_te_ret = XGBoosterPredict(booster, dtest,  0, 0, 0, &out_len_te, &pred_te);
             fprintf(stderr, "[WF marker] fold %d: post-predict-test (ret=%d, out_len=%lu)\n",
                     f + 1, predict_te_ret, (unsigned long)out_len_te);
@@ -1890,6 +1917,8 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                         pred_te, test_labels, n_test, 0.5f);
                 }
             }
+            // v5.11.58 — release the train-prediction snapshot
+            if (pred_tr_copy) free(pred_tr_copy);
         }
 
         // feature importances (stability tracking hook) — zero-filled until
@@ -2167,6 +2196,24 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
         bst_ulong out_len_tr = 0, out_len_ev = 0;
         const float *pred_tr = NULL, *pred_ev = NULL;
         int pr_tr_ok = (XGBoosterPredict(booster, dtrain, 0, 0, 0, &out_len_tr, &pred_tr) == 0);
+        // v5.11.58 — see WF predict block for full rationale. XGBoost reuses
+        // its prediction buffer across Predict calls; second Predict
+        // invalidates the first pointer at large sample counts. Snapshot
+        // pred_tr to caller heap before second Predict.
+        float *pred_tr_copy = NULL;
+        if (pr_tr_ok && pred_tr != NULL && out_len_tr > 0) {
+            pred_tr_copy = (float*)malloc((size_t)out_len_tr * sizeof(float));
+            if (pred_tr_copy) {
+                memcpy(pred_tr_copy, pred_tr, (size_t)out_len_tr * sizeof(float));
+                pred_tr = pred_tr_copy;
+            } else {
+                fprintf(stderr, "[heldout] pred_tr snapshot malloc failed (out_len=%lu) — "
+                                "skipping train metrics\n",
+                        (unsigned long)out_len_tr);
+                pred_tr = NULL;
+                pr_tr_ok = 0;
+            }
+        }
         int pr_ev_ok = (XGBoosterPredict(booster, deval,  0, 0, 0, &out_len_ev, &pred_ev) == 0);
 
         if (is_regression) {
@@ -2202,6 +2249,8 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
         fprintf(stderr, "[heldout] result: train_metric=%.4f held_out_metric=%.4f%s\n",
                 r.train_metric, r.metric,
                 is_regression ? " (correlation)" : " (accuracy)");
+        // v5.11.58 — release the train-prediction snapshot
+        if (pred_tr_copy) free(pred_tr_copy);
     } while (0);
 
     if (booster) XGBoosterFree(booster);
