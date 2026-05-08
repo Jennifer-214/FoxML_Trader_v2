@@ -1130,15 +1130,18 @@ static inline bool Settings_RenderPerCoreTab(SettingsState *s, int core_id,
         }
     }
 
-    // v4.7.23: resolve this core's strategy for the strategy-aware filter.
-    // Prefer the LIVE active strategy from the snapshot; fall back to the
-    // user's pending-but-not-applied dropdown choice; last resort STRATEGY_NONE
-    // (hides strategy-specific fields entirely until something is configured).
+    // v5.11.59 — resolve this core's strategy for the strategy-aware filter.
+    // Prefer the operator's DROPDOWN selection (configuration intent) over the
+    // live snapshot (current engine state). Reasoning: when the operator picks
+    // ML in the dropdown, they want to see ML fields immediately to configure
+    // them — not stay looking at EMA fields just because the engine is still
+    // running EMA pre-Apply. Fall back to snapshot if no dropdown choice yet,
+    // last resort STRATEGY_NONE.
     int core_strategy = STRATEGY_NONE;
-    if (snap && snap->sharded_mode_active && core_id < snap->per_core_count) {
-        core_strategy = snap->per_core[core_id].strategy_id_display;
-    } else if (s->per_core_strategy[core_id] >= 0) {
+    if (s->per_core_strategy[core_id] >= 0) {
         core_strategy = s->per_core_strategy[core_id];
+    } else if (snap && snap->sharded_mode_active && core_id < snap->per_core_count) {
+        core_strategy = snap->per_core[core_id].strategy_id_display;
     }
 
     const char *current_section = NULL;
