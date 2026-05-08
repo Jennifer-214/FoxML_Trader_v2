@@ -287,12 +287,19 @@ struct OrderManagerState {
     // EventLoop_CheckWsStaleness when the producer's last-tick gap exceeds
     // cfg.ws_dead_time_flatten_threshold_secs. Multiple slow-paths may
     // race for the CAS; only one wins and submits the flatten via
-    // EventLoop_FlattenAll. Read by Strategy_BuildParameters (.A.3) for
+    // EventLoop_FlattenAll. Read by EventLoop_RebuildOneCore (.A.3) for
     // recovery-refusal gating during the post-flatten reconcile window.
     // std::atomic<int> for the compare_exchange_strong primitive; raw
     // uint8_t kill_switch_tripped above is read-only after init in non-
     // CAS contexts so atomicity is implicit on x86.
     std::atomic<int> flatten_pending;  // 0 = normal, 1 = flatten fired
+    // v5.12.1.A.3 — recovery refusal deadline. Set by CheckWsStaleness
+    // alongside flatten_pending=1: deadline = now_us + recovery_delay_secs*1e6.
+    // RebuildOneCore reads this; while now_us < deadline, it forces
+    // BUY_BLOCKED + SHALT_RECOVERY on every core's pending_params.
+    // Cleared together with flatten_pending after deadline expires
+    // (auto-recovery; no manual reset required).
+    std::atomic<uint64_t> recovery_until_us;  // 0 = no recovery window active
 
     // === TRADE LOG (moved from EventLoopState in phase 03 chunk 1) ===
     // Optional CSV trade log. nullptr → no logging (default). Not owned —
@@ -480,6 +487,8 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     oms->trade_log           = nullptr;
     // v5.12.1.A.2 — emergency-flatten flag init.
     oms->flatten_pending.store(0, std::memory_order_relaxed);
+    // v5.12.1.A.3 — recovery deadline init (0 = inactive).
+    oms->recovery_until_us.store(0, std::memory_order_relaxed);
 
     oms->total_submitted.store(0, std::memory_order_relaxed);
     oms->total_filled.store(0, std::memory_order_relaxed);

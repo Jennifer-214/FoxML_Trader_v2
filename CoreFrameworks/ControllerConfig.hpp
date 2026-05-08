@@ -421,6 +421,12 @@ template <unsigned F> struct ControllerConfig {
   // local clock and fire a phantom flatten on every cycle.
   int ws_dead_time_flatten_enabled;          // 0=disabled (default), 1=enabled
   int ws_dead_time_flatten_threshold_secs;   // gap threshold (default 60)
+  // v5.12.1.A.3 — recovery refusal window in seconds after a flatten
+  // fires. Strategy_BuildParameters' caller (RebuildOneCore) sets
+  // BUY_BLOCKED + SHALT_RECOVERY while now_us < oms.recovery_until_us.
+  // Auto-clears when now_us crosses the deadline, on the next slow-path
+  // cycle to detect the expiry.
+  int recovery_delay_secs;                   // recovery refusal window (default 30)
   // vol-scaled position sizing
   int vol_sizing_enabled; // 0=disabled, 1=scale qty inversely with volatility
   FPN<F> vol_scale_min; // min scale factor (e.g. 0.25 = never less than 25% of
@@ -1195,6 +1201,11 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // backtest MUST keep this off (live-only safety net).
   cfg.ws_dead_time_flatten_enabled = 0;
   cfg.ws_dead_time_flatten_threshold_secs = 60;
+  // v5.12.1.A.3 — recovery window after a flatten fires. New entries
+  // refused for this many seconds while operator-side reconcile catches
+  // up to exchange truth. After window expires, flatten_pending +
+  // recovery_until_us auto-clear; trading resumes (assuming WS healthy).
+  cfg.recovery_delay_secs = 30;
   for (int i = 0; i < 16; ++i) cfg.core_model_path[i][0] = '\0';    // empty = shared
   for (int i = 0; i < 16; ++i) cfg.core_model_dir[i][0] = '\0';     // empty = use model_path or shared
   // v4.0 per-core overrides — zero in every field = "inherit global".
@@ -1421,6 +1432,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // v5.12.1.A — WS dead-time emergency-flatten (live-only safety net)
     CFG_PARSE_INT(ws_dead_time_flatten_enabled)
     CFG_PARSE_INT(ws_dead_time_flatten_threshold_secs)
+    // v5.12.1.A.3 — post-flatten recovery refusal window
+    CFG_PARSE_INT(recovery_delay_secs)
     CFG_PARSE_PCT(max_exposure_pct)
     CFG_PARSE_PCT(min_hold_gain_pct)
     CFG_PARSE_PCT(regime_r2_threshold)

@@ -2155,6 +2155,43 @@ inline void EventLoop_RebuildOneCore(
         // set this to a SHALT_* code when zero-gating for strategy-
         // internal reasons. SHALT_OK = no veto.
         state->cores[slot].strategy_halt_reason = SHALT_OK;
+
+        // v5.12.1.A.3 — post-flatten recovery refusal. Gated on
+        // recovery_until_us > 0 so the common case (no recovery active)
+        // pays just one atomic load (~5ns); active case adds one clock
+        // read (~50ns) only while in the recovery window. Auto-clears
+        // via EventLoop_TryClearRecovery once the deadline elapses.
+        // FUTURE OPPORTUNITY: hoist now_us read to slow-path entry and
+        // share with sp_last_tick_us update (line ~2890) +
+        // CheckWsStaleness — saves ~50ns/cycle on per-core slow-path.
+        // Deferred to a v5.12.2.X "slow-path clock unification" if
+        // profiling justifies; cost of plumbing now_us through 3
+        // function signatures (RebuildOneCore /
+        // RebuildAllParameters_PerCore / RebuildAllParameters) outweighs
+        // the savings until measurement says otherwise.
+        {
+            uint64_t recovery_until = state->oms->recovery_until_us.load(
+                std::memory_order_acquire);
+            if (recovery_until > 0) {
+                uint64_t now_us = (uint64_t)
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+                if (now_us < recovery_until) {
+                    // Refuse new entries this cycle. Block via flag —
+                    // works for buy-above (Momentum) AND buy-below
+                    // (DIP/MR) strategies. SHALT_RECOVERY surfaces in
+                    // GUI / health log for operator forensics.
+                    state->cores[slot].pending_params.flags
+                        |= GATE_FLAG_BUY_BLOCKED;
+                    state->cores[slot].strategy_halt_reason = SHALT_RECOVERY;
+                } else {
+                    // Recovery window elapsed — clear flatten state so
+                    // a future staleness event can re-fire. CAS-based;
+                    // only one slow-path thread wins the clear.
+                    EventLoop_TryClearRecovery(state->oms, now_us);
+                }
+            }
+        }
         // v5.5.1 (Bug B-FLAT — addressed the "latent zero_gate bug" called out
         // in the Track E.3 comment below). Pre-fix: zero_gate set
         // bg_price_threshold = 0 to disable entries. This works for buy-below
@@ -2845,13 +2882,59 @@ inline int EventLoop_CheckWsStaleness(EventLoopState<F>* state,
         return 0;  // another core already won; no double-flatten
     }
 
+    // v5.12.1.A.3 — set recovery deadline BEFORE firing flatten so
+    // RebuildOneCore (which checks recovery_until_us) sees the new
+    // window even on the same slow-path tick. release ordering pairs
+    // with RebuildOneCore's acquire load.
+    uint64_t deadline_us = now_us +
+        ((uint64_t)cfg.recovery_delay_secs * 1000000ULL);
+    state->oms->recovery_until_us.store(deadline_us,
+                                         std::memory_order_release);
+
     std::fprintf(stderr,
         "[OMS] WS staleness: gap=%.1fs > threshold=%ds; "
-        "firing OMS_FlattenAll.\n",
+        "firing OMS_FlattenAll. Recovery refusal until +%ds.\n",
         (double)gap_us / 1.0e6,
-        cfg.ws_dead_time_flatten_threshold_secs);
+        cfg.ws_dead_time_flatten_threshold_secs,
+        cfg.recovery_delay_secs);
     return EventLoop_FlattenAll(state, state->oms, current_price,
                                  /*reason*/1);
+}
+
+//======================================================================================================
+// [POST-FLATTEN RECOVERY EXPIRY] (v5.12.1.A.3)
+//======================================================================================================
+// CheckWsStaleness sets oms->recovery_until_us when it fires a flatten.
+// Once the deadline elapses, this helper auto-clears flatten_pending +
+// recovery_until_us so a future staleness event can re-fire.
+//
+// Caller (slow-path) invokes whenever recovery_until_us > 0 — gated
+// at the call site so the common case (no recovery active) pays zero.
+//
+// Branchless: compare-and-swap with witness; success means we won the
+// clear race across multiple slow-path threads. CAS-ordering puts a
+// release on the cleared atomics so a later staleness fire sees zeroed
+// state.
+//======================================================================================================
+template <unsigned F>
+inline int EventLoop_TryClearRecovery(OrderManagerState<F>* oms,
+                                       uint64_t now_us) {
+    uint64_t until = oms->recovery_until_us.load(std::memory_order_acquire);
+    if (until == 0) return 0;            // not active
+    if (now_us < until) return 0;        // still inside window
+    // Recovery window expired. CAS the deadline back to 0; only the
+    // winner clears flatten_pending. Multi-core race-safe.
+    if (oms->recovery_until_us.compare_exchange_strong(
+            until, 0,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+        oms->flatten_pending.store(0, std::memory_order_release);
+        std::fprintf(stderr,
+            "[OMS] post-flatten recovery window elapsed; trading "
+            "may resume on next slow-path cycle.\n");
+        return 1;
+    }
+    return 0;  // another thread won the clear
 }
 
 //======================================================================================================
