@@ -3642,20 +3642,51 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         if (state->ui_sl_per_horizon_count > 0)
             state->label_sl_pct = state->ui_sl_per_horizon[0];
     }
-    if (state->label_type == LABEL_FORWARD_PNL) {
-        ImGui::InputInt("Forward Ticks", &state->label_forward_ticks, 100, 1000);
-        ImGui::SetItemTooltip("How many ticks to look ahead\n"
-                              "label = 1 if price is higher, 0 if lower");
+    // v5.11.43 — Forward Ticks / Lookahead Ticks inputs DELETED. Horizons CSV
+    // (rendered below) is the single source for label_forward_ticks. For
+    // single-horizon mode (1 entry in CSV), horizons[0] is used as
+    // label_forward_ticks. For multi-horizon (N entries), each horizon
+    // gets its own label_forward_ticks during the per-horizon worker loop.
+    // Sync logic in click handlers: state->label_forward_ticks =
+    //   state->ui_horizon_list[0] when ui_horizon_count >= 1.
+
+    // v5.11.43 — parse horizon CSV early (was at line ~4236+ post-Train Model).
+    // Collect Features + Train Model buttons need ui_horizon_count to decide
+    // whether to render single-mode or multi-horizon-mode variant. Parsing
+    // here makes ui_horizon_count fresh BEFORE any button conditional fires.
+    // (The same parser ran later in v5.11.40 — duplicating here doesn't hurt;
+    // CSV parse is microseconds.)
+    {
+        int n = 0;
+        const char* p = state->ui_horizon_csv;
+        while (*p && n < 8) {
+            while (*p == ' ' || *p == '\t' || *p == ',') p++;
+            if (!*p) break;
+            char* end = nullptr;
+            long v = strtol(p, &end, 10);
+            if (end == p) break;
+            if (v > 0 && v <= 1000000)
+                state->ui_horizon_list[n++] = (int)v;
+            p = end;
+        }
+        state->ui_horizon_count = n;
     }
-    // Lookahead horizon for multiclass and peak/valley labels
-    if (state->label_type == LABEL_PEAK_VALLEY_STABLE ||
-        state->label_type == LABEL_WILL_PEAK || state->label_type == LABEL_WILL_VALLEY) {
-        ImGui::InputInt("Lookahead Ticks", &state->label_forward_ticks, 100, 1000);
-        ImGui::SetItemTooltip("How many ticks forward to scan for the barrier hit\n"
-                              "0 = scan to end of data. Default 500.\n"
-                              "Larger = more confident labels, fewer stable cases\n"
-                              "Smaller = more stable cases, sharper peak/valley signal");
+    // v5.11.43 — sync label_forward_ticks from horizons[0] when single-horizon
+    // mode (so Collect Features + Train Model use horizons[0] without needing
+    // a separate Lookahead Ticks input). Multi-horizon mode (N>1) overrides
+    // per horizon inside the worker loop.
+    if (state->ui_horizon_count >= 1) {
+        state->label_forward_ticks = state->ui_horizon_list[0];
     }
+
+    // v5.11.43 — compute effective horizon count up-front. When operator's
+    // UI CSV is empty, fall back to cfg.horizon_list (back-compat). This
+    // value drives the auto-routing button visibility (single_horizon_mode)
+    // so legacy cfg-driven multi-horizon flows still work even when the
+    // operator hasn't typed anything in the UI input.
+    int panel_eff_horizon_count = state->ui_horizon_count > 0
+                                 ? state->ui_horizon_count
+                                 : run_control->results.config_used.horizon_count;
 
     ImGui::Separator();
 
@@ -3663,8 +3694,18 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // already running (mirrors the Walk-Forward pattern). prevents the
     // "click button N times because nothing visibly happens" UX trap that
     // fires N parallel backtests each writing to the same log file.
+    //
+    // v5.11.43 — auto-route by horizon count. Operator types horizons in
+    // Horizons CSV; only the matching button is rendered. <=1 horizon =
+    // "Collect Features" (single-mode worker). >1 = "Collect Multi-Horizon"
+    // (multi-horizon worker). Both still write to results->feature_matrix.
     bool has_data = data->selected_count > 0;
     bool can_collect = has_data && !run_control->running;
+    // v5.11.43 — uses panel_eff_horizon_count (UI takes priority, falls back
+    // to cfg.horizon_list). 0 or 1 = single mode; >1 = multi-horizon mode.
+    bool single_horizon_mode = (panel_eff_horizon_count <= 1);
+
+    if (single_horizon_mode) {
     if (!can_collect) ImGui::BeginDisabled();
     if (ImGui::Button("Collect Features")) {
         // clear previous training/walk-forward results on re-collect
@@ -3722,6 +3763,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         ImGui::SameLine();
         ImGui::TextColored(FoxmlColors::yellow, "running... (%d%%)", run_control->progress_pct);
     }
+    } // end single_horizon_mode (Collect Features)
 
     // v5.11.24 — Collect Multi-Horizon button. Mirrors Train Multi-Horizon's
     // pattern (uses state->ui_horizon_csv populated by the input field below).
@@ -3731,7 +3773,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     // counts to engine.log. Final state: last horizon's labels in
     // results->labels[] (Train Multi-Horizon will recompute per horizon
     // during training, so no data loss).
-    ImGui::SameLine();
+    // v5.11.43 — only render Collect Multi-Horizon when N>1 horizons typed.
+    // Single horizon → operator sees "Collect Features" only (rendered above).
+    // N>1 → operator sees "Collect Multi-Horizon" only (rendered here).
     int mh_collect_horizon_count = state->ui_horizon_count;
     // v5.11.40 — broadcast-or-match alignment for per-horizon TP/SL.
     // Allowed: single value (broadcasts) OR N values where N matches
@@ -3744,6 +3788,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
     bool mh_can_collect = has_data && !run_control->running
                           && mh_collect_horizon_count > 0
                           && tp_aligned && sl_aligned;
+    if (!single_horizon_mode) {
     if (!mh_can_collect) ImGui::BeginDisabled();
     if (ImGui::Button("Collect Multi-Horizon")) {
         // clear previous training/walk-forward results
@@ -3823,33 +3868,31 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             "(misaligned: TP=%d, SL=%d, horizons=%d — need 1 or %d each)",
             tp_n, sl_n, mh_collect_horizon_count, mh_collect_horizon_count);
     }
+    } // end !single_horizon_mode (Collect Multi-Horizon)
 
-    // v5.11.28 — Horizons (CSV) input rendered AT THE TOP next to
-    // Collect Multi-Horizon (operator-flagged 2026-05-07: "probably
-    // need a multi horizon entry point where you list them"). Same
-    // buffer as the Train Multi-Horizon side (state->ui_horizon_csv,
-    // single source of truth) — `##collect` suffix makes the ImGui
-    // widget ID unique without changing the visible label. Operator
-    // can type horizons here OR down by Train Multi-Horizon; both
-    // edit the same string. Parsed every render frame at the
-    // existing parser block (line ~3563+) which feeds
-    // state->ui_horizon_list/_count for both buttons.
+    // v5.11.43 — Horizons (CSV) input ALWAYS visible. Single source of
+    // truth for both Collect/Train mode auto-routing AND single-horizon
+    // label_forward_ticks. Type "1000" for single-horizon mode (one
+    // training run); type "1000,7500,15000" for multi-horizon (N parallel
+    // trainings). v5.11.28 rendered this at the top to mirror the train
+    // side; v5.11.43 dropped the train-side mirror so this is now the
+    // ONLY Horizons input.
     ImGui::PushItemWidth(220);
     ImGui::InputText("Horizons (CSV)##collect",
                      state->ui_horizon_csv,
                      sizeof(state->ui_horizon_csv));
     ImGui::PopItemWidth();
     ImGui::SetItemTooltip(
-        "Comma-separated forward-tick horizons used by both\n"
-        "Collect Multi-Horizon (above) and Train Multi-Horizon\n"
-        "(below). Same buffer — type here OR there, both stay in\n"
-        "sync.\n\n"
-        "Example: 100,500,1000  →  3 horizons, recompute labels\n"
-        "(or train models) at each forward window.\n\n"
+        "Comma-separated forward-tick horizons. Single source of truth.\n\n"
+        "  '1000'              → single-horizon mode\n"
+        "                        (Collect Features + Train Model render)\n"
+        "  '1000,7500,15000'   → multi-horizon mode (N parallel trainings)\n"
+        "                        (Collect Multi-Horizon + Train Multi-Horizon\n"
+        "                         render; Train auto-spawns N pthreads)\n\n"
         "Empty falls back to cfg.horizon_list. Max 8 horizons,\n"
         "each 1..1,000,000 ticks.");
     ImGui::SameLine();
-    ImGui::TextDisabled("(%d horizon%s parsed; shared with Train Multi-Horizon)",
+    ImGui::TextDisabled("(%d horizon%s parsed)",
                         state->ui_horizon_count,
                         state->ui_horizon_count == 1 ? "" : "s");
 
@@ -4187,6 +4230,9 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             state->tm_cancel = 1;
         }
     } else {
+        // v5.11.43 — auto-route by horizon count. Single-horizon (count<=1)
+        // shows "Train Model"; multi-horizon (count>1) shows "Train Multi-Horizon".
+        if (single_horizon_mode) {
         if (!can_train) ImGui::BeginDisabled();
         if (ImGui::Button("Train Model")) {
             // clear previous results + spawn worker
@@ -4229,12 +4275,15 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             }
 #endif
         }
+        } // end single_horizon_mode (Train Model)
 
         // v5.10.0a.G.1 — Train Multi-Horizon button. Adjacent to Train
         // Model so operators see both options. Gated on horizons being
         // configured (in-panel CSV input OR cfg.horizon_list fallback).
         // v5.10.0a-bugfix2: in-panel CSV editor — operator no longer
         // needs to edit cfg.horizon_list + reload to multi-horizon train.
+        // v5.11.43 — only render in multi-horizon mode (single mode shows
+        // Train Model, above).
         const auto& mh_cfg = run_control->results.config_used;
 
         // Parse the operator's CSV input on each render. Cheap (typically
@@ -4267,24 +4316,10 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                                  ? state->ui_horizon_list
                                  : mh_cfg.horizon_list;
 
-        // CSV input field. Operator types "100,500,1000" (or whatever);
-        // parse runs every render so the displayed cell-count reflects
-        // current input.
-        ImGui::PushItemWidth(220);
-        ImGui::InputText("Horizons (CSV)",
-                         state->ui_horizon_csv,
-                         sizeof(state->ui_horizon_csv));
-        ImGui::PopItemWidth();
-        ImGui::SetItemTooltip(
-            "Comma-separated forward-tick horizons for Train Multi-Horizon.\n"
-            "Example: 100,500,1000  →  trains 3 models with different\n"
-            "label_forward_ticks values, saves each to its own dir.\n\n"
-            "Empty falls back to cfg.horizon_list. Max 8 horizons.\n"
-            "Each horizon must be 1..1,000,000 ticks.");
-        ImGui::SameLine();
-        ImGui::TextDisabled("(%d horizon%s parsed)",
-                            state->ui_horizon_count,
-                            state->ui_horizon_count == 1 ? "" : "s");
+        // v5.11.43 — second Horizons CSV InputText DELETED. Single source of
+        // truth lives at the top of the panel (rendered always, near
+        // Collect Features / Collect Multi-Horizon). Operator types horizons
+        // there; auto-routing renders the matching Train button here.
 
         // v5.11.40 — broadcast-or-match for TP/SL on the train side too.
         // Same validation as Collect Multi-Horizon (above). When eff_horizon
@@ -4297,6 +4332,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         bool train_sl_aligned = (train_sl_n <= 1) || (train_sl_n == eff_horizon_count);
         bool mh_can_train = can_train && (eff_horizon_count > 0)
                             && train_tp_aligned && train_sl_aligned;
+        if (!single_horizon_mode) {
         if (!mh_can_train) ImGui::BeginDisabled();
         if (ImGui::Button("Train Multi-Horizon")) {
             state->mh_running = 1;
@@ -4465,6 +4501,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 ImGui::EndTable();
             }
         }
+        } // end !single_horizon_mode (Train Multi-Horizon block)
     }
 
     // training results — kind-appropriate display.
