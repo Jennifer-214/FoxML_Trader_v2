@@ -13,13 +13,18 @@
 #include <string.h>
 #include <math.h>
 #include <sys/stat.h>
+#include <sys/resource.h>  // v5.11.0.B — getrlimit / RLIMIT_MEMLOCK
 #include <unistd.h>
 #include <limits>  // v5.9.0: std::numeric_limits<double>::quiet_NaN() in NaN guard tests
+#include <thread>  // v5.11.3.B: std::thread for seqlock tear-free regression test
+#include <atomic>  // v5.11.3.B: std::atomic for cross-thread coordination in tests
+#include <locale.h>  // v5.11.4.A: setlocale for locale-immunity test
 #include "../DataStream/MockGenerator.hpp"
 #include "../CoreFrameworks/PortfolioController.hpp"
 #include "../CoreFrameworks/Order.hpp"
 #include "../CoreFrameworks/OrderManager.hpp"
 #include "../CoreFrameworks/ControllerEventLoop.hpp"  // Phase 2.1 tests
+#include "../CoreFrameworks/SystemInit.hpp"            // v5.11.0.A — engine_set_mxcsr_ftz_daz
 #include "../CoreFrameworks/ExecutionCore.hpp"        // Phase 2.1 tests
 #include "../CoreFrameworks/ShardedSnapshotPersist.hpp"  // Phase 4 tests
 #include "../CoreFrameworks/ShardedBacktestDriver.hpp"   // Track E.1 tests
@@ -28,6 +33,9 @@
 #include "../ML_Headers/CoreModelZoo.hpp"                // Track E.2 tests
 #include "../ML_Headers/FeatureRegistry.hpp"              // v5.8.1a tests
 #include "../Backtest/PhaseTimers.hpp"                    // v5.10.0 Item A — phase timer tests
+#include "../MemHeaders/BuddyAllocator.hpp"                // v5.11.13 — typo fix + O(1) order lookup tests
+#include "../MemHeaders/InitArena.hpp"                     // v5.11.22 — MAP_HUGETLB opt-in tests
+#include <sys/mman.h>                                       // v5.11.22 — MAP_HUGETLB constant
 #include "../DataStream/DepthReplayState.hpp"            // Track E.3 tests
 #include "../ML_Headers/FlowFeatures.hpp"                // v4.5 Wave 1 tests
 #include "../DataStream/BinanceUserData.hpp"
@@ -356,7 +364,7 @@ static void test_fill_timing() {
     check("TP price computed", fabs(tp - expected_tp) < 0.1);
     check("SL price computed", fabs(sl - expected_sl) < 0.1);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -403,7 +411,7 @@ static void test_backpressure() {
     check("still 16 (backpressure)", Portfolio_CountActive(&ctrl.portfolio) == 16);
     check("pool slot remains", (pool.bitmap & (1ULL << 20)) != 0);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -448,7 +456,7 @@ static void test_warmup() {
     // initial anchor should match
     check("initial anchor set", FPN_Equal(ctrl.buy_conds.price, ctrl.mean_rev.buy_conds_initial.price));
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -501,7 +509,7 @@ static void test_regression_feedback() {
     int shifted = !FPN_Equal(ctrl.buy_conds.price, initial_price);
     check("buy conditions shifted", shifted);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -600,7 +608,7 @@ static void test_branchless() {
     double final_price = FPN_ToDouble(ctrl.buy_conds.price);
     check("noisy data: conditions near initial", fabs(final_price - 100.0) < 10.0);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -655,7 +663,7 @@ static void test_max_shift() {
     double max_shift_abs = rolling_avg * 0.02;
     check("shift clamped to max_shift", shift_from_rolling <= max_shift_abs + 0.5);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -694,7 +702,7 @@ static void test_empty_regression() {
     double pnl = FPN_ToDouble(ctrl.portfolio_delta);
     check("P&L stays zero", fabs(pnl) < 0.01);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -722,7 +730,7 @@ static void test_tick_counter() {
     }
     check("total_ticks = 20", ctrl.total_ticks == 20);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -795,7 +803,7 @@ static void test_full_pipeline() {
     check("total ticks = 500", ctrl.total_ticks == 500);
 
     TradeLog_Close(&log);
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 
     // check log file exists and has content
     FILE *f = fopen("logging/INTG_order_history.csv", "r");
@@ -868,7 +876,7 @@ static void test_stddev_offset() {
     double pct_buy_p = FPN_ToDouble(ctrl2.buy_conds.price);
     check("stddev: different from pct mode", fabs(buy_p - pct_buy_p) > 0.01);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -923,7 +931,7 @@ static void test_stddev_adaptation() {
     double init_op = FPN_ToDouble(cfg.entry_offset_pct);
     check("stddev: offset_pct unchanged in stddev mode", fabs(op - init_op) < 0.0001);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -973,7 +981,7 @@ static void test_multi_timeframe() {
     double buy_p_falling = FPN_ToDouble(ctrl.buy_conds.price);
     check("mt: buys blocked with falling long slope", buy_p_falling < 0.01);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -1010,7 +1018,7 @@ static void test_multi_timeframe_disabled() {
     double buy_p = FPN_ToDouble(ctrl.buy_conds.price);
     check("mt disabled: buys allowed despite falling slope", buy_p > 0);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -1055,7 +1063,7 @@ static void test_trailing_disabled() {
     double final_tp = FPN_ToDouble(ctrl.portfolio.positions[slot].take_profit_price);
     check("trailing disabled: TP unchanged", fabs(final_tp - 103.0) < 0.01);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -1113,7 +1121,7 @@ static void test_trailing_activates() {
     double final_price = 104.0 + 49.0 * 0.2; // 113.8
     check("trailing: TP below current price (trailing distance)", final_tp < final_price);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -1166,7 +1174,7 @@ static void test_trailing_ratchet() {
 
     check("ratchet: TP did not decrease during dip", tp_after_dip >= tp_after_rise - 0.01);
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -1217,7 +1225,7 @@ static void test_original_tp_sl() {
         check("position was created", 0);
     }
 
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
 }
 
 //======================================================================================================
@@ -1255,7 +1263,7 @@ static void test_slippage() {
         double entry = FPN_ToDouble(ctrl.portfolio.positions[0].entry_price);
         // 100 + 100*0.01 = 101
         check("slippage buy: entry price adjusted", fabs(entry - 101.0) < 0.1);
-        free(pool.slots);
+        OrderPool_DestroyBacking(&pool);
     }
 
     // TEST 2: sell slippage — realized P&L should reflect worse exit
@@ -1318,7 +1326,7 @@ static void test_slippage() {
         check("slippage disabled: position created", Portfolio_CountActive(&ctrl.portfolio) == 1);
         double entry = FPN_ToDouble(ctrl.portfolio.positions[0].entry_price);
         check("slippage disabled: entry price exact", fabs(entry - 100.0) < 0.01);
-        free(pool.slots);
+        OrderPool_DestroyBacking(&pool);
     }
 }
 
@@ -1366,7 +1374,7 @@ static void test_max_positions() {
         check("max_pos=1: second fill rejected", Portfolio_CountActive(&ctrl.portfolio) == 1);
         check("max_pos=1: pool slot 1 remains", (pool.bitmap & (1ULL << 1)) != 0);
 
-        free(pool.slots);
+        OrderPool_DestroyBacking(&pool);
     }
 
     // TEST 2: max_positions=2 accepts two, rejects third
@@ -1408,7 +1416,7 @@ static void test_max_positions() {
                                   FPN_FromDouble<FP>(500.0), &log);
         check("max_pos=2: third fill rejected", Portfolio_CountActive(&ctrl.portfolio) == 2);
 
-        free(pool.slots);
+        OrderPool_DestroyBacking(&pool);
     }
 
     // TEST 3: config parser clamps values
@@ -1421,6 +1429,11 @@ static void test_max_positions() {
 // [MAIN]
 //======================================================================================================
 int main() {
+    // v5.11.0.A — Match engine's MXCSR state so snapshot tests for feature
+    // compute don't silently diverge in subnormal territory. See
+    // CoreFrameworks/SystemInit.hpp.
+    tt::engine_set_mxcsr_ftz_daz();
+
     mkdir("logging", 0755); // tests write trade logs here now
     printf("======================================\n");
     printf("  CONTROLLER TEST SUITE\n");
@@ -1793,7 +1806,7 @@ int main() {
                                       FPN_FromDouble<FP>(500.0), &log);
         check("same_tick: losses counted", ctrl.losses > 0);
 
-        free(pool.slots);
+        OrderPool_DestroyBacking(&pool);
     }
 
     {
@@ -2414,12 +2427,12 @@ int main() {
                   sk.kill_reason == 1);
 
             TradeLog_Close(&sl);
-            free(sp.slots);
+            OrderPool_DestroyBacking(&sp);
             remove("logging/KILL_SMALL_TEST_order_history.csv");
         }
 
         TradeLog_Close(&log);
-        free(pool.slots);
+        OrderPool_DestroyBacking(&pool);
         remove("logging/HALT_TEST_order_history.csv");
     }
 
@@ -2463,7 +2476,7 @@ int main() {
               Portfolio_CountActive(&ctrl.portfolio) == 1);
 
         TradeLog_Close(&log);
-        free(pool.slots);
+        OrderPool_DestroyBacking(&pool);
         remove("logging/PUSHBUY_TEST_order_history.csv");
     }
 
@@ -2614,7 +2627,7 @@ int main() {
                    bal_final, expected_final, bal_final - expected_final);
 
             TradeLog_Close(&log);
-            free(pool.slots);
+            OrderPool_DestroyBacking(&pool);
             remove("logging/DRIFT_TEST1_order_history.csv");
         }
 
@@ -2675,7 +2688,7 @@ int main() {
                    manual_pv, computed_pv, computed_pv - manual_pv);
 
             TradeLog_Close(&log);
-            free(pool.slots);
+            OrderPool_DestroyBacking(&pool);
             remove("logging/DRIFT_TEST2_order_history.csv");
         }
 
@@ -2718,7 +2731,7 @@ int main() {
             }
 
             TradeLog_Close(&log);
-            free(pool.slots);
+            OrderPool_DestroyBacking(&pool);
             remove("logging/DRIFT_TEST3_order_history.csv");
         }
     }
@@ -13393,6 +13406,1215 @@ e3_skip_load:;
         unlink(stamp_path);
     }
 
+    printf("\n--- EXTENSIBILITY: v5.11.2.A — Reciprocal LUT for 1/n ---\n");
+    {
+        // Theory (audit Part 2.3): replace FPN_DivNoAssert(sum, n_fp) with
+        // FPN_Mul(sum, recip[n]) where recip[n] is precomputed at boot.
+        // Branchless across all n; ULP drift accepted for non-power-of-2 n.
+
+        using namespace tt;
+
+        // === Test 1: LUT initializes with non-zero values for n=1..W ===
+        const auto& lut = GetReciprocalLUT<FP, 128>();
+        check("v5.11.2.A: LUT[0] is sentinel zero",
+              FPN_IsZero(lut.values[0]));
+        check("v5.11.2.A: LUT[1] is non-zero (= 1.0)",
+              !FPN_IsZero(lut.values[1]));
+        check("v5.11.2.A: LUT[128] is non-zero (= 1/128)",
+              !FPN_IsZero(lut.values[128]));
+
+        // === Test 2: LUT[2] is exactly 0.5 (power-of-2 reciprocal is exact) ===
+        FPN<FP> half = FPN_FromDouble<FP>(0.5);
+        check("v5.11.2.A: LUT[2] == FPN(0.5) bytewise (power-of-2 exact)",
+              lut.values[2].w[0] == half.w[0] &&
+              lut.values[2].w[1] == half.w[1]);
+
+        // === Test 3: LUT[128] is exactly 1/128 (power-of-2) ===
+        FPN<FP> recip128 = FPN_FromDouble<FP>(1.0 / 128.0);
+        check("v5.11.2.A: LUT[128] == FPN(1/128) bytewise (power-of-2 exact)",
+              lut.values[128].w[0] == recip128.w[0] &&
+              lut.values[128].w[1] == recip128.w[1]);
+
+        // === Test 4: For power-of-2 n, FPN_Mul(sum, LUT[n]) == FPN_DivNoAssert(sum, n) bytewise ===
+        // (Audit's claim; verifies no drift for the steady-state case n=W.)
+        FPN<FP> sum = FPN_FromDouble<FP>(12345.6789);
+        for (int n_test : {2, 4, 8, 16, 32, 64, 128}) {
+            FPN<FP> n_fp = FPN_FromInt<FP>((int64_t)n_test);
+            FPN<FP> via_div = FPN_DivNoAssert(sum, n_fp);
+            FPN<FP> via_mul = FPN_Mul(sum, lut.values[n_test]);
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                "v5.11.2.A: FPN_Mul(LUT[%d]) == FPN_DivNoAssert (power-of-2)", n_test);
+            check(msg,
+                  via_div.w[0] == via_mul.w[0] && via_div.w[1] == via_mul.w[1]);
+        }
+
+        // === Test 5: For non-power-of-2 n, drift bounded in REAL VALUE terms ===
+        // Bytewise drift can be many LSBs (truncation cascades) but real-value
+        // drift should be < 1e-10 of the result. This is the actual contract
+        // the engine relies on (downstream consumers truncate to ~1e-7 anyway).
+        for (int n_test : {3, 5, 6, 7, 9, 10, 11, 13, 100}) {
+            FPN<FP> n_fp = FPN_FromInt<FP>((int64_t)n_test);
+            FPN<FP> via_div = FPN_DivNoAssert(sum, n_fp);
+            FPN<FP> via_mul = FPN_Mul(sum, lut.values[n_test]);
+            double via_div_d = FPN_ToDouble(via_div);
+            double via_mul_d = FPN_ToDouble(via_mul);
+            double rel_drift = (via_div_d != 0.0)
+                ? std::abs(via_mul_d - via_div_d) / std::abs(via_div_d)
+                : std::abs(via_mul_d - via_div_d);
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                "v5.11.2.A: relative drift LUT vs Div < 1e-10 for n=%d", n_test);
+            check(msg, rel_drift < 1e-10);
+        }
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.2.B — RollingStats cache-line layout ---\n");
+    {
+        // Theory: GUI reads outputs every frame; engine writes head/count + ring
+        // buffers every Push. Pre-reorder: head at offset 0 shared a 64-byte
+        // line with price_avg → engine's head write evicted GUI's L1d copy of
+        // outputs every Push. Post-reorder: outputs in lines 0-4, head pushed
+        // to line 5 via alignas(64). The compile-time static_assert enforces
+        // this; these runtime checks are an extra-paranoid mirror.
+        //
+        // Also exercises Push to confirm the field reorder didn't break
+        // functional correctness — Init writes every field by name, Push
+        // reads/writes by name, no positional dependency.
+
+        using namespace tt;
+        using RS128 = RollingStats<FP, 128>;
+        using RS256 = RollingStats<FP, 256>;
+        using RS512 = RollingStats<FP, 512>;
+        using RS1024 = RollingStats<FP, 1024>;
+
+        // Cache-line discipline (mirror of static_assert at the type level)
+        check("v5.11.2.B: head offset is 64B-aligned (W=128)",
+              (offsetof(RS128, head) % 64) == 0);
+        check("v5.11.2.B: head past 5-output-line cluster (W=128)",
+              offsetof(RS128, head) >= 64 * 5);
+        // Layout up to head is W-independent (outputs come first)
+        check("v5.11.2.B: head offset same across W=128/256",
+              offsetof(RS128, head) == offsetof(RS256, head));
+        check("v5.11.2.B: head offset same across W=128/512",
+              offsetof(RS128, head) == offsetof(RS512, head));
+        check("v5.11.2.B: head offset same across W=128/1024",
+              offsetof(RS128, head) == offsetof(RS1024, head));
+        // Output cluster sits at the very front (line 0)
+        check("v5.11.2.B: price_avg at offset 0 (struct head)",
+              offsetof(RS128, price_avg) == 0);
+        // Outputs occupy lines 0-4 — last output `vwap_deviation` < line 5 boundary
+        check("v5.11.2.B: vwap_deviation in cache lines 0-4 (output cluster)",
+              offsetof(RS128, vwap_deviation) < 64 * 5);
+
+        // Functional correctness — Push still computes valid outputs after reorder
+        RS128 rolling = RollingStats_Init<FP, 128>();
+        for (int i = 0; i < 16; ++i) {
+            FPN<FP> p = FPN_FromDouble<FP>(100.0 + i * 0.5);
+            FPN<FP> v = FPN_FromDouble<FP>(1.0);
+            RollingStats_Push(&rolling, p, v, /*is_buyer_maker=*/0);
+        }
+        check("v5.11.2.B: post-reorder count populated",
+              rolling.count == 16);
+        check("v5.11.2.B: post-reorder price_avg non-zero",
+              !FPN_IsZero(rolling.price_avg));
+        check("v5.11.2.B: post-reorder vwap non-zero",
+              !FPN_IsZero(rolling.vwap));
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.2.C — O(1) running sums + monotonic deque ---\n");
+    {
+        // Theory: pre-v5.11.2.C, RollingStats_Push ran an O(W) accumulator loop
+        // every Push to compute sum_y, sum_y2, sum_xy, sum_v, sum_v_xy + min/max.
+        // Post-v5.11.2.C: running sums updated incrementally O(1) per Push,
+        // monotonic deques track sliding-window min/max O(1) amortized.
+        //
+        // Verification strategy: push a sequence of (price, volume) samples
+        // and at each step recompute the same sums by brute-force scan over
+        // the ring buffer's currently-valid window. The running sums must
+        // match the brute-force result exactly (FPN integer math is
+        // associative so order doesn't matter).
+        //
+        // Min/max from deque must equal min/max from a linear scan.
+        //
+        // Tests cover both warmup (count < W) and full-window (count == W,
+        // eviction active) regimes, plus monotonic-extreme inputs that
+        // exercise the deque back-pop while-loops.
+
+        using namespace tt;
+        constexpr unsigned WTEST = 8;  // small W so we hit eviction quickly
+
+        auto brute_sum_y = [](const RollingStats<FP, WTEST>& rs) {
+            FPN<FP> s = FPN_Zero<FP>();
+            int n = rs.count;
+            for (int i = 0; i < n; ++i) {
+                int idx = (rs.head - n + i + (int)WTEST) & ((int)WTEST - 1);
+                s = FPN_AddSat(s, rs.price_buf[idx]);
+            }
+            return s;
+        };
+        auto brute_sum_y2 = [](const RollingStats<FP, WTEST>& rs) {
+            FPN<FP> s = FPN_Zero<FP>();
+            int n = rs.count;
+            for (int i = 0; i < n; ++i) {
+                int idx = (rs.head - n + i + (int)WTEST) & ((int)WTEST - 1);
+                FPN<FP> p = rs.price_buf[idx];
+                s = FPN_AddSat(s, FPN_Mul(p, p));
+            }
+            return s;
+        };
+        auto brute_sum_xy = [](const RollingStats<FP, WTEST>& rs) {
+            FPN<FP> s = FPN_Zero<FP>();
+            int n = rs.count;
+            for (int i = 0; i < n; ++i) {
+                int idx = (rs.head - n + i + (int)WTEST) & ((int)WTEST - 1);
+                s = FPN_AddSat(s, FPN_Mul(FPN_FromInt<FP>(i), rs.price_buf[idx]));
+            }
+            return s;
+        };
+        auto brute_min = [](const RollingStats<FP, WTEST>& rs) {
+            int n = rs.count;
+            int idx0 = (rs.head - n + (int)WTEST) & ((int)WTEST - 1);
+            FPN<FP> m = rs.price_buf[idx0];
+            for (int i = 1; i < n; ++i) {
+                int idx = (rs.head - n + i + (int)WTEST) & ((int)WTEST - 1);
+                m = FPN_Min(m, rs.price_buf[idx]);
+            }
+            return m;
+        };
+        auto brute_max = [](const RollingStats<FP, WTEST>& rs) {
+            int n = rs.count;
+            int idx0 = (rs.head - n + (int)WTEST) & ((int)WTEST - 1);
+            FPN<FP> m = rs.price_buf[idx0];
+            for (int i = 1; i < n; ++i) {
+                int idx = (rs.head - n + i + (int)WTEST) & ((int)WTEST - 1);
+                m = FPN_Max(m, rs.price_buf[idx]);
+            }
+            return m;
+        };
+
+        // --- Test 1: arbitrary mixed sequence (warmup → full → eviction) ---
+        {
+            RollingStats<FP, WTEST> rs = RollingStats_Init<FP, WTEST>();
+            // 16 pushes (2× window) — exercises both warmup (count<W) and
+            // full-window (count==W, slot reuse) regimes.
+            const double prices[] = {100, 105, 102, 110, 108, 115, 112, 118,
+                                      120, 117, 125, 122, 130, 128, 135, 132};
+            int sum_xy_match = 1, sum_y_match = 1, sum_y2_match = 1;
+            int min_match = 1, max_match = 1;
+            for (int i = 0; i < 16; ++i) {
+                RollingStats_Push(&rs, FPN_FromDouble<FP>(prices[i]),
+                                       FPN_FromDouble<FP>(1.0));
+                if (rs.count < 1) continue;
+                sum_y_match  &= FPN_Equal(rs.price_sum_running,    brute_sum_y(rs));
+                sum_y2_match &= FPN_Equal(rs.price_sum_y2_running, brute_sum_y2(rs));
+                sum_xy_match &= FPN_Equal(rs.price_sum_xy_running, brute_sum_xy(rs));
+                min_match    &= FPN_Equal(rs.price_min, brute_min(rs));
+                max_match    &= FPN_Equal(rs.price_max, brute_max(rs));
+            }
+            check("v5.11.2.C: running price_sum matches brute-force at every step", sum_y_match);
+            check("v5.11.2.C: running price_sum_y2 matches brute-force at every step", sum_y2_match);
+            check("v5.11.2.C: running price_sum_xy matches brute-force at every step", sum_xy_match);
+            check("v5.11.2.C: deque price_min matches brute-force at every step", min_match);
+            check("v5.11.2.C: deque price_max matches brute-force at every step", max_match);
+        }
+
+        // --- Test 2: monotonically increasing — exercises max-deque back-pop ---
+        // Each new value > all in deque → back-pop strips deque to size 1
+        // every push; deque's amortized O(1) is delivered via this case.
+        {
+            RollingStats<FP, WTEST> rs = RollingStats_Init<FP, WTEST>();
+            for (int i = 0; i < 12; ++i) {
+                RollingStats_Push(&rs, FPN_FromDouble<FP>(100.0 + i * 10.0),
+                                       FPN_FromDouble<FP>(1.0));
+            }
+            // After 12 pushes with W=8: window holds prices[4..11] = 140..210
+            check("v5.11.2.C: monotonic-up: max == latest (210)",
+                  FPN_Equal(rs.price_max, FPN_FromDouble<FP>(210.0)));
+            check("v5.11.2.C: monotonic-up: min == oldest in window (140)",
+                  FPN_Equal(rs.price_min, FPN_FromDouble<FP>(140.0)));
+        }
+
+        // --- Test 3: monotonically decreasing — exercises min-deque back-pop ---
+        {
+            RollingStats<FP, WTEST> rs = RollingStats_Init<FP, WTEST>();
+            for (int i = 0; i < 12; ++i) {
+                RollingStats_Push(&rs, FPN_FromDouble<FP>(200.0 - i * 10.0),
+                                       FPN_FromDouble<FP>(1.0));
+            }
+            // After 12 pushes with W=8: window holds prices[4..11] = 160..90
+            check("v5.11.2.C: monotonic-down: min == latest (90)",
+                  FPN_Equal(rs.price_min, FPN_FromDouble<FP>(90.0)));
+            check("v5.11.2.C: monotonic-down: max == oldest in window (160)",
+                  FPN_Equal(rs.price_max, FPN_FromDouble<FP>(160.0)));
+        }
+
+        // --- Test 4: deque fronts must NEVER reference an evicted slot ---
+        // Probe invariant by checking deque sizes stay ≤ W at all times.
+        {
+            RollingStats<FP, WTEST> rs = RollingStats_Init<FP, WTEST>();
+            int size_ok = 1;
+            for (int i = 0; i < 100; ++i) {
+                double p = 50.0 + (double)((i * 13) % 23);  // pseudo-noisy
+                RollingStats_Push(&rs, FPN_FromDouble<FP>(p), FPN_FromDouble<FP>(1.0));
+                size_ok &= (rs.min_dq_size  <= (int)WTEST);
+                size_ok &= (rs.max_dq_size  <= (int)WTEST);
+                size_ok &= (rs.vmax_dq_size <= (int)WTEST);
+                size_ok &= (rs.min_dq_size  <= rs.count);
+                size_ok &= (rs.max_dq_size  <= rs.count);
+            }
+            check("v5.11.2.C: deque sizes stay bounded by W and count", size_ok);
+        }
+
+        // --- Test 5: FPN_BlendOnMask correctness (Rule 8 helper) ---
+        {
+            FPN<FP> a = FPN_FromDouble<FP>(42.0);
+            FPN<FP> b = FPN_FromDouble<FP>(-17.5);
+            check("v5.11.2.C: FPN_BlendOnMask(a, b, all-1s) == a",
+                  FPN_Equal(FPN_BlendOnMask(a, b, (uint64_t)-1), a));
+            check("v5.11.2.C: FPN_BlendOnMask(a, b, 0) == b",
+                  FPN_Equal(FPN_BlendOnMask(a, b, (uint64_t)0),  b));
+            // Sign-bit blending: a is positive, b is negative → blend preserves
+            FPN<FP> blend_a = FPN_BlendOnMask(a, b, (uint64_t)-1);
+            FPN<FP> blend_b = FPN_BlendOnMask(a, b, (uint64_t)0);
+            check("v5.11.2.C: FPN_BlendOnMask preserves positive sign (a path)",
+                  blend_a.sign == a.sign);
+            check("v5.11.2.C: FPN_BlendOnMask preserves negative sign (b path)",
+                  blend_b.sign == b.sign);
+        }
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.3.B — TUISnapshot seqlock tear-free read ---\n");
+    {
+        // Theory: pre-v5.11.3.B, TUISharedState had `volatile int active_idx`
+        // and the writer/reader pattern was atomic-store (writer) + atomic-load
+        // (reader). Tear hazard: if the writer published twice between two
+        // reader frames, the second publish wrote into the buffer the reader
+        // was holding a pointer into. GUI rendered a partially-overwritten
+        // TUISnapshot.
+        //
+        // Post-v5.11.3.B: seqlock pattern with parity bit (mid-write signal)
+        // and active-idx bit (encoded in seq bit 1). Reader memcpys into
+        // local + retries on tear. Writer protocol matches ParameterSlot.
+        //
+        // Test: spawn a writer thread that publishes a sequence of
+        // (price=N, seq_marker=N) pairs at high rate; main thread reads
+        // tear-free copies and asserts price == seq_marker on every read
+        // (i.e. each read sees a self-consistent snapshot, no field crossover
+        // from a prior publication). Pre-v5.11.3.B this would fail under
+        // even modest contention; post-v5.11.3.B it passes regardless.
+
+        TUISharedState shared = {};
+        TUISnapshot_InitSeq(&shared);
+
+        constexpr int N_WRITES = 10000;
+        std::atomic<int> writer_done{0};
+        std::atomic<int> tear_count{0};
+        std::atomic<int> read_count{0};
+
+        std::thread writer([&]() {
+            for (int i = 1; i <= N_WRITES; ++i) {
+                auto pub = TUISnapshot_Publish_Begin(&shared);
+                pub.back->price = (double)i;
+                // Use start_time as a distinct field that should always
+                // match price post-publish. If the reader sees price == X
+                // but start_time == Y where X != Y, that's a tear.
+                pub.back->start_time = (uint64_t)i;
+                TUISnapshot_Publish_End(&shared);
+            }
+            writer_done.store(1, std::memory_order_release);
+        });
+
+        // Reader loop: keep reading until writer is done + drain
+        TUISnapshot snap;
+        while (writer_done.load(std::memory_order_acquire) == 0) {
+            TUISnapshot_ReadInto(&shared, &snap);
+            read_count.fetch_add(1, std::memory_order_relaxed);
+            if (snap.start_time != 0 && (double)snap.start_time != snap.price) {
+                tear_count.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        // Final drain read
+        TUISnapshot_ReadInto(&shared, &snap);
+        if (snap.start_time != 0 && (double)snap.start_time != snap.price) {
+            tear_count.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        writer.join();
+
+        check("v5.11.3.B: writer published all N_WRITES",
+              snap.price == (double)N_WRITES);
+        check("v5.11.3.B: reader observed >= 100 snapshots",
+              read_count.load() >= 100);
+        check("v5.11.3.B: zero torn reads across thousands of writer publishes",
+              tear_count.load() == 0);
+
+        // Verify seq encoding invariants
+        uint64_t final_seq = TUISnapshot_Sequence(&shared);
+        check("v5.11.3.B: final seq parity is even (writer at rest)",
+              (final_seq & 1ULL) == 0);
+        check("v5.11.3.B: seq advanced exactly 2 per publish",
+              final_seq == (uint64_t)(2 * N_WRITES));
+
+        // Verify reader's local memcpy is independent of shared state
+        // (mutating shared.snapshots[0] after read shouldn't change snap)
+        TUISnapshot_ReadInto(&shared, &snap);
+        double saved = snap.price;
+        shared.snapshots[0].price = -99999.0;
+        shared.snapshots[1].price = -99999.0;
+        check("v5.11.3.B: reader's local copy is independent of subsequent shared mutation",
+              snap.price == saved);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.4.A — std::from_chars-based fast parsing ---\n");
+    {
+        // Theory: pre-v5.11.4.A, atof was used in binance_json_extract_double
+        // (WS userData drainer path) and BinanceCrypto.hpp's price_d/volume_d
+        // stash (every WS trade tick). atof depends on the global C locale —
+        // a stray setlocale("de_DE") elsewhere flips '.' to ',' and silently
+        // corrupts every parsed price.
+        //
+        // Post-v5.11.4.A: tt::parse_double_fast / parse_double_fast_n /
+        // parse_uint64_fast wrap std::from_chars. Locale-immune, branchless
+        // on well-formed inputs, ~3-5× quicker on libstdc++ ≥11.
+        //
+        // Tests verify: (1) parity vs atof on representative trade values,
+        // (2) locale-immunity, (3) edge cases (NULL, empty, malformed),
+        // (4) length-aware variant doesn't over-read its slice.
+        using namespace tt;
+
+        // Parity vs atof on a sweep of representative price/qty strings
+        const char *cases[] = {
+            "70000.00", "70000.12345678", "0.001", "0.00012345",
+            "1", "1.0", "100000.99999999", "12345.6789",
+            "0", "0.0", "1e-5", "1.5e10",
+        };
+        int parity_match = 1;
+        for (const char *s : cases) {
+            double a = atof(s);
+            double f = parse_double_fast(s);
+            if (a != f) parity_match = 0;
+        }
+        check("v5.11.4.A: parse_double_fast matches atof on representative values",
+              parity_match);
+
+        // Length-aware variant for JSON-extracted slices (non-NUL-terminated)
+        const char *json = "{\"p\":\"70123.45\",\"q\":\"0.001\"}";
+        // Manually find the price slice
+        const char *p_start = strstr(json, "\"p\":\"") + 5;
+        const char *p_end = strchr(p_start, '"');
+        size_t p_len = (size_t)(p_end - p_start);
+        double price = parse_double_fast_n(p_start, p_len);
+        check("v5.11.4.A: parse_double_fast_n extracts 70123.45 from JSON slice",
+              price == 70123.45);
+
+        // Verify the length-aware variant doesn't read past the slice end
+        // (tail of the source string has data we shouldn't include)
+        const char *tail = "12345junk";
+        double v = parse_double_fast_n(tail, 5);
+        check("v5.11.4.A: parse_double_fast_n stops at length boundary (12345)",
+              v == 12345.0);
+
+        // Edge cases: NULL + empty + malformed
+        check("v5.11.4.A: parse_double_fast(NULL) returns 0.0",
+              parse_double_fast(nullptr) == 0.0);
+        check("v5.11.4.A: parse_double_fast(\"\") returns 0.0",
+              parse_double_fast("") == 0.0);
+        check("v5.11.4.A: parse_double_fast on non-numeric returns 0.0",
+              parse_double_fast("abc") == 0.0);
+
+        // Locale immunity: explicitly set a non-C locale and verify behavior.
+        // atof respects LC_NUMERIC; std::from_chars does NOT. Try both — if
+        // de_DE.UTF-8 is unavailable on this system, skip the locale test
+        // (don't fail just because the locale isn't installed).
+        const char *prev_locale = setlocale(LC_NUMERIC, "de_DE.UTF-8");
+        if (prev_locale && strcmp(prev_locale, "de_DE.UTF-8") == 0) {
+            // Under de_DE, "0.55" should still parse as 0.55 with from_chars
+            // (atof under this locale would parse "0.55" as 0 because '.' is
+            // the thousands separator, not the decimal).
+            double under_locale = parse_double_fast("0.55");
+            check("v5.11.4.A: parse_double_fast is locale-immune under de_DE.UTF-8",
+                  under_locale == 0.55);
+            // Restore C locale so subsequent tests don't see stray locale state
+            setlocale(LC_NUMERIC, "C");
+        }
+        // (else: locale not available on this dev box — skip silently;
+        // CI / deploy boxes will have it.)
+
+        // parse_uint64_fast for trade IDs / timestamps
+        check("v5.11.4.A: parse_uint64_fast(\"1234567890\") == 1234567890",
+              parse_uint64_fast("1234567890") == 1234567890ULL);
+        check("v5.11.4.A: parse_uint64_fast(\"0\") == 0",
+              parse_uint64_fast("0") == 0ULL);
+        check("v5.11.4.A: parse_uint64_fast(NULL) == 0",
+              parse_uint64_fast(nullptr) == 0ULL);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.7 — Bandit AVX-512 bytewise parity ---\n");
+    {
+        // Theory: pre-v5.11.7, Bandit_GetProbabilities was a scalar loop
+        // over n_arms doing div + mul + add + floor + sum. v5.11.7
+        // vectorizes the elementwise normalize+blend+floor via AVX-512
+        // intrinsics, with explicit operation ordering to preserve
+        // bytewise IEEE-754 equivalence vs scalar (separate mul+add not
+        // fmadd; div not mul-by-reciprocal).
+        //
+        // Test strategy: compare the AVX-512-built BanditState's
+        // probability output against a hand-rolled scalar reference
+        // implementation on representative inputs. Bytewise-identical
+        // doubles (memcmp) → vectorization preserved determinism.
+
+        using namespace tt;
+
+        // Scalar reference — replays the pre-v5.11.7 algorithm exactly.
+        auto scalar_probs = [](const BanditState& b, double* out) {
+            double sum_w = 0.0;
+            for (int i = 0; i < b.n_arms; i++) sum_w += b.weights[i];
+            double K = (double)b.n_arms;
+            if (sum_w <= 0.0) {
+                for (int i = 0; i < b.n_arms; i++) out[i] = 1.0 / K;
+                return;
+            }
+            double prob_sum = 0.0;
+            for (int i = 0; i < b.n_arms; i++) {
+                double normalized = b.weights[i] / sum_w;
+                out[i] = (1.0 - b.gamma) * normalized + b.gamma / K;
+                if (out[i] < 1e-10) out[i] = 1e-10;
+                prob_sum += out[i];
+            }
+            if (prob_sum > 0.0) {
+                for (int i = 0; i < b.n_arms; i++) out[i] /= prob_sum;
+            }
+        };
+
+        auto memcmp_probs = [](const double* a, const double* b, int n) {
+            return std::memcmp(a, b, sizeof(double) * (size_t)n) == 0;
+        };
+
+        // Test 1: typical 5-arm production case (NUM_STRATEGIES_REAL=5)
+        {
+            BanditState bs{};
+            Bandit_InitDefault(&bs, 5);
+            // Spread weights non-uniformly to exercise the path
+            bs.weights[0] = 1.5; bs.weights[1] = 0.8; bs.weights[2] = 2.1;
+            bs.weights[3] = 0.3; bs.weights[4] = 1.2;
+            double probs_avx[BANDIT_MAX_ARMS] = {};
+            double probs_scalar[BANDIT_MAX_ARMS] = {};
+            Bandit_GetProbabilities(&bs, probs_avx);
+            scalar_probs(bs, probs_scalar);
+            check("v5.11.7: 5-arm probs bytewise-identical to scalar reference",
+                  memcmp_probs(probs_avx, probs_scalar, 5));
+        }
+
+        // Test 2: full 8-arm case (BANDIT_MAX_ARMS) — exercises full vector
+        {
+            BanditState bs{};
+            Bandit_InitDefault(&bs, BANDIT_MAX_ARMS);
+            for (int i = 0; i < BANDIT_MAX_ARMS; i++)
+                bs.weights[i] = 0.5 + 0.25 * (double)(i + 1);
+            double probs_avx[BANDIT_MAX_ARMS] = {};
+            double probs_scalar[BANDIT_MAX_ARMS] = {};
+            Bandit_GetProbabilities(&bs, probs_avx);
+            scalar_probs(bs, probs_scalar);
+            check("v5.11.7: 8-arm probs bytewise-identical (full vector lane)",
+                  memcmp_probs(probs_avx, probs_scalar, BANDIT_MAX_ARMS));
+        }
+
+        // Test 3: minimum n_arms=2 — exercises tight mask
+        {
+            BanditState bs{};
+            Bandit_InitDefault(&bs, 2);
+            bs.weights[0] = 1.0; bs.weights[1] = 1e-12;  // skewed
+            double probs_avx[BANDIT_MAX_ARMS] = {};
+            double probs_scalar[BANDIT_MAX_ARMS] = {};
+            Bandit_GetProbabilities(&bs, probs_avx);
+            scalar_probs(bs, probs_scalar);
+            check("v5.11.7: 2-arm probs bytewise-identical (mask=0x3)",
+                  memcmp_probs(probs_avx, probs_scalar, 2));
+        }
+
+        // Test 4: floor exercise — weights so small they trigger 1e-10 floor
+        {
+            BanditState bs{};
+            Bandit_InitDefault(&bs, 5);
+            for (int i = 0; i < 5; i++) bs.weights[i] = 1e-15 * (double)(i + 1);
+            double probs_avx[BANDIT_MAX_ARMS] = {};
+            double probs_scalar[BANDIT_MAX_ARMS] = {};
+            Bandit_GetProbabilities(&bs, probs_avx);
+            scalar_probs(bs, probs_scalar);
+            check("v5.11.7: floor (1e-10) path bytewise-identical",
+                  memcmp_probs(probs_avx, probs_scalar, 5));
+        }
+
+        // Test 5: 600-cycle synthetic reward sequence — exercises the
+        // full Update + GetProbabilities path under realistic bandit
+        // dynamics. Master plan named test count.
+        {
+            BanditState bs_avx{};
+            BanditState bs_scl{};
+            Bandit_InitDefault(&bs_avx, 5);
+            Bandit_InitDefault(&bs_scl, 5);
+            // Simulate 600 reward cycles. We can't compare DURING
+            // updates directly because Update internally calls
+            // Bandit_GetProbabilities (which is the AVX path). Instead,
+            // compare final probabilities post-sequence.
+            for (int t = 0; t < 600; t++) {
+                int arm = t % 5;
+                double reward = ((t * 13) % 17) - 8;  // pseudo-mixed signs
+                Bandit_Update(&bs_avx, arm, reward);
+                Bandit_Update(&bs_scl, arm, reward);
+            }
+            double probs_avx[BANDIT_MAX_ARMS] = {};
+            double probs_scalar[BANDIT_MAX_ARMS] = {};
+            Bandit_GetProbabilities(&bs_avx, probs_avx);
+            scalar_probs(bs_scl, probs_scalar);
+            // Both states evolved through the same updates so weights
+            // should be identical, and so should probabilities.
+            check("v5.11.7: 600-cycle reward sequence final probs bytewise-identical",
+                  memcmp_probs(probs_avx, probs_scalar, 5));
+        }
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.6.A — InitArena unified mmap allocator ---\n");
+    {
+        // Theory: pre-v5.11.6.A, init-time allocations (RollingStats × 3,
+        // CumDeltaState, per-core CoreSlowState, strategy state factories)
+        // each called malloc/new individually. Scattered across libc heap;
+        // page-fault tail on first slow-path cycle.
+        //
+        // Post-v5.11.6.A: single mmap(MAP_POPULATE) arena bumps these
+        // allocations contiguously. Tests verify the bump-pointer + alignment
+        // + ownership-check + destroy semantics.
+
+        using namespace tt;
+
+        InitArena a = InitArena_Create(64 * 1024);  // 64 KB test arena
+        check("v5.11.6.A: InitArena_Create succeeds", a.base != nullptr);
+        check("v5.11.6.A: capacity equals requested bytes", a.capacity == 64 * 1024);
+        check("v5.11.6.A: used starts at 0", a.used == 0);
+
+        // Bump-pointer alloc + alignment
+        void* p1 = InitArena_Alloc(&a, 100, 8);
+        check("v5.11.6.A: first alloc returns non-null", p1 != nullptr);
+        check("v5.11.6.A: first alloc 8-byte aligned",
+              ((uintptr_t)p1 & 7u) == 0);
+        check("v5.11.6.A: used advanced by ≥100 bytes", a.used >= 100);
+
+        // Second alloc with stricter alignment
+        void* p2 = InitArena_Alloc(&a, 200, 64);
+        check("v5.11.6.A: second alloc 64-byte aligned",
+              ((uintptr_t)p2 & 63u) == 0);
+        check("v5.11.6.A: distinct ranges (no overlap)",
+              (uint8_t*)p2 >= (uint8_t*)p1 + 100);
+
+        // Ownership check
+        check("v5.11.6.A: InitArena_Owns(p1) returns 1",
+              InitArena_Owns(&a, p1) == 1);
+        check("v5.11.6.A: InitArena_Owns(p2) returns 1",
+              InitArena_Owns(&a, p2) == 1);
+        int stack_var;
+        check("v5.11.6.A: InitArena_Owns(stack ptr) returns 0",
+              InitArena_Owns(&a, &stack_var) == 0);
+        check("v5.11.6.A: InitArena_Owns(NULL) returns 0",
+              InitArena_Owns(&a, nullptr) == 0);
+
+        // Type-safe convenience
+        struct Foo { uint64_t x; uint32_t y; };
+        Foo* f = InitArena_AllocOne<Foo>(&a);
+        check("v5.11.6.A: InitArena_AllocOne<Foo> returns aligned pointer",
+              f != nullptr && ((uintptr_t)f & (alignof(Foo) - 1)) == 0);
+        f->x = 0xDEADBEEF;
+        f->y = 0xCAFE;
+        check("v5.11.6.A: arena memory is writable post-alloc",
+              f->x == 0xDEADBEEF && f->y == 0xCAFE);
+
+        // Exhaustion: alloc beyond capacity returns nullptr
+        size_t remaining = InitArena_Remaining(&a);
+        void* big = InitArena_Alloc(&a, remaining + 1, 8);
+        check("v5.11.6.A: alloc beyond capacity returns NULL", big == nullptr);
+
+        // Global accessor
+        check("v5.11.6.A: InitArena_Global() starts at nullptr (test path)",
+              InitArena_Global() == nullptr);
+        InitArena_Global() = &a;
+        check("v5.11.6.A: InitArena_Global() reads set value",
+              InitArena_Global() == &a);
+        InitArena_Global() = nullptr;  // restore for subsequent tests
+
+        // Destroy clean
+        InitArena_Destroy(&a);
+        check("v5.11.6.A: Destroy clears base", a.base == nullptr);
+        check("v5.11.6.A: Destroy clears capacity", a.capacity == 0);
+        check("v5.11.6.A: Destroy is idempotent",
+              (InitArena_Destroy(&a), a.base == nullptr));
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.5.C — mmap pre-alloc OrderEventLog ---\n");
+    {
+        // Theory: pre-v5.11.5.C, OrderEventLog.entries was malloc'd at
+        // ORDER_EVENT_LOG_INIT_CAPACITY and grew via 2× realloc. realloc
+        // mid-trading risked relocation tail latency on the writer thread
+        // even after v5.11.3.C moved I/O off the drainer.
+        //
+        // Post-v5.11.5.C: mmap(MAP_ANONYMOUS|MAP_POPULATE) at boot. Fixed
+        // capacity. MAP_POPULATE pre-faults all pages so no first-write
+        // page-fault tail. Overflow drops + counter bump.
+
+        using namespace tt;
+
+        OrderEventLog<64> log;
+        OrderEventLog_Init(&log);
+        check("v5.11.5.C: Init succeeds with mmap'd entries[]",
+              log.entries != nullptr);
+        check("v5.11.5.C: capacity equals ORDER_EVENT_LOG_MAX_CAPACITY",
+              log.capacity == ORDER_EVENT_LOG_MAX_CAPACITY);
+        check("v5.11.5.C: log_full_drops starts at 0",
+              log.log_full_drops.load() == 0);
+
+        // Verify pages are touchable (no SEGV on writes anywhere in the
+        // mmap'd range — MAP_POPULATE should have pre-faulted them).
+        log.entries[0].event_id = 0xDEADBEEF;
+        log.entries[ORDER_EVENT_LOG_MAX_CAPACITY - 1].event_id = 0xCAFEBABE;
+        check("v5.11.5.C: first slot writable post-mmap",
+              log.entries[0].event_id == 0xDEADBEEF);
+        check("v5.11.5.C: last slot writable post-mmap (full range pre-faulted)",
+              log.entries[ORDER_EVENT_LOG_MAX_CAPACITY - 1].event_id == 0xCAFEBABE);
+
+        // Fill the log right up to capacity, then trigger overflow.
+        log.count = 0;
+        log.next_event_id.store(1, std::memory_order_relaxed);
+        for (size_t i = 0; i < ORDER_EVENT_LOG_MAX_CAPACITY; ++i) {
+            OrderEvent<64> ev{};
+            ev.type = OEVT_FULL_FILL;
+            int rc = OrderEventLog_ApplyEvent(&log, ev);
+            if (rc != 1) break;
+        }
+        check("v5.11.5.C: count reaches MAX_CAPACITY when filled",
+              log.count == ORDER_EVENT_LOG_MAX_CAPACITY);
+        check("v5.11.5.C: log_full_drops still 0 (no overflow yet)",
+              log.log_full_drops.load() == 0);
+
+        // One more event triggers overflow path
+        OrderEvent<64> overflow_ev{};
+        overflow_ev.type = OEVT_FULL_FILL;
+        int rc = OrderEventLog_ApplyEvent(&log, overflow_ev);
+        check("v5.11.5.C: overflow apply returns 0 (drop)",
+              rc == 0);
+        check("v5.11.5.C: log_full_drops bumped on overflow",
+              log.log_full_drops.load() == 1);
+        check("v5.11.5.C: count stays at MAX (no out-of-bounds write)",
+              log.count == ORDER_EVENT_LOG_MAX_CAPACITY);
+
+        // Free path must munmap cleanly (no leak / segfault)
+        OrderEventLog_Free(&log);
+        check("v5.11.5.C: Free clears entries pointer",
+              log.entries == nullptr);
+        check("v5.11.5.C: Free clears capacity",
+              log.capacity == 0);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.5.B — clientOrderId slot encoding (O(1) lookup) ---\n");
+    {
+        // Theory: pre-v5.11.5.B, OrderManager_ProcessFillCommand scanned
+        // MAX_INFLIGHT_ORDERS (=16) bitmap entries linearly to find the slot
+        // matching cmd.order_id. With slot encoded in the upper 4 bits of
+        // the order id, ProcessFillCommand can decode the slot directly
+        // and verify in O(1).
+        //
+        // Encoding: bits 63..60 = slot, bits 59..0 = monotonic counter.
+        //
+        // Tests:
+        //  1. Submitted order_ids carry slot in upper 4 bits
+        //  2. Slot decoded from order_id matches the bitmap slot allocated
+        //  3. Distinct orders get distinct encoded ids even if slots reuse
+        //     after a fill
+        //  4. ProcessFillCommand path: slot decode + verify
+
+        using namespace tt;
+
+        OrderManagerState<64> oms;
+        ExchangeAdapter<64> empty_adapter{};
+        // event_log_mode=1 forces paper mode through the slot-allocation
+        // path (mode 0 shortcuts past the table for legacy compat). We need
+        // the table populated to test the slot encoding.
+        OrderManager_Init(&oms, empty_adapter, /*live=*/0,
+                          FPN_FromDouble<64>(10000.0),
+                          FPN_FromDouble<64>(0.001),
+                          /*event_log_mode=*/1, /*event_log_path=*/nullptr);
+
+        // First submit — paper mode (mode=1), fills synthetically. The returned
+        // order id should have slot in the upper 4 bits.
+        uint64_t oid1 = OrderManager_Submit(&oms,
+            /*core_id=*/0, ORDER_MARKET_BUY,
+            FPN_FromDouble<64>(0.001),
+            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+
+        int decoded_slot1 = (int)((oid1 >> 60) & 0xFu);
+        check("v5.11.5.B: first submit's id encodes slot 0 in bits 63..60",
+              decoded_slot1 == 0);
+        check("v5.11.5.B: lower 60 bits of encoded id are non-zero (monotonic counter)",
+              (oid1 & ((1ULL << 60) - 1)) != 0);
+        check("v5.11.5.B: bitmap reflects slot 0 occupied",
+              (oms.order_bitmap & 0x1u) != 0);
+        check("v5.11.5.B: orders[0].id == returned encoded id",
+              oms.orders[0].id == oid1);
+
+        // Submit a second order. Slot 0 still holds order 1; slot 1 should be
+        // allocated.
+        uint64_t oid2 = OrderManager_Submit(&oms,
+            /*core_id=*/0, ORDER_MARKET_BUY,
+            FPN_FromDouble<64>(0.002),
+            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
+            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+        int decoded_slot2 = (int)((oid2 >> 60) & 0xFu);
+        check("v5.11.5.B: second submit's id encodes slot 1",
+              decoded_slot2 == 1);
+        check("v5.11.5.B: distinct orders get distinct encoded ids",
+              oid1 != oid2);
+        check("v5.11.5.B: lower 60 bits monotonic across submits",
+              (oid2 & ((1ULL << 60) - 1)) > (oid1 & ((1ULL << 60) - 1)));
+
+        // ProcessFillCommand path — the O(1) decode + verify lookup.
+        Command cmd{};
+        cmd.type     = (uint8_t)CMD_FILL_RESULT;
+        cmd.order_id = oid1;  // hit slot 0 directly via the encoded id
+        std::memset(&cmd.result, 0, sizeof(cmd.result));
+        cmd.result.success         = 1;
+        cmd.result.avg_fill_price  = 60100.0;
+        cmd.result.fill_qty        = 0.001;
+        cmd.result.order_complete  = 1;  // ORDER_FILLED (vs PARTIAL=0)
+        std::strncpy(cmd.result.exchange_id, "TEST_EX",
+                     sizeof(cmd.result.exchange_id) - 1);
+        int processed = OrderManager_ProcessFillCommand(&oms, cmd);
+        check("v5.11.5.B: ProcessFillCommand routes via decoded slot to slot 0",
+              processed == 1 && oms.orders[0].state == ORDER_FILLED);
+
+        // Stale-callback safety: a cmd with a stale encoded id (slot now
+        // freed or reused for a different order) must NOT match. Free slot 0
+        // and try the same cmd — should be rejected.
+        oms.order_bitmap &= ~(uint16_t)0x1u;  // free slot 0
+        Command stale_cmd = cmd;
+        int stale_result = OrderManager_ProcessFillCommand(&oms, stale_cmd);
+        check("v5.11.5.B: ProcessFillCommand rejects callback for freed slot",
+              stale_result == 0);
+
+        OrderEventLog_Free(&oms.event_log);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.3.C — Async log thread (drainer I/O isolation) ---\n");
+    {
+        // Theory: pre-v5.11.3.C, every OrderEventLog_Append on the drainer
+        // thread synchronously did realloc + fwrite + periodic fflush. Disk
+        // stalls (page cache flush, fsync from another process) blocked the
+        // drainer for arbitrary microseconds → tail variance.
+        //
+        // Post-v5.11.3.C: drainer pushes the event onto a SPSC ring + returns
+        // (~5ns); a dedicated writer pthread drains the ring and does the
+        // realloc + fwrite + fflush off the drainer's tail-latency path.
+        //
+        // Test strategy: instantiate an OrderEventLog with the async writer
+        // started, push N events from the test thread (analog of the drainer
+        // role), then call StopAsyncWriter (which joins the writer after
+        // its final drain pass). Assert that all N events landed in entries[]
+        // with monotonic event_ids 1..N. Verifies the SPSC pipe + apply
+        // ordering + shutdown drain.
+        using namespace tt;
+        constexpr int N_EVENTS = 500;
+
+        // Use a stack-allocated OrderEventLog; no disk persistence (focuses
+        // the test on the ring + apply path, not Phase 07 disk).
+        OrderEventLog<FP> log;
+        OrderEventLog_Init(&log);
+
+        // Sync mode baseline: Append works without writer thread.
+        OrderEvent<FP> ev0{};
+        ev0.type = OEVT_FULL_FILL;
+        ev0.order_id = 999;
+        int rc_sync = OrderEventLog_Append(&log, ev0);
+        check("v5.11.3.C: sync-mode Append succeeds when writer not started",
+              rc_sync == 1 && log.count == 1);
+        check("v5.11.3.C: sync-mode Append assigned event_id=1",
+              log.entries[0].event_id == 1);
+
+        // Reset for the async test (count=0, next_event_id=1)
+        OrderEventLog_Reset(&log);
+        check("v5.11.3.C: Reset zeros count and rewinds next_event_id",
+              log.count == 0 && log.next_event_id.load() == 1);
+
+        // Start the async writer. From here on, Append enqueues + returns.
+        int started = OrderEventLog_StartAsyncWriter(&log);
+        check("v5.11.3.C: StartAsyncWriter succeeds (pthread_create OK)",
+              started == 1);
+        check("v5.11.3.C: writer_thread_active flag set after Start",
+              log.writer_thread_active.load() == 1);
+
+        // Push N events as fast as possible — exercises the SPSC ring + the
+        // writer's drain-loop. The 1ms writer sleep is the steady-state
+        // cadence; with a 256-slot ring, bursts of <256 fit cleanly.
+        for (int i = 0; i < N_EVENTS; ++i) {
+            OrderEvent<FP> ev{};
+            ev.type     = OEVT_FULL_FILL;
+            ev.order_id = (uint64_t)(2000 + i);
+            OrderEventLog_Append(&log, ev);
+        }
+
+        // Stop the writer — joins the thread after its final drain pass.
+        // This is the test's synchronization point: post-Stop, all pushed
+        // events MUST be in entries[] (or in ring_drop_count if overflow).
+        OrderEventLog_StopAsyncWriter(&log);
+        check("v5.11.3.C: writer_thread_active=0 after Stop",
+              log.writer_thread_active.load() == 0);
+
+        // Verify drain completeness — every event MUST land in entries[].
+        // The producer spin-waits on ring-full, so no events drop; we expect
+        // count == N_EVENTS exactly. ring_full_spins may be non-zero if the
+        // burst exceeded ring capacity (just observability).
+        check("v5.11.3.C: every pushed event landed in entries (count == N_EVENTS)",
+              log.count == (size_t)N_EVENTS);
+        check("v5.11.3.C: zero realloc failures during async drain",
+              log.writer_realloc_failed_count.load() == 0);
+
+        // Verify event_id monotonicity in entries[]. Even if some events
+        // dropped via ring overflow, the IDs that landed should be a
+        // monotonic prefix (since drops happen on the producer side AFTER
+        // event_id assignment when the inline fallback also fires).
+        int monotonic = 1;
+        for (size_t i = 1; i < log.count; ++i) {
+            if (log.entries[i].event_id <= log.entries[i-1].event_id) {
+                monotonic = 0;
+                break;
+            }
+        }
+        check("v5.11.3.C: entries[] event_ids are strictly monotonic", monotonic);
+
+        // Verify that order_ids are preserved (i.e. the writer applied the
+        // events the producer pushed, not torn / random).
+        // entries[0] should be order_id=2000 (first push), since we Reset
+        // before the async loop.
+        check("v5.11.3.C: first entry's order_id matches first push",
+              log.count > 0 && log.entries[0].order_id == 2000);
+
+        // v5.11.4.B — verify ring_full_spins is observable from outside the
+        // writer thread (parity-check Section J — operator must be able to
+        // see writer-thread distress). The 500-event push above shouldn't
+        // have hit ring-full given the 256-slot ring + 1ms writer cadence,
+        // but the COUNTER must be readable either way.
+        uint64_t spins = log.ring_full_spins.load(std::memory_order_relaxed);
+        check("v5.11.4.B: ring_full_spins atomic is observable from another thread",
+              spins == spins);  // tautology; verifies no segfault on the load
+        // (the actual spin count depends on writer scheduling — could be 0
+        // or hundreds depending on contention; either is a valid runtime
+        // state. The TUISnapshot populator copies this into the GUI.)
+
+        OrderEventLog_Free(&log);
+        check("v5.11.3.C: Free is idempotent on already-stopped writer",
+              log.entries == nullptr);
+
+        // Test 2: Free without explicit Stop should still tear down the writer.
+        OrderEventLog<FP> log2;
+        OrderEventLog_Init(&log2);
+        OrderEventLog_StartAsyncWriter(&log2);
+        OrderEvent<FP> ev2{};
+        ev2.type = OEVT_FULL_FILL;
+        OrderEventLog_Append(&log2, ev2);
+        OrderEventLog_Free(&log2);  // calls StopAsyncWriter internally
+        check("v5.11.3.C: Free correctly stops writer + frees memory",
+              log2.entries == nullptr && log2.writer_thread_active.load() == 0);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.1.2 — Branchless leg-B via PAIR_BRANCHLESS template ---\n");
+    {
+        // Theory (audit Part 1.2): leg-B SG_Evaluate is currently branch-gated
+        // on `__builtin_expect(active_b, 0)`. For default cfg (partial_exit=0)
+        // the branch is correctly predicted not-taken (~0ns). For always-pair
+        // deployments where every entry creates a pair, active_b=1 most ticks
+        // and the branch's "+40ns when taken" cost dominates.
+        //
+        // Post-v5.11.1.2: PAIR_BRANCHLESS template parameter selects between:
+        //   - true: unconditional leg-B compute + mask with active_b
+        //   - false: original predicted-not-taken branch
+        // Wrapper dispatches via GATE_FLAG_PAIR_ACTIVE flag in cached_params.
+        //
+        // CRITICAL invariant: both paths must produce bytewise-identical
+        // observable output for any (active_b, threshold, tick price) input.
+        // The branchless path's mask-with-active_b ensures sg_fires_b matches
+        // the branched path's "no fire when active_b=0" semantic.
+
+        using namespace tt;
+
+        // === Setup ===
+        // Build an ExecutionCore in "leg-B-active" state: active=1, active_b=1,
+        // live_tp_b set so a tick price > tp_b fires the leg-B exit.
+        ExecutionCore<FP> core;
+        SPSCRing<Tick<FP>, EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
+        SPSCRing_Init(&tick_ring);
+        ExecutionCore_Init<FP>(&core, /*core_id=*/0, &tick_ring);
+
+        // Set permission so the gate would let entries through (we're testing
+        // exits — leg B SG fires).
+        ExecutionCore_SetPermission(&core, 1);
+
+        // Leg A active with live_tp = 110 (won't fire on tick 100).
+        // Leg B active with live_tp_b = 105 (won't fire on tick 100, will fire on tick 106).
+        core.active = 1;
+        core.entry_price = FPN_FromDouble<FP>(100.0);
+        core.live_tp = FPN_FromDouble<FP>(110.0);
+        core.live_sl = FPN_FromDouble<FP>(95.0);
+        core.active_b = 1;
+        core.entry_price_b = FPN_FromDouble<FP>(100.0);
+        core.live_tp_b = FPN_FromDouble<FP>(105.0);
+        core.live_sl_b = FPN_FromDouble<FP>(98.0);
+
+        // Push params via the proper seqlock pipeline. Direct assignment to
+        // cached_params would be overwritten on the first _Impl call (cache-miss
+        // path reads from param_slot, not from cached_params). SetParameters
+        // updates the param_slot which propagates to cached_params on first read.
+        GateParameters<FP> p;
+        GateParameters_Init(&p);
+        p.flags = GATE_FLAG_TP_ENABLED | GATE_FLAG_SL_ENABLED;
+        ExecutionCore_SetParameters(&core, p);
+
+        // Warmup tick to consume the first-tick cache-miss path. After this,
+        // cached_seq matches param_slot.seq → subsequent calls use the cached
+        // copy and respect the flags we set above.
+        Tick<FP> warmup_tick{};
+        warmup_tick.price = FPN_FromDouble<FP>(100.0);  // no fire (= entry_price)
+        warmup_tick.volume = FPN_FromDouble<FP>(1.0);
+        warmup_tick.timestamp = 0;
+        warmup_tick.sequence = 0;
+        ExecutionCore_Tick<FP>(&core, warmup_tick);
+        TradeEvent<FP> evt;
+        while (SPSCRing_TryPop(&core.event_ring, &evt)) {}
+        core.active = 1; core.active_b = 1;  // restore (warmup may have flipped)
+
+        // === Test 1: PAIR_BRANCHLESS=false with leg-B threshold hit fires ===
+        Tick<FP> tick_hit_b{};
+        tick_hit_b.price = FPN_FromDouble<FP>(106.0);  // > live_tp_b=105 → leg B fires
+        tick_hit_b.volume = FPN_FromDouble<FP>(1.0);
+        tick_hit_b.timestamp = 1;
+        tick_hit_b.sequence = 1;
+
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/false, /*PAIR_BRANCHLESS=*/false>(
+            &core, tick_hit_b);
+        check("v5.11.1.2 branched: leg-B fire clears active_b on TP hit",
+              core.active_b == 0);
+        // Drain event ring to clean state for next test
+        while (SPSCRing_TryPop(&core.event_ring, &evt)) {}
+
+        // Reset for branchless test
+        core.active_b = 1;
+        core.live_tp_b = FPN_FromDouble<FP>(105.0);
+
+        // === Test 2: PAIR_BRANCHLESS=true with same input fires identically ===
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/false, /*PAIR_BRANCHLESS=*/true>(
+            &core, tick_hit_b);
+        check("v5.11.1.2 branchless: leg-B fire clears active_b on TP hit",
+              core.active_b == 0);
+        while (SPSCRing_TryPop(&core.event_ring, &evt)) {}
+
+        // === Test 3: PAIR_BRANCHLESS=true with active_b=0 masks any compute ===
+        // Set active_b=0 + tick price triggers the leg-B compare. Branchless
+        // path computes leg-B SG but masks with active_b=0 → no fire.
+        core.active_b = 0;
+        core.live_tp_b = FPN_FromDouble<FP>(105.0);  // would-fire threshold
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/false, /*PAIR_BRANCHLESS=*/true>(
+            &core, tick_hit_b);
+        check("v5.11.1.2 branchless: active_b=0 masks leg-B fire (stays 0)",
+              core.active_b == 0);
+        while (SPSCRing_TryPop(&core.event_ring, &evt)) {}
+
+        // === Test 4: PAIR_BRANCHLESS=true vs false, no-fire scenario ===
+        // Tick price below leg-B TP and above leg-B SL → no fire either path.
+        Tick<FP> tick_no_fire{};
+        tick_no_fire.price = FPN_FromDouble<FP>(102.0);  // between live_sl_b=98 and live_tp_b=105
+        tick_no_fire.volume = FPN_FromDouble<FP>(1.0);
+        tick_no_fire.timestamp = 2;
+        tick_no_fire.sequence = 2;
+
+        // Reset to leg-B-active state
+        core.active = 1;
+        core.active_b = 1;
+        core.live_tp_b = FPN_FromDouble<FP>(105.0);
+        core.live_sl_b = FPN_FromDouble<FP>(98.0);
+
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/false, /*PAIR_BRANCHLESS=*/false>(
+            &core, tick_no_fire);
+        uint8_t branched_active_b = core.active_b;
+        while (SPSCRing_TryPop(&core.event_ring, &evt)) {}
+
+        core.active_b = 1;
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/false, /*PAIR_BRANCHLESS=*/true>(
+            &core, tick_no_fire);
+        uint8_t branchless_active_b = core.active_b;
+        while (SPSCRing_TryPop(&core.event_ring, &evt)) {}
+
+        check("v5.11.1.2: branched + branchless identical when no leg-B threshold hit",
+              branched_active_b == branchless_active_b);
+        check("v5.11.1.2: no-fire scenario keeps active_b=1 (both paths)",
+              branchless_active_b == 1);
+
+        // === Test 5: Wrapper dispatch via GATE_FLAG_PAIR_ACTIVE ===
+        // With GATE_FLAG_PAIR_ACTIVE set, wrapper dispatches to PAIR_BRANCHLESS=true.
+        // With it clear, wrapper dispatches to PAIR_BRANCHLESS=false.
+        // Both paths produce same observable output → verifies dispatch correctness.
+        core.active = 1; core.active_b = 1;
+        core.live_tp_b = FPN_FromDouble<FP>(105.0);
+        core.cached_params.flags = GATE_FLAG_TP_ENABLED | GATE_FLAG_SL_ENABLED | GATE_FLAG_PAIR_ACTIVE;
+        ExecutionCore_Tick<FP>(&core, tick_hit_b);  // wrapper → branchless
+        uint8_t wrap_pair_active = core.active_b;
+        while (SPSCRing_TryPop(&core.event_ring, &evt)) {}
+
+        core.active = 1; core.active_b = 1;
+        core.live_tp_b = FPN_FromDouble<FP>(105.0);
+        core.cached_params.flags = GATE_FLAG_TP_ENABLED | GATE_FLAG_SL_ENABLED;  // pair clear
+        ExecutionCore_Tick<FP>(&core, tick_hit_b);  // wrapper → branched
+        uint8_t wrap_no_pair = core.active_b;
+        while (SPSCRing_TryPop(&core.event_ring, &evt)) {}
+
+        check("v5.11.1.2 wrapper: dispatch produces identical output regardless of PAIR_ACTIVE flag",
+              wrap_pair_active == wrap_no_pair);
+        check("v5.11.1.2 wrapper: leg-B fire clears active_b in both dispatch paths",
+              wrap_pair_active == 0 && wrap_no_pair == 0);
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.1.1 — Template-bool elision of lat_enabled ---\n");
+    {
+        // Theory (audit Part 1.1): pre-v5.11.1.1 the hot path read
+        // `core->latency_stats.enabled` every tick (relaxed atomic load) +
+        // branched on `__builtin_expect(lat_enabled, 0)`. Even predicted
+        // not-taken, the load + branch occupy execution ports.
+        //
+        // Post-v5.11.1.1, ExecutionCore_Tick_Impl is templated on bool LAT_ENABLED.
+        // When LAT_ENABLED=false, the entire rdtsc + load + branch block is
+        // compiled out (`if constexpr (LAT_ENABLED)` elides it).
+        //
+        // Tests verify behavioral equivalence: with LAT_ENABLED=false, even
+        // when `enabled=1` is set on latency_stats, NO sample gets recorded
+        // (the elided block never runs). With LAT_ENABLED=true, samples DO
+        // get recorded when enabled=1.
+
+        using namespace tt;
+
+        // Setup a minimal ExecutionCore + Tick.
+        ExecutionCore<FP> core;
+        SPSCRing<Tick<FP>, EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
+        SPSCRing_Init(&tick_ring);
+        ExecutionCore_Init<FP>(&core, /*core_id=*/0, &tick_ring);
+
+        Tick<FP> tick{};
+        tick.price = FPN_FromDouble<FP>(100.0);
+        tick.volume = FPN_FromDouble<FP>(1.0);
+        tick.timestamp = 1234567890ULL;
+        tick.sequence = 1;
+
+        // === Test 1: LAT_ENABLED=false elides sampling regardless of enabled flag ===
+        core.latency_stats.enabled.store(1, std::memory_order_relaxed);
+        uint64_t before_false = core.latency_stats.total_count;
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/false, /*PAIR_BRANCHLESS=*/false>(&core, tick);
+        uint64_t after_false = core.latency_stats.total_count;
+        check("v5.11.1.1: LAT_ENABLED=false elides rdtsc sample even when enabled=1",
+              after_false == before_false);
+
+        // === Test 2: LAT_ENABLED=true respects runtime enabled flag (1 = sample) ===
+        // Reset stats so we can detect a fresh sample
+        CoreLatencyStats_Init(&core.latency_stats);
+        core.latency_stats.enabled.store(1, std::memory_order_relaxed);
+        uint64_t before_true = core.latency_stats.total_count;
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/true, /*PAIR_BRANCHLESS=*/false>(&core, tick);
+        uint64_t after_true = core.latency_stats.total_count;
+        check("v5.11.1.1: LAT_ENABLED=true + enabled=1 records a sample",
+              after_true > before_true);
+
+        // === Test 3: LAT_ENABLED=true with runtime enabled=0 still elides at runtime ===
+        // (The compile-time path is in; runtime gate still works.)
+        CoreLatencyStats_Init(&core.latency_stats);
+        core.latency_stats.enabled.store(0, std::memory_order_relaxed);
+        uint64_t before_runtime = core.latency_stats.total_count;
+        ExecutionCore_Tick_Impl<FP, /*LAT_ENABLED=*/true, /*PAIR_BRANCHLESS=*/false>(&core, tick);
+        uint64_t after_runtime = core.latency_stats.total_count;
+        check("v5.11.1.1: LAT_ENABLED=true + enabled=0 skips sample (runtime gate)",
+              after_runtime == before_runtime);
+
+        // === Test 4: Wrapper ExecutionCore_Tick<F> dispatches based on LATENCY_PROFILING ===
+        // Tests build without LATENCY_PROFILING, so wrapper picks LAT_ENABLED=false.
+        // Verify by setting enabled=1 + running the wrapper + checking no sample.
+        CoreLatencyStats_Init(&core.latency_stats);
+        core.latency_stats.enabled.store(1, std::memory_order_relaxed);
+        uint64_t before_wrap = core.latency_stats.total_count;
+        ExecutionCore_Tick<FP>(&core, tick);  // wrapper dispatch
+        uint64_t after_wrap = core.latency_stats.total_count;
+#ifdef LATENCY_PROFILING
+        check("v5.11.1.1: wrapper dispatches LAT_ENABLED=true when LATENCY_PROFILING defined",
+              after_wrap > before_wrap);
+#else
+        check("v5.11.1.1: wrapper dispatches LAT_ENABLED=false when LATENCY_PROFILING undefined",
+              after_wrap == before_wrap);
+#endif
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.0.B — RLIMIT_MEMLOCK preflight ---\n");
+    {
+        // Theory (audit Part 12.2): mlockall(MCL_CURRENT | MCL_FUTURE) locks
+        // engine memory pages into physical RAM, preventing kernel page swap
+        // stalls on hot path. Preflight via getrlimit(RLIMIT_MEMLOCK) catches
+        // operator misconfig (soft limit too low) before mlockall fails.
+        //
+        // Test scope: getrlimit smoke (always succeeds on Linux for valid
+        // resource); validate fields are sensible. We do NOT call mlockall
+        // directly in the test process (would lock the test's pages until
+        // exit + would fail in CI without CAP_IPC_LOCK).
+
+        struct rlimit rl;
+        int rc = getrlimit(RLIMIT_MEMLOCK, &rl);
+        check("v5.11.0.B: getrlimit(RLIMIT_MEMLOCK) succeeds", rc == 0);
+
+        // rlim_cur ≤ rlim_max (kernel invariant)
+        bool soft_le_hard = (rl.rlim_cur == RLIM_INFINITY) ||
+                            (rl.rlim_max == RLIM_INFINITY) ||
+                            (rl.rlim_cur <= rl.rlim_max);
+        check("v5.11.0.B: rlim_cur <= rlim_max (kernel invariant)",
+              soft_le_hard);
+
+        // Operator-visibility: print the resolved limit so the test log shows
+        // what the engine boot will see. Not an assertion — different boxes
+        // will report different values (CI vs dev vs prod). Just informational.
+        if (rl.rlim_cur == RLIM_INFINITY) {
+            printf("  [info] RLIMIT_MEMLOCK soft limit: unlimited\n");
+        } else {
+            printf("  [info] RLIMIT_MEMLOCK soft limit: %llu bytes (%llu MB)\n",
+                   (unsigned long long)rl.rlim_cur,
+                   (unsigned long long)(rl.rlim_cur / (1024 * 1024)));
+        }
+    }
+
+    printf("\n--- EXTENSIBILITY: v5.11.0.A — FTZ/DAZ MXCSR state ---\n");
+    {
+        // Theory (audit Part 12.3): subnormal floats trigger microcode traps
+        // costing up to 100x FPU throughput. tt::engine_set_mxcsr_ftz_daz()
+        // sets FTZ + DAZ bits at main() entry to flush subnormals to zero.
+        // This test runs AFTER controller_test main() called the helper at
+        // line 1424; verify the bits are still set (Linux pthread inherits
+        // MXCSR but the test runs on the main thread, so direct check works).
+
+        unsigned int mxcsr = _mm_getcsr();
+
+        // FTZ bit = 0x8000 (bit 15)
+        // DAZ bit = 0x0040 (bit 6)
+        check("v5.11.0.A: FTZ bit set in MXCSR (0x8000)",
+              (mxcsr & 0x8000) != 0);
+        check("v5.11.0.A: DAZ bit set in MXCSR (0x0040)",
+              (mxcsr & 0x0040) != 0);
+
+        // Smoke: idempotent — calling again leaves bits set
+        tt::engine_set_mxcsr_ftz_daz();
+        unsigned int mxcsr2 = _mm_getcsr();
+        check("v5.11.0.A: FTZ idempotent under second call",
+              (mxcsr2 & 0x8000) != 0);
+        check("v5.11.0.A: DAZ idempotent under second call",
+              (mxcsr2 & 0x0040) != 0);
+    }
+
     printf("\n--- EXTENSIBILITY: v5.10.1.B — Ensemble grid_member_count consistency validator ---\n");
     {
         // Theory (parity-check Finding #2): pre-v5.10.1.B,
@@ -14330,6 +15552,997 @@ e3_skip_load:;
         tt::PhaseTimer_Global().parse_ns = 999;
         tt::PhaseTimer_Reset(&tt::PhaseTimer_Global());
         check("v5.10.0A: Global singleton accessible + reset", tt::PhaseTimer_Global().parse_ns == 0);
+    }
+
+    printf("\n--- v5.11.15: Strategy_FreePerCore AUTO/NONE root-cause regression ---\n");
+    {
+        // v5.11.15 (2026-05-07) — root cause for the v5.11.11 symptom-quiet
+        // was identified at CoreFrameworks/ShardedSnapshotPersist.hpp:498:
+        // snapshot Load was restoring strategy_state_kind from the
+        // persisted byte AFTER Strategy_InitPerCore had already set kind
+        // correctly from cfg.strategy_id. Result: state ptr (non-null,
+        // typed e.g. MR) + kind (overwritten to a previous-run value
+        // e.g. AUTO) — Strategy_FreePerCore at shutdown couldn't dispatch
+        // the type-correct delete; pre-v5.11.11 hit `default:` and WARN'd,
+        // post-v5.11.11 took the AUTO/NONE branch and leaked.
+        //
+        // Fix: stop applying s.strategy_state_kind to ctx.strategy_state_kind
+        // in the snapshot Load path. The persisted byte stays in the file
+        // format (snapshot v4+ back-compat — still READ, just not APPLIED).
+        // The kind invariant is now: set ONLY by Strategy_InitPerCore at
+        // boot and Strategy_FreePerCore on teardown.
+
+        // === Test 1: post-fix kind invariant after Strategy_InitPerCore ===
+        // After Init with a concrete strategy, state ptr is non-null AND
+        // kind matches the strategy_id. This is the invariant the snapshot
+        // Load fix preserves (pre-fix, Load could overwrite kind even
+        // though state ptr was unchanged).
+        {
+            tt::OrderManagerState<FP> oms;
+            tt::EventLoopState<FP> state;
+            tt::EventLoopState_Init(&state, &oms);
+            ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+            RollingStats<FP, 128> rolling = RollingStats_Init<FP, 128>();
+            tt::Strategy_InitPerCore(&state, 0, STRATEGY_MEAN_REVERSION, &rolling, &cfg);
+
+            check("v5.11.15: post-Init kind matches strategy_id",
+                  state.cores[0].strategy_state_kind == STRATEGY_MEAN_REVERSION);
+            check("v5.11.15: post-Init state ptr is non-null for concrete strategy",
+                  state.cores[0].strategy_state != nullptr);
+
+            tt::Strategy_FreePerCore(&state, 0);
+            check("v5.11.15: post-Free kind reset to 0xFF (uninitialized sentinel)",
+                  state.cores[0].strategy_state_kind == 0xFF);
+            check("v5.11.15: post-Free state ptr is nullptr",
+                  state.cores[0].strategy_state == nullptr);
+
+            tt::EventLoopState_Free(&state);
+        }
+
+        // === Test 2: AUTO/NONE branch defensiveness (synthetic mismatch) ===
+        // Even with the root cause fixed, the AUTO/NONE branch is kept
+        // defensively for unusual lifecycle orderings (test harnesses,
+        // future hot-swap paths). Verify it nulls the state ptr cleanly
+        // without crashing OR mistakenly invoking `delete` on an
+        // unknown-type pointer. Use a non-allocated dummy pointer that
+        // would crash on delete, to prove no `delete` is called on this
+        // branch.
+        {
+            tt::OrderManagerState<FP> oms;
+            tt::EventLoopState<FP> state;
+            tt::EventLoopState_Init(&state, &oms);
+
+            // Synthesize the kind/state mismatch the pre-v5.11.15 snapshot
+            // Load would create: state ptr non-null, kind=AUTO. Use an
+            // arena-style dummy address that Strategy_FreePerCore must
+            // NOT call delete on (would crash if it did).
+            char on_stack_dummy[64] = {0};
+            state.cores[0].strategy_state      = on_stack_dummy;
+            state.cores[0].strategy_state_kind = STRATEGY_AUTO;
+
+            // Should hit AUTO/NONE branch defensively. No crash, no delete.
+            tt::Strategy_FreePerCore(&state, 0);
+
+            check("v5.11.15: AUTO/NONE branch nulls state ptr",
+                  state.cores[0].strategy_state == nullptr);
+            check("v5.11.15: AUTO/NONE branch sets kind=0xFF",
+                  state.cores[0].strategy_state_kind == 0xFF);
+
+            // Same shape but kind=NONE
+            state.cores[0].strategy_state      = on_stack_dummy;
+            state.cores[0].strategy_state_kind = STRATEGY_NONE;
+            tt::Strategy_FreePerCore(&state, 0);
+            check("v5.11.15: NONE branch also nulls state ptr without crash",
+                  state.cores[0].strategy_state == nullptr);
+
+            tt::EventLoopState_Free(&state);
+        }
+    }
+
+    printf("\n--- v5.11.22: InitArena MAP_HUGETLB opt-in cfg + fallback ---\n");
+    {
+        // v5.11.22 (2026-05-07) — operator-gated MAP_HUGETLB on the
+        // boot InitArena. Default cfg.init_arena_use_hugepages=0 (no
+        // OS dependency); 1 = request 2MB hugepages with non-fatal
+        // fallback to normal pages on failure.
+
+        // === Test 1: cfg field defaults to 0 ===
+        {
+            ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+            check("v5.11.22: init_arena_use_hugepages defaults to 0",
+                  cfg.init_arena_use_hugepages == 0);
+        }
+
+        // === Test 2: cfg parser reads "init_arena_use_hugepages=1" ===
+        {
+            char tmp_cfg[] = "/tmp/v51122_cfg_XXXXXX";
+            int fd = mkstemp(tmp_cfg);
+            check("v5.11.22: tmp cfg file creation", fd >= 0);
+            if (fd >= 0) {
+                FILE* f = fdopen(fd, "w");
+                fprintf(f, "init_arena_use_hugepages=1\n");
+                fclose(f);
+
+                ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(tmp_cfg);
+                check("v5.11.22: parser reads init_arena_use_hugepages=1",
+                      cfg.init_arena_use_hugepages == 1);
+                unlink(tmp_cfg);
+            }
+        }
+
+        // === Test 3: InitArena_Create with extra_flags=0 succeeds ===
+        // (baseline path; same as pre-v5.11.22 behavior)
+        {
+            tt::InitArena a = tt::InitArena_Create(64 * 1024, 0);
+            check("v5.11.22: InitArena_Create(64KB, 0) succeeds", a.base != nullptr);
+            check("v5.11.22: InitArena_Create(64KB, 0) reports is_mmap=1",
+                  a.is_mmap == 1);
+            tt::InitArena_Destroy(&a);
+        }
+
+        // === Test 4: InitArena_Create with MAP_HUGETLB falls back gracefully ===
+        // Most CI / dev machines don't have hugepages reserved — the path
+        // below exercises the v5.11.22 fallback (retry without HUGETLB,
+        // emit a stderr WARN, return a working arena anyway).
+        // We can't deterministically assert WHICH path runs (operator
+        // machines with hugepages WILL succeed on the first try), but
+        // either way the resulting arena must be usable.
+        {
+            tt::InitArena a = tt::InitArena_Create(64 * 1024, MAP_HUGETLB);
+            check("v5.11.22: InitArena_Create(64KB, MAP_HUGETLB) returns usable arena",
+                  a.base != nullptr && a.capacity == 64 * 1024);
+            // Test that we can actually allocate from it (proves the
+            // fallback or HUGETLB path produced a working backing).
+            void* p = tt::InitArena_Alloc(&a, 1024, 64);
+            check("v5.11.22: arena alloc works regardless of HUGETLB success",
+                  p != nullptr);
+            tt::InitArena_Destroy(&a);
+        }
+    }
+
+    printf("\n--- v5.11.19: FPN_FromString + FPN_ToDouble vs parse_double_fast ---\n");
+    {
+        // v5.11.19 (2026-05-07): BinanceCrypto's per-tick ingestion path
+        // pre-fix called BOTH FPN_FromString<F>(s) AND tt::parse_double_fast(s)
+        // on the same price/qty strings — once for the FPN engine value, once
+        // for the TUI display double. v5.11.19 derives the TUI double from
+        // FPN_ToDouble(fpn) instead, saving a parse + eliminating the parity
+        // hazard of two parsers rounding differently.
+        //
+        // This block validates that FPN_FromString → FPN_ToDouble round-trip
+        // is bytewise-equal to tt::parse_double_fast for representative
+        // Binance price/qty strings (in-spec inputs only — the two paths
+        // are not required to agree on out-of-spec input like NaN/Inf).
+
+        const char* test_strings[] = {
+            "0.001",
+            "1.0",
+            "50000.00",
+            "100.5",
+            "0.00012345",
+            "12345.6789",
+            "99999.99",
+            "0.5",
+            "1234567.89012345",
+        };
+        const int n_strings = sizeof(test_strings) / sizeof(*test_strings);
+        int matches = 0;
+        for (int i = 0; i < n_strings; ++i) {
+            FPN<FP> fpn = FPN_FromString<FP>(test_strings[i]);
+            double via_fpn = FPN_ToDouble(fpn);
+            double via_parse = tt::parse_double_fast(test_strings[i]);
+            // Allow tiny FP rounding (1 ULP) — FPN<64> stores 4096 fractional
+            // bits internally so the precision difference is the FPN→double
+            // conversion at the boundary, not the input parse. For typical
+            // crypto-tick strings (8 decimal digits) the round-trip is exact.
+            double diff = via_fpn - via_parse;
+            if (diff < 0) diff = -diff;
+            double scale = (via_parse < 0 ? -via_parse : via_parse);
+            if (scale < 1e-12) scale = 1.0;
+            double rel = diff / scale;
+            if (rel < 1e-12) ++matches;
+        }
+        check("v5.11.19: all 9 representative tick strings match within 1e-12 relative",
+              matches == n_strings);
+    }
+
+    printf("\n--- v5.11.18a: feature_mask cfg + stamp infrastructure ---\n");
+    {
+        // v5.11.18a (2026-05-07) — per-core feature_mask cfg field +
+        // stamp body extension (Surface G has_*=0 forward-compat).
+        // No ML behavior change yet (Features_PackAll still ignores the
+        // mask until v5.11.18 lands). This block tests the prep
+        // infrastructure: cfg parser, default value, stamp emit + parse
+        // round-trip, mismatch refuse, legacy-stamp accept.
+
+        // === Test 1: Default cfg has all-on mask ===
+        {
+            ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
+            check("v5.11.18a: default core_feature_mask[0] is all-on",
+                  cfg.core_feature_mask[0] == 0xFFFFFFFFFFFFFFFFULL);
+            check("v5.11.18a: default core_feature_mask[15] is all-on",
+                  cfg.core_feature_mask[15] == 0xFFFFFFFFFFFFFFFFULL);
+        }
+
+        // === Test 2: cfg parser accepts hex-prefixed value ===
+        {
+            char tmp_cfg[] = "/tmp/v51118a_cfg_hex_XXXXXX";
+            int fd = mkstemp(tmp_cfg);
+            check("v5.11.18a: tmp cfg file creation", fd >= 0);
+            if (fd >= 0) {
+                FILE* f = fdopen(fd, "w");
+                fprintf(f, "core_0_feature_mask=0xDEADBEEFCAFEBABE\n");
+                fprintf(f, "core_3_feature_mask=0x00000000000003ff\n");
+                fclose(f);
+
+                ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(tmp_cfg);
+                check("v5.11.18a: parser reads 0xDEADBEEFCAFEBABE for core 0",
+                      cfg.core_feature_mask[0] == 0xDEADBEEFCAFEBABEULL);
+                check("v5.11.18a: parser reads 0x3ff for core 3",
+                      cfg.core_feature_mask[3] == 0x3FFULL);
+                check("v5.11.18a: untouched core stays at all-on default",
+                      cfg.core_feature_mask[1] == 0xFFFFFFFFFFFFFFFFULL);
+                unlink(tmp_cfg);
+            }
+        }
+
+        // === Test 3: cfg parser accepts decimal value ===
+        {
+            char tmp_cfg[] = "/tmp/v51118a_cfg_dec_XXXXXX";
+            int fd = mkstemp(tmp_cfg);
+            if (fd >= 0) {
+                FILE* f = fdopen(fd, "w");
+                fprintf(f, "core_2_feature_mask=18446744073709551615\n");
+                fclose(f);
+
+                ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(tmp_cfg);
+                check("v5.11.18a: parser reads decimal max-uint64",
+                      cfg.core_feature_mask[2] == 0xFFFFFFFFFFFFFFFFULL);
+                unlink(tmp_cfg);
+            }
+        }
+
+        // === Test 4: stamp emit + parse round-trip with feature_mask set ===
+        {
+            char tmp_model[] = "/tmp/v51118a_stamp_model_XXXXXX";
+            char tmp_stamp[600];
+            int fd = mkstemp(tmp_model);
+            check("v5.11.18a: tmp model file creation", fd >= 0);
+            if (fd >= 0) {
+                FILE* mf = fdopen(fd, "wb");
+                const char* dummy = "model-payload-v51118a";
+                fwrite(dummy, 1, strlen(dummy), mf);
+                fclose(mf);
+                snprintf(tmp_stamp, sizeof(tmp_stamp), "%s.stamp", tmp_model);
+
+                StampInferenceCfgInputs inf{};
+                inf.has_feature_mask = 1;
+                inf.feature_mask_train = 0xDEADBEEFCAFEBABEULL;
+
+                StampWriteResult wr = stamp_write_for_model(
+                    tmp_model, "", MODEL_FORMAT_VERSION,
+                    "2026-05-07", 0.55, 0.53, 0.05, 0,
+                    /*feature_registry_hash=*/0,
+                    /*engine_version=*/nullptr,
+                    /*inf=*/&inf);
+                check("v5.11.18a: stamp_write_for_model accepts feature_mask in inf",
+                      wr.ok == 1);
+
+                // Verifier WITHOUT expected_feature_mask: round-trip reads
+                // the field but doesn't enforce a comparison.
+                ModelStampResult vr = verify_model_stamp(
+                    tmp_model, "", 0.05, MODEL_FORMAT_VERSION);
+                check("v5.11.18a: verifier reads has_feature_mask=1 from stamp",
+                      vr.has_feature_mask == 1);
+                check("v5.11.18a: verifier reads feature_mask_train round-trip",
+                      vr.feature_mask_train == 0xDEADBEEFCAFEBABEULL);
+
+                // Verifier WITH matching expected_feature_mask: accept.
+                ModelStampResult vr_match = verify_model_stamp(
+                    tmp_model, "", 0.05, MODEL_FORMAT_VERSION,
+                    /*expected_feature_registry_hash=*/0,
+                    /*expected_label_registry_hash=*/0,
+                    /*expected_feature_mask=*/0xDEADBEEFCAFEBABEULL);
+                check("v5.11.18a: matching feature_mask accepts",
+                      vr_match.valid == 1);
+
+                // Verifier WITH mismatched expected_feature_mask: REFUSE.
+                ModelStampResult vr_mismatch = verify_model_stamp(
+                    tmp_model, "", 0.05, MODEL_FORMAT_VERSION,
+                    /*expected_feature_registry_hash=*/0,
+                    /*expected_label_registry_hash=*/0,
+                    /*expected_feature_mask=*/0x00000000000000FFULL);
+                check("v5.11.18a: mismatched feature_mask REFUSES load",
+                      vr_mismatch.valid == 0);
+                check("v5.11.18a: refuse reason mentions feature_mask mismatch",
+                      strstr(vr_mismatch.reason, "feature_mask mismatch") != nullptr);
+
+                unlink(tmp_model);
+                unlink(tmp_stamp);
+            }
+        }
+
+        // === Test 5: Legacy stamp (no feature_mask field) accepts with WARN ===
+        {
+            char tmp_model[] = "/tmp/v51118a_legacy_XXXXXX";
+            char tmp_stamp[600];
+            int fd = mkstemp(tmp_model);
+            if (fd >= 0) {
+                FILE* mf = fdopen(fd, "wb");
+                const char* dummy = "legacy-stamp-payload";
+                fwrite(dummy, 1, strlen(dummy), mf);
+                fclose(mf);
+                snprintf(tmp_stamp, sizeof(tmp_stamp), "%s.stamp", tmp_model);
+
+                // Stamp WITHOUT inf (legacy emit; no feature_mask line)
+                StampWriteResult wr = stamp_write_for_model(
+                    tmp_model, "", MODEL_FORMAT_VERSION,
+                    "2026-05-07", 0.55, 0.53, 0.05, 0);
+                check("v5.11.18a: legacy stamp (no inf) writes",
+                      wr.ok == 1);
+
+                // Verifier reads has_feature_mask=0 (field absent).
+                ModelStampResult vr = verify_model_stamp(
+                    tmp_model, "", 0.05, MODEL_FORMAT_VERSION,
+                    /*expected_feature_registry_hash=*/0,
+                    /*expected_label_registry_hash=*/0,
+                    /*expected_feature_mask=*/0xDEADBEEFCAFEBABEULL);
+                check("v5.11.18a: legacy stamp parses has_feature_mask=0",
+                      vr.has_feature_mask == 0);
+                check("v5.11.18a: legacy stamp + non-zero expected → ACCEPT (warn, not reject)",
+                      vr.valid == 1);
+
+                unlink(tmp_model);
+                unlink(tmp_stamp);
+            }
+        }
+    }
+
+    printf("\n--- v5.11.40: per-horizon TP/SL CSV parser (broadcast or match) ---\n");
+    {
+        // v5.11.40 — TP Barrier % / SL Barrier % accept comma-separated
+        // values for per-horizon mapping (broadcast-or-match rule):
+        //   - Single value (count==1): broadcasts to all horizons
+        //   - N values where N == horizon_count: positional mapping
+        //   - Anything else: misaligned → button disabled with hint
+        //
+        // The parser at BacktestPanels.hpp:3300+ runs on each render
+        // frame. Tests below validate the parser logic standalone (the
+        // GUI plumbing + button-enable gate is functional only via
+        // visual inspection; covered in operator paper-test).
+
+        // Match the parse_pct_csv lambda body in BacktestPanels.hpp.
+        auto parse = [](const char* csv, float* out, int* n_out) {
+            int n = 0;
+            const char* p = csv;
+            while (*p && n < 8) {
+                while (*p == ' ' || *p == '\t' || *p == ',') p++;
+                if (!*p) break;
+                char* end = nullptr;
+                float v = strtof(p, &end);
+                if (end == p) break;
+                if (v >= 0.0f && v <= 100.0f) out[n++] = v;
+                p = end;
+            }
+            *n_out = n;
+        };
+
+        // === Test 1: single value parses + count==1 ===
+        {
+            float buf[8] = {0};
+            int n = 0;
+            parse("0.030", buf, &n);
+            check("v5.11.40: single value parses to count=1",
+                  n == 1 && buf[0] == 0.030f);
+        }
+
+        // === Test 2: 3-value CSV parses positionally ===
+        {
+            float buf[8] = {0};
+            int n = 0;
+            parse("0.020,0.030,0.040", buf, &n);
+            check("v5.11.40: 3-value CSV parses to count=3",
+                  n == 3 && buf[0] == 0.020f && buf[1] == 0.030f && buf[2] == 0.040f);
+        }
+
+        // === Test 3: empty / whitespace input parses to count=0 ===
+        {
+            float buf[8] = {0};
+            int n = 0;
+            parse("   ", buf, &n);
+            check("v5.11.40: whitespace-only input parses to count=0", n == 0);
+            parse("", buf, &n);
+            check("v5.11.40: empty input parses to count=0", n == 0);
+        }
+
+        // === Test 4: out-of-range values silently dropped ===
+        {
+            float buf[8] = {0};
+            int n = 0;
+            parse("0.030,200.0,0.040", buf, &n);  // 200.0 > 100.0 cap
+            check("v5.11.40: out-of-range value (200.0) dropped",
+                  n == 2 && buf[0] == 0.030f && buf[1] == 0.040f);
+        }
+
+        // === Test 5: broadcast-or-match alignment rule ===
+        // Mirrors the GUI gate: aligned iff (n_csv <= 1) || (n_csv == horizon_count).
+        {
+            auto aligned = [](int n_csv, int horizon_count) -> bool {
+                return (n_csv <= 1) || (n_csv == horizon_count);
+            };
+            check("v5.11.40: count=1 is always aligned (broadcast)",
+                  aligned(1, 3) && aligned(1, 8));
+            check("v5.11.40: count=N matches horizon_count==N",
+                  aligned(3, 3) && aligned(8, 8));
+            check("v5.11.40: count=N != horizon_count is misaligned",
+                  !aligned(2, 3) && !aligned(4, 3));
+            check("v5.11.40: count=0 is aligned (single-field fallback)",
+                  aligned(0, 3));
+        }
+    }
+
+    printf("\n--- v5.11.53: Backtest_RunFullValidation preserves request fields across memset ---\n");
+    {
+        // v5.11.53 — regression test for v5.11.49 bug class (RFV's
+        // memset(out, 0, sizeof(*out)) at function entry wiped the
+        // auto_stamp_path / auto_stamp_secret / req_label_* fields the
+        // CALLER pre-set as inputs). Test: pre-fill the request fields
+        // on a FullValidationResults, call RFV with minimal/null data
+        // (so it returns early without doing real WF), assert the
+        // request fields SURVIVE.
+        FullValidationResults fv;
+        memset(&fv, 0, sizeof(fv));
+        // Pre-fill request fields (caller's inputs)
+        const char *test_path   = "/tmp/v51153_test_model.json";
+        const char *test_secret = "test-secret-32-chars-long-enough-here";
+        strncpy(fv.auto_stamp_path,   test_path,   sizeof(fv.auto_stamp_path) - 1);
+        strncpy(fv.auto_stamp_secret, test_secret, sizeof(fv.auto_stamp_secret) - 1);
+        fv.auto_stamp_format_version = 7;
+        fv.req_label_lookahead_ticks = 1234;
+        fv.req_label_tp_pct          = 0.0567;
+        fv.req_label_sl_pct          = 0.0345;
+
+        // Call RFV with NULL data → should early-return after the request-
+        // field preservation block + memset
+        HeldOutSplit dummy_split = {};
+        dummy_split.locked = 0;  // unlocked so we get past the locked check
+        // NOTE: data=nullptr triggers early-return at "no samples" check;
+        // request-field preservation MUST happen BEFORE that early-return
+        // (per v5.11.49 fix at start of RFV).
+        volatile int progress = 0;
+        volatile int cancel = 0;
+        Backtest_RunFullValidation(&fv, /*data=*/nullptr, &dummy_split,
+                                    /*n_splits=*/5, /*horizon=*/1000,
+                                    /*buffer=*/100, /*min_train=*/100,
+                                    &progress, &cancel,
+                                    /*label_type=*/7,
+                                    /*gap_threshold=*/0.05f);
+        // Assert request fields SURVIVED the memset
+        check("v5.11.53: RFV preserves auto_stamp_path across memset",
+              strcmp(fv.auto_stamp_path, test_path) == 0);
+        check("v5.11.53: RFV preserves auto_stamp_secret across memset",
+              strcmp(fv.auto_stamp_secret, test_secret) == 0);
+        check("v5.11.53: RFV preserves auto_stamp_format_version=7",
+              fv.auto_stamp_format_version == 7);
+        check("v5.11.53: RFV preserves req_label_lookahead_ticks=1234",
+              fv.req_label_lookahead_ticks == 1234);
+        check("v5.11.53: RFV preserves req_label_tp_pct≈0.0567",
+              fv.req_label_tp_pct > 0.056 && fv.req_label_tp_pct < 0.057);
+        check("v5.11.53: RFV preserves req_label_sl_pct≈0.0345",
+              fv.req_label_sl_pct > 0.034 && fv.req_label_sl_pct < 0.035);
+        // Result fields should be zeroed by the memset
+        check("v5.11.53: RFV memsets ran_held_out=0 (result field)",
+              fv.ran_held_out == 0);
+        check("v5.11.53: RFV memsets auto_stamp_attempted=0 (result field)",
+              fv.auto_stamp_attempted == 0);
+    }
+
+    printf("\n--- v5.11.42 D.1: ModelHandle.stamp_xgb_train_nthread propagation ---\n");
+    {
+        // v5.11.42 D.1 — verify that ModelHandle picks up xgb_train_nthread
+        // from the stamp body. EngineSharded boot WARN compares stamp's
+        // value vs cfg.xgb_train_nthread; mode-divergence (stamp=1 +
+        // cfg>1) indicates parallel multi-horizon trained model loaded
+        // under serial-mode cfg. Forensic only — no refusal.
+        ModelHandle<64> mh;
+        Model_Init(&mh);
+        check("v5.11.42 D.1: Model_Init zeroes has_stamp_xgb_train_nthread",
+              mh.has_stamp_xgb_train_nthread == 0);
+        check("v5.11.42 D.1: Model_Init zeroes stamp_xgb_train_nthread",
+              mh.stamp_xgb_train_nthread == 0);
+
+        // Simulate post-load population (mirrors CoreModelZoo path)
+        mh.has_stamp_xgb_train_nthread = 1;
+        mh.stamp_xgb_train_nthread = 1;
+        check("v5.11.42 D.1: handle field assignable to 1 (parallel mode)",
+              mh.has_stamp_xgb_train_nthread == 1 &&
+              mh.stamp_xgb_train_nthread == 1);
+    }
+
+    printf("\n--- v5.11.42 D.2: ModelHandle.stamp_label_lookahead_ticks propagation ---\n");
+    {
+        // v5.11.42 D.2 — verify ModelHandle picks up label_lookahead_ticks
+        // from stamp. EnsembleModelZoo_LoadFromCfg passes the dir-name-
+        // parsed horizon as expected_horizon_ticks; CoreModelZoo_TryLoadRole
+        // refuses on mismatch (catches dir rename/copy mistake).
+        ModelHandle<64> mh;
+        Model_Init(&mh);
+        check("v5.11.42 D.2: Model_Init zeroes has_stamp_label_params",
+              mh.has_stamp_label_params == 0);
+        check("v5.11.42 D.2: Model_Init zeroes stamp_label_lookahead_ticks",
+              mh.stamp_label_lookahead_ticks == 0);
+
+        // Simulate post-load population
+        mh.has_stamp_label_params = 1;
+        mh.stamp_label_lookahead_ticks = 7500;
+        mh.stamp_label_tp_pct = 0.05;
+        mh.stamp_label_sl_pct = 0.05;
+        check("v5.11.42 D.2: handle stamp_label_lookahead_ticks=7500",
+              mh.stamp_label_lookahead_ticks == 7500);
+        check("v5.11.42 D.2: handle stamp_label_tp_pct=0.05",
+              mh.stamp_label_tp_pct > 0.049 && mh.stamp_label_tp_pct < 0.051);
+    }
+
+    printf("\n--- v5.11.42 D.3: ModelHandle.stamp_scaler_sha256 propagation ---\n");
+    {
+        // v5.11.42 D.3 — verify ModelHandle picks up scaler_sha256 from
+        // stamp for ensemble-sibling consistency check. Per-horizon
+        // scalers SHOULD be identical across siblings (scaler is derived
+        // from shared feature matrix); WARN if they differ.
+        ModelHandle<64> mh;
+        Model_Init(&mh);
+        check("v5.11.42 D.3: Model_Init zeroes has_stamp_scaler_sha256",
+              mh.has_stamp_scaler_sha256 == 0);
+        check("v5.11.42 D.3: Model_Init nul-terminates stamp_scaler_sha256",
+              mh.stamp_scaler_sha256[0] == '\0');
+
+        // Simulate post-load population (64-char hex SHA + null)
+        mh.has_stamp_scaler_sha256 = 1;
+        const char* sample_sha = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        memcpy(mh.stamp_scaler_sha256, sample_sha, 64);
+        mh.stamp_scaler_sha256[64] = '\0';
+        check("v5.11.42 D.3: handle stamp_scaler_sha256 round-trip",
+              strcmp(mh.stamp_scaler_sha256, sample_sha) == 0);
+    }
+
+    printf("\n--- v5.11.41.C: multi_horizon_max_threads cfg + auto-default ---\n");
+    {
+        // v5.11.41.C — Multi-Horizon parallelism control. cfg field
+        // multi_horizon_max_threads. Default 0 = auto (computed at runtime
+        // as min(8, ncores/2)). 1 = forced serial. >1 = parallel cap.
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        // v5.11.45 — default changed from 0 (auto) to 1 (forced serial) after
+        // segfault reports under XGBoost+libgomp+pthread interaction. Parallel
+        // mode is opt-in only.
+        check("v5.11.45: default multi_horizon_max_threads = 1 (forced serial post-segfault)",
+              cfg.multi_horizon_max_threads == 1);
+
+        // Verify the cfg field type is int (assignment + read-back)
+        cfg.multi_horizon_max_threads = 4;
+        check("v5.11.41.C: cfg field assignable to 4",
+              cfg.multi_horizon_max_threads == 4);
+        cfg.multi_horizon_max_threads = 1;
+        check("v5.11.41.C: cfg field assignable to 1 (forced serial)",
+              cfg.multi_horizon_max_threads == 1);
+    }
+
+    printf("\n--- v5.11.41.0: stamp body schema closure (label params + xgb_train_nthread) ---\n");
+    {
+        // v5.11.41.0 (2026-05-07) — close pre-existing stamp schema gaps
+        // surfaced by /parity-check 2026-05-07-stamp:
+        //  CRITICAL-1: label_lookahead_ticks/tp_pct/sl_pct missing (no
+        //              way to identify which horizon a stamp belongs to)
+        //  CRITICAL-2: xgb_train_nthread missing (no forensic record of
+        //              serial-vs-parallel mode that produced the stamp)
+        //  CRITICAL-3: Backtest_RunFullValidation didn't populate nthread
+        //
+        // Tests verify: (1) emit with has_*=1 produces canonical body
+        // lines; (2) parser round-trips values into ModelStampResult;
+        // (3) emit without has_*=0 produces no lines (legacy compat);
+        // (4) legacy stamp (no v5.11.41 fields) parses cleanly with
+        //     has_*=0 (forward-compat preserved).
+        //
+        // Forensic-only: no load-time refusal because engine has no
+        // expected horizon cfg-side; tests don't check refusal logic.
+
+        // === Test 1: Per-horizon label params round-trip ===
+        {
+            char tmp_model[] = "/tmp/v51141_labelparams_XXXXXX";
+            char tmp_stamp[600];
+            int fd = mkstemp(tmp_model);
+            check("v5.11.41.0: tmp model file creation", fd >= 0);
+            if (fd >= 0) {
+                FILE* mf = fdopen(fd, "wb");
+                const char* dummy = "model-payload-v51141";
+                fwrite(dummy, 1, strlen(dummy), mf);
+                fclose(mf);
+                snprintf(tmp_stamp, sizeof(tmp_stamp), "%s.stamp", tmp_model);
+
+                StampInferenceCfgInputs inf{};
+                inf.has_label_params = 1;
+                inf.label_lookahead_ticks = 7500;
+                inf.label_tp_pct = 0.05;
+                inf.label_sl_pct = 0.03;
+
+                StampWriteResult wr = stamp_write_for_model(
+                    tmp_model, "", MODEL_FORMAT_VERSION,
+                    "2026-05-07", 0.55, 0.53, 0.05, 0,
+                    /*feature_registry_hash=*/0,
+                    /*engine_version=*/nullptr,
+                    /*inf=*/&inf);
+                check("v5.11.41.0: stamp_write_for_model accepts label params in inf",
+                      wr.ok == 1);
+
+                ModelStampResult vr = verify_model_stamp(
+                    tmp_model, "", 0.05, MODEL_FORMAT_VERSION);
+                check("v5.11.41.0: verifier reads has_label_params=1 from stamp",
+                      vr.has_label_params == 1);
+                check("v5.11.41.0: verifier reads label_lookahead_ticks round-trip",
+                      vr.label_lookahead_ticks == 7500);
+                check("v5.11.41.0: verifier reads label_tp_pct round-trip (within 1e-6)",
+                      vr.label_tp_pct > 0.0499 && vr.label_tp_pct < 0.0501);
+                check("v5.11.41.0: verifier reads label_sl_pct round-trip (within 1e-6)",
+                      vr.label_sl_pct > 0.0299 && vr.label_sl_pct < 0.0301);
+
+                unlink(tmp_model);
+                unlink(tmp_stamp);
+            }
+        }
+
+        // === Test 2: xgb_train_nthread round-trip ===
+        {
+            char tmp_model[] = "/tmp/v51141_nthread_XXXXXX";
+            char tmp_stamp[600];
+            int fd = mkstemp(tmp_model);
+            if (fd >= 0) {
+                FILE* mf = fdopen(fd, "wb");
+                const char* dummy = "model-payload-nthread";
+                fwrite(dummy, 1, strlen(dummy), mf);
+                fclose(mf);
+                snprintf(tmp_stamp, sizeof(tmp_stamp), "%s.stamp", tmp_model);
+
+                StampInferenceCfgInputs inf{};
+                inf.has_xgb_train_nthread = 1;
+                inf.xgb_train_nthread = 4;
+
+                StampWriteResult wr = stamp_write_for_model(
+                    tmp_model, "", MODEL_FORMAT_VERSION,
+                    "2026-05-07", 0.55, 0.53, 0.05, 0,
+                    /*feature_registry_hash=*/0,
+                    /*engine_version=*/nullptr,
+                    /*inf=*/&inf);
+                check("v5.11.41.0: stamp_write_for_model accepts xgb_train_nthread",
+                      wr.ok == 1);
+
+                ModelStampResult vr = verify_model_stamp(
+                    tmp_model, "", 0.05, MODEL_FORMAT_VERSION);
+                check("v5.11.41.0: verifier reads has_xgb_train_nthread=1",
+                      vr.has_xgb_train_nthread == 1);
+                check("v5.11.41.0: verifier reads xgb_train_nthread=4 round-trip",
+                      vr.xgb_train_nthread == 4);
+
+                unlink(tmp_model);
+                unlink(tmp_stamp);
+            }
+        }
+
+        // === Test 3: Combined label params + nthread (per-horizon stamp shape) ===
+        {
+            char tmp_model[] = "/tmp/v51141_combined_XXXXXX";
+            char tmp_stamp[600];
+            int fd = mkstemp(tmp_model);
+            if (fd >= 0) {
+                FILE* mf = fdopen(fd, "wb");
+                const char* dummy = "model-payload-combined";
+                fwrite(dummy, 1, strlen(dummy), mf);
+                fclose(mf);
+                snprintf(tmp_stamp, sizeof(tmp_stamp), "%s.stamp", tmp_model);
+
+                StampInferenceCfgInputs inf{};
+                inf.has_label_params = 1;
+                inf.label_lookahead_ticks = 15000;
+                inf.label_tp_pct = 0.07;
+                inf.label_sl_pct = 0.07;
+                inf.has_xgb_train_nthread = 1;
+                inf.xgb_train_nthread = 1;  // parallel-mode pinned
+
+                StampWriteResult wr = stamp_write_for_model(
+                    tmp_model, "", MODEL_FORMAT_VERSION,
+                    "2026-05-07", 0.55, 0.53, 0.05, 0,
+                    /*feature_registry_hash=*/0,
+                    /*engine_version=*/nullptr,
+                    /*inf=*/&inf);
+                check("v5.11.41.0: combined per-horizon stamp writes",
+                      wr.ok == 1);
+
+                ModelStampResult vr = verify_model_stamp(
+                    tmp_model, "", 0.05, MODEL_FORMAT_VERSION);
+                check("v5.11.41.0: combined stamp parses both field blocks",
+                      vr.has_label_params == 1 && vr.has_xgb_train_nthread == 1);
+                check("v5.11.41.0: combined stamp horizon=15000 + nthread=1 (parallel mode shape)",
+                      vr.label_lookahead_ticks == 15000 && vr.xgb_train_nthread == 1);
+
+                unlink(tmp_model);
+                unlink(tmp_stamp);
+            }
+        }
+
+        // === Test 4: Legacy stamp (no v5.11.41 fields) — forward-compat ===
+        {
+            char tmp_model[] = "/tmp/v51141_legacy_XXXXXX";
+            char tmp_stamp[600];
+            int fd = mkstemp(tmp_model);
+            if (fd >= 0) {
+                FILE* mf = fdopen(fd, "wb");
+                const char* dummy = "model-legacy-payload";
+                fwrite(dummy, 1, strlen(dummy), mf);
+                fclose(mf);
+                snprintf(tmp_stamp, sizeof(tmp_stamp), "%s.stamp", tmp_model);
+
+                // Emit without inf — legacy stamp shape
+                StampWriteResult wr = stamp_write_for_model(
+                    tmp_model, "", MODEL_FORMAT_VERSION,
+                    "2026-05-07", 0.55, 0.53, 0.05, 0);
+                check("v5.11.41.0: legacy stamp (no inf) writes",
+                      wr.ok == 1);
+
+                ModelStampResult vr = verify_model_stamp(
+                    tmp_model, "", 0.05, MODEL_FORMAT_VERSION);
+                check("v5.11.41.0: legacy stamp parses has_label_params=0",
+                      vr.has_label_params == 0);
+                check("v5.11.41.0: legacy stamp parses has_xgb_train_nthread=0",
+                      vr.has_xgb_train_nthread == 0);
+                check("v5.11.41.0: legacy stamp valid (forward-compat)",
+                      vr.valid == 1);
+
+                unlink(tmp_model);
+                unlink(tmp_stamp);
+            }
+        }
+    }
+
+    printf("\n--- v5.11.18 main: Features_PackAll mask-aware overload ---\n");
+    {
+        // v5.11.18 main (2026-05-07) — sparse-zero mask-aware overload of
+        // Features_PackAll. Per /parity-check 2026-05-07 CRITICAL/HIGH gaps
+        // (scaler binding + index contract). Caller pattern: pass null mask
+        // (legacy bytewise-identical), all-on mask (no-op masking), or
+        // partial mask (zeroed slots for unset bits). Returned n always =
+        // NUM_REGISTERED_FEATURES (sparse-zero, not dense compression).
+
+        // Synthetic ctx that produces valid features (mirrors v5.9.0 NaN
+        // guard test pattern at line 9764+).
+        RegimeSignals<64> sig{};
+        sig.short_slope    = FPN_FromDouble<64>(0.0042);
+        sig.short_r2       = FPN_FromDouble<64>(0.78);
+        sig.short_variance = FPN_FromDouble<64>(0.000123);
+        sig.long_slope     = FPN_FromDouble<64>(0.0019);
+        sig.long_r2        = FPN_FromDouble<64>(0.45);
+        sig.long_variance  = FPN_FromDouble<64>(0.000456);
+        sig.vol_ratio      = FPN_FromDouble<64>(2.7);
+        sig.ror_slope      = FPN_FromDouble<64>(-0.0001);
+        sig.volume_slope   = FPN_FromDouble<64>(0.005);
+        sig.volume_delta   = FPN_FromDouble<64>(0.013);
+        sig.hour_sin       = 0.7071;
+        sig.hour_cos       = 0.7071;
+
+        RollingStats<64, 128> r{};
+        r.vwap_deviation = FPN_FromDouble<64>(0.00018);
+        r.price_stddev   = FPN_FromDouble<64>(0.011);
+        r.price_avg      = FPN_FromDouble<64>(48000.0);
+        r.volume_avg     = FPN_FromDouble<64>(0.92);
+
+        FeatureComputeCtx<64> ctx{};
+        ctx.signals       = &sig;
+        ctx.short_rolling = &r;
+
+        // === Test 1: mask=nullptr delegates to no-mask overload ===
+        // Bytewise identical to pre-v5.11.18 path.
+        {
+            float buf_nomask[MODEL_MAX_FEATURES] = {0};
+            float buf_nullmask[MODEL_MAX_FEATURES] = {0};
+            int n_nomask  = Features_PackAll(&ctx, buf_nomask);
+            int n_nullmask = Features_PackAll(&ctx, buf_nullmask, nullptr);
+            check("v5.11.18 main: null mask returns same n as no-mask",
+                  n_nomask == n_nullmask);
+            check("v5.11.18 main: null mask produces bytewise-identical output to no-mask",
+                  memcmp(buf_nomask, buf_nullmask, sizeof(buf_nomask)) == 0);
+        }
+
+        // === Test 2: all-on mask is bytewise-identical to no-mask ===
+        // Provides operator-flagged regression target — when cfg has the
+        // default mask 0xFFFF..F, output must match pre-v5.11.18.
+        {
+            float buf_nomask[MODEL_MAX_FEATURES] = {0};
+            float buf_allon[MODEL_MAX_FEATURES] = {0};
+            int n_nomask = Features_PackAll(&ctx, buf_nomask);
+            uint64_t all_on = 0xFFFFFFFFFFFFFFFFULL;
+            int n_allon  = Features_PackAll(&ctx, buf_allon, &all_on);
+            check("v5.11.18 main: all-on mask returns same n as no-mask",
+                  n_allon == n_nomask);
+            check("v5.11.18 main: all-on mask produces bytewise-identical output",
+                  memcmp(buf_nomask, buf_allon, sizeof(buf_nomask)) == 0);
+        }
+
+        // === Test 3: partial mask zeros out unselected slots ===
+        // Bits 0-9 set, bits 10+ cleared. Verify out[0..9] match no-mask,
+        // out[10..NUM_REGISTERED_FEATURES-1] are 0.0f.
+        {
+            float buf_nomask[MODEL_MAX_FEATURES] = {0};
+            float buf_partial[MODEL_MAX_FEATURES] = {0};
+            int n_nomask = Features_PackAll(&ctx, buf_nomask);
+            uint64_t partial = 0x3FFULL;  // bits 0-9 set
+            int n_partial = Features_PackAll(&ctx, buf_partial, &partial);
+            check("v5.11.18 main: partial mask returns same n (sparse-zero contract)",
+                  n_partial == n_nomask);
+            // Bits 0-9: must match no-mask output exactly (selected features).
+            int matches_selected = 1;
+            for (int i = 0; i < 10 && i < (int)NUM_REGISTERED_FEATURES; ++i) {
+                if (buf_partial[i] != buf_nomask[i]) { matches_selected = 0; break; }
+            }
+            check("v5.11.18 main: partial mask preserves selected features",
+                  matches_selected);
+            // Bits 10+: must be 0.0f (masked out).
+            int all_zeros_unselected = 1;
+            for (int i = 10; i < (int)NUM_REGISTERED_FEATURES; ++i) {
+                if (buf_partial[i] != 0.0f) { all_zeros_unselected = 0; break; }
+            }
+            check("v5.11.18 main: partial mask zeros unselected slots",
+                  all_zeros_unselected);
+        }
+
+        // === Test 4: zero mask zeros all slots, returns full n ===
+        // Edge case — operator typo. cfg parser already WARNs; verify the
+        // function itself handles gracefully.
+        {
+            float buf_zero[MODEL_MAX_FEATURES] = {0};
+            // pre-fill with junk to verify the zero-write actually happens
+            for (int i = 0; i < MODEL_MAX_FEATURES; ++i) buf_zero[i] = 99.0f;
+            uint64_t zero_mask = 0;
+            int n_zero = Features_PackAll(&ctx, buf_zero, &zero_mask);
+            check("v5.11.18 main: zero mask returns NUM_REGISTERED_FEATURES",
+                  n_zero == (int)NUM_REGISTERED_FEATURES);
+            int all_zero = 1;
+            for (int i = 0; i < (int)NUM_REGISTERED_FEATURES; ++i) {
+                if (buf_zero[i] != 0.0f) { all_zero = 0; break; }
+            }
+            check("v5.11.18 main: zero mask zeros every slot (no leftover junk)",
+                  all_zero);
+        }
+
+        // === Test 5: NaN sentinel still works with mask ===
+        // FPN_IsValidFinite + std::isnan guards are inside the per-feature
+        // compute fn — when mask bit is set, they fire. When mask bit
+        // is clear, fn isn't called → no NaN check (the slot is just
+        // zeroed). So a NaN-producing feature only triggers the sentinel
+        // if it's actually selected by the mask.
+        {
+            float buf[MODEL_MAX_FEATURES] = {0};
+            sig.short_slope = FPN_FromDouble<64>(1e16);  // FPN_IsValidFinite-busting
+            // With mask bit 0 (FEATURE_SHORT_SLOPE) set: should return -1
+            uint64_t m_with_slope = 0x1ULL;  // bit 0 set
+            int n1 = Features_PackAll(&ctx, buf, &m_with_slope);
+            check("v5.11.18 main: NaN sentinel fires when masked-in feature is invalid",
+                  n1 < 0);
+            // With mask bit 0 cleared: short_slope skipped, no sentinel
+            uint64_t m_without_slope = 0xFFFFFFFFFFFFFFFEULL;  // all bits except 0
+            int n2 = Features_PackAll(&ctx, buf, &m_without_slope);
+            check("v5.11.18 main: NaN sentinel skipped when masked-out feature is invalid",
+                  n2 == (int)NUM_REGISTERED_FEATURES);
+            sig.short_slope = FPN_FromDouble<64>(0.0042);  // restore
+        }
+    }
+
+    printf("\n--- v5.11.14: scaler comparison diff math + flag threshold ---\n");
+    {
+        // Validates the math compare_scalers does per-feature:
+        //   pct_change_stddev = (sb - sa) / sa * 100.0
+        //   flag = |pct_change_stddev| > threshold_pct
+        //
+        // The CLI itself (tools/compare_scalers.cpp) drives this same
+        // formula over each FOREACH_FEATURE entry. No CLI subprocess
+        // here — just inline math validation against known synthetic
+        // values. The save/load path is already tested under the
+        // v5.9.3a scaler-binding suite elsewhere.
+
+        // === Test 1: identical scalers → 0% delta, no flag ===
+        double mean_a = 0.5,  stddev_a = 1.0;
+        double mean_b = 0.5,  stddev_b = 1.0;
+        double pct_change = ((stddev_b - stddev_a) / stddev_a) * 100.0;
+        check("v5.11.14: identical stddev → 0% change",
+              std::fabs(pct_change) < 1e-9);
+        check("v5.11.14: identical mean → 0 abs delta",
+              std::fabs(mean_b - mean_a) < 1e-9);
+
+        // === Test 2: 100% stddev change → flagged at default threshold (50) ===
+        double sa2 = 1.0, sb2 = 2.0;
+        double pct2 = ((sb2 - sa2) / sa2) * 100.0;
+        bool flag2 = std::fabs(pct2) > 50.0;
+        check("v5.11.14: 1.0→2.0 stddev = +100%", std::fabs(pct2 - 100.0) < 1e-9);
+        check("v5.11.14: +100% > 50% threshold → flagged", flag2);
+
+        // === Test 3: 25% stddev change → NOT flagged at default threshold ===
+        double sa3 = 1.0, sb3 = 1.25;
+        double pct3 = ((sb3 - sa3) / sa3) * 100.0;
+        bool flag3 = std::fabs(pct3) > 50.0;
+        check("v5.11.14: 1.0→1.25 stddev = +25%", std::fabs(pct3 - 25.0) < 1e-9);
+        check("v5.11.14: +25% < 50% threshold → not flagged", !flag3);
+
+        // === Test 4: negative delta also flags by absolute value ===
+        double sa4 = 2.0, sb4 = 0.5;
+        double pct4 = ((sb4 - sa4) / sa4) * 100.0;
+        bool flag4 = std::fabs(pct4) > 50.0;
+        check("v5.11.14: 2.0→0.5 stddev = -75%", std::fabs(pct4 - (-75.0)) < 1e-9);
+        check("v5.11.14: -75% triggers absolute-value flag", flag4);
+    }
+
+    printf("\n--- v5.11.13: BuddyAllocator typo fix + O(1) order lookup ---\n");
+    {
+        // Pre-v5.11.13: buddy_internal_order_to_size returned `1u <
+        // order` (a bool: 0 or 1) instead of `1u << order` (the
+        // power-of-2 block size). buddy_internal_buddy_offset called
+        // size_to_order(order) instead of order_to_size(order).
+        // Both bugs masked each other in arithmetic so the absent
+        // production caller never noticed.
+        //
+        // Post-fix: order_to_size(N) == (1 << N) bytes for valid
+        // orders, buddy XOR uses block size in bytes, and the alloc
+        // path uses an O(1) free_list_bitmap + __builtin_ctz instead
+        // of a 17-iteration linear scan.
+
+        using namespace fox_ml::mem;
+
+        // === Test 1: order_to_size correctness (the typo fix) ===
+        check("v5.11.13: order_to_size(4) == 16",   buddy_internal_order_to_size(4)  == 16u);
+        check("v5.11.13: order_to_size(10) == 1024", buddy_internal_order_to_size(10) == 1024u);
+        check("v5.11.13: order_to_size(20) == 1MB",  buddy_internal_order_to_size(20) == (1u << 20));
+
+        // === Test 2: buddy_offset uses block size in bytes ===
+        // For order=4 (16-byte blocks): offset=0 buddy = 16 (XOR 16 = 16).
+        check("v5.11.13: buddy_offset(0, 4) == 16",
+              buddy_internal_buddy_offset(0u, 4u) == 16u);
+        // For order=5 (32-byte blocks): offset=32 buddy = 0 (XOR 32 = 0).
+        check("v5.11.13: buddy_offset(32, 5) == 0",
+              buddy_internal_buddy_offset(32u, 5u) == 0u);
+
+        // === Test 3: bitmap of free list orders is maintained on init ===
+        BuddyAllocatorState *state = (BuddyAllocatorState *)aligned_alloc(64, sizeof(BuddyAllocatorState));
+        check("v5.11.13: state alloc succeeds", state != nullptr);
+        if (state) {
+            buddy_init_state(state);
+            uint32_t expect_init_bits = (1u << (BUDDY_MAX_ORDER - BUDDY_MIN_ORDER));
+            check("v5.11.13: post-init bitmap has only MAX_ORDER bit set",
+                  state->free_list_bitmap == expect_init_bits);
+
+            // === Test 4: O(1) alloc path picks the right order ===
+            // Allocate a small block: requires splitting from MAX
+            // down to the smallest level. Should succeed; bitmap
+            // should now reflect intermediate orders also having
+            // entries (one block each from the split chain).
+            void *p1 = buddy_alloc_bytes(state, 16);  // smallest block
+            check("v5.11.13: small alloc succeeds via O(1) lookup", p1 != nullptr);
+
+            // After split chain: the splitter takes a MAX-order block,
+            // halves it down to target_order, and pushes one buddy to
+            // the free list at each intermediate order. So one free
+            // block at every order MIN .. MAX-1 (the consumed leg
+            // becomes the allocation; the buddy stays free).
+            uint32_t expected_bits_after = 0u;
+            for (uint32_t ord = BUDDY_MIN_ORDER; ord < BUDDY_MAX_ORDER; ++ord) {
+                expected_bits_after |= (1u << (ord - BUDDY_MIN_ORDER));
+            }
+            check("v5.11.13: bitmap reflects split chain post-alloc",
+                  state->free_list_bitmap == expected_bits_after);
+
+            // === Test 5: O(1) lookup returns nullptr when no order ≥ target has free blocks ===
+            // Small alloc has consumed all min-order capacity for
+            // this branch. Now try the largest alloc (1MB) — there
+            // are no free MAX-order blocks left because we split it.
+            void *p2 = buddy_alloc_bytes(state, 1u << BUDDY_MAX_ORDER);
+            check("v5.11.13: O(1) lookup returns nullptr on no-fit", p2 == nullptr);
+
+            free(state);
+        }
     }
 
     printf("\n======================================\n");

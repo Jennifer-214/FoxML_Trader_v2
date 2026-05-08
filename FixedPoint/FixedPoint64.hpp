@@ -294,13 +294,33 @@ static inline FP64 FP64_Sign(FP64 value) {
 //======================================================================================================
 // [FIXED-POINT MATH FUNCTIONS]
 //======================================================================================================
+// v5.11.27 — clamp negative input to zero instead of asserting. The
+// assertion was a v5.0-era stub guard; the test at
+// tests/controller_test.cpp:12862 expects FPN_Sqrt(neg) = 0 graceful
+// ("old stub would assert"). Production builds NDEBUG'd the assert so
+// negative input → sqrt(negative double) → NaN → silent contamination
+// of features/labels via Welford-style variance underflow paths
+// (sum_sq / n - (sum/n)² mathematically ≥ 0, but FPN finite precision
+// can underflow into a tiny negative). Suspected cause of the v5.11.x
+// WF + held-out 0% accuracy regression — degenerate-variance samples
+// got NaN'd and dropped from training, biasing the train set against
+// a class of inputs.
+//
+// Post-fix: negative input → 0 (matches the test expectation + matches
+// the FlowFeatures sites that already pre-guard with var.sign != 0).
+// Caller-side `FPN_IsZero(stddev)` checks (already in place at both
+// FlowFeatures call sites) safely handle the zero result.
 static inline FP64 FP64_Sqrt(FP64 value) {
-    assert(value.sign == 0 || value.magnitude == 0);
+    if (value.sign != 0) return FP64{0, 0};
     return FP64_FromDouble(sqrt(FP64_ToDouble(value)));
 }
 
+// v5.11.27 — same treatment. Negative or zero input → return 0 (the
+// inverse-sqrt of zero is mathematically undefined; returning 0
+// matches the assert-was-stripped release behavior of NaN, but
+// safer downstream).
 static inline FP64 FP64_InvSqrt(FP64 value) {
-    assert(value.sign == 0 && value.magnitude != 0);
+    if (value.sign != 0 || value.magnitude == 0) return FP64{0, 0};
     double x = FP64_ToDouble(value);
     return FP64_FromDouble(1.0 / sqrt(x));
 }

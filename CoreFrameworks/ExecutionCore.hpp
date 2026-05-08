@@ -50,6 +50,7 @@
 #include "TradeEvent.hpp"
 
 #include <cstdint>
+#include <type_traits>  // v5.11.0.E — static_assert(!std::is_polymorphic<...>)
 
 namespace tt {
 
@@ -59,40 +60,45 @@ constexpr size_t EXECUTION_CORE_EVENT_RING_SIZE = 1024;
 
 template <unsigned F>
 struct alignas(64) ExecutionCore {
-    // --- Hot fields (read every tick) ---
-    // permission and active are single bytes; entry_price needs 8-byte alignment.
-    // The explicit padding makes the layout deterministic across compilers.
-    uint8_t  permission;       // controller writes (atomic), core reads
-    uint8_t  active;           // core writes and reads
-    uint8_t  _pad0[6];
-    FPN<F>   entry_price;      // core writes on entry, reads on SG check
-    // Phase 14: live TP/SL computed on actual fill, not on the controller's
-    // expected entry. The execution core sets these when can_enter fires
-    // using the percentage from the gate parameter pack. SG_Evaluate reads
-    // them instead of params.sg_take_profit_price / sg_stop_loss_price when
-    // the percentage path is active. Fixes the structural loss bias from
-    // phase 13 head-to-head.
-    FPN<F>   live_tp;
-    FPN<F>   live_sl;
-
-    // --- P.2 (partial exits, 2026-04-27): leg-B fields ---
-    // Two-position-per-core model: when partial_exit_enabled=1, a single
-    // entry signal opens BOTH leg A (TP=TP1) AND leg B (TP=TP2), sharing
-    // SL. Hot path evaluates SG on both legs branchlessly; either or both
-    // can fire on a given tick. Whichever fires emits a TradeEvent with
-    // .leg = 0 (A) or 1 (B); drainer maps to portfolio slot via
-    // Sharded_LegSlot(core_id, leg, partial_exit_enabled).
+    // ── CACHE LINE 0 (64B): steady-state HOT READS only ──
+    // v5.11.1.5 layout reorder: the per-tick CMOV at hot path lines ~287-288
+    // reads `live_tp` + `live_sl` every tick. Pre-v5.11.1.5 layout had
+    // `live_sl` spanning offsets 56-80 (cache line 0 → 1) due to FPN<64>=24B
+    // sizing — every tick loaded 2 cache lines instead of 1.
     //
-    // When partial_exit_enabled=0 (default cfg), Strategy_BuildParameters
-    // never sets GATE_FLAG_PAIR_ACTIVE. core->active_b stays at 0; leg-B
-    // fields stay at zero; SG_Evaluate on (0, 0) is masked out by
-    // active_b=0; cost is the unused FPN comparisons (~1-2ns, pipelined
-    // into otherwise-idle CPU slots).
-    uint8_t  active_b;
-    uint8_t  _pad_b[7];
+    // New layout: 2 byte flags + 6 pad + 24 (live_tp) + 24 (live_sl) + 8 pad
+    //           = 64B total → fits exactly in cache line 0.
+    // entry_price MOVED to line 1 (write-only on entry events; not in steady
+    // CMOV). leg-B fields gated by `if (active_b)` → line never touched in
+    // steady state when leg B is inactive (the common case).
+    //
+    // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 1.5 (permission isolation)
+    //      + plans/2026-05-06-latency-path-discipline.md Rule 1 (Finding A)
+    uint8_t  active;           // hot read: core writes and reads
+    uint8_t  active_b;         // hot read: 0 in steady state when leg B inactive
+    uint8_t  _pad_hot[6];
+    FPN<F>   live_tp;          // 24B at offset 8 — fits in line 0
+    FPN<F>   live_sl;          // 24B at offset 32 — fits in line 0 (Finding A)
+    uint8_t  _pad_line0[8];    // pad cache line 0 to 64
+
+    // ── CACHE LINE 1+ (cold in steady state — only entry/leg-B paths touch) ──
+    // entry_price is WRITE-only on entry events (not read in steady CMOV).
+    // leg-B fields gated by `if (__builtin_expect(active_b, 0))` — line never
+    // touched when leg B is inactive (steady-state default cfg).
+    FPN<F>   entry_price;      // write-on-entry only; cold in steady state
     FPN<F>   entry_price_b;
     FPN<F>   live_tp_b;
     FPN<F>   live_sl_b;
+
+    // ── permission isolated to its OWN cache line (audit Part 1.5) ──
+    // Controller atomic-stores `permission` from a different CPU than the
+    // hot path's read. Pre-v5.11.1.5: permission shared cache line 0 with
+    // active/entry_price/live_tp/live_sl → controller writes invalidated the
+    // line, causing ~30-50ns reload stall on the next hot-path tick.
+    // Post-v5.11.1.5: permission alone on its own 64B line → controller
+    // writes don't invalidate the hot-fields line.
+    alignas(64) uint8_t permission;
+    uint8_t  _pad_perm[63];
 
     // --- Parameter pack pushed by controller (phase 05) ---
     // Seqlock atomic slot. The controller calls ExecutionCore_SetParameters
@@ -139,7 +145,39 @@ struct alignas(64) ExecutionCore {
     // (the controller's snapshot helper). Disabled by default; flip the
     // enable flag from the controller to start sampling.
     CoreLatencyStats latency_stats;
+
+    // --- v5.11.0.1: Hot-path failure counters (no I/O on hot path) ---
+    // Replaces inline fprintf on the rare ring-push-failure branch
+    // (cascading libc-mutex stall risk under degraded conditions).
+    // Single writer (this core's hot path), relaxed-load by slow path
+    // for surfacing via TUISnapshot. No false sharing — accessed only
+    // by this core's threads. Position at struct tail keeps the cold
+    // failure-path cache line out of line 0.
+    // See plans/2026-05-06-hot-path-discipline.md Rule 2 for the pattern.
+    uint64_t ring_push_failures;
 };
+
+// v5.11.0.E — Part 3 architectural invariant (LATENCY_OPTIMIZATION_AUDIT.md
+// §3.1 Zero-VTable Architecture). ExecutionCore must remain non-polymorphic
+// — virtual functions introduce vtable lookups + indirect jumps that bypass
+// the CPU branch predictor, causing pipeline stalls on hot path. Future PR
+// adding a virtual function fails at compile.
+static_assert(!std::is_polymorphic<ExecutionCore<64>>::value,
+              "ExecutionCore must remain non-polymorphic — Part 3 invariant");
+
+// v5.11.1.5 — Cache layout invariants. Future field reorders must preserve
+// these to avoid regressing the hot-path single-cache-line load.
+// See plans/2026-05-06-latency-path-discipline.md Rule 1.
+static_assert(offsetof(ExecutionCore<64>, live_sl) + sizeof(FPN<64>) <= 64,
+              "live_sl must fit entirely in cache line 0 — see latency-path-discipline.md Rule 1");
+static_assert((offsetof(ExecutionCore<64>, permission) % 64) == 0,
+              "permission must be cache-line-aligned to prevent false sharing — audit Part 1.5");
+static_assert(offsetof(ExecutionCore<64>, active) == 0,
+              "active byte must sit at struct offset 0 (hot field, line 0)");
+static_assert(offsetof(ExecutionCore<64>, active_b) == 1,
+              "active_b byte must sit at struct offset 1 (hot field, line 0)");
+static_assert(offsetof(ExecutionCore<64>, live_tp) >= 8,
+              "live_tp must be 8-byte aligned (after byte flags + pad)");
 
 // Initialize an execution core. Defaults: permission=0 (controller must explicitly
 // grant), active=0, entry_price=0, parameter slot installed with safe defaults
@@ -178,6 +216,7 @@ static inline void ExecutionCore_Init(
     core->cached_seq    = (uint64_t)-1;
     SPSCRing_Init(&core->event_ring);
     CoreLatencyStats_Init(&core->latency_stats);
+    core->ring_push_failures = 0;  // v5.11.0.1: hot-path failure counter
 }
 
 // Atomic parameter push from the controller. Wraps ParameterSlot_Write so the
@@ -222,18 +261,34 @@ static inline void ExecutionCore_SetPermission(ExecutionCore<F>* core, uint8_t v
 // not-taken in the common case), so disabled cost is ~1ns. Enabled cost adds
 // ~25-30ns for the rdtsc + sample, which roughly doubles the hot path — use
 // for diagnostics, not always-on monitoring.
-template <unsigned F>
+// v5.11.1.1 — Compile-time elision of latency sampling via template-bool
+// LAT_ENABLED. When LAT_ENABLED=false (production builds without -DLATENCY_PROFILING),
+// the entire rdtsc + sample block compiles out — zero runtime cost, zero loads
+// of the lat_enabled atomic. When LAT_ENABLED=true (latency-profiled builds),
+// runtime still gates on `core->latency_stats.enabled.load(...)` so the
+// controller can flip sampling on/off at runtime within the profiled binary.
+//
+// RDTSC standardization (Finding D from pre-v5.11.1 review): both entry +
+// exit now use `rdtscp; lfence`. rdtscp is serializing post-execution (no
+// need for mfence+lfence pre-amble); gives a consistent measurement bracket.
+//
+// Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 1.1
+template <unsigned F, bool LAT_ENABLED, bool PAIR_BRANCHLESS>
 __attribute__((always_inline))
-static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tick) {
-    // Latency sampling — read enable flag with relaxed ordering. The enable
-    // flip is rare (controller flips it once when diagnostics start), so the
-    // branch predictor pins this to "not taken" in steady state.
-    uint8_t lat_enabled = core->latency_stats.enabled.load(std::memory_order_relaxed);
+static inline void ExecutionCore_Tick_Impl(ExecutionCore<F>* core, const Tick<F>& tick) {
+    // Latency sampling — only loaded + checked in LAT_ENABLED=true builds.
+    // The runtime gate (`core->latency_stats.enabled`) lets the controller
+    // flip sampling on/off within an LAT_ENABLED=true binary; non-profiled
+    // production builds (LAT_ENABLED=false) skip the entire block.
+    uint8_t lat_enabled = 0;
     uint64_t lat_t0 = 0;
-    if (__builtin_expect(lat_enabled, 0)) {
-        uint32_t hi, lo;
-        asm volatile("mfence\n\tlfence\n\trdtsc\n\t" : "=a"(lo), "=d"(hi));
-        lat_t0 = ((uint64_t)hi << 32) | lo;
+    if constexpr (LAT_ENABLED) {
+        lat_enabled = core->latency_stats.enabled.load(std::memory_order_relaxed);
+        if (__builtin_expect(lat_enabled, 0)) {
+            uint32_t hi, lo;
+            asm volatile("rdtscp\n\tlfence\n\t" : "=a"(lo), "=d"(hi) : : "rcx");
+            lat_t0 = ((uint64_t)hi << 32) | lo;
+        }
     }
 
     // Cached parameter slot read (phase 14 perf optimization).
@@ -331,17 +386,37 @@ static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tic
     uint64_t tp_hit_a   = (uint64_t)FPN_GreaterThanOrEqual(tick.price, effective_tp);
     uint64_t sl_hit_a   = (uint64_t)FPN_LessThanOrEqual(tick.price, effective_sl);
     uint64_t sg_fires_a = (tp_enabled & tp_hit_a) | (sl_enabled & sl_hit_a);
-    // Leg B SG — gated. Variable defaults to 0 so can_exit_b stays 0
-    // when active_b=0 (the steady state).
+    // v5.11.1.2 — Leg B SG. Two compile-time-selected paths via PAIR_BRANCHLESS:
+    //   - PAIR_BRANCHLESS=true (always-pair deployments where active_b is set
+    //     most ticks): unconditional compute + mask. CPU pipelines leg-A and
+    //     leg-B compares together; no branch mispredict cost when leg B fires.
+    //   - PAIR_BRANCHLESS=false (default-cfg deployments): original predicted-
+    //     not-taken branch. ~0ns cost when active_b=0 (the common steady state).
+    // Wrapper dispatches via cached_params.flags & GATE_FLAG_PAIR_ACTIVE — one
+    // predicted runtime branch per tick (~0ns once predictor warms).
+    // Both code paths produce bytewise-identical output for any (active_b, FPN)
+    // input — the branchless path masks the unconditional compute with active_b.
     uint64_t sg_fires_b = 0;
-    if (__builtin_expect(active_b, 0)) {
-        FPN<F> tp_b           = core->live_tp_b;
-        FPN<F> sl_b           = core->live_sl_b;
-        FPN<F> effective_sl_b = FPN_Max(sl_b, core->cached_params.ratchet_sl);
-        FPN<F> effective_tp_b = FPN_Max(tp_b, core->cached_params.ratchet_tp);
+    if constexpr (PAIR_BRANCHLESS) {
+        // Unconditional leg-B compute. Loads live_tp_b + live_sl_b every tick;
+        // for always-pair deployments these stay hot in L1d.
+        FPN<F> effective_sl_b = FPN_Max(core->live_sl_b, core->cached_params.ratchet_sl);
+        FPN<F> effective_tp_b = FPN_Max(core->live_tp_b, core->cached_params.ratchet_tp);
         uint64_t tp_hit_b     = (uint64_t)FPN_GreaterThanOrEqual(tick.price, effective_tp_b);
         uint64_t sl_hit_b     = (uint64_t)FPN_LessThanOrEqual(tick.price, effective_sl_b);
-        sg_fires_b            = (tp_enabled & tp_hit_b) | (sl_enabled & sl_hit_b);
+        // Mask with active_b — when leg B isn't open, mask=0 zeros the result.
+        sg_fires_b = ((tp_enabled & tp_hit_b) | (sl_enabled & sl_hit_b))
+                     & -((uint64_t)active_b);
+    } else {
+        if (__builtin_expect(active_b, 0)) {
+            FPN<F> tp_b           = core->live_tp_b;
+            FPN<F> sl_b           = core->live_sl_b;
+            FPN<F> effective_sl_b = FPN_Max(sl_b, core->cached_params.ratchet_sl);
+            FPN<F> effective_tp_b = FPN_Max(tp_b, core->cached_params.ratchet_tp);
+            uint64_t tp_hit_b     = (uint64_t)FPN_GreaterThanOrEqual(tick.price, effective_tp_b);
+            uint64_t sl_hit_b     = (uint64_t)FPN_LessThanOrEqual(tick.price, effective_sl_b);
+            sg_fires_b            = (tp_enabled & tp_hit_b) | (sl_enabled & sl_hit_b);
+        }
     }
 
     // Mask events. ~(active_a | active_b) means "not currently in any leg".
@@ -461,17 +536,16 @@ static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tic
                 }
             }
         }
-        // Surface push failures so we know if the ring is filling. Predicted
-        // not-taken in steady state — if this fires, something upstream is
-        // backed up and we'd rather know than silently retry.
+        // v5.11.0.1: Surface push failures via counter (NO I/O on hot path).
+        // Pre-fix this was an inline fprintf(stderr) — libc stdio mutex
+        // acquisition during a ring-full condition (drainer already stalled)
+        // could cascade-stall the hot path further. Now: single store to a
+        // per-core counter; slow path picks it up via TUISnapshot for surfacing
+        // (slow-path log/render landing in v5.11.3's async log thread).
+        // See plans/2026-05-06-latency-path-discipline.md Rule 2.
         if (__builtin_expect(!(exit_a_pushed & exit_b_pushed &
                                 entry_a_pushed & entry_b_pushed), 0)) {
-            std::fprintf(stderr,
-                "[execution-core] core %d: event ring push FAILED "
-                "(exit_a=%u exit_b=%u entry_a=%u entry_b=%u) — "
-                "active flag preserved, will retry next tick\n",
-                core->core_id, exit_a_pushed, exit_b_pushed,
-                entry_a_pushed, entry_b_pushed);
+            core->ring_push_failures++;
         }
     }
 
@@ -492,13 +566,57 @@ static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tic
     core->active   = (uint8_t)((active   | enter_a_eff) & ~exit_a_eff);
     core->active_b = (uint8_t)((active_b | enter_b_eff) & ~exit_b_eff);
 
-    // Latency sample close — only when enabled (predicted not-taken).
-    if (__builtin_expect(lat_enabled, 0)) {
-        uint32_t hi, lo;
-        asm volatile("rdtscp\n\tlfence\n\t" : "=a"(lo), "=d"(hi) : : "rcx");
-        uint64_t lat_t1 = ((uint64_t)hi << 32) | lo;
-        CoreLatencyStats_Sample(&core->latency_stats, lat_t1 - lat_t0, lat_t1);
+    // Latency sample close — only when LAT_ENABLED at compile time + runtime gate set.
+    if constexpr (LAT_ENABLED) {
+        if (__builtin_expect(lat_enabled, 0)) {
+            uint32_t hi, lo;
+            asm volatile("rdtscp\n\tlfence\n\t" : "=a"(lo), "=d"(hi) : : "rcx");
+            uint64_t lat_t1 = ((uint64_t)hi << 32) | lo;
+            CoreLatencyStats_Sample(&core->latency_stats, lat_t1 - lat_t0, lat_t1);
+        }
     }
+}
+
+// v5.11.1.1 + v5.11.1.2 — Two-axis dispatch wrapper.
+//   1. LAT_ENABLED: build-flag (LATENCY_PROFILING macro) — compile-time
+//   2. PAIR_BRANCHLESS: cfg-flag (GATE_FLAG_PAIR_ACTIVE) — runtime predicted
+//      branch on cached_params.flags. Selects branchless leg-B compute path
+//      when operator runs partial-exit-always cfg (every entry pairs).
+//
+// 4 template instantiations live in the binary (LAT × PAIR = 2×2). The cfg
+// branch is predicted nearly perfectly (cfg flag changes only via slow-path
+// param push, ~once per ~256 ticks at most) → ~0ns steady-state cost.
+//
+// The wrapper reads `cached_params.flags` directly (single-byte load from
+// line ~3 of struct). One-tick staleness vs the body's own cached_params
+// read is benign: both template paths produce bytewise-identical output for
+// any (active_b, threshold) input — the branchless path masks the result
+// with active_b. Dispatch staleness affects perf path only, never correctness.
+//
+// Hot-swap: cfg.partial_exit_enabled flip → Strategy_BuildParameters →
+// ParameterSlot_Write → next tick's cached_params has new flags → next
+// tick dispatches to the other instantiation. Predictor takes ~2-3 ticks
+// to relearn; transient cost negligible.
+//
+// Preserves callers (still call ExecutionCore_Tick<F>(core, tick)).
+template <unsigned F>
+__attribute__((always_inline))
+static inline void ExecutionCore_Tick(ExecutionCore<F>* core, const Tick<F>& tick) {
+    uint8_t flags = core->cached_params.flags;
+    bool pair_branchless = (flags & GATE_FLAG_PAIR_ACTIVE) != 0;
+#ifdef LATENCY_PROFILING
+    if (pair_branchless) {
+        ExecutionCore_Tick_Impl<F, /*LAT_ENABLED=*/true,  /*PAIR_BRANCHLESS=*/true>(core, tick);
+    } else {
+        ExecutionCore_Tick_Impl<F, /*LAT_ENABLED=*/true,  /*PAIR_BRANCHLESS=*/false>(core, tick);
+    }
+#else
+    if (pair_branchless) {
+        ExecutionCore_Tick_Impl<F, /*LAT_ENABLED=*/false, /*PAIR_BRANCHLESS=*/true>(core, tick);
+    } else {
+        ExecutionCore_Tick_Impl<F, /*LAT_ENABLED=*/false, /*PAIR_BRANCHLESS=*/false>(core, tick);
+    }
+#endif
 }
 
 }  // namespace tt

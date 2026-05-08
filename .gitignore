@@ -84,3 +84,36 @@ GEMINI.local.md
 # local Claude Code memory overlays (private — auto-loaded alongside CLAUDE.md)
 CLAUDE.local.md
 *.local.md
+
+# v5.11.43 — DOCS privacy migration. Architectural / operator-edge docs now
+# live in workspace/DOCS/ (private). Engine-repo DOCS/ has symlinks pointing
+# at the workspace; gitignore them to silence "untracked" noise. Only
+# operator setup/usage docs stay tracked: QUICKSTART, OPERATOR_DEPLOYMENT,
+# CONFIGURATION, ML_USAGE, ML_TRAINING, CONTRIBUTING, LATENCY_PROFILING.
+# Public engine repo cloned without workspace gets DOCS/ with only those 7.
+DOCS/CLAUDE_*.md
+DOCS/CHANGELOG.md
+DOCS/changelogs
+DOCS/CODE_MAP.md
+DOCS/KNOWN_ISSUES.md
+DOCS/RECURRING_BUG_PATTERNS.md
+DOCS/PARITY_LIFECYCLE.md
+DOCS/PARITY_VERIFICATION_CHECKLIST.md
+DOCS/EASY_ADDITIONS_INVARIANTS.md
+DOCS/EXECUTION_DISPLAY_INVARIANTS.md
+DOCS/ARCHITECTURE.md
+DOCS/COMPONENTS.md
+DOCS/FEATURE_INTERFACE.md
+DOCS/STRATEGY_INTERFACE.md
+DOCS/STRATEGY_REFACTOR_IDEAS.md
+DOCS/STRATEGY_TEMPLATE.hpp
+DOCS/STRATEGY_BANDIT_TEMPLATE.hpp
+DOCS/TARGET_INTERFACE.md
+DOCS/HOT_PATH_CHANGELOG.md
+DOCS/NEXT_STEPS.md
+DOCS/ML_TEST_RECIPES.md
+DOCS/PERFORMANCE.md
+DOCS/FAILED_OPTIMIZATIONS.md
+DOCS/sizing-audit-*.md
+DOCS/v5.4-*.md
+DOCS/v5.11-*.md

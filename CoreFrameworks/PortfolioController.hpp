@@ -34,7 +34,9 @@
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/WelfordStats.hpp"
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
+#include "../MemHeaders/InitArena.hpp"  // v5.11.6.A — unified mmap arena for init allocations
 #include <cmath>                               // v5.9.0: std::isnan/isinf for prediction validation
+#include <type_traits>                         // v5.11.0.E — static_assert(!std::is_polymorphic<...>)
 #include "../Strategies/MeanReversion.hpp"
 #include "../Strategies/Momentum.hpp"
 #include "../Strategies/SimpleDip.hpp"
@@ -266,6 +268,13 @@ template <unsigned F> struct PortfolioController {
   FPN<F> total_maker_fees;
   FPN<F> total_taker_fees;
 };
+
+// v5.11.0.E — Part 3 architectural invariant (LATENCY_OPTIMIZATION_AUDIT.md
+// §3.1 Zero-VTable Architecture). PortfolioController is the legacy single-
+// threaded controller (still used by tests + benchmark); also non-polymorphic.
+static_assert(!std::is_polymorphic<PortfolioController<64>>::value,
+              "PortfolioController must remain non-polymorphic — Part 3 invariant");
+
 //======================================================================================================
 // [INIT]
 //======================================================================================================
@@ -423,37 +432,60 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
 
   ctrl->config = config;
 
-  // heap-allocate rolling_long (24KB) — keeps it out of the hot struct
-  if (ctrl->rolling_long) free(ctrl->rolling_long);  // safe on reinit (24h reconnect)
-  ctrl->rolling_long = (RollingStats<F, 512>*)malloc(sizeof(RollingStats<F, 512>));
+  // v5.11.6.A — InitArena-backed init allocations (replaces malloc).
+  // The arena bumps from a single mmap'd region (MAP_POPULATE pre-faulted
+  // at engine boot). Engine sets InitArena_Global() before first Init;
+  // tests leave it nullptr and get the malloc fallback path.
+  //
+  // Reinit semantics (24h Binance disconnect/reconnect): if the pointer
+  // already exists, REUSE the same memory and re-init contents. This
+  // avoids exhausting the arena across the hundreds of reinits over an
+  // engine's lifetime. The malloc path also no longer free+realloc-on-
+  // reinit (matches the arena pattern for symmetry).
+  auto alloc_or_arena = [](size_t bytes, size_t align) -> void* {
+    if (auto* arena = tt::InitArena_Global()) {
+      return tt::InitArena_Alloc(arena, bytes, align);
+    }
+    return std::malloc(bytes);
+  };
   if (!ctrl->rolling_long) {
-    fprintf(stderr, "[FATAL] malloc failed for rolling_long (24KB)\n");
-    return;
+    ctrl->rolling_long = (RollingStats<F, 512>*)alloc_or_arena(
+        sizeof(RollingStats<F, 512>), alignof(RollingStats<F, 512>));
+    if (!ctrl->rolling_long) {
+      fprintf(stderr, "[FATAL] alloc failed for rolling_long\n");
+      return;
+    }
   }
   *ctrl->rolling_long = RollingStats_Init<F, 512>();
 
-  // v4.3 — feature-pack expansion state (heap-allocated, ~2.5MB total)
-  if (ctrl->rolling_medium) free(ctrl->rolling_medium);
-  ctrl->rolling_medium = (RollingStats<F, 256>*)malloc(sizeof(RollingStats<F, 256>));
+  // v4.3 — feature-pack expansion state
   if (!ctrl->rolling_medium) {
-    fprintf(stderr, "[FATAL] malloc failed for rolling_medium (~393KB)\n");
-    return;
+    ctrl->rolling_medium = (RollingStats<F, 256>*)alloc_or_arena(
+        sizeof(RollingStats<F, 256>), alignof(RollingStats<F, 256>));
+    if (!ctrl->rolling_medium) {
+      fprintf(stderr, "[FATAL] alloc failed for rolling_medium\n");
+      return;
+    }
   }
   *ctrl->rolling_medium = RollingStats_Init<F, 256>();
 
-  if (ctrl->rolling_baseline) free(ctrl->rolling_baseline);
-  ctrl->rolling_baseline = (RollingStats<F, 1024>*)malloc(sizeof(RollingStats<F, 1024>));
   if (!ctrl->rolling_baseline) {
-    fprintf(stderr, "[FATAL] malloc failed for rolling_baseline (~1.5MB)\n");
-    return;
+    ctrl->rolling_baseline = (RollingStats<F, 1024>*)alloc_or_arena(
+        sizeof(RollingStats<F, 1024>), alignof(RollingStats<F, 1024>));
+    if (!ctrl->rolling_baseline) {
+      fprintf(stderr, "[FATAL] alloc failed for rolling_baseline\n");
+      return;
+    }
   }
   *ctrl->rolling_baseline = RollingStats_Init<F, 1024>();
 
-  if (ctrl->cumdelta_state) free(ctrl->cumdelta_state);
-  ctrl->cumdelta_state = (CumDeltaState<F>*)malloc(sizeof(CumDeltaState<F>));
   if (!ctrl->cumdelta_state) {
-    fprintf(stderr, "[FATAL] malloc failed for cumdelta_state (~512KB)\n");
-    return;
+    ctrl->cumdelta_state = (CumDeltaState<F>*)alloc_or_arena(
+        sizeof(CumDeltaState<F>), alignof(CumDeltaState<F>));
+    if (!ctrl->cumdelta_state) {
+      fprintf(stderr, "[FATAL] alloc failed for cumdelta_state\n");
+      return;
+    }
   }
   CumDelta_Init(ctrl->cumdelta_state);
 

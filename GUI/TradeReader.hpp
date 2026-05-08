@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cmath>
 #include <sys/stat.h>
+#include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.C — locale-immune CSV parsing
 
 static constexpr int MAX_TRADES = 512;
 
@@ -111,7 +112,8 @@ static inline void TradeData_Refresh(TradeData *td) {
         csv_field(line, 6, reason_s, sizeof(reason_s));
         csv_field(line, 14, fee_s, sizeof(fee_s));
 
-        double price = atof(price_s);
+        // v5.11.4.C — locale-immune CSV field parsing.
+        double price = tt::parse_double_fast(price_s);
         if (price < 1.0) continue;
 
         if (strcmp(side, "BUY") == 0) {
@@ -121,12 +123,12 @@ static inline void TradeData_Refresh(TradeData *td) {
             m->is_tp = 0;
             // stash entry fee for pairing with the corresponding sell
             if (pending_count < MAX_TRADES) {
-                pending_entry_fees[pending_count++] = atof(fee_s);
+                pending_entry_fees[pending_count++] = tt::parse_double_fast(fee_s);
             }
         } else if (strcmp(side, "SELL") == 0) {
-            double entry = atof(entry_s);
-            double qty = atof(qty_s);
-            double exit_fee = atof(fee_s);
+            double entry = tt::parse_double_fast(entry_s);
+            double qty = tt::parse_double_fast(qty_s);
+            double exit_fee = tt::parse_double_fast(fee_s);
             if (entry < 1.0) entry = price;
 
             // pop matching entry fee (FIFO — buys and sells pair in order)

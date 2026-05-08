@@ -461,3 +461,74 @@ inline int Features_PackAll(const FeatureComputeCtx<F>* ctx, float* out) {
 #undef X
     return n;
 }
+
+//======================================================================================================
+// [Features_PackAll mask-aware variant — v5.11.18 main]
+//======================================================================================================
+// Per /parity-check 2026-05-07 (CRITICAL gap on scaler binding + HIGH gap
+// on Features_PackAll index contract). Operator-controlled per-core
+// feature subsetting via the cfg field core_<N>_feature_mask
+// (uint64_t hex bitmap; 1=feature enabled at runtime).
+//
+// Sparse-zero contract — IMPORTANT for caller correctness:
+//   - Caller passes a buffer of size NUM_REGISTERED_FEATURES floats.
+//   - Returned value `n` = NUM_REGISTERED_FEATURES (count of OUTPUT
+//     slots written, including the zeroed ones), NOT the count of
+//     unmasked features. Caller's downstream code (Scaler_Apply,
+//     Model_Predict) expects exactly NUM_REGISTERED_FEATURES inputs.
+//   - When mask bit i is unset, out[i] = 0.0f (write the zero
+//     explicitly; don't skip the slot). Compute fn() is NOT called
+//     for masked features — saves the slow-path math for them.
+//   - When mask bit i is set, identical semantics to the no-mask
+//     overload above (compute, FPN_IsValidFinite + isnan/isinf
+//     guard, return -1 sentinel on any failure).
+//
+// Why sparse-zero (not dense compression):
+//   - Scaler sidecar's mean[] / stddev[] are indexed by
+//     FEATURE_<ID>, computed against training data with the SAME
+//     mask. A zero-input through standardization at index i
+//     produces (0 - mean[i]) / stddev[i] — a deterministic
+//     post-scale value the model has already seen during training.
+//     Dense compression would shift indices and break this contract.
+//   - XGBoost expects fixed-shape input across train + serve. n
+//     must always equal NUM_REGISTERED_FEATURES.
+//
+// Stamp parity:
+//   - When mask is non-null AND non-default (i.e., differs from
+//     0xFFFF..F all-on), the trained model's stamp MUST have
+//     has_feature_mask=1 + feature_mask_train matching the runtime
+//     cfg. v5.11.18a's verify_model_stamp pipeline checks this and
+//     refuses load on mismatch.
+//   - mask=nullptr OR mask=0xFFFF..F → bytewise-identical to
+//     pre-v5.11.18 path. Stamp check skipped (legacy stamps load).
+//
+// Backwards compat: the no-mask overload above stays. Existing
+// callers (5 production sites, 4 test sites) compile unchanged
+// until they explicitly opt in to mask-aware behavior.
+template <unsigned F>
+inline int Features_PackAll(const FeatureComputeCtx<F>* ctx, float* out,
+                              const uint64_t* mask) {
+    if (mask == nullptr) {
+        // null mask → no-op; delegate to the no-mask overload for
+        // bytewise-identical behavior.
+        return Features_PackAll(ctx, out);
+    }
+    uint64_t m = *mask;
+    int n = 0;
+#define X(id, name, version, enabled, fn, note) \
+    if ((enabled)) { \
+        if (m & (1ULL << FEATURE_##id)) { \
+            FPN<F> _fpn = fn(ctx); \
+            if (!FPN_IsValidFinite(_fpn)) { return -1; } \
+            float _v = (float)FPN_ToDouble(_fpn); \
+            if (std::isnan(_v) || std::isinf(_v)) { return -1; } \
+            out[FEATURE_##id] = _v; \
+        } else { \
+            out[FEATURE_##id] = 0.0f; \
+        } \
+        ++n; \
+    }
+    FOREACH_FEATURE(X)
+#undef X
+    return n;
+}

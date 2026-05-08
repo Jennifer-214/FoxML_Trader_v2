@@ -91,7 +91,24 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                                     // minor-version drift WARN. Cross-major
                                     // is still always refused/warned per
                                     // ModelStampResult.cross_major_engine.
-                                    int acknowledge_cross_binary_drift = 0) {
+                                    int acknowledge_cross_binary_drift = 0,
+                                    // v5.11.18 main — runtime cfg's per-core
+                                    // feature_mask. Default 0 = skip check
+                                    // (v5.11.18a infrastructure default; legacy
+                                    // path stays bytewise-identical). When
+                                    // non-zero, verify_model_stamp refuses
+                                    // load if stamp's feature_mask_train
+                                    // doesn't match this value.
+                                    uint64_t expected_feature_mask = 0,
+                                    // v5.11.42 D.2 — expected horizon ticks
+                                    // (parsed from dir name `_horizon_<N>` by
+                                    // EnsembleModelZoo_LoadFromCfg). Default 0
+                                    // = skip check (single-horizon load path).
+                                    // When non-zero AND stamp has label_params,
+                                    // post-load REFUSE if stamp's
+                                    // label_lookahead_ticks differs from this
+                                    // value (catches dir rename / copy mistake).
+                                    int expected_horizon_ticks = 0) {
     char path[512];
     struct stat st;
     const char* found_path = nullptr;
@@ -137,7 +154,8 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
             gap_threshold,
             MODEL_FORMAT_VERSION,
             FEATURE_REGISTRY_HASH(),
-            LABEL_REGISTRY_HASH());  // v5.10.1.A — close Finding #1 consume side
+            LABEL_REGISTRY_HASH(),  // v5.10.1.A — close Finding #1 consume side
+            expected_feature_mask);  // v5.11.18 main — feature mask binding
         have_sr = 1;
         if (sr.valid <= 0) {
             if (held_out_gate_strict == 1) {
@@ -220,6 +238,28 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
             handle->has_build_flags_hash   = 1;
             handle->stamp_build_flags_hash = sr.build_flags_hash;
         }
+        // v5.11.42 D.1 — copy stamp's xgb_train_nthread for engine boot WARN.
+        if (sr.has_xgb_train_nthread) {
+            handle->has_stamp_xgb_train_nthread = 1;
+            handle->stamp_xgb_train_nthread     = sr.xgb_train_nthread;
+        }
+        // v5.11.42 D.2 — copy stamp's label params for ensemble dir-name
+        // horizon-mismatch refusal at AutoDetect time.
+        if (sr.has_label_params) {
+            handle->has_stamp_label_params  = 1;
+            handle->stamp_label_lookahead_ticks = sr.label_lookahead_ticks;
+            handle->stamp_label_tp_pct          = sr.label_tp_pct;
+            handle->stamp_label_sl_pct          = sr.label_sl_pct;
+        }
+        // v5.11.42 D.3 — copy stamp's scaler_sha256 for ensemble-sibling
+        // consistency WARN.
+        if (sr.has_scaler_fields && sr.scaler_sha256[0] != '\0') {
+            handle->has_stamp_scaler_sha256 = 1;
+            size_t n = strnlen(sr.scaler_sha256,
+                               sizeof(handle->stamp_scaler_sha256) - 1);
+            memcpy(handle->stamp_scaler_sha256, sr.scaler_sha256, n);
+            handle->stamp_scaler_sha256[n] = '\0';
+        }
         // v5.9.5i — copy stamp's inference cfg values. EngineSharded
         // boot-WARN/REFUSE compares vs cfg.*. Forward-compat: legacy
         // stamps (has_inference_cfg=0) leave handle's stamp_inf_* at
@@ -269,6 +309,26 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                     "loaded model has num_outputs=%d (strict=0, loading anyway)\n",
                     found_path, sr.model_num_outputs, handle->num_outputs);
             }
+        }
+        // v5.11.42 D.2 — horizon-mismatch refusal at ensemble load.
+        // EnsembleModelZoo_LoadFromCfg parses horizon_ticks from dir
+        // name `_horizon_<N>` and passes it as expected_horizon_ticks.
+        // Stamp's label_lookahead_ticks must match. Catches: dir
+        // rename, copy-paste mistake, two horizons accidentally swapped
+        // between dirs. ALWAYS refuses on mismatch (no strict-mode
+        // gating) since the model definitely shouldn't be loaded under
+        // a horizon it wasn't trained for. Legacy stamps without
+        // label_params (has_*=0) skip the check.
+        if (expected_horizon_ticks > 0 && sr.has_label_params &&
+            sr.label_lookahead_ticks != expected_horizon_ticks) {
+            fprintf(stderr,
+                "[model] REFUSING %s — stamp claims label_lookahead_ticks=%d "
+                "but loaded from dir expecting horizon=%d (dir rename or "
+                "copy-paste mistake?)\n",
+                found_path, sr.label_lookahead_ticks, expected_horizon_ticks);
+            Model_Free(handle);
+            Model_Init(handle);
+            return 0;
         }
     }
 
@@ -339,31 +399,36 @@ inline int CoreModelZoo_LoadFromDir(CoreModelZoo<F> *zoo, const char *dir, int b
                                      int held_out_gate_strict = 0,
                                      // v5.9.4 — operator opt-in, threaded
                                      // through to per-role load.
-                                     int acknowledge_cross_binary_drift = 0) {
+                                     int acknowledge_cross_binary_drift = 0,
+                                     // v5.11.18 main — runtime cfg's
+                                     // per-core feature_mask, threaded to
+                                     // each role's verify_model_stamp call.
+                                     // Default 0 = skip mask check.
+                                     uint64_t expected_feature_mask = 0) {
     if (!dir || dir[0] == '\0') return 0;
 
     int loaded = 0;
     if (CoreModelZoo_TryLoadRole(&zoo->barrier, dir, "barrier", backend,
             held_out_stamp_secret, gap_threshold, held_out_gate_strict,
-            acknowledge_cross_binary_drift)) {
+            acknowledge_cross_binary_drift, expected_feature_mask)) {
         zoo->loaded_mask |= CORE_MODEL_BARRIER;
         loaded++;
     }
     if (CoreModelZoo_TryLoadRole(&zoo->regime, dir, "regime", backend,
             held_out_stamp_secret, gap_threshold, held_out_gate_strict,
-            acknowledge_cross_binary_drift)) {
+            acknowledge_cross_binary_drift, expected_feature_mask)) {
         zoo->loaded_mask |= CORE_MODEL_REGIME;
         loaded++;
     }
     if (CoreModelZoo_TryLoadRole(&zoo->exit, dir, "exit", backend,
             held_out_stamp_secret, gap_threshold, held_out_gate_strict,
-            acknowledge_cross_binary_drift)) {
+            acknowledge_cross_binary_drift, expected_feature_mask)) {
         zoo->loaded_mask |= CORE_MODEL_EXIT;
         loaded++;
     }
     if (CoreModelZoo_TryLoadRole(&zoo->buy_signal, dir, "buy_signal", backend,
             held_out_stamp_secret, gap_threshold, held_out_gate_strict,
-            acknowledge_cross_binary_drift)) {
+            acknowledge_cross_binary_drift, expected_feature_mask)) {
         zoo->loaded_mask |= CORE_MODEL_BUY_SIGNAL;
         loaded++;
     }
@@ -491,14 +556,14 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
         while (vend > val && (*(vend-1) == ' ' || *(vend-1) == '\t')) { *(--vend) = '\0'; }
 
         if (strcmp(key, "barrier_gate_enabled") == 0)        expected_barrier_gate = atoi(val);
-        else if (strcmp(key, "ml_buy_threshold") == 0)       expected_threshold = atof(val);
+        else if (strcmp(key, "ml_buy_threshold") == 0)       expected_threshold = tt::parse_double_fast(val);
         else if (strcmp(key, "expected_num_classes") == 0)   expected_num_classes = atoi(val);
         else if (strcmp(key, "expected_role") == 0) {
             strncpy(expected_role, val, sizeof(expected_role) - 1);
             expected_role[sizeof(expected_role) - 1] = '\0';
         }
-        else if (strcmp(key, "held_out_fraction") == 0)        expected_held_out_fraction = atof(val);
-        else if (strcmp(key, "gap_acceptable_threshold") == 0) expected_gap_threshold     = atof(val);
+        else if (strcmp(key, "held_out_fraction") == 0)        expected_held_out_fraction = tt::parse_double_fast(val);
+        else if (strcmp(key, "gap_acceptable_threshold") == 0) expected_gap_threshold     = tt::parse_double_fast(val);
         else if (strcmp(key, "expected_poll_interval") == 0)         expected_poll_interval = atoi(val);
         else if (strcmp(key, "expected_feature_format_version") == 0) expected_feature_format_ver = atoi(val);
         else if (strcmp(key, "expected_num_features") == 0)          expected_num_features = atoi(val);
@@ -1033,12 +1098,17 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
         snprintf(per_horizon_dir, sizeof(per_horizon_dir),
                  "%s_horizon_%d", base_run_path, H);
 
-        // Try each role at this horizon's dir
+        // Try each role at this horizon's dir.
+        // v5.11.42 D.2 — pass H as expected_horizon_ticks so TryLoadRole
+        // refuses if stamp's label_lookahead_ticks doesn't match the dir
+        // we loaded from.
         if (CoreModelZoo_TryLoadRole(&ezoo->barrier[ezoo->barrier_count],
                                        per_horizon_dir, "barrier", backend,
                                        held_out_stamp_secret, gap_threshold,
                                        held_out_gate_strict,
-                                       acknowledge_cross_binary_drift)) {
+                                       acknowledge_cross_binary_drift,
+                                       /*expected_feature_mask=*/0,
+                                       /*expected_horizon_ticks=*/H)) {
             ezoo->horizon_ticks_at_idx[ezoo->barrier_count] = H;
             ezoo->barrier_count++;
             total_loaded++;
@@ -1047,7 +1117,9 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
                                        per_horizon_dir, "regime", backend,
                                        held_out_stamp_secret, gap_threshold,
                                        held_out_gate_strict,
-                                       acknowledge_cross_binary_drift)) {
+                                       acknowledge_cross_binary_drift,
+                                       /*expected_feature_mask=*/0,
+                                       /*expected_horizon_ticks=*/H)) {
             ezoo->regime_count++;
             total_loaded++;
         }
@@ -1055,7 +1127,9 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
                                        per_horizon_dir, "exit", backend,
                                        held_out_stamp_secret, gap_threshold,
                                        held_out_gate_strict,
-                                       acknowledge_cross_binary_drift)) {
+                                       acknowledge_cross_binary_drift,
+                                       /*expected_feature_mask=*/0,
+                                       /*expected_horizon_ticks=*/H)) {
             ezoo->exit_predictor_count++;
             total_loaded++;
         }
@@ -1063,7 +1137,9 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
                                        per_horizon_dir, "buy_signal", backend,
                                        held_out_stamp_secret, gap_threshold,
                                        held_out_gate_strict,
-                                       acknowledge_cross_binary_drift)) {
+                                       acknowledge_cross_binary_drift,
+                                       /*expected_feature_mask=*/0,
+                                       /*expected_horizon_ticks=*/H)) {
             ezoo->buy_signal_count++;
             total_loaded++;
         }
@@ -1078,6 +1154,41 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
                 ezoo->barrier_count, ezoo->regime_count,
                 ezoo->exit_predictor_count, ezoo->buy_signal_count,
                 horizon_count);
+
+        // v5.11.42 D.3 — sibling consistency WARN. Per-horizon scalers
+        // SHOULD be identical across siblings of the same role (scaler
+        // is derived from the shared feature matrix, not from per-horizon
+        // labels). If sibling scalers differ → WARN (operator may have
+        // mixed training sessions or accidentally copied a sidecar from
+        // a different run). Doesn't refuse — model already loaded; just
+        // operator notification.
+        auto check_sibling_scalers = [&](ModelHandle<F>* arr, int count, const char* role_name) {
+            const char* baseline_sha = nullptr;
+            int baseline_idx = -1;
+            for (int i = 0; i < count; ++i) {
+                if (!arr[i].has_stamp_scaler_sha256) continue;
+                if (arr[i].stamp_scaler_sha256[0] == '\0') continue;
+                if (baseline_sha == nullptr) {
+                    baseline_sha = arr[i].stamp_scaler_sha256;
+                    baseline_idx = i;
+                    continue;
+                }
+                if (strcmp(arr[i].stamp_scaler_sha256, baseline_sha) != 0) {
+                    fprintf(stderr,
+                        "[sibling-consistency] WARN: ensemble role=%s "
+                        "sibling[%d] scaler_sha256=%.16s... differs from "
+                        "sibling[%d] scaler_sha256=%.16s... "
+                        "(per-horizon scalers should be identical; mixed "
+                        "training sessions or sidecar copy mistake?)\n",
+                        role_name, i, arr[i].stamp_scaler_sha256,
+                        baseline_idx, baseline_sha);
+                }
+            }
+        };
+        check_sibling_scalers(ezoo->barrier,        ezoo->barrier_count,        "barrier");
+        check_sibling_scalers(ezoo->regime,         ezoo->regime_count,         "regime");
+        check_sibling_scalers(ezoo->exit_predictor, ezoo->exit_predictor_count, "exit");
+        check_sibling_scalers(ezoo->buy_signal,     ezoo->buy_signal_count,     "buy_signal");
     } else {
         fprintf(stderr, "[ML] ensemble zoo: no models loaded "
                         "(checked %d horizons under base '%s'; falling back "

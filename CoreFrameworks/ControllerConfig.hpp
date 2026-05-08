@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>      // v5.11.18a: ERANGE detection in feature_mask hex parser
 
 //======================================================================================================
 // [ENGINE MODE]
@@ -378,6 +379,27 @@ template <unsigned F> struct ControllerConfig {
   // fire regardless of regime. Setting this to 1 is the operator
   // saying "I know what I'm doing" and is logged.
   int acknowledge_hardcoded_strategy_in_live;
+  // v5.11.3 — mlockall failure handling. 1 (default) = HFT-correct: fatal
+  // exit if pages can't be locked into RAM (deployment must have enough
+  // RLIMIT_MEMLOCK + CAP_IPC_LOCK). 0 = laptop / dev: warn and continue
+  // when mlockall fails. Setting this to 0 in production trades determinism
+  // for portability — operator should explicitly opt out.
+  int require_mlockall;
+  // v5.11.22 — InitArena MAP_HUGETLB opt-in. Default 0 = use 4 KB pages
+  // (no OS dependency); set to 1 to request 2 MB hugepages for the 8 MB
+  // boot arena, reducing TLB pressure on slow-path CoreSlowState +
+  // strategy state access.
+  //
+  // Requires OS-level hugepage reservation:
+  //   sudo sysctl -w vm.nr_hugepages=4   # 4 × 2 MB = 8 MB to fit arena
+  // OR persistent in /etc/sysctl.d/99-foxml.conf:
+  //   vm.nr_hugepages=4
+  //
+  // On boot, if the cfg flag is 1 but hugepages are not available,
+  // InitArena_Create retries WITHOUT MAP_HUGETLB and emits a stderr
+  // WARN — engine continues with normal pages, no fatal. See
+  // DOCS/OPERATOR_DEPLOYMENT.md for the production-machine recipe.
+  int init_arena_use_hugepages;
   // kill switch (sticky — stays active until session reset or manual TUI 'k')
   int kill_switch_enabled; // 0=disabled, 1=enabled
   FPN<F>
@@ -487,6 +509,13 @@ template <unsigned F> struct ControllerConfig {
   // current behavior (manual stamping via tools/stamp_model.sh); flip to 1 after
   // configuring the secret to enable hands-off stamp generation in foxml_suite.
   int    auto_stamp_on_held_out;
+  // v5.11.47 — auto-stamp HMAC secret. When non-empty AND
+  // auto_stamp_on_held_out=1, the suite signs each generated stamp
+  // with this secret. Empty = devmode (signature accepted as-is at
+  // load time). Operator can also type a secret in the GUI Validation
+  // panel; the GUI value takes priority over this cfg fallback.
+  // Setting here means operator doesn't have to re-type per-session.
+  char   auto_stamp_secret[128];
   // v5.4.0 (Phase 0.1) — operational health log. Always-available
   // structured JSONL diagnostic log. Replaces ad-hoc env-gated stderr
   // traces. When enabled, engine init configures MemHeaders/HealthLog.hpp
@@ -663,6 +692,25 @@ template <unsigned F> struct ControllerConfig {
   char core_horizon_list[16][128];
   char core_ensemble_blend_mode[16][16];
   char core_disabled_horizons[16][128];
+  // v5.11.18a — per-core feature mask. Bit i set = feature index i is
+  // computed + packed for this core; bit i clear = packed as 0.0f
+  // (NOT skipped; sparse-zero array contract per parity-check finding).
+  // Default 0xFFFFFFFFFFFFFFFF (all features enabled) — preserves
+  // pre-v5.11.18a behavior bytewise.
+  //
+  // Config syntax: `core_0_feature_mask=0xFFFFFFFFFFFFFFFF` (matches the
+  // existing per-core field convention: core_N_strategy, core_N_risk_pct,
+  // etc.). Parser accepts 0x-prefixed hex (any case) or plain decimal.
+  // Stored uint64_t.
+  // Parity binding (Surface G stamp body extension at v5.11.18a, ML
+  // wiring at v5.11.18) ensures runtime-mask vs training-mask drift is
+  // caught at model load.
+  //
+  // Safety: v5.11.18a ships this cfg field + stamp infra ONLY. Behavior
+  // change (Features_PackAll respecting the mask) lands in v5.11.18.
+  // Default-on bitmap means any cfg without `feature_mask_<N>=` lines
+  // produces identical features to pre-v5.11.18a builds.
+  uint64_t core_feature_mask[16];
   // Per-core full-tunable overrides (v4.0). One slot per execution core
   // (16 max). Each PerCoreOverrides field shadows a same-named field on
   // ControllerConfig — non-zero overrides global; zero inherits.
@@ -713,6 +761,15 @@ template <unsigned F> struct ControllerConfig {
   int      xgb_train_nthread;      // XGBoost Train Model worker nthread; default 4 (matches pre-v5.10 BacktestPanels.hpp hardcoded)
   int      xgb_eval_nthread;       // XGBoost WF/HeldOut eval nthread; default 1 (deterministic per-fold)
   int      csv_load_workers;       // parallel CSV worker threads (Item C); default 1 (serial)
+  // v5.11.41 — Multi-Horizon parallelism cap. Worker spawns
+  //   min(N_horizons, multi_horizon_max_threads) pthreads, each running a
+  //   full per-horizon Backtest_RunFullValidation pipeline. 0 = auto
+  //   (defaults to min(8, ncores/2) computed at runtime to leave room
+  //   for GUI/other threads). 1 = forced serial (legacy behavior). >1
+  //   pins xgb_train_nthread=1 inside parallel worker for bytewise
+  //   determinism vs serial-mode-with-nthread=1. Recorded in stamp body
+  //   via xgb_train_nthread field for forensic mode-divergence detection.
+  int      multi_horizon_max_threads;
 
   // RAM budgets (advisory soft caps — emit WARN at boot if dataset projects
   // to exceed; no hard refuse since the streaming label compute closes
@@ -957,6 +1014,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
                                                     // must set to 1 to
                                                     // run hardcoded
                                                     // strategies live
+  cfg.init_arena_use_hugepages = 0;  // v5.11.22 — opt-in; requires OS reservation
+  cfg.require_mlockall = 1;  // v5.11.3 — HFT-correct default; set to 0
+                              // for laptop dev where RLIMIT_MEMLOCK is tight
   // kill switch
   cfg.kill_switch_enabled = 1; // on by default — safety first
   cfg.kill_switch_daily_loss_pct =
@@ -1018,6 +1078,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.allow_cross_major_engine    = 0;                            // v5.9.2b — refuse cross-major by default
   cfg.held_out_stamp_secret[0]    = '\0';                         // empty = accept-any (dev)
   cfg.auto_stamp_on_held_out      = 1;                            // v5.8.10: default 1 (suite Run Full Validation auto-stamps); set 0 only for manual tools/stamp_model.sh workflow
+  cfg.auto_stamp_secret[0]        = '\0';                         // v5.11.47 default empty = devmode (signs stamps but accepts any signature at load); operator sets in cfg or GUI Validation panel
   cfg.health_log_path[0]          = '\0';                         // empty = disabled
   cfg.health_log_max_bytes        = 0;                            // 0 = no rotation (back-compat)
   cfg.health_log_keep_count       = 0;                            // 0 = no retained rotated files
@@ -1048,6 +1109,12 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.xgb_train_nthread       = 4;   // matches BacktestPanels.hpp:2056 pre-v5.10
   cfg.xgb_eval_nthread        = 1;   // matches BacktestEngine.hpp:1352, 1638
   cfg.csv_load_workers        = 1;   // serial CSV load (matches pre-v5.10 behavior)
+  cfg.multi_horizon_max_threads = 1; // 1 = forced serial (DEFAULT; stable). v5.11.45:
+                                      // changed from 0 (auto) -> 1 after segfault reports.
+                                      // XGBoost + libgomp + pthread interaction is fragile;
+                                      // even with per-pthread omp_set_num_threads(1), libgomp
+                                      // state can race across pthreads. Set >1 to opt into
+                                      // experimental parallel mode (may segfault).
   cfg.feature_collect_max_gb  = 12;  // advisory cap; WARN-only
   cfg.wf_split_max_gb         = 8;
   cfg.held_out_max_gb         = 4;
@@ -1070,10 +1137,12 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.ensemble_trade_reward_mult = 4.0;
   cfg.ensemble_bandit_save_interval = 5000;  // v5.10.0a.G.9
   // v5.10.0a.G.6 — per-core ensemble cfg defaults (empty = inherit global)
+  // v5.11.18a — per-core feature_mask defaults (all-bits-on = no masking)
   for (int i = 0; i < 16; ++i) {
       cfg.core_horizon_list[i][0] = '\0';
       cfg.core_ensemble_blend_mode[i][0] = '\0';
       cfg.core_disabled_horizons[i][0] = '\0';
+      cfg.core_feature_mask[i] = 0xFFFFFFFFFFFFFFFFULL;  // all features enabled
   }
   cfg.health_log_level            = 0;                            // 0=info, 1=debug, 2=trace
   cfg.reconcile_interval_sec      = 0;                            // 0 = boot-only
@@ -1193,6 +1262,33 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     line[eq_pos] = '\0';
     char *key = line;
     char *val = &line[eq_pos + 1];
+
+    // v5.11.33 — strip inline `# comment` from value, then strip trailing
+    // whitespace. Pre-fix the parser only stripped `\n`/`\r`, so a cfg line
+    // like `xgb_tree_method=hist                # comment` left the value
+    // as `"hist                # comment"`. For numeric fields atof/atoi
+    // stop at the first non-numeric char (silently OK), but string fields
+    // (xgb_tree_method, ml_model_path, etc.) used the literal string
+    // verbatim — XGBoost's strcmp-match rejected `"hist           "` with
+    // an `Invalid Input: 'hist           ', valid values are: {...}` error
+    // that surfaced as WF train+val 0.0 across all folds (pred fails →
+    // shape-mismatch SKIP at the WF accuracy compute). Operator-flagged
+    // 2026-05-07; root-caused via v5.11.30/31/32 observability work.
+    {
+        // find first unescaped '#' on the value line (start scanning from
+        // val[0]; the `=` already split key from val so the only `#`
+        // we'd see is an inline comment marker)
+        char *hash = strchr(val, '#');
+        if (hash) *hash = '\0';
+        // strip trailing whitespace (space, tab) — both cfg-style padding
+        // and editor-auto-trim leftovers
+        size_t vl = strlen(val);
+        while (vl > 0 && (val[vl - 1] == ' ' || val[vl - 1] == '\t')) {
+            val[--vl] = '\0';
+        }
+        // also strip leading whitespace (less common but cheap)
+        while (*val == ' ' || *val == '\t') ++val;
+    }
 
 // table-driven parser: FPN fields parsed as atof(val) directly
 // adding a new field = add ONE line to the matching table below
@@ -1364,6 +1460,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(depth_enabled)
     CFG_PARSE_INT(use_real_money)
     CFG_PARSE_INT(acknowledge_hardcoded_strategy_in_live)  // v5.7.2
+    CFG_PARSE_INT(require_mlockall)  // v5.11.3
+    CFG_PARSE_INT(init_arena_use_hugepages)  // v5.11.22
     CFG_PARSE_INT(session_filter_enabled)
     CFG_PARSE_INT(gate_ema_enabled)
     CFG_PARSE_INT(default_strategy)
@@ -1463,6 +1561,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(xgb_train_nthread)
     CFG_PARSE_INT(xgb_eval_nthread)
     CFG_PARSE_INT(csv_load_workers)
+    CFG_PARSE_INT(multi_horizon_max_threads)
     CFG_PARSE_INT(feature_collect_max_gb)
     CFG_PARSE_INT(wf_split_max_gb)
     CFG_PARSE_INT(held_out_max_gb)
@@ -1552,7 +1651,12 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.held_out_stamp_secret[n] = '\0';
         continue;
     }
-    if (strcmp(key, "auto_stamp_on_held_out") == 0) {
+    if (strcmp(key, "auto_stamp_secret") == 0) {
+        size_t vn = strnlen(val, sizeof(cfg.auto_stamp_secret) - 1);
+        memcpy(cfg.auto_stamp_secret, val, vn);
+        cfg.auto_stamp_secret[vn] = '\0';
+    }
+    else if (strcmp(key, "auto_stamp_on_held_out") == 0) {
         cfg.auto_stamp_on_held_out = atoi(val);
         continue;
     }
@@ -1755,6 +1859,38 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
                     sizeof(cfg.core_disabled_horizons[core_idx]) - 1);
             cfg.core_disabled_horizons[core_idx][
                 sizeof(cfg.core_disabled_horizons[core_idx]) - 1] = '\0';
+            continue;
+        }
+        // v5.11.18a — per-core feature_mask (uint64_t, hex or decimal).
+        // Accepts `0xDEADBEEFCAFEBABE` (any case), `0XDEADBEEF`, or plain
+        // decimal `18446744073709551615`. Out-of-range / unparseable
+        // values fall back to default 0xFFFF..F (all features enabled)
+        // with a WARN — never silently zero-out the mask, which would
+        // disable ALL features for that core.
+        if (strcmp(suffix, "feature_mask") == 0) {
+            char* end = nullptr;
+            errno = 0;
+            uint64_t parsed;
+            if ((val[0] == '0' && (val[1] == 'x' || val[1] == 'X'))) {
+                parsed = strtoull(val + 2, &end, 16);
+            } else {
+                parsed = strtoull(val, &end, 10);
+            }
+            if (end == val || (end != nullptr && *end != '\0' && *end != '\n')
+                    || errno == ERANGE) {
+                fprintf(stderr, "[cfg] core_%d_feature_mask='%s' unparseable; "
+                        "expected 0xHEX or decimal. Falling back to all-on "
+                        "(0xFFFFFFFFFFFFFFFF).\n", core_idx, val);
+                cfg.core_feature_mask[core_idx] = 0xFFFFFFFFFFFFFFFFULL;
+            } else {
+                cfg.core_feature_mask[core_idx] = parsed;
+                if (parsed == 0ULL) {
+                    fprintf(stderr, "[cfg] WARN: core_%d_feature_mask=0x0 "
+                            "disables ALL features for this core. Did you "
+                            "mean 0xFFFFFFFFFFFFFFFF (all enabled)?\n",
+                            core_idx);
+                }
+            }
             continue;
         }
       }

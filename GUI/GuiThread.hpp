@@ -159,6 +159,32 @@ static inline bool Gui_Init(GuiContext *gui, const char *title, int w, int h) {
         }
     }
 
+    // v5.11.37 — font scale persistence (operator-flagged 2026-05-07).
+    // Operator wants 0.6 default for 1080p, persisted across sessions.
+    // Pre-fix: FontGlobalScale = 1.0f (ImGui default) every launch
+    // regardless of slider drag. Now read from data/foxml_gui_state.txt
+    // on boot; SettingsPanel writes back when operator drags the slider.
+    //
+    // Format: simple key=value lines. Robust to missing file (use 0.6
+    // default), malformed value (clamp to 0.5..1.5), or missing dir
+    // (mkdir -p data/ on first write).
+    {
+        FILE* f = fopen("data/foxml_gui_state.txt", "r");
+        float saved_scale = 0.6f;  // 0.6 default — operator-set baseline
+        if (f) {
+            char line[128];
+            while (fgets(line, sizeof(line), f)) {
+                float v;
+                if (sscanf(line, "font_scale=%f", &v) == 1) {
+                    if (v >= 0.5f && v <= 1.5f) saved_scale = v;
+                    break;
+                }
+            }
+            fclose(f);
+        }
+        io.FontGlobalScale = saved_scale;
+    }
+
     // theme + transparency
     Foxml_ApplyTheme();
 
@@ -348,9 +374,14 @@ static inline void *gui_thread_fn(void *arg) {
             first_frame = false;
         }
 
-        // read current snapshot
-        int idx = __atomic_load_n(&shared->active_idx, __ATOMIC_ACQUIRE);
-        const TUISnapshot *snap = &shared->snapshots[idx];
+        // v5.11.3.B — read current snapshot tear-free into stack-local copy.
+        // Replaces the prior pointer-into-shared pattern, which could observe
+        // a torn buffer when the engine slow-path lapped the renderer (publish
+        // cadence > frame rate under heavy update). The memcpy is ~one TUISnapshot
+        // per frame at 60 Hz — negligible (~5 µs of the 16 ms budget).
+        TUISnapshot snap_local;
+        TUISnapshot_ReadInto(shared, &snap_local);
+        const TUISnapshot *snap = &snap_local;
 
         // keyboard controls
         Gui_HandleKeys(shared);

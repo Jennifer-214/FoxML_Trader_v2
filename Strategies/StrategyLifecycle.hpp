@@ -128,10 +128,21 @@ inline void Strategy_InitPerCore(EventLoopState<F>* state, int slot,
     // not via BuySideGateConditions.
     BuySideGateConditions<F> buy_conds_scratch{};
 
+    // v5.11.6.A — InitArena-backed strategy state allocation when the
+    // engine has set the global arena (production path); placement-new
+    // on the arena slot. Tests + non-engine consumers fall back to
+    // standard `new`.
     switch (strategy_id) {
 #define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn) \
         case STRATEGY_##id: { \
-            auto* s = new state_t<F>{}; \
+            state_t<F>* s; \
+            if (auto* arena = tt::InitArena_Global()) { \
+                void* mem = tt::InitArena_Alloc(arena, sizeof(state_t<F>), \
+                                                 alignof(state_t<F>)); \
+                s = mem ? new (mem) state_t<F>{} : new state_t<F>{}; \
+            } else { \
+                s = new state_t<F>{}; \
+            } \
             Strategy_SeedFromCfg(s, cfg); \
             init_fn(s, rolling, &buy_conds_scratch); \
             ctx.strategy_state = s; \
@@ -368,18 +379,47 @@ inline void Strategy_FreePerCore(EventLoopState<F>* state, int slot) {
     // v5.8.0: dispatch via FOREACH_STRATEGY(X). Each row generates one
     // case that deletes the registered state type. Unknown kinds leak
     // (defensive) — see default branch.
+    //
+    // v5.11.6.A — when arena-allocated, skip `delete` (arena owns the
+    // memory; freed by InitArena_Destroy at engine shutdown). For the
+    // arena path, also skip the destructor call since strategy state
+    // structs are trivially destructible (POD-only fields verified by
+    // construction at v5.4.0 strategy spec).
     switch (ctx.strategy_state_kind) {
 #define X(id, short_name, full_name, state_t, init_fn, build_fn, adapt_fn, exit_fn) \
         case STRATEGY_##id: \
-            delete static_cast<state_t<F>*>(ctx.strategy_state); \
+            if (!tt::InitArena_Owns(tt::InitArena_Global(), ctx.strategy_state)) { \
+                delete static_cast<state_t<F>*>(ctx.strategy_state); \
+            } \
             break;
         FOREACH_STRATEGY(X)
 #undef X
+        case STRATEGY_AUTO:
+        case STRATEGY_NONE:
+            // v5.11.11 (2026-05-07): symptom-quieted the WARN that this
+            // branch used to fire (it lived in `default:` pre-v5.11.11).
+            // v5.11.15 (2026-05-07): root cause found and fixed at
+            // `CoreFrameworks/ShardedSnapshotPersist.hpp:498` — snapshot
+            // Load was restoring `ctx.strategy_state_kind` from a
+            // previous run's persisted byte, overwriting the kind that
+            // Strategy_InitPerCore had just set correctly from
+            // cfg.strategy_id. With that restore removed, the kind
+            // invariant ("kind describes the C++ type of the
+            // strategy_state pointer") holds and this branch should be
+            // unreachable in normal operation.
+            //
+            // Kept defensively for two reasons: (1) tests can still
+            // exercise unusual lifecycle orderings, (2) future paths
+            // (hot-swap, AUTO regime re-allocation per Phase 3) could
+            // re-introduce the mismatch and we'd rather null-out than
+            // crash. Without knowing the concrete type, we cannot
+            // safely delete (type-cast UB). Null the pointer — the
+            // arena owns the memory (v5.11.6.A) so reclamation happens
+            // at engine shutdown via InitArena_Destroy.
+            break;
         default:
-            // Unknown kind: leak rather than miscast. 0xFF (uninitialized)
-            // means strategy_state should already be nullptr — handled
-            // above. This default catches genuinely unknown values which
-            // should never occur in practice.
+            // Genuinely unknown kind value (corrupted state). Worth
+            // a WARN since this should never happen.
             fprintf(stderr,
                 "[strategy-lifecycle] Strategy_FreePerCore: unknown kind %u "
                 "on slot %d, leaking the state pointer rather than miscasting\n",

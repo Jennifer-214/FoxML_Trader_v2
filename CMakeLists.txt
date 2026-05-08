@@ -23,6 +23,37 @@ option(BUSY_POLL "Spin-poll instead of sleeping in poll() (experimental)" OFF)
 option(USE_XGBOOST "Link XGBoost C API for ML inference" OFF)
 option(USE_LIGHTGBM "Link LightGBM C API for ML inference" OFF)
 
+# v5.11.0.D — Profile-Guided Optimization (PGO).
+# GCC-only orchestration. Use via `./build.sh pgo`:
+#   1. Build with USE_PGO_GENERATE=ON  → instrumented binary
+#   2. Run a representative workload   → emits .gcda profile data
+#   3. Build with USE_PGO_USE=ON       → consumes profile, optimizes hot paths
+# 2-8% latency improvement typical on the engine's hot path.
+option(USE_PGO_GENERATE "Build with -fprofile-generate (instrumented run)" OFF)
+option(USE_PGO_USE "Build with -fprofile-use (consumes .gcda profile)" OFF)
+set(PGO_PROFILE_DIR "${CMAKE_BINARY_DIR}/pgo_profile" CACHE PATH "Where .gcda files live")
+
+function(apply_pgo_flags target)
+    # PGO orchestration is GCC-specific (-fprofile-generate / -fprofile-use
+    # syntax). Clang LTO PGO uses -fprofile-instr-generate / -fprofile-instr-use
+    # with different filename conventions. Pin to GCC for now; revisit if
+    # operator switches toolchains. Silently no-op for non-GCC compilers.
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        return()
+    endif()
+    if(USE_PGO_GENERATE)
+        target_compile_options(${target} PRIVATE -fprofile-generate=${PGO_PROFILE_DIR})
+        target_link_options(${target} PRIVATE -fprofile-generate=${PGO_PROFILE_DIR})
+    elseif(USE_PGO_USE)
+        # Note: NOT using -fprofile-correction. We want fail-fast on stale
+        # profile data — operator should always train on the same SHA. If
+        # a future workflow legitimately needs to ignore mismatches (e.g.
+        # cross-version PGO reuse), document the rationale before enabling.
+        target_compile_options(${target} PRIVATE -fprofile-use=${PGO_PROFILE_DIR})
+        target_link_options(${target} PRIVATE -fprofile-use=${PGO_PROFILE_DIR})
+    endif()
+endfunction()
+
 if(LATENCY_PROFILING)
     target_compile_definitions(engine PRIVATE LATENCY_PROFILING)
 endif()
@@ -50,6 +81,10 @@ if(USE_LIGHTGBM)
     target_compile_definitions(engine PRIVATE USE_LIGHTGBM)
     target_link_libraries(engine PRIVATE ${LIGHTGBM_LIB})
 endif()
+
+# v5.11.0.D — Apply PGO flags to engine (no-op when neither GENERATE
+# nor USE option is on, no-op for non-GCC compilers).
+apply_pgo_flags(engine)
 
 #===============================================================================
 # engine_gui binary — Dear ImGui + implot (SDL2 + OpenGL3)
@@ -128,6 +163,10 @@ if(USE_IMGUI_GUI)
         target_compile_definitions(engine_gui PRIVATE USE_LIGHTGBM)
         target_link_libraries(engine_gui PRIVATE ${LIGHTGBM_LIB})
     endif()
+
+    # v5.11.0.D — Apply PGO to engine_gui (operator's typical
+    # profile-collection target since it has the full panel surface).
+    apply_pgo_flags(engine_gui)
 endif()
 
 #===============================================================================
@@ -150,6 +189,10 @@ if(USE_IMGUI_GUI)
         ${SDL2_LIBRARIES}
         OpenGL::GL
         ssl crypto pthread
+        gomp  # v5.11.44 hotfix — omp_set_num_threads + omp_set_dynamic in
+              # mh_per_horizon_parallel_worker (caps libgomp thread pool
+              # per-pthread to prevent OpenMP team collisions across
+              # parallel multi-horizon workers running XGBoost)
     )
     if(USE_NATIVE_128)
         target_compile_definitions(foxml_suite PRIVATE USE_NATIVE_128)
@@ -197,6 +240,15 @@ target_compile_options(parity_harness PRIVATE -O3 -march=native -funroll-loops -
 target_include_directories(parity_harness PRIVATE ${CMAKE_SOURCE_DIR}/..)
 target_compile_definitions(parity_harness PRIVATE MULTICORE_TUI)
 target_link_libraries(parity_harness PRIVATE Threads::Threads ssl crypto)
+
+# v5.11.14 — standalone CLI that diffs two FeatureStandardizer .scaler
+# binaries per-feature. Reports |Δmean|, |Δstddev|, and percent change.
+# Linked against ssl + crypto for the SHA-256 verifier the loader runs
+# on each sidecar. No MULTICORE_TUI / no test framework — pure CLI tool.
+add_executable(compare_scalers tools/compare_scalers.cpp)
+target_compile_options(compare_scalers PRIVATE -O2 -march=native)
+target_include_directories(compare_scalers PRIVATE ${CMAKE_SOURCE_DIR}/..)
+target_link_libraries(compare_scalers PRIVATE ssl crypto)
 
 enable_testing()
 add_test(NAME controller_test COMMAND controller_test)

@@ -24,6 +24,7 @@
 #include <termios.h>
 #include <signal.h>
 #include <time.h>
+#include <atomic>     // v5.11.3.B — TUISharedState seq counter
 
 #include "../CoreFrameworks/PortfolioController.hpp"
 #include "../CoreFrameworks/SPSCRing.hpp"  // v5.0.3: SPSCRing_Depth for Q-depth display
@@ -914,6 +915,20 @@ struct TUISnapshot {
     double tick_rate;
     uint32_t fills_rejected;
     int last_reject_reason;  // 0=none, 1=spacing, 2=balance, 3=exposure, 4=breaker, 5=full, 6=dup
+    // v5.11.4.B — async log writer health (parity-check 2026-05-07 Section J).
+    // The drainer pushes order events to a SPSC ring; a writer pthread drains
+    // them (does realloc + fwrite + fflush off the drainer's tail-latency
+    // path). These two atomic counters live on oms->event_log; without
+    // surfacing them, sustained ring-fullness or writer realloc OOM is a
+    // SILENT failure — the drainer keeps spinning + spends time it shouldn't,
+    // or events get dropped, and the operator has no GUI signal.
+    //
+    // Both are monotonic counters (never reset). GUI panels render the raw
+    // value; non-zero = something to investigate. Health log emits WARN on
+    // first non-zero observation (rate-limited).
+    uint64_t oms_log_ring_full_spins;        // total spin/usleep iters in OrderEventLog_Append
+    uint64_t oms_log_writer_realloc_failed;  // realloc failures inside async writer thread (legacy — should stay 0 post-v5.11.5.C)
+    uint64_t oms_log_full_drops;             // v5.11.5.D — events dropped because mmap'd capacity exhausted (parity-check J.1)
     // Phase 14: per-core latency stats. Populated only when engine_mode ==
     // sharded AND CoreLatencyStats are enabled. Display panel renders only
     // when sharded_mode_active is set.
@@ -1156,7 +1171,32 @@ struct TUISnapshot {
 //======================================================================================================
 struct TUISharedState {
     TUISnapshot snapshots[2];
-    volatile int active_idx;
+    // v5.11.3.B — Seqlock encoding of publish state. Replaces the former
+    // `volatile int active_idx` flat-flag pattern. The flat flag was
+    // tear-prone: when the writer published faster than the reader read
+    // (which happens under load with the publish-frequent slow path) the
+    // writer could overwrite the same buffer the reader was holding a
+    // pointer into mid-frame. The seqlock + double-buffer combo (matches
+    // ParameterSlot in CoreFrameworks/) closes that hazard.
+    //
+    // Encoding:
+    //   bit 0 (parity)    — 0 = stable, 1 = mid-write
+    //   bit 1 (active idx) — flips after each successful write
+    //
+    // Writer protocol: load seq → store seq+1 (mid-write, idx unchanged)
+    // → fill snapshots[idx ^ 1] → store seq+2 (parity even, idx flipped).
+    // Two release stores fence around the non-atomic populate.
+    //
+    // Reader protocol: full memcpy of snapshots[idx] into stack-local copy
+    // bracketed by acquire-loads of seq; retry if mid-write or seq advanced
+    // during the copy. Wait-free for the writer; bounded retry for the
+    // reader (only retries when the writer just lapped, rare in steady state
+    // where writer cadence is slow-path and reader cadence is 60 Hz).
+    //
+    // Use TUISnapshot_Publish_Begin/End on the writer side and
+    // TUISnapshot_ReadInto on the reader side — direct seq mutation is
+    // forbidden outside those helpers.
+    std::atomic<uint64_t> seq;
     volatile sig_atomic_t quit_requested;
     volatile sig_atomic_t pause_requested;
     volatile sig_atomic_t reload_requested;
@@ -1213,6 +1253,82 @@ struct TUISharedState {
     const char *config_path;
     void *candle_acc;  // CandleAccumulator* (GUI build only, NULL for ANSI)
 };
+
+//======================================================================================================
+// [TUISnapshot SEQLOCK HELPERS (v5.11.3.B)]
+//======================================================================================================
+// Three-call publish: Init at boot, Begin/End around populate. Reader uses
+// ReadInto for a tear-free local copy.
+//======================================================================================================
+
+// Init the seqlock to a stable starting state (idx=0, parity=0). Both buffers
+// must already be zeroed by the caller (or set to a sentinel "not yet
+// populated" state) — this only initializes the sequence counter.
+static inline void TUISnapshot_InitSeq(TUISharedState *shared) {
+    shared->seq.store(0, std::memory_order_release);
+}
+
+// Result of TUISnapshot_Publish_Begin — gives the writer access to both
+// buffers (back for write, front for graph-history carry-over).
+struct TUISnapshot_PublishHandle {
+    TUISnapshot *back;          // writer fills this; readers will see it after End
+    const TUISnapshot *front;   // last-published; engine carries graph history forward
+};
+
+// Begin a publish cycle. Stamps the parity bit to "mid-write" so any reader
+// in flight retries; returns pointers to both buffers. The caller fills
+// `back` and then calls TUISnapshot_Publish_End — the back buffer becomes
+// the new active.
+static inline TUISnapshot_PublishHandle TUISnapshot_Publish_Begin(TUISharedState *shared) {
+    uint64_t s = shared->seq.load(std::memory_order_relaxed);
+    uint64_t cur_idx  = (s >> 1) & 1ULL;
+    uint64_t next_idx = cur_idx ^ 1ULL;
+    // Mid-write: parity flips odd. Active idx (bit 1) is unchanged so any
+    // reader concurrently sampling seq sees the OLD active idx still — they
+    // continue reading the previous publication, never the in-progress back.
+    shared->seq.store(s + 1, std::memory_order_release);
+    return TUISnapshot_PublishHandle{
+        &shared->snapshots[next_idx],
+        &shared->snapshots[cur_idx]
+    };
+}
+
+// End a publish cycle. Bumps seq one more (becomes even, idx bit toggled).
+// Any subsequent reader sees the just-filled buffer as active.
+static inline void TUISnapshot_Publish_End(TUISharedState *shared) {
+    uint64_t s = shared->seq.load(std::memory_order_relaxed);
+    // s is currently odd (mid-write set in Begin). +1 → even, idx toggled.
+    shared->seq.store(s + 1, std::memory_order_release);
+}
+
+// Tear-free reader. Copies the active snapshot into caller-owned storage.
+// Retries when the writer is mid-write or has just lapped during the copy.
+// Bounded under steady-state load; in pathological cases (writer publishing
+// faster than memcpy can complete) this could spin, but the writer's cadence
+// is slow-path (~10ms-100ms) and the memcpy is microseconds — retries are
+// effectively never observed.
+static inline void TUISnapshot_ReadInto(const TUISharedState *shared, TUISnapshot *out) {
+    uint64_t s1, s2;
+    for (;;) {
+        s1 = shared->seq.load(std::memory_order_acquire);
+        if ((s1 & 1ULL) != 0) {
+            __builtin_ia32_pause();
+            continue;
+        }
+        uint64_t idx = (s1 >> 1) & 1ULL;
+        *out = shared->snapshots[idx];  // memcpy of the snapshot struct
+        s2 = shared->seq.load(std::memory_order_acquire);
+        if (s1 == s2) return;
+        // Writer lapped during copy — retry.
+    }
+}
+
+// Introspection: current sequence value, for tests and the parity-check
+// torn-read regression test.
+static inline uint64_t TUISnapshot_Sequence(const TUISharedState *shared) {
+    return shared->seq.load(std::memory_order_relaxed);
+}
+
 
 //======================================================================================================
 // [SNAPSHOT COPY]
@@ -1929,8 +2045,10 @@ static inline void *tui_thread_fn(void *arg) {
             }
         }
 
-        int idx = __atomic_load_n(&shared->active_idx, __ATOMIC_ACQUIRE);
-        const TUISnapshot *s = &shared->snapshots[idx];
+        // v5.11.3.B — tear-free snapshot read (replaces direct active_idx load).
+        TUISnapshot snap_local;
+        TUISnapshot_ReadInto(shared, &snap_local);
+        const TUISnapshot *s = &snap_local;
         ANSI_Render(s, current_layout, term_h, term_w, tui_start);
 
         char c = 0;

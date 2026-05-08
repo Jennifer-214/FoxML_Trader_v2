@@ -33,6 +33,7 @@
 #include "GUI/MLStatusPanel.hpp"      // v5.9.0b: per-core ML observability
 
 #include "Backtest/BacktestPanels.hpp"
+#include "CoreFrameworks/SystemInit.hpp"  // v5.11.0.A — engine_set_mxcsr_ftz_daz
 
 #include <sys/stat.h>  // mkdir
 
@@ -83,6 +84,11 @@ static void Suite_SetupDefaultLayout(ImGuiID dockspace_id) {
 // [MAIN]
 //======================================================================================================
 int main(int argc, char *argv[]) {
+    // v5.11.0.A — Suite does FP math during model training (XGBoost feature
+    // standardizer, label binning, walk-forward scoring). Match engine's
+    // MXCSR state so trained models score identically at serve time.
+    tt::engine_set_mxcsr_ftz_daz();
+
     fprintf(stderr, "foxml suite — backtesting + ML training workstation\n");
     fprintf(stderr, "Copyright (c) 2026 Jennifer Lewis. All rights reserved.\n\n");
 
@@ -161,6 +167,32 @@ int main(int argc, char *argv[]) {
                 18.0f, &cjk_cfg, jp_ranges);
         }
         if (!font) io.FontGlobalScale = 1.3f;
+    }
+
+    // v5.11.39 — font scale persistence (operator-flagged 2026-05-07,
+    // re-flagged after v5.11.37 because the original implementation
+    // only added the read to GuiThread.hpp; foxml_suite.cpp has its
+    // own font init block that needs the same logic). Identical
+    // shape as GuiThread.hpp:171-186.
+    //
+    // Save side (SettingsPanel.hpp) writes data/foxml_gui_state.txt
+    // on slider drag; read side here applies it at boot. Default
+    // 0.6 if file missing or value out of [0.5, 1.5] range.
+    {
+        FILE* f = fopen("data/foxml_gui_state.txt", "r");
+        float saved_scale = 0.6f;  // 0.6 default — operator-set baseline
+        if (f) {
+            char line[128];
+            while (fgets(line, sizeof(line), f)) {
+                float v;
+                if (sscanf(line, "font_scale=%f", &v) == 1) {
+                    if (v >= 0.5f && v <= 1.5f) saved_scale = v;
+                    break;
+                }
+            }
+            fclose(f);
+        }
+        io.FontGlobalScale = saved_scale;
     }
 
     // theme + transparency
@@ -303,7 +335,9 @@ int main(int argc, char *argv[]) {
         GUI_Panel_RunControl(&run_control, &data_panel);
         GUI_Panel_Results(&run_control.results);
         GUI_Panel_Comparison(&comparison, &run_control.results);
-        GUI_Panel_PastRuns(&past_runs);
+        // v5.11.57 — pass cfg for Verify Stamp HMAC verification (uses
+        // cfg.auto_stamp_secret if set, falls back to devmode otherwise).
+        GUI_Panel_PastRuns(&past_runs, &run_control.results.config_used);
         GUI_Panel_Optimizer(&optimizer, &data_panel);
         GUI_Panel_Training(&training, &run_control, &data_panel);
         GUI_Panel_LogViewer(&log_viewer);

@@ -425,6 +425,30 @@ template <unsigned F> inline FP64 FPN_ToFP64(FPN<F> value) {
 //======================================================================================================
 // [GUARDS]
 //======================================================================================================
+
+// Branchless mask-blend selection. Picks if_true when mask = all-1s, if_false when mask = 0.
+// Caller forms mask as `-(uint64_t)cond` where cond is 0 or 1 → no branches anywhere.
+//
+// Audit: plans/2026-05-06-latency-path-discipline.md Rule 8.
+// Used by slow-path running-sum maintenance (v5.11.2.C) where the "warmup vs
+// full-window" eviction term is data-dependent on count >= W.
+//
+// FPN<64> hits this template directly (N=2 limbs); no FP64 specialization needed
+// since two AND-OR pairs compile to ~6 instructions, comparable to cmov on the
+// __uint128_t magnitude.
+template <unsigned F>
+inline FPN<F> FPN_BlendOnMask(FPN<F> if_true, FPN<F> if_false, uint64_t mask) {
+    FPN<F> r;
+#pragma GCC unroll 65534
+    for (unsigned i = 0; i < FPN<F>::N; ++i) {
+        r.w[i] = (if_true.w[i] & mask) | (if_false.w[i] & ~mask);
+    }
+    // Sign is 0 or 1; sign-extend mask to int32 so the AND preserves that range.
+    int32_t m32 = (int32_t)mask;
+    r.sign = (if_true.sign & m32) | (if_false.sign & ~m32);
+    return r;
+}
+
 template <unsigned F> inline FPN<F> FPN_Min(FPN<F> a, FPN<F> b) {
     int diff_sign = a.sign ^ b.sign;
     int a_lt_mag  = FPN_MagGt(b, a);

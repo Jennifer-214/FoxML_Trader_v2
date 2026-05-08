@@ -241,3 +241,49 @@ without scaler fields still load).
 - The audit at `DOCS/V5_9_ML_HARDENING_AUDIT.md` finding #3
   for the full diagnosis of the v5.8 imbalance issue
 - `ML_Headers/FeatureStandardizer.hpp` — implementation reference
+
+## Multi-Horizon training (v5.10.0a-final / v5.11.41+)
+
+Train N models in one pass, each predicting at a different forward
+horizon (e.g. 1000 / 7500 / 15000 ticks). Engine ensemble auto-detects
+horizon siblings and combines their predictions via Bandit-Exp3
+weighted blend per regime.
+
+### Operator workflow
+
+In foxml_suite Training panel:
+
+1. **Set horizons** in the Horizons (CSV) field — e.g. `1000,7500,15000`
+2. **Set TP/SL barriers** — broadcast (single value) OR positional (N values matching horizon count)
+3. **Set Run Name (prefix)** — e.g. `btc_5min_v1` (worker auto-appends `_horizon_<H>` per horizon)
+4. **Click Collect Multi-Horizon** — collects features once, then loops over horizons recomputing labels (for inspecting per-horizon class distribution before training)
+5. **Click Train Multi-Horizon** — trains N models sequentially. For each horizon: full XGBoost training + walk-forward CV + held-out validation + auto-stamp. Output saved to:
+   ```
+   models/<class>/<run_name>_horizon_<H>/<role>.json
+   models/<class>/<run_name>_horizon_<H>/<role>.json.stamp
+   models/<class>/<run_name>_horizon_<H>/summary.txt
+   ```
+6. **Past Runs panel** shows all N horizons grouped under `<run_name> [N horizons]` with per-horizon WF + held-out + gap metrics.
+
+### Engine deployment
+
+Set in `engine.cfg` (or per-core override):
+```
+core_0_model_dir = models/classification/btc_5min_v1
+```
+Engine ensemble auto-detect scans for `<base>_horizon_<H>` siblings; loads all matching horizons; runs Bandit-Exp3 weighted prediction blend per regime. Per-horizon weights persist across restarts in `data/bandit_state.json`.
+
+### Stamping + signature verification
+
+If `auto_stamp_secret` is set in cfg, all trained models are HMAC-signed.
+Engine verifies signature at load (`held_out_gate_strict=1` refuses
+mismatched stamps). Empty secret = devmode (engine accepts any stamp,
+just checks format/SHA/registry hash). For production: set a long random
+secret in engine.cfg + retain it across operator deployments.
+
+### Caveats
+
+- **`multi_horizon_max_threads` defaults to 1 (forced serial)** post-v5.11.45 due to libgomp/pthread interaction in XGBoost (see plans/2026-05-07-deferred-items.md "v5.11.45 landmine"). Setting `>=2` opt-in for parallel training; may segfault.
+- **Multiclass labels with rare classes**: per-sample weight cap at 5.0 (v5.11.46) to prevent gradient overflow during XGBoost histogram building.
+- **Stamps**: written ALWAYS post-v5.11.47 regardless of legacy `auto_stamp_on_held_out` cfg flag.
+- **Horizon-mismatch refusal**: engine REFUSES to load a model from `<dir>_horizon_<H>` if the stamp's `label_lookahead_ticks` doesn't match `<H>` (catches dir rename / copy mistakes; v5.11.42).

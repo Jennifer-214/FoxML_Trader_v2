@@ -487,15 +487,40 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         // resolved_strategy_id is per-tick output; restore it for display
         // continuity but the next rebuild will overwrite anyway.
         ctx.resolved_strategy_id = s.resolved_strategy_id;
-        // v5.4.0: persist strategy_state_kind so the load path can call
-        // Strategy_InitPerCore with the correct kind. The actual void*
-        // strategy_state pointer is reallocated fresh on load; persistence
-        // is kind-only (see SHARDED_SNAPSHOT_VERSION 4 doc).
-        // NOTE: Strategy_InitPerCore call moved to engine boot AFTER this
-        // load returns — the engine's init path checks strategy_state_kind
-        // and dispatches. This separation keeps the persist layer free of
-        // Strategy_*Init dependencies.
-        ctx.strategy_state_kind  = s.strategy_state_kind;
+        // v5.4.0: persisted `strategy_state_kind` was originally intended
+        // to drive Strategy_InitPerCore at boot (the comment said "engine's
+        // init path checks strategy_state_kind and dispatches"). In
+        // practice, EngineSharded.hpp:1183 dispatches on
+        // `state.cores[i].strategy_id` (cfg-derived), NOT the loaded kind.
+        // The persisted field is therefore dead weight — and worse,
+        // restoring it here corrupts the invariant that `strategy_state_kind`
+        // describes the C++ type of the allocated `strategy_state` pointer.
+        //
+        // Concrete repro of the kind/state mismatch the restore introduced:
+        //
+        //   Run 1 cfg: core_0_strategy=auto         → state=nullptr, kind=AUTO
+        //              snapshot saves kind=AUTO.
+        //   Run 2 cfg: core_0_strategy=mean_reversion
+        //              Strategy_InitPerCore(MR) → state=non-null MR, kind=MR.
+        //              Snapshot Load (this site) → kind = AUTO (from snap).
+        //              Net: state=non-null + kind=AUTO. Mismatch.
+        //
+        // At shutdown Strategy_FreePerCore can't dispatch the type-correct
+        // `delete` — pre-v5.11.11 it hit the `default:` branch and WARN'd
+        // ("unknown kind ..."), post-v5.11.11 it quietly took the AUTO/NONE
+        // branch and leaked the state pointer (~1-4 KB; arena cleanup at
+        // shutdown reclaims either way).
+        //
+        // v5.11.15 (2026-05-07) — root-cause fix. Stop restoring kind from
+        // snapshot. The persisted byte stays in the format (snapshot v4+
+        // back-compat — we still READ it at line 420 above, just don't
+        // APPLY it here). Future snapshot versions can drop the field
+        // entirely without breaking older saves.
+        //
+        // The kind invariant is now: set ONLY by Strategy_InitPerCore at
+        // boot (StrategyLifecycle.hpp:160) and Strategy_FreePerCore on
+        // teardown (StrategyLifecycle.hpp:432). No other site mutates it.
+        (void)s.strategy_state_kind;  // intentionally unused; see comment.
         ctx.allocated_balance    = s.allocated_balance;
         ctx.entries_processed    = s.entries_processed;
         ctx.exits_processed      = s.exits_processed;

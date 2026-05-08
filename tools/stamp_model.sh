@@ -21,6 +21,9 @@
 # v5.9.5c — added 9 more flags for full inference cfg parity with the
 # in-process emit at Backtest_RunFullValidation. Closes the
 # half-wired StampInferenceCfgInputs gap caught at v5.9.5 sprint exit.
+# v5.11.18a — added --feature-mask for per-core feature_mask binding
+# (CRITICAL gap from /parity-check 2026-05-07; train-time mask must
+# match runtime cfg mask or model produces drifted predictions).
 #
 # Usage:
 #   ./tools/stamp_model.sh \
@@ -43,6 +46,7 @@
 #       [--bandit-blend-ratio 0.30] \
 #       [--fee-rate-maker 0.00075 --fee-rate-taker 0.00100] \
 #       [--training-poll-interval 100] \
+#       [--feature-mask 0xFFFFFFFFFFFFFFFF] \
 #       [--force]
 #
 # Refuses to write if gap > gap_threshold unless --force is passed.
@@ -90,6 +94,9 @@ XGB_MIN_CHILD_WEIGHT=""
 XGB_SEED=""
 XGB_TREE_METHOD=""
 BUILD_FLAGS_HASH_HEX=""
+# v5.11.18a — per-core feature_mask default (empty = don't emit, equivalent
+# to all-on default in cfg). Operator passes --feature-mask 0xHEX to set.
+FEATURE_MASK_HEX=""
 FORCE=0
 
 usage() {
@@ -132,6 +139,11 @@ while [[ $# -gt 0 ]]; do
         --xgb-tree-method)                   XGB_TREE_METHOD="$2";        shift 2 ;;
         # v5.9.5h Phase 10 — build flags fingerprint
         --build-flags-hash)                  BUILD_FLAGS_HASH_HEX="$2";   shift 2 ;;
+        # v5.11.18a — per-core feature mask (uint64 hex). Emitted at canonical
+        # position 21 to match in-process stamp_write_for_model. Skip
+        # entirely when not supplied — keeps stamps trained against the
+        # all-on default 0xFFFF..F bytewise-identical to pre-v5.11.18a.
+        --feature-mask)                      FEATURE_MASK_HEX="$2";       shift 2 ;;
         --force)                  FORCE=1;                    shift ;;
         -h|--help)                usage ;;
         *) echo "[stamp] unknown arg: $1" >&2; usage ;;
@@ -310,6 +322,24 @@ fi
 # compares stamp's hash vs current build's at boot.
 if [[ -n "$BUILD_FLAGS_HASH_HEX" ]]; then
     CANONICAL="${CANONICAL}build_flags_hash=${BUILD_FLAGS_HASH_HEX}
+"
+fi
+
+# v5.11.18a — per-core feature mask (canonical body position 21). 16-char
+# hex (no 0x prefix; matches in-process emitter's %016lx). Emitted only
+# when --feature-mask is supplied — when absent, stamps trained against
+# the all-on default 0xFFFFFFFFFFFFFFFF stay bytewise-identical to
+# pre-v5.11.18a stamps. Verifier compares against the runtime cfg's
+# per-core feature_mask at load time and refuses on mismatch in strict
+# mode (CRITICAL gap from /parity-check 2026-05-07).
+if [[ -n "$FEATURE_MASK_HEX" ]]; then
+    # Strip 0x/0X prefix if operator passed one, then lowercase + zero-pad
+    # to 16 chars to match in-process %016lx output.
+    FM_CLEAN="${FEATURE_MASK_HEX#0x}"
+    FM_CLEAN="${FM_CLEAN#0X}"
+    FM_LOWER=$(echo "$FM_CLEAN" | tr 'A-Z' 'a-z')
+    FM_PADDED=$(printf "%016s" "$FM_LOWER" | tr ' ' '0')
+    CANONICAL="${CANONICAL}feature_mask=${FM_PADDED}
 "
 fi
 

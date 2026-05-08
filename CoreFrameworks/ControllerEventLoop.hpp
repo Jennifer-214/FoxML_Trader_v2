@@ -50,6 +50,7 @@
 #include "../ML_Headers/ROR_regressor.hpp"        // v5.1.0 — RORRegressor on CoreContext::slow_state
 #include "../ML_Headers/FlowFeatures.hpp"         // v5.1.0 — FlowState etc on CoreContext::slow_state
 #include "../MemHeaders/HealthLog.hpp"
+#include "../MemHeaders/InitArena.hpp"  // v5.11.6.A — unified mmap arena for init allocations
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.9.0b: FEATURE_REGISTRY_HASH() in entry log           // v5.4.0 Phase 0.1 — structured JSONL diagnostic log
 #include "../Strategies/StrategyParameters.hpp"
 // Strategies/StrategyLifecycle.hpp included LATER (post-EventLoopState
@@ -567,11 +568,24 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].sp_cycles_total.store(0, std::memory_order_relaxed);
         state->cores[i].sp_yield_count.store(0, std::memory_order_relaxed);
         state->cores[i].sp_state.store(0, std::memory_order_relaxed);
-        // v5.1.0 (per-core data plane): heap-allocate each engine's
-        // slow_state. ~3MB per engine × 16 cores would overflow default
-        // stack if inline. Freed in EventLoopState_Free. Caller MUST
-        // call _Free before re-_Init (otherwise leaks).
-        state->cores[i].slow_state = new CoreSlowState<F>();
+        // v5.1.0 (per-core data plane): per-engine slow_state allocation.
+        // ~3MB per engine × 16 cores would overflow default stack if inline.
+        //
+        // v5.11.6.A — InitArena-backed allocation (replaces `new`). The arena
+        // bumps from a single mmap'd region (MAP_POPULATE pre-faulted at
+        // engine boot). Engine sets InitArena_Global() before this Init;
+        // tests leave it nullptr and get the `new` fallback.
+        if (auto* arena = tt::InitArena_Global()) {
+            void* mem = tt::InitArena_Alloc(arena, sizeof(CoreSlowState<F>),
+                                             alignof(CoreSlowState<F>));
+            if (mem) {
+                state->cores[i].slow_state = new (mem) CoreSlowState<F>();
+            } else {
+                state->cores[i].slow_state = new CoreSlowState<F>();
+            }
+        } else {
+            state->cores[i].slow_state = new CoreSlowState<F>();
+        }
         CoreSlowState_Init(state->cores[i].slow_state);
         // v5.4.0 Phase 1.1: per-strategy state. Allocated by
         // Strategy_InitPerCore at engine boot AFTER cfg is read so the
@@ -653,9 +667,26 @@ inline void EventLoopState_InitLegacy(EventLoopState<F>* state,
 //======================================================================================================
 template <unsigned F>
 inline void EventLoopState_Free(EventLoopState<F>* state) {
+    // v5.11.26 NOTE: writer thread cleanup happens at OrderManagerState's
+    // destructor (RAII at scope exit, OrderManager.hpp:316). Don't stop
+    // the writer here — the test might still use `oms` after this Free
+    // returns; premature stop would race with subsequent OMS work.
     for (int i = 0; i < MAX_EXECUTION_CORES; ++i) {
         if (state->cores[i].slow_state) {
-            delete state->cores[i].slow_state;
+            // v5.11.6.A — if the arena owns this allocation, it's freed
+            // by InitArena_Destroy at engine shutdown — skip delete here.
+            // Otherwise (test path / no arena), `new` allocated it and
+            // we delete normally.
+            //
+            // Placement-new'd objects need explicit destructor call before
+            // the arena reclaims their memory, but CoreSlowState is
+            // trivially destructible (no pointers it owns; all FPN +
+            // POD). For non-trivial types, add a manual ->~CoreSlowState<F>()
+            // here when the arena is in use.
+            if (!tt::InitArena_Owns(tt::InitArena_Global(),
+                                     state->cores[i].slow_state)) {
+                delete state->cores[i].slow_state;
+            }
             state->cores[i].slow_state = nullptr;
         }
         // strategy_state is freed by caller via Strategy_FreePerCore
@@ -2026,6 +2057,14 @@ inline void EventLoop_RebuildOneCore(
             // parameter; ml_ctx is the only path ML_BuildParameters has into
             // it without changing the dispatcher signature.
             ml_ctx.out_strategy_halt_reason    = &state->cores[slot].strategy_halt_reason;
+            // v5.11.18 main — per-core feature mask. Pointer to the cfg
+            // field directly; no copy. Features_PackAll inside
+            // ML_BuildParameters reads through this pointer when non-null.
+            // When operator hasn't set core_<slot>_feature_mask in cfg,
+            // the cfg parser at v5.11.18a defaults to 0xFFFF..F (all
+            // features enabled); pointer is non-null but mask = all-on
+            // produces bytewise-identical output to pre-v5.11.18.
+            ml_ctx.feature_mask = &resolved_cfg.core_feature_mask[slot];
             dispatch_ctx = &ml_ctx;
         }
         // v4.0.4: stash the resolved strategy for GUI display. For non-AUTO

@@ -31,6 +31,8 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netdb.h>
+#include <netinet/tcp.h>  // v5.11.0.C — TCP_NODELAY / IPPROTO_TCP
+#include <errno.h>        // v5.11.0.C — strerror(errno) on setsockopt fail
 #include <poll.h>
 #include <time.h>
 #include <csignal>
@@ -44,6 +46,7 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../CoreFrameworks/OrderGates.hpp"
 #include "../CoreFrameworks/Notify.hpp"  // Phase 8b — disconnect alerts
+#include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.A — std::from_chars wrapper
 
 using namespace std;
 
@@ -148,6 +151,20 @@ static inline int binance_tcp_connect(const char *host, const char *port) {
     }
 
     freeaddrinfo(res);
+
+    if (sockfd != -1) {
+        // v5.11.0.C — Disable Nagle's algorithm. Without this, TCP can
+        // buffer outgoing packets up to 40ms waiting to coalesce — fine
+        // for bulk transfers, catastrophic for HFT order submit.
+        // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 12.1.
+        // Not fatal if this fails — log it and continue (some interfaces
+        // are TCP_NODELAY-by-default at the NIC level).
+        int one = 1;
+        if (setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) < 0) {
+            fprintf(stderr, "[BINANCE] setsockopt(TCP_NODELAY) failed: %s\n",
+                    strerror(errno));
+        }
+    }
 
     if (sockfd == -1) {
         fprintf(stderr, "[BINANCE] TCP connect failed to %s:%s\n", host, port);
@@ -416,8 +433,23 @@ static inline int binance_ws_send_close(BinanceStream *bs) {
 //
 // no allocations, no recursion, no tree building - just two string scans
 // returns 1 if both fields found, 0 otherwise
+//
+// v5.11.16 (2026-05-07) — DataStream parsing audit. The strstr/strchr calls
+// below are safe to use without explicit length bounds because the caller
+// (binance_ws_read_frame at line 365) writes `buf[pay_len] = '\0'` after
+// every frame read AND clamps pay_len <= buf_size-1, so the null terminator
+// is guaranteed to land within the buffer. v5.11.4.A locale-immune parsing
+// covered the actual number-extraction (FPN_FromString is digit-by-digit;
+// out->price_d / out->volume_d use tt::parse_double_fast). Audit verdict:
+// no behavior change needed; using the `len` parameter (previously unused)
+// as a min-size sanity guard catches truncated frames without scanning.
 //======================================================================================================
 static inline int binance_parse_trade(const char *json, int len, char *price_str, char *qty_str, int *is_buyer_maker) {
+    // v5.11.16 — sanity floor. A real Binance trade message is >= ~120 bytes
+    // (event type + symbol + ids + price + qty + timestamps). Anything under
+    // 20 is a truncated/non-trade frame; bail before scanning.
+    if (len < 20) return 0;
+
     // find "p":" - the price field
     const char *p_key = "\"p\":\"";
     const char *p_pos = strstr(json, p_key);
@@ -711,8 +743,21 @@ static inline int BinanceStream_ReadTick(BinanceStream *bs, DataStream<F> *out) 
 
             out->price  = FPN_FromString<F>(price_str);
             out->volume = FPN_FromString<F>(qty_str);
-            out->price_d  = atof(price_str);   // stash double for TUI (hidden in I/O path)
-            out->volume_d = atof(qty_str);
+            // v5.11.19 — derive TUI doubles from the FPN values directly
+            // instead of running a separate parse_double_fast pass on the
+            // same string. Saves one parse per tick (BinanceCrypto's hot
+            // ingestion is the only per-tick site) AND eliminates the
+            // parity hazard of two parsers ever rounding differently
+            // (FPN_FromString uses digit-by-digit integer math, locale-
+            // immune by construction; tt::parse_double_fast uses
+            // std::from_chars). The two paths agree for in-spec tick
+            // strings today, but the duplication invited future drift.
+            // FPN_ToDouble is a deterministic conversion (uint64_t
+            // limb math + ldexp combination), so this is a strict
+            // tightening: every TUI double is now provably consistent
+            // with its FPN value.
+            out->price_d  = FPN_ToDouble(out->price);
+            out->volume_d = FPN_ToDouble(out->volume);
             out->is_buyer_maker = is_buyer_maker;
             bs->tick_count++;
             return 1;

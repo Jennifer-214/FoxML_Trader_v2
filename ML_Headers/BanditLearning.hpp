@@ -45,7 +45,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.C — std::from_chars wrapper for locale-immune parsing
 #include <unistd.h>     // unlink, write
+#if defined(__AVX512F__)
+#include <immintrin.h>  // v5.11.7 — AVX-512 vectorization of Bandit_GetProbabilities
+#endif
 
 // default parameters (from FoxML bandit.py + weight_optimizer.py)
 #define BANDIT_GAMMA_DEFAULT       0.05    // exploration rate
@@ -112,6 +116,12 @@ static inline void Bandit_SetArmName(BanditState *b, int arm, const char *name) 
 // p_i = (1 - gamma) * (w_i / sum_w) + gamma / K
 //======================================================================================================
 static inline void Bandit_GetProbabilities(const BanditState *b, double *probs_out) {
+    // v5.11.7 — sum reduction stays SCALAR for bytewise determinism.
+    // _mm512_reduce_add_pd does tree reduction (different rounding than
+    // left-to-right scalar sum), so the same set of doubles can produce
+    // different bytes. Hot-path is the elementwise normalize+floor (which
+    // IS deterministic across SIMD vs scalar since each element is
+    // computed independently with the same IEEE-754 ops).
     double sum_w = 0.0;
     for (int i = 0; i < b->n_arms; i++)
         sum_w += b->weights[i];
@@ -124,6 +134,39 @@ static inline void Bandit_GetProbabilities(const BanditState *b, double *probs_o
         return;
     }
 
+#if defined(__AVX512F__)
+    // v5.11.7 — vectorize the elementwise normalize + affine-blend + floor.
+    // Audit Part 5: weights[BANDIT_MAX_ARMS=8] fits cleanly in __m512d.
+    // n_arms is variable (typical=5); mask to lower n_arms lanes only.
+    //
+    // Bytewise determinism: each element computed via IEEE-754 div/mul/add/max
+    // with identical operands as the scalar path. Same input → same output
+    // bit-for-bit. Verified by v5.11.7 EXTENSIBILITY tests below.
+    // BYTEWISE-DETERMINISM CRITICAL: must match scalar IEEE-754 op order.
+    //   - _mm512_div_pd(x, y) NOT _mm512_mul_pd(x, 1/y)  (1-ULP could differ)
+    //   - _mm512_fmadd_pd(a, b, c) for `a*b + c` — gcc -O3 with default
+    //     -ffp-contract=fast fuses scalar `(1-gamma)*normd + g/K` into FMA,
+    //     so the AVX path must use FMA too to stay bytewise-equivalent.
+    //     If the build ever switches to -ffp-contract=off, swap to
+    //     separate _mm512_mul_pd + _mm512_add_pd.
+    const __mmask8 mask = (__mmask8)((1u << b->n_arms) - 1u);
+    __m512d w         = _mm512_loadu_pd(b->weights);
+    __m512d sum_w_vec = _mm512_set1_pd(sum_w);
+    __m512d normd     = _mm512_div_pd(w, sum_w_vec);
+    __m512d one_min_g = _mm512_set1_pd(1.0 - b->gamma);
+    __m512d g_over_K  = _mm512_set1_pd(b->gamma / K);
+    __m512d probs     = _mm512_fmadd_pd(one_min_g, normd, g_over_K);
+    __m512d floor     = _mm512_set1_pd(1e-10);
+    probs             = _mm512_max_pd(probs, floor);
+    // Mask-store: write only the lower n_arms lanes; upper lanes remain
+    // unwritten (caller must size probs_out at BANDIT_MAX_ARMS=8 doubles
+    // per the function contract).
+    _mm512_mask_storeu_pd(probs_out, mask, probs);
+    // Scalar sum of the just-written probs (preserves left-to-right order
+    // for bytewise determinism vs prior version).
+    double prob_sum = 0.0;
+    for (int i = 0; i < b->n_arms; i++) prob_sum += probs_out[i];
+#else
     double prob_sum = 0.0;
     for (int i = 0; i < b->n_arms; i++) {
         double normalized = b->weights[i] / sum_w;
@@ -131,10 +174,22 @@ static inline void Bandit_GetProbabilities(const BanditState *b, double *probs_o
         if (probs_out[i] < 1e-10) probs_out[i] = 1e-10;
         prob_sum += probs_out[i];
     }
+#endif
     // renormalize
     if (prob_sum > 0.0) {
+#if defined(__AVX512F__)
+        // BYTEWISE-DETERMINISM CRITICAL: scalar `probs[i] /= prob_sum` is
+        // a divide. _mm512_mul_pd(p, 1/prob_sum) would be mul-by-reciprocal
+        // (1-ULP could differ). Use _mm512_div_pd to match scalar exactly.
+        const __mmask8 mask = (__mmask8)((1u << b->n_arms) - 1u);
+        __m512d p           = _mm512_maskz_loadu_pd(mask, probs_out);
+        __m512d psum_vec    = _mm512_set1_pd(prob_sum);
+        p                   = _mm512_div_pd(p, psum_vec);
+        _mm512_mask_storeu_pd(probs_out, mask, p);
+#else
         for (int i = 0; i < b->n_arms; i++)
             probs_out[i] /= prob_sum;
+#endif
     }
 }
 
@@ -403,8 +458,10 @@ static inline int Bandit_JsonParseDoubleArray(const char* p, double* out,
     while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '[') ++p;
     int count = 0;
     while (*p && *p != ']' && count < max_count) {
-        char* end_ptr = NULL;
-        double v = strtod(p, &end_ptr);
+        // v5.11.4.C — locale-immune via std::from_chars (replaces strtod
+        // which honors LC_NUMERIC). Same end-pointer "no progress" sentinel.
+        const char* end_ptr = nullptr;
+        double v = tt::parse_double_fast_advance(p, &end_ptr);
         if (end_ptr == p) break;  // no number consumed
         out[count++] = v;
         p = end_ptr;
@@ -454,48 +511,55 @@ static inline int Bandit_LoadJSON(BanditState* bandits,
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (fsize <= 0 || fsize > 1024 * 1024) {  // 1MB cap; bandit JSON is tiny
+    // v5.11.6.C — replace malloc with thread-local static buffer.
+    // bandit_state.json is operator-controlled and tiny (<100 KB in
+    // realistic deployments). Cap at 256 KB to keep the buffer on .bss
+    // not the stack and to enforce a tighter bound than the prior 1 MB.
+    // Removes the 13 `free(buf)` cleanup sites that previously had to
+    // be threaded through every error-return.
+    constexpr size_t BUF_CAP = 256 * 1024;
+    if (fsize <= 0 || (size_t)fsize >= BUF_CAP) {
         fclose(f);
         return 0;
     }
-    char* buf = (char*)malloc((size_t)fsize + 1);
-    if (!buf) { fclose(f); return 0; }
+    static thread_local char buf_storage[BUF_CAP];
+    char* buf = buf_storage;
     size_t read_n = fread(buf, 1, (size_t)fsize, f);
     fclose(f);
     buf[read_n] = '\0';
 
     // format_version check
     const char* p = Bandit_JsonFindKey(buf, "format_version");
-    if (!p) { free(buf); return 0; }
+    if (!p) { return 0; }
     int fmt = (int)strtol(p, NULL, 10);
-    if (fmt != BANDIT_STATE_FORMAT_VERSION) { free(buf); return 0; }
+    if (fmt != BANDIT_STATE_FORMAT_VERSION) { return 0; }
 
     // n_arms check
     p = Bandit_JsonFindKey(buf, "n_arms");
-    if (!p) { free(buf); return 0; }
+    if (!p) { return 0; }
     int file_n_arms = (int)strtol(p, NULL, 10);
-    if (file_n_arms != expected_n_arms) { free(buf); return 0; }
+    if (file_n_arms != expected_n_arms) { return 0; }
 
     // n_regimes check (file may have more, never fewer)
     p = Bandit_JsonFindKey(buf, "n_regimes");
-    if (!p) { free(buf); return 0; }
+    if (!p) { return 0; }
     int file_n_regimes = (int)strtol(p, NULL, 10);
-    if (file_n_regimes < n_regimes) { free(buf); return 0; }
+    if (file_n_regimes < n_regimes) { return 0; }
 
     // SHA check (only if caller supplied expected)
     if (expected_model_bundle_sha256_hex && expected_model_bundle_sha256_hex[0]) {
         p = Bandit_JsonFindKey(buf, "model_bundle_sha256");
-        if (!p) { free(buf); return 0; }
+        if (!p) { return 0; }
         // Skip leading whitespace + open quote
         while (*p == ' ' || *p == '\t') ++p;
-        if (*p != '"') { free(buf); return 0; }
+        if (*p != '"') { return 0; }
         ++p;
         const char* end = strchr(p, '"');
-        if (!end) { free(buf); return 0; }
+        if (!end) { return 0; }
         size_t sha_len = (size_t)(end - p);
         if (sha_len != strlen(expected_model_bundle_sha256_hex) ||
             memcmp(p, expected_model_bundle_sha256_hex, sha_len) != 0) {
-            free(buf);
+            
             return 0;
         }
     }
@@ -503,14 +567,14 @@ static inline int Bandit_LoadJSON(BanditState* bandits,
     // Per-regime parse: walk to "regimes" array, then for each "regime_id"
     // entry, populate weights / cum_reward / pulls.
     p = Bandit_JsonFindKey(buf, "regimes");
-    if (!p) { free(buf); return 0; }
+    if (!p) { return 0; }
     while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '[') ++p;
 
     for (int r = 0; r < n_regimes; ++r) {
         // Find next "regime_id" past current p
         const char* rid_p = Bandit_JsonFindKey(p, "regime_id");
         if (!rid_p) {
-            free(buf);
+            
             return 0;
         }
         int regime_id = (int)strtol(rid_p, NULL, 10);
@@ -559,7 +623,7 @@ static inline int Bandit_LoadJSON(BanditState* bandits,
         p = end_brace ? end_brace + 1 : rid_p + 1;
     }
 
-    free(buf);
+    
     return 1;
 }
 

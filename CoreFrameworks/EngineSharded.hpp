@@ -448,6 +448,25 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
                     (unsigned long)h->stamp_build_flags_hash,
                     (unsigned long)tt::BUILD_FLAGS_HASH());
             }
+            // v5.11.42 D.1 — xgb_train_nthread mode-divergence WARN.
+            // Stamp's nthread=1 + cfg nthread>1 → operator trained in
+            // parallel multi-horizon mode (which pins to 1) but engine
+            // would now retrain at higher nthread → bytewise model
+            // divergence. Forensic only — model already trained, can't
+            // be retrained at load. Operator notification.
+            if (h->has_stamp_xgb_train_nthread &&
+                h->stamp_xgb_train_nthread != cfg.xgb_train_nthread) {
+                fprintf(stderr,
+                    "[xgb_train_nthread] WARN: %s role=%s stamp claims "
+                    "xgb_train_nthread=%d but cfg.xgb_train_nthread=%d "
+                    "(mode divergence; stamp=1 indicates parallel multi-horizon "
+                    "training, cfg>1 indicates serial mode would diverge "
+                    "bytewise on retrain; set acknowledge_cross_binary_version_drift=1 "
+                    "to suppress)\n",
+                    loc, role_name,
+                    h->stamp_xgb_train_nthread,
+                    cfg.xgb_train_nthread);
+            }
         }
 
         // === Subgroup 2: inference_cfg drift (Tier 1 REFUSE in strict;
@@ -834,6 +853,28 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     ShardedTradeLog_Init(&g_sharded_trade_log, bcfg.symbol);
     oms.trade_log = &g_sharded_trade_log;
 
+    // v5.11.6.A — InitArena: single mmap'd region for all init-time
+    // allocations (PortfolioController rolling stats × 3 + cumdelta_state +
+    // per-core CoreSlowState + per-core strategy state). MAP_POPULATE
+    // pre-faults all pages at boot so first slow-path cycle never page-faults.
+    //
+    // Sizing (measured at boot 2026-05-07):
+    //   - CoreSlowState<64> ≈ 278 KB / core × 16 cores = 4.4 MB
+    //   - RollingStats × 3 + CumDeltaState  ≈ 60 KB
+    //   - Strategy state × 16 cores         ≈ 80 KB
+    //   - Headroom for future growth        ≈ ~3 MB
+    //   Total: 8 MB. Within the mlockall envelope (RLIMIT_MEMLOCK ≥ 256 MB
+    //   per the deployment runbook).
+    static tt::InitArena g_init_arena;
+    // v5.11.22 — operator-gated MAP_HUGETLB. Default 0 = use 4 KB pages.
+    // Set cfg.init_arena_use_hugepages=1 + reserve hugepages at the OS
+    // level (sudo sysctl -w vm.nr_hugepages=4) for ~512× fewer TLB
+    // entries on the 8 MB arena. InitArena_Create silently falls back
+    // to non-HUGETLB on failure (with a stderr WARN) — never fatal.
+    int arena_extra_flags = cfg.init_arena_use_hugepages ? MAP_HUGETLB : 0;
+    g_init_arena = tt::InitArena_Create(8 * 1024 * 1024, arena_extra_flags);
+    tt::InitArena_Global() = &g_init_arena;
+
     EventLoopState<F> state;
     EventLoopState_Init(&state, &oms);
 
@@ -1020,10 +1061,19 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // through so per-role load suppresses minor-drift WARN
                 // when operator deliberately deploys a v5.x.y model on
                 // a v5.x.z engine.
+                // v5.11.18 main — pass per-core feature_mask through. When
+                // operator's cfg has core_<i>_feature_mask=0xHEXVAL set
+                // (default 0xFFFF..F = all features enabled), the stamp's
+                // feature_mask_train must match or load refuses. When mask
+                // is the all-on default, expected_feature_mask=0 (skip
+                // check; legacy stamps still load).
+                uint64_t mask_for_load = (cfg.core_feature_mask[i] != 0xFFFFFFFFFFFFFFFFULL)
+                    ? cfg.core_feature_mask[i] : 0;
                 loaded = CoreModelZoo_LoadFromDir(&ml_zoos[i], cfg.core_model_dir[i],
                     backend, /*secret=*/nullptr, /*gap=*/0.05,
                     /*strict=*/cfg.held_out_gate_strict,
-                    cfg.acknowledge_cross_binary_version_drift);
+                    cfg.acknowledge_cross_binary_version_drift,
+                    /*expected_feature_mask=*/mask_for_load);
                 fprintf(stderr, "[sharded] core %d: zoo from %s, %d role(s) loaded\n",
                         i, cfg.core_model_dir[i], loaded);
             } else {
@@ -1278,7 +1328,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     static TUISharedState g_shared;
     memset(&g_shared, 0, sizeof(g_shared));
     g_shared.config_path = "engine_sharded.cfg";
-    g_shared.active_idx = 0;
+    TUISnapshot_InitSeq(&g_shared);  // v5.11.3.B — seq starts at 0 (idx=0, parity=stable)
     g_shared.quit_requested = 0;
     g_shared.pause_requested = 0;
     g_shared.reload_requested = 0;
@@ -1783,10 +1833,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // Populate TUISnapshot for the GUI — same double-buffered
                 // pattern as legacy engine in main.cpp:845-912.
                 {
-                    int back = !__atomic_load_n(&g_shared.active_idx, __ATOMIC_ACQUIRE);
-                    int front = !back;
-                    TUISnapshot *bs = &g_shared.snapshots[back];
-                    const TUISnapshot *fs = &g_shared.snapshots[front];
+                    // v5.11.3.B — seqlock publish: parity bit flips odd → fill
+                    // back → flip even (idx toggled). Reader retries if mid-write.
+                    auto pub = TUISnapshot_Publish_Begin(&g_shared);
+                    TUISnapshot *bs = pub.back;
+                    const TUISnapshot *fs = pub.front;
                     // carry graph history ring buffers from front buffer
                     memcpy(bs->price_history, fs->price_history, sizeof(bs->price_history));
                     memcpy(bs->volume_history, fs->volume_history, sizeof(bs->volume_history));
@@ -1815,13 +1866,60 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     TUI_PopulateAdvancedTopology(bs, &state, &oms);
                     // v4.7.18: paper-reset seq for history-clearing panels
                     bs->paper_reset_seq = (uint32_t)g_shared.paper_reset_seq;
+                    // v5.11.4.B — health log WARN on first non-zero observation
+                    // of async log writer trouble (parity-check Section J).
+                    // One-shot per process: the moment ring_full_spins or
+                    // writer_realloc_failed_count cross zero, emit a single
+                    // WARN line. Operator can grep the health log for the
+                    // string to detect silent writer-thread distress.
+                    {
+                        static uint64_t prev_ring_full = 0;
+                        static uint64_t prev_realloc_failed = 0;
+                        if (bs->oms_log_ring_full_spins != prev_ring_full) {
+                            if (prev_ring_full == 0) {
+                                tt::Health_Log(tt::HEALTH_WARN, "oms_log", -1,
+                                    "async writer ring saturation: ring_full_spins=%llu "
+                                    "(drainer is spin-waiting for writer to drain; "
+                                    "investigate disk health or bump ring size)",
+                                    (unsigned long long)bs->oms_log_ring_full_spins);
+                            }
+                            prev_ring_full = bs->oms_log_ring_full_spins;
+                        }
+                        if (bs->oms_log_writer_realloc_failed != prev_realloc_failed) {
+                            if (prev_realloc_failed == 0) {
+                                tt::Health_Log(tt::HEALTH_CRITICAL, "oms_log", -1,
+                                    "async writer realloc OOM: writer_realloc_failed=%llu "
+                                    "(events may be dropped; entries[] cannot grow)",
+                                    (unsigned long long)bs->oms_log_writer_realloc_failed);
+                            }
+                            prev_realloc_failed = bs->oms_log_writer_realloc_failed;
+                        }
+                        // v5.11.5.D — log_full_drops first-non-zero WARN
+                        // (parity-check J.1). Distinct from ring_full_spins:
+                        // log_full_drops fires when the mmap'd entries[]
+                        // buffer is saturated; events have been DROPPED.
+                        // Operator may need to bump
+                        // ORDER_EVENT_LOG_MAX_CAPACITY or run an offline
+                        // log-rotation step.
+                        static uint64_t prev_log_drops = 0;
+                        if (bs->oms_log_full_drops != prev_log_drops) {
+                            if (prev_log_drops == 0) {
+                                tt::Health_Log(tt::HEALTH_CRITICAL, "oms_log", -1,
+                                    "event log capacity exhausted: log_full_drops=%llu "
+                                    "(events DROPPED; bump ORDER_EVENT_LOG_MAX_CAPACITY "
+                                    "or rotate the log)",
+                                    (unsigned long long)bs->oms_log_full_drops);
+                            }
+                            prev_log_drops = bs->oms_log_full_drops;
+                        }
+                    }
                     // append current data point to graph ring buffers
                     bs->price_history[bs->graph_head] = bs->price;
                     bs->volume_history[bs->graph_head] = bs->volume;
                     bs->pnl_history[bs->graph_head] = bs->total_pnl;
                     bs->graph_head = (bs->graph_head + 1) % TUISnapshot::GRAPH_LEN;
                     if (bs->graph_count < TUISnapshot::GRAPH_LEN) bs->graph_count++;
-                    __atomic_store_n(&g_shared.active_idx, back, __ATOMIC_RELEASE);
+                    TUISnapshot_Publish_End(&g_shared);  // v5.11.3.B — flips parity even, idx toggled
                 }
                 // check GUI quit request
                 if (g_shared.quit_requested) {
@@ -3119,6 +3217,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     fprintf(stderr, "[sharded]   shutting down OMS...\n");
     OrderManager_Shutdown(&oms);
 
+    // v5.11.6.A — InitArena destroy MOVED to after per-struct frees
+    // (Strategy_FreePerCore loop below at line ~3274). Pre-fix ordering
+    // had InitArena_Destroy here BEFORE the strategy free loop, which
+    // would zero out InitArena_Global() while strategy frees were still
+    // running — InitArena_Owns check in Strategy_FreePerCore would
+    // return 0 and `delete` would run on already-unmapped memory.
+    // Closes parity-check 2026-05-07 v5.11.6 sprint-exit Finding 7b.
+
     fprintf(stderr, "[sharded] all threads joined.\n");
     fprintf(stderr, "[sharded] final: produced=%lu consumed=%lu entries=%lu exits=%lu balance=%.4f\n",
             (unsigned long)ticks_produced.load(),
@@ -3198,6 +3304,22 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     for (int c = 0; c < state.registered_count; ++c) {
         tt::Strategy_FreePerCore(&state, c);
     }
+
+    // v5.11.6.D — destroy the init-time arena AFTER all per-struct frees
+    // (above + EventLoopState_Free path). The arena's munmap reclaims
+    // the entire mmap'd region in one syscall. Reset the global FIRST
+    // so any caller that observes the global post-shutdown sees nullptr
+    // (clean fallback). Closes parity-check 2026-05-07 v5.11.6
+    // sprint-exit Finding 7b — the prior ordering ran arena Destroy
+    // BEFORE Strategy_FreePerCore, which would have caused
+    // InitArena_Owns to return 0 and `delete` to run on already-unmapped
+    // memory. Restart path was the trigger; main shutdown path was
+    // OK because process-exit reclaims everything.
+    fprintf(stderr, "[sharded]   destroying init arena (%zu/%zu bytes used)...\n",
+            tt::InitArena_Used(&g_init_arena),
+            g_init_arena.capacity);
+    tt::InitArena_Global() = nullptr;
+    tt::InitArena_Destroy(&g_init_arena);
 
     // Restore previous signal handlers so subsequent code paths see the
     // original behavior (legacy engine doesn't install one, so this resets

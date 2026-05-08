@@ -74,12 +74,44 @@ Per-engine slow_state (RollingStats × 4 + RORRegressor + flow + depth) →
 ## Code Conventions
 
 - `using namespace std;` throughout
-- C-style with templates, no classes
+- C-style with templates, no classes (with one explicit exception:
+  RAII destructors on resource-owning structs that own threads or
+  mmap'd memory, e.g. `~OrderManagerState()` since v5.11.26 — see
+  the destructor comment in `CoreFrameworks/OrderManager.hpp` for
+  the criteria; default is still no destructor)
 - `Pattern_FunctionName` (e.g. `Portfolio_Init`, `BG_Evaluate`)
 - Hot-path math is `FPN<F>` only, no floats (F=64 = 4096-bit)
 - Branchless: mask tricks `-(uint64_t)pass`, word-level mask-select
 - Inline comments explain reasoning, not what
 - **Preserve user's voice in existing comments when editing**
+
+### Test file size discipline (added v5.11.35)
+
+`tests/controller_test.cpp` is currently ~16k lines (1822 tests).
+That's too big — slow to compile, hard to navigate, easy to break
+during refactors. The build system already supports multiple test
+binaries (`depth_recorder_test`, `parity_harness` are precedents).
+
+**Rule:** any test file > 5k lines OR > 100 test sections must be
+split BEFORE adding more tests. Categories should be domain-aligned:
+
+  - `controller_test_engine.cpp` — engine paths, OMS, drainer, gates
+  - `controller_test_features.cpp` — RollingStats, FeatureRegistry,
+    Features_PackAll, FeatureStandardizer
+  - `controller_test_stamps.cpp` — verify_model_stamp,
+    stamp_write_for_model, bash-parity, scaler binding
+  - `controller_test_ml.cpp` — ConfidenceScore, MLBuildContext,
+    CoreModelZoo, BanditLearning, FOREACH_FEATURE
+  - `controller_test_misc.cpp` — utility tests, FPN math, allocators
+
+Helpers (`check`, `tests_passed`, `tests_failed`, `make_event`,
+`fpn_field_eq` etc.) extract into `tests/test_common.hpp`. Each
+split file is a separate `add_executable()` in CMakeLists.txt;
+all run via `ctest` or the existing `./build.sh test` harness.
+
+The actual split for the current `controller_test.cpp` is queued
+as a v5.11.35 sub-ship (deferred from the current session because
+1822 tests at risk warrants a focused effort with rollback anchor).
 
 ## Key Design Decisions
 

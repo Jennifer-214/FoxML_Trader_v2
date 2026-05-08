@@ -311,6 +311,35 @@ struct OrderManagerState {
     std::atomic<uint64_t> total_submitted;
     std::atomic<uint64_t> total_filled;
     std::atomic<uint64_t> total_rejected;
+
+    // v5.11.26 — RAII destructor. Stops the OrderEventLog async writer
+    // thread (v5.11.3.B feature) + closes the disk file + frees the
+    // mmap'd entry buffer when this struct goes out of scope. Idempotent
+    // on default-init / never-Init'd state (StopAsyncWriter checks
+    // writer_thread_active; OrderEventLog_Free checks disk_file/entries
+    // before closing/freeing). Safe to call on stack-allocated test OMS
+    // OR production engine OMS.
+    //
+    // Why RAII (vs explicit OrderManager_Shutdown at every site):
+    //  - 113 OrderManagerState declarations across the codebase, ZERO
+    //    callers of OrderManager_Shutdown today (production-side
+    //    EngineSharded_Run never calls it; OS cleanup at exit only).
+    //  - Tests: 9 sites call OrderManager_Init directly; none call
+    //    Shutdown. Each previously leaked the writer thread; ASAN
+    //    flagged stack-use-after-scope at SPSCRing_TryPop because the
+    //    writer outlived the test scope and read stale stack data.
+    //  - One destructor closes both classes of leak in one place.
+    //
+    // Why safe (no copy/move concerns):
+    //  - grep verified zero copy-init / memcpy of OrderManagerState
+    //    across the codebase. struct is always declared then used by
+    //    pointer; never duplicated.
+    //  - Compiler-generated copy/move constructors would be deleted by
+    //    SPSCRing's deleted copy semantics anyway (mutex-like guarantee
+    //    via std::atomic<uint64_t>).
+    ~OrderManagerState() {
+        OrderManager_Shutdown(this);
+    }
 };
 
 //======================================================================================================
@@ -477,6 +506,13 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
         // mode=0 OR mode=1+no-path → in-memory only.
         OrderEventLog_Init(&oms->event_log);
     }
+    // v5.11.3.C — start the async writer thread. From here on, the drainer's
+    // OrderEventLog_Append calls enqueue + return; the writer thread does
+    // realloc + fwrite + fflush off the drainer's tail-latency path. If
+    // pthread_create fails (rare), Append falls back to inline sync apply
+    // — same correctness guarantees, just no isolation. Tests that don't
+    // want the thread can call OrderEventLog_StopAsyncWriter immediately.
+    OrderEventLog_StartAsyncWriter(&oms->event_log);
 }
 
 //======================================================================================================
@@ -544,7 +580,21 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms,
     int slot = __builtin_ctz((unsigned int)free_mask);
     oms->order_bitmap |= (uint16_t)(1u << slot);
 
-    Order_Init(&oms->orders[slot], id, core_id, type);
+    // v5.11.5.B — encode slot in the upper 4 bits of the order id. The wire
+    // representation (clientOrderId on the exchange) and Order::id both
+    // carry this encoded value. ProcessFillCommand decodes the slot
+    // directly from cmd.order_id for O(1) lookup, replacing the prior
+    // O(MAX_INFLIGHT_ORDERS) linear scan over order_bitmap.
+    //
+    // Encoding: bits 63..60 = slot (0-15, fits in 4 bits since
+    // MAX_INFLIGHT_ORDERS=16); bits 59..0 = monotonic counter.
+    // Lower 60 bits give 1.15e18 unique IDs — a million years at 1/μs.
+    //
+    // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 9. Plan: master plan
+    // v5.11.5 item 3.
+    uint64_t encoded_id = id | ((uint64_t)slot << 60);
+    Order_Init(&oms->orders[slot], encoded_id, core_id, type);
+    id = encoded_id;  // returned to caller + used in cmd.order_id below
     oms->orders[slot].submitted_at_us = (uint64_t)
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
@@ -901,19 +951,23 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
 //======================================================================================================
 template <unsigned F>
 inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Command& cmd) {
-    // Find the matching order by id.
-    int slot = -1;
-    for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
-        if ((oms->order_bitmap & (uint16_t)(1u << i)) == 0) continue;
-        if (oms->orders[i].id == cmd.order_id) { slot = i; break; }
-    }
-
     // WS surprise fill (order_id == 0): log and skip.
     if (cmd.order_id == 0 && cmd.type == (uint8_t)CMD_WS_FILL) {
         std::fprintf(stderr,
                      "[OMS] WS surprise fill (no clientOrderId), ignoring — "
                      "reconciliation will catch it\n");
         return 0;
+    }
+
+    // v5.11.5.B — O(1) slot lookup via encoded id.
+    // Bits 63..60 of cmd.order_id carry the slot index assigned at submit
+    // time. Decode + verify the slot still holds the expected order
+    // (defends against late-arriving callbacks for an already-freed slot
+    // that has been reused for a different order).
+    int slot = (int)((cmd.order_id >> 60) & 0xFu);
+    if ((oms->order_bitmap & (uint16_t)(1u << slot)) == 0 ||
+        oms->orders[slot].id != cmd.order_id) {
+        slot = -1;  // slot freed, or reused for a different order
     }
 
     if (slot < 0) {

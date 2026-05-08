@@ -32,6 +32,7 @@
 #include "DataStream/TradeLog.hpp"
 #include "DataStream/MetricsLog.hpp"
 #include "DataStream/TickRecorder.hpp"
+#include "CoreFrameworks/SystemInit.hpp"  // v5.11.0.A — engine_set_mxcsr_ftz_daz
 
 #ifdef USE_IMGUI_GUI
 #include "GUI/CandleAccumulator.hpp"
@@ -41,6 +42,10 @@
 #include "Licensing.hpp"
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>     // v5.11.0.B — mlockall
+#include <sys/resource.h> // v5.11.0.B — getrlimit / RLIMIT_MEMLOCK
+#include <errno.h>        // v5.11.0.B — strerror(errno) on mlockall fail
+#include <string.h>       // v5.11.0.B — strerror
 
 #ifdef LATENCY_PROFILING
 #include <x86intrin.h>
@@ -117,7 +122,13 @@ static inline void engine_force_close_all(PortfolioController<FP> *ctrl, TradeLo
 // [MAIN]
 //======================================================================================================
 int main(int argc, char *argv[]) {
-    fprintf(stderr, "Tick Trader — Copyright (c) 2026 Jennifer Lewis. All rights reserved.\n");
+    // v5.11.0.A — Set FTZ/DAZ as the FIRST thing in main(). Subnormal stalls
+    // cost up to 100x FPU throughput (microcode trap); critical for HFT
+    // determinism. Linux pthread_create inherits MXCSR, so this covers all
+    // slow-path threads. Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 12.3.
+    tt::engine_set_mxcsr_ftz_daz();
+
+    fprintf(stderr, "FoxML_Trader_v2 — Copyright (c) 2026 Jennifer Lewis. All rights reserved.\n");
     fprintf(stderr, "Licensed under AGPL-3.0-or-later. Commercial license: jenn.lewis5789@gmail.com\n\n");
 
     const char *cfg_path = (argc > 1) ? argv[1] : "engine.cfg";
@@ -143,6 +154,59 @@ int main(int argc, char *argv[]) {
             perror("freopen log_file");
         } else {
             setvbuf(stderr, NULL, _IOLBF, 0); // line-buffered so tail -f works
+        }
+    }
+
+    //==================================================================================================
+    // [v5.11.0.B — LOCK MEMORY PAGES INTO RAM]
+    //==================================================================================================
+    // Audit: LATENCY_OPTIMIZATION_AUDIT.md Part 12.2 — page swap stalls cost
+    // hundreds of microseconds. mlockall locks all pages into physical RAM,
+    // preventing the kernel from swapping out critical execution memory.
+    //
+    // Ordering matters: this fires AFTER freopen(log_file) above, so a fatal
+    // mlockall failure prints to logging/engine.log rather than terminal
+    // stderr (where headless / systemd / nohup operators wouldn't see it).
+    // Trade-off: cfg-parsing memory at lines ~128-129 isn't locked, but cfg
+    // is parsed-and-discarded outside the hot path; not a regression.
+    //
+    // Failure modes:
+    //   1. RLIMIT_MEMLOCK soft limit too low → mlockall returns EAGAIN.
+    //      We probe the limit first and emit a clear WARN before attempting.
+    //   2. Process lacks CAP_IPC_LOCK on non-root → mlockall returns EPERM.
+    //      Operator must run with appropriate caps or as root.
+    // An HFT engine that can't lock its memory is a fail-fast condition
+    // (per HFT-suggestion annotation in plan).
+    //==================================================================================================
+    {
+        struct rlimit rl;
+        if (getrlimit(RLIMIT_MEMLOCK, &rl) == 0) {
+            // Heuristic: need at least the engine's typical resident size.
+            // 256 MB is generous for current sizing (zoo + scaler + bandit
+            // state + cfg + ring buffers); alarm if soft limit is below.
+            const rlim_t kMinMemlock = 256ULL * 1024 * 1024;
+            if (rl.rlim_cur != RLIM_INFINITY && rl.rlim_cur < kMinMemlock) {
+                fprintf(stderr,
+                    "[v5.11.0.B] WARNING: RLIMIT_MEMLOCK soft limit is %llu bytes, "
+                    "want >= %llu. mlockall may fail. Raise via "
+                    "`ulimit -l unlimited` or /etc/security/limits.conf.\n",
+                    (unsigned long long)rl.rlim_cur,
+                    (unsigned long long)kMinMemlock);
+            }
+        }
+        if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+            const int level_required = (ccfg.require_mlockall != 0);
+            fprintf(stderr,
+                "[v5.11.0.B] %s: mlockall failed: %s. "
+                "Engine cannot guarantee deterministic latency without locked pages. "
+                "Run with CAP_IPC_LOCK or as root, and ensure RLIMIT_MEMLOCK is raised "
+                "(`ulimit -l unlimited` for this shell, or /etc/security/limits.conf "
+                "for persistent config).%s\n",
+                level_required ? "FATAL" : "WARN",
+                strerror(errno),
+                level_required ? "" :
+                    " Continuing because require_mlockall=0 (laptop/dev mode).");
+            if (level_required) return 1;
         }
     }
 
@@ -354,7 +418,7 @@ int main(int argc, char *argv[]) {
     // multicore: TUI runs on separate thread, engine thread never renders
     TUISharedState shared = {};
     shared.config_path = cfg_path;
-    shared.active_idx = 0;
+    TUISnapshot_InitSeq(&shared);  // v5.11.3.B — seq starts at 0 (idx=0, parity=stable)
     shared.quit_requested = 0;
     shared.pause_requested = 0;
     shared.reload_requested = 0;
@@ -667,8 +731,13 @@ int main(int argc, char *argv[]) {
             // live update to active snapshot — 3 stores, 1 cache line, no FPN_ToDouble
             // price/volume from stashed doubles (atof during websocket parse)
             // active_count from hot-path bitmap (already in L1 from ExitGate)
+            // v5.11.3.B — legacy single-core live-update: derive active idx from
+            // seq counter (replaces former direct read of active_idx). Functionally
+            // equivalent — same per-field tear envelope as before; the legacy text
+            // TUI tolerates a frame of stale price by design.
             {
-                int tui_idx = __atomic_load_n(&shared.active_idx, __ATOMIC_ACQUIRE);
+                uint64_t s = shared.seq.load(std::memory_order_acquire);
+                int tui_idx = (int)((s >> 1) & 1ULL);
                 shared.snapshots[tui_idx].price = last_stream.price_d;
                 shared.snapshots[tui_idx].volume = last_stream.volume_d;
                 shared.snapshots[tui_idx].active_count = __builtin_popcount(ctrl.portfolio.active_bitmap);
@@ -1004,11 +1073,10 @@ int main(int argc, char *argv[]) {
                 // L1 already warm from rolling stats, regime, balance, strategy dispatch
                 // so this copy reads from L1 hits, not L2 misses (zero additional pollution)
                 {
-                    int back = !__atomic_load_n(&shared.active_idx, __ATOMIC_ACQUIRE);
-                    int front = !back;
-                    // carry graph history from front buffer before overwriting
-                    TUISnapshot *bs = &shared.snapshots[back];
-                    const TUISnapshot *fs = &shared.snapshots[front];
+                    // v5.11.3.B — seqlock publish (legacy single-core mode)
+                    auto pub = TUISnapshot_Publish_Begin(&shared);
+                    TUISnapshot *bs = pub.back;
+                    const TUISnapshot *fs = pub.front;
                     memcpy(bs->price_history, fs->price_history, sizeof(bs->price_history));
                     memcpy(bs->volume_history, fs->volume_history, sizeof(bs->volume_history));
                     memcpy(bs->pnl_history, fs->pnl_history, sizeof(bs->pnl_history));
@@ -1071,7 +1139,7 @@ int main(int argc, char *argv[]) {
                         bs->slow_count  = tui.slow_count;
                     }
 #endif
-                    __atomic_store_n(&shared.active_idx, back, __ATOMIC_RELEASE);
+                    TUISnapshot_Publish_End(&shared);  // v5.11.3.B
                 }
 #endif
             }
@@ -1195,7 +1263,7 @@ int main(int argc, char *argv[]) {
     TickRecorder_Close(&tick_rec);
     DepthRecorder_Close(&depth_rec);
     BinanceStream_Close(&bs);
-    free(pool.slots);
+    OrderPool_DestroyBacking(&pool);
     free(ctrl.rolling_long);
 
     return 0;

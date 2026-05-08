@@ -1224,6 +1224,41 @@ static inline void GUI_Panel_Settings(SettingsState *s,
     ImGui::TextColored(FoxmlColors::comment, "edit + press Enter to apply");
     ImGui::Separator();
 
+    // v5.11.10 — font scale slider. Session-only (no cfg persistence yet).
+    // ImGuiIO::FontGlobalScale is a runtime multiplier on the loaded font
+    // size; values < 1.0 shrink, > 1.0 enlarge. Slightly blurry on
+    // non-integer scales (mitigated by Hack Nerd Font's hinting). For
+    // crisp text on a different size, rebuild the font atlas at startup
+    // with a smaller pixel size — deferred polish.
+    {
+        // v5.11.37 — slider min lowered 0.7 → 0.5 for 1080p operators.
+        // Default 0.6 (set at GuiThread.hpp boot). Persists across
+        // sessions via data/foxml_gui_state.txt. Operator drags →
+        // immediate FontGlobalScale change → atomic-rename write to
+        // disk. Next boot reads back.
+        float font_scale = ImGui::GetIO().FontGlobalScale;
+        ImGui::PushItemWidth(140.0f);
+        if (ImGui::SliderFloat("font scale", &font_scale, 0.5f, 1.5f, "%.2fx")) {
+            ImGui::GetIO().FontGlobalScale = font_scale;
+            // Persist. Atomic write: tmp + rename so a concurrent boot
+            // never sees a partial file. Best-effort; failures are
+            // silent (worst case = next boot uses default 0.6).
+            mkdir("data", 0755);  // EEXIST is fine
+            FILE* tmp = fopen("data/foxml_gui_state.txt.tmp", "w");
+            if (tmp) {
+                fprintf(tmp, "font_scale=%.3f\n", font_scale);
+                fclose(tmp);
+                rename("data/foxml_gui_state.txt.tmp",
+                       "data/foxml_gui_state.txt");
+            }
+        }
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        ImGui::TextColored(FoxmlColors::comment,
+            "(persisted: data/foxml_gui_state.txt)");
+        ImGui::Separator();
+    }
+
     // Tabs match live registered cores when available; else fall back to
     // cfg num_execution_cores; else default 4. Avoids the "I have 4 cores
     // but only 1 tab" bug when num_execution_cores is missing from cfg

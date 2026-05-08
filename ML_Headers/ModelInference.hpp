@@ -24,6 +24,7 @@
 #include "../MemHeaders/HmacSha256.hpp"  // v5.3.0 Phase B — in-process HMAC + SHA-256 (replaces popen paths)
 #include "../Version.hpp"                 // v5.9.2b — ENGINE_VERSION_STRING for cross-major detection
 #include "FeatureStandardizer.hpp"       // v5.9.3a — inline scaler struct on ModelHandle
+#include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.C — std::from_chars wrapper (locale immunity)
 #include <stdio.h>
 #include <string.h>
 #include <locale.h>                       // v5.3.0 Phase B — uselocale for canonical body LC_NUMERIC pinning
@@ -280,6 +281,31 @@ struct ModelHandle {
     uint8_t  has_stamp_fees;
     double   stamp_inf_fee_rate_maker;
     double   stamp_inf_fee_rate_taker;
+    // v5.11.42 D.1 — xgb_train_nthread recorded at training time. Stamp's
+    // value is forensic — engine boot-WARN compares vs cfg.xgb_train_nthread
+    // when stamp's nthread was 1 (indicates parallel multi-horizon mode)
+    // but engine cfg has nthread > 1 (= reload would produce different
+    // model bytes). Doesn't refuse — XGBoost output already trained,
+    // just operator notification.
+    uint8_t  has_stamp_xgb_train_nthread;
+    int      stamp_xgb_train_nthread;
+    // v5.11.42 D.2 — label_lookahead_ticks (aka horizon ticks) recorded
+    // at training time. Engine ensemble auto-detect (CoreModelZoo_AutoDetectEnsemble)
+    // parses horizon from dir name `_horizon_<N>` and compares vs this
+    // field at load. Mismatch = REFUSE load with "stamp says horizon=X
+    // but loaded from dir=horizon_Y" (catches dir rename / copy mistake).
+    uint8_t  has_stamp_label_params;
+    int      stamp_label_lookahead_ticks;
+    double   stamp_label_tp_pct;
+    double   stamp_label_sl_pct;
+    // v5.11.42 D.3 — stamp's scaler_sha256 (forensic; for ensemble-sibling
+    // consistency check). Per-horizon scalers in a Multi-Horizon ensemble
+    // SHOULD be identical (scaler is derived from the shared feature matrix,
+    // not from per-horizon labels). EnsembleModelZoo_LoadFromCfg post-loop
+    // WARNs if siblings have different scaler_sha256 (= mixed training
+    // sessions or accidental sidecar copy mistake).
+    uint8_t  has_stamp_scaler_sha256;
+    char     stamp_scaler_sha256[65];
 };
 
 //======================================================================================================
@@ -324,6 +350,15 @@ inline void Model_Init(ModelHandle<F> *m) {
     m->has_stamp_fees = 0;
     m->stamp_inf_fee_rate_maker = 0.0;
     m->stamp_inf_fee_rate_taker = 0.0;
+    // v5.11.42 — stamp xgb_train_nthread + label params zero-init
+    m->has_stamp_xgb_train_nthread = 0;
+    m->stamp_xgb_train_nthread = 0;
+    m->has_stamp_label_params = 0;
+    m->stamp_label_lookahead_ticks = 0;
+    m->stamp_label_tp_pct = 0.0;
+    m->stamp_label_sl_pct = 0.0;
+    m->has_stamp_scaler_sha256 = 0;
+    m->stamp_scaler_sha256[0] = '\0';
 }
 
 //======================================================================================================
@@ -970,6 +1005,33 @@ struct ModelStampResult {
     // feature_registry_hash refusal flow.
     uint8_t  has_label_registry_hash;
     uint64_t label_registry_hash;
+    // v5.11.18a — per-core feature_mask binding (stamp-side anchor for the
+    // runtime cfg field at ControllerConfig::core_feature_mask[16]). The
+    // stamp persists ONE mask (the training-time mask, which must equal
+    // the cfg mask of the core that produced this model). v5.11.18a only
+    // emits + verifies this field when the mask differs from the all-on
+    // default — legacy stamps + default-cfg-trained models load with
+    // has_feature_mask=0 (skip check), preserving backward compat.
+    //
+    // Verifier compares stamp's feature_mask_train against the runtime
+    // cfg's per-core mask (caller passes which core is loading) and
+    // refuses on mismatch in strict mode. v5.11.18a writes infrastructure
+    // only; v5.11.18 wires Features_PackAll to actually act on the mask.
+    uint8_t  has_feature_mask;
+    uint64_t feature_mask_train;
+    // v5.11.41 — per-horizon label parameters (parsed from stamp body
+    // canonical position 22). Forensic record; no load-time refusal.
+    // Operator can read these via stamp_inspect.sh + grep to identify
+    // which horizon a stamped model belongs to.
+    uint8_t  has_label_params;
+    int      label_lookahead_ticks;
+    double   label_tp_pct;
+    double   label_sl_pct;
+    // v5.11.41 — XGBoost training thread count (canonical position 23).
+    // Forensic; lets operator post-hoc identify which mode (serial
+    // vs parallel multi-horizon) produced a given stamp.
+    uint8_t  has_xgb_train_nthread;
+    int      xgb_train_nthread;
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -1007,7 +1069,11 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                                             double gap_threshold,
                                             int expected_format_version,
                                             uint64_t expected_feature_registry_hash = 0,
-                                            uint64_t expected_label_registry_hash = 0) {
+                                            uint64_t expected_label_registry_hash = 0,
+                                            // v5.11.18a — feature_mask of the core
+                                            // loading the model. 0 = skip check
+                                            // (legacy callers + default mask).
+                                            uint64_t expected_feature_mask = 0) {
     ModelStampResult r;
     r.valid = -1;
     r.reason[0] = '\0';
@@ -1061,6 +1127,19 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     // v5.10.0d — label_registry_hash zero-init (absent in legacy stamps)
     r.has_label_registry_hash = 0;
     r.label_registry_hash = 0;
+    // v5.11.18a — feature_mask zero-init (absent in legacy stamps + in
+    // v5.11.18a stamps trained with the all-on default mask). Caller's
+    // load-time check skips when has_feature_mask=0.
+    r.has_feature_mask = 0;
+    r.feature_mask_train = 0;
+    // v5.11.41 — per-horizon label params + xgb_train_nthread zero-init.
+    // Legacy stamps (pre-v5.11.41) load with has_*=0 → fields skipped.
+    r.has_label_params = 0;
+    r.label_lookahead_ticks = 0;
+    r.label_tp_pct = 0.0;
+    r.label_sl_pct = 0.0;
+    r.has_xgb_train_nthread = 0;
+    r.xgb_train_nthread = 0;
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -1124,9 +1203,9 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 memcpy(model_sha, val, vl);
                 model_sha[vl] = '\0';
             } else if (strcmp(key, "gap") == 0) {
-                r.generalization_gap = atof(val);
+                r.generalization_gap = tt::parse_double_fast(val);
             } else if (strcmp(key, "gap_threshold") == 0) {
-                r.gap_threshold = atof(val);
+                r.gap_threshold = tt::parse_double_fast(val);
             } else if (strcmp(key, "feature_registry_hash") == 0) {
                 // v5.8.1a: parse hex-encoded 64-bit hash. strtoull accepts
                 // 0x-prefix or bare hex. Stamp emits %016lx (no prefix).
@@ -1149,28 +1228,28 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             // sets the relevant has_* flag. Verifier compares against
             // current cfg later (caller-side).
             else if (strcmp(key, "inference_cfg_confidence_threshold_scale") == 0) {
-                r.inference_cfg_confidence_threshold_scale = atof(val);
+                r.inference_cfg_confidence_threshold_scale = tt::parse_double_fast(val);
                 r.has_inference_cfg = 1;
             } else if (strcmp(key, "inference_cfg_barrier_gate_enabled") == 0) {
                 r.inference_cfg_barrier_gate_enabled = atoi(val);
                 r.has_inference_cfg = 1;
             } else if (strcmp(key, "inference_cfg_confidence_hard_block_threshold") == 0) {
-                r.inference_cfg_confidence_hard_block_threshold = atof(val);
+                r.inference_cfg_confidence_hard_block_threshold = tt::parse_double_fast(val);
                 r.has_inference_cfg = 1;
             } else if (strcmp(key, "inference_cfg_held_out_fraction") == 0) {
-                r.inference_cfg_held_out_fraction = atof(val);
+                r.inference_cfg_held_out_fraction = tt::parse_double_fast(val);
                 r.has_inference_cfg = 1;
             } else if (strcmp(key, "inference_cfg_freshness_tau") == 0) {
-                r.inference_cfg_freshness_tau = atof(val);
+                r.inference_cfg_freshness_tau = tt::parse_double_fast(val);
                 r.has_inference_cfg = 1;
             } else if (strcmp(key, "inference_cfg_bandit_blend_ratio") == 0) {
-                r.inference_cfg_bandit_blend_ratio = atof(val);
+                r.inference_cfg_bandit_blend_ratio = tt::parse_double_fast(val);
                 r.has_inference_cfg_bandit = 1;
             } else if (strcmp(key, "inference_cfg_fee_rate_maker") == 0) {
-                r.inference_cfg_fee_rate_maker = atof(val);
+                r.inference_cfg_fee_rate_maker = tt::parse_double_fast(val);
                 r.has_inference_cfg_fees = 1;
             } else if (strcmp(key, "inference_cfg_fee_rate_taker") == 0) {
-                r.inference_cfg_fee_rate_taker = atof(val);
+                r.inference_cfg_fee_rate_taker = tt::parse_double_fast(val);
                 r.has_inference_cfg_fees = 1;
             } else if (strcmp(key, "training_poll_interval") == 0) {
                 r.training_poll_interval = (uint32_t)strtoul(val, nullptr, 10);
@@ -1203,7 +1282,7 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 }
             #define PARSE_XGB_DOUBLE(field) \
                 else if (strcmp(key, "xgb_" #field) == 0) { \
-                    r.xgb_##field = atof(val); \
+                    r.xgb_##field = tt::parse_double_fast(val); \
                     r.has_xgb_hyperparams = 1; \
                 }
             PARSE_XGB_INT(max_depth)
@@ -1241,6 +1320,31 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             else if (strcmp(key, "label_registry_hash") == 0) {
                 r.label_registry_hash = (uint64_t)strtoull(val, nullptr, 16);
                 r.has_label_registry_hash = 1;
+            }
+            // v5.11.18a — feature mask (position 21). Hex-encoded uint64
+            // bitmap of features active during training. Stamp emits
+            // %016lx (no prefix). Verifier compares against runtime cfg
+            // mask in 3-tier strict-mode. Legacy stamps (no field) load
+            // with has_feature_mask=0 → check skipped.
+            else if (strcmp(key, "feature_mask") == 0) {
+                r.feature_mask_train = (uint64_t)strtoull(val, nullptr, 16);
+                r.has_feature_mask = 1;
+            }
+            // v5.11.41 — per-horizon label params (canonical position 22).
+            else if (strcmp(key, "label_lookahead_ticks") == 0) {
+                r.label_lookahead_ticks = atoi(val);
+                r.has_label_params = 1;
+            }
+            else if (strcmp(key, "label_tp_pct") == 0) {
+                r.label_tp_pct = tt::parse_double_fast(val);
+            }
+            else if (strcmp(key, "label_sl_pct") == 0) {
+                r.label_sl_pct = tt::parse_double_fast(val);
+            }
+            // v5.11.41 — XGBoost train-time thread count (position 23).
+            else if (strcmp(key, "xgb_train_nthread") == 0) {
+                r.xgb_train_nthread = atoi(val);
+                r.has_xgb_train_nthread = 1;
             }
         }
         line = strtok_r(nullptr, "\n", &save);
@@ -1316,6 +1420,32 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 "(label set drift; retrain required)",
                 (unsigned long)r.label_registry_hash,
                 (unsigned long)expected_label_registry_hash);
+            return r;
+        }
+    }
+
+    // 1d. v5.11.18a — feature_mask match. Caller passes the runtime cfg's
+    // per-core mask for the core loading this model. Default 0 = skip
+    // check. Pre-v5.11.18a stamps lack the field (parses as 0) → caller
+    // can decide WARN vs accept based on operator strictness; here we
+    // WARN-and-accept by default (informational; behavior change is
+    // v5.11.18 territory). When both sides have the data and disagree,
+    // refuse — masked-feature drift is a parity-critical failure mode
+    // (CRITICAL gap from /parity-check 2026-05-07).
+    if (expected_feature_mask != 0) {
+        if (!r.has_feature_mask) {
+            fprintf(stderr,
+                "[stamp] WARN: %s stamp lacks feature_mask "
+                "(pre-v5.11.18a) — feature-mask drift NOT verified\n",
+                stamp_path);
+        } else if (r.feature_mask_train != expected_feature_mask) {
+            r.valid = 0;
+            snprintf(r.reason, sizeof(r.reason),
+                "feature_mask mismatch: stamp=%016lx engine=%016lx "
+                "(per-core feature subset drift; retrain or restore "
+                "feature_mask cfg to training-time value)",
+                (unsigned long)r.feature_mask_train,
+                (unsigned long)expected_feature_mask);
             return r;
         }
     }
@@ -1490,6 +1620,37 @@ struct StampInferenceCfgInputs {
     // Mirrors v5.8.6 feature_registry_hash refusal flow.
     int      has_label_registry_hash;
     uint64_t label_registry_hash;
+    // v5.11.18a — feature_mask (canonical position 21). Per-core uint64
+    // bitmap of which features were active at training time. Ship is
+    // infrastructure-only — Features_PackAll still consumes ALL features
+    // until v5.11.18 wires the mask through MLBuildContext. Surface G
+    // has_*=0 forward-compat for legacy stamps + default-cfg trains
+    // (where the mask is the all-on default 0xFFFFFFFFFFFFFFFF).
+    //
+    // Convention: emit only when caller explicitly passes a non-default
+    // mask. This keeps stamps trained against the all-on default
+    // bytewise-identical to pre-v5.11.18a stamps (the field is absent
+    // from the canonical body, so the HMAC signature is unchanged).
+    int      has_feature_mask;
+    uint64_t feature_mask_train;
+    // v5.11.41 — per-horizon label parameters (canonical position 22).
+    // Forensic-only: verifier records into ModelStampResult so operator
+    // can grep stamp file to identify which horizon produced this model.
+    // No load-time refusal — engine has no "expected horizon" cfg-side
+    // to compare against (multi-horizon ensemble auto-detects via dir
+    // naming `_horizon_<H>` per v5.10.0a-final). Recording closes a
+    // pre-existing schema gap surfaced by /parity-check 2026-05-07-stamp.
+    int      has_label_params;
+    int      label_lookahead_ticks;        // aka label_forward_ticks
+    double   label_tp_pct;                  // 0.05 means 0.05% (BacktestRunConfig convention)
+    double   label_sl_pct;
+    // v5.11.41 — XGBoost train-time thread count (canonical position 23).
+    // Forensic-only: lets operator post-hoc detect mode divergence
+    // (serial mode = cfg.xgb_train_nthread; parallel multi-horizon
+    // mode = pinned to 1 for bytewise determinism vs serial-with-1).
+    // Recording closes /parity-check 2026-05-07-stamp CRITICAL-2.
+    int      has_xgb_train_nthread;
+    int      xgb_train_nthread;
 };
 
 inline StampWriteResult stamp_write_for_model(const char* model_path,
@@ -1698,6 +1859,51 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
         int wrote = snprintf(canonical + n, sizeof(canonical) - n,
             "label_registry_hash=%016lx\n",
             (unsigned long)inf->label_registry_hash);
+        if (wrote > 0) n += wrote;
+    }
+
+    // v5.11.18a — feature_mask (canonical position 21). Set
+    // inf->has_feature_mask=1 to emit; verifier compares against the
+    // runtime cfg's per-core feature_mask at load time. Convention:
+    // emit only when caller explicitly passes a non-default mask
+    // (training-time mask differs from 0xFFFF..F all-on default). This
+    // keeps stamps trained against the default mask bytewise-identical
+    // to pre-v5.11.18a stamps + their HMAC signatures unchanged.
+    if (inf && inf->has_feature_mask && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "feature_mask=%016lx\n",
+            (unsigned long)inf->feature_mask_train);
+        if (wrote > 0) n += wrote;
+    }
+
+    // v5.11.41 — per-horizon label params (canonical position 22). Set
+    // inf->has_label_params=1 to emit. Forensic-only: verifier records
+    // into ModelStampResult; no load-time refusal because engine has no
+    // expected horizon cfg-side. Multi-horizon ensemble auto-detects
+    // siblings via dir naming `_horizon_<H>` (v5.10.0a-final). Recording
+    // closes /parity-check 2026-05-07-stamp CRITICAL-1 + lets operator
+    // grep stamp file to identify which horizon a model belongs to.
+    if (inf && inf->has_label_params && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "label_lookahead_ticks=%d\n"
+            "label_tp_pct=%.6g\n"
+            "label_sl_pct=%.6g\n",
+            inf->label_lookahead_ticks,
+            inf->label_tp_pct,
+            inf->label_sl_pct);
+        if (wrote > 0) n += wrote;
+    }
+
+    // v5.11.41 — XGBoost training thread count (canonical position 23).
+    // Set inf->has_xgb_train_nthread=1 to emit. Forensic-only: lets
+    // operator post-hoc detect whether a stamp came from serial mode
+    // (cfg.xgb_train_nthread default 4) or parallel multi-horizon mode
+    // (pinned to 1). Recording closes /parity-check 2026-05-07-stamp
+    // CRITICAL-2.
+    if (inf && inf->has_xgb_train_nthread && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "xgb_train_nthread=%d\n",
+            inf->xgb_train_nthread);
         if (wrote > 0) n += wrote;
     }
 

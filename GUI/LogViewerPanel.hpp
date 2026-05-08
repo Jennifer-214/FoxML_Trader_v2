@@ -66,8 +66,16 @@ static inline void GUI_Panel_LogViewer(LogViewer *lv) {
     ImGui::Checkbox("Auto-scroll", &lv->auto_scroll);
     ImGui::Separator();
 
+    // v5.11.20.1 — text wrap. Pre-fix the panel had
+    // ImGuiWindowFlags_HorizontalScrollbar and used TextColored (which
+    // does NOT wrap), so long log lines (e.g. v5.11.0.B mlockall WARN
+    // citing the full /etc/security/limits.conf path) ran off the
+    // right edge and required horizontal scrolling. Operator caught
+    // 2026-05-07. Post-fix: drop horizontal scrollbar; render each
+    // line via PushStyleColor + TextWrapped + PopStyleColor — wraps
+    // at the right edge of the panel, preserving color coding.
     ImGui::BeginChild("##log_scroll", ImVec2(0, 0), ImGuiChildFlags_None,
-                       ImGuiWindowFlags_HorizontalScrollbar);
+                       ImGuiWindowFlags_None);
 
     if (lv->buf_len > 0) {
         // render line by line with color coding
@@ -76,17 +84,23 @@ static inline void GUI_Panel_LogViewer(LogViewer *lv) {
             char *eol = strchr(line, '\n');
             if (eol) *eol = '\0';
 
-            // color based on content
+            // color based on content — push as style, render TextWrapped,
+            // pop. TextWrapped honors the panel width by default.
+            ImVec4 color;
             if (strstr(line, "error") || strstr(line, "ERROR") || strstr(line, "FAIL"))
-                ImGui::TextColored(FoxmlColors::red, "%s", line);
+                color = FoxmlColors::red;
             else if (strstr(line, "warn") || strstr(line, "WARN"))
-                ImGui::TextColored(FoxmlColors::yellow, "%s", line);
+                color = FoxmlColors::yellow;
             else if (strstr(line, "FILL") || strstr(line, "BUY") || strstr(line, "SELL"))
-                ImGui::TextColored(FoxmlColors::wheat, "%s", line);
+                color = FoxmlColors::wheat;
             else if (strstr(line, "REGIME") || strstr(line, "STRATEGY"))
-                ImGui::TextColored(FoxmlColors::accent, "%s", line);
+                color = FoxmlColors::accent;
             else
-                ImGui::TextColored(FoxmlColors::comment, "%s", line);
+                color = FoxmlColors::comment;
+
+            ImGui::PushStyleColor(ImGuiCol_Text, color);
+            ImGui::TextWrapped("%s", line);
+            ImGui::PopStyleColor();
 
             if (eol) {
                 *eol = '\n';

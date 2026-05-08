@@ -23,6 +23,8 @@
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.6: FEATURE_REGISTRY_HASH() for auto-stamp
 #include "../ML_Headers/BuildFlags.hpp"       // v5.9.5h: BUILD_FLAGS_HASH() for cross-build drift detection
 #include "../Version.hpp"                      // v5.8.6: ENGINE_VERSION_STRING for auto-stamp
+#include "../MemHeaders/HealthLog.hpp"        // v5.11.32: Health_Log for WF observability
+#include "../MemHeaders/DebugLog.hpp"         // v5.11.32: LOG_DEBUG_ENGINE for compile-time-only diags
 #include "../GUI/CandleAccumulator.hpp"
 #include "LabelFunctions.hpp"
 #include "BacktestSnapshot.hpp"
@@ -995,6 +997,17 @@ struct FullValidationResults {
     int  auto_stamp_ok;                    // result: 1 if stamp written successfully
     char auto_stamp_error[256];            // result: failure reason (if attempted && !ok)
     char auto_stamp_path_written[520];     // result: path of written stamp file
+    // v5.11.41 — caller-populated request fields for per-horizon stamp body
+    // forensics. label_lookahead_ticks/tp_pct/sl_pct live in BacktestRunConfig,
+    // not in ControllerConfig (which is what RFV reads via data->config_used).
+    // So multi-horizon worker (and single-horizon RFV button) populate these
+    // BEFORE calling Backtest_RunFullValidation; RFV reads them when building
+    // StampInferenceCfgInputs. Zero req_label_lookahead_ticks = skip emit
+    // (legacy behavior preserved for callers that don't care). Closes
+    // /parity-check 2026-05-07-stamp CRITICAL-1.
+    int       req_label_lookahead_ticks;
+    double    req_label_tp_pct;
+    double    req_label_sl_pct;
 };
 
 // Forward declaration — Backtest_RunWalkForward is defined further down in
@@ -1025,7 +1038,30 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
                                                 volatile int *cancel,
                                                 int label_type,
                                                 float gap_threshold) {
+    // v5.11.49 — preserve caller-set REQUEST fields across the memset.
+    // The pre-fix `memset(out, 0, sizeof(*out))` wiped auto_stamp_path /
+    // auto_stamp_secret / auto_stamp_format_version / req_label_* that
+    // the caller set BEFORE calling RFV — so the gate at line ~1100
+    // (`if (out->ran_held_out && out->auto_stamp_path[0] != '\0')`)
+    // ALWAYS saw an empty path → auto-stamp NEVER fired via this path.
+    // Bug present since Phase 7prep c2 (commit 99ac494). Operators
+    // worked around via manual tools/stamp_model.sh; deferred-items.md
+    // had this as "auto-stamp internal copy failure".
+    char saved_auto_stamp_path[512];
+    char saved_auto_stamp_secret[128];
+    int  saved_auto_stamp_format_version = out->auto_stamp_format_version;
+    int  saved_req_label_lookahead_ticks = out->req_label_lookahead_ticks;
+    double saved_req_label_tp_pct = out->req_label_tp_pct;
+    double saved_req_label_sl_pct = out->req_label_sl_pct;
+    memcpy(saved_auto_stamp_path,   out->auto_stamp_path,   sizeof(saved_auto_stamp_path));
+    memcpy(saved_auto_stamp_secret, out->auto_stamp_secret, sizeof(saved_auto_stamp_secret));
     memset(out, 0, sizeof(*out));
+    memcpy(out->auto_stamp_path,   saved_auto_stamp_path,   sizeof(out->auto_stamp_path));
+    memcpy(out->auto_stamp_secret, saved_auto_stamp_secret, sizeof(out->auto_stamp_secret));
+    out->auto_stamp_format_version = saved_auto_stamp_format_version;
+    out->req_label_lookahead_ticks = saved_req_label_lookahead_ticks;
+    out->req_label_tp_pct = saved_req_label_tp_pct;
+    out->req_label_sl_pct = saved_req_label_sl_pct;
     out->gap_threshold = gap_threshold;
 
     // Refuse if split is locked (caller MUST unlock with token first)
@@ -1170,6 +1206,26 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         // deploy drift (e.g., trained -O2 dev box, deployed -O3 prod).
         inf.has_build_flags_hash = 1;
         inf.build_flags_hash = tt::BUILD_FLAGS_HASH();
+        // v5.11.41 — XGBoost training thread count. Forensic record of
+        // serial mode (operator's cfg.xgb_train_nthread, default 4) vs
+        // parallel multi-horizon mode (pinned to 1 by per-horizon worker
+        // for bytewise determinism). Closes /parity-check 2026-05-07-stamp
+        // CRITICAL-2 + CRITICAL-3.
+        inf.has_xgb_train_nthread = 1;
+        inf.xgb_train_nthread     = data->config_used.xgb_train_nthread > 0
+                                  ? data->config_used.xgb_train_nthread : 1;
+        // v5.11.41 — per-horizon label parameters. label_lookahead_ticks /
+        // tp_pct / sl_pct live in BacktestRunConfig, not ControllerConfig
+        // (data->config_used). Caller (multi-horizon worker OR single-
+        // horizon RFV button) populates out->req_label_* before calling
+        // RFV; we propagate to stamp body when non-zero. Closes
+        // /parity-check 2026-05-07-stamp CRITICAL-1.
+        if (out->req_label_lookahead_ticks > 0) {
+            inf.has_label_params      = 1;
+            inf.label_lookahead_ticks = out->req_label_lookahead_ticks;
+            inf.label_tp_pct          = out->req_label_tp_pct;
+            inf.label_sl_pct          = out->req_label_sl_pct;
+        }
 
         // v5.10.0 Item A — stamp_emit phase timer.
         uint64_t stamp_start_ns = tt::PhaseTimer_NowNs();
@@ -1613,24 +1669,79 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
             if (mc_weights) {
                 XGBoost_ComputeMulticlassWeights(train_labels, n_train, num_classes_lt,
                                                   mc_weights, mc_counts);
+                // v5.11.46 — cap per-sample weight at 5.0 to prevent
+                // numerical issues during XGBoost gradient computation
+                // when one class is very rare (e.g. c0=1.2% gives raw
+                // weight ~27, large enough to cause gradient overflow
+                // in some XGBoost versions → segfault in histogram
+                // split-finding). Capping caps the importance weighting
+                // for very rare classes; you lose some signal but stop
+                // crashing.
+                const float WEIGHT_CAP = 5.0f;
+                int capped_count = 0;
+                for (int wi = 0; wi < n_train; ++wi) {
+                    if (mc_weights[wi] > WEIGHT_CAP) {
+                        mc_weights[wi] = WEIGHT_CAP;
+                        capped_count++;
+                    }
+                }
                 XGDMatrixSetFloatInfo(dtrain, "weight", mc_weights, n_train);
                 fprintf(stderr, "[walkforward] fold %d: multiclass class counts:", f + 1);
                 for (int k = 0; k < num_classes_lt && k < 16; k++) {
                     fprintf(stderr, " c%d=%d (%.1f%%)", k, mc_counts[k],
                             n_train > 0 ? 100.0f * mc_counts[k] / n_train : 0.0f);
                 }
-                fprintf(stderr, " — per-sample weights applied\n");
+                if (capped_count > 0) {
+                    fprintf(stderr, " — per-sample weights applied (capped %d at %.1f)\n",
+                            capped_count, WEIGHT_CAP);
+                } else {
+                    fprintf(stderr, " — per-sample weights applied\n");
+                }
                 free(mc_weights);
             }
         }
+        // v5.11.46 — bisection markers for fold 2 segfault diagnosis.
+        // If crash is in XGBoosterUpdateOneIter, we'll see "[WF marker]
+        // fold N: pre-iter R" before crash. If pre-predict, see "[WF
+        // marker] fold N: pre-predict". Helps narrow without ASAN.
+        fprintf(stderr, "[WF marker] fold %d: pre-train-loop (booster=%p, dtrain=%p, n_train=%d)\n",
+                f + 1, (void*)booster, (void*)dtrain, n_train);
+        fflush(stderr);
 
         // train (no early stopping yet — full n_rounds always)
         int n_rounds = 200;
         // v5.10.0 Item A — xgboost_train phase timer (per-fold).
         uint64_t xgb_start_ns = tt::PhaseTimer_NowNs();
+        // v5.11.31/.32 — track first failing iter + last successful iter.
+        // Categorization: train-iter failure with XGB err string is a
+        // WARN (always-on observability — operator wants to see this
+        // without rebuilding); the per-fold "trained N/N successfully"
+        // banner is INFO (cheap, only 1 line per fold).
+        int last_iter_ret = 0;
+        int last_iter_idx = -1;
         for (int r = 0; r < n_rounds; r++) {
+            // v5.11.46 — log every 10 iters to bisect crash location
+            if (r == 0 || r % 10 == 0) {
+                fprintf(stderr, "[WF marker] fold %d: pre-iter %d\n", f + 1, r);
+                fflush(stderr);
+            }
             ret = XGBoosterUpdateOneIter(booster, r, dtrain);
-            if (ret != 0) break;
+            last_iter_ret = ret;
+            last_iter_idx = r;
+            if (ret != 0) {
+                tt::Health_Log(tt::HEALTH_WARN, "wf-xgb", f + 1,
+                    "UpdateOneIter ret=%d at iter %d — XGB err: %s",
+                    ret, r, XGBGetLastError() ? XGBGetLastError() : "(null)");
+                break;
+            }
+        }
+        fprintf(stderr, "[WF marker] fold %d: train-loop complete (last_iter=%d)\n",
+                f + 1, last_iter_idx);
+        fflush(stderr);
+        if (last_iter_ret == 0 && tt::Health_LogEnabled(tt::HEALTH_INFO)) {
+            tt::Health_Log(tt::HEALTH_INFO, "wf-xgb", f + 1,
+                "trained %d/%d iters successfully",
+                last_iter_idx + 1, n_rounds);
         }
         tt::PhaseTimer_Global().xgboost_train_ns +=
             tt::PhaseTimer_NowNs() - xgb_start_ns;
@@ -1639,8 +1750,61 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
         {
             bst_ulong out_len_tr = 0, out_len_te = 0;
             const float *pred_tr = nullptr, *pred_te = nullptr;
-            int pred_tr_ok = (XGBoosterPredict(booster, dtrain, 0, 0, 0, &out_len_tr, &pred_tr) == 0);
-            int pred_te_ok = (XGBoosterPredict(booster, dtest,  0, 0, 0, &out_len_te, &pred_te) == 0);
+            // v5.11.46 — bisection markers
+            fprintf(stderr, "[WF marker] fold %d: pre-predict-train\n", f + 1);
+            fflush(stderr);
+            int predict_tr_ret = XGBoosterPredict(booster, dtrain, 0, 0, 0, &out_len_tr, &pred_tr);
+            fprintf(stderr, "[WF marker] fold %d: post-predict-train (ret=%d, out_len=%lu)\n",
+                    f + 1, predict_tr_ret, (unsigned long)out_len_tr);
+            fflush(stderr);
+            // v5.11.58 — XGBoost C API: XGBoosterPredict's `out_result` is
+            // a pointer into Booster-owned memory (HostDeviceVector reused
+            // across calls). A second Predict realloc-and-fills the same
+            // buffer; at large sample counts (1.5M+ × num_classes), the
+            // realloc moves the address and INVALIDATES the previous
+            // pointer. Symptom: WF segfaults after post-predict-test marker
+            // when train_accuracy computation reads stale pred_tr. Latent
+            // since multiclass support; only triggered at scale (operator
+            // hit it on 2-year × 3-horizon × multiclass run).
+            //
+            // Fix: snapshot pred_tr to caller-owned heap before second
+            // Predict invalidates it. Free at end of predict block.
+            float *pred_tr_copy = nullptr;
+            if (predict_tr_ret == 0 && pred_tr != nullptr && out_len_tr > 0) {
+                pred_tr_copy = (float*)malloc((size_t)out_len_tr * sizeof(float));
+                if (pred_tr_copy) {
+                    memcpy(pred_tr_copy, pred_tr, (size_t)out_len_tr * sizeof(float));
+                    pred_tr = pred_tr_copy;  // downstream uses stable copy
+                } else {
+                    tt::Health_Log(tt::HEALTH_WARN, "wf-xgb", f + 1,
+                        "pred_tr snapshot malloc failed (out_len=%lu) — "
+                        "skipping train metrics this fold",
+                        (unsigned long)out_len_tr);
+                    pred_tr = nullptr;
+                    predict_tr_ret = -1;  // forces pred_tr_ok=0 below
+                }
+            }
+            int predict_te_ret = XGBoosterPredict(booster, dtest,  0, 0, 0, &out_len_te, &pred_te);
+            fprintf(stderr, "[WF marker] fold %d: post-predict-test (ret=%d, out_len=%lu)\n",
+                    f + 1, predict_te_ret, (unsigned long)out_len_te);
+            fflush(stderr);
+            int pred_tr_ok = (predict_tr_ret == 0);
+            int pred_te_ok = (predict_te_ret == 0);
+            // v5.11.32 — predict failure → WARN (always-on; this is the
+            // class of bug that left WF accuracy at default 0.0 silently
+            // pre-fix). XGBGetLastError() string is the smoking gun.
+            if (!pred_tr_ok) {
+                tt::Health_Log(tt::HEALTH_WARN, "wf-xgb", f + 1,
+                    "Predict(train) ret=%d — XGB err: %s",
+                    predict_tr_ret,
+                    XGBGetLastError() ? XGBGetLastError() : "(null)");
+            }
+            if (!pred_te_ok) {
+                tt::Health_Log(tt::HEALTH_WARN, "wf-xgb", f + 1,
+                    "Predict(test) ret=%d — XGB err: %s",
+                    predict_te_ret,
+                    XGBGetLastError() ? XGBGetLastError() : "(null)");
+            }
 
             if (is_regression) {
                 if (pred_tr_ok && (int)out_len_tr == n_train) {
@@ -1653,13 +1817,95 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                 }
             } else if (is_multiclass) {
                 int K = num_classes_lt;
+                // v5.11.32 — observability discipline (suite-side, no
+                // engine-slow-path latency cost). Categorization:
+                //   * shape-mismatch SKIP → WARN (always-on; this is
+                //     the silent-bug class that masked the WF
+                //     regression for hours).
+                //   * per-sample (argmax→label) sampling → DEBUG via
+                //     LOG_DEBUG_ENGINE (compile-time gated; off in
+                //     release; rebuild with ./build.sh debug to enable
+                //     when reproducing a tricky bug).
+                //   * post-compute accuracy summary → INFO (cheap,
+                //     1 line per fold; aggregates the per-fold result).
                 if (pred_tr_ok && (int)out_len_tr == n_train * K) {
                     fr->train_accuracy = WalkForward_ComputeMulticlassAccuracy(
                         pred_tr, train_labels, n_train, K);
+#ifdef FOXML_DEBUG_LOGS
+                    {
+                        // Sample first 5 (argmax, label) pairs.
+                        char sample_buf[128] = {0};
+                        size_t off = 0;
+                        int show = n_train < 5 ? n_train : 5;
+                        for (int i = 0; i < show; i++) {
+                            int best = 0;
+                            float best_p = pred_tr[i * K];
+                            for (int k = 1; k < K; k++) {
+                                float p = pred_tr[i * K + k];
+                                if (p > best_p) { best_p = p; best = k; }
+                            }
+                            int truth = (int)(train_labels[i] + 0.5f);
+                            int wrote = snprintf(sample_buf + off,
+                                                  sizeof(sample_buf) - off,
+                                                  " (%d->%d)", best, truth);
+                            if (wrote > 0) off += wrote;
+                            else break;
+                        }
+                        LOG_DEBUG_ENGINE("wf-fold-train", f + 1,
+                            "argmax/label samples:%s acc=%.4f",
+                            sample_buf, fr->train_accuracy);
+                    }
+#endif
+                    if (tt::Health_LogEnabled(tt::HEALTH_INFO)) {
+                        tt::Health_Log(tt::HEALTH_INFO, "wf-fold", f + 1,
+                            "train_accuracy=%.4f n_train=%d K=%d",
+                            fr->train_accuracy, n_train, K);
+                    }
+                } else {
+                    tt::Health_Log(tt::HEALTH_WARN, "wf-fold", f + 1,
+                        "train SKIP — pred_tr_ok=%d out_len_tr=%lu expected=%d "
+                        "(n_train=%d K=%d) → train_accuracy stays at 0.0 default",
+                        pred_tr_ok, (unsigned long)out_len_tr, n_train * K,
+                        n_train, K);
                 }
                 if (pred_te_ok && (int)out_len_te == n_test * K) {
                     fr->val_accuracy = WalkForward_ComputeMulticlassAccuracy(
                         pred_te, test_labels, n_test, K);
+#ifdef FOXML_DEBUG_LOGS
+                    {
+                        char sample_buf[128] = {0};
+                        size_t off = 0;
+                        int show = n_test < 5 ? n_test : 5;
+                        for (int i = 0; i < show; i++) {
+                            int best = 0;
+                            float best_p = pred_te[i * K];
+                            for (int k = 1; k < K; k++) {
+                                float p = pred_te[i * K + k];
+                                if (p > best_p) { best_p = p; best = k; }
+                            }
+                            int truth = (int)(test_labels[i] + 0.5f);
+                            int wrote = snprintf(sample_buf + off,
+                                                  sizeof(sample_buf) - off,
+                                                  " (%d->%d)", best, truth);
+                            if (wrote > 0) off += wrote;
+                            else break;
+                        }
+                        LOG_DEBUG_ENGINE("wf-fold-val", f + 1,
+                            "argmax/label samples:%s acc=%.4f",
+                            sample_buf, fr->val_accuracy);
+                    }
+#endif
+                    if (tt::Health_LogEnabled(tt::HEALTH_INFO)) {
+                        tt::Health_Log(tt::HEALTH_INFO, "wf-fold", f + 1,
+                            "val_accuracy=%.4f n_test=%d K=%d",
+                            fr->val_accuracy, n_test, K);
+                    }
+                } else {
+                    tt::Health_Log(tt::HEALTH_WARN, "wf-fold", f + 1,
+                        "val SKIP — pred_te_ok=%d out_len_te=%lu expected=%d "
+                        "(n_test=%d K=%d) → val_accuracy stays at 0.0 default",
+                        pred_te_ok, (unsigned long)out_len_te, n_test * K,
+                        n_test, K);
                 }
             } else {
                 if (pred_tr_ok && (int)out_len_tr == n_train) {
@@ -1671,6 +1917,8 @@ static inline void Backtest_RunWalkForward(WalkForwardResults *wf,
                         pred_te, test_labels, n_test, 0.5f);
                 }
             }
+            // v5.11.58 — release the train-prediction snapshot
+            if (pred_tr_copy) free(pred_tr_copy);
         }
 
         // feature importances (stability tracking hook) — zero-filled until
@@ -1948,6 +2196,24 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
         bst_ulong out_len_tr = 0, out_len_ev = 0;
         const float *pred_tr = NULL, *pred_ev = NULL;
         int pr_tr_ok = (XGBoosterPredict(booster, dtrain, 0, 0, 0, &out_len_tr, &pred_tr) == 0);
+        // v5.11.58 — see WF predict block for full rationale. XGBoost reuses
+        // its prediction buffer across Predict calls; second Predict
+        // invalidates the first pointer at large sample counts. Snapshot
+        // pred_tr to caller heap before second Predict.
+        float *pred_tr_copy = NULL;
+        if (pr_tr_ok && pred_tr != NULL && out_len_tr > 0) {
+            pred_tr_copy = (float*)malloc((size_t)out_len_tr * sizeof(float));
+            if (pred_tr_copy) {
+                memcpy(pred_tr_copy, pred_tr, (size_t)out_len_tr * sizeof(float));
+                pred_tr = pred_tr_copy;
+            } else {
+                fprintf(stderr, "[heldout] pred_tr snapshot malloc failed (out_len=%lu) — "
+                                "skipping train metrics\n",
+                        (unsigned long)out_len_tr);
+                pred_tr = NULL;
+                pr_tr_ok = 0;
+            }
+        }
         int pr_ev_ok = (XGBoosterPredict(booster, deval,  0, 0, 0, &out_len_ev, &pred_ev) == 0);
 
         if (is_regression) {
@@ -1983,6 +2249,8 @@ static inline HeldOutTrainEvalResult HeldOutSplit_TrainEval(
         fprintf(stderr, "[heldout] result: train_metric=%.4f held_out_metric=%.4f%s\n",
                 r.train_metric, r.metric,
                 is_regression ? " (correlation)" : " (accuracy)");
+        // v5.11.58 — release the train-prediction snapshot
+        if (pred_tr_copy) free(pred_tr_copy);
     } while (0);
 
     if (booster) XGBoosterFree(booster);
