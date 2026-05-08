@@ -3239,6 +3239,11 @@ static inline void mh_run_one_horizon_fv(
         fprintf(sf, "role: %s\n", role);
         fprintf(sf, "model: %s/%s.json\n", horizon_dir, role);
         fprintf(sf, "label_type: %d\n", label_type);
+        // v5.11.49 — expected_num_classes drives Past Runs "Classes"
+        // column rendering. Without this, past_runs reads 0 (default)
+        // → renders "binary" even for multiclass models. K=0 binary,
+        // K=1 regression, K>=2 multiclass.
+        fprintf(sf, "expected_num_classes: %d\n", num_classes);
         fprintf(sf, "label_lookahead_ticks: %d\n", horizon_ticks);
         fprintf(sf, "label_tp_pct: %.6g\n", (double)tp_pct);
         fprintf(sf, "label_sl_pct: %.6g\n", (double)sl_pct);

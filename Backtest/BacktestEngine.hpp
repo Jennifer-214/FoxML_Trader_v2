@@ -1038,7 +1038,30 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
                                                 volatile int *cancel,
                                                 int label_type,
                                                 float gap_threshold) {
+    // v5.11.49 — preserve caller-set REQUEST fields across the memset.
+    // The pre-fix `memset(out, 0, sizeof(*out))` wiped auto_stamp_path /
+    // auto_stamp_secret / auto_stamp_format_version / req_label_* that
+    // the caller set BEFORE calling RFV — so the gate at line ~1100
+    // (`if (out->ran_held_out && out->auto_stamp_path[0] != '\0')`)
+    // ALWAYS saw an empty path → auto-stamp NEVER fired via this path.
+    // Bug present since Phase 7prep c2 (commit 99ac494). Operators
+    // worked around via manual tools/stamp_model.sh; deferred-items.md
+    // had this as "auto-stamp internal copy failure".
+    char saved_auto_stamp_path[512];
+    char saved_auto_stamp_secret[128];
+    int  saved_auto_stamp_format_version = out->auto_stamp_format_version;
+    int  saved_req_label_lookahead_ticks = out->req_label_lookahead_ticks;
+    double saved_req_label_tp_pct = out->req_label_tp_pct;
+    double saved_req_label_sl_pct = out->req_label_sl_pct;
+    memcpy(saved_auto_stamp_path,   out->auto_stamp_path,   sizeof(saved_auto_stamp_path));
+    memcpy(saved_auto_stamp_secret, out->auto_stamp_secret, sizeof(saved_auto_stamp_secret));
     memset(out, 0, sizeof(*out));
+    memcpy(out->auto_stamp_path,   saved_auto_stamp_path,   sizeof(out->auto_stamp_path));
+    memcpy(out->auto_stamp_secret, saved_auto_stamp_secret, sizeof(out->auto_stamp_secret));
+    out->auto_stamp_format_version = saved_auto_stamp_format_version;
+    out->req_label_lookahead_ticks = saved_req_label_lookahead_ticks;
+    out->req_label_tp_pct = saved_req_label_tp_pct;
+    out->req_label_sl_pct = saved_req_label_sl_pct;
     out->gap_threshold = gap_threshold;
 
     // Refuse if split is locked (caller MUST unlock with token first)
