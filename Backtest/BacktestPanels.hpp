@@ -3158,16 +3158,22 @@ static inline void mh_run_one_horizon_fv(
 
     FullValidationResults *fv = &state->mh_horizon_fv[h];
     memset(fv, 0, sizeof(*fv));
-    if (snap_auto_stamp_enabled) {
-        snprintf(fv->auto_stamp_path, sizeof(fv->auto_stamp_path),
-                 "%s/%s.json", horizon_dir, role);
-        size_t n = strnlen(snap_auto_stamp_secret, 128);
-        if (n >= sizeof(fv->auto_stamp_secret))
-            n = sizeof(fv->auto_stamp_secret) - 1;
-        memcpy(fv->auto_stamp_secret, snap_auto_stamp_secret, n);
-        fv->auto_stamp_secret[n] = '\0';
-    }
+    // v5.11.47 — ALWAYS stamp. Was gated on snap_auto_stamp_enabled
+    // (= cfg.auto_stamp_on_held_out which defaults to 1 but could be
+    // 0 OR uninitialized if Run Control never loaded a cfg). Operator
+    // wants stamps unconditionally — they're cheap, and unstamped
+    // models lose load-time safety checks (label_registry_hash,
+    // feature_registry_hash, model_num_outputs, etc.). Removed the
+    // conditional; auto_stamp_path is always set.
+    snprintf(fv->auto_stamp_path, sizeof(fv->auto_stamp_path),
+             "%s/%s.json", horizon_dir, role);
+    size_t n = strnlen(snap_auto_stamp_secret, 128);
+    if (n >= sizeof(fv->auto_stamp_secret))
+        n = sizeof(fv->auto_stamp_secret) - 1;
+    memcpy(fv->auto_stamp_secret, snap_auto_stamp_secret, n);
+    fv->auto_stamp_secret[n] = '\0';
     fv->auto_stamp_format_version = 0;
+    (void)snap_auto_stamp_enabled;  // kept in args for back-compat; not gating now
     fv->req_label_lookahead_ticks = horizon_ticks;
     fv->req_label_tp_pct          = (double)tp_pct;
     fv->req_label_sl_pct          = (double)sl_pct;
@@ -3198,10 +3204,20 @@ static inline void mh_run_one_horizon_fv(
                  horizon_ticks, wf_metric, ho_metric,
                  fv->wf_to_held_out_gap);
     } else if (fv->ran_held_out) {
+        // v5.11.47 — distinguish WHY stamp was skipped:
+        //  - auto_stamp_attempted=0 → path was empty (cfg.auto_stamp_on_held_out=0
+        //    OR snap was 0 at click time; OR Run Control hasn't loaded a cfg)
+        //  - auto_stamp_attempted=1 + auto_stamp_ok=0 → write failed
+        //    (auto_stamp_error has the reason)
+        const char* skip_reason =
+            !fv->auto_stamp_attempted
+                ? "auto_stamp_on_held_out=0 in cfg"
+                : (fv->auto_stamp_error[0] ? fv->auto_stamp_error
+                                           : "unknown write error");
         snprintf(state->mh_horizon_status[h], 128,
-                 "h=%d OK: WF=%.3f HO=%.3f gap=%.3f (stamp skipped)",
+                 "h=%d OK: WF=%.3f HO=%.3f gap=%.3f (stamp skipped: %s)",
                  horizon_ticks, wf_metric, ho_metric,
-                 fv->wf_to_held_out_gap);
+                 fv->wf_to_held_out_gap, skip_reason);
     } else if (state->mh_cancel) {
         snprintf(state->mh_horizon_status[h], 128,
                  "h=%d CANCELLED mid-validation", horizon_ticks);
@@ -4341,13 +4357,16 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 mh_args->snap_tp_pct[i]   = single_tp;
                 mh_args->snap_sl_pct[i]   = single_sl;
             }
+            // v5.11.47 — same cfg-fallback for secret as Multi-Horizon path.
             {
-                size_t n = strnlen(state->fv_auto_stamp_secret,
-                                   sizeof(state->fv_auto_stamp_secret));
+                const char* secret_src = state->fv_auto_stamp_secret;
+                if (secret_src[0] == '\0') {
+                    secret_src = run_control->results.config_used.auto_stamp_secret;
+                }
+                size_t n = strnlen(secret_src, sizeof(state->fv_auto_stamp_secret));
                 if (n >= sizeof(mh_args->snap_auto_stamp_secret))
                     n = sizeof(mh_args->snap_auto_stamp_secret) - 1;
-                memcpy(mh_args->snap_auto_stamp_secret,
-                       state->fv_auto_stamp_secret, n);
+                memcpy(mh_args->snap_auto_stamp_secret, secret_src, n);
                 mh_args->snap_auto_stamp_secret[n] = '\0';
             }
             mh_args->snap_auto_stamp_enabled  =
@@ -4490,20 +4509,26 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             }
             // v5.11.41 — snap FV/auto-stamp params at click time. Closes
             // the gap where Train Multi-Horizon trained but didn't run WF
-            // / held-out / stamp. Now mirrors single-horizon RFV behavior
+            // / held-out / stamp. Now mirrors single-horizon RFV behavior.
+            // v5.11.47 — secret falls back to cfg.auto_stamp_secret when
+            // GUI text input (state->fv_auto_stamp_secret) is empty. Lets
+            // operator set secret once in cfg without re-typing per session.
             // per horizon (sequential; v5.11.41.C adds parallelism).
+            // v5.11.47 — if GUI text input is empty, fall back to cfg's
+            // auto_stamp_secret (lets operator set it once in cfg).
             {
-                size_t n = strnlen(state->fv_auto_stamp_secret,
-                                   sizeof(state->fv_auto_stamp_secret));
+                const char* secret_src = state->fv_auto_stamp_secret;
+                if (secret_src[0] == '\0') {
+                    secret_src = run_control->results.config_used.auto_stamp_secret;
+                }
+                size_t n = strnlen(secret_src, sizeof(state->fv_auto_stamp_secret));
                 if (n >= sizeof(mh_args->snap_auto_stamp_secret))
                     n = sizeof(mh_args->snap_auto_stamp_secret) - 1;
-                memcpy(mh_args->snap_auto_stamp_secret,
-                       state->fv_auto_stamp_secret, n);
+                memcpy(mh_args->snap_auto_stamp_secret, secret_src, n);
                 mh_args->snap_auto_stamp_secret[n] = '\0';
             }
-            // auto_stamp_on_held_out lives on ControllerConfig (cfg-side),
-            // not BacktestRunConfig. Read from the same place single-horizon
-            // RFV worker reads (data->config_used.auto_stamp_on_held_out).
+            // v5.11.47 — kept for back-compat in args struct; worker no
+            // longer gates on this (always stamps).
             mh_args->snap_auto_stamp_enabled  =
                 run_control->results.config_used.auto_stamp_on_held_out;
             mh_args->snap_n_splits            = state->wf_n_splits;

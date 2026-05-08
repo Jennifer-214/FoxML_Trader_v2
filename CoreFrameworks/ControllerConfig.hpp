@@ -509,6 +509,13 @@ template <unsigned F> struct ControllerConfig {
   // current behavior (manual stamping via tools/stamp_model.sh); flip to 1 after
   // configuring the secret to enable hands-off stamp generation in foxml_suite.
   int    auto_stamp_on_held_out;
+  // v5.11.47 — auto-stamp HMAC secret. When non-empty AND
+  // auto_stamp_on_held_out=1, the suite signs each generated stamp
+  // with this secret. Empty = devmode (signature accepted as-is at
+  // load time). Operator can also type a secret in the GUI Validation
+  // panel; the GUI value takes priority over this cfg fallback.
+  // Setting here means operator doesn't have to re-type per-session.
+  char   auto_stamp_secret[128];
   // v5.4.0 (Phase 0.1) — operational health log. Always-available
   // structured JSONL diagnostic log. Replaces ad-hoc env-gated stderr
   // traces. When enabled, engine init configures MemHeaders/HealthLog.hpp
@@ -1071,6 +1078,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.allow_cross_major_engine    = 0;                            // v5.9.2b — refuse cross-major by default
   cfg.held_out_stamp_secret[0]    = '\0';                         // empty = accept-any (dev)
   cfg.auto_stamp_on_held_out      = 1;                            // v5.8.10: default 1 (suite Run Full Validation auto-stamps); set 0 only for manual tools/stamp_model.sh workflow
+  cfg.auto_stamp_secret[0]        = '\0';                         // v5.11.47 default empty = devmode (signs stamps but accepts any signature at load); operator sets in cfg or GUI Validation panel
   cfg.health_log_path[0]          = '\0';                         // empty = disabled
   cfg.health_log_max_bytes        = 0;                            // 0 = no rotation (back-compat)
   cfg.health_log_keep_count       = 0;                            // 0 = no retained rotated files
@@ -1643,7 +1651,12 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.held_out_stamp_secret[n] = '\0';
         continue;
     }
-    if (strcmp(key, "auto_stamp_on_held_out") == 0) {
+    if (strcmp(key, "auto_stamp_secret") == 0) {
+        size_t vn = strnlen(val, sizeof(cfg.auto_stamp_secret) - 1);
+        memcpy(cfg.auto_stamp_secret, val, vn);
+        cfg.auto_stamp_secret[vn] = '\0';
+    }
+    else if (strcmp(key, "auto_stamp_on_held_out") == 0) {
         cfg.auto_stamp_on_held_out = atoi(val);
         continue;
     }
