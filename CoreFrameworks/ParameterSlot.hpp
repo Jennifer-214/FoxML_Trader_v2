@@ -127,9 +127,18 @@ struct alignas(64) ParameterSlot {
 
     T buffers[2];
     std::atomic<uint64_t> seq;
+    // v5.12.1.B — paired publish_tick per buffer. Writer stores the slow-
+    // path tick counter alongside buffers[next_idx]; reader returns it
+    // through the optional out-param. Hot-path uses (now_tick -
+    // publish_tick) > cfg.param_max_age_ticks to gate stale params via
+    // SHALT_PARAM_STALE. Same seqlock barrier protects both arrays —
+    // bytewise paired with the buffer at the same index.
+    uint64_t publish_ticks[2];
     // pad the slot itself to a multiple of 64 so adjacent slots in arrays
     // (e.g. inside ExecutionCore[]) don't share cache lines (pitfall P5.5).
-    uint8_t _pad[64 - sizeof(std::atomic<uint64_t>)];
+    // Pad shrunk from 56 → 40 to absorb the 16 bytes of publish_ticks[2]
+    // without growing the struct beyond its existing 64-byte stride.
+    uint8_t _pad[64 - sizeof(std::atomic<uint64_t>) - sizeof(uint64_t) * 2];
 };
 
 //======================================================================================================
@@ -143,6 +152,11 @@ template <typename T>
 inline void ParameterSlot_Init(ParameterSlot<T>* slot, const T& initial) {
     slot->buffers[0] = initial;
     slot->buffers[1] = initial;
+    // v5.12.1.B — both publish_ticks start at 0 (warmup sentinel; hot-path
+    // staleness gate treats 0 as "no tick stamped, never gate" via the
+    // existing pre-warmup escape).
+    slot->publish_ticks[0] = 0;
+    slot->publish_ticks[1] = 0;
     slot->seq.store(0, std::memory_order_release);
 }
 
@@ -177,7 +191,8 @@ inline void ParameterSlot_Init(ParameterSlot<T>* slot, const T& initial) {
 //======================================================================================================
 template <typename T>
 __attribute__((no_sanitize("thread")))
-inline void ParameterSlot_Write(ParameterSlot<T>* slot, const T& new_params) {
+inline void ParameterSlot_Write(ParameterSlot<T>* slot, const T& new_params,
+                                 uint64_t publish_tick = 0) {
     uint64_t s = slot->seq.load(std::memory_order_relaxed);
     // Active idx is bit 1 (since bit 0 is the parity). Next write goes to the
     // opposite buffer. The XOR with 1 alternates 0 → 1 → 0 → 1.
@@ -188,6 +203,10 @@ inline void ParameterSlot_Write(ParameterSlot<T>* slot, const T& new_params) {
     // Non-atomic memcpy into the inactive buffer. Safe — no consumer reads
     // this buffer until we publish.
     slot->buffers[next_idx] = new_params;
+    // v5.12.1.B — publish_tick paired with buffer in the same seqlock window.
+    // Reader sees consistent (params, tick) tuple. publish_tick=0 (default)
+    // disables hot-path staleness gate for legacy callers.
+    slot->publish_ticks[next_idx] = publish_tick;
     // Mark done: parity flips back to even, version advanced by 2, active idx
     // bit now reflects the new buffer. Consumers that sampled seq+1 will retry
     // and see seq+2 with the new buffer ready.
@@ -222,7 +241,8 @@ inline void ParameterSlot_Write(ParameterSlot<T>* slot, const T& new_params) {
 template <typename T>
 __attribute__((always_inline))
 __attribute__((no_sanitize("thread")))
-static inline void ParameterSlot_Read(const ParameterSlot<T>* slot, T* out) {
+static inline void ParameterSlot_Read(const ParameterSlot<T>* slot, T* out,
+                                       uint64_t* publish_tick_out = nullptr) {
     uint64_t s1, s2;
     for (;;) {
         s1 = slot->seq.load(std::memory_order_acquire);
@@ -234,6 +254,12 @@ static inline void ParameterSlot_Read(const ParameterSlot<T>* slot, T* out) {
         }
         uint64_t idx = (s1 >> 1) & 1ULL;
         *out = slot->buffers[idx];
+        // v5.12.1.B — paired publish_tick read inside the same seqlock
+        // bracket. Caller passes nullptr to skip (legacy call sites pay
+        // zero — branch eliminated by the compiler).
+        if (publish_tick_out) {
+            *publish_tick_out = slot->publish_ticks[idx];
+        }
         s2 = slot->seq.load(std::memory_order_acquire);
         if (s1 == s2) return;
         // version changed during the copy — a write completed. retry to get

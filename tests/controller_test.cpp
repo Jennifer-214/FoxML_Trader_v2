@@ -16546,6 +16546,75 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.12.1.B.1: ParameterSlot publish_tick paired field ---\n");
+    {
+        // Phase B.1 of v5.12.1.B. Adds publish_ticks[2] parallel array
+        // to ParameterSlot, plus optional publish_tick params on Write/Read.
+        // Default 0 = legacy callers unchanged. Writer + reader pair the
+        // tick value with the buffer atomically via the same seqlock.
+        // The slow-path-write + hot-path-gate wiring lands in .B.2/.B.3.
+
+        struct TestPayload {
+            uint32_t value;
+            uint32_t pad;
+        };
+        tt::ParameterSlot<TestPayload> slot;
+        TestPayload init = {42, 0};
+        tt::ParameterSlot_Init(&slot, init);
+
+        // === Test 1: post-Init publish_ticks are 0 ===
+        TestPayload out = {0, 0};
+        uint64_t pt = 999;  // sentinel
+        tt::ParameterSlot_Read(&slot, &out, &pt);
+        check("v5.12.1.B.1: post-Init Read returns publish_tick = 0",
+              pt == 0);
+        check("v5.12.1.B.1: post-Init Read returns initial value",
+              out.value == 42);
+
+        // === Test 2: legacy Write (default publish_tick=0) preserves 0 ===
+        TestPayload w1 = {100, 0};
+        tt::ParameterSlot_Write(&slot, w1);  // no publish_tick → default 0
+        tt::ParameterSlot_Read(&slot, &out, &pt);
+        check("v5.12.1.B.1: legacy Write sets publish_tick = 0",
+              pt == 0);
+        check("v5.12.1.B.1: legacy Write payload round-trips",
+              out.value == 100);
+
+        // === Test 3: Write with explicit publish_tick round-trips ===
+        TestPayload w2 = {200, 0};
+        const uint64_t expected_tick = 0x1234567890ABCDEFULL;
+        tt::ParameterSlot_Write(&slot, w2, expected_tick);
+        tt::ParameterSlot_Read(&slot, &out, &pt);
+        check("v5.12.1.B.1: Write with publish_tick round-trips tick",
+              pt == expected_tick);
+        check("v5.12.1.B.1: Write with publish_tick round-trips payload",
+              out.value == 200);
+
+        // === Test 4: legacy Read (no publish_tick out-param) still works ===
+        TestPayload out2 = {0, 0};
+        tt::ParameterSlot_Read(&slot, &out2);  // no out-param → ignored
+        check("v5.12.1.B.1: legacy Read (no publish_tick) returns payload",
+              out2.value == 200);
+
+        // === Test 5: multiple writes — publish_tick paired with right buffer ===
+        // Seqlock alternates buffers; verify publish_tick tracks index.
+        for (uint64_t k = 1; k <= 8; ++k) {
+            TestPayload p = {(uint32_t)(k * 1000), 0};
+            tt::ParameterSlot_Write(&slot, p, k);
+        }
+        tt::ParameterSlot_Read(&slot, &out, &pt);
+        check("v5.12.1.B.1: latest Write's publish_tick observed after burst",
+              pt == 8);
+        check("v5.12.1.B.1: latest Write's payload observed after burst",
+              out.value == 8000);
+
+        // === Test 6: sizeof(ParameterSlot) preserved at 64-byte stride ===
+        // The struct gained 16 bytes (publish_ticks[2]); pad shrunk to absorb.
+        // Total size MUST remain a multiple of 64 for cache-line isolation.
+        check("v5.12.1.B.1: sizeof(ParameterSlot<TestPayload>) is multiple of 64",
+              (sizeof(tt::ParameterSlot<TestPayload>) % 64) == 0);
+    }
+
     printf("\n--- v5.12.1.A.3: recovery refusal + flatten_pending auto-clear ---\n");
     {
         // Phase A.3 of v5.12.1.A. CheckWsStaleness now sets
