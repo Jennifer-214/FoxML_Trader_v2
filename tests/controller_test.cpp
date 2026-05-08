@@ -15981,6 +15981,24 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.11.41.C: multi_horizon_max_threads cfg + auto-default ---\n");
+    {
+        // v5.11.41.C — Multi-Horizon parallelism control. cfg field
+        // multi_horizon_max_threads. Default 0 = auto (computed at runtime
+        // as min(8, ncores/2)). 1 = forced serial. >1 = parallel cap.
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.11.41.C: default multi_horizon_max_threads = 0 (auto)",
+              cfg.multi_horizon_max_threads == 0);
+
+        // Verify the cfg field type is int (assignment + read-back)
+        cfg.multi_horizon_max_threads = 4;
+        check("v5.11.41.C: cfg field assignable to 4",
+              cfg.multi_horizon_max_threads == 4);
+        cfg.multi_horizon_max_threads = 1;
+        check("v5.11.41.C: cfg field assignable to 1 (forced serial)",
+              cfg.multi_horizon_max_threads == 1);
+    }
+
     printf("\n--- v5.11.41.0: stamp body schema closure (label params + xgb_train_nthread) ---\n");
     {
         // v5.11.41.0 (2026-05-07) — close pre-existing stamp schema gaps

@@ -754,6 +754,15 @@ template <unsigned F> struct ControllerConfig {
   int      xgb_train_nthread;      // XGBoost Train Model worker nthread; default 4 (matches pre-v5.10 BacktestPanels.hpp hardcoded)
   int      xgb_eval_nthread;       // XGBoost WF/HeldOut eval nthread; default 1 (deterministic per-fold)
   int      csv_load_workers;       // parallel CSV worker threads (Item C); default 1 (serial)
+  // v5.11.41 — Multi-Horizon parallelism cap. Worker spawns
+  //   min(N_horizons, multi_horizon_max_threads) pthreads, each running a
+  //   full per-horizon Backtest_RunFullValidation pipeline. 0 = auto
+  //   (defaults to min(8, ncores/2) computed at runtime to leave room
+  //   for GUI/other threads). 1 = forced serial (legacy behavior). >1
+  //   pins xgb_train_nthread=1 inside parallel worker for bytewise
+  //   determinism vs serial-mode-with-nthread=1. Recorded in stamp body
+  //   via xgb_train_nthread field for forensic mode-divergence detection.
+  int      multi_horizon_max_threads;
 
   // RAM budgets (advisory soft caps — emit WARN at boot if dataset projects
   // to exceed; no hard refuse since the streaming label compute closes
@@ -1092,6 +1101,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.xgb_train_nthread       = 4;   // matches BacktestPanels.hpp:2056 pre-v5.10
   cfg.xgb_eval_nthread        = 1;   // matches BacktestEngine.hpp:1352, 1638
   cfg.csv_load_workers        = 1;   // serial CSV load (matches pre-v5.10 behavior)
+  cfg.multi_horizon_max_threads = 0; // 0 = auto (min(8, ncores/2)); 1 = forced serial
   cfg.feature_collect_max_gb  = 12;  // advisory cap; WARN-only
   cfg.wf_split_max_gb         = 8;
   cfg.held_out_max_gb         = 4;
@@ -1538,6 +1548,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(xgb_train_nthread)
     CFG_PARSE_INT(xgb_eval_nthread)
     CFG_PARSE_INT(csv_load_workers)
+    CFG_PARSE_INT(multi_horizon_max_threads)
     CFG_PARSE_INT(feature_collect_max_gb)
     CFG_PARSE_INT(wf_split_max_gb)
     CFG_PARSE_INT(held_out_max_gb)

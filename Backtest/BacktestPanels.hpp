@@ -3071,6 +3071,216 @@ struct MultiHorizonWorkerArgs {
     float snap_held_out_fraction;           // from state->fv_held_out_fraction
 };
 
+// v5.11.41 — per-horizon FV helper. Extracted from train_multi_horizon_worker_fn
+// for both serial-mode (called from for-loop) AND parallel-mode (called from
+// per-horizon pthreads). Writes mh_horizon_fv[h] / mh_horizon_complete[h] /
+// mh_horizon_status[h] / per-horizon summary.txt + fires
+// Backtest_RunFullValidation (which itself fires WF + held-out + auto-stamp).
+//
+// Parameters:
+//   state        — for status writes
+//   results      — feature matrix + labels[]; in PARALLEL mode each thread
+//                  passes its own isolated copy with own labels[] buffer
+//   h            — horizon index (0..N-1)
+//   horizon_ticks/tp_pct/sl_pct — per-horizon overrides
+//   local_run_cfg — mutable copy of BacktestRunConfig; mutated per horizon
+//                   to drive Backtest_ComputeLabelsFromSamples. In SERIAL,
+//                   this is &run_control->run_config (shared mutate). In
+//                   PARALLEL, each thread passes its own local copy.
+static inline void mh_run_one_horizon_fv(
+    TrainingPanelState *state,
+    BacktestResults *results,
+    int h,
+    int horizon_ticks,
+    float tp_pct, float sl_pct,
+    int label_type,
+    const char *run_name,
+    int snap_n_splits, int snap_buffer_ticks, int snap_min_train,
+    float snap_gap_threshold, float snap_held_out_fraction,
+    int snap_auto_stamp_enabled,
+    const char *snap_auto_stamp_secret,
+    BacktestRunConfig *local_run_cfg)
+{
+    snprintf(state->mh_horizon_status[h], 128,
+             "h=%d: computing labels...", horizon_ticks);
+
+    local_run_cfg->label_forward_ticks = horizon_ticks;
+    local_run_cfg->label_tp_pct        = (double)tp_pct;
+    local_run_cfg->label_sl_pct        = (double)sl_pct;
+    Backtest_ComputeLabelsFromSamples(results, local_run_cfg);
+
+    int n_valid = 0;
+    for (int s = 0; s < results->sample_count; ++s) {
+        if (!isnan(results->labels[s]) && !isinf(results->labels[s]))
+            n_valid++;
+    }
+    if (n_valid < 50) {
+        fprintf(stderr, "[mh-train] horizon %d: only %d valid labels; skip\n",
+                horizon_ticks, n_valid);
+        snprintf(state->mh_horizon_status[h], 128,
+                 "h=%d FAILED: only %d valid labels (need >= 50)",
+                 horizon_ticks, n_valid);
+        state->mh_horizon_complete[h] = 1;
+        return;
+    }
+
+    int num_classes = (label_type >= 0 && label_type < LABEL_COUNT)
+                      ? label_table[label_type].num_classes : 0;
+    int is_multiclass = (num_classes >= 2);
+    int is_regression = (num_classes == 1);
+    const char* role = "buy_signal";
+    if (label_type == LABEL_PEAK_VALLEY_STABLE) role = "barrier";
+    else if (label_type == LABEL_REGIME)        role = "regime";
+    const char* run_subdir = (label_type == LABEL_PEAK_VALLEY_STABLE
+                              || label_type == LABEL_REGIME
+                              || is_multiclass)
+        ? "classification" : (is_regression ? "regression" : "classification");
+    char horizon_dir[300];
+    snprintf(horizon_dir, sizeof(horizon_dir),
+             "models/%s/%s_horizon_%d", run_subdir, run_name, horizon_ticks);
+    mkdir("models", 0755);
+    char parent_dir[320];
+    snprintf(parent_dir, sizeof(parent_dir), "models/%s", run_subdir);
+    mkdir(parent_dir, 0755);
+    mkdir(horizon_dir, 0755);
+
+    HeldOutSplit split = HeldOutSplit_Make(results->sample_count,
+                                            (double)snap_held_out_fraction);
+    char unlock_token[33];
+    memcpy(unlock_token, split.lock_token, sizeof(unlock_token));
+    HeldOutSplit_Unlock(&split, unlock_token);
+
+    FullValidationResults *fv = &state->mh_horizon_fv[h];
+    memset(fv, 0, sizeof(*fv));
+    if (snap_auto_stamp_enabled) {
+        snprintf(fv->auto_stamp_path, sizeof(fv->auto_stamp_path),
+                 "%s/%s.json", horizon_dir, role);
+        size_t n = strnlen(snap_auto_stamp_secret, 128);
+        if (n >= sizeof(fv->auto_stamp_secret))
+            n = sizeof(fv->auto_stamp_secret) - 1;
+        memcpy(fv->auto_stamp_secret, snap_auto_stamp_secret, n);
+        fv->auto_stamp_secret[n] = '\0';
+    }
+    fv->auto_stamp_format_version = 0;
+    fv->req_label_lookahead_ticks = horizon_ticks;
+    fv->req_label_tp_pct          = (double)tp_pct;
+    fv->req_label_sl_pct          = (double)sl_pct;
+
+    snprintf(state->mh_horizon_status[h], 128,
+             "h=%d: training + WF + held-out (%d folds)...",
+             horizon_ticks, snap_n_splits);
+
+    Backtest_RunFullValidation(fv, results, &split,
+                                snap_n_splits, horizon_ticks,
+                                snap_buffer_ticks, snap_min_train,
+                                &state->mh_horizon_progress[h],
+                                &state->mh_cancel,
+                                label_type, snap_gap_threshold);
+
+    state->mh_horizon_complete[h] = 1;
+
+    int label_kind = fv->label_kind;
+    double wf_metric = (label_kind == 2)
+        ? fv->walkforward.mean_val_correlation
+        : fv->walkforward.mean_val_accuracy;
+    double ho_metric = (label_kind == 2)
+        ? fv->held_out_correlation : fv->held_out_metric;
+
+    if (fv->auto_stamp_attempted && fv->auto_stamp_ok) {
+        snprintf(state->mh_horizon_status[h], 128,
+                 "h=%d OK: WF=%.3f HO=%.3f gap=%.3f stamped",
+                 horizon_ticks, wf_metric, ho_metric,
+                 fv->wf_to_held_out_gap);
+    } else if (fv->ran_held_out) {
+        snprintf(state->mh_horizon_status[h], 128,
+                 "h=%d OK: WF=%.3f HO=%.3f gap=%.3f (stamp skipped)",
+                 horizon_ticks, wf_metric, ho_metric,
+                 fv->wf_to_held_out_gap);
+    } else if (state->mh_cancel) {
+        snprintf(state->mh_horizon_status[h], 128,
+                 "h=%d CANCELLED mid-validation", horizon_ticks);
+    } else {
+        snprintf(state->mh_horizon_status[h], 128,
+                 "h=%d FAILED: held-out did not complete",
+                 horizon_ticks);
+    }
+
+    char dst_summary[400];
+    snprintf(dst_summary, sizeof(dst_summary), "%s/summary.txt", horizon_dir);
+    FILE *sf = fopen(dst_summary, "w");
+    if (sf) {
+        fprintf(sf, "run: %s_horizon_%d\n", run_name, horizon_ticks);
+        fprintf(sf, "role: %s\n", role);
+        fprintf(sf, "model: %s/%s.json\n", horizon_dir, role);
+        fprintf(sf, "label_type: %d\n", label_type);
+        fprintf(sf, "label_lookahead_ticks: %d\n", horizon_ticks);
+        fprintf(sf, "label_tp_pct: %.6g\n", (double)tp_pct);
+        fprintf(sf, "label_sl_pct: %.6g\n", (double)sl_pct);
+        fprintf(sf, "wf_n_folds: %d\n", fv->walkforward.valid_folds);
+        fprintf(sf, "wf_mean_val_accuracy: %.6f\n",
+                (double)fv->walkforward.mean_val_accuracy);
+        fprintf(sf, "wf_std_val_accuracy: %.6f\n",
+                (double)fv->walkforward.std_val_accuracy);
+        fprintf(sf, "wf_mean_val_correlation: %.6f\n",
+                (double)fv->walkforward.mean_val_correlation);
+        fprintf(sf, "held_out_metric: %.6f\n", (double)fv->held_out_metric);
+        fprintf(sf, "held_out_count: %d\n", fv->held_out_count);
+        fprintf(sf, "wf_to_held_out_gap: %.6f\n",
+                (double)fv->wf_to_held_out_gap);
+        fprintf(sf, "gap_acceptable: %d\n", fv->gap_acceptable);
+        fprintf(sf, "gap_threshold: %.6f\n", (double)fv->gap_threshold);
+        fprintf(sf, "ran_held_out: %d\n", fv->ran_held_out);
+        fprintf(sf, "auto_stamp_attempted: %d\n", fv->auto_stamp_attempted);
+        fprintf(sf, "auto_stamp_ok: %d\n", fv->auto_stamp_ok);
+        if (fv->auto_stamp_ok) {
+            fprintf(sf, "auto_stamp_path_written: %s\n",
+                    fv->auto_stamp_path_written);
+        } else if (fv->auto_stamp_attempted) {
+            fprintf(sf, "auto_stamp_error: %s\n", fv->auto_stamp_error);
+        }
+        fclose(sf);
+    }
+}
+
+// v5.11.41 — per-horizon parallel worker. Each thread runs ONE horizon's
+// full FV pipeline against its own isolated_results (shallow copy of shared
+// BacktestResults + own labels[] buffer to avoid race with other threads
+// recomputing labels concurrently). Forces config_used.xgb_train_nthread=1
+// for bytewise-determinism parity with serial-mode-with-nthread=1.
+struct MultiHorizonParallelJob {
+    TrainingPanelState *state;
+    BacktestResults isolated_results;  // shallow copy + own labels[]
+    int h;
+    int horizon_ticks;
+    float tp_pct, sl_pct;
+    int label_type;
+    char run_name[64];
+    int snap_n_splits, snap_buffer_ticks, snap_min_train;
+    float snap_gap_threshold, snap_held_out_fraction;
+    int snap_auto_stamp_enabled;
+    char snap_auto_stamp_secret[128];
+    BacktestRunConfig local_run_cfg;
+};
+
+static inline void *mh_per_horizon_parallel_worker(void *arg) {
+    MultiHorizonParallelJob *job = (MultiHorizonParallelJob *)arg;
+    mh_run_one_horizon_fv(
+        job->state,
+        &job->isolated_results,
+        job->h,
+        job->horizon_ticks,
+        job->tp_pct, job->sl_pct,
+        job->label_type,
+        job->run_name,
+        job->snap_n_splits, job->snap_buffer_ticks, job->snap_min_train,
+        job->snap_gap_threshold, job->snap_held_out_fraction,
+        job->snap_auto_stamp_enabled, job->snap_auto_stamp_secret,
+        &job->local_run_cfg);
+    free(job->isolated_results.labels);
+    free(job);
+    return NULL;
+}
+
 static inline void *train_multi_horizon_worker_fn(void *arg) {
     MultiHorizonWorkerArgs *args = (MultiHorizonWorkerArgs *)arg;
     TrainingPanelState *state = args->state;
@@ -3152,190 +3362,146 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
         state->mh_horizon_progress[h] = 0;
         state->mh_horizon_status[h][0] = '\0';
     }
+    state->mh_total = horizon_count;
+
+    // v5.11.41.C — parallelism dispatch. Compute effective worker count from
+    // cfg.multi_horizon_max_threads (0 = auto = min(8, ncores/2)). Cap at
+    // horizon_count + 8 (HORIZON_LIST_MAX). Forced serial when
+    // mh_max_threads=1 OR horizon_count==1.
+    int mh_max_threads = results->config_used.multi_horizon_max_threads;
+    if (mh_max_threads <= 0) {
+        long ncores = sysconf(_SC_NPROCESSORS_ONLN);
+        if (ncores < 2) ncores = 2;
+        mh_max_threads = (int)(ncores / 2);
+        if (mh_max_threads < 1) mh_max_threads = 1;
+        if (mh_max_threads > 8) mh_max_threads = 8;
+    }
+    int n_parallel = horizon_count < mh_max_threads ? horizon_count : mh_max_threads;
+    int parallel_mode = (n_parallel >= 2 && horizon_count >= 2);
 
     int trained = 0;
     int saved_count = 0;
-    int validated = 0;  // v5.11.41 — count horizons where ran_held_out=1
-    for (int h = 0; h < horizon_count; ++h) {
-        if (state->mh_cancel) {
-            fprintf(stderr, "[mh-train] cancelled at horizon %d/%d\n",
-                    h, horizon_count);
-            break;
-        }
-        int horizon_ticks = horizons[h];
-        state->mh_current_horizon = horizon_ticks;
-        state->mh_progress = h + 1;
-        state->mh_total = horizon_count;
-        snprintf(state->mh_horizon_status[h], 128,
-                 "h=%d: computing labels...", horizon_ticks);
+    int validated = 0;
 
-        // Override label params for THIS horizon, recompute labels.
-        // v5.11.40 — rotate label_tp_pct + label_sl_pct per horizon
-        //            (snap'd from operator's CSV at click time).
-        // v5.11.41 — full per-horizon FV pipeline (WF + held-out + stamp).
-        run_control->run_config.label_forward_ticks = horizon_ticks;
-        run_control->run_config.label_tp_pct = (double)tp_pcts[h];
-        run_control->run_config.label_sl_pct = (double)sl_pcts[h];
-        Backtest_ComputeLabelsFromSamples(results, &run_control->run_config);
+    if (parallel_mode) {
+        fprintf(stderr, "[mh-train] parallel mode: %d horizons across %d threads "
+                        "(xgb_train_nthread pinned to 1 per thread for parity)\n",
+                horizon_count, n_parallel);
 
-        // v5.11.41 — sanity check before invoking RFV. Same N_VALID floor
-        // as the previous inline path. Skip horizon if not enough labels.
-        int n_valid = 0;
-        for (int s = 0; s < results->sample_count; ++s) {
-            if (!isnan(results->labels[s]) && !isinf(results->labels[s]))
-                n_valid++;
-        }
-        if (n_valid < 50) {
-            fprintf(stderr, "[mh-train] horizon %d: only %d valid labels; skip\n",
-                    horizon_ticks, n_valid);
-            snprintf(state->mh_horizon_status[h], 128,
-                     "h=%d FAILED: only %d valid labels (need >= 50)",
-                     horizon_ticks, n_valid);
-            state->mh_horizon_complete[h] = 1;
-            continue;
-        }
-
-        // v5.11.41 — per-horizon model directory (matches Save Run convention).
-        // Determine role from label_type. Multiclass / barrier / regime
-        // classification → "classification" subdir; regression → "regression".
-        int num_classes = (label_type >= 0 && label_type < LABEL_COUNT)
-                          ? label_table[label_type].num_classes : 0;
-        int is_multiclass = (num_classes >= 2);
-        int is_regression = (num_classes == 1);
-        const char* role = "buy_signal";
-        if (label_type == LABEL_PEAK_VALLEY_STABLE) role = "barrier";
-        else if (label_type == LABEL_REGIME)        role = "regime";
-        const char* run_subdir = (label_type == LABEL_PEAK_VALLEY_STABLE
-                                  || label_type == LABEL_REGIME
-                                  || is_multiclass)
-            ? "classification" : (is_regression ? "regression" : "classification");
-        char horizon_dir[300];
-        snprintf(horizon_dir, sizeof(horizon_dir),
-                 "models/%s/%s_horizon_%d", run_subdir, run_name, horizon_ticks);
-        mkdir("models", 0755);
-        char parent_dir[320];
-        snprintf(parent_dir, sizeof(parent_dir), "models/%s", run_subdir);
-        mkdir(parent_dir, 0755);
-        mkdir(horizon_dir, 0755);
-
-        // v5.11.41 — build per-horizon HeldOutSplit (same pattern as
-        // single-horizon RFV worker). HeldOutSplit_Make returns a locked
-        // split; Unlock with the returned token.
-        HeldOutSplit split = HeldOutSplit_Make(results->sample_count,
-                                                (double)snap_held_out_fraction);
-        char unlock_token[33];
-        memcpy(unlock_token, split.lock_token, sizeof(unlock_token));
-        HeldOutSplit_Unlock(&split, unlock_token);
-
-        // v5.11.41 — populate FullValidationResults request fields per
-        // horizon. Backtest_RunFullValidation will read auto_stamp_path/
-        // _secret to fire stamp_write_for_model post-held-out, and read
-        // req_label_* to embed forensic horizon record into stamp body.
-        FullValidationResults *fv = &state->mh_horizon_fv[h];
-        memset(fv, 0, sizeof(*fv));
-        if (snap_auto_stamp_enabled) {
-            snprintf(fv->auto_stamp_path, sizeof(fv->auto_stamp_path),
-                     "%s/%s.json", horizon_dir, role);
-            size_t n = strnlen(snap_auto_stamp_secret,
-                               sizeof(snap_auto_stamp_secret));
-            if (n >= sizeof(fv->auto_stamp_secret))
-                n = sizeof(fv->auto_stamp_secret) - 1;
-            memcpy(fv->auto_stamp_secret, snap_auto_stamp_secret, n);
-            fv->auto_stamp_secret[n] = '\0';
-        }
-        fv->auto_stamp_format_version = 0;  // 0 = use MODEL_FORMAT_VERSION
-        fv->req_label_lookahead_ticks = horizon_ticks;
-        fv->req_label_tp_pct          = (double)tp_pcts[h];
-        fv->req_label_sl_pct          = (double)sl_pcts[h];
-
-        snprintf(state->mh_horizon_status[h], 128,
-                 "h=%d: training + WF + held-out (%d folds)...",
-                 horizon_ticks, snap_n_splits);
-
-        // v5.11.41 — run full validation (WF + held-out + auto-stamp) for
-        // THIS horizon. RFV writes both fv->walkforward.* + fv->held_out_*
-        // + fv->wf_to_held_out_gap, AND if auto_stamp_path is non-empty
-        // AND ran_held_out=1, it fires stamp_write_for_model embedding
-        // all per-horizon stamp body fields (label_lookahead_ticks,
-        // label_tp_pct, label_sl_pct, xgb_train_nthread).
-        Backtest_RunFullValidation(fv, results, &split,
-                                    snap_n_splits, horizon_ticks,
-                                    snap_buffer_ticks, snap_min_train,
-                                    &state->mh_horizon_progress[h],
-                                    &state->mh_cancel,
-                                    label_type, snap_gap_threshold);
-
-        state->mh_horizon_complete[h] = 1;
-        trained++;
-        if (fv->ran_held_out) validated++;
-        if (fv->auto_stamp_ok) saved_count++;
-
-        // v5.11.41 — build per-horizon status line. Pick metric per label
-        // kind: classification = WF accuracy + held-out accuracy; regression
-        // = WF correlation + held-out correlation.
-        int label_kind = fv->label_kind;  // mirrored from WF; 0=binary, 1=multi, 2=regression
-        double wf_metric = (label_kind == 2)
-            ? fv->walkforward.mean_val_correlation
-            : fv->walkforward.mean_val_accuracy;
-        double ho_metric = (label_kind == 2)
-            ? fv->held_out_correlation : fv->held_out_metric;
-
-        if (fv->auto_stamp_attempted && fv->auto_stamp_ok) {
-            snprintf(state->mh_horizon_status[h], 128,
-                     "h=%d OK: WF=%.3f HO=%.3f gap=%.3f stamped",
-                     horizon_ticks, wf_metric, ho_metric,
-                     fv->wf_to_held_out_gap);
-        } else if (fv->ran_held_out) {
-            snprintf(state->mh_horizon_status[h], 128,
-                     "h=%d OK: WF=%.3f HO=%.3f gap=%.3f (stamp skipped)",
-                     horizon_ticks, wf_metric, ho_metric,
-                     fv->wf_to_held_out_gap);
-        } else if (state->mh_cancel) {
-            snprintf(state->mh_horizon_status[h], 128,
-                     "h=%d CANCELLED mid-validation", horizon_ticks);
-        } else {
-            snprintf(state->mh_horizon_status[h], 128,
-                     "h=%d FAILED: held-out did not complete",
-                     horizon_ticks);
-        }
-
-        // v5.11.41 — extended per-horizon summary.txt with all metrics.
-        char dst_summary[400];
-        snprintf(dst_summary, sizeof(dst_summary), "%s/summary.txt", horizon_dir);
-        FILE *sf = fopen(dst_summary, "w");
-        if (sf) {
-            fprintf(sf, "run: %s_horizon_%d\n", run_name, horizon_ticks);
-            fprintf(sf, "role: %s\n", role);
-            fprintf(sf, "model: %s/%s.json\n", horizon_dir, role);
-            fprintf(sf, "label_type: %d\n", label_type);
-            fprintf(sf, "label_lookahead_ticks: %d\n", horizon_ticks);
-            fprintf(sf, "label_tp_pct: %.6g\n", (double)tp_pcts[h]);
-            fprintf(sf, "label_sl_pct: %.6g\n", (double)sl_pcts[h]);
-            fprintf(sf, "wf_n_folds: %d\n", fv->walkforward.valid_folds);
-            fprintf(sf, "wf_mean_val_accuracy: %.6f\n",
-                    (double)fv->walkforward.mean_val_accuracy);
-            fprintf(sf, "wf_std_val_accuracy: %.6f\n",
-                    (double)fv->walkforward.std_val_accuracy);
-            fprintf(sf, "wf_mean_val_correlation: %.6f\n",
-                    (double)fv->walkforward.mean_val_correlation);
-            fprintf(sf, "held_out_metric: %.6f\n",
-                    (double)fv->held_out_metric);
-            fprintf(sf, "held_out_count: %d\n", fv->held_out_count);
-            fprintf(sf, "wf_to_held_out_gap: %.6f\n",
-                    (double)fv->wf_to_held_out_gap);
-            fprintf(sf, "gap_acceptable: %d\n", fv->gap_acceptable);
-            fprintf(sf, "gap_threshold: %.6f\n",
-                    (double)fv->gap_threshold);
-            fprintf(sf, "ran_held_out: %d\n", fv->ran_held_out);
-            fprintf(sf, "auto_stamp_attempted: %d\n", fv->auto_stamp_attempted);
-            fprintf(sf, "auto_stamp_ok: %d\n", fv->auto_stamp_ok);
-            if (fv->auto_stamp_ok) {
-                fprintf(sf, "auto_stamp_path_written: %s\n",
-                        fv->auto_stamp_path_written);
-            } else if (fv->auto_stamp_attempted) {
-                fprintf(sf, "auto_stamp_error: %s\n", fv->auto_stamp_error);
+        // v5.11.41.C — spawn one pthread per horizon. Each thread:
+        //   - shallow-copies BacktestResults (shared read-only feature_matrix)
+        //   - allocates own labels[] buffer (avoids race with concurrent
+        //     Backtest_ComputeLabelsFromSamples calls in other threads)
+        //   - shallow-copies cfg with xgb_train_nthread=1 forced (parity
+        //     contract — same value as serial mode would produce when cfg
+        //     has nthread=1, and bytewise-deterministic across mode).
+        pthread_t tids[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX] = {0};
+        int spawned[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX] = {0};
+        for (int h = 0; h < horizon_count; ++h) {
+            if (state->mh_cancel) break;
+            MultiHorizonParallelJob *job =
+                (MultiHorizonParallelJob *)malloc(sizeof(MultiHorizonParallelJob));
+            if (!job) {
+                snprintf(state->mh_horizon_status[h], 128,
+                         "h=%d FAILED: malloc job arg", horizons[h]);
+                state->mh_horizon_complete[h] = 1;
+                continue;
             }
-            fclose(sf);
+            job->state = state;
+            // Shallow-copy results; replace labels[] with own heap buffer
+            job->isolated_results = *results;
+            job->isolated_results.labels =
+                (float *)malloc((size_t)results->sample_count * sizeof(float));
+            if (!job->isolated_results.labels) {
+                snprintf(state->mh_horizon_status[h], 128,
+                         "h=%d FAILED: malloc labels[]", horizons[h]);
+                state->mh_horizon_complete[h] = 1;
+                free(job);
+                continue;
+            }
+            // Pin xgb_train_nthread=1 in the isolated cfg for parity vs
+            // serial mode running with nthread=1.
+            job->isolated_results.config_used.xgb_train_nthread = 1;
+            job->h = h;
+            job->horizon_ticks = horizons[h];
+            job->tp_pct = tp_pcts[h];
+            job->sl_pct = sl_pcts[h];
+            job->label_type = label_type;
+            {
+                size_t n = strnlen(run_name, sizeof(job->run_name) - 1);
+                memcpy(job->run_name, run_name, n);
+                job->run_name[n] = '\0';
+            }
+            job->snap_n_splits          = snap_n_splits;
+            job->snap_buffer_ticks      = snap_buffer_ticks;
+            job->snap_min_train         = snap_min_train;
+            job->snap_gap_threshold     = snap_gap_threshold;
+            job->snap_held_out_fraction = snap_held_out_fraction;
+            job->snap_auto_stamp_enabled = snap_auto_stamp_enabled;
+            {
+                size_t n = strnlen(snap_auto_stamp_secret,
+                                   sizeof(job->snap_auto_stamp_secret) - 1);
+                memcpy(job->snap_auto_stamp_secret, snap_auto_stamp_secret, n);
+                job->snap_auto_stamp_secret[n] = '\0';
+            }
+            // Local cfg copy — per-thread mutation of label_*; restored
+            // implicitly when thread exits (job is freed).
+            job->local_run_cfg = saved_run_cfg;
+
+            int rc = pthread_create(&tids[h], NULL,
+                                     mh_per_horizon_parallel_worker, job);
+            if (rc != 0) {
+                snprintf(state->mh_horizon_status[h], 128,
+                         "h=%d FAILED: pthread_create rc=%d", horizons[h], rc);
+                state->mh_horizon_complete[h] = 1;
+                free(job->isolated_results.labels);
+                free(job);
+                continue;
+            }
+            spawned[h] = 1;
+        }
+        // Join all spawned threads. Throttle concurrency by limiting
+        // simultaneous joins is not necessary — pthread_join just blocks
+        // until each completes. Total wall time is max-per-horizon time.
+        for (int h = 0; h < horizon_count; ++h) {
+            if (spawned[h]) pthread_join(tids[h], NULL);
+        }
+        // Tally counters from per-horizon FV results
+        for (int h = 0; h < horizon_count; ++h) {
+            if (!state->mh_horizon_complete[h]) continue;
+            FullValidationResults *fv = &state->mh_horizon_fv[h];
+            trained++;
+            if (fv->ran_held_out) validated++;
+            if (fv->auto_stamp_ok) saved_count++;
+        }
+        state->mh_progress = horizon_count;
+    } else {
+        // Serial mode (existing v5.11.41.A behavior; now via helper)
+        fprintf(stderr, "[mh-train] serial mode: %d horizons sequential "
+                        "(xgb_train_nthread=%d from cfg)\n",
+                horizon_count, results->config_used.xgb_train_nthread);
+        for (int h = 0; h < horizon_count; ++h) {
+            if (state->mh_cancel) {
+                fprintf(stderr, "[mh-train] cancelled at horizon %d/%d\n",
+                        h, horizon_count);
+                break;
+            }
+            state->mh_current_horizon = horizons[h];
+            state->mh_progress = h + 1;
+
+            mh_run_one_horizon_fv(
+                state, results, h,
+                horizons[h], tp_pcts[h], sl_pcts[h],
+                label_type, run_name,
+                snap_n_splits, snap_buffer_ticks, snap_min_train,
+                snap_gap_threshold, snap_held_out_fraction,
+                snap_auto_stamp_enabled, snap_auto_stamp_secret,
+                &run_control->run_config);
+
+            FullValidationResults *fv = &state->mh_horizon_fv[h];
+            trained++;
+            if (fv->ran_held_out) validated++;
+            if (fv->auto_stamp_ok) saved_count++;
         }
     }
 
