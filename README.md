@@ -39,7 +39,7 @@ The hot path is **0.4% of the project**. The rest is supporting infrastructure �
 - 🔄 **hot model swap** without engine restart, safety-gated by open-position semantics.
 - 1879 unit tests · 30+ snapshot parity tests · replay-determinism baseline
 
-[full version history → `DOCS/CHANGELOG.md`](DOCS/CHANGELOG.md)
+[full version history → `DOCS/CHANGELOG.md`](DOCS/CHANGELOG.md) · [per-sprint detail in `DOCS/changelogs/`](DOCS/changelogs/INDEX.md) · [GitHub releases](https://github.com/Jennyfirrr/FoxML_Trader_v2/releases)
 
 ---
 
@@ -168,7 +168,7 @@ train-serve parity locked via:
 - `scaler_sha256` (FeatureStandardizer sidecar binding)
 - HMAC-signed stamp body (cross-build / cross-cfg / cross-feature drift refused)
 
-see `DOCS/CLAUDE_ML_INVARIANTS.md` + `DOCS/PARITY_LIFECYCLE.md` for the full contract.
+see [`DOCS/ML_TRAINING.md`](DOCS/ML_TRAINING.md) + [`DOCS/ML_USAGE.md`](DOCS/ML_USAGE.md) for the operator-facing pipeline.
 
 ---
 
@@ -254,13 +254,14 @@ three concurrent SPSC rings feed the OMS drainer: REST results, WebSocket fills,
 | If you're... | Read |
 |---|---|
 | **New to the codebase** | [`CLAUDE.md`](CLAUDE.md) → [`DOCS/QUICKSTART.md`](DOCS/QUICKSTART.md) → architecture + build sections above |
-| **Adding a feature / strategy / ML feature** | [`DOCS/CLAUDE_INTEGRATION.md`](DOCS/CLAUDE_INTEGRATION.md) — recipes per category |
-| **Working on the hot path / OMS / kill switch** | [`DOCS/CLAUDE_INVARIANTS.md`](DOCS/CLAUDE_INVARIANTS.md) — load-bearing rules |
-| **Working on the ML pipeline** | [`DOCS/CLAUDE_ML_INVARIANTS.md`](DOCS/CLAUDE_ML_INVARIANTS.md) + [`DOCS/PARITY_LIFECYCLE.md`](DOCS/PARITY_LIFECYCLE.md) |
+| **Configuring the engine** | [`DOCS/CONFIGURATION.md`](DOCS/CONFIGURATION.md) — every cfg field documented |
 | **Backtest / training operator** | [`DOCS/ML_TRAINING.md`](DOCS/ML_TRAINING.md) + [`DOCS/ML_USAGE.md`](DOCS/ML_USAGE.md) |
 | **Going to live trading** | [`DOCS/OPERATOR_DEPLOYMENT.md`](DOCS/OPERATOR_DEPLOYMENT.md) — kernel tuning, isolcpus, SCHED_FIFO, IRQ affinity |
-| **Looking for what shipped when** | [`DOCS/CHANGELOG.md`](DOCS/CHANGELOG.md) |
-| **Code-map / function lookup** | [`DOCS/CODE_MAP.md`](DOCS/CODE_MAP.md) — auto-generated `Pattern_FunctionName` index |
+| **Profiling latency** | [`DOCS/LATENCY_PROFILING.md`](DOCS/LATENCY_PROFILING.md) — rdtsc methodology + bench guide |
+| **Contributing** | [`DOCS/CONTRIBUTING.md`](DOCS/CONTRIBUTING.md) |
+| **Looking for what shipped when** | [`DOCS/CHANGELOG.md`](DOCS/CHANGELOG.md) (one-line per version) · [`DOCS/changelogs/`](DOCS/changelogs/INDEX.md) (per-sprint forensic detail) |
+
+> Internal architecture docs (load-bearing invariants, parity contracts, full code-map, sprint changelogs) are operator-private — they capture edge-case design history not relevant to public users. The source code is documented inline; CLAUDE.md is the always-loaded reference for engine-wide architecture.
 
 ---
 

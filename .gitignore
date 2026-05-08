@@ -93,8 +93,7 @@ CLAUDE.local.md
 # CONFIGURATION, ML_USAGE, ML_TRAINING, CONTRIBUTING, LATENCY_PROFILING.
 # Public engine repo cloned without workspace gets DOCS/ with only those 7.
 DOCS/CLAUDE_*.md
-DOCS/CHANGELOG.md
-DOCS/changelogs
+# DOCS/CHANGELOG.md and DOCS/changelogs/ are PUBLIC — see workspace privacy boundary
 DOCS/CODE_MAP.md
 DOCS/KNOWN_ISSUES.md
 DOCS/RECURRING_BUG_PATTERNS.md
