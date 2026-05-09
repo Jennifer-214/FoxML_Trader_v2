@@ -47,6 +47,7 @@
 #include "../ML_Headers/ConfidenceScore.hpp"
 #include "../ML_Headers/LinearRegression3X.hpp"  // v4.0.3 D10 RegressionFeederX
 #include "../ML_Headers/RollingStats.hpp"
+#include "../ML_Headers/RollingTurnover.hpp"  // v5.14.1.G — portfolio turnover
 #include "../ML_Headers/ROR_regressor.hpp"        // v5.1.0 — RORRegressor on CoreContext::slow_state
 #include "../ML_Headers/FlowFeatures.hpp"         // v5.1.0 — FlowState etc on CoreContext::slow_state
 #include "../MemHeaders/HealthLog.hpp"
@@ -198,6 +199,12 @@ struct CoreContext {
     // Single-position-per-core invariant means active_prediction is plenty;
     // multi-position would need a per-position ring.
     ConfidenceScorer confidence;
+    // v5.14.1.G — portfolio turnover diagnostic. Per-core; ephemeral
+    // (NOT in PortfolioController.hpp:2094 fwrite path; sharded-only
+    // state). Populated per slow-path cycle from weights_buf top-K.
+    // Surfaced via PerCoreSnap.ml_portfolio_turnover. State + math
+    // in ML_Headers/RollingTurnover.hpp.
+    RollingTurnover turnover;
     // v5.10.0e — drift detection. Sampled post-fill (when
     // ConfidenceScorer_Update fires for ML cores). Engine emits CRITICAL
     // log on sustained-breach + optionally trips per-core kill_switch
@@ -589,6 +596,11 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         // moot). No BindCompositeCfg here — defer to EngineSharded.
         // v5.10.0e — drift history starts empty; samples land post-fill.
         DriftHistory_Init(&state->cores[i].drift_history);
+        // v5.14.1.G — turnover with safe defaults (window=100, topk=3).
+        // Engine boot will re-init via EngineSharded.hpp with cfg values
+        // for STRATEGY_ML cores; non-ML cores keep these defaults
+        // (turnover never gets fed; stays at last_turnover=0).
+        RollingTurnover_Init(&state->cores[i].turnover, 100, 3);
         state->cores[i].staged_prediction = 0.0;
         state->cores[i].active_prediction = 0.0;
         state->cores[i].last_confidence = 0.0;
@@ -2278,6 +2290,13 @@ inline void EventLoop_RebuildOneCore(
             // features enabled); pointer is non-null but mask = all-on
             // produces bytewise-identical output to pre-v5.11.18.
             ml_ctx.feature_mask = &resolved_cfg.core_feature_mask[slot];
+            // v5.14.1.G — portfolio turnover wire. Pointer to per-core
+            // CoreContext.turnover; ML_BuildParameters' buy-side blend
+            // populator pushes top-K mask each cycle. void* in MLBuildContext
+            // avoids include cycle (StrategyParameters.hpp doesn't include
+            // ControllerEventLoop.hpp). topk read from resolved cfg.
+            ml_ctx.turnover_state = (void*)&state->cores[slot].turnover;
+            ml_ctx.turnover_topk  = resolved_cfg.confidence_turnover_topk;
             // v5.13.0.B — sell-side ML wiring. Reset per-cycle; ML_Build-
             // Parameters writes the blended exit_predictor probability when
             // cfg.use_exit_model && exit_predictor_count > 0. Slow-path body

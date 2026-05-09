@@ -1253,6 +1253,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 FPN_ToDouble(cfg.confidence_capacity_target_dollars),
                 FPN_ToDouble(cfg.confidence_capacity_kappa),
                 FPN_ToDouble(cfg.confidence_rmse_baseline));
+            // v5.14.1.G — re-init turnover with cfg-tunable window/topk
+            // (overrides EventLoopState_Init defaults of 100/3).
+            RollingTurnover_Init(&state.cores[i].turnover,
+                                  cfg.confidence_turnover_window,
+                                  cfg.confidence_turnover_topk);
         }
 
         // v5.4.0 Phase 1.3 — wire Strategy_InitPerCore. Allocates the

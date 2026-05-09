@@ -49,6 +49,7 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/BarrierGate.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"
+#include "../ML_Headers/RollingTurnover.hpp"  // v5.14.1.G — portfolio turnover populator
 #include <ctime>  // v5.14.1.B — clock_gettime for composite confidence freshness
 #include "../ML_Headers/CoreModelZoo.hpp"
 #include "../ML_Headers/CostModel.hpp"     // v5.5.0 Class 8 — cost gate
@@ -175,6 +176,14 @@ struct MLBuildContext {
     // verify_model_stamp pipeline already supports this; load-time
     // refusal fires on mismatch.
     const uint64_t*     feature_mask;
+
+    // v5.14.1.G — portfolio turnover diagnostic state. Pointer to
+    // CoreContext.turnover (per-core EventLoopState; sharded-only).
+    // ML_BuildParameters populates the ring with top-K weights mask
+    // each cycle when non-null. nullptr = legacy path / non-ML cores
+    // (no-op). Surfaced via PerCoreSnap.ml_portfolio_turnover.
+    void*               turnover_state;  // RollingTurnover* (void* avoids include cycle)
+    int                 turnover_topk;   // matched to cfg.confidence_turnover_topk at boot
 };
 
 //======================================================================================================
@@ -944,6 +953,18 @@ inline void ML_BuildParameters(
                     // If avail < 2: not enough history — leave bandit
                     // weights in weights_buf (Ridge needs at least 2
                     // samples for meaningful correlation).
+                }
+                // v5.14.1.G — push top-K mask to turnover ring for diagnostic.
+                // weights_buf is now finalized (post-bandit OR post-Ridge).
+                // Reads ezoo->primary_count + weights_buf; writes to per-core
+                // turnover ring via mctx->turnover_state pointer (CoreContext-
+                // owned). No-op when state nullptr (legacy / non-ML).
+                if (mctx && mctx->turnover_state && ezoo->primary_count > 0) {
+                    uint8_t topk_mask = topk_mask_from_weights(
+                        weights_buf, ezoo->primary_count,
+                        mctx->turnover_topk);
+                    RollingTurnover_Push(
+                        (RollingTurnover*)mctx->turnover_state, topk_mask);
                 }
                 pred_raw = (double)Model_Predict_Ensemble_Weighted(
                     ezoo->primary_handles, ezoo->primary_count,
