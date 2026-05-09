@@ -4914,7 +4914,18 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 mh_args->snap_horizons[i] = (i == 0) ? single_h : 0;
                 mh_args->snap_tp_pct[i]   = single_tp;
                 mh_args->snap_sl_pct[i]   = single_sl;
+                // v5.13.5.A — populate new snap fields. Without this,
+                // malloc'd MultiHorizonWorkerArgs leaves snap_label_kind_
+                // per_horizon[] uninitialized → undefined label_type
+                // passed to mh_run_one_horizon_fv. Single-horizon click
+                // mirrors broadcast: label_type combo for h=0, 0 elsewhere.
+                mh_args->snap_label_kind_per_horizon[i] =
+                    (i == 0) ? state->label_type : 0;
             }
+            // v5.13.5.A — single-horizon training_side. Operator's UI
+            // toggle applies even in single-horizon mode (lets them
+            // train one exit-side model without per-horizon CSV).
+            mh_args->snap_training_side = state->ui_training_side;
             // v5.11.47 — same cfg-fallback for secret as Multi-Horizon path.
             {
                 const char* secret_src = state->fv_auto_stamp_secret;
