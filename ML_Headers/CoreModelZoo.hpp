@@ -36,6 +36,7 @@
 #include "ModelInference.hpp"
 #include "FeatureRegistry.hpp"  // v5.8.6: FEATURE_REGISTRY_HASH() drift catch
 #include "../Backtest/LabelFunctions.hpp"  // v5.10.1.A: LABEL_REGISTRY_HASH() drift catch
+#include "../CoreFrameworks/ControllerConfig.hpp"  // v5.14.1.B.3: cfg* for X-macro drift check
 #include "BanditLearning.hpp"   // v5.10.0a.G.7 — per-regime BanditState in EnsembleModelZoo
 #include "RidgeBlender.hpp"     // v5.14.0 — Ridge risk-parity blending state on EnsembleModelZoo
 #include "../Strategies/StrategyInterface.hpp"  // v5.10.0a.G.7 — NUM_REGIMES
@@ -121,7 +122,19 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                                     // post-load REFUSE if stamp's
                                     // label_lookahead_ticks differs from this
                                     // value (catches dir rename / copy mistake).
-                                    int expected_horizon_ticks = 0) {
+                                    int expected_horizon_ticks = 0,
+                                    // v5.14.1.B.3 — cfg pointer for X-macro
+                                    // drift check (Ridge + composite cfg
+                                    // fields stamped via FOREACH_STAMP_BOUND_CFG).
+                                    // Default nullptr = skip drift check (legacy
+                                    // callers + tests). When non-null, post-
+                                    // verify_model_stamp expansion compares
+                                    // sr.<name> vs cfg->get_cfg_expr per
+                                    // X-macro entry; mismatch → increments
+                                    // sr.inference_cfg_drift_count + caller's
+                                    // existing held_out_gate_strict gate decides
+                                    // refuse-vs-warn.
+                                    const ControllerConfig<F>* cfg_ptr = nullptr) {
     char path[512];
     struct stat st;
     const char* found_path = nullptr;
@@ -170,6 +183,45 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
             LABEL_REGISTRY_HASH(),  // v5.10.1.A — close Finding #1 consume side
             expected_feature_mask);  // v5.11.18 main — feature mask binding
         have_sr = 1;
+
+        // v5.14.1.B.3 (PARITY-004 + PARITY-005) — X-macro drift check.
+        // Compares stamp body's Ridge + composite cfg values vs current
+        // cfg; increments sr.inference_cfg_drift_count per drift +
+        // populates sr.reason on first drift. Resurrects v5.9.2b's
+        // abandoned drift_count mechanism (partial — covers the 10
+        // X-macro-registered fields; legacy v5.9.2b inference_cfg_*
+        // fields gain coverage when v5.15+ migrates them into the
+        // registry per CLEANUP-001).
+        //
+        // Surface G forward-compat: legacy stamps (pre-v5.14.1.B.3)
+        // load with sr.has_<name>=0 → check skips silently. New stamps
+        // with mismatched cfg → drift detected at load.
+        //
+        // cfg_ptr=nullptr (legacy callers + tests) → skip silently.
+        // Local `cfg` reference inside the block lets the X-macro
+        // entries use `cfg.field` syntax uniformly (matches the macro
+        // contract documented in StampBoundCfgRegistry.hpp).
+        if (cfg_ptr && sr.valid > 0) {
+            const ControllerConfig<F>& cfg = *cfg_ptr;
+            #define X(name, type, fmt, default_val, get_cfg_expr)                  \
+                if (sr.has_##name) {                                                \
+                    type cfg_val = (type)(get_cfg_expr);                            \
+                    if (sr.name != cfg_val) {                                       \
+                        sr.inference_cfg_drift_count++;                             \
+                        if (sr.reason[0] == '\0') {                                 \
+                            snprintf(sr.reason, sizeof(sr.reason),                  \
+                                "%s drift: stamp=" fmt " cfg=" fmt,                 \
+                                #name, sr.name, cfg_val);                           \
+                        }                                                            \
+                    }                                                                \
+                }
+            FOREACH_STAMP_BOUND_CFG(X)
+            #undef X
+            if (sr.inference_cfg_drift_count > 0) {
+                sr.valid = 0;  // treat drift as verification failure
+            }
+        }
+
         if (sr.valid <= 0) {
             if (held_out_gate_strict == 1) {
                 fprintf(stderr,
