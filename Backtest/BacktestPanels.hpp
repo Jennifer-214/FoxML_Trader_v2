@@ -5039,7 +5039,36 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                             && train_lk_aligned;
         if (!single_horizon_mode) {
         if (!mh_can_train) ImGui::BeginDisabled();
-        if (ImGui::Button("Train Multi-Horizon")) {
+        // v5.13.6.D — tooltip for the click target. Note: SetItemTooltip
+        // attaches to the LAST item; ImGui::Button must be issued first
+        // for the tooltip to bind to it. Render order matters here.
+        bool mh_clicked = ImGui::Button("Train Multi-Horizon");
+        ImGui::SetItemTooltip(
+            "Train N models in one click — one per horizon in Horizons CSV.\n"
+            "\n"
+            "Per-horizon TP/SL via the CSV inputs above (broadcast-or-match\n"
+            "rule: empty/single value broadcasts; N values map positional).\n"
+            "\n"
+            "v5.13.5 — per-horizon Label Kind via 'Label Kind CSV' input:\n"
+            "  Empty: all horizons use the Label Type combo above\n"
+            "  Single value (e.g. '5'): broadcasts to all horizons\n"
+            "  N values (e.g. '0,5,1'): positional map to Horizons CSV\n"
+            "  Misalignment disables this button (count != horizons count)\n"
+            "Lets you train heterogeneous mixed-output ensembles in ONE\n"
+            "click: e.g. binary at h=1000, 3-class barrier at h=5000,\n"
+            "regression at h=10000 — v5.12.3.B+E mixed-output normalizer\n"
+            "blends them at inference.\n"
+            "\n"
+            "v5.13.5 — Training Side combo at top of panel routes output\n"
+            "to side-specific subdir:\n"
+            "  Buy:  models/<run_subdir>/<run>_horizon_<N>/role.json\n"
+            "  Exit: models/exit/<run_subdir>/<run>_horizon_<N>/role.json\n"
+            "After training, point cfg.exit_signal_model_dir at the exit\n"
+            "subtree to enable v5.13.0 sell-side ML inference.\n"
+            "\n"
+            "Each model gets full WF + held-out + auto-stamp. Per-horizon\n"
+            "results table renders below.");
+        if (mh_clicked) {
             state->mh_running = 1;
             state->mh_progress = 0;
             state->mh_total = eff_horizon_count;

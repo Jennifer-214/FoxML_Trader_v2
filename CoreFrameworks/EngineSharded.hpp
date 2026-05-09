@@ -2749,7 +2749,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                             "[hot_swap] core %d REFUSED: ensemble inference "
                                             "active; swap of single-zoo model would not "
                                             "affect actual predictions. Restart engine "
-                                            "with new core_%d_model_dir to swap horizon set.\n",
+                                            "with new core_%d_model_dir to swap horizon set "
+                                            "(also applies to v5.13.0+ exit_predictor models — "
+                                            "EnsembleModelZoo_LoadFromCfg covers exit_predictor "
+                                            "but hot-swap path does NOT yet; v5.14.2 candidate).\n",
                                             c, c);
                                         __atomic_store_n(
                                             &g_shared.swap_model_path_requested[c], 0,
@@ -2958,10 +2961,42 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                     state.cores[c].last_exit_prediction;
                                 // v5.13.4 — capture chosen arm + regime per-slot
                                 // for HandleFill's exit_bandit Update.
-                                oms.last_exit_predicted_arm[pidx] = (int8_t)
+                                // v5.13.6.C — defensive bounds (parity-check
+                                // M.3 gap-close 2026-05-08). Catches trainer↔
+                                // engine model dimension mismatch + regime
+                                // out-of-range at SUBMIT time vs. silently
+                                // skipping bandit update at attribution time.
+                                // CRITICAL log + clamp; doesn't refuse submit
+                                // (exit fires for safety; bandit skips later).
+                                int captured_arm =
                                     state.cores[c].last_exit_dominant_horizon;
-                                oms.last_exit_predicted_regime[pidx] = (int8_t)
+                                int captured_regime =
                                     state.cores[c].regime_state.current_regime;
+                                EnsembleModelZoo<F>* ezoo_b = (EnsembleModelZoo<F>*)
+                                    state.cores[c].ensemble_handle;
+                                int n_arms_b = (ezoo_b
+                                    ? ezoo_b->exit_predictor_count : 0);
+                                if (captured_arm < 0 ||
+                                    captured_arm >= n_arms_b) {
+                                    static uint64_t s_arm_log_us[16] = {0};
+                                    Health_LogCriticalRateLimited(
+                                        &s_arm_log_us[c & 15], 60000000ULL,
+                                        c, "ml",
+                                        "exit submit: captured arm %d out of "
+                                        "range [0, %d) — bandit Update will "
+                                        "skip; trainer↔engine horizon count "
+                                        "mismatch?",
+                                        captured_arm, n_arms_b);
+                                    captured_arm = -1;  // -1 sentinel; HandleFill skips
+                                }
+                                if (captured_regime < 0 ||
+                                    captured_regime >= NUM_REGIMES) {
+                                    captured_regime = -1;
+                                }
+                                oms.last_exit_predicted_arm[pidx] =
+                                    (int8_t)captured_arm;
+                                oms.last_exit_predicted_regime[pidx] =
+                                    (int8_t)captured_regime;
                                 OMS_PushSubmit(&oms, (int16_t)pidx,
                                     ORDER_MARKET_SELL, qty,
                                     FPN_Zero<F>(), FPN_Zero<F>(),
