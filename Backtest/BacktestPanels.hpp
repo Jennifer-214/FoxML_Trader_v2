@@ -3811,6 +3811,17 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
     int   snap_min_train          = args->snap_min_train;
     float snap_gap_threshold      = args->snap_gap_threshold;
     float snap_held_out_fraction  = args->snap_held_out_fraction;
+    // v5.13.5.B (parity-check audit gap-close 2026-05-08) — copy NEW
+    // v5.13.5 snap fields to stack BEFORE free(args). Without this,
+    // subsequent reads at the parallel-job populate (line ~3938) +
+    // serial-mode call (line ~4005, 4014) would dereference freed
+    // memory → undefined label_kind in stamp + wrong/random training_side
+    // path routing. Same pattern as horizons/tp_pcts/sl_pcts above.
+    int snap_label_kind_per_horizon[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
+    memcpy(snap_label_kind_per_horizon,
+           args->snap_label_kind_per_horizon,
+           sizeof(snap_label_kind_per_horizon));
+    int snap_training_side = args->snap_training_side;
     free(args);
 
     BacktestResults *results = &run_control->results;
@@ -3935,9 +3946,11 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
             // populates each slot with either the per-horizon CSV value
             // (when N>1 entries given) or the broadcast (single value /
             // empty CSV). Worker reads array directly.
-            job->label_type = args->snap_label_kind_per_horizon[h];
-            // v5.13.1.A — per-job training_side
-            job->training_side = args->snap_training_side;
+            // v5.13.5.B (parity-check gap-close 2026-05-08) — read from
+            // stack-local snap (post-free(args)), not args->* (freed).
+            job->label_type = snap_label_kind_per_horizon[h];
+            // v5.13.1.A — per-job training_side (stack-local copy)
+            job->training_side = snap_training_side;
             {
                 size_t n = strnlen(run_name, sizeof(job->run_name) - 1);
                 memcpy(job->run_name, run_name, n);
@@ -4002,7 +4015,9 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
 
             // v5.13.1.B — per-horizon label_kind from snap (broadcast
             // already applied at click time when CSV had ≤1 entries).
-            int per_horizon_lk = args->snap_label_kind_per_horizon[h];
+            // v5.13.5.B (parity-check gap-close) — read stack-local snap
+            // (args is freed at line ~3814).
+            int per_horizon_lk = snap_label_kind_per_horizon[h];
             mh_run_one_horizon_fv(
                 state, results, h,
                 horizons[h], tp_pcts[h], sl_pcts[h],
@@ -4011,7 +4026,7 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
                 snap_gap_threshold, snap_held_out_fraction,
                 snap_auto_stamp_enabled, snap_auto_stamp_secret,
                 &run_control->run_config,
-                args->snap_training_side);
+                snap_training_side);
 
             FullValidationResults *fv = &state->mh_horizon_fv[h];
             trained++;
