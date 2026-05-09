@@ -1039,6 +1039,39 @@ inline void ML_BuildParameters(
     if (out_prediction)  *out_prediction  = prediction;
     if (out_confidence)  *out_confidence  = conf_now;
 
+    // v5.12.1.D — confidence-conditional sizing infrastructure.
+    // INFRA ONLY in this ship: multiplier is plumbed but defaults
+    // cfg.risk_scale_by_confidence=0 → factor=1.0 → no behavior change.
+    // ACTIVATION GATED on Phase 4.B paper-test: operator measures whether
+    // the model is well-calibrated (predicted P=0.7 actually wins ~70%);
+    // if calibrated, flips cfg to 1 (linear) or 2 (quadratic) for
+    // proportional position scaling. Mis-calibrated model + scaling on =
+    // amplified losses, hence the gate.
+    //
+    // factor = clamp((p - threshold) / (1.0 - threshold), 0.0, 1.0)
+    //   mode 1 (linear)    → factor
+    //   mode 2 (quadratic) → factor*factor (steeper rolloff)
+    //   mode 0 (default)   → 1.0 (disabled)
+    //
+    // Branchless via mask-select if the compiler optimizes the ternary;
+    // slow-path budget allows simple branches either way.
+    if (config->risk_scale_by_confidence != 0) {
+        double denom = 1.0 - threshold;
+        double factor = 1.0;
+        if (denom > 1e-9 && conf_now >= threshold) {
+            double raw = (conf_now - threshold) / denom;
+            if (raw < 0.0) raw = 0.0;
+            if (raw > 1.0) raw = 1.0;
+            factor = (config->risk_scale_by_confidence == 2)
+                     ? (raw * raw)        // quadratic
+                     : raw;               // linear
+        } else {
+            factor = 0.0;  // confidence below threshold → block
+        }
+        // Hard cap at original size (factor ∈ [0, 1]); never upsize.
+        trade_size = FPN_Mul(trade_size, FPN_FromDouble<F>(factor));
+    }
+
     out->bg_price_threshold   = gate_price;
     out->bg_volume_threshold  = volume_threshold;
     out->sg_take_profit_price = FPN_Add(entry_price, tp_amount);

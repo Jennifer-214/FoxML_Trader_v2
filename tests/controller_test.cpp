@@ -16546,6 +16546,72 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.12.1.D: confidence-conditional sizing infra ---\n");
+    {
+        // Phase 1.D of v5.12. Cfg field + multiplier plumbing in
+        // ML_BuildParameters. Default cfg=0 → factor=1.0 → no behavior
+        // change. Activation gated on Phase 4.B paper-test calibration.
+        // Tests verify the factor math directly (the plumbing site is
+        // exercised through the existing ML strategy build tests).
+
+        auto compute_factor = [](int mode, double conf_now, double threshold) -> double {
+            if (mode == 0) return 1.0;
+            double denom = 1.0 - threshold;
+            if (denom <= 1e-9 || conf_now < threshold) return 0.0;
+            double raw = (conf_now - threshold) / denom;
+            if (raw < 0.0) raw = 0.0;
+            if (raw > 1.0) raw = 1.0;
+            return (mode == 2) ? (raw * raw) : raw;
+        };
+
+        // === Test 1: default cfg.risk_scale_by_confidence == 0 ===
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.12.1.D: default cfg.risk_scale_by_confidence == 0",
+              cfg.risk_scale_by_confidence == 0);
+
+        // === Test 2: mode=0 (disabled) → factor = 1.0 (no change) ===
+        check("v5.12.1.D: mode=0 → factor = 1.0",
+              compute_factor(0, 0.95, 0.5) == 1.0);
+        check("v5.12.1.D: mode=0 → factor = 1.0 even with low conf",
+              compute_factor(0, 0.51, 0.5) == 1.0);
+
+        // === Test 3: mode=1 (linear) ===
+        // P=0.95, threshold=0.50 → factor = (0.45 / 0.50) = 0.90
+        double f1 = compute_factor(1, 0.95, 0.50);
+        check("v5.12.1.D: mode=1 P=0.95/thr=0.50 → factor ≈ 0.90",
+              std::fabs(f1 - 0.90) < 1e-9);
+        // P=0.51, threshold=0.50 → factor ≈ 0.02
+        double f2 = compute_factor(1, 0.51, 0.50);
+        check("v5.12.1.D: mode=1 P=0.51/thr=0.50 → factor ≈ 0.02",
+              std::fabs(f2 - 0.02) < 1e-9);
+
+        // === Test 4: mode=2 (quadratic) — steeper rolloff ===
+        // P=0.95, threshold=0.50 → factor = 0.90^2 = 0.81
+        double f3 = compute_factor(2, 0.95, 0.50);
+        check("v5.12.1.D: mode=2 P=0.95/thr=0.50 → factor ≈ 0.81",
+              std::fabs(f3 - 0.81) < 1e-9);
+        // P=0.51, threshold=0.50 → factor ≈ 0.02^2 = 0.0004
+        double f4 = compute_factor(2, 0.51, 0.50);
+        check("v5.12.1.D: mode=2 P=0.51/thr=0.50 → factor ≈ 0.0004",
+              std::fabs(f4 - 0.0004) < 1e-9);
+
+        // === Test 5: P below threshold → factor = 0 (block) ===
+        check("v5.12.1.D: mode=1 P<threshold → factor = 0",
+              compute_factor(1, 0.40, 0.50) == 0.0);
+        check("v5.12.1.D: mode=2 P<threshold → factor = 0",
+              compute_factor(2, 0.40, 0.50) == 0.0);
+
+        // === Test 6: P=threshold (boundary) → factor = 0 (no scale) ===
+        check("v5.12.1.D: mode=1 P==threshold → factor = 0",
+              compute_factor(1, 0.50, 0.50) == 0.0);
+
+        // === Test 7: P=1.0 (max conf) → factor = 1.0 ===
+        check("v5.12.1.D: mode=1 P=1.0 → factor = 1.0",
+              std::fabs(compute_factor(1, 1.0, 0.50) - 1.0) < 1e-9);
+        check("v5.12.1.D: mode=2 P=1.0 → factor = 1.0 (1^2 = 1)",
+              std::fabs(compute_factor(2, 1.0, 0.50) - 1.0) < 1e-9);
+    }
+
     printf("\n--- v5.12.1.B.3: hot-path staleness gate (branchless mask) ---\n");
     {
         // Phase B.3 of v5.12.1.B. Hot-path mask check uses

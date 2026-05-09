@@ -437,6 +437,15 @@ template <unsigned F> struct ControllerConfig {
   // measuring slow-path p99 latency on operator hardware.
   int param_staleness_gate_enabled;          // 0=disabled (default), 1=enabled
   uint64_t param_max_age_ticks;              // gap threshold (default 1000 = 10x default poll_interval=100)
+  // v5.12.1.D — confidence-conditional sizing INFRASTRUCTURE.
+  //   0 = disabled (default; flat risk_pct regardless of prediction P)
+  //   1 = linear scale (factor = clamp((P - threshold) / (1 - threshold), 0, 1))
+  //   2 = quadratic scale (factor squared — steeper rolloff)
+  // ACTIVATION GATED on calibration data from v5.12 Phase 4.B paper-test.
+  // Operator flips to 1 or 2 only after measuring model calibration; if
+  // model is mis-calibrated, leave at 0 (amplifying poor predictions =
+  // larger losses).
+  int risk_scale_by_confidence;
   // vol-scaled position sizing
   int vol_sizing_enabled; // 0=disabled, 1=scale qty inversely with volatility
   FPN<F> vol_scale_min; // min scale factor (e.g. 0.25 = never less than 25% of
@@ -1219,6 +1228,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.12.1.B.3 — disabled by default; flip after measuring slow-path p99.
   cfg.param_staleness_gate_enabled = 0;
   cfg.param_max_age_ticks = 1000;
+  // v5.12.1.D — disabled by default; activate only after Phase 4.B
+  // paper-test confirms model calibration.
+  cfg.risk_scale_by_confidence = 0;
   for (int i = 0; i < 16; ++i) cfg.core_model_path[i][0] = '\0';    // empty = shared
   for (int i = 0; i < 16; ++i) cfg.core_model_dir[i][0] = '\0';     // empty = use model_path or shared
   // v4.0 per-core overrides — zero in every field = "inherit global".
@@ -1454,6 +1466,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       cfg.param_max_age_ticks = (uint64_t)atoll(val);
       continue;
     }
+    // v5.12.1.D — confidence-conditional sizing infra
+    CFG_PARSE_INT(risk_scale_by_confidence)
     CFG_PARSE_PCT(max_exposure_pct)
     CFG_PARSE_PCT(min_hold_gain_pct)
     CFG_PARSE_PCT(regime_r2_threshold)
