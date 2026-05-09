@@ -630,7 +630,13 @@ inline void ML_BuildParameters(
     const ControllerConfig<F>* config,
     FPN<F> allocated_balance,
     GateParameters<F>* out,
-    void* ml_ctx_ptr
+    void* ml_ctx_ptr,
+    uint64_t now_us = 0   // v5.14.1.B.2 (PARITY-001) — passed by caller for
+                          // replay-determinism. Live: clock_gettime at slow-
+                          // path entry. Backtest: tick.timestamp (deterministic).
+                          // Default 0 = legacy/test path (composite stays in
+                          // cold-start freshness=0 if enabled; harmless when
+                          // composite_enabled=0 which is the default).
 ) {
     MLBuildContext* mctx = (MLBuildContext*)ml_ctx_ptr;
     CoreModelZoo<F>* zoo = nullptr;
@@ -1105,17 +1111,16 @@ inline void ML_BuildParameters(
         // pre-v5.14.1 behavior. Composite path uses wall-clock now_us
         // for freshness; data_age=0 in legacy path keeps freshness=1.0.
         if (config->confidence_composite_enabled) {
-            // Slow-path site (~once per poll_interval cycle); clock_gettime
-            // ~50-100ns via vDSO is acceptable. Composite formula reads
-            // freshness from last UpdateAndMark + capacity from current_adv +
-            // stability normalized vs cfg.confidence_rmse_baseline.
-            // Hot-cfg fields (rmse_baseline, capacity params, freshness_tau)
-            // are pushed into the scorer at boot (EngineSharded_Init);
-            // ComputeComposite reads them from scorer state, not cfg.
-            struct timespec ts;
-            clock_gettime(CLOCK_MONOTONIC, &ts);
-            uint64_t now_us = (uint64_t)ts.tv_sec * 1000000ull
-                             + (uint64_t)ts.tv_nsec / 1000ull;
+            // v5.14.1.B.2 (PARITY-001) — now_us passed in by caller. Live:
+            // clock_gettime at slow-path entry (non-deterministic OK; live
+            // has no determinism contract). Backtest: tick.timestamp via
+            // EventLoop_RebuildAllParameters_PerCore (deterministic; same
+            // CSV → same now_us across replays).
+            // Composite formula reads freshness from last UpdateAndMark
+            // + capacity from current_adv + stability normalized vs
+            // cfg.confidence_rmse_baseline. Hot-cfg fields are pushed
+            // into the scorer at boot via ConfidenceScorer_BindCompositeCfg
+            // (EngineSharded_Init / PortfolioController init in v5.14.1.B.1).
             conf_now = ConfidenceScorer_ComputeComposite(conf_scorer, now_us);
         } else {
             conf_now = ConfidenceScorer_Compute(conf_scorer, 0.0);  // data_age=0 (live)
@@ -1247,12 +1252,18 @@ inline void Strategy_BuildParameters(
     const RollingStats<F, WL>* rolling_long = nullptr,
     void* model_ctx = nullptr,
     void* strategy_state = nullptr,  // v5.4.0 Phase 2.x — typed-cast inside each branch
-    uint8_t* strategy_halt_reason = nullptr  // v5.6.2 — when non-null, dispatcher
+    uint8_t* strategy_halt_reason = nullptr,  // v5.6.2 — when non-null, dispatcher
                                               // writes SHALT_* codes for BUY_BLOCKED
                                               // paths (fee-floor, cost-gate) and a
                                               // post-pass for strategy zero-gates
                                               // that didn't set a specific code.
                                               // Caller resets to SHALT_OK before call.
+    uint64_t now_us = 0   // v5.14.1.B.2 (PARITY-001) — passed through to
+                          // ML_BuildParameters for composite confidence
+                          // freshness. Live: clock_gettime at slow-path
+                          // entry. Backtest: deterministic tick.timestamp.
+                          // Default 0 keeps non-ML strategies + legacy
+                          // callers unchanged.
 ) {
     switch (strategy_id) {
         case STRATEGY_SIMPLE_DIP:
@@ -1333,7 +1344,9 @@ inline void Strategy_BuildParameters(
                                       (EmaCrossState<F>*)strategy_state);
             break;
         case STRATEGY_ML:
-            ML_BuildParameters(rolling, rolling_long, config, allocated_balance, out, model_ctx);
+            // v5.14.1.B.2 (PARITY-001) — now_us threaded through for
+            // composite confidence replay-determinism.
+            ML_BuildParameters(rolling, rolling_long, config, allocated_balance, out, model_ctx, now_us);
             break;
         default:
             GateParameters_Init(out);

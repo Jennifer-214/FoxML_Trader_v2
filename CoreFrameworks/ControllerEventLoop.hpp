@@ -2309,9 +2309,13 @@ inline void EventLoop_RebuildOneCore(
             rolling_long,
             dispatch_ctx,
             state->cores[slot].strategy_state,   // v5.4.0 Phase 2.1 — typed-cast inside dispatcher
-            &state->cores[slot].strategy_halt_reason  // v5.6.2 — dispatcher writes
+            &state->cores[slot].strategy_halt_reason,  // v5.6.2 — dispatcher writes
                                                        // SHALT_* codes for fee-floor /
                                                        // cost-gate / no-signal paths.
+            now_us  // v5.14.1.B.2 (PARITY-001) — threaded through to ML_BuildParameters
+                    // for composite confidence freshness. Already plumbed to this fn
+                    // (param :1951) since v5.12.1.B clock hoist; live = clock_gettime
+                    // at slow-path entry, backtest = tick.timestamp (deterministic).
         );
 
         // v4.0.3 D9: clear ratchet_sl when no position active on this core,
