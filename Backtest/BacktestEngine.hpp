@@ -1285,6 +1285,16 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
                 inf.has_confidence_rmse_baseline = 1;
                 inf.confidence_rmse_baseline = FPN_ToDouble(cfg.confidence_rmse_baseline);
             }
+            // v5.14.1.E.E (PARITY-008 hotfix) — exit-side blender selector.
+            // Without this, operator changes cfg.exit_blender_mode between
+            // training + deployment without detection (drift check skipped
+            // when has_*=0 forward-compat default). Same v5.9.5b production-
+            // caller field-population gap class as PARITY-002/003/004/005.
+            // Caught by /parity-check 2026-05-09 (v5.14.1.E close audit).
+            if (cfg.exit_blender_mode) {
+                inf.has_exit_blender_mode = 1;
+                inf.exit_blender_mode     = cfg.exit_blender_mode;
+            }
         }
 
         // v5.10.0 Item A — stamp_emit phase timer.
