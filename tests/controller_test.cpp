@@ -10094,18 +10094,19 @@ e3_skip_load:;
         // Re-pinning history:
         //   v5.8.1b — 0xfc9119b8ed47bcf9ULL (34 features)
         //   v5.14.5.B — 0x200b252237bbebddULL (37 features; +3 regime)
+        //   v5.14.5.C — 0xa40d3d3c0dab1b40ULL (40 features; +3 frac diff)
         //
         // If this test fails after a deliberate registry change, update
         // the constant + bump retrain workflow. Failure path prints
         // computed value for easy update.
-        constexpr uint64_t EXPECTED_HASH_V5_14_5_B = 0x200b252237bbebddULL;
-        if (h != EXPECTED_HASH_V5_14_5_B) {
+        constexpr uint64_t EXPECTED_HASH_V5_14_5_C = 0xa40d3d3c0dab1b40ULL;
+        if (h != EXPECTED_HASH_V5_14_5_C) {
             fprintf(stderr,
                 "  [hash debug] computed=0x%016lx expected=0x%016lx\n",
-                (unsigned long)h, (unsigned long)EXPECTED_HASH_V5_14_5_B);
+                (unsigned long)h, (unsigned long)EXPECTED_HASH_V5_14_5_C);
         }
-        check("v5.14.5.B: FEATURE_REGISTRY_HASH matches pinned snapshot",
-              h == EXPECTED_HASH_V5_14_5_B);
+        check("v5.14.5.C: FEATURE_REGISTRY_HASH matches pinned snapshot",
+              h == EXPECTED_HASH_V5_14_5_C);
 
         // Names array drift detection — boundaries of the registered set.
         check("v5.8.1b: FEATURE_NAMES[0] == \"short_slope\"",
@@ -19426,6 +19427,129 @@ e3_skip_load:;
               std::abs(buf[FEATURE_REGIME_VOL_ZSCORE] - 1.0f) < 1e-3f);
         check("v5.14.5.B: regime_class_onehot populated from ctx",
               std::abs(buf[FEATURE_REGIME_CLASS_ONEHOT] - 2.0f) < 1e-3f);
+    }
+
+    // ----- v5.14.5.C: fractional differentiation features --------------------------------------------
+    printf("\n--- v5.14.5.C: fractional differentiation features ---\n");
+    {
+        // Verify the 3 frac diff features are registered.
+        check("v5.14.5.C: FEATURE_FRAC_DIFF_PRICE_D04 index assigned",
+              FEATURE_FRAC_DIFF_PRICE_D04 >= 37);
+        check("v5.14.5.C: FEATURE_FRAC_DIFF_PRICE_D05 index assigned",
+              FEATURE_FRAC_DIFF_PRICE_D05 >= 37);
+        check("v5.14.5.C: FEATURE_FRAC_DIFF_PRICE_D06 index assigned",
+              FEATURE_FRAC_DIFF_PRICE_D06 >= 37);
+        check("v5.14.5.C: NUM_REGISTERED_FEATURES bumped to >= 40",
+              NUM_REGISTERED_FEATURES >= 40);
+        check("v5.14.5.C: FEATURE_NAMES[FRAC_DIFF_PRICE_D04] correct",
+              strcmp(FEATURE_NAMES[FEATURE_FRAC_DIFF_PRICE_D04],
+                     "frac_diff_price_d04") == 0);
+        check("v5.14.5.C: FEATURE_NAMES[FRAC_DIFF_PRICE_D05] correct",
+              strcmp(FEATURE_NAMES[FEATURE_FRAC_DIFF_PRICE_D05],
+                     "frac_diff_price_d05") == 0);
+        check("v5.14.5.C: FEATURE_NAMES[FRAC_DIFF_PRICE_D06] correct",
+              strcmp(FEATURE_NAMES[FEATURE_FRAC_DIFF_PRICE_D06],
+                     "frac_diff_price_d06") == 0);
+    }
+    {
+        // Coefficient table sanity — recurrence verification.
+        // C(d, 0) = 1; C(d, 1) = d; C(d, 2) = d*(d-1)/2.
+        check("v5.14.5.C: kFracDiff_d05_Coeffs[0] = 1.0",
+              std::abs(kFracDiff_d05_Coeffs[0] - 1.0) < 1e-12);
+        check("v5.14.5.C: kFracDiff_d05_Coeffs[1] = 0.5",
+              std::abs(kFracDiff_d05_Coeffs[1] - 0.5) < 1e-12);
+        // C(0.5, 2) = 0.5 * (-0.5) / 2 = -0.125
+        check("v5.14.5.C: kFracDiff_d05_Coeffs[2] = -0.125",
+              std::abs(kFracDiff_d05_Coeffs[2] - (-0.125)) < 1e-12);
+        // C(0.4, 1) = 0.4
+        check("v5.14.5.C: kFracDiff_d04_Coeffs[1] = 0.4",
+              std::abs(kFracDiff_d04_Coeffs[1] - 0.4) < 1e-12);
+        // C(0.6, 1) = 0.6
+        check("v5.14.5.C: kFracDiff_d06_Coeffs[1] = 0.6",
+              std::abs(kFracDiff_d06_Coeffs[1] - 0.6) < 1e-12);
+        // Coefficients should decay toward 0 as k grows.
+        check("v5.14.5.C: |C(d=0.5, k=49)| < 0.01 (decay sanity)",
+              std::abs(kFracDiff_d05_Coeffs[49]) < 0.01);
+    }
+    {
+        // Cold-start: count < K=50 → returns FPN_Zero.
+        RollingStats<64> rs = RollingStats_Init<64>();
+        FeatureComputeCtx<64> ctx{};
+        ctx.short_rolling = &rs;
+        check("v5.14.5.C: FracDiff_d04 cold-start returns 0",
+              FPN_IsZero(ML_Compute_FracDiffPrice_d04(&ctx)));
+        check("v5.14.5.C: FracDiff_d05 cold-start returns 0",
+              FPN_IsZero(ML_Compute_FracDiffPrice_d05(&ctx)));
+        check("v5.14.5.C: FracDiff_d06 cold-start returns 0",
+              FPN_IsZero(ML_Compute_FracDiffPrice_d06(&ctx)));
+        check("v5.14.5.C: null ctx returns 0",
+              FPN_IsZero(ML_Compute_FracDiffPrice_d05<64>(nullptr)));
+    }
+    {
+        // Steady-state: constant price input → frac diff converges to a
+        // stable value (constant signal differentiated to its long-run
+        // mean: x * sum(coeffs)). Sanity check finite + non-NaN.
+        RollingStats<64> rs = RollingStats_Init<64>();
+        // Push 60 ticks of constant price.
+        for (int i = 0; i < 60; i++) {
+            RollingStats_Push(&rs, FPN_FromDouble<64>(100.0),
+                              FPN_FromDouble<64>(1.0), 0);
+        }
+        FeatureComputeCtx<64> ctx{};
+        ctx.short_rolling = &rs;
+        FPN<64> result = ML_Compute_FracDiffPrice_d05(&ctx);
+        // Verify it computed something finite (not 0 since count >= 50).
+        double r = FPN_ToDouble(result);
+        check("v5.14.5.C: FracDiff_d05 on constant price computes finite",
+              std::isfinite(r));
+        // For constant input x=100, frac diff = 100 * Σ(-1)^k C(0.5,k).
+        // Σ(-1)^k C(d,k) for k=0..∞ = (1-1)^d = 0 for d > 0. With K=50
+        // truncation, residual ≈ |C(-0.5, 49)| ≈ 1/sqrt(π*49) ≈ 0.08 →
+        // expected magnitude 100 * 0.08 ≈ 8.
+        check("v5.14.5.C: FracDiff_d05 on constant price bounded (truncation residual)",
+              std::abs(r) < 20.0);  // |residual| << input magnitude (100)
+    }
+    {
+        // Trend: monotonic ramp price → frac diff captures fractional rate.
+        // Push 60 ticks of linearly increasing price.
+        RollingStats<64> rs = RollingStats_Init<64>();
+        for (int i = 0; i < 60; i++) {
+            RollingStats_Push(&rs, FPN_FromDouble<64>(100.0 + i * 0.5),
+                              FPN_FromDouble<64>(1.0), 0);
+        }
+        FeatureComputeCtx<64> ctx{};
+        ctx.short_rolling = &rs;
+        FPN<64> r04 = ML_Compute_FracDiffPrice_d04(&ctx);
+        FPN<64> r05 = ML_Compute_FracDiffPrice_d05(&ctx);
+        FPN<64> r06 = ML_Compute_FracDiffPrice_d06(&ctx);
+        check("v5.14.5.C: ramp → FracDiff_d04 finite",
+              std::isfinite(FPN_ToDouble(r04)));
+        check("v5.14.5.C: ramp → FracDiff_d05 finite",
+              std::isfinite(FPN_ToDouble(r05)));
+        check("v5.14.5.C: ramp → FracDiff_d06 finite",
+              std::isfinite(FPN_ToDouble(r06)));
+    }
+    {
+        // Replay determinism: same input → same output bytewise (FPN
+        // arithmetic is deterministic; verifies no shared mutable state).
+        RollingStats<64> rs1 = RollingStats_Init<64>();
+        RollingStats<64> rs2 = RollingStats_Init<64>();
+        for (int i = 0; i < 60; i++) {
+            FPN<64> p = FPN_FromDouble<64>(100.0 + (i % 7) * 0.3);
+            FPN<64> v = FPN_FromDouble<64>(1.0 + (i % 5) * 0.2);
+            RollingStats_Push(&rs1, p, v, 0);
+            RollingStats_Push(&rs2, p, v, 0);
+        }
+        FeatureComputeCtx<64> ctx1{};
+        ctx1.short_rolling = &rs1;
+        FeatureComputeCtx<64> ctx2{};
+        ctx2.short_rolling = &rs2;
+        FPN<64> r1 = ML_Compute_FracDiffPrice_d05(&ctx1);
+        FPN<64> r2 = ML_Compute_FracDiffPrice_d05(&ctx2);
+        // FPN<64> wraps a 4096-bit int internally — bytewise equality
+        // is exact (no float rounding).
+        check("v5.14.5.C: same input → bytewise identical FracDiff",
+              memcmp(&r1, &r2, sizeof(r1)) == 0);
     }
 
     // ----- v5.14.4.B.2: Reconcile_AutoCancelStale (zombie cleanup; full AUTO_SYNC) ------------------

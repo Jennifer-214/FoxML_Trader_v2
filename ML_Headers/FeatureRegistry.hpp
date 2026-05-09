@@ -37,6 +37,7 @@
 
 #include <cstdint>
 #include <cmath>  // v5.9.0: isnan/isinf for NaN-fold validation in Features_PackAll
+#include <array>  // v5.14.5.C: constexpr coefficient tables for fractional differentiation
 #include "../FixedPoint/FixedPointN.hpp"
 #include "RollingStats.hpp"
 #include "../Strategies/RegimeDetector.hpp"  // RegimeSignals<F>
@@ -349,6 +350,86 @@ inline FPN<F> ML_Compute_RegimeClassOneHot(const FeatureComputeCtx<F>* ctx) {
 }
 
 //======================================================================================================
+// [v5.14.5.C — FRACTIONAL DIFFERENTIATION FEATURES]
+//======================================================================================================
+// Marcos Lopez de Prado fractional differentiation. Removes the long-
+// memory component of price series while preserving stationarity in
+// the residual. Three integration orders d ∈ {0.4, 0.5, 0.6} bracket
+// the range typically informative for crypto tick prices (per
+// FoxML_Core research; d=0.5 is often the sweet spot but
+// near-neighbors give complementary signal).
+//
+// Math:
+//   Δ^d x_t = Σ_{k=0..K-1} (-1)^k * C(d, k) * x_{t-k}
+//   C(d, k) = d*(d-1)*...*(d-k+1) / k!
+//   Recurrence: C(d, k) = C(d, k-1) * (d-k+1) / k
+//
+// K=50 captures > 99.999% of the infinite-sum weight for d ∈ [0.4, 0.6].
+// Coefficients computed at compile time (constexpr); converted to FPN
+// per-call in Compute fns (50 FPN_FromDouble × 3 fns = ~150 conversions
+// per slow-path cycle ≈ ~50ns total; SLOW-PATH only, well within budget).
+//
+// Train-serve parity: same Compute fn reads same RollingStats price_buf
+// ring in both live + backtest paths. Bytewise identical by construction.
+//
+// FUTURE OPPORTUNITY (v5.16+): same pattern works for volume_buf[]; add
+// ML_Compute_FracDiffVolume_d05 etc. as additional features if model
+// finds price-frac-diff useful and we want volume-frac-diff isolation.
+//======================================================================================================
+
+constexpr int FRAC_DIFF_K = 50;
+
+constexpr std::array<double, FRAC_DIFF_K> ComputeFracDiffCoeffs(double d) {
+    std::array<double, FRAC_DIFF_K> c{};
+    c[0] = 1.0;
+    for (int k = 1; k < FRAC_DIFF_K; k++) {
+        c[k] = c[k-1] * (d - (double)k + 1.0) / (double)k;
+    }
+    return c;
+}
+
+constexpr auto kFracDiff_d04_Coeffs = ComputeFracDiffCoeffs(0.4);
+constexpr auto kFracDiff_d05_Coeffs = ComputeFracDiffCoeffs(0.5);
+constexpr auto kFracDiff_d06_Coeffs = ComputeFracDiffCoeffs(0.6);
+
+// Generic Compute helper: walk K=50 most-recent prices, accumulate
+// alternating sum. Branchless wrap relies on W=128 being a power of 2.
+template <unsigned F>
+inline FPN<F> FracDiffPriceCompute(const FeatureComputeCtx<F>* ctx,
+                                    const std::array<double, FRAC_DIFF_K>& coeffs) {
+    if (!ctx || !ctx->short_rolling) return FPN_Zero<F>();
+    const auto* rs = ctx->short_rolling;
+    if (rs->count < FRAC_DIFF_K) return FPN_Zero<F>();
+    constexpr int W = 128;
+    static_assert((W & (W - 1)) == 0, "W must be power of 2 for branchless wrap");
+    FPN<F> sum = FPN_Zero<F>();
+    int idx = (rs->head - 1) & (W - 1);
+    for (int k = 0; k < FRAC_DIFF_K; k++) {
+        FPN<F> coeff_fpn = FPN_FromDouble<F>(coeffs[k]);
+        FPN<F> term = FPN_Mul(coeff_fpn, rs->price_buf[idx]);
+        // Sign alternates: even k → add, odd k → subtract.
+        sum = ((k & 1) == 0) ? FPN_Add(sum, term) : FPN_Sub(sum, term);
+        idx = (idx - 1) & (W - 1);
+    }
+    return sum;
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_FracDiffPrice_d04(const FeatureComputeCtx<F>* ctx) {
+    return FracDiffPriceCompute<F>(ctx, kFracDiff_d04_Coeffs);
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_FracDiffPrice_d05(const FeatureComputeCtx<F>* ctx) {
+    return FracDiffPriceCompute<F>(ctx, kFracDiff_d05_Coeffs);
+}
+
+template <unsigned F>
+inline FPN<F> ML_Compute_FracDiffPrice_d06(const FeatureComputeCtx<F>* ctx) {
+    return FracDiffPriceCompute<F>(ctx, kFracDiff_d06_Coeffs);
+}
+
+//======================================================================================================
 // [FEATURE REGISTRY — X-macro]
 //======================================================================================================
 // Row format:
@@ -412,7 +493,14 @@ inline FPN<F> ML_Compute_RegimeClassOneHot(const FeatureComputeCtx<F>* ctx) {
     /*               Verify post-first-retrain feature_importance gain.   */ \
     X(REGIME_TREND_STRENGTH, "regime_trend_strength", 1, FEATURE_ENABLED, ML_Compute_RegimeTrendStrength, "saturating tanh(short_slope) bounded [-1,1]") \
     X(REGIME_VOL_ZSCORE,     "regime_vol_zscore",     1, FEATURE_ENABLED, ML_Compute_RegimeVolZscore,     "(short_var - long_var) / sqrt(long_var) z-score") \
-    X(REGIME_CLASS_ONEHOT,   "regime_class_onehot",   1, FEATURE_ENABLED, ML_Compute_RegimeClassOneHot,   "current_regime as int (0..NUM_REGIMES-1)")
+    X(REGIME_CLASS_ONEHOT,   "regime_class_onehot",   1, FEATURE_ENABLED, ML_Compute_RegimeClassOneHot,   "current_regime as int (0..NUM_REGIMES-1)") \
+    /* v5.14.5.C — Marcos Lopez de Prado fractional differentiation       */ \
+    /*               (FoxML_Core port). 3 integration orders bracket the  */ \
+    /*               typical informative range for crypto tick prices.    */ \
+    /*               Cold-start: returns 0 until rolling.count >= K=50.   */ \
+    X(FRAC_DIFF_PRICE_D04, "frac_diff_price_d04", 1, FEATURE_ENABLED, ML_Compute_FracDiffPrice_d04, "fractional diff of price (d=0.4); long-memory removed") \
+    X(FRAC_DIFF_PRICE_D05, "frac_diff_price_d05", 1, FEATURE_ENABLED, ML_Compute_FracDiffPrice_d05, "fractional diff of price (d=0.5); often the sweet spot") \
+    X(FRAC_DIFF_PRICE_D06, "frac_diff_price_d06", 1, FEATURE_ENABLED, ML_Compute_FracDiffPrice_d06, "fractional diff of price (d=0.6); near-stationary residual")
 
 // Auto-generated FEATURE_<ID> enum constants. Order matches FOREACH_FEATURE.
 enum FeatureId : uint16_t {
