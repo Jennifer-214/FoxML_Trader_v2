@@ -460,6 +460,15 @@ template <unsigned F> struct ControllerConfig {
   int      lazy_rebuild_enabled;             // 0=off (default), 1=on
   uint64_t lazy_rebuild_force_period_us;     // default 1_000_000 (1s)
   FPN<F>   lazy_rebuild_price_threshold_pct; // default 0.0005 (0.05%)
+  // v5.12.2.D — Treelite AOT inference backend (INFRASTRUCTURE ONLY in
+  // this ship; Treelite vendoring + Predict_AOT impl deferred to follow-
+  // up). When 1 + stamp body has has_aot_compiled_sha256=1 + the .so
+  // file at aot_compiled_path verifies SHA-256 → engine loads compiled
+  // .so via Model_LoadAOT, calls Predict_AOT (~<100ns vs ~1-5us C API).
+  // When 0 (default) OR AOT load fails OR sha mismatch → engine falls
+  // back to XGBoost C API path silently. Per-stamp opt-in via the
+  // stamp body fields, not just the cfg flag.
+  int use_aot_inference;                     // 0=off (default), 1=opt-in
   // vol-scaled position sizing
   int vol_sizing_enabled; // 0=disabled, 1=scale qty inversely with volatility
   FPN<F> vol_scale_min; // min scale factor (e.g. 0.25 = never less than 25% of
@@ -1250,6 +1259,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.lazy_rebuild_enabled = 0;
   cfg.lazy_rebuild_force_period_us = 1000000ULL;  // 1 second
   cfg.lazy_rebuild_price_threshold_pct = FPN_FromDouble<F>(0.0005);  // 0.05%
+  // v5.12.2.D — disabled by default; operator opts in after tooling is wired.
+  cfg.use_aot_inference = 0;
   for (int i = 0; i < 16; ++i) cfg.core_model_path[i][0] = '\0';    // empty = shared
   for (int i = 0; i < 16; ++i) cfg.core_model_dir[i][0] = '\0';     // empty = use model_path or shared
   // v4.0 per-core overrides — zero in every field = "inherit global".
@@ -1497,6 +1508,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       cfg.lazy_rebuild_price_threshold_pct = FPN_FromDouble<F>(atof(val));
       continue;
     }
+    // v5.12.2.D — Treelite AOT backend opt-in (infrastructure-only)
+    CFG_PARSE_INT(use_aot_inference)
     CFG_PARSE_PCT(max_exposure_pct)
     CFG_PARSE_PCT(min_hold_gain_pct)
     CFG_PARSE_PCT(regime_r2_threshold)

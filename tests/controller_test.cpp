@@ -16546,6 +16546,40 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.12.2.D: Treelite AOT infrastructure (stubs) ---\n");
+    {
+        // Phase 2.D of v5.12. INFRASTRUCTURE ONLY in this ship — Treelite
+        // not yet vendored. Adds MODEL_BACKEND_AOT slot in the dispatch
+        // chain + cfg.use_aot_inference flag + stub Model_LoadAOT
+        // (returns -1 = fall back to C API) + stub Model_Predict_AOT.
+        // The follow-up ship vendors Treelite + replaces stubs with
+        // real dlopen + Predict implementations.
+
+        // === Test 1: cfg default ===
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.12.2.D: default cfg.use_aot_inference == 0",
+              cfg.use_aot_inference == 0);
+
+        // === Test 2: MODEL_BACKEND_AOT constant ===
+        check("v5.12.2.D: MODEL_BACKEND_AOT == 3",
+              MODEL_BACKEND_AOT == 3);
+
+        // === Test 3: Model_LoadAOT stub returns -1 (fall back to C API) ===
+        ModelHandle<64> m;
+        Model_Init(&m);
+        int load_result = Model_LoadAOT(&m, "/tmp/nonexistent.aot.so");
+        check("v5.12.2.D: Model_LoadAOT stub returns -1 (Treelite not vendored)",
+              load_result == -1);
+        check("v5.12.2.D: Failed AOT load preserves backend = NONE (stub didn't mutate)",
+              m.backend == MODEL_BACKEND_NONE);
+
+        // === Test 4: Model_Predict_AOT stub returns 0.0f ===
+        float dummy_features[1] = {0.0f};
+        float pred = Model_Predict_AOT(&m, dummy_features, 1);
+        check("v5.12.2.D: Model_Predict_AOT stub returns 0.0f",
+              pred == 0.0f);
+    }
+
     printf("\n--- v5.12.2.B: lazy slow-path rebuild ---\n");
     {
         // Phase 2.B of v5.12. Skips RebuildOneCore body when slow_state

@@ -34,6 +34,20 @@
 #define MODEL_BACKEND_NONE     0
 #define MODEL_BACKEND_XGBOOST  1
 #define MODEL_BACKEND_LIGHTGBM 2
+// v5.12.2.D — Treelite AOT backend slot (INFRASTRUCTURE-ONLY).
+// Compiled C++ from XGBoost / LightGBM trees emits an inference function;
+// Model_LoadAOT dlopen's the .so + resolves the predict symbol. Brings
+// per-row inference from ~1-5us (C API) to <100ns. Operator workflow:
+//   1. Train model (existing pipeline)
+//   2. Run tools/aot_compile_model.sh <model.json> → emits <model>.aot.so +
+//      stamp body extension (has_aot_compiled_sha256 + aot_compiled_path)
+//   3. Re-stamp model with the new fields
+//   4. Set cfg.use_aot_inference=1 to opt in
+// This ship lands the BACKEND constant + cfg field + stamp body fields +
+// a Model_LoadAOT stub that returns -1 (= "Treelite not vendored; engine
+// falls back to XGBoost C API path"). Treelite vendoring + actual
+// Predict_AOT impl land in a follow-up after operator tests on hardware.
+#define MODEL_BACKEND_AOT      3
 
 // feature indices — must match training pipeline exactly
 // changing order here requires retraining models
@@ -489,12 +503,56 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
 
     // backend requested but not compiled in
     if (backend != MODEL_BACKEND_NONE) {
-        const char *names[] = {"none", "xgboost", "lightgbm"};
-        const char *name = (backend >= 1 && backend <= 2) ? names[backend] : "unknown";
+        const char *names[] = {"none", "xgboost", "lightgbm", "aot"};
+        const char *name = (backend >= 1 && backend <= 3) ? names[backend] : "unknown";
         fprintf(stderr, "[ML] backend '%s' requested but not compiled in (need -DUSE_%s=ON)\n",
-                name, backend == 1 ? "XGBOOST" : "LIGHTGBM");
+                name, backend == 1 ? "XGBOOST" : (backend == 2 ? "LIGHTGBM" : "TREELITE_AOT"));
     }
     return 0;
+}
+
+//======================================================================================================
+// [TREELITE AOT — INFRASTRUCTURE STUBS (v5.12.2.D)]
+//======================================================================================================
+// Stubs for compiled-tree inference. Returns -1 = "AOT not vendored;
+// caller falls back to MODEL_BACKEND_XGBOOST path." The real
+// implementation lands when Treelite is vendored to vendor/treelite/
+// (gitignored, ~hundreds of MB) + the operator runs the compile script
+// on their hardware. Ship plan:
+//   1. (this ship) — slot in the dispatch chain + stamp body fields +
+//      cfg flag + dlopen scaffolding stubs
+//   2. (follow-up) — vendor Treelite, wire actual dlopen + symbol resolve
+//      + Predict_AOT FFI shim
+//   3. (validation) — 1000-feature parity test: AOT == C API within 1e-6
+//
+// Failure-mode contract: the engine never fires Predict_AOT in this ship
+// because Model_LoadAOT always returns -1. Caller (CoreModelZoo) sees the
+// failure, logs a single INFO line, and proceeds with MODEL_BACKEND_XGBOOST.
+// Operator behavior is bytewise identical to pre-.D when use_aot_inference=0
+// or when AOT load fails — the cfg flag is opt-in and load failure is
+// transparent fallback.
+template <unsigned F>
+inline int Model_LoadAOT(ModelHandle<F>* m, const char* path) {
+    // INFRASTRUCTURE-ONLY in v5.12.2.D. Treelite vendor lib not present;
+    // returns -1 to signal "fall back to C API". Future ship dlopen's
+    // path + resolves the predict symbol via dlsym; populates
+    // m->aot_handle (new field on ModelHandle, added in follow-up) +
+    // sets m->backend = MODEL_BACKEND_AOT.
+    (void)m; (void)path;
+    fprintf(stderr,
+        "[ML] Model_LoadAOT: Treelite not vendored in this build; "
+        "engine will fall back to MODEL_BACKEND_XGBOOST C API path.\n");
+    return -1;
+}
+
+template <unsigned F>
+inline float Model_Predict_AOT(ModelHandle<F>* m, const float* features,
+                                 int num_features) {
+    // INFRASTRUCTURE-ONLY. Same fallback semantics as LoadAOT — never
+    // called in this ship because LoadAOT returns -1 → backend stays at
+    // XGBOOST → Model_Predict's existing dispatch routes to C API.
+    (void)m; (void)features; (void)num_features;
+    return 0.0f;
 }
 
 //======================================================================================================
