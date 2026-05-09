@@ -1289,6 +1289,31 @@ struct ModelStampResult {
         type name;
     FOREACH_STAMP_BOUND_CFG(X)
     #undef X
+
+    // v5.14.2.E.2.B — model-architectural fields migrated from expected.cfg
+    // sidecar to stamp body. NOT cfg-bound (these come from training-time
+    // model-architectural context: label_kind → num_classes; operator's
+    // role choice; build-time MODEL_NUM_FEATURES + MODEL_FORMAT_VERSION
+    // constants). Manual emit + parse pattern (don't fit FOREACH_STAMP_BOUND_CFG
+    // which is for cfg-only fields). When count grows to 5+, refactor to
+    // FOREACH_STAMP_BOUND_MODEL_CONST registry (TECH_DEBT.md entry).
+    //
+    // **If you add a NEW architectural field here, ALSO update:**
+    //   - StampInferenceCfgInputs (~line 1940; emit-side struct)
+    //   - verify_model_stamp init block (zero has_*)
+    //   - verify_model_stamp parser (add `if (strcmp(key, "...") == 0)` branch)
+    //   - stamp_write_for_model emit (add `if (inf->has_*)` block)
+    //   - BacktestEngine.hpp populator (add `inf.has_*=1; inf.*=value;`)
+    //   - tools/stamp_model.sh CLI emit (TECH_DEBT-tracked catch-up)
+    //   - CoreModelZoo_VerifyExpected dual-path read (use stamp if has_*, else expected.cfg)
+    uint8_t  has_expected_num_classes;
+    int      expected_num_classes;             // 0=binary, 1=regression, ≥2=multiclass
+    uint8_t  has_expected_role;
+    char     expected_role[16];                 // "buy_signal" | "barrier" | "regime" | "exit"
+    uint8_t  has_expected_num_features;
+    int      expected_num_features;             // = MODEL_NUM_FEATURES at training time
+    uint8_t  has_expected_feature_format_version;
+    int      expected_feature_format_version;   // = MODEL_FORMAT_VERSION at training time
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -1407,6 +1432,18 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
         r.name = (type)(default_val);
     FOREACH_STAMP_BOUND_CFG(X)
     #undef X
+
+    // v5.14.2.E.2.B — model-architectural fields zero-init. Legacy stamps
+    // (pre-v5.14.2.E.2) load with has_*=0 → caller (CoreModelZoo_VerifyExpected)
+    // falls back to expected.cfg sidecar lookup.
+    r.has_expected_num_classes = 0;
+    r.expected_num_classes = 0;
+    r.has_expected_role = 0;
+    r.expected_role[0] = '\0';
+    r.has_expected_num_features = 0;
+    r.expected_num_features = 0;
+    r.has_expected_feature_format_version = 0;
+    r.expected_feature_format_version = 0;
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -1623,6 +1660,25 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 }
             FOREACH_STAMP_BOUND_CFG(X)
             #undef X
+            // v5.14.2.E.2.B — model-architectural fields (manual parser branches;
+            // not in FOREACH_STAMP_BOUND_CFG since they're not cfg-bound).
+            else if (strcmp(key, "expected_num_classes") == 0) {
+                r.expected_num_classes = atoi(val);
+                r.has_expected_num_classes = 1;
+            }
+            else if (strcmp(key, "expected_role") == 0) {
+                strncpy(r.expected_role, val, sizeof(r.expected_role) - 1);
+                r.expected_role[sizeof(r.expected_role) - 1] = '\0';
+                r.has_expected_role = 1;
+            }
+            else if (strcmp(key, "expected_num_features") == 0) {
+                r.expected_num_features = atoi(val);
+                r.has_expected_num_features = 1;
+            }
+            else if (strcmp(key, "expected_feature_format_version") == 0) {
+                r.expected_feature_format_version = atoi(val);
+                r.has_expected_feature_format_version = 1;
+            }
         }
         line = strtok_r(nullptr, "\n", &save);
     }
@@ -1940,6 +1996,18 @@ struct StampInferenceCfgInputs {
         type name;
     FOREACH_STAMP_BOUND_CFG(X)
     #undef X
+
+    // v5.14.2.E.2.B — model-architectural fields (mirror of ModelStampResult
+    // additions; see ModelStampResult for the discipline list). NOT in
+    // FOREACH_STAMP_BOUND_CFG (architectural, not cfg-bound).
+    int      has_expected_num_classes;
+    int      expected_num_classes;
+    int      has_expected_role;
+    char     expected_role[16];
+    int      has_expected_num_features;
+    int      expected_num_features;
+    int      has_expected_feature_format_version;
+    int      expected_feature_format_version;
 };
 
 inline StampWriteResult stamp_write_for_model(const char* model_path,
@@ -2209,6 +2277,30 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
         }
     FOREACH_STAMP_BOUND_CFG(X)
     #undef X
+
+    // v5.14.2.E.2.B — model-architectural fields emit (manual, not in
+    // FOREACH_STAMP_BOUND_CFG). Surface G discipline: legacy callers
+    // (has_*=0) emit nothing → canonical body bytewise-identical.
+    if (inf && inf->has_expected_num_classes && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "expected_num_classes=%d\n", inf->expected_num_classes);
+        if (wrote > 0) n += wrote;
+    }
+    if (inf && inf->has_expected_role && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "expected_role=%s\n", inf->expected_role);
+        if (wrote > 0) n += wrote;
+    }
+    if (inf && inf->has_expected_num_features && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "expected_num_features=%d\n", inf->expected_num_features);
+        if (wrote > 0) n += wrote;
+    }
+    if (inf && inf->has_expected_feature_format_version && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "expected_feature_format_version=%d\n", inf->expected_feature_format_version);
+        if (wrote > 0) n += wrote;
+    }
 
     // Restore prior locale ASAP — every subsequent return must NOT undo this twice
     if (pinned) {

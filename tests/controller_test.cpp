@@ -19116,6 +19116,107 @@ e3_skip_load:;
         }
     }
 
+    // ----- v5.14.2.E.2.B: model-architectural stamp body fields (forensic) ---------------------------
+    // 4 new stamp body fields (expected_num_classes, expected_role,
+    // expected_num_features, expected_feature_format_version). Forensic
+    // record of training-time model context. Round-trip: write stamp →
+    // read back → verify field values + has_* flags.
+    printf("\n--- v5.14.2.E.2.B: model-architectural stamp body fields ---\n");
+    {
+        // Test 1 — Write stamp with all 4 architectural fields populated;
+        // verify round-trip via verify_model_stamp.
+        char tmp_model[] = "/tmp/v5_14_2_e2b_model_XXXXXX";
+        int fd = mkstemp(tmp_model);
+        if (fd >= 0) {
+            close(fd);
+            // Write a placeholder model file (verify_model_stamp validates
+            // SHA but we're testing the parser, not SHA verification here)
+            FILE* mf = fopen(tmp_model, "wb");
+            if (mf) { fputs("placeholder model", mf); fclose(mf); }
+
+            StampInferenceCfgInputs inf = {};
+            inf.has_expected_num_classes = 1;
+            inf.expected_num_classes = 3;
+            inf.has_expected_role = 1;
+            strncpy(inf.expected_role, "barrier", sizeof(inf.expected_role) - 1);
+            inf.has_expected_num_features = 1;
+            inf.expected_num_features = 42;
+            inf.has_expected_feature_format_version = 1;
+            inf.expected_feature_format_version = 7;
+
+            StampWriteResult sw = stamp_write_for_model(
+                tmp_model, /*secret=*/"test_secret_v5_14_2_e2b",
+                /*format_version=*/6, "2026-05-09",
+                /*wf_mean_val=*/0.5, /*held_out_metric=*/0.5,
+                /*gap_threshold=*/0.05, /*force=*/1,
+                /*feature_registry_hash=*/0,
+                /*engine_version=*/nullptr,
+                &inf);
+            check("v5.14.2.E.2.B write: stamp emit succeeded", sw.ok == 1);
+
+            ModelStampResult r = verify_model_stamp(tmp_model,
+                /*secret=*/"test_secret_v5_14_2_e2b",
+                /*gap_threshold=*/0.05, /*expected_format_version=*/6);
+            check("v5.14.2.E.2.B parse: has_expected_num_classes set", r.has_expected_num_classes == 1);
+            check("v5.14.2.E.2.B parse: expected_num_classes = 3", r.expected_num_classes == 3);
+            check("v5.14.2.E.2.B parse: has_expected_role set", r.has_expected_role == 1);
+            check("v5.14.2.E.2.B parse: expected_role = barrier",
+                  strcmp(r.expected_role, "barrier") == 0);
+            check("v5.14.2.E.2.B parse: has_expected_num_features set", r.has_expected_num_features == 1);
+            check("v5.14.2.E.2.B parse: expected_num_features = 42", r.expected_num_features == 42);
+            check("v5.14.2.E.2.B parse: has_expected_feature_format_version set",
+                  r.has_expected_feature_format_version == 1);
+            check("v5.14.2.E.2.B parse: expected_feature_format_version = 7",
+                  r.expected_feature_format_version == 7);
+
+            std::remove(tmp_model);
+            char stamp_path[512];
+            snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", tmp_model);
+            std::remove(stamp_path);
+        }
+    }
+    {
+        // Test 2 — Legacy stamp without architectural fields: parser leaves
+        // has_*=0 defaults; backward-compat preserved.
+        char tmp_model[] = "/tmp/v5_14_2_e2b_legacy_XXXXXX";
+        int fd = mkstemp(tmp_model);
+        if (fd >= 0) {
+            close(fd);
+            FILE* mf = fopen(tmp_model, "wb");
+            if (mf) { fputs("placeholder model", mf); fclose(mf); }
+
+            // No StampInferenceCfgInputs has_expected_* flags set — legacy emit
+            StampInferenceCfgInputs inf = {};
+
+            StampWriteResult sw = stamp_write_for_model(
+                tmp_model, /*secret=*/"test_secret_legacy",
+                /*format_version=*/6, "2026-05-09",
+                /*wf_mean_val=*/0.5, /*held_out_metric=*/0.5,
+                /*gap_threshold=*/0.05, /*force=*/1,
+                /*feature_registry_hash=*/0,
+                /*engine_version=*/nullptr,
+                &inf);
+            check("v5.14.2.E.2.B legacy write: stamp emit succeeded", sw.ok == 1);
+
+            ModelStampResult r = verify_model_stamp(tmp_model,
+                /*secret=*/"test_secret_legacy",
+                /*gap_threshold=*/0.05, /*expected_format_version=*/6);
+            check("v5.14.2.E.2.B legacy: has_expected_num_classes = 0 (Surface G forward-compat)",
+                  r.has_expected_num_classes == 0);
+            check("v5.14.2.E.2.B legacy: has_expected_role = 0",
+                  r.has_expected_role == 0);
+            check("v5.14.2.E.2.B legacy: has_expected_num_features = 0",
+                  r.has_expected_num_features == 0);
+            check("v5.14.2.E.2.B legacy: has_expected_feature_format_version = 0",
+                  r.has_expected_feature_format_version == 0);
+
+            std::remove(tmp_model);
+            char stamp_path[512];
+            snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", tmp_model);
+            std::remove(stamp_path);
+        }
+    }
+
     // ----- v5.14.2.E.1: PostLoadSetup X-macro registries + helpers ----------------------------------
     // Symmetry test + registry count static_asserts + is_ready_for_inference
     // predicate + strict-mode failure preservation. Mechanizes the Class 18

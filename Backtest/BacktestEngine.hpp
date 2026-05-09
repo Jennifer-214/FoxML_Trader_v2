@@ -1008,6 +1008,13 @@ struct FullValidationResults {
     int       req_label_lookahead_ticks;
     double    req_label_tp_pct;
     double    req_label_sl_pct;
+    // v5.14.2.E.2.B — model-architectural fields for stamp body migration.
+    // Populated by caller (Train Model / Train Multi-Horizon worker) BEFORE
+    // calling Backtest_RunFullValidation. Zero-default = skip emit (legacy
+    // behavior preserved for callers that don't care; engine falls back to
+    // expected.cfg sidecar via VerifyExpected).
+    int       req_num_outputs;       // 1=binary/regression, ≥2=multiclass
+    char      req_role[16];          // "buy_signal" | "barrier" | "regime" | "exit"
 };
 
 // Forward declaration — Backtest_RunWalkForward is defined further down in
@@ -1249,6 +1256,37 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             auto& cfg = data->config_used;
             STAMP_CFG_AUTOPOPULATE(inf, cfg);
         }
+
+        // v5.14.2.E.2.B — model-architectural fields (manual populator;
+        // not in FOREACH_STAMP_BOUND_CFG). These come from training-time
+        // model context, not engine cfg:
+        //   - expected_num_classes: derived from out->req_num_outputs
+        //     (= XGBoost output dimension = num_classes for multiclass,
+        //     1 for binary/regression)
+        //   - expected_role: from out->req_role (operator's training-time
+        //     choice: buy_signal | barrier | regime | exit)
+        //   - expected_num_features: MODEL_NUM_FEATURES build constant
+        //     (= NUM_REGISTERED_FEATURES)
+        //   - expected_feature_format_version: MODEL_FORMAT_VERSION build constant
+        //
+        // Closes the expected.cfg → stamp body migration for these 4 fields.
+        // Engine reads stamp body if has_* set; falls back to expected.cfg
+        // for legacy stamps. Migration goal: deprecate expected.cfg entirely
+        // when v5.X+ all stamps have the new fields.
+        if (out->req_num_outputs > 0) {
+            inf.has_expected_num_classes = 1;
+            inf.expected_num_classes     = out->req_num_outputs;
+        }
+        if (out->req_role[0]) {
+            inf.has_expected_role = 1;
+            strncpy(inf.expected_role, out->req_role, sizeof(inf.expected_role) - 1);
+            inf.expected_role[sizeof(inf.expected_role) - 1] = '\0';
+        }
+        // Build constants — always emit (training-time = build-time identity).
+        inf.has_expected_num_features = 1;
+        inf.expected_num_features     = (int)MODEL_NUM_FEATURES;
+        inf.has_expected_feature_format_version = 1;
+        inf.expected_feature_format_version     = (int)MODEL_FORMAT_VERSION;
 
         // v5.10.0 Item A — stamp_emit phase timer.
         uint64_t stamp_start_ns = tt::PhaseTimer_NowNs();
