@@ -16546,6 +16546,46 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.12.3.C: per-core time-exit override ---\n");
+    {
+        // Phase 3.C of v5.12. Adds core_<N>_time_exit_ticks cfg array;
+        // EventLoop_TimeExitOneCore reads override before falling back
+        // to global cfg.max_hold_ticks. 0 = use global (default).
+
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+
+        // === Test 1: defaults all zero (use global) ===
+        int all_zero = 1;
+        for (int i = 0; i < 16; ++i) {
+            if (cfg.core_time_exit_ticks[i] != 0) { all_zero = 0; break; }
+        }
+        check("v5.12.3.C: default cfg.core_time_exit_ticks all 0 (use global)",
+              all_zero == 1);
+
+        // === Test 2: per-core override semantics ===
+        cfg.max_hold_ticks = 1000;
+        cfg.core_time_exit_ticks[2] = 5000;  // core 2 holds 5x longer
+        // Simulate the lookup logic:
+        auto effective_max_hold = [&](int core_id) -> uint32_t {
+            uint32_t override_val = cfg.core_time_exit_ticks[core_id];
+            return (override_val == 0) ? cfg.max_hold_ticks : override_val;
+        };
+        check("v5.12.3.C: core 0 (no override) uses global = 1000",
+              effective_max_hold(0) == 1000);
+        check("v5.12.3.C: core 2 (override) uses 5000",
+              effective_max_hold(2) == 5000);
+        check("v5.12.3.C: core 5 (no override) uses global = 1000",
+              effective_max_hold(5) == 1000);
+
+        // === Test 3: zero global + per-core override → still works ===
+        cfg.max_hold_ticks = 0;
+        cfg.core_time_exit_ticks[3] = 2000;
+        check("v5.12.3.C: global=0 + core 3 override=2000 → core 3 uses 2000",
+              effective_max_hold(3) == 2000);
+        check("v5.12.3.C: global=0 + core 4 no override → uses 0 (disabled)",
+              effective_max_hold(4) == 0);
+    }
+
     printf("\n--- v5.12.3.A: composite-signal extractor on ModelHandle ---\n");
     {
         // Phase 3.A of v5.12. Adds num_classes_active + target_classes[8] +

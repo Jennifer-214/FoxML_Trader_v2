@@ -2832,7 +2832,12 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
             continue;
         }
         uint64_t elapsed = now_tick - entry_t;
-        if (elapsed < cfg.max_hold_ticks) continue;
+        // v5.12.3.C — per-core override. 0 = use global; >0 = override.
+        // Branchless mask-select would obscure intent; slow-path branch is
+        // negligible (~1ns per cycle).
+        uint32_t max_hold = cfg.core_time_exit_ticks[core_id];
+        if (max_hold == 0) max_hold = cfg.max_hold_ticks;
+        if (elapsed < max_hold) continue;
 
         double entry_d = FPN_ToDouble(oms->portfolio.positions[slot].entry_price);
         if (entry_d <= 0.0) continue;

@@ -266,6 +266,13 @@ template <unsigned F> struct ControllerConfig {
   // time-based exit (disabled by default)
   uint32_t
       max_hold_ticks; // close position if held longer than this (0 = disabled)
+  // v5.12.3.C — per-core override of max_hold_ticks. 0 = use global
+  // cfg.max_hold_ticks (preserves pre-v5.12.3.C behavior). >0 = this
+  // core uses its own time-exit threshold. Useful for mixed paper-test
+  // experiments where AUTO-mode core wants longer holds than DIP core,
+  // or where strategy comparison wants different time horizons per core.
+  // Cfg parser pattern: core_<N>_time_exit_ticks=<int>
+  uint32_t core_time_exit_ticks[16];           // MAX_EXECUTION_CORES
   FPN<F>
       min_hold_gain_pct; // only time-exit if gain < this % (e.g. 0.001 = 0.1%)
   // regime detection
@@ -1009,6 +1016,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.breakout_min = FPN_FromDouble<F>(0.5); // 0.5 stddev floor
   cfg.slow_path_max_secs = 3;
   cfg.max_hold_ticks = 0; // 0 = disabled
+  // v5.12.3.C — all per-core overrides default 0 (use global). Operator
+  // sets specific cores via core_<N>_time_exit_ticks=<value> in cfg.
+  for (int i = 0; i < 16; ++i) cfg.core_time_exit_ticks[i] = 0;
   cfg.min_hold_gain_pct =
       FPN_FromDouble<F>(0.001); // 0.1% — only time-exit if below this gain
   // regime detection
@@ -1849,6 +1859,17 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     if (strcmp(key, "sharded_force_synthetic") == 0) {
       cfg.sharded_force_synthetic = (uint8_t)(atoi(val) != 0 ? 1 : 0);
+      continue;
+    }
+    // v5.12.3.C — per-core time-exit override: core_0_time_exit_ticks=5000
+    // means core 0 forces exit after 5000 ticks held (overrides global
+    // cfg.max_hold_ticks for this core). Match BEFORE generic _exit_*
+    // patterns to avoid substring collisions.
+    if (strncmp(key, "core_", 5) == 0 && strstr(key, "_time_exit_ticks")) {
+      int core_idx = atoi(key + 5);
+      if (core_idx >= 0 && core_idx < 16) {
+        cfg.core_time_exit_ticks[core_idx] = (uint32_t)atol(val);
+      }
       continue;
     }
     // Per-core risk: core_0_risk_pct=20.0 means core 0 risks 20% of balance
