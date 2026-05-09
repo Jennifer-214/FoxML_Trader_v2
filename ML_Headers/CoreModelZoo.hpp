@@ -1294,6 +1294,27 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
     }
     ezoo->primary_role_name[sizeof(ezoo->primary_role_name) - 1] = '\0';
 
+    // v5.13.0 (audit gap-close 2026-05-08) — exit_predictor buy_class_idx
+    // aliasing. Independent of primary-role selection above (exit_predictor
+    // is consumed by the v5.13 sell-side path, not by the buy-side
+    // ensemble blend). Path 3 architecture: exit_predictor uses the SAME
+    // PEAK_VALLEY_STABLE 3-class labels as buy-side barrier, so we extract
+    // class 1 (peak) probability as "exit imminent" signal.
+    //
+    // CRITICAL: without this aliasing, exit_predictor handles default to
+    // buy_class_idx=0 (VALLEY class) → Model_Predict_Normalized returns
+    // valley probability instead of peak probability → exits would fire
+    // at WRONG MOMENT (during dips instead of at peaks). Silent semantic
+    // inversion that the /plan-check + /merge-scan audits caught before
+    // coding started.
+    //
+    // Mirrors the barrier-role pattern (lines ~1280-1281) but applies to
+    // exit_predictor independently.
+    for (int i = 0; i < ezoo->exit_predictor_count; ++i) {
+        ezoo->exit_predictor[i].buy_class_idx =
+            (ezoo->exit_predictor[i].num_outputs >= 2) ? 1 : 0;
+    }
+
     if (total_loaded > 0) {
         ezoo->active = 1;
         fprintf(stderr, "[ML] ensemble zoo: %d total models loaded "

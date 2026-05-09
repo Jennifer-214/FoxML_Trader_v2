@@ -476,6 +476,16 @@ template <unsigned F> struct ControllerConfig {
   // back to XGBoost C API path silently. Per-stamp opt-in via the
   // stamp body fields, not just the cfg flag.
   int use_aot_inference;                     // 0=off (default), 1=opt-in
+  // v5.13.0 — sell-side ML predictions (Path 3: path-based role
+  // discrimination using existing PEAK_VALLEY_STABLE 3-class labels).
+  // When enabled + ezoo->exit_predictor_count > 0, MLStrategy runs
+  // exit prediction at slow-path; if blended exit_prob > exit_threshold
+  // AND position open for this core's slot, fires early market-exit
+  // via OMS_PushSubmit. Default disabled; opt-in for paper-test.
+  // Hot path UNTOUCHED.
+  int use_exit_model;                        // 0=off (default), 1=on
+  FPN<F> exit_threshold;                     // default 0.6 (60% blended exit prob)
+  char exit_signal_model_dir[256];           // optional explicit dir; empty = auto-detect
   // vol-scaled position sizing
   int vol_sizing_enabled; // 0=disabled, 1=scale qty inversely with volatility
   FPN<F> vol_scale_min; // min scale factor (e.g. 0.25 = never less than 25% of
@@ -1271,6 +1281,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.lazy_rebuild_price_threshold_pct = FPN_FromDouble<F>(0.0005);  // 0.05%
   // v5.12.2.D — disabled by default; operator opts in after tooling is wired.
   cfg.use_aot_inference = 0;
+  // v5.13.0 — sell-side ML defaults: disabled; opt-in for paper-test.
+  cfg.use_exit_model = 0;
+  cfg.exit_threshold = FPN_FromDouble<F>(0.6);
+  cfg.exit_signal_model_dir[0] = '\0';
   for (int i = 0; i < 16; ++i) cfg.core_model_path[i][0] = '\0';    // empty = shared
   for (int i = 0; i < 16; ++i) cfg.core_model_dir[i][0] = '\0';     // empty = use model_path or shared
   // v4.0 per-core overrides — zero in every field = "inherit global".
@@ -1520,6 +1534,18 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     // v5.12.2.D — Treelite AOT backend opt-in (infrastructure-only)
     CFG_PARSE_INT(use_aot_inference)
+    // v5.13.0 — sell-side ML opt-in (Path 3 architecture)
+    CFG_PARSE_INT(use_exit_model)
+    if (strcmp(key, "exit_threshold") == 0) {
+      cfg.exit_threshold = FPN_FromDouble<F>(atof(val));
+      continue;
+    }
+    if (strcmp(key, "exit_signal_model_dir") == 0) {
+      strncpy(cfg.exit_signal_model_dir, val,
+              sizeof(cfg.exit_signal_model_dir) - 1);
+      cfg.exit_signal_model_dir[sizeof(cfg.exit_signal_model_dir) - 1] = '\0';
+      continue;
+    }
     CFG_PARSE_PCT(max_exposure_pct)
     CFG_PARSE_PCT(min_hold_gain_pct)
     CFG_PARSE_PCT(regime_r2_threshold)
