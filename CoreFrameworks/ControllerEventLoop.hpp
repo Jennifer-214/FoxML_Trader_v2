@@ -206,6 +206,13 @@ struct CoreContext {
     double staged_prediction;      // prediction from last ML rebuild
     double active_prediction;      // prediction at last entry submit (0 = no open pos)
     double last_confidence;        // most recent ConfidenceScorer_Compute result
+    // v5.13.0.B — sell-side ML prediction. Written by ML_BuildParameters
+    // when cfg.use_exit_model && exit_predictor_count > 0. Slow-path body
+    // post-RebuildOneCore checks against cfg.exit_threshold and fires
+    // OMS_PushSubmit for any open positions on this core's slot(s).
+    // Default 0.0 = no exit prediction this cycle. Reset each cycle.
+    double last_exit_prediction;
+    int    last_exit_dominant_horizon;  // -1 = none; otherwise [0..exit_predictor_count)
     // v5.9.0b — ML observability extensions (V5_9_AUDIT-#2, #3).
     // Surface model load failures, ML decision context, and NaN counters
     // to the operator via TUISnapshot + ML Status panel + entry log.
@@ -670,6 +677,12 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].last_ml_effective_threshold    = 0.0;
         state->cores[i].nan_feature_events_total       = 0;
         state->cores[i].nan_prediction_events_total    = 0;
+        // v5.13.0.B — sell-side ML prediction state. Reset to 0 each cycle
+        // by RebuildOneCore via mctx wiring; init here for first-cycle
+        // safety (slow-path post-rebuild check reads this before any
+        // RebuildOneCore writes can have happened on cold boot).
+        state->cores[i].last_exit_prediction           = 0.0;
+        state->cores[i].last_exit_dominant_horizon     = -1;
         // v5.9.1 — edge-trigger flag for boot-time per-core warmup-complete
         // log. Set to 1 once per session per core after the first slow-path
         // rebuild that observes rolling.count >= min_warmup_samples.
@@ -2164,6 +2177,15 @@ inline void EventLoop_RebuildOneCore(
             // features enabled); pointer is non-null but mask = all-on
             // produces bytewise-identical output to pre-v5.11.18.
             ml_ctx.feature_mask = &resolved_cfg.core_feature_mask[slot];
+            // v5.13.0.B — sell-side ML wiring. Reset per-cycle; ML_Build-
+            // Parameters writes the blended exit_predictor probability when
+            // cfg.use_exit_model && exit_predictor_count > 0. Slow-path body
+            // post-RebuildOneCore reads + acts on the value (fires OMS submit
+            // if above cfg.exit_threshold and any positions are open).
+            state->cores[slot].last_exit_prediction       = 0.0;
+            state->cores[slot].last_exit_dominant_horizon = -1;
+            ml_ctx.out_exit_prediction       = &state->cores[slot].last_exit_prediction;
+            ml_ctx.out_exit_dominant_horizon = &state->cores[slot].last_exit_dominant_horizon;
             dispatch_ctx = &ml_ctx;
         }
         // v4.0.4: stash the resolved strategy for GUI display. For non-AUTO

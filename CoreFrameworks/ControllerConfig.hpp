@@ -486,6 +486,11 @@ template <unsigned F> struct ControllerConfig {
   int use_exit_model;                        // 0=off (default), 1=on
   FPN<F> exit_threshold;                     // default 0.6 (60% blended exit prob)
   char exit_signal_model_dir[256];           // optional explicit dir; empty = auto-detect
+  // v5.13.0.B — calibration log: every exit fill records the predicted
+  // exit prob + realized PnL bps + flag indicating whether v5.13.0 exit-
+  // model fired. Operator post-processes the CSV to assess prediction
+  // calibration (Brier score, AUC, etc.). Default empty = disabled.
+  char calibration_log_path[256];
   // vol-scaled position sizing
   int vol_sizing_enabled; // 0=disabled, 1=scale qty inversely with volatility
   FPN<F> vol_scale_min; // min scale factor (e.g. 0.25 = never less than 25% of
@@ -1285,6 +1290,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.use_exit_model = 0;
   cfg.exit_threshold = FPN_FromDouble<F>(0.6);
   cfg.exit_signal_model_dir[0] = '\0';
+  cfg.calibration_log_path[0] = '\0';
   for (int i = 0; i < 16; ++i) cfg.core_model_path[i][0] = '\0';    // empty = shared
   for (int i = 0; i < 16; ++i) cfg.core_model_dir[i][0] = '\0';     // empty = use model_path or shared
   // v4.0 per-core overrides — zero in every field = "inherit global".
@@ -1544,6 +1550,12 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       strncpy(cfg.exit_signal_model_dir, val,
               sizeof(cfg.exit_signal_model_dir) - 1);
       cfg.exit_signal_model_dir[sizeof(cfg.exit_signal_model_dir) - 1] = '\0';
+      continue;
+    }
+    if (strcmp(key, "calibration_log_path") == 0) {
+      strncpy(cfg.calibration_log_path, val,
+              sizeof(cfg.calibration_log_path) - 1);
+      cfg.calibration_log_path[sizeof(cfg.calibration_log_path) - 1] = '\0';
       continue;
     }
     CFG_PARSE_PCT(max_exposure_pct)

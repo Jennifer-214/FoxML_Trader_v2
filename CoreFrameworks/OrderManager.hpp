@@ -263,6 +263,35 @@ struct OrderManagerState {
     uint16_t   last_opened_mask;
     uint8_t    _pad_lof[6];
 
+    // v5.13.0.B — per-slot flag set by MLStrategy when exit_predictor fires
+    // the exit on this specific slot. Consumed by v5.13.4's reward
+    // attribution (drainer post-fill in HandleFill) + cleared after.
+    //
+    // PARTIALS-AWARE: indexed by portfolio slot (0..MAX_PORTFOLIO_POSITIONS-1)
+    // not core_id. Under partials, slot 2c+0 and 2c+1 are independent legs;
+    // each can have its OWN predicted-exit attribution.
+    //
+    // Single-writer (slow-path MLStrategy thread per-core), single-reader
+    // (drainer thread). uint8_t is naturally atomic on x86; cross-thread
+    // visibility via the SPSC ring's release-acquire fence on the submit/fill
+    // path (set BEFORE OMS_PushSubmit returns; read AFTER OMS_DrainSubmit
+    // observes the order). No explicit atomic needed.
+    uint8_t last_exit_was_predicted[MAX_PORTFOLIO_POSITIONS];
+    uint8_t _pad_lewp[(MAX_PORTFOLIO_POSITIONS % 8) ? (8 - (MAX_PORTFOLIO_POSITIONS % 8)) : 0];
+
+    // v5.13.0.B — calibration logging. Populated by slow-path body when
+    // the exit-model fires (mirrors last_exit_was_predicted[]). HandleFill
+    // reads + emits CSV row on exit fill (any exit reason — predicted or
+    // natural TP/SL/time). Operator post-processes the CSV offline (ROC,
+    // Brier, precision-recall). last_exit_predicted_p stores the actual
+    // blended probability at submit time.
+    double last_exit_predicted_p[MAX_PORTFOLIO_POSITIONS];
+
+    // FILE* opened lazily by OrderManager_OpenCalibrationLog (engine boot
+    // calls when cfg.calibration_log_path is non-empty). Drainer thread
+    // (sole HandleFill caller) is the only writer. Closed in Shutdown.
+    FILE* calibration_log_file;
+
     // === PARTIALS GEOMETRY (mirrored from cfg at engine init) ===
     // partial_exit_enabled = 1 → portfolio slot 2c is core c's leg A,
     // slot 2c+1 is core c's leg B (mapping via Sharded_LegSlot in
@@ -478,7 +507,13 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
         oms->last_fill[i].exit_entry_notional = FPN_Zero<F>();
         oms->last_fill[i].exit_total_fees     = FPN_Zero<F>();
         oms->last_fill[i].was_win             = 0;
+        // v5.13.0.B — per-slot exit-predictor attribution + calibration
+        oms->last_exit_was_predicted[i]       = 0;
+        oms->last_exit_predicted_p[i]         = 0.0;
     }
+    // v5.13.0.B — calibration log file lazy-opened by engine boot via
+    // OrderManager_OpenCalibrationLog when cfg.calibration_log_path set.
+    oms->calibration_log_file = nullptr;
     oms->ks_min_balance      = FPN_Zero<F>();
     oms->ks_max_drawdown_pct = FPN_Zero<F>();
     oms->ks_peak_balance     = starting_balance;  // initial peak = start
@@ -913,6 +948,49 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         oms->last_fill[pslot].exit_entry_notional = FPN_Mul(entry_price_snap, qty_snap);
         oms->last_fill[pslot].exit_total_fees     = total_fee;
         oms->last_fill[pslot].was_win             = FPN_GreaterThan(net, FPN_Zero<F>()) ? 1 : 0;
+        // v5.13.0.B — calibration log row. Captures EVERY exit fill (not
+        // just predicted ones) so operator can compute calibration metrics
+        // (Brier, ROC AUC) offline. nullptr-safe: most runs leave the
+        // FILE* null. After write, clears per-slot exit-prediction flags
+        // (single-use per trade). Using std::chrono here to avoid coupling
+        // HandleFill to OS-specific clocks; same precision as the rest of
+        // the engine's wall-clock fields.
+        if (oms->calibration_log_file) {
+            uint64_t ts_us = (uint64_t)
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+            double entry_d_calib = FPN_ToDouble(entry_price_snap);
+            double exit_d_calib  = FPN_ToDouble(fill_price);
+            double gain_pct = entry_d_calib > 0.0
+                ? (exit_d_calib - entry_d_calib) / entry_d_calib * 100.0
+                : 0.0;
+            double notional_d = entry_d_calib > 0.0
+                ? entry_d_calib * FPN_ToDouble(qty_snap) : 0.0;
+            double pnl_bps = notional_d > 0.0
+                ? FPN_ToDouble(net) / notional_d * 10000.0 : 0.0;
+            uint8_t pred_flag = (pslot >= 0 && pslot < MAX_PORTFOLIO_POSITIONS)
+                ? oms->last_exit_was_predicted[pslot] : 0;
+            double pred_p = (pslot >= 0 && pslot < MAX_PORTFOLIO_POSITIONS)
+                ? oms->last_exit_predicted_p[pslot] : 0.0;
+            std::fprintf(oms->calibration_log_file,
+                "%llu,%d,%u,%.6f,%.4f,%.4f,%.6f,%.4f,%d\n",
+                (unsigned long long)ts_us, (int)pslot,
+                (unsigned)pred_flag, pred_p,
+                entry_d_calib, exit_d_calib, gain_pct, pnl_bps,
+                (int)oms->last_fill[pslot].was_win);
+            // Don't fflush every row — let stdio buffer (drainer is the
+            // single writer; flush happens on file close at shutdown).
+            // Operator can `tail -f` if needed (line-buffered when stdout
+            // is a TTY; full-buffered for files — that's a tail -F caveat,
+            // not a correctness concern for offline calibration analysis).
+        }
+        // v5.13.0.B — clear per-slot exit-predictor attribution post-fill
+        // (single-use per trade; v5.13.4 reward attribution will move
+        // BEFORE the clear when bandit lands).
+        if (pslot >= 0 && pslot < MAX_PORTFOLIO_POSITIONS) {
+            oms->last_exit_was_predicted[pslot] = 0;
+            oms->last_exit_predicted_p[pslot]   = 0.0;
+        }
         // v5.1.6 (diagnostic logging): infer exit reason from the relationship
         // between fill_price and the position's TP/SL at close-time.
         //   - TP_HIT:  exit ≥ pos.take_profit_price (hot-path SG TP fired)
@@ -1145,6 +1223,46 @@ inline void OrderManager_Tick(OrderManagerState<F>* oms) {
 template <unsigned F>
 inline void OrderManager_Shutdown(OrderManagerState<F>* oms) {
     OrderEventLog_Free(&oms->event_log);
+    // v5.13.0.B — calibration log cleanup. nullptr-safe: most runs leave
+    // it null (cfg.calibration_log_path empty by default).
+    if (oms->calibration_log_file) {
+        std::fclose(oms->calibration_log_file);
+        oms->calibration_log_file = nullptr;
+    }
+}
+
+//======================================================================================================
+// [v5.13.0.B — calibration log open]
+//======================================================================================================
+// Opens cfg.calibration_log_path in append mode. Writes a header row if
+// the file is new (size == 0). Engine boot calls this AFTER OrderManager_Init
+// when the cfg field is non-empty. Single-thread (boot); after this returns
+// the FILE* is read-only on the drainer thread (sole writer in HandleFill).
+//
+// Returns 0 on success / -1 on failure (failure is non-fatal: log goes to
+// stderr; engine continues without calibration logging this session).
+//======================================================================================================
+template <unsigned F>
+inline int OrderManager_OpenCalibrationLog(OrderManagerState<F>* oms,
+                                             const char* path) {
+    if (!path || path[0] == '\0') return 0;  // disabled — not an error
+    oms->calibration_log_file = std::fopen(path, "a");
+    if (!oms->calibration_log_file) {
+        std::fprintf(stderr,
+            "[OMS] OpenCalibrationLog: fopen failed for '%s' — calibration "
+            "logging disabled this session\n", path);
+        return -1;
+    }
+    // Header row only if file is empty (new). Use ftell after open.
+    std::fseek(oms->calibration_log_file, 0, SEEK_END);
+    long sz = std::ftell(oms->calibration_log_file);
+    if (sz == 0) {
+        std::fprintf(oms->calibration_log_file,
+            "timestamp_us,slot,exit_predicted_flag,predicted_p,"
+            "entry_price,exit_price,gain_pct,realized_pnl_bps,was_win\n");
+        std::fflush(oms->calibration_log_file);
+    }
+    return 0;
 }
 
 //======================================================================================================

@@ -817,6 +817,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     OrderManager_Init(&oms, exchange_adapter, live_trading ? 1 : 0,
                       live_starting_balance, cfg.fee_rate,
                       (int)cfg.oms_event_log_mode);
+    // v5.13.0.B — open calibration log if cfg.calibration_log_path set.
+    // No-op when path is empty (default). Failure is non-fatal (logs to
+    // stderr; calibration logging disabled this session).
+    OrderManager_OpenCalibrationLog(&oms, cfg.calibration_log_path);
     // Phase 8 (post-coding c9) — explicit maker/taker rates so HandleFill's
     // per-fill rate selection actually works. Init defaults both = fee_rate
     // (legacy compat); engine layer sets the real values from cfg here.
@@ -2901,6 +2905,51 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     CoreLatencyStats_Sample(
                         &state.cores[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_PUSH_PARAMS],
                         _sec_t_te_start - _sec_t_push_start, _sec_t_te_start);
+
+                    // === v5.13.0.B — sell-side ML exit-prediction submit ===
+                    // RebuildOneCore wrote state.cores[c].last_exit_prediction
+                    // (when cfg.use_exit_model && exit_predictor models loaded).
+                    // If above threshold and any positions are open on this
+                    // core's slot(s), fire MARKET_SELL via OMS_PushSubmit and
+                    // mark per-slot last_exit_was_predicted for v5.13.4 reward
+                    // attribution. Default cfg path (use_exit_model=0): the
+                    // last_exit_prediction stays 0.0 → ~5ns flag check + skip.
+                    if (cfg.use_exit_model
+                        && state.cores[c].last_exit_prediction
+                           > FPN_ToDouble(cfg.exit_threshold)
+                        && price_d > 0.01) {
+                        // Slot mask: under partials each core owns 2 slots
+                        // (legs A + B); single-leg under partial_exit_enabled=0.
+                        int partial_on = oms.partial_exit_enabled ? 1 : 0;
+                        uint16_t my_mask = partial_on
+                            ? (uint16_t)((1u << (c * 2)) | (1u << (c * 2 + 1)))
+                            : (uint16_t)(1u << c);
+                        uint16_t bm = (uint16_t)
+                            (oms.portfolio.active_bitmap & my_mask);
+                        if (bm) {
+                            FPN<F> price_fpn = FPN_FromDouble<F>(price_d);
+                            while (bm) {
+                                int pidx = __builtin_ctz(bm);
+                                bm &= (uint16_t)(bm - 1);
+                                FPN<F> qty =
+                                    oms.portfolio.positions[pidx].quantity;
+                                if (FPN_IsZero(qty)) continue;
+                                // Mark per-slot for v5.13.4 attribution + v5.13.0.B
+                                // calibration log. Set BEFORE OMS_PushSubmit so the
+                                // SPSC ring release-acquire makes it visible to drainer
+                                // when the fill arrives.
+                                oms.last_exit_was_predicted[pidx] = 1;
+                                oms.last_exit_predicted_p[pidx] =
+                                    state.cores[c].last_exit_prediction;
+                                OMS_PushSubmit(&oms, (int16_t)pidx,
+                                    ORDER_MARKET_SELL, qty,
+                                    FPN_Zero<F>(), FPN_Zero<F>(),
+                                    state.cores[c].strategy_id, price_fpn);
+                            }
+                            state.cores[c].strategy_halt_reason =
+                                SHALT_EXIT_PREDICTED;
+                        }
+                    }
 
                     // === Time exit + trailing SL ratchet (per-core) ===
                     if (cfg.max_hold_ticks > 0 && price_d > 0.01) {

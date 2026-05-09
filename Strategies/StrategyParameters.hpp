@@ -98,6 +98,14 @@ struct MLBuildContext {
     ConfidenceScorer*   confidence;
     double*             out_prediction;
     double*             out_confidence;
+    // v5.13.0.B — sell-side ML prediction. ML_BuildParameters writes the
+    // blended exit_predictor probability here when cfg.use_exit_model &&
+    // ezoo->exit_predictor_count > 0. Slow-path body post-RebuildOneCore
+    // reads + acts on it (fires OMS submit if above cfg.exit_threshold and
+    // any positions are open). nullptr-safe: legacy callers without sell-
+    // side wiring leave this null; ML_BuildParameters skips the inference.
+    double*             out_exit_prediction;
+    int*                out_exit_dominant_horizon;
     // v5.9.0b — ML observability pass-through. ML_BuildParameters writes
     // these for the entry log + ML Status panel to read. nullptr-safe
     // (legacy/test callers can omit).
@@ -923,6 +931,45 @@ inline void ML_BuildParameters(
             p_peak     = 1.0 - prediction;
             p_valley   = prediction;
             have_signal = 1;
+        }
+    }
+
+    // v5.13.0.B — sell-side prediction (Path 3 architecture). Runs once
+    // per slow-path rebuild when:
+    //   1. cfg.use_exit_model = 1 (operator opt-in)
+    //   2. ezoo->exit_predictor_count > 0 (models loaded)
+    //   3. mctx->out_exit_prediction != nullptr (slow-path body wired)
+    //
+    // Reuses already-standardized features from the buy-side path (scaler
+    // is shared across roles via sibling-scaler load-time check). Writes
+    // blended exit probability to *out_exit_prediction; slow-path body
+    // post-RebuildOneCore reads it + fires OMS submit if above threshold.
+    //
+    // Hot path UNTOUCHED. Default cfg (use_exit_model=0): ~5ns flag check.
+    EnsembleModelZoo<F>* ezoo_ex = (EnsembleModelZoo<F>*)
+        (mctx ? mctx->ensemble_zoo : nullptr);
+    if (config->use_exit_model
+        && ezoo_ex
+        && ezoo_ex->exit_predictor_count > 0
+        && mctx
+        && mctx->out_exit_prediction) {
+        float blended = 0.0f;
+        int n_loaded = 0;
+        int dominant = -1;
+        float max_p = -1.0f;
+        for (int h = 0; h < ezoo_ex->exit_predictor_count; ++h) {
+            ModelHandle<F>* mh = &ezoo_ex->exit_predictor[h];
+            if (!Model_IsLoaded(mh)) continue;
+            float p = Model_Predict_Normalized(mh, features, n);
+            if (std::isnan(p) || std::isinf(p)) continue;
+            blended += p;
+            n_loaded++;
+            if (p > max_p) { max_p = p; dominant = h; }
+        }
+        if (n_loaded > 0) {
+            *mctx->out_exit_prediction = (double)(blended / (float)n_loaded);
+            if (mctx->out_exit_dominant_horizon)
+                *mctx->out_exit_dominant_horizon = dominant;
         }
     }
 
