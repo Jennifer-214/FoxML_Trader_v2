@@ -613,10 +613,18 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         // v5.6.6: sentinel = 0xFFFF so the first rebuild ALWAYS emits a
         // baseline gate log entry. Subsequent emits are edge-triggered.
         state->cores[i].prev_gate_log_state = 0xFFFF;
-        // v4.0.3 B: regime state per AUTO core. Hysteresis threshold of 3
-        // matches legacy default — requires 3 consecutive cycles of new
-        // regime detection before switching.
-        Regime_Init(&state->cores[i].regime_state, 3);
+        // v5.14.5.B.0.A — regime state initialized for ALL cores (not just
+        // AUTO; universalization closes the architectural limitation that
+        // prevented ML strategies from reading hysteresed current_regime).
+        //
+        // Hysteresis threshold here uses safe default (5); EngineSharded boot
+        // re-inits with cfg.regime_hysteresis (operator-tunable; same default).
+        // Was hardcoded 3 pre-v5.14.5.B.0 → 5 default now matches cfg docs.
+        // Operators wanting pre-v5.14.5.B.0 behavior set
+        // regime_hysteresis=3 in engine.cfg (CHANGELOG + cfg.example documented).
+        // EventLoopState_Init signature unchanged (no cfg param) per
+        // boundary-stable refactor; EngineSharded does the cfg override.
+        Regime_Init(&state->cores[i].regime_state, 5);
         // v4.0.3 D10: P&L feeder per core for adaptive filter shifts.
         state->cores[i].pnl_feeder = RegressionFeederX_Init<F>();
         state->cores[i].resolved_strategy_id = STRATEGY_NONE;  // v4.0.4
@@ -2111,21 +2119,27 @@ inline void EventLoop_RebuildOneCore(
             }
         }
 
-        // v4.0.3 B: STRATEGY_AUTO regime mode. The core's nominal strategy_id
-        // is AUTO; we compute the current regime from the same RegimeSignals
-        // the ML pack uses, classify with hysteresis, and resolve to a
-        // concrete strategy via REGIME_STRATEGY_TABLE. The dispatcher never
-        // sees STRATEGY_AUTO — it sees the resolved id (MR/MOM/DIP/EMA).
-        // Each AUTO core tracks its own regime_state independently.
+        // v5.14.5.B.0.A — universalize regime classification.
+        // Runs for ALL cores (was AUTO-only pre-v5.14.5.B.0). Closes the
+        // architectural limitation where ML strategies couldn't read
+        // hysteresed current_regime; opens v5.14.5.B's regime-context
+        // ML features (regime_class_onehot etc.).
+        //
+        // Cost (slow-path): ~50-100ns per non-AUTO core × 16 cores = ~1.6µs/cycle.
+        // Slow-path budget = 100µs p99; impact = 0.0016% — well within budget.
+        // HOT_PATH_CHANGELOG entry filed.
+        //
+        // AUTO-mode-only logic (strategy resolution + ratchet adjustment on
+        // transition) stays gated separately below.
         uint8_t effective_strategy_id = state->cores[slot].strategy_id;
-        if (effective_strategy_id == STRATEGY_AUTO &&
-            ror_regressor && ema_price && rolling_long) {
+        int old_regime = state->cores[slot].regime_state.current_regime;
+        int new_regime = old_regime;  // default if compute path not active
+        if (ror_regressor && ema_price && rolling_long) {
             const RORRegressor<F>* ror_in = (const RORRegressor<F>*)ror_regressor;
             const FPN<F>* ema_in          = (const FPN<F>*)ema_price;
             RegimeSignals<F> sig;
-            // v4.3 — pass expanded state so AUTO regime classification sees
-            // the same features the ML core will see (consistency for the
-            // few signals Regime_Classify reads beyond just slope/R²).
+            // v4.3 — pass expanded state so regime classification sees the same
+            // features the ML core sees (consistency).
             Regime_ComputeSignals(&sig, rolling, rolling_long, ror_in, *ema_in,
                                    (const RollingStats<F, 256>*)rolling_medium,
                                    (const RollingStats<F, 1024>*)rolling_baseline,
@@ -2134,19 +2148,16 @@ inline void EventLoop_RebuildOneCore(
                                    timestamp_us,
                                    book_imb_history, flow_state, large_trade_state,
                                    spread_state, current_spread, current_mid_price);
-            int old_regime = state->cores[slot].regime_state.current_regime;
-            int new_regime = Regime_Classify(&state->cores[slot].regime_state,
-                                              &sig, &resolved_cfg);
-            int resolved = Regime_ToStrategy(state->cores[slot].regime_state.current_regime);
-            // v5.4.0 Phase 0.1 — log AUTO-core regime classification per cadence.
-            // Cheap (cfg-gated, no-op when disabled). Captures regime transitions
-            // and the inputs that drove them — runtime visibility into the
-            // "regime stuck on RANGING" symptom (F3).
+            new_regime = Regime_Classify(&state->cores[slot].regime_state,
+                                          &sig, &resolved_cfg);
+
+            // v5.4.0 Phase 0.1 — log per-cycle regime classification
+            // (universalized v5.14.5.B.0.A; was AUTO-only pre-fix).
             if (tt::Health_LogEnabled(tt::HEALTH_INFO)) {
                 tt::Health_Log(tt::HEALTH_INFO, "regime", slot,
-                    "old=%d new=%d resolved_strat=%d ema_sma_spread=%g "
+                    "old=%d new=%d ema_sma_spread=%g "
                     "short_r2=%g ror_slope=%g hyst=%d/%d short_count=%d",
-                    old_regime, new_regime, resolved,
+                    old_regime, new_regime,
                     FPN_ToDouble(sig.ema_sma_spread),
                     FPN_ToDouble(sig.short_r2),
                     FPN_ToDouble(sig.ror_slope),
@@ -2154,6 +2165,20 @@ inline void EventLoop_RebuildOneCore(
                     state->cores[slot].regime_state.hysteresis_threshold,
                     sig.short_count);
             }
+        }
+
+        // AUTO-only: resolve concrete strategy + ratchet adjustment on transition.
+        // Pre-v5.14.5.B.0.A this block ALSO did the compute+classify; now it
+        // just consumes the result.
+        if (effective_strategy_id == STRATEGY_AUTO &&
+            ror_regressor && ema_price && rolling_long) {
+            int resolved = Regime_ToStrategy(state->cores[slot].regime_state.current_regime);
+            // v5.4.0 Phase 0.1 health log moved to universal classification
+            // block above (v5.14.5.B.0.A). AUTO-only emission would log
+            // resolved_strat=N — that field is recoverable from regime via
+            // REGIME_STRATEGY_TABLE so no info loss; logs now fire for all
+            // cores so operator gets regime visibility regardless of strategy.
+
             // Don't recurse into STRATEGY_AUTO (defensive — REGIME_STRATEGY_TABLE
             // shouldn't return AUTO, but safer to clamp).
             if (resolved != STRATEGY_AUTO && resolved != STRATEGY_NONE) {

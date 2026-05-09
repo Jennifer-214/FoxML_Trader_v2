@@ -14311,8 +14311,8 @@ e3_skip_load:;
         // 19 by /plan-check 2026-05-06 since 0a took 19).
 
         // Auto-generated count matches the canonical 8-label set
-        check("v5.10.0d: LABEL_COUNT == 8 (canonical label set size)",
-              LABEL_COUNT == 8);
+        check("v5.10.0d: LABEL_COUNT >= 8 (canonical label set; v5.14.5.A added 3 CS targets → 11)",
+              LABEL_COUNT >= 8);
         check("v5.10.0d: LABEL_COUNT == LABEL_COUNT_AUTO (X-macro count match)",
               LABEL_COUNT == LABEL_COUNT_AUTO);
 
@@ -19114,6 +19114,151 @@ e3_skip_load:;
                   FPN_ToDouble(parsed.ridge_min_ic_floor) < 0.0051);
             std::remove(tmp_cfg);
         }
+    }
+
+    // ----- v5.14.5.B.0: Regime classification universalization (Option Z sprint) --------------------
+    printf("\n--- v5.14.5.B.0: regime classification universalization ---\n");
+    {
+        // Test 1 — cfg.regime_hysteresis default = 5 (post-v5.14.5.B.0 alignment)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.14.5.B.0: cfg.regime_hysteresis default = 5",
+              cfg.regime_hysteresis == 5);
+    }
+    {
+        // Test 2 — Regime_Init reads cfg-driven threshold (matches Option A
+        // single-source-of-truth philosophy; no more hardcoded 3 in live)
+        RegimeState<64> rs;
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        Regime_Init(&rs, (int)cfg.regime_hysteresis);
+        check("v5.14.5.B.0: Regime_Init populates hysteresis_threshold from cfg (=5)",
+              rs.hysteresis_threshold == 5);
+        check("v5.14.5.B.0: Regime_Init sets current_regime = REGIME_RANGING (cold-start)",
+              rs.current_regime == REGIME_RANGING);
+        check("v5.14.5.B.0: Regime_Init sets hysteresis_count = 0",
+              rs.hysteresis_count == 0);
+    }
+    {
+        // Test 3 — Operator override via cfg works (regime_hysteresis=3 = old behavior)
+        RegimeState<64> rs;
+        Regime_Init(&rs, 3);  // operator-override case
+        check("v5.14.5.B.0: Operator override (regime_hysteresis=3) → threshold=3 (legacy compat)",
+              rs.hysteresis_threshold == 3);
+    }
+    {
+        // Test 4 — Operator override via cfg works (regime_hysteresis=10 = slow/careful)
+        RegimeState<64> rs;
+        Regime_Init(&rs, 10);
+        check("v5.14.5.B.0: Operator override (regime_hysteresis=10) → threshold=10",
+              rs.hysteresis_threshold == 10);
+    }
+    {
+        // Test 5 — EventLoopState_Init initializes ALL cores' regime_state
+        // (universalization — was AUTO-only; now ALL cores get init'd to safe default)
+        tt::OrderManagerState<64> oms;
+        tt::EventLoopState<64> state;
+        tt::EventLoopState_InitLegacy(&state, &oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+        // EventLoopState_Init initializes regime_state[i] for ALL i with safe
+        // default 5 (EngineSharded_Run overrides with cfg.regime_hysteresis
+        // post-init; tests use the safe default).
+        for (int i = 0; i < 16; i++) {
+            check("v5.14.5.B.0: regime_state[i].current_regime = RANGING (post-init)",
+                  state.cores[i].regime_state.current_regime == REGIME_RANGING);
+        }
+        check("v5.14.5.B.0: regime_state[0].hysteresis_threshold = 5 (safe default)",
+              state.cores[0].regime_state.hysteresis_threshold == 5);
+    }
+    {
+        // Test 6 — Regime_Classify cold-start gate: short_count < 64 → no transition
+        // (verifies the safety pattern at RegimeDetector.hpp:514 stays intact)
+        RegimeState<64> rs;
+        Regime_Init(&rs, 5);
+        rs.current_regime = REGIME_RANGING;
+
+        RegimeSignals<64> sig;
+        memset(&sig, 0, sizeof(sig));
+        sig.short_count = 32;  // below cold-start threshold (64)
+
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        int new_regime = Regime_Classify(&rs, &sig, &cfg);
+        check("v5.14.5.B.0: Regime_Classify with short_count<64 → no change (cold-start gate)",
+              new_regime == REGIME_RANGING && rs.current_regime == REGIME_RANGING);
+    }
+
+    // ----- v5.14.5.A: CS targets X-macro append (FoxML_Core port) ------------------------------------
+    printf("\n--- v5.14.5.A: cross-sectional target plumbing ---\n");
+    {
+        // Test 1 — LABEL_COUNT bumped (3 new CS labels appended)
+        static_assert(LABEL_COUNT >= 11,
+            "v5.14.5.A: FOREACH_TARGET registry shrunk (expected >=11 after CS additions)");
+        check("v5.14.5.A: LABEL_COUNT >= 11 (8 baseline + 3 CS)", LABEL_COUNT >= 11);
+    }
+    {
+        // Test 2 — Registry table entries populated for new CS labels
+        check("v5.14.5.A: label_table[LABEL_CS_PERCENTILE_RANK].name = 'cs_percentile_rank'",
+              strcmp(label_table[LABEL_CS_PERCENTILE_RANK].name, "cs_percentile_rank") == 0);
+        check("v5.14.5.A: label_table[LABEL_CS_ZSCORE_ROBUST].name = 'cs_zscore_robust'",
+              strcmp(label_table[LABEL_CS_ZSCORE_ROBUST].name, "cs_zscore_robust") == 0);
+        check("v5.14.5.A: label_table[LABEL_CS_VOLSCALED_DEMEANED].name = 'cs_volscaled_demeaned'",
+              strcmp(label_table[LABEL_CS_VOLSCALED_DEMEANED].name, "cs_volscaled_demeaned") == 0);
+        check("v5.14.5.A: CS labels declare num_classes=1 (regression)",
+              label_table[LABEL_CS_PERCENTILE_RANK].num_classes == 1 &&
+              label_table[LABEL_CS_ZSCORE_ROBUST].num_classes == 1 &&
+              label_table[LABEL_CS_VOLSCALED_DEMEANED].num_classes == 1);
+    }
+    {
+        // Test 3 — Label_CSPercentileRank: returns raw forward return
+        // (single-symbol degenerate path; CS aggregation activates v5.16+)
+        HistoricalTick ticks[10];
+        for (int i = 0; i < 10; i++) {
+            ticks[i].price = 100.0 + i * 0.5;  // monotonic up
+            ticks[i].qty = 1.0;
+            ticks[i].timestamp_us = i * 1000;
+            ticks[i].is_buyer_maker = 0;
+        }
+        // From idx=0, 5 ticks ahead: price 100.0 → 102.5; return = 0.025
+        float result = Label_CSPercentileRank(ticks, /*idx=*/0, /*total=*/10,
+                                                /*sample_price=*/100.0,
+                                                /*tp=*/0, /*sl=*/0,
+                                                /*forward_ticks=*/5);
+        check("v5.14.5.A: Label_CSPercentileRank returns raw return (~0.025)",
+              fabs(result - 0.025f) < 1e-6);
+    }
+    {
+        // Test 4 — Boundary: future tick out of range → NAN
+        HistoricalTick ticks[3];
+        for (int i = 0; i < 3; i++) {
+            ticks[i].price = 100.0;
+            ticks[i].qty = 1.0;
+            ticks[i].timestamp_us = i * 1000;
+        }
+        float result = Label_CSPercentileRank(ticks, /*idx=*/0, /*total=*/3,
+                                                /*sample_price=*/100.0,
+                                                /*tp=*/0, /*sl=*/0,
+                                                /*forward_ticks=*/100);
+        check("v5.14.5.A: future tick out of range → NAN", std::isnan(result));
+    }
+    {
+        // Test 5 — All 3 CS Compute fns return SAME value in single-symbol mode
+        // (degenerate path; verifies framework-plumbing-only intent for v5.14.5)
+        HistoricalTick ticks[10];
+        for (int i = 0; i < 10; i++) {
+            ticks[i].price = 100.0 + i * 0.5;
+            ticks[i].qty = 1.0;
+            ticks[i].timestamp_us = i * 1000;
+        }
+        float r1 = Label_CSPercentileRank   (ticks, 0, 10, 100.0, 0, 0, 5);
+        float r2 = Label_CSZScoreRobust     (ticks, 0, 10, 100.0, 0, 0, 5);
+        float r3 = Label_CSVolScaledDemeaned(ticks, 0, 10, 100.0, 0, 0, 5);
+        check("v5.14.5.A: CS_* labels identical in single-symbol mode (degenerate framework intent)",
+              fabs(r1 - r2) < 1e-9 && fabs(r2 - r3) < 1e-9);
+    }
+    {
+        // Test 6 — sample_price <= 0 → NAN (defensive)
+        HistoricalTick ticks[5];
+        for (int i = 0; i < 5; i++) ticks[i].price = 100.0;
+        float result = Label_CSPercentileRank(ticks, 0, 5, /*sample_price=*/0.0, 0, 0, 2);
+        check("v5.14.5.A: sample_price <= 0 → NAN (defensive)", std::isnan(result));
     }
 
     // ----- v5.14.4.B.2: Reconcile_AutoCancelStale (zombie cleanup; full AUTO_SYNC) ------------------

@@ -191,6 +191,20 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     EventLoopState<BACKTEST_FP> state;
     EventLoopState_Init(&state, &oms);
 
+    // v5.14.5.B.0.B — re-init regime_state with cfg-driven hysteresis
+    // (mirrors EngineSharded boot at ~line 880; same single source of
+    // truth = cfg.regime_hysteresis). EventLoopState_Init uses safe
+    // default 5; this override matches EngineSharded so train-serve
+    // parity is guaranteed by construction.
+    //
+    // Universalization (v5.14.5.B.0.A) means Regime_Classify now fires
+    // on ALL cores (not just AUTO). Backtest replay reproduces the same
+    // hysteresed current_regime sequence as live for any given tick
+    // stream, enabling regime-context ML features (v5.14.5.B class_onehot).
+    for (int i = 0; i < MAX_EXECUTION_CORES; ++i) {
+        Regime_Init(&state.cores[i].regime_state, (int)cfg.regime_hysteresis);
+    }
+
     // Configure kill switch from the existing config fields. The drawdown
     // field in cfg is already a fraction (parsed via CFG_PARSE_PCT) so it
     // matches what _ConfigureKillSwitch expects.

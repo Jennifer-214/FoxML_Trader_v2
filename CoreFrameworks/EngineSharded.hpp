@@ -871,6 +871,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     EventLoopState<F> state;
     EventLoopState_Init(&state, &oms);
 
+    // v5.14.5.B.0.A — re-init regime_state with cfg-driven hysteresis
+    // (EventLoopState_Init uses safe default 5; here we override with
+    // cfg.regime_hysteresis so operators can tune per-deployment).
+    // Single source of truth = cfg; backtest's matching cfg-driven init
+    // guarantees train-serve parity.
+    for (int i = 0; i < MAX_EXECUTION_CORES; ++i) {
+        Regime_Init(&state.cores[i].regime_state, (int)cfg.regime_hysteresis);
+    }
+
     // Phase 04: start the user data websocket for real-time fills.
     // Uses its own BinanceOrderAPI instance for listen key REST calls.
     // The ws_result_queue is a dedicated SPSC ring inside the OMS.
