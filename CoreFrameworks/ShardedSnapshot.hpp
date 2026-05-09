@@ -551,6 +551,11 @@ static inline void TUI_CopySnapshotSharded(
             snap->per_core[i].ml_last_prediction   = state->cores[i].staged_prediction;
             snap->per_core[i].ml_last_confidence   = state->cores[i].last_confidence;
             snap->per_core[i].ml_active_prediction = state->cores[i].active_prediction;
+            // v5.13.6.A — sell-side ML prediction surface (parity-check
+            // Section J observability gap close). Operator sees per-cycle
+            // exit_predictor blended prob + dominant horizon in dashboard.
+            snap->per_core[i].ml_last_exit_prediction       = state->cores[i].last_exit_prediction;
+            snap->per_core[i].ml_last_exit_dominant_horizon = state->cores[i].last_exit_dominant_horizon;
             // Direct reads of scorer internals — these are double-only and safe
             // to compute on the snapshot path (snapshot is slow-path itself).
             snap->per_core[i].ml_confidence_ic   = RollingIC_Compute(&state->cores[i].confidence.ic);

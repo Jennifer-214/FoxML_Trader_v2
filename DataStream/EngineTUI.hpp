@@ -1069,6 +1069,15 @@ struct TUISnapshot {
         double   ml_confidence_ic;     // RollingIC value for tooltip / debug
         double   ml_confidence_rmse;   // RollingRMSE value
         double   ml_active_prediction; // prediction at fill time of open position (0 if no open pos)
+        // v5.13.6 — sell-side ML prediction (parity-check Section J observability gap).
+        // Per-cycle blended exit_predictor probability (0 when use_exit_model
+        // disabled or no exit models loaded). Operator sees real-time exit
+        // probs in the GUI dashboard; without this, paper-test debugging of
+        // "did exit_predictor fire just now?" requires log grep.
+        // ml_last_exit_dominant_horizon: -1 = no prediction this cycle;
+        // otherwise [0..exit_predictor_count) the arm with highest prob.
+        double   ml_last_exit_prediction;
+        int      ml_last_exit_dominant_horizon;
         // v5.9.0b — ML observability extensions for the new ML Status panel.
         // Distinct from ml_model_loaded: ml_model_load_failed=1 means
         // "load was attempted and refused/missing" (operator should care);

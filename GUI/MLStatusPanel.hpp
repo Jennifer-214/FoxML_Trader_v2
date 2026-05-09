@@ -166,6 +166,34 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                     ImGui::SameLine();
                     ImGui::Text("%.3f", pc.ml_last_confidence);
                 }
+
+                // v5.13.6.A — sell-side ML prediction display. Renders
+                // when exit_predictor models loaded + cfg.use_exit_model=1
+                // (signaled by ml_last_exit_prediction > 0). Operator sees
+                // real-time exit-prob per core; closes parity Section J
+                // observability gap. Threshold display (cfg.exit_threshold)
+                // not surfaced separately yet — operator reads the cfg if
+                // they need to compare; future v5.13.X may add it.
+                if (pc.ml_last_exit_prediction > 0.0) {
+                    ImGui::SameLine(0, 14);
+                    ImGui::TextColored(FoxmlColors::sand, "exit:");
+                    ImGui::SameLine();
+                    if (pc.ml_last_exit_dominant_horizon >= 0) {
+                        ImGui::Text("%.3f (h%d)",
+                                    pc.ml_last_exit_prediction,
+                                    pc.ml_last_exit_dominant_horizon);
+                    } else {
+                        ImGui::Text("%.3f", pc.ml_last_exit_prediction);
+                    }
+                    ImGui::SetItemTooltip(
+                        "Sell-side ML prediction this slow-path cycle\n"
+                        "(blended across loaded exit_predictor horizons;\n"
+                        "h<idx> = dominant arm with max single-model prob).\n"
+                        "When > cfg.exit_threshold (default 0.6) and any\n"
+                        "position is open on this core, slow-path body\n"
+                        "fires MARKET_SELL via OMS_PushSubmit + sets\n"
+                        "SHALT_EXIT_PREDICTED on this core's halt reason.");
+                }
             }
 
             // v5.9.3a — scaler row (Gap H). Mutually-exclusive states.
