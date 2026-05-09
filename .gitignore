@@ -119,3 +119,6 @@ DOCS/FAILED_OPTIMIZATIONS.md
 DOCS/sizing-audit-*.md
 DOCS/v5.4-*.md
 DOCS/v5.11-*.md
+
+# v5.14.2.E.3 — CLAUDE.md moved to workspace-private (operator-policy + audit references)
+CLAUDE.md
