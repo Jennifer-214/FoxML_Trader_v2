@@ -696,3 +696,34 @@ confidence_freshness_tau_secs=3600       # decay constant; 1 hour for slow regim
 confidence_capacity_target_dollars=0     # 0 = unbounded capacity (single-symbol default)
 confidence_capacity_kappa=0.1            # ADV proportionality factor (cap = kappa * adv / target)
 confidence_rmse_baseline=1.0             # bind to training-time RMSE; 1.0 = neutral default
+
+#==============================================================================
+# v5.14.1.D — FEATURE WINSORIZATION (per-feature percentile clipping)
+#==============================================================================
+# Clips features to [winsor_pct_low, winsor_pct_high] percentiles fit at
+# training time. Reduces noise from 5σ outliers (flash crashes, exchange
+# glitches) + improves model generalization vs fat-tailed crypto returns.
+#
+# Default values (0.5% / 99.5%) are reasonable for clean BTC data.
+# Noisier markets (smaller alts) may benefit from 1% / 99% or 5% / 95%.
+# Setting low=0 OR high=1 disables winsor (no clip; identity pass-through).
+#
+# Applied in FeatureStandardizer_Apply BEFORE mean-center + unit-var.
+# Stamped into stamp body (Surface G via FOREACH_STAMP_BOUND_CFG) so
+# train↔serve cfg drift is detected at model load (refused in strict
+# mode, WARN otherwise).
+#
+# Heterogeneous winsor models supported via per-core override:
+#   core_0_winsor_pct_low=0.005    # tight: noise-resistant
+#   core_1_winsor_pct_low=0.0      # disabled: tail-catcher
+#   core_2_winsor_pct_low=0.05     # wide: balanced
+# Each core's drift check uses its own override; bandit/Ridge blends
+# predictions across cores. See DOCS/HETEROGENEOUS_WINSOR_PLAYBOOK.md
+# (post-v5.14.1.E ship) for the operator workflow.
+#
+# Activation requires retrain: existing scaler sidecars are pre-v5.14.1.D
+# format (SCALER_MAGIC_V0); engine refuses them at load with operator-
+# readable message. Run Full Validation regenerates sidecars in v1 format.
+
+winsor_pct_low=0.005    # default 0.5% (lower clip percentile)
+winsor_pct_high=0.995   # default 99.5% (upper clip percentile)

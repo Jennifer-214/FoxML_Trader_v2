@@ -3955,6 +3955,184 @@ int main() {
         }
     }
 
+    // ----- v5.14.1.D: FeatureStandardizer winsorization tests --------------------------------------
+    // Closes PARITY-004 sister-fix: cfg-tunable per-feature percentile clips
+    // applied in FeatureStandardizer_Apply BEFORE mean-center + unit-var.
+    // Sidecar binary format bumped to v1 (SCALER_MAGIC 0xFE5C1AE3).
+    printf("\n--- v5.14.1.D: FeatureStandardizer winsorization ---\n");
+    {
+        // Test 1 — Cfg defaults
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.14.1.D cfg default: winsor_pct_low = 0.005",
+              fabs(FPN_ToDouble(cfg.winsor_pct_low) - 0.005) < 1e-9);
+        check("v5.14.1.D cfg default: winsor_pct_high = 0.995",
+              fabs(FPN_ToDouble(cfg.winsor_pct_high) - 0.995) < 1e-9);
+    }
+    {
+        // Test 2 — Cfg parser
+        char tmp_cfg[] = "/tmp/foxml_v5_14_1_d_cfg_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        if (fd >= 0) {
+            const char* contents =
+                "winsor_pct_low=0.01\n"
+                "winsor_pct_high=0.99\n";
+            write(fd, contents, strlen(contents));
+            close(fd);
+            ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmp_cfg);
+            check("v5.14.1.D cfg parser: winsor_pct_low ≈ 0.01",
+                  fabs(FPN_ToDouble(cfg.winsor_pct_low) - 0.01) < 1e-6);
+            check("v5.14.1.D cfg parser: winsor_pct_high ≈ 0.99",
+                  fabs(FPN_ToDouble(cfg.winsor_pct_high) - 0.99) < 1e-6);
+            unlink(tmp_cfg);
+        }
+    }
+    {
+        // Test 3 — FeatureStandardizer Init defaults: bounds = ±INFINITY,
+        // has_winsor_bounds = 0 (Apply pass-through).
+        tt::FeatureStandardizer sc;
+        tt::FeatureStandardizer_Init(&sc);
+        check("v5.14.1.D Init: has_winsor_bounds = 0",
+              sc.has_winsor_bounds == 0);
+        check("v5.14.1.D Init: winsor_low[0] = -INFINITY",
+              sc.winsor_low[0] == -INFINITY);
+        check("v5.14.1.D Init: winsor_high[0] = +INFINITY",
+              sc.winsor_high[0] == +INFINITY);
+    }
+    {
+        // Test 4 — fit_winsor_percentiles with sentinel values (disabled)
+        tt::FeatureStandardizer sc;
+        tt::FeatureStandardizer_Init(&sc);
+        // Need samples; use synthetic
+        const int N = 100;
+        float* feats = (float*)malloc(N * NUM_REGISTERED_FEATURES * sizeof(float));
+        for (int i = 0; i < N * (int)NUM_REGISTERED_FEATURES; i++) feats[i] = (float)i;
+        // Sentinel: pct_low = 0 → no fit
+        tt::FeatureStandardizer_FitWinsor(&sc, feats, N, /*pct_low=*/0.0, /*pct_high=*/1.0);
+        check("v5.14.1.D FitWinsor: pct_low=0 → has_winsor_bounds stays 0",
+              sc.has_winsor_bounds == 0);
+        // Sentinel: pct_high = 1 → no fit
+        tt::FeatureStandardizer_FitWinsor(&sc, feats, N, /*pct_low=*/0.005, /*pct_high=*/1.0);
+        check("v5.14.1.D FitWinsor: pct_high=1 → has_winsor_bounds stays 0",
+              sc.has_winsor_bounds == 0);
+        // Sentinel: low > high → no fit
+        tt::FeatureStandardizer_FitWinsor(&sc, feats, N, /*pct_low=*/0.99, /*pct_high=*/0.01);
+        check("v5.14.1.D FitWinsor: low>high → has_winsor_bounds stays 0",
+              sc.has_winsor_bounds == 0);
+        free(feats);
+    }
+    {
+        // Test 5 — fit_winsor_percentiles with valid percentiles produces
+        // bounds matching expected percentile values.
+        tt::FeatureStandardizer sc;
+        tt::FeatureStandardizer_Init(&sc);
+        // Synthetic: feature 0 = ramp 0..99; pct_low=0.05 → idx 5 → value 5;
+        // pct_high=0.95 → idx 95 → value 95.
+        const int N = 100;
+        float* feats = (float*)malloc(N * NUM_REGISTERED_FEATURES * sizeof(float));
+        for (int s = 0; s < N; s++) {
+            for (unsigned f = 0; f < NUM_REGISTERED_FEATURES; f++) {
+                feats[s * NUM_REGISTERED_FEATURES + f] = (float)s;
+            }
+        }
+        tt::FeatureStandardizer_FitWinsor(&sc, feats, N, /*pct_low=*/0.05, /*pct_high=*/0.95);
+        check("v5.14.1.D FitWinsor: has_winsor_bounds = 1 after valid fit",
+              sc.has_winsor_bounds == 1);
+        check("v5.14.1.D FitWinsor: feature 0 winsor_low ≈ 5",
+              fabs(sc.winsor_low[0] - 5.0) < 1e-6);
+        check("v5.14.1.D FitWinsor: feature 0 winsor_high ≈ 95",
+              fabs(sc.winsor_high[0] - 95.0) < 1e-6);
+        free(feats);
+    }
+    {
+        // Test 6 — Apply with has_winsor_bounds=0 → identity pass-through
+        // for any value (legacy behavior preserved).
+        tt::FeatureStandardizer sc;
+        tt::FeatureStandardizer_Init(&sc);
+        sc.has_scaler = 1;
+        sc.num_features = NUM_REGISTERED_FEATURES;
+        // mean=0, stddev=1 → identity scale; winsor=±INFINITY → identity clip
+        float feats_in[NUM_REGISTERED_FEATURES];
+        // Cast to int explicitly so i * 100 - 1000 doesn't wrap on unsigned i.
+        for (unsigned i = 0; i < NUM_REGISTERED_FEATURES; i++)
+            feats_in[i] = (float)((int)i * 100 - 1000);
+        int rc = tt::FeatureStandardizer_Apply(&sc, feats_in, NUM_REGISTERED_FEATURES);
+        check("v5.14.1.D Apply: has_winsor=0 + extreme values → no clip + no NaN",
+              rc == 0);
+        // First feature value passed through unchanged (identity scale)
+        check("v5.14.1.D Apply: has_winsor=0 → feature[0] = -1000 unchanged",
+              fabs(feats_in[0] - (-1000.0f)) < 1e-3);
+    }
+    {
+        // Test 7 — Apply with winsor enabled: extreme values clipped to bounds
+        tt::FeatureStandardizer sc;
+        tt::FeatureStandardizer_Init(&sc);
+        sc.has_scaler = 1;
+        sc.num_features = NUM_REGISTERED_FEATURES;
+        sc.has_winsor_bounds = 1;
+        // Set bounds [-10, 10] for feature 0
+        sc.winsor_low[0]  = -10.0;
+        sc.winsor_high[0] = 10.0;
+        // Other features: leave at ±INFINITY (no clip)
+        float feats[NUM_REGISTERED_FEATURES] = {0};
+        feats[0] = 1000.0f;  // way above winsor_high[0]=10
+        int rc = tt::FeatureStandardizer_Apply(&sc, feats, NUM_REGISTERED_FEATURES);
+        check("v5.14.1.D Apply: extreme value clipped to winsor_high",
+              rc == 0 && fabs(feats[0] - 10.0f) < 1e-3);
+        // In-range value unchanged
+        feats[0] = 5.0f;
+        rc = tt::FeatureStandardizer_Apply(&sc, feats, NUM_REGISTERED_FEATURES);
+        check("v5.14.1.D Apply: in-range value unchanged",
+              rc == 0 && fabs(feats[0] - 5.0f) < 1e-3);
+    }
+    {
+        // Test 8 — Sidecar round-trip with winsor block populated
+        tt::FeatureStandardizer sc_write;
+        tt::FeatureStandardizer_Init(&sc_write);
+        sc_write.has_scaler = 1;
+        sc_write.num_features = NUM_REGISTERED_FEATURES;
+        sc_write.registry_hash = FEATURE_REGISTRY_HASH();
+        sc_write.has_winsor_bounds = 1;
+        for (unsigned i = 0; i < NUM_REGISTERED_FEATURES; i++) {
+            sc_write.mean[i] = (double)i;
+            sc_write.stddev[i] = 1.0;
+            sc_write.winsor_low[i] = -100.0 - (double)i;
+            sc_write.winsor_high[i] = 100.0 + (double)i;
+        }
+        char tmp_path[] = "/tmp/foxml_v5_14_1_d_winsor_XXXXXX";
+        int fd = mkstemp(tmp_path);
+        if (fd >= 0) {
+            close(fd);
+            int wrc = tt::FeatureStandardizer_Persist(&sc_write, tmp_path);
+            check("v5.14.1.D Persist: write succeeded", wrc == 1);
+
+            tt::FeatureStandardizer sc_read;
+            int lrc = tt::FeatureStandardizer_Load(&sc_read, tmp_path);
+            check("v5.14.1.D Load: read succeeded", lrc == 1);
+            check("v5.14.1.D Load: has_winsor_bounds round-trip",
+                  sc_read.has_winsor_bounds == 1);
+            check("v5.14.1.D Load: winsor_low[0] round-trip",
+                  fabs(sc_read.winsor_low[0] - (-100.0)) < 1e-12);
+            check("v5.14.1.D Load: winsor_high[0] round-trip",
+                  fabs(sc_read.winsor_high[0] - 100.0) < 1e-12);
+            unlink(tmp_path);
+        }
+    }
+    {
+        // Test 9 — Per-core override field exists in PerCoreOverrides
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.core_overrides[0].winsor_pct_low = FPN_FromDouble<64>(0.01);
+        cfg.core_overrides[0].winsor_pct_high = FPN_FromDouble<64>(0.99);
+        ControllerConfig<64> resolved = ControllerConfig_ResolveForCore(cfg, 0);
+        check("v5.14.1.D per-core: override resolves correctly",
+              fabs(FPN_ToDouble(resolved.winsor_pct_low) - 0.01) < 1e-6);
+        check("v5.14.1.D per-core: high override resolves",
+              fabs(FPN_ToDouble(resolved.winsor_pct_high) - 0.99) < 1e-6);
+        // Core without override → inherits global
+        ControllerConfig<64> resolved_1 = ControllerConfig_ResolveForCore(cfg, 1);
+        check("v5.14.1.D per-core: no override → inherits global default",
+              fabs(FPN_ToDouble(resolved_1.winsor_pct_low) - 0.005) < 1e-6);
+    }
+
     // ----- Group 3: Gate effective-threshold formula (3 assertions) ----------------------------------
     // The formula `effective_thr = base * (scale - conf)`, clamped at 1.0,
     // lives at PortfolioController.hpp:~1618 in the slow-path gate block.
