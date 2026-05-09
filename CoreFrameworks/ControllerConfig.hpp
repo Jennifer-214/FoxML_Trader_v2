@@ -953,6 +953,13 @@ template <unsigned F> struct ControllerConfig {
   // ridge_lambda + ridge_cost_penalty + ridge_min_ic_floor cfg.
   // Stamp-bound via FOREACH_STAMP_BOUND_CFG → drift detected at load.
   int      exit_blender_mode;          // 0=bandit (default), 1=Ridge
+  // v5.14.1.G — Portfolio turnover (operator diagnostic only; not
+  // stamp-bound — tunable post-train without retraining).
+  // window: rolling buffer size (≥ 2, ≤ 256)
+  // topk: top-K arm members tracked per cycle (≥ 1, ≤ 8 = ENSEMBLE_HORIZON_MAX)
+  // Surfaced in PerCoreSnap.ml_portfolio_turnover for operator visibility.
+  int      confidence_turnover_window;  // default 100
+  int      confidence_turnover_topk;    // default 3 (top-3 arms)
   // v5.14.1.F — IC variant selector (drift detection + TUI display).
   // 0 = Spearman (default; existing RollingIC implementation despite
   //     generic name — see ICVariantRegistry.hpp doc note).
@@ -1292,6 +1299,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.exit_blender_mode   = 0;
   // v5.14.1.F — Spearman default (only registered variant today).
   cfg.confidence_ic_variant = 0;
+  // v5.14.1.G — portfolio turnover diagnostic defaults
+  cfg.confidence_turnover_window = 100;
+  cfg.confidence_turnover_topk   = 3;
   cfg.exit_bandit_lr      = 0.1;
   cfg.ensemble_min_agreement_pct = 0.6;
   cfg.ensemble_trade_reward_mult = 4.0;
@@ -1887,6 +1897,9 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(exit_blender_mode)
     // v5.14.1.F — IC variant selector
     CFG_PARSE_INT(confidence_ic_variant)
+    // v5.14.1.G — portfolio turnover diagnostic
+    CFG_PARSE_INT(confidence_turnover_window)
+    CFG_PARSE_INT(confidence_turnover_topk)
     if (strcmp(key, "exit_bandit_lr") == 0) {
         double v = atof(val);
         if (v < 0.01) v = 0.01;
