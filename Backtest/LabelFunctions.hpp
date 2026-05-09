@@ -52,7 +52,13 @@ struct HistoricalTick {
     X(VOL_BARRIER,        "vol_barrier",        "Vol Barrier",        "Vol-scaled: k*sigma barrier (FoxML)",                Label_VolBarrier,        0) \
     X(WILL_PEAK,          "will_peak",          "Will Peak",          "Binary: 1=price peaks within N ticks",               Label_WillPeak,          0) \
     X(WILL_VALLEY,        "will_valley",        "Will Valley",        "Binary: 1=price valleys within N ticks",             Label_WillValley,        0) \
-    X(PEAK_VALLEY_STABLE, "peak_valley_stable", "Peak/Valley/Stable", "3-class: 0=stable, 1=peak, 2=valley (softmax)",      Label_PeakValleyStable,  3)
+    X(PEAK_VALLEY_STABLE, "peak_valley_stable", "Peak/Valley/Stable", "3-class: 0=stable, 1=peak, 2=valley (softmax)",      Label_PeakValleyStable,  3) \
+    /* v5.14.5.A — cross-sectional targets (FoxML_Core port). Single-symbol */ \
+    /*               mode = degenerate (returns raw return per Compute fn);   */ \
+    /*               CS aggregation activates with multi-symbol (v5.16+).     */ \
+    X(CS_PERCENTILE_RANK,    "cs_percentile_rank",    "CS Percentile Rank",    "Per-timestamp rank/(N+1); SS-degenerate=raw return",       Label_CSPercentileRank,    1) \
+    X(CS_ZSCORE_ROBUST,      "cs_zscore_robust",      "CS Robust Z-Score",     "Per-timestamp (r-median)/(1.4826*MAD); SS-degenerate=raw", Label_CSZScoreRobust,      1) \
+    X(CS_VOLSCALED_DEMEANED, "cs_volscaled_demeaned", "CS Vol-scaled Demeaned","Per-timestamp (r/vol)-mean(r/vol); SS-degenerate=raw",     Label_CSVolScaledDemeaned, 1)
 
 // Auto-generated LABEL_* constants. Order matches FOREACH_TARGET.
 // Trailing LABEL_COUNT_AUTO acts as the count (one past the last value).
@@ -275,6 +281,69 @@ static float Label_PeakValleyStable(const HistoricalTick *ticks, int tick_idx, i
         if (ticks[j].price <= down_barrier) return 1.0f;  // down first → was at peak → bad entry
     }
     return 0.0f;  // neither hit within lookahead → stable
+}
+
+//======================================================================================================
+// [v5.14.5.A — CROSS-SECTIONAL TARGETS (FoxML_Core port)]
+//======================================================================================================
+// Cross-sectional labels normalize/rank returns ACROSS symbols at each
+// timestamp. Today's engine is single-symbol (BTCUSDT) so the
+// cross-section size = 1 and all 3 metrics DEGENERATE to identity:
+//   - rank/(N+1) = 1/2 = 0.5 always (constant)
+//   - (r - median(r))/(MAD + ε) ≈ 0 always (single value = its own median)
+//   - (r/vol) - mean((r/vol)) = 0 always
+//
+// To preserve OPTIONALITY for future v5.16+ multi-symbol port, the
+// Compute fns return raw `future_return` for now. The CS aggregation
+// (rank, median, mean) lives at BacktestResults level when multi-symbol
+// streaming lands. Today, training on CS_* in single-symbol mode
+// produces identical models to FORWARD_PNL — operator should be aware
+// (see engine.cfg.example v5.14.5.A note).
+//
+// CALLER convention: same LabelFn signature as existing labels (matches
+// LabelFn typedef at LabelFunctions.hpp:~290). tp_pct/sl_pct ignored
+// (no barriers); extra_param = forward_ticks for horizon.
+//
+// FUTURE-THINKING (v5.16+ multi-symbol activation):
+// - CS_PERCENTILE_RANK: replace `return future_return` with cross-section
+//   rank lookup at BacktestResults level. Plumbing here is correct.
+// - CS_ZSCORE_ROBUST: same, with median + MAD computed over symbols.
+// - CS_VOLSCALED_DEMEANED: vol estimate sourced from per-symbol rolling
+//   stats; mean computed across symbols.
+// All 3 maintain identical signatures + return types; aggregation step
+// is downstream of these Compute fns.
+
+// CS Percentile Rank — single-symbol degenerate path returns raw return.
+static float Label_CSPercentileRank(const HistoricalTick *ticks, int tick_idx, int total_ticks,
+                                      double sample_price, double /*tp_pct*/, double /*sl_pct*/,
+                                      int extra_param) {
+    int forward_ticks = (extra_param > 0) ? extra_param : 100;
+    if (tick_idx + forward_ticks >= total_ticks) return NAN;
+    if (sample_price <= 0.0) return NAN;
+    double future_return = (ticks[tick_idx + forward_ticks].price - sample_price) / sample_price;
+    return (float)future_return;
+}
+
+// CS Robust Z-Score — single-symbol degenerate path returns raw return.
+static float Label_CSZScoreRobust(const HistoricalTick *ticks, int tick_idx, int total_ticks,
+                                    double sample_price, double /*tp_pct*/, double /*sl_pct*/,
+                                    int extra_param) {
+    int forward_ticks = (extra_param > 0) ? extra_param : 100;
+    if (tick_idx + forward_ticks >= total_ticks) return NAN;
+    if (sample_price <= 0.0) return NAN;
+    double future_return = (ticks[tick_idx + forward_ticks].price - sample_price) / sample_price;
+    return (float)future_return;
+}
+
+// CS Vol-Scaled Demeaned — single-symbol degenerate path returns raw return.
+static float Label_CSVolScaledDemeaned(const HistoricalTick *ticks, int tick_idx, int total_ticks,
+                                         double sample_price, double /*tp_pct*/, double /*sl_pct*/,
+                                         int extra_param) {
+    int forward_ticks = (extra_param > 0) ? extra_param : 100;
+    if (tick_idx + forward_ticks >= total_ticks) return NAN;
+    if (sample_price <= 0.0) return NAN;
+    double future_return = (ticks[tick_idx + forward_ticks].price - sample_price) / sample_price;
+    return (float)future_return;
 }
 
 //======================================================================================================
