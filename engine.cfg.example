@@ -149,6 +149,28 @@ max_hold_ticks=50000            # close after this many ticks (~4-5 hours at 3 t
 min_hold_gain_pct=0.10          # only time-exit if gain < this % (0.10 = 0.1%)
 
 #==============================================================================
+# v5.13.0 — SELL-SIDE ML PREDICTION (Path 3 architecture)
+#==============================================================================
+# Optional sell-side ML predictor that runs alongside buy-side. When enabled
+# AND exit_predictor models are loaded (via exit_signal_model_dir or auto-
+# detect from cfg.ml_model_dir + naming convention), the slow-path body runs
+# inference on every rebuild cycle; if blended exit-probability exceeds
+# exit_threshold AND any positions are open on the core's slot(s), an early
+# MARKET_SELL is fired via OMS_PushSubmit. Hot path UNTOUCHED. Per-slot
+# attribution flags are populated on the OMS for the v5.13.4 sell-side bandit.
+# Default cfg (use_exit_model=0): ~5ns slow-path overhead per cycle.
+
+use_exit_model=0                # 0=off (default), 1=on
+exit_threshold=0.6              # blended exit-probability above which to fire (0.0-1.0)
+exit_signal_model_dir=          # optional explicit dir; empty = auto-detect from ml_model_dir
+
+# v5.13.0.B — calibration log. Records every exit fill (predicted + natural)
+# with its predicted probability, realized PnL bps, and was_win flag. Operator
+# post-processes the CSV offline to compute Brier score, ROC AUC, precision-
+# recall. Default empty = disabled.
+calibration_log_path=
+
+#==============================================================================
 # REGIME DETECTION
 #==============================================================================
 # classifies market as RANGING (mean reversion), TRENDING (momentum), or VOLATILE (pause)

@@ -17262,6 +17262,192 @@ e3_skip_load:;
         tt::OrderManager_Shutdown(&oms);
     }
 
+    // ===================================================================
+    // v5.13.0.B/C — sell-side ML exit-prediction + calibration logging
+    // ===================================================================
+    printf("\n--- v5.13.0: sell-side ML cfg + per-slot tracking + calibration ---\n");
+    {
+        using namespace tt;
+
+        // === cfg defaults ===
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.13.0.A: cfg.use_exit_model defaults to 0",
+              cfg.use_exit_model == 0);
+        check("v5.13.0.A: cfg.exit_threshold defaults to 0.6",
+              FPN_ToDouble(cfg.exit_threshold) > 0.59 &&
+              FPN_ToDouble(cfg.exit_threshold) < 0.61);
+        check("v5.13.0.A: cfg.exit_signal_model_dir defaults to empty",
+              cfg.exit_signal_model_dir[0] == '\0');
+        check("v5.13.0.B: cfg.calibration_log_path defaults to empty",
+              cfg.calibration_log_path[0] == '\0');
+
+        // === SHALT_EXIT_PREDICTED registry sanity ===
+        check("v5.13.0.B: SHALT_EXIT_PREDICTED < NUM_SHALT_CODES",
+              SHALT_EXIT_PREDICTED < NUM_SHALT_CODES);
+        check("v5.13.0.B: SHALT_SHORT_NAMES[SHALT_EXIT_PREDICTED] == 'exit-predicted'",
+              strcmp(SHALT_SHORT_NAMES[SHALT_EXIT_PREDICTED],
+                     "exit-predicted") == 0);
+    }
+
+    printf("\n--- v5.13.0.B: OMS per-slot exit-predictor tracking ---\n");
+    {
+        using namespace tt;
+        OrderManagerState<64> oms;
+        ExchangeAdapter<64> empty_adapter{};
+        OrderManager_Init(&oms, empty_adapter, /*live_trading=*/0,
+                          FPN_FromDouble<64>(10000.0),
+                          FPN_FromDouble<64>(0.001));
+
+        // === Init defaults ===
+        int all_zero = 1;
+        for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; ++i) {
+            if (oms.last_exit_was_predicted[i] != 0) { all_zero = 0; break; }
+            if (oms.last_exit_predicted_p[i] != 0.0) { all_zero = 0; break; }
+        }
+        check("v5.13.0.B: last_exit_was_predicted[] defaults all-zero post-Init",
+              all_zero);
+        check("v5.13.0.B: last_exit_predicted_p[] defaults all-zero post-Init",
+              all_zero);  // same loop checks both
+        check("v5.13.0.B: calibration_log_file defaults to nullptr",
+              oms.calibration_log_file == nullptr);
+
+        // === Per-slot writes round-trip ===
+        oms.last_exit_was_predicted[5] = 1;
+        oms.last_exit_predicted_p[5] = 0.72;
+        check("v5.13.0.B: per-slot write last_exit_was_predicted[5]=1",
+              oms.last_exit_was_predicted[5] == 1);
+        check("v5.13.0.B: per-slot write last_exit_predicted_p[5]=0.72",
+              oms.last_exit_predicted_p[5] > 0.71 &&
+              oms.last_exit_predicted_p[5] < 0.73);
+        check("v5.13.0.B: adjacent slots untouched (slot 4)",
+              oms.last_exit_was_predicted[4] == 0 &&
+              oms.last_exit_predicted_p[4] == 0.0);
+        check("v5.13.0.B: adjacent slots untouched (slot 6 — partials leg-B sibling)",
+              oms.last_exit_was_predicted[6] == 0 &&
+              oms.last_exit_predicted_p[6] == 0.0);
+
+        OrderManager_Shutdown(&oms);
+    }
+
+    printf("\n--- v5.13.0.B: OrderManager_OpenCalibrationLog ---\n");
+    {
+        using namespace tt;
+        OrderManagerState<64> oms;
+        ExchangeAdapter<64> empty_adapter{};
+        OrderManager_Init(&oms, empty_adapter, 0,
+                          FPN_FromDouble<64>(10000.0),
+                          FPN_FromDouble<64>(0.001));
+
+        // === Empty path → no-op success ===
+        int rv_empty = OrderManager_OpenCalibrationLog(&oms, "");
+        check("v5.13.0.B: OpenCalibrationLog('') returns 0 (disabled, not error)",
+              rv_empty == 0);
+        check("v5.13.0.B: OpenCalibrationLog('') leaves file null",
+              oms.calibration_log_file == nullptr);
+
+        // === Valid path → file opens, header written ===
+        const char* path = "/tmp/v5_13_0_calibration_test.csv";
+        std::remove(path);  // ensure clean state
+        int rv_open = OrderManager_OpenCalibrationLog(&oms, path);
+        check("v5.13.0.B: OpenCalibrationLog(valid_path) returns 0",
+              rv_open == 0);
+        check("v5.13.0.B: OpenCalibrationLog(valid_path) populates FILE*",
+              oms.calibration_log_file != nullptr);
+
+        OrderManager_Shutdown(&oms);
+        check("v5.13.0.B: Shutdown closes calibration_log_file",
+              oms.calibration_log_file == nullptr);
+
+        // === Header row written ===
+        FILE* fp = std::fopen(path, "r");
+        check("v5.13.0.B: calibration log file exists post-Shutdown", fp != nullptr);
+        if (fp) {
+            char buf[256];
+            char* got = std::fgets(buf, sizeof(buf), fp);
+            check("v5.13.0.B: fgets header returns non-null", got != nullptr);
+            // header begins with "timestamp_us"
+            check("v5.13.0.B: header row starts with 'timestamp_us'",
+                  got && strncmp(buf, "timestamp_us", 12) == 0);
+            check("v5.13.0.B: header includes 'predicted_p' column",
+                  got && strstr(buf, "predicted_p") != nullptr);
+            check("v5.13.0.B: header includes 'exit_predicted_flag' column",
+                  got && strstr(buf, "exit_predicted_flag") != nullptr);
+            std::fclose(fp);
+        }
+        std::remove(path);  // cleanup
+    }
+
+    printf("\n--- v5.13.0.B: CoreContext sell-side prediction fields ---\n");
+    {
+        using namespace tt;
+        EventLoopState<64> state;
+        OrderManagerState<64> oms;
+        ExchangeAdapter<64> empty_adapter{};
+        OrderManager_Init(&oms, empty_adapter, 0,
+                          FPN_FromDouble<64>(10000.0),
+                          FPN_FromDouble<64>(0.001));
+        EventLoopState_Init(&state, &oms);
+
+        // === Init defaults ===
+        check("v5.13.0.B: cores[0].last_exit_prediction defaults to 0.0",
+              state.cores[0].last_exit_prediction == 0.0);
+        check("v5.13.0.B: cores[0].last_exit_dominant_horizon defaults to -1",
+              state.cores[0].last_exit_dominant_horizon == -1);
+        check("v5.13.0.B: cores[7].last_exit_prediction defaults to 0.0 (last core)",
+              state.cores[7].last_exit_prediction == 0.0);
+
+        // === Per-core writes round-trip ===
+        state.cores[2].last_exit_prediction = 0.81;
+        state.cores[2].last_exit_dominant_horizon = 1;
+        check("v5.13.0.B: per-core write last_exit_prediction[2]=0.81",
+              state.cores[2].last_exit_prediction > 0.80 &&
+              state.cores[2].last_exit_prediction < 0.82);
+        check("v5.13.0.B: per-core write last_exit_dominant_horizon[2]=1",
+              state.cores[2].last_exit_dominant_horizon == 1);
+        check("v5.13.0.B: adjacent cores untouched (core 1)",
+              state.cores[1].last_exit_prediction == 0.0 &&
+              state.cores[1].last_exit_dominant_horizon == -1);
+        check("v5.13.0.B: adjacent cores untouched (core 3)",
+              state.cores[3].last_exit_prediction == 0.0 &&
+              state.cores[3].last_exit_dominant_horizon == -1);
+
+        OrderManager_Shutdown(&oms);
+    }
+
+    printf("\n--- v5.13.0.B: cfg parser — exit-side fields ---\n");
+    {
+        using namespace tt;
+
+        // Round-trip cfg fields through the parser. Use a temp cfg + a
+        // synthetic cfg string fed line-by-line.
+        const char* tmp_cfg = "/tmp/v5_13_0_cfg_parser_test.cfg";
+        FILE* cfp = std::fopen(tmp_cfg, "w");
+        check("v5.13.0.B: cfg parser test fopen works", cfp != nullptr);
+        if (cfp) {
+            std::fprintf(cfp,
+                "use_exit_model=1\n"
+                "exit_threshold=0.75\n"
+                "exit_signal_model_dir=/path/to/exit_models\n"
+                "calibration_log_path=/tmp/calib_out.csv\n"
+                "horizon_list=1000\n");  // any other valid field
+            std::fclose(cfp);
+
+            ControllerConfig<64> parsed_cfg = ControllerConfig_Load<64>(tmp_cfg);
+            check("v5.13.0.B: parsed use_exit_model == 1",
+                  parsed_cfg.use_exit_model == 1);
+            check("v5.13.0.B: parsed exit_threshold ~= 0.75",
+                  FPN_ToDouble(parsed_cfg.exit_threshold) > 0.74 &&
+                  FPN_ToDouble(parsed_cfg.exit_threshold) < 0.76);
+            check("v5.13.0.B: parsed exit_signal_model_dir matches",
+                  strcmp(parsed_cfg.exit_signal_model_dir,
+                         "/path/to/exit_models") == 0);
+            check("v5.13.0.B: parsed calibration_log_path matches",
+                  strcmp(parsed_cfg.calibration_log_path,
+                         "/tmp/calib_out.csv") == 0);
+            std::remove(tmp_cfg);
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
