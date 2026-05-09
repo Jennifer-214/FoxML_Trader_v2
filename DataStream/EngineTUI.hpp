@@ -1068,6 +1068,12 @@ struct TUISnapshot {
         double   ml_last_confidence;   // ConfidenceScorer_Compute result [0, 1]
         double   ml_confidence_ic;     // RollingIC value for tooltip / debug
         double   ml_confidence_rmse;   // RollingRMSE value
+        // v5.14.1.G — portfolio turnover diagnostic. Average symmetric-
+        // difference ratio across the rolling window of top-K arm picks.
+        // 0.0 = stable convictions (same top-3 every cycle); 1.0 = thrashing
+        // (top picks fully shift each cycle). Populated by per-core
+        // RollingTurnover ring on slow-path; published here for TUI display.
+        double   ml_portfolio_turnover; // avg turnover ∈ [0, 1] across window
         double   ml_active_prediction; // prediction at fill time of open position (0 if no open pos)
         // v5.13.6 — sell-side ML prediction (parity-check Section J observability gap).
         // Per-cycle blended exit_predictor probability (0 when use_exit_model

@@ -565,6 +565,11 @@ static inline void TUI_CopySnapshotSharded(
             snap->per_core[i].ml_confidence_ic   = ConfidenceScorer_ComputeICVariant(
                 &state->cores[i].confidence, cfg ? cfg->confidence_ic_variant : 0);
             snap->per_core[i].ml_confidence_rmse = RollingRMSE_Compute(&state->cores[i].confidence.rmse);
+            // v5.14.1.G — portfolio turnover. Reads per-core RollingTurnover
+            // ring; ~500ns at window=100 (popcount-based; within slow-path
+            // budget). HOT_PATH_CHANGELOG entry committed in this ship.
+            snap->per_core[i].ml_portfolio_turnover =
+                RollingTurnover_Compute(&state->cores[i].turnover);
             // v5.9.0b — ML observability extensions. Single-writer (slow path)
             // → snapshot read; no race. Counters are uint32 monotonic.
             snap->per_core[i].ml_model_load_failed       = (uint8_t)state->cores[i].model_load_failed;

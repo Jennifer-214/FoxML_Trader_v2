@@ -4201,6 +4201,135 @@ int main() {
               ic > 0.99);  // Spearman returns 1.0 for monotonic; Pearson would be ~0.92
     }
 
+    // ----- v5.14.1.G: Portfolio turnover diagnostic ------------------------------------------------
+    // Closes original v5.14.1 plan's missing .G sub-tag. RollingTurnover
+    // tracks symmetric-difference ratio of top-K arm picks across rolling
+    // window. Per-core; ephemeral (NOT in PortfolioController fwrite path).
+    printf("\n--- v5.14.1.G: portfolio turnover ---\n");
+    {
+        // Test 1 — Init defaults sane
+        RollingTurnover rt;
+        RollingTurnover_Init(&rt, 100, 3);
+        check("v5.14.1.G Init: window = 100",
+              rt.window == 100);
+        check("v5.14.1.G Init: topk = 3",
+              rt.topk == 3);
+        check("v5.14.1.G Init: count starts 0",
+              rt.count == 0);
+        check("v5.14.1.G Init: head starts 0",
+              rt.head == 0);
+    }
+    {
+        // Test 2 — Init clamps invalid inputs
+        RollingTurnover rt;
+        RollingTurnover_Init(&rt, 999999, 99);  // both over-bounds
+        check("v5.14.1.G Init: window clamped to MAX_WINDOW",
+              rt.window == ROLLING_TURNOVER_MAX_WINDOW);
+        check("v5.14.1.G Init: topk clamped to MAX_TOPK (8)",
+              rt.topk == 8);
+        RollingTurnover_Init(&rt, 0, 0);  // both under-bounds
+        check("v5.14.1.G Init: window clamped up from 0 to 2",
+              rt.window == 2);
+        check("v5.14.1.G Init: topk clamped up from 0 to 1",
+              rt.topk == 1);
+    }
+    {
+        // Test 3 — topk_mask_from_weights: descending weights → top-K mask
+        // weights = [0.1, 0.4, 0.05, 0.3, 0.15] → top-3 by value: 1, 3, 4
+        // → mask bits 1+3+4 = 0b11010 = 0x1A = 26
+        double w[5] = {0.1, 0.4, 0.05, 0.3, 0.15};
+        uint8_t mask = topk_mask_from_weights(w, 5, 3);
+        check("v5.14.1.G mask: top-3 of 5 weights → correct bits set",
+              mask == 0x1A);  // bits 1, 3, 4 set
+        // Verify popcount = 3
+        check("v5.14.1.G mask: popcount = topk",
+              __builtin_popcount(mask) == 3);
+    }
+    {
+        // Test 4 — topk_mask_from_weights: K >= N → all-arms mask
+        double w[3] = {0.5, 0.3, 0.2};
+        uint8_t mask = topk_mask_from_weights(w, 3, 5);  // K > N
+        check("v5.14.1.G mask: K >= N → all bits set",
+              mask == 0x07);  // bits 0, 1, 2 set
+    }
+    {
+        // Test 5 — Stable picks (same top-3 every push) → turnover ≈ 0
+        RollingTurnover rt;
+        RollingTurnover_Init(&rt, 50, 3);
+        for (int i = 0; i < 10; i++) {
+            RollingTurnover_Push(&rt, 0x07);  // same top-3 mask
+        }
+        double avg = RollingTurnover_Compute(&rt);
+        check("v5.14.1.G stable: identical masks → turnover = 0",
+              avg == 0.0);
+    }
+    {
+        // Test 6 — Random alternating picks → high turnover
+        // Alternate fully-disjoint masks (top-3 = {0,1,2} vs {3,4,5})
+        RollingTurnover rt;
+        RollingTurnover_Init(&rt, 50, 3);
+        for (int i = 0; i < 10; i++) {
+            RollingTurnover_Push(&rt, (i % 2 == 0) ? 0x07 : 0x38);  // disjoint top-3 sets
+        }
+        double avg = RollingTurnover_Compute(&rt);
+        // |∆| = 6 (all 6 bits differ); divide by topk*2 = 6 → 1.0
+        check("v5.14.1.G thrashing: disjoint masks → turnover = 1.0",
+              fabs(avg - 1.0) < 1e-9);
+    }
+    {
+        // Test 7 — Cold-start: count < 2 → turnover = 0
+        RollingTurnover rt;
+        RollingTurnover_Init(&rt, 50, 3);
+        check("v5.14.1.G cold: empty ring → Compute = 0",
+              RollingTurnover_Compute(&rt) == 0.0);
+        RollingTurnover_Push(&rt, 0x07);
+        check("v5.14.1.G cold: 1 push → Compute still 0 (need ≥2)",
+              RollingTurnover_Compute(&rt) == 0.0);
+    }
+    {
+        // Test 8 — Push returns just-computed turnover
+        RollingTurnover rt;
+        RollingTurnover_Init(&rt, 50, 3);
+        double t1 = RollingTurnover_Push(&rt, 0x07);
+        check("v5.14.1.G push: first push returns 0 (no prior to diff)",
+              t1 == 0.0);
+        double t2 = RollingTurnover_Push(&rt, 0x07);
+        check("v5.14.1.G push: same mask → returns 0",
+              t2 == 0.0);
+        double t3 = RollingTurnover_Push(&rt, 0x38);
+        // Diff = 6 bits / (topk*2 = 6) = 1.0
+        check("v5.14.1.G push: disjoint mask → returns 1.0",
+              fabs(t3 - 1.0) < 1e-9);
+        check("v5.14.1.G push: last_turnover field updated",
+              fabs(rt.last_turnover - 1.0) < 1e-9);
+    }
+    {
+        // Test 9 — Cfg defaults
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.14.1.G cfg default: window = 100",
+              cfg.confidence_turnover_window == 100);
+        check("v5.14.1.G cfg default: topk = 3",
+              cfg.confidence_turnover_topk == 3);
+    }
+    {
+        // Test 10 — Cfg parser
+        char tmp_cfg[] = "/tmp/foxml_v5_14_1_g_cfg_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        if (fd >= 0) {
+            const char* contents =
+                "confidence_turnover_window=200\n"
+                "confidence_turnover_topk=5\n";
+            write(fd, contents, strlen(contents));
+            close(fd);
+            ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmp_cfg);
+            check("v5.14.1.G cfg parser: window = 200",
+                  cfg.confidence_turnover_window == 200);
+            check("v5.14.1.G cfg parser: topk = 5",
+                  cfg.confidence_turnover_topk == 5);
+            unlink(tmp_cfg);
+        }
+    }
+
     // ----- v5.14.1.E.E.B: STAMP_CFG_AUTOPOPULATE macro tests ---------------------------------------
     // Verifies the X-macro auto-populate eliminates the v5.9.5b
     // production-caller field-population gap class. With this macro, adding
