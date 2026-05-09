@@ -47,6 +47,8 @@
 #include "../MemHeaders/RunHistory.hpp"                  // v5.3.2 Phase C — JSONL append-only run history
 #include "../MemHeaders/HealthLog.hpp"                   // v5.4.0 Phase 0.1 — structured operational diagnostic log
 #include "../MemHeaders/BitmapMacros.hpp"                // v5.14.8.A.0.b — reusable BITMAP_* API for bit-packed flag accessors
+#include "../ML_Headers/StampBoundModelConstRegistry.hpp"  // v5.14.8.A.0.b — registry tests + presence column dispatch
+#include <type_traits>                                   // v5.14.8.A.0.b — std::is_array_v / std::extent_v for char-array dispatch
 #include "../Strategies/StrategyLifecycle.hpp"           // v5.4.0 Phase 1.2 — Strategy_InitPerCore / FreePerCore
 
 using namespace std;
@@ -20615,6 +20617,97 @@ e3_skip_load:;
         BITMAP_ATOMIC_SET(shared_flags, BITMAP_BIT_U64(3));
         check("v5.14.8.A.0.b: BITMAP_ATOMIC_ANY multi-flag",
               BITMAP_ATOMIC_ANY(shared_flags, BITMAP_BIT_U64(3) | BITMAP_BIT_U64(4)));
+    }
+
+    // ==================================================================
+    // v5.14.8.A.0.b — Registry extensibility loop tests (Check 26)
+    // ==================================================================
+    // Verifies FOREACH_STAMP_BOUND_MODEL_CONST data is shaped correctly.
+    // Catches accidental row deletion / count regression during refactors.
+    // Per Check 21 (test count fragility): use `>=` instead of literal `==`
+    // so future registry growth doesn't break the test.
+    {
+        // Total typed-value entries: 22 original (v5.14.8.A.1) + 3 re-added
+        // (v5.14.8.A.0.b.3: feature_scaler_present + scaler_sha256 +
+        // model_num_outputs) = 25 today. Future v5.14.8.D adds 5 more (32 total).
+        check("v5.14.8.A.0.b: FOREACH_STAMP_BOUND_MODEL_CONST has >= 25 entries",
+              FOREACH_STAMP_BOUND_MODEL_CONST_COUNT >= 25);
+
+        // Group count: 6 today (inference_cfg, scaler, fees, xgb_hyperparams,
+        // grid_member_count_group, label_params).
+        check("v5.14.8.A.0.b: FOREACH_STAMP_BOUND_MODEL_CONST_GROUPS has >= 6 entries",
+              FOREACH_STAMP_BOUND_MODEL_CONST_GROUP_COUNT >= 6);
+
+        // Standalone count: 7 today (bandit, training_poll_interval,
+        // model_num_outputs, build_flags_hash, label_registry_hash,
+        // feature_mask, xgb_train_nthread).
+        int standalone_count = 0;
+        #define X(name, doc) standalone_count++;
+        FOREACH_STAMP_BOUND_MODEL_CONST_STANDALONE(X)
+        #undef X
+        check("v5.14.8.A.0.b: FOREACH_STAMP_BOUND_MODEL_CONST_STANDALONE has >= 7 entries",
+              standalone_count >= 7);
+    }
+    {
+        // Token-paste dispatch shape verification: STAMP_HANDLE_GEN_INCLUDE
+        // expands to "type name;" (struct-member declaration); SKIP_HANDLE
+        // expands to nothing. We verify by constructing a test struct that
+        // uses the dispatch + asserting member presence/absence at compile
+        // time.
+        struct DispatchTest {
+            STAMP_HANDLE_GEN_INCLUDE(included_field, int)        // → int included_field;
+            STAMP_HANDLE_GEN_SKIP_HANDLE(skipped_field, int)     // → (nothing)
+        };
+        DispatchTest dt{};
+        dt.included_field = 42;
+        check("v5.14.8.A.0.b: STAMP_HANDLE_GEN_INCLUDE produces struct member",
+              dt.included_field == 42);
+        // SKIP_HANDLE produces no member; can't test for absence directly,
+        // but if it had produced a member, the struct would have an extra
+        // field. Verified by sizeof check vs expected (1 int field):
+        check("v5.14.8.A.0.b: STAMP_HANDLE_GEN_SKIP_HANDLE produces NO struct member",
+              sizeof(DispatchTest) == sizeof(int));
+    }
+    {
+        // Registry walk correctness: FOREACH_STAMP_BOUND_MODEL_CONST(X) with
+        // a custom X that counts entries by presence kind. Verifies all
+        // 25 entries reach the walk + presence column is parsed correctly.
+        int include_count = 0;
+        int skip_handle_count = 0;
+        #define COUNT_INCLUDE(name, type) include_count++;
+        #define COUNT_SKIP_HANDLE(name, type) skip_handle_count++;
+        #define X(name, group, presence, type, fmt, def, get, when, doc) \
+            COUNT_##presence(name, type)
+        FOREACH_STAMP_BOUND_MODEL_CONST(X)
+        #undef X
+        #undef COUNT_INCLUDE
+        #undef COUNT_SKIP_HANDLE
+        // 19 INCLUDE + 6 SKIP_HANDLE = 25 total. Use >= so future growth
+        // doesn't break the test (per Check 21).
+        check("v5.14.8.A.0.b: registry walks >= 19 INCLUDE entries",
+              include_count >= 19);
+        check("v5.14.8.A.0.b: registry walks >= 6 SKIP_HANDLE entries",
+              skip_handle_count >= 6);
+        check("v5.14.8.A.0.b: total walk count matches FOREACH_STAMP_BOUND_MODEL_CONST_COUNT",
+              (include_count + skip_handle_count) == FOREACH_STAMP_BOUND_MODEL_CONST_COUNT);
+    }
+    {
+        // tt:: namespace string-field type aliases verified at compile time.
+        // std::is_array_v + std::extent_v should resolve correctly so the
+        // AUTOPOPULATE if-constexpr dispatch picks the strncpy branch.
+        static_assert(std::is_array_v<tt::stamp_str_16>,
+                      "v5.14.8.A.0.b: tt::stamp_str_16 must be array type for if-constexpr dispatch");
+        static_assert(std::is_array_v<tt::stamp_str_65>,
+                      "v5.14.8.A.0.b: tt::stamp_str_65 must be array type for if-constexpr dispatch");
+        static_assert(std::extent_v<tt::stamp_str_16> == 16,
+                      "v5.14.8.A.0.b: tt::stamp_str_16 extent must be 16");
+        static_assert(std::extent_v<tt::stamp_str_65> == 65,
+                      "v5.14.8.A.0.b: tt::stamp_str_65 extent must be 65");
+        // Negative cases: scalar types don't pass is_array_v (sanity).
+        static_assert(!std::is_array_v<int>,
+                      "v5.14.8.A.0.b: int must NOT be array (sanity)");
+        check("v5.14.8.A.0.b: tt::stamp_str_N typedefs verified at compile time",
+              true);  // static_asserts above did the actual checking
     }
 
     printf("\n======================================\n");
