@@ -859,6 +859,13 @@ struct EnsembleModelZoo {
     PredictionRecord reward_ring[REWARD_RING_SIZE];
     int reward_ring_head;             // next write slot
     uint64_t predict_call_count;      // monotonic predict counter (sets record.predict_call)
+    // v5.14.1.E — exit-side prediction history (parallel to reward_ring).
+    // Populated per-cycle from exit_predictor[i] predictions at the exit
+    // prediction site. Used by Ridge solver when cfg.exit_blender_mode=1
+    // to compute correlation matrix across exit handles. Default 0-init.
+    PredictionRecord exit_reward_ring[REWARD_RING_SIZE];
+    int exit_reward_ring_head;
+    uint64_t exit_predict_call_count;
     // v5.10.0a.G.8 — drift watchdog (perf #3). Per-arm rolling IC tracker;
     // when IC drops below cfg.confidence_ic_floor, demote weight to ~0
     // across all regimes (manual override of bandit's natural learning).
@@ -929,6 +936,10 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     // v5.10.0a.G.8 — reward state init
     memset(ezoo->reward_ring, 0, sizeof(ezoo->reward_ring));
     ezoo->reward_ring_head = 0;
+    // v5.14.1.E — symmetric init for exit-side prediction ring
+    memset(ezoo->exit_reward_ring, 0, sizeof(ezoo->exit_reward_ring));
+    ezoo->exit_reward_ring_head = 0;
+    ezoo->exit_predict_call_count = 0;
     ezoo->predict_call_count = 0;
     memset(ezoo->drift, 0, sizeof(ezoo->drift));
     // v5.10.0a.G.9 — persistence config init (caller fills via _SetSavePath)

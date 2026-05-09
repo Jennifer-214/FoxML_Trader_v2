@@ -1031,7 +1031,10 @@ inline void ML_BuildParameters(
         && ezoo_ex->exit_predictor_count > 0
         && mctx
         && mctx->out_exit_prediction) {
-        float blended = 0.0f;
+        // v5.14.1.E — collect per-handle predictions (used by both the
+        // existing uniform/Ridge blend AND the exit_reward_ring populate
+        // for Ridge correlation history).
+        float per_handle_pred[ENSEMBLE_HORIZON_MAX] = {0};
         int n_loaded = 0;
         int dominant = -1;
         float max_p = -1.0f;
@@ -1040,12 +1043,94 @@ inline void ML_BuildParameters(
             if (!Model_IsLoaded(mh)) continue;
             float p = Model_Predict_Normalized(mh, features, n);
             if (std::isnan(p) || std::isinf(p)) continue;
-            blended += p;
+            per_handle_pred[h] = p;
             n_loaded++;
             if (p > max_p) { max_p = p; dominant = h; }
         }
         if (n_loaded > 0) {
-            *mctx->out_exit_prediction = (double)(blended / (float)n_loaded);
+            // v5.14.1.E — push per-handle predictions into exit_reward_ring
+            // BEFORE blending (mirrors buy-side reward_ring populate at
+            // CoreModelZoo.hpp:1002+). Used by Ridge solver to compute
+            // correlation matrix from prediction history. Cheap: ~50 bytes
+            // memcpy per cycle into a 256-slot ring.
+            int slot = ezoo_ex->exit_reward_ring_head %
+                       EnsembleModelZoo<F>::REWARD_RING_SIZE;
+            auto& rec = ezoo_ex->exit_reward_ring[slot];
+            rec.predict_call = ezoo_ex->exit_predict_call_count;
+            for (int h = 0; h < ezoo_ex->exit_predictor_count; ++h) {
+                rec.predictions[h] = per_handle_pred[h];
+            }
+            ezoo_ex->exit_predict_call_count++;
+            ezoo_ex->exit_reward_ring_head =
+                (ezoo_ex->exit_reward_ring_head + 1) %
+                EnsembleModelZoo<F>::REWARD_RING_SIZE;
+
+            // v5.14.1.E — blend computation. Default cfg.exit_blender_mode=0
+            // → uniform average (pre-v5.14.1.E behavior, bytewise unchanged).
+            // When =1: Ridge override using exit_ridge_state + exit_reward_ring
+            // history. Mirrors v5.14.0 buy-side ridge_within_horizon block at
+            // StrategyParameters.hpp:891-947.
+            double weights[ENSEMBLE_HORIZON_MAX];
+            for (int i = 0; i < ezoo_ex->exit_predictor_count; ++i) {
+                weights[i] = 1.0 / (double)n_loaded;  // uniform default
+            }
+            if (config->exit_blender_mode &&
+                ezoo_ex->exit_predictor_count >= 2) {
+                // Build flat history from exit_reward_ring (last K records)
+                constexpr int RIDGE_HISTORY_DEPTH = 64;
+                float history[RIDGE_HISTORY_DEPTH * ENSEMBLE_HORIZON_MAX];
+                int avail = (int)(ezoo_ex->exit_predict_call_count <
+                                  (uint64_t)RIDGE_HISTORY_DEPTH
+                    ? ezoo_ex->exit_predict_call_count : RIDGE_HISTORY_DEPTH);
+                if (avail >= 2) {
+                    for (int k = 0; k < avail; ++k) {
+                        int ring_idx = (ezoo_ex->exit_reward_ring_head -
+                                        1 - k +
+                                        EnsembleModelZoo<F>::REWARD_RING_SIZE) %
+                                       EnsembleModelZoo<F>::REWARD_RING_SIZE;
+                        for (int i = 0; i < ezoo_ex->exit_predictor_count; ++i) {
+                            history[k * ezoo_ex->exit_predictor_count + i] =
+                                ezoo_ex->exit_reward_ring[ring_idx].predictions[i];
+                        }
+                    }
+                    // Build correlation matrix
+                    RidgeBlender_BuildCorr<F>(
+                        ezoo_ex->exit_ridge_state.corr_matrix,
+                        history, avail, ezoo_ex->exit_predictor_count);
+                    // IC + cost arrays. For exit side, reuse drift[] (per-arm
+                    // IC tracker; populated from exit prediction outcomes
+                    // post-fill via existing v5.13.4 path). Cost stays 0.0
+                    // until v5.15+ live cost-aware tracking lands.
+                    double ic_per_arm[MAX_RIDGE_MODELS]   = {0};
+                    double cost_per_arm[MAX_RIDGE_MODELS] = {0};
+                    for (int i = 0; i < ezoo_ex->exit_predictor_count; ++i) {
+                        // Buy-side uses ezoo->drift[i].ic_avg; exit side has
+                        // its own per-handle drift via ic_avg_exit[] when
+                        // available. Default to 0 if not yet tracked
+                        // (Ridge will floor to ridge_min_ic_floor anyway).
+                        ic_per_arm[i] = 0.0;
+                    }
+                    // Solve. Cholesky failure → fallback_to_uniform=1 +
+                    // uniform 1/N weights (safe).
+                    int rc = RidgeBlender_Compute<F>(
+                        &ezoo_ex->exit_ridge_state,
+                        ic_per_arm, cost_per_arm, ezoo_ex->exit_predictor_count,
+                        FPN_ToDouble(config->ridge_lambda),
+                        FPN_ToDouble(config->ridge_cost_penalty),
+                        FPN_ToDouble(config->ridge_min_ic_floor));
+                    (void)rc;  // diagnostic via fallback_to_uniform
+                    for (int i = 0; i < ezoo_ex->exit_predictor_count; ++i) {
+                        weights[i] = FPN_ToDouble(ezoo_ex->exit_ridge_state.w[i]);
+                    }
+                }
+                // If avail < 2: leave uniform weights (Ridge needs ≥2 samples)
+            }
+            // Weighted blend
+            double blended = 0.0;
+            for (int h = 0; h < ezoo_ex->exit_predictor_count; ++h) {
+                blended += weights[h] * (double)per_handle_pred[h];
+            }
+            *mctx->out_exit_prediction = blended;
             if (mctx->out_exit_dominant_horizon)
                 *mctx->out_exit_dominant_horizon = dominant;
         }
