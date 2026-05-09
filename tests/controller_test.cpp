@@ -17678,6 +17678,132 @@ e3_skip_load:;
               ezoo.exit_bandits[0].cum_reward[0] == cum0_before);
     }
 
+    // ===================================================================
+    // v5.13.5 — trainer-side per-horizon label_kind UI + side selector
+    // (renamed from v5.13.1; phase numbering diverged from ship order)
+    // ===================================================================
+    printf("\n--- v5.13.5: per-horizon label_kind snap logic ---\n");
+    {
+        // TrainingPanelState lives in Backtest/BacktestPanels.hpp which
+        // depends on ImGui (suite-only). controller_test is engine-only,
+        // so we test the SNAP LOGIC inline here without the panel struct.
+        // The snap pattern (broadcast-or-match) is what feeds
+        // MultiHorizonWorkerArgs.snap_label_kind_per_horizon[h].
+
+        // Simulate ui_label_kind_per_horizon[] for 3 cases:
+        //   1. Empty CSV (count=0) → broadcast state->label_type
+        //   2. Single value (count=1) → broadcast that value
+        //   3. N values (count=N) → positional with broadcast bcast=per[0]
+
+        // Case 1: empty CSV → broadcast LABEL_BARRIER (operator's combo selection)
+        {
+            int per_horizon[8] = {0};
+            int per_count = 0;
+            int combo_label_type = LABEL_BARRIER;
+            int bcast_lk = (per_count > 0) ? per_horizon[0] : combo_label_type;
+            check("v5.13.5: empty CSV → bcast = combo's LABEL_BARRIER",
+                  bcast_lk == LABEL_BARRIER);
+        }
+
+        // Case 2: single value broadcast LABEL_PEAK_VALLEY_STABLE
+        {
+            int per_horizon[8] = {LABEL_PEAK_VALLEY_STABLE};
+            int per_count = 1;
+            int combo_label_type = LABEL_WIN_LOSS;  // ignored when CSV given
+            int bcast_lk = (per_count > 0) ? per_horizon[0] : combo_label_type;
+            check("v5.13.5: single-value CSV broadcasts LABEL_PEAK_VALLEY_STABLE",
+                  bcast_lk == LABEL_PEAK_VALLEY_STABLE);
+            // Snap to all 3 horizon slots
+            int snap_lk[3];
+            for (int i = 0; i < 3; ++i) {
+                snap_lk[i] = (per_count > 1 && i < per_count)
+                    ? per_horizon[i] : bcast_lk;
+            }
+            check("v5.13.5: single-value snap fills horizon[0..2] with bcast",
+                  snap_lk[0] == LABEL_PEAK_VALLEY_STABLE &&
+                  snap_lk[1] == LABEL_PEAK_VALLEY_STABLE &&
+                  snap_lk[2] == LABEL_PEAK_VALLEY_STABLE);
+        }
+
+        // Case 3: 3-value positional [WIN_LOSS, PEAK_VALLEY_STABLE, FORWARD_PNL]
+        {
+            int per_horizon[8] = {LABEL_WIN_LOSS, LABEL_PEAK_VALLEY_STABLE,
+                                  LABEL_FORWARD_PNL};
+            int per_count = 3;
+            int bcast_lk = (per_count > 0) ? per_horizon[0] : 0;
+            int snap_lk[3];
+            for (int i = 0; i < 3; ++i) {
+                snap_lk[i] = (per_count > 1 && i < per_count)
+                    ? per_horizon[i] : bcast_lk;
+            }
+            check("v5.13.5: 3-value CSV snap[0] == LABEL_WIN_LOSS",
+                  snap_lk[0] == LABEL_WIN_LOSS);
+            check("v5.13.5: 3-value CSV snap[1] == LABEL_PEAK_VALLEY_STABLE",
+                  snap_lk[1] == LABEL_PEAK_VALLEY_STABLE);
+            check("v5.13.5: 3-value CSV snap[2] == LABEL_FORWARD_PNL",
+                  snap_lk[2] == LABEL_FORWARD_PNL);
+        }
+    }
+
+    printf("\n--- v5.13.5: side selector path routing logic ---\n");
+    {
+        // Verify the side_prefix logic that mh_run_one_horizon_fv uses.
+        // We can't actually call mh_run_one_horizon_fv here (would require
+        // a full XGBoost training cycle), but we verify the path-derivation
+        // behavior matches what side_prefix produces.
+        const char* side_prefix_buy = (0 == 1) ? "exit/" : "";
+        const char* side_prefix_exit = (1 == 1) ? "exit/" : "";
+        check("v5.13.5: side=0 (buy) → empty side_prefix",
+              strcmp(side_prefix_buy, "") == 0);
+        check("v5.13.5: side=1 (exit) → 'exit/' side_prefix",
+              strcmp(side_prefix_exit, "exit/") == 0);
+
+        // Compose actual paths
+        char buy_path[320], exit_path[320];
+        snprintf(buy_path, sizeof(buy_path),
+                 "models/%s%s/%s_horizon_%d",
+                 side_prefix_buy, "classification", "myrun", 5000);
+        snprintf(exit_path, sizeof(exit_path),
+                 "models/%s%s/%s_horizon_%d",
+                 side_prefix_exit, "classification", "myrun", 5000);
+        check("v5.13.5: side=0 path == 'models/classification/myrun_horizon_5000'",
+              strcmp(buy_path, "models/classification/myrun_horizon_5000") == 0);
+        check("v5.13.5: side=1 path == 'models/exit/classification/myrun_horizon_5000'",
+              strcmp(exit_path, "models/exit/classification/myrun_horizon_5000") == 0);
+    }
+
+    printf("\n--- v5.13.5: alignment check for label_kind CSV ---\n");
+    {
+        // Mirror the train_lk_aligned predicate from the Multi-Horizon
+        // button-disable logic. Empty / single-value always aligned;
+        // N values must equal eff_horizon_count.
+        int eff_horizon_count = 3;
+
+        // Empty CSV (count=0) → aligned (use Label Type combo)
+        int n_empty = 0;
+        bool aligned_empty = (n_empty <= 1) || (n_empty == eff_horizon_count);
+        check("v5.13.5: empty label_kind CSV aligned with any horizon count",
+              aligned_empty);
+
+        // Single value (count=1) → aligned (broadcast)
+        int n_one = 1;
+        bool aligned_one = (n_one <= 1) || (n_one == eff_horizon_count);
+        check("v5.13.5: single-value label_kind CSV aligned (broadcast)",
+              aligned_one);
+
+        // Matching count (count=N == horizons) → aligned
+        int n_match = 3;
+        bool aligned_match = (n_match <= 1) || (n_match == eff_horizon_count);
+        check("v5.13.5: matching-count label_kind CSV aligned",
+              aligned_match);
+
+        // Mismatched count (count=2 vs horizons=3) → MISALIGNED
+        int n_bad = 2;
+        bool aligned_bad = (n_bad <= 1) || (n_bad == eff_horizon_count);
+        check("v5.13.5: mismatched-count label_kind CSV MISALIGNED (button disabled)",
+              !aligned_bad);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

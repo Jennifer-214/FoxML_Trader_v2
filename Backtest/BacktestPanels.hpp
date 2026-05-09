@@ -2426,6 +2426,28 @@ struct TrainingPanelState {
     volatile int           mh_horizon_complete[8];
     volatile int           mh_horizon_progress[8];
     char                   mh_horizon_status[8][128];
+
+    // v5.13.1.A — sell-side training. Routes Multi-Horizon output to a
+    // side-specific subdirectory: side=0 (buy) leaves the existing
+    // models/<run_subdir>/<run>_horizon_<N>/ path; side=1 (exit) writes
+    // to models/exit/<run_subdir>/<run>_horizon_<N>/. Engine cfg's
+    // exit_signal_model_dir then points at models/exit/<run_subdir>/<run>
+    // for auto-detection of horizon siblings. Default 0 preserves
+    // pre-v5.13.1 behavior.
+    int             ui_training_side;  // 0=buy (default), 1=exit
+
+    // v5.13.1.B — per-horizon label_kind CSV (operator-flagged 2026-05-08).
+    // Broadcast-or-match rule mirrors ui_tp_pct_csv. Empty/single value
+    // falls back to state->label_type (existing behavior). N values map
+    // positionally where N == ui_horizon_count; misalignment disables
+    // Train Multi-Horizon button.
+    //
+    // Format: integer label_type values per LABEL_* enum (LabelFunctions.hpp).
+    // Operator types e.g. "0,2,1" → horizon_0=binary, horizon_1=multi,
+    // horizon_2=regression.
+    char            ui_label_kind_csv[64];
+    int             ui_label_kind_per_horizon[8];   // parsed (broadcast or positional)
+    int             ui_label_kind_per_horizon_count; // 0=empty; 1=broadcast; N=positional
 };
 
 static inline void TrainingPanel_Init(TrainingPanelState *state) {
@@ -2447,6 +2469,12 @@ static inline void TrainingPanel_Init(TrainingPanelState *state) {
     // types comma-separated values to opt in to per-horizon.
     state->ui_tp_pct_csv[0] = '\0';
     state->ui_sl_pct_csv[0] = '\0';
+    // v5.13.1 — sell-side training defaults: side=buy, empty CSV
+    // (broadcast state->label_type to all horizons).
+    state->ui_training_side               = 0;  // 0 = buy
+    state->ui_label_kind_csv[0]           = '\0';
+    state->ui_label_kind_per_horizon_count = 0;
+    for (int i = 0; i < 8; ++i) state->ui_label_kind_per_horizon[i] = LABEL_WIN_LOSS;
     for (int i = 0; i < 8; ++i) state->ui_tp_per_horizon[i] = 0.0f;
     for (int i = 0; i < 8; ++i) state->ui_sl_per_horizon[i] = 0.0f;
     state->ui_tp_per_horizon_count = 0;
@@ -3356,6 +3384,14 @@ struct MultiHorizonWorkerArgs {
     int   snap_min_train;                   // from state->wf_min_train
     float snap_gap_threshold;               // from state->fv_gap_threshold
     float snap_held_out_fraction;           // from state->fv_held_out_fraction
+    // v5.13.1 — sell-side training routing + per-horizon label_kind.
+    // snap_training_side = 0 (buy) leaves existing path bytewise; 1 (exit)
+    // prepends "exit/" to run_subdir → models/exit/<run_subdir>/<run>/.
+    // snap_label_kind_per_horizon[h] overrides snap_label_type per horizon
+    // when its source CSV had >1 entries; otherwise broadcasts the single
+    // value (back-compat with single-uniform Label Type combo).
+    int  snap_training_side;
+    int  snap_label_kind_per_horizon[ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX];
 };
 
 // v5.11.41 — per-horizon FV helper. Extracted from train_multi_horizon_worker_fn
@@ -3386,7 +3422,11 @@ static inline void mh_run_one_horizon_fv(
     float snap_gap_threshold, float snap_held_out_fraction,
     int snap_auto_stamp_enabled,
     const char *snap_auto_stamp_secret,
-    BacktestRunConfig *local_run_cfg)
+    BacktestRunConfig *local_run_cfg,
+    // v5.13.1 — sell-side training. Default 0 preserves pre-v5.13.1 path
+    // for legacy callers. 1 → prepend "exit/" to run_subdir routing
+    // output to models/exit/<run_subdir>/<run>_horizon_<N>/.
+    int training_side = 0)
 {
     snprintf(state->mh_horizon_status[h], 128,
              "h=%d: computing labels...", horizon_ticks);
@@ -3422,12 +3462,26 @@ static inline void mh_run_one_horizon_fv(
                               || label_type == LABEL_REGIME
                               || is_multiclass)
         ? "classification" : (is_regression ? "regression" : "classification");
-    char horizon_dir[300];
+    // v5.13.1.A — sell-side routing. side=0 (buy) leaves the existing
+    // "models/<run_subdir>/<run>_horizon_<N>/" path bytewise. side=1 (exit)
+    // prepends "exit/" so operator's cfg.exit_signal_model_dir can directly
+    // point at "models/exit/<run_subdir>/<run>" for engine auto-detection
+    // of horizon siblings (Path 3 architecture).
+    const char* side_prefix = (training_side == 1) ? "exit/" : "";
+    char horizon_dir[320];
     snprintf(horizon_dir, sizeof(horizon_dir),
-             "models/%s/%s_horizon_%d", run_subdir, run_name, horizon_ticks);
+             "models/%s%s/%s_horizon_%d",
+             side_prefix, run_subdir, run_name, horizon_ticks);
     mkdir("models", 0755);
-    char parent_dir[320];
-    snprintf(parent_dir, sizeof(parent_dir), "models/%s", run_subdir);
+    if (training_side == 1) {
+        // models/exit/ must exist before models/exit/<run_subdir>/.
+        char exit_root[64];
+        snprintf(exit_root, sizeof(exit_root), "models/exit");
+        mkdir(exit_root, 0755);
+    }
+    char parent_dir[340];
+    snprintf(parent_dir, sizeof(parent_dir), "models/%s%s",
+             side_prefix, run_subdir);
     mkdir(parent_dir, 0755);
     mkdir(horizon_dir, 0755);
 
@@ -3679,6 +3733,9 @@ struct MultiHorizonParallelJob {
     int snap_auto_stamp_enabled;
     char snap_auto_stamp_secret[128];
     BacktestRunConfig local_run_cfg;
+    // v5.13.1 — sell-side training routing. Defaults to 0 (buy) so legacy
+    // parallel-mode callers preserve bytewise output paths.
+    int training_side;
 };
 
 static inline void *mh_per_horizon_parallel_worker(void *arg) {
@@ -3703,7 +3760,8 @@ static inline void *mh_per_horizon_parallel_worker(void *arg) {
         job->snap_n_splits, job->snap_buffer_ticks, job->snap_min_train,
         job->snap_gap_threshold, job->snap_held_out_fraction,
         job->snap_auto_stamp_enabled, job->snap_auto_stamp_secret,
-        &job->local_run_cfg);
+        &job->local_run_cfg,
+        job->training_side);
     free(job->isolated_results.labels);
     free(job);
     return NULL;
@@ -3873,7 +3931,13 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
             job->horizon_ticks = horizons[h];
             job->tp_pct = tp_pcts[h];
             job->sl_pct = sl_pcts[h];
-            job->label_type = label_type;
+            // v5.13.1.B — per-horizon label_kind. Click-handler snap
+            // populates each slot with either the per-horizon CSV value
+            // (when N>1 entries given) or the broadcast (single value /
+            // empty CSV). Worker reads array directly.
+            job->label_type = args->snap_label_kind_per_horizon[h];
+            // v5.13.1.A — per-job training_side
+            job->training_side = args->snap_training_side;
             {
                 size_t n = strnlen(run_name, sizeof(job->run_name) - 1);
                 memcpy(job->run_name, run_name, n);
@@ -3936,14 +4000,18 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
             state->mh_current_horizon = horizons[h];
             state->mh_progress = h + 1;
 
+            // v5.13.1.B — per-horizon label_kind from snap (broadcast
+            // already applied at click time when CSV had ≤1 entries).
+            int per_horizon_lk = args->snap_label_kind_per_horizon[h];
             mh_run_one_horizon_fv(
                 state, results, h,
                 horizons[h], tp_pcts[h], sl_pcts[h],
-                label_type, run_name,
+                per_horizon_lk, run_name,
                 snap_n_splits, snap_buffer_ticks, snap_min_train,
                 snap_gap_threshold, snap_held_out_fraction,
                 snap_auto_stamp_enabled, snap_auto_stamp_secret,
-                &run_control->run_config);
+                &run_control->run_config,
+                args->snap_training_side);
 
             FullValidationResults *fv = &state->mh_horizon_fv[h];
             trained++;
@@ -3993,6 +4061,23 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         }
         label_names_built = true;
     }
+    // v5.13.1.A — sell-side training output routing. Operator selects buy
+    // (default; existing path) vs exit (Path 3 sell-side; routes to
+    // models/exit/<run_subdir>/<run>_horizon_<N>/). Engine's
+    // cfg.exit_signal_model_dir then points at the exit subtree for
+    // auto-detection of horizon siblings.
+    static const char* side_names[2] = {"Buy (entry signals)", "Exit (sell signals)"};
+    ImGui::Combo("Training Side", &state->ui_training_side, side_names, 2);
+    ImGui::SetItemTooltip(
+        "Buy: trains entry-signal models (existing default). Output:\n"
+        "  models/<run_subdir>/<run>_horizon_<N>/role.json\n\n"
+        "Exit: trains sell-signal models for v5.13.0 exit_predictor.\n"
+        "Output:\n"
+        "  models/exit/<run_subdir>/<run>_horizon_<N>/role.json\n\n"
+        "Operator must point cfg.exit_signal_model_dir at the\n"
+        "models/exit/<run_subdir>/<run> directory after training to\n"
+        "enable engine-side sell-side ML inference (Path 3 architecture).");
+
     int prev_label_type = state->label_type;
     ImGui::Combo("Label Type", &state->label_type, label_names, LABEL_COUNT);
     // v4.2.2: when label type changes, retarget the default Model Path so it
@@ -4082,6 +4167,48 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                       state->ui_tp_per_horizon, &state->ui_tp_per_horizon_count);
         parse_pct_csv(state->ui_sl_pct_csv,
                       state->ui_sl_per_horizon, &state->ui_sl_per_horizon_count);
+
+        // v5.13.1.B — per-horizon label_kind CSV input. Mirrors TP/SL
+        // CSV pattern: empty → broadcast state->label_type combo;
+        // single value → broadcast that value to all horizons; N values
+        // → positional map to Horizons (CSV) with broadcast-or-match
+        // alignment. Format: integer label_type values per LABEL_*
+        // (LabelFunctions.hpp). Operator types e.g. "0,2,1" →
+        // horizon_0=binary, horizon_1=multiclass, horizon_2=regression.
+        ImGui::InputText("Label Kind CSV",
+                         state->ui_label_kind_csv,
+                         sizeof(state->ui_label_kind_csv));
+        ImGui::SetItemTooltip(
+            "Per-horizon label_kind (integer LABEL_* enum values).\n\n"
+            "Empty: all horizons use the Label Type combo above.\n"
+            "Single value (e.g. '5'): broadcasts to all horizons.\n"
+            "N values (e.g. '0,5,1'): positional map to Horizons CSV.\n"
+            "  N must equal Horizons count or Train Multi-Horizon disables.\n\n"
+            "Use to train heterogeneous mixed-output ensembles in ONE\n"
+            "click: e.g. binary at h=1000, 3-class barrier at h=5000,\n"
+            "regression at h=10000. v5.12.3.B+E mixed-output normalizer\n"
+            "blends them at inference time.\n\n"
+            "Reference: LabelFunctions.hpp label_table[] for the\n"
+            "label_type → display_name mapping.");
+
+        // Parse the label_kind CSV (same pattern as TP/SL CSV).
+        auto parse_int_csv = [](const char* csv, int* out, int* n_out) {
+            int n = 0;
+            const char* p = csv;
+            while (*p && n < 8) {
+                while (*p == ' ' || *p == '\t' || *p == ',') p++;
+                if (!*p) break;
+                char* end = nullptr;
+                long v = strtol(p, &end, 10);
+                if (end == p) break;
+                if (v >= 0 && v < LABEL_COUNT) out[n++] = (int)v;
+                p = end;
+            }
+            *n_out = n;
+        };
+        parse_int_csv(state->ui_label_kind_csv,
+                      state->ui_label_kind_per_horizon,
+                      &state->ui_label_kind_per_horizon_count);
         // Keep label_tp_pct / _sl_pct in sync with index 0 — the
         // backward-compat path for single-horizon Train Model.
         if (state->ui_tp_per_horizon_count > 0)
@@ -4877,8 +5004,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         int train_sl_n = state->ui_sl_per_horizon_count;
         bool train_tp_aligned = (train_tp_n <= 1) || (train_tp_n == eff_horizon_count);
         bool train_sl_aligned = (train_sl_n <= 1) || (train_sl_n == eff_horizon_count);
+        // v5.13.1.B — alignment check for per-horizon label_kind CSV.
+        // Same broadcast-or-match rule as TP/SL CSV.
+        int train_lk_n = state->ui_label_kind_per_horizon_count;
+        bool train_lk_aligned = (train_lk_n <= 1) || (train_lk_n == eff_horizon_count);
         bool mh_can_train = can_train && (eff_horizon_count > 0)
-                            && train_tp_aligned && train_sl_aligned;
+                            && train_tp_aligned && train_sl_aligned
+                            && train_lk_aligned;
         if (!single_horizon_mode) {
         if (!mh_can_train) ImGui::BeginDisabled();
         if (ImGui::Button("Train Multi-Horizon")) {
@@ -4928,6 +5060,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 ? state->ui_tp_per_horizon[0] : state->label_tp_pct;
             float bcast_sl = (state->ui_sl_per_horizon_count > 0)
                 ? state->ui_sl_per_horizon[0] : state->label_sl_pct;
+            // v5.13.1.B — broadcast-or-match for per-horizon label_kind.
+            // Empty CSV / single value → broadcast state->label_type
+            // (which is the existing UI Label Type combo). N values map
+            // positional. Mirrors TP/SL CSV pattern.
+            int bcast_lk = (state->ui_label_kind_per_horizon_count > 0)
+                ? state->ui_label_kind_per_horizon[0] : state->label_type;
             for (int i = 0; i < ControllerConfig<BACKTEST_FP>::HORIZON_LIST_MAX; ++i) {
                 mh_args->snap_horizons[i] = (i < eff_horizon_count)
                     ? eff_horizons[i] : 0;
@@ -4937,7 +5075,13 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 mh_args->snap_sl_pct[i] = (state->ui_sl_per_horizon_count > 1
                                            && i < state->ui_sl_per_horizon_count)
                     ? state->ui_sl_per_horizon[i] : bcast_sl;
+                mh_args->snap_label_kind_per_horizon[i] =
+                    (state->ui_label_kind_per_horizon_count > 1
+                     && i < state->ui_label_kind_per_horizon_count)
+                        ? state->ui_label_kind_per_horizon[i] : bcast_lk;
             }
+            // v5.13.1.A — snapshot side at click time (race-free).
+            mh_args->snap_training_side = state->ui_training_side;
             // v5.11.41 — snap FV/auto-stamp params at click time. Closes
             // the gap where Train Multi-Horizon trained but didn't run WF
             // / held-out / stamp. Now mirrors single-horizon RFV behavior.
