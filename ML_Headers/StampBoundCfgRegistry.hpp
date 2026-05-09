@@ -119,7 +119,13 @@
          FPN_ToDouble(cfg.winsor_pct_low) < FPN_ToDouble(cfg.winsor_pct_high)))                      \
     /* v5.14.1.E — Exit-side blender selector (PARITY drift detection) */                             \
     X(exit_blender_mode,                   int,    "%d",     0,   cfg.exit_blender_mode,            \
-        (cfg.exit_blender_mode != 0))
+        (cfg.exit_blender_mode != 0))                                                                 \
+    /* v5.14.2.E.2 — expected.cfg → stamp body migration. Always emit          */                     \
+    /* (model trained with these values; engine compares at load).             */                     \
+    X(ml_buy_threshold,                    double, "%.17g",  0.0, FPN_ToDouble(cfg.ml_buy_threshold),\
+        1)                                                                                            \
+    X(gap_acceptable_threshold,            double, "%.17g",  0.0, FPN_ToDouble(cfg.gap_acceptable_threshold), \
+        1)
 
 //======================================================================================================
 // [PARSER DISPATCH MACROS]

@@ -4418,8 +4418,8 @@ int main() {
     }
     {
         // Test 3 — Registry count post-.E (was 12 post-D, now 13)
-        check("v5.14.1.E registry: FOREACH_STAMP_BOUND_CFG_COUNT >= 13 (D 12 + E 1)",
-              FOREACH_STAMP_BOUND_CFG_COUNT >= 13);
+        check("v5.14.1.E registry: FOREACH_STAMP_BOUND_CFG_COUNT >= 15 (D 12 + E 1 + v5.14.2.E.2 ml_buy_threshold + gap_acceptable_threshold)",
+              FOREACH_STAMP_BOUND_CFG_COUNT >= 15);
     }
     {
         // Test 4 — EnsembleModelZoo init: exit_ridge_state + exit_reward_ring
