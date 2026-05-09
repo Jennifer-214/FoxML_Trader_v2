@@ -999,13 +999,13 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
             // is a TTY; full-buffered for files — that's a tail -F caveat,
             // not a correctness concern for offline calibration analysis).
         }
-        // v5.13.0.B — clear per-slot exit-predictor attribution post-fill
-        // (single-use per trade; v5.13.4 reward attribution will move
-        // BEFORE the clear when bandit lands).
-        if (pslot >= 0 && pslot < MAX_PORTFOLIO_POSITIONS) {
-            oms->last_exit_was_predicted[pslot] = 0;
-            oms->last_exit_predicted_p[pslot]   = 0.0;
-        }
+        // v5.13.4 — per-slot exit-prediction state DELIBERATELY NOT
+        // cleared here. Calibration log row above already captured what
+        // it needs. Clear is moved to EventLoop_DrainPostFillOneCore
+        // (post-bandit-attribution) so the bandit Update has stable
+        // arm + regime + flag values to read. Clear there is also where
+        // the buy-side ConfidenceScorer + ensemble bandit attribution
+        // run, keeping per-leg exit-side accounting symmetric.
         // v5.1.6 (diagnostic logging): infer exit reason from the relationship
         // between fill_price and the position's TP/SL at close-time.
         //   - TP_HIT:  exit ≥ pos.take_profit_price (hot-path SG TP fired)

@@ -2364,7 +2364,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                  cfg.ensemble_trade_reward_mult,
                                  cfg.confidence_ic_floor,
                                  cfg.confidence_ic_floor_window,
-                                 cfg.auto_kill_on_drift);
+                                 cfg.auto_kill_on_drift,
+                                 // v5.13.4 — sell-side bandit attribution
+                                 cfg.exit_bandit_enabled,
+                                 FPN_ToDouble(cfg.fee_rate_taker));
     };
 
     // v4.7.8: manual force-close requests from the GUI. User clicks a

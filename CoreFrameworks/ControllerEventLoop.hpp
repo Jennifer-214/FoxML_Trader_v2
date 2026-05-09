@@ -1104,7 +1104,13 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                                              // (avg < 0 floor never fires).
                                              double drift_floor                = 0.0,
                                              uint32_t drift_window_seconds     = 86400u,
-                                             int      drift_auto_kill          = 0) {
+                                             int      drift_auto_kill          = 0,
+                                             // v5.13.4 — sell-side bandit reward
+                                             // attribution. Default 0 = disabled
+                                             // (preserves pre-v5.13.4 behavior; legacy
+                                             // test callers using 3-arg form unaffected).
+                                             int      exit_bandit_enabled      = 0,
+                                             double   fee_rate_taker_for_cf    = 0.001) {
     const int partial_on = oms->partial_exit_enabled ? 1 : 0;
     uint16_t my_mask = partial_on
         ? (uint16_t)((1u << (core_id * 2)) | (1u << (core_id * 2 + 1)))
@@ -1351,6 +1357,67 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 }
             }
         }
+
+        // v5.13.4 — sell-side bandit reward attribution. Per-LEG (not
+        // leg-A only) since each slot's exit decision is independent
+        // under partials. Conditions for crediting exit_bandit:
+        //   1. cfg.exit_bandit_enabled
+        //   2. per-slot last_exit_was_predicted captured at submit
+        //   3. NOT a flatten-induced safety event (don't pollute bandit
+        //      with non-strategic exits)
+        //   4. exit_bandits actually initialized (exit models loaded)
+        //   5. captured arm + regime are valid
+        //
+        // Counterfactual reward (basis points relative to entry notional):
+        //   actual_pnl_bps = exit_net_pnl / entry_notional * 10000
+        //   hypothetical_pnl_bps = (tp_pct - 2*fee_rate) * 10000
+        //     where tp_pct = (original_tp - entry_price) / entry_price
+        //   reward = actual - hypothetical
+        // Optimistic assumption: TP would have hit before SL.
+        // Biases bandit AGAINST firing exits (since hypothetical is
+        // usually positive) — operator scales via cfg.exit_bandit_lr.
+        if (exit_bandit_enabled
+            && slot < (int)MAX_PORTFOLIO_POSITIONS
+            && oms->last_exit_was_predicted[slot] == 1
+            && oms->flatten_pending.load(std::memory_order_acquire) == 0
+            && ctx.ensemble_handle) {
+            auto* ezoo = static_cast<EnsembleModelZoo<F>*>(ctx.ensemble_handle);
+            int chosen_arm = (int)oms->last_exit_predicted_arm[slot];
+            int regime     = (int)oms->last_exit_predicted_regime[slot];
+            if (ezoo->initialized_exit_bandits
+                && chosen_arm >= 0
+                && chosen_arm < ezoo->exit_predictor_count
+                && regime >= 0 && regime < NUM_REGIMES) {
+                // Original TP locked at entry — captures the trade's
+                // intended TP target without staleness from later
+                // ratchet writes (those modify take_profit_price not
+                // original_tp).
+                FPN<F> entry_p   = oms->portfolio.positions[slot].entry_price;
+                FPN<F> orig_tp   = oms->portfolio.positions[slot].original_tp;
+                double entry_d   = FPN_ToDouble(entry_p);
+                double orig_tp_d = FPN_ToDouble(orig_tp);
+                if (entry_d > 0.0 && orig_tp_d > entry_d) {
+                    double tp_pct = (orig_tp_d - entry_d) / entry_d;
+                    double hypothetical_pnl_bps =
+                        (tp_pct - 2.0 * fee_rate_taker_for_cf) * 10000.0;
+                    double notional_d = FPN_ToDouble(rec.exit_entry_notional);
+                    double actual_pnl_bps = (notional_d > 0.0)
+                        ? FPN_ToDouble(rec.exit_net_pnl) / notional_d * 10000.0
+                        : 0.0;
+                    double reward_bps = actual_pnl_bps - hypothetical_pnl_bps;
+                    Bandit_Update(&ezoo->exit_bandits[regime],
+                                  chosen_arm, reward_bps);
+                }
+            }
+        }
+        // v5.13.0.B + v5.13.4 — clear per-slot exit-prediction state
+        // post-attribution (single-use per trade).
+        if (slot < (int)MAX_PORTFOLIO_POSITIONS) {
+            oms->last_exit_was_predicted[slot]    = 0;
+            oms->last_exit_predicted_p[slot]      = 0.0;
+            oms->last_exit_predicted_arm[slot]    = -1;
+            oms->last_exit_predicted_regime[slot] = -1;
+        }
     }
     oms->last_closed_mask &= (uint16_t)~my_mask;  // clear only my bits
 }
@@ -1366,12 +1433,20 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
                                      // behavior).
                                      double drift_floor                = 0.0,
                                      uint32_t drift_window_seconds     = 86400u,
-                                     int      drift_auto_kill          = 0) {
+                                     int      drift_auto_kill          = 0,
+                                     // v5.13.4 — sell-side bandit forwarded to
+                                     // OneCore. Default 0/0.001 = disabled +
+                                     // typical taker rate (defensive when cfg
+                                     // unwired in legacy callers).
+                                     int      exit_bandit_enabled      = 0,
+                                     double   fee_rate_taker_for_cf    = 0.001) {
     for (int c = 0; c < state->registered_count; ++c) {
         EventLoop_DrainPostFillOneCore(state, oms, sl_cooldown_cycles, c,
                                          ensemble_trade_reward_mult,
                                          drift_floor, drift_window_seconds,
-                                         drift_auto_kill);
+                                         drift_auto_kill,
+                                         exit_bandit_enabled,
+                                         fee_rate_taker_for_cf);
     }
 }
 
