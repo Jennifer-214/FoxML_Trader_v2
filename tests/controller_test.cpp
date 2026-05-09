@@ -16546,6 +16546,54 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.12.2.B: lazy slow-path rebuild ---\n");
+    {
+        // Phase 2.B of v5.12. Skips RebuildOneCore body when slow_state
+        // hasn't changed materially (small price delta + within
+        // force_period_us). Default cfg.lazy_rebuild_enabled=0 → always
+        // rebuild; existing 1944 tests verify bytewise preservation.
+        // Enabled-mode behavior is integration-tested via replay harness.
+
+        // === Test 1: cfg defaults ===
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.12.2.B: default cfg.lazy_rebuild_enabled == 0",
+              cfg.lazy_rebuild_enabled == 0);
+        check("v5.12.2.B: default cfg.lazy_rebuild_force_period_us == 1_000_000",
+              cfg.lazy_rebuild_force_period_us == 1000000ULL);
+        check("v5.12.2.B: default cfg.lazy_rebuild_price_threshold_pct == 0.0005",
+              std::fabs(FPN_ToDouble(cfg.lazy_rebuild_price_threshold_pct)
+                        - 0.0005) < 1e-9);
+
+        // === Test 2: FPN abs via sign-bit clear (used by lazy predicate) ===
+        FPN<64> a = FPN_FromDouble<64>(100.5);
+        FPN<64> b = FPN_FromDouble<64>(101.0);
+        FPN<64> delta = FPN_Sub(a, b);  // negative
+        check("v5.12.2.B: FPN_Sub(100.5, 101.0) sign == 1 (negative)",
+              delta.sign == 1);
+        FPN<64> abs_delta = delta;
+        abs_delta.sign = 0;
+        check("v5.12.2.B: |delta| via sign-bit clear → magnitude same",
+              FPN_MagEq<64>(abs_delta, delta));
+        check("v5.12.2.B: |delta| sign cleared",
+              abs_delta.sign == 0);
+
+        // === Test 3: relative delta math at threshold boundary ===
+        // |100.5 - 101.0| / 101.0 ≈ 0.00495 > 0.0005 → would trigger rebuild
+        FPN<64> rel = FPN_DivNoAssert(abs_delta, b);
+        check("v5.12.2.B: rel_delta(100.5, 101.0) > 0.0005 threshold",
+              FPN_GreaterThan(rel, cfg.lazy_rebuild_price_threshold_pct));
+
+        // === Test 4: small price change → below threshold ===
+        // 100.04 vs 100.0 → rel_delta = 0.0004 < 0.0005 threshold → SKIP
+        FPN<64> p1 = FPN_FromDouble<64>(100.0);
+        FPN<64> p2 = FPN_FromDouble<64>(100.04);
+        FPN<64> small_delta = FPN_Sub(p2, p1);
+        small_delta.sign = 0;  // abs
+        FPN<64> small_rel = FPN_DivNoAssert(small_delta, p1);
+        check("v5.12.2.B: small price delta (0.04%) below 0.05% threshold",
+              !FPN_GreaterThan(small_rel, cfg.lazy_rebuild_price_threshold_pct));
+    }
+
     printf("\n--- v5.12.1.D: confidence-conditional sizing infra ---\n");
     {
         // Phase 1.D of v5.12. Cfg field + multiplier plumbing in

@@ -118,6 +118,19 @@ struct CoreSlowState {
     // cadence. In per_core_slow this is a producer→slow-path cross-
     // thread read (eventual consistency, x86-acceptable on aligned word).
     FPN<F>                  ema_price;
+
+    // v5.12.2.B — lazy slow-path rebuild bookkeeping. Updated at the
+    // END of every full RebuildOneCore execution. The next RebuildOneCore
+    // call uses these to decide whether to skip the rebuild body when:
+    //   (a) cfg.lazy_rebuild_enabled = 1 AND
+    //   (b) (now_us - us_at_last_rebuild) < cfg.lazy_rebuild_force_period_us AND
+    //   (c) |price_avg - price_at_last_rebuild| / price_at_last_rebuild
+    //       < cfg.lazy_rebuild_price_threshold_pct
+    // When all three hold, RebuildOneCore returns early after marking
+    // pending_params for republish (so v5.12.1.B's publish_tick stays
+    // fresh). Single-writer (this core's slow-path); no atomics.
+    uint64_t                us_at_last_rebuild;
+    FPN<F>                  price_at_last_rebuild;
 };
 
 template <unsigned F>
@@ -134,6 +147,11 @@ inline void CoreSlowState_Init(CoreSlowState<F>* s) {
     LargeTradeState_Init(&s->large_trade_state);
     SpreadState_Init(&s->spread_state);
     s->ema_price = FPN_Zero<F>();
+    // v5.12.2.B — initial values force a full rebuild on the first cycle
+    // (us_at_last_rebuild=0 → time-bound predicate fires; price=0 →
+    // delta predicate fires).
+    s->us_at_last_rebuild = 0;
+    s->price_at_last_rebuild = FPN_Zero<F>();
 }
 
 //======================================================================================================
@@ -1830,6 +1848,44 @@ inline void EventLoop_RebuildOneCore(
     double      current_mid_price,
     int         book_imbalance_blocked,
     uint64_t    now_us = 0) {  // v5.12.1.B clock hoist; 0 = compute internally
+    // v5.12.2.B — lazy rebuild predicate. Evaluated at function entry so
+    // we skip the heavy body when slow_state hasn't changed materially
+    // since last rebuild. Three escape clauses force a full rebuild:
+    //   (1) cfg.lazy_rebuild_enabled == 0 (default; preserves baseline)
+    //   (2) caller didn't pass now_us (legacy + test path) — can't time-bound
+    //   (3) sst is null OR last_rebuild bookkeeping is unset (warmup)
+    // Otherwise check the time-bound + price-delta predicates.
+    if (config->lazy_rebuild_enabled && now_us != 0
+        && state && slot >= 0 && slot < MAX_EXECUTION_CORES) {
+        auto* sst_lazy = state->cores[slot].slow_state;
+        if (sst_lazy && sst_lazy->us_at_last_rebuild != 0
+            && !FPN_IsZero(sst_lazy->price_at_last_rebuild)
+            && rolling) {
+            // Time-bound force: rebuild every force_period_us regardless.
+            uint64_t age_us = (now_us > sst_lazy->us_at_last_rebuild)
+                ? (now_us - sst_lazy->us_at_last_rebuild) : 0;
+            int time_force = (age_us >= config->lazy_rebuild_force_period_us);
+            // Price-delta force: rebuild when |Δprice| / last_price > threshold.
+            FPN<F> price_now = rolling->price_avg;
+            FPN<F> price_last = sst_lazy->price_at_last_rebuild;
+            FPN<F> delta = FPN_Sub(price_now, price_last);
+            // |delta| via direct sign-bit clear (FPN is sign-magnitude).
+            FPN<F> abs_delta = delta;
+            abs_delta.sign = 0;
+            FPN<F> rel_delta = FPN_DivNoAssert(abs_delta, price_last);
+            int price_force = FPN_GreaterThan(rel_delta,
+                config->lazy_rebuild_price_threshold_pct);
+            if (!time_force && !price_force) {
+                // Lazy-skip path. Mark dirty=1 so PushParameters publishes
+                // pending_params with fresh publish_tick (v5.12.1.B
+                // staleness gate stays satisfied). pending_params payload
+                // is unchanged from the last full rebuild — the republish
+                // is purely for tick freshness.
+                state->cores[slot].dirty = 1;
+                return;
+            }
+        }
+    }
     {
         // Single-iteration scope (was inside `for` loop body before extraction).
         // v4.0 per-core overrides: resolve the cfg for this core. Stack-local
@@ -2550,6 +2606,17 @@ inline void EventLoop_RebuildOneCore(
                     FPN_ToDouble(state->cores[slot].pending_params.bg_price_threshold),
                     FPN_ToDouble(rolling->price_avg));
                 state->cores[slot].prev_gate_log_state = packed;
+            }
+        }
+
+        // v5.12.2.B — record the full-rebuild bookkeeping so the next
+        // call's lazy predicate can compare against it. Only reaches here
+        // when we DIDN'T take the lazy-skip path (= a real rebuild ran).
+        if (state && slot >= 0 && slot < MAX_EXECUTION_CORES) {
+            auto* sst_lazy = state->cores[slot].slow_state;
+            if (sst_lazy && rolling) {
+                sst_lazy->us_at_last_rebuild = now_us;
+                sst_lazy->price_at_last_rebuild = rolling->price_avg;
             }
         }
     }

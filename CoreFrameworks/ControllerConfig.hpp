@@ -446,6 +446,20 @@ template <unsigned F> struct ControllerConfig {
   // model is mis-calibrated, leave at 0 (amplifying poor predictions =
   // larger losses).
   int risk_scale_by_confidence;
+  // v5.12.2.B — lazy slow-path rebuild. Skip RebuildOneCore body when
+  // slow_state hasn't changed materially since last rebuild. Estimated
+  // 30-50% of cycles become no-ops on stable regimes; per-cycle savings
+  // ~30-50us (bypassed regime-classify + strategy-build work).
+  // Default 0 = always rebuild (preserves bytewise replay-determinism
+  // baseline). Flip to 1 after parity-check confirms regime histogram
+  // unchanged within tolerance.
+  // force_period_us bounds worst-case missed regime shift (1s = 100
+  // poll_interval cycles at default poll_interval=100). price_threshold_pct
+  // is the per-tick price-delta threshold below which the slow-path cycle
+  // is considered "no material change."
+  int      lazy_rebuild_enabled;             // 0=off (default), 1=on
+  uint64_t lazy_rebuild_force_period_us;     // default 1_000_000 (1s)
+  FPN<F>   lazy_rebuild_price_threshold_pct; // default 0.0005 (0.05%)
   // vol-scaled position sizing
   int vol_sizing_enabled; // 0=disabled, 1=scale qty inversely with volatility
   FPN<F> vol_scale_min; // min scale factor (e.g. 0.25 = never less than 25% of
@@ -1231,6 +1245,11 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.12.1.D — disabled by default; activate only after Phase 4.B
   // paper-test confirms model calibration.
   cfg.risk_scale_by_confidence = 0;
+  // v5.12.2.B — disabled by default; activate after parity-check confirms
+  // regime histogram unchanged within tolerance under enabled mode.
+  cfg.lazy_rebuild_enabled = 0;
+  cfg.lazy_rebuild_force_period_us = 1000000ULL;  // 1 second
+  cfg.lazy_rebuild_price_threshold_pct = FPN_FromDouble<F>(0.0005);  // 0.05%
   for (int i = 0; i < 16; ++i) cfg.core_model_path[i][0] = '\0';    // empty = shared
   for (int i = 0; i < 16; ++i) cfg.core_model_dir[i][0] = '\0';     // empty = use model_path or shared
   // v4.0 per-core overrides — zero in every field = "inherit global".
@@ -1468,6 +1487,16 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     // v5.12.1.D — confidence-conditional sizing infra
     CFG_PARSE_INT(risk_scale_by_confidence)
+    // v5.12.2.B — lazy slow-path rebuild
+    CFG_PARSE_INT(lazy_rebuild_enabled)
+    if (strcmp(key, "lazy_rebuild_force_period_us") == 0) {
+      cfg.lazy_rebuild_force_period_us = (uint64_t)atoll(val);
+      continue;
+    }
+    if (strcmp(key, "lazy_rebuild_price_threshold_pct") == 0) {
+      cfg.lazy_rebuild_price_threshold_pct = FPN_FromDouble<F>(atof(val));
+      continue;
+    }
     CFG_PARSE_PCT(max_exposure_pct)
     CFG_PARSE_PCT(min_hold_gain_pct)
     CFG_PARSE_PCT(regime_r2_threshold)
