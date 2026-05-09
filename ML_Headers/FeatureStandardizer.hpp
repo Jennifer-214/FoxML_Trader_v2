@@ -61,7 +61,12 @@ namespace tt {
 //======================================================================================================
 // Magic number identifies a v5.9.3+ scaler binary. Distinct value chosen so
 // random file headers don't accidentally validate as scaler files.
-static constexpr uint32_t SCALER_MAGIC = 0xFE5C1AE2u;
+// v5.14.1.D — magic bumped from 0xFE5C1AE2 (v0; pre-winsor) to 0xFE5C1AE3
+// (v1; winsor-aware). Surface G discipline at the sidecar level: legacy
+// sidecars refused at load with operator-readable error directing them to
+// regenerate via Run Full Validation. Operator regenerates once.
+static constexpr uint32_t SCALER_MAGIC_V0 = 0xFE5C1AE2u;  // pre-v5.14.1.D
+static constexpr uint32_t SCALER_MAGIC    = 0xFE5C1AE3u;  // v5.14.1.D+ (winsor)
 
 // Scaler sidecar body layout — single source of truth.
 //
@@ -101,7 +106,11 @@ static constexpr size_t SCALER_BODY_BYTES =
   + sizeof(uint64_t)                              // registry_hash
   + sizeof(uint32_t)                              // stddev_floor (Q32)
   + sizeof(double) * NUM_REGISTERED_FEATURES      // mean[N]
-  + sizeof(double) * NUM_REGISTERED_FEATURES;     // stddev[N]
+  + sizeof(double) * NUM_REGISTERED_FEATURES      // stddev[N]
+  // v5.14.1.D additions:
+  + sizeof(uint8_t)                               // has_winsor_bounds
+  + sizeof(double) * NUM_REGISTERED_FEATURES      // winsor_low[N]
+  + sizeof(double) * NUM_REGISTERED_FEATURES;     // winsor_high[N]
 
 // Default stddev floor. For constant features (stddev=0) or near-constant
 // (stddev < floor), apply uses fmax(stddev, floor) to avoid div-by-zero
@@ -138,6 +147,19 @@ struct FeatureStandardizer {
     double   stddev_floor;         // typically SCALER_STDDEV_FLOOR (1e-9)
     double   mean[NUM_REGISTERED_FEATURES];
     double   stddev[NUM_REGISTERED_FEATURES];
+    // v5.14.1.D — feature winsorization bounds. Per-feature percentile
+    // clips applied in Apply BEFORE mean-center + unit-var. Reduces
+    // noise from 5σ outliers (flash crashes, exchange glitches). Each
+    // ModelHandle has its own scaler → heterogeneous winsor models
+    // supported (3 winsor variants per role across 3 cores, blended
+    // via bandit/Ridge per existing ensemble infrastructure).
+    //
+    // has_winsor_bounds=0 default + winsor_low=-INFINITY +
+    // winsor_high=+INFINITY → fmin/fmax pass-through, zero observable
+    // cost vs no-winsor case. Init populates these no-op defaults.
+    uint8_t  has_winsor_bounds;
+    double   winsor_low[NUM_REGISTERED_FEATURES];
+    double   winsor_high[NUM_REGISTERED_FEATURES];
 };
 
 //======================================================================================================
@@ -155,6 +177,16 @@ static inline void FeatureStandardizer_Init(FeatureStandardizer* sc) {
     for (unsigned i = 0; i < NUM_REGISTERED_FEATURES; ++i) {
         sc->mean[i] = 0.0;
         sc->stddev[i] = 1.0;  // neutral default — apply produces identity
+    }
+    // v5.14.1.D — winsor defaults: bounds = ±INFINITY → fmin/fmax pass-
+    // through (zero observable cost when has_winsor_bounds=0). Apply
+    // works correctly even if has_winsor_bounds gets set to 1 with these
+    // defaults (still a no-op clip; both clipped values pass through any
+    // finite input).
+    sc->has_winsor_bounds = 0;
+    for (unsigned i = 0; i < NUM_REGISTERED_FEATURES; ++i) {
+        sc->winsor_low[i]  = -INFINITY;
+        sc->winsor_high[i] = +INFINITY;
     }
 }
 
@@ -186,10 +218,15 @@ static inline int FeatureStandardizer_Apply(const FeatureStandardizer* sc,
 
     for (int i = 0; i < n; ++i) {
         double in   = (double)features[i];
-        // std::fmax compiles to maxsd on x86 (single instruction, branchless).
-        // Other platforms may emit a branch — acceptable, slow path.
+        // v5.14.1.D — branchless winsor clip BEFORE scale.
+        // bounds = [-INFINITY, +INFINITY] from Init → fmin/fmax pass-through
+        // (zero observable cost when has_winsor_bounds=0). When training-time
+        // RFV has fit per-feature percentile bounds, in is clipped to the
+        // [low, high] interval, taming outliers BEFORE mean-center + scale.
+        // Compiles to maxsd + minsd on x86 (2 instructions, branchless).
+        double clipped = fmin(fmax(in, sc->winsor_low[i]), sc->winsor_high[i]);
         double sd   = fmax(sc->stddev[i], floor);
-        double diff = in - sc->mean[i];
+        double diff = clipped - sc->mean[i];
         double out  = diff / sd;
         features[i] = (float)out;
     }
@@ -225,8 +262,18 @@ static inline int FeatureStandardizer_Load(FeatureStandardizer* sc,
 
     uint32_t magic = 0;
     if (fread(&magic, 4, 1, f) != 1 || magic != SCALER_MAGIC) {
-        fprintf(stderr, "[scaler] %s: magic mismatch (got 0x%08x, expect 0x%08x)\n",
+        if (magic == SCALER_MAGIC_V0) {
+            // v5.14.1.D — clean break with pre-winsor format. Operator
+            // sees a clear actionable message instead of a generic mismatch.
+            fprintf(stderr,
+                "[scaler] %s: pre-v5.14.1.D format (magic=0x%08x); "
+                "regenerate via Run Full Validation to upgrade to "
+                "winsor-aware format (magic=0x%08x)\n",
                 sidecar_path, magic, SCALER_MAGIC);
+        } else {
+            fprintf(stderr, "[scaler] %s: magic mismatch (got 0x%08x, expect 0x%08x)\n",
+                    sidecar_path, magic, SCALER_MAGIC);
+        }
         fclose(f);
         return -1;
     }
@@ -245,11 +292,20 @@ static inline int FeatureStandardizer_Load(FeatureStandardizer* sc,
     sc->stddev_floor = scaler_q32_to_floor(floor_q);
     if (sc->stddev_floor <= 0.0) sc->stddev_floor = SCALER_STDDEV_FLOOR;
 
-    // Body SHA-256 covers magic + num_features + registry_hash + floor + mean + stddev.
+    // Body SHA-256 covers magic + num_features + registry_hash + floor +
+    // mean + stddev + (v5.14.1.D) has_winsor_bounds + winsor_low + winsor_high.
     // Computed against the read bytes; compared to the trailing sha256[32].
     if (fread(sc->mean,   sizeof(double), NUM_REGISTERED_FEATURES, f)
             != NUM_REGISTERED_FEATURES) { fclose(f); return -1; }
     if (fread(sc->stddev, sizeof(double), NUM_REGISTERED_FEATURES, f)
+            != NUM_REGISTERED_FEATURES) { fclose(f); return -1; }
+    // v5.14.1.D — winsor block
+    uint8_t hwb_read = 0;
+    if (fread(&hwb_read, 1, 1, f) != 1) { fclose(f); return -1; }
+    sc->has_winsor_bounds = hwb_read;
+    if (fread(sc->winsor_low,  sizeof(double), NUM_REGISTERED_FEATURES, f)
+            != NUM_REGISTERED_FEATURES) { fclose(f); return -1; }
+    if (fread(sc->winsor_high, sizeof(double), NUM_REGISTERED_FEATURES, f)
             != NUM_REGISTERED_FEATURES) { fclose(f); return -1; }
     uint8_t embedded_sha[32];
     if (fread(embedded_sha, 1, 32, f) != 32) { fclose(f); return -1; }
@@ -268,6 +324,12 @@ static inline int FeatureStandardizer_Load(FeatureStandardizer* sc,
     memcpy(body_buf + off, sc->mean,   sizeof(double) * NUM_REGISTERED_FEATURES);
     off += sizeof(double) * NUM_REGISTERED_FEATURES;
     memcpy(body_buf + off, sc->stddev, sizeof(double) * NUM_REGISTERED_FEATURES);
+    off += sizeof(double) * NUM_REGISTERED_FEATURES;
+    // v5.14.1.D — winsor block in SHA-recompute body
+    uint8_t hwb_w = sc->has_winsor_bounds; memcpy(body_buf + off, &hwb_w, 1); off += 1;
+    memcpy(body_buf + off, sc->winsor_low,  sizeof(double) * NUM_REGISTERED_FEATURES);
+    off += sizeof(double) * NUM_REGISTERED_FEATURES;
+    memcpy(body_buf + off, sc->winsor_high, sizeof(double) * NUM_REGISTERED_FEATURES);
     off += sizeof(double) * NUM_REGISTERED_FEATURES;
     uint8_t computed_sha[32];
     if (!tt::sha256_bytes(body_buf, off, computed_sha)) {
@@ -370,6 +432,15 @@ static inline int FeatureStandardizer_Persist(const FeatureStandardizer* sc,
            sizeof(double) * NUM_REGISTERED_FEATURES);
     off += sizeof(double) * NUM_REGISTERED_FEATURES;
     memcpy(body + off, sc->stddev,
+           sizeof(double) * NUM_REGISTERED_FEATURES);
+    off += sizeof(double) * NUM_REGISTERED_FEATURES;
+
+    // v5.14.1.D — winsor block (canonical body position 7+).
+    uint8_t hwb = sc->has_winsor_bounds;     memcpy(body + off, &hwb, 1); off += 1;
+    memcpy(body + off, sc->winsor_low,
+           sizeof(double) * NUM_REGISTERED_FEATURES);
+    off += sizeof(double) * NUM_REGISTERED_FEATURES;
+    memcpy(body + off, sc->winsor_high,
            sizeof(double) * NUM_REGISTERED_FEATURES);
     off += sizeof(double) * NUM_REGISTERED_FEATURES;
 

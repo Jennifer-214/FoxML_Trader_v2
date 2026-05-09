@@ -11527,8 +11527,12 @@ e3_skip_load:;
                   stat(sidecar_path, &st) == 0 && S_ISREG(st.st_mode));
             // Expected size: 4 (magic) + 4 (num_features) + 8 (hash) + 4 (floor_q)
             //              + 8*N (mean) + 8*N (stddev) + 32 (sha)
-            int expected_size = 4 + 4 + 8 + 4 + 8 * NUM_REGISTERED_FEATURES * 2 + 32;
-            check("v5.9.3a: sidecar file size matches expected layout",
+            // v5.14.1.D updated layout: existing fields + has_winsor_bounds (1B)
+            // + winsor_low[N] (8N) + winsor_high[N] (8N).
+            int expected_size = 4 + 4 + 8 + 4 + 8 * NUM_REGISTERED_FEATURES * 2
+                              + 1 + 8 * NUM_REGISTERED_FEATURES * 2
+                              + 32;
+            check("v5.9.3a + v5.14.1.D: sidecar file size matches expected layout",
                   st.st_size == expected_size);
 
             FeatureStandardizer sc3 = {};
