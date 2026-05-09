@@ -46,6 +46,7 @@
 #include "../MemHeaders/HmacSha256.hpp"                  // v5.3.0 Phase B — in-process HMAC primitive
 #include "../MemHeaders/RunHistory.hpp"                  // v5.3.2 Phase C — JSONL append-only run history
 #include "../MemHeaders/HealthLog.hpp"                   // v5.4.0 Phase 0.1 — structured operational diagnostic log
+#include "../MemHeaders/BitmapMacros.hpp"                // v5.14.8.A.0.b — reusable BITMAP_* API for bit-packed flag accessors
 #include "../Strategies/StrategyLifecycle.hpp"           // v5.4.0 Phase 1.2 — Strategy_InitPerCore / FreePerCore
 
 using namespace std;
@@ -20516,6 +20517,104 @@ e3_skip_load:;
               ezoo.exit_predict_call_count == 0);
         check("v5.14.2.D Free: active flag cleared",
               ezoo.active == 0);
+    }
+
+    // ==================================================================
+    // v5.14.8.A.0.b — BitmapMacros foundation tests
+    // ==================================================================
+    // Verifies the reusable BITMAP_* API works correctly. Foundation
+    // for FOREACH_STAMP_BOUND_MODEL_CONST has_flags (v5.14.8.A.merged) +
+    // FOREACH_FAILURE_MODE failure_flags (v5.14.8.B) + future
+    // TECH_DEBT-013 BIT_FLAG sweep candidates.
+    {
+        // Single-thread accessors
+        uint64_t flags = 0;
+        constexpr uint64_t MASK_A = BITMAP_BIT_U64(0);
+        constexpr uint64_t MASK_B = BITMAP_BIT_U64(1);
+        constexpr uint64_t MASK_C = BITMAP_BIT_U64(63);  // top bit
+
+        check("v5.14.8.A.0.b: BITMAP empty initial state",
+              !BITMAP_IS_SET(flags, MASK_A) && !BITMAP_ANY(flags, MASK_A | MASK_B));
+
+        BITMAP_SET(flags, MASK_A);
+        check("v5.14.8.A.0.b: BITMAP_SET sets target bit",
+              BITMAP_IS_SET(flags, MASK_A));
+        check("v5.14.8.A.0.b: BITMAP_SET leaves other bits unset",
+              !BITMAP_IS_SET(flags, MASK_B));
+
+        BITMAP_SET(flags, MASK_B);
+        check("v5.14.8.A.0.b: BITMAP_ANY multi-flag check (both set)",
+              BITMAP_ANY(flags, MASK_A | MASK_B));
+        check("v5.14.8.A.0.b: BITMAP_ALL detects both set",
+              BITMAP_ALL(flags, MASK_A | MASK_B));
+
+        BITMAP_CLR(flags, MASK_A);
+        check("v5.14.8.A.0.b: BITMAP_CLR clears target bit",
+              !BITMAP_IS_SET(flags, MASK_A));
+        check("v5.14.8.A.0.b: BITMAP_CLR leaves other bits set",
+              BITMAP_IS_SET(flags, MASK_B));
+        check("v5.14.8.A.0.b: BITMAP_ANY post-CLR shows partial",
+              BITMAP_ANY(flags, MASK_A | MASK_B));
+        check("v5.14.8.A.0.b: BITMAP_ALL post-CLR shows incomplete",
+              !BITMAP_ALL(flags, MASK_A | MASK_B));
+
+        BITMAP_TOGGLE(flags, MASK_A);
+        check("v5.14.8.A.0.b: BITMAP_TOGGLE off→on",
+              BITMAP_IS_SET(flags, MASK_A));
+        BITMAP_TOGGLE(flags, MASK_A);
+        check("v5.14.8.A.0.b: BITMAP_TOGGLE on→off",
+              !BITMAP_IS_SET(flags, MASK_A));
+
+        // Top-bit (uint64_t safety check; signed-int promotion would corrupt)
+        BITMAP_SET(flags, MASK_C);
+        check("v5.14.8.A.0.b: BITMAP supports top bit (uint64_t safe)",
+              BITMAP_IS_SET(flags, MASK_C));
+
+        // BITMAP_NONE on full clear
+        BITMAP_CLR(flags, MASK_A | MASK_B | MASK_C);
+        check("v5.14.8.A.0.b: BITMAP_NONE after full clear",
+              BITMAP_NONE(flags, MASK_A | MASK_B | MASK_C));
+    }
+    {
+        // uint16_t variant (e.g., failure_flags target)
+        uint16_t flags16 = 0;
+        constexpr uint16_t MASK_X = BITMAP_BIT_U16(0);
+        constexpr uint16_t MASK_Y = BITMAP_BIT_U16(15);  // top bit of uint16_t
+
+        BITMAP_SET(flags16, MASK_X);
+        BITMAP_SET(flags16, MASK_Y);
+        check("v5.14.8.A.0.b: BITMAP uint16_t supports top bit",
+              BITMAP_IS_SET(flags16, MASK_Y));
+        check("v5.14.8.A.0.b: BITMAP uint16_t multi-flag",
+              BITMAP_ALL(flags16, MASK_X | MASK_Y));
+
+        // Population count
+        check("v5.14.8.A.0.b: BITMAP_POPCOUNT_U16 = 2",
+              BITMAP_POPCOUNT_U16(flags16) == 2);
+
+        // First-set helper
+        check("v5.14.8.A.0.b: BITMAP_FIRST_U16 returns 0 (lowest set)",
+              BITMAP_FIRST_U16(flags16) == 0);
+    }
+    {
+        // Atomic accessors (cross-thread visibility surface)
+        uint64_t shared_flags = 0;
+        constexpr uint64_t MASK_OBSERVED = BITMAP_BIT_U64(7);
+
+        BITMAP_ATOMIC_SET(shared_flags, MASK_OBSERVED);
+        check("v5.14.8.A.0.b: BITMAP_ATOMIC_SET visible via ATOMIC_LOAD",
+              (BITMAP_ATOMIC_LOAD(shared_flags) & MASK_OBSERVED) != 0);
+        check("v5.14.8.A.0.b: BITMAP_ATOMIC_IS_SET works",
+              BITMAP_ATOMIC_IS_SET(shared_flags, MASK_OBSERVED));
+
+        BITMAP_ATOMIC_CLR(shared_flags, MASK_OBSERVED);
+        check("v5.14.8.A.0.b: BITMAP_ATOMIC_CLR visible via ATOMIC_LOAD",
+              (BITMAP_ATOMIC_LOAD(shared_flags) & MASK_OBSERVED) == 0);
+
+        // ATOMIC_ANY across multiple bits
+        BITMAP_ATOMIC_SET(shared_flags, BITMAP_BIT_U64(3));
+        check("v5.14.8.A.0.b: BITMAP_ATOMIC_ANY multi-flag",
+              BITMAP_ATOMIC_ANY(shared_flags, BITMAP_BIT_U64(3) | BITMAP_BIT_U64(4)));
     }
 
     printf("\n======================================\n");
