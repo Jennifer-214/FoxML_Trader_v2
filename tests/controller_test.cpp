@@ -4133,6 +4133,74 @@ int main() {
               fabs(FPN_ToDouble(resolved_1.winsor_pct_low) - 0.005) < 1e-6);
     }
 
+    // ----- v5.14.1.F: IC variant registry + dispatcher ---------------------------------------------
+    // Closes original v5.14.1.F scope: cfg toggle for IC variant. Existing
+    // RollingIC IS Spearman (verified 2026-05-09); FOREACH_IC_VARIANT
+    // registry exposes it as variant 0; dispatcher routes per cfg choice.
+    // Future variants (Pearson, Kendall) slot in as 1-line additions.
+    // No struct change to ConfidenceScorer (avoids snapshot save/load break
+    // at PortfolioController.hpp:2094+2210, Class 4).
+    printf("\n--- v5.14.1.F: IC variant registry ---\n");
+    {
+        // Test 1 — registry has expected count (1 today; future additions
+        // bump this; assert >= 1 to avoid breaking on growth)
+        check("v5.14.1.F registry: FOREACH_IC_VARIANT_COUNT >= 1 (Spearman)",
+              FOREACH_IC_VARIANT_COUNT >= 1);
+    }
+    {
+        // Test 2 — Cfg defaults
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.14.1.F cfg default: confidence_ic_variant = 0 (Spearman)",
+              cfg.confidence_ic_variant == 0);
+    }
+    {
+        // Test 3 — Dispatcher returns same value as direct call for variant=0
+        ConfidenceScorer cs;
+        ConfidenceScorer_Init(&cs, 50, 60.0);
+        for (int i = 0; i < 50; i++) {
+            double p = (double)i / 50.0;
+            ConfidenceScorer_Update(&cs, p, p);  // perfect identity
+        }
+        double direct = RollingIC_Compute(&cs.ic);
+        double via_dispatcher = ConfidenceScorer_ComputeICVariant(&cs, 0);
+        check("v5.14.1.F dispatcher: variant=0 returns same as direct RollingIC_Compute",
+              fabs(direct - via_dispatcher) < 1e-12);
+    }
+    {
+        // Test 4 — Out-of-range variant falls through to default (returns 0.0)
+        ConfidenceScorer cs;
+        ConfidenceScorer_Init(&cs, 50, 60.0);
+        for (int i = 0; i < 50; i++) {
+            ConfidenceScorer_Update(&cs, 0.5, 0.5);
+        }
+        // Variant 99 not registered → default case returns 0.0
+        double oob = ConfidenceScorer_ComputeICVariant(&cs, 99);
+        check("v5.14.1.F dispatcher: out-of-range variant falls through to 0.0",
+              oob == 0.0);
+        // Negative variant also falls through
+        double neg = ConfidenceScorer_ComputeICVariant(&cs, -1);
+        check("v5.14.1.F dispatcher: negative variant falls through to 0.0",
+              neg == 0.0);
+    }
+    {
+        // Test 5 — Confirms RollingIC is Spearman (not Pearson). Documented
+        // proof: identical (pred, actual) pairs → ranks should match
+        // perfectly → Spearman = 1.0. Pearson on raw values would be 1.0
+        // too (linear), so we use a non-linear monotonic case to discriminate.
+        // y = x^3 — strictly monotonic, but Pearson would be < 1 due to
+        // non-linear curvature; Spearman = 1.0 because ranks match.
+        ConfidenceScorer cs;
+        ConfidenceScorer_Init(&cs, 50, 60.0);
+        for (int i = 1; i <= 50; i++) {
+            double p = (double)i;
+            double a = p * p * p;  // non-linear monotonic
+            ConfidenceScorer_Update(&cs, p, a);
+        }
+        double ic = RollingIC_Compute(&cs.ic);
+        check("v5.14.1.F doc-proof: RollingIC IS Spearman (non-linear monotonic → 1.0)",
+              ic > 0.99);  // Spearman returns 1.0 for monotonic; Pearson would be ~0.92
+    }
+
     // ----- v5.14.1.E.E.B: STAMP_CFG_AUTOPOPULATE macro tests ---------------------------------------
     // Verifies the X-macro auto-populate eliminates the v5.9.5b
     // production-caller field-population gap class. With this macro, adding

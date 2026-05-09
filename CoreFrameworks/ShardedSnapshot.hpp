@@ -558,7 +558,12 @@ static inline void TUI_CopySnapshotSharded(
             snap->per_core[i].ml_last_exit_dominant_horizon = state->cores[i].last_exit_dominant_horizon;
             // Direct reads of scorer internals — these are double-only and safe
             // to compute on the snapshot path (snapshot is slow-path itself).
-            snap->per_core[i].ml_confidence_ic   = RollingIC_Compute(&state->cores[i].confidence.ic);
+            // v5.14.1.F — variant-aware IC (default 0=Spearman). cfg in scope
+            // via Snapshot fn parameter. Future Pearson/Kendall variants slot
+            // in via FOREACH_IC_VARIANT registry; today's behavior bytewise
+            // unchanged (single-case switch inlines to direct call).
+            snap->per_core[i].ml_confidence_ic   = ConfidenceScorer_ComputeICVariant(
+                &state->cores[i].confidence, cfg ? cfg->confidence_ic_variant : 0);
             snap->per_core[i].ml_confidence_rmse = RollingRMSE_Compute(&state->cores[i].confidence.rmse);
             // v5.9.0b — ML observability extensions. Single-writer (slow path)
             // → snapshot read; no race. Counters are uint32 monotonic.

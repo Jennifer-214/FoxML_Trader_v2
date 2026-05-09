@@ -1112,6 +1112,12 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                                              double drift_floor                = 0.0,
                                              uint32_t drift_window_seconds     = 86400u,
                                              int      drift_auto_kill          = 0,
+                                             // v5.14.1.F — IC variant selector
+                                             // for drift detection. Default 0 =
+                                             // Spearman (back-compat with pre-
+                                             // v5.14.1.F callers; existing
+                                             // RollingIC behavior bytewise).
+                                             int      confidence_ic_variant    = 0,
                                              // v5.13.4 — sell-side bandit reward
                                              // attribution. Default 0 = disabled
                                              // (preserves pre-v5.13.4 behavior; legacy
@@ -1305,7 +1311,14 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 // post-update; push to drift history; check sustained breach.
                 // Only meaningful when operator has set drift_floor > 0.
                 if (drift_floor > 0.0) {
-                    double ic_now = RollingIC_Compute(&ctx.confidence.ic);
+                    // v5.14.1.F — variant-aware IC dispatcher honors
+                    // cfg.confidence_ic_variant (default 0 = Spearman).
+                    // Future Pearson/Kendall variants slot in via
+                    // FOREACH_IC_VARIANT registry; existing semantics
+                    // preserved bytewise (single-case switch inlines to
+                    // direct RollingIC_Compute call).
+                    double ic_now = ConfidenceScorer_ComputeICVariant(
+                        &ctx.confidence, confidence_ic_variant);
                     DriftHistory_Push(&ctx.drift_history, ic_now, now_us);
                     double avg_ic = 0.0;
                     int    n_samples = 0;

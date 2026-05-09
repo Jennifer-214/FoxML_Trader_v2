@@ -953,6 +953,16 @@ template <unsigned F> struct ControllerConfig {
   // ridge_lambda + ridge_cost_penalty + ridge_min_ic_floor cfg.
   // Stamp-bound via FOREACH_STAMP_BOUND_CFG → drift detected at load.
   int      exit_blender_mode;          // 0=bandit (default), 1=Ridge
+  // v5.14.1.F — IC variant selector (drift detection + TUI display).
+  // 0 = Spearman (default; existing RollingIC implementation despite
+  //     generic name — see ICVariantRegistry.hpp doc note).
+  // 1+ = future variants (Pearson, Kendall, etc.; slot in via
+  //      FOREACH_IC_VARIANT(X) in ICVariantRegistry.hpp).
+  // Routes through ConfidenceScorer_ComputeICVariant dispatcher at:
+  //   - ControllerEventLoop.hpp drift detection
+  //   - ShardedSnapshot.hpp ml_confidence_ic display
+  // Composite formula internals always use direct Spearman (no cfg in scope).
+  int      confidence_ic_variant;      // 0=spearman (default), 1+=future
   // v5.10.0a.G.8 — trade-close reward multiplier. Real money signal
   // (TP/SL hit) gets weighted ×N over the slow-path lookback rewards
   // (which are hypothetical "would have been correct" signals).
@@ -1280,6 +1290,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.exit_bandit_enabled = 0;
   // v5.14.1.E — exit-side blender default to bandit (pre-v5.14.1.E behavior).
   cfg.exit_blender_mode   = 0;
+  // v5.14.1.F — Spearman default (only registered variant today).
+  cfg.confidence_ic_variant = 0;
   cfg.exit_bandit_lr      = 0.1;
   cfg.ensemble_min_agreement_pct = 0.6;
   cfg.ensemble_trade_reward_mult = 4.0;
@@ -1873,6 +1885,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(exit_bandit_enabled)
     // v5.14.1.E — exit-side blender selector (0=bandit, 1=Ridge)
     CFG_PARSE_INT(exit_blender_mode)
+    // v5.14.1.F — IC variant selector
+    CFG_PARSE_INT(confidence_ic_variant)
     if (strcmp(key, "exit_bandit_lr") == 0) {
         double v = atof(val);
         if (v < 0.01) v = 0.01;

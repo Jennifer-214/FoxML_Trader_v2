@@ -38,6 +38,7 @@
 
 #include <math.h>
 #include <string.h>
+#include "ICVariantRegistry.hpp"  // v5.14.1.F — FOREACH_IC_VARIANT X-macro
 
 // default parameters (from FoxML constants.py + confidence.py)
 #define CONFIDENCE_FRESHNESS_TAU_DEFAULT  300.0   // seconds (5 min decay)
@@ -293,6 +294,15 @@ static inline double RollingCapacity_Compute(const RollingCapacity *c) {
 // Pre-v5.14.1 fields (ic, rmse, freshness_tau, last_confidence) preserved;
 // existing ConfidenceScorer_Compute path bytewise unchanged when caller
 // stays on the IC-only API. Composite opt-in via cfg flag (v5.14.1.B).
+//
+// IC SEMANTICS NOTE (v5.14.1.F doc-fix): the `ic` field's struct type
+// `RollingIC` is generically named but its `RollingIC_Compute` body at
+// `ML_Headers/ConfidenceScore.hpp:96+` ranks both predictions+actuals then
+// computes Pearson correlation of the ranks = textbook **Spearman rank
+// correlation**. Despite the generic struct name, this has been Spearman
+// since v5.x.x. cfg.confidence_ic_variant=0 (default) selects this Spearman
+// implementation via the FOREACH_IC_VARIANT registry; future variants
+// (Pearson, Kendall, etc.) slot in without disturbing this field's wiring.
 struct ConfidenceScorer {
     RollingIC ic;
     RollingRMSE rmse;
@@ -302,6 +312,10 @@ struct ConfidenceScorer {
     RollingCapacity capacity;     // v5.14.1.A
     double rmse_baseline;         // v5.14.1.A — bound to training-time RMSE; default 1.0
 };
+// v5.14.1.F design note: NO struct field for active variant (would change
+// sizeof(ConfidenceScorer) and break snapshot load at PortfolioController.hpp:2094+2210
+// per Class 4 — snapshot save/load asymmetry). Variant is passed explicitly
+// to ConfidenceScorer_ComputeICVariant; caller reads from cfg at call site.
 
 static inline void ConfidenceScorer_Init(ConfidenceScorer *cs, int window, double tau) {
     RollingIC_Init(&cs->ic, (window > 0) ? window : CONFIDENCE_IC_WINDOW_DEFAULT);
@@ -325,6 +339,24 @@ static inline void ConfidenceScorer_Init(ConfidenceScorer *cs, int window, doubl
     RollingCapacity_Init(&cs->capacity, /*target_dollars=*/0.0,
                           /*kappa=*/CONFIDENCE_CAPACITY_KAPPA_DEFAULT);
     cs->rmse_baseline = 1.0;  // safe default; bound to training-time RMSE in v5.14.1.B
+}
+
+// v5.14.1.F — variant-aware IC dispatcher. Routes to the registered
+// variant's compute fn via FOREACH_IC_VARIANT X-macro. Caller passes
+// `variant` explicitly (typically `cfg.confidence_ic_variant` from
+// ControllerConfig) — NOT cached on ConfidenceScorer to avoid changing
+// sizeof and breaking snapshot save/load at PortfolioController.hpp:2094+2210
+// (Class 4 — snapshot save/load asymmetry).
+//
+// Out-of-range variant → falls through to default case in the dispatch
+// switch (returns 0.0; safe). Existing sites that DON'T need variant
+// awareness (e.g., legacy ConfidenceScorer_Compute internal path; kept
+// bytewise unchanged) can keep direct RollingIC_Compute(&cs->ic) calls.
+// New code + sites being refactored for variant choice use this dispatcher.
+static inline double ConfidenceScorer_ComputeICVariant(const ConfidenceScorer *cs,
+                                                         int variant) {
+    if (!cs) return 0.0;
+    return IC_VARIANT_COMPUTE(cs, variant);
 }
 
 // v5.14.1.A — extended init for composite path. Equivalent to base Init +
