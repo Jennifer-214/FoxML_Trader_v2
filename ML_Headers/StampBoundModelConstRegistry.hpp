@@ -82,14 +82,37 @@ namespace tt {
 //======================================================================================================
 // [REGISTRY ENTRY SHAPE]
 //======================================================================================================
-// X(name, type, fmt, default_val, get_value_expr, emit_when, doc_comment)
+// X(name, group, presence, type, fmt, default_val, get_value_expr, emit_when, doc_comment)
 //
 //   name           — canonical stamp body key (also struct field name).
 //                    Must be a valid C identifier; written to stamp body
 //                    as `<name>=<value>\n` line.
-//   type           — C++ type: int, uint64_t, double, or `char[N]` for
-//                    string fields. Drives struct field type, parser
-//                    dispatch, fmt format string.
+//   group          — has_* flag group; "_" for standalone (own bit), or
+//                    a group name from FOREACH_STAMP_BOUND_MODEL_CONST_GROUPS.
+//                    All entries with the same group share one has_<group>
+//                    flag at struct generation time.
+//   presence       — token marker controlling which structs include this
+//                    field at struct-generation time. Token-paste-based
+//                    dispatch (preprocessor):
+//                      INCLUDE      — field on ALL THREE structs
+//                                     (ModelStampResult parser-side,
+//                                     StampInferenceCfgInputs emit-side,
+//                                     ModelHandle runtime-side). Default.
+//                      SKIP_HANDLE  — field on parser + emit only; NOT
+//                                     on ModelHandle (parser checks the
+//                                     value but doesn't propagate to
+//                                     runtime). Used for: held_out_fraction,
+//                                     feature_scaler_present (the boolean;
+//                                     scaler_sha256 IS on handle),
+//                                     grid_member_count, grid_member_idx,
+//                                     label_registry_hash, feature_mask.
+//                    Future markers if needed: PARSER_ONLY (parsed but
+//                    not emitted; none today). The token-paste pattern
+//                    extends with one new HANDLE_GEN_<marker> macro per
+//                    new marker.
+//   type           — C++ type: int, uint64_t, double, or `tt::stamp_str_N`
+//                    typedef for char[N] string fields. Drives struct
+//                    field type, parser dispatch, fmt format string.
 //   fmt            — printf format. Types:
 //                      int       → "%d"
 //                      uint64_t  → "%llu"
@@ -194,89 +217,103 @@ namespace tt {
 // has_* gating: standalone (group="_") gates a single field; group
 // (group=<name>) gates all entries with that group_name.
 //
-// Tuple: X(name, group, type, fmt, default_val, get_value_expr, emit_when, doc)
+// Tuple: X(name, group, presence, type, fmt, default_val, get_value_expr, emit_when, doc)
+//
+// presence (NEW v5.14.8.A.0.b): controls ModelHandle inclusion.
+//   INCLUDE     — on all 3 structs (default; new entries should use this)
+//   SKIP_HANDLE — parser/emit only; not on ModelHandle (parser checks but
+//                 doesn't propagate to runtime). 6 entries today:
+//                 inference_cfg_held_out_fraction, feature_scaler_present
+//                 (the boolean; scaler_sha256 IS on handle), grid_member_count,
+//                 grid_member_idx, label_registry_hash, feature_mask.
 
 #define FOREACH_STAMP_BOUND_MODEL_CONST(X)                                                          \
     /* === inference_cfg group (5 fields) — emitted at line 2175 === */                            \
-    X(inference_cfg_confidence_threshold_scale, inference_cfg, double, "%g", 0.0,                   \
+    X(inference_cfg_confidence_threshold_scale, inference_cfg, INCLUDE, double, "%g", 0.0,          \
       inf->confidence_threshold_scale, inf->has_inference_cfg, "confidence threshold scale")        \
-    X(inference_cfg_barrier_gate_enabled,       inference_cfg, int,    "%d", 0,                     \
+    X(inference_cfg_barrier_gate_enabled,       inference_cfg, INCLUDE, int,    "%d", 0,            \
       inf->barrier_gate_enabled, inf->has_inference_cfg, "barrier gate enabled flag")               \
-    X(inference_cfg_confidence_hard_block_threshold, inference_cfg, double, "%g", 0.0,              \
+    X(inference_cfg_confidence_hard_block_threshold, inference_cfg, INCLUDE, double, "%g", 0.0,     \
       inf->confidence_hard_block_threshold, inf->has_inference_cfg, "confidence hard-block threshold") \
-    X(inference_cfg_held_out_fraction,          inference_cfg, double, "%g", 0.0,                   \
+    /* held_out_fraction is parser-checked but NOT propagated to ModelHandle (no runtime use). */   \
+    X(inference_cfg_held_out_fraction,          inference_cfg, SKIP_HANDLE, double, "%g", 0.0,      \
       inf->held_out_fraction, inf->has_inference_cfg, "held-out fraction at training")              \
-    X(inference_cfg_freshness_tau,              inference_cfg, double, "%g", 0.0,                   \
+    X(inference_cfg_freshness_tau,              inference_cfg, INCLUDE, double, "%g", 0.0,          \
       inf->freshness_tau, inf->has_inference_cfg, "freshness tau decay")                            \
     /* === bandit (standalone) — emitted at line 2189 === */                                        \
-    X(inference_cfg_bandit_blend_ratio,         _, double, "%g", 0.0,                               \
+    X(inference_cfg_bandit_blend_ratio,         _, INCLUDE, double, "%g", 0.0,                      \
       inf->bandit_blend_ratio, inf->has_bandit, "bandit blend ratio (Exp3 vs ridge)")               \
     /* === fees group (2 fields) — emitted at line 2195 === */                                      \
-    X(inference_cfg_fee_rate_maker,             fees, double, "%g", 0.0,                            \
+    X(inference_cfg_fee_rate_maker,             fees, INCLUDE, double, "%g", 0.0,                   \
       inf->fee_rate_maker, inf->has_fees, "maker fee rate at training time")                        \
-    X(inference_cfg_fee_rate_taker,             fees, double, "%g", 0.0,                            \
+    X(inference_cfg_fee_rate_taker,             fees, INCLUDE, double, "%g", 0.0,                   \
       inf->fee_rate_taker, inf->has_fees, "taker fee rate at training time")                        \
     /* === training_poll_interval (standalone) — emitted at line 2203 === */                        \
-    X(training_poll_interval,                   _, uint32_t, "%u", 0,                               \
+    X(training_poll_interval,                   _, INCLUDE, uint32_t, "%u", 0,                      \
       (unsigned)inf->training_poll_interval, inf->has_training_poll_interval,                       \
       "training data poll cadence; engine boot WARN on cross-cadence drift")                        \
     /* === scaler group (2 fields) — emitted at line 2211; gated by has_scaler === */               \
     /* v5.14.8.A.0.b — re-added during pre-flight registry data completion;                      */ \
     /* originally dropped between training_poll_interval and xgb_hyperparams in v5.14.8.A.1.    */ \
     /* GATE-NEW-2 wire-format preservation depends on these landing here.                       */ \
-    X(feature_scaler_present,                   scaler, uint8_t, "%d", 0,                           \
+    /* feature_scaler_present is parser-only (scaler_sha256 IS on handle, but the boolean isn't  */ \
+    /* needed at runtime — has_scaler flag suffices).                                            */ \
+    X(feature_scaler_present,                   scaler, SKIP_HANDLE, uint8_t, "%d", 0,              \
       (uint8_t)(inf->feature_scaler_present ? 1 : 0), inf->has_scaler,                              \
       "scaler sidecar present flag (0=no/1=yes; uint8_t for bit-packing efficiency)")               \
-    X(scaler_sha256,                            scaler, tt::stamp_str_65, "%s", "",                 \
+    X(scaler_sha256,                            scaler, INCLUDE, tt::stamp_str_65, "%s", "",        \
       inf->scaler_sha256, inf->has_scaler,                                                          \
       "SHA-256 of full scaler sidecar file (64 hex + null)")                                        \
     /* === model_num_outputs (standalone) — emitted at line 2223; gated by has_model_num_outputs */ \
-    X(model_num_outputs,                        _, int, "%d", 0,                                    \
+    X(model_num_outputs,                        _, INCLUDE, int, "%d", 0,                           \
       inf->model_num_outputs, inf->has_model_num_outputs,                                           \
       "model output dimension; binary/regression=1, multiclass=N (REFUSE on mismatch)")             \
     /* === xgb_hyperparams group (8 fields) — emitted at line 2234 === */                           \
-    X(xgb_max_depth,                            xgb_hyperparams, int, "%d", 0,                      \
+    X(xgb_max_depth,                            xgb_hyperparams, INCLUDE, int, "%d", 0,             \
       inf->xgb_max_depth, inf->has_xgb_hyperparams, "XGBoost max tree depth")                       \
-    X(xgb_learning_rate,                        xgb_hyperparams, double, "%g", 0.0,                 \
+    X(xgb_learning_rate,                        xgb_hyperparams, INCLUDE, double, "%g", 0.0,        \
       inf->xgb_learning_rate, inf->has_xgb_hyperparams, "XGBoost learning rate")                    \
-    X(xgb_n_estimators,                         xgb_hyperparams, int, "%d", 0,                      \
+    X(xgb_n_estimators,                         xgb_hyperparams, INCLUDE, int, "%d", 0,             \
       inf->xgb_n_estimators, inf->has_xgb_hyperparams, "XGBoost number of trees")                   \
-    X(xgb_subsample,                            xgb_hyperparams, double, "%g", 0.0,                 \
+    X(xgb_subsample,                            xgb_hyperparams, INCLUDE, double, "%g", 0.0,        \
       inf->xgb_subsample, inf->has_xgb_hyperparams, "XGBoost row subsample fraction")               \
-    X(xgb_colsample_bytree,                     xgb_hyperparams, double, "%g", 0.0,                 \
+    X(xgb_colsample_bytree,                     xgb_hyperparams, INCLUDE, double, "%g", 0.0,        \
       inf->xgb_colsample_bytree, inf->has_xgb_hyperparams, "XGBoost column subsample per tree")     \
-    X(xgb_min_child_weight,                     xgb_hyperparams, int, "%d", 0,                      \
+    X(xgb_min_child_weight,                     xgb_hyperparams, INCLUDE, int, "%d", 0,             \
       inf->xgb_min_child_weight, inf->has_xgb_hyperparams, "XGBoost min child weight")              \
-    X(xgb_seed,                                 xgb_hyperparams, int, "%d", 0,                      \
+    X(xgb_seed,                                 xgb_hyperparams, INCLUDE, int, "%d", 0,             \
       inf->xgb_seed, inf->has_xgb_hyperparams, "XGBoost RNG seed for reproducibility")              \
     /* xgb_tree_method is char[16] — handled by separate string-type macros at struct-gen time */   \
     /* === build_flags_hash (standalone) — emitted at line 2253 === */                              \
-    X(build_flags_hash,                         _, uint64_t, "%016lx", 0,                           \
+    X(build_flags_hash,                         _, INCLUDE, uint64_t, "%016lx", 0,                  \
       (unsigned long)inf->build_flags_hash, inf->has_build_flags_hash,                              \
       "build-time feature flag hash; engine boot WARN on cross-binary drift")                       \
     /* === grid_member_count group (2 fields) — emitted at line 2266 === */                         \
-    X(grid_member_count,                        grid_member_count_group, int, "%d", 0,              \
+    /* Forensic / informational on parse side; no runtime use → SKIP_HANDLE.                    */  \
+    X(grid_member_count,                        grid_member_count_group, SKIP_HANDLE, int, "%d", 0, \
       inf->grid_member_count, inf->has_grid_member_count,                                           \
       "ensemble member count when trained as part of horizon set")                                  \
-    X(grid_member_idx,                          grid_member_count_group, int, "%d", 0,              \
+    X(grid_member_idx,                          grid_member_count_group, SKIP_HANDLE, int, "%d", 0, \
       inf->grid_member_idx, inf->has_grid_member_count, "this model's index within the grid")       \
     /* === label_registry_hash (standalone) — emitted at line 2278 === */                           \
-    X(label_registry_hash,                      _, uint64_t, "%016lx", 0,                           \
+    /* Parser checks against runtime LABEL_REGISTRY_HASH() at boot; not stored on handle.       */  \
+    X(label_registry_hash,                      _, SKIP_HANDLE, uint64_t, "%016lx", 0,              \
       (unsigned long)inf->label_registry_hash, inf->has_label_registry_hash,                        \
       "label registry hash; engine boot REFUSE on mismatch (label set drift)")                      \
     /* === feature_mask (standalone) — emitted at line 2292 === */                                  \
-    X(feature_mask,                             _, uint64_t, "%016lx", 0,                           \
+    /* Parser compares against runtime cfg.core_feature_mask[core] at boot; not on handle.      */  \
+    X(feature_mask,                             _, SKIP_HANDLE, uint64_t, "%016lx", 0,              \
       (unsigned long)inf->feature_mask_train, inf->has_feature_mask,                                \
       "feature mask at training time; engine compares to runtime feature_mask")                     \
     /* === label_params group (3 fields) — emitted at line 2306 === */                              \
-    X(label_lookahead_ticks,                    label_params, int, "%d", 0,                         \
+    X(label_lookahead_ticks,                    label_params, INCLUDE, int, "%d", 0,                \
       inf->label_lookahead_ticks, inf->has_label_params, "label lookahead window in ticks")         \
-    X(label_tp_pct,                             label_params, double, "%.6g", 0.0,                  \
+    X(label_tp_pct,                             label_params, INCLUDE, double, "%.6g", 0.0,         \
       inf->label_tp_pct, inf->has_label_params, "label take-profit percent")                        \
-    X(label_sl_pct,                             label_params, double, "%.6g", 0.0,                  \
+    X(label_sl_pct,                             label_params, INCLUDE, double, "%.6g", 0.0,         \
       inf->label_sl_pct, inf->has_label_params, "label stop-loss percent")                          \
     /* === xgb_train_nthread (standalone) — emitted at line 2323 === */                             \
-    X(xgb_train_nthread,                        _, int, "%d", 0,                                    \
+    X(xgb_train_nthread,                        _, INCLUDE, int, "%d", 0,                           \
       inf->xgb_train_nthread, inf->has_xgb_train_nthread,                                           \
       "XGBoost training thread count; lets operator detect serial vs parallel mode forensically")
 
@@ -338,14 +375,26 @@ namespace tt {
 // fields (xgb_tree_method, scaler_sha256, etc.) populate manually
 // alongside the AUTOPOPULATE call.
 //
-// Tuple signature (8 params): X(name, group, type, fmt, default_val,
-// get_value, emit_when, doc). Group is documentation-only at autopopulate
-// time (used by struct generation at v5.14.8.A; auto-populate just
-// gates per-entry on the explicit emit_when).
-#define STAMP_MODEL_CONST_AUTOPOPULATE_ONE(name, group, type, fmt, default_val, get_value, emit_when, doc) \
+// Tuple signature (9 params; v5.14.8.A.0.b adds presence column):
+//   X(name, group, presence, type, fmt, default_val, get_value, emit_when, doc)
+//
+// Group + presence are documentation/struct-gen metadata; auto-populate
+// ignores them (always populates the StampInferenceCfgInputs side regardless
+// of presence — presence only affects struct GENERATION, not population).
+//
+// String-field handling (v5.14.8.A.0.b.4): tt::stamp_str_N typedefs
+// detected via std::is_array_v<type>. Numeric types use direct cast +
+// assignment; string types use strncpy + null-terminate via
+// std::extent_v<type> for size.
+#define STAMP_MODEL_CONST_AUTOPOPULATE_ONE(name, group, presence, type, fmt, default_val, get_value, emit_when, doc) \
     if (emit_when) {                                                                  \
         (inf).has_##name = 1;                                                         \
-        (inf).name       = (type)(get_value);                                         \
+        if constexpr (std::is_array_v<type>) {                                        \
+            strncpy((inf).name, (get_value), std::extent_v<type> - 1);                \
+            (inf).name[std::extent_v<type> - 1] = '\0';                               \
+        } else {                                                                      \
+            (inf).name = (type)(get_value);                                           \
+        }                                                                             \
     }
 
 //======================================================================================================
@@ -356,7 +405,7 @@ namespace tt {
 // registry" — catches accidental row deletion during refactors.
 //
 // Extensibility loop test pattern (CLAUDE.md Check 26 discipline):
-//   #define X(name, type, fmt, def, get, when, doc) \
+//   #define X(name, group, presence, type, fmt, def, get, when, doc) \
 //       do { /* compile-time existence check */ \
 //           StampInferenceCfgInputs inf{}; \
 //           (void)inf.has_##name; \
@@ -366,12 +415,34 @@ namespace tt {
 //   #undef X
 //======================================================================================================
 
-#define STAMP_MODEL_CONST_COUNT_ONE(name, group, type, fmt, default_val, get_value, emit_when, doc) +1
+#define STAMP_MODEL_CONST_COUNT_ONE(name, group, presence, type, fmt, default_val, get_value, emit_when, doc) +1
 #define FOREACH_STAMP_BOUND_MODEL_CONST_COUNT  (0 FOREACH_STAMP_BOUND_MODEL_CONST(STAMP_MODEL_CONST_COUNT_ONE))
 
 // Group counter: how many group has_* flags exist (for bit allocation).
 #define STAMP_MODEL_CONST_GROUP_COUNT_ONE(group_name, doc) +1
 #define FOREACH_STAMP_BOUND_MODEL_CONST_GROUP_COUNT \
     (0 FOREACH_STAMP_BOUND_MODEL_CONST_GROUPS(STAMP_MODEL_CONST_GROUP_COUNT_ONE))
+
+//======================================================================================================
+// [STRUCT-GENERATION DISPATCH (presence-aware) — v5.14.8.A.0.b]
+//======================================================================================================
+// The token-paste pattern that lets ModelHandle struct generation skip
+// fields marked SKIP_HANDLE while ModelStampResult + StampInferenceCfgInputs
+// include all fields.
+//
+// Usage in v5.14.8.A.merged ModelHandle struct generation:
+//   #define X(name, group, presence, type, fmt, def, get, when, doc) \
+//       STAMP_HANDLE_GEN_##presence(name, type)
+//   FOREACH_STAMP_BOUND_MODEL_CONST(X)
+//   #undef X
+//
+// Token-paste resolves to STAMP_HANDLE_GEN_INCLUDE or STAMP_HANDLE_GEN_SKIP_HANDLE
+// based on the presence column. Adding a new presence marker (e.g.,
+// PARSER_ONLY) means defining one new STAMP_HANDLE_GEN_<MARKER> macro;
+// no per-entry boilerplate.
+//======================================================================================================
+
+#define STAMP_HANDLE_GEN_INCLUDE(name, type)      type name;
+#define STAMP_HANDLE_GEN_SKIP_HANDLE(name, type)  /* skip — parser-only */
 
 #endif // STAMP_BOUND_MODEL_CONST_REGISTRY_HPP
