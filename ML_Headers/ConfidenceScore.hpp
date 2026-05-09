@@ -34,6 +34,7 @@
 #define CONFIDENCE_SCORE_HPP
 
 #include <stdio.h>
+#include <stdint.h>
 
 #include <math.h>
 #include <string.h>
@@ -205,13 +206,101 @@ static inline double Confidence_Compute(double ic, double data_age_sec, double r
 }
 
 //======================================================================================================
+// [v5.14.1.A — COMPOSITE CONFIDENCE COMPONENTS]
+//======================================================================================================
+// Composite formula: IC × Freshness × Capacity × Stability_normalized
+// where Stability_normalized = 1 - clamp(rmse / rmse_baseline, 0, 1).
+//
+// Each component is independently observable + cfg-tunable, replacing the
+// older 3-factor (IC * Freshness * 1/(1+RMSE)) with a 4-factor formulation
+// that adds a Capacity term + normalizes Stability against a baseline RMSE
+// pulled from training. Enables soft risk degradation (v5.14.9) by giving
+// the sizing path a continuous [0, 1] confidence scalar instead of a
+// binary kill-switch trip.
+//======================================================================================================
+
+// Default kappa for capacity calc (proportionality constant on ADV).
+#define CONFIDENCE_CAPACITY_KAPPA_DEFAULT  0.1
+// Default ADV smoothing alpha (10-sample EWMA).
+#define CONFIDENCE_CAPACITY_ALPHA_DEFAULT  0.1
+
+// Wall-clock-driven freshness with cfg-tunable tau. Replaces the
+// data_age_sec arg of the original Confidence_Freshness so the scorer
+// owns its own clock state — operator + tests can manipulate via Mark.
+struct RollingFreshness {
+    uint64_t last_predict_us;   // wall-clock at last prediction (Mark)
+    double   tau_secs;          // exponential decay time constant
+};
+
+static inline void RollingFreshness_Init(RollingFreshness *f, double tau_secs) {
+    f->last_predict_us = 0;
+    f->tau_secs = (tau_secs > 0.0) ? tau_secs : CONFIDENCE_FRESHNESS_TAU_DEFAULT;
+}
+
+static inline void RollingFreshness_Mark(RollingFreshness *f, uint64_t now_us) {
+    f->last_predict_us = now_us;
+}
+
+// freshness ∈ [0, 1]. Returns 0 when never marked (cold-start = stale).
+// When time travels backward (now_us < last_predict_us, e.g. test fixture
+// or replay determinism), clamp to 1.0.
+static inline double RollingFreshness_Compute(const RollingFreshness *f, uint64_t now_us) {
+    if (f->last_predict_us == 0) return 0.0;
+    if (now_us <= f->last_predict_us) return 1.0;
+    double tau = (f->tau_secs > 0.0) ? f->tau_secs : CONFIDENCE_FRESHNESS_TAU_DEFAULT;
+    double age_sec = (double)(now_us - f->last_predict_us) / 1e6;
+    return exp(-age_sec / tau);
+}
+
+// Capacity factor: how much of the desired position size the market can
+// absorb without slippage degradation. target_dollars=0 = unbounded
+// (single-symbol small-account default; capacity always 1.0).
+struct RollingCapacity {
+    double current_adv;       // EWMA-smoothed average daily volume estimate
+    double target_dollars;    // cfg-tunable position-size target; 0 = unbounded
+    double kappa;             // proportionality constant
+};
+
+static inline void RollingCapacity_Init(RollingCapacity *c,
+                                          double target_dollars, double kappa) {
+    c->current_adv    = 0.0;
+    c->target_dollars = (target_dollars >= 0.0) ? target_dollars : 0.0;
+    c->kappa          = (kappa > 0.0) ? kappa : CONFIDENCE_CAPACITY_KAPPA_DEFAULT;
+}
+
+static inline void RollingCapacity_UpdateADV(RollingCapacity *c, double new_adv) {
+    if (new_adv < 0.0) new_adv = 0.0;
+    if (c->current_adv == 0.0) {
+        c->current_adv = new_adv;
+    } else {
+        const double alpha = CONFIDENCE_CAPACITY_ALPHA_DEFAULT;
+        c->current_adv = (1.0 - alpha) * c->current_adv + alpha * new_adv;
+    }
+}
+
+static inline double RollingCapacity_Compute(const RollingCapacity *c) {
+    if (c->target_dollars <= 0.0) return 1.0;
+    double cap = (c->kappa * c->current_adv) / c->target_dollars;
+    if (cap > 1.0) cap = 1.0;
+    if (cap < 0.0) cap = 0.0;
+    return cap;
+}
+
+//======================================================================================================
 // [FULL CONFIDENCE SCORER — combines IC + RMSE buffers]
 //======================================================================================================
+// v5.14.1.A — added freshness + capacity + rmse_baseline for composite formula.
+// Pre-v5.14.1 fields (ic, rmse, freshness_tau, last_confidence) preserved;
+// existing ConfidenceScorer_Compute path bytewise unchanged when caller
+// stays on the IC-only API. Composite opt-in via cfg flag (v5.14.1.B).
 struct ConfidenceScorer {
     RollingIC ic;
     RollingRMSE rmse;
     double freshness_tau;
     double last_confidence;
+    RollingFreshness freshness;   // v5.14.1.A
+    RollingCapacity capacity;     // v5.14.1.A
+    double rmse_baseline;         // v5.14.1.A — bound to training-time RMSE; default 1.0
 };
 
 static inline void ConfidenceScorer_Init(ConfidenceScorer *cs, int window, double tau) {
@@ -229,6 +318,27 @@ static inline void ConfidenceScorer_Init(ConfidenceScorer *cs, int window, doubl
         cs->freshness_tau = tau;
     }
     cs->last_confidence = 0.0;
+    // v5.14.1.A — composite components default to "no-op" so legacy
+    // ConfidenceScorer_Compute path is bytewise unchanged. Operator
+    // tunes via cfg in v5.14.1.B; ComputeComposite is opt-in.
+    RollingFreshness_Init(&cs->freshness, cs->freshness_tau);
+    RollingCapacity_Init(&cs->capacity, /*target_dollars=*/0.0,
+                          /*kappa=*/CONFIDENCE_CAPACITY_KAPPA_DEFAULT);
+    cs->rmse_baseline = 1.0;  // safe default; bound to training-time RMSE in v5.14.1.B
+}
+
+// v5.14.1.A — extended init for composite path. Equivalent to base Init +
+// explicit composite parameters. Useful for tests + v5.14.1.B cfg wiring.
+static inline void ConfidenceScorer_InitComposite(ConfidenceScorer *cs,
+                                                    int window, double tau,
+                                                    double freshness_tau_secs,
+                                                    double capacity_target_dollars,
+                                                    double capacity_kappa,
+                                                    double rmse_baseline) {
+    ConfidenceScorer_Init(cs, window, tau);
+    RollingFreshness_Init(&cs->freshness, freshness_tau_secs);
+    RollingCapacity_Init(&cs->capacity, capacity_target_dollars, capacity_kappa);
+    cs->rmse_baseline = (rmse_baseline > 0.0) ? rmse_baseline : 1.0;
 }
 
 // feed a prediction + actual return pair (call after outcome is known)
@@ -244,6 +354,60 @@ static inline double ConfidenceScorer_Compute(ConfidenceScorer *cs, double data_
     double rmse = RollingRMSE_Compute(&cs->rmse);
     cs->last_confidence = Confidence_Compute(ic, data_age_sec, rmse, cs->freshness_tau);
     return cs->last_confidence;
+}
+
+//======================================================================================================
+// [v5.14.1.A — COMPOSITE CONFIDENCE COMPUTE]
+//======================================================================================================
+// 4-factor composite: IC × Freshness × Capacity × Stability_normalized.
+//
+// Differs from ConfidenceScorer_Compute (3-factor IC × Freshness ×
+// 1/(1+RMSE)) in three ways:
+//   1. Adds Capacity term (silently 1.0 when target_dollars=0; default).
+//   2. Stability is normalized vs rmse_baseline (training-time RMSE),
+//      so "stability" means "how close are we to training-time
+//      calibration" rather than "absolute RMSE magnitude".
+//   3. Freshness uses wall-clock now_us against last Mark, not a
+//      caller-passed data_age_sec — the scorer owns its own clock state.
+//
+// Returns scalar in [0, 1]. Caller-provided now_us so tests + replay-
+// determinism can pin time.
+//
+// Mark must be called when a prediction is generated (typically inside
+// the slow-path predict loop, between Features_PackAll + Model_Predict).
+// Update is called when the outcome is known (post-fill, same as legacy
+// ConfidenceScorer_Update).
+//======================================================================================================
+static inline double ConfidenceScorer_ComputeComposite(ConfidenceScorer *cs,
+                                                          uint64_t now_us) {
+    double ic   = RollingIC_Compute(&cs->ic);
+    double rmse = RollingRMSE_Compute(&cs->rmse);
+    double abs_ic = (ic >= 0.0) ? ic : -ic;
+    if (abs_ic < CONFIDENCE_MIN_IC_DEFAULT) abs_ic = CONFIDENCE_MIN_IC_DEFAULT;
+
+    double fresh = RollingFreshness_Compute(&cs->freshness, now_us);
+    double capac = RollingCapacity_Compute(&cs->capacity);
+
+    // Stability normalized: 1 when rmse=0 (perfect cal); 0 when rmse>=baseline
+    // (no edge vs training). Clamp protects against rmse_baseline misconfig
+    // (e.g. operator forgot to bind from training).
+    double baseline = (cs->rmse_baseline > 0.0) ? cs->rmse_baseline : 1.0;
+    double stab_ratio = rmse / baseline;
+    if (stab_ratio > 1.0) stab_ratio = 1.0;
+    if (stab_ratio < 0.0) stab_ratio = 0.0;
+    double stability = 1.0 - stab_ratio;
+
+    double composite = abs_ic * fresh * capac * stability;
+    cs->last_confidence = composite;
+    return composite;
+}
+
+// v5.14.1.A — convenience wrapper for callers that don't track now_us
+// directly (e.g. simple tests, single-shot manual eval). Production
+// path should pass now_us explicitly for replay-determinism + test
+// fixture control.
+static inline void ConfidenceScorer_MarkPredict(ConfidenceScorer *cs, uint64_t now_us) {
+    RollingFreshness_Mark(&cs->freshness, now_us);
 }
 
 //======================================================================================================
