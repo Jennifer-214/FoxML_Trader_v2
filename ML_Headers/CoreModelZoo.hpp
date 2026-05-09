@@ -37,6 +37,7 @@
 #include "FeatureRegistry.hpp"  // v5.8.6: FEATURE_REGISTRY_HASH() drift catch
 #include "../Backtest/LabelFunctions.hpp"  // v5.10.1.A: LABEL_REGISTRY_HASH() drift catch
 #include "BanditLearning.hpp"   // v5.10.0a.G.7 — per-regime BanditState in EnsembleModelZoo
+#include "RidgeBlender.hpp"     // v5.14.0 — Ridge risk-parity blending state on EnsembleModelZoo
 #include "../Strategies/StrategyInterface.hpp"  // v5.10.0a.G.7 — NUM_REGIMES
 #include "../Version.hpp"        // v5.8.6: ENGINE_VERSION_STRING for boot log
 #include <stdio.h>
@@ -749,6 +750,21 @@ struct EnsembleModelZoo {
     BanditState exit_bandits[NUM_REGIMES];
     int initialized_exit_bandits;       // 0 = no exit models loaded; gates dispatch
     int last_predicted_exit_horizon_idx;// dominant exit_predictor arm at predict time
+
+    // v5.14.0 — Ridge risk-parity blending state. Computed per slow-path
+    // cycle when cfg.ridge_within_horizon=1 (default 0; preserves bandit
+    // path bytewise). Reads ezoo->reward_ring's recent prediction history
+    // to build N×N correlation matrix; Cholesky-solves Markowitz-style
+    // optimal weights; falls back to uniform on singular Σ.
+    //
+    // Cache impact: ~5KB struct per ezoo. Slow-path single-writer + reader
+    // on its own per-core ezoo; no false sharing. NOT in hot-path read set.
+    //
+    // Default: zero-init via RidgeWeights_Init in _Init below. Identity
+    // correlation matrix = orthogonal models = Cholesky succeeds with
+    // diagonal-only Σ. fallback_to_uniform stays 0 until the first
+    // _Compute call sees a singular Σ.
+    RidgeWeights<F> ridge_state;
     char blend_mode[16];           // "weighted" or "selection" (cached from cfg)
     // v5.10.0a.G.7 — kill-switch bitmask. Bit i set = horizon i disabled
     // (skip predict + freeze its bandit weight). Set by parsing cfg's
@@ -827,6 +843,11 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     memset(ezoo->exit_bandits, 0, sizeof(ezoo->exit_bandits));
     ezoo->initialized_exit_bandits        = 0;
     ezoo->last_predicted_exit_horizon_idx = -1;
+    // v5.14.0 — Ridge state zero-init. Identity Σ + zero μ/L/y/w/output
+    // weights. Cholesky succeeds out-of-box on identity Σ regularized
+    // by ridge λ; no per-core wiring needed beyond cfg flag check at
+    // dispatch site (StrategyParameters.hpp ML_BuildParameters).
+    RidgeWeights_Init(&ezoo->ridge_state);
     ezoo->last_predicted_regime_id = 0;
     ezoo->last_predicted_horizon_idx = -1;
     strncpy(ezoo->blend_mode, "weighted", sizeof(ezoo->blend_mode) - 1);

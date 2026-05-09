@@ -17804,6 +17804,250 @@ e3_skip_load:;
               !aligned_bad);
     }
 
+    // ===================================================================
+    // v5.14.0.A — Ridge risk-parity blending (Cholesky + BuildCorr math)
+    // ===================================================================
+    printf("\n--- v5.14.0.A: RidgeWeights_Init + zero-state ---\n");
+    {
+        RidgeWeights<64> rw;
+        RidgeWeights_Init(&rw);
+        check("v5.14.0.A: n_models defaults 0 post-Init",
+              rw.n_models == 0);
+        check("v5.14.0.A: fallback_to_uniform defaults 0 post-Init",
+              rw.fallback_to_uniform == 0);
+        // Identity correlation matrix post-Init
+        check("v5.14.0.A: corr_matrix[0][0] = 1.0 (identity diagonal)",
+              rw.corr_matrix[0][0] == 1.0);
+        check("v5.14.0.A: corr_matrix[0][1] = 0.0 (identity off-diag)",
+              rw.corr_matrix[0][1] == 0.0);
+        check("v5.14.0.A: corr_matrix[7][7] = 1.0 (last diagonal)",
+              rw.corr_matrix[MAX_RIDGE_MODELS - 1][MAX_RIDGE_MODELS - 1] == 1.0);
+        // Output weights all zero
+        int all_zero_w = 1;
+        for (int i = 0; i < MAX_RIDGE_MODELS; ++i) {
+            if (FPN_ToDouble(rw.w[i]) != 0.0) { all_zero_w = 0; break; }
+        }
+        check("v5.14.0.A: w[] defaults all-zero post-Init", all_zero_w);
+    }
+
+    printf("\n--- v5.14.0.A: Cholesky_Solve on synthetic 2x2 ---\n");
+    {
+        // Test: 2x2 SPD matrix, simple solve.
+        // Σ = [[1.0, 0.0], [0.0, 1.0]] (identity); λ = 0.0 (no ridge yet)
+        // μ = [0.5, 0.5]
+        // Expected: L = identity; y = μ; w = μ → [0.5, 0.5]
+        double sigma[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS] = {{0.0}};
+        sigma[0][0] = 1.0; sigma[1][1] = 1.0;
+        double mu[MAX_RIDGE_MODELS] = {0.5, 0.5};
+        double L[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS] = {{0.0}};
+        double y[MAX_RIDGE_MODELS] = {0.0};
+        double w[MAX_RIDGE_MODELS] = {0.0};
+        int rc = Cholesky_Solve<64>(L, y, w, sigma, mu, /*lambda=*/0.0, 2);
+        check("v5.14.0.A: Cholesky_Solve returns 0 on identity Σ",
+              rc == 0);
+        check("v5.14.0.A: identity Σ → L diagonal = 1",
+              L[0][0] == 1.0 && L[1][1] == 1.0);
+        check("v5.14.0.A: identity Σ + μ=[0.5,0.5] → w = [0.5, 0.5]",
+              w[0] > 0.499 && w[0] < 0.501 &&
+              w[1] > 0.499 && w[1] < 0.501);
+    }
+
+    printf("\n--- v5.14.0.A: Cholesky_Solve on singular matrix ---\n");
+    {
+        // Test: 2x2 rank-1 (singular), no ridge → Cholesky should fail.
+        // Σ = [[1.0, 1.0], [1.0, 1.0]] (rank 1)
+        double sigma[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS] = {{0.0}};
+        sigma[0][0] = 1.0; sigma[0][1] = 1.0;
+        sigma[1][0] = 1.0; sigma[1][1] = 1.0;
+        double mu[MAX_RIDGE_MODELS] = {0.5, 0.5};
+        double L[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS] = {{0.0}};
+        double y[MAX_RIDGE_MODELS] = {0.0};
+        double w[MAX_RIDGE_MODELS] = {0.0};
+        int rc = Cholesky_Solve<64>(L, y, w, sigma, mu, /*lambda=*/0.0, 2);
+        check("v5.14.0.A: Cholesky_Solve returns -1 on rank-1 (singular) Σ",
+              rc == -1);
+    }
+
+    printf("\n--- v5.14.0.A: Cholesky_Solve singular Σ + ridge regularization ---\n");
+    {
+        // Same rank-1 Σ but with λ = 0.15 → (Σ + λI) is PD → Cholesky succeeds.
+        double sigma[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS] = {{0.0}};
+        sigma[0][0] = 1.0; sigma[0][1] = 1.0;
+        sigma[1][0] = 1.0; sigma[1][1] = 1.0;
+        double mu[MAX_RIDGE_MODELS] = {0.5, 0.5};
+        double L[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS] = {{0.0}};
+        double y[MAX_RIDGE_MODELS] = {0.0};
+        double w[MAX_RIDGE_MODELS] = {0.0};
+        int rc = Cholesky_Solve<64>(L, y, w, sigma, mu, /*lambda=*/0.15, 2);
+        check("v5.14.0.A: ridge λ=0.15 rescues singular Σ; Cholesky succeeds",
+              rc == 0);
+        // Symmetric μ → symmetric w
+        check("v5.14.0.A: symmetric μ + symmetric Σ → symmetric w",
+              w[0] > 0.0 && w[1] > 0.0 &&
+              std::fabs(w[0] - w[1]) < 1e-9);
+    }
+
+    printf("\n--- v5.14.0.A: RidgeBlender_Compute end-to-end ---\n");
+    {
+        // 3-model case: model 0 has highest IC, models 1+2 lower.
+        // Expected: w[0] gets the largest weight after cost-penalty + clip + renorm.
+        RidgeWeights<64> rw;
+        RidgeWeights_Init(&rw);
+        // Identity-like correlation (default from Init); models orthogonal.
+        // ICs: 0.10, 0.05, 0.02; costs: all zero.
+        double ic[3]   = {0.10, 0.05, 0.02};
+        double cost[3] = {0.0, 0.0, 0.0};
+        int rc = RidgeBlender_Compute<64>(&rw, ic, cost, 3,
+            /*lambda=*/0.15, /*cost_penalty=*/0.5,
+            /*min_ic_floor=*/0.001);
+        check("v5.14.0.A: Compute returns 0 on healthy 3-model case",
+              rc == 0);
+        check("v5.14.0.A: 3-model w sums to ~1.0",
+              std::fabs(FPN_ToDouble(rw.w[0]) +
+                        FPN_ToDouble(rw.w[1]) +
+                        FPN_ToDouble(rw.w[2]) - 1.0) < 1e-6);
+        // Highest IC → highest weight (orthogonal models)
+        check("v5.14.0.A: model 0 (highest IC) gets highest weight",
+              FPN_ToDouble(rw.w[0]) > FPN_ToDouble(rw.w[1]) &&
+              FPN_ToDouble(rw.w[1]) > FPN_ToDouble(rw.w[2]));
+        check("v5.14.0.A: all weights ≥ 0",
+              FPN_ToDouble(rw.w[0]) >= 0.0 &&
+              FPN_ToDouble(rw.w[1]) >= 0.0 &&
+              FPN_ToDouble(rw.w[2]) >= 0.0);
+        check("v5.14.0.A: fallback_to_uniform stays 0 (Cholesky succeeded)",
+              rw.fallback_to_uniform == 0);
+    }
+
+    printf("\n--- v5.14.0.A: Compute fallback on extreme correlation ---\n");
+    {
+        // Highly-correlated models: corr = 1.0 across all pairs → Σ + λI
+        // still PD if λ > 0, but small λ may not save it. Use λ near 0.
+        RidgeWeights<64> rw;
+        RidgeWeights_Init(&rw);
+        // Override default identity with all-1 correlation (rank 1)
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                rw.corr_matrix[i][j] = 1.0;
+            }
+        }
+        double ic[3]   = {0.10, 0.10, 0.10};
+        double cost[3] = {0.0, 0.0, 0.0};
+        // λ = 0.0 → Σ is rank-1 (all-1s); zero eigenvalues remain →
+        // Cholesky fails on the second diagonal step → uniform fallback.
+        // Note: any λ > 0 makes (Σ + λI) PD with min eigenvalue = λ; even
+        // λ=1e-9 numerically succeeds (just produces huge weights). The
+        // ridge regularization works exactly as designed: catches singular
+        // Σ cases via cfg.ridge_lambda > 0 default. Tested separately in
+        // earlier "ridge λ=0.15 rescues singular Σ" test.
+        int rc = RidgeBlender_Compute<64>(&rw, ic, cost, 3,
+            /*lambda=*/0.0, 0.5, 0.001);
+        check("v5.14.0.A: λ=0 on rank-1 Σ → Cholesky fails (rc=-1)",
+              rc == -1);
+        check("v5.14.0.A: fallback_to_uniform=1 on Cholesky failure",
+              rw.fallback_to_uniform == 1);
+        // Uniform 1/3 weights returned
+        check("v5.14.0.A: fallback weights = uniform 1/3",
+              std::fabs(FPN_ToDouble(rw.w[0]) - 1.0/3.0) < 1e-6 &&
+              std::fabs(FPN_ToDouble(rw.w[1]) - 1.0/3.0) < 1e-6 &&
+              std::fabs(FPN_ToDouble(rw.w[2]) - 1.0/3.0) < 1e-6);
+    }
+
+    printf("\n--- v5.14.0.A: cost_penalty reduces fee-heavy model weight ---\n");
+    {
+        // 2 models, equal IC, but model 1 has higher cost. With
+        // cost_penalty > 0, model 0 should get more weight.
+        RidgeWeights<64> rw;
+        RidgeWeights_Init(&rw);
+        double ic[2]   = {0.05, 0.05};
+        double cost[2] = {0.0, 0.02};   // model 1 is fee-heavy
+        int rc = RidgeBlender_Compute<64>(&rw, ic, cost, 2,
+            /*lambda=*/0.15, /*cost_penalty=*/0.5,
+            /*min_ic_floor=*/0.001);
+        check("v5.14.0.A: cost-penalty case Compute succeeds",
+              rc == 0);
+        check("v5.14.0.A: model 0 (no cost) gets higher weight than model 1 (fee-heavy)",
+              FPN_ToDouble(rw.w[0]) > FPN_ToDouble(rw.w[1]));
+    }
+
+    printf("\n--- v5.14.0.A: BuildCorr on independent uniform-noise predictions ---\n");
+    {
+        // 3 models predicting random uniform noise → off-diagonal corr ≈ 0.
+        // Synthesize K=64 predictions per model with deterministic
+        // uncorrelated values (LCG) to keep test reproducible.
+        constexpr int K = 64;
+        constexpr int N = 3;
+        float history[K * N];
+        // Three different LCG streams (different seeds → uncorrelated)
+        uint32_t s0 = 12345, s1 = 67890, s2 = 24680;
+        for (int k = 0; k < K; ++k) {
+            s0 = s0 * 1103515245u + 12345u;
+            s1 = s1 * 1103515245u + 12345u;
+            s2 = s2 * 1103515245u + 12345u;
+            history[k * N + 0] = (float)(s0 % 1000) / 1000.0f;
+            history[k * N + 1] = (float)(s1 % 1000) / 1000.0f;
+            history[k * N + 2] = (float)(s2 % 1000) / 1000.0f;
+        }
+        double corr[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS] = {{0.0}};
+        RidgeBlender_BuildCorr<64>(corr, history, K, N);
+        check("v5.14.0.A: BuildCorr diagonal = 1.0",
+              std::fabs(corr[0][0] - 1.0) < 1e-9 &&
+              std::fabs(corr[1][1] - 1.0) < 1e-9 &&
+              std::fabs(corr[2][2] - 1.0) < 1e-9);
+        // Independent streams → |corr| should be small (< 0.3 with K=64)
+        check("v5.14.0.A: BuildCorr off-diagonal ≈ 0 for independent streams",
+              std::fabs(corr[0][1]) < 0.3 &&
+              std::fabs(corr[0][2]) < 0.3 &&
+              std::fabs(corr[1][2]) < 0.3);
+        // Symmetric
+        check("v5.14.0.A: BuildCorr is symmetric",
+              std::fabs(corr[0][1] - corr[1][0]) < 1e-12 &&
+              std::fabs(corr[0][2] - corr[2][0]) < 1e-12);
+    }
+
+    printf("\n--- v5.14.0.A: BuildCorr identity-row guard for constant predictions ---\n");
+    {
+        // 2 models: model 0 predicts constant 0.5; model 1 predicts uniform noise.
+        // Constant model has std=0 → identity row guard fires (off-diag = 0).
+        constexpr int K = 32;
+        constexpr int N = 2;
+        float history[K * N];
+        uint32_t s = 99999;
+        for (int k = 0; k < K; ++k) {
+            s = s * 1103515245u + 12345u;
+            history[k * N + 0] = 0.5f;  // constant
+            history[k * N + 1] = (float)(s % 1000) / 1000.0f;
+        }
+        double corr[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS] = {{0.0}};
+        RidgeBlender_BuildCorr<64>(corr, history, K, N);
+        check("v5.14.0.A: constant predictions → identity row (off-diag = 0)",
+              corr[0][1] == 0.0 && corr[1][0] == 0.0);
+        check("v5.14.0.A: constant predictions → diagonal = 1.0",
+              corr[0][0] == 1.0 && corr[1][1] == 1.0);
+    }
+
+    printf("\n--- v5.14.0.A: BuildCorr sparse history (n_history < 2) ---\n");
+    {
+        // Insufficient history → identity matrix returned (Cholesky-safe default)
+        double corr[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS] = {{0.0}};
+        RidgeBlender_BuildCorr<64>(corr, nullptr, /*n_history=*/0, /*n_models=*/3);
+        check("v5.14.0.A: empty history → identity matrix",
+              corr[0][0] == 1.0 && corr[1][1] == 1.0 &&
+              corr[2][2] == 1.0 && corr[0][1] == 0.0);
+    }
+
+    printf("\n--- v5.14.0.A: EnsembleModelZoo zero-init includes ridge_state ---\n");
+    {
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        check("v5.14.0.A: ezoo.ridge_state.n_models = 0 post-Init",
+              ezoo.ridge_state.n_models == 0);
+        check("v5.14.0.A: ezoo.ridge_state.fallback_to_uniform = 0 post-Init",
+              ezoo.ridge_state.fallback_to_uniform == 0);
+        check("v5.14.0.A: ezoo.ridge_state.corr_matrix is identity post-Init",
+              ezoo.ridge_state.corr_matrix[0][0] == 1.0 &&
+              ezoo.ridge_state.corr_matrix[1][1] == 1.0);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
