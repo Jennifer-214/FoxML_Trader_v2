@@ -1378,27 +1378,32 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
                 case tt::RECONCILE_AUTO_SYNC: {
                     // AUTO_SYNC = composition of N independent helper-actions.
-                    // .B.1 ships ApplyMissedFills (replay; pure OMS state
-                    // mutation; no exchange writes). .B.2 will add
-                    // AutoCancelStale (exchange-side cancellations).
+                    // .B.1: Reconcile_ApplyMissedFills (replay; pure OMS state
+                    //       mutation; no exchange writes)
+                    // .B.2: Reconcile_AutoCancelStale (real exchange cancels
+                    //       via lambda-injected BinanceOrderAPI_CancelOrder
+                    //       per Option E template-deferred dep injection)
                     int replayed = tt::Reconcile_ApplyMissedFills(
                         &oms, trades, n_trades);
                     fprintf(stderr,
-                        "[reconcile] AUTO_SYNC: %d missed fill(s) replayed "
-                        "(last_seen_trade_id=%llu)\n",
+                        "[reconcile] AUTO_SYNC replay: %d missed fill(s) "
+                        "applied (last_seen_trade_id=%llu)\n",
                         replayed, (unsigned long long)oms.last_seen_trade_id);
 
-                    // .B.1 partial-mode message: cancel of zombie orders
-                    // is deferred to .B.2. Removed when .B.2 ships.
-                    if (rr.cancel_actions > 0) {
-                        fprintf(stderr,
-                            "[reconcile] AUTO_SYNC partial (v5.14.4.B.1): "
-                            "%d zombie order(s) detected but cancel-stale "
-                            "deferred to v5.14.4.B.2 ship. Orders left as-is; "
-                            "operator can manually cancel via Binance UI OR "
-                            "wait for v5.14.4.B.2.\n",
-                            rr.cancel_actions);
-                    }
+                    // v5.14.4.B.2 — zombie order cleanup. Lambda injects
+                    // the network primitive (BinanceOrderAPI_CancelOrder)
+                    // into the template helper without Reconcile.hpp needing
+                    // to take a network include. Symmetric with .B.1's
+                    // template-deferred OMS dependency injection.
+                    int cancelled = tt::Reconcile_AutoCancelStale(
+                        [&](const char* order_id) -> int {
+                            return BinanceOrderAPI_CancelOrder(api, order_id);
+                        },
+                        orders, n_orders);
+                    fprintf(stderr,
+                        "[reconcile] AUTO_SYNC cancel: %d zombie order(s) "
+                        "cancelled (out of %d cancel_action(s) detected)\n",
+                        cancelled, rr.cancel_actions);
                     break;
                 }
             }

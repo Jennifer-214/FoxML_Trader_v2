@@ -19116,6 +19116,124 @@ e3_skip_load:;
         }
     }
 
+    // ----- v5.14.4.B.2: Reconcile_AutoCancelStale (zombie cleanup; full AUTO_SYNC) ------------------
+    printf("\n--- v5.14.4.B.2: AutoCancelStale helper ---\n");
+    {
+        // Test 1 — null orders → returns 0 (defensive)
+        auto noop_cancel = [](const char*) -> int { return 1; };
+        check("v5.14.4.B.2: AutoCancelStale null orders → 0",
+              tt::Reconcile_AutoCancelStale(noop_cancel,
+                  (tt::ReconcileOpenOrder*)nullptr, 5) == 0);
+        tt::ReconcileOpenOrder dummy;
+        check("v5.14.4.B.2: AutoCancelStale n_orders=0 → 0",
+              tt::Reconcile_AutoCancelStale(noop_cancel, &dummy, 0) == 0);
+    }
+    {
+        // Test 2 — All is_ours=0 (other-client orders) → none cancelled
+        // (defensive: never touch non-engine orders even if list non-empty)
+        tt::ReconcileOpenOrder orders[3];
+        memset(orders, 0, sizeof(orders));
+        orders[0].order_id = 100; orders[0].is_ours = 0;
+        orders[1].order_id = 200; orders[1].is_ours = 0;
+        orders[2].order_id = 300; orders[2].is_ours = 0;
+
+        int call_count = 0;
+        auto track_cancel = [&](const char*) -> int { call_count++; return 1; };
+
+        int rc = tt::Reconcile_AutoCancelStale(track_cancel, orders, 3);
+        check("v5.14.4.B.2: all is_ours=0 → 0 cancelled (defensive skip)",
+              rc == 0);
+        check("v5.14.4.B.2: cancel callable NEVER invoked when no is_ours orders",
+              call_count == 0);
+    }
+    {
+        // Test 3 — All is_ours=1 + cancel succeeds → all cancelled
+        tt::ReconcileOpenOrder orders[3];
+        memset(orders, 0, sizeof(orders));
+        orders[0].order_id = 100; orders[0].is_ours = 1;
+        orders[1].order_id = 200; orders[1].is_ours = 1;
+        orders[2].order_id = 300; orders[2].is_ours = 1;
+
+        std::vector<std::string> cancelled_ids;
+        auto record_cancel = [&](const char* id) -> int {
+            cancelled_ids.push_back(std::string(id));
+            return 1;
+        };
+
+        int rc = tt::Reconcile_AutoCancelStale(record_cancel, orders, 3);
+        check("v5.14.4.B.2: all is_ours=1 + success → 3 cancelled", rc == 3);
+        check("v5.14.4.B.2: cancel callable invoked 3 times", cancelled_ids.size() == 3);
+        check("v5.14.4.B.2: order_id correctly stringified (100)",
+              cancelled_ids[0] == "100");
+        check("v5.14.4.B.2: order_id correctly stringified (200)",
+              cancelled_ids[1] == "200");
+        check("v5.14.4.B.2: order_id correctly stringified (300)",
+              cancelled_ids[2] == "300");
+    }
+    {
+        // Test 4 — Mixed is_ours → only is_ours cancelled (defensive
+        // selectivity preserved with mixed input)
+        tt::ReconcileOpenOrder orders[5];
+        memset(orders, 0, sizeof(orders));
+        orders[0].order_id = 10; orders[0].is_ours = 1;
+        orders[1].order_id = 20; orders[1].is_ours = 0;  // skip
+        orders[2].order_id = 30; orders[2].is_ours = 1;
+        orders[3].order_id = 40; orders[3].is_ours = 0;  // skip
+        orders[4].order_id = 50; orders[4].is_ours = 1;
+
+        std::vector<std::string> cancelled_ids;
+        auto record_cancel = [&](const char* id) -> int {
+            cancelled_ids.push_back(std::string(id));
+            return 1;
+        };
+
+        int rc = tt::Reconcile_AutoCancelStale(record_cancel, orders, 5);
+        check("v5.14.4.B.2: mixed is_ours → only 3 cancelled (10/30/50)", rc == 3);
+        check("v5.14.4.B.2: skipped orders (20/40) NOT in cancel list",
+              cancelled_ids.size() == 3 &&
+              cancelled_ids[0] == "10" &&
+              cancelled_ids[1] == "30" &&
+              cancelled_ids[2] == "50");
+    }
+    {
+        // Test 5 — Cancel partial fail → cancelled count reflects only success
+        tt::ReconcileOpenOrder orders[4];
+        memset(orders, 0, sizeof(orders));
+        orders[0].order_id = 1; orders[0].is_ours = 1;
+        orders[1].order_id = 2; orders[1].is_ours = 1;
+        orders[2].order_id = 3; orders[2].is_ours = 1;
+        orders[3].order_id = 4; orders[3].is_ours = 1;
+
+        // Simulate fail on order_id 2 + 3 (e.g. "already cancelled" race)
+        auto partial_fail_cancel = [](const char* id) -> int {
+            if (strcmp(id, "2") == 0) return 0;  // fail
+            if (strcmp(id, "3") == 0) return 0;  // fail
+            return 1;
+        };
+
+        int rc = tt::Reconcile_AutoCancelStale(partial_fail_cancel, orders, 4);
+        check("v5.14.4.B.2: 2/4 cancels fail → returns 2 (success count only)",
+              rc == 2);
+    }
+    {
+        // Test 6 — All cancels fail → returns 0 (no aborts; loop completes)
+        tt::ReconcileOpenOrder orders[2];
+        memset(orders, 0, sizeof(orders));
+        orders[0].order_id = 1; orders[0].is_ours = 1;
+        orders[1].order_id = 2; orders[1].is_ours = 1;
+
+        int call_count = 0;
+        auto always_fail = [&](const char*) -> int {
+            call_count++;
+            return 0;
+        };
+
+        int rc = tt::Reconcile_AutoCancelStale(always_fail, orders, 2);
+        check("v5.14.4.B.2: all cancels fail → returns 0", rc == 0);
+        check("v5.14.4.B.2: loop continues despite failures (best-effort) — 2 attempts",
+              call_count == 2);
+    }
+
     // ----- v5.14.4.B.1: Reconcile_ApplyMissedFills (replay-only AUTO_SYNC) --------------------------
     printf("\n--- v5.14.4.B.1: ApplyMissedFills helper ---\n");
     {

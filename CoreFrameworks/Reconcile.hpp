@@ -240,6 +240,103 @@ inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
     return replayed;
 }
 
+//======================================================================================================
+// [v5.14.4.B.2 — AUTOCANCELSTALE HELPER]
+//======================================================================================================
+// Cancels engine-orphaned exchange orders ("zombies"): for each
+// ReconcileOpenOrder where is_ours=1 (client_order_id has "tt-" prefix
+// = engine-placed), invokes BinanceOrderAPI_CancelOrder via the REST
+// API. Engine boot has no in-flight orders by construction (fresh OMS
+// state), so any is_ours order at exchange = orphaned from previous
+// engine session = should be cancelled.
+//
+// Non-engine-placed orders (is_ours=0) are LEFT ALONE. Operator may
+// have orders from other clients on the same account; engine reconcile
+// must not touch those.
+//
+// CALLER (sharded boot only; per deep audit / TECH_DEBT-002):
+//   - EngineSharded.hpp boot reconcile dispatch (RECONCILE_AUTO_SYNC mode)
+//
+// SAFETY:
+//   - Network failure per cancel → logged + counted as failure, but
+//     loop continues (best-effort cancellation; partial success is
+//     better than no cancellation)
+//   - Cancel returns non-200 on "already filled / already cancelled"
+//     races — counted as failure for accounting but not actually
+//     dangerous (terminal state already). Operator-tolerable.
+//   - is_ours=0 orders silently skipped (defensive: never touch
+//     non-engine orders even if reconcile mistakenly classified them)
+//
+// FUTURE-THINKING:
+//   - When v5.X+ adds bulk-cancel-by-symbol (DELETE /api/v3/openOrders;
+//     see BinanceOrderAPI.hpp v5.14.4.0 future-thinking comment), add
+//     a sister helper `Reconcile_AutoCancelAllStale` that uses bulk
+//     endpoint when n_zombies > threshold. Don't fold into this helper
+//     — different endpoint shape + different operator semantics.
+//   - When WS-side cancel-event stream lands, post-cancel state cleanup
+//     follows the WS-event handler path. Boot reconcile only fires the
+//     cancel; WS handles the resulting state update via the existing
+//     event handler.
+//
+// AUTO_SYNC = composition pattern: this is the SECOND helper-action in
+// AUTO_SYNC mode (sister to Reconcile_ApplyMissedFills from v5.14.4.B.1).
+// Establishes the precedent: future v5.X+ AUTO_SYNC additions slot in
+// as new standalone helpers; boot dispatch composes them alongside
+// existing helpers.
+//
+// SHAPE: Template-deferred dependency injection (per Option E discussion
+// 2026-05-09). The CancelFn callable is invoked per zombie order_id;
+// caller supplies the actual cancel function (e.g., a lambda calling
+// BinanceOrderAPI_CancelOrder). This keeps Reconcile.hpp logic-only —
+// no NETWORK include needed; same pattern as Reconcile_ApplyMissedFills
+// (template-deferred OMS dependency).
+//
+// Test-friendly by construction: mocking the cancel function is trivial
+// (pass a lambda that records calls + returns predetermined success/fail
+// pattern). No need for mock-API scaffolding.
+//
+// Returns: count of SUCCESSFUL cancels (n_zombies - failure_count).
+//
+// CancelFn signature: int (*)(const char* order_id) — returns 1 on
+// success, 0 on failure (matches BinanceOrderAPI_CancelOrder's contract
+// for clean caller composition).
+template <typename CancelFn>
+inline int Reconcile_AutoCancelStale(CancelFn&& cancel,
+                                       const ReconcileOpenOrder* exchange_orders,
+                                       int n_orders) {
+    if (!exchange_orders || n_orders <= 0) return 0;
+
+    int cancelled = 0;
+    int failed = 0;
+    char order_id_str[32];
+
+    for (int i = 0; i < n_orders; ++i) {
+        const ReconcileOpenOrder& o = exchange_orders[i];
+        if (!o.is_ours) continue;  // skip non-engine orders (defensive)
+
+        snprintf(order_id_str, sizeof(order_id_str), "%lld",
+                 (long long)o.order_id);
+
+        if (cancel(order_id_str)) {
+            cancelled++;
+        } else {
+            failed++;
+            // Failure detail logged by the caller's CancelFn; continue
+            // loop (best-effort — partial success better than aborting).
+        }
+    }
+
+    if (failed > 0) {
+        fprintf(stderr,
+            "[reconcile] AutoCancelStale partial success: %d cancelled, "
+            "%d failed (likely race with fill OR already-cancelled state; "
+            "see per-order [REST] CANCEL log lines above for details)\n",
+            cancelled, failed);
+    }
+
+    return cancelled;
+}
+
 struct ReconcileResult {
     // Inputs (echoed for logging)
     double exchange_usdt;
