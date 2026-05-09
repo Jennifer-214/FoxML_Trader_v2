@@ -3484,6 +3484,85 @@ int main() {
               conf_stale < conf_fresh * 0.5 && conf_stale > conf_fresh * 0.3);
     }
 
+    // ----- v5.14.1.B.2.C: composite confidence replay-determinism (PARITY-001) ----------
+    // Closes the v5.9.2 contract gap: composite path must produce bytewise-
+    // identical results for identical (now_us, scorer state) inputs across
+    // any number of replays. Backtest path achieves this by passing
+    // tick.timestamp (deterministic) as now_us; live path uses clock_gettime
+    // (no determinism contract). These tests verify the math layer; full
+    // end-to-end backtest replay determinism is verified by the existing
+    // bytewise-determinism test at tests/controller_test.cpp:10251 once
+    // composite is enabled in cfg.
+    printf("\n--- v5.14.1.B.2.C: composite replay-determinism (PARITY-001) ---\n");
+    {
+        // Build a known-good composite scorer + verify formula reproducibility
+        // Same (now_us, state) → same composite scalar bytewise.
+        ConfidenceScorer cs1, cs2;
+        ConfidenceScorer_InitComposite(&cs1, /*window=*/16, /*tau=*/300.0,
+            /*freshness_tau_secs=*/3600.0, /*capacity_target=*/0.0,
+            /*kappa=*/0.1, /*rmse_baseline=*/0.5);
+        ConfidenceScorer_InitComposite(&cs2, /*window=*/16, /*tau=*/300.0,
+            /*freshness_tau_secs=*/3600.0, /*capacity_target=*/0.0,
+            /*kappa=*/0.1, /*rmse_baseline=*/0.5);
+
+        // Push identical (pred, actual) sequences into both scorers
+        for (int i = 0; i < 32; i++) {
+            double p = 0.4 + 0.4 * sin((double)i * 0.3);
+            double a = p + 0.05 * cos((double)i * 0.7);  // close to pred but not identical
+            uint64_t mark_us = 1000000ULL + (uint64_t)i * 100000ULL;  // deterministic
+            ConfidenceScorer_UpdateAndMark(&cs1, p, a, mark_us);
+            ConfidenceScorer_UpdateAndMark(&cs2, p, a, mark_us);
+        }
+
+        // Compute composite at the same now_us — must be bytewise identical.
+        uint64_t now_us = 5000000ULL;
+        double comp1 = ConfidenceScorer_ComputeComposite(&cs1, now_us);
+        double comp2 = ConfidenceScorer_ComputeComposite(&cs2, now_us);
+        check("v5.14.1.B.2 (PARITY-001): identical (state, now_us) → bytewise composite",
+              memcmp(&comp1, &comp2, sizeof(double)) == 0);
+
+        // Different now_us → different freshness → different composite.
+        // (Verifies now_us is actually consumed; not silently dropped.)
+        double comp_later = ConfidenceScorer_ComputeComposite(&cs1, now_us + 7200000000ULL); // +2h
+        check("v5.14.1.B.2: now_us advance → composite decays (freshness term active)",
+              comp_later < comp1);
+
+        // Replay scenario: re-init scorer + replay same sequence + same now_us
+        // → must reproduce composite scalar exactly. Critical for backtest.
+        ConfidenceScorer cs_replay;
+        ConfidenceScorer_InitComposite(&cs_replay, 16, 300.0, 3600.0, 0.0, 0.1, 0.5);
+        for (int i = 0; i < 32; i++) {
+            double p = 0.4 + 0.4 * sin((double)i * 0.3);
+            double a = p + 0.05 * cos((double)i * 0.7);
+            uint64_t mark_us = 1000000ULL + (uint64_t)i * 100000ULL;
+            ConfidenceScorer_UpdateAndMark(&cs_replay, p, a, mark_us);
+        }
+        double comp_replay = ConfidenceScorer_ComputeComposite(&cs_replay, now_us);
+        check("v5.14.1.B.2: full replay → bytewise-identical composite (replay-det contract)",
+              memcmp(&comp1, &comp_replay, sizeof(double)) == 0);
+    }
+    {
+        // Verify ConfidenceScorer_BindCompositeCfg respects cfg fields.
+        // If composite_enabled=0, scorer keeps Init defaults (no-op call).
+        ConfidenceScorer cs;
+        ConfidenceScorer_Init(&cs, 16, 300.0);
+        double saved_baseline = cs.rmse_baseline;
+        ConfidenceScorer_BindCompositeCfg(&cs, /*enabled=*/0, 7200.0, 5000.0, 0.2, 0.123);
+        check("v5.14.1.B.1 (PARITY-003): BindCompositeCfg with enabled=0 → no-op",
+              cs.rmse_baseline == saved_baseline);
+
+        // composite_enabled=1 → push cfg values into scorer.
+        ConfidenceScorer_BindCompositeCfg(&cs, /*enabled=*/1, 7200.0, 5000.0, 0.2, 0.123);
+        check("v5.14.1.B.1 (PARITY-003): BindCompositeCfg with enabled=1 → rmse_baseline pushed",
+              fabs(cs.rmse_baseline - 0.123) < 1e-9);
+        check("v5.14.1.B.1 (PARITY-003): BindCompositeCfg with enabled=1 → freshness_tau pushed",
+              fabs(cs.freshness.tau_secs - 7200.0) < 1e-9);
+        check("v5.14.1.B.1 (PARITY-003): BindCompositeCfg with enabled=1 → capacity_target pushed",
+              fabs(cs.capacity.target_dollars - 5000.0) < 1e-9);
+        check("v5.14.1.B.1 (PARITY-003): BindCompositeCfg with enabled=1 → capacity_kappa pushed",
+              fabs(cs.capacity.kappa - 0.2) < 1e-9);
+    }
+
     // ----- Group 3: Gate effective-threshold formula (3 assertions) ----------------------------------
     // The formula `effective_thr = base * (scale - conf)`, clamped at 1.0,
     // lives at PortfolioController.hpp:~1618 in the slow-path gate block.
