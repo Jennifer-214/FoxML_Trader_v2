@@ -1682,6 +1682,10 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       FeatureComputeCtx<F> ctx{};
       ctx.signals       = &signals;
       ctx.short_rolling = &ctrl->rolling;
+      // v5.14.5.B — populate current_regime from local controller state.
+      // Read PRIOR cycle's classification (Regime_Classify below updates
+      // for next cycle). regime_class_onehot consumes via FOREACH_FEATURE.
+      ctx.current_regime = ctrl->regime.current_regime;
       int n = Features_PackAll(&ctx, feat_buf);
       // v5.9.3b — apply scaler. Identity no-op when not loaded.
       if (n >= 0 && tt::FeatureStandardizer_Apply(
@@ -1850,6 +1854,8 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     FeatureComputeCtx<F> ctx{};
     ctx.signals       = &ctrl->last_signals;
     ctx.short_rolling = &ctrl->rolling;
+    // v5.14.5.B — populate current_regime for regime_class_onehot feature.
+    ctx.current_regime = ctrl->regime.current_regime;
     int n = Features_PackAll(&ctx, features);
     // v5.9.3b — apply scaler ONCE before both peak + valley predictions
     // share the same features buffer. Use peak_model's scaler (peak +

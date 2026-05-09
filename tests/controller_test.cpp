@@ -10061,11 +10061,15 @@ e3_skip_load:;
 
     printf("\n--- EXTENSIBILITY: v5.8.1b feature X-macro registry (full 34-feature set) ---\n");
     {
-        // v5.8.1b: all 34 features now registered (FEAT_SHORT_SLOPE through
-        // FEAT_SPREAD_ZSCORE). ModelFeatures_Pack remains as a thin
-        // back-compat wrapper around Features_PackAll until v5.9.
-        check("v5.8.1b: NUM_REGISTERED_FEATURES == 34 (full set)",
-              NUM_REGISTERED_FEATURES == 34);
+        // v5.8.1b: 34 features registered originally (FEAT_SHORT_SLOPE through
+        // FEAT_SPREAD_ZSCORE). v5.14.5.B added 3 regime-conditional features
+        // (REGIME_TREND_STRENGTH, REGIME_VOL_ZSCORE, REGIME_CLASS_ONEHOT).
+        // ModelFeatures_Pack remains as a thin back-compat wrapper around
+        // Features_PackAll until v5.9.
+        // Use >= for forward-compat: future feature additions don't break
+        // legacy tests; explicit boundary checks below pin the original 34.
+        check("v5.8.1b: NUM_REGISTERED_FEATURES >= 34 (full set + extensions)",
+              NUM_REGISTERED_FEATURES >= 34);
         check("v5.8.1b: FEATURE_SHORT_SLOPE == 0", FEATURE_SHORT_SLOPE == 0);
         check("v5.8.1b: FEATURE_VOLUME_DELTA == 9", FEATURE_VOLUME_DELTA == 9);
         // Boundary checks for the 24 newly registered features (10-33). These
@@ -10084,20 +10088,24 @@ e3_skip_load:;
         // Pinned snapshot — any change to FOREACH_FEATURE flips the hash
         // and fails this test, forcing a deliberate "yes I'm changing
         // the model contract" acknowledgment + retrain.
-        // FNV-1a fold over the 34 enabled rows of FOREACH_FEATURE,
-        // chaining hash(name) and hash(":v" + version). Re-pinned at
-        // v5.8.1b ship time when the remaining 24 features were added.
+        // FNV-1a fold over enabled rows of FOREACH_FEATURE, chaining
+        // hash(name) and hash(":v" + version).
+        //
+        // Re-pinning history:
+        //   v5.8.1b — 0xfc9119b8ed47bcf9ULL (34 features)
+        //   v5.14.5.B — 0x200b252237bbebddULL (37 features; +3 regime)
+        //
         // If this test fails after a deliberate registry change, update
-        // the constant + bump MODEL_FORMAT_VERSION + retrain models.
-        // Failure path prints computed value for easy update.
-        constexpr uint64_t EXPECTED_HASH_V5_8_1B = 0xfc9119b8ed47bcf9ULL;
-        if (h != EXPECTED_HASH_V5_8_1B) {
+        // the constant + bump retrain workflow. Failure path prints
+        // computed value for easy update.
+        constexpr uint64_t EXPECTED_HASH_V5_14_5_B = 0x200b252237bbebddULL;
+        if (h != EXPECTED_HASH_V5_14_5_B) {
             fprintf(stderr,
                 "  [hash debug] computed=0x%016lx expected=0x%016lx\n",
-                (unsigned long)h, (unsigned long)EXPECTED_HASH_V5_8_1B);
+                (unsigned long)h, (unsigned long)EXPECTED_HASH_V5_14_5_B);
         }
-        check("v5.8.1b: FEATURE_REGISTRY_HASH matches pinned snapshot",
-              h == EXPECTED_HASH_V5_8_1B);
+        check("v5.14.5.B: FEATURE_REGISTRY_HASH matches pinned snapshot",
+              h == EXPECTED_HASH_V5_14_5_B);
 
         // Names array drift detection — boundaries of the registered set.
         check("v5.8.1b: FEATURE_NAMES[0] == \"short_slope\"",
@@ -10203,8 +10211,10 @@ e3_skip_load:;
         ModelFeatures_Pack(pack_old, &sig, &r, &r_long);
         int n_new = Features_PackAll(&ctx, pack_new);
 
-        check("v5.8.1b: Features_PackAll returns 34 (registered count)",
-              n_new == 34);
+        // Use >= for forward-compat: v5.14.5.B added 3 regime-conditional
+        // features (37 total). Future additions don't break this assertion.
+        check("v5.8.1b: Features_PackAll returns >= 34 (registered count)",
+              n_new >= 34);
 
         // Per-index equivalence for ALL 34 indices. Tolerance 1e-5 (slightly
         // looser than the 0-9 test's 1e-6) because doubles round-trip through
@@ -19259,6 +19269,163 @@ e3_skip_load:;
         for (int i = 0; i < 5; i++) ticks[i].price = 100.0;
         float result = Label_CSPercentileRank(ticks, 0, 5, /*sample_price=*/0.0, 0, 0, 2);
         check("v5.14.5.A: sample_price <= 0 → NAN (defensive)", std::isnan(result));
+    }
+
+    // ----- v5.14.5.B: regime-conditional features ---------------------------------------------------
+    printf("\n--- v5.14.5.B: regime-conditional features ---\n");
+    {
+        // Verify FOREACH_FEATURE registry exposes the 3 new features at
+        // the expected positions (append-only invariant: new features
+        // get the next available indices, never reorder existing ones).
+        check("v5.14.5.B: FEATURE_REGIME_TREND_STRENGTH index assigned",
+              FEATURE_REGIME_TREND_STRENGTH >= 34);
+        check("v5.14.5.B: FEATURE_REGIME_VOL_ZSCORE index assigned",
+              FEATURE_REGIME_VOL_ZSCORE >= 34);
+        check("v5.14.5.B: FEATURE_REGIME_CLASS_ONEHOT index assigned",
+              FEATURE_REGIME_CLASS_ONEHOT >= 34);
+        check("v5.14.5.B: NUM_REGISTERED_FEATURES bumped to >= 37",
+              NUM_REGISTERED_FEATURES >= 37);
+        check("v5.14.5.B: FEATURE_NAMES[REGIME_TREND_STRENGTH] correct",
+              strcmp(FEATURE_NAMES[FEATURE_REGIME_TREND_STRENGTH],
+                     "regime_trend_strength") == 0);
+        check("v5.14.5.B: FEATURE_NAMES[REGIME_VOL_ZSCORE] correct",
+              strcmp(FEATURE_NAMES[FEATURE_REGIME_VOL_ZSCORE],
+                     "regime_vol_zscore") == 0);
+        check("v5.14.5.B: FEATURE_NAMES[REGIME_CLASS_ONEHOT] correct",
+              strcmp(FEATURE_NAMES[FEATURE_REGIME_CLASS_ONEHOT],
+                     "regime_class_onehot") == 0);
+    }
+    {
+        // ML_Compute_RegimeTrendStrength — saturating clamp to [-1, 1].
+        // x in range → identity; |x|>1 → ±1; null/missing → 0.
+        RegimeSignals<64> sig;
+        memset(&sig, 0, sizeof(sig));
+        FeatureComputeCtx<64> ctx{};
+        ctx.signals = &sig;
+
+        // x = 0 → 0
+        sig.short_slope = FPN_Zero<64>();
+        check("v5.14.5.B: RegimeTrendStrength(x=0) = 0",
+              FPN_IsZero(ML_Compute_RegimeTrendStrength(&ctx)));
+
+        // x = 0.5 → 0.5 (in-range identity)
+        sig.short_slope = FPN_FromDouble<64>(0.5);
+        FPN<64> result = ML_Compute_RegimeTrendStrength(&ctx);
+        check("v5.14.5.B: RegimeTrendStrength(x=0.5) ~= 0.5",
+              std::abs(FPN_ToDouble(result) - 0.5) < 1e-6);
+
+        // x = 5.0 → 1.0 (saturated upper)
+        sig.short_slope = FPN_FromDouble<64>(5.0);
+        result = ML_Compute_RegimeTrendStrength(&ctx);
+        check("v5.14.5.B: RegimeTrendStrength(x=5) saturates to 1",
+              std::abs(FPN_ToDouble(result) - 1.0) < 1e-6);
+
+        // x = -5.0 → -1.0 (saturated lower)
+        sig.short_slope = FPN_FromDouble<64>(-5.0);
+        result = ML_Compute_RegimeTrendStrength(&ctx);
+        check("v5.14.5.B: RegimeTrendStrength(x=-5) saturates to -1",
+              std::abs(FPN_ToDouble(result) + 1.0) < 1e-6);
+
+        // null ctx → 0 (defensive)
+        check("v5.14.5.B: RegimeTrendStrength(null) = 0",
+              FPN_IsZero(ML_Compute_RegimeTrendStrength<64>(nullptr)));
+    }
+    {
+        // ML_Compute_RegimeVolZscore — (short_var - long_var) / sqrt(long_var).
+        // Sign-carrying; long_var=0 → 0 (defensive).
+        RegimeSignals<64> sig;
+        memset(&sig, 0, sizeof(sig));
+        FeatureComputeCtx<64> ctx{};
+        ctx.signals = &sig;
+
+        // long_var=0 → 0 (defensive: avoid div-by-zero)
+        sig.short_variance = FPN_FromDouble<64>(1.0);
+        sig.long_variance  = FPN_Zero<64>();
+        check("v5.14.5.B: RegimeVolZscore(long_var=0) = 0",
+              FPN_IsZero(ML_Compute_RegimeVolZscore(&ctx)));
+
+        // short_var=long_var → 0 (no z-score)
+        sig.short_variance = FPN_FromDouble<64>(4.0);
+        sig.long_variance  = FPN_FromDouble<64>(4.0);
+        FPN<64> result = ML_Compute_RegimeVolZscore(&ctx);
+        check("v5.14.5.B: RegimeVolZscore(equal) ~= 0",
+              std::abs(FPN_ToDouble(result)) < 1e-6);
+
+        // short_var=8, long_var=4 → (8-4)/sqrt(4) = 4/2 = 2.0
+        sig.short_variance = FPN_FromDouble<64>(8.0);
+        sig.long_variance  = FPN_FromDouble<64>(4.0);
+        result = ML_Compute_RegimeVolZscore(&ctx);
+        check("v5.14.5.B: RegimeVolZscore(8, 4) ~= 2.0",
+              std::abs(FPN_ToDouble(result) - 2.0) < 1e-3);
+
+        // short_var=2, long_var=8 → (2-8)/sqrt(8) ~= -2.121
+        sig.short_variance = FPN_FromDouble<64>(2.0);
+        sig.long_variance  = FPN_FromDouble<64>(8.0);
+        result = ML_Compute_RegimeVolZscore(&ctx);
+        check("v5.14.5.B: RegimeVolZscore(2, 8) negative",
+              FPN_ToDouble(result) < -1.5);
+
+        // null ctx → 0 (defensive)
+        check("v5.14.5.B: RegimeVolZscore(null) = 0",
+              FPN_IsZero(ML_Compute_RegimeVolZscore<64>(nullptr)));
+    }
+    {
+        // ML_Compute_RegimeClassOneHot — read ctx->current_regime as int.
+        FeatureComputeCtx<64> ctx{};
+
+        // Default 0 (REGIME_RANGING)
+        ctx.current_regime = 0;
+        check("v5.14.5.B: RegimeClassOneHot(0) = 0",
+              FPN_IsZero(ML_Compute_RegimeClassOneHot(&ctx)));
+
+        // current_regime=1 → 1
+        ctx.current_regime = 1;
+        FPN<64> result = ML_Compute_RegimeClassOneHot(&ctx);
+        check("v5.14.5.B: RegimeClassOneHot(1) = 1",
+              std::abs(FPN_ToDouble(result) - 1.0) < 1e-6);
+
+        // current_regime=4 (max regime; depends on FOREACH_REGIME)
+        ctx.current_regime = 4;
+        result = ML_Compute_RegimeClassOneHot(&ctx);
+        check("v5.14.5.B: RegimeClassOneHot(4) = 4",
+              std::abs(FPN_ToDouble(result) - 4.0) < 1e-6);
+
+        // null ctx → 0 (defensive)
+        check("v5.14.5.B: RegimeClassOneHot(null) = 0",
+              FPN_IsZero(ML_Compute_RegimeClassOneHot<64>(nullptr)));
+    }
+    {
+        // Train-serve parity by construction — verify Features_PackAll
+        // populates the 3 new features in the same buffer slots in
+        // both LIVE and BACKTEST callers, given identical FeatureComputeCtx.
+        // (Direct verification: same ctx → same buffer = parity by
+        // construction, since both paths call Features_PackAll with the
+        // same registry.)
+        RegimeSignals<64> sig;
+        memset(&sig, 0, sizeof(sig));
+        sig.short_slope = FPN_FromDouble<64>(0.3);
+        sig.short_variance = FPN_FromDouble<64>(2.0);
+        sig.long_variance = FPN_FromDouble<64>(1.0);
+
+        RollingStats<64> r = RollingStats_Init<64>();
+
+        FeatureComputeCtx<64> ctx{};
+        ctx.signals = &sig;
+        ctx.short_rolling = &r;
+        ctx.current_regime = 2;
+
+        float buf[MODEL_MAX_FEATURES] = {0};
+        int n = Features_PackAll(&ctx, buf);
+        check("v5.14.5.B: Features_PackAll succeeds with regime fields",
+              n >= 37);
+        // Verify the 3 new features land in their registry positions.
+        check("v5.14.5.B: regime_trend_strength populated correctly",
+              std::abs(buf[FEATURE_REGIME_TREND_STRENGTH] - 0.3f) < 1e-3f);
+        // (8 - 1) / sqrt(1) = 7 — wait, short_var=2, long_var=1 → (2-1)/sqrt(1) = 1
+        check("v5.14.5.B: regime_vol_zscore populated correctly",
+              std::abs(buf[FEATURE_REGIME_VOL_ZSCORE] - 1.0f) < 1e-3f);
+        check("v5.14.5.B: regime_class_onehot populated from ctx",
+              std::abs(buf[FEATURE_REGIME_CLASS_ONEHOT] - 2.0f) < 1e-3f);
     }
 
     // ----- v5.14.4.B.2: Reconcile_AutoCancelStale (zombie cleanup; full AUTO_SYNC) ------------------

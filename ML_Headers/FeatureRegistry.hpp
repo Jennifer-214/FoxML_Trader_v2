@@ -74,6 +74,16 @@ struct FeatureComputeCtx {
     // Short-window rolling stats. Feature indices 11-14 read here:
     // vwap_dev, price_stddev, price_avg, volume_avg.
     const RollingStats<F, 128>*           short_rolling;
+
+    // v5.14.5.B — hysteresed regime classification (REGIME_RANGING /
+    // _TRENDING / _VOLATILE / _TRENDING_DOWN / _MILD_TREND). Populated
+    // at slow-path callers from EventLoopCoreState.regime_state.current_regime
+    // (universalized in v5.14.5.B.0 to fire for ALL cores, not just AUTO).
+    // Read by ML_Compute_RegimeClassOneHot.
+    //
+    // Default 0 (REGIME_RANGING) when caller doesn't populate; safe for
+    // legacy/test paths that don't have regime_state in scope.
+    int                                   current_regime;
 };
 
 //======================================================================================================
@@ -270,6 +280,75 @@ inline FPN<F> ML_Compute_SpreadZscore(const FeatureComputeCtx<F>* ctx) {
 }
 
 //======================================================================================================
+// [v5.14.5.B — REGIME-CONDITIONAL FEATURES]
+//======================================================================================================
+// 3 features that expose regime context to ML models. Differs from
+// existing SHORT_SLOPE / VOL_RATIO in normalization characteristics
+// (saturating vs unbounded; sign-carrying z-score vs ratio).
+//
+// EMPIRICAL VERIFICATION DISCIPLINE (TECH_DEBT-007):
+//   regime_trend_strength + regime_vol_zscore have semantic overlap
+//   with existing SHORT_SLOPE / VOL_RATIO. The differing normalization
+//   may produce complementary training signal OR may train identically
+//   depending on operator's data + model architecture. Verify via
+//   feature_importance scores post-first-retrain. If trend_strength
+//   importance < 0.01 AND SHORT_SLOPE importance > 0.05 → likely
+//   redundant; drop in v5.X+ ship via FEATURE_REGISTRY_HASH bump.
+//
+// regime_class_onehot reads ctx->current_regime directly (populated by
+// slow-path callers from EventLoopCoreState.regime_state.current_regime;
+// universalized in v5.14.5.B.0). Genuinely new info; not derivable
+// from existing RegimeSignals fields.
+//======================================================================================================
+
+// regime_trend_strength: saturating clamp of short_slope to [-1, 1].
+// Bounded; sign-preserving. Differs from SHORT_SLOPE (unbounded slope/avg
+// ratio) in that extreme values saturate rather than dominating model
+// gradient. Verify importance vs SHORT_SLOPE post-train (TECH_DEBT-007).
+template <unsigned F>
+inline FPN<F> ML_Compute_RegimeTrendStrength(const FeatureComputeCtx<F>* ctx) {
+    if (!ctx || !ctx->signals) return FPN_Zero<F>();
+    FPN<F> x = ctx->signals->short_slope;
+    FPN<F> one = FPN_FromInt<F>(1);
+    FPN<F> neg_one = FPN_Sub(FPN_Zero<F>(), one);
+    if (FPN_GreaterThan(x, one)) return one;
+    if (FPN_LessThan(x, neg_one)) return neg_one;
+    return x;
+}
+
+// regime_vol_zscore: (short_var - long_var) / sqrt(long_var) z-score.
+// Sign-carrying (positive = elevated vol; negative = depressed).
+// Differs from VOL_RATIO (positive ratio) in sign + bounded behavior.
+// Verify importance vs VOL_RATIO post-train (TECH_DEBT-007).
+template <unsigned F>
+inline FPN<F> ML_Compute_RegimeVolZscore(const FeatureComputeCtx<F>* ctx) {
+    if (!ctx || !ctx->signals) return FPN_Zero<F>();
+    FPN<F> short_var = ctx->signals->short_variance;
+    FPN<F> long_var = ctx->signals->long_variance;
+    if (FPN_IsZero(long_var)) return FPN_Zero<F>();
+    FPN<F> diff = FPN_Sub(short_var, long_var);
+    FPN<F> denom = FPN_Sqrt(long_var);
+    if (FPN_IsZero(denom)) return FPN_Zero<F>();
+    return FPN_DivNoAssert(diff, denom);
+}
+
+// regime_class_onehot: current_regime as int (0..NUM_REGIMES-1).
+// Read from ctx->current_regime (populated by slow-path callers from
+// EventLoopCoreState.regime_state.current_regime; universalized in
+// v5.14.5.B.0 to fire for ALL cores). Default 0 (REGIME_RANGING) if
+// caller doesn't populate (legacy/test paths).
+//
+// "Onehot" name preserved for future v5.X+ expansion to actual one-hot
+// vector encoding (NUM_REGIMES separate features); single-int form
+// today is the bandwidth-conscious version. Tree-based models (XGBoost)
+// handle integer-valued categorical features natively.
+template <unsigned F>
+inline FPN<F> ML_Compute_RegimeClassOneHot(const FeatureComputeCtx<F>* ctx) {
+    if (!ctx) return FPN_Zero<F>();
+    return FPN_FromInt<F>(ctx->current_regime);
+}
+
+//======================================================================================================
 // [FEATURE REGISTRY — X-macro]
 //======================================================================================================
 // Row format:
@@ -325,7 +404,15 @@ inline FPN<F> ML_Compute_SpreadZscore(const FeatureComputeCtx<F>* ctx) {
     X(FLOW_5M,            "flow_5m",            1, FEATURE_ENABLED, ML_Compute_Flow5m,            "signed-volume EWMA, half-life 300s") \
     X(LARGE_TRADE_Z,      "large_trade_z",      1, FEATURE_ENABLED, ML_Compute_LargeTradeZ,       "z-score of current trade size") \
     X(SPREAD_BPS,         "spread_bps",         1, FEATURE_ENABLED, ML_Compute_SpreadBps,         "spread / mid_price × 10000") \
-    X(SPREAD_ZSCORE,      "spread_zscore",      1, FEATURE_ENABLED, ML_Compute_SpreadZscore,      "z-score of current spread")
+    X(SPREAD_ZSCORE,      "spread_zscore",      1, FEATURE_ENABLED, ML_Compute_SpreadZscore,      "z-score of current spread") \
+    /* v5.14.5.B — regime-conditional features. Empirical-verification    */ \
+    /*               discipline applies (TECH_DEBT-007): trend_strength + */ \
+    /*               vol_zscore have semantic overlap with existing       */ \
+    /*               SHORT_SLOPE / VOL_RATIO but differ in normalization. */ \
+    /*               Verify post-first-retrain feature_importance gain.   */ \
+    X(REGIME_TREND_STRENGTH, "regime_trend_strength", 1, FEATURE_ENABLED, ML_Compute_RegimeTrendStrength, "saturating tanh(short_slope) bounded [-1,1]") \
+    X(REGIME_VOL_ZSCORE,     "regime_vol_zscore",     1, FEATURE_ENABLED, ML_Compute_RegimeVolZscore,     "(short_var - long_var) / sqrt(long_var) z-score") \
+    X(REGIME_CLASS_ONEHOT,   "regime_class_onehot",   1, FEATURE_ENABLED, ML_Compute_RegimeClassOneHot,   "current_regime as int (0..NUM_REGIMES-1)")
 
 // Auto-generated FEATURE_<ID> enum constants. Order matches FOREACH_FEATURE.
 enum FeatureId : uint16_t {
