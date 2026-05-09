@@ -1732,6 +1732,29 @@ inline int EnsembleModelZoo_SaveBanditState(
                             bundle_id, regime_names);
 }
 
+// v5.13.4.C — sell-side bandit persistence. Mirrors _SaveBanditState
+// for the exit_bandits[] array. Saved as a SEPARATE file
+// (<base_dir>/exit_bandit_state.json) rather than extending the
+// existing JSON format, which would cascade into Bandit_SaveJSON /
+// Bandit_LoadJSON (broader callers, larger blast radius). Forward-
+// compat by absence: legacy bundles without the file load with
+// uniform priors (same shape as a fresh deploy). Returns 1 on
+// success, 0 on failure (silent).
+template <unsigned F>
+inline int EnsembleModelZoo_SaveExitBanditState(
+    const EnsembleModelZoo<F>* ezoo, const char* base_dir,
+    const char* const* regime_names) {
+    if (!ezoo || !ezoo->initialized_exit_bandits) return 0;
+    if (ezoo->exit_predictor_count < 2) return 0;  // single-arm: nothing to save
+    if (!base_dir || base_dir[0] == '\0') return 0;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/exit_bandit_state.json", base_dir);
+    char bundle_id[65];
+    EnsembleModelZoo_ComputeBundleId(ezoo, bundle_id, sizeof(bundle_id));
+    return Bandit_SaveJSON(ezoo->exit_bandits, NUM_REGIMES, path,
+                            bundle_id, regime_names);
+}
+
 // Load bandit state from <base_dir>/bandit_state.json. Returns 1 on
 // success (overlays weights/cum_reward/pulls onto pre-initialized
 // bandits), 0 on missing/corrupt/mismatched file.
@@ -1764,6 +1787,32 @@ inline int EnsembleModelZoo_LoadBanditState(
             fprintf(stderr, "[ensemble] bandit_state.json present but rejected "
                             "(format/sha/n_arms mismatch); starting uniform\n");
         }
+    }
+    return loaded;
+}
+
+// v5.13.4.C — sell-side bandit load. Mirrors _LoadBanditState for the
+// exit_bandits[] array. Reads <base_dir>/exit_bandit_state.json.
+// Returns 1 on success, 0 on missing/mismatch (uniform priors stay).
+// Caller must call _InitExitBandits FIRST to set up uniform priors.
+template <unsigned F>
+inline int EnsembleModelZoo_LoadExitBanditState(
+    EnsembleModelZoo<F>* ezoo, const char* base_dir) {
+    if (!ezoo || !ezoo->initialized_exit_bandits) return 0;
+    if (ezoo->exit_predictor_count < 2) return 0;  // single-arm: skip load
+    if (!base_dir || base_dir[0] == '\0') return 0;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/exit_bandit_state.json", base_dir);
+    char expected_id[65];
+    EnsembleModelZoo_ComputeBundleId(ezoo, expected_id, sizeof(expected_id));
+    int loaded = Bandit_LoadJSON(ezoo->exit_bandits, NUM_REGIMES, path,
+                                   expected_id, ezoo->exit_predictor_count);
+    if (loaded) {
+        fprintf(stderr, "[ensemble] loaded exit_bandit state from %s\n", path);
+    } else if (access(path, F_OK) == 0) {
+        fprintf(stderr, "[ensemble] exit_bandit_state.json present but "
+                        "rejected (format/sha/n_arms mismatch); "
+                        "starting uniform\n");
     }
     return loaded;
 }

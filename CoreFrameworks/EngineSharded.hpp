@@ -1185,6 +1185,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                       cfg.core_model_dir[i]);
                     EnsembleModelZoo_SetBanditSaveInterval(&ml_ensemble_zoos[i],
                         cfg.ensemble_bandit_save_interval);
+                    // v5.13.4.C — overlay persisted exit-bandit state (if any).
+                    // No-op when no exit_bandit_state.json file exists or
+                    // exit_predictor_count < 2.
+                    EnsembleModelZoo_LoadExitBanditState(&ml_ensemble_zoos[i],
+                                                          cfg.core_model_dir[i]);
                     state.cores[i].ensemble_handle = &ml_ensemble_zoos[i];
                     ensemble_loaded = 1;
                 } else {
@@ -3311,6 +3316,16 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             if (saved) {
                 fprintf(stderr, "[sharded] core %d: saved bandit state to "
                                 "%s/bandit_state.json\n",
+                        i, cfg.core_model_dir[i]);
+            }
+            // v5.13.4.C — sell-side bandit shutdown save. Skips silently
+            // when initialized_exit_bandits=0 (no exit models loaded).
+            int saved_exit = EnsembleModelZoo_SaveExitBanditState(
+                ezoo, cfg.core_model_dir[i],
+                /*regime_names=*/nullptr);
+            if (saved_exit) {
+                fprintf(stderr, "[sharded] core %d: saved exit_bandit "
+                                "state to %s/exit_bandit_state.json\n",
                         i, cfg.core_model_dir[i]);
             }
         }
