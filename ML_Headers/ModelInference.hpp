@@ -25,6 +25,7 @@
 #include "../Version.hpp"                 // v5.9.2b — ENGINE_VERSION_STRING for cross-major detection
 #include "FeatureStandardizer.hpp"       // v5.9.3a — inline scaler struct on ModelHandle
 #include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.C — std::from_chars wrapper (locale immunity)
+#include "StampBoundCfgRegistry.hpp"     // v5.14.1.B.3 — FOREACH_STAMP_BOUND_CFG X-macro
 #include <stdio.h>
 #include <string.h>
 #include <locale.h>                       // v5.3.0 Phase B — uselocale for canonical body LC_NUMERIC pinning
@@ -1277,6 +1278,17 @@ struct ModelStampResult {
     // vs parallel multi-horizon) produced a given stamp.
     uint8_t  has_xgb_train_nthread;
     int      xgb_train_nthread;
+
+    // v5.14.1.B.3 — X-macro-driven stamp-bound cfg fields (canonical
+    // positions 24+). Auto-generated from FOREACH_STAMP_BOUND_CFG.
+    // Each field has a uint8_t has_<name> Surface G forward-compat
+    // flag + the typed value field. Adding the next field is ONE line
+    // in StampBoundCfgRegistry.hpp.
+    #define X(name, type, fmt, default_val, get_cfg_expr)  \
+        uint8_t has_##name;                                 \
+        type name;
+    FOREACH_STAMP_BOUND_CFG(X)
+    #undef X
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -1385,6 +1397,16 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     r.label_sl_pct = 0.0;
     r.has_xgb_train_nthread = 0;
     r.xgb_train_nthread = 0;
+
+    // v5.14.1.B.3 — X-macro-driven zero-init for stamp-bound cfg fields.
+    // Legacy stamps (pre-v5.14.1.B.3) load with has_<name>=0 → drift
+    // check at caller site skips silently. New stamps populate via the
+    // parser branch below.
+    #define X(name, type, fmt, default_val, get_cfg_expr)  \
+        r.has_##name = 0;                                   \
+        r.name = (type)(default_val);
+    FOREACH_STAMP_BOUND_CFG(X)
+    #undef X
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -1591,6 +1613,16 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 r.xgb_train_nthread = atoi(val);
                 r.has_xgb_train_nthread = 1;
             }
+            // v5.14.1.B.3 — X-macro-driven parser branches (positions 24+).
+            // Each X expands to one `else if (strcmp(key, "<name>") == 0)`
+            // branch that uses the type-dispatched STAMP_CFG_PARSE macro.
+            #define X(name, type, fmt, default_val, get_cfg_expr)        \
+                else if (strcmp(key, #name) == 0) {                       \
+                    r.name = (type)(STAMP_CFG_PARSE(type, val));          \
+                    r.has_##name = 1;                                     \
+                }
+            FOREACH_STAMP_BOUND_CFG(X)
+            #undef X
         }
         line = strtok_r(nullptr, "\n", &save);
     }
@@ -1896,6 +1928,18 @@ struct StampInferenceCfgInputs {
     // Recording closes /parity-check 2026-05-07-stamp CRITICAL-2.
     int      has_xgb_train_nthread;
     int      xgb_train_nthread;
+
+    // v5.14.1.B.3 — X-macro-driven stamp-bound cfg fields (canonical
+    // positions 24+). Auto-generated from FOREACH_STAMP_BOUND_CFG;
+    // mirrors ModelStampResult (parser side). Production caller (e.g.
+    // BacktestPanels' Train Model worker) populates has_<name>=1 +
+    // value when cfg-side flag is enabled. Default 0 = legacy stamp
+    // (emit nothing → byte-identical to pre-v5.14.1.B.3 stamps).
+    #define X(name, type, fmt, default_val, get_cfg_expr)  \
+        int  has_##name;                                    \
+        type name;
+    FOREACH_STAMP_BOUND_CFG(X)
+    #undef X
 };
 
 inline StampWriteResult stamp_write_for_model(const char* model_path,
@@ -2151,6 +2195,20 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
             inf->xgb_train_nthread);
         if (wrote > 0) n += wrote;
     }
+
+    // v5.14.1.B.3 — X-macro-driven emit for stamp-bound cfg fields.
+    // Each X expands to one `if (inf->has_<name>) snprintf("<name>=...")`
+    // emit block. Surface G discipline: legacy callers (which leave
+    // inf->has_<name>=0) emit nothing → canonical body stays
+    // bytewise-identical to pre-v5.14.1.B.3 stamps.
+    #define X(name, type, fmt, default_val, get_cfg_expr)                       \
+        if (inf && inf->has_##name && n > 0 && (size_t)n < sizeof(canonical)) { \
+            int wrote = snprintf(canonical + n, sizeof(canonical) - n,          \
+                #name "=" fmt "\n", inf->name);                                 \
+            if (wrote > 0) n += wrote;                                          \
+        }
+    FOREACH_STAMP_BOUND_CFG(X)
+    #undef X
 
     // Restore prior locale ASAP — every subsequent return must NOT undo this twice
     if (pinned) {
