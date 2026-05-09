@@ -867,6 +867,77 @@ inline void ML_BuildParameters(
                 } else {
                     Bandit_GetProbabilities(&ezoo->bandits[regime_id], weights_buf);
                 }
+                // v5.14.0.B — Ridge risk-parity blending OVERRIDE.
+                // When cfg.ridge_within_horizon=1, supersede bandit weights
+                // with Ridge weights computed from prediction-correlation
+                // matrix + cost-aware IC. Default 0: bytewise-identical to
+                // pre-v5.14 bandit-only path (this block is skipped).
+                //
+                // Ridge complements bandit: bandit selects/weights via
+                // exponential-update on per-arm rewards; Ridge accounts
+                // for correlation BETWEEN arms (penalizes double-counting
+                // of correlated alpha sources). Both run; Ridge wins when
+                // flag is on.
+                //
+                // Cost: ~3µs/cycle when enabled (BuildCorr ~1µs +
+                // Cholesky ~2µs at N=8). Default off pays ~5ns flag check.
+                if (config->ridge_within_horizon &&
+                    ezoo->primary_count >= 2) {
+                    // Build flat prediction history from ring. Use last K
+                    // = min(REWARD_RING_SIZE, predict_call_count) records.
+                    // For N=8 + K=64: 512 bytes stack — small + cache-warm
+                    // (ring already in L1 from G.8 reward attribution).
+                    constexpr int RIDGE_HISTORY_DEPTH = 64;
+                    float history[RIDGE_HISTORY_DEPTH * ENSEMBLE_HORIZON_MAX];
+                    int avail = (int)(ezoo->predict_call_count < (uint64_t)RIDGE_HISTORY_DEPTH
+                        ? ezoo->predict_call_count : RIDGE_HISTORY_DEPTH);
+                    if (avail >= 2) {
+                        // Walk ring backwards from head — most recent K records
+                        for (int k = 0; k < avail; ++k) {
+                            int ring_idx = (ezoo->reward_ring_head -
+                                            1 - k +
+                                            EnsembleModelZoo<F>::REWARD_RING_SIZE) %
+                                           EnsembleModelZoo<F>::REWARD_RING_SIZE;
+                            for (int i = 0; i < ezoo->primary_count; ++i) {
+                                history[k * ezoo->primary_count + i] =
+                                    ezoo->reward_ring[ring_idx].predictions[i];
+                            }
+                        }
+                        // Build correlation matrix from history
+                        RidgeBlender_BuildCorr<F>(
+                            ezoo->ridge_state.corr_matrix,
+                            history, avail, ezoo->primary_count);
+                        // IC per arm from existing drift watchdog tracker
+                        // (v5.10.0a.G.8 — already populated post-trade-close)
+                        double ic_per_arm[MAX_RIDGE_MODELS];
+                        double cost_per_arm[MAX_RIDGE_MODELS];
+                        for (int i = 0; i < ezoo->primary_count; ++i) {
+                            ic_per_arm[i] = (double)ezoo->drift[i].ic_avg;
+                            // Cost tracking deferred to v5.15+; default 0.
+                            // When live cost-aware bandit lands, populate
+                            // from per-arm fee + slippage estimate.
+                            cost_per_arm[i] = 0.0;
+                        }
+                        // Solve. On Cholesky failure, RidgeBlender_Compute
+                        // sets fallback_to_uniform=1 + writes uniform 1/N
+                        // weights — safe fallback (no exception/abort).
+                        int rc = RidgeBlender_Compute<F>(
+                            &ezoo->ridge_state,
+                            ic_per_arm, cost_per_arm, ezoo->primary_count,
+                            FPN_ToDouble(config->ridge_lambda),
+                            FPN_ToDouble(config->ridge_cost_penalty),
+                            FPN_ToDouble(config->ridge_min_ic_floor));
+                        // Override weights_buf with Ridge result (regardless
+                        // of rc; uniform fallback still produces valid weights).
+                        (void)rc;  // diagnostic only via fallback_to_uniform
+                        for (int i = 0; i < ezoo->primary_count; ++i) {
+                            weights_buf[i] = FPN_ToDouble(ezoo->ridge_state.w[i]);
+                        }
+                    }
+                    // If avail < 2: not enough history — leave bandit
+                    // weights in weights_buf (Ridge needs at least 2
+                    // samples for meaningful correlation).
+                }
                 pred_raw = (double)Model_Predict_Ensemble_Weighted(
                     ezoo->primary_handles, ezoo->primary_count,
                     features, n,

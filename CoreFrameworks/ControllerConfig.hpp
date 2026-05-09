@@ -491,6 +491,20 @@ template <unsigned F> struct ControllerConfig {
   // model fired. Operator post-processes the CSV to assess prediction
   // calibration (Brier score, AUC, etc.). Default empty = disabled.
   char calibration_log_path[256];
+
+  // v5.14.0 — Ridge risk-parity blending. Markowitz-style cost-aware
+  // weight combination of N model predictions via Cholesky solve of
+  // (Σ + λI) w = μ. Complements (does NOT replace) Exp3-IX bandit:
+  // bandit selects ONE arm per regime; Ridge blends correlated models
+  // intelligently (penalizes double-counting of correlated alpha).
+  // Default off; opt-in for paper-test session. When enabled, slow-
+  // path adds ~3µs/cycle (BuildCorr ~1µs + Cholesky ~2µs at N=8).
+  // Hot path UNTOUCHED.
+  int    ridge_within_horizon;       // 0=bandit (default), 1=Ridge across role-arms
+  int    ridge_across_horizons;      // 0=bandit (default), 1=Ridge across horizons
+  FPN<F> ridge_lambda;               // ridge regularization; default 0.15
+  FPN<F> ridge_cost_penalty;         // cost penalty in net IC = IC - penalty*cost; default 0.5
+  FPN<F> ridge_min_ic_floor;         // min net IC floor (prevents zero-weight starvation); default 0.001
   // vol-scaled position sizing
   int vol_sizing_enabled; // 0=disabled, 1=scale qty inversely with volatility
   FPN<F> vol_scale_min; // min scale factor (e.g. 0.25 = never less than 25% of
@@ -1290,6 +1304,13 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.12.1.D — disabled by default; activate only after Phase 4.B
   // paper-test confirms model calibration.
   cfg.risk_scale_by_confidence = 0;
+  // v5.14.0 — Ridge blending defaults: disabled; opt-in for paper-test.
+  // Default behavior bytewise-identical to v5.13.6 bandit selection path.
+  cfg.ridge_within_horizon = 0;
+  cfg.ridge_across_horizons = 0;
+  cfg.ridge_lambda          = FPN_FromDouble<F>(0.15);
+  cfg.ridge_cost_penalty    = FPN_FromDouble<F>(0.5);
+  cfg.ridge_min_ic_floor    = FPN_FromDouble<F>(0.001);
   // v5.12.2.B — disabled by default; activate after parity-check confirms
   // regime histogram unchanged within tolerance under enabled mode.
   cfg.lazy_rebuild_enabled = 0;
@@ -1539,6 +1560,21 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     // v5.12.1.D — confidence-conditional sizing infra
     CFG_PARSE_INT(risk_scale_by_confidence)
+    // v5.14.0 — Ridge risk-parity blending (cfg gates default off)
+    CFG_PARSE_INT(ridge_within_horizon)
+    CFG_PARSE_INT(ridge_across_horizons)
+    if (strcmp(key, "ridge_lambda") == 0) {
+      cfg.ridge_lambda = FPN_FromDouble<F>(atof(val));
+      continue;
+    }
+    if (strcmp(key, "ridge_cost_penalty") == 0) {
+      cfg.ridge_cost_penalty = FPN_FromDouble<F>(atof(val));
+      continue;
+    }
+    if (strcmp(key, "ridge_min_ic_floor") == 0) {
+      cfg.ridge_min_ic_floor = FPN_FromDouble<F>(atof(val));
+      continue;
+    }
     // v5.12.2.B — lazy slow-path rebuild
     CFG_PARSE_INT(lazy_rebuild_enabled)
     if (strcmp(key, "lazy_rebuild_force_period_us") == 0) {
