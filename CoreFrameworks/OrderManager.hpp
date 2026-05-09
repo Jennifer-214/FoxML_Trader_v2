@@ -370,6 +370,22 @@ struct OrderManagerState {
     std::atomic<uint64_t> total_filled;
     std::atomic<uint64_t> total_rejected;
 
+    // v5.14.4.0 — high-watermark trade_id we've seen via myTrades (boot
+    // reconcile path). Used by Reconcile_ApplyMissedFills (v5.14.4.B) to
+    // filter out trades we already saw, replaying ONLY trades with
+    // trade_id > last_seen_trade_id. Monotonic; updated post-reconcile
+    // to max(seen) so the next reconcile cycle skips replay-applied trades.
+    //
+    // Single source of truth for "what trades have we observed?" — sister
+    // to total_filled (which counts observed-and-applied) but specifically
+    // tracks the exchange-side trade_id high-watermark for replay-safety.
+    //
+    // Future-thinking: when WS-side fill stream is added (v5.14.x+ post-
+    // boot reconcile), bump this on every WS fill so post-disconnect
+    // reconcile only replays trades newer than the WS-stream high water.
+    // Boot today = once at startup; not a per-cycle path.
+    uint64_t last_seen_trade_id;
+
     // v5.11.26 — RAII destructor. Stops the OrderEventLog async writer
     // thread (v5.11.3.B feature) + closes the disk file + frees the
     // mmap'd entry buffer when this struct goes out of scope. Idempotent
@@ -482,6 +498,8 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     oms->next_order_id  = 1;
     oms->adapter        = adapter;
     oms->live_trading   = live_trading;
+    oms->last_seen_trade_id = 0;  // v5.14.4.0 — high-watermark for replay-safe boot reconcile
+
     SPSCRing_Init(&oms->result_queue);
     SPSCRing_Init(&oms->ws_result_queue);
     SPSCRing_Init(&oms->reconcile_queue);

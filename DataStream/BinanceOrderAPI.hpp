@@ -590,6 +590,61 @@ static inline int BinanceOrderAPI_MarketSell(BinanceOrderAPI *api,
     }
 }
 
+// v5.14.4.0 — DELETE /api/v3/order. Cancels a working order by its
+// exchange-side orderId. Reuses existing binance_signed_request +
+// retry infrastructure (mirrors GetStatus's GET shape exactly).
+//
+// Returns:
+//   1 on success (HTTP 200; order cancelled or already in terminal state
+//     per Binance — the API returns 200 even if the order was already
+//     filled before the cancel arrived; that's still a "successful no-op"
+//     from operator's POV)
+//   0 on failure (network error, invalid orderId, exchange refused)
+//
+// USED BY:
+//   - v5.14.4.B Reconcile_AutoCancelStale (zombie-order cleanup at boot
+//     when AUTO_SYNC mode + exchange has open orders not in our OMS)
+//   - v5.14.7+ (TBD per master plan; manual operator cancel UI)
+//
+// Built ONCE here; both callers reuse — single source of truth for
+// the cancel primitive (reuse-audit per CLAUDE.md item 16).
+//
+// Future-thinking: if v5.X+ adds bulk-cancel-by-symbol (DELETE
+// /api/v3/openOrders), build that as a sister function alongside
+// (NOT a special case of CancelOrder) — different endpoint shape +
+// different operator semantics.
+static inline int BinanceOrderAPI_CancelOrder(BinanceOrderAPI *api,
+                                                const char *order_id) {
+    if (!api || !order_id || order_id[0] == '\0') {
+        fprintf(stderr, "[REST] CANCEL: invalid args (api=%p order_id=%s)\n",
+                (void*)api, order_id ? order_id : "(null)");
+        return 0;
+    }
+    char params[256];
+    snprintf(params, sizeof(params), "symbol=%s&orderId=%s",
+             api->symbol, order_id);
+
+    char body[2048];
+    int status = binance_signed_request(api, "DELETE", "/api/v3/order",
+                                          params, body, sizeof(body));
+
+    if (status == 200) {
+        // Binance returns 200 + JSON body with the cancelled order's
+        // final state. Operator-side: log the cancel for audit trail;
+        // OMS state cleanup happens at caller (reconcile path).
+        fprintf(stderr, "[REST] CANCEL ok: orderId=%s\n", order_id);
+        return 1;
+    } else {
+        // 404 = order not found (already cancelled / never existed);
+        // 400 = invalid params; 401 = auth; 5xx = exchange issue.
+        // All non-200 → operator notification + caller decides
+        // strict-mode action (refuse vs continue).
+        fprintf(stderr, "[REST] CANCEL failed (status %d): orderId=%s body=%s\n",
+                status, order_id, body);
+        return 0;
+    }
+}
+
 // check order status — returns ORDER_STATUS_* constant
 // fills filled_qty and avg_price on success
 static inline int BinanceOrderAPI_GetStatus(BinanceOrderAPI *api,

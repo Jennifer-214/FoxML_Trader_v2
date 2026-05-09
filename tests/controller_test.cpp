@@ -19116,6 +19116,49 @@ e3_skip_load:;
         }
     }
 
+    // ----- v5.14.4.0: BinanceOrderAPI_CancelOrder + last_seen_trade_id ------------------------------
+    printf("\n--- v5.14.4.0: cancel API + last_seen_trade_id ---\n");
+    {
+        // Test 1 — last_seen_trade_id zero-init via OrderManager_Init.
+        // Use EventLoopState_InitLegacy (paper-trading OMS) which is the
+        // canonical test setup pattern (see line 4935+ for precedent).
+        tt::OrderManagerState<64> oms;
+        tt::EventLoopState<64> state;
+        tt::EventLoopState_InitLegacy(&state, &oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+        check("v5.14.4.0: OrderManager_Init zero-inits last_seen_trade_id",
+              oms.last_seen_trade_id == 0);
+    }
+    {
+        // Test 2 — last_seen_trade_id is mutable; supports full uint64 range
+        // (Binance trade_id is monotonic int64; field is uint64 for headroom).
+        tt::OrderManagerState<64> oms;
+        tt::EventLoopState<64> state;
+        tt::EventLoopState_InitLegacy(&state, &oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+        oms.last_seen_trade_id = 42;
+        check("v5.14.4.0: last_seen_trade_id mutable (= 42 after write)",
+              oms.last_seen_trade_id == 42);
+        oms.last_seen_trade_id = UINT64_MAX;
+        check("v5.14.4.0: last_seen_trade_id supports UINT64_MAX (no overflow)",
+              oms.last_seen_trade_id == UINT64_MAX);
+    }
+    {
+        // Test 3 — BinanceOrderAPI_CancelOrder defensive null-arg path.
+        // Network call would require live exchange + secrets; tested via
+        // integration harness (not here).
+        int rc = BinanceOrderAPI_CancelOrder(nullptr, "12345");
+        check("v5.14.4.0: CancelOrder null api → returns 0", rc == 0);
+    }
+    {
+        // Test 4 — CancelOrder null/empty order_id → returns 0 (defensive)
+        BinanceOrderAPI api{};
+        int rc1 = BinanceOrderAPI_CancelOrder(&api, nullptr);
+        int rc2 = BinanceOrderAPI_CancelOrder(&api, "");
+        check("v5.14.4.0: CancelOrder null order_id → returns 0", rc1 == 0);
+        check("v5.14.4.0: CancelOrder empty order_id → returns 0", rc2 == 0);
+    }
+
     // ----- v5.14.3.C: FeatureOverlay 3-layer fingerprinting -----------------------------------------
     // Sidecar parser + PostLoadVerify helper + symmetry test (Class 18 prevention)
     printf("\n--- v5.14.3.C: overlay sidecar verify ---\n");
