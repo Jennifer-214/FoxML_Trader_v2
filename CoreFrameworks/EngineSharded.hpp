@@ -87,6 +87,8 @@
 #endif
 #include <unistd.h>  // sysconf(_SC_NPROCESSORS_ONLN) — POSIX, also available on macOS
 
+#include "EnsembleHotSwap.hpp"  // v5.14.2 — EngineSharded_HotSwapEnsemble template
+
 namespace tt {
 
 // File-scope shutdown flag the SIGINT handler flips. The handler is installed
@@ -585,6 +587,12 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
     }
     return 0;
 }
+
+// v5.14.2 — EngineSharded_HotSwapEnsemble template lives in its own
+// header (CoreFrameworks/EnsembleHotSwap.hpp) so tests can exercise it
+// without dragging in the full sharded engine. Definition is included
+// once at the top of this file (above namespace tt opening); the call
+// site is in EngineSharded_Run below.
 
 template <unsigned F>
 static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
@@ -2749,25 +2757,30 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                             &g_shared.swap_model_path_requested[c], 0,
                                             __ATOMIC_RELEASE);
                                     } else if (state.cores[c].ensemble_handle != nullptr) {
-                                        // v5.10.2.B — REFUSE hot swap when ensemble
-                                        // is active (parity-check Finding #4).
+                                        // v5.14.2 — ensemble hot swap (closes the
+                                        // v5.10.2.B REFUSE; v5.13.6.B finding).
+                                        // Same-thread atomic Free+Init+Load+Bandit
+                                        // sequence in EngineSharded_HotSwapEnsemble.
                                         // Dispatcher reads ensemble_zoo first
-                                        // (StrategyParameters.hpp:794); a single-zoo
-                                        // swap would be a silent no-op for actual
-                                        // inference. Operator must restart engine
-                                        // to swap the horizon set.
-                                        // Full ensemble swap (Free + Init + AutoDetect
-                                        // + bandit reload) is Option B, deferred to
-                                        // v5.10.2.X if operator wants it.
-                                        fprintf(stderr,
-                                            "[hot_swap] core %d REFUSED: ensemble inference "
-                                            "active; swap of single-zoo model would not "
-                                            "affect actual predictions. Restart engine "
-                                            "with new core_%d_model_dir to swap horizon set "
-                                            "(also applies to v5.13.0+ exit_predictor models — "
-                                            "EnsembleModelZoo_LoadFromCfg covers exit_predictor "
-                                            "but hot-swap path does NOT yet; v5.14.2 candidate).\n",
-                                            c, c);
+                                        // (StrategyParameters.hpp:794); operator
+                                        // can now swap horizon set + exit models
+                                        // without an engine restart.
+                                        EnsembleModelZoo<F>* swap_ezoo =
+                                            (EnsembleModelZoo<F>*)state.cores[c].ensemble_handle;
+                                        int swap_backend = cfg.ml_backend
+                                            ? cfg.ml_backend
+                                            : MODEL_BACKEND_XGBOOST;
+                                        int rc = EngineSharded_HotSwapEnsemble(
+                                            swap_ezoo, cfg, c, new_path, swap_backend);
+                                        if (rc == 0) {
+                                            // Failure → mark core degraded.
+                                            // ezoo is left in post-Free + post-Init
+                                            // (empty) state; dispatcher falls back
+                                            // to SimpleDip via ML_BuildParameters.
+                                            state.cores[c].model_load_failed = 1;
+                                        } else {
+                                            state.cores[c].model_load_failed = 0;
+                                        }
                                         __atomic_store_n(
                                             &g_shared.swap_model_path_requested[c], 0,
                                             __ATOMIC_RELEASE);

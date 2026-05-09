@@ -31,6 +31,7 @@
 #include "../DataStream/EngineTUI.hpp"                   // v5.0.4 — topology populator tests
 #include "../CoreFrameworks/Reconcile.hpp"                // v5.2.1 — live reconciliation tests
 #include "../ML_Headers/CoreModelZoo.hpp"                // Track E.2 tests
+#include "../CoreFrameworks/EnsembleHotSwap.hpp"          // v5.14.2 — EngineSharded_HotSwapEnsemble template (separate header avoids EngineSharded.hpp drag-in)
 #include "../ML_Headers/FeatureRegistry.hpp"              // v5.8.1a tests
 #include "../Backtest/PhaseTimers.hpp"                    // v5.10.0 Item A — phase timer tests
 #include "../MemHeaders/BuddyAllocator.hpp"                // v5.11.13 — typo fix + O(1) order lookup tests
@@ -19113,6 +19114,112 @@ e3_skip_load:;
                   FPN_ToDouble(parsed.ridge_min_ic_floor) < 0.0051);
             std::remove(tmp_cfg);
         }
+    }
+
+    // ----- v5.14.2: Ensemble hot-swap helper ---------------------------------------------------------
+    // Tests EngineSharded_HotSwapEnsemble failure paths + .D Free
+    // completeness. Success paths (real model load + bandit overlay)
+    // require XGBoost model fixtures and are exercised by integration
+    // / paper testing.
+    printf("\n--- v5.14.2: ensemble hot-swap helper ---\n");
+    {
+        // Test 1 — Null zoo → returns 0 (failure path)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        int rc = tt::EngineSharded_HotSwapEnsemble<64>(
+            nullptr, cfg, /*core_id=*/0,
+            /*new_base_dir=*/"models/some_dir",
+            /*swap_backend=*/MODEL_BACKEND_XGBOOST);
+        check("v5.14.2: HotSwap null ezoo → returns 0", rc == 0);
+    }
+    {
+        // Test 2 — Empty path → returns 0
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        int rc = tt::EngineSharded_HotSwapEnsemble<64>(
+            &ezoo, cfg, /*core_id=*/0,
+            /*new_base_dir=*/"",
+            /*swap_backend=*/MODEL_BACKEND_XGBOOST);
+        check("v5.14.2: HotSwap empty new_base_dir → returns 0", rc == 0);
+    }
+    {
+        // Test 3 — Null path → returns 0
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        int rc = tt::EngineSharded_HotSwapEnsemble<64>(
+            &ezoo, cfg, /*core_id=*/0,
+            /*new_base_dir=*/nullptr,
+            /*swap_backend=*/MODEL_BACKEND_XGBOOST);
+        check("v5.14.2: HotSwap null new_base_dir → returns 0", rc == 0);
+    }
+    {
+        // Test 4 — Fresh zoo (no cached horizons) → returns 0
+        // EnsembleModelZoo_Init zeros horizon_ticks_at_idx[]; Helper
+        // walks it and finds nothing to load → safe-fail.
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        int rc = tt::EngineSharded_HotSwapEnsemble<64>(
+            &ezoo, cfg, /*core_id=*/0,
+            /*new_base_dir=*/"/tmp/v5_14_2_nonexistent",
+            /*swap_backend=*/MODEL_BACKEND_XGBOOST);
+        check("v5.14.2: HotSwap with no cached horizons → returns 0", rc == 0);
+    }
+    {
+        // Test 5 — Cached horizons but invalid dir → LoadFromCfg
+        // returns 0 → helper returns 0; ezoo left in post-Free + post-Init
+        // (empty) state.
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        // Simulate a prior boot that loaded horizons {100, 500, 1000}
+        ezoo.horizon_ticks_at_idx[0] = 100;
+        ezoo.horizon_ticks_at_idx[1] = 500;
+        ezoo.horizon_ticks_at_idx[2] = 1000;
+        ezoo.barrier_count = 3;  // simulate post-load state
+        ezoo.active = 1;
+
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        int rc = tt::EngineSharded_HotSwapEnsemble<64>(
+            &ezoo, cfg, /*core_id=*/0,
+            /*new_base_dir=*/"/tmp/v5_14_2_definitely_nonexistent_dir_xyz",
+            /*swap_backend=*/MODEL_BACKEND_XGBOOST);
+        check("v5.14.2: HotSwap valid horizons + invalid dir → returns 0", rc == 0);
+        check("v5.14.2: HotSwap on failure leaves ezoo in empty post-Init state",
+              ezoo.barrier_count == 0 && ezoo.active == 0);
+    }
+    {
+        // Test 6 — .D Free completeness: Free() must zero v5.14.1.E
+        // fields (exit_ridge_state / exit_reward_ring / head /
+        // predict_call_count). Init compensates in the hot-swap path,
+        // but Free called outside that path must still leave clean state.
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        // Dirty the v5.14.1.E fields
+        ezoo.exit_ridge_state.n_models = 5;
+        ezoo.exit_ridge_state.fallback_to_uniform = 1;
+        ezoo.exit_reward_ring[3].predict_call = 42;
+        ezoo.exit_reward_ring[3].predictions[0] = 0.7f;
+        ezoo.exit_reward_ring_head = 7;
+        ezoo.exit_predict_call_count = 100;
+        ezoo.active = 1;
+
+        EnsembleModelZoo_Free(&ezoo);
+
+        check("v5.14.2.D Free: exit_ridge_state.n_models cleared",
+              ezoo.exit_ridge_state.n_models == 0);
+        check("v5.14.2.D Free: exit_ridge_state.fallback_to_uniform cleared",
+              ezoo.exit_ridge_state.fallback_to_uniform == 0);
+        check("v5.14.2.D Free: exit_reward_ring entry cleared",
+              ezoo.exit_reward_ring[3].predict_call == 0);
+        check("v5.14.2.D Free: exit_reward_ring predictions cleared",
+              ezoo.exit_reward_ring[3].predictions[0] == 0.0f);
+        check("v5.14.2.D Free: exit_reward_ring_head reset",
+              ezoo.exit_reward_ring_head == 0);
+        check("v5.14.2.D Free: exit_predict_call_count reset",
+              ezoo.exit_predict_call_count == 0);
+        check("v5.14.2.D Free: active flag cleared",
+              ezoo.active == 0);
     }
 
     printf("\n======================================\n");

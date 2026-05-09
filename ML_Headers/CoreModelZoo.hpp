@@ -1334,6 +1334,14 @@ inline void EnsembleModelZoo_Free(EnsembleModelZoo<F> *ezoo) {
     ezoo->exit_predictor_count = 0;
     ezoo->buy_signal_count = 0;
     ezoo->active = 0;
+    // v5.14.2.D — clear v5.14.1.E exit-side state for semantic completeness.
+    // Init compensates in the hot-swap Free→Init→Load path, but Free called
+    // outside that path (process exit, future error-recovery code) shouldn't
+    // leave stale ridge weights / reward ring entries behind.
+    RidgeWeights_Init(&ezoo->exit_ridge_state);
+    memset(ezoo->exit_reward_ring, 0, sizeof(ezoo->exit_reward_ring));
+    ezoo->exit_reward_ring_head = 0;
+    ezoo->exit_predict_call_count = 0;
 }
 
 // Load N models per role from per-horizon directories. Operator's
