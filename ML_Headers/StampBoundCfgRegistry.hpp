@@ -80,7 +80,10 @@
     X(confidence_freshness_tau_secs,       double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_freshness_tau_secs))     \
     X(confidence_capacity_target_dollars,  double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_capacity_target_dollars))\
     X(confidence_capacity_kappa,           double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_capacity_kappa))         \
-    X(confidence_rmse_baseline,            double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_rmse_baseline))
+    X(confidence_rmse_baseline,            double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_rmse_baseline))         \
+    /* v5.14.1.D — Feature winsorization (PARITY drift detection) */                                  \
+    X(winsor_pct_low,                      double, "%.17g",  0.0, FPN_ToDouble(cfg.winsor_pct_low))                  \
+    X(winsor_pct_high,                     double, "%.17g",  0.0, FPN_ToDouble(cfg.winsor_pct_high))
 
 //======================================================================================================
 // [PARSER DISPATCH MACROS]

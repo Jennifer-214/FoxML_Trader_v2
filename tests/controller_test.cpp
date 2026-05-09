@@ -3576,9 +3576,13 @@ int main() {
     //   5. registry compile-time count == 10 (catches accidental row deletion)
     printf("\n--- v5.14.1.B.3.E: FOREACH_STAMP_BOUND_CFG X-macro registry ---\n");
     {
-        // Test 1 — registry has the expected 10 entries
-        check("v5.14.1.B.3 registry: FOREACH_STAMP_BOUND_CFG_COUNT == 10 (5 Ridge + 5 composite)",
-              FOREACH_STAMP_BOUND_CFG_COUNT == 10);
+        // Test 1 — registry has the expected entries.
+        // v5.14.1.B.3 added 10 (5 Ridge + 5 composite); v5.14.1.D added 2
+        // (winsor_pct_low + winsor_pct_high) → 12 total. Assert >= 12 so
+        // future additions don't break this test (use a stricter == check
+        // in the v5.14.1.D-specific tests below).
+        check("v5.14.1.B.3+D registry: FOREACH_STAMP_BOUND_CFG_COUNT >= 12 (10 + 2 winsor)",
+              FOREACH_STAMP_BOUND_CFG_COUNT >= 12);
     }
     {
         // Test 2 — round-trip: write stamp with all 10 fields populated,

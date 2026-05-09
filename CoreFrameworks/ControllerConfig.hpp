@@ -147,7 +147,13 @@ constexpr uint8_t ENGINE_ARCH_PER_CORE_SLOW = 1;
     RAW(foxml_vol_scaling_z_max) \
     RAW(bandit_blend_ratio) \
     RAW(confidence_freshness_tau) \
-    RAW(confidence_threshold_scale)
+    RAW(confidence_threshold_scale) \
+    /* v5.14.1.D: per-core winsor override — supports heterogeneous winsor */ \
+    /* models (e.g. 3 buy_signal models with different winsor settings each */ \
+    /* on its own core). 0 = inherit global cfg.winsor_pct_*; non-zero overrides. */ \
+    /* Field name matches global ControllerConfig field per resolver contract. */ \
+    RAW(winsor_pct_low) \
+    RAW(winsor_pct_high)
 
 // v4.7.40: INT-typed per-core overrides. Separate macro because INT fields
 // are uint32_t (not FPN<F>) — different declaration + parser. 0 = inherit
@@ -465,6 +471,15 @@ template <unsigned F> struct ControllerConfig {
   FPN<F>   confidence_capacity_target_dollars;  // default 0.0 (unbounded)
   FPN<F>   confidence_capacity_kappa;           // default 0.1 (ADV proportionality)
   FPN<F>   confidence_rmse_baseline;            // default 1.0 (rebound at training time)
+  // v5.14.1.D — feature winsorization (per-feature percentile clipping
+  // applied in FeatureStandardizer_Apply BEFORE mean-center + unit-var).
+  // Reduces noise from 5σ outliers (flash crashes, exchange glitches) +
+  // improves model generalization vs fat-tailed crypto returns. Stamp-
+  // bound via FOREACH_STAMP_BOUND_CFG → drift between training cfg and
+  // inference cfg detected at model load.
+  // Setting low=0 + high=1 disables (no clip; identity pass-through).
+  FPN<F>   winsor_pct_low;                      // default 0.005 (lower clip pct)
+  FPN<F>   winsor_pct_high;                     // default 0.995 (upper clip pct)
   // v5.12.2.B — lazy slow-path rebuild. Skip RebuildOneCore body when
   // slow_state hasn't changed materially since last rebuild. Estimated
   // 30-50% of cycles become no-ops on stable regimes; per-cycle savings
@@ -1324,6 +1339,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.confidence_capacity_target_dollars  = FPN_FromDouble<F>(0.0);
   cfg.confidence_capacity_kappa           = FPN_FromDouble<F>(0.1);
   cfg.confidence_rmse_baseline            = FPN_FromDouble<F>(1.0);
+  // v5.14.1.D — winsor percentile defaults (0.5% / 99.5% — sensible for
+  // clean BTC; noisier markets may want 1%/99% or 5%/95%).
+  cfg.winsor_pct_low                      = FPN_FromDouble<F>(0.005);
+  cfg.winsor_pct_high                     = FPN_FromDouble<F>(0.995);
   // v5.14.0 — Ridge blending defaults: disabled; opt-in for paper-test.
   // Default behavior bytewise-identical to v5.13.6 bandit selection path.
   cfg.ridge_within_horizon = 0;
@@ -1596,6 +1615,15 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     if (strcmp(key, "confidence_rmse_baseline") == 0) {
       cfg.confidence_rmse_baseline = FPN_FromDouble<F>(atof(val));
+      continue;
+    }
+    // v5.14.1.D — feature winsorization (cfg-tunable percentiles)
+    if (strcmp(key, "winsor_pct_low") == 0) {
+      cfg.winsor_pct_low = FPN_FromDouble<F>(atof(val));
+      continue;
+    }
+    if (strcmp(key, "winsor_pct_high") == 0) {
+      cfg.winsor_pct_high = FPN_FromDouble<F>(atof(val));
       continue;
     }
     // v5.14.0 — Ridge risk-parity blending (cfg gates default off)
