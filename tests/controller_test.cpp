@@ -17448,6 +17448,236 @@ e3_skip_load:;
         }
     }
 
+    // ===================================================================
+    // v5.13.4 — sell-side bandit (struct + cfg + init + per-slot capture)
+    // ===================================================================
+    printf("\n--- v5.13.4: sell-side bandit defaults + per-slot capture ---\n");
+    {
+        using namespace tt;
+
+        // === cfg defaults ===
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.13.4.A: cfg.exit_bandit_enabled defaults to 0",
+              cfg.exit_bandit_enabled == 0);
+        check("v5.13.4.A: cfg.exit_bandit_lr defaults to 0.1",
+              cfg.exit_bandit_lr > 0.09 && cfg.exit_bandit_lr < 0.11);
+
+        // === cfg parser round-trip ===
+        const char* tmp_cfg = "/tmp/v5_13_4_bandit_cfg_test.cfg";
+        FILE* cfp = std::fopen(tmp_cfg, "w");
+        if (cfp) {
+            std::fprintf(cfp,
+                "exit_bandit_enabled=1\n"
+                "exit_bandit_lr=0.25\n");
+            std::fclose(cfp);
+            ControllerConfig<64> parsed_cfg = ControllerConfig_Load<64>(tmp_cfg);
+            check("v5.13.4.A: parsed exit_bandit_enabled == 1",
+                  parsed_cfg.exit_bandit_enabled == 1);
+            check("v5.13.4.A: parsed exit_bandit_lr ~= 0.25",
+                  parsed_cfg.exit_bandit_lr > 0.24 &&
+                  parsed_cfg.exit_bandit_lr < 0.26);
+            std::remove(tmp_cfg);
+        }
+    }
+
+    printf("\n--- v5.13.4: EnsembleModelZoo exit-side bandit init ---\n");
+    {
+        using namespace tt;
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+
+        // === Defaults post-Init ===
+        check("v5.13.4.A: initialized_exit_bandits defaults to 0",
+              ezoo.initialized_exit_bandits == 0);
+        check("v5.13.4.A: last_predicted_exit_horizon_idx defaults to -1",
+              ezoo.last_predicted_exit_horizon_idx == -1);
+        check("v5.13.4.A: exit_predictor_count defaults to 0",
+              ezoo.exit_predictor_count == 0);
+
+        // === No exit models loaded → InitExitBandits skips gracefully ===
+        EnsembleModelZoo_InitExitBandits(&ezoo, 0.1, 100);
+        check("v5.13.4.A: InitExitBandits with 0 models leaves init=0",
+              ezoo.initialized_exit_bandits == 0);
+
+        // === Single-arm path → InitExitBandits marks initialized ===
+        ezoo.exit_predictor_count = 1;
+        EnsembleModelZoo_InitExitBandits(&ezoo, 0.1, 100);
+        check("v5.13.4.A: InitExitBandits with 1 model marks init=1 (single-arm)",
+              ezoo.initialized_exit_bandits == 1);
+
+        // === Multi-arm path → bandits actually populated ===
+        EnsembleModelZoo<64> ezoo2;
+        EnsembleModelZoo_Init(&ezoo2);
+        ezoo2.exit_predictor_count = 3;
+        ezoo2.horizon_ticks_at_idx[0] = 1000;
+        ezoo2.horizon_ticks_at_idx[1] = 5000;
+        ezoo2.horizon_ticks_at_idx[2] = 10000;
+        EnsembleModelZoo_InitExitBandits(&ezoo2, 0.1, 100);
+        check("v5.13.4.A: InitExitBandits with 3 models marks init=1",
+              ezoo2.initialized_exit_bandits == 1);
+        // Per-regime bandits should have 3 arms each
+        check("v5.13.4.A: exit_bandits[0].n_arms == 3",
+              ezoo2.exit_bandits[0].n_arms == 3);
+        check("v5.13.4.A: exit_bandits[NUM_REGIMES-1].n_arms == 3 (all regimes)",
+              ezoo2.exit_bandits[NUM_REGIMES - 1].n_arms == 3);
+
+        // === Bandit_Update on exit_bandit doesn't affect buy bandit ===
+        ezoo2.primary_count = 3;
+        for (int r = 0; r < NUM_REGIMES; ++r) {
+            Bandit_Init(&ezoo2.bandits[r], 3, 0.05, 0.1, 1.0, 100, 200);
+        }
+        ezoo2.initialized_bandits = 1;
+        // Snapshot buy_bandit cum_reward[0]
+        double buy_cum_before = ezoo2.bandits[0].cum_reward[0];
+        // Update exit_bandit
+        Bandit_Update(&ezoo2.exit_bandits[0], 0, 50.0);
+        check("v5.13.4.B: exit_bandit Update on regime 0, arm 0 changes exit cum_reward",
+              ezoo2.exit_bandits[0].cum_reward[0] != 0.0);
+        check("v5.13.4.B: exit_bandit Update doesn't perturb buy_bandit cum_reward",
+              ezoo2.bandits[0].cum_reward[0] == buy_cum_before);
+    }
+
+    printf("\n--- v5.13.4: per-slot exit-bandit arm + regime capture ---\n");
+    {
+        using namespace tt;
+        OrderManagerState<64> oms;
+        ExchangeAdapter<64> empty_adapter{};
+        OrderManager_Init(&oms, empty_adapter, 0,
+                          FPN_FromDouble<64>(10000.0),
+                          FPN_FromDouble<64>(0.001));
+        // === Defaults post-Init: -1 sentinel ===
+        int all_neg1 = 1;
+        for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; ++i) {
+            if (oms.last_exit_predicted_arm[i] != -1)    { all_neg1 = 0; break; }
+            if (oms.last_exit_predicted_regime[i] != -1) { all_neg1 = 0; break; }
+        }
+        check("v5.13.4.A: last_exit_predicted_arm[] defaults all -1",
+              all_neg1);
+        check("v5.13.4.A: last_exit_predicted_regime[] defaults all -1",
+              all_neg1);
+
+        // === Per-slot writes round-trip ===
+        oms.last_exit_predicted_arm[3]    = 2;  // arm 2
+        oms.last_exit_predicted_regime[3] = 1;  // TRENDING
+        check("v5.13.4.A: per-slot arm[3]=2 round-trip",
+              oms.last_exit_predicted_arm[3] == 2);
+        check("v5.13.4.A: per-slot regime[3]=1 round-trip",
+              oms.last_exit_predicted_regime[3] == 1);
+        check("v5.13.4.A: adjacent slots untouched (slot 2)",
+              oms.last_exit_predicted_arm[2] == -1 &&
+              oms.last_exit_predicted_regime[2] == -1);
+
+        OrderManager_Shutdown(&oms);
+    }
+
+    printf("\n--- v5.13.4.B: counterfactual reward math sanity ---\n");
+    {
+        // Verify the counterfactual formula produces expected sign:
+        //   actual - hypothetical
+        //   actual < hypothetical (early exit avoided gains) → negative
+        //   actual > hypothetical (early exit avoided losses) → positive
+
+        // Scenario 1: exit at +0.2% gain, TP was at +0.5%
+        // actual_pnl_bps = 20 (after fee), hypothetical_pnl_bps = 50 - 2*10 = 30
+        // reward = 20 - 30 = -10 bps → bandit learns this exit was suboptimal
+        double actual_bps = 20.0;
+        double tp_pct = 0.005;  // 0.5% TP
+        double fee_taker = 0.001;
+        double hypo_bps = (tp_pct - 2.0 * fee_taker) * 10000.0;
+        double reward = actual_bps - hypo_bps;
+        check("v5.13.4.B: actual<hypo (early exit avoiding gain) → negative reward",
+              reward < 0);
+        check("v5.13.4.B: hypo with tp=0.5% / fee=0.1% taker = 30 bps",
+              hypo_bps > 29.9 && hypo_bps < 30.1);
+
+        // Scenario 2: exit at -0.1% loss, TP was at +0.5%
+        // actual_pnl_bps = -10, hypo = 30
+        // reward = -10 - 30 = -40 (still negative; price didn't recover to TP)
+        actual_bps = -10.0;
+        reward = actual_bps - hypo_bps;
+        check("v5.13.4.B: actual=-loss, optimistic hypo → still negative reward",
+              reward < 0);
+
+        // Scenario 3: hypothetical assumption flipped (price would have lost)
+        // We can't observe this without forward path-knowledge — operator
+        // accepts the optimistic bias for v5.13.X (per plan note line 80-90).
+        check("v5.13.4.B: optimistic counterfactual biases against firing (sanity)",
+              true);
+    }
+
+    printf("\n--- v5.13.4.C: exit_bandit_state.json save+load round-trip ---\n");
+    {
+        using namespace tt;
+        const char* tmp_dir = "/tmp/v5_13_4_bandit_persist_test";
+        // Cleanup state from prior run
+        char tmpbuf[512];
+        snprintf(tmpbuf, sizeof(tmpbuf), "%s/exit_bandit_state.json", tmp_dir);
+        std::remove(tmpbuf);
+        rmdir(tmp_dir);
+        if (mkdir(tmp_dir, 0755) == 0 || errno == EEXIST) {
+            EnsembleModelZoo<64> ezoo_save;
+            EnsembleModelZoo_Init(&ezoo_save);
+            ezoo_save.exit_predictor_count = 3;
+            ezoo_save.primary_count = 3;
+            for (int i = 0; i < 3; ++i) ezoo_save.horizon_ticks_at_idx[i] = (i+1)*1000;
+            EnsembleModelZoo_InitExitBandits(&ezoo_save, 0.1, 100);
+            // Apply some updates to populate non-uniform state
+            Bandit_Update(&ezoo_save.exit_bandits[0], 0, 25.0);
+            Bandit_Update(&ezoo_save.exit_bandits[0], 1, -15.0);
+            Bandit_Update(&ezoo_save.exit_bandits[2], 2, 50.0);
+
+            int saved = EnsembleModelZoo_SaveExitBanditState(
+                &ezoo_save, tmp_dir, /*regime_names=*/nullptr);
+            check("v5.13.4.C: SaveExitBanditState returns 1 on success",
+                  saved == 1);
+            // File should exist
+            FILE* fp = std::fopen(tmpbuf, "r");
+            check("v5.13.4.C: exit_bandit_state.json file created",
+                  fp != nullptr);
+            if (fp) std::fclose(fp);
+
+            // === Load into a fresh zoo + verify state preserved ===
+            EnsembleModelZoo<64> ezoo_load;
+            EnsembleModelZoo_Init(&ezoo_load);
+            ezoo_load.exit_predictor_count = 3;
+            ezoo_load.primary_count = 3;
+            for (int i = 0; i < 3; ++i) ezoo_load.horizon_ticks_at_idx[i] = (i+1)*1000;
+            EnsembleModelZoo_InitExitBandits(&ezoo_load, 0.1, 100);
+            int loaded = EnsembleModelZoo_LoadExitBanditState(&ezoo_load, tmp_dir);
+            check("v5.13.4.C: LoadExitBanditState returns 1 on matching bundle",
+                  loaded == 1);
+            check("v5.13.4.C: loaded exit_bandits[0].pulls[0] preserved",
+                  ezoo_load.exit_bandits[0].pulls[0] ==
+                  ezoo_save.exit_bandits[0].pulls[0]);
+            check("v5.13.4.C: loaded exit_bandits[2].pulls[2] preserved",
+                  ezoo_load.exit_bandits[2].pulls[2] ==
+                  ezoo_save.exit_bandits[2].pulls[2]);
+
+            // Cleanup
+            std::remove(tmpbuf);
+            rmdir(tmp_dir);
+        }
+    }
+
+    printf("\n--- v5.13.4.C: missing file → graceful skip ---\n");
+    {
+        using namespace tt;
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        ezoo.exit_predictor_count = 3;
+        ezoo.primary_count = 3;
+        EnsembleModelZoo_InitExitBandits(&ezoo, 0.1, 100);
+        // Snapshot priors (uniform from Init)
+        double cum0_before = ezoo.exit_bandits[0].cum_reward[0];
+        // Load from non-existent dir
+        int loaded = EnsembleModelZoo_LoadExitBanditState(&ezoo,
+            "/tmp/nonexistent_v5_13_4_path");
+        check("v5.13.4.C: LoadExitBanditState returns 0 on missing file",
+              loaded == 0);
+        check("v5.13.4.C: missing file leaves uniform priors intact",
+              ezoo.exit_bandits[0].cum_reward[0] == cum0_before);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

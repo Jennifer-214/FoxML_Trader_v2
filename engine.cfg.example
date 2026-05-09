@@ -170,6 +170,19 @@ exit_signal_model_dir=          # optional explicit dir; empty = auto-detect fro
 # recall. Default empty = disabled.
 calibration_log_path=
 
+# v5.13.4 — sell-side bandit reward attribution (parallel to buy-side bandit).
+# When enabled, exit-fired trades' counterfactual reward feeds exit_bandit;
+# non-exit fills bypass exit_bandit (existing buy_bandit flow unchanged).
+# Reward formula: actual_pnl_bps - hypothetical_held-to-TP_pnl_bps (optimistic
+# assumption — assumes TP would have hit before SL, which biases bandit
+# AGAINST firing exits; operator scales via exit_bandit_lr until paper-test
+# calibration suggests refinement). State persists across restart at
+# <core_model_dir>/exit_bandit_state.json (separate from buy-side
+# bandit_state.json).
+
+exit_bandit_enabled=0           # 0=off (default), 1=on
+exit_bandit_lr=0.1              # bandit learning rate; clamped [0.01, 1.0]
+
 #==============================================================================
 # REGIME DETECTION
 #==============================================================================
