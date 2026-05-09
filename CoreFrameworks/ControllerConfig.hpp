@@ -945,6 +945,14 @@ template <unsigned F> struct ControllerConfig {
   // via exit_bandit_lr until paper-test calibration suggests refinement).
   int      exit_bandit_enabled;        // 0 (default), 1 = on
   double   exit_bandit_lr;             // bandit learning rate; default 0.1
+  // v5.14.1.E — exit-side blender selector. Mirrors v5.14.0 buy-side
+  // ridge_within_horizon. Enables Ridge blending across exit_predictor
+  // handles (correlation-aware; downweights correlated alpha sources).
+  // 0 (default) = bandit-only (pre-v5.14.1.E behavior; preserved
+  // bytewise). 1 = Ridge across exit_predictor handles using existing
+  // ridge_lambda + ridge_cost_penalty + ridge_min_ic_floor cfg.
+  // Stamp-bound via FOREACH_STAMP_BOUND_CFG → drift detected at load.
+  int      exit_blender_mode;          // 0=bandit (default), 1=Ridge
   // v5.10.0a.G.8 — trade-close reward multiplier. Real money signal
   // (TP/SL hit) gets weighted ×N over the slow-path lookback rewards
   // (which are hypothetical "would have been correct" signals).
@@ -1270,6 +1278,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.ensemble_min_warmup_predictions = 100;
   // v5.13.4 — sell-side bandit defaults
   cfg.exit_bandit_enabled = 0;
+  // v5.14.1.E — exit-side blender default to bandit (pre-v5.14.1.E behavior).
+  cfg.exit_blender_mode   = 0;
   cfg.exit_bandit_lr      = 0.1;
   cfg.ensemble_min_agreement_pct = 0.6;
   cfg.ensemble_trade_reward_mult = 4.0;
@@ -1861,6 +1871,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(ensemble_min_warmup_predictions)
     // v5.13.4 — sell-side bandit
     CFG_PARSE_INT(exit_bandit_enabled)
+    // v5.14.1.E — exit-side blender selector (0=bandit, 1=Ridge)
+    CFG_PARSE_INT(exit_blender_mode)
     if (strcmp(key, "exit_bandit_lr") == 0) {
         double v = atof(val);
         if (v < 0.01) v = 0.01;

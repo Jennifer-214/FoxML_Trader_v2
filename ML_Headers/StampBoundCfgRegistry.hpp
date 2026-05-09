@@ -83,7 +83,9 @@
     X(confidence_rmse_baseline,            double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_rmse_baseline))         \
     /* v5.14.1.D — Feature winsorization (PARITY drift detection) */                                  \
     X(winsor_pct_low,                      double, "%.17g",  0.0, FPN_ToDouble(cfg.winsor_pct_low))                  \
-    X(winsor_pct_high,                     double, "%.17g",  0.0, FPN_ToDouble(cfg.winsor_pct_high))
+    X(winsor_pct_high,                     double, "%.17g",  0.0, FPN_ToDouble(cfg.winsor_pct_high))                 \
+    /* v5.14.1.E — Exit-side blender selector (PARITY drift detection) */                             \
+    X(exit_blender_mode,                   int,    "%d",     0,   cfg.exit_blender_mode)
 
 //======================================================================================================
 // [PARSER DISPATCH MACROS]

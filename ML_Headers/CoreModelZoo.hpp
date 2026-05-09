@@ -828,6 +828,12 @@ struct EnsembleModelZoo {
     // diagonal-only Σ. fallback_to_uniform stays 0 until the first
     // _Compute call sees a singular Σ.
     RidgeWeights<F> ridge_state;
+    // v5.14.1.E — exit-side Ridge state. Mirrors ridge_state for the
+    // exit_predictor handle array. Populated when cfg.exit_blender_mode=1
+    // by mirroring the v5.14.0 buy-side ridge_within_horizon path against
+    // exit_predictor[0..exit_predictor_count) instead of buy_signal[].
+    // Default: zero-init via RidgeWeights_Init in _Init below.
+    RidgeWeights<F> exit_ridge_state;
     char blend_mode[16];           // "weighted" or "selection" (cached from cfg)
     // v5.10.0a.G.7 — kill-switch bitmask. Bit i set = horizon i disabled
     // (skip predict + freeze its bandit weight). Set by parsing cfg's
@@ -911,6 +917,8 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     // by ridge λ; no per-core wiring needed beyond cfg flag check at
     // dispatch site (StrategyParameters.hpp ML_BuildParameters).
     RidgeWeights_Init(&ezoo->ridge_state);
+    // v5.14.1.E — symmetric init for exit-side Ridge state.
+    RidgeWeights_Init(&ezoo->exit_ridge_state);
     ezoo->last_predicted_regime_id = 0;
     ezoo->last_predicted_horizon_idx = -1;
     strncpy(ezoo->blend_mode, "weighted", sizeof(ezoo->blend_mode) - 1);
