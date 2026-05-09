@@ -19116,6 +19116,99 @@ e3_skip_load:;
         }
     }
 
+    // ----- v5.14.4.B.1: Reconcile_ApplyMissedFills (replay-only AUTO_SYNC) --------------------------
+    printf("\n--- v5.14.4.B.1: ApplyMissedFills helper ---\n");
+    {
+        // Test 1 — null/empty inputs → returns 0 (defensive)
+        check("v5.14.4.B.1: ApplyMissedFills null oms → 0",
+              tt::Reconcile_ApplyMissedFills<64>(nullptr, nullptr, 0) == 0);
+
+        tt::OrderManagerState<64> oms;
+        tt::EventLoopState<64> state;
+        tt::EventLoopState_InitLegacy(&state, &oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+        check("v5.14.4.B.1: ApplyMissedFills null trades → 0",
+              tt::Reconcile_ApplyMissedFills(&oms, (tt::ReconcileTrade*)nullptr, 5) == 0);
+        check("v5.14.4.B.1: ApplyMissedFills n_trades=0 → 0",
+              tt::Reconcile_ApplyMissedFills(&oms, (tt::ReconcileTrade*)nullptr, 0) == 0);
+    }
+    {
+        // Test 2 — trade_id <= last_seen → skipped (idempotent re-run safety)
+        tt::OrderManagerState<64> oms;
+        tt::EventLoopState<64> state;
+        tt::EventLoopState_InitLegacy(&state, &oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+        oms.last_seen_trade_id = 100;
+
+        tt::ReconcileTrade trades[3];
+        trades[0] = {.trade_id = 50,  .order_id = 1, .price = 50000.0, .qty = 0.001, .commission = 0, .time_ms = 0, .is_buyer = 1, .is_maker = 0};
+        trades[1] = {.trade_id = 100, .order_id = 2, .price = 50000.0, .qty = 0.001, .commission = 0, .time_ms = 0, .is_buyer = 1, .is_maker = 0};
+        trades[2] = {.trade_id = 99,  .order_id = 3, .price = 50000.0, .qty = 0.001, .commission = 0, .time_ms = 0, .is_buyer = 1, .is_maker = 0};
+
+        int rc = tt::Reconcile_ApplyMissedFills(&oms, trades, 3);
+        check("v5.14.4.B.1: trades all <= last_seen_trade_id → 0 replayed",
+              rc == 0);
+        check("v5.14.4.B.1: last_seen_trade_id unchanged (still 100)",
+              oms.last_seen_trade_id == 100);
+    }
+    {
+        // Test 3 — trade_id > last_seen → replayed; last_seen bumped to max
+        tt::OrderManagerState<64> oms;
+        tt::EventLoopState<64> state;
+        tt::EventLoopState_InitLegacy(&state, &oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+        oms.last_seen_trade_id = 50;
+
+        tt::ReconcileTrade trades[3];
+        trades[0] = {.trade_id = 100, .order_id = 1, .price = 50000.0, .qty = 0.001, .commission = 0, .time_ms = 0, .is_buyer = 1, .is_maker = 0};
+        trades[1] = {.trade_id = 200, .order_id = 2, .price = 50100.0, .qty = 0.001, .commission = 0, .time_ms = 0, .is_buyer = 1, .is_maker = 0};
+        trades[2] = {.trade_id = 150, .order_id = 3, .price = 50050.0, .qty = 0.001, .commission = 0, .time_ms = 0, .is_buyer = 1, .is_maker = 0};
+
+        int rc = tt::Reconcile_ApplyMissedFills(&oms, trades, 3);
+        check("v5.14.4.B.1: trades all > last_seen → 3 replayed",
+              rc == 3);
+        check("v5.14.4.B.1: last_seen_trade_id bumped to max (200)",
+              oms.last_seen_trade_id == 200);
+    }
+    {
+        // Test 4 — mixed (some old, some new) → only new ones replayed
+        tt::OrderManagerState<64> oms;
+        tt::EventLoopState<64> state;
+        tt::EventLoopState_InitLegacy(&state, &oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+        oms.last_seen_trade_id = 100;
+
+        tt::ReconcileTrade trades[4];
+        trades[0] = {.trade_id = 50,  .order_id = 1, .price = 50000.0, .qty = 0.001, .commission = 0, .time_ms = 0, .is_buyer = 1, .is_maker = 0};  // old
+        trades[1] = {.trade_id = 150, .order_id = 2, .price = 50100.0, .qty = 0.001, .commission = 0, .time_ms = 0, .is_buyer = 1, .is_maker = 0};  // new
+        trades[2] = {.trade_id = 100, .order_id = 3, .price = 50050.0, .qty = 0.001, .commission = 0, .time_ms = 0, .is_buyer = 1, .is_maker = 0};  // boundary (== last_seen → skipped)
+        trades[3] = {.trade_id = 175, .order_id = 4, .price = 50075.0, .qty = 0.001, .commission = 0, .time_ms = 0, .is_buyer = 1, .is_maker = 0};  // new
+
+        int rc = tt::Reconcile_ApplyMissedFills(&oms, trades, 4);
+        check("v5.14.4.B.1: mixed old/new → 2 replayed (only > 100)",
+              rc == 2);
+        check("v5.14.4.B.1: last_seen_trade_id bumped to max new (175)",
+              oms.last_seen_trade_id == 175);
+    }
+    {
+        // Test 5 — idempotent re-run: replay then re-call → 0 the second time
+        tt::OrderManagerState<64> oms;
+        tt::EventLoopState<64> state;
+        tt::EventLoopState_InitLegacy(&state, &oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+
+        tt::ReconcileTrade trades[2];
+        trades[0] = {.trade_id = 100, .order_id = 1, .price = 50000.0, .qty = 0.001, .commission = 0, .time_ms = 0, .is_buyer = 1, .is_maker = 0};
+        trades[1] = {.trade_id = 200, .order_id = 2, .price = 50100.0, .qty = 0.001, .commission = 0, .time_ms = 0, .is_buyer = 1, .is_maker = 0};
+
+        int rc1 = tt::Reconcile_ApplyMissedFills(&oms, trades, 2);
+        int rc2 = tt::Reconcile_ApplyMissedFills(&oms, trades, 2);
+        check("v5.14.4.B.1: first call replays 2",  rc1 == 2);
+        check("v5.14.4.B.1: re-run with same trades → 0 (idempotent)", rc2 == 0);
+        check("v5.14.4.B.1: last_seen_trade_id stable across re-runs (200)",
+              oms.last_seen_trade_id == 200);
+    }
+
     // ----- v5.14.4.A: FOREACH_RECONCILE_MODE registry + cfg back-compat ------------------------------
     printf("\n--- v5.14.4.A: reconcile mode X-macro ---\n");
     {

@@ -158,6 +158,88 @@ inline int ReconcileMode_FromString(const char* str, ReconcileMode* out_mode) {
     return 0;
 }
 
+//======================================================================================================
+// [v5.14.4.B.1 — APPLYMISSEDFILLS HELPER]
+//======================================================================================================
+// Replays trades that arrived during a disconnect window: for each
+// ReconcileTrade with trade_id > oms->last_seen_trade_id, synthesizes
+// an Order + calls OrderManager_HandleFill (existing path) to update
+// portfolio + balance to match exchange-side reality.
+//
+// CALLER (sharded boot only; per deep audit 2026-05-09 / TECH_DEBT-002):
+//   - EngineSharded.hpp boot reconcile dispatch (RECONCILE_AUTO_SYNC mode)
+//
+// SAFETY:
+//   - Idempotent re-run: trade_id <= last_seen_trade_id → skipped
+//     (no double-apply across multiple boot reconciles)
+//   - last_seen_trade_id updated to max(seen) after replay so the next
+//     reconcile cycle skips replay-applied trades
+//   - core_id synthesis: ReconcileTrade doesn't carry core_id (boot-time
+//     reconcile doesn't know which core a trade belonged to). Replay
+//     uses core_id=0 as default — operator-acceptable because boot
+//     reconcile is a one-time recovery path, not steady-state attribution
+//   - Order_Init uses ORDER_MARKET_BUY for is_buyer=1 trades, ORDER_MARKET_SELL
+//     otherwise. Real order_type may have been LIMIT but boot replay can't
+//     reconstruct that; MARKET-equivalent state restoration is sufficient
+//     for portfolio/balance correctness
+//
+// FUTURE-THINKING: when WS-side fill stream lands (v5.14.x+ post-boot),
+// bump oms->last_seen_trade_id on every WS fill. Post-disconnect reconcile
+// then only replays trades newer than the WS-stream high water — narrower
+// replay window, less risk of double-apply.
+//
+// AUTO_SYNC = composition pattern: this is one of N independent
+// helper-actions composed into AUTO_SYNC mode. Adding a new auto-sync
+// action (e.g., auto-rebalance positions, auto-recreate stops) follows
+// the v5.14.4.B sub-split precedent: new helper as standalone unit;
+// boot dispatch composes it alongside existing helpers.
+//
+// Returns: count of fills replayed.
+template <unsigned F>
+inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
+                                        const ReconcileTrade* trades,
+                                        int n_trades) {
+    if (!oms || !trades || n_trades <= 0) return 0;
+
+    int replayed = 0;
+    uint64_t max_trade_id = oms->last_seen_trade_id;
+
+    for (int i = 0; i < n_trades; ++i) {
+        const ReconcileTrade& t = trades[i];
+        if ((uint64_t)t.trade_id <= oms->last_seen_trade_id) {
+            continue;  // already seen; skip (idempotent re-run safety)
+        }
+
+        // Synthesize an Order from the trade record. Defaults explained
+        // in the function header comment.
+        Order<F> synth;
+        OrderType otype = t.is_buyer ? ORDER_MARKET_BUY : ORDER_MARKET_SELL;
+        Order_Init(&synth, (uint64_t)t.order_id, /*core_id=*/0, otype);
+        synth.is_maker = (uint8_t)t.is_maker;
+        synth.requested_qty = FPN_FromDouble<F>(t.qty);
+        synth.event_price   = FPN_FromDouble<F>(t.price);
+
+        // Call existing fill path. Updates portfolio + balance + writes
+        // event log entry. Same code as live WS fill handler — this is
+        // the canonical fill-application path (single source of truth).
+        OrderManager_HandleFill(oms, &synth,
+                                  FPN_FromDouble<F>(t.price),
+                                  FPN_FromDouble<F>(t.qty));
+
+        replayed++;
+        if ((uint64_t)t.trade_id > max_trade_id) {
+            max_trade_id = (uint64_t)t.trade_id;
+        }
+    }
+
+    // Bump high-watermark to max(seen). Next reconcile cycle skips
+    // already-applied trades regardless of which order they appear in
+    // exchange's response.
+    oms->last_seen_trade_id = max_trade_id;
+
+    return replayed;
+}
+
 struct ReconcileResult {
     // Inputs (echoed for logging)
     double exchange_usdt;

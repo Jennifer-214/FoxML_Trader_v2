@@ -1326,11 +1326,81 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 return;
             }
 
-            if (!cfg.reconcile_dry_run) {
-                fprintf(stderr,
-                    "[reconcile] WARN: reconcile_dry_run=0 set but "
-                    "Phase 2 apply path not implemented yet. No changes "
-                    "applied. Set dry_run=1 explicitly to silence this.\n");
+            // v5.14.4.B.1 — 3-mode dispatch (FOREACH_RECONCILE_MODE).
+            //
+            // SHARDED-ONLY (deep audit 2026-05-09 / TECH_DEBT-002 alignment):
+            // centralized engine main.cpp:362 does balance check only, NOT
+            // reconciliation. This dispatch lives in EngineSharded boot ONLY.
+            // When TECH_DEBT-002 (centralized removal) ships, no migration
+            // step needed here. If v5.X+ adds Phase 3 heartbeat reconcile
+            // (per Reconcile.hpp:19-24), verify the new dispatch is ALSO
+            // sharded-only — DO NOT add to legacy path.
+            //
+            // FUTURE-THINKING: if mode dispatch goes per-cycle (e.g.,
+            // AUTO_SYNC_CONTINUOUS in v5.X+), apply CLAUDE.md item 18(a):
+            // template <bool ENABLED> + if constexpr for compile-time
+            // elision. Boot dispatch today is operator-initiated +
+            // I/O-dominated; branchless irrelevant.
+            tt::ReconcileMode mode = (tt::ReconcileMode)cfg.reconcile_mode;
+            switch (mode) {
+                case tt::RECONCILE_STRICT:
+                    // STRICT: refused_boot is the canonical CRITICAL refusal
+                    // (already returned above). Additionally refuse if any
+                    // cancel_actions surfaced — operator wants ZERO disagreement
+                    // tolerance in strict mode (e.g. production deploy where
+                    // any zombie order indicates a state-management bug to fix
+                    // before continuing).
+                    if (rr.cancel_actions > 0) {
+                        fprintf(stderr,
+                            "[reconcile] STRICT mode + %d cancel_action(s) "
+                            "detected (zombie orders or position drift); "
+                            "engine boot REFUSED. Set reconcile_mode=warn "
+                            "to log + continue, OR reconcile_mode=auto_sync "
+                            "to replay missed fills + cancel zombies.\n",
+                            rr.cancel_actions);
+                        BinanceAdapter_ShutdownState(&g_sharded_binance_adapter);
+                        std::signal(SIGINT,  prev_int);
+                        std::signal(SIGTERM, prev_term);
+                        return;
+                    }
+                    break;
+
+                case tt::RECONCILE_WARN:
+                    // WARN: log + continue. Legacy dry_run=1 behavior preserved.
+                    if (rr.cancel_actions > 0) {
+                        fprintf(stderr,
+                            "[reconcile] WARN mode: %d cancel_action(s) "
+                            "detected; continuing (set reconcile_mode=auto_sync "
+                            "to apply replay + cancel)\n",
+                            rr.cancel_actions);
+                    }
+                    break;
+
+                case tt::RECONCILE_AUTO_SYNC: {
+                    // AUTO_SYNC = composition of N independent helper-actions.
+                    // .B.1 ships ApplyMissedFills (replay; pure OMS state
+                    // mutation; no exchange writes). .B.2 will add
+                    // AutoCancelStale (exchange-side cancellations).
+                    int replayed = tt::Reconcile_ApplyMissedFills(
+                        &oms, trades, n_trades);
+                    fprintf(stderr,
+                        "[reconcile] AUTO_SYNC: %d missed fill(s) replayed "
+                        "(last_seen_trade_id=%llu)\n",
+                        replayed, (unsigned long long)oms.last_seen_trade_id);
+
+                    // .B.1 partial-mode message: cancel of zombie orders
+                    // is deferred to .B.2. Removed when .B.2 ships.
+                    if (rr.cancel_actions > 0) {
+                        fprintf(stderr,
+                            "[reconcile] AUTO_SYNC partial (v5.14.4.B.1): "
+                            "%d zombie order(s) detected but cancel-stale "
+                            "deferred to v5.14.4.B.2 ship. Orders left as-is; "
+                            "operator can manually cancel via Binance UI OR "
+                            "wait for v5.14.4.B.2.\n",
+                            rr.cancel_actions);
+                    }
+                    break;
+                }
             }
         }
     }
