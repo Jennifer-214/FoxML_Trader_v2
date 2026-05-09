@@ -66,6 +66,98 @@ struct ReconcileTrade {
     int     is_maker;     // 1 = maker fill
 };
 
+//======================================================================================================
+// [v5.14.4.A — RECONCILE MODE X-MACRO REGISTRY]
+//======================================================================================================
+// 3-mode enum (STRICT/WARN/AUTO_SYNC) for boot reconcile dispatch.
+// Operator chose X-macro registry over manual enum at 3-mode count
+// per CLAUDE.md item 19 (structural fix preferred when bug class can
+// recur). Adding 4th mode = ONE line in this registry; enum + cfg
+// parser + dispatch + count macro auto-extend.
+//
+// PROVEN PATTERN: same shape as STAMP_CFG_AUTOPOPULATE (v5.14.1.E.E.B)
+// + FOREACH_ENSEMBLE_POST_LOAD (v5.14.2.E.1) + FOREACH_IC_VARIANT
+// (v5.14.1.F). All extinguished recurring bug classes (Class 18 +
+// v5.9.5b production-caller) at compile time.
+//
+// REGISTRY ENTRY SHAPE: X(name, value, cfg_string)
+//   name        — uppercase identifier; expands to RECONCILE_<name>
+//                 enum value. Used in switch dispatch + cfg.reconcile_mode
+//                 reads.
+//   value       — uint8_t numeric value (0/1/2/3...). Stable for cfg
+//                 numeric back-compat (legacy operator cfgs may have
+//                 numeric values).
+//   cfg_string  — operator-friendly string for cfg parser (e.g.,
+//                 "strict", "warn", "auto_sync"). Lowercase with
+//                 underscores. Cfg parser accepts BOTH numeric AND
+//                 string values for back-compat + readability.
+//
+// FUTURE-THINKING: if v5.X+ adds a per-cycle reconcile mode (e.g.,
+// AUTO_SYNC_CONTINUOUS that re-runs reconcile every N cycles), the
+// dispatch becomes per-cycle. At that point apply CLAUDE.md item 18(a):
+//   - DEFAULT-OFF safety gate via `template <bool ENABLED>` + `if constexpr`
+//     for compile-time elision when mode != continuous
+//   - OR runtime cache: hoist mode to slow-path top + pass resolved
+//     predicate (item 18(d))
+// Boot dispatch today is operator-initiated + I/O-dominated; branchless
+// is irrelevant. The trigger is documented here so future-Claude
+// catches it when adding a per-cycle mode.
+//
+// SHARDED-ONLY (deep audit 2026-05-09 / TECH_DEBT-002 alignment):
+// Centralized engine `main.cpp:362` does balance check only, NOT
+// reconciliation. Reconcile dispatch lives in EngineSharded boot ONLY.
+// When TECH_DEBT-002 (centralized removal) ships, no migration step
+// needed at the dispatch site (verified by deep audit).
+
+#define FOREACH_RECONCILE_MODE(X)                                              \
+    /* refuse boot if exchange state diverges from local OMS expectations */   \
+    X(STRICT,    0, "strict")                                                  \
+    /* log + continue (legacy default; was reconcile_dry_run=1) */             \
+    X(WARN,      1, "warn")                                                    \
+    /* replay missed fills (myTrades) + cancel zombie orders (openOrders) */   \
+    X(AUTO_SYNC, 2, "auto_sync")
+
+// Compile-time count for tests + parametric sweeps. Update when adding
+// entries (registry should compile-time-fail if count drifts; tests
+// use static_assert for accidental shrinkage detection).
+#define FOREACH_RECONCILE_MODE_COUNT_HELPER(name, value, str) +1
+#define FOREACH_RECONCILE_MODE_COUNT \
+    (0 FOREACH_RECONCILE_MODE(FOREACH_RECONCILE_MODE_COUNT_HELPER))
+
+// Auto-generate enum from registry. Each X expands to:
+//   RECONCILE_<NAME> = <value>,
+#define RECONCILE_MODE_ENUM_ENTRY(name, value, str) RECONCILE_##name = value,
+enum ReconcileMode : uint8_t {
+    FOREACH_RECONCILE_MODE(RECONCILE_MODE_ENUM_ENTRY)
+};
+#undef RECONCILE_MODE_ENUM_ENTRY
+
+// Mode → string for logging. Uses cfg_string field (operator-friendly).
+inline const char* ReconcileMode_ToString(ReconcileMode mode) {
+#define RECONCILE_MODE_TO_STRING_CASE(name, value, str) \
+    case RECONCILE_##name: return str;
+    switch (mode) {
+        FOREACH_RECONCILE_MODE(RECONCILE_MODE_TO_STRING_CASE)
+    }
+    return "unknown";
+#undef RECONCILE_MODE_TO_STRING_CASE
+}
+
+// String → mode for cfg parser. Returns 1 on match (with *out_mode
+// populated), 0 on no match (operator should fall back to numeric
+// parse OR error). Accepts cfg_string values from registry.
+inline int ReconcileMode_FromString(const char* str, ReconcileMode* out_mode) {
+    if (!str || !out_mode) return 0;
+#define RECONCILE_MODE_FROM_STRING_CASE(name, value, s)   \
+    if (strcmp(str, s) == 0) {                             \
+        *out_mode = RECONCILE_##name;                      \
+        return 1;                                          \
+    }
+    FOREACH_RECONCILE_MODE(RECONCILE_MODE_FROM_STRING_CASE)
+#undef RECONCILE_MODE_FROM_STRING_CASE
+    return 0;
+}
+
 struct ReconcileResult {
     // Inputs (echoed for logging)
     double exchange_usdt;

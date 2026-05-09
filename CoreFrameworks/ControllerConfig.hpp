@@ -708,13 +708,24 @@ template <unsigned F> struct ControllerConfig {
   //                              most cases), >0 = poll cadence in
   //                              seconds for heartbeat reconciliation
   //                              (defends against silent WS-missed fills).
-  //   reconcile_dry_run:      1 = log what would change but don't apply
-  //                              (recommended for first live deploy
-  //                              against testnet)
-  //                              0 = full reconcile (production)
-  // Default dry_run=1 is intentional friction — flip to 0 deliberately.
+  //   reconcile_dry_run:      DEPRECATED v5.14.4. Use reconcile_mode.
+  //                              Back-compat parser still accepts this
+  //                              field (dry_run=1 → mode=WARN; dry_run=0
+  //                              → mode=STRICT). Will be removed in
+  //                              v5.X+ once operator cfgs migrated.
+  //   reconcile_mode:         v5.14.4 — 3-mode enum (STRICT/WARN/AUTO_SYNC).
+  //                              See FOREACH_RECONCILE_MODE in Reconcile.hpp
+  //                              for canonical values + cfg_string mappings.
+  //                              Cfg parser accepts both string ("strict",
+  //                              "warn", "auto_sync") and numeric (0/1/2)
+  //                              for operator-friendly + back-compat reading.
+  // Default reconcile_mode=WARN is intentional friction — flip to STRICT
+  // for production refusal-on-mismatch, or AUTO_SYNC for replay+cancel.
   int    reconcile_interval_sec;
-  int    reconcile_dry_run;
+  int    reconcile_dry_run;          // legacy; back-compat shim translates to reconcile_mode
+  uint8_t reconcile_mode;             // v5.14.4 — ReconcileMode enum stored as uint8_t
+                                      // (avoid pulling Reconcile.hpp into universal-include
+                                      //  ControllerConfig.hpp; cast at point of use)
   // Prediction normalization — Phase 7F (default OFF)
   int prediction_normalize; // 0=disabled, 1=z-score normalize predictions
                             // (activates after 100)
@@ -1316,7 +1327,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   }
   cfg.health_log_level            = 0;                            // 0=info, 1=debug, 2=trace
   cfg.reconcile_interval_sec      = 0;                            // 0 = boot-only
-  cfg.reconcile_dry_run           = 1;                            // safer default; flip to 0 deliberately
+  cfg.reconcile_dry_run           = 1;                            // legacy field; safer default
+  cfg.reconcile_mode              = 1;                            // v5.14.4 — RECONCILE_WARN (matches dry_run=1 legacy behavior)
   cfg.prediction_normalize = 0;
   cfg.barrier_gate_enabled = 0;
   cfg.model_verify_strict = 0;  // 0=warn, 1=strict (fail on mismatch), -1=skip
@@ -2015,7 +2027,31 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         continue;
     }
     if (strcmp(key, "reconcile_dry_run") == 0) {
-        cfg.reconcile_dry_run = atoi(val);
+        // v5.14.4 back-compat: legacy operator cfgs may have this field.
+        // Translate to reconcile_mode (1 → WARN; 0 → STRICT). Also keep
+        // the legacy field set so any downstream code reading
+        // reconcile_dry_run still works during the transition window.
+        int dry_run = atoi(val);
+        cfg.reconcile_dry_run = dry_run;
+        cfg.reconcile_mode    = dry_run ? 1 /*WARN*/ : 0 /*STRICT*/;
+        continue;
+    }
+    if (strcmp(key, "reconcile_mode") == 0) {
+        // v5.14.4 — accepts string ("strict"/"warn"/"auto_sync") OR
+        // numeric (0/1/2). String form is operator-friendly + matches
+        // FOREACH_RECONCILE_MODE registry; numeric is for back-compat
+        // and tests. Falls back to numeric atoi if string match fails.
+        // (NOTE: ReconcileMode_FromString lives in Reconcile.hpp; we
+        // duplicate the small string switch here to keep ControllerConfig
+        // header free of Reconcile.hpp dependency. If FOREACH_RECONCILE_MODE
+        // gains many entries, refactor to include Reconcile.hpp here.)
+        if      (strcmp(val, "strict")    == 0) cfg.reconcile_mode = 0;
+        else if (strcmp(val, "warn")      == 0) cfg.reconcile_mode = 1;
+        else if (strcmp(val, "auto_sync") == 0) cfg.reconcile_mode = 2;
+        else                                     cfg.reconcile_mode = (uint8_t)atoi(val);
+        // Mirror to legacy field for code still reading reconcile_dry_run
+        // (will be removed when transition window closes).
+        cfg.reconcile_dry_run = (cfg.reconcile_mode == 0) ? 0 : 1;
         continue;
     }
     CFG_PARSE_INT(prediction_normalize)

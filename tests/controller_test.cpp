@@ -19116,6 +19116,111 @@ e3_skip_load:;
         }
     }
 
+    // ----- v5.14.4.A: FOREACH_RECONCILE_MODE registry + cfg back-compat ------------------------------
+    printf("\n--- v5.14.4.A: reconcile mode X-macro ---\n");
+    {
+        // Test 1 — Registry count static_assert (catches accidental shrinkage)
+        static_assert(FOREACH_RECONCILE_MODE_COUNT >= 3,
+            "v5.14.4.A: FOREACH_RECONCILE_MODE registry shrunk — was a mode removed?");
+        check("v5.14.4.A: FOREACH_RECONCILE_MODE_COUNT >= 3 (STRICT/WARN/AUTO_SYNC)",
+              FOREACH_RECONCILE_MODE_COUNT >= 3);
+    }
+    {
+        // Test 2 — Enum values stable (operator cfgs may use numeric form)
+        check("v5.14.4.A enum: RECONCILE_STRICT == 0", (int)tt::RECONCILE_STRICT == 0);
+        check("v5.14.4.A enum: RECONCILE_WARN == 1", (int)tt::RECONCILE_WARN == 1);
+        check("v5.14.4.A enum: RECONCILE_AUTO_SYNC == 2", (int)tt::RECONCILE_AUTO_SYNC == 2);
+    }
+    {
+        // Test 3 — ToString round-trip
+        check("v5.14.4.A: ToString(STRICT) == 'strict'",
+              strcmp(tt::ReconcileMode_ToString(tt::RECONCILE_STRICT), "strict") == 0);
+        check("v5.14.4.A: ToString(WARN) == 'warn'",
+              strcmp(tt::ReconcileMode_ToString(tt::RECONCILE_WARN), "warn") == 0);
+        check("v5.14.4.A: ToString(AUTO_SYNC) == 'auto_sync'",
+              strcmp(tt::ReconcileMode_ToString(tt::RECONCILE_AUTO_SYNC), "auto_sync") == 0);
+    }
+    {
+        // Test 4 — FromString round-trip
+        tt::ReconcileMode mode;
+        check("v5.14.4.A: FromString('strict') → STRICT",
+              tt::ReconcileMode_FromString("strict", &mode) == 1 && mode == tt::RECONCILE_STRICT);
+        check("v5.14.4.A: FromString('warn') → WARN",
+              tt::ReconcileMode_FromString("warn", &mode) == 1 && mode == tt::RECONCILE_WARN);
+        check("v5.14.4.A: FromString('auto_sync') → AUTO_SYNC",
+              tt::ReconcileMode_FromString("auto_sync", &mode) == 1 && mode == tt::RECONCILE_AUTO_SYNC);
+        check("v5.14.4.A: FromString('unknown') → 0 (no match)",
+              tt::ReconcileMode_FromString("unknown", &mode) == 0);
+    }
+    {
+        // Test 5 — Cfg defaults: reconcile_mode = WARN (matches legacy dry_run=1)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.14.4.A cfg default: reconcile_mode = WARN (1)",
+              cfg.reconcile_mode == 1);
+        check("v5.14.4.A cfg default: reconcile_dry_run = 1 (legacy preserved)",
+              cfg.reconcile_dry_run == 1);
+    }
+    {
+        // Test 6 — Cfg parser back-compat: legacy reconcile_dry_run=0 → STRICT
+        char tmp_cfg[] = "/tmp/v5_14_4_a_compat_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        if (fd >= 0) {
+            const char* contents = "reconcile_dry_run=0\n";
+            write(fd, contents, strlen(contents));
+            close(fd);
+            ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmp_cfg);
+            check("v5.14.4.A back-compat: dry_run=0 → reconcile_mode = STRICT (0)",
+                  cfg.reconcile_mode == 0);
+            check("v5.14.4.A back-compat: dry_run=0 → reconcile_dry_run = 0 preserved",
+                  cfg.reconcile_dry_run == 0);
+            unlink(tmp_cfg);
+        }
+    }
+    {
+        // Test 7 — Cfg parser back-compat: legacy reconcile_dry_run=1 → WARN
+        char tmp_cfg[] = "/tmp/v5_14_4_a_compat2_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        if (fd >= 0) {
+            const char* contents = "reconcile_dry_run=1\n";
+            write(fd, contents, strlen(contents));
+            close(fd);
+            ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmp_cfg);
+            check("v5.14.4.A back-compat: dry_run=1 → reconcile_mode = WARN (1)",
+                  cfg.reconcile_mode == 1);
+            unlink(tmp_cfg);
+        }
+    }
+    {
+        // Test 8 — Cfg parser new field: reconcile_mode=auto_sync (string form)
+        char tmp_cfg[] = "/tmp/v5_14_4_a_str_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        if (fd >= 0) {
+            const char* contents = "reconcile_mode=auto_sync\n";
+            write(fd, contents, strlen(contents));
+            close(fd);
+            ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmp_cfg);
+            check("v5.14.4.A new field: reconcile_mode=auto_sync → 2",
+                  cfg.reconcile_mode == 2);
+            check("v5.14.4.A new field: dry_run mirrored (mode != STRICT → dry_run=1)",
+                  cfg.reconcile_dry_run == 1);
+            unlink(tmp_cfg);
+        }
+    }
+    {
+        // Test 9 — Cfg parser new field: reconcile_mode=2 (numeric form)
+        char tmp_cfg[] = "/tmp/v5_14_4_a_num_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        if (fd >= 0) {
+            const char* contents = "reconcile_mode=2\n";
+            write(fd, contents, strlen(contents));
+            close(fd);
+            ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmp_cfg);
+            check("v5.14.4.A new field: reconcile_mode=2 (numeric) → 2 (AUTO_SYNC)",
+                  cfg.reconcile_mode == 2);
+            unlink(tmp_cfg);
+        }
+    }
+
     // ----- v5.14.4.0: BinanceOrderAPI_CancelOrder + last_seen_trade_id ------------------------------
     printf("\n--- v5.14.4.0: cancel API + last_seen_trade_id ---\n");
     {
