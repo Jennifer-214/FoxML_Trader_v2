@@ -1164,6 +1164,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     EnsembleModelZoo_InitBandits(&ml_ensemble_zoos[i],
                                                    cfg.ensemble_bandit_eta,
                                                    cfg.ensemble_min_warmup_predictions);
+                    // v5.13.4 — initialize per-regime exit-side bandits.
+                    // Skips silently if exit_predictor_count==0 (no exit
+                    // models loaded). Gating to actually fire happens at
+                    // HandleFill (cfg.exit_bandit_enabled check).
+                    EnsembleModelZoo_InitExitBandits(&ml_ensemble_zoos[i],
+                                                       cfg.exit_bandit_lr,
+                                                       cfg.ensemble_min_warmup_predictions);
                     const char* mode = cfg.core_ensemble_blend_mode[i][0]
                                       ? cfg.core_ensemble_blend_mode[i]
                                       : cfg.ensemble_blend_mode;
@@ -2941,6 +2948,12 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                 oms.last_exit_was_predicted[pidx] = 1;
                                 oms.last_exit_predicted_p[pidx] =
                                     state.cores[c].last_exit_prediction;
+                                // v5.13.4 — capture chosen arm + regime per-slot
+                                // for HandleFill's exit_bandit Update.
+                                oms.last_exit_predicted_arm[pidx] = (int8_t)
+                                    state.cores[c].last_exit_dominant_horizon;
+                                oms.last_exit_predicted_regime[pidx] = (int8_t)
+                                    state.cores[c].regime_state.current_regime;
                                 OMS_PushSubmit(&oms, (int16_t)pidx,
                                     ORDER_MARKET_SELL, qty,
                                     FPN_Zero<F>(), FPN_Zero<F>(),

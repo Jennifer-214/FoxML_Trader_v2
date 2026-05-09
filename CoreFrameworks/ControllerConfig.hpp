@@ -896,6 +896,14 @@ template <unsigned F> struct ControllerConfig {
   double   ensemble_bandit_eta;
   int      ensemble_min_warmup_predictions;
   double   ensemble_min_agreement_pct;
+  // v5.13.4 — sell-side bandit. Disabled by default; opt-in for paper-
+  // test. When enabled, exit-fired trades' counterfactual reward feeds
+  // exit_bandit; non-exit fills bypass exit_bandit (existing buy_bandit
+  // path unchanged). Reward formula: actual_pnl_bps - hypothetical_held-
+  // to-TP_pnl_bps (optimistic; biases against exits — operator scales
+  // via exit_bandit_lr until paper-test calibration suggests refinement).
+  int      exit_bandit_enabled;        // 0 (default), 1 = on
+  double   exit_bandit_lr;             // bandit learning rate; default 0.1
   // v5.10.0a.G.8 — trade-close reward multiplier. Real money signal
   // (TP/SL hit) gets weighted ×N over the slow-path lookback rewards
   // (which are hypothetical "would have been correct" signals).
@@ -1219,6 +1227,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.ensemble_blend_mode[sizeof(cfg.ensemble_blend_mode) - 1] = '\0';
   cfg.ensemble_bandit_eta = 0.1;
   cfg.ensemble_min_warmup_predictions = 100;
+  // v5.13.4 — sell-side bandit defaults
+  cfg.exit_bandit_enabled = 0;
+  cfg.exit_bandit_lr      = 0.1;
   cfg.ensemble_min_agreement_pct = 0.6;
   cfg.ensemble_trade_reward_mult = 4.0;
   cfg.ensemble_bandit_save_interval = 5000;  // v5.10.0a.G.9
@@ -1746,6 +1757,15 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         continue;
     }
     CFG_PARSE_INT(ensemble_min_warmup_predictions)
+    // v5.13.4 — sell-side bandit
+    CFG_PARSE_INT(exit_bandit_enabled)
+    if (strcmp(key, "exit_bandit_lr") == 0) {
+        double v = atof(val);
+        if (v < 0.01) v = 0.01;
+        if (v > 1.0)  v = 1.0;
+        cfg.exit_bandit_lr = v;
+        continue;
+    }
     if (strcmp(key, "ensemble_min_agreement_pct") == 0) {
         double v = atof(val);
         if (v < 0.0) v = 0.0;

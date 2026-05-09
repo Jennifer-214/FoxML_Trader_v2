@@ -287,6 +287,18 @@ struct OrderManagerState {
     // blended probability at submit time.
     double last_exit_predicted_p[MAX_PORTFOLIO_POSITIONS];
 
+    // v5.13.4 — per-slot arm capture. Slow-path body writes the dominant
+    // exit_predictor horizon idx at submit time; HandleFill reads at fill
+    // time for Bandit_Update on exit_bandits[regime]. Captured per-slot
+    // (not per-core) so partials legs A/B independently attributable +
+    // stable across subsequent slow-path cycles (subsequent predicts on
+    // the same core can't overwrite this slot's chosen arm because
+    // there's already a fill pending). Cleared in HandleFill post-update.
+    int8_t last_exit_predicted_arm[MAX_PORTFOLIO_POSITIONS];
+    int8_t last_exit_predicted_regime[MAX_PORTFOLIO_POSITIONS];
+    uint8_t _pad_lepa[(MAX_PORTFOLIO_POSITIONS * 2 % 8)
+                       ? (8 - (MAX_PORTFOLIO_POSITIONS * 2 % 8)) : 0];
+
     // FILE* opened lazily by OrderManager_OpenCalibrationLog (engine boot
     // calls when cfg.calibration_log_path is non-empty). Drainer thread
     // (sole HandleFill caller) is the only writer. Closed in Shutdown.
@@ -510,6 +522,9 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
         // v5.13.0.B — per-slot exit-predictor attribution + calibration
         oms->last_exit_was_predicted[i]       = 0;
         oms->last_exit_predicted_p[i]         = 0.0;
+        // v5.13.4 — per-slot bandit arm + regime capture (-1 = unset)
+        oms->last_exit_predicted_arm[i]       = -1;
+        oms->last_exit_predicted_regime[i]    = -1;
     }
     // v5.13.0.B — calibration log file lazy-opened by engine boot via
     // OrderManager_OpenCalibrationLog when cfg.calibration_log_path set.

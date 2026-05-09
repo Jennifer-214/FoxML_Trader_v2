@@ -739,6 +739,16 @@ struct EnsembleModelZoo {
     // Per-prediction tracking (G.7 + G.8 reward attribution)
     int last_predicted_regime_id;  // regime AT predict-time (NOT current; for G.8 attribution)
     int last_predicted_horizon_idx;// dominant horizon idx (display + G.8 reward)
+    // v5.13.4 — sell-side bandit (parallel to buy-side). Same per-regime
+    // shape; arms count = exit_predictor_count. Cold start: uniform; G.8-
+    // style reward update fires from HandleFill exit branch when
+    // last_exit_was_predicted[slot] && cfg.exit_bandit_enabled && NOT
+    // flatten event. Counterfactual reward formula: actual_pnl_bps -
+    // hypothetical_held_to_TP_pnl_bps (optimistic; biases against exits;
+    // operator scales via cfg.exit_bandit_lr; refined post paper-test).
+    BanditState exit_bandits[NUM_REGIMES];
+    int initialized_exit_bandits;       // 0 = no exit models loaded; gates dispatch
+    int last_predicted_exit_horizon_idx;// dominant exit_predictor arm at predict time
     char blend_mode[16];           // "weighted" or "selection" (cached from cfg)
     // v5.10.0a.G.7 — kill-switch bitmask. Bit i set = horizon i disabled
     // (skip predict + freeze its bandit weight). Set by parsing cfg's
@@ -812,6 +822,11 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     // so we know how many arms).
     memset(ezoo->bandits, 0, sizeof(ezoo->bandits));
     ezoo->initialized_bandits = 0;
+    // v5.13.4 — exit-side bandit zero-init (full init in _InitExitBandits
+    // AFTER LoadFromCfg populates exit_predictor_count).
+    memset(ezoo->exit_bandits, 0, sizeof(ezoo->exit_bandits));
+    ezoo->initialized_exit_bandits        = 0;
+    ezoo->last_predicted_exit_horizon_idx = -1;
     ezoo->last_predicted_regime_id = 0;
     ezoo->last_predicted_horizon_idx = -1;
     strncpy(ezoo->blend_mode, "weighted", sizeof(ezoo->blend_mode) - 1);
@@ -1120,6 +1135,53 @@ inline void EnsembleModelZoo_InitBandits(EnsembleModelZoo<F>* ezoo,
         }
     }
     ezoo->initialized_bandits = 1;
+}
+
+// v5.13.4 — sell-side bandit init. Mirrors _InitBandits above for the
+// exit_predictor role. Arms count = exit_predictor_count (set at
+// LoadFromCfg time). Defaults match buy-side (gamma=0.05, blend=1.0,
+// min_samples=100, ramp=200) so exit-side learning shape matches buy-
+// side discipline. Operator opts in via cfg.exit_bandit_enabled at the
+// HandleFill attribution path; init is harmless if cfg is off (bandits
+// just stay uniform until first reward arrives).
+//
+// Caller: EngineSharded boot, AFTER EnsembleModelZoo_LoadFromCfg
+// populates exit_predictor_count.
+template <unsigned F>
+inline void EnsembleModelZoo_InitExitBandits(EnsembleModelZoo<F>* ezoo,
+                                               double exit_eta,
+                                               int min_warmup) {
+    if (!ezoo) return;
+    int n_arms = ezoo->exit_predictor_count;
+    if (n_arms < 1) {
+        // No exit models loaded — graceful skip. exit_bandits stay
+        // zero-init; HandleFill attribution check
+        // initialized_exit_bandits=0 → no Bandit_Update fires.
+        ezoo->initialized_exit_bandits = 0;
+        return;
+    }
+    if (n_arms < 2) {
+        // Single-arm: no point in bandits, but mark initialized so
+        // HandleFill can call Bandit_Update without crashing
+        // (single-arm Update is a no-op accumulating reward stats).
+        ezoo->initialized_exit_bandits = 1;
+        return;
+    }
+    for (int r = 0; r < NUM_REGIMES; ++r) {
+        Bandit_Init(&ezoo->exit_bandits[r], n_arms,
+                    /*gamma=*/0.05,
+                    /*eta_max=*/(exit_eta > 0.0 ? exit_eta : 0.1),
+                    /*blend_ratio=*/1.0,
+                    /*min_samples=*/(min_warmup > 0 ? min_warmup : 100),
+                    /*ramp_up=*/(min_warmup > 0 ? min_warmup * 2 : 200));
+        for (int a = 0; a < n_arms; ++a) {
+            char nm[32];
+            snprintf(nm, sizeof(nm), "exit_h%d",
+                     ezoo->horizon_ticks_at_idx[a]);
+            Bandit_SetArmName(&ezoo->exit_bandits[r], a, nm);
+        }
+    }
+    ezoo->initialized_exit_bandits = 1;
 }
 
 //======================================================================================================
