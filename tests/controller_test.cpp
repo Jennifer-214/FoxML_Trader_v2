@@ -18048,6 +18048,55 @@ e3_skip_load:;
               ezoo.ridge_state.corr_matrix[1][1] == 1.0);
     }
 
+    printf("\n--- v5.14.0.C: Ridge cfg fields defaults + parser ---\n");
+    {
+        using namespace tt;
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.14.0.C: cfg.ridge_within_horizon defaults 0 (bandit path)",
+              cfg.ridge_within_horizon == 0);
+        check("v5.14.0.C: cfg.ridge_across_horizons defaults 0",
+              cfg.ridge_across_horizons == 0);
+        check("v5.14.0.C: cfg.ridge_lambda defaults 0.15",
+              FPN_ToDouble(cfg.ridge_lambda) > 0.149 &&
+              FPN_ToDouble(cfg.ridge_lambda) < 0.151);
+        check("v5.14.0.C: cfg.ridge_cost_penalty defaults 0.5",
+              FPN_ToDouble(cfg.ridge_cost_penalty) > 0.499 &&
+              FPN_ToDouble(cfg.ridge_cost_penalty) < 0.501);
+        check("v5.14.0.C: cfg.ridge_min_ic_floor defaults 0.001",
+              FPN_ToDouble(cfg.ridge_min_ic_floor) > 0.0009 &&
+              FPN_ToDouble(cfg.ridge_min_ic_floor) < 0.0011);
+
+        // Cfg parser round-trip: write a tmp cfg with non-default values
+        // + parse + verify each field.
+        const char* tmp_cfg = "/tmp/v5_14_0_ridge_cfg_test.cfg";
+        FILE* cfp = std::fopen(tmp_cfg, "w");
+        check("v5.14.0.C: cfg parser test fopen", cfp != nullptr);
+        if (cfp) {
+            std::fprintf(cfp,
+                "ridge_within_horizon=1\n"
+                "ridge_across_horizons=1\n"
+                "ridge_lambda=0.25\n"
+                "ridge_cost_penalty=0.75\n"
+                "ridge_min_ic_floor=0.005\n");
+            std::fclose(cfp);
+            ControllerConfig<64> parsed = ControllerConfig_Load<64>(tmp_cfg);
+            check("v5.14.0.C: parsed ridge_within_horizon == 1",
+                  parsed.ridge_within_horizon == 1);
+            check("v5.14.0.C: parsed ridge_across_horizons == 1",
+                  parsed.ridge_across_horizons == 1);
+            check("v5.14.0.C: parsed ridge_lambda ~= 0.25",
+                  FPN_ToDouble(parsed.ridge_lambda) > 0.249 &&
+                  FPN_ToDouble(parsed.ridge_lambda) < 0.251);
+            check("v5.14.0.C: parsed ridge_cost_penalty ~= 0.75",
+                  FPN_ToDouble(parsed.ridge_cost_penalty) > 0.749 &&
+                  FPN_ToDouble(parsed.ridge_cost_penalty) < 0.751);
+            check("v5.14.0.C: parsed ridge_min_ic_floor ~= 0.005",
+                  FPN_ToDouble(parsed.ridge_min_ic_floor) > 0.0049 &&
+                  FPN_ToDouble(parsed.ridge_min_ic_floor) < 0.0051);
+            std::remove(tmp_cfg);
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

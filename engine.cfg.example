@@ -184,6 +184,35 @@ exit_bandit_enabled=0           # 0=off (default), 1=on
 exit_bandit_lr=0.1              # bandit learning rate; clamped [0.01, 1.0]
 
 #==============================================================================
+# v5.14.0 — RIDGE RISK-PARITY BLENDING (Markowitz-style cost-aware weighting)
+#==============================================================================
+# Optional alternative to Exp3-IX bandit weight selection. Solves
+#   w  =  (Sigma + lambda*I)^{-1} * mu
+# where Sigma is the N x N correlation matrix of model predictions and
+# mu[i] = max(IC[i] - cost_penalty * cost[i], min_ic_floor).
+#
+# Why Ridge complements (not replaces) the bandit:
+#   - Bandit selects ONE arm per regime via exponential reward updates;
+#     does NOT account for correlation BETWEEN model predictions.
+#   - Two highly-correlated models both winning bandit weight = double-
+#     counting the same alpha source.
+#   - Ridge weights correlated models DOWN (they're saying the same thing).
+#   - cost_penalty term penalizes fee-heavy or latency-heavy models.
+#   - lambda*I regularization keeps the solve well-conditioned even when
+#     Sigma is rank-deficient (constant or fully-correlated predictions).
+#   - Cholesky failure (singular Sigma) → graceful uniform fallback.
+#
+# Default off; opt-in for paper-test session. When enabled, slow-path
+# adds ~3us/cycle (BuildCorr ~1us + Cholesky ~2us at N=8 horizons).
+# Hot path UNTOUCHED.
+
+ridge_within_horizon=0          # 0=bandit weights (default), 1=Ridge across primary_handles arms
+ridge_across_horizons=0         # 0=bandit (default), 1=Ridge across horizons (deferred wiring; flag reserved)
+ridge_lambda=0.15               # Cholesky regularization; lower=sharper weights but Cholesky may fail; higher=more uniform
+ridge_cost_penalty=0.5          # net IC = IC - penalty*cost; 0=ignore cost; >0=penalize fee-heavy models
+ridge_min_ic_floor=0.001        # min net IC (prevents zero-weight starvation when all ICs < cost_penalty * cost)
+
+#==============================================================================
 # REGIME DETECTION
 #==============================================================================
 # classifies market as RANGING (mean reversion), TRENDING (momentum), or VOLATILE (pause)
