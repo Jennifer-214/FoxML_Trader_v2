@@ -44,9 +44,9 @@
 // helper macro to dispatch parser by type so the X-macro stays clean.
 
 //======================================================================================================
-// [REGISTRY ENTRY SHAPE]
+// [REGISTRY ENTRY SHAPE — extended v5.14.1.E.E.B for auto-populate]
 //======================================================================================================
-// X(name, type, fmt, default_val, get_cfg_expr)
+// X(name, type, fmt, default_val, get_cfg_expr, emit_when)
 //
 //   name        — canonical stamp body key (also struct field name).
 //                 Must be a valid C identifier; written to stamp body as
@@ -61,31 +61,65 @@
 //                 at the call site. e.g. `cfg.ridge_within_horizon`
 //                 (direct int access) or `FPN_ToDouble(cfg.ridge_lambda)`
 //                 (FPN→double conversion at boundary).
+//   emit_when   — boolean expression evaluated at production-caller
+//                 emit time. When TRUE, has_<name>=1 + value populated;
+//                 when FALSE, has_<name>=0 (skip emit; legacy stamp).
+//                 Default-zero cfg means stamp doesn't have the field.
+//                 e.g. `cfg.exit_blender_mode` (truthy when set non-zero).
+//                 Operator opt-in features are typically gated by their
+//                 own enable flag; multi-field features may share a flag.
 //
-// IMPORTANT: get_cfg_expr is evaluated at the CALLER (CoreModelZoo +
-// production stamp emit). The macro doesn't know what `cfg` is; the
-// caller's scope provides it. This design keeps ControllerConfig out of
-// ModelInference.hpp's include graph (one-way dep direction).
+// IMPORTANT: get_cfg_expr + emit_when are evaluated at the CALLER
+// (CoreModelZoo + production stamp emit). The macro doesn't know what
+// `cfg` is; the caller's scope provides it. This design keeps
+// ControllerConfig out of ModelInference.hpp's include graph (one-way
+// dep direction).
+//
+// AUTO-POPULATE (v5.14.1.E.E.B): production stamp emit at BacktestEngine
+// uses `STAMP_CFG_AUTOPOPULATE(inf, cfg)` macro to expand into per-field
+// gated populator code. This eliminates the v5.9.5b production-caller
+// field-population gap class — adding a new stamp-bound field becomes
+// ONE line in the registry; populator is auto-generated. Recurrences
+// (PARITY-002/003/004/005/008) all stem from forgetting the manual
+// populator. Auto-populate makes forgetting impossible.
 //======================================================================================================
 
 #define FOREACH_STAMP_BOUND_CFG(X)                                                                  \
     /* v5.14.1.B.3 — Ridge risk-parity blending (PARITY-004) */                                     \
-    X(ridge_within_horizon,                int,    "%d",     0,   cfg.ridge_within_horizon)         \
-    X(ridge_across_horizons,               int,    "%d",     0,   cfg.ridge_across_horizons)        \
-    X(ridge_lambda,                        double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_lambda))   \
-    X(ridge_cost_penalty,                  double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_cost_penalty))  \
-    X(ridge_min_ic_floor,                  double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_min_ic_floor))  \
+    /* emit_when: any Ridge mode enabled */                                                          \
+    X(ridge_within_horizon,                int,    "%d",     0,   cfg.ridge_within_horizon,         \
+        (cfg.ridge_within_horizon || cfg.ridge_across_horizons))                                     \
+    X(ridge_across_horizons,               int,    "%d",     0,   cfg.ridge_across_horizons,        \
+        (cfg.ridge_within_horizon || cfg.ridge_across_horizons))                                     \
+    X(ridge_lambda,                        double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_lambda),   \
+        (cfg.ridge_within_horizon || cfg.ridge_across_horizons))                                     \
+    X(ridge_cost_penalty,                  double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_cost_penalty),     \
+        (cfg.ridge_within_horizon || cfg.ridge_across_horizons))                                     \
+    X(ridge_min_ic_floor,                  double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_min_ic_floor),     \
+        (cfg.ridge_within_horizon || cfg.ridge_across_horizons))                                     \
     /* v5.14.1.B.3 — Composite confidence (PARITY-005) */                                           \
-    X(confidence_composite_enabled,        int,    "%d",     0,   cfg.confidence_composite_enabled) \
-    X(confidence_freshness_tau_secs,       double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_freshness_tau_secs))     \
-    X(confidence_capacity_target_dollars,  double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_capacity_target_dollars))\
-    X(confidence_capacity_kappa,           double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_capacity_kappa))         \
-    X(confidence_rmse_baseline,            double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_rmse_baseline))         \
+    /* emit_when: composite enabled */                                                               \
+    X(confidence_composite_enabled,        int,    "%d",     0,   cfg.confidence_composite_enabled, \
+        (cfg.confidence_composite_enabled != 0))                                                     \
+    X(confidence_freshness_tau_secs,       double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_freshness_tau_secs),     \
+        (cfg.confidence_composite_enabled != 0))                                                     \
+    X(confidence_capacity_target_dollars,  double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_capacity_target_dollars),\
+        (cfg.confidence_composite_enabled != 0))                                                     \
+    X(confidence_capacity_kappa,           double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_capacity_kappa),         \
+        (cfg.confidence_composite_enabled != 0))                                                     \
+    X(confidence_rmse_baseline,            double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_rmse_baseline),         \
+        (cfg.confidence_composite_enabled != 0))                                                     \
     /* v5.14.1.D — Feature winsorization (PARITY drift detection) */                                  \
-    X(winsor_pct_low,                      double, "%.17g",  0.0, FPN_ToDouble(cfg.winsor_pct_low))                  \
-    X(winsor_pct_high,                     double, "%.17g",  0.0, FPN_ToDouble(cfg.winsor_pct_high))                 \
+    /* emit_when: cfg has valid winsor range (low > 0 AND high < 1 AND low < high) */               \
+    X(winsor_pct_low,                      double, "%.17g",  0.0, FPN_ToDouble(cfg.winsor_pct_low),                  \
+        (FPN_ToDouble(cfg.winsor_pct_low) > 0.0 && FPN_ToDouble(cfg.winsor_pct_high) < 1.0 &&        \
+         FPN_ToDouble(cfg.winsor_pct_low) < FPN_ToDouble(cfg.winsor_pct_high)))                      \
+    X(winsor_pct_high,                     double, "%.17g",  0.0, FPN_ToDouble(cfg.winsor_pct_high),                 \
+        (FPN_ToDouble(cfg.winsor_pct_low) > 0.0 && FPN_ToDouble(cfg.winsor_pct_high) < 1.0 &&        \
+         FPN_ToDouble(cfg.winsor_pct_low) < FPN_ToDouble(cfg.winsor_pct_high)))                      \
     /* v5.14.1.E — Exit-side blender selector (PARITY drift detection) */                             \
-    X(exit_blender_mode,                   int,    "%d",     0,   cfg.exit_blender_mode)
+    X(exit_blender_mode,                   int,    "%d",     0,   cfg.exit_blender_mode,            \
+        (cfg.exit_blender_mode != 0))
 
 //======================================================================================================
 // [PARSER DISPATCH MACROS]
@@ -101,6 +135,45 @@
 #define STAMP_CFG_PARSE(type, val)  STAMP_CFG_PARSE_##type(val)
 
 //======================================================================================================
+// [AUTO-POPULATE MACRO — v5.14.1.E.E.B]
+//======================================================================================================
+// Single-call auto-populate for production stamp emit at BacktestEngine
+// (and any future production caller). Replaces 13 manual populator blocks
+// with one X-macro expansion that:
+//   - For each registry entry: evaluate emit_when at the call site
+//   - When TRUE: set inf.has_<name> = 1 + inf.<name> = (type)(get_cfg_expr)
+//   - When FALSE: leave both at zero-init defaults (legacy stamp shape)
+//
+// Caller usage:
+//
+//   void some_emit_function(StampInferenceCfgInputs& inf,
+//                            const ControllerConfig<F>& cfg) {
+//     STAMP_CFG_AUTOPOPULATE(inf, cfg);
+//   }
+//
+// `inf` and `cfg` are the variable names the macro expansion uses.
+// Caller MUST name their variables exactly `inf` and `cfg` (or wrap
+// in a small block + alias). This eliminates the v5.9.5b production-
+// caller field-population gap class — adding a new stamp-bound field
+// becomes ONE line in FOREACH_STAMP_BOUND_CFG; the auto-populate
+// expansion picks it up automatically next compile.
+//======================================================================================================
+
+#define STAMP_CFG_AUTOPOPULATE(inf, cfg)                                            \
+    do {                                                                            \
+        _Pragma("GCC diagnostic push")                                              \
+        _Pragma("GCC diagnostic ignored \"-Wunused-value\"")                        \
+        FOREACH_STAMP_BOUND_CFG(STAMP_CFG_AUTOPOPULATE_ONE)                         \
+        _Pragma("GCC diagnostic pop")                                               \
+    } while (0)
+
+#define STAMP_CFG_AUTOPOPULATE_ONE(name, type, fmt, default_val, get_cfg, emit_when) \
+    if (emit_when) {                                                                 \
+        (inf).has_##name = 1;                                                        \
+        (inf).name       = (type)(get_cfg);                                          \
+    }
+
+//======================================================================================================
 // [TEST INSTRUMENTATION]
 //======================================================================================================
 // Compile-time field count for tests. Counts entries via macro counting.
@@ -108,7 +181,7 @@
 // registry" — catches accidental row deletion during refactors.
 //======================================================================================================
 
-#define STAMP_CFG_COUNT_ONE(name, type, fmt, default_val, get_cfg) +1
+#define STAMP_CFG_COUNT_ONE(name, type, fmt, default_val, get_cfg, emit_when) +1
 #define FOREACH_STAMP_BOUND_CFG_COUNT  (0 FOREACH_STAMP_BOUND_CFG(STAMP_CFG_COUNT_ONE))
 
 #endif // STAMP_BOUND_CFG_REGISTRY_HPP

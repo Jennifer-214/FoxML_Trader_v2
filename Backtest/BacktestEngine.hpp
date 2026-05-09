@@ -1226,75 +1226,28 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             inf.label_tp_pct          = out->req_label_tp_pct;
             inf.label_sl_pct          = out->req_label_sl_pct;
         }
-        // v5.14.1.D — winsor cfg fields (PARITY drift detection via
-        // FOREACH_STAMP_BOUND_CFG). Populate inf.has_winsor_pct_*
-        // + value when winsor was enabled at training time. Default
-        // 0.005 / 0.995 is treated as "operator left it default; not
-        // explicitly opted in" — only emit when at least one bound
-        // is non-default OR when scaler was fit (would need to plumb
-        // scaler.has_winsor_bounds; simplest: emit always when cfg has
-        // valid range so drift check fires per-cfg-knob).
-        {
-            auto& cfg = data->config_used;
-            double pl = FPN_ToDouble(cfg.winsor_pct_low);
-            double ph = FPN_ToDouble(cfg.winsor_pct_high);
-            // Emit if cfg has a valid winsor range (low > 0 OR high < 1).
-            // Default cfg (0.005 / 0.995) IS in valid range → drift check
-            // fires automatically, catches if operator changes either side.
-            if (pl > 0.0 && ph < 1.0 && pl < ph) {
-                inf.has_winsor_pct_low  = 1;
-                inf.winsor_pct_low      = pl;
-                inf.has_winsor_pct_high = 1;
-                inf.winsor_pct_high     = ph;
-            }
-        }
-        // v5.14.1.B.3.D (PARITY-004 + PARITY-005) — populate stamp-bound
-        // Ridge + composite cfg fields registered in FOREACH_STAMP_BOUND_CFG.
-        // Only emit when operator has opted in to the feature (cfg flag
-        // enabled); otherwise leave has_<name>=0 so stamps stay
-        // byte-identical to v5.14.1.B.3 + earlier (zero impact when
-        // feature disabled).
+        // v5.14.1.E.E.B — Auto-populate ALL stamp-bound cfg fields via
+        // FOREACH_STAMP_BOUND_CFG X-macro expansion. Replaces the
+        // 4 manual populator blocks (Ridge/composite/winsor/exit_blender)
+        // with a single STAMP_CFG_AUTOPOPULATE call.
+        //
+        // Eliminates the v5.9.5b production-caller field-population gap
+        // class structurally — adding a new stamp-bound cfg field becomes
+        // ONE line in FOREACH_STAMP_BOUND_CFG (StampBoundCfgRegistry.hpp);
+        // the auto-populate expansion picks it up automatically next
+        // compile. PARITY-002/003/004/005/008 (4 historical recurrences
+        // of the same class) cannot recur for fields registered via the
+        // X-macro.
+        //
+        // Per-field emit_when predicate (in registry tuple) gates whether
+        // each field's has_* + value gets populated; default cfg leaves
+        // legacy has_*=0 stamps byte-identical to pre-feature ships.
         //
         // `auto&` (not templated <F>) since this enclosing fn is not a
         // template; data->config_used has its concrete type available.
         {
             auto& cfg = data->config_used;
-            // Ridge: emit if either ridge mode is enabled
-            if (cfg.ridge_within_horizon || cfg.ridge_across_horizons) {
-                inf.has_ridge_within_horizon = 1;
-                inf.ridge_within_horizon = cfg.ridge_within_horizon;
-                inf.has_ridge_across_horizons = 1;
-                inf.ridge_across_horizons = cfg.ridge_across_horizons;
-                inf.has_ridge_lambda = 1;
-                inf.ridge_lambda = FPN_ToDouble(cfg.ridge_lambda);
-                inf.has_ridge_cost_penalty = 1;
-                inf.ridge_cost_penalty = FPN_ToDouble(cfg.ridge_cost_penalty);
-                inf.has_ridge_min_ic_floor = 1;
-                inf.ridge_min_ic_floor = FPN_ToDouble(cfg.ridge_min_ic_floor);
-            }
-            // Composite confidence: emit if enabled
-            if (cfg.confidence_composite_enabled) {
-                inf.has_confidence_composite_enabled = 1;
-                inf.confidence_composite_enabled = cfg.confidence_composite_enabled;
-                inf.has_confidence_freshness_tau_secs = 1;
-                inf.confidence_freshness_tau_secs = FPN_ToDouble(cfg.confidence_freshness_tau_secs);
-                inf.has_confidence_capacity_target_dollars = 1;
-                inf.confidence_capacity_target_dollars = FPN_ToDouble(cfg.confidence_capacity_target_dollars);
-                inf.has_confidence_capacity_kappa = 1;
-                inf.confidence_capacity_kappa = FPN_ToDouble(cfg.confidence_capacity_kappa);
-                inf.has_confidence_rmse_baseline = 1;
-                inf.confidence_rmse_baseline = FPN_ToDouble(cfg.confidence_rmse_baseline);
-            }
-            // v5.14.1.E.E (PARITY-008 hotfix) — exit-side blender selector.
-            // Without this, operator changes cfg.exit_blender_mode between
-            // training + deployment without detection (drift check skipped
-            // when has_*=0 forward-compat default). Same v5.9.5b production-
-            // caller field-population gap class as PARITY-002/003/004/005.
-            // Caught by /parity-check 2026-05-09 (v5.14.1.E close audit).
-            if (cfg.exit_blender_mode) {
-                inf.has_exit_blender_mode = 1;
-                inf.exit_blender_mode     = cfg.exit_blender_mode;
-            }
+            STAMP_CFG_AUTOPOPULATE(inf, cfg);
         }
 
         // v5.10.0 Item A — stamp_emit phase timer.

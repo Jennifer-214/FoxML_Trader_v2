@@ -1284,8 +1284,8 @@ struct ModelStampResult {
     // Each field has a uint8_t has_<name> Surface G forward-compat
     // flag + the typed value field. Adding the next field is ONE line
     // in StampBoundCfgRegistry.hpp.
-    #define X(name, type, fmt, default_val, get_cfg_expr)  \
-        uint8_t has_##name;                                 \
+    #define X(name, type, fmt, default_val, get_cfg_expr, emit_when)  \
+        uint8_t has_##name;                                             \
         type name;
     FOREACH_STAMP_BOUND_CFG(X)
     #undef X
@@ -1402,8 +1402,8 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     // Legacy stamps (pre-v5.14.1.B.3) load with has_<name>=0 → drift
     // check at caller site skips silently. New stamps populate via the
     // parser branch below.
-    #define X(name, type, fmt, default_val, get_cfg_expr)  \
-        r.has_##name = 0;                                   \
+    #define X(name, type, fmt, default_val, get_cfg_expr, emit_when)  \
+        r.has_##name = 0;                                               \
         r.name = (type)(default_val);
     FOREACH_STAMP_BOUND_CFG(X)
     #undef X
@@ -1616,10 +1616,10 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             // v5.14.1.B.3 — X-macro-driven parser branches (positions 24+).
             // Each X expands to one `else if (strcmp(key, "<name>") == 0)`
             // branch that uses the type-dispatched STAMP_CFG_PARSE macro.
-            #define X(name, type, fmt, default_val, get_cfg_expr)        \
-                else if (strcmp(key, #name) == 0) {                       \
-                    r.name = (type)(STAMP_CFG_PARSE(type, val));          \
-                    r.has_##name = 1;                                     \
+            #define X(name, type, fmt, default_val, get_cfg_expr, emit_when)  \
+                else if (strcmp(key, #name) == 0) {                            \
+                    r.name = (type)(STAMP_CFG_PARSE(type, val));               \
+                    r.has_##name = 1;                                          \
                 }
             FOREACH_STAMP_BOUND_CFG(X)
             #undef X
@@ -1935,8 +1935,8 @@ struct StampInferenceCfgInputs {
     // BacktestPanels' Train Model worker) populates has_<name>=1 +
     // value when cfg-side flag is enabled. Default 0 = legacy stamp
     // (emit nothing → byte-identical to pre-v5.14.1.B.3 stamps).
-    #define X(name, type, fmt, default_val, get_cfg_expr)  \
-        int  has_##name;                                    \
+    #define X(name, type, fmt, default_val, get_cfg_expr, emit_when)  \
+        int  has_##name;                                                \
         type name;
     FOREACH_STAMP_BOUND_CFG(X)
     #undef X
@@ -2201,7 +2201,7 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     // emit block. Surface G discipline: legacy callers (which leave
     // inf->has_<name>=0) emit nothing → canonical body stays
     // bytewise-identical to pre-v5.14.1.B.3 stamps.
-    #define X(name, type, fmt, default_val, get_cfg_expr)                       \
+    #define X(name, type, fmt, default_val, get_cfg_expr, emit_when)            \
         if (inf && inf->has_##name && n > 0 && (size_t)n < sizeof(canonical)) { \
             int wrote = snprintf(canonical + n, sizeof(canonical) - n,          \
                 #name "=" fmt "\n", inf->name);                                 \

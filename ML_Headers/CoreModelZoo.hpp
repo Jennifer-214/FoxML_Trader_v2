@@ -203,7 +203,7 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         // contract documented in StampBoundCfgRegistry.hpp).
         if (cfg_ptr && sr.valid > 0) {
             const ControllerConfig<F>& cfg = *cfg_ptr;
-            #define X(name, type, fmt, default_val, get_cfg_expr)                  \
+            #define X(name, type, fmt, default_val, get_cfg_expr, emit_when)       \
                 if (sr.has_##name) {                                                \
                     type cfg_val = (type)(get_cfg_expr);                            \
                     if (sr.name != cfg_val) {                                       \

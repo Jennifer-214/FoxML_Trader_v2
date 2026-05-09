@@ -4133,6 +4133,64 @@ int main() {
               fabs(FPN_ToDouble(resolved_1.winsor_pct_low) - 0.005) < 1e-6);
     }
 
+    // ----- v5.14.1.E.E.B: STAMP_CFG_AUTOPOPULATE macro tests ---------------------------------------
+    // Verifies the X-macro auto-populate eliminates the v5.9.5b
+    // production-caller field-population gap class. With this macro, adding
+    // a new stamp-bound cfg field is ONE registry line; population is
+    // guaranteed by compile-time expansion (cannot be forgotten).
+    printf("\n--- v5.14.1.E.E.B: STAMP_CFG_AUTOPOPULATE ---\n");
+    {
+        // Test 1 — All emit_when=true → all 13 fields populated
+        StampInferenceCfgInputs inf = {};
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        // Trigger all emit_when predicates:
+        cfg.ridge_within_horizon = 1;             // Ridge block (5 fields)
+        cfg.confidence_composite_enabled = 1;     // Composite block (5 fields)
+        // Winsor: defaults (0.005/0.995) already trigger emit_when (low>0 && high<1)
+        cfg.exit_blender_mode = 1;                // Exit blender (1 field)
+        STAMP_CFG_AUTOPOPULATE(inf, cfg);
+        check("v5.14.1.E.E.B autopopulate: has_ridge_within_horizon = 1",
+              inf.has_ridge_within_horizon == 1);
+        check("v5.14.1.E.E.B autopopulate: has_ridge_lambda = 1",
+              inf.has_ridge_lambda == 1);
+        check("v5.14.1.E.E.B autopopulate: has_confidence_composite_enabled = 1",
+              inf.has_confidence_composite_enabled == 1);
+        check("v5.14.1.E.E.B autopopulate: has_winsor_pct_low = 1",
+              inf.has_winsor_pct_low == 1);
+        check("v5.14.1.E.E.B autopopulate: has_winsor_pct_high = 1",
+              inf.has_winsor_pct_high == 1);
+        check("v5.14.1.E.E.B autopopulate: has_exit_blender_mode = 1",
+              inf.has_exit_blender_mode == 1);
+    }
+    {
+        // Test 2 — All emit_when=false (default cfg with most flags off) →
+        // only winsor populates (defaults already valid range)
+        StampInferenceCfgInputs inf = {};
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        // Defaults: ridge=0, composite=0, exit_blender=0; winsor=0.005/0.995 (valid)
+        STAMP_CFG_AUTOPOPULATE(inf, cfg);
+        check("v5.14.1.E.E.B autopopulate: defaults → ridge has_*=0",
+              inf.has_ridge_within_horizon == 0);
+        check("v5.14.1.E.E.B autopopulate: defaults → composite has_*=0",
+              inf.has_confidence_composite_enabled == 0);
+        check("v5.14.1.E.E.B autopopulate: defaults → exit_blender has_*=0",
+              inf.has_exit_blender_mode == 0);
+        // Winsor defaults (0.005/0.995) ARE in valid range → emit
+        check("v5.14.1.E.E.B autopopulate: defaults → winsor populates (valid range)",
+              inf.has_winsor_pct_low == 1 && inf.has_winsor_pct_high == 1);
+    }
+    {
+        // Test 3 — Disabled winsor (low=0, high=1) → emit_when fails →
+        // has_winsor_pct_*=0
+        StampInferenceCfgInputs inf = {};
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.winsor_pct_low = FPN_FromDouble<64>(0.0);
+        cfg.winsor_pct_high = FPN_FromDouble<64>(1.0);
+        STAMP_CFG_AUTOPOPULATE(inf, cfg);
+        check("v5.14.1.E.E.B autopopulate: winsor disabled (0/1) → has_*=0",
+              inf.has_winsor_pct_low == 0 && inf.has_winsor_pct_high == 0);
+    }
+
     // ----- v5.14.1.E: exit-side Ridge blending + heterogeneous winsor ------------------------------
     // Closes PARITY-004/005 sister-fix on exit side: cfg-tunable Ridge
     // blending across exit_predictor[] handles, mirroring v5.14.0 buy-side.
