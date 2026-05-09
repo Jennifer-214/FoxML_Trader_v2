@@ -60,6 +60,26 @@
 #include <string.h>   // strncpy, strncmp
 
 //======================================================================================================
+// [STRING-FIELD TYPE ALIASES]
+//======================================================================================================
+// C++ array-typedef forms for char[N] fields. The X-macro tuple's `type`
+// column needs a single-token type name; `char[65]` doesn't tokenize
+// cleanly (the '[' splits parameters). Aliases give us a single token.
+//
+// Detection at template-dispatch time: `std::is_array_v<stamp_str_65>`
+// returns true; `std::extent_v<stamp_str_65>` gives the size at compile
+// time. This lets `if constexpr` parser/emitter macros (v5.14.8.A.0.b
+// Step 4) handle string fields uniformly with int/uint/double types.
+//
+// Naming convention: `stamp_str_<N>` where N = total array size including
+// null terminator. Add new aliases as char[N] fields are introduced.
+//======================================================================================================
+namespace tt {
+    using stamp_str_16 = char[16];   // xgb_tree_method
+    using stamp_str_65 = char[65];   // scaler_sha256, overlay_hash, effective_hash, run_name
+}
+
+//======================================================================================================
 // [REGISTRY ENTRY SHAPE]
 //======================================================================================================
 // X(name, type, fmt, default_val, get_value_expr, emit_when, doc_comment)
@@ -160,6 +180,7 @@
 #define FOREACH_STAMP_BOUND_MODEL_CONST_STANDALONE(X)                                               \
     X(bandit,                       "bandit blend ratio set (1 field)")                             \
     X(training_poll_interval,       "training poll cadence set (1 field)")                          \
+    X(model_num_outputs,            "model output dimension set (1 field)")                         \
     X(build_flags_hash,             "build flags hash set (1 field)")                               \
     X(label_registry_hash,          "label registry hash set (1 field)")                            \
     X(feature_mask,                 "feature mask set (1 field)")                                   \
@@ -199,6 +220,20 @@
     X(training_poll_interval,                   _, uint32_t, "%u", 0,                               \
       (unsigned)inf->training_poll_interval, inf->has_training_poll_interval,                       \
       "training data poll cadence; engine boot WARN on cross-cadence drift")                        \
+    /* === scaler group (2 fields) — emitted at line 2211; gated by has_scaler === */               \
+    /* v5.14.8.A.0.b — re-added during pre-flight registry data completion;                      */ \
+    /* originally dropped between training_poll_interval and xgb_hyperparams in v5.14.8.A.1.    */ \
+    /* GATE-NEW-2 wire-format preservation depends on these landing here.                       */ \
+    X(feature_scaler_present,                   scaler, uint8_t, "%d", 0,                           \
+      (uint8_t)(inf->feature_scaler_present ? 1 : 0), inf->has_scaler,                              \
+      "scaler sidecar present flag (0=no/1=yes; uint8_t for bit-packing efficiency)")               \
+    X(scaler_sha256,                            scaler, tt::stamp_str_65, "%s", "",                 \
+      inf->scaler_sha256, inf->has_scaler,                                                          \
+      "SHA-256 of full scaler sidecar file (64 hex + null)")                                        \
+    /* === model_num_outputs (standalone) — emitted at line 2223; gated by has_model_num_outputs */ \
+    X(model_num_outputs,                        _, int, "%d", 0,                                    \
+      inf->model_num_outputs, inf->has_model_num_outputs,                                           \
+      "model output dimension; binary/regression=1, multiclass=N (REFUSE on mismatch)")             \
     /* === xgb_hyperparams group (8 fields) — emitted at line 2234 === */                           \
     X(xgb_max_depth,                            xgb_hyperparams, int, "%d", 0,                      \
       inf->xgb_max_depth, inf->has_xgb_hyperparams, "XGBoost max tree depth")                       \
