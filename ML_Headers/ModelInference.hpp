@@ -330,6 +330,19 @@ struct ModelHandle {
     // Model_Predict returns out_result[buy_class_idx]. Out-of-range
     // index falls back to 0.
     int      buy_class_idx;
+    // v5.12.3.A — composite-signal extractor. When num_classes_active > 1,
+    // Model_Predict returns Σ class_weights[i] × out_result[target_classes[i]]
+    // over the first num_classes_active entries. Default num_classes_active=1
+    // + target_classes[0]=buy_class_idx + class_weights[0]=1.0 → preserves
+    // existing single-class behavior bytewise. Useful for: 5-class up/down
+    // models (target=[strong_up, strong_down], weights=[+1,-1] → directional
+    // probability difference); P(strong_up) - P(strong_down) composites; any
+    // soft-blended decision rule. Strategy code unchanged (per v5.11.62
+    // invariant — composition lives in Model_Predict, not strategy).
+    // Out-of-range target_classes[i] entries skip silently (defensive).
+    uint8_t  num_classes_active;     // default 1
+    int      target_classes[8];      // default [buy_class_idx, 0, 0, 0, 0, 0, 0, 0]
+    float    class_weights[8];       // default [1.0, 0, 0, 0, 0, 0, 0, 0]
 };
 
 //======================================================================================================
@@ -385,6 +398,15 @@ inline void Model_Init(ModelHandle<F> *m) {
     m->stamp_scaler_sha256[0] = '\0';
     // v5.11.62 — buy class default = 0 (binary positive class).
     m->buy_class_idx = 0;
+    // v5.12.3.A — composite-signal defaults: single-class extraction equivalent
+    // to pre-v5.12.3.A behavior. Loader sets num_classes_active>1 + target_classes/
+    // class_weights from stamp body (Surface G) when operator trains a model
+    // with composite-signal config.
+    m->num_classes_active = 1;
+    m->target_classes[0] = m->buy_class_idx;
+    for (int i = 1; i < 8; ++i) m->target_classes[i] = 0;
+    m->class_weights[0] = 1.0f;
+    for (int i = 1; i < 8; ++i) m->class_weights[i] = 0.0f;
 }
 
 //======================================================================================================
@@ -579,6 +601,22 @@ inline float Model_Predict(ModelHandle<F> *m, const float *features, int num_fea
         XGDMatrixFree(dmat);
 
         if (ret != 0 || out_len == 0) return 0.0f;
+        // v5.12.3.A — composite-signal extraction. When num_classes_active > 1,
+        // returns linear combination over target_classes[]. Out-of-range
+        // class indices contribute 0 (defensive). When num_classes_active == 1
+        // (default), falls through to the single-class path which is bytewise-
+        // equivalent to v5.11.62 behavior.
+        if (m->num_classes_active > 1) {
+            float composite = 0.0f;
+            uint8_t n = m->num_classes_active;
+            if (n > 8) n = 8;
+            for (uint8_t i = 0; i < n; ++i) {
+                int cls = m->target_classes[i];
+                if (cls < 0 || (unsigned long)cls >= out_len) continue;
+                composite += m->class_weights[i] * out_result[cls];
+            }
+            return composite;
+        }
         // v5.11.62 — for multiclass models (out_len > 1), return the
         // configured "buy class" probability instead of out_result[0].
         // Default buy_class_idx=0 preserves binary semantics; loader sets

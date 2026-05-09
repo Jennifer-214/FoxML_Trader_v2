@@ -16546,6 +16546,74 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.12.3.A: composite-signal extractor on ModelHandle ---\n");
+    {
+        // Phase 3.A of v5.12. Adds num_classes_active + target_classes[8] +
+        // class_weights[8] to ModelHandle so Model_Predict can return a
+        // linear combination of class probabilities. Default fields preserve
+        // single-class extraction (v5.11.62 behavior bytewise). Strategy
+        // code unchanged per v5.11.62 invariant — composition lives in
+        // Model_Predict.
+        //
+        // Tests verify the FIELDS + INIT defaults. Actual Model_Predict
+        // composite path requires a loaded XGBoost booster which the unit
+        // test harness doesn't synthesize; integration is via the existing
+        // ML strategy build tests once operator trains a 5-class model.
+
+        ModelHandle<64> m;
+        Model_Init(&m);
+
+        // === Test 1: post-Init num_classes_active == 1 ===
+        check("v5.12.3.A: post-Init num_classes_active == 1 (single-class default)",
+              m.num_classes_active == 1);
+
+        // === Test 2: post-Init target_classes[0] == buy_class_idx ===
+        check("v5.12.3.A: target_classes[0] == buy_class_idx (default)",
+              m.target_classes[0] == m.buy_class_idx);
+        // target_classes[1..7] should be 0
+        int rest_zero = 1;
+        for (int i = 1; i < 8; ++i) {
+            if (m.target_classes[i] != 0) { rest_zero = 0; break; }
+        }
+        check("v5.12.3.A: target_classes[1..7] zero-initialized",
+              rest_zero == 1);
+
+        // === Test 3: post-Init class_weights[0] == 1.0 ===
+        check("v5.12.3.A: class_weights[0] == 1.0 (single-class identity)",
+              m.class_weights[0] == 1.0f);
+        int weights_rest_zero = 1;
+        for (int i = 1; i < 8; ++i) {
+            if (m.class_weights[i] != 0.0f) { weights_rest_zero = 0; break; }
+        }
+        check("v5.12.3.A: class_weights[1..7] zero-initialized",
+              weights_rest_zero == 1);
+
+        // === Test 4: configurable composite — set fields manually ===
+        // Simulate a 5-class model with target=[4, 0], weights=[+1, -1]:
+        // composite = P(class_4) - P(class_0).
+        m.num_classes_active = 2;
+        m.target_classes[0] = 4;
+        m.target_classes[1] = 0;
+        m.class_weights[0] = 1.0f;
+        m.class_weights[1] = -1.0f;
+        check("v5.12.3.A: composite config — num_classes_active = 2",
+              m.num_classes_active == 2);
+        check("v5.12.3.A: composite config — targets [4,0]",
+              m.target_classes[0] == 4 && m.target_classes[1] == 0);
+        check("v5.12.3.A: composite config — weights [+1,-1]",
+              m.class_weights[0] == 1.0f && m.class_weights[1] == -1.0f);
+
+        // === Test 5: out-of-bounds target clamped to skip (predict-side
+        //              defensiveness; no out-of-bounds memory read) ===
+        m.target_classes[0] = -1;     // negative → skip
+        m.target_classes[1] = 99;     // beyond out_len → skip
+        // Without an actual model loaded we can't call Model_Predict, but
+        // verify the fields can hold the values (no static enforcement
+        // intended; runtime defensiveness in Predict body).
+        check("v5.12.3.A: target_classes can hold sentinel out-of-bounds values",
+              m.target_classes[0] == -1 && m.target_classes[1] == 99);
+    }
+
     printf("\n--- v5.12.2.D: Treelite AOT infrastructure (stubs) ---\n");
     {
         // Phase 2.D of v5.12. INFRASTRUCTURE ONLY in this ship — Treelite
