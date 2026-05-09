@@ -51,6 +51,7 @@
 #include <string.h>
 #include <math.h>      // std::fmax (branchless on x86 maxsd), std::isfinite
 #include <unistd.h>    // unlink/rename for atomic write
+#include <algorithm>   // v5.14.1.D — std::sort for FitWinsor percentile pick
 #include "FeatureRegistry.hpp"   // NUM_REGISTERED_FEATURES, FEATURE_REGISTRY_HASH
 #include "../MemHeaders/HmacSha256.hpp"  // sha256_file_hex_inproc + sha256 bytes helpers
 
@@ -368,6 +369,67 @@ static inline int FeatureStandardizer_VerifyAgainstBuild(const FeatureStandardiz
 //
 // V5.9.3a STATUS: function defined, NO CALLERS YET. v5.9.3b will integrate
 // from Backtest_TrainModel.
+
+//======================================================================================================
+// [FIT_WINSOR_PERCENTILES — v5.14.1.D]
+//======================================================================================================
+// Compute per-feature winsor bounds from training data using cfg-tunable
+// percentiles. For each feature column: gather values, sort, take
+// floor(pct_low * N) and floor(pct_high * N) indices → winsor_low[i] /
+// winsor_high[i].
+//
+// Caller responsibility: invoke AFTER FeatureStandardizer_Compute (which
+// populates mean/stddev). Sets sc->has_winsor_bounds = 1 on success.
+//
+// Sentinel: if pct_low <= 0 OR pct_high >= 1.0 OR pct_low >= pct_high,
+// no fit; bounds stay at ±INFINITY (Init defaults). Operator setting
+// cfg.winsor_pct_low=0 + cfg.winsor_pct_high=1 effectively disables.
+//
+// Memory: stack-allocates a per-feature vector of doubles (1 column at
+// a time → O(num_samples * sizeof(double)) per call). For N=2048 training
+// samples = 16KB stack, well within ulimit. For larger N, caller scopes
+// this to its own buffer (future extension if needed).
+//
+// Latency: O(N log N) per feature × NUM_REGISTERED_FEATURES; one-time
+// training-side cost. Slow-path slow.
+//======================================================================================================
+static inline void FeatureStandardizer_FitWinsor(FeatureStandardizer* sc,
+                                                   const float* feature_matrix,
+                                                   int num_samples,
+                                                   double pct_low,
+                                                   double pct_high) {
+    if (!sc) return;
+    if (num_samples <= 0) return;
+    // Sentinel: invalid percentiles → leave bounds at ±INFINITY (Init defaults)
+    if (pct_low <= 0.0 || pct_high >= 1.0 || pct_low >= pct_high) {
+        sc->has_winsor_bounds = 0;
+        return;
+    }
+    // Per-feature column extraction + sort + percentile pick.
+    // Stack alloc one column at a time (avoids num_features × num_samples
+    // matrix transpose).
+    double col[8192];  // hard cap; larger N → fall back to identity (no fit)
+    if (num_samples > 8192) {
+        sc->has_winsor_bounds = 0;
+        return;
+    }
+    for (unsigned f = 0; f < NUM_REGISTERED_FEATURES; ++f) {
+        for (int s = 0; s < num_samples; ++s) {
+            // feature_matrix is row-major: matrix[s * NUM_FEATURES + f]
+            col[s] = (double)feature_matrix[s * NUM_REGISTERED_FEATURES + f];
+        }
+        // std::sort in place; ascending. Mid-range index for percentile.
+        std::sort(col, col + num_samples);
+        int idx_low  = (int)(pct_low  * (double)num_samples);
+        int idx_high = (int)(pct_high * (double)num_samples);
+        if (idx_low  < 0)              idx_low  = 0;
+        if (idx_high >= num_samples)   idx_high = num_samples - 1;
+        if (idx_low  > idx_high)       idx_low  = idx_high;
+        sc->winsor_low[f]  = col[idx_low];
+        sc->winsor_high[f] = col[idx_high];
+    }
+    sc->has_winsor_bounds = 1;
+}
 
 static inline void FeatureStandardizer_Compute(FeatureStandardizer* sc,
                                                  const float* feature_matrix,

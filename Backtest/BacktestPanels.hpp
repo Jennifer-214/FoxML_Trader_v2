@@ -3128,6 +3128,20 @@ static inline void *train_model_worker_fn(void *arg) {
         tt::FeatureStandardizer scaler;
         tt::FeatureStandardizer_Compute(&scaler, train_features, n_valid,
                                           tt::SCALER_STDDEV_FLOOR);
+        // v5.14.1.D — fit winsor percentiles per cfg-tunable bounds.
+        // No-op when cfg.winsor_pct_low=0 or high=1 (disabled). Otherwise
+        // sets scaler.has_winsor_bounds=1 + fits winsor_low/high arrays
+        // per-feature from training data percentiles. Persist below
+        // includes the winsor block in the v1 sidecar format. Uses
+        // results->config_used (the ControllerConfig snapshot at
+        // training time; same source as the existing xgb_train_nthread
+        // population at line ~2949).
+        {
+            double pct_low  = FPN_ToDouble(results->config_used.winsor_pct_low);
+            double pct_high = FPN_ToDouble(results->config_used.winsor_pct_high);
+            tt::FeatureStandardizer_FitWinsor(&scaler, train_features, n_valid,
+                                                pct_low, pct_high);
+        }
         snprintf(scaler_path, sizeof(scaler_path), "%s.scaler", snap_model_path);
         if (tt::FeatureStandardizer_Persist(&scaler, scaler_path)) {
             scaler_persisted = 1;

@@ -1226,6 +1226,28 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             inf.label_tp_pct          = out->req_label_tp_pct;
             inf.label_sl_pct          = out->req_label_sl_pct;
         }
+        // v5.14.1.D — winsor cfg fields (PARITY drift detection via
+        // FOREACH_STAMP_BOUND_CFG). Populate inf.has_winsor_pct_*
+        // + value when winsor was enabled at training time. Default
+        // 0.005 / 0.995 is treated as "operator left it default; not
+        // explicitly opted in" — only emit when at least one bound
+        // is non-default OR when scaler was fit (would need to plumb
+        // scaler.has_winsor_bounds; simplest: emit always when cfg has
+        // valid range so drift check fires per-cfg-knob).
+        {
+            auto& cfg = data->config_used;
+            double pl = FPN_ToDouble(cfg.winsor_pct_low);
+            double ph = FPN_ToDouble(cfg.winsor_pct_high);
+            // Emit if cfg has a valid winsor range (low > 0 OR high < 1).
+            // Default cfg (0.005 / 0.995) IS in valid range → drift check
+            // fires automatically, catches if operator changes either side.
+            if (pl > 0.0 && ph < 1.0 && pl < ph) {
+                inf.has_winsor_pct_low  = 1;
+                inf.winsor_pct_low      = pl;
+                inf.has_winsor_pct_high = 1;
+                inf.winsor_pct_high     = ph;
+            }
+        }
         // v5.14.1.B.3.D (PARITY-004 + PARITY-005) — populate stamp-bound
         // Ridge + composite cfg fields registered in FOREACH_STAMP_BOUND_CFG.
         // Only emit when operator has opted in to the feature (cfg flag
