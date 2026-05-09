@@ -469,31 +469,42 @@ inline int CoreModelZoo_LoadFromDir(CoreModelZoo<F> *zoo, const char *dir, int b
                                      // per-core feature_mask, threaded to
                                      // each role's verify_model_stamp call.
                                      // Default 0 = skip mask check.
-                                     uint64_t expected_feature_mask = 0) {
+                                     uint64_t expected_feature_mask = 0,
+                                     // v5.14.1.B.3 — cfg pointer for X-macro
+                                     // drift check (Ridge + composite cfg
+                                     // stamp-bound fields). Default nullptr
+                                     // = skip drift check (legacy callers,
+                                     // tests). When non-null, threaded
+                                     // through to each TryLoadRole call.
+                                     const ControllerConfig<F>* cfg_ptr = nullptr) {
     if (!dir || dir[0] == '\0') return 0;
 
     int loaded = 0;
     if (CoreModelZoo_TryLoadRole(&zoo->barrier, dir, "barrier", backend,
             held_out_stamp_secret, gap_threshold, held_out_gate_strict,
-            acknowledge_cross_binary_drift, expected_feature_mask)) {
+            acknowledge_cross_binary_drift, expected_feature_mask,
+            /*expected_horizon_ticks=*/0, cfg_ptr)) {
         zoo->loaded_mask |= CORE_MODEL_BARRIER;
         loaded++;
     }
     if (CoreModelZoo_TryLoadRole(&zoo->regime, dir, "regime", backend,
             held_out_stamp_secret, gap_threshold, held_out_gate_strict,
-            acknowledge_cross_binary_drift, expected_feature_mask)) {
+            acknowledge_cross_binary_drift, expected_feature_mask,
+            /*expected_horizon_ticks=*/0, cfg_ptr)) {
         zoo->loaded_mask |= CORE_MODEL_REGIME;
         loaded++;
     }
     if (CoreModelZoo_TryLoadRole(&zoo->exit, dir, "exit", backend,
             held_out_stamp_secret, gap_threshold, held_out_gate_strict,
-            acknowledge_cross_binary_drift, expected_feature_mask)) {
+            acknowledge_cross_binary_drift, expected_feature_mask,
+            /*expected_horizon_ticks=*/0, cfg_ptr)) {
         zoo->loaded_mask |= CORE_MODEL_EXIT;
         loaded++;
     }
     if (CoreModelZoo_TryLoadRole(&zoo->buy_signal, dir, "buy_signal", backend,
             held_out_stamp_secret, gap_threshold, held_out_gate_strict,
-            acknowledge_cross_binary_drift, expected_feature_mask)) {
+            acknowledge_cross_binary_drift, expected_feature_mask,
+            /*expected_horizon_ticks=*/0, cfg_ptr)) {
         zoo->loaded_mask |= CORE_MODEL_BUY_SIGNAL;
         loaded++;
     }

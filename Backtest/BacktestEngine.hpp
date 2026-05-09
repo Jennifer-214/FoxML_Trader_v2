@@ -1226,6 +1226,44 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             inf.label_tp_pct          = out->req_label_tp_pct;
             inf.label_sl_pct          = out->req_label_sl_pct;
         }
+        // v5.14.1.B.3.D (PARITY-004 + PARITY-005) — populate stamp-bound
+        // Ridge + composite cfg fields registered in FOREACH_STAMP_BOUND_CFG.
+        // Only emit when operator has opted in to the feature (cfg flag
+        // enabled); otherwise leave has_<name>=0 so stamps stay
+        // byte-identical to v5.14.1.B.3 + earlier (zero impact when
+        // feature disabled).
+        //
+        // `auto&` (not templated <F>) since this enclosing fn is not a
+        // template; data->config_used has its concrete type available.
+        {
+            auto& cfg = data->config_used;
+            // Ridge: emit if either ridge mode is enabled
+            if (cfg.ridge_within_horizon || cfg.ridge_across_horizons) {
+                inf.has_ridge_within_horizon = 1;
+                inf.ridge_within_horizon = cfg.ridge_within_horizon;
+                inf.has_ridge_across_horizons = 1;
+                inf.ridge_across_horizons = cfg.ridge_across_horizons;
+                inf.has_ridge_lambda = 1;
+                inf.ridge_lambda = FPN_ToDouble(cfg.ridge_lambda);
+                inf.has_ridge_cost_penalty = 1;
+                inf.ridge_cost_penalty = FPN_ToDouble(cfg.ridge_cost_penalty);
+                inf.has_ridge_min_ic_floor = 1;
+                inf.ridge_min_ic_floor = FPN_ToDouble(cfg.ridge_min_ic_floor);
+            }
+            // Composite confidence: emit if enabled
+            if (cfg.confidence_composite_enabled) {
+                inf.has_confidence_composite_enabled = 1;
+                inf.confidence_composite_enabled = cfg.confidence_composite_enabled;
+                inf.has_confidence_freshness_tau_secs = 1;
+                inf.confidence_freshness_tau_secs = FPN_ToDouble(cfg.confidence_freshness_tau_secs);
+                inf.has_confidence_capacity_target_dollars = 1;
+                inf.confidence_capacity_target_dollars = FPN_ToDouble(cfg.confidence_capacity_target_dollars);
+                inf.has_confidence_capacity_kappa = 1;
+                inf.confidence_capacity_kappa = FPN_ToDouble(cfg.confidence_capacity_kappa);
+                inf.has_confidence_rmse_baseline = 1;
+                inf.confidence_rmse_baseline = FPN_ToDouble(cfg.confidence_rmse_baseline);
+            }
+        }
 
         // v5.10.0 Item A — stamp_emit phase timer.
         uint64_t stamp_start_ns = tt::PhaseTimer_NowNs();

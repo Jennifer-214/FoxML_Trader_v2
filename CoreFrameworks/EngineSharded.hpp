@@ -1077,7 +1077,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     backend, /*secret=*/nullptr, /*gap=*/0.05,
                     /*strict=*/cfg.held_out_gate_strict,
                     cfg.acknowledge_cross_binary_version_drift,
-                    /*expected_feature_mask=*/mask_for_load);
+                    /*expected_feature_mask=*/mask_for_load,
+                    /*cfg_ptr=*/&cfg);  // v5.14.1.B.3 — enable X-macro drift check
                 fprintf(stderr, "[sharded] core %d: zoo from %s, %d role(s) loaded\n",
                         i, cfg.core_model_dir[i], loaded);
             } else {
@@ -2780,7 +2781,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                             swap_zoo, new_path, swap_backend,
                                             /*secret=*/nullptr, /*gap=*/0.05,
                                             /*strict=*/cfg.held_out_gate_strict,
-                                            cfg.acknowledge_cross_binary_version_drift);
+                                            cfg.acknowledge_cross_binary_version_drift,
+                                            /*expected_feature_mask=*/0,
+                                            /*cfg_ptr=*/&cfg);  // v5.14.1.B.3 — drift check on hot swap
                                         if (loaded > 0) {
                                             state.cores[c].model_load_failed = 0;
                                             fprintf(stderr,
