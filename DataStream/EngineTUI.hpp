@@ -775,6 +775,14 @@ struct TUISnapshot {
     // test "all DIP" bug. Populated in TUI_CopySnapshot* from
     // ControllerConfig::source_cfg_path.
     char source_cfg_path[256];
+    // v5.12.1.C — WS heartbeat. ws_last_tick_us = local wall-clock us at
+    // last WS tick received (published by producer fan_out, v5.12.1.A.2).
+    // ws_ticks_per_5s = rolling tick count over the last 5 seconds (5 ×
+    // 1-second buckets ring-rotated by producer; sums to current 5s
+    // throughput). Header bar shows "WS: <ticks/sec>/s, last <ms>ms ago"
+    // with green/yellow/red color-coding per gap thresholds.
+    uint64_t ws_last_tick_us;
+    uint64_t ws_ticks_per_5s;
     // rolling stats
     double roll_price_avg, roll_stddev, roll_p_min, roll_p_max;
     double roll_vol_avg, roll_vol_slope;
@@ -1712,6 +1720,9 @@ template <typename StateT, typename OmsT>
 static inline void TUI_PopulateAdvancedTopology(TUISnapshot *snap,
                                                   const StateT *state,
                                                   const OmsT *oms) {
+    // v5.12.1.C — heartbeat: snapshot WS freshness for header render
+    snap->ws_last_tick_us = state->last_ws_tick_us.load(std::memory_order_acquire);
+    snap->ws_ticks_per_5s = state->ws_ticks_per_5s.load(std::memory_order_relaxed);
     int n = snap->per_core_count;
     if (n < 0) n = 0;
     if (n > 16) n = 16;

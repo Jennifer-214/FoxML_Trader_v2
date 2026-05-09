@@ -491,6 +491,16 @@ struct alignas(64) EventLoopState {
     // Pre-warmup (last_ws_tick_us == 0) is treated as "no flatten" so the
     // engine doesn't fire a phantom flatten before the first tick arrives.
     std::atomic<uint64_t> last_ws_tick_us;
+    // v5.12.1.C — WS heartbeat throughput tracking. Producer fan_out
+    // increments the bucket for the current second; the slow-path / GUI
+    // sums all buckets within the last 5 seconds. ws_bucket_last_sec[i]
+    // holds the wall-clock second when bucket i was last touched (so
+    // stale buckets don't contribute). Single-writer (producer), single-
+    // reader (snapshot publisher). Relaxed atomic on ws_ticks_per_5s
+    // because monotonic + sub-tick accuracy doesn't matter for display.
+    std::atomic<uint64_t> ws_ticks_per_5s;
+    uint64_t ws_bucket_last_sec[5];   // producer-only writer; not atomic
+    uint32_t ws_bucket_count[5];      // producer-only writer; not atomic
 };
 
 }  // namespace tt
@@ -520,6 +530,12 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
     // v5.12.1.A — pre-warmup sentinel; first tick from producer/backtest
     // sets it to a monotonic wall-clock us value.
     state->last_ws_tick_us.store(0, std::memory_order_relaxed);
+    // v5.12.1.C — heartbeat throughput tracking init.
+    state->ws_ticks_per_5s.store(0, std::memory_order_relaxed);
+    for (int i = 0; i < 5; ++i) {
+        state->ws_bucket_last_sec[i] = 0;
+        state->ws_bucket_count[i] = 0;
+    }
     for (int i = 0; i < MAX_EXECUTION_CORES; i++) {
         state->cores[i].core = nullptr;
         state->cores[i].intended_tp = FPN_Zero<F>();

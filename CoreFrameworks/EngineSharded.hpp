@@ -1513,6 +1513,27 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     std::chrono::system_clock::now().time_since_epoch()).count();
             state.last_ws_tick_us.store(local_now_us, std::memory_order_release);
             (void)ts_us;  // ts_us still used by other fan_out consumers
+            // v5.12.1.C — heartbeat throughput. 5 × 1-second-bucket ring;
+            // current bucket = (now_sec % 5). Reset on second-rollover.
+            // Sum of fresh buckets = ticks/5s shown in header bar. Single-
+            // writer (producer); reader sees eventual consistency.
+            // Reuses local_now_us from above — no extra clock read.
+            {
+                uint64_t now_sec = local_now_us / 1000000ULL;
+                int b = (int)(now_sec % 5);
+                if (state.ws_bucket_last_sec[b] != now_sec) {
+                    state.ws_bucket_last_sec[b] = now_sec;
+                    state.ws_bucket_count[b] = 0;
+                }
+                state.ws_bucket_count[b]++;
+                uint64_t total = 0;
+                for (int i = 0; i < 5; ++i) {
+                    if (state.ws_bucket_last_sec[i] >= now_sec - 4) {
+                        total += state.ws_bucket_count[i];
+                    }
+                }
+                state.ws_ticks_per_5s.store(total, std::memory_order_relaxed);
+            }
 
             // v5.1.4: GUI drag-TP/SL pickup runs per-tick, NOT at slow-path
             // cadence. Pre-v5.1.4 this lived in the cadence block and gave
