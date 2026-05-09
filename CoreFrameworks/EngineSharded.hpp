@@ -1244,6 +1244,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             ConfidenceScorer_Init(&state.cores[i].confidence,
                                   (int)cfg.confidence_window,
                                   FPN_ToDouble(tau_eff));
+            // v5.14.1.B.1 (PARITY-003) — push composite cfg into scorer.
+            // No-op when cfg.confidence_composite_enabled=0 (legacy path).
+            ConfidenceScorer_BindCompositeCfg(&state.cores[i].confidence,
+                cfg.confidence_composite_enabled,
+                FPN_ToDouble(cfg.confidence_freshness_tau_secs),
+                FPN_ToDouble(cfg.confidence_capacity_target_dollars),
+                FPN_ToDouble(cfg.confidence_capacity_kappa),
+                FPN_ToDouble(cfg.confidence_rmse_baseline));
         }
 
         // v5.4.0 Phase 1.3 — wire Strategy_InitPerCore. Allocates the

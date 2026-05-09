@@ -668,3 +668,31 @@ held_out_stamp_secret=          # HMAC-SHA256 secret. Empty = devmode (signs but
 # Default 1 — auto-stamp is the recommended path post-v5.8.7. Flip to 0
 # only if you intend to use tools/stamp_model.sh manually (rare).
 auto_stamp_on_held_out=1
+
+#==============================================================================
+# v5.14.1 — COMPOSITE CONFIDENCE (4-factor: IC × Freshness × Capacity × Stability)
+#==============================================================================
+# Optional alternative to the legacy 3-factor ConfidenceScorer_Compute path
+# (IC × Freshness × 1/(1+RMSE)). Composite adds:
+#   - Capacity term: throttles confidence when current ADV * kappa < target_dollars
+#     (silently 1.0 when target_dollars=0; default = unbounded = no throttle)
+#   - Stability normalized vs training-time RMSE baseline (rather than absolute
+#     RMSE magnitude); semantic: "how close are we to training-time calibration"
+#   - Wall-clock-driven freshness via Mark/Compute (not caller-passed data_age)
+#
+# When enabled, cfg-gated swap fires at StrategyParameters.hpp:1101 (the
+# existing risk_scale_by_confidence sizing site). Mark fires from
+# ConfidenceScorer_UpdateAndMark at the post-fill drain (calibration data
+# point observed) — freshness measures "how recently we had outcomes",
+# NOT "how recently we predicted" (the latter would be degenerate).
+#
+# Default off; legacy IC-only path is bytewise-unchanged. Operator opts in
+# AFTER paper-test confirms calibration. PARITY-001 (replay-determinism in
+# backtest) is a known issue when composite_enabled=1; tracked in
+# DOCS/PARITY_ISSUES.md, fixed in v5.14.1.B.2.
+
+confidence_composite_enabled=0           # 0=legacy IC-only (default), 1=composite
+confidence_freshness_tau_secs=3600       # decay constant; 1 hour for slow regimes
+confidence_capacity_target_dollars=0     # 0 = unbounded capacity (single-symbol default)
+confidence_capacity_kappa=0.1            # ADV proportionality factor (cap = kappa * adv / target)
+confidence_rmse_baseline=1.0             # bind to training-time RMSE; 1.0 = neutral default

@@ -580,6 +580,13 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         ConfidenceScorer_Init(&state->cores[i].confidence,
                               CONFIDENCE_IC_WINDOW_DEFAULT,
                               CONFIDENCE_FRESHNESS_TAU_DEFAULT);
+        // v5.14.1.B.1 (PARITY-003) — at this site cfg may be unavailable
+        // (state init runs before EngineSharded re-inits with cfg values).
+        // Boot sequence guarantees EngineSharded.hpp:1244 re-runs Init +
+        // BindCompositeCfg with cfg AFTER this site for STRATEGY_ML cores.
+        // Non-ML cores keep the safe defaults from Init alone (their scorer
+        // is never fed via ConfidenceScorer_UpdateAndMark, so composite is
+        // moot). No BindCompositeCfg here — defer to EngineSharded.
         // v5.10.0e — drift history starts empty; samples land post-fill.
         DriftHistory_Init(&state->cores[i].drift_history);
         state->cores[i].staged_prediction = 0.0;
@@ -1281,8 +1288,17 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
             }
             double realized = oms->last_realized_return[slot];
             if (ctx.strategy_id == STRATEGY_ML) {
-                ConfidenceScorer_Update(&ctx.confidence,
-                                        ctx.active_prediction, realized);
+                // v5.14.1.B.1 (PARITY-002 + CLAUDE.md item 16 merge-scan):
+                // hoist clock_gettime once; serves both UpdateAndMark
+                // (composite freshness) + drift detection below. Saves
+                // ~50-100ns vs the prior pattern of computing now_us only
+                // inside the drift_floor branch.
+                struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+                uint64_t now_us = (uint64_t)ts.tv_sec * 1000000ULL +
+                                  (uint64_t)ts.tv_nsec / 1000ULL;
+                ConfidenceScorer_UpdateAndMark(&ctx.confidence,
+                                               ctx.active_prediction, realized,
+                                               now_us);
                 ctx.active_prediction = 0.0;
 
                 // v5.10.0e — runtime IC drift detection. Sample current IC
@@ -1290,9 +1306,6 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 // Only meaningful when operator has set drift_floor > 0.
                 if (drift_floor > 0.0) {
                     double ic_now = RollingIC_Compute(&ctx.confidence.ic);
-                    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
-                    uint64_t now_us = (uint64_t)ts.tv_sec * 1000000ULL +
-                                      (uint64_t)ts.tv_nsec / 1000ULL;
                     DriftHistory_Push(&ctx.drift_history, ic_now, now_us);
                     double avg_ic = 0.0;
                     int    n_samples = 0;

@@ -397,6 +397,15 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   ConfidenceScorer_Init(&ctrl->confidence,
                           (int)config.confidence_window,
                           FPN_ToDouble(config.confidence_freshness_tau));
+  // v5.14.1.B.1 (PARITY-003) — push composite cfg into legacy scorer.
+  // Legacy single_core path is deprecated but still init-aligned with
+  // sharded engine for parity-test scenarios.
+  ConfidenceScorer_BindCompositeCfg(&ctrl->confidence,
+      config.confidence_composite_enabled,
+      FPN_ToDouble(config.confidence_freshness_tau_secs),
+      FPN_ToDouble(config.confidence_capacity_target_dollars),
+      FPN_ToDouble(config.confidence_capacity_kappa),
+      FPN_ToDouble(config.confidence_rmse_baseline));
   Bandit_Init(&ctrl->bandit, NUM_STRATEGIES, BANDIT_GAMMA_DEFAULT, BANDIT_ETA_MAX_DEFAULT,
               FPN_ToDouble(config.bandit_blend_ratio), BANDIT_MIN_SAMPLES_DEFAULT, BANDIT_RAMP_UP_DEFAULT);
   Bandit_SetArmName(&ctrl->bandit, STRATEGY_MEAN_REVERSION, "MR");
@@ -604,7 +613,14 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
     if (ctrl->config.confidence_enabled && strat == STRATEGY_ML) {
         double pred = ctrl->entry_prediction[slot];
         double actual = (!pos_pnl.sign & !FPN_IsZero(pos_pnl)) ? 1.0 : 0.0;
-        ConfidenceScorer_Update(&ctrl->confidence, pred, actual);
+        // v5.14.1.B.1 (PARITY-002) — UpdateAndMark sets RollingFreshness so
+        // composite confidence path works when enabled. Wall-clock now_us
+        // is fine for legacy single_core (deprecated; not used in
+        // replay-determinism contract).
+        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+        uint64_t now_us = (uint64_t)ts.tv_sec * 1000000ULL +
+                          (uint64_t)ts.tv_nsec / 1000ULL;
+        ConfidenceScorer_UpdateAndMark(&ctrl->confidence, pred, actual, now_us);
     }
 
     // feed bandit learner: update arm = entry strategy, reward = P&L in bps

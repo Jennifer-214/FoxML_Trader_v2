@@ -341,6 +341,35 @@ static inline void ConfidenceScorer_InitComposite(ConfidenceScorer *cs,
     cs->rmse_baseline = (rmse_baseline > 0.0) ? rmse_baseline : 1.0;
 }
 
+// v5.14.1.B.1 (PARITY-003 fix) — push composite cfg fields into a scorer
+// AFTER ConfidenceScorer_Init has run. Designed to be called from boot sites
+// alongside the existing Init call so legacy callers stay compatible
+// (composite_enabled=0 → leaves Init's safe defaults in place).
+//
+// Avoids circular include risk by taking primitive doubles instead of
+// ControllerConfig<F>* (ConfidenceScore.hpp lives in ML_Headers/, cfg lives
+// in CoreFrameworks/ — keeping the dependency direction one-way).
+//
+// Caller pattern (3 boot sites: EngineSharded, ControllerEventLoop, PortfolioController):
+//   ConfidenceScorer_Init(&cs, window, base_tau);
+//   ConfidenceScorer_BindCompositeCfg(&cs,
+//       cfg.confidence_composite_enabled,
+//       FPN_ToDouble(cfg.confidence_freshness_tau_secs),
+//       FPN_ToDouble(cfg.confidence_capacity_target_dollars),
+//       FPN_ToDouble(cfg.confidence_capacity_kappa),
+//       FPN_ToDouble(cfg.confidence_rmse_baseline));
+static inline void ConfidenceScorer_BindCompositeCfg(ConfidenceScorer *cs,
+                                                       int composite_enabled,
+                                                       double freshness_tau_secs,
+                                                       double capacity_target_dollars,
+                                                       double capacity_kappa,
+                                                       double rmse_baseline) {
+    if (!composite_enabled) return;  // legacy path; leave Init defaults
+    RollingFreshness_Init(&cs->freshness, freshness_tau_secs);
+    RollingCapacity_Init(&cs->capacity, capacity_target_dollars, capacity_kappa);
+    cs->rmse_baseline = (rmse_baseline > 0.0) ? rmse_baseline : 1.0;
+}
+
 // feed a prediction + actual return pair (call after outcome is known)
 static inline void ConfidenceScorer_Update(ConfidenceScorer *cs,
                                              double prediction, double actual) {
