@@ -348,6 +348,21 @@ static inline void ConfidenceScorer_Update(ConfidenceScorer *cs,
     RollingRMSE_Push(&cs->rmse, prediction, actual);
 }
 
+// v5.14.1.B — Update + Mark in one call. Use this from production sites
+// when composite confidence is enabled so freshness reflects "how recently
+// we observed a calibration data point". Wall-clock now_us drives the
+// freshness decay (Compute reads it via ComputeComposite's now_us arg).
+//
+// Backwards-compat: existing _Update sites can stay on the 3-arg form
+// when composite is disabled (composite path is opt-in via cfg).
+static inline void ConfidenceScorer_UpdateAndMark(ConfidenceScorer *cs,
+                                                    double prediction,
+                                                    double actual,
+                                                    uint64_t now_us) {
+    ConfidenceScorer_Update(cs, prediction, actual);
+    RollingFreshness_Mark(&cs->freshness, now_us);
+}
+
 // compute current confidence given data age
 static inline double ConfidenceScorer_Compute(ConfidenceScorer *cs, double data_age_sec) {
     double ic = RollingIC_Compute(&cs->ic);

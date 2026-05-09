@@ -49,6 +49,7 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/BarrierGate.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"
+#include <ctime>  // v5.14.1.B — clock_gettime for composite confidence freshness
 #include "../ML_Headers/CoreModelZoo.hpp"
 #include "../ML_Headers/CostModel.hpp"     // v5.5.0 Class 8 — cost gate
 #include "../ML_Headers/ModelInference.hpp"
@@ -1099,7 +1100,26 @@ inline void ML_BuildParameters(
     double conf_now = 0.0;
     double threshold = base_threshold;
     if (config->confidence_enabled && conf_scorer) {
-        conf_now = ConfidenceScorer_Compute(conf_scorer, 0.0);  // data_age=0 (live)
+        // v5.14.1.B — cfg-gated swap to 4-factor composite confidence.
+        // Default (composite_enabled=0) preserves bytewise-identical
+        // pre-v5.14.1 behavior. Composite path uses wall-clock now_us
+        // for freshness; data_age=0 in legacy path keeps freshness=1.0.
+        if (config->confidence_composite_enabled) {
+            // Slow-path site (~once per poll_interval cycle); clock_gettime
+            // ~50-100ns via vDSO is acceptable. Composite formula reads
+            // freshness from last UpdateAndMark + capacity from current_adv +
+            // stability normalized vs cfg.confidence_rmse_baseline.
+            // Hot-cfg fields (rmse_baseline, capacity params, freshness_tau)
+            // are pushed into the scorer at boot (EngineSharded_Init);
+            // ComputeComposite reads them from scorer state, not cfg.
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            uint64_t now_us = (uint64_t)ts.tv_sec * 1000000ull
+                             + (uint64_t)ts.tv_nsec / 1000ull;
+            conf_now = ConfidenceScorer_ComputeComposite(conf_scorer, now_us);
+        } else {
+            conf_now = ConfidenceScorer_Compute(conf_scorer, 0.0);  // data_age=0 (live)
+        }
         double scale = FPN_ToDouble(config->confidence_threshold_scale);
         double effective = base_threshold * (scale - conf_now);
         if (effective > 1.0) effective = 1.0;

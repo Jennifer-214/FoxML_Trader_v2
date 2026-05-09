@@ -453,6 +453,18 @@ template <unsigned F> struct ControllerConfig {
   // model is mis-calibrated, leave at 0 (amplifying poor predictions =
   // larger losses).
   int risk_scale_by_confidence;
+  // v5.14.1 — composite confidence (IC × Freshness × Capacity × Stability)
+  // Default 0 = legacy 3-factor ConfidenceScorer_Compute (bytewise-unchanged
+  // pre-v5.14.1 behavior). Flip to 1 to swap in the 4-factor formula at the
+  // risk_scale_by_confidence sizing site (StrategyParameters.hpp:1099).
+  // Pairs with: confidence_freshness_tau_secs (decay constant),
+  // confidence_capacity_target_dollars (0=unbounded), confidence_rmse_baseline
+  // (training-time RMSE for stability normalization).
+  int      confidence_composite_enabled;        // v5.14.1.B — 0=off, 1=composite
+  FPN<F>   confidence_freshness_tau_secs;       // default 3600.0 (1 hour decay)
+  FPN<F>   confidence_capacity_target_dollars;  // default 0.0 (unbounded)
+  FPN<F>   confidence_capacity_kappa;           // default 0.1 (ADV proportionality)
+  FPN<F>   confidence_rmse_baseline;            // default 1.0 (rebound at training time)
   // v5.12.2.B — lazy slow-path rebuild. Skip RebuildOneCore body when
   // slow_state hasn't changed materially since last rebuild. Estimated
   // 30-50% of cycles become no-ops on stable regimes; per-cycle savings
@@ -1304,6 +1316,14 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.12.1.D — disabled by default; activate only after Phase 4.B
   // paper-test confirms model calibration.
   cfg.risk_scale_by_confidence = 0;
+  // v5.14.1.B — composite confidence: disabled by default. Activates the
+  // 4-factor formula (IC × Freshness × Capacity × Stability_normalized).
+  // Defaults: 1 hour freshness decay, unbounded capacity, 1.0 rmse baseline.
+  cfg.confidence_composite_enabled        = 0;
+  cfg.confidence_freshness_tau_secs       = FPN_FromDouble<F>(3600.0);
+  cfg.confidence_capacity_target_dollars  = FPN_FromDouble<F>(0.0);
+  cfg.confidence_capacity_kappa           = FPN_FromDouble<F>(0.1);
+  cfg.confidence_rmse_baseline            = FPN_FromDouble<F>(1.0);
   // v5.14.0 — Ridge blending defaults: disabled; opt-in for paper-test.
   // Default behavior bytewise-identical to v5.13.6 bandit selection path.
   cfg.ridge_within_horizon = 0;
@@ -1560,6 +1580,24 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     // v5.12.1.D — confidence-conditional sizing infra
     CFG_PARSE_INT(risk_scale_by_confidence)
+    // v5.14.1.B — composite confidence
+    CFG_PARSE_INT(confidence_composite_enabled)
+    if (strcmp(key, "confidence_freshness_tau_secs") == 0) {
+      cfg.confidence_freshness_tau_secs = FPN_FromDouble<F>(atof(val));
+      continue;
+    }
+    if (strcmp(key, "confidence_capacity_target_dollars") == 0) {
+      cfg.confidence_capacity_target_dollars = FPN_FromDouble<F>(atof(val));
+      continue;
+    }
+    if (strcmp(key, "confidence_capacity_kappa") == 0) {
+      cfg.confidence_capacity_kappa = FPN_FromDouble<F>(atof(val));
+      continue;
+    }
+    if (strcmp(key, "confidence_rmse_baseline") == 0) {
+      cfg.confidence_rmse_baseline = FPN_FromDouble<F>(atof(val));
+      continue;
+    }
     // v5.14.0 — Ridge risk-parity blending (cfg gates default off)
     CFG_PARSE_INT(ridge_within_horizon)
     CFG_PARSE_INT(ridge_across_horizons)
