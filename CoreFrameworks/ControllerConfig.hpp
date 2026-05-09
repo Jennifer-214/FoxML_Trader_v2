@@ -450,6 +450,15 @@ template <unsigned F> struct ControllerConfig {
   // measuring slow-path p99 latency on operator hardware.
   int param_staleness_gate_enabled;          // 0=disabled (default), 1=enabled
   uint64_t param_max_age_ticks;              // gap threshold (default 1000 = 10x default poll_interval=100)
+  // v5.14.8.E — stale-MODEL age check (load-time gate). Operator policy:
+  // if a loaded model's stamp body claims training_timestamp_us older
+  // than max_age_hours, engine WARNs (held_out_gate_strict=0) or
+  // REFUSEs load (held_out_gate_strict=1). Default 0 = disabled.
+  // Distinct from param_staleness_gate (slow-path-tier; this is a
+  // boot-time gate). Per-model evaluation in CoreModelZoo_CheckStaleModel
+  // (uses ModelHandle.training_timestamp_us — stamp-bound field added
+  // in v5.14.8.D via FOREACH_STAMP_BOUND_MODEL_CONST registry).
+  uint32_t model_max_age_hours;
   // v5.12.1.D — confidence-conditional sizing INFRASTRUCTURE.
   //   0 = disabled (default; flat risk_pct regardless of prediction P)
   //   1 = linear scale (factor = clamp((P - threshold) / (1 - threshold), 0, 1))
@@ -1372,6 +1381,8 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.12.1.B.3 — disabled by default; flip after measuring slow-path p99.
   cfg.param_staleness_gate_enabled = 0;
   cfg.param_max_age_ticks = 1000;
+  // v5.14.8.E — stale-model age check (boot-time gate). Default 0 = disabled.
+  cfg.model_max_age_hours = 0;
   // v5.12.1.D — disabled by default; activate only after Phase 4.B
   // paper-test confirms model calibration.
   cfg.risk_scale_by_confidence = 0;
@@ -1639,6 +1650,11 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // param_max_age_ticks is uint64_t; can't use CFG_PARSE_INT (atoi returns int).
     if (strcmp(key, "param_max_age_ticks") == 0) {
       cfg.param_max_age_ticks = (uint64_t)atoll(val);
+      continue;
+    }
+    // v5.14.8.E — stale-model age gate (uint32_t hours; 0 = disabled)
+    if (strcmp(key, "model_max_age_hours") == 0) {
+      cfg.model_max_age_hours = (uint32_t)atoi(val);
       continue;
     }
     // v5.12.1.D — confidence-conditional sizing infra

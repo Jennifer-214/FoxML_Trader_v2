@@ -780,3 +780,21 @@ winsor_pct_high=0.995   # default 99.5% (upper clip percentile)
 #   Production deploy:        reconcile_mode=strict    (refuse on any drift)
 
 reconcile_mode=warn         # default (legacy dry_run=1 behavior preserved)
+
+# v5.14.8.E — STALE-MODEL AGE GATE (boot-time)
+#
+# When a model loads, engine checks the stamp body's training_timestamp_us
+# against wall-clock. If (now - training_timestamp) > model_max_age_hours,
+# engine surfaces stale-model condition:
+#   held_out_gate_strict=0 → WARN (load proceeds; ML Status panel flagged)
+#   held_out_gate_strict=1 → REFUSE (engine refuses the model)
+#
+# Default 0 = disabled (no age check; legacy behavior). Operator opts in by
+# setting hours threshold (e.g., 168 = 1 week, 720 = 30 days). Stamp body's
+# training_timestamp_us is populated by Train Model panel + CLI tooling
+# (v5.14.8.D landed the field via FOREACH_STAMP_BOUND_MODEL_CONST registry).
+#
+# Distinct from param_staleness_gate_enabled (slow-path gate measuring
+# tick-vs-publish gap) — this is a boot-time check on model lineage.
+
+model_max_age_hours=0       # default: disabled. Hours threshold for stale-model gate.
