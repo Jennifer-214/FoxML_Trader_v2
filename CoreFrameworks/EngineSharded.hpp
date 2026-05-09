@@ -89,6 +89,7 @@
 
 #include "EnsembleHotSwap.hpp"   // v5.14.2 — EngineSharded_HotSwapEnsemble template
 #include "ModelValidation.hpp"   // v5.14.2.E.1 — CoreModelZoo_ValidateAgainstCfg (extracted; PARITY-012)
+#include "../ML_Headers/FeatureRegistryOverlay.hpp"  // v5.14.3.B — FeatureOverlay_PostLoadVerify
 
 namespace tt {
 
@@ -1192,6 +1193,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // to enforce refuse properly). The validator preserves this:
                 // counters are written, FATAL log fires, but engine continues.
                 // Hot-swap branch handles REFUSE differently (model_load_failed).
+
+                // v5.14.3.B — overlay sidecar verification (3-layer
+                // fingerprinting). Per-handle: if stamp claims overlay
+                // (has_overlay_hash=1), read sidecar + compare hash. Boot
+                // semantics: log loudly + leave loaded (matches
+                // ValidateAgainstCfg above; TODO v5.10 same disposition).
+                FeatureOverlay_PostLoadVerify<F>(
+                    zoo, ezoo, /*core_id=*/i, cfg.held_out_gate_strict);
             }
 
             // Phase 6prep sharded c12: re-init ConfidenceScorer with cfg
@@ -2765,6 +2774,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                     "Operator must reconcile cfg "
                                                     "vs stamp + restart.\n", c);
                                             }
+                                            // v5.14.3.B — overlay sidecar verification.
+                                            // Hot-swap semantics: flag-only on REFUSE
+                                            // (matches ValidateAgainstCfg above).
+                                            int overlay_rc = FeatureOverlay_PostLoadVerify<F>(
+                                                /*zoo=*/nullptr, swap_ezoo,
+                                                /*core_id=*/c, cfg.held_out_gate_strict);
+                                            if (overlay_rc < 0) {
+                                                state.cores[c].model_load_failed = 1;
+                                            }
                                         }
                                         __atomic_store_n(
                                             &g_shared.swap_model_path_requested[c], 0,
@@ -2837,6 +2855,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                     "validation in strict mode; new model "
                                                     "loaded but flagged degraded. Operator "
                                                     "must reconcile cfg vs stamp + restart.\n", c);
+                                            }
+                                            // v5.14.3.B — overlay sidecar verification.
+                                            // Hot-swap semantics: flag-only on REFUSE
+                                            // (matches ValidateAgainstCfg above).
+                                            int overlay_rc = FeatureOverlay_PostLoadVerify<F>(
+                                                swap_zoo, /*ezoo=*/nullptr,
+                                                /*core_id=*/c, cfg.held_out_gate_strict);
+                                            if (overlay_rc < 0) {
+                                                state.cores[c].model_load_failed = 1;
                                             }
                                         } else {
                                             // Load failed; null the handle so

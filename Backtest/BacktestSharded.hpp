@@ -40,6 +40,7 @@
 
 #include "../CoreFrameworks/ControllerConfig.hpp"
 #include "../CoreFrameworks/ModelValidation.hpp"  // v5.14.2.E.1 — CoreModelZoo_ValidateAgainstCfg (closes PARITY-012)
+#include "../ML_Headers/FeatureRegistryOverlay.hpp"  // v5.14.3.B — FeatureOverlay_PostLoadVerify
 #include "../CoreFrameworks/EventLoopAggregates.hpp"
 #include "../CoreFrameworks/ExecutionCore.hpp"
 #include "../CoreFrameworks/ShardedBacktestDriver.hpp"
@@ -369,6 +370,14 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                     // Note: validator returns -1 on REFUSE in strict mode but
                     // backtest semantics match boot's "log loudly + leave loaded"
                     // (counters written, FATAL log fires, replay continues).
+
+                    // v5.14.3.B — overlay sidecar verification (3-layer
+                    // fingerprinting). Per-handle: if stamp claims overlay,
+                    // read sidecar + compare hash. Backtest semantics: log +
+                    // continue replay (matches ValidateAgainstCfg above).
+                    FeatureOverlay_PostLoadVerify<BACKTEST_FP>(
+                        zoo_for_validate, ezoo_for_validate, /*core_id=*/i,
+                        cfg.held_out_gate_strict);
                 }
             }
             // Phase 6prep — ConfidenceScorer with cfg tunables.

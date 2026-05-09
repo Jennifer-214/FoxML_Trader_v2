@@ -321,6 +321,13 @@ struct ModelHandle {
     // sessions or accidental sidecar copy mistake).
     uint8_t  has_stamp_scaler_sha256;
     char     stamp_scaler_sha256[65];
+    // v5.14.3.B — overlay-derived fields on runtime ModelHandle.
+    // Mirrors ModelStampResult (parser side) — copied via TryLoadRole
+    // post-verify_model_stamp. Read by FeatureOverlay_PostLoadVerify.
+    uint8_t  has_overlay_hash;
+    char     overlay_hash[65];
+    uint8_t  has_effective_hash;
+    char     effective_hash[65];
     // v5.11.62 — for multiclass models, which class index is the
     // "buy probability"? Default 0 (binary positive class) preserves
     // legacy semantics. CoreModelZoo loader sets:
@@ -420,6 +427,11 @@ inline void Model_Init(ModelHandle<F> *m) {
     m->stamp_label_sl_pct = 0.0;
     m->has_stamp_scaler_sha256 = 0;
     m->stamp_scaler_sha256[0] = '\0';
+    // v5.14.3.B — overlay-derived fields zero-init
+    m->has_overlay_hash = 0;
+    m->overlay_hash[0] = '\0';
+    m->has_effective_hash = 0;
+    m->effective_hash[0] = '\0';
     // v5.11.62 — buy class default = 0 (binary positive class).
     m->buy_class_idx = 0;
     // v5.12.3.A — composite-signal defaults: single-class extraction equivalent
@@ -1314,6 +1326,15 @@ struct ModelStampResult {
     int      expected_num_features;             // = MODEL_NUM_FEATURES at training time
     uint8_t  has_expected_feature_format_version;
     int      expected_feature_format_version;   // = MODEL_FORMAT_VERSION at training time
+
+    // v5.14.3.B — overlay-derived fields (3-layer fingerprinting).
+    // SIDECAR-DERIVED (FeatureOverlay JSON → SHA256). NOT cfg-bound.
+    // See StampInferenceCfgInputs (below) for the discipline list of sites
+    // that must stay in sync when adding a new sidecar-derived field.
+    uint8_t  has_overlay_hash;
+    char     overlay_hash[65];                  // layer-2: SHA256 of canonical overlay JSON
+    uint8_t  has_effective_hash;
+    char     effective_hash[65];                // layer-3: SHA256(layer1 || layer2)
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -1444,6 +1465,14 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     r.expected_num_features = 0;
     r.has_expected_feature_format_version = 0;
     r.expected_feature_format_version = 0;
+
+    // v5.14.3.B — overlay-derived fields zero-init. Legacy stamps
+    // (pre-v5.14.3) load with has_*=0 → FeatureOverlay_PostLoadVerify
+    // skips silently (no overlay verification claimed).
+    r.has_overlay_hash = 0;
+    r.overlay_hash[0] = '\0';
+    r.has_effective_hash = 0;
+    r.effective_hash[0] = '\0';
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -1678,6 +1707,17 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             else if (strcmp(key, "expected_feature_format_version") == 0) {
                 r.expected_feature_format_version = atoi(val);
                 r.has_expected_feature_format_version = 1;
+            }
+            // v5.14.3.B — overlay-derived fields parser branches.
+            else if (strcmp(key, "overlay_hash") == 0) {
+                strncpy(r.overlay_hash, val, sizeof(r.overlay_hash) - 1);
+                r.overlay_hash[sizeof(r.overlay_hash) - 1] = '\0';
+                r.has_overlay_hash = 1;
+            }
+            else if (strcmp(key, "effective_hash") == 0) {
+                strncpy(r.effective_hash, val, sizeof(r.effective_hash) - 1);
+                r.effective_hash[sizeof(r.effective_hash) - 1] = '\0';
+                r.has_effective_hash = 1;
             }
         }
         line = strtok_r(nullptr, "\n", &save);
@@ -2008,6 +2048,28 @@ struct StampInferenceCfgInputs {
     int      expected_num_features;
     int      has_expected_feature_format_version;
     int      expected_feature_format_version;
+
+    // v5.14.3.B — overlay-derived fields (3-layer fingerprinting).
+    // SIDECAR-DERIVED (computed from FeatureOverlay JSON), NOT cfg-bound.
+    // Don't fit FOREACH_STAMP_BOUND_CFG. Manual emit + parse pattern
+    // (mirror v5.14.2.E.2.B precedent above).
+    //
+    // **TECH_DEBT trigger:** when sidecar-derived field count grows to 5+,
+    // refactor to parallel `FOREACH_STAMP_BOUND_SIDECAR(X)` registry
+    // (sister to TECH_DEBT-006's FOREACH_STAMP_BOUND_MODEL_CONST).
+    //
+    // **If you add a NEW sidecar-derived field here, ALSO update:**
+    //   - ModelStampResult (above; parser-side struct)
+    //   - verify_model_stamp init block (zero has_*)
+    //   - verify_model_stamp parser (add `if (strcmp(key, "...") == 0)` branch)
+    //   - stamp_write_for_model emit (add `if (inf->has_*)` block)
+    //   - BacktestEngine.hpp populator (add `inf.has_*=1; inf.*=value;`)
+    //   - tools/feature_overlay.py (Python emit-side mirror)
+    //   - FeatureOverlay_PostLoadVerify helper (verification check)
+    int      has_overlay_hash;
+    char     overlay_hash[65];                  // SHA256 of canonical overlay JSON; 64 hex + null
+    int      has_effective_hash;
+    char     effective_hash[65];                // SHA256(layer1 || layer2); 64 hex + null
 };
 
 inline StampWriteResult stamp_write_for_model(const char* model_path,
@@ -2299,6 +2361,19 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     if (inf && inf->has_expected_feature_format_version && n > 0 && (size_t)n < sizeof(canonical)) {
         int wrote = snprintf(canonical + n, sizeof(canonical) - n,
             "expected_feature_format_version=%d\n", inf->expected_feature_format_version);
+        if (wrote > 0) n += wrote;
+    }
+
+    // v5.14.3.B — overlay-derived fields emit (manual; not in FOREACH_STAMP_BOUND_CFG).
+    // Surface G discipline: legacy callers (has_*=0) emit nothing.
+    if (inf && inf->has_overlay_hash && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "overlay_hash=%s\n", inf->overlay_hash);
+        if (wrote > 0) n += wrote;
+    }
+    if (inf && inf->has_effective_hash && n > 0 && (size_t)n < sizeof(canonical)) {
+        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
+            "effective_hash=%s\n", inf->effective_hash);
         if (wrote > 0) n += wrote;
     }
 

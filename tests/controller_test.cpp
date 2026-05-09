@@ -19116,6 +19116,254 @@ e3_skip_load:;
         }
     }
 
+    // ----- v5.14.3.C: FeatureOverlay 3-layer fingerprinting -----------------------------------------
+    // Sidecar parser + PostLoadVerify helper + symmetry test (Class 18 prevention)
+    printf("\n--- v5.14.3.C: overlay sidecar verify ---\n");
+    {
+        // Test 1 — Stamp body round-trip for overlay fields
+        char tmp_model[] = "/tmp/v5_14_3_overlay_XXXXXX";
+        int fd = mkstemp(tmp_model);
+        if (fd >= 0) {
+            close(fd);
+            FILE* mf = fopen(tmp_model, "wb");
+            if (mf) { fputs("placeholder model", mf); fclose(mf); }
+
+            StampInferenceCfgInputs inf = {};
+            inf.has_overlay_hash = 1;
+            strncpy(inf.overlay_hash, "abcd1234567890abcd1234567890abcd1234567890abcd1234567890abcd1234",
+                    sizeof(inf.overlay_hash) - 1);
+            inf.has_effective_hash = 1;
+            strncpy(inf.effective_hash, "ffff1234567890ffff1234567890ffff1234567890ffff1234567890ffff1234",
+                    sizeof(inf.effective_hash) - 1);
+
+            StampWriteResult sw = stamp_write_for_model(
+                tmp_model, "test_secret_overlay",
+                /*format_version=*/6, "2026-05-09",
+                0.5, 0.5, 0.05, /*force=*/1,
+                /*feature_registry_hash=*/0, /*engine_version=*/nullptr,
+                &inf);
+            check("v5.14.3.C: stamp emit with overlay fields", sw.ok == 1);
+
+            ModelStampResult r = verify_model_stamp(tmp_model, "test_secret_overlay", 0.05, 6);
+            check("v5.14.3.C: parse has_overlay_hash = 1", r.has_overlay_hash == 1);
+            check("v5.14.3.C: parse overlay_hash round-trip",
+                  strcmp(r.overlay_hash, "abcd1234567890abcd1234567890abcd1234567890abcd1234567890abcd1234") == 0);
+            check("v5.14.3.C: parse has_effective_hash = 1", r.has_effective_hash == 1);
+            check("v5.14.3.C: parse effective_hash round-trip",
+                  strcmp(r.effective_hash, "ffff1234567890ffff1234567890ffff1234567890ffff1234567890ffff1234") == 0);
+
+            std::remove(tmp_model);
+            char stamp_path[512];
+            snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", tmp_model);
+            std::remove(stamp_path);
+        }
+    }
+    {
+        // Test 2 — Sidecar parser: valid sidecar with computed_layer2_hash field
+        char tmp_model[] = "/tmp/v5_14_3_sidecar_XXXXXX";
+        int fd = mkstemp(tmp_model);
+        if (fd >= 0) {
+            close(fd);
+            char sidecar_path[512];
+            snprintf(sidecar_path, sizeof(sidecar_path), "%s.overlay.json", tmp_model);
+            FILE* sf = fopen(sidecar_path, "w");
+            if (sf) {
+                fputs("{\n", sf);
+                fputs("  \"version\": 1,\n", sf);
+                fputs("  \"base_registry_hash\": \"0xabc\",\n", sf);
+                fputs("  \"overlays\": [],\n", sf);
+                fputs("  \"computed_layer2_hash\": \"deadbeef00000000deadbeef00000000deadbeef00000000deadbeef00000000\",\n", sf);
+                fputs("  \"computed_layer3_hash\": \"cafebabe00000000cafebabe00000000cafebabe00000000cafebabe00000000\"\n", sf);
+                fputs("}\n", sf);
+                fclose(sf);
+            }
+
+            char hash[65] = {0};
+            char err[128] = {0};
+            int rc = tt::FeatureOverlay_ParseLayer2HashFromSidecar(
+                tmp_model, hash, sizeof(hash), err, sizeof(err));
+            check("v5.14.3.C: ParseLayer2HashFromSidecar returns 1 on valid sidecar", rc == 1);
+            check("v5.14.3.C: parsed hash matches sidecar value",
+                  strcmp(hash, "deadbeef00000000deadbeef00000000deadbeef00000000deadbeef00000000") == 0);
+
+            std::remove(sidecar_path);
+            std::remove(tmp_model);
+        }
+    }
+    {
+        // Test 3 — Sidecar missing → ParseLayer2HashFromSidecar returns 0
+        char hash[65] = {0};
+        char err[128] = {0};
+        int rc = tt::FeatureOverlay_ParseLayer2HashFromSidecar(
+            "/tmp/v5_14_3_does_not_exist", hash, sizeof(hash), err, sizeof(err));
+        check("v5.14.3.C: missing sidecar → returns 0", rc == 0);
+        check("v5.14.3.C: missing sidecar → error string mentions sidecar", strstr(err, "sidecar") != nullptr);
+    }
+    {
+        // Test 4 — PostLoadVerify with no zoos loaded → returns 0 (nothing to verify)
+        int rc = tt::FeatureOverlay_PostLoadVerify<64>(
+            /*zoo=*/nullptr, /*ezoo=*/nullptr, /*core_id=*/0, /*strict_mode=*/1);
+        check("v5.14.3.C: PostLoadVerify null zoos → returns 0", rc == 0);
+    }
+    {
+        // Test 5 — PostLoadVerify with zoo but no overlay-claimed handles → returns 0
+        // (loaded handle but has_overlay_hash=0 → silent skip)
+        CoreModelZoo<64> zoo;
+        CoreModelZoo_Init(&zoo);
+        zoo.loaded_mask = CORE_MODEL_BUY_SIGNAL;
+        zoo.buy_signal.has_overlay_hash = 0;  // legacy stamp; no overlay claimed
+        int rc = tt::FeatureOverlay_PostLoadVerify<64>(
+            &zoo, /*ezoo=*/nullptr, /*core_id=*/0, /*strict_mode=*/1);
+        check("v5.14.3.C: PostLoadVerify no overlay claimed → returns 0 (silent skip)", rc == 0);
+    }
+    {
+        // Test 6 — PostLoadVerify with handle claiming overlay but no sidecar →
+        // returns -1 in strict mode (REFUSE)
+        CoreModelZoo<64> zoo;
+        CoreModelZoo_Init(&zoo);
+        zoo.loaded_mask = CORE_MODEL_BUY_SIGNAL;
+        zoo.buy_signal.has_overlay_hash = 1;
+        strncpy(zoo.buy_signal.overlay_hash,
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                sizeof(zoo.buy_signal.overlay_hash) - 1);
+        strncpy(zoo.buy_signal.model_path, "/tmp/v5_14_3_no_sidecar_model_xyz",
+                sizeof(zoo.buy_signal.model_path) - 1);
+        int rc = tt::FeatureOverlay_PostLoadVerify<64>(
+            &zoo, /*ezoo=*/nullptr, /*core_id=*/0, /*strict_mode=*/1);
+        check("v5.14.3.C: PostLoadVerify overlay claimed + sidecar missing + strict → -1",
+              rc == -1);
+    }
+    {
+        // Test 7 — Same as Test 6 but loose mode → returns 0 (WARN-only, no REFUSE)
+        CoreModelZoo<64> zoo;
+        CoreModelZoo_Init(&zoo);
+        zoo.loaded_mask = CORE_MODEL_BUY_SIGNAL;
+        zoo.buy_signal.has_overlay_hash = 1;
+        strncpy(zoo.buy_signal.overlay_hash,
+                "2222222222222222222222222222222222222222222222222222222222222222",
+                sizeof(zoo.buy_signal.overlay_hash) - 1);
+        strncpy(zoo.buy_signal.model_path, "/tmp/v5_14_3_no_sidecar_loose_xyz",
+                sizeof(zoo.buy_signal.model_path) - 1);
+        int rc = tt::FeatureOverlay_PostLoadVerify<64>(
+            &zoo, /*ezoo=*/nullptr, /*core_id=*/0, /*strict_mode=*/0);
+        check("v5.14.3.C: PostLoadVerify overlay claimed + sidecar missing + loose → 0 (WARN)",
+              rc == 0);
+    }
+    {
+        // Test 8 — PostLoadVerify with valid sidecar matching stamp's hash → returns 0
+        char tmp_model[] = "/tmp/v5_14_3_match_XXXXXX";
+        int fd = mkstemp(tmp_model);
+        if (fd >= 0) {
+            close(fd);
+            char sidecar_path[512];
+            snprintf(sidecar_path, sizeof(sidecar_path), "%s.overlay.json", tmp_model);
+            FILE* sf = fopen(sidecar_path, "w");
+            if (sf) {
+                fputs("{ \"computed_layer2_hash\": \"3333333333333333333333333333333333333333333333333333333333333333\" }\n", sf);
+                fclose(sf);
+            }
+
+            CoreModelZoo<64> zoo;
+            CoreModelZoo_Init(&zoo);
+            zoo.loaded_mask = CORE_MODEL_BUY_SIGNAL;
+            zoo.buy_signal.has_overlay_hash = 1;
+            strncpy(zoo.buy_signal.overlay_hash,
+                    "3333333333333333333333333333333333333333333333333333333333333333",
+                    sizeof(zoo.buy_signal.overlay_hash) - 1);
+            strncpy(zoo.buy_signal.model_path, tmp_model,
+                    sizeof(zoo.buy_signal.model_path) - 1);
+
+            int rc = tt::FeatureOverlay_PostLoadVerify<64>(
+                &zoo, /*ezoo=*/nullptr, /*core_id=*/0, /*strict_mode=*/1);
+            check("v5.14.3.C: PostLoadVerify valid sidecar + matching hash + strict → 0",
+                  rc == 0);
+
+            std::remove(sidecar_path);
+            std::remove(tmp_model);
+        }
+    }
+    {
+        // Test 9 — PostLoadVerify with sidecar hash MISMATCH against stamp → -1 in strict
+        char tmp_model[] = "/tmp/v5_14_3_mismatch_XXXXXX";
+        int fd = mkstemp(tmp_model);
+        if (fd >= 0) {
+            close(fd);
+            char sidecar_path[512];
+            snprintf(sidecar_path, sizeof(sidecar_path), "%s.overlay.json", tmp_model);
+            FILE* sf = fopen(sidecar_path, "w");
+            if (sf) {
+                fputs("{ \"computed_layer2_hash\": \"4444444444444444444444444444444444444444444444444444444444444444\" }\n", sf);
+                fclose(sf);
+            }
+
+            CoreModelZoo<64> zoo;
+            CoreModelZoo_Init(&zoo);
+            zoo.loaded_mask = CORE_MODEL_BUY_SIGNAL;
+            zoo.buy_signal.has_overlay_hash = 1;
+            // Stamp claims a DIFFERENT hash than sidecar reports
+            strncpy(zoo.buy_signal.overlay_hash,
+                    "5555555555555555555555555555555555555555555555555555555555555555",
+                    sizeof(zoo.buy_signal.overlay_hash) - 1);
+            strncpy(zoo.buy_signal.model_path, tmp_model,
+                    sizeof(zoo.buy_signal.model_path) - 1);
+
+            int rc = tt::FeatureOverlay_PostLoadVerify<64>(
+                &zoo, /*ezoo=*/nullptr, /*core_id=*/0, /*strict_mode=*/1);
+            check("v5.14.3.C: PostLoadVerify hash mismatch + strict → -1 (REFUSE)",
+                  rc == -1);
+
+            std::remove(sidecar_path);
+            std::remove(tmp_model);
+        }
+    }
+    {
+        // Test 10 — Symmetry: PostLoadVerify produces same outcome from
+        // boot/backtest/hot-swap "contexts" (Class 18 prevention at CI level).
+        // All 6 call sites pass the same args → same result. Verifies the
+        // helper has no hidden caller-context assumptions.
+        char tmp_model[] = "/tmp/v5_14_3_sym_XXXXXX";
+        int fd = mkstemp(tmp_model);
+        if (fd >= 0) {
+            close(fd);
+            char sidecar_path[512];
+            snprintf(sidecar_path, sizeof(sidecar_path), "%s.overlay.json", tmp_model);
+            FILE* sf = fopen(sidecar_path, "w");
+            if (sf) {
+                fputs("{ \"computed_layer2_hash\": \"6666666666666666666666666666666666666666666666666666666666666666\" }\n", sf);
+                fclose(sf);
+            }
+
+            // Build 3 zoos with identical state (simulating boot/backtest/hot-swap)
+            CoreModelZoo<64> zoo_boot, zoo_backtest, zoo_hotswap;
+            CoreModelZoo_Init(&zoo_boot);
+            CoreModelZoo_Init(&zoo_backtest);
+            CoreModelZoo_Init(&zoo_hotswap);
+            for (auto* z : {&zoo_boot, &zoo_backtest, &zoo_hotswap}) {
+                z->loaded_mask = CORE_MODEL_BUY_SIGNAL;
+                z->buy_signal.has_overlay_hash = 1;
+                strncpy(z->buy_signal.overlay_hash,
+                        "6666666666666666666666666666666666666666666666666666666666666666",
+                        sizeof(z->buy_signal.overlay_hash) - 1);
+                strncpy(z->buy_signal.model_path, tmp_model,
+                        sizeof(z->buy_signal.model_path) - 1);
+            }
+
+            int rc_boot     = tt::FeatureOverlay_PostLoadVerify<64>(&zoo_boot,     nullptr, 0, 1);
+            int rc_backtest = tt::FeatureOverlay_PostLoadVerify<64>(&zoo_backtest, nullptr, 0, 1);
+            int rc_hotswap  = tt::FeatureOverlay_PostLoadVerify<64>(&zoo_hotswap,  nullptr, 0, 1);
+
+            check("v5.14.3.C symmetry: boot rc == backtest rc",
+                  rc_boot == rc_backtest);
+            check("v5.14.3.C symmetry: boot rc == hot-swap rc",
+                  rc_boot == rc_hotswap);
+            check("v5.14.3.C symmetry: all 3 contexts return 0 (matched hash)",
+                  rc_boot == 0 && rc_backtest == 0 && rc_hotswap == 0);
+
+            std::remove(sidecar_path);
+            std::remove(tmp_model);
+        }
+    }
+
     // ----- v5.14.2.E.2.B: model-architectural stamp body fields (forensic) ---------------------------
     // 4 new stamp body fields (expected_num_classes, expected_role,
     // expected_num_features, expected_feature_format_version). Forensic

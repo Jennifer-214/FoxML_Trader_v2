@@ -325,6 +325,24 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
             memcpy(handle->stamp_scaler_sha256, sr.scaler_sha256, n);
             handle->stamp_scaler_sha256[n] = '\0';
         }
+        // v5.14.3.B — copy stamp's overlay-derived fields for
+        // FeatureOverlay_PostLoadVerify. Forward-compat: legacy stamps
+        // (has_overlay_hash=0) leave handle's overlay_hash empty;
+        // verify skips silently.
+        if (sr.has_overlay_hash && sr.overlay_hash[0] != '\0') {
+            handle->has_overlay_hash = 1;
+            size_t n = strnlen(sr.overlay_hash,
+                               sizeof(handle->overlay_hash) - 1);
+            memcpy(handle->overlay_hash, sr.overlay_hash, n);
+            handle->overlay_hash[n] = '\0';
+        }
+        if (sr.has_effective_hash && sr.effective_hash[0] != '\0') {
+            handle->has_effective_hash = 1;
+            size_t n = strnlen(sr.effective_hash,
+                               sizeof(handle->effective_hash) - 1);
+            memcpy(handle->effective_hash, sr.effective_hash, n);
+            handle->effective_hash[n] = '\0';
+        }
         // v5.9.5i — copy stamp's inference cfg values. EngineSharded
         // boot-WARN/REFUSE compares vs cfg.*. Forward-compat: legacy
         // stamps (has_inference_cfg=0) leave handle's stamp_inf_* at
