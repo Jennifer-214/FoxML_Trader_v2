@@ -16546,6 +16546,61 @@ e3_skip_load:;
         }
     }
 
+    printf("\n--- v5.12.3.B+E: mixed-output normalizer + Predict_AtClass helper ---\n");
+    {
+        // Combined ship of 3.B (mixed-output normalizer) + 3.E foundation
+        // (Model_Predict_AtClass helper). Infrastructure-only; loader
+        // integration + ensemble blend integration deferred to follow-up
+        // (when operator actually trains a mixed-output model).
+
+        ModelHandle<64> m;
+        Model_Init(&m);
+
+        // === Test 1: post-Init normalizer == NORM_IDENTITY ===
+        check("v5.12.3.B+E: post-Init normalizer == NORM_IDENTITY (passthrough default)",
+              m.normalizer == ModelHandle<64>::NORM_IDENTITY);
+
+        // === Test 2: post-Init normalizer_param == 0.0 ===
+        check("v5.12.3.B+E: post-Init normalizer_param == 0.0",
+              m.normalizer_param == 0.0f);
+
+        // === Test 3: enum values stable ===
+        check("v5.12.3.B+E: NORM_IDENTITY == 0",
+              ModelHandle<64>::NORM_IDENTITY == 0);
+        check("v5.12.3.B+E: NORM_REGRESSION == 1",
+              ModelHandle<64>::NORM_REGRESSION == 1);
+        check("v5.12.3.B+E: NORM_BARRIER_CLASS_1 == 2",
+              ModelHandle<64>::NORM_BARRIER_CLASS_1 == 2);
+        check("v5.12.3.B+E: NORM_COMPOSITE == 3",
+              ModelHandle<64>::NORM_COMPOSITE == 3);
+
+        // === Test 4: Model_Predict_Normalized w/ no model loaded → 0 ===
+        // Model_Predict returns 0.0 if !m->handle; normalized passes through.
+        float pred1 = Model_Predict_Normalized(&m, nullptr, 0);
+        check("v5.12.3.B+E: Predict_Normalized w/ no model → 0.0",
+              pred1 == 0.0f);
+
+        // === Test 5: Model_Predict_AtClass w/ no model loaded → 0 ===
+        float pred2 = Model_Predict_AtClass(&m, nullptr, 0, /*class_idx=*/0);
+        check("v5.12.3.B+E: Predict_AtClass w/ no model → 0.0",
+              pred2 == 0.0f);
+
+        // === Test 6: Predict_AtClass w/ negative class_idx clamps to 0 ===
+        // Without a real model, both calls return 0; we verify the
+        // signature accepts negative values (defensive runtime clamp).
+        float pred3 = Model_Predict_AtClass(&m, nullptr, 0, /*class_idx=*/-1);
+        check("v5.12.3.B+E: Predict_AtClass w/ negative class_idx returns 0 (no crash)",
+              pred3 == 0.0f);
+
+        // === Test 7: configurable normalizer ===
+        m.normalizer = ModelHandle<64>::NORM_REGRESSION;
+        m.normalizer_param = 0.005f;  // 0.5% TP
+        check("v5.12.3.B+E: normalizer assignable to NORM_REGRESSION",
+              m.normalizer == ModelHandle<64>::NORM_REGRESSION);
+        check("v5.12.3.B+E: normalizer_param holds tp_pct value",
+              m.normalizer_param == 0.005f);
+    }
+
     printf("\n--- v5.12.3.C: per-core time-exit override ---\n");
     {
         // Phase 3.C of v5.12. Adds core_<N>_time_exit_ticks cfg array;

@@ -330,6 +330,29 @@ struct ModelHandle {
     // Model_Predict returns out_result[buy_class_idx]. Out-of-range
     // index falls back to 0.
     int      buy_class_idx;
+    // v5.12.3.B+E — prediction normalizer. Maps heterogeneous model
+    // outputs to a [0,1] buy-probability space so ensemble blend can
+    // average across mixed model types. Default NORM_IDENTITY = passthrough
+    // (preserves existing single-output semantics bytewise). Loader sets
+    // this from stamp body's label_kind at load time; never mutated post-
+    // load (per-handle invariant). normalizer_param holds tp_pct for
+    // NORM_REGRESSION; unused for other kinds.
+    //
+    // Elision-friendly design (per CLAUDE.md item 18): hot-path-equivalent
+    // call site checks `if (m->normalizer == NORM_IDENTITY) return raw;`
+    // FIRST. Default state → 1-line early return → optimizer treats as
+    // ~1ns predicted-not-taken. Switch on enum is only entered when a
+    // model is actually trained with non-IDENTITY normalizer. ~1ns
+    // when off; ~5ns when on. Slow-path budget irrelevant either way
+    // (Model_Predict's XGBoost C API call dominates at ~1-5us).
+    enum prediction_normalizer_t {
+        NORM_IDENTITY        = 0,    // passthrough (default; current behavior)
+        NORM_REGRESSION      = 1,    // [-tp_pct, +tp_pct] → [0, 1] via clamp(0.5 + raw / (2*tp), 0, 1)
+        NORM_BARRIER_CLASS_1 = 2,    // 3-class barrier; explicit class-1 extraction
+        NORM_COMPOSITE       = 3,    // uses target_classes/class_weights from this struct (3.A)
+    };
+    uint8_t  normalizer;             // default NORM_IDENTITY
+    float    normalizer_param;       // tp_pct for NORM_REGRESSION; unused otherwise
     // v5.12.3.A — composite-signal extractor. When num_classes_active > 1,
     // Model_Predict returns Σ class_weights[i] × out_result[target_classes[i]]
     // over the first num_classes_active entries. Default num_classes_active=1
@@ -407,6 +430,12 @@ inline void Model_Init(ModelHandle<F> *m) {
     for (int i = 1; i < 8; ++i) m->target_classes[i] = 0;
     m->class_weights[0] = 1.0f;
     for (int i = 1; i < 8; ++i) m->class_weights[i] = 0.0f;
+    // v5.12.3.B+E — normalizer defaults: NORM_IDENTITY = passthrough.
+    // Preserves existing single-output behavior bytewise. Loader picks
+    // non-IDENTITY when stamp body's label_kind needs it (e.g.,
+    // REGRESSION model uses NORM_REGRESSION).
+    m->normalizer = ModelHandle<F>::NORM_IDENTITY;
+    m->normalizer_param = 0.0f;
 }
 
 //======================================================================================================
@@ -553,6 +582,106 @@ inline int Model_Load(ModelHandle<F> *m, const char *path, int backend) {
 // Operator behavior is bytewise identical to pre-.D when use_aot_inference=0
 // or when AOT load fails — the cfg flag is opt-in and load failure is
 // transparent fallback.
+//======================================================================================================
+// [PREDICT NORMALIZED — mixed-output ensemble support (v5.12.3.B+E)]
+//======================================================================================================
+// Wraps Model_Predict + applies the per-handle normalizer to map any
+// model's raw output to a [0, 1] buy-probability space. Bandit ensemble
+// blend can average normalized values across mixed model types
+// (binary, regression, 3-class barrier).
+//
+// Elision-friendly: default NORM_IDENTITY → 1-line early return.
+// Branch is heavily predicted (default state); ~1ns runtime cost when
+// no model uses non-IDENTITY normalizer (= every existing operator
+// model today). Switch on enum is entered only after a model is trained
+// with a non-default label_kind that needs scale alignment.
+//
+// Strategy code unchanged per v5.11.62 invariant — strategy reads the
+// (already-normalized) float and acts on it. Composition lives in
+// Model_Predict + Model_Predict_Normalized; not in strategy.
+//======================================================================================================
+template <unsigned F>
+inline float Model_Predict_Normalized(ModelHandle<F>* m,
+                                        const float* features,
+                                        int num_features) {
+    float raw = Model_Predict(m, features, num_features);
+    // Elision-friendly fast path: NORM_IDENTITY (default) → return raw.
+    // Optimizer + branch predictor reduce this to ~1ns when default.
+    if (m->normalizer == ModelHandle<F>::NORM_IDENTITY) return raw;
+
+    switch (m->normalizer) {
+        case ModelHandle<F>::NORM_REGRESSION: {
+            // [-tp_pct, +tp_pct] → [0, 1]. tp from normalizer_param at load.
+            float tp = m->normalizer_param;
+            if (tp <= 0.0f) return 0.5f;  // defensive: invalid tp → neutral
+            float v = 0.5f + raw / (2.0f * tp);
+            return (v < 0.0f) ? 0.0f : (v > 1.0f ? 1.0f : v);
+        }
+        case ModelHandle<F>::NORM_BARRIER_CLASS_1:
+            // Loader sets buy_class_idx=1 for these handles, so
+            // Model_Predict already returned out_result[1]. Just
+            // passthrough; documented for clarity + future where the
+            // loader-side aliasing is dropped (v5.11.62 cleanup).
+            return raw;
+        case ModelHandle<F>::NORM_COMPOSITE:
+            // Phase 3.A's composite extraction already ran inside
+            // Model_Predict. Just clamp to [0, 1].
+            return (raw < 0.0f) ? 0.0f : (raw > 1.0f ? 1.0f : raw);
+        default:
+            return raw;  // unrecognized → passthrough
+    }
+}
+
+//======================================================================================================
+// [PREDICT AT CLASS — class-explicit predict (v5.12.3.E foundation)]
+//======================================================================================================
+// Decouples the class-extraction concern from the role-aliasing concern.
+// Strategy code (or ensemble blend) can ask for "this model's class N"
+// without knowing role-name semantics (buy_signal vs barrier vs regime).
+//
+// Foundation for the v5.11.62 architectural cleanup: future loader
+// refactor populates ezoo->primary_handles directly + sets per-handle
+// buy_class_idx; consumers call Model_Predict_AtClass with the
+// configured class index. Removes the tactical memcpy alias (which
+// requires the borrowed flag bookkeeping).
+//
+// In this ship: just the helper. Loader integration + alias removal
+// deferred to follow-up (when operator trains a 4th label kind that
+// breaks the current tactical patch's assumptions).
+//
+// Behavior: identical to Model_Predict but uses caller-supplied
+// class_idx instead of m->buy_class_idx. Default Model_Predict() ==
+// Model_Predict_AtClass(m, features, n, m->buy_class_idx).
+//======================================================================================================
+template <unsigned F>
+inline float Model_Predict_AtClass(ModelHandle<F>* m,
+                                     const float* features,
+                                     int num_features,
+                                     int class_idx) {
+    if (!m->handle) return 0.0f;
+#ifdef USE_XGBOOST
+    if (m->backend == MODEL_BACKEND_XGBOOST) {
+        BoosterHandle booster = (BoosterHandle)m->handle;
+        DMatrixHandle dmat;
+        int ret = XGDMatrixCreateFromMat(features, 1, num_features, -1.0f, &dmat);
+        if (ret != 0) return 0.0f;
+        bst_ulong out_len;
+        const float *out_result;
+        ret = XGBoosterPredict(booster, dmat, 0, 0, 0, &out_len, &out_result);
+        XGDMatrixFree(dmat);
+        if (ret != 0 || out_len == 0) return 0.0f;
+        int idx = class_idx;
+        if (idx < 0 || (unsigned long)idx >= out_len) idx = 0;
+        return out_result[idx];
+    }
+#endif
+    // Other backends fall back to the standard Model_Predict (which uses
+    // m->buy_class_idx). For LIGHTGBM this is fine since LGBM single-row
+    // returns a single scalar.
+    (void)class_idx;
+    return Model_Predict(m, features, num_features);
+}
+
 template <unsigned F>
 inline int Model_LoadAOT(ModelHandle<F>* m, const char* path) {
     // INFRASTRUCTURE-ONLY in v5.12.2.D. Treelite vendor lib not present;
