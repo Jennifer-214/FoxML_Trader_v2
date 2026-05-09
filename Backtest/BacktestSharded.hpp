@@ -39,6 +39,7 @@
 #pragma once
 
 #include "../CoreFrameworks/ControllerConfig.hpp"
+#include "../CoreFrameworks/ModelValidation.hpp"  // v5.14.2.E.1 — CoreModelZoo_ValidateAgainstCfg (closes PARITY-012)
 #include "../CoreFrameworks/EventLoopAggregates.hpp"
 #include "../CoreFrameworks/ExecutionCore.hpp"
 #include "../CoreFrameworks/ShardedBacktestDriver.hpp"
@@ -290,15 +291,13 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             }
             if (loaded) {
                 state.cores[i].model_handle = &ml_zoos[i];
+                // v5.14.2.E.1 — canonical post-load setup (X-macro registry
+                // FOREACH_SINGLE_ZOO_POST_LOAD; today: VerifyExpected).
+                // Returns 1 if all steps OK; 0 if any failed.
                 if (cfg.core_model_dir[i][0]) {
-                    int verify_ok = CoreModelZoo_VerifyExpected(&ml_zoos[i],
-                        cfg.core_model_dir[i],
-                        cfg.barrier_gate_enabled,
-                        FPN_ToDouble(cfg.ml_buy_threshold),
-                        cfg.model_verify_strict, i,
-                        cfg.poll_interval,
-                        (unsigned)MODEL_FORMAT_VERSION);
-                    if (!verify_ok && cfg.model_verify_strict > 0) {
+                    int post_ok = CoreModelZoo_PostLoadSetup<BACKTEST_FP>(
+                        &ml_zoos[i], cfg, i, cfg.core_model_dir[i]);
+                    if (!post_ok && cfg.model_verify_strict > 0) {
                         fprintf(stderr, "[backtest sharded] core %d: ML model UNLOADED due to "
                                          "strict verify failure\n", i);
                         CoreModelZoo_Free(&ml_zoos[i]);
@@ -325,30 +324,15 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                         fprintf(stderr, "[backtest sharded] core %d: ensemble active "
                                         "(%d horizons; %d total models)\n",
                                 i, ml_ensemble_zoos[i].buy_signal_count, n_loaded);
-                        // v5.10.0a.G.7 — initialize per-regime bandits + cache
-                        // blend mode from cfg (per-core override → global fallback).
-                        EnsembleModelZoo_InitBandits(&ml_ensemble_zoos[i],
-                                                       cfg.ensemble_bandit_eta,
-                                                       cfg.ensemble_min_warmup_predictions);
-                        const char* mode = cfg.core_ensemble_blend_mode[i][0]
-                                          ? cfg.core_ensemble_blend_mode[i]
-                                          : cfg.ensemble_blend_mode;
-                        strncpy(ml_ensemble_zoos[i].blend_mode, mode,
-                                sizeof(ml_ensemble_zoos[i].blend_mode) - 1);
-                        ml_ensemble_zoos[i].blend_mode[
-                            sizeof(ml_ensemble_zoos[i].blend_mode) - 1] = '\0';
-                        // v5.10.0a.G.7 — kill-switch: parse cfg.core_N_disabled_horizons
-                        EnsembleModelZoo_SetDisabledHorizons(&ml_ensemble_zoos[i],
-                            cfg.core_disabled_horizons[i]);
-                        // v5.10.0a.G.9 — overlay persisted bandit state from
-                        // <core_model_dir>/bandit_state.json onto uniform priors.
-                        // Missing/mismatched → uniform stays. Bundle-id check
-                        // catches model-swap-without-clearing-bandit-state.
-                        EnsembleModelZoo_LoadBanditState(&ml_ensemble_zoos[i],
-                                                          cfg.core_model_dir[i]);
-                        // v5.10.0a.next.1 — operator-explicit prior path
-                        // overrides the default model_dir load. Skips
-                        // bundle-id check (operator may be transferring
+                        // v5.14.2.E.1 — canonical post-load setup (closes
+                        // PARITY-010: backtest was missing v5.13.4 InitExitBandits
+                        // + LoadExitBanditState that boot has).
+                        EnsembleModelZoo_PostLoadSetup<BACKTEST_FP>(
+                            &ml_ensemble_zoos[i], cfg, i, cfg.core_model_dir[i]);
+                        // v5.10.0a.next.1 — backtest-only operator-explicit
+                        // prior path override (run_cfg, NOT in standard helper).
+                        // Overrides the default LoadBanditState the helper just
+                        // ran. Skips bundle-id check (operator may be transferring
                         // weights from a sibling bundle deliberately).
                         if (run_cfg && run_cfg->bandit_state_prior_path[0]) {
                             EnsembleModelZoo_LoadBanditStateFromPath(
@@ -356,8 +340,6 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                                 run_cfg->bandit_state_prior_path,
                                 /*skip_bundle_check=*/1);
                         }
-                        EnsembleModelZoo_SetBanditSaveInterval(&ml_ensemble_zoos[i],
-                            cfg.ensemble_bandit_save_interval);
                         // Wire ensemble pointer into the per-core handle slot;
                         // dispatcher's ml_ctx.ensemble_zoo reads from this.
                         state.cores[i].ensemble_handle = &ml_ensemble_zoos[i];
@@ -365,6 +347,28 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                         // ensure stale handle from prior run cleared
                         state.cores[i].ensemble_handle = nullptr;
                     }
+                }
+                // v5.14.2.E.1 — closes PARITY-012: backtest was missing
+                // CoreModelZoo_ValidateAgainstCfg that boot has at
+                // EngineSharded.hpp:1192. Skipping it silently bypassed
+                // inference_cfg drift detection (Ridge / composite / winsor /
+                // exit_blender) for backtest replays. Now matches boot path.
+                // ValidateAgainstCfg lives in ../CoreFrameworks/ModelValidation.hpp
+                // (moved from EngineSharded.hpp in v5.14.2.E.1; backtest can't
+                // include EngineSharded.hpp).
+                if (cfg.core_model_dir[i][0] && state.cores[i].model_handle) {
+                    CoreModelZoo<BACKTEST_FP>* zoo_for_validate = &ml_zoos[i];
+                    EnsembleModelZoo<BACKTEST_FP>* ezoo_for_validate =
+                        state.cores[i].ensemble_handle ? &ml_ensemble_zoos[i] : nullptr;
+                    CoreModelZoo_ValidateAgainstCfg<BACKTEST_FP>(
+                        zoo_for_validate, ezoo_for_validate, cfg, /*core_id=*/i,
+                        cfg.held_out_gate_strict,
+                        cfg.acknowledge_inference_cfg_drift,
+                        cfg.acknowledge_cross_binary_version_drift,
+                        &state.cores[i]);
+                    // Note: validator returns -1 on REFUSE in strict mode but
+                    // backtest semantics match boot's "log loudly + leave loaded"
+                    // (counters written, FATAL log fires, replay continues).
                 }
             }
             // Phase 6prep — ConfidenceScorer with cfg tunables.

@@ -87,7 +87,8 @@
 #endif
 #include <unistd.h>  // sysconf(_SC_NPROCESSORS_ONLN) — POSIX, also available on macOS
 
-#include "EnsembleHotSwap.hpp"  // v5.14.2 — EngineSharded_HotSwapEnsemble template
+#include "EnsembleHotSwap.hpp"   // v5.14.2 — EngineSharded_HotSwapEnsemble template
+#include "ModelValidation.hpp"   // v5.14.2.E.1 — CoreModelZoo_ValidateAgainstCfg (extracted; PARITY-012)
 
 namespace tt {
 
@@ -329,37 +330,15 @@ static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* cores,
 // Pass &g_shutdown_requested or whichever variable you have.
 //======================================================================================================
 
-//======================================================================================================
-// [v5.10.2.A — POST-LOAD VALIDATOR]
-//======================================================================================================
-// Cross-zoo validator extracted from EngineSharded_Run boot loop body
-// (parity-check Findings #3 + #7 + #10). Subsumes THREE existing WARN/REFUSE
-// subgroups uniformly across single zoo + ensemble parallel-array handles:
+// v5.14.2.E.1 — CoreModelZoo_ValidateAgainstCfg moved to its own header
+// (CoreFrameworks/ModelValidation.hpp) so BacktestSharded.hpp can call it
+// (closes PARITY-012). Same boundary-stable refactor pattern as
+// EnsembleHotSwap.hpp from v5.14.2.A. Function definition unchanged.
+// Header is included OUTSIDE namespace tt (at top of file, around line 90).
 //
-//   1. v5.9.4 + v5.9.5h xgb-and-friends WARN
-//      (training_poll_interval + xgb_hyperparams + build_flags_hash)
-//      gated by !acknowledge_cross_binary_version_drift
-//   2. v5.9.5i inference_cfg drift detection
-//      Tier 1 (freshness_tau, threshold_scale, barrier_gate_enabled) REFUSE in strict
-//      Tier 2 (hard_block, bandit, fees) WARN regardless
-//      gated by !acknowledge_inference_cfg_drift
-//
-// Writes cfg_drift_tier1/tier2_count + strict_refused into ctx.
-// Returns 0 on accept, -1 on REFUSE in strict mode (Tier 1 mismatch).
-//
-// Callable from:
-//   - EngineSharded_Run boot loop (replaces inline blocks)
-//   - EngineSharded_Run hot swap branch (post-CoreModelZoo_LoadFromDir)
-//
-// Ensemble support: pass &ml_ensemble_zoos[i] for ezoo when
-// state.cores[i].ensemble_handle != nullptr, else nullptr.
-// Closes parity-check Finding #7 (drift block iterated single-zoo only).
-//
-// Hot-swap rollback semantics: helper returns -1 on Tier 1 REFUSE, but
-// caller in hot-swap context logs + leaves (model_load_failed=1) rather
-// than crashing the engine — pre-swap state isn't snapshotted, so true
-// rollback would require additional infrastructure (deferred to v5.10.X).
-//======================================================================================================
+// Old definition kept inside #if 0 for context — DO NOT enable.
+
+#if 0  // moved to ModelValidation.hpp
 template <unsigned F>
 static inline int CoreModelZoo_ValidateAgainstCfg(
     CoreModelZoo<F>* zoo,
@@ -587,6 +566,7 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
     }
     return 0;
 }
+#endif  // moved to ModelValidation.hpp
 
 // v5.14.2 — EngineSharded_HotSwapEnsemble template lives in its own
 // header (CoreFrameworks/EnsembleHotSwap.hpp) so tests can exercise it
@@ -1107,19 +1087,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
             if (loaded) {
                 state.cores[i].model_handle = &ml_zoos[i];
-                // stupid-proof verification: read expected.cfg from the run
-                // bundle and warn (or fail in strict mode) on any mismatch
-                // between the model's training config and the live engine.cfg.
+                // v5.14.2.E.1 — canonical post-load setup (X-macro registry
+                // FOREACH_SINGLE_ZOO_POST_LOAD; today: VerifyExpected only).
+                // Returns 1 if all steps OK; 0 if any failed.
+                // Strict-mode action stays at caller (boot does Free+null;
+                // hot-swap does flag-only per v5.10.0c semantics).
                 if (cfg.core_model_dir[i][0]) {
-                    int verify_ok = CoreModelZoo_VerifyExpected(&ml_zoos[i],
-                        cfg.core_model_dir[i],
-                        cfg.barrier_gate_enabled,
-                        FPN_ToDouble(cfg.ml_buy_threshold),
-                        cfg.model_verify_strict, i,
-                        // v4.3.1: train-serve cadence + feature format check
-                        cfg.poll_interval,
-                        (unsigned)MODEL_FORMAT_VERSION);
-                    if (!verify_ok && cfg.model_verify_strict > 0) {
+                    int post_ok = CoreModelZoo_PostLoadSetup<F>(&ml_zoos[i], cfg, i,
+                                                                 cfg.core_model_dir[i]);
+                    if (!post_ok && cfg.model_verify_strict > 0) {
                         // strict mode + mismatch: detach model, treat as "no model loaded"
                         // (executor falls back to SimpleDip per ML_BuildParameters)
                         fprintf(stderr, "[sharded] core %d: ML model UNLOADED due to strict verify failure\n", i);
@@ -1169,36 +1145,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                             ml_ensemble_zoos[i].primary_role_name[0]
                                 ? ml_ensemble_zoos[i].primary_role_name : "(none)",
                             ml_ensemble_zoos[i].primary_count, n_loaded);
-                    // v5.10.0a.G.7 — initialize per-regime bandits + cfg-driven mode
-                    EnsembleModelZoo_InitBandits(&ml_ensemble_zoos[i],
-                                                   cfg.ensemble_bandit_eta,
-                                                   cfg.ensemble_min_warmup_predictions);
-                    // v5.13.4 — initialize per-regime exit-side bandits.
-                    // Skips silently if exit_predictor_count==0 (no exit
-                    // models loaded). Gating to actually fire happens at
-                    // HandleFill (cfg.exit_bandit_enabled check).
-                    EnsembleModelZoo_InitExitBandits(&ml_ensemble_zoos[i],
-                                                       cfg.exit_bandit_lr,
-                                                       cfg.ensemble_min_warmup_predictions);
-                    const char* mode = cfg.core_ensemble_blend_mode[i][0]
-                                      ? cfg.core_ensemble_blend_mode[i]
-                                      : cfg.ensemble_blend_mode;
-                    strncpy(ml_ensemble_zoos[i].blend_mode, mode,
-                            sizeof(ml_ensemble_zoos[i].blend_mode) - 1);
-                    ml_ensemble_zoos[i].blend_mode[
-                        sizeof(ml_ensemble_zoos[i].blend_mode) - 1] = '\0';
-                    EnsembleModelZoo_SetDisabledHorizons(&ml_ensemble_zoos[i],
-                        cfg.core_disabled_horizons[i]);
-                    // v5.10.0a.G.9 — overlay persisted bandit state (if any)
-                    EnsembleModelZoo_LoadBanditState(&ml_ensemble_zoos[i],
-                                                      cfg.core_model_dir[i]);
-                    EnsembleModelZoo_SetBanditSaveInterval(&ml_ensemble_zoos[i],
-                        cfg.ensemble_bandit_save_interval);
-                    // v5.13.4.C — overlay persisted exit-bandit state (if any).
-                    // No-op when no exit_bandit_state.json file exists or
-                    // exit_predictor_count < 2.
-                    EnsembleModelZoo_LoadExitBanditState(&ml_ensemble_zoos[i],
-                                                          cfg.core_model_dir[i]);
+                    // v5.14.2.E.1 — canonical post-load setup (X-macro registry
+                    // FOREACH_ENSEMBLE_POST_LOAD). 7 steps (InitBandits,
+                    // InitExitBandits, blend_mode, SetDisabledHorizons,
+                    // LoadBanditState, SetBanditSaveInterval, LoadExitBanditState).
+                    // Boot, backtest, hot-swap all call this helper; adding new
+                    // steps is one-line edit to FOREACH_ENSEMBLE_POST_LOAD.
+                    EnsembleModelZoo_PostLoadSetup<F>(&ml_ensemble_zoos[i], cfg, i,
+                                                       cfg.core_model_dir[i]);
                     state.cores[i].ensemble_handle = &ml_ensemble_zoos[i];
                     ensemble_loaded = 1;
                 } else {
@@ -2780,6 +2734,37 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                             state.cores[c].model_load_failed = 1;
                                         } else {
                                             state.cores[c].model_load_failed = 0;
+                                            // v5.14.2.E.1 — closes PARITY-009.F
+                                            // (CRITICAL): post-load inference_cfg
+                                            // drift validation that boot does at
+                                            // line 1192 + single-zoo hot-swap does
+                                            // at ~2810. Pre-fix v5.14.2 ensemble
+                                            // hot-swap silently bypassed this,
+                                            // disabling Ridge/composite/winsor/
+                                            // exit_blender drift detection that
+                                            // PARITY-002/003/004/005 closed.
+                                            // Hot-swap semantics: log-and-leave
+                                            // on Tier 1 REFUSE (matches single-zoo
+                                            // hot-swap; operator reverts via
+                                            // cfg+restart).
+                                            int validate_rc = CoreModelZoo_ValidateAgainstCfg<F>(
+                                                /*zoo=*/nullptr,
+                                                swap_ezoo,
+                                                cfg, /*core_id=*/c,
+                                                cfg.held_out_gate_strict,
+                                                cfg.acknowledge_inference_cfg_drift,
+                                                cfg.acknowledge_cross_binary_version_drift,
+                                                &state.cores[c]);
+                                            if (validate_rc < 0) {
+                                                state.cores[c].model_load_failed = 1;
+                                                fprintf(stderr,
+                                                    "[hot_swap] ensemble core %d "
+                                                    "REFUSED post-load validation "
+                                                    "in strict mode; new model "
+                                                    "loaded but flagged degraded. "
+                                                    "Operator must reconcile cfg "
+                                                    "vs stamp + restart.\n", c);
+                                            }
                                         }
                                         __atomic_store_n(
                                             &g_shared.swap_model_path_requested[c], 0,
@@ -2808,6 +2793,26 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 "[hot_swap] core %d swapped to %s "
                                                 "(%d roles loaded)\n",
                                                 c, new_path, loaded);
+                                            // v5.14.2.E.1 — canonical post-load setup
+                                            // (closes PARITY-011: hot-swap was missing
+                                            // VerifyExpected which boot calls). Helper
+                                            // runs FOREACH_SINGLE_ZOO_POST_LOAD
+                                            // (today: VerifyExpected). Hot-swap
+                                            // semantics: log-and-leave on failure
+                                            // (NOT Free+null like boot — matches
+                                            // v5.10.0c semantics for
+                                            // ValidateAgainstCfg below).
+                                            int post_ok = CoreModelZoo_PostLoadSetup<F>(
+                                                swap_zoo, cfg, c, new_path);
+                                            if (!post_ok && cfg.model_verify_strict > 0) {
+                                                state.cores[c].model_load_failed = 1;
+                                                fprintf(stderr,
+                                                    "[hot_swap] core %d FLAGGED: "
+                                                    "post-load VerifyExpected mismatch "
+                                                    "in strict mode (model loaded but "
+                                                    "degraded; operator should reconcile "
+                                                    "cfg vs expected.cfg + restart).\n", c);
+                                            }
                                             // v5.10.2.A — Run post-load validator
                                             // on the newly-swapped zoo (parity-check
                                             // Finding #3 closure: hot swap was

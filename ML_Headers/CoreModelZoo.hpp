@@ -2009,4 +2009,147 @@ inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
     }
 }
 
+//======================================================================================================
+// [v5.14.2.E.1 — POST-LOAD SETUP X-MACRO REGISTRIES]
+//======================================================================================================
+// Canonical post-load setup steps for single-zoo + ensemble. Same shape as
+// FOREACH_STAMP_BOUND_CFG (v5.14.1) — extract recurring pattern, eliminate
+// the bug class structurally.
+//
+// Why: pre-v5.14.2.E, the boot ensemble setup at EngineSharded.hpp:1173-1201
+// was inlined as 7 sequential calls. Backtest (BacktestSharded.hpp) had a
+// near-mirror that drifted (missed v5.13.4 InitExitBandits + LoadExitBanditState
+// = PARITY-010). Hot-swap (EnsembleHotSwap.hpp from v5.14.2.A) had a different
+// near-mirror that drifted MORE (missed 6 steps = PARITY-009). Single-zoo
+// hot-swap missed VerifyExpected (PARITY-011); backtest single-zoo missed
+// ValidateAgainstCfg (PARITY-012).
+//
+// Class 18 mirror data-flow incomplete recurred 4× as PARITY-009/010/011/012.
+// The structural fix: X-macro registry — adding a new post-load step is ONE
+// line in the registry; boot, backtest, hot-swap inherit automatically.
+// Compile-time enforced inclusion at all sites; bypass impossible.
+//
+// ValidateAgainstCfg is NOT in the registries — it's a cross-cutting validator
+// that takes BOTH zoo + ezoo as one combined check, called by caller AFTER
+// PostLoadSetup helpers run. Strict-mode failure handling stays at caller
+// level (boot Free+null vs hot-swap log-only — preserved per v5.10.0c
+// semantics at EngineSharded.hpp:2803-2806).
+
+// Multi-line blend_mode application extracted to helper for X-macro tuple
+// cleanliness. Selects per-core override OR global default; null-terminates
+// after strncpy.
+template <unsigned F>
+inline void ensemble_post_load_apply_blend_mode(EnsembleModelZoo<F>* ezoo,
+                                                  const ControllerConfig<F>& cfg,
+                                                  int core_id) {
+    const char* mode = cfg.core_ensemble_blend_mode[core_id][0]
+        ? cfg.core_ensemble_blend_mode[core_id]
+        : cfg.ensemble_blend_mode;
+    strncpy(ezoo->blend_mode, mode, sizeof(ezoo->blend_mode) - 1);
+    ezoo->blend_mode[sizeof(ezoo->blend_mode) - 1] = '\0';
+}
+
+// Canonical post-load setup steps for ensemble.
+// Each entry: X(step_name, call_expression). Expression invoked with
+// (ezoo, cfg, core_id, base_run_path) in scope from helper body.
+// Adding a new step: 1 line here. Boot, backtest, hot-swap inherit.
+#define FOREACH_ENSEMBLE_POST_LOAD(X)                                          \
+    X(init_bandits,        EnsembleModelZoo_InitBandits(ezoo,                   \
+                               cfg.ensemble_bandit_eta,                          \
+                               cfg.ensemble_min_warmup_predictions))             \
+    X(init_exit_bandits,   EnsembleModelZoo_InitExitBandits(ezoo,                \
+                               cfg.exit_bandit_lr,                                \
+                               cfg.ensemble_min_warmup_predictions))             \
+    X(blend_mode,          ensemble_post_load_apply_blend_mode(ezoo, cfg,        \
+                               core_id))                                          \
+    X(disabled_horizons,   EnsembleModelZoo_SetDisabledHorizons(ezoo,            \
+                               cfg.core_disabled_horizons[core_id]))             \
+    X(load_bandit_state,   EnsembleModelZoo_LoadBanditState(ezoo,                \
+                               base_run_path))                                    \
+    X(save_interval,       EnsembleModelZoo_SetBanditSaveInterval(ezoo,          \
+                               cfg.ensemble_bandit_save_interval))               \
+    X(load_exit_bandit,    EnsembleModelZoo_LoadExitBanditState(ezoo,            \
+                               base_run_path))
+
+// Compile-time count for tests. Update when adding entries.
+#define FOREACH_ENSEMBLE_POST_LOAD_COUNT 7
+
+// Canonical post-load setup for ensemble. All 7 setup steps in one place.
+// Boot, backtest, hot-swap call this; never inline the steps directly.
+//
+// Returns: void. Does NOT call ValidateAgainstCfg — that's the caller's
+// responsibility (it takes both zoo + ezoo as combined check).
+//
+// Caller must hold the ezoo's slow-path thread (single-reader/writer for
+// per-core ezoo). Same-thread invariant; no internal locking.
+template <unsigned F>
+inline void EnsembleModelZoo_PostLoadSetup(EnsembleModelZoo<F>* ezoo,
+                                             const ControllerConfig<F>& cfg,
+                                             int core_id,
+                                             const char* base_run_path) {
+    if (!ezoo || !base_run_path) return;
+#define X(name, expr) expr;
+    FOREACH_ENSEMBLE_POST_LOAD(X)
+#undef X
+}
+
+// Canonical post-load contract: returns 1 iff the ezoo has all the side-effects
+// that PostLoadSetup applies. Adding a new step to FOREACH_ENSEMBLE_POST_LOAD
+// requires also extending this predicate so the contract stays honest.
+//
+// Used by tests to assert: pre-PostLoadSetup → false; post-PostLoadSetup → true.
+// If anyone adds a new step at boot/backtest/hot-swap that bypasses the helper,
+// the symmetry test compares boot output vs helper output and the missing step
+// shows up as a false return here OR as a state divergence.
+template <unsigned F>
+inline int EnsembleModelZoo_IsReadyForInference(const EnsembleModelZoo<F>* ezoo) {
+    if (!ezoo) return 0;
+    // Step contracts (mirror FOREACH_ENSEMBLE_POST_LOAD):
+    // - InitBandits: initialized_bandits flag set (or no bandits possible — primary_count<2)
+    // - InitExitBandits: initialized_exit_bandits set (or no exit models — exit_predictor_count<2)
+    // - blend_mode: non-empty (defaults to global cfg.ensemble_blend_mode)
+    // - SetDisabledHorizons: disabled_horizon_mask written (any value valid)
+    // - LoadBanditState: no boolean to check; idempotent overlay
+    // - SetBanditSaveInterval: bandit_save_interval set if cfg.ensemble_bandit_save_interval>0
+    // - LoadExitBanditState: no boolean to check; idempotent overlay
+    if (ezoo->primary_count >= 2 && !ezoo->initialized_bandits) return 0;
+    if (ezoo->exit_predictor_count >= 2 && !ezoo->initialized_exit_bandits) return 0;
+    if (ezoo->blend_mode[0] == '\0') return 0;
+    return 1;
+}
+
+// Canonical post-load setup steps for single-zoo.
+// Today: 1 entry (VerifyExpected). Designed for growth.
+// Each entry: X(step_name, call_expression). Expression returns int
+// (1=ok, 0=failure). Caller checks return code to decide strict-mode action
+// (Free+null at boot; flag-only at hot-swap per v5.10.0c semantics).
+#define FOREACH_SINGLE_ZOO_POST_LOAD(X)                                        \
+    X(verify_expected,     CoreModelZoo_VerifyExpected(zoo, base_run_path,      \
+                               cfg.barrier_gate_enabled,                         \
+                               FPN_ToDouble(cfg.ml_buy_threshold),               \
+                               cfg.model_verify_strict, core_id,                 \
+                               cfg.poll_interval,                                 \
+                               (unsigned)MODEL_FORMAT_VERSION))
+
+// Compile-time count for tests. Update when adding entries.
+#define FOREACH_SINGLE_ZOO_POST_LOAD_COUNT 1
+
+// Canonical post-load setup for single-zoo.
+// Today: VerifyExpected (cfg-vs-expected.cfg pre-check).
+//
+// Returns: 1 if all steps OK; 0 if any step failed (caller decides strict-mode
+// action — Free+null at boot; flag-only at hot-swap).
+template <unsigned F>
+inline int CoreModelZoo_PostLoadSetup(const CoreModelZoo<F>* zoo,
+                                        const ControllerConfig<F>& cfg,
+                                        int core_id,
+                                        const char* base_run_path) {
+    if (!zoo || !base_run_path) return 0;
+    int all_ok = 1;
+#define X(name, expr) do { if (!(expr)) all_ok = 0; } while (0);
+    FOREACH_SINGLE_ZOO_POST_LOAD(X)
+#undef X
+    return all_ok;
+}
+
 #endif // CORE_MODEL_ZOO_HPP

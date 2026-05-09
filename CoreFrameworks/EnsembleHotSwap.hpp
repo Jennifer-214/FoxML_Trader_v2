@@ -80,16 +80,18 @@ inline int EngineSharded_HotSwapEnsemble(EnsembleModelZoo<F>* swap_ezoo,
     EnsembleModelZoo_Init(swap_ezoo);
 
     // 4. Load new ensemble across all horizons (buy_signal/barrier/
-    //    regime/exit_predictor for each). v5.14.1.B.3 cross-binary
-    //    drift gates passed through.
+    //    regime/exit_predictor for each). v5.14.2.E.1 — closes PARITY-009.A/.B:
+    //    pass cfg.held_out_stamp_secret + FPN_ToDouble(cfg.gap_acceptable_threshold)
+    //    instead of hardcoded nullptr/0.05 (matches boot at
+    //    EngineSharded.hpp:1161-1162).
     int total = EnsembleModelZoo_LoadFromCfg(
         swap_ezoo,
         new_base_dir,
         horizons,
         h_count,
         swap_backend,
-        /*held_out_stamp_secret=*/nullptr,
-        /*gap_threshold=*/0.05,
+        /*held_out_stamp_secret=*/cfg.held_out_stamp_secret,
+        /*gap_threshold=*/FPN_ToDouble(cfg.gap_acceptable_threshold),
         /*held_out_gate_strict=*/cfg.held_out_gate_strict,
         /*acknowledge_cross_binary_drift=*/cfg.acknowledge_cross_binary_version_drift);
     if (total == 0) {
@@ -99,19 +101,12 @@ inline int EngineSharded_HotSwapEnsemble(EnsembleModelZoo<F>* swap_ezoo,
         return 0;
     }
 
-    // 5. Re-init buy + exit bandits with cfg defaults. Cold start:
-    //    uniform priors. (G.8-style state overlay happens in step 6.)
-    EnsembleModelZoo_InitBandits(swap_ezoo,
-        cfg.ensemble_bandit_eta,
-        cfg.ensemble_min_warmup_predictions);
-    EnsembleModelZoo_InitExitBandits(swap_ezoo,
-        cfg.exit_bandit_lr,
-        cfg.ensemble_min_warmup_predictions);
-
-    // 6. Overlay persisted bandit state if any. Bundle-id mismatch is
-    //    a graceful skip — uniform priors stay (LoadBanditState logs).
-    EnsembleModelZoo_LoadBanditState(swap_ezoo, new_base_dir);
-    EnsembleModelZoo_LoadExitBanditState(swap_ezoo, new_base_dir);
+    // 5. Canonical post-load setup (X-macro registry FOREACH_ENSEMBLE_POST_LOAD).
+    //    7 steps: InitBandits, InitExitBandits, blend_mode (per-core override),
+    //    SetDisabledHorizons, LoadBanditState, SetBanditSaveInterval,
+    //    LoadExitBanditState. v5.14.2.E.1 — closes PARITY-009.C/.D/.E:
+    //    pre-fix only ran 4 of these.
+    EnsembleModelZoo_PostLoadSetup<F>(swap_ezoo, cfg, core_id, new_base_dir);
 
     fprintf(stderr,
         "[hot_swap] ensemble core %d swapped to %s "
@@ -120,6 +115,17 @@ inline int EngineSharded_HotSwapEnsemble(EnsembleModelZoo<F>* swap_ezoo,
         swap_ezoo->primary_role_name[0]
             ? swap_ezoo->primary_role_name : "(none)",
         swap_ezoo->exit_predictor_count);
+
+    // NOTE: Post-load inference_cfg drift validation
+    // (CoreModelZoo_ValidateAgainstCfg) is intentionally called by the
+    // CALLER in EngineSharded.hpp, NOT here — that function lives in
+    // EngineSharded.hpp and including it here would create circular
+    // dependency (EngineSharded.hpp includes this file). The caller has
+    // visibility to both this helper + ValidateAgainstCfg + can pass
+    // its own EventLoopCoreState. v5.14.2.E.1 closes PARITY-009.F by
+    // adding the validate call at the caller's site — see ensemble
+    // hot-swap branch in EngineSharded_Run.
+
     return 1;
 }
 

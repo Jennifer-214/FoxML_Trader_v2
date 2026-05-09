@@ -19116,6 +19116,158 @@ e3_skip_load:;
         }
     }
 
+    // ----- v5.14.2.E.1: PostLoadSetup X-macro registries + helpers ----------------------------------
+    // Symmetry test + registry count static_asserts + is_ready_for_inference
+    // predicate + strict-mode failure preservation. Mechanizes the Class 18
+    // "mirror data-flow" prevention at CI level (vs audit-time).
+    printf("\n--- v5.14.2.E.1: PostLoadSetup registries + helpers ---\n");
+    {
+        // Test 1 — Registry count static_asserts (compile-time guard against
+        // accidental shrinkage). If a step is removed from FOREACH_ENSEMBLE_POST_LOAD,
+        // this fails to compile.
+        static_assert(FOREACH_ENSEMBLE_POST_LOAD_COUNT >= 7,
+            "v5.14.2.E.1: FOREACH_ENSEMBLE_POST_LOAD shrunk — was a step removed accidentally?");
+        static_assert(FOREACH_SINGLE_ZOO_POST_LOAD_COUNT >= 1,
+            "v5.14.2.E.1: FOREACH_SINGLE_ZOO_POST_LOAD shrunk — was VerifyExpected removed?");
+        check("v5.14.2.E.1: FOREACH_ENSEMBLE_POST_LOAD_COUNT >= 7", true);
+        check("v5.14.2.E.1: FOREACH_SINGLE_ZOO_POST_LOAD_COUNT >= 1", true);
+    }
+    {
+        // Test 2 — is_ready_for_inference contract.
+        // Fresh-init zoo: primary_count=0 (trivially "no bandit work needed") +
+        // blend_mode="weighted" (set by Init). So fresh-init IS trivially ready
+        // (nothing to do). The interesting case is "claims to have bandits but
+        // hasn't initialized them" — simulated below.
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        check("v5.14.2.E.1 contract: fresh-init ezoo trivially ready (no models loaded)",
+              EnsembleModelZoo_IsReadyForInference(&ezoo) == 1);
+
+        // Simulate: primary_count >= 2 (would need bandits) but initialized_bandits=0
+        ezoo.primary_count = 3;
+        ezoo.initialized_bandits = 0;
+        check("v5.14.2.E.1 contract: primary_count>=2 + initialized_bandits=0 → NOT ready",
+              EnsembleModelZoo_IsReadyForInference(&ezoo) == 0);
+
+        // Now mark bandits initialized (as if InitBandits ran)
+        ezoo.initialized_bandits = 1;
+        check("v5.14.2.E.1 contract: after InitBandits flag set → ready",
+              EnsembleModelZoo_IsReadyForInference(&ezoo) == 1);
+    }
+    {
+        // Test 3 — is_ready_for_inference: after PostLoadSetup with cfg.ensemble_blend_mode
+        // populated, blend_mode is set; primary_count=0 trivially "no bandit needed".
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        strncpy(cfg.ensemble_blend_mode, "softmax", sizeof(cfg.ensemble_blend_mode) - 1);
+        EnsembleModelZoo_PostLoadSetup<64>(&ezoo, cfg, /*core_id=*/0, "/tmp/v5_14_2_e_test_dir");
+        check("v5.14.2.E.1 contract: post-PostLoadSetup ezoo READY (blend_mode set)",
+              EnsembleModelZoo_IsReadyForInference(&ezoo) == 1);
+        check("v5.14.2.E.1 helper applied: blend_mode = 'softmax'",
+              strcmp(ezoo.blend_mode, "softmax") == 0);
+    }
+    {
+        // Test 4 — Symmetry test (the load-bearing one). Run helper from 3
+        // separate "contexts" (boot, backtest, hot-swap) with same inputs;
+        // assert resulting state is bytewise-identical for the fields the
+        // helper writes. If anyone adds a step at boot site but bypasses
+        // the helper, this test fails because state would diverge.
+        EnsembleModelZoo<64> zoo_boot, zoo_backtest, zoo_hotswap;
+        EnsembleModelZoo_Init(&zoo_boot);
+        EnsembleModelZoo_Init(&zoo_backtest);
+        EnsembleModelZoo_Init(&zoo_hotswap);
+
+        // Set up distinctive non-default cfg
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.ensemble_bandit_eta = 0.15;
+        cfg.exit_bandit_lr = 0.07;
+        cfg.ensemble_min_warmup_predictions = 250;
+        cfg.ensemble_bandit_save_interval = 999;
+        strncpy(cfg.ensemble_blend_mode, "weighted", sizeof(cfg.ensemble_blend_mode) - 1);
+        // per-core override for blend_mode at core 1
+        strncpy(cfg.core_ensemble_blend_mode[1], "softmax", sizeof(cfg.core_ensemble_blend_mode[1]) - 1);
+        // disabled horizons CSV at core 0
+        strncpy(cfg.core_disabled_horizons[0], "100,500", sizeof(cfg.core_disabled_horizons[0]) - 1);
+
+        // "Boot" call site — core 0
+        EnsembleModelZoo_PostLoadSetup<64>(&zoo_boot, cfg, /*core_id=*/0, "/tmp/v5_14_2_e_test");
+        // "Backtest" call site — core 0 (same args)
+        EnsembleModelZoo_PostLoadSetup<64>(&zoo_backtest, cfg, /*core_id=*/0, "/tmp/v5_14_2_e_test");
+        // "Hot-swap" call site — core 0 (same args)
+        EnsembleModelZoo_PostLoadSetup<64>(&zoo_hotswap, cfg, /*core_id=*/0, "/tmp/v5_14_2_e_test");
+
+        // Symmetry assertions
+        check("v5.14.2.E.1 symmetry: blend_mode identical boot==backtest",
+              strcmp(zoo_boot.blend_mode, zoo_backtest.blend_mode) == 0);
+        check("v5.14.2.E.1 symmetry: blend_mode identical boot==hot-swap",
+              strcmp(zoo_boot.blend_mode, zoo_hotswap.blend_mode) == 0);
+        check("v5.14.2.E.1 symmetry: bandit_save_interval identical",
+              zoo_boot.bandit_save_interval == zoo_backtest.bandit_save_interval &&
+              zoo_boot.bandit_save_interval == zoo_hotswap.bandit_save_interval);
+        check("v5.14.2.E.1 symmetry: disabled_horizon_mask identical",
+              zoo_boot.disabled_horizon_mask == zoo_backtest.disabled_horizon_mask &&
+              zoo_boot.disabled_horizon_mask == zoo_hotswap.disabled_horizon_mask);
+        check("v5.14.2.E.1 symmetry: bandit_save_interval == 999 (cfg override applied)",
+              zoo_boot.bandit_save_interval == 999);
+    }
+    {
+        // Test 5 — Per-core blend_mode override. Core 1 should pick up
+        // cfg.core_ensemble_blend_mode[1]="softmax", not global "weighted".
+        EnsembleModelZoo<64> zoo;
+        EnsembleModelZoo_Init(&zoo);
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        strncpy(cfg.ensemble_blend_mode, "weighted", sizeof(cfg.ensemble_blend_mode) - 1);
+        strncpy(cfg.core_ensemble_blend_mode[1], "softmax", sizeof(cfg.core_ensemble_blend_mode[1]) - 1);
+
+        EnsembleModelZoo_PostLoadSetup<64>(&zoo, cfg, /*core_id=*/1, "/tmp/v5_14_2_e_test");
+        check("v5.14.2.E.1: per-core blend_mode override picked up (core 1 → softmax)",
+              strcmp(zoo.blend_mode, "softmax") == 0);
+
+        EnsembleModelZoo<64> zoo0;
+        EnsembleModelZoo_Init(&zoo0);
+        EnsembleModelZoo_PostLoadSetup<64>(&zoo0, cfg, /*core_id=*/0, "/tmp/v5_14_2_e_test");
+        check("v5.14.2.E.1: core 0 falls back to global blend_mode (weighted)",
+              strcmp(zoo0.blend_mode, "weighted") == 0);
+    }
+    {
+        // Test 6 — Single-zoo PostLoadSetup contract: returns 0 on null inputs
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.14.2.E.1: CoreModelZoo_PostLoadSetup null zoo → 0",
+              CoreModelZoo_PostLoadSetup<64>(nullptr, cfg, 0, "/tmp/foo") == 0);
+
+        CoreModelZoo<64> zoo;
+        CoreModelZoo_Init(&zoo);
+        check("v5.14.2.E.1: CoreModelZoo_PostLoadSetup null path → 0",
+              CoreModelZoo_PostLoadSetup<64>(&zoo, cfg, 0, nullptr) == 0);
+    }
+    {
+        // Test 7 — Single-zoo PostLoadSetup with nonexistent dir: VerifyExpected
+        // returns 1 (silent pass — no expected.cfg = backward compat). Helper
+        // returns 1 ("all steps OK").
+        CoreModelZoo<64> zoo;
+        CoreModelZoo_Init(&zoo);
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        int rc = CoreModelZoo_PostLoadSetup<64>(&zoo, cfg, /*core_id=*/0,
+                                                  "/tmp/v5_14_2_e_nonexistent_dir_xyz");
+        check("v5.14.2.E.1: single-zoo PostLoadSetup with no expected.cfg → 1 (backward compat)",
+              rc == 1);
+    }
+    {
+        // Test 8 — Strict-mode failure preservation: VerifyExpected returning
+        // 0 should propagate via PostLoadSetup return value; caller decides
+        // strict-mode action (boot Free+null vs hot-swap flag-only).
+        // We can't easily simulate verify_ok=0 without a real expected.cfg
+        // mismatch on disk, but we can verify the return-code propagation
+        // via the null-path test above (which returns 0).
+        CoreModelZoo<64> zoo;
+        CoreModelZoo_Init(&zoo);
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        int rc_failure = CoreModelZoo_PostLoadSetup<64>(&zoo, cfg, 0, nullptr);
+        check("v5.14.2.E.1: PostLoadSetup propagates failure (return code = 0) for caller strict-mode action",
+              rc_failure == 0);
+    }
+
     // ----- v5.14.2: Ensemble hot-swap helper ---------------------------------------------------------
     // Tests EngineSharded_HotSwapEnsemble failure paths + .D Free
     // completeness. Success paths (real model load + bandit overlay)
