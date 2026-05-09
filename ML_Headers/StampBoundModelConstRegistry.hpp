@@ -147,6 +147,25 @@
     X(label_params,     "label params (3): lookahead_ticks, tp_pct, sl_pct")
 
 //======================================================================================================
+// [STANDALONE has_* DECLARATIONS]
+//======================================================================================================
+// Lists standalone entries (group="_" in main FOREACH). Each gets its
+// own has_<name> declaration. Adding a new standalone field requires:
+//   1. Add line to this STANDALONE macro (declares has_<name>)
+//   2. Add line to main FOREACH_STAMP_BOUND_MODEL_CONST (declares typed value)
+// Two places per addition; vs current ~5 sites. Alternative would
+// require preprocessor magic to detect group="_" in main FOREACH;
+// not worth the complexity for this gain.
+
+#define FOREACH_STAMP_BOUND_MODEL_CONST_STANDALONE(X)                                               \
+    X(bandit,                       "bandit blend ratio set (1 field)")                             \
+    X(training_poll_interval,       "training poll cadence set (1 field)")                          \
+    X(build_flags_hash,             "build flags hash set (1 field)")                               \
+    X(label_registry_hash,          "label registry hash set (1 field)")                            \
+    X(feature_mask,                 "feature mask set (1 field)")                                   \
+    X(xgb_train_nthread,            "xgb training thread count set (1 field)")
+
+//======================================================================================================
 // [TYPED VALUE ENTRIES — v5.14.8.A; emit order = canonical body order]
 //======================================================================================================
 // Order matches stamp_write_for_model emit sequence (ModelInference.hpp
