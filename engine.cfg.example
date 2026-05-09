@@ -727,3 +727,56 @@ confidence_rmse_baseline=1.0             # bind to training-time RMSE; 1.0 = neu
 
 winsor_pct_low=0.005    # default 0.5% (lower clip percentile)
 winsor_pct_high=0.995   # default 99.5% (upper clip percentile)
+
+#==============================================================================
+# v5.14.4 — RECONCILE MODE (boot-time exchange-truth sync; LIVE only)
+#==============================================================================
+# At boot in live mode (engine_mode=sharded + use_real_money=1), engine
+# fetches account/openOrders/myTrades from Binance + reconciles against
+# local OMS state (snapshot from previous run). Three modes (registered
+# in FOREACH_RECONCILE_MODE registry; adding 4th mode is a 1-line change):
+#
+#   strict     — refuse boot on ANY mismatch (cancel_actions > 0 OR
+#                CRITICAL refused_boot). Production-grade safety:
+#                operator must manually resolve any disagreement before
+#                engine starts. Use for production deployments where
+#                ZERO tolerance for drift is required.
+#
+#   warn       — log mismatches; continue boot. Legacy default (matches
+#                pre-v5.14.4 reconcile_dry_run=1 behavior). Engine starts
+#                with disagreements still present; operator can manually
+#                cancel zombies via Binance UI later.
+#
+#   auto_sync  — APPLY: replay missed fills + cancel zombie orders.
+#                Replay path = pure OMS state mutation (low-risk; restores
+#                balance + portfolio to exchange-side reality). Cancel
+#                path = real exchange writes (cancels engine-placed orders
+#                that engine forgot about across restart). Operator should
+#                validate on testnet before production deployment.
+#
+# SAFETY NOTES:
+#   - STRICT can REFUSE BOOT — engine will exit if mismatch detected;
+#     operator must resolve manually then restart
+#   - AUTO_SYNC's cancel path uses BinanceOrderAPI_CancelOrder per zombie
+#     (network round-trip per cancel; failures logged + counted but loop
+#     continues — best-effort)
+#   - AUTO_SYNC NEVER touches non-engine orders (is_ours=0 silently
+#     skipped — defensive against operator's other-client orders on the
+#     same account)
+#   - Default WARN preserves legacy behavior; explicit STRICT or AUTO_SYNC
+#     opt-in required
+#   - Sister field: reconcile_dry_run (DEPRECATED v5.14.4; back-compat
+#     parser still accepts dry_run=0 → mode=strict; dry_run=1 → mode=warn)
+#
+# Cfg parser accepts both string AND numeric forms:
+#   reconcile_mode=strict      (= 0; recommended explicit form)
+#   reconcile_mode=warn        (= 1; default)
+#   reconcile_mode=auto_sync   (= 2)
+#   reconcile_mode=0           (numeric form for tests / back-compat)
+#
+# Example deployment progression:
+#   First testnet deploy:    reconcile_mode=warn      (observe behavior)
+#   Mature testnet:           reconcile_mode=auto_sync (validate replay+cancel)
+#   Production deploy:        reconcile_mode=strict    (refuse on any drift)
+
+reconcile_mode=warn         # default (legacy dry_run=1 behavior preserved)
