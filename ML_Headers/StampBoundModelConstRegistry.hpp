@@ -56,8 +56,9 @@
 #ifndef STAMP_BOUND_MODEL_CONST_REGISTRY_HPP
 #define STAMP_BOUND_MODEL_CONST_REGISTRY_HPP
 
-#include <stdlib.h>   // atoi, strncpy
+#include <stdlib.h>   // atoi, strncpy, strtoull
 #include <string.h>   // strncpy, strncmp
+#include <type_traits>  // v5.14.8.A.merged.4 — std::is_array_v / extent_v / is_floating_point_v / is_unsigned_v for tt::stamp_parse_field<T>
 #include "../MemHeaders/BitmapMacros.hpp"  // BITMAP_* primitives (v5.14.8.A.0.b.1) backing STAMP_HAS / SET / CLR aliases
 
 //======================================================================================================
@@ -78,6 +79,35 @@
 namespace tt {
     using stamp_str_16 = char[16];   // xgb_tree_method
     using stamp_str_65 = char[65];   // scaler_sha256, overlay_hash, effective_hash, run_name
+
+    // v5.14.8.A.merged.4 — Templated parser helper. Extracts type-dispatch
+    // logic from registry's parser X-macro expansion to a template function
+    // so each instantiation discards non-matching `if constexpr` branches
+    // properly. Required because non-template macro context does NOT discard
+    // type-invalid syntax in non-taken if-constexpr branches (e.g.,
+    // `(char[16])(double)` is a hard cast error even when type is double).
+    //
+    // Usage at parser X-macro: `tt::stamp_parse_field(r.name, val);`
+    // Each registry consumer (parser per-entry) instantiates this once;
+    // instantiation properly discards branches per T.
+    //
+    // Forward declaration of parse_double_fast to avoid include cycle —
+    // the actual definition lives in ModelInference.hpp's namespace tt.
+    inline double parse_double_fast(const char* s);
+
+    template <typename T>
+    inline void stamp_parse_field(T& dst, const char* val) {
+        if constexpr (std::is_array_v<T>) {
+            strncpy(dst, val, std::extent_v<T> - 1);
+            dst[std::extent_v<T> - 1] = '\0';
+        } else if constexpr (std::is_floating_point_v<T>) {
+            dst = static_cast<T>(parse_double_fast(val));
+        } else if constexpr (std::is_unsigned_v<T>) {
+            dst = static_cast<T>(strtoull(val, nullptr, 10));
+        } else {
+            dst = static_cast<T>(atoi(val));
+        }
+    }
 }
 
 //======================================================================================================
@@ -228,7 +258,10 @@ namespace tt {
 //                 (the boolean; scaler_sha256 IS on handle), grid_member_count,
 //                 grid_member_idx, label_registry_hash, feature_mask.
 
-#define FOREACH_STAMP_BOUND_MODEL_CONST(X)                                                          \
+// PRE_CFG section: entries that emit BEFORE FOREACH_STAMP_BOUND_CFG in
+// canonical wire format. 26 entries today. Adding new pre-cfg field =
+// 1 row here.
+#define FOREACH_STAMP_BOUND_MODEL_CONST_PRE_CFG(X)                                                  \
     /* === inference_cfg group (5 fields) — emitted at line 2175 === */                            \
     X(inference_cfg_confidence_threshold_scale, inference_cfg, INCLUDE, double, "%g", 0.0,          \
       inf->confidence_threshold_scale, inf->has_inference_cfg, "confidence threshold scale")        \
@@ -322,6 +355,48 @@ namespace tt {
       inf->xgb_train_nthread, inf->has_xgb_train_nthread,                                           \
       "XGBoost training thread count; lets operator detect serial vs parallel mode forensically")
 
+// POST_CFG section: entries that emit AFTER FOREACH_STAMP_BOUND_CFG in
+// canonical wire format (v5.14.8.A.merged.4 — TECH_DEBT-006 full closure).
+//
+// These are architectural fields whose canonical emit order places them
+// AFTER the sister stamp-bound cfg fields. The split exists because a
+// single FOREACH walk can't pause for the sister registry; the emitter
+// walks PRE_CFG → FOREACH_STAMP_BOUND_CFG → POST_CFG to preserve
+// canonical wire format byte-for-byte.
+//
+// Adding new POST_CFG entry: 1 row here + 1 enum bit in StampHasFlagBit
+// + 1 MASK constant. Future field = 3-site update (acceptable for
+// late-emit since it's bounded vs the original 9-site manual N-site
+// pattern).
+#define FOREACH_STAMP_BOUND_MODEL_CONST_POST_CFG(X)                                                 \
+    /* === v5.14.2.E.2.B model-architectural fields — emitted at line ~2069 === */                  \
+    X(expected_num_classes,                     _, SKIP_HANDLE, int, "%d", 0,                       \
+      inf->expected_num_classes, inf->has_expected_num_classes,                                     \
+      "model output dimension at training time (binary/regression=1, multiclass=K)")                \
+    X(expected_role,                            _, SKIP_HANDLE, tt::stamp_str_16, "%s", "",         \
+      inf->expected_role, inf->has_expected_role,                                                   \
+      "operator's training-time role choice (buy_signal | barrier | regime | exit)")                \
+    X(expected_num_features,                    _, SKIP_HANDLE, int, "%d", 0,                       \
+      inf->expected_num_features, inf->has_expected_num_features,                                   \
+      "MODEL_NUM_FEATURES at training time")                                                        \
+    X(expected_feature_format_version,          _, SKIP_HANDLE, int, "%d", 0,                       \
+      inf->expected_feature_format_version, inf->has_expected_feature_format_version,               \
+      "MODEL_FORMAT_VERSION at training time")                                                      \
+    /* === v5.14.3.B overlay-derived fields — emitted at line ~2092 === */                          \
+    X(overlay_hash,                             _, INCLUDE, tt::stamp_str_65, "%s", "",             \
+      inf->overlay_hash, inf->has_overlay_hash,                                                     \
+      "SHA256 of canonical overlay JSON (3-layer fingerprinting layer 2)")                          \
+    X(effective_hash,                           _, INCLUDE, tt::stamp_str_65, "%s", "",             \
+      inf->effective_hash, inf->has_effective_hash,                                                 \
+      "SHA256(layer1 || layer2) (3-layer fingerprinting layer 3)")
+
+// Union: walks both PRE_CFG and POST_CFG. Used by struct generation +
+// AUTOPOPULATE + entry counting (everything that doesn't care about
+// emit ordering relative to FOREACH_STAMP_BOUND_CFG).
+#define FOREACH_STAMP_BOUND_MODEL_CONST(X) \
+    FOREACH_STAMP_BOUND_MODEL_CONST_PRE_CFG(X) \
+    FOREACH_STAMP_BOUND_MODEL_CONST_POST_CFG(X)
+
 //======================================================================================================
 // [PARSER DISPATCH MACROS]
 //======================================================================================================
@@ -370,7 +445,7 @@ enum StampHasFlagBit : uint64_t {
     STAMP_BIT_grid_member,
     STAMP_BIT_label_params,
 
-    // === Standalone bits (one per group="_" entry) ===
+    // === Standalone bits — PRE_CFG section (emitted before FOREACH_STAMP_BOUND_CFG) ===
     STAMP_BIT_inference_cfg_bandit_blend_ratio,
     STAMP_BIT_training_poll_interval,
     STAMP_BIT_model_num_outputs,
@@ -378,6 +453,17 @@ enum StampHasFlagBit : uint64_t {
     STAMP_BIT_label_registry_hash,
     STAMP_BIT_feature_mask,
     STAMP_BIT_xgb_train_nthread,
+
+    // === Standalone bits — POST_CFG section (emitted after FOREACH_STAMP_BOUND_CFG; v5.14.8.A.merged.4) ===
+    // Late-emit architectural fields. Order matches canonical wire format:
+    // expected_num_classes → expected_role → expected_num_features →
+    // expected_feature_format_version → overlay_hash → effective_hash.
+    STAMP_BIT_expected_num_classes,
+    STAMP_BIT_expected_role,
+    STAMP_BIT_expected_num_features,
+    STAMP_BIT_expected_feature_format_version,
+    STAMP_BIT_overlay_hash,
+    STAMP_BIT_effective_hash,
 
     STAMP_BIT_COUNT  // sentinel: total used bits (must be ≤ 64 for uint64_t has_flags)
 };
@@ -400,6 +486,13 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 #define MASK_label_registry_hash                    (1ULL << tt::STAMP_BIT_label_registry_hash)
 #define MASK_feature_mask                           (1ULL << tt::STAMP_BIT_feature_mask)
 #define MASK_xgb_train_nthread                      (1ULL << tt::STAMP_BIT_xgb_train_nthread)
+// POST_CFG late-emit standalone masks (v5.14.8.A.merged.4):
+#define MASK_expected_num_classes                   (1ULL << tt::STAMP_BIT_expected_num_classes)
+#define MASK_expected_role                          (1ULL << tt::STAMP_BIT_expected_role)
+#define MASK_expected_num_features                  (1ULL << tt::STAMP_BIT_expected_num_features)
+#define MASK_expected_feature_format_version        (1ULL << tt::STAMP_BIT_expected_feature_format_version)
+#define MASK_overlay_hash                           (1ULL << tt::STAMP_BIT_overlay_hash)
+#define MASK_effective_hash                         (1ULL << tt::STAMP_BIT_effective_hash)
 
 //======================================================================================================
 // [STAMP_HAS / SET / CLR accessor macros — alias to BITMAP_* API]

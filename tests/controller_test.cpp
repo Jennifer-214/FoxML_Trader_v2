@@ -19929,10 +19929,10 @@ e3_skip_load:;
             if (mf) { fputs("placeholder model", mf); fclose(mf); }
 
             StampInferenceCfgInputs inf = {};
-            inf.has_overlay_hash = 1;
+            STAMP_SET(inf, overlay_hash);
             strncpy(inf.overlay_hash, "abcd1234567890abcd1234567890abcd1234567890abcd1234567890abcd1234",
                     sizeof(inf.overlay_hash) - 1);
-            inf.has_effective_hash = 1;
+            STAMP_SET(inf, effective_hash);
             strncpy(inf.effective_hash, "ffff1234567890ffff1234567890ffff1234567890ffff1234567890ffff1234",
                     sizeof(inf.effective_hash) - 1);
 
@@ -19945,10 +19945,10 @@ e3_skip_load:;
             check("v5.14.3.C: stamp emit with overlay fields", sw.ok == 1);
 
             ModelStampResult r = verify_model_stamp(tmp_model, "test_secret_overlay", 0.05, 6);
-            check("v5.14.3.C: parse has_overlay_hash = 1", r.has_overlay_hash == 1);
+            check("v5.14.3.C: parse has_overlay_hash = 1", STAMP_HAS(r, overlay_hash) == 1);
             check("v5.14.3.C: parse overlay_hash round-trip",
                   strcmp(r.overlay_hash, "abcd1234567890abcd1234567890abcd1234567890abcd1234567890abcd1234") == 0);
-            check("v5.14.3.C: parse has_effective_hash = 1", r.has_effective_hash == 1);
+            check("v5.14.3.C: parse has_effective_hash = 1", STAMP_HAS(r, effective_hash) == 1);
             check("v5.14.3.C: parse effective_hash round-trip",
                   strcmp(r.effective_hash, "ffff1234567890ffff1234567890ffff1234567890ffff1234567890ffff1234") == 0);
 
@@ -20183,13 +20183,13 @@ e3_skip_load:;
             if (mf) { fputs("placeholder model", mf); fclose(mf); }
 
             StampInferenceCfgInputs inf = {};
-            inf.has_expected_num_classes = 1;
+            STAMP_SET(inf, expected_num_classes);
             inf.expected_num_classes = 3;
-            inf.has_expected_role = 1;
+            STAMP_SET(inf, expected_role);
             strncpy(inf.expected_role, "barrier", sizeof(inf.expected_role) - 1);
-            inf.has_expected_num_features = 1;
+            STAMP_SET(inf, expected_num_features);
             inf.expected_num_features = 42;
-            inf.has_expected_feature_format_version = 1;
+            STAMP_SET(inf, expected_feature_format_version);
             inf.expected_feature_format_version = 7;
 
             StampWriteResult sw = stamp_write_for_model(
@@ -20205,15 +20205,15 @@ e3_skip_load:;
             ModelStampResult r = verify_model_stamp(tmp_model,
                 /*secret=*/"test_secret_v5_14_2_e2b",
                 /*gap_threshold=*/0.05, /*expected_format_version=*/6);
-            check("v5.14.2.E.2.B parse: has_expected_num_classes set", r.has_expected_num_classes == 1);
+            check("v5.14.2.E.2.B parse: has_expected_num_classes set", STAMP_HAS(r, expected_num_classes) == 1);
             check("v5.14.2.E.2.B parse: expected_num_classes = 3", r.expected_num_classes == 3);
-            check("v5.14.2.E.2.B parse: has_expected_role set", r.has_expected_role == 1);
+            check("v5.14.2.E.2.B parse: has_expected_role set", STAMP_HAS(r, expected_role) == 1);
             check("v5.14.2.E.2.B parse: expected_role = barrier",
                   strcmp(r.expected_role, "barrier") == 0);
-            check("v5.14.2.E.2.B parse: has_expected_num_features set", r.has_expected_num_features == 1);
+            check("v5.14.2.E.2.B parse: has_expected_num_features set", STAMP_HAS(r, expected_num_features) == 1);
             check("v5.14.2.E.2.B parse: expected_num_features = 42", r.expected_num_features == 42);
             check("v5.14.2.E.2.B parse: has_expected_feature_format_version set",
-                  r.has_expected_feature_format_version == 1);
+                  STAMP_HAS(r, expected_feature_format_version) == 1);
             check("v5.14.2.E.2.B parse: expected_feature_format_version = 7",
                   r.expected_feature_format_version == 7);
 
@@ -20250,13 +20250,13 @@ e3_skip_load:;
                 /*secret=*/"test_secret_legacy",
                 /*gap_threshold=*/0.05, /*expected_format_version=*/6);
             check("v5.14.2.E.2.B legacy: has_expected_num_classes = 0 (Surface G forward-compat)",
-                  r.has_expected_num_classes == 0);
+                  STAMP_HAS(r, expected_num_classes) == 0);
             check("v5.14.2.E.2.B legacy: has_expected_role = 0",
-                  r.has_expected_role == 0);
+                  STAMP_HAS(r, expected_role) == 0);
             check("v5.14.2.E.2.B legacy: has_expected_num_features = 0",
-                  r.has_expected_num_features == 0);
+                  STAMP_HAS(r, expected_num_features) == 0);
             check("v5.14.2.E.2.B legacy: has_expected_feature_format_version = 0",
-                  r.has_expected_feature_format_version == 0);
+                  STAMP_HAS(r, expected_feature_format_version) == 0);
 
             std::remove(tmp_model);
             char stamp_path[512];

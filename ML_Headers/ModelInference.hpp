@@ -1232,25 +1232,17 @@ struct ModelStampResult {
     FOREACH_STAMP_BOUND_CFG(X)
     #undef X
 
-    // === v5.14.2.E.2.B + v5.14.3.B late-emit architectural fields (manual; FUTURE: migrate to FOREACH_STAMP_BOUND_MODEL_CONST_LATE registry) ===
-    // Late-emit: these fields emit AFTER FOREACH_STAMP_BOUND_CFG to preserve
-    // canonical wire format byte-for-byte. Migration to registry requires
-    // a second FOREACH_<X>_POST_CFG registry to maintain emit ordering.
-    // TECH_DEBT-006 closure focuses on the 26 pre-cfg entries; late-emit
-    // migration is a follow-up ship (TECH_DEBT-006.b candidate; trigger:
-    // next ship adding 3+ late-emit fields, or cleanup sprint).
-    uint8_t  has_expected_num_classes;
-    int      expected_num_classes;
-    uint8_t  has_expected_role;
-    char     expected_role[16];
-    uint8_t  has_expected_num_features;
-    int      expected_num_features;
-    uint8_t  has_expected_feature_format_version;
-    int      expected_feature_format_version;
-    uint8_t  has_overlay_hash;
-    char     overlay_hash[65];
-    uint8_t  has_effective_hash;
-    char     effective_hash[65];
+    // === Late-emit architectural fields auto-generated from FOREACH_STAMP_BOUND_MODEL_CONST_POST_CFG ===
+    // (v5.14.8.A.merged.4 — TECH_DEBT-006 full closure). 6 entries:
+    // expected_num_classes, expected_role, expected_num_features,
+    // expected_feature_format_version, overlay_hash, effective_hash.
+    // has_* flags bit-packed in has_flags (above); typed value fields
+    // declared via X-macro below. Entries emit AFTER FOREACH_STAMP_BOUND_CFG
+    // to preserve canonical wire format.
+    //
+    // Note: ModelStampResult includes ALL POST_CFG entries (parser side
+    // sees everything). FOREACH_STAMP_BOUND_MODEL_CONST already walked
+    // both halves above (union expansion).
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -1523,36 +1515,21 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 }
             FOREACH_STAMP_BOUND_CFG(X)
             #undef X
-            // v5.14.2.E.2.B — model-architectural fields (manual parser branches;
-            // not in FOREACH_STAMP_BOUND_CFG since they're not cfg-bound).
-            else if (strcmp(key, "expected_num_classes") == 0) {
-                r.expected_num_classes = atoi(val);
-                r.has_expected_num_classes = 1;
-            }
-            else if (strcmp(key, "expected_role") == 0) {
-                strncpy(r.expected_role, val, sizeof(r.expected_role) - 1);
-                r.expected_role[sizeof(r.expected_role) - 1] = '\0';
-                r.has_expected_role = 1;
-            }
-            else if (strcmp(key, "expected_num_features") == 0) {
-                r.expected_num_features = atoi(val);
-                r.has_expected_num_features = 1;
-            }
-            else if (strcmp(key, "expected_feature_format_version") == 0) {
-                r.expected_feature_format_version = atoi(val);
-                r.has_expected_feature_format_version = 1;
-            }
-            // v5.14.3.B — overlay-derived fields parser branches.
-            else if (strcmp(key, "overlay_hash") == 0) {
-                strncpy(r.overlay_hash, val, sizeof(r.overlay_hash) - 1);
-                r.overlay_hash[sizeof(r.overlay_hash) - 1] = '\0';
-                r.has_overlay_hash = 1;
-            }
-            else if (strcmp(key, "effective_hash") == 0) {
-                strncpy(r.effective_hash, val, sizeof(r.effective_hash) - 1);
-                r.effective_hash[sizeof(r.effective_hash) - 1] = '\0';
-                r.has_effective_hash = 1;
-            }
+            // v5.14.8.A.merged.4 — POST_CFG section parser branches (registry-driven).
+            // Replaces manual if-else branches for expected_*, overlay_hash,
+            // effective_hash (6 fields total). All POST_CFG entries are
+            // standalone (group="_") so STAMP_SET(r, name) sets the entry's
+            // own bit. tt::stamp_parse_field<T> templated helper handles
+            // type-dispatch (char[N] strncpy / scalar cast); avoids the
+            // non-template `if constexpr` cast-syntax issue (templated
+            // function instantiates per-T, properly discarding branches).
+            #define X(name, group, presence, type, fmt, default_val, get_value, emit_when, doc) \
+                else if (strcmp(key, #name) == 0) { \
+                    tt::stamp_parse_field(r.name, val); \
+                    STAMP_SET(r, name); \
+                }
+            FOREACH_STAMP_BOUND_MODEL_CONST_POST_CFG(X)
+            #undef X
         }
         line = strtok_r(nullptr, "\n", &save);
     }
@@ -1780,19 +1757,11 @@ struct StampInferenceCfgInputs {
     FOREACH_STAMP_BOUND_CFG(X)
     #undef X
 
-    // === v5.14.2.E.2.B + v5.14.3.B late-emit architectural fields (manual; FUTURE: TECH_DEBT-006.b) ===
-    int      has_expected_num_classes;
-    int      expected_num_classes;
-    int      has_expected_role;
-    char     expected_role[16];
-    int      has_expected_num_features;
-    int      expected_num_features;
-    int      has_expected_feature_format_version;
-    int      expected_feature_format_version;
-    int      has_overlay_hash;
-    char     overlay_hash[65];
-    int      has_effective_hash;
-    char     effective_hash[65];
+    // === Late-emit architectural fields — auto-generated via FOREACH_STAMP_BOUND_MODEL_CONST union (v5.14.8.A.merged.4) ===
+    // POST_CFG section's entries declared above via X-macro walk over
+    // FOREACH_STAMP_BOUND_MODEL_CONST = PRE_CFG + POST_CFG. has_* bits
+    // bit-packed in has_flags; STAMP_HAS(inf, expected_num_classes) etc.
+    // for accessor.
 };
 
 inline StampWriteResult stamp_write_for_model(const char* model_path,
@@ -1914,7 +1883,7 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
                 #name "=" fmt "\n", inf->name); \
             if (wrote > 0) n += wrote; \
         }
-    FOREACH_STAMP_BOUND_MODEL_CONST(X)
+    FOREACH_STAMP_BOUND_MODEL_CONST_PRE_CFG(X)
     #undef X
 
     // v5.14.1.B.3 — X-macro-driven emit for stamp-bound cfg fields.
@@ -1931,42 +1900,19 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     FOREACH_STAMP_BOUND_CFG(X)
     #undef X
 
-    // v5.14.2.E.2.B — model-architectural fields emit (manual, not in
-    // FOREACH_STAMP_BOUND_CFG). Surface G discipline: legacy callers
-    // (has_*=0) emit nothing → canonical body bytewise-identical.
-    if (inf && inf->has_expected_num_classes && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "expected_num_classes=%d\n", inf->expected_num_classes);
-        if (wrote > 0) n += wrote;
-    }
-    if (inf && inf->has_expected_role && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "expected_role=%s\n", inf->expected_role);
-        if (wrote > 0) n += wrote;
-    }
-    if (inf && inf->has_expected_num_features && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "expected_num_features=%d\n", inf->expected_num_features);
-        if (wrote > 0) n += wrote;
-    }
-    if (inf && inf->has_expected_feature_format_version && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "expected_feature_format_version=%d\n", inf->expected_feature_format_version);
-        if (wrote > 0) n += wrote;
-    }
-
-    // v5.14.3.B — overlay-derived fields emit (manual; not in FOREACH_STAMP_BOUND_CFG).
-    // Surface G discipline: legacy callers (has_*=0) emit nothing.
-    if (inf && inf->has_overlay_hash && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "overlay_hash=%s\n", inf->overlay_hash);
-        if (wrote > 0) n += wrote;
-    }
-    if (inf && inf->has_effective_hash && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "effective_hash=%s\n", inf->effective_hash);
-        if (wrote > 0) n += wrote;
-    }
+    // v5.14.8.A.merged.4 — POST_CFG section emit walk (registry-driven).
+    // Closes TECH_DEBT-006: 6 late-emit fields (expected_*, overlay_hash,
+    // effective_hash) auto-flow via the same X-macro pattern as PRE_CFG.
+    // Wire format byte-for-byte preserved (canonical order: PRE_CFG → cfg
+    // → POST_CFG; same as v5.14.7 manual emit).
+    #define X(name, group, presence, type, fmt, default_val, get_value, emit_when, doc) \
+        if (inf && STAMP_EMIT_CHECK_HAS_##group(name) && n > 0 && (size_t)n < sizeof(canonical)) { \
+            int wrote = snprintf(canonical + n, sizeof(canonical) - n, \
+                #name "=" fmt "\n", inf->name); \
+            if (wrote > 0) n += wrote; \
+        }
+    FOREACH_STAMP_BOUND_MODEL_CONST_POST_CFG(X)
+    #undef X
 
     // Restore prior locale ASAP — every subsequent return must NOT undo this twice
     if (pinned) {

@@ -1279,18 +1279,18 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         // for legacy stamps. Migration goal: deprecate expected.cfg entirely
         // when v5.X+ all stamps have the new fields.
         if (out->req_num_outputs > 0) {
-            inf.has_expected_num_classes = 1;
+            STAMP_SET(inf, expected_num_classes);
             inf.expected_num_classes     = out->req_num_outputs;
         }
         if (out->req_role[0]) {
-            inf.has_expected_role = 1;
+            STAMP_SET(inf, expected_role);
             strncpy(inf.expected_role, out->req_role, sizeof(inf.expected_role) - 1);
             inf.expected_role[sizeof(inf.expected_role) - 1] = '\0';
         }
         // Build constants — always emit (training-time = build-time identity).
-        inf.has_expected_num_features = 1;
+        STAMP_SET(inf, expected_num_features);
         inf.expected_num_features     = (int)MODEL_NUM_FEATURES;
-        inf.has_expected_feature_format_version = 1;
+        STAMP_SET(inf, expected_feature_format_version);
         inf.expected_feature_format_version     = (int)MODEL_FORMAT_VERSION;
 
         // v5.10.0 Item A — stamp_emit phase timer.

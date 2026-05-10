@@ -329,14 +329,14 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         // FeatureOverlay_PostLoadVerify. Forward-compat: legacy stamps
         // (has_overlay_hash=0) leave handle's overlay_hash empty;
         // verify skips silently.
-        if (sr.has_overlay_hash /* late-emit: still manual */ && sr.overlay_hash[0] != '\0') {
+        if (STAMP_HAS(sr, overlay_hash) && sr.overlay_hash[0] != '\0') {
             handle->has_overlay_hash = 1;
             size_t n = strnlen(sr.overlay_hash,
                                sizeof(handle->overlay_hash) - 1);
             memcpy(handle->overlay_hash, sr.overlay_hash, n);
             handle->overlay_hash[n] = '\0';
         }
-        if (sr.has_effective_hash /* late-emit: still manual */ && sr.effective_hash[0] != '\0') {
+        if (STAMP_HAS(sr, effective_hash) && sr.effective_hash[0] != '\0') {
             handle->has_effective_hash = 1;
             size_t n = strnlen(sr.effective_hash,
                                sizeof(handle->effective_hash) - 1);
