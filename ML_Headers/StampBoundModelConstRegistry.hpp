@@ -77,8 +77,11 @@
 // null terminator. Add new aliases as char[N] fields are introduced.
 //======================================================================================================
 namespace tt {
-    using stamp_str_16 = char[16];   // xgb_tree_method
-    using stamp_str_65 = char[65];   // scaler_sha256, overlay_hash, effective_hash, run_name
+    using stamp_str_16   = char[16];    // xgb_tree_method, environment_cuda_version, environment_libgomp_version
+    using stamp_str_32   = char[32];    // v5.14.8.D — environment_tf_version, environment_pytorch_version
+    using stamp_str_64   = char[64];    // v5.14.8.D — run_name, environment_cpu_model
+    using stamp_str_65   = char[65];    // scaler_sha256, overlay_hash, effective_hash, scaler_fit_data_hash
+    using stamp_str_1024 = char[1024];  // v5.14.8.D — removal_reasons_csv (feature removal lineage)
 
     // v5.14.8.A.merged.4 — Templated parser helper. Extracts type-dispatch
     // logic from registry's parser X-macro expansion to a template function
@@ -388,7 +391,43 @@ namespace tt {
       "SHA256 of canonical overlay JSON (3-layer fingerprinting layer 2)")                          \
     X(effective_hash,                           _, INCLUDE, tt::stamp_str_65, "%s", "",             \
       inf->effective_hash, inf->has_effective_hash,                                                 \
-      "SHA256(layer1 || layer2) (3-layer fingerprinting layer 3)")
+      "SHA256(layer1 || layer2) (3-layer fingerprinting layer 3)")                                  \
+    /* === v5.14.8.D NEW fields — model lineage + environment metadata === */                       \
+    /* training_timestamp_us: wall-clock at training time (μs since unix epoch)                  */ \
+    /* used by v5.14.8.E stale-model gate (CoreModelZoo_CheckStaleModel)                         */ \
+    X(training_timestamp_us,                    _, INCLUDE, uint64_t, "%lu", 0,                     \
+      (unsigned long)inf->training_timestamp_us, inf->has_training_timestamp_us,                    \
+      "training wall-clock (μs since unix epoch); v5.14.8.E stale-model gate reads this")           \
+    /* run_name: operator-set training run identifier (e.g., 'btcusdt_5min_v3') */                  \
+    X(run_name,                                 _, INCLUDE, tt::stamp_str_64, "%s", "",             \
+      inf->run_name, inf->has_run_name,                                                             \
+      "operator-set training run identifier; surfaces in stale-model log + ML Status panel")        \
+    /* scaler_fit_data_hash: SHA256 of training data slice used to fit scaler.                   */ \
+    /* trainer hashes features_train.tobytes(); verifier WARN/REFUSE on mismatch.                */ \
+    X(scaler_fit_data_hash,                     _, INCLUDE, tt::stamp_str_65, "%s", "",             \
+      inf->scaler_fit_data_hash, inf->has_scaler_fit_data_hash,                                     \
+      "SHA-256 of training data slice fitted by scaler; catches scaler refit drift")                \
+    /* removal_reasons_csv: per-feature CSV tracking why feature was excluded from training.    */ \
+    /* read-only forensic field; no enforcement.                                                  */ \
+    X(removal_reasons_csv,                      _, INCLUDE, tt::stamp_str_1024, "%s", "",           \
+      inf->removal_reasons_csv, inf->has_removal_reasons_csv,                                       \
+      "CSV: <feature>=<reason>,...; tracks why features were pruned from training")                 \
+    /* === environment_meta GROUP (5 fields) — operator audit; informational; no enforcement === */ \
+    X(environment_tf_version,                   environment_meta, INCLUDE, tt::stamp_str_32, "%s", "", \
+      inf->environment_tf_version, inf->has_environment_meta,                                       \
+      "TensorFlow version at training time (e.g., 'tensorflow==2.15.0')")                           \
+    X(environment_pytorch_version,              environment_meta, INCLUDE, tt::stamp_str_32, "%s", "", \
+      inf->environment_pytorch_version, inf->has_environment_meta,                                  \
+      "PyTorch version at training time (e.g., 'torch==2.1.0')")                                    \
+    X(environment_cuda_version,                 environment_meta, INCLUDE, tt::stamp_str_16, "%s", "", \
+      inf->environment_cuda_version, inf->has_environment_meta,                                     \
+      "CUDA version at training time (e.g., '12.1')")                                               \
+    X(environment_cpu_model,                    environment_meta, INCLUDE, tt::stamp_str_64, "%s", "", \
+      inf->environment_cpu_model, inf->has_environment_meta,                                        \
+      "CPU model string from platform.processor() at training time")                                \
+    X(environment_libgomp_version,              environment_meta, INCLUDE, tt::stamp_str_16, "%s", "", \
+      inf->environment_libgomp_version, inf->has_environment_meta,                                  \
+      "libgomp.so version at training time (XGBoost OpenMP runtime)")
 
 // Union: walks both PRE_CFG and POST_CFG. Used by struct generation +
 // AUTOPOPULATE + entry counting (everything that doesn't care about
@@ -444,6 +483,7 @@ enum StampHasFlagBit : uint64_t {
     STAMP_BIT_xgb_hyperparams,
     STAMP_BIT_grid_member,
     STAMP_BIT_label_params,
+    STAMP_BIT_environment_meta,    // v5.14.8.D — 5-field environment_meta group
 
     // === Standalone bits — PRE_CFG section (emitted before FOREACH_STAMP_BOUND_CFG) ===
     STAMP_BIT_inference_cfg_bandit_blend_ratio,
@@ -464,6 +504,11 @@ enum StampHasFlagBit : uint64_t {
     STAMP_BIT_expected_feature_format_version,
     STAMP_BIT_overlay_hash,
     STAMP_BIT_effective_hash,
+    // v5.14.8.D NEW POST_CFG standalone bits:
+    STAMP_BIT_training_timestamp_us,
+    STAMP_BIT_run_name,
+    STAMP_BIT_scaler_fit_data_hash,
+    STAMP_BIT_removal_reasons_csv,
 
     STAMP_BIT_COUNT  // sentinel: total used bits (must be ≤ 64 for uint64_t has_flags)
 };
@@ -493,6 +538,12 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 #define MASK_expected_feature_format_version        (1ULL << tt::STAMP_BIT_expected_feature_format_version)
 #define MASK_overlay_hash                           (1ULL << tt::STAMP_BIT_overlay_hash)
 #define MASK_effective_hash                         (1ULL << tt::STAMP_BIT_effective_hash)
+// v5.14.8.D — 5 new fields:
+#define MASK_environment_meta                       (1ULL << tt::STAMP_BIT_environment_meta)
+#define MASK_training_timestamp_us                  (1ULL << tt::STAMP_BIT_training_timestamp_us)
+#define MASK_run_name                               (1ULL << tt::STAMP_BIT_run_name)
+#define MASK_scaler_fit_data_hash                   (1ULL << tt::STAMP_BIT_scaler_fit_data_hash)
+#define MASK_removal_reasons_csv                    (1ULL << tt::STAMP_BIT_removal_reasons_csv)
 
 //======================================================================================================
 // [STAMP_HAS / SET / CLR accessor macros — alias to BITMAP_* API]
@@ -589,6 +640,8 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 #define STAMP_AUTOPOPULATE_SET_HAS_xgb_hyperparams(name)    STAMP_SET((inf), xgb_hyperparams)
 #define STAMP_AUTOPOPULATE_SET_HAS_grid_member(name)        STAMP_SET((inf), grid_member)
 #define STAMP_AUTOPOPULATE_SET_HAS_label_params(name)       STAMP_SET((inf), label_params)
+// v5.14.8.D — environment_meta group dispatcher:
+#define STAMP_AUTOPOPULATE_SET_HAS_environment_meta(name)   STAMP_SET((inf), environment_meta)
 
 // Token-paste dispatcher for emit-time has_* check. Mirrors
 // STAMP_AUTOPOPULATE_SET_HAS but for READING the bit (boolean) in the
@@ -602,6 +655,24 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 #define STAMP_EMIT_CHECK_HAS_xgb_hyperparams(name)    STAMP_HAS(*inf, xgb_hyperparams)
 #define STAMP_EMIT_CHECK_HAS_grid_member(name)        STAMP_HAS(*inf, grid_member)
 #define STAMP_EMIT_CHECK_HAS_label_params(name)       STAMP_HAS(*inf, label_params)
+// v5.14.8.D — environment_meta group emit-check:
+#define STAMP_EMIT_CHECK_HAS_environment_meta(name)   STAMP_HAS(*inf, environment_meta)
+
+// Parser-side dispatchers (hardcoded `r` target — used inside
+// verify_model_stamp body; r is the local ModelStampResult). For
+// grouped entries: set the group bit. For standalone (group="_"):
+// set the entry's own bit. Mirrors STAMP_AUTOPOPULATE_SET_HAS pattern
+// but with `r` target instead of `inf`.
+//
+// Used by v5.14.8.A.merged.4 + v5.14.8.D POST_CFG parser X-macro walks.
+#define STAMP_PARSER_SET_HAS__(name)                  STAMP_SET(r, name)
+#define STAMP_PARSER_SET_HAS_inference_cfg(name)      STAMP_SET(r, inference_cfg)
+#define STAMP_PARSER_SET_HAS_scaler(name)             STAMP_SET(r, scaler)
+#define STAMP_PARSER_SET_HAS_fees(name)               STAMP_SET(r, fees)
+#define STAMP_PARSER_SET_HAS_xgb_hyperparams(name)    STAMP_SET(r, xgb_hyperparams)
+#define STAMP_PARSER_SET_HAS_grid_member(name)        STAMP_SET(r, grid_member)
+#define STAMP_PARSER_SET_HAS_label_params(name)       STAMP_SET(r, label_params)
+#define STAMP_PARSER_SET_HAS_environment_meta(name)   STAMP_SET(r, environment_meta)
 
 #define STAMP_MODEL_CONST_AUTOPOPULATE_ONE(name, group, presence, type, fmt, default_val, get_value, emit_when, doc) \
     if (emit_when) {                                                                  \

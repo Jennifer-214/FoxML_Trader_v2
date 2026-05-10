@@ -1526,7 +1526,7 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             #define X(name, group, presence, type, fmt, default_val, get_value, emit_when, doc) \
                 else if (strcmp(key, #name) == 0) { \
                     tt::stamp_parse_field(r.name, val); \
-                    STAMP_SET(r, name); \
+                    STAMP_PARSER_SET_HAS_##group(name); \
                 }
             FOREACH_STAMP_BOUND_MODEL_CONST_POST_CFG(X)
             #undef X
