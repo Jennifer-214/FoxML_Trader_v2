@@ -1550,7 +1550,7 @@ inline void Strategy_BuildParameters(
     // No-op when partial_exit_enabled=0: tp_pct_b stays at GateParameters_-
     // Init's zero, and GATE_FLAG_PAIR_ACTIVE is never set. Pre-P.4
     // behavior preserved exactly.
-    if (config->partial_exit_enabled) {
+    if (BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED)) {
         out->flags |= GATE_FLAG_PAIR_ACTIVE;
         // tp_pct_b = tp_pct * tp2_mult. Falls back to tp_pct (TP1 distance,
         // i.e. leg B duplicates leg A) when tp2_mult is zero (defensive —

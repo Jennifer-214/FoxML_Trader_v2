@@ -6754,13 +6754,13 @@ e3_skip_load:;
         using namespace tt;
         // Disabled: always valid regardless of other fields
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        cfg.partial_exit_enabled = 0;
+        BITMAP_CLR(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);
         cfg.num_execution_cores = 16;  // would fail if partials enabled
         check("disabled: validation passes regardless of n_cores",
               Sharded_ValidatePartialExitCfg(&cfg) == 1);
 
         // Enabled, within capacity (4 cores → 8 slots, fits 16-slot portfolio)
-        cfg.partial_exit_enabled = 1;
+        BITMAP_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);
         cfg.num_execution_cores = 4;
         cfg.partial_exit_pct = FPN_FromDouble<64>(0.5);
         check("enabled with 4 cores: validation passes",
@@ -6973,7 +6973,7 @@ e3_skip_load:;
     {
         using namespace tt;
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        cfg.partial_exit_enabled = 0;  // DISABLED first
+        BITMAP_CLR(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);  // DISABLED first
         cfg.tp2_mult             = FPN_FromDouble<64>(2.0);
 
         // Need rolling stats with enough data for SimpleDip to compute
@@ -6991,7 +6991,7 @@ e3_skip_load:;
         GateParameters<64> params;
 
         // ---- partial_exit_enabled=0 → no GATE_FLAG_PAIR_ACTIVE ----
-        cfg.partial_exit_enabled = 0;
+        BITMAP_CLR(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);
         Strategy_BuildParameters(STRATEGY_SIMPLE_DIP,
             &rolling, &cfg, FPN_FromDouble<64>(1000.0),
             &params, &rolling_long);
@@ -7001,7 +7001,7 @@ e3_skip_load:;
               FPN_IsZero(params.tp_pct_b));
 
         // ---- partial_exit_enabled=1 → flag set, tp_pct_b = tp_pct * 2.0 ----
-        cfg.partial_exit_enabled = 1;
+        BITMAP_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);
         Strategy_BuildParameters(STRATEGY_SIMPLE_DIP,
             &rolling, &cfg, FPN_FromDouble<64>(1000.0),
             &params, &rolling_long);
@@ -7734,7 +7734,7 @@ e3_skip_load:;
         R* r = new R();
         r->cfg = ControllerConfig_Default<64>();
         r->cfg.sl_cooldown_cycles = 0;
-        r->cfg.partial_exit_enabled = 1;
+        BITMAP_SET(r->cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
             FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
         r->oms.event_log_mode       = 1;
@@ -8141,7 +8141,7 @@ e3_skip_load:;
         {
             cfg.take_profit_pct = FPN_FromDouble<64>(0.01);   // 1% TP
             cfg.stop_loss_pct   = FPN_FromDouble<64>(0.005);  // 0.5% SL
-            cfg.partial_exit_enabled = 0;  // simpler path
+            BITMAP_CLR(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);  // simpler path
             tt::GateParameters<64> out;
             tt::GateParameters_Init(&out);
             tt::Strategy_BuildParameters<64>(STRATEGY_MEAN_REVERSION, &rs, &cfg,
@@ -21753,6 +21753,97 @@ e3_skip_load:;
               ctx.feature_last_update_us == nullptr);
         check("v5.14.9.E: ctx.stale_feature_events_total defaults to nullptr",
               ctx.stale_feature_events_total == nullptr);
+    }
+
+    //======================================================================
+    // [v5.14.9.F — FOREACH_LIFECYCLE_CFG_FLAG (3 flags) — first domain registry]
+    //======================================================================
+    // First DOMAIN SPLIT registry per heterogeneous-registry-pattern.md.
+    // Migrates 3 position-exit-mechanic boolean cfg fields from individual
+    // ints to a uint8_t bitmap on ControllerConfig. Closes TECH_DEBT-013(5).
+    //
+    // Test scope:
+    //   1. LIFECYCLE_CFG_COUNT sanity (>= 3 per Check 21 fragility convention)
+    //   2. MASK_LIFECYCLE_CFG_<NAME> constants at correct bit positions
+    //   3. Default cfg has correct bit pattern (partial_exit OFF, breakeven_on_partial ON,
+    //      breakeven_on_profit OFF — matches ControllerConfig_Default<F>())
+    //   4. BITMAP_IS_SET / BITMAP_SET / BITMAP_CLR round-trip per flag
+    //   5. AUTOPOPULATE_FROM_TRIPLE writes the right bits
+    //   6. Domain isolation: setting one bit doesn't affect others
+    //   7. Parser: legacy keys (`partial_exit_enabled = 1`) set the right bit
+    {
+        check("v5.14.9.F: LIFECYCLE_CFG_COUNT >= 3 (3 entries: partial_exit + 2 breakeven)",
+              LIFECYCLE_CFG_COUNT >= 3);
+        check("v5.14.9.F: LIFECYCLE_CFG_COUNT <= 8 (uint8_t storage budget)",
+              LIFECYCLE_CFG_COUNT <= 8);
+    }
+    {
+        // MASK constants are bit positions 0, 1, 2 (registry order)
+        check("v5.14.9.F: MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED == 0x01",
+              MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED == 0x01);
+        check("v5.14.9.F: MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL == 0x02",
+              MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL == 0x02);
+        check("v5.14.9.F: MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT == 0x04",
+              MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT == 0x04);
+    }
+    {
+        // Default cfg: partial_exit_enabled=0, breakeven_on_partial=1, breakeven_on_profit=0
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.14.9.F: default partial_exit_enabled bit OFF",
+              !BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED));
+        check("v5.14.9.F: default breakeven_on_partial bit ON",
+              BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL));
+        check("v5.14.9.F: default breakeven_on_profit bit OFF (DORMANT — TECH_DEBT-024)",
+              !BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT));
+    }
+    {
+        // BITMAP_SET / BITMAP_CLR round-trip
+        uint8_t flags = 0;
+        BITMAP_SET(flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);
+        check("v5.14.9.F: BITMAP_SET turns on partial_exit bit",
+              BITMAP_IS_SET(flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED));
+        BITMAP_CLR(flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);
+        check("v5.14.9.F: BITMAP_CLR turns off partial_exit bit",
+              !BITMAP_IS_SET(flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED));
+    }
+    {
+        // AUTOPOPULATE_FROM_TRIPLE writes the right bits
+        uint8_t flags = 0;
+        LIFECYCLE_CFG_FLAG_AUTOPOPULATE_FROM_TRIPLE(flags, /*partial*/1, /*be_partial*/0, /*be_profit*/1);
+        check("v5.14.9.F: AUTOPOPULATE(1,0,1) sets partial_exit",
+              BITMAP_IS_SET(flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED));
+        check("v5.14.9.F: AUTOPOPULATE(1,0,1) clears breakeven_on_partial",
+              !BITMAP_IS_SET(flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL));
+        check("v5.14.9.F: AUTOPOPULATE(1,0,1) sets breakeven_on_profit",
+              BITMAP_IS_SET(flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT));
+        // Domain isolation: only the 3 LIFECYCLE bits affected
+        check("v5.14.9.F: AUTOPOPULATE writes only LIFECYCLE bits (no spillover)",
+              (flags & ~(MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED |
+                         MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL |
+                         MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT)) == 0);
+    }
+    {
+        // Parser back-compat: legacy keys still work — write engine.cfg with all 3 keys + parse + verify
+        char tmpfile[] = "/tmp/foxml_v5_14_9_f_XXXXXX";
+        int fd = mkstemp(tmpfile);
+        check("v5.14.9.F: parser tmpfile created", fd >= 0);
+        FILE* f = fdopen(fd, "w");
+        check("v5.14.9.F: parser tmpfile fdopen", f != nullptr);
+        fprintf(f, "partial_exit_enabled=1\n");
+        fprintf(f, "breakeven_on_partial=0\n");   // override default ON to OFF
+        fprintf(f, "breakeven_on_profit=1\n");    // override default OFF to ON (DORMANT but parser should still set bit)
+        fclose(f);
+
+        ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmpfile);
+        check("v5.14.9.F: parser loads file (returns valid config; default num_execution_cores>0)",
+              cfg.num_execution_cores > 0);
+        check("v5.14.9.F: parser sets partial_exit bit from legacy key",
+              BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED));
+        check("v5.14.9.F: parser clears breakeven_on_partial bit from legacy key=0",
+              !BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL));
+        check("v5.14.9.F: parser sets breakeven_on_profit bit from legacy key=1",
+              BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT));
+        unlink(tmpfile);
     }
 
     //======================================================================

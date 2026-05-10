@@ -881,7 +881,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // Partials geometry mirrored to OMS for the post-fill drainer's
     // slot→core_id mapping. Set once at init — toggle requires snapshot v3
     // reload anyway (see Snapshot Re-Activation Invariant).
-    oms.partial_exit_enabled = cfg.partial_exit_enabled ? 1 : 0;
+    oms.partial_exit_enabled = BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
 
     // Trade log CSV — same pattern as legacy engine in main.cpp
     static ShardedTradeLog g_sharded_trade_log;
@@ -1321,7 +1321,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         mkdir("data", 0755);
         if (!live_trading) {
             int loaded = ShardedSnapshot_Load<F>(&state, snapshot_path,
-                                                  cfg.partial_exit_enabled ? 1 : 0,
+                                                  BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0,
                                                   &cfg);  // v5.5.5
             (void)loaded;  // logged inside; nothing else to do here
         } else {
@@ -1947,7 +1947,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 if (!live_trading && (++save_counter >= 1024)) {
                     save_counter = 0;
                     ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat",
-                                              cfg.partial_exit_enabled ? 1 : 0);
+                                              BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0);
                 }
                 // v4.7.39 (Phase C.2): per_core_slow inlines the push inside
                 // each slow-path thread (after RebuildOneCore). Producer skips.
@@ -2353,7 +2353,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // P.3: map (core_id, leg) → portfolio slot. When
                 // partial_exit_enabled=0, slot == core_id (1:1 mapping
                 // preserves pre-P.3 behavior). When enabled, slot = 2*c+leg.
-                int partial_on = cfg.partial_exit_enabled ? 1 : 0;
+                int partial_on = BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
                 int portfolio_slot = Sharded_LegSlot(slot, (int)event.leg, partial_on);
                 if (portfolio_slot < 0) {
                     // Defensive: malformed event (e.g. leg=1 without partials
@@ -2511,7 +2511,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             FPN<F> qty = oms.portfolio.positions[slot].quantity;
             if (FPN_IsZero(qty)) continue;
             // Map slot → core_id for strategy_id + leg lookup
-            int partial_on = cfg.partial_exit_enabled ? 1 : 0;
+            int partial_on = BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
             int core_id = partial_on ? (slot >> 1) : slot;
             int leg     = partial_on ? (slot & 1)  : 0;
             if (core_id < 0 || core_id >= state.registered_count) continue;
@@ -3510,7 +3510,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // Paper mode only — live mode treats exchange state as truth.
     if (!live_trading) {
         if (ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat",
-                                      cfg.partial_exit_enabled ? 1 : 0)) {
+                                      BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0)) {
             fprintf(stderr, "[snapshot] final save: data/sharded_snapshot.dat\n");
         } else {
             fprintf(stderr, "[snapshot] final save FAILED — next restart starts fresh\n");

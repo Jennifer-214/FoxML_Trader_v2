@@ -14,6 +14,7 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/LinearRegression3X.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"  // v5.14.9.A — DegradationCurve enum + ToString/FromString helpers
+#include "LifecycleCfgFlagRegistry.hpp"       // v5.14.9.F — FOREACH_LIFECYCLE_CFG_FLAG + MASK_LIFECYCLE_CFG_*
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -367,15 +368,17 @@ template <unsigned F> struct ControllerConfig {
                                   // (e.g. 5.0 = 5x)
   FPN<F> spike_spacing_reduction; // spacing multiplier during spike (e.g. 0.5 =
                                   // half normal)
-  // partial exits (scaling out)
-  int partial_exit_enabled; // 0 = full exits only, 1 = split into two legs at
-                            // fill time
+  // partial exits (scaling out) + breakeven ratchet — v5.14.9.F bit-packed via
+  // FOREACH_LIFECYCLE_CFG_FLAG. Replaces 3 individual int fields:
+  //   partial_exit_enabled  → BITMAP_IS_SET(lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED)
+  //   breakeven_on_partial  → BITMAP_IS_SET(lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL)
+  //   breakeven_on_profit   → BITMAP_IS_SET(lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT)
+  // See CoreFrameworks/LifecycleCfgFlagRegistry.hpp for registry definition.
+  // Adding a new lifecycle-domain boolean = 1 row in FOREACH_LIFECYCLE_CFG_FLAG.
+  uint8_t lifecycle_cfg_flags;
   FPN<F>
       partial_exit_pct; // fraction to exit at TP1 (0.5 = 50%, rest rides TP2)
   FPN<F> tp2_mult; // TP2 = TP1_distance * this (2.0 = double the TP distance)
-  int breakeven_on_partial; // 1 = move remaining SL to entry after TP1 hit
-  int breakeven_on_profit;  // 1 = ratchet SL to breakeven when position crosses
-                            // net profit
   FPN<F> breakeven_buffer_pct; // SL offset from entry once breakeven ratchet
                                // fires (0.001 = +0.1% above entry, -0.001 =
                                // allow 0.1% loss)
@@ -1222,12 +1225,16 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // volume spike detection
   cfg.spike_threshold = FPN_FromDouble<F>(5.0); // 5x rolling max triggers spike
   cfg.spike_spacing_reduction = FPN_FromDouble<F>(0.5); // half spacing on spike
-  cfg.partial_exit_enabled = 0; // 0 = disabled (backward compat)
+  // v5.14.9.F — lifecycle_cfg_flags defaults via AUTOPOPULATE_FROM_TRIPLE:
+  //   partial_exit_enabled  = 0 (disabled — backward compat)
+  //   breakeven_on_partial  = 1 (move SL to entry after TP1 hit)
+  //   breakeven_on_profit   = 0 (disabled — currently dormant per TECH_DEBT-024)
+  LIFECYCLE_CFG_FLAG_AUTOPOPULATE_FROM_TRIPLE(cfg.lifecycle_cfg_flags,
+      /*partial_exit_enabled*/  0,
+      /*breakeven_on_partial*/  1,
+      /*breakeven_on_profit*/   0);
   cfg.partial_exit_pct = FPN_FromDouble<F>(0.5); // 50% at TP1, 50% rides
   cfg.tp2_mult = FPN_FromDouble<F>(2.0);         // TP2 = 2x TP1 distance
-  cfg.breakeven_on_partial = 1; // move SL to entry after TP1 hit
-  cfg.breakeven_on_profit =
-      0; // 0 = disabled, 1 = ratchet SL to breakeven on profit
   cfg.breakeven_buffer_pct =
       FPN_FromDouble<F>(0.0005);    // +0.05% above entry (lock in tiny profit)
   cfg.slippage_pct = FPN_Zero<F>(); // 0 = disabled (backward compat)
@@ -1882,9 +1889,25 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 
     //--- int ---
     CFG_PARSE_INT(sl_cooldown_adaptive)
-    CFG_PARSE_INT(partial_exit_enabled)
-    CFG_PARSE_INT(breakeven_on_partial)
-    CFG_PARSE_INT(breakeven_on_profit)
+    // v5.14.9.F — lifecycle_cfg_flags bitmap (3 fields migrated; legacy keys preserved for back-compat)
+    if (strcmp(key, "partial_exit_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.lifecycle_cfg_flags |=  MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED;
+      else   cfg.lifecycle_cfg_flags &= (uint8_t)~MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED;
+      continue;
+    }
+    if (strcmp(key, "breakeven_on_partial") == 0) {
+      int v = atoi(val);
+      if (v) cfg.lifecycle_cfg_flags |=  MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL;
+      else   cfg.lifecycle_cfg_flags &= (uint8_t)~MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL;
+      continue;
+    }
+    if (strcmp(key, "breakeven_on_profit") == 0) {
+      int v = atoi(val);
+      if (v) cfg.lifecycle_cfg_flags |=  MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT;
+      else   cfg.lifecycle_cfg_flags &= (uint8_t)~MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT;
+      continue;
+    }
     CFG_PARSE_PCT(breakeven_buffer_pct)
     CFG_PARSE_INT(depth_enabled)
     CFG_PARSE_INT(use_real_money)

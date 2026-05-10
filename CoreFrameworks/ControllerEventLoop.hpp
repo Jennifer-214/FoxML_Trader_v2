@@ -920,7 +920,7 @@ static inline uint16_t Sharded_CoreSlotMask(int core_id, int partial_exit_enable
 //   - partial_exit_pct outside (0.0, 1.0) when partials enabled
 template <unsigned F>
 static inline int Sharded_ValidatePartialExitCfg(const ControllerConfig<F>* cfg) {
-    if (!cfg->partial_exit_enabled) return 1;  // disabled = always valid
+    if (!BITMAP_IS_SET(cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED)) return 1;  // disabled = always valid
     int n_cores = (int)cfg->num_execution_cores;
     if (n_cores < 1) {
         std::fprintf(stderr,
@@ -2237,7 +2237,7 @@ inline void EventLoop_RebuildOneCore(
             // which the hot path doesn't read).
             if (new_regime != old_regime &&
                 (state->oms->portfolio.active_bitmap &
-                 Sharded_CoreSlotMask(slot, config->partial_exit_enabled))) {
+                 Sharded_CoreSlotMask(slot, BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED)))) {
                 // v5.5.4 (Class 2 / Class 9 hybrid): SL tighten on regime
                 // transition. The legacy D11 path here wrote ratchet_sl
                 // DIRECTLY without the v5.1.7 fee-floor cap. Symptom (user
@@ -2253,7 +2253,7 @@ inline void EventLoop_RebuildOneCore(
                 // cap math.
                 FPN<F> tight_sl = FPN_Sub(rolling->price_avg,
                                            rolling->price_stddev);
-                int partial_on = config->partial_exit_enabled ? 1 : 0;
+                int partial_on = BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
                 uint16_t my_mask = partial_on
                     ? (uint16_t)((1u << (slot * 2)) | (1u << (slot * 2 + 1)))
                     : (uint16_t)(1u << slot);
@@ -2429,7 +2429,7 @@ inline void EventLoop_RebuildOneCore(
         // Partials-aware: core's portfolio slot(s) come from the helper
         // (slot N or 2N+0/2N+1 depending on partial_exit_enabled).
         bool slot_active = (state->oms->portfolio.active_bitmap &
-                             Sharded_CoreSlotMask(slot, config->partial_exit_enabled)) != 0;
+                             Sharded_CoreSlotMask(slot, BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED))) != 0;
         if (!slot_active) {
             state->cores[slot].pending_params.ratchet_sl = FPN_Zero<F>();
         }
@@ -2595,7 +2595,7 @@ inline void EventLoop_RebuildOneCore(
             // independent qty). Sum unrealized across both. Without
             // partials, only slot c is walked.
             if (config->enable_mtm_kill_switch && px_in && !FPN_IsZero(*px_in)) {
-                uint16_t mask = Sharded_CoreSlotMask(slot, config->partial_exit_enabled);
+                uint16_t mask = Sharded_CoreSlotMask(slot, BITMAP_IS_SET(config->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED));
                 uint16_t bm   = state->oms->portfolio.active_bitmap & mask;
                 while (bm) {
                     int s = __builtin_ctz(bm);

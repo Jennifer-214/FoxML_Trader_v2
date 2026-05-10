@@ -667,7 +667,7 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
     // partial exit: TP exits ratchet paired position's SL to breakeven
     if (reason == 0) {
         int8_t pair_idx = rec->pair_index;
-        if (pair_idx >= 0 && ctrl->config.breakeven_on_partial &&
+        if (pair_idx >= 0 && BITMAP_IS_SET(ctrl->config.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL) &&
             (ctrl->portfolio.active_bitmap & (1 << pair_idx))) {
             ctrl->portfolio.positions[pair_idx].stop_loss_price =
                 FPN_Max(ctrl->portfolio.positions[pair_idx].stop_loss_price,
@@ -1357,7 +1357,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
       // partial exits: split into two legs with different TP levels
       // leg A exits at TP1 (conservative), leg B rides to TP2 (extended)
       // when disabled or not enough room for 2 slots, falls back to single position
-      int do_split = ctrl->config.partial_exit_enabled &&
+      int do_split = BITMAP_IS_SET(ctrl->config.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) &&
           (Portfolio_CountActive(&ctrl->portfolio) + 2 <= (int)ctrl->config.max_positions);
 
       int fill_ok = 0; // track whether any position was actually created

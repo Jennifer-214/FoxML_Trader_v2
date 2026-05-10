@@ -125,7 +125,7 @@ static inline void TUI_CopySnapshotSharded(
     // mask to even positions, popcount. Handles half-paired states too
     // (e.g. leg A closed but leg B still open after TP1) — that core
     // counts as 1, not 0 (under-count) or 2 (raw bitmap).
-    if (cfg->partial_exit_enabled) {
+    if (BITMAP_IS_SET(cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED)) {
         uint16_t bm = state->oms->portfolio.active_bitmap;
         uint16_t any_pair = (uint16_t)(((bm | (bm >> 1)) & 0x5555u));
         snap->active_count = __builtin_popcount(any_pair);
@@ -196,7 +196,7 @@ static inline void TUI_CopySnapshotSharded(
     uint64_t now_wall_us = (uint64_t)
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-    int partial_on = cfg->partial_exit_enabled ? 1 : 0;
+    int partial_on = BITMAP_IS_SET(cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
     while (bm) {
         int idx = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
@@ -213,7 +213,7 @@ static inline void TUI_CopySnapshotSharded(
         // mirror SG_Evaluate's formula: effective = max(active, ratchet).
         // Falls back to pos->* when this slot's core isn't yet registered
         // (cold start) or when reading param_slot fails.
-        int core_id_for_pos = (cfg->partial_exit_enabled ? (idx >> 1) : idx);
+        int core_id_for_pos = (BITMAP_IS_SET(cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? (idx >> 1) : idx);
         bool resolved_effective = false;
         if (core_id_for_pos >= 0 && core_id_for_pos < state->registered_count) {
             tt::ExecutionCore<F>* xc = state->cores[core_id_for_pos].core;
@@ -222,7 +222,7 @@ static inline void TUI_CopySnapshotSharded(
                 tt::ParameterSlot_Read(&xc->param_slot, &params);
                 // Leg-aware live levels: leg B (slot odd under partials)
                 // uses live_tp_b, leg A uses live_tp.
-                bool is_leg_b = cfg->partial_exit_enabled && (idx & 1);
+                bool is_leg_b = BITMAP_IS_SET(cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) && (idx & 1);
                 FPN<F> live_tp = is_leg_b ? xc->live_tp_b : xc->live_tp;
                 FPN<F> live_sl = is_leg_b ? xc->live_sl_b : xc->live_sl;
                 // active_tp/sl is the per-fill price when set, else the
@@ -391,7 +391,7 @@ static inline void TUI_CopySnapshotSharded(
     // use core 0's strategy as the "headline" strategy for the Market panel,
     // and core 0's gate parameters for the Buy Gate panel.
     snap->sharded_mode_active = 1;
-    snap->partial_exit_enabled = cfg->partial_exit_enabled ? 1 : 0;
+    snap->partial_exit_enabled = BITMAP_IS_SET(cfg->lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
     snap->per_core_count = state->registered_count;
     if (state->registered_count > 0) {
         // v4.0.4: use core 0's RESOLVED strategy as headline. For AUTO core 0
