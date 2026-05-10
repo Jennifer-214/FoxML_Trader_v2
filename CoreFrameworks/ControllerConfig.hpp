@@ -154,7 +154,16 @@ constexpr uint8_t ENGINE_ARCH_PER_CORE_SLOW = 1;
     /* on its own core). 0 = inherit global cfg.winsor_pct_*; non-zero overrides. */ \
     /* Field name matches global ControllerConfig field per resolver contract. */ \
     RAW(winsor_pct_low) \
-    RAW(winsor_pct_high)
+    RAW(winsor_pct_high) \
+    /* v5.14.9.B.1: per-core soft risk degradation ladder thresholds — */ \
+    /* operator can tune ladder shape per core (e.g. aggressive core 0 with */ \
+    /* full=0.20 + min_pct=0.05, conservative core 1 with full=0.10 + min_pct=0.20). */ \
+    /* RUNTIME-ONLY overrides (NOT stamp-bound; matches existing per-core risk_pct */ \
+    /* precedent — operator policy, not training-derived). 0 = inherit global. */ \
+    /* curve enum (risk_degradation_curve) is INT-typed; see PER_CORE_OVERRIDE_INT_FIELDS below. */ \
+    RAW(risk_full_size_threshold) \
+    RAW(risk_min_size_threshold) \
+    RAW(risk_min_size_pct)
 
 // v4.7.40: INT-typed per-core overrides. Separate macro because INT fields
 // are uint32_t (not FPN<F>) — different declaration + parser. 0 = inherit
@@ -164,7 +173,14 @@ constexpr uint8_t ENGINE_ARCH_PER_CORE_SLOW = 1;
     /* v4.7.40: per-core slow-path cadence. Each engine can poll faster or */ \
     /* slower than the global poll_interval — fast strategies (momentum) */ \
     /* may want tighter rebuilds; slow strategies (MR) tolerate longer. */ \
-    INT(poll_interval)
+    INT(poll_interval) \
+    /* v5.14.9.B.1: per-core ladder curve override (CURVE_OFF/LINEAR/EXP/STEP). */ \
+    /* 0 = inherit global cfg.risk_degradation_curve; non-zero overrides. Sentinel: */ \
+    /* operator who wants to FORCE OFF on a specific core when global=LINEAR sets */ \
+    /* core_N_risk_degradation_curve=0 (which is also the inherit signal — but */ \
+    /* the global being non-zero means inherit yields LINEAR; cannot per-core- */ \
+    /* disable). Trade-off accepted; matches existing INT-override sentinel pattern. */ \
+    INT(risk_degradation_curve)
 
 template <unsigned F> struct PerCoreOverrides {
 #define _DECL_OV_FIELD(name) FPN<F> name;

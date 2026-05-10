@@ -21447,6 +21447,138 @@ e3_skip_load:;
               snap.ml_confidence_factor == 0.0);
     }
 
+    //======================================================================
+    // [v5.14.9.B.1 — Per-core ladder override (4 fields) + extended REFUSE]
+    //======================================================================
+    {
+        // Default cfg → all per-core overrides initialize to 0 (inherit)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.14.9.B.1: default per-core risk_degradation_curve == 0 (inherit)",
+              cfg.core_overrides[0].risk_degradation_curve == 0);
+        check("v5.14.9.B.1: default per-core risk_full_size_threshold == 0 (inherit)",
+              FPN_IsZero(cfg.core_overrides[0].risk_full_size_threshold));
+        check("v5.14.9.B.1: default per-core risk_min_size_threshold == 0 (inherit)",
+              FPN_IsZero(cfg.core_overrides[0].risk_min_size_threshold));
+        check("v5.14.9.B.1: default per-core risk_min_size_pct == 0 (inherit)",
+              FPN_IsZero(cfg.core_overrides[0].risk_min_size_pct));
+    }
+    {
+        // Per-core override resolves correctly via ControllerConfig_ResolveForCore
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.risk_degradation_curve     = CURVE_OFF;       // global OFF
+        cfg.risk_full_size_threshold   = FPN_FromDouble<64>(0.15);
+        cfg.risk_min_size_threshold    = FPN_FromDouble<64>(0.05);
+        cfg.risk_min_size_pct          = FPN_FromDouble<64>(0.10);
+        // Override core 1: aggressive ladder
+        cfg.core_overrides[1].risk_degradation_curve   = (uint32_t)CURVE_LINEAR;
+        cfg.core_overrides[1].risk_full_size_threshold = FPN_FromDouble<64>(0.20);
+        cfg.core_overrides[1].risk_min_size_pct        = FPN_FromDouble<64>(0.05);
+
+        ControllerConfig<64> resolved_core_0 = ControllerConfig_ResolveForCore(cfg, 0);
+        check("v5.14.9.B.1: core 0 (no override) inherits global curve OFF",
+              resolved_core_0.risk_degradation_curve == CURVE_OFF);
+
+        ControllerConfig<64> resolved_core_1 = ControllerConfig_ResolveForCore(cfg, 1);
+        check("v5.14.9.B.1: core 1 (override=LINEAR) resolves to LINEAR",
+              resolved_core_1.risk_degradation_curve == CURVE_LINEAR);
+        check("v5.14.9.B.1: core 1 full_size_threshold override = 0.20",
+              fabs(FPN_ToDouble(resolved_core_1.risk_full_size_threshold) - 0.20) < 1e-6);
+        check("v5.14.9.B.1: core 1 min_size_pct override = 0.05",
+              fabs(FPN_ToDouble(resolved_core_1.risk_min_size_pct) - 0.05) < 1e-6);
+        // Min threshold not overridden → inherits global 0.05
+        check("v5.14.9.B.1: core 1 min_size_threshold inherits global (no override)",
+              fabs(FPN_ToDouble(resolved_core_1.risk_min_size_threshold) - 0.05) < 1e-6);
+    }
+    {
+        using namespace tt;
+        // AUTOPOPULATE_PER_CORE on per-core resolved cfg → MASK_LADDER_ACTIVE
+        // honors per-core override (with global composite enabled).
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.confidence_composite_enabled = 1;  // engine-wide composite on
+        cfg.risk_degradation_curve = CURVE_OFF;
+        cfg.core_overrides[2].risk_degradation_curve = (uint32_t)CURVE_LINEAR;
+
+        ControllerConfig<64> resolved_core_0 = ControllerConfig_ResolveForCore(cfg, 0);
+        SlowPathGateState state_0;
+        SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state_0, resolved_core_0);
+        check("v5.14.9.B.1: core 0 (no override; global OFF) → MASK_LADDER_ACTIVE off",
+              !BITMAP_IS_SET(state_0.flags, MASK_LADDER_ACTIVE));
+
+        ControllerConfig<64> resolved_core_2 = ControllerConfig_ResolveForCore(cfg, 2);
+        SlowPathGateState state_2;
+        SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state_2, resolved_core_2);
+        check("v5.14.9.B.1: core 2 (override=LINEAR + composite ON) → MASK_LADDER_ACTIVE set",
+              BITMAP_IS_SET(state_2.flags, MASK_LADDER_ACTIVE));
+    }
+    {
+        using namespace tt;
+        // Extended REFUSE predicate honors per-core overrides.
+        // Mirrors EngineSharded_Run logic; logic-only test (heavy fixture
+        // not warranted for the boot-time check).
+        auto should_refuse = [](const ControllerConfig<64>& c) -> bool {
+            if (c.risk_degradation_curve != CURVE_OFF
+                && c.confidence_composite_enabled == 0) return true;
+            for (int i = 0; i < 16; ++i) {
+                if (c.core_overrides[i].risk_degradation_curve != 0
+                    && c.core_overrides[i].risk_degradation_curve != (uint32_t)CURVE_OFF
+                    && c.confidence_composite_enabled == 0) return true;
+            }
+            return false;
+        };
+
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.risk_degradation_curve = CURVE_OFF;
+        cfg.confidence_composite_enabled = 0;
+        check("v5.14.9.B.1: REFUSE predicate FALSE for default + no per-core override",
+              !should_refuse(cfg));
+
+        cfg.core_overrides[3].risk_degradation_curve = (uint32_t)CURVE_LINEAR;
+        check("v5.14.9.B.1: REFUSE predicate TRUE for per-core LINEAR override + NO composite",
+              should_refuse(cfg));
+
+        cfg.confidence_composite_enabled = 1;
+        check("v5.14.9.B.1: REFUSE predicate FALSE for per-core LINEAR override + composite ON",
+              !should_refuse(cfg));
+
+        // Multiple cores override; one disables composite
+        cfg.core_overrides[5].risk_degradation_curve = (uint32_t)CURVE_EXP;
+        check("v5.14.9.B.1: REFUSE predicate FALSE for multiple per-core overrides + composite ON",
+              !should_refuse(cfg));
+
+        cfg.confidence_composite_enabled = 0;
+        check("v5.14.9.B.1: REFUSE predicate TRUE for multiple per-core overrides + NO composite",
+              should_refuse(cfg));
+    }
+    {
+        // Per-core override parser via ControllerConfig_Load (numeric form
+        // for INT-typed curve enum; matches existing per-core parser pattern)
+        char tmp_cfg[] = "/tmp/foxml_v5_14_9_b1_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        const char* contents =
+            "core_3_risk_degradation_curve=2\n"            // CURVE_EXP
+            "core_3_risk_full_size_threshold=0.18\n"
+            "core_3_risk_min_size_threshold=0.04\n"
+            "core_3_risk_min_size_pct=0.08\n";
+        write(fd, contents, strlen(contents));
+        close(fd);
+
+        ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmp_cfg);
+        check("v5.14.9.B.1: parser sets core_3 risk_degradation_curve=2 (CURVE_EXP)",
+              cfg.core_overrides[3].risk_degradation_curve == 2);
+        check("v5.14.9.B.1: parser sets core_3 risk_full_size_threshold=0.18",
+              fabs(FPN_ToDouble(cfg.core_overrides[3].risk_full_size_threshold) - 0.18) < 1e-6);
+        check("v5.14.9.B.1: parser sets core_3 risk_min_size_threshold=0.04",
+              fabs(FPN_ToDouble(cfg.core_overrides[3].risk_min_size_threshold) - 0.04) < 1e-6);
+        check("v5.14.9.B.1: parser sets core_3 risk_min_size_pct=0.08",
+              fabs(FPN_ToDouble(cfg.core_overrides[3].risk_min_size_pct) - 0.08) < 1e-6);
+
+        // Other cores remain inherit (0)
+        check("v5.14.9.B.1: other cores untouched (core_0 still 0=inherit)",
+              cfg.core_overrides[0].risk_degradation_curve == 0);
+
+        unlink(tmp_cfg);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
