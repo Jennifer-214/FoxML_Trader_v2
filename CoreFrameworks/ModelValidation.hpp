@@ -191,13 +191,13 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
                 tier1_drift = true;
                 ++tier1_count;
             }
-            if (h->stamp_inf_barrier_gate_enabled != cfg.barrier_gate_enabled) {
+            if (h->stamp_inf_barrier_gate_enabled != BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED)) {
                 fprintf(stderr,
                     "[inference_cfg] %s: %s role=%s stamp claims "
                     "barrier_gate_enabled=%d but cfg=%d\n",
                     strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
                     loc, role_name, h->stamp_inf_barrier_gate_enabled,
-                    cfg.barrier_gate_enabled);
+                    BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED));
                 tier1_drift = true;
                 ++tier1_count;
             }
@@ -221,7 +221,7 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
                         loc, role_name, h->stamp_inf_bandit_blend_ratio, cfg_bbr);
                 }
             }
-            if (h->has_stamp_fees && cfg.cost_gate_enabled) {
+            if (h->has_stamp_fees && BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED)) {
                 double cfg_frm = FPN_ToDouble(cfg.fee_rate_maker);
                 double cfg_frt = FPN_ToDouble(cfg.fee_rate_taker);
                 if (fabs(h->stamp_inf_fee_rate_maker - cfg_frm) > 1e-6) {

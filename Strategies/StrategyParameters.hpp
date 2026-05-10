@@ -644,7 +644,7 @@ inline void EmaCross_BuildParameters(
 //   2. CORE_MODEL_BUY_SIGNAL (single-binary, complementary interpretation) — legacy
 //   3. no models → fall back to SimpleDip behavior
 //
-// BarrierGate modulation (when config->barrier_gate_enabled):
+// BarrierGate modulation (when BITMAP_IS_SET(config->gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED)):
 //   - hard block when bg.blocked (p_peak > BARRIER_HARD_BLOCK)
 //   - hard block when prediction < ml_buy_threshold (signal too cold)
 //   - else soft modulation: scale trade_size by bg.gate ∈ [g_min, 1.0]
@@ -1314,7 +1314,7 @@ inline void ML_BuildParameters(
     // gate decision: BarrierGate (continuous modulation) OR binary threshold
     FPN<F> gate_price = FPN_Zero<F>();  // default: zero-gate (no entry)
 
-    if (config->barrier_gate_enabled) {
+    if (BITMAP_IS_SET(config->gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED)) {
         BarrierGateResult bg = BarrierGate_Compute(p_peak, p_valley);
         // hard block if either: barrier says "imminent peak" OR prediction below threshold
         if (!bg.blocked && prediction >= threshold) {
@@ -1619,7 +1619,7 @@ inline void Strategy_BuildParameters(
     // yet plumb live spread bps to BuildParameters; timing + impact alone
     // is the conservative approximation. Future: thread spread_bps from
     // CoreSlowState::spread_state.
-    if (config->cost_gate_enabled && !FPN_IsZero(out->tp_pct) &&
+    if (BITMAP_IS_SET(config->gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED) && !FPN_IsZero(out->tp_pct) &&
         !FPN_IsZero(out->bg_price_threshold) && rolling) {
         double price = FPN_ToDouble(rolling->price_avg);
         double rel_vol = (price > 0.01)

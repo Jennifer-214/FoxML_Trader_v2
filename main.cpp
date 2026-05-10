@@ -319,7 +319,7 @@ int main(int argc, char *argv[]) {
     // Recorder pointer is wired into depth_shared below the depth-thread block.
     DepthRecorder depth_rec;
     DepthRecorder_Init(&depth_rec, bcfg.symbol, "data", ccfg.record_max_days,
-                       ccfg.record_depth && ccfg.depth_enabled);
+                       ccfg.record_depth && BITMAP_IS_SET(ccfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED));
 
     // metrics log — diagnostics for verifying regime switching, strategy behavior
     MetricsLog metrics;
@@ -534,7 +534,7 @@ int main(int argc, char *argv[]) {
     //==================================================================================================
     DepthSharedState<FP> depth_shared = {};
     pthread_t depth_tid = 0;
-    if (ccfg.depth_enabled) {
+    if (BITMAP_IS_SET(ccfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED)) {
         const char *depth_host;
         int depth_port;
         if (bcfg.use_testnet)         { depth_host = "testnet.binance.vision";   depth_port = 443; }

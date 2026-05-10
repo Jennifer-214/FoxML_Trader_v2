@@ -2470,7 +2470,7 @@ inline void EventLoop_RebuildOneCore(
         // fields from cfg uniformly across all strategies. Branchless: flag
         // bit is OR'd in; max_age value is unconditional. Hot path's
         // branchless mask check uses these.
-        if (config->param_staleness_gate_enabled) {
+        if (BITMAP_IS_SET(config->gate_cfg_flags, MASK_GATE_CFG_PARAM_STALENESS_GATE_ENABLED)) {
             state->cores[slot].pending_params.flags
                 |= GATE_FLAG_STALENESS_ENABLED;
         }

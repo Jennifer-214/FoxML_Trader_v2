@@ -2156,7 +2156,7 @@ inline int EnsembleModelZoo_IsReadyForInference(const EnsembleModelZoo<F>* ezoo)
 // (Free+null at boot; flag-only at hot-swap per v5.10.0c semantics).
 #define FOREACH_SINGLE_ZOO_POST_LOAD(X)                                        \
     X(verify_expected,     CoreModelZoo_VerifyExpected(zoo, base_run_path,      \
-                               cfg.barrier_gate_enabled,                         \
+                               BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED),                         \
                                FPN_ToDouble(cfg.ml_buy_threshold),               \
                                cfg.model_verify_strict, core_id,                 \
                                cfg.poll_interval,                                 \

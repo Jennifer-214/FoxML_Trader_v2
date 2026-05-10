@@ -9739,7 +9739,7 @@ e3_skip_load:;
         cfg.entry_offset_pct = FPN_FromDouble<FP>(0.001);
 
         // Defaults off — baseline gate output.
-        cfg.cost_gate_enabled = 0;
+        BITMAP_CLR(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED);
         cfg.foxml_vol_scaling_enabled = 0;
         tt::GateParameters<FP> baseline{};
         tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg,
@@ -9761,7 +9761,7 @@ e3_skip_load:;
 
         // CostModel enabled — non-crashing path, flags computed.
         cfg.foxml_vol_scaling_enabled = 0;
-        cfg.cost_gate_enabled = 1;
+        BITMAP_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED);
         tt::GateParameters<FP> with_cost{};
         tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg,
                                       FPN_FromDouble<FP>(1000.0), &with_cost);
@@ -12625,13 +12625,13 @@ e3_skip_load:;
                 // every documented stamp body field.
                 ControllerConfig<64> cfg = ControllerConfig_Default<64>();
                 cfg.confidence_threshold_scale       = FPN_FromDouble<64>(2.5);
-                cfg.barrier_gate_enabled             = 1;
+                BITMAP_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED);
                 cfg.confidence_hard_block_threshold  = FPN_FromDouble<64>(0.07);
                 cfg.held_out_fraction                = FPN_FromDouble<64>(0.25);
                 // v5.14.9.D — DELETED cfg.confidence_freshness_tau (TECH_DEBT-004 close).
                 cfg.bandit_enabled                   = 1;
                 cfg.bandit_blend_ratio               = FPN_FromDouble<64>(0.40);
-                cfg.cost_gate_enabled                = 1;
+                BITMAP_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED);
                 cfg.fee_rate_maker                   = FPN_FromDouble<64>(0.00060);
                 cfg.fee_rate_taker                   = FPN_FromDouble<64>(0.00090);
                 cfg.poll_interval                    = 200u;
@@ -12644,7 +12644,7 @@ e3_skip_load:;
                 STAMP_SET(inf, inference_cfg);
                 inf.inference_cfg_confidence_threshold_scale =
                     FPN_ToDouble(cfg.confidence_threshold_scale);
-                inf.inference_cfg_barrier_gate_enabled = cfg.barrier_gate_enabled;
+                inf.inference_cfg_barrier_gate_enabled = BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED) ? 1 : 0;
                 inf.inference_cfg_confidence_hard_block_threshold =
                     FPN_ToDouble(cfg.confidence_hard_block_threshold);
                 inf.inference_cfg_held_out_fraction =
@@ -12655,7 +12655,7 @@ e3_skip_load:;
                     inf.inference_cfg_bandit_blend_ratio =
                         FPN_ToDouble(cfg.bandit_blend_ratio);
                 }
-                if (cfg.cost_gate_enabled) {
+                if (BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED)) {
                     STAMP_SET(inf, fees);
                     inf.inference_cfg_fee_rate_maker = FPN_ToDouble(cfg.fee_rate_maker);
                     inf.inference_cfg_fee_rate_taker = FPN_ToDouble(cfg.fee_rate_taker);
@@ -17921,7 +17921,7 @@ e3_skip_load:;
         // === Test 9: cfg defaults ===
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
         check("v5.12.1.B.3: default cfg.param_staleness_gate_enabled == 0",
-              cfg.param_staleness_gate_enabled == 0);
+              !BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_PARAM_STALENESS_GATE_ENABLED));
         check("v5.12.1.B.3: default cfg.param_max_age_ticks == 1000",
               cfg.param_max_age_ticks == 1000);
 
@@ -21844,6 +21844,109 @@ e3_skip_load:;
         check("v5.14.9.F: parser sets breakeven_on_profit bit from legacy key=1",
               BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT));
         unlink(tmpfile);
+    }
+
+    //======================================================================
+    // [v5.14.9.F.1 — FOREACH_GATE_CFG_FLAG (6 flags) — entry/exit gate domain]
+    //======================================================================
+    // Second domain registry. Migrates 6 entry/exit gate booleans from
+    // individual ints to a uint8_t bitmap on ControllerConfig (gate_cfg_flags).
+    // barrier_gate_enabled is stamp-bound via FOREACH_STAMP_BOUND_MODEL_CONST
+    // (not via cfg-bound registry); migration is straight cascade — no special
+    // dispatch needed (.F.2 handles ML stamp-bound flags with emit_source column).
+    {
+        check("v5.14.9.F.1: GATE_CFG_COUNT >= 6 (6 entries)",
+              GATE_CFG_COUNT >= 6);
+        check("v5.14.9.F.1: GATE_CFG_COUNT <= 8 (uint8_t storage budget)",
+              GATE_CFG_COUNT <= 8);
+    }
+    {
+        // MASK constants at correct bit positions (registry order)
+        check("v5.14.9.F.1: MASK_GATE_CFG_DEPTH_ENABLED == 0x01",
+              MASK_GATE_CFG_DEPTH_ENABLED == 0x01);
+        check("v5.14.9.F.1: MASK_GATE_CFG_GATE_EMA_ENABLED == 0x02",
+              MASK_GATE_CFG_GATE_EMA_ENABLED == 0x02);
+        check("v5.14.9.F.1: MASK_GATE_CFG_NO_TRADE_BAND_ENABLED == 0x04",
+              MASK_GATE_CFG_NO_TRADE_BAND_ENABLED == 0x04);
+        check("v5.14.9.F.1: MASK_GATE_CFG_COST_GATE_ENABLED == 0x08",
+              MASK_GATE_CFG_COST_GATE_ENABLED == 0x08);
+        check("v5.14.9.F.1: MASK_GATE_CFG_BARRIER_GATE_ENABLED == 0x10",
+              MASK_GATE_CFG_BARRIER_GATE_ENABLED == 0x10);
+        check("v5.14.9.F.1: MASK_GATE_CFG_PARAM_STALENESS_GATE_ENABLED == 0x20",
+              MASK_GATE_CFG_PARAM_STALENESS_GATE_ENABLED == 0x20);
+    }
+    {
+        // Default cfg: all 6 flags off (backward compat)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.14.9.F.1: default depth_enabled bit OFF",
+              !BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED));
+        check("v5.14.9.F.1: default gate_ema_enabled bit OFF",
+              !BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_GATE_EMA_ENABLED));
+        check("v5.14.9.F.1: default no_trade_band_enabled bit OFF",
+              !BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_NO_TRADE_BAND_ENABLED));
+        check("v5.14.9.F.1: default cost_gate_enabled bit OFF",
+              !BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED));
+        check("v5.14.9.F.1: default barrier_gate_enabled bit OFF",
+              !BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED));
+        check("v5.14.9.F.1: default param_staleness_gate_enabled bit OFF",
+              !BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_PARAM_STALENESS_GATE_ENABLED));
+    }
+    {
+        // AUTOPOPULATE_FROM_HEX writes the right bits + domain isolation
+        uint8_t flags = 0;
+        GATE_CFG_FLAG_AUTOPOPULATE_FROM_HEX(flags, 1, 0, 1, 0, 1, 0);
+        check("v5.14.9.F.1: AUTOPOPULATE(1,0,1,0,1,0) sets depth_enabled",
+              BITMAP_IS_SET(flags, MASK_GATE_CFG_DEPTH_ENABLED));
+        check("v5.14.9.F.1: AUTOPOPULATE(1,0,1,0,1,0) clears gate_ema_enabled",
+              !BITMAP_IS_SET(flags, MASK_GATE_CFG_GATE_EMA_ENABLED));
+        check("v5.14.9.F.1: AUTOPOPULATE(1,0,1,0,1,0) sets no_trade_band_enabled",
+              BITMAP_IS_SET(flags, MASK_GATE_CFG_NO_TRADE_BAND_ENABLED));
+        check("v5.14.9.F.1: AUTOPOPULATE(1,0,1,0,1,0) sets barrier_gate_enabled",
+              BITMAP_IS_SET(flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED));
+        // Domain isolation: only GATE bits set
+        const uint8_t gate_mask = MASK_GATE_CFG_DEPTH_ENABLED | MASK_GATE_CFG_GATE_EMA_ENABLED |
+                                   MASK_GATE_CFG_NO_TRADE_BAND_ENABLED | MASK_GATE_CFG_COST_GATE_ENABLED |
+                                   MASK_GATE_CFG_BARRIER_GATE_ENABLED | MASK_GATE_CFG_PARAM_STALENESS_GATE_ENABLED;
+        check("v5.14.9.F.1: AUTOPOPULATE writes only GATE bits (no spillover)",
+              (flags & ~gate_mask) == 0);
+    }
+    {
+        // Parser back-compat: legacy keys still set the right bits
+        char tmpfile[] = "/tmp/foxml_v5_14_9_f1_XXXXXX";
+        int fd = mkstemp(tmpfile);
+        check("v5.14.9.F.1: parser tmpfile created", fd >= 0);
+        FILE* f = fdopen(fd, "w");
+        check("v5.14.9.F.1: parser tmpfile fdopen", f != nullptr);
+        fprintf(f, "depth_enabled=1\n");
+        fprintf(f, "gate_ema_enabled=1\n");
+        fprintf(f, "cost_gate_enabled=1\n");
+        fprintf(f, "barrier_gate_enabled=1\n");
+        fprintf(f, "param_staleness_gate_enabled=1\n");
+        // no_trade_band_enabled NOT in file: should stay default OFF
+        fclose(f);
+
+        ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmpfile);
+        check("v5.14.9.F.1: parser sets depth_enabled bit",
+              BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED));
+        check("v5.14.9.F.1: parser sets gate_ema_enabled bit",
+              BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_GATE_EMA_ENABLED));
+        check("v5.14.9.F.1: parser sets cost_gate_enabled bit",
+              BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED));
+        check("v5.14.9.F.1: parser sets barrier_gate_enabled bit",
+              BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED));
+        check("v5.14.9.F.1: parser sets param_staleness_gate_enabled bit",
+              BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_PARAM_STALENESS_GATE_ENABLED));
+        check("v5.14.9.F.1: parser leaves no_trade_band_enabled OFF when not in file",
+              !BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_NO_TRADE_BAND_ENABLED));
+        unlink(tmpfile);
+    }
+    {
+        // Cross-domain isolation: setting GATE bit doesn't affect LIFECYCLE bitmap
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        uint8_t lifecycle_before = cfg.lifecycle_cfg_flags;
+        BITMAP_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED);
+        check("v5.14.9.F.1: setting GATE bit doesn't disturb LIFECYCLE bitmap",
+              cfg.lifecycle_cfg_flags == lifecycle_before);
     }
 
     //======================================================================

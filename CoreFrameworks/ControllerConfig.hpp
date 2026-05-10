@@ -15,6 +15,7 @@
 #include "../ML_Headers/LinearRegression3X.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"  // v5.14.9.A — DegradationCurve enum + ToString/FromString helpers
 #include "LifecycleCfgFlagRegistry.hpp"       // v5.14.9.F — FOREACH_LIFECYCLE_CFG_FLAG + MASK_LIFECYCLE_CFG_*
+#include "GateCfgFlagRegistry.hpp"            // v5.14.9.F.1 — FOREACH_GATE_CFG_FLAG + MASK_GATE_CFG_*
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -368,14 +369,24 @@ template <unsigned F> struct ControllerConfig {
                                   // (e.g. 5.0 = 5x)
   FPN<F> spike_spacing_reduction; // spacing multiplier during spike (e.g. 0.5 =
                                   // half normal)
-  // partial exits (scaling out) + breakeven ratchet — v5.14.9.F bit-packed via
-  // FOREACH_LIFECYCLE_CFG_FLAG. Replaces 3 individual int fields:
-  //   partial_exit_enabled  → BITMAP_IS_SET(lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED)
-  //   breakeven_on_partial  → BITMAP_IS_SET(lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL)
-  //   breakeven_on_profit   → BITMAP_IS_SET(lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT)
-  // See CoreFrameworks/LifecycleCfgFlagRegistry.hpp for registry definition.
-  // Adding a new lifecycle-domain boolean = 1 row in FOREACH_LIFECYCLE_CFG_FLAG.
-  uint8_t lifecycle_cfg_flags;
+  // v5.14.9.F* — DOMAIN CFG FLAG BITMAPS (HOT-CLUSTER per heterogeneous-registry-pattern.md
+  // cache-layout discipline). Each bitmap is its own domain registry; adding a new flag
+  // in any domain = 1 row in FOREACH_<DOMAIN>_CFG_FLAG. See DESIGN_SPECS docs for pattern.
+  //
+  // LIFECYCLE (v5.14.9.F): position-exit mechanics — see LifecycleCfgFlagRegistry.hpp
+  //   partial_exit_enabled  → MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED
+  //   breakeven_on_partial  → MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL
+  //   breakeven_on_profit   → MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT
+  //
+  // GATE (v5.14.9.F.1): entry/exit gate mechanics — see GateCfgFlagRegistry.hpp
+  //   depth_enabled                → MASK_GATE_CFG_DEPTH_ENABLED
+  //   gate_ema_enabled             → MASK_GATE_CFG_GATE_EMA_ENABLED
+  //   no_trade_band_enabled        → MASK_GATE_CFG_NO_TRADE_BAND_ENABLED
+  //   cost_gate_enabled            → MASK_GATE_CFG_COST_GATE_ENABLED
+  //   barrier_gate_enabled         → MASK_GATE_CFG_BARRIER_GATE_ENABLED (stamp-bound via FOREACH_STAMP_BOUND_MODEL_CONST)
+  //   param_staleness_gate_enabled → MASK_GATE_CFG_PARAM_STALENESS_GATE_ENABLED
+  alignas(8) uint8_t lifecycle_cfg_flags;
+              uint8_t gate_cfg_flags;
   FPN<F>
       partial_exit_pct; // fraction to exit at TP1 (0.5 = 50%, rest rides TP2)
   FPN<F> tp2_mult; // TP2 = TP1_distance * this (2.0 = double the TP distance)
@@ -392,12 +403,11 @@ template <unsigned F> struct ControllerConfig {
                                 // (07-13 UTC)
   FPN<F> session_us_mult;       // gate multiplier during US session (13-20 UTC)
   FPN<F> session_overnight_mult; // gate multiplier during overnight (20-00 UTC)
-  // order book (L2 depth)
-  int depth_enabled; // 0 = trade stream only, 1 = also subscribe to depth
+  // order book (L2 depth) — depth_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
   FPN<F> min_book_imbalance; // require bid bias to buy (0 = disabled, 0.10 =
                              // 10% bid excess)
   // EMA gate (proactive entry — reacts in 1-2s instead of 5s)
-  int gate_ema_enabled;  // 0=use rolling avg (legacy), 1=use EMA for gate price
+  // gate_ema_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
   FPN<F> gate_ema_alpha; // EMA smoothing factor (0.997 = ~333 tick window)
   FPN<F> gate_ema_one_minus_alpha; // precomputed 1.0 - alpha (avoid subtraction
                                    // on hot path)
@@ -469,7 +479,7 @@ template <unsigned F> struct ControllerConfig {
   // via branchless mask. SHALT_PARAM_STALE on strategy_halt_reason.
   // Disabled by default; flip to 1 BEFORE live deployment after
   // measuring slow-path p99 latency on operator hardware.
-  int param_staleness_gate_enabled;          // 0=disabled (default), 1=enabled
+  // param_staleness_gate_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
   uint64_t param_max_age_ticks;              // gap threshold (default 1000 = 10x default poll_interval=100)
   // v5.14.8.E — stale-MODEL age check (load-time gate). Operator policy:
   // if a loaded model's stamp body claims training_timestamp_us older
@@ -602,8 +612,7 @@ template <unsigned F> struct ControllerConfig {
   FPN<F> vol_scale_max; // max scale factor (e.g. 2.0 = never more than 200% of
                         // base qty)
   // no-trade band (cost-aware signal strength gate)
-  int no_trade_band_enabled; // 0=disabled, 1=suppress entries when signal <
-                             // fee_rate * mult
+  // no_trade_band_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
   FPN<F> no_trade_band_mult; // signal must exceed fee_rate * this to trade
                              // (e.g. 3.0)
   // ML inference
@@ -640,7 +649,7 @@ template <unsigned F> struct ControllerConfig {
   uint32_t notify_cooldown_secs;  // per-event-kind cooldown (default 60)
   // FoxML integration — Phase 6C (all default OFF, zero behavior change when
   // disabled)
-  int cost_gate_enabled; // 0=disabled, 1=estimate trade cost via CostModel,
+  // cost_gate_enabled migrated to gate_cfg_flags (v5.14.9.F.1) — original comment: 0=disabled, 1=estimate trade cost via CostModel,
                          // suppress if unprofitable
   int foxml_vol_scaling_enabled;  // 0=disabled, 1=scale risk_pct by VolScaler
                                   // inverse-vol on slow path
@@ -798,7 +807,7 @@ template <unsigned F> struct ControllerConfig {
   int prediction_normalize; // 0=disabled, 1=z-score normalize predictions
                             // (activates after 100)
   // Barrier gate — Phase 7E (default OFF)
-  int barrier_gate_enabled;    // 0=disabled, 1=block entries before predicted
+  // barrier_gate_enabled migrated to gate_cfg_flags (v5.14.9.F.1; stamp-bound via FOREACH_STAMP_BOUND_MODEL_CONST) — original comment: 0=disabled, 1=block entries before predicted
                                // price peaks
   char peak_model_path[256];   // path to P(will_peak) model
   char valley_model_path[256]; // path to P(will_valley) model
@@ -1233,6 +1242,14 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
       /*partial_exit_enabled*/  0,
       /*breakeven_on_partial*/  1,
       /*breakeven_on_profit*/   0);
+  // v5.14.9.F.1 — gate_cfg_flags defaults: all 6 flags off (backward compat)
+  GATE_CFG_FLAG_AUTOPOPULATE_FROM_HEX(cfg.gate_cfg_flags,
+      /*depth_enabled*/                0,
+      /*gate_ema_enabled*/             0,
+      /*no_trade_band_enabled*/        0,
+      /*cost_gate_enabled*/            0,
+      /*barrier_gate_enabled*/         0,
+      /*param_staleness_gate_enabled*/ 0);
   cfg.partial_exit_pct = FPN_FromDouble<F>(0.5); // 50% at TP1, 50% rides
   cfg.tp2_mult = FPN_FromDouble<F>(2.0);         // TP2 = 2x TP1 distance
   cfg.breakeven_buffer_pct =
@@ -1245,10 +1262,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.session_us_mult = FPN_FromDouble<F>(0.8); // tighter gates, best liquidity
   cfg.session_overnight_mult =
       FPN_FromDouble<F>(1.3);             // wider gates, declining volume
-  cfg.depth_enabled = 0;                  // 0 = disabled (backward compat)
+  // depth_enabled migrated to gate_cfg_flags (default 0; set above via AUTOPOPULATE)
   cfg.min_book_imbalance = FPN_Zero<F>(); // 0 = disabled
-  // EMA gate
-  cfg.gate_ema_enabled = 0; // 0 = disabled (backward compat)
+  // EMA gate — gate_ema_enabled migrated to gate_cfg_flags (default 0)
   cfg.gate_ema_alpha = FPN_FromDouble<F>(0.997); // ~333-tick effective window
   cfg.gate_ema_one_minus_alpha = FPN_FromDouble<F>(0.003); // 1.0 - 0.997
   cfg.default_strategy = -1; // -1 = regime auto (backward compat)
@@ -1273,7 +1289,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.vol_scale_min = FPN_FromDouble<F>(0.25);
   cfg.vol_scale_max = FPN_FromDouble<F>(2.0);
   // no-trade band
-  cfg.no_trade_band_enabled = 0; // off by default (backward compat)
+  // no_trade_band_enabled migrated to gate_cfg_flags (default 0)
   cfg.no_trade_band_mult = FPN_FromDouble<F>(3.0);
   // ML inference (disabled by default — zero overhead when off)
   cfg.ml_backend = 0;
@@ -1301,7 +1317,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.notify_command[0] = '\0';
   cfg.notify_cooldown_secs = 60;
   // FoxML integration — Phase 6C (all OFF by default, zero behavior change)
-  cfg.cost_gate_enabled = 0;
+  // cost_gate_enabled migrated to gate_cfg_flags (default 0)
   cfg.foxml_vol_scaling_enabled = 0;
   cfg.foxml_vol_scaling_z_max = FPN_FromDouble<F>(3.0);
   cfg.bandit_enabled = 0;
@@ -1402,7 +1418,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.reconcile_dry_run           = 1;                            // legacy field; safer default
   cfg.reconcile_mode              = 1;                            // v5.14.4 — RECONCILE_WARN (matches dry_run=1 legacy behavior)
   cfg.prediction_normalize = 0;
-  cfg.barrier_gate_enabled = 0;
+  // barrier_gate_enabled migrated to gate_cfg_flags (default 0)
   cfg.model_verify_strict = 0;  // 0=warn, 1=strict (fail on mismatch), -1=skip
   cfg.peak_model_path[0] = '\0';
   cfg.valley_model_path[0] = '\0';
@@ -1442,7 +1458,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // recovery_until_us auto-clear; trading resumes (assuming WS healthy).
   cfg.recovery_delay_secs = 30;
   // v5.12.1.B.3 — disabled by default; flip after measuring slow-path p99.
-  cfg.param_staleness_gate_enabled = 0;
+  // param_staleness_gate_enabled migrated to gate_cfg_flags (default 0)
   cfg.param_max_age_ticks = 1000;
   // v5.14.8.E — stale-model age check (boot-time gate). Default 0 = disabled.
   cfg.model_max_age_hours = 0;
@@ -1717,7 +1733,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // v5.12.1.A.3 — post-flatten recovery refusal window
     CFG_PARSE_INT(recovery_delay_secs)
     // v5.12.1.B.3 — hot-path parameter freshness gate
-    CFG_PARSE_INT(param_staleness_gate_enabled)
+    // param_staleness_gate_enabled migrated to gate_cfg_flags — parser branch added in lifecycle block (v5.14.9.F.1)
     // param_max_age_ticks is uint64_t; can't use CFG_PARSE_INT (atoi returns int).
     if (strcmp(key, "param_max_age_ticks") == 0) {
       cfg.param_max_age_ticks = (uint64_t)atoll(val);
@@ -1908,18 +1924,55 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       else   cfg.lifecycle_cfg_flags &= (uint8_t)~MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT;
       continue;
     }
+    // v5.14.9.F.1 — gate_cfg_flags bitmap (6 fields migrated; legacy keys preserved for back-compat)
+    if (strcmp(key, "depth_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.gate_cfg_flags |=  MASK_GATE_CFG_DEPTH_ENABLED;
+      else   cfg.gate_cfg_flags &= (uint8_t)~MASK_GATE_CFG_DEPTH_ENABLED;
+      continue;
+    }
+    if (strcmp(key, "gate_ema_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.gate_cfg_flags |=  MASK_GATE_CFG_GATE_EMA_ENABLED;
+      else   cfg.gate_cfg_flags &= (uint8_t)~MASK_GATE_CFG_GATE_EMA_ENABLED;
+      continue;
+    }
+    if (strcmp(key, "no_trade_band_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.gate_cfg_flags |=  MASK_GATE_CFG_NO_TRADE_BAND_ENABLED;
+      else   cfg.gate_cfg_flags &= (uint8_t)~MASK_GATE_CFG_NO_TRADE_BAND_ENABLED;
+      continue;
+    }
+    if (strcmp(key, "cost_gate_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.gate_cfg_flags |=  MASK_GATE_CFG_COST_GATE_ENABLED;
+      else   cfg.gate_cfg_flags &= (uint8_t)~MASK_GATE_CFG_COST_GATE_ENABLED;
+      continue;
+    }
+    if (strcmp(key, "barrier_gate_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.gate_cfg_flags |=  MASK_GATE_CFG_BARRIER_GATE_ENABLED;
+      else   cfg.gate_cfg_flags &= (uint8_t)~MASK_GATE_CFG_BARRIER_GATE_ENABLED;
+      continue;
+    }
+    if (strcmp(key, "param_staleness_gate_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.gate_cfg_flags |=  MASK_GATE_CFG_PARAM_STALENESS_GATE_ENABLED;
+      else   cfg.gate_cfg_flags &= (uint8_t)~MASK_GATE_CFG_PARAM_STALENESS_GATE_ENABLED;
+      continue;
+    }
     CFG_PARSE_PCT(breakeven_buffer_pct)
-    CFG_PARSE_INT(depth_enabled)
+    // depth_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
     CFG_PARSE_INT(use_real_money)
     CFG_PARSE_INT(acknowledge_hardcoded_strategy_in_live)  // v5.7.2
     CFG_PARSE_INT(require_mlockall)  // v5.11.3
     CFG_PARSE_INT(init_arena_use_hugepages)  // v5.11.22
     CFG_PARSE_INT(session_filter_enabled)
-    CFG_PARSE_INT(gate_ema_enabled)
+    // gate_ema_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
     CFG_PARSE_INT(default_strategy)
     CFG_PARSE_INT(kill_switch_enabled)
     CFG_PARSE_INT(vol_sizing_enabled)
-    CFG_PARSE_INT(no_trade_band_enabled)
+    // no_trade_band_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
     CFG_PARSE_INT(ml_backend)
     CFG_PARSE_INT(regime_model_backend)
 
@@ -1960,7 +2013,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
 
     //--- FoxML integration (Phase 6C) ---
-    CFG_PARSE_INT(cost_gate_enabled)
+    // cost_gate_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
     CFG_PARSE_INT(foxml_vol_scaling_enabled)
     CFG_PARSE_FPN(foxml_vol_scaling_z_max)
     CFG_PARSE_INT(bandit_enabled)
@@ -2179,7 +2232,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         continue;
     }
     CFG_PARSE_INT(prediction_normalize)
-    CFG_PARSE_INT(barrier_gate_enabled)
+    // barrier_gate_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
     CFG_PARSE_INT(model_verify_strict)
 
     // Per-core sharding (Phase 13) — engine_mode accepts both string and int

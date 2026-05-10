@@ -3208,7 +3208,7 @@ static inline void *train_model_worker_fn(void *arg) {
         inf.has_inference_cfg = 1;
         inf.confidence_threshold_scale =
             FPN_ToDouble(run_control->results.config_used.confidence_threshold_scale);
-        inf.barrier_gate_enabled = run_control->results.config_used.barrier_gate_enabled;
+        inf.barrier_gate_enabled = BITMAP_IS_SET(run_control->results.config_used.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED) ? 1 : 0;
         inf.confidence_hard_block_threshold =
             FPN_ToDouble(run_control->results.config_used.confidence_hard_block_threshold);
         inf.held_out_fraction =

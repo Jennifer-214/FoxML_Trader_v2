@@ -344,7 +344,7 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   // barrier gate models (peak/valley classifiers)
   Model_Init(&ctrl->peak_model);
   Model_Init(&ctrl->valley_model);
-  if (config.barrier_gate_enabled) {
+  if (BITMAP_IS_SET(config.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED)) {
     if (config.peak_model_path[0])
       Model_Load(&ctrl->peak_model, config.peak_model_path, config.ml_backend ? config.ml_backend : 1);
     if (config.valley_model_path[0])
@@ -770,7 +770,7 @@ inline void PortfolioController_DrainExits(PortfolioController<F> *ctrl) {
 // signal-only: compute buy gate without feeding regression (for unpause/init)
 template <unsigned F>
 inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) {
-  FPN<F> gate_avg = ctrl->config.gate_ema_enabled ? ctrl->ema_price : FPN_Zero<F>();
+  FPN<F> gate_avg = BITMAP_IS_SET(ctrl->config.gate_cfg_flags, MASK_GATE_CFG_GATE_EMA_ENABLED) ? ctrl->ema_price : FPN_Zero<F>();
   switch (ctrl->strategy_id) {
   case STRATEGY_MEAN_REVERSION:
     ctrl->buy_conds = MeanReversion_BuySignal(&ctrl->mean_rev, &ctrl->rolling,
@@ -848,7 +848,7 @@ inline void PortfolioController_StrategyBuySignal(PortfolioController<F> *ctrl) 
 
   // NO-TRADE BAND: suppress entries when signal strength < fee breakeven
   // cost-aware: signal must exceed fee_rate × no_trade_band_mult to justify trade
-  if (ctrl->config.no_trade_band_enabled && !FPN_IsZero(ctrl->rolling.price_avg)) {
+  if (BITMAP_IS_SET(ctrl->config.gate_cfg_flags, MASK_GATE_CFG_NO_TRADE_BAND_ENABLED) && !FPN_IsZero(ctrl->rolling.price_avg)) {
     // Phase 8: pre-trade gate threshold — fee_rate as a quantity, not a fee
     // charge on a fill. Leave as fee_rate (not fee_rate_taker) intentionally.
     FPN<F> min_signal = FPN_Mul(ctrl->config.fee_rate, ctrl->config.no_trade_band_mult);
@@ -1825,7 +1825,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
 
   // COST GATE: suppress entries when estimated trade cost exceeds TP target
   // uses CostModel from FoxML — accounts for spread, volatility timing, and market impact
-  if (ctrl->config.cost_gate_enabled && !FPN_IsZero(ctrl->buy_conds.price)
+  if (BITMAP_IS_SET(ctrl->config.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED) && !FPN_IsZero(ctrl->buy_conds.price)
       && !FPN_IsZero(ctrl->rolling.price_avg)) {
     double price_d = FPN_ToDouble(ctrl->rolling.price_avg);
     double spread_bps = FPN_ToDouble(ctrl->config.fee_rate) * 10000.0 * 2.0; // round-trip fee as spread proxy
@@ -1850,7 +1850,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // v5.9.0: NaN/Inf in feature pack OR prediction → skip the gate
   //         (don't block on garbage; safer to defer to lower-level
   //         gates that have valid inputs).
-  if (ctrl->config.barrier_gate_enabled && !FPN_IsZero(ctrl->buy_conds.price)
+  if (BITMAP_IS_SET(ctrl->config.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED) && !FPN_IsZero(ctrl->buy_conds.price)
       && Model_IsLoaded(&ctrl->peak_model)) {
     float features[MODEL_MAX_FEATURES];
     FeatureComputeCtx<F> ctx{};

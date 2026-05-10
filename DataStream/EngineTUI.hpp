@@ -696,7 +696,7 @@ static inline void MLSnapshot_Populate(MLSnapshot *snap, const PortfolioControll
     snap->cost_bps = ctrl->last_cost_bps;
     snap->foxml_vol_scale = ctrl->foxml_vol_scale;
     snap->confidence = ctrl->last_confidence;
-    snap->cost_gate_enabled = ctrl->config.cost_gate_enabled;
+    snap->cost_gate_enabled = BITMAP_IS_SET(ctrl->config.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED);
     snap->foxml_vol_scaling_enabled = ctrl->config.foxml_vol_scaling_enabled;
     snap->confidence_enabled = ctrl->config.confidence_enabled;
     snap->bandit_enabled = ctrl->config.bandit_enabled;
@@ -1556,7 +1556,7 @@ static inline void TUI_CopySnapshot(TUISnapshot *snap,
       double bprice = FPN_ToDouble(ctrl->buy_conds.price);
       snap->signal_strength = (bavg > 1e-15) ? fabs(bprice - bavg) / bavg * 100.0 : 0.0;
       double min_signal = FPN_ToDouble(ctrl->config.fee_rate) * FPN_ToDouble(ctrl->config.no_trade_band_mult) * 100.0;
-      snap->no_trade_band_blocked = ctrl->config.no_trade_band_enabled &&
+      snap->no_trade_band_blocked = BITMAP_IS_SET(ctrl->config.gate_cfg_flags, MASK_GATE_CFG_NO_TRADE_BAND_ENABLED) &&
           (snap->signal_strength < min_signal) && !snap->state_warmup;
     }
     // FoxML integration (Phase 6C) — single populate function

@@ -482,8 +482,8 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     depth_replay_initialized = 1;
     // depth_enabled gate: when 0, replay state is initialized but never
     // advanced — book_imbalance_holder stays at zero, gate stays inert.
-    // Mirrors live cfg.depth_enabled=0 (depth thread doesn't run).
-    int depth_enabled = (int)cfg.depth_enabled;
+    // Mirrors live BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED)=0 (depth thread doesn't run).
+    int depth_enabled = (int)BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED);
     // Holder for the current book_imbalance value passed to the driver.
     // Driver reads via pointer so updates between RunTick calls land
     // automatically.

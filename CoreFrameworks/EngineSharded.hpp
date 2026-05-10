@@ -471,13 +471,13 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
                 tier1_drift = true;
                 ++tier1_count;
             }
-            if (h->stamp_inf_barrier_gate_enabled != cfg.barrier_gate_enabled) {
+            if (h->stamp_inf_barrier_gate_enabled != BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED)) {
                 fprintf(stderr,
                     "[inference_cfg] %s: %s role=%s stamp claims "
                     "barrier_gate_enabled=%d but cfg=%d\n",
                     strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
                     loc, role_name, h->stamp_inf_barrier_gate_enabled,
-                    cfg.barrier_gate_enabled);
+                    BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED));
                 tier1_drift = true;
                 ++tier1_count;
             }
@@ -501,7 +501,7 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
                         loc, role_name, h->stamp_inf_bandit_blend_ratio, cfg_bbr);
                 }
             }
-            if (h->has_stamp_fees && cfg.cost_gate_enabled) {
+            if (h->has_stamp_fees && BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED)) {
                 double cfg_frm = FPN_ToDouble(cfg.fee_rate_maker);
                 double cfg_frt = FPN_ToDouble(cfg.fee_rate_taker);
                 if (fabs(h->stamp_inf_fee_rate_maker - cfg_frm) > 1e-6) {
@@ -996,8 +996,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     static DepthSharedState<F> g_depth_shared;
     static pthread_t g_depth_tid = 0;
     DepthRecorder_Init(&g_depth_rec, bcfg.symbol, "data", cfg.record_max_days,
-                       cfg.record_depth && cfg.depth_enabled);
-    if (cfg.depth_enabled) {
+                       cfg.record_depth && BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED));
+    if (BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED)) {
         const char *depth_host;
         int depth_port;
         if (bcfg.use_testnet)         { depth_host = "testnet.binance.vision";   depth_port = 443; }
@@ -1888,7 +1888,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // Track E.3 (post-coding c14, finally landed 2026-04-26)
                 // — feed book_imbalance from the depth thread into the
                 // per-core slow-path rebuild. The depth thread runs only
-                // when cfg.depth_enabled=1 and writes to active_idx with
+                // when BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED)=1 and writes to active_idx with
                 // RELEASE; we read with ACQUIRE for matching ordering.
                 // When depth_enabled=0 OR the depth thread hasn't received
                 // a snapshot yet, the value stays at FPN_Zero (init) —
@@ -1898,7 +1898,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 FPN<F> book_imb;
                 FPN<F> book_spread   = FPN_Zero<F>();
                 FPN<F> book_mid      = FPN_Zero<F>();
-                if (cfg.depth_enabled) {
+                if (BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED)) {
                     int dactive = __atomic_load_n(&g_depth_shared.active_idx,
                                                    __ATOMIC_ACQUIRE);
                     book_imb    = g_depth_shared.snapshots[dactive].imbalance;
@@ -1916,7 +1916,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // own pushes. The "rolling" inputs are nullptr here —
                 // we're only pushing depth fields; the helper short-
                 // circuits if `price` is zero, so pass current price.
-                if (cfg.depth_enabled &&
+                if (BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) &&
                     cfg.engine_arch != ENGINE_ARCH_PER_CORE_SLOW) {
                     for (int c = 0; c < state.registered_count; ++c) {
                         auto* sst = state.cores[c].slow_state;
@@ -1933,7 +1933,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 EventLoop_RebuildAllParameters_PerCore(&state, &cfg,
                     FPN_IsZero(mtm_price) ? nullptr : &mtm_price,
                     rebuild_ts_us,
-                    cfg.depth_enabled ? &book_imb : nullptr,
+                    BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) ? &book_imb : nullptr,
                     FPN_ToDouble(book_spread),
                     FPN_ToDouble(book_mid));
 
@@ -3016,7 +3016,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // values were current at slow-path entry).
                     FPN<F> book_imb = FPN_Zero<F>();
                     double book_spread_d = 0.0, book_mid_d = 0.0;
-                    if (cfg.depth_enabled) {
+                    if (BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED)) {
                         int dactive = __atomic_load_n(&g_depth_shared.active_idx,
                                                        __ATOMIC_ACQUIRE);
                         book_imb     = g_depth_shared.snapshots[dactive].imbalance;
@@ -3026,7 +3026,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
                     // Pre-loop scalar (matches RebuildAllParameters wrapper).
                     int book_imbalance_blocked = 0;
-                    if (cfg.depth_enabled && !FPN_IsZero(cfg.min_book_imbalance)) {
+                    if (BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) && !FPN_IsZero(cfg.min_book_imbalance)) {
                         book_imbalance_blocked = FPN_LessThan(book_imb,
                             cfg.min_book_imbalance) ? 1 : 0;
                     }
@@ -3045,15 +3045,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // Single-writer is this thread (per_core_slow's c).
                     auto* sst = state.cores[c].slow_state;
                     FPN<F> vol = volume_d > 0.0 ? FPN_FromDouble<F>(volume_d) : FPN_Zero<F>();
-                    FPN<F> bs = cfg.depth_enabled ?
+                    FPN<F> bs = BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) ?
                         FPN_FromDouble<F>(book_spread_d) : FPN_Zero<F>();
                     EventLoop_UpdateRollingStateOneCore(
                         &state, c,
                         mtm_price, vol, rebuild_ts_us,
                         /*is_buyer_maker=*/0, // TODO(parity-check Finding #5): plumb through scalar bus (v5.10.X)
-                        cfg.depth_enabled ? book_imb : FPN_Zero<F>(),
+                        BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) ? book_imb : FPN_Zero<F>(),
                         bs,
-                        cfg.depth_enabled ? 1 : 0);
+                        BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) ? 1 : 0);
 
                     // v5.1.1: bracket OTHER section (depth read + swap pickup
                     // + per-cadence pushes setup).
@@ -3075,7 +3075,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         FPN_IsZero(mtm_price) ? nullptr : &mtm_price,
                         &sst->rolling_medium, &sst->rolling_baseline,
                         &sst->cumdelta_state, &sst->tick_rate_state, rebuild_ts_us,
-                        cfg.depth_enabled ? &book_imb : nullptr,
+                        BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_DEPTH_ENABLED) ? &book_imb : nullptr,
                         &sst->book_imb_history, &sst->flow_state,
                         &sst->large_trade_state, &sst->spread_state,
                         book_spread_d, book_mid_d, book_imbalance_blocked,

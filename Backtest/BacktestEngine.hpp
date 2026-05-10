@@ -1153,7 +1153,7 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         STAMP_SET(inf, inference_cfg);
         inf.inference_cfg_confidence_threshold_scale =
             FPN_ToDouble(data->config_used.confidence_threshold_scale);
-        inf.inference_cfg_barrier_gate_enabled = data->config_used.barrier_gate_enabled;
+        inf.inference_cfg_barrier_gate_enabled = BITMAP_IS_SET(data->config_used.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED) ? 1 : 0;
         inf.inference_cfg_confidence_hard_block_threshold =
             FPN_ToDouble(data->config_used.confidence_hard_block_threshold);
         inf.inference_cfg_held_out_fraction =
@@ -1165,7 +1165,7 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             inf.inference_cfg_bandit_blend_ratio =
                 FPN_ToDouble(data->config_used.bandit_blend_ratio);
         }
-        if (data->config_used.cost_gate_enabled) {
+        if (BITMAP_IS_SET(data->config_used.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED)) {
             STAMP_SET(inf, fees);
             inf.inference_cfg_fee_rate_maker = FPN_ToDouble(data->config_used.fee_rate_maker);
             inf.inference_cfg_fee_rate_taker = FPN_ToDouble(data->config_used.fee_rate_taker);
