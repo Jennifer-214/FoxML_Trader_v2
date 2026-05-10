@@ -291,7 +291,7 @@ struct ModelHandle {
     double   stamp_inf_confidence_threshold_scale;
     int      stamp_inf_barrier_gate_enabled;
     double   stamp_inf_confidence_hard_block_threshold;
-    double   stamp_inf_freshness_tau;
+    // v5.14.9.D — DELETED stamp_inf_freshness_tau (TECH_DEBT-004 close).
     uint8_t  has_stamp_bandit;
     double   stamp_inf_bandit_blend_ratio;
     uint8_t  has_stamp_fees;
@@ -424,7 +424,7 @@ inline void Model_Init(ModelHandle<F> *m) {
     m->stamp_inf_confidence_threshold_scale = 0.0;
     m->stamp_inf_barrier_gate_enabled = 0;
     m->stamp_inf_confidence_hard_block_threshold = 0.0;
-    m->stamp_inf_freshness_tau = 0.0;
+    // v5.14.9.D — DELETED stamp_inf_freshness_tau zero-init (TECH_DEBT-004 close).
     m->has_stamp_bandit = 0;
     m->stamp_inf_bandit_blend_ratio = 0.0;
     m->has_stamp_fees = 0;
@@ -1414,9 +1414,9 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             } else if (strcmp(key, "inference_cfg_held_out_fraction") == 0) {
                 r.inference_cfg_held_out_fraction = tt::parse_double_fast(val);
                 STAMP_SET(r, inference_cfg);
-            } else if (strcmp(key, "inference_cfg_freshness_tau") == 0) {
-                r.inference_cfg_freshness_tau = tt::parse_double_fast(val);
-                STAMP_SET(r, inference_cfg);
+            // v5.14.9.D — DELETED inference_cfg_freshness_tau parser branch
+            // (TECH_DEBT-004 close). Legacy stamps with this key parse it as
+            // unknown (silently ignored by parser); HMAC chain unbroken.
             } else if (strcmp(key, "inference_cfg_bandit_blend_ratio") == 0) {
                 r.inference_cfg_bandit_blend_ratio = tt::parse_double_fast(val);
                 STAMP_SET(r, inference_cfg_bandit_blend_ratio);

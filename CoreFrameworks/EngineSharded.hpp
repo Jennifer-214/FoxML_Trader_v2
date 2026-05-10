@@ -456,19 +456,12 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
         if (!acknowledge_inference_cfg_drift && h->has_stamp_inference_cfg) {
             double cfg_cts = FPN_ToDouble(cfg.confidence_threshold_scale);
             double cfg_chb = FPN_ToDouble(cfg.confidence_hard_block_threshold);
-            double cfg_tau = FPN_ToDouble(cfg.confidence_freshness_tau);
+            // v5.14.9.D — DELETED legacy confidence_freshness_tau drift
+            // check (TECH_DEBT-004 close). Cfg field deleted; stamp body
+            // entry deleted; manual drift check no longer applicable.
 
             // Tier 1: directly affects serving math
             bool tier1_drift = false;
-            if (fabs(h->stamp_inf_freshness_tau - cfg_tau) > 1e-6) {
-                fprintf(stderr,
-                    "[inference_cfg] %s: %s role=%s stamp claims "
-                    "confidence_freshness_tau=%.2f but cfg=%.2f\n",
-                    strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
-                    loc, role_name, h->stamp_inf_freshness_tau, cfg_tau);
-                tier1_drift = true;
-                ++tier1_count;
-            }
             if (fabs(h->stamp_inf_confidence_threshold_scale - cfg_cts) > 1e-6) {
                 fprintf(stderr,
                     "[inference_cfg] %s: %s role=%s stamp claims "
@@ -1263,17 +1256,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
             // Phase 6prep sharded c12: re-init ConfidenceScorer with cfg
             // tunables. EventLoopState_Init left it at safe defaults; for
-            // ML cores we want the user's window/tau settings active.
-            // v4.7.32: read per-core resolved cfg so per-core
-            // confidence_freshness_tau override actually takes effect.
-            // confidence_window stays global (INT not in X-macro yet).
-            const auto& ov_conf = cfg.core_overrides[i];
-            FPN<F> tau_eff = !FPN_IsZero(ov_conf.confidence_freshness_tau)
-                ? ov_conf.confidence_freshness_tau
-                : cfg.confidence_freshness_tau;
+            // ML cores we want the user's window setting active.
+            // v5.14.9.D — DELETED legacy confidence_freshness_tau
+            // (TECH_DEBT-004 close). Tau now hardcoded to
+            // CONFIDENCE_FRESHNESS_TAU_DEFAULT — was mathematically inert
+            // in production (data_age=0). Composite confidence (v5.14.1)
+            // owns its own freshness via confidence_freshness_tau_secs.
             ConfidenceScorer_Init(&state.cores[i].confidence,
                                   (int)cfg.confidence_window,
-                                  FPN_ToDouble(tau_eff));
+                                  CONFIDENCE_FRESHNESS_TAU_DEFAULT);
             // v5.14.1.B.1 (PARITY-003) — push composite cfg into scorer.
             // No-op when cfg.confidence_composite_enabled=0 (legacy path).
             ConfidenceScorer_BindCompositeCfg(&state.cores[i].confidence,

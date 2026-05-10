@@ -147,7 +147,8 @@ constexpr uint8_t ENGINE_ARCH_PER_CORE_SLOW = 1;
     /* confidence behavior, vol-z scaling, bandit blend ratios, etc. */ \
     RAW(foxml_vol_scaling_z_max) \
     RAW(bandit_blend_ratio) \
-    RAW(confidence_freshness_tau) \
+    /* v5.14.9.D — DELETED RAW(confidence_freshness_tau) per-core override. */ \
+    /* Cfg field deleted (TECH_DEBT-004); legacy tau hardcoded internally. */ \
     RAW(confidence_threshold_scale) \
     /* v5.14.1.D: per-core winsor override — supports heterogeneous winsor */ \
     /* models (e.g. 3 buy_signal models with different winsor settings each */ \
@@ -651,7 +652,12 @@ template <unsigned F> struct ControllerConfig {
   // Phase 6 prep — tunable confidence loop parameters. Defaults preserve the
   // pre-Phase-6prep hardcoded values. Only consulted when confidence_enabled=1.
   uint32_t confidence_window;       // RollingIC + RollingRMSE window (default 32)
-  FPN<F>   confidence_freshness_tau; // freshness decay constant in seconds (default 300)
+  // v5.14.9.D — DELETED legacy `confidence_freshness_tau` field. Was
+  // mathematically inert in production (data_age=0 → freshness=1.0
+  // regardless of tau). Composite confidence (v5.14.1) uses
+  // `confidence_freshness_tau_secs` for its own freshness math; legacy
+  // 3-factor formula now uses CONFIDENCE_FRESHNESS_TAU_DEFAULT (300.0)
+  // hardcoded constant. Closes TECH_DEBT-004.
   FPN<F>   confidence_threshold_scale; // gate formula: effective_thr = base * (this - conf)
                                        // (default 2.0 — clamps at 1.0 in code)
   // v5.9.1 (V5_9_AUDIT-#21) — hard-block entries when raw confidence is below
@@ -1296,7 +1302,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.confidence_enabled = 0;
   // Phase 6 prep — defaults match the pre-amend hardcoded values
   cfg.confidence_window           = 32;                          // CONFIDENCE_IC_WINDOW_DEFAULT
-  cfg.confidence_freshness_tau    = FPN_FromDouble<F>(300.0);    // CONFIDENCE_FRESHNESS_TAU_DEFAULT
+  // v5.14.9.D — DELETED cfg.confidence_freshness_tau default (TECH_DEBT-004 close).
   cfg.confidence_threshold_scale  = FPN_FromDouble<F>(2.0);      // hardcoded `2.0` in gate formula
   // v5.9.1 — hard-block floor. 0.0 = disabled (pre-v5.9.1 behavior).
   // Operator opts in (audit-recommended 0.05) for the noise-floor protection.
@@ -1938,27 +1944,13 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(bandit_blend_ratio)
     CFG_PARSE_INT(confidence_enabled)
     CFG_PARSE_U32(confidence_window)
-    // v5.9.1 (V5_9_AUDIT-#13) — tau<=0 silently fell back to default in
-    // ConfidenceScorer_Init. Reject at parse time so the operator sees
-    // the bad value before it's silently overridden during boot.
-    if (strcmp(key, "confidence_freshness_tau") == 0) {
-        double v = atof(val);
-        // v5.9.1 (V5_9_AUDIT-#13) — reject tau<=0 (silent default fallback).
-        // v5.9.2b — also clamp to [60.0, 3600.0] (1 minute to 1 hour).
-        // Out-of-range values silently degraded the confidence damping
-        // contract: tau=1e6 effectively disabled freshness decay; tau=10
-        // produced near-zero confidence after just a few seconds. Both
-        // are pathological. Range matches the model lifetime envelope.
-        if (v <= 0.0 || v < 60.0 || v > 3600.0) {
-            fprintf(stderr,
-                "[cfg] confidence_freshness_tau=%.3f out of range [60.0, 3600.0]; "
-                "using default 300.0. See DOCS/CLAUDE_INTEGRATION.md.\n",
-                v);
-            continue;
-        }
-        cfg.confidence_freshness_tau = FPN_FromDouble<F>(v);
-        continue;
-    }
+    // v5.14.9.D — DELETED legacy `confidence_freshness_tau` parser branch
+    // (TECH_DEBT-004 close). Cfg field deleted; legacy 3-factor formula
+    // uses CONFIDENCE_FRESHNESS_TAU_DEFAULT (300.0) hardcoded constant.
+    // Operator who has confidence_freshness_tau=N in their cfg file gets
+    // unknown-key error at parse — clean signal to remove the line per
+    // CHANGELOG migration note. Heavy-WIP stance accepted — no
+    // tolerant parser shim.
     CFG_PARSE_FPN(confidence_threshold_scale)
     CFG_PARSE_FPN_POS(confidence_hard_block_threshold)
     CFG_PARSE_FPN(held_out_fraction)

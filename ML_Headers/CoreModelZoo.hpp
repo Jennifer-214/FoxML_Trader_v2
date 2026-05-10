@@ -368,8 +368,8 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                 sr.inference_cfg_barrier_gate_enabled;
             handle->stamp_inf_confidence_hard_block_threshold =
                 sr.inference_cfg_confidence_hard_block_threshold;
-            handle->stamp_inf_freshness_tau =
-                sr.inference_cfg_freshness_tau;
+            // v5.14.9.D — DELETED stamp_inf_freshness_tau population
+            // (TECH_DEBT-004 close); registry entry + ModelHandle field deleted.
         }
         if (STAMP_HAS(sr, inference_cfg_bandit_blend_ratio)) {
             handle->has_stamp_bandit = 1;

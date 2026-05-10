@@ -176,19 +176,12 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
         if (!acknowledge_inference_cfg_drift && h->has_stamp_inference_cfg) {
             double cfg_cts = FPN_ToDouble(cfg.confidence_threshold_scale);
             double cfg_chb = FPN_ToDouble(cfg.confidence_hard_block_threshold);
-            double cfg_tau = FPN_ToDouble(cfg.confidence_freshness_tau);
+            // v5.14.9.D — DELETED legacy confidence_freshness_tau drift
+            // check (TECH_DEBT-004 close). Cfg field + stamp body entry
+            // deleted; manual drift check no longer applicable.
 
             // Tier 1: directly affects serving math
             bool tier1_drift = false;
-            if (fabs(h->stamp_inf_freshness_tau - cfg_tau) > 1e-6) {
-                fprintf(stderr,
-                    "[inference_cfg] %s: %s role=%s stamp claims "
-                    "confidence_freshness_tau=%.2f but cfg=%.2f\n",
-                    strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
-                    loc, role_name, h->stamp_inf_freshness_tau, cfg_tau);
-                tier1_drift = true;
-                ++tier1_count;
-            }
             if (fabs(h->stamp_inf_confidence_threshold_scale - cfg_cts) > 1e-6) {
                 fprintf(stderr,
                     "[inference_cfg] %s: %s role=%s stamp claims "

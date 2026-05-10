@@ -394,9 +394,11 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   // Phase 6 prep: read tunables from cfg. ConfidenceScorer_Init falls back to
   // CONFIDENCE_IC_WINDOW_DEFAULT / CONFIDENCE_FRESHNESS_TAU_DEFAULT when the
   // cfg values are 0/non-positive — defaults preserve pre-amend behavior.
+  // v5.14.9.D — TECH_DEBT-004 close: confidence_freshness_tau cfg field
+  // deleted; tau hardcoded to default constant.
   ConfidenceScorer_Init(&ctrl->confidence,
                           (int)config.confidence_window,
-                          FPN_ToDouble(config.confidence_freshness_tau));
+                          CONFIDENCE_FRESHNESS_TAU_DEFAULT);
   // v5.14.1.B.1 (PARITY-003) — push composite cfg into legacy scorer.
   // Legacy single_core path is deprecated but still init-aligned with
   // sharded engine for parity-test scenarios.

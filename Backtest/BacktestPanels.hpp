@@ -1769,8 +1769,9 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                                     v.inference_cfg_confidence_hard_block_threshold);
                         ImGui::Text("  held_out_fraction:                %.3f",
                                     v.inference_cfg_held_out_fraction);
-                        ImGui::Text("  freshness_tau:                    %.1f",
-                                    v.inference_cfg_freshness_tau);
+                        // v5.14.9.D — DELETED freshness_tau display
+                        // (TECH_DEBT-004 close); registry entry + struct field
+                        // deleted; stamp body line no longer emitted.
                         if (STAMP_HAS(v, inference_cfg_bandit_blend_ratio)) {
                             ImGui::Text("  bandit_blend_ratio:               %.4g",
                                         v.inference_cfg_bandit_blend_ratio);
@@ -3212,8 +3213,8 @@ static inline void *train_model_worker_fn(void *arg) {
             FPN_ToDouble(run_control->results.config_used.confidence_hard_block_threshold);
         inf.held_out_fraction =
             FPN_ToDouble(run_control->results.config_used.held_out_fraction);
-        inf.freshness_tau =
-            FPN_ToDouble(run_control->results.config_used.confidence_freshness_tau);
+        // v5.14.9.D — DELETED inf.freshness_tau setter (TECH_DEBT-004 close).
+        // Stamp body entry + cfg field both deleted; line is now inapplicable.
         inf.has_training_poll_interval = 1;
         inf.training_poll_interval = run_control->results.config_used.poll_interval;
         // num_outputs derived from label_type

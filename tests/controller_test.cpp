@@ -4887,9 +4887,9 @@ int main() {
             dprintf(fd, "confidence_enabled=1\n");  // only enable, nothing else
             close(fd);
             ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(path);
-            check("missing cfg fields keep defaults (window=32, tau=300, scale=2.0)",
+            // v5.14.9.D — DELETED confidence_freshness_tau check (TECH_DEBT-004 close).
+            check("missing cfg fields keep defaults (window=32, scale=2.0)",
                   cfg.confidence_window == 32u &&
-                  fabs(FPN_ToDouble(cfg.confidence_freshness_tau) - 300.0) < 1e-6 &&
                   fabs(FPN_ToDouble(cfg.confidence_threshold_scale) - 2.0) < 1e-6);
             unlink(path);
         }
@@ -4899,15 +4899,14 @@ int main() {
         char path[] = "/tmp/test_conf_explicit_XXXXXX";
         int fd = mkstemp(path);
         if (fd >= 0) {
+            // v5.14.9.D — DELETED confidence_freshness_tau line (TECH_DEBT-004 close).
             dprintf(fd, "confidence_enabled=1\n"
                         "confidence_window=20\n"
-                        "confidence_freshness_tau=120.0\n"
                         "confidence_threshold_scale=1.5\n");
             close(fd);
             ControllerConfig<FP> cfg = ControllerConfig_Load<FP>(path);
-            check("explicit cfg values parse: window=20, tau=120, scale=1.5",
+            check("explicit cfg values parse: window=20, scale=1.5",
                   cfg.confidence_window == 20u &&
-                  fabs(FPN_ToDouble(cfg.confidence_freshness_tau) - 120.0) < 1e-6 &&
                   fabs(FPN_ToDouble(cfg.confidence_threshold_scale) - 1.5) < 1e-6);
             unlink(path);
         }
@@ -11138,19 +11137,8 @@ e3_skip_load:;
         // Write a cfg with tau=-5.0; parser must skip the field, default
         // (300.0) is preserved. Cleanest test: load + verify default still
         // present.
-        char tmp_cfg[] = "/tmp/v591_tau_test_XXXXXX";
-        int fd = mkstemp(tmp_cfg);
-        if (fd >= 0) {
-            const char* body = "confidence_freshness_tau=-5.0\n";
-            (void)!write(fd, body, strlen(body));
-            close(fd);
-            ControllerConfig<64> parsed = ControllerConfig_Load<64>(tmp_cfg);
-            check("v5.9.1: cfg parser rejects tau<=0 (default preserved)",
-                  FPN_ToDouble(parsed.confidence_freshness_tau) == 300.0);
-            unlink(tmp_cfg);
-        } else {
-            check("v5.9.1: tmp cfg file creation for tau test", 0);
-        }
+        // v5.14.9.D — DELETED v5.9.1 confidence_freshness_tau parser test
+        // (TECH_DEBT-004 close). cfg field deleted; parser branch deleted.
 
         // V5_9_AUDIT-#21: Confidence hard-block default = 0.0 (disabled).
         // ControllerConfig_Default sets confidence_hard_block_threshold=0.0
@@ -11161,7 +11149,7 @@ e3_skip_load:;
 
         // Cfg parser accepts the new field.
         char tmp_cfg2[] = "/tmp/v591_hardblock_XXXXXX";
-        fd = mkstemp(tmp_cfg2);
+        int fd = mkstemp(tmp_cfg2);
         if (fd >= 0) {
             const char* body = "confidence_hard_block_threshold=0.05\n";
             (void)!write(fd, body, strlen(body));
@@ -11834,46 +11822,9 @@ e3_skip_load:;
         // v5.9.1 rejected tau<=0; v5.9.2b extends to clamp to model lifetime
         // envelope. Out-of-range → reject + WARN + use default.
         char tmp_cfg[] = "/tmp/v592b_tau_test_XXXXXX";
-        int fd = mkstemp(tmp_cfg);
-        if (fd >= 0) {
-            const char* body_low = "confidence_freshness_tau=10\n"; // < 60 → rejected
-            (void)!write(fd, body_low, strlen(body_low));
-            close(fd);
-            ControllerConfig<64> parsed_low = ControllerConfig_Load<64>(tmp_cfg);
-            check("v5.9.2b: tau=10 (below range) rejected, default used",
-                  FPN_ToDouble(parsed_low.confidence_freshness_tau) == 300.0);
-            unlink(tmp_cfg);
-        } else {
-            check("v5.9.2b: tmp cfg for tau-low test", 0);
-        }
-
-        char tmp_cfg2[] = "/tmp/v592b_tau_high_XXXXXX";
-        fd = mkstemp(tmp_cfg2);
-        if (fd >= 0) {
-            const char* body_high = "confidence_freshness_tau=10000\n"; // > 3600 → rejected
-            (void)!write(fd, body_high, strlen(body_high));
-            close(fd);
-            ControllerConfig<64> parsed_high = ControllerConfig_Load<64>(tmp_cfg2);
-            check("v5.9.2b: tau=10000 (above range) rejected, default used",
-                  FPN_ToDouble(parsed_high.confidence_freshness_tau) == 300.0);
-            unlink(tmp_cfg2);
-        } else {
-            check("v5.9.2b: tmp cfg for tau-high test", 0);
-        }
-
-        char tmp_cfg3[] = "/tmp/v592b_tau_ok_XXXXXX";
-        fd = mkstemp(tmp_cfg3);
-        if (fd >= 0) {
-            const char* body_ok = "confidence_freshness_tau=600\n"; // in range
-            (void)!write(fd, body_ok, strlen(body_ok));
-            close(fd);
-            ControllerConfig<64> parsed_ok = ControllerConfig_Load<64>(tmp_cfg3);
-            check("v5.9.2b: tau=600 (in range) accepted",
-                  FPN_ToDouble(parsed_ok.confidence_freshness_tau) == 600.0);
-            unlink(tmp_cfg3);
-        } else {
-            check("v5.9.2b: tmp cfg for tau-ok test", 0);
-        }
+        (void)tmp_cfg;
+        // v5.14.9.D — DELETED v5.9.2b confidence_freshness_tau range tests
+        // (TECH_DEBT-004 close). cfg field deleted; parser branch deleted.
 
         // === Sub-area 2 setup: allow_cross_major_engine cfg field ===
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
@@ -11881,7 +11832,7 @@ e3_skip_load:;
               cfg.allow_cross_major_engine == 0);
 
         char tmp_cfg4[] = "/tmp/v592b_cross_major_XXXXXX";
-        fd = mkstemp(tmp_cfg4);
+        int fd = mkstemp(tmp_cfg4);
         if (fd >= 0) {
             const char* body = "allow_cross_major_engine=1\n";
             (void)!write(fd, body, strlen(body));
@@ -11915,7 +11866,7 @@ e3_skip_load:;
                 inf.inference_cfg_barrier_gate_enabled = 1;
                 inf.inference_cfg_confidence_hard_block_threshold = 0.05;
                 inf.inference_cfg_held_out_fraction = 0.20;
-                inf.inference_cfg_freshness_tau = 300.0;
+                // v5.14.9.D — DELETED inf.inference_cfg_freshness_tau (TECH_DEBT-004 close).
                 STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
                 inf.inference_cfg_bandit_blend_ratio = 0.30;
                 STAMP_SET(inf, fees);
@@ -12675,7 +12626,7 @@ e3_skip_load:;
                 cfg.barrier_gate_enabled             = 1;
                 cfg.confidence_hard_block_threshold  = FPN_FromDouble<64>(0.07);
                 cfg.held_out_fraction                = FPN_FromDouble<64>(0.25);
-                cfg.confidence_freshness_tau         = FPN_FromDouble<64>(450.0);
+                // v5.14.9.D — DELETED cfg.confidence_freshness_tau (TECH_DEBT-004 close).
                 cfg.bandit_enabled                   = 1;
                 cfg.bandit_blend_ratio               = FPN_FromDouble<64>(0.40);
                 cfg.cost_gate_enabled                = 1;
@@ -12696,8 +12647,7 @@ e3_skip_load:;
                     FPN_ToDouble(cfg.confidence_hard_block_threshold);
                 inf.inference_cfg_held_out_fraction =
                     FPN_ToDouble(cfg.held_out_fraction);
-                inf.inference_cfg_freshness_tau =
-                    FPN_ToDouble(cfg.confidence_freshness_tau);
+                // v5.14.9.D — DELETED inf.inference_cfg_freshness_tau (TECH_DEBT-004 close).
                 if (cfg.bandit_enabled) {
                     STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
                     inf.inference_cfg_bandit_blend_ratio =
@@ -12735,8 +12685,7 @@ e3_skip_load:;
                       fabs(v.inference_cfg_confidence_hard_block_threshold - 0.07) < 1e-9);
                 check("v5.9.5b: held_out_fraction round-trips (0.25)",
                       fabs(v.inference_cfg_held_out_fraction - 0.25) < 1e-9);
-                check("v5.9.5b: freshness_tau round-trips (450)",
-                      fabs(v.inference_cfg_freshness_tau - 450.0) < 1e-9);
+                // v5.14.9.D — DELETED freshness_tau round-trip check (TECH_DEBT-004 close).
                 check("v5.9.5b: has_bandit set (cfg.bandit_enabled=1)",
                       STAMP_HAS(v, inference_cfg_bandit_blend_ratio) == 1);
                 check("v5.9.5b: bandit_blend_ratio round-trips (0.40)",
@@ -12766,7 +12715,7 @@ e3_skip_load:;
                 STAMP_SET(inf2, inference_cfg);
                 inf2.inference_cfg_confidence_threshold_scale = 1.0;
                 inf2.inference_cfg_held_out_fraction          = 0.20;
-                inf2.inference_cfg_freshness_tau              = 300.0;
+                // v5.14.9.D — DELETED inf2.inference_cfg_freshness_tau (TECH_DEBT-004 close).
                 // bandit_enabled=0 → has_bandit stays 0
                 // cost_gate_enabled=0 → has_fees stays 0
                 STAMP_SET(inf2, training_poll_interval);
@@ -12884,8 +12833,7 @@ e3_skip_load:;
                           fabs(vr.inference_cfg_confidence_hard_block_threshold - 0.07) < 1e-9);
                     check("v5.9.5c: bash-written held_out_fraction=0.25",
                           fabs(vr.inference_cfg_held_out_fraction - 0.25) < 1e-9);
-                    check("v5.9.5c: bash-written freshness_tau=450",
-                          fabs(vr.inference_cfg_freshness_tau - 450.0) < 1e-9);
+                    // v5.14.9.D — DELETED freshness_tau check (TECH_DEBT-004 close).
                     check("v5.9.5c: bash-written has_bandit=1",
                           STAMP_HAS(vr, inference_cfg_bandit_blend_ratio) == 1);
                     check("v5.9.5c: bash-written bandit_blend_ratio=0.40",
@@ -13125,8 +13073,7 @@ e3_skip_load:;
         Model_Init(&h);
         check("v5.9.5i: Model_Init zeros has_stamp_inference_cfg",
               h.has_stamp_inference_cfg == 0);
-        check("v5.9.5i: Model_Init zeros stamp_inf_freshness_tau",
-              h.stamp_inf_freshness_tau == 0.0);
+        // v5.14.9.D — DELETED stamp_inf_freshness_tau check (TECH_DEBT-004 close).
         check("v5.9.5i: Model_Init zeros stamp_inf_confidence_threshold_scale",
               h.stamp_inf_confidence_threshold_scale == 0.0);
         check("v5.9.5i: Model_Init zeros stamp_inf_barrier_gate_enabled",
@@ -20824,7 +20771,7 @@ e3_skip_load:;
         inf.inference_cfg_barrier_gate_enabled             = 1;
         inf.inference_cfg_confidence_hard_block_threshold  = 0.0567;
         inf.inference_cfg_held_out_fraction                = 0.20;
-        inf.inference_cfg_freshness_tau                    = 300.5;
+        // v5.14.9.D — DELETED inf.inference_cfg_freshness_tau (TECH_DEBT-004 close).
         STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
         inf.inference_cfg_bandit_blend_ratio = 0.42;
         STAMP_SET(inf, fees);
@@ -21674,6 +21621,53 @@ e3_skip_load:;
               inf.has_risk_full_size_threshold == 0 &&
               inf.has_risk_min_size_threshold == 0 &&
               inf.has_risk_min_size_pct == 0);
+    }
+
+    //======================================================================
+    // [v5.14.9.D — TECH_DEBT-004 close: legacy confidence_freshness_tau deletion]
+    //======================================================================
+    {
+        // Cfg parser rejects the deleted key. Operator who has
+        // `confidence_freshness_tau=...` in their cfg gets clean error.
+        // Heavy-WIP stance accepted (no tolerant shim).
+        char tmp_cfg[] = "/tmp/foxml_v5_14_9_d_legacy_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        const char* contents = "confidence_freshness_tau=400.0\n";
+        write(fd, contents, strlen(contents));
+        close(fd);
+
+        // Parser doesn't recognize key → key skipped (parser logs warning;
+        // cfg keeps defaults). No crash; clean signal to operator.
+        ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmp_cfg);
+        check("v5.14.9.D: legacy confidence_freshness_tau key parses without crash "
+              "(unknown-key warning logged; cfg keeps defaults)",
+              cfg.confidence_window == 32);  // default still 32
+
+        unlink(tmp_cfg);
+    }
+    // v5.14.9.D — REMOVED redundant comprehensive round-trip test.
+    // The comprehensive stamp pipeline (writer → HMAC → parser → verifier)
+    // is verified by `v5.14.1.B.3.E round-trip` tests at line ~3629
+    // (10-field full population including composite + ridge; passes after
+    // the freshness_tau deletion). Adding a duplicate here would be
+    // redundant coverage, NOT additional safety.
+    //
+    // Justification per anti-regression test-deletion convention
+    // (proposed v5.14.9.D, codified at sprint close):
+    //   - Property covered by: v5.14.1.B.3.E (tests/controller_test.cpp:3629+)
+    //   - This deletion is REDUNDANCY REMOVAL, not coverage reduction.
+    {
+        // ConfidenceScorer_Init signature preserved (tau still tunable per-test);
+        // production callers now pass CONFIDENCE_FRESHNESS_TAU_DEFAULT constant.
+        ConfidenceScorer cs;
+        ConfidenceScorer_Init(&cs, 32, CONFIDENCE_FRESHNESS_TAU_DEFAULT);
+        check("v5.14.9.D: ConfidenceScorer_Init(window, DEFAULT) sets tau correctly",
+              cs.freshness_tau == CONFIDENCE_FRESHNESS_TAU_DEFAULT);
+
+        // Test path can still tune tau if needed (Init signature unchanged)
+        ConfidenceScorer_Init(&cs, 32, 600.0);
+        check("v5.14.9.D: ConfidenceScorer_Init still accepts custom tau (test flexibility)",
+              cs.freshness_tau == 600.0);
     }
 
     //======================================================================

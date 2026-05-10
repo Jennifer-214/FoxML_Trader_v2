@@ -1158,8 +1158,8 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             FPN_ToDouble(data->config_used.confidence_hard_block_threshold);
         inf.inference_cfg_held_out_fraction =
             FPN_ToDouble(data->config_used.held_out_fraction);
-        inf.inference_cfg_freshness_tau =
-            FPN_ToDouble(data->config_used.confidence_freshness_tau);
+        // v5.14.9.D — DELETED inference_cfg_freshness_tau setter
+        // (TECH_DEBT-004 close); cfg field + stamp body entry deleted.
         if (data->config_used.bandit_enabled) {
             STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
             inf.inference_cfg_bandit_blend_ratio =

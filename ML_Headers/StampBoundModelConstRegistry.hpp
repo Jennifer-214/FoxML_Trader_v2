@@ -216,7 +216,7 @@ namespace tt {
 // N fields together.
 
 #define FOREACH_STAMP_BOUND_MODEL_CONST_GROUPS(X)                                                   \
-    X(inference_cfg,    "inference cfg fields (5): confidence_threshold_scale, barrier_gate_enabled, confidence_hard_block_threshold, held_out_fraction, freshness_tau") \
+    X(inference_cfg,    "inference cfg fields (4): confidence_threshold_scale, barrier_gate_enabled, confidence_hard_block_threshold, held_out_fraction (freshness_tau DELETED v5.14.9.D — TECH_DEBT-004 close)") \
     X(scaler,           "scaler fields (2): feature_scaler_present, scaler_sha256")                 \
     X(fees,             "fee rate fields (2): fee_rate_maker, fee_rate_taker")                      \
     X(xgb_hyperparams,  "xgb hyperparams (9): max_depth, learning_rate, n_estimators, subsample, colsample_bytree, min_child_weight, seed, tree_method, train_nthread (since v5.14.8.A.merged)") \
@@ -265,7 +265,7 @@ namespace tt {
 // canonical wire format. 26 entries today. Adding new pre-cfg field =
 // 1 row here.
 #define FOREACH_STAMP_BOUND_MODEL_CONST_PRE_CFG(X)                                                  \
-    /* === inference_cfg group (5 fields) — emitted at line 2175 === */                            \
+    /* === inference_cfg group (4 fields post-v5.14.9.D — freshness_tau DELETED) === */            \
     X(inference_cfg_confidence_threshold_scale, inference_cfg, INCLUDE, double, "%g", 0.0,          \
       inf->confidence_threshold_scale, inf->has_inference_cfg, "confidence threshold scale")        \
     X(inference_cfg_barrier_gate_enabled,       inference_cfg, INCLUDE, int,    "%d", 0,            \
@@ -275,8 +275,11 @@ namespace tt {
     /* held_out_fraction is parser-checked but NOT propagated to ModelHandle (no runtime use). */   \
     X(inference_cfg_held_out_fraction,          inference_cfg, SKIP_HANDLE, double, "%g", 0.0,      \
       inf->held_out_fraction, inf->has_inference_cfg, "held-out fraction at training")              \
-    X(inference_cfg_freshness_tau,              inference_cfg, INCLUDE, double, "%g", 0.0,          \
-      inf->freshness_tau, inf->has_inference_cfg, "freshness tau decay")                            \
+    /* v5.14.9.D — DELETED X(inference_cfg_freshness_tau, ...) entry           */                  \
+    /* (TECH_DEBT-004 close). Cfg field was mathematically inert (data_age=0   */                  \
+    /* in production); registry entry deletion → struct field auto-removed →   */                  \
+    /* stamp body no longer emits the line. Legacy stamps load (parser ignores */                  \
+    /* unknown key); HMAC chain unbroken (HMAC is per-stamp).                  */                  \
     /* === bandit (standalone) — emitted at line 2189 === */                                        \
     X(inference_cfg_bandit_blend_ratio,         _, INCLUDE, double, "%g", 0.0,                      \
       inf->bandit_blend_ratio, inf->has_bandit, "bandit blend ratio (Exp3 vs ridge)")               \
