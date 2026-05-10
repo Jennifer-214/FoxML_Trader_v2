@@ -120,6 +120,18 @@
     /* v5.14.1.E — Exit-side blender selector (PARITY drift detection) */                             \
     X(exit_blender_mode,                   int,    "%d",     0,   cfg.exit_blender_mode,            \
         (cfg.exit_blender_mode != 0))                                                                 \
+    /* v5.14.9.C — Soft risk degradation ladder (4 fields). emit_when: ladder enabled. */            \
+    /* When operator activates the ladder (curve != OFF), the cfg values determine               */ \
+    /* sizing behavior. Stamp them so engine boot detects training/inference drift via the        */ \
+    /* same v5.14.1 mechanism that closed PARITY-005 for composite confidence.                    */ \
+    X(risk_degradation_curve,              int,    "%d",     0,   cfg.risk_degradation_curve,      \
+        (cfg.risk_degradation_curve != 0))                                                            \
+    X(risk_full_size_threshold,            double, "%.17g",  0.0, FPN_ToDouble(cfg.risk_full_size_threshold), \
+        (cfg.risk_degradation_curve != 0))                                                            \
+    X(risk_min_size_threshold,             double, "%.17g",  0.0, FPN_ToDouble(cfg.risk_min_size_threshold), \
+        (cfg.risk_degradation_curve != 0))                                                            \
+    X(risk_min_size_pct,                   double, "%.17g",  0.0, FPN_ToDouble(cfg.risk_min_size_pct), \
+        (cfg.risk_degradation_curve != 0))                                                            \
     /* v5.14.2.E.2 — expected.cfg → stamp body migration. Always emit          */                     \
     /* (model trained with these values; engine compares at load).             */                     \
     X(ml_buy_threshold,                    double, "%.17g",  0.0, FPN_ToDouble(cfg.ml_buy_threshold),\

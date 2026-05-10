@@ -21539,6 +21539,144 @@ e3_skip_load:;
     }
 
     //======================================================================
+    // [v5.14.9.C — Stamp-bind 4 ladder cfg fields via FOREACH_STAMP_BOUND_CFG]
+    //======================================================================
+    {
+        // Registry size sanity (>= per /readiness Check 21).
+        // Pre-v5.14.9.C had 13 entries; .C adds 4 (risk_degradation_curve + 3 thresholds).
+        check("v5.14.9.C: FOREACH_STAMP_BOUND_CFG_COUNT >= 17 post-C",
+              FOREACH_STAMP_BOUND_CFG_COUNT >= 17);
+    }
+    {
+        // Round-trip: stamp_write_for_model writes ladder fields when
+        // emit_when predicate (curve != OFF) is true; verify_model_stamp
+        // reads them back identically. Same pattern as v5.14.1.B.3.E.
+        char tmp_model[] = "/tmp/foxml_v5_14_9_c_ladder_XXXXXX";
+        int fd = mkstemp(tmp_model);
+        if (fd >= 0) {
+            const char* dummy = "dummy_model_bytes";
+            write(fd, dummy, strlen(dummy));
+            close(fd);
+
+            StampInferenceCfgInputs inf = {};
+            // Set ladder cfg fields (curve=LINEAR triggers emit_when=true).
+            inf.has_risk_degradation_curve = 1;
+            inf.risk_degradation_curve = 1;  // CURVE_LINEAR
+            inf.has_risk_full_size_threshold = 1;
+            inf.risk_full_size_threshold = 0.18;
+            inf.has_risk_min_size_threshold = 1;
+            inf.risk_min_size_threshold = 0.04;
+            inf.has_risk_min_size_pct = 1;
+            inf.risk_min_size_pct = 0.12;
+
+            StampWriteResult sw = stamp_write_for_model(tmp_model,
+                /*secret=*/"", /*format_version=*/6, "2026-05-10",
+                /*wf_mean_val=*/0.0, /*held_out_metric=*/0.5,
+                /*gap_threshold=*/0.05, /*force=*/1,
+                /*feature_registry_hash=*/0,
+                /*engine_version=*/nullptr,
+                /*inf=*/&inf);
+            check("v5.14.9.C: stamp_write_for_model with ladder cfg succeeded",
+                  sw.ok == 1);
+
+            ModelStampResult sr = verify_model_stamp(tmp_model, "",
+                /*gap_threshold=*/0.05, /*expected_format_version=*/6);
+
+            check("v5.14.9.C round-trip: has_risk_degradation_curve + value",
+                  sr.has_risk_degradation_curve == 1 &&
+                  sr.risk_degradation_curve == 1);
+            check("v5.14.9.C round-trip: has_risk_full_size_threshold + value",
+                  sr.has_risk_full_size_threshold == 1 &&
+                  fabs(sr.risk_full_size_threshold - 0.18) < 1e-9);
+            check("v5.14.9.C round-trip: has_risk_min_size_threshold + value",
+                  sr.has_risk_min_size_threshold == 1 &&
+                  fabs(sr.risk_min_size_threshold - 0.04) < 1e-9);
+            check("v5.14.9.C round-trip: has_risk_min_size_pct + value",
+                  sr.has_risk_min_size_pct == 1 &&
+                  fabs(sr.risk_min_size_pct - 0.12) < 1e-9);
+
+            char stamp_path[1024];
+            snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", tmp_model);
+            unlink(stamp_path);
+            unlink(tmp_model);
+        }
+    }
+    {
+        // emit_when=false (curve=OFF) → ladder fields NOT emitted in stamp body.
+        // Stamp written with default StampInferenceCfgInputs (all has_*=0)
+        // means STAMP_CFG_AUTOPOPULATE skips these entries. Verify by reading
+        // back: has_*=0 for ladder fields.
+        char tmp_model[] = "/tmp/foxml_v5_14_9_c_off_XXXXXX";
+        int fd = mkstemp(tmp_model);
+        if (fd >= 0) {
+            const char* dummy = "dummy_model_bytes";
+            write(fd, dummy, strlen(dummy));
+            close(fd);
+
+            StampInferenceCfgInputs inf = {};  // all has_*=0; no ladder fields populated
+
+            StampWriteResult sw = stamp_write_for_model(tmp_model,
+                "", 6, "2026-05-10", 0.0, 0.5, 0.05, /*force=*/1, 0, nullptr, &inf);
+            check("v5.14.9.C: stamp_write succeeded with no ladder cfg", sw.ok == 1);
+
+            ModelStampResult sr = verify_model_stamp(tmp_model, "", 0.05, 6);
+            check("v5.14.9.C: emit_when=false → has_risk_degradation_curve == 0",
+                  sr.has_risk_degradation_curve == 0);
+            check("v5.14.9.C: emit_when=false → has_risk_full_size_threshold == 0",
+                  sr.has_risk_full_size_threshold == 0);
+            check("v5.14.9.C: emit_when=false → has_risk_min_size_threshold == 0",
+                  sr.has_risk_min_size_threshold == 0);
+            check("v5.14.9.C: emit_when=false → has_risk_min_size_pct == 0",
+                  sr.has_risk_min_size_pct == 0);
+
+            char stamp_path[1024];
+            snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", tmp_model);
+            unlink(stamp_path);
+            unlink(tmp_model);
+        }
+    }
+    {
+        // STAMP_CFG_AUTOPOPULATE auto-flow: cfg → inf populator covers the
+        // 4 new fields without any caller-site changes. Verify via
+        // ControllerConfig → StampInferenceCfgInputs population path.
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.risk_degradation_curve = 2;  // CURVE_EXP
+        cfg.risk_full_size_threshold = FPN_FromDouble<64>(0.22);
+        cfg.risk_min_size_threshold  = FPN_FromDouble<64>(0.06);
+        cfg.risk_min_size_pct        = FPN_FromDouble<64>(0.15);
+
+        StampInferenceCfgInputs inf = {};
+        STAMP_CFG_AUTOPOPULATE(inf, cfg);
+
+        check("v5.14.9.C: AUTOPOPULATE sets has_risk_degradation_curve",
+              inf.has_risk_degradation_curve == 1);
+        check("v5.14.9.C: AUTOPOPULATE writes risk_degradation_curve value",
+              inf.risk_degradation_curve == 2);
+        check("v5.14.9.C: AUTOPOPULATE writes risk_full_size_threshold value",
+              fabs(inf.risk_full_size_threshold - 0.22) < 1e-6);
+        check("v5.14.9.C: AUTOPOPULATE writes risk_min_size_threshold value",
+              fabs(inf.risk_min_size_threshold - 0.06) < 1e-6);
+        check("v5.14.9.C: AUTOPOPULATE writes risk_min_size_pct value",
+              fabs(inf.risk_min_size_pct - 0.15) < 1e-6);
+    }
+    {
+        // emit_when=false path via AUTOPOPULATE: cfg.risk_degradation_curve=0
+        // → 4 ladder has_* stay 0 even when the threshold values are non-zero.
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.risk_degradation_curve = 0;  // OFF
+        cfg.risk_full_size_threshold = FPN_FromDouble<64>(0.50);  // non-default
+
+        StampInferenceCfgInputs inf = {};
+        STAMP_CFG_AUTOPOPULATE(inf, cfg);
+
+        check("v5.14.9.C: AUTOPOPULATE skips when curve=OFF (has_*=0)",
+              inf.has_risk_degradation_curve == 0 &&
+              inf.has_risk_full_size_threshold == 0 &&
+              inf.has_risk_min_size_threshold == 0 &&
+              inf.has_risk_min_size_pct == 0);
+    }
+
+    //======================================================================
     // [v5.14.9.B.1 — Per-core ladder override (4 fields) + extended REFUSE]
     //======================================================================
     {
