@@ -7630,7 +7630,7 @@ e3_skip_load:;
             check("v4.7.21 (1): TP+TP paired → core_losses == 0",
                   r->state.cores[0].core_losses == 0);
             check("v4.7.21 (1): pairing flag cleared after both legs drained",
-                  r->state.cores[0].partner_pending_active == 0);
+                  !BITMAP_IS_SET(r->state.partner_pending_bitmap, BITMAP_BIT_U16(0)));
             // v4.7.25: gross win bucket should hold the total net (5+10=15)
             check("v4.7.25 (1): TP+TP paired → core_gross_wins == 15.0",
                   fabs(FPN_ToDouble(r->state.cores[0].core_gross_wins) - 15.0) < 0.001);
@@ -7697,7 +7697,7 @@ e3_skip_load:;
             check("v4.7.21 (3): partials off → core_losses unchanged",
                   r->state.cores[0].core_losses == 0);
             check("v4.7.21 (3): partials off → pending stash never set",
-                  r->state.cores[0].partner_pending_active == 0);
+                  !BITMAP_IS_SET(r->state.partner_pending_bitmap, BITMAP_BIT_U16(0)));
             delete r;
         }
     }
@@ -7778,7 +7778,7 @@ e3_skip_load:;
         check("v4.7.21 backtest: TP+SL paired through driver → core_losses == 1",
               r->state.cores[0].core_losses == 1);
         check("v4.7.21 backtest: pairing flag cleared after backtest drain",
-              r->state.cores[0].partner_pending_active == 0);
+              !BITMAP_IS_SET(r->state.partner_pending_bitmap, BITMAP_BIT_U16(0)));
         check("v4.7.21 backtest: closed_mask consumed by driver drain",
               r->oms.last_closed_mask == 0);
 
@@ -22235,6 +22235,57 @@ e3_skip_load:;
         check("v5.14.9.F.6: resolver core 5 breakeven_on_profit inherits global OFF",
               !BITMAP_IS_SET(r5.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT));
         unlink(tmpfile);
+    }
+
+    //======================================================================
+    // [v5.14.9.G — partner_pending_bitmap (TECH_DEBT-013 candidate 6)]
+    //======================================================================
+    // Per-core partner-pending state migrated from `uint8_t partner_pending_active`
+    // (16 bytes scattered across CoreContexts) to single `uint16_t partner_pending_bitmap`
+    // on EventLoopState. Memory saved: ~126 bytes per state. Single-load multi-core query.
+    {
+        // Default: bitmap == 0 (no cores pending)
+        tt::EventLoopState<64> state{};
+        tt::OrderManagerState<64> oms{};
+        EventLoopState_Init(&state, &oms);
+        check("v5.14.9.G: default partner_pending_bitmap == 0 (no cores pending)",
+              state.partner_pending_bitmap == 0);
+    }
+    {
+        // BITMAP_SET marks specific core; BITMAP_CLR clears
+        uint16_t bitmap = 0;
+        BITMAP_SET(bitmap, BITMAP_BIT_U16(3));
+        check("v5.14.9.G: BITMAP_SET core 3 → bit 3 set",
+              BITMAP_IS_SET(bitmap, BITMAP_BIT_U16(3)));
+        check("v5.14.9.G: core 0 unchanged (no false-spillover)",
+              !BITMAP_IS_SET(bitmap, BITMAP_BIT_U16(0)));
+        check("v5.14.9.G: core 15 unchanged",
+              !BITMAP_IS_SET(bitmap, BITMAP_BIT_U16(15)));
+        BITMAP_CLR(bitmap, BITMAP_BIT_U16(3));
+        check("v5.14.9.G: BITMAP_CLR core 3 → bit 3 clear",
+              !BITMAP_IS_SET(bitmap, BITMAP_BIT_U16(3)));
+    }
+    {
+        // Multi-core: set bits 0 + 5 + 11; check all three; verify others untouched
+        uint16_t bitmap = 0;
+        BITMAP_SET(bitmap, BITMAP_BIT_U16(0));
+        BITMAP_SET(bitmap, BITMAP_BIT_U16(5));
+        BITMAP_SET(bitmap, BITMAP_BIT_U16(11));
+        check("v5.14.9.G: multi-set: core 0 set",
+              BITMAP_IS_SET(bitmap, BITMAP_BIT_U16(0)));
+        check("v5.14.9.G: multi-set: core 5 set",
+              BITMAP_IS_SET(bitmap, BITMAP_BIT_U16(5)));
+        check("v5.14.9.G: multi-set: core 11 set",
+              BITMAP_IS_SET(bitmap, BITMAP_BIT_U16(11)));
+        check("v5.14.9.G: multi-set: core 3 NOT set (no spillover)",
+              !BITMAP_IS_SET(bitmap, BITMAP_BIT_U16(3)));
+        // Iteration via __builtin_ctz (set core IDs in order)
+        int first_set = __builtin_ctz(bitmap);
+        check("v5.14.9.G: __builtin_ctz finds first set bit (core 0)",
+              first_set == 0);
+        // Popcount = 3
+        check("v5.14.9.G: popcount of bitmap == 3",
+              __builtin_popcount(bitmap) == 3);
     }
 
     //======================================================================

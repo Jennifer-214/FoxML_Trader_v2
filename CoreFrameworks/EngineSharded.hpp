@@ -2192,7 +2192,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         // core_losses without a corresponding fill, leaving
                         // the panel showing W:0 L:N with 0-fills counter.
                         state.cores[c].partner_pending_pnl    = FPN_Zero<F>();
-                        state.cores[c].partner_pending_active = 0;
+                        BITMAP_CLR(state.partner_pending_bitmap, BITMAP_BIT_U16(c));
                         // v4.7.26: clear v4.7.25 gross accumulators. Without
                         // this, post-reset avg W/L can read stale gross
                         // values divided by the freshly-zero W/L counters

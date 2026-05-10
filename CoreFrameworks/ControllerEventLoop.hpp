@@ -348,8 +348,8 @@ struct CoreContext {
     // partials disabled → bypass pairing, per-leg-A logic is correct
     // (single-leg trades, no partner exists).
     FPN<F> partner_pending_pnl;
-    uint8_t partner_pending_active;
-    uint8_t _pad_partner[7];
+    // partner_pending_active migrated to EventLoopState.partner_pending_bitmap
+    // (v5.14.9.G; 1 bit per core in single uint16_t bitmap)
     // v4.7.25: per-core gross win/loss accumulators, mirroring the legacy
     // single_core's ctrl->gross_wins / ctrl->gross_losses. Sum of net P&L
     // for winning trades (gross_wins) and absolute net P&L for losing
@@ -522,6 +522,15 @@ struct alignas(64) EventLoopState {
     uint64_t total_events_processed;
     uint64_t total_entries;
     uint64_t total_exits;
+    // v5.14.9.G — per-core partner-pending bitmap (TECH_DEBT-013 candidate 6).
+    // Migrated from `uint8_t partner_pending_active` on each CoreContext (16 × 1 byte
+    // = 16 bytes; plus the 16 × 7 bytes _pad_partner alignment padding = 128 bytes).
+    // Now 1 bit per core in a single uint16_t = 2 bytes. Memory saved: ~126 bytes per
+    // EventLoopState; better cache locality (single load to query any core's state).
+    //
+    // Bit N = core N's partner_pending_active. Set via BITMAP_SET / BITMAP_BIT_U16(N);
+    // tested via BITMAP_IS_SET. See bitmap-flag-api.md for primitives.
+    uint16_t partner_pending_bitmap;
     // Phase 03 chunk 1B: OMS back-pointer. MUST be non-null after Init —
     // all financial state reads go through oms->. EventLoopState_Init takes
     // the OMS pointer as its second argument and stores it here. callers that
@@ -582,6 +591,8 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
     state->total_entries = 0;
     state->total_exits = 0;
     state->oms = oms;
+    // v5.14.9.G — partner_pending bitmap (1 bit per core; 0 = no partner pending)
+    state->partner_pending_bitmap = 0;
     // v5.12.1.A — pre-warmup sentinel; first tick from producer/backtest
     // sets it to a monotonic wall-clock us value.
     state->last_ws_tick_us.store(0, std::memory_order_relaxed);
@@ -658,7 +669,7 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].core_losses = 0;
         // v4.7.21: pending-partner pairing state (per-trade W/L under partials)
         state->cores[i].partner_pending_pnl = FPN_Zero<F>();
-        state->cores[i].partner_pending_active = 0;
+        // partner_pending_active migrated to EventLoopState.partner_pending_bitmap (v5.14.9.G)
         // v4.7.25: gross win/loss accumulators
         state->cores[i].core_gross_wins   = FPN_Zero<F>();
         state->cores[i].core_gross_losses = FPN_Zero<F>();
@@ -1303,9 +1314,10 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 is_leg_a ? 1 : 0);
         }
 
-        // v4.7.21 W/L pairing under partials (unchanged).
+        // v4.7.21 W/L pairing under partials.
+        // v5.14.9.G — partner_pending_active is now BITMAP_IS_SET(state->partner_pending_bitmap, bit)
         if (partial_on) {
-            if (ctx.partner_pending_active) {
+            if (BITMAP_IS_SET(state->partner_pending_bitmap, BITMAP_BIT_U16(core_id))) {
                 FPN<F> total_net = FPN_Add(ctx.partner_pending_pnl, rec.exit_net_pnl);
                 if (FPN_GreaterThan(total_net, FPN_Zero<F>())) {
                     ctx.core_wins++;
@@ -1316,10 +1328,10 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                                                     FPN_Sub(FPN_Zero<F>(), total_net));
                 }
                 ctx.partner_pending_pnl = FPN_Zero<F>();
-                ctx.partner_pending_active = 0;
+                BITMAP_CLR(state->partner_pending_bitmap, BITMAP_BIT_U16(core_id));
             } else {
                 ctx.partner_pending_pnl = rec.exit_net_pnl;
-                ctx.partner_pending_active = 1;
+                BITMAP_SET(state->partner_pending_bitmap, BITMAP_BIT_U16(core_id));
             }
         }
 
