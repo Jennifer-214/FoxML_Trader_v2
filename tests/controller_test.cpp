@@ -20997,6 +20997,54 @@ e3_skip_load:;
               tt::GROUP_NAN_EVENTS != tt::GROUP_STANDALONE);
     }
 
+    // ==================================================================
+    // v5.14.8.E — CoreModelZoo_CheckStaleModel + stale_feature_events
+    // ==================================================================
+    {
+        // Stale-model gate semantic test:
+        ModelHandle<64> m{};
+        Model_Init(&m);
+        uint64_t now_us = 1000000ULL * 3600ULL * 24ULL * 100ULL;  // 100 days into "epoch"
+
+        // Disabled (max_age_hours=0): always returns 0
+        check("v5.14.8.E: max_age_hours=0 returns 0 (disabled)",
+              CoreModelZoo_CheckStaleModel(&m, now_us, 0, 1) == 0);
+
+        // No has_training_timestamp_us (legacy stamp): returns 0
+        m.has_training_timestamp_us = 0;
+        check("v5.14.8.E: legacy stamp (no has_*) returns 0 (skip check)",
+              CoreModelZoo_CheckStaleModel(&m, now_us, 24, 1) == 0);
+
+        // Sentinel (training_timestamp_us=0): returns 0
+        m.has_training_timestamp_us = 1;
+        m.training_timestamp_us = 0;
+        check("v5.14.8.E: sentinel timestamp 0 returns 0 (skip)",
+              CoreModelZoo_CheckStaleModel(&m, now_us, 24, 1) == 0);
+
+        // Fresh model (1h old, max=24h): returns 0
+        m.training_timestamp_us = now_us - (1ULL * 3600ULL * 1000000ULL);
+        check("v5.14.8.E: 1h old model with max=24h returns 0 (fresh)",
+              CoreModelZoo_CheckStaleModel(&m, now_us, 24, 1) == 0);
+
+        // Stale model strict_mode=1: returns -1 (REFUSE)
+        m.training_timestamp_us = now_us - (48ULL * 3600ULL * 1000000ULL);  // 48h old
+        check("v5.14.8.E: stale model strict=1 returns -1 (REFUSE)",
+              CoreModelZoo_CheckStaleModel(&m, now_us, 24, 1) == -1);
+
+        // Stale model strict_mode=0: returns 0 (WARN; engine continues)
+        check("v5.14.8.E: stale model strict=0 returns 0 (WARN)",
+              CoreModelZoo_CheckStaleModel(&m, now_us, 24, 0) == 0);
+
+        // Future timestamp: returns 0 (treat as fresh; clock skew tolerance)
+        m.training_timestamp_us = now_us + (3600ULL * 1000000ULL);
+        check("v5.14.8.E: future-timestamp returns 0 (clock skew tolerance)",
+              CoreModelZoo_CheckStaleModel(&m, now_us, 24, 1) == 0);
+
+        // FOREACH_FAILURE_MODE post-E should have 6 entries (5 + stale_feature_events)
+        check("v5.14.8.E: FOREACH_FAILURE_MODE_COUNT >= 6 post-E (added stale_feature_events)",
+              FOREACH_FAILURE_MODE_COUNT >= 6);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

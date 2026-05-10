@@ -329,6 +329,17 @@ struct ModelHandle {
     char     overlay_hash[65];
     uint8_t  has_effective_hash;
     char     effective_hash[65];
+    // v5.14.8.E — stale-model gate fields. Copied from ModelStampResult
+    // at TryLoadRole post-verify (v5.14.8.D adds them to stamp body via
+    // FOREACH_STAMP_BOUND_MODEL_CONST_POST_CFG). Read by
+    // CoreModelZoo_CheckStaleModel at boot.
+    // Manual fields on ModelHandle (NOT registry-driven) — ModelHandle
+    // X-macro migration deferred (TECH_DEBT-014); these are added directly
+    // to keep the v5.14.8 ship bounded.
+    uint8_t  has_training_timestamp_us;
+    uint64_t training_timestamp_us;     // wall-clock at training time (μs since epoch)
+    uint8_t  has_run_name;
+    char     run_name[64];              // operator-set training run identifier
     // v5.11.62 — for multiclass models, which class index is the
     // "buy probability"? Default 0 (binary positive class) preserves
     // legacy semantics. CoreModelZoo loader sets:
@@ -433,6 +444,11 @@ inline void Model_Init(ModelHandle<F> *m) {
     m->overlay_hash[0] = '\0';
     m->has_effective_hash = 0;
     m->effective_hash[0] = '\0';
+    // v5.14.8.E — stale-model gate fields zero-init.
+    m->has_training_timestamp_us = 0;
+    m->training_timestamp_us     = 0;
+    m->has_run_name              = 0;
+    m->run_name[0]               = '\0';
     // v5.11.62 — buy class default = 0 (binary positive class).
     m->buy_class_idx = 0;
     // v5.12.3.A — composite-signal defaults: single-class extraction equivalent

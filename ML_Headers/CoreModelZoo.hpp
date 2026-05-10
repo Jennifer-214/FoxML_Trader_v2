@@ -41,6 +41,7 @@
 #include "RidgeBlender.hpp"     // v5.14.0 — Ridge risk-parity blending state on EnsembleModelZoo
 #include "../Strategies/StrategyInterface.hpp"  // v5.10.0a.G.7 — NUM_REGIMES
 #include "../Version.hpp"        // v5.8.6: ENGINE_VERSION_STRING for boot log
+#include "../MemHeaders/HealthLog.hpp"  // v5.14.8.E: Health_LogCriticalRateLimited for stale-model log
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>      // v5.10.0a.G.5 — strtol for AutoDetect horizon parse
@@ -342,6 +343,18 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                                sizeof(handle->effective_hash) - 1);
             memcpy(handle->effective_hash, sr.effective_hash, n);
             handle->effective_hash[n] = '\0';
+        }
+        // v5.14.8.E — copy stale-model gate fields from stamp to handle.
+        // Read by CoreModelZoo_CheckStaleModel at boot.
+        if (STAMP_HAS(sr, training_timestamp_us)) {
+            handle->has_training_timestamp_us = 1;
+            handle->training_timestamp_us     = sr.training_timestamp_us;
+        }
+        if (STAMP_HAS(sr, run_name) && sr.run_name[0] != '\0') {
+            handle->has_run_name = 1;
+            size_t n = strnlen(sr.run_name, sizeof(handle->run_name) - 1);
+            memcpy(handle->run_name, sr.run_name, n);
+            handle->run_name[n] = '\0';
         }
         // v5.9.5i — copy stamp's inference cfg values. EngineSharded
         // boot-WARN/REFUSE compares vs cfg.*. Forward-compat: legacy
@@ -2168,6 +2181,58 @@ inline int CoreModelZoo_PostLoadSetup(const CoreModelZoo<F>* zoo,
     FOREACH_SINGLE_ZOO_POST_LOAD(X)
 #undef X
     return all_ok;
+}
+
+//======================================================================================================
+// [CoreModelZoo_CheckStaleModel — v5.14.8.E stale-model age gate]
+//======================================================================================================
+// Boot-time check: if the loaded model's stamp claims training_timestamp_us
+// older than cfg.model_max_age_hours, surface stale-model condition.
+//
+// Operator policy:
+//   cfg.model_max_age_hours == 0          → disabled (no check)
+//   strict_mode (held_out_gate_strict=1)  → REFUSE (return -1)
+//   strict_mode == 0                      → WARN (return 0; engine continues)
+//
+// Legacy stamps without training_timestamp_us (has_training_timestamp_us=0)
+// load with check skipped (forward-compat).
+//
+// Caller uses CRITICAL log for WARN/REFUSE surfacing. Rate-limited via
+// per-call-site static.
+//
+// Returns: -1 on REFUSE, 0 on OK or WARN. Caller checks strict_mode +
+// the returned value.
+//======================================================================================================
+template <unsigned F>
+inline int CoreModelZoo_CheckStaleModel(const ModelHandle<F>* m,
+                                          uint64_t now_us,
+                                          uint32_t max_age_hours,
+                                          int strict_mode) {
+    if (max_age_hours == 0) return 0;             // disabled
+    if (!m) return 0;                              // no handle
+    if (!m->has_training_timestamp_us) return 0;   // legacy stamp; skip check
+    if (m->training_timestamp_us == 0) return 0;   // sentinel; skip
+    if (m->training_timestamp_us > now_us) return 0; // future timestamp; treat as fresh
+
+    uint64_t age_us = now_us - m->training_timestamp_us;
+    uint64_t age_hours = age_us / (3600ULL * 1000000ULL);
+    if (age_hours <= max_age_hours) return 0;     // fresh
+
+    // Stale. Surface via CRITICAL log (rate-limited per call site).
+    const char* run_name = m->has_run_name ? m->run_name : "(unnamed)";
+    static uint64_t last_stale_model_log_us = 0;
+    tt::Health_LogCriticalRateLimited(
+        &last_stale_model_log_us,
+        60000000ULL,    // 60s rate-limit gate
+        -1,              // global (not per-core)
+        "stale_model",   // category
+        "[stale_model] %s is %lluh old > max %uh (strict=%d)",
+        run_name,
+        (unsigned long long)age_hours,
+        (unsigned)max_age_hours,
+        strict_mode);
+
+    return strict_mode ? -1 : 0;  // REFUSE in strict; WARN otherwise
 }
 
 #endif // CORE_MODEL_ZOO_HPP

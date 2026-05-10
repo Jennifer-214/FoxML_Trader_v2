@@ -149,7 +149,16 @@ enum FailureModeGroupId : int {
       "Triggers when Model_Predict returns NaN/Inf (degenerate model OR\n"                              \
       "post-scaler-apply NaN propagation).\n"                                                           \
       "Counter increments per skipped prediction cycle.",                                               \
-      tt::GROUP_NAN_EVENTS)
+      tt::GROUP_NAN_EVENTS)                                                                             \
+    /* v5.14.8.E — stale-feature failure mode. Wiring deferred to TECH_DEBT-015 */                       \
+    /* (Features_PackAll consumes feature_last_update_us per-feature; bumps     */                       \
+    /* this counter when feature data exceeds max_staleness_minutes threshold). */                       \
+    X(stale_feature_events,     COUNTER_U32, SEV_YELLOW, "stale: %u feat",                              \
+      "Total events where a feature's source data exceeded its\n"                                       \
+      "max_staleness_minutes threshold and the feature was skipped\n"                                   \
+      "(zero sentinel written). Indicates feature pipeline drift\n"                                     \
+      "or stalled data source. Investigate if counter grows steadily.",                                  \
+      tt::GROUP_STANDALONE)
 
 //======================================================================================================
 // [STORAGE-CLASS-AWARE FIELD GENERATION]
