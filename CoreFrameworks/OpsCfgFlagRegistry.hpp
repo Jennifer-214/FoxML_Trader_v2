@@ -21,12 +21,13 @@
 #include <cstdint>
 #include "../MemHeaders/BitmapMacros.hpp"
 
-#define FOREACH_OPS_CFG_FLAG(X)                                                                  \
-    X(SESSION_FILTER_ENABLED,  session_filter_enabled,  "per-session gate multipliers (Asian/European/US)") \
-    X(NOTIFY_ENABLED,          notify_enabled,          "external notification backend (Slack/email/etc.)")
+// Tuple: X(NAME, legacy_field, display_label, section, doc)  [5-col v5.14.9.F.5+]
+#define FOREACH_OPS_CFG_FLAG(X)                                                                                                                                  \
+    X(SESSION_FILTER_ENABLED,  session_filter_enabled,  "Session Filter",  "Toggles",                  "per-session gate multipliers (Asian/European/US)")        \
+    X(NOTIFY_ENABLED,          notify_enabled,          "Notify",          "Operational Monitoring",   "external notification backend (Slack/email/etc.)")
 
 enum OpsCfgFlag {
-#define X_GEN_OPS_CFG_BIT(name, legacy_field, doc) OPS_CFG_##name,
+#define X_GEN_OPS_CFG_BIT(name, legacy_field, display_label, section, doc) OPS_CFG_##name,
     FOREACH_OPS_CFG_FLAG(X_GEN_OPS_CFG_BIT)
     OPS_CFG_COUNT
 #undef X_GEN_OPS_CFG_BIT
@@ -35,7 +36,7 @@ enum OpsCfgFlag {
 static_assert(OPS_CFG_COUNT <= 8,
               "FOREACH_OPS_CFG_FLAG exhausted uint8_t storage; expand to uint16_t");
 
-#define X_GEN_OPS_CFG_MASK(name, legacy_field, doc) \
+#define X_GEN_OPS_CFG_MASK(name, legacy_field, display_label, section, doc) \
     static constexpr uint8_t MASK_OPS_CFG_##name = (uint8_t)(1u << OPS_CFG_##name);
 FOREACH_OPS_CFG_FLAG(X_GEN_OPS_CFG_MASK)
 #undef X_GEN_OPS_CFG_MASK

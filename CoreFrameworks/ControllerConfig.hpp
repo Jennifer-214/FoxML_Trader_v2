@@ -1961,7 +1961,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // Each X is locally #define'd + #undef'd to avoid namespace pollution.
 
     // LIFECYCLE bitmap walk
-    #define X(name, legacy_field, doc) \
+    #define X(name, legacy_field, display_label, section, doc) \
       if (strcmp(key, #legacy_field) == 0) { \
         int _v = atoi(val); \
         if (_v) cfg.lifecycle_cfg_flags |=  MASK_LIFECYCLE_CFG_##name; \
@@ -1972,7 +1972,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     #undef X
 
     // GATE bitmap walk
-    #define X(name, legacy_field, doc) \
+    #define X(name, legacy_field, display_label, section, doc) \
       if (strcmp(key, #legacy_field) == 0) { \
         int _v = atoi(val); \
         if (_v) cfg.gate_cfg_flags |=  MASK_GATE_CFG_##name; \
@@ -1983,7 +1983,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     #undef X
 
     // ML bitmap walk
-    #define X(name, legacy_field, doc) \
+    #define X(name, legacy_field, display_label, section, doc) \
       if (strcmp(key, #legacy_field) == 0) { \
         int _v = atoi(val); \
         if (_v) cfg.ml_cfg_flags |=  MASK_ML_CFG_##name; \
@@ -1994,7 +1994,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     #undef X
 
     // RISK bitmap walk
-    #define X(name, legacy_field, doc) \
+    #define X(name, legacy_field, display_label, section, doc) \
       if (strcmp(key, #legacy_field) == 0) { \
         int _v = atoi(val); \
         if (_v) cfg.risk_cfg_flags |=  MASK_RISK_CFG_##name; \
@@ -2005,7 +2005,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     #undef X
 
     // OPS bitmap walk
-    #define X(name, legacy_field, doc) \
+    #define X(name, legacy_field, display_label, section, doc) \
       if (strcmp(key, #legacy_field) == 0) { \
         int _v = atoi(val); \
         if (_v) cfg.ops_cfg_flags |=  MASK_OPS_CFG_##name; \

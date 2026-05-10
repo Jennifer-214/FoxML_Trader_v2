@@ -35,30 +35,33 @@
 //------------------------------------------------------------------------------------------------------
 // [REGISTRY]
 //------------------------------------------------------------------------------------------------------
-// Tuple: X(NAME, legacy_field, doc)
-//   NAME         — UPPERCASE token; used for MASK_LIFECYCLE_CFG_<NAME> + LIFECYCLE_CFG_<NAME> enum
-//   legacy_field — pre-migration cfg field name (used by AUTOPOPULATE source + parser back-compat)
-//                  for NEW flags (no legacy field), use the canonical lowercase name as both
-//   doc          — short description for engine.cfg.example + GUI tooltip + audit trails
+// Tuple: X(NAME, legacy_field, display_label, section, doc)  [5-col v5.14.9.F.5+]
+//   NAME          — UPPERCASE token; used for MASK_LIFECYCLE_CFG_<NAME> + LIFECYCLE_CFG_<NAME> enum
+//   legacy_field  — pre-migration cfg field name (used by AUTOPOPULATE source + parser back-compat)
+//                   for NEW flags (no legacy field), use the canonical lowercase name as both
+//   display_label — GUI checkbox label (operator-facing; e.g. "Partial Exits##toggle")
+//   section       — GUI collapsing-header / section name (e.g. "Toggles", "Kill Switch")
+//   doc           — short description for engine.cfg.example + GUI tooltip + audit trails
 //
-// Adding a new entry: append 1 row → enum bit, MASK constant, AUTOPOPULATE bit-set, parser branch
-// (in parse_csv_engine_config), and engine.cfg.example doc line all auto-flow / mechanically extend.
+// Adding a new entry: append 1 row → enum bit, MASK constant, AUTOPOPULATE bit-set, parser branch,
+// engine.cfg.example doc, AND GUI checkbox+section+tooltip all auto-flow / mechanically extend.
+// Registry is the SINGLE SOURCE OF TRUTH for all cfg + GUI metadata (v5.14.9.F.5 Option D).
 // uint8_t fits 8 entries; expand to uint16_t if exceeded (static_assert below).
 //
 // Domain identity: position-exit mechanics. Add here if the flag governs HOW positions exit
 // (partial-fill geometry, breakeven ratchet logic, exit-related dispatcher behavior). Use
 // other domains (GATE/RISK/ML/OPS — v5.14.9.F.1-.F.3) for non-lifecycle flags.
 
-#define FOREACH_LIFECYCLE_CFG_FLAG(X)                                                                                                   \
-    X(PARTIAL_EXIT_ENABLED, partial_exit_enabled, "partial-exit dispatcher arm — leg-A and leg-B size split")                            \
-    X(BREAKEVEN_ON_PARTIAL, breakeven_on_partial, "move SL to entry after TP1 hit (partial-exit ratchet)")                               \
-    X(BREAKEVEN_ON_PROFIT,  breakeven_on_profit,  "ratchet SL to breakeven when position crosses net profit (DORMANT — see TECH_DEBT-024)")
+#define FOREACH_LIFECYCLE_CFG_FLAG(X)                                                                                                                       \
+    X(PARTIAL_EXIT_ENABLED, partial_exit_enabled, "Partial Exits##toggle", "Toggles",       "partial-exit dispatcher arm — leg-A and leg-B size split")     \
+    X(BREAKEVEN_ON_PARTIAL, breakeven_on_partial, "Breakeven SL",          "Partial Exits", "move SL to entry after TP1 hit (partial-exit ratchet)")        \
+    X(BREAKEVEN_ON_PROFIT,  breakeven_on_profit,  "Breakeven on Profit",   "Partial Exits", "ratchet SL to breakeven when position crosses net profit (DORMANT — see TECH_DEBT-024)")
 
 //------------------------------------------------------------------------------------------------------
 // [AUTO-GENERATED ENUM + COUNT]
 //------------------------------------------------------------------------------------------------------
 enum LifecycleCfgFlag {
-#define X_GEN_LIFECYCLE_CFG_BIT(name, legacy_field, doc) LIFECYCLE_CFG_##name,
+#define X_GEN_LIFECYCLE_CFG_BIT(name, legacy_field, display_label, section, doc) LIFECYCLE_CFG_##name,
     FOREACH_LIFECYCLE_CFG_FLAG(X_GEN_LIFECYCLE_CFG_BIT)
     LIFECYCLE_CFG_COUNT
 #undef X_GEN_LIFECYCLE_CFG_BIT
@@ -70,7 +73,7 @@ static_assert(LIFECYCLE_CFG_COUNT <= 8,
 //------------------------------------------------------------------------------------------------------
 // [AUTO-GENERATED MASK_LIFECYCLE_CFG_<NAME> CONSTANTS]
 //------------------------------------------------------------------------------------------------------
-#define X_GEN_LIFECYCLE_CFG_MASK(name, legacy_field, doc) \
+#define X_GEN_LIFECYCLE_CFG_MASK(name, legacy_field, display_label, section, doc) \
     static constexpr uint8_t MASK_LIFECYCLE_CFG_##name = (uint8_t)(1u << LIFECYCLE_CFG_##name);
 FOREACH_LIFECYCLE_CFG_FLAG(X_GEN_LIFECYCLE_CFG_MASK)
 #undef X_GEN_LIFECYCLE_CFG_MASK

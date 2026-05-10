@@ -21,13 +21,14 @@
 #include <cstdint>
 #include "../MemHeaders/BitmapMacros.hpp"
 
-#define FOREACH_RISK_CFG_FLAG(X)                                                                                          \
-    X(KILL_SWITCH_ENABLED,            kill_switch_enabled,            "engine-wide loss-cap kill switch (safety-first)")  \
-    X(VOL_SIZING_ENABLED,             vol_sizing_enabled,             "scale trade size by realized vol (legacy ATR)")    \
-    X(WS_DEAD_TIME_FLATTEN_ENABLED,   ws_dead_time_flatten_enabled,   "OMS_FlattenAll when WS dead longer than threshold")
+// Tuple: X(NAME, legacy_field, display_label, section, doc)  [5-col v5.14.9.F.5+]
+#define FOREACH_RISK_CFG_FLAG(X)                                                                                                                                                          \
+    X(KILL_SWITCH_ENABLED,            kill_switch_enabled,            "Enabled",                "Kill Switch",     "engine-wide loss-cap kill switch (safety-first)")                      \
+    X(VOL_SIZING_ENABLED,             vol_sizing_enabled,             "Vol Sizing##bool",       "Vol Sizing",      "scale trade size by realized vol (legacy ATR)")                       \
+    X(WS_DEAD_TIME_FLATTEN_ENABLED,   ws_dead_time_flatten_enabled,   "WS Dead-Time Flatten",   "Risk Management", "OMS_FlattenAll when WS dead longer than threshold")
 
 enum RiskCfgFlag {
-#define X_GEN_RISK_CFG_BIT(name, legacy_field, doc) RISK_CFG_##name,
+#define X_GEN_RISK_CFG_BIT(name, legacy_field, display_label, section, doc) RISK_CFG_##name,
     FOREACH_RISK_CFG_FLAG(X_GEN_RISK_CFG_BIT)
     RISK_CFG_COUNT
 #undef X_GEN_RISK_CFG_BIT
@@ -36,7 +37,7 @@ enum RiskCfgFlag {
 static_assert(RISK_CFG_COUNT <= 8,
               "FOREACH_RISK_CFG_FLAG exhausted uint8_t storage; expand to uint16_t");
 
-#define X_GEN_RISK_CFG_MASK(name, legacy_field, doc) \
+#define X_GEN_RISK_CFG_MASK(name, legacy_field, display_label, section, doc) \
     static constexpr uint8_t MASK_RISK_CFG_##name = (uint8_t)(1u << RISK_CFG_##name);
 FOREACH_RISK_CFG_FLAG(X_GEN_RISK_CFG_MASK)
 #undef X_GEN_RISK_CFG_MASK

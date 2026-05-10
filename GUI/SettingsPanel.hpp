@@ -14,6 +14,12 @@
 #include "FoxmlTheme.hpp"
 #include "../DataStream/EngineTUI.hpp"  // TUISharedState, TUISnapshot for per-core core-config
 #include "../Strategies/StrategyInterface.hpp"  // STRATEGY_* + NUM_STRATEGIES + SHORT_NAMES
+// v5.14.9.F.5 — registry headers for auto-extended field_defs[] entries
+#include "../CoreFrameworks/LifecycleCfgFlagRegistry.hpp"
+#include "../CoreFrameworks/GateCfgFlagRegistry.hpp"
+#include "../ML_Headers/MlCfgFlagRegistry.hpp"
+#include "../CoreFrameworks/RiskCfgFlagRegistry.hpp"
+#include "../CoreFrameworks/OpsCfgFlagRegistry.hpp"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -94,7 +100,7 @@ static const CfgFieldDef field_defs[] = {
     {"max_exposure_pct",      "Max Exp %%",   "Risk Management", CFG_FLOAT, "%.0f", NULL},
     {"max_positions",         "Max Pos",      "Risk Management", CFG_INT,   "%d",   NULL},
     // Kill Switch
-    {"kill_switch_enabled",   "Enabled",      "Kill Switch",     CFG_BOOL,  NULL,   NULL},
+    // kill_switch_enabled migrated to FOREACH_RISK_CFG_FLAG (v5.14.9.F.5; auto-extended below)
     {"kill_switch_daily_loss_pct","Daily Loss %%","Kill Switch",  CFG_FLOAT, "%.2f",
         "Max session loss before kill switch triggers\n3.0 = halt if equity drops 3%% from session start"},
     {"kill_switch_drawdown_pct","Drawdown %%", "Kill Switch",     CFG_FLOAT, "%.2f",
@@ -103,10 +109,8 @@ static const CfgFieldDef field_defs[] = {
         "Slow-path cycles to observe after kill reset\nbefore trading resumes (prevents immediate re-entry)"},
     // v4.7.29: Vol Sizing + No-Trade Band scale curves moved to per-core
     // tabs. Toggles stay global (engine-architectural enable/disable).
-    {"vol_sizing_enabled",    "Vol Sizing##bool",   "Vol Sizing",      CFG_BOOL,  NULL,
-        "Engine-wide enable for vol sizing.\nPer-core scale_min/scale_max overrides live in each core's Vol Sizing section."},
-    {"no_trade_band_enabled", "No-Trade Band##bool","No-Trade Band",   CFG_BOOL,  NULL,
-        "Engine-wide enable for the no-trade band.\nPer-core band multiplier override lives in each core's No-Trade Band section."},
+    // vol_sizing_enabled + no_trade_band_enabled migrated to FOREACH_<DOMAIN>_CFG_FLAG
+    // (v5.14.9.F.5 RISK + GATE; auto-extended below)
     // Regime Detection
     {"regime_crossover_threshold","Mild Trend","Regime Detection",CFG_FLOAT,"%.5f",
         "EMA/SMA spread for MILD_TREND (EMA Cross)\n0.0005 = 0.05%% gap (~$35 at BTC $68k)\nbelow = RANGING, above = mild uptrend"},
@@ -121,10 +125,7 @@ static const CfgFieldDef field_defs[] = {
     // (Momentum + EMA Cross strategy tuning consolidated into "Momentum
     //  Tuning" / "EMA Cross Tuning" sections below — v4.7.22 dedup pass.)
     // v4.7.29: Partial Exits geometry (split %, TP2 mult) moved to per-core.
-    // breakeven_on_partial stays global (single bool toggle).
-    {"breakeven_on_partial",  "Breakeven SL", "Partial Exits",   CFG_BOOL,  NULL,
-        "Engine-wide: ratchet leg-B SL to entry after leg A TP1 hits.\n"
-        "Per-core split % and TP2 mult overrides live in each core's Partial Exits section."},
+    // breakeven_on_partial migrated to FOREACH_LIFECYCLE_CFG_FLAG (v5.14.9.F.5; auto-extended below)
     // Gate Recovery
     {"idle_reset_cycles",     "Idle Reset",   "Gate Recovery",   CFG_INT,   "%d",
         "Cycles with no fill before gate decay\nprevents permanent lockout after losses"},
@@ -142,7 +143,7 @@ static const CfgFieldDef field_defs[] = {
     // core's tab are the canonical strategy assignment surface. cfg's
     // default_strategy=N still parses for legacy single_core boot.
     // EMA Gate
-    {"gate_ema_enabled",      "EMA Enabled",  "EMA Gate",        CFG_BOOL,  NULL,   NULL},
+    // gate_ema_enabled migrated to FOREACH_GATE_CFG_FLAG (v5.14.9.F.5; auto-extended below)
     {"gate_ema_alpha",        "Alpha",        "EMA Gate",        CFG_FLOAT, "%.4f",
         "EMA smoothing factor\n0.99 = fast (responsive)\n0.997 = default\n0.999 = slow (stable)"},
     // Danger Gradient
@@ -163,10 +164,7 @@ static const CfgFieldDef field_defs[] = {
     {"record_max_days",       "Max Days",     "Tick Recording",  CFG_FLOAT, "%.0f",
         "Auto-delete tick + depth CSVs older than this many days\n30 = ~1-2GB cap on disk usage (more if depth recording is on)"},
     // Operational Monitoring (Phase 8b) — alerts on kill switch, orphans, disconnects
-    {"notify_enabled",        "Notify",       "Operational Monitoring", CFG_BOOL,  NULL,
-        "0 = file logs only (default)\n"
-        "1 = route alerts through configured backend (kill switch trips, orphans,\n"
-        "    disconnects). Also keeps the existing fprintfs — backend is additive."},
+    // notify_enabled migrated to FOREACH_OPS_CFG_FLAG (v5.14.9.F.5; auto-extended below)
     {"notify_backend",        "Backend",      "Operational Monitoring", CFG_INT,   "%d",
         "0 = stderr (default — visible via tail -f or syslog)\n"
         "1 = command (popen-based shell template — see notify_command)\n"
@@ -193,25 +191,14 @@ static const CfgFieldDef field_defs[] = {
         "Used for both stderr and command backends."},
     // Toggles
     {"use_real_money",        "LIVE Trading", "Toggles",         CFG_BOOL,  NULL,   NULL},
-    {"partial_exit_enabled",  "Partial Exits##toggle","Toggles",         CFG_BOOL,  NULL,   NULL},
-    {"session_filter_enabled","Session Filter","Toggles",        CFG_BOOL,  NULL,   NULL},
-    {"depth_enabled",         "Order Book",   "Toggles",         CFG_BOOL,  NULL,   NULL},
+    // partial_exit_enabled / session_filter_enabled / depth_enabled migrated to
+    // FOREACH_<DOMAIN>_CFG_FLAG (v5.14.9.F.5 LIFECYCLE + OPS + GATE; auto-extended below)
     {"min_book_imbalance",    "Book Imbal",   "Toggles",         CFG_FLOAT, "%.2f", NULL},
     // FoxML integration — engine-wide enable/disable + training-time defaults
     // (per-core FPN tuning lives in each ML core's "ML" override section).
-    {"cost_gate_enabled",        "Cost Gate",         "FoxML",  CFG_BOOL,  NULL,
-        "Engine-wide enable for cost gate (suppress entries when estimated\n"
-        "trade cost exceeds TP target). Per-core FPN knobs live in each\n"
-        "ML core's tab."},
-    {"foxml_vol_scaling_enabled","Vol Scaling",        "FoxML",  CFG_BOOL,  NULL,
-        "Engine-wide enable for FoxML vol scaling.\n"
-        "Per-core Vol Z-Max override lives in each ML core's tab."},
-    {"bandit_enabled",           "Bandit",            "FoxML",  CFG_BOOL,  NULL,
-        "Engine-wide enable for Exp3-IX bandit blending.\n"
-        "Per-core Blend Ratio override lives in each ML core's tab."},
-    {"confidence_enabled",       "Confidence",        "FoxML",  CFG_BOOL,  NULL,
-        "Engine-wide enable for dynamic ML threshold scaling.\n"
-        "Per-core Tau / Scale overrides live in each ML core's tab."},
+    // cost_gate_enabled / foxml_vol_scaling_enabled / bandit_enabled / confidence_enabled
+    // migrated to FOREACH_<DOMAIN>_CFG_FLAG (v5.14.9.F.5; auto-extended below):
+    //   cost_gate_enabled → GATE; bandit_enabled / confidence_enabled / foxml_vol_scaling_enabled → ML
     {"confidence_window",        "Conf Window",       "FoxML",  CFG_INT,   "%d",
         "RollingIC + RollingRMSE window size (engine-wide; cap 64).\n"
         "Same window per ML core today; INT support for X-macro deferred."},
@@ -232,8 +219,7 @@ static const CfgFieldDef field_defs[] = {
         "Per-core override available via core_N_model_path in each ML core's tab."},
     {"regime_model_path",        "Regime Model",      "Models", CFG_PATH,  NULL,
         "Path to regime enrichment model (engine-wide). Per-core deferred."},
-    {"barrier_gate_enabled",     "Barrier Gate",      "Barrier", CFG_BOOL, NULL,
-        "Block entries before predicted price peaks (engine-wide).\nrequires trained peak/valley models"},
+    // barrier_gate_enabled migrated to FOREACH_GATE_CFG_FLAG (v5.14.9.F.5; auto-extended below)
     {"peak_model_path",          "Peak Model",        "Barrier", CFG_PATH, NULL,
         "Path to P(will_peak) model (engine-wide). Per-core deferred."},
     {"valley_model_path",        "Valley Model",      "Barrier", CFG_PATH, NULL,
@@ -300,6 +286,22 @@ static const CfgFieldDef field_defs[] = {
     {"xgb_tree_method",          "Tree Method",       "ML Hyperparams",  CFG_PATH,  "%s",
         "XGBoost tree construction algorithm: hist (fast, default) | exact |\n"
         "approx | auto. Match deployed model's training method or expect WARN."},
+    //==========================================================================
+    // v5.14.9.F.5 — AUTO-EXTENDED FROM FOREACH_<DOMAIN>_CFG_FLAG REGISTRIES
+    //==========================================================================
+    // Registry is the SINGLE SOURCE OF TRUTH for these 21 boolean cfg flags.
+    // Adding a new flag = 1 row in the appropriate registry → field_defs[]
+    // auto-extends → widget appears with correct label / section / tooltip.
+    // See CoreFrameworks/{Lifecycle,Gate,Risk,Ops}CfgFlagRegistry.hpp +
+    // ML_Headers/MlCfgFlagRegistry.hpp for full lists.
+    #define X(name, legacy_field, display_label, section, doc) \
+        {#legacy_field, display_label, section, CFG_BOOL, NULL, doc},
+    FOREACH_LIFECYCLE_CFG_FLAG(X)
+    FOREACH_GATE_CFG_FLAG(X)
+    FOREACH_ML_CFG_FLAG(X)
+    FOREACH_RISK_CFG_FLAG(X)
+    FOREACH_OPS_CFG_FLAG(X)
+    #undef X
 };
 static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 

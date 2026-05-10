@@ -42,19 +42,20 @@
 // gate price, no-trade band suppression, cost-aware sizing gate, ML barrier gating,
 // param staleness gating).
 
-#define FOREACH_GATE_CFG_FLAG(X)                                                                                  \
-    X(DEPTH_ENABLED,                depth_enabled,                "order book depth feed + book imbalance gate")  \
-    X(GATE_EMA_ENABLED,             gate_ema_enabled,             "use EMA price for gate (vs rolling avg)")      \
-    X(NO_TRADE_BAND_ENABLED,        no_trade_band_enabled,        "suppress entries when signal in no-trade band") \
-    X(COST_GATE_ENABLED,            cost_gate_enabled,            "fee-aware sizing gate (require TP > round-trip cost)") \
-    X(BARRIER_GATE_ENABLED,         barrier_gate_enabled,         "ML 3-class barrier gate (uses P(peak)/P(stable) for gating; stamp-bound via FOREACH_STAMP_BOUND_MODEL_CONST)") \
-    X(PARAM_STALENESS_GATE_ENABLED, param_staleness_gate_enabled, "GATE_FLAG_STALENESS_ENABLED hot-path gate via slow-path rebuild")
+// Tuple: X(NAME, legacy_field, display_label, section, doc)  [5-col v5.14.9.F.5+]
+#define FOREACH_GATE_CFG_FLAG(X)                                                                                                                                                                       \
+    X(DEPTH_ENABLED,                depth_enabled,                "Order Book",            "Toggles",         "order book depth feed + book imbalance gate")                                            \
+    X(GATE_EMA_ENABLED,             gate_ema_enabled,             "EMA Enabled",           "EMA Gate",        "use EMA price for gate (vs rolling avg)")                                                \
+    X(NO_TRADE_BAND_ENABLED,        no_trade_band_enabled,        "No-Trade Band##bool",   "No-Trade Band",   "suppress entries when signal in no-trade band")                                          \
+    X(COST_GATE_ENABLED,            cost_gate_enabled,            "Cost Gate",             "FoxML",           "fee-aware sizing gate (require TP > round-trip cost)")                                   \
+    X(BARRIER_GATE_ENABLED,         barrier_gate_enabled,         "Barrier Gate",          "Barrier",         "ML 3-class barrier gate (P(peak)/P(stable) gating; stamp-bound via FOREACH_STAMP_BOUND_MODEL_CONST)") \
+    X(PARAM_STALENESS_GATE_ENABLED, param_staleness_gate_enabled, "Param Staleness Gate",  "Risk Management", "GATE_FLAG_STALENESS_ENABLED hot-path gate via slow-path rebuild")
 
 //------------------------------------------------------------------------------------------------------
 // [AUTO-GENERATED ENUM + COUNT]
 //------------------------------------------------------------------------------------------------------
 enum GateCfgFlag {
-#define X_GEN_GATE_CFG_BIT(name, legacy_field, doc) GATE_CFG_##name,
+#define X_GEN_GATE_CFG_BIT(name, legacy_field, display_label, section, doc) GATE_CFG_##name,
     FOREACH_GATE_CFG_FLAG(X_GEN_GATE_CFG_BIT)
     GATE_CFG_COUNT
 #undef X_GEN_GATE_CFG_BIT
@@ -66,7 +67,7 @@ static_assert(GATE_CFG_COUNT <= 8,
 //------------------------------------------------------------------------------------------------------
 // [AUTO-GENERATED MASK_GATE_CFG_<NAME> CONSTANTS]
 //------------------------------------------------------------------------------------------------------
-#define X_GEN_GATE_CFG_MASK(name, legacy_field, doc) \
+#define X_GEN_GATE_CFG_MASK(name, legacy_field, display_label, section, doc) \
     static constexpr uint8_t MASK_GATE_CFG_##name = (uint8_t)(1u << GATE_CFG_##name);
 FOREACH_GATE_CFG_FLAG(X_GEN_GATE_CFG_MASK)
 #undef X_GEN_GATE_CFG_MASK

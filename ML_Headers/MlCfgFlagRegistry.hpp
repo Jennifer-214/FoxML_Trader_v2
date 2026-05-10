@@ -48,20 +48,21 @@
 // ML pipeline behavior (confidence scoring, bandit warmup, exit-model arms,
 // volatility scaling, lazy slow-path rebuild).
 
-#define FOREACH_ML_CFG_FLAG(X)                                                                                                          \
-    X(CONFIDENCE_ENABLED,           confidence_enabled,           "scale entry threshold by confidence score")                           \
-    X(CONFIDENCE_COMPOSITE_ENABLED, confidence_composite_enabled, "use 4-factor composite confidence (vs legacy 3-factor); stamp-bound") \
-    X(BANDIT_ENABLED,               bandit_enabled,               "Thompson-sampling bandit for buy-signal arm selection")               \
-    X(EXIT_BANDIT_ENABLED,          exit_bandit_enabled,          "Thompson-sampling bandit for exit-side arm selection")                \
-    X(USE_EXIT_MODEL,               use_exit_model,               "use dedicated exit-side ML model (vs entry model fallback)")          \
-    X(FOXML_VOL_SCALING_ENABLED,    foxml_vol_scaling_enabled,    "scale trade size by recent volatility (FoxML VolScaler)")             \
-    X(LAZY_REBUILD_ENABLED,         lazy_rebuild_enabled,         "skip slow-path rebuild when no parameter inputs changed")
+// Tuple: X(NAME, legacy_field, display_label, section, doc)  [5-col v5.14.9.F.5+]
+#define FOREACH_ML_CFG_FLAG(X)                                                                                                                                                                          \
+    X(CONFIDENCE_ENABLED,           confidence_enabled,           "Confidence",            "FoxML",       "scale entry threshold by confidence score")                                                  \
+    X(CONFIDENCE_COMPOSITE_ENABLED, confidence_composite_enabled, "Composite Confidence",  "FoxML",       "use 4-factor composite confidence (vs legacy 3-factor); stamp-bound")                         \
+    X(BANDIT_ENABLED,               bandit_enabled,               "Bandit",                "FoxML",       "Thompson-sampling bandit for buy-signal arm selection")                                      \
+    X(EXIT_BANDIT_ENABLED,          exit_bandit_enabled,          "Exit Bandit",           "FoxML",       "Thompson-sampling bandit for exit-side arm selection")                                       \
+    X(USE_EXIT_MODEL,               use_exit_model,               "Use Exit Model",        "FoxML",       "use dedicated exit-side ML model (vs entry model fallback)")                                 \
+    X(FOXML_VOL_SCALING_ENABLED,    foxml_vol_scaling_enabled,    "Vol Scaling",           "FoxML",       "scale trade size by recent volatility (FoxML VolScaler)")                                    \
+    X(LAZY_REBUILD_ENABLED,         lazy_rebuild_enabled,         "Lazy Rebuild",          "Performance", "skip slow-path rebuild when no parameter inputs changed")
 
 //------------------------------------------------------------------------------------------------------
 // [AUTO-GENERATED ENUM + COUNT]
 //------------------------------------------------------------------------------------------------------
 enum MlCfgFlag {
-#define X_GEN_ML_CFG_BIT(name, legacy_field, doc) ML_CFG_##name,
+#define X_GEN_ML_CFG_BIT(name, legacy_field, display_label, section, doc) ML_CFG_##name,
     FOREACH_ML_CFG_FLAG(X_GEN_ML_CFG_BIT)
     ML_CFG_COUNT
 #undef X_GEN_ML_CFG_BIT
@@ -73,7 +74,7 @@ static_assert(ML_CFG_COUNT <= 16,
 //------------------------------------------------------------------------------------------------------
 // [AUTO-GENERATED MASK_ML_CFG_<NAME> CONSTANTS]
 //------------------------------------------------------------------------------------------------------
-#define X_GEN_ML_CFG_MASK(name, legacy_field, doc) \
+#define X_GEN_ML_CFG_MASK(name, legacy_field, display_label, section, doc) \
     static constexpr uint16_t MASK_ML_CFG_##name = (uint16_t)(1u << ML_CFG_##name);
 FOREACH_ML_CFG_FLAG(X_GEN_ML_CFG_MASK)
 #undef X_GEN_ML_CFG_MASK
