@@ -1753,127 +1753,34 @@ struct StampWriteResult {
 // Caller fills only the fields it has; has_* flags gate emit. Nullptr
 // passed for legacy callers means none of these fields emit (forward-
 // compat with v5.9.0/.1/.2 stamps).
+// v5.14.8.A.merged.3 — StampInferenceCfgInputs migrated to X-macro
+// generation from FOREACH_STAMP_BOUND_MODEL_CONST registry (matches
+// ModelStampResult; Option 1 unification). Both structs now use canonical
+// wire-key field names + uint64_t has_flags bit-packed via STAMP_HAS aliases.
+//
+// Production caller migration: replace manual population blocks with
+// `STAMP_MODEL_CONST_AUTOPOPULATE(inf, src)` macro call. Future field
+// additions auto-flow via the registry (extinguishes v5.9.5b production-
+// caller class for stamp body fields).
 struct StampInferenceCfgInputs {
-    int      has_inference_cfg;                     // 1 = emit the 5 always-present cfg fields below
-    double   confidence_threshold_scale;
-    int      barrier_gate_enabled;
-    double   confidence_hard_block_threshold;
-    double   held_out_fraction;
-    double   freshness_tau;                          // bound to stamp at training time
-    int      has_bandit;                             // 1 = emit bandit_blend_ratio (when bandit_enabled cfg=1)
-    double   bandit_blend_ratio;
-    int      has_fees;                               // 1 = emit fee_rate_maker/taker (when cost_gate_enabled=1)
-    double   fee_rate_maker;
-    double   fee_rate_taker;
-    int      has_training_poll_interval;             // 1 = emit training_poll_interval
-    uint32_t training_poll_interval;
-    // v5.9.3a — scaler sidecar binding fields. has_scaler=1 → emit
-    // both feature_scaler_present + scaler_sha256 lines. scaler_sha256
-    // is the SHA-256 of the FULL sidecar file (computed by trainer
-    // post-Persist via sha256_file_hex_inproc).
-    int      has_scaler;
-    int      feature_scaler_present;                 // 0 = no sidecar; 1 = sidecar exists
-    const char* scaler_sha256_hex;                   // null-terminated 64-char hex (or empty)
-    // v5.9.4a — model num_outputs (output dimension) stamp binding.
-    // Stamp records what the trainer SAW; verifier compares against
-    // ModelHandle.num_outputs at load time. Binary/regression = 1,
-    // multiclass = num_classes (e.g. 3 for PEAK_VALLEY_STABLE).
-    // Catches "stamp claims 3-class but binary model loaded" bug.
-    int      has_num_outputs;
-    int      model_num_outputs;
-    // v5.9.5h — XGBoost training hyperparams. Stamp body position 17
-    // (canonical-order locked: appended after model_num_outputs at
-    // position 16). Surface G has_*=0 forward-compat for legacy stamps.
-    // Engine load-WARN compares these vs cfg.xgb_* at boot; mismatch
-    // logs (no refuse — hyperparams don't affect inference, only
-    // forensics + reproducibility). max_depth/lr/n_est are the
-    // operator-tunable ones; subsample/colsample/min_child_weight/
-    // seed/tree_method are the cfg-tunable ones (v5.9.5h Phase 2).
-    int      has_xgb_hyperparams;
-    int      xgb_max_depth;
-    double   xgb_learning_rate;
-    int      xgb_n_estimators;
-    double   xgb_subsample;
-    double   xgb_colsample_bytree;
-    int      xgb_min_child_weight;
-    int      xgb_seed;
-    char     xgb_tree_method[16];
-    int      has_build_flags_hash;
-    uint64_t build_flags_hash;
-    // v5.10.0a.G.2 — multi-horizon ensemble member count.
-    //
-    // CANONICAL STAMP BODY POSITION ASSIGNMENT (v5.10.0a):
-    // Position 19: grid_member_count (this ship; locks order via Sprint B B2 ships first)
-    // Position 20: label_registry_hash (v5.10.0d / Sprint B B5; ships after this)
-    // New fields after v5.10.0a + v5.10.0d MUST take position 21+ per
-    // master plan canonical-order rule (only append at end). Sprint
-    // order is locked by master plan; do NOT reassign positions.
-    //
-    // grid_member_count = N where this stamp belongs to an ensemble of
-    // N models trained as a horizon set (cfg.horizon_list non-empty at
-    // train time). Single-horizon stamps have has_grid_member_count=0
-    // (forward-compat; legacy stamps load fine).
-    //
-    // Engine load: when has_grid_member_count=1, load proceeds normally
-    // BUT logs "[ensemble] this model is member <member_idx>/<count> of a
-    // multi-horizon ensemble; consider loading siblings via cfg.horizon_list
-    // for full ensemble inference." Operator-side hint only; no refuse.
-    int      has_grid_member_count;
-    int      grid_member_count;        // total members in the ensemble (N)
-    int      grid_member_idx;          // this model's index within (0..N-1)
-    // v5.10.0d — label registry hash (canonical position 20). Set
-    // has_label_registry_hash=1 to emit; verifier compares stamp's value
-    // vs current build's LABEL_REGISTRY_HASH() — mismatch refuses load.
-    // Mirrors v5.8.6 feature_registry_hash refusal flow.
-    int      has_label_registry_hash;
-    uint64_t label_registry_hash;
-    // v5.11.18a — feature_mask (canonical position 21). Per-core uint64
-    // bitmap of which features were active at training time. Ship is
-    // infrastructure-only — Features_PackAll still consumes ALL features
-    // until v5.11.18 wires the mask through MLBuildContext. Surface G
-    // has_*=0 forward-compat for legacy stamps + default-cfg trains
-    // (where the mask is the all-on default 0xFFFFFFFFFFFFFFFF).
-    //
-    // Convention: emit only when caller explicitly passes a non-default
-    // mask. This keeps stamps trained against the all-on default
-    // bytewise-identical to pre-v5.11.18a stamps (the field is absent
-    // from the canonical body, so the HMAC signature is unchanged).
-    int      has_feature_mask;
-    uint64_t feature_mask_train;
-    // v5.11.41 — per-horizon label parameters (canonical position 22).
-    // Forensic-only: verifier records into ModelStampResult so operator
-    // can grep stamp file to identify which horizon produced this model.
-    // No load-time refusal — engine has no "expected horizon" cfg-side
-    // to compare against (multi-horizon ensemble auto-detects via dir
-    // naming `_horizon_<H>` per v5.10.0a-final). Recording closes a
-    // pre-existing schema gap surfaced by /parity-check 2026-05-07-stamp.
-    int      has_label_params;
-    int      label_lookahead_ticks;        // aka label_forward_ticks
-    double   label_tp_pct;                  // 0.05 means 0.05% (BacktestRunConfig convention)
-    double   label_sl_pct;
-    // v5.11.41 — XGBoost train-time thread count (canonical position 23).
-    // Forensic-only: lets operator post-hoc detect mode divergence
-    // (serial mode = cfg.xgb_train_nthread; parallel multi-horizon
-    // mode = pinned to 1 for bytewise determinism vs serial-with-1).
-    // Recording closes /parity-check 2026-05-07-stamp CRITICAL-2.
-    int      has_xgb_train_nthread;
-    int      xgb_train_nthread;
+    // === Bit-packed has_* flags (matches ModelStampResult) ===
+    uint64_t has_flags;
 
-    // v5.14.1.B.3 — X-macro-driven stamp-bound cfg fields (canonical
-    // positions 24+). Auto-generated from FOREACH_STAMP_BOUND_CFG;
-    // mirrors ModelStampResult (parser side). Production caller (e.g.
-    // BacktestPanels' Train Model worker) populates has_<name>=1 +
-    // value when cfg-side flag is enabled. Default 0 = legacy stamp
-    // (emit nothing → byte-identical to pre-v5.14.1.B.3 stamps).
+    // === Architectural value fields — auto-generated from FOREACH_STAMP_BOUND_MODEL_CONST ===
+    // 26 entries; canonical wire-key names. Same expansion as ModelStampResult side.
+    #define X(name, group, presence, type, fmt, default_val, get_value, emit_when, doc) \
+        type name;
+    FOREACH_STAMP_BOUND_MODEL_CONST(X)
+    #undef X
+
+    // === FOREACH_STAMP_BOUND_CFG fields (sister registry; per-entry has_*) ===
     #define X(name, type, fmt, default_val, get_cfg_expr, emit_when)  \
         int  has_##name;                                                \
         type name;
     FOREACH_STAMP_BOUND_CFG(X)
     #undef X
 
-    // v5.14.2.E.2.B — model-architectural fields (mirror of ModelStampResult
-    // additions; see ModelStampResult for the discipline list). NOT in
-    // FOREACH_STAMP_BOUND_CFG (architectural, not cfg-bound).
+    // === v5.14.2.E.2.B + v5.14.3.B late-emit architectural fields (manual; FUTURE: TECH_DEBT-006.b) ===
     int      has_expected_num_classes;
     int      expected_num_classes;
     int      has_expected_role;
@@ -1882,28 +1789,10 @@ struct StampInferenceCfgInputs {
     int      expected_num_features;
     int      has_expected_feature_format_version;
     int      expected_feature_format_version;
-
-    // v5.14.3.B — overlay-derived fields (3-layer fingerprinting).
-    // SIDECAR-DERIVED (computed from FeatureOverlay JSON), NOT cfg-bound.
-    // Don't fit FOREACH_STAMP_BOUND_CFG. Manual emit + parse pattern
-    // (mirror v5.14.2.E.2.B precedent above).
-    //
-    // **TECH_DEBT trigger:** when sidecar-derived field count grows to 5+,
-    // refactor to parallel `FOREACH_STAMP_BOUND_SIDECAR(X)` registry
-    // (sister to TECH_DEBT-006's FOREACH_STAMP_BOUND_MODEL_CONST).
-    //
-    // **If you add a NEW sidecar-derived field here, ALSO update:**
-    //   - ModelStampResult (above; parser-side struct)
-    //   - verify_model_stamp init block (zero has_*)
-    //   - verify_model_stamp parser (add `if (strcmp(key, "...") == 0)` branch)
-    //   - stamp_write_for_model emit (add `if (inf->has_*)` block)
-    //   - BacktestEngine.hpp populator (add `inf.has_*=1; inf.*=value;`)
-    //   - tools/feature_overlay.py (Python emit-side mirror)
-    //   - FeatureOverlay_PostLoadVerify helper (verification check)
     int      has_overlay_hash;
-    char     overlay_hash[65];                  // SHA256 of canonical overlay JSON; 64 hex + null
+    char     overlay_hash[65];
     int      has_effective_hash;
-    char     effective_hash[65];                // SHA256(layer1 || layer2); 64 hex + null
+    char     effective_hash[65];
 };
 
 inline StampWriteResult stamp_write_for_model(const char* model_path,
@@ -2003,162 +1892,30 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
             "stamp_format_version=1\n");
         if (wrote > 0) n += wrote;
     }
-    // v5.9.2b — inference cfg binding. Emitted only when caller passed
-    // non-null `inf` pointer + respective has_* flag set. Verifier
-    // parser tolerates absent fields (legacy stamps + no-bind callers).
-    if (inf && inf->has_inference_cfg && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "inference_cfg_confidence_threshold_scale=%g\n"
-            "inference_cfg_barrier_gate_enabled=%d\n"
-            "inference_cfg_confidence_hard_block_threshold=%g\n"
-            "inference_cfg_held_out_fraction=%g\n"
-            "inference_cfg_freshness_tau=%g\n",
-            inf->confidence_threshold_scale,
-            inf->barrier_gate_enabled,
-            inf->confidence_hard_block_threshold,
-            inf->held_out_fraction,
-            inf->freshness_tau);
-        if (wrote > 0) n += wrote;
-    }
-    if (inf && inf->has_bandit && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "inference_cfg_bandit_blend_ratio=%g\n",
-            inf->bandit_blend_ratio);
-        if (wrote > 0) n += wrote;
-    }
-    if (inf && inf->has_fees && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "inference_cfg_fee_rate_maker=%g\n"
-            "inference_cfg_fee_rate_taker=%g\n",
-            inf->fee_rate_maker,
-            inf->fee_rate_taker);
-        if (wrote > 0) n += wrote;
-    }
-    if (inf && inf->has_training_poll_interval && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "training_poll_interval=%u\n",
-            (unsigned)inf->training_poll_interval);
-        if (wrote > 0) n += wrote;
-    }
-    // v5.9.3a — scaler sidecar binding. Both lines emit together; SHA
-    // empty when feature_scaler_present=0 (no sidecar).
-    if (inf && inf->has_scaler && n > 0 && (size_t)n < sizeof(canonical)) {
-        const char* sha = (inf->scaler_sha256_hex && inf->scaler_sha256_hex[0])
-                        ? inf->scaler_sha256_hex : "";
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "feature_scaler_present=%d\n"
-            "scaler_sha256=%s\n",
-            inf->feature_scaler_present ? 1 : 0, sha);
-        if (wrote > 0) n += wrote;
-    }
-    // v5.9.4a — model num_outputs (output dimension). Stamp records
-    // what trainer SAW; engine load compares vs ModelHandle.num_outputs.
-    // Mismatch caught by CoreModelZoo_TryLoadRole's strict-mode gate.
-    if (inf && inf->has_num_outputs && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "model_num_outputs=%d\n", inf->model_num_outputs);
-        if (wrote > 0) n += wrote;
-    }
-    // v5.9.5h — XGBoost training hyperparams (stamp body position 17).
-    // 8 fields emit together as a block. Operator-tunable max_depth/lr/
-    // n_est come from Train Model panel; cfg-tunable subsample/colsample/
-    // min_child_weight/seed/tree_method come from cfg.xgb_*. Engine
-    // load-WARN compares to cfg at boot; mismatch logged (no refuse —
-    // hyperparams don't affect inference, only forensics + reproducibility).
-    if (inf && inf->has_xgb_hyperparams && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "xgb_max_depth=%d\n"
-            "xgb_learning_rate=%g\n"
-            "xgb_n_estimators=%d\n"
-            "xgb_subsample=%g\n"
-            "xgb_colsample_bytree=%g\n"
-            "xgb_min_child_weight=%d\n"
-            "xgb_seed=%d\n"
-            "xgb_tree_method=%s\n",
-            inf->xgb_max_depth, inf->xgb_learning_rate, inf->xgb_n_estimators,
-            inf->xgb_subsample, inf->xgb_colsample_bytree,
-            inf->xgb_min_child_weight, inf->xgb_seed, inf->xgb_tree_method);
-        if (wrote > 0) n += wrote;
-    }
-    // v5.9.5h Phase 10 — build flags fingerprint (position 18). Emit
-    // when has_build_flags_hash=1; engine load-WARN compares stamp's
-    // hash vs current build's BUILD_FLAGS_HASH() (mismatch logged).
-    if (inf && inf->has_build_flags_hash && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "build_flags_hash=%016lx\n",
-            (unsigned long)inf->build_flags_hash);
-        if (wrote > 0) n += wrote;
-    }
-    // v5.10.0a.G.2 — multi-horizon ensemble metadata (position 19).
-    // Emitted when this model was trained as part of a horizon set
-    // (cfg.horizon_list non-empty at train time). Forward-compat:
-    // single-horizon stamps have has_grid_member_count=0 and skip
-    // this block; legacy verifiers (pre-v5.10.0a.G.2) tolerate missing
-    // fields. Engine load-time: when present, hint operator that
-    // siblings exist (informational; does not enforce ensemble load).
-    if (inf && inf->has_grid_member_count && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "grid_member_count=%d\n"
-            "grid_member_idx=%d\n",
-            inf->grid_member_count, inf->grid_member_idx);
-        if (wrote > 0) n += wrote;
-    }
-
-    // v5.10.0d — label_registry_hash (canonical position 20). Set
-    // inf->has_label_registry_hash=1 to emit; verifier compares against
-    // engine's LABEL_REGISTRY_HASH() and refuses on mismatch (mirrors
-    // feature_registry_hash refusal flow).
-    if (inf && inf->has_label_registry_hash && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "label_registry_hash=%016lx\n",
-            (unsigned long)inf->label_registry_hash);
-        if (wrote > 0) n += wrote;
-    }
-
-    // v5.11.18a — feature_mask (canonical position 21). Set
-    // inf->has_feature_mask=1 to emit; verifier compares against the
-    // runtime cfg's per-core feature_mask at load time. Convention:
-    // emit only when caller explicitly passes a non-default mask
-    // (training-time mask differs from 0xFFFF..F all-on default). This
-    // keeps stamps trained against the default mask bytewise-identical
-    // to pre-v5.11.18a stamps + their HMAC signatures unchanged.
-    if (inf && inf->has_feature_mask && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "feature_mask=%016lx\n",
-            (unsigned long)inf->feature_mask_train);
-        if (wrote > 0) n += wrote;
-    }
-
-    // v5.11.41 — per-horizon label params (canonical position 22). Set
-    // inf->has_label_params=1 to emit. Forensic-only: verifier records
-    // into ModelStampResult; no load-time refusal because engine has no
-    // expected horizon cfg-side. Multi-horizon ensemble auto-detects
-    // siblings via dir naming `_horizon_<H>` (v5.10.0a-final). Recording
-    // closes /parity-check 2026-05-07-stamp CRITICAL-1 + lets operator
-    // grep stamp file to identify which horizon a model belongs to.
-    if (inf && inf->has_label_params && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "label_lookahead_ticks=%d\n"
-            "label_tp_pct=%.6g\n"
-            "label_sl_pct=%.6g\n",
-            inf->label_lookahead_ticks,
-            inf->label_tp_pct,
-            inf->label_sl_pct);
-        if (wrote > 0) n += wrote;
-    }
-
-    // v5.11.41 — XGBoost training thread count (canonical position 23).
-    // Set inf->has_xgb_train_nthread=1 to emit. Forensic-only: lets
-    // operator post-hoc detect whether a stamp came from serial mode
-    // (cfg.xgb_train_nthread default 4) or parallel multi-horizon mode
-    // (pinned to 1). Recording closes /parity-check 2026-05-07-stamp
-    // CRITICAL-2.
-    if (inf && inf->has_xgb_train_nthread && n > 0 && (size_t)n < sizeof(canonical)) {
-        int wrote = snprintf(canonical + n, sizeof(canonical) - n,
-            "xgb_train_nthread=%d\n",
-            inf->xgb_train_nthread);
-        if (wrote > 0) n += wrote;
-    }
+    // v5.14.8.A.merged.3 — Registry-driven emit walk. Replaces ~152 lines
+    // of manual `if (inf->has_X) snprintf(...)` blocks with single X-macro
+    // walk over FOREACH_STAMP_BOUND_MODEL_CONST. Per-entry has_* dispatch
+    // via STAMP_EMIT_CHECK_HAS_<group> token paste. Wire format byte-for-byte
+    // preserved (same registry order as canonical emit sequence v5.14.7).
+    //
+    // Type handling: printf format string in registry's `fmt` column matches
+    // C type promotion rules on x86_64:
+    //   double + "%g" / "%.6g" — direct
+    //   int + "%d" — direct
+    //   uint8_t + "%d" — integer promotion to int
+    //   uint32_t + "%u" — same as unsigned int on x86_64
+    //   uint64_t + "%016lx" — same as unsigned long on x86_64
+    //   tt::stamp_str_N (char[N]) + "%s" — array decay to char*
+    // Compiler may emit -Wformat warnings for non-x86_64; if porting to
+    // 32-bit, add explicit casts via a templated stamp_emit_field<T> helper.
+    #define X(name, group, presence, type, fmt, default_val, get_value, emit_when, doc) \
+        if (inf && STAMP_EMIT_CHECK_HAS_##group(name) && n > 0 && (size_t)n < sizeof(canonical)) { \
+            int wrote = snprintf(canonical + n, sizeof(canonical) - n, \
+                #name "=" fmt "\n", inf->name); \
+            if (wrote > 0) n += wrote; \
+        }
+    FOREACH_STAMP_BOUND_MODEL_CONST(X)
+    #undef X
 
     // v5.14.1.B.3 — X-macro-driven emit for stamp-bound cfg fields.
     // Each X expands to one `if (inf->has_<name>) snprintf("<name>=...")`

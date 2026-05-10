@@ -11904,18 +11904,18 @@ e3_skip_load:;
 
                 // Use stamp_write_for_model with inference_cfg inputs
                 StampInferenceCfgInputs inf = {};
-                inf.has_inference_cfg = 1;
-                inf.confidence_threshold_scale = 2.0;
-                inf.barrier_gate_enabled = 1;
-                inf.confidence_hard_block_threshold = 0.05;
-                inf.held_out_fraction = 0.20;
-                inf.freshness_tau = 300.0;
-                inf.has_bandit = 1;
-                inf.bandit_blend_ratio = 0.30;
-                inf.has_fees = 1;
-                inf.fee_rate_maker = 0.00075;
-                inf.fee_rate_taker = 0.00100;
-                inf.has_training_poll_interval = 1;
+                STAMP_SET(inf, inference_cfg);
+                inf.inference_cfg_confidence_threshold_scale = 2.0;
+                inf.inference_cfg_barrier_gate_enabled = 1;
+                inf.inference_cfg_confidence_hard_block_threshold = 0.05;
+                inf.inference_cfg_held_out_fraction = 0.20;
+                inf.inference_cfg_freshness_tau = 300.0;
+                STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
+                inf.inference_cfg_bandit_blend_ratio = 0.30;
+                STAMP_SET(inf, fees);
+                inf.inference_cfg_fee_rate_maker = 0.00075;
+                inf.inference_cfg_fee_rate_taker = 0.00100;
+                STAMP_SET(inf, training_poll_interval);
                 inf.training_poll_interval = 100;
 
                 StampWriteResult sw = stamp_write_for_model(
@@ -12148,9 +12148,10 @@ e3_skip_load:;
 
                 // Write a stamp claiming scaler present + a fake SHA
                 StampInferenceCfgInputs inf = {};
-                inf.has_scaler = 1;
+                STAMP_SET(inf, scaler);
                 inf.feature_scaler_present = 1;
-                inf.scaler_sha256_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+                strncpy(inf.scaler_sha256, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 64);
+                inf.scaler_sha256[64] = '\0';
                 StampWriteResult sw = stamp_write_for_model(
                     model_path, "test-secret-v593a", 5, "2026-05-02",
                     0.65, 0.62, 0.05, 0,
@@ -12338,10 +12339,11 @@ e3_skip_load:;
 
                     // Emit stamp WITH scaler fields (v5.9.3b shape)
                     StampInferenceCfgInputs inf = {};
-                    inf.has_scaler = 1;
+                    STAMP_SET(inf, scaler);
                     inf.feature_scaler_present = 1;
-                    inf.scaler_sha256_hex =
-                        "feedfacecafebabe0123456789abcdef0123456789abcdef0123456789abcdef";
+                    strncpy(inf.scaler_sha256,
+                        "feedfacecafebabe0123456789abcdef0123456789abcdef0123456789abcdef", 64);
+                    inf.scaler_sha256[64] = '\0';
 
                     StampWriteResult sw_full = stamp_write_for_model(
                         model_path, "test-secret-v593b", 5, "2026-05-02",
@@ -12355,7 +12357,7 @@ e3_skip_load:;
                     check("v5.9.3b: full stamp parses feature_scaler_present=1",
                           v_full.feature_scaler_present == 1);
                     check("v5.9.3b: full stamp parses scaler_sha256 verbatim",
-                          strncmp(v_full.scaler_sha256, inf.scaler_sha256_hex, 64) == 0);
+                          strncmp(v_full.scaler_sha256, inf.scaler_sha256, 64) == 0);
 
                     unlink(stamp_path);
                     unlink(model_path);
@@ -12566,7 +12568,7 @@ e3_skip_load:;
 
                 // Test 1: write stamp WITH model_num_outputs=3, verify round-trip
                 StampInferenceCfgInputs inf = {};
-                inf.has_num_outputs = 1;
+                STAMP_SET(inf, model_num_outputs);
                 inf.model_num_outputs = 3;
                 StampWriteResult sw = stamp_write_for_model(
                     model_path, "test-secret-v594a", 5, "2026-05-02",
@@ -12677,31 +12679,31 @@ e3_skip_load:;
                 // ↓ This block IS the v5.9.5b wiring (mirrors
                 //   Backtest_RunFullValidation):
                 StampInferenceCfgInputs inf = {};
-                inf.has_inference_cfg = 1;
-                inf.confidence_threshold_scale =
+                STAMP_SET(inf, inference_cfg);
+                inf.inference_cfg_confidence_threshold_scale =
                     FPN_ToDouble(cfg.confidence_threshold_scale);
-                inf.barrier_gate_enabled = cfg.barrier_gate_enabled;
-                inf.confidence_hard_block_threshold =
+                inf.inference_cfg_barrier_gate_enabled = cfg.barrier_gate_enabled;
+                inf.inference_cfg_confidence_hard_block_threshold =
                     FPN_ToDouble(cfg.confidence_hard_block_threshold);
-                inf.held_out_fraction =
+                inf.inference_cfg_held_out_fraction =
                     FPN_ToDouble(cfg.held_out_fraction);
-                inf.freshness_tau =
+                inf.inference_cfg_freshness_tau =
                     FPN_ToDouble(cfg.confidence_freshness_tau);
                 if (cfg.bandit_enabled) {
-                    inf.has_bandit = 1;
-                    inf.bandit_blend_ratio =
+                    STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
+                    inf.inference_cfg_bandit_blend_ratio =
                         FPN_ToDouble(cfg.bandit_blend_ratio);
                 }
                 if (cfg.cost_gate_enabled) {
-                    inf.has_fees = 1;
-                    inf.fee_rate_maker = FPN_ToDouble(cfg.fee_rate_maker);
-                    inf.fee_rate_taker = FPN_ToDouble(cfg.fee_rate_taker);
+                    STAMP_SET(inf, fees);
+                    inf.inference_cfg_fee_rate_maker = FPN_ToDouble(cfg.fee_rate_maker);
+                    inf.inference_cfg_fee_rate_taker = FPN_ToDouble(cfg.fee_rate_taker);
                 }
-                inf.has_training_poll_interval = 1;
+                STAMP_SET(inf, training_poll_interval);
                 inf.training_poll_interval     = cfg.poll_interval;
                 {
                     int K = LabelType_NumClasses(label_type);
-                    inf.has_num_outputs   = 1;
+                    STAMP_SET(inf, model_num_outputs);
                     inf.model_num_outputs = (K >= 2) ? K : 1;
                 }
 
@@ -12752,15 +12754,15 @@ e3_skip_load:;
                 fwrite("d2", 1, 2, mf2);
                 fclose(mf2);
                 StampInferenceCfgInputs inf2 = {};
-                inf2.has_inference_cfg = 1;
-                inf2.confidence_threshold_scale = 1.0;
-                inf2.held_out_fraction          = 0.20;
-                inf2.freshness_tau              = 300.0;
+                STAMP_SET(inf2, inference_cfg);
+                inf2.inference_cfg_confidence_threshold_scale = 1.0;
+                inf2.inference_cfg_held_out_fraction          = 0.20;
+                inf2.inference_cfg_freshness_tau              = 300.0;
                 // bandit_enabled=0 → has_bandit stays 0
                 // cost_gate_enabled=0 → has_fees stays 0
-                inf2.has_training_poll_interval = 1;
+                STAMP_SET(inf2, training_poll_interval);
                 inf2.training_poll_interval     = 100;
-                inf2.has_num_outputs            = 1;
+                STAMP_SET(inf2, model_num_outputs);
                 inf2.model_num_outputs          = 1;  // binary
                 StampWriteResult sw_min = stamp_write_for_model(
                     model_path, "test-secret-v595b", 5, "2026-05-02",
@@ -12964,7 +12966,7 @@ e3_skip_load:;
                 fclose(mf);
 
                 StampInferenceCfgInputs inf = {};
-                inf.has_xgb_hyperparams = 1;
+                STAMP_SET(inf, xgb_hyperparams);
                 inf.xgb_max_depth        = 8;
                 inf.xgb_learning_rate    = 0.05;
                 inf.xgb_n_estimators     = 300;
@@ -14375,7 +14377,7 @@ e3_skip_load:;
         FILE* mf = fopen(tmp_model, "wb"); fwrite("test", 1, 4, mf); fclose(mf);
 
         StampInferenceCfgInputs inf = {};
-        inf.has_label_registry_hash = 1;
+        STAMP_SET(inf, label_registry_hash);
         inf.label_registry_hash = h;
         StampWriteResult sw = stamp_write_for_model(
             tmp_model, "test-secret", MODEL_FORMAT_VERSION,
@@ -15681,7 +15683,7 @@ e3_skip_load:;
                     FILE *mf = fopen(m_path[i], "wb"); fwrite("test", 1, 4, mf); fclose(mf);
 
                     StampInferenceCfgInputs inf = {};
-                    inf.has_grid_member_count = 1;
+                    STAMP_SET(inf, grid_member);
                     inf.grid_member_count = 3;
                     inf.grid_member_idx = i;
                     StampWriteResult sw = stamp_write_for_model(
@@ -15730,7 +15732,7 @@ e3_skip_load:;
                     FILE *mf = fopen(m_path[i], "wb"); fwrite("test", 1, 4, mf); fclose(mf);
 
                     StampInferenceCfgInputs inf = {};
-                    inf.has_grid_member_count = 1;
+                    STAMP_SET(inf, grid_member);
                     inf.grid_member_count = member_counts[i];
                     inf.grid_member_idx = i;
                     stamp_write_for_model(
@@ -15836,7 +15838,7 @@ e3_skip_load:;
         // Emit stamp with WRONG label_registry_hash (engine's actual XOR'd).
         uint64_t wrong_hash = LABEL_REGISTRY_HASH() ^ 0xDEADBEEFULL;
         StampInferenceCfgInputs inf_wrong = {};
-        inf_wrong.has_label_registry_hash = 1;
+        STAMP_SET(inf_wrong, label_registry_hash);
         inf_wrong.label_registry_hash     = wrong_hash;
         StampWriteResult sw = stamp_write_for_model(
             tmp_model, "v5.10.1.A-test", MODEL_FORMAT_VERSION,
@@ -15861,7 +15863,7 @@ e3_skip_load:;
         // Sanity: a CORRECT label_registry_hash loads via the same production-path
         // call shape.
         StampInferenceCfgInputs inf_right = {};
-        inf_right.has_label_registry_hash = 1;
+        STAMP_SET(inf_right, label_registry_hash);
         inf_right.label_registry_hash     = LABEL_REGISTRY_HASH();
         StampWriteResult sw2 = stamp_write_for_model(
             tmp_model, "v5.10.1.A-test", MODEL_FORMAT_VERSION,
@@ -16238,11 +16240,11 @@ e3_skip_load:;
     {
         // === Test G.2.1: StampInferenceCfgInputs has grid_member_count fields ===
         StampInferenceCfgInputs inf{};
-        inf.has_grid_member_count = 1;
+        STAMP_SET(inf, grid_member);
         inf.grid_member_count = 4;
         inf.grid_member_idx = 2;
         check("v5.10.0a.G.2: StampInferenceCfgInputs.has_grid_member_count assignable",
-              inf.has_grid_member_count == 1);
+              STAMP_HAS(inf, grid_member));
         check("v5.10.0a.G.2: StampInferenceCfgInputs.grid_member_count assignable",
               inf.grid_member_count == 4);
         check("v5.10.0a.G.2: StampInferenceCfgInputs.grid_member_idx assignable",
@@ -16850,8 +16852,8 @@ e3_skip_load:;
                 snprintf(tmp_stamp, sizeof(tmp_stamp), "%s.stamp", tmp_model);
 
                 StampInferenceCfgInputs inf{};
-                inf.has_feature_mask = 1;
-                inf.feature_mask_train = 0xDEADBEEFCAFEBABEULL;
+                STAMP_SET(inf, feature_mask);
+                inf.feature_mask = 0xDEADBEEFCAFEBABEULL;
 
                 StampWriteResult wr = stamp_write_for_model(
                     tmp_model, "", MODEL_FORMAT_VERSION,
@@ -17193,7 +17195,7 @@ e3_skip_load:;
                 snprintf(tmp_stamp, sizeof(tmp_stamp), "%s.stamp", tmp_model);
 
                 StampInferenceCfgInputs inf{};
-                inf.has_label_params = 1;
+                STAMP_SET(inf, label_params);
                 inf.label_lookahead_ticks = 7500;
                 inf.label_tp_pct = 0.05;
                 inf.label_sl_pct = 0.03;
@@ -17236,7 +17238,7 @@ e3_skip_load:;
                 snprintf(tmp_stamp, sizeof(tmp_stamp), "%s.stamp", tmp_model);
 
                 StampInferenceCfgInputs inf{};
-                inf.has_xgb_train_nthread = 1;
+                STAMP_SET(inf, xgb_train_nthread);
                 inf.xgb_train_nthread = 4;
 
                 StampWriteResult wr = stamp_write_for_model(
@@ -17273,11 +17275,11 @@ e3_skip_load:;
                 snprintf(tmp_stamp, sizeof(tmp_stamp), "%s.stamp", tmp_model);
 
                 StampInferenceCfgInputs inf{};
-                inf.has_label_params = 1;
+                STAMP_SET(inf, label_params);
                 inf.label_lookahead_ticks = 15000;
                 inf.label_tp_pct = 0.07;
                 inf.label_sl_pct = 0.07;
-                inf.has_xgb_train_nthread = 1;
+                STAMP_SET(inf, xgb_train_nthread);
                 inf.xgb_train_nthread = 1;  // parallel-mode pinned
 
                 StampWriteResult wr = stamp_write_for_model(

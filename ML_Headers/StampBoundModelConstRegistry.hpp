@@ -497,6 +497,19 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 #define STAMP_AUTOPOPULATE_SET_HAS_grid_member(name)        STAMP_SET((inf), grid_member)
 #define STAMP_AUTOPOPULATE_SET_HAS_label_params(name)       STAMP_SET((inf), label_params)
 
+// Token-paste dispatcher for emit-time has_* check. Mirrors
+// STAMP_AUTOPOPULATE_SET_HAS but for READING the bit (boolean) in the
+// X-macro emit walk inside stamp_write_for_model. Same semantics —
+// for grouped entries, checks the group bit; for standalone (group="_"),
+// checks the entry's own bit.
+#define STAMP_EMIT_CHECK_HAS__(name)                  STAMP_HAS(*inf, name)
+#define STAMP_EMIT_CHECK_HAS_inference_cfg(name)      STAMP_HAS(*inf, inference_cfg)
+#define STAMP_EMIT_CHECK_HAS_scaler(name)             STAMP_HAS(*inf, scaler)
+#define STAMP_EMIT_CHECK_HAS_fees(name)               STAMP_HAS(*inf, fees)
+#define STAMP_EMIT_CHECK_HAS_xgb_hyperparams(name)    STAMP_HAS(*inf, xgb_hyperparams)
+#define STAMP_EMIT_CHECK_HAS_grid_member(name)        STAMP_HAS(*inf, grid_member)
+#define STAMP_EMIT_CHECK_HAS_label_params(name)       STAMP_HAS(*inf, label_params)
+
 #define STAMP_MODEL_CONST_AUTOPOPULATE_ONE(name, group, presence, type, fmt, default_val, get_value, emit_when, doc) \
     if (emit_when) {                                                                  \
         STAMP_AUTOPOPULATE_SET_HAS_##group(name);                                     \

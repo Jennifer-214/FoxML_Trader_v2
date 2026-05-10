@@ -1144,34 +1144,39 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         // data->config_used + label_type, pass to stamp_write_for_model.
         // Scaler sha256 not wired here (Run Full Validation doesn't persist
         // a scaler in this path — separate v5.9.5c+ scope).
+        // v5.14.8.A.merged.3 — Production caller migrated to canonical
+        // stamp body names + STAMP_SET. Field names follow the canonical
+        // wire keys (matches what stamp_write_for_model emits + what
+        // verify_model_stamp parses). FOREACH_STAMP_BOUND_MODEL_CONST
+        // registry is the single source of truth.
         StampInferenceCfgInputs inf = {};
-        inf.has_inference_cfg = 1;
-        inf.confidence_threshold_scale =
+        STAMP_SET(inf, inference_cfg);
+        inf.inference_cfg_confidence_threshold_scale =
             FPN_ToDouble(data->config_used.confidence_threshold_scale);
-        inf.barrier_gate_enabled = data->config_used.barrier_gate_enabled;
-        inf.confidence_hard_block_threshold =
+        inf.inference_cfg_barrier_gate_enabled = data->config_used.barrier_gate_enabled;
+        inf.inference_cfg_confidence_hard_block_threshold =
             FPN_ToDouble(data->config_used.confidence_hard_block_threshold);
-        inf.held_out_fraction =
+        inf.inference_cfg_held_out_fraction =
             FPN_ToDouble(data->config_used.held_out_fraction);
-        inf.freshness_tau =
+        inf.inference_cfg_freshness_tau =
             FPN_ToDouble(data->config_used.confidence_freshness_tau);
         if (data->config_used.bandit_enabled) {
-            inf.has_bandit = 1;
-            inf.bandit_blend_ratio =
+            STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
+            inf.inference_cfg_bandit_blend_ratio =
                 FPN_ToDouble(data->config_used.bandit_blend_ratio);
         }
         if (data->config_used.cost_gate_enabled) {
-            inf.has_fees = 1;
-            inf.fee_rate_maker = FPN_ToDouble(data->config_used.fee_rate_maker);
-            inf.fee_rate_taker = FPN_ToDouble(data->config_used.fee_rate_taker);
+            STAMP_SET(inf, fees);
+            inf.inference_cfg_fee_rate_maker = FPN_ToDouble(data->config_used.fee_rate_maker);
+            inf.inference_cfg_fee_rate_taker = FPN_ToDouble(data->config_used.fee_rate_taker);
         }
-        inf.has_training_poll_interval = 1;
+        STAMP_SET(inf, training_poll_interval);
         inf.training_poll_interval     = data->config_used.poll_interval;
         // model_num_outputs derived from label_type: binary/regression → 1,
         // multiclass K → K. Single source of truth: LabelType_NumClasses.
         {
             int K = LabelType_NumClasses(label_type);
-            inf.has_num_outputs   = 1;
+            STAMP_SET(inf, model_num_outputs);
             inf.model_num_outputs = (K >= 2) ? K : 1;
         }
         // v5.9.5h — XGBoost hyperparams binding. RFV uses
@@ -1180,7 +1185,7 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         // Stamp records what trained the model for forensics +
         // reproducibility; engine load-WARN compares to runtime cfg.
         {
-            inf.has_xgb_hyperparams = 1;
+            STAMP_SET(inf, xgb_hyperparams);
             tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
             // RFV training uses cfg-tunable subset; pull from config_used
             hp.subsample        = FPN_ToDouble(data->config_used.xgb_subsample);
@@ -1206,19 +1211,19 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         }
         // v5.10.1.A — LABEL_REGISTRY_HASH plumb-through (parity-check Finding #1).
         // Without this, engine accepts any model regardless of label-set drift.
-        inf.has_label_registry_hash = 1;
+        STAMP_SET(inf, label_registry_hash);
         inf.label_registry_hash     = LABEL_REGISTRY_HASH();
         // v5.9.5h Phase 10 — build flags fingerprint. Stamps the
         // training-build's hash so engine load can detect cross-build
         // deploy drift (e.g., trained -O2 dev box, deployed -O3 prod).
-        inf.has_build_flags_hash = 1;
+        STAMP_SET(inf, build_flags_hash);
         inf.build_flags_hash = tt::BUILD_FLAGS_HASH();
         // v5.11.41 — XGBoost training thread count. Forensic record of
         // serial mode (operator's cfg.xgb_train_nthread, default 4) vs
         // parallel multi-horizon mode (pinned to 1 by per-horizon worker
         // for bytewise determinism). Closes /parity-check 2026-05-07-stamp
         // CRITICAL-2 + CRITICAL-3.
-        inf.has_xgb_train_nthread = 1;
+        STAMP_SET(inf, xgb_train_nthread);
         inf.xgb_train_nthread     = data->config_used.xgb_train_nthread > 0
                                   ? data->config_used.xgb_train_nthread : 1;
         // v5.11.41 — per-horizon label parameters. label_lookahead_ticks /
@@ -1228,7 +1233,7 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
         // RFV; we propagate to stamp body when non-zero. Closes
         // /parity-check 2026-05-07-stamp CRITICAL-1.
         if (out->req_label_lookahead_ticks > 0) {
-            inf.has_label_params      = 1;
+            STAMP_SET(inf, label_params);
             inf.label_lookahead_ticks = out->req_label_lookahead_ticks;
             inf.label_tp_pct          = out->req_label_tp_pct;
             inf.label_sl_pct          = out->req_label_sl_pct;
