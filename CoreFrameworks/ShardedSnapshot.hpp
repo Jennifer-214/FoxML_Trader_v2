@@ -25,6 +25,7 @@
 #include "../DataStream/EngineTUI.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"
 #include "../ML_Headers/CoreModelZoo.hpp"
+#include "../MemHeaders/FailureModeRegistry.hpp"  // v5.14.8.C — FAILURE_SET / FAILURE_IS_SET
 #include "ControllerEventLoop.hpp"
 #include "EventLoopAggregates.hpp"
 #include "MetricCompute.hpp"  // v5.8.4c: shared metric helpers
@@ -572,7 +573,12 @@ static inline void TUI_CopySnapshotSharded(
                 RollingTurnover_Compute(&state->cores[i].turnover);
             // v5.9.0b — ML observability extensions. Single-writer (slow path)
             // → snapshot read; no race. Counters are uint32 monotonic.
-            snap->per_core[i].ml_model_load_failed       = (uint8_t)state->cores[i].model_load_failed;
+            // v5.14.8.C — failure_flags bitmap (FOREACH_FAILURE_MODE BIT_FLAG entries).
+            // Reset all failure bits, then set per slow-path state.
+            snap->per_core[i].failure_flags = 0;
+            if (state->cores[i].model_load_failed) {
+                FAILURE_SET(snap->per_core[i], ml_model_load_failed);
+            }
             snap->per_core[i].ml_last_threshold          = state->cores[i].last_ml_threshold;
             snap->per_core[i].ml_last_effective_threshold= state->cores[i].last_ml_effective_threshold;
             snap->per_core[i].ml_nan_feature_events      = state->cores[i].nan_feature_events_total;
@@ -597,7 +603,9 @@ static inline void TUI_CopySnapshotSharded(
                 if (zoo->exit.scaler_load_failed)        any_scaler_failed  = 1;
             }
             snap->per_core[i].ml_scaler_present     = any_scaler_present;
-            snap->per_core[i].ml_scaler_load_failed = any_scaler_failed;
+            if (any_scaler_failed) {
+                FAILURE_SET(snap->per_core[i], ml_scaler_load_failed);
+            }
             // v5.10.0a.G.10 — populate ensemble snapshot from ezoo (when active).
             // The cast through void* matches the dispatcher; ml_zoo_ensemble's
             // type isn't visible here without a forward decl. Empty when

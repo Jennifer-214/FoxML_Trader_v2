@@ -12204,11 +12204,14 @@ e3_skip_load:;
         }
 
         // === Test 8: PerCoreSnap fields exist ===
+        // v5.14.8.C — ml_scaler_load_failed migrated from uint8_t to BIT_FLAG
+        // in failure_flags bitmap. ml_scaler_present stays as separate uint8_t
+        // (state flag, not failure mode).
         TUISnapshot::PerCoreSnap pcs = {};
         pcs.ml_scaler_present = 1;
-        pcs.ml_scaler_load_failed = 0;
-        check("v5.9.3a: PerCoreSnap.ml_scaler_present + ml_scaler_load_failed assignable",
-              pcs.ml_scaler_present == 1 && pcs.ml_scaler_load_failed == 0);
+        // failure_flags = 0 → ml_scaler_load_failed cleared (bit 1 unset)
+        check("v5.14.8.C: PerCoreSnap.ml_scaler_present + FAILURE_IS_SET cleared",
+              pcs.ml_scaler_present == 1 && !FAILURE_IS_SET(pcs, ml_scaler_load_failed));
 
         free(fmat);
     }

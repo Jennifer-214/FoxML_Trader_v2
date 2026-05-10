@@ -27,6 +27,7 @@
 #include "FoxmlTheme.hpp"
 #include "../DataStream/EngineTUI.hpp"
 #include "../Strategies/StrategyInterface.hpp"  // v5.10.0a.G.10 — REGIME_INFO
+#include "../MemHeaders/FailureModeRegistry.hpp"  // v5.14.8.C — FAILURE_IS_SET accessor
 
 namespace tt {
 
@@ -54,7 +55,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
             // Only render rows for ML cores OR cores with ML symptoms
             // (load failed / NaN events / pre-warmup) — keeps the panel
             // quiet for non-ML cores in mixed deployments.
-            int has_ml_signal = pc.is_ml || pc.ml_model_load_failed ||
+            int has_ml_signal = pc.is_ml || FAILURE_IS_SET(pc, ml_model_load_failed) ||
                                  pc.ml_nan_feature_events > 0 ||
                                  pc.ml_nan_prediction_events > 0 ||
                                  (pc.is_ml && pc.warmup_progress_pct < 100);
@@ -81,7 +82,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
             // Model state — tri-state, with ensemble awareness (v5.11.62+).
             // Ensemble counts as "loaded" even when single-zoo buy_model
             // isn't populated — the strategy reads ezoo->primary_handles.
-            if (pc.ml_model_load_failed) {
+            if (FAILURE_IS_SET(pc, ml_model_load_failed)) {
                 ImGui::TextColored(FoxmlColors::red, "model: LOAD FAILED");
                 ImGui::SetItemTooltip(
                     "ML strategy was selected but no model could be loaded.\n"
@@ -199,7 +200,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
             // v5.9.3a — scaler row (Gap H). Mutually-exclusive states.
             if (pc.ml_model_loaded) {
                 ImGui::SameLine(0, 14);
-                if (pc.ml_scaler_load_failed) {
+                if (FAILURE_IS_SET(pc, ml_scaler_load_failed)) {
                     ImGui::TextColored(FoxmlColors::red, "scaler: WARN — load failed");
                     ImGui::SetItemTooltip(
                         "Stamp claimed scaler present but the .scaler sidecar\n"

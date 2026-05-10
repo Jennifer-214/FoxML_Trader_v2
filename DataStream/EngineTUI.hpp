@@ -1084,39 +1084,39 @@ struct TUISnapshot {
         // otherwise [0..exit_predictor_count) the arm with highest prob.
         double   ml_last_exit_prediction;
         int      ml_last_exit_dominant_horizon;
-        // v5.9.0b — ML observability extensions for the new ML Status panel.
-        // Distinct from ml_model_loaded: ml_model_load_failed=1 means
-        // "load was attempted and refused/missing" (operator should care);
-        // ml_model_loaded=0 with load_failed=0 means "no model configured"
-        // (operator intent — leave at simpler strategy).
-        uint8_t  ml_model_load_failed;       // 1 = ML strategy selected but model didn't load
+        // v5.14.8.C — ML observability failure modes via FOREACH_FAILURE_MODE
+        // registry. Bit-packed BIT_FLAG entries share `failure_flags` uint16_t
+        // bitmap; COUNTER_U32 + PERCENT_U8 entries declare standalone fields.
+        // BIT_FLAG entries today: ml_model_load_failed (bit 0; SEV_RED),
+        // ml_scaler_load_failed (bit 1; SEV_YELLOW). 14 bits headroom.
+        // See MemHeaders/FailureModeRegistry.hpp for registry data.
+        // Read at panel: if (FAILURE_IS_SET(pc, ml_model_load_failed)) { ... }
+        // Set at slow path: FAILURE_SET(snap, ml_model_load_failed); / FAILURE_CLR.
+        uint16_t failure_flags;              // BIT_FLAG entries (up to 16 today)
         double   ml_last_threshold;          // ml_buy_threshold at last decision
         double   ml_last_effective_threshold;// post-confidence-damping threshold actually used
-        uint32_t ml_nan_feature_events;      // total feature-pack NaN/Inf events on this core
-        uint32_t ml_nan_prediction_events;   // total prediction NaN/Inf events on this core
+        uint32_t ml_nan_feature_events;      // FOREACH_FAILURE_MODE COUNTER_U32; total feature-pack NaN/Inf events
+        uint32_t ml_nan_prediction_events;   // FOREACH_FAILURE_MODE COUNTER_U32; total prediction NaN/Inf events
         // v5.9.0c — cfg explicit-set bitmap surfaced per-core. 1 = operator
         // set core_N_strategy= explicitly in cfg; 0 = default applied
         // because field was absent. Drives tri-state marker in Per-Core
         // P&L panel: "0!" deliberate, "0?" defaulted, "0" auto-regime.
         uint8_t  strategy_was_explicit_set;
-        // v5.9.1 — per-core warmup progress (rolling.count vs min_warmup_samples).
-        // 0..100 once warmup starts; 100 once warmup_complete edge fires.
-        // The global TUISnapshot.warmup_samples_now collapses cores in
-        // sharded mode — operator needs per-core visibility to spot a single
-        // core stuck due to misconfigured slow-path cadence.
+        // v5.14.8.C — FOREACH_FAILURE_MODE PERCENT_U8 entry. Per-core warmup
+        // progress (rolling.count vs min_warmup_samples; 0..100). The global
+        // TUISnapshot.warmup_samples_now collapses cores in sharded mode —
+        // per-core visibility spots a single core stuck due to misconfigured
+        // slow-path cadence.
         uint8_t  warmup_progress_pct;
-        // v5.9.3a — scaler observability (Gap H from comprehensive parity audit).
-        // ml_scaler_present=1 when CoreModelZoo loaded the .scaler sidecar
-        // successfully (handle->scaler.has_scaler == 1).
-        // ml_scaler_load_failed=1 when stamp claimed scaler present but load
-        // failed in non-strict mode (engine continued with identity → silent
-        // drift class without this surface).
+        // v5.9.3a + v5.14.8.C — scaler observability. ml_scaler_present is a
+        // STATE flag (not failure mode; not in FOREACH_FAILURE_MODE) — kept
+        // as separate uint8_t. ml_scaler_load_failed migrated to BIT_FLAG in
+        // failure_flags (bit 1). Read via FAILURE_IS_SET(pc, ml_scaler_load_failed).
         // Mutually-exclusive states (operator-facing matrix):
         //   present=1 + failed=0 → green "scaler: applied"
         //   present=0 + failed=1 → red "scaler: WARN — load failed"
         //   present=0 + failed=0 → sand "scaler: NONE (legacy v5 model)"
         uint8_t  ml_scaler_present;
-        uint8_t  ml_scaler_load_failed;
         // v5.9.5i — cfg drift detection summary. Counts mismatches
         // between stamp's recorded cfg + runtime cfg at boot. ML Status
         // panel renders summary; details live in stderr boot log.
