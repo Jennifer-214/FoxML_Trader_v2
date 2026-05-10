@@ -22142,6 +22142,102 @@ e3_skip_load:;
     }
 
     //======================================================================
+    // [v5.14.9.F.6 — PER_CORE_OVERRIDE bitmap extension (per-bit overrides)]
+    //======================================================================
+    // Per-core bitmap overrides allow operators to override SOME bits of a
+    // domain's flags on a specific core; other bits inherit global cfg.
+    // Storage: override_values + override_set mask (which bits are overridden).
+    // Resolution (in ControllerConfig_ResolveForCore): branchless bit-select.
+    {
+        // Default cfg: no per-core bitmap overrides (override_set == 0)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.14.9.F.6: default per-core lifecycle override_set == 0",
+              cfg.core_overrides[0].lifecycle_cfg_flags_override_set == 0);
+        check("v5.14.9.F.6: default per-core gate override_set == 0",
+              cfg.core_overrides[0].gate_cfg_flags_override_set == 0);
+        check("v5.14.9.F.6: default per-core ml override_set == 0",
+              cfg.core_overrides[0].ml_cfg_flags_override_set == 0);
+        check("v5.14.9.F.6: default per-core risk override_set == 0",
+              cfg.core_overrides[0].risk_cfg_flags_override_set == 0);
+        check("v5.14.9.F.6: default per-core ops override_set == 0",
+              cfg.core_overrides[0].ops_cfg_flags_override_set == 0);
+    }
+    {
+        // No override → resolver inherits global for ALL bits
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        // global state: kill_switch ON (default), bandit OFF (default)
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED);  // turn bandit ON globally
+        ControllerConfig<64> resolved = ControllerConfig_ResolveForCore(cfg, 3);
+        check("v5.14.9.F.6: no override → resolver inherits global ML bitmap",
+              resolved.ml_cfg_flags == cfg.ml_cfg_flags);
+        check("v5.14.9.F.6: no override → resolver inherits global RISK bitmap (kill_switch ON)",
+              BITMAP_IS_SET(resolved.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED));
+    }
+    {
+        // Per-bit override: core 3 disables bandit (global is ON)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED);   // global bandit ON
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED); // global confidence ON
+        // Core 3: override bandit OFF; leave confidence at global (inherited)
+        cfg.core_overrides[3].ml_cfg_flags_override_set |= MASK_ML_CFG_BANDIT_ENABLED;
+        cfg.core_overrides[3].ml_cfg_flags_override &= (uint16_t)~MASK_ML_CFG_BANDIT_ENABLED; // bit = 0 in override
+        ControllerConfig<64> resolved3 = ControllerConfig_ResolveForCore(cfg, 3);
+        check("v5.14.9.F.6: core 3 override → bandit OFF in resolved",
+              !BITMAP_IS_SET(resolved3.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED));
+        check("v5.14.9.F.6: core 3 confidence inherits global (still ON)",
+              BITMAP_IS_SET(resolved3.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED));
+        // Core 0: no override → both bits inherit global ON
+        ControllerConfig<64> resolved0 = ControllerConfig_ResolveForCore(cfg, 0);
+        check("v5.14.9.F.6: core 0 bandit inherits global ON",
+              BITMAP_IS_SET(resolved0.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED));
+        check("v5.14.9.F.6: core 0 confidence inherits global ON",
+              BITMAP_IS_SET(resolved0.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED));
+    }
+    {
+        // Parser: `core_2_kill_switch_enabled = 0` overrides kill_switch on core 2
+        char tmpfile[] = "/tmp/foxml_v5_14_9_f6_XXXXXX";
+        int fd = mkstemp(tmpfile);
+        check("v5.14.9.F.6: parser tmpfile created", fd >= 0);
+        FILE* f = fdopen(fd, "w");
+        fprintf(f, "kill_switch_enabled=1\n");           // global: kill_switch ON (matches default but explicit)
+        fprintf(f, "core_2_kill_switch_enabled=0\n");    // core 2: override OFF
+        fprintf(f, "core_5_partial_exit_enabled=1\n");   // core 5: override partial_exit ON (global default OFF)
+        fprintf(f, "core_5_breakeven_on_partial=0\n");   // core 5: override breakeven OFF (global default ON)
+        fclose(f);
+
+        ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmpfile);
+        check("v5.14.9.F.6: parser sets core 2 RISK override_set bit for kill_switch",
+              BITMAP_IS_SET(cfg.core_overrides[2].risk_cfg_flags_override_set, MASK_RISK_CFG_KILL_SWITCH_ENABLED));
+        check("v5.14.9.F.6: parser sets core 2 RISK override VALUE bit OFF (overrides global ON)",
+              !BITMAP_IS_SET(cfg.core_overrides[2].risk_cfg_flags_override, MASK_RISK_CFG_KILL_SWITCH_ENABLED));
+        check("v5.14.9.F.6: parser sets core 5 LIFECYCLE override_set for partial_exit",
+              BITMAP_IS_SET(cfg.core_overrides[5].lifecycle_cfg_flags_override_set, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED));
+        check("v5.14.9.F.6: parser sets core 5 LIFECYCLE override VALUE ON for partial_exit",
+              BITMAP_IS_SET(cfg.core_overrides[5].lifecycle_cfg_flags_override, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED));
+        check("v5.14.9.F.6: parser sets core 5 LIFECYCLE override_set for breakeven_on_partial",
+              BITMAP_IS_SET(cfg.core_overrides[5].lifecycle_cfg_flags_override_set, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL));
+        check("v5.14.9.F.6: parser sets core 5 LIFECYCLE override VALUE OFF for breakeven_on_partial",
+              !BITMAP_IS_SET(cfg.core_overrides[5].lifecycle_cfg_flags_override, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL));
+        // Core 0: no override
+        check("v5.14.9.F.6: core 0 LIFECYCLE override_set == 0 (untouched)",
+              cfg.core_overrides[0].lifecycle_cfg_flags_override_set == 0);
+
+        // Resolver verifies effective bitmap for core 2 + 5
+        ControllerConfig<64> r2 = ControllerConfig_ResolveForCore(cfg, 2);
+        check("v5.14.9.F.6: resolver core 2 has kill_switch OFF (override beats global ON)",
+              !BITMAP_IS_SET(r2.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED));
+        ControllerConfig<64> r5 = ControllerConfig_ResolveForCore(cfg, 5);
+        check("v5.14.9.F.6: resolver core 5 has partial_exit ON (override beats global OFF)",
+              BITMAP_IS_SET(r5.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED));
+        check("v5.14.9.F.6: resolver core 5 has breakeven_on_partial OFF (override beats global ON)",
+              !BITMAP_IS_SET(r5.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL));
+        // Core 5 breakeven_on_profit: no override → inherits global default OFF
+        check("v5.14.9.F.6: resolver core 5 breakeven_on_profit inherits global OFF",
+              !BITMAP_IS_SET(r5.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT));
+        unlink(tmpfile);
+    }
+
+    //======================================================================
     // [v5.14.9.B.1 — Per-core ladder override (4 fields) + extended REFUSE]
     //======================================================================
     {

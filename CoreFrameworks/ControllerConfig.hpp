@@ -188,6 +188,33 @@ constexpr uint8_t ENGINE_ARCH_PER_CORE_SLOW = 1;
     /* disable). Trade-off accepted; matches existing INT-override sentinel pattern. */ \
     INT(risk_degradation_curve)
 
+// v5.14.9.F.6: BITMAP-typed per-core overrides. Each domain bitmap on
+// ControllerConfig (lifecycle/gate/ml/risk/ops_cfg_flags) gets a per-core
+// override PAIR: <domain>_cfg_flags_override (the override values) +
+// <domain>_cfg_flags_override_set (mask of which bits are overridden).
+//
+// Per-bit override semantics: `core_3_partial_exit_enabled = 1` sets the
+// PARTIAL_EXIT_ENABLED bit in core 3's lifecycle override + sets the
+// corresponding bit in lifecycle_override_set so the resolver knows to use
+// the override value (not global) for that specific bit. Other bits in the
+// domain stay inherited from global.
+//
+// Resolution (in ControllerConfig_ResolveForCore): branchless bit-select.
+//   resolved = (override_set & override_values) | (~override_set & global_values)
+//
+// Adding a new domain to FOREACH_<DOMAIN>_CFG_FLAG family = 1 row in
+// PER_CORE_OVERRIDE_BITMAP_DOMAINS below → declare + zero + resolve + parse
+// all auto-flow.
+//
+// Tuple: X(domain_lower, DOMAIN_UPPER, storage_type, FOREACH_macro)
+
+#define PER_CORE_OVERRIDE_BITMAP_DOMAINS(X)                                              \
+    X(lifecycle, LIFECYCLE, uint8_t,  FOREACH_LIFECYCLE_CFG_FLAG)                        \
+    X(gate,      GATE,      uint8_t,  FOREACH_GATE_CFG_FLAG)                             \
+    X(ml,        ML,        uint16_t, FOREACH_ML_CFG_FLAG)                               \
+    X(risk,      RISK,      uint8_t,  FOREACH_RISK_CFG_FLAG)                             \
+    X(ops,       OPS,       uint8_t,  FOREACH_OPS_CFG_FLAG)
+
 template <unsigned F> struct PerCoreOverrides {
 #define _DECL_OV_FIELD(name) FPN<F> name;
     PER_CORE_OVERRIDE_FIELDS(_DECL_OV_FIELD, _DECL_OV_FIELD)
@@ -196,6 +223,14 @@ template <unsigned F> struct PerCoreOverrides {
 #define _DECL_OV_INT_FIELD(name) uint32_t name;
     PER_CORE_OVERRIDE_INT_FIELDS(_DECL_OV_INT_FIELD)
 #undef _DECL_OV_INT_FIELD
+// v5.14.9.F.6: BITMAP-typed overrides. <domain>_cfg_flags_override holds the
+// override VALUES; <domain>_cfg_flags_override_set is the MASK of which bits
+// are overridden (others inherit global). 0 = no overrides for this domain.
+#define _DECL_OV_BITMAP_FIELDS(d_lower, D_UPPER, stype, FOREACH_macro) \
+    stype d_lower##_cfg_flags_override;     \
+    stype d_lower##_cfg_flags_override_set;
+    PER_CORE_OVERRIDE_BITMAP_DOMAINS(_DECL_OV_BITMAP_FIELDS)
+#undef _DECL_OV_BITMAP_FIELDS
 };
 
 // v5.9.2c — CSV tick-sort validation modes (csv_sort_check_mode field).
@@ -1151,6 +1186,20 @@ inline ControllerConfig<F> ControllerConfig_ResolveForCore(
 #define _RESOLVE_OV_INT_FIELD(name) if (ov.name != 0) resolved.name = ov.name;
     PER_CORE_OVERRIDE_INT_FIELDS(_RESOLVE_OV_INT_FIELD)
 #undef _RESOLVE_OV_INT_FIELD
+// v5.14.9.F.6: BITMAP overrides — branchless bit-select per domain.
+//   resolved = (override_set & override_values) | (~override_set & global_values)
+// Bits set in override_set use the override value; bits clear inherit global.
+// Per-bit override (operator can override SOME bits in a domain, leave others
+// inherited). 0 override_set = full inherit (no overrides this domain).
+#define _RESOLVE_OV_BITMAP_FIELDS(d_lower, D_UPPER, stype, FOREACH_macro) \
+    {                                                                          \
+        stype _ov_set = ov.d_lower##_cfg_flags_override_set;                   \
+        stype _ov_val = ov.d_lower##_cfg_flags_override;                       \
+        stype _global = global.d_lower##_cfg_flags;                            \
+        resolved.d_lower##_cfg_flags = (stype)((_ov_set & _ov_val) | ((stype)~_ov_set & _global)); \
+    }
+    PER_CORE_OVERRIDE_BITMAP_DOMAINS(_RESOLVE_OV_BITMAP_FIELDS)
+#undef _RESOLVE_OV_BITMAP_FIELDS
     return resolved;
 }
 
@@ -1560,6 +1609,12 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
 #define _ZERO_OV_INT_FIELD(name) cfg.core_overrides[i].name = 0;
     PER_CORE_OVERRIDE_INT_FIELDS(_ZERO_OV_INT_FIELD)
 #undef _ZERO_OV_INT_FIELD
+// v5.14.9.F.6: zero BITMAP overrides (0 = no overrides, full inherit).
+#define _ZERO_OV_BITMAP_FIELDS(d_lower, D_UPPER, stype, FOREACH_macro) \
+    cfg.core_overrides[i].d_lower##_cfg_flags_override = (stype)0;     \
+    cfg.core_overrides[i].d_lower##_cfg_flags_override_set = (stype)0;
+    PER_CORE_OVERRIDE_BITMAP_DOMAINS(_ZERO_OV_BITMAP_FIELDS)
+#undef _ZERO_OV_BITMAP_FIELDS
   }
   cfg.simpledip_tp_pct  = FPN_Zero<F>();  // 0 = use shared take_profit_pct
   cfg.simpledip_sl_pct  = FPN_Zero<F>();
@@ -2426,6 +2481,47 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 #define _PARSE_OV_INT(name) if (strcmp(suffix, #name) == 0) { ov.name = (uint32_t)atoi(val); continue; }
         PER_CORE_OVERRIDE_INT_FIELDS(_PARSE_OV_INT)
 #undef _PARSE_OV_INT
+// v5.14.9.F.6: BITMAP per-bit overrides. `core_N_<legacy_field> = X` sets the
+// corresponding bit on <domain>_cfg_flags_override + marks it in
+// <domain>_cfg_flags_override_set so the resolver knows to use the override
+// for that specific bit. Other bits in the domain inherit from global.
+//
+// Walks the 5 FOREACH_<DOMAIN>_CFG_FLAG registries; per-entry checks if suffix
+// matches legacy_field; on match: set/clear override bit + mark override_set bit.
+// Auto-flows: adding a new flag to ANY domain registry = parser picks it up.
+#define _PARSE_OV_BITMAP_DOMAIN(d_lower, D_UPPER, stype, FOREACH_macro) \
+    {                                                                          \
+        int _val_b = -1;                                                       \
+        const char* _legacy_match = nullptr;                                   \
+        (void)_legacy_match;                                                   \
+        stype _mask_b = (stype)0;                                              \
+        (void)_mask_b;                                                         \
+        FOREACH_macro(_PARSE_OV_BITMAP_ROW_##d_lower)                          \
+        if (_val_b >= 0) {                                                     \
+            if (_val_b) ov.d_lower##_cfg_flags_override |= _mask_b;            \
+            else        ov.d_lower##_cfg_flags_override &= (stype)~_mask_b;    \
+            ov.d_lower##_cfg_flags_override_set |= _mask_b;                    \
+            continue;                                                          \
+        }                                                                       \
+    }
+// Per-domain per-row macros: capture mask + val into outer scope when matched
+#define _PARSE_OV_BITMAP_ROW_lifecycle(name, legacy_field, dl, sec, doc) \
+    if (strcmp(suffix, #legacy_field) == 0) { _val_b = atoi(val); _mask_b = MASK_LIFECYCLE_CFG_##name; }
+#define _PARSE_OV_BITMAP_ROW_gate(name, legacy_field, dl, sec, doc) \
+    if (strcmp(suffix, #legacy_field) == 0) { _val_b = atoi(val); _mask_b = MASK_GATE_CFG_##name; }
+#define _PARSE_OV_BITMAP_ROW_ml(name, legacy_field, dl, sec, doc) \
+    if (strcmp(suffix, #legacy_field) == 0) { _val_b = atoi(val); _mask_b = MASK_ML_CFG_##name; }
+#define _PARSE_OV_BITMAP_ROW_risk(name, legacy_field, dl, sec, doc) \
+    if (strcmp(suffix, #legacy_field) == 0) { _val_b = atoi(val); _mask_b = MASK_RISK_CFG_##name; }
+#define _PARSE_OV_BITMAP_ROW_ops(name, legacy_field, dl, sec, doc) \
+    if (strcmp(suffix, #legacy_field) == 0) { _val_b = atoi(val); _mask_b = MASK_OPS_CFG_##name; }
+        PER_CORE_OVERRIDE_BITMAP_DOMAINS(_PARSE_OV_BITMAP_DOMAIN)
+#undef _PARSE_OV_BITMAP_DOMAIN
+#undef _PARSE_OV_BITMAP_ROW_lifecycle
+#undef _PARSE_OV_BITMAP_ROW_gate
+#undef _PARSE_OV_BITMAP_ROW_ml
+#undef _PARSE_OV_BITMAP_ROW_risk
+#undef _PARSE_OV_BITMAP_ROW_ops
         // v5.10.0a.G.6 — string-typed per-core ensemble fields. X-macro
         // doesn't support string types; explicit branches here. All three
         // default empty (inherit global).
