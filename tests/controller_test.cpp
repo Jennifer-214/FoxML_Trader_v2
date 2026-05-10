@@ -48,6 +48,7 @@
 #include "../MemHeaders/HealthLog.hpp"                   // v5.4.0 Phase 0.1 — structured operational diagnostic log
 #include "../MemHeaders/BitmapMacros.hpp"                // v5.14.8.A.0.b — reusable BITMAP_* API for bit-packed flag accessors
 #include "../MemHeaders/FailureModeRegistry.hpp"         // v5.14.8.B — FOREACH_FAILURE_MODE pseudo-registry
+#include "../MemHeaders/PerCoreStateFlagsRegistry.hpp"   // v5.14.9.B.2 — FOREACH_PER_CORE_STATE_FLAG
 #include "../ML_Headers/StampBoundModelConstRegistry.hpp"  // v5.14.8.A.0.b — registry tests + presence column dispatch
 #include <type_traits>                                   // v5.14.8.A.0.b — std::is_array_v / std::extent_v for char-array dispatch
 #include "../Strategies/StrategyLifecycle.hpp"           // v5.4.0 Phase 1.2 — Strategy_InitPerCore / FreePerCore
@@ -9885,15 +9886,17 @@ e3_skip_load:;
         // removing a field, accidentally type-changing, etc).
         TUISnapshot::PerCoreSnap pc{};
         pc.gate_flags = 0x20;
-        pc.permission = 1;
-        pc.bitmap_consistency = 1;
+        // v5.14.9.B.2 — permission + bitmap_consistency migrated to state_flags
+        // BIT_FLAG (TECH_DEBT-013 candidate (3) close).
+        STATE_FLAG_SET(pc, PERMISSION_ALLOWED);
+        STATE_FLAG_SET(pc, BITMAP_CONSISTENT);
         pc.bg_volume_threshold = 12.5;
         check("v5.6.1: gate_flags field accepts BUY_BLOCKED bit",
               pc.gate_flags == 0x20);
-        check("v5.6.1: permission field accepts 0/1",
-              pc.permission == 1);
-        check("v5.6.1: bitmap_consistency field accepts 0/1",
-              pc.bitmap_consistency == 1);
+        check("v5.14.9.B.2: PERMISSION_ALLOWED bit set via STATE_FLAG_SET",
+              STATE_FLAG_IS_SET(pc, PERMISSION_ALLOWED));
+        check("v5.14.9.B.2: BITMAP_CONSISTENT bit set via STATE_FLAG_SET",
+              STATE_FLAG_IS_SET(pc, BITMAP_CONSISTENT));
         check("v5.6.1: bg_volume_threshold field accepts double",
               pc.bg_volume_threshold > 12.0 && pc.bg_volume_threshold < 13.0);
     }
@@ -11072,12 +11075,13 @@ e3_skip_load:;
             check("v5.9.0c: tmp cfg file creation for all-default test", 0);
         }
 
-        // PerCoreSnap.strategy_was_explicit_set field exists + is uint8_t.
-        // (Compile-time check; populator is in ShardedSnapshot.hpp.)
+        // v5.14.9.B.2 — strategy_was_explicit_set MIGRATED to state_flags BIT_FLAG.
+        // Populator in ShardedSnapshot.hpp now uses STATE_FLAG_SET; consumers
+        // read via STATE_FLAG_IS_SET. Verify the bitmap accessor works.
         TUISnapshot::PerCoreSnap pcs{};
-        pcs.strategy_was_explicit_set = 1;
-        check("v5.9.0c: PerCoreSnap.strategy_was_explicit_set assignable",
-              pcs.strategy_was_explicit_set == 1);
+        STATE_FLAG_SET(pcs, STRATEGY_EXPLICITLY_SET);
+        check("v5.14.9.B.2: STRATEGY_EXPLICITLY_SET bit settable",
+              STATE_FLAG_IS_SET(pcs, STRATEGY_EXPLICITLY_SET));
 
         // TUISnapshot.source_cfg_path field exists + is null-terminable.
         TUISnapshot snap{};
@@ -11579,12 +11583,13 @@ e3_skip_load:;
         TUISnapshot::PerCoreSnap pcs = {};
         pcs.strategy_id_display = 5;       // v5.4.0 strategy enum
         pcs.halt_reason         = 7;       // warmup
-        pcs.ml_model_loaded     = 1;
+        // v5.14.9.B.2 — ml_model_loaded MIGRATED to state_flags BIT_FLAG.
+        STATE_FLAG_SET(pcs, ML_MODEL_LOADED);
         pcs.core_realized       = 12.34;
         pcs.warmup_progress_pct = 75;
         check("v5.9.2c: PerCoreSnap representative fields round-trip across categories",
               pcs.strategy_id_display == 5 && pcs.halt_reason == 7 &&
-              pcs.ml_model_loaded == 1 && pcs.core_realized == 12.34 &&
+              STATE_FLAG_IS_SET(pcs, ML_MODEL_LOADED) && pcs.core_realized == 12.34 &&
               pcs.warmup_progress_pct == 75);
     }
 
@@ -21445,6 +21450,92 @@ e3_skip_load:;
         TUISnapshot::PerCoreSnap snap{};
         check("v5.14.9.B: PerCoreSnap.ml_confidence_factor exists + initializes to 0",
               snap.ml_confidence_factor == 0.0);
+    }
+
+    //======================================================================
+    // [v5.14.9.B.2 — TECH_DEBT-013 (3): PerCoreSnap state_flags bitmap]
+    //======================================================================
+    {
+        using namespace tt;
+        // Registry sizing assertions
+        check("v5.14.9.B.2: PER_CORE_STATE_FLAG count >= 7 (6 migrated + 1 ladder bottom)",
+              FOREACH_PER_CORE_STATE_FLAG_COUNT >= 7);
+        check("v5.14.9.B.2: PER_CORE_STATE_FLAG count <= 16 (uint16_t cap)",
+              PER_CORE_STATE_FLAG_COUNT <= 16);
+
+        // MASK_* are bit-distinct
+        check("v5.14.9.B.2: MASK_PERMISSION_ALLOWED != MASK_BITMAP_CONSISTENT",
+              MASK_PERMISSION_ALLOWED != MASK_BITMAP_CONSISTENT);
+        check("v5.14.9.B.2: MASK_LADDER_BOTTOM_HIT distinct from migrated bits",
+              (MASK_LADDER_BOTTOM_HIT &
+               (MASK_PERMISSION_ALLOWED | MASK_BITMAP_CONSISTENT |
+                MASK_GATE_BUY_ABOVE | MASK_IS_ML | MASK_ML_MODEL_LOADED |
+                MASK_STRATEGY_EXPLICITLY_SET)) == 0);
+    }
+    {
+        // STATE_FLAG_SET / IS_SET / CLR round-trip
+        TUISnapshot::PerCoreSnap snap{};
+        check("v5.14.9.B.2: default state_flags == 0 (no bits set)",
+              snap.state_flags == 0);
+
+        STATE_FLAG_SET(snap, IS_ML);
+        check("v5.14.9.B.2: STATE_FLAG_SET(IS_ML) sets the bit",
+              STATE_FLAG_IS_SET(snap, IS_ML));
+        check("v5.14.9.B.2: other bits remain 0 after single SET",
+              !STATE_FLAG_IS_SET(snap, ML_MODEL_LOADED));
+
+        STATE_FLAG_SET(snap, ML_MODEL_LOADED);
+        check("v5.14.9.B.2: multi-bit set both bits live",
+              STATE_FLAG_IS_SET(snap, IS_ML) && STATE_FLAG_IS_SET(snap, ML_MODEL_LOADED));
+
+        STATE_FLAG_CLR(snap, IS_ML);
+        check("v5.14.9.B.2: STATE_FLAG_CLR(IS_ML) clears only that bit",
+              !STATE_FLAG_IS_SET(snap, IS_ML) && STATE_FLAG_IS_SET(snap, ML_MODEL_LOADED));
+
+        STATE_FLAG_TOGGLE(snap, IS_ML);
+        check("v5.14.9.B.2: STATE_FLAG_TOGGLE flips bit (off → on)",
+              STATE_FLAG_IS_SET(snap, IS_ML));
+        STATE_FLAG_TOGGLE(snap, IS_ML);
+        check("v5.14.9.B.2: STATE_FLAG_TOGGLE flips bit (on → off)",
+              !STATE_FLAG_IS_SET(snap, IS_ML));
+    }
+    {
+        // BITMAP_ANY multi-flag check (forward-leverage)
+        using namespace tt;
+        TUISnapshot::PerCoreSnap snap{};
+        STATE_FLAG_SET(snap, IS_ML);
+        check("v5.14.9.B.2: BITMAP_ANY catches IS_ML | ML_MODEL_LOADED set",
+              BITMAP_ANY(snap.state_flags, MASK_IS_ML | MASK_ML_MODEL_LOADED));
+        STATE_FLAG_CLR(snap, IS_ML);
+        check("v5.14.9.B.2: BITMAP_ANY false when both bits clear",
+              !BITMAP_ANY(snap.state_flags, MASK_IS_ML | MASK_ML_MODEL_LOADED));
+    }
+    {
+        // All 7 currently-defined bits assignable + readable
+        using namespace tt;
+        TUISnapshot::PerCoreSnap snap{};
+        STATE_FLAG_SET(snap, PERMISSION_ALLOWED);
+        STATE_FLAG_SET(snap, BITMAP_CONSISTENT);
+        STATE_FLAG_SET(snap, GATE_BUY_ABOVE);
+        STATE_FLAG_SET(snap, IS_ML);
+        STATE_FLAG_SET(snap, ML_MODEL_LOADED);
+        STATE_FLAG_SET(snap, STRATEGY_EXPLICITLY_SET);
+        STATE_FLAG_SET(snap, LADDER_BOTTOM_HIT);
+        check("v5.14.9.B.2: all 7 PER_CORE_STATE_FLAG bits coexist + readable",
+              STATE_FLAG_IS_SET(snap, PERMISSION_ALLOWED) &&
+              STATE_FLAG_IS_SET(snap, BITMAP_CONSISTENT) &&
+              STATE_FLAG_IS_SET(snap, GATE_BUY_ABOVE) &&
+              STATE_FLAG_IS_SET(snap, IS_ML) &&
+              STATE_FLAG_IS_SET(snap, ML_MODEL_LOADED) &&
+              STATE_FLAG_IS_SET(snap, STRATEGY_EXPLICITLY_SET) &&
+              STATE_FLAG_IS_SET(snap, LADDER_BOTTOM_HIT));
+    }
+    {
+        // Memory savings: state_flags is uint16_t (2 bytes) replacing 6
+        // uint8_t fields (6 bytes). 3× shrink per snap; 16 cores × 4 bytes =
+        // ~64 bytes per engine. Sanity check field layout.
+        check("v5.14.9.B.2: PerCoreSnap.state_flags is uint16_t (2 bytes)",
+              sizeof(((TUISnapshot::PerCoreSnap*)nullptr)->state_flags) == 2);
     }
 
     //======================================================================

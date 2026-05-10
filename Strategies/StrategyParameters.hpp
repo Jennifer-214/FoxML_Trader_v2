@@ -47,6 +47,9 @@
 #include "../CoreFrameworks/ControllerConfig.hpp"
 #include "../CoreFrameworks/GateParameters.hpp"
 #include "../CoreFrameworks/SlowPathGateRegistry.hpp"  // v5.14.9.B.0 — FOREACH_SLOW_PATH_GATE + MASK_* + BITMAP_IS_SET
+// Note: STATE_FLAG_LADDER_BOTTOM_HIT is set in ShardedSnapshot copy via
+// inference (gate_state.LADDER_ACTIVE && last_confidence_factor == 0.0)
+// — not set directly here. No PerCoreStateFlagsRegistry include needed.
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/BarrierGate.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"

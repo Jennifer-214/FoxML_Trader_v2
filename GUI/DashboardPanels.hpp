@@ -14,6 +14,7 @@
 #include "../Version.hpp"
 #include "../Strategies/StrategyInterface.hpp"
 #include "SettingsPanel.hpp"  // cfg_write_field for hot-swap persistence
+#include "../MemHeaders/PerCoreStateFlagsRegistry.hpp"  // v5.14.9.B.2 — STATE_FLAG_IS_SET
 #include <ctime>
 #include <chrono>  // v5.0.3: Engine Topology drift display
 
@@ -539,12 +540,12 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                 // entries regardless of price/flags (kill switch trip,
                 // startup gate). Bitmap drift means GUI and hot path
                 // disagree on any_active — flagged for diagnosis.
-                if (!pc->bitmap_consistency) {
+                if (!STATE_FLAG_IS_SET(*pc, BITMAP_CONSISTENT)) {
                     ImGui::TextColored(FoxmlColors::red,
                         "DRIFT (bitmap)");
                 } else if (s->positions[i].idx >= 0) {
                     ImGui::TextColored(FoxmlColors::comment, "in pos");
-                } else if (pc->permission == 0) {
+                } else if (!STATE_FLAG_IS_SET(*pc, PERMISSION_ALLOWED)) {
                     // v5.11.10 — break out the specific PERM_OFF cause
                     // instead of a generic label. permission=0 covers three
                     // distinct conditions; each warrants a different operator
@@ -593,7 +594,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     // reason — treat as drift.
                     ImGui::TextColored(FoxmlColors::yellow, "off: ???");
                 } else {
-                    int price_ok = pc->gate_direction
+                    int price_ok = STATE_FLAG_IS_SET(*pc, GATE_BUY_ABOVE)
                         ? (s->price >= gate_p)
                         : (s->price <= gate_p);
                     if (price_ok)
@@ -626,7 +627,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
             if (ImGui::CollapsingHeader(hdr)) {
                 // Gate price
                 ImGui::TextColored(FoxmlColors::sand, "  gate %s",
-                    pc->gate_direction ? ">=" : "<=");
+                    STATE_FLAG_IS_SET(*pc, GATE_BUY_ABOVE) ? ">=" : "<=");
                 ImGui::SameLine();
                 if (pc->buy_gate_price > 0.01) {
                     ImGui::Text("$%.2f", pc->buy_gate_price);
@@ -679,7 +680,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                 // v5.11.10 — same refinement as the per-core summary table:
                 // break out specific causes (WARMUP / KILL / AUTO RES) so
                 // operator can act on the right diagnostic.
-                if (pc->permission == 0) {
+                if (!STATE_FLAG_IS_SET(*pc, PERMISSION_ALLOWED)) {
                     ImGui::SameLine(0, 15);
                     const char* perm_label = "PERM_OFF";
                     ImVec4 perm_color = FoxmlColors::red;
@@ -699,7 +700,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                 // hot path's any_active mask and the GUI's positions
                 // bitmap should always agree. If they don't, the engine
                 // and the operator are looking at different states.
-                if (!pc->bitmap_consistency) {
+                if (!STATE_FLAG_IS_SET(*pc, BITMAP_CONSISTENT)) {
                     ImGui::SameLine(0, 15);
                     ImGui::TextColored(FoxmlColors::red, "DRIFT(bitmap)");
                 }
@@ -772,12 +773,12 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                 // predictions via ensemble_active=1 (multi-horizon zoo).
                 // Show the ensemble state in that case so the panel doesn't
                 // misleadingly say "model: none" when 4 horizons are active.
-                if (pc->is_ml) {
+                if (STATE_FLAG_IS_SET(*pc, IS_ML)) {
                     ImGui::TextColored(FoxmlColors::sand, "  ML:");
                     ImGui::SameLine();
                     ImGui::TextColored(FoxmlColors::comment, "model:");
                     ImGui::SameLine();
-                    if (pc->ml_model_loaded) {
+                    if (STATE_FLAG_IS_SET(*pc, ML_MODEL_LOADED)) {
                         ImGui::TextColored(FoxmlColors::green, "loaded");
                     } else if (pc->ensemble_active && pc->ensemble_n_horizons > 0) {
                         ImGui::TextColored(FoxmlColors::green,
@@ -1039,7 +1040,7 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
                 // a deliberate choice.
                 const char *explicit_marker =
                     (cfg_sid == STRATEGY_AUTO) ? "" :
-                    (pc->strategy_was_explicit_set ? "!" : "?");
+                    (STATE_FLAG_IS_SET(*pc, STRATEGY_EXPLICITLY_SET) ? "!" : "?");
                 if (cfg_sid == STRATEGY_AUTO &&
                     live_sid < NUM_STRATEGIES && live_sid != STRATEGY_AUTO) {
                     ImVec4 c = strat_colors[live_sid];
@@ -1049,7 +1050,7 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
                     ImVec4 c = strat_colors[live_sid];
                     if (pc->core_kill_tripped) c.w = 0.45f;
                     ImGui::TextColored(c, "%s%s", STRATEGY_SHORT_NAMES[live_sid], explicit_marker);
-                    if (!pc->strategy_was_explicit_set && cfg_sid != STRATEGY_AUTO) {
+                    if (!STATE_FLAG_IS_SET(*pc, STRATEGY_EXPLICITLY_SET) && cfg_sid != STRATEGY_AUTO) {
                         ImGui::SetItemTooltip(
                             "Strategy DEFAULTED — cfg lacked core_%d_strategy= line.\n"
                             "All-default fallback per ControllerConfig_Default (line 847).\n"
@@ -1708,7 +1709,7 @@ static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
     // hide itself when only ensemble is active.
     if (!any_active && s->sharded_mode_active) {
         for (int i = 0; i < s->per_core_count && i < 16; ++i) {
-            if (s->per_core[i].ml_model_loaded ||
+            if (STATE_FLAG_IS_SET(s->per_core[i], ML_MODEL_LOADED) ||
                 (s->per_core[i].ensemble_active &&
                  s->per_core[i].ensemble_n_horizons > 0)) {
                 any_active = 1;
@@ -1813,7 +1814,7 @@ static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
     if (s->sharded_mode_active) {
         int any_ml_core = 0;
         for (int i = 0; i < s->per_core_count && i < 16; ++i) {
-            if (s->per_core[i].is_ml) { any_ml_core = 1; break; }
+            if (STATE_FLAG_IS_SET(s->per_core[i], IS_ML)) { any_ml_core = 1; break; }
         }
         if (any_ml_core && ImGui::CollapsingHeader("Per-Core ML",
                             ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1829,13 +1830,13 @@ static inline void GUI_Panel_MLIntelligence(const TUISnapshot *s) {
                 ImGui::TableSetupColumn("RMSE",     ImGuiTableColumnFlags_WidthFixed, 60);
                 ImGui::TableHeadersRow();
                 for (int i = 0; i < s->per_core_count && i < 16; ++i) {
-                    if (!s->per_core[i].is_ml) continue;
+                    if (!STATE_FLAG_IS_SET(s->per_core[i], IS_ML)) continue;
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn();
                     ImGui::Text("%d", i);
                     ImGui::TableNextColumn();
                     // v5.11.62 — ensemble awareness
-                    if (s->per_core[i].ml_model_loaded) {
+                    if (STATE_FLAG_IS_SET(s->per_core[i], ML_MODEL_LOADED)) {
                         ImGui::TextColored(FoxmlColors::green, "loaded");
                     } else if (s->per_core[i].ensemble_active &&
                                s->per_core[i].ensemble_n_horizons > 0) {

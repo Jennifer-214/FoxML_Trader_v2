@@ -26,6 +26,8 @@
 #include "../ML_Headers/ConfidenceScore.hpp"
 #include "../ML_Headers/CoreModelZoo.hpp"
 #include "../MemHeaders/FailureModeRegistry.hpp"  // v5.14.8.C — FAILURE_SET / FAILURE_IS_SET
+#include "../MemHeaders/PerCoreStateFlagsRegistry.hpp"  // v5.14.9.B.2 — STATE_FLAG_SET / IS_SET
+#include "SlowPathGateRegistry.hpp"  // v5.14.9.B.2 — MASK_LADDER_ACTIVE for ladder-bottom inference
 #include "ControllerEventLoop.hpp"
 #include "EventLoopAggregates.hpp"
 #include "MetricCompute.hpp"  // v5.8.4c: shared metric helpers
@@ -300,8 +302,13 @@ static inline void TUI_CopySnapshotSharded(
         int slot_b = partial_on ? (c * 2 + 1) : -1;
         bool gui_any_pos = (slot_a >= 0 && slot_a < 16 && snap->positions[slot_a].idx >= 0)
                        || (slot_b >= 0 && slot_b < 16 && snap->positions[slot_b].idx >= 0);
-        snap->per_core[c].bitmap_consistency =
-            (hot_any_active == gui_any_pos) ? 1 : 0;
+        // v5.14.9.B.2 — bitmap_consistency migrated to state_flags BIT_FLAG.
+        // Reset state_flags for this core BEFORE first per-core bit set
+        // (other writers later in this fn set their bits independently).
+        snap->per_core[c].state_flags = 0;
+        if (hot_any_active == gui_any_pos) {
+            STATE_FLAG_SET(snap->per_core[c], BITMAP_CONSISTENT);
+        }
     }
 
     // counters
@@ -427,8 +434,10 @@ static inline void TUI_CopySnapshotSharded(
         // v5.9.0c — explicit-set bitmap (V5_9_AUDIT-#5). Drives tri-state
         // marker in Per-Core P&L panel: "i!" deliberate, "i?" defaulted,
         // "i" auto-regime. Read bit i from the cfg's bitmap.
-        snap->per_core[i].strategy_was_explicit_set =
-            (cfg->core_strategies_explicit_set >> i) & 0x1;
+        // v5.14.9.B.2 — strategy_was_explicit_set migrated to state_flags BIT_FLAG.
+        if ((cfg->core_strategies_explicit_set >> i) & 0x1) {
+            STATE_FLAG_SET(snap->per_core[i], STRATEGY_EXPLICITLY_SET);
+        }
         // v5.9.1 — per-core warmup % (rolling_short.count vs min_warmup_samples).
         // Defensive bounds: if min_warmup_samples is 0/unset, the engine
         // defaults to 64 (matches the global-snap fallback at line 128).
@@ -452,7 +461,11 @@ static inline void TUI_CopySnapshotSharded(
         uint8_t dir_strat = (state->cores[i].resolved_strategy_id != STRATEGY_NONE)
                               ? state->cores[i].resolved_strategy_id
                               : state->cores[i].strategy_id;
-        snap->per_core[i].gate_direction = (dir_strat == STRATEGY_MOMENTUM) ? 1 : 0;
+        // v5.14.9.B.2 — gate_direction migrated to state_flags BIT_FLAG.
+        // Bit set = buy ABOVE (MOM); bit clear = buy below (other strategies).
+        if (dir_strat == STRATEGY_MOMENTUM) {
+            STATE_FLAG_SET(snap->per_core[i], GATE_BUY_ABOVE);
+        }
         // v4.0.4: per-core diagnostic state for Buy Gate panel
         snap->per_core[i].halt_reason            = state->cores[i].halt_reason;
         // v5.6.2: strategy-internal halt reason (SHALT_*). Distinct from
@@ -526,8 +539,10 @@ static inline void TUI_CopySnapshotSharded(
             // v5.6.1: permission atomic snapshot. ACQUIRE load matches the
             // hot-path read in ExecutionCore.hpp:356, so we see the same
             // state the next tick would see. 0 = entries forbidden.
-            snap->per_core[i].permission = (uint8_t)__atomic_load_n(
-                &core->permission, __ATOMIC_ACQUIRE);
+            // v5.14.9.B.2 — permission migrated to state_flags BIT_FLAG.
+            if (__atomic_load_n(&core->permission, __ATOMIC_ACQUIRE)) {
+                STATE_FLAG_SET(snap->per_core[i], PERMISSION_ALLOWED);
+            }
             // populate headline buy gate from core 0
             if (i == 0) {
                 snap->buy_p = FPN_ToDouble(params.bg_price_threshold);
@@ -541,12 +556,15 @@ static inline void TUI_CopySnapshotSharded(
 
         // Phase 6prep sharded c16: per-core ML observability
         if (state->cores[i].strategy_id == STRATEGY_ML) {
-            snap->per_core[i].is_ml = 1;
+            // v5.14.9.B.2 — is_ml + ml_model_loaded migrated to state_flags BIT_FLAG.
+            STATE_FLAG_SET(snap->per_core[i], IS_ML);
             any_ml_active = 1;
             CoreModelZoo<F>* zoo = (CoreModelZoo<F>*)state->cores[i].model_handle;
             int loaded = (zoo && CoreModelZoo_HasAny(zoo)) ? 1 : 0;
-            snap->per_core[i].ml_model_loaded = (uint8_t)loaded;
-            if (loaded) any_model_loaded = 1;
+            if (loaded) {
+                STATE_FLAG_SET(snap->per_core[i], ML_MODEL_LOADED);
+                any_model_loaded = 1;
+            }
             // staged_prediction is the freshest rebuild output; active_prediction
             // is the snapshot at last entry submit (0 if no open position).
             snap->per_core[i].ml_last_prediction   = state->cores[i].staged_prediction;
@@ -554,6 +572,15 @@ static inline void TUI_CopySnapshotSharded(
             snap->per_core[i].ml_active_prediction = state->cores[i].active_prediction;
             // v5.14.9.B — soft risk degradation ladder factor surface.
             snap->per_core[i].ml_confidence_factor = state->cores[i].last_confidence_factor;
+            // v5.14.9.B.2 — ladder-bottom inference: ladder active for this core
+            // (gate cache says LADDER_ACTIVE) AND factor written as exactly 0.0
+            // by ML_BuildParameters → entry blocked + SHALT_LOW_CONFIDENCE fired.
+            // STATE_FLAG_LADDER_BOTTOM_HIT surfaces this for ML Status panel +
+            // entry log (operator sees per-cycle ladder behavior).
+            if (BITMAP_IS_SET(state->cores[i].gate_state.flags, tt::MASK_LADDER_ACTIVE)
+                && state->cores[i].last_confidence_factor == 0.0) {
+                STATE_FLAG_SET(snap->per_core[i], LADDER_BOTTOM_HIT);
+            }
             // v5.13.6.A — sell-side ML prediction surface (parity-check
             // Section J observability gap close). Operator sees per-cycle
             // exit_predictor blended prob + dominant horizon in dashboard.

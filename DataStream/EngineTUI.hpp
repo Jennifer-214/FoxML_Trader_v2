@@ -1017,18 +1017,11 @@ struct TUISnapshot {
                                         // TP_ENABLED / SL_ENABLED / BUY_ABOVE / PAIR_ACTIVE.
                                         // See EXECUTION_DISPLAY_INVARIANTS.md for the
                                         // predicate↔display matrix.
-        uint8_t  permission;           // v5.6.1: snapshot of core->permission atomic
-                                        // (acquire load). 0 = entries forbidden (startup
-                                        // gate, kill-switch trip, AUTO unresolved). 1 =
-                                        // entries allowed. Without this surface, a
-                                        // kill-tripped core can show READY in the top
-                                        // table — the kill state is visible only on the
-                                        // separate Risk panel.
-        uint8_t  bitmap_consistency;   // v5.6.1: 1 if (positions[i].idx >= 0) ==
-                                        // (core->active | core->active_b), 0 if drift.
-                                        // A 0 here = display↔execution divergence
-                                        // (Class 2 / 2c bug) and is logged via cat=gate
-                                        // health entry. Steady state should always be 1.
+        // v5.14.9.B.2 — permission + bitmap_consistency MIGRATED to state_flags
+        // bitmap (TECH_DEBT-013 candidate (3) close). Read via:
+        //   STATE_FLAG_IS_SET(pc, PERMISSION_ALLOWED)   — entries allowed
+        //   STATE_FLAG_IS_SET(pc, BITMAP_CONSISTENT)    — display↔execution invariant
+        // See MemHeaders/PerCoreStateFlagsRegistry.hpp for full inventory.
         uint32_t sl_cooldown_remaining;// v4.0.4: per-core SL cooldown counter
         double   buy_gate_price;       // current buy gate threshold (for chart overlay)
         double   bg_volume_threshold;  // v5.6.1: cached_params.bg_volume_threshold —
@@ -1061,9 +1054,11 @@ struct TUISnapshot {
         // Phase 6prep sharded c16 — per-core ML observability. Populated only
         // for STRATEGY_ML cores by TUI_CopySnapshotSharded; non-ML cores leave
         // is_ml=0 and renderer skips them.
-        uint8_t  gate_direction;       // 0 = buy below (MR/DIP/EMA/ML), 1 = buy above (MOM)
-        uint8_t  is_ml;                // 1 = STRATEGY_ML core with ML extras valid
-        uint8_t  ml_model_loaded;      // 1 = zoo has at least one role loaded
+        // v5.14.9.B.2 — gate_direction + is_ml + ml_model_loaded MIGRATED to
+        // state_flags bitmap (TECH_DEBT-013 candidate (3) close). Read via:
+        //   STATE_FLAG_IS_SET(pc, GATE_BUY_ABOVE)    — buy direction (MOM)
+        //   STATE_FLAG_IS_SET(pc, IS_ML)             — STRATEGY_ML core
+        //   STATE_FLAG_IS_SET(pc, ML_MODEL_LOADED)   — zoo has any role loaded
         double   ml_last_prediction;   // most recent ML inference output [0, 1]
         double   ml_last_confidence;   // ConfidenceScorer_Compute result [0, 1]
         double   ml_confidence_ic;     // RollingIC value for tooltip / debug
@@ -1101,15 +1096,21 @@ struct TUISnapshot {
         // Read at panel: if (FAILURE_IS_SET(pc, ml_model_load_failed)) { ... }
         // Set at slow path: FAILURE_SET(snap, ml_model_load_failed); / FAILURE_CLR.
         uint16_t failure_flags;              // BIT_FLAG entries (up to 16 today)
+        // v5.14.9.B.2 — non-failure boolean state bitmap (TECH_DEBT-013
+        // candidate (3) close). 7 bits today (PERMISSION_ALLOWED,
+        // BITMAP_CONSISTENT, GATE_BUY_ABOVE, IS_ML, ML_MODEL_LOADED,
+        // STRATEGY_EXPLICITLY_SET, LADDER_BOTTOM_HIT). Adding a new bit:
+        // 1 row to FOREACH_PER_CORE_STATE_FLAG in
+        // MemHeaders/PerCoreStateFlagsRegistry.hpp.
+        // Read via STATE_FLAG_IS_SET(pc, NAME); set via STATE_FLAG_SET / CLR.
+        uint16_t state_flags;                // BIT_FLAG entries (up to 16 today; 7 used)
         double   ml_last_threshold;          // ml_buy_threshold at last decision
         double   ml_last_effective_threshold;// post-confidence-damping threshold actually used
         uint32_t ml_nan_feature_events;      // FOREACH_FAILURE_MODE COUNTER_U32; total feature-pack NaN/Inf events
         uint32_t ml_nan_prediction_events;   // FOREACH_FAILURE_MODE COUNTER_U32; total prediction NaN/Inf events
-        // v5.9.0c — cfg explicit-set bitmap surfaced per-core. 1 = operator
-        // set core_N_strategy= explicitly in cfg; 0 = default applied
-        // because field was absent. Drives tri-state marker in Per-Core
-        // P&L panel: "0!" deliberate, "0?" defaulted, "0" auto-regime.
-        uint8_t  strategy_was_explicit_set;
+        // v5.14.9.B.2 — strategy_was_explicit_set MIGRATED to state_flags
+        // bitmap (TECH_DEBT-013 candidate (3) close). Read via:
+        //   STATE_FLAG_IS_SET(pc, STRATEGY_EXPLICITLY_SET)
         // v5.14.8.C — FOREACH_FAILURE_MODE PERCENT_U8 entry. Per-core warmup
         // progress (rolling.count vs min_warmup_samples; 0..100). The global
         // TUISnapshot.warmup_samples_now collapses cores in sharded mode —

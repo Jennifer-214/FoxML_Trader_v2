@@ -10,6 +10,7 @@
 #include "CandleAccumulator.hpp"
 #include "TradeReader.hpp"
 #include "../Strategies/StrategyInterface.hpp"
+#include "../MemHeaders/PerCoreStateFlagsRegistry.hpp"  // v5.14.9.B.2 — STATE_FLAG_IS_SET
 
 // chart display settings (mutable — controlled by GUI dropdowns)
 struct ChartSettings {
@@ -213,7 +214,7 @@ static inline void GUI_PriceChart(const ChartState *cs, const TUISnapshot *snap,
     bool any_ml_active = snap->ml.ml_model_loaded != 0;
     if (!any_ml_active && snap->sharded_mode_active) {
         for (int i = 0; i < snap->per_core_count && i < 16; ++i) {
-            if (snap->per_core[i].ml_model_loaded ||
+            if (STATE_FLAG_IS_SET(snap->per_core[i], ML_MODEL_LOADED) ||
                 (snap->per_core[i].ensemble_active &&
                  snap->per_core[i].ensemble_n_horizons > 0)) {
                 any_ml_active = true;

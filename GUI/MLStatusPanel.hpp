@@ -28,6 +28,7 @@
 #include "../DataStream/EngineTUI.hpp"
 #include "../Strategies/StrategyInterface.hpp"  // v5.10.0a.G.10 — REGIME_INFO
 #include "../MemHeaders/FailureModeRegistry.hpp"  // v5.14.8.C — FAILURE_IS_SET accessor
+#include "../MemHeaders/PerCoreStateFlagsRegistry.hpp"  // v5.14.9.B.2 — STATE_FLAG_IS_SET
 
 namespace tt {
 
@@ -55,10 +56,10 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
             // Only render rows for ML cores OR cores with ML symptoms
             // (load failed / NaN events / pre-warmup) — keeps the panel
             // quiet for non-ML cores in mixed deployments.
-            int has_ml_signal = pc.is_ml || FAILURE_IS_SET(pc, ml_model_load_failed) ||
+            int has_ml_signal = STATE_FLAG_IS_SET(pc, IS_ML) || FAILURE_IS_SET(pc, ml_model_load_failed) ||
                                  pc.ml_nan_feature_events > 0 ||
                                  pc.ml_nan_prediction_events > 0 ||
-                                 (pc.is_ml && pc.warmup_progress_pct < 100);
+                                 (STATE_FLAG_IS_SET(pc, IS_ML) && pc.warmup_progress_pct < 100);
             if (!has_ml_signal) continue;
 
             ImGui::TextColored(FoxmlColors::sand, "core %d:", i);
@@ -90,7 +91,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                     "(buy_signal/barrier/regime), or held_out_gate_strict=1\n"
                     "with mismatched registry hash. Check the boot log for details.\n"
                     "Operator action: verify cfg path + retrain if needed.");
-            } else if (pc.ml_model_loaded) {
+            } else if (STATE_FLAG_IS_SET(pc, ML_MODEL_LOADED)) {
                 ImGui::TextColored(FoxmlColors::green, "model: loaded");
             } else if (pc.ensemble_active && pc.ensemble_n_horizons > 0) {
                 ImGui::TextColored(FoxmlColors::green,
@@ -132,7 +133,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
             // v5.11.62 — also count ensemble as "loaded" so the prediction
             // / threshold / confidence row shows for ensemble cores even
             // when single-zoo buy_model is empty.
-            bool any_model_active = pc.ml_model_loaded ||
+            bool any_model_active = STATE_FLAG_IS_SET(pc, ML_MODEL_LOADED) ||
                 (pc.ensemble_active && pc.ensemble_n_horizons > 0);
             if (any_model_active) {
                 ImGui::SameLine(0, 14);
@@ -198,7 +199,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
             }
 
             // v5.9.3a — scaler row (Gap H). Mutually-exclusive states.
-            if (pc.ml_model_loaded) {
+            if (STATE_FLAG_IS_SET(pc, ML_MODEL_LOADED)) {
                 ImGui::SameLine(0, 14);
                 if (FAILURE_IS_SET(pc, ml_scaler_load_failed)) {
                     ImGui::TextColored(FoxmlColors::red, "scaler: WARN — load failed");
