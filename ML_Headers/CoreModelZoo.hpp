@@ -276,7 +276,7 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
     // Only copies when stamp had the field; preserves Model_Init zero
     // defaults for legacy stamps.
     if (have_sr) {
-        if (sr.has_training_poll_interval) {
+        if (STAMP_HAS(sr, training_poll_interval)) {
             handle->training_poll_interval = sr.training_poll_interval;
             handle->has_training_poll_interval = 1;
         }
@@ -284,7 +284,7 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         // EngineSharded boot-WARN compares stamp_xgb_* vs cfg.xgb_*
         // (mirrors v5.9.4a poll_interval pattern). No refusal — hyperparams
         // don't affect inference, only forensics + reproducibility.
-        if (sr.has_xgb_hyperparams) {
+        if (STAMP_HAS(sr, xgb_hyperparams)) {
             handle->has_xgb_hyperparams        = 1;
             handle->stamp_xgb_max_depth        = sr.xgb_max_depth;
             handle->stamp_xgb_learning_rate    = sr.xgb_learning_rate;
@@ -299,18 +299,18 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
             handle->stamp_xgb_tree_method[tmln] = '\0';
         }
         // v5.9.5h Phase 10 — build flags fingerprint
-        if (sr.has_build_flags_hash) {
+        if (STAMP_HAS(sr, build_flags_hash)) {
             handle->has_build_flags_hash   = 1;
             handle->stamp_build_flags_hash = sr.build_flags_hash;
         }
         // v5.11.42 D.1 — copy stamp's xgb_train_nthread for engine boot WARN.
-        if (sr.has_xgb_train_nthread) {
+        if (STAMP_HAS(sr, xgb_train_nthread)) {
             handle->has_stamp_xgb_train_nthread = 1;
             handle->stamp_xgb_train_nthread     = sr.xgb_train_nthread;
         }
         // v5.11.42 D.2 — copy stamp's label params for ensemble dir-name
         // horizon-mismatch refusal at AutoDetect time.
-        if (sr.has_label_params) {
+        if (STAMP_HAS(sr, label_params)) {
             handle->has_stamp_label_params  = 1;
             handle->stamp_label_lookahead_ticks = sr.label_lookahead_ticks;
             handle->stamp_label_tp_pct          = sr.label_tp_pct;
@@ -318,7 +318,7 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         }
         // v5.11.42 D.3 — copy stamp's scaler_sha256 for ensemble-sibling
         // consistency WARN.
-        if (sr.has_scaler_fields && sr.scaler_sha256[0] != '\0') {
+        if (STAMP_HAS(sr, scaler) && sr.scaler_sha256[0] != '\0') {
             handle->has_stamp_scaler_sha256 = 1;
             size_t n = strnlen(sr.scaler_sha256,
                                sizeof(handle->stamp_scaler_sha256) - 1);
@@ -329,14 +329,14 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         // FeatureOverlay_PostLoadVerify. Forward-compat: legacy stamps
         // (has_overlay_hash=0) leave handle's overlay_hash empty;
         // verify skips silently.
-        if (sr.has_overlay_hash && sr.overlay_hash[0] != '\0') {
+        if (sr.has_overlay_hash /* late-emit: still manual */ && sr.overlay_hash[0] != '\0') {
             handle->has_overlay_hash = 1;
             size_t n = strnlen(sr.overlay_hash,
                                sizeof(handle->overlay_hash) - 1);
             memcpy(handle->overlay_hash, sr.overlay_hash, n);
             handle->overlay_hash[n] = '\0';
         }
-        if (sr.has_effective_hash && sr.effective_hash[0] != '\0') {
+        if (sr.has_effective_hash /* late-emit: still manual */ && sr.effective_hash[0] != '\0') {
             handle->has_effective_hash = 1;
             size_t n = strnlen(sr.effective_hash,
                                sizeof(handle->effective_hash) - 1);
@@ -347,7 +347,7 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         // boot-WARN/REFUSE compares vs cfg.*. Forward-compat: legacy
         // stamps (has_inference_cfg=0) leave handle's stamp_inf_* at
         // Model_Init zero defaults; comparison skipped.
-        if (sr.has_inference_cfg) {
+        if (STAMP_HAS(sr, inference_cfg)) {
             handle->has_stamp_inference_cfg = 1;
             handle->stamp_inf_confidence_threshold_scale =
                 sr.inference_cfg_confidence_threshold_scale;
@@ -358,19 +358,19 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
             handle->stamp_inf_freshness_tau =
                 sr.inference_cfg_freshness_tau;
         }
-        if (sr.has_inference_cfg_bandit) {
+        if (STAMP_HAS(sr, inference_cfg_bandit_blend_ratio)) {
             handle->has_stamp_bandit = 1;
             handle->stamp_inf_bandit_blend_ratio =
                 sr.inference_cfg_bandit_blend_ratio;
         }
-        if (sr.has_inference_cfg_fees) {
+        if (STAMP_HAS(sr, fees)) {
             handle->has_stamp_fees = 1;
             handle->stamp_inf_fee_rate_maker =
                 sr.inference_cfg_fee_rate_maker;
             handle->stamp_inf_fee_rate_taker =
                 sr.inference_cfg_fee_rate_taker;
         }
-        if (sr.has_model_num_outputs) {
+        if (STAMP_HAS(sr, model_num_outputs)) {
             handle->stamp_model_num_outputs = sr.model_num_outputs;
             handle->has_stamp_num_outputs = 1;
             // Phase 5 — verify stamp's claim matches Model_Load's seen
@@ -402,7 +402,7 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         // gating) since the model definitely shouldn't be loaded under
         // a horizon it wasn't trained for. Legacy stamps without
         // label_params (has_*=0) skip the check.
-        if (expected_horizon_ticks > 0 && sr.has_label_params &&
+        if (expected_horizon_ticks > 0 && STAMP_HAS(sr, label_params) &&
             sr.label_lookahead_ticks != expected_horizon_ticks) {
             fprintf(stderr,
                 "[model] REFUSING %s — stamp claims label_lookahead_ticks=%d "
@@ -1646,7 +1646,7 @@ inline int EnsembleZoo_VerifyGridMemberConsistency(
                 /*expected_feature_registry_hash=*/0,
                 /*expected_label_registry_hash=*/0);
 
-            if (!sr.has_grid_member_count) {
+            if (!STAMP_HAS(sr, grid_member)) {
                 ++legacy_count;
                 continue; // back-compat: unstamped multi-horizon model
             }

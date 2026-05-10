@@ -1724,16 +1724,16 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                                            "  (cross-major-engine WARN)");
                     }
                     // v5.9.4a model_num_outputs (output dimension)
-                    if (v.has_model_num_outputs) {
+                    if (STAMP_HAS(v, model_num_outputs)) {
                         ImGui::Text("model_num_outputs: %d", v.model_num_outputs);
                     }
                     // v5.9.4a training_poll_interval (cadence)
-                    if (v.has_training_poll_interval) {
+                    if (STAMP_HAS(v, training_poll_interval)) {
                         ImGui::Text("training_poll:    %u",
                                     (unsigned)v.training_poll_interval);
                     }
                     // v5.9.3a scaler binding
-                    if (v.has_scaler_fields) {
+                    if (STAMP_HAS(v, scaler)) {
                         ImGui::Separator();
                         ImGui::Text("scaler_present:    %d",
                                     v.feature_scaler_present);
@@ -1757,7 +1757,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                         }
                     }
                     // v5.9.2b inference cfg block
-                    if (v.has_inference_cfg) {
+                    if (STAMP_HAS(v, inference_cfg)) {
                         ImGui::Separator();
                         ImGui::TextColored(FoxmlColors::comment,
                                            "Recorded cfg at training time:");
@@ -1771,11 +1771,11 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                                     v.inference_cfg_held_out_fraction);
                         ImGui::Text("  freshness_tau:                    %.1f",
                                     v.inference_cfg_freshness_tau);
-                        if (v.has_inference_cfg_bandit) {
+                        if (STAMP_HAS(v, inference_cfg_bandit_blend_ratio)) {
                             ImGui::Text("  bandit_blend_ratio:               %.4g",
                                         v.inference_cfg_bandit_blend_ratio);
                         }
-                        if (v.has_inference_cfg_fees) {
+                        if (STAMP_HAS(v, fees)) {
                             ImGui::Text("  fee_rate_maker / taker:           %.5f / %.5f",
                                         v.inference_cfg_fee_rate_maker,
                                         v.inference_cfg_fee_rate_taker);
@@ -1783,7 +1783,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                     }
                     // v5.9.5h — XGBoost hyperparameter group. Renders when
                     // stamp had has_xgb_hyperparams=1 (post-v5.9.5h stamps).
-                    if (v.has_xgb_hyperparams) {
+                    if (STAMP_HAS(v, xgb_hyperparams)) {
                         ImGui::Separator();
                         ImGui::TextColored(FoxmlColors::comment,
                                            "XGBoost hyperparams at training time:");

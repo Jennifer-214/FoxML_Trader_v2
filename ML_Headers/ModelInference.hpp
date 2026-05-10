@@ -26,6 +26,7 @@
 #include "FeatureStandardizer.hpp"       // v5.9.3a — inline scaler struct on ModelHandle
 #include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.C — std::from_chars wrapper (locale immunity)
 #include "StampBoundCfgRegistry.hpp"     // v5.14.1.B.3 — FOREACH_STAMP_BOUND_CFG X-macro
+#include "StampBoundModelConstRegistry.hpp"  // v5.14.8.0+ — FOREACH_STAMP_BOUND_MODEL_CONST X-macro (registry, MASK constants, STAMP_HAS aliases, AUTOPOPULATE)
 #include <stdio.h>
 #include <string.h>
 #include <locale.h>                       // v5.3.0 Phase B — uselocale for canonical body LC_NUMERIC pinning
@@ -1184,7 +1185,17 @@ inline int ModelFeatures_Pack(float *buf, const RegimeSignals<F> *sig,
 // File reads are bounded; stamp file > 4KB is treated as malformed.
 //======================================================================================================
 
+// v5.14.8.A.merged — ModelStampResult migrated to X-macro generation
+// from FOREACH_STAMP_BOUND_MODEL_CONST registry. has_* flags bit-packed
+// into uint64_t has_flags (v5.14.8.A.merged.1 bit allocation enum).
+// All 26 architectural fields auto-flow from the registry; future field
+// addition = 1 row in registry → struct field + parser + emitter +
+// AUTOPOPULATE wiring all auto-derived. Closes TECH_DEBT-006.
+//
+// Caller migration: `r.has_<X>` → `STAMP_HAS(r, <group_or_entry>)`;
+// field reads continue as `r.<canonical_name>`.
 struct ModelStampResult {
+    // === Runtime-only fields (NOT in registry) ===
     int      valid;             // 1 / 0 / -1 per above
     char     reason[256];       // human-readable failure reason
     int      model_format_version;
@@ -1195,146 +1206,51 @@ struct ModelStampResult {
     int      stamp_format_version;   // v5.9.0: schema version of the stamp body itself.
                                      //         0 if absent (v5.8.x and older).
                                      //         1 = current (v5.9.0+).
-                                     //         Verifier rejects unknown versions in strict mode.
-    // v5.9.2b — inference-affecting cfg fields stamped at training time.
-    // Verifier compares against current cfg; mismatch triggers
-    // 3-tier strict-mode behavior (refuse / warn / surfaced).
-    // Field flags = 1 when stamp had the field; 0 = absent (skip check).
-    uint8_t  has_inference_cfg;                    // 1 if any inference_cfg_* present
-    double   inference_cfg_confidence_threshold_scale;
-    int      inference_cfg_barrier_gate_enabled;
-    double   inference_cfg_confidence_hard_block_threshold;
-    double   inference_cfg_held_out_fraction;
-    double   inference_cfg_freshness_tau;
-    uint8_t  has_inference_cfg_bandit;             // 1 if bandit_blend_ratio present
-    double   inference_cfg_bandit_blend_ratio;
-    uint8_t  has_inference_cfg_fees;               // 1 if fee_rate_* fields present
-    double   inference_cfg_fee_rate_maker;
-    double   inference_cfg_fee_rate_taker;
-    uint8_t  has_training_poll_interval;
-    uint32_t training_poll_interval;
-    int      inference_cfg_drift_count;            // 0 if all match; >0 = mismatched fields
-    // v5.9.2b — cross-major engine version detection. Set to 1 when stamp's
-    // engine_version differs by major number from current build's
-    // ENGINE_VERSION_STRING (e.g. stamp says 5.9.0 but engine is 6.0.0).
-    // Caller (CoreModelZoo) refuses load when:
-    //   cross_major_engine==1 AND !cfg.allow_cross_major_engine
-    // Within-major (5.7 → 5.9) always allowed.
-    uint8_t  cross_major_engine;
-    // v5.9.3a — scaler sidecar binding. has_scaler_fields=1 when stamp
-    // contains feature_scaler_present + scaler_sha256 lines (v5.9.3+
-    // stamps); =0 means legacy stamp (no scaler claimed). Distinct from
-    // feature_scaler_present (=1 only when scaler is actually present
-    // for the model). Backward compat: legacy stamps load with
-    // has_scaler_fields=0 + feature_scaler_present=0.
-    uint8_t  has_scaler_fields;
-    uint8_t  feature_scaler_present;        // 1 = sidecar exists at <model>.scaler
-    char     scaler_sha256[65];             // SHA-256 hex of full sidecar file
-    // v5.9.4a — model num_outputs (output dimension) stamp binding.
-    // has_model_num_outputs=1 when stamp had the field; legacy stamps
-    // load with 0 (no check fired). Verifier compares against
-    // ModelHandle.num_outputs at CoreModelZoo load time.
-    uint8_t  has_model_num_outputs;
-    int      model_num_outputs;
-    // v5.9.5h — XGBoost training hyperparams (parsed from stamp body
-    // position 17). has_xgb_hyperparams=0 for legacy stamps; loader
-    // skips comparison.
-    uint8_t  has_xgb_hyperparams;
-    int      xgb_max_depth;
-    double   xgb_learning_rate;
-    int      xgb_n_estimators;
-    double   xgb_subsample;
-    double   xgb_colsample_bytree;
-    int      xgb_min_child_weight;
-    int      xgb_seed;
-    char     xgb_tree_method[16];
-    // v5.9.5h Phase 10 — build flags fingerprint
-    uint8_t  has_build_flags_hash;
-    uint64_t build_flags_hash;
-    // v5.10.0a.G.2 — multi-horizon ensemble member count (parsed from stamp).
-    // See StampInferenceCfgInputs above for canonical position 19 anchor.
-    uint8_t  has_grid_member_count;
-    int      grid_member_count;
-    int      grid_member_idx;
-    // v5.10.0d — label registry hash (canonical position 20). 0 if absent
-    // (stamps from before v5.10.0d). Verifier compares against current
-    // build's LABEL_REGISTRY_HASH() — mismatch refuses load with
-    // "label set drift; retrain required" message. Mirrors v5.8.6
-    // feature_registry_hash refusal flow.
-    uint8_t  has_label_registry_hash;
-    uint64_t label_registry_hash;
-    // v5.11.18a — per-core feature_mask binding (stamp-side anchor for the
-    // runtime cfg field at ControllerConfig::core_feature_mask[16]). The
-    // stamp persists ONE mask (the training-time mask, which must equal
-    // the cfg mask of the core that produced this model). v5.11.18a only
-    // emits + verifies this field when the mask differs from the all-on
-    // default — legacy stamps + default-cfg-trained models load with
-    // has_feature_mask=0 (skip check), preserving backward compat.
-    //
-    // Verifier compares stamp's feature_mask_train against the runtime
-    // cfg's per-core mask (caller passes which core is loading) and
-    // refuses on mismatch in strict mode. v5.11.18a writes infrastructure
-    // only; v5.11.18 wires Features_PackAll to actually act on the mask.
-    uint8_t  has_feature_mask;
-    uint64_t feature_mask_train;
-    // v5.11.41 — per-horizon label parameters (parsed from stamp body
-    // canonical position 22). Forensic record; no load-time refusal.
-    // Operator can read these via stamp_inspect.sh + grep to identify
-    // which horizon a stamped model belongs to.
-    uint8_t  has_label_params;
-    int      label_lookahead_ticks;
-    double   label_tp_pct;
-    double   label_sl_pct;
-    // v5.11.41 — XGBoost training thread count (canonical position 23).
-    // Forensic; lets operator post-hoc identify which mode (serial
-    // vs parallel multi-horizon) produced a given stamp.
-    uint8_t  has_xgb_train_nthread;
-    int      xgb_train_nthread;
+    int      inference_cfg_drift_count;  // v5.9.2b runtime: 0 if all match; >0 = mismatched fields
+    uint8_t  cross_major_engine;     // v5.9.2b runtime: stamp's engine_version differs by major
 
-    // v5.14.1.B.3 — X-macro-driven stamp-bound cfg fields (canonical
-    // positions 24+). Auto-generated from FOREACH_STAMP_BOUND_CFG.
-    // Each field has a uint8_t has_<name> Surface G forward-compat
-    // flag + the typed value field. Adding the next field is ONE line
-    // in StampBoundCfgRegistry.hpp.
+    // === Bit-packed has_* flags (v5.14.8.A.merged.1; 13 bits used today) ===
+    // 6 group bits (inference_cfg, scaler, fees, xgb_hyperparams, grid_member, label_params)
+    // + 7 standalone bits (inference_cfg_bandit_blend_ratio, training_poll_interval,
+    // model_num_outputs, build_flags_hash, label_registry_hash, feature_mask, xgb_train_nthread).
+    // 51 bits headroom in uint64_t for future fields.
+    uint64_t has_flags;
+
+    // === Architectural value fields — auto-generated from FOREACH_STAMP_BOUND_MODEL_CONST ===
+    // 26 entries (v5.14.8.A.0.b restored 3 dropped fields; v5.14.8.A.merged added xgb_tree_method).
+    #define X(name, group, presence, type, fmt, default_val, get_value, emit_when, doc) \
+        type name;
+    FOREACH_STAMP_BOUND_MODEL_CONST(X)
+    #undef X
+
+    // === FOREACH_STAMP_BOUND_CFG fields (sister registry; v5.14.1.B.3 X-macro driven) ===
+    // Each field has a uint8_t has_<name> Surface G forward-compat flag
+    // (per-entry semantics; sister registry uses per-entry has_*, not group-bit).
     #define X(name, type, fmt, default_val, get_cfg_expr, emit_when)  \
         uint8_t has_##name;                                             \
         type name;
     FOREACH_STAMP_BOUND_CFG(X)
     #undef X
 
-    // v5.14.2.E.2.B — model-architectural fields migrated from expected.cfg
-    // sidecar to stamp body. NOT cfg-bound (these come from training-time
-    // model-architectural context: label_kind → num_classes; operator's
-    // role choice; build-time MODEL_NUM_FEATURES + MODEL_FORMAT_VERSION
-    // constants). Manual emit + parse pattern (don't fit FOREACH_STAMP_BOUND_CFG
-    // which is for cfg-only fields). When count grows to 5+, refactor to
-    // FOREACH_STAMP_BOUND_MODEL_CONST registry (TECH_DEBT.md entry).
-    //
-    // **If you add a NEW architectural field here, ALSO update:**
-    //   - StampInferenceCfgInputs (~line 1940; emit-side struct)
-    //   - verify_model_stamp init block (zero has_*)
-    //   - verify_model_stamp parser (add `if (strcmp(key, "...") == 0)` branch)
-    //   - stamp_write_for_model emit (add `if (inf->has_*)` block)
-    //   - BacktestEngine.hpp populator (add `inf.has_*=1; inf.*=value;`)
-    //   - tools/stamp_model.sh CLI emit (TECH_DEBT-tracked catch-up)
-    //   - CoreModelZoo_VerifyExpected dual-path read (use stamp if has_*, else expected.cfg)
+    // === v5.14.2.E.2.B + v5.14.3.B late-emit architectural fields (manual; FUTURE: migrate to FOREACH_STAMP_BOUND_MODEL_CONST_LATE registry) ===
+    // Late-emit: these fields emit AFTER FOREACH_STAMP_BOUND_CFG to preserve
+    // canonical wire format byte-for-byte. Migration to registry requires
+    // a second FOREACH_<X>_POST_CFG registry to maintain emit ordering.
+    // TECH_DEBT-006 closure focuses on the 26 pre-cfg entries; late-emit
+    // migration is a follow-up ship (TECH_DEBT-006.b candidate; trigger:
+    // next ship adding 3+ late-emit fields, or cleanup sprint).
     uint8_t  has_expected_num_classes;
-    int      expected_num_classes;             // 0=binary, 1=regression, ≥2=multiclass
+    int      expected_num_classes;
     uint8_t  has_expected_role;
-    char     expected_role[16];                 // "buy_signal" | "barrier" | "regime" | "exit"
+    char     expected_role[16];
     uint8_t  has_expected_num_features;
-    int      expected_num_features;             // = MODEL_NUM_FEATURES at training time
+    int      expected_num_features;
     uint8_t  has_expected_feature_format_version;
-    int      expected_feature_format_version;   // = MODEL_FORMAT_VERSION at training time
-
-    // v5.14.3.B — overlay-derived fields (3-layer fingerprinting).
-    // SIDECAR-DERIVED (FeatureOverlay JSON → SHA256). NOT cfg-bound.
-    // See StampInferenceCfgInputs (below) for the discipline list of sites
-    // that must stay in sync when adding a new sidecar-derived field.
+    int      expected_feature_format_version;
     uint8_t  has_overlay_hash;
-    char     overlay_hash[65];                  // layer-2: SHA256 of canonical overlay JSON
+    char     overlay_hash[65];
     uint8_t  has_effective_hash;
-    char     effective_hash[65];                // layer-3: SHA256(layer1 || layer2)
+    char     effective_hash[65];
 };
 
 // Compute SHA-256 of a file. Reads in 64K chunks, safe for any size.
@@ -1377,102 +1293,20 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                                             // loading the model. 0 = skip check
                                             // (legacy callers + default mask).
                                             uint64_t expected_feature_mask = 0) {
-    ModelStampResult r;
+    // v5.14.8.A.merged — Brace-init zero-fills the entire struct in one
+    // statement. Replaces ~90 lines of explicit field zero-inits.
+    // - has_flags = 0 (all bits clear; legacy stamps load with all
+    //   group/standalone bits 0 → drift checks skip silently)
+    // - All char arrays = "" (zero-filled)
+    // - All numeric fields = 0
+    // - FOREACH_STAMP_BOUND_CFG fields' has_* + value = 0
+    // - Late-emit manual fields (expected_*, overlay_hash, effective_hash) = 0
+    //
+    // After brace-init, set the runtime-only fields that need non-zero
+    // initial values (valid + gap_threshold from caller param).
+    ModelStampResult r{};
     r.valid = -1;
-    r.reason[0] = '\0';
-    r.model_format_version = 0;
-    r.generalization_gap = 0.0;
     r.gap_threshold = gap_threshold;
-    r.feature_registry_hash = 0;
-    r.engine_version[0] = '\0';
-    r.stamp_format_version = 0;  // v5.9.0: 0 = absent (legacy stamp)
-    // v5.9.2b — inference cfg fields. has_* flags = 0 until parser sets them.
-    r.has_inference_cfg = 0;
-    r.inference_cfg_confidence_threshold_scale = 0.0;
-    r.inference_cfg_barrier_gate_enabled = 0;
-    r.inference_cfg_confidence_hard_block_threshold = 0.0;
-    r.inference_cfg_held_out_fraction = 0.0;
-    r.inference_cfg_freshness_tau = 0.0;
-    r.has_inference_cfg_bandit = 0;
-    r.inference_cfg_bandit_blend_ratio = 0.0;
-    r.has_inference_cfg_fees = 0;
-    r.inference_cfg_fee_rate_maker = 0.0;
-    r.inference_cfg_fee_rate_taker = 0.0;
-    r.has_training_poll_interval = 0;
-    r.training_poll_interval = 0;
-    r.inference_cfg_drift_count = 0;
-    r.cross_major_engine = 0;
-    // v5.9.3a — scaler fields. has_scaler_fields = 1 if stamp had any
-    // scaler key; feature_scaler_present = 1 only if stamp claims the
-    // sidecar exists. Legacy stamps load with both = 0 (forward-compat).
-    r.has_scaler_fields = 0;
-    r.feature_scaler_present = 0;
-    r.scaler_sha256[0] = '\0';
-    // v5.9.4a — model num_outputs init.
-    r.has_model_num_outputs = 0;
-    r.model_num_outputs = 0;
-    // v5.9.5h — XGBoost hyperparam fields zero-init
-    r.has_xgb_hyperparams = 0;
-    r.xgb_max_depth = 0;
-    r.xgb_learning_rate = 0.0;
-    r.xgb_n_estimators = 0;
-    r.xgb_subsample = 0.0;
-    r.xgb_colsample_bytree = 0.0;
-    r.xgb_min_child_weight = 0;
-    r.xgb_seed = 0;
-    r.xgb_tree_method[0] = '\0';
-    r.has_build_flags_hash = 0;
-    r.build_flags_hash = 0;
-    // v5.10.0a.G.2 — grid_member_count fields zero-init
-    r.has_grid_member_count = 0;
-    r.grid_member_count = 0;
-    r.grid_member_idx = 0;
-    // v5.10.0d — label_registry_hash zero-init (absent in legacy stamps)
-    r.has_label_registry_hash = 0;
-    r.label_registry_hash = 0;
-    // v5.11.18a — feature_mask zero-init (absent in legacy stamps + in
-    // v5.11.18a stamps trained with the all-on default mask). Caller's
-    // load-time check skips when has_feature_mask=0.
-    r.has_feature_mask = 0;
-    r.feature_mask_train = 0;
-    // v5.11.41 — per-horizon label params + xgb_train_nthread zero-init.
-    // Legacy stamps (pre-v5.11.41) load with has_*=0 → fields skipped.
-    r.has_label_params = 0;
-    r.label_lookahead_ticks = 0;
-    r.label_tp_pct = 0.0;
-    r.label_sl_pct = 0.0;
-    r.has_xgb_train_nthread = 0;
-    r.xgb_train_nthread = 0;
-
-    // v5.14.1.B.3 — X-macro-driven zero-init for stamp-bound cfg fields.
-    // Legacy stamps (pre-v5.14.1.B.3) load with has_<name>=0 → drift
-    // check at caller site skips silently. New stamps populate via the
-    // parser branch below.
-    #define X(name, type, fmt, default_val, get_cfg_expr, emit_when)  \
-        r.has_##name = 0;                                               \
-        r.name = (type)(default_val);
-    FOREACH_STAMP_BOUND_CFG(X)
-    #undef X
-
-    // v5.14.2.E.2.B — model-architectural fields zero-init. Legacy stamps
-    // (pre-v5.14.2.E.2) load with has_*=0 → caller (CoreModelZoo_VerifyExpected)
-    // falls back to expected.cfg sidecar lookup.
-    r.has_expected_num_classes = 0;
-    r.expected_num_classes = 0;
-    r.has_expected_role = 0;
-    r.expected_role[0] = '\0';
-    r.has_expected_num_features = 0;
-    r.expected_num_features = 0;
-    r.has_expected_feature_format_version = 0;
-    r.expected_feature_format_version = 0;
-
-    // v5.14.3.B — overlay-derived fields zero-init. Legacy stamps
-    // (pre-v5.14.3) load with has_*=0 → FeatureOverlay_PostLoadVerify
-    // skips silently (no overlay verification claimed).
-    r.has_overlay_hash = 0;
-    r.overlay_hash[0] = '\0';
-    r.has_effective_hash = 0;
-    r.effective_hash[0] = '\0';
 
     char stamp_path[512];
     snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
@@ -1562,47 +1396,47 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             // current cfg later (caller-side).
             else if (strcmp(key, "inference_cfg_confidence_threshold_scale") == 0) {
                 r.inference_cfg_confidence_threshold_scale = tt::parse_double_fast(val);
-                r.has_inference_cfg = 1;
+                STAMP_SET(r, inference_cfg);
             } else if (strcmp(key, "inference_cfg_barrier_gate_enabled") == 0) {
                 r.inference_cfg_barrier_gate_enabled = atoi(val);
-                r.has_inference_cfg = 1;
+                STAMP_SET(r, inference_cfg);
             } else if (strcmp(key, "inference_cfg_confidence_hard_block_threshold") == 0) {
                 r.inference_cfg_confidence_hard_block_threshold = tt::parse_double_fast(val);
-                r.has_inference_cfg = 1;
+                STAMP_SET(r, inference_cfg);
             } else if (strcmp(key, "inference_cfg_held_out_fraction") == 0) {
                 r.inference_cfg_held_out_fraction = tt::parse_double_fast(val);
-                r.has_inference_cfg = 1;
+                STAMP_SET(r, inference_cfg);
             } else if (strcmp(key, "inference_cfg_freshness_tau") == 0) {
                 r.inference_cfg_freshness_tau = tt::parse_double_fast(val);
-                r.has_inference_cfg = 1;
+                STAMP_SET(r, inference_cfg);
             } else if (strcmp(key, "inference_cfg_bandit_blend_ratio") == 0) {
                 r.inference_cfg_bandit_blend_ratio = tt::parse_double_fast(val);
-                r.has_inference_cfg_bandit = 1;
+                STAMP_SET(r, inference_cfg_bandit_blend_ratio);
             } else if (strcmp(key, "inference_cfg_fee_rate_maker") == 0) {
                 r.inference_cfg_fee_rate_maker = tt::parse_double_fast(val);
-                r.has_inference_cfg_fees = 1;
+                STAMP_SET(r, fees);
             } else if (strcmp(key, "inference_cfg_fee_rate_taker") == 0) {
                 r.inference_cfg_fee_rate_taker = tt::parse_double_fast(val);
-                r.has_inference_cfg_fees = 1;
+                STAMP_SET(r, fees);
             } else if (strcmp(key, "training_poll_interval") == 0) {
                 r.training_poll_interval = (uint32_t)strtoul(val, nullptr, 10);
-                r.has_training_poll_interval = 1;
+                STAMP_SET(r, training_poll_interval);
             }
             // v5.9.3a — scaler fields
             else if (strcmp(key, "feature_scaler_present") == 0) {
                 r.feature_scaler_present = (atoi(val) != 0) ? 1 : 0;
-                r.has_scaler_fields = 1;
+                STAMP_SET(r, scaler);
             } else if (strcmp(key, "scaler_sha256") == 0) {
                 size_t vl = strlen(val);
                 if (vl >= sizeof(r.scaler_sha256)) vl = sizeof(r.scaler_sha256) - 1;
                 memcpy(r.scaler_sha256, val, vl);
                 r.scaler_sha256[vl] = '\0';
-                r.has_scaler_fields = 1;
+                STAMP_SET(r, scaler);
             }
             // v5.9.4a — model_num_outputs (output dimension binding)
             else if (strcmp(key, "model_num_outputs") == 0) {
                 r.model_num_outputs = atoi(val);
-                r.has_model_num_outputs = 1;
+                STAMP_SET(r, model_num_outputs);
             }
             // v5.9.5h — XGBoost hyperparam parsing. Macro-expanded
             // to keep the 8-field dispatch tight (vs an if/else
@@ -1611,12 +1445,12 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             #define PARSE_XGB_INT(field) \
                 else if (strcmp(key, "xgb_" #field) == 0) { \
                     r.xgb_##field = atoi(val); \
-                    r.has_xgb_hyperparams = 1; \
+                    STAMP_SET(r, xgb_hyperparams); \
                 }
             #define PARSE_XGB_DOUBLE(field) \
                 else if (strcmp(key, "xgb_" #field) == 0) { \
                     r.xgb_##field = tt::parse_double_fast(val); \
-                    r.has_xgb_hyperparams = 1; \
+                    STAMP_SET(r, xgb_hyperparams); \
                 }
             PARSE_XGB_INT(max_depth)
             PARSE_XGB_DOUBLE(learning_rate)
@@ -1631,28 +1465,28 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
                 if (vl >= sizeof(r.xgb_tree_method)) vl = sizeof(r.xgb_tree_method) - 1;
                 memcpy(r.xgb_tree_method, val, vl);
                 r.xgb_tree_method[vl] = '\0';
-                r.has_xgb_hyperparams = 1;
+                STAMP_SET(r, xgb_hyperparams);
             }
             #undef PARSE_XGB_INT
             #undef PARSE_XGB_DOUBLE
             // v5.9.5h Phase 10 — build flags hash (hex parse)
             else if (strcmp(key, "build_flags_hash") == 0) {
                 r.build_flags_hash = (uint64_t)strtoull(val, nullptr, 16);
-                r.has_build_flags_hash = 1;
+                STAMP_SET(r, build_flags_hash);
             }
             // v5.10.0a.G.2 — multi-horizon ensemble member count (position 19)
             else if (strcmp(key, "grid_member_count") == 0) {
                 r.grid_member_count = atoi(val);
-                r.has_grid_member_count = 1;
+                STAMP_SET(r, grid_member);
             }
             else if (strcmp(key, "grid_member_idx") == 0) {
                 r.grid_member_idx = atoi(val);
-                r.has_grid_member_count = 1;
+                STAMP_SET(r, grid_member);
             }
             // v5.10.0d — label registry hash (position 20)
             else if (strcmp(key, "label_registry_hash") == 0) {
                 r.label_registry_hash = (uint64_t)strtoull(val, nullptr, 16);
-                r.has_label_registry_hash = 1;
+                STAMP_SET(r, label_registry_hash);
             }
             // v5.11.18a — feature mask (position 21). Hex-encoded uint64
             // bitmap of features active during training. Stamp emits
@@ -1660,13 +1494,13 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             // mask in 3-tier strict-mode. Legacy stamps (no field) load
             // with has_feature_mask=0 → check skipped.
             else if (strcmp(key, "feature_mask") == 0) {
-                r.feature_mask_train = (uint64_t)strtoull(val, nullptr, 16);
-                r.has_feature_mask = 1;
+                r.feature_mask = (uint64_t)strtoull(val, nullptr, 16);
+                STAMP_SET(r, feature_mask);
             }
             // v5.11.41 — per-horizon label params (canonical position 22).
             else if (strcmp(key, "label_lookahead_ticks") == 0) {
                 r.label_lookahead_ticks = atoi(val);
-                r.has_label_params = 1;
+                STAMP_SET(r, label_params);
             }
             else if (strcmp(key, "label_tp_pct") == 0) {
                 r.label_tp_pct = tt::parse_double_fast(val);
@@ -1677,7 +1511,7 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             // v5.11.41 — XGBoost train-time thread count (position 23).
             else if (strcmp(key, "xgb_train_nthread") == 0) {
                 r.xgb_train_nthread = atoi(val);
-                r.has_xgb_train_nthread = 1;
+                STAMP_SET(r, xgb_train_nthread);
             }
             // v5.14.1.B.3 — X-macro-driven parser branches (positions 24+).
             // Each X expands to one `else if (strcmp(key, "<name>") == 0)`
@@ -1806,18 +1640,18 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
     // refuse — masked-feature drift is a parity-critical failure mode
     // (CRITICAL gap from /parity-check 2026-05-07).
     if (expected_feature_mask != 0) {
-        if (!r.has_feature_mask) {
+        if (!STAMP_HAS(r, feature_mask)) {
             fprintf(stderr,
                 "[stamp] WARN: %s stamp lacks feature_mask "
                 "(pre-v5.11.18a) — feature-mask drift NOT verified\n",
                 stamp_path);
-        } else if (r.feature_mask_train != expected_feature_mask) {
+        } else if (r.feature_mask != expected_feature_mask) {
             r.valid = 0;
             snprintf(r.reason, sizeof(r.reason),
                 "feature_mask mismatch: stamp=%016lx engine=%016lx "
                 "(per-core feature subset drift; retrain or restore "
                 "feature_mask cfg to training-time value)",
-                (unsigned long)r.feature_mask_train,
+                (unsigned long)r.feature_mask,
                 (unsigned long)expected_feature_mask);
             return r;
         }

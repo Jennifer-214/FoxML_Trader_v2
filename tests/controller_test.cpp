@@ -11931,21 +11931,21 @@ e3_skip_load:;
                 check("v5.9.2b: stamp with inference_cfg verifies",
                       v.valid == 1);
                 check("v5.9.2b: parser sets has_inference_cfg=1",
-                      v.has_inference_cfg == 1);
+                      STAMP_HAS(v, inference_cfg) == 1);
                 check("v5.9.2b: parsed confidence_threshold_scale matches stamp",
                       v.inference_cfg_confidence_threshold_scale == 2.0);
                 check("v5.9.2b: parsed barrier_gate_enabled matches stamp",
                       v.inference_cfg_barrier_gate_enabled == 1);
                 check("v5.9.2b: parsed has_inference_cfg_bandit=1",
-                      v.has_inference_cfg_bandit == 1);
+                      STAMP_HAS(v, inference_cfg_bandit_blend_ratio) == 1);
                 check("v5.9.2b: parsed bandit_blend_ratio matches stamp",
                       fabs(v.inference_cfg_bandit_blend_ratio - 0.30) < 1e-9);
                 check("v5.9.2b: parsed has_inference_cfg_fees=1",
-                      v.has_inference_cfg_fees == 1);
+                      STAMP_HAS(v, fees) == 1);
                 check("v5.9.2b: parsed fee_rate_taker matches stamp",
                       fabs(v.inference_cfg_fee_rate_taker - 0.001) < 1e-9);
                 check("v5.9.2b: parsed has_training_poll_interval=1",
-                      v.has_training_poll_interval == 1);
+                      STAMP_HAS(v, training_poll_interval) == 1);
                 check("v5.9.2b: parsed training_poll_interval matches stamp",
                       v.training_poll_interval == 100u);
 
@@ -11992,11 +11992,11 @@ e3_skip_load:;
                 ModelStampResult v3 = verify_model_stamp(model_path,
                     "test-secret-v592b", 0.10, 5, 0xABCD1234U);
                 check("v5.9.2b: legacy-shape stamp → has_inference_cfg=0",
-                      v3.has_inference_cfg == 0);
+                      STAMP_HAS(v3, inference_cfg) == 0);
                 check("v5.9.2b: legacy-shape stamp → has_inference_cfg_fees=0",
-                      v3.has_inference_cfg_fees == 0);
+                      STAMP_HAS(v3, fees) == 0);
                 check("v5.9.2b: legacy-shape stamp → has_training_poll_interval=0",
-                      v3.has_training_poll_interval == 0);
+                      STAMP_HAS(v3, training_poll_interval) == 0);
 
                 unlink(stamp_path);
                 unlink(model_path);
@@ -12163,7 +12163,7 @@ e3_skip_load:;
                 check("v5.9.3a: stamp with scaler fields verifies",
                       v.valid == 1);
                 check("v5.9.3a: parser sets has_scaler_fields=1",
-                      v.has_scaler_fields == 1);
+                      STAMP_HAS(v, scaler) == 1);
                 check("v5.9.3a: parser reads feature_scaler_present=1",
                       v.feature_scaler_present == 1);
                 check("v5.9.3a: parser reads scaler_sha256 hex",
@@ -12187,7 +12187,7 @@ e3_skip_load:;
                 ModelStampResult v2 = verify_model_stamp(model_path,
                     "test-secret-v593a", 0.10, 5, 0xABCD1234U);
                 check("v5.9.3a: legacy stamp → has_scaler_fields=0",
-                      v2.has_scaler_fields == 0);
+                      STAMP_HAS(v2, scaler) == 0);
                 check("v5.9.3a: legacy stamp → feature_scaler_present=0",
                       v2.feature_scaler_present == 0);
 
@@ -12580,7 +12580,7 @@ e3_skip_load:;
                 check("v5.9.4a: stamp with model_num_outputs verifies",
                       v.valid == 1);
                 check("v5.9.4a: parser sets has_model_num_outputs=1",
-                      v.has_model_num_outputs == 1);
+                      STAMP_HAS(v, model_num_outputs) == 1);
                 check("v5.9.4a: parsed model_num_outputs == 3",
                       v.model_num_outputs == 3);
 
@@ -12602,7 +12602,7 @@ e3_skip_load:;
                 ModelStampResult v2 = verify_model_stamp(model_path,
                     "test-secret-v594a", 0.10, 5, 0xABCD1234U);
                 check("v5.9.4a: legacy stamp → has_model_num_outputs=0",
-                      v2.has_model_num_outputs == 0);
+                      STAMP_HAS(v2, model_num_outputs) == 0);
                 check("v5.9.4a: legacy stamp → model_num_outputs=0 (default)",
                       v2.model_num_outputs == 0);
 
@@ -12727,18 +12727,18 @@ e3_skip_load:;
                 check("v5.9.5b: freshness_tau round-trips (450)",
                       fabs(v.inference_cfg_freshness_tau - 450.0) < 1e-9);
                 check("v5.9.5b: has_bandit set (cfg.bandit_enabled=1)",
-                      v.has_inference_cfg_bandit == 1);
+                      STAMP_HAS(v, inference_cfg_bandit_blend_ratio) == 1);
                 check("v5.9.5b: bandit_blend_ratio round-trips (0.40)",
                       fabs(v.inference_cfg_bandit_blend_ratio - 0.40) < 1e-9);
                 check("v5.9.5b: has_fees set (cfg.cost_gate_enabled=1)",
-                      v.has_inference_cfg_fees == 1);
+                      STAMP_HAS(v, fees) == 1);
                 check("v5.9.5b: fee_rate_maker round-trips (0.00060)",
                       fabs(v.inference_cfg_fee_rate_maker - 0.00060) < 1e-9);
                 check("v5.9.5b: training_poll_interval round-trips (200)",
-                      v.has_training_poll_interval == 1 &&
+                      STAMP_HAS(v, training_poll_interval) == 1 &&
                       v.training_poll_interval == 200u);
                 check("v5.9.5b: model_num_outputs=3 for PEAK_VALLEY_STABLE",
-                      v.has_model_num_outputs == 1 &&
+                      STAMP_HAS(v, model_num_outputs) == 1 &&
                       v.model_num_outputs == 3);
 
                 char stamp_path[450];
@@ -12770,9 +12770,9 @@ e3_skip_load:;
                 ModelStampResult v_min = verify_model_stamp(model_path,
                     "test-secret-v595b", 0.10, 5, 0xCAFE5599u);
                 check("v5.9.5b: gated-off bandit → has_inference_cfg_bandit=0",
-                      v_min.has_inference_cfg_bandit == 0);
+                      STAMP_HAS(v_min, inference_cfg_bandit_blend_ratio) == 0);
                 check("v5.9.5b: gated-off fees → has_inference_cfg_fees=0",
-                      v_min.has_inference_cfg_fees == 0);
+                      STAMP_HAS(v_min, fees) == 0);
 
                 unlink(stamp_path);
                 unlink(model_path);
@@ -12864,7 +12864,7 @@ e3_skip_load:;
                     check("v5.9.5c: bash-signed stamp with full inf verifies via in-process",
                           vr.valid == 1);
                     check("v5.9.5c: bash-written has_inference_cfg=1",
-                          vr.has_inference_cfg == 1);
+                          STAMP_HAS(vr, inference_cfg) == 1);
                     check("v5.9.5c: bash-written confidence_threshold_scale=2.5",
                           fabs(vr.inference_cfg_confidence_threshold_scale - 2.5) < 1e-9);
                     check("v5.9.5c: bash-written barrier_gate_enabled=1",
@@ -12876,20 +12876,20 @@ e3_skip_load:;
                     check("v5.9.5c: bash-written freshness_tau=450",
                           fabs(vr.inference_cfg_freshness_tau - 450.0) < 1e-9);
                     check("v5.9.5c: bash-written has_bandit=1",
-                          vr.has_inference_cfg_bandit == 1);
+                          STAMP_HAS(vr, inference_cfg_bandit_blend_ratio) == 1);
                     check("v5.9.5c: bash-written bandit_blend_ratio=0.40",
                           fabs(vr.inference_cfg_bandit_blend_ratio - 0.40) < 1e-9);
                     check("v5.9.5c: bash-written has_fees=1",
-                          vr.has_inference_cfg_fees == 1);
+                          STAMP_HAS(vr, fees) == 1);
                     check("v5.9.5c: bash-written fee_rate_maker=0.00060",
                           fabs(vr.inference_cfg_fee_rate_maker - 0.00060) < 1e-9);
                     check("v5.9.5c: bash-written fee_rate_taker=0.00090",
                           fabs(vr.inference_cfg_fee_rate_taker - 0.00090) < 1e-9);
                     check("v5.9.5c: bash-written training_poll_interval=200",
-                          vr.has_training_poll_interval == 1 &&
+                          STAMP_HAS(vr, training_poll_interval) == 1 &&
                           vr.training_poll_interval == 200u);
                     check("v5.9.5c: bash-written model_num_outputs=3",
-                          vr.has_model_num_outputs == 1 &&
+                          STAMP_HAS(vr, model_num_outputs) == 1 &&
                           vr.model_num_outputs == 3);
 
                     char stamp_path[256];
@@ -12987,7 +12987,7 @@ e3_skip_load:;
                 check("v5.9.5h: stamp with xgb_hyperparams verifies",
                       v.valid == 1);
                 check("v5.9.5h: parser sets has_xgb_hyperparams=1",
-                      v.has_xgb_hyperparams == 1);
+                      STAMP_HAS(v, xgb_hyperparams) == 1);
                 check("v5.9.5h: round-trip xgb_max_depth=8",
                       v.xgb_max_depth == 8);
                 check("v5.9.5h: round-trip xgb_learning_rate=0.05",
@@ -13021,7 +13021,7 @@ e3_skip_load:;
                 ModelStampResult v2 = verify_model_stamp(model_path,
                     "test-secret-v595h", 0.10, 5, 0xCAFE5599u);
                 check("v5.9.5h: legacy stamp → has_xgb_hyperparams=0",
-                      v2.has_xgb_hyperparams == 0);
+                      STAMP_HAS(v2, xgb_hyperparams) == 0);
                 unlink(stamp_path);
                 unlink(model_path);
             } else {
@@ -14393,7 +14393,7 @@ e3_skip_load:;
         check("v5.10.0d: parsed label hash matches emitted",
               vr.label_registry_hash == h);
         check("v5.10.0d: has_label_registry_hash flag set on parse",
-              vr.has_label_registry_hash == 1);
+              STAMP_HAS(vr, label_registry_hash) == 1);
 
         // Mismatch: stamp says hash A, engine wants hash B → REFUSE
         uint64_t fake_engine_hash = h ^ 0xDEADBEEFULL;
@@ -14425,7 +14425,7 @@ e3_skip_load:;
         check("v5.10.0d: legacy stamp parsed label hash == 0 (sentinel)",
               vr_legacy.label_registry_hash == 0);
         check("v5.10.0d: legacy stamp has_label_registry_hash == 0",
-              vr_legacy.has_label_registry_hash == 0);
+              STAMP_HAS(vr_legacy, label_registry_hash) == 0);
 
         // Skip-check path: caller passes 0 → no comparison even with mismatched stamp
         ModelStampResult vr_skip = verify_model_stamp(
@@ -16250,11 +16250,11 @@ e3_skip_load:;
 
         // === Test G.2.2: ModelStampResult has grid_member_count fields ===
         ModelStampResult r{};
-        r.has_grid_member_count = 1;
+        STAMP_SET(r, grid_member);
         r.grid_member_count = 8;
         r.grid_member_idx = 3;
         check("v5.10.0a.G.2: ModelStampResult.has_grid_member_count assignable",
-              r.has_grid_member_count == 1);
+              STAMP_HAS(r, grid_member) == 1);
         check("v5.10.0a.G.2: ModelStampResult.grid_member_count assignable",
               r.grid_member_count == 8);
         check("v5.10.0a.G.2: ModelStampResult.grid_member_idx assignable",
@@ -16265,7 +16265,7 @@ e3_skip_load:;
         // sets has_grid_member_count=0 for those. Engine load with !has_*
         // skips ensemble metadata processing → bytewise-identical to legacy.
         ModelStampResult legacy{};
-        legacy.has_grid_member_count = 0;  // simulates parsing pre-G.2 stamp body
+        STAMP_CLR(legacy, grid_member);  // simulates parsing pre-G.2 stamp body
         check("v5.10.0a.G.2: legacy stamp (has_grid_member_count=0) is no-op",
               legacy.grid_member_count == 0 && legacy.grid_member_idx == 0);
     }
@@ -16867,9 +16867,9 @@ e3_skip_load:;
                 ModelStampResult vr = verify_model_stamp(
                     tmp_model, "", 0.05, MODEL_FORMAT_VERSION);
                 check("v5.11.18a: verifier reads has_feature_mask=1 from stamp",
-                      vr.has_feature_mask == 1);
+                      STAMP_HAS(vr, feature_mask) == 1);
                 check("v5.11.18a: verifier reads feature_mask_train round-trip",
-                      vr.feature_mask_train == 0xDEADBEEFCAFEBABEULL);
+                      vr.feature_mask == 0xDEADBEEFCAFEBABEULL);
 
                 // Verifier WITH matching expected_feature_mask: accept.
                 ModelStampResult vr_match = verify_model_stamp(
@@ -16922,7 +16922,7 @@ e3_skip_load:;
                     /*expected_label_registry_hash=*/0,
                     /*expected_feature_mask=*/0xDEADBEEFCAFEBABEULL);
                 check("v5.11.18a: legacy stamp parses has_feature_mask=0",
-                      vr.has_feature_mask == 0);
+                      STAMP_HAS(vr, feature_mask) == 0);
                 check("v5.11.18a: legacy stamp + non-zero expected → ACCEPT (warn, not reject)",
                       vr.valid == 1);
 
@@ -17210,7 +17210,7 @@ e3_skip_load:;
                 ModelStampResult vr = verify_model_stamp(
                     tmp_model, "", 0.05, MODEL_FORMAT_VERSION);
                 check("v5.11.41.0: verifier reads has_label_params=1 from stamp",
-                      vr.has_label_params == 1);
+                      STAMP_HAS(vr, label_params) == 1);
                 check("v5.11.41.0: verifier reads label_lookahead_ticks round-trip",
                       vr.label_lookahead_ticks == 7500);
                 check("v5.11.41.0: verifier reads label_tp_pct round-trip (within 1e-6)",
@@ -17251,7 +17251,7 @@ e3_skip_load:;
                 ModelStampResult vr = verify_model_stamp(
                     tmp_model, "", 0.05, MODEL_FORMAT_VERSION);
                 check("v5.11.41.0: verifier reads has_xgb_train_nthread=1",
-                      vr.has_xgb_train_nthread == 1);
+                      STAMP_HAS(vr, xgb_train_nthread) == 1);
                 check("v5.11.41.0: verifier reads xgb_train_nthread=4 round-trip",
                       vr.xgb_train_nthread == 4);
 
@@ -17292,7 +17292,7 @@ e3_skip_load:;
                 ModelStampResult vr = verify_model_stamp(
                     tmp_model, "", 0.05, MODEL_FORMAT_VERSION);
                 check("v5.11.41.0: combined stamp parses both field blocks",
-                      vr.has_label_params == 1 && vr.has_xgb_train_nthread == 1);
+                      STAMP_HAS(vr, label_params) == 1 && STAMP_HAS(vr, xgb_train_nthread) == 1);
                 check("v5.11.41.0: combined stamp horizon=15000 + nthread=1 (parallel mode shape)",
                       vr.label_lookahead_ticks == 15000 && vr.xgb_train_nthread == 1);
 
@@ -17323,9 +17323,9 @@ e3_skip_load:;
                 ModelStampResult vr = verify_model_stamp(
                     tmp_model, "", 0.05, MODEL_FORMAT_VERSION);
                 check("v5.11.41.0: legacy stamp parses has_label_params=0",
-                      vr.has_label_params == 0);
+                      STAMP_HAS(vr, label_params) == 0);
                 check("v5.11.41.0: legacy stamp parses has_xgb_train_nthread=0",
-                      vr.has_xgb_train_nthread == 0);
+                      STAMP_HAS(vr, xgb_train_nthread) == 0);
                 check("v5.11.41.0: legacy stamp valid (forward-compat)",
                       vr.valid == 1);
 
