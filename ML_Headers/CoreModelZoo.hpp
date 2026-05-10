@@ -204,7 +204,8 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         // contract documented in StampBoundCfgRegistry.hpp).
         if (cfg_ptr && sr.valid > 0) {
             const ControllerConfig<F>& cfg = *cfg_ptr;
-            #define X(name, type, fmt, default_val, get_cfg_expr, emit_when)       \
+            // v5.14.9.F.2 — 7-arg X macro signature (emit_source col added; unused here)
+            #define X(name, type, fmt, default_val, get_cfg_expr, emit_when, emit_source) \
                 if (sr.has_##name) {                                                \
                     type cfg_val = (type)(get_cfg_expr);                            \
                     if (sr.name != cfg_val) {                                       \
@@ -837,7 +838,7 @@ struct EnsembleModelZoo {
     // v5.13.4 — sell-side bandit (parallel to buy-side). Same per-regime
     // shape; arms count = exit_predictor_count. Cold start: uniform; G.8-
     // style reward update fires from HandleFill exit branch when
-    // last_exit_was_predicted[slot] && cfg.exit_bandit_enabled && NOT
+    // last_exit_was_predicted[slot] && BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED) && NOT
     // flatten event. Counterfactual reward formula: actual_pnl_bps -
     // hypothetical_held_to_TP_pnl_bps (optimistic; biases against exits;
     // operator scales via cfg.exit_bandit_lr; refined post paper-test).
@@ -1275,7 +1276,7 @@ inline void EnsembleModelZoo_InitBandits(EnsembleModelZoo<F>* ezoo,
 // exit_predictor role. Arms count = exit_predictor_count (set at
 // LoadFromCfg time). Defaults match buy-side (gamma=0.05, blend=1.0,
 // min_samples=100, ramp=200) so exit-side learning shape matches buy-
-// side discipline. Operator opts in via cfg.exit_bandit_enabled at the
+// side discipline. Operator opts in via BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED) at the
 // HandleFill attribution path; init is harmless if cfg is off (bandits
 // just stay uniform until first reward arrives).
 //

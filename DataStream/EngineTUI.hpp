@@ -697,13 +697,13 @@ static inline void MLSnapshot_Populate(MLSnapshot *snap, const PortfolioControll
     snap->foxml_vol_scale = ctrl->foxml_vol_scale;
     snap->confidence = ctrl->last_confidence;
     snap->cost_gate_enabled = BITMAP_IS_SET(ctrl->config.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED);
-    snap->foxml_vol_scaling_enabled = ctrl->config.foxml_vol_scaling_enabled;
-    snap->confidence_enabled = ctrl->config.confidence_enabled;
-    snap->bandit_enabled = ctrl->config.bandit_enabled;
+    snap->foxml_vol_scaling_enabled = BITMAP_IS_SET(ctrl->config.ml_cfg_flags, MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED);
+    snap->confidence_enabled = BITMAP_IS_SET(ctrl->config.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED);
+    snap->bandit_enabled = BITMAP_IS_SET(ctrl->config.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED);
 
     // bandit detail
     snap->bandit_total_steps = ctrl->bandit.total_steps;
-    if (ctrl->config.bandit_enabled) {
+    if (BITMAP_IS_SET(ctrl->config.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) {
         snap->bandit_blend = Bandit_EffectiveBlend(&ctrl->bandit);
         snap->bandit_active = (ctrl->bandit.total_steps >= ctrl->bandit.min_samples) ? 1 : 0;
         double bw[BANDIT_MAX_ARMS], bp[BANDIT_MAX_ARMS];

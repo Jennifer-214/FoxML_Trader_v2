@@ -387,7 +387,7 @@ static inline void ConfidenceScorer_InitComposite(ConfidenceScorer *cs,
 // Caller pattern (3 boot sites: EngineSharded, ControllerEventLoop, PortfolioController):
 //   ConfidenceScorer_Init(&cs, window, base_tau);
 //   ConfidenceScorer_BindCompositeCfg(&cs,
-//       cfg.confidence_composite_enabled,
+//       BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED),
 //       FPN_ToDouble(cfg.confidence_freshness_tau_secs),
 //       FPN_ToDouble(cfg.confidence_capacity_target_dollars),
 //       FPN_ToDouble(cfg.confidence_capacity_kappa),

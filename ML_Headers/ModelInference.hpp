@@ -1242,8 +1242,9 @@ struct ModelStampResult {
     // === FOREACH_STAMP_BOUND_CFG fields (sister registry; v5.14.1.B.3 X-macro driven) ===
     // Each field has a uint8_t has_<name> Surface G forward-compat flag
     // (per-entry semantics; sister registry uses per-entry has_*, not group-bit).
-    #define X(name, type, fmt, default_val, get_cfg_expr, emit_when)  \
-        uint8_t has_##name;                                             \
+    // v5.14.9.F.2 — 7-arg X macro signature (emit_source col added; unused for struct gen)
+    #define X(name, type, fmt, default_val, get_cfg_expr, emit_when, emit_source) \
+        uint8_t has_##name;                                                       \
         type name;
     FOREACH_STAMP_BOUND_CFG(X)
     #undef X
@@ -1524,10 +1525,11 @@ inline ModelStampResult verify_model_stamp(const char* model_path,
             // v5.14.1.B.3 — X-macro-driven parser branches (positions 24+).
             // Each X expands to one `else if (strcmp(key, "<name>") == 0)`
             // branch that uses the type-dispatched STAMP_CFG_PARSE macro.
-            #define X(name, type, fmt, default_val, get_cfg_expr, emit_when)  \
-                else if (strcmp(key, #name) == 0) {                            \
-                    r.name = (type)(STAMP_CFG_PARSE(type, val));               \
-                    r.has_##name = 1;                                          \
+            // v5.14.9.F.2 — 7-arg X macro signature (emit_source col added; unused for parser)
+            #define X(name, type, fmt, default_val, get_cfg_expr, emit_when, emit_source) \
+                else if (strcmp(key, #name) == 0) {                                       \
+                    r.name = (type)(STAMP_CFG_PARSE(type, val));                          \
+                    r.has_##name = 1;                                                     \
                 }
             FOREACH_STAMP_BOUND_CFG(X)
             #undef X
@@ -1767,8 +1769,9 @@ struct StampInferenceCfgInputs {
     #undef X
 
     // === FOREACH_STAMP_BOUND_CFG fields (sister registry; per-entry has_*) ===
-    #define X(name, type, fmt, default_val, get_cfg_expr, emit_when)  \
-        int  has_##name;                                                \
+    // v5.14.9.F.2 — 7-arg X macro signature (emit_source col added; unused for struct gen)
+    #define X(name, type, fmt, default_val, get_cfg_expr, emit_when, emit_source) \
+        int  has_##name;                                                          \
         type name;
     FOREACH_STAMP_BOUND_CFG(X)
     #undef X
@@ -1907,11 +1910,13 @@ inline StampWriteResult stamp_write_for_model(const char* model_path,
     // emit block. Surface G discipline: legacy callers (which leave
     // inf->has_<name>=0) emit nothing → canonical body stays
     // bytewise-identical to pre-v5.14.1.B.3 stamps.
-    #define X(name, type, fmt, default_val, get_cfg_expr, emit_when)            \
-        if (inf && inf->has_##name && n > 0 && (size_t)n < sizeof(canonical)) { \
-            int wrote = snprintf(canonical + n, sizeof(canonical) - n,          \
-                #name "=" fmt "\n", inf->name);                                 \
-            if (wrote > 0) n += wrote;                                          \
+    // v5.14.9.F.2 — 7-arg X macro signature (emit_source col added; unused for emit — wire bytes
+    // are read from inf->name struct field, populated by AUTOPOPULATE which dispatched by emit_source)
+    #define X(name, type, fmt, default_val, get_cfg_expr, emit_when, emit_source) \
+        if (inf && inf->has_##name && n > 0 && (size_t)n < sizeof(canonical)) {   \
+            int wrote = snprintf(canonical + n, sizeof(canonical) - n,            \
+                #name "=" fmt "\n", inf->name);                                   \
+            if (wrote > 0) n += wrote;                                            \
         }
     FOREACH_STAMP_BOUND_CFG(X)
     #undef X

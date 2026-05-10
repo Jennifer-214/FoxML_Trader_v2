@@ -492,7 +492,7 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
                     cfg_chb);
                 ++tier2_count;
             }
-            if (h->has_stamp_bandit && cfg.bandit_enabled) {
+            if (h->has_stamp_bandit && BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) {
                 double cfg_bbr = FPN_ToDouble(cfg.bandit_blend_ratio);
                 if (fabs(h->stamp_inf_bandit_blend_ratio - cfg_bbr) > 1e-6) {
                     fprintf(stderr,
@@ -618,7 +618,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 break;
             }
         }
-        if (any_ladder_active && cfg.confidence_composite_enabled == 0) {
+        if (any_ladder_active && BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED) == 0) {
             const char* origin = (active_core_id < 0) ? "global cfg"
                                                        : "per-core override";
             fprintf(stderr,
@@ -1266,9 +1266,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                   (int)cfg.confidence_window,
                                   CONFIDENCE_FRESHNESS_TAU_DEFAULT);
             // v5.14.1.B.1 (PARITY-003) — push composite cfg into scorer.
-            // No-op when cfg.confidence_composite_enabled=0 (legacy path).
+            // No-op when BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED)=0 (legacy path).
             ConfidenceScorer_BindCompositeCfg(&state.cores[i].confidence,
-                cfg.confidence_composite_enabled,
+                BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED),
                 FPN_ToDouble(cfg.confidence_freshness_tau_secs),
                 FPN_ToDouble(cfg.confidence_capacity_target_dollars),
                 FPN_ToDouble(cfg.confidence_capacity_kappa),
@@ -2480,7 +2480,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                  cfg.confidence_ic_floor_window,
                                  cfg.auto_kill_on_drift,
                                  // v5.13.4 — sell-side bandit attribution
-                                 cfg.exit_bandit_enabled,
+                                 BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED),
                                  FPN_ToDouble(cfg.fee_rate_taker));
     };
 
@@ -3111,13 +3111,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
                     // === v5.13.0.B — sell-side ML exit-prediction submit ===
                     // RebuildOneCore wrote state.cores[c].last_exit_prediction
-                    // (when cfg.use_exit_model && exit_predictor models loaded).
+                    // (when BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL) && exit_predictor models loaded).
                     // If above threshold and any positions are open on this
                     // core's slot(s), fire MARKET_SELL via OMS_PushSubmit and
                     // mark per-slot last_exit_was_predicted for v5.13.4 reward
                     // attribution. Default cfg path (use_exit_model=0): the
                     // last_exit_prediction stays 0.0 → ~5ns flag check + skip.
-                    if (cfg.use_exit_model
+                    if (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL)
                         && state.cores[c].last_exit_prediction
                            > FPN_ToDouble(cfg.exit_threshold)
                         && price_d > 0.01) {

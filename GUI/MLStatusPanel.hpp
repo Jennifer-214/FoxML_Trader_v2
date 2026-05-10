@@ -170,7 +170,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                 }
 
                 // v5.13.6.A — sell-side ML prediction display. Renders
-                // when exit_predictor models loaded + cfg.use_exit_model=1
+                // when exit_predictor models loaded + BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL)=1
                 // (signaled by ml_last_exit_prediction > 0). Operator sees
                 // real-time exit-prob per core; closes parity Section J
                 // observability gap. Threshold display (cfg.exit_threshold)

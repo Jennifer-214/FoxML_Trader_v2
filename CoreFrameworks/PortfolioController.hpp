@@ -403,7 +403,7 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
   // Legacy single_core path is deprecated but still init-aligned with
   // sharded engine for parity-test scenarios.
   ConfidenceScorer_BindCompositeCfg(&ctrl->confidence,
-      config.confidence_composite_enabled,
+      BITMAP_IS_SET(config.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED),
       FPN_ToDouble(config.confidence_freshness_tau_secs),
       FPN_ToDouble(config.confidence_capacity_target_dollars),
       FPN_ToDouble(config.confidence_capacity_kappa),
@@ -612,7 +612,7 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
 
     // feed confidence scorer: (entry_prediction, actual_outcome)
     // actual = 1.0 if profitable, 0.0 if not (matches binary classification target)
-    if (ctrl->config.confidence_enabled && strat == STRATEGY_ML) {
+    if (BITMAP_IS_SET(ctrl->config.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED) && strat == STRATEGY_ML) {
         double pred = ctrl->entry_prediction[slot];
         double actual = (!pos_pnl.sign & !FPN_IsZero(pos_pnl)) ? 1.0 : 0.0;
         // v5.14.1.B.1 (PARITY-002) — UpdateAndMark sets RollingFreshness so
@@ -626,7 +626,7 @@ inline void RecordExit(PortfolioController<F> *ctrl, ExitRecord<F> *rec) {
     }
 
     // feed bandit learner: update arm = entry strategy, reward = P&L in bps
-    if (ctrl->config.bandit_enabled && strat >= 0 && strat < NUM_STRATEGIES) {
+    if (BITMAP_IS_SET(ctrl->config.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED) && strat >= 0 && strat < NUM_STRATEGIES) {
         double entry_d = FPN_ToDouble(rec->entry_price);
         double reward_bps = (entry_d > 0.0) ? (FPN_ToDouble(pos_pnl) / entry_d) * 10000.0 : 0.0;
         Bandit_Update(&ctrl->bandit, strat, reward_bps);
@@ -1223,7 +1223,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
 
     // FOXML VOL SCALER: apply slow-path precomputed inverse-vol scale
     // separate from vol_sizing — uses VolScaler's alpha/vol formula instead of stddev ratio
-    if (ctrl->config.foxml_vol_scaling_enabled) {
+    if (BITMAP_IS_SET(ctrl->config.ml_cfg_flags, MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED)) {
       sized_qty = FPN_Mul(sized_qty, FPN_FromDouble<F>(ctrl->foxml_vol_scale));
     }
 
@@ -1739,7 +1739,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
 
         // bandit blending: blend regime's one-hot pick with learned weights
         // argmax of blended weights = final strategy choice
-        if (ctrl->config.bandit_enabled && Bandit_EffectiveBlend(&ctrl->bandit) > 0.0) {
+        if (BITMAP_IS_SET(ctrl->config.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED) && Bandit_EffectiveBlend(&ctrl->bandit) > 0.0) {
           double static_w[BANDIT_MAX_ARMS] = {0};
           if (regime_pick >= 0 && regime_pick < NUM_STRATEGIES)
             static_w[regime_pick] = 1.0;
@@ -1799,7 +1799,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // KNOWN FPN-only violation: this formula is in `double` because the existing
   // ConfidenceScorer is double-only. Documented in CLAUDE.md "FPN-Only
   // Accounting / Known violations to fix".
-  if (ctrl->config.confidence_enabled && ctrl->strategy_id == STRATEGY_ML
+  if (BITMAP_IS_SET(ctrl->config.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED) && ctrl->strategy_id == STRATEGY_ML
       && !FPN_IsZero(ctrl->buy_conds.price)) {
     double conf = ConfidenceScorer_Compute(&ctrl->confidence, 0.0); // data_age=0 (live)
     ctrl->last_confidence = conf;
@@ -1886,7 +1886,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // VOL SCALER: precompute inverse-vol position scale factor for fill-time use
   // VolScaler_Size(alpha, vol, z_max, max_weight) — alpha/vol clipped to z_max, scaled to [0, max_weight]
   // uses TP target as alpha proxy: high vol relative to TP = smaller position
-  if (ctrl->config.foxml_vol_scaling_enabled
+  if (BITMAP_IS_SET(ctrl->config.ml_cfg_flags, MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED)
       && !FPN_IsZero(ctrl->rolling.price_avg) && !FPN_IsZero(ctrl->rolling.price_stddev)) {
     double vol = FPN_ToDouble(ctrl->rolling.price_stddev) / FPN_ToDouble(ctrl->rolling.price_avg);
     double alpha = FPN_ToDouble(ctrl->config.take_profit_pct); // TP target as expected return

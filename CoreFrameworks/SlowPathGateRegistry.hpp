@@ -70,15 +70,15 @@ namespace tt {
     /* === PER_CORE — checked in ML_BuildParameters body; uses resolved_cfg === */                  \
     /* v5.14.9.A — soft risk degradation ladder. Composite must be on */                            \
     X(PER_CORE,    LADDER_ACTIVE,                                                                    \
-      ((_gate_cfg).risk_degradation_curve != CURVE_OFF) && ((_gate_cfg).confidence_composite_enabled != 0),    \
+      ((_gate_cfg).risk_degradation_curve != CURVE_OFF) && BITMAP_IS_SET((_gate_cfg).ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED), \
       "soft risk degradation ladder (curve != OFF AND composite required)")                         \
-    /* Pre-v5.14.x — confidence-damped threshold */                                                  \
+    /* Pre-v5.14.x — confidence-damped threshold (v5.14.9.F.2 migrated to ml_cfg_flags) */          \
     X(PER_CORE,    CONFIDENCE_ENABLED,                                                               \
-      (_gate_cfg).confidence_enabled != 0,                                                                 \
+      BITMAP_IS_SET((_gate_cfg).ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED),                       \
       "scale entry threshold by confidence")                                                         \
-    /* v5.14.1.B — composite (4-factor) vs legacy (3-factor) confidence */                         \
+    /* v5.14.1.B — composite (4-factor) vs legacy (3-factor) confidence (v5.14.9.F.2 migrated) */   \
     X(PER_CORE,    COMPOSITE_ENABLED,                                                                \
-      (_gate_cfg).confidence_composite_enabled != 0,                                                       \
+      BITMAP_IS_SET((_gate_cfg).ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED),             \
       "use 4-factor composite confidence formula (vs legacy 3-factor)")                             \
     /* v5.14.0 — Ridge within-horizon blend */                                                      \
     X(PER_CORE,    RIDGE_WITHIN_ACTIVE,                                                              \
@@ -91,7 +91,7 @@ namespace tt {
     /* === ENGINE_WIDE — checked in engine-wide outer / function-entry; uses global cfg === */     \
     /* v5.12.2.B — lazy slow-path rebuild predicate (function-entry of EventLoop_RebuildOneCore) */ \
     X(ENGINE_WIDE, LAZY_REBUILD_ACTIVE,                                                              \
-      (_gate_cfg).lazy_rebuild_enabled != 0,                                                               \
+      BITMAP_IS_SET((_gate_cfg).ml_cfg_flags, MASK_ML_CFG_LAZY_REBUILD_ENABLED),                     \
       "skip RebuildOneCore body when state hasn't changed materially")                              \
     /* v5.12.1.A — WS staleness emergency-flatten (engine-wide outer) */                            \
     X(ENGINE_WIDE, WS_FLATTEN_ACTIVE,                                                                \

@@ -1160,7 +1160,7 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
             FPN_ToDouble(data->config_used.held_out_fraction);
         // v5.14.9.D — DELETED inference_cfg_freshness_tau setter
         // (TECH_DEBT-004 close); cfg field + stamp body entry deleted.
-        if (data->config_used.bandit_enabled) {
+        if (BITMAP_IS_SET(data->config_used.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) {
             STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
             inf.inference_cfg_bandit_blend_ratio =
                 FPN_ToDouble(data->config_used.bandit_blend_ratio);

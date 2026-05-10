@@ -124,7 +124,7 @@ struct CoreSlowState {
     // v5.12.2.B — lazy slow-path rebuild bookkeeping. Updated at the
     // END of every full RebuildOneCore execution. The next RebuildOneCore
     // call uses these to decide whether to skip the rebuild body when:
-    //   (a) cfg.lazy_rebuild_enabled = 1 AND
+    //   (a) BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_LAZY_REBUILD_ENABLED) = 1 AND
     //   (b) (now_us - us_at_last_rebuild) < cfg.lazy_rebuild_force_period_us AND
     //   (c) |price_avg - price_at_last_rebuild| / price_at_last_rebuild
     //       < cfg.lazy_rebuild_price_threshold_pct
@@ -230,7 +230,7 @@ struct CoreContext {
     // by ShardedSnapshot for ML Status panel display.
     double last_confidence_factor;
     // v5.13.0.B — sell-side ML prediction. Written by ML_BuildParameters
-    // when cfg.use_exit_model && exit_predictor_count > 0. Slow-path body
+    // when BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL) && exit_predictor_count > 0. Slow-path body
     // post-RebuildOneCore checks against cfg.exit_threshold and fires
     // OMS_PushSubmit for any open positions on this core's slot(s).
     // Default 0.0 = no exit prediction this cycle. Reset each cycle.
@@ -1430,7 +1430,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // v5.13.4 — sell-side bandit reward attribution. Per-LEG (not
         // leg-A only) since each slot's exit decision is independent
         // under partials. Conditions for crediting exit_bandit:
-        //   1. cfg.exit_bandit_enabled
+        //   1. BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED)
         //   2. per-slot last_exit_was_predicted captured at submit
         //   3. NOT a flatten-induced safety event (don't pollute bandit
         //      with non-strategic exits)
@@ -2016,7 +2016,7 @@ inline void EventLoop_RebuildOneCore(
     // v5.12.2.B — lazy rebuild predicate. Evaluated at function entry so
     // we skip the heavy body when slow_state hasn't changed materially
     // since last rebuild. Three escape clauses force a full rebuild:
-    //   (1) MASK_LAZY_REBUILD_ACTIVE off (cfg.lazy_rebuild_enabled=0; default; preserves baseline)
+    //   (1) MASK_LAZY_REBUILD_ACTIVE off (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_LAZY_REBUILD_ENABLED)=0; default; preserves baseline)
     //   (2) caller didn't pass now_us (legacy + test path) — can't time-bound
     //   (3) sst is null OR last_rebuild bookkeeping is unset (warmup)
     // Otherwise check the time-bound + price-delta predicates.
@@ -2371,7 +2371,7 @@ inline void EventLoop_RebuildOneCore(
             ml_ctx.turnover_topk  = resolved_cfg.confidence_turnover_topk;
             // v5.13.0.B — sell-side ML wiring. Reset per-cycle; ML_Build-
             // Parameters writes the blended exit_predictor probability when
-            // cfg.use_exit_model && exit_predictor_count > 0. Slow-path body
+            // BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL) && exit_predictor_count > 0. Slow-path body
             // post-RebuildOneCore reads + acts on the value (fires OMS submit
             // if above cfg.exit_threshold and any positions are open).
             state->cores[slot].last_exit_prediction       = 0.0;

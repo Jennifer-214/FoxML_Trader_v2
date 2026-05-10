@@ -105,7 +105,7 @@ struct MLBuildContext {
     double*             out_prediction;
     double*             out_confidence;
     // v5.13.0.B — sell-side ML prediction. ML_BuildParameters writes the
-    // blended exit_predictor probability here when cfg.use_exit_model &&
+    // blended exit_predictor probability here when BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL) &&
     // ezoo->exit_predictor_count > 0. Slow-path body post-RebuildOneCore
     // reads + acts on it (fires OMS submit if above cfg.exit_threshold and
     // any positions are open). nullptr-safe: legacy callers without sell-
@@ -1068,7 +1068,7 @@ inline void ML_BuildParameters(
 
     // v5.13.0.B — sell-side prediction (Path 3 architecture). Runs once
     // per slow-path rebuild when:
-    //   1. cfg.use_exit_model = 1 (operator opt-in)
+    //   1. BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL) = 1 (operator opt-in)
     //   2. ezoo->exit_predictor_count > 0 (models loaded)
     //   3. mctx->out_exit_prediction != nullptr (slow-path body wired)
     //
@@ -1080,7 +1080,7 @@ inline void ML_BuildParameters(
     // Hot path UNTOUCHED. Default cfg (use_exit_model=0): ~5ns flag check.
     EnsembleModelZoo<F>* ezoo_ex = (EnsembleModelZoo<F>*)
         (mctx ? mctx->ensemble_zoo : nullptr);
-    if (config->use_exit_model
+    if (BITMAP_IS_SET(config->ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL)
         && ezoo_ex
         && ezoo_ex->exit_predictor_count > 0
         && mctx
@@ -1252,7 +1252,7 @@ inline void ML_BuildParameters(
     // when wired; fall back to inline cfg-flag for legacy/test callers.
     bool _conf_gate = gate_state
         ? BITMAP_IS_SET(gate_state->flags, MASK_CONFIDENCE_ENABLED)
-        : (config->confidence_enabled != 0);
+        : (BITMAP_IS_SET(config->ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED) != 0);
     if (_conf_gate && conf_scorer) {
         // v5.14.1.B — cfg-gated swap to 4-factor composite confidence.
         // Default (composite_enabled=0) preserves bytewise-identical
@@ -1261,7 +1261,7 @@ inline void ML_BuildParameters(
         // v5.14.9.B.0 — read composite_enabled gate from cached state when wired
         bool _comp_gate = gate_state
             ? BITMAP_IS_SET(gate_state->flags, MASK_COMPOSITE_ENABLED)
-            : (config->confidence_composite_enabled != 0);
+            : (BITMAP_IS_SET(config->ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED) != 0);
         if (_comp_gate) {
             // v5.14.1.B.2 (PARITY-001) — now_us passed in by caller. Live:
             // clock_gettime at slow-path entry (non-deterministic OK; live
@@ -1652,7 +1652,7 @@ inline void Strategy_BuildParameters(
     // VolScaler: shrink trade_size in high-volatility regimes. Uses
     // alpha=tp_pct and vol=stddev/price; weight in [0, 1] that scales
     // the existing trade_size down (never up — never increases risk).
-    if (config->foxml_vol_scaling_enabled && !FPN_IsZero(out->trade_size) &&
+    if (BITMAP_IS_SET(config->ml_cfg_flags, MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED) && !FPN_IsZero(out->trade_size) &&
         !FPN_IsZero(out->tp_pct) && rolling) {
         double price = FPN_ToDouble(rolling->price_avg);
         double rel_vol = (price > 0.01)

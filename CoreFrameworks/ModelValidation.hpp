@@ -212,7 +212,7 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
                     cfg_chb);
                 ++tier2_count;
             }
-            if (h->has_stamp_bandit && cfg.bandit_enabled) {
+            if (h->has_stamp_bandit && BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) {
                 double cfg_bbr = FPN_ToDouble(cfg.bandit_blend_ratio);
                 if (fabs(h->stamp_inf_bandit_blend_ratio - cfg_bbr) > 1e-6) {
                     fprintf(stderr,

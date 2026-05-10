@@ -705,7 +705,7 @@ static inline void TUI_CopySnapshotSharded(
     // Phase 6prep sharded c16: populate s->ml.* from the headline ML core.
     // GUI_Panel_MLIntelligence renders this single-core view; per-core detail
     // goes through the new per-core section.
-    snap->ml.confidence_enabled = cfg->confidence_enabled ? 1 : 0;
+    snap->ml.confidence_enabled = BITMAP_IS_SET(cfg->ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED) ? 1 : 0;
     snap->ml.ml_model_loaded    = any_model_loaded;
     if (headline_ml_core >= 0) {
         const auto& core_pc = snap->per_core[headline_ml_core];

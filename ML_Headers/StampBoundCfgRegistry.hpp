@@ -84,60 +84,72 @@
 // populator. Auto-populate makes forgetting impossible.
 //======================================================================================================
 
-#define FOREACH_STAMP_BOUND_CFG(X)                                                                  \
-    /* v5.14.1.B.3 — Ridge risk-parity blending (PARITY-004) */                                     \
-    /* emit_when: any Ridge mode enabled */                                                          \
-    X(ridge_within_horizon,                int,    "%d",     0,   cfg.ridge_within_horizon,         \
-        (cfg.ridge_within_horizon || cfg.ridge_across_horizons))                                     \
-    X(ridge_across_horizons,               int,    "%d",     0,   cfg.ridge_across_horizons,        \
-        (cfg.ridge_within_horizon || cfg.ridge_across_horizons))                                     \
-    X(ridge_lambda,                        double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_lambda),   \
-        (cfg.ridge_within_horizon || cfg.ridge_across_horizons))                                     \
-    X(ridge_cost_penalty,                  double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_cost_penalty),     \
-        (cfg.ridge_within_horizon || cfg.ridge_across_horizons))                                     \
-    X(ridge_min_ic_floor,                  double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_min_ic_floor),     \
-        (cfg.ridge_within_horizon || cfg.ridge_across_horizons))                                     \
-    /* v5.14.1.B.3 — Composite confidence (PARITY-005) */                                           \
-    /* emit_when: composite enabled */                                                               \
-    X(confidence_composite_enabled,        int,    "%d",     0,   cfg.confidence_composite_enabled, \
-        (cfg.confidence_composite_enabled != 0))                                                     \
-    X(confidence_freshness_tau_secs,       double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_freshness_tau_secs),     \
-        (cfg.confidence_composite_enabled != 0))                                                     \
-    X(confidence_capacity_target_dollars,  double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_capacity_target_dollars),\
-        (cfg.confidence_composite_enabled != 0))                                                     \
-    X(confidence_capacity_kappa,           double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_capacity_kappa),         \
-        (cfg.confidence_composite_enabled != 0))                                                     \
-    X(confidence_rmse_baseline,            double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_rmse_baseline),         \
-        (cfg.confidence_composite_enabled != 0))                                                     \
-    /* v5.14.1.D — Feature winsorization (PARITY drift detection) */                                  \
-    /* emit_when: cfg has valid winsor range (low > 0 AND high < 1 AND low < high) */               \
-    X(winsor_pct_low,                      double, "%.17g",  0.0, FPN_ToDouble(cfg.winsor_pct_low),                  \
-        (FPN_ToDouble(cfg.winsor_pct_low) > 0.0 && FPN_ToDouble(cfg.winsor_pct_high) < 1.0 &&        \
-         FPN_ToDouble(cfg.winsor_pct_low) < FPN_ToDouble(cfg.winsor_pct_high)))                      \
-    X(winsor_pct_high,                     double, "%.17g",  0.0, FPN_ToDouble(cfg.winsor_pct_high),                 \
-        (FPN_ToDouble(cfg.winsor_pct_low) > 0.0 && FPN_ToDouble(cfg.winsor_pct_high) < 1.0 &&        \
-         FPN_ToDouble(cfg.winsor_pct_low) < FPN_ToDouble(cfg.winsor_pct_high)))                      \
-    /* v5.14.1.E — Exit-side blender selector (PARITY drift detection) */                             \
-    X(exit_blender_mode,                   int,    "%d",     0,   cfg.exit_blender_mode,            \
-        (cfg.exit_blender_mode != 0))                                                                 \
-    /* v5.14.9.C — Soft risk degradation ladder (4 fields). emit_when: ladder enabled. */            \
-    /* When operator activates the ladder (curve != OFF), the cfg values determine               */ \
-    /* sizing behavior. Stamp them so engine boot detects training/inference drift via the        */ \
-    /* same v5.14.1 mechanism that closed PARITY-005 for composite confidence.                    */ \
-    X(risk_degradation_curve,              int,    "%d",     0,   cfg.risk_degradation_curve,      \
-        (cfg.risk_degradation_curve != 0))                                                            \
-    X(risk_full_size_threshold,            double, "%.17g",  0.0, FPN_ToDouble(cfg.risk_full_size_threshold), \
-        (cfg.risk_degradation_curve != 0))                                                            \
-    X(risk_min_size_threshold,             double, "%.17g",  0.0, FPN_ToDouble(cfg.risk_min_size_threshold), \
-        (cfg.risk_degradation_curve != 0))                                                            \
-    X(risk_min_size_pct,                   double, "%.17g",  0.0, FPN_ToDouble(cfg.risk_min_size_pct), \
-        (cfg.risk_degradation_curve != 0))                                                            \
-    /* v5.14.2.E.2 — expected.cfg → stamp body migration. Always emit          */                     \
-    /* (model trained with these values; engine compares at load).             */                     \
-    X(ml_buy_threshold,                    double, "%.17g",  0.0, FPN_ToDouble(cfg.ml_buy_threshold),\
-        1)                                                                                            \
-    X(gap_acceptable_threshold,            double, "%.17g",  0.0, FPN_ToDouble(cfg.gap_acceptable_threshold), \
-        1)
+// v5.14.9.F.2 — Tuple extended 6-col → 7-col. New `emit_source` column is a TOKEN
+// (DIRECT_FIELD or BITMAP_BIT) consumed by Y3 token-paste dispatch in STAMP_CFG_AUTOPOPULATE_ONE.
+// Most entries are DIRECT_FIELD (get_cfg reads cfg field verbatim). BITMAP_BIT entries
+// have get_cfg as a bitmap-extract expression. Both dispatch paths produce identical wire
+// bytes today (per heterogeneous-registry-pattern.md Form 3 worked example); future
+// emit_source values (e.g., COMPUTED_FROM_GROUP) can have genuinely different handler bodies.
+// Adding a new emit_source = ONE new HANDLE_STAMP_EMIT_<MARKER> macro; existing entries unchanged.
+//
+// Consumers that walk FOREACH_STAMP_BOUND_CFG with their own X macros now accept 7-arg
+// signature with `emit_source` as 7th arg (may be unused). Updated consumers:
+// CoreModelZoo.hpp (drift check), ModelInference.hpp (struct gen × 2, parser, emit walk).
+
+#define FOREACH_STAMP_BOUND_CFG(X)                                                                                                                          \
+    /* v5.14.1.B.3 — Ridge risk-parity blending (PARITY-004) */                                                                                              \
+    /* emit_when: any Ridge mode enabled */                                                                                                                  \
+    X(ridge_within_horizon,                int,    "%d",     0,   cfg.ridge_within_horizon,                                                                  \
+        (cfg.ridge_within_horizon || cfg.ridge_across_horizons), DIRECT_FIELD)                                                                               \
+    X(ridge_across_horizons,               int,    "%d",     0,   cfg.ridge_across_horizons,                                                                 \
+        (cfg.ridge_within_horizon || cfg.ridge_across_horizons), DIRECT_FIELD)                                                                               \
+    X(ridge_lambda,                        double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_lambda),                                                            \
+        (cfg.ridge_within_horizon || cfg.ridge_across_horizons), DIRECT_FIELD)                                                                               \
+    X(ridge_cost_penalty,                  double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_cost_penalty),                                                      \
+        (cfg.ridge_within_horizon || cfg.ridge_across_horizons), DIRECT_FIELD)                                                                               \
+    X(ridge_min_ic_floor,                  double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_min_ic_floor),                                                      \
+        (cfg.ridge_within_horizon || cfg.ridge_across_horizons), DIRECT_FIELD)                                                                               \
+    /* v5.14.1.B.3 — Composite confidence (PARITY-005) */                                                                                                    \
+    /* emit_when: composite enabled */                                                                                                                       \
+    /* v5.14.9.F.2 — confidence_composite_enabled migrated to ml_cfg_flags bitmap. */                                                                        \
+    /*               get_cfg + emit_when read via BITMAP_IS_SET → produce identical wire bytes. */                                                           \
+    /*               emit_source=BITMAP_BIT (Y3 dispatch shape per heterogeneous-registry-pattern.md). */                                                    \
+    X(confidence_composite_enabled,        int,    "%d",     0,                                                                                              \
+        (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED) ? 1 : 0),                                                                  \
+        BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED), BITMAP_BIT)                                                               \
+    X(confidence_freshness_tau_secs,       double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_freshness_tau_secs),                                           \
+        BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED), DIRECT_FIELD)                                                              \
+    X(confidence_capacity_target_dollars,  double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_capacity_target_dollars),                                      \
+        BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED), DIRECT_FIELD)                                                              \
+    X(confidence_capacity_kappa,           double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_capacity_kappa),                                               \
+        BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED), DIRECT_FIELD)                                                              \
+    X(confidence_rmse_baseline,            double, "%.17g",  0.0, FPN_ToDouble(cfg.confidence_rmse_baseline),                                                \
+        BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED), DIRECT_FIELD)                                                              \
+    /* v5.14.1.D — Feature winsorization (PARITY drift detection) */                                                                                         \
+    /* emit_when: cfg has valid winsor range (low > 0 AND high < 1 AND low < high) */                                                                        \
+    X(winsor_pct_low,                      double, "%.17g",  0.0, FPN_ToDouble(cfg.winsor_pct_low),                                                          \
+        (FPN_ToDouble(cfg.winsor_pct_low) > 0.0 && FPN_ToDouble(cfg.winsor_pct_high) < 1.0 &&                                                                \
+         FPN_ToDouble(cfg.winsor_pct_low) < FPN_ToDouble(cfg.winsor_pct_high)), DIRECT_FIELD)                                                                \
+    X(winsor_pct_high,                     double, "%.17g",  0.0, FPN_ToDouble(cfg.winsor_pct_high),                                                         \
+        (FPN_ToDouble(cfg.winsor_pct_low) > 0.0 && FPN_ToDouble(cfg.winsor_pct_high) < 1.0 &&                                                                \
+         FPN_ToDouble(cfg.winsor_pct_low) < FPN_ToDouble(cfg.winsor_pct_high)), DIRECT_FIELD)                                                                \
+    /* v5.14.1.E — Exit-side blender selector (PARITY drift detection) */                                                                                    \
+    X(exit_blender_mode,                   int,    "%d",     0,   cfg.exit_blender_mode,                                                                     \
+        (cfg.exit_blender_mode != 0), DIRECT_FIELD)                                                                                                          \
+    /* v5.14.9.C — Soft risk degradation ladder (4 fields). emit_when: ladder enabled. */                                                                    \
+    X(risk_degradation_curve,              int,    "%d",     0,   cfg.risk_degradation_curve,                                                                \
+        (cfg.risk_degradation_curve != 0), DIRECT_FIELD)                                                                                                     \
+    X(risk_full_size_threshold,            double, "%.17g",  0.0, FPN_ToDouble(cfg.risk_full_size_threshold),                                                \
+        (cfg.risk_degradation_curve != 0), DIRECT_FIELD)                                                                                                     \
+    X(risk_min_size_threshold,             double, "%.17g",  0.0, FPN_ToDouble(cfg.risk_min_size_threshold),                                                 \
+        (cfg.risk_degradation_curve != 0), DIRECT_FIELD)                                                                                                     \
+    X(risk_min_size_pct,                   double, "%.17g",  0.0, FPN_ToDouble(cfg.risk_min_size_pct),                                                       \
+        (cfg.risk_degradation_curve != 0), DIRECT_FIELD)                                                                                                     \
+    /* v5.14.2.E.2 — expected.cfg → stamp body migration. Always emit (model trained with these values). */                                                  \
+    X(ml_buy_threshold,                    double, "%.17g",  0.0, FPN_ToDouble(cfg.ml_buy_threshold),                                                        \
+        1, DIRECT_FIELD)                                                                                                                                     \
+    X(gap_acceptable_threshold,            double, "%.17g",  0.0, FPN_ToDouble(cfg.gap_acceptable_threshold),                                                \
+        1, DIRECT_FIELD)
 
 //======================================================================================================
 // [PARSER DISPATCH MACROS]
@@ -185,10 +197,25 @@
         _Pragma("GCC diagnostic pop")                                               \
     } while (0)
 
-#define STAMP_CFG_AUTOPOPULATE_ONE(name, type, fmt, default_val, get_cfg, emit_when) \
-    if (emit_when) {                                                                 \
-        (inf).has_##name = 1;                                                        \
-        (inf).name       = (type)(get_cfg);                                          \
+// v5.14.9.F.2 — Y3 dispatch: STAMP_CFG_AUTOPOPULATE_ONE token-pastes emit_source
+// to dispatch to the appropriate handler. Both handlers share body shape today
+// (snprintf with get_cfg expression); the registry tuple supports per-entry emit_source
+// (DIRECT_FIELD or BITMAP_BIT) so future emit_source values can have different bodies
+// without restructuring. Per DESIGN_SPECS/heterogeneous-registry-pattern.md Y3 dispatch canon.
+
+#define STAMP_CFG_AUTOPOPULATE_ONE(name, type, fmt, default_val, get_cfg, emit_when, emit_source) \
+    HANDLE_STAMP_EMIT_##emit_source(name, type, fmt, default_val, get_cfg, emit_when, emit_source)
+
+#define HANDLE_STAMP_EMIT_DIRECT_FIELD(name, type, fmt, default_val, get_cfg, emit_when, _src) \
+    if (emit_when) {                                                                            \
+        (inf).has_##name = 1;                                                                   \
+        (inf).name       = (type)(get_cfg);                                                     \
+    }
+
+#define HANDLE_STAMP_EMIT_BITMAP_BIT(name, type, fmt, default_val, get_cfg, emit_when, _src) \
+    if (emit_when) {                                                                          \
+        (inf).has_##name = 1;                                                                 \
+        (inf).name       = (type)(get_cfg);                                                   \
     }
 
 //======================================================================================================
@@ -199,7 +226,7 @@
 // registry" — catches accidental row deletion during refactors.
 //======================================================================================================
 
-#define STAMP_CFG_COUNT_ONE(name, type, fmt, default_val, get_cfg, emit_when) +1
+#define STAMP_CFG_COUNT_ONE(name, type, fmt, default_val, get_cfg, emit_when, emit_source) +1
 #define FOREACH_STAMP_BOUND_CFG_COUNT  (0 FOREACH_STAMP_BOUND_CFG(STAMP_CFG_COUNT_ONE))
 
 #endif // STAMP_BOUND_CFG_REGISTRY_HPP

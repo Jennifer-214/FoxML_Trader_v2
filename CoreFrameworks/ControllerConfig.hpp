@@ -16,6 +16,7 @@
 #include "../ML_Headers/ConfidenceScore.hpp"  // v5.14.9.A — DegradationCurve enum + ToString/FromString helpers
 #include "LifecycleCfgFlagRegistry.hpp"       // v5.14.9.F — FOREACH_LIFECYCLE_CFG_FLAG + MASK_LIFECYCLE_CFG_*
 #include "GateCfgFlagRegistry.hpp"            // v5.14.9.F.1 — FOREACH_GATE_CFG_FLAG + MASK_GATE_CFG_*
+#include "../ML_Headers/MlCfgFlagRegistry.hpp" // v5.14.9.F.2 — FOREACH_ML_CFG_FLAG + MASK_ML_CFG_*
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -385,8 +386,20 @@ template <unsigned F> struct ControllerConfig {
   //   cost_gate_enabled            → MASK_GATE_CFG_COST_GATE_ENABLED
   //   barrier_gate_enabled         → MASK_GATE_CFG_BARRIER_GATE_ENABLED (stamp-bound via FOREACH_STAMP_BOUND_MODEL_CONST)
   //   param_staleness_gate_enabled → MASK_GATE_CFG_PARAM_STALENESS_GATE_ENABLED
-  alignas(8) uint8_t lifecycle_cfg_flags;
-              uint8_t gate_cfg_flags;
+  //
+  // ML (v5.14.9.F.2): ML/confidence mechanics — see MlCfgFlagRegistry.hpp
+  //   confidence_enabled              → MASK_ML_CFG_CONFIDENCE_ENABLED
+  //   confidence_composite_enabled    → MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED
+  //                                      (stamp-bound via FOREACH_STAMP_BOUND_CFG with emit_source=BITMAP_BIT;
+  //                                       Y3 dispatch per heterogeneous-registry-pattern.md Form 3)
+  //   bandit_enabled                  → MASK_ML_CFG_BANDIT_ENABLED
+  //   exit_bandit_enabled             → MASK_ML_CFG_EXIT_BANDIT_ENABLED
+  //   use_exit_model                  → MASK_ML_CFG_USE_EXIT_MODEL
+  //   foxml_vol_scaling_enabled       → MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED
+  //   lazy_rebuild_enabled            → MASK_ML_CFG_LAZY_REBUILD_ENABLED
+  alignas(8) uint8_t  lifecycle_cfg_flags;
+              uint8_t  gate_cfg_flags;
+              uint16_t ml_cfg_flags;
   FPN<F>
       partial_exit_pct; // fraction to exit at TP1 (0.5 = 50%, rest rides TP2)
   FPN<F> tp2_mult; // TP2 = TP1_distance * this (2.0 = double the TP distance)
@@ -539,7 +552,7 @@ template <unsigned F> struct ControllerConfig {
   // Pairs with: confidence_freshness_tau_secs (decay constant),
   // confidence_capacity_target_dollars (0=unbounded), confidence_rmse_baseline
   // (training-time RMSE for stability normalization).
-  int      confidence_composite_enabled;        // v5.14.1.B — 0=off, 1=composite
+  // confidence_composite_enabled migrated to ml_cfg_flags (v5.14.9.F.2; stamp-bound via FOREACH_STAMP_BOUND_CFG emit_source=BITMAP_BIT)
   FPN<F>   confidence_freshness_tau_secs;       // default 3600.0 (1 hour decay)
   FPN<F>   confidence_capacity_target_dollars;  // default 0.0 (unbounded)
   FPN<F>   confidence_capacity_kappa;           // default 0.1 (ADV proportionality)
@@ -564,7 +577,7 @@ template <unsigned F> struct ControllerConfig {
   // poll_interval cycles at default poll_interval=100). price_threshold_pct
   // is the per-tick price-delta threshold below which the slow-path cycle
   // is considered "no material change."
-  int      lazy_rebuild_enabled;             // 0=off (default), 1=on
+  // lazy_rebuild_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
   uint64_t lazy_rebuild_force_period_us;     // default 1_000_000 (1s)
   FPN<F>   lazy_rebuild_price_threshold_pct; // default 0.0005 (0.05%)
   // v5.12.2.D — Treelite AOT inference backend (INFRASTRUCTURE ONLY in
@@ -583,7 +596,7 @@ template <unsigned F> struct ControllerConfig {
   // AND position open for this core's slot, fires early market-exit
   // via OMS_PushSubmit. Default disabled; opt-in for paper-test.
   // Hot path UNTOUCHED.
-  int use_exit_model;                        // 0=off (default), 1=on
+  // use_exit_model migrated to ml_cfg_flags (v5.14.9.F.2)
   FPN<F> exit_threshold;                     // default 0.6 (60% blended exit prob)
   char exit_signal_model_dir[256];           // optional explicit dir; empty = auto-detect
   // v5.13.0.B — calibration log: every exit fill records the predicted
@@ -651,15 +664,15 @@ template <unsigned F> struct ControllerConfig {
   // disabled)
   // cost_gate_enabled migrated to gate_cfg_flags (v5.14.9.F.1) — original comment: 0=disabled, 1=estimate trade cost via CostModel,
                          // suppress if unprofitable
-  int foxml_vol_scaling_enabled;  // 0=disabled, 1=scale risk_pct by VolScaler
+  // foxml_vol_scaling_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
                                   // inverse-vol on slow path
   FPN<F> foxml_vol_scaling_z_max; // z-score clipping threshold for VolScaler
                                   // (default 3.0)
-  int bandit_enabled; // 0=disabled, 1=blend regime strategy with Exp3-IX bandit
+  // bandit_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
                       // weights
   FPN<F> bandit_blend_ratio; // bandit influence fraction at full ramp (default
                              // 0.30)
-  int confidence_enabled;    // 0=disabled, 1=dynamic ml_buy_threshold from
+  // confidence_enabled migrated to ml_cfg_flags (v5.14.9.F.2) — original comment: 0=disabled, 1=dynamic ml_buy_threshold from
                              // confidence scoring
   // Phase 6 prep — tunable confidence loop parameters. Defaults preserve the
   // pre-Phase-6prep hardcoded values. Only consulted when confidence_enabled=1.
@@ -1031,7 +1044,7 @@ template <unsigned F> struct ControllerConfig {
   // path unchanged). Reward formula: actual_pnl_bps - hypothetical_held-
   // to-TP_pnl_bps (optimistic; biases against exits — operator scales
   // via exit_bandit_lr until paper-test calibration suggests refinement).
-  int      exit_bandit_enabled;        // 0 (default), 1 = on
+  // exit_bandit_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
   double   exit_bandit_lr;             // bandit learning rate; default 0.1
   // v5.14.1.E — exit-side blender selector. Mirrors v5.14.0 buy-side
   // ridge_within_horizon. Enables Ridge blending across exit_predictor
@@ -1250,6 +1263,15 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
       /*cost_gate_enabled*/            0,
       /*barrier_gate_enabled*/         0,
       /*param_staleness_gate_enabled*/ 0);
+  // v5.14.9.F.2 — ml_cfg_flags defaults: all 7 flags off (backward compat)
+  ML_CFG_FLAG_AUTOPOPULATE_FROM_SEPTUPLE(cfg.ml_cfg_flags,
+      /*confidence_enabled*/           0,
+      /*confidence_composite_enabled*/ 0,
+      /*bandit_enabled*/               0,
+      /*exit_bandit_enabled*/          0,
+      /*use_exit_model*/               0,
+      /*foxml_vol_scaling_enabled*/    0,
+      /*lazy_rebuild_enabled*/         0);
   cfg.partial_exit_pct = FPN_FromDouble<F>(0.5); // 50% at TP1, 50% rides
   cfg.tp2_mult = FPN_FromDouble<F>(2.0);         // TP2 = 2x TP1 distance
   cfg.breakeven_buffer_pct =
@@ -1318,11 +1340,11 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.notify_cooldown_secs = 60;
   // FoxML integration — Phase 6C (all OFF by default, zero behavior change)
   // cost_gate_enabled migrated to gate_cfg_flags (default 0)
-  cfg.foxml_vol_scaling_enabled = 0;
+  // foxml_vol_scaling_enabled migrated to ml_cfg_flags (default 0)
   cfg.foxml_vol_scaling_z_max = FPN_FromDouble<F>(3.0);
-  cfg.bandit_enabled = 0;
+  // bandit_enabled migrated to ml_cfg_flags (default 0)
   cfg.bandit_blend_ratio = FPN_FromDouble<F>(0.30);
-  cfg.confidence_enabled = 0;
+  // confidence_enabled migrated to ml_cfg_flags (default 0)
   // Phase 6 prep — defaults match the pre-amend hardcoded values
   cfg.confidence_window           = 32;                          // CONFIDENCE_IC_WINDOW_DEFAULT
   // v5.14.9.D — DELETED cfg.confidence_freshness_tau default (TECH_DEBT-004 close).
@@ -1393,7 +1415,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.ensemble_bandit_eta = 0.1;
   cfg.ensemble_min_warmup_predictions = 100;
   // v5.13.4 — sell-side bandit defaults
-  cfg.exit_bandit_enabled = 0;
+  // exit_bandit_enabled migrated to ml_cfg_flags (default 0)
   // v5.14.1.E — exit-side blender default to bandit (pre-v5.14.1.E behavior).
   cfg.exit_blender_mode   = 0;
   // v5.14.1.F — Spearman default (only registered variant today).
@@ -1476,7 +1498,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // v5.14.1.B — composite confidence: disabled by default. Activates the
   // 4-factor formula (IC × Freshness × Capacity × Stability_normalized).
   // Defaults: 1 hour freshness decay, unbounded capacity, 1.0 rmse baseline.
-  cfg.confidence_composite_enabled        = 0;
+  // confidence_composite_enabled migrated to ml_cfg_flags (default 0; stamp-bound via FOREACH_STAMP_BOUND_CFG emit_source=BITMAP_BIT)
   cfg.confidence_freshness_tau_secs       = FPN_FromDouble<F>(3600.0);
   cfg.confidence_capacity_target_dollars  = FPN_FromDouble<F>(0.0);
   cfg.confidence_capacity_kappa           = FPN_FromDouble<F>(0.1);
@@ -1494,13 +1516,13 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.ridge_min_ic_floor    = FPN_FromDouble<F>(0.001);
   // v5.12.2.B — disabled by default; activate after parity-check confirms
   // regime histogram unchanged within tolerance under enabled mode.
-  cfg.lazy_rebuild_enabled = 0;
+  // lazy_rebuild_enabled migrated to ml_cfg_flags (default 0)
   cfg.lazy_rebuild_force_period_us = 1000000ULL;  // 1 second
   cfg.lazy_rebuild_price_threshold_pct = FPN_FromDouble<F>(0.0005);  // 0.05%
   // v5.12.2.D — disabled by default; operator opts in after tooling is wired.
   cfg.use_aot_inference = 0;
   // v5.13.0 — sell-side ML defaults: disabled; opt-in for paper-test.
-  cfg.use_exit_model = 0;
+  // use_exit_model migrated to ml_cfg_flags (default 0)
   cfg.exit_threshold = FPN_FromDouble<F>(0.6);
   cfg.exit_signal_model_dir[0] = '\0';
   cfg.calibration_log_path[0] = '\0';
@@ -1782,7 +1804,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       continue;
     }
     // v5.14.1.B — composite confidence
-    CFG_PARSE_INT(confidence_composite_enabled)
+    // confidence_composite_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
     if (strcmp(key, "confidence_freshness_tau_secs") == 0) {
       cfg.confidence_freshness_tau_secs = FPN_FromDouble<F>(atof(val));
       continue;
@@ -1824,7 +1846,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       continue;
     }
     // v5.12.2.B — lazy slow-path rebuild
-    CFG_PARSE_INT(lazy_rebuild_enabled)
+    // lazy_rebuild_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
     if (strcmp(key, "lazy_rebuild_force_period_us") == 0) {
       cfg.lazy_rebuild_force_period_us = (uint64_t)atoll(val);
       continue;
@@ -1836,7 +1858,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // v5.12.2.D — Treelite AOT backend opt-in (infrastructure-only)
     CFG_PARSE_INT(use_aot_inference)
     // v5.13.0 — sell-side ML opt-in (Path 3 architecture)
-    CFG_PARSE_INT(use_exit_model)
+    // use_exit_model migrated to ml_cfg_flags (v5.14.9.F.2)
     if (strcmp(key, "exit_threshold") == 0) {
       cfg.exit_threshold = FPN_FromDouble<F>(atof(val));
       continue;
@@ -1961,6 +1983,49 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       else   cfg.gate_cfg_flags &= (uint8_t)~MASK_GATE_CFG_PARAM_STALENESS_GATE_ENABLED;
       continue;
     }
+    // v5.14.9.F.2 — ml_cfg_flags bitmap (7 fields migrated; legacy keys preserved for back-compat)
+    if (strcmp(key, "confidence_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.ml_cfg_flags |=  MASK_ML_CFG_CONFIDENCE_ENABLED;
+      else   cfg.ml_cfg_flags &= (uint16_t)~MASK_ML_CFG_CONFIDENCE_ENABLED;
+      continue;
+    }
+    if (strcmp(key, "confidence_composite_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.ml_cfg_flags |=  MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED;
+      else   cfg.ml_cfg_flags &= (uint16_t)~MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED;
+      continue;
+    }
+    if (strcmp(key, "bandit_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.ml_cfg_flags |=  MASK_ML_CFG_BANDIT_ENABLED;
+      else   cfg.ml_cfg_flags &= (uint16_t)~MASK_ML_CFG_BANDIT_ENABLED;
+      continue;
+    }
+    if (strcmp(key, "exit_bandit_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.ml_cfg_flags |=  MASK_ML_CFG_EXIT_BANDIT_ENABLED;
+      else   cfg.ml_cfg_flags &= (uint16_t)~MASK_ML_CFG_EXIT_BANDIT_ENABLED;
+      continue;
+    }
+    if (strcmp(key, "use_exit_model") == 0) {
+      int v = atoi(val);
+      if (v) cfg.ml_cfg_flags |=  MASK_ML_CFG_USE_EXIT_MODEL;
+      else   cfg.ml_cfg_flags &= (uint16_t)~MASK_ML_CFG_USE_EXIT_MODEL;
+      continue;
+    }
+    if (strcmp(key, "foxml_vol_scaling_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.ml_cfg_flags |=  MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED;
+      else   cfg.ml_cfg_flags &= (uint16_t)~MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED;
+      continue;
+    }
+    if (strcmp(key, "lazy_rebuild_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.ml_cfg_flags |=  MASK_ML_CFG_LAZY_REBUILD_ENABLED;
+      else   cfg.ml_cfg_flags &= (uint16_t)~MASK_ML_CFG_LAZY_REBUILD_ENABLED;
+      continue;
+    }
     CFG_PARSE_PCT(breakeven_buffer_pct)
     // depth_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
     CFG_PARSE_INT(use_real_money)
@@ -2014,11 +2079,11 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 
     //--- FoxML integration (Phase 6C) ---
     // cost_gate_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
-    CFG_PARSE_INT(foxml_vol_scaling_enabled)
+    // foxml_vol_scaling_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
     CFG_PARSE_FPN(foxml_vol_scaling_z_max)
-    CFG_PARSE_INT(bandit_enabled)
+    // bandit_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
     CFG_PARSE_FPN(bandit_blend_ratio)
-    CFG_PARSE_INT(confidence_enabled)
+    // confidence_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
     CFG_PARSE_U32(confidence_window)
     // v5.14.9.D — DELETED legacy `confidence_freshness_tau` parser branch
     // (TECH_DEBT-004 close). Cfg field deleted; legacy 3-factor formula
@@ -2081,7 +2146,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     CFG_PARSE_INT(ensemble_min_warmup_predictions)
     // v5.13.4 — sell-side bandit
-    CFG_PARSE_INT(exit_bandit_enabled)
+    // exit_bandit_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
     // v5.14.1.E — exit-side blender selector (0=bandit, 1=Ridge)
     CFG_PARSE_INT(exit_blender_mode)
     // v5.14.1.F — IC variant selector

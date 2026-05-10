@@ -3920,7 +3920,7 @@ int main() {
         // Defaults from ControllerConfig_Default<F>()
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
         check("v5.14.1.C cfg default: confidence_composite_enabled = 0",
-              cfg.confidence_composite_enabled == 0);
+              BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED) == 0);
         check("v5.14.1.C cfg default: confidence_freshness_tau_secs = 3600.0",
               fabs(FPN_ToDouble(cfg.confidence_freshness_tau_secs) - 3600.0) < 1e-9);
         check("v5.14.1.C cfg default: confidence_capacity_target_dollars = 0.0",
@@ -3947,7 +3947,7 @@ int main() {
 
             ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmp_cfg);
             check("v5.14.1.C cfg parser: confidence_composite_enabled == 1",
-                  cfg.confidence_composite_enabled == 1);
+                  BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED) == 1);
             check("v5.14.1.C cfg parser: freshness_tau_secs ≈ 7200",
                   fabs(FPN_ToDouble(cfg.confidence_freshness_tau_secs) - 7200.0) < 1e-6);
             check("v5.14.1.C cfg parser: capacity_target_dollars ≈ 10000",
@@ -4348,7 +4348,7 @@ int main() {
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
         // Trigger all emit_when predicates:
         cfg.ridge_within_horizon = 1;             // Ridge block (5 fields)
-        cfg.confidence_composite_enabled = 1;     // Composite block (5 fields)
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);     // Composite block (5 fields)
         // Winsor: defaults (0.005/0.995) already trigger emit_when (low>0 && high<1)
         cfg.exit_blender_mode = 1;                // Exit blender (1 field)
         STAMP_CFG_AUTOPOPULATE(inf, cfg);
@@ -9740,7 +9740,7 @@ e3_skip_load:;
 
         // Defaults off — baseline gate output.
         BITMAP_CLR(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED);
-        cfg.foxml_vol_scaling_enabled = 0;
+        BITMAP_CLR(cfg.ml_cfg_flags, MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED);
         tt::GateParameters<FP> baseline{};
         tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg,
                                       FPN_FromDouble<FP>(1000.0), &baseline);
@@ -9751,7 +9751,7 @@ e3_skip_load:;
         FPN<FP> baseline_size = baseline.trade_size;
 
         // VolScaler enabled — trade_size should shrink under high rel vol.
-        cfg.foxml_vol_scaling_enabled = 1;
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED);
         cfg.foxml_vol_scaling_z_max = FPN_FromDouble<FP>(3.0);
         tt::GateParameters<FP> with_vol{};
         tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg,
@@ -9760,7 +9760,7 @@ e3_skip_load:;
               FPN_LessThanOrEqual(with_vol.trade_size, baseline_size));
 
         // CostModel enabled — non-crashing path, flags computed.
-        cfg.foxml_vol_scaling_enabled = 0;
+        BITMAP_CLR(cfg.ml_cfg_flags, MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED);
         BITMAP_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED);
         tt::GateParameters<FP> with_cost{};
         tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg,
@@ -12629,7 +12629,7 @@ e3_skip_load:;
                 cfg.confidence_hard_block_threshold  = FPN_FromDouble<64>(0.07);
                 cfg.held_out_fraction                = FPN_FromDouble<64>(0.25);
                 // v5.14.9.D — DELETED cfg.confidence_freshness_tau (TECH_DEBT-004 close).
-                cfg.bandit_enabled                   = 1;
+                BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED);
                 cfg.bandit_blend_ratio               = FPN_FromDouble<64>(0.40);
                 BITMAP_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED);
                 cfg.fee_rate_maker                   = FPN_FromDouble<64>(0.00060);
@@ -12650,7 +12650,7 @@ e3_skip_load:;
                 inf.inference_cfg_held_out_fraction =
                     FPN_ToDouble(cfg.held_out_fraction);
                 // v5.14.9.D — DELETED inf.inference_cfg_freshness_tau (TECH_DEBT-004 close).
-                if (cfg.bandit_enabled) {
+                if (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) {
                     STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
                     inf.inference_cfg_bandit_blend_ratio =
                         FPN_ToDouble(cfg.bandit_blend_ratio);
@@ -12688,7 +12688,7 @@ e3_skip_load:;
                 check("v5.9.5b: held_out_fraction round-trips (0.25)",
                       fabs(v.inference_cfg_held_out_fraction - 0.25) < 1e-9);
                 // v5.14.9.D — DELETED freshness_tau round-trip check (TECH_DEBT-004 close).
-                check("v5.9.5b: has_bandit set (cfg.bandit_enabled=1)",
+                check("v5.9.5b: has_bandit set (bandit_enabled=1)",
                       STAMP_HAS(v, inference_cfg_bandit_blend_ratio) == 1);
                 check("v5.9.5b: bandit_blend_ratio round-trips (0.40)",
                       fabs(v.inference_cfg_bandit_blend_ratio - 0.40) < 1e-9);
@@ -17740,14 +17740,14 @@ e3_skip_load:;
     {
         // Phase 2.B of v5.12. Skips RebuildOneCore body when slow_state
         // hasn't changed materially (small price delta + within
-        // force_period_us). Default cfg.lazy_rebuild_enabled=0 → always
+        // force_period_us). Default lazy_rebuild_enabled=0 → always
         // rebuild; existing 1944 tests verify bytewise preservation.
         // Enabled-mode behavior is integration-tested via replay harness.
 
         // === Test 1: cfg defaults ===
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        check("v5.12.2.B: default cfg.lazy_rebuild_enabled == 0",
-              cfg.lazy_rebuild_enabled == 0);
+        check("v5.12.2.B: default BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_LAZY_REBUILD_ENABLED) == 0",
+              BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_LAZY_REBUILD_ENABLED) == 0);
         check("v5.12.2.B: default cfg.lazy_rebuild_force_period_us == 1_000_000",
               cfg.lazy_rebuild_force_period_us == 1000000ULL);
         check("v5.12.2.B: default cfg.lazy_rebuild_price_threshold_pct == 0.0005",
@@ -18272,8 +18272,8 @@ e3_skip_load:;
 
         // === cfg defaults ===
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        check("v5.13.0.A: cfg.use_exit_model defaults to 0",
-              cfg.use_exit_model == 0);
+        check("v5.13.0.A: BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL) defaults to 0",
+              BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL) == 0);
         check("v5.13.0.A: cfg.exit_threshold defaults to 0.6",
               FPN_ToDouble(cfg.exit_threshold) > 0.59 &&
               FPN_ToDouble(cfg.exit_threshold) < 0.61);
@@ -18435,7 +18435,7 @@ e3_skip_load:;
 
             ControllerConfig<64> parsed_cfg = ControllerConfig_Load<64>(tmp_cfg);
             check("v5.13.0.B: parsed use_exit_model == 1",
-                  parsed_cfg.use_exit_model == 1);
+                  BITMAP_IS_SET(parsed_cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL) == 1);
             check("v5.13.0.B: parsed exit_threshold ~= 0.75",
                   FPN_ToDouble(parsed_cfg.exit_threshold) > 0.74 &&
                   FPN_ToDouble(parsed_cfg.exit_threshold) < 0.76);
@@ -18458,8 +18458,8 @@ e3_skip_load:;
 
         // === cfg defaults ===
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        check("v5.13.4.A: cfg.exit_bandit_enabled defaults to 0",
-              cfg.exit_bandit_enabled == 0);
+        check("v5.13.4.A: BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED) defaults to 0",
+              BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED) == 0);
         check("v5.13.4.A: cfg.exit_bandit_lr defaults to 0.1",
               cfg.exit_bandit_lr > 0.09 && cfg.exit_bandit_lr < 0.11);
 
@@ -18473,7 +18473,7 @@ e3_skip_load:;
             std::fclose(cfp);
             ControllerConfig<64> parsed_cfg = ControllerConfig_Load<64>(tmp_cfg);
             check("v5.13.4.A: parsed exit_bandit_enabled == 1",
-                  parsed_cfg.exit_bandit_enabled == 1);
+                  BITMAP_IS_SET(parsed_cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED) == 1);
             check("v5.13.4.A: parsed exit_bandit_lr ~= 0.25",
                   parsed_cfg.exit_bandit_lr > 0.24 &&
                   parsed_cfg.exit_bandit_lr < 0.26);
@@ -21237,7 +21237,7 @@ e3_skip_load:;
         // AUTOPOPULATE_PER_CORE — ladder enabled with composite ON
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
         cfg.risk_degradation_curve     = CURVE_LINEAR;
-        cfg.confidence_composite_enabled = 1;
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
         SlowPathGateState state;
         SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
         check("v5.14.9.B.0: ladder + composite → MASK_LADDER_ACTIVE set",
@@ -21250,7 +21250,7 @@ e3_skip_load:;
         // AUTOPOPULATE_PER_CORE — ladder enabled but composite OFF → NOT active
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
         cfg.risk_degradation_curve     = CURVE_LINEAR;
-        cfg.confidence_composite_enabled = 0;
+        BITMAP_CLR(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
         SlowPathGateState state;
         SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
         check("v5.14.9.B.0: ladder + NO composite → MASK_LADDER_ACTIVE off (composite required)",
@@ -21300,7 +21300,7 @@ e3_skip_load:;
         using namespace tt;
         // AUTOPOPULATE_ENGINE_WIDE — lazy_rebuild + ws_flatten enabled
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        cfg.lazy_rebuild_enabled = 1;
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_LAZY_REBUILD_ENABLED);
         cfg.ws_dead_time_flatten_enabled = 1;
         GlobalGateState state;
         SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE(state, cfg);
@@ -21329,12 +21329,12 @@ e3_skip_load:;
         using namespace tt;
         // AUTOPOPULATE clears bits that go from set → unset (full re-evaluation)
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        cfg.confidence_composite_enabled = 1;
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
         SlowPathGateState state;
         SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
         check("v5.14.9.B.0: AUTOPOPULATE sets composite when cfg=1",
               BITMAP_IS_SET(state.flags, MASK_COMPOSITE_ENABLED));
-        cfg.confidence_composite_enabled = 0;
+        BITMAP_CLR(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
         SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
         check("v5.14.9.B.0: AUTOPOPULATE CLEARS composite when cfg flips to 0 (full re-eval)",
               !BITMAP_IS_SET(state.flags, MASK_COMPOSITE_ENABLED));
@@ -21354,7 +21354,7 @@ e3_skip_load:;
               cfg.risk_degradation_curve == 0);
         check("v5.14.9.B: default cfg → ladder NOT active (curve=OFF)",
               cfg.risk_degradation_curve == 0 ||
-              cfg.confidence_composite_enabled == 0);
+              BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED) == 0);
     }
     {
         using namespace tt;
@@ -21364,7 +21364,7 @@ e3_skip_load:;
         // close — heavy fixture not warranted for this single-line predicate).
         auto should_refuse = [](const ControllerConfig<64>& c) -> bool {
             return c.risk_degradation_curve != CURVE_OFF
-                && c.confidence_composite_enabled == 0;
+                && !BITMAP_IS_SET(c.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
         };
 
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
@@ -21372,11 +21372,11 @@ e3_skip_load:;
               !should_refuse(cfg));
 
         cfg.risk_degradation_curve = CURVE_LINEAR;
-        cfg.confidence_composite_enabled = 0;
+        BITMAP_CLR(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
         check("v5.14.9.B: REFUSE predicate TRUE for ladder + NO composite",
               should_refuse(cfg));
 
-        cfg.confidence_composite_enabled = 1;
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
         check("v5.14.9.B: REFUSE predicate FALSE for ladder + composite ON",
               !should_refuse(cfg));
 
@@ -21384,7 +21384,7 @@ e3_skip_load:;
         check("v5.14.9.B: REFUSE predicate FALSE for any curve + composite ON",
               !should_refuse(cfg));
 
-        cfg.confidence_composite_enabled = 0;
+        BITMAP_CLR(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
         check("v5.14.9.B: REFUSE predicate TRUE for ANY non-OFF curve + NO composite",
               should_refuse(cfg));
 
@@ -21950,6 +21950,111 @@ e3_skip_load:;
     }
 
     //======================================================================
+    // [v5.14.9.F.2 — FOREACH_ML_CFG_FLAG (7 flags) + Y3 dispatch for stamp]
+    //======================================================================
+    // Third domain registry. Migrates 7 ML/confidence booleans to uint16_t bitmap.
+    // confidence_composite_enabled is stamp-bound via FOREACH_STAMP_BOUND_CFG with
+    // emit_source=BITMAP_BIT (Y3 token-paste dispatch per heterogeneous-registry-pattern.md
+    // Form 3 worked example). Other 6 entries are RUNTIME-only.
+    //
+    // Load-bearing test: round-trip HMAC byte-equivalence (BITMAP_BIT bit-extract
+    // produces identical wire bytes vs pre-migration DIRECT_FIELD read).
+    {
+        check("v5.14.9.F.2: ML_CFG_COUNT >= 7 (7 entries)",
+              ML_CFG_COUNT >= 7);
+        check("v5.14.9.F.2: ML_CFG_COUNT <= 16 (uint16_t storage budget)",
+              ML_CFG_COUNT <= 16);
+    }
+    {
+        // MASK constants at correct bit positions (registry order)
+        check("v5.14.9.F.2: MASK_ML_CFG_CONFIDENCE_ENABLED == 0x0001",
+              MASK_ML_CFG_CONFIDENCE_ENABLED == 0x0001);
+        check("v5.14.9.F.2: MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED == 0x0002",
+              MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED == 0x0002);
+        check("v5.14.9.F.2: MASK_ML_CFG_BANDIT_ENABLED == 0x0004",
+              MASK_ML_CFG_BANDIT_ENABLED == 0x0004);
+        check("v5.14.9.F.2: MASK_ML_CFG_EXIT_BANDIT_ENABLED == 0x0008",
+              MASK_ML_CFG_EXIT_BANDIT_ENABLED == 0x0008);
+        check("v5.14.9.F.2: MASK_ML_CFG_USE_EXIT_MODEL == 0x0010",
+              MASK_ML_CFG_USE_EXIT_MODEL == 0x0010);
+        check("v5.14.9.F.2: MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED == 0x0020",
+              MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED == 0x0020);
+        check("v5.14.9.F.2: MASK_ML_CFG_LAZY_REBUILD_ENABLED == 0x0040",
+              MASK_ML_CFG_LAZY_REBUILD_ENABLED == 0x0040);
+    }
+    {
+        // Default cfg: all 7 flags off (backward compat)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.14.9.F.2: default ml_cfg_flags == 0 (all 7 flags OFF)",
+              cfg.ml_cfg_flags == 0);
+    }
+    {
+        // Parser back-compat: legacy keys still set the right bits
+        char tmpfile[] = "/tmp/foxml_v5_14_9_f2_XXXXXX";
+        int fd = mkstemp(tmpfile);
+        check("v5.14.9.F.2: parser tmpfile created", fd >= 0);
+        FILE* f = fdopen(fd, "w");
+        fprintf(f, "confidence_enabled=1\n");
+        fprintf(f, "confidence_composite_enabled=1\n");
+        fprintf(f, "bandit_enabled=1\n");
+        fprintf(f, "lazy_rebuild_enabled=1\n");
+        // exit_bandit_enabled / use_exit_model / foxml_vol_scaling_enabled NOT in file → stay OFF
+        fclose(f);
+
+        ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmpfile);
+        check("v5.14.9.F.2: parser sets confidence_enabled bit",
+              BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED));
+        check("v5.14.9.F.2: parser sets confidence_composite_enabled bit",
+              BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED));
+        check("v5.14.9.F.2: parser sets bandit_enabled bit",
+              BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED));
+        check("v5.14.9.F.2: parser sets lazy_rebuild_enabled bit",
+              BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_LAZY_REBUILD_ENABLED));
+        check("v5.14.9.F.2: parser leaves exit_bandit_enabled OFF",
+              !BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED));
+        check("v5.14.9.F.2: parser leaves use_exit_model OFF",
+              !BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL));
+        check("v5.14.9.F.2: parser leaves foxml_vol_scaling_enabled OFF",
+              !BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED));
+        unlink(tmpfile);
+    }
+    {
+        // LOAD-BEARING: Y3 dispatch for stamp-bound entry — STAMP_CFG_AUTOPOPULATE
+        // walks FOREACH_STAMP_BOUND_CFG; emit_source=BITMAP_BIT for
+        // confidence_composite_enabled dispatches via HANDLE_STAMP_EMIT_BITMAP_BIT,
+        // which evaluates the bitmap-extract expression and writes inf->name.
+        // Verify byte-equivalence: bit-extract produces same uint as pre-migration direct read.
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
+        StampInferenceCfgInputs inf = {};
+        STAMP_CFG_AUTOPOPULATE(inf, cfg);
+        check("v5.14.9.F.2: Y3 dispatch — AUTOPOPULATE sets has_confidence_composite_enabled",
+              inf.has_confidence_composite_enabled == 1);
+        check("v5.14.9.F.2: Y3 dispatch — confidence_composite_enabled value == 1 (byte-equivalent to direct read)",
+              inf.confidence_composite_enabled == 1);
+    }
+    {
+        // Clear bit + verify emit_when=false skips emission (legacy stamp shape)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        BITMAP_CLR(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
+        StampInferenceCfgInputs inf = {};
+        STAMP_CFG_AUTOPOPULATE(inf, cfg);
+        check("v5.14.9.F.2: Y3 dispatch — emit_when=false skips has_confidence_composite_enabled",
+              inf.has_confidence_composite_enabled == 0);
+    }
+    {
+        // Cross-domain isolation: setting ML bit doesn't affect LIFECYCLE / GATE bitmaps
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        uint8_t lifecycle_before = cfg.lifecycle_cfg_flags;
+        uint8_t gate_before      = cfg.gate_cfg_flags;
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_ENABLED);
+        check("v5.14.9.F.2: setting ML bit doesn't disturb LIFECYCLE bitmap",
+              cfg.lifecycle_cfg_flags == lifecycle_before);
+        check("v5.14.9.F.2: setting ML bit doesn't disturb GATE bitmap",
+              cfg.gate_cfg_flags == gate_before);
+    }
+
+    //======================================================================
     // [v5.14.9.B.1 — Per-core ladder override (4 fields) + extended REFUSE]
     //======================================================================
     {
@@ -21996,7 +22101,7 @@ e3_skip_load:;
         // AUTOPOPULATE_PER_CORE on per-core resolved cfg → MASK_LADDER_ACTIVE
         // honors per-core override (with global composite enabled).
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        cfg.confidence_composite_enabled = 1;  // engine-wide composite on
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);  // engine-wide composite on
         cfg.risk_degradation_curve = CURVE_OFF;
         cfg.core_overrides[2].risk_degradation_curve = (uint32_t)CURVE_LINEAR;
 
@@ -22019,18 +22124,18 @@ e3_skip_load:;
         // not warranted for the boot-time check).
         auto should_refuse = [](const ControllerConfig<64>& c) -> bool {
             if (c.risk_degradation_curve != CURVE_OFF
-                && c.confidence_composite_enabled == 0) return true;
+                && !BITMAP_IS_SET(c.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED)) return true;
             for (int i = 0; i < 16; ++i) {
                 if (c.core_overrides[i].risk_degradation_curve != 0
                     && c.core_overrides[i].risk_degradation_curve != (uint32_t)CURVE_OFF
-                    && c.confidence_composite_enabled == 0) return true;
+                    && !BITMAP_IS_SET(c.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED)) return true;
             }
             return false;
         };
 
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
         cfg.risk_degradation_curve = CURVE_OFF;
-        cfg.confidence_composite_enabled = 0;
+        BITMAP_CLR(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
         check("v5.14.9.B.1: REFUSE predicate FALSE for default + no per-core override",
               !should_refuse(cfg));
 
@@ -22038,7 +22143,7 @@ e3_skip_load:;
         check("v5.14.9.B.1: REFUSE predicate TRUE for per-core LINEAR override + NO composite",
               should_refuse(cfg));
 
-        cfg.confidence_composite_enabled = 1;
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
         check("v5.14.9.B.1: REFUSE predicate FALSE for per-core LINEAR override + composite ON",
               !should_refuse(cfg));
 
@@ -22047,7 +22152,7 @@ e3_skip_load:;
         check("v5.14.9.B.1: REFUSE predicate FALSE for multiple per-core overrides + composite ON",
               !should_refuse(cfg));
 
-        cfg.confidence_composite_enabled = 0;
+        BITMAP_CLR(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
         check("v5.14.9.B.1: REFUSE predicate TRUE for multiple per-core overrides + NO composite",
               should_refuse(cfg));
     }
