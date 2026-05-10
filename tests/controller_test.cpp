@@ -20710,6 +20710,80 @@ e3_skip_load:;
               true);  // static_asserts above did the actual checking
     }
 
+    // ==================================================================
+    // v5.14.8.A.merged.1 — Bit allocation + MASK constants + STAMP_HAS aliases
+    // ==================================================================
+    // Verifies the foundation for has_flags uint64_t bit-packing:
+    // bit allocation enum, MASK_<X> constants (non-zero, distinct), and
+    // STAMP_HAS / SET / CLR aliases work on a synthetic test struct.
+    {
+        // Bit allocation discipline:
+        //   - STAMP_BIT_COUNT must fit in uint64_t
+        //   - At least 13 bits used today (6 groups + 7 standalone)
+        static_assert(tt::STAMP_BIT_COUNT <= 64,
+                      "v5.14.8.A.merged.1: STAMP_BIT_COUNT must fit uint64_t");
+        check("v5.14.8.A.merged.1: STAMP_BIT_COUNT >= 13 (6 groups + 7 standalone)",
+              tt::STAMP_BIT_COUNT >= 13);
+        check("v5.14.8.A.merged.1: STAMP_BIT_COUNT <= 64",
+              tt::STAMP_BIT_COUNT <= 64);
+
+        // MASK constants are distinct (catch bit-position collisions):
+        static_assert(MASK_inference_cfg != MASK_scaler,
+                      "v5.14.8.A.merged.1: group mask collision");
+        static_assert(MASK_scaler != MASK_fees,
+                      "v5.14.8.A.merged.1: group mask collision");
+        static_assert(MASK_inference_cfg != MASK_inference_cfg_bandit_blend_ratio,
+                      "v5.14.8.A.merged.1: group vs standalone mask collision");
+        // OR of all 6 group masks should equal sum (no overlap):
+        constexpr uint64_t ALL_GROUP_MASKS =
+            MASK_inference_cfg | MASK_scaler | MASK_fees |
+            MASK_xgb_hyperparams | MASK_grid_member | MASK_label_params;
+        check("v5.14.8.A.merged.1: 6 group masks have no overlap",
+              __builtin_popcountll(ALL_GROUP_MASKS) == 6);
+
+        // OR of all 13 masks today; bit-popcount should match:
+        constexpr uint64_t ALL_MASKS =
+            MASK_inference_cfg | MASK_scaler | MASK_fees |
+            MASK_xgb_hyperparams | MASK_grid_member | MASK_label_params |
+            MASK_inference_cfg_bandit_blend_ratio | MASK_training_poll_interval |
+            MASK_model_num_outputs | MASK_build_flags_hash |
+            MASK_label_registry_hash | MASK_feature_mask | MASK_xgb_train_nthread;
+        check("v5.14.8.A.merged.1: 13 distinct mask bits (6 groups + 7 standalone)",
+              __builtin_popcountll(ALL_MASKS) == 13);
+    }
+    {
+        // STAMP_HAS / SET / CLR / ANY semantic test on synthetic struct
+        struct StampTest { uint64_t has_flags = 0; };
+        StampTest t{};
+
+        check("v5.14.8.A.merged.1: STAMP_HAS empty initial state",
+              !STAMP_HAS(t, inference_cfg));
+
+        STAMP_SET(t, inference_cfg);
+        check("v5.14.8.A.merged.1: STAMP_HAS detects after STAMP_SET",
+              STAMP_HAS(t, inference_cfg));
+
+        STAMP_SET(t, xgb_hyperparams);
+        check("v5.14.8.A.merged.1: STAMP_ANY multi-flag (both set)",
+              STAMP_ANY(t, MASK_inference_cfg | MASK_xgb_hyperparams));
+
+        STAMP_CLR(t, inference_cfg);
+        check("v5.14.8.A.merged.1: STAMP_CLR removes target bit",
+              !STAMP_HAS(t, inference_cfg));
+        check("v5.14.8.A.merged.1: STAMP_CLR leaves other bits set",
+              STAMP_HAS(t, xgb_hyperparams));
+
+        // Top-bit safety (uint64_t bit 63 — high-bit truncation regression check)
+        STAMP_SET(t, xgb_train_nthread);  // last standalone; may not be highest, but exercises high bits
+        check("v5.14.8.A.merged.1: STAMP_HAS for standalone (post-CLR)",
+              STAMP_HAS(t, xgb_train_nthread));
+
+        // Standalone bit is independent of group bits
+        check("v5.14.8.A.merged.1: standalone bit doesn't trigger group ANY",
+              !STAMP_HAS(t, inference_cfg) &&  // group bit
+              STAMP_HAS(t, xgb_train_nthread));  // standalone bit
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

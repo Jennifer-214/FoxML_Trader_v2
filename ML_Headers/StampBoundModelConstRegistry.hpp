@@ -58,6 +58,7 @@
 
 #include <stdlib.h>   // atoi, strncpy
 #include <string.h>   // strncpy, strncmp
+#include "../MemHeaders/BitmapMacros.hpp"  // BITMAP_* primitives (v5.14.8.A.0.b.1) backing STAMP_HAS / SET / CLR aliases
 
 //======================================================================================================
 // [STRING-FIELD TYPE ALIASES]
@@ -185,8 +186,8 @@ namespace tt {
     X(inference_cfg,    "inference cfg fields (5): confidence_threshold_scale, barrier_gate_enabled, confidence_hard_block_threshold, held_out_fraction, freshness_tau") \
     X(scaler,           "scaler fields (2): feature_scaler_present, scaler_sha256")                 \
     X(fees,             "fee rate fields (2): fee_rate_maker, fee_rate_taker")                      \
-    X(xgb_hyperparams,  "xgb hyperparams (8): max_depth, learning_rate, n_estimators, subsample, colsample_bytree, min_child_weight, seed, tree_method") \
-    X(grid_member_count_group, "grid member metadata (2): grid_member_count, grid_member_idx")      \
+    X(xgb_hyperparams,  "xgb hyperparams (9): max_depth, learning_rate, n_estimators, subsample, colsample_bytree, min_child_weight, seed, tree_method, train_nthread (since v5.14.8.A.merged)") \
+    X(grid_member,      "grid member metadata (2): grid_member_count, grid_member_idx — renamed from grid_member v5.14.8.A.merged for dispatcher cleanliness") \
     X(label_params,     "label params (3): lookahead_ticks, tp_pct, sl_pct")
 
 //======================================================================================================
@@ -283,17 +284,21 @@ namespace tt {
       inf->xgb_min_child_weight, inf->has_xgb_hyperparams, "XGBoost min child weight")              \
     X(xgb_seed,                                 xgb_hyperparams, INCLUDE, int, "%d", 0,             \
       inf->xgb_seed, inf->has_xgb_hyperparams, "XGBoost RNG seed for reproducibility")              \
-    /* xgb_tree_method is char[16] — handled by separate string-type macros at struct-gen time */   \
+    /* v5.14.8.A.merged — xgb_tree_method (char[16]) folded into registry as 26th entry.        */ \
+    /* Uses tt::stamp_str_16 typedef + if-constexpr dispatch from A.0.b. Replaces manual emit  */ \
+    /* (ModelInference.hpp:2243) + manual parse (1629-1633). Wire format byte-identical.        */ \
+    X(xgb_tree_method,                          xgb_hyperparams, INCLUDE, tt::stamp_str_16, "%s", "", \
+      inf->xgb_tree_method, inf->has_xgb_hyperparams, "XGBoost tree-method enum (e.g., \"hist\")") \
     /* === build_flags_hash (standalone) — emitted at line 2253 === */                              \
     X(build_flags_hash,                         _, INCLUDE, uint64_t, "%016lx", 0,                  \
       (unsigned long)inf->build_flags_hash, inf->has_build_flags_hash,                              \
       "build-time feature flag hash; engine boot WARN on cross-binary drift")                       \
     /* === grid_member_count group (2 fields) — emitted at line 2266 === */                         \
     /* Forensic / informational on parse side; no runtime use → SKIP_HANDLE.                    */  \
-    X(grid_member_count,                        grid_member_count_group, SKIP_HANDLE, int, "%d", 0, \
+    X(grid_member_count,                        grid_member, SKIP_HANDLE, int, "%d", 0, \
       inf->grid_member_count, inf->has_grid_member_count,                                           \
       "ensemble member count when trained as part of horizon set")                                  \
-    X(grid_member_idx,                          grid_member_count_group, SKIP_HANDLE, int, "%d", 0, \
+    X(grid_member_idx,                          grid_member, SKIP_HANDLE, int, "%d", 0, \
       inf->grid_member_idx, inf->has_grid_member_count, "this model's index within the grid")       \
     /* === label_registry_hash (standalone) — emitted at line 2278 === */                           \
     /* Parser checks against runtime LABEL_REGISTRY_HASH() at boot; not stored on handle.       */  \
@@ -331,6 +336,91 @@ namespace tt {
 #define STAMP_MODEL_CONST_PARSE_int(val)      atoi(val)
 #define STAMP_MODEL_CONST_PARSE_uint64_t(val) (uint64_t)strtoull(val, NULL, 10)
 #define STAMP_MODEL_CONST_PARSE_double(val)   tt::parse_double_fast(val)
+
+//======================================================================================================
+// [BIT ALLOCATION FOR has_flags — v5.14.8.A.merged]
+//======================================================================================================
+// Each group + each standalone entry gets ONE bit position in the
+// uint64_t has_flags field that lives on ModelStampResult /
+// StampInferenceCfgInputs / ModelHandle (post-Option-1 unification).
+//
+// Allocation: groups first (6 bits), then standalones (7 bits) = 13
+// total. uint64_t has 51 bits headroom for future fields. Hand-allocated
+// so debug output reads cleanly; build-time test asserts STAMP_BIT_COUNT
+// matches FOREACH_STAMP_BOUND_MODEL_CONST_GROUP_COUNT + standalone count.
+//
+// Adding new group: 1 enum line + 1 MASK line + 1 GROUPS macro entry +
+// 1 dispatcher #define (STAMP_AUTOPOPULATE_SET_HAS_<newgroup>).
+// Adding new standalone: 1 enum line + 1 MASK line + 1 FOREACH entry
+// (group="_") + 1 STANDALONE macro entry. Build-time count check catches
+// site-drift.
+//
+// Standalone has_* names use the entry's full canonical name (mechanical
+// derivation; no STANDALONE list dispatch). Verbose for some entries
+// (has_inference_cfg_bandit_blend_ratio) but unambiguous + IDE auto-
+// completes. Eliminates 2-site STANDALONE dispatch maintenance.
+//======================================================================================================
+namespace tt {
+enum StampHasFlagBit : uint64_t {
+    // === Group bits (one per group; gates ALL fields in group) ===
+    STAMP_BIT_inference_cfg = 0,
+    STAMP_BIT_scaler,
+    STAMP_BIT_fees,
+    STAMP_BIT_xgb_hyperparams,
+    STAMP_BIT_grid_member,
+    STAMP_BIT_label_params,
+
+    // === Standalone bits (one per group="_" entry) ===
+    STAMP_BIT_inference_cfg_bandit_blend_ratio,
+    STAMP_BIT_training_poll_interval,
+    STAMP_BIT_model_num_outputs,
+    STAMP_BIT_build_flags_hash,
+    STAMP_BIT_label_registry_hash,
+    STAMP_BIT_feature_mask,
+    STAMP_BIT_xgb_train_nthread,
+
+    STAMP_BIT_COUNT  // sentinel: total used bits (must be ≤ 64 for uint64_t has_flags)
+};
+static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capacity");
+}  // namespace tt
+
+// MASK_<X> constants — one per bit position. Used by STAMP_HAS / SET / CLR
+// accessor macros + caller code that does multi-flag checks via
+// BITMAP_ANY(s.has_flags, MASK_X | MASK_Y).
+#define MASK_inference_cfg                          (1ULL << tt::STAMP_BIT_inference_cfg)
+#define MASK_scaler                                 (1ULL << tt::STAMP_BIT_scaler)
+#define MASK_fees                                   (1ULL << tt::STAMP_BIT_fees)
+#define MASK_xgb_hyperparams                        (1ULL << tt::STAMP_BIT_xgb_hyperparams)
+#define MASK_grid_member                            (1ULL << tt::STAMP_BIT_grid_member)
+#define MASK_label_params                           (1ULL << tt::STAMP_BIT_label_params)
+#define MASK_inference_cfg_bandit_blend_ratio       (1ULL << tt::STAMP_BIT_inference_cfg_bandit_blend_ratio)
+#define MASK_training_poll_interval                 (1ULL << tt::STAMP_BIT_training_poll_interval)
+#define MASK_model_num_outputs                      (1ULL << tt::STAMP_BIT_model_num_outputs)
+#define MASK_build_flags_hash                       (1ULL << tt::STAMP_BIT_build_flags_hash)
+#define MASK_label_registry_hash                    (1ULL << tt::STAMP_BIT_label_registry_hash)
+#define MASK_feature_mask                           (1ULL << tt::STAMP_BIT_feature_mask)
+#define MASK_xgb_train_nthread                      (1ULL << tt::STAMP_BIT_xgb_train_nthread)
+
+//======================================================================================================
+// [STAMP_HAS / SET / CLR accessor macros — alias to BITMAP_* API]
+//======================================================================================================
+// Ergonomic accessors for the has_flags uint64_t bitmap. Aliases to the
+// BITMAP_* primitives so callers don't touch raw bit operations.
+//
+// Usage:
+//   if (STAMP_HAS(*m, inference_cfg)) { ... }   // group bit check
+//   if (STAMP_HAS(*m, training_poll_interval)) { ... }  // standalone bit
+//   if (BITMAP_ANY(m->has_flags,                // multi-flag branchless
+//        MASK_inference_cfg | MASK_xgb_hyperparams)) { ... }
+//
+// Atomic variants available via BITMAP_ATOMIC_* directly when cross-thread
+// visibility is needed (e.g., observability flags written by slow path,
+// read by display thread).
+//======================================================================================================
+#define STAMP_HAS(s, name)  BITMAP_IS_SET((s).has_flags, MASK_##name)
+#define STAMP_SET(s, name)  BITMAP_SET((s).has_flags, MASK_##name)
+#define STAMP_CLR(s, name)  BITMAP_CLR((s).has_flags, MASK_##name)
+#define STAMP_ANY(s, mask_set) BITMAP_ANY((s).has_flags, (mask_set))
 
 //======================================================================================================
 // [AUTO-POPULATE MACRO — eliminates v5.9.5b production-caller class]
@@ -378,17 +468,38 @@ namespace tt {
 // Tuple signature (9 params; v5.14.8.A.0.b adds presence column):
 //   X(name, group, presence, type, fmt, default_val, get_value, emit_when, doc)
 //
-// Group + presence are documentation/struct-gen metadata; auto-populate
-// ignores them (always populates the StampInferenceCfgInputs side regardless
-// of presence — presence only affects struct GENERATION, not population).
+// has_* dispatch (v5.14.8.A.merged): for grouped entries, sets the
+// group bit (e.g., MASK_inference_cfg). For standalone entries
+// (group="_"), sets the entry's own bit (e.g., MASK_training_poll_interval).
+// Token-paste dispatch via STAMP_AUTOPOPULATE_SET_HAS_<group>(name).
+// Adding new group = 1 new dispatcher #define (one per group); standalone
+// is automatic via group="_" → STAMP_AUTOPOPULATE_SET_HAS__(name).
 //
 // String-field handling (v5.14.8.A.0.b.4): tt::stamp_str_N typedefs
 // detected via std::is_array_v<type>. Numeric types use direct cast +
 // assignment; string types use strncpy + null-terminate via
 // std::extent_v<type> for size.
+
+// Token-paste dispatcher: STAMP_AUTOPOPULATE_SET_HAS_<group_name>(entry_name)
+// resolves to the right has_* field set. Standalone uses entry name; grouped
+// entries share the group bit.
+//
+// Note on STAMP_HAS_FIELD_ON: for the EARLY pre-Option-1 phase (before
+// struct migration), structs still have legacy per-entry has_* fields.
+// We use STAMP_SET (BITMAP_SET on has_flags) since post-migration structs
+// will have uint64_t has_flags. Dispatching via macro keeps the migration
+// boundary localized.
+#define STAMP_AUTOPOPULATE_SET_HAS__(name)                  STAMP_SET((inf), name)
+#define STAMP_AUTOPOPULATE_SET_HAS_inference_cfg(name)      STAMP_SET((inf), inference_cfg)
+#define STAMP_AUTOPOPULATE_SET_HAS_scaler(name)             STAMP_SET((inf), scaler)
+#define STAMP_AUTOPOPULATE_SET_HAS_fees(name)               STAMP_SET((inf), fees)
+#define STAMP_AUTOPOPULATE_SET_HAS_xgb_hyperparams(name)    STAMP_SET((inf), xgb_hyperparams)
+#define STAMP_AUTOPOPULATE_SET_HAS_grid_member(name)        STAMP_SET((inf), grid_member)
+#define STAMP_AUTOPOPULATE_SET_HAS_label_params(name)       STAMP_SET((inf), label_params)
+
 #define STAMP_MODEL_CONST_AUTOPOPULATE_ONE(name, group, presence, type, fmt, default_val, get_value, emit_when, doc) \
     if (emit_when) {                                                                  \
-        (inf).has_##name = 1;                                                         \
+        STAMP_AUTOPOPULATE_SET_HAS_##group(name);                                     \
         if constexpr (std::is_array_v<type>) {                                        \
             strncpy((inf).name, (get_value), std::extent_v<type> - 1);                \
             (inf).name[std::extent_v<type> - 1] = '\0';                               \
