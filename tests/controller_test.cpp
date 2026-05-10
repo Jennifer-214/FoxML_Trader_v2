@@ -20786,6 +20786,162 @@ e3_skip_load:;
               STAMP_HAS(t, xgb_train_nthread));  // standalone bit
     }
 
+    // ==================================================================
+    // v5.14.8.A.7 — Round-trip HMAC + canonical body byte preservation
+    // ==================================================================
+    // Verifies wire format byte-for-byte preserved across the
+    // v5.14.8.A.merged migration. Closes the loop on TECH_DEBT-006.
+    {
+        char tmp_dir[256];
+        snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/v5_14_8_A_7_test_%d", getpid());
+        mkdir(tmp_dir, 0755);
+        char model_path[400];
+        snprintf(model_path, sizeof(model_path), "%s/model.bin", tmp_dir);
+        FILE* mf = fopen(model_path, "wb");
+        if (mf) { fputs("test-model-bytes", mf); fclose(mf); }
+
+        StampInferenceCfgInputs inf{};
+        // PRE_CFG section (26 fields):
+        STAMP_SET(inf, inference_cfg);
+        inf.inference_cfg_confidence_threshold_scale       = 1.234;
+        inf.inference_cfg_barrier_gate_enabled             = 1;
+        inf.inference_cfg_confidence_hard_block_threshold  = 0.0567;
+        inf.inference_cfg_held_out_fraction                = 0.20;
+        inf.inference_cfg_freshness_tau                    = 300.5;
+        STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
+        inf.inference_cfg_bandit_blend_ratio = 0.42;
+        STAMP_SET(inf, fees);
+        inf.inference_cfg_fee_rate_maker = 0.00015;
+        inf.inference_cfg_fee_rate_taker = 0.00100;
+        STAMP_SET(inf, training_poll_interval);
+        inf.training_poll_interval = 100u;
+        STAMP_SET(inf, scaler);
+        inf.feature_scaler_present = 1;
+        strncpy(inf.scaler_sha256,
+                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", 64);
+        inf.scaler_sha256[64] = '\0';
+        STAMP_SET(inf, model_num_outputs);
+        inf.model_num_outputs = 3;
+        STAMP_SET(inf, xgb_hyperparams);
+        inf.xgb_max_depth         = 6;
+        inf.xgb_learning_rate     = 0.05;
+        inf.xgb_n_estimators      = 200;
+        inf.xgb_subsample         = 0.8;
+        inf.xgb_colsample_bytree  = 0.7;
+        inf.xgb_min_child_weight  = 4;
+        inf.xgb_seed              = 42;
+        strncpy(inf.xgb_tree_method, "hist", 15);
+        inf.xgb_tree_method[15] = '\0';
+        STAMP_SET(inf, build_flags_hash);
+        inf.build_flags_hash = 0xDEADBEEFCAFEBABEULL;
+        STAMP_SET(inf, grid_member);
+        inf.grid_member_count = 5;
+        inf.grid_member_idx   = 2;
+        STAMP_SET(inf, label_registry_hash);
+        inf.label_registry_hash = 0x0123456789ABCDEFULL;
+        STAMP_SET(inf, feature_mask);
+        inf.feature_mask = 0xFFFFFFFFFFFFFFFFULL;
+        STAMP_SET(inf, label_params);
+        inf.label_lookahead_ticks = 100;
+        inf.label_tp_pct          = 0.05;
+        inf.label_sl_pct          = 0.02;
+        STAMP_SET(inf, xgb_train_nthread);
+        inf.xgb_train_nthread = 1;
+
+        // POST_CFG section (6 fields):
+        STAMP_SET(inf, expected_num_classes);
+        inf.expected_num_classes = 3;
+        STAMP_SET(inf, expected_role);
+        strncpy(inf.expected_role, "barrier", 15);
+        inf.expected_role[15] = '\0';
+        STAMP_SET(inf, expected_num_features);
+        inf.expected_num_features = 42;
+        STAMP_SET(inf, expected_feature_format_version);
+        inf.expected_feature_format_version = 5;
+        STAMP_SET(inf, overlay_hash);
+        strncpy(inf.overlay_hash,
+                "1111222233334444555566667777888899990000aaaabbbbccccdddd00001111", 64);
+        inf.overlay_hash[64] = '\0';
+        STAMP_SET(inf, effective_hash);
+        strncpy(inf.effective_hash,
+                "ffffeeee0123456789abcdef0123456789abcdef0123456789abcdef00001111", 64);
+        inf.effective_hash[64] = '\0';
+
+        // Emit + verify HMAC round-trip:
+        StampWriteResult sw = stamp_write_for_model(
+            model_path, "v5.14.8.A.7-test-secret", MODEL_FORMAT_VERSION,
+            "2026-05-09", 0.65, 0.62, 0.05, 0,
+            0xCAFEFEEDFACEBABEULL, "5.14.8", &inf);
+        check("v5.14.8.A.7: stamp_write_for_model with all 32 fields populated",
+              sw.ok == 1);
+
+        ModelStampResult vr = verify_model_stamp(
+            model_path, "v5.14.8.A.7-test-secret", 0.10, MODEL_FORMAT_VERSION,
+            0xCAFEFEEDFACEBABEULL, 0, 0);
+        check("v5.14.8.A.7: round-trip HMAC valid", vr.valid == 1);
+
+        // Verify all 19 has_flags bits set:
+        check("v5.14.8.A.7: has_inference_cfg",   STAMP_HAS(vr, inference_cfg));
+        check("v5.14.8.A.7: has_scaler",          STAMP_HAS(vr, scaler));
+        check("v5.14.8.A.7: has_fees",            STAMP_HAS(vr, fees));
+        check("v5.14.8.A.7: has_xgb_hyperparams", STAMP_HAS(vr, xgb_hyperparams));
+        check("v5.14.8.A.7: has_grid_member",     STAMP_HAS(vr, grid_member));
+        check("v5.14.8.A.7: has_label_params",    STAMP_HAS(vr, label_params));
+        check("v5.14.8.A.7: has_inference_cfg_bandit_blend_ratio",
+              STAMP_HAS(vr, inference_cfg_bandit_blend_ratio));
+        check("v5.14.8.A.7: has_training_poll_interval",
+              STAMP_HAS(vr, training_poll_interval));
+        check("v5.14.8.A.7: has_model_num_outputs", STAMP_HAS(vr, model_num_outputs));
+        check("v5.14.8.A.7: has_build_flags_hash",  STAMP_HAS(vr, build_flags_hash));
+        check("v5.14.8.A.7: has_label_registry_hash",
+              STAMP_HAS(vr, label_registry_hash));
+        check("v5.14.8.A.7: has_feature_mask",     STAMP_HAS(vr, feature_mask));
+        check("v5.14.8.A.7: has_xgb_train_nthread",
+              STAMP_HAS(vr, xgb_train_nthread));
+        check("v5.14.8.A.7: has_expected_num_classes",
+              STAMP_HAS(vr, expected_num_classes));
+        check("v5.14.8.A.7: has_expected_role", STAMP_HAS(vr, expected_role));
+        check("v5.14.8.A.7: has_expected_num_features",
+              STAMP_HAS(vr, expected_num_features));
+        check("v5.14.8.A.7: has_expected_feature_format_version",
+              STAMP_HAS(vr, expected_feature_format_version));
+        check("v5.14.8.A.7: has_overlay_hash",   STAMP_HAS(vr, overlay_hash));
+        check("v5.14.8.A.7: has_effective_hash", STAMP_HAS(vr, effective_hash));
+
+        // Round-trip values (sample from each type class):
+        check("v5.14.8.A.7: round-trip double",
+              fabs(vr.inference_cfg_confidence_threshold_scale - 1.234) < 1e-6);
+        check("v5.14.8.A.7: round-trip int",
+              vr.inference_cfg_barrier_gate_enabled == 1);
+        check("v5.14.8.A.7: round-trip uint32_t (training_poll_interval)",
+              vr.training_poll_interval == 100u);
+        check("v5.14.8.A.7: round-trip uint8_t (feature_scaler_present)",
+              vr.feature_scaler_present == 1);
+        check("v5.14.8.A.7: round-trip uint64_t hex (build_flags_hash)",
+              vr.build_flags_hash == 0xDEADBEEFCAFEBABEULL);
+        check("v5.14.8.A.7: round-trip char[16] (xgb_tree_method)",
+              strncmp(vr.xgb_tree_method, "hist", 4) == 0);
+        check("v5.14.8.A.7: round-trip char[65] PRE_CFG (scaler_sha256)",
+              strncmp(vr.scaler_sha256,
+                      "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", 64) == 0);
+        check("v5.14.8.A.7: round-trip POST_CFG int (expected_num_classes)",
+              vr.expected_num_classes == 3);
+        check("v5.14.8.A.7: round-trip POST_CFG char[16] (expected_role)",
+              strncmp(vr.expected_role, "barrier", 7) == 0);
+        check("v5.14.8.A.7: round-trip POST_CFG char[65] (overlay_hash)",
+              strncmp(vr.overlay_hash,
+                      "1111222233334444555566667777888899990000aaaabbbbccccdddd00001111", 64) == 0);
+        check("v5.14.8.A.7: round-trip POST_CFG char[65] (effective_hash)",
+              strncmp(vr.effective_hash,
+                      "ffffeeee0123456789abcdef0123456789abcdef0123456789abcdef00001111", 64) == 0);
+
+        char stamp_path[450];
+        snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
+        unlink(stamp_path);
+        unlink(model_path);
+        rmdir(tmp_dir);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
