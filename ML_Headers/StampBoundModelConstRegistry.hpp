@@ -110,10 +110,6 @@
 // in this registry; populator is auto-generated.
 //======================================================================================================
 
-// Empty registry definition for v5.14.8.0 infrastructure ship.
-// v5.14.8.A populates with 24 existing migrated fields.
-// v5.14.8.D appends 5 new v5.14.8 fields.
-//
 // ANTI-PATTERN: Do NOT add architectural stamp body fields as flat
 // struct field declarations directly in ModelStampResult /
 // StampInferenceCfgInputs / ModelHandle. Use this registry. Each new
@@ -121,15 +117,114 @@
 // populator all auto-generated.
 //
 // Adding a new architectural field — example shape:
-//   X(my_new_field, uint64_t, "%llu", 0,
+//   X(my_new_field, _, uint64_t, "%llu", 0,
 //       compute_my_value(meta), 1,
 //       "doc string explaining the field")
+//
+// For new GROUP fields:
+//   1. Add group declaration to FOREACH_STAMP_BOUND_MODEL_CONST_GROUPS
+//   2. Add per-field entries to FOREACH_STAMP_BOUND_MODEL_CONST with
+//      group=<group_name>; all fields share one has_<group_name> bit
+
+//======================================================================================================
+// [GROUP DECLARATIONS — v5.14.8.A]
+//======================================================================================================
+// Groups are has_* flags that gate MULTIPLE typed fields populated
+// together. Each group declaration auto-allocates one bit position in
+// the bitmap. Standalone fields (group="_") auto-allocate their own bits.
+//
+// Wire format preserved: existing stamps with `has_xgb_hyperparams=1`
+// + 8 xgb_* value lines parse identically; group bit set → all 8
+// fields populated. C++ has_<group> semantics: gate one bit, populate
+// N fields together.
+
+#define FOREACH_STAMP_BOUND_MODEL_CONST_GROUPS(X)                                                   \
+    X(inference_cfg,    "inference cfg fields (5): confidence_threshold_scale, barrier_gate_enabled, confidence_hard_block_threshold, held_out_fraction, freshness_tau") \
+    X(scaler,           "scaler fields (2): feature_scaler_present, scaler_sha256")                 \
+    X(fees,             "fee rate fields (2): fee_rate_maker, fee_rate_taker")                      \
+    X(xgb_hyperparams,  "xgb hyperparams (8): max_depth, learning_rate, n_estimators, subsample, colsample_bytree, min_child_weight, seed, tree_method") \
+    X(grid_member_count_group, "grid member metadata (2): grid_member_count, grid_member_idx")      \
+    X(label_params,     "label params (3): lookahead_ticks, tp_pct, sl_pct")
+
+//======================================================================================================
+// [TYPED VALUE ENTRIES — v5.14.8.A; emit order = canonical body order]
+//======================================================================================================
+// Order matches stamp_write_for_model emit sequence (ModelInference.hpp
+// :2175-2378). Wire format byte-for-byte preserved for HMAC verification.
+// has_* gating: standalone (group="_") gates a single field; group
+// (group=<name>) gates all entries with that group_name.
+//
+// Tuple: X(name, group, type, fmt, default_val, get_value_expr, emit_when, doc)
 
 #define FOREACH_STAMP_BOUND_MODEL_CONST(X)                                                          \
-    /* v5.14.8.A entries (migrated from manual flat fields) appended here */                       \
-    /* v5.14.8.D entries (new v5.14.8 architectural fields) appended after */                      \
-    /* registry intentionally empty in v5.14.8.0 — infrastructure ship; */                         \
-    /* see plans/2026-05-08-v5.14.8-stamp-lineage-stale-gating.md sub-tags .A + .D */
+    /* === inference_cfg group (5 fields) — emitted at line 2175 === */                            \
+    X(inference_cfg_confidence_threshold_scale, inference_cfg, double, "%g", 0.0,                   \
+      inf->confidence_threshold_scale, inf->has_inference_cfg, "confidence threshold scale")        \
+    X(inference_cfg_barrier_gate_enabled,       inference_cfg, int,    "%d", 0,                     \
+      inf->barrier_gate_enabled, inf->has_inference_cfg, "barrier gate enabled flag")               \
+    X(inference_cfg_confidence_hard_block_threshold, inference_cfg, double, "%g", 0.0,              \
+      inf->confidence_hard_block_threshold, inf->has_inference_cfg, "confidence hard-block threshold") \
+    X(inference_cfg_held_out_fraction,          inference_cfg, double, "%g", 0.0,                   \
+      inf->held_out_fraction, inf->has_inference_cfg, "held-out fraction at training")              \
+    X(inference_cfg_freshness_tau,              inference_cfg, double, "%g", 0.0,                   \
+      inf->freshness_tau, inf->has_inference_cfg, "freshness tau decay")                            \
+    /* === bandit (standalone) — emitted at line 2189 === */                                        \
+    X(inference_cfg_bandit_blend_ratio,         _, double, "%g", 0.0,                               \
+      inf->bandit_blend_ratio, inf->has_bandit, "bandit blend ratio (Exp3 vs ridge)")               \
+    /* === fees group (2 fields) — emitted at line 2195 === */                                      \
+    X(inference_cfg_fee_rate_maker,             fees, double, "%g", 0.0,                            \
+      inf->fee_rate_maker, inf->has_fees, "maker fee rate at training time")                        \
+    X(inference_cfg_fee_rate_taker,             fees, double, "%g", 0.0,                            \
+      inf->fee_rate_taker, inf->has_fees, "taker fee rate at training time")                        \
+    /* === training_poll_interval (standalone) — emitted at line 2203 === */                        \
+    X(training_poll_interval,                   _, uint32_t, "%u", 0,                               \
+      (unsigned)inf->training_poll_interval, inf->has_training_poll_interval,                       \
+      "training data poll cadence; engine boot WARN on cross-cadence drift")                        \
+    /* === xgb_hyperparams group (8 fields) — emitted at line 2234 === */                           \
+    X(xgb_max_depth,                            xgb_hyperparams, int, "%d", 0,                      \
+      inf->xgb_max_depth, inf->has_xgb_hyperparams, "XGBoost max tree depth")                       \
+    X(xgb_learning_rate,                        xgb_hyperparams, double, "%g", 0.0,                 \
+      inf->xgb_learning_rate, inf->has_xgb_hyperparams, "XGBoost learning rate")                    \
+    X(xgb_n_estimators,                         xgb_hyperparams, int, "%d", 0,                      \
+      inf->xgb_n_estimators, inf->has_xgb_hyperparams, "XGBoost number of trees")                   \
+    X(xgb_subsample,                            xgb_hyperparams, double, "%g", 0.0,                 \
+      inf->xgb_subsample, inf->has_xgb_hyperparams, "XGBoost row subsample fraction")               \
+    X(xgb_colsample_bytree,                     xgb_hyperparams, double, "%g", 0.0,                 \
+      inf->xgb_colsample_bytree, inf->has_xgb_hyperparams, "XGBoost column subsample per tree")     \
+    X(xgb_min_child_weight,                     xgb_hyperparams, int, "%d", 0,                      \
+      inf->xgb_min_child_weight, inf->has_xgb_hyperparams, "XGBoost min child weight")              \
+    X(xgb_seed,                                 xgb_hyperparams, int, "%d", 0,                      \
+      inf->xgb_seed, inf->has_xgb_hyperparams, "XGBoost RNG seed for reproducibility")              \
+    /* xgb_tree_method is char[16] — handled by separate string-type macros at struct-gen time */   \
+    /* === build_flags_hash (standalone) — emitted at line 2253 === */                              \
+    X(build_flags_hash,                         _, uint64_t, "%016lx", 0,                           \
+      (unsigned long)inf->build_flags_hash, inf->has_build_flags_hash,                              \
+      "build-time feature flag hash; engine boot WARN on cross-binary drift")                       \
+    /* === grid_member_count group (2 fields) — emitted at line 2266 === */                         \
+    X(grid_member_count,                        grid_member_count_group, int, "%d", 0,              \
+      inf->grid_member_count, inf->has_grid_member_count,                                           \
+      "ensemble member count when trained as part of horizon set")                                  \
+    X(grid_member_idx,                          grid_member_count_group, int, "%d", 0,              \
+      inf->grid_member_idx, inf->has_grid_member_count, "this model's index within the grid")       \
+    /* === label_registry_hash (standalone) — emitted at line 2278 === */                           \
+    X(label_registry_hash,                      _, uint64_t, "%016lx", 0,                           \
+      (unsigned long)inf->label_registry_hash, inf->has_label_registry_hash,                        \
+      "label registry hash; engine boot REFUSE on mismatch (label set drift)")                      \
+    /* === feature_mask (standalone) — emitted at line 2292 === */                                  \
+    X(feature_mask,                             _, uint64_t, "%016lx", 0,                           \
+      (unsigned long)inf->feature_mask_train, inf->has_feature_mask,                                \
+      "feature mask at training time; engine compares to runtime feature_mask")                     \
+    /* === label_params group (3 fields) — emitted at line 2306 === */                              \
+    X(label_lookahead_ticks,                    label_params, int, "%d", 0,                         \
+      inf->label_lookahead_ticks, inf->has_label_params, "label lookahead window in ticks")         \
+    X(label_tp_pct,                             label_params, double, "%.6g", 0.0,                  \
+      inf->label_tp_pct, inf->has_label_params, "label take-profit percent")                        \
+    X(label_sl_pct,                             label_params, double, "%.6g", 0.0,                  \
+      inf->label_sl_pct, inf->has_label_params, "label stop-loss percent")                          \
+    /* === xgb_train_nthread (standalone) — emitted at line 2323 === */                             \
+    X(xgb_train_nthread,                        _, int, "%d", 0,                                    \
+      inf->xgb_train_nthread, inf->has_xgb_train_nthread,                                           \
+      "XGBoost training thread count; lets operator detect serial vs parallel mode forensically")
 
 //======================================================================================================
 // [PARSER DISPATCH MACROS]
@@ -184,12 +279,16 @@
     } while (0)
 
 // Per-entry expansion. Numeric types use direct assignment; string
-// types (char[N]) auto-detected at compile time via type traits is
-// complex in pure macro — for simplicity, the per-entry macro handles
-// numeric only; string fields use a separate STAMP_MODEL_CONST_AUTOPOPULATE_STR_ONE
-// that's specialized at registry definition time (caller can pick which
-// AUTOPOPULATE_ONE variant to use; v5.14.8.A migration codifies the choice).
-#define STAMP_MODEL_CONST_AUTOPOPULATE_ONE(name, type, fmt, default_val, get_value, emit_when, doc) \
+// types (char[N]) need separate strncpy-based handling. v5.14.8.A
+// migration uses the numeric-only AUTOPOPULATE for simplicity; string
+// fields (xgb_tree_method, scaler_sha256, etc.) populate manually
+// alongside the AUTOPOPULATE call.
+//
+// Tuple signature (8 params): X(name, group, type, fmt, default_val,
+// get_value, emit_when, doc). Group is documentation-only at autopopulate
+// time (used by struct generation at v5.14.8.A; auto-populate just
+// gates per-entry on the explicit emit_when).
+#define STAMP_MODEL_CONST_AUTOPOPULATE_ONE(name, group, type, fmt, default_val, get_value, emit_when, doc) \
     if (emit_when) {                                                                  \
         (inf).has_##name = 1;                                                         \
         (inf).name       = (type)(get_value);                                         \
@@ -213,7 +312,12 @@
 //   #undef X
 //======================================================================================================
 
-#define STAMP_MODEL_CONST_COUNT_ONE(name, type, fmt, default_val, get_value, emit_when, doc) +1
+#define STAMP_MODEL_CONST_COUNT_ONE(name, group, type, fmt, default_val, get_value, emit_when, doc) +1
 #define FOREACH_STAMP_BOUND_MODEL_CONST_COUNT  (0 FOREACH_STAMP_BOUND_MODEL_CONST(STAMP_MODEL_CONST_COUNT_ONE))
+
+// Group counter: how many group has_* flags exist (for bit allocation).
+#define STAMP_MODEL_CONST_GROUP_COUNT_ONE(group_name, doc) +1
+#define FOREACH_STAMP_BOUND_MODEL_CONST_GROUP_COUNT \
+    (0 FOREACH_STAMP_BOUND_MODEL_CONST_GROUPS(STAMP_MODEL_CONST_GROUP_COUNT_ONE))
 
 #endif // STAMP_BOUND_MODEL_CONST_REGISTRY_HPP
