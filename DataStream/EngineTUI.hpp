@@ -1075,6 +1075,14 @@ struct TUISnapshot {
         // RollingTurnover ring on slow-path; published here for TUI display.
         double   ml_portfolio_turnover; // avg turnover ∈ [0, 1] across window
         double   ml_active_prediction; // prediction at fill time of open position (0 if no open pos)
+        // v5.14.9.B — soft risk degradation ladder factor (composite confidence
+        // × FOREACH_DEGRADATION_CURVE compute fn). 1.0 = full size; (0, 1) =
+        // soft scale; 0.0 = ladder bottom (entry blocked + SHALT_LOW_CONFIDENCE).
+        // Populated by ML_BuildParameters via mctx.out_confidence_factor.
+        // Read by ML Status panel for "Conf factor: 0.42" display + entry log
+        // attribution. nullptr-safe: pre-v5.14.9.B builds leave at 0.0;
+        // operator who hasn't activated the ladder sees 1.0 (default cfg).
+        double   ml_confidence_factor;
         // v5.13.6 — sell-side ML prediction (parity-check Section J observability gap).
         // Per-cycle blended exit_predictor probability (0 when use_exit_model
         // disabled or no exit models loaded). Operator sees real-time exit

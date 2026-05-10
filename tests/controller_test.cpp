@@ -17830,9 +17830,17 @@ e3_skip_load:;
               !FPN_GreaterThan(small_rel, cfg.lazy_rebuild_price_threshold_pct));
     }
 
-    printf("\n--- v5.12.1.D: confidence-conditional sizing infra ---\n");
+    printf("\n--- v5.12.1.D: confidence-conditional sizing infra (REPLACED v5.14.9.B; lambda kept as historical reference) ---\n");
     {
-        // Phase 1.D of v5.12. Cfg field + multiplier plumbing in
+        // **DEPRECATED v5.14.9.B**: the v5.12.1.D math at
+        // StrategyParameters.hpp:1291-1322 has been replaced by the soft risk
+        // degradation ladder (FOREACH_DEGRADATION_CURVE + per-core gate cache).
+        // The lambda below mirrors the OLD formula; it stays for historical
+        // reference. The actual engine code now dispatches through
+        // Confidence_DegradationScale (tested in v5.14.9.A) + reads
+        // MASK_LADDER_ACTIVE from per-core gate_state cache.
+        //
+        // Original v5.12.1.D scope: cfg field + multiplier plumbing in
         // ML_BuildParameters. Default cfg=0 → factor=1.0 → no behavior
         // change. Activation gated on Phase 4.B paper-test calibration.
         // Tests verify the factor math directly (the plumbing site is
@@ -21376,6 +21384,67 @@ e3_skip_load:;
         SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
         check("v5.14.9.B.0: AUTOPOPULATE CLEARS composite when cfg flips to 0 (full re-eval)",
               !BITMAP_IS_SET(state.flags, MASK_COMPOSITE_ENABLED));
+    }
+
+    //======================================================================
+    // [v5.14.9.B — Ladder wiring + REFUSE predicate + observability]
+    //======================================================================
+    {
+        // Default cfg → ladder NOT active → factor would be 1.0 (preserves
+        // pre-v5.14.9 behavior bytewise). The actual ML_BuildParameters
+        // dispatch path is verified at the AUTOPOPULATE level (.B.0) +
+        // curve correctness level (.A); end-to-end exercise via existing
+        // ML strategy build tests + boot smoke at sprint close.
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.14.9.B: default cfg → risk_degradation_curve == OFF",
+              cfg.risk_degradation_curve == 0);
+        check("v5.14.9.B: default cfg → ladder NOT active (curve=OFF)",
+              cfg.risk_degradation_curve == 0 ||
+              cfg.confidence_composite_enabled == 0);
+    }
+    {
+        using namespace tt;
+        // Boot REFUSE predicate: ladder enabled + composite disabled = REFUSE.
+        // Mirrors the check in EngineSharded_Run (logic-only here; the actual
+        // EngineSharded_Run early-return is exercised by boot smoke at sprint
+        // close — heavy fixture not warranted for this single-line predicate).
+        auto should_refuse = [](const ControllerConfig<64>& c) -> bool {
+            return c.risk_degradation_curve != CURVE_OFF
+                && c.confidence_composite_enabled == 0;
+        };
+
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.14.9.B: REFUSE predicate FALSE for default cfg (ladder OFF)",
+              !should_refuse(cfg));
+
+        cfg.risk_degradation_curve = CURVE_LINEAR;
+        cfg.confidence_composite_enabled = 0;
+        check("v5.14.9.B: REFUSE predicate TRUE for ladder + NO composite",
+              should_refuse(cfg));
+
+        cfg.confidence_composite_enabled = 1;
+        check("v5.14.9.B: REFUSE predicate FALSE for ladder + composite ON",
+              !should_refuse(cfg));
+
+        cfg.risk_degradation_curve = CURVE_EXP;
+        check("v5.14.9.B: REFUSE predicate FALSE for any curve + composite ON",
+              !should_refuse(cfg));
+
+        cfg.confidence_composite_enabled = 0;
+        check("v5.14.9.B: REFUSE predicate TRUE for ANY non-OFF curve + NO composite",
+              should_refuse(cfg));
+
+        cfg.risk_degradation_curve = CURVE_STEP;
+        check("v5.14.9.B: REFUSE predicate TRUE for STEP + NO composite",
+              should_refuse(cfg));
+    }
+    {
+        // PerCoreSnap.ml_confidence_factor field exists + initializes to 0.
+        // Default-constructed snap has all-zero values; field is part of the
+        // ml_* cluster (cache locality verified in plan).
+        TUISnapshot::PerCoreSnap snap{};
+        check("v5.14.9.B: PerCoreSnap.ml_confidence_factor exists + initializes to 0",
+              snap.ml_confidence_factor == 0.0);
     }
 
     printf("\n======================================\n");

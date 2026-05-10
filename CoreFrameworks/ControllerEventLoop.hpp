@@ -221,6 +221,14 @@ struct CoreContext {
     double staged_prediction;      // prediction from last ML rebuild
     double active_prediction;      // prediction at last entry submit (0 = no open pos)
     double last_confidence;        // most recent ConfidenceScorer_Compute result
+    // v5.14.9.B — soft risk degradation ladder factor (composite confidence
+    // × FOREACH_DEGRADATION_CURVE compute fn). 1.0 when ladder inactive
+    // (default cfg) preserves pre-v5.14.9 behavior; (0, 1) when active +
+    // composite ∈ [min, full]; 0.0 when ladder bottom hit (entry blocked
+    // + SHALT_LOW_CONFIDENCE). Written by ML_BuildParameters via
+    // mctx.out_confidence_factor; copied to PerCoreSnap.ml_confidence_factor
+    // by ShardedSnapshot for ML Status panel display.
+    double last_confidence_factor;
     // v5.13.0.B — sell-side ML prediction. Written by ML_BuildParameters
     // when cfg.use_exit_model && exit_predictor_count > 0. Slow-path body
     // post-RebuildOneCore checks against cfg.exit_threshold and fires
@@ -2351,6 +2359,9 @@ inline void EventLoop_RebuildOneCore(
             // populated above by SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE.
             // ML_BuildParameters reads gate predicates via BITMAP_IS_SET.
             ml_ctx.gate_state = (void*)&state->cores[slot].gate_state;
+            // v5.14.9.B — soft risk degradation ladder factor sink. ML_BuildParameters
+            // writes per-cycle factor; ShardedSnapshot mirrors to PerCoreSnap.
+            ml_ctx.out_confidence_factor = &state->cores[slot].last_confidence_factor;
             // v5.14.1.G — portfolio turnover wire. Pointer to per-core
             // CoreContext.turnover; ML_BuildParameters' buy-side blend
             // populator pushes top-K mask each cycle. void* in MLBuildContext

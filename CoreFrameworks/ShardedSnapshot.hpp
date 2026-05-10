@@ -552,6 +552,8 @@ static inline void TUI_CopySnapshotSharded(
             snap->per_core[i].ml_last_prediction   = state->cores[i].staged_prediction;
             snap->per_core[i].ml_last_confidence   = state->cores[i].last_confidence;
             snap->per_core[i].ml_active_prediction = state->cores[i].active_prediction;
+            // v5.14.9.B — soft risk degradation ladder factor surface.
+            snap->per_core[i].ml_confidence_factor = state->cores[i].last_confidence_factor;
             // v5.13.6.A — sell-side ML prediction surface (parity-check
             // Section J observability gap close). Operator sees per-cycle
             // exit_predictor blended prob + dominant horizon in dashboard.

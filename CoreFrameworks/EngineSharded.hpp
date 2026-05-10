@@ -599,6 +599,35 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             (unsigned)cfg.num_execution_cores, cfg.health_log_level);
     }
 
+    // v5.14.9.B — composite-required-for-ladder boot REFUSE.
+    // Ladder thresholds (risk_full/min_size_threshold) are tuned for composite
+    // confidence's practical scale [0.001, 0.3]; legacy 3-factor IC scale
+    // [0.05, 0.5] would behave wrong with the same thresholds. Operator who
+    // enables the ladder MUST also enable composite confidence — otherwise
+    // refuse boot with a clear error message rather than silently misbehave.
+    //
+    // Per-core override aware: if ANY core has ladder enabled (global or per-
+    // core override; per-core override added in v5.14.9.B.1), composite must
+    // be on engine-wide. Today (.B) only the global cfg is checked; .B.1
+    // extends the check to per-core overrides via the same shape.
+    if (cfg.risk_degradation_curve != CURVE_OFF
+        && cfg.confidence_composite_enabled == 0) {
+        fprintf(stderr,
+            "[boot] FATAL: risk_degradation_curve=%s requires "
+            "confidence_composite_enabled=1.\n"
+            "  Ladder thresholds are tuned for composite confidence scale; "
+            "legacy 3-factor IC scale would silently misbehave.\n"
+            "  Set confidence_composite_enabled=1 OR set "
+            "risk_degradation_curve=OFF (default).\n",
+            DegradationCurve_ToString(cfg.risk_degradation_curve));
+        if (cfg.health_log_path[0]) {
+            tt::Health_Log(tt::HEALTH_CRITICAL, "boot", -1,
+                "REFUSE: ladder requires composite (curve=%s, composite=0)",
+                DegradationCurve_ToString(cfg.risk_degradation_curve));
+        }
+        return;  // refuse boot; engine doesn't start
+    }
+
     // v5.7.2 — hardcoded strategy boot guard. AUTO (regime-gated) is the
     // recommended assignment for live/paper runs because it routes
     // strategy selection through the regime classifier. Hardcoded

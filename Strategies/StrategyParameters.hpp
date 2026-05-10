@@ -1332,38 +1332,61 @@ inline void ML_BuildParameters(
     if (out_prediction)  *out_prediction  = prediction;
     if (out_confidence)  *out_confidence  = conf_now;
 
-    // v5.12.1.D — confidence-conditional sizing infrastructure.
-    // INFRA ONLY in this ship: multiplier is plumbed but defaults
-    // cfg.risk_scale_by_confidence=0 → factor=1.0 → no behavior change.
-    // ACTIVATION GATED on Phase 4.B paper-test: operator measures whether
-    // the model is well-calibrated (predicted P=0.7 actually wins ~70%);
-    // if calibrated, flips cfg to 1 (linear) or 2 (quadratic) for
-    // proportional position scaling. Mis-calibrated model + scaling on =
-    // amplified losses, hence the gate.
+    // v5.14.9.B — soft risk degradation ladder (replaces v5.12.1.D broken math).
     //
-    // factor = clamp((p - threshold) / (1.0 - threshold), 0.0, 1.0)
-    //   mode 1 (linear)    → factor
-    //   mode 2 (quadratic) → factor*factor (steeper rolloff)
-    //   mode 0 (default)   → 1.0 (disabled)
+    // The v5.12.1.D math compared conf_now (composite scale ∈ [0.001, 0.3])
+    // against ml_buy_threshold (∈ [0.5, 0.7]) and silently blocked entries
+    // when composite_enabled=1 (factor=0 always). v5.14.9 ships
+    // FOREACH_DEGRADATION_CURVE registry + per-core gate_state cache so the
+    // ladder operates on composite confidence's actual scale via operator-
+    // tunable thresholds.
     //
-    // Branchless via mask-select if the compiler optimizes the ternary;
-    // slow-path budget allows simple branches either way.
-    if (config->risk_scale_by_confidence != 0) {
-        double denom = 1.0 - threshold;
-        double factor = 1.0;
-        if (denom > 1e-9 && conf_now >= threshold) {
-            double raw = (conf_now - threshold) / denom;
-            if (raw < 0.0) raw = 0.0;
-            if (raw > 1.0) raw = 1.0;
-            factor = (config->risk_scale_by_confidence == 2)
-                     ? (raw * raw)        // quadratic
-                     : raw;               // linear
-        } else {
-            factor = 0.0;  // confidence below threshold → block
-        }
-        // Hard cap at original size (factor ∈ [0, 1]); never upsize.
-        trade_size = FPN_Mul(trade_size, FPN_FromDouble<F>(factor));
+    // Read MASK_LADDER_ACTIVE from gate_state (populated upstream by
+    // SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE). MASK_LADDER_ACTIVE = (curve != OFF
+    // AND composite_enabled). When inactive: factor=1.0 (preserves pre-v5.14.9
+    // behavior bytewise). When active: dispatch to FOREACH_DEGRADATION_CURVE
+    // compute fn (branchless; cmov + fma). Factor=0 (ladder bottom) emits
+    // SHALT_LOW_CONFIDENCE + early-return for entry-log/ML-Status attribution
+    // (same shape as v5.9.1 confidence_hard_block_threshold path above).
+    double factor = 1.0;
+    if (gate_state && BITMAP_IS_SET(gate_state->flags, MASK_LADDER_ACTIVE)) {
+        factor = Confidence_DegradationScale(
+            config->risk_degradation_curve,
+            conf_now,
+            FPN_ToDouble(config->risk_full_size_threshold),
+            FPN_ToDouble(config->risk_min_size_threshold),
+            FPN_ToDouble(config->risk_min_size_pct));
     }
+    // Surface the per-cycle factor for PerCoreSnap.ml_confidence_factor
+    // observability. nullptr-safe: legacy callers without the wiring skip.
+    if (mctx && mctx->out_confidence_factor) {
+        *mctx->out_confidence_factor = factor;
+    }
+    // Ladder-bottom emission: factor=0 means "operator policy floor breached"
+    // (composite confidence below cfg.risk_min_size_threshold). Same gate-
+    // zeroing + SHALT path as the v5.9.1 hard-floor block above so the entry
+    // log + ML Status panel attribute the block correctly. Returns early
+    // (preserves the explicit SHALT pattern; readability beats marginal
+    // branchless gain at a single slow-path site per CLAUDE.md item 18(b)).
+    if (factor == 0.0 && gate_state && BITMAP_IS_SET(gate_state->flags, MASK_LADDER_ACTIVE)) {
+        out->bg_price_threshold   = FPN_Zero<F>();
+        out->bg_volume_threshold  = FPN_Zero<F>();
+        out->sg_take_profit_price = FPN_Zero<F>();
+        out->sg_stop_loss_price   = FPN_Zero<F>();
+        out->tp_pct               = FPN_Zero<F>();
+        out->sl_pct               = FPN_Zero<F>();
+        out->trade_size           = FPN_Zero<F>();
+        out->strategy_id          = STRATEGY_ML;
+        out->flags                = GATE_FLAG_BUY_BLOCKED;
+        for (int i = 0; i < 6; ++i) out->_pad[i] = 0;
+        if (mctx && mctx->out_strategy_halt_reason)
+            *mctx->out_strategy_halt_reason = SHALT_LOW_CONFIDENCE;
+        return;
+    }
+    // Normal ladder path: scale trade_size by factor (∈ [min_pct, 1.0] when
+    // ladder active; 1.0 when inactive). Hard cap at original size; never
+    // upsize. FPN multiply preserves accounting precision.
+    trade_size = FPN_Mul(trade_size, FPN_FromDouble<F>(factor));
 
     out->bg_price_threshold   = gate_price;
     out->bg_volume_threshold  = volume_threshold;
