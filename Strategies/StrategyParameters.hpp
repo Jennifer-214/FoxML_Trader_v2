@@ -46,6 +46,7 @@
 
 #include "../CoreFrameworks/ControllerConfig.hpp"
 #include "../CoreFrameworks/GateParameters.hpp"
+#include "../CoreFrameworks/SlowPathGateRegistry.hpp"  // v5.14.9.B.0 — FOREACH_SLOW_PATH_GATE + MASK_* + BITMAP_IS_SET
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/BarrierGate.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"
@@ -184,6 +185,24 @@ struct MLBuildContext {
     // (no-op). Surfaced via PerCoreSnap.ml_portfolio_turnover.
     void*               turnover_state;  // RollingTurnover* (void* avoids include cycle)
     int                 turnover_topk;   // matched to cfg.confidence_turnover_topk at boot
+
+    // v5.14.9.B — soft risk degradation ladder factor observability.
+    // ML_BuildParameters writes the per-cycle ladder factor (composite
+    // confidence × degradation curve) here when non-null. 1.0 = full
+    // size; (0, 1) = soft scale; 0.0 = ladder bottom (entry blocked
+    // with SHALT_LOW_CONFIDENCE). nullptr-safe: legacy/test callers
+    // can omit. Read by ML Status panel + PerCoreSnap.ml_confidence_factor.
+    double*             out_confidence_factor;
+    // v5.14.9.B.0 — pointer to the per-core slow-path gate cache
+    // (FOREACH_SLOW_PATH_GATE PER_CORE entries). Populated by the
+    // slow-path caller after ControllerConfig_ResolveForCore +
+    // SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE; ML_BuildParameters reads
+    // gate predicates via BITMAP_IS_SET(gate_state->flags, MASK_<NAME>).
+    // nullptr-safe: legacy/test callers without slow-path setup can
+    // omit (use sites fall back to inline cfg reads when null).
+    // void* (not SlowPathGateState*) avoids an include cycle —
+    // ML_BuildParameters casts at use sites.
+    void*               gate_state;  // SlowPathGateState* — cast at use site
 };
 
 //======================================================================================================
@@ -654,6 +673,11 @@ inline void ML_BuildParameters(
     double* out_confidence = nullptr;
     const RORRegressor<F>* ror_in = nullptr;
     const FPN<F>* ema_in = nullptr;
+    // v5.14.9.B.0 — per-core slow-path gate cache (FOREACH_SLOW_PATH_GATE
+    // PER_CORE entries). Wired by EventLoop_RebuildOneCore upstream.
+    // Null when caller didn't populate (legacy/test path) — use sites
+    // fall back to inline cfg-flag reads for compatibility.
+    const SlowPathGateState* gate_state = nullptr;
     if (mctx) {
         zoo = (CoreModelZoo<F>*)mctx->model_handle;
         conf_scorer = mctx->confidence;
@@ -661,6 +685,7 @@ inline void ML_BuildParameters(
         out_confidence = mctx->out_confidence;
         ror_in = (const RORRegressor<F>*)mctx->ror_regressor;
         ema_in = (const FPN<F>*)mctx->ema_price;
+        gate_state = (const SlowPathGateState*)mctx->gate_state;
     }
 
     // if no zoo or no models loaded, fall back to SimpleDip
@@ -897,7 +922,12 @@ inline void ML_BuildParameters(
                 //
                 // Cost: ~3µs/cycle when enabled (BuildCorr ~1µs +
                 // Cholesky ~2µs at N=8). Default off pays ~5ns flag check.
-                if (config->ridge_within_horizon &&
+                // v5.14.9.B.0 — read ridge_within_horizon gate from cached
+                // per-core state when wired; fall back to inline cfg-flag.
+                bool _ridge_gate = gate_state
+                    ? BITMAP_IS_SET(gate_state->flags, MASK_RIDGE_WITHIN_ACTIVE)
+                    : (config->ridge_within_horizon != 0);
+                if (_ridge_gate &&
                     ezoo->primary_count >= 2) {
                     // Build flat prediction history from ring. Use last K
                     // = min(REWARD_RING_SIZE, predict_call_count) records.
@@ -1095,7 +1125,11 @@ inline void ML_BuildParameters(
             for (int i = 0; i < ezoo_ex->exit_predictor_count; ++i) {
                 weights[i] = 1.0 / (double)n_loaded;  // uniform default
             }
-            if (config->exit_blender_mode &&
+            // v5.14.9.B.0 — read exit_blender gate from cached state when wired
+            bool _exit_blender_gate = gate_state
+                ? BITMAP_IS_SET(gate_state->flags, MASK_EXIT_BLENDER_ACTIVE)
+                : (config->exit_blender_mode != 0);
+            if (_exit_blender_gate &&
                 ezoo_ex->exit_predictor_count >= 2) {
                 // Build flat history from exit_reward_ring (last K records)
                 constexpr int RIDGE_HISTORY_DEPTH = 64;
@@ -1211,12 +1245,21 @@ inline void ML_BuildParameters(
     double base_threshold = FPN_ToDouble(config->ml_buy_threshold);
     double conf_now = 0.0;
     double threshold = base_threshold;
-    if (config->confidence_enabled && conf_scorer) {
+    // v5.14.9.B.0 — read confidence_enabled gate from cached per-core state
+    // when wired; fall back to inline cfg-flag for legacy/test callers.
+    bool _conf_gate = gate_state
+        ? BITMAP_IS_SET(gate_state->flags, MASK_CONFIDENCE_ENABLED)
+        : (config->confidence_enabled != 0);
+    if (_conf_gate && conf_scorer) {
         // v5.14.1.B — cfg-gated swap to 4-factor composite confidence.
         // Default (composite_enabled=0) preserves bytewise-identical
         // pre-v5.14.1 behavior. Composite path uses wall-clock now_us
         // for freshness; data_age=0 in legacy path keeps freshness=1.0.
-        if (config->confidence_composite_enabled) {
+        // v5.14.9.B.0 — read composite_enabled gate from cached state when wired
+        bool _comp_gate = gate_state
+            ? BITMAP_IS_SET(gate_state->flags, MASK_COMPOSITE_ENABLED)
+            : (config->confidence_composite_enabled != 0);
+        if (_comp_gate) {
             // v5.14.1.B.2 (PARITY-001) — now_us passed in by caller. Live:
             // clock_gettime at slow-path entry (non-deterministic OK; live
             // has no determinism contract). Backtest: tick.timestamp via
@@ -1246,7 +1289,8 @@ inline void ML_BuildParameters(
     // predictions. Hard-block when raw confidence is below the operator-
     // configured floor. Default 0.0 = disabled (preserves pre-v5.9.1).
     double hard_floor = FPN_ToDouble(config->confidence_hard_block_threshold);
-    if (config->confidence_enabled && hard_floor > 0.0 && conf_now < hard_floor) {
+    // v5.14.9.B.0 — same cached gate as the threshold-damping check above.
+    if (_conf_gate && hard_floor > 0.0 && conf_now < hard_floor) {
         out->bg_price_threshold   = FPN_Zero<F>();
         out->bg_volume_threshold  = FPN_Zero<F>();
         out->sg_take_profit_price = FPN_Zero<F>();

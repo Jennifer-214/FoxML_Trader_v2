@@ -45,6 +45,7 @@
 
 #include "../Limits.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"
+#include "SlowPathGateRegistry.hpp"  // v5.14.9.B.0 — FOREACH_SLOW_PATH_GATE + AUTOPOPULATE
 #include "../ML_Headers/LinearRegression3X.hpp"  // v4.0.3 D10 RegressionFeederX
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/RollingTurnover.hpp"  // v5.14.1.G — portfolio turnover
@@ -210,6 +211,13 @@ struct CoreContext {
     // log on sustained-breach + optionally trips per-core kill_switch
     // when cfg.auto_kill_on_drift=1. See ConfidenceScore.hpp DriftHistory.
     DriftHistory drift_history;
+    // v5.14.9.B.0 — per-core slow-path gate cache (FOREACH_SLOW_PATH_GATE
+    // PER_CORE entries). Populated by SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE
+    // at slow-path entry per core (after ControllerConfig_ResolveForCore).
+    // Read via BITMAP_IS_SET(gate_state.flags, MASK_<NAME>) at use sites
+    // in ML_BuildParameters body (mctx->gate_state pointer). Single-
+    // threaded per-core access; no atomics needed.
+    SlowPathGateState gate_state;
     double staged_prediction;      // prediction from last ML rebuild
     double active_prediction;      // prediction at last entry submit (0 = no open pos)
     double last_confidence;        // most recent ConfidenceScorer_Compute result
@@ -533,6 +541,13 @@ struct alignas(64) EventLoopState {
     std::atomic<uint64_t> ws_ticks_per_5s;
     uint64_t ws_bucket_last_sec[5];   // producer-only writer; not atomic
     uint32_t ws_bucket_count[5];      // producer-only writer; not atomic
+    // v5.14.9.B.0 — engine-wide slow-path gate cache (FOREACH_SLOW_PATH_GATE
+    // ENGINE_WIDE entries: lazy_rebuild + ws_flatten today). Populated by
+    // SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE once per slow-path entry with
+    // global cfg (no per-core resolution). Read via BITMAP_IS_SET at the
+    // engine-wide use sites (function-entry of EventLoop_RebuildOneCore +
+    // engine-wide outer ws-staleness check).
+    GlobalGateState global_gate_state;
 };
 
 }  // namespace tt
@@ -1982,15 +1997,24 @@ inline void EventLoop_RebuildOneCore(
     double      current_mid_price,
     int         book_imbalance_blocked,
     uint64_t    now_us = 0) {  // v5.12.1.B clock hoist; 0 = compute internally
+    // v5.14.9.B.0 — populate engine-wide gate cache (FOREACH_SLOW_PATH_GATE
+    // ENGINE_WIDE entries: lazy_rebuild + ws_flatten today). Per-core
+    // duplicate write across the engine-wide loop is acceptable (cfg
+    // values identical across cores; ~3ns idempotent OR-reduction).
+    // Reads downstream via BITMAP_IS_SET(state->global_gate_state.flags, ...)
+    if (state) {
+        SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE(state->global_gate_state, *config);
+    }
     // v5.12.2.B — lazy rebuild predicate. Evaluated at function entry so
     // we skip the heavy body when slow_state hasn't changed materially
     // since last rebuild. Three escape clauses force a full rebuild:
-    //   (1) cfg.lazy_rebuild_enabled == 0 (default; preserves baseline)
+    //   (1) MASK_LAZY_REBUILD_ACTIVE off (cfg.lazy_rebuild_enabled=0; default; preserves baseline)
     //   (2) caller didn't pass now_us (legacy + test path) — can't time-bound
     //   (3) sst is null OR last_rebuild bookkeeping is unset (warmup)
     // Otherwise check the time-bound + price-delta predicates.
-    if (config->lazy_rebuild_enabled && now_us != 0
-        && state && slot >= 0 && slot < MAX_EXECUTION_CORES) {
+    if (state && BITMAP_IS_SET(state->global_gate_state.flags, MASK_LAZY_REBUILD_ACTIVE)
+        && now_us != 0
+        && slot >= 0 && slot < MAX_EXECUTION_CORES) {
         auto* sst_lazy = state->cores[slot].slow_state;
         if (sst_lazy && sst_lazy->us_at_last_rebuild != 0
             && !FPN_IsZero(sst_lazy->price_at_last_rebuild)
@@ -2027,6 +2051,14 @@ inline void EventLoop_RebuildOneCore(
         // resolved" cfg and don't need to know about the override mechanism.
         ControllerConfig<F> resolved_cfg =
             ControllerConfig_ResolveForCore(*config, slot);
+        // v5.14.9.B.0 — populate per-core slow-path gate cache (PER_CORE
+        // entries of FOREACH_SLOW_PATH_GATE) from resolved_cfg. ML_BuildParameters
+        // reads via BITMAP_IS_SET(mctx->gate_state->flags, MASK_<NAME>); the
+        // mctx.gate_state pointer is wired downstream where mctx is constructed.
+        if (state && slot >= 0 && slot < MAX_EXECUTION_CORES) {
+            SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(
+                state->cores[slot].gate_state, resolved_cfg);
+        }
         // v4.0.3 D6: session-aware volume multiplier. Each session has its
         // own typical volume profile — cfg can require lower volume during
         // Asian session (when BTC is quieter) than US session (when busier).
@@ -2315,6 +2347,10 @@ inline void EventLoop_RebuildOneCore(
             // features enabled); pointer is non-null but mask = all-on
             // produces bytewise-identical output to pre-v5.11.18.
             ml_ctx.feature_mask = &resolved_cfg.core_feature_mask[slot];
+            // v5.14.9.B.0 — pointer to the per-core slow-path gate cache
+            // populated above by SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE.
+            // ML_BuildParameters reads gate predicates via BITMAP_IS_SET.
+            ml_ctx.gate_state = (void*)&state->cores[slot].gate_state;
             // v5.14.1.G — portfolio turnover wire. Pointer to per-core
             // CoreContext.turnover; ML_BuildParameters' buy-side blend
             // populator pushes top-K mask each cycle. void* in MLBuildContext
@@ -3137,8 +3173,21 @@ inline int EventLoop_CheckWsStaleness(EventLoopState<F>* state,
                                        const ControllerConfig<F>& cfg,
                                        double current_price,
                                        uint64_t now_us) {
-    // Fast-path: gate disabled (default). Inlined check; no atomic load.
-    if (!cfg.ws_dead_time_flatten_enabled) return 0;
+    // v5.14.9.B.0 — refresh engine-wide gate cache from cfg before reading.
+    // Cheap (~3ns OR-reduction); defensive against callers that haven't run
+    // RebuildOneCore yet (CheckWsStaleness fires every slow-path cycle in
+    // EngineSharded; RebuildOneCore fires every poll_interval cycle, so the
+    // gate cache could be missing/stale on the first few CheckWsStaleness
+    // calls before warmup). Re-populating here makes the cache source-of-
+    // truth equivalent to inline cfg read while preserving the registry-
+    // driven discipline.
+    if (state) {
+        SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE(state->global_gate_state, cfg);
+    }
+    bool _ws_gate = state
+        ? BITMAP_IS_SET(state->global_gate_state.flags, MASK_WS_FLATTEN_ACTIVE)
+        : (cfg.ws_dead_time_flatten_enabled != 0);
+    if (!_ws_gate) return 0;
 
     // Pre-warmup sentinel: producer hasn't published any tick yet.
     uint64_t last = state->last_ws_tick_us.load(std::memory_order_acquire);

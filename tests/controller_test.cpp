@@ -21224,6 +21224,160 @@ e3_skip_load:;
         unlink(tmp_cfg);
     }
 
+    //======================================================================
+    // [v5.14.9.B.0 — FOREACH_SLOW_PATH_GATE registry + AUTOPOPULATE]
+    //======================================================================
+    {
+        using namespace tt;
+        // Registry size assertions (>= per /readiness Check 21).
+        check("v5.14.9.B.0: PER_CORE count >= 5 (LADDER + 4 ML gates)",
+              FOREACH_SLOW_PATH_GATE_PER_CORE_COUNT >= 5);
+        check("v5.14.9.B.0: ENGINE_WIDE count >= 2 (LAZY_REBUILD + WS_FLATTEN)",
+              FOREACH_SLOW_PATH_GATE_ENGINE_WIDE_COUNT >= 2);
+        check("v5.14.9.B.0: total bits <= 16 (uint16_t cap)",
+              GATE_SLOW_PATH_TOTAL_COUNT <= 16);
+
+        // MASK_* constants are bit-distinct
+        check("v5.14.9.B.0: MASK_LADDER_ACTIVE != MASK_CONFIDENCE_ENABLED",
+              MASK_LADDER_ACTIVE != MASK_CONFIDENCE_ENABLED);
+        check("v5.14.9.B.0: MASK_LAZY_REBUILD_ACTIVE != MASK_WS_FLATTEN_ACTIVE",
+              MASK_LAZY_REBUILD_ACTIVE != MASK_WS_FLATTEN_ACTIVE);
+        check("v5.14.9.B.0: MASK_PER_CORE bits don't collide with ENGINE_WIDE bits",
+              (MASK_LADDER_ACTIVE | MASK_CONFIDENCE_ENABLED | MASK_COMPOSITE_ENABLED |
+               MASK_RIDGE_WITHIN_ACTIVE | MASK_EXIT_BLENDER_ACTIVE) ==
+              ((MASK_LADDER_ACTIVE | MASK_CONFIDENCE_ENABLED | MASK_COMPOSITE_ENABLED |
+                MASK_RIDGE_WITHIN_ACTIVE | MASK_EXIT_BLENDER_ACTIVE) &
+               ~(MASK_LAZY_REBUILD_ACTIVE | MASK_WS_FLATTEN_ACTIVE)));
+    }
+    {
+        using namespace tt;
+        // AUTOPOPULATE_PER_CORE — default cfg → all PER_CORE bits off
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        SlowPathGateState state;
+        state.flags = 0xFFFF;  // pre-populate to ensure AUTOPOPULATE clears
+        SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
+        check("v5.14.9.B.0: PER_CORE default cfg → MASK_LADDER_ACTIVE off",
+              !BITMAP_IS_SET(state.flags, MASK_LADDER_ACTIVE));
+        check("v5.14.9.B.0: PER_CORE default cfg → MASK_CONFIDENCE_ENABLED off (default cfg disables)",
+              !BITMAP_IS_SET(state.flags, MASK_CONFIDENCE_ENABLED));
+        check("v5.14.9.B.0: PER_CORE default cfg → MASK_COMPOSITE_ENABLED off",
+              !BITMAP_IS_SET(state.flags, MASK_COMPOSITE_ENABLED));
+        check("v5.14.9.B.0: PER_CORE default cfg → MASK_RIDGE_WITHIN_ACTIVE off",
+              !BITMAP_IS_SET(state.flags, MASK_RIDGE_WITHIN_ACTIVE));
+        check("v5.14.9.B.0: PER_CORE default cfg → MASK_EXIT_BLENDER_ACTIVE off",
+              !BITMAP_IS_SET(state.flags, MASK_EXIT_BLENDER_ACTIVE));
+        check("v5.14.9.B.0: PER_CORE default cfg → ENGINE_WIDE bits stay 0 in PER_CORE state",
+              !BITMAP_IS_SET(state.flags, MASK_LAZY_REBUILD_ACTIVE) &&
+              !BITMAP_IS_SET(state.flags, MASK_WS_FLATTEN_ACTIVE));
+    }
+    {
+        using namespace tt;
+        // AUTOPOPULATE_PER_CORE — ladder enabled with composite ON
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.risk_degradation_curve     = CURVE_LINEAR;
+        cfg.confidence_composite_enabled = 1;
+        SlowPathGateState state;
+        SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
+        check("v5.14.9.B.0: ladder + composite → MASK_LADDER_ACTIVE set",
+              BITMAP_IS_SET(state.flags, MASK_LADDER_ACTIVE));
+        check("v5.14.9.B.0: ladder + composite → MASK_COMPOSITE_ENABLED set",
+              BITMAP_IS_SET(state.flags, MASK_COMPOSITE_ENABLED));
+    }
+    {
+        using namespace tt;
+        // AUTOPOPULATE_PER_CORE — ladder enabled but composite OFF → NOT active
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.risk_degradation_curve     = CURVE_LINEAR;
+        cfg.confidence_composite_enabled = 0;
+        SlowPathGateState state;
+        SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
+        check("v5.14.9.B.0: ladder + NO composite → MASK_LADDER_ACTIVE off (composite required)",
+              !BITMAP_IS_SET(state.flags, MASK_LADDER_ACTIVE));
+        check("v5.14.9.B.0: NO composite → MASK_COMPOSITE_ENABLED off",
+              !BITMAP_IS_SET(state.flags, MASK_COMPOSITE_ENABLED));
+    }
+    {
+        using namespace tt;
+        // AUTOPOPULATE_PER_CORE — Ridge within-horizon enabled
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.ridge_within_horizon = 1;
+        SlowPathGateState state;
+        SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
+        check("v5.14.9.B.0: ridge_within_horizon=1 → MASK_RIDGE_WITHIN_ACTIVE set",
+              BITMAP_IS_SET(state.flags, MASK_RIDGE_WITHIN_ACTIVE));
+    }
+    {
+        using namespace tt;
+        // AUTOPOPULATE_PER_CORE — exit blender enabled
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.exit_blender_mode = 1;
+        SlowPathGateState state;
+        SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
+        check("v5.14.9.B.0: exit_blender_mode=1 → MASK_EXIT_BLENDER_ACTIVE set",
+              BITMAP_IS_SET(state.flags, MASK_EXIT_BLENDER_ACTIVE));
+    }
+    {
+        using namespace tt;
+        // AUTOPOPULATE_ENGINE_WIDE — default cfg → all ENGINE_WIDE bits off
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        GlobalGateState state;
+        state.flags = 0xFFFF;
+        SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE(state, cfg);
+        check("v5.14.9.B.0: ENGINE_WIDE default cfg → MASK_LAZY_REBUILD_ACTIVE off",
+              !BITMAP_IS_SET(state.flags, MASK_LAZY_REBUILD_ACTIVE));
+        check("v5.14.9.B.0: ENGINE_WIDE default cfg → MASK_WS_FLATTEN_ACTIVE off",
+              !BITMAP_IS_SET(state.flags, MASK_WS_FLATTEN_ACTIVE));
+        check("v5.14.9.B.0: ENGINE_WIDE default → PER_CORE bits stay 0 in ENGINE_WIDE state",
+              !BITMAP_IS_SET(state.flags, MASK_LADDER_ACTIVE) &&
+              !BITMAP_IS_SET(state.flags, MASK_CONFIDENCE_ENABLED) &&
+              !BITMAP_IS_SET(state.flags, MASK_COMPOSITE_ENABLED) &&
+              !BITMAP_IS_SET(state.flags, MASK_RIDGE_WITHIN_ACTIVE) &&
+              !BITMAP_IS_SET(state.flags, MASK_EXIT_BLENDER_ACTIVE));
+    }
+    {
+        using namespace tt;
+        // AUTOPOPULATE_ENGINE_WIDE — lazy_rebuild + ws_flatten enabled
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.lazy_rebuild_enabled = 1;
+        cfg.ws_dead_time_flatten_enabled = 1;
+        GlobalGateState state;
+        SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE(state, cfg);
+        check("v5.14.9.B.0: lazy_rebuild=1 → MASK_LAZY_REBUILD_ACTIVE set",
+              BITMAP_IS_SET(state.flags, MASK_LAZY_REBUILD_ACTIVE));
+        check("v5.14.9.B.0: ws_flatten=1 → MASK_WS_FLATTEN_ACTIVE set",
+              BITMAP_IS_SET(state.flags, MASK_WS_FLATTEN_ACTIVE));
+    }
+    {
+        using namespace tt;
+        // BITMAP_ANY multi-flag check (forward-leverage for grouped checks)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.ridge_within_horizon = 1;
+        SlowPathGateState state;
+        SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
+        const uint16_t blend_mask = MASK_RIDGE_WITHIN_ACTIVE | MASK_EXIT_BLENDER_ACTIVE;
+        check("v5.14.9.B.0: BITMAP_ANY catches ridge OR exit_blender (any blend gate)",
+              BITMAP_ANY(state.flags, blend_mask));
+        cfg.ridge_within_horizon = 0;
+        cfg.exit_blender_mode = 0;
+        SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
+        check("v5.14.9.B.0: BITMAP_ANY returns 0 when no blend gates active",
+              !BITMAP_ANY(state.flags, blend_mask));
+    }
+    {
+        using namespace tt;
+        // AUTOPOPULATE clears bits that go from set → unset (full re-evaluation)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.confidence_composite_enabled = 1;
+        SlowPathGateState state;
+        SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
+        check("v5.14.9.B.0: AUTOPOPULATE sets composite when cfg=1",
+              BITMAP_IS_SET(state.flags, MASK_COMPOSITE_ENABLED));
+        cfg.confidence_composite_enabled = 0;
+        SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
+        check("v5.14.9.B.0: AUTOPOPULATE CLEARS composite when cfg flips to 0 (full re-eval)",
+              !BITMAP_IS_SET(state.flags, MASK_COMPOSITE_ENABLED));
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
