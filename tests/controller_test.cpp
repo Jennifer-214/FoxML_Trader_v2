@@ -47,6 +47,7 @@
 #include "../MemHeaders/RunHistory.hpp"                  // v5.3.2 Phase C — JSONL append-only run history
 #include "../MemHeaders/HealthLog.hpp"                   // v5.4.0 Phase 0.1 — structured operational diagnostic log
 #include "../MemHeaders/BitmapMacros.hpp"                // v5.14.8.A.0.b — reusable BITMAP_* API for bit-packed flag accessors
+#include "../MemHeaders/FailureModeRegistry.hpp"         // v5.14.8.B — FOREACH_FAILURE_MODE pseudo-registry
 #include "../ML_Headers/StampBoundModelConstRegistry.hpp"  // v5.14.8.A.0.b — registry tests + presence column dispatch
 #include <type_traits>                                   // v5.14.8.A.0.b — std::is_array_v / std::extent_v for char-array dispatch
 #include "../Strategies/StrategyLifecycle.hpp"           // v5.4.0 Phase 1.2 — Strategy_InitPerCore / FreePerCore
@@ -20940,6 +20941,57 @@ e3_skip_load:;
         unlink(stamp_path);
         unlink(model_path);
         rmdir(tmp_dir);
+    }
+
+    // ==================================================================
+    // v5.14.8.B — FailureModeRegistry foundation tests
+    // ==================================================================
+    // Verifies FOREACH_FAILURE_MODE registry shape + BIT_FLAG bit allocation
+    // + MASK constants. Migration of consumers (PerCoreSnap + ML Status panel)
+    // lands in v5.14.8.C.
+    {
+        // Registry has 5 entries today (2 BIT_FLAG + 1 PERCENT_U8 + 2 COUNTER_U32).
+        // Future v5.14.8.E adds stale_feature_events (COUNTER_U32) → 6.
+        check("v5.14.8.B: FOREACH_FAILURE_MODE has >= 5 entries today",
+              FOREACH_FAILURE_MODE_COUNT >= 5);
+
+        // BIT_FLAG count: 2 today (ml_model_load_failed, ml_scaler_load_failed).
+        // Must fit in uint16_t failure_flags (16 bits).
+        static_assert(tt::FAILURE_BIT_COUNT <= 16,
+                      "v5.14.8.B: FOREACH_FAILURE_MODE BIT_FLAG count exceeds uint16_t");
+        check("v5.14.8.B: FAILURE_BIT_COUNT >= 2 (ml_model_load_failed + ml_scaler_load_failed)",
+              tt::FAILURE_BIT_COUNT >= 2);
+        check("v5.14.8.B: FAILURE_BIT_COUNT <= 16 (uint16_t cap)",
+              tt::FAILURE_BIT_COUNT <= 16);
+
+        // MASK constants are distinct (no bit collisions):
+        static_assert(FAILURE_MASK_ml_model_load_failed != FAILURE_MASK_ml_scaler_load_failed,
+                      "v5.14.8.B: BIT_FLAG mask collision");
+        check("v5.14.8.B: 2 BIT_FLAG masks distinct (no overlap)",
+              __builtin_popcount(FAILURE_MASK_ml_model_load_failed | FAILURE_MASK_ml_scaler_load_failed) == 2);
+
+        // FAILURE_IS_SET / SET / CLR semantic test on synthetic struct:
+        struct FailureTest { uint16_t failure_flags = 0; };
+        FailureTest s{};
+        check("v5.14.8.B: FAILURE_IS_SET empty initial state",
+              !FAILURE_IS_SET(s, ml_model_load_failed));
+        FAILURE_SET(s, ml_model_load_failed);
+        check("v5.14.8.B: FAILURE_IS_SET after FAILURE_SET",
+              FAILURE_IS_SET(s, ml_model_load_failed));
+        FAILURE_SET(s, ml_scaler_load_failed);
+        check("v5.14.8.B: FAILURE_ANY multi-flag",
+              FAILURE_ANY(s, FAILURE_MASK_ml_model_load_failed | FAILURE_MASK_ml_scaler_load_failed));
+        FAILURE_CLR(s, ml_model_load_failed);
+        check("v5.14.8.B: FAILURE_CLR removes target",
+              !FAILURE_IS_SET(s, ml_model_load_failed));
+        check("v5.14.8.B: FAILURE_CLR leaves other bits",
+              FAILURE_IS_SET(s, ml_scaler_load_failed));
+
+        // Group_id discipline: GROUP_NAN_EVENTS = 1, GROUP_STANDALONE = 0
+        static_assert(tt::GROUP_STANDALONE == 0,
+                      "v5.14.8.B: GROUP_STANDALONE must be 0 (sentinel)");
+        check("v5.14.8.B: GROUP_NAN_EVENTS != GROUP_STANDALONE (combined-display group has non-zero id)",
+              tt::GROUP_NAN_EVENTS != tt::GROUP_STANDALONE);
     }
 
     printf("\n======================================\n");
