@@ -13,6 +13,42 @@
 # engine.cfg has these documented; copy from there if you need a current
 # template. Defaults in code are the source of truth — see
 # `ControllerConfig_Default` in `CoreFrameworks/ControllerConfig.hpp`.
+#
+#==============================================================================
+# v5.14.9.F.4 — BOOLEAN CFG FLAGS BIT-PACKED INTO DOMAIN BITMAPS
+#==============================================================================
+# 21 boolean cfg flags migrated from individual `int` fields to 5 domain
+# bitmaps (uint8_t / uint16_t) on ControllerConfig. Legacy key names PRESERVED
+# for backward compat — operators don't need to change engine.cfg files.
+#
+# Adding a new boolean cfg flag = 1 row in the appropriate FOREACH_<DOMAIN>_CFG_FLAG
+# registry; parser + default + GUI all auto-flow.
+#
+# DOMAIN REGISTRIES (see CoreFrameworks/{Lifecycle,Gate,Risk,Ops}CfgFlagRegistry.hpp
+# + ML_Headers/MlCfgFlagRegistry.hpp for full lists with doc strings):
+#
+#   LIFECYCLE (position-exit mechanics):
+#     partial_exit_enabled  breakeven_on_partial  breakeven_on_profit
+#
+#   GATE (entry/exit gate mechanics):
+#     depth_enabled  gate_ema_enabled  no_trade_band_enabled
+#     cost_gate_enabled  barrier_gate_enabled  param_staleness_gate_enabled
+#
+#   ML (ML/confidence mechanics; confidence_composite_enabled is stamp-bound):
+#     confidence_enabled  confidence_composite_enabled  bandit_enabled
+#     exit_bandit_enabled  use_exit_model  foxml_vol_scaling_enabled
+#     lazy_rebuild_enabled
+#
+#   RISK (sizing/safety mechanics; kill_switch_enabled default ON):
+#     kill_switch_enabled  vol_sizing_enabled  ws_dead_time_flatten_enabled
+#
+#   OPS (operational mechanics):
+#     session_filter_enabled  notify_enabled
+#
+# Set any of these to 0 or 1 in this file using the legacy key name.
+# Engine parser auto-flows the assignment to the correct bitmap bit.
+# Pattern documented in tick-trader-percore-workspace/DESIGN_SPECS/
+# heterogeneous-registry-pattern.md (Form 2 DOMAIN SPLIT).
 #==============================================================================
 
 # data source

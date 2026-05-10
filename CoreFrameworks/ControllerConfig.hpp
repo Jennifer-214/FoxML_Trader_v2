@@ -1949,137 +1949,71 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 
     //--- int ---
     CFG_PARSE_INT(sl_cooldown_adaptive)
-    // v5.14.9.F — lifecycle_cfg_flags bitmap (3 fields migrated; legacy keys preserved for back-compat)
-    if (strcmp(key, "partial_exit_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.lifecycle_cfg_flags |=  MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED;
-      else   cfg.lifecycle_cfg_flags &= (uint8_t)~MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED;
-      continue;
-    }
-    if (strcmp(key, "breakeven_on_partial") == 0) {
-      int v = atoi(val);
-      if (v) cfg.lifecycle_cfg_flags |=  MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL;
-      else   cfg.lifecycle_cfg_flags &= (uint8_t)~MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PARTIAL;
-      continue;
-    }
-    if (strcmp(key, "breakeven_on_profit") == 0) {
-      int v = atoi(val);
-      if (v) cfg.lifecycle_cfg_flags |=  MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT;
-      else   cfg.lifecycle_cfg_flags &= (uint8_t)~MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT;
-      continue;
-    }
-    // v5.14.9.F.1 — gate_cfg_flags bitmap (6 fields migrated; legacy keys preserved for back-compat)
-    if (strcmp(key, "depth_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.gate_cfg_flags |=  MASK_GATE_CFG_DEPTH_ENABLED;
-      else   cfg.gate_cfg_flags &= (uint8_t)~MASK_GATE_CFG_DEPTH_ENABLED;
-      continue;
-    }
-    if (strcmp(key, "gate_ema_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.gate_cfg_flags |=  MASK_GATE_CFG_GATE_EMA_ENABLED;
-      else   cfg.gate_cfg_flags &= (uint8_t)~MASK_GATE_CFG_GATE_EMA_ENABLED;
-      continue;
-    }
-    if (strcmp(key, "no_trade_band_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.gate_cfg_flags |=  MASK_GATE_CFG_NO_TRADE_BAND_ENABLED;
-      else   cfg.gate_cfg_flags &= (uint8_t)~MASK_GATE_CFG_NO_TRADE_BAND_ENABLED;
-      continue;
-    }
-    if (strcmp(key, "cost_gate_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.gate_cfg_flags |=  MASK_GATE_CFG_COST_GATE_ENABLED;
-      else   cfg.gate_cfg_flags &= (uint8_t)~MASK_GATE_CFG_COST_GATE_ENABLED;
-      continue;
-    }
-    if (strcmp(key, "barrier_gate_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.gate_cfg_flags |=  MASK_GATE_CFG_BARRIER_GATE_ENABLED;
-      else   cfg.gate_cfg_flags &= (uint8_t)~MASK_GATE_CFG_BARRIER_GATE_ENABLED;
-      continue;
-    }
-    if (strcmp(key, "param_staleness_gate_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.gate_cfg_flags |=  MASK_GATE_CFG_PARAM_STALENESS_GATE_ENABLED;
-      else   cfg.gate_cfg_flags &= (uint8_t)~MASK_GATE_CFG_PARAM_STALENESS_GATE_ENABLED;
-      continue;
-    }
-    // v5.14.9.F.2 — ml_cfg_flags bitmap (7 fields migrated; legacy keys preserved for back-compat)
-    if (strcmp(key, "confidence_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.ml_cfg_flags |=  MASK_ML_CFG_CONFIDENCE_ENABLED;
-      else   cfg.ml_cfg_flags &= (uint16_t)~MASK_ML_CFG_CONFIDENCE_ENABLED;
-      continue;
-    }
-    if (strcmp(key, "confidence_composite_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.ml_cfg_flags |=  MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED;
-      else   cfg.ml_cfg_flags &= (uint16_t)~MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED;
-      continue;
-    }
-    if (strcmp(key, "bandit_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.ml_cfg_flags |=  MASK_ML_CFG_BANDIT_ENABLED;
-      else   cfg.ml_cfg_flags &= (uint16_t)~MASK_ML_CFG_BANDIT_ENABLED;
-      continue;
-    }
-    if (strcmp(key, "exit_bandit_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.ml_cfg_flags |=  MASK_ML_CFG_EXIT_BANDIT_ENABLED;
-      else   cfg.ml_cfg_flags &= (uint16_t)~MASK_ML_CFG_EXIT_BANDIT_ENABLED;
-      continue;
-    }
-    if (strcmp(key, "use_exit_model") == 0) {
-      int v = atoi(val);
-      if (v) cfg.ml_cfg_flags |=  MASK_ML_CFG_USE_EXIT_MODEL;
-      else   cfg.ml_cfg_flags &= (uint16_t)~MASK_ML_CFG_USE_EXIT_MODEL;
-      continue;
-    }
-    if (strcmp(key, "foxml_vol_scaling_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.ml_cfg_flags |=  MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED;
-      else   cfg.ml_cfg_flags &= (uint16_t)~MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED;
-      continue;
-    }
-    if (strcmp(key, "lazy_rebuild_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.ml_cfg_flags |=  MASK_ML_CFG_LAZY_REBUILD_ENABLED;
-      else   cfg.ml_cfg_flags &= (uint16_t)~MASK_ML_CFG_LAZY_REBUILD_ENABLED;
-      continue;
-    }
-    // v5.14.9.F.3 — risk_cfg_flags bitmap (3 fields migrated; legacy keys preserved for back-compat)
-    if (strcmp(key, "kill_switch_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.risk_cfg_flags |=  MASK_RISK_CFG_KILL_SWITCH_ENABLED;
-      else   cfg.risk_cfg_flags &= (uint8_t)~MASK_RISK_CFG_KILL_SWITCH_ENABLED;
-      continue;
-    }
-    if (strcmp(key, "vol_sizing_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.risk_cfg_flags |=  MASK_RISK_CFG_VOL_SIZING_ENABLED;
-      else   cfg.risk_cfg_flags &= (uint8_t)~MASK_RISK_CFG_VOL_SIZING_ENABLED;
-      continue;
-    }
-    if (strcmp(key, "ws_dead_time_flatten_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.risk_cfg_flags |=  MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED;
-      else   cfg.risk_cfg_flags &= (uint8_t)~MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED;
-      continue;
-    }
-    // v5.14.9.F.3 — ops_cfg_flags bitmap (2 fields migrated; legacy keys preserved for back-compat)
-    if (strcmp(key, "session_filter_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.ops_cfg_flags |=  MASK_OPS_CFG_SESSION_FILTER_ENABLED;
-      else   cfg.ops_cfg_flags &= (uint8_t)~MASK_OPS_CFG_SESSION_FILTER_ENABLED;
-      continue;
-    }
-    if (strcmp(key, "notify_enabled") == 0) {
-      int v = atoi(val);
-      if (v) cfg.ops_cfg_flags |=  MASK_OPS_CFG_NOTIFY_ENABLED;
-      else   cfg.ops_cfg_flags &= (uint8_t)~MASK_OPS_CFG_NOTIFY_ENABLED;
-      continue;
-    }
+    // v5.14.9.F.4 — Parser auto-flow via FOREACH walks. Replaces 21 inline if-strcmp
+    // branches (~130 lines) with 5 FOREACH walks (~40 lines). Adding a new bool flag
+    // to ANY of the 5 domain registries = 1 row in the FOREACH macro; parser auto-flows
+    // via this walk. Closes TECH_DEBT-009 boolean subset.
+    //
+    // Pattern: per-domain X macro expands to one if-strcmp branch; FOREACH_<DOMAIN>_CFG_FLAG
+    // walks N entries. The `continue;` inside each branch breaks out of the parser's
+    // outer for/while loop (NOT a do-while — that's why X is expanded inline, not wrapped).
+    //
+    // Each X is locally #define'd + #undef'd to avoid namespace pollution.
+
+    // LIFECYCLE bitmap walk
+    #define X(name, legacy_field, doc) \
+      if (strcmp(key, #legacy_field) == 0) { \
+        int _v = atoi(val); \
+        if (_v) cfg.lifecycle_cfg_flags |=  MASK_LIFECYCLE_CFG_##name; \
+        else    cfg.lifecycle_cfg_flags &= (uint8_t)~MASK_LIFECYCLE_CFG_##name; \
+        continue; \
+      }
+    FOREACH_LIFECYCLE_CFG_FLAG(X)
+    #undef X
+
+    // GATE bitmap walk
+    #define X(name, legacy_field, doc) \
+      if (strcmp(key, #legacy_field) == 0) { \
+        int _v = atoi(val); \
+        if (_v) cfg.gate_cfg_flags |=  MASK_GATE_CFG_##name; \
+        else    cfg.gate_cfg_flags &= (uint8_t)~MASK_GATE_CFG_##name; \
+        continue; \
+      }
+    FOREACH_GATE_CFG_FLAG(X)
+    #undef X
+
+    // ML bitmap walk
+    #define X(name, legacy_field, doc) \
+      if (strcmp(key, #legacy_field) == 0) { \
+        int _v = atoi(val); \
+        if (_v) cfg.ml_cfg_flags |=  MASK_ML_CFG_##name; \
+        else    cfg.ml_cfg_flags &= (uint16_t)~MASK_ML_CFG_##name; \
+        continue; \
+      }
+    FOREACH_ML_CFG_FLAG(X)
+    #undef X
+
+    // RISK bitmap walk
+    #define X(name, legacy_field, doc) \
+      if (strcmp(key, #legacy_field) == 0) { \
+        int _v = atoi(val); \
+        if (_v) cfg.risk_cfg_flags |=  MASK_RISK_CFG_##name; \
+        else    cfg.risk_cfg_flags &= (uint8_t)~MASK_RISK_CFG_##name; \
+        continue; \
+      }
+    FOREACH_RISK_CFG_FLAG(X)
+    #undef X
+
+    // OPS bitmap walk
+    #define X(name, legacy_field, doc) \
+      if (strcmp(key, #legacy_field) == 0) { \
+        int _v = atoi(val); \
+        if (_v) cfg.ops_cfg_flags |=  MASK_OPS_CFG_##name; \
+        else    cfg.ops_cfg_flags &= (uint8_t)~MASK_OPS_CFG_##name; \
+        continue; \
+      }
+    FOREACH_OPS_CFG_FLAG(X)
+    #undef X
     CFG_PARSE_PCT(breakeven_buffer_pct)
     // depth_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
     CFG_PARSE_INT(use_real_money)
