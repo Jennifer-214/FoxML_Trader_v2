@@ -619,20 +619,28 @@ static inline void TUI_CopySnapshotSharded(
             // roles in a zoo share the same training pipeline so they
             // typically agree, but per-role granularity is preserved by
             // the underlying ModelHandle.scaler — this surface aggregates.)
-            uint8_t any_scaler_present = 0;
-            uint8_t any_scaler_failed  = 0;
+            //
+            // v5.14.9.H (TECH_DEBT-013 candidate 7): 2 bools collapsed into
+            // uint8_t scaler_summary_flags bitmap. 2 bits used; 6 bits headroom
+            // for future scaler observability (e.g., partial-load, version-
+            // mismatch, calibration-stale). Transient local; not persisted to
+            // wire format (downstream surfaces ml_scaler_present + failure_flags
+            // bit are the canonical persisted state).
+            static constexpr uint8_t MASK_SCALER_PRESENT = (uint8_t)(1u << 0);
+            static constexpr uint8_t MASK_SCALER_FAILED  = (uint8_t)(1u << 1);
+            uint8_t scaler_summary_flags = 0;
             if (zoo) {
-                if (zoo->buy_signal.scaler.has_scaler)   any_scaler_present = 1;
-                if (zoo->barrier.scaler.has_scaler)      any_scaler_present = 1;
-                if (zoo->regime.scaler.has_scaler)       any_scaler_present = 1;
-                if (zoo->exit.scaler.has_scaler)         any_scaler_present = 1;
-                if (zoo->buy_signal.scaler_load_failed)  any_scaler_failed  = 1;
-                if (zoo->barrier.scaler_load_failed)     any_scaler_failed  = 1;
-                if (zoo->regime.scaler_load_failed)      any_scaler_failed  = 1;
-                if (zoo->exit.scaler_load_failed)        any_scaler_failed  = 1;
+                if (zoo->buy_signal.scaler.has_scaler)   scaler_summary_flags |= MASK_SCALER_PRESENT;
+                if (zoo->barrier.scaler.has_scaler)      scaler_summary_flags |= MASK_SCALER_PRESENT;
+                if (zoo->regime.scaler.has_scaler)       scaler_summary_flags |= MASK_SCALER_PRESENT;
+                if (zoo->exit.scaler.has_scaler)         scaler_summary_flags |= MASK_SCALER_PRESENT;
+                if (zoo->buy_signal.scaler_load_failed)  scaler_summary_flags |= MASK_SCALER_FAILED;
+                if (zoo->barrier.scaler_load_failed)     scaler_summary_flags |= MASK_SCALER_FAILED;
+                if (zoo->regime.scaler_load_failed)      scaler_summary_flags |= MASK_SCALER_FAILED;
+                if (zoo->exit.scaler_load_failed)        scaler_summary_flags |= MASK_SCALER_FAILED;
             }
-            snap->per_core[i].ml_scaler_present     = any_scaler_present;
-            if (any_scaler_failed) {
+            snap->per_core[i].ml_scaler_present = BITMAP_IS_SET(scaler_summary_flags, MASK_SCALER_PRESENT) ? 1 : 0;
+            if (BITMAP_IS_SET(scaler_summary_flags, MASK_SCALER_FAILED)) {
                 FAILURE_SET(snap->per_core[i], ml_scaler_load_failed);
             }
             // v5.10.0a.G.10 — populate ensemble snapshot from ezoo (when active).
