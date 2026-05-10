@@ -729,6 +729,56 @@ winsor_pct_low=0.005    # default 0.5% (lower clip percentile)
 winsor_pct_high=0.995   # default 99.5% (upper clip percentile)
 
 #==============================================================================
+# v5.14.9.A — SOFT RISK DEGRADATION LADDER
+#==============================================================================
+# Composite confidence → sizing-multiplier scaling. Replaces the broken-for-
+# composite v5.12.1.D math (`risk_scale_by_confidence`; deprecated and back-
+# compat-translated to `risk_degradation_curve` below).
+#
+# How it works:
+#   - When ladder is active (curve != OFF AND composite_enabled=1), the
+#     post-prediction trade size scales by a curve over composite confidence
+#   - High confidence (>= full_size_threshold) → factor=1.0 (full size)
+#   - Low confidence (<= min_size_threshold)   → factor=min_size_pct
+#   - Strictly below min_size_threshold        → factor=0 → BUY_BLOCKED +
+#                                                 SHALT_LOW_CONFIDENCE halt
+#                                                 reason emission
+#   - Between thresholds: curve-shaped interpolation
+#
+# Curves (pick via risk_degradation_curve):
+#   OFF    (0) — disabled; preserves pre-v5.14.9 behavior bytewise (default)
+#   LINEAR (1) — linear interp between (min, min_pct) and (full, 1.0)
+#   EXP    (2) — quadratic falloff; preserves more size in middle
+#   STEP   (3) — binary above/below midpoint; debug shape
+#
+# REQUIRES cfg.confidence_composite_enabled=1. Boot REFUSE fires otherwise
+# (v5.14.9.B) — ladder thresholds are tuned for composite confidence's
+# practical scale [0.001, 0.3]; legacy 3-factor IC scale [0.05, 0.5] would
+# behave wrong with the same thresholds.
+#
+# Stamp-bound (v5.14.9.C): drift detection at boot if cfg differs from
+# training-time stamp. Operator who changes ladder between training and
+# inference gets clear error message.
+#
+# Per-core override (v5.14.9.B.1): RUNTIME-ONLY; not stamp-bound. Matches
+# existing per-core risk_pct precedent — operator policy on top of the
+# stamp-protected global cfg.
+#
+#   core_0_risk_degradation_curve=LINEAR    # aggressive core
+#   core_0_risk_full_size_threshold=0.20
+#   core_0_risk_min_size_pct=0.05
+#   core_1_risk_degradation_curve=STEP      # debug core
+#
+# Default OFF preserves pre-v5.14.9 sizing behavior; activate after paper-
+# test confirms model calibration. Mis-calibrated model + ladder ON =
+# amplified drawdowns, hence the gate.
+
+risk_degradation_curve=OFF      # OFF (default), LINEAR, EXP, or STEP (or 0/1/2/3)
+risk_full_size_threshold=0.15   # full size at composite conf >= 0.15
+risk_min_size_threshold=0.05    # ladder bottom below this
+risk_min_size_pct=0.10          # 10% of base at min threshold; 0.0 = hard ladder bottom
+
+#==============================================================================
 # v5.14.4 — RECONCILE MODE (boot-time exchange-truth sync; LIVE only)
 #==============================================================================
 # At boot in live mode (engine_mode=sharded + use_real_money=1), engine

@@ -21045,6 +21045,185 @@ e3_skip_load:;
               FOREACH_FAILURE_MODE_COUNT >= 6);
     }
 
+    //======================================================================
+    // [v5.14.9.A — FOREACH_DEGRADATION_CURVE registry + branchless curves]
+    //======================================================================
+    {
+        // Registry sanity (uses >= per /readiness Check 21)
+        check("v5.14.9.A: FOREACH_DEGRADATION_CURVE_COUNT >= 4 (OFF/LINEAR/EXP/STEP)",
+              FOREACH_DEGRADATION_CURVE_COUNT >= 4);
+
+        // Enum values lock to the registry tuple
+        check("v5.14.9.A: enum CURVE_OFF == 0",    CURVE_OFF == 0);
+        check("v5.14.9.A: enum CURVE_LINEAR == 1", CURVE_LINEAR == 1);
+        check("v5.14.9.A: enum CURVE_EXP == 2",    CURVE_EXP == 2);
+        check("v5.14.9.A: enum CURVE_STEP == 3",   CURVE_STEP == 3);
+
+        // OFF: factor=1.0 unconditionally regardless of inputs
+        check("v5.14.9.A: OFF returns 1.0 at conf=0",
+              Confidence_DegradationScale_Off(0.0, 0.15, 0.05, 0.10) == 1.0);
+        check("v5.14.9.A: OFF returns 1.0 at conf=1.0",
+              Confidence_DegradationScale_Off(1.0, 0.15, 0.05, 0.10) == 1.0);
+        check("v5.14.9.A: OFF returns 1.0 with degenerate thresholds",
+              Confidence_DegradationScale_Off(0.5, 0.0, 1.0, 0.5) == 1.0);
+
+        // LINEAR endpoints
+        check("v5.14.9.A: LINEAR returns 1.0 at conf >= full",
+              Confidence_DegradationScale_Linear(0.20, 0.15, 0.05, 0.10) == 1.0);
+        check("v5.14.9.A: LINEAR returns min_pct at conf <= min",
+              Confidence_DegradationScale_Linear(0.02, 0.15, 0.05, 0.10) == 0.10);
+        check("v5.14.9.A: LINEAR returns 1.0 at conf == full exactly",
+              Confidence_DegradationScale_Linear(0.15, 0.15, 0.05, 0.10) == 1.0);
+        check("v5.14.9.A: LINEAR returns min_pct at conf == min exactly",
+              Confidence_DegradationScale_Linear(0.05, 0.15, 0.05, 0.10) == 0.10);
+
+        // LINEAR midpoint: t=0.5 → factor = min_pct + 0.5 * (1-min_pct) = 0.55
+        check("v5.14.9.A: LINEAR midpoint (conf=0.10) returns 0.55",
+              fabs(Confidence_DegradationScale_Linear(0.10, 0.15, 0.05, 0.10) - 0.55) < 1e-9);
+
+        // EXP: same endpoints as LINEAR; preserves more size in middle
+        check("v5.14.9.A: EXP returns 1.0 at conf >= full",
+              Confidence_DegradationScale_Exp(0.20, 0.15, 0.05, 0.10) == 1.0);
+        check("v5.14.9.A: EXP returns min_pct at conf <= min",
+              Confidence_DegradationScale_Exp(0.02, 0.15, 0.05, 0.10) == 0.10);
+        // EXP midpoint: t=0.5 → factor = min_pct + 0.25*(1-min_pct) = 0.325
+        // (vs LINEAR's 0.55 — EXP drops faster near min, recovers more near full)
+        check("v5.14.9.A: EXP midpoint (conf=0.10) returns 0.325 (steeper than LINEAR)",
+              fabs(Confidence_DegradationScale_Exp(0.10, 0.15, 0.05, 0.10) - 0.325) < 1e-9);
+
+        // STEP: binary above/below midpoint; midpoint = (full+min)/2 = 0.10
+        check("v5.14.9.A: STEP returns 1.0 above midpoint",
+              Confidence_DegradationScale_Step(0.12, 0.15, 0.05, 0.10) == 1.0);
+        check("v5.14.9.A: STEP returns min_pct below midpoint",
+              Confidence_DegradationScale_Step(0.08, 0.15, 0.05, 0.10) == 0.10);
+        check("v5.14.9.A: STEP returns 1.0 at midpoint exactly",
+              Confidence_DegradationScale_Step(0.10, 0.15, 0.05, 0.10) == 1.0);
+
+        // Misconfig guard: full <= min → return min_pct (predictable degraded)
+        check("v5.14.9.A: LINEAR misconfig (full=min) returns min_pct",
+              Confidence_DegradationScale_Linear(0.50, 0.10, 0.10, 0.25) == 0.25);
+        check("v5.14.9.A: EXP misconfig (full<min) returns min_pct",
+              Confidence_DegradationScale_Exp(0.50, 0.05, 0.10, 0.30) == 0.30);
+
+        // Dispatch wrapper bounds check: out-of-range returns 1.0 (degrades to OFF)
+        check("v5.14.9.A: dispatch out-of-range curve returns 1.0",
+              Confidence_DegradationScale(99, 0.10, 0.15, 0.05, 0.10) == 1.0);
+        check("v5.14.9.A: dispatch negative curve returns 1.0",
+              Confidence_DegradationScale(-1, 0.10, 0.15, 0.05, 0.10) == 1.0);
+
+        // Dispatch wrapper picks correct curve fn
+        check("v5.14.9.A: dispatch OFF returns 1.0",
+              Confidence_DegradationScale(CURVE_OFF, 0.0, 0.15, 0.05, 0.10) == 1.0);
+        check("v5.14.9.A: dispatch LINEAR matches direct call",
+              Confidence_DegradationScale(CURVE_LINEAR, 0.10, 0.15, 0.05, 0.10) ==
+              Confidence_DegradationScale_Linear(0.10, 0.15, 0.05, 0.10));
+
+        // ToString round-trip
+        check("v5.14.9.A: ToString(OFF) == \"OFF\"",
+              strcmp(DegradationCurve_ToString(CURVE_OFF), "OFF") == 0);
+        check("v5.14.9.A: ToString(LINEAR) == \"LINEAR\"",
+              strcmp(DegradationCurve_ToString(CURVE_LINEAR), "LINEAR") == 0);
+        check("v5.14.9.A: ToString invalid returns \"INVALID\"",
+              strcmp(DegradationCurve_ToString(99), "INVALID") == 0);
+
+        // FromString — string form, case-insensitive
+        check("v5.14.9.A: FromString(\"OFF\") == 0",
+              DegradationCurve_FromString("OFF") == CURVE_OFF);
+        check("v5.14.9.A: FromString(\"linear\") (lowercase) == 1",
+              DegradationCurve_FromString("linear") == CURVE_LINEAR);
+        check("v5.14.9.A: FromString(\"Exp\") (mixed case) == 2",
+              DegradationCurve_FromString("Exp") == CURVE_EXP);
+        check("v5.14.9.A: FromString(\"STEP\") == 3",
+              DegradationCurve_FromString("STEP") == CURVE_STEP);
+
+        // FromString — numeric form
+        check("v5.14.9.A: FromString(\"0\") == CURVE_OFF",
+              DegradationCurve_FromString("0") == CURVE_OFF);
+        check("v5.14.9.A: FromString(\"3\") == CURVE_STEP",
+              DegradationCurve_FromString("3") == CURVE_STEP);
+
+        // FromString — invalid input returns -1
+        check("v5.14.9.A: FromString(\"BOGUS\") returns -1",
+              DegradationCurve_FromString("BOGUS") == -1);
+        check("v5.14.9.A: FromString(\"99\") (out-of-range numeric) returns -1",
+              DegradationCurve_FromString("99") == -1);
+        check("v5.14.9.A: FromString(NULL) returns -1",
+              DegradationCurve_FromString(NULL) == -1);
+        check("v5.14.9.A: FromString(\"\") returns -1",
+              DegradationCurve_FromString("") == -1);
+    }
+
+    //======================================================================
+    // [v5.14.9.A — Cfg parser: ladder fields + back-compat shim]
+    //======================================================================
+    {
+        // Defaults from ControllerConfig_Default
+        ControllerConfig<64> cfg_default = ControllerConfig_Default<64>();
+        check("v5.14.9.A: default risk_degradation_curve == CURVE_OFF",
+              cfg_default.risk_degradation_curve == CURVE_OFF);
+        check("v5.14.9.A: default risk_full_size_threshold == 0.15",
+              fabs(FPN_ToDouble(cfg_default.risk_full_size_threshold) - 0.15) < 1e-6);
+        check("v5.14.9.A: default risk_min_size_threshold == 0.05",
+              fabs(FPN_ToDouble(cfg_default.risk_min_size_threshold) - 0.05) < 1e-6);
+        check("v5.14.9.A: default risk_min_size_pct == 0.10",
+              fabs(FPN_ToDouble(cfg_default.risk_min_size_pct) - 0.10) < 1e-6);
+    }
+    {
+        // Parse new ladder cfg keys via the actual cfg parser (string form)
+        char tmp_cfg[] = "/tmp/foxml_v5_14_9_a_str_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        const char* contents =
+            "risk_degradation_curve=LINEAR\n"
+            "risk_full_size_threshold=0.20\n"
+            "risk_min_size_threshold=0.05\n"
+            "risk_min_size_pct=0.15\n";
+        write(fd, contents, strlen(contents));
+        close(fd);
+
+        ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmp_cfg);
+        check("v5.14.9.A: parser sets risk_degradation_curve via string \"LINEAR\"",
+              cfg.risk_degradation_curve == CURVE_LINEAR);
+        check("v5.14.9.A: parser sets risk_full_size_threshold to 0.20",
+              fabs(FPN_ToDouble(cfg.risk_full_size_threshold) - 0.20) < 1e-6);
+        check("v5.14.9.A: parser sets risk_min_size_threshold to 0.05",
+              fabs(FPN_ToDouble(cfg.risk_min_size_threshold) - 0.05) < 1e-6);
+        check("v5.14.9.A: parser sets risk_min_size_pct to 0.15",
+              fabs(FPN_ToDouble(cfg.risk_min_size_pct) - 0.15) < 1e-6);
+
+        unlink(tmp_cfg);
+    }
+    {
+        // Numeric form for new key works too (operator can use 0/1/2/3)
+        char tmp_cfg[] = "/tmp/foxml_v5_14_9_a_num_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        const char* contents = "risk_degradation_curve=2\n";
+        write(fd, contents, strlen(contents));
+        close(fd);
+
+        ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmp_cfg);
+        check("v5.14.9.A: numeric form sets risk_degradation_curve == CURVE_EXP",
+              cfg.risk_degradation_curve == CURVE_EXP);
+
+        unlink(tmp_cfg);
+    }
+    {
+        // Back-compat shim: legacy `risk_scale_by_confidence=N` → writes both
+        // legacy field AND risk_degradation_curve (values map 1:1)
+        char tmp_cfg[] = "/tmp/foxml_v5_14_9_a_legacy_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        const char* contents = "risk_scale_by_confidence=2\n";
+        write(fd, contents, strlen(contents));
+        close(fd);
+
+        ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmp_cfg);
+        check("v5.14.9.A: legacy shim writes both fields (risk_scale_by_confidence)",
+              cfg.risk_scale_by_confidence == 2);
+        check("v5.14.9.A: legacy shim translates to risk_degradation_curve",
+              cfg.risk_degradation_curve == CURVE_EXP);
+
+        unlink(tmp_cfg);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

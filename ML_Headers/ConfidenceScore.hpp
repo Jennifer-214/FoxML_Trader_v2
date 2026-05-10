@@ -35,9 +35,11 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>  // v5.14.9 — atoi for DegradationCurve_FromString numeric parse
 
 #include <math.h>
 #include <string.h>
+#include <strings.h>  // v5.14.9 — strcasecmp for DegradationCurve_FromString
 #include "ICVariantRegistry.hpp"  // v5.14.1.F — FOREACH_IC_VARIANT X-macro
 
 // default parameters (from FoxML constants.py + confidence.py)
@@ -484,6 +486,151 @@ static inline double ConfidenceScorer_ComputeComposite(ConfidenceScorer *cs,
 // fixture control.
 static inline void ConfidenceScorer_MarkPredict(ConfidenceScorer *cs, uint64_t now_us) {
     RollingFreshness_Mark(&cs->freshness, now_us);
+}
+
+//======================================================================================================
+// [v5.14.9 — SOFT RISK DEGRADATION LADDER]
+//======================================================================================================
+// Composite confidence → sizing-multiplier scaling. Replaces the broken-for-
+// composite v5.12.1.D math (which compared conf_now ∈ [0.001, 0.3] against
+// ml_buy_threshold ∈ [0.5, 0.7] → factor=0 silently).
+//
+// FOREACH_DEGRADATION_CURVE(X) registry — adding a new curve is 1 line:
+//   1. Append X(NAME, val, fn, "doc") below
+//   2. Implement Confidence_DegradationScale_<NAME>
+//   Auto-generated: enum DegradationCurve, dispatch table curve_fns[],
+//   FOREACH_DEGRADATION_CURVE_COUNT, ToString helper.
+//
+// Curve signature: f(conf, full, min, min_pct) → factor ∈ [0, 1].
+//   conf      — composite confidence ∈ [0, 1] (or legacy IC scale)
+//   full      — threshold above which factor=1.0 (full size)
+//   min       — threshold below which factor=0.0 (block; ladder bottom)
+//   min_pct   — factor at min (typical 0.10 = 10% of base) so the curve
+//               doesn't drop to zero immediately above min; ladder bottom
+//               only fires strictly below min
+//
+// All compute fns are BRANCHLESS (mask compute via fmin/fmax/cmov + fma).
+// SIMD-friendly if curve becomes vectorized (multi-core fan-out scenario).
+//
+// Pattern documented in DESIGN_SPECS/curve-registry-pattern.md.
+// Slow-path-only; hot path UNTOUCHED.
+//======================================================================================================
+
+// Forward-declare curve compute fns so the dispatch table can reference them.
+inline double Confidence_DegradationScale_Off    (double, double, double, double);
+inline double Confidence_DegradationScale_Linear (double, double, double, double);
+inline double Confidence_DegradationScale_Exp    (double, double, double, double);
+inline double Confidence_DegradationScale_Step   (double, double, double, double);
+
+// Tuple: X(name, enum_value, compute_fn, doc_string)
+#define FOREACH_DEGRADATION_CURVE(X)                                                                  \
+    X(OFF,    0, Confidence_DegradationScale_Off,    "disabled — factor=1.0; preserves pre-v5.14.9") \
+    X(LINEAR, 1, Confidence_DegradationScale_Linear, "linear interp between (min, min_pct) and (full, 1.0)") \
+    X(EXP,    2, Confidence_DegradationScale_Exp,    "quadratic falloff; preserves more size in middle") \
+    X(STEP,   3, Confidence_DegradationScale_Step,   "binary 1.0 above midpoint else min_pct (debug)")
+
+// Auto-generated enum (CURVE_OFF / CURVE_LINEAR / CURVE_EXP / CURVE_STEP).
+#define X_GEN_ENUM(name, val, fn, doc) CURVE_##name = val,
+enum DegradationCurve {
+    FOREACH_DEGRADATION_CURVE(X_GEN_ENUM)
+};
+#undef X_GEN_ENUM
+
+// Auto-generated count. NOTE: X_GEN_DEGRADATION_COUNT_ONE stays defined
+// (the COUNT macro defers expansion to use sites; undef'ing the helper
+// would break later expansions). Same pattern as FOREACH_STAMP_BOUND_CFG_COUNT.
+#define X_GEN_DEGRADATION_COUNT_ONE(name, val, fn, doc) +1
+#define FOREACH_DEGRADATION_CURVE_COUNT (0 FOREACH_DEGRADATION_CURVE(X_GEN_DEGRADATION_COUNT_ONE))
+
+// Function-pointer dispatch table. Indexed by curve enum value.
+// Slow-path: 1 indirect call (~1-2ns); branch predictor handles cfg-stable curves.
+typedef double (*DegradationCurveFn)(double conf, double full, double min, double min_pct);
+
+#define X_GEN_FN_PTR(name, val, fn, doc) fn,
+static const DegradationCurveFn degradation_curve_fns[] = {
+    FOREACH_DEGRADATION_CURVE(X_GEN_FN_PTR)
+};
+#undef X_GEN_FN_PTR
+
+// Auto-generated ToString — for cfg parser + GUI display.
+static inline const char* DegradationCurve_ToString(int curve) {
+    switch (curve) {
+        #define X_GEN_TOSTRING(name, val, fn, doc) case val: return #name;
+        FOREACH_DEGRADATION_CURVE(X_GEN_TOSTRING)
+        #undef X_GEN_TOSTRING
+        default: return "INVALID";
+    }
+}
+
+// Auto-generated FromString — for cfg parser. Accepts string ("LINEAR") or
+// numeric ("1") forms; case-insensitive on string form. Returns -1 on miss.
+static inline int DegradationCurve_FromString(const char* s) {
+    if (!s || !*s) return -1;
+    // Try numeric first
+    if (s[0] >= '0' && s[0] <= '9') {
+        int v = atoi(s);
+        if (v >= 0 && v < FOREACH_DEGRADATION_CURVE_COUNT) return v;
+        return -1;
+    }
+    // Case-insensitive string match
+    #define X_GEN_FROMSTRING(name, val, fn, doc)                          \
+        if (strcasecmp(s, #name) == 0) return val;
+    FOREACH_DEGRADATION_CURVE(X_GEN_FROMSTRING)
+    #undef X_GEN_FROMSTRING
+    return -1;
+}
+
+//======================================================================================================
+// [CURVE COMPUTE FNS — v5.14.9.A]
+//======================================================================================================
+// All branchless. fmin/fmax → cmov; fma → 1 cycle on modern x86.
+// Defensive: if full <= min (operator misconfig), return min_pct unconditionally
+// (avoids div-by-zero; operator gets predictable degraded behavior).
+//======================================================================================================
+
+// OFF — factor=1.0 unconditionally. Preserves pre-v5.14.9 behavior bytewise
+// when cfg.risk_degradation_curve=0 (default).
+inline double Confidence_DegradationScale_Off(double conf, double full, double min, double min_pct) {
+    (void)conf; (void)full; (void)min; (void)min_pct;
+    return 1.0;
+}
+
+// LINEAR — interp between (min, min_pct) and (full, 1.0). Below min, returns
+// min_pct (caller treats factor==0 as ladder-bottom hit; here min_pct ≥ 0).
+// To get ladder-bottom (factor=0), operator sets min_pct=0.0.
+inline double Confidence_DegradationScale_Linear(double conf, double full, double min, double min_pct) {
+    if (full <= min) return min_pct;  // misconfig guard
+    double clamped = fmin(fmax(conf, min), full);
+    double t = (clamped - min) / (full - min);  // ∈ [0, 1]
+    return fma(t, 1.0 - min_pct, min_pct);      // min_pct + t*(1-min_pct)
+}
+
+// EXP — quadratic falloff: factor = min_pct + t² * (1-min_pct). Steeper drop
+// near min; preserves more size in the middle of the range. Same endpoints
+// as LINEAR.
+inline double Confidence_DegradationScale_Exp(double conf, double full, double min, double min_pct) {
+    if (full <= min) return min_pct;  // misconfig guard
+    double clamped = fmin(fmax(conf, min), full);
+    double t = (clamped - min) / (full - min);
+    double t_sq = t * t;
+    return fma(t_sq, 1.0 - min_pct, min_pct);
+}
+
+// STEP — binary above/below midpoint. factor = 1.0 if conf >= (full+min)/2
+// else min_pct. Useful for debugging/paper-test "did the ladder fire?"
+// without continuous-curve noise.
+inline double Confidence_DegradationScale_Step(double conf, double full, double min, double min_pct) {
+    double mid = (full + min) * 0.5;
+    double mask = (conf >= mid) ? 1.0 : 0.0;  // cmov; branchless
+    return fma(mask, 1.0 - min_pct, min_pct);
+}
+
+// Dispatch wrapper — bounds-checked. Caller passes any int curve value;
+// out-of-range returns 1.0 (degrades safely to OFF behavior).
+static inline double Confidence_DegradationScale(int curve, double conf,
+                                                  double full, double min, double min_pct) {
+    if (curve < 0 || curve >= FOREACH_DEGRADATION_CURVE_COUNT) return 1.0;
+    return degradation_curve_fns[curve](conf, full, min, min_pct);
 }
 
 //======================================================================================================

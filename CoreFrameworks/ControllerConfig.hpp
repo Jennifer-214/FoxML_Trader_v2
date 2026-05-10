@@ -13,6 +13,7 @@
 
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/LinearRegression3X.hpp"
+#include "../ML_Headers/ConfidenceScore.hpp"  // v5.14.9.A — DegradationCurve enum + ToString/FromString helpers
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -459,15 +460,48 @@ template <unsigned F> struct ControllerConfig {
   // (uses ModelHandle.training_timestamp_us — stamp-bound field added
   // in v5.14.8.D via FOREACH_STAMP_BOUND_MODEL_CONST registry).
   uint32_t model_max_age_hours;
-  // v5.12.1.D — confidence-conditional sizing INFRASTRUCTURE.
+  // v5.12.1.D — confidence-conditional sizing INFRASTRUCTURE (DEPRECATED v5.14.9.A).
   //   0 = disabled (default; flat risk_pct regardless of prediction P)
   //   1 = linear scale (factor = clamp((P - threshold) / (1 - threshold), 0, 1))
   //   2 = quadratic scale (factor squared — steeper rolloff)
-  // ACTIVATION GATED on calibration data from v5.12 Phase 4.B paper-test.
-  // Operator flips to 1 or 2 only after measuring model calibration; if
-  // model is mis-calibrated, leave at 0 (amplifying poor predictions =
-  // larger losses).
+  //
+  // **DEPRECATED:** the math here was broken-for-composite-scale (compares
+  // conf_now ∈ [0.001, 0.3] against ml_buy_threshold ∈ [0.5, 0.7] → factor=0
+  // always when composite enabled). Replaced by v5.14.9.A FOREACH_DEGRADATION_CURVE
+  // registry + curve dispatch. Field kept for back-compat until v5.14.9.B
+  // replaces the caller at StrategyParameters.hpp:1291-1322. After .B ships,
+  // this field is unused; back-compat parser shim translates legacy cfg
+  // `risk_scale_by_confidence=N` → `risk_degradation_curve=N` (boot WARN).
+  // Will be deleted in a future cleanup ship.
   int risk_scale_by_confidence;
+  // v5.14.9.A — soft risk degradation ladder (replaces broken v5.12.1.D math).
+  // Enum values come from FOREACH_DEGRADATION_CURVE in ML_Headers/ConfidenceScore.hpp:
+  //   0 = OFF    (default; factor=1.0; preserves pre-v5.14.9 behavior bytewise)
+  //   1 = LINEAR (linear interp between thresholds)
+  //   2 = EXP    (quadratic falloff; preserves more size in middle)
+  //   3 = STEP   (binary above/below midpoint; debug shape)
+  //
+  // REQUIRES cfg.confidence_composite_enabled=1 (boot REFUSE otherwise per
+  // v5.14.9.B — ladder thresholds tuned for composite scale, not legacy
+  // 3-factor IC scale). Stamp-bound via FOREACH_STAMP_BOUND_CFG (v5.14.9.C);
+  // drift detection fires at boot if cfg differs from training-time stamp.
+  //
+  // Per-core override: core_N_risk_degradation_curve (RUNTIME-ONLY; not
+  // stamp-bound — operator policy, matches existing per-core risk_pct
+  // precedent). See v5.14.9.B.1.
+  int    risk_degradation_curve;             // default 0 (OFF)
+  // Threshold above which factor=1.0 (full size at high confidence).
+  // Default 0.15 matches composite confidence's practical upper bound.
+  FPN<F> risk_full_size_threshold;           // default 0.15
+  // Threshold below which factor=min_pct (or 0 if min_pct=0 = ladder bottom).
+  // Default 0.05 matches composite confidence's "low edge" boundary.
+  FPN<F> risk_min_size_threshold;            // default 0.05
+  // Factor at min threshold. ∈ [0, 1]. Below this size, ladder bottom fires
+  // (factor=0 → trade_size=0 → BUY_BLOCKED + SHALT_LOW_CONFIDENCE).
+  // Default 0.10 = 10% of base size at low edge; operator sets 0.0 for hard
+  // ladder bottom even at min_threshold (matches confidence_hard_block
+  // behavior but with a smooth ramp above).
+  FPN<F> risk_min_size_pct;                  // default 0.10
   // v5.14.1 — composite confidence (IC × Freshness × Capacity × Stability)
   // Default 0 = legacy 3-factor ConfidenceScorer_Compute (bytewise-unchanged
   // pre-v5.14.1 behavior). Flip to 1 to swap in the 4-factor formula at the
@@ -1383,9 +1417,17 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.param_max_age_ticks = 1000;
   // v5.14.8.E — stale-model age check (boot-time gate). Default 0 = disabled.
   cfg.model_max_age_hours = 0;
-  // v5.12.1.D — disabled by default; activate only after Phase 4.B
-  // paper-test confirms model calibration.
+  // v5.12.1.D — disabled by default (DEPRECATED v5.14.9.A; replaced by
+  // risk_degradation_curve below; kept for back-compat parser shim).
   cfg.risk_scale_by_confidence = 0;
+  // v5.14.9.A — soft risk degradation ladder defaults. OFF preserves
+  // pre-v5.14.9 behavior bytewise. Threshold defaults match composite
+  // confidence's practical scale [0.001, 0.3]: full at 0.15, min at 0.05,
+  // 10% size floor at min threshold.
+  cfg.risk_degradation_curve     = 0;  // CURVE_OFF
+  cfg.risk_full_size_threshold   = FPN_FromDouble<F>(0.15);
+  cfg.risk_min_size_threshold    = FPN_FromDouble<F>(0.05);
+  cfg.risk_min_size_pct          = FPN_FromDouble<F>(0.10);
   // v5.14.1.B — composite confidence: disabled by default. Activates the
   // 4-factor formula (IC × Freshness × Capacity × Stability_normalized).
   // Defaults: 1 hour freshness decay, unbounded capacity, 1.0 rmse baseline.
@@ -1657,8 +1699,43 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       cfg.model_max_age_hours = (uint32_t)atoi(val);
       continue;
     }
-    // v5.12.1.D — confidence-conditional sizing infra
-    CFG_PARSE_INT(risk_scale_by_confidence)
+    // v5.12.1.D — confidence-conditional sizing infra (DEPRECATED v5.14.9.A;
+    // back-compat parser shim translates to risk_degradation_curve below).
+    if (strcmp(key, "risk_scale_by_confidence") == 0) {
+      int legacy = atoi(val);
+      cfg.risk_scale_by_confidence = legacy;       // legacy field stays (until cleanup ship)
+      cfg.risk_degradation_curve   = legacy;       // legacy values 0/1/2 map 1:1 to OFF/LINEAR/EXP
+      fprintf(stderr,
+              "[cfg] WARN: risk_scale_by_confidence is deprecated v5.14.9; "
+              "use risk_degradation_curve. Translating value %d → curve %s.\n",
+              legacy, DegradationCurve_ToString(legacy));
+      continue;
+    }
+    // v5.14.9.A — soft risk degradation ladder. Accepts numeric (0-3) or
+    // string ("OFF"/"LINEAR"/"EXP"/"STEP", case-insensitive).
+    if (strcmp(key, "risk_degradation_curve") == 0) {
+      int parsed = DegradationCurve_FromString(val);
+      if (parsed < 0) {
+        fprintf(stderr, "[cfg] WARN: risk_degradation_curve='%s' invalid; "
+                "expected one of OFF/LINEAR/EXP/STEP or 0-3. Using OFF.\n", val);
+        cfg.risk_degradation_curve = 0;
+      } else {
+        cfg.risk_degradation_curve = parsed;
+      }
+      continue;
+    }
+    if (strcmp(key, "risk_full_size_threshold") == 0) {
+      cfg.risk_full_size_threshold = FPN_FromDouble<F>(atof(val));
+      continue;
+    }
+    if (strcmp(key, "risk_min_size_threshold") == 0) {
+      cfg.risk_min_size_threshold = FPN_FromDouble<F>(atof(val));
+      continue;
+    }
+    if (strcmp(key, "risk_min_size_pct") == 0) {
+      cfg.risk_min_size_pct = FPN_FromDouble<F>(atof(val));
+      continue;
+    }
     // v5.14.1.B — composite confidence
     CFG_PARSE_INT(confidence_composite_enabled)
     if (strcmp(key, "confidence_freshness_tau_secs") == 0) {
