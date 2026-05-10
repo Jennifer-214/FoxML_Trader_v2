@@ -95,7 +95,7 @@ namespace tt {
       "skip RebuildOneCore body when state hasn't changed materially")                              \
     /* v5.12.1.A — WS staleness emergency-flatten (engine-wide outer) */                            \
     X(ENGINE_WIDE, WS_FLATTEN_ACTIVE,                                                                \
-      (_gate_cfg).ws_dead_time_flatten_enabled != 0,                                                       \
+      BITMAP_IS_SET((_gate_cfg).risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED),         \
       "fire OMS_FlattenAll when WS dead longer than threshold")
 
 //======================================================================================================

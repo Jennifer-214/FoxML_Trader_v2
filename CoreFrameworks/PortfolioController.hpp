@@ -948,7 +948,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   // hot-path kill: catches equity drops between slow-path cycles
   // runs every 16th tick (~5s at 300ms/tick) — fast enough for 3% daily loss detection
   // Portfolio_ComputeValue is O(popcount) — 1 multiply for single-slot mode
-  if ((ctrl->total_ticks & 0xF) == 0 && ctrl->config.kill_switch_enabled && !ctrl->buying_halted) {
+  if ((ctrl->total_ticks & 0xF) == 0 && BITMAP_IS_SET(ctrl->config.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED) && !ctrl->buying_halted) {
     FPN<F> pv = Portfolio_ComputeValue(&ctrl->portfolio, current_price);
     // include pending exit proceeds — exit gate clears bitmap before DrainExits credits balance
     // without this, equity appears crashed between exit gate and drain (false kill trigger)
@@ -1210,7 +1210,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
     // high vol → smaller position, low vol → larger (consistent risk per trade)
     // uses long-window stddev as baseline so it self-calibrates
     ctrl->last_vol_scale = 1.0;
-    if (ctrl->config.vol_sizing_enabled
+    if (BITMAP_IS_SET(ctrl->config.risk_cfg_flags, MASK_RISK_CFG_VOL_SIZING_ENABLED)
         && !FPN_IsZero(ctrl->rolling.price_stddev)
         && !FPN_IsZero(ctrl->rolling_long->price_stddev)) {
       FPN<F> vol_ratio = FPN_DivNoAssert(ctrl->rolling_long->price_stddev,
@@ -1491,7 +1491,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
 
   // session awareness: classify UTC hour and set gate multiplier
   // reuses last_slow_time — no extra syscall
-  if (ctrl->config.session_filter_enabled) {
+  if (BITMAP_IS_SET(ctrl->config.ops_cfg_flags, MASK_OPS_CFG_SESSION_FILTER_ENABLED)) {
     time_t st = (time_t)ctrl->last_slow_time;
     struct tm *utc = gmtime(&st);
     int h = utc->tm_hour;
@@ -1601,7 +1601,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
 
   // KILL SWITCH: check daily loss and drawdown limits (all FPN)
   // sticky — once triggered, stays active until session reset or manual 'k'
-  if (ctrl->config.kill_switch_enabled && !ctrl->kill_switch_active) {
+  if (BITMAP_IS_SET(ctrl->config.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED) && !ctrl->kill_switch_active) {
     FPN<F> equity = FPN_AddSat(ctrl->balance, portfolio_value);
     // daily loss: loss = start - equity, limit = start * threshold
     if (!FPN_IsZero(ctrl->session_start_equity)) {
@@ -1788,7 +1788,7 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
 
   // session awareness: scale volume gate by session multiplier
   // wider mult = more volume required = fewer entries during low-liquidity sessions
-  if (ctrl->config.session_filter_enabled) {
+  if (BITMAP_IS_SET(ctrl->config.ops_cfg_flags, MASK_OPS_CFG_SESSION_FILTER_ENABLED)) {
     ctrl->buy_conds.volume = FPN_Mul(ctrl->buy_conds.volume, ctrl->session_mult);
   }
 

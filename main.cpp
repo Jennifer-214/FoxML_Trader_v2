@@ -472,7 +472,7 @@ int main(int argc, char *argv[]) {
     //==================================================================================================
     static NotifyState g_notify_state;
     static NotifyCommandState g_notify_cmd_state;
-    if (ccfg.notify_enabled) {
+    if (BITMAP_IS_SET(ccfg.ops_cfg_flags, MASK_OPS_CFG_NOTIFY_ENABLED)) {
         NotifyBackendFn backend = NotifyBackend_Stderr;
         void *backend_state = nullptr;
         if (ccfg.notify_backend == 1) {

@@ -535,7 +535,7 @@ struct alignas(64) EventLoopState {
     // monotonically once ticks start flowing. The slow-path check is
     //   gap_us = now_us - last_ws_tick_us;
     //   if (gap_us >= cfg.ws_dead_time_flatten_threshold_secs * 1e6 &&
-    //       cfg.ws_dead_time_flatten_enabled) → OMS_FlattenAll(...)
+    //       BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED)) → OMS_FlattenAll(...)
     // Pre-warmup (last_ws_tick_us == 0) is treated as "no flatten" so the
     // engine doesn't fire a phantom flatten before the first tick arrives.
     std::atomic<uint64_t> last_ws_tick_us;
@@ -3103,7 +3103,7 @@ inline void EventLoop_TimeExit(EventLoopState<F>* state,
 // market-exit commands for every active position into the standard
 // drainer queue.
 //
-// Disabled by default (cfg.ws_dead_time_flatten_enabled = 0); flip to 1
+// Disabled by default (BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED) = 0); flip to 1
 // BEFORE live-capital deployment. Backtest must keep it 0 — backtest's
 // tick-driven last_ws_tick_us would otherwise produce a huge gap vs
 // local clock and fire phantom flattens.
@@ -3175,7 +3175,7 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
 // this thread won the CAS and fired the flatten.
 //
 // Branchless considerations: cfg-flag check is the dominant fast path
-// (cfg.ws_dead_time_flatten_enabled = 0 by default → early return ~5ns,
+// (BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED) = 0 by default → early return ~5ns,
 // no atomic load). Once enabled, the predicates are sequential branches
 // — slow-path branches are fine; the rare-true outcome justifies branch
 // over branchless mask compute.
@@ -3197,7 +3197,7 @@ inline int EventLoop_CheckWsStaleness(EventLoopState<F>* state,
     }
     bool _ws_gate = state
         ? BITMAP_IS_SET(state->global_gate_state.flags, MASK_WS_FLATTEN_ACTIVE)
-        : (cfg.ws_dead_time_flatten_enabled != 0);
+        : (BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED) != 0);
     if (!_ws_gate) return 0;
 
     // Pre-warmup sentinel: producer hasn't published any tick yet.

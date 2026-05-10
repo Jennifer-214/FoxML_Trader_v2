@@ -17,6 +17,8 @@
 #include "LifecycleCfgFlagRegistry.hpp"       // v5.14.9.F — FOREACH_LIFECYCLE_CFG_FLAG + MASK_LIFECYCLE_CFG_*
 #include "GateCfgFlagRegistry.hpp"            // v5.14.9.F.1 — FOREACH_GATE_CFG_FLAG + MASK_GATE_CFG_*
 #include "../ML_Headers/MlCfgFlagRegistry.hpp" // v5.14.9.F.2 — FOREACH_ML_CFG_FLAG + MASK_ML_CFG_*
+#include "RiskCfgFlagRegistry.hpp"             // v5.14.9.F.3 — FOREACH_RISK_CFG_FLAG + MASK_RISK_CFG_*
+#include "OpsCfgFlagRegistry.hpp"              // v5.14.9.F.3 — FOREACH_OPS_CFG_FLAG + MASK_OPS_CFG_*
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -397,9 +399,20 @@ template <unsigned F> struct ControllerConfig {
   //   use_exit_model                  → MASK_ML_CFG_USE_EXIT_MODEL
   //   foxml_vol_scaling_enabled       → MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED
   //   lazy_rebuild_enabled            → MASK_ML_CFG_LAZY_REBUILD_ENABLED
+  //
+  // RISK (v5.14.9.F.3): risk/sizing mechanics — see RiskCfgFlagRegistry.hpp
+  //   kill_switch_enabled              → MASK_RISK_CFG_KILL_SWITCH_ENABLED
+  //   vol_sizing_enabled               → MASK_RISK_CFG_VOL_SIZING_ENABLED
+  //   ws_dead_time_flatten_enabled     → MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED
+  //
+  // OPS (v5.14.9.F.3): operational mechanics — see OpsCfgFlagRegistry.hpp
+  //   session_filter_enabled           → MASK_OPS_CFG_SESSION_FILTER_ENABLED
+  //   notify_enabled                   → MASK_OPS_CFG_NOTIFY_ENABLED
   alignas(8) uint8_t  lifecycle_cfg_flags;
               uint8_t  gate_cfg_flags;
               uint16_t ml_cfg_flags;
+              uint8_t  risk_cfg_flags;
+              uint8_t  ops_cfg_flags;
   FPN<F>
       partial_exit_pct; // fraction to exit at TP1 (0.5 = 50%, rest rides TP2)
   FPN<F> tp2_mult; // TP2 = TP1_distance * this (2.0 = double the TP distance)
@@ -409,7 +422,7 @@ template <unsigned F> struct ControllerConfig {
   // slippage simulation
   FPN<F> slippage_pct; // simulated slippage on entry/exit (e.g. 0.0005 = 0.05%)
   // session awareness
-  int session_filter_enabled; // 0 = disabled, 1 = apply per-session gate
+  // session_filter_enabled migrated to ops_cfg_flags (v5.14.9.F.3)
                               // multipliers
   FPN<F> session_asian_mult; // gate multiplier during Asian session (00-07 UTC)
   FPN<F> session_european_mult; // gate multiplier during European session
@@ -458,7 +471,7 @@ template <unsigned F> struct ControllerConfig {
   // DOCS/OPERATOR_DEPLOYMENT.md for the production-machine recipe.
   int init_arena_use_hugepages;
   // kill switch (sticky — stays active until session reset or manual TUI 'k')
-  int kill_switch_enabled; // 0=disabled, 1=enabled
+  // kill_switch_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
   FPN<F>
       kill_switch_daily_loss_pct; // max daily loss before kill (e.g. 0.03 = 3%)
   FPN<F> kill_switch_drawdown_pct; // max drawdown from session peak before kill
@@ -476,7 +489,7 @@ template <unsigned F> struct ControllerConfig {
   // Backtest: cfg.ws_dead_time_flatten_enabled MUST stay 0; backtest's
   // tick-driven last_ws_tick_us would otherwise produce a huge gap vs
   // local clock and fire a phantom flatten on every cycle.
-  int ws_dead_time_flatten_enabled;          // 0=disabled (default), 1=enabled
+  // ws_dead_time_flatten_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
   int ws_dead_time_flatten_threshold_secs;   // gap threshold (default 60)
   // v5.12.1.A.3 — recovery refusal window in seconds after a flatten
   // fires. Strategy_BuildParameters' caller (RebuildOneCore) sets
@@ -619,7 +632,7 @@ template <unsigned F> struct ControllerConfig {
   FPN<F> ridge_cost_penalty;         // cost penalty in net IC = IC - penalty*cost; default 0.5
   FPN<F> ridge_min_ic_floor;         // min net IC floor (prevents zero-weight starvation); default 0.001
   // vol-scaled position sizing
-  int vol_sizing_enabled; // 0=disabled, 1=scale qty inversely with volatility
+  // vol_sizing_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
   FPN<F> vol_scale_min; // min scale factor (e.g. 0.25 = never less than 25% of
                         // base qty)
   FPN<F> vol_scale_max; // max scale factor (e.g. 2.0 = never more than 200% of
@@ -655,7 +668,7 @@ template <unsigned F> struct ControllerConfig {
 
   // operational alerts (Phase 8b): route kill switch, orphan, disconnect
   // events through a configurable backend. All off by default.
-  int notify_enabled;             // 0=disabled (default), 1=route alerts
+  // notify_enabled migrated to ops_cfg_flags (v5.14.9.F.3)
   int notify_backend;             // 0=stderr (default), 1=command (popen-based)
   char notify_command[512];       // shell template with up to 2 %s (subject, body)
                                   // examples in engine.cfg / SettingsPanel tooltip
@@ -1272,12 +1285,21 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
       /*use_exit_model*/               0,
       /*foxml_vol_scaling_enabled*/    0,
       /*lazy_rebuild_enabled*/         0);
+  // v5.14.9.F.3 — risk_cfg_flags defaults: kill_switch ON (safety-first), rest OFF
+  RISK_CFG_FLAG_AUTOPOPULATE_FROM_TRIPLE(cfg.risk_cfg_flags,
+      /*kill_switch_enabled*/          1,
+      /*vol_sizing_enabled*/           0,
+      /*ws_dead_time_flatten_enabled*/ 0);
+  // v5.14.9.F.3 — ops_cfg_flags defaults: all 2 flags off (backward compat)
+  OPS_CFG_FLAG_AUTOPOPULATE_FROM_PAIR(cfg.ops_cfg_flags,
+      /*session_filter_enabled*/       0,
+      /*notify_enabled*/               0);
   cfg.partial_exit_pct = FPN_FromDouble<F>(0.5); // 50% at TP1, 50% rides
   cfg.tp2_mult = FPN_FromDouble<F>(2.0);         // TP2 = 2x TP1 distance
   cfg.breakeven_buffer_pct =
       FPN_FromDouble<F>(0.0005);    // +0.05% above entry (lock in tiny profit)
   cfg.slippage_pct = FPN_Zero<F>(); // 0 = disabled (backward compat)
-  cfg.session_filter_enabled = 0;   // 0 = disabled (backward compat)
+  // session_filter_enabled migrated to ops_cfg_flags (default 0)
   cfg.session_asian_mult =
       FPN_FromDouble<F>(1.5); // wider gates in low-vol Asian session
   cfg.session_european_mult = FPN_FromDouble<F>(1.0); // normal during European
@@ -1299,7 +1321,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.require_mlockall = 1;  // v5.11.3 — HFT-correct default; set to 0
                               // for laptop dev where RLIMIT_MEMLOCK is tight
   // kill switch
-  cfg.kill_switch_enabled = 1; // on by default — safety first
+  // kill_switch_enabled migrated to risk_cfg_flags (default 1 — safety-first; set via AUTOPOPULATE above)
   cfg.kill_switch_daily_loss_pct =
       FPN_FromDouble<F>(0.03); // 3% daily loss triggers kill
   cfg.kill_switch_drawdown_pct =
@@ -1307,7 +1329,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.kill_recovery_warmup =
       50; // 50 slow-path cycles observation after kill reset
   // vol-scaled sizing
-  cfg.vol_sizing_enabled = 0; // off by default (backward compat)
+  // vol_sizing_enabled migrated to risk_cfg_flags (default 0)
   cfg.vol_scale_min = FPN_FromDouble<F>(0.25);
   cfg.vol_scale_max = FPN_FromDouble<F>(2.0);
   // no-trade band
@@ -1334,7 +1356,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.record_depth = 0; // Phase 8a c5 — opt-in
   cfg.record_max_days = 30;
   // Phase 8b — operational alerts (all opt-in; default = no behavior change)
-  cfg.notify_enabled = 0;
+  // notify_enabled migrated to ops_cfg_flags (default 0)
   cfg.notify_backend = 0;          // stderr
   cfg.notify_command[0] = '\0';
   cfg.notify_cooldown_secs = 60;
@@ -1472,7 +1494,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.enable_mtm_kill_switch = 1;                // mark-to-market enabled by default
   // v5.12.1.A — disabled by default. Operator opts in for live deployment;
   // backtest MUST keep this off (live-only safety net).
-  cfg.ws_dead_time_flatten_enabled = 0;
+  // ws_dead_time_flatten_enabled migrated to risk_cfg_flags (default 0)
   cfg.ws_dead_time_flatten_threshold_secs = 60;
   // v5.12.1.A.3 — recovery window after a flatten fires. New entries
   // refused for this many seconds while operator-side reconcile catches
@@ -1750,7 +1772,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN_POS(min_kill_loss)
     CFG_PARSE_U32(enable_mtm_kill_switch)
     // v5.12.1.A — WS dead-time emergency-flatten (live-only safety net)
-    CFG_PARSE_INT(ws_dead_time_flatten_enabled)
+    // ws_dead_time_flatten_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
     CFG_PARSE_INT(ws_dead_time_flatten_threshold_secs)
     // v5.12.1.A.3 — post-flatten recovery refusal window
     CFG_PARSE_INT(recovery_delay_secs)
@@ -2026,17 +2048,49 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       else   cfg.ml_cfg_flags &= (uint16_t)~MASK_ML_CFG_LAZY_REBUILD_ENABLED;
       continue;
     }
+    // v5.14.9.F.3 — risk_cfg_flags bitmap (3 fields migrated; legacy keys preserved for back-compat)
+    if (strcmp(key, "kill_switch_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.risk_cfg_flags |=  MASK_RISK_CFG_KILL_SWITCH_ENABLED;
+      else   cfg.risk_cfg_flags &= (uint8_t)~MASK_RISK_CFG_KILL_SWITCH_ENABLED;
+      continue;
+    }
+    if (strcmp(key, "vol_sizing_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.risk_cfg_flags |=  MASK_RISK_CFG_VOL_SIZING_ENABLED;
+      else   cfg.risk_cfg_flags &= (uint8_t)~MASK_RISK_CFG_VOL_SIZING_ENABLED;
+      continue;
+    }
+    if (strcmp(key, "ws_dead_time_flatten_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.risk_cfg_flags |=  MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED;
+      else   cfg.risk_cfg_flags &= (uint8_t)~MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED;
+      continue;
+    }
+    // v5.14.9.F.3 — ops_cfg_flags bitmap (2 fields migrated; legacy keys preserved for back-compat)
+    if (strcmp(key, "session_filter_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.ops_cfg_flags |=  MASK_OPS_CFG_SESSION_FILTER_ENABLED;
+      else   cfg.ops_cfg_flags &= (uint8_t)~MASK_OPS_CFG_SESSION_FILTER_ENABLED;
+      continue;
+    }
+    if (strcmp(key, "notify_enabled") == 0) {
+      int v = atoi(val);
+      if (v) cfg.ops_cfg_flags |=  MASK_OPS_CFG_NOTIFY_ENABLED;
+      else   cfg.ops_cfg_flags &= (uint8_t)~MASK_OPS_CFG_NOTIFY_ENABLED;
+      continue;
+    }
     CFG_PARSE_PCT(breakeven_buffer_pct)
     // depth_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
     CFG_PARSE_INT(use_real_money)
     CFG_PARSE_INT(acknowledge_hardcoded_strategy_in_live)  // v5.7.2
     CFG_PARSE_INT(require_mlockall)  // v5.11.3
     CFG_PARSE_INT(init_arena_use_hugepages)  // v5.11.22
-    CFG_PARSE_INT(session_filter_enabled)
+    // session_filter_enabled migrated to ops_cfg_flags (v5.14.9.F.3)
     // gate_ema_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
     CFG_PARSE_INT(default_strategy)
-    CFG_PARSE_INT(kill_switch_enabled)
-    CFG_PARSE_INT(vol_sizing_enabled)
+    // kill_switch_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
+    // vol_sizing_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
     // no_trade_band_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
     CFG_PARSE_INT(ml_backend)
     CFG_PARSE_INT(regime_model_backend)
@@ -2060,7 +2114,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_U32(record_max_days)
 
     //--- operational alerts (Phase 8b) ---
-    CFG_PARSE_INT(notify_enabled)
+    // notify_enabled migrated to ops_cfg_flags (v5.14.9.F.3)
     CFG_PARSE_INT(notify_backend)
     CFG_PARSE_U32(notify_cooldown_secs)
     // notify_command is a string — no macro for that, inline parse below

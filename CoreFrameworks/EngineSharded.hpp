@@ -954,7 +954,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // actual delivery.
     static NotifyState g_notify_state;
     static NotifyCommandState g_notify_cmd_state;
-    if (cfg.notify_enabled) {
+    if (BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_NOTIFY_ENABLED)) {
         NotifyBackendFn backend = NotifyBackend_Stderr;
         void *backend_state = nullptr;
         if (cfg.notify_backend == 1) {

@@ -2251,7 +2251,7 @@ int main() {
         cfg.warmup_ticks = 10;
         cfg.poll_interval = 1;
         cfg.min_warmup_samples = 10;
-        cfg.kill_switch_enabled = 1;
+        BITMAP_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED);
         cfg.kill_switch_daily_loss_pct = FPN_FromDouble<FP>(0.03); // 3%
         cfg.kill_switch_drawdown_pct = FPN_FromDouble<FP>(0.05);   // 5%
 
@@ -2349,7 +2349,7 @@ int main() {
         // 6. centralized halt: volatile regime sets halted
         PortfolioController<FP> ctrl5 = {};
         PortfolioController_Init(&ctrl5, cfg);
-        cfg.kill_switch_enabled = 0; // disable kill so it doesn't interfere
+        BITMAP_CLR(cfg.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED); // disable kill so it doesn't interfere
         PortfolioController_Init(&ctrl5, cfg);
         test_warmup_ctrl(&ctrl5, &pool, &log, 100.0, 500.0);
         ctrl5.regime.current_regime = REGIME_VOLATILE;
@@ -2379,7 +2379,7 @@ int main() {
             small_cfg.poll_interval = 1;
             small_cfg.min_warmup_samples = 10;
             small_cfg.starting_balance = FPN_FromDouble<FP>(10000.0);
-            small_cfg.kill_switch_enabled = 1;
+            BITMAP_SET(small_cfg.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED);
             small_cfg.kill_switch_daily_loss_pct = FPN_FromDouble<FP>(0.03);  // 3%
             small_cfg.kill_switch_drawdown_pct = FPN_FromDouble<FP>(0.05);    // 5%
             small_cfg.max_positions = 1;
@@ -2564,7 +2564,7 @@ int main() {
         cfg.risk_pct = FPN_FromDouble<FP>(0.15);  // 15%
         cfg.fee_rate = FPN_FromDouble<FP>(0.001);  // 0.1%
         cfg.max_positions = 1;
-        cfg.kill_switch_enabled = 0;  // disable kill — we're testing accounting
+        BITMAP_CLR(cfg.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED);  // disable kill — we're testing accounting
         cfg.slippage_pct = FPN_Zero<FP>();  // no slippage for clean test
         cfg.take_profit_pct = FPN_FromDouble<FP>(0.03);
         cfg.stop_loss_pct = FPN_FromDouble<FP>(0.015);
@@ -2701,7 +2701,7 @@ int main() {
         // TEST 5: full pipeline round trip through PortfolioController_Tick
         {
             ControllerConfig<FP> rt_cfg = cfg;
-            rt_cfg.kill_switch_enabled = 0;
+            BITMAP_CLR(rt_cfg.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED);
             rt_cfg.offset_stddev_mult = FPN_FromDouble<FP>(0.5); // tight gate for quick fill
             PortfolioController<FP> ctrl = {};
             PortfolioController_Init(&ctrl, rt_cfg);
@@ -18014,7 +18014,7 @@ e3_skip_load:;
         tt::EventLoopState<64> state;
         tt::EventLoopState_Init(&state, &oms);
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        cfg.ws_dead_time_flatten_enabled = 1;
+        BITMAP_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED);
         cfg.ws_dead_time_flatten_threshold_secs = 60;
         cfg.recovery_delay_secs = 30;
 
@@ -18113,7 +18113,7 @@ e3_skip_load:;
         // Make a default config; verify our cfg fields parsed.
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
         check("v5.12.1.A.2: default cfg.ws_dead_time_flatten_enabled == 0",
-              cfg.ws_dead_time_flatten_enabled == 0);
+              !BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED));
         check("v5.12.1.A.2: default cfg.ws_dead_time_flatten_threshold_secs == 60",
               cfg.ws_dead_time_flatten_threshold_secs == 60);
 
@@ -18131,7 +18131,7 @@ e3_skip_load:;
 
         // === Test 2: enabled + last==0 (warmup) → no flatten ===
         {
-            cfg.ws_dead_time_flatten_enabled = 1;
+            BITMAP_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED);
             state.last_ws_tick_us.store(0ULL, std::memory_order_release);
             uint64_t huge_now_us = 1000000000000ULL;
             int n = tt::EventLoop_CheckWsStaleness(&state, cfg, 100.0, huge_now_us);
@@ -21301,7 +21301,7 @@ e3_skip_load:;
         // AUTOPOPULATE_ENGINE_WIDE — lazy_rebuild + ws_flatten enabled
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
         BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_LAZY_REBUILD_ENABLED);
-        cfg.ws_dead_time_flatten_enabled = 1;
+        BITMAP_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED);
         GlobalGateState state;
         SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE(state, cfg);
         check("v5.14.9.B.0: lazy_rebuild=1 → MASK_LAZY_REBUILD_ACTIVE set",
@@ -22052,6 +22052,93 @@ e3_skip_load:;
               cfg.lifecycle_cfg_flags == lifecycle_before);
         check("v5.14.9.F.2: setting ML bit doesn't disturb GATE bitmap",
               cfg.gate_cfg_flags == gate_before);
+    }
+
+    //======================================================================
+    // [v5.14.9.F.3 — FOREACH_RISK_CFG_FLAG + FOREACH_OPS_CFG_FLAG (5 flags bundled)]
+    //======================================================================
+    // 4th + 5th domain registries (RISK + OPS bundled). No stamp-binding;
+    // no per-core override; pure DOMAIN SPLIT pattern application.
+    {
+        check("v5.14.9.F.3: RISK_CFG_COUNT >= 3 (kill_switch + vol_sizing + ws_flatten)",
+              RISK_CFG_COUNT >= 3);
+        check("v5.14.9.F.3: OPS_CFG_COUNT >= 2 (session_filter + notify)",
+              OPS_CFG_COUNT >= 2);
+        check("v5.14.9.F.3: RISK_CFG_COUNT <= 8 (uint8_t storage)",
+              RISK_CFG_COUNT <= 8);
+        check("v5.14.9.F.3: OPS_CFG_COUNT <= 8 (uint8_t storage)",
+              OPS_CFG_COUNT <= 8);
+    }
+    {
+        // RISK MASK constants
+        check("v5.14.9.F.3: MASK_RISK_CFG_KILL_SWITCH_ENABLED == 0x01",
+              MASK_RISK_CFG_KILL_SWITCH_ENABLED == 0x01);
+        check("v5.14.9.F.3: MASK_RISK_CFG_VOL_SIZING_ENABLED == 0x02",
+              MASK_RISK_CFG_VOL_SIZING_ENABLED == 0x02);
+        check("v5.14.9.F.3: MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED == 0x04",
+              MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED == 0x04);
+        // OPS MASK constants
+        check("v5.14.9.F.3: MASK_OPS_CFG_SESSION_FILTER_ENABLED == 0x01",
+              MASK_OPS_CFG_SESSION_FILTER_ENABLED == 0x01);
+        check("v5.14.9.F.3: MASK_OPS_CFG_NOTIFY_ENABLED == 0x02",
+              MASK_OPS_CFG_NOTIFY_ENABLED == 0x02);
+    }
+    {
+        // Default cfg: kill_switch ON (safety-first), rest OFF
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.14.9.F.3: default kill_switch_enabled bit ON (safety-first)",
+              BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED));
+        check("v5.14.9.F.3: default vol_sizing_enabled bit OFF",
+              !BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_VOL_SIZING_ENABLED));
+        check("v5.14.9.F.3: default ws_dead_time_flatten_enabled bit OFF",
+              !BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED));
+        check("v5.14.9.F.3: default session_filter_enabled bit OFF",
+              !BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_SESSION_FILTER_ENABLED));
+        check("v5.14.9.F.3: default notify_enabled bit OFF",
+              !BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_NOTIFY_ENABLED));
+    }
+    {
+        // Parser back-compat: legacy keys still set the right bits
+        char tmpfile[] = "/tmp/foxml_v5_14_9_f3_XXXXXX";
+        int fd = mkstemp(tmpfile);
+        check("v5.14.9.F.3: parser tmpfile created", fd >= 0);
+        FILE* f = fdopen(fd, "w");
+        fprintf(f, "kill_switch_enabled=0\n");
+        fprintf(f, "vol_sizing_enabled=1\n");
+        fprintf(f, "ws_dead_time_flatten_enabled=1\n");
+        fprintf(f, "session_filter_enabled=1\n");
+        fprintf(f, "notify_enabled=1\n");
+        fclose(f);
+
+        ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmpfile);
+        check("v5.14.9.F.3: parser clears kill_switch_enabled bit (was default ON)",
+              !BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED));
+        check("v5.14.9.F.3: parser sets vol_sizing_enabled bit",
+              BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_VOL_SIZING_ENABLED));
+        check("v5.14.9.F.3: parser sets ws_dead_time_flatten_enabled bit",
+              BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED));
+        check("v5.14.9.F.3: parser sets session_filter_enabled bit",
+              BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_SESSION_FILTER_ENABLED));
+        check("v5.14.9.F.3: parser sets notify_enabled bit",
+              BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_NOTIFY_ENABLED));
+        unlink(tmpfile);
+    }
+    {
+        // Cross-domain isolation: setting RISK bit doesn't disturb other bitmaps
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        uint8_t lifecycle_before = cfg.lifecycle_cfg_flags;
+        uint8_t gate_before      = cfg.gate_cfg_flags;
+        uint16_t ml_before       = cfg.ml_cfg_flags;
+        uint8_t ops_before       = cfg.ops_cfg_flags;
+        BITMAP_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_VOL_SIZING_ENABLED);
+        check("v5.14.9.F.3: setting RISK bit doesn't disturb LIFECYCLE",
+              cfg.lifecycle_cfg_flags == lifecycle_before);
+        check("v5.14.9.F.3: setting RISK bit doesn't disturb GATE",
+              cfg.gate_cfg_flags == gate_before);
+        check("v5.14.9.F.3: setting RISK bit doesn't disturb ML",
+              cfg.ml_cfg_flags == ml_before);
+        check("v5.14.9.F.3: setting RISK bit doesn't disturb OPS",
+              cfg.ops_cfg_flags == ops_before);
     }
 
     //======================================================================

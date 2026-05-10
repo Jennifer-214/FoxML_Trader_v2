@@ -208,7 +208,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // Configure kill switch from the existing config fields. The drawdown
     // field in cfg is already a fraction (parsed via CFG_PARSE_PCT) so it
     // matches what _ConfigureKillSwitch expects.
-    if (cfg.kill_switch_enabled) {
+    if (BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_KILL_SWITCH_ENABLED)) {
         EventLoopState_ConfigureKillSwitch(&state,
             FPN_Zero<BACKTEST_FP>(),  // no hard balance floor in legacy mode either
             cfg.kill_switch_drawdown_pct);
