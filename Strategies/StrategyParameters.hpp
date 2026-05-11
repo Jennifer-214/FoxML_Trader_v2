@@ -972,39 +972,31 @@ inline void ML_BuildParameters(
                 if (_ridge_gate &&
                     config->bandit_algorithm == 0 &&
                     ezoo->primary_count >= 2) {
-                    // Build flat prediction history from ring. Use last K
-                    // = min(REWARD_RING_SIZE, predict_call_count) records.
-                    // For N=8 + K=64: 512 bytes stack — small + cache-warm
-                    // (ring already in L1 from G.8 reward attribution).
-                    constexpr int RIDGE_HISTORY_DEPTH = 64;
-                    float history[RIDGE_HISTORY_DEPTH * ENSEMBLE_HORIZON_MAX];
-                    int avail = (int)(ezoo->predict_call_count < (uint64_t)RIDGE_HISTORY_DEPTH
-                        ? ezoo->predict_call_count : RIDGE_HISTORY_DEPTH);
-                    if (avail >= 2) {
-                        // Walk ring backwards from head — most recent K records
-                        for (int k = 0; k < avail; ++k) {
-                            int ring_idx = (ezoo->reward_ring_head -
-                                            1 - k +
-                                            EnsembleModelZoo<F>::REWARD_RING_SIZE) %
-                                           EnsembleModelZoo<F>::REWARD_RING_SIZE;
-                            for (int i = 0; i < ezoo->primary_count; ++i) {
-                                history[k * ezoo->primary_count + i] =
-                                    ezoo->reward_ring[ring_idx].predictions[i];
-                            }
-                        }
-                        // Build correlation matrix from history
-                        RidgeBlender_BuildCorr<F>(
-                            ezoo->ridge_state.corr_matrix,
-                            history, avail, ezoo->primary_count);
+                    // v5.14.11.A — OnlineCycleStep helper consolidates ring-walk
+                    // + BuildCorr at this site + the exit-side mirror (below at
+                    // ~:1195). C1 helper extraction eliminates the Class 18
+                    // mirror per CLAUDE.md item 19. use_online=false hard-coded
+                    // until v5.14.11.C adds cfg.ridge_online_corr (Decision 4
+                    // cohort migration). Pattern:
+                    // DESIGN_SPECS/sliding-window-online-statistics-pattern.md.
+                    const bool use_online = false;  // v5.14.11.C will read cfg flag
+                    int rc_corr = RidgeBlender_OnlineCycleStep<F>(
+                        &ezoo->ridge_state,
+                        ezoo->reward_ring,
+                        ezoo->reward_ring_head,
+                        EnsembleModelZoo<F>::REWARD_RING_SIZE,
+                        ezoo->predict_call_count,
+                        ezoo->primary_count,
+                        use_online);
+                    if (rc_corr == 0) {
+                        // corr_matrix populated; proceed to Cholesky + weights.
                         // IC per arm from existing drift watchdog tracker
-                        // (v5.10.0a.G.8 — already populated post-trade-close)
+                        // (v5.10.0a.G.8 — already populated post-trade-close).
                         double ic_per_arm[MAX_RIDGE_MODELS];
                         double cost_per_arm[MAX_RIDGE_MODELS];
                         for (int i = 0; i < ezoo->primary_count; ++i) {
                             ic_per_arm[i] = (double)ezoo->drift[i].ic_avg;
                             // Cost tracking deferred to v5.15+; default 0.
-                            // When live cost-aware bandit lands, populate
-                            // from per-arm fee + slippage estimate.
                             cost_per_arm[i] = 0.0;
                         }
                         // Solve. On Cholesky failure, RidgeBlender_Compute
@@ -1016,16 +1008,13 @@ inline void ML_BuildParameters(
                             FPN_ToDouble(config->ridge_lambda),
                             FPN_ToDouble(config->ridge_cost_penalty),
                             FPN_ToDouble(config->ridge_min_ic_floor));
-                        // Override weights_buf with Ridge result (regardless
-                        // of rc; uniform fallback still produces valid weights).
                         (void)rc;  // diagnostic only via fallback_to_uniform
                         for (int i = 0; i < ezoo->primary_count; ++i) {
                             weights_buf[i] = FPN_ToDouble(ezoo->ridge_state.w[i]);
                         }
                     }
-                    // If avail < 2: not enough history — leave bandit
-                    // weights in weights_buf (Ridge needs at least 2
-                    // samples for meaningful correlation).
+                    // rc_corr == -1: not enough history; bandit weights
+                    // stay in weights_buf (Ridge needs ≥2 samples).
                 }
                 // v5.14.1.G — push top-K mask to turnover ring for diagnostic.
                 // weights_buf is now finalized (post-bandit OR post-Ridge).
@@ -1174,27 +1163,20 @@ inline void ML_BuildParameters(
                 : (config->exit_blender_mode != 0);
             if (_exit_blender_gate &&
                 ezoo_ex->exit_predictor_count >= 2) {
-                // Build flat history from exit_reward_ring (last K records)
-                constexpr int RIDGE_HISTORY_DEPTH = 64;
-                float history[RIDGE_HISTORY_DEPTH * ENSEMBLE_HORIZON_MAX];
-                int avail = (int)(ezoo_ex->exit_predict_call_count <
-                                  (uint64_t)RIDGE_HISTORY_DEPTH
-                    ? ezoo_ex->exit_predict_call_count : RIDGE_HISTORY_DEPTH);
-                if (avail >= 2) {
-                    for (int k = 0; k < avail; ++k) {
-                        int ring_idx = (ezoo_ex->exit_reward_ring_head -
-                                        1 - k +
-                                        EnsembleModelZoo<F>::REWARD_RING_SIZE) %
-                                       EnsembleModelZoo<F>::REWARD_RING_SIZE;
-                        for (int i = 0; i < ezoo_ex->exit_predictor_count; ++i) {
-                            history[k * ezoo_ex->exit_predictor_count + i] =
-                                ezoo_ex->exit_reward_ring[ring_idx].predictions[i];
-                        }
-                    }
-                    // Build correlation matrix
-                    RidgeBlender_BuildCorr<F>(
-                        ezoo_ex->exit_ridge_state.corr_matrix,
-                        history, avail, ezoo_ex->exit_predictor_count);
+                // v5.14.11.A — OnlineCycleStep helper (mirrors buy-side dispatch
+                // at ~:996). C1 helper extraction eliminates Class 18 mirror.
+                // use_online=false hard-coded until .C wires cfg.ridge_online_corr.
+                const bool use_online = false;  // v5.14.11.C will read cfg flag
+                int rc_corr = RidgeBlender_OnlineCycleStep<F>(
+                    &ezoo_ex->exit_ridge_state,
+                    ezoo_ex->exit_reward_ring,
+                    ezoo_ex->exit_reward_ring_head,
+                    EnsembleModelZoo<F>::REWARD_RING_SIZE,
+                    ezoo_ex->exit_predict_call_count,
+                    ezoo_ex->exit_predictor_count,
+                    use_online);
+                if (rc_corr == 0) {
+                    // corr_matrix populated; proceed to Cholesky + weights.
                     // IC + cost arrays. For exit side, reuse drift[] (per-arm
                     // IC tracker; populated from exit prediction outcomes
                     // post-fill via existing v5.13.4 path). Cost stays 0.0
@@ -1208,8 +1190,6 @@ inline void ML_BuildParameters(
                         // (Ridge will floor to ridge_min_ic_floor anyway).
                         ic_per_arm[i] = 0.0;
                     }
-                    // Solve. Cholesky failure → fallback_to_uniform=1 +
-                    // uniform 1/N weights (safe).
                     int rc = RidgeBlender_Compute<F>(
                         &ezoo_ex->exit_ridge_state,
                         ic_per_arm, cost_per_arm, ezoo_ex->exit_predictor_count,
@@ -1221,7 +1201,7 @@ inline void ML_BuildParameters(
                         weights[i] = FPN_ToDouble(ezoo_ex->exit_ridge_state.w[i]);
                     }
                 }
-                // If avail < 2: leave uniform weights (Ridge needs ≥2 samples)
+                // rc_corr == -1: not enough history; uniform weights stay
             }
             // Weighted blend
             double blended = 0.0;

@@ -23280,6 +23280,261 @@ e3_skip_load:;
               strcmp(buf, expected) == 0);
     }
 
+    // === v5.14.11.A — sliding-window Welford + BuildCorr refactor + helpers ===
+    // Pattern: DESIGN_SPECS/sliding-window-online-statistics-pattern.md
+    // PARITY contract: online vs full BuildCorr within 1e-9 tolerance over K=64
+    // records (NOT bytewise; algebraic equivalence in IEEE-754 finite precision).
+    // Bounded inputs in [0,1] × K=64 → cancellation error ~10^-14; 5 orders of
+    // magnitude headroom below 1e-9 tolerance.
+
+    printf("\n--- v5.14.11.A: sliding-window Welford + BuildCorr refactor + helpers ---\n");
+
+    // Deterministic test-data generator (bytewise-stable; avoids
+    // std::uniform_real_distribution implementation-defined behavior per
+    // PARITY-014 lesson). Returns float in [0, 1].
+    auto v5_14_11_a_test_data = [](int k, int i) -> float {
+        float s = sinf((float)(k * 7 + i * 13) * 0.1f);
+        return 0.5f + 0.4f * s;  // bounded [0.1, 0.9] ⊂ [0,1]
+    };
+
+    // Test 1: Welford-equivalence — online (sliding-window) and full
+    // BuildCorr produce equivalent correlation matrices within 1e-9 over K=64.
+    {
+        RidgeWeights<64> rw_online, rw_full;
+        RidgeWeights_Init(&rw_online);
+        RidgeWeights_Init(&rw_full);
+
+        constexpr int N_MODELS = 4;
+        constexpr int K = 64;
+
+        float history[K * N_MODELS];
+        for (int k = 0; k < K; ++k) {
+            for (int i = 0; i < N_MODELS; ++i) {
+                history[k * N_MODELS + i] = v5_14_11_a_test_data(k, i);
+            }
+        }
+
+        // Full-recompute path (refactored BuildCorr → FinalizeCorrFromSums)
+        RidgeBlender_BuildCorr<64>(rw_full.corr_matrix, history, K, N_MODELS);
+
+        // Incremental path (UpdateOnline × K → FinalizeCorrFromSums)
+        for (int k = 0; k < K; ++k) {
+            const float* preds_new = &history[k * N_MODELS];
+            RidgeBlender_UpdateOnline<64>(&rw_online, preds_new, nullptr, N_MODELS);
+        }
+        RidgeBlender_FinalizeCorrFromSums<64>(rw_online.corr_matrix,
+                                                rw_online.online_sum_x,
+                                                rw_online.online_sum_xx,
+                                                rw_online.online_window_count,
+                                                N_MODELS);
+
+        bool within_tolerance = true;
+        double max_diff = 0.0;
+        for (int i = 0; i < N_MODELS; ++i) {
+            for (int j = 0; j < N_MODELS; ++j) {
+                double d = fabs(rw_online.corr_matrix[i][j] - rw_full.corr_matrix[i][j]);
+                if (d > max_diff) max_diff = d;
+                if (d > 1e-9) within_tolerance = false;
+            }
+        }
+        check("v5.14.11.A: Welford-equivalence — online vs full BuildCorr within 1e-9 tolerance over K=64",
+              within_tolerance);
+
+        check("v5.14.11.A: online_window_count saturates at K=64 after K updates (not-full path)",
+              rw_online.online_window_count == 64);
+    }
+
+    // Test 2: Sliding-window drop correctness — after window fills,
+    // replacement preserves correlation matrix vs fresh-rebuild over current K window.
+    {
+        RidgeWeights<64> rw_online, rw_fresh;
+        RidgeWeights_Init(&rw_online);
+        RidgeWeights_Init(&rw_fresh);
+
+        constexpr int N_MODELS = 4;
+        constexpr int K = 64;
+        constexpr int EXTRA = 30;  // 30 records past window-full
+        constexpr int TOTAL = K + EXTRA;
+
+        float all_preds[TOTAL * N_MODELS];
+        for (int k = 0; k < TOTAL; ++k) {
+            for (int i = 0; i < N_MODELS; ++i) {
+                all_preds[k * N_MODELS + i] = v5_14_11_a_test_data(k + 1000, i);
+            }
+        }
+
+        // Run online update with sliding-window drop after K-th record
+        for (int k = 0; k < TOTAL; ++k) {
+            const float* preds_new = &all_preds[k * N_MODELS];
+            const float* preds_old = nullptr;
+            if (k >= K) {
+                preds_old = &all_preds[(k - K) * N_MODELS];
+            }
+            RidgeBlender_UpdateOnline<64>(&rw_online, preds_new, preds_old, N_MODELS);
+        }
+        RidgeBlender_FinalizeCorrFromSums<64>(rw_online.corr_matrix,
+                                                rw_online.online_sum_x,
+                                                rw_online.online_sum_xx,
+                                                rw_online.online_window_count,
+                                                N_MODELS);
+
+        // Build "fresh" via full-recompute over the current K window (last K records: indices EXTRA..TOTAL-1)
+        const float* current_window = &all_preds[EXTRA * N_MODELS];
+        RidgeBlender_BuildCorr<64>(rw_fresh.corr_matrix, current_window, K, N_MODELS);
+
+        bool within_tolerance = true;
+        for (int i = 0; i < N_MODELS; ++i) {
+            for (int j = 0; j < N_MODELS; ++j) {
+                double d = fabs(rw_online.corr_matrix[i][j] - rw_fresh.corr_matrix[i][j]);
+                if (d > 1e-9) within_tolerance = false;
+            }
+        }
+        check("v5.14.11.A: sliding-window drop preserves accuracy within 1e-9 (online vs fresh K-window rebuild)",
+              within_tolerance);
+
+        check("v5.14.11.A: online_window_count stays at K=64 after drop-add updates",
+              rw_online.online_window_count == 64);
+    }
+
+    // Test 3: Refactored BuildCorr edge cases (identity matrix when n_history < 2;
+    // self-correlation = 1.0 by construction).
+    {
+        RidgeWeights<64> rw;
+        RidgeWeights_Init(&rw);
+
+        constexpr int N_MODELS = 4;
+        float history[N_MODELS] = {0.5f, 0.5f, 0.5f, 0.5f};
+        RidgeBlender_BuildCorr<64>(rw.corr_matrix, history, 1, N_MODELS);
+
+        bool is_identity = true;
+        for (int i = 0; i < N_MODELS; ++i) {
+            for (int j = 0; j < N_MODELS; ++j) {
+                double expected = (i == j) ? 1.0 : 0.0;
+                if (fabs(rw.corr_matrix[i][j] - expected) > 1e-12) is_identity = false;
+            }
+        }
+        check("v5.14.11.A: refactored BuildCorr returns identity matrix when n_history < 2",
+              is_identity);
+
+        // Real data; self-correlation should be exactly 1.0
+        constexpr int K = 16;
+        float real_history[K * N_MODELS];
+        for (int k = 0; k < K; ++k) {
+            for (int i = 0; i < N_MODELS; ++i) {
+                real_history[k * N_MODELS + i] = v5_14_11_a_test_data(k + 2000, i);
+            }
+        }
+        RidgeBlender_BuildCorr<64>(rw.corr_matrix, real_history, K, N_MODELS);
+        bool diag_one = true;
+        for (int i = 0; i < N_MODELS; ++i) {
+            if (fabs(rw.corr_matrix[i][i] - 1.0) > 1e-12) diag_one = false;
+        }
+        check("v5.14.11.A: refactored BuildCorr self-correlation diagonal = 1.0",
+              diag_one);
+    }
+
+    // Test 4: BuildHistoryFromRing walks ring backwards from head
+    // (most-recent-first; replaces TWO mirror loops at StrategyParameters.hpp).
+    {
+        struct MockRecord { float predictions[8]; };
+        constexpr int N_RING = 8;
+        constexpr int N_MODELS = 4;
+        MockRecord ring[N_RING];
+        for (int r = 0; r < N_RING; ++r) {
+            for (int i = 0; i < 8; ++i) {
+                ring[r].predictions[i] = (float)(r * 10 + i);
+            }
+        }
+
+        // ring_head = 5 (next write); 5 records filled (0..4)
+        float history[N_RING * 8] = {0};
+        int avail = RidgeBlender_BuildHistoryFromRing<64, MockRecord>(
+            ring, 5, N_RING, 5, N_MODELS, history);
+
+        check("v5.14.11.A: BuildHistoryFromRing returns avail = min(predict_call_count, K)",
+              avail == 5);
+
+        // Expected order: most-recent-first = record 4, 3, 2, 1, 0
+        bool order_correct = true;
+        for (int k = 0; k < 5; ++k) {
+            int expected_record = 4 - k;
+            for (int i = 0; i < N_MODELS; ++i) {
+                float expected_val = (float)(expected_record * 10 + i);
+                if (history[k * N_MODELS + i] != expected_val) {
+                    order_correct = false;
+                }
+            }
+        }
+        check("v5.14.11.A: BuildHistoryFromRing walks ring backwards from head (most-recent-first)",
+              order_correct);
+    }
+
+    // Test 5: OnlineCycleStep dispatch (full-recompute mode + insufficient history edge).
+    {
+        struct MockRecord { float predictions[8]; };
+        constexpr int N_RING = 256;
+        constexpr int N_MODELS = 4;
+        constexpr int N_FILLED = 64;
+        MockRecord ring[N_RING] = {};
+        for (int r = 0; r < N_FILLED; ++r) {
+            for (int i = 0; i < 8; ++i) {
+                ring[r].predictions[i] = v5_14_11_a_test_data(r + 3000, i);
+            }
+        }
+
+        RidgeWeights<64> rw;
+        RidgeWeights_Init(&rw);
+        int rc = RidgeBlender_OnlineCycleStep<64, MockRecord>(
+            &rw, ring, N_FILLED, N_RING, N_FILLED, N_MODELS, /*use_online=*/false);
+        check("v5.14.11.A: OnlineCycleStep (full mode) returns 0 with K=64 records",
+              rc == 0);
+
+        bool diag_one = true;
+        for (int i = 0; i < N_MODELS; ++i) {
+            if (fabs(rw.corr_matrix[i][i] - 1.0) > 1e-12) diag_one = false;
+        }
+        check("v5.14.11.A: OnlineCycleStep (full mode) populates corr_matrix correctly",
+              diag_one);
+
+        // Insufficient history → -1 (caller falls through to bandit weights)
+        RidgeWeights_Init(&rw);
+        int rc_empty = RidgeBlender_OnlineCycleStep<64, MockRecord>(
+            &rw, ring, 0, N_RING, 0, N_MODELS, /*use_online=*/false);
+        check("v5.14.11.A: OnlineCycleStep returns -1 with predict_call_count = 0",
+              rc_empty == -1);
+
+        int rc_one = RidgeBlender_OnlineCycleStep<64, MockRecord>(
+            &rw, ring, 1, N_RING, 1, N_MODELS, /*use_online=*/false);
+        check("v5.14.11.A: OnlineCycleStep returns -1 with predict_call_count = 1 (Ridge needs ≥ 2)",
+              rc_one == -1);
+    }
+
+    // Test 6: Online state fields present + zero-init verified via RidgeWeights_Init memset
+    // (D5 resolution — confirms memset covers new fields; no postloadsetup-registry entry needed).
+    {
+        RidgeWeights<64> rw;
+        // Pre-set non-zero values to verify Init zeroes them
+        rw.online_sum_x[0] = 999.0;
+        rw.online_sum_xx[2][3] = 888.0;
+        rw.online_window_count = 7777;
+
+        RidgeWeights_Init(&rw);
+
+        bool zeroed = (rw.online_sum_x[0] == 0.0)
+                   && (rw.online_sum_xx[2][3] == 0.0)
+                   && (rw.online_window_count == 0);
+        check("v5.14.11.A: RidgeWeights_Init memset covers appended online state fields (D5 resolution)",
+              zeroed);
+
+        // Identity matrix from Init (existing behavior preserved)
+        bool diag_one = true;
+        for (int i = 0; i < MAX_RIDGE_MODELS; ++i) {
+            if (rw.corr_matrix[i][i] != 1.0) diag_one = false;
+        }
+        check("v5.14.11.A: RidgeWeights_Init still sets identity corr_matrix diagonal",
+              diag_one);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
