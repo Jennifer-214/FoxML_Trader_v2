@@ -155,7 +155,7 @@ inline int FeatureOverlay_PostLoadVerify(
 
     auto check_handle = [&](const ModelHandle<F>* h, const char* role_name, int h_idx) {
         if (!h) return;
-        if (!h->has_overlay_hash) return;  // legacy stamp; silent skip
+        if (!STAMP_HAS(*h, overlay_hash)) return;  // legacy stamp; silent skip
 
         // Format location string (single-zoo: "core 0"; ensemble: "core 0 ensemble[2]")
         char loc[64];

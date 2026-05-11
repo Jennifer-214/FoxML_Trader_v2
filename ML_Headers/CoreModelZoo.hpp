@@ -279,68 +279,79 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
     // Only copies when stamp had the field; preserves Model_Init zero
     // defaults for legacy stamps.
     if (have_sr) {
+        // v5.15.0 — stamp-derived field copies now mirror ModelStampResult
+        // canonical names; STAMP_SET writes bit-packed has_flags. Each
+        // group/standalone bit follows the FOREACH_STAMP_BOUND_MODEL_CONST
+        // bit allocation (registry's enum StampHasFlagBit).
+        //
+        // FUTURE OPPORTUNITY: extract this entire block into a
+        // STAMP_HANDLE_COPY_FROM_RESULT(handle, sr) companion macro
+        // mirroring STAMP_MODEL_CONST_AUTOPOPULATE. Walks the registry +
+        // emits per-entry copy + STAMP_SET. Closes the Class 18 mirror
+        // for handle/result copy at the same surface AUTOPOPULATE closed
+        // for emit. Deferred from v5.15.0 to keep .A bounded; ~30 LOC
+        // new infrastructure when triggered.
         if (STAMP_HAS(sr, training_poll_interval)) {
             handle->training_poll_interval = sr.training_poll_interval;
-            handle->has_training_poll_interval = 1;
+            STAMP_SET(*handle, training_poll_interval);
         }
         // v5.9.5h — copy XGBoost hyperparams from stamp onto handle.
-        // EngineSharded boot-WARN compares stamp_xgb_* vs cfg.xgb_*
-        // (mirrors v5.9.4a poll_interval pattern). No refusal — hyperparams
-        // don't affect inference, only forensics + reproducibility.
+        // EngineSharded boot-WARN compares xgb_* vs cfg.xgb_*. No refusal —
+        // hyperparams don't affect inference, only forensics + reproducibility.
         if (STAMP_HAS(sr, xgb_hyperparams)) {
-            handle->has_xgb_hyperparams        = 1;
-            handle->stamp_xgb_max_depth        = sr.xgb_max_depth;
-            handle->stamp_xgb_learning_rate    = sr.xgb_learning_rate;
-            handle->stamp_xgb_n_estimators     = sr.xgb_n_estimators;
-            handle->stamp_xgb_subsample        = sr.xgb_subsample;
-            handle->stamp_xgb_colsample_bytree = sr.xgb_colsample_bytree;
-            handle->stamp_xgb_min_child_weight = sr.xgb_min_child_weight;
-            handle->stamp_xgb_seed             = sr.xgb_seed;
+            STAMP_SET(*handle, xgb_hyperparams);
+            handle->xgb_max_depth        = sr.xgb_max_depth;
+            handle->xgb_learning_rate    = sr.xgb_learning_rate;
+            handle->xgb_n_estimators     = sr.xgb_n_estimators;
+            handle->xgb_subsample        = sr.xgb_subsample;
+            handle->xgb_colsample_bytree = sr.xgb_colsample_bytree;
+            handle->xgb_min_child_weight = sr.xgb_min_child_weight;
+            handle->xgb_seed             = sr.xgb_seed;
             size_t tmln = strnlen(sr.xgb_tree_method,
-                                   sizeof(handle->stamp_xgb_tree_method) - 1);
-            memcpy(handle->stamp_xgb_tree_method, sr.xgb_tree_method, tmln);
-            handle->stamp_xgb_tree_method[tmln] = '\0';
+                                   sizeof(handle->xgb_tree_method) - 1);
+            memcpy(handle->xgb_tree_method, sr.xgb_tree_method, tmln);
+            handle->xgb_tree_method[tmln] = '\0';
         }
         // v5.9.5h Phase 10 — build flags fingerprint
         if (STAMP_HAS(sr, build_flags_hash)) {
-            handle->has_build_flags_hash   = 1;
-            handle->stamp_build_flags_hash = sr.build_flags_hash;
+            STAMP_SET(*handle, build_flags_hash);
+            handle->build_flags_hash = sr.build_flags_hash;
         }
         // v5.11.42 D.1 — copy stamp's xgb_train_nthread for engine boot WARN.
         if (STAMP_HAS(sr, xgb_train_nthread)) {
-            handle->has_stamp_xgb_train_nthread = 1;
-            handle->stamp_xgb_train_nthread     = sr.xgb_train_nthread;
+            STAMP_SET(*handle, xgb_train_nthread);
+            handle->xgb_train_nthread = sr.xgb_train_nthread;
         }
         // v5.11.42 D.2 — copy stamp's label params for ensemble dir-name
         // horizon-mismatch refusal at AutoDetect time.
         if (STAMP_HAS(sr, label_params)) {
-            handle->has_stamp_label_params  = 1;
-            handle->stamp_label_lookahead_ticks = sr.label_lookahead_ticks;
-            handle->stamp_label_tp_pct          = sr.label_tp_pct;
-            handle->stamp_label_sl_pct          = sr.label_sl_pct;
+            STAMP_SET(*handle, label_params);
+            handle->label_lookahead_ticks = sr.label_lookahead_ticks;
+            handle->label_tp_pct          = sr.label_tp_pct;
+            handle->label_sl_pct          = sr.label_sl_pct;
         }
         // v5.11.42 D.3 — copy stamp's scaler_sha256 for ensemble-sibling
         // consistency WARN.
         if (STAMP_HAS(sr, scaler) && sr.scaler_sha256[0] != '\0') {
-            handle->has_stamp_scaler_sha256 = 1;
+            STAMP_SET(*handle, scaler);
             size_t n = strnlen(sr.scaler_sha256,
-                               sizeof(handle->stamp_scaler_sha256) - 1);
-            memcpy(handle->stamp_scaler_sha256, sr.scaler_sha256, n);
-            handle->stamp_scaler_sha256[n] = '\0';
+                               sizeof(handle->scaler_sha256) - 1);
+            memcpy(handle->scaler_sha256, sr.scaler_sha256, n);
+            handle->scaler_sha256[n] = '\0';
         }
         // v5.14.3.B — copy stamp's overlay-derived fields for
         // FeatureOverlay_PostLoadVerify. Forward-compat: legacy stamps
-        // (has_overlay_hash=0) leave handle's overlay_hash empty;
+        // (overlay_hash bit unset) leave handle's overlay_hash empty;
         // verify skips silently.
         if (STAMP_HAS(sr, overlay_hash) && sr.overlay_hash[0] != '\0') {
-            handle->has_overlay_hash = 1;
+            STAMP_SET(*handle, overlay_hash);
             size_t n = strnlen(sr.overlay_hash,
                                sizeof(handle->overlay_hash) - 1);
             memcpy(handle->overlay_hash, sr.overlay_hash, n);
             handle->overlay_hash[n] = '\0';
         }
         if (STAMP_HAS(sr, effective_hash) && sr.effective_hash[0] != '\0') {
-            handle->has_effective_hash = 1;
+            STAMP_SET(*handle, effective_hash);
             size_t n = strnlen(sr.effective_hash,
                                sizeof(handle->effective_hash) - 1);
             memcpy(handle->effective_hash, sr.effective_hash, n);
@@ -349,45 +360,45 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         // v5.14.8.E — copy stale-model gate fields from stamp to handle.
         // Read by CoreModelZoo_CheckStaleModel at boot.
         if (STAMP_HAS(sr, training_timestamp_us)) {
-            handle->has_training_timestamp_us = 1;
-            handle->training_timestamp_us     = sr.training_timestamp_us;
+            STAMP_SET(*handle, training_timestamp_us);
+            handle->training_timestamp_us = sr.training_timestamp_us;
         }
         if (STAMP_HAS(sr, run_name) && sr.run_name[0] != '\0') {
-            handle->has_run_name = 1;
+            STAMP_SET(*handle, run_name);
             size_t n = strnlen(sr.run_name, sizeof(handle->run_name) - 1);
             memcpy(handle->run_name, sr.run_name, n);
             handle->run_name[n] = '\0';
         }
         // v5.9.5i — copy stamp's inference cfg values. EngineSharded
         // boot-WARN/REFUSE compares vs cfg.*. Forward-compat: legacy
-        // stamps (has_inference_cfg=0) leave handle's stamp_inf_* at
-        // Model_Init zero defaults; comparison skipped.
+        // stamps (inference_cfg bit unset) leave handle's
+        // inference_cfg_* at Model_Init zero defaults; comparison skipped.
         if (STAMP_HAS(sr, inference_cfg)) {
-            handle->has_stamp_inference_cfg = 1;
-            handle->stamp_inf_confidence_threshold_scale =
+            STAMP_SET(*handle, inference_cfg);
+            handle->inference_cfg_confidence_threshold_scale =
                 sr.inference_cfg_confidence_threshold_scale;
-            handle->stamp_inf_barrier_gate_enabled =
+            handle->inference_cfg_barrier_gate_enabled =
                 sr.inference_cfg_barrier_gate_enabled;
-            handle->stamp_inf_confidence_hard_block_threshold =
+            handle->inference_cfg_confidence_hard_block_threshold =
                 sr.inference_cfg_confidence_hard_block_threshold;
-            // v5.14.9.D — DELETED stamp_inf_freshness_tau population
+            // v5.14.9.D — DELETED inference_cfg_freshness_tau population
             // (TECH_DEBT-004 close); registry entry + ModelHandle field deleted.
         }
         if (STAMP_HAS(sr, inference_cfg_bandit_blend_ratio)) {
-            handle->has_stamp_bandit = 1;
-            handle->stamp_inf_bandit_blend_ratio =
+            STAMP_SET(*handle, inference_cfg_bandit_blend_ratio);
+            handle->inference_cfg_bandit_blend_ratio =
                 sr.inference_cfg_bandit_blend_ratio;
         }
         if (STAMP_HAS(sr, fees)) {
-            handle->has_stamp_fees = 1;
-            handle->stamp_inf_fee_rate_maker =
+            STAMP_SET(*handle, fees);
+            handle->inference_cfg_fee_rate_maker =
                 sr.inference_cfg_fee_rate_maker;
-            handle->stamp_inf_fee_rate_taker =
+            handle->inference_cfg_fee_rate_taker =
                 sr.inference_cfg_fee_rate_taker;
         }
         if (STAMP_HAS(sr, model_num_outputs)) {
-            handle->stamp_model_num_outputs = sr.model_num_outputs;
-            handle->has_stamp_num_outputs = 1;
+            STAMP_SET(*handle, model_num_outputs);
+            handle->model_num_outputs = sr.model_num_outputs;
             // Phase 5 — verify stamp's claim matches Model_Load's seen
             // num_outputs. Mismatch = stamp tampered with OR XGBoost
             // loaded a different model than the trainer wrote. Refuse
@@ -416,7 +427,7 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
         // between dirs. ALWAYS refuses on mismatch (no strict-mode
         // gating) since the model definitely shouldn't be loaded under
         // a horizon it wasn't trained for. Legacy stamps without
-        // label_params (has_*=0) skip the check.
+        // label_params (bit unset) skip the check.
         if (expected_horizon_ticks > 0 && STAMP_HAS(sr, label_params) &&
             sr.label_lookahead_ticks != expected_horizon_ticks) {
             fprintf(stderr,
@@ -1606,21 +1617,21 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
             const char* baseline_sha = nullptr;
             int baseline_idx = -1;
             for (int i = 0; i < count; ++i) {
-                if (!arr[i].has_stamp_scaler_sha256) continue;
-                if (arr[i].stamp_scaler_sha256[0] == '\0') continue;
+                if (!STAMP_HAS(arr[i], scaler)) continue;
+                if (arr[i].scaler_sha256[0] == '\0') continue;
                 if (baseline_sha == nullptr) {
-                    baseline_sha = arr[i].stamp_scaler_sha256;
+                    baseline_sha = arr[i].scaler_sha256;
                     baseline_idx = i;
                     continue;
                 }
-                if (strcmp(arr[i].stamp_scaler_sha256, baseline_sha) != 0) {
+                if (strcmp(arr[i].scaler_sha256, baseline_sha) != 0) {
                     fprintf(stderr,
                         "[sibling-consistency] WARN: ensemble role=%s "
                         "sibling[%d] scaler_sha256=%.16s... differs from "
                         "sibling[%d] scaler_sha256=%.16s... "
                         "(per-horizon scalers should be identical; mixed "
                         "training sessions or sidecar copy mistake?)\n",
-                        role_name, i, arr[i].stamp_scaler_sha256,
+                        role_name, i, arr[i].scaler_sha256,
                         baseline_idx, baseline_sha);
                 }
             }
@@ -2506,7 +2517,7 @@ inline int CoreModelZoo_CheckStaleModel(const ModelHandle<F>* m,
                                           int strict_mode) {
     if (max_age_hours == 0) return 0;             // disabled
     if (!m) return 0;                              // no handle
-    if (!m->has_training_timestamp_us) return 0;   // legacy stamp; skip check
+    if (!STAMP_HAS(*m, training_timestamp_us)) return 0;   // legacy stamp; skip check
     if (m->training_timestamp_us == 0) return 0;   // sentinel; skip
     if (m->training_timestamp_us > now_us) return 0; // future timestamp; treat as fresh
 
@@ -2515,7 +2526,7 @@ inline int CoreModelZoo_CheckStaleModel(const ModelHandle<F>* m,
     if (age_hours <= max_age_hours) return 0;     // fresh
 
     // Stale. Surface via CRITICAL log (rate-limited per call site).
-    const char* run_name = m->has_run_name ? m->run_name : "(unnamed)";
+    const char* run_name = STAMP_HAS(*m, run_name) ? m->run_name : "(unnamed)";
     static uint64_t last_stale_model_log_us = 0;
     tt::Health_LogCriticalRateLimited(
         &last_stale_model_log_us,

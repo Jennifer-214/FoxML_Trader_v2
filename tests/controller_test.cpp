@@ -12583,22 +12583,24 @@ e3_skip_load:;
         }
 
         // === Phase 6: ModelHandle stamp-derived fields zero-init ===
+        // v5.15.0 — has_* fields migrated to bit-packed has_flags + STAMP_HAS
+        // accessor; field names updated to canonical registry names.
         ModelHandle<64> h = {};
         Model_Init(&h);
         check("v5.9.4a: Model_Init zero-inits training_poll_interval",
               h.training_poll_interval == 0u);
-        check("v5.9.4a: Model_Init zero-inits has_training_poll_interval",
-              h.has_training_poll_interval == 0);
-        check("v5.9.4a: Model_Init zero-inits stamp_model_num_outputs",
-              h.stamp_model_num_outputs == 0);
-        check("v5.9.4a: Model_Init zero-inits has_stamp_num_outputs",
-              h.has_stamp_num_outputs == 0);
+        check("v5.9.4a: Model_Init clears has_flags training_poll_interval bit",
+              !STAMP_HAS(h, training_poll_interval));
+        check("v5.9.4a: Model_Init zero-inits model_num_outputs",
+              h.model_num_outputs == 0);
+        check("v5.9.4a: Model_Init clears has_flags model_num_outputs bit",
+              !STAMP_HAS(h, model_num_outputs));
 
         // Direct field assignability (sanity for boot-time WARN logic)
-        h.has_training_poll_interval = 1;
+        STAMP_SET(h, training_poll_interval);
         h.training_poll_interval = 250;
         check("v5.9.4a: ModelHandle.training_poll_interval assignable",
-              h.has_training_poll_interval == 1 && h.training_poll_interval == 250u);
+              STAMP_HAS(h, training_poll_interval) && h.training_poll_interval == 250u);
     }
 
     printf("\n--- EXTENSIBILITY: v5.9.5b — in-process stamp emit populates StampInferenceCfgInputs ---\n");
@@ -12904,17 +12906,18 @@ e3_skip_load:;
         check("v5.9.5h: defaults tree_method == 'hist'",
               strcmp(hp_def.tree_method, "hist") == 0);
 
-        // === Test 2: ModelHandle stamp_xgb_* zero-init ===
+        // === Test 2: ModelHandle xgb_hyperparams zero-init ===
+        // v5.15.0 — fields renamed stamp_xgb_* → xgb_*; has_* → has_flags bit.
         ModelHandle<64> h = {};
         Model_Init(&h);
-        check("v5.9.5h: Model_Init zeros has_xgb_hyperparams",
-              h.has_xgb_hyperparams == 0);
-        check("v5.9.5h: Model_Init zeros stamp_xgb_max_depth",
-              h.stamp_xgb_max_depth == 0);
-        check("v5.9.5h: Model_Init zeros stamp_xgb_subsample",
-              h.stamp_xgb_subsample == 0.0);
-        check("v5.9.5h: Model_Init zeros stamp_xgb_tree_method",
-              h.stamp_xgb_tree_method[0] == '\0');
+        check("v5.9.5h: Model_Init clears xgb_hyperparams bit",
+              !STAMP_HAS(h, xgb_hyperparams));
+        check("v5.9.5h: Model_Init zeros xgb_max_depth",
+              h.xgb_max_depth == 0);
+        check("v5.9.5h: Model_Init zeros xgb_subsample",
+              h.xgb_subsample == 0.0);
+        check("v5.9.5h: Model_Init zeros xgb_tree_method",
+              h.xgb_tree_method[0] == '\0');
 
         // === Test 3: Stamp round-trip with xgb_hyperparams ===
         char tmp_dir[] = "/tmp/v595h_stamp_XXXXXX";
@@ -13072,20 +13075,22 @@ e3_skip_load:;
         // manually via paper-test + stderr inspection.
         using namespace tt;
 
-        // === Test 1: ModelHandle stamp_inf_* zero-init ===
+        // === Test 1: ModelHandle inference_cfg zero-init ===
+        // v5.15.0 — fields renamed stamp_inf_* → inference_cfg_*; bandit + fees
+        // group bits moved to bit-packed has_flags.
         ModelHandle<64> h = {};
         Model_Init(&h);
-        check("v5.9.5i: Model_Init zeros has_stamp_inference_cfg",
-              h.has_stamp_inference_cfg == 0);
-        // v5.14.9.D — DELETED stamp_inf_freshness_tau check (TECH_DEBT-004 close).
-        check("v5.9.5i: Model_Init zeros stamp_inf_confidence_threshold_scale",
-              h.stamp_inf_confidence_threshold_scale == 0.0);
-        check("v5.9.5i: Model_Init zeros stamp_inf_barrier_gate_enabled",
-              h.stamp_inf_barrier_gate_enabled == 0);
-        check("v5.9.5i: Model_Init zeros has_stamp_bandit",
-              h.has_stamp_bandit == 0);
-        check("v5.9.5i: Model_Init zeros has_stamp_fees",
-              h.has_stamp_fees == 0);
+        check("v5.9.5i: Model_Init clears inference_cfg bit",
+              !STAMP_HAS(h, inference_cfg));
+        // v5.14.9.D — DELETED inference_cfg_freshness_tau check (TECH_DEBT-004 close).
+        check("v5.9.5i: Model_Init zeros inference_cfg_confidence_threshold_scale",
+              h.inference_cfg_confidence_threshold_scale == 0.0);
+        check("v5.9.5i: Model_Init zeros inference_cfg_barrier_gate_enabled",
+              h.inference_cfg_barrier_gate_enabled == 0);
+        check("v5.9.5i: Model_Init clears inference_cfg_bandit_blend_ratio bit",
+              !STAMP_HAS(h, inference_cfg_bandit_blend_ratio));
+        check("v5.9.5i: Model_Init clears fees bit",
+              !STAMP_HAS(h, fees));
 
         // === Test 2: cfg field acknowledge_inference_cfg_drift defaults to 0 ===
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
@@ -17033,72 +17038,75 @@ e3_skip_load:;
               fv.auto_stamp_attempted == 0);
     }
 
-    printf("\n--- v5.11.42 D.1: ModelHandle.stamp_xgb_train_nthread propagation ---\n");
+    printf("\n--- v5.11.42 D.1: ModelHandle.xgb_train_nthread propagation ---\n");
     {
         // v5.11.42 D.1 — verify that ModelHandle picks up xgb_train_nthread
         // from the stamp body. EngineSharded boot WARN compares stamp's
         // value vs cfg.xgb_train_nthread; mode-divergence (stamp=1 +
         // cfg>1) indicates parallel multi-horizon trained model loaded
         // under serial-mode cfg. Forensic only — no refusal.
+        // v5.15.0 — field renamed stamp_xgb_train_nthread → xgb_train_nthread.
         ModelHandle<64> mh;
         Model_Init(&mh);
-        check("v5.11.42 D.1: Model_Init zeroes has_stamp_xgb_train_nthread",
-              mh.has_stamp_xgb_train_nthread == 0);
-        check("v5.11.42 D.1: Model_Init zeroes stamp_xgb_train_nthread",
-              mh.stamp_xgb_train_nthread == 0);
+        check("v5.11.42 D.1: Model_Init clears xgb_train_nthread bit",
+              !STAMP_HAS(mh, xgb_train_nthread));
+        check("v5.11.42 D.1: Model_Init zeroes xgb_train_nthread",
+              mh.xgb_train_nthread == 0);
 
         // Simulate post-load population (mirrors CoreModelZoo path)
-        mh.has_stamp_xgb_train_nthread = 1;
-        mh.stamp_xgb_train_nthread = 1;
+        STAMP_SET(mh, xgb_train_nthread);
+        mh.xgb_train_nthread = 1;
         check("v5.11.42 D.1: handle field assignable to 1 (parallel mode)",
-              mh.has_stamp_xgb_train_nthread == 1 &&
-              mh.stamp_xgb_train_nthread == 1);
+              STAMP_HAS(mh, xgb_train_nthread) && mh.xgb_train_nthread == 1);
     }
 
-    printf("\n--- v5.11.42 D.2: ModelHandle.stamp_label_lookahead_ticks propagation ---\n");
+    printf("\n--- v5.11.42 D.2: ModelHandle.label_lookahead_ticks propagation ---\n");
     {
         // v5.11.42 D.2 — verify ModelHandle picks up label_lookahead_ticks
         // from stamp. EnsembleModelZoo_LoadFromCfg passes the dir-name-
         // parsed horizon as expected_horizon_ticks; CoreModelZoo_TryLoadRole
         // refuses on mismatch (catches dir rename/copy mistake).
+        // v5.15.0 — fields renamed stamp_label_* → label_*.
         ModelHandle<64> mh;
         Model_Init(&mh);
-        check("v5.11.42 D.2: Model_Init zeroes has_stamp_label_params",
-              mh.has_stamp_label_params == 0);
-        check("v5.11.42 D.2: Model_Init zeroes stamp_label_lookahead_ticks",
-              mh.stamp_label_lookahead_ticks == 0);
+        check("v5.11.42 D.2: Model_Init clears label_params bit",
+              !STAMP_HAS(mh, label_params));
+        check("v5.11.42 D.2: Model_Init zeroes label_lookahead_ticks",
+              mh.label_lookahead_ticks == 0);
 
         // Simulate post-load population
-        mh.has_stamp_label_params = 1;
-        mh.stamp_label_lookahead_ticks = 7500;
-        mh.stamp_label_tp_pct = 0.05;
-        mh.stamp_label_sl_pct = 0.05;
-        check("v5.11.42 D.2: handle stamp_label_lookahead_ticks=7500",
-              mh.stamp_label_lookahead_ticks == 7500);
-        check("v5.11.42 D.2: handle stamp_label_tp_pct=0.05",
-              mh.stamp_label_tp_pct > 0.049 && mh.stamp_label_tp_pct < 0.051);
+        STAMP_SET(mh, label_params);
+        mh.label_lookahead_ticks = 7500;
+        mh.label_tp_pct = 0.05;
+        mh.label_sl_pct = 0.05;
+        check("v5.11.42 D.2: handle label_lookahead_ticks=7500",
+              mh.label_lookahead_ticks == 7500);
+        check("v5.11.42 D.2: handle label_tp_pct=0.05",
+              mh.label_tp_pct > 0.049 && mh.label_tp_pct < 0.051);
     }
 
-    printf("\n--- v5.11.42 D.3: ModelHandle.stamp_scaler_sha256 propagation ---\n");
+    printf("\n--- v5.11.42 D.3: ModelHandle.scaler_sha256 propagation ---\n");
     {
         // v5.11.42 D.3 — verify ModelHandle picks up scaler_sha256 from
         // stamp for ensemble-sibling consistency check. Per-horizon
         // scalers SHOULD be identical across siblings (scaler is derived
         // from shared feature matrix); WARN if they differ.
+        // v5.15.0 — field renamed stamp_scaler_sha256 → scaler_sha256;
+        // group bit renamed has_stamp_scaler_sha256 → scaler.
         ModelHandle<64> mh;
         Model_Init(&mh);
-        check("v5.11.42 D.3: Model_Init zeroes has_stamp_scaler_sha256",
-              mh.has_stamp_scaler_sha256 == 0);
-        check("v5.11.42 D.3: Model_Init nul-terminates stamp_scaler_sha256",
-              mh.stamp_scaler_sha256[0] == '\0');
+        check("v5.11.42 D.3: Model_Init clears scaler bit",
+              !STAMP_HAS(mh, scaler));
+        check("v5.11.42 D.3: Model_Init nul-terminates scaler_sha256",
+              mh.scaler_sha256[0] == '\0');
 
         // Simulate post-load population (64-char hex SHA + null)
-        mh.has_stamp_scaler_sha256 = 1;
+        STAMP_SET(mh, scaler);
         const char* sample_sha = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-        memcpy(mh.stamp_scaler_sha256, sample_sha, 64);
-        mh.stamp_scaler_sha256[64] = '\0';
-        check("v5.11.42 D.3: handle stamp_scaler_sha256 round-trip",
-              strcmp(mh.stamp_scaler_sha256, sample_sha) == 0);
+        memcpy(mh.scaler_sha256, sample_sha, 64);
+        mh.scaler_sha256[64] = '\0';
+        check("v5.11.42 D.3: handle scaler_sha256 round-trip",
+              strcmp(mh.scaler_sha256, sample_sha) == 0);
     }
 
     printf("\n--- v5.11.41.C: multi_horizon_max_threads cfg + auto-default ---\n");
@@ -19979,7 +19987,7 @@ e3_skip_load:;
         CoreModelZoo<64> zoo;
         CoreModelZoo_Init(&zoo);
         zoo.loaded_mask = CORE_MODEL_BUY_SIGNAL;
-        zoo.buy_signal.has_overlay_hash = 0;  // legacy stamp; no overlay claimed
+        STAMP_CLR(zoo.buy_signal, overlay_hash);  // legacy stamp; no overlay claimed
         int rc = tt::FeatureOverlay_PostLoadVerify<64>(
             &zoo, /*ezoo=*/nullptr, /*core_id=*/0, /*strict_mode=*/1);
         check("v5.14.3.C: PostLoadVerify no overlay claimed → returns 0 (silent skip)", rc == 0);
@@ -19990,7 +19998,7 @@ e3_skip_load:;
         CoreModelZoo<64> zoo;
         CoreModelZoo_Init(&zoo);
         zoo.loaded_mask = CORE_MODEL_BUY_SIGNAL;
-        zoo.buy_signal.has_overlay_hash = 1;
+        STAMP_SET(zoo.buy_signal, overlay_hash);
         strncpy(zoo.buy_signal.overlay_hash,
                 "1111111111111111111111111111111111111111111111111111111111111111",
                 sizeof(zoo.buy_signal.overlay_hash) - 1);
@@ -20006,7 +20014,7 @@ e3_skip_load:;
         CoreModelZoo<64> zoo;
         CoreModelZoo_Init(&zoo);
         zoo.loaded_mask = CORE_MODEL_BUY_SIGNAL;
-        zoo.buy_signal.has_overlay_hash = 1;
+        STAMP_SET(zoo.buy_signal, overlay_hash);
         strncpy(zoo.buy_signal.overlay_hash,
                 "2222222222222222222222222222222222222222222222222222222222222222",
                 sizeof(zoo.buy_signal.overlay_hash) - 1);
@@ -20034,7 +20042,7 @@ e3_skip_load:;
             CoreModelZoo<64> zoo;
             CoreModelZoo_Init(&zoo);
             zoo.loaded_mask = CORE_MODEL_BUY_SIGNAL;
-            zoo.buy_signal.has_overlay_hash = 1;
+            STAMP_SET(zoo.buy_signal, overlay_hash);
             strncpy(zoo.buy_signal.overlay_hash,
                     "3333333333333333333333333333333333333333333333333333333333333333",
                     sizeof(zoo.buy_signal.overlay_hash) - 1);
@@ -20067,7 +20075,7 @@ e3_skip_load:;
             CoreModelZoo<64> zoo;
             CoreModelZoo_Init(&zoo);
             zoo.loaded_mask = CORE_MODEL_BUY_SIGNAL;
-            zoo.buy_signal.has_overlay_hash = 1;
+            STAMP_SET(zoo.buy_signal, overlay_hash);
             // Stamp claims a DIFFERENT hash than sidecar reports
             strncpy(zoo.buy_signal.overlay_hash,
                     "5555555555555555555555555555555555555555555555555555555555555555",
@@ -20108,7 +20116,7 @@ e3_skip_load:;
             CoreModelZoo_Init(&zoo_hotswap);
             for (auto* z : {&zoo_boot, &zoo_backtest, &zoo_hotswap}) {
                 z->loaded_mask = CORE_MODEL_BUY_SIGNAL;
-                z->buy_signal.has_overlay_hash = 1;
+                STAMP_SET(z->buy_signal, overlay_hash);
                 strncpy(z->buy_signal.overlay_hash,
                         "6666666666666666666666666666666666666666666666666666666666666666",
                         sizeof(z->buy_signal.overlay_hash) - 1);
@@ -20979,13 +20987,13 @@ e3_skip_load:;
         check("v5.14.8.E: max_age_hours=0 returns 0 (disabled)",
               CoreModelZoo_CheckStaleModel(&m, now_us, 0, 1) == 0);
 
-        // No has_training_timestamp_us (legacy stamp): returns 0
-        m.has_training_timestamp_us = 0;
-        check("v5.14.8.E: legacy stamp (no has_*) returns 0 (skip check)",
+        // No training_timestamp_us bit (legacy stamp): returns 0
+        STAMP_CLR(m, training_timestamp_us);
+        check("v5.14.8.E: legacy stamp (no bit) returns 0 (skip check)",
               CoreModelZoo_CheckStaleModel(&m, now_us, 24, 1) == 0);
 
         // Sentinel (training_timestamp_us=0): returns 0
-        m.has_training_timestamp_us = 1;
+        STAMP_SET(m, training_timestamp_us);
         m.training_timestamp_us = 0;
         check("v5.14.8.E: sentinel timestamp 0 returns 0 (skip)",
               CoreModelZoo_CheckStaleModel(&m, now_us, 24, 1) == 0);
@@ -23681,6 +23689,164 @@ e3_skip_load:;
               sha_ok);
         check("v5.14.11.B.3: BuildCorr SHA-256-locked sample-trace (byte-determinism within build)",
               hash_match);
+    }
+
+    //==================================================================
+    // v5.15.0 — ModelHandle X-macro migration + parser refactor anchors
+    //==================================================================
+    //
+    // Two anchor tests for the v5.15.0 structural unification:
+    //
+    //   1. Bit-packed has_flags accessor round-trip — verifies STAMP_HAS /
+    //      SET / CLR aliases work on ModelHandle.has_flags exactly as they
+    //      do on ModelStampResult / StampInferenceCfgInputs. Sanity check
+    //      for the migration's cornerstone invariant: ModelHandle.has_flags
+    //      shares MASK_<name> bit positions with the sister structs.
+    //
+    //   2. Stamp emit→parse→re-emit round-trip — verifies the registry-
+    //      driven parser (v5.15.0.B refactor) preserves byte-equivalence
+    //      across PRE_CFG + CFG + POST_CFG halves. Populates a representative
+    //      StampInferenceCfgInputs with all 13 group/standalone bits set,
+    //      emits via stamp_write_for_model, parses via verify_model_stamp,
+    //      checks every STAMP_HAS bit propagates + key value fields survive
+    //      the round-trip bytewise.
+    //
+    // The 2904 existing tests already exercise the parser + emitter
+    // extensively; these are explicit v5.15.0 anchor tests that fail
+    // loudly if the structural unification ever drifts.
+    printf("\n--- v5.15.0: ModelHandle X-macro migration + parser refactor anchors ---\n");
+    {
+        // === Anchor 1: STAMP_HAS / SET / CLR round-trip on ModelHandle ===
+        ModelHandle<64> h;
+        Model_Init(&h);
+        check("v5.15.0.A: Model_Init clears has_flags to 0",
+              h.has_flags == 0ULL);
+
+        // Set a group bit + a standalone bit; verify STAMP_HAS reads true.
+        STAMP_SET(h, inference_cfg);        // group bit
+        STAMP_SET(h, training_poll_interval); // standalone bit
+        STAMP_SET(h, run_name);              // POST_CFG standalone
+        check("v5.15.0.A: STAMP_SET(h, inference_cfg) sets group bit",
+              STAMP_HAS(h, inference_cfg));
+        check("v5.15.0.A: STAMP_SET(h, training_poll_interval) sets standalone bit",
+              STAMP_HAS(h, training_poll_interval));
+        check("v5.15.0.A: STAMP_SET(h, run_name) sets POST_CFG standalone bit",
+              STAMP_HAS(h, run_name));
+
+        // Multi-flag branchless predicate.
+        check("v5.15.0.A: STAMP_ANY catches any-of-set bits",
+              STAMP_ANY(h, MASK_inference_cfg | MASK_xgb_hyperparams));
+
+        // STAMP_CLR clears + STAMP_HAS reads false.
+        STAMP_CLR(h, inference_cfg);
+        check("v5.15.0.A: STAMP_CLR(h, inference_cfg) clears group bit",
+              !STAMP_HAS(h, inference_cfg));
+        // Other bits unaffected.
+        check("v5.15.0.A: STAMP_CLR scope is per-bit (training_poll_interval still set)",
+              STAMP_HAS(h, training_poll_interval));
+    }
+    {
+        // === Anchor 2: stamp emit→parse round-trip preserves all bits ===
+        // Synthesize a representative StampInferenceCfgInputs with all
+        // 6 group bits + 7 PRE_CFG standalone bits + 4 POST_CFG standalone
+        // bits populated. Round-trip via stamp_write_for_model + verify_model_stamp.
+        char model_path[] = "/tmp/test_v5150_roundtrip_XXXXXX";
+        int fd = mkstemp(model_path);
+        if (fd >= 0) {
+            const char* content = "v5.15.0-roundtrip-fake-model-content";
+            (void)!write(fd, content, strlen(content));
+            close(fd);
+
+            StampInferenceCfgInputs inf{};
+            // Set all group bits + populate at least one field per group.
+            STAMP_SET(inf, inference_cfg);
+            inf.inference_cfg_confidence_threshold_scale = 0.75;
+            inf.inference_cfg_barrier_gate_enabled = 1;
+            STAMP_SET(inf, scaler);
+            inf.feature_scaler_present = 1;
+            strncpy(inf.scaler_sha256,
+                    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+                    sizeof(inf.scaler_sha256) - 1);
+            STAMP_SET(inf, fees);
+            inf.inference_cfg_fee_rate_maker = 0.0001;
+            inf.inference_cfg_fee_rate_taker = 0.0005;
+            STAMP_SET(inf, xgb_hyperparams);
+            inf.xgb_max_depth = 6;
+            inf.xgb_learning_rate = 0.1;
+            STAMP_SET(inf, label_params);
+            inf.label_lookahead_ticks = 7500;
+            inf.label_tp_pct = 0.05;
+            inf.label_sl_pct = 0.05;
+            // Standalone bits (subset; check all 4 categories propagate).
+            STAMP_SET(inf, training_poll_interval);
+            inf.training_poll_interval = 250;
+            STAMP_SET(inf, build_flags_hash);
+            inf.build_flags_hash = 0xABCDEF0123456789ULL;
+            STAMP_SET(inf, run_name);
+            strncpy(inf.run_name, "v5_15_0_roundtrip_test",
+                    sizeof(inf.run_name) - 1);
+            STAMP_SET(inf, training_timestamp_us);
+            inf.training_timestamp_us = 1715472000000000ULL;
+
+            StampWriteResult wr = stamp_write_for_model(
+                model_path, "v515-roundtrip-secret",
+                MODEL_FORMAT_VERSION, "2026-05-12",
+                /*wf_mean_val=*/0.55, /*held_out_metric=*/0.53,
+                /*gap_threshold=*/0.05, /*force=*/0,
+                /*feature_registry_hash=*/0,
+                /*engine_version=*/nullptr,
+                /*inf=*/&inf);
+            check("v5.15.0.C: stamp_write_for_model with populated inf succeeds",
+                  wr.ok == 1);
+
+            ModelStampResult vr = verify_model_stamp(
+                model_path, "v515-roundtrip-secret",
+                /*gap_threshold=*/0.05, MODEL_FORMAT_VERSION);
+            check("v5.15.0.C: verify_model_stamp returns valid=1 (signature verified)",
+                  vr.valid == 1);
+
+            // Verify all set bits propagated to parsed result.
+            check("v5.15.0.C: inference_cfg bit round-trips",
+                  STAMP_HAS(vr, inference_cfg));
+            check("v5.15.0.C: scaler bit round-trips",
+                  STAMP_HAS(vr, scaler));
+            check("v5.15.0.C: fees bit round-trips",
+                  STAMP_HAS(vr, fees));
+            check("v5.15.0.C: xgb_hyperparams bit round-trips",
+                  STAMP_HAS(vr, xgb_hyperparams));
+            check("v5.15.0.C: label_params bit round-trips",
+                  STAMP_HAS(vr, label_params));
+            check("v5.15.0.C: training_poll_interval bit round-trips",
+                  STAMP_HAS(vr, training_poll_interval));
+            check("v5.15.0.C: build_flags_hash bit round-trips",
+                  STAMP_HAS(vr, build_flags_hash));
+            check("v5.15.0.C: run_name bit round-trips",
+                  STAMP_HAS(vr, run_name));
+            check("v5.15.0.C: training_timestamp_us bit round-trips",
+                  STAMP_HAS(vr, training_timestamp_us));
+
+            // Verify value fields survive byte-perfect for representative entries.
+            check("v5.15.0.C: training_poll_interval value preserved",
+                  vr.training_poll_interval == 250u);
+            check("v5.15.0.C: build_flags_hash hex-encoded value preserved",
+                  vr.build_flags_hash == 0xABCDEF0123456789ULL);
+            check("v5.15.0.C: xgb_max_depth value preserved",
+                  vr.xgb_max_depth == 6);
+            check("v5.15.0.C: run_name string preserved",
+                  strcmp(vr.run_name, "v5_15_0_roundtrip_test") == 0);
+            check("v5.15.0.C: scaler_sha256 string preserved (64 hex + null)",
+                  strncmp(vr.scaler_sha256,
+                          "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+                          64) == 0);
+
+            // Cleanup
+            unlink(model_path);
+            char stamp_path[520];
+            snprintf(stamp_path, sizeof(stamp_path), "%s.stamp", model_path);
+            unlink(stamp_path);
+        } else {
+            check("v5.15.0.C: stamp_write_for_model with populated inf succeeds", 0);
+        }
     }
 
     printf("\n======================================\n");

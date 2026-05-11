@@ -373,7 +373,7 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
         // === Subgroup 1: xgb-and-friends WARN (training_poll_interval +
         //                  xgb_hyperparams + build_flags_hash) ===
         if (!acknowledge_cross_binary_version_drift) {
-            if (h->has_training_poll_interval &&
+            if (STAMP_HAS(*h, training_poll_interval) &&
                 h->training_poll_interval != cfg.poll_interval) {
                 fprintf(stderr,
                     "[poll_interval] WARN: %s role=%s stamp claims "
@@ -383,51 +383,51 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
                     (unsigned)h->training_poll_interval,
                     (unsigned)cfg.poll_interval);
             }
-            if (h->has_xgb_hyperparams) {
+            if (STAMP_HAS(*h, xgb_hyperparams)) {
                 double cfg_subsample = FPN_ToDouble(cfg.xgb_subsample);
                 double cfg_colsample = FPN_ToDouble(cfg.xgb_colsample_bytree);
-                if (fabs(h->stamp_xgb_subsample - cfg_subsample) > 1e-6) {
+                if (fabs(h->xgb_subsample - cfg_subsample) > 1e-6) {
                     fprintf(stderr,
                         "[xgb_hyperparams] WARN: %s role=%s stamp "
                         "claims xgb_subsample=%.4f but cfg=%.4f\n",
-                        loc, role_name, h->stamp_xgb_subsample, cfg_subsample);
+                        loc, role_name, h->xgb_subsample, cfg_subsample);
                 }
-                if (fabs(h->stamp_xgb_colsample_bytree - cfg_colsample) > 1e-6) {
+                if (fabs(h->xgb_colsample_bytree - cfg_colsample) > 1e-6) {
                     fprintf(stderr,
                         "[xgb_hyperparams] WARN: %s role=%s stamp "
                         "claims xgb_colsample_bytree=%.4f but cfg=%.4f\n",
-                        loc, role_name, h->stamp_xgb_colsample_bytree,
+                        loc, role_name, h->xgb_colsample_bytree,
                         cfg_colsample);
                 }
-                if (h->stamp_xgb_min_child_weight != cfg.xgb_min_child_weight) {
+                if (h->xgb_min_child_weight != cfg.xgb_min_child_weight) {
                     fprintf(stderr,
                         "[xgb_hyperparams] WARN: %s role=%s stamp "
                         "claims xgb_min_child_weight=%d but cfg=%d\n",
-                        loc, role_name, h->stamp_xgb_min_child_weight,
+                        loc, role_name, h->xgb_min_child_weight,
                         cfg.xgb_min_child_weight);
                 }
-                if (h->stamp_xgb_seed != cfg.xgb_seed) {
+                if (h->xgb_seed != cfg.xgb_seed) {
                     fprintf(stderr,
                         "[xgb_hyperparams] WARN: %s role=%s stamp "
                         "claims xgb_seed=%d but cfg=%d\n",
-                        loc, role_name, h->stamp_xgb_seed, cfg.xgb_seed);
+                        loc, role_name, h->xgb_seed, cfg.xgb_seed);
                 }
-                if (strcmp(h->stamp_xgb_tree_method, cfg.xgb_tree_method) != 0) {
+                if (strcmp(h->xgb_tree_method, cfg.xgb_tree_method) != 0) {
                     fprintf(stderr,
                         "[xgb_hyperparams] WARN: %s role=%s stamp "
                         "claims xgb_tree_method=%s but cfg=%s\n",
-                        loc, role_name, h->stamp_xgb_tree_method,
+                        loc, role_name, h->xgb_tree_method,
                         cfg.xgb_tree_method);
                 }
             }
-            if (h->has_build_flags_hash &&
-                h->stamp_build_flags_hash != tt::BUILD_FLAGS_HASH()) {
+            if (STAMP_HAS(*h, build_flags_hash) &&
+                h->build_flags_hash != tt::BUILD_FLAGS_HASH()) {
                 fprintf(stderr,
                     "[build_flags] WARN: %s role=%s stamp claims "
                     "build_flags_hash=%016lx but current build is %016lx "
                     "(cross-build drift; set acknowledge_cross_binary_version_drift=1 to suppress)\n",
                     loc, role_name,
-                    (unsigned long)h->stamp_build_flags_hash,
+                    (unsigned long)h->build_flags_hash,
                     (unsigned long)tt::BUILD_FLAGS_HASH());
             }
             // v5.11.42 D.1 — xgb_train_nthread mode-divergence WARN.
@@ -436,8 +436,8 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
             // would now retrain at higher nthread → bytewise model
             // divergence. Forensic only — model already trained, can't
             // be retrained at load. Operator notification.
-            if (h->has_stamp_xgb_train_nthread &&
-                h->stamp_xgb_train_nthread != cfg.xgb_train_nthread) {
+            if (STAMP_HAS(*h, xgb_train_nthread) &&
+                h->xgb_train_nthread != cfg.xgb_train_nthread) {
                 fprintf(stderr,
                     "[xgb_train_nthread] WARN: %s role=%s stamp claims "
                     "xgb_train_nthread=%d but cfg.xgb_train_nthread=%d "
@@ -446,14 +446,14 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
                     "bytewise on retrain; set acknowledge_cross_binary_version_drift=1 "
                     "to suppress)\n",
                     loc, role_name,
-                    h->stamp_xgb_train_nthread,
+                    h->xgb_train_nthread,
                     cfg.xgb_train_nthread);
             }
         }
 
         // === Subgroup 2: inference_cfg drift (Tier 1 REFUSE in strict;
         //                  Tier 2 WARN regardless) ===
-        if (!acknowledge_inference_cfg_drift && h->has_stamp_inference_cfg) {
+        if (!acknowledge_inference_cfg_drift && STAMP_HAS(*h, inference_cfg)) {
             double cfg_cts = FPN_ToDouble(cfg.confidence_threshold_scale);
             double cfg_chb = FPN_ToDouble(cfg.confidence_hard_block_threshold);
             // v5.14.9.D — DELETED legacy confidence_freshness_tau drift
@@ -462,21 +462,21 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
 
             // Tier 1: directly affects serving math
             bool tier1_drift = false;
-            if (fabs(h->stamp_inf_confidence_threshold_scale - cfg_cts) > 1e-6) {
+            if (fabs(h->inference_cfg_confidence_threshold_scale - cfg_cts) > 1e-6) {
                 fprintf(stderr,
                     "[inference_cfg] %s: %s role=%s stamp claims "
                     "confidence_threshold_scale=%.4f but cfg=%.4f\n",
                     strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
-                    loc, role_name, h->stamp_inf_confidence_threshold_scale, cfg_cts);
+                    loc, role_name, h->inference_cfg_confidence_threshold_scale, cfg_cts);
                 tier1_drift = true;
                 ++tier1_count;
             }
-            if (h->stamp_inf_barrier_gate_enabled != BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED)) {
+            if (h->inference_cfg_barrier_gate_enabled != BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED)) {
                 fprintf(stderr,
                     "[inference_cfg] %s: %s role=%s stamp claims "
                     "barrier_gate_enabled=%d but cfg=%d\n",
                     strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
-                    loc, role_name, h->stamp_inf_barrier_gate_enabled,
+                    loc, role_name, h->inference_cfg_barrier_gate_enabled,
                     BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED));
                 tier1_drift = true;
                 ++tier1_count;
@@ -484,37 +484,37 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
             if (tier1_drift && strict) ++tier1_refused_count;
 
             // Tier 2: WARN regardless of strict mode
-            if (fabs(h->stamp_inf_confidence_hard_block_threshold - cfg_chb) > 1e-6) {
+            if (fabs(h->inference_cfg_confidence_hard_block_threshold - cfg_chb) > 1e-6) {
                 fprintf(stderr,
                     "[inference_cfg] WARN (Tier 2): %s role=%s stamp "
                     "claims confidence_hard_block_threshold=%.4f but cfg=%.4f\n",
-                    loc, role_name, h->stamp_inf_confidence_hard_block_threshold,
+                    loc, role_name, h->inference_cfg_confidence_hard_block_threshold,
                     cfg_chb);
                 ++tier2_count;
             }
-            if (h->has_stamp_bandit && BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) {
+            if (STAMP_HAS(*h, inference_cfg_bandit_blend_ratio) && BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) {
                 double cfg_bbr = FPN_ToDouble(cfg.bandit_blend_ratio);
-                if (fabs(h->stamp_inf_bandit_blend_ratio - cfg_bbr) > 1e-6) {
+                if (fabs(h->inference_cfg_bandit_blend_ratio - cfg_bbr) > 1e-6) {
                     fprintf(stderr,
                         "[inference_cfg] WARN (Tier 2): %s role=%s stamp "
                         "claims bandit_blend_ratio=%.4f but cfg=%.4f\n",
-                        loc, role_name, h->stamp_inf_bandit_blend_ratio, cfg_bbr);
+                        loc, role_name, h->inference_cfg_bandit_blend_ratio, cfg_bbr);
                 }
             }
-            if (h->has_stamp_fees && BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED)) {
+            if (STAMP_HAS(*h, fees) && BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED)) {
                 double cfg_frm = FPN_ToDouble(cfg.fee_rate_maker);
                 double cfg_frt = FPN_ToDouble(cfg.fee_rate_taker);
-                if (fabs(h->stamp_inf_fee_rate_maker - cfg_frm) > 1e-6) {
+                if (fabs(h->inference_cfg_fee_rate_maker - cfg_frm) > 1e-6) {
                     fprintf(stderr,
                         "[inference_cfg] WARN (Tier 2): %s role=%s stamp "
                         "claims fee_rate_maker=%.6f but cfg=%.6f\n",
-                        loc, role_name, h->stamp_inf_fee_rate_maker, cfg_frm);
+                        loc, role_name, h->inference_cfg_fee_rate_maker, cfg_frm);
                 }
-                if (fabs(h->stamp_inf_fee_rate_taker - cfg_frt) > 1e-6) {
+                if (fabs(h->inference_cfg_fee_rate_taker - cfg_frt) > 1e-6) {
                     fprintf(stderr,
                         "[inference_cfg] WARN (Tier 2): %s role=%s stamp "
                         "claims fee_rate_taker=%.6f but cfg=%.6f\n",
-                        loc, role_name, h->stamp_inf_fee_rate_taker, cfg_frt);
+                        loc, role_name, h->inference_cfg_fee_rate_taker, cfg_frt);
                 }
             }
         }

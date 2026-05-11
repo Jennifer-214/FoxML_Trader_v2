@@ -99,14 +99,25 @@ namespace tt {
     inline double parse_double_fast(const char* s);
 
     template <typename T>
-    inline void stamp_parse_field(T& dst, const char* val) {
+    inline void stamp_parse_field(T& dst, const char* val, const char* fmt = "") {
         if constexpr (std::is_array_v<T>) {
             strncpy(dst, val, std::extent_v<T> - 1);
             dst[std::extent_v<T> - 1] = '\0';
         } else if constexpr (std::is_floating_point_v<T>) {
             dst = static_cast<T>(parse_double_fast(val));
         } else if constexpr (std::is_unsigned_v<T>) {
-            dst = static_cast<T>(strtoull(val, nullptr, 10));
+            // v5.15.0.B refinement — auto-detect base from emit format string
+            // (DRY: fmt is single source of truth for both emit AND parse).
+            // Hex-encoded uint64 fields (build_flags_hash, label_registry_hash,
+            // feature_mask) emit via "%016lx" / "%lx" → strchr finds 'x' →
+            // base 16. Decimal fields ("%u", "%lu", "%llu", "%d") → base 10.
+            // Boot-only path; 1 strchr scan per field load is negligible.
+            // Closes the recurring "add a new hex field → also touch the
+            // parser manually" Class 18 mirror; future hex fields auto-flow.
+            const int base = (fmt[0] != '\0' &&
+                              (strchr(fmt, 'x') != nullptr ||
+                               strchr(fmt, 'X') != nullptr)) ? 16 : 10;
+            dst = static_cast<T>(strtoull(val, nullptr, base));
         } else {
             dst = static_cast<T>(atoi(val));
         }
