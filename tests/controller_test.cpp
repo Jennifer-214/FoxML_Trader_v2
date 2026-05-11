@@ -31,6 +31,8 @@
 #include "../DataStream/EngineTUI.hpp"                   // v5.0.4 — topology populator tests
 #include "../CoreFrameworks/Reconcile.hpp"                // v5.2.1 — live reconciliation tests
 #include "../ML_Headers/CoreModelZoo.hpp"                // Track E.2 tests
+#include "../ML_Headers/ThompsonBandit.hpp"              // v5.14.10.A — Bayesian Thompson sampling bandit
+#include "../ML_Headers/BanditAlgorithmRegistry.hpp"     // v5.14.10.A — FOREACH_BANDIT_ALGORITHM dispatch registry
 #include "../CoreFrameworks/EnsembleHotSwap.hpp"          // v5.14.2 — EngineSharded_HotSwapEnsemble template (separate header avoids EngineSharded.hpp drag-in)
 #include "../ML_Headers/FeatureRegistry.hpp"              // v5.8.1a tests
 #include "../Backtest/PhaseTimers.hpp"                    // v5.10.0 Item A — phase timer tests
@@ -22418,6 +22420,289 @@ e3_skip_load:;
               cfg.core_overrides[0].risk_degradation_curve == 0);
 
         unlink(tmp_cfg);
+    }
+
+    // ===========================================================================
+    // === v5.14.10.A — Bayesian Thompson sampling bandit ========================
+    // ===========================================================================
+    printf("\n--- v5.14.10.A: Bayesian Thompson sampling bandit ---\n");
+
+    // ─── Test 1: Thompson_Init applies prior to all arms ───
+    {
+        ThompsonBanditState tb;
+        Thompson_Init(&tb, 8, /*mu_prior=*/0.0, /*precision_prior=*/1.0,
+                      /*precision_obs=*/1.0, /*rng_seed=*/42ULL);
+        bool all_priored = true;
+        for (int i = 0; i < 8; i++) {
+            if (tb.mu_post[i] != 0.0) { all_priored = false; break; }
+            if (tb.precision_post[i] != 1.0) { all_priored = false; break; }
+            if (tb.total_pulls[i] != 0) { all_priored = false; break; }
+        }
+        check("v5.14.10.A: Thompson_Init applies prior (mu=0, precision=1) to all arms",
+              all_priored && tb.n_arms == 8 && tb.rng_state == 42ULL);
+    }
+
+    // ─── Test 2: Thompson_Update shifts posterior mean toward reward ───
+    {
+        ThompsonBanditState tb;
+        Thompson_InitDefault(&tb, 4);   // mu_prior=0, precision_prior=1, precision_obs=1
+        // Single update: arm 0 reward=10
+        // mu_new = (1*0 + 1*10) / (1+1) = 5.0
+        Thompson_Update(&tb, 0, 10.0);
+        check("v5.14.10.A: Thompson_Update shifts posterior mean toward reward",
+              tb.mu_post[0] > 4.99 && tb.mu_post[0] < 5.01);
+        check("v5.14.10.A: Thompson_Update leaves untouched arms at prior",
+              tb.mu_post[1] == 0.0 && tb.mu_post[2] == 0.0 && tb.mu_post[3] == 0.0);
+    }
+
+    // ─── Test 3: Thompson_Update increases posterior precision (variance shrinks) ───
+    {
+        ThompsonBanditState tb;
+        Thompson_InitDefault(&tb, 4);
+        double initial_precision = tb.precision_post[0];
+        Thompson_Update(&tb, 0, 5.0);
+        Thompson_Update(&tb, 0, 5.0);
+        Thompson_Update(&tb, 0, 5.0);
+        // 3 updates: precision = 1 + 3*1 = 4
+        check("v5.14.10.A: Thompson_Update increases precision (3 updates: 1.0 → 4.0)",
+              tb.precision_post[0] > 3.99 && tb.precision_post[0] < 4.01 &&
+              initial_precision == 1.0);
+        check("v5.14.10.A: Thompson_Update increments total_pulls (3 updates → pulls=3)",
+              tb.total_pulls[0] == 3);
+    }
+
+    // ─── Test 4: Thompson_Sample is deterministic given seed (replay-determinism) ───
+    {
+        ThompsonBanditState tb_a, tb_b;
+        Thompson_InitDefault(&tb_a, 8);
+        Thompson_InitDefault(&tb_b, 8);
+        // Two fresh states, same seed (42 default) → same Sample sequence
+        bool match = true;
+        for (int i = 0; i < 100; i++) {
+            int sa = Thompson_Sample(&tb_a);
+            int sb = Thompson_Sample(&tb_b);
+            if (sa != sb) { match = false; break; }
+        }
+        check("v5.14.10.A: Thompson_Sample deterministic given identical seed (100 draws match)",
+              match);
+    }
+
+    // ─── Test 5: Thompson_Sample SHA-256-locked sample-trace snapshot ─────────
+    // PARITY-014 fix: cross-binary cross-version reproducibility contract.
+    // If this hash changes, EITHER Thompson_Sample math changed (intentional →
+    // update locked hex) OR replay-determinism broke (BUG → investigate).
+    {
+        ThompsonBanditState tb;
+        Thompson_InitDefault(&tb, 8);
+        constexpr int N_ITER = 1000;
+        uint8_t chosen_arms[N_ITER];
+        for (int i = 0; i < N_ITER; i++) {
+            int chosen = Thompson_Sample(&tb);
+            chosen_arms[i] = (uint8_t)chosen;
+        }
+        unsigned char raw[32];
+        bool sha_ok = (tt::sha256_bytes(chosen_arms, sizeof(chosen_arms), raw) == 1);
+        static const char hex_chars[] = "0123456789abcdef";
+        char actual_hex[65];
+        for (int i = 0; i < 32; i++) {
+            actual_hex[2*i]     = hex_chars[raw[i] >> 4];
+            actual_hex[2*i + 1] = hex_chars[raw[i] & 0x0F];
+        }
+        actual_hex[64] = '\0';
+        // Locked hash — captured 2026-05-10 from first v5.14.10.A build verify.
+        // Inputs: ThompsonBanditState 8 arms, default hyperparams (mu_prior=0.0,
+        // precision_prior=1.0, precision_obs=1.0, rng_seed=42), N_ITER=1000
+        // Thompson_Sample calls (no Update calls — pure RNG-driven sequence).
+        // If this hash CHANGES: either Thompson math intentionally changed
+        // (update locked value + bump version) OR replay-determinism broke
+        // (BUG — investigate splitmix64 / Box-Muller / argmax ordering).
+        static const char* EXPECTED_HEX = "4f550751be3c3cdcdbb3bc5849e232903356ab553f0ab0793e3918e3fe006255";
+        bool hash_match = (strcmp(actual_hex, EXPECTED_HEX) == 0);
+        if (!hash_match) {
+            printf("    v5.14.10.A SHA-256 sample-trace ACTUAL: %s\n", actual_hex);
+            printf("    v5.14.10.A SHA-256 sample-trace EXPECT: %s\n", EXPECTED_HEX);
+            printf("    (If first run: copy ACTUAL into EXPECTED_HEX in tests/controller_test.cpp)\n");
+        }
+        check("v5.14.10.A: Thompson_Sample SHA-256 sample-trace snapshot computed",
+              sha_ok);
+        check("v5.14.10.A: Thompson_Sample SHA-256-locked sample-trace (replay-determinism PARITY-014)",
+              hash_match);
+    }
+
+    // ─── Test 6: 2-arm convergence (arm 1 always +10 wins over arm 2 always -10) ───
+    {
+        ThompsonBanditState tb;
+        Thompson_InitDefault(&tb, 2);
+        // 100 updates per arm: arm 0 reward=+10, arm 1 reward=-10
+        for (int i = 0; i < 100; i++) {
+            Thompson_Update(&tb, 0, 10.0);
+            Thompson_Update(&tb, 1, -10.0);
+        }
+        // Posterior should strongly favor arm 0
+        check("v5.14.10.A: 2-arm convergence — arm 0 mu_post >> arm 1 mu_post",
+              tb.mu_post[0] > 9.0 && tb.mu_post[1] < -9.0);
+        // Sample 100 times; arm 0 should win OVERWHELMINGLY (≥95%)
+        int wins_0 = 0;
+        for (int i = 0; i < 100; i++) {
+            if (Thompson_Sample(&tb) == 0) wins_0++;
+        }
+        check("v5.14.10.A: 2-arm convergence — Sample picks arm 0 ≥95/100 after 100 updates",
+              wins_0 >= 95);
+    }
+
+    // ─── Test 7: Thompson_GetProbabilities returns valid distribution ───
+    {
+        ThompsonBanditState tb;
+        Thompson_InitDefault(&tb, 4);
+        Thompson_Update(&tb, 0, 5.0);
+        Thompson_Update(&tb, 0, 5.0);
+        double probs[BANDIT_MAX_ARMS];
+        Thompson_GetProbabilities(&tb, probs);
+        double sum = 0.0;
+        bool nonneg = true;
+        for (int i = 0; i < 4; i++) {
+            sum += probs[i];
+            if (probs[i] < 0.0 || probs[i] > 1.0) { nonneg = false; break; }
+        }
+        check("v5.14.10.A: Thompson_GetProbabilities sums to ~1.0 (valid distribution)",
+              nonneg && sum > 0.99 && sum < 1.01);
+        // Arm 0 should have highest prob (got 2 positive rewards)
+        bool arm0_top = (probs[0] >= probs[1] && probs[0] >= probs[2] && probs[0] >= probs[3]);
+        check("v5.14.10.A: Thompson_GetProbabilities — arm 0 (2 positive rewards) has highest prob",
+              arm0_top);
+    }
+
+    // ─── Test 8: Thompson_GetProbabilities does NOT mutate caller's rng_state ───
+    {
+        ThompsonBanditState tb;
+        Thompson_InitDefault(&tb, 4);
+        uint64_t pre_rng = tb.rng_state;
+        double probs[BANDIT_MAX_ARMS];
+        Thompson_GetProbabilities(&tb, probs);
+        check("v5.14.10.A: Thompson_GetProbabilities preserves caller rng_state (clone-based)",
+              tb.rng_state == pre_rng);
+    }
+
+    // ─── Test 9: FOREACH_BANDIT_ALGORITHM_COUNT == 3 ───
+    {
+        check("v5.14.10.A: FOREACH_BANDIT_ALGORITHM_COUNT == 3 (EXP3 + THOMPSON + BOTH)",
+              FOREACH_BANDIT_ALGORITHM_COUNT == 3);
+    }
+
+    // ─── Test 10: BanditAlgorithm_ToString round-trip ───
+    {
+        check("v5.14.10.A: BanditAlgorithm_ToString(0) == \"EXP3\"",
+              strcmp(BanditAlgorithm_ToString(0), "EXP3") == 0);
+        check("v5.14.10.A: BanditAlgorithm_ToString(1) == \"THOMPSON\"",
+              strcmp(BanditAlgorithm_ToString(1), "THOMPSON") == 0);
+        check("v5.14.10.A: BanditAlgorithm_ToString(2) == \"BOTH\"",
+              strcmp(BanditAlgorithm_ToString(2), "BOTH") == 0);
+        check("v5.14.10.A: BanditAlgorithm_ToString(99) == \"INVALID\"",
+              strcmp(BanditAlgorithm_ToString(99), "INVALID") == 0);
+    }
+
+    // ─── Test 11: BanditAlgorithm_FromString accepts numeric + string + case-insensitive ───
+    {
+        check("v5.14.10.A: BanditAlgorithm_FromString numeric (\"0\" → 0)",
+              BanditAlgorithm_FromString("0") == 0);
+        check("v5.14.10.A: BanditAlgorithm_FromString numeric (\"2\" → 2)",
+              BanditAlgorithm_FromString("2") == 2);
+        check("v5.14.10.A: BanditAlgorithm_FromString string uppercase (\"THOMPSON\" → 1)",
+              BanditAlgorithm_FromString("THOMPSON") == 1);
+        check("v5.14.10.A: BanditAlgorithm_FromString string lowercase (\"thompson\" → 1)",
+              BanditAlgorithm_FromString("thompson") == 1);
+        check("v5.14.10.A: BanditAlgorithm_FromString string mixed case (\"Both\" → 2)",
+              BanditAlgorithm_FromString("Both") == 2);
+        check("v5.14.10.A: BanditAlgorithm_FromString invalid string (\"UCB1\" → -1)",
+              BanditAlgorithm_FromString("UCB1") == -1);
+        check("v5.14.10.A: BanditAlgorithm_FromString out-of-range numeric (\"99\" → -1)",
+              BanditAlgorithm_FromString("99") == -1);
+        check("v5.14.10.A: BanditAlgorithm_FromString empty/null returns -1",
+              BanditAlgorithm_FromString("") == -1 && BanditAlgorithm_FromString(nullptr) == -1);
+    }
+
+    // ─── Test 12: BanditAlgorithm_Apply EXP3 mode matches direct Bandit_GetProbabilities ───
+    {
+        BanditState exp3;
+        Bandit_InitDefault(&exp3, 4);
+        // Apply some weight asymmetry
+        exp3.weights[0] = 4.0; exp3.weights[1] = 2.0;
+        exp3.weights[2] = 1.0; exp3.weights[3] = 1.0;
+        double direct_probs[BANDIT_MAX_ARMS];
+        Bandit_GetProbabilities(&exp3, direct_probs);
+        double via_dispatch[BANDIT_MAX_ARMS];
+        int chosen = -1;
+        BanditAlgorithm_Apply(BANDIT_ALGO_EXP3, &exp3, nullptr, 4, via_dispatch, &chosen);
+        bool match = true;
+        for (int i = 0; i < 4; i++) {
+            if (fabs(direct_probs[i] - via_dispatch[i]) > 1e-12) { match = false; break; }
+        }
+        check("v5.14.10.A: BanditAlgorithm_Apply EXP3 == direct Bandit_GetProbabilities (bytewise)",
+              match);
+        check("v5.14.10.A: BanditAlgorithm_Apply EXP3 chosen_arm = argmax(weights) = arm 0",
+              chosen == 0);
+    }
+
+    // ─── Test 13: BanditAlgorithm_Apply THOMPSON produces one-hot weights ───
+    {
+        ThompsonBanditState tb;
+        Thompson_InitDefault(&tb, 4);
+        double weights[BANDIT_MAX_ARMS];
+        int chosen = -1;
+        BanditAlgorithm_Apply(BANDIT_ALGO_THOMPSON, nullptr, &tb, 4, weights, &chosen);
+        bool one_hot = (chosen >= 0 && chosen < 4);
+        if (one_hot) {
+            for (int i = 0; i < 4; i++) {
+                double expected = (i == chosen) ? 1.0 : 0.0;
+                if (weights[i] != expected) { one_hot = false; break; }
+            }
+        }
+        check("v5.14.10.A: BanditAlgorithm_Apply THOMPSON produces one-hot weights at chosen_arm",
+              one_hot);
+    }
+
+    // ─── Test 14: BanditAlgorithm_Apply BOTH — Exp3 weights + Thompson choice ───
+    {
+        BanditState exp3;
+        Bandit_InitDefault(&exp3, 4);
+        exp3.weights[0] = 4.0; exp3.weights[1] = 2.0;
+        exp3.weights[2] = 1.0; exp3.weights[3] = 1.0;
+        ThompsonBanditState tb;
+        Thompson_InitDefault(&tb, 4);
+        double exp3_probs_direct[BANDIT_MAX_ARMS];
+        Bandit_GetProbabilities(&exp3, exp3_probs_direct);
+        double via_dispatch[BANDIT_MAX_ARMS];
+        int chosen = -1;
+        BanditAlgorithm_Apply(BANDIT_ALGO_BOTH, &exp3, &tb, 4, via_dispatch, &chosen);
+        bool exp3_weights_match = true;
+        for (int i = 0; i < 4; i++) {
+            if (fabs(exp3_probs_direct[i] - via_dispatch[i]) > 1e-12) {
+                exp3_weights_match = false; break;
+            }
+        }
+        check("v5.14.10.A: BanditAlgorithm_Apply BOTH — weights = Exp3 (drives action)",
+              exp3_weights_match);
+        check("v5.14.10.A: BanditAlgorithm_Apply BOTH — chosen_arm = Thompson sample (telemetry)",
+              chosen >= 0 && chosen < 4);
+    }
+
+    // ─── Test 15: BanditAlgorithm_Apply out-of-range degrades to EXP3 ───
+    {
+        BanditState exp3;
+        Bandit_InitDefault(&exp3, 4);
+        exp3.weights[0] = 1.0; exp3.weights[1] = 1.0;
+        exp3.weights[2] = 1.0; exp3.weights[3] = 1.0;
+        double exp3_uniform[BANDIT_MAX_ARMS];
+        Bandit_GetProbabilities(&exp3, exp3_uniform);
+        double via_dispatch[BANDIT_MAX_ARMS];
+        int chosen = -1;
+        BanditAlgorithm_Apply(/*algo=*/99, &exp3, nullptr, 4, via_dispatch, &chosen);
+        bool match = true;
+        for (int i = 0; i < 4; i++) {
+            if (fabs(exp3_uniform[i] - via_dispatch[i]) > 1e-12) { match = false; break; }
+        }
+        check("v5.14.10.A: BanditAlgorithm_Apply out-of-range degrades to EXP3 (safe default)",
+              match);
     }
 
     printf("\n======================================\n");
