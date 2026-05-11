@@ -38,6 +38,14 @@ template <unsigned FRAC_BITS> struct FPN {
 
     uint64_t w[N]; // little-endian: w[0] = least significant
     int32_t sign;  // 0 = positive/zero, 1 = negative
+    int32_t _padding = 0;  // v5.14.11.B.2 — explicit zero-init padding eliminates UB
+                           // bytes in memcmp/SHA-256/wire-format contexts. Same struct
+                           // size (24B at F=64; was 24B with implicit padding). Default
+                           // member init guarantees deterministic 0 for all FPN
+                           // constructions + copies. Pattern documented in
+                           // DESIGN_SPECS/struct-padding-determinism-pattern.md.
+                           // FracDiff bytewise-identity regression (exposed by
+                           // v5.14.11.B stack-layout shift) eliminated by this fix.
 };
 
 //======================================================================================================

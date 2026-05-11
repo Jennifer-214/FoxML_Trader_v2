@@ -73,6 +73,11 @@ struct ThompsonBanditState {
     double   precision_post[BANDIT_MAX_ARMS];    // posterior precision per arm (= 1/variance)
     uint32_t total_pulls[BANDIT_MAX_ARMS];       // pull count per arm (matches BanditState.pulls width)
     int      n_arms;                              // active arms (≤ BANDIT_MAX_ARMS)
+    int32_t  _padding = 0;                        // v5.14.11.B.2 — explicit zero-init padding
+                                                  // (4B gap before double mu_prior; 8-byte align).
+                                                  // Pattern: DESIGN_SPECS/struct-padding-determinism-pattern.md.
+                                                  // Currently latent (Thompson_SaveJSON is field-by-field, not
+                                                  // memcmp); fix is preventive for future byte-comparison usage.
     double   mu_prior;                            // operator-tunable; default 0.0
     double   precision_prior;                     // operator-tunable; default 1.0
     double   precision_obs;                       // observation precision (1/reward_variance); default 1.0

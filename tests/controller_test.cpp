@@ -23535,6 +23535,45 @@ e3_skip_load:;
               diag_one);
     }
 
+    // === v5.14.11.B.2 — FPN + ThompsonBanditState padding determinism ===
+    // Pattern: DESIGN_SPECS/struct-padding-determinism-pattern.md
+    // Both structs got explicit `int32_t _padding = 0;` fields in .B.2 to
+    // eliminate UB padding bytes in memcmp / SHA-256 / wire-format contexts.
+
+    printf("\n--- v5.14.11.B.2: FPN + ThompsonBanditState padding determinism ---\n");
+
+    {
+        // FPN<F=64> bytewise-identity: two FPN_Zero<64> values must be
+        // bytewise identical (padding deterministically zero).
+        FPN<64> a = FPN_Zero<64>();
+        FPN<64> b = FPN_Zero<64>();
+        check("v5.14.11.B.2: FPN_Zero<64> produces bytewise-identical struct",
+              memcmp(&a, &b, sizeof(a)) == 0);
+
+        // Struct size invariant — adding _padding field doesn't change size.
+        static_assert(sizeof(FPN<64>) == 24,
+                      "FPN<F=64> struct size must remain 24 bytes (16 w[] + 4 sign + 4 _padding)");
+        check("v5.14.11.B.2: sizeof(FPN<64>) == 24 (struct size invariant preserved)",
+              sizeof(FPN<64>) == 24);
+
+        // FPN values from same double bytewise-identical (test that FracDiff
+        // regression class is structurally eliminated).
+        FPN<64> c = FPN_FromDouble<64>(3.14159);
+        FPN<64> d = FPN_FromDouble<64>(3.14159);
+        check("v5.14.11.B.2: FPN_FromDouble<64>(same input) bytewise-identical (FracDiff regression class extinct)",
+              memcmp(&c, &d, sizeof(c)) == 0);
+    }
+
+    {
+        // ThompsonBanditState bytewise-identity: two Thompson_InitDefault
+        // calls with same args produce bytewise-identical state.
+        ThompsonBanditState tb_a, tb_b;
+        Thompson_InitDefault(&tb_a, 4);
+        Thompson_InitDefault(&tb_b, 4);
+        check("v5.14.11.B.2: Thompson_InitDefault produces bytewise-identical state (padding deterministic)",
+              memcmp(&tb_a, &tb_b, sizeof(tb_a)) == 0);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
