@@ -249,6 +249,42 @@ ridge_cost_penalty=0.5          # net IC = IC - penalty*cost; 0=ignore cost; >0=
 ridge_min_ic_floor=0.001        # min net IC (prevents zero-weight starvation when all ICs < cost_penalty * cost)
 
 #==============================================================================
+# BAYESIAN THOMPSON SAMPLING BANDIT (v5.14.10)
+#==============================================================================
+# Alternative bandit algorithm for ensemble arm selection. Default = EXP3-IX
+# (preserved bytewise from pre-v5.14.10). Operator opts into Thompson sampling
+# (Bayesian posterior; non-stationary-friendly) or BOTH parallel-mode (cfg=2)
+# for offline A/B comparison.
+#
+# WHY Thompson alongside Exp3:
+#   Crypto markets are NON-STATIONARY (regime shifts; alpha decay). Thompson's
+#   randomized exploration via Bayesian posterior samples adapts more naturally
+#   than Exp3's deterministic exponential weights for non-stationary rewards.
+#
+# WHY cfg=2 dual-mode is mathematically valid:
+#   This codebase grades each ensemble arm's prediction independently against
+#   actual price (per-arm reward observability). Both bandits learn from the
+#   SAME per-arm signal stream; Exp3 drives ACTUAL trading; Thompson logs
+#   chosen_arm for offline A/B comparison.
+#
+# Replay determinism: own splitmix64 PRNG (single-uint64 state, fully
+# specified algorithm — deterministic across all platforms; NOT std::mt19937_64
+# which has 312-word internal state) + own Box-Muller (NOT std::normal_distribution
+# which is libstdc++-implementation-defined). SHA-256-locked sample-trace test
+# enforces cross-binary cross-version reproducibility.
+#
+# Hot path UNTOUCHED. Slow-path cost: cfg=0 ~5ns dispatch / cfg=1 ~85ns / cfg=2 ~140ns.
+# Mutually exclusive with Ridge override (cfg!=0 + ridge_within_horizon=1: Ridge skipped).
+
+bandit_algorithm=0              # 0=EXP3 (default; bytewise-identical pre-v5.14.10), 1=THOMPSON, 2=BOTH (parallel A/B)
+                                # Accepts numeric (0/1/2) OR string (EXP3/THOMPSON/BOTH; case-insensitive).
+thompson_mu_prior=0.0           # Posterior mean prior (uninformative default; first reward shifts strongly)
+thompson_precision_prior=1.0    # Posterior precision prior (= 1/variance; 1.0 = loose belief; higher = tighter prior)
+thompson_precision_obs=1.0      # Observation precision (= 1/reward_variance; affects per-update posterior shrinkage)
+thompson_rng_seed=42            # splitmix64 seed (operator-tunable; same seed + same rewards → same samples bytewise)
+                                # Accepts decimal (42) or hex (0xDEADBEEFCAFEBABE).
+
+#==============================================================================
 # REGIME DETECTION
 #==============================================================================
 # classifies market as RANGING (mean reversion), TRENDING (momentum), or VOLATILE (pause)
