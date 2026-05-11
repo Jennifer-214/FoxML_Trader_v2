@@ -4348,11 +4348,11 @@ int main() {
         // Test 1 — All emit_when=true → all 13 fields populated
         StampInferenceCfgInputs inf = {};
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        // Trigger all emit_when predicates:
-        cfg.ridge_within_horizon = 1;             // Ridge block (5 fields)
+        // Trigger all emit_when predicates: [v5.14.11.C ridge_within_horizon + exit_blender_mode migrated to ml_cfg_flags bitmap]
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON);            // Ridge block (5 fields)
         BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);     // Composite block (5 fields)
         // Winsor: defaults (0.005/0.995) already trigger emit_when (low>0 && high<1)
-        cfg.exit_blender_mode = 1;                // Exit blender (1 field)
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BLENDER_MODE);                // Exit blender (1 field)
         STAMP_CFG_AUTOPOPULATE(inf, cfg);
         check("v5.14.1.E.E.B autopopulate: has_ridge_within_horizon = 1",
               inf.has_ridge_within_horizon == 1);
@@ -4406,8 +4406,8 @@ int main() {
     {
         // Test 1 — Cfg defaults
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        check("v5.14.1.E cfg default: exit_blender_mode = 0 (bandit)",
-              cfg.exit_blender_mode == 0);
+        check("v5.14.1.E cfg default: exit_blender_mode = 0 (bandit) [v5.14.11.C migrated to ml_cfg_flags bitmap]",
+              !BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BLENDER_MODE));
     }
     {
         // Test 2 — Cfg parser
@@ -4418,8 +4418,8 @@ int main() {
             write(fd, contents, strlen(contents));
             close(fd);
             ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmp_cfg);
-            check("v5.14.1.E cfg parser: exit_blender_mode = 1 (Ridge)",
-                  cfg.exit_blender_mode == 1);
+            check("v5.14.1.E cfg parser: exit_blender_mode = 1 (Ridge) [v5.14.11.C migrated to ml_cfg_flags bitmap]",
+                  BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BLENDER_MODE));
             unlink(tmp_cfg);
         }
     }
@@ -19055,10 +19055,10 @@ e3_skip_load:;
     {
         using namespace tt;
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        check("v5.14.0.C: cfg.ridge_within_horizon defaults 0 (bandit path)",
-              cfg.ridge_within_horizon == 0);
-        check("v5.14.0.C: cfg.ridge_across_horizons defaults 0",
-              cfg.ridge_across_horizons == 0);
+        check("v5.14.0.C: cfg.ridge_within_horizon defaults 0 (bandit path) [v5.14.11.C migrated to ml_cfg_flags bitmap]",
+              !BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON));
+        check("v5.14.0.C: cfg.ridge_across_horizons defaults 0 [v5.14.11.C migrated to ml_cfg_flags bitmap]",
+              !BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_ACROSS_HORIZONS));
         check("v5.14.0.C: cfg.ridge_lambda defaults 0.15",
               FPN_ToDouble(cfg.ridge_lambda) > 0.149 &&
               FPN_ToDouble(cfg.ridge_lambda) < 0.151);
@@ -19083,10 +19083,10 @@ e3_skip_load:;
                 "ridge_min_ic_floor=0.005\n");
             std::fclose(cfp);
             ControllerConfig<64> parsed = ControllerConfig_Load<64>(tmp_cfg);
-            check("v5.14.0.C: parsed ridge_within_horizon == 1",
-                  parsed.ridge_within_horizon == 1);
-            check("v5.14.0.C: parsed ridge_across_horizons == 1",
-                  parsed.ridge_across_horizons == 1);
+            check("v5.14.0.C: parsed ridge_within_horizon == 1 [v5.14.11.C migrated to ml_cfg_flags bitmap]",
+                  BITMAP_IS_SET(parsed.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON));
+            check("v5.14.0.C: parsed ridge_across_horizons == 1 [v5.14.11.C migrated to ml_cfg_flags bitmap]",
+                  BITMAP_IS_SET(parsed.ml_cfg_flags, MASK_ML_CFG_RIDGE_ACROSS_HORIZONS));
             check("v5.14.0.C: parsed ridge_lambda ~= 0.25",
                   FPN_ToDouble(parsed.ridge_lambda) > 0.249 &&
                   FPN_ToDouble(parsed.ridge_lambda) < 0.251);
@@ -21267,9 +21267,9 @@ e3_skip_load:;
     }
     {
         using namespace tt;
-        // AUTOPOPULATE_PER_CORE — Ridge within-horizon enabled
+        // AUTOPOPULATE_PER_CORE — Ridge within-horizon enabled [v5.14.11.C migrated cfg to bitmap]
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        cfg.ridge_within_horizon = 1;
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON);
         SlowPathGateState state;
         SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
         check("v5.14.9.B.0: ridge_within_horizon=1 → MASK_RIDGE_WITHIN_ACTIVE set",
@@ -21277,9 +21277,9 @@ e3_skip_load:;
     }
     {
         using namespace tt;
-        // AUTOPOPULATE_PER_CORE — exit blender enabled
+        // AUTOPOPULATE_PER_CORE — exit blender enabled [v5.14.11.C migrated cfg to bitmap]
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        cfg.exit_blender_mode = 1;
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BLENDER_MODE);
         SlowPathGateState state;
         SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
         check("v5.14.9.B.0: exit_blender_mode=1 → MASK_EXIT_BLENDER_ACTIVE set",
@@ -21318,16 +21318,16 @@ e3_skip_load:;
     }
     {
         using namespace tt;
-        // BITMAP_ANY multi-flag check (forward-leverage for grouped checks)
+        // BITMAP_ANY multi-flag check (forward-leverage for grouped checks) [v5.14.11.C cfg migrated to bitmap]
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        cfg.ridge_within_horizon = 1;
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON);
         SlowPathGateState state;
         SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
         const uint16_t blend_mask = MASK_RIDGE_WITHIN_ACTIVE | MASK_EXIT_BLENDER_ACTIVE;
         check("v5.14.9.B.0: BITMAP_ANY catches ridge OR exit_blender (any blend gate)",
               BITMAP_ANY(state.flags, blend_mask));
-        cfg.ridge_within_horizon = 0;
-        cfg.exit_blender_mode = 0;
+        BITMAP_CLR(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON);
+        BITMAP_CLR(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BLENDER_MODE);
         SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE(state, cfg);
         check("v5.14.9.B.0: BITMAP_ANY returns 0 when no blend gates active",
               !BITMAP_ANY(state.flags, blend_mask));

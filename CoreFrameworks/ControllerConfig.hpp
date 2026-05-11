@@ -662,8 +662,8 @@ template <unsigned F> struct ControllerConfig {
   // Default off; opt-in for paper-test session. When enabled, slow-
   // path adds ~3µs/cycle (BuildCorr ~1µs + Cholesky ~2µs at N=8).
   // Hot path UNTOUCHED.
-  int    ridge_within_horizon;       // 0=bandit (default), 1=Ridge across role-arms
-  int    ridge_across_horizons;      // 0=bandit (default), 1=Ridge across horizons
+  // ridge_within_horizon migrated to ml_cfg_flags (v5.14.11.C; bit MASK_ML_CFG_RIDGE_WITHIN_HORIZON)
+  // ridge_across_horizons migrated to ml_cfg_flags (v5.14.11.C; bit MASK_ML_CFG_RIDGE_ACROSS_HORIZONS)
   FPN<F> ridge_lambda;               // ridge regularization; default 0.15
   FPN<F> ridge_cost_penalty;         // cost penalty in net IC = IC - penalty*cost; default 0.5
   FPN<F> ridge_min_ic_floor;         // min net IC floor (prevents zero-weight starvation); default 0.001
@@ -1102,7 +1102,7 @@ template <unsigned F> struct ControllerConfig {
   // bytewise). 1 = Ridge across exit_predictor handles using existing
   // ridge_lambda + ridge_cost_penalty + ridge_min_ic_floor cfg.
   // Stamp-bound via FOREACH_STAMP_BOUND_CFG → drift detected at load.
-  int      exit_blender_mode;          // 0=bandit (default), 1=Ridge
+  // exit_blender_mode migrated to ml_cfg_flags (v5.14.11.C; bit MASK_ML_CFG_EXIT_BLENDER_MODE)
   // v5.14.1.G — Portfolio turnover (operator diagnostic only; not
   // stamp-bound — tunable post-train without retraining).
   // window: rolling buffer size (≥ 2, ≤ 256)
@@ -1505,8 +1505,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.ensemble_min_warmup_predictions = 100;
   // v5.13.4 — sell-side bandit defaults
   // exit_bandit_enabled migrated to ml_cfg_flags (default 0)
-  // v5.14.1.E — exit-side blender default to bandit (pre-v5.14.1.E behavior).
-  cfg.exit_blender_mode   = 0;
+  // v5.14.1.E — exit_blender_mode migrated to ml_cfg_flags (v5.14.11.C; default 0)
   // v5.14.1.F — Spearman default (only registered variant today).
   cfg.confidence_ic_variant = 0;
   // v5.14.1.G — portfolio turnover diagnostic defaults
@@ -1604,8 +1603,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.winsor_pct_high                     = FPN_FromDouble<F>(0.995);
   // v5.14.0 — Ridge blending defaults: disabled; opt-in for paper-test.
   // Default behavior bytewise-identical to v5.13.6 bandit selection path.
-  cfg.ridge_within_horizon = 0;
-  cfg.ridge_across_horizons = 0;
+  // ridge_within_horizon / ridge_across_horizons migrated to ml_cfg_flags (v5.14.11.C; default 0)
   cfg.ridge_lambda          = FPN_FromDouble<F>(0.15);
   cfg.ridge_cost_penalty    = FPN_FromDouble<F>(0.5);
   cfg.ridge_min_ic_floor    = FPN_FromDouble<F>(0.001);
@@ -1932,8 +1930,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       continue;
     }
     // v5.14.0 — Ridge risk-parity blending (cfg gates default off)
-    CFG_PARSE_INT(ridge_within_horizon)
-    CFG_PARSE_INT(ridge_across_horizons)
+    // ridge_within_horizon / ridge_across_horizons migrated to ml_cfg_flags (v5.14.11.C)
     if (strcmp(key, "ridge_lambda") == 0) {
       cfg.ridge_lambda = FPN_FromDouble<F>(atof(val));
       continue;
@@ -2214,8 +2211,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_INT(ensemble_min_warmup_predictions)
     // v5.13.4 — sell-side bandit
     // exit_bandit_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
-    // v5.14.1.E — exit-side blender selector (0=bandit, 1=Ridge)
-    CFG_PARSE_INT(exit_blender_mode)
+    // v5.14.1.E — exit_blender_mode migrated to ml_cfg_flags (v5.14.11.C)
     // v5.14.1.F — IC variant selector
     CFG_PARSE_INT(confidence_ic_variant)
     // v5.14.1.G — portfolio turnover diagnostic

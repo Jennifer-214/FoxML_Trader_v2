@@ -98,17 +98,23 @@
 
 #define FOREACH_STAMP_BOUND_CFG(X)                                                                                                                          \
     /* v5.14.1.B.3 — Ridge risk-parity blending (PARITY-004) */                                                                                              \
-    /* emit_when: any Ridge mode enabled */                                                                                                                  \
-    X(ridge_within_horizon,                int,    "%d",     0,   cfg.ridge_within_horizon,                                                                  \
-        (cfg.ridge_within_horizon || cfg.ridge_across_horizons), DIRECT_FIELD)                                                                               \
-    X(ridge_across_horizons,               int,    "%d",     0,   cfg.ridge_across_horizons,                                                                 \
-        (cfg.ridge_within_horizon || cfg.ridge_across_horizons), DIRECT_FIELD)                                                                               \
+    /* v5.14.11.C — ridge_within_horizon + ridge_across_horizons migrated to ml_cfg_flags bitmap (cohort).        */                                          \
+    /*              emit_source flipped DIRECT_FIELD → BITMAP_BIT for both with ?1:0 ternary normalization for     */                                         \
+    /*              HMAC byte-equivalence per wire-format-byte-preservation-discipline.md + v5.14.10 Surprise 6.   */                                         \
+    /*              emit_when uses BITMAP_ANY for the OR-of-both-bits predicate.                                  */                                          \
+    /* emit_when: any Ridge mode enabled (cohort bitmap) */                                                                                                  \
+    X(ridge_within_horizon,                int,    "%d",     0,                                                                                              \
+        (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON) ? 1 : 0),                                                                          \
+        BITMAP_ANY(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON | MASK_ML_CFG_RIDGE_ACROSS_HORIZONS), BITMAP_BIT)                                       \
+    X(ridge_across_horizons,               int,    "%d",     0,                                                                                              \
+        (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_ACROSS_HORIZONS) ? 1 : 0),                                                                         \
+        BITMAP_ANY(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON | MASK_ML_CFG_RIDGE_ACROSS_HORIZONS), BITMAP_BIT)                                       \
     X(ridge_lambda,                        double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_lambda),                                                            \
-        (cfg.ridge_within_horizon || cfg.ridge_across_horizons), DIRECT_FIELD)                                                                               \
+        BITMAP_ANY(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON | MASK_ML_CFG_RIDGE_ACROSS_HORIZONS), DIRECT_FIELD)                                     \
     X(ridge_cost_penalty,                  double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_cost_penalty),                                                      \
-        (cfg.ridge_within_horizon || cfg.ridge_across_horizons), DIRECT_FIELD)                                                                               \
+        BITMAP_ANY(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON | MASK_ML_CFG_RIDGE_ACROSS_HORIZONS), DIRECT_FIELD)                                     \
     X(ridge_min_ic_floor,                  double, "%.17g",  0.0, FPN_ToDouble(cfg.ridge_min_ic_floor),                                                      \
-        (cfg.ridge_within_horizon || cfg.ridge_across_horizons), DIRECT_FIELD)                                                                               \
+        BITMAP_ANY(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON | MASK_ML_CFG_RIDGE_ACROSS_HORIZONS), DIRECT_FIELD)                                     \
     /* v5.14.1.B.3 — Composite confidence (PARITY-005) */                                                                                                    \
     /* emit_when: composite enabled */                                                                                                                       \
     /* v5.14.9.F.2 — confidence_composite_enabled migrated to ml_cfg_flags bitmap. */                                                                        \
@@ -134,8 +140,10 @@
         (FPN_ToDouble(cfg.winsor_pct_low) > 0.0 && FPN_ToDouble(cfg.winsor_pct_high) < 1.0 &&                                                                \
          FPN_ToDouble(cfg.winsor_pct_low) < FPN_ToDouble(cfg.winsor_pct_high)), DIRECT_FIELD)                                                                \
     /* v5.14.1.E — Exit-side blender selector (PARITY drift detection) */                                                                                    \
-    X(exit_blender_mode,                   int,    "%d",     0,   cfg.exit_blender_mode,                                                                     \
-        (cfg.exit_blender_mode != 0), DIRECT_FIELD)                                                                                                          \
+    /* v5.14.11.C — exit_blender_mode migrated to ml_cfg_flags bitmap (cohort). emit_source DIRECT_FIELD → BITMAP_BIT */                                     \
+    X(exit_blender_mode,                   int,    "%d",     0,                                                                                              \
+        (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BLENDER_MODE) ? 1 : 0),                                                                             \
+        BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BLENDER_MODE), BITMAP_BIT)                                                                          \
     /* v5.14.9.C — Soft risk degradation ladder (4 fields). emit_when: ladder enabled. */                                                                    \
     X(risk_degradation_curve,              int,    "%d",     0,   cfg.risk_degradation_curve,                                                                \
         (cfg.risk_degradation_curve != 0), DIRECT_FIELD)                                                                                                     \

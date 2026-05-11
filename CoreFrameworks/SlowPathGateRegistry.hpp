@@ -80,14 +80,18 @@ namespace tt {
     X(PER_CORE,    COMPOSITE_ENABLED,                                                                \
       BITMAP_IS_SET((_gate_cfg).ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED),             \
       "use 4-factor composite confidence formula (vs legacy 3-factor)")                             \
-    /* v5.14.0 — Ridge within-horizon blend */                                                      \
+    /* v5.14.0 — Ridge within-horizon blend (v5.14.11.C migrated to ml_cfg_flags bitmap) */         \
     X(PER_CORE,    RIDGE_WITHIN_ACTIVE,                                                              \
-      (_gate_cfg).ridge_within_horizon != 0,                                                               \
+      BITMAP_IS_SET((_gate_cfg).ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON),                     \
       "Ridge blend across role-arms within a horizon")                                              \
-    /* v5.14.1.E — Ridge exit-side blend */                                                          \
+    /* v5.14.1.E — Ridge exit-side blend (v5.14.11.C migrated to ml_cfg_flags bitmap) */            \
     X(PER_CORE,    EXIT_BLENDER_ACTIVE,                                                              \
-      (_gate_cfg).exit_blender_mode != 0,                                                                  \
+      BITMAP_IS_SET((_gate_cfg).ml_cfg_flags, MASK_ML_CFG_EXIT_BLENDER_MODE),                        \
       "Ridge blend across exit_predictor handles")                                                  \
+    /* v5.14.11.C — Ridge online correlation matrix (sliding-window incremental) gate */            \
+    X(PER_CORE,    RIDGE_ONLINE_CORR_ACTIVE,                                                         \
+      BITMAP_IS_SET((_gate_cfg).ml_cfg_flags, MASK_ML_CFG_RIDGE_ONLINE_CORR),                        \
+      "use sliding-window incremental correlation matrix in Ridge (vs full recompute)")             \
     /* v5.14.10.B — Thompson sampling active (cfg.bandit_algorithm in {1, 2}) */                    \
     X(PER_CORE,    THOMPSON_ACTIVE,                                                                  \
       (_gate_cfg).bandit_algorithm != 0,                                                             \

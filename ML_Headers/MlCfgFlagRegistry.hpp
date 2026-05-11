@@ -56,7 +56,11 @@
     X(EXIT_BANDIT_ENABLED,          exit_bandit_enabled,          "Exit Bandit",           "FoxML",       "Exp3-IX bandit for exit-side arm selection (sell-side; v5.13.4)")                              \
     X(USE_EXIT_MODEL,               use_exit_model,               "Use Exit Model",        "FoxML",       "use dedicated exit-side ML model (vs entry model fallback)")                                 \
     X(FOXML_VOL_SCALING_ENABLED,    foxml_vol_scaling_enabled,    "Vol Scaling",           "FoxML",       "scale trade size by recent volatility (FoxML VolScaler)")                                    \
-    X(LAZY_REBUILD_ENABLED,         lazy_rebuild_enabled,         "Lazy Rebuild",          "Performance", "skip slow-path rebuild when no parameter inputs changed")
+    X(LAZY_REBUILD_ENABLED,         lazy_rebuild_enabled,         "Lazy Rebuild",          "Performance", "skip slow-path rebuild when no parameter inputs changed")                                    \
+    X(RIDGE_WITHIN_HORIZON,         ridge_within_horizon,         "Ridge Within Horizon",  "ML/Ridge",    "Ridge blend across role-arms within a horizon (v5.14.0; stamp-bound) [v5.14.11.C cohort migration from direct int]") \
+    X(RIDGE_ACROSS_HORIZONS,        ridge_across_horizons,        "Ridge Across Horizons", "ML/Ridge",    "Ridge blend across horizons (vs bandit selection); infrastructure-only until consumer ships [v5.14.11.C cohort migration]") \
+    X(EXIT_BLENDER_MODE,            exit_blender_mode,            "Exit Blender Mode",     "ML/Ridge",    "Ridge blend across exit_predictor handles (v5.14.1.E; stamp-bound) [v5.14.11.C cohort migration]") \
+    X(RIDGE_ONLINE_CORR,            ridge_online_corr,            "Ridge Online Corr",     "ML/Ridge",    "Use sliding-window incremental correlation matrix in Ridge (default 0=full recompute; v5.14.11)")
 
 //------------------------------------------------------------------------------------------------------
 // [AUTO-GENERATED ENUM + COUNT]

@@ -961,25 +961,34 @@ inline void ML_BuildParameters(
                 // Cholesky ~2µs at N=8). Default off pays ~5ns flag check.
                 // v5.14.9.B.0 — read ridge_within_horizon gate from cached
                 // per-core state when wired; fall back to inline cfg-flag.
-                bool _ridge_gate = gate_state
-                    ? BITMAP_IS_SET(gate_state->flags, MASK_RIDGE_WITHIN_ACTIVE)
-                    : (config->ridge_within_horizon != 0);
-                // v5.14.10.B — Ridge override mutually-exclusive with Thompson. Thompson's
-                // one-hot weights would feed degenerate correlation history into Ridge's
-                // BuildCorr → singular Σ → fallback_to_uniform (ineffective). Operator
-                // picks ONE of {Exp3, Thompson, Ridge-overrides-Exp3}; Thompson wins
-                // when both flags set (Ridge override skipped silently for cfg!=0).
-                if (_ridge_gate &&
-                    config->bandit_algorithm == 0 &&
+                // v5.14.11.C — branchless multi-flag mask check (CLAUDE.md item
+                // 18). "Ridge ON AND Thompson OFF" collapses to a single
+                // mask-AND-compare when gate_state is present (1 cycle vs
+                // 2-branch scalar). Fallback keeps scalar form for backtest
+                // paths that don't wire gate_state. v5.14.10.B — Ridge override
+                // mutually-exclusive with Thompson. Thompson's one-hot weights
+                // would feed degenerate correlation history into Ridge's
+                // BuildCorr → singular Σ → fallback_to_uniform (ineffective).
+                bool _ridge_dispatch;
+                if (gate_state) {
+                    constexpr uint16_t ridge_only_mask = MASK_RIDGE_WITHIN_ACTIVE | MASK_THOMPSON_ACTIVE;
+                    _ridge_dispatch = (gate_state->flags & ridge_only_mask) == MASK_RIDGE_WITHIN_ACTIVE;
+                } else {
+                    _ridge_dispatch = BITMAP_IS_SET(config->ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON)
+                                     && config->bandit_algorithm == 0;
+                }
+                if (_ridge_dispatch &&
                     ezoo->primary_count >= 2) {
                     // v5.14.11.A — OnlineCycleStep helper consolidates ring-walk
                     // + BuildCorr at this site + the exit-side mirror (below at
                     // ~:1195). C1 helper extraction eliminates the Class 18
-                    // mirror per CLAUDE.md item 19. use_online=false hard-coded
-                    // until v5.14.11.C adds cfg.ridge_online_corr (Decision 4
-                    // cohort migration). Pattern:
+                    // mirror per CLAUDE.md item 19.
+                    // v5.14.11.C — use_online wired from cfg.ridge_online_corr
+                    // (default 0 = full recompute; bytewise-identical). Pattern:
                     // DESIGN_SPECS/sliding-window-online-statistics-pattern.md.
-                    const bool use_online = false;  // v5.14.11.C will read cfg flag
+                    const bool use_online = gate_state
+                        ? BITMAP_IS_SET(gate_state->flags, MASK_RIDGE_ONLINE_CORR_ACTIVE)
+                        : BITMAP_IS_SET(config->ml_cfg_flags, MASK_ML_CFG_RIDGE_ONLINE_CORR);
                     int rc_corr = RidgeBlender_OnlineCycleStep<F>(
                         &ezoo->ridge_state,
                         ezoo->reward_ring,
@@ -1158,15 +1167,19 @@ inline void ML_BuildParameters(
                 weights[i] = 1.0 / (double)n_loaded;  // uniform default
             }
             // v5.14.9.B.0 — read exit_blender gate from cached state when wired
+            // v5.14.11.C — cfg.exit_blender_mode migrated to ml_cfg_flags bitmap
             bool _exit_blender_gate = gate_state
                 ? BITMAP_IS_SET(gate_state->flags, MASK_EXIT_BLENDER_ACTIVE)
-                : (config->exit_blender_mode != 0);
+                : BITMAP_IS_SET(config->ml_cfg_flags, MASK_ML_CFG_EXIT_BLENDER_MODE);
             if (_exit_blender_gate &&
                 ezoo_ex->exit_predictor_count >= 2) {
                 // v5.14.11.A — OnlineCycleStep helper (mirrors buy-side dispatch
                 // at ~:996). C1 helper extraction eliminates Class 18 mirror.
-                // use_online=false hard-coded until .C wires cfg.ridge_online_corr.
-                const bool use_online = false;  // v5.14.11.C will read cfg flag
+                // v5.14.11.C — use_online wired from cfg.ridge_online_corr
+                // (default 0 = full recompute; bytewise-identical).
+                const bool use_online = gate_state
+                    ? BITMAP_IS_SET(gate_state->flags, MASK_RIDGE_ONLINE_CORR_ACTIVE)
+                    : BITMAP_IS_SET(config->ml_cfg_flags, MASK_ML_CFG_RIDGE_ONLINE_CORR);
                 int rc_corr = RidgeBlender_OnlineCycleStep<F>(
                     &ezoo_ex->exit_ridge_state,
                     ezoo_ex->exit_reward_ring,
