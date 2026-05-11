@@ -17,6 +17,7 @@
 #include "LifecycleCfgFlagRegistry.hpp"       // v5.14.9.F — FOREACH_LIFECYCLE_CFG_FLAG + MASK_LIFECYCLE_CFG_*
 #include "GateCfgFlagRegistry.hpp"            // v5.14.9.F.1 — FOREACH_GATE_CFG_FLAG + MASK_GATE_CFG_*
 #include "../ML_Headers/MlCfgFlagRegistry.hpp" // v5.14.9.F.2 — FOREACH_ML_CFG_FLAG + MASK_ML_CFG_*
+#include "../ML_Headers/BanditAlgorithmRegistry.hpp" // v5.14.10.B — BanditAlgorithm_FromString for cfg.bandit_algorithm parser
 #include "RiskCfgFlagRegistry.hpp"             // v5.14.9.F.3 — FOREACH_RISK_CFG_FLAG + MASK_RISK_CFG_*
 #include "OpsCfgFlagRegistry.hpp"              // v5.14.9.F.3 — FOREACH_OPS_CFG_FLAG + MASK_OPS_CFG_*
 #include <stdio.h>
@@ -1133,6 +1134,23 @@ template <unsigned F> struct ControllerConfig {
   // save/hour at typical tick rates). Set to 0 to disable periodic
   // saves (state still saved on engine clean shutdown).
   int      ensemble_bandit_save_interval;
+  // v5.14.10.B — Bayesian Thompson sampling bandit (alternative bandit weight
+  // provider; cfg.bandit_algorithm enum picks Exp3-IX vs Thompson vs Both).
+  // Cfg-flag eligibility analysis (per cfg-flag-eligibility-criteria.md):
+  // bandit_algorithm is INT enum (3 values), thompson_*_prior/obs are FPN
+  // scalars, thompson_rng_seed is uint64 — none are booleans → all REJECT
+  // for FOREACH_ML_CFG_FLAG bitmap migration. Stay as direct cfg fields.
+  // Stamp-bound via FOREACH_STAMP_BOUND_CFG (drift detection); rng_seed
+  // excluded (RNG state is runtime-only; doesn't affect inference reproducibility
+  // across stamps — only within-run determinism via seeded splitmix64).
+  // See ML_Headers/ThompsonBandit.hpp for math kernel + replay-determinism
+  // PARITY-014 contract; see ML_Headers/BanditAlgorithmRegistry.hpp for
+  // FOREACH_BANDIT_ALGORITHM dispatch (3 algos: EXP3=0, THOMPSON=1, BOTH=2).
+  int      bandit_algorithm;          // 0=EXP3 (default), 1=THOMPSON, 2=BOTH (parallel A/B)
+  FPN<F>   thompson_mu_prior;         // posterior mean prior; default 0.0
+  FPN<F>   thompson_precision_prior;  // posterior precision prior (= 1/variance); default 1.0
+  FPN<F>   thompson_precision_obs;    // observation precision; default 1.0
+  uint64_t thompson_rng_seed;         // splitmix64 seed; default 42
 };
 
 //======================================================================================================
@@ -1498,6 +1516,12 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.ensemble_min_agreement_pct = 0.6;
   cfg.ensemble_trade_reward_mult = 4.0;
   cfg.ensemble_bandit_save_interval = 5000;  // v5.10.0a.G.9
+  // v5.14.10.B — Bayesian Thompson sampling bandit defaults
+  cfg.bandit_algorithm        = 0;                              // 0=EXP3 (default; bytewise-identical pre-v5.14.10)
+  cfg.thompson_mu_prior       = FPN_FromDouble<F>(0.0);
+  cfg.thompson_precision_prior= FPN_FromDouble<F>(1.0);
+  cfg.thompson_precision_obs  = FPN_FromDouble<F>(1.0);
+  cfg.thompson_rng_seed       = 42ULL;                          // operator-tunable; 0 = use ThompsonBandit.hpp's THOMPSON_RNG_SEED_DEFAULT
   // v5.10.0a.G.6 — per-core ensemble cfg defaults (empty = inherit global)
   // v5.11.18a — per-core feature_mask defaults (all-bits-on = no masking)
   for (int i = 0; i < 16; ++i) {
@@ -2228,6 +2252,33 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         if (v < 0) v = 0;
         if (v > 10000000) v = 10000000;
         cfg.ensemble_bandit_save_interval = v;
+        continue;
+    }
+    // v5.14.10.B — Bayesian Thompson sampling bandit cfg fields.
+    // bandit_algorithm accepts numeric (0/1/2) or string (EXP3/THOMPSON/BOTH;
+    // case-insensitive) via BanditAlgorithm_FromString. Out-of-range silently
+    // clamps to EXP3 (preserves pre-v5.14.10 behavior on cfg corruption).
+    if (strcmp(key, "bandit_algorithm") == 0) {
+        int v = BanditAlgorithm_FromString(val);
+        if (v < 0) {
+            fprintf(stderr, "[CFG WARN] bandit_algorithm: unknown value '%s' (expected EXP3|THOMPSON|BOTH or 0|1|2); defaulting to EXP3\n", val);
+            v = 0;
+        }
+        cfg.bandit_algorithm = v;
+        continue;
+    }
+    CFG_PARSE_FPN(thompson_mu_prior)
+    CFG_PARSE_FPN(thompson_precision_prior)
+    CFG_PARSE_FPN(thompson_precision_obs)
+    if (strcmp(key, "thompson_rng_seed") == 0) {
+        // Accept hex (0x...) or decimal; 0 means "use ThompsonBandit.hpp default".
+        uint64_t v = 0ULL;
+        if (val[0] == '0' && (val[1] == 'x' || val[1] == 'X')) {
+            v = strtoull(val + 2, nullptr, 16);
+        } else {
+            v = strtoull(val, nullptr, 10);
+        }
+        cfg.thompson_rng_seed = v;
         continue;
     }
     // v5.10.0a — horizon_list CSV parser. Comma-separated ints, max

@@ -38,6 +38,7 @@
 #include "../Backtest/LabelFunctions.hpp"  // v5.10.1.A: LABEL_REGISTRY_HASH() drift catch
 #include "../CoreFrameworks/ControllerConfig.hpp"  // v5.14.1.B.3: cfg* for X-macro drift check
 #include "BanditLearning.hpp"   // v5.10.0a.G.7 — per-regime BanditState in EnsembleModelZoo
+#include "ThompsonBandit.hpp"   // v5.14.10.B — per-regime ThompsonBanditState in EnsembleModelZoo (parallel to bandits[])
 #include "RidgeBlender.hpp"     // v5.14.0 — Ridge risk-parity blending state on EnsembleModelZoo
 #include "../Strategies/StrategyInterface.hpp"  // v5.10.0a.G.7 — NUM_REGIMES
 #include "../Version.hpp"        // v5.8.6: ENGINE_VERSION_STRING for boot log
@@ -845,6 +846,16 @@ struct EnsembleModelZoo {
     BanditState exit_bandits[NUM_REGIMES];
     int initialized_exit_bandits;       // 0 = no exit models loaded; gates dispatch
     int last_predicted_exit_horizon_idx;// dominant exit_predictor arm at predict time
+    // v5.14.10.B — Bayesian Thompson sampling bandits (parallel to bandits[]).
+    // Per-regime Gaussian conjugate posterior; activated when cfg.bandit_algorithm
+    // == 1 (THOMPSON) or 2 (BOTH). Cfg=0 (EXP3 default) → never read; init
+    // happens regardless so cfg-flip mid-run doesn't see uninitialized state.
+    // Each ThompsonBanditState is ~112B; × NUM_REGIMES (5) = ~560B per ezoo.
+    // SLOW-PATH-only state (no false-sharing risk; per-core ezoo).
+    // Persistence in v5.14.10.C via thompson_state.json (parallel to bandit_state.json).
+    ThompsonBanditState thompson_bandits[NUM_REGIMES];
+    int initialized_thompson_bandits;       // 0 = not yet wired (Init phase only)
+    int last_predicted_thompson_arm;        // Thompson's argmax-of-posterior at predict time (cfg=2 telemetry)
 
     // v5.14.0 — Ridge risk-parity blending state. Computed per slow-path
     // cycle when cfg.ridge_within_horizon=1 (default 0; preserves bandit
@@ -951,6 +962,12 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     memset(ezoo->exit_bandits, 0, sizeof(ezoo->exit_bandits));
     ezoo->initialized_exit_bandits        = 0;
     ezoo->last_predicted_exit_horizon_idx = -1;
+    // v5.14.10.B — Thompson bandits zero-init (full init in _InitThompsonBandits
+    // AFTER LoadFromCfg populates buy_signal_count). cfg.bandit_algorithm=0
+    // path never reads thompson_bandits; safe to leave at zero in that mode.
+    memset(ezoo->thompson_bandits, 0, sizeof(ezoo->thompson_bandits));
+    ezoo->initialized_thompson_bandits = 0;
+    ezoo->last_predicted_thompson_arm  = -1;
     // v5.14.0 — Ridge state zero-init. Identity Σ + zero μ/L/y/w/output
     // weights. Cholesky succeeds out-of-box on identity Σ regularized
     // by ridge λ; no per-core wiring needed beyond cfg flag check at
@@ -1317,6 +1334,54 @@ inline void EnsembleModelZoo_InitExitBandits(EnsembleModelZoo<F>* ezoo,
         }
     }
     ezoo->initialized_exit_bandits = 1;
+}
+
+//======================================================================================================
+// [v5.14.10.B — THOMPSON BANDIT INIT]
+//======================================================================================================
+// Initializes one ThompsonBanditState per regime (NUM_REGIMES from FOREACH_REGIME),
+// with arms = ezoo->primary_count (same dimensions as bandits[]). Each posterior
+// starts at the prior (mu_post=mu_prior, precision_post=precision_prior); RNG
+// seeded with operator-tunable cfg.thompson_rng_seed (default 42 for replay
+// determinism).
+//
+// Caller: EngineSharded boot, AFTER EnsembleModelZoo_LoadFromCfg populates
+// buy_signal_count + EnsureCorePrimary populates primary_count. Same call-
+// sequence position as _InitBandits (above) + _InitExitBandits.
+//
+// Init is idempotent + safe to call when cfg.bandit_algorithm=0 (EXP3 default):
+// the Thompson state stays initialized but never read by the dispatch path.
+// This preserves runtime cfg-flip semantics (operator can set cfg=1 mid-run via
+// /reload-cfg without re-init).
+template <unsigned F>
+inline void EnsembleModelZoo_InitThompsonBandits(EnsembleModelZoo<F>* ezoo,
+                                                  double mu_prior,
+                                                  double precision_prior,
+                                                  double precision_obs,
+                                                  uint64_t rng_seed) {
+    if (!ezoo) return;
+    int n_arms = ezoo->primary_count;
+    if (n_arms < 1) {
+        // No primary models loaded — graceful skip. thompson_bandits stay
+        // zero-init; dispatch's nullptr check fallbacks to uniform weights.
+        ezoo->initialized_thompson_bandits = 0;
+        return;
+    }
+    if (n_arms < 2) {
+        // Single-arm: Thompson degrades to "always pick arm 0"; mark
+        // initialized so dispatch fires without crashing.
+        ezoo->initialized_thompson_bandits = 1;
+        return;
+    }
+    // Per-regime init. Each regime gets its own RNG state derived from the
+    // base seed XOR'd with regime index — keeps regimes' RNG sequences
+    // independent (same seed across regimes would correlate posterior draws).
+    for (int r = 0; r < NUM_REGIMES; ++r) {
+        uint64_t per_regime_seed = rng_seed ^ ((uint64_t)(r + 1) * 0x9E3779B97F4A7C15ULL);
+        Thompson_Init(&ezoo->thompson_bandits[r], n_arms,
+                      mu_prior, precision_prior, precision_obs, per_regime_seed);
+    }
+    ezoo->initialized_thompson_bandits = 1;
 }
 
 //======================================================================================================

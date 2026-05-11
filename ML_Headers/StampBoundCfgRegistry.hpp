@@ -149,7 +149,17 @@
     X(ml_buy_threshold,                    double, "%.17g",  0.0, FPN_ToDouble(cfg.ml_buy_threshold),                                                        \
         1, DIRECT_FIELD)                                                                                                                                     \
     X(gap_acceptable_threshold,            double, "%.17g",  0.0, FPN_ToDouble(cfg.gap_acceptable_threshold),                                                \
-        1, DIRECT_FIELD)
+        1, DIRECT_FIELD)                                                                                                                                     \
+    /* v5.14.10.B — Bayesian Thompson sampling bandit (4 fields stamp-bound; rng_seed excluded — runtime-only state). */                                     \
+    /* emit_when: cfg.bandit_algorithm != 0 (only emit when Thompson active; legacy stamps without these fields load with has_*=0 per Surface G). */         \
+    X(bandit_algorithm,                    int,    "%d",     0,   cfg.bandit_algorithm,                                                                      \
+        (cfg.bandit_algorithm != 0), DIRECT_FIELD)                                                                                                           \
+    X(thompson_mu_prior,                   double, "%.17g",  0.0, FPN_ToDouble(cfg.thompson_mu_prior),                                                       \
+        (cfg.bandit_algorithm != 0), DIRECT_FIELD)                                                                                                           \
+    X(thompson_precision_prior,            double, "%.17g",  1.0, FPN_ToDouble(cfg.thompson_precision_prior),                                                \
+        (cfg.bandit_algorithm != 0), DIRECT_FIELD)                                                                                                           \
+    X(thompson_precision_obs,              double, "%.17g",  1.0, FPN_ToDouble(cfg.thompson_precision_obs),                                                  \
+        (cfg.bandit_algorithm != 0), DIRECT_FIELD)
 
 //======================================================================================================
 // [PARSER DISPATCH MACROS]

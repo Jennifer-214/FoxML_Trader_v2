@@ -22705,6 +22705,211 @@ e3_skip_load:;
               match);
     }
 
+    // ===========================================================================
+    // === v5.14.10.B — Engine wiring: cfg fields + dispatch + stamp-binds ======
+    // ===========================================================================
+    printf("\n--- v5.14.10.B: cfg fields + dispatch + slow-path-gate predicates + stamp-binds ---\n");
+
+    // ─── Test B.1: cfg defaults ───
+    {
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.14.10.B: cfg.bandit_algorithm default = 0 (EXP3; bytewise-identical pre-v5.14.10)",
+              cfg.bandit_algorithm == 0);
+        check("v5.14.10.B: cfg.thompson_mu_prior default = 0.0",
+              fabs(FPN_ToDouble(cfg.thompson_mu_prior) - 0.0) < 1e-9);
+        check("v5.14.10.B: cfg.thompson_precision_prior default = 1.0",
+              fabs(FPN_ToDouble(cfg.thompson_precision_prior) - 1.0) < 1e-9);
+        check("v5.14.10.B: cfg.thompson_precision_obs default = 1.0",
+              fabs(FPN_ToDouble(cfg.thompson_precision_obs) - 1.0) < 1e-9);
+        check("v5.14.10.B: cfg.thompson_rng_seed default = 42",
+              cfg.thompson_rng_seed == 42ULL);
+    }
+
+    // ─── Test B.2: cfg parser numeric + string + hex forms ───
+    {
+        char tmp_cfg[] = "/tmp/foxml_v5_14_10_b_cfg_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        check("v5.14.10.B cfg parser: tmpfile created", fd >= 0);
+        if (fd >= 0) {
+            const char* contents =
+                "bandit_algorithm=THOMPSON\n"           // string form (case-insensitive)
+                "thompson_mu_prior=0.5\n"
+                "thompson_precision_prior=2.0\n"
+                "thompson_precision_obs=4.0\n"
+                "thompson_rng_seed=0xDEADBEEFCAFEBABE\n"; // hex form
+            write(fd, contents, strlen(contents));
+            close(fd);
+
+            ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmp_cfg);
+            check("v5.14.10.B cfg parser: bandit_algorithm=\"THOMPSON\" → 1",
+                  cfg.bandit_algorithm == 1);
+            check("v5.14.10.B cfg parser: thompson_mu_prior ≈ 0.5",
+                  fabs(FPN_ToDouble(cfg.thompson_mu_prior) - 0.5) < 1e-6);
+            check("v5.14.10.B cfg parser: thompson_precision_prior ≈ 2.0",
+                  fabs(FPN_ToDouble(cfg.thompson_precision_prior) - 2.0) < 1e-6);
+            check("v5.14.10.B cfg parser: thompson_precision_obs ≈ 4.0",
+                  fabs(FPN_ToDouble(cfg.thompson_precision_obs) - 4.0) < 1e-6);
+            check("v5.14.10.B cfg parser: thompson_rng_seed hex (0xDEADBEEFCAFEBABE) parses",
+                  cfg.thompson_rng_seed == 0xDEADBEEFCAFEBABEULL);
+
+            unlink(tmp_cfg);
+        }
+    }
+
+    // ─── Test B.3: cfg parser numeric form ───
+    {
+        char tmp_cfg[] = "/tmp/foxml_v5_14_10_b_num_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        if (fd >= 0) {
+            const char* contents = "bandit_algorithm=2\n";
+            write(fd, contents, strlen(contents));
+            close(fd);
+            ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmp_cfg);
+            check("v5.14.10.B cfg parser: bandit_algorithm=\"2\" (numeric) → 2 (BOTH)",
+                  cfg.bandit_algorithm == 2);
+            unlink(tmp_cfg);
+        }
+    }
+
+    // ─── Test B.4: cfg parser invalid value defaults to EXP3 + WARN ───
+    {
+        char tmp_cfg[] = "/tmp/foxml_v5_14_10_b_inv_XXXXXX";
+        int fd = mkstemp(tmp_cfg);
+        if (fd >= 0) {
+            const char* contents = "bandit_algorithm=UCB1\n";   // unknown algo
+            write(fd, contents, strlen(contents));
+            close(fd);
+            // Suppress stderr for this test (the parser intentionally WARNs)
+            ControllerConfig<64> cfg = ControllerConfig_Load<64>(tmp_cfg);
+            check("v5.14.10.B cfg parser: invalid bandit_algorithm defaults to 0 (EXP3 safe fallback)",
+                  cfg.bandit_algorithm == 0);
+            unlink(tmp_cfg);
+        }
+    }
+
+    // ─── Test B.5: EnsembleModelZoo_InitThompsonBandits initializes per-regime states ───
+    {
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        // Simulate post-LoadFromCfg state: primary_count = 4 (4 arms)
+        ezoo.primary_count = 4;
+        // Pre-init: state should be zero
+        check("v5.14.10.B: pre-Init thompson_bandits initialized=0",
+              ezoo.initialized_thompson_bandits == 0);
+        EnsembleModelZoo_InitThompsonBandits(&ezoo,
+            /*mu_prior=*/0.0, /*precision_prior=*/1.0, /*precision_obs=*/1.0,
+            /*rng_seed=*/42ULL);
+        check("v5.14.10.B: post-Init thompson_bandits initialized=1 (primary_count=4)",
+              ezoo.initialized_thompson_bandits == 1);
+        // Each regime's state should have prior applied to all arms
+        bool all_priored = true;
+        for (int r = 0; r < NUM_REGIMES; ++r) {
+            if (ezoo.thompson_bandits[r].n_arms != 4) { all_priored = false; break; }
+            for (int a = 0; a < 4; ++a) {
+                if (ezoo.thompson_bandits[r].mu_post[a] != 0.0 ||
+                    ezoo.thompson_bandits[r].precision_post[a] != 1.0) {
+                    all_priored = false;
+                }
+            }
+        }
+        check("v5.14.10.B: all NUM_REGIMES Thompson states have prior applied (mu=0, precision=1)",
+              all_priored);
+        // Per-regime RNG seeds should differ (rng_seed XOR'd with regime index)
+        bool rng_states_differ = true;
+        for (int r = 1; r < NUM_REGIMES; ++r) {
+            if (ezoo.thompson_bandits[r].rng_state == ezoo.thompson_bandits[0].rng_state) {
+                rng_states_differ = false; break;
+            }
+        }
+        check("v5.14.10.B: per-regime RNG seeds differ (avoids correlated draws across regimes)",
+              rng_states_differ);
+    }
+
+    // ─── Test B.6: EnsembleModelZoo_InitThompsonBandits handles primary_count<2 gracefully ───
+    {
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        ezoo.primary_count = 0;
+        EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+        check("v5.14.10.B: InitThompsonBandits with primary_count=0 → initialized=0 (graceful skip)",
+              ezoo.initialized_thompson_bandits == 0);
+        ezoo.primary_count = 1;
+        EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+        check("v5.14.10.B: InitThompsonBandits with primary_count=1 → initialized=1 (single-arm degenerate but safe)",
+              ezoo.initialized_thompson_bandits == 1);
+    }
+
+    // ─── Test B.7: SLOW_PATH_GATE predicates fire correctly ───
+    {
+        using namespace tt;
+        ControllerConfig<64> cfg_exp3     = ControllerConfig_Default<64>();
+        ControllerConfig<64> cfg_thompson = ControllerConfig_Default<64>();
+        ControllerConfig<64> cfg_both     = ControllerConfig_Default<64>();
+        cfg_exp3.bandit_algorithm     = 0;
+        cfg_thompson.bandit_algorithm = 1;
+        cfg_both.bandit_algorithm     = 2;
+
+        // Compute gate flags via the predicate expressions (matches AUTOPOPULATE walk)
+        uint16_t flags_exp3     = 0;
+        uint16_t flags_thompson = 0;
+        uint16_t flags_both     = 0;
+
+        // THOMPSON_ACTIVE: cfg.bandit_algorithm != 0
+        flags_exp3     |= ((cfg_exp3.bandit_algorithm     != 0) ? MASK_THOMPSON_ACTIVE : (uint16_t)0);
+        flags_thompson |= ((cfg_thompson.bandit_algorithm != 0) ? MASK_THOMPSON_ACTIVE : (uint16_t)0);
+        flags_both     |= ((cfg_both.bandit_algorithm     != 0) ? MASK_THOMPSON_ACTIVE : (uint16_t)0);
+        // BANDIT_BOTH_ACTIVE: cfg.bandit_algorithm == 2
+        flags_exp3     |= ((cfg_exp3.bandit_algorithm     == 2) ? MASK_BANDIT_BOTH_ACTIVE : (uint16_t)0);
+        flags_thompson |= ((cfg_thompson.bandit_algorithm == 2) ? MASK_BANDIT_BOTH_ACTIVE : (uint16_t)0);
+        flags_both     |= ((cfg_both.bandit_algorithm     == 2) ? MASK_BANDIT_BOTH_ACTIVE : (uint16_t)0);
+
+        check("v5.14.10.B SLOW_PATH_GATE: cfg=0 (EXP3) → THOMPSON_ACTIVE OFF, BOTH_ACTIVE OFF",
+              !BITMAP_IS_SET(flags_exp3, MASK_THOMPSON_ACTIVE) &&
+              !BITMAP_IS_SET(flags_exp3, MASK_BANDIT_BOTH_ACTIVE));
+        check("v5.14.10.B SLOW_PATH_GATE: cfg=1 (THOMPSON) → THOMPSON_ACTIVE ON, BOTH_ACTIVE OFF",
+              BITMAP_IS_SET(flags_thompson, MASK_THOMPSON_ACTIVE) &&
+              !BITMAP_IS_SET(flags_thompson, MASK_BANDIT_BOTH_ACTIVE));
+        check("v5.14.10.B SLOW_PATH_GATE: cfg=2 (BOTH) → THOMPSON_ACTIVE ON, BOTH_ACTIVE ON",
+              BITMAP_IS_SET(flags_both, MASK_THOMPSON_ACTIVE) &&
+              BITMAP_IS_SET(flags_both, MASK_BANDIT_BOTH_ACTIVE));
+    }
+
+    // ─── Test B.8: FOREACH_STAMP_BOUND_CFG includes new entries (FOREACH walk count) ───
+    // Compile-time check: walk the registry counting matches for the 4 new field names.
+    {
+        int found_bandit_algorithm = 0;
+        int found_thompson_mu_prior = 0;
+        int found_thompson_precision_prior = 0;
+        int found_thompson_precision_obs = 0;
+        #define X_COUNT_THOMPSON_FIELD(name, type, fmt, def, get_expr, emit_when, src) \
+            if (strcmp(#name, "bandit_algorithm") == 0)         found_bandit_algorithm++; \
+            if (strcmp(#name, "thompson_mu_prior") == 0)        found_thompson_mu_prior++; \
+            if (strcmp(#name, "thompson_precision_prior") == 0) found_thompson_precision_prior++; \
+            if (strcmp(#name, "thompson_precision_obs") == 0)   found_thompson_precision_obs++;
+        FOREACH_STAMP_BOUND_CFG(X_COUNT_THOMPSON_FIELD)
+        #undef X_COUNT_THOMPSON_FIELD
+        check("v5.14.10.B FOREACH_STAMP_BOUND_CFG includes bandit_algorithm",
+              found_bandit_algorithm == 1);
+        check("v5.14.10.B FOREACH_STAMP_BOUND_CFG includes thompson_mu_prior",
+              found_thompson_mu_prior == 1);
+        check("v5.14.10.B FOREACH_STAMP_BOUND_CFG includes thompson_precision_prior",
+              found_thompson_precision_prior == 1);
+        check("v5.14.10.B FOREACH_STAMP_BOUND_CFG includes thompson_precision_obs",
+              found_thompson_precision_obs == 1);
+    }
+
+    // ─── Test B.9: FOREACH_STAMP_BOUND_CFG does NOT include thompson_rng_seed ───
+    // (rng_seed is runtime-only; doesn't affect cross-stamp inference reproducibility)
+    {
+        int found_rng_seed = 0;
+        #define X_COUNT_RNG_SEED(name, type, fmt, def, get_expr, emit_when, src) \
+            if (strcmp(#name, "thompson_rng_seed") == 0) found_rng_seed++;
+        FOREACH_STAMP_BOUND_CFG(X_COUNT_RNG_SEED)
+        #undef X_COUNT_RNG_SEED
+        check("v5.14.10.B FOREACH_STAMP_BOUND_CFG correctly EXCLUDES thompson_rng_seed (runtime-only)",
+              found_rng_seed == 0);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

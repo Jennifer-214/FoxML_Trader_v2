@@ -889,27 +889,61 @@ inline void ML_BuildParameters(
                 int regime_id = mctx ? mctx->current_regime_id : 0;
                 if (regime_id < 0 || regime_id >= NUM_REGIMES) regime_id = 0;
                 ezoo->last_predicted_regime_id = regime_id;
-                // G.7 #7 — regime hysteresis dampening. When regime just
-                // changed, blend OLD bandit's weights with NEW for
-                // hysteresis cycles. Otherwise use current bandit directly.
                 double weights_buf[ENSEMBLE_HORIZON_MAX];
-                if (ezoo->regime_transition_cycles_remaining > 0) {
-                    double w_curr[ENSEMBLE_HORIZON_MAX];
-                    double w_prev[ENSEMBLE_HORIZON_MAX];
-                    Bandit_GetProbabilities(&ezoo->bandits[regime_id], w_curr);
-                    Bandit_GetProbabilities(&ezoo->bandits[ezoo->prev_regime_id], w_prev);
-                    int hyst = config->regime_hysteresis > 0
-                             ? (int)config->regime_hysteresis : 5;
-                    double alpha = (double)(hyst - ezoo->regime_transition_cycles_remaining) /
-                                   (double)hyst;
-                    if (alpha < 0.0) alpha = 0.0;
-                    if (alpha > 1.0) alpha = 1.0;
-                    for (int h = 0; h < ezoo->primary_count; ++h) {
-                        weights_buf[h] = alpha * w_curr[h] + (1.0 - alpha) * w_prev[h];
+
+                // v5.14.10.B — bandit algorithm dispatch via FOREACH_BANDIT_ALGORITHM
+                // registry (ML_Headers/BanditAlgorithmRegistry.hpp). cfg.bandit_algorithm
+                // enum: 0=EXP3 (default; bytewise-identical to pre-v5.14.10), 1=THOMPSON,
+                // 2=BOTH (Exp3 drives action; Thompson chosen_arm logged for cfg=2 telemetry).
+                //
+                // EXP3 path branch is INTENTIONALLY duplicated (not routed through
+                // BanditAlgorithm_Apply) to preserve bytewise-identical behavior of the
+                // regime hysteresis blend. Hysteresis only fires for Exp3 because Thompson's
+                // one-hot output weights have no natural alpha-blend semantic
+                // (alpha-blending one-hot with probability distribution is mathematically
+                // undefined; would corrupt Thompson's intended argmax-of-posterior dynamics).
+                if (config->bandit_algorithm == 0) {
+                    // G.7 #7 — regime hysteresis dampening (Exp3 only). When regime just
+                    // changed, blend OLD bandit's weights with NEW for hysteresis cycles.
+                    // Otherwise use current bandit directly. Bytewise-identical to pre-v5.14.10.
+                    if (ezoo->regime_transition_cycles_remaining > 0) {
+                        double w_curr[ENSEMBLE_HORIZON_MAX];
+                        double w_prev[ENSEMBLE_HORIZON_MAX];
+                        Bandit_GetProbabilities(&ezoo->bandits[regime_id], w_curr);
+                        Bandit_GetProbabilities(&ezoo->bandits[ezoo->prev_regime_id], w_prev);
+                        int hyst = config->regime_hysteresis > 0
+                                 ? (int)config->regime_hysteresis : 5;
+                        double alpha = (double)(hyst - ezoo->regime_transition_cycles_remaining) /
+                                       (double)hyst;
+                        if (alpha < 0.0) alpha = 0.0;
+                        if (alpha > 1.0) alpha = 1.0;
+                        for (int h = 0; h < ezoo->primary_count; ++h) {
+                            weights_buf[h] = alpha * w_curr[h] + (1.0 - alpha) * w_prev[h];
+                        }
+                        ezoo->regime_transition_cycles_remaining--;
+                    } else {
+                        Bandit_GetProbabilities(&ezoo->bandits[regime_id], weights_buf);
                     }
-                    ezoo->regime_transition_cycles_remaining--;
                 } else {
-                    Bandit_GetProbabilities(&ezoo->bandits[regime_id], weights_buf);
+                    // THOMPSON (cfg=1) or BOTH (cfg=2) — single registry dispatch.
+                    // Hysteresis SKIPPED (see comment above). Hysteresis counter
+                    // decremented anyway so a future cfg-flip back to EXP3 sees clean state.
+                    int chosen_arm = -1;
+                    BanditAlgorithm_Apply(config->bandit_algorithm,
+                                          &ezoo->bandits[regime_id],
+                                          ezoo->initialized_thompson_bandits
+                                              ? &ezoo->thompson_bandits[regime_id] : nullptr,
+                                          ezoo->primary_count,
+                                          weights_buf,
+                                          &chosen_arm);
+                    // Capture Thompson's chosen_arm for cfg=2 telemetry. .D's
+                    // FOREACH_CALIB_LOG_COL writer reads this per fill.
+                    if (chosen_arm >= 0) {
+                        ezoo->last_predicted_thompson_arm = chosen_arm;
+                    }
+                    if (ezoo->regime_transition_cycles_remaining > 0) {
+                        ezoo->regime_transition_cycles_remaining--;
+                    }
                 }
                 // v5.14.0.B — Ridge risk-parity blending OVERRIDE.
                 // When cfg.ridge_within_horizon=1, supersede bandit weights
@@ -930,7 +964,13 @@ inline void ML_BuildParameters(
                 bool _ridge_gate = gate_state
                     ? BITMAP_IS_SET(gate_state->flags, MASK_RIDGE_WITHIN_ACTIVE)
                     : (config->ridge_within_horizon != 0);
+                // v5.14.10.B — Ridge override mutually-exclusive with Thompson. Thompson's
+                // one-hot weights would feed degenerate correlation history into Ridge's
+                // BuildCorr → singular Σ → fallback_to_uniform (ineffective). Operator
+                // picks ONE of {Exp3, Thompson, Ridge-overrides-Exp3}; Thompson wins
+                // when both flags set (Ridge override skipped silently for cfg!=0).
                 if (_ridge_gate &&
+                    config->bandit_algorithm == 0 &&
                     ezoo->primary_count >= 2) {
                     // Build flat prediction history from ring. Use last K
                     // = min(REWARD_RING_SIZE, predict_call_count) records.

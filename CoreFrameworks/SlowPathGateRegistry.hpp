@@ -88,6 +88,14 @@ namespace tt {
     X(PER_CORE,    EXIT_BLENDER_ACTIVE,                                                              \
       (_gate_cfg).exit_blender_mode != 0,                                                                  \
       "Ridge blend across exit_predictor handles")                                                  \
+    /* v5.14.10.B — Thompson sampling active (cfg.bandit_algorithm in {1, 2}) */                    \
+    X(PER_CORE,    THOMPSON_ACTIVE,                                                                  \
+      (_gate_cfg).bandit_algorithm != 0,                                                             \
+      "Thompson sampling bandit dispatched (cfg=1 THOMPSON or cfg=2 BOTH)")                         \
+    /* v5.14.10.B — cfg=2 dual-mode (parallel-training A/B telemetry) */                            \
+    X(PER_CORE,    BANDIT_BOTH_ACTIVE,                                                               \
+      (_gate_cfg).bandit_algorithm == 2,                                                             \
+      "Both Exp3 + Thompson run per cycle (cfg=2 calib log telemetry)")                             \
     /* === ENGINE_WIDE — checked in engine-wide outer / function-entry; uses global cfg === */     \
     /* v5.12.2.B — lazy slow-path rebuild predicate (function-entry of EventLoop_RebuildOneCore) */ \
     X(ENGINE_WIDE, LAZY_REBUILD_ACTIVE,                                                              \
