@@ -283,7 +283,7 @@ secret in engine.cfg + retain it across operator deployments.
 
 ### Caveats
 
-- **`multi_horizon_max_threads` defaults to 1 (forced serial)** post-v5.11.45 due to libgomp/pthread interaction in XGBoost (see plans/2026-05-07-deferred-items.md "v5.11.45 landmine"). Setting `>=2` opt-in for parallel training; may segfault.
+- **`multi_horizon_max_threads` defaults to 1 (forced serial)** post-v5.11.45 due to libgomp/pthread interaction in XGBoost (see plans/_cross-cutting/2026-05-07-deferred-items.md "v5.11.45 landmine"). Setting `>=2` opt-in for parallel training; may segfault.
 - **Multiclass labels with rare classes**: per-sample weight cap at 5.0 (v5.11.46) to prevent gradient overflow during XGBoost histogram building.
 - **Stamps**: written ALWAYS post-v5.11.47 regardless of legacy `auto_stamp_on_held_out` cfg flag.
 - **Horizon-mismatch refusal**: engine REFUSES to load a model from `<dir>_horizon_<H>` if the stamp's `label_lookahead_ticks` doesn't match `<H>` (catches dir rename / copy mistakes; v5.11.42).
