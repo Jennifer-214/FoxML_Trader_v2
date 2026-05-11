@@ -3203,28 +3203,32 @@ static inline void *train_model_worker_fn(void *arg) {
                  "Auto-stamping...");
         state->tm_auto_stamp_attempted = 1;
 
-        // Build inf — mirror Backtest_RunFullValidation's pattern (v5.9.5b/h)
+        // Build inf — mirror Backtest_RunFullValidation's pattern (v5.9.5b/h).
+        // v5.14.8.A.merged.3 — migrated to canonical wire-key field names
+        // + STAMP_SET API (Option 1 unification). Field names follow the
+        // FOREACH_STAMP_BOUND_MODEL_CONST + FOREACH_STAMP_BOUND_CFG registry
+        // single source of truth; has_* bits bit-packed via STAMP_HAS/_SET.
         StampInferenceCfgInputs inf = {};
-        inf.has_inference_cfg = 1;
-        inf.confidence_threshold_scale =
+        STAMP_SET(inf, inference_cfg);
+        inf.inference_cfg_confidence_threshold_scale =
             FPN_ToDouble(run_control->results.config_used.confidence_threshold_scale);
-        inf.barrier_gate_enabled = BITMAP_IS_SET(run_control->results.config_used.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED) ? 1 : 0;
-        inf.confidence_hard_block_threshold =
+        inf.inference_cfg_barrier_gate_enabled = BITMAP_IS_SET(run_control->results.config_used.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED) ? 1 : 0;
+        inf.inference_cfg_confidence_hard_block_threshold =
             FPN_ToDouble(run_control->results.config_used.confidence_hard_block_threshold);
-        inf.held_out_fraction =
+        inf.inference_cfg_held_out_fraction =
             FPN_ToDouble(run_control->results.config_used.held_out_fraction);
-        // v5.14.9.D — DELETED inf.freshness_tau setter (TECH_DEBT-004 close).
-        // Stamp body entry + cfg field both deleted; line is now inapplicable.
-        inf.has_training_poll_interval = 1;
+        // v5.14.9.D — DELETED inference_cfg_freshness_tau setter
+        // (TECH_DEBT-004 close); cfg field + stamp body entry deleted.
+        STAMP_SET(inf, training_poll_interval);
         inf.training_poll_interval = run_control->results.config_used.poll_interval;
-        // num_outputs derived from label_type
+        // model_num_outputs derived from label_type
         {
             int K = LabelType_NumClasses(snap_label_type);
-            inf.has_num_outputs = 1;
+            STAMP_SET(inf, model_num_outputs);
             inf.model_num_outputs = (K >= 2) ? K : 1;
         }
         // XGBoost hyperparams from operator's panel inputs (v5.9.5h)
-        inf.has_xgb_hyperparams = 1;
+        STAMP_SET(inf, xgb_hyperparams);
         inf.xgb_max_depth = snap_max_depth;
         inf.xgb_learning_rate = snap_learning_rate;
         inf.xgb_n_estimators = snap_n_estimators;
@@ -3242,19 +3246,22 @@ static inline void *train_model_worker_fn(void *arg) {
             inf.xgb_tree_method[tmln] = '\0';
         }
         // Build flags fingerprint (v5.9.5h #10)
-        inf.has_build_flags_hash = 1;
+        STAMP_SET(inf, build_flags_hash);
         inf.build_flags_hash = tt::BUILD_FLAGS_HASH();
         // v5.10.1.A — LABEL_REGISTRY_HASH plumb-through (parity-check Finding #1).
         // Train Model worker now stamps the label-set fingerprint alongside
         // the feature-set + build-flags fingerprints; engine load REFUSES
         // on label drift in strict mode.
-        inf.has_label_registry_hash = 1;
+        STAMP_SET(inf, label_registry_hash);
         inf.label_registry_hash     = LABEL_REGISTRY_HASH();
         // Scaler binding (v5.9.3a) — populate when scaler_persisted
         if (scaler_persisted && state->scaler_sha256_hex[0]) {
-            inf.has_scaler = 1;
+            STAMP_SET(inf, scaler);
             inf.feature_scaler_present = 1;
-            inf.scaler_sha256_hex = state->scaler_sha256_hex;
+            size_t shn = strnlen(state->scaler_sha256_hex,
+                                  sizeof(inf.scaler_sha256) - 1);
+            memcpy(inf.scaler_sha256, state->scaler_sha256_hex, shn);
+            inf.scaler_sha256[shn] = '\0';
         }
 
         // ISO date for trained_on
