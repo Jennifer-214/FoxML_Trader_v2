@@ -119,9 +119,16 @@ struct RidgeWeights {
     // inputs [0,1] (sigmoid output) × K=64 → cancellation error ~10^-14;
     // 5 orders of magnitude headroom below 1e-9 PARITY tolerance.
     // Zero-init via RidgeWeights_Init memset; no explicit init needed.
-    double   online_sum_x[MAX_RIDGE_MODELS];
-    double   online_sum_xx[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS];
-    uint64_t online_window_count;       // ≤ K; saturates at K
+    //
+    // v5.14.11.B.7 — alignas(64) on the online state cluster ensures
+    // each cache-line-sized field starts on a cache line boundary.
+    // online_sum_x[8] (64B = 1 cache line) at cache-aligned offset →
+    // online_sum_xx[8][8] (512B = 8 cache lines) at +64 (still aligned)
+    // → online_window_count (8B) at +576. Hot reads in UpdateOnline +
+    // FinalizeCorrFromSums touch fewer partial cache lines.
+    alignas(64) double   online_sum_x[MAX_RIDGE_MODELS];
+    double               online_sum_xx[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS];
+    uint64_t             online_window_count;       // ≤ K; saturates at K
 };
 
 //======================================================================================================
