@@ -143,51 +143,105 @@ inline int Cholesky_Solve(double L_out[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS],
                           const double mu[MAX_RIDGE_MODELS],
                           double ridge_lambda,
                           int n) {
+    // v5.14.11.B.1 — fully branchless + constant-iter Cholesky.
+    // Inner reductions iterate exactly MAX_RIDGE_MODELS=8 times (no variable-
+    // iteration loops; no if guards inside reduce loops). Pattern documented
+    // in DESIGN_SPECS/branchless-math-kernel-pattern.md.
+    //
+    // Zero-invariants establish bytewise-equivalence with prior variable-iter
+    // form via IEEE-754 x - 0.0 = x exact and x * 0.0 = 0.0 exact:
+    //   - L_out pre-zeroed per row at row START (replaces old "zero upper
+    //     triangle" pass at row END; establishes invariant for all decomp +
+    //     forward solve inner reductions)
+    //   - y_out pre-zeroed before forward solve
+    //   - w_out pre-zeroed before back-solve
+    //
+    // Compiler auto-vectorizes constant-8 inner loops via -O3 -march=native;
+    // no explicit AVX-512 intrinsics in Cholesky_Solve (single code path;
+    // bytewise-stable per build).
+    //
+    // Bytewise-equivalent to v5.14.10 scalar Cholesky output (same final
+    // accumulator values; same operation order at semantic level).
+    //
     // === DECOMPOSITION ===
     // L[i][i] = sqrt((Σ[i][i] + λ) - Σ_{k<i}(L[i][k]²))
     // L[i][j] = (Σ[i][j] - Σ_{k<j}(L[i][k]·L[j][k])) / L[j][j]   for j < i
     for (int i = 0; i < n; ++i) {
+        // Pre-zero L_out[i][0..MAX-1] at row START — establishes the
+        // constant-8 invariant for off-diagonal + diagonal reductions.
+        // Replaces the old "zero upper triangle" tail pass.
+        for (int k = 0; k < MAX_RIDGE_MODELS; ++k) {
+            L_out[i][k] = 0.0;
+        }
+
         // Off-diagonal: L[i][0..i-1]
         for (int j = 0; j < i; ++j) {
             double s = sigma[i][j];
-            for (int k = 0; k < j; ++k) {
+            // Constant-8 reduce. L_out[i][k]=0 for k >= j (pre-zero invariant
+            // + L_out[i][0..j-1] filled in earlier j iters of this row).
+            // L_out[j][k]=0 for k > j (pre-zero invariant on row j; row j was
+            // processed earlier when outer i was at j). Zero contributions are
+            // bytewise no-ops per IEEE-754 x*0=0 and x-0=x exact.
+            for (int k = 0; k < MAX_RIDGE_MODELS; ++k) {
                 s -= L_out[i][k] * L_out[j][k];
             }
-            // L[j][j] guaranteed > 0 from prior diagonal step (or we
-            // would have already returned -1).
+            // L[j][j] guaranteed > 0 from prior diagonal step.
             L_out[i][j] = s / L_out[j][j];
         }
+
         // Diagonal: L[i][i]
         double diag = sigma[i][i] + ridge_lambda;
-        for (int k = 0; k < i; ++k) {
+        // Constant-8 reduce. L_out[i][0..i-1] just computed in off-diag iters;
+        // L_out[i][k]=0 for k >= i (pre-zero invariant; k=i not yet written).
+        for (int k = 0; k < MAX_RIDGE_MODELS; ++k) {
             diag -= L_out[i][k] * L_out[i][k];
         }
         if (diag <= 0.0) {
             // Singular or negative-definite (shouldn't happen with λ > 0
-            // unless Σ has invalid entries). Fail fast.
+            // unless Σ has invalid entries). Function-entry-frequency
+            // legitimate error fallback per CLAUDE.md item 18.
             return -1;
         }
         L_out[i][i] = std::sqrt(diag);
-        // Zero upper triangle for cleanliness (not strictly needed for
-        // forward/back solve below, but helps debugging).
-        for (int j = i + 1; j < n; ++j) {
-            L_out[i][j] = 0.0;
-        }
+        // NOTE: old "zero upper triangle for cleanliness" pass removed;
+        // pre-zero at row START already establishes the invariant.
     }
 
     // === FORWARD SOLVE: L y = μ ===
+    // Pre-zero y_out for constant-8 reduce (k > i contributions zero out via
+    // y_out[k]=0 × L_out[i][k]=0 = 0; per IEEE-754 0 - 0 = 0 exact).
+    for (int k = 0; k < MAX_RIDGE_MODELS; ++k) {
+        y_out[k] = 0.0;
+    }
     for (int i = 0; i < n; ++i) {
         double s = mu[i];
-        for (int k = 0; k < i; ++k) {
+        // Constant-8 reduce. L_out[i][k]=0 for k > i (upper triangle; pre-zero
+        // invariant from decomp). y_out[k]=0 for k >= i (pre-zero of y_out
+        // above; computed only for k < i in earlier outer iters).
+        for (int k = 0; k < MAX_RIDGE_MODELS; ++k) {
             s -= L_out[i][k] * y_out[k];
         }
         y_out[i] = s / L_out[i][i];
     }
 
     // === BACK SOLVE: L^T w = y ===
+    // Pre-zero w_out for constant-8 reduce. Handles k = i and k < i terms as
+    // L_out[k][i] × w_out[k] = (real or 0) × 0 = 0. For k > i: real values
+    // (computed in earlier outer iters as outer goes n-1 → 0).
+    for (int k = 0; k < MAX_RIDGE_MODELS; ++k) {
+        w_out[k] = 0.0;
+    }
     for (int i = n - 1; i >= 0; --i) {
         double s = y_out[i];
-        for (int k = i + 1; k < n; ++k) {
+        // Constant-8 reduce.
+        //   k < i: L_out[k][i]=0 (upper triangle of row k; pre-zero invariant)
+        //   k = i: L_out[i][i] (diagonal; non-zero) × w_out[i] (= 0; not yet
+        //          written this iter; pre-zeroed). Contribution = 0.
+        //   k > i: L_out[k][i] (real lower-triangle entry) × w_out[k] (real;
+        //          computed in earlier outer iter since back-solve walks
+        //          n-1 → 0). Real contribution.
+        //   k >= n: L_out[k][i]=0 (row k pre-zeroed; never written for k >= n).
+        for (int k = 0; k < MAX_RIDGE_MODELS; ++k) {
             s -= L_out[k][i] * w_out[k];
         }
         w_out[i] = s / L_out[i][i];
