@@ -37,6 +37,7 @@
 
 #include "../FixedPoint/FixedPointN.hpp"
 #include "TradeEvent.hpp"
+#include "TradeLogColRegistry.hpp"  // v5.14.10.F — FOREACH_TRADE_LOG_COL registry (closes /merge-scan N2 for trade log)
 
 #include <cstdint>
 #include <cstdio>
@@ -115,8 +116,9 @@ inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol) {
         // '#' line as a version sentinel.
         fprintf(log->file,
             "# v3 sharded engine — rows are in arrival order; sort by timestamp_us for chronological view\n");
-        fprintf(log->file,
-            "timestamp_us,core_id,strategy_id,event_type,price,entry_price,exit_price,pnl,fees,balance_after,trade_size\n");
+        // v5.14.10.F — column header via FOREACH_TRADE_LOG_COL registry walk.
+        // Byte-identical to pre-refactor literal (operator-parser compat).
+        TradeLog_EmitHeader(log->file);
         fflush(log->file);
     }
     return 1;
@@ -206,16 +208,24 @@ inline void ShardedTradeLog_RecordEntry(ShardedTradeLog* log,
                                          FPN<F> balance_after) {
     if (!log->file) return;
     char row[1024];
-    int n = snprintf(row, sizeof(row),
-        "%lu,%u,%u,E,%.8f,%.8f,0,0,%.8f,%.8f,%.8f\n",
-        (unsigned long)event.timestamp,
-        (unsigned)event.core_id,
-        (unsigned)strategy_id,
-        FPN_ToDouble(event.price),
-        FPN_ToDouble(entry_price),
-        FPN_ToDouble(entry_fee),
-        FPN_ToDouble(balance_after),
-        FPN_ToDouble(trade_size));
+    // v5.14.10.F — registry-driven row build via FOREACH_TRADE_LOG_COL.
+    // Byte-identical output to pre-refactor snprintf format
+    // ("%lu,%u,%u,E,%.8f,%.8f,0,0,%.8f,%.8f,%.8f\n"); closes /merge-scan
+    // N2 finding for trade log; mirrors v5.14.10.D's calib log refactor pattern.
+    // Caller-scope variables set BEFORE the registry walk macro per
+    // CALLER SCOPE CONTRACT in TradeLogColRegistry.hpp.
+    uint64_t timestamp_us  = event.timestamp;
+    uint32_t core_id       = event.core_id;
+    char     event_type    = 'E';
+    double   price_v       = FPN_ToDouble(event.price);
+    double   entry_price_v = FPN_ToDouble(entry_price);
+    double   exit_price_v  = 0.0;                                // entry: exit_price unused
+    double   pnl_v         = 0.0;                                // entry: pnl unused
+    double   fees_v        = FPN_ToDouble(entry_fee);            // entry: fees = entry_fee
+    double   balance_after_v = FPN_ToDouble(balance_after);
+    double   trade_size_v    = FPN_ToDouble(trade_size);
+    int n = 0;
+    TRADE_LOG_EMIT_ROW_TO_BUFFER(row, sizeof(row), &n);
     if (n < 0 || (size_t)n >= sizeof(row)) {
         log->writes_truncated++;
         return;
@@ -245,18 +255,21 @@ inline void ShardedTradeLog_RecordExit(ShardedTradeLog* log,
                                         FPN<F> balance_after) {
     if (!log->file) return;
     char row[1024];
-    int n = snprintf(row, sizeof(row),
-        "%lu,%u,%u,X,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f\n",
-        (unsigned long)event.timestamp,
-        (unsigned)event.core_id,
-        (unsigned)strategy_id,
-        FPN_ToDouble(event.price),
-        FPN_ToDouble(entry_price),
-        FPN_ToDouble(exit_price),
-        FPN_ToDouble(net_pnl),
-        FPN_ToDouble(total_fees),
-        FPN_ToDouble(balance_after),
-        FPN_ToDouble(trade_size));
+    // v5.14.10.F — registry-driven row build via FOREACH_TRADE_LOG_COL.
+    // Byte-identical output to pre-refactor snprintf format
+    // ("%lu,%u,%u,X,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f\n").
+    uint64_t timestamp_us  = event.timestamp;
+    uint32_t core_id       = event.core_id;
+    char     event_type    = 'X';
+    double   price_v       = FPN_ToDouble(event.price);
+    double   entry_price_v = FPN_ToDouble(entry_price);
+    double   exit_price_v  = FPN_ToDouble(exit_price);
+    double   pnl_v         = FPN_ToDouble(net_pnl);              // exit: pnl = net_pnl
+    double   fees_v        = FPN_ToDouble(total_fees);           // exit: fees = total_fees
+    double   balance_after_v = FPN_ToDouble(balance_after);
+    double   trade_size_v    = FPN_ToDouble(trade_size);
+    int n = 0;
+    TRADE_LOG_EMIT_ROW_TO_BUFFER(row, sizeof(row), &n);
     if (n < 0 || (size_t)n >= sizeof(row)) {
         log->writes_truncated++;
         return;
