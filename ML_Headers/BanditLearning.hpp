@@ -47,6 +47,7 @@
 #include <time.h>
 #include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.C — std::from_chars wrapper for locale-immune parsing
 #include <unistd.h>     // unlink, write
+#include <locale.h>     // v5.14.10.C — uselocale/newlocale for LC_NUMERIC=C pinning at JSON emit (TECH_DEBT-027 close)
 #if defined(__AVX512F__)
 #include <immintrin.h>  // v5.11.7 — AVX-512 vectorization of Bandit_GetProbabilities
 #endif
@@ -377,6 +378,15 @@ static inline int Bandit_SaveJSON(const BanditState* bandits,
     FILE* f = fopen(tmp_path, "w");
     if (!f) return 0;
 
+    // v5.14.10.C — TECH_DEBT-027 close. Pin LC_NUMERIC=C (per-thread via
+    // uselocale) so %.17g emits ASCII decimal point regardless of process
+    // locale. Without this, an engine launched under LC_NUMERIC=de_DE
+    // would write "0,55" instead of "0.55"; tt::parse_double_fast (locale-
+    // immune via from_chars) would parse "0" → silent state corruption.
+    locale_t pinned_locale = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+    locale_t prev_locale = (locale_t)0;
+    if (pinned_locale) prev_locale = uselocale(pinned_locale);
+
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     long long ns = (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
@@ -423,6 +433,14 @@ static inline int Bandit_SaveJSON(const BanditState* bandits,
     }
     fprintf(f, "  ]\n");
     fprintf(f, "}\n");
+
+    // Restore caller's locale before fclose (file handle isn't locale-bound;
+    // restore order matches stamp_write_for_model precedent at ModelInference.hpp:1940).
+    if (pinned_locale) {
+        uselocale(prev_locale);
+        freelocale(pinned_locale);
+    }
+
     if (fclose(f) != 0) {
         unlink(tmp_path);
         return 0;
@@ -434,35 +452,47 @@ static inline int Bandit_SaveJSON(const BanditState* bandits,
     return 1;
 }
 
-// Helper: scan a JSON-ish key and skip ahead. Returns ptr to value start,
-// or NULL if not found. NOT a real JSON parser — just walks to "key": and
-// returns position past the colon. Whitespace + escapes minimal.
-static inline const char* Bandit_JsonFindKey(const char* haystack,
-                                               const char* key) {
-    if (!haystack || !key) return NULL;
+//======================================================================================================
+// [JSON I/O PRIMITIVES — generic, reusable across Bandit + Thompson + future state-persistence]
+//======================================================================================================
+// v5.14.10.C — extracted to tt::json_io namespace from Bandit_Json* sister
+// functions (per /merge-scan T4 finding). NOT a real JSON parser — just
+// walks to "key": and returns position past the colon; reads numeric arrays
+// until ']'. Sufficient for state-persistence sidecar files (bandit_state.json,
+// thompson_state.json) where format is operator-controlled + tiny.
+//
+// Used by Bandit_LoadJSON below + EnsembleModelZoo_LoadThompsonState in CoreModelZoo.hpp.
+namespace tt { namespace json_io {
+
+// Scan for a JSON key and return position past the ':'. Returns nullptr if
+// not found (caller treats as "field absent"; defaults / forward-compat-by-
+// absence apply per Surface G discipline).
+static inline const char* find_key(const char* haystack, const char* key) {
+    if (!haystack || !key) return nullptr;
     char needle[96];
     int wrote = snprintf(needle, sizeof(needle), "\"%s\"", key);
-    if (wrote <= 0 || wrote >= (int)sizeof(needle)) return NULL;
+    if (wrote <= 0 || wrote >= (int)sizeof(needle)) return nullptr;
     const char* p = strstr(haystack, needle);
-    if (!p) return NULL;
+    if (!p) return nullptr;
     p += wrote;
     while (*p == ' ' || *p == ':' || *p == '\t') ++p;
     return p;
 }
 
-// Parse a numeric array starting at p (after the '['). Reads up to max
-// values; returns count parsed. Stops at ']'.
-static inline int Bandit_JsonParseDoubleArray(const char* p, double* out,
-                                                int max_count) {
+// Parse a JSON numeric array starting at p. Skips leading whitespace + '['.
+// Reads up to max_count doubles; returns count parsed. Stops at ']' or first
+// non-numeric / malformed input.
+//
+// Locale-IMMUNE via tt::parse_double_fast_advance (uses std::from_chars per
+// v5.11.4.C). Safe regardless of process LC_NUMERIC.
+static inline int parse_double_array(const char* p, double* out, int max_count) {
     if (!p || !out) return 0;
     while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '[') ++p;
     int count = 0;
     while (*p && *p != ']' && count < max_count) {
-        // v5.11.4.C — locale-immune via std::from_chars (replaces strtod
-        // which honors LC_NUMERIC). Same end-pointer "no progress" sentinel.
         const char* end_ptr = nullptr;
         double v = tt::parse_double_fast_advance(p, &end_ptr);
-        if (end_ptr == p) break;  // no number consumed
+        if (end_ptr == p) break;   // no number consumed
         out[count++] = v;
         p = end_ptr;
         while (*p == ' ' || *p == ',' || *p == '\n' || *p == '\t') ++p;
@@ -470,13 +500,13 @@ static inline int Bandit_JsonParseDoubleArray(const char* p, double* out,
     return count;
 }
 
-static inline int Bandit_JsonParseIntArray(const char* p, int* out,
-                                              int max_count) {
+// Parse a JSON integer array. Same shape as parse_double_array but for ints.
+static inline int parse_int_array(const char* p, int* out, int max_count) {
     if (!p || !out) return 0;
     while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '[') ++p;
     int count = 0;
     while (*p && *p != ']' && count < max_count) {
-        char* end_ptr = NULL;
+        char* end_ptr = nullptr;
         long v = strtol(p, &end_ptr, 10);
         if (end_ptr == p) break;
         out[count++] = (int)v;
@@ -485,6 +515,25 @@ static inline int Bandit_JsonParseIntArray(const char* p, int* out,
     }
     return count;
 }
+
+// v5.14.10.C — uint32 array variant (for thompson_state.total_pulls[] which
+// uses uint32_t per BanditState.pulls[] precedent).
+static inline int parse_uint32_array(const char* p, uint32_t* out, int max_count) {
+    if (!p || !out) return 0;
+    while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '[') ++p;
+    int count = 0;
+    while (*p && *p != ']' && count < max_count) {
+        char* end_ptr = nullptr;
+        unsigned long v = strtoul(p, &end_ptr, 10);
+        if (end_ptr == p) break;
+        out[count++] = (uint32_t)v;
+        p = end_ptr;
+        while (*p == ' ' || *p == ',' || *p == '\n' || *p == '\t') ++p;
+    }
+    return count;
+}
+
+}} // namespace tt::json_io
 
 // Load BanditState array from JSON file. Returns 1 if loaded + valid;
 // 0 if missing/corrupt/sha-mismatch (caller falls back to uniform via
@@ -529,26 +578,26 @@ static inline int Bandit_LoadJSON(BanditState* bandits,
     buf[read_n] = '\0';
 
     // format_version check
-    const char* p = Bandit_JsonFindKey(buf, "format_version");
+    const char* p = tt::json_io::find_key(buf, "format_version");
     if (!p) { return 0; }
     int fmt = (int)strtol(p, NULL, 10);
     if (fmt != BANDIT_STATE_FORMAT_VERSION) { return 0; }
 
     // n_arms check
-    p = Bandit_JsonFindKey(buf, "n_arms");
+    p = tt::json_io::find_key(buf, "n_arms");
     if (!p) { return 0; }
     int file_n_arms = (int)strtol(p, NULL, 10);
     if (file_n_arms != expected_n_arms) { return 0; }
 
     // n_regimes check (file may have more, never fewer)
-    p = Bandit_JsonFindKey(buf, "n_regimes");
+    p = tt::json_io::find_key(buf, "n_regimes");
     if (!p) { return 0; }
     int file_n_regimes = (int)strtol(p, NULL, 10);
     if (file_n_regimes < n_regimes) { return 0; }
 
     // SHA check (only if caller supplied expected)
     if (expected_model_bundle_sha256_hex && expected_model_bundle_sha256_hex[0]) {
-        p = Bandit_JsonFindKey(buf, "model_bundle_sha256");
+        p = tt::json_io::find_key(buf, "model_bundle_sha256");
         if (!p) { return 0; }
         // Skip leading whitespace + open quote
         while (*p == ' ' || *p == '\t') ++p;
@@ -566,13 +615,13 @@ static inline int Bandit_LoadJSON(BanditState* bandits,
 
     // Per-regime parse: walk to "regimes" array, then for each "regime_id"
     // entry, populate weights / cum_reward / pulls.
-    p = Bandit_JsonFindKey(buf, "regimes");
+    p = tt::json_io::find_key(buf, "regimes");
     if (!p) { return 0; }
     while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '[') ++p;
 
     for (int r = 0; r < n_regimes; ++r) {
         // Find next "regime_id" past current p
-        const char* rid_p = Bandit_JsonFindKey(p, "regime_id");
+        const char* rid_p = tt::json_io::find_key(p, "regime_id");
         if (!rid_p) {
             
             return 0;
@@ -588,32 +637,32 @@ static inline int Bandit_LoadJSON(BanditState* bandits,
         // Just overlay the persisted state.
 
         // total_steps
-        const char* ts_p = Bandit_JsonFindKey(rid_p, "total_steps");
+        const char* ts_p = tt::json_io::find_key(rid_p, "total_steps");
         if (ts_p) b.total_steps = (int)strtol(ts_p, NULL, 10);
 
         // weights
-        const char* w_p = Bandit_JsonFindKey(rid_p, "weights");
+        const char* w_p = tt::json_io::find_key(rid_p, "weights");
         if (w_p) {
             double tmp_w[BANDIT_MAX_ARMS];
-            int got = Bandit_JsonParseDoubleArray(w_p, tmp_w, BANDIT_MAX_ARMS);
+            int got = tt::json_io::parse_double_array(w_p, tmp_w, BANDIT_MAX_ARMS);
             int copy = (got < b.n_arms) ? got : b.n_arms;
             for (int a = 0; a < copy; ++a) b.weights[a] = tmp_w[a];
         }
 
         // cum_reward
-        const char* cr_p = Bandit_JsonFindKey(rid_p, "cum_reward");
+        const char* cr_p = tt::json_io::find_key(rid_p, "cum_reward");
         if (cr_p) {
             double tmp_cr[BANDIT_MAX_ARMS];
-            int got = Bandit_JsonParseDoubleArray(cr_p, tmp_cr, BANDIT_MAX_ARMS);
+            int got = tt::json_io::parse_double_array(cr_p, tmp_cr, BANDIT_MAX_ARMS);
             int copy = (got < b.n_arms) ? got : b.n_arms;
             for (int a = 0; a < copy; ++a) b.cum_reward[a] = tmp_cr[a];
         }
 
         // pulls
-        const char* pl_p = Bandit_JsonFindKey(rid_p, "pulls");
+        const char* pl_p = tt::json_io::find_key(rid_p, "pulls");
         if (pl_p) {
             int tmp_p[BANDIT_MAX_ARMS];
-            int got = Bandit_JsonParseIntArray(pl_p, tmp_p, BANDIT_MAX_ARMS);
+            int got = tt::json_io::parse_int_array(pl_p, tmp_p, BANDIT_MAX_ARMS);
             int copy = (got < b.n_arms) ? got : b.n_arms;
             for (int a = 0; a < copy; ++a) b.pulls[a] = tmp_p[a];
         }

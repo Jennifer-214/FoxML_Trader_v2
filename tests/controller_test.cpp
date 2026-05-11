@@ -20268,7 +20268,12 @@ e3_skip_load:;
 
         // Now mark bandits initialized (as if InitBandits ran)
         ezoo.initialized_bandits = 1;
-        check("v5.14.2.E.1 contract: after InitBandits flag set → ready",
+        // v5.14.10.C — IsReadyForInference now also requires Thompson init when
+        // primary_count >= 2 (FOREACH_ENSEMBLE_POST_LOAD extension landed in .C
+        // adds init_thompson_bandits as canonical step 8). Test-mock both flags
+        // since this test bypasses PostLoadSetup helper.
+        ezoo.initialized_thompson_bandits = 1;
+        check("v5.14.2.E.1 contract: after InitBandits + InitThompsonBandits flags set → ready",
               EnsembleModelZoo_IsReadyForInference(&ezoo) == 1);
     }
     {
@@ -22908,6 +22913,158 @@ e3_skip_load:;
         #undef X_COUNT_RNG_SEED
         check("v5.14.10.B FOREACH_STAMP_BOUND_CFG correctly EXCLUDES thompson_rng_seed (runtime-only)",
               found_rng_seed == 0);
+    }
+
+    // ===========================================================================
+    // === v5.14.10.C — Persistence + tt::json_io extraction + PostLoadSetup ===
+    // ===========================================================================
+    printf("\n--- v5.14.10.C: thompson_state.json persistence + tt::json_io + FOREACH_ENSEMBLE_POST_LOAD ---\n");
+
+    // ─── Test C.1: tt::json_io::find_key + parse_double_array round-trip ───
+    {
+        const char* json =
+            "  \"weights\": [0.5, 0.25, 0.125, 0.125]\n";
+        const char* p = tt::json_io::find_key(json, "weights");
+        check("v5.14.10.C: tt::json_io::find_key finds key",
+              p != nullptr);
+        if (p) {
+            double tmp[8] = {0};
+            int got = tt::json_io::parse_double_array(p, tmp, 8);
+            check("v5.14.10.C: tt::json_io::parse_double_array returns 4 values",
+                  got == 4);
+            check("v5.14.10.C: parsed values match (0.5, 0.25, 0.125, 0.125)",
+                  fabs(tmp[0] - 0.5) < 1e-9 &&
+                  fabs(tmp[1] - 0.25) < 1e-9 &&
+                  fabs(tmp[2] - 0.125) < 1e-9 &&
+                  fabs(tmp[3] - 0.125) < 1e-9);
+        }
+    }
+
+    // ─── Test C.2: tt::json_io::parse_uint32_array ───
+    {
+        const char* json = "  \"pulls\": [10, 20, 30, 40]\n";
+        const char* p = tt::json_io::find_key(json, "pulls");
+        if (p) {
+            uint32_t tmp[8] = {0};
+            int got = tt::json_io::parse_uint32_array(p, tmp, 8);
+            check("v5.14.10.C: tt::json_io::parse_uint32_array returns 4 values",
+                  got == 4);
+            check("v5.14.10.C: parsed uint32 values match (10, 20, 30, 40)",
+                  tmp[0] == 10 && tmp[1] == 20 && tmp[2] == 30 && tmp[3] == 40);
+        }
+    }
+
+    // ─── Test C.3: thompson_state.json save → load round-trip preserves posterior ───
+    {
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        ezoo.primary_count = 4;
+        EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+
+        // Mutate state — apply some Updates to differentiate from prior
+        Thompson_Update(&ezoo.thompson_bandits[0], 0, 5.0);
+        Thompson_Update(&ezoo.thompson_bandits[0], 0, 5.0);
+        Thompson_Update(&ezoo.thompson_bandits[0], 1, -3.0);
+        Thompson_Update(&ezoo.thompson_bandits[2], 2, 2.5);
+        // Advance RNG
+        Thompson_Sample(&ezoo.thompson_bandits[1]);
+
+        // Capture pre-save state for comparison
+        double pre_mu[NUM_REGIMES][BANDIT_MAX_ARMS];
+        double pre_prec[NUM_REGIMES][BANDIT_MAX_ARMS];
+        uint32_t pre_pulls[NUM_REGIMES][BANDIT_MAX_ARMS];
+        uint64_t pre_rng[NUM_REGIMES];
+        for (int r = 0; r < NUM_REGIMES; ++r) {
+            for (int a = 0; a < BANDIT_MAX_ARMS; ++a) {
+                pre_mu[r][a]    = ezoo.thompson_bandits[r].mu_post[a];
+                pre_prec[r][a]  = ezoo.thompson_bandits[r].precision_post[a];
+                pre_pulls[r][a] = ezoo.thompson_bandits[r].total_pulls[a];
+            }
+            pre_rng[r] = ezoo.thompson_bandits[r].rng_state;
+        }
+
+        // Save
+        char tmp_dir[] = "/tmp/foxml_v5_14_10_c_thompson_XXXXXX";
+        char* dir = mkdtemp(tmp_dir);
+        check("v5.14.10.C: mkdtemp tmpdir for thompson_state.json", dir != nullptr);
+        if (dir) {
+            const char* regime_names[] = {"R0", "R1", "R2", "R3", "R4"};
+            int saved = EnsembleModelZoo_SaveThompsonState(&ezoo, dir, regime_names);
+            check("v5.14.10.C: SaveThompsonState returns 1 (success)", saved == 1);
+
+            // Now zero out the in-memory state + reload
+            for (int r = 0; r < NUM_REGIMES; ++r) {
+                for (int a = 0; a < BANDIT_MAX_ARMS; ++a) {
+                    ezoo.thompson_bandits[r].mu_post[a]       = 999.0;  // sentinel
+                    ezoo.thompson_bandits[r].precision_post[a] = 999.0;
+                    ezoo.thompson_bandits[r].total_pulls[a]    = 999;
+                }
+                ezoo.thompson_bandits[r].rng_state = 0xDEADBEEFULL;
+            }
+            int loaded = EnsembleModelZoo_LoadThompsonState(&ezoo, dir);
+            check("v5.14.10.C: LoadThompsonState returns 1 (success)", loaded == 1);
+
+            // Verify state restored bytewise. Only check active arms (a < n_arms);
+            // Save/Load only persist first n_arms entries — arms [n_arms, BANDIT_MAX_ARMS)
+            // intentionally retain their sentinel value (no need to round-trip unused slots).
+            bool mu_match = true, prec_match = true, pulls_match = true, rng_match = true;
+            for (int r = 0; r < NUM_REGIMES; ++r) {
+                int active = ezoo.thompson_bandits[r].n_arms;  // = primary_count = 4
+                for (int a = 0; a < active; ++a) {
+                    if (ezoo.thompson_bandits[r].mu_post[a] != pre_mu[r][a])    mu_match = false;
+                    if (ezoo.thompson_bandits[r].precision_post[a] != pre_prec[r][a]) prec_match = false;
+                    if (ezoo.thompson_bandits[r].total_pulls[a] != pre_pulls[r][a]) pulls_match = false;
+                }
+                if (ezoo.thompson_bandits[r].rng_state != pre_rng[r]) rng_match = false;
+            }
+            check("v5.14.10.C: round-trip preserves mu_post (.17g lossless; active arms)", mu_match);
+            check("v5.14.10.C: round-trip preserves precision_post (.17g lossless; active arms)", prec_match);
+            check("v5.14.10.C: round-trip preserves total_pulls (uint32 exact; active arms)", pulls_match);
+            check("v5.14.10.C: round-trip preserves rng_state (016lx hex lossless)", rng_match);
+
+            // Cleanup
+            char path[600];
+            snprintf(path, sizeof(path), "%s/thompson_state.json", dir);
+            unlink(path);
+            rmdir(dir);
+        }
+    }
+
+    // ─── Test C.4: Load with missing file returns 0 (forward-compat-by-absence) ───
+    {
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        ezoo.primary_count = 4;
+        EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+        int loaded = EnsembleModelZoo_LoadThompsonState(&ezoo, "/tmp/nonexistent_dir_v5_14_10_c");
+        check("v5.14.10.C: Load missing file returns 0 (forward-compat-by-absence)",
+              loaded == 0);
+        // State should still be at prior (uniform; from InitThompsonBandits)
+        check("v5.14.10.C: state unchanged after failed load (priors preserved)",
+              fabs(ezoo.thompson_bandits[0].mu_post[0] - 0.0) < 1e-9 &&
+              fabs(ezoo.thompson_bandits[0].precision_post[0] - 1.0) < 1e-9);
+    }
+
+    // ─── Test C.5: FOREACH_ENSEMBLE_POST_LOAD_COUNT == 9 (extended from 7) ───
+    {
+        check("v5.14.10.C: FOREACH_ENSEMBLE_POST_LOAD_COUNT == 9 (was 7; +2 for Thompson init+load)",
+              FOREACH_ENSEMBLE_POST_LOAD_COUNT == 9);
+    }
+
+    // ─── Test C.6: PostLoadSetup runs InitThompsonBandits (initialized_thompson_bandits set) ───
+    {
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        ezoo.primary_count = 4;
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        strncpy(cfg.ensemble_blend_mode, "weighted", sizeof(cfg.ensemble_blend_mode) - 1);
+        // Pre-PostLoadSetup: thompson init flag should be 0
+        check("v5.14.10.C: pre-PostLoadSetup initialized_thompson_bandits == 0",
+              ezoo.initialized_thompson_bandits == 0);
+        EnsembleModelZoo_PostLoadSetup<64>(&ezoo, cfg, /*core_id=*/0,
+                                            "/tmp/v5_14_10_c_post_load_test_dir");
+        check("v5.14.10.C: post-PostLoadSetup initialized_thompson_bandits == 1 (init step ran)",
+              ezoo.initialized_thompson_bandits == 1);
     }
 
     printf("\n======================================\n");

@@ -2025,6 +2025,223 @@ inline int EnsembleModelZoo_LoadExitBanditState(
     return loaded;
 }
 
+//======================================================================================================
+// [v5.14.10.C — THOMPSON STATE PERSISTENCE]
+//======================================================================================================
+// Mirrors v5.13.4.C exit_bandit_state.json pattern but writes ThompsonBanditState's
+// posterior (mu_post + precision_post + total_pulls) + per-regime RNG state to
+// <base_dir>/thompson_state.json. Same forward-compat-by-absence shape: legacy
+// bundles without thompson_state.json load with InitThompsonBandits uniform priors.
+//
+// WIRE FORMAT (per wire-format-byte-preservation-discipline.md, all 6 layers):
+//   - Layer 2 — Locale pinned LC_NUMERIC=C around emit body (per-thread uselocale)
+//   - Layer 3 — Per-entry fmt: %.17g for double (lossless mu/precision); %016lx hex for rng_state
+//   - Layer 6 — Forward-compat-by-absence: missing file → uniform priors stay; missing fields default
+//   - format_version=1 header (PATH for FUTURE format upgrades; bumped via .X.Y if breaking)
+//
+// Skipped silently when initialized_thompson_bandits=0 (cfg=0 default = no Thompson activity to persist).
+//======================================================================================================
+
+// Save thompson state to <base_dir>/thompson_state.json. Returns 1 on success.
+template <unsigned F>
+inline int EnsembleModelZoo_SaveThompsonState(
+    const EnsembleModelZoo<F>* ezoo, const char* base_dir,
+    const char* const* regime_names) {
+    if (!ezoo || !ezoo->initialized_thompson_bandits) return 0;
+    if (ezoo->primary_count < 2) return 0;  // single-arm: nothing to save
+    if (!base_dir || base_dir[0] == '\0') return 0;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/thompson_state.json", base_dir);
+    char tmp_path[520];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+    FILE* f = fopen(tmp_path, "w");
+    if (!f) return 0;
+
+    // v5.14.10.C — Locale pin per wire-format-byte-preservation-discipline.md Layer 2.
+    locale_t pinned_locale = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+    locale_t prev_locale = (locale_t)0;
+    if (pinned_locale) prev_locale = uselocale(pinned_locale);
+
+    char bundle_id[65];
+    EnsembleModelZoo_ComputeBundleId(ezoo, bundle_id, sizeof(bundle_id));
+
+    fprintf(f, "{\n");
+    fprintf(f, "  \"format_version\": 1,\n");
+    fprintf(f, "  \"n_arms\": %d,\n", ezoo->primary_count);
+    fprintf(f, "  \"n_regimes\": %d,\n", NUM_REGIMES);
+    fprintf(f, "  \"model_bundle_sha256\": \"%s\",\n", bundle_id);
+    fprintf(f, "  \"regimes\": [\n");
+    for (int r = 0; r < NUM_REGIMES; ++r) {
+        const ThompsonBanditState* tb = &ezoo->thompson_bandits[r];
+        const char* rname = (regime_names && regime_names[r]) ? regime_names[r] : "?";
+        fprintf(f, "    {\n");
+        fprintf(f, "      \"regime_id\": %d,\n", r);
+        fprintf(f, "      \"regime_name\": \"%s\",\n", rname);
+        fprintf(f, "      \"n_arms\": %d,\n", tb->n_arms);
+        fprintf(f, "      \"mu_prior\": %.17g,\n", tb->mu_prior);
+        fprintf(f, "      \"precision_prior\": %.17g,\n", tb->precision_prior);
+        fprintf(f, "      \"precision_obs\": %.17g,\n", tb->precision_obs);
+        fprintf(f, "      \"rng_state\": \"0x%016lx\",\n", (unsigned long)tb->rng_state);
+        fprintf(f, "      \"mu_post\": [");
+        for (int a = 0; a < tb->n_arms; ++a) {
+            fprintf(f, "%s%.17g", (a > 0 ? ", " : ""), tb->mu_post[a]);
+        }
+        fprintf(f, "],\n");
+        fprintf(f, "      \"precision_post\": [");
+        for (int a = 0; a < tb->n_arms; ++a) {
+            fprintf(f, "%s%.17g", (a > 0 ? ", " : ""), tb->precision_post[a]);
+        }
+        fprintf(f, "],\n");
+        fprintf(f, "      \"total_pulls\": [");
+        for (int a = 0; a < tb->n_arms; ++a) {
+            fprintf(f, "%s%u", (a > 0 ? ", " : ""), tb->total_pulls[a]);
+        }
+        fprintf(f, "]\n");
+        fprintf(f, "    }%s\n", (r < NUM_REGIMES - 1) ? "," : "");
+    }
+    fprintf(f, "  ]\n");
+    fprintf(f, "}\n");
+
+    if (pinned_locale) {
+        uselocale(prev_locale);
+        freelocale(pinned_locale);
+    }
+
+    if (fclose(f) != 0) {
+        unlink(tmp_path);
+        return 0;
+    }
+    if (rename(tmp_path, path) != 0) {
+        unlink(tmp_path);
+        return 0;
+    }
+    return 1;
+}
+
+// Load thompson state from <base_dir>/thompson_state.json. Returns 1 on
+// success (overlays mu_post/precision_post/total_pulls/rng_state onto pre-
+// initialized states), 0 on missing/corrupt/mismatched file.
+//
+// Caller must call EnsembleModelZoo_InitThompsonBandits FIRST to set up
+// uniform priors + arm count + base RNG seed. This function only overlays.
+template <unsigned F>
+inline int EnsembleModelZoo_LoadThompsonState(
+    EnsembleModelZoo<F>* ezoo, const char* base_dir) {
+    if (!ezoo || !ezoo->initialized_thompson_bandits) return 0;
+    if (ezoo->primary_count < 2) return 0;
+    if (!base_dir || base_dir[0] == '\0') return 0;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/thompson_state.json", base_dir);
+
+    FILE* f = fopen(path, "r");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    constexpr size_t BUF_CAP = 256 * 1024;
+    if (fsize <= 0 || (size_t)fsize >= BUF_CAP) {
+        fclose(f);
+        return 0;
+    }
+    static thread_local char buf_storage[BUF_CAP];
+    char* buf = buf_storage;
+    size_t read_n = fread(buf, 1, (size_t)fsize, f);
+    fclose(f);
+    buf[read_n] = '\0';
+
+    // format_version check (only v=1 supported today)
+    const char* p = tt::json_io::find_key(buf, "format_version");
+    if (!p) return 0;
+    int fmt = (int)strtol(p, nullptr, 10);
+    if (fmt != 1) {
+        fprintf(stderr, "[ensemble] thompson_state.json format_version=%d unsupported (expected 1); rejecting\n", fmt);
+        return 0;
+    }
+
+    // n_arms check (must match current ezoo)
+    p = tt::json_io::find_key(buf, "n_arms");
+    if (!p) return 0;
+    int saved_n_arms = (int)strtol(p, nullptr, 10);
+    if (saved_n_arms != ezoo->primary_count) {
+        fprintf(stderr, "[ensemble] thompson_state.json n_arms=%d mismatch (expected %d); rejecting\n",
+                saved_n_arms, ezoo->primary_count);
+        return 0;
+    }
+
+    // bundle_id check (best-effort; mismatch rejects; empty saved → skip check)
+    char expected_id[65];
+    EnsembleModelZoo_ComputeBundleId(ezoo, expected_id, sizeof(expected_id));
+    const char* sha_p = tt::json_io::find_key(buf, "model_bundle_sha256");
+    if (sha_p && expected_id[0] != '\0') {
+        while (*sha_p == ' ' || *sha_p == '\t') ++sha_p;
+        if (*sha_p == '"') ++sha_p;
+        char saved_id[65] = {0};
+        for (int i = 0; i < 64 && *sha_p && *sha_p != '"'; ++i) saved_id[i] = *sha_p++;
+        if (saved_id[0] != '\0' && strcmp(saved_id, expected_id) != 0) {
+            fprintf(stderr, "[ensemble] thompson_state.json bundle_id mismatch; rejecting\n");
+            return 0;
+        }
+    }
+
+    // Walk regimes array. forward-compat-by-absence: if a regime entry is
+    // missing or a field is missing, leave the corresponding tb field at
+    // its prior (uniform priors from InitThompsonBandits).
+    p = tt::json_io::find_key(buf, "regimes");
+    if (!p) return 0;
+    for (int r = 0; r < NUM_REGIMES; ++r) {
+        ThompsonBanditState* tb = &ezoo->thompson_bandits[r];
+        const char* rid_p = tt::json_io::find_key(p, "regime_id");
+        if (!rid_p) break;   // forward-compat: shorter files OK
+
+        // Overlay scalars (mu_prior / precision_prior / precision_obs)
+        const char* mp_p = tt::json_io::find_key(rid_p, "mu_prior");
+        if (mp_p) tb->mu_prior = tt::parse_double_fast(mp_p);
+        const char* pp_p = tt::json_io::find_key(rid_p, "precision_prior");
+        if (pp_p) tb->precision_prior = tt::parse_double_fast(pp_p);
+        const char* po_p = tt::json_io::find_key(rid_p, "precision_obs");
+        if (po_p) tb->precision_obs = tt::parse_double_fast(po_p);
+
+        // Overlay rng_state (hex preferred; decimal fallback)
+        const char* rng_p = tt::json_io::find_key(rid_p, "rng_state");
+        if (rng_p) {
+            while (*rng_p == ' ' || *rng_p == '\t') ++rng_p;
+            if (*rng_p == '"') ++rng_p;
+            if (rng_p[0] == '0' && (rng_p[1] == 'x' || rng_p[1] == 'X')) {
+                tb->rng_state = strtoull(rng_p + 2, nullptr, 16);
+            } else {
+                tb->rng_state = strtoull(rng_p, nullptr, 10);
+            }
+        }
+
+        // Overlay posterior arrays
+        const char* mu_p = tt::json_io::find_key(rid_p, "mu_post");
+        if (mu_p) {
+            double tmp[BANDIT_MAX_ARMS];
+            int got = tt::json_io::parse_double_array(mu_p, tmp, BANDIT_MAX_ARMS);
+            for (int a = 0; a < got && a < tb->n_arms; ++a) tb->mu_post[a] = tmp[a];
+        }
+        const char* pr_p = tt::json_io::find_key(rid_p, "precision_post");
+        if (pr_p) {
+            double tmp[BANDIT_MAX_ARMS];
+            int got = tt::json_io::parse_double_array(pr_p, tmp, BANDIT_MAX_ARMS);
+            for (int a = 0; a < got && a < tb->n_arms; ++a) tb->precision_post[a] = tmp[a];
+        }
+        const char* tp_p = tt::json_io::find_key(rid_p, "total_pulls");
+        if (tp_p) {
+            uint32_t tmp[BANDIT_MAX_ARMS];
+            int got = tt::json_io::parse_uint32_array(tp_p, tmp, BANDIT_MAX_ARMS);
+            for (int a = 0; a < got && a < tb->n_arms; ++a) tb->total_pulls[a] = tmp[a];
+        }
+
+        // Advance p past this regime entry for next find_key scan.
+        // Best-effort linear advance; find_key handles overshoot gracefully (returns nullptr → break).
+        p = rid_p + 1;
+    }
+
+    fprintf(stderr, "[ensemble] loaded thompson state from %s\n", path);
+    return 1;
+}
+
 // v5.10.0a.next.1 — load bandit state from an EXPLICIT path with optional
 // bundle-id check skip. Used by BacktestRunConfig.bandit_state_prior_path
 // when operator wants to bootstrap a new ensemble from a sibling bundle's
@@ -2166,10 +2383,20 @@ inline void ensemble_post_load_apply_blend_mode(EnsembleModelZoo<F>* ezoo,
     X(save_interval,       EnsembleModelZoo_SetBanditSaveInterval(ezoo,          \
                                cfg.ensemble_bandit_save_interval))               \
     X(load_exit_bandit,    EnsembleModelZoo_LoadExitBanditState(ezoo,            \
+                               base_run_path))                                    \
+    /* v5.14.10.C — Thompson sampling bandit init + load (parallel to bandits[] init/load above). */ \
+    /* Class 18 mirror prevention via PostLoadSetup registry (per /trace-deps BLOCKING amendment). */ \
+    /* Init unconditional (so cfg-flip mid-run sees pre-initialized state); Load idempotent overlay. */ \
+    X(init_thompson_bandits, EnsembleModelZoo_InitThompsonBandits(ezoo,           \
+                               FPN_ToDouble(cfg.thompson_mu_prior),                \
+                               FPN_ToDouble(cfg.thompson_precision_prior),         \
+                               FPN_ToDouble(cfg.thompson_precision_obs),           \
+                               cfg.thompson_rng_seed))                             \
+    X(load_thompson_state,   EnsembleModelZoo_LoadThompsonState(ezoo,             \
                                base_run_path))
 
 // Compile-time count for tests. Update when adding entries.
-#define FOREACH_ENSEMBLE_POST_LOAD_COUNT 7
+#define FOREACH_ENSEMBLE_POST_LOAD_COUNT 9
 
 // Canonical post-load setup for ensemble. All 7 setup steps in one place.
 // Boot, backtest, hot-swap call this; never inline the steps directly.
@@ -2209,8 +2436,11 @@ inline int EnsembleModelZoo_IsReadyForInference(const EnsembleModelZoo<F>* ezoo)
     // - LoadBanditState: no boolean to check; idempotent overlay
     // - SetBanditSaveInterval: bandit_save_interval set if cfg.ensemble_bandit_save_interval>0
     // - LoadExitBanditState: no boolean to check; idempotent overlay
+    // - InitThompsonBandits (v5.14.10.C): initialized_thompson_bandits set when primary_count>=2
+    // - LoadThompsonState (v5.14.10.C): no boolean to check; idempotent overlay (skipped silently when initialized=0)
     if (ezoo->primary_count >= 2 && !ezoo->initialized_bandits) return 0;
     if (ezoo->exit_predictor_count >= 2 && !ezoo->initialized_exit_bandits) return 0;
+    if (ezoo->primary_count >= 2 && !ezoo->initialized_thompson_bandits) return 0;
     if (ezoo->blend_mode[0] == '\0') return 0;
     return 1;
 }
