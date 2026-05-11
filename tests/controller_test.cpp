@@ -23067,6 +23067,110 @@ e3_skip_load:;
               ezoo.initialized_thompson_bandits == 1);
     }
 
+    // ===========================================================================
+    // === v5.14.10.D — FULL Bayesian dashboard + FOREACH_CALIB_LOG_COL =========
+    // ===========================================================================
+    printf("\n--- v5.14.10.D: PerCoreSnap Thompson display + FOREACH_CALIB_LOG_COL registry ---\n");
+
+    // ─── Test D.1: Thompson PerCoreSnap fields exist with bit-pack constants ───
+    {
+        TUISnapshot::PerCoreSnap pc;
+        memset(&pc, 0, sizeof(pc));
+        // Encode active + chosen_arm = 5 (binary 101)
+        pc.thompson_state = (uint8_t)(
+            TUISnapshot::PerCoreSnap::MASK_THOMPSON_BANDIT_ACTIVE |
+            ((5 & 0x07) << TUISnapshot::PerCoreSnap::SHIFT_THOMPSON_CHOSEN_ARM));
+        bool active = (pc.thompson_state & TUISnapshot::PerCoreSnap::MASK_THOMPSON_BANDIT_ACTIVE) != 0;
+        int chosen = (pc.thompson_state & TUISnapshot::PerCoreSnap::MASK_THOMPSON_CHOSEN_ARM)
+                     >> TUISnapshot::PerCoreSnap::SHIFT_THOMPSON_CHOSEN_ARM;
+        check("v5.14.10.D: thompson_state bit-pack encode/decode active=1 + chosen=5 round-trip",
+              active == true && chosen == 5);
+    }
+
+    // ─── Test D.2: FOREACH_CALIB_LOG_COL_COUNT == 9 (existing columns preserved) ───
+    {
+        check("v5.14.10.D: FOREACH_CALIB_LOG_COL_COUNT == 9 (preserves pre-refactor column shape)",
+              FOREACH_CALIB_LOG_COL_COUNT == 9);
+    }
+
+    // ─── Test D.3: CalibLog_EmitHeader produces byte-identical pre-refactor header ───
+    {
+        char tmp_path[] = "/tmp/foxml_v5_14_10_d_calib_hdr_XXXXXX";
+        int fd = mkstemp(tmp_path);
+        check("v5.14.10.D: tmpfile for header byte-format preservation", fd >= 0);
+        if (fd >= 0) {
+            FILE* f = fdopen(fd, "w");
+            CalibLog_EmitHeader(f);
+            fflush(f);
+            fclose(f);
+
+            FILE* rf = fopen(tmp_path, "r");
+            char buf[512] = {0};
+            fread(buf, 1, sizeof(buf) - 1, rf);
+            fclose(rf);
+
+            // Pre-refactor header literal (from OrderManager.hpp:1293-1295 BEFORE v5.14.10.D)
+            const char* EXPECTED =
+                "timestamp_us,slot,exit_predicted_flag,predicted_p,"
+                "entry_price,exit_price,gain_pct,realized_pnl_bps,was_win\n";
+            check("v5.14.10.D: CalibLog_EmitHeader byte-identical to pre-refactor literal (TECH_DEBT-010 close)",
+                  strcmp(buf, EXPECTED) == 0);
+            unlink(tmp_path);
+        }
+    }
+
+    // ─── Test D.4: CALIB_LOG_EMIT_ROW byte-identical to pre-refactor fprintf ───
+    {
+        char tmp_path[] = "/tmp/foxml_v5_14_10_d_calib_row_XXXXXX";
+        int fd = mkstemp(tmp_path);
+        if (fd >= 0) {
+            FILE* f = fdopen(fd, "w");
+
+            // Set up the exact caller-scope variables CALIB_LOG_EMIT_ROW expects
+            uint64_t ts_us = 1234567890123ULL;
+            int pslot = 3;
+            uint8_t pred_flag = 1;
+            double pred_p = 0.752468;
+            double entry_d_calib = 50000.1234;
+            double exit_d_calib = 50500.5678;
+            double gain_pct = 1.000891;
+            double pnl_bps = 99.7531;
+
+            // Mock OMS struct with last_fill[pslot].was_win = 1
+            // Direct-construct a minimal layout matching what the macro reads.
+            struct MockLastFill { int was_win; };
+            struct MockOms {
+                MockLastFill last_fill[16];
+            };
+            MockOms mock_oms{};
+            mock_oms.last_fill[pslot].was_win = 1;
+            auto* oms = &mock_oms;   // CALIB_LOG_EMIT_ROW reads oms->last_fill[pslot].was_win
+
+            CALIB_LOG_EMIT_ROW(f);
+            fflush(f);
+            fclose(f);
+
+            FILE* rf = fopen(tmp_path, "r");
+            char buf[512] = {0};
+            fread(buf, 1, sizeof(buf) - 1, rf);
+            fclose(rf);
+
+            // Pre-refactor row format (from OrderManager.hpp:1008-1013 BEFORE v5.14.10.D):
+            //   "%llu,%d,%u,%.6f,%.4f,%.4f,%.6f,%.4f,%d\n"
+            char expected[256];
+            snprintf(expected, sizeof(expected),
+                "%llu,%d,%u,%.6f,%.4f,%.4f,%.6f,%.4f,%d\n",
+                (unsigned long long)ts_us, (int)pslot,
+                (unsigned)pred_flag, pred_p,
+                entry_d_calib, exit_d_calib, gain_pct, pnl_bps,
+                (int)mock_oms.last_fill[pslot].was_win);
+
+            check("v5.14.10.D: CALIB_LOG_EMIT_ROW byte-identical to pre-refactor fprintf (TECH_DEBT-010 close)",
+                  strcmp(buf, expected) == 0);
+            unlink(tmp_path);
+        }
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");

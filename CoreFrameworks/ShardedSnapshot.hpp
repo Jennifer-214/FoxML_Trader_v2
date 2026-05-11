@@ -694,9 +694,52 @@ static inline void TUI_CopySnapshotSharded(
                         es.ensemble_n_updates_per_regime[r] = 0;
                     }
                 }
+                // v5.14.10.D — Populate Thompson display fields when cfg.bandit_algorithm
+                // != 0 + initialized_thompson_bandits=1. cfg=0 (EXP3 default) leaves
+                // the cluster zeroed → ML Status panel skips Thompson render branch.
+                // For cfg=1 / cfg=2: copy current regime's posterior to display arrays;
+                // pack thompson_state byte (active flag + chosen_arm).
+                if (cfg->bandit_algorithm != 0 && ezoo->initialized_thompson_bandits) {
+                    int regime_id = ezoo->last_predicted_regime_id;
+                    if (regime_id < 0 || regime_id >= 5) regime_id = 0;
+                    const ThompsonBanditState* tb = &ezoo->thompson_bandits[regime_id];
+                    int n_arms = tb->n_arms;
+                    if (n_arms > 8) n_arms = 8;
+                    // Float-cast at copy time (display precision; saves 32B/array vs double)
+                    for (int a = 0; a < n_arms; ++a) {
+                        es.thompson_mu_post[a]        = (float)tb->mu_post[a];
+                        es.thompson_precision_post[a] = (float)tb->precision_post[a];
+                        es.thompson_total_pulls[a]    = tb->total_pulls[a];
+                    }
+                    for (int a = n_arms; a < 8; ++a) {
+                        es.thompson_mu_post[a]        = 0.0f;
+                        es.thompson_precision_post[a] = 0.0f;
+                        es.thompson_total_pulls[a]    = 0;
+                    }
+                    // Pack state byte: bit 0 = active; bits 1-3 = chosen_arm
+                    uint8_t arm_bits = (uint8_t)(ezoo->last_predicted_thompson_arm >= 0
+                        ? (ezoo->last_predicted_thompson_arm & 0x07) : 0);
+                    es.thompson_state = (uint8_t)(
+                        (uint8_t)TUISnapshot::PerCoreSnap::MASK_THOMPSON_BANDIT_ACTIVE |
+                        (arm_bits << TUISnapshot::PerCoreSnap::SHIFT_THOMPSON_CHOSEN_ARM));
+                } else {
+                    es.thompson_state = 0;
+                    for (int a = 0; a < 8; ++a) {
+                        es.thompson_mu_post[a]        = 0.0f;
+                        es.thompson_precision_post[a] = 0.0f;
+                        es.thompson_total_pulls[a]    = 0;
+                    }
+                }
             } else {
                 snap->per_core[i].ensemble_active = 0;
                 snap->per_core[i].ensemble_n_horizons = 0;
+                // Thompson cluster also zeroed when ezoo is not active
+                snap->per_core[i].thompson_state = 0;
+                for (int a = 0; a < 8; ++a) {
+                    snap->per_core[i].thompson_mu_post[a]        = 0.0f;
+                    snap->per_core[i].thompson_precision_post[a] = 0.0f;
+                    snap->per_core[i].thompson_total_pulls[a]    = 0;
+                }
             }
             // Track the highest-confidence ML core for the headline summary.
             // Tie-break: prefer the lowest core index (deterministic).

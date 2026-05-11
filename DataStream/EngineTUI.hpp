@@ -1207,6 +1207,28 @@ struct TUISnapshot {
         int      ensemble_n_updates_per_regime[5];     // total_steps per bandit
         char     ensemble_blend_mode[16];              // "weighted" or "selection"
         uint32_t ensemble_disabled_horizon_mask;       // bit i set = arm i disabled
+        // v5.14.10.D — FULL Bayesian dashboard for Thompson sampling. 5 fields
+        // packed in the same alignas(64) bandit telemetry cluster (started at
+        // ensemble_active above per v5.14.10.0 per-snapshot-cluster-layout-pattern).
+        // Populated only when cfg.bandit_algorithm != 0 + initialized_thompson_bandits=1
+        // (cfg=0 default leaves at zero — ML Status panel skips render).
+        // Bit-packed state byte (per CLAUDE.md item 20):
+        //   bit 0      : THOMPSON_BANDIT_ACTIVE (1 = Thompson dispatch fired this cycle)
+        //   bits 1-3   : THOMPSON_CHOSEN_ARM (0-7; argmax-of-posterior at last predict)
+        //   bits 4-7   : reserved for future Thompson telemetry (mode, sub-strategy, ...)
+        // Encode: state = (active ? MASK_THOMPSON_BANDIT_ACTIVE : 0) |
+        //                 ((arm & 0x07) << SHIFT_THOMPSON_CHOSEN_ARM)
+        // Decode: bool a    = (state & MASK_THOMPSON_BANDIT_ACTIVE) != 0;
+        //         uint8_t c = (state & MASK_THOMPSON_CHOSEN_ARM) >> SHIFT_THOMPSON_CHOSEN_ARM;
+        static constexpr uint8_t MASK_THOMPSON_BANDIT_ACTIVE  = 0x01;  // bit 0
+        static constexpr uint8_t MASK_THOMPSON_CHOSEN_ARM     = 0x0E;  // bits 1-3
+        static constexpr uint8_t SHIFT_THOMPSON_CHOSEN_ARM    = 1;
+        uint8_t  thompson_state;                                  // 1B  packed (active + chosen_arm)
+        // 7B padding before next 4B-aligned field
+        // Display arrays (FLOAT — display precision sufficient; saves 32B/array vs double):
+        float    thompson_mu_post[8];                             // 32B  posterior mean per arm (BANDIT_MAX_ARMS=8)
+        float    thompson_precision_post[8];                      // 32B  posterior precision per arm (= 1/variance)
+        uint32_t thompson_total_pulls[8];                         // 32B  pull count per arm (matches BanditState.pulls width)
     };
     PerCoreSnap per_core[16];      // up to MAX_EXECUTION_CORES
 };

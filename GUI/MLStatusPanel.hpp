@@ -398,6 +398,105 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                 }
             }
         }
+
+        // v5.14.10.D — FULL Bayesian dashboard for Thompson sampling bandit.
+        // Renders only when at least one core has cfg.bandit_algorithm != 0
+        // AND initialized_thompson_bandits=1 (signaled via per-core
+        // thompson_state byte's MASK_THOMPSON_BANDIT_ACTIVE bit).
+        // Shows per-arm posterior mean (mu_post) + precision (1/variance)
+        // + pull count. Distinct from the Exp3 ensemble heatmap above:
+        // ensemble_weights are EXP3 selection probabilities; thompson_mu_post
+        // are Bayesian posterior means (different math; different semantics).
+        bool any_thompson = false;
+        for (int i = 0; i < snap->per_core_count && i < 16; ++i) {
+            if (snap->per_core[i].thompson_state &
+                TUISnapshot::PerCoreSnap::MASK_THOMPSON_BANDIT_ACTIVE) {
+                any_thompson = true;
+                break;
+            }
+        }
+        if (any_thompson) {
+            ImGui::Separator();
+            if (ImGui::CollapsingHeader("Thompson Bayesian dashboard (v5.14.10.D)",
+                                          ImGuiTreeNodeFlags_DefaultOpen)) {
+                for (int i = 0; i < snap->per_core_count && i < 16; ++i) {
+                    const auto& cs = snap->per_core[i];
+                    if (!(cs.thompson_state &
+                          TUISnapshot::PerCoreSnap::MASK_THOMPSON_BANDIT_ACTIVE)) continue;
+                    int chosen_arm = (cs.thompson_state &
+                                       TUISnapshot::PerCoreSnap::MASK_THOMPSON_CHOSEN_ARM) >>
+                                       TUISnapshot::PerCoreSnap::SHIFT_THOMPSON_CHOSEN_ARM;
+                    ImGui::TextColored(FoxmlColors::sand,
+                        "core %d: Thompson active (last chose arm %d)",
+                        i, chosen_arm);
+
+                    char tbl_id[32];
+                    snprintf(tbl_id, sizeof(tbl_id), "thompson_dash_c%d", i);
+                    int n_h = (int)cs.ensemble_n_horizons;
+                    if (n_h > 8) n_h = 8;
+                    if (n_h <= 0) continue;
+                    if (ImGui::BeginTable(tbl_id, n_h + 1,
+                                            ImGuiTableFlags_Borders |
+                                            ImGuiTableFlags_RowBg |
+                                            ImGuiTableFlags_SizingFixedFit)) {
+                        ImGui::TableSetupColumn("metric",
+                                                 ImGuiTableColumnFlags_WidthFixed, 120.0f);
+                        for (int h = 0; h < n_h; ++h) {
+                            char hdr[24];
+                            snprintf(hdr, sizeof(hdr), "h%d%s",
+                                     cs.ensemble_horizon_ticks[h],
+                                     (h == chosen_arm) ? "*" : "");
+                            ImGui::TableSetupColumn(hdr,
+                                ImGuiTableColumnFlags_WidthFixed, 75.0f);
+                        }
+                        ImGui::TableHeadersRow();
+
+                        // Row 1: mu_post (posterior mean per arm)
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::TextColored(FoxmlColors::sand, "mu_post");
+                        for (int h = 0; h < n_h; ++h) {
+                            ImGui::TableSetColumnIndex(h + 1);
+                            float mu = cs.thompson_mu_post[h];
+                            ImVec4 col = (h == chosen_arm) ? FoxmlColors::green : FoxmlColors::sand;
+                            ImGui::TextColored(col, "%.3f", mu);
+                        }
+                        // Row 2: precision_post (1/variance per arm)
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::TextColored(FoxmlColors::sand, "precision");
+                        for (int h = 0; h < n_h; ++h) {
+                            ImGui::TableSetColumnIndex(h + 1);
+                            float prec = cs.thompson_precision_post[h];
+                            // Color by magnitude: green=tight (high precision); dim=loose (low)
+                            ImVec4 col = (prec > 5.0f) ? FoxmlColors::green
+                                       : (prec > 2.0f) ? FoxmlColors::sand
+                                                        : FoxmlColors::comment;
+                            ImGui::TextColored(col, "%.2f", prec);
+                        }
+                        // Row 3: total_pulls (Bayesian pull count per arm)
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::TextColored(FoxmlColors::sand, "pulls");
+                        for (int h = 0; h < n_h; ++h) {
+                            ImGui::TableSetColumnIndex(h + 1);
+                            uint32_t pulls = cs.thompson_total_pulls[h];
+                            ImGui::TextColored(FoxmlColors::comment, "%u", pulls);
+                        }
+                        ImGui::EndTable();
+                    }
+                    ImGui::SetItemTooltip(
+                        "Bayesian Thompson sampling posterior dashboard.\n\n"
+                        "mu_post:    posterior mean reward per arm (highest = preferred).\n"
+                        "precision:  1/variance; HIGHER = tighter posterior (more confident).\n"
+                        "pulls:      total reward updates received per arm.\n\n"
+                        "Header h<N>* marks the arm Thompson sampled this cycle.\n"
+                        "Note: posterior values are FLOAT-cast for display from the\n"
+                        "underlying double-precision Bayesian state in ThompsonBanditState.");
+                    ImGui::Spacing();
+                }
+            }
+        }
     }
     ImGui::End();
 }

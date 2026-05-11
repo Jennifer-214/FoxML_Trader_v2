@@ -52,8 +52,8 @@
 #define FOREACH_ML_CFG_FLAG(X)                                                                                                                                                                          \
     X(CONFIDENCE_ENABLED,           confidence_enabled,           "Confidence",            "FoxML",       "scale entry threshold by confidence score")                                                  \
     X(CONFIDENCE_COMPOSITE_ENABLED, confidence_composite_enabled, "Composite Confidence",  "FoxML",       "use 4-factor composite confidence (vs legacy 3-factor); stamp-bound")                         \
-    X(BANDIT_ENABLED,               bandit_enabled,               "Bandit",                "FoxML",       "Thompson-sampling bandit for buy-signal arm selection")                                      \
-    X(EXIT_BANDIT_ENABLED,          exit_bandit_enabled,          "Exit Bandit",           "FoxML",       "Thompson-sampling bandit for exit-side arm selection")                                       \
+    X(BANDIT_ENABLED,               bandit_enabled,               "Bandit",                "FoxML",       "Exp3-IX bandit for buy-signal arm selection (default; cfg.bandit_algorithm=1 swaps to Thompson)") \
+    X(EXIT_BANDIT_ENABLED,          exit_bandit_enabled,          "Exit Bandit",           "FoxML",       "Exp3-IX bandit for exit-side arm selection (sell-side; v5.13.4)")                              \
     X(USE_EXIT_MODEL,               use_exit_model,               "Use Exit Model",        "FoxML",       "use dedicated exit-side ML model (vs entry model fallback)")                                 \
     X(FOXML_VOL_SCALING_ENABLED,    foxml_vol_scaling_enabled,    "Vol Scaling",           "FoxML",       "scale trade size by recent volatility (FoxML VolScaler)")                                    \
     X(LAZY_REBUILD_ENABLED,         lazy_rebuild_enabled,         "Lazy Rebuild",          "Performance", "skip slow-path rebuild when no parameter inputs changed")

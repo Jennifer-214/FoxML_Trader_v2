@@ -65,6 +65,7 @@
 #include "Portfolio.hpp"
 #include "ShardedTradeLog.hpp"
 #include "SPSCRing.hpp"
+#include "../DataStream/CalibLogColRegistry.hpp"   // v5.14.10.D — FOREACH_CALIB_LOG_COL registry (closes TECH_DEBT-010)
 
 #include <atomic>
 #include <chrono>
@@ -1005,12 +1006,11 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
                 ? oms->last_exit_was_predicted[pslot] : 0;
             double pred_p = (pslot >= 0 && pslot < MAX_PORTFOLIO_POSITIONS)
                 ? oms->last_exit_predicted_p[pslot] : 0.0;
-            std::fprintf(oms->calibration_log_file,
-                "%llu,%d,%u,%.6f,%.4f,%.4f,%.6f,%.4f,%d\n",
-                (unsigned long long)ts_us, (int)pslot,
-                (unsigned)pred_flag, pred_p,
-                entry_d_calib, exit_d_calib, gain_pct, pnl_bps,
-                (int)oms->last_fill[pslot].was_win);
+            // v5.14.10.D — registry-driven row emit via FOREACH_CALIB_LOG_COL
+            // (DataStream/CalibLogColRegistry.hpp). Byte-identical output to
+            // the prior hand-coded fprintf; closes TECH_DEBT-010 structurally
+            // (future column additions = 1 row in the registry, not 3-site touch).
+            CALIB_LOG_EMIT_ROW(oms->calibration_log_file);
             // Don't fflush every row — let stdio buffer (drainer is the
             // single writer; flush happens on file close at shutdown).
             // Operator can `tail -f` if needed (line-buffered when stdout
@@ -1290,9 +1290,9 @@ inline int OrderManager_OpenCalibrationLog(OrderManagerState<F>* oms,
     std::fseek(oms->calibration_log_file, 0, SEEK_END);
     long sz = std::ftell(oms->calibration_log_file);
     if (sz == 0) {
-        std::fprintf(oms->calibration_log_file,
-            "timestamp_us,slot,exit_predicted_flag,predicted_p,"
-            "entry_price,exit_price,gain_pct,realized_pnl_bps,was_win\n");
+        // v5.14.10.D — registry-driven header via FOREACH_CALIB_LOG_COL.
+        // Byte-identical to prior hand-coded literal; closes TECH_DEBT-010.
+        CalibLog_EmitHeader(oms->calibration_log_file);
         std::fflush(oms->calibration_log_file);
     }
     return 0;
