@@ -56,6 +56,10 @@
 #include <cstring>
 #include <cstdint>
 
+#if defined(__AVX512F__)
+#include <immintrin.h>  // v5.14.11.B.3 — UpdateOnline + BuildCorr AVX-512 vectorization
+#endif
+
 #include "../FixedPoint/FixedPointN.hpp"
 
 // File-scope (not tt::) — matches existing ML_Headers convention
@@ -475,6 +479,33 @@ inline void RidgeBlender_BuildCorr(double corr_out[MAX_RIDGE_MODELS][MAX_RIDGE_M
     // === Single-pass sum-of-squares accumulation ===
     double sum_x[MAX_RIDGE_MODELS]                       = {0.0};
     double sum_xx[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS]    = {{0.0}};
+
+#if defined(__AVX512F__)
+    // v5.14.11.B.3 — AVX-512 single-pass accumulation per
+    // DESIGN_SPECS/avx512-byte-determinism-pattern.md + branchless-math-kernel-pattern.md.
+    //   - Uniform mask across 8 lanes (n_models ≤ MAX_RIDGE_MODELS = 8); no inner if-guards
+    //   - _mm512_fmadd_pd per-lane matches scalar vfmadd231sd (Rule 3)
+    //   - _mm512_maskz_loadu zero-extends unused lanes; safe contribution
+    //   - _mm512_mask_storeu_pd writes only masked lanes; rest of memory untouched
+    const __mmask8 mask = (__mmask8)((1u << n_models) - 1u);
+    for (int k = 0; k < n_history; ++k) {
+        // Load record k's predictions as 8 floats (zero-extended via maskz), cvt to 8 doubles
+        __m256 v_rec_f = _mm256_maskz_loadu_ps(mask, &predictions_history[k * n_models]);
+        __m512d v_rec  = _mm512_cvtps_pd(v_rec_f);
+        // sum_x += v_rec
+        __m512d sx     = _mm512_maskz_loadu_pd(mask, sum_x);
+        sx             = _mm512_add_pd(sx, v_rec);
+        _mm512_mask_storeu_pd(sum_x, mask, sx);
+        // sum_xx[i][0..n-1] += xi × v_rec for each row i
+        for (int i = 0; i < n_models; ++i) {
+            const __m512d v_xi = _mm512_set1_pd((double)predictions_history[k * n_models + i]);
+            __m512d sxx_i      = _mm512_maskz_loadu_pd(mask, &sum_xx[i][0]);
+            sxx_i              = _mm512_fmadd_pd(v_xi, v_rec, sxx_i);
+            _mm512_mask_storeu_pd(&sum_xx[i][0], mask, sxx_i);
+        }
+    }
+#else
+    // Scalar reference (byte-determinism baseline per Rule 5)
     for (int k = 0; k < n_history; ++k) {
         for (int i = 0; i < n_models; ++i) {
             const double xi = (double)predictions_history[k * n_models + i];
@@ -485,6 +516,7 @@ inline void RidgeBlender_BuildCorr(double corr_out[MAX_RIDGE_MODELS][MAX_RIDGE_M
             }
         }
     }
+#endif
 
     // === Shared finalize ===
     RidgeBlender_FinalizeCorrFromSums<F>(corr_out, sum_x, sum_xx,
@@ -538,6 +570,28 @@ inline void RidgeBlender_UpdateOnline(RidgeWeights<F>* rw,
 
     if (predictions_oldest_or_null == nullptr) {
         // === Window not yet full — standard add ===
+#if defined(__AVX512F__)
+        // v5.14.11.B.3 — AVX-512 outer-product update per
+        // DESIGN_SPECS/avx512-byte-determinism-pattern.md + branchless-math-kernel-pattern.md.
+        //   - _mm512_fmadd_pd per-lane ≡ scalar vfmadd231sd (Rule 3; gcc -O3 -ffp-contract=fast)
+        //   - No _mm512_reduce_*; sum_x update is plain vector add (Rule 1)
+        //   - Mask uniform across 8 lanes; no inner if-guards (branchless)
+        const __mmask8 mask = (__mmask8)((1u << n_models) - 1u);
+        __m256 v_new_f = _mm256_maskz_loadu_ps(mask, predictions_new);
+        __m512d v_new  = _mm512_cvtps_pd(v_new_f);
+        // sum_x[0..n-1] += v_new
+        __m512d sx     = _mm512_maskz_loadu_pd(mask, rw->online_sum_x);
+        sx             = _mm512_add_pd(sx, v_new);
+        _mm512_mask_storeu_pd(rw->online_sum_x, mask, sx);
+        // sum_xx[i][0..n-1] += xi × v_new per row i
+        for (int i = 0; i < n_models; ++i) {
+            const __m512d v_xi = _mm512_set1_pd((double)predictions_new[i]);
+            __m512d sxx_i      = _mm512_maskz_loadu_pd(mask, &rw->online_sum_xx[i][0]);
+            sxx_i              = _mm512_fmadd_pd(v_xi, v_new, sxx_i);
+            _mm512_mask_storeu_pd(&rw->online_sum_xx[i][0], mask, sxx_i);
+        }
+#else
+        // Scalar reference (byte-determinism baseline per Rule 5)
         for (int i = 0; i < n_models; ++i) {
             const double xi = (double)predictions_new[i];
             rw->online_sum_x[i] += xi;
@@ -546,12 +600,48 @@ inline void RidgeBlender_UpdateOnline(RidgeWeights<F>* rw,
                 rw->online_sum_xx[i][j] += xi * xj;
             }
         }
+#endif
         rw->online_window_count++;
     } else {
         // === Window full — drop oldest + add new (fused replacement) ===
         // Net delta: sum_x += (new - old); sum_xx += (new ⊗ new - old ⊗ old).
         // Bounded window means accumulator magnitudes stay bounded →
         // no drift accumulation → no periodic reset needed.
+#if defined(__AVX512F__)
+        // v5.14.11.B.3 — AVX-512 drop-add. Per-lane shape:
+        //   v_new_term = xn × v_new (vmulpd)
+        //   v_old_term = xo × v_old (vmulpd)
+        //   v_delta    = v_new_term - v_old_term (vsubpd)
+        //   sxx_i     += v_delta (vaddpd)
+        // Total 4 ops per lane; matches scalar 4-op below bytewise.
+        // Scalar below uses EXPLICIT temporaries to prevent gcc -ffp-contract=fast
+        // from fusing across the difference (would produce vfmadd231 + vfnmadd231
+        // instead of 4 plain ops; would break cross-build byte-determinism).
+        const __mmask8 mask = (__mmask8)((1u << n_models) - 1u);
+        __m256 v_new_f = _mm256_maskz_loadu_ps(mask, predictions_new);
+        __m256 v_old_f = _mm256_maskz_loadu_ps(mask, predictions_oldest_or_null);
+        __m512d v_new  = _mm512_cvtps_pd(v_new_f);
+        __m512d v_old  = _mm512_cvtps_pd(v_old_f);
+        // sum_x += (v_new - v_old)
+        __m512d v_diff = _mm512_sub_pd(v_new, v_old);
+        __m512d sx     = _mm512_maskz_loadu_pd(mask, rw->online_sum_x);
+        sx             = _mm512_add_pd(sx, v_diff);
+        _mm512_mask_storeu_pd(rw->online_sum_x, mask, sx);
+        // sum_xx[i] += (xn × v_new - xo × v_old) per row i — explicit 4-op
+        for (int i = 0; i < n_models; ++i) {
+            const __m512d v_xn = _mm512_set1_pd((double)predictions_new[i]);
+            const __m512d v_xo = _mm512_set1_pd((double)predictions_oldest_or_null[i]);
+            __m512d v_new_term = _mm512_mul_pd(v_xn, v_new);
+            __m512d v_old_term = _mm512_mul_pd(v_xo, v_old);
+            __m512d v_delta    = _mm512_sub_pd(v_new_term, v_old_term);
+            __m512d sxx_i      = _mm512_maskz_loadu_pd(mask, &rw->online_sum_xx[i][0]);
+            sxx_i              = _mm512_add_pd(sxx_i, v_delta);
+            _mm512_mask_storeu_pd(&rw->online_sum_xx[i][0], mask, sxx_i);
+        }
+#else
+        // Scalar reference — explicit 4-op form matches AVX-512 op sequence
+        // (prevents -ffp-contract=fast from fusing `xn*xnj - xo*xoj` into 2 FMAs
+        // instead of 4 plain ops; explicit temporaries break the fusion pattern).
         for (int i = 0; i < n_models; ++i) {
             const double xn = (double)predictions_new[i];
             const double xo = (double)predictions_oldest_or_null[i];
@@ -559,9 +649,13 @@ inline void RidgeBlender_UpdateOnline(RidgeWeights<F>* rw,
             for (int j = 0; j < n_models; ++j) {
                 const double xnj = (double)predictions_new[j];
                 const double xoj = (double)predictions_oldest_or_null[j];
-                rw->online_sum_xx[i][j] += (xn * xnj - xo * xoj);
+                const double v_new_term = xn * xnj;
+                const double v_old_term = xo * xoj;
+                const double v_delta    = v_new_term - v_old_term;
+                rw->online_sum_xx[i][j] += v_delta;
             }
         }
+#endif
         // window_count stays at K (saturated)
     }
 }

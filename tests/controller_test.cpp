@@ -23574,6 +23574,115 @@ e3_skip_load:;
               memcmp(&tb_a, &tb_b, sizeof(tb_a)) == 0);
     }
 
+    // === v5.14.11.B.3 — UpdateOnline + BuildCorr AVX-512 byte-determinism (SHA-256 lock) ===
+    // Pattern: DESIGN_SPECS/avx512-byte-determinism-pattern.md + branchless-math-kernel-pattern.md
+    // Per CLAUDE.md item 25 (SIMD bytewise determinism). Tests capture SHA-256
+    // of accumulator state after deterministic input sequence; locks bytewise
+    // output across runs of the same binary. Cross-binary verification
+    // (scalar build vs AVX-512 build) is a future CI matrix concern.
+
+    printf("\n--- v5.14.11.B.3: UpdateOnline + BuildCorr AVX-512 SHA-256 byte-determinism ---\n");
+
+    {
+        // Test 1: UpdateOnline SHA-256 lock — K=64 updates with deterministic
+        // [0,1] floats; hash online_sum_x + online_sum_xx + window_count.
+        RidgeWeights<64> rw;
+        RidgeWeights_Init(&rw);
+
+        constexpr int N_MODELS = 4;
+        constexpr int K = 64;
+        float predictions[N_MODELS];
+        for (int k = 0; k < K; ++k) {
+            // Deterministic test-data generator (bytewise-stable; same as .A tests)
+            for (int i = 0; i < N_MODELS; ++i) {
+                float s = sinf((float)(k * 7 + i * 13) * 0.1f);
+                predictions[i] = 0.5f + 0.4f * s;
+            }
+            RidgeBlender_UpdateOnline<64>(&rw, predictions, nullptr, N_MODELS);
+        }
+
+        // Capture relevant state bytes for hashing
+        struct UpdateOnlineState {
+            double sum_x[MAX_RIDGE_MODELS];
+            double sum_xx[MAX_RIDGE_MODELS][MAX_RIDGE_MODELS];
+            uint64_t window_count;
+        };
+        UpdateOnlineState snap;
+        memcpy(snap.sum_x, rw.online_sum_x, sizeof(snap.sum_x));
+        memcpy(snap.sum_xx, rw.online_sum_xx, sizeof(snap.sum_xx));
+        snap.window_count = rw.online_window_count;
+
+        unsigned char raw[32];
+        bool sha_ok = (tt::sha256_bytes(&snap, sizeof(snap), raw) == 1);
+        static const char hex_chars[] = "0123456789abcdef";
+        char actual_hex[65];
+        for (int i = 0; i < 32; i++) {
+            actual_hex[2*i]     = hex_chars[raw[i] >> 4];
+            actual_hex[2*i + 1] = hex_chars[raw[i] & 0x0F];
+        }
+        actual_hex[64] = '\0';
+        // Locked hash — captured 2026-05-11 on first v5.14.11.B.3 build verify.
+        // If hash CHANGES: either UpdateOnline math intentionally changed
+        // (update locked value + bump version) OR byte-determinism broke
+        // (BUG — investigate AVX-512 vs scalar mismatch).
+        // Locked hash — captured 2026-05-11 from first v5.14.11.B.3 build verify
+        // on AVX-512 build target (-march=native). Locks UpdateOnline bytewise
+        // output within build. Cross-build verification: rebuild with
+        // -mno-avx512f and check actual matches this hash (future CI matrix task).
+        static const char* EXPECTED_HEX = "ddd071b66e12a8f99a0856af5bff8390927adf45fafbaa7051e4455b976bedf9";
+        bool hash_match = (strcmp(actual_hex, EXPECTED_HEX) == 0);
+        if (!hash_match) {
+            printf("    v5.14.11.B.3 UpdateOnline SHA-256 ACTUAL: %s\n", actual_hex);
+            printf("    v5.14.11.B.3 UpdateOnline SHA-256 EXPECT: %s\n", EXPECTED_HEX);
+            printf("    (Hash divergence: either UpdateOnline math changed OR byte-determinism broke)\n");
+        }
+        check("v5.14.11.B.3: UpdateOnline SHA-256 sample-trace computed",
+              sha_ok);
+        check("v5.14.11.B.3: UpdateOnline SHA-256-locked sample-trace (byte-determinism within build)",
+              hash_match);
+    }
+
+    {
+        // Test 2: BuildCorr SHA-256 lock — single-pass accumulation over K=64
+        // deterministic records; hash corr_matrix.
+        RidgeWeights<64> rw;
+        RidgeWeights_Init(&rw);
+
+        constexpr int N_MODELS = 4;
+        constexpr int K = 64;
+        float history[K * N_MODELS];
+        for (int k = 0; k < K; ++k) {
+            for (int i = 0; i < N_MODELS; ++i) {
+                float s = sinf((float)(k * 11 + i * 17) * 0.07f);
+                history[k * N_MODELS + i] = 0.5f + 0.4f * s;
+            }
+        }
+        RidgeBlender_BuildCorr<64>(rw.corr_matrix, history, K, N_MODELS);
+
+        unsigned char raw[32];
+        bool sha_ok = (tt::sha256_bytes(rw.corr_matrix, sizeof(rw.corr_matrix), raw) == 1);
+        static const char hex_chars[] = "0123456789abcdef";
+        char actual_hex[65];
+        for (int i = 0; i < 32; i++) {
+            actual_hex[2*i]     = hex_chars[raw[i] >> 4];
+            actual_hex[2*i + 1] = hex_chars[raw[i] & 0x0F];
+        }
+        actual_hex[64] = '\0';
+        // Locked hash — captured 2026-05-11 from first v5.14.11.B.3 build verify
+        // on AVX-512 build target. Cross-build verification: future CI matrix.
+        static const char* EXPECTED_HEX = "dfcd517d29251a5c8aac4bc1ca048d7375f2b6f309f2c0e5b8f733a67d6161ed";
+        bool hash_match = (strcmp(actual_hex, EXPECTED_HEX) == 0);
+        if (!hash_match) {
+            printf("    v5.14.11.B.3 BuildCorr SHA-256 ACTUAL: %s\n", actual_hex);
+            printf("    v5.14.11.B.3 BuildCorr SHA-256 EXPECT: %s\n", EXPECTED_HEX);
+            printf("    (Hash divergence: either BuildCorr math changed OR byte-determinism broke)\n");
+        }
+        check("v5.14.11.B.3: BuildCorr SHA-256 sample-trace computed",
+              sha_ok);
+        check("v5.14.11.B.3: BuildCorr SHA-256-locked sample-trace (byte-determinism within build)",
+              hash_match);
+    }
+
     printf("\n======================================\n");
     printf("  RESULTS: %d passed, %d failed\n", tests_passed, tests_failed);
     printf("======================================\n");
