@@ -19,6 +19,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stddef.h>   // v5.14.10.0 — offsetof for cluster-boundary static_asserts
 #include "../Version.hpp"
 #include <unistd.h>
 #include <termios.h>
@@ -1185,6 +1186,18 @@ struct TUISnapshot {
         // Populated by TUI snapshot when ensemble_handle is set; default
         // ensemble_active=0 keeps the GUI heatmap hidden for single-zoo
         // deployments. NUM_REGIMES rows × ENSEMBLE_HORIZON_MAX cols.
+        //
+        // v5.14.10.0 — BANDIT TELEMETRY CLUSTER BOUNDARY (alignas(64)).
+        // First application of per-snapshot-cluster-layout-pattern.md (NEW
+        // DESIGN_SPECS). Cluster starts here on a fresh cache-line boundary
+        // to (a) prevent false-sharing with the preceding ML observability
+        // fields whose write cadence differs, and (b) co-locate all bandit
+        // telemetry (Exp3 ensemble_* fields below + Thompson fields added
+        // in v5.14.10.D) so GUI render fetches the entire bandit cluster in
+        // one cache-warm sweep. Cluster span: ~408B today (Exp3 only); grows
+        // to ~512B (8 cache lines exact) when Thompson lands. Static_assert
+        // below enforces the cache-line boundary at compile time.
+        alignas(64)
         uint8_t  ensemble_active;
         uint8_t  ensemble_n_horizons;                  // 0 = inactive
         int      ensemble_horizon_ticks[8];            // ENSEMBLE_HORIZON_MAX
@@ -1197,6 +1210,28 @@ struct TUISnapshot {
     };
     PerCoreSnap per_core[16];      // up to MAX_EXECUTION_CORES
 };
+
+// ───────────────────────────────────────────────────────────────────────────
+// v5.14.10.0 — PerCoreSnap layout discipline (per-snapshot-cluster-layout-pattern.md)
+// ───────────────────────────────────────────────────────────────────────────
+//
+// Compile-time enforcement that the bandit telemetry cluster starts on a
+// cache-line boundary. Catches inadvertent layout drift if a future field
+// lands BEFORE ensemble_active without preserving the alignas(64) marker.
+//
+// To extend (e.g., when adding a new clustered telemetry surface):
+//   1. Add `alignas(64)` to the FIRST field of the new cluster
+//   2. Add a static_assert here mirroring this pattern
+//   3. Update per-snapshot-cluster-layout-pattern.md "Reference applications"
+//
+// Substantial close of TECH_DEBT-011 (PerCoreSnap layout discipline).
+// Future ships will apply the same pattern to other clusters (ML
+// observability, gate diagnostics, slow-path observability) per the
+// DESIGN_SPECS doc; remaining clusters tracked as deferred items.
+static_assert(offsetof(TUISnapshot::PerCoreSnap, ensemble_active) % 64 == 0,
+    "v5.14.10.0: bandit telemetry cluster (PerCoreSnap::ensemble_active) "
+    "must start on 64-byte cache-line boundary. Did a new field land before "
+    "ensemble_active without preserving the alignas(64) marker?");
 
 //======================================================================================================
 // [SHARED STATE]
