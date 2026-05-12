@@ -59,8 +59,14 @@
 #define CORE_MODEL_EXIT        (1u << 2)  // exit timing model
 #define CORE_MODEL_BUY_SIGNAL  (1u << 3)  // legacy single-binary buy signal
 
+// v5.15.4 — alignas(64) required so heap-allocated CoreModelZoo via
+// aligned_alloc(64) (HotSwap_ShadowLoad_SingleZoo) gives the embedded
+// ModelHandle<F> members (which are themselves alignas(64) since v5.15.0)
+// correctly-aligned addresses. Without container-level alignas(64), heap
+// allocation via plain malloc gives only 16-byte alignment + AVX-512
+// vector-load fields inside ModelHandle could fault or run slow.
 template <unsigned F>
-struct CoreModelZoo {
+struct alignas(64) CoreModelZoo {
     ModelHandle<F> barrier;     // 3-class P(stable)/P(peak)/P(valley) when num_outputs=3
     ModelHandle<F> regime;      // multi-class regime
     ModelHandle<F> exit;        // exit timing
@@ -76,6 +82,17 @@ struct CoreModelZoo {
     int             primary_target_class;   // mirrors primary_handle->buy_class_idx for snapshot
     char            primary_role_name[16];  // "buy_signal" | "barrier" | "regime" | ""
 };
+
+// v5.15.4 — size%64==0 invariant for shadow-load aligned_alloc(64).
+// Compiler enforces alignment + size %16 == 0 (alignas implies); we also
+// want size %64 == 0 so adjacent heap-allocated CoreModelZoo don't share
+// cache lines with neighboring allocations + cluster cleanly. Each
+// ModelHandle<F=64> is itself 64-byte aligned, so the struct sizeof
+// is already a multiple of 64 (verified by static_assert).
+static_assert(sizeof(CoreModelZoo<64>) % 64 == 0,
+              "v5.15.4: CoreModelZoo<64> size must be multiple of 64 for cache-line discipline");
+static_assert(alignof(CoreModelZoo<64>) == 64,
+              "v5.15.4: CoreModelZoo<64> must be cache-line aligned");
 
 //======================================================================================================
 template <unsigned F>
@@ -884,8 +901,15 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
 // circular dep; the value is small enough to hardcode.
 #define ENSEMBLE_HORIZON_MAX 8
 
+// v5.15.4 — alignas(64) required so heap-allocated EnsembleModelZoo via
+// aligned_alloc(64) (HotSwap_ShadowLoad_Ensemble) gives the embedded
+// alignment-sensitive members correctly-aligned addresses:
+//   - ModelHandle<F> arrays (alignas(64) per v5.15.0)
+//   - RidgeWeights<F> (AVX-512 vectorized; per CLAUDE.md item 25)
+//   - ThompsonBanditState (gained alignas/padding per v5.14.11.B.7)
+// Container struct also clusters cleanly at cache-line boundaries.
 template <unsigned F>
-struct EnsembleModelZoo {
+struct alignas(64) EnsembleModelZoo {
     ModelHandle<F> barrier[ENSEMBLE_HORIZON_MAX];
     ModelHandle<F> regime[ENSEMBLE_HORIZON_MAX];
     ModelHandle<F> exit_predictor[ENSEMBLE_HORIZON_MAX];
@@ -1007,6 +1031,16 @@ struct EnsembleModelZoo {
     int             primary_target_class;   // class index for buy probability extraction
     char            primary_role_name[16];  // "buy_signal" | "barrier" | "regime" | ""
 };
+
+// v5.15.4 — size%64==0 invariant for shadow-load aligned_alloc(64).
+// EnsembleModelZoo is large (~40-60KB depending on F) but the constituent
+// member alignments (ModelHandle alignas(64) × 32 slots + RidgeWeights
+// alignas(64) × 2 + ThompsonBanditState ×5) all sit on 64-byte boundaries,
+// so total size is a multiple of 64 (verified by static_assert).
+static_assert(sizeof(EnsembleModelZoo<64>) % 64 == 0,
+              "v5.15.4: EnsembleModelZoo<64> size must be multiple of 64 for cache-line discipline + AVX-512 alignment of RidgeWeights");
+static_assert(alignof(EnsembleModelZoo<64>) == 64,
+              "v5.15.4: EnsembleModelZoo<64> must be cache-line aligned");
 
 template <unsigned F>
 inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {

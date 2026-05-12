@@ -55,6 +55,20 @@ constexpr uint8_t TRADING_MODE_PAPER  = 0;
 constexpr uint8_t TRADING_MODE_LIVE   = 1;
 constexpr uint8_t TRADING_MODE_SHADOW = 2;
 
+// v5.15.4 — ControllerConfig_NormalizeForMode key-explicit tracking.
+// Parser sets the corresponding bit when the operator explicitly sets a
+// key in the cfg file; normalize honors the explicit value. Bits unset
+// → default; normalize applies mode-specific override (e.g.,
+// trading_mode=LIVE flips model_verify_strict 0→1 unless operator
+// explicitly set it).
+//
+// Cohort discipline per CLAUDE.md item 20 (bitmap-flag-api): bit-pack
+// from start; adding next tracked key = 1 bit + 1 parser-side OR. 16 bits
+// of headroom; expected to grow with future mode-specific flip rules.
+constexpr uint16_t MASK_CFG_KEY_MODEL_VERIFY_STRICT = 1u << 0;
+constexpr uint16_t MASK_CFG_KEY_RECONCILE_MODE      = 1u << 1;
+// Reserved bits 2..15 for future tracked keys.
+
 // v4.7.39: engine_arch — controls slow-path threading model under sharded
 // mode. STARTUP-ONLY (changes ignored on hot reload).
 //   ENGINE_ARCH_CENTRALIZED (default): slow-path runs on producer thread,
@@ -887,6 +901,17 @@ template <unsigned F> struct ControllerConfig {
   // (TRADING_MODE_PAPER / LIVE / SHADOW; matches engine_mode constant
   // style for consistency).
   uint8_t trading_mode;               // v5.15.2 — TradingMode enum (default PAPER)
+  // v5.15.4 — bitmap of "operator explicitly set this key" flags. Used
+  // by ControllerConfig_NormalizeForMode<F> to honor operator overrides
+  // when applying mode-specific defaults. Adding a new tracked key = 1
+  // bit position + 1 parser-side `cfg.cfg_keys_explicit |= MASK_X` set.
+  //
+  // Cohort verdict (CLAUDE.local.md cohort-audit rule 2026-05-11):
+  // 2 bits today (MODEL_VERIFY_STRICT + RECONCILE_MODE); expected to grow
+  // as more mode-specific flip rules land. Per CLAUDE.md item 20
+  // (bitmap-flag-api) + cfg-flag-eligibility-criteria.md cohort
+  // discipline, bit-pack from the start rather than retrofit later.
+  uint16_t cfg_keys_explicit;
   // Prediction normalization — Phase 7F (default OFF)
   int prediction_normalize; // 0=disabled, 1=z-score normalize predictions
                             // (activates after 100)
@@ -1556,6 +1581,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.reconcile_dry_run           = 1;                            // legacy field; safer default
   cfg.reconcile_mode              = 1;                            // v5.14.4 — RECONCILE_WARN (matches dry_run=1 legacy behavior)
   cfg.trading_mode                = TRADING_MODE_PAPER;           // v5.15.2 — pre-v5.15 behavior preserved
+  cfg.cfg_keys_explicit           = 0;                            // v5.15.4 — no keys explicit by default
   cfg.prediction_normalize = 0;
   // barrier_gate_enabled migrated to gate_cfg_flags (default 0)
   cfg.model_verify_strict = 0;  // 0=warn, 1=strict (fail on mismatch), -1=skip
@@ -1676,6 +1702,53 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.oms_event_log_mode = 1;
   return cfg;
 }
+//======================================================================================================
+// [CONFIG NORMALIZE — v5.15.4]
+//======================================================================================================
+// Post-parse pass that applies mode-specific default tightening when the
+// operator hasn't explicitly set a key. Honors explicit overrides via
+// `cfg_keys_explicit` bitmap.
+//
+// Currently: `trading_mode=LIVE` flips two defaults toward stricter
+// production semantics. Paper/shadow modes are passthrough.
+//   - `model_verify_strict`: 0 (WARN) → 1 (STRICT)
+//   - `reconcile_mode`:      1 (WARN) → 0 (STRICT)
+//
+// Stderr logs each auto-flip at boot so operators see what changed +
+// why. Setting either key explicitly in cfg suppresses the flip (the
+// bitmap bit is set by the parser at parse time; normalize checks it).
+//
+// Called from EngineSharded_Run AFTER ControllerConfig_Load + BEFORE
+// LiveReadiness_Verify so the boot gate sees normalized values.
+//
+// Forward-compat: future mode-specific flip rules (e.g., AUTO_SYNC mode
+// flipping kill switch thresholds, SHADOW mode skipping reconciliation
+// entirely) get added here + a new MASK_CFG_KEY_* bit per tracked key.
+template <unsigned F>
+inline void ControllerConfig_NormalizeForMode(ControllerConfig<F>& cfg) {
+    if (cfg.trading_mode != TRADING_MODE_LIVE) return;
+
+    // Flip rule 1: model_verify_strict 0 (WARN) → 1 (STRICT)
+    if (!(cfg.cfg_keys_explicit & MASK_CFG_KEY_MODEL_VERIFY_STRICT) &&
+        cfg.model_verify_strict == 0) {
+        cfg.model_verify_strict = 1;
+        fprintf(stderr,
+            "[live_normalize] trading_mode=live: model_verify_strict 0→1 "
+            "(STRICT). Set explicitly in cfg to override.\n");
+    }
+
+    // Flip rule 2: reconcile_mode WARN (1) → STRICT (0)
+    if (!(cfg.cfg_keys_explicit & MASK_CFG_KEY_RECONCILE_MODE) &&
+        cfg.reconcile_mode == 1) {
+        cfg.reconcile_mode = 0;
+        // Mirror to legacy field per existing reconcile_mode parsing convention.
+        cfg.reconcile_dry_run = 0;
+        fprintf(stderr,
+            "[live_normalize] trading_mode=live: reconcile_mode WARN→STRICT. "
+            "Set explicitly in cfg to override.\n");
+    }
+}
+
 //======================================================================================================
 // [CONFIG PARSER]
 //======================================================================================================
@@ -2389,6 +2462,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         int dry_run = atoi(val);
         cfg.reconcile_dry_run = dry_run;
         cfg.reconcile_mode    = dry_run ? 1 /*WARN*/ : 0 /*STRICT*/;
+        // v5.15.4 — back-compat field is an explicit choice from operator.
+        cfg.cfg_keys_explicit |= MASK_CFG_KEY_RECONCILE_MODE;
         continue;
     }
     if (strcmp(key, "reconcile_mode") == 0) {
@@ -2407,6 +2482,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         // Mirror to legacy field for code still reading reconcile_dry_run
         // (will be removed when transition window closes).
         cfg.reconcile_dry_run = (cfg.reconcile_mode == 0) ? 0 : 1;
+        // v5.15.4 — track explicit parse so NormalizeForMode honors it.
+        cfg.cfg_keys_explicit |= MASK_CFG_KEY_RECONCILE_MODE;
         continue;
     }
     if (strcmp(key, "trading_mode") == 0) {
@@ -2422,7 +2499,14 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     CFG_PARSE_INT(prediction_normalize)
     // barrier_gate_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
-    CFG_PARSE_INT(model_verify_strict)
+    // v5.15.4 — model_verify_strict needs explicit-tracking for the
+    // NormalizeForMode flip rule, so inline parse instead of CFG_PARSE_INT
+    // (which doesn't have an injection point for the bitmap OR).
+    if (strcmp(key, "model_verify_strict") == 0) {
+        cfg.model_verify_strict = atoi(val);
+        cfg.cfg_keys_explicit  |= MASK_CFG_KEY_MODEL_VERIFY_STRICT;
+        continue;
+    }
 
     // Per-core sharding (Phase 13) — engine_mode accepts both string and int
     // forms. The GUI SettingsPanel uses CFG_BOOL which writes "0"/"1"; manual

@@ -55,6 +55,7 @@
 #include "../CoreFrameworks/LiveReadiness.hpp"           // v5.15.2 — FOREACH_LIVE_READINESS_CHECK + helpers
 #include "../ML_Headers/StampBoundModelConstRegistry.hpp"  // v5.14.8.A.0.b — registry tests + presence column dispatch
 #include "../ML_Headers/StampHelper.hpp"                   // v5.15.3.A — StampArgs<F> + Stamp_AssembleAndEmit
+#include "../CoreFrameworks/HotSwap.hpp"                   // v5.15.4 — HotSwap_ShadowLoad_{Ensemble,SingleZoo}
 #include <type_traits>                                   // v5.14.8.A.0.b — std::is_array_v / std::extent_v for char-array dispatch
 #include "../Strategies/StrategyLifecycle.hpp"           // v5.4.0 Phase 1.2 — Strategy_InitPerCore / FreePerCore
 
@@ -24264,6 +24265,169 @@ e3_skip_load:;
               FOREACH_STAMP_BOUND_MODEL_CONST_COUNT > 0);
         check("v5.15.3.A.0 PARITY-022: FOREACH_STAMP_BOUND_CFG_COUNT > 0 (cfg-bound sister registry)",
               FOREACH_STAMP_BOUND_CFG_COUNT > 0);
+    }
+
+    printf("\n--- v5.15.4: Live-mode normalize + alignas zoos + shadow-load helpers ---\n");
+    // ==================================================================
+    // v5.15.4.A — ControllerConfig_NormalizeForMode flip rules
+    // ==================================================================
+    {
+        // Live mode + nothing explicitly set → both flips fire
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.trading_mode      = TRADING_MODE_LIVE;
+        cfg.cfg_keys_explicit = 0;
+        // Verify pre-call state matches v5.15 defaults
+        check("v5.15.4.A: pre-normalize model_verify_strict default = 0 (WARN)",
+              cfg.model_verify_strict == 0);
+        check("v5.15.4.A: pre-normalize reconcile_mode default = 1 (WARN)",
+              cfg.reconcile_mode == 1);
+
+        ControllerConfig_NormalizeForMode<64>(cfg);
+
+        check("v5.15.4.A: live flips model_verify_strict 0→1 (STRICT)",
+              cfg.model_verify_strict == 1);
+        check("v5.15.4.A: live flips reconcile_mode WARN→STRICT (1→0)",
+              cfg.reconcile_mode == 0);
+        check("v5.15.4.A: live flips reconcile_dry_run mirror (1→0)",
+              cfg.reconcile_dry_run == 0);
+    }
+    {
+        // Explicit override on model_verify_strict honored
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.trading_mode        = TRADING_MODE_LIVE;
+        cfg.model_verify_strict = 0;
+        cfg.cfg_keys_explicit   = MASK_CFG_KEY_MODEL_VERIFY_STRICT;
+        ControllerConfig_NormalizeForMode<64>(cfg);
+        check("v5.15.4.A: explicit override on model_verify_strict NOT flipped",
+              cfg.model_verify_strict == 0);
+        // reconcile_mode NOT marked explicit → still flips
+        check("v5.15.4.A: reconcile_mode still flips when model_verify_strict explicit",
+              cfg.reconcile_mode == 0);
+    }
+    {
+        // Explicit override on reconcile_mode honored
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.trading_mode      = TRADING_MODE_LIVE;
+        cfg.reconcile_mode    = 1;
+        cfg.cfg_keys_explicit = MASK_CFG_KEY_RECONCILE_MODE;
+        ControllerConfig_NormalizeForMode<64>(cfg);
+        check("v5.15.4.A: explicit override on reconcile_mode NOT flipped",
+              cfg.reconcile_mode == 1);
+    }
+    {
+        // Paper mode → no flips (passthrough)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.trading_mode      = TRADING_MODE_PAPER;
+        cfg.cfg_keys_explicit = 0;
+        ControllerConfig_NormalizeForMode<64>(cfg);
+        check("v5.15.4.A: paper does NOT flip model_verify_strict",
+              cfg.model_verify_strict == 0);
+        check("v5.15.4.A: paper does NOT flip reconcile_mode",
+              cfg.reconcile_mode == 1);
+    }
+    {
+        // Shadow mode → no flips (passthrough; future use case)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.trading_mode      = TRADING_MODE_SHADOW;
+        cfg.cfg_keys_explicit = 0;
+        ControllerConfig_NormalizeForMode<64>(cfg);
+        check("v5.15.4.A: shadow does NOT flip model_verify_strict",
+              cfg.model_verify_strict == 0);
+        check("v5.15.4.A: shadow does NOT flip reconcile_mode",
+              cfg.reconcile_mode == 1);
+    }
+    {
+        // KeyExplicit bitmap default = 0 (no keys explicit on _Default)
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.15.4.A: _Default zero-inits cfg_keys_explicit",
+              cfg.cfg_keys_explicit == 0);
+    }
+    // ==================================================================
+    // v5.15.4.B — alignas(64) + size%64==0 static_asserts
+    // These would have failed at compile time if the struct didn't meet
+    // the alignment + size invariants. Runtime check confirms the
+    // alignof returns the expected value (sanity).
+    // ==================================================================
+    {
+        check("v5.15.4.B: alignof(CoreModelZoo<64>) == 64",
+              alignof(CoreModelZoo<64>) == 64);
+        check("v5.15.4.B: sizeof(CoreModelZoo<64>) % 64 == 0",
+              sizeof(CoreModelZoo<64>) % 64 == 0);
+        check("v5.15.4.B: alignof(EnsembleModelZoo<64>) == 64",
+              alignof(EnsembleModelZoo<64>) == 64);
+        check("v5.15.4.B: sizeof(EnsembleModelZoo<64>) % 64 == 0",
+              sizeof(EnsembleModelZoo<64>) % 64 == 0);
+    }
+    // ==================================================================
+    // v5.15.4.C/.D — Shadow-load helper failure path preserves pre-swap
+    //
+    // Test that HotSwap_ShadowLoad_SingleZoo with a bad path returns
+    // nonzero AND leaves state.cores[c].model_handle pointing at the
+    // pre-swap zoo. This proves the PARITY-023 capture-pointer Revert
+    // anti-pattern is eliminated — there's no revert path because there's
+    // no torn-state moment.
+    //
+    // Full-engine shadow-load tests require boot infrastructure (Binance
+    // mock, OMS init, pthread spawns). For unit-testable proof of the
+    // shadow-load discipline, we exercise the failure path with a
+    // synthetic EventLoopState + bad new_path. Success path is exercised
+    // implicitly via the wider build (engine + engine_gui link the helper
+    // calls; production paper-test will exercise the success path).
+    // ==================================================================
+    {
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.held_out_stamp_secret[0] = '\0';  // no HMAC required for synthetic test
+        cfg.held_out_gate_strict = 0;
+
+        // Allocate a pre-swap zoo on heap (mirrors v5.15.4 boot migration).
+        CoreModelZoo<64>* pre_swap =
+            (CoreModelZoo<64>*)aligned_alloc(64, sizeof(CoreModelZoo<64>));
+        check("v5.15.4.C/D: aligned_alloc(CoreModelZoo<64>) succeeds",
+              pre_swap != nullptr);
+        if (pre_swap) {
+            CoreModelZoo_Init(pre_swap);
+
+            // Synth a minimal EventLoopState with one core's model_handle set.
+            // EventLoopState is big (~270KB); allocate on heap for stack safety.
+            tt::EventLoopState<64>* state =
+                (tt::EventLoopState<64>*)malloc(sizeof(tt::EventLoopState<64>));
+            check("v5.15.4.C/D: synth EventLoopState allocation",
+                  state != nullptr);
+            if (state) {
+                memset(state, 0, sizeof(tt::EventLoopState<64>));
+                state->cores[0].model_handle = (void*)pre_swap;
+
+                // Shadow-load with non-existent path → expect rc=-2 + pre-swap preserved.
+                int rc = tt::HotSwap_ShadowLoad_SingleZoo<64>(
+                    *state, 0, cfg,
+                    "/nonexistent/path/v5_15_4_synth", MODEL_BACKEND_XGBOOST);
+                check("v5.15.4.C/D PARITY-023: shadow-load with bad path returns nonzero",
+                      rc != 0);
+                check("v5.15.4.C/D PARITY-023: pre-swap handle preserved after failed load",
+                      state->cores[0].model_handle == (void*)pre_swap);
+
+                // Empty path → -2 specifically
+                int rc_empty = tt::HotSwap_ShadowLoad_SingleZoo<64>(
+                    *state, 0, cfg, "", MODEL_BACKEND_XGBOOST);
+                check("v5.15.4.C/D: shadow-load with empty path returns -2",
+                      rc_empty == -2);
+                check("v5.15.4.C/D: pre-swap handle still preserved after empty path",
+                      state->cores[0].model_handle == (void*)pre_swap);
+
+                // Ensemble path with null ensemble_handle → -2 (no pre-swap ezoo
+                // to inherit horizon list from; helper refuses).
+                state->cores[0].ensemble_handle = nullptr;
+                int rc_ens = tt::HotSwap_ShadowLoad_Ensemble<64>(
+                    *state, 0, cfg,
+                    "/nonexistent/ensemble/path", MODEL_BACKEND_XGBOOST);
+                check("v5.15.4.C/D: shadow-load ensemble with null pre-swap returns nonzero",
+                      rc_ens != 0);
+
+                free(state);
+            }
+            CoreModelZoo_Free(pre_swap);
+            free(pre_swap);
+        }
     }
 
     printf("\n======================================\n");

@@ -936,6 +936,20 @@ reconcile_mode=warn         # default (legacy dry_run=1 behavior preserved)
 
 trading_mode=paper          # default; flip to live + pass pre-flight to enable live trading
 
+# v5.15.4 — LIVE MODE STRICT-DEFAULT NORMALIZE
+#
+# When trading_mode=live, ControllerConfig_NormalizeForMode auto-tightens
+# safety defaults the operator has NOT explicitly set in this file:
+#   model_verify_strict:    0 (WARN) → 1 (STRICT)
+#   reconcile_mode:         1 (WARN) → 0 (STRICT)
+#
+# Explicit overrides honored — set either key explicitly above to
+# preserve your value. Stderr logs the auto-flips at boot for audit:
+#   [live_normalize] trading_mode=live: model_verify_strict 0→1 (STRICT)...
+#   [live_normalize] trading_mode=live: reconcile_mode WARN→STRICT...
+#
+# Paper + shadow modes: passthrough (no auto-flips).
+
 # v5.14.8.E — STALE-MODEL AGE GATE (boot-time)
 #
 # When a model loads, engine checks the stamp body's training_timestamp_us

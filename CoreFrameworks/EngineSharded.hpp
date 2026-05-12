@@ -88,7 +88,8 @@
 #endif
 #include <unistd.h>  // sysconf(_SC_NPROCESSORS_ONLN) — POSIX, also available on macOS
 
-#include "EnsembleHotSwap.hpp"   // v5.14.2 — EngineSharded_HotSwapEnsemble template
+#include "EnsembleHotSwap.hpp"   // v5.14.2 — EngineSharded_HotSwapEnsemble template (legacy in-place; superseded v5.15.4 by HotSwap.hpp)
+#include "HotSwap.hpp"           // v5.15.4 — HotSwap_ShadowLoad_{Ensemble,SingleZoo}
 #include "ModelValidation.hpp"   // v5.14.2.E.1 — CoreModelZoo_ValidateAgainstCfg (extracted; PARITY-012)
 #include "../ML_Headers/FeatureRegistryOverlay.hpp"  // v5.14.3.B — FeatureOverlay_PostLoadVerify
 
@@ -1091,12 +1092,37 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         //   3. ml_model_path set globally → load single buy_signal (legacy fallback)
         // The dispatcher passes model_handle as void* — we point it at the zoo.
         if (cfg.core_strategies[i] == STRATEGY_ML) {
-            static CoreModelZoo<F> ml_zoos[MAX_EXECUTION_CORES];
-            CoreModelZoo_Init(&ml_zoos[i]);
+            // v5.15.4 — heap-allocate zoo containers via aligned_alloc(64)
+            // for lifecycle consistency with shadow-load (HotSwap_ShadowLoad_*
+            // unconditional free(old_ptr) requires heap-resident containers).
+            // alignas(64) on container struct (CoreModelZoo + EnsembleModelZoo;
+            // v5.15.4.B) means aligned_alloc(64, sizeof(T)) gives the embedded
+            // alignment-sensitive members (ModelHandle, RidgeWeights, etc.)
+            // correctly-aligned addresses. Process-exit leak acceptable per
+            // existing static-array behavior (no shutdown cleanup of internal
+            // allocations either).
+            CoreModelZoo<F>* zoo_ptr =
+                (CoreModelZoo<F>*)aligned_alloc(64, sizeof(CoreModelZoo<F>));
+            if (!zoo_ptr) {
+                fprintf(stderr, "[sharded] core %d: aligned_alloc(CoreModelZoo) "
+                                "failed; ML core cannot init\n", i);
+                state.cores[i].model_load_failed = 1;
+                continue;
+            }
+            CoreModelZoo_Init(zoo_ptr);
             // v5.10.0a.G.5 — per-core ensemble zoo, mirrors single-zoo allocation.
             // Default empty = ezoo->active=0 = single-zoo path runs unchanged.
-            static EnsembleModelZoo<F> ml_ensemble_zoos[MAX_EXECUTION_CORES];
-            EnsembleModelZoo_Init(&ml_ensemble_zoos[i]);
+            EnsembleModelZoo<F>* ezoo_ptr =
+                (EnsembleModelZoo<F>*)aligned_alloc(64, sizeof(EnsembleModelZoo<F>));
+            if (!ezoo_ptr) {
+                fprintf(stderr, "[sharded] core %d: aligned_alloc(EnsembleModelZoo) "
+                                "failed; ML core cannot init\n", i);
+                CoreModelZoo_Free(zoo_ptr);
+                free(zoo_ptr);
+                state.cores[i].model_load_failed = 1;
+                continue;
+            }
+            EnsembleModelZoo_Init(ezoo_ptr);
             int backend = cfg.ml_backend ? cfg.ml_backend : MODEL_BACKEND_XGBOOST;
 
             int loaded = 0;
@@ -1114,7 +1140,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // check; legacy stamps still load).
                 uint64_t mask_for_load = (cfg.core_feature_mask[i] != 0xFFFFFFFFFFFFFFFFULL)
                     ? cfg.core_feature_mask[i] : 0;
-                loaded = CoreModelZoo_LoadFromDir(&ml_zoos[i], cfg.core_model_dir[i],
+                loaded = CoreModelZoo_LoadFromDir(zoo_ptr, cfg.core_model_dir[i],
                     backend, /*secret=*/nullptr, /*gap=*/0.05,
                     /*strict=*/cfg.held_out_gate_strict,
                     cfg.acknowledge_cross_binary_version_drift,
@@ -1127,7 +1153,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 const char* model_path = cfg.core_model_path[i][0]
                     ? cfg.core_model_path[i] : cfg.ml_model_path;
                 if (model_path[0]) {
-                    loaded = CoreModelZoo_LoadLegacy(&ml_zoos[i], model_path, backend);
+                    loaded = CoreModelZoo_LoadLegacy(zoo_ptr, model_path, backend);
                     if (loaded) {
                         fprintf(stderr, "[sharded] core %d: legacy buy_signal model loaded from %s\n",
                                 i, model_path);
@@ -1139,20 +1165,20 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             }
 
             if (loaded) {
-                state.cores[i].model_handle = &ml_zoos[i];
+                state.cores[i].model_handle = zoo_ptr;
                 // v5.14.2.E.1 — canonical post-load setup (X-macro registry
                 // FOREACH_SINGLE_ZOO_POST_LOAD; today: VerifyExpected only).
                 // Returns 1 if all steps OK; 0 if any failed.
                 // Strict-mode action stays at caller (boot does Free+null;
                 // hot-swap does flag-only per v5.10.0c semantics).
                 if (cfg.core_model_dir[i][0]) {
-                    int post_ok = CoreModelZoo_PostLoadSetup<F>(&ml_zoos[i], cfg, i,
+                    int post_ok = CoreModelZoo_PostLoadSetup<F>(zoo_ptr, cfg, i,
                                                                  cfg.core_model_dir[i]);
                     if (!post_ok && cfg.model_verify_strict > 0) {
                         // strict mode + mismatch: detach model, treat as "no model loaded"
                         // (executor falls back to SimpleDip per ML_BuildParameters)
                         fprintf(stderr, "[sharded] core %d: ML model UNLOADED due to strict verify failure\n", i);
-                        CoreModelZoo_Free(&ml_zoos[i]);
+                        CoreModelZoo_Free(zoo_ptr);
                         state.cores[i].model_handle = NULL;
                         // v5.9.0b: surface load failure to operator via TUI/health log
                         state.cores[i].model_load_failed = 1;
@@ -1184,29 +1210,29 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // (parity-check Finding #6). Without these, ensemble auto-detect
                 // silently bypassed cfg.held_out_gate_strict in ensemble mode.
                 int n_loaded = EnsembleModelZoo_AutoDetectFromDir(
-                    &ml_ensemble_zoos[i],
+                    ezoo_ptr,
                     cfg.core_model_dir[i],
                     backend,
                     cfg.held_out_stamp_secret,
                     FPN_ToDouble(cfg.gap_acceptable_threshold),
                     cfg.held_out_gate_strict,
                     cfg.acknowledge_cross_binary_version_drift);
-                if (n_loaded > 0 && ml_ensemble_zoos[i].active) {
+                if (n_loaded > 0 && ezoo_ptr->active) {
                     fprintf(stderr, "[sharded] core %d: ensemble active "
                                     "(primary=%s, %d horizons; %d total models)\n",
                             i,
-                            ml_ensemble_zoos[i].primary_role_name[0]
-                                ? ml_ensemble_zoos[i].primary_role_name : "(none)",
-                            ml_ensemble_zoos[i].primary_count, n_loaded);
+                            ezoo_ptr->primary_role_name[0]
+                                ? ezoo_ptr->primary_role_name : "(none)",
+                            ezoo_ptr->primary_count, n_loaded);
                     // v5.14.2.E.1 — canonical post-load setup (X-macro registry
                     // FOREACH_ENSEMBLE_POST_LOAD). 7 steps (InitBandits,
                     // InitExitBandits, blend_mode, SetDisabledHorizons,
                     // LoadBanditState, SetBanditSaveInterval, LoadExitBanditState).
                     // Boot, backtest, hot-swap all call this helper; adding new
                     // steps is one-line edit to FOREACH_ENSEMBLE_POST_LOAD.
-                    EnsembleModelZoo_PostLoadSetup<F>(&ml_ensemble_zoos[i], cfg, i,
+                    EnsembleModelZoo_PostLoadSetup<F>(ezoo_ptr, cfg, i,
                                                        cfg.core_model_dir[i]);
-                    state.cores[i].ensemble_handle = &ml_ensemble_zoos[i];
+                    state.cores[i].ensemble_handle = ezoo_ptr;
                     ensemble_loaded = 1;
                 } else {
                     state.cores[i].ensemble_handle = nullptr;
@@ -1230,9 +1256,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             // a single call. Now iterates ensemble parallel-array handles too
             // (Finding #7), and is callable from the hot-swap branch (Finding #3).
             if (loaded && cfg.core_model_dir[i][0]) {
-                CoreModelZoo<F>* zoo = &ml_zoos[i];
+                CoreModelZoo<F>* zoo = zoo_ptr;
                 EnsembleModelZoo<F>* ezoo = state.cores[i].ensemble_handle
-                    ? &ml_ensemble_zoos[i] : nullptr;
+                    ? ezoo_ptr : nullptr;
                 CoreModelZoo_ValidateAgainstCfg<F>(
                     zoo, ezoo, cfg, /*core_id=*/i,
                     cfg.held_out_gate_strict,
@@ -1469,6 +1495,17 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // since the TUI is informational, not load-bearing.
     std::atomic<double> last_price{0.0};
     std::atomic<double> last_volume{0.0};
+
+    //----------------------------------------------------------------------
+    // v5.15.4 — Mode-specific cfg normalize
+    //----------------------------------------------------------------------
+    // When trading_mode=LIVE, auto-tighten safety defaults the operator
+    // hasn't explicitly set: model_verify_strict 0→1 (STRICT);
+    // reconcile_mode WARN→STRICT. Explicit operator overrides honored
+    // via cfg_keys_explicit bitmap (parser sets bits at parse time).
+    // Runs BEFORE LiveReadiness_Verify so the boot gate sees normalized
+    // values. Paper/shadow modes are passthrough.
+    ControllerConfig_NormalizeForMode<F>(cfg);
 
     //----------------------------------------------------------------------
     // v5.15.2 — Live-readiness boot gate
@@ -2874,42 +2911,47 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                             &g_shared.swap_model_path_requested[c], 0,
                                             __ATOMIC_RELEASE);
                                     } else if (state.cores[c].ensemble_handle != nullptr) {
-                                        // v5.14.2 — ensemble hot swap (closes the
-                                        // v5.10.2.B REFUSE; v5.13.6.B finding).
-                                        // Same-thread atomic Free+Init+Load+Bandit
-                                        // sequence in EngineSharded_HotSwapEnsemble.
-                                        // Dispatcher reads ensemble_zoo first
-                                        // (StrategyParameters.hpp:794); operator
-                                        // can now swap horizon set + exit models
-                                        // without an engine restart.
-                                        EnsembleModelZoo<F>* swap_ezoo =
-                                            (EnsembleModelZoo<F>*)state.cores[c].ensemble_handle;
+                                        // v5.15.4 — ENSEMBLE SHADOW-LOAD HOT-SWAP.
+                                        // Replaces v5.14.2's in-place Free+Init+Load
+                                        // pattern (now legacy in EnsembleHotSwap.hpp;
+                                        // kept compiled but not called from this
+                                        // production path). PARITY-023's broken
+                                        // capture-pointer Revert design replaced by
+                                        // shadow-load discipline per
+                                        // DESIGN_SPECS/shadow-load-state-transition-pattern.md.
+                                        //
+                                        // Helper:
+                                        //   1. Allocates NEW ezoo via aligned_alloc(64)
+                                        //   2. Loads + PostLoadSetup into new_ezoo
+                                        //   3. Atomically swaps state.cores[c].ensemble_handle
+                                        //   4. Free's old ezoo
+                                        // Pre-swap untouched on any failure; caller
+                                        // sees nonzero rc and continues serving from
+                                        // pre-swap state.
                                         int swap_backend = cfg.ml_backend
                                             ? cfg.ml_backend
                                             : MODEL_BACKEND_XGBOOST;
-                                        int rc = EngineSharded_HotSwapEnsemble(
-                                            swap_ezoo, cfg, c, new_path, swap_backend);
-                                        if (rc == 0) {
-                                            // Failure → mark core degraded.
-                                            // ezoo is left in post-Free + post-Init
-                                            // (empty) state; dispatcher falls back
-                                            // to SimpleDip via ML_BuildParameters.
-                                            state.cores[c].model_load_failed = 1;
+                                        int rc = tt::HotSwap_ShadowLoad_Ensemble<F>(
+                                            state, c, cfg, new_path, swap_backend);
+                                        if (rc != 0) {
+                                            // Pre-swap state preserved automatically;
+                                            // helper already logged the specific
+                                            // failure mode. Leave model_load_failed
+                                            // at its pre-call value (likely 0 if
+                                            // pre-swap was healthy).
+                                            fprintf(stderr,
+                                                "[hot_swap] ensemble core %d shadow-load "
+                                                "FAILED (rc=%d); pre-swap state preserved\n",
+                                                c, rc);
                                         } else {
                                             state.cores[c].model_load_failed = 0;
-                                            // v5.14.2.E.1 — closes PARITY-009.F
-                                            // (CRITICAL): post-load inference_cfg
-                                            // drift validation that boot does at
-                                            // line 1192 + single-zoo hot-swap does
-                                            // at ~2810. Pre-fix v5.14.2 ensemble
-                                            // hot-swap silently bypassed this,
-                                            // disabling Ridge/composite/winsor/
-                                            // exit_blender drift detection that
-                                            // PARITY-002/003/004/005 closed.
-                                            // Hot-swap semantics: log-and-leave
-                                            // on Tier 1 REFUSE (matches single-zoo
-                                            // hot-swap; operator reverts via
-                                            // cfg+restart).
+                                            // Re-fetch ezoo after swap to run post-load
+                                            // validators on the NEW ezoo. v5.14.2.E.1
+                                            // closes PARITY-009.F: ValidateAgainstCfg +
+                                            // FeatureOverlay_PostLoadVerify still run
+                                            // on hot-swap (was bypassed pre-v5.14.2.E.1).
+                                            EnsembleModelZoo<F>* swap_ezoo =
+                                                (EnsembleModelZoo<F>*)state.cores[c].ensemble_handle;
                                             int validate_rc = CoreModelZoo_ValidateAgainstCfg<F>(
                                                 /*zoo=*/nullptr,
                                                 swap_ezoo,
@@ -2928,9 +2970,6 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                     "Operator must reconcile cfg "
                                                     "vs stamp + restart.\n", c);
                                             }
-                                            // v5.14.3.B — overlay sidecar verification.
-                                            // Hot-swap semantics: flag-only on REFUSE
-                                            // (matches ValidateAgainstCfg above).
                                             int overlay_rc = FeatureOverlay_PostLoadVerify<F>(
                                                 /*zoo=*/nullptr, swap_ezoo,
                                                 /*core_id=*/c, cfg.held_out_gate_strict);
@@ -2942,61 +2981,37 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                             &g_shared.swap_model_path_requested[c], 0,
                                             __ATOMIC_RELEASE);
                                     } else {
+                                        // v5.15.4 — SINGLE-ZOO SHADOW-LOAD HOT-SWAP.
+                                        // Replaces in-place Free+Init+LoadFromDir
+                                        // (v5.10.0c "log-and-leave" pattern; brief
+                                        // empty-zoo window). Shadow-load discipline:
+                                        // allocate NEW zoo + Load + PostLoadSetup,
+                                        // atomically swap, Free old. Pre-swap
+                                        // untouched on any failure → no empty-zoo
+                                        // window; failed swaps preserve state.
                                         int swap_backend = cfg.ml_backend
                                             ? cfg.ml_backend
                                             : MODEL_BACKEND_XGBOOST;
-                                        // Free old + reinit + reload. Same-thread
-                                        // (slow-path c is single-reader/writer for
-                                        // its zoo); brief window with empty zoo
-                                        // is safe — ML inference also runs on this
-                                        // same slow-path thread, can't preempt itself.
-                                        CoreModelZoo_Free(swap_zoo);
-                                        CoreModelZoo_Init(swap_zoo);
-                                        int loaded = CoreModelZoo_LoadFromDir(
-                                            swap_zoo, new_path, swap_backend,
-                                            /*secret=*/nullptr, /*gap=*/0.05,
-                                            /*strict=*/cfg.held_out_gate_strict,
-                                            cfg.acknowledge_cross_binary_version_drift,
-                                            /*expected_feature_mask=*/0,
-                                            /*cfg_ptr=*/&cfg);  // v5.14.1.B.3 — drift check on hot swap
-                                        if (loaded > 0) {
-                                            state.cores[c].model_load_failed = 0;
+                                        int rc = tt::HotSwap_ShadowLoad_SingleZoo<F>(
+                                            state, c, cfg, new_path, swap_backend);
+                                        if (rc != 0) {
+                                            // Pre-swap state preserved by helper;
+                                            // log + continue. Don't null the handle;
+                                            // pre-swap zoo remains active.
                                             fprintf(stderr,
-                                                "[hot_swap] core %d swapped to %s "
-                                                "(%d roles loaded)\n",
-                                                c, new_path, loaded);
-                                            // v5.14.2.E.1 — canonical post-load setup
-                                            // (closes PARITY-011: hot-swap was missing
-                                            // VerifyExpected which boot calls). Helper
-                                            // runs FOREACH_SINGLE_ZOO_POST_LOAD
-                                            // (today: VerifyExpected). Hot-swap
-                                            // semantics: log-and-leave on failure
-                                            // (NOT Free+null like boot — matches
-                                            // v5.10.0c semantics for
-                                            // ValidateAgainstCfg below).
-                                            int post_ok = CoreModelZoo_PostLoadSetup<F>(
-                                                swap_zoo, cfg, c, new_path);
-                                            if (!post_ok && cfg.model_verify_strict > 0) {
-                                                state.cores[c].model_load_failed = 1;
-                                                fprintf(stderr,
-                                                    "[hot_swap] core %d FLAGGED: "
-                                                    "post-load VerifyExpected mismatch "
-                                                    "in strict mode (model loaded but "
-                                                    "degraded; operator should reconcile "
-                                                    "cfg vs expected.cfg + restart).\n", c);
-                                            }
-                                            // v5.10.2.A — Run post-load validator
-                                            // on the newly-swapped zoo (parity-check
-                                            // Finding #3 closure: hot swap was
-                                            // bypassing inference_cfg drift detection
-                                            // + xgb_hyperparams WARN at boot).
-                                            // Hot-swap context: log-and-leave on
-                                            // Tier 1 REFUSE; operator manually reverts
-                                            // via cfg+restart (true rollback deferred
-                                            // — pre-swap state isn't snapshotted).
+                                                "[hot_swap] single-zoo core %d shadow-load "
+                                                "FAILED (rc=%d); pre-swap state preserved\n",
+                                                c, rc);
+                                        } else {
+                                            state.cores[c].model_load_failed = 0;
+                                            // Re-fetch zoo after swap to run post-load
+                                            // validators on the NEW zoo (parity-check
+                                            // Finding #3 closure preserved).
+                                            CoreModelZoo<F>* new_swap_zoo =
+                                                (CoreModelZoo<F>*)state.cores[c].model_handle;
                                             int validate_rc = CoreModelZoo_ValidateAgainstCfg<F>(
-                                                swap_zoo,
-                                                /*ezoo=*/nullptr,  // single-zoo only here; ensemble swap REFUSED in B
+                                                new_swap_zoo,
+                                                /*ezoo=*/nullptr,
                                                 cfg, /*core_id=*/c,
                                                 cfg.held_out_gate_strict,
                                                 cfg.acknowledge_inference_cfg_drift,
@@ -3010,24 +3025,12 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                     "loaded but flagged degraded. Operator "
                                                     "must reconcile cfg vs stamp + restart.\n", c);
                                             }
-                                            // v5.14.3.B — overlay sidecar verification.
-                                            // Hot-swap semantics: flag-only on REFUSE
-                                            // (matches ValidateAgainstCfg above).
                                             int overlay_rc = FeatureOverlay_PostLoadVerify<F>(
-                                                swap_zoo, /*ezoo=*/nullptr,
+                                                new_swap_zoo, /*ezoo=*/nullptr,
                                                 /*core_id=*/c, cfg.held_out_gate_strict);
                                             if (overlay_rc < 0) {
                                                 state.cores[c].model_load_failed = 1;
                                             }
-                                        } else {
-                                            // Load failed; null the handle so
-                                            // dispatcher falls back to SimpleDip.
-                                            state.cores[c].model_handle = NULL;
-                                            state.cores[c].model_load_failed = 1;
-                                            fprintf(stderr,
-                                                "[hot_swap] core %d REFUSED: "
-                                                "no roles loaded from %s\n",
-                                                c, new_path);
                                         }
                                         __atomic_store_n(
                                             &g_shared.swap_model_path_requested[c], 0,
