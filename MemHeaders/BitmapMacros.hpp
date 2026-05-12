@@ -155,9 +155,11 @@
 
 // Bit-position helper: build a mask for bit N.
 //   Use the type-aware variant to avoid signed-int promotion bugs:
+//     BITMAP_BIT_U8(0)  = (uint8_t)1
 //     BITMAP_BIT_U16(0) = (uint16_t)1
 //     BITMAP_BIT_U32(0) = 1u
 //     BITMAP_BIT_U64(0) = 1ULL
+#define BITMAP_BIT_U8(n)  ((uint8_t)((uint8_t)1u << (n)))
 #define BITMAP_BIT_U16(n) ((uint16_t)((uint16_t)1u << (n)))
 #define BITMAP_BIT_U32(n) ((uint32_t)(1u << (n)))
 #define BITMAP_BIT_U64(n) (1ULL << (n))
@@ -165,6 +167,7 @@
 // Population count: how many bits are set?
 //   Built-in popcount; portable across GCC/Clang.
 //   Useful for "how many failure modes fired?" queries.
+#define BITMAP_POPCOUNT_U8(field)  (__builtin_popcount((unsigned)(field) & 0xFFu))
 #define BITMAP_POPCOUNT_U16(field) (__builtin_popcount((unsigned)(field) & 0xFFFFu))
 #define BITMAP_POPCOUNT_U32(field) (__builtin_popcount((unsigned)(field)))
 #define BITMAP_POPCOUNT_U64(field) (__builtin_popcountll((unsigned long long)(field)))
@@ -173,6 +176,7 @@
 // (use BITMAP_ANY to disambiguate "none set" from "bit 0 set").
 //   Useful for iteration: bit_idx = BITMAP_FIRST_U64(remaining);
 //                          remaining &= ~BITMAP_BIT_U64(bit_idx);
+#define BITMAP_FIRST_U8(field)  ((unsigned)__builtin_ctz((unsigned)(field) & 0xFFu))
 #define BITMAP_FIRST_U16(field) ((unsigned)__builtin_ctz((unsigned)(field) & 0xFFFFu))
 #define BITMAP_FIRST_U32(field) ((unsigned)__builtin_ctz((unsigned)(field)))
 #define BITMAP_FIRST_U64(field) ((unsigned)__builtin_ctzll((unsigned long long)(field)))
