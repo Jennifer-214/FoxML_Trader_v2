@@ -533,7 +533,7 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
     // 2. Ensemble handles (Finding #7 closure): 4 roles × N horizons
     //    EnsembleModelZoo struct uses `exit_predictor` (NOT `exit`)
     //    per CoreModelZoo.hpp:616
-    if (ezoo && ezoo->active) {
+    if (ezoo && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE)) {
         for (int h = 0; h < ezoo->buy_signal_count; ++h)
             check_handle(&ezoo->buy_signal[h], "buy_signal", h);
         for (int h = 0; h < ezoo->barrier_count; ++h)
@@ -1111,7 +1111,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             }
             CoreModelZoo_Init(zoo_ptr);
             // v5.10.0a.G.5 — per-core ensemble zoo, mirrors single-zoo allocation.
-            // Default empty = ezoo->active=0 = single-zoo path runs unchanged.
+            // Default empty = BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE)=0 = single-zoo path runs unchanged.
             EnsembleModelZoo<F>* ezoo_ptr =
                 (EnsembleModelZoo<F>*)aligned_alloc(64, sizeof(EnsembleModelZoo<F>));
             if (!ezoo_ptr) {
@@ -1202,7 +1202,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             // produced only sibling dirs, no base.
             //
             // v5.10.0a.G.5 — try ensemble auto-detect on the base dir.
-            // No-op when no _horizon_<H> siblings present; ezoo->active=0
+            // No-op when no _horizon_<H> siblings present; BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE)=0
             // → single-zoo path runs unchanged.
             int ensemble_loaded = 0;
             if (cfg.core_model_dir[i][0]) {
@@ -1217,7 +1217,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     FPN_ToDouble(cfg.gap_acceptable_threshold),
                     cfg.held_out_gate_strict,
                     cfg.acknowledge_cross_binary_version_drift);
-                if (n_loaded > 0 && ezoo_ptr->active) {
+                if (n_loaded > 0 && BITMAP_IS_SET(ezoo_ptr->init_flags, MASK_EZOO_ACTIVE)) {
                     fprintf(stderr, "[sharded] core %d: ensemble active "
                                     "(primary=%s, %d horizons; %d total models)\n",
                             i,
@@ -3561,7 +3561,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     for (int i = 0; i < num_cores; ++i) {
         auto* ezoo = static_cast<EnsembleModelZoo<F>*>(
             state.cores[i].ensemble_handle);
-        if (ezoo && ezoo->active && ezoo->initialized_bandits &&
+        if (ezoo && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY) &&
             cfg.core_model_dir[i][0]) {
             int saved = EnsembleModelZoo_SaveBanditState(
                 ezoo, cfg.core_model_dir[i],

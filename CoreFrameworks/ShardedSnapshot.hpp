@@ -679,7 +679,7 @@ static inline void TUI_CopySnapshotSharded(
             // ensemble inactive (single-zoo path) → GUI hides the section.
             auto* ezoo = static_cast<EnsembleModelZoo<F>*>(
                 state->cores[i].ensemble_handle);
-            if (ezoo && ezoo->active) {
+            if (ezoo && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE)) {
                 auto& es = snap->per_core[i];
                 es.ensemble_active = 1;
                 // v5.11.62 — n_horizons reflects primary handles (set at
@@ -705,7 +705,7 @@ static inline void TUI_CopySnapshotSharded(
                 // Per-regime probability matrix (preferred over raw weights —
                 // probabilities are normalized so the heatmap is interpretable).
                 for (int r = 0; r < 5; ++r) {  // NUM_REGIMES = 5
-                    if (ezoo->initialized_bandits) {
+                    if (BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) {
                         double probs[8];
                         Bandit_GetProbabilities(&ezoo->bandits[r], probs);
                         for (int h = 0; h < n_h; ++h) {
@@ -729,7 +729,7 @@ static inline void TUI_CopySnapshotSharded(
                 // the cluster zeroed → ML Status panel skips Thompson render branch.
                 // For cfg=1 / cfg=2: copy current regime's posterior to display arrays;
                 // pack thompson_state byte (active flag + chosen_arm).
-                if (cfg->bandit_algorithm != 0 && ezoo->initialized_thompson_bandits) {
+                if (cfg->bandit_algorithm != 0 && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_THOMPSON_READY)) {
                     int regime_id = ezoo->last_predicted_regime_id;
                     if (regime_id < 0 || regime_id >= 5) regime_id = 0;
                     const ThompsonBanditState* tb = &ezoo->thompson_bandits[regime_id];

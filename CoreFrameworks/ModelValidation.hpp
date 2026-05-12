@@ -251,7 +251,7 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
     // 2. Ensemble handles (Finding #7 closure): 4 roles × N horizons
     //    EnsembleModelZoo struct uses `exit_predictor` (NOT `exit`)
     //    per CoreModelZoo.hpp:616
-    if (ezoo && ezoo->active) {
+    if (ezoo && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE)) {
         for (int h = 0; h < ezoo->buy_signal_count; ++h)
             check_handle(&ezoo->buy_signal[h], "buy_signal", h);
         for (int h = 0; h < ezoo->barrier_count; ++h)

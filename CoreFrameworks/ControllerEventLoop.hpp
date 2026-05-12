@@ -1427,7 +1427,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
             // is rare (~1 per closed trade) — cost negligible.
             if (ctx.ensemble_handle) {
                 auto* ezoo = static_cast<EnsembleModelZoo<F>*>(ctx.ensemble_handle);
-                if (ezoo->active && ezoo->initialized_bandits) {
+                if (BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) {
                     double bal_d = FPN_ToDouble(oms->balance);
                     if (bal_d > 0.0) {
                         double pnl_d = FPN_ToDouble(rec.exit_net_pnl);
@@ -1465,7 +1465,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
             auto* ezoo = static_cast<EnsembleModelZoo<F>*>(ctx.ensemble_handle);
             int chosen_arm = (int)oms->last_exit_predicted_arm[slot];
             int regime     = (int)oms->last_exit_predicted_regime[slot];
-            if (ezoo->initialized_exit_bandits
+            if (BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_EXIT_BANDITS_READY)
                 && chosen_arm >= 0
                 && chosen_arm < ezoo->exit_predictor_count
                 && regime >= 0 && regime < NUM_REGIMES) {

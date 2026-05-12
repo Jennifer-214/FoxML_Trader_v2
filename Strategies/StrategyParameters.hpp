@@ -872,7 +872,7 @@ inline void ML_BuildParameters(
         // buy_signal_*. Loader picks role at boot (priority: buy_signal
         // > barrier > regime); per-handle buy_class_idx makes
         // Model_Predict transparently extract the right class.
-        if (ezoo && ezoo->active && ezoo->primary_count > 0 &&
+        if (ezoo && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) && ezoo->primary_count > 0 &&
             ezoo->primary_handles) {
             int dominant_idx = -1;
             // Mode dispatch: weighted (default) uses bandit weights;
@@ -884,7 +884,7 @@ inline void ML_BuildParameters(
             float per_arm_preds[ENSEMBLE_HORIZON_MAX];
             for (int a = 0; a < ENSEMBLE_HORIZON_MAX; ++a)
                 per_arm_preds[a] = 0.5f;
-            if (use_weighted && ezoo->initialized_bandits) {
+            if (use_weighted && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) {
                 // G.7 path: per-regime bandit weights drive blend.
                 int regime_id = mctx ? mctx->current_regime_id : 0;
                 if (regime_id < 0 || regime_id >= NUM_REGIMES) regime_id = 0;
@@ -931,7 +931,7 @@ inline void ML_BuildParameters(
                     int chosen_arm = -1;
                     BanditAlgorithm_Apply(config->bandit_algorithm,
                                           &ezoo->bandits[regime_id],
-                                          ezoo->initialized_thompson_bandits
+                                          BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_THOMPSON_READY)
                                               ? &ezoo->thompson_bandits[regime_id] : nullptr,
                                           ezoo->primary_count,
                                           weights_buf,

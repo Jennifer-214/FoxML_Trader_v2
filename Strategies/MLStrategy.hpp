@@ -167,7 +167,7 @@ inline BuySideGateConditions<F> MLStrategy_BuySignal(MLStrategyState<F> *state,
     // Model_Predict returns the right class probability transparently.
     float prediction;
     int   selected_horizon_idx = -1;
-    if (state->ensemble_zoo && state->ensemble_zoo->active &&
+    if (state->ensemble_zoo && BITMAP_IS_SET(state->ensemble_zoo->init_flags, MASK_EZOO_ACTIVE) &&
         state->ensemble_zoo->primary_count > 0 &&
         state->ensemble_zoo->primary_handles) {
         prediction = Model_Predict_Ensemble(state->ensemble_zoo->primary_handles,

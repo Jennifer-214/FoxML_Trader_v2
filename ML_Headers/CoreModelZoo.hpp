@@ -40,6 +40,8 @@
 #include "BanditLearning.hpp"   // v5.10.0a.G.7 — per-regime BanditState in EnsembleModelZoo
 #include "ThompsonBandit.hpp"   // v5.14.10.B — per-regime ThompsonBanditState in EnsembleModelZoo (parallel to bandits[])
 #include "RidgeBlender.hpp"     // v5.14.0 — Ridge risk-parity blending state on EnsembleModelZoo
+#include "PerArmFlagRegistry.hpp"     // v5.15.5.A.2.b — FOREACH_PER_ARM_FLAG for per-arm uint8_t bitmaps
+#include "EzooInitFlagRegistry.hpp"   // v5.15.5.A.2.c — FOREACH_EZOO_INIT_FLAG bit-pack for init state
 #include "../Strategies/StrategyInterface.hpp"  // v5.10.0a.G.7 — NUM_REGIMES
 #include "../Version.hpp"        // v5.8.6: ENGINE_VERSION_STRING for boot log
 #include "../MemHeaders/HealthLog.hpp"  // v5.14.8.E: Health_LogCriticalRateLimited for stale-model log
@@ -949,12 +951,25 @@ struct alignas(64) EnsembleModelZoo {
     // v5.15.5.A.2.b. See DESIGN_SPECS/per-horizon-barrier-blending-with-
     // shadow-mode.md for the cache-layout rationale.
     alignas(64) PerArmBarriers per_arm_barriers[ENSEMBLE_HORIZON_MAX];
-    int active;  // 0 = use single-zoo (existing); 1 = ensemble path
+    // v5.15.5.A.2.c — init flags bit-pack (replaces 4 separate ints:
+    // active + initialized_bandits + initialized_exit_bandits +
+    // initialized_thompson_bandits). FOREACH_EZOO_INIT_FLAG registry
+    // owns the mask constants; 4 bits used today; 4 free for future
+    // init flags (RIDGE_INITIALIZED, CALIB_LOG_READY, etc.).
+    // Access via BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) etc.
+    uint8_t init_flags;
+    // v5.15.5.A.2.b — per-arm flag bitmaps auto-generated from
+    // FOREACH_PER_ARM_FLAG registry. Currently: disabled_horizon_mask
+    // (legacy v5.14; bit N = arm N disabled by cfg.disabled_horizons)
+    // + arms_with_barriers_mask (v5.15.5+; bit N = arm N has stamp-
+    // recorded TP/SL barriers in per_arm_barriers[N]). uint8_t each;
+    // total 2 bytes for the 2 current flags. Width chosen to match
+    // ENSEMBLE_HORIZON_MAX=8 exactly (8 arms = 8 bits).
+    PER_ARM_FLAG_DECLARE_FIELDS()
     // v5.10.0a.G.7 — per-regime bandit state (NUM_REGIMES from
     // FOREACH_REGIME X-macro). Each bandit has N arms = ezoo->buy_signal_count.
     // Cold start: uniform weights; G.8 reward path updates them per outcome.
     BanditState bandits[NUM_REGIMES];
-    int initialized_bandits;       // 0 = bandits not yet wired (Init phase only)
     // Per-prediction tracking (G.7 + G.8 reward attribution)
     int last_predicted_regime_id;  // regime AT predict-time (NOT current; for G.8 attribution)
     int last_predicted_horizon_idx;// dominant horizon idx (display + G.8 reward)
@@ -966,7 +981,7 @@ struct alignas(64) EnsembleModelZoo {
     // hypothetical_held_to_TP_pnl_bps (optimistic; biases against exits;
     // operator scales via cfg.exit_bandit_lr; refined post paper-test).
     BanditState exit_bandits[NUM_REGIMES];
-    int initialized_exit_bandits;       // 0 = no exit models loaded; gates dispatch
+    // v5.15.5.A.2.c — initialized_exit_bandits → MASK_EZOO_EXIT_BANDITS_READY bit in init_flags
     int last_predicted_exit_horizon_idx;// dominant exit_predictor arm at predict time
     // v5.14.10.B — Bayesian Thompson sampling bandits (parallel to bandits[]).
     // Per-regime Gaussian conjugate posterior; activated when cfg.bandit_algorithm
@@ -976,7 +991,7 @@ struct alignas(64) EnsembleModelZoo {
     // SLOW-PATH-only state (no false-sharing risk; per-core ezoo).
     // Persistence in v5.14.10.C via thompson_state.json (parallel to bandit_state.json).
     ThompsonBanditState thompson_bandits[NUM_REGIMES];
-    int initialized_thompson_bandits;       // 0 = not yet wired (Init phase only)
+    // v5.15.5.A.2.c — initialized_thompson_bandits → MASK_EZOO_THOMPSON_READY bit in init_flags
     int last_predicted_thompson_arm;        // Thompson's argmax-of-posterior at predict time (cfg=2 telemetry)
 
     // v5.14.0 — Ridge risk-parity blending state. Computed per slow-path
@@ -1000,10 +1015,11 @@ struct alignas(64) EnsembleModelZoo {
     // Default: zero-init via RidgeWeights_Init in _Init below.
     RidgeWeights<F> exit_ridge_state;
     char blend_mode[16];           // "weighted" or "selection" (cached from cfg)
-    // v5.10.0a.G.7 — kill-switch bitmask. Bit i set = horizon i disabled
-    // (skip predict + freeze its bandit weight). Set by parsing cfg's
-    // core_N_disabled_horizons CSV at boot via _SetDisabledHorizons.
-    uint32_t disabled_horizon_mask;
+    // v5.15.5.A.2.b — disabled_horizon_mask migrated to uint8_t via
+    // PER_ARM_FLAG_DECLARE_FIELDS() macro (declared near top of struct
+    // alongside arms_with_barriers_mask). Width chosen to match
+    // ENSEMBLE_HORIZON_MAX=8 (8 arms = 8 bits exactly). Consumer
+    // semantics unchanged: bit N = arm N disabled by cfg.disabled_horizons.
     // v5.10.0a.G.7 — regime hysteresis dampening. When current_regime
     // changes, blend OLD regime's weights with NEW for hysteresis cycles.
     int regime_transition_cycles_remaining;  // 0 = stable
@@ -1087,22 +1103,25 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     ezoo->regime_count = 0;
     ezoo->exit_predictor_count = 0;
     ezoo->buy_signal_count = 0;
-    ezoo->active = 0;
+    // v5.15.5.A.2.c — init_flags bit-pack: zero clears ACTIVE, BANDITS_READY,
+    // EXIT_BANDITS_READY, THOMPSON_READY bits all at once. Full bandit/Thompson
+    // init happens in _InitBandits / _InitExitBandits / _InitThompsonBandits
+    // AFTER LoadFromCfg populates buy_signal_count / exit_predictor_count;
+    // those Init helpers set the appropriate MASK_EZOO_*_READY bits on
+    // completion.
+    ezoo->init_flags = 0;
     // v5.10.0a.G.7 — bandit state zero-init (full bandit init happens in
     // _InitBandits AFTER LoadFromCfg / AutoDetect populates buy_signal_count
     // so we know how many arms).
     memset(ezoo->bandits, 0, sizeof(ezoo->bandits));
-    ezoo->initialized_bandits = 0;
     // v5.13.4 — exit-side bandit zero-init (full init in _InitExitBandits
     // AFTER LoadFromCfg populates exit_predictor_count).
     memset(ezoo->exit_bandits, 0, sizeof(ezoo->exit_bandits));
-    ezoo->initialized_exit_bandits        = 0;
     ezoo->last_predicted_exit_horizon_idx = -1;
     // v5.14.10.B — Thompson bandits zero-init (full init in _InitThompsonBandits
     // AFTER LoadFromCfg populates buy_signal_count). cfg.bandit_algorithm=0
     // path never reads thompson_bandits; safe to leave at zero in that mode.
     memset(ezoo->thompson_bandits, 0, sizeof(ezoo->thompson_bandits));
-    ezoo->initialized_thompson_bandits = 0;
     ezoo->last_predicted_thompson_arm  = -1;
     // v5.14.0 — Ridge state zero-init. Identity Σ + zero μ/L/y/w/output
     // weights. Cholesky succeeds out-of-box on identity Σ regularized
@@ -1115,7 +1134,10 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     ezoo->last_predicted_horizon_idx = -1;
     strncpy(ezoo->blend_mode, "weighted", sizeof(ezoo->blend_mode) - 1);
     ezoo->blend_mode[sizeof(ezoo->blend_mode) - 1] = '\0';
+    // v5.15.5.A.2.b — per-arm flag bitmaps zero-init.
+    // Adding a FOREACH_PER_ARM_FLAG entry requires a matching line here.
     ezoo->disabled_horizon_mask = 0;
+    ezoo->arms_with_barriers_mask = 0;
     ezoo->regime_transition_cycles_remaining = 0;
     ezoo->prev_regime_id = 0;
     // v5.10.0a.G.8 — reward state init
@@ -1194,7 +1216,7 @@ inline void EnsembleModelZoo_RecordPrediction(EnsembleModelZoo<F>* ezoo,
                                                 const float* per_arm_preds,
                                                 int n_arms,
                                                 float sample_price) {
-    if (!ezoo || !ezoo->active) return;
+    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE)) return;
     int slot = ezoo->reward_ring_head % EnsembleModelZoo<F>::REWARD_RING_SIZE;
     auto& rec = ezoo->reward_ring[slot];
     ezoo->predict_call_count++;
@@ -1270,7 +1292,7 @@ inline void EnsembleModelZoo_TickRewardsFromLookback(EnsembleModelZoo<F>* ezoo,
                                                        int forward_ticks,
                                                        int poll_interval,
                                                        double ic_floor) {
-    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return;
+    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return;
     if (poll_interval <= 0) poll_interval = 100;
     if (forward_ticks <= 0) forward_ticks = 1000;
     uint64_t lookback_calls = (uint64_t)((forward_ticks + poll_interval - 1)
@@ -1336,7 +1358,7 @@ template <unsigned F>
 inline void EnsembleModelZoo_TradeCloseReward(EnsembleModelZoo<F>* ezoo,
                                                 double realized_pnl_bps,
                                                 double reward_mult) {
-    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return;
+    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return;
     if (ezoo->predict_call_count == 0) return;  // no predictions yet
 
     // Find the most recent record that hasn't been trade-rewarded.
@@ -1385,7 +1407,7 @@ inline void EnsembleModelZoo_TradeCloseReward(EnsembleModelZoo<F>* ezoo,
 // eta: cfg.ensemble_bandit_eta (Bandit-Exp3 learning rate; 0.1 default)
 // min_warmup: cfg.ensemble_min_warmup_predictions (per regime; 100 default)
 //
-// Sets ezoo->initialized_bandits = 1 to gate G.7 dispatch (won't read bandits
+// Sets BITMAP_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY) to gate G.7 dispatch (won't read bandits
 // before they're initialized).
 template <unsigned F>
 inline void EnsembleModelZoo_InitBandits(EnsembleModelZoo<F>* ezoo,
@@ -1400,8 +1422,8 @@ inline void EnsembleModelZoo_InitBandits(EnsembleModelZoo<F>* ezoo,
     if (n_arms < 2) {
         // Single-arm or empty ensemble — no point in bandits. Mark
         // initialized so dispatch doesn't loop forever, but bandits won't
-        // be used (ezoo->active gates that anyway).
-        ezoo->initialized_bandits = 1;
+        // be used (BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) gates that anyway).
+        BITMAP_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY);
         return;
     }
     for (int r = 0; r < NUM_REGIMES; ++r) {
@@ -1422,7 +1444,7 @@ inline void EnsembleModelZoo_InitBandits(EnsembleModelZoo<F>* ezoo,
             Bandit_SetArmName(&ezoo->bandits[r], a, nm);
         }
     }
-    ezoo->initialized_bandits = 1;
+    BITMAP_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY);
 }
 
 // v5.13.4 — sell-side bandit init. Mirrors _InitBandits above for the
@@ -1445,14 +1467,14 @@ inline void EnsembleModelZoo_InitExitBandits(EnsembleModelZoo<F>* ezoo,
         // No exit models loaded — graceful skip. exit_bandits stay
         // zero-init; HandleFill attribution check
         // initialized_exit_bandits=0 → no Bandit_Update fires.
-        ezoo->initialized_exit_bandits = 0;
+        BITMAP_CLR(ezoo->init_flags, MASK_EZOO_EXIT_BANDITS_READY);
         return;
     }
     if (n_arms < 2) {
         // Single-arm: no point in bandits, but mark initialized so
         // HandleFill can call Bandit_Update without crashing
         // (single-arm Update is a no-op accumulating reward stats).
-        ezoo->initialized_exit_bandits = 1;
+        BITMAP_SET(ezoo->init_flags, MASK_EZOO_EXIT_BANDITS_READY);
         return;
     }
     for (int r = 0; r < NUM_REGIMES; ++r) {
@@ -1469,7 +1491,7 @@ inline void EnsembleModelZoo_InitExitBandits(EnsembleModelZoo<F>* ezoo,
             Bandit_SetArmName(&ezoo->exit_bandits[r], a, nm);
         }
     }
-    ezoo->initialized_exit_bandits = 1;
+    BITMAP_SET(ezoo->init_flags, MASK_EZOO_EXIT_BANDITS_READY);
 }
 
 //======================================================================================================
@@ -1500,13 +1522,13 @@ inline void EnsembleModelZoo_InitThompsonBandits(EnsembleModelZoo<F>* ezoo,
     if (n_arms < 1) {
         // No primary models loaded — graceful skip. thompson_bandits stay
         // zero-init; dispatch's nullptr check fallbacks to uniform weights.
-        ezoo->initialized_thompson_bandits = 0;
+        BITMAP_CLR(ezoo->init_flags, MASK_EZOO_THOMPSON_READY);
         return;
     }
     if (n_arms < 2) {
         // Single-arm: Thompson degrades to "always pick arm 0"; mark
         // initialized so dispatch fires without crashing.
-        ezoo->initialized_thompson_bandits = 1;
+        BITMAP_SET(ezoo->init_flags, MASK_EZOO_THOMPSON_READY);
         return;
     }
     // Per-regime init. Each regime gets its own RNG state derived from the
@@ -1517,7 +1539,7 @@ inline void EnsembleModelZoo_InitThompsonBandits(EnsembleModelZoo<F>* ezoo,
         Thompson_Init(&ezoo->thompson_bandits[r], n_arms,
                       mu_prior, precision_prior, precision_obs, per_regime_seed);
     }
-    ezoo->initialized_thompson_bandits = 1;
+    BITMAP_SET(ezoo->init_flags, MASK_EZOO_THOMPSON_READY);
 }
 
 //======================================================================================================
@@ -1531,7 +1553,7 @@ inline void EnsembleModelZoo_SetDisabledHorizons(EnsembleModelZoo<F>* ezoo,
                                                    const char* csv) {
     if (!ezoo) return;
     EnsembleModelZoo_EnsurePrimary(ezoo);
-    ezoo->disabled_horizon_mask = 0;
+    ezoo->disabled_horizon_mask = 0;  // uint8_t per FOREACH_PER_ARM_FLAG
     if (!csv || csv[0] == '\0') return;
     const char* p = csv;
     while (*p) {
@@ -1566,7 +1588,7 @@ inline void EnsembleModelZoo_Free(EnsembleModelZoo<F> *ezoo) {
     ezoo->regime_count = 0;
     ezoo->exit_predictor_count = 0;
     ezoo->buy_signal_count = 0;
-    ezoo->active = 0;
+    BITMAP_CLR(ezoo->init_flags, MASK_EZOO_ACTIVE);
     // v5.14.2.D — clear v5.14.1.E exit-side state for semantic completeness.
     // Init compensates in the hot-swap Free→Init→Load path, but Free called
     // outside that path (process exit, future error-recovery code) shouldn't
@@ -1587,7 +1609,7 @@ inline void EnsembleModelZoo_Free(EnsembleModelZoo<F> *ezoo) {
 //   try load <base_run_path>_horizon_<H>/<role>.json for each role
 //
 // Returns total models loaded across all roles + horizons. Sets
-// ezoo->active=1 if any role got at least one horizon loaded.
+// BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE)=1 if any role got at least one horizon loaded.
 template <unsigned F>
 inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
                                          const char *base_run_path,
@@ -1736,7 +1758,7 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
     }
 
     if (total_loaded > 0) {
-        ezoo->active = 1;
+        BITMAP_SET(ezoo->init_flags, MASK_EZOO_ACTIVE);
         fprintf(stderr, "[ML] ensemble zoo: %d total models loaded "
                         "(barrier=%d, regime=%d, exit=%d, buy_signal=%d) "
                         "across %d horizons\n",
@@ -1804,12 +1826,12 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
 //   4. Function discovers all _horizon_* siblings + populates ezoo
 //
 // Returns total models loaded across all roles + horizons. Sets
-// ezoo->active=1 if any role got at least one horizon loaded; logs
+// BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE)=1 if any role got at least one horizon loaded; logs
 // the discovered horizon set.
 //
 // Backward-compat:
 //   - empty base_dir → no-op, returns 0
-//   - no siblings on disk → returns 0, ezoo->active stays 0; engine
+//   - no siblings on disk → returns 0, BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) stays 0; engine
 //     falls back to single-zoo path
 //   - inconsistent grid_member_count across siblings → log error +
 //     skip inconsistent ones (load only those that agree on count)
@@ -2012,7 +2034,7 @@ inline int EnsembleModelZoo_AutoDetectFromDir(
     // (parity-check Finding #2 consume-side closure; Option C).
     // Validator extracted into EnsembleZoo_VerifyGridMemberConsistency for
     // unit-testable isolation; runs only when models actually loaded.
-    if (total > 0 && ezoo->active) {
+    if (total > 0 && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE)) {
         int validator_rc = EnsembleZoo_VerifyGridMemberConsistency(
             ezoo, held_out_stamp_secret, gap_threshold);
         if (validator_rc == 0) {
@@ -2022,7 +2044,7 @@ inline int EnsembleModelZoo_AutoDetectFromDir(
         }
     }
 
-    if (total > 0 && ezoo->active) {
+    if (total > 0 && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE)) {
         // Build a comma-separated list for the log
         char hlog[256];
         int off = 0;
@@ -2080,7 +2102,7 @@ template <unsigned F>
 inline int EnsembleModelZoo_SaveBanditState(
     const EnsembleModelZoo<F>* ezoo, const char* base_dir,
     const char* const* regime_names) {
-    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return 0;
+    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return 0;
     if (!base_dir || base_dir[0] == '\0') return 0;
     char path[512];
     snprintf(path, sizeof(path), "%s/bandit_state.json", base_dir);
@@ -2102,7 +2124,7 @@ template <unsigned F>
 inline int EnsembleModelZoo_SaveExitBanditState(
     const EnsembleModelZoo<F>* ezoo, const char* base_dir,
     const char* const* regime_names) {
-    if (!ezoo || !ezoo->initialized_exit_bandits) return 0;
+    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_EXIT_BANDITS_READY)) return 0;
     if (ezoo->exit_predictor_count < 2) return 0;  // single-arm: nothing to save
     if (!base_dir || base_dir[0] == '\0') return 0;
     char path[512];
@@ -2125,7 +2147,7 @@ inline int EnsembleModelZoo_SaveExitBanditState(
 template <unsigned F>
 inline int EnsembleModelZoo_LoadBanditState(
     EnsembleModelZoo<F>* ezoo, const char* base_dir) {
-    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return 0;
+    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return 0;
     if (!base_dir || base_dir[0] == '\0') return 0;
     char path[512];
     snprintf(path, sizeof(path), "%s/bandit_state.json", base_dir);
@@ -2156,7 +2178,7 @@ inline int EnsembleModelZoo_LoadBanditState(
 template <unsigned F>
 inline int EnsembleModelZoo_LoadExitBanditState(
     EnsembleModelZoo<F>* ezoo, const char* base_dir) {
-    if (!ezoo || !ezoo->initialized_exit_bandits) return 0;
+    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_EXIT_BANDITS_READY)) return 0;
     if (ezoo->exit_predictor_count < 2) return 0;  // single-arm: skip load
     if (!base_dir || base_dir[0] == '\0') return 0;
     char path[512];
@@ -2197,7 +2219,7 @@ template <unsigned F>
 inline int EnsembleModelZoo_SaveThompsonState(
     const EnsembleModelZoo<F>* ezoo, const char* base_dir,
     const char* const* regime_names) {
-    if (!ezoo || !ezoo->initialized_thompson_bandits) return 0;
+    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_THOMPSON_READY)) return 0;
     if (ezoo->primary_count < 2) return 0;  // single-arm: nothing to save
     if (!base_dir || base_dir[0] == '\0') return 0;
     char path[512];
@@ -2277,7 +2299,7 @@ inline int EnsembleModelZoo_SaveThompsonState(
 template <unsigned F>
 inline int EnsembleModelZoo_LoadThompsonState(
     EnsembleModelZoo<F>* ezoo, const char* base_dir) {
-    if (!ezoo || !ezoo->initialized_thompson_bandits) return 0;
+    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_THOMPSON_READY)) return 0;
     if (ezoo->primary_count < 2) return 0;
     if (!base_dir || base_dir[0] == '\0') return 0;
     char path[512];
@@ -2408,7 +2430,7 @@ inline int EnsembleModelZoo_LoadThompsonState(
 template <unsigned F>
 inline int EnsembleModelZoo_LoadBanditStateFromPath(
     EnsembleModelZoo<F>* ezoo, const char* path, int skip_bundle_check) {
-    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return 0;
+    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return 0;
     if (!path || path[0] == '\0') return 0;
     char expected_id[65];
     if (skip_bundle_check) {
@@ -2451,7 +2473,7 @@ inline void EnsembleModelZoo_SetBanditSaveInterval(
 template <unsigned F>
 inline void EnsembleModelZoo_MaybeSaveBanditPeriodic(
     EnsembleModelZoo<F>* ezoo, int updates_this_call) {
-    if (!ezoo || !ezoo->active || !ezoo->initialized_bandits) return;
+    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return;
     if (ezoo->bandit_save_interval <= 0) return;
     if (ezoo->bandit_save_path[0] == '\0') return;
     if (updates_this_call <= 0) return;
@@ -2588,9 +2610,9 @@ inline int EnsembleModelZoo_IsReadyForInference(const EnsembleModelZoo<F>* ezoo)
     // - LoadExitBanditState: no boolean to check; idempotent overlay
     // - InitThompsonBandits (v5.14.10.C): initialized_thompson_bandits set when primary_count>=2
     // - LoadThompsonState (v5.14.10.C): no boolean to check; idempotent overlay (skipped silently when initialized=0)
-    if (ezoo->primary_count >= 2 && !ezoo->initialized_bandits) return 0;
-    if (ezoo->exit_predictor_count >= 2 && !ezoo->initialized_exit_bandits) return 0;
-    if (ezoo->primary_count >= 2 && !ezoo->initialized_thompson_bandits) return 0;
+    if (ezoo->primary_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return 0;
+    if (ezoo->exit_predictor_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_EXIT_BANDITS_READY)) return 0;
+    if (ezoo->primary_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_THOMPSON_READY)) return 0;
     if (ezoo->blend_mode[0] == '\0') return 0;
     return 1;
 }

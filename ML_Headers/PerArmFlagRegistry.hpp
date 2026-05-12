@@ -60,7 +60,8 @@
 
 #include "../MemHeaders/BitmapMacros.hpp"  // BITMAP_BIT_U8 + BITMAP_* accessors
 
-namespace tt {
+// NOTE: deliberately NOT wrapped in `namespace tt` — see EzooInitFlagRegistry.hpp
+// for rationale (matches CoreModelZoo.hpp consumer convention).
 
 //======================================================================================================
 // [REGISTRY TUPLE]
@@ -123,15 +124,20 @@ enum {
     uint8_t field;  /* doc */
 
 //======================================================================================================
-// [INIT MACRO — zero all per-arm flag fields]
+// [INIT — zero all per-arm flag fields]
 //======================================================================================================
-// Use inside EnsembleModelZoo_Init to reset all per-arm flag bitmaps.
-// Expansion: `ezoo->disabled_horizon_mask = 0; ezoo->arms_with_barriers_mask = 0; ...`
-#define PER_ARM_FLAG_INIT_FIELDS(ezoo_ptr) \
-    FOREACH_PER_ARM_FLAG(PER_ARM_FLAG_INIT_FIELD_ONE_)
-
-#define PER_ARM_FLAG_INIT_FIELD_ONE_(id, field, doc) \
-    (ezoo_ptr)->field = 0;
+// Standard C preprocessor doesn't propagate outer-macro parameters into
+// inner FOREACH expansions cleanly, so init uses explicit per-field
+// lines. Adding a new FOREACH_PER_ARM_FLAG entry requires adding ONE
+// line here to keep them in sync (compile-time enforcement: missed
+// init line = field stays uninitialized; first read triggers
+// non-deterministic behavior that's caught by parity tests).
+//
+// Future improvement candidate: wrap per-arm flag fields in a nested
+// struct PerArmFlagFields, memset that struct in Init. Trade-off:
+// adds `ezoo->per_arm_flags.X` access pattern indirection at ~96
+// consumer sites (boundary-stable refactor cost). Deferred unless
+// 5+ per-arm flag entries make explicit-init unwieldy.
 
 //======================================================================================================
 // [TOSTRING — for telemetry / debug]
@@ -159,7 +165,5 @@ static_assert(PER_ARM_FLAG_DISABLED == 0,
               "DISABLED must be the first per-arm flag entry (legacy v5.14 position)");
 static_assert(PER_ARM_FLAG_COUNT >= 2,
               "Must have at least DISABLED + LOADED_BARRIERS entries for v5.15.5");
-
-} // namespace tt
 
 #endif // PER_ARM_FLAG_REGISTRY_HPP

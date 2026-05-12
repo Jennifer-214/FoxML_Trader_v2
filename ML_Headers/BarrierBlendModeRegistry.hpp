@@ -53,7 +53,9 @@
 
 #include "../MemHeaders/BitmapMacros.hpp"  // BITMAP_BIT_U8 for MODE_F_* constants (item 20)
 
-namespace tt {
+// NOTE: deliberately NOT wrapped in `namespace tt` — matches CoreModelZoo.hpp +
+// StrategyParameters.hpp consumer convention; MODE_FLAGS[] table + MASK constants
+// need to be accessible from template functions without namespace qualification.
 
 //======================================================================================================
 // [MODE_F_* BIT-PACKED FLAGS]
@@ -188,7 +190,5 @@ static_assert((MODE_FLAGS[MODE_BARRIER_BLEND_BOTH_BLEND_DRIVES]
 static_assert((MODE_FLAGS[MODE_BARRIER_BLEND_BOTH_DOMINANT_DRIVES]
                 & MODE_F_SHADOW_ACTIVE) != 0,
               "BOTH_DOMINANT_DRIVES must have shadow active for telemetry");
-
-} // namespace tt
 
 #endif // BARRIER_BLEND_MODE_REGISTRY_HPP

@@ -13120,7 +13120,7 @@ e3_skip_load:;
         EnsembleModelZoo<FP> ezoo;
         EnsembleModelZoo_Init(&ezoo);
         check("v5.10.0a.G.7: EnsembleModelZoo init clears initialized_bandits flag",
-              ezoo.initialized_bandits == 0);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_BANDITS_READY) == 0);
         // Simulate populated ezoo (bypass LoadFromCfg for unit test)
         ezoo.buy_signal_count = 3;
         ezoo.horizon_ticks_at_idx[0] = 100;
@@ -13128,7 +13128,7 @@ e3_skip_load:;
         ezoo.horizon_ticks_at_idx[2] = 1000;
         EnsembleModelZoo_InitBandits(&ezoo, 0.1, 100);
         check("v5.10.0a.G.7: InitBandits sets initialized_bandits=1",
-              ezoo.initialized_bandits == 1);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_BANDITS_READY) == 1);
         // Each regime's bandit has n_arms = 3
         for (int r = 0; r < NUM_REGIMES; ++r) {
             char msg[64];
@@ -13209,7 +13209,7 @@ e3_skip_load:;
         // === Test G.8.1: RecordPrediction populates ring + advances head ===
         EnsembleModelZoo<FP> ezoo;
         EnsembleModelZoo_Init(&ezoo);
-        ezoo.active = 1;
+        BITMAP_SET(ezoo.init_flags, MASK_EZOO_ACTIVE);
         ezoo.buy_signal_count = 4;
         ezoo.horizon_ticks_at_idx[0] = 100;
         ezoo.horizon_ticks_at_idx[1] = 500;
@@ -13268,7 +13268,7 @@ e3_skip_load:;
         // === Test G.8.5: TradeCloseReward finds most recent record + marks rewarded_trade ===
         EnsembleModelZoo<FP> ezoo2;
         EnsembleModelZoo_Init(&ezoo2);
-        ezoo2.active = 1;
+        BITMAP_SET(ezoo2.init_flags, MASK_EZOO_ACTIVE);
         ezoo2.buy_signal_count = 3;
         ezoo2.horizon_ticks_at_idx[0] = 100;
         ezoo2.horizon_ticks_at_idx[1] = 500;
@@ -13294,7 +13294,7 @@ e3_skip_load:;
         // === Test G.8.6: UpdateDrift demotes arm with sustained low IC ===
         EnsembleModelZoo<FP> ezoo3;
         EnsembleModelZoo_Init(&ezoo3);
-        ezoo3.active = 1;
+        BITMAP_SET(ezoo3.init_flags, MASK_EZOO_ACTIVE);
         ezoo3.buy_signal_count = 2;
         ezoo3.horizon_ticks_at_idx[0] = 100;
         ezoo3.horizon_ticks_at_idx[1] = 500;
@@ -13342,7 +13342,7 @@ e3_skip_load:;
         // === Test G.8.8: disabled-horizon mask skipped during reward ===
         EnsembleModelZoo<FP> ezoo4;
         EnsembleModelZoo_Init(&ezoo4);
-        ezoo4.active = 1;
+        BITMAP_SET(ezoo4.init_flags, MASK_EZOO_ACTIVE);
         ezoo4.buy_signal_count = 3;
         ezoo4.horizon_ticks_at_idx[0] = 100;
         ezoo4.horizon_ticks_at_idx[1] = 500;
@@ -13483,7 +13483,7 @@ e3_skip_load:;
         // === Test G.9.8: ComputeBundleId is deterministic ===
         EnsembleModelZoo<FP> ez_a;
         EnsembleModelZoo_Init(&ez_a);
-        ez_a.active = 1;
+        BITMAP_SET(ez_a.init_flags, MASK_EZOO_ACTIVE);
         ez_a.buy_signal_count = 3;
         // Inject deterministic training_fingerprints
         const char* fps[] = {"aaaaaaaaffff1111", "bbbbbbbbffff2222", "ccccccccffff3333"};
@@ -13517,7 +13517,7 @@ e3_skip_load:;
         // succeeds even when bundle id would mismatch ===
         EnsembleModelZoo<FP> ez_src;
         EnsembleModelZoo_Init(&ez_src);
-        ez_src.active = 1;
+        BITMAP_SET(ez_src.init_flags, MASK_EZOO_ACTIVE);
         ez_src.buy_signal_count = 3;
         ez_src.horizon_ticks_at_idx[0] = 100;
         ez_src.horizon_ticks_at_idx[1] = 500;
@@ -13556,7 +13556,7 @@ e3_skip_load:;
             // Bundle IDs deliberately mismatch.
             EnsembleModelZoo<FP> ez_dst;
             EnsembleModelZoo_Init(&ez_dst);
-            ez_dst.active = 1;
+            BITMAP_SET(ez_dst.init_flags, MASK_EZOO_ACTIVE);
             ez_dst.buy_signal_count = 3;
             ez_dst.horizon_ticks_at_idx[0] = 100;
             ez_dst.horizon_ticks_at_idx[1] = 500;
@@ -13650,7 +13650,7 @@ e3_skip_load:;
         EnsembleModelZoo_Init(&ez1);
         EnsembleModelZoo_Init(&ez2);
         for (auto* ez : {&ez1, &ez2}) {
-            ez->active = 1;
+            BITMAP_SET(ez->init_flags, MASK_EZOO_ACTIVE);
             ez->buy_signal_count = 4;
             ez->horizon_ticks_at_idx[0] = 100;
             ez->horizon_ticks_at_idx[1] = 500;
@@ -15667,7 +15667,7 @@ e3_skip_load:;
 
                 EnsembleModelZoo<FP> ezoo;
                 EnsembleModelZoo_Init(&ezoo);
-                ezoo.active = 1;
+                BITMAP_SET(ezoo.init_flags, MASK_EZOO_ACTIVE);
                 ezoo.buy_signal_count = 3;
                 for (int i = 0; i < 3; ++i) {
                     ezoo.buy_signal[i].backend = MODEL_BACKEND_XGBOOST;
@@ -15715,7 +15715,7 @@ e3_skip_load:;
 
                 EnsembleModelZoo<FP> ezoo;
                 EnsembleModelZoo_Init(&ezoo);
-                ezoo.active = 1;
+                BITMAP_SET(ezoo.init_flags, MASK_EZOO_ACTIVE);
                 ezoo.buy_signal_count = 3;
                 for (int i = 0; i < 3; ++i) {
                     ezoo.buy_signal[i].backend = MODEL_BACKEND_XGBOOST;
@@ -15761,7 +15761,7 @@ e3_skip_load:;
 
                 EnsembleModelZoo<FP> ezoo;
                 EnsembleModelZoo_Init(&ezoo);
-                ezoo.active = 1;
+                BITMAP_SET(ezoo.init_flags, MASK_EZOO_ACTIVE);
                 ezoo.buy_signal_count = 3;
                 for (int i = 0; i < 3; ++i) {
                     ezoo.buy_signal[i].backend = MODEL_BACKEND_XGBOOST;
@@ -16027,14 +16027,14 @@ e3_skip_load:;
         int n = EnsembleModelZoo_AutoDetectFromDir(&ezoo, "",
                                                     MODEL_BACKEND_XGBOOST);
         check("v5.10.0a.G.5: AutoDetect empty path returns 0", n == 0);
-        check("v5.10.0a.G.5: AutoDetect empty path leaves active=0", ezoo.active == 0);
+        check("v5.10.0a.G.5: AutoDetect empty path leaves active=0", BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_ACTIVE) == 0);
 
         // === Test G.5.2: AutoDetectFromDir with bad parent dir returns 0 ===
         n = EnsembleModelZoo_AutoDetectFromDir(&ezoo,
                                                  "/nonexistent_v5100aG5/run",
                                                  MODEL_BACKEND_XGBOOST);
         check("v5.10.0a.G.5: AutoDetect bad parent returns 0", n == 0);
-        check("v5.10.0a.G.5: AutoDetect bad parent leaves active=0", ezoo.active == 0);
+        check("v5.10.0a.G.5: AutoDetect bad parent leaves active=0", BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_ACTIVE) == 0);
 
         // === Test G.5.3: AutoDetectFromDir with no _horizon_* siblings ===
         // Use /tmp (real dir, but no test_v5100aG5_horizon_* siblings).
@@ -16042,7 +16042,7 @@ e3_skip_load:;
                                                  "/tmp/v5100aG5_no_siblings",
                                                  MODEL_BACKEND_XGBOOST);
         check("v5.10.0a.G.5: AutoDetect no siblings returns 0", n == 0);
-        check("v5.10.0a.G.5: AutoDetect no siblings leaves active=0", ezoo.active == 0);
+        check("v5.10.0a.G.5: AutoDetect no siblings leaves active=0", BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_ACTIVE) == 0);
 
         // === Test G.5.4: AutoDetectFromDir creates synthetic siblings, finds them ===
         // Make 3 empty horizon dirs; AutoDetect scans + counts them.
@@ -16069,7 +16069,7 @@ e3_skip_load:;
             check("v5.10.0a.G.5: AutoDetect with empty horizon dirs returns 0 models",
                   n == 0);
             check("v5.10.0a.G.5: AutoDetect with no model files leaves active=0",
-                  ezoo.active == 0);
+                  BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_ACTIVE) == 0);
 
             // Cleanup
             char rmcmd[400];
@@ -16164,19 +16164,19 @@ e3_skip_load:;
         ezoo.regime_count = 3;
         ezoo.exit_predictor_count = 2;
         ezoo.buy_signal_count = 7;
-        ezoo.active = 1;
+        BITMAP_SET(ezoo.init_flags, MASK_EZOO_ACTIVE);
         EnsembleModelZoo_Init(&ezoo);
         check("v5.10.0a.G.3: Init zeros barrier_count",     ezoo.barrier_count == 0);
         check("v5.10.0a.G.3: Init zeros regime_count",      ezoo.regime_count == 0);
         check("v5.10.0a.G.3: Init zeros exit_predictor_count", ezoo.exit_predictor_count == 0);
         check("v5.10.0a.G.3: Init zeros buy_signal_count",  ezoo.buy_signal_count == 0);
-        check("v5.10.0a.G.3: Init clears active flag",      ezoo.active == 0);
+        check("v5.10.0a.G.3: Init clears active flag",      BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_ACTIVE) == 0);
 
         // === Test G.3.3: EnsembleModelZoo_Free is callable + zeros active ===
-        ezoo.active = 1;
+        BITMAP_SET(ezoo.init_flags, MASK_EZOO_ACTIVE);
         ezoo.barrier_count = 3;
         EnsembleModelZoo_Free(&ezoo);
-        check("v5.10.0a.G.3: Free clears active flag",      ezoo.active == 0);
+        check("v5.10.0a.G.3: Free clears active flag",      BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_ACTIVE) == 0);
         check("v5.10.0a.G.3: Free zeros barrier_count",     ezoo.barrier_count == 0);
 
         // === Test G.3.4: EnsembleModelZoo_LoadFromCfg with no horizons no-op ===
@@ -16188,7 +16188,7 @@ e3_skip_load:;
         check("v5.10.0a.G.3: LoadFromCfg with horizon_count=0 returns 0",
               loaded == 0);
         check("v5.10.0a.G.3: LoadFromCfg with horizon_count=0 leaves active=0",
-              ezoo.active == 0);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_ACTIVE) == 0);
 
         // === Test G.3.5: LoadFromCfg with non-existent paths returns 0 ===
         // No models present at the made-up base path; loader gracefully
@@ -16202,7 +16202,7 @@ e3_skip_load:;
         check("v5.10.0a.G.3: LoadFromCfg with bad paths returns 0 (no models found)",
               loaded == 0);
         check("v5.10.0a.G.3: LoadFromCfg with bad paths keeps active=0",
-              ezoo.active == 0);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_ACTIVE) == 0);
 
         EnsembleModelZoo_Free(&ezoo);
     }
@@ -18505,7 +18505,7 @@ e3_skip_load:;
 
         // === Defaults post-Init ===
         check("v5.13.4.A: initialized_exit_bandits defaults to 0",
-              ezoo.initialized_exit_bandits == 0);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_EXIT_BANDITS_READY) == 0);
         check("v5.13.4.A: last_predicted_exit_horizon_idx defaults to -1",
               ezoo.last_predicted_exit_horizon_idx == -1);
         check("v5.13.4.A: exit_predictor_count defaults to 0",
@@ -18514,13 +18514,13 @@ e3_skip_load:;
         // === No exit models loaded → InitExitBandits skips gracefully ===
         EnsembleModelZoo_InitExitBandits(&ezoo, 0.1, 100);
         check("v5.13.4.A: InitExitBandits with 0 models leaves init=0",
-              ezoo.initialized_exit_bandits == 0);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_EXIT_BANDITS_READY) == 0);
 
         // === Single-arm path → InitExitBandits marks initialized ===
         ezoo.exit_predictor_count = 1;
         EnsembleModelZoo_InitExitBandits(&ezoo, 0.1, 100);
         check("v5.13.4.A: InitExitBandits with 1 model marks init=1 (single-arm)",
-              ezoo.initialized_exit_bandits == 1);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_EXIT_BANDITS_READY) == 1);
 
         // === Multi-arm path → bandits actually populated ===
         EnsembleModelZoo<64> ezoo2;
@@ -18531,7 +18531,7 @@ e3_skip_load:;
         ezoo2.horizon_ticks_at_idx[2] = 10000;
         EnsembleModelZoo_InitExitBandits(&ezoo2, 0.1, 100);
         check("v5.13.4.A: InitExitBandits with 3 models marks init=1",
-              ezoo2.initialized_exit_bandits == 1);
+              BITMAP_IS_SET(ezoo2.init_flags, MASK_EZOO_EXIT_BANDITS_READY) == 1);
         // Per-regime bandits should have 3 arms each
         check("v5.13.4.A: exit_bandits[0].n_arms == 3",
               ezoo2.exit_bandits[0].n_arms == 3);
@@ -18543,7 +18543,7 @@ e3_skip_load:;
         for (int r = 0; r < NUM_REGIMES; ++r) {
             Bandit_Init(&ezoo2.bandits[r], 3, 0.05, 0.1, 1.0, 100, 200);
         }
-        ezoo2.initialized_bandits = 1;
+        BITMAP_SET(ezoo2.init_flags, MASK_EZOO_BANDITS_READY);
         // Snapshot buy_bandit cum_reward[0]
         double buy_cum_before = ezoo2.bandits[0].cum_reward[0];
         // Update exit_bandit
@@ -20276,17 +20276,17 @@ e3_skip_load:;
 
         // Simulate: primary_count >= 2 (would need bandits) but initialized_bandits=0
         ezoo.primary_count = 3;
-        ezoo.initialized_bandits = 0;
+        BITMAP_CLR(ezoo.init_flags, MASK_EZOO_BANDITS_READY);
         check("v5.14.2.E.1 contract: primary_count>=2 + initialized_bandits=0 → NOT ready",
               EnsembleModelZoo_IsReadyForInference(&ezoo) == 0);
 
         // Now mark bandits initialized (as if InitBandits ran)
-        ezoo.initialized_bandits = 1;
+        BITMAP_SET(ezoo.init_flags, MASK_EZOO_BANDITS_READY);
         // v5.14.10.C — IsReadyForInference now also requires Thompson init when
         // primary_count >= 2 (FOREACH_ENSEMBLE_POST_LOAD extension landed in .C
         // adds init_thompson_bandits as canonical step 8). Test-mock both flags
         // since this test bypasses PostLoadSetup helper.
-        ezoo.initialized_thompson_bandits = 1;
+        BITMAP_SET(ezoo.init_flags, MASK_EZOO_THOMPSON_READY);
         check("v5.14.2.E.1 contract: after InitBandits + InitThompsonBandits flags set → ready",
               EnsembleModelZoo_IsReadyForInference(&ezoo) == 1);
     }
@@ -20465,7 +20465,7 @@ e3_skip_load:;
         ezoo.horizon_ticks_at_idx[1] = 500;
         ezoo.horizon_ticks_at_idx[2] = 1000;
         ezoo.barrier_count = 3;  // simulate post-load state
-        ezoo.active = 1;
+        BITMAP_SET(ezoo.init_flags, MASK_EZOO_ACTIVE);
 
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
         int rc = tt::EngineSharded_HotSwapEnsemble<64>(
@@ -20474,7 +20474,7 @@ e3_skip_load:;
             /*swap_backend=*/MODEL_BACKEND_XGBOOST);
         check("v5.14.2: HotSwap valid horizons + invalid dir → returns 0", rc == 0);
         check("v5.14.2: HotSwap on failure leaves ezoo in empty post-Init state",
-              ezoo.barrier_count == 0 && ezoo.active == 0);
+              ezoo.barrier_count == 0 && BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_ACTIVE) == 0);
     }
     {
         // Test 6 — .D Free completeness: Free() must zero v5.14.1.E
@@ -20490,7 +20490,7 @@ e3_skip_load:;
         ezoo.exit_reward_ring[3].predictions[0] = 0.7f;
         ezoo.exit_reward_ring_head = 7;
         ezoo.exit_predict_call_count = 100;
-        ezoo.active = 1;
+        BITMAP_SET(ezoo.init_flags, MASK_EZOO_ACTIVE);
 
         EnsembleModelZoo_Free(&ezoo);
 
@@ -20507,7 +20507,7 @@ e3_skip_load:;
         check("v5.14.2.D Free: exit_predict_call_count reset",
               ezoo.exit_predict_call_count == 0);
         check("v5.14.2.D Free: active flag cleared",
-              ezoo.active == 0);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_ACTIVE) == 0);
     }
 
     // ==================================================================
@@ -22814,12 +22814,12 @@ e3_skip_load:;
         ezoo.primary_count = 4;
         // Pre-init: state should be zero
         check("v5.14.10.B: pre-Init thompson_bandits initialized=0",
-              ezoo.initialized_thompson_bandits == 0);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_THOMPSON_READY) == 0);
         EnsembleModelZoo_InitThompsonBandits(&ezoo,
             /*mu_prior=*/0.0, /*precision_prior=*/1.0, /*precision_obs=*/1.0,
             /*rng_seed=*/42ULL);
         check("v5.14.10.B: post-Init thompson_bandits initialized=1 (primary_count=4)",
-              ezoo.initialized_thompson_bandits == 1);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_THOMPSON_READY) == 1);
         // Each regime's state should have prior applied to all arms
         bool all_priored = true;
         for (int r = 0; r < NUM_REGIMES; ++r) {
@@ -22851,11 +22851,11 @@ e3_skip_load:;
         ezoo.primary_count = 0;
         EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
         check("v5.14.10.B: InitThompsonBandits with primary_count=0 → initialized=0 (graceful skip)",
-              ezoo.initialized_thompson_bandits == 0);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_THOMPSON_READY) == 0);
         ezoo.primary_count = 1;
         EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
         check("v5.14.10.B: InitThompsonBandits with primary_count=1 → initialized=1 (single-arm degenerate but safe)",
-              ezoo.initialized_thompson_bandits == 1);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_THOMPSON_READY) == 1);
     }
 
     // ─── Test B.7: SLOW_PATH_GATE predicates fire correctly ───
@@ -23074,11 +23074,11 @@ e3_skip_load:;
         strncpy(cfg.ensemble_blend_mode, "weighted", sizeof(cfg.ensemble_blend_mode) - 1);
         // Pre-PostLoadSetup: thompson init flag should be 0
         check("v5.14.10.C: pre-PostLoadSetup initialized_thompson_bandits == 0",
-              ezoo.initialized_thompson_bandits == 0);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_THOMPSON_READY) == 0);
         EnsembleModelZoo_PostLoadSetup<64>(&ezoo, cfg, /*core_id=*/0,
                                             "/tmp/v5_14_10_c_post_load_test_dir");
         check("v5.14.10.C: post-PostLoadSetup initialized_thompson_bandits == 1 (init step ran)",
-              ezoo.initialized_thompson_bandits == 1);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_THOMPSON_READY) == 1);
     }
 
     // ===========================================================================

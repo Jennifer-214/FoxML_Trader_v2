@@ -335,7 +335,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                         FPN_ToDouble(cfg.gap_acceptable_threshold),
                         cfg.held_out_gate_strict,
                         cfg.acknowledge_cross_binary_version_drift);
-                    if (n_loaded > 0 && ml_ensemble_zoos[i].active) {
+                    if (n_loaded > 0 && BITMAP_IS_SET(ml_ensemble_zoos[i].init_flags, MASK_EZOO_ACTIVE)) {
                         fprintf(stderr, "[backtest sharded] core %d: ensemble active "
                                         "(%d horizons; %d total models)\n",
                                 i, ml_ensemble_zoos[i].buy_signal_count, n_loaded);
@@ -978,8 +978,8 @@ done:
     // case but final flush ensures end-state is persisted even if
     // total updates < interval.
     for (int i = 0; i < num_cores; ++i) {
-        if (ml_ensemble_zoos[i].active &&
-            ml_ensemble_zoos[i].initialized_bandits &&
+        if (BITMAP_IS_SET(ml_ensemble_zoos[i].init_flags, MASK_EZOO_ACTIVE) &&
+            BITMAP_IS_SET(ml_ensemble_zoos[i].init_flags, MASK_EZOO_BANDITS_READY) &&
             cfg.core_model_dir[i][0]) {
             int saved = EnsembleModelZoo_SaveBanditState(
                 &ml_ensemble_zoos[i], cfg.core_model_dir[i],
