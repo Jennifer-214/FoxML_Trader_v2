@@ -908,6 +908,25 @@ inline int CoreModelZoo_VerifyExpected(const CoreModelZoo<F> *zoo, const char *d
 //   - RidgeWeights<F> (AVX-512 vectorized; per CLAUDE.md item 25)
 //   - ThompsonBanditState (gained alignas/padding per v5.14.11.B.7)
 // Container struct also clusters cleanly at cache-line boundaries.
+// v5.15.5.A.2.a — per-arm trained barriers (Layout C AoS).
+// Each entry pairs tp + sl floats so a single cache-line read at
+// DOMINANT-mode dispatch (read per_arm_barriers[h]) fetches BOTH
+// barriers for the dominant arm. struct{tp,sl} × 8 = 64 bytes
+// exactly = 1 cache line; alignas(64) prevents straddling.
+// Populated at LoadFromCfg per-arm copy site from each handle's
+// stamp-body label_tp_pct/label_sl_pct (already loaded by
+// CoreModelZoo_TryLoadRole at CoreModelZoo.hpp:349-350).
+// Rationale: cache-miss cost (~100ns cold) is 75-100× cycle cost
+// per CLAUDE.md item 28 latency-vs-cache decision framework;
+// 1-cache-line read profile across both DOMINANT and BLEND modes
+// wins over SoA double[8] separate arrays (2 cache lines per
+// DOMINANT lookup). Pattern documented in
+// DESIGN_SPECS/per-horizon-barrier-blending-with-shadow-mode.md.
+struct PerArmBarriers {
+    float tp;  // label_tp_pct from stamp body (zero when stamp lacks the field)
+    float sl;  // label_sl_pct from stamp body
+};
+
 template <unsigned F>
 struct alignas(64) EnsembleModelZoo {
     ModelHandle<F> barrier[ENSEMBLE_HORIZON_MAX];
@@ -921,6 +940,15 @@ struct alignas(64) EnsembleModelZoo {
     // Per-member horizon ticks (e.g. {100, 500, 1000} → ezoo populated
     // at indices 0..2 with horizon_ticks_at_idx[0..2] = {100, 500, 1000}).
     int horizon_ticks_at_idx[ENSEMBLE_HORIZON_MAX];
+    // v5.15.5.A.2.a — per-arm trained barriers, AoS struct{tp,sl}[8] (Layout C).
+    // alignas(64) forces the array to start on a cache-line boundary so a
+    // single L1 fetch covers all 8 arms × {tp,sl}. Populated at LoadFromCfg
+    // from each loaded handle's stamp-body label_tp_pct/label_sl_pct.
+    // Zero (both tp and sl) when stamp lacks the field (pre-v5.15.5 legacy
+    // stamps) — masked out by the arms_with_barriers_mask gate added in
+    // v5.15.5.A.2.b. See DESIGN_SPECS/per-horizon-barrier-blending-with-
+    // shadow-mode.md for the cache-layout rationale.
+    alignas(64) PerArmBarriers per_arm_barriers[ENSEMBLE_HORIZON_MAX];
     int active;  // 0 = use single-zoo (existing); 1 = ensemble path
     // v5.10.0a.G.7 — per-regime bandit state (NUM_REGIMES from
     // FOREACH_REGIME X-macro). Each bandit has N arms = ezoo->buy_signal_count.
@@ -1050,6 +1078,10 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
         Model_Init(&ezoo->exit_predictor[i]);
         Model_Init(&ezoo->buy_signal[i]);
         ezoo->horizon_ticks_at_idx[i] = 0;
+        // v5.15.5.A.2.a — per-arm barriers zero-init. LoadFromCfg fills
+        // these from stamp body for each successfully-loaded handle.
+        ezoo->per_arm_barriers[i].tp = 0.0f;
+        ezoo->per_arm_barriers[i].sl = 0.0f;
     }
     ezoo->barrier_count = 0;
     ezoo->regime_count = 0;
@@ -1621,6 +1653,20 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
                                        acknowledge_cross_binary_drift,
                                        /*expected_feature_mask=*/0,
                                        /*expected_horizon_ticks=*/H)) {
+            // v5.15.5.A.2.a — copy stamp-body barriers from just-loaded
+            // handle into ezoo's tight-pack per_arm_barriers array.
+            // Legacy stamps without label_params stay at zero (already
+            // zero-init'd in EnsembleModelZoo_Init); the .A.2.b mask
+            // gates them out at dispatch time.
+            int arm_idx = ezoo->buy_signal_count;
+            if (STAMP_HAS(ezoo->buy_signal[arm_idx], label_params)) {
+                // handle->label_tp_pct is stored as double (not FPN<F>);
+                // direct cast to float for the tight-pack array.
+                ezoo->per_arm_barriers[arm_idx].tp =
+                    (float)ezoo->buy_signal[arm_idx].label_tp_pct;
+                ezoo->per_arm_barriers[arm_idx].sl =
+                    (float)ezoo->buy_signal[arm_idx].label_sl_pct;
+            }
             ezoo->buy_signal_count++;
             total_loaded++;
         }
