@@ -670,6 +670,16 @@ inline void ML_BuildParameters(
                           // composite_enabled=0 which is the default).
 ) {
     MLBuildContext* mctx = (MLBuildContext*)ml_ctx_ptr;
+    // v5.15.5.A.4 — function-scope locals for per-horizon barrier dispatch.
+    // Computed INSIDE the weighted-block scope (weights_buf is local to
+    // that scope; trace-deps audit RED finding). Consumed at the cfg-
+    // fallback site at ~:1259-1260 below. Defaults preserve LEGACY mode
+    // bytewise-identical behavior when ensemble inactive or dispatch
+    // mode disabled.
+    int blend_dominant_h = -1;
+    double blend_tp_d = 0.0, blend_sl_d = 0.0;
+    double dominant_tp_d = 0.0, dominant_sl_d = 0.0;  // captured at compute time; ezoo not in dispatch-site scope
+    bool blend_dispatch_ready = false;  // 1 = weights+barriers populated
     CoreModelZoo<F>* zoo = nullptr;
     ConfidenceScorer* conf_scorer = nullptr;
     double* out_prediction = nullptr;
@@ -1045,6 +1055,37 @@ inline void ML_BuildParameters(
                     config->ensemble_min_agreement_pct,
                     &dominant_idx,
                     per_arm_preds);
+                // v5.15.5.A.4 — per-horizon barrier dispatch compute. INSIDE
+                // the weighted-block scope (weights_buf is local here per
+                // trace-deps RED finding). Computes BOTH blend (Σ wᵢ · barrierᵢ)
+                // AND dominant (argmax weights) so the mode-dispatch site below
+                // at the cfg-fallback can pick either via branchless MODE_FLAGS[]
+                // mask. Constant-iter inner loop (CLAUDE.md item 26); active mask
+                // (i < primary_count) zeroed via multiply for branchless.
+                // Gated by arms_with_barriers_mask: only arms with stamp barriers
+                // contribute; missing arms zero out via the mask AND.
+                double max_w_v5155 = -1.0;
+                for (int i = 0; i < ENSEMBLE_HORIZON_MAX; i++) {
+                    double active = (i < ezoo->primary_count) ? 1.0 : 0.0;
+                    double has_b  = BITMAP_IS_SET(ezoo->arms_with_barriers_mask,
+                                                   BITMAP_BIT_U8(i)) ? 1.0 : 0.0;
+                    double gate = active * has_b;
+                    blend_tp_d += gate * weights_buf[i] *
+                                  (double)ezoo->per_arm_barriers[i].tp;
+                    blend_sl_d += gate * weights_buf[i] *
+                                  (double)ezoo->per_arm_barriers[i].sl;
+                    bool is_greater = (gate > 0.0) && (weights_buf[i] > max_w_v5155);
+                    max_w_v5155       = is_greater ? weights_buf[i] : max_w_v5155;
+                    blend_dominant_h  = is_greater ? i               : blend_dominant_h;
+                }
+                blend_dispatch_ready = (blend_dominant_h >= 0);
+                // Capture dominant arm's barriers as function-scope doubles
+                // (ezoo is local to this block; dispatch site at ~:1290 below
+                // can't reference ezoo directly).
+                if (blend_dispatch_ready) {
+                    dominant_tp_d = (double)ezoo->per_arm_barriers[blend_dominant_h].tp;
+                    dominant_sl_d = (double)ezoo->per_arm_barriers[blend_dominant_h].sl;
+                }
             } else {
                 // Selection path (G.4 argmax-confidence). Bandit-uninit
                 // ensembles also fall here (cold-start before _InitBandits).
@@ -1255,9 +1296,44 @@ inline void ML_BuildParameters(
     double ml_threshold_d = (double)FPN_ToDouble(config->ml_buy_threshold);
     if (mctx && mctx->out_threshold) *mctx->out_threshold = ml_threshold_d;
 
-    // TP/SL from ML-specific config
-    FPN<F> tp_pct = config->ml_tp_pct;
-    FPN<F> sl_pct = config->ml_sl_pct;
+    // v5.15.5.A.4 — TP/SL mode-dispatch via FOREACH_BARRIER_BLEND_MODE.
+    // Branchless dispatch using MODE_FLAGS[] bit-packed lookup (Rule 8
+    // Pattern 8b from cache-layout-discipline DESIGN_SPEC). Modes:
+    //   LEGACY               — cfg.ml_tp_pct direct (pre-v5.15.5 behavior)
+    //   BLEND                — Σ wᵢ · barrierᵢ from per_arm_barriers
+    //   DOMINANT             — argmax(weights) picks one arm's barriers
+    //   BOTH_BLEND_DRIVES    — blend drives trade; dominant logged for shadow
+    //   BOTH_DOMINANT_DRIVES — dominant drives trade; blend logged for shadow
+    //
+    // Per-core override: barrier_blend_mode reads from cfg directly today;
+    // future v5.15.6 wires through gate_state cache + per-core resolution.
+    // Master ON/OFF: per_horizon_barrier_blend cohort bit in ml_cfg_flags
+    // gates the entire feature; cleared → falls back to LEGACY regardless
+    // of mode value.
+    FPN<F> tp_pct, sl_pct;
+    bool feature_enabled = BITMAP_IS_SET(config->ml_cfg_flags,
+                                          MASK_ML_CFG_PER_HORIZON_BARRIER_BLEND);
+    int active_mode = feature_enabled ? config->barrier_blend_mode
+                                      : MODE_BARRIER_BLEND_LEGACY;
+    uint8_t mode_flags = (active_mode >= 0 && active_mode < MODE_BARRIER_BLEND_COUNT)
+                             ? MODE_FLAGS[active_mode]
+                             : MODE_F_LEGACY;
+    bool blend_drives    = (mode_flags & MODE_F_BLEND_DRIVES)    != 0;
+    bool dominant_drives = (mode_flags & MODE_F_DOMINANT_DRIVES) != 0;
+    // Dispatch resolution (branchless ternary chain):
+    if (blend_dispatch_ready && blend_drives) {
+        tp_pct = FPN_FromDouble<F>(blend_tp_d);
+        sl_pct = FPN_FromDouble<F>(blend_sl_d);
+    } else if (blend_dispatch_ready && dominant_drives) {
+        tp_pct = FPN_FromDouble<F>(dominant_tp_d);
+        sl_pct = FPN_FromDouble<F>(dominant_sl_d);
+    } else {
+        // LEGACY fallback: cfg-direct (bytewise-identical to pre-v5.15.5).
+        tp_pct = config->ml_tp_pct;
+        sl_pct = config->ml_sl_pct;
+    }
+    // Shadow telemetry (modes 3/4) deferred to .A.6 (observability sub-commit);
+    // mode_flags & MODE_F_SHADOW_ACTIVE will gate the shadow ring write.
     FPN<F> tp_amount = FPN_Mul(entry_price, tp_pct);
     FPN<F> sl_amount = FPN_Mul(entry_price, sl_pct);
 
