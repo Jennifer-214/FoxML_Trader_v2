@@ -44,6 +44,17 @@
 constexpr uint8_t ENGINE_MODE_SINGLE_CORE = 0;
 constexpr uint8_t ENGINE_MODE_SHARDED = 1;
 
+// v5.15.2 — TradingMode constants (paper / live / shadow). File-scope
+// uint8_t constants matching ENGINE_MODE_* / RECONCILE_MODE_* style.
+// Paper = default safe-mode (gates default-off; no live exchange writes).
+// Live = pre-flight REFUSE on missing safety items (held_out_stamp_secret,
+// mlockall, per-core strategy, ...). Shadow = future (live data + simulated
+// fills). Stamp-bound via FOREACH_STAMP_BOUND_CFG (every model carries
+// training-time mode for audit trail).
+constexpr uint8_t TRADING_MODE_PAPER  = 0;
+constexpr uint8_t TRADING_MODE_LIVE   = 1;
+constexpr uint8_t TRADING_MODE_SHADOW = 2;
+
 // v4.7.39: engine_arch — controls slow-path threading model under sharded
 // mode. STARTUP-ONLY (changes ignored on hot reload).
 //   ENGINE_ARCH_CENTRALIZED (default): slow-path runs on producer thread,
@@ -865,6 +876,17 @@ template <unsigned F> struct ControllerConfig {
   uint8_t reconcile_mode;             // v5.14.4 — ReconcileMode enum stored as uint8_t
                                       // (avoid pulling Reconcile.hpp into universal-include
                                       //  ControllerConfig.hpp; cast at point of use)
+  // v5.15.2 — TradingMode discriminates paper vs live vs shadow operation.
+  // Distinct from engine_mode (sharded vs single_core architectural) and
+  // engine_arch (per_core_slow vs centralized). Default PAPER preserves
+  // pre-v5.15 behavior; legacy cfgs unset → PAPER → no behavior change.
+  // Stamp-bound via FOREACH_STAMP_BOUND_CFG so every model carries its
+  // training-time mode for audit trail. Read at boot for
+  // LiveReadiness_Verify dispatch — REFUSE on live + missing pre-flight
+  // items; WARN-only on paper/shadow. Values defined at file scope below
+  // (TRADING_MODE_PAPER / LIVE / SHADOW; matches engine_mode constant
+  // style for consistency).
+  uint8_t trading_mode;               // v5.15.2 — TradingMode enum (default PAPER)
   // Prediction normalization — Phase 7F (default OFF)
   int prediction_normalize; // 0=disabled, 1=z-score normalize predictions
                             // (activates after 100)
@@ -1533,6 +1555,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.reconcile_interval_sec      = 0;                            // 0 = boot-only
   cfg.reconcile_dry_run           = 1;                            // legacy field; safer default
   cfg.reconcile_mode              = 1;                            // v5.14.4 — RECONCILE_WARN (matches dry_run=1 legacy behavior)
+  cfg.trading_mode                = TRADING_MODE_PAPER;           // v5.15.2 — pre-v5.15 behavior preserved
   cfg.prediction_normalize = 0;
   // barrier_gate_enabled migrated to gate_cfg_flags (default 0)
   cfg.model_verify_strict = 0;  // 0=warn, 1=strict (fail on mismatch), -1=skip
@@ -2384,6 +2407,17 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         // Mirror to legacy field for code still reading reconcile_dry_run
         // (will be removed when transition window closes).
         cfg.reconcile_dry_run = (cfg.reconcile_mode == 0) ? 0 : 1;
+        continue;
+    }
+    if (strcmp(key, "trading_mode") == 0) {
+        // v5.15.2 — accepts string ("paper"/"live"/"shadow") OR numeric
+        // (0/1/2). String form is operator-friendly (cfg files);
+        // numeric is for back-compat + tests. Falls back to atoi on
+        // unknown string (preserves "unset" → 0=PAPER behavior).
+        if      (strcmp(val, "paper")  == 0) cfg.trading_mode = TRADING_MODE_PAPER;
+        else if (strcmp(val, "live")   == 0) cfg.trading_mode = TRADING_MODE_LIVE;
+        else if (strcmp(val, "shadow") == 0) cfg.trading_mode = TRADING_MODE_SHADOW;
+        else                                  cfg.trading_mode = (uint8_t)atoi(val);
         continue;
     }
     CFG_PARSE_INT(prediction_normalize)

@@ -45,6 +45,7 @@
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/RollingStats.hpp"
 #include "../ML_Headers/BuildFlags.hpp"  // v5.9.5h: BUILD_FLAGS_HASH() for cross-build drift WARN
+#include "LiveReadiness.hpp"  // v5.15.2: LiveReadiness_Verify boot gate + FOREACH_LIVE_READINESS_CHECK
 #include "../Strategies/StrategyParameters.hpp"
 #include "../Strategies/StrategyLifecycle.hpp"  // v5.4.0 Phase 1.2: Strategy_InitPerCore / _FreePerCore
 #include "../DataStream/BinanceUserData.hpp"
@@ -1470,6 +1471,31 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     std::atomic<double> last_volume{0.0};
 
     //----------------------------------------------------------------------
+    // v5.15.2 — Live-readiness boot gate
+    //----------------------------------------------------------------------
+    // Pre-flight checklist via FOREACH_LIVE_READINESS_CHECK. When
+    // trading_mode=LIVE, REFUSES boot if any LR_SEV_REFUSE-severity check
+    // fails. When PAPER or SHADOW, logs failures as WARN-only + proceeds
+    // (visibility-by-default so operators see the full checklist at every
+    // boot before flipping to live).
+    //
+    // Drift state read directly from handle->drift_flags_at_load via
+    // aggregate_zoo_drift helper — PerCoreSnap.failure_flags isn't
+    // populated until snapshot publish (slow-path tail; AFTER pthread
+    // spawns). Boot gate runs before pthread spawns; reads from
+    // engine-side source of truth.
+    {
+        int lr_result = tt::LiveReadiness_Verify<F>(cfg, state);
+        if (lr_result < 0) {
+            fprintf(stderr,
+                "[v5.15.2] engine exit: live-readiness REFUSED. "
+                "trading_mode=live + pre-flight failure(s). "
+                "Either fix the items above or set trading_mode=paper to ship-test.\n");
+            return;
+        }
+    }
+
+    //----------------------------------------------------------------------
     // GUI thread (ImGui build only)
     //----------------------------------------------------------------------
     // Same double-buffered TUISharedState pattern as the legacy engine in
@@ -2018,6 +2044,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         EventLoop_TrailingSLRatchet(&state, cfg,
                             state.cores[0].slow_state->rolling_short, current_price);
                     }
+                    // v5.15.2 — breakeven_on_profit ratchet (TECH_DEBT-024 close).
+                    // Independent of trailing-SL preconditions; writes to the same
+                    // pending_params.ratchet_sl with max-only composition.
+                    EventLoop_BreakevenOnProfit(&state, cfg, current_price);
                     // v5.12.1.A.2 — WS-staleness emergency-flatten gate.
                     // Default cfg.ws_dead_time_flatten_enabled=0 → 5ns
                     // early return. Live deployment (=1) → ~150ns/cycle

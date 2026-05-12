@@ -55,7 +55,7 @@
 #define FOREACH_LIFECYCLE_CFG_FLAG(X)                                                                                                                       \
     X(PARTIAL_EXIT_ENABLED, partial_exit_enabled, "Partial Exits##toggle", "Toggles",       "partial-exit dispatcher arm — leg-A and leg-B size split")     \
     X(BREAKEVEN_ON_PARTIAL, breakeven_on_partial, "Breakeven SL",          "Partial Exits", "move SL to entry after TP1 hit (partial-exit ratchet)")        \
-    X(BREAKEVEN_ON_PROFIT,  breakeven_on_profit,  "Breakeven on Profit",   "Partial Exits", "ratchet SL to breakeven when position crosses net profit (DORMANT — see TECH_DEBT-024)")
+    X(BREAKEVEN_ON_PROFIT,  breakeven_on_profit,  "Breakeven on Profit",   "Partial Exits", "ratchet SL to fee-floored breakeven when position crosses net profit (round-trip taker fees threshold)")
 
 //------------------------------------------------------------------------------------------------------
 // [AUTO-GENERATED ENUM + COUNT]

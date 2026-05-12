@@ -3385,6 +3385,75 @@ inline void EventLoop_TrailingSLRatchet(EventLoopState<F>* state,
     }
 }
 
+//======================================================================================================
+// v5.15.2 — Breakeven-on-profit slow-path ratchet (TECH_DEBT-024 close)
+//======================================================================================================
+// One-shot ratchet of SL to fee-floored breakeven when an open position
+// crosses net-profitable (gain > round-trip taker fees). Mirrors trailing-
+// SL ratchet's OneCore/Wrapper precedent + writes to the same
+// pending_params.ratchet_sl with max-only semantics — composes cleanly
+// with trailing-SL when both enabled (trailing wins via max once gain
+// exceeds tp_hold_score; breakeven holds the floor below).
+//
+// Independent of trailing-SL preconditions (sl_trail_mult / tp_hold_score
+// can both be zero; breakeven still fires).
+//
+// Slow-path cost: per-cycle when bit set; ~80-150ns per active position
+// (active_bitmap walk + entry-price load + gain compute + FPN compare).
+// Bit unset → wrapper early-exits in ~1ns. Below 100µs slow-path budget.
+
+template <unsigned F>
+inline void EventLoop_BreakevenOnProfitOneCore(EventLoopState<F>* state,
+                                                const ControllerConfig<F>& cfg,
+                                                double current_price,
+                                                int core_id) {
+    int partial_on = state->oms->partial_exit_enabled ? 1 : 0;
+    uint16_t my_mask = partial_on
+        ? (uint16_t)((1u << (core_id * 2)) | (1u << (core_id * 2 + 1)))
+        : (uint16_t)(1u << core_id);
+    uint16_t bm = (uint16_t)(state->oms->portfolio.active_bitmap & my_mask);
+
+    // Net-profit threshold: round-trip taker fees (entry + exit). Below
+    // this, the ratchet would close the position at net-negative; the
+    // fee floor on the ratchet_sl prevents that, but skipping the math
+    // when gain_pct < 2*fee saves the FPN_FromDouble + compare per cycle.
+    double fee_taker_d = FPN_ToDouble(cfg.fee_rate_taker);
+    if (fee_taker_d <= 0.0) fee_taker_d = FPN_ToDouble(cfg.fee_rate);
+    double net_profit_threshold = 2.0 * fee_taker_d;
+    double fee_floor_pct        = 3.0 * fee_taker_d;
+
+    while (bm) {
+        int slot = __builtin_ctz(bm);
+        bm &= (uint16_t)(bm - 1);
+        double entry_d = FPN_ToDouble(state->oms->portfolio.positions[slot].entry_price);
+        if (entry_d <= 0.0) continue;
+        double gain_pct = (current_price - entry_d) / entry_d;
+        if (gain_pct < net_profit_threshold) continue;  // not net-profitable yet
+
+        // Ratchet SL to fee-floored breakeven (entry × (1 - 3 × fee)).
+        // pending_params.ratchet_sl is max-only; if trailing-SL already
+        // proposed a higher floor (gain > tp_hold_score path), that wins.
+        FPN<F> breakeven_sl = FPN_FromDouble<F>(entry_d * (1.0 - fee_floor_pct));
+        FPN<F> existing     = state->cores[core_id].pending_params.ratchet_sl;
+        if (FPN_GreaterThan(breakeven_sl, existing)) {
+            state->cores[core_id].pending_params.ratchet_sl = breakeven_sl;
+            state->cores[core_id].dirty = 1;
+        }
+    }
+}
+
+// Wrapper: bit check + iterate.
+template <unsigned F>
+inline void EventLoop_BreakevenOnProfit(EventLoopState<F>* state,
+                                         const ControllerConfig<F>& cfg,
+                                         double current_price) {
+    if (!BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT)) return;
+    if (current_price <= 0.01) return;
+    for (int c = 0; c < state->registered_count; ++c) {
+        EventLoop_BreakevenOnProfitOneCore(state, cfg, current_price, c);
+    }
+}
+
 template <unsigned F>
 inline int EventLoop_Unpause(EventLoopState<F>* state) {
     state->oms->kill_switch_tripped = 0;

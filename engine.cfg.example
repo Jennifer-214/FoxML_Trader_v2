@@ -903,6 +903,39 @@ risk_min_size_pct=0.10          # 10% of base at min threshold; 0.0 = hard ladde
 
 reconcile_mode=warn         # default (legacy dry_run=1 behavior preserved)
 
+# v5.15.2 — TRADING MODE (paper / live / shadow)
+#
+# Top-level discriminator between paper, live, and shadow operation.
+# Distinct from engine_mode (sharded/single_core architectural) and
+# engine_arch (per_core_slow/centralized). Stamp-bound: every model
+# carries its training-time mode for audit trail.
+#
+# Values:
+#   trading_mode=paper      (= 0; default; gates default-off; safe to ship-test)
+#   trading_mode=live       (= 1; pre-flight REFUSE on missing safety items)
+#   trading_mode=shadow     (= 2; future: live data + simulated fills)
+#
+# When trading_mode=live, the engine REFUSES boot if any of the following
+# pre-flight items fail (LiveReadiness_Verify; v5.15.2.B):
+#   - held_out_stamp_secret nonempty (HMAC signature verification possible)
+#   - mlockall succeeded (cfg.require_mlockall + mlockall() syscall OK)
+#   - all cores have explicit core_<N>_strategy in cfg (no hardcoded fallback)
+#   - all ML cores have a loaded model
+#   - model_max_age_hours set + no stale-model age WARN
+#   - no feature_registry_hash / label_registry_hash / build_flags_hash drift
+#   - all stamps had HMAC signature verified (no skip)
+#
+# trading_mode=paper or shadow: same checks logged as WARN-only; engine
+# proceeds. Operator sees the full list at every boot for visibility
+# before flipping to live.
+#
+# Legacy v5.14 cfgs without trading_mode= key default to PAPER → no
+# behavior change. Surface G forward-compat: legacy stamps without
+# trading_mode= line in their body parse as has_trading_mode=0 → no
+# drift check fired vs current cfg.
+
+trading_mode=paper          # default; flip to live + pass pre-flight to enable live trading
+
 # v5.14.8.E — STALE-MODEL AGE GATE (boot-time)
 #
 # When a model loads, engine checks the stamp body's training_timestamp_us

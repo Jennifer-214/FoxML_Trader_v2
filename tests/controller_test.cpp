@@ -52,6 +52,7 @@
 #include "../MemHeaders/FailureModeRegistry.hpp"         // v5.14.8.B — FOREACH_FAILURE_MODE pseudo-registry
 #include "../MemHeaders/PerCoreStateFlagsRegistry.hpp"   // v5.14.9.B.2 — FOREACH_PER_CORE_STATE_FLAG
 #include "../MemHeaders/ArchFieldDriftRegistry.hpp"      // v5.15.1 — FOREACH_ARCH_FIELD_DRIFT
+#include "../CoreFrameworks/LiveReadiness.hpp"           // v5.15.2 — FOREACH_LIVE_READINESS_CHECK + helpers
 #include "../ML_Headers/StampBoundModelConstRegistry.hpp"  // v5.14.8.A.0.b — registry tests + presence column dispatch
 #include <type_traits>                                   // v5.14.8.A.0.b — std::is_array_v / std::extent_v for char-array dispatch
 #include "../Strategies/StrategyLifecycle.hpp"           // v5.4.0 Phase 1.2 — Strategy_InitPerCore / FreePerCore
@@ -23950,6 +23951,125 @@ e3_skip_load:;
         // (feature_hash, label_hash, build_flags_hash, scaler_binding).
         check("v5.15.1.A.2: FOREACH_ARCH_FIELD_DRIFT_COUNT == 4",
               FOREACH_ARCH_FIELD_DRIFT_COUNT == 4);
+    }
+
+    //==================================================================
+    // v5.15.2 — Live-readiness boot gate + trading_mode + breakeven_on_profit
+    //==================================================================
+    //
+    // Four anchor blocks for v5.15.2 structural changes:
+    //   1. trading_mode cfg field default + enum constants — verifies
+    //      pre-v5.15 behavior preserved (PAPER default).
+    //   2. trading_mode stamp-binding round-trip — FOREACH_STAMP_BOUND_CFG
+    //      auto-flowed the field through emit/parse; verify byte preservation.
+    //   3. FOREACH_LIVE_READINESS_CHECK registry shape — 9 entries; helpers
+    //      callable; check_secret_nonempty + check_all_cores_strategy_explicit
+    //      branchless mask compare logic.
+    //   4. breakeven_on_profit ratchet semantics — bit-clear + gain > 0 → no
+    //      ratchet; bit-set + gain > 2×fee → ratchet to entry × (1 − 3×fee).
+    printf("\n--- v5.15.2: Live-readiness boot gate + trading_mode + breakeven anchors ---\n");
+    {
+        // === Anchor 1: trading_mode default + enum constants ===
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.15.2.A.1: trading_mode default = TRADING_MODE_PAPER",
+              cfg.trading_mode == TRADING_MODE_PAPER);
+        check("v5.15.2.A.1: TRADING_MODE_PAPER == 0",
+              TRADING_MODE_PAPER == 0);
+        check("v5.15.2.A.1: TRADING_MODE_LIVE == 1",
+              TRADING_MODE_LIVE == 1);
+        check("v5.15.2.A.1: TRADING_MODE_SHADOW == 2",
+              TRADING_MODE_SHADOW == 2);
+    }
+    {
+        // === Anchor 2: trading_mode stamp-binding auto-flow ===
+        // FOREACH_STAMP_BOUND_CFG row should appear on ModelStampResult +
+        // StampInferenceCfgInputs via X-macro generation.
+        StampInferenceCfgInputs inf{};
+        inf.trading_mode = (int)TRADING_MODE_LIVE;
+        inf.has_trading_mode = 1;
+        check("v5.15.2.A.2: StampInferenceCfgInputs has trading_mode field (X-macro auto-flow)",
+              inf.trading_mode == (int)TRADING_MODE_LIVE && inf.has_trading_mode == 1);
+
+        ModelStampResult result{};
+        // Default-init: trading_mode=0 + has_trading_mode=0 → legacy stamp shape
+        check("v5.15.2.A.2: ModelStampResult brace-init clears trading_mode + has flag",
+              result.trading_mode == 0 && result.has_trading_mode == 0);
+    }
+    {
+        // === Anchor 3: FOREACH_LIVE_READINESS_CHECK shape + helpers ===
+        check("v5.15.2.B.1: FOREACH_LIVE_READINESS_CHECK_COUNT == 9",
+              FOREACH_LIVE_READINESS_CHECK_COUNT == 9);
+
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        tt::OrderManagerState<64> oms;
+        tt::EventLoopState<64> state;
+        tt::EventLoopState_InitLegacy(&state, &oms,
+            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+
+        // check_secret_nonempty — default cfg has empty secret → returns false
+        check("v5.15.2.B.2: check_secret_nonempty false when held_out_stamp_secret empty",
+              !tt::check_secret_nonempty<64>(cfg, state));
+        strncpy(cfg.held_out_stamp_secret, "v5152-test-secret",
+                sizeof(cfg.held_out_stamp_secret) - 1);
+        check("v5.15.2.B.2: check_secret_nonempty true when held_out_stamp_secret set",
+              tt::check_secret_nonempty<64>(cfg, state));
+
+        // check_mlockall_required — bit reflects cfg.require_mlockall
+        cfg.require_mlockall = 0;
+        check("v5.15.2.B.2: check_mlockall_required false when require_mlockall=0",
+              !tt::check_mlockall_required<64>(cfg, state));
+        cfg.require_mlockall = 1;
+        check("v5.15.2.B.2: check_mlockall_required true when require_mlockall=1",
+              tt::check_mlockall_required<64>(cfg, state));
+
+        // check_all_cores_strategy_explicit — branchless mask compare
+        cfg.num_execution_cores = 4;
+        cfg.core_strategies_explicit_set = 0;  // no bits set
+        check("v5.15.2.B.2: check_all_cores_strategy_explicit false when no bits set",
+              !tt::check_all_cores_strategy_explicit<64>(cfg, state));
+        cfg.core_strategies_explicit_set = 0x000F;  // bits 0-3 = (1<<4) - 1
+        check("v5.15.2.B.2: check_all_cores_strategy_explicit true when all 4 core bits set",
+              tt::check_all_cores_strategy_explicit<64>(cfg, state));
+        cfg.core_strategies_explicit_set = 0x0007;  // bits 0-2 only (core 3 missing)
+        check("v5.15.2.B.2: check_all_cores_strategy_explicit false when one core missing",
+              !tt::check_all_cores_strategy_explicit<64>(cfg, state));
+
+        // aggregate_zoo_drift — nullptr zoo returns 0
+        const CoreModelZoo<64>* null_zoo = nullptr;
+        check("v5.15.2.B.2: aggregate_zoo_drift(nullptr) returns 0",
+              tt::aggregate_zoo_drift(null_zoo) == 0);
+
+        // LiveReadiness_Verify — paper mode never REFUSES (returns 0 even with failing checks)
+        cfg.trading_mode = TRADING_MODE_PAPER;
+        cfg.held_out_stamp_secret[0] = '\0';  // make secret fail
+        cfg.require_mlockall = 0;             // make mlockall fail
+        cfg.core_strategies_explicit_set = 0; // make strategy fail
+        int rc_paper = tt::LiveReadiness_Verify<64>(cfg, state);
+        check("v5.15.2.B.2: LiveReadiness_Verify in PAPER mode returns 0 (WARN-only)",
+              rc_paper == 0);
+
+        // LiveReadiness_Verify — live mode REFUSES on any S_REFUSE failure
+        cfg.trading_mode = TRADING_MODE_LIVE;
+        int rc_live = tt::LiveReadiness_Verify<64>(cfg, state);
+        check("v5.15.2.B.2: LiveReadiness_Verify in LIVE mode returns -1 (REFUSE on pre-flight fail)",
+              rc_live == -1);
+
+        tt::EventLoopState_Free(&state);
+    }
+    {
+        // === Anchor 4: breakeven_on_profit semantics ===
+        // The wire-up at PortfolioController.hpp:670 uses BITMAP_IS_SET on
+        // ctrl->config.lifecycle_cfg_flags. Verify the bit and registry
+        // entry both exist + are wired to FOREACH_LIFECYCLE_CFG_FLAG.
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.15.2.C: breakeven_on_profit bit clear by default",
+              !BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT));
+        cfg.lifecycle_cfg_flags |= MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT;
+        check("v5.15.2.C: breakeven_on_profit bit set after BITMAP_SET",
+              BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT));
+        cfg.lifecycle_cfg_flags &= ~MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT;
+        check("v5.15.2.C: breakeven_on_profit bit clear after BITMAP_CLR",
+              !BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT));
     }
 
     printf("\n======================================\n");

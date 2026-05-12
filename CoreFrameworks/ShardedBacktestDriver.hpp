@@ -375,6 +375,8 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
                                (uint64_t)tick_index, current_price);
             EventLoop_TrailingSLRatchet(drv->state, *drv->config,
                                          *drv->rolling, current_price);
+            // v5.15.2 — breakeven_on_profit ratchet (TECH_DEBT-024 close).
+            EventLoop_BreakevenOnProfit(drv->state, *drv->config, current_price);
         }
 
         drv->slow_path_runs++;

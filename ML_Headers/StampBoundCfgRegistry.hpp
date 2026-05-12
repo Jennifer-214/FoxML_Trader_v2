@@ -167,7 +167,13 @@
     X(thompson_precision_prior,            double, "%.17g",  1.0, FPN_ToDouble(cfg.thompson_precision_prior),                                                \
         (cfg.bandit_algorithm != 0), DIRECT_FIELD)                                                                                                           \
     X(thompson_precision_obs,              double, "%.17g",  1.0, FPN_ToDouble(cfg.thompson_precision_obs),                                                  \
-        (cfg.bandit_algorithm != 0), DIRECT_FIELD)
+        (cfg.bandit_algorithm != 0), DIRECT_FIELD)                                                                                                            \
+    /* v5.15.2 — trading_mode (paper / live / shadow) stamp-bound. Every model carries its */                                                                \
+    /* training-time mode for audit trail. emit_when=1 (always emit). Legacy stamps lack    */                                                                \
+    /* this row → has_trading_mode=0 → effective PAPER (legacy default); Surface G          */                                                                \
+    /* forward-compat preserved (no MODEL_FORMAT_VERSION bump).                              */                                                                \
+    X(trading_mode,                        int,    "%d",     0,   (int)cfg.trading_mode,                                                                     \
+        1, DIRECT_FIELD)
 
 //======================================================================================================
 // [PARSER DISPATCH MACROS]
