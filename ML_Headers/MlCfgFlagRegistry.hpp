@@ -60,7 +60,8 @@
     X(RIDGE_WITHIN_HORIZON,         ridge_within_horizon,         "Ridge Within Horizon",  "ML/Ridge",    "Ridge blend across role-arms within a horizon (v5.14.0; stamp-bound) [v5.14.11.C cohort migration from direct int]") \
     X(RIDGE_ACROSS_HORIZONS,        ridge_across_horizons,        "Ridge Across Horizons", "ML/Ridge",    "Ridge blend across horizons (vs bandit selection); infrastructure-only until consumer ships [v5.14.11.C cohort migration]") \
     X(EXIT_BLENDER_MODE,            exit_blender_mode,            "Exit Blender Mode",     "ML/Ridge",    "Ridge blend across exit_predictor handles (v5.14.1.E; stamp-bound) [v5.14.11.C cohort migration]") \
-    X(RIDGE_ONLINE_CORR,            ridge_online_corr,            "Ridge Online Corr",     "ML/Ridge",    "Use sliding-window incremental correlation matrix in Ridge (default 0=full recompute; v5.14.11)")
+    X(RIDGE_ONLINE_CORR,            ridge_online_corr,            "Ridge Online Corr",     "ML/Ridge",    "Use sliding-window incremental correlation matrix in Ridge (default 0=full recompute; v5.14.11)") \
+    X(PER_HORIZON_BARRIER_BLEND,    per_horizon_barrier_blend,    "Per-Horizon Barriers",  "FoxML",       "Enable per-horizon TP/SL serving via blend/dominant modes (vs cfg-direct LEGACY fallback); paired with cfg.barrier_blend_mode enum [v5.15.5.A.5]")
 
 //------------------------------------------------------------------------------------------------------
 // [AUTO-GENERATED ENUM + COUNT]

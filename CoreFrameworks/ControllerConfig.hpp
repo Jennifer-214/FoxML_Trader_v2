@@ -18,6 +18,7 @@
 #include "GateCfgFlagRegistry.hpp"            // v5.14.9.F.1 — FOREACH_GATE_CFG_FLAG + MASK_GATE_CFG_*
 #include "../ML_Headers/MlCfgFlagRegistry.hpp" // v5.14.9.F.2 — FOREACH_ML_CFG_FLAG + MASK_ML_CFG_*
 #include "../ML_Headers/BanditAlgorithmRegistry.hpp" // v5.14.10.B — BanditAlgorithm_FromString for cfg.bandit_algorithm parser
+#include "../ML_Headers/BarrierBlendModeRegistry.hpp" // v5.15.5.A.5 — BarrierBlendMode_FromString + MODE_BARRIER_BLEND_COUNT for cfg.barrier_blend_mode parser
 #include "RiskCfgFlagRegistry.hpp"             // v5.14.9.F.3 — FOREACH_RISK_CFG_FLAG + MASK_RISK_CFG_*
 #include "OpsCfgFlagRegistry.hpp"              // v5.14.9.F.3 — FOREACH_OPS_CFG_FLAG + MASK_OPS_CFG_*
 #include <stdio.h>
@@ -212,7 +213,13 @@ constexpr uint8_t ENGINE_ARCH_PER_CORE_SLOW = 1;
     /* core_N_risk_degradation_curve=0 (which is also the inherit signal — but */ \
     /* the global being non-zero means inherit yields LINEAR; cannot per-core- */ \
     /* disable). Trade-off accepted; matches existing INT-override sentinel pattern. */ \
-    INT(risk_degradation_curve)
+    INT(risk_degradation_curve) \
+    /* v5.15.5.A.5: per-core barrier blend mode override (LEGACY/BLEND/DOMINANT/ */ \
+    /* BOTH_BLEND_DRIVES/BOTH_DOMINANT_DRIVES). 0 = inherit global */ \
+    /* cfg.barrier_blend_mode; non-zero overrides per-core. Same sentinel */ \
+    /* trade-off as risk_degradation_curve (cannot per-core-disable when */ \
+    /* global is non-zero). Mirror of v5.14.9.C precedent. */ \
+    INT(barrier_blend_mode)
 
 // v5.14.9.F.6: BITMAP-typed per-core overrides. Each domain bitmap on
 // ControllerConfig (lifecycle/gate/ml/risk/ops_cfg_flags) gets a per-core
@@ -607,6 +614,19 @@ template <unsigned F> struct ControllerConfig {
   // stamp-bound — operator policy, matches existing per-core risk_pct
   // precedent). See v5.14.9.B.1.
   int    risk_degradation_curve;             // default 0 (OFF)
+  // v5.15.5.A.5 — per-horizon TP/SL barrier blend mode (5-mode enum).
+  // 0=LEGACY (cfg.ml_tp_pct direct; pre-v5.15.5 behavior; DEFAULT for
+  //   backward-compat — operator must opt in to non-legacy mode), 1=BLEND
+  //   (Σ wᵢ · barrierᵢ weighted blend), 2=DOMINANT (argmax(weights) picks
+  //   one arm's barriers; exact train-serve match per trade), 3=BOTH_BLEND_DRIVES
+  //   (blend drives + dominant logged for shadow-mode A/B compare),
+  //   4=BOTH_DOMINANT_DRIVES (dominant drives + blend logged for shadow-mode).
+  // Per CLAUDE.md item 13 X-macro: enum + ToString/FromString + branchless
+  // dispatch via MODE_FLAGS[] table auto-generated from FOREACH_BARRIER_BLEND_MODE
+  // (see ML_Headers/BarrierBlendModeRegistry.hpp).
+  // Per-core override: core_N_barrier_blend_mode (INT-enum, mirrors
+  // risk_degradation_curve v5.14.9.C precedent).
+  int    barrier_blend_mode;                  // default 0 (LEGACY)
   // Threshold above which factor=1.0 (full size at high confidence).
   // Default 0.15 matches composite confidence's practical upper bound.
   FPN<F> risk_full_size_threshold;           // default 0.15
@@ -1635,6 +1655,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // confidence's practical scale [0.001, 0.3]: full at 0.15, min at 0.05,
   // 10% size floor at min threshold.
   cfg.risk_degradation_curve     = 0;  // CURVE_OFF
+  cfg.barrier_blend_mode         = 0;  // MODE_BARRIER_BLEND_LEGACY (v5.15.5.A.5)
   cfg.risk_full_size_threshold   = FPN_FromDouble<F>(0.15);
   cfg.risk_min_size_threshold    = FPN_FromDouble<F>(0.05);
   cfg.risk_min_size_pct          = FPN_FromDouble<F>(0.10);
@@ -1983,6 +2004,22 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.risk_degradation_curve = 0;
       } else {
         cfg.risk_degradation_curve = parsed;
+      }
+      continue;
+    }
+    // v5.15.5.A.5 — per-horizon barrier blend mode (5-mode enum from
+    // FOREACH_BARRIER_BLEND_MODE registry). Accepts numeric (0-4) or
+    // case-insensitive string token (LEGACY / BLEND / DOMINANT /
+    // BOTH_BLEND_DRIVES / BOTH_DOMINANT_DRIVES).
+    if (strcmp(key, "barrier_blend_mode") == 0) {
+      int parsed = BarrierBlendMode_FromString(val);
+      if (parsed < 0 || parsed >= MODE_BARRIER_BLEND_COUNT) {
+        fprintf(stderr, "[cfg] WARN: barrier_blend_mode='%s' invalid; "
+                "expected one of LEGACY/BLEND/DOMINANT/BOTH_BLEND_DRIVES/"
+                "BOTH_DOMINANT_DRIVES or 0-4. Using LEGACY.\n", val);
+        cfg.barrier_blend_mode = 0;
+      } else {
+        cfg.barrier_blend_mode = parsed;
       }
       continue;
     }
