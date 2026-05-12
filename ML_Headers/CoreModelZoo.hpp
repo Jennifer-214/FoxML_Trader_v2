@@ -929,151 +929,134 @@ struct PerArmBarriers {
     float sl;  // label_sl_pct from stamp body
 };
 
+// v5.10.0a.G.8 — reward attribution ring buffer record (used in WARM cluster
+// below). Each predict writes a record; slow-path lookback walks ring for
+// reward attribution.
+struct PredictionRecord {
+    uint64_t predict_call;        // monotonic counter (increments per predict)
+    int      regime_id;           // regime AT predict time (for attribution)
+    float    predictions[ENSEMBLE_HORIZON_MAX];  // per-arm raw outputs
+    float    sample_price;        // price at predict time
+    uint8_t  rewarded_lookback;   // 1 = already rewarded by slow-path lookback
+    uint8_t  rewarded_trade;      // 1 = already rewarded by trade-close
+};
+
+// v5.10.0a.G.8 — drift watchdog state (used in WARM cluster below).
+struct PerArmDrift {
+    float    ic_history[100];  // recent reward outcomes; capped at DRIFT_IC_HISTORY
+    int      ic_count;          // populated entries
+    float    ic_avg;            // running average
+    uint8_t  demoted;           // 1 = forced near-zero weight; sticky until recovery
+};
+
 template <unsigned F>
 struct alignas(64) EnsembleModelZoo {
-    ModelHandle<F> barrier[ENSEMBLE_HORIZON_MAX];
-    ModelHandle<F> regime[ENSEMBLE_HORIZON_MAX];
-    ModelHandle<F> exit_predictor[ENSEMBLE_HORIZON_MAX];
-    ModelHandle<F> buy_signal[ENSEMBLE_HORIZON_MAX];
+    // ============================================================================
+    // HOT CLUSTER — small fields touched every slow-path cycle when ensemble active
+    // ============================================================================
+    // Per CLAUDE.md item 28 + DESIGN_SPECS/cache-layout-discipline-for-hot-side-
+    // structs.md Rule 4 (Hot/Warm/Cold tier clustering): small high-frequency
+    // fields cluster at struct start so a single L1 fetch covers all of them
+    // per slow-path cycle. Large arrays follow (each gets its own cache lines
+    // by virtue of size + alignment).
+
+    // Per-arm barriers (Layout C AoS; alignas(64) = 1 cache line for all 8 arms).
+    alignas(64) PerArmBarriers per_arm_barriers[ENSEMBLE_HORIZON_MAX];
+
+    // Small hot scalars — counts, indices, masks (the per-cycle gate inputs).
     int barrier_count;
     int regime_count;
     int exit_predictor_count;
     int buy_signal_count;
-    // Per-member horizon ticks (e.g. {100, 500, 1000} → ezoo populated
-    // at indices 0..2 with horizon_ticks_at_idx[0..2] = {100, 500, 1000}).
     int horizon_ticks_at_idx[ENSEMBLE_HORIZON_MAX];
-    // v5.15.5.A.2.a — per-arm trained barriers, AoS struct{tp,sl}[8] (Layout C).
-    // alignas(64) forces the array to start on a cache-line boundary so a
-    // single L1 fetch covers all 8 arms × {tp,sl}. Populated at LoadFromCfg
-    // from each loaded handle's stamp-body label_tp_pct/label_sl_pct.
-    // Zero (both tp and sl) when stamp lacks the field (pre-v5.15.5 legacy
-    // stamps) — masked out by the arms_with_barriers_mask gate added in
-    // v5.15.5.A.2.b. See DESIGN_SPECS/per-horizon-barrier-blending-with-
-    // shadow-mode.md for the cache-layout rationale.
-    alignas(64) PerArmBarriers per_arm_barriers[ENSEMBLE_HORIZON_MAX];
-    // v5.15.5.A.2.c — init flags bit-pack (replaces 4 separate ints:
-    // active + initialized_bandits + initialized_exit_bandits +
-    // initialized_thompson_bandits). FOREACH_EZOO_INIT_FLAG registry
-    // owns the mask constants; 4 bits used today; 4 free for future
-    // init flags (RIDGE_INITIALIZED, CALIB_LOG_READY, etc.).
-    // Access via BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) etc.
+    // v5.15.5.A.2.c — init flags bit-pack via FOREACH_EZOO_INIT_FLAG registry.
+    // 4 bits used (ACTIVE, BANDITS_READY, EXIT_BANDITS_READY, THOMPSON_READY);
+    // 4 free for future flags. Access: BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_*).
     uint8_t init_flags;
-    // v5.15.5.A.2.b — per-arm flag bitmaps auto-generated from
-    // FOREACH_PER_ARM_FLAG registry. Currently: disabled_horizon_mask
-    // (legacy v5.14; bit N = arm N disabled by cfg.disabled_horizons)
-    // + arms_with_barriers_mask (v5.15.5+; bit N = arm N has stamp-
-    // recorded TP/SL barriers in per_arm_barriers[N]). uint8_t each;
-    // total 2 bytes for the 2 current flags. Width chosen to match
-    // ENSEMBLE_HORIZON_MAX=8 exactly (8 arms = 8 bits).
+    // v5.15.5.A.2.b — per-arm flag bitmaps auto-generated from FOREACH_PER_ARM_FLAG:
+    // disabled_horizon_mask + arms_with_barriers_mask (uint8_t each, 8 arms = 8 bits).
     PER_ARM_FLAG_DECLARE_FIELDS()
-    // v5.10.0a.G.7 — per-regime bandit state (NUM_REGIMES from
-    // FOREACH_REGIME X-macro). Each bandit has N arms = ezoo->buy_signal_count.
-    // Cold start: uniform weights; G.8 reward path updates them per outcome.
-    BanditState bandits[NUM_REGIMES];
-    // Per-prediction tracking (G.7 + G.8 reward attribution)
-    int last_predicted_regime_id;  // regime AT predict-time (NOT current; for G.8 attribution)
-    int last_predicted_horizon_idx;// dominant horizon idx (display + G.8 reward)
-    // v5.13.4 — sell-side bandit (parallel to buy-side). Same per-regime
-    // shape; arms count = exit_predictor_count. Cold start: uniform; G.8-
-    // style reward update fires from HandleFill exit branch when
-    // last_exit_was_predicted[slot] && BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED) && NOT
-    // flatten event. Counterfactual reward formula: actual_pnl_bps -
-    // hypothetical_held_to_TP_pnl_bps (optimistic; biases against exits;
-    // operator scales via cfg.exit_bandit_lr; refined post paper-test).
-    BanditState exit_bandits[NUM_REGIMES];
-    // v5.15.5.A.2.c — initialized_exit_bandits → MASK_EZOO_EXIT_BANDITS_READY bit in init_flags
-    int last_predicted_exit_horizon_idx;// dominant exit_predictor arm at predict time
-    // v5.14.10.B — Bayesian Thompson sampling bandits (parallel to bandits[]).
-    // Per-regime Gaussian conjugate posterior; activated when cfg.bandit_algorithm
-    // == 1 (THOMPSON) or 2 (BOTH). Cfg=0 (EXP3 default) → never read; init
-    // happens regardless so cfg-flip mid-run doesn't see uninitialized state.
-    // Each ThompsonBanditState is ~112B; × NUM_REGIMES (5) = ~560B per ezoo.
-    // SLOW-PATH-only state (no false-sharing risk; per-core ezoo).
-    // Persistence in v5.14.10.C via thompson_state.json (parallel to bandit_state.json).
-    ThompsonBanditState thompson_bandits[NUM_REGIMES];
-    // v5.15.5.A.2.c — initialized_thompson_bandits → MASK_EZOO_THOMPSON_READY bit in init_flags
-    int last_predicted_thompson_arm;        // Thompson's argmax-of-posterior at predict time (cfg=2 telemetry)
 
-    // v5.14.0 — Ridge risk-parity blending state. Computed per slow-path
-    // cycle when cfg.ridge_within_horizon=1 (default 0; preserves bandit
-    // path bytewise). Reads ezoo->reward_ring's recent prediction history
-    // to build N×N correlation matrix; Cholesky-solves Markowitz-style
-    // optimal weights; falls back to uniform on singular Σ.
-    //
-    // Cache impact: ~5KB struct per ezoo. Slow-path single-writer + reader
-    // on its own per-core ezoo; no false sharing. NOT in hot-path read set.
-    //
-    // Default: zero-init via RidgeWeights_Init in _Init below. Identity
-    // correlation matrix = orthogonal models = Cholesky succeeds with
-    // diagonal-only Σ. fallback_to_uniform stays 0 until the first
-    // _Compute call sees a singular Σ.
-    RidgeWeights<F> ridge_state;
-    // v5.14.1.E — exit-side Ridge state. Mirrors ridge_state for the
-    // exit_predictor handle array. Populated when cfg.exit_blender_mode=1
-    // by mirroring the v5.14.0 buy-side ridge_within_horizon path against
-    // exit_predictor[0..exit_predictor_count) instead of buy_signal[].
-    // Default: zero-init via RidgeWeights_Init in _Init below.
-    RidgeWeights<F> exit_ridge_state;
-    char blend_mode[16];           // "weighted" or "selection" (cached from cfg)
-    // v5.15.5.A.2.b — disabled_horizon_mask migrated to uint8_t via
-    // PER_ARM_FLAG_DECLARE_FIELDS() macro (declared near top of struct
-    // alongside arms_with_barriers_mask). Width chosen to match
-    // ENSEMBLE_HORIZON_MAX=8 (8 arms = 8 bits exactly). Consumer
-    // semantics unchanged: bit N = arm N disabled by cfg.disabled_horizons.
-    // v5.10.0a.G.7 — regime hysteresis dampening. When current_regime
-    // changes, blend OLD regime's weights with NEW for hysteresis cycles.
+    // Per-prediction tracking (per-cycle writes).
+    int last_predicted_regime_id;      // regime AT predict-time (G.8 attribution)
+    int last_predicted_horizon_idx;    // dominant horizon idx (display + G.8 reward)
+    int last_predicted_exit_horizon_idx; // dominant exit_predictor arm at predict time
+    int last_predicted_thompson_arm;   // Thompson's argmax-of-posterior (cfg=2 telemetry)
+
+    // v5.11.62 — primary-role indirection (per-cycle read; pointer + small scalars).
+    ModelHandle<F> *primary_handles;   // points into one of {buy_signal, barrier, regime}
+    int             primary_count;     // mirrors *_count of chosen role
+    int             primary_target_class; // class index for buy probability extraction
+
+    // ============================================================================
+    // LARGE HOT arrays — touched per-cycle for predict/dispatch; each large enough
+    // to occupy its own cache lines (clustering with small hot scalars wouldn't help)
+    // ============================================================================
+
+    alignas(64) ModelHandle<F> barrier[ENSEMBLE_HORIZON_MAX];
+    alignas(64) ModelHandle<F> regime[ENSEMBLE_HORIZON_MAX];
+    alignas(64) ModelHandle<F> exit_predictor[ENSEMBLE_HORIZON_MAX];
+    alignas(64) ModelHandle<F> buy_signal[ENSEMBLE_HORIZON_MAX];
+
+    // v5.10.0a.G.7 — per-regime bandit state. Each bandit has N arms.
+    // Cold start: uniform weights; G.8 reward path updates per outcome.
+    alignas(64) BanditState bandits[NUM_REGIMES];
+
+    // v5.13.4 — sell-side bandit (parallel to buy-side); arms count = exit_predictor_count.
+    alignas(64) BanditState exit_bandits[NUM_REGIMES];
+
+    // v5.14.10.B — Bayesian Thompson sampling bandits. Activated when
+    // cfg.bandit_algorithm == 1/2. Cfg=0 (EXP3) → never read but init'd anyway
+    // so cfg-flip mid-run doesn't see uninitialized state. ~560B per ezoo.
+    // Persistence: thompson_state.json (parallel to bandit_state.json).
+    alignas(64) ThompsonBanditState thompson_bandits[NUM_REGIMES];
+
+    // ============================================================================
+    // WARM CLUSTER — touched per regime-transition or sparse attribution paths
+    // ============================================================================
+    // v5.14.0 — Ridge risk-parity blending state. Computed per slow-path cycle
+    // when cfg.ridge_within_horizon=1 (default 0). Reads reward_ring history,
+    // builds N×N correlation matrix, Cholesky-solves optimal weights, falls
+    // back to uniform on singular Σ. Slow-path single-writer + reader on its
+    // own per-core ezoo; no false sharing. NOT in hot-path read set.
+    alignas(64) RidgeWeights<F> ridge_state;
+    // v5.14.1.E — exit-side Ridge (mirrors ridge_state for exit_predictor[]).
+    alignas(64) RidgeWeights<F> exit_ridge_state;
+
+    // v5.10.0a.G.7 — regime hysteresis dampening.
     int regime_transition_cycles_remaining;  // 0 = stable
-    int prev_regime_id;            // regime BEFORE the transition
-    // v5.10.0a.G.8 — reward attribution ring buffer. Each predict writes
-    // a record (tick_index, regime_id, per-arm predictions, sample_price);
-    // slow-path lookback walks ring → for old-enough records, computes
-    // per-arm reward (direction match) → calls Bandit_Update.
+    int prev_regime_id;                       // regime BEFORE transition
+
+    // v5.10.0a.G.8 — reward attribution ring buffer. Writes per cycle (1 record);
+    // reads sparse during slow-path lookback. 256-slot ring; ~32 bytes/record.
     static constexpr int REWARD_RING_SIZE = 256;
-    struct PredictionRecord {
-        uint64_t predict_call;        // monotonic counter (increments per predict)
-        int      regime_id;           // regime AT predict time (for attribution)
-        float    predictions[ENSEMBLE_HORIZON_MAX];  // per-arm raw outputs
-        float    sample_price;        // price at predict time
-        uint8_t  rewarded_lookback;   // 1 = already rewarded by slow-path lookback
-        uint8_t  rewarded_trade;      // 1 = already rewarded by trade-close
-    };
-    PredictionRecord reward_ring[REWARD_RING_SIZE];
-    int reward_ring_head;             // next write slot
-    uint64_t predict_call_count;      // monotonic predict counter (sets record.predict_call)
+    static constexpr int DRIFT_IC_HISTORY = 100;
+    alignas(64) PredictionRecord reward_ring[REWARD_RING_SIZE];
+    int reward_ring_head;                     // next write slot
+    uint64_t predict_call_count;              // monotonic predict counter
+
     // v5.14.1.E — exit-side prediction history (parallel to reward_ring).
-    // Populated per-cycle from exit_predictor[i] predictions at the exit
-    // prediction site. Used by Ridge solver when cfg.exit_blender_mode=1
-    // to compute correlation matrix across exit handles. Default 0-init.
-    PredictionRecord exit_reward_ring[REWARD_RING_SIZE];
+    alignas(64) PredictionRecord exit_reward_ring[REWARD_RING_SIZE];
     int exit_reward_ring_head;
     uint64_t exit_predict_call_count;
-    // v5.10.0a.G.8 — drift watchdog (perf #3). Per-arm rolling IC tracker;
-    // when IC drops below cfg.confidence_ic_floor, demote weight to ~0
-    // across all regimes (manual override of bandit's natural learning).
-    static constexpr int DRIFT_IC_HISTORY = 100;
-    struct PerArmDrift {
-        float    ic_history[DRIFT_IC_HISTORY];  // recent reward outcomes (1=correct, -1=wrong, 0=skip)
-        int      ic_count;                       // populated entries (capped at DRIFT_IC_HISTORY)
-        float    ic_avg;                         // running average over ic_history
-        uint8_t  demoted;                        // 1 = forced near-zero weight; sticky until recovery
-    };
-    PerArmDrift drift[ENSEMBLE_HORIZON_MAX];
-    // v5.10.0a.G.9 — bandit state persistence. base_dir is captured at
-    // AutoDetectFromDir / LoadFromCfg time so the periodic save trigger
-    // doesn't need ControllerConfig visibility from the bandit-update
-    // helpers. Empty path = persistence disabled (no save attempted).
-    char     bandit_save_path[400];     // <core_model_dir>/bandit_state.json
-    int      bandit_save_interval;      // 0 = no periodic save (shutdown only)
-    uint64_t bandit_update_count;       // monotonic; modulo'd against interval
-    // v5.11.62 — primary-role indirection (mirrors CoreModelZoo). Strategy
-    // + bandit code reads ezoo->primary_handles[0..primary_count) instead
-    // of ezoo->buy_signal directly. Loader picks role at end of LoadFromCfg
-    // based on which slots are populated, priority: buy_signal > barrier >
-    // regime. nullptr = no primary role available.
-    ModelHandle<F> *primary_handles;        // points into one of {buy_signal, barrier, regime}
-    int             primary_count;          // mirrors *_count of chosen role
-    int             primary_target_class;   // class index for buy probability extraction
-    char            primary_role_name[16];  // "buy_signal" | "barrier" | "regime" | ""
+
+    // v5.10.0a.G.8 — drift watchdog (per-arm rolling IC tracker).
+    // Written on reward attribution events; demoted bit sticky until recovery.
+    alignas(64) PerArmDrift drift[ENSEMBLE_HORIZON_MAX];
+
+    // ============================================================================
+    // COLD CLUSTER — boot / persistence / display only
+    // ============================================================================
+    // v5.10.0a.G.9 — bandit state persistence config. base_dir captured at
+    // AutoDetectFromDir / LoadFromCfg time; empty path = persistence disabled.
+    alignas(64) char bandit_save_path[400];   // <core_model_dir>/bandit_state.json
+    int      bandit_save_interval;             // 0 = no periodic save (shutdown only)
+    uint64_t bandit_update_count;              // monotonic; modulo'd against interval
+
+    char blend_mode[16];           // "weighted" or "selection" (cached from cfg)
+
+    // v5.11.62 — display name for the primary-role indirection.
+    char primary_role_name[16];    // "buy_signal" | "barrier" | "regime" | ""
 };
 
 // v5.15.4 — size%64==0 invariant for shadow-load aligned_alloc(64).
