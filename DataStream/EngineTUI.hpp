@@ -716,7 +716,8 @@ static inline void MLSnapshot_Populate(MLSnapshot *snap, const PortfolioControll
             snap->bandit_pulls[i] = ctrl->bandit.pulls[i];
             snap->bandit_avg_reward[i] = (ctrl->bandit.pulls[i] > 0)
                 ? ctrl->bandit.cum_reward[i] / ctrl->bandit.pulls[i] : 0.0;
-            strncpy(snap->bandit_arm_names[i], ctrl->bandit.arm_names[i], 31);
+            // v5.15.5.A.3 — arm_names extracted into ctrl->bandit_display_meta.
+            strncpy(snap->bandit_arm_names[i], ctrl->bandit_display_meta.arm_names[i], 31);
             snap->bandit_arm_names[i][31] = '\0';
         }
     } else {

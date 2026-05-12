@@ -188,6 +188,10 @@ template <unsigned F> struct PortfolioController {
   double entry_prediction[MAX_PORTFOLIO_POSITIONS]; // ML prediction at entry time (for confidence tracking)
   ConfidenceScorer confidence;      // FoxML confidence scorer (IC × freshness × stability)
   BanditState bandit;               // FoxML Exp3-IX bandit for strategy selection (survives hot-reload)
+  // v5.15.5.A.3 — arm_names extracted out of BanditState into BanditDisplayMeta.
+  // Strategy names (MR / Momentum / SimpleDip / ML / EmaCross) set here via
+  // BanditDisplayMeta_SetArmName; consumed at display sites (EngineTUI snapshot).
+  BanditDisplayMeta bandit_display_meta;
 
   // per-strategy reward attribution
   struct StrategyStats {
@@ -410,12 +414,14 @@ inline void PortfolioController_Init(PortfolioController<F> *ctrl,
       FPN_ToDouble(config.confidence_rmse_baseline));
   Bandit_Init(&ctrl->bandit, NUM_STRATEGIES, BANDIT_GAMMA_DEFAULT, BANDIT_ETA_MAX_DEFAULT,
               FPN_ToDouble(config.bandit_blend_ratio), BANDIT_MIN_SAMPLES_DEFAULT, BANDIT_RAMP_UP_DEFAULT);
-  Bandit_SetArmName(&ctrl->bandit, STRATEGY_MEAN_REVERSION, "MR");
-  Bandit_SetArmName(&ctrl->bandit, STRATEGY_MOMENTUM, "Momentum");
-  Bandit_SetArmName(&ctrl->bandit, STRATEGY_SIMPLE_DIP, "SimpleDip");
-  Bandit_SetArmName(&ctrl->bandit, STRATEGY_ML, "ML");
+  // v5.15.5.A.3 — arm_names extracted; pair the bandit with bandit_display_meta.
+  BanditDisplayMeta_InitDefault(&ctrl->bandit_display_meta, NUM_STRATEGIES);
+  BanditDisplayMeta_SetArmName(&ctrl->bandit_display_meta, STRATEGY_MEAN_REVERSION, "MR");
+  BanditDisplayMeta_SetArmName(&ctrl->bandit_display_meta, STRATEGY_MOMENTUM, "Momentum");
+  BanditDisplayMeta_SetArmName(&ctrl->bandit_display_meta, STRATEGY_SIMPLE_DIP, "SimpleDip");
+  BanditDisplayMeta_SetArmName(&ctrl->bandit_display_meta, STRATEGY_ML, "ML");
 #if __has_include("../Strategies/private/EmaCross.hpp")
-  Bandit_SetArmName(&ctrl->bandit, STRATEGY_EMA_CROSS, "EmaCross");
+  BanditDisplayMeta_SetArmName(&ctrl->bandit_display_meta, STRATEGY_EMA_CROSS, "EmaCross");
 #endif
   for (int i = 0; i < 5; i++) {
     ctrl->strategy_stats[i].realized_pnl = FPN_Zero<F>();

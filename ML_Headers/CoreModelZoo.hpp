@@ -1057,6 +1057,14 @@ struct alignas(64) EnsembleModelZoo {
 
     // v5.11.62 — display name for the primary-role indirection.
     char primary_role_name[16];    // "buy_signal" | "barrier" | "regime" | ""
+
+    // v5.15.5.A.3 — arm_names extracted out of BanditState (saves 256B × 5 regimes
+    // × 2 sides = 2560B of display-only data per ezoo). New display meta arrays
+    // live here in COLD cluster, paired with the corresponding bandits[] /
+    // exit_bandits[] in the HOT region. Slow-path bandit math never touches
+    // these; display sites (MLStatusPanel + EngineTUI snapshot) read them.
+    BanditDisplayMeta bandit_display[NUM_REGIMES];
+    BanditDisplayMeta exit_bandit_display[NUM_REGIMES];
 };
 
 // v5.15.4 — size%64==0 invariant for shadow-load aligned_alloc(64).
@@ -1420,11 +1428,11 @@ inline void EnsembleModelZoo_InitBandits(EnsembleModelZoo<F>* ezoo,
                     /*blend_ratio=*/1.0,         // full bandit influence in ensemble
                     /*min_samples=*/(min_warmup > 0 ? min_warmup : 100),
                     /*ramp_up=*/(min_warmup > 0 ? min_warmup * 2 : 200));
-        // Set arm names for logging/debug
+        // v5.15.5.A.3 — arm_names extracted to BanditDisplayMeta paired in ezoo->bandit_display.
         for (int a = 0; a < n_arms; ++a) {
             char nm[32];
             snprintf(nm, sizeof(nm), "h%d", ezoo->horizon_ticks_at_idx[a]);
-            Bandit_SetArmName(&ezoo->bandits[r], a, nm);
+            BanditDisplayMeta_SetArmName(&ezoo->bandit_display[r], a, nm);
         }
     }
     BITMAP_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY);
@@ -1467,11 +1475,12 @@ inline void EnsembleModelZoo_InitExitBandits(EnsembleModelZoo<F>* ezoo,
                     /*blend_ratio=*/1.0,
                     /*min_samples=*/(min_warmup > 0 ? min_warmup : 100),
                     /*ramp_up=*/(min_warmup > 0 ? min_warmup * 2 : 200));
+        // v5.15.5.A.3 — exit-side arm_names paired in ezoo->exit_bandit_display.
         for (int a = 0; a < n_arms; ++a) {
             char nm[32];
             snprintf(nm, sizeof(nm), "exit_h%d",
                      ezoo->horizon_ticks_at_idx[a]);
-            Bandit_SetArmName(&ezoo->exit_bandits[r], a, nm);
+            BanditDisplayMeta_SetArmName(&ezoo->exit_bandit_display[r], a, nm);
         }
     }
     BITMAP_SET(ezoo->init_flags, MASK_EZOO_EXIT_BANDITS_READY);

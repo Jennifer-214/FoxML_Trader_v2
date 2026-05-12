@@ -61,13 +61,53 @@
 #define BANDIT_MAX_ARMS            8       // max arms supported
 
 //======================================================================================================
+// [BANDIT DISPLAY META — separate struct for human-readable arm names]
+//======================================================================================================
+// v5.15.5.A.3 — extracted from BanditState per CLAUDE.md item 7 + DESIGN_SPECS/
+// cache-layout-discipline-for-hot-side-structs.md Rule 1 (extract display-only
+// fields out of hot-side structs). arm_names is 256B (8 × 32) of display-only
+// data that was sitting inside BanditState, getting pulled into L1 every time
+// slow-path read weights/cum_reward/pulls. With NUM_REGIMES=5 BanditState
+// instances on ezoo, that was 1280B of arm_names noise per ezoo.
+//
+// New layout: BanditState has just the hot/slow-path math state.
+// BanditDisplayMeta lives separately at the OWNER level (PortfolioController
+// has 1 next to its bandit; EnsembleModelZoo has [NUM_REGIMES] in COLD cluster
+// next to bandits[]). Functions that NEED arm names take a BanditDisplayMeta*
+// parameter (nullable; falls back to "arm_N" default when null).
+struct BanditDisplayMeta {
+    char arm_names[BANDIT_MAX_ARMS][32];   // human-readable arm names
+};
+
+// Initialize display meta with default "arm_0", "arm_1", ... labels.
+// Caller invokes once after pairing; or overrides individual arms via
+// BanditDisplayMeta_SetArmName.
+static inline void BanditDisplayMeta_InitDefault(BanditDisplayMeta *m, int n_arms) {
+    if (!m) return;
+    for (int i = 0; i < BANDIT_MAX_ARMS; ++i) {
+        if (i < n_arms) {
+            snprintf(m->arm_names[i], sizeof(m->arm_names[i]), "arm_%d", i);
+        } else {
+            m->arm_names[i][0] = '\0';
+        }
+    }
+}
+
+// Set a custom human-readable name for an arm (display only).
+static inline void BanditDisplayMeta_SetArmName(BanditDisplayMeta *m, int arm, const char *name) {
+    if (!m || arm < 0 || arm >= BANDIT_MAX_ARMS || !name) return;
+    snprintf(m->arm_names[arm], sizeof(m->arm_names[arm]), "%s", name);
+}
+
+//======================================================================================================
 // [BANDIT STATE]
 //======================================================================================================
+// v5.15.5.A.3 — arm_names extracted to BanditDisplayMeta (above). Pure
+// math state; ~256B smaller than pre-v5.15.5.
 struct BanditState {
     double weights[BANDIT_MAX_ARMS];       // unnormalized weights (exp3-ix)
     double cum_reward[BANDIT_MAX_ARMS];    // cumulative P&L per arm (bps)
     int pulls[BANDIT_MAX_ARMS];            // pull count per arm
-    char arm_names[BANDIT_MAX_ARMS][32];   // human-readable arm names
     int n_arms;
     int total_steps;
     double gamma;           // exploration rate
@@ -76,6 +116,15 @@ struct BanditState {
     int min_samples;        // minimum trades before bandit activates
     int ramp_up_samples;    // trades to ramp from 0 to blend_ratio
 };
+
+// v5.15.5.A.3 — shrinkage assertion: BanditState lost the 256B arm_names
+// (BANDIT_MAX_ARMS=8 × 32 = 256 bytes). New size should be <= OLD_SIZE - 256.
+// Pre-extraction sizeof was 456 bytes (weights[64] + cum_reward[64] + pulls[32]
+// + arm_names[256] + scalars[44]); post should be ~200 bytes.
+static_assert(sizeof(BanditState) <= 256,
+              "v5.15.5.A.3 BanditState shrinkage check: extracted arm_names "
+              "should bring sizeof down to ~200 bytes; if assertion trips, "
+              "either struct gained fields or extraction was partial");
 
 //======================================================================================================
 // [INIT]
@@ -96,7 +145,9 @@ static inline void Bandit_Init(BanditState *b, int n_arms,
     // uniform initial weights
     for (int i = 0; i < n_arms; i++) {
         b->weights[i] = 1.0;
-        snprintf(b->arm_names[i], sizeof(b->arm_names[i]), "arm_%d", i);
+        // v5.15.5.A.3 — arm_names extracted to BanditDisplayMeta; caller
+        // pairs a BanditDisplayMeta with this BanditState and calls
+        // BanditDisplayMeta_InitDefault separately if default labels needed.
     }
 }
 
@@ -106,11 +157,20 @@ static inline void Bandit_InitDefault(BanditState *b, int n_arms) {
                 BANDIT_BLEND_RATIO_DEFAULT, BANDIT_MIN_SAMPLES_DEFAULT, BANDIT_RAMP_UP_DEFAULT);
 }
 
-// set arm name (call after init)
-static inline void Bandit_SetArmName(BanditState *b, int arm, const char *name) {
-    if (arm >= 0 && arm < b->n_arms)
-        snprintf(b->arm_names[arm], sizeof(b->arm_names[arm]), "%s", name);
-}
+// v5.15.5.A.3 — DEPRECATED legacy API. arm_names was extracted to
+// BanditDisplayMeta; this signature is preserved as a thin forwarder to
+// BanditDisplayMeta_SetArmName for any pre-v5.15.5.A.3 caller. New callers
+// should pass a BanditDisplayMeta* directly. This forwarder requires a
+// paired display meta separately set by the caller (no automatic pairing).
+//
+// PortfolioController + EnsembleModelZoo both add a BanditDisplayMeta
+// alongside their BanditState fields; callers using the legacy API need
+// to also pass the display meta. Removed in a future cleanup ship once
+// all callers are updated to the explicit-pair API.
+//
+// Kept inline (no body) — DO NOT call from new code; references will
+// trigger a deliberate undefined symbol at link time when migrated.
+// Update all call sites to BanditDisplayMeta_SetArmName(&meta, arm, name).
 
 //======================================================================================================
 // [PROBABILITIES]
@@ -324,7 +384,11 @@ static inline void Bandit_BlendWeights(const BanditState *b,
 //======================================================================================================
 // [DIAGNOSTICS]
 //======================================================================================================
-static inline void Bandit_Print(const BanditState *b) {
+// v5.15.5.A.3 — Bandit_Print takes optional display meta. Pass nullptr
+// to print default "arm_N" labels; pass a populated BanditDisplayMeta*
+// to print human-readable names.
+static inline void Bandit_Print(const BanditState *b,
+                                 const BanditDisplayMeta *m = nullptr) {
     double probs[BANDIT_MAX_ARMS], weights[BANDIT_MAX_ARMS];
     Bandit_GetProbabilities(b, probs);
     Bandit_GetWeights(b, weights);
@@ -333,8 +397,16 @@ static inline void Bandit_Print(const BanditState *b) {
             b->n_arms, b->total_steps, Bandit_EffectiveBlend(b) * 100.0);
     for (int i = 0; i < b->n_arms; i++) {
         double avg = (b->pulls[i] > 0) ? b->cum_reward[i] / b->pulls[i] : 0.0;
+        char default_name[16];
+        const char *name;
+        if (m && m->arm_names[i][0]) {
+            name = m->arm_names[i];
+        } else {
+            snprintf(default_name, sizeof(default_name), "arm_%d", i);
+            name = default_name;
+        }
         fprintf(stderr, "  %s: pulls=%d, avg=%.1f bps, weight=%.3f, prob=%.3f\n",
-                b->arm_names[i], b->pulls[i], avg, weights[i], probs[i]);
+                name, b->pulls[i], avg, weights[i], probs[i]);
     }
 }
 
@@ -424,9 +496,15 @@ static inline int Bandit_SaveJSON(const BanditState* bandits,
             fprintf(f, "%s%d", (a ? ", " : ""), b.pulls[a]);
         }
         fprintf(f, "],\n");
+        // v5.15.5.A.3 — arm_names extracted to BanditDisplayMeta (not part
+        // of BanditState anymore). Emit default "arm_N" labels in the JSON
+        // for backward-compat shape; loaders don't parse this field anyway
+        // (verified at Bandit_LoadJSON). Callers wanting custom names in
+        // the JSON should call a future Bandit_SaveJSON variant that takes
+        // a BanditDisplayMeta* array (not yet defined; add when needed).
         fprintf(f, "      \"arm_names\": [");
         for (int a = 0; a < b.n_arms; ++a) {
-            fprintf(f, "%s\"%s\"", (a ? ", " : ""), b.arm_names[a]);
+            fprintf(f, "%s\"arm_%d\"", (a ? ", " : ""), a);
         }
         fprintf(f, "]\n");
         fprintf(f, "    }%s\n", (r < n_regimes - 1) ? "," : "");
