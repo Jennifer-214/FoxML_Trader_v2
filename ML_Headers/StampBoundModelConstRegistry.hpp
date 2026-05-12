@@ -609,13 +609,32 @@ static_assert(STAMP_BIT_COUNT <= 64, "stamp body has_flags exceeds uint64_t capa
 // auto-dispatched per-type at expansion time (see .A migration code).
 //======================================================================================================
 
+// v5.15.3.A — STAMP_MODEL_CONST_AUTOPOPULATE QUARANTINED (PARITY-022).
+//
+// The macro is semantically wrong for model-const fields. Registry tuples
+// pass `inf->X` as the `get_value` column (e.g., StampBoundModelConstRegistry.hpp:360-361,
+// :431-432), so expansion becomes `(inf).X = (type)(inf->X)` — self-referential
+// no-op. The macro had 0 production callers; bug was latent.
+//
+// Root cause: model-const fields (training_timestamp, run_name, grid_member_count,
+// xgb hyperparams, etc.) come from training-time CALLER ARGS — NOT cfg
+// auto-derivation. The companion-AUTOPOPULATE pattern (proven for
+// STAMP_CFG_AUTOPOPULATE on cfg-bound fields) doesn't apply because there's
+// no `cfg.X` to derive from. They populate via `StampArgs` in the
+// `Stamp_AssembleAndEmit` helper (v5.15.3.A).
+//
+// Future architectural-field AUTOPOPULATE redesign tracked as TECH_DEBT-036
+// (registry tuple restructure with separate value-source column).
+//
+// Any future caller that tries to use this macro fires the static_assert
+// below at compile time — the error message points operators to the
+// canonical alternative (Stamp_AssembleAndEmit).
 #define STAMP_MODEL_CONST_AUTOPOPULATE(inf, meta, now_us)                            \
-    do {                                                                              \
-        _Pragma("GCC diagnostic push")                                                \
-        _Pragma("GCC diagnostic ignored \"-Wunused-value\"")                          \
-        FOREACH_STAMP_BOUND_MODEL_CONST(STAMP_MODEL_CONST_AUTOPOPULATE_ONE)           \
-        _Pragma("GCC diagnostic pop")                                                 \
-    } while (0)
+    static_assert(false,                                                              \
+        "STAMP_MODEL_CONST_AUTOPOPULATE is QUARANTINED (PARITY-022; v5.15.3.A). "    \
+        "Model-const fields populate manually from StampArgs in callers like "        \
+        "Stamp_AssembleAndEmit. See TECH_DEBT-036 for architectural-field "          \
+        "AUTOPOPULATE redesign.")
 
 // Per-entry expansion. Numeric types use direct assignment; string
 // types (char[N]) need separate strncpy-based handling. v5.14.8.A

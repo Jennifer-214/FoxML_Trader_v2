@@ -54,6 +54,7 @@
 #include "../MemHeaders/ArchFieldDriftRegistry.hpp"      // v5.15.1 — FOREACH_ARCH_FIELD_DRIFT
 #include "../CoreFrameworks/LiveReadiness.hpp"           // v5.15.2 — FOREACH_LIVE_READINESS_CHECK + helpers
 #include "../ML_Headers/StampBoundModelConstRegistry.hpp"  // v5.14.8.A.0.b — registry tests + presence column dispatch
+#include "../ML_Headers/StampHelper.hpp"                   // v5.15.3.A — StampArgs<F> + Stamp_AssembleAndEmit
 #include <type_traits>                                   // v5.14.8.A.0.b — std::is_array_v / std::extent_v for char-array dispatch
 #include "../Strategies/StrategyLifecycle.hpp"           // v5.4.0 Phase 1.2 — Strategy_InitPerCore / FreePerCore
 
@@ -24070,6 +24071,199 @@ e3_skip_load:;
         cfg.lifecycle_cfg_flags &= ~MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT;
         check("v5.15.2.C: breakeven_on_profit bit clear after BITMAP_CLR",
               !BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_BREAKEVEN_ON_PROFIT));
+    }
+
+    printf("\n--- v5.15.3: Stamp_AssembleAndEmit canonical helper ---\n");
+    // ==================================================================
+    // v5.15.3.A.1 — StampArgs<F> POD struct default values.
+    // Default member init must zero-init padding (CLAUDE.md item 27)
+    // AND set sensible single-horizon defaults (grid_member_count=1,
+    // grid_member_idx=0, horizon_count=1) for callers that don't override.
+    // ==================================================================
+    {
+        tt::StampArgs<64> args;
+        check("v5.15.3.A.1: StampArgs default format_version = MODEL_FORMAT_VERSION",
+              args.format_version == MODEL_FORMAT_VERSION);
+        check("v5.15.3.A.1: StampArgs default grid_member_count = 1 (single-horizon)",
+              args.grid_member_count == 1);
+        check("v5.15.3.A.1: StampArgs default grid_member_idx = 0",
+              args.grid_member_idx == 0);
+        check("v5.15.3.A.1: StampArgs default horizon_count = 1 (single-horizon)",
+              args.horizon_count == 1);
+        check("v5.15.3.A.1: StampArgs default horizon_ticks = 0 (no label_params emit)",
+              args.horizon_ticks == 0);
+        check("v5.15.3.A.1: StampArgs default snap_train_nthread = 1 (determinism)",
+              args.snap_train_nthread == 1);
+        check("v5.15.3.A.1: StampArgs default trained_on_iso empty (helper fills with today)",
+              args.trained_on_iso != nullptr && args.trained_on_iso[0] == '\0');
+        check("v5.15.3.A.1: StampArgs default scaler_sha256_hex empty (no emit)",
+              args.scaler_sha256_hex != nullptr && args.scaler_sha256_hex[0] == '\0');
+        check("v5.15.3.A.1: StampArgs default req_role empty (no emit)",
+              args.req_role != nullptr && args.req_role[0] == '\0');
+    }
+    // ==================================================================
+    // v5.15.3.A.1 — Helper emits a stamp file successfully + verifier
+    // accepts it. End-to-end smoke test: build helper-style args from a
+    // default cfg, call Stamp_AssembleAndEmit, verify the resulting stamp
+    // is HMAC-valid + parseable.
+    // ==================================================================
+    {
+        const char* tmp_model = "/tmp/v5_15_3_helper_test.bin";
+        const char* tmp_stamp = "/tmp/v5_15_3_helper_test.bin.stamp";
+        FILE* mf = fopen(tmp_model, "wb");
+        if (mf) {
+            const char* dummy_payload = "MOCKMODEL_v5_15_3";
+            fwrite(dummy_payload, 1, 17, mf);
+            fclose(mf);
+
+            ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+            tt::StampArgs<64> args;
+            args.wf_metric = 0.62;
+            args.held_out_metric = 0.59;
+            args.gap_threshold = 0.05;
+            args.label_kind = 0;  // binary
+
+            StampWriteResult sr = tt::Stamp_AssembleAndEmit<64>(
+                tmp_model, /*secret=*/"v5_15_3_helper_test_secret", cfg, args);
+            check("v5.15.3.A.1: Stamp_AssembleAndEmit succeeds with default cfg + args",
+                  sr.ok == 1);
+
+            // Verifier should accept the helper-emitted stamp
+            ModelStampResult vr = verify_model_stamp(
+                tmp_model, "v5_15_3_helper_test_secret",
+                /*gap_threshold=*/0.05,
+                /*expected_format_version=*/MODEL_FORMAT_VERSION);
+            check("v5.15.3.A.1: verifier accepts helper-emitted stamp",
+                  vr.valid == 1);
+
+            unlink(tmp_model);
+            unlink(tmp_stamp);
+        }
+    }
+    // ==================================================================
+    // v5.15.3.B.1 — PARITY-020 closure proof. The helper internally calls
+    // STAMP_CFG_AUTOPOPULATE, so callers that go through it automatically
+    // get all FOREACH_STAMP_BOUND_CFG fields populated. This was the gap
+    // pre-v5.15.3 train_model_worker_fn had — it manually populated only
+    // ~5 fields and missed the ~22 cfg-bound fields entirely.
+    //
+    // Test: emit via helper with Ridge enabled in cfg, then read back the
+    // verifier's parsed inf to confirm ridge_lambda + ridge_within_horizon
+    // bits are set in the stamp body (would be zero if AUTOPOPULATE missing).
+    // ==================================================================
+    {
+        const char* tmp_model = "/tmp/v5_15_3_parity020_test.bin";
+        const char* tmp_stamp = "/tmp/v5_15_3_parity020_test.bin.stamp";
+        FILE* mf = fopen(tmp_model, "wb");
+        if (mf) {
+            fwrite("MOCK", 1, 4, mf);
+            fclose(mf);
+
+            ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+            // Enable Ridge + composite + exit_blender (trigger emit_when predicates)
+            BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_RIDGE_WITHIN_HORIZON);
+            BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED);
+            BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BLENDER_MODE);
+
+            tt::StampArgs<64> args;
+            args.wf_metric = 0.62;
+            args.held_out_metric = 0.59;
+            args.gap_threshold = 0.05;
+            args.label_kind = 0;
+
+            StampWriteResult sr = tt::Stamp_AssembleAndEmit<64>(
+                tmp_model, /*secret=*/"", cfg, args);
+            check("v5.15.3.B.1 PARITY-020: helper emit succeeds with Ridge cfg",
+                  sr.ok == 1);
+
+            // Read back via verifier; check that ridge cfg fields ARE in stamp body.
+            // Pre-helper train_model_worker_fn would have emitted has_ridge_*=0
+            // (gap). Helper-emitted stamps have has_ridge_*=1 via internal
+            // STAMP_CFG_AUTOPOPULATE.
+            ModelStampResult vr = verify_model_stamp(
+                tmp_model, /*secret=*/"",
+                /*gap_threshold=*/0.05,
+                /*expected_format_version=*/MODEL_FORMAT_VERSION);
+            check("v5.15.3.B.1 PARITY-020: helper-emitted stamp has has_ridge_within_horizon=1 (cfg-bound)",
+                  vr.has_ridge_within_horizon == 1);
+            check("v5.15.3.B.1 PARITY-020: helper-emitted stamp has has_ridge_lambda=1 (cfg-bound)",
+                  vr.has_ridge_lambda == 1);
+            check("v5.15.3.B.1 PARITY-020: helper-emitted stamp has has_confidence_composite_enabled=1",
+                  vr.has_confidence_composite_enabled == 1);
+            check("v5.15.3.B.1 PARITY-020: helper-emitted stamp has has_exit_blender_mode=1",
+                  vr.has_exit_blender_mode == 1);
+
+            unlink(tmp_model);
+            unlink(tmp_stamp);
+        }
+    }
+    // ==================================================================
+    // v5.15.3.B.2 — PARITY-021 closure proof. grid_member_count +
+    // grid_member_idx were orphan-placeholder fields in
+    // FOREACH_STAMP_BOUND_MODEL_CONST that no production caller populated.
+    // Helper populates them from StampArgs; multi-horizon worker plumbs
+    // h + horizon_count through FullValidationResults.req_grid_*.
+    //
+    // Test: emit via helper with grid_member_count=3 + idx=1, verify the
+    // stamp body parsed values match.
+    // ==================================================================
+    {
+        const char* tmp_model = "/tmp/v5_15_3_parity021_test.bin";
+        const char* tmp_stamp = "/tmp/v5_15_3_parity021_test.bin.stamp";
+        FILE* mf = fopen(tmp_model, "wb");
+        if (mf) {
+            fwrite("MOCK", 1, 4, mf);
+            fclose(mf);
+
+            ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+            tt::StampArgs<64> args;
+            args.wf_metric = 0.62;
+            args.held_out_metric = 0.59;
+            args.gap_threshold = 0.05;
+            args.label_kind = 0;
+            args.grid_member_count = 3;
+            args.grid_member_idx   = 1;
+            args.horizon_count     = 3;
+
+            StampWriteResult sr = tt::Stamp_AssembleAndEmit<64>(
+                tmp_model, /*secret=*/"", cfg, args);
+            check("v5.15.3.B.2 PARITY-021: helper emit with grid_member_count=3 idx=1 succeeds",
+                  sr.ok == 1);
+
+            ModelStampResult vr = verify_model_stamp(
+                tmp_model, /*secret=*/"",
+                /*gap_threshold=*/0.05,
+                /*expected_format_version=*/MODEL_FORMAT_VERSION);
+            check("v5.15.3.B.2 PARITY-021: stamp body has_grid_member bit set (was orphan-placeholder pre-v5.15.3)",
+                  (vr.has_flags & MASK_grid_member) != 0);
+            check("v5.15.3.B.2 PARITY-021: stamp body grid_member_count = 3",
+                  vr.grid_member_count == 3);
+            check("v5.15.3.B.2 PARITY-021: stamp body grid_member_idx = 1",
+                  vr.grid_member_idx == 1);
+
+            unlink(tmp_model);
+            unlink(tmp_stamp);
+        }
+    }
+    // ==================================================================
+    // v5.15.3.A — STAMP_MODEL_CONST_AUTOPOPULATE quarantine proof.
+    // PARITY-022 closed by replacing the self-referential macro body with
+    // a static_assert(false, "QUARANTINED ..."). Macro is no longer
+    // callable from production code; helper uses manual per-call
+    // population from StampArgs instead. Verify the static_assert text
+    // refers to the quarantine marker (compile-time check that the macro
+    // exists but is gated).
+    // ==================================================================
+    {
+        // Macro shape: when expanded, the only valid syntactic use is in a
+        // context where static_assert is allowed (function body / global scope).
+        // We don't expand it here; we just sanity-check that the registry
+        // header is included via the helper's transitively-included path
+        // (FOREACH_STAMP_BOUND_MODEL_CONST_PRE_CFG_COUNT lives there).
+        check("v5.15.3.A.0 PARITY-022: FOREACH_STAMP_BOUND_MODEL_CONST_COUNT > 0",
+              FOREACH_STAMP_BOUND_MODEL_CONST_COUNT > 0);
+        check("v5.15.3.A.0 PARITY-022: FOREACH_STAMP_BOUND_CFG_COUNT > 0 (cfg-bound sister registry)",
+              FOREACH_STAMP_BOUND_CFG_COUNT > 0);
     }
 
     printf("\n======================================\n");

@@ -22,6 +22,7 @@
 #include "../ML_Headers/ModelInference.hpp"
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.6: FEATURE_REGISTRY_HASH() for auto-stamp
 #include "../ML_Headers/BuildFlags.hpp"       // v5.9.5h: BUILD_FLAGS_HASH() for cross-build drift detection
+#include "../ML_Headers/StampHelper.hpp"      // v5.15.3.A: Stamp_AssembleAndEmit canonical orchestration helper
 #include "../Version.hpp"                      // v5.8.6: ENGINE_VERSION_STRING for auto-stamp
 #include "../MemHeaders/HealthLog.hpp"        // v5.11.32: Health_Log for WF observability
 #include "../MemHeaders/DebugLog.hpp"         // v5.11.32: LOG_DEBUG_ENGINE for compile-time-only diags
@@ -1015,6 +1016,22 @@ struct FullValidationResults {
     // expected.cfg sidecar via VerifyExpected).
     int       req_num_outputs;       // 1=binary/regression, ≥2=multiclass
     char      req_role[16];          // "buy_signal" | "barrier" | "regime" | "exit"
+
+    // v5.15.3.B.2 — Multi-horizon grid identification (PARITY-021 close).
+    // Caller populates BEFORE calling Backtest_RunFullValidation. Single-
+    // horizon callers leave at defaults (count=1, idx=0, horizon_count=1).
+    // Multi-horizon worker (mh_run_one_horizon_fv) sets per-horizon values.
+    // RFV reads these into StampArgs.grid_member_count/idx/horizon_count and
+    // emits via Stamp_AssembleAndEmit — fields previously declared on the
+    // stamp body schema (FOREACH_STAMP_BOUND_MODEL_CONST_PRE_CFG) but no
+    // production caller populated them. Boot log warning "4/4 handles
+    // missing grid_member_count" closes via this plumb-through.
+    //
+    // Appended at END of struct to preserve offsetof of all existing fields
+    // (in-memory layout discipline; not the same as stamp wire format).
+    int       req_grid_member_count = 1;
+    int       req_grid_member_idx   = 0;
+    int       req_horizon_count     = 1;
 };
 
 // Forward declaration — Backtest_RunWalkForward is defined further down in
@@ -1119,195 +1136,74 @@ static inline void Backtest_RunFullValidation(FullValidationResults *out,
     out->auto_stamp_error[0]  = '\0';
     out->auto_stamp_path_written[0] = '\0';
     if (out->ran_held_out && out->auto_stamp_path[0] != '\0') {
-        // Pick wf metric per label kind (matches engine's gap math).
-        double wf_metric = LabelType_IsRegression(label_type)
-            ? out->walkforward.mean_val_correlation
-            : out->walkforward.mean_val_accuracy;
-
-        // today's date in ISO format
-        char today[16] = {0};
-        time_t now = time(NULL);
-        struct tm tm_buf;
-        localtime_r(&now, &tm_buf);
-        strftime(today, sizeof(today), "%Y-%m-%d", &tm_buf);
-
-        // v5.8.6: embed FEATURE_REGISTRY_HASH() + ENGINE_VERSION_STRING so the
-        // load-time verifier can catch train-serve drift + the operator sees
-        // which engine version the model was trained against.
+        // v5.15.3.A — Stamp emit chain refactored to use Stamp_AssembleAndEmit
+        // canonical helper. Replaces ~180 LOC of manual StampInferenceCfgInputs
+        // assembly with StampArgs setup + helper call. Helper internally walks
+        // STAMP_CFG_AUTOPOPULATE (cfg-bound fields) + manually populates per-
+        // call model-const fields from StampArgs. Closes PARITY-020 + -021
+        // structurally (any caller using the helper automatically gets all
+        // stamp-bound cfg fields + grid_member identification).
         //
-        // v5.9.5b — close the half-wired StampInferenceCfgInputs gap. v5.9.2b
-        // added 9 inference-affecting cfg fields to the stamp body schema +
-        // verifier, but production emit sites (suite Run Full Validation
-        // here, plus tools/stamp_model.sh CLI) never populated `inf`. Result:
-        // suite-emitted stamps lacked all stamp-bound cfg protection. Same
-        // shape as the v5.9.4a model_num_outputs gap. Fix: build inf from
-        // data->config_used + label_type, pass to stamp_write_for_model.
-        // Scaler sha256 not wired here (Run Full Validation doesn't persist
-        // a scaler in this path — separate v5.9.5c+ scope).
-        // v5.14.8.A.merged.3 — Production caller migrated to canonical
-        // stamp body names + STAMP_SET. Field names follow the canonical
-        // wire keys (matches what stamp_write_for_model emits + what
-        // verify_model_stamp parses). FOREACH_STAMP_BOUND_MODEL_CONST
-        // registry is the single source of truth.
-        StampInferenceCfgInputs inf = {};
-        STAMP_SET(inf, inference_cfg);
-        inf.inference_cfg_confidence_threshold_scale =
-            FPN_ToDouble(data->config_used.confidence_threshold_scale);
-        inf.inference_cfg_barrier_gate_enabled = BITMAP_IS_SET(data->config_used.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED) ? 1 : 0;
-        inf.inference_cfg_confidence_hard_block_threshold =
-            FPN_ToDouble(data->config_used.confidence_hard_block_threshold);
-        inf.inference_cfg_held_out_fraction =
-            FPN_ToDouble(data->config_used.held_out_fraction);
-        // v5.14.9.D — DELETED inference_cfg_freshness_tau setter
-        // (TECH_DEBT-004 close); cfg field + stamp body entry deleted.
-        if (BITMAP_IS_SET(data->config_used.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) {
-            STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
-            inf.inference_cfg_bandit_blend_ratio =
-                FPN_ToDouble(data->config_used.bandit_blend_ratio);
-        }
-        if (BITMAP_IS_SET(data->config_used.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED)) {
-            STAMP_SET(inf, fees);
-            inf.inference_cfg_fee_rate_maker = FPN_ToDouble(data->config_used.fee_rate_maker);
-            inf.inference_cfg_fee_rate_taker = FPN_ToDouble(data->config_used.fee_rate_taker);
-        }
-        STAMP_SET(inf, training_poll_interval);
-        inf.training_poll_interval     = data->config_used.poll_interval;
-        // model_num_outputs derived from label_type: binary/regression → 1,
-        // multiclass K → K. Single source of truth: LabelType_NumClasses.
+        // Byte-equivalence preserved: helper walks the same FOREACH_STAMP_BOUND_*
+        // registries in the same canonical order; only refactor is HOW inf gets
+        // populated. NEW emit: grid_member_count + grid_member_idx (always
+        // emit; defaults 1/0 for single-horizon — additive change per Surface
+        // G forward-compat; no MODEL_FORMAT_VERSION bump).
+        tt::StampArgs<BACKTEST_FP> args;
+        args.format_version = out->auto_stamp_format_version > 0
+                            ? out->auto_stamp_format_version
+                            : MODEL_FORMAT_VERSION;
+        // wf_metric pick per label kind (matches engine's gap math)
+        args.wf_metric = LabelType_IsRegression(label_type)
+            ? (double)out->walkforward.mean_val_correlation
+            : (double)out->walkforward.mean_val_accuracy;
+        args.held_out_metric = (double)out->held_out_metric;
+        args.gap_threshold   = (double)gap_threshold;
+        args.label_kind      = label_type;
+
+        // XGBoost hyperparams: RFV uses Defaults+cfg override (operator-tunable
+        // subset). Pull from config_used.
         {
-            int K = LabelType_NumClasses(label_type);
-            STAMP_SET(inf, model_num_outputs);
-            inf.model_num_outputs = (K >= 2) ? K : 1;
-        }
-        // v5.9.5h — XGBoost hyperparams binding. RFV uses
-        // XGBHyperparams_Defaults() (cfg-tunable subset overridden by
-        // config_used; Train Model overrides max_depth/lr/n_est too).
-        // Stamp records what trained the model for forensics +
-        // reproducibility; engine load-WARN compares to runtime cfg.
-        {
-            STAMP_SET(inf, xgb_hyperparams);
             tt::XGBHyperparams hp = tt::XGBHyperparams_Defaults();
-            // RFV training uses cfg-tunable subset; pull from config_used
             hp.subsample        = FPN_ToDouble(data->config_used.xgb_subsample);
             hp.colsample_bytree = FPN_ToDouble(data->config_used.xgb_colsample_bytree);
             hp.min_child_weight = data->config_used.xgb_min_child_weight;
             hp.seed             = data->config_used.xgb_seed;
-            {
-                size_t tmln = strnlen(data->config_used.xgb_tree_method,
-                                       sizeof(hp.tree_method) - 1);
-                memcpy(hp.tree_method, data->config_used.xgb_tree_method, tmln);
-                hp.tree_method[tmln] = '\0';
-            }
-            inf.xgb_max_depth         = hp.max_depth;
-            inf.xgb_learning_rate     = (double)hp.learning_rate;
-            inf.xgb_n_estimators      = hp.n_estimators;
-            inf.xgb_subsample         = hp.subsample;
-            inf.xgb_colsample_bytree  = hp.colsample_bytree;
-            inf.xgb_min_child_weight  = hp.min_child_weight;
-            inf.xgb_seed              = hp.seed;
-            size_t tmln = strnlen(hp.tree_method, sizeof(inf.xgb_tree_method) - 1);
-            memcpy(inf.xgb_tree_method, hp.tree_method, tmln);
-            inf.xgb_tree_method[tmln] = '\0';
+            args.snap_max_depth        = hp.max_depth;
+            args.snap_learning_rate    = (double)hp.learning_rate;
+            args.snap_n_estimators     = hp.n_estimators;
+            args.snap_subsample        = hp.subsample;
+            args.snap_colsample_bytree = hp.colsample_bytree;
+            args.snap_min_child_weight = hp.min_child_weight;
+            args.snap_seed             = hp.seed;
+            args.snap_tree_method      = data->config_used.xgb_tree_method;
         }
-        // v5.10.1.A — LABEL_REGISTRY_HASH plumb-through (parity-check Finding #1).
-        // Without this, engine accepts any model regardless of label-set drift.
-        STAMP_SET(inf, label_registry_hash);
-        inf.label_registry_hash     = LABEL_REGISTRY_HASH();
-        // v5.9.5h Phase 10 — build flags fingerprint. Stamps the
-        // training-build's hash so engine load can detect cross-build
-        // deploy drift (e.g., trained -O2 dev box, deployed -O3 prod).
-        STAMP_SET(inf, build_flags_hash);
-        inf.build_flags_hash = tt::BUILD_FLAGS_HASH();
-        // v5.11.41 — XGBoost training thread count. Forensic record of
-        // serial mode (operator's cfg.xgb_train_nthread, default 4) vs
-        // parallel multi-horizon mode (pinned to 1 by per-horizon worker
-        // for bytewise determinism). Closes /parity-check 2026-05-07-stamp
-        // CRITICAL-2 + CRITICAL-3.
-        STAMP_SET(inf, xgb_train_nthread);
-        inf.xgb_train_nthread     = data->config_used.xgb_train_nthread > 0
-                                  ? data->config_used.xgb_train_nthread : 1;
-        // v5.11.41 — per-horizon label parameters. label_lookahead_ticks /
-        // tp_pct / sl_pct live in BacktestRunConfig, not ControllerConfig
-        // (data->config_used). Caller (multi-horizon worker OR single-
-        // horizon RFV button) populates out->req_label_* before calling
-        // RFV; we propagate to stamp body when non-zero. Closes
-        // /parity-check 2026-05-07-stamp CRITICAL-1.
-        if (out->req_label_lookahead_ticks > 0) {
-            STAMP_SET(inf, label_params);
-            inf.label_lookahead_ticks = out->req_label_lookahead_ticks;
-            inf.label_tp_pct          = out->req_label_tp_pct;
-            inf.label_sl_pct          = out->req_label_sl_pct;
-        }
-        // v5.14.1.E.E.B — Auto-populate ALL stamp-bound cfg fields via
-        // FOREACH_STAMP_BOUND_CFG X-macro expansion. Replaces the
-        // 4 manual populator blocks (Ridge/composite/winsor/exit_blender)
-        // with a single STAMP_CFG_AUTOPOPULATE call.
-        //
-        // Eliminates the v5.9.5b production-caller field-population gap
-        // class structurally — adding a new stamp-bound cfg field becomes
-        // ONE line in FOREACH_STAMP_BOUND_CFG (StampBoundCfgRegistry.hpp);
-        // the auto-populate expansion picks it up automatically next
-        // compile. PARITY-002/003/004/005/008 (4 historical recurrences
-        // of the same class) cannot recur for fields registered via the
-        // X-macro.
-        //
-        // Per-field emit_when predicate (in registry tuple) gates whether
-        // each field's has_* + value gets populated; default cfg leaves
-        // legacy has_*=0 stamps byte-identical to pre-feature ships.
-        //
-        // `auto&` (not templated <F>) since this enclosing fn is not a
-        // template; data->config_used has its concrete type available.
-        {
-            auto& cfg = data->config_used;
-            STAMP_CFG_AUTOPOPULATE(inf, cfg);
-        }
+        args.snap_train_nthread = data->config_used.xgb_train_nthread > 0
+                                ? data->config_used.xgb_train_nthread : 1;
 
-        // v5.14.2.E.2.B — model-architectural fields (manual populator;
-        // not in FOREACH_STAMP_BOUND_CFG). These come from training-time
-        // model context, not engine cfg:
-        //   - expected_num_classes: derived from out->req_num_outputs
-        //     (= XGBoost output dimension = num_classes for multiclass,
-        //     1 for binary/regression)
-        //   - expected_role: from out->req_role (operator's training-time
-        //     choice: buy_signal | barrier | regime | exit)
-        //   - expected_num_features: MODEL_NUM_FEATURES build constant
-        //     (= NUM_REGISTERED_FEATURES)
-        //   - expected_feature_format_version: MODEL_FORMAT_VERSION build constant
-        //
-        // Closes the expected.cfg → stamp body migration for these 4 fields.
-        // Engine reads stamp body if has_* set; falls back to expected.cfg
-        // for legacy stamps. Migration goal: deprecate expected.cfg entirely
-        // when v5.X+ all stamps have the new fields.
-        if (out->req_num_outputs > 0) {
-            STAMP_SET(inf, expected_num_classes);
-            inf.expected_num_classes     = out->req_num_outputs;
-        }
-        if (out->req_role[0]) {
-            STAMP_SET(inf, expected_role);
-            strncpy(inf.expected_role, out->req_role, sizeof(inf.expected_role) - 1);
-            inf.expected_role[sizeof(inf.expected_role) - 1] = '\0';
-        }
-        // Build constants — always emit (training-time = build-time identity).
-        STAMP_SET(inf, expected_num_features);
-        inf.expected_num_features     = (int)MODEL_NUM_FEATURES;
-        STAMP_SET(inf, expected_feature_format_version);
-        inf.expected_feature_format_version     = (int)MODEL_FORMAT_VERSION;
+        // Per-horizon label params (multi-horizon worker sets req_label_*;
+        // single-horizon RFV button leaves at 0).
+        args.horizon_ticks  = out->req_label_lookahead_ticks;
+        args.horizon_tp_pct = out->req_label_tp_pct;
+        args.horizon_sl_pct = out->req_label_sl_pct;
 
-        // v5.10.0 Item A — stamp_emit phase timer.
+        // PARITY-021 close — grid identification (mh_run_one_horizon_fv
+        // populates req_grid_*; single-horizon callers leave at defaults).
+        args.grid_member_count = out->req_grid_member_count;
+        args.grid_member_idx   = out->req_grid_member_idx;
+        args.horizon_count     = out->req_horizon_count;
+
+        // Architectural fields (training-time identity)
+        args.req_num_outputs = out->req_num_outputs;
+        args.req_role        = out->req_role;
+
+        // v5.10.0 Item A — stamp_emit phase timer (kept; wraps helper call).
         uint64_t stamp_start_ns = tt::PhaseTimer_NowNs();
-        StampWriteResult sr = stamp_write_for_model(
+        StampWriteResult sr = tt::Stamp_AssembleAndEmit<BACKTEST_FP>(
             out->auto_stamp_path,
             out->auto_stamp_secret,
-            out->auto_stamp_format_version > 0 ? out->auto_stamp_format_version
-                                                : MODEL_FORMAT_VERSION,
-            today,
-            wf_metric,
-            (double)out->held_out_metric,
-            (double)gap_threshold,
-            /*force=*/0,
-            /*feature_registry_hash=*/FEATURE_REGISTRY_HASH(),
-            /*engine_version=*/ENGINE_VERSION_STRING,
-            /*inf=*/&inf);
+            data->config_used,
+            args);
         tt::PhaseTimer_Global().stamp_emit_ns +=
             tt::PhaseTimer_NowNs() - stamp_start_ns;
         tt::PhaseTimer_Global().populated = 1;

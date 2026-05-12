@@ -3203,90 +3203,53 @@ static inline void *train_model_worker_fn(void *arg) {
                  "Auto-stamping...");
         state->tm_auto_stamp_attempted = 1;
 
-        // Build inf — mirror Backtest_RunFullValidation's pattern (v5.9.5b/h).
-        // v5.14.8.A.merged.3 — migrated to canonical wire-key field names
-        // + STAMP_SET API (Option 1 unification). Field names follow the
-        // FOREACH_STAMP_BOUND_MODEL_CONST + FOREACH_STAMP_BOUND_CFG registry
-        // single source of truth; has_* bits bit-packed via STAMP_HAS/_SET.
-        StampInferenceCfgInputs inf = {};
-        STAMP_SET(inf, inference_cfg);
-        inf.inference_cfg_confidence_threshold_scale =
-            FPN_ToDouble(run_control->results.config_used.confidence_threshold_scale);
-        inf.inference_cfg_barrier_gate_enabled = BITMAP_IS_SET(run_control->results.config_used.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED) ? 1 : 0;
-        inf.inference_cfg_confidence_hard_block_threshold =
-            FPN_ToDouble(run_control->results.config_used.confidence_hard_block_threshold);
-        inf.inference_cfg_held_out_fraction =
-            FPN_ToDouble(run_control->results.config_used.held_out_fraction);
-        // v5.14.9.D — DELETED inference_cfg_freshness_tau setter
-        // (TECH_DEBT-004 close); cfg field + stamp body entry deleted.
-        STAMP_SET(inf, training_poll_interval);
-        inf.training_poll_interval = run_control->results.config_used.poll_interval;
-        // model_num_outputs derived from label_type
-        {
-            int K = LabelType_NumClasses(snap_label_type);
-            STAMP_SET(inf, model_num_outputs);
-            inf.model_num_outputs = (K >= 2) ? K : 1;
-        }
-        // XGBoost hyperparams from operator's panel inputs (v5.9.5h)
-        STAMP_SET(inf, xgb_hyperparams);
-        inf.xgb_max_depth = snap_max_depth;
-        inf.xgb_learning_rate = snap_learning_rate;
-        inf.xgb_n_estimators = snap_n_estimators;
-        inf.xgb_subsample = snap_subsample;
-        inf.xgb_colsample_bytree = snap_colsample_bytree;
-        inf.xgb_min_child_weight = snap_min_child_weight;
-        inf.xgb_seed = snap_seed;
+        // v5.15.3.B.1 — Stamp emit chain refactored to use Stamp_AssembleAndEmit
+        // canonical helper (closes PARITY-020: previously missing
+        // STAMP_CFG_AUTOPOPULATE → all ~22 cfg-bound fields silently absent
+        // from Train Model stamps). Helper walks STAMP_CFG_AUTOPOPULATE +
+        // populates per-call model-const fields from StampArgs. NEW stamp body
+        // emit (additive; no MODEL_FORMAT_VERSION bump): full cfg-bound set
+        // (Ridge, composite, winsor, exit_blender, trading_mode, etc.) +
+        // grid_member_count/idx (defaults 1/0 for single-horizon training).
+        //
+        // Sentinels preserved for training-only stamp:
+        //   held_out_metric = 0.0  → engine recognizes as "training-only"
+        //   gap_threshold   = 0.0  → engine skips generalization gap check
+        tt::StampArgs<BACKTEST_FP> args;
+        args.wf_metric       = (double)state->train_accuracy / 100.0;
+        args.held_out_metric = 0.0;
+        args.gap_threshold   = 0.0;
+        args.label_kind      = snap_label_type;
+
+        // XGBoost hyperparams from operator's panel inputs (snap_* snapshot)
+        args.snap_max_depth        = snap_max_depth;
+        args.snap_learning_rate    = snap_learning_rate;
+        args.snap_n_estimators     = snap_n_estimators;
+        args.snap_subsample        = snap_subsample;
+        args.snap_colsample_bytree = snap_colsample_bytree;
+        args.snap_min_child_weight = snap_min_child_weight;
+        args.snap_seed             = snap_seed;
+        // UI dropdown idx → tree method string (single source of truth for
+        // the lookup table stays at caller, per StampArgs design)
         {
             static const char* tree_method_choices[] = { "hist", "exact", "approx", "auto" };
             int tm_idx = (snap_tree_method_idx >= 0 && snap_tree_method_idx < 4)
                          ? snap_tree_method_idx : 0;
-            size_t tmln = strnlen(tree_method_choices[tm_idx],
-                                   sizeof(inf.xgb_tree_method) - 1);
-            memcpy(inf.xgb_tree_method, tree_method_choices[tm_idx], tmln);
-            inf.xgb_tree_method[tmln] = '\0';
+            args.snap_tree_method = tree_method_choices[tm_idx];
         }
-        // Build flags fingerprint (v5.9.5h #10)
-        STAMP_SET(inf, build_flags_hash);
-        inf.build_flags_hash = tt::BUILD_FLAGS_HASH();
-        // v5.10.1.A — LABEL_REGISTRY_HASH plumb-through (parity-check Finding #1).
-        // Train Model worker now stamps the label-set fingerprint alongside
-        // the feature-set + build-flags fingerprints; engine load REFUSES
-        // on label drift in strict mode.
-        STAMP_SET(inf, label_registry_hash);
-        inf.label_registry_hash     = LABEL_REGISTRY_HASH();
-        // Scaler binding (v5.9.3a) — populate when scaler_persisted
+        args.snap_train_nthread = run_control->results.config_used.xgb_train_nthread > 0
+                                ? run_control->results.config_used.xgb_train_nthread : 1;
+
+        // Scaler binding (only emit if persisted; helper checks for non-empty)
         if (scaler_persisted && state->scaler_sha256_hex[0]) {
-            STAMP_SET(inf, scaler);
-            inf.feature_scaler_present = 1;
-            size_t shn = strnlen(state->scaler_sha256_hex,
-                                  sizeof(inf.scaler_sha256) - 1);
-            memcpy(inf.scaler_sha256, state->scaler_sha256_hex, shn);
-            inf.scaler_sha256[shn] = '\0';
+            args.scaler_sha256_hex = state->scaler_sha256_hex;
         }
 
-        // ISO date for trained_on
-        char today[16] = {0};
-        time_t now = time(NULL);
-        struct tm tm_buf;
-        localtime_r(&now, &tm_buf);
-        strftime(today, sizeof(today), "%Y-%m-%d", &tm_buf);
-
-        // Convert WF mean (display %) to fraction (matches Full Validation's
-        // stamping convention: 0.0-1.0).
-        double wf_metric = (double)state->train_accuracy / 100.0;
-
-        StampWriteResult sr = stamp_write_for_model(
+        StampWriteResult sr = tt::Stamp_AssembleAndEmit<BACKTEST_FP>(
             snap_model_path,
             run_control->results.config_used.held_out_stamp_secret,
-            MODEL_FORMAT_VERSION,
-            today,
-            wf_metric,
-            /*held_out_metric=*/0.0,        // sentinel: training-only stamp
-            /*gap_threshold=*/0.0,           // sentinel: skip gap check
-            /*force=*/0,
-            FEATURE_REGISTRY_HASH(),
-            ENGINE_VERSION_STRING,
-            &inf);
+            run_control->results.config_used,
+            args);
         state->tm_auto_stamp_ok = sr.ok;
         if (sr.ok) {
             size_t pn = strnlen(sr.stamp_path, sizeof(state->tm_auto_stamp_path_written) - 1);
@@ -3448,7 +3411,12 @@ static inline void mh_run_one_horizon_fv(
     // v5.13.1 — sell-side training. Default 0 preserves pre-v5.13.1 path
     // for legacy callers. 1 → prepend "exit/" to run_subdir routing
     // output to models/exit/<run_subdir>/<run>_horizon_<N>/.
-    int training_side = 0)
+    int training_side = 0,
+    // v5.15.3.B.2 — total horizon count in this multi-horizon sweep
+    // (default 1 = single-horizon caller; multi-horizon callers pass N).
+    // Closes PARITY-021: stamp body grid_member_count + grid_member_idx
+    // were orphan-placeholder fields; this plumbs the real values.
+    int horizon_count = 1)
 {
     snprintf(state->mh_horizon_status[h], 128,
              "h=%d: computing labels...", horizon_ticks);
@@ -3534,6 +3502,19 @@ static inline void mh_run_one_horizon_fv(
     fv->req_label_lookahead_ticks = horizon_ticks;
     fv->req_label_tp_pct          = (double)tp_pct;
     fv->req_label_sl_pct          = (double)sl_pct;
+    // v5.15.3.B.2 — PARITY-021 close. Grid identification plumbed from
+    // multi-horizon worker through FullValidationResults → StampArgs.
+    // grid_member_count = horizon_count (total horizons), member_idx = h
+    // (this horizon's index 0..N-1). Single-horizon callers (Train Model
+    // button) leave defaults at 1/0/1 via the function-arg default.
+    fv->req_grid_member_count = horizon_count;
+    fv->req_grid_member_idx   = h;
+    fv->req_horizon_count     = horizon_count;
+    // v5.15.3.B.2 — also plumb expected_role from label_type so Stamp_
+    // AssembleAndEmit emits args.req_role correctly. Pre-v5.15.3 this
+    // came via inf.expected_role manual setter at RFV; helper expects
+    // it via out->req_role.
+    snprintf(fv->req_role, sizeof(fv->req_role), "%s", role);
 
     // v5.11.52 — train + save the FINAL deployable model BEFORE calling
     // RFV. RFV computes WF + held-out metrics + auto-stamps the file at
@@ -3758,17 +3739,23 @@ struct MultiHorizonParallelJob {
     // v5.13.1 — sell-side training routing. Defaults to 0 (buy) so legacy
     // parallel-mode callers preserve bytewise output paths.
     int training_side;
+    // v5.15.3.B.2 — grid identification (PARITY-021 close). horizon_count = N
+    // total horizons in this multi-horizon sweep. h is the per-job index
+    // (already present). Plumbed into fv->req_grid_* before RFV call so
+    // Stamp_AssembleAndEmit emits grid_member_count + grid_member_idx fields
+    // (previously orphan-placeholder fields in FOREACH_STAMP_BOUND_MODEL_CONST
+    // that no production caller populated).
+    int horizon_count;
 };
 
 static inline void *mh_per_horizon_parallel_worker(void *arg) {
     MultiHorizonParallelJob *job = (MultiHorizonParallelJob *)arg;
-    // v5.11.44 hotfix — cap libgomp's OpenMP thread pool to 1 in this
-    // pthread context. XGBoost uses libgomp for its internal histogram-
-    // building parallel-for; with multiple pthreads each spawning their
-    // own OpenMP teams, libgomp's shared thread pool collides → segfault
-    // in RowsWiseBuildHistKernel. Pinning OMP threads per pthread context
-    // serializes XGBoost's inner work; outer parallelism (N pthreads) still
-    // gives N-x speedup vs serial.
+    // v5.15.3.C — libgomp pthread-race landmine FIXED at process entry
+    // via setenv("OMP_NUM_THREADS", "1", ...) in foxml_suite.cpp:main.
+    // Per-pthread omp_set_num_threads(1) here is now defensive (process-
+    // global env already set, but cheap belt-and-suspenders against any
+    // accidental nested omp_set_num_threads call elsewhere in libgomp/
+    // XGBoost init).
     omp_set_num_threads(1);
     omp_set_dynamic(0);
     mh_run_one_horizon_fv(
@@ -3783,7 +3770,8 @@ static inline void *mh_per_horizon_parallel_worker(void *arg) {
         job->snap_gap_threshold, job->snap_held_out_fraction,
         job->snap_auto_stamp_enabled, job->snap_auto_stamp_secret,
         &job->local_run_cfg,
-        job->training_side);
+        job->training_side,
+        job->horizon_count);  // v5.15.3.B.2 PARITY-021
     free(job->isolated_results.labels);
     free(job);
     return NULL;
@@ -3883,34 +3871,22 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
     }
     state->mh_total = horizon_count;
 
-    // v5.11.41.C — parallelism dispatch. v5.11.45: default changed to
-    // serial (cfg.multi_horizon_max_threads=1) after segfault reports.
-    // XGBoost + libgomp + pthread is fragile; per-pthread omp_set_num_threads(1)
-    // doesn't fully prevent libgomp state collisions across concurrent
-    // XGBoost trainings. Operator opts into parallel by setting
-    // cfg.multi_horizon_max_threads >= 2. If they do, fire a one-shot
-    // CRITICAL warning so they know the risk.
+    // v5.15.3.C — libgomp landmine FIXED at process entry (setenv
+    // OMP_NUM_THREADS=1 in foxml_suite.cpp:main). XGBoost trainings across
+    // pthreads no longer race on libgomp's shared parallel-region state
+    // because the process-global single-thread mode is set before any
+    // libgomp init. Per-pthread workers can now safely run concurrent
+    // XGBoost without the v5.11.44 omp_set_num_threads(1) per-pthread
+    // workaround (kept defensively) or the v5.11.45 forced-serial clamp
+    // (REMOVED in this ship). cfg.multi_horizon_max_threads now honors
+    // operator's actual setting: 0 = auto (= horizon_count, fully
+    // parallel), N = cap to N concurrent.
     int mh_max_threads = results->config_used.multi_horizon_max_threads;
     if (mh_max_threads <= 0) {
-        // 0 = auto, but post-v5.11.45 defaults to 1 (serial) for stability.
-        // Treat 0 the same as 1 here — operator must explicitly request >=2.
-        mh_max_threads = 1;
+        mh_max_threads = horizon_count;  // 0 = auto = fully parallel
     }
     int n_parallel = horizon_count < mh_max_threads ? horizon_count : mh_max_threads;
     int parallel_mode = (n_parallel >= 2 && horizon_count >= 2);
-    if (parallel_mode) {
-        // v5.11.45 — experimental opt-in. Operator explicitly set cfg
-        // multi_horizon_max_threads >= 2. Log warning so they know the risk.
-        // (One-shot per worker invocation; rate-limit not needed since
-        // training is rare.)
-        fprintf(stderr,
-            "[mh-train] WARN: parallel mode enabled "
-            "(cfg.multi_horizon_max_threads=%d). XGBoost+libgomp+pthread "
-            "interaction is unstable and may segfault under load. If you "
-            "see SIGSEGV in RowsWiseBuildHistKernel or PredictDMatrix, "
-            "set cfg.multi_horizon_max_threads=1 and retry serial.\n",
-            results->config_used.multi_horizon_max_threads);
-    }
 
     int trained = 0;
     int saved_count = 0;
@@ -3961,6 +3937,7 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
             job->isolated_results.config_used.xgb_train_nthread = 1;
             job->isolated_results.config_used.xgb_eval_nthread  = 1;
             job->h = h;
+            job->horizon_count = horizon_count;  // v5.15.3.B.2 PARITY-021
             job->horizon_ticks = horizons[h];
             job->tp_pct = tp_pcts[h];
             job->sl_pct = sl_pcts[h];
@@ -4048,7 +4025,8 @@ static inline void *train_multi_horizon_worker_fn(void *arg) {
                 snap_gap_threshold, snap_held_out_fraction,
                 snap_auto_stamp_enabled, snap_auto_stamp_secret,
                 &run_control->run_config,
-                snap_training_side);
+                snap_training_side,
+                horizon_count);  // v5.15.3.B.2 PARITY-021
 
             FullValidationResults *fv = &state->mh_horizon_fv[h];
             trained++;

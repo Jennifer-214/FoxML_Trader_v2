@@ -36,6 +36,7 @@
 #include "CoreFrameworks/SystemInit.hpp"  // v5.11.0.A — engine_set_mxcsr_ftz_daz
 
 #include <sys/stat.h>  // mkdir
+#include <stdlib.h>    // v5.15.3.C — setenv("OMP_NUM_THREADS", ...) at main entry
 
 //======================================================================================================
 // [SUITE DOCK LAYOUT]
@@ -84,6 +85,31 @@ static void Suite_SetupDefaultLayout(ImGuiID dockspace_id) {
 // [MAIN]
 //======================================================================================================
 int main(int argc, char *argv[]) {
+    // v5.15.3.C — libgomp+XGBoost+pthread landmine fix. MUST be FIRST line
+    // of main() so libgomp inherits OMP_NUM_THREADS=1 at its first init
+    // (which happens at first XGBoost call). Sets process-global single-
+    // thread state; all subsequent pthreads share it; no shared-pool race.
+    //
+    // Closes CLAUDE.local.md "XGBoost + libgomp + pthread parallelism"
+    // landmine (set 2026-05-07). Prior workarounds (per-pthread
+    // omp_set_num_threads(1) at v5.11.44; forced-serial clamp at v5.11.45)
+    // were insufficient because libgomp's parallel-region setup uses
+    // shared process-global state that races on first init.
+    //
+    // Trade-off: forces ALL XGBoost in suite to single-thread mode. This
+    // is fine because (a) v5.11.41 already pins xgb_train_nthread=1 for
+    // bytewise determinism in multi-horizon, (b) Train Model panel's
+    // serial mode benefits negligibly from libgomp threading vs the
+    // determinism risk, (c) per-horizon pthread parallelism in
+    // mh_per_horizon_parallel_worker now safe (single-thread XGBoost
+    // per pthread = no libgomp shared state to collide on).
+    //
+    // overwrite=1: deliberately override any pre-existing OMP_NUM_THREADS
+    // operator may have set in shell env (suite needs OMP=1 for parity +
+    // libgomp safety; operator opt-out by patching this line + rebuilding,
+    // not via env).
+    setenv("OMP_NUM_THREADS", "1", /*overwrite=*/1);
+
     // v5.11.0.A — Suite does FP math during model training (XGBoost feature
     // standardizer, label binning, walk-forward scoring). Match engine's
     // MXCSR state so trained models score identically at serve time.
