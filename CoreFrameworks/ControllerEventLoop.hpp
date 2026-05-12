@@ -236,6 +236,13 @@ struct CoreContext {
     // Default 0.0 = no exit prediction this cycle. Reset each cycle.
     double last_exit_prediction;
     int    last_exit_dominant_horizon;  // -1 = none; otherwise [0..exit_predictor_count)
+    // v5.15.5.A.6 — buy-side per-horizon barrier dispatch observability.
+    // Mirrors exit-side fields above; written by ML_BuildParameters when
+    // the per-horizon barrier feature is active. Surfaced via PerCoreSnap
+    // to MLStatusPanel for the `tp: 0.050% (h2)` display pattern.
+    int     last_buy_dominant_horizon;  // -1 = no buy-side dispatch this cycle
+    uint8_t last_barrier_mode_used;     // active mode enum (FOREACH_BARRIER_BLEND_MODE)
+    uint32_t barrier_shadow_event_count; // total shadow ring writes (modes 3/4)
     // v5.9.0b — ML observability extensions (V5_9_AUDIT-#2, #3).
     // Surface model load failures, ML decision context, and NaN counters
     // to the operator via TUISnapshot + ML Status panel + entry log.
@@ -744,6 +751,10 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         // RebuildOneCore writes can have happened on cold boot).
         state->cores[i].last_exit_prediction           = 0.0;
         state->cores[i].last_exit_dominant_horizon     = -1;
+        // v5.15.5.A.6 — buy-side per-horizon barrier observability init
+        state->cores[i].last_buy_dominant_horizon      = -1;
+        state->cores[i].last_barrier_mode_used         = 0;  // MODE_BARRIER_BLEND_LEGACY
+        state->cores[i].barrier_shadow_event_count     = 0;
         // v5.9.1 — edge-trigger flag for boot-time per-core warmup-complete
         // log. Set to 1 once per session per core after the first slow-path
         // rebuild that observes rolling.count >= min_warmup_samples.
@@ -2390,6 +2401,14 @@ inline void EventLoop_RebuildOneCore(
             state->cores[slot].last_exit_dominant_horizon = -1;
             ml_ctx.out_exit_prediction       = &state->cores[slot].last_exit_prediction;
             ml_ctx.out_exit_dominant_horizon = &state->cores[slot].last_exit_dominant_horizon;
+            // v5.15.5.A.6 — buy-side per-horizon barrier observability sinks.
+            // Reset per-cycle dispatch fields; shadow event counter stays
+            // monotonic (don't reset across cycles).
+            state->cores[slot].last_buy_dominant_horizon = -1;
+            state->cores[slot].last_barrier_mode_used    = 0;  // LEGACY default
+            ml_ctx.out_buy_dominant_horizon   = &state->cores[slot].last_buy_dominant_horizon;
+            ml_ctx.out_barrier_mode_used      = &state->cores[slot].last_barrier_mode_used;
+            ml_ctx.barrier_shadow_event_count = &state->cores[slot].barrier_shadow_event_count;
             dispatch_ctx = &ml_ctx;
         }
         // v4.0.4: stash the resolved strategy for GUI display. For non-AUTO

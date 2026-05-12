@@ -1089,6 +1089,22 @@ struct TUISnapshot {
         // otherwise [0..exit_predictor_count) the arm with highest prob.
         double   ml_last_exit_prediction;
         int      ml_last_exit_dominant_horizon;
+        // v5.15.5.A.6 — buy-side per-horizon barrier dispatch observability.
+        // Mirrors exit-side pattern at MLStatusPanel.hpp:179-198. Surfaces
+        // which horizon's barriers drove the most recent ML buy trade
+        // (DOMINANT mode) or the blended barrier value (BLEND mode).
+        // -1 = no buy-side ensemble dispatch this cycle (LEGACY mode or
+        // ensemble inactive). >=0 = dominant arm index [0..primary_count).
+        int      ml_last_buy_dominant_horizon;
+        // Active blend mode that fired this cycle's TP/SL resolution.
+        // Maps to FOREACH_BARRIER_BLEND_MODE enum:
+        //   0=LEGACY, 1=BLEND, 2=DOMINANT, 3=BOTH_BLEND_DRIVES,
+        //   4=BOTH_DOMINANT_DRIVES (shadow modes log compare).
+        uint8_t  ml_last_barrier_mode_used;
+        // Shadow-mode telemetry: count of shadow ring writes since boot.
+        // Only increments when barrier_blend_mode is 3 or 4. Operator can
+        // gauge how much shadow data has accumulated for offline A/B analysis.
+        uint32_t ml_barrier_shadow_event_count;
         // v5.14.8.C — ML observability failure modes via FOREACH_FAILURE_MODE
         // registry. Bit-packed BIT_FLAG entries share `failure_flags` uint16_t
         // bitmap; COUNTER_U32 + PERCENT_U8 entries declare standalone fields.

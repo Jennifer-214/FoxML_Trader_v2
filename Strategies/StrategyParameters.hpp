@@ -112,6 +112,12 @@ struct MLBuildContext {
     // side wiring leave this null; ML_BuildParameters skips the inference.
     double*             out_exit_prediction;
     int*                out_exit_dominant_horizon;
+    // v5.15.5.A.6 — buy-side per-horizon barrier dispatch observability.
+    // Written by ML_BuildParameters when per-horizon barrier feature
+    // active. Mirrors exit-side pattern.
+    int*                out_buy_dominant_horizon;       // -1 = no dispatch this cycle
+    uint8_t*            out_barrier_mode_used;          // FOREACH_BARRIER_BLEND_MODE enum
+    uint32_t*           barrier_shadow_event_count;     // incremented on shadow ring write
     // v5.9.0b — ML observability pass-through. ML_BuildParameters writes
     // these for the entry log + ML Status panel to read. nullptr-safe
     // (legacy/test callers can omit).
@@ -1332,8 +1338,25 @@ inline void ML_BuildParameters(
         tp_pct = config->ml_tp_pct;
         sl_pct = config->ml_sl_pct;
     }
-    // Shadow telemetry (modes 3/4) deferred to .A.6 (observability sub-commit);
-    // mode_flags & MODE_F_SHADOW_ACTIVE will gate the shadow ring write.
+    // v5.15.5.A.6 — observability writes for the per-horizon barrier
+    // dispatch. Mirrors exit-side pattern. Surfaces to MLStatusPanel via
+    // PerCoreSnap (ShardedSnapshot.hpp:597-602 area).
+    if (mctx) {
+        if (mctx->out_buy_dominant_horizon)
+            *mctx->out_buy_dominant_horizon = blend_dispatch_ready ? blend_dominant_h : -1;
+        if (mctx->out_barrier_mode_used)
+            *mctx->out_barrier_mode_used = (uint8_t)active_mode;
+        // Shadow event counter: increment when mode is BOTH_*_DRIVES
+        // (MODE_F_SHADOW_ACTIVE set). Counter is monotonic; operator
+        // gauges shadow-data accumulation for offline A/B analysis.
+        // Full shadow ring write (records[]) deferred to v5.15.6 — for
+        // v5.15.5.A we just count events; ring infra lands when the
+        // first telemetry consumer needs it.
+        if (mctx->barrier_shadow_event_count &&
+            (mode_flags & MODE_F_SHADOW_ACTIVE) && blend_dispatch_ready) {
+            (*mctx->barrier_shadow_event_count)++;
+        }
+    }
     FPN<F> tp_amount = FPN_Mul(entry_price, tp_pct);
     FPN<F> sl_amount = FPN_Mul(entry_price, sl_pct);
 

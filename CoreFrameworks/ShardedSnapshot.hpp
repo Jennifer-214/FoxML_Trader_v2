@@ -596,6 +596,10 @@ static inline void TUI_CopySnapshotSharded(
             // exit_predictor blended prob + dominant horizon in dashboard.
             snap->per_core[i].ml_last_exit_prediction       = state->cores[i].last_exit_prediction;
             snap->per_core[i].ml_last_exit_dominant_horizon = state->cores[i].last_exit_dominant_horizon;
+            // v5.15.5.A.6 — buy-side per-horizon barrier observability snap.
+            snap->per_core[i].ml_last_buy_dominant_horizon   = state->cores[i].last_buy_dominant_horizon;
+            snap->per_core[i].ml_last_barrier_mode_used      = state->cores[i].last_barrier_mode_used;
+            snap->per_core[i].ml_barrier_shadow_event_count  = state->cores[i].barrier_shadow_event_count;
             // Direct reads of scorer internals — these are double-only and safe
             // to compute on the snapshot path (snapshot is slow-path itself).
             // v5.14.1.F — variant-aware IC (default 0=Spearman). cfg in scope

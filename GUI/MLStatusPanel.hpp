@@ -196,6 +196,45 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                         "fires MARKET_SELL via OMS_PushSubmit + sets\n"
                         "SHALT_EXIT_PREDICTED on this core's halt reason.");
                 }
+
+                // v5.15.5.A.6 — buy-side per-horizon barrier dispatch display.
+                // Mirrors exit-side `exit:` line above. Only renders when the
+                // per-horizon feature was active this cycle (dominant >= 0
+                // means dispatch ran; LEGACY mode never writes a non-negative
+                // dominant). Surfaces which horizon's barriers drove the trade.
+                if (pc.ml_last_buy_dominant_horizon >= 0) {
+                    ImGui::SameLine(0, 14);
+                    ImGui::TextColored(FoxmlColors::sand, "barrier:");
+                    ImGui::SameLine();
+                    static const char* mode_short[] = {
+                        "L", "B", "D", "B+s", "D+s"  // LEGACY/BLEND/DOMINANT/BOTH_BLEND/BOTH_DOMINANT
+                    };
+                    int mode = pc.ml_last_barrier_mode_used;
+                    const char* mlabel = (mode >= 0 && mode < 5) ? mode_short[mode] : "?";
+                    ImGui::Text("h%d %s", pc.ml_last_buy_dominant_horizon, mlabel);
+                    ImGui::SetItemTooltip(
+                        "Per-horizon TP/SL barrier dispatch (v5.15.5+).\n"
+                        "h<idx> = horizon arm whose stamp barriers drove\n"
+                        "this trade's TP/SL (or contributed most weight in\n"
+                        "BLEND mode). Mode tag:\n"
+                        "  L = LEGACY (cfg-direct fallback)\n"
+                        "  B = BLEND (Σ wᵢ · barrierᵢ)\n"
+                        "  D = DOMINANT (argmax arm's barriers)\n"
+                        "  B+s = BOTH_BLEND_DRIVES (blend drives; dominant shadow-logged)\n"
+                        "  D+s = BOTH_DOMINANT_DRIVES (dominant drives; blend shadow-logged)\n"
+                        "Enable: cfg.per_horizon_barrier_blend=1 + cfg.barrier_blend_mode=N.");
+                    if (pc.ml_barrier_shadow_event_count > 0) {
+                        ImGui::SameLine(0, 6);
+                        ImGui::TextColored(FoxmlColors::comment, "(sh:%u)",
+                                            pc.ml_barrier_shadow_event_count);
+                        ImGui::SetItemTooltip(
+                            "Cumulative shadow-mode events: count of BOTH_*_DRIVES\n"
+                            "cycles where the non-driving result was logged for\n"
+                            "offline A/B analysis. Operator uses this to gauge\n"
+                            "shadow-data accumulation before promoting blend or\n"
+                            "dominant to primary driving mode.");
+                    }
+                }
             }
 
             // v5.9.3a — scaler row (Gap H). Mutually-exclusive states.
