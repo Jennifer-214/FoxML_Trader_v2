@@ -97,6 +97,7 @@ namespace tt {
 enum FailureModeGroupId : int {
     GROUP_STANDALONE  = 0,  // sentinel; standalone display
     GROUP_NAN_EVENTS  = 1,  // nan_feature_events + nan_prediction_events
+    GROUP_DRIFT       = 2,  // v5.15.1 — Model Health drift surface (7 entries)
     // Future combined-display groups append here.
 };
 }
@@ -158,7 +159,57 @@ enum FailureModeGroupId : int {
       "max_staleness_minutes threshold and the feature was skipped\n"                                   \
       "(zero sentinel written). Indicates feature pipeline drift\n"                                     \
       "or stalled data source. Investigate if counter grows steadily.",                                  \
-      tt::GROUP_STANDALONE)
+      tt::GROUP_STANDALONE)                                                                             \
+    /* === v5.15.1 — Model Health drift surface (7 BIT_FLAG entries; tt::GROUP_DRIFT) === */            \
+    /* Set at CoreModelZoo_TryLoadRole post-verify_model_stamp chokepoint; read by   */                 \
+    /* MLStatusPanel.hpp Model Health CollapsingHeader + (future) v5.15.2 boot gate. */                 \
+    X(feature_hash_drift,       BIT_FLAG,    SEV_RED,    "feat: HASH DRIFT",                            \
+      "Model's stamp-bound feature_registry_hash does not match the\n"                                  \
+      "current FEATURE_REGISTRY_HASH at runtime.\n"                                                     \
+      "Indicates schema drift since training (feature added / removed /\n"                              \
+      "reordered).\n"                                                                                   \
+      "Operator action: retrain with current feature set OR document drift.",                           \
+      tt::GROUP_DRIFT)                                                                                  \
+    X(label_hash_drift,         BIT_FLAG,    SEV_RED,    "label: HASH DRIFT",                           \
+      "Model's stamp-bound label_registry_hash does not match the\n"                                    \
+      "current LABEL_REGISTRY_HASH at runtime.\n"                                                       \
+      "Indicates label-kind schema drift since training.\n"                                             \
+      "Operator action: retrain with current label set.",                                               \
+      tt::GROUP_DRIFT)                                                                                  \
+    X(build_flags_drift,        BIT_FLAG,    SEV_YELLOW, "build: FLAG DRIFT",                           \
+      "Model's stamp-bound build_flags_hash does not match the current\n"                               \
+      "build's compile-time flags hash. Predictions may diverge if a build\n"                           \
+      "flag (LATENCY_PROFILING, USE_XGBOOST, etc.) affects feature compute.\n"                          \
+      "Operator action: rebuild engine with matching flags OR retrain.",                                \
+      tt::GROUP_DRIFT)                                                                                  \
+    X(scaler_drift,             BIT_FLAG,    SEV_RED,    "scaler: BIND DRIFT",                          \
+      "Loaded scaler's feature_registry_hash does not match the model\n"                                \
+      "handle's feature_registry_hash. Scaler binding broke between\n"                                  \
+      "training-time and runtime (e.g., sidecar copied from different\n"                                \
+      "training session).\n"                                                                            \
+      "Operator action: retrain scaler with current model + features.",                                 \
+      tt::GROUP_DRIFT)                                                                                  \
+    X(cfg_binding_drift,        BIT_FLAG,    SEV_YELLOW, "cfg: BIND DRIFT",                             \
+      "One or more stamp-bound cfg fields diverge between training-time\n"                              \
+      "and runtime cfg.* values. Examples: confidence_threshold_scale,\n"                               \
+      "barrier_gate_enabled, bandit_blend_ratio.\n"                                                     \
+      "Operator action: review boot log for per-field WARN; retrain if\n"                               \
+      "intentional or revert cfg to training-time values.",                                             \
+      tt::GROUP_DRIFT)                                                                                  \
+    X(stamp_hmac_not_verified,  BIT_FLAG,    SEV_YELLOW, "stamp: HMAC NOT VERIFIED",                    \
+      "Stamp body's HMAC signature was not verified at load\n"                                          \
+      "(cfg.held_out_stamp_secret empty OR cfg.model_verify_strict=skip).\n"                            \
+      "Live trading should always run with non-empty secret + strict\n"                                 \
+      "verification (REFUSE in v5.15.2 boot gate when trading_mode=live).\n"                            \
+      "Operator action: set held_out_stamp_secret + model_verify_strict=1.",                            \
+      tt::GROUP_DRIFT)                                                                                  \
+    X(model_age_warn,           BIT_FLAG,    SEV_YELLOW, "model: AGE WARN",                             \
+      "Model's training_timestamp_us indicates age beyond\n"                                            \
+      "cfg.model_max_age_hours. Stale model may produce predictions\n"                                  \
+      "detached from current market regime.\n"                                                          \
+      "Operator action: retrain on recent data OR adjust\n"                                             \
+      "model_max_age_hours.",                                                                           \
+      tt::GROUP_DRIFT)
 
 //======================================================================================================
 // [STORAGE-CLASS-AWARE FIELD GENERATION]

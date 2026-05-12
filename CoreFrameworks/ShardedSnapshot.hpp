@@ -510,10 +510,20 @@ static inline void TUI_CopySnapshotSharded(
         snap->per_core[i].core_peak_balance    = FPN_ToDouble(state->cores[i].core_peak_balance);
         snap->per_core[i].core_dd_pct          = FPN_ToDouble(state->cores[i].core_dd_pct);
         snap->per_core[i].core_ks_trips_total  = state->cores[i].core_ks_trips_total;
-        snap->per_core[i].core_kill_tripped    = state->cores[i].core_kill_tripped;
+        // v5.15.1 — TECH_DEBT-028: core_kill_tripped + drift_breached +
+        // drift_kill_tripped migrated to state_flags bitmap. ExecutionCore
+        // side (state->cores[i].core_kill_tripped + drift_history.*) keeps
+        // its bool/struct storage — only the snapshot side moves to bitmap.
+        if (state->cores[i].core_kill_tripped) {
+            STATE_FLAG_SET(snap->per_core[i], CORE_KILL_TRIPPED);
+        }
         // v5.10.3.B — runtime IC drift observability (parity-check Finding #9).
-        snap->per_core[i].drift_breached     = (uint8_t)state->cores[i].drift_history.breached;
-        snap->per_core[i].drift_kill_tripped = (uint8_t)state->cores[i].drift_history.kill_tripped;
+        if (state->cores[i].drift_history.breached) {
+            STATE_FLAG_SET(snap->per_core[i], DRIFT_BREACHED);
+        }
+        if (state->cores[i].drift_history.kill_tripped) {
+            STATE_FLAG_SET(snap->per_core[i], DRIFT_KILL_TRIPPED);
+        }
         snap->per_core[i].drift_n_samples    = (uint16_t)state->cores[i].drift_history.count;
         {
             double sum = 0.0;
@@ -639,9 +649,29 @@ static inline void TUI_CopySnapshotSharded(
                 if (zoo->regime.scaler_load_failed)      scaler_summary_flags |= MASK_SCALER_FAILED;
                 if (zoo->exit.scaler_load_failed)        scaler_summary_flags |= MASK_SCALER_FAILED;
             }
-            snap->per_core[i].ml_scaler_present = BITMAP_IS_SET(scaler_summary_flags, MASK_SCALER_PRESENT) ? 1 : 0;
+            // v5.15.1 — TECH_DEBT-028: ml_scaler_present migrated to state_flags bitmap.
+            if (BITMAP_IS_SET(scaler_summary_flags, MASK_SCALER_PRESENT)) {
+                STATE_FLAG_SET(snap->per_core[i], ML_SCALER_PRESENT);
+            }
             if (BITMAP_IS_SET(scaler_summary_flags, MASK_SCALER_FAILED)) {
                 FAILURE_SET(snap->per_core[i], ml_scaler_load_failed);
+            }
+            // v5.15.1 — Model Health drift aggregation. OR-combine each
+            // role's handle->drift_flags_at_load (set at TryLoadRole
+            // chokepoint) into snap.failure_flags. Single source of truth
+            // per handle; aggregate to per-core snapshot for GUI rendering.
+            // Operator sees "drift on this core" if ANY role has drift.
+            // training_timestamp_us captured from buy_signal as the
+            // representative role (single-zoo typical case).
+            if (zoo) {
+                snap->per_core[i].failure_flags |= zoo->buy_signal.drift_flags_at_load;
+                snap->per_core[i].failure_flags |= zoo->barrier.drift_flags_at_load;
+                snap->per_core[i].failure_flags |= zoo->regime.drift_flags_at_load;
+                snap->per_core[i].failure_flags |= zoo->exit.drift_flags_at_load;
+                snap->per_core[i].handle_training_timestamp_us =
+                    zoo->buy_signal.training_timestamp_us;
+            } else {
+                snap->per_core[i].handle_training_timestamp_us = 0;
             }
             // v5.10.0a.G.10 — populate ensemble snapshot from ezoo (when active).
             // The cast through void* matches the dispatcher; ml_zoo_ensemble's

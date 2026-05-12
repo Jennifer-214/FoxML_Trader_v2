@@ -85,7 +85,18 @@ namespace tt {
       "operator set core_N_strategy= explicitly in cfg (vs defaulted)")                             \
     /* v5.14.9.B.2 NEW — soft risk degradation ladder bottom hit this cycle */                      \
     X(LADDER_BOTTOM_HIT,                                                                             \
-      "ladder factor=0 fired this cycle → entry blocked + SHALT_LOW_CONFIDENCE")
+      "ladder factor=0 fired this cycle → entry blocked + SHALT_LOW_CONFIDENCE")                    \
+    /* v5.15.1 — TECH_DEBT-028 close: 4 bool-as-uint8 PerCoreSnap fields                          */ \
+    /* migrated to state_flags bitmap (matches cohort homogeneity rule;                            */ \
+    /* per-snapshot-cluster-layout-pattern + bitmap-flag-api).                                     */ \
+    X(ML_SCALER_PRESENT,                                                                             \
+      "ANY zoo role has has_scaler=1 (aggregate; per-role granularity in handles)")                 \
+    X(DRIFT_BREACHED,                                                                                \
+      "drift_history.breached at snapshot time (composite confidence drift gate tripped)")          \
+    X(DRIFT_KILL_TRIPPED,                                                                            \
+      "drift-induced kill switch fired (auto_kill_on_drift cfg + breach persisted)")                \
+    X(CORE_KILL_TRIPPED,                                                                             \
+      "operator-driven core kill OR MTM-kill OR manual-kill active right now")
 
 //======================================================================================================
 // [AUTO-GENERATED BIT POSITIONS + MASK CONSTANTS]

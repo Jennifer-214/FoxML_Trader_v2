@@ -1118,15 +1118,15 @@ struct TUISnapshot {
         // per-core visibility spots a single core stuck due to misconfigured
         // slow-path cadence.
         uint8_t  warmup_progress_pct;
-        // v5.9.3a + v5.14.8.C — scaler observability. ml_scaler_present is a
-        // STATE flag (not failure mode; not in FOREACH_FAILURE_MODE) — kept
-        // as separate uint8_t. ml_scaler_load_failed migrated to BIT_FLAG in
-        // failure_flags (bit 1). Read via FAILURE_IS_SET(pc, ml_scaler_load_failed).
+        // v5.9.3a + v5.14.8.C + v5.15.1 — scaler observability.
+        // ml_scaler_present MIGRATED to state_flags bitmap (TECH_DEBT-028);
+        // read via STATE_FLAG_IS_SET(pc, ML_SCALER_PRESENT).
+        // ml_scaler_load_failed lives in failure_flags BIT_FLAG; read via
+        // FAILURE_IS_SET(pc, ml_scaler_load_failed).
         // Mutually-exclusive states (operator-facing matrix):
         //   present=1 + failed=0 → green "scaler: applied"
         //   present=0 + failed=1 → red "scaler: WARN — load failed"
         //   present=0 + failed=0 → sand "scaler: NONE (legacy v5 model)"
-        uint8_t  ml_scaler_present;
         // v5.9.5i — cfg drift detection summary. Counts mismatches
         // between stamp's recorded cfg + runtime cfg at boot. ML Status
         // panel renders summary; details live in stderr boot log.
@@ -1153,13 +1153,13 @@ struct TUISnapshot {
         double   core_peak_balance;    // peak watermark (allocated + realized + MTM)
         double   core_dd_pct;          // current drawdown fraction (0..1)
         uint32_t core_ks_trips_total;  // historical trip count
-        uint8_t  core_kill_tripped;    // 1 = kill-halted right now
-        // v5.10.3.B — runtime IC drift detection observability (parity-check
-        // Finding #9 closure). Section J discipline: each silent-failure mode
-        // gets a distinct field so operators can distinguish drift-kill from
-        // MTM-kill / manual-kill (all of which set core_kill_tripped).
-        uint8_t  drift_breached;       // 1 = drift_history.breached at snapshot
-        uint8_t  drift_kill_tripped;   // 1 = auto_kill_on_drift triggered
+        // v5.15.1 — core_kill_tripped + drift_breached + drift_kill_tripped
+        // MIGRATED to state_flags bitmap (TECH_DEBT-028; matches cohort
+        // homogeneity rule). Read via STATE_FLAG_IS_SET(pc, CORE_KILL_TRIPPED)
+        // / STATE_FLAG_IS_SET(pc, DRIFT_BREACHED) / STATE_FLAG_IS_SET(pc,
+        // DRIFT_KILL_TRIPPED). drift-kill vs MTM-kill vs manual-kill all
+        // set CORE_KILL_TRIPPED at snapshot; DRIFT_KILL_TRIPPED distinguishes
+        // the drift sub-case (auto_kill_on_drift triggered).
         uint16_t drift_n_samples;      // current ic_samples count (0..256)
         double   drift_avg_ic;         // live-computed avg IC over the ring
         // v5.0.2 (Engine Topology): per-core thread layout
@@ -1229,6 +1229,17 @@ struct TUISnapshot {
         float    thompson_mu_post[8];                             // 32B  posterior mean per arm (BANDIT_MAX_ARMS=8)
         float    thompson_precision_post[8];                      // 32B  posterior precision per arm (= 1/variance)
         uint32_t thompson_total_pulls[8];                         // 32B  pull count per arm (matches BanditState.pulls width)
+        // v5.15.1 — Model Health drift surface. Aggregated drift state for
+        // operator visibility. Drift BITS live in failure_flags (set by
+        // ShardedSnapshot OR-aggregating each zoo role's
+        // handle->drift_flags_at_load); panel reads via FAILURE_IS_SET.
+        // training_timestamp_us captured here (8B) for "model age" rendering.
+        // At-load hash diagnostic values (feature_hash, label_hash,
+        // build_flags, scaler_registry_hash) deferred to v5.15.1.post or
+        // v5.15.2 — would need feature_registry_hash + label_registry_hash
+        // added to ModelHandle as runtime-only fields (not in stamp body
+        // registry). Drift bits + tooltips give enough operator signal today.
+        uint64_t handle_training_timestamp_us;                    // 8 B (representative role; 0 if no timestamp)
     };
     PerCoreSnap per_core[16];      // up to MAX_EXECUTION_CORES
 };

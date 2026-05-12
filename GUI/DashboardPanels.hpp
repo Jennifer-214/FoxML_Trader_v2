@@ -552,7 +552,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     // response.
                     if (s->state_warmup) {
                         ImGui::TextColored(FoxmlColors::yellow, "WARMUP");
-                    } else if (pc->core_kill_tripped) {
+                    } else if (STATE_FLAG_IS_SET(*pc, CORE_KILL_TRIPPED)) {
                         ImGui::TextColored(FoxmlColors::red, "KILL");
                     } else if (pc->strategy_id_display == STRATEGY_AUTO &&
                                pc->resolved_strategy_id == STRATEGY_NONE) {
@@ -687,7 +687,7 @@ static inline void GUI_Panel_BuyGate(const TUISnapshot *s) {
                     if (s->state_warmup) {
                         perm_label = "WARMUP";
                         perm_color = FoxmlColors::yellow;
-                    } else if (pc->core_kill_tripped) {
+                    } else if (STATE_FLAG_IS_SET(*pc, CORE_KILL_TRIPPED)) {
                         perm_label = "KILL";
                     } else if (pc->strategy_id_display == STRATEGY_AUTO &&
                                pc->resolved_strategy_id == STRATEGY_NONE) {
@@ -1004,7 +1004,7 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
             for (int i = 0; i < s->per_core_count && i < 16; ++i) {
                 const TUISnapshot::PerCoreSnap *pc = &s->per_core[i];
                 ImGui::TableNextRow();
-                if (pc->core_kill_tripped) {
+                if (STATE_FLAG_IS_SET(*pc, CORE_KILL_TRIPPED)) {
                     // 2A: highlight killed cores. Subtle red row tint so the
                     // panel doesn't look broken when a core trips, just
                     // visibly distinct. Hover any cell for the dd% reason.
@@ -1012,7 +1012,7 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
                         ImGui::GetColorU32(ImVec4(0.4f, 0.1f, 0.1f, 0.45f)));
                 }
                 ImGui::TableNextColumn();
-                if (pc->core_kill_tripped) {
+                if (STATE_FLAG_IS_SET(*pc, CORE_KILL_TRIPPED)) {
                     ImGui::TextColored(FoxmlColors::red, "%d!", i);
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Core %d killed (dd %.2f%%) — entries halted "
@@ -1044,11 +1044,11 @@ static inline void GUI_Panel_Account(const TUISnapshot *s, TUISharedState *share
                 if (cfg_sid == STRATEGY_AUTO &&
                     live_sid < NUM_STRATEGIES && live_sid != STRATEGY_AUTO) {
                     ImVec4 c = strat_colors[live_sid];
-                    if (pc->core_kill_tripped) c.w = 0.45f;
+                    if (STATE_FLAG_IS_SET(*pc, CORE_KILL_TRIPPED)) c.w = 0.45f;
                     ImGui::TextColored(c, "AUTO(%s)", STRATEGY_SHORT_NAMES[live_sid]);
                 } else if (live_sid < NUM_STRATEGIES) {
                     ImVec4 c = strat_colors[live_sid];
-                    if (pc->core_kill_tripped) c.w = 0.45f;
+                    if (STATE_FLAG_IS_SET(*pc, CORE_KILL_TRIPPED)) c.w = 0.45f;
                     ImGui::TextColored(c, "%s%s", STRATEGY_SHORT_NAMES[live_sid], explicit_marker);
                     if (!STATE_FLAG_IS_SET(*pc, STRATEGY_EXPLICITLY_SET) && cfg_sid != STRATEGY_AUTO) {
                         ImGui::SetItemTooltip(
@@ -2002,14 +2002,14 @@ static inline void GUI_RenderDashboard(const TUISnapshot *s, uint64_t start_time
                 }
 
                 ImGui::TableNextColumn();
-                if (pc->core_kill_tripped) {
+                if (STATE_FLAG_IS_SET(*pc, CORE_KILL_TRIPPED)) {
                     ImGui::TextColored(FoxmlColors::red_b, "KILLED");
                 } else {
                     ImGui::TextColored(FoxmlColors::green, "armed");
                 }
 
                 ImGui::TableNextColumn();
-                if (pc->core_kill_tripped) {
+                if (STATE_FLAG_IS_SET(*pc, CORE_KILL_TRIPPED)) {
                     if (ImGui::Button("Reset")) {
                         // Per-core reset signal — engine slow path picks this
                         // up, clears trip flag, refreshes peak to current.

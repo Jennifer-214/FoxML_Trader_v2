@@ -51,6 +51,7 @@
 #include "../MemHeaders/BitmapMacros.hpp"                // v5.14.8.A.0.b — reusable BITMAP_* API for bit-packed flag accessors
 #include "../MemHeaders/FailureModeRegistry.hpp"         // v5.14.8.B — FOREACH_FAILURE_MODE pseudo-registry
 #include "../MemHeaders/PerCoreStateFlagsRegistry.hpp"   // v5.14.9.B.2 — FOREACH_PER_CORE_STATE_FLAG
+#include "../MemHeaders/ArchFieldDriftRegistry.hpp"      // v5.15.1 — FOREACH_ARCH_FIELD_DRIFT
 #include "../ML_Headers/StampBoundModelConstRegistry.hpp"  // v5.14.8.A.0.b — registry tests + presence column dispatch
 #include <type_traits>                                   // v5.14.8.A.0.b — std::is_array_v / std::extent_v for char-array dispatch
 #include "../Strategies/StrategyLifecycle.hpp"           // v5.4.0 Phase 1.2 — Strategy_InitPerCore / FreePerCore
@@ -12163,15 +12164,17 @@ e3_skip_load:;
             check("v5.9.3a: tmp dir for stamp test", 0);
         }
 
-        // === Test 8: PerCoreSnap fields exist ===
+        // === Test 8: PerCoreSnap state_flags bits + failure_flags bits ===
         // v5.14.8.C — ml_scaler_load_failed migrated from uint8_t to BIT_FLAG
-        // in failure_flags bitmap. ml_scaler_present stays as separate uint8_t
-        // (state flag, not failure mode).
+        // in failure_flags bitmap.
+        // v5.15.1 — ml_scaler_present migrated from uint8_t to BIT_FLAG in
+        // state_flags bitmap (TECH_DEBT-028).
         TUISnapshot::PerCoreSnap pcs = {};
-        pcs.ml_scaler_present = 1;
-        // failure_flags = 0 → ml_scaler_load_failed cleared (bit 1 unset)
-        check("v5.14.8.C: PerCoreSnap.ml_scaler_present + FAILURE_IS_SET cleared",
-              pcs.ml_scaler_present == 1 && !FAILURE_IS_SET(pcs, ml_scaler_load_failed));
+        STATE_FLAG_SET(pcs, ML_SCALER_PRESENT);
+        // failure_flags = 0 → ml_scaler_load_failed cleared (bit unset)
+        check("v5.15.1: ml_scaler_present (state_flags) + ml_scaler_load_failed (failure_flags) independent bits",
+              STATE_FLAG_IS_SET(pcs, ML_SCALER_PRESENT) &&
+              !FAILURE_IS_SET(pcs, ml_scaler_load_failed));
 
         free(fmat);
     }
@@ -23847,6 +23850,106 @@ e3_skip_load:;
         } else {
             check("v5.15.0.C: stamp_write_for_model with populated inf succeeds", 0);
         }
+    }
+
+    //==================================================================
+    // v5.15.1 — Model Health drift surface + TECH_DEBT-028 bitmap anchors
+    //==================================================================
+    //
+    // Three anchor blocks for the v5.15.1 structural changes:
+    //   1. TECH_DEBT-028 — 4 bool-as-uint8 fields migrated to state_flags
+    //      bitmap; STATE_FLAG_IS_SET / SET / CLR round-trip works.
+    //   2. FOREACH_FAILURE_MODE — 7 new BIT_FLAG drift entries
+    //      (feature_hash_drift, label_hash_drift, build_flags_drift,
+    //      scaler_drift, cfg_binding_drift, stamp_hmac_not_verified,
+    //      model_age_warn); FAILURE_IS_SET / SET / CLR round-trip works.
+    //   3. Registry count invariants — PerCoreStateFlagsRegistry +
+    //      FailureModeRegistry registry counts match expected post-v5.15.1
+    //      cardinalities; static_asserts at the registries' uint16_t
+    //      capacity boundaries hold.
+    printf("\n--- v5.15.1: Model Health drift + TECH_DEBT-028 bitmap anchors ---\n");
+    {
+        // === Anchor 1: TECH_DEBT-028 state_flags bitmap migration ===
+        TUISnapshot::PerCoreSnap pcs = {};
+        check("v5.15.1.B.1: PerCoreSnap brace-init clears state_flags",
+              pcs.state_flags == 0);
+
+        // ML_SCALER_PRESENT round-trip
+        STATE_FLAG_SET(pcs, ML_SCALER_PRESENT);
+        check("v5.15.1.B.1: STATE_FLAG_SET(ML_SCALER_PRESENT) sets bit",
+              STATE_FLAG_IS_SET(pcs, ML_SCALER_PRESENT));
+        STATE_FLAG_CLR(pcs, ML_SCALER_PRESENT);
+        check("v5.15.1.B.1: STATE_FLAG_CLR(ML_SCALER_PRESENT) clears bit",
+              !STATE_FLAG_IS_SET(pcs, ML_SCALER_PRESENT));
+
+        // DRIFT_BREACHED + DRIFT_KILL_TRIPPED + CORE_KILL_TRIPPED — per-bit
+        // isolation (set one; verify others stay clear).
+        STATE_FLAG_SET(pcs, DRIFT_BREACHED);
+        STATE_FLAG_SET(pcs, CORE_KILL_TRIPPED);
+        check("v5.15.1.B.1: per-bit isolation (DRIFT_BREACHED + CORE_KILL_TRIPPED set; DRIFT_KILL_TRIPPED clear)",
+              STATE_FLAG_IS_SET(pcs, DRIFT_BREACHED) &&
+              STATE_FLAG_IS_SET(pcs, CORE_KILL_TRIPPED) &&
+              !STATE_FLAG_IS_SET(pcs, DRIFT_KILL_TRIPPED));
+    }
+    {
+        // === Anchor 2: FOREACH_FAILURE_MODE drift entries ===
+        TUISnapshot::PerCoreSnap pcs = {};
+        check("v5.15.1.A.1: PerCoreSnap brace-init clears failure_flags",
+              pcs.failure_flags == 0);
+
+        // Each of 7 new drift BIT_FLAG entries via FAILURE_SET / IS_SET.
+        FAILURE_SET(pcs, feature_hash_drift);
+        FAILURE_SET(pcs, label_hash_drift);
+        FAILURE_SET(pcs, build_flags_drift);
+        FAILURE_SET(pcs, scaler_drift);
+        FAILURE_SET(pcs, cfg_binding_drift);
+        FAILURE_SET(pcs, stamp_hmac_not_verified);
+        FAILURE_SET(pcs, model_age_warn);
+        check("v5.15.1.A.1: all 7 drift bits set via FAILURE_SET",
+              FAILURE_IS_SET(pcs, feature_hash_drift) &&
+              FAILURE_IS_SET(pcs, label_hash_drift) &&
+              FAILURE_IS_SET(pcs, build_flags_drift) &&
+              FAILURE_IS_SET(pcs, scaler_drift) &&
+              FAILURE_IS_SET(pcs, cfg_binding_drift) &&
+              FAILURE_IS_SET(pcs, stamp_hmac_not_verified) &&
+              FAILURE_IS_SET(pcs, model_age_warn));
+
+        // Branchless multi-flag check via BITMAP_ANY on the aggregate drift mask.
+        const uint16_t drift_mask = FAILURE_MASK_feature_hash_drift |
+                                    FAILURE_MASK_label_hash_drift   |
+                                    FAILURE_MASK_build_flags_drift  |
+                                    FAILURE_MASK_scaler_drift       |
+                                    FAILURE_MASK_cfg_binding_drift  |
+                                    FAILURE_MASK_stamp_hmac_not_verified |
+                                    FAILURE_MASK_model_age_warn;
+        check("v5.15.1.A.1: BITMAP_ANY catches any drift bit (multi-flag predicate)",
+              BITMAP_ANY(pcs.failure_flags, drift_mask));
+
+        // Per-bit independence: clearing one drift bit doesn't affect others.
+        FAILURE_CLR(pcs, scaler_drift);
+        check("v5.15.1.A.1: FAILURE_CLR(scaler_drift) clears only that bit",
+              !FAILURE_IS_SET(pcs, scaler_drift) &&
+              FAILURE_IS_SET(pcs, feature_hash_drift) &&
+              FAILURE_IS_SET(pcs, label_hash_drift));
+    }
+    {
+        // === Anchor 3: Registry count + capacity invariants ===
+        // PerCoreStateFlagsRegistry: was 7 entries pre-v5.15.1; +4 = 11.
+        check("v5.15.1.B.1: FOREACH_PER_CORE_STATE_FLAG_COUNT == 11 (was 7; +4 TECH_DEBT-028)",
+              FOREACH_PER_CORE_STATE_FLAG_COUNT == 11);
+        check("v5.15.1.B.1: PER_CORE_STATE_FLAG_COUNT fits uint16_t (≤16)",
+              (int)tt::PER_CORE_STATE_FLAG_COUNT <= 16);
+
+        // FOREACH_FAILURE_MODE total entries: was 6 pre-v5.15.1; +7 = 13.
+        check("v5.15.1.A.1: FOREACH_FAILURE_MODE_COUNT == 13 (was 6; +7 drift entries)",
+              FOREACH_FAILURE_MODE_COUNT == 13);
+        check("v5.15.1.A.1: FAILURE_BIT_COUNT fits uint16_t (≤16)",
+              (int)tt::FAILURE_BIT_COUNT <= 16);
+
+        // FOREACH_ARCH_FIELD_DRIFT — new v5.15.1 registry; 4 entries
+        // (feature_hash, label_hash, build_flags_hash, scaler_binding).
+        check("v5.15.1.A.2: FOREACH_ARCH_FIELD_DRIFT_COUNT == 4",
+              FOREACH_ARCH_FIELD_DRIFT_COUNT == 4);
     }
 
     printf("\n======================================\n");

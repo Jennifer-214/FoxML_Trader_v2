@@ -316,11 +316,18 @@ struct alignas(64) ModelHandle {
     // / STAMP_SET / STAMP_CLR aliases (shared with ModelStampResult +
     // StampInferenceCfgInputs).
     uint64_t has_flags;              //  8 B
-    // 16 B explicit zero-init padding (CLAUDE.md item 27) fills HOT
+    // v5.15.1 — drift_flags_at_load: bits set at TryLoadRole post-verify
+    // chokepoint. Storage uses FOREACH_FAILURE_MODE bit positions via
+    // FAILURE_MASK_<name> (e.g., FAILURE_MASK_feature_hash_drift). Read
+    // by ShardedSnapshot_Publish which OR-aggregates across all 4 zoo
+    // roles into PerCoreSnap.failure_flags. Repurposes 2 B of v5.15.0's
+    // _hot_pad1; net cluster size unchanged.
+    uint16_t drift_flags_at_load;    //  2 B
+    // 14 B explicit zero-init padding (CLAUDE.md item 27) fills HOT
     // cluster to exactly one cache line + keeps target_classes (next
-    // cluster) at offset 64. Sized 4×int32 (not a single int128) for
-    // portability across compilers without 128-bit extension.
-    int32_t  _hot_pad1[4] = {0, 0, 0, 0};  // 16 B
+    // cluster) at offset 64.
+    uint16_t _hot_pad1a = 0;         //  2 B
+    int32_t  _hot_pad1b[3] = {0, 0, 0};  // 12 B
     // = 64 B used; cache line 1 fully consumed.
 
     // =====================================================================

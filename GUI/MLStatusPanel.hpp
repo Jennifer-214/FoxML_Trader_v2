@@ -211,7 +211,7 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                         "Operator action: verify .scaler sidecar exists +\n"
                         "matches stamp's scaler_sha256, or set strict=1 to\n"
                         "refuse load entirely.");
-                } else if (pc.ml_scaler_present) {
+                } else if (STATE_FLAG_IS_SET(pc, ML_SCALER_PRESENT)) {
                     ImGui::TextColored(FoxmlColors::green, "scaler: applied");
                     ImGui::SetItemTooltip(
                         "Feature standardizer (mean-centering + unit-variance)\n"
@@ -263,9 +263,9 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
             // v5.10.3.B — Runtime IC drift detection observability (parity-check
             // Finding #9 closure; v5.10.0e). Distinguishes drift-kill from
             // MTM-kill / manual-kill (all of which set core_kill_tripped).
-            if (pc.drift_breached) {
+            if (STATE_FLAG_IS_SET(pc, DRIFT_BREACHED)) {
                 ImGui::Indent(20);
-                if (pc.drift_kill_tripped) {
+                if (STATE_FLAG_IS_SET(pc, DRIFT_KILL_TRIPPED)) {
                     ImGui::TextColored(FoxmlColors::red,
                         "drift: KILLED (avg_ic=%.4f, n=%u)",
                         pc.drift_avg_ic, (unsigned)pc.drift_n_samples);
@@ -415,6 +415,143 @@ inline void MLStatus_Render(const TUISnapshot* snap, const TUISharedState* share
                 break;
             }
         }
+        // ──────────────────────────────────────────────────────────────────
+        // v5.15.1 — Model Health CollapsingHeader (between Ensemble + Thompson).
+        // Reads failure_flags drift bits set at CoreModelZoo_TryLoadRole
+        // chokepoint + aggregated to PerCoreSnap by ShardedSnapshot publish.
+        // Per CLAUDE.md item 12 (display↔execution invariant): drift state set
+        // engine-side is visible operator-side.
+        // ──────────────────────────────────────────────────────────────────
+        static constexpr uint16_t MODEL_HEALTH_DRIFT_MASK =
+            FAILURE_MASK_feature_hash_drift     |
+            FAILURE_MASK_label_hash_drift       |
+            FAILURE_MASK_build_flags_drift      |
+            FAILURE_MASK_scaler_drift           |
+            FAILURE_MASK_cfg_binding_drift      |
+            FAILURE_MASK_stamp_hmac_not_verified|
+            FAILURE_MASK_model_age_warn;
+        static constexpr uint16_t MODEL_HEALTH_DRIFT_RED_MASK =
+            FAILURE_MASK_feature_hash_drift |
+            FAILURE_MASK_label_hash_drift   |
+            FAILURE_MASK_scaler_drift;
+
+        // Aggregate across cores for header summary (any drift tripped anywhere?).
+        uint16_t any_drift_flags = 0;
+        int max_tripped_per_core = 0;
+        for (int i = 0; i < snap->per_core_count && i < 16; ++i) {
+            uint16_t drift = snap->per_core[i].failure_flags & MODEL_HEALTH_DRIFT_MASK;
+            any_drift_flags |= drift;
+            int tripped_here = __builtin_popcount((unsigned)drift);
+            if (tripped_here > max_tripped_per_core) max_tripped_per_core = tripped_here;
+        }
+        int total_tripped = __builtin_popcount((unsigned)any_drift_flags);
+        const bool drift_red = (any_drift_flags & MODEL_HEALTH_DRIFT_RED_MASK) != 0;
+        char model_health_label[96];
+        if (total_tripped == 0) {
+            snprintf(model_health_label, sizeof(model_health_label),
+                     "Model Health: clean (no drift across cores)##model_health_header");
+        } else {
+            snprintf(model_health_label, sizeof(model_health_label),
+                     "Model Health: %d drift bit%s tripped %s##model_health_header",
+                     total_tripped,
+                     total_tripped == 1 ? "" : "s",
+                     drift_red ? "[RED]" : "[YELLOW]");
+        }
+        ImGui::Separator();
+        if (ImGui::CollapsingHeader(model_health_label,
+                                      total_tripped > 0 ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
+            if (total_tripped == 0) {
+                ImGui::TextColored(FoxmlColors::green,
+                    "No drift detected on any loaded model. "
+                    "Stamp + scaler + cfg + HMAC + age all aligned with runtime.");
+            } else {
+                for (int i = 0; i < snap->per_core_count && i < 16; ++i) {
+                    const auto& pc = snap->per_core[i];
+                    uint16_t drift = pc.failure_flags & MODEL_HEALTH_DRIFT_MASK;
+                    if (drift == 0) continue;
+                    ImGui::TextColored(FoxmlColors::sand, "core %d:", i);
+                    ImGui::Indent(20);
+
+                    auto render_bit = [&](uint16_t mask, const char *label, const char *tooltip,
+                                          const ImVec4& color) {
+                        if (drift & mask) {
+                            ImGui::TextColored(color, "%s", label);
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
+                        }
+                    };
+                    render_bit(FAILURE_MASK_feature_hash_drift,
+                               "feat: HASH DRIFT",
+                               "Model's stamp-bound feature_registry_hash does not match the\n"
+                               "current FEATURE_REGISTRY_HASH at runtime.\n"
+                               "Indicates schema drift since training (feature added / removed /\n"
+                               "reordered).\n"
+                               "Operator action: retrain with current feature set OR document drift.",
+                               FoxmlColors::red);
+                    render_bit(FAILURE_MASK_label_hash_drift,
+                               "label: HASH DRIFT",
+                               "Model's stamp-bound label_registry_hash does not match the\n"
+                               "current LABEL_REGISTRY_HASH at runtime.\n"
+                               "Indicates label-kind schema drift since training.\n"
+                               "Operator action: retrain with current label set.",
+                               FoxmlColors::red);
+                    render_bit(FAILURE_MASK_scaler_drift,
+                               "scaler: BIND DRIFT",
+                               "Loaded scaler's training-time registry_hash does not match the\n"
+                               "model's training-time feature_registry_hash. Scaler binding\n"
+                               "broke between training and runtime (sidecar copied from a\n"
+                               "different training session?).\n"
+                               "Operator action: retrain scaler with current model + features.",
+                               FoxmlColors::red);
+                    render_bit(FAILURE_MASK_build_flags_drift,
+                               "build: FLAG DRIFT",
+                               "Model's stamp-bound build_flags_hash does not match the current\n"
+                               "build's compile-time flags hash. Predictions may diverge if a\n"
+                               "build flag (LATENCY_PROFILING, USE_XGBOOST, etc.) affects\n"
+                               "feature compute.\n"
+                               "Operator action: rebuild engine with matching flags OR retrain.",
+                               FoxmlColors::yellow);
+                    render_bit(FAILURE_MASK_cfg_binding_drift,
+                               "cfg: BIND DRIFT",
+                               "One or more stamp-bound cfg fields diverge between training-time\n"
+                               "and runtime cfg.* values. Examples: confidence_threshold_scale,\n"
+                               "barrier_gate_enabled, bandit_blend_ratio.\n"
+                               "Operator action: review boot log for per-field WARN; retrain if\n"
+                               "intentional or revert cfg to training-time values.",
+                               FoxmlColors::yellow);
+                    render_bit(FAILURE_MASK_stamp_hmac_not_verified,
+                               "stamp: HMAC NOT VERIFIED",
+                               "Stamp body's HMAC signature was not verified at load\n"
+                               "(cfg.held_out_stamp_secret empty OR cfg.model_verify_strict=skip).\n"
+                               "Live trading should always run with non-empty secret + strict\n"
+                               "verification (REFUSE in v5.15.2 boot gate when trading_mode=live).\n"
+                               "Operator action: set held_out_stamp_secret + model_verify_strict=1.",
+                               FoxmlColors::yellow);
+                    render_bit(FAILURE_MASK_model_age_warn,
+                               "model: AGE WARN",
+                               "Model's training_timestamp_us indicates age beyond\n"
+                               "cfg.model_max_age_hours. Stale model may produce predictions\n"
+                               "detached from current market regime.\n"
+                               "Operator action: retrain on recent data OR adjust\n"
+                               "model_max_age_hours.",
+                               FoxmlColors::yellow);
+                    // Model age display (sand; informational, even when no AGE_WARN bit tripped).
+                    if (pc.handle_training_timestamp_us > 0) {
+                        struct timespec ts;
+                        clock_gettime(CLOCK_REALTIME, &ts);
+                        uint64_t now_us = (uint64_t)ts.tv_sec * 1000000ULL +
+                                          (uint64_t)ts.tv_nsec / 1000ULL;
+                        if (now_us > pc.handle_training_timestamp_us) {
+                            uint64_t age_h = (now_us - pc.handle_training_timestamp_us) /
+                                             (3600ULL * 1000000ULL);
+                            ImGui::TextColored(FoxmlColors::sand,
+                                "model age: %llu h", (unsigned long long)age_h);
+                        }
+                    }
+                    ImGui::Unindent(20);
+                }
+            }
+        }
+
         if (any_thompson) {
             ImGui::Separator();
             if (ImGui::CollapsingHeader("Thompson Bayesian dashboard (v5.14.10.D)",

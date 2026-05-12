@@ -43,6 +43,8 @@
 #include "../Strategies/StrategyInterface.hpp"  // v5.10.0a.G.7 — NUM_REGIMES
 #include "../Version.hpp"        // v5.8.6: ENGINE_VERSION_STRING for boot log
 #include "../MemHeaders/HealthLog.hpp"  // v5.14.8.E: Health_LogCriticalRateLimited for stale-model log
+#include "BuildFlags.hpp"  // v5.15.1: tt::BUILD_FLAGS_HASH() for FOREACH_ARCH_FIELD_DRIFT
+#include "../MemHeaders/ArchFieldDriftRegistry.hpp"  // v5.15.1: FOREACH_ARCH_FIELD_DRIFT for arch-field drift detection at TryLoadRole chokepoint
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>      // v5.10.0a.G.5 — strtol for AutoDetect horizon parse
@@ -491,6 +493,63 @@ inline int CoreModelZoo_TryLoadRole(ModelHandle<F> *handle, const char *dir,
                 scaler_path,
                 (unsigned long)handle->scaler.registry_hash,
                 (unsigned)handle->scaler.num_features);
+        }
+    }
+
+    //==================================================================
+    // v5.15.1 — drift detection chokepoint (single source of truth per
+    // handle for arch-field + CFG + HMAC + model-age drift bits).
+    // Sets bits on handle->drift_flags_at_load using FOREACH_FAILURE_MODE
+    // BIT_FLAG positions. ShardedSnapshot_Publish OR-aggregates across
+    // all 4 zoo roles into PerCoreSnap.failure_flags for GUI Model Health
+    // panel + (future v5.15.2) live-readiness boot gate consumption.
+    //
+    // Boot-only path; runs once per handle load. No slow-path or hot-path
+    // cost. Per CLAUDE.md item 9 (NaN-free chokepoint precedent): one
+    // chokepoint per concern, not scattered checks.
+    //==================================================================
+    if (have_sr) {
+        // (1) Arch-field drift checks (registry-driven; auto-flows for
+        //     future entries via FOREACH_ARCH_FIELD_DRIFT).
+        #define X(name, stamp_field, runtime_value, fail_mask) \
+            if ((stamp_field) != (runtime_value)) { \
+                BITMAP_SET(handle->drift_flags_at_load, fail_mask); \
+            }
+        FOREACH_ARCH_FIELD_DRIFT(X)
+        #undef X
+
+        // (2) CFG_BINDING_DRIFT aggregate bit (single-fact; consolidates
+        //     with existing CFG drift loop at L206-226 which already
+        //     counted drifts into sr.inference_cfg_drift_count).
+        if (sr.inference_cfg_drift_count > 0) {
+            BITMAP_SET(handle->drift_flags_at_load, FAILURE_MASK_cfg_binding_drift);
+        }
+
+        // (3) STAMP_HMAC_NOT_VERIFIED — set when caller invoked
+        //     verify_model_stamp with empty secret (dev mode; HMAC sig
+        //     was logged but not verified). v5.15.2 boot gate REFUSEs
+        //     when trading_mode=live + this bit set.
+        if (held_out_stamp_secret == nullptr || held_out_stamp_secret[0] == '\0') {
+            BITMAP_SET(handle->drift_flags_at_load, FAILURE_MASK_stamp_hmac_not_verified);
+        }
+
+        // (4) MODEL_AGE_WARN — set when stamp has training_timestamp_us
+        //     + cfg.model_max_age_hours > 0 + age exceeds threshold.
+        //     Mirrors CoreModelZoo_CheckStaleModel's age check but sets
+        //     a snapshot-publishable bit (vs CheckStaleModel's CRITICAL
+        //     log path). Both paths fire independently.
+        if (cfg_ptr && cfg_ptr->model_max_age_hours > 0 &&
+            STAMP_HAS(sr, training_timestamp_us) && sr.training_timestamp_us > 0) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            uint64_t now_us = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+            if (now_us > sr.training_timestamp_us) {
+                uint64_t age_hours = (now_us - sr.training_timestamp_us) /
+                                     (3600ULL * 1000000ULL);
+                if (age_hours > cfg_ptr->model_max_age_hours) {
+                    BITMAP_SET(handle->drift_flags_at_load, FAILURE_MASK_model_age_warn);
+                }
+            }
         }
     }
 
