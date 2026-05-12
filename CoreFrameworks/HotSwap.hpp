@@ -136,7 +136,7 @@ inline int HotSwap_ShadowLoad_Ensemble(
         /*held_out_stamp_secret=*/cfg.held_out_stamp_secret,
         /*gap_threshold=*/FPN_ToDouble(cfg.gap_acceptable_threshold),
         /*held_out_gate_strict=*/cfg.held_out_gate_strict,
-        /*acknowledge_cross_binary_drift=*/cfg.acknowledge_cross_binary_version_drift);
+        /*acknowledge_cross_binary_drift=*/(int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT));
 
     if (total == 0) {
         fprintf(stderr,
@@ -242,7 +242,7 @@ inline int HotSwap_ShadowLoad_SingleZoo(
         /*secret=*/cfg.held_out_stamp_secret,
         /*gap=*/FPN_ToDouble(cfg.gap_acceptable_threshold),
         /*strict=*/cfg.held_out_gate_strict,
-        cfg.acknowledge_cross_binary_version_drift,
+        (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
         /*expected_feature_mask=*/mask_for_load,
         /*cfg_ptr=*/&cfg);
 

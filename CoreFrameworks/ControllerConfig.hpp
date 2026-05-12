@@ -843,22 +843,13 @@ template <unsigned F> struct ControllerConfig {
   //                              rotated files (typical: 7)
   uint64_t health_log_max_bytes;
   int      health_log_keep_count;
-  // v5.9.4 — cross-binary version drift acknowledgment. By default,
-  // engine boot WARNs (stderr) when a loaded model's stamp engine_version
-  // differs from current ENGINE_VERSION_STRING by major.minor. Operators
-  // who deliberately deploy a v5.8 model on a v5.9 engine (or v5.9.1 on
-  // v5.9.4) flip this to 1 to suppress the WARN. The cross-major check
-  // (different MAJOR) is a separate refusal gate; this only suppresses
-  // the patch/minor drift WARN. See DOCS/PARITY_LIFECYCLE.md.
-  int    acknowledge_cross_binary_version_drift;
-  // v5.9.5i — suppress inference cfg drift WARN/REFUSE on stamp ↔ runtime
-  // mismatch. Tier 1 fields (freshness_tau, confidence_threshold_scale,
-  // barrier_gate_enabled) REFUSE in strict mode (held_out_gate_strict=1),
-  // WARN otherwise. Tier 2 (confidence_hard_block_threshold, bandit,
-  // fees) WARN only. Setting this flag = 1 silences both tiers.
-  // Default 0 (vocal). Suppresses only inference cfg drift; cross-binary
-  // version drift uses its own flag above.
-  int    acknowledge_inference_cfg_drift;
+  // v5.9.4 — acknowledge_cross_binary_version_drift MIGRATED to ops_cfg_flags
+  // bitmap (MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT) at v5.15.5.A.7. Read
+  // sites use BITMAP_IS_SET; legacy cfg key `acknowledge_cross_binary_version_drift=1`
+  // still parses via FOREACH_OPS_CFG_FLAG walker (legacy_field column).
+  // v5.9.5i — acknowledge_inference_cfg_drift MIGRATED to ops_cfg_flags bitmap
+  // (MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT) at v5.15.5.A.7. Read sites
+  // use BITMAP_IS_SET; legacy cfg key still parses via FOREACH_OPS_CFG_FLAG walker.
   // v5.10.0c — hot model swap behavior when a position is open.
   //   0 (default) = swap is deferred until the position closes naturally
   //                 (next slow-path retries; safer — entry & exit use
@@ -1424,10 +1415,13 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
       /*kill_switch_enabled*/          1,
       /*vol_sizing_enabled*/           0,
       /*ws_dead_time_flatten_enabled*/ 0);
-  // v5.14.9.F.3 — ops_cfg_flags defaults: all 2 flags off (backward compat)
-  OPS_CFG_FLAG_AUTOPOPULATE_FROM_PAIR(cfg.ops_cfg_flags,
-      /*session_filter_enabled*/       0,
-      /*notify_enabled*/               0);
+  // v5.14.9.F.3 — ops_cfg_flags defaults: all flags off (backward compat).
+  // v5.15.5.A.7 — Cohort grew from 2 → 4 entries with ACKNOWLEDGE_INFERENCE_CFG_DRIFT
+  // + ACKNOWLEDGE_CROSS_BINARY_DRIFT migration. FROM_PAIR macro retired (couldn't
+  // generalize to 4-arg cleanly); direct zero-init suffices since all 4 entries
+  // default OFF. Operator cfg keys set bits via FOREACH_OPS_CFG_FLAG parser walker
+  // at line ~2220 (legacy_field column auto-routes legacy key names).
+  cfg.ops_cfg_flags = 0;
   cfg.partial_exit_pct = FPN_FromDouble<F>(0.5); // 50% at TP1, 50% rides
   cfg.tp2_mult = FPN_FromDouble<F>(2.0);         // TP2 = 2x TP1 distance
   cfg.breakeven_buffer_pct =
@@ -1519,8 +1513,9 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.health_log_path[0]          = '\0';                         // empty = disabled
   cfg.health_log_max_bytes        = 0;                            // 0 = no rotation (back-compat)
   cfg.health_log_keep_count       = 0;                            // 0 = no retained rotated files
-  cfg.acknowledge_cross_binary_version_drift = 0;                 // v5.9.4 — default WARN on minor drift
-  cfg.acknowledge_inference_cfg_drift = 0;                        // v5.9.5i — default REFUSE/WARN on inference cfg drift
+  // v5.15.5.A.7 — acknowledge_cross_binary_version_drift + acknowledge_inference_cfg_drift
+  // migrated to ops_cfg_flags bitmap. Both default OFF via `cfg.ops_cfg_flags = 0` init above.
+  // Legacy default semantics preserved: WARN on cross-binary drift; REFUSE/WARN on inference_cfg.
   cfg.acknowledge_hot_swap_with_open_positions = 0;               // v5.10.0c — default DEFER swap until position close
   cfg.confidence_ic_floor                       = 0.02;           // v5.10.0e — Spearman correlation > random
   cfg.confidence_ic_floor_window                = 86400u;          // v5.10.0e — 24h sustained-breach window
@@ -2475,8 +2470,9 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         if (cfg.health_log_keep_count < 0) cfg.health_log_keep_count = 0;
         continue;
     }
-    CFG_PARSE_INT(acknowledge_cross_binary_version_drift)
-    CFG_PARSE_INT(acknowledge_inference_cfg_drift)  // v5.9.5i
+    // v5.15.5.A.7 — acknowledge_cross_binary_version_drift + acknowledge_inference_cfg_drift
+    // CFG_PARSE_INT removed; legacy cfg keys auto-route via FOREACH_OPS_CFG_FLAG walker
+    // (legacy_field column matches keys at the ops_cfg_flags parser block line ~2220).
     CFG_PARSE_INT(acknowledge_hot_swap_with_open_positions)  // v5.10.0c
     if (strcmp(key, "confidence_ic_floor") == 0) {
         cfg.confidence_ic_floor = atof(val);

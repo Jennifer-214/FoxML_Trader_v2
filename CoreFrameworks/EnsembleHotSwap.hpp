@@ -93,7 +93,7 @@ inline int EngineSharded_HotSwapEnsemble(EnsembleModelZoo<F>* swap_ezoo,
         /*held_out_stamp_secret=*/cfg.held_out_stamp_secret,
         /*gap_threshold=*/FPN_ToDouble(cfg.gap_acceptable_threshold),
         /*held_out_gate_strict=*/cfg.held_out_gate_strict,
-        /*acknowledge_cross_binary_drift=*/cfg.acknowledge_cross_binary_version_drift);
+        /*acknowledge_cross_binary_drift=*/(int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT));
     if (total == 0) {
         fprintf(stderr,
             "[hot_swap] ensemble core %d FAILED: 0 roles loaded "

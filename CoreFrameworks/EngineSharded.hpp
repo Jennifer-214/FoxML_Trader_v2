@@ -1128,7 +1128,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             int loaded = 0;
             if (cfg.core_model_dir[i][0]) {
                 // path 1: zoo from directory (auto-discovered roles).
-                // v5.9.4 — pass cfg.acknowledge_cross_binary_version_drift
+                // v5.9.4 — pass (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT)
                 // through so per-role load suppresses minor-drift WARN
                 // when operator deliberately deploys a v5.x.y model on
                 // a v5.x.z engine.
@@ -1143,7 +1143,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 loaded = CoreModelZoo_LoadFromDir(zoo_ptr, cfg.core_model_dir[i],
                     backend, /*secret=*/nullptr, /*gap=*/0.05,
                     /*strict=*/cfg.held_out_gate_strict,
-                    cfg.acknowledge_cross_binary_version_drift,
+                    (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
                     /*expected_feature_mask=*/mask_for_load,
                     /*cfg_ptr=*/&cfg);  // v5.14.1.B.3 — enable X-macro drift check
                 fprintf(stderr, "[sharded] core %d: zoo from %s, %d role(s) loaded\n",
@@ -1216,7 +1216,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     cfg.held_out_stamp_secret,
                     FPN_ToDouble(cfg.gap_acceptable_threshold),
                     cfg.held_out_gate_strict,
-                    cfg.acknowledge_cross_binary_version_drift);
+                    (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT));
                 if (n_loaded > 0 && BITMAP_IS_SET(ezoo_ptr->init_flags, MASK_EZOO_ACTIVE)) {
                     fprintf(stderr, "[sharded] core %d: ensemble active "
                                     "(primary=%s, %d horizons; %d total models)\n",
@@ -1262,8 +1262,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 CoreModelZoo_ValidateAgainstCfg<F>(
                     zoo, ezoo, cfg, /*core_id=*/i,
                     cfg.held_out_gate_strict,
-                    cfg.acknowledge_inference_cfg_drift,
-                    cfg.acknowledge_cross_binary_version_drift,
+                    (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
+                    (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
                     &state.cores[i]);
                 // Note: validator returns -1 on REFUSE in strict mode but the
                 // existing v5.9.5i semantics here were "log loudly + leave
@@ -2957,8 +2957,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 swap_ezoo,
                                                 cfg, /*core_id=*/c,
                                                 cfg.held_out_gate_strict,
-                                                cfg.acknowledge_inference_cfg_drift,
-                                                cfg.acknowledge_cross_binary_version_drift,
+                                                (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
+                                                (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
                                                 &state.cores[c]);
                                             if (validate_rc < 0) {
                                                 state.cores[c].model_load_failed = 1;
@@ -3014,8 +3014,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 /*ezoo=*/nullptr,
                                                 cfg, /*core_id=*/c,
                                                 cfg.held_out_gate_strict,
-                                                cfg.acknowledge_inference_cfg_drift,
-                                                cfg.acknowledge_cross_binary_version_drift,
+                                                (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
+                                                (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
                                                 &state.cores[c]);
                                             if (validate_rc < 0) {
                                                 state.cores[c].model_load_failed = 1;

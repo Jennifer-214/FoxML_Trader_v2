@@ -174,6 +174,13 @@
     /* forward-compat preserved (no MODEL_FORMAT_VERSION bump).                              */                                                                \
     X(trading_mode,                        int,    "%d",     0,   (int)cfg.trading_mode,                                                                     \
         1, DIRECT_FIELD)
+    /* v5.15.5.A.7 — REVERTED earlier-attempted append of 4 per-horizon-barrier entries.       */
+    /* (ml_tp_pct / ml_sl_pct / barrier_blend_mode / per_horizon_barrier_blend)                  */
+    /* They moved to FOREACH_STAMP_BOUND_MODEL_CONST_POST_CFG as `inference_cfg_<name>` —          */
+    /* the canonical taxonomy for cfg-derived inference_cfg_* fields (per TECH_DEBT-037           */
+    /* now CLOSED via NEW MemHeaders/CfgDerivedInferenceCfgRegistry.hpp + INFERENCE_CFG_           */
+    /* AUTOPOPULATE companion macro). The CFG registry would NOT auto-generate ModelHandle fields */
+    /* — only MODEL_CONST does. cfg→inf population auto-flows via INFERENCE_CFG_AUTOPOPULATE.    */
 
 //======================================================================================================
 // [PARSER DISPATCH MACROS]

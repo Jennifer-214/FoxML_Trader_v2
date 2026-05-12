@@ -52,6 +52,7 @@
 #include "../Backtest/XGBHyperparams.hpp"  // XGBHyperparams_Defaults
 #include "../CoreFrameworks/ControllerConfig.hpp"  // ControllerConfig
 #include "../Version.hpp"  // ENGINE_VERSION_STRING
+#include "../MemHeaders/CfgDerivedInferenceCfgRegistry.hpp"  // v5.15.5.A.7: INFERENCE_CFG_AUTOPOPULATE (closes TECH_DEBT-037 manual section 2a)
 
 namespace tt {
 
@@ -155,35 +156,36 @@ inline StampWriteResult Stamp_AssembleAndEmit(
     STAMP_CFG_AUTOPOPULATE(inf, cfg);
 
     // ────────────────────────────────────────────────────────────────────
-    // (2a) Cfg-derived model-const fields. These live in
-    // FOREACH_STAMP_BOUND_MODEL_CONST (not FOREACH_STAMP_BOUND_CFG) for
-    // historical reasons (v5.14.8.A.merged taxonomy classified them as
-    // model-const). They're cfg-derived but the registry split means
-    // STAMP_CFG_AUTOPOPULATE doesn't auto-flow them; manual cfg→inf
-    // mapping required. Future cleanup: migrate these entries to
-    // FOREACH_STAMP_BOUND_CFG OR extend STAMP_CFG_AUTOPOPULATE to support
-    // cfg→stamp_field name mapping. Tracked as TECH_DEBT-037 if it
-    // surfaces again.
+    // (2a) Cfg-derived model-const fields — registry-driven (v5.15.5.A.7).
+    //
+    // CLOSES TECH_DEBT-037 (cfg-derived inference_cfg_* taxonomy drift).
+    //
+    // Pre-v5.15.5.A.7: this section was ~20 lines of manual `inf.inference_cfg_X
+    // = cfg.Y` mapping. Each new cfg-derived inference_cfg_* field required
+    // a registry entry AND a manual line here. Recurring Class 18 mirror that
+    // grew with each addition (TECH_DEBT-037).
+    //
+    // v5.15.5.A.7: replaced with INFERENCE_CFG_AUTOPOPULATE registry walker
+    // (MemHeaders/CfgDerivedInferenceCfgRegistry.hpp). 11 entries total
+    // (7 existing + 4 new per-horizon barrier cohort). Adding the next
+    // cfg-derived inference_cfg_* field is now ONE registry row; auto-flows
+    // through this call automatically. Cannot drift.
+    //
+    // 3rd application of autopopulate-pattern-for-production-caller-class.md
+    // (after STAMP_CFG_AUTOPOPULATE + STAMP_MODEL_CONST_AUTOPOPULATE quarantined).
+    //
+    // STAMP_SET(inf, fees) — fees group was historically set in the manual
+    // block; preserved here outside the AUTOPOPULATE because fees has its own
+    // group has flag, set only when cost gate enabled. The cfg-derived registry
+    // sets per-field values; group flags for inference_cfg + bandit are set by
+    // AUTOPOPULATE / per-field STAMP_SET. fees group flag stays explicit.
     // ────────────────────────────────────────────────────────────────────
-    {
-        STAMP_SET(inf, inference_cfg);
-        inf.inference_cfg_confidence_threshold_scale =
-            FPN_ToDouble(cfg.confidence_threshold_scale);
-        inf.inference_cfg_barrier_gate_enabled =
-            BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED) ? 1 : 0;
-        inf.inference_cfg_confidence_hard_block_threshold =
-            FPN_ToDouble(cfg.confidence_hard_block_threshold);
-        inf.inference_cfg_held_out_fraction =
-            FPN_ToDouble(cfg.held_out_fraction);
-    }
+    INFERENCE_CFG_AUTOPOPULATE(inf, cfg);
     if (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) {
         STAMP_SET(inf, inference_cfg_bandit_blend_ratio);
-        inf.inference_cfg_bandit_blend_ratio = FPN_ToDouble(cfg.bandit_blend_ratio);
     }
     if (BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED)) {
         STAMP_SET(inf, fees);
-        inf.inference_cfg_fee_rate_maker = FPN_ToDouble(cfg.fee_rate_maker);
-        inf.inference_cfg_fee_rate_taker = FPN_ToDouble(cfg.fee_rate_taker);
     }
 
     // ────────────────────────────────────────────────────────────────────

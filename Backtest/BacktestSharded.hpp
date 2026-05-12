@@ -287,7 +287,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                                                    cfg.held_out_stamp_secret,
                                                    FPN_ToDouble(cfg.gap_acceptable_threshold),
                                                    cfg.held_out_gate_strict,
-                                                   cfg.acknowledge_cross_binary_version_drift);
+                                                   (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT));
                 fprintf(stderr, "[backtest sharded] core %d: zoo from %s, %d role(s) loaded\n",
                         i, cfg.core_model_dir[i], loaded);
             } else {
@@ -334,7 +334,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                         cfg.held_out_stamp_secret,
                         FPN_ToDouble(cfg.gap_acceptable_threshold),
                         cfg.held_out_gate_strict,
-                        cfg.acknowledge_cross_binary_version_drift);
+                        (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT));
                     if (n_loaded > 0 && BITMAP_IS_SET(ml_ensemble_zoos[i].init_flags, MASK_EZOO_ACTIVE)) {
                         fprintf(stderr, "[backtest sharded] core %d: ensemble active "
                                         "(%d horizons; %d total models)\n",
@@ -378,8 +378,8 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                     CoreModelZoo_ValidateAgainstCfg<BACKTEST_FP>(
                         zoo_for_validate, ezoo_for_validate, cfg, /*core_id=*/i,
                         cfg.held_out_gate_strict,
-                        cfg.acknowledge_inference_cfg_drift,
-                        cfg.acknowledge_cross_binary_version_drift,
+                        (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
+                        (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
                         &state.cores[i]);
                     // Note: validator returns -1 on REFUSE in strict mode but
                     // backtest semantics match boot's "log loudly + leave loaded"

@@ -441,7 +441,27 @@ namespace tt {
       "CPU model string from platform.processor() at training time")                                \
     X(environment_libgomp_version,              environment_meta, INCLUDE, tt::stamp_str_16, "%s", "", \
       inf->environment_libgomp_version, inf->has_environment_meta,                                  \
-      "libgomp.so version at training time (XGBoost OpenMP runtime)")
+      "libgomp.so version at training time (XGBoost OpenMP runtime)")                               \
+    /* === v5.15.5.A.7 — Per-horizon barrier serving cohort (PARITY-024 close).               */    \
+    /* Appended AT END of POST_CFG section for HMAC chain byte preservation per                 */    \
+    /* wire-format-byte-preservation-discipline.md. Legacy v5.15.4- stamps lack these lines;    */    \
+    /* parser tolerates absent keys (Surface G forward-compat); has_inference_cfg group flag    */    \
+    /* gates emit (when inference_cfg group is populated, all 4 new fields emit too).            */    \
+    /* Population: cfg→inf flows via NEW INFERENCE_CFG_AUTOPOPULATE in StampHelper (CLOSES       */    \
+    /* TECH_DEBT-037 — manual section 2a extinct). cfg-side gate (feature-on/off) lives in       */    \
+    /* CfgDerivedInferenceCfgRegistry.hpp's gate_when column.                                    */    \
+    X(inference_cfg_ml_tp_pct,                  inference_cfg, INCLUDE, double, "%.17g", 0.0,        \
+      inf->inference_cfg_ml_tp_pct, inf->has_inference_cfg,                                          \
+      "training-time cfg.ml_tp_pct snapshot (legacy single-barrier fallback; drift Tier 1 in strict mode)") \
+    X(inference_cfg_ml_sl_pct,                  inference_cfg, INCLUDE, double, "%.17g", 0.0,        \
+      inf->inference_cfg_ml_sl_pct, inf->has_inference_cfg,                                          \
+      "training-time cfg.ml_sl_pct snapshot (legacy single-barrier fallback; drift Tier 1 in strict mode)") \
+    X(inference_cfg_barrier_blend_mode,         inference_cfg, INCLUDE, int, "%d", 0,                \
+      inf->inference_cfg_barrier_blend_mode, inf->has_inference_cfg,                                 \
+      "training-time cfg.barrier_blend_mode enum (LEGACY/BLEND/DOMINANT/BOTH_*; dispatch shape; drift Tier 1)") \
+    X(inference_cfg_per_horizon_barrier_blend,  inference_cfg, INCLUDE, int, "%d", 0,                \
+      inf->inference_cfg_per_horizon_barrier_blend, inf->has_inference_cfg,                          \
+      "training-time per_horizon_barrier_blend feature master gate (0/1 from ml_cfg_flags bitmap; drift Tier 1)")
 
 // Union: walks both PRE_CFG and POST_CFG. Used by struct generation +
 // AUTOPOPULATE + entry counting (everything that doesn't care about

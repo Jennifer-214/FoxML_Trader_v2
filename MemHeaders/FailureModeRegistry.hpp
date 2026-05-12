@@ -189,12 +189,36 @@ enum FailureModeGroupId : int {
       "training session).\n"                                                                            \
       "Operator action: retrain scaler with current model + features.",                                 \
       tt::GROUP_DRIFT)                                                                                  \
-    X(cfg_binding_drift,        BIT_FLAG,    SEV_YELLOW, "cfg: BIND DRIFT",                             \
-      "One or more stamp-bound cfg fields diverge between training-time\n"                              \
+    X(cfg_binding_drift,        BIT_FLAG,    SEV_YELLOW, "cfg: INFERENCE DRIFT",                        \
+      "One or more stamp-bound inference_cfg fields diverge between training-time\n"                    \
       "and runtime cfg.* values. Examples: confidence_threshold_scale,\n"                               \
-      "barrier_gate_enabled, bandit_blend_ratio.\n"                                                     \
+      "barrier_gate_enabled, bandit_blend_ratio, ml_tp_pct, ml_sl_pct,\n"                               \
+      "barrier_blend_mode, per_horizon_barrier_blend (v5.15.5.A.7+).\n"                                 \
+      "Tier 1 fields REFUSE in strict mode (model_verify_strict=1);                                 \n" \
+      "Tier 2 fields WARN regardless. Set by FOREACH_CFG_DRIFT_CHECK walker                          \n" \
+      "at CoreModelZoo_ValidateAgainstCfg post-v5.15.5.A.7 chokepoint.                                \n"\
       "Operator action: review boot log for per-field WARN; retrain if\n"                               \
-      "intentional or revert cfg to training-time values.",                                             \
+      "intentional or revert cfg to training-time values; or ack via\n"                                 \
+      "cfg.acknowledge_inference_cfg_drift=1 (now ops_cfg_flags bit).",                                 \
+      tt::GROUP_DRIFT)                                                                                  \
+    /* v5.15.5.A.7 — Cross-binary-category drift bit (sister of cfg_binding_drift).             */     \
+    /* Set when stamp-bound xgb hyperparams / build_flags / training_poll_interval diverge from   */    \
+    /* cfg at load time. Cross-binary drift = forensic indicator (model was trained under         */    \
+    /* different cfg; cannot be retrained at load; bytewise prediction divergence possible if     */    \
+    /* operator retrains). All cross-binary checks are WARN-only (never REFUSE) — bit set when    */    \
+    /* operator hasn't ack'd via cfg.acknowledge_cross_binary_version_drift=1 (now ops_cfg_flags  */    \
+    /* bit). Closes ArchField↔CfgDrift bitmap asymmetry — ArchField sets per-entry bits; cfg-     */    \
+    /* drift now sets per-category bits via FOREACH_CFG_DRIFT_CHECK Y3 category dispatch.         */    \
+    X(cfg_cross_binary_drift,   BIT_FLAG,    SEV_YELLOW, "cfg: CROSS-BINARY DRIFT",                     \
+      "One or more cross-binary stamp-bound fields diverge from cfg at load:\n"                         \
+      "xgb_subsample, xgb_colsample_bytree, xgb_min_child_weight, xgb_seed,\n"                          \
+      "xgb_tree_method, xgb_train_nthread, training_poll_interval,\n"                                   \
+      "build_flags_hash (when not covered by ArchFieldDrift).\n"                                        \
+      "Cross-binary drift = bytewise model divergence if retrained under current\n"                     \
+      "cfg. Forensic only at load (cannot retrain at boot); operator notification.\n"                   \
+      "Set by FOREACH_CFG_DRIFT_CHECK walker (v5.15.5.A.7+).\n"                                         \
+      "Operator action: review boot log; ack via cfg.acknowledge_cross_binary_version_drift=1\n"        \
+      "(now ops_cfg_flags bit) if intentional, OR retrain with current cfg values.",                    \
       tt::GROUP_DRIFT)                                                                                  \
     X(stamp_hmac_not_verified,  BIT_FLAG,    SEV_YELLOW, "stamp: HMAC NOT VERIFIED",                    \
       "Stamp body's HMAC signature was not verified at load\n"                                          \

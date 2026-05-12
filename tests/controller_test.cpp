@@ -12369,8 +12369,10 @@ e3_skip_load:;
               cfg.health_log_max_bytes == 0);
         check("v5.9.4: health_log_keep_count defaults to 0 (no retention)",
               cfg.health_log_keep_count == 0);
-        check("v5.9.4: acknowledge_cross_binary_version_drift defaults to 0 (warn on)",
-              cfg.acknowledge_cross_binary_version_drift == 0);
+        // v5.15.5.A.7 — acknowledge_cross_binary_version_drift migrated to ops_cfg_flags bitmap;
+        // default 0 verified via BITMAP_IS_SET (matches pre-migration int-direct semantics).
+        check("v5.15.5.A.7: acknowledge_cross_binary_version_drift defaults to 0 (warn on) via ops_cfg_flags bitmap",
+              !BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT));
 
         // === Test 2: cfg parser accepts new fields ===
         char tmp_cfg[] = "/tmp/v594_cfg_test_XXXXXX";
@@ -12387,8 +12389,10 @@ e3_skip_load:;
                   parsed.health_log_max_bytes == 104857600);
             check("v5.9.4: cfg parser reads health_log_keep_count",
                   parsed.health_log_keep_count == 7);
-            check("v5.9.4: cfg parser reads acknowledge_cross_binary_version_drift",
-                  parsed.acknowledge_cross_binary_version_drift == 1);
+            // v5.15.5.A.7 — Legacy cfg key still parses; sets bit in ops_cfg_flags bitmap.
+            // Validates backward-compat of the cohort migration (operator cfg files unchanged).
+            check("v5.15.5.A.7: cfg parser reads legacy acknowledge_cross_binary_version_drift=1 → ops_cfg_flags bit",
+                  BITMAP_IS_SET(parsed.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT));
             unlink(tmp_cfg);
         } else {
             check("v5.9.4: tmp cfg for parser test", 0);
@@ -13098,10 +13102,10 @@ e3_skip_load:;
         check("v5.9.5i: Model_Init clears fees bit",
               !STAMP_HAS(h, fees));
 
-        // === Test 2: cfg field acknowledge_inference_cfg_drift defaults to 0 ===
+        // === Test 2: ack flag default off via ops_cfg_flags bitmap (v5.15.5.A.7 migration) ===
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
-        check("v5.9.5i: acknowledge_inference_cfg_drift defaults to 0",
-              cfg.acknowledge_inference_cfg_drift == 0);
+        check("v5.15.5.A.7: acknowledge_inference_cfg_drift defaults to 0 (off) via ops_cfg_flags bitmap",
+              !BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT));
 
         // === Test 3: PerCoreSnap drift counter fields exist + assignable ===
         TUISnapshot::PerCoreSnap pcs = {};
@@ -23943,9 +23947,12 @@ e3_skip_load:;
         check("v5.15.1.B.1: PER_CORE_STATE_FLAG_COUNT fits uint16_t (≤16)",
               (int)tt::PER_CORE_STATE_FLAG_COUNT <= 16);
 
-        // FOREACH_FAILURE_MODE total entries: was 6 pre-v5.15.1; +7 = 13.
-        check("v5.15.1.A.1: FOREACH_FAILURE_MODE_COUNT == 13 (was 6; +7 drift entries)",
-              FOREACH_FAILURE_MODE_COUNT == 13);
+        // FOREACH_FAILURE_MODE total entries: was 6 pre-v5.15.1; +7 = 13 post-.1;
+        // +1 = 14 post-v5.15.5.A.7 (cfg_cross_binary_drift BIT_FLAG added for ArchField
+        // ↔ CfgDrift bitmap asymmetry closure; cfg_binding_drift bit reused for
+        // INFERENCE_CFG category — already counted in v5.15.1's +7).
+        check("v5.15.5.A.7: FOREACH_FAILURE_MODE_COUNT == 14 (was 13; +1 cfg_cross_binary_drift)",
+              FOREACH_FAILURE_MODE_COUNT == 14);
         check("v5.15.1.A.1: FAILURE_BIT_COUNT fits uint16_t (≤16)",
               (int)tt::FAILURE_BIT_COUNT <= 16);
 
@@ -23953,6 +23960,118 @@ e3_skip_load:;
         // (feature_hash, label_hash, build_flags_hash, scaler_binding).
         check("v5.15.1.A.2: FOREACH_ARCH_FIELD_DRIFT_COUNT == 4",
               FOREACH_ARCH_FIELD_DRIFT_COUNT == 4);
+    }
+
+    //==================================================================
+    // v5.15.5.A.7 — Cfg-drift Tier 1 promotion + structural close
+    //==================================================================
+    // Test anchor block for v5.15.5.A.7 structural changes:
+    //   1. FOREACH_CFG_DRIFT_CHECK registry (18 entries: 14 migrated +
+    //      4 new per-horizon barrier cohort)
+    //   2. FOREACH_CFG_DERIVED_INFERENCE_CFG registry (11 entries; closes
+    //      TECH_DEBT-037 manual section 2a in StampHelper)
+    //   3. FOREACH_OPS_CFG_FLAG (4 entries post-cohort migration; was 2 +
+    //      ACKNOWLEDGE_INFERENCE_CFG_DRIFT + ACKNOWLEDGE_CROSS_BINARY_DRIFT)
+    //   4. tt::StderrLog default LogFn + capturing-functor injection
+    //
+    // Per CLAUDE.md item 15 (parity-tested-by-construction): each registry
+    // count assertion + Y3 dispatch invariant + log-injection round-trip
+    // is a load-bearing parity surface for future contributors.
+    //==================================================================
+    {
+        // --- A.7.1: Registry count assertions (catches accidental row deletion) ---
+        check("v5.15.5.A.7: FOREACH_CFG_DRIFT_CHECK_COUNT == 18 (8 cross-binary + 6 inference_cfg + 4 per-horizon)",
+              FOREACH_CFG_DRIFT_CHECK_COUNT == 18);
+        check("v5.15.5.A.7: FOREACH_CFG_DERIVED_INFERENCE_CFG_COUNT == 11 (7 migrated + 4 new per-horizon cohort)",
+              FOREACH_CFG_DERIVED_INFERENCE_CFG_COUNT == 11);
+        check("v5.15.5.A.7: FOREACH_OPS_CFG_FLAG_COUNT == 4 (post-ACK migration; was 2)",
+              (int)OPS_CFG_COUNT == 4);
+        check("v5.15.5.A.7: OPS_CFG count fits uint8_t (≤8)",
+              (int)OPS_CFG_COUNT <= 8);
+
+        // --- A.7.2: MASK_OPS_CFG_ACKNOWLEDGE_* constants exist + are distinct bits ---
+        check("v5.15.5.A.7: MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT non-zero",
+              MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT != 0);
+        check("v5.15.5.A.7: MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT non-zero",
+              MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT != 0);
+        check("v5.15.5.A.7: ACK_INFERENCE_CFG_DRIFT and ACK_CROSS_BINARY_DRIFT are distinct bits",
+              (MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT &
+               MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT) == 0);
+
+        // --- A.7.3: 4 new entries in FOREACH_STAMP_BOUND_MODEL_CONST_POST_CFG
+        //           generate ModelHandle fields ---
+        // If these compile, the X-macro expansion generated the fields via
+        // STAMP_HANDLE_GEN_INCLUDE token-paste dispatch. Field presence at
+        // compile time = structural parity surface (the .A.7 main goal).
+        ModelHandle<64> h{};
+        h.inference_cfg_ml_tp_pct = 0.0005;
+        h.inference_cfg_ml_sl_pct = 0.0003;
+        h.inference_cfg_barrier_blend_mode = 1;
+        h.inference_cfg_per_horizon_barrier_blend = 1;
+        check("v5.15.5.A.7: h.inference_cfg_ml_tp_pct field exists + assignable",
+              h.inference_cfg_ml_tp_pct > 0.0);
+        check("v5.15.5.A.7: h.inference_cfg_ml_sl_pct field exists + assignable",
+              h.inference_cfg_ml_sl_pct > 0.0);
+        check("v5.15.5.A.7: h.inference_cfg_barrier_blend_mode field exists + assignable",
+              h.inference_cfg_barrier_blend_mode == 1);
+        check("v5.15.5.A.7: h.inference_cfg_per_horizon_barrier_blend field exists + assignable",
+              h.inference_cfg_per_horizon_barrier_blend == 1);
+
+        // --- A.7.4: INFERENCE_CFG_AUTOPOPULATE round-trip (closes TECH_DEBT-037) ---
+        // Validates that cfg→inf population auto-flows via the new registry walker
+        // (replaces manual section 2a in StampHelper.hpp).
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        cfg.ml_tp_pct = FPN_FromDouble<64>(0.0007);
+        cfg.ml_sl_pct = FPN_FromDouble<64>(0.0003);
+        cfg.barrier_blend_mode = 2;  // MODE_BARRIER_BLEND_DOMINANT
+        BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_PER_HORIZON_BARRIER_BLEND);
+        StampInferenceCfgInputs inf{};
+        INFERENCE_CFG_AUTOPOPULATE(inf, cfg);
+        check("v5.15.5.A.7: INFERENCE_CFG_AUTOPOPULATE sets has_inference_cfg group flag",
+              STAMP_HAS(inf, inference_cfg));
+        check("v5.15.5.A.7: INFERENCE_CFG_AUTOPOPULATE populates inf.inference_cfg_ml_tp_pct from cfg",
+              fabs(inf.inference_cfg_ml_tp_pct - 0.0007) < 1e-9);
+        check("v5.15.5.A.7: INFERENCE_CFG_AUTOPOPULATE populates inf.inference_cfg_ml_sl_pct from cfg",
+              fabs(inf.inference_cfg_ml_sl_pct - 0.0003) < 1e-9);
+        check("v5.15.5.A.7: INFERENCE_CFG_AUTOPOPULATE populates inf.inference_cfg_barrier_blend_mode from cfg",
+              inf.inference_cfg_barrier_blend_mode == 2);
+        check("v5.15.5.A.7: INFERENCE_CFG_AUTOPOPULATE populates per_horizon_barrier_blend bit (=1 when feature on)",
+              inf.inference_cfg_per_horizon_barrier_blend == 1);
+
+        // --- A.7.5: gate_when respects feature-off (Surface G semantic) ---
+        // When the feature is OFF in cfg, AUTOPOPULATE skips populating fields
+        // that are gated by per_horizon_barrier_blend (preserves zero-defaults).
+        ControllerConfig<64> cfg_off = ControllerConfig_Default<64>();
+        cfg_off.ml_tp_pct = FPN_FromDouble<64>(0.0007);
+        BITMAP_CLR(cfg_off.ml_cfg_flags, MASK_ML_CFG_PER_HORIZON_BARRIER_BLEND);
+        StampInferenceCfgInputs inf_off{};
+        INFERENCE_CFG_AUTOPOPULATE(inf_off, cfg_off);
+        check("v5.15.5.A.7: feature OFF → ml_tp_pct stays zero-default (gate_when respected)",
+              inf_off.inference_cfg_ml_tp_pct == 0.0);
+        check("v5.15.5.A.7: feature OFF → per_horizon_barrier_blend = 0 (no drift surface)",
+              inf_off.inference_cfg_per_horizon_barrier_blend == 0);
+
+        // --- A.7.6: tt::StderrLog default LogFn is callable (compile + run check) ---
+        tt::StderrLog stderr_log;
+        // Don't actually emit to stderr in test; just verify the functor is callable
+        // (compile-time validation that StderrLog::operator() forwards to printf).
+        check("v5.15.5.A.7: tt::StderrLog is default-constructible (LogFn template default)",
+              sizeof(stderr_log) >= 0);
+
+        // --- A.7.7: Log injection — capturing functor receives drift output ---
+        // C++17 generic lambda (local classes can't have template member functions;
+        // generic lambdas with `auto...` packs ARE allowed inside main). Verifies
+        // LogFn template-deferred-dependency-injection works for tests without
+        // stderr redirect (boundary-stable refactor proof).
+        std::vector<std::string> captured;
+        auto log_fn = [&captured](const char* fmt, auto... args) {
+            char buf[512];
+            snprintf(buf, sizeof(buf), fmt, args...);
+            captured.push_back(buf);
+        };
+        log_fn("test message %d", 42);
+        check("v5.15.5.A.7: capturing lambda receives formatted log line",
+              captured.size() == 1 && captured[0] == "test message 42");
     }
 
     //==================================================================

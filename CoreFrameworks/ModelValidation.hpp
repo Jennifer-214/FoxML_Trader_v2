@@ -5,14 +5,45 @@
 //======================================================================================================
 // [v5.14.2.E.1 — POST-LOAD MODEL VALIDATION]
 //======================================================================================================
-// Extracts the cross-zoo validator from EngineSharded.hpp into its own header
-// so BacktestSharded.hpp + EnsembleHotSwap.hpp callers can use it directly
-// without circular includes. Boundary-stable refactor (callers' API unchanged;
-// only storage location moved).
+// Cross-zoo validator. Walks every loaded handle (single zoo + ensemble) and
+// detects stamp ↔ cfg / build / runtime drift via registry-driven dispatch.
 //
-// Why moved: PARITY-012 required BacktestSharded to call ValidateAgainstCfg,
-// but BacktestSharded.hpp doesn't include EngineSharded.hpp (different code
-// path). Same boundary-stable pattern as v5.14.2.A's EnsembleHotSwap.hpp split.
+// v5.15.5.A.7 — STRUCTURAL REFACTOR (closes inferred Class 18 mirror class):
+//   - 14 manual drift if-blocks (subgroup 1 xgb cross-binary WARN + subgroup
+//     2 inference_cfg Tier 1/2) REPLACED with single FOREACH_CFG_DRIFT_CHECK
+//     X-macro walker. Adding next drift check is now 1 registry row vs touching
+//     this function body.
+//   - Template-deferred LogFn injection (3rd application of
+//     template-deferred-dependency-injection.md pattern after v5.14.4.B
+//     Reconcile_ApplyMissedFills/AutoCancelStale). Default `tt::StderrLog`
+//     preserves backward-compat for all 4 production callers; tests inject
+//     capturing functors without stderr-redirect hackery.
+//   - Per-category bits set on `h->drift_flags_at_load` (FAILURE_MASK_cfg_*)
+//     — closes ArchField ↔ CfgDrift bitmap asymmetry (ArchField sets per-entry
+//     bits via FOREACH_ARCH_FIELD_DRIFT; cfg-drift now sets per-category bits
+//     via FOREACH_CFG_DRIFT_CHECK Y3 category dispatch).
+//   - Ack flags migrated to ops_cfg_flags bitmap (TECH_DEBT-009 boolean orphan
+//     tail closed). Function parameters preserve original int signature
+//     (boundary-stable refactor); callers pass `BITMAP_IS_SET(...)` at the
+//     call sites (mechanical migration; existing callers updated v5.15.5.A.7).
+//
+// CALLERS (4 production sites — all signature-compatible post-refactor):
+//   1. CoreFrameworks/EngineSharded.hpp boot loop
+//   2. CoreFrameworks/HotSwap.hpp single-zoo hot-swap
+//   3. CoreFrameworks/EnsembleHotSwap.hpp ensemble hot-swap
+//   4. Backtest/BacktestSharded.hpp validate path (PARITY-012)
+//
+// PATTERNS (DESIGN_SPECS cross-refs):
+//   - x-macro-registry-with-presence-dispatch.md (Y3 token-paste dispatch)
+//   - dual-axis-y3-dispatch-pattern.md (severity × category × compare_kind)
+//   - stamp-vs-runtime-drift-detection-registry.md (canonical drift pattern)
+//   - template-deferred-dependency-injection.md (LogFn template parameter)
+//   - bitmap-flag-api.md (per-category fail_mask BITMAP_SET)
+//   - structural-fix-preferred-decision-framework.md (Class 18 extinction)
+//
+// CLAUDE.md cross-refs: items 13 (X-macro), 15 (parity-tested), 17 (slow-path
+// only; +0 ns hot-path delta), 19 (structural fix), 20 (BITMAP_* API), 23
+// (type-trait dispatch via templated helpers).
 //======================================================================================================
 
 #pragma once
@@ -22,64 +53,105 @@
 #include "../ML_Headers/CoreModelZoo.hpp"
 #include "../ML_Headers/ModelInference.hpp"
 #include "../ML_Headers/BuildFlags.hpp"  // BUILD_FLAGS_HASH
+#include "../ML_Headers/CfgDriftCheckRegistry.hpp"  // v5.15.5.A.7: FOREACH_CFG_DRIFT_CHECK + Y3 dispatchers
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <math.h>
 #include <string.h>
+#include <type_traits>  // is_array_v / is_floating_point_v / is_unsigned_v for log_drift_pair
 
 namespace tt {
 
 //======================================================================================================
-// [v5.10.2.A — POST-LOAD VALIDATOR]
+// [v5.15.5.A.7 — Log injection support: StderrLog functor + log_drift_pair helper]
 //======================================================================================================
-// Cross-zoo validator extracted from EngineSharded_Run boot loop body
-// (parity-check Findings #3 + #7 + #10). Subsumes THREE existing WARN/REFUSE
-// subgroups uniformly across single zoo + ensemble parallel-array handles:
+// Default LogFn for production callers — preserves pre-refactor `fprintf(stderr, ...)` semantics
+// exactly. Tests inject a capturing functor (e.g., recording lambda) for log-content assertions.
 //
-//   1. v5.9.4 + v5.9.5h xgb-and-friends WARN
-//      (training_poll_interval + xgb_hyperparams + build_flags_hash)
-//      gated by !acknowledge_cross_binary_version_drift
-//   2. v5.9.5i inference_cfg drift detection
-//      Tier 1 (freshness_tau, threshold_scale, barrier_gate_enabled) REFUSE in strict
-//      Tier 2 (hard_block, bandit, fees) WARN regardless
-//      gated by !acknowledge_inference_cfg_drift
+// LogFn is invoked as a printf-style callable: `log_fn("fmt %d", arg)`. Variadic template
+// forwards args to vfprintf or vsnprintf depending on the functor. Per template-deferred-
+// dependency-injection.md: zero runtime overhead in production (compiler inlines
+// StderrLog::operator() at the call site).
+
+struct StderrLog {
+    template <typename... Args>
+    void operator()(const char* fmt, Args... args) const {
+        fprintf(stderr, fmt, args...);
+    }
+};
+
+// Type-dispatched value pair logger for drift-detection output. Replaces ~14
+// manual `fprintf(stderr, "stamp=%g cfg=%g", ...)` lines (each with custom
+// format) with one templated dispatch via if-constexpr on T per CLAUDE.md item
+// 23. Format choices match the pre-refactor manual code:
+//   - char[N] arrays    → %s (string compare; mirrors xgb_tree_method)
+//   - floating-point    → %.6g (mirrors confidence_threshold_scale, fee_rate_*, ridge_*)
+//   - uint64 unsigned   → %016lx (hex; mirrors build_flags_hash)
+//   - other unsigned    → %u (mirrors training_poll_interval)
+//   - signed int        → %d (mirrors xgb_min_child_weight, xgb_seed, barrier_blend_mode)
+
+// Separate T1/T2 template parameters because stamp side (array) and cfg side
+// (const char*) may decay differently when the field is a char[N] string. T1
+// drives dispatch (the stamp-side type carries the array information).
+template <typename LogFn, typename T1, typename T2>
+inline void log_drift_pair(LogFn& log_fn, const char* name, const T1& stamp_v, const T2& cfg_v) {
+    if constexpr (std::is_array_v<T1> || std::is_pointer_v<std::decay_t<T1>>) {
+        log_fn("stamp.%s=%s cfg.%s=%s", name, (const char*)stamp_v, name, (const char*)cfg_v);
+    } else if constexpr (std::is_floating_point_v<T1>) {
+        log_fn("stamp.%s=%.6g cfg.%s=%.6g", name, (double)stamp_v, name, (double)cfg_v);
+    } else if constexpr (std::is_same_v<T1, uint64_t>) {
+        log_fn("stamp.%s=%016lx cfg.%s=%016lx", name, (unsigned long)stamp_v, name, (unsigned long)cfg_v);
+    } else if constexpr (std::is_unsigned_v<T1>) {
+        log_fn("stamp.%s=%u cfg.%s=%u", name, (unsigned)stamp_v, name, (unsigned)cfg_v);
+    } else {
+        log_fn("stamp.%s=%d cfg.%s=%d", name, (int)stamp_v, name, (int)cfg_v);
+    }
+}
+
+//======================================================================================================
+// [v5.10.2.A — POST-LOAD VALIDATOR — REFACTORED v5.15.5.A.7]
+//======================================================================================================
+// Cross-zoo validator extracted from EngineSharded_Run boot loop body. Subsumes
+// drift detection across single zoo + ensemble parallel-array handles via
+// FOREACH_CFG_DRIFT_CHECK X-macro walker (14 entries: 8 cross-binary WARN +
+// 6 inference_cfg Tier 1/2 + 4 v5.15.5.A.7 per-horizon barrier cohort = 18).
 //
-// Writes cfg_drift_tier1/tier2_count + strict_refused into ctx.
-// Returns 0 on accept, -1 on REFUSE in strict mode (Tier 1 mismatch).
+// Writes cfg_drift_tier1/tier2_count + strict_refused into ctx. Returns 0 on
+// accept, -1 on REFUSE in strict mode (Tier 1 mismatch).
 //
 // Callable from:
-//   - EngineSharded_Run boot loop (replaces inline blocks)
-//   - EngineSharded_Run hot swap branch (post-CoreModelZoo_LoadFromDir)
+//   - EngineSharded_Run boot loop
+//   - EngineSharded_Run hot swap branch (single-zoo + ensemble paths)
+//   - BacktestSharded validate (PARITY-012)
 //
-// Ensemble support: pass &ml_ensemble_zoos[i] for ezoo when
-// state.cores[i].ensemble_handle != nullptr, else nullptr.
-// Closes parity-check Finding #7 (drift block iterated single-zoo only).
+// Ensemble support: pass &ml_ensemble_zoos[i] for ezoo when ensemble active,
+// else nullptr.
 //
-// Hot-swap rollback semantics: helper returns -1 on Tier 1 REFUSE, but
-// caller in hot-swap context logs + leaves (model_load_failed=1) rather
-// than crashing the engine — pre-swap state isn't snapshotted, so true
-// rollback would require additional infrastructure (deferred to v5.10.X).
+// LogFn template parameter (v5.15.5.A.7) — default tt::StderrLog preserves
+// pre-refactor production behavior; tests pass capturing functor for log
+// content assertions without stderr-redirect.
 //======================================================================================================
-template <unsigned F>
+template <unsigned F, typename LogFn = tt::StderrLog>
 static inline int CoreModelZoo_ValidateAgainstCfg(
     CoreModelZoo<F>* zoo,
     EnsembleModelZoo<F>* ezoo,                       // nullptr when ensemble inactive
     const ControllerConfig<F>& cfg,
     int core_id,
     int strict_mode,                                  // cfg.held_out_gate_strict
-    int acknowledge_inference_cfg_drift,              // suppresses drift block
-    int acknowledge_cross_binary_version_drift,       // suppresses xgb/poll/build_flags WARN
-    CoreContext<F>* ctx                               // for cfg_drift_* counter writeback
+    int acknowledge_inference_cfg_drift,              // ops_cfg_flags bit; suppresses INFERENCE_CFG category
+    int acknowledge_cross_binary_version_drift,       // ops_cfg_flags bit; suppresses CROSS_BINARY category
+    CoreContext<F>* ctx,                              // for cfg_drift_* counter writeback
+    LogFn log_fn = LogFn{}                            // v5.15.5.A.7: injected logger (default = stderr)
 ) {
     int strict = (strict_mode == 1);
     int tier1_count = 0;
     int tier2_count = 0;
     int tier1_refused_count = 0;
 
-    // Inner check: applies xgb-and-friends WARN (subgroup 1) + drift (subgroup 2)
-    // to a single ModelHandle. Lambda captures the per-core context (logs,
-    // counters) so per-handle work stays tight. h_idx >= 0 means ensemble
-    // member at slot [h_idx]; -1 means single-zoo.
+    // Inner check: applies FOREACH_CFG_DRIFT_CHECK walker to a single ModelHandle.
+    // Lambda captures per-core context (counters, log_fn) so per-handle work is tight.
+    // h_idx >= 0 means ensemble member at slot [h_idx]; -1 means single-zoo.
     auto check_handle = [&](ModelHandle<F>* h, const char* role_name, int h_idx) {
         if (!h) return;
         // Distinguishable log prefix: "core 0" vs "core 0 ensemble[2]"
@@ -90,167 +162,66 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
             snprintf(loc, sizeof(loc), "core %d ensemble[%d]", core_id, h_idx);
         }
 
-        // === Subgroup 1: xgb-and-friends WARN (training_poll_interval +
-        //                  xgb_hyperparams + build_flags_hash) ===
-        if (!acknowledge_cross_binary_version_drift) {
-            if (STAMP_HAS(*h, training_poll_interval) &&
-                h->training_poll_interval != cfg.poll_interval) {
-                fprintf(stderr,
-                    "[poll_interval] WARN: %s role=%s stamp claims "
-                    "training_poll_interval=%u but cfg.poll_interval=%u "
-                    "(set acknowledge_cross_binary_version_drift=1 to suppress)\n",
-                    loc, role_name,
-                    (unsigned)h->training_poll_interval,
-                    (unsigned)cfg.poll_interval);
-            }
-            if (STAMP_HAS(*h, xgb_hyperparams)) {
-                double cfg_subsample = FPN_ToDouble(cfg.xgb_subsample);
-                double cfg_colsample = FPN_ToDouble(cfg.xgb_colsample_bytree);
-                if (fabs(h->xgb_subsample - cfg_subsample) > 1e-6) {
-                    fprintf(stderr,
-                        "[xgb_hyperparams] WARN: %s role=%s stamp "
-                        "claims xgb_subsample=%.4f but cfg=%.4f\n",
-                        loc, role_name, h->xgb_subsample, cfg_subsample);
-                }
-                if (fabs(h->xgb_colsample_bytree - cfg_colsample) > 1e-6) {
-                    fprintf(stderr,
-                        "[xgb_hyperparams] WARN: %s role=%s stamp "
-                        "claims xgb_colsample_bytree=%.4f but cfg=%.4f\n",
-                        loc, role_name, h->xgb_colsample_bytree,
-                        cfg_colsample);
-                }
-                if (h->xgb_min_child_weight != cfg.xgb_min_child_weight) {
-                    fprintf(stderr,
-                        "[xgb_hyperparams] WARN: %s role=%s stamp "
-                        "claims xgb_min_child_weight=%d but cfg=%d\n",
-                        loc, role_name, h->xgb_min_child_weight,
-                        cfg.xgb_min_child_weight);
-                }
-                if (h->xgb_seed != cfg.xgb_seed) {
-                    fprintf(stderr,
-                        "[xgb_hyperparams] WARN: %s role=%s stamp "
-                        "claims xgb_seed=%d but cfg=%d\n",
-                        loc, role_name, h->xgb_seed, cfg.xgb_seed);
-                }
-                if (strcmp(h->xgb_tree_method, cfg.xgb_tree_method) != 0) {
-                    fprintf(stderr,
-                        "[xgb_hyperparams] WARN: %s role=%s stamp "
-                        "claims xgb_tree_method=%s but cfg=%s\n",
-                        loc, role_name, h->xgb_tree_method,
-                        cfg.xgb_tree_method);
-                }
-            }
-            if (STAMP_HAS(*h, build_flags_hash) &&
-                h->build_flags_hash != tt::BUILD_FLAGS_HASH()) {
-                fprintf(stderr,
-                    "[build_flags] WARN: %s role=%s stamp claims "
-                    "build_flags_hash=%016lx but current build is %016lx "
-                    "(cross-build drift; set acknowledge_cross_binary_version_drift=1 to suppress)\n",
-                    loc, role_name,
-                    (unsigned long)h->build_flags_hash,
-                    (unsigned long)tt::BUILD_FLAGS_HASH());
-            }
-            // v5.11.42 D.1 — xgb_train_nthread mode-divergence WARN.
-            // Stamp's nthread=1 + cfg nthread>1 → operator trained in
-            // parallel multi-horizon mode (which pins to 1) but engine
-            // would now retrain at higher nthread → bytewise model
-            // divergence. Forensic only — model already trained, can't
-            // be retrained at load. Operator notification.
-            if (STAMP_HAS(*h, xgb_train_nthread) &&
-                h->xgb_train_nthread != cfg.xgb_train_nthread) {
-                fprintf(stderr,
-                    "[xgb_train_nthread] WARN: %s role=%s stamp claims "
-                    "xgb_train_nthread=%d but cfg.xgb_train_nthread=%d "
-                    "(mode divergence; stamp=1 indicates parallel multi-horizon "
-                    "training, cfg>1 indicates serial mode would diverge "
-                    "bytewise on retrain; set acknowledge_cross_binary_version_drift=1 "
-                    "to suppress)\n",
-                    loc, role_name,
-                    h->xgb_train_nthread,
-                    cfg.xgb_train_nthread);
-            }
-        }
+        // ──────────────────────────────────────────────────────────────────────
+        // FOREACH_CFG_DRIFT_CHECK walker — replaces 14 manual if-blocks
+        // ──────────────────────────────────────────────────────────────────────
+        // Per-entry composition (dual-axis Y3 + per-entry compare/gate/fail_mask):
+        //   1. gate_when (per-entry, includes STAMP_HAS forward-compat + cfg-side feature gate)
+        //   2. category ack check (HANDLE_DRIFT_CATEGORY_<X>_ACK reads ops_cfg_flags bit)
+        //   3. compare_kind dispatch (HANDLE_DRIFT_CMP_<X> per-type compare)
+        //   4. severity counter mutation (HANDLE_DRIFT_SEVERITY_<X> tier1/tier2)
+        //   5. log_fn emit with type-dispatched value formatting (tt::log_drift_pair)
+        //   6. per-category fail_mask SET on h->drift_flags_at_load
+        //
+        // Adding a new drift check = 1 row in FOREACH_CFG_DRIFT_CHECK; function
+        // body unchanged. Compile-time enforcement prevents Class 18 mirror.
 
-        // === Subgroup 2: inference_cfg drift (Tier 1 REFUSE in strict;
-        //                  Tier 2 WARN regardless) ===
-        if (!acknowledge_inference_cfg_drift && STAMP_HAS(*h, inference_cfg)) {
-            double cfg_cts = FPN_ToDouble(cfg.confidence_threshold_scale);
-            double cfg_chb = FPN_ToDouble(cfg.confidence_hard_block_threshold);
-            // v5.14.9.D — DELETED legacy confidence_freshness_tau drift
-            // check (TECH_DEBT-004 close). Cfg field + stamp body entry
-            // deleted; manual drift check no longer applicable.
+        // Resolve ack-gate values per-category (cached locally to avoid repeated
+        // BITMAP_IS_SET calls inside the walker; slow-path micro-optimization).
+        const bool ack_inf_cfg     = HANDLE_DRIFT_CATEGORY_INFERENCE_CFG_ACK(cfg);
+        const bool ack_cross_binary = HANDLE_DRIFT_CATEGORY_CROSS_BINARY_ACK(cfg);
+        (void)acknowledge_inference_cfg_drift;     // function-param signature preserved for boundary stability;
+        (void)acknowledge_cross_binary_version_drift; // cohort-migrated ack flags now resolved via ops_cfg_flags.
 
-            // Tier 1: directly affects serving math
-            bool tier1_drift = false;
-            if (fabs(h->inference_cfg_confidence_threshold_scale - cfg_cts) > 1e-6) {
-                fprintf(stderr,
-                    "[inference_cfg] %s: %s role=%s stamp claims "
-                    "confidence_threshold_scale=%.4f but cfg=%.4f\n",
-                    strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
-                    loc, role_name, h->inference_cfg_confidence_threshold_scale, cfg_cts);
-                tier1_drift = true;
-                ++tier1_count;
-            }
-            if (h->inference_cfg_barrier_gate_enabled != BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED)) {
-                fprintf(stderr,
-                    "[inference_cfg] %s: %s role=%s stamp claims "
-                    "barrier_gate_enabled=%d but cfg=%d\n",
-                    strict ? "REFUSE (Tier 1, strict mode)" : "WARN (Tier 1)",
-                    loc, role_name, h->inference_cfg_barrier_gate_enabled,
-                    BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_BARRIER_GATE_ENABLED));
-                tier1_drift = true;
-                ++tier1_count;
-            }
-            if (tier1_drift && strict) ++tier1_refused_count;
-
-            // Tier 2: WARN regardless of strict mode
-            if (fabs(h->inference_cfg_confidence_hard_block_threshold - cfg_chb) > 1e-6) {
-                fprintf(stderr,
-                    "[inference_cfg] WARN (Tier 2): %s role=%s stamp "
-                    "claims confidence_hard_block_threshold=%.4f but cfg=%.4f\n",
-                    loc, role_name, h->inference_cfg_confidence_hard_block_threshold,
-                    cfg_chb);
-                ++tier2_count;
-            }
-            if (STAMP_HAS(*h, inference_cfg_bandit_blend_ratio) && BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) {
-                double cfg_bbr = FPN_ToDouble(cfg.bandit_blend_ratio);
-                if (fabs(h->inference_cfg_bandit_blend_ratio - cfg_bbr) > 1e-6) {
-                    fprintf(stderr,
-                        "[inference_cfg] WARN (Tier 2): %s role=%s stamp "
-                        "claims bandit_blend_ratio=%.4f but cfg=%.4f\n",
-                        loc, role_name, h->inference_cfg_bandit_blend_ratio, cfg_bbr);
-                }
-            }
-            if (STAMP_HAS(*h, fees) && BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED)) {
-                double cfg_frm = FPN_ToDouble(cfg.fee_rate_maker);
-                double cfg_frt = FPN_ToDouble(cfg.fee_rate_taker);
-                if (fabs(h->inference_cfg_fee_rate_maker - cfg_frm) > 1e-6) {
-                    fprintf(stderr,
-                        "[inference_cfg] WARN (Tier 2): %s role=%s stamp "
-                        "claims fee_rate_maker=%.6f but cfg=%.6f\n",
-                        loc, role_name, h->inference_cfg_fee_rate_maker, cfg_frm);
-                }
-                if (fabs(h->inference_cfg_fee_rate_taker - cfg_frt) > 1e-6) {
-                    fprintf(stderr,
-                        "[inference_cfg] WARN (Tier 2): %s role=%s stamp "
-                        "claims fee_rate_taker=%.6f but cfg=%.6f\n",
-                        loc, role_name, h->inference_cfg_fee_rate_taker, cfg_frt);
-                }
-            }
-        }
+        #define X(NAME, type, severity, category, compare_kind,                                  \
+                  get_stamp_expr, get_cfg_expr, gate_when, fail_mask, doc)                       \
+            do {                                                                                  \
+                /* Compose category ack-gate at compile time per entry (resolves to a            \
+                 * specific local bool — ack_inf_cfg or ack_cross_binary): */                     \
+                const bool _drift_acked = (HANDLE_DRIFT_CATEGORY_##category##_ACK_LOCAL);         \
+                if ((gate_when) && !_drift_acked) {                                               \
+                    const auto _stamp_v = (get_stamp_expr);                                       \
+                    const auto _cfg_v   = (get_cfg_expr);                                         \
+                    if (HANDLE_DRIFT_CMP_##compare_kind(_stamp_v, _cfg_v)) {                      \
+                        log_fn("[cfg-drift] " #category " " #severity ": %s role=%s ",            \
+                               loc, role_name);                                                   \
+                        tt::log_drift_pair(log_fn, #NAME, _stamp_v, _cfg_v);                      \
+                        log_fn(" — %s\n", doc);                                                   \
+                        BITMAP_SET(h->drift_flags_at_load, fail_mask);                            \
+                        HANDLE_DRIFT_SEVERITY_##severity(strict,                                  \
+                            tier1_count, tier2_count, tier1_refused_count);                       \
+                    }                                                                              \
+                }                                                                                  \
+            } while (0);
+        // Per-entry ack-gate local resolves via Y3 token-paste:
+        #define HANDLE_DRIFT_CATEGORY_INFERENCE_CFG_ACK_LOCAL ack_inf_cfg
+        #define HANDLE_DRIFT_CATEGORY_CROSS_BINARY_ACK_LOCAL  ack_cross_binary
+        FOREACH_CFG_DRIFT_CHECK(X)
+        #undef HANDLE_DRIFT_CATEGORY_CROSS_BINARY_ACK_LOCAL
+        #undef HANDLE_DRIFT_CATEGORY_INFERENCE_CFG_ACK_LOCAL
+        #undef X
     };
 
-    // 1. Single zoo: 4 roles
-    //    CoreModelZoo struct uses `exit` (singular) per CoreModelZoo.hpp:60
+    // 1. Single zoo: 4 roles (buy_signal, barrier, regime, exit).
+    //    CoreModelZoo struct uses `exit` (singular) per CoreModelZoo.hpp:60.
     if (zoo) {
         check_handle(&zoo->buy_signal, "buy_signal", -1);
         check_handle(&zoo->barrier,    "barrier",    -1);
         check_handle(&zoo->regime,     "regime",     -1);
         check_handle(&zoo->exit,       "exit",       -1);
     }
-    // 2. Ensemble handles (Finding #7 closure): 4 roles × N horizons
-    //    EnsembleModelZoo struct uses `exit_predictor` (NOT `exit`)
-    //    per CoreModelZoo.hpp:616
+    // 2. Ensemble handles: 4 roles × N horizons (closes parity-check Finding #7).
+    //    EnsembleModelZoo struct uses `exit_predictor` per CoreModelZoo.hpp:616.
     if (ezoo && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE)) {
         for (int h = 0; h < ezoo->buy_signal_count; ++h)
             check_handle(&ezoo->buy_signal[h], "buy_signal", h);
@@ -262,19 +233,20 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
             check_handle(&ezoo->exit_predictor[h], "exit", h);
     }
 
-    // Writeback drift counters (Finding #10 closure: now updated on hot-swap too)
+    // Writeback drift counters to per-core context (closes parity-check Finding #10
+    // — now updated on hot-swap too via shared helper).
     if (ctx) {
-        ctx->cfg_drift_tier1_count = (uint8_t)(tier1_count > 255 ? 255 : tier1_count);
-        ctx->cfg_drift_tier2_count = (uint8_t)(tier2_count > 255 ? 255 : tier2_count);
+        ctx->cfg_drift_tier1_count    = (uint8_t)(tier1_count > 255 ? 255 : tier1_count);
+        ctx->cfg_drift_tier2_count    = (uint8_t)(tier2_count > 255 ? 255 : tier2_count);
         ctx->cfg_drift_strict_refused = (tier1_refused_count > 0) ? 1 : 0;
     }
 
     if (tier1_refused_count > 0 && strict) {
-        fprintf(stderr,
-            "[inference_cfg] FATAL: core %d had %d Tier 1 mismatch(es) "
-            "in strict mode. Set held_out_gate_strict=0 (warn-only) "
-            "OR acknowledge_inference_cfg_drift=1 to bypass, "
-            "OR retrain the model with current cfg.\n",
+        log_fn(
+            "[cfg-drift] FATAL: core %d had %d Tier 1 mismatch(es) in strict mode. "
+            "Set held_out_gate_strict=0 (warn-only) OR acknowledge_inference_cfg_drift=1 "
+            "in cfg (ops_cfg_flags bitmap v5.15.5.A.7+) to bypass, OR retrain the model "
+            "with current cfg.\n",
             core_id, tier1_refused_count);
         return -1;  // REFUSE
     }
