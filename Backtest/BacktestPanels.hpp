@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 #include <pthread.h>
 #include <ftw.h>          // v5.11.51 — nftw() for recursive directory delete
+#include <unistd.h>       // v5.15.5 — fork() / execlp() / _exit() for Open Folder Path
 #include <omp.h>          // v5.11.44 hotfix — omp_set_num_threads(1) in
                           // per-horizon parallel workers to cap libgomp's
                           // thread pool. Without this, multiple pthreads
@@ -697,6 +698,11 @@ struct PastRun {
     // (rendered with indent). group_size=1 = singleton (not a group).
     int    group_size;
     int    group_idx;
+    // v5.15.5 — training sample count from summary.txt. 0 = older run
+    // pre-v5.15.5 that didn't capture the field. Rendered as "Samples"
+    // column in both classification + regression tables; lets operator
+    // gauge training data scale at a glance.
+    int    n_train_samples;
 };
 
 struct PastRunsState {
@@ -716,11 +722,18 @@ struct PastRunsState {
     int     compare_baseline_idx;
     int     compare_candidate_idx;
     int     compare_modal_open;  // 1 = render modal next frame
+    // v5.15.5 — Delete confirm modal hoisted out of per-row popup
+    // (popup-inside-table-cell rendering issue: button clicked → peach
+    // flash → popup never appeared because ImGui popup ID gets scoped
+    // to the row's transient context). Track pending row index here;
+    // single modal renders at window scope after EndTabBar.
+    int     pending_delete_idx;  // -1 = no delete pending
 };
 
 static inline void PastRuns_Init(PastRunsState *s) {
     memset(s, 0, sizeof(*s));
     s->selected = -1;
+    s->pending_delete_idx = -1;
     s->sort_column = 6;          // default sort by val_accuracy descending
     s->sort_descending = 1;
     // v5.10.0a — Compare slots default to "unselected".
@@ -795,6 +808,8 @@ static inline int PastRuns_LoadOne(PastRun *r, const char *run_dir) {
         // v5.8.9 — held-out + auto-stamp summary fields (optional, missing
         // for older runs).
         else if (strcmp(k, "held_out_metric") == 0)    { r->held_out_metric = (float)atof(v); r->has_held_out = 1; }
+        // v5.15.5 — training data scale; missing on older runs = 0.
+        else if (strcmp(k, "n_train_samples") == 0)      r->n_train_samples = atoi(v);
     }
     fclose(f);
 
@@ -1277,6 +1292,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                 ImGui::TableSetupColumn("TP bps",     ImGuiTableColumnFlags_WidthFixed, 75);
                 ImGui::TableSetupColumn("SL bps",     ImGuiTableColumnFlags_WidthFixed, 75);
                 ImGui::TableSetupColumn("Lookahead",  ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Samples",    ImGuiTableColumnFlags_WidthFixed, 80);  // v5.15.5
                 ImGui::TableSetupColumn("Train Acc",  ImGuiTableColumnFlags_WidthFixed, 80);
                 ImGui::TableSetupColumn("Val Acc",    ImGuiTableColumnFlags_WidthFixed, 80);
                 ImGui::TableSetupColumn("Gap",        ImGuiTableColumnFlags_WidthFixed, 70);
@@ -1323,6 +1339,19 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                     ImGui::TableNextColumn();
                     if (r->label_lookahead_ticks > 0) ImGui::Text("%d", r->label_lookahead_ticks);
                     else                               ImGui::TextDisabled("-");
+
+                    // v5.15.5 — Samples column (training data scale).
+                    ImGui::TableNextColumn();
+                    if (r->n_train_samples > 0) {
+                        if (r->n_train_samples >= 1000000)
+                            ImGui::Text("%.1fM", r->n_train_samples / 1e6);
+                        else if (r->n_train_samples >= 1000)
+                            ImGui::Text("%.1fk", r->n_train_samples / 1e3);
+                        else
+                            ImGui::Text("%d", r->n_train_samples);
+                    } else {
+                        ImGui::TextDisabled("-");
+                    }
 
                     ImGui::TableNextColumn(); ImGui::Text("%.1f%%", r->train_accuracy);
 
@@ -1397,36 +1426,16 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                                               "Click 'Verify Stamp' below to check.");
                     }
 
-                    // v5.11.51 — Delete button column. Confirm popup before
-                    // recursive rmdir. PushID(i) so the button + popup are
-                    // unique per row.
+                    // v5.15.5 — Delete button: set pending idx + open hoisted
+                    // modal at window scope. Popup body lives below EndTabBar
+                    // so it isn't scoped to this row's transient context.
                     ImGui::TableNextColumn();
                     ImGui::PushID(i);
                     if (ImGui::SmallButton("X")) {
-                        ImGui::OpenPopup("DeleteConfirm");
+                        s->pending_delete_idx = i;
+                        ImGui::OpenPopup("##DeleteConfirmModal");
                     }
                     ImGui::SetItemTooltip("Delete this run (recursive)");
-                    if (ImGui::BeginPopup("DeleteConfirm")) {
-                        ImGui::Text("Delete %s?", r->dir_name);
-                        ImGui::TextDisabled("(removes %s recursively)", r->full_path);
-                        ImGui::Separator();
-                        if (ImGui::Button("Delete")) {
-                            int rc = PastRuns_DeleteDir(r->full_path);
-                            if (rc == 0) {
-                                snprintf(s->status_msg, sizeof(s->status_msg),
-                                         "deleted: %s", r->full_path);
-                            } else {
-                                snprintf(s->status_msg, sizeof(s->status_msg),
-                                         "delete FAILED: %s (errno=%d)",
-                                         r->full_path, errno);
-                            }
-                            PastRuns_Scan(s);  // refresh
-                            ImGui::CloseCurrentPopup();
-                        }
-                        ImGui::SameLine();
-                        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
-                        ImGui::EndPopup();
-                    }
                     ImGui::PopID();
                 }
                 ImGui::EndTable();
@@ -1450,6 +1459,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                 ImGui::TableSetupColumn("TP bps",     ImGuiTableColumnFlags_WidthFixed, 75);
                 ImGui::TableSetupColumn("SL bps",     ImGuiTableColumnFlags_WidthFixed, 75);
                 ImGui::TableSetupColumn("Lookahead",  ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableSetupColumn("Samples",    ImGuiTableColumnFlags_WidthFixed, 80);  // v5.15.5
                 ImGui::TableSetupColumn("Train r",    ImGuiTableColumnFlags_WidthFixed, 80);
                 ImGui::TableSetupColumn("Val r",      ImGuiTableColumnFlags_WidthFixed, 80);
                 ImGui::TableSetupColumn("Val MSE",    ImGuiTableColumnFlags_WidthFixed, 90);
@@ -1493,6 +1503,19 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                     ImGui::TableNextColumn();
                     if (r->label_lookahead_ticks > 0) ImGui::Text("%d", r->label_lookahead_ticks);
                     else                               ImGui::TextDisabled("-");
+
+                    // v5.15.5 — Samples column (training data scale).
+                    ImGui::TableNextColumn();
+                    if (r->n_train_samples > 0) {
+                        if (r->n_train_samples >= 1000000)
+                            ImGui::Text("%.1fM", r->n_train_samples / 1e6);
+                        else if (r->n_train_samples >= 1000)
+                            ImGui::Text("%.1fk", r->n_train_samples / 1e3);
+                        else
+                            ImGui::Text("%d", r->n_train_samples);
+                    } else {
+                        ImGui::TextDisabled("-");
+                    }
 
                     // Train r — for regression, train_accuracy field stores
                     // the in-sample correlation already (since training code
@@ -1548,34 +1571,15 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                                               "Click 'Verify Stamp' below to check.");
                     }
 
-                    // v5.11.55 — Delete button column (parity with classification)
+                    // v5.15.5 — Delete button column (parity with classification);
+                    // shares the hoisted modal at parent window scope.
                     ImGui::TableNextColumn();
                     ImGui::PushID(i);
                     if (ImGui::SmallButton("X")) {
-                        ImGui::OpenPopup("DeleteConfirmRegr");
+                        s->pending_delete_idx = i;
+                        ImGui::OpenPopup("##DeleteConfirmModal");
                     }
                     ImGui::SetItemTooltip("Delete this run (recursive)");
-                    if (ImGui::BeginPopup("DeleteConfirmRegr")) {
-                        ImGui::Text("Delete %s?", r->dir_name);
-                        ImGui::TextDisabled("(removes %s recursively)", r->full_path);
-                        ImGui::Separator();
-                        if (ImGui::Button("Delete")) {
-                            int rc = PastRuns_DeleteDir(r->full_path);
-                            if (rc == 0) {
-                                snprintf(s->status_msg, sizeof(s->status_msg),
-                                         "deleted: %s", r->full_path);
-                            } else {
-                                snprintf(s->status_msg, sizeof(s->status_msg),
-                                         "delete FAILED: %s (errno=%d)",
-                                         r->full_path, errno);
-                            }
-                            PastRuns_Scan(s);
-                            ImGui::CloseCurrentPopup();
-                        }
-                        ImGui::SameLine();
-                        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
-                        ImGui::EndPopup();
-                    }
                     ImGui::PopID();
                 }
                 ImGui::EndTable();
@@ -1583,6 +1587,44 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
+    }
+
+    // v5.15.5 — Hoisted delete-confirm modal (shared by both tabs).
+    // Sits at parent window scope so it isn't scoped to a table cell's
+    // transient context (which caused the v5.11.51/v5.11.55 "peach flash,
+    // no popup" bug).
+    if (ImGui::BeginPopupModal("##DeleteConfirmModal", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (s->pending_delete_idx >= 0 && s->pending_delete_idx < s->count) {
+            PastRun *dr = &s->runs[s->pending_delete_idx];
+            ImGui::Text("Delete %s?", dr->dir_name);
+            ImGui::TextDisabled("(removes %s recursively)", dr->full_path);
+            ImGui::Separator();
+            if (ImGui::Button("Delete")) {
+                int rc = PastRuns_DeleteDir(dr->full_path);
+                if (rc == 0) {
+                    snprintf(s->status_msg, sizeof(s->status_msg),
+                             "deleted: %s", dr->full_path);
+                } else {
+                    snprintf(s->status_msg, sizeof(s->status_msg),
+                             "delete FAILED: %s (errno=%d)",
+                             dr->full_path, errno);
+                }
+                PastRuns_Scan(s);
+                s->pending_delete_idx = -1;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                s->pending_delete_idx = -1;
+                ImGui::CloseCurrentPopup();
+            }
+        } else {
+            // pending_delete_idx invalidated by a rescan — just close
+            s->pending_delete_idx = -1;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
 
     // detail / action area for the selected run
@@ -1601,14 +1643,34 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
             "To use in engine: set core_N_model_dir=%s/ in engine.cfg",
             r->full_path);
 
+        // v5.15.5 — Open Folder Path actually opens the directory via
+        // xdg-open. Pre-fix only wrote the path to status_msg, leaving
+        // the operator to copy/paste manually. The path comes from a
+        // filesystem scan (PastRuns_LoadOne stat'd it) so shell injection
+        // risk is bounded; still pass via fork+exec rather than system()
+        // so spaces / quotes in pathnames don't need escaping.
         if (ImGui::Button("Open Folder Path")) {
-            snprintf(s->status_msg, sizeof(s->status_msg),
-                     "%s/", r->full_path);
+            pid_t pid = fork();
+            if (pid == 0) {
+                execlp("xdg-open", "xdg-open", r->full_path, (char*)nullptr);
+                _exit(127);  // exec failed
+            } else if (pid > 0) {
+                snprintf(s->status_msg, sizeof(s->status_msg),
+                         "opened: %s/", r->full_path);
+            } else {
+                snprintf(s->status_msg, sizeof(s->status_msg),
+                         "fork() failed for xdg-open %s/", r->full_path);
+            }
         }
         ImGui::SameLine();
-        if (ImGui::Button("Delete (manual)")) {
+        // v5.15.5 — Copy Path replaces the redundant "Delete (manual)"
+        // button (X column on the row already does real delete-with-confirm
+        // via PastRuns_DeleteDir). Copy is useful for dropping the path
+        // into a cfg, terminal, or `rm -r` manually.
+        if (ImGui::Button("Copy Path")) {
+            ImGui::SetClipboardText(r->full_path);
             snprintf(s->status_msg, sizeof(s->status_msg),
-                     "to delete: rm -r %s/", r->full_path);
+                     "copied to clipboard: %s", r->full_path);
         }
 
         // v5.8.9 — Verify Stamp: runs verify_model_stamp on the saved
@@ -3677,6 +3739,7 @@ static inline void mh_run_one_horizon_fv(
         fprintf(sf, "label_tp_pct: %.4f\n", (double)tp_pct);
         fprintf(sf, "label_sl_pct: %.4f\n", (double)sl_pct);
         fprintf(sf, "label_lookahead_ticks: %d\n", horizon_ticks);
+        fprintf(sf, "n_train_samples: %d\n", results->sample_count);
         fprintf(sf, "label_kind: %d\n", fv->label_kind);
         fprintf(sf, "valid_folds: %d\n", fv->walkforward.valid_folds);
         // val_accuracy / val_correlation: pick whichever fits the kind.
@@ -4193,18 +4256,24 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
         ImGui::InputText("Label Kind CSV",
                          state->ui_label_kind_csv,
                          sizeof(state->ui_label_kind_csv));
-        ImGui::SetItemTooltip(
-            "Per-horizon label_kind (integer LABEL_* enum values).\n\n"
-            "Empty: all horizons use the Label Type combo above.\n"
-            "Single value (e.g. '5'): broadcasts to all horizons.\n"
-            "N values (e.g. '0,5,1'): positional map to Horizons CSV.\n"
-            "  N must equal Horizons count or Train Multi-Horizon disables.\n\n"
-            "Use to train heterogeneous mixed-output ensembles in ONE\n"
-            "click: e.g. binary at h=1000, 3-class barrier at h=5000,\n"
-            "regression at h=10000. v5.12.3.B+E mixed-output normalizer\n"
-            "blends them at inference time.\n\n"
-            "Reference: LabelFunctions.hpp label_table[] for the\n"
-            "label_type → display_name mapping.");
+        // Tooltip iterates label_table[] live so adding a new label
+        // (1 row in FOREACH_TARGET) auto-updates the lookup.
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted(
+                "Per-horizon label_kind (integer LABEL_* enum values).\n\n"
+                "Empty: all horizons use the Label Type combo above.\n"
+                "Single value: broadcasts to all horizons.\n"
+                "N values: positional map to Horizons CSV.\n"
+                "  N must equal Horizons count or Train Multi-Horizon disables.\n\n"
+                "Trains heterogeneous mixed-output ensembles in ONE click;\n"
+                "v5.12.3.B+E mixed-output normalizer blends them at inference.");
+            ImGui::Separator();
+            ImGui::TextUnformatted("Lookup (auto-synced from FOREACH_TARGET):");
+            for (int i = 0; i < LABEL_COUNT; i++)
+                ImGui::Text("  %2d  %s", i, label_table[i].display_name);
+            ImGui::EndTooltip();
+        }
 
         // Parse the label_kind CSV (same pattern as TP/SL CSV).
         auto parse_int_csv = [](const char* csv, int* out, int* n_out) {
@@ -5051,13 +5120,12 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
             "\n"
             "v5.13.5 — per-horizon Label Kind via 'Label Kind CSV' input:\n"
             "  Empty: all horizons use the Label Type combo above\n"
-            "  Single value (e.g. '5'): broadcasts to all horizons\n"
-            "  N values (e.g. '0,5,1'): positional map to Horizons CSV\n"
+            "  Single value: broadcasts to all horizons\n"
+            "  N values: positional map to Horizons CSV\n"
             "  Misalignment disables this button (count != horizons count)\n"
-            "Lets you train heterogeneous mixed-output ensembles in ONE\n"
-            "click: e.g. binary at h=1000, 3-class barrier at h=5000,\n"
-            "regression at h=10000 — v5.12.3.B+E mixed-output normalizer\n"
-            "blends them at inference.\n"
+            "Hover the 'Label Kind CSV' input for the integer→name lookup.\n"
+            "Trains heterogeneous mixed-output ensembles in ONE click;\n"
+            "v5.12.3.B+E mixed-output normalizer blends them at inference.\n"
             "\n"
             "v5.13.5 — Training Side combo at top of panel routes output\n"
             "to side-specific subdir:\n"
@@ -5478,6 +5546,7 @@ static inline void GUI_Panel_Training(TrainingPanelState *state,
                 fprintf(sf, "label_tp_pct: %.4f\n", state->label_tp_pct);
                 fprintf(sf, "label_sl_pct: %.4f\n", state->label_sl_pct);
                 fprintf(sf, "label_lookahead_ticks: %d\n", state->label_forward_ticks);
+                fprintf(sf, "n_train_samples: %d\n", results->sample_count);
                 // v4.3 — also persist Walk-Forward metrics if a WF run has
                 // been completed for this training. Past Runs viewer reads
                 // these to show val accuracy + overfit gap.
