@@ -5499,6 +5499,20 @@ int main() {
             // (BIT-kind) and sets the bit at load commit. Wire format
             // byte-preserved.
             BITMAP_SET(r->oms.oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
+            // v5.15.5.C.3 Phase 10 (/parity-check MEDIUM-2 + /test-strength-audit INFO-1 close):
+            // Exercise the remaining 7 PERSIST fields end-to-end. Pre-Phase-10
+            // the round-trip directly asserted only balance, realized_pnl,
+            // kill_switch_tripped — 3 of 10 PERSIST fields. Snapshot v8 wire
+            // bytes 3-10 (ks_peak_balance, total_fees, total_maker_fees,
+            // total_taker_fees, maker_fills_count, taker_fills_count,
+            // paper_session_start_us) now get direct assertions too.
+            r->oms.ks_peak_balance = FPN_FromDouble<64>(11250.75);
+            r->oms.total_fees      = FPN_FromDouble<64>(42.50);
+            r->oms.total_maker_fees= FPN_FromDouble<64>(15.25);
+            r->oms.total_taker_fees= FPN_FromDouble<64>(27.25);
+            r->oms.maker_fills_count = 7;
+            r->oms.taker_fills_count = 13;
+            r->oms.paper_session_start_us = 1700000000000000ULL;  // arbitrary epoch us
 
             int saved = tt::ShardedSnapshot_Save<64>(&r->state, test_path, 0);
             check("round-trip: save returns 1",
@@ -5520,6 +5534,21 @@ int main() {
             check("round-trip: oms kill_switch_tripped bit restored (set)",
                   BITMAP_IS_SET(r2->state.oms->oms_state_flags,
                                 tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED));
+            // v5.15.5.C.3 Phase 10 — 7 additional PERSIST fields directly asserted.
+            check("round-trip: oms.ks_peak_balance restored",
+                  fabs(FPN_ToDouble(r2->state.oms->ks_peak_balance) - 11250.75) < 1e-6);
+            check("round-trip: oms.total_fees restored",
+                  fabs(FPN_ToDouble(r2->state.oms->total_fees) - 42.50) < 1e-6);
+            check("round-trip: oms.total_maker_fees restored",
+                  fabs(FPN_ToDouble(r2->state.oms->total_maker_fees) - 15.25) < 1e-6);
+            check("round-trip: oms.total_taker_fees restored",
+                  fabs(FPN_ToDouble(r2->state.oms->total_taker_fees) - 27.25) < 1e-6);
+            check("round-trip: oms.maker_fills_count restored",
+                  r2->state.oms->maker_fills_count == 7u);
+            check("round-trip: oms.taker_fills_count restored",
+                  r2->state.oms->taker_fills_count == 13u);
+            check("round-trip: oms.paper_session_start_us restored",
+                  r2->state.oms->paper_session_start_us == 1700000000000000ULL);
 
             // Round-trip the cleared case too — ensures BIT-kind load commit
             // correctly clears the bit when wire value is 0.
@@ -24978,6 +25007,66 @@ e3_skip_load:;
             ControllerConfig<64> cfg = ControllerConfig_Default<64>();
             check("v5.15.5.C.3 Phase 7.A: cfg.oms_bench_enabled defaults to 0 (production)",
                   cfg.oms_bench_enabled == 0);
+        }
+    }
+
+    //==================================================================================================
+    // v5.15.5.C.3 Phase 10 (/test-strength-audit INFO-2 close):
+    // AUTOPOPULATE BIT-init + MULTI_BIT-init direct test
+    //==================================================================================================
+    // Phase 3b's OMS_INIT_AUTOPOPULATE absorbed LIVE_TRADING + PARTIAL_EXIT_ENABLED
+    // (BIT) + EVENT_LOG_MODE (MULTI_BIT) into FOREACH_OMS_FIELD via STORAGE_KIND
+    // dispatch. Without a direct test, accidental layer-ordering regression
+    // (e.g., Layer 2 oms_state_flags wipe RE-ORDERED before Layer 1's substrate
+    // row would silently clobber the bit writes) wouldn't surface. This test
+    // exercises the full BIT/MULTI_BIT init path end-to-end.
+    {
+        using namespace tt;
+
+        // Test 1: live_trading=1 + partial_exit_enabled=1 → both bits set.
+        {
+            OrderManagerState<64> oms_a;
+            ExchangeAdapter<64> empty{};
+            OrderManager_Init(&oms_a, empty,
+                              /*live_trading=*/1, /*partial_exit_enabled=*/1,
+                              FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            check("v5.15.5.C.3 Phase 10: AUTOPOPULATE BIT init — LIVE_TRADING bit set when arg=1",
+                  BITMAP_IS_SET(oms_a.oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING));
+            check("v5.15.5.C.3 Phase 10: AUTOPOPULATE BIT init — PARTIAL_EXIT_ENABLED bit set when arg=1",
+                  BITMAP_IS_SET(oms_a.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED));
+            check("v5.15.5.C.3 Phase 10: AUTOPOPULATE BIT init — KILL_SWITCH bit cleared (substrate=0; init=0)",
+                  !BITMAP_IS_SET(oms_a.oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED));
+            check("v5.15.5.C.3 Phase 10: AUTOPOPULATE MULTI_BIT init — EVENT_LOG_MODE slot default 0",
+                  MBS_EQ_U8(oms_a.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE,
+                            tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 0));
+        }
+        // Test 2: live_trading=0 + partial_exit_enabled=0 → both bits CLEAR.
+        {
+            OrderManagerState<64> oms_b;
+            ExchangeAdapter<64> empty{};
+            OrderManager_Init(&oms_b, empty,
+                              /*live_trading=*/0, /*partial_exit_enabled=*/0,
+                              FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            check("v5.15.5.C.3 Phase 10: AUTOPOPULATE BIT init — LIVE_TRADING bit cleared when arg=0",
+                  !BITMAP_IS_SET(oms_b.oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING));
+            check("v5.15.5.C.3 Phase 10: AUTOPOPULATE BIT init — PARTIAL_EXIT_ENABLED bit cleared when arg=0",
+                  !BITMAP_IS_SET(oms_b.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED));
+        }
+        // Test 3: event_log_mode=1 → EVENT_LOG_MODE slot = 1 (MULTI_BIT dispatch).
+        {
+            OrderManagerState<64> oms_c;
+            ExchangeAdapter<64> empty{};
+            OrderManager_Init(&oms_c, empty,
+                              /*live_trading=*/0, /*partial_exit_enabled=*/0,
+                              FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001),
+                              /*event_log_mode=*/1);
+            check("v5.15.5.C.3 Phase 10: AUTOPOPULATE MULTI_BIT init — EVENT_LOG_MODE slot = 1 when arg=1",
+                  MBS_EQ_U8(oms_c.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE,
+                            tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1));
+            check("v5.15.5.C.3 Phase 10: AUTOPOPULATE MULTI_BIT init — slot bits don't bleed into LIVE_TRADING",
+                  !BITMAP_IS_SET(oms_c.oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING));
+            check("v5.15.5.C.3 Phase 10: AUTOPOPULATE MULTI_BIT init — slot bits don't bleed into KILL_SWITCH",
+                  !BITMAP_IS_SET(oms_c.oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED));
         }
     }
 

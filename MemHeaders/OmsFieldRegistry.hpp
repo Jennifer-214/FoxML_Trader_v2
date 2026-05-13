@@ -342,6 +342,29 @@ static_assert(FOREACH_OMS_FIELD_COUNT >= 30,
               "cfg-derived + observability masks + adapter + 5 atomics + 3 COLD). "
               "Removing entries requires explicit justification.");
 
+// v5.15.5.C.3 Phase 10 (/parity-check LOW-2 close): lock PERSIST view row
+// count to 10 — wire format snapshot v8 expects exactly 10 PERSIST-kind
+// rows (balance, realized_pnl, ks_peak_balance, kill_switch_tripped,
+// total_fees, total_maker_fees, total_taker_fees, maker_fills_count,
+// taker_fills_count, paper_session_start_us). Adding/removing a PERSIST
+// row CHANGES the snapshot wire format → SHARDED_SNAPSHOT_VERSION bump
+// + loader-side migration required. Static_assert catches accidental
+// count drift at compile time.
+#define _OMS_PERSIST_COUNT_PERSIST       +1
+#define _OMS_PERSIST_COUNT_SKIP_PERSIST  +0
+#define _OMS_FIELD_PERSIST_COUNT_ONE(name, type, init, reset, rkind, skind, pkind, smask) \
+    _OMS_PERSIST_COUNT_##pkind
+constexpr int FOREACH_OMS_FIELD_PERSIST_COUNT =
+    0 FOREACH_OMS_FIELD(_OMS_FIELD_PERSIST_COUNT_ONE);
+#undef _OMS_FIELD_PERSIST_COUNT_ONE
+#undef _OMS_PERSIST_COUNT_PERSIST
+#undef _OMS_PERSIST_COUNT_SKIP_PERSIST
+static_assert(FOREACH_OMS_FIELD_PERSIST_COUNT == 10,
+              "Snapshot v8 wire format expects EXACTLY 10 PERSIST-kind fields. "
+              "Adding/removing a PERSIST row in FOREACH_OMS_FIELD requires "
+              "SHARDED_SNAPSHOT_VERSION bump + loader migration. See "
+              "DESIGN_SPECS/wire-format-byte-preservation-discipline.md.");
+
 static_assert(FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 8,
               "FOREACH_OMS_PER_SLOT_FIELD must keep the 8 per-slot scalar entries "
               "(last_realized_return + 6 FillRecord fields + last_exit_predicted_p).");
