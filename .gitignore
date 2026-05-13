@@ -123,3 +123,7 @@ DOCS/v5.11-*.md
 
 # v5.14.2.E.3 — CLAUDE.md moved to workspace-private (operator-policy + audit references)
 CLAUDE.md
+
+# v5.15.5.C.3 — session-local artifacts (regenerated automatically)
+.foxml_index.json
+context_cont.md
