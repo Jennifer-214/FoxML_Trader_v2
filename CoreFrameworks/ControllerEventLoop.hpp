@@ -1594,13 +1594,16 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         }
         // v5.13.0.B + v5.13.4 — clear per-slot exit-prediction state
         // post-attribution (single-use per trade).
+        // v5.15.5.C.3 Phase 8 — Class-18 mirror close. Shared macro
+        // OMS_RESET_PER_SLOT_EXIT_PREDICTOR (defined in
+        // MemHeaders/OmsExitPredictorMetaRegistry.hpp) clears all 3
+        // components atomically: bitmap bit + last_exit_predicted_p[slot] +
+        // last_exit_predicted_meta[slot]. Same macro is referenced by
+        // future call sites (e.g., manual close paths if added); adding a
+        // 4th per-slot exit-predictor state field expands ONE macro instead
+        // of N parallel sites.
         if (slot < (int)MAX_PORTFOLIO_POSITIONS) {
-            // v5.15.5.C.2 (S3b) — bit-packed in last_exit_predicted_bitmap.
-            BITMAP_CLR(oms->last_exit_predicted_bitmap, BITMAP_BIT_U16(slot));
-            oms->last_exit_predicted_p[slot]      = 0.0;
-            // v5.15.5.C.2.1 (LOW-2) — single byte-zero clears both arm +
-            // regime + valid bit (replaces two int8_t = -1 assignments).
-            OMS_META_CLEAR(oms->last_exit_predicted_meta[slot]);
+            OMS_RESET_PER_SLOT_EXIT_PREDICTOR(oms, slot);
         }
     }
     oms->last_closed_mask &= (uint16_t)~my_mask;  // clear only my bits

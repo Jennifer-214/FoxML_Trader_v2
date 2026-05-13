@@ -148,4 +148,39 @@ static_assert((OMS_META_REGIME_MASK & OMS_META_VALID_MASK) == 0,
 #define OMS_META_CLEAR(byte) \
     ((byte) = (uint8_t)0)
 
+//======================================================================================================
+// [OMS_RESET_PER_SLOT_EXIT_PREDICTOR — v5.15.5.C.3 Phase 8]
+//======================================================================================================
+// Shared macro that clears ALL THREE components of one slot's exit-predictor
+// state atomically (from a per-slot single-thread perspective):
+//   1. BITMAP_CLR on last_exit_predicted_bitmap (bit per slot)
+//   2. last_exit_predicted_p[slot] = 0.0
+//   3. OMS_META_CLEAR(last_exit_predicted_meta[slot])
+//
+// Closes the per-slot Class-18 mirror identified by /merge-scan MEDIUM-1
+// (the same 3-line sequence appeared at 2 sites: OrderManager_Init per-slot
+// loop body + ControllerEventLoop.hpp DrainPostFill post-attribution clear).
+// Adding a future per-slot exit-predictor state field (e.g., per-slot bandit
+// arm telemetry) now expands ONE macro definition — not 2 parallel sites.
+//
+// CALL CONTRACT:
+//   - `oms` must be a non-null OrderManagerState<F>* pointer
+//   - `slot` must be in [0, MAX_PORTFOLIO_POSITIONS) — caller verifies bounds
+//   - Single-thread per-OMS access (BITMAP_CLR is non-atomic; correct because
+//     the DrainPostFill caller + AUTOPOPULATE caller are single-thread per OMS
+//     by the codebase invariant — see ControllerEventLoop.hpp DrainPostFill
+//     thread-safety comment)
+//
+// Cost: 3 single-cycle ops (AND mask + zero store + zero store). Sub-cycle
+// total on modern superscalar; well within slow-path budget per CLAUDE.md
+// item 18 (the DrainPostFill site is slow-path-cadence; OMS_INIT_AUTOPOPULATE
+// site is boot-time).
+//======================================================================================================
+#define OMS_RESET_PER_SLOT_EXIT_PREDICTOR(oms, slot)                                           \
+    do {                                                                                       \
+        BITMAP_CLR((oms)->last_exit_predicted_bitmap, BITMAP_BIT_U16(slot));                    \
+        (oms)->last_exit_predicted_p[(slot)] = 0.0;                                             \
+        OMS_META_CLEAR((oms)->last_exit_predicted_meta[(slot)]);                                \
+    } while (0)
+
 #endif  // OMS_EXIT_PREDICTOR_META_REGISTRY_HPP
