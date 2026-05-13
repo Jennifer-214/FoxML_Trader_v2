@@ -14,39 +14,79 @@
 #define PORTFOLIO_HPP
 
 #include "../FixedPoint/FixedPointN.hpp"
+#include "../MemHeaders/PositionFieldRegistry.hpp"  // v5.15.5.C.4 Phase POS — FOREACH_POSITION_FIELD + PERSIST_KIND dispatch
 #include <stdio.h>
 #include <time.h>      // v5.11.65 — clock_gettime(CLOCK_REALTIME) for entry_timestamp_us
+#include <cstddef>     // v5.15.5.C.4 Phase POS — offsetof for static_assert layout locks
 //======================================================================================================
 // [STRUCTS]
 //======================================================================================================
 // Im not sure how many positions i really want to track here but for now im just gonna leave it at like 16 i think, there will probably be more advanced logic added later to have a model that watches performace and dynamically updates or something like i attempted to do in FoxML core, but this is a deepr dive so i can actually learn and understand the logic behind stuff, and i just think its cool as shit, like why learn java when stuff lke this exists lmao, also i get to make my own library so im not functioning off blackbox implementations where the end of the documentation is lke "Trust me bro", and i hate reading documentation, so id rather build my own
 //======================================================================================================
+// v5.15.5.C.4 Phase POS — Position struct generated from FOREACH_POSITION_FIELD
+// registry per `DESIGN_SPECS/persisted-struct-with-ephemeral-field-coexistence-pattern.md`.
+//
+// Field order (controlled by FOREACH_POSITION_FIELD in PositionFieldRegistry.hpp)
+// preserves the prior manual struct layout:
+//   - Hot-path fields first (TP/SL — ExitGate reads every tick)
+//   - Warm fields middle (quantity, entry_price, entry_fee — read at fill / P&L)
+//   - Cold fields last (originals, timestamp, pair_index — slow-path-only)
+//
+// Wire format: PORTFOLIO_SNAPSHOT_VERSION=5 byte-identical to pre-POS.1 layout.
+// Verified via static_assert(sizeof + offsetof) layout locks below the struct.
+//
+// POS.2 will add 2 SKIP_PERSIST fields (exit_fill_price + is_maker) after the
+// existing fields — wire format STILL byte-identical because Save/Load filter
+// walks only PERSIST fields (no version bump).
 template <unsigned F> struct Position {
-    // hot-path fields first: ExitGate reads ONLY these two every tick
-    // packing them in cache line 0 eliminates a cache miss per position
-    FPN<F> take_profit_price; // LIVE — modified by trailing TP on slow path
-    FPN<F> stop_loss_price;   // LIVE — modified by trailing SL on slow path
-    // warm-path fields: read at fill time and P&L computation
-    FPN<F> quantity;          // positive for long, negative for short
-    FPN<F> entry_price;
-    FPN<F> entry_fee;         // actual fee paid at fill time (not reconstructed)
-    // cold fields: only read by trailing logic on slow path
-    FPN<F> original_tp;       // set at fill, never modified — used to detect "running" positions
-    FPN<F> original_sl;       // set at fill, never modified — baseline for trailing SL
-    // v5.11.65 — wall-clock entry timestamp (microseconds since epoch).
-    // Set by Portfolio_OpenSlot via clock_gettime(CLOCK_REALTIME). Survives
-    // engine restart via snapshot persistence (vs last_entry_tick which
-    // lives in CoreContext and gets reset by snapshot-drift guard at
-    // restart). Trade-history Hold computes from this so cross-restart
-    // hold time is accurate. Also feeds future ML-training "optimal exit
-    // timing" features. 0 = pre-v5.11.65 entry (legacy snapshot loaded
-    // without the field — display falls back to tick-derived hold).
-    uint64_t entry_timestamp_us;
-    // partial exit pairing: -1 = no pair, 0-15 = paired slot index
-    int8_t pair_index;
-    uint8_t _pad_pos[7];     // keep alignment (Position size now +8)
+    // Auto-generated fields from FOREACH_POSITION_FIELD (PositionFieldRegistry.hpp):
+    //   take_profit_price (FPN<F>)
+    //   stop_loss_price   (FPN<F>)
+    //   quantity          (FPN<F>)
+    //   entry_price       (FPN<F>)
+    //   entry_fee         (FPN<F>)
+    //   original_tp       (FPN<F>)
+    //   original_sl       (FPN<F>)
+    //   entry_timestamp_us (uint64_t)
+    //   pair_index        (int8_t)
+    #define POSITION_EMIT_FIELD(name, type, init, persist_kind, doc) type name = init;
+    FOREACH_POSITION_FIELD(POSITION_EMIT_FIELD)
+    #undef POSITION_EMIT_FIELD
+
+    // Manual padding to align Position to 8 bytes after int8_t pair_index.
+    // Part of wire format (PORTFOLIO_SNAPSHOT_VERSION=5 byte layout).
+    uint8_t _pad_pos[7];
 };
-// Position = 6 FPN fields + pair_index + padding
+
+// v5.15.5.C.4 Phase POS — static_assert layout locks per the design spec
+// `function-struct-alignment-for-single-mov-access.md` + wire-format byte
+// preservation discipline. Catches accidental field-reorder that would
+// invalidate PORTFOLIO_SNAPSHOT_VERSION=5 wire format.
+//
+// Reference layout (FPN<64> = 24B; PORTFOLIO_SNAPSHOT_VERSION=5):
+//   offset 0:   take_profit_price   (24B)
+//   offset 24:  stop_loss_price     (24B)
+//   offset 48:  quantity            (24B)
+//   offset 72:  entry_price         (24B)
+//   offset 96:  entry_fee           (24B)
+//   offset 120: original_tp         (24B)
+//   offset 144: original_sl         (24B)
+//   offset 168: entry_timestamp_us  (8B)
+//   offset 176: pair_index          (1B)
+//   offset 177: _pad_pos            (7B)
+//   total:      184 bytes
+static_assert(sizeof(Position<64>) == 184,
+              "Position<64> size changed — wire format (PORTFOLIO_SNAPSHOT_VERSION=5) may be invalidated");
+static_assert(offsetof(Position<64>, take_profit_price)  == 0,   "Position layout: take_profit_price offset");
+static_assert(offsetof(Position<64>, stop_loss_price)    == 24,  "Position layout: stop_loss_price offset");
+static_assert(offsetof(Position<64>, quantity)           == 48,  "Position layout: quantity offset");
+static_assert(offsetof(Position<64>, entry_price)        == 72,  "Position layout: entry_price offset");
+static_assert(offsetof(Position<64>, entry_fee)          == 96,  "Position layout: entry_fee offset");
+static_assert(offsetof(Position<64>, original_tp)        == 120, "Position layout: original_tp offset");
+static_assert(offsetof(Position<64>, original_sl)        == 144, "Position layout: original_sl offset");
+static_assert(offsetof(Position<64>, entry_timestamp_us) == 168, "Position layout: entry_timestamp_us offset");
+static_assert(offsetof(Position<64>, pair_index)         == 176, "Position layout: pair_index offset");
+// Position = 7 FPN fields + uint64 + int8 + padding (registry-driven; layout locked above)
 //======================================================================================================
 // [PORTFOLIO]
 //======================================================================================================
