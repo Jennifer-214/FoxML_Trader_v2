@@ -66,15 +66,21 @@ enum OrderState : uint8_t {
     ORDER_UNKNOWN        = 8,  // lost tracking, needs reconciliation
 };
 
+// v5.15.5.C.1 — Order<F> HOT/WARM/COLD reorg (cache-layout-discipline Rule 4).
+// `exchange_id[64]` is touched only on terminal-state transitions + error/REJECTED
+// logging — drainer + Submit hot paths never read it. Moved to the COLD tail of
+// the struct so the per-fill hot prefix (id, client_id, ints, FPN block,
+// timestamps, fill metadata) fits in a tighter cache footprint.
+// Size invariant preserved at 280 B per Order<64>.
 template <unsigned F>
 struct Order {
+    // ────────── HOT cluster — read every Submit + every drainer fill processing ──────────
     uint64_t  id;                  // local monotonic id, assigned by OMS
     uint64_t  client_id;           // idempotency key for retries (== id for first attempt)
-    char      exchange_id[64];     // assigned by exchange on ack, "" until then
     int16_t   core_id;             // which executor core, -1 for non-core orders
     uint8_t   type;                // OrderType
     uint8_t   state;               // OrderState
-    // implicit padding here for FPN alignment
+    uint8_t   _pad_hot1[4];        // pad to FPN alignment (FPN<64> alignof = 8); 4 bytes here
     FPN<F>    requested_qty;
     FPN<F>    requested_price;     // limit only, ignored for MARKET
     FPN<F>    filled_qty;          // running total across partials
@@ -105,7 +111,13 @@ struct Order {
     // can use o->core_id directly as the slot index. leg is carried for
     // observability (trade log, ConfidenceScorer feedback per-leg).
     uint8_t   leg;
-    uint8_t   _pad[4];             // adjusted from 5 to keep struct size stable
+    uint8_t   _pad_hot2[4];        // pad to align COLD cluster start (was _pad[4])
+
+    // ────────── COLD cluster — error paths + terminal state transitions only ──────────
+    // exchange_id is only set on adapter-side ACK (terminal-or-near-terminal) and
+    // read on REJECTED logging / reconcile audit. Per-fill drainer hot path
+    // never touches this field. Moved to COLD tail v5.15.5.C.1.
+    char      exchange_id[64];     // assigned by exchange on ack, "" until then
 };
 
 // Initialize an order to PENDING state with the given identifying fields.

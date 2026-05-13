@@ -147,39 +147,69 @@ constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
 // for everything money-related. EventLoopState_Balance and friends are
 // the forwarding accessors that let existing call sites keep working.
 //======================================================================================================
+// v5.15.5.C.1 — OrderManagerState HOT/WARM/COLD tier reorganization
+// (cache-layout-discipline-for-hot-side-structs.md Rule 4) + cross-thread
+// atomic cluster isolation via alignas(64) (cross-thread-snapshot-publish-
+// cluster-isolation.md / ND1) + embedded-SPSCRing cluster discipline
+// (spsc-ring-embedded-in-hot-struct-cluster-discipline.md / NC2) + RAII
+// destructor preservation through tier reorg (raii-destructor-with-cluster-
+// reorg-interaction.md / NC1).
+//
+// Pre-.C.1 the struct interleaved HOT (orders, rings) with COLD (adapter,
+// live_trading) with WARM-on-fill (portfolio, fee state) with CROSS-THREAD
+// (total_*, flatten_pending) — drainer per-cycle access pulled scattered
+// cache lines across the entire ~150 KB struct. Post-.C.1 clusters are
+// explicit + compile-time-locked via static_asserts.
+//
+// FIELD NAMES UNCHANGED — only field positions move. All ~46 consumer
+// access sites (`oms->total_submitted` etc.) work without modification.
+// Compiler resolves names at compile time; reorg changes resolved offsets
+// only. RAII destructor (`~OrderManagerState()`) refs fields by name; reorg
+// is bytewise-safe per NC1.
+//
+// Persistence: OMS state is NOT byte-persisted. OrderEventLog writes
+// individual OrderEvent records (NOT struct bytes); Portfolio_FromEventLog
+// replays on restart. Snapshot publisher reads individual fields. Reorg
+// preserves all wire-format semantics.
+//
+// Bench-gate context: TECH_DEBT-012 flags this as PERFORMANCE-CRITICAL
+// (drainer reads OMS every cycle). Tier reorg is pure data-layout change
+// with compile-time-enforced sizeof/offsetof asserts — bytewise-safe + the
+// 3027-test regression + parity_harness byte-equivalence checks act as the
+// gate. The HIGH-RISK changes per TECH_DEBT-012 (FOREACH_OMS_INIT registry
+// conversion) land in .C.3 where rdtsc-bracket bench instrumentation is
+// added with a runtime cfg toggle.
 template <unsigned F>
 struct OrderManagerState {
+    // ════════════════════════════════════════════════════════════════════
+    // HOT CLUSTER — drainer reads every cycle
+    // (orders, rings, event_log_mode, event_log)
+    // ════════════════════════════════════════════════════════════════════
     Order<F> orders[MAX_INFLIGHT_ORDERS];
     uint16_t order_bitmap;       // 1 = slot in use, 0 = free. uint16_t caps at 16 slots.
     uint16_t _pad0;
     uint32_t _pad1;
     uint64_t next_order_id;      // monotonic id counter; 0 reserved for "no id"
 
-    // Exchange adapter (by value). In paper mode all function pointers
-    // are null and the OMS short-circuits before touching them. In live
-    // mode the OMS calls submit_market_buy / submit_market_sell from
-    // OrderManager_Submit and the adapter callback fires later from a
-    // worker thread.
-    ExchangeAdapter<F> adapter;
-
-    int live_trading;            // 0 = paper, 1 = live (adapter required)
-
     // Result queue: adapter worker thread (single producer with
     // worker_count==1) pushes CMD_FILL_RESULT here when an order
     // completes. Drainer thread (single consumer) drains it from
     // OrderManager_Tick. SPSC contract relies on worker_count==1.
-    SPSCRing<Command, OMS_RESULT_QUEUE_SIZE> result_queue;
+    // v5.15.5.C.1 — alignas(64) at enclosing-struct level per NC2
+    // (spsc-ring-embedded-in-hot-struct-cluster-discipline.md); ensures
+    // preceding field's tail doesn't share line with ring head.
+    alignas(64) SPSCRing<Command, OMS_RESULT_QUEUE_SIZE> result_queue;
 
     // WS fill queue (phase 04): user data websocket thread is the sole
     // producer, drainer is the sole consumer. Separate ring preserves
     // the SPSC contract — no MPSC needed. OrderManager_Tick drains
     // this after the REST result_queue.
-    SPSCRing<Command, OMS_RESULT_QUEUE_SIZE> ws_result_queue;
+    alignas(64) SPSCRing<Command, OMS_RESULT_QUEUE_SIZE> ws_result_queue;
 
     // Reconcile queue (phase 05): reconciler thread is the sole producer,
     // drainer is the sole consumer. Carries CMD_RECONCILE commands with
     // drift amounts. OrderManager_Tick drains this third.
-    SPSCRing<Command, 64> reconcile_queue;
+    alignas(64) SPSCRing<Command, 64> reconcile_queue;
 
     // v4.7.37: per-core submit queues. Producer threads (today: producer
     // slow-path; future: per-core slow-path threads in engine_arch=
@@ -190,13 +220,35 @@ struct OrderManagerState {
     // Why per-core (not one queue): when per-core slow-paths spawn (Phase C),
     // each thread is the sole producer for its own ring. SPSC contract
     // holds. With one shared queue, multiple producers would need MPSC.
-    SPSCRing<SubmitCommand<F>, OMS_SUBMIT_QUEUE_SIZE> submit_queues[MAX_EXECUTION_CORES];
+    alignas(64) SPSCRing<SubmitCommand<F>, OMS_SUBMIT_QUEUE_SIZE> submit_queues[MAX_EXECUTION_CORES];
 
+    // === EVENT LOG MODE (phase 03 chunk 3) ===
+    // 0 = legacy: OMS_Tick only marks FILLED/REJECTED and frees slots.
+    //     OnEvent in ControllerEventLoop does the portfolio mutation.
+    // 1 = event log: OMS_Tick runs the fill handler which opens/closes
+    //     portfolio slots, updates balance, appends to the event log.
+    //     OnEvent just bumps counters.
+    // v5.15.5.C.1 — relocated to HOT cluster (read per drainer fill-process).
+    int event_log_mode;
+
+    // === ORDER EVENT LOG (phase 03 chunk 3) ===
+    // append-only log of order lifecycle events. populated in mode 1 by
+    // the fill handler inside OMS_Tick. the portfolio can be reconstructed
+    // from this log at any time via Portfolio_FromEventLog.
+    // v5.15.5.C.1 — relocated to HOT cluster (drainer writes per fill-process
+    // via async_ring push). Cross-thread atomics INSIDE event_log
+    // (ring_full_spins, writer_realloc_failed_count, log_full_drops) are
+    // isolated by OrderEventLog's internal alignas discipline.
+    OrderEventLog<F> event_log;
+
+    // ════════════════════════════════════════════════════════════════════
+    // WARM CLUSTER — read on fill burst (HandleFill + DrainPostFill)
     // === BANK STATE (moved from EventLoopState in phase 03 chunk 1) ===
+    // ════════════════════════════════════════════════════════════════════
     // Canonical portfolio + balance. After phase 03 mode 1 ships, these
     // are derived from the order event log. In mode 0 (legacy) and during
     // chunk 1 itself, EventLoop_OnEvent still mutates them directly.
-    Portfolio<F> portfolio;
+    alignas(64) Portfolio<F> portfolio;
     FPN<F>       balance;
     FPN<F>       realized_pnl;
     FPN<F>       fee_rate;
@@ -232,6 +284,8 @@ struct OrderManagerState {
     // realized_return = (exit_price - entry_price) / entry_price as a double
     // (ConfidenceScorer is double-only — see CLAUDE.md FPN-Only invariant).
     uint16_t     last_closed_mask;
+    uint16_t     last_opened_mask;   // v5.15.5.C.1 — relocated adjacent (both per-fill bookkeeping masks)
+    uint8_t      _pad_lof[4];        // pad to 8B before double[16] array
     double       last_realized_return[MAX_PORTFOLIO_POSITIONS];
 
     // === PER-FILL BOOKKEEPING (mode 1 per-core accounting) ===
@@ -261,8 +315,6 @@ struct OrderManagerState {
         int8_t  _pad[7];
     };
     FillRecord last_fill[MAX_PORTFOLIO_POSITIONS];
-    uint16_t   last_opened_mask;
-    uint8_t    _pad_lof[6];
 
     // v5.13.0.B — per-slot flag set by MLStrategy when exit_predictor fires
     // the exit on this specific slot. Consumed by v5.13.4's reward
@@ -277,6 +329,7 @@ struct OrderManagerState {
     // visibility via the SPSC ring's release-acquire fence on the submit/fill
     // path (set BEFORE OMS_PushSubmit returns; read AFTER OMS_DrainSubmit
     // observes the order). No explicit atomic needed.
+    // .C.2 will bit-pack this into uint16_t `last_exit_predicted_bitmap`.
     uint8_t last_exit_was_predicted[MAX_PORTFOLIO_POSITIONS];
     uint8_t _pad_lewp[(MAX_PORTFOLIO_POSITIONS % 8) ? (8 - (MAX_PORTFOLIO_POSITIONS % 8)) : 0];
 
@@ -300,10 +353,20 @@ struct OrderManagerState {
     uint8_t _pad_lepa[(MAX_PORTFOLIO_POSITIONS * 2 % 8)
                        ? (8 - (MAX_PORTFOLIO_POSITIONS * 2 % 8)) : 0];
 
-    // FILE* opened lazily by OrderManager_OpenCalibrationLog (engine boot
-    // calls when cfg.calibration_log_path is non-empty). Drainer thread
-    // (sole HandleFill caller) is the only writer. Closed in Shutdown.
-    FILE* calibration_log_file;
+    // ════════════════════════════════════════════════════════════════════
+    // COLD CLUSTER — boot-set + reconcile-only (drainer hot path doesn't read)
+    // ════════════════════════════════════════════════════════════════════
+
+    // Exchange adapter (by value). In paper mode all function pointers
+    // are null and the OMS short-circuits before touching them. In live
+    // mode the OMS calls submit_market_buy / submit_market_sell from
+    // OrderManager_Submit and the adapter callback fires later from a
+    // worker thread.
+    // v5.15.5.C.1 — relocated to COLD cluster (set at boot, read only on
+    // live Submit path which is rare relative to drainer-cycle reads).
+    alignas(64) ExchangeAdapter<F> adapter;
+
+    int live_trading;            // 0 = paper, 1 = live (adapter required) — boot-set; .C.2 bit-pack candidate
 
     // === PARTIALS GEOMETRY (mirrored from cfg at engine init) ===
     // partial_exit_enabled = 1 → portfolio slot 2c is core c's leg A,
@@ -311,6 +374,9 @@ struct OrderManagerState {
     // ControllerEventLoop.hpp). The drainer needs this to map slot→core
     // when applying FillRecords to per-core stats. Set at sharded init,
     // not changed at runtime (toggle requires snapshot v3 reload anyway).
+    // v5.15.5.C.1 — relocated to COLD (boot-set; drainer reads via
+    // `oms->partial_exit_enabled` from the canonical single-source mirror;
+    // .C.2 may consolidate to bitmap).
     uint8_t partial_exit_enabled;
     uint8_t _pad_pe[7];
 
@@ -322,26 +388,14 @@ struct OrderManagerState {
     FPN<F>  ks_min_balance;       // trip if balance < this
     FPN<F>  ks_max_drawdown_pct;  // trip if (peak - balance) / peak > this (0 = disabled)
     FPN<F>  ks_peak_balance;      // running max of balance, updated on exits
-    uint8_t kill_switch_tripped;  // 1 once tripped (idempotent)
+    uint8_t kill_switch_tripped;  // 1 once tripped (idempotent) — .C.2 bit-pack candidate
     uint8_t _pad_ks[7];
     uint64_t ks_trips_total;      // count of trip events (observability)
-    // v5.12.1.A.2 — WS-staleness emergency-flatten flag. CAS-set by
-    // EventLoop_CheckWsStaleness when the producer's last-tick gap exceeds
-    // cfg.ws_dead_time_flatten_threshold_secs. Multiple slow-paths may
-    // race for the CAS; only one wins and submits the flatten via
-    // EventLoop_FlattenAll. Read by EventLoop_RebuildOneCore (.A.3) for
-    // recovery-refusal gating during the post-flatten reconcile window.
-    // std::atomic<int> for the compare_exchange_strong primitive; raw
-    // uint8_t kill_switch_tripped above is read-only after init in non-
-    // CAS contexts so atomicity is implicit on x86.
-    std::atomic<int> flatten_pending;  // 0 = normal, 1 = flatten fired
-    // v5.12.1.A.3 — recovery refusal deadline. Set by CheckWsStaleness
-    // alongside flatten_pending=1: deadline = now_us + recovery_delay_secs*1e6.
-    // RebuildOneCore reads this; while now_us < deadline, it forces
-    // BUY_BLOCKED + SHALT_RECOVERY on every core's pending_params.
-    // Cleared together with flatten_pending after deadline expires
-    // (auto-recovery; no manual reset required).
-    std::atomic<uint64_t> recovery_until_us;  // 0 = no recovery window active
+
+    // FILE* opened lazily by OrderManager_OpenCalibrationLog (engine boot
+    // calls when cfg.calibration_log_path is non-empty). Drainer thread
+    // (sole HandleFill caller) is the only writer. Closed in Shutdown.
+    FILE* calibration_log_file;
 
     // === TRADE LOG (moved from EventLoopState in phase 03 chunk 1) ===
     // Optional CSV trade log. nullptr → no logging (default). Not owned —
@@ -349,27 +403,6 @@ struct OrderManagerState {
     // here via EventLoopState_AttachTradeLog (which now writes through to
     // the OMS).
     ShardedTradeLog* trade_log;
-
-    // === EVENT LOG MODE (phase 03 chunk 3) ===
-    // 0 = legacy: OMS_Tick only marks FILLED/REJECTED and frees slots.
-    //     OnEvent in ControllerEventLoop does the portfolio mutation.
-    // 1 = event log: OMS_Tick runs the fill handler which opens/closes
-    //     portfolio slots, updates balance, appends to the event log.
-    //     OnEvent just bumps counters.
-    int event_log_mode;
-
-    // === ORDER EVENT LOG (phase 03 chunk 3) ===
-    // append-only log of order lifecycle events. populated in mode 1 by
-    // the fill handler inside OMS_Tick. the portfolio can be reconstructed
-    // from this log at any time via Portfolio_FromEventLog.
-    OrderEventLog<F> event_log;
-
-    // Observability counters. Atomic so the TUI render loop on a different
-    // core can read them without locks. Relaxed ordering throughout —
-    // these are display-only.
-    std::atomic<uint64_t> total_submitted;
-    std::atomic<uint64_t> total_filled;
-    std::atomic<uint64_t> total_rejected;
 
     // v5.14.4.0 — high-watermark trade_id we've seen via myTrades (boot
     // reconcile path). Used by Reconcile_ApplyMissedFills (v5.14.4.B) to
@@ -387,13 +420,56 @@ struct OrderManagerState {
     // Boot today = once at startup; not a per-cycle path.
     uint64_t last_seen_trade_id;
 
-    // v5.11.26 — RAII destructor. Stops the OrderEventLog async writer
-    // thread (v5.11.3.B feature) + closes the disk file + frees the
-    // mmap'd entry buffer when this struct goes out of scope. Idempotent
-    // on default-init / never-Init'd state (StopAsyncWriter checks
-    // writer_thread_active; OrderEventLog_Free checks disk_file/entries
-    // before closing/freeing). Safe to call on stack-allocated test OMS
-    // OR production engine OMS.
+    // ════════════════════════════════════════════════════════════════════
+    // CROSS-THREAD OBSERVABILITY COUNTERS — alignas(64) cluster (NC1 ND1)
+    // Writer = drainer thread (atomic_fetch_add per fill).
+    // Reader = snapshot publisher (GUI thread) at 60 Hz via .load(RELAXED).
+    // Isolation prevents publisher reads from invalidating cache lines of
+    // drainer's other write targets (warm fee_state / last_fill etc.).
+    // ════════════════════════════════════════════════════════════════════
+    // Observability counters. Atomic so the TUI render loop on a different
+    // core can read them without locks. Relaxed ordering throughout —
+    // these are display-only.
+    alignas(64) std::atomic<uint64_t> total_submitted;
+    std::atomic<uint64_t> total_filled;
+    std::atomic<uint64_t> total_rejected;
+
+    // ════════════════════════════════════════════════════════════════════
+    // CROSS-THREAD SAFETY CAS CLUSTER — alignas(64) cluster (NC1 ND1)
+    // Writer = N slow-path threads via CAS (compare_exchange_strong).
+    // Reader = slow-path predicate in RebuildOneCore.
+    // Isolation prevents N-thread CAS contention from invalidating
+    // neighbor warm fields (kill_switch_tripped, ks_*, etc.).
+    // ════════════════════════════════════════════════════════════════════
+    // v5.12.1.A.2 — WS-staleness emergency-flatten flag. CAS-set by
+    // EventLoop_CheckWsStaleness when the producer's last-tick gap exceeds
+    // cfg.ws_dead_time_flatten_threshold_secs. Multiple slow-paths may
+    // race for the CAS; only one wins and submits the flatten via
+    // EventLoop_FlattenAll. Read by EventLoop_RebuildOneCore (.A.3) for
+    // recovery-refusal gating during the post-flatten reconcile window.
+    // std::atomic<int> for the compare_exchange_strong primitive.
+    alignas(64) std::atomic<int> flatten_pending;  // 0 = normal, 1 = flatten fired
+    // v5.12.1.A.3 — recovery refusal deadline. Set by CheckWsStaleness
+    // alongside flatten_pending=1: deadline = now_us + recovery_delay_secs*1e6.
+    // RebuildOneCore reads this; while now_us < deadline, it forces
+    // BUY_BLOCKED + SHALT_RECOVERY on every core's pending_params.
+    // Cleared together with flatten_pending after deadline expires
+    // (auto-recovery; no manual reset required).
+    std::atomic<uint64_t> recovery_until_us;  // 0 = no recovery window active
+
+    // ════════════════════════════════════════════════════════════════════
+    // RAII destructor (v5.11.26)
+    // ════════════════════════════════════════════════════════════════════
+    // Stops the OrderEventLog async writer thread (v5.11.3.B feature) +
+    // closes the disk file + frees the mmap'd entry buffer when this
+    // struct goes out of scope. Idempotent on default-init / never-Init'd
+    // state.
+    //
+    // v5.15.5.C.1 — destructor body unchanged through tier reorg per NC1
+    // (raii-destructor-with-cluster-reorg-interaction.md). Field references
+    // resolve by name; reorg changes offsets but not names. The cleanup
+    // pairing (every Init alloc matches a Shutdown free) is preserved
+    // because the reorg adds/removes ZERO members — only reorders.
     //
     // Why RAII (vs explicit OrderManager_Shutdown at every site):
     //  - 113 OrderManagerState declarations across the codebase, ZERO
@@ -416,6 +492,40 @@ struct OrderManagerState {
         OrderManager_Shutdown(this);
     }
 };
+
+// ════════════════════════════════════════════════════════════════════════
+// v5.15.5.C.1 — Layout invariants. Compile-time-enforced cluster anchors
+// per `cache-layout-discipline-for-hot-side-structs.md` Rule 3+4 +
+// `cross-thread-snapshot-publish-cluster-isolation.md` (ND1) +
+// `spsc-ring-embedded-in-hot-struct-cluster-discipline.md` (NC2).
+// Catches future field-insertion that silently breaks alignment.
+// ════════════════════════════════════════════════════════════════════════
+static_assert(alignof(OrderManagerState<64>) >= 64,
+              "OrderManagerState MUST be 64-byte aligned (cluster anchors + alignas(64) on result_queue).");
+// HOT cluster — first SPSCRing anchor (preceding fields = orders[] + scalars).
+static_assert(offsetof(OrderManagerState<64>, result_queue) % 64 == 0,
+              "result_queue (HOT cluster ring 1) MUST start at a cache-line boundary. "
+              "See spsc-ring-embedded-in-hot-struct-cluster-discipline.md.");
+// WARM cluster — Portfolio anchor (per-fill bookkeeping cluster start).
+static_assert(offsetof(OrderManagerState<64>, portfolio) % 64 == 0,
+              "Portfolio (WARM cluster anchor) MUST start at a cache-line boundary "
+              "(separates HOT event_log from WARM per-fill state).");
+// COLD cluster — adapter anchor (boot-set fields cluster start).
+static_assert(offsetof(OrderManagerState<64>, adapter) % 64 == 0,
+              "ExchangeAdapter (COLD cluster anchor) MUST start at a cache-line boundary "
+              "(separates WARM per-fill state from COLD boot-set state).");
+// Cross-thread observability cluster — total_submitted anchor.
+static_assert(offsetof(OrderManagerState<64>, total_submitted) % 64 == 0,
+              "Observability atomics cluster (total_submitted/filled/rejected) MUST be "
+              "alignas(64)-isolated. Snapshot publisher reads at 60 Hz; isolation "
+              "prevents reads from invalidating drainer-written neighbor warm fields. "
+              "See cross-thread-snapshot-publish-cluster-isolation.md (ND1).");
+// Cross-thread safety CAS cluster — flatten_pending anchor.
+static_assert(offsetof(OrderManagerState<64>, flatten_pending) % 64 == 0,
+              "Safety CAS atomics cluster (flatten_pending/recovery_until_us) MUST be "
+              "alignas(64)-isolated. N slow-path threads CAS-contend; isolation prevents "
+              "RFO storms on neighbor cold fields. "
+              "See cross-thread-snapshot-publish-cluster-isolation.md (ND1).");
 
 //======================================================================================================
 // [FILL RESULT CALLBACK — invoked by the adapter worker thread]
