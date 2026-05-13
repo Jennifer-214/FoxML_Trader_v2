@@ -59,6 +59,7 @@
 #include "PaperResetArchive.hpp"        // v5.15.5.C.3 Phase 6 — paper-reset archive helpers (Summary_WriteJson + dirname/mkdir)
 #include "../MemHeaders/LatencyHistogram.hpp"  // v5.15.5.C.3 Phase 7.B — drainer-cycle bench gate histogram
 #include "../MemHeaders/DrainerConstants.hpp"  // v5.15.5.C.4 Phase T1 — drainer-thread-stable POD struct (fee_rate_taker_d, drain_count, partial_on)
+#include "../MemHeaders/OmsPhasedDrain.hpp"    // v5.15.5.C.4 Phase F — phase-separated drainer foundation (DrainIntoBuckets + ProcessBucket_*)
 #include "ControllerEventLoop.hpp"
 #include "CoreLatencyStats.hpp"
 #include "ControllerConfig.hpp"
@@ -2562,6 +2563,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     std::thread drainer([&state, &oms, &producer_done, &drain_with_submit,
                          &drain_post_fill, &drain_manual_closes, &cfg] {
         // v5.15.5.C.4 Phase T1: &cfg added to capture list for DrainerConstants_Init
+        // v5.15.5.C.4 Phase F — drainer-local bucket arrays for phase-separated
+        // dispatch. ~7 KB stack allocation; reused per cycle (Reset at top of
+        // DrainIntoBuckets). NOT added to OmsState (transient per-cycle scratch).
+        tt::OmsDrainBuckets drain_buckets;
         EngineSharded_PinThread(state.registered_count + 1);
         while (!g_engine_sharded_shutdown) {
             // v5.15.5.C.3 Phase 7.B — bench gate per-cycle rdtsc bracket.
@@ -2594,8 +2599,19 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             int total_drained = drain_with_submit();
             drain_manual_closes();
             OMS_DrainSubmit(&oms, dc.drain_count);  // v4.7.37; v5.15.5.C.4 T1 uses cached dc.drain_count
-            OrderManager_Tick(&oms);
-            drain_post_fill();
+
+            // v5.15.5.C.4 Phase F — phase-separated drain (replaces unified
+            // OrderManager_Tick). Drain commands into per-direction buckets;
+            // process Phase A (closes) → Phase A.5 (DrainPostFill consumer
+            // pass; reads CLOSE-form Position state — unlocks Phase G+H
+            // derives) → Phase B (opens; Portfolio_OpenSlot fires here) →
+            // Phase C (reconciles; phase-invariant safe). See
+            // DESIGN_SPECS/phase-separated-drainer-for-safe-cross-temporal-derives.md.
+            tt::OrderManager_DrainIntoBuckets(&oms, &drain_buckets);
+            tt::OrderManager_ProcessBucket_Closes(&oms, &drain_buckets);  // Phase A
+            drain_post_fill();                                              // Phase A.5
+            tt::OrderManager_ProcessBucket_Opens(&oms, &drain_buckets);   // Phase B
+            tt::OrderManager_ProcessBucket_Reconciles(&oms, &drain_buckets);  // Phase C
 
             if constexpr (BENCH) {
                 uint64_t _bench_dt = (uint64_t)__rdtsc() - _bench_t0;
@@ -2613,8 +2629,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     const tt::DrainerConstants dc_shutdown =
                         tt::DrainerConstants_Init(state.registered_count, cfg, oms);
                     OMS_DrainSubmit(&oms, dc_shutdown.drain_count);  // v4.7.37
-                    OrderManager_Tick(&oms);
+                    // v5.15.5.C.4 Phase F — phase-separated drain (shutdown
+                    // path mirrors main loop). drain_buckets is the drainer-
+                    // thread-local bucket array declared at lambda entry.
+                    tt::OrderManager_DrainIntoBuckets(&oms, &drain_buckets);
+                    tt::OrderManager_ProcessBucket_Closes(&oms, &drain_buckets);
                     drain_post_fill();
+                    tt::OrderManager_ProcessBucket_Opens(&oms, &drain_buckets);
+                    tt::OrderManager_ProcessBucket_Reconciles(&oms, &drain_buckets);
                 }
                 break;
             }
