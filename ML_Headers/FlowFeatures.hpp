@@ -41,6 +41,7 @@
 
 #include "../FixedPoint/FixedPointN.hpp"
 #include <cmath>
+#include <cstddef>   // v5.15.5.D.A — offsetof for layout-lock static_asserts
 #include <cstdint>
 #include <cstring>
 
@@ -54,13 +55,42 @@
 // Maintains a running sum so MeanLong is O(1). MeanShort iterates the
 // last K samples (K << W) — O(K) per call, called once per slow path.
 //======================================================================================================
+// v5.15.5.D.A — alignas(64) + HOT-first reorg per cache-layout-discipline-
+// for-hot-side-structs.md Rule 4. HOT cluster (sum + count + head) sits at
+// offset 0..31 = 1 cache line; COLD samples[W] follows at offset 32. The
+// 32 B trailing pad from alignas(64) is structural minimum (24,608 natural;
+// mod 64 = 32; next multiple = 24,640). v5.15.5.D.B inserts `short_sum`
+// between sum and count (HOT cluster grows 32 → 56 B; trailing pad shrinks
+// 32 → 8 B; sizeof unchanged).
 template <unsigned F, unsigned W = 1024>
-struct BookImbalanceHistory {
-    FPN<F> samples[W];
+struct alignas(64) BookImbalanceHistory {
+    // HOT cluster (offset 0; touched every slow-path cycle by Push + read fns)
     FPN<F> sum;          // running sum over all valid samples
     int    count;        // number of valid samples in [0, W]
     int    head;         // next write position
+    // COLD cluster (offset 32; samples[head] touched 1× per Push; MeanShort
+    // walks K=64 sequential elements once per read in .D.A — converted to
+    // O(1) via short_sum running aggregate in .D.B)
+    FPN<F> samples[W];
 };
+
+// v5.15.5.D.A — Layout lock for the canonical production instantiation.
+// 32 B HOT scalars + 24,576 B COLD samples + 32 B alignas(64) trailing pad
+// = 24,640 B = 385 cache lines exact. The 32 B trailing pad is structural
+// minimum given alignas(64) requirement; reducing requires changing W
+// (sub-optimal per layout-puzzle analysis) or filling pad with a useful
+// field (no current consumer per CLAUDE.md item 16 reuse-audit).
+// Typedef wraps the template instantiation so the comma in <64, 1024> isn't
+// parsed as a macro-arg separator inside offsetof().
+using BookImbHistDefaultT = BookImbalanceHistory<64, 1024>;
+static_assert(sizeof(BookImbHistDefaultT) == 24640,
+    "BookImbalanceHistory<64,1024> sizeof MUST be 24,640 B (385 cache lines).");
+static_assert(offsetof(BookImbHistDefaultT, sum) == 0,
+    "BookImbalanceHistory HOT scalar `sum` MUST sit at offset 0.");
+static_assert(offsetof(BookImbHistDefaultT, samples) == 32,
+    "BookImbalanceHistory COLD `samples` MUST sit at offset 32 (after HOT cluster).");
+static_assert(alignof(BookImbHistDefaultT) == 64,
+    "BookImbalanceHistory MUST be cache-line aligned.");
 
 template <unsigned F, unsigned W = 1024>
 static inline void BookImbHistory_Init(BookImbalanceHistory<F, W> *s) {
@@ -133,12 +163,25 @@ static inline FPN<F> BookImbHistory_MeanShort(const BookImbalanceHistory<F, W> *
 // inter-tick time) produces the same approximate continuous EWMA as
 // pushing every wall-clock second would.
 //======================================================================================================
-struct FlowState {
+// v5.15.5.D.A — alignas(64) ensures FlowState's 32 B never straddles two
+// cache lines. All 4 fields are HOT (Push and read both touch all 4 every
+// slow-path cycle); no HOT/WARM/COLD tier needed (whole struct fits in 1
+// cache line). Trailing 32 B pad is structural minimum given alignas(64)
+// requirement (32 B natural; pad to 64).
+struct alignas(64) FlowState {
     double ewma_10s;     // signed-volume EWMA, half-life 10s
     double ewma_1m;      // half-life 60s
     double ewma_5m;      // half-life 300s
     uint64_t last_us;    // timestamp of last push (0 = no prior)
 };
+
+// v5.15.5.D.A — Layout lock for FlowState.
+static_assert(sizeof(FlowState) == 64,
+    "FlowState sizeof MUST be 64 B (1 cache line).");
+static_assert(offsetof(FlowState, ewma_10s) == 0,
+    "FlowState fields MUST sit at offset 0.");
+static_assert(alignof(FlowState) == 64,
+    "FlowState MUST be cache-line aligned.");
 
 static inline void FlowState_Init(FlowState *s) {
     s->ewma_10s = 0.0;
@@ -200,14 +243,36 @@ static inline void FlowState_Push(FlowState *s, uint64_t timestamp_us, double si
 // Window W default 1024 ≈ 17 minutes at slow_path=100 cadence under a
 // busy market. Same W as BookImbalanceHistory for symmetry.
 //======================================================================================================
+// v5.15.5.D.A — alignas(64) + HOT-first reorg per cache-layout-discipline-
+// for-hot-side-structs.md Rule 4. HOT cluster (sum + sum_sq + count + head)
+// sits at offset 0..55 = 1 cache line minus 8 B; COLD sizes[W] follows at
+// offset 56. The 8 B trailing pad from alignas(64) is structural minimum
+// (24,632 natural; mod 64 = 24; next multiple = 24,640).
 template <unsigned F, unsigned W = 1024>
-struct LargeTradeState {
-    FPN<F> sizes[W];     // ring of recent sizes
+struct alignas(64) LargeTradeState {
+    // HOT cluster (offset 0; touched every slow-path cycle by Push + read fns)
     FPN<F> sum;          // running sum
     FPN<F> sum_sq;       // running sum of squares
     int    count;
     int    head;
+    // COLD cluster (offset 56; sizes[head] touched 1× per Push; ZScore is
+    // already O(1) using running sum + sum_sq, no walk)
+    FPN<F> sizes[W];     // ring of recent sizes
 };
+
+// v5.15.5.D.A — Layout lock for LargeTradeState<64, 1024>.
+// 56 B HOT scalars + 24,576 B COLD sizes + 8 B alignas(64) trailing pad
+// = 24,640 B = 385 cache lines exact. Typedef wraps template instantiation
+// for offsetof macro-arg parsing.
+using LargeTradeStateDefaultT = LargeTradeState<64, 1024>;
+static_assert(sizeof(LargeTradeStateDefaultT) == 24640,
+    "LargeTradeState<64,1024> sizeof MUST be 24,640 B (385 cache lines).");
+static_assert(offsetof(LargeTradeStateDefaultT, sum) == 0,
+    "LargeTradeState HOT scalar `sum` MUST sit at offset 0.");
+static_assert(offsetof(LargeTradeStateDefaultT, sizes) == 56,
+    "LargeTradeState COLD `sizes` MUST sit at offset 56 (after HOT cluster).");
+static_assert(alignof(LargeTradeStateDefaultT) == 64,
+    "LargeTradeState MUST be cache-line aligned.");
 
 template <unsigned F, unsigned W = 1024>
 static inline void LargeTradeState_Init(LargeTradeState<F, W> *s) {
@@ -280,14 +345,31 @@ static inline FPN<F> LargeTradeState_Last(const LargeTradeState<F, W> *s) {
 // FEAT_SPREAD_ZSCORE is the z-score of current spread vs this state's
 // distribution.
 //======================================================================================================
+// v5.15.5.D.A — alignas(64) + HOT-first reorg per cache-layout-discipline-
+// for-hot-side-structs.md Rule 4. Identical shape to LargeTradeState; HOT
+// cluster (sum + sum_sq + count + head) at offset 0..55; COLD samples[W]
+// at offset 56. The 8 B trailing pad is structural minimum.
 template <unsigned F, unsigned W = 1024>
-struct SpreadState {
-    FPN<F> samples[W];
+struct alignas(64) SpreadState {
+    // HOT cluster (offset 0; touched every slow-path cycle)
     FPN<F> sum;
     FPN<F> sum_sq;
     int    count;
     int    head;
+    // COLD cluster (offset 56)
+    FPN<F> samples[W];
 };
+
+// v5.15.5.D.A — Layout lock for SpreadState<64, 1024>.
+using SpreadStateDefaultT = SpreadState<64, 1024>;
+static_assert(sizeof(SpreadStateDefaultT) == 24640,
+    "SpreadState<64,1024> sizeof MUST be 24,640 B (385 cache lines).");
+static_assert(offsetof(SpreadStateDefaultT, sum) == 0,
+    "SpreadState HOT scalar `sum` MUST sit at offset 0.");
+static_assert(offsetof(SpreadStateDefaultT, samples) == 56,
+    "SpreadState COLD `samples` MUST sit at offset 56 (after HOT cluster).");
+static_assert(alignof(SpreadStateDefaultT) == 64,
+    "SpreadState MUST be cache-line aligned.");
 
 template <unsigned F, unsigned W = 1024>
 static inline void SpreadState_Init(SpreadState<F, W> *s) {
