@@ -1307,8 +1307,14 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         int slot = __builtin_ctz(open_mask);
         open_mask &= (uint16_t)(open_mask - 1);
         if (slot < 0 || slot >= max_slot) continue;
-        const auto& rec = oms->last_fill[slot];
-        ctx.core_open_notional = FPN_Add(ctx.core_open_notional, rec.entry_notional);
+        // v5.15.5.C.4 Phase H — derive entry-side fields from Position state.
+        // Phase F's invariant guarantees Position is in OPEN form here
+        // (Portfolio_OpenSlot just wrote entry_price + quantity + entry_fee
+        // in Phase B; DrainPostFill open-mask iter runs after).
+        const auto& pos_entry = oms->portfolio.positions[slot];
+        const FPN<F> entry_notional_derived = FPN_Mul(pos_entry.entry_price, pos_entry.quantity);
+        const FPN<F> entry_fee_derived      = pos_entry.entry_fee;
+        ctx.core_open_notional = FPN_Add(ctx.core_open_notional, entry_notional_derived);
         // v5.3.1 (Phase D fee accounting fix): do NOT add entry_fee here.
         // The exit pass below adds rec.exit_total_fees which already equals
         // entry_fee + exit_fee (set in OMS_HandleFill). Adding entry_fee
@@ -1350,8 +1356,8 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 ctx.regime_state.hysteresis_threshold,
                 FPN_ToDouble(pos.entry_price),
                 FPN_ToDouble(pos.quantity),
-                FPN_ToDouble(rec.entry_notional),
-                FPN_ToDouble(rec.entry_fee),
+                FPN_ToDouble(entry_notional_derived),  // v5.15.5.C.4 Phase H — derived
+                FPN_ToDouble(entry_fee_derived),       // v5.15.5.C.4 Phase H — derived
                 // v5.15.5.B.2 — diag_* + last_ml_* fields extracted to
                 // display_meta. Use the per-core meta alias for readability.
                 FPN_ToDouble(state->display_meta[core_id].diag_tp_pct_actual),

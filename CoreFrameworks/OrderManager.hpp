@@ -316,16 +316,19 @@ struct OrderManagerState {
     //   populated on SELL fills; mask bit set in last_closed_mask
     //   (existing). Drainer uses these for core_realized accumulation,
     //   core_open_notional decrement, core_fees, core_wins/core_losses.
+    // v5.15.5.C.4 Phase H — entry-side fields (entry_notional, entry_fee)
+    // REMOVED. Derived at DrainPostFill open-mask iter from Position state
+    // (Portfolio_OpenSlot writes entry_price + quantity + entry_fee at
+    // HandleFill BUY; preserved through Phase F's open-side consumer pass).
+    // FillRecord is now EMPTY — pending Phase K which deletes the struct +
+    // its array entirely. Kept as zero-size placeholder so dependent code
+    // (FOREACH_OMS_PER_SLOT_FIELD walks; sizeof(FillRecord)) compiles
+    // unchanged until Phase K removes all references.
     struct FillRecord {
-        FPN<F>  entry_notional;       // entry: fill_price × fill_qty (Phase H derive target)
-        FPN<F>  entry_fee;            // entry fee (maker or taker; Phase H derive target)
-        // v5.15.5.C.4 Phase G — exit-side fields (exit_net_pnl, exit_entry_notional,
-        // exit_total_fees) REMOVED. Derived at DrainPostFill from
-        // Position.{entry_price, quantity, entry_fee, exit_fill_price, is_maker} +
-        // oms->fee_rate_maker/taker. Saves 72B per record × 16 = 1152B per OMS.
-        // FillRecord shrinks to 48B; pad to 64B (single cache line per record).
-        // v5.15.5.C.4 Phase J — was_win moved to OMS-level last_was_win_bitmap.
-        int8_t  _pad[16];
+        // All fields derived from Position state at DrainPostFill time.
+        // Empty struct (1-byte minimum; pad to 8B for array alignment).
+        uint8_t _placeholder;
+        uint8_t _pad[7];
     };
     FillRecord last_fill[MAX_PORTFOLIO_POSITIONS];
 
@@ -1002,12 +1005,12 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         Portfolio_OpenSlot(&oms->portfolio, (int)o->core_id,
                            fill_price, fill_qty,
                            o->intended_tp, o->intended_sl, entry_fee);
-        // Mode 1 per-core bookkeeping: stash entry data for the drainer to
-        // apply to CoreContext (core_open_notional += notional, core_fees
-        // += entry_fee). Slot is the portfolio slot — drainer maps to
-        // core_id via Sharded_LegSlot under partials.
-        oms->last_fill[(int)o->core_id].entry_notional = notional;
-        oms->last_fill[(int)o->core_id].entry_fee      = entry_fee;
+        // v5.15.5.C.4 Phase H — entry-side fields (entry_notional, entry_fee)
+        // REMOVED from FillRecord. DrainPostFill open-mask iter derives from
+        // Position state (Portfolio_OpenSlot wrote entry_price + quantity +
+        // entry_fee just above). Phase F's invariant: open-side consumer
+        // pass runs AFTER all OPEN events in Phase B, so Position state is
+        // in OPEN form when DrainPostEntry/post-fill reads.
         oms->last_opened_mask |= (uint16_t)(1u << (int)o->core_id);
         if (oms->trade_log) {
             TradeEvent<F> synth{};
