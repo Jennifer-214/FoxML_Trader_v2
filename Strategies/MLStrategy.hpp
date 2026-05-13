@@ -23,6 +23,7 @@
 #include "../ML_Headers/CoreModelZoo.hpp"  // v5.10.0a.G.4: EnsembleModelZoo for multi-horizon
 #include "../ML_Headers/FeatureRegistry.hpp"  // v5.8.1b: Features_PackAll replaces ModelFeatures_Pack
 #include "../CoreFrameworks/OrderGates.hpp"
+#include "../MemHeaders/OmsStateFlagRegistry.hpp"  // v5.15.5.C.2 (S3a) — MASK_OMS_STATE_*
 #include <cmath>  // v5.9.0: std::isnan/isinf for prediction validation
 
 //======================================================================================================
@@ -293,7 +294,8 @@ inline void MLStrategy_ExitAdjustSharded(
     // legacy MLStrategy_ExitAdjust's `r2_ok = R² > 0.5` threshold.
     if (!FPN_GreaterThan(rolling->price_r_squared, FPN_FromDouble<F>(0.5))) return;
 
-    int partial_on = state->oms->partial_exit_enabled ? 1 : 0;
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    int partial_on = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     uint16_t my_mask = partial_on
         ? (uint16_t)((1u << (slot * 2)) | (1u << (slot * 2 + 1)))
         : (uint16_t)(1u << slot);

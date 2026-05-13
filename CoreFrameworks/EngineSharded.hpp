@@ -662,7 +662,12 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // Partials geometry mirrored to OMS for the post-fill drainer's
     // slot→core_id mapping. Set once at init — toggle requires snapshot v3
     // reload anyway (see Snapshot Re-Activation Invariant).
-    oms.partial_exit_enabled = BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    if (BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED)) {
+        BITMAP_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
+    } else {
+        BITMAP_CLR(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
+    }
 
     // Trade log CSV — same pattern as legacy engine in main.cpp
     static ShardedTradeLog g_sharded_trade_log;
@@ -1126,8 +1131,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         // Ensure data/ exists (mkdir is idempotent — silent if it does)
         mkdir("data", 0755);
         if (!live_trading) {
+            // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed
+            // oms_state_flags (S3a); set at line 665 from cfg; drainer-path
+            // single source of truth (S4).
             int loaded = ShardedSnapshot_Load<F>(&state, snapshot_path,
-                                                  BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0,
+                                                  BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED),
                                                   &cfg);  // v5.5.5
             (void)loaded;  // logged inside; nothing else to do here
         } else {
@@ -1595,13 +1603,14 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         &g_shared.swap_strategy_requested[c], __ATOMIC_ACQUIRE);
                     if (pending == STRATEGY_NONE) continue;
                     // v4.7.28: partials-aware open-position check. With
+                    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
                     // partial_exit_enabled=1 each core owns 2 slots
                     // (leg A at 2c, leg B at 2c+1). Pre-v4.7.28 this
                     // checked bit `c` only — for Core 2 that's bit 2,
                     // which under partials is actually Core 1's leg A.
                     // If Core 1 had a position open, Core 2's swap would
                     // defer forever even though Core 2 has nothing open.
-                    int partial_on = state.oms->partial_exit_enabled ? 1 : 0;
+                    int partial_on = BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
                     uint16_t open_mask = partial_on
                         ? (uint16_t)((1u << (c * 2)) | (1u << (c * 2 + 1)))
                         : (uint16_t)(1u << c);
@@ -1789,8 +1798,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 static int save_counter = 0;
                 if (!live_trading && (++save_counter >= 1024)) {
                     save_counter = 0;
+                    // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
                     ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat",
-                                              BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0);
+                                              BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED));
                 }
                 // v4.7.39 (Phase C.2): per_core_slow inlines the push inside
                 // each slow-path thread (after RebuildOneCore). Producer skips.
@@ -1994,7 +2004,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     state.oms->balance      = cfg.starting_balance;
                     state.oms->realized_pnl = FPN_Zero<F>();
                     state.oms->ks_peak_balance = cfg.starting_balance;
-                    state.oms->kill_switch_tripped = 0;
+                    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+                    BITMAP_CLR(state.oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
                     // v5.5.6 (recurring-bugs Class 5): OMS counters added in
                     // Phase 8 (maker/taker breakdown) + v5.4.4 (snapshot
                     // persistence) were never wired into Reset Paper. Result:
@@ -2167,7 +2178,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // P.3: map (core_id, leg) → portfolio slot. When
                 // partial_exit_enabled=0, slot == core_id (1:1 mapping
                 // preserves pre-P.3 behavior). When enabled, slot = 2*c+leg.
-                int partial_on = BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
+                // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
+                int partial_on = BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
                 int portfolio_slot = Sharded_LegSlot(slot, (int)event.leg, partial_on);
                 if (portfolio_slot < 0) {
                     // Defensive: malformed event (e.g. leg=1 without partials
@@ -2325,7 +2337,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             FPN<F> qty = oms.portfolio.positions[slot].quantity;
             if (FPN_IsZero(qty)) continue;
             // Map slot → core_id for strategy_id + leg lookup
-            int partial_on = BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
+            // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
+            int partial_on = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
             int core_id = partial_on ? (slot >> 1) : slot;
             int leg     = partial_on ? (slot & 1)  : 0;
             if (core_id < 0 || core_id >= state.registered_count) continue;
@@ -2395,7 +2408,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             // may have been written, not just queues 0..N-1. Pre-fix,
             // cores beyond num_cores under partials had their submits
             // stuck in undrained queues forever — silent zero-trade state.
-            int drain_count = oms.partial_exit_enabled
+            // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+            int drain_count = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED)
                 ? state.registered_count * 2 : state.registered_count;
             OMS_DrainSubmit(&oms, drain_count);  // v4.7.37
             OrderManager_Tick(&oms);
@@ -2408,7 +2422,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     drain_manual_closes();
                     // v5.4.1 Bug B2: same partials-aware drain count as the
                     // main loop above.
-                    int dc = oms.partial_exit_enabled
+                    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+                    int dc = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED)
                         ? state.registered_count * 2 : state.registered_count;
                     OMS_DrainSubmit(&oms, dc);  // v4.7.37
                     OrderManager_Tick(&oms);
@@ -2580,7 +2595,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                             &g_shared.swap_strategy_requested[c],
                             __ATOMIC_ACQUIRE);
                         if (pending != STRATEGY_NONE) {
-                            int partial_on = state.oms->partial_exit_enabled ? 1 : 0;
+                            // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+                            int partial_on = BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
                             uint16_t open_mask = partial_on
                                 ? (uint16_t)((1u << (c * 2)) | (1u << (c * 2 + 1)))
                                 : (uint16_t)(1u << c);
@@ -2619,7 +2635,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                             &g_shared.swap_model_path_requested[c],
                             __ATOMIC_ACQUIRE);
                         if (mswap) {
-                            int partial_on = state.oms->partial_exit_enabled ? 1 : 0;
+                            // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+                            int partial_on = BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
                             uint16_t open_mask = partial_on
                                 ? (uint16_t)((1u << (c * 2)) | (1u << (c * 2 + 1)))
                                 : (uint16_t)(1u << c);
@@ -2894,7 +2911,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // (when BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL) && exit_predictor models loaded).
                     // If above threshold and any positions are open on this
                     // core's slot(s), fire MARKET_SELL via OMS_PushSubmit and
-                    // mark per-slot last_exit_was_predicted for v5.13.4 reward
+                    // mark per-slot last_exit_predicted_bitmap for v5.13.4 reward
                     // attribution. Default cfg path (use_exit_model=0): the
                     // last_exit_prediction stays 0.0 → ~5ns flag check + skip.
                     if (BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_USE_EXIT_MODEL)
@@ -2903,7 +2920,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         && price_d > 0.01) {
                         // Slot mask: under partials each core owns 2 slots
                         // (legs A + B); single-leg under partial_exit_enabled=0.
-                        int partial_on = oms.partial_exit_enabled ? 1 : 0;
+                        // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+                        int partial_on = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
                         uint16_t my_mask = partial_on
                             ? (uint16_t)((1u << (c * 2)) | (1u << (c * 2 + 1)))
                             : (uint16_t)(1u << c);
@@ -2921,7 +2939,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                 // calibration log. Set BEFORE OMS_PushSubmit so the
                                 // SPSC ring release-acquire makes it visible to drainer
                                 // when the fill arrives.
-                                oms.last_exit_was_predicted[pidx] = 1;
+                                // v5.15.5.C.2 (S3b) — bit-packed in last_exit_predicted_bitmap.
+                                BITMAP_SET(oms.last_exit_predicted_bitmap, BITMAP_BIT_U16(pidx));
                                 oms.last_exit_predicted_p[pidx] =
                                     state.cores[c].last_exit_prediction;
                                 // v5.13.4 — capture chosen arm + regime per-slot
@@ -3289,8 +3308,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // engine's "intent" rather than an in-progress liquidation.
     // Paper mode only — live mode treats exchange state as truth.
     if (!live_trading) {
+        // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
         if (ShardedSnapshot_Save<F>(&state, "data/sharded_snapshot.dat",
-                                      BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0)) {
+                                      BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED))) {
             fprintf(stderr, "[snapshot] final save: data/sharded_snapshot.dat\n");
         } else {
             fprintf(stderr, "[snapshot] final save FAILED — next restart starts fresh\n");

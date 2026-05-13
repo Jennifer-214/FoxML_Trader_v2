@@ -66,6 +66,7 @@
 #include "ShardedTradeLog.hpp"
 #include "SPSCRing.hpp"
 #include "../DataStream/CalibLogColRegistry.hpp"   // v5.14.10.D — FOREACH_CALIB_LOG_COL registry (closes TECH_DEBT-010)
+#include "../MemHeaders/OmsStateFlagRegistry.hpp"  // v5.15.5.C.2 (S3a) — FOREACH_OMS_STATE_FLAG bitmap cohort
 
 #include <atomic>
 #include <chrono>
@@ -316,25 +317,31 @@ struct OrderManagerState {
     };
     FillRecord last_fill[MAX_PORTFOLIO_POSITIONS];
 
-    // v5.13.0.B — per-slot flag set by MLStrategy when exit_predictor fires
-    // the exit on this specific slot. Consumed by v5.13.4's reward
-    // attribution (drainer post-fill in HandleFill) + cleared after.
+    // v5.13.0.B / v5.15.5.C.2 (S3b) — per-slot bit set by MLStrategy when
+    // exit_predictor fires the exit on this specific slot. Consumed by
+    // v5.13.4's reward attribution (drainer post-fill in HandleFill) +
+    // cleared after.
     //
-    // PARTIALS-AWARE: indexed by portfolio slot (0..MAX_PORTFOLIO_POSITIONS-1)
+    // PARTIALS-AWARE: bit index = portfolio slot (0..MAX_PORTFOLIO_POSITIONS-1)
     // not core_id. Under partials, slot 2c+0 and 2c+1 are independent legs;
-    // each can have its OWN predicted-exit attribution.
+    // each has its OWN bit.
     //
     // Single-writer (slow-path MLStrategy thread per-core), single-reader
-    // (drainer thread). uint8_t is naturally atomic on x86; cross-thread
-    // visibility via the SPSC ring's release-acquire fence on the submit/fill
-    // path (set BEFORE OMS_PushSubmit returns; read AFTER OMS_DrainSubmit
-    // observes the order). No explicit atomic needed.
-    // .C.2 will bit-pack this into uint16_t `last_exit_predicted_bitmap`.
-    uint8_t last_exit_was_predicted[MAX_PORTFOLIO_POSITIONS];
-    uint8_t _pad_lewp[(MAX_PORTFOLIO_POSITIONS % 8) ? (8 - (MAX_PORTFOLIO_POSITIONS % 8)) : 0];
+    // (drainer thread). uint16_t reads are naturally atomic on x86; cross-
+    // thread visibility via the SPSC ring's release-acquire fence on the
+    // submit/fill path (set BEFORE OMS_PushSubmit returns; read AFTER
+    // OMS_DrainSubmit observes the order). No explicit atomic needed.
+    //
+    // Pre-S3b: uint8_t[16] array + zero-size pad = 16 bytes. Post-S3b:
+    // uint16_t bitmap = 2 bytes (+ 6 bytes implicit pad to align next field).
+    // 8 bytes saved + mask iteration symmetric with last_closed_mask /
+    // last_opened_mask (CLAUDE.md item 20 Variant 6 — bitmap-flag-api.md
+    // 8th application).
+    uint16_t last_exit_predicted_bitmap;
+    uint16_t _pad_lepb[3];  // align next field on 8-byte boundary
 
     // v5.13.0.B — calibration logging. Populated by slow-path body when
-    // the exit-model fires (mirrors last_exit_was_predicted[]). HandleFill
+    // the exit-model fires (mirrors last_exit_predicted_bitmap). HandleFill
     // reads + emits CSV row on exit fill (any exit reason — predicted or
     // natural TP/SL/time). Operator post-processes the CSV offline (ROC,
     // Brier, precision-recall). last_exit_predicted_p stores the actual
@@ -366,30 +373,28 @@ struct OrderManagerState {
     // live Submit path which is rare relative to drainer-cycle reads).
     alignas(64) ExchangeAdapter<F> adapter;
 
-    int live_trading;            // 0 = paper, 1 = live (adapter required) — boot-set; .C.2 bit-pack candidate
+    // === COLD-CLUSTER BOOLEAN STATE (v5.15.5.C.2 / S3a) ===
+    // Bit-packed cohort of 3 single-thread boolean state flags:
+    //   LIVE_TRADING         (bit 0) — boot-set; gates Submit adapter dispatch
+    //   PARTIAL_EXIT_ENABLED (bit 1) — boot-set; drainer slot→core_id mapping
+    //   KILL_SWITCH_TRIPPED  (bit 2) — drainer-thread write; serialized as int
+    //                                    in snapshot (wire format preserved)
+    // Pre-.C.2 layout: int live_trading + uint8 + _pad_pe[7] + uint8 + _pad_ks[7]
+    //                   = 20 bytes. Post-.C.2: uint8_t bitmap (+ implicit padding) = 1 byte.
+    // Accessor: BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_<NAME>)
+    //           or OMS_STATE_FLAG_IS_SET(oms, <NAME>). See OmsStateFlagRegistry.hpp.
+    // 5 bits headroom for future COLD-cluster booleans (static_assert catches overflow).
+    uint8_t oms_state_flags;
 
-    // === PARTIALS GEOMETRY (mirrored from cfg at engine init) ===
-    // partial_exit_enabled = 1 → portfolio slot 2c is core c's leg A,
-    // slot 2c+1 is core c's leg B (mapping via Sharded_LegSlot in
-    // ControllerEventLoop.hpp). The drainer needs this to map slot→core
-    // when applying FillRecords to per-core stats. Set at sharded init,
-    // not changed at runtime (toggle requires snapshot v3 reload anyway).
-    // v5.15.5.C.1 — relocated to COLD (boot-set; drainer reads via
-    // `oms->partial_exit_enabled` from the canonical single-source mirror;
-    // .C.2 may consolidate to bitmap).
-    uint8_t partial_exit_enabled;
-    uint8_t _pad_pe[7];
-
-    // === KILL SWITCH STATE (moved from EventLoopState in phase 03 chunk 1) ===
+    // === KILL SWITCH THRESHOLDS (moved from EventLoopState in phase 03 chunk 1) ===
     // Configured by EventLoopState_ConfigureKillSwitch (which now writes
     // here through the OMS pointer). Disabled by default (both thresholds
     // zero). Tripping clears every registered core's permission with
     // RELEASE; resume via EventLoop_Unpause.
+    // kill_switch_tripped bit lives in oms_state_flags above (v5.15.5.C.2).
     FPN<F>  ks_min_balance;       // trip if balance < this
     FPN<F>  ks_max_drawdown_pct;  // trip if (peak - balance) / peak > this (0 = disabled)
     FPN<F>  ks_peak_balance;      // running max of balance, updated on exits
-    uint8_t kill_switch_tripped;  // 1 once tripped (idempotent) — .C.2 bit-pack candidate
-    uint8_t _pad_ks[7];
     uint64_t ks_trips_total;      // count of trip events (observability)
 
     // FILE* opened lazily by OrderManager_OpenCalibrationLog (engine boot
@@ -608,7 +613,13 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     oms->order_bitmap   = 0;
     oms->next_order_id  = 1;
     oms->adapter        = adapter;
-    oms->live_trading   = live_trading;
+    // v5.15.5.C.2 (S3a) — COLD-cluster boolean cohort bit-pack. All 3 flags
+    // start cleared; live_trading bit set conditionally below. Engine init
+    // sets PARTIAL_EXIT_ENABLED per cfg after Init (line ~665 in EngineSharded.hpp).
+    oms->oms_state_flags = 0;
+    if (live_trading) {
+        OMS_STATE_FLAG_SET(*oms, LIVE_TRADING);
+    }
     oms->last_seen_trade_id = 0;  // v5.14.4.0 — high-watermark for replay-safe boot reconcile
 
     SPSCRing_Init(&oms->result_queue);
@@ -640,7 +651,9 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     }
     // Mode 1 per-fill bookkeeping
     oms->last_opened_mask    = 0;
-    oms->partial_exit_enabled = 0;  // engine sets per-cfg after Init
+    // v5.15.5.C.2 (S3a) — partial_exit_enabled bit cleared in oms_state_flags above.
+    // v5.15.5.C.2 (S3b) — bitmap clear replaces per-slot byte writes.
+    oms->last_exit_predicted_bitmap = 0;
     for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; ++i) {
         oms->last_fill[i].entry_notional      = FPN_Zero<F>();
         oms->last_fill[i].entry_fee           = FPN_Zero<F>();
@@ -649,7 +662,6 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
         oms->last_fill[i].exit_total_fees     = FPN_Zero<F>();
         oms->last_fill[i].was_win             = 0;
         // v5.13.0.B — per-slot exit-predictor attribution + calibration
-        oms->last_exit_was_predicted[i]       = 0;
         oms->last_exit_predicted_p[i]         = 0.0;
         // v5.13.4 — per-slot bandit arm + regime capture (-1 = unset)
         oms->last_exit_predicted_arm[i]       = -1;
@@ -661,7 +673,7 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     oms->ks_min_balance      = FPN_Zero<F>();
     oms->ks_max_drawdown_pct = FPN_Zero<F>();
     oms->ks_peak_balance     = starting_balance;  // initial peak = start
-    oms->kill_switch_tripped = 0;
+    // v5.15.5.C.2 (S3a) — kill_switch_tripped bit cleared in oms_state_flags above.
     oms->ks_trips_total      = 0;
     oms->trade_log           = nullptr;
     // v5.12.1.A.2 — emergency-flatten flag init.
@@ -762,7 +774,7 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms,
     // Paper mode + legacy (mode 0): count and return. Never touch the
     // table or the adapter. Mode 1 paper falls through to the slot
     // allocation path below so the fill handler runs in OMS_Tick.
-    if (!oms->live_trading && oms->event_log_mode == 0) {
+    if (!BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING) && oms->event_log_mode == 0) {
         oms->total_submitted.fetch_add(1, std::memory_order_relaxed);
         oms->total_filled.fetch_add(1, std::memory_order_relaxed);
         return id;
@@ -810,7 +822,7 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms,
     // Paper mode + event log (mode 1): push a synthetic fill result so
     // OMS_Tick runs the fill handler uniformly. The fill price is the
     // event_price captured at submit time. No adapter call needed.
-    if (!oms->live_trading) {
+    if (!BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING)) {
         Command cmd;
         cmd.type     = (uint8_t)CMD_FILL_RESULT;
         cmd.order_id = id;
@@ -947,6 +959,30 @@ inline int OMS_DrainSubmit(OrderManagerState<F>* oms, int num_cores) {
 }
 
 //======================================================================================================
+// [FEE ACCOUNTING — maker/taker counters + totals]
+//======================================================================================================
+// v5.15.5.C.2 (S5): single-source-of-truth for the 8-line fee bookkeeping
+// duplicated byte-identical at both entry-fill and exit-fill sites in
+// HandleFill (only differing in entry_fee vs exit_fee). Class 18 mirror
+// close (CLAUDE.md item 19 + DESIGN_SPECS/structural-fix-preferred-
+// decision-framework.md). Future fee categories (taker_rebate,
+// partial_taker, etc.) extend this single helper rather than touching
+// N call sites.
+//======================================================================================================
+template <unsigned F>
+inline void OrderManager_AccountMakerTakerFee(
+    OrderManagerState<F>* oms, int is_maker, FPN<F> fee) {
+    oms->total_fees = FPN_AddSat(oms->total_fees, fee);
+    if (is_maker) {
+        oms->maker_fills_count++;
+        oms->total_maker_fees = FPN_AddSat(oms->total_maker_fees, fee);
+    } else {
+        oms->taker_fills_count++;
+        oms->total_taker_fees = FPN_AddSat(oms->total_taker_fees, fee);
+    }
+}
+
+//======================================================================================================
 // [FILL HANDLER — single source of truth for portfolio mutation]
 //======================================================================================================
 // Extracted from OrderManager_Tick to eliminate duplication across REST fill,
@@ -992,15 +1028,9 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         // For legacy / backtest paths, fee_rate_maker == fee_rate_taker → same rate.
         FPN<F> entry_rate = o->is_maker ? oms->fee_rate_maker : oms->fee_rate_taker;
         FPN<F> entry_fee  = FPN_Mul(notional, entry_rate);
-        // Phase 8 (post-coding c10) — accounting counters
-        oms->total_fees = FPN_AddSat(oms->total_fees, entry_fee);
-        if (o->is_maker) {
-            oms->maker_fills_count++;
-            oms->total_maker_fees = FPN_AddSat(oms->total_maker_fees, entry_fee);
-        } else {
-            oms->taker_fills_count++;
-            oms->total_taker_fees = FPN_AddSat(oms->total_taker_fees, entry_fee);
-        }
+        // Phase 8 (post-coding c10) — accounting counters; v5.15.5.C.2 (S5)
+        // extracted to OrderManager_AccountMakerTakerFee helper.
+        OrderManager_AccountMakerTakerFee(oms, (int)o->is_maker, entry_fee);
         Portfolio_OpenSlot(&oms->portfolio, (int)o->core_id,
                            fill_price, fill_qty,
                            o->intended_tp, o->intended_sl, entry_fee);
@@ -1067,15 +1097,9 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         // hybrid execution (Phase 9 POST_ONLY limit sells = potential maker).
         FPN<F> exit_rate = o->is_maker ? oms->fee_rate_maker : oms->fee_rate_taker;
         FPN<F> exit_fee  = FPN_Mul(exit_notional, exit_rate);
-        // Phase 8 (post-coding c10) — accounting counters on exit
-        oms->total_fees = FPN_AddSat(oms->total_fees, exit_fee);
-        if (o->is_maker) {
-            oms->maker_fills_count++;
-            oms->total_maker_fees = FPN_AddSat(oms->total_maker_fees, exit_fee);
-        } else {
-            oms->taker_fills_count++;
-            oms->total_taker_fees = FPN_AddSat(oms->total_taker_fees, exit_fee);
-        }
+        // Phase 8 (post-coding c10) — accounting counters on exit; v5.15.5.C.2
+        // (S5) extracted to OrderManager_AccountMakerTakerFee helper.
+        OrderManager_AccountMakerTakerFee(oms, (int)o->is_maker, exit_fee);
         FPN<F> total_fee     = FPN_Add(entry_fee, exit_fee);
         FPN<F> net           = FPN_Sub(gross, total_fee);
         oms->balance      = FPN_Add(oms->balance, net);
@@ -1112,8 +1136,9 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
                 ? entry_d_calib * FPN_ToDouble(qty_snap) : 0.0;
             double pnl_bps = notional_d > 0.0
                 ? FPN_ToDouble(net) / notional_d * 10000.0 : 0.0;
+            // v5.15.5.C.2 (S3b) — bit-packed in last_exit_predicted_bitmap.
             uint8_t pred_flag = (pslot >= 0 && pslot < MAX_PORTFOLIO_POSITIONS)
-                ? oms->last_exit_was_predicted[pslot] : 0;
+                ? (uint8_t)BITMAP_IS_SET(oms->last_exit_predicted_bitmap, BITMAP_BIT_U16(pslot)) : 0;
             double pred_p = (pslot >= 0 && pslot < MAX_PORTFOLIO_POSITIONS)
                 ? oms->last_exit_predicted_p[pslot] : 0.0;
             // v5.14.10.D — registry-driven row emit via FOREACH_CALIB_LOG_COL

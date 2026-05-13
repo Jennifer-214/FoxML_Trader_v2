@@ -5747,7 +5747,7 @@ int main() {
         // ---- Test 1: paper + slippage 0.1% → entry slips up, exit slips down ----
         {
             auto* r = build(10000.0, 0.001);
-            r->oms.live_trading = 0;  // paper
+            BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING);  // paper
             // Entry at $60000 → expect stored entry_price = $60000 × 1.001 = $60060
             tt::EventLoop_OnEvent(&r->state,
                 make_event(0, tt::TRADE_EVENT_ENTRY, 60000.0));
@@ -5775,7 +5775,7 @@ int main() {
         // ---- Test 2: live mode → no slippage adjustment ----
         {
             auto* r = build(10000.0, 0.001);
-            r->oms.live_trading = 1;  // LIVE — should skip slippage
+            BITMAP_SET(r->oms.oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING);  // LIVE — should skip slippage
             tt::EventLoop_OnEvent(&r->state,
                 make_event(0, tt::TRADE_EVENT_ENTRY, 60000.0));
             double entry_price = FPN_ToDouble(r->oms.portfolio.positions[0].entry_price);
@@ -5786,7 +5786,7 @@ int main() {
         // ---- Test 3: zero slippage → no adjustment regardless of mode ----
         {
             auto* r = build(10000.0, 0.0);
-            r->oms.live_trading = 0;
+            BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING);
             tt::EventLoop_OnEvent(&r->state,
                 make_event(0, tt::TRADE_EVENT_ENTRY, 60000.0));
             double entry_price = FPN_ToDouble(r->oms.portfolio.positions[0].entry_price);
@@ -7123,7 +7123,7 @@ e3_skip_load:;
         // Mode 1 — OMS owns portfolio mutation + per-core accounting via
         // the FillRecord machinery this commit added.
         r->oms.event_log_mode      = 1;
-        r->oms.partial_exit_enabled = 1;  // paired-leg geometry
+        BITMAP_SET(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);  // paired-leg geometry
         r->oms.fee_rate_taker      = FPN_FromDouble<64>(0.001);  // 10bps taker
         r->oms.fee_rate_maker      = FPN_FromDouble<64>(0.001);
 
@@ -7270,7 +7270,7 @@ e3_skip_load:;
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
             FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
         r->oms.event_log_mode       = 1;
-        r->oms.partial_exit_enabled = 0;  // single-leg
+        BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);  // single-leg
         r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
         r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
         tt::SPSCRing_Init(&r->tick_ring);
@@ -7340,7 +7340,7 @@ e3_skip_load:;
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
             FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
         r->oms.event_log_mode       = 1;       // mirror live default
-        r->oms.partial_exit_enabled = 0;
+        BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
         r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
         r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
         tt::SPSCRing_Init(&r->tick_ring);
@@ -7468,7 +7468,7 @@ e3_skip_load:;
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
             FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
         r->oms.event_log_mode       = 1;
-        r->oms.partial_exit_enabled = 0;
+        BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
         r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
         r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
         tt::SPSCRing_Init(&r->tick_ring);
@@ -7547,7 +7547,7 @@ e3_skip_load:;
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
             FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
         r->oms.event_log_mode       = 1;
-        r->oms.partial_exit_enabled = 0;
+        BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
         r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
         r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
         tt::SPSCRing_Init(&r->tick_ring);
@@ -7687,7 +7687,7 @@ e3_skip_load:;
             R* r = new R();
             tt::EventLoopState_InitLegacy(&r->state, &r->oms,
                 FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
-            r->oms.partial_exit_enabled = 1;
+            BITMAP_SET(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
             r->oms.event_log_mode = 1;
             tt::SPSCRing_Init(&r->tick_ring);
             tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
@@ -7719,7 +7719,7 @@ e3_skip_load:;
             R* r = new R();
             tt::EventLoopState_InitLegacy(&r->state, &r->oms,
                 FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
-            r->oms.partial_exit_enabled = 1;
+            BITMAP_SET(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
             r->oms.event_log_mode = 1;
             tt::SPSCRing_Init(&r->tick_ring);
             tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
@@ -7749,7 +7749,7 @@ e3_skip_load:;
             R* r = new R();
             tt::EventLoopState_InitLegacy(&r->state, &r->oms,
                 FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
-            r->oms.partial_exit_enabled = 0;
+            BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
             r->oms.event_log_mode = 1;
             tt::SPSCRing_Init(&r->tick_ring);
             tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
@@ -7813,7 +7813,7 @@ e3_skip_load:;
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
             FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
         r->oms.event_log_mode       = 1;
-        r->oms.partial_exit_enabled = 1;       // mirror cfg
+        BITMAP_SET(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);       // mirror cfg
         r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.0);  // zero fees: clean P&L signal
         r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.0);
         tt::SPSCRing_Init(&r->tick_ring);
@@ -9865,7 +9865,7 @@ e3_skip_load:;
                                /*event_log_mode=*/0);  // mode 0 keeps
                                                         // Submit a no-op
                                                         // for paper
-        rig->oms.partial_exit_enabled = 1;  // partials on
+        BITMAP_SET(rig->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);  // partials on
         tt::EventLoopState_Init(&rig->state, &rig->oms);
         rig->state.registered_count = 4;    // 4 cores
 
@@ -9888,7 +9888,7 @@ e3_skip_load:;
         // returning 4 (legs A+B of cores 0..1) and stranding 4 commands in
         // queues 4..7. The fix uses partials_drain_count = 2*N when partials
         // enabled.
-        int drain_count = rig->oms.partial_exit_enabled
+        int drain_count = BITMAP_IS_SET(rig->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED)
             ? rig->state.registered_count * 2 : rig->state.registered_count;
         check("v5.4.1.B2: drain count is 2*N under partials",
               drain_count == 8);
@@ -18395,12 +18395,13 @@ e3_skip_load:;
                           FPN_FromDouble<64>(0.001));
 
         // === Init defaults ===
+        // v5.15.5.C.2 (S3b) — last_exit_was_predicted[16] → uint16_t last_exit_predicted_bitmap.
         int all_zero = 1;
+        if (oms.last_exit_predicted_bitmap != 0) all_zero = 0;
         for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; ++i) {
-            if (oms.last_exit_was_predicted[i] != 0) { all_zero = 0; break; }
             if (oms.last_exit_predicted_p[i] != 0.0) { all_zero = 0; break; }
         }
-        check("v5.13.0.B: last_exit_was_predicted[] defaults all-zero post-Init",
+        check("v5.13.0.B / v5.15.5.C.2 (S3b): last_exit_predicted_bitmap defaults zero post-Init",
               all_zero);
         check("v5.13.0.B: last_exit_predicted_p[] defaults all-zero post-Init",
               all_zero);  // same loop checks both
@@ -18408,18 +18409,18 @@ e3_skip_load:;
               oms.calibration_log_file == nullptr);
 
         // === Per-slot writes round-trip ===
-        oms.last_exit_was_predicted[5] = 1;
+        BITMAP_SET(oms.last_exit_predicted_bitmap, BITMAP_BIT_U16(5));
         oms.last_exit_predicted_p[5] = 0.72;
-        check("v5.13.0.B: per-slot write last_exit_was_predicted[5]=1",
-              oms.last_exit_was_predicted[5] == 1);
+        check("v5.15.5.C.2 (S3b): per-slot write last_exit_predicted_bitmap bit 5=1",
+              BITMAP_IS_SET(oms.last_exit_predicted_bitmap, BITMAP_BIT_U16(5)));
         check("v5.13.0.B: per-slot write last_exit_predicted_p[5]=0.72",
               oms.last_exit_predicted_p[5] > 0.71 &&
               oms.last_exit_predicted_p[5] < 0.73);
-        check("v5.13.0.B: adjacent slots untouched (slot 4)",
-              oms.last_exit_was_predicted[4] == 0 &&
+        check("v5.15.5.C.2 (S3b): adjacent slots untouched (slot 4)",
+              !BITMAP_IS_SET(oms.last_exit_predicted_bitmap, BITMAP_BIT_U16(4)) &&
               oms.last_exit_predicted_p[4] == 0.0);
-        check("v5.13.0.B: adjacent slots untouched (slot 6 — partials leg-B sibling)",
-              oms.last_exit_was_predicted[6] == 0 &&
+        check("v5.15.5.C.2 (S3b): adjacent slots untouched (slot 6 — partials leg-B sibling)",
+              !BITMAP_IS_SET(oms.last_exit_predicted_bitmap, BITMAP_BIT_U16(6)) &&
               oms.last_exit_predicted_p[6] == 0.0);
 
         OrderManager_Shutdown(&oms);

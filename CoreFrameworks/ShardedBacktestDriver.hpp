@@ -210,7 +210,8 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
         // been written. Under partials, ExecutionCore producers push
         // SubmitCommands keyed by portfolio_slot (0..2N-1), so the drain
         // walks 2N queues instead of N.
-        int dc = drv->oms->partial_exit_enabled
+        // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+        int dc = BITMAP_IS_SET(drv->oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED)
             ? drv->state->registered_count * 2 : drv->state->registered_count;
         OMS_DrainSubmit(drv->oms, dc);
     }
@@ -417,7 +418,8 @@ inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
         // been written. Under partials, ExecutionCore producers push
         // SubmitCommands keyed by portfolio_slot (0..2N-1), so the drain
         // walks 2N queues instead of N.
-        int dc = drv->oms->partial_exit_enabled
+        // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+        int dc = BITMAP_IS_SET(drv->oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED)
             ? drv->state->registered_count * 2 : drv->state->registered_count;
         OMS_DrainSubmit(drv->oms, dc);
     }

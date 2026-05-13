@@ -18,6 +18,7 @@
 #include "../../CoreFrameworks/OrderGates.hpp"
 #include "../../ML_Headers/RollingStats.hpp"
 #include "../../CoreFrameworks/ControllerConfig.hpp"
+#include "../../MemHeaders/OmsStateFlagRegistry.hpp"  // v5.15.5.C.2 (S3a) — MASK_OMS_STATE_*
 #include "../StrategyInterface.hpp"
 
 template <unsigned F> struct EmaCrossState {
@@ -193,7 +194,8 @@ inline void EmaCross_ExitAdjustSharded(
     int ema_rising = (es->last_ema_slope.sign == 0) && !FPN_IsZero(es->last_ema_slope);
     if (!ema_rising) return;
 
-    int partial_on = state->oms->partial_exit_enabled ? 1 : 0;
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    int partial_on = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     uint16_t my_mask = partial_on
         ? (uint16_t)((1u << (slot * 2)) | (1u << (slot * 2 + 1)))
         : (uint16_t)(1u << slot);

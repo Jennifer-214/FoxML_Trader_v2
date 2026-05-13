@@ -143,7 +143,7 @@ static void test_init() {
 
     EXPECT(oms.order_bitmap == 0, "init: bitmap empty");
     EXPECT(oms.next_order_id == 1, "init: next_order_id starts at 1");
-    EXPECT(oms.live_trading == 0, "init: live_trading = 0");
+    EXPECT(!BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING), "init: live_trading = 0");
     EXPECT(OrderManager_TotalSubmitted(&oms) == 0, "init: submitted = 0");
     EXPECT(OrderManager_TotalFilled(&oms) == 0, "init: filled = 0");
     EXPECT(OrderManager_TotalRejected(&oms) == 0, "init: rejected = 0");

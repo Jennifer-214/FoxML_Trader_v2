@@ -56,14 +56,14 @@ static void test_default_disabled() {
     EventLoopState<64> state;
     EventLoopState_InitLegacy(&state, &oms, FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
-    EXPECT(state.oms->kill_switch_tripped == 0, "default not tripped");
+    EXPECT(!BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED),"default not tripped");
     EXPECT(state.oms->ks_trips_total == 0, "no trips counted");
     EXPECT(FPN_IsZero(state.oms->ks_min_balance), "min balance unset");
     EXPECT(FPN_IsZero(state.oms->ks_max_drawdown_pct), "max drawdown unset");
 
     int tripped = EventLoop_KillSwitchEvaluate(&state);
     EXPECT(tripped == 0, "default evaluate is no-op");
-    EXPECT(state.oms->kill_switch_tripped == 0, "still not tripped after evaluate");
+    EXPECT(!BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED),"still not tripped after evaluate");
 }
 
 //======================================================================================================
@@ -85,7 +85,7 @@ static void test_balance_floor_trip() {
     state.oms->balance = FPN_FromDouble<64>(4999.0);
     int t2 = EventLoop_KillSwitchEvaluate(&state);
     EXPECT(t2 == 1, "below floor: trip fires");
-    EXPECT(state.oms->kill_switch_tripped == 1, "state shows tripped");
+    EXPECT(BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED),"state shows tripped");
     EXPECT(state.oms->ks_trips_total == 1, "trips counter bumped once");
 }
 
@@ -114,7 +114,7 @@ static void test_drawdown_trip() {
     state.oms->balance = FPN_FromDouble<64>(9500.0);
     int t2 = EventLoop_KillSwitchEvaluate(&state);
     EXPECT(t2 == 1, "20.83% drawdown: trip fires");
-    EXPECT(state.oms->kill_switch_tripped == 1, "state shows tripped");
+    EXPECT(BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED),"state shows tripped");
 }
 
 //======================================================================================================
@@ -138,7 +138,7 @@ static void test_trip_clears_permissions() {
 
     // Manual trip via helper.
     EventLoop_KillSwitchTrip(&state);
-    EXPECT(state.oms->kill_switch_tripped == 1, "tripped");
+    EXPECT(BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED),"tripped");
 
     // All four should now be cleared.
     for (int i = 0; i < N; ++i) {
@@ -200,7 +200,7 @@ static void test_active_position_can_exit_after_trip() {
 
     // Trip the kill switch.
     EventLoop_KillSwitchTrip(&state);
-    EXPECT(state.oms->kill_switch_tripped == 1, "tripped");
+    EXPECT(BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED),"tripped");
     EXPECT(__atomic_load_n(&core.permission, __ATOMIC_ACQUIRE) == 0, "permission cleared");
 
     // Now an exit event should still be processable — SG fired on the hot path
@@ -257,7 +257,7 @@ static void test_unpause_skips_none_cores() {
     EXPECT(__atomic_load_n(&cores[0].permission, __ATOMIC_ACQUIRE) == 1, "core 0 resumed");
     EXPECT(__atomic_load_n(&cores[1].permission, __ATOMIC_ACQUIRE) == 0, "core 1 (NONE) stays paused");
     EXPECT(__atomic_load_n(&cores[2].permission, __ATOMIC_ACQUIRE) == 1, "core 2 resumed");
-    EXPECT(state.oms->kill_switch_tripped == 0, "tripped flag cleared");
+    EXPECT(!BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED),"tripped flag cleared");
 }
 
 //======================================================================================================
@@ -286,7 +286,7 @@ static void test_unpause_rearms_switch() {
     state.oms->balance = FPN_FromDouble<64>(8000.0);
     int resumed = EventLoop_Unpause(&state);
     EXPECT(resumed == 1, "core resumed");
-    EXPECT(state.oms->kill_switch_tripped == 0, "tripped flag cleared");
+    EXPECT(!BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED),"tripped flag cleared");
     EXPECT(__atomic_load_n(&core.permission, __ATOMIC_ACQUIRE) == 1, "core armed again");
 
     // Drop balance again — switch should fire a second time.

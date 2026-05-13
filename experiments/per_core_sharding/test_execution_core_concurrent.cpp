@@ -279,7 +279,7 @@ static void test_kill_switch_observed_quickly() {
     // After the trip, the core's permission should be 0 (atomic).
     uint8_t perm = __atomic_load_n(&core.permission, __ATOMIC_ACQUIRE);
     EXPECT(perm == 0, "permission cleared after kill switch trip");
-    EXPECT(state.oms->kill_switch_tripped == 1, "state shows tripped");
+    EXPECT(BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED), "state shows tripped");
     EXPECT(ticks_total.load() > 0, "executor processed at least some ticks");
     EXPECT(ticks_after_trip.load() > 0,
            "executor processed ticks AFTER the trip — proves permission load was observed");

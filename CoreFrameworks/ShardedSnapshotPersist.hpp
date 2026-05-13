@@ -37,6 +37,7 @@
 #include "OrderManager.hpp"
 #include "Portfolio.hpp"
 #include "../FixedPoint/FixedPointN.hpp"
+#include "../MemHeaders/OmsPersistFieldRegistry.hpp"  // v5.15.5.C.2 (S3a-W) — FOREACH_OMS_PERSIST_FIELD
 
 namespace tt {
 
@@ -132,18 +133,12 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
     }
 
     // ---- GLOBAL OMS BLOCK ----
-    if (fwrite(&state->oms->balance,             sizeof(FPN<F>), 1, f) != 1) goto fail;
-    if (fwrite(&state->oms->realized_pnl,        sizeof(FPN<F>), 1, f) != 1) goto fail;
-    if (fwrite(&state->oms->ks_peak_balance,     sizeof(FPN<F>), 1, f) != 1) goto fail;
-    if (fwrite(&state->oms->kill_switch_tripped, sizeof(int),    1, f) != 1) goto fail;
-    // v6 (recurring-bugs Class 6): OMS counters. HandleFill bumps these
-    // on every fill (entry+exit). Without persistence, session
-    // forensics drop to zero on every restart.
-    if (fwrite(&state->oms->total_fees,          sizeof(FPN<F>), 1, f) != 1) goto fail;
-    if (fwrite(&state->oms->total_maker_fees,    sizeof(FPN<F>), 1, f) != 1) goto fail;
-    if (fwrite(&state->oms->total_taker_fees,    sizeof(FPN<F>), 1, f) != 1) goto fail;
-    if (fwrite(&state->oms->maker_fills_count,   sizeof(uint32_t), 1, f) != 1) goto fail;
-    if (fwrite(&state->oms->taker_fills_count,   sizeof(uint32_t), 1, f) != 1) goto fail;
+    // v5.15.5.C.2 (S3a-W) — registry-driven save. Class 18 mirror close
+    // (CLAUDE.md item 19); adding a new persisted OMS field = 1 row in
+    // FOREACH_OMS_PERSIST_FIELD. Wire format byte-preserved (CLAUDE.md
+    // item 15). v6 OMS counters covered automatically by registry order.
+    // kill_switch_tripped bit-extracted from oms_state_flags (S3a) at save.
+    FOREACH_OMS_PERSIST_FIELD(OMS_PERSIST_DO_SAVE)
 
     // Portfolio bitmap + 16 positions (full Portfolio struct snapshot).
     if (fwrite(&state->oms->portfolio.active_bitmap, 2, 1, f) != 1) goto fail;
@@ -364,20 +359,15 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
     }
 
     // ---- GLOBAL OMS BLOCK ----
-    FPN<F> tmp_balance, tmp_realized, tmp_peak;
-    int tmp_kill_tripped;
-    if (fread(&tmp_balance,      sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(&tmp_realized,     sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(&tmp_peak,         sizeof(FPN<F>), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(&tmp_kill_tripped, sizeof(int),    1, f) != 1) { fclose(f); return 0; }
+    // v5.15.5.C.2 (S3a-W) — registry-driven load. tmp_<name> declared +
+    // populated via FOREACH expansion; commit happens in the post-read
+    // commit block below.
+    FOREACH_OMS_PERSIST_FIELD(OMS_PERSIST_DECLARE_TMP)
+    FOREACH_OMS_PERSIST_FIELD(OMS_PERSIST_DO_READ)
     // v6 OMS counters: read into tmps, apply at commit point below.
-    FPN<F> tmp_total_fees, tmp_total_maker, tmp_total_taker;
-    uint32_t tmp_maker_count, tmp_taker_count;
-    if (fread(&tmp_total_fees,   sizeof(FPN<F>),  1, f) != 1) { fclose(f); return 0; }
-    if (fread(&tmp_total_maker,  sizeof(FPN<F>),  1, f) != 1) { fclose(f); return 0; }
-    if (fread(&tmp_total_taker,  sizeof(FPN<F>),  1, f) != 1) { fclose(f); return 0; }
-    if (fread(&tmp_maker_count,  sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }
-    if (fread(&tmp_taker_count,  sizeof(uint32_t), 1, f) != 1) { fclose(f); return 0; }
+    // v5.15.5.C.2 (S3a-W) — v6 OMS counters (total_fees, total_maker_fees,
+    // total_taker_fees, maker_fills_count, taker_fills_count) are now
+    // declared + read by the FOREACH_OMS_PERSIST_FIELD expansion above.
 
     uint16_t bitmap = 0, pad16 = 0;
     Position<F> positions[16];
@@ -482,16 +472,9 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
     fclose(f);
 
     // ---- COMMIT (after all reads validated) ----
-    state->oms->balance             = tmp_balance;
-    state->oms->realized_pnl        = tmp_realized;
-    state->oms->ks_peak_balance     = tmp_peak;
-    state->oms->kill_switch_tripped = tmp_kill_tripped;
-    // v6 OMS counters apply
-    state->oms->total_fees          = tmp_total_fees;
-    state->oms->total_maker_fees    = tmp_total_maker;
-    state->oms->total_taker_fees    = tmp_total_taker;
-    state->oms->maker_fills_count   = tmp_maker_count;
-    state->oms->taker_fills_count   = tmp_taker_count;
+    // v5.15.5.C.2 (S3a-W) — registry-driven commit. tmp_<name> → state->oms->name
+    // for DIRECT-kind fields; bit set/clear for BIT-kind kill_switch_tripped.
+    FOREACH_OMS_PERSIST_FIELD(OMS_PERSIST_DO_COMMIT)
     state->oms->portfolio.active_bitmap = bitmap;
     memcpy(state->oms->portfolio.positions, positions, sizeof(positions));
 

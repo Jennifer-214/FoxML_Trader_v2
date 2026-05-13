@@ -310,7 +310,7 @@ static void test_kill_switch_mid_run() {
     }
     EventLoop_DrainEvents(&state);
 
-    EXPECT(state.oms->kill_switch_tripped == 1, "kill switch still tripped");
+    EXPECT(BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED), "kill switch still tripped");
     // Entries after trip should equal entries before trip — no new ones.
     EXPECT(state.total_entries == entries_before,
            "no new entries after kill switch trip");

@@ -113,7 +113,8 @@ inline EventLoopAggregates EventLoop_GetAggregates(const EventLoopState<F>* stat
     agg.registered_cores = state->registered_count;
     agg.total_entries    = state->total_entries;
     agg.total_exits      = state->total_exits;
-    agg.kill_switch_tripped = state->oms->kill_switch_tripped;
+    // v5.15.5.C.2 (S3a) — kill_switch_tripped now lives in oms_state_flags bitmap.
+    agg.kill_switch_tripped = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
 
     // walk the active bitmap once for unrealized P&L and active count
     FPN<F> unreal = FPN_Zero<F>();

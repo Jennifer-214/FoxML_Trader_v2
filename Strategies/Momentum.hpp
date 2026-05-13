@@ -30,6 +30,7 @@
 #include "../CoreFrameworks/ControllerConfig.hpp"
 #include "../CoreFrameworks/OrderGates.hpp"
 #include "../CoreFrameworks/Portfolio.hpp"
+#include "../MemHeaders/OmsStateFlagRegistry.hpp"  // v5.15.5.C.2 (S3a) — MASK_OMS_STATE_*
 #include "../ML_Headers/LinearRegression3X.hpp"
 #include "../ML_Headers/ROR_regressor.hpp"
 #include "../ML_Headers/RollingStats.hpp"
@@ -366,7 +367,8 @@ inline void Momentum_ExitAdjustSharded(
     FPN<F> hold_score = FPN_Mul(snr, r_squared);
     if (!FPN_GreaterThanOrEqual(hold_score, cfg->tp_hold_score)) return;
 
-    int partial_on = state->oms->partial_exit_enabled ? 1 : 0;
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    int partial_on = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     uint16_t my_mask = partial_on
         ? (uint16_t)((1u << (slot * 2)) | (1u << (slot * 2 + 1)))
         : (uint16_t)(1u << slot);

@@ -1162,7 +1162,8 @@ inline FPN<F> EventLoopState_KsPeakBalance(const EventLoopState<F>* state) {
 
 template <unsigned F>
 inline uint8_t EventLoopState_KillSwitchTripped(const EventLoopState<F>* state) {
-    return state->oms->kill_switch_tripped;
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    return (uint8_t)BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
 }
 
 template <unsigned F>
@@ -1204,7 +1205,8 @@ inline void EventLoopState_SetIntendedParams(EventLoopState<F>* state, int slot,
 // core_wins/core_losses, ConfidenceScorer feedback, SL cooldown,
 // pnl_feeder push.
 //
-// Slot → core_id mapping is partials-aware via oms->partial_exit_enabled.
+// Slot → core_id mapping is partials-aware via oms_state_flags
+// PARTIAL_EXIT_ENABLED bit (v5.15.5.C.2 / S3a).
 // Both legs of a paired trade route their stats to the SAME CoreContext
 // (one per core, not one per leg) — partials only split the exit
 // schedule, not the allocation.
@@ -1265,7 +1267,8 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                                              // test callers using 3-arg form unaffected).
                                              int      exit_bandit_enabled      = 0,
                                              double   fee_rate_taker_for_cf    = 0.001) {
-    const int partial_on = oms->partial_exit_enabled ? 1 : 0;
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    const int partial_on = BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     uint16_t my_mask = partial_on
         ? (uint16_t)((1u << (core_id * 2)) | (1u << (core_id * 2 + 1)))
         : (uint16_t)(1u << core_id);
@@ -1532,7 +1535,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // leg-A only) since each slot's exit decision is independent
         // under partials. Conditions for crediting exit_bandit:
         //   1. BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED)
-        //   2. per-slot last_exit_was_predicted captured at submit
+        //   2. per-slot last_exit_predicted_bitmap (bit set at submit)
         //   3. NOT a flatten-induced safety event (don't pollute bandit
         //      with non-strategic exits)
         //   4. exit_bandits actually initialized (exit models loaded)
@@ -1546,9 +1549,10 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // Optimistic assumption: TP would have hit before SL.
         // Biases bandit AGAINST firing exits (since hypothetical is
         // usually positive) — operator scales via cfg.exit_bandit_lr.
+        // v5.15.5.C.2 (S3b) — bit-packed in last_exit_predicted_bitmap.
         if (exit_bandit_enabled
             && slot < (int)MAX_PORTFOLIO_POSITIONS
-            && oms->last_exit_was_predicted[slot] == 1
+            && BITMAP_IS_SET(oms->last_exit_predicted_bitmap, BITMAP_BIT_U16(slot))
             && oms->flatten_pending.load(std::memory_order_acquire) == 0
             && ctx.ensemble_handle) {
             auto* ezoo = static_cast<EnsembleModelZoo<F>*>(ctx.ensemble_handle);
@@ -1583,7 +1587,8 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // v5.13.0.B + v5.13.4 — clear per-slot exit-prediction state
         // post-attribution (single-use per trade).
         if (slot < (int)MAX_PORTFOLIO_POSITIONS) {
-            oms->last_exit_was_predicted[slot]    = 0;
+            // v5.15.5.C.2 (S3b) — bit-packed in last_exit_predicted_bitmap.
+            BITMAP_CLR(oms->last_exit_predicted_bitmap, BITMAP_BIT_U16(slot));
             oms->last_exit_predicted_p[slot]      = 0.0;
             oms->last_exit_predicted_arm[slot]    = -1;
             oms->last_exit_predicted_regime[slot] = -1;
@@ -1656,7 +1661,8 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
     //
     // Mutate a local copy so the caller's event is untouched.
     TradeEvent<F> event = event_in;
-    if (!state->oms->live_trading && !FPN_IsZero(state->oms->slippage_pct)) {
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    if (!BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING) && !FPN_IsZero(state->oms->slippage_pct)) {
         FPN<F> slip = FPN_Mul(event.price, state->oms->slippage_pct);
         if (event.type & TRADE_EVENT_ENTRY) {
             event.price = FPN_Add(event.price, slip);
@@ -3036,8 +3042,9 @@ inline void EventLoop_ClearAllPermissions(EventLoopState<F>* state) {
 // idempotent: trips_total only bumps on a state transition.
 template <unsigned F>
 inline void EventLoop_KillSwitchTrip(EventLoopState<F>* state) {
-    if (state->oms->kill_switch_tripped == 0) {
-        state->oms->kill_switch_tripped = 1;
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    if (!BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED)) {
+        BITMAP_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
         state->oms->ks_trips_total++;
     }
     EventLoop_ClearAllPermissions(state);
@@ -3064,7 +3071,8 @@ inline void EventLoop_KillSwitchTrip(EventLoopState<F>* state) {
 //======================================================================================================
 template <unsigned F>
 inline int EventLoop_KillSwitchEvaluate(EventLoopState<F>* state) {
-    if (state->oms->kill_switch_tripped) return 0;  // already tripped, no double-action
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    if (BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED)) return 0;  // already tripped, no double-action
 
     int trip = 0;
 
@@ -3090,7 +3098,8 @@ inline int EventLoop_KillSwitchEvaluate(EventLoopState<F>* state) {
     if (!trip) return 0;
 
     // Trip: clear permission on every core. This is the primary action.
-    state->oms->kill_switch_tripped = 1;
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    BITMAP_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
     state->oms->ks_trips_total++;
     EventLoop_ClearAllPermissions(state);
     return 1;
@@ -3143,7 +3152,8 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
                                        double current_price,
                                        int core_id) {
     // Build per-core slot mask: slot c (partials off) or slots 2c+0..1 (on).
-    int partial_on = oms->partial_exit_enabled ? 1 : 0;
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    int partial_on = BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     uint16_t my_mask = partial_on
         ? (uint16_t)((1u << (core_id * 2)) | (1u << (core_id * 2 + 1)))
         : (uint16_t)(1u << core_id);
@@ -3256,7 +3266,8 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
     FPN<F> price_fpn = (current_price > 0.0)
         ? FPN_FromDouble<F>(current_price)
         : FPN_Zero<F>();
-    int partial_on = oms->partial_exit_enabled ? 1 : 0;
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    int partial_on = BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     while (bm) {
         int slot = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
@@ -3432,7 +3443,8 @@ inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
     double trail_dist_d = stddev_d * FPN_ToDouble(cfg.sl_trail_mult);
     double hold_thresh  = FPN_ToDouble(cfg.tp_hold_score);
 
-    int partial_on = state->oms->partial_exit_enabled ? 1 : 0;
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    int partial_on = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     uint16_t my_mask = partial_on
         ? (uint16_t)((1u << (core_id * 2)) | (1u << (core_id * 2 + 1)))
         : (uint16_t)(1u << core_id);
@@ -3516,7 +3528,8 @@ inline void EventLoop_BreakevenOnProfitOneCore(EventLoopState<F>* state,
                                                 const ControllerConfig<F>& cfg,
                                                 double current_price,
                                                 int core_id) {
-    int partial_on = state->oms->partial_exit_enabled ? 1 : 0;
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    int partial_on = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     uint16_t my_mask = partial_on
         ? (uint16_t)((1u << (core_id * 2)) | (1u << (core_id * 2 + 1)))
         : (uint16_t)(1u << core_id);
@@ -3565,7 +3578,8 @@ inline void EventLoop_BreakevenOnProfit(EventLoopState<F>* state,
 
 template <unsigned F>
 inline int EventLoop_Unpause(EventLoopState<F>* state) {
-    state->oms->kill_switch_tripped = 0;
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    BITMAP_CLR(state->oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
     int resumed = 0;
     for (int slot = 0; slot < state->registered_count; ++slot) {
         ExecutionCore<F>* core = state->cores[slot].core;

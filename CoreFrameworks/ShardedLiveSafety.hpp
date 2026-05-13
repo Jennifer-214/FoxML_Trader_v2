@@ -166,7 +166,8 @@ static inline int EngineSharded_ForceCloseOnShutdown(
                     "Sharded shutdown — force closing", body);
     }
 
-    if (!oms->live_trading) {
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    if (!BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING)) {
         // Paper mode: clear the portfolio locally. No exchange state to manage.
         oms->portfolio.active_bitmap = 0;
         fprintf(stderr, "[sharded-safety] FORCE-CLOSE: paper mode — cleared %d position(s) locally\n",

@@ -187,7 +187,12 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     oms.fee_rate_taker = cfg.fee_rate_taker;
     // v4.7.15: mirror partials geometry to OMS for the post-fill drainer's
     // slot→core_id mapping. Same as EngineSharded_Run sets it from cfg.
-    oms.partial_exit_enabled = BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
+    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
+    if (BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED)) {
+        BITMAP_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
+    } else {
+        BITMAP_CLR(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
+    }
     EventLoopState<BACKTEST_FP> state;
     EventLoopState_Init(&state, &oms);
 
