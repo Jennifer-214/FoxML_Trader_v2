@@ -51,11 +51,19 @@ template <unsigned F> struct Position {
     //   pair_index        (int8_t)
     #define POSITION_EMIT_FIELD(name, type, init, persist_kind, doc) type name = init;
     FOREACH_POSITION_FIELD(POSITION_EMIT_FIELD)
-    #undef POSITION_EMIT_FIELD
 
     // Manual padding to align Position to 8 bytes after int8_t pair_index.
     // Part of wire format (PORTFOLIO_SNAPSHOT_VERSION=5 byte layout).
+    // v5.15.5.C.4 Phase POS.2: this padding ALSO marks the PERSIST/SKIP_PERSIST
+    // byte boundary — Save/Load filter uses offsetof(Position, first_skip_persist_field)
+    // to compute POSITION_PERSIST_BYTES = 184.
     uint8_t _pad_pos[7];
+
+    // SKIP_PERSIST fields (Phase POS.2): exit-side scratch captured at HandleFill
+    // SELL; consumed by Phase G's derive cascade at DrainPostFill. NOT in wire format.
+    FOREACH_POSITION_FIELD_SKIP_PERSIST(POSITION_EMIT_FIELD)
+
+    #undef POSITION_EMIT_FIELD
 };
 
 // v5.15.5.C.4 Phase POS — static_assert layout locks per the design spec
@@ -75,8 +83,11 @@ template <unsigned F> struct Position {
 //   offset 176: pair_index          (1B)
 //   offset 177: _pad_pos            (7B)
 //   total:      184 bytes
-static_assert(sizeof(Position<64>) == 184,
-              "Position<64> size changed — wire format (PORTFOLIO_SNAPSHOT_VERSION=5) may be invalidated");
+// v5.15.5.C.4 Phase POS.2 — sizeof grows to accommodate SKIP_PERSIST fields
+// (exit_fill_price 24B + is_maker 1B + alignment padding).
+// PERSIST prefix size stays at 184 — wire format unchanged.
+static_assert(sizeof(Position<64>) == 216,
+              "Position<64> size changed — verify layout vs design spec");
 static_assert(offsetof(Position<64>, take_profit_price)  == 0,   "Position layout: take_profit_price offset");
 static_assert(offsetof(Position<64>, stop_loss_price)    == 24,  "Position layout: stop_loss_price offset");
 static_assert(offsetof(Position<64>, quantity)           == 48,  "Position layout: quantity offset");
@@ -86,7 +97,22 @@ static_assert(offsetof(Position<64>, original_tp)        == 120, "Position layou
 static_assert(offsetof(Position<64>, original_sl)        == 144, "Position layout: original_sl offset");
 static_assert(offsetof(Position<64>, entry_timestamp_us) == 168, "Position layout: entry_timestamp_us offset");
 static_assert(offsetof(Position<64>, pair_index)         == 176, "Position layout: pair_index offset");
-// Position = 7 FPN fields + uint64 + int8 + padding (registry-driven; layout locked above)
+
+// v5.15.5.C.4 Phase POS.2 — PERSIST byte count locked.
+// Equals offset of first SKIP_PERSIST field (exit_fill_price) = end of _pad_pos = 184.
+// PORTFOLIO_SNAPSHOT_VERSION=5 wire format writes exactly POSITION_PERSIST_BYTES per
+// position (16 positions × 184 = 2944 bytes). Legacy snapshots load byte-identical.
+template <unsigned F>
+constexpr size_t POSITION_PERSIST_BYTES() {
+    return offsetof(Position<F>, exit_fill_price);
+}
+static_assert(POSITION_PERSIST_BYTES<64>() == 184,
+              "Position PERSIST byte count must equal 184 — wire format (PORTFOLIO_SNAPSHOT_VERSION=5) byte-identical");
+static_assert(offsetof(Position<64>, exit_fill_price) == 184, "SKIP_PERSIST field exit_fill_price must be at offset 184 (PERSIST boundary)");
+// Position layout: 9 PERSIST value fields (168B FPN + 8B uint64 + 1B int8) + 7B
+// wire-format pad = 184B PERSIST prefix. Then SKIP_PERSIST fields (Phase POS.2):
+// exit_fill_price (24B FPN<F>) + is_maker (1B uint8_t) + alignment pad = 32B.
+// Total sizeof(Position<64>) = 216B.
 //======================================================================================================
 // [PORTFOLIO]
 //======================================================================================================
@@ -440,7 +466,15 @@ static inline int Portfolio_Save(const Portfolio<F> *portfolio, FPN<F> realized_
     fwrite(&portfolio->active_bitmap, 2, 1, f);
     uint16_t pad = 0;
     fwrite(&pad, 2, 1, f);
-    fwrite(portfolio->positions, sizeof(Position<F>), 16, f);
+    // v5.15.5.C.4 Phase POS.2 — write only PERSIST prefix (184 bytes per position).
+    // SKIP_PERSIST fields (exit_fill_price, is_maker) live in the Position struct
+    // for cache locality but are NOT in the wire format. Per-position loop with
+    // explicit POSITION_PERSIST_BYTES() count preserves PORTFOLIO_SNAPSHOT_VERSION=5
+    // byte-identity with pre-POS.2 snapshots.
+    constexpr size_t pos_persist_bytes = POSITION_PERSIST_BYTES<F>();
+    for (int i = 0; i < 16; i++) {
+        fwrite(&portfolio->positions[i], pos_persist_bytes, 1, f);
+    }
     fwrite(&realized_pnl, sizeof(FPN<F>), 1, f);
     fwrite(&live_offset_pct, sizeof(FPN<F>), 1, f);
     fwrite(&live_vol_mult, sizeof(FPN<F>), 1, f);
@@ -479,7 +513,17 @@ static inline int Portfolio_Load(Portfolio<F> *portfolio, FPN<F> *realized_pnl,
     uint16_t pad;
     if (fread(&bitmap, 2, 1, f) != 1) { fclose(f); return 0; }
     if (fread(&pad, 2, 1, f) != 1) { fclose(f); return 0; }
-    if (fread(portfolio->positions, sizeof(Position<F>), 16, f) != 16) { fclose(f); return 0; }
+    // v5.15.5.C.4 Phase POS.2 — read only PERSIST prefix (184 bytes per position).
+    // SKIP_PERSIST fields (exit_fill_price, is_maker) are NOT in wire format;
+    // they stay at default-init (zero) after load. Per-position loop matches
+    // Save's PERSIST-filtered write; legacy snapshots load byte-identical.
+    constexpr size_t pos_persist_bytes = POSITION_PERSIST_BYTES<F>();
+    for (int i = 0; i < 16; i++) {
+        if (fread(&portfolio->positions[i], pos_persist_bytes, 1, f) != 1) {
+            fclose(f);
+            return 0;
+        }
+    }
 
     portfolio->active_bitmap = bitmap;
 
