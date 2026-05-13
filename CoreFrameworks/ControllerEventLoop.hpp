@@ -1396,6 +1396,9 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // distinction is captured in `was_win` for now; finer
         // exit-kind taxonomy (time-exit, ratchet, manual) is deferred
         // to the dashboard panel computing it from order_history CSV.
+        // v5.15.5.C.4 Phase J — was_win now in cross-slot bitmap; hoisted
+        // single read per slot iter used at multiple sites below.
+        const bool slot_was_win = BITMAP_IS_SET(oms->last_was_win_bitmap, BITMAP_BIT_U16(slot));
         if (tt::Health_LogEnabled(tt::HEALTH_INFO)) {
             double realized = oms->last_realized_return[slot];
             tt::Health_Log(tt::HEALTH_INFO, "exit", core_id,
@@ -1403,7 +1406,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 "net_pnl=%g entry_notional=%g total_fees=%g leg_a=%d",
                 slot, (unsigned)ctx.strategy_id,
                 (unsigned)ctx.resolved_strategy_id,
-                (int)rec.was_win, realized,
+                (int)slot_was_win, realized,
                 FPN_ToDouble(rec.exit_net_pnl),
                 FPN_ToDouble(rec.exit_entry_notional),
                 FPN_ToDouble(rec.exit_total_fees),
@@ -1434,9 +1437,10 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // Per-trade signals: leg A only.
         if (is_leg_a) {
             if (!partial_on) {
-                ctx.core_wins   += (rec.was_win ? 1u : 0u);
-                ctx.core_losses += (rec.was_win ? 0u : 1u);
-                if (rec.was_win) {
+                // v5.15.5.C.4 Phase J — uses hoisted slot_was_win from above.
+                ctx.core_wins   += (slot_was_win ? 1u : 0u);
+                ctx.core_losses += (slot_was_win ? 0u : 1u);
+                if (slot_was_win) {
                     ctx.core_gross_wins = FPN_Add(ctx.core_gross_wins, rec.exit_net_pnl);
                 } else {
                     ctx.core_gross_losses = FPN_Add(ctx.core_gross_losses,

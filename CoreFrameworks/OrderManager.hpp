@@ -322,8 +322,11 @@ struct OrderManagerState {
         FPN<F>  exit_net_pnl;         // exit: gross − total_fees (signed)
         FPN<F>  exit_entry_notional;  // exit: entry_price_snap × qty_snap
         FPN<F>  exit_total_fees;      // exit: entry_fee + exit_fee booked at close
-        int8_t  was_win;              // exit only: 1 if exit_net_pnl > 0
-        int8_t  _pad[7];
+        // v5.15.5.C.4 Phase J — was_win extracted to OMS-level
+        // `last_was_win_bitmap` (cross-slot bitmap; per Technique 3 of
+        // aggressive-memory-reduction-techniques.md + CLAUDE.md item 20).
+        // Pad keeps FillRecord at 128B for unchanged sizeof.
+        int8_t  _pad[8];
     };
     FillRecord last_fill[MAX_PORTFOLIO_POSITIONS];
 
@@ -348,7 +351,13 @@ struct OrderManagerState {
     // last_opened_mask (CLAUDE.md item 20 Variant 6 — bitmap-flag-api.md
     // 8th application).
     uint16_t last_exit_predicted_bitmap;
-    uint16_t _pad_lepb[3];  // align next field on 8-byte boundary
+    // v5.15.5.C.4 Phase J — was_win extracted from FillRecord to cross-slot
+    // bitmap (Technique 3 of aggressive-memory-reduction-techniques.md +
+    // CLAUDE.md item 20). Saves 8B/record × 16 = 128B; 1B per slot in old
+    // FillRecord layout (incl. alignment pad) → 2B total at OMS level.
+    // Init/reset wired via FOREACH_OMS_FIELD (PositionFieldRegistry-style).
+    uint16_t last_was_win_bitmap;
+    uint16_t _pad_lepb[2];  // align next field on 8-byte boundary (was [3]; -2B for new bitmap)
 
     // v5.13.0.B — calibration logging. Populated by slow-path body when
     // the exit-model fires (mirrors last_exit_predicted_bitmap). HandleFill
@@ -1075,7 +1084,12 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         oms->last_fill[pslot].exit_net_pnl        = net;
         oms->last_fill[pslot].exit_entry_notional = FPN_Mul(entry_price_snap, qty_snap);
         oms->last_fill[pslot].exit_total_fees     = total_fee;
-        oms->last_fill[pslot].was_win             = FPN_GreaterThan(net, FPN_Zero<F>()) ? 1 : 0;
+        // v5.15.5.C.4 Phase J — was_win moved to cross-slot bitmap.
+        if (FPN_GreaterThan(net, FPN_Zero<F>())) {
+            BITMAP_SET(oms->last_was_win_bitmap, BITMAP_BIT_U16(pslot));
+        } else {
+            BITMAP_CLR(oms->last_was_win_bitmap, BITMAP_BIT_U16(pslot));
+        }
         // v5.13.0.B — calibration log row. Captures EVERY exit fill (not
         // just predicted ones) so operator can compute calibration metrics
         // (Brier, ROC AUC) offline. nullptr-safe: most runs leave the

@@ -272,6 +272,8 @@ struct OmsResetCtx {
     X(last_closed_mask,       uint16_t,           0,                            0,                            SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
     X(last_opened_mask,       uint16_t,           0,                            0,                            SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
     X(last_exit_predicted_bitmap, uint16_t,       0,                            0,                            SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
+    /* v5.15.5.C.4 Phase J — was_win extracted from FillRecord to cross-slot bitmap (Technique 3 of aggressive-memory-reduction-techniques.md) */         \
+    X(last_was_win_bitmap,    uint16_t,           0,                            0,                            SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
     /* ============================================================================================ */                                                  \
     /* [7] Adapter struct copy (was Layer 2 special-case; now DIRECT row)                             */                                                  \
     /* ============================================================================================ */                                                  \
@@ -320,7 +322,9 @@ struct OmsResetCtx {
     X(last_fill[_i].exit_net_pnl,       FPN<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
     X(last_fill[_i].exit_entry_notional,FPN<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
     X(last_fill[_i].exit_total_fees,    FPN<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
-    X(last_fill[_i].was_win,            int8_t,    0,              0)                          \
+    /* v5.15.5.C.4 Phase J — was_win moved to OMS-level last_was_win_bitmap                  \
+     * (cross-slot uint16_t bitmap; not per-slot scalar). No longer in per-slot              \
+     * AUTOPOPULATE walk; cleared in DrainPostFill via OMS-level field reset.                */ \
     X(last_exit_predicted_p[_i],        double,    0.0,            0.0)
 
 //======================================================================================================
@@ -365,9 +369,13 @@ static_assert(FOREACH_OMS_FIELD_PERSIST_COUNT == 10,
               "SHARDED_SNAPSHOT_VERSION bump + loader migration. See "
               "DESIGN_SPECS/wire-format-byte-preservation-discipline.md.");
 
-static_assert(FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 8,
-              "FOREACH_OMS_PER_SLOT_FIELD must keep the 8 per-slot scalar entries "
-              "(last_realized_return + 6 FillRecord fields + last_exit_predicted_p).");
+// v5.15.5.C.4 Phase J — was_win extracted from FillRecord to OMS-level
+// cross-slot bitmap (last_was_win_bitmap). Per-slot scalar count decreases
+// by 1 (8 → 7).
+static_assert(FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 7,
+              "FOREACH_OMS_PER_SLOT_FIELD must keep the 7 per-slot scalar entries "
+              "(last_realized_return + 5 FillRecord fields + last_exit_predicted_p; "
+              "was_win moved to OMS-level last_was_win_bitmap in v5.15.5.C.4 Phase J).");
 
 }  // namespace tt
 

@@ -62,7 +62,7 @@
     X(exit_price,          "%.4f",  exit_d_calib)                                                         \
     X(gain_pct,            "%.6f",  gain_pct)                                                             \
     X(realized_pnl_bps,    "%.4f",  pnl_bps)                                                              \
-    X(was_win,             "%d",    (int)oms->last_fill[pslot].was_win)
+    X(was_win,             "%d",    (BITMAP_IS_SET(oms->last_was_win_bitmap, BITMAP_BIT_U16(pslot)) ? 1 : 0))
 
 //======================================================================================================
 // [AUTO-GENERATED COUNT]

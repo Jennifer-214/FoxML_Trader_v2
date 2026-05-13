@@ -7739,11 +7739,13 @@ e3_skip_load:;
             r->oms.last_fill[0].exit_net_pnl       = FPN_FromDouble<64>(pnl_a);
             r->oms.last_fill[0].exit_entry_notional= FPN_Zero<64>();
             r->oms.last_fill[0].exit_total_fees    = FPN_Zero<64>();
-            r->oms.last_fill[0].was_win            = (pnl_a > 0.0) ? 1 : 0;
+            if (pnl_a > 0.0) BITMAP_SET(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(0));
+            else             BITMAP_CLR(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(0));  // v5.15.5.C.4 Phase J
             r->oms.last_fill[1].exit_net_pnl       = FPN_FromDouble<64>(pnl_b);
             r->oms.last_fill[1].exit_entry_notional= FPN_Zero<64>();
             r->oms.last_fill[1].exit_total_fees    = FPN_Zero<64>();
-            r->oms.last_fill[1].was_win            = (pnl_b > 0.0) ? 1 : 0;
+            if (pnl_b > 0.0) BITMAP_SET(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(1));
+            else             BITMAP_CLR(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(1));  // v5.15.5.C.4 Phase J
             r->oms.last_closed_mask = (uint16_t)0x3;  // bits 0,1
         };
 
@@ -7828,7 +7830,7 @@ e3_skip_load:;
             r->oms.last_fill[0].exit_net_pnl       = FPN_FromDouble<64>(+7.0);
             r->oms.last_fill[0].exit_entry_notional= FPN_Zero<64>();
             r->oms.last_fill[0].exit_total_fees    = FPN_Zero<64>();
-            r->oms.last_fill[0].was_win            = 1;
+            BITMAP_SET(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(0));  // v5.15.5.C.4 Phase J
             r->oms.last_closed_mask = (uint16_t)0x1;
             tt::EventLoop_DrainPostFill(&r->state, &r->oms, 0);
 
@@ -7899,11 +7901,11 @@ e3_skip_load:;
         r->oms.last_fill[0].exit_net_pnl        = FPN_FromDouble<64>(+3.0);
         r->oms.last_fill[0].exit_entry_notional = FPN_Zero<64>();
         r->oms.last_fill[0].exit_total_fees     = FPN_Zero<64>();
-        r->oms.last_fill[0].was_win             = 1;
+        BITMAP_SET(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(0));  // v5.15.5.C.4 Phase J
         r->oms.last_fill[1].exit_net_pnl        = FPN_FromDouble<64>(-8.0);
         r->oms.last_fill[1].exit_entry_notional = FPN_Zero<64>();
         r->oms.last_fill[1].exit_total_fees     = FPN_Zero<64>();
-        r->oms.last_fill[1].was_win             = 0;
+        BITMAP_CLR(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(1));  // v5.15.5.C.4 Phase J
         r->oms.last_closed_mask = (uint16_t)0x3;
 
         // Drive a no-op tick through the backtest driver — DrainPostFill
@@ -23309,15 +23311,16 @@ e3_skip_load:;
             double gain_pct = 1.000891;
             double pnl_bps = 99.7531;
 
-            // Mock OMS struct with last_fill[pslot].was_win = 1
-            // Direct-construct a minimal layout matching what the macro reads.
-            struct MockLastFill { int was_win; };
+            // v5.15.5.C.4 Phase J — was_win moved to cross-slot bitmap on OMS state.
+            // Mock OMS struct needs last_was_win_bitmap (uint16_t); FillRecord no
+            // longer carries was_win. CALIB_LOG_EMIT_ROW reads
+            // BITMAP_IS_SET(oms->last_was_win_bitmap, BITMAP_BIT_U16(pslot)).
             struct MockOms {
-                MockLastFill last_fill[16];
+                uint16_t last_was_win_bitmap;
             };
             MockOms mock_oms{};
-            mock_oms.last_fill[pslot].was_win = 1;
-            auto* oms = &mock_oms;   // CALIB_LOG_EMIT_ROW reads oms->last_fill[pslot].was_win
+            BITMAP_SET(mock_oms.last_was_win_bitmap, BITMAP_BIT_U16(pslot));
+            auto* oms = &mock_oms;   // CALIB_LOG_EMIT_ROW reads oms->last_was_win_bitmap
 
             CALIB_LOG_EMIT_ROW(f);
             fflush(f);
@@ -23336,7 +23339,7 @@ e3_skip_load:;
                 (unsigned long long)ts_us, (int)pslot,
                 (unsigned)pred_flag, pred_p,
                 entry_d_calib, exit_d_calib, gain_pct, pnl_bps,
-                (int)mock_oms.last_fill[pslot].was_win);
+                BITMAP_IS_SET(mock_oms.last_was_win_bitmap, BITMAP_BIT_U16(pslot)) ? 1 : 0);  // v5.15.5.C.4 Phase J
 
             check("v5.14.10.D: CALIB_LOG_EMIT_ROW byte-identical to pre-refactor fprintf (TECH_DEBT-010 close)",
                   strcmp(buf, expected) == 0);
