@@ -1796,7 +1796,7 @@ static inline void TUI_PopulatePerCoreSlowPathLatency(TUISnapshot *snap,
     if (n > 16) n = 16;
     for (int i = 0; i < n; ++i) {
         tt::CoreLatencySnapshot ls = tt::CoreLatencyStats_Snapshot(
-            &state->cores[i].slow_path_latency, tsc_ghz);
+            &state->display_meta[i].slow_path_latency, tsc_ghz);
         snap->per_core[i].sp_samples = ls.total_count;
         snap->per_core[i].sp_min_ns  = ls.min_ns;
         snap->per_core[i].sp_p50_ns  = ls.p50_ns;
@@ -1807,7 +1807,7 @@ static inline void TUI_PopulatePerCoreSlowPathLatency(TUISnapshot *snap,
         // v5.1.1: per-section breakdown.
         for (int s = 0; s < 5; ++s) {
             tt::CoreLatencySnapshot ss = tt::CoreLatencyStats_Snapshot(
-                &state->cores[i].slow_path_breakdown[s], tsc_ghz);
+                &state->display_meta[i].slow_path_breakdown[s], tsc_ghz);
             snap->per_core[i].sp_breakdown_p50_ns[s] = ss.p50_ns;
             snap->per_core[i].sp_breakdown_p99_ns[s] = ss.p99_ns;
         }
@@ -1830,20 +1830,25 @@ static inline void TUI_PopulateAdvancedTopology(TUISnapshot *snap,
                                                   const StateT *state,
                                                   const OmsT *oms) {
     // v5.12.1.C — heartbeat: snapshot WS freshness for header render
-    snap->ws_last_tick_us = state->last_ws_tick_us.load(std::memory_order_acquire);
-    snap->ws_ticks_per_5s = state->ws_ticks_per_5s.load(std::memory_order_relaxed);
+    // v5.15.5.B.2 — source-side reads now hit the WsHeartbeatTelemetry cluster
+    // (alignas(64) isolated). PerCoreSnap field names unchanged.
+    snap->ws_last_tick_us = state->ws_telemetry.last_tick_us.load(std::memory_order_acquire);
+    snap->ws_ticks_per_5s = state->ws_telemetry.ticks_per_5s.load(std::memory_order_relaxed);
     int n = snap->per_core_count;
     if (n < 0) n = 0;
     if (n > 16) n = 16;
     for (int i = 0; i < n; ++i) {
+        // v5.15.5.B.2 — source-side reads now hit the SlowPathTelemetry cluster
+        // (alignas(64) isolated; cross-thread-snapshot-publish-cluster-isolation.md).
+        // PerCoreSnap field names unchanged — only the source-of-truth changed.
         snap->per_core[i].sp_last_tick_us =
-            state->cores[i].sp_last_tick_us.load(std::memory_order_relaxed);
+            state->cores[i].sp_telemetry.last_tick_us.load(std::memory_order_relaxed);
         snap->per_core[i].sp_cycles_total =
-            state->cores[i].sp_cycles_total.load(std::memory_order_relaxed);
+            state->cores[i].sp_telemetry.cycles_total.load(std::memory_order_relaxed);
         snap->per_core[i].sp_yield_count =
-            state->cores[i].sp_yield_count.load(std::memory_order_relaxed);
+            state->cores[i].sp_telemetry.yield_count.load(std::memory_order_relaxed);
         snap->per_core[i].sp_state =
-            state->cores[i].sp_state.load(std::memory_order_relaxed);
+            state->cores[i].sp_telemetry.state.load(std::memory_order_relaxed);
         snap->per_core[i].sp_submit_q_depth =
             (uint16_t)SPSCRing_Depth(&oms->submit_queues[i]);
     }

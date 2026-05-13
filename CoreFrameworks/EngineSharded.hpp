@@ -1106,7 +1106,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             if (!zoo_ptr) {
                 fprintf(stderr, "[sharded] core %d: aligned_alloc(CoreModelZoo) "
                                 "failed; ML core cannot init\n", i);
-                state.cores[i].model_load_failed = 1;
+                state.display_meta[i].model_load_failed = 1;
                 continue;
             }
             CoreModelZoo_Init(zoo_ptr);
@@ -1119,7 +1119,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                 "failed; ML core cannot init\n", i);
                 CoreModelZoo_Free(zoo_ptr);
                 free(zoo_ptr);
-                state.cores[i].model_load_failed = 1;
+                state.display_meta[i].model_load_failed = 1;
                 continue;
             }
             EnsembleModelZoo_Init(ezoo_ptr);
@@ -1181,7 +1181,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         CoreModelZoo_Free(zoo_ptr);
                         state.cores[i].model_handle = NULL;
                         // v5.9.0b: surface load failure to operator via TUI/health log
-                        state.cores[i].model_load_failed = 1;
+                        state.display_meta[i].model_load_failed = 1;
                     }
                 }
             }
@@ -1247,7 +1247,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // Distinct from "no model configured" (which is operator
                 // intent — leave flag at 0). Here: strategy=ML + load
                 // attempted + failed → surface to operator.
-                state.cores[i].model_load_failed = 1;
+                state.display_meta[i].model_load_failed = 1;
             }
 
             // v5.10.2.A — POST-LOAD VALIDATOR (extracted; closes parity-check
@@ -1264,7 +1264,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     cfg.held_out_gate_strict,
                     (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
                     (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
-                    &state.cores[i]);
+                    &state.display_meta[i]);
                 // Note: validator returns -1 on REFUSE in strict mode but the
                 // existing v5.9.5i semantics here were "log loudly + leave
                 // handle loaded" (TODO v5.10: free handle + return-from-boot
@@ -1699,7 +1699,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             uint64_t local_now_us = (uint64_t)
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count();
-            state.last_ws_tick_us.store(local_now_us, std::memory_order_release);
+            // v5.15.5.B.2 — wrapped in WsHeartbeatTelemetry alignas(64) cluster.
+            state.ws_telemetry.last_tick_us.store(local_now_us, std::memory_order_release);
             (void)ts_us;  // ts_us still used by other fan_out consumers
             // v5.12.1.C — heartbeat throughput. 5 × 1-second-bucket ring;
             // current bucket = (now_sec % 5). Reset on second-rollover.
@@ -1709,18 +1710,18 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             {
                 uint64_t now_sec = local_now_us / 1000000ULL;
                 int b = (int)(now_sec % 5);
-                if (state.ws_bucket_last_sec[b] != now_sec) {
-                    state.ws_bucket_last_sec[b] = now_sec;
-                    state.ws_bucket_count[b] = 0;
+                if (state.ws_telemetry.bucket_last_sec[b] != now_sec) {
+                    state.ws_telemetry.bucket_last_sec[b] = now_sec;
+                    state.ws_telemetry.bucket_count[b] = 0;
                 }
-                state.ws_bucket_count[b]++;
+                state.ws_telemetry.bucket_count[b]++;
                 uint64_t total = 0;
                 for (int i = 0; i < 5; ++i) {
-                    if (state.ws_bucket_last_sec[i] >= now_sec - 4) {
-                        total += state.ws_bucket_count[i];
+                    if (state.ws_telemetry.bucket_last_sec[i] >= now_sec - 4) {
+                        total += state.ws_telemetry.bucket_count[i];
                     }
                 }
-                state.ws_ticks_per_5s.store(total, std::memory_order_relaxed);
+                state.ws_telemetry.ticks_per_5s.store(total, std::memory_order_relaxed);
             }
 
             // v5.1.4: GUI drag-TP/SL pickup runs per-tick, NOT at slow-path
@@ -2775,39 +2776,39 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // v4.7.42 (Phase E): enable per-core slow-path latency stats.
                 // Sampled around the per-cycle work below (RebuildOneCore +
                 // PushParameters + TimeExitOneCore + TrailingSL + permission).
-                CoreLatencyStats_Enable(&state.cores[c].slow_path_latency);
+                CoreLatencyStats_Enable(&state.display_meta[c].slow_path_latency);
                 // v5.1.1: enable per-section breakdown stats.
                 for (int s = 0; s < CoreContext<F>::SP_SECTION_COUNT; ++s) {
-                    CoreLatencyStats_Enable(&state.cores[c].slow_path_breakdown[s]);
+                    CoreLatencyStats_Enable(&state.display_meta[c].slow_path_breakdown[s]);
                 }
                 uint64_t last_seen_tick = 0;
                 while (!g_engine_sharded_shutdown) {
                     // v5.0.3: user pause via paused_engines_mask bit c.
 #ifdef USE_IMGUI_GUI
                     if (g_shared.paused_engines_mask & (uint16_t)(1u << c)) {
-                        state.cores[c].sp_state.store(3, std::memory_order_relaxed);
-                        state.cores[c].sp_yield_count.fetch_add(1, std::memory_order_relaxed);
+                        state.cores[c].sp_telemetry.state.store(3, std::memory_order_relaxed);
+                        state.cores[c].sp_telemetry.yield_count.fetch_add(1, std::memory_order_relaxed);
                         std::this_thread::yield();
                         continue;
                     }
 #endif
                     // Reset Paper coordination — park while reset runs.
                     if (paper_reset_in_progress.load(std::memory_order_acquire)) {
-                        state.cores[c].sp_state.store(1, std::memory_order_relaxed);
-                        state.cores[c].sp_yield_count.fetch_add(1, std::memory_order_relaxed);
+                        state.cores[c].sp_telemetry.state.store(1, std::memory_order_relaxed);
+                        state.cores[c].sp_telemetry.yield_count.fetch_add(1, std::memory_order_relaxed);
                         std::this_thread::yield();
                         continue;
                     }
                     // Cadence — wake when enough ticks have passed.
                     uint64_t now_tick = ticks_produced.load(std::memory_order_acquire);
                     if (now_tick - last_seen_tick < (uint64_t)slow_path_interval) {
-                        state.cores[c].sp_state.store(2, std::memory_order_relaxed);
-                        state.cores[c].sp_yield_count.fetch_add(1, std::memory_order_relaxed);
+                        state.cores[c].sp_telemetry.state.store(2, std::memory_order_relaxed);
+                        state.cores[c].sp_telemetry.yield_count.fetch_add(1, std::memory_order_relaxed);
                         std::this_thread::yield();
                         continue;
                     }
                     last_seen_tick = now_tick;
-                    state.cores[c].sp_state.store(0, std::memory_order_relaxed);  // running
+                    state.cores[c].sp_telemetry.state.store(0, std::memory_order_relaxed);  // running
 
                     // v4.7.42 (Phase E): rdtsc-bracket the per-cycle work for
                     // slow-path latency stats. Sample after work completes.
@@ -2944,7 +2945,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 "FAILED (rc=%d); pre-swap state preserved\n",
                                                 c, rc);
                                         } else {
-                                            state.cores[c].model_load_failed = 0;
+                                            state.display_meta[c].model_load_failed = 0;
                                             // Re-fetch ezoo after swap to run post-load
                                             // validators on the NEW ezoo. v5.14.2.E.1
                                             // closes PARITY-009.F: ValidateAgainstCfg +
@@ -2959,9 +2960,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 cfg.held_out_gate_strict,
                                                 (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
                                                 (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
-                                                &state.cores[c]);
+                                                &state.display_meta[c]);
                                             if (validate_rc < 0) {
-                                                state.cores[c].model_load_failed = 1;
+                                                state.display_meta[c].model_load_failed = 1;
                                                 fprintf(stderr,
                                                     "[hot_swap] ensemble core %d "
                                                     "REFUSED post-load validation "
@@ -2974,7 +2975,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 /*zoo=*/nullptr, swap_ezoo,
                                                 /*core_id=*/c, cfg.held_out_gate_strict);
                                             if (overlay_rc < 0) {
-                                                state.cores[c].model_load_failed = 1;
+                                                state.display_meta[c].model_load_failed = 1;
                                             }
                                         }
                                         __atomic_store_n(
@@ -3003,7 +3004,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 "FAILED (rc=%d); pre-swap state preserved\n",
                                                 c, rc);
                                         } else {
-                                            state.cores[c].model_load_failed = 0;
+                                            state.display_meta[c].model_load_failed = 0;
                                             // Re-fetch zoo after swap to run post-load
                                             // validators on the NEW zoo (parity-check
                                             // Finding #3 closure preserved).
@@ -3016,9 +3017,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 cfg.held_out_gate_strict,
                                                 (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
                                                 (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
-                                                &state.cores[c]);
+                                                &state.display_meta[c]);
                                             if (validate_rc < 0) {
-                                                state.cores[c].model_load_failed = 1;
+                                                state.display_meta[c].model_load_failed = 1;
                                                 fprintf(stderr,
                                                     "[hot_swap] core %d REFUSED post-load "
                                                     "validation in strict mode; new model "
@@ -3029,7 +3030,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 new_swap_zoo, /*ezoo=*/nullptr,
                                                 /*core_id=*/c, cfg.held_out_gate_strict);
                                             if (overlay_rc < 0) {
-                                                state.cores[c].model_load_failed = 1;
+                                                state.display_meta[c].model_load_failed = 1;
                                             }
                                         }
                                         __atomic_store_n(
@@ -3092,7 +3093,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // + per-cadence pushes setup).
                     uint64_t _sec_t_rebuild_start = __rdtsc();
                     CoreLatencyStats_Sample(
-                        &state.cores[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_OTHER],
+                        &state.display_meta[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_OTHER],
                         _sec_t_rebuild_start - _sec_t_other_start, _sec_t_rebuild_start);
 
                     // === Strategy dispatch + gate parameter rebuild ===
@@ -3117,7 +3118,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // v5.1.1: bracket REBUILD section.
                     uint64_t _sec_t_push_start = __rdtsc();
                     CoreLatencyStats_Sample(
-                        &state.cores[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_REBUILD],
+                        &state.display_meta[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_REBUILD],
                         _sec_t_push_start - _sec_t_rebuild_start, _sec_t_push_start);
 
                     // === Push pending_params via seqlock (was inside
@@ -3139,7 +3140,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // v5.1.1: bracket PUSH_PARAMS section.
                     uint64_t _sec_t_te_start = __rdtsc();
                     CoreLatencyStats_Sample(
-                        &state.cores[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_PUSH_PARAMS],
+                        &state.display_meta[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_PUSH_PARAMS],
                         _sec_t_te_start - _sec_t_push_start, _sec_t_te_start);
 
                     // === v5.13.0.B — sell-side ML exit-prediction submit ===
@@ -3233,7 +3234,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // v5.1.1: bracket TIME_EXIT section.
                     uint64_t _sec_t_tsl_start = __rdtsc();
                     CoreLatencyStats_Sample(
-                        &state.cores[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_TIME_EXIT],
+                        &state.display_meta[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_TIME_EXIT],
                         _sec_t_tsl_start - _sec_t_te_start, _sec_t_tsl_start);
 
                     if (!FPN_IsZero(cfg.sl_trail_mult) &&
@@ -3249,7 +3250,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // negligible (<100ns) so we don't add another bracket.
                     uint64_t _sec_t_tail = __rdtsc();
                     CoreLatencyStats_Sample(
-                        &state.cores[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_TRAIL_SL],
+                        &state.display_meta[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_TRAIL_SL],
                         _sec_t_tail - _sec_t_tsl_start, _sec_t_tail);
 
                     // === Warmup permission grant (per-core check) ===
@@ -3262,7 +3263,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 
                     // v4.7.42 (Phase E): close rdtsc bracket + sample.
                     uint64_t _sp_t1 = __rdtsc();
-                    CoreLatencyStats_Sample(&state.cores[c].slow_path_latency,
+                    CoreLatencyStats_Sample(&state.display_meta[c].slow_path_latency,
                                              _sp_t1 - _sp_t0, _sp_t1);
 
                     // v5.12.1.B clock hoist: reuse rebuild_ts_us captured at
@@ -3276,9 +3277,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // here, plus another inside RebuildOneCore's recovery
                     // check when active = up to 3 reads/cycle/core. Now: 1.
                     {
-                        state.cores[c].sp_last_tick_us.store(rebuild_ts_us,
+                        state.cores[c].sp_telemetry.last_tick_us.store(rebuild_ts_us,
                                                               std::memory_order_relaxed);
-                        state.cores[c].sp_cycles_total.fetch_add(1,
+                        state.cores[c].sp_telemetry.cycles_total.fetch_add(1,
                                                                   std::memory_order_relaxed);
                         EventLoop_CheckWsStaleness(&state, cfg, price_d,
                                                     rebuild_ts_us);

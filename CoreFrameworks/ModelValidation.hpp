@@ -141,7 +141,7 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
     int strict_mode,                                  // cfg.held_out_gate_strict
     int acknowledge_inference_cfg_drift,              // ops_cfg_flags bit; suppresses INFERENCE_CFG category
     int acknowledge_cross_binary_version_drift,       // ops_cfg_flags bit; suppresses CROSS_BINARY category
-    CoreContext<F>* ctx,                              // for cfg_drift_* counter writeback
+    CoreContextDisplayMeta<F>* meta,                  // for cfg_drift_* counter writeback (v5.15.5.B.2: extracted from CoreContext)
     LogFn log_fn = LogFn{}                            // v5.15.5.A.7: injected logger (default = stderr)
 ) {
     int strict = (strict_mode == 1);
@@ -233,12 +233,13 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
             check_handle(&ezoo->exit_predictor[h], "exit", h);
     }
 
-    // Writeback drift counters to per-core context (closes parity-check Finding #10
-    // — now updated on hot-swap too via shared helper).
-    if (ctx) {
-        ctx->cfg_drift_tier1_count    = (uint8_t)(tier1_count > 255 ? 255 : tier1_count);
-        ctx->cfg_drift_tier2_count    = (uint8_t)(tier2_count > 255 ? 255 : tier2_count);
-        ctx->cfg_drift_strict_refused = (tier1_refused_count > 0) ? 1 : 0;
+    // Writeback drift counters to per-core display_meta (closes parity-check
+    // Finding #10 — now updated on hot-swap too via shared helper).
+    // v5.15.5.B.2 — moved from CoreContext to CoreContextDisplayMeta sibling.
+    if (meta) {
+        meta->cfg_drift_tier1_count    = (uint8_t)(tier1_count > 255 ? 255 : tier1_count);
+        meta->cfg_drift_tier2_count    = (uint8_t)(tier2_count > 255 ? 255 : tier2_count);
+        meta->cfg_drift_strict_refused = (tier1_refused_count > 0) ? 1 : 0;
     }
 
     if (tier1_refused_count > 0 && strict) {

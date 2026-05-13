@@ -452,9 +452,10 @@ static inline void TUI_CopySnapshotSharded(
             snap->per_core[i].warmup_progress_pct = (uint8_t)pct;
         }
         // v5.9.5i — cfg drift summary mirror
-        snap->per_core[i].cfg_drift_tier1_count    = state->cores[i].cfg_drift_tier1_count;
-        snap->per_core[i].cfg_drift_tier2_count    = state->cores[i].cfg_drift_tier2_count;
-        snap->per_core[i].cfg_drift_strict_refused = state->cores[i].cfg_drift_strict_refused;
+        // v5.15.5.B.2 — fields extracted to CoreContextDisplayMeta sibling.
+        snap->per_core[i].cfg_drift_tier1_count    = state->display_meta[i].cfg_drift_tier1_count;
+        snap->per_core[i].cfg_drift_tier2_count    = state->display_meta[i].cfg_drift_tier2_count;
+        snap->per_core[i].cfg_drift_strict_refused = state->display_meta[i].cfg_drift_strict_refused;
         // Per-core gate direction. Use RESOLVED strategy for AUTO so direction
         // tracks the active regime's strategy. MOMENTUM buys above; everything
         // else buys below.
@@ -473,20 +474,17 @@ static inline void TUI_CopySnapshotSharded(
         // for strategy-specific reasons (no uptrend, fee-floor BUY_BLOCKED,
         // ML below threshold, etc).
         snap->per_core[i].strategy_halt_reason   = state->cores[i].strategy_halt_reason;
-        // v5.6.3: copy gate diagnostic comparands. Captured by the
-        // controller's gate checks; converted FPN<F> → double here.
-        snap->per_core[i].diag_spacing_actual    = FPN_ToDouble(state->cores[i].diag_spacing_actual);
-        snap->per_core[i].diag_spacing_floor     = FPN_ToDouble(state->cores[i].diag_spacing_floor);
-        snap->per_core[i].diag_vwap_actual       = FPN_ToDouble(state->cores[i].diag_vwap_actual);
-        snap->per_core[i].diag_vwap_threshold    = FPN_ToDouble(state->cores[i].diag_vwap_threshold);
-        snap->per_core[i].diag_long_slope        = FPN_ToDouble(state->cores[i].diag_long_slope);
-        snap->per_core[i].diag_long_slope_min    = FPN_ToDouble(state->cores[i].diag_long_slope_min);
-        snap->per_core[i].diag_volume_delta      = FPN_ToDouble(state->cores[i].diag_volume_delta);
-        snap->per_core[i].diag_volume_delta_min  = FPN_ToDouble(state->cores[i].diag_volume_delta_min);
-        snap->per_core[i].diag_stddev_pct        = FPN_ToDouble(state->cores[i].diag_stddev_pct);
-        snap->per_core[i].diag_stddev_pct_min    = FPN_ToDouble(state->cores[i].diag_stddev_pct_min);
-        snap->per_core[i].diag_tp_pct_actual     = FPN_ToDouble(state->cores[i].diag_tp_pct_actual);
-        snap->per_core[i].diag_tp_pct_floor      = FPN_ToDouble(state->cores[i].diag_tp_pct_floor);
+        // v5.6.3 — gate diagnostic comparands → FPN_ToDouble.
+        // v5.15.5.B.2 — registry-generated read block per
+        // FOREACH_GATE_DIAG_PAIR (MemHeaders/DisplayMetaRegistry.hpp).
+        // Adding a 7th gate diag = one row in the registry; this block
+        // auto-flows + PerCoreSnap field decl + GUI render row similarly
+        // pick up the new field with their own registry walks.
+#define X(FAMILY, ACTUAL_FIELD, OTHER_FIELD, _DOC) \
+        snap->per_core[i].diag_##ACTUAL_FIELD = FPN_ToDouble(state->display_meta[i].diag_##ACTUAL_FIELD); \
+        snap->per_core[i].diag_##OTHER_FIELD  = FPN_ToDouble(state->display_meta[i].diag_##OTHER_FIELD);
+        FOREACH_GATE_DIAG_PAIR(X)
+#undef X
         snap->per_core[i].sl_cooldown_remaining  = state->cores[i].sl_cooldown_remaining;
         // v4.0.4: per-core P&L for Account panel breakdown
         snap->per_core[i].core_realized      = FPN_ToDouble(state->cores[i].core_realized);
@@ -599,7 +597,7 @@ static inline void TUI_CopySnapshotSharded(
             // v5.15.5.A.6 — buy-side per-horizon barrier observability snap.
             snap->per_core[i].ml_last_buy_dominant_horizon   = state->cores[i].last_buy_dominant_horizon;
             snap->per_core[i].ml_last_barrier_mode_used      = state->cores[i].last_barrier_mode_used;
-            snap->per_core[i].ml_barrier_shadow_event_count  = state->cores[i].barrier_shadow_event_count;
+            snap->per_core[i].ml_barrier_shadow_event_count  = state->display_meta[i].barrier_shadow_event_count;
             // Direct reads of scorer internals — these are double-only and safe
             // to compute on the snapshot path (snapshot is slow-path itself).
             // v5.14.1.F — variant-aware IC (default 0=Spearman). cfg in scope
@@ -619,13 +617,16 @@ static inline void TUI_CopySnapshotSharded(
             // v5.14.8.C — failure_flags bitmap (FOREACH_FAILURE_MODE BIT_FLAG entries).
             // Reset all failure bits, then set per slow-path state.
             snap->per_core[i].failure_flags = 0;
-            if (state->cores[i].model_load_failed) {
+            // v5.15.5.B.2 — model_load_failed + ML threshold/nan_* counters
+            // moved to display_meta (.B.3 will bit-pack model_load_failed back
+            // onto CoreContext as a core_state_flags bit).
+            if (state->display_meta[i].model_load_failed) {
                 FAILURE_SET(snap->per_core[i], ml_model_load_failed);
             }
-            snap->per_core[i].ml_last_threshold          = state->cores[i].last_ml_threshold;
-            snap->per_core[i].ml_last_effective_threshold= state->cores[i].last_ml_effective_threshold;
-            snap->per_core[i].ml_nan_feature_events      = state->cores[i].nan_feature_events_total;
-            snap->per_core[i].ml_nan_prediction_events   = state->cores[i].nan_prediction_events_total;
+            snap->per_core[i].ml_last_threshold          = state->display_meta[i].last_ml_threshold;
+            snap->per_core[i].ml_last_effective_threshold= state->display_meta[i].last_ml_effective_threshold;
+            snap->per_core[i].ml_nan_feature_events      = state->display_meta[i].nan_feature_events_total;
+            snap->per_core[i].ml_nan_prediction_events   = state->display_meta[i].nan_prediction_events_total;
             // v5.9.3a — scaler observability (Gap H). Aggregate across all
             // 4 model roles in the zoo: scaler considered "present" if ANY
             // role's handle has has_scaler=1; "load_failed" if ANY role has

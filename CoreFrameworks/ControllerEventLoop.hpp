@@ -59,6 +59,7 @@
 // definition) to avoid the include cycle: SL needs CoreContext +
 // EventLoopState, and ControllerEventLoop.hpp defines them at line ~404.
 #include "CoreLatencyStats.hpp"  // v4.7.42 — slow_path_latency on CoreContext
+#include "../MemHeaders/DisplayMetaRegistry.hpp"  // v5.15.5.B.2 — FOREACH_GATE_DIAG_PAIR + FOREACH_DISPLAY_META_FIELD
 #include "ExecutionCore.hpp"
 #include "Notify.hpp"
 #include "OrderManager.hpp"
@@ -179,6 +180,40 @@ inline void CoreSlowState_Init(CoreSlowState<F>* s) {
     s->us_at_last_rebuild = 0;
     s->price_at_last_rebuild = FPN_Zero<F>();
 }
+
+//======================================================================================================
+// [SLOW-PATH TELEMETRY CLUSTER — v5.15.5.B.2]
+//======================================================================================================
+// v5.0.3-era thread observability fields, wrapped in alignas(64) cluster for
+// cross-thread cache-line isolation. Single-writer is the slow-path thread
+// that owns this core (or producer in centralized mode); GUI publish reads
+// relaxed and copies into TUISnapshot::PerCoreSnap. Snapshot-publisher reads
+// happen on a different thread → without alignas isolation, the read pulls
+// the cache line + invalidates neighbor slow-path-written fields, causing
+// cycle stalls at ~30Hz × 16 cores = ~480 invalidations/sec.
+//
+// Fields:
+//   last_tick_us  — wall-clock us at end of last cycle (cadence-drift display)
+//   cycles_total  — monotonic count of completed slow-path cycles
+//   yield_count   — monotonic count of cadence yields + parks
+//   state         — coarse thread state: 0=running, 1=parked (reset_in_progress),
+//                   2=cadence-yield, 3=paused (user via paused_engines_mask)
+//
+// Pattern: cross-thread-snapshot-publish-cluster-isolation.md (ND1 first ref).
+// ~25 B used in 64 B cache line — generous padding kept intentional for
+// future flag additions + crosstalk prevention.
+//======================================================================================================
+struct alignas(64) SlowPathTelemetry {
+    std::atomic<uint64_t> last_tick_us{0};
+    std::atomic<uint64_t> cycles_total{0};
+    std::atomic<uint64_t> yield_count{0};
+    std::atomic<uint8_t>  state{0};
+};
+static_assert(alignof(SlowPathTelemetry) == 64,
+              "SlowPathTelemetry MUST be cache-line aligned for cross-thread "
+              "isolation. See cross-thread-snapshot-publish-cluster-isolation.md.");
+static_assert(sizeof(SlowPathTelemetry) == 64,
+              "SlowPathTelemetry MUST occupy exactly one cache line.");
 
 //======================================================================================================
 // [CORE CONTEXT]
@@ -482,89 +517,28 @@ struct alignas(64) CoreContext {
     static constexpr int SP_SECTION_OTHER       = SP_SECTION_ROLLING;
     static constexpr int SP_SECTION_PUSH_PARAMS = SP_SECTION_PUSH;
 
-    // v5.0.3 (Engine Topology advanced): live thread observability fields.
-    // Single-writer is the slow-path thread that owns this core (or the
-    // producer in centralized mode for cores it iterates). GUI publish
-    // reads relaxed and copies into TUISnapshot::PerCoreSnap.
-    //   sp_last_tick_us: wall-clock us at end of last cycle. Compare to
-    //                    "now" for cadence-drift display in topology panel.
-    //   sp_cycles_total: monotonic count of completed slow-path cycles.
-    //   sp_yield_count:  monotonic count of cadence yields + parks.
-    //   sp_state:        coarse thread state — 0=running, 1=parked
-    //                    (reset_in_progress), 2=cadence-yield, 3=paused
-    //                    (user via paused_engines_mask). Updated at the
-    //                    transition points; readers see eventual values.
-    // alignas(64) on sp_last_tick_us = cross-thread atomics cluster boundary
-    // (cross-thread-snapshot-publish-cluster-isolation.md); .B.2 wraps these
-    // in an explicit `SlowPathTelemetry` struct.
-    alignas(64) std::atomic<uint64_t> sp_last_tick_us;
-    std::atomic<uint64_t> sp_cycles_total;
-    std::atomic<uint64_t> sp_yield_count;
-    std::atomic<uint8_t>  sp_state;
+    // v5.0.3 (Engine Topology) live thread observability — wrapped in alignas(64)
+    // SlowPathTelemetry struct (defined above) per cross-thread-snapshot-publish-
+    // cluster-isolation.md. Single-writer = this core's slow-path thread (or
+    // producer in centralized mode); reader = snapshot publisher (different
+    // thread; relaxed atomics). alignas(64) on the struct itself isolates it
+    // to its own cache line so publisher reads can't invalidate slow-path-
+    // written neighbor fields. Field accessors:
+    //   sp_telemetry.last_tick_us / cycles_total / yield_count / state
+    SlowPathTelemetry sp_telemetry;
 
-    // v4.7.42 (Phase E): per-core slow-path latency profiling. Mirrors
-    // ExecutionCore::latency_stats (hot-path) for the slow-path. Sampled
-    // around the per-core slow-path body in engine_arch=per_core_slow.
-    // In centralized mode, total_count stays 0 (no samples collected —
-    // single producer slow-path doesn't break per-core, by design).
-    // (.B.2 → CoreContextDisplayMeta extraction)
-    CoreLatencyStats slow_path_latency;
-    CoreLatencyStats slow_path_breakdown[SP_SECTION_COUNT];
-
-    // v5.6.3 — gate diagnostic comparands. Captured by the controller's
-    // post-Strategy_BuildParameters gate checks (spacing, vwap, long-slope,
-    // vol-delta, min-stddev) so the GUI can show actual vs threshold per
-    // gate without recomputing (single-source rule —
-    // EXECUTION_DISPLAY_INVARIANTS.md). Snapshot copies into PerCoreSnap
-    // diag_* fields. Reset by the rebuild loop before each pass.
-    // (.B.4 — FOREACH_GATE_DIAG registry-driven layout; .B.2 — moves to
-    // CoreContextDisplayMeta sibling struct.)
-    FPN<F> diag_spacing_actual;         // |bg_threshold - last_entry|
-    FPN<F> diag_spacing_floor;          // stddev * spacing_multiplier
-    FPN<F> diag_vwap_actual;            // bg_price_threshold
-    FPN<F> diag_vwap_threshold;         // vwap - vwap*vwap_offset
-    FPN<F> diag_long_slope;             // long_rel_slope
-    FPN<F> diag_long_slope_min;         // cfg.min_long_slope
-    FPN<F> diag_volume_delta;           // rolling.volume_delta
-    FPN<F> diag_volume_delta_min;       // cfg.min_buy_delta
-    FPN<F> diag_stddev_pct;             // rolling.price_stddev / rolling.price_avg
-    FPN<F> diag_stddev_pct_min;         // cfg.min_stddev_pct
-    FPN<F> diag_tp_pct_actual;          // out.tp_pct
-    FPN<F> diag_tp_pct_floor;           // 3 * fee_rate_taker
-
-    // v5.6.6: previous packed gate-state byte. Used by the gate-state
-    // edge-trigger health log emit to detect transitions. Layout:
-    //   bits 0..3 : halt_reason          (0..10 fits in 4 bits)
-    //   bits 4..7 : strategy_halt_reason (0..10)
-    //   bit  8     : (BUY_BLOCKED >> 5) & 1
-    //   bit  9     : permission
-    // Stored as uint16_t. Fresh state computed at end of RebuildOneCore;
-    // emit cat="gate" log only when packed_now != prev_gate_log_state.
-    uint16_t prev_gate_log_state;
-    uint32_t barrier_shadow_event_count; // total shadow ring writes (modes 3/4)
-    uint64_t last_ml_critical_log_us;    // rate-limit gate for ML→SimpleDip CRITICAL log (per-core)
-    double   last_ml_threshold;          // ml_buy_threshold at last decision (display + entry log)
-    double   last_ml_effective_threshold; // post-confidence-damping threshold actually used
-    uint32_t nan_feature_events_total;   // count of Features_PackAll -1 sentinel returns on this core
-    uint32_t nan_prediction_events_total; // count of Model_Predict NaN/Inf events on this core
-
-    // v5.9.0b — ML observability extensions (V5_9_AUDIT-#2, #3).
-    // Surface model load failures + cfg-drift state to the operator via
-    // TUISnapshot + ML Status panel + entry log.
-    int      model_load_failed;         // 1 = model attempted but refused/missing (.B.3 → bitmap bit)
-    // v5.9.5i — cfg drift counters (populated in EngineSharded boot;
-    // TUI_CopySnapshotSharded mirrors to PerCoreSnap; ML Status panel
-    // renders summary).
-    uint8_t  cfg_drift_tier1_count;
-    uint8_t  cfg_drift_tier2_count;
-    uint8_t  cfg_drift_strict_refused;  // (.B.3 → bitmap bit)
-    // v5.9.1 — edge-trigger for boot-time per-core warmup-complete log.
-    // RebuildOneCore checks (rolling_short.count >= min_warmup_samples)
-    // every cycle; fires the log exactly once per core (and per session)
-    // by setting this flag. Distinct from the global startup gate at
-    // EngineSharded.hpp:1420 (which uses core 0's count to release ALL
-    // cores from CONTROLLER_WARMUP). Per-core readiness lives here.
-    uint8_t  warmup_log_emitted;        // (.B.3 → bitmap bit)
+    // v5.15.5.B.2 — DisplayMeta fields (12 diag_*, observability counters,
+    // cfg-drift state, model_load_failed/warmup_log_emitted booleans,
+    // slow_path_latency + breakdown[]) EXTRACTED to CoreContextDisplayMeta<F>
+    // sibling struct on EventLoopState. Per-cycle slow-path body no longer
+    // pulls those ~9-10 KB of display-only data into HOT cluster L1 working
+    // set. Access via state->display_meta[core_id].<field>; registry-driven
+    // additions per MemHeaders/DisplayMetaRegistry.hpp.
+    //
+    // Booleans flagged "(.B.3 → core_state_flags bit)" in the registry will
+    // migrate BACK to CoreContext as bitmap bits in v5.15.5.B.3 (uint8_t
+    // core_state_flags); this temporary residence in DisplayMeta is the
+    // .B.2 staging step. Per CLAUDE.md item 19 + Caramel 2026-05-13.
 };
 
 // v5.15.5.B.1 — CoreContext layout invariants. Lock the brittleness class:
@@ -588,14 +562,147 @@ static_assert(alignof(CoreContext<64>) >= 64,
 static_assert(offsetof(CoreContext<64>, entries_processed) % 64 == 0,
               "WARM cluster anchor MUST be 64-byte aligned. "
               "See decision-first-cluster-layout-pattern.md Step 5.");
-// COLD cluster atomics boundary — sp_last_tick_us starts the cross-thread
-// atomics block (snapshot publisher reads this from a different thread).
-// alignas(64) prevents publisher reads from invalidating cache lines holding
-// slow-path-written neighbor fields. .B.2 will wrap these atomics in an
-// explicit SlowPathTelemetry struct.
-static_assert(offsetof(CoreContext<64>, sp_last_tick_us) % 64 == 0,
-              "Cross-thread sp_* atomics cluster MUST be alignas(64) isolated. "
-              "See cross-thread-snapshot-publish-cluster-isolation.md.");
+// COLD cluster atomics boundary — sp_telemetry (SlowPathTelemetry struct)
+// starts the cross-thread atomics block. The struct itself is alignas(64)
+// so its placement is naturally aligned, but locking offsetof%64==0 protects
+// against future field-insertion before sp_telemetry that might violate the
+// alignment assumption (alignas only enforces that the struct ITSELF is
+// 64-aligned; static_assert(offsetof%64==0) ensures cluster anchor remains
+// at a cache line boundary within the enclosing struct).
+static_assert(offsetof(CoreContext<64>, sp_telemetry) % 64 == 0,
+              "Cross-thread atomics cluster (sp_telemetry) MUST start at a "
+              "cache line boundary. See "
+              "cross-thread-snapshot-publish-cluster-isolation.md.");
+
+//======================================================================================================
+// [WS HEARTBEAT TELEMETRY CLUSTER — v5.15.5.B.2]
+//======================================================================================================
+// v5.12.1.A + v5.12.1.C WS heartbeat fields, wrapped in alignas(64) cluster
+// for cross-thread cache-line isolation on EventLoopState. Single-writer is
+// the producer thread (live) or backtest driver (offline). Readers: per-core
+// slow paths (WS-staleness gate at slow-path entry) + snapshot publisher
+// (GUI heartbeat display). alignas(64) prevents publisher reads from
+// invalidating cache lines holding producer-written neighbor fields.
+//
+// Pattern: cross-thread-snapshot-publish-cluster-isolation.md (ND1 — sister
+// application to SlowPathTelemetry on CoreContext). ~76 B used in 128 B
+// (two cache lines); padding intentional for future heartbeat additions.
+//
+// Fields:
+//   last_tick_us       — wall-clock us of last WS tick received
+//   ticks_per_5s       — rolling tick count over last 5 seconds
+//   bucket_last_sec[5] — second-tag of each rotating bucket (stale detection)
+//   bucket_count[5]    — tick count in each bucket
+//======================================================================================================
+struct alignas(64) WsHeartbeatTelemetry {
+    std::atomic<uint64_t> last_tick_us{0};
+    std::atomic<uint64_t> ticks_per_5s{0};
+    uint64_t              bucket_last_sec[5]{0, 0, 0, 0, 0};  // producer-only writer; not atomic
+    uint32_t              bucket_count[5]{0, 0, 0, 0, 0};     // producer-only writer; not atomic
+};
+static_assert(alignof(WsHeartbeatTelemetry) == 64,
+              "WsHeartbeatTelemetry MUST be cache-line aligned for cross-thread "
+              "isolation. See cross-thread-snapshot-publish-cluster-isolation.md.");
+
+//======================================================================================================
+// [CORE CONTEXT DISPLAY META — v5.15.5.B.2]
+//======================================================================================================
+// Per-core display-only state, extracted from CoreContext per
+// cache-layout-discipline-for-hot-side-structs.md Rule 1 (extract
+// display-only fields off the HOT cluster of slow-path-cycled structs).
+//
+// These fields are WRITTEN by slow-path-body (gate-diag capture +
+// observability counter increments + cfg-drift counters at boot) but
+// READ ONLY by ShardedSnapshot publisher (ShardedSnapshot.hpp + entry
+// log emission). They DO NOT influence per-cycle decision code.
+//
+// Parallel-array layout: EventLoopState has display_meta[MAX_EXECUTION_CORES]
+// paired by index with cores[] — meta for core i lives at display_meta[i].
+// Separate storage = slow-path cycle's HOT cluster access doesn't pull
+// display-meta cache lines into L1 unnecessarily; ~9-10 KB of cold data
+// stays out of the HOT/WARM working set.
+//
+// Single-writer per core (slow-path thread for this core); single-reader
+// per snapshot (publisher thread at ~30 Hz). Cross-thread accesses do
+// not happen on per-cycle cadence so no alignas isolation is needed
+// within DisplayMeta (homogeneous low-cadence access). The aggregate
+// `EventLoopState::display_meta[MAX_EXECUTION_CORES]` array IS sized to
+// be a multiple of 64 bytes via static_assert below.
+//
+// FIELDS ARE REGISTRY-GENERATED. See
+// `MemHeaders/DisplayMetaRegistry.hpp` for the two FOREACH registries
+// that drive every aspect of this struct:
+//   FOREACH_GATE_DIAG_PAIR(X)   — 12 FPN<F> gate-diag fields (paired)
+//   FOREACH_DISPLAY_META_FIELD(X) — 12 heterogeneous counters + flags
+// To add a new field: append ONE row to the appropriate registry; the
+// struct decl, init helper, snapshot publisher reads, etc. auto-flow.
+// See DESIGN_SPECS/display-execution-invariant-registry-pattern.md (ND2).
+//
+// `slow_path_latency` + `slow_path_breakdown[]` are KEPT as direct
+// fields because CoreLatencyStats has its own Init/Enable/Sample
+// helpers + alignas(64) discipline; shoehorning them into a uniform
+// registry shape would lose the type safety.
+//======================================================================================================
+template <unsigned F>
+struct CoreContextDisplayMeta {
+    // ------------------------------------------------------------------
+    // Gate-diagnostic actual/threshold pairs — auto-generated.
+    // Adding a 7th pair = one row in FOREACH_GATE_DIAG_PAIR.
+    // ------------------------------------------------------------------
+#define X(FAMILY, ACTUAL_FIELD, OTHER_FIELD, _DOC) \
+    FPN<F> diag_##ACTUAL_FIELD; \
+    FPN<F> diag_##OTHER_FIELD;
+    FOREACH_GATE_DIAG_PAIR(X)
+#undef X
+
+    // ------------------------------------------------------------------
+    // Heterogeneous observability counters + edge-trigger state +
+    // cfg-drift counters + boot booleans. Auto-generated; default-init
+    // value per registry tuple.
+    // ------------------------------------------------------------------
+#define X(TYPE, NAME, INIT, _DOC) TYPE NAME = INIT;
+    FOREACH_DISPLAY_META_FIELD(X)
+#undef X
+
+    // ------------------------------------------------------------------
+    // v4.7.42 Phase E — per-core slow-path latency profiling. Mirrors
+    // ExecutionCore::latency_stats (hot-path) for the slow-path.
+    // Single-writer (this core's slow-path thread); single-reader
+    // (snapshot publisher). Each CoreLatencyStats is alignas(64) so
+    // arrays of them are 64-aligned by ABI.
+    // ------------------------------------------------------------------
+    CoreLatencyStats slow_path_latency;
+
+    // v5.1.1 + v5.1.3 — per-section breakdown. Sections defined by
+    // CoreContext<F>::SP_SECTION_* constants. (.B.5 — FOREACH_SP_SECTION
+    // close removes the back-compat alias indirection.)
+    CoreLatencyStats slow_path_breakdown[CoreContext<F>::SP_SECTION_COUNT];
+};
+
+// Init helper — zero-init all registry fields + Init the latency stats.
+// Called once per core in EventLoopState_Init. Future field additions
+// flow through the registry expansion automatically — no manual init
+// per new field needed.
+template <unsigned F>
+inline void CoreContextDisplayMeta_Init(CoreContextDisplayMeta<F>* m) {
+    // Gate-diagnostic FPN<F> pairs zeroed.
+#define X(FAMILY, ACTUAL_FIELD, OTHER_FIELD, _DOC) \
+    m->diag_##ACTUAL_FIELD = FPN_Zero<F>(); \
+    m->diag_##OTHER_FIELD  = FPN_Zero<F>();
+    FOREACH_GATE_DIAG_PAIR(X)
+#undef X
+    // Heterogeneous fields — reset to registry-defined init value.
+    // (Default member-init covers boot-time; explicit reset here for
+    // re-init paths + clarity.)
+#define X(TYPE, NAME, INIT, _DOC) m->NAME = (TYPE)(INIT);
+    FOREACH_DISPLAY_META_FIELD(X)
+#undef X
+    // Latency profiling — init zeros + disabled until engine explicitly enables.
+    CoreLatencyStats_Init(&m->slow_path_latency);
+    for (int s = 0; s < CoreContext<F>::SP_SECTION_COUNT; ++s) {
+        CoreLatencyStats_Init(&m->slow_path_breakdown[s]);
+    }
+}
 
 //======================================================================================================
 // [EVENT LOOP STATE]
@@ -616,6 +723,11 @@ static_assert(offsetof(CoreContext<64>, sp_last_tick_us) % 64 == 0,
 template <unsigned F>
 struct alignas(64) EventLoopState {
     CoreContext<F> cores[MAX_EXECUTION_CORES];
+    // v5.15.5.B.2 — Per-core display-only state (extracted from CoreContext per
+    // cache-layout-discipline-for-hot-side-structs.md Rule 1). Parallel array;
+    // display_meta[i] is paired by index with cores[i]. Fields are registry-
+    // generated; see MemHeaders/DisplayMetaRegistry.hpp.
+    CoreContextDisplayMeta<F> display_meta[MAX_EXECUTION_CORES];
     int registered_count;
     uint64_t total_events_processed;
     uint64_t total_entries;
@@ -634,28 +746,28 @@ struct alignas(64) EventLoopState {
     // the OMS pointer as its second argument and stores it here. callers that
     // pass nullptr will get crashes in any accessor or OnEvent call.
     OrderManagerState<F>* oms;
-    // v5.12.1.A — wall-clock us of last WS tick received. Single-writer
-    // (the producer thread in live, or the backtest driver in offline);
-    // multiple-reader (per-core slow paths for the v5.12.1.A WS-staleness
-    // emergency-flatten gate, and the GUI/TUI heartbeat indicator added in
-    // v5.12.1.C). Initialized to 0 in EventLoopState_Init; rises
-    // monotonically once ticks start flowing. The slow-path check is
-    //   gap_us = now_us - last_ws_tick_us;
-    //   if (gap_us >= cfg.ws_dead_time_flatten_threshold_secs * 1e6 &&
-    //       BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED)) → OMS_FlattenAll(...)
-    // Pre-warmup (last_ws_tick_us == 0) is treated as "no flatten" so the
-    // engine doesn't fire a phantom flatten before the first tick arrives.
-    std::atomic<uint64_t> last_ws_tick_us;
-    // v5.12.1.C — WS heartbeat throughput tracking. Producer fan_out
-    // increments the bucket for the current second; the slow-path / GUI
-    // sums all buckets within the last 5 seconds. ws_bucket_last_sec[i]
-    // holds the wall-clock second when bucket i was last touched (so
-    // stale buckets don't contribute). Single-writer (producer), single-
-    // reader (snapshot publisher). Relaxed atomic on ws_ticks_per_5s
-    // because monotonic + sub-tick accuracy doesn't matter for display.
-    std::atomic<uint64_t> ws_ticks_per_5s;
-    uint64_t ws_bucket_last_sec[5];   // producer-only writer; not atomic
-    uint32_t ws_bucket_count[5];      // producer-only writer; not atomic
+    // v5.12.1.A + v5.12.1.C — WS heartbeat telemetry. Wrapped in alignas(64)
+    // WsHeartbeatTelemetry cluster (defined below) per
+    // cross-thread-snapshot-publish-cluster-isolation.md (.B.2 v5.15.5).
+    //
+    // last_tick_us  — wall-clock us of last WS tick received. Single-writer
+    //                 (producer thread in live, backtest driver in offline);
+    //                 multiple-reader (per-core slow paths for the v5.12.1.A
+    //                 WS-staleness emergency-flatten gate; GUI/TUI heartbeat
+    //                 indicator). Initialized to 0; rises monotonically.
+    //                 The slow-path check:
+    //                   gap_us = now_us - last_tick_us;
+    //                   if (gap_us >= cfg.ws_dead_time_flatten_threshold_secs * 1e6 &&
+    //                       BITMAP_IS_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED))
+    //                       → OMS_FlattenAll(...)
+    //                 Pre-warmup (last_tick_us == 0) is treated as "no flatten".
+    // ticks_per_5s  — rolling tick count over last 5 seconds; producer fan_out
+    //                 increments bucket_count for the current second; slow-path
+    //                 / GUI sums all buckets within the last 5 seconds.
+    // bucket_last_sec — second-tag of each bucket (so stale buckets don't
+    //                 contribute). Single-writer (producer); single-reader.
+    // bucket_count  — counts per bucket; producer-only writer.
+    WsHeartbeatTelemetry ws_telemetry;
     // v5.14.9.B.0 — engine-wide slow-path gate cache (FOREACH_SLOW_PATH_GATE
     // ENGINE_WIDE entries: lazy_rebuild + ws_flatten today). Populated by
     // SLOW_PATH_GATE_AUTOPOPULATE_ENGINE_WIDE once per slow-path entry with
@@ -693,12 +805,13 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
     state->partner_pending_bitmap = 0;
     // v5.12.1.A — pre-warmup sentinel; first tick from producer/backtest
     // sets it to a monotonic wall-clock us value.
-    state->last_ws_tick_us.store(0, std::memory_order_relaxed);
+    // v5.15.5.B.2 — wrapped in WsHeartbeatTelemetry alignas(64) cluster.
+    state->ws_telemetry.last_tick_us.store(0, std::memory_order_relaxed);
     // v5.12.1.C — heartbeat throughput tracking init.
-    state->ws_ticks_per_5s.store(0, std::memory_order_relaxed);
+    state->ws_telemetry.ticks_per_5s.store(0, std::memory_order_relaxed);
     for (int i = 0; i < 5; ++i) {
-        state->ws_bucket_last_sec[i] = 0;
-        state->ws_bucket_count[i] = 0;
+        state->ws_telemetry.bucket_last_sec[i] = 0;
+        state->ws_telemetry.bucket_count[i] = 0;
     }
     for (int i = 0; i < MAX_EXECUTION_CORES; i++) {
         state->cores[i].core = nullptr;
@@ -742,9 +855,9 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].sl_cooldown_remaining = 0;
         state->cores[i].halt_reason = HALT_OK;
         state->cores[i].strategy_halt_reason = SHALT_OK;
-        // v5.6.6: sentinel = 0xFFFF so the first rebuild ALWAYS emits a
-        // baseline gate log entry. Subsequent emits are edge-triggered.
-        state->cores[i].prev_gate_log_state = 0xFFFF;
+        // v5.15.5.B.2 — prev_gate_log_state moved to display_meta;
+        // initialized below via CoreContextDisplayMeta_Init (sentinel 0xFFFF
+        // encoded in FOREACH_DISPLAY_META_FIELD registry default).
         // v5.14.5.B.0.A — regime state initialized for ALL cores (not just
         // AUTO; universalization closes the architectural limitation that
         // prevented ML strategies from reading hysteresed current_regime).
@@ -771,19 +884,15 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         // v4.7.25: gross win/loss accumulators
         state->cores[i].core_gross_wins   = FPN_Zero<F>();
         state->cores[i].core_gross_losses = FPN_Zero<F>();
-        // v4.7.42 (Phase E): per-core slow-path latency stats — mirrors
-        // ExecutionCore::latency_stats. Init zeros + disabled until engine
-        // explicitly enables (CoreLatencyStats_Enable).
-        CoreLatencyStats_Init(&state->cores[i].slow_path_latency);
-        // v5.1.1: per-section breakdown stats.
-        for (int s = 0; s < CoreContext<F>::SP_SECTION_COUNT; ++s) {
-            CoreLatencyStats_Init(&state->cores[i].slow_path_breakdown[s]);
-        }
+        // v5.15.5.B.2 — slow_path_latency + slow_path_breakdown[] moved to
+        // display_meta; init via CoreContextDisplayMeta_Init below (covers
+        // all registry-driven fields + the latency stats).
         // v5.0.3 (Engine Topology advanced): observability fields.
-        state->cores[i].sp_last_tick_us.store(0, std::memory_order_relaxed);
-        state->cores[i].sp_cycles_total.store(0, std::memory_order_relaxed);
-        state->cores[i].sp_yield_count.store(0, std::memory_order_relaxed);
-        state->cores[i].sp_state.store(0, std::memory_order_relaxed);
+        // v5.15.5.B.2 — wrapped in SlowPathTelemetry alignas(64) cluster.
+        state->cores[i].sp_telemetry.last_tick_us.store(0, std::memory_order_relaxed);
+        state->cores[i].sp_telemetry.cycles_total.store(0, std::memory_order_relaxed);
+        state->cores[i].sp_telemetry.yield_count.store(0, std::memory_order_relaxed);
+        state->cores[i].sp_telemetry.state.store(0, std::memory_order_relaxed);
         // v5.1.0 (per-core data plane): per-engine slow_state allocation.
         // ~3MB per engine × 16 cores would overflow default stack if inline.
         //
@@ -821,21 +930,11 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].core_ks_trips_total   = 0;
         // v4.2.1: idle-cycle counter for death-spiral detection
         state->cores[i].idle_cycles = 0;
-        // v5.9.0b — ML observability fields. Without explicit init, the
-        // hard-block / nan-counter / rate-limit-log paths read garbage on
-        // fresh-state runs. Caught by v5.9.1 parity audit (V5_9_AUDIT-#9
-        // follow-up). Same pattern as the staged_prediction / last_confidence
-        // init above — every CoreContext field declared in v5.9 needs to
-        // land here.
-        state->cores[i].model_load_failed              = 0;
-        state->cores[i].cfg_drift_tier1_count          = 0;
-        state->cores[i].cfg_drift_tier2_count          = 0;
-        state->cores[i].cfg_drift_strict_refused       = 0;
-        state->cores[i].last_ml_critical_log_us        = 0;
-        state->cores[i].last_ml_threshold              = 0.0;
-        state->cores[i].last_ml_effective_threshold    = 0.0;
-        state->cores[i].nan_feature_events_total       = 0;
-        state->cores[i].nan_prediction_events_total    = 0;
+        // v5.15.5.B.2 — ML observability fields (model_load_failed,
+        // cfg_drift_*, last_ml_*, nan_*_events_total, barrier_shadow_event_count,
+        // warmup_log_emitted) all moved to display_meta; init via
+        // CoreContextDisplayMeta_Init below (registry-driven defaults from
+        // FOREACH_DISPLAY_META_FIELD entries).
         // v5.13.0.B — sell-side ML prediction state. Reset to 0 each cycle
         // by RebuildOneCore via mctx wiring; init here for first-cycle
         // safety (slow-path post-rebuild check reads this before any
@@ -843,13 +942,16 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].last_exit_prediction           = 0.0;
         state->cores[i].last_exit_dominant_horizon     = -1;
         // v5.15.5.A.6 — buy-side per-horizon barrier observability init
+        // (these fields stay on CoreContext HOT cluster — read by ML
+        // decision code per cycle, NOT extracted to display_meta).
         state->cores[i].last_buy_dominant_horizon      = -1;
         state->cores[i].last_barrier_mode_used         = 0;  // MODE_BARRIER_BLEND_LEGACY
-        state->cores[i].barrier_shadow_event_count     = 0;
-        // v5.9.1 — edge-trigger flag for boot-time per-core warmup-complete
-        // log. Set to 1 once per session per core after the first slow-path
-        // rebuild that observes rolling.count >= min_warmup_samples.
-        state->cores[i].warmup_log_emitted             = 0;
+        // v5.15.5.B.2 — Initialize this core's display_meta sibling.
+        // Registry-driven; covers all 12 gate-diag pairs + 12 heterogeneous
+        // fields (counters, edge-triggers, cfg-drift, boot booleans) +
+        // slow_path_latency + slow_path_breakdown[SP_SECTION_COUNT].
+        // Future field additions auto-init via FOREACH expansion.
+        CoreContextDisplayMeta_Init(&state->display_meta[i]);
     }
 }
 
@@ -1360,15 +1462,17 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 FPN_ToDouble(pos.quantity),
                 FPN_ToDouble(rec.entry_notional),
                 FPN_ToDouble(rec.entry_fee),
-                FPN_ToDouble(ctx.diag_tp_pct_actual),
-                FPN_ToDouble(ctx.diag_tp_pct_floor),
-                FPN_ToDouble(ctx.diag_stddev_pct),
-                FPN_ToDouble(ctx.diag_long_slope),
-                FPN_ToDouble(ctx.diag_volume_delta),
+                // v5.15.5.B.2 — diag_* + last_ml_* fields extracted to
+                // display_meta. Use the per-core meta alias for readability.
+                FPN_ToDouble(state->display_meta[core_id].diag_tp_pct_actual),
+                FPN_ToDouble(state->display_meta[core_id].diag_tp_pct_floor),
+                FPN_ToDouble(state->display_meta[core_id].diag_stddev_pct),
+                FPN_ToDouble(state->display_meta[core_id].diag_long_slope),
+                FPN_ToDouble(state->display_meta[core_id].diag_volume_delta),
                 // v5.9.0b — ML decision context. Zero for non-ML cores.
                 is_ml ? ctx.active_prediction : 0.0,
-                is_ml ? ctx.last_ml_threshold : 0.0,
-                is_ml ? ctx.last_ml_effective_threshold : 0.0,
+                is_ml ? state->display_meta[core_id].last_ml_threshold : 0.0,
+                is_ml ? state->display_meta[core_id].last_ml_effective_threshold : 0.0,
                 is_ml ? ctx.last_confidence : 0.0,
                 (unsigned long)FEATURE_REGISTRY_HASH());
         }
@@ -2215,7 +2319,7 @@ inline void EventLoop_RebuildOneCore(
         // global startup gate that releases all cores from CONTROLLER_WARMUP
         // simultaneously — operator wants per-core readiness because in
         // per_core_slow arch each core's slow path runs at its own cadence.
-        if (!state->cores[slot].warmup_log_emitted) {
+        if (!state->display_meta[slot].warmup_log_emitted) {
             int wmin = (int)config->min_warmup_samples;
             if (wmin <= 0) wmin = 64;  // engine default (matches ShardedSnapshot fallback)
             if (rolling->count >= wmin) {
@@ -2228,7 +2332,7 @@ inline void EventLoop_RebuildOneCore(
                                   ? STRATEGY_SHORT_NAMES[sid] : "unknown";
                 fprintf(stderr, "[core %d] warmup complete (%d/%d samples) — %s active\n",
                         slot, rolling->count, wmin, sname);
-                state->cores[slot].warmup_log_emitted = 1;
+                state->display_meta[slot].warmup_log_emitted = 1;
             }
         }
         if (config->idle_reset_cycles > 0 &&
@@ -2449,12 +2553,12 @@ inline void EventLoop_RebuildOneCore(
             // Caller-owned per-core storage; ML_BuildParameters reads/writes
             // through these pointers + the entry log emitter reads them at
             // fill time.
-            ml_ctx.model_load_failed           = &state->cores[slot].model_load_failed;
-            ml_ctx.last_ml_critical_log_us     = &state->cores[slot].last_ml_critical_log_us;
-            ml_ctx.out_threshold               = &state->cores[slot].last_ml_threshold;
-            ml_ctx.out_effective_threshold     = &state->cores[slot].last_ml_effective_threshold;
-            ml_ctx.nan_feature_events_total    = &state->cores[slot].nan_feature_events_total;
-            ml_ctx.nan_prediction_events_total = &state->cores[slot].nan_prediction_events_total;
+            ml_ctx.model_load_failed           = &state->display_meta[slot].model_load_failed;
+            ml_ctx.last_ml_critical_log_us     = &state->display_meta[slot].last_ml_critical_log_us;
+            ml_ctx.out_threshold               = &state->display_meta[slot].last_ml_threshold;
+            ml_ctx.out_effective_threshold     = &state->display_meta[slot].last_ml_effective_threshold;
+            ml_ctx.nan_feature_events_total    = &state->display_meta[slot].nan_feature_events_total;
+            ml_ctx.nan_prediction_events_total = &state->display_meta[slot].nan_prediction_events_total;
             // v5.9.1 — wire SHALT pointer through MLBuildContext so the
             // confidence hard-block path can attribute SHALT_LOW_CONFIDENCE.
             // Same address the dispatcher passes via its strategy_halt_reason
@@ -2499,7 +2603,7 @@ inline void EventLoop_RebuildOneCore(
             state->cores[slot].last_barrier_mode_used    = 0;  // LEGACY default
             ml_ctx.out_buy_dominant_horizon   = &state->cores[slot].last_buy_dominant_horizon;
             ml_ctx.out_barrier_mode_used      = &state->cores[slot].last_barrier_mode_used;
-            ml_ctx.barrier_shadow_event_count = &state->cores[slot].barrier_shadow_event_count;
+            ml_ctx.barrier_shadow_event_count = &state->display_meta[slot].barrier_shadow_event_count;
             dispatch_ctx = &ml_ctx;
         }
         // v4.0.4: stash the resolved strategy for GUI display. For non-AUTO
@@ -2819,8 +2923,8 @@ inline void EventLoop_RebuildOneCore(
                 ? FPN_Sub(a, b) : FPN_Sub(b, a);
             FPN<F> min_dist = FPN_Mul(rolling->price_stddev,
                                        spacing_cfg.spacing_multiplier);
-            state->cores[slot].diag_spacing_actual = abs_dist;
-            state->cores[slot].diag_spacing_floor  = min_dist;
+            state->display_meta[slot].diag_spacing_actual = abs_dist;
+            state->display_meta[slot].diag_spacing_floor  = min_dist;
         }
         if (!Strategy_SpacingOk(state->cores[slot].pending_params.bg_price_threshold,
                                  state->cores[slot].last_entry_price,
@@ -2832,9 +2936,9 @@ inline void EventLoop_RebuildOneCore(
             FPN<F> vwap_threshold = FPN_Sub(rolling->vwap,
                 FPN_Mul(rolling->vwap, resolved_cfg.vwap_offset));
             // v5.6.3: capture both sides for GUI.
-            state->cores[slot].diag_vwap_actual    =
+            state->display_meta[slot].diag_vwap_actual    =
                 state->cores[slot].pending_params.bg_price_threshold;
-            state->cores[slot].diag_vwap_threshold = vwap_threshold;
+            state->display_meta[slot].diag_vwap_threshold = vwap_threshold;
             if (FPN_GreaterThan(state->cores[slot].pending_params.bg_price_threshold,
                                  vwap_threshold)) {
                 zero_gate(HALT_VWAP);
@@ -2846,8 +2950,8 @@ inline void EventLoop_RebuildOneCore(
             FPN<F> long_rel_slope = FPN_DivNoAssert(rolling_long->price_slope,
                                                      rolling_long->price_avg);
             // v5.6.3: capture for GUI.
-            state->cores[slot].diag_long_slope     = long_rel_slope;
-            state->cores[slot].diag_long_slope_min = resolved_cfg.min_long_slope;
+            state->display_meta[slot].diag_long_slope     = long_rel_slope;
+            state->display_meta[slot].diag_long_slope_min = resolved_cfg.min_long_slope;
             if (FPN_LessThan(long_rel_slope, resolved_cfg.min_long_slope)) {
                 zero_gate(HALT_LONG_SLOPE);
             }
@@ -2857,8 +2961,8 @@ inline void EventLoop_RebuildOneCore(
             // v5.6.3: capture both sides regardless of pass/fail so the
             // GUI shows current state (display invariant: always show
             // when cfg enabled).
-            state->cores[slot].diag_volume_delta     = rolling->volume_delta;
-            state->cores[slot].diag_volume_delta_min = resolved_cfg.min_buy_delta;
+            state->display_meta[slot].diag_volume_delta     = rolling->volume_delta;
+            state->display_meta[slot].diag_volume_delta_min = resolved_cfg.min_buy_delta;
             if (FPN_LessThan(rolling->volume_delta, resolved_cfg.min_buy_delta)) {
                 zero_gate(HALT_VOL_DELTA);
             }
@@ -2868,8 +2972,8 @@ inline void EventLoop_RebuildOneCore(
             FPN<F> stddev_ratio = FPN_DivNoAssert(rolling->price_stddev,
                                                     rolling->price_avg);
             // v5.6.3: capture for GUI.
-            state->cores[slot].diag_stddev_pct     = stddev_ratio;
-            state->cores[slot].diag_stddev_pct_min = resolved_cfg.min_stddev_pct;
+            state->display_meta[slot].diag_stddev_pct     = stddev_ratio;
+            state->display_meta[slot].diag_stddev_pct_min = resolved_cfg.min_stddev_pct;
             if (FPN_LessThan(stddev_ratio, resolved_cfg.min_stddev_pct)) {
                 zero_gate(HALT_MIN_STDDEV);
             }
@@ -2882,9 +2986,9 @@ inline void EventLoop_RebuildOneCore(
         {
             FPN<F> fee_taker = !FPN_IsZero(resolved_cfg.fee_rate_taker)
                 ? resolved_cfg.fee_rate_taker : resolved_cfg.fee_rate;
-            state->cores[slot].diag_tp_pct_actual =
+            state->display_meta[slot].diag_tp_pct_actual =
                 state->cores[slot].pending_params.tp_pct;
-            state->cores[slot].diag_tp_pct_floor =
+            state->display_meta[slot].diag_tp_pct_floor =
                 FPN_Mul(fee_taker, FPN_FromDouble<F>(3.0));
         }
         // FEE FLOOR: ratchet TP up so it clears at least
@@ -2937,7 +3041,7 @@ inline void EventLoop_RebuildOneCore(
                 : 0;
             uint16_t packed = (uint16_t)(hr | (shr << 4)
                                           | (bb   << 8) | (perm << 9));
-            if (packed != state->cores[slot].prev_gate_log_state) {
+            if (packed != state->display_meta[slot].prev_gate_log_state) {
                 tt::Health_Log(tt::HEALTH_INFO, "gate", slot,
                     "halt=%u shalt=%u blocked=%u perm=%u "
                     "gate=%g price=%g",
@@ -2945,7 +3049,7 @@ inline void EventLoop_RebuildOneCore(
                     (unsigned)bb, (unsigned)perm,
                     FPN_ToDouble(state->cores[slot].pending_params.bg_price_threshold),
                     FPN_ToDouble(rolling->price_avg));
-                state->cores[slot].prev_gate_log_state = packed;
+                state->display_meta[slot].prev_gate_log_state = packed;
             }
         }
 
@@ -3323,7 +3427,7 @@ inline int EventLoop_CheckWsStaleness(EventLoopState<F>* state,
     if (!_ws_gate) return 0;
 
     // Pre-warmup sentinel: producer hasn't published any tick yet.
-    uint64_t last = state->last_ws_tick_us.load(std::memory_order_acquire);
+    uint64_t last = state->ws_telemetry.last_tick_us.load(std::memory_order_acquire);
     if (last == 0) return 0;
 
     // Defensive: clock skew or NTP reset could leave now_us < last;

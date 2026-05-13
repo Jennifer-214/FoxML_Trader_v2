@@ -1468,8 +1468,8 @@ inline void print_layout_fingerprint() {
     printf("-- HOT/WARM/COLD cluster anchors --\n");
     printf("offsetof CoreContext.entries_processed         = %zu\n",
            offsetof(tt::CoreContext<64>, entries_processed));
-    printf("offsetof CoreContext.sp_last_tick_us           = %zu\n",
-           offsetof(tt::CoreContext<64>, sp_last_tick_us));
+    printf("offsetof CoreContext.sp_telemetry              = %zu\n",
+           offsetof(tt::CoreContext<64>, sp_telemetry));
     printf("offsetof CoreSlowState.ema_price               = %zu\n",
            offsetof(tt::CoreSlowState<64>, ema_price));
     printf("offsetof CoreSlowState.us_at_last_rebuild      = %zu\n",
@@ -11050,23 +11050,24 @@ e3_skip_load:;
             check("v5.9.0b: rate-limited critical does NOT update last_emit_us when suppressed", 0);
         }
 
-        // CoreContext extensions exist — compile-time check via memset+access.
-        // (The fields would have caused compile failure earlier if missing.)
-        tt::CoreContext<64> ctx{};
-        ctx.model_load_failed = 1;
-        ctx.last_ml_threshold = 0.5;
-        ctx.last_ml_effective_threshold = 0.55;
-        ctx.nan_feature_events_total = 7;
-        ctx.nan_prediction_events_total = 3;
-        ctx.last_ml_critical_log_us = 12345;
-        check("v5.9.0b: CoreContext.model_load_failed assignable",
-              ctx.model_load_failed == 1);
-        check("v5.9.0b: CoreContext.last_ml_threshold assignable",
-              ctx.last_ml_threshold == 0.5);
-        check("v5.9.0b: CoreContext.nan_feature_events_total counter assignable",
-              ctx.nan_feature_events_total == 7);
-        check("v5.9.0b: CoreContext.nan_prediction_events_total counter assignable",
-              ctx.nan_prediction_events_total == 3);
+        // v5.15.5.B.2 — these fields moved from CoreContext to
+        // CoreContextDisplayMeta sibling struct. Compile-time check via direct
+        // DisplayMeta access; named-pattern test labels updated to match.
+        tt::CoreContextDisplayMeta<64> meta{};
+        meta.model_load_failed = 1;
+        meta.last_ml_threshold = 0.5;
+        meta.last_ml_effective_threshold = 0.55;
+        meta.nan_feature_events_total = 7;
+        meta.nan_prediction_events_total = 3;
+        meta.last_ml_critical_log_us = 12345;
+        check("v5.9.0b+v5.15.5.B.2: DisplayMeta.model_load_failed assignable",
+              meta.model_load_failed == 1);
+        check("v5.9.0b+v5.15.5.B.2: DisplayMeta.last_ml_threshold assignable",
+              meta.last_ml_threshold == 0.5);
+        check("v5.9.0b+v5.15.5.B.2: DisplayMeta.nan_feature_events_total counter assignable",
+              meta.nan_feature_events_total == 7);
+        check("v5.9.0b+v5.15.5.B.2: DisplayMeta.nan_prediction_events_total counter assignable",
+              meta.nan_prediction_events_total == 3);
 
         // MLBuildContext pass-through pointer fields exist.
         tt::MLBuildContext mctx{};
@@ -18118,7 +18119,7 @@ e3_skip_load:;
         {
             uint64_t last_us = 1000000000000ULL;
             uint64_t now_us  = last_us + 90ULL * 1000000ULL;  // 90s gap
-            state.last_ws_tick_us.store(last_us, std::memory_order_release);
+            state.ws_telemetry.last_tick_us.store(last_us, std::memory_order_release);
             oms.flatten_pending.store(0, std::memory_order_release);
             oms.recovery_until_us.store(0, std::memory_order_release);
             tt::EventLoop_CheckWsStaleness(&state, cfg, /*price*/100.0, now_us);
@@ -18162,7 +18163,7 @@ e3_skip_load:;
         {
             uint64_t last_us = 2000000000000ULL;
             uint64_t now_us  = last_us + 90ULL * 1000000ULL;
-            state.last_ws_tick_us.store(last_us, std::memory_order_release);
+            state.ws_telemetry.last_tick_us.store(last_us, std::memory_order_release);
             // flatten_pending and recovery_until_us are 0 from Test 5
             tt::EventLoop_CheckWsStaleness(&state, cfg, 100.0, now_us);
             check("v5.12.1.A.3: re-fire after clear → flatten_pending=1",
@@ -18207,7 +18208,7 @@ e3_skip_load:;
 
         // === Test 1: cfg flag=0 (default) → no flatten regardless of gap ===
         {
-            state.last_ws_tick_us.store(1000ULL, std::memory_order_release);
+            state.ws_telemetry.last_tick_us.store(1000ULL, std::memory_order_release);
             uint64_t huge_now_us = 1000000000000ULL;  // gap >> threshold
             int n = tt::EventLoop_CheckWsStaleness(&state, cfg, /*price*/100.0,
                                                     huge_now_us);
@@ -18220,7 +18221,7 @@ e3_skip_load:;
         // === Test 2: enabled + last==0 (warmup) → no flatten ===
         {
             BITMAP_SET(cfg.risk_cfg_flags, MASK_RISK_CFG_WS_DEAD_TIME_FLATTEN_ENABLED);
-            state.last_ws_tick_us.store(0ULL, std::memory_order_release);
+            state.ws_telemetry.last_tick_us.store(0ULL, std::memory_order_release);
             uint64_t huge_now_us = 1000000000000ULL;
             int n = tt::EventLoop_CheckWsStaleness(&state, cfg, 100.0, huge_now_us);
             check("v5.12.1.A.2: enabled + last==0 (warmup) → no flatten",
@@ -18233,7 +18234,7 @@ e3_skip_load:;
         {
             uint64_t last_us  = 1000000000000ULL;             // some baseline
             uint64_t now_us   = last_us + 30ULL * 1000000ULL; // 30s gap
-            state.last_ws_tick_us.store(last_us, std::memory_order_release);
+            state.ws_telemetry.last_tick_us.store(last_us, std::memory_order_release);
             oms.flatten_pending.store(0, std::memory_order_release);
             int n = tt::EventLoop_CheckWsStaleness(&state, cfg, 100.0, now_us);
             check("v5.12.1.A.2: enabled + gap<threshold (30s vs 60s) → "
@@ -18248,7 +18249,7 @@ e3_skip_load:;
         {
             uint64_t last_us  = 1000000000000ULL;
             uint64_t now_us   = last_us + 90ULL * 1000000ULL; // 90s gap
-            state.last_ws_tick_us.store(last_us, std::memory_order_release);
+            state.ws_telemetry.last_tick_us.store(last_us, std::memory_order_release);
             oms.flatten_pending.store(0, std::memory_order_release);
             // Portfolio is empty by default — bitmap=0 → FlattenAll
             // returns 0 but flatten_pending CAS still wins.
@@ -18265,7 +18266,7 @@ e3_skip_load:;
             // re-enter the flatten path.
             uint64_t last_us  = 1000000000000ULL;
             uint64_t now_us   = last_us + 90ULL * 1000000ULL;
-            state.last_ws_tick_us.store(last_us, std::memory_order_release);
+            state.ws_telemetry.last_tick_us.store(last_us, std::memory_order_release);
             int n = tt::EventLoop_CheckWsStaleness(&state, cfg, 100.0, now_us);
             check("v5.12.1.A.2: second call after fire → CAS lost, "
                   "no double-flatten",
@@ -18324,13 +18325,13 @@ e3_skip_load:;
 
         // === Test 1: post-Init value is 0 (warmup sentinel) ===
         check("v5.12.1.A.1: last_ws_tick_us defaults to 0 post-Init",
-              state.last_ws_tick_us.load(std::memory_order_acquire) == 0);
+              state.ws_telemetry.last_tick_us.load(std::memory_order_acquire) == 0);
 
         // === Test 2: store + load round-trips ===
         const uint64_t synthetic_ts = 1778145938ULL;
-        state.last_ws_tick_us.store(synthetic_ts, std::memory_order_release);
+        state.ws_telemetry.last_tick_us.store(synthetic_ts, std::memory_order_release);
         check("v5.12.1.A.1: store + acquire-load returns the published value",
-              state.last_ws_tick_us.load(std::memory_order_acquire) == synthetic_ts);
+              state.ws_telemetry.last_tick_us.load(std::memory_order_acquire) == synthetic_ts);
 
         // === Test 3: monotonic-on-store contract ===
         // Producer/backtest drivers publish strictly-increasing wall-clock
@@ -18341,8 +18342,8 @@ e3_skip_load:;
         int monotonic_pass = 1;
         for (uint64_t k = 1; k <= 10; ++k) {
             uint64_t ts = synthetic_ts + k * 1000ULL;
-            state.last_ws_tick_us.store(ts, std::memory_order_release);
-            uint64_t got = state.last_ws_tick_us.load(std::memory_order_acquire);
+            state.ws_telemetry.last_tick_us.store(ts, std::memory_order_release);
+            uint64_t got = state.ws_telemetry.last_tick_us.load(std::memory_order_acquire);
             if (got != ts) { monotonic_pass = 0; break; }
         }
         check("v5.12.1.A.1: monotonic store/load on every step",

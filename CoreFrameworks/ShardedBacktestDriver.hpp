@@ -314,7 +314,8 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
         // live deployment) — the staleness check returns immediately.
         // Operator MUST NOT enable the flatten gate during backtest.
         if (drv->state) {
-            drv->state->last_ws_tick_us.store(tick.timestamp,
+            // v5.15.5.B.2 — wrapped in WsHeartbeatTelemetry alignas(64) cluster.
+            drv->state->ws_telemetry.last_tick_us.store(tick.timestamp,
                                                std::memory_order_release);
             // v5.12.1.A.2 — backtest also runs CheckWsStaleness for parity
             // with live slow-path call sites. Pass tick.timestamp as
