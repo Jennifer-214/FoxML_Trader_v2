@@ -56,6 +56,7 @@
 #include "ShardedLiveSafety.hpp"   // Phase 0: orphan recovery, force-close, reconcile
 #include "ShardedSnapshot.hpp"
 #include "ShardedSnapshotPersist.hpp"  // Phase 4: persistent state across restarts
+#include "PaperResetArchive.hpp"        // v5.15.5.C.3 Phase 6 — paper-reset archive helpers (Summary_WriteJson + dirname/mkdir)
 #include "ControllerEventLoop.hpp"
 #include "CoreLatencyStats.hpp"
 #include "ControllerConfig.hpp"
@@ -2005,6 +2006,83 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // proceed concurrently, slow-path's next read sees fresh
                     // values (eventually consistent acceptable for slow-path).
                     std::this_thread::yield();
+
+                    // v5.15.5.C.3 Phase 6 — paper-reset archive flow. Captures the
+                    // prior session's state into a timestamped directory BEFORE the
+                    // OMS reset wipes paper_session_start_us. Operator can review
+                    // archived sessions in data/paper_resets/{start_iso}_to_{end_iso}.paper/
+                    //   - snapshot.dat: full OMS + per-core state (ShardedSnapshot_Save)
+                    //   - trades.csv:    copy of logging/SYMBOL_order_history.csv
+                    //   - summary.json:  session + global + per_core + per_strategy +
+                    //                     per_regime (per_regime is empty placeholder;
+                    //                     Phase 5.B follow-up or focused aggregator
+                    //                     populates from trades.csv post-rotation)
+                    // Failures are NON-FATAL (log to stderr; continue with reset).
+                    // MUST RUN BEFORE OMS_RESET_AUTOPOPULATE: the registry's
+                    // paper_session_start_us RESET expression evaluates tt::_oms_now_us()
+                    // and overwrites the prior session's anchor. We need the prior
+                    // start_us for the archive dirname.
+                    {
+                        uint64_t prior_start_us = state.oms->paper_session_start_us;
+                        uint64_t end_us = (uint64_t)
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count();
+                        char dirname[256];
+                        tt::PaperResetArchive_FormatDirname(prior_start_us, end_us,
+                                                             dirname, sizeof(dirname));
+                        if (tt::PaperResetArchive_CreateDirectories(dirname)) {
+                            // 1) snapshot.dat — full OMS + per-core via existing ShardedSnapshot_Save
+                            char snapshot_path[512];
+                            std::snprintf(snapshot_path, sizeof(snapshot_path),
+                                          "%s/snapshot.dat", dirname);
+                            int partial_on =
+                                BITMAP_IS_SET(state.oms->oms_state_flags,
+                                              tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED) ? 1 : 0;
+                            ShardedSnapshot_Save(&state, snapshot_path, partial_on);
+
+                            // 2) trades.csv — copy of logging/<SYMBOL>_order_history.csv
+                            //    Flush + copy via fread/fwrite loop (no live file pointer disturbance;
+                            //    ShardedTradeLog_Rotate below handles the rotation of the live file).
+                            if (state.oms->trade_log) {
+                                if (state.oms->trade_log->file) {
+                                    std::fflush(state.oms->trade_log->file);
+                                }
+                                char trade_src[256], trade_dst[512];
+                                std::snprintf(trade_src, sizeof(trade_src),
+                                              "logging/%s_order_history.csv",
+                                              state.oms->trade_log->symbol);
+                                std::snprintf(trade_dst, sizeof(trade_dst),
+                                              "%s/trades.csv", dirname);
+                                FILE* sf = std::fopen(trade_src, "r");
+                                FILE* df = std::fopen(trade_dst, "w");
+                                if (sf && df) {
+                                    char buf[4096];
+                                    size_t n;
+                                    while ((n = std::fread(buf, 1, sizeof(buf), sf)) > 0) {
+                                        std::fwrite(buf, 1, n, df);
+                                    }
+                                }
+                                if (sf) std::fclose(sf);
+                                if (df) std::fclose(df);
+                            }
+
+                            // 3) summary.json — session + global + per_core + per_strategy + per_regime
+                            char summary_path[512];
+                            std::snprintf(summary_path, sizeof(summary_path),
+                                          "%s/summary.json", dirname);
+                            tt::Summary_WriteJson(summary_path, state, cfg,
+                                                   num_cores, end_us);
+
+                            std::fprintf(stderr,
+                                "[archive] paper-reset session archived: %s "
+                                "(snapshot + trades + summary)\n", dirname);
+                        } else {
+                            std::fprintf(stderr,
+                                "[archive] WARNING — failed to create archive directory %s; "
+                                "proceeding with reset without archive\n", dirname);
+                        }
+                    }
+
                     // v5.15.5.C.3 Phase 3b — full OMS reset via canonical registry.
                     // Replaces 10 explicit field assignments (balance, realized_pnl,
                     // ks_peak_balance, kill_switch_tripped bit clear, total_fees,

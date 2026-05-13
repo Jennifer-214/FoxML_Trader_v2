@@ -39,6 +39,7 @@
 #include "../MemHeaders/BuddyAllocator.hpp"                // v5.11.13 — typo fix + O(1) order lookup tests
 #include "../MemHeaders/InitArena.hpp"                     // v5.11.22 — MAP_HUGETLB opt-in tests
 #include "../MemHeaders/CoreCtxSummaryFieldRegistry.hpp"  // v5.15.5.C.3 Phase 4 — FOREACH_CORE_CTX_SUMMARY_FIELD + JSON emit
+#include "../CoreFrameworks/PaperResetArchive.hpp"        // v5.15.5.C.3 Phase 6 — paper-reset archive helpers
 #include <sys/mman.h>                                       // v5.11.22 — MAP_HUGETLB constant
 #include "../DataStream/DepthReplayState.hpp"            // Track E.3 tests
 #include "../ML_Headers/FlowFeatures.hpp"                // v4.5 Wave 1 tests
@@ -24826,6 +24827,57 @@ e3_skip_load:;
                 check("v5.15.5.C.3 Phase 4: per_strategy skips STRATEGY_NONE (0xFF) cores",
                       is_empty_arr);
             }
+        }
+    }
+
+    //==================================================================================================
+    // v5.15.5.C.3 Phase 6 — PaperResetArchive helpers (dirname format + mkdir -p)
+    //==================================================================================================
+    {
+        using namespace tt;
+        // Test 1: PaperResetArchive_FormatTimestamp produces filesystem-friendly ISO string.
+        {
+            char buf[32] = {};
+            // Use a fixed Unix epoch microsecond value: 2026-05-13 12:34:56 UTC = 1778596496 sec
+            // (but localtime applies — the test just checks length + format pattern, not exact wall clock).
+            uint64_t test_us = 1778596496ULL * 1000000ULL;
+            PaperResetArchive_FormatTimestamp(test_us, buf, sizeof(buf));
+            // Format: "YYYY-MM-DD-HHMMSS" — exactly 17 chars.
+            check("v5.15.5.C.3 Phase 6: PaperResetArchive_FormatTimestamp produces 17-char ISO string",
+                  std::strlen(buf) == 17);
+            check("v5.15.5.C.3 Phase 6: timestamp contains dashes at expected positions",
+                  buf[4] == '-' && buf[7] == '-' && buf[10] == '-');
+        }
+        // Test 2: PaperResetArchive_FormatDirname composes expected path shape.
+        {
+            char buf[256] = {};
+            uint64_t start_us = 1700000000ULL * 1000000ULL;
+            uint64_t end_us   = 1700003600ULL * 1000000ULL;  // 1 hour later
+            PaperResetArchive_FormatDirname(start_us, end_us, buf, sizeof(buf));
+            // Expected: "data/paper_resets/{start}_to_{end}.paper"
+            bool has_prefix = (std::strncmp(buf, "data/paper_resets/", 18) == 0);
+            bool has_to     = (std::strstr(buf, "_to_") != nullptr);
+            bool has_suffix = (std::strstr(buf, ".paper") != nullptr);
+            check("v5.15.5.C.3 Phase 6: dirname has data/paper_resets/ prefix", has_prefix);
+            check("v5.15.5.C.3 Phase 6: dirname has _to_ separator",            has_to);
+            check("v5.15.5.C.3 Phase 6: dirname has .paper suffix",             has_suffix);
+        }
+        // Test 3: PaperResetArchive_CreateDirectories creates nested path; idempotent on re-call.
+        {
+            // Use /tmp prefix to avoid polluting the workspace
+            const char* test_dir = "/tmp/foxml_phase6_test/nested/deep/dir";
+            int rc1 = PaperResetArchive_CreateDirectories(test_dir);
+            check("v5.15.5.C.3 Phase 6: CreateDirectories returns 1 on success", rc1 == 1);
+            // Idempotent — re-calling should still succeed (EEXIST tolerated).
+            int rc2 = PaperResetArchive_CreateDirectories(test_dir);
+            check("v5.15.5.C.3 Phase 6: CreateDirectories idempotent on existing path", rc2 == 1);
+            // Verify directory actually exists.
+            struct stat st;
+            int stat_rc = stat(test_dir, &st);
+            check("v5.15.5.C.3 Phase 6: nested directory actually created on disk",
+                  stat_rc == 0 && S_ISDIR(st.st_mode));
+            // Cleanup — remove nested tree (best effort; system() returns 0 on success).
+            (void)std::system("rm -rf /tmp/foxml_phase6_test");
         }
     }
 
