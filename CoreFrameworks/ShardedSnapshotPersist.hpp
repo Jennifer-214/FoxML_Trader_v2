@@ -80,7 +80,15 @@ namespace tt {
 // Replaces the tick-derived hold (which got reset by snapshot-drift
 // guard at restart). Also feeds future ML-training "optimal exit
 // timing" features. v6 files rejected on load with version-mismatch.
-#define SHARDED_SNAPSHOT_VERSION  7u
+//
+// v8 (v5.15.5.C.3): OMS gains uint64_t paper_session_start_us field
+// (wall-clock microseconds at OrderManager_Init; reset on paper-reset).
+// Used by paper-reset archive flow (Phase 6) to format the
+// {start_iso}_to_{end_iso}.paper archive directory name. v7 files
+// rejected on load with version-mismatch — paper-mode data only;
+// operator restarts a fresh paper session. No live data is lost
+// (live mode never persists via this path; reconciles from exchange).
+#define SHARDED_SNAPSHOT_VERSION  8u
 
 //======================================================================================================
 // [SAVE]

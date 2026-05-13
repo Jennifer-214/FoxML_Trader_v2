@@ -84,22 +84,24 @@
 //   realized_pnl         FPN<F>     [sizeof(FPN<F>) bytes]
 //   ks_peak_balance      FPN<F>     [sizeof(FPN<F>) bytes]
 //   kill_switch_tripped  int        [4 bytes]  ← post-S3a: BIT extraction
-//   total_fees           FPN<F>     [sizeof(FPN<F>) bytes]
-//   total_maker_fees     FPN<F>     [sizeof(FPN<F>) bytes]
-//   total_taker_fees     FPN<F>     [sizeof(FPN<F>) bytes]
-//   maker_fills_count    uint32_t   [4 bytes]
-//   taker_fills_count    uint32_t   [4 bytes]
+//   total_fees              FPN<F>     [sizeof(FPN<F>) bytes]
+//   total_maker_fees        FPN<F>     [sizeof(FPN<F>) bytes]
+//   total_taker_fees        FPN<F>     [sizeof(FPN<F>) bytes]
+//   maker_fills_count       uint32_t   [4 bytes]
+//   taker_fills_count       uint32_t   [4 bytes]
+//   paper_session_start_us  uint64_t   [8 bytes]  ← v5.15.5.C.3 (Phase 2)
 //======================================================================================================
 #define FOREACH_OMS_PERSIST_FIELD(X)                                                                  \
-    X(balance,             FPN<F>,    DIRECT, 0)                                                       \
-    X(realized_pnl,        FPN<F>,    DIRECT, 0)                                                       \
-    X(ks_peak_balance,     FPN<F>,    DIRECT, 0)                                                       \
-    X(kill_switch_tripped, int,       BIT,    MASK_OMS_STATE_KILL_SWITCH_TRIPPED)                      \
-    X(total_fees,          FPN<F>,    DIRECT, 0)                                                       \
-    X(total_maker_fees,    FPN<F>,    DIRECT, 0)                                                       \
-    X(total_taker_fees,    FPN<F>,    DIRECT, 0)                                                       \
-    X(maker_fills_count,   uint32_t,  DIRECT, 0)                                                       \
-    X(taker_fills_count,   uint32_t,  DIRECT, 0)
+    X(balance,                FPN<F>,    DIRECT, 0)                                                    \
+    X(realized_pnl,           FPN<F>,    DIRECT, 0)                                                    \
+    X(ks_peak_balance,        FPN<F>,    DIRECT, 0)                                                    \
+    X(kill_switch_tripped,    int,       BIT,    MASK_OMS_STATE_KILL_SWITCH_TRIPPED)                   \
+    X(total_fees,             FPN<F>,    DIRECT, 0)                                                    \
+    X(total_maker_fees,       FPN<F>,    DIRECT, 0)                                                    \
+    X(total_taker_fees,       FPN<F>,    DIRECT, 0)                                                    \
+    X(maker_fills_count,      uint32_t,  DIRECT, 0)                                                    \
+    X(taker_fills_count,      uint32_t,  DIRECT, 0)                                                    \
+    X(paper_session_start_us, uint64_t,  DIRECT, 0)
 
 //======================================================================================================
 // [PER-KIND DISPATCH HELPERS]

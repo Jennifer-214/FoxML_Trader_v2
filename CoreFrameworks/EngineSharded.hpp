@@ -2006,15 +2006,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     state.oms->ks_peak_balance = cfg.starting_balance;
                     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
                     BITMAP_CLR(state.oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
-                    // v5.5.6 (recurring-bugs Class 5): OMS counters added in
-                    // Phase 8 (maker/taker breakdown) + v5.4.4 (snapshot
-                    // persistence) were never wired into Reset Paper. Result:
-                    // Account header showed cumulative fees across resets
-                    // (e.g. $93 with realized=$-3.18 from one trade), and
-                    // gross = realized + unrealized + fees gave nonsense
-                    // numbers. User reported on 2026-04-30. Now zeroed
-                    // alongside balance + realized_pnl so all session
-                    // counters are scoped consistently.
+                    // v5.5.6: OMS counters reset alongside balance + realized_pnl
+                    // (Class 5 recurring bug — see DOCS/RECURRING_BUG_PATTERNS.md).
                     state.oms->total_fees          = FPN_Zero<F>();
                     state.oms->total_maker_fees    = FPN_Zero<F>();
                     state.oms->total_taker_fees    = FPN_Zero<F>();

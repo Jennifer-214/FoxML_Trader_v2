@@ -9152,8 +9152,8 @@ e3_skip_load:;
         // SHARDED_SNAPSHOT_VERSION bumped from 3 to 4 for the CoreContext
         // strategy_state addition. Hardcoded check to catch accidental
         // reverts.
-        check("v5.11.65: SHARDED_SNAPSHOT_VERSION is 7 (v5.4.0=4, v5.4.3=5, v5.4.4=6, v5.11.65=7 added Position.entry_timestamp_us)",
-              SHARDED_SNAPSHOT_VERSION == 7u);
+        check("v5.15.5.C.3: SHARDED_SNAPSHOT_VERSION is 8 (v5.4.0=4, v5.4.3=5, v5.4.4=6, v5.11.65=7, v5.15.5.C.3=8 added OrderManagerState.paper_session_start_us)",
+              SHARDED_SNAPSHOT_VERSION == 8u);
     }
     {
         // Default state after EventLoopState_Init: strategy_state nullptr,

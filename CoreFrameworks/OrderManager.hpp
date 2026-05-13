@@ -68,6 +68,7 @@
 #include "../DataStream/CalibLogColRegistry.hpp"   // v5.14.10.D — FOREACH_CALIB_LOG_COL registry (closes TECH_DEBT-010)
 #include "../MemHeaders/OmsStateFlagRegistry.hpp"  // v5.15.5.C.2 (S3a) — FOREACH_OMS_STATE_FLAG bitmap cohort
 #include "../MemHeaders/OmsExitPredictorMetaRegistry.hpp"  // v5.15.5.C.2.1 (LOW-2) — FOREACH_OMS_META_SLOT multi-bit cohort
+#include "../MemHeaders/OmsFieldRegistry.hpp"              // v5.15.5.C.3 (Phase 3) — canonical FOREACH_OMS_FIELD + projections
 
 #include <atomic>
 #include <chrono>
@@ -418,6 +419,15 @@ struct OrderManagerState {
     FPN<F>  ks_peak_balance;      // running max of balance, updated on exits
     uint64_t ks_trips_total;      // count of trip events (observability)
 
+    // v5.15.5.C.3 — paper-session start time (microseconds). Set at OrderManager_Init
+    // to now_us(); updated to now_us() at each paper-reset (end of previous session +
+    // start of new session). Persisted via FOREACH_OMS_PERSIST_FIELD so paper-mode
+    // restart resumes from the same session-start anchor. Used by the paper-reset
+    // archive flow (Phase 6) to format `{start_iso}_to_{end_iso}.paper` directory
+    // names — gives operator a date-range identifier per paper session for offline
+    // analysis (per_strategy_per_regime comparison across sessions).
+    uint64_t paper_session_start_us;
+
     // FILE* opened lazily by OrderManager_OpenCalibrationLog (engine boot
     // calls when cfg.calibration_log_path is non-empty). Drainer thread
     // (sole HandleFill caller) is the only writer. Closed in Shutdown.
@@ -605,13 +615,12 @@ static void OrderManager_FillResultCallback(void* user_ctx,
 // adapter — all function pointers null. The OMS will short-circuit Submit
 // to FILLED before touching them.
 //
-// Phase 03 chunk 1B: the OMS now owns the bank state. OrderManager_Init
-// takes starting_balance + fee_rate so the OMS is fully self-contained
-// from init onwards. EventLoopState_Init takes an OMS pointer instead of
-// its own balance/fee_rate and forwards all financial reads through the
-// OMS.
+// OMS owns the bank state since v4.x (originally Phase 03 chunk 1B).
+// OrderManager_Init takes starting_balance + fee_rate so the OMS is fully
+// self-contained from init onwards. EventLoopState_Init takes an OMS
+// pointer and forwards all financial reads through the OMS.
 //
-// Phase 03 chunk 3: event_log_mode parameter (default 0):
+// event_log_mode parameter (default 0):
 //   0 = legacy mode. OMS_Tick only marks orders FILLED/REJECTED and frees
 //       slots. Portfolio mutation happens in EventLoop_OnEvent (unchanged).
 //   1 = event log mode. OMS_Tick runs a fill handler that opens/closes
@@ -656,12 +665,12 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     SPSCRing_Init(&oms->result_queue);
     SPSCRing_Init(&oms->ws_result_queue);
     SPSCRing_Init(&oms->reconcile_queue);
-    // v4.7.37: per-core submit queues (Phase B reordered)
+    // v4.7.37: per-core submit queues.
     for (int i = 0; i < MAX_EXECUTION_CORES; ++i) {
         SPSCRing_Init(&oms->submit_queues[i]);
     }
 
-    // Phase 03 chunk 1B: bank state lives here now.
+    // Bank state owned by OMS.
     Portfolio_Init(&oms->portfolio);
     oms->balance             = starting_balance;
     oms->realized_pnl        = FPN_Zero<F>();
@@ -669,13 +678,13 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     oms->fee_rate_maker      = fee_rate; // Phase 8: legacy default = same rate
     oms->fee_rate_taker      = fee_rate; // engine sets per-cfg after Init
     oms->slippage_pct        = FPN_Zero<F>(); // v4.2.1: engine sets per-cfg after Init
-    // Phase 8 (post-coding c10) — counter init
+    // Maker/taker fee counter init.
     oms->maker_fills_count   = 0;
     oms->taker_fills_count   = 0;
     oms->total_maker_fees    = FPN_Zero<F>();
     oms->total_taker_fees    = FPN_Zero<F>();
     oms->total_fees          = FPN_Zero<F>();
-    // Phase 6prep sharded c14 — exit-fill feedback channel
+    // Exit-fill feedback channel.
     oms->last_closed_mask    = 0;
     for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; ++i) {
         oms->last_realized_return[i] = 0.0;
@@ -708,6 +717,11 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     oms->ks_peak_balance     = starting_balance;  // initial peak = start
     // v5.15.5.C.2 (S3a) — kill_switch_tripped bit cleared in oms_state_flags above.
     oms->ks_trips_total      = 0;
+    // v5.15.5.C.3 (Phase 2) — paper-session start anchor. Used by paper-reset
+    // archive flow to format `{start_iso}_to_{end_iso}.paper` directory name.
+    oms->paper_session_start_us = (uint64_t)
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
     oms->trade_log           = nullptr;
     // v5.12.1.A.2 — emergency-flatten flag init.
     oms->flatten_pending.store(0, std::memory_order_relaxed);
@@ -718,19 +732,25 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     oms->total_filled.store(0, std::memory_order_relaxed);
     oms->total_rejected.store(0, std::memory_order_relaxed);
 
-    // Phase 03 chunk 3: event log mode + log allocation.
+    // Event log mode + log allocation.
     oms->event_log_mode = event_log_mode;
-    // Phase 07: disk persistence. In mode 1, load previous events from
-    // disk (reconstructs next_event_id), then open the file for append
-    // so new events write through. On first run the load returns 0 (no
-    // file) and InitWithFile creates a fresh one with a header.
+    // Disk persistence (mode 1 + non-empty path): load previous events from
+    // disk (reconstructs next_event_id), then open the file for append so
+    // new events write through. First run: load returns 0 (no file);
+    // InitWithFile creates a fresh one with a header.
     // v5.9.5e — disk persistence only when caller passes a non-empty
     // event_log_path. Backtest passes nullptr/"" → mode=1 in-memory-only:
-    // fill+drain pipeline still active (parity with live), but no
-    // load-from-disk + no append-to-disk. Live engine still gets full
-    // restart-recovery via the default "logging/order_events.bin".
+    // fill+drain pipeline still active (parity with live), but no load-
+    // from-disk + no append-to-disk. Live engine still gets full restart-
+    // recovery via the default "logging/order_events.bin".
     int has_disk_path = (event_log_path && event_log_path[0]);
     if (event_log_mode == 1 && has_disk_path) {
+        // MUST RUN BEFORE: line 735 OrderEventLog_LoadFromDisk + line 738
+        // Portfolio_FromEventLog replay block — both depend on event_log
+        // being initialized. Registry refactor in v5.15.5.C.3 Phase 3 must
+        // preserve this ordering (do NOT move OrderEventLog_Init into the
+        // registry-driven init block; keep it as an explicit dependency-
+        // ordered step in the AUTOPOPULATE Layer 2 helper-init cluster).
         OrderEventLog_Init(&oms->event_log);  // allocate buffer first
         int loaded = OrderEventLog_LoadFromDisk(&oms->event_log, event_log_path);
         if (loaded > 0) {
@@ -757,6 +777,11 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
     // pthread_create fails (rare), Append falls back to inline sync apply
     // — same correctness guarantees, just no isolation. Tests that don't
     // want the thread can call OrderEventLog_StopAsyncWriter immediately.
+    //
+    // MUST RUN LAST in OrderManager_Init: depends on event_log being either
+    // _Init-only or _InitWithFile'd (both branches above). Registry refactor
+    // in v5.15.5.C.3 Phase 3 must place this AFTER the AUTOPOPULATE expansion
+    // (Layer 5 / post-registry) — never inside the FOREACH walk.
     OrderEventLog_StartAsyncWriter(&oms->event_log);
 }
 
