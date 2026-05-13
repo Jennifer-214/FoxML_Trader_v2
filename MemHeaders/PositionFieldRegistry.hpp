@@ -59,24 +59,28 @@
     X(pair_index,          int8_t,   -1,               PERSIST,      "partial-exit pairing; -1=unpaired, 0-15=pair idx")
 
 //======================================================================================================
-// FOREACH_POSITION_FIELD_SKIP_PERSIST(X) — v5.15.5.C.4 Phase POS.2 addition.
+// FOREACH_POSITION_FIELD_SKIP_PERSIST(X) — empty placeholder.
 //
-// SKIP_PERSIST fields live in the Position struct (colocated with PERSIST
-// fields for cache locality) but are NOT in the wire format. Save/Load
-// walks only PERSIST fields; SKIP_PERSIST stays at default-init on load.
+// v5.15.5.C.4 POS.2 added 2 SKIP_PERSIST fields (exit_fill_price, is_maker)
+// here. v5.15.5.C.5 REVERTED those fields to OMS sibling arrays per the
+// `slot-state-foreach-registry-with-storage-routing.md` decision tree:
+// sparse-access per-slot ephemeral state goes to OMS sibling SoA arrays;
+// Position holds only PERSIST state. The revert allows Position to be 184B
+// (PERSIST-only) + alignas(64) → 192B = 3 cache lines exact, eliminating
+// hot-path cache-line straddle (per
+// `hot-side-array-element-alignment-for-sparse-access.md` first canonical
+// application).
 //
-// Position struct emits FOREACH_POSITION_FIELD first, then manual _pad_pos[7]
-// (wire-format alignment pad at bytes 177-183), then FOREACH_POSITION_FIELD_SKIP_PERSIST.
-// The _pad_pos manual padding placement ENFORCES the PERSIST/SKIP_PERSIST
-// byte boundary at offset 184 = POSITION_PERSIST_BYTES.
+// This empty macro is RETAINED as future-extension infrastructure. If a
+// future field genuinely benefits from Position-locality (e.g., a transient
+// flag co-accessed with PERSIST fields in slow-path), it can be added here.
+// The PERSIST_KIND filter machinery (Portfolio_Save/Load) remains intact.
 //
-// Pattern composes with `pre-post-cfg-registry-split-for-emit-order-preservation.md`
-// — the manual _pad_pos plays the role of a "sister registry" between PRE
-// (PERSIST) and POST (SKIP_PERSIST) sections of the struct.
+// Pattern remains composable with `pre-post-cfg-registry-split-for-emit-order-preservation.md`
+// (the manual `_pad_pos` plays the role of a "sister registry boundary"
+// between PRE (PERSIST) and any future POST (SKIP_PERSIST) entries).
 //======================================================================================================
-#define FOREACH_POSITION_FIELD_SKIP_PERSIST(X)                                                                            \
-    X(exit_fill_price,     FPN<F>,   FPN_Zero<F>(),    SKIP_PERSIST, "Phase G — exit fill price captured at HandleFill SELL") \
-    X(is_maker,            uint8_t,  0,                SKIP_PERSIST, "Phase G — is_maker flag at HandleFill SELL (1=maker, 0=taker)")
+#define FOREACH_POSITION_FIELD_SKIP_PERSIST(X) /* empty; v5.15.5.C.5 revert; see comment above */
 
 //======================================================================================================
 // PERSIST_KIND token-paste dispatch.

@@ -7744,16 +7744,18 @@ e3_skip_load:;
             pos_a.entry_price     = FPN_Zero<64>();
             pos_a.quantity        = FPN_FromDouble<64>(1.0);
             pos_a.entry_fee       = FPN_Zero<64>();
-            pos_a.exit_fill_price = FPN_FromDouble<64>(pnl_a);
-            pos_a.is_maker        = 0;
+            // v5.15.5.C.5 — exit_fill_price + is_maker moved to OMS sibling state
+            r->oms.last_exit_fill_price[0] = FPN_FromDouble<64>(pnl_a);
+            BITMAP_CLR(r->oms.last_is_maker_bitmap, BITMAP_BIT_U16(0));  // 0 = taker
             if (pnl_a > 0.0) BITMAP_SET(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(0));
             else             BITMAP_CLR(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(0));
             auto& pos_b = r->oms.portfolio.positions[1];
             pos_b.entry_price     = FPN_Zero<64>();
             pos_b.quantity        = FPN_FromDouble<64>(1.0);
             pos_b.entry_fee       = FPN_Zero<64>();
-            pos_b.exit_fill_price = FPN_FromDouble<64>(pnl_b);
-            pos_b.is_maker        = 0;
+            // v5.15.5.C.5 — exit_fill_price + is_maker moved to OMS sibling state
+            r->oms.last_exit_fill_price[1] = FPN_FromDouble<64>(pnl_b);
+            BITMAP_CLR(r->oms.last_is_maker_bitmap, BITMAP_BIT_U16(1));  // 0 = taker
             if (pnl_b > 0.0) BITMAP_SET(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(1));
             else             BITMAP_CLR(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(1));
             r->oms.last_closed_mask = (uint16_t)0x3;  // bits 0,1
@@ -7844,8 +7846,9 @@ e3_skip_load:;
             pos_single.entry_price     = FPN_Zero<64>();
             pos_single.quantity        = FPN_FromDouble<64>(1.0);
             pos_single.entry_fee       = FPN_Zero<64>();
-            pos_single.exit_fill_price = FPN_FromDouble<64>(+7.0);
-            pos_single.is_maker        = 0;
+            // v5.15.5.C.5 — exit_fill_price + is_maker moved to OMS sibling state
+            r->oms.last_exit_fill_price[0] = FPN_FromDouble<64>(+7.0);
+            BITMAP_CLR(r->oms.last_is_maker_bitmap, BITMAP_BIT_U16(0));
             BITMAP_SET(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(0));
             r->oms.last_closed_mask = (uint16_t)0x1;
             tt::EventLoop_DrainPostFill(&r->state, &r->oms, 0);
@@ -7920,15 +7923,17 @@ e3_skip_load:;
         pos_pair_a.entry_price     = FPN_Zero<64>();
         pos_pair_a.quantity        = FPN_FromDouble<64>(1.0);
         pos_pair_a.entry_fee       = FPN_Zero<64>();
-        pos_pair_a.exit_fill_price = FPN_FromDouble<64>(+3.0);
-        pos_pair_a.is_maker        = 0;
+        // v5.15.5.C.5 — exit_fill_price + is_maker moved to OMS sibling state
+        r->oms.last_exit_fill_price[0] = FPN_FromDouble<64>(+3.0);
+        BITMAP_CLR(r->oms.last_is_maker_bitmap, BITMAP_BIT_U16(0));
         BITMAP_SET(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(0));
         auto& pos_pair_b = r->oms.portfolio.positions[1];
         pos_pair_b.entry_price     = FPN_Zero<64>();
         pos_pair_b.quantity        = FPN_FromDouble<64>(1.0);
         pos_pair_b.entry_fee       = FPN_Zero<64>();
-        pos_pair_b.exit_fill_price = FPN_FromDouble<64>(-8.0);
-        pos_pair_b.is_maker        = 0;
+        // v5.15.5.C.5 — exit_fill_price + is_maker moved to OMS sibling state
+        r->oms.last_exit_fill_price[1] = FPN_FromDouble<64>(-8.0);
+        BITMAP_CLR(r->oms.last_is_maker_bitmap, BITMAP_BIT_U16(1));
         BITMAP_CLR(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(1));
         r->oms.last_closed_mask = (uint16_t)0x3;
 

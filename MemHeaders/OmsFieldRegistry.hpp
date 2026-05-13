@@ -274,6 +274,8 @@ struct OmsResetCtx {
     X(last_exit_predicted_bitmap, uint16_t,       0,                            0,                            SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
     /* v5.15.5.C.4 Phase J — was_win extracted from FillRecord to cross-slot bitmap (Technique 3 of aggressive-memory-reduction-techniques.md) */         \
     X(last_was_win_bitmap,    uint16_t,           0,                            0,                            SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
+    /* v5.15.5.C.5 — is_maker reverted from Position SKIP_PERSIST to OMS-level cross-slot bitmap per slot-state-foreach-registry-with-storage-routing.md */ \
+    X(last_is_maker_bitmap,   uint16_t,           0,                            0,                            SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
     /* ============================================================================================ */                                                  \
     /* [7] Adapter struct copy (was Layer 2 special-case; now DIRECT row)                             */                                                  \
     /* ============================================================================================ */                                                  \
@@ -320,8 +322,11 @@ struct OmsResetCtx {
     /* v5.15.5.C.4 Phase G — exit-side fields REMOVED (derived at DrainPostFill).             \
      * v5.15.5.C.4 Phase H — entry-side fields REMOVED (derived at DrainPostFill open-mask).  \
      * v5.15.5.C.4 Phase J — was_win moved to OMS-level last_was_win_bitmap.                  \
-     * FillRecord is now empty + pending deletion in Phase K.                                 */ \
-    X(last_exit_predicted_p[_i],        double,    0.0,            0.0)
+     * FillRecord struct DELETED in Phase K.                                                  */ \
+    X(last_exit_predicted_p[_i],        double,    0.0,            0.0)                        \
+    /* v5.15.5.C.5 — exit_fill_price reverted from Position SKIP_PERSIST to OMS sibling SoA   \
+     * per slot-state-foreach-registry-with-storage-routing.md decision tree.                 */ \
+    X(last_exit_fill_price[_i],         FPN<F>,    FPN_Zero<F>(),  FPN_Zero<F>())
 
 //======================================================================================================
 // [COMPILE-TIME COUNT SENTINELS]
@@ -365,14 +370,14 @@ static_assert(FOREACH_OMS_FIELD_PERSIST_COUNT == 10,
               "SHARDED_SNAPSHOT_VERSION bump + loader migration. See "
               "DESIGN_SPECS/wire-format-byte-preservation-discipline.md.");
 
-// v5.15.5.C.4 Phase H — entry-side FillRecord fields (entry_notional, entry_fee)
-// DERIVED from Position state at DrainPostFill open-mask iter. Per-slot
-// scalar count drops 4 → 2 (just last_realized_return + last_exit_predicted_p).
-static_assert(FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 2,
-              "FOREACH_OMS_PER_SLOT_FIELD must keep the 2 per-slot scalar entries "
-              "(last_realized_return + last_exit_predicted_p; all FillRecord fields "
-              "moved to Position-derived computations in v5.15.5.C.4 Phases G+H; "
-              "was_win moved to OMS-level last_was_win_bitmap in Phase J).");
+// v5.15.5.C.5 — last_exit_fill_price added as OMS sibling array (reverted
+// from Position SKIP_PERSIST). Per-slot scalar count now 3 (last_realized_return
+// + last_exit_predicted_p + last_exit_fill_price).
+static_assert(FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 3,
+              "FOREACH_OMS_PER_SLOT_FIELD must keep the 3 per-slot scalar entries "
+              "(last_realized_return + last_exit_predicted_p + last_exit_fill_price; "
+              "FillRecord struct DELETED in C.4 Phase K; SKIP_PERSIST Position fields "
+              "reverted to OMS siblings in C.5 per slot-state-foreach decision tree).");
 
 }  // namespace tt
 

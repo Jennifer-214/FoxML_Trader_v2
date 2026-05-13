@@ -23,25 +23,36 @@
 //======================================================================================================
 // Im not sure how many positions i really want to track here but for now im just gonna leave it at like 16 i think, there will probably be more advanced logic added later to have a model that watches performace and dynamically updates or something like i attempted to do in FoxML core, but this is a deepr dive so i can actually learn and understand the logic behind stuff, and i just think its cool as shit, like why learn java when stuff lke this exists lmao, also i get to make my own library so im not functioning off blackbox implementations where the end of the documentation is lke "Trust me bro", and i hate reading documentation, so id rather build my own
 //======================================================================================================
-// v5.15.5.C.4 Phase POS — Position struct generated from FOREACH_POSITION_FIELD
-// registry per `DESIGN_SPECS/persisted-struct-with-ephemeral-field-coexistence-pattern.md`.
+// v5.15.5.C.5 — Position struct generated from FOREACH_POSITION_FIELD registry
+// + `alignas(64)` per `DESIGN_SPECS/hot-side-array-element-alignment-for-sparse-access.md`.
 //
 // Field order (controlled by FOREACH_POSITION_FIELD in PositionFieldRegistry.hpp)
 // preserves the prior manual struct layout:
-//   - Hot-path fields first (TP/SL — ExitGate reads every tick)
+//   - Hot-path fields first (TP/SL — ExitGate reads every tick; fit in 1st cache line)
 //   - Warm fields middle (quantity, entry_price, entry_fee — read at fill / P&L)
 //   - Cold fields last (originals, timestamp, pair_index — slow-path-only)
 //
-// Wire format: PORTFOLIO_SNAPSHOT_VERSION=5 byte-identical to pre-POS.1 layout.
-// Verified via static_assert(sizeof + offsetof) layout locks below the struct.
+// v5.15.5.C.5 changes vs C.4:
+//   - SKIP_PERSIST fields (exit_fill_price, is_maker) REVERTED to OMS sibling arrays
+//     (per `slot-state-foreach-registry-with-storage-routing.md` decision tree for
+//     sparse-access ephemeral state)
+//   - `alignas(64)` on Position struct → sizeof = 192B = 3 cache lines exact
+//   - Per-slot hot-path access: guaranteed 1 cache line (TP+SL fit in first 64B
+//     of each Position; each Position[N] starts on 64B boundary)
+//   - 8B trailing alignas pad (cost: 128B per OMS); savings: ~50% reduction in
+//     hot-path cache misses at sparse-iteration access patterns
 //
-// POS.2 will add 2 SKIP_PERSIST fields (exit_fill_price + is_maker) after the
-// existing fields — wire format STILL byte-identical because Save/Load filter
-// walks only PERSIST fields (no version bump).
-template <unsigned F> struct Position {
+// Wire format: PORTFOLIO_SNAPSHOT_VERSION=5 byte-identical (PERSIST_BYTES=184
+// unchanged; alignas pad NOT in wire format; Save/Load writes 184B per position).
+//
+// POS.2's SKIP_PERSIST infrastructure (FOREACH_POSITION_FIELD_SKIP_PERSIST registry +
+// PERSIST_KIND filter dispatch in Portfolio_Save/Load) RETAINED as future-extension
+// capacity. Empty registry today; available for future fields that warrant Position-
+// locality co-access with PERSIST fields.
+template <unsigned F> struct alignas(64) Position {
     // Auto-generated fields from FOREACH_POSITION_FIELD (PositionFieldRegistry.hpp):
-    //   take_profit_price (FPN<F>)
-    //   stop_loss_price   (FPN<F>)
+    //   take_profit_price (FPN<F>)   ← hot; offset 0
+    //   stop_loss_price   (FPN<F>)   ← hot; offset 24
     //   quantity          (FPN<F>)
     //   entry_price       (FPN<F>)
     //   entry_fee         (FPN<F>)
@@ -51,19 +62,16 @@ template <unsigned F> struct Position {
     //   pair_index        (int8_t)
     #define POSITION_EMIT_FIELD(name, type, init, persist_kind, doc) type name = init;
     FOREACH_POSITION_FIELD(POSITION_EMIT_FIELD)
+    #undef POSITION_EMIT_FIELD
 
     // Manual padding to align Position to 8 bytes after int8_t pair_index.
     // Part of wire format (PORTFOLIO_SNAPSHOT_VERSION=5 byte layout).
-    // v5.15.5.C.4 Phase POS.2: this padding ALSO marks the PERSIST/SKIP_PERSIST
-    // byte boundary — Save/Load filter uses offsetof(Position, first_skip_persist_field)
-    // to compute POSITION_PERSIST_BYTES = 184.
+    // POSITION_PERSIST_BYTES = offsetof(_pad_pos) + sizeof(_pad_pos) = 184.
     uint8_t _pad_pos[7];
 
-    // SKIP_PERSIST fields (Phase POS.2): exit-side scratch captured at HandleFill
-    // SELL; consumed by Phase G's derive cascade at DrainPostFill. NOT in wire format.
-    FOREACH_POSITION_FIELD_SKIP_PERSIST(POSITION_EMIT_FIELD)
-
-    #undef POSITION_EMIT_FIELD
+    // SKIP_PERSIST fields would expand here. Empty today per C.5 revert.
+    // The `alignas(64)` decorator above implicitly adds 8B trailing pad
+    // to round sizeof(Position) to 192B = 3 cache lines exact.
 };
 
 // v5.15.5.C.4 Phase POS — static_assert layout locks per the design spec
@@ -83,13 +91,34 @@ template <unsigned F> struct Position {
 //   offset 176: pair_index          (1B)
 //   offset 177: _pad_pos            (7B)
 //   total:      184 bytes
-// v5.15.5.C.4 Phase POS.2 — sizeof grows to accommodate SKIP_PERSIST fields
-// (exit_fill_price 24B + is_maker 1B + alignment padding).
+// v5.15.5.C.5 — sizeof locked at 192B (alignas(64) padded to 3 cache lines).
 // PERSIST prefix size stays at 184 — wire format unchanged.
-static_assert(sizeof(Position<64>) == 216,
-              "Position<64> size changed — verify layout vs design spec");
-static_assert(offsetof(Position<64>, take_profit_price)  == 0,   "Position layout: take_profit_price offset");
-static_assert(offsetof(Position<64>, stop_loss_price)    == 24,  "Position layout: stop_loss_price offset");
+//
+// Per DESIGN_SPECS/hot-side-array-element-alignment-for-sparse-access.md:
+// - sizeof(Position) % 64 == 0 → each Position[N] starts on cache-line boundary
+// - Hot-path 48B read (TP + SL at offsets 0, 24) fits in first cache line of each
+//   Position[N] — guaranteed 1 cache line per slot access, regardless of N
+//
+// Position layout (post-C.5):
+//   offset 0-23:   take_profit_price (24B; HOT)
+//   offset 24-47:  stop_loss_price   (24B; HOT)
+//   offset 48-71:  quantity          (24B; warm)
+//   offset 72-95:  entry_price       (24B; warm)
+//   offset 96-119: entry_fee         (24B; warm)
+//   offset 120-143: original_tp      (24B; cold)
+//   offset 144-167: original_sl      (24B; cold)
+//   offset 168-175: entry_timestamp_us (8B)
+//   offset 176:    pair_index        (1B)
+//   offset 177-183: _pad_pos          (7B; wire-format alignment pad)
+//   offset 184-191: alignas(64) trailing pad (8B)
+//   Total: 192B = 3 cache lines exact
+static_assert(sizeof(Position<64>) == 192,
+              "Position<64> size must be 192B (alignas(64) on 184B PERSIST struct = 3 cache lines exact); "
+              "see DESIGN_SPECS/hot-side-array-element-alignment-for-sparse-access.md");
+static_assert(alignof(Position<64>) == 64,
+              "Position<64> must have 64B alignment for hot-path single-cache-line-per-slot access");
+static_assert(offsetof(Position<64>, take_profit_price)  == 0,   "Position layout: take_profit_price offset (HOT)");
+static_assert(offsetof(Position<64>, stop_loss_price)    == 24,  "Position layout: stop_loss_price offset (HOT)");
 static_assert(offsetof(Position<64>, quantity)           == 48,  "Position layout: quantity offset");
 static_assert(offsetof(Position<64>, entry_price)        == 72,  "Position layout: entry_price offset");
 static_assert(offsetof(Position<64>, entry_fee)          == 96,  "Position layout: entry_fee offset");
@@ -98,21 +127,19 @@ static_assert(offsetof(Position<64>, original_sl)        == 144, "Position layou
 static_assert(offsetof(Position<64>, entry_timestamp_us) == 168, "Position layout: entry_timestamp_us offset");
 static_assert(offsetof(Position<64>, pair_index)         == 176, "Position layout: pair_index offset");
 
-// v5.15.5.C.4 Phase POS.2 — PERSIST byte count locked.
-// Equals offset of first SKIP_PERSIST field (exit_fill_price) = end of _pad_pos = 184.
-// PORTFOLIO_SNAPSHOT_VERSION=5 wire format writes exactly POSITION_PERSIST_BYTES per
-// position (16 positions × 184 = 2944 bytes). Legacy snapshots load byte-identical.
+// PERSIST byte count — first 184 bytes of Position go to wire format.
+// Save/Load writes exactly POSITION_PERSIST_BYTES per position (16 positions × 184 = 2944 bytes
+// payload; matches PORTFOLIO_SNAPSHOT_VERSION=5 byte-identical to all prior versions).
+// The trailing 8B alignas pad is NOT written/read (sizeof(Position) - POSITION_PERSIST_BYTES = 8).
 template <unsigned F>
 constexpr size_t POSITION_PERSIST_BYTES() {
-    return offsetof(Position<F>, exit_fill_price);
+    // 9 PERSIST value fields (168B FPN + 8B uint64 + 1B int8) + 7B _pad_pos = 184B
+    return offsetof(Position<F>, _pad_pos) + 7;
 }
 static_assert(POSITION_PERSIST_BYTES<64>() == 184,
               "Position PERSIST byte count must equal 184 — wire format (PORTFOLIO_SNAPSHOT_VERSION=5) byte-identical");
-static_assert(offsetof(Position<64>, exit_fill_price) == 184, "SKIP_PERSIST field exit_fill_price must be at offset 184 (PERSIST boundary)");
-// Position layout: 9 PERSIST value fields (168B FPN + 8B uint64 + 1B int8) + 7B
-// wire-format pad = 184B PERSIST prefix. Then SKIP_PERSIST fields (Phase POS.2):
-// exit_fill_price (24B FPN<F>) + is_maker (1B uint8_t) + alignment pad = 32B.
-// Total sizeof(Position<64>) = 216B.
+static_assert(sizeof(Position<64>) - POSITION_PERSIST_BYTES<64>() == 8,
+              "alignas(64) trailing pad must be 8B (rounds 184B to 192B = 3 cache lines)");
 //======================================================================================================
 // [PORTFOLIO]
 //======================================================================================================

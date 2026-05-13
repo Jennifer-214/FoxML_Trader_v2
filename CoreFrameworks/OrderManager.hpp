@@ -354,9 +354,19 @@ struct OrderManagerState {
     // bitmap (Technique 3 of aggressive-memory-reduction-techniques.md +
     // CLAUDE.md item 20). Saves 8B/record × 16 = 128B; 1B per slot in old
     // FillRecord layout (incl. alignment pad) → 2B total at OMS level.
-    // Init/reset wired via FOREACH_OMS_FIELD (PositionFieldRegistry-style).
     uint16_t last_was_win_bitmap;
-    uint16_t _pad_lepb[2];  // align next field on 8-byte boundary (was [3]; -2B for new bitmap)
+    // v5.15.5.C.5 — is_maker reverted from Position SKIP_PERSIST to OMS-level
+    // cross-slot bitmap per slot-state-foreach-registry-with-storage-routing.md
+    // decision tree (sparse-access ephemeral state lives in sibling SoA on OMS).
+    // Enables Position to be 184B PERSIST + alignas(64) → 192B = 3 cache lines
+    // exact (hot-side-array-element-alignment-for-sparse-access.md). 1 bit/slot
+    // captured at HandleFill SELL; consumed by Phase G derive at DrainPostFill.
+    uint16_t last_is_maker_bitmap;
+    // v5.15.5.C.5 — exit_fill_price reverted from Position SKIP_PERSIST to
+    // OMS-level sibling SoA array (same reasoning as last_is_maker_bitmap).
+    // Per-slot captured at HandleFill SELL; consumed by Phase G derive at
+    // DrainPostFill. 384B (24 × 16); not persisted.
+    FPN<F> last_exit_fill_price[MAX_PORTFOLIO_POSITIONS];
 
     // v5.13.0.B — calibration logging. Populated by slow-path body when
     // the exit-model fires (mirrors last_exit_predicted_bitmap). HandleFill
@@ -1075,17 +1085,17 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         if (FPN_GreaterThan(oms->balance, oms->ks_peak_balance)) {
             oms->ks_peak_balance = oms->balance;
         }
-        // v5.15.5.C.4 Phase G — capture exit-side scratch on Position struct
-        // (SKIP_PERSIST fields added in POS.2). DrainPostFill derives
-        // exit_net_pnl / exit_entry_notional / exit_total_fees from
-        // Position state + sibling capture; FillRecord no longer stores
-        // those 3 fields. Captures happen here BEFORE the phase-invariant
-        // boundary (Phase F drainer guarantees DrainPostFill runs with
-        // Position in CLOSE form; entry_price / quantity / entry_fee are
-        // preserved through Portfolio_CloseSlot — only the active_bitmap
-        // bit is cleared).
-        oms->portfolio.positions[pslot].exit_fill_price = fill_price;
-        oms->portfolio.positions[pslot].is_maker        = (uint8_t)(o->is_maker ? 1 : 0);
+        // v5.15.5.C.5 — capture exit-side scratch on OMS sibling arrays
+        // (reverted from Position SKIP_PERSIST per
+        // slot-state-foreach-registry-with-storage-routing.md decision tree).
+        // DrainPostFill derives exit_net_pnl / exit_entry_notional /
+        // exit_total_fees from Position state + these OMS sibling captures.
+        // Phase F invariant: DrainPostFill runs with Position in CLOSE form
+        // (entry_price / quantity / entry_fee preserved through CloseSlot;
+        // only active_bitmap bit cleared).
+        oms->last_exit_fill_price[pslot] = fill_price;
+        if (o->is_maker) BITMAP_SET(oms->last_is_maker_bitmap, BITMAP_BIT_U16(pslot));
+        else             BITMAP_CLR(oms->last_is_maker_bitmap, BITMAP_BIT_U16(pslot));
         // v5.15.5.C.4 Phase J — was_win moved to cross-slot bitmap.
         if (FPN_GreaterThan(net, FPN_Zero<F>())) {
             BITMAP_SET(oms->last_was_win_bitmap, BITMAP_BIT_U16(pslot));

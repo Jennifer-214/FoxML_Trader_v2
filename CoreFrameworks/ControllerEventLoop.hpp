@@ -1390,6 +1390,8 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // (entry-side + exit-side) derive from Position state at this iter.
 
         // v5.15.5.C.4 Phase G — derive exit-side fields from Position state.
+        // v5.15.5.C.5 — exit_fill_price + is_maker reverted to OMS sibling state
+        // (slot-state-foreach-registry-with-storage-routing.md decision tree).
         // Phase F's invariant guarantees Position is in CLOSE form here
         // (DrainPostFill runs between Phase A SELL processing and Phase B BUY
         // processing within each drainer cycle; Portfolio_CloseSlot only clears
@@ -1397,9 +1399,10 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // is gated to Phase B). See
         // DESIGN_SPECS/phase-separated-drainer-for-safe-cross-temporal-derives.md.
         const auto& pos = oms->portfolio.positions[slot];
+        const bool slot_is_maker = BITMAP_IS_SET(oms->last_is_maker_bitmap, BITMAP_BIT_U16(slot));
         const FPN<F> exit_entry_notional = FPN_Mul(pos.entry_price, pos.quantity);
-        const FPN<F> exit_notional       = FPN_Mul(pos.exit_fill_price, pos.quantity);
-        const FPN<F> exit_fee_rate       = pos.is_maker ? oms->fee_rate_maker : oms->fee_rate_taker;
+        const FPN<F> exit_notional       = FPN_Mul(oms->last_exit_fill_price[slot], pos.quantity);
+        const FPN<F> exit_fee_rate       = slot_is_maker ? oms->fee_rate_maker : oms->fee_rate_taker;
         const FPN<F> exit_fee            = FPN_Mul(exit_notional, exit_fee_rate);
         const FPN<F> exit_total_fees     = FPN_Add(pos.entry_fee, exit_fee);
         const FPN<F> gross               = FPN_Sub(exit_notional, exit_entry_notional);
