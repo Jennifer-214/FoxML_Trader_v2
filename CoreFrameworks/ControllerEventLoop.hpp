@@ -100,25 +100,21 @@ namespace tt {
 //======================================================================================================
 template <unsigned F>
 struct CoreSlowState {
-    // Per-cadence rolling stats (RegimeDetector inputs).
-    RollingStats<F, 128>    rolling_short;
-    RollingStats<F, 512>    rolling_long;
-    RollingStats<F, 256>    rolling_medium;
-    RollingStats<F, 1024>   rolling_baseline;
-
-    // Per-cadence regime / flow state.
-    RORRegressor<F>         regime_ror;
-    CumDeltaState<F>        cumdelta_state;
-    TickRateState           tick_rate_state;
-    BookImbalanceHistory<F, 1024> book_imb_history;
-    FlowState               flow_state;
-    LargeTradeState<F, 1024> large_trade_state;
-    SpreadState<F, 1024>    spread_state;
-
-    // Per-tick: EMA price. Updated EVERY tick in producer's fan_out;
-    // hot-tail consumers (Regime_ComputeSignals) read at slow-path
-    // cadence. In per_core_slow this is a producer→slow-path cross-
-    // thread read (eventual consistency, x86-acceptable on aligned word).
+    // ---- v5.15.5.B.1 — HOT cluster at struct head (lazy-rebuild gate + ema_price) ----
+    //
+    // EventLoop_RebuildOneCore reads these THREE fields FIRST every cycle to
+    // run the lazy-rebuild gate (CLAUDE.md item 18 Pattern 8a). Placing them
+    // at offset 0 means skip-eligible cycles touch ONE cache line and bail;
+    // pre-v5.15.5.B.1 they sat at struct TAIL (offset ~278384), guaranteeing
+    // a cold-cache miss every cycle (~100 ns each, ~30-50% of cycles fire
+    // the bail per CLAUDE.md item 18 lazy-rebuild stat). See
+    // decision-first-cluster-layout-pattern.md Step 4 (forward-sequential
+    // subsequent fields).
+    //
+    // ema_price (per-tick: producer fan_out updates EVERY tick; slow-path
+    // consumers read at slow-path cadence; in per_core_slow this is a
+    // producer→slow-path cross-thread read — eventual consistency,
+    // x86-acceptable on aligned word).
     FPN<F>                  ema_price;
 
     // v5.12.2.B — lazy slow-path rebuild bookkeeping. Updated at the
@@ -133,7 +129,35 @@ struct CoreSlowState {
     // fresh). Single-writer (this core's slow-path); no atomics.
     uint64_t                us_at_last_rebuild;
     FPN<F>                  price_at_last_rebuild;
+
+    // ---- WARM/COLD cluster: per-cadence rolling/regime/flow state ----
+    //
+    // Per-cadence rolling stats (RegimeDetector inputs). alignas(64) on
+    // RollingStats::head propagates the discipline to all W instantiations.
+    RollingStats<F, 128>    rolling_short;
+    RollingStats<F, 512>    rolling_long;
+    RollingStats<F, 256>    rolling_medium;
+    RollingStats<F, 1024>   rolling_baseline;
+
+    // Per-cadence regime / flow state.
+    RORRegressor<F>         regime_ror;
+    CumDeltaState<F>        cumdelta_state;
+    TickRateState           tick_rate_state;
+    BookImbalanceHistory<F, 1024> book_imb_history;
+    FlowState               flow_state;
+    LargeTradeState<F, 1024> large_trade_state;
+    SpreadState<F, 1024>    spread_state;
 };
+
+// v5.15.5.B.1 — Layout invariant. ema_price + lazy_rebuild gate fields MUST
+// sit at offset 0 of CoreSlowState (decision-first-cluster-layout-pattern.md
+// Step 2). Hoisted from struct TAIL — the per-cycle lazy-rebuild gate at
+// EventLoop_RebuildOneCore reads them FIRST every cycle; offset-0 placement
+// means skip-eligible cycles touch one cache line and bail.
+static_assert(offsetof(CoreSlowState<64>, ema_price) == 0,
+              "ema_price MUST sit at CoreSlowState offset 0 — per-cycle lazy-"
+              "rebuild gate reads it first; see decision-first-cluster-layout-"
+              "pattern.md Step 4 (forward-sequential subsequent fields).");
 
 template <unsigned F>
 inline void CoreSlowState_Init(CoreSlowState<F>* s) {
@@ -169,21 +193,77 @@ inline void CoreSlowState_Init(CoreSlowState<F>* s) {
 // statistics (entries_processed / exits_processed) are bumped from the drain
 // loop, useful for monitoring per-core throughput in the TUI later.
 //======================================================================================================
+// v5.15.5.B.1 — Fields grouped into HOT/WARM/COLD clusters by access frequency
+// (cache-layout-discipline-for-hot-side-structs.md Rule 4); intra-cluster
+// ordering is decision-first (decision-first-cluster-layout-pattern.md):
+// gate_state bitmap at offset 0 for cycle-entry bail-out + forward-sequential
+// subsequent fields for Intel/AMD stride-prefetcher friendliness.
+//
+// Explicit `struct alignas(64)` makes inter-slot false-sharing prevention
+// LOCAL — previously TRANSITIVE via embedded CoreLatencyStats's alignas(64);
+// a future refactor removing that would silently break the cores[16] inter-
+// slot guarantee. Static_asserts after the struct close lock the invariant
+// at compile time.
+//
+// Safe to reorder: ShardedSnapshotPersist is field-by-field fwrite (no memcpy
+// of struct bytes); no HMAC / SHA-256 / wire-format path uses raw CoreContext
+// bytes; safety greps cleared 2026-05-12. CLAUDE.md item 27 (struct-padding
+// determinism) explicitly NOT in scope — CoreContext is not in byte-
+// equivalence path.
 template <unsigned F>
-struct CoreContext {
-    ExecutionCore<F>* core;        // registered execution core pointer
-    FPN<F> intended_tp;            // TP to apply when this core's next entry fires
-    FPN<F> intended_sl;            // SL to apply when this core's next entry fires
-    FPN<F> intended_qty;           // quantity to size the next entry to
-    FPN<F> allocated_balance;      // capital share for this core (set by Regime_AllocateCores in phase 06+)
-    GateParameters<F> pending_params; // staged params, pushed on next _PushParameters
-    uint8_t  strategy_id;          // STRATEGY_* constant; STRATEGY_NONE means "do not trade"
-    uint8_t  dirty;                // 1 = pending_params should be pushed to the core
-    uint8_t  _pad[6];
-    void*    model_handle;         // CoreModelZoo<F>* for STRATEGY_ML cores (nullptr for others)
-    void*    ensemble_handle;      // v5.10.0a.G.5 — EnsembleModelZoo<F>* when multi-horizon active; nullptr = single-zoo path (default)
-    uint64_t entries_processed;    // bumped on entry event
-    uint64_t exits_processed;      // bumped on exit event
+struct alignas(64) CoreContext {
+    // ════════════════════════════════════════════════════════════════════
+    // HOT CLUSTER — touched every slow-path cycle.
+    // Decision-first ordering: dispatch metadata at offset 0 (gate_state
+    // bitmap → handles → strategy enums) so skip-eligible cycles touch
+    // ONE cache line + the CoreSlowState head fields and bail.
+    // ════════════════════════════════════════════════════════════════════
+
+    // v5.14.9.B.0 — per-core slow-path gate cache (FOREACH_SLOW_PATH_GATE
+    // PER_CORE entries). Populated by SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE
+    // at slow-path entry per core (after ControllerConfig_ResolveForCore).
+    // Read via BITMAP_IS_SET(gate_state.flags, MASK_<NAME>) at use sites
+    // in ML_BuildParameters body (mctx->gate_state pointer). Single-
+    // threaded per-core access; no atomics needed. At offset 0 of HOT
+    // cluster so decision-first bail-out per ND3.
+    SlowPathGateState gate_state;
+    ExecutionCore<F>* core;             // registered execution core pointer
+    // v5.1.0 (per-core data-plane decoupling): each engine OWNS its
+    // rolling/regime/flow state. POINTER (not inline) — CoreSlowState is
+    // ~272KB per engine; 16 inline copies would overflow the 8MB default
+    // stack on tests. Heap-allocated in EventLoopState_Init; freed in
+    // EventLoopState_Free. Slow-path-only access; indirection cost
+    // negligible at slow-path cadence.
+    CoreSlowState<F>* slow_state;
+    void*    model_handle;              // CoreModelZoo<F>* for STRATEGY_ML cores (nullptr for others)
+    void*    ensemble_handle;           // v5.10.0a.G.5 — EnsembleModelZoo<F>* when multi-horizon active; nullptr = single-zoo path
+    // v5.4.0 Phase 1.1 — per-strategy state (lifecycle stage 1 + 2:
+    // Init/Adapt). Heap-allocated by Strategy_InitPerCore at engine boot;
+    // freed by Strategy_FreePerCore on shutdown / strategy hot-swap.
+    // Concrete type depends on strategy_state_kind:
+    //   STRATEGY_MOMENTUM       → MomentumState<F>*
+    //   STRATEGY_MEAN_REVERSION → MeanReversionState<F>*
+    //   STRATEGY_SIMPLE_DIP     → SimpleDipState<F>*
+    //   STRATEGY_EMA_CROSS      → EmaCrossState<F>*
+    //   STRATEGY_ML             → MLStrategyState<F>*
+    //   STRATEGY_AUTO/NONE      → nullptr (no state needed)
+    // void* used to avoid pulling all strategy headers into
+    // ControllerEventLoop.hpp. Single-writer per core (per-core slow-path
+    // thread), single-reader (same thread). Snapshot persistence: only
+    // strategy_state_kind is persisted; on load, Strategy_InitPerCore is
+    // called to reallocate state from scratch matching the persisted kind.
+    void*    strategy_state;
+    uint8_t  strategy_id;               // STRATEGY_* constant; STRATEGY_NONE means "do not trade"
+    uint8_t  resolved_strategy_id;      // v4.0.4 — after AUTO regime resolution; equals strategy_id for non-AUTO cores
+    uint8_t  dirty;                     // 1 = pending_params should be pushed to the core (.B.3 → core_state_flags bit)
+    uint8_t  strategy_state_kind;       // matches strategy_id at allocation; 0xFF = uninitialized
+
+    // v4.0.3 B: per-core regime state for STRATEGY_AUTO. Tracks current
+    // regime + hysteresis so the auto-mode core's strategy choice doesn't
+    // flap on noise. Each AUTO core has its own state — different cores
+    // can detect different regimes if their cfg differs.
+    RegimeState<F> regime_state;
+
     // Phase 6prep (sharded c12-c14): per-core ML confidence loop. The scorer
     // is fed (prediction, realized_return) pairs at exit fill time and read
     // on the slow path during ML_BuildParameters to damp the entry threshold.
@@ -200,27 +280,30 @@ struct CoreContext {
     // Single-position-per-core invariant means active_prediction is plenty;
     // multi-position would need a per-position ring.
     ConfidenceScorer confidence;
-    // v5.14.1.G — portfolio turnover diagnostic. Per-core; ephemeral
-    // (NOT in PortfolioController.hpp:2094 fwrite path; sharded-only
-    // state). Populated per slow-path cycle from weights_buf top-K.
-    // Surfaced via PerCoreSnap.ml_portfolio_turnover. State + math
-    // in ML_Headers/RollingTurnover.hpp.
-    RollingTurnover turnover;
-    // v5.10.0e — drift detection. Sampled post-fill (when
-    // ConfidenceScorer_Update fires for ML cores). Engine emits CRITICAL
-    // log on sustained-breach + optionally trips per-core kill_switch
-    // when cfg.auto_kill_on_drift=1. See ConfidenceScore.hpp DriftHistory.
-    DriftHistory drift_history;
-    // v5.14.9.B.0 — per-core slow-path gate cache (FOREACH_SLOW_PATH_GATE
-    // PER_CORE entries). Populated by SLOW_PATH_GATE_AUTOPOPULATE_PER_CORE
-    // at slow-path entry per core (after ControllerConfig_ResolveForCore).
-    // Read via BITMAP_IS_SET(gate_state.flags, MASK_<NAME>) at use sites
-    // in ML_BuildParameters body (mctx->gate_state pointer). Single-
-    // threaded per-core access; no atomics needed.
-    SlowPathGateState gate_state;
-    double staged_prediction;      // prediction from last ML rebuild
-    double active_prediction;      // prediction at last entry submit (0 = no open pos)
-    double last_confidence;        // most recent ConfidenceScorer_Compute result
+
+    GateParameters<F> pending_params;   // staged params, pushed on next _PushParameters
+
+    FPN<F> intended_tp;                 // TP to apply when this core's next entry fires
+    FPN<F> intended_sl;                 // SL to apply when this core's next entry fires
+    FPN<F> intended_qty;                // quantity to size the next entry to
+    FPN<F> allocated_balance;           // capital share for this core (set by Regime_AllocateCores in phase 06+)
+
+    // v4.0.3 D8 halt reason: most recent reason the gate was zero-gated.
+    // 0 = ok / armed; 1 = spacing; 2 = vwap; 3 = long-slope; 4 = vol-delta;
+    // 5 = min-stddev; 6 = sl-cooldown; 7 = warmup; 8 = core-budget (Phase 2.2);
+    // 9 = core-kill (Phase 3); 10 = imbalance (Track E.3, surfaced v5.6.0).
+    // Displayed in GUI per core.
+    uint8_t  halt_reason;
+    // v5.6.2: strategy-internal halt reason. Distinct from halt_reason
+    // (controller-level). Each strategy's _BuildParameters sets this
+    // to a SHALT_* code (see StrategyInterface.hpp) before zero-gating
+    // or setting BUY_BLOCKED. SHALT_OK = no strategy-level veto.
+    // GUI display order: halt_reason > 0 > strategy_halt_reason > 0.
+    uint8_t  strategy_halt_reason;
+
+    double staged_prediction;           // prediction from last ML rebuild
+    double active_prediction;           // prediction at last entry submit (0 = no open pos)
+    double last_confidence;             // most recent ConfidenceScorer_Compute result
     // v5.14.9.B — soft risk degradation ladder factor (composite confidence
     // × FOREACH_DEGRADATION_CURVE compute fn). 1.0 when ladder inactive
     // (default cfg) preserves pre-v5.14.9 behavior; (0, 1) when active +
@@ -242,36 +325,21 @@ struct CoreContext {
     // to MLStatusPanel for the `tp: 0.050% (h2)` display pattern.
     int     last_buy_dominant_horizon;  // -1 = no buy-side dispatch this cycle
     uint8_t last_barrier_mode_used;     // active mode enum (FOREACH_BARRIER_BLEND_MODE)
-    uint32_t barrier_shadow_event_count; // total shadow ring writes (modes 3/4)
-    // v5.9.0b — ML observability extensions (V5_9_AUDIT-#2, #3).
-    // Surface model load failures, ML decision context, and NaN counters
-    // to the operator via TUISnapshot + ML Status panel + entry log.
-    int      model_load_failed;            // 1 = model attempted but refused/missing (distinct from "no model configured")
-    // v5.9.5i — cfg drift counters (populated in EngineSharded boot;
-    // TUI_CopySnapshotSharded mirrors to PerCoreSnap; ML Status panel
-    // renders summary).
-    uint8_t  cfg_drift_tier1_count;
-    uint8_t  cfg_drift_tier2_count;
-    uint8_t  cfg_drift_strict_refused;
-    uint64_t last_ml_critical_log_us;      // rate-limit gate for ML→SimpleDip CRITICAL log (per-core)
-    double   last_ml_threshold;            // ml_buy_threshold at last decision (display + entry log)
-    double   last_ml_effective_threshold;  // post-confidence-damping threshold actually used
-    uint32_t nan_feature_events_total;     // count of Features_PackAll -1 sentinel returns on this core
-    uint32_t nan_prediction_events_total;  // count of Model_Predict NaN/Inf events on this core
-    // v5.9.1 — edge-trigger for boot-time per-core warmup-complete log.
-    // RebuildOneCore checks (rolling_short.count >= min_warmup_samples)
-    // every cycle; fires the log exactly once per core (and per session)
-    // by setting this flag. Distinct from the global startup gate at
-    // EngineSharded.hpp:1420 (which uses core 0's count to release ALL
-    // cores from CONTROLLER_WARMUP). Per-core readiness lives here.
-    uint8_t warmup_log_emitted;
+
+    // ════════════════════════════════════════════════════════════════════
+    // WARM CLUSTER — per-event/per-fill accounting; NOT per-cycle.
+    // alignas(64) on entries_processed marks the cluster boundary.
+    // ════════════════════════════════════════════════════════════════════
+    alignas(64) uint64_t entries_processed;  // bumped on entry event
+    uint64_t exits_processed;           // bumped on exit event
+
     // v4.0.3 spacing: last entry price for this core, set by drainer on
     // entry submit. Strategy _BuildParameters checks
     // |new_entry - last_entry_price| < stddev × spacing_multiplier and
     // zero-gates if too close, preventing entry clustering at similar
     // prices. Mirrors legacy PortfolioController spacing logic.
-    FPN<F> last_entry_price;
-    uint64_t last_entry_tick;      // for time-based exit (A3)
+    FPN<F>   last_entry_price;
+    uint64_t last_entry_tick;           // for time-based exit (A3)
     // v4.7.6: wall-clock microseconds at the leg-A entry stamp site so
     // GUI can show "hold time" for open positions. Independent of
     // last_entry_tick (which is a producer count, not seconds).
@@ -281,70 +349,26 @@ struct CoreContext {
     // zero-gated while > 0. Optionally adaptive — scales by trend confidence
     // at SL time (cfg.sl_cooldown_adaptive).
     uint32_t sl_cooldown_remaining;
-    // v4.0.3 D8 halt reason: most recent reason the gate was zero-gated.
-    // 0 = ok / armed; 1 = spacing; 2 = vwap; 3 = long-slope; 4 = vol-delta;
-    // 5 = min-stddev; 6 = sl-cooldown; 7 = warmup; 8 = core-budget (Phase 2.2);
-    // 9 = core-kill (Phase 3); 10 = imbalance (Track E.3, surfaced v5.6.0).
-    // Displayed in GUI per core.
-    uint8_t  halt_reason;
-    // v5.6.2: strategy-internal halt reason. Distinct from halt_reason
-    // (controller-level). Each strategy's _BuildParameters sets this
-    // to a SHALT_* code (see StrategyInterface.hpp) before zero-gating
-    // or setting BUY_BLOCKED. SHALT_OK = no strategy-level veto.
-    // GUI display order: halt_reason > 0 > strategy_halt_reason > 0.
-    uint8_t  strategy_halt_reason;
-    // v5.6.3 — gate diagnostic comparands. Captured by the controller's
-    // post-Strategy_BuildParameters gate checks (spacing, vwap, long-slope,
-    // vol-delta, min-stddev) so the GUI can show actual vs threshold per
-    // gate without recomputing (single-source rule —
-    // EXECUTION_DISPLAY_INVARIANTS.md). Snapshot copies into PerCoreSnap
-    // diag_* fields. Reset by the rebuild loop before each pass.
-    FPN<F> diag_spacing_actual;     // |bg_threshold - last_entry|
-    FPN<F> diag_spacing_floor;      // stddev * spacing_multiplier
-    FPN<F> diag_vwap_actual;        // bg_price_threshold
-    FPN<F> diag_vwap_threshold;     // vwap - vwap*vwap_offset
-    FPN<F> diag_long_slope;         // long_rel_slope
-    FPN<F> diag_long_slope_min;     // cfg.min_long_slope
-    FPN<F> diag_volume_delta;       // rolling.volume_delta
-    FPN<F> diag_volume_delta_min;   // cfg.min_buy_delta
-    FPN<F> diag_stddev_pct;         // rolling.price_stddev / rolling.price_avg
-    FPN<F> diag_stddev_pct_min;     // cfg.min_stddev_pct
-    FPN<F> diag_tp_pct_actual;      // out.tp_pct
-    FPN<F> diag_tp_pct_floor;       // 3 * fee_rate_taker
-    // v5.6.6: previous packed gate-state byte. Used by the gate-state
-    // edge-trigger health log emit to detect transitions. Layout:
-    //   bits 0..3 : halt_reason          (0..10 fits in 4 bits)
-    //   bits 4..7 : strategy_halt_reason (0..10)
-    //   bit  8     : (BUY_BLOCKED >> 5) & 1
-    //   bit  9     : permission
-    // Stored as uint16_t. Fresh state computed at end of RebuildOneCore;
-    // emit cat="gate" log only when packed_now != prev_gate_log_state.
-    uint16_t prev_gate_log_state;
-    // v4.0.3 B: per-core regime state for STRATEGY_AUTO. Tracks current
-    // regime + hysteresis so the auto-mode core's strategy choice doesn't
-    // flap on noise. Each AUTO core has its own state — different cores
-    // can detect different regimes if their cfg differs.
-    RegimeState<F> regime_state;
-    // v4.0.3 D10: per-core P&L regression feeder for adaptive feedback.
-    // Drainer pushes realized return on each exit; slow path reads slope
-    // to shift resolved_cfg.entry_offset_pct + volume_multiplier within
-    // [offset_min/max] + [vol_mult_min/max] bounds. Mirrors legacy
-    // MeanReversion_Adapt / Momentum_Adapt regression-driven adaptation.
-    RegressionFeederX<F> pnl_feeder;
-    // v4.0.4: resolved strategy_id (after AUTO regime resolution). Equals
-    // strategy_id for non-AUTO cores. For AUTO cores, holds the concrete
-    // strategy from REGIME_STRATEGY_TABLE for the current detected regime.
-    // Snapshot reads this for the GUI display so AUTO rows show e.g. "AUTO (DIP)".
-    uint8_t resolved_strategy_id;
+    // v4.2.1 — slow-path cycles since last fill on this core. Resets on
+    // entry. Used as a "death-spiral" detector: if a core hasn't fired
+    // in many cycles, the pnl_feeder is full of stale regression data
+    // that's no longer informative — clear it so adaptive feedback
+    // (D10) doesn't keep applying shifts based on ancient outcomes.
+    // Mirrors legacy PortfolioController_Tick line 1641 mechanism but
+    // doesn't need the filter-decay step (sharded recomputes
+    // resolved_cfg fresh each rebuild, so there's no live-filter state
+    // to drift back toward defaults).
+    uint32_t idle_cycles;
+
     // v4.0.4: per-core P&L tracking. The OMS keeps a single global
     // realized_pnl across all cores (since portfolio is shared); these
     // counters split it out by source core for the Account panel and any
     // future per-core kill switch / risk re-allocation logic. Updated in
     // EventLoop_OnEvent exit branch, alongside oms->realized_pnl.
-    FPN<F> core_realized;          // sum of net P&L from this core's exits
-    FPN<F> core_fees;              // sum of fees paid by this core's fills
-    uint32_t core_wins;            // exits with net > 0
-    uint32_t core_losses;          // exits with net <= 0
+    FPN<F>   core_realized;             // sum of net P&L from this core's exits
+    FPN<F>   core_fees;                 // sum of fees paid by this core's fills
+    uint32_t core_wins;                 // exits with net > 0
+    uint32_t core_losses;               // exits with net <= 0
     // v4.7.21: per-trade W/L pairing under partial exits. When partials are
     // enabled, leg A and leg B close as separate fills, but they belong to
     // ONE trade idea. Counting each leg independently overstates trade count
@@ -354,7 +378,7 @@ struct CoreContext {
     // partner closes we compute total net and bump core_wins/core_losses by 1.
     // partials disabled → bypass pairing, per-leg-A logic is correct
     // (single-leg trades, no partner exists).
-    FPN<F> partner_pending_pnl;
+    FPN<F>   partner_pending_pnl;
     // partner_pending_active migrated to EventLoopState.partner_pending_bitmap
     // (v5.14.9.G; 1 bit per core in single uint16_t bitmap)
     // v4.7.25: per-core gross win/loss accumulators, mirroring the legacy
@@ -366,8 +390,8 @@ struct CoreContext {
     // Pre-v4.7.25 sharded snapshot left snap->avg_win / avg_loss /
     // profit_factor / expectancy at zero — these accumulators feed those
     // fields in TUI_CopySnapshotSharded.
-    FPN<F> core_gross_wins;
-    FPN<F> core_gross_losses;
+    FPN<F>   core_gross_wins;
+    FPN<F>   core_gross_losses;
     // Phase 2.1: per-core open notional. Sum of (entry_price × qty) across
     // currently-open positions for this core. Updated branchlessly in
     // EventLoop_OnEvent — entry adds notional, exit subtracts the SAME
@@ -382,7 +406,8 @@ struct CoreContext {
     // positions). Single-position-per-core invariant means this is the
     // entry notional of one position today, but the sum-of-positions
     // model survives future multi-position-per-core.
-    FPN<F> core_open_notional;
+    FPN<F>   core_open_notional;
+
     // Phase 3: per-core kill switch state. Realized + MTM unrealized P&L
     // tracked against a peak-to-trough drawdown. When dd exceeds threshold
     // (and absolute drop exceeds min_kill_loss floor), the core is "killed"
@@ -396,27 +421,36 @@ struct CoreContext {
     // Manual reset via TUISharedState::kill_reset_per_core[N] resets the
     // trip flag and refreshes peak to current. Aggregate OMS-level breaker
     // remains as backstop for whole-account drawdown.
-    FPN<F> core_peak_balance;       // peak of current_value over core's lifetime
-    FPN<F> core_dd_pct;             // current drawdown % (display field, recomputed each rebuild)
-    uint8_t core_kill_tripped;      // 1 = killed; entries zero-gated with HALT_CORE_KILL
-    uint8_t  _pad_kill[3];          // alignment
-    uint32_t core_ks_trips_total;   // lifetime trip count (for forensics)
-    // v4.2.1 — slow-path cycles since last fill on this core. Resets on
-    // entry. Used as a "death-spiral" detector: if a core hasn't fired
-    // in many cycles, the pnl_feeder is full of stale regression data
-    // that's no longer informative — clear it so adaptive feedback
-    // (D10) doesn't keep applying shifts based on ancient outcomes.
-    // Mirrors legacy PortfolioController_Tick line 1641 mechanism but
-    // doesn't need the filter-decay step (sharded recomputes
-    // resolved_cfg fresh each rebuild, so there's no live-filter state
-    // to drift back toward defaults).
-    uint32_t idle_cycles;
-    // v4.7.42 (Phase E): per-core slow-path latency profiling. Mirrors
-    // ExecutionCore::latency_stats (hot-path) for the slow-path. Sampled
-    // around the per-core slow-path body in engine_arch=per_core_slow.
-    // In centralized mode, total_count stays 0 (no samples collected —
-    // single producer slow-path doesn't break per-core, by design).
-    CoreLatencyStats slow_path_latency;
+    FPN<F>   core_peak_balance;         // peak of current_value over core's lifetime
+    FPN<F>   core_dd_pct;               // current drawdown % (display field, recomputed each rebuild)
+    uint8_t  core_kill_tripped;         // 1 = killed; entries zero-gated with HALT_CORE_KILL (.B.3 → bitmap bit)
+    uint8_t  _pad_kill[3];              // alignment (.B.3 may collapse after bit-pack)
+    uint32_t core_ks_trips_total;       // lifetime trip count (for forensics)
+
+    // v4.0.3 D10: per-core P&L regression feeder for adaptive feedback.
+    // Drainer pushes realized return on each exit; slow path reads slope
+    // to shift resolved_cfg.entry_offset_pct + volume_multiplier within
+    // [offset_min/max] + [vol_mult_min/max] bounds. Mirrors legacy
+    // MeanReversion_Adapt / Momentum_Adapt regression-driven adaptation.
+    RegressionFeederX<F> pnl_feeder;
+    // v5.14.1.G — portfolio turnover diagnostic. Per-core; ephemeral
+    // (NOT in PortfolioController.hpp:2094 fwrite path; sharded-only
+    // state). Populated per slow-path cycle from weights_buf top-K.
+    // Surfaced via PerCoreSnap.ml_portfolio_turnover. State + math
+    // in ML_Headers/RollingTurnover.hpp.
+    RollingTurnover turnover;
+    // v5.10.0e — drift detection. Sampled post-fill (when
+    // ConfidenceScorer_Update fires for ML cores). Engine emits CRITICAL
+    // log on sustained-breach + optionally trips per-core kill_switch
+    // when cfg.auto_kill_on_drift=1. See ConfidenceScore.hpp DriftHistory.
+    DriftHistory drift_history;
+
+    // ════════════════════════════════════════════════════════════════════
+    // COLD CLUSTER — display-only / cross-thread / lifetime / boot.
+    // (.B.2 will extract display-only fields → CoreContextDisplayMeta sibling
+    // struct; .B.2 will also wrap sp_* atomics in alignas(64) sp_telemetry.)
+    // ════════════════════════════════════════════════════════════════════
+
     // v5.1.1 + v5.1.3 (slow-path work breakdown): per-section profiling.
     // Same single-writer rule as slow_path_latency.
     //
@@ -443,10 +477,11 @@ struct CoreContext {
     static constexpr int SP_SECTION_TRAIL_SL    = 4;
     static constexpr int SP_SECTION_COUNT       = 5;
     // Back-compat aliases — earlier names kept so external callers don't
-    // break. New code should use the names above.
+    // break. New code should use the names above. (.B.5 — FOREACH_SP_SECTION
+    // close removes these aliases.)
     static constexpr int SP_SECTION_OTHER       = SP_SECTION_ROLLING;
     static constexpr int SP_SECTION_PUSH_PARAMS = SP_SECTION_PUSH;
-    CoreLatencyStats slow_path_breakdown[SP_SECTION_COUNT];
+
     // v5.0.3 (Engine Topology advanced): live thread observability fields.
     // Single-writer is the slow-path thread that owns this core (or the
     // producer in centralized mode for cores it iterates). GUI publish
@@ -459,52 +494,108 @@ struct CoreContext {
     //                    (reset_in_progress), 2=cadence-yield, 3=paused
     //                    (user via paused_engines_mask). Updated at the
     //                    transition points; readers see eventual values.
-    std::atomic<uint64_t> sp_last_tick_us;
+    // alignas(64) on sp_last_tick_us = cross-thread atomics cluster boundary
+    // (cross-thread-snapshot-publish-cluster-isolation.md); .B.2 wraps these
+    // in an explicit `SlowPathTelemetry` struct.
+    alignas(64) std::atomic<uint64_t> sp_last_tick_us;
     std::atomic<uint64_t> sp_cycles_total;
     std::atomic<uint64_t> sp_yield_count;
     std::atomic<uint8_t>  sp_state;
-    // v5.1.0 (per-core data-plane decoupling): each engine OWNS its
-    // rolling/regime/flow state. Centralized: producer writes all N.
-    // per_core_slow: per-core slow-path c writes its own (per-cadence
-    // fields) + producer writes ema_price to all N (per-tick). See
-    // CoreSlowState<F> doc above.
-    //
-    // POINTER (not inline) because CoreSlowState is ~3MB per engine and
-    // 16 inline copies would overflow the 8MB default stack on tests
-    // that put EventLoopState on the stack. Heap-allocated in
-    // EventLoopState_Init; freed in EventLoopState_Free. Slow-path-only
-    // access — the indirection cost is negligible at slow-path cadence.
-    CoreSlowState<F>* slow_state;
 
-    // v5.4.0 Phase 1.1 — per-strategy state (lifecycle stage 1 + 2: Init/Adapt).
-    // Heap-allocated by Strategy_InitPerCore at engine boot; freed by
-    // Strategy_FreePerCore on shutdown / strategy hot-swap. Concrete type
-    // depends on strategy_state_kind:
-    //   STRATEGY_MOMENTUM       → MomentumState<F>*
-    //   STRATEGY_MEAN_REVERSION → MeanReversionState<F>*
-    //   STRATEGY_SIMPLE_DIP     → SimpleDipState<F>*
-    //   STRATEGY_EMA_CROSS      → EmaCrossState<F>*
-    //   STRATEGY_ML             → MLStrategyState<F>*
-    //   STRATEGY_AUTO/NONE      → nullptr (no state needed)
-    // void* used to avoid pulling all strategy headers into ControllerEventLoop.hpp.
-    // Concrete typing happens at Strategy_InitPerCore call sites where each
-    // strategy's header is included.
-    //
-    // Single-writer per core (the per-core slow-path thread), single-reader
-    // (same thread reading state for _Adapt and _BuildParameters). No
-    // cross-thread access — strategy state stays per-engine just like
-    // slow_state above.
-    //
-    // Snapshot persistence (v5.4 → SHARDED_SNAPSHOT_VERSION 4): only
-    // strategy_state_kind is persisted. On load, Strategy_InitPerCore
-    // is called to reallocate state from scratch matching the persisted
-    // kind. Treated as session-only — strategies' adapted parameters
-    // converge within a few cadences post-restart, so this is acceptable
-    // for v5.4. Full persistence deferred to v5.5.0.
-    void*    strategy_state;        // owned by this core's slow-path thread
-    uint8_t  strategy_state_kind;   // matches strategy_id at allocation; 0xFF = uninitialized
-    uint8_t  _pad_strategy_state[7];
+    // v4.7.42 (Phase E): per-core slow-path latency profiling. Mirrors
+    // ExecutionCore::latency_stats (hot-path) for the slow-path. Sampled
+    // around the per-core slow-path body in engine_arch=per_core_slow.
+    // In centralized mode, total_count stays 0 (no samples collected —
+    // single producer slow-path doesn't break per-core, by design).
+    // (.B.2 → CoreContextDisplayMeta extraction)
+    CoreLatencyStats slow_path_latency;
+    CoreLatencyStats slow_path_breakdown[SP_SECTION_COUNT];
+
+    // v5.6.3 — gate diagnostic comparands. Captured by the controller's
+    // post-Strategy_BuildParameters gate checks (spacing, vwap, long-slope,
+    // vol-delta, min-stddev) so the GUI can show actual vs threshold per
+    // gate without recomputing (single-source rule —
+    // EXECUTION_DISPLAY_INVARIANTS.md). Snapshot copies into PerCoreSnap
+    // diag_* fields. Reset by the rebuild loop before each pass.
+    // (.B.4 — FOREACH_GATE_DIAG registry-driven layout; .B.2 — moves to
+    // CoreContextDisplayMeta sibling struct.)
+    FPN<F> diag_spacing_actual;         // |bg_threshold - last_entry|
+    FPN<F> diag_spacing_floor;          // stddev * spacing_multiplier
+    FPN<F> diag_vwap_actual;            // bg_price_threshold
+    FPN<F> diag_vwap_threshold;         // vwap - vwap*vwap_offset
+    FPN<F> diag_long_slope;             // long_rel_slope
+    FPN<F> diag_long_slope_min;         // cfg.min_long_slope
+    FPN<F> diag_volume_delta;           // rolling.volume_delta
+    FPN<F> diag_volume_delta_min;       // cfg.min_buy_delta
+    FPN<F> diag_stddev_pct;             // rolling.price_stddev / rolling.price_avg
+    FPN<F> diag_stddev_pct_min;         // cfg.min_stddev_pct
+    FPN<F> diag_tp_pct_actual;          // out.tp_pct
+    FPN<F> diag_tp_pct_floor;           // 3 * fee_rate_taker
+
+    // v5.6.6: previous packed gate-state byte. Used by the gate-state
+    // edge-trigger health log emit to detect transitions. Layout:
+    //   bits 0..3 : halt_reason          (0..10 fits in 4 bits)
+    //   bits 4..7 : strategy_halt_reason (0..10)
+    //   bit  8     : (BUY_BLOCKED >> 5) & 1
+    //   bit  9     : permission
+    // Stored as uint16_t. Fresh state computed at end of RebuildOneCore;
+    // emit cat="gate" log only when packed_now != prev_gate_log_state.
+    uint16_t prev_gate_log_state;
+    uint32_t barrier_shadow_event_count; // total shadow ring writes (modes 3/4)
+    uint64_t last_ml_critical_log_us;    // rate-limit gate for ML→SimpleDip CRITICAL log (per-core)
+    double   last_ml_threshold;          // ml_buy_threshold at last decision (display + entry log)
+    double   last_ml_effective_threshold; // post-confidence-damping threshold actually used
+    uint32_t nan_feature_events_total;   // count of Features_PackAll -1 sentinel returns on this core
+    uint32_t nan_prediction_events_total; // count of Model_Predict NaN/Inf events on this core
+
+    // v5.9.0b — ML observability extensions (V5_9_AUDIT-#2, #3).
+    // Surface model load failures + cfg-drift state to the operator via
+    // TUISnapshot + ML Status panel + entry log.
+    int      model_load_failed;         // 1 = model attempted but refused/missing (.B.3 → bitmap bit)
+    // v5.9.5i — cfg drift counters (populated in EngineSharded boot;
+    // TUI_CopySnapshotSharded mirrors to PerCoreSnap; ML Status panel
+    // renders summary).
+    uint8_t  cfg_drift_tier1_count;
+    uint8_t  cfg_drift_tier2_count;
+    uint8_t  cfg_drift_strict_refused;  // (.B.3 → bitmap bit)
+    // v5.9.1 — edge-trigger for boot-time per-core warmup-complete log.
+    // RebuildOneCore checks (rolling_short.count >= min_warmup_samples)
+    // every cycle; fires the log exactly once per core (and per session)
+    // by setting this flag. Distinct from the global startup gate at
+    // EngineSharded.hpp:1420 (which uses core 0's count to release ALL
+    // cores from CONTROLLER_WARMUP). Per-core readiness lives here.
+    uint8_t  warmup_log_emitted;        // (.B.3 → bitmap bit)
 };
+
+// v5.15.5.B.1 — CoreContext layout invariants. Lock the brittleness class:
+// pre-v5.15.5.B.1 the alignas(64) was TRANSITIVE via embedded CoreLatencyStats
+// (CoreLatencyStats.hpp:55). A future refactor removing that alignas would
+// silently break inter-slot false-sharing on the cores[16] array. Explicit
+// alignas + these static_asserts make the invariant LOCAL and compile-time-
+// enforced. See cache-layout-discipline-for-hot-side-structs.md Rule 3+4 +
+// decision-first-cluster-layout-pattern.md Step 5.
+static_assert(sizeof(CoreContext<64>) % 64 == 0,
+              "CoreContext size MUST be a multiple of 64B for inter-slot "
+              "false-sharing prevention across cores[MAX_EXECUTION_CORES]. "
+              "Future field-insertion that violates this is a regression.");
+static_assert(alignof(CoreContext<64>) >= 64,
+              "CoreContext MUST be 64-byte aligned (now explicit via the "
+              "`struct alignas(64)` declaration, NOT transitive via embedded "
+              "CoreLatencyStats's alignas).");
+// WARM cluster boundary anchor — entries_processed marks the per-event-cadence
+// cluster start. Hot-cluster footprint is everything before this offset; warm-
+// cluster everything between this and sp_last_tick_us; cold-cluster from there.
+static_assert(offsetof(CoreContext<64>, entries_processed) % 64 == 0,
+              "WARM cluster anchor MUST be 64-byte aligned. "
+              "See decision-first-cluster-layout-pattern.md Step 5.");
+// COLD cluster atomics boundary — sp_last_tick_us starts the cross-thread
+// atomics block (snapshot publisher reads this from a different thread).
+// alignas(64) prevents publisher reads from invalidating cache lines holding
+// slow-path-written neighbor fields. .B.2 will wrap these atomics in an
+// explicit SlowPathTelemetry struct.
+static_assert(offsetof(CoreContext<64>, sp_last_tick_us) % 64 == 0,
+              "Cross-thread sp_* atomics cluster MUST be alignas(64) isolated. "
+              "See cross-thread-snapshot-publish-cluster-isolation.md.");
 
 //======================================================================================================
 // [EVENT LOOP STATE]

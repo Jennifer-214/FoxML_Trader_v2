@@ -1438,6 +1438,67 @@ static void test_max_positions() {
 }
 
 //======================================================================================================
+// [LAYOUT FINGERPRINT — v5.15.5.B.1]
+//======================================================================================================
+// Permanent layout-fingerprint probe. Runs at test startup; prints
+// sizeof/alignof for every key data-plane struct + offsetof for HOT/WARM/COLD
+// cluster anchors. Cost ~6 µs once per test binary launch. Permanent so
+// diffs across versions are cleanly visible in CI output / commit messages.
+//
+// File-scope namespace block for templated-with-comma types (RollingStats<F,W>,
+// BookImbalanceHistory<F,W>, etc.) — offsetof macro can't span commas.
+namespace layout_probe {
+    using RS_128   = RollingStats<64, 128>;
+    using RS_256   = RollingStats<64, 256>;
+    using RS_512   = RollingStats<64, 512>;
+    using RS_1024  = RollingStats<64, 1024>;
+    using BIH_1024 = BookImbalanceHistory<64, 1024>;
+    using LTS_1024 = LargeTradeState<64, 1024>;
+    using SS_1024  = SpreadState<64, 1024>;
+}
+
+inline void print_layout_fingerprint() {
+    printf("\n-- v5.15.5.B.1 layout fingerprint (sizeof / alignof) --\n");
+    printf("CoreContext<64>            %8zu B  align=%zu\n",
+           sizeof(tt::CoreContext<64>),    alignof(tt::CoreContext<64>));
+    printf("CoreSlowState<64>          %8zu B  align=%zu\n",
+           sizeof(tt::CoreSlowState<64>),  alignof(tt::CoreSlowState<64>));
+    printf("EventLoopState<64>         %8zu B  align=%zu\n",
+           sizeof(tt::EventLoopState<64>), alignof(tt::EventLoopState<64>));
+    printf("-- HOT/WARM/COLD cluster anchors --\n");
+    printf("offsetof CoreContext.entries_processed         = %zu\n",
+           offsetof(tt::CoreContext<64>, entries_processed));
+    printf("offsetof CoreContext.sp_last_tick_us           = %zu\n",
+           offsetof(tt::CoreContext<64>, sp_last_tick_us));
+    printf("offsetof CoreSlowState.ema_price               = %zu\n",
+           offsetof(tt::CoreSlowState<64>, ema_price));
+    printf("offsetof CoreSlowState.us_at_last_rebuild      = %zu\n",
+           offsetof(tt::CoreSlowState<64>, us_at_last_rebuild));
+    printf("-- Sub-struct sizes --\n");
+    printf("FPN<64>                    %8zu B\n", sizeof(FPN<64>));
+    printf("RollingStats<64,128>       %8zu B\n", sizeof(layout_probe::RS_128));
+    printf("RollingStats<64,256>       %8zu B\n", sizeof(layout_probe::RS_256));
+    printf("RollingStats<64,512>       %8zu B\n", sizeof(layout_probe::RS_512));
+    printf("RollingStats<64,1024>      %8zu B\n", sizeof(layout_probe::RS_1024));
+    printf("ConfidenceScorer           %8zu B\n", sizeof(ConfidenceScorer));
+    printf("RollingTurnover            %8zu B\n", sizeof(RollingTurnover));
+    printf("DriftHistory               %8zu B\n", sizeof(DriftHistory));
+    printf("SlowPathGateState          %8zu B\n", sizeof(tt::SlowPathGateState));
+    printf("GateParameters<64>         %8zu B\n", sizeof(tt::GateParameters<64>));
+    printf("CoreLatencyStats           %8zu B  align=%zu\n",
+           sizeof(tt::CoreLatencyStats), alignof(tt::CoreLatencyStats));
+    printf("RegimeState<64>            %8zu B\n", sizeof(RegimeState<64>));
+    printf("RegressionFeederX<64>      %8zu B\n", sizeof(RegressionFeederX<64>));
+    printf("FlowState                  %8zu B\n", sizeof(FlowState));
+    printf("CumDeltaState<64>          %8zu B\n", sizeof(CumDeltaState<64>));
+    printf("TickRateState              %8zu B\n", sizeof(TickRateState));
+    printf("BookImbalanceHistory<64,1024> %5zu B\n", sizeof(layout_probe::BIH_1024));
+    printf("LargeTradeState<64,1024>   %8zu B\n", sizeof(layout_probe::LTS_1024));
+    printf("SpreadState<64,1024>       %8zu B\n", sizeof(layout_probe::SS_1024));
+    printf("\n");
+}
+
+//======================================================================================================
 // [MAIN]
 //======================================================================================================
 int main() {
@@ -1450,6 +1511,13 @@ int main() {
     printf("======================================\n");
     printf("  CONTROLLER TEST SUITE\n");
     printf("======================================\n");
+
+    // v5.15.5.B.1 — sizeof/alignof/offsetof baseline probe.
+    // Captures the pre-reorg layout for Phase B audit synthesis (and the
+    // post-reorg layout for regression-tracking). Permanent — runtime
+    // print is cheap (~6 µs), survives future cluster sweeps as a layout
+    // fingerprint that diffs cleanly across versions.
+    print_layout_fingerprint();
 
     test_config_parser();
     test_portfolio_bitmap();
