@@ -40,6 +40,7 @@
 #include "../MemHeaders/InitArena.hpp"                     // v5.11.22 — MAP_HUGETLB opt-in tests
 #include "../MemHeaders/CoreCtxSummaryFieldRegistry.hpp"  // v5.15.5.C.3 Phase 4 — FOREACH_CORE_CTX_SUMMARY_FIELD + JSON emit
 #include "../CoreFrameworks/PaperResetArchive.hpp"        // v5.15.5.C.3 Phase 6 — paper-reset archive helpers
+#include "../MemHeaders/LatencyHistogram.hpp"             // v5.15.5.C.3 Phase 7.A — LatencyHistogram primitive
 #include <sys/mman.h>                                       // v5.11.22 — MAP_HUGETLB constant
 #include "../DataStream/DepthReplayState.hpp"            // Track E.3 tests
 #include "../ML_Headers/FlowFeatures.hpp"                // v4.5 Wave 1 tests
@@ -24878,6 +24879,105 @@ e3_skip_load:;
                   stat_rc == 0 && S_ISDIR(st.st_mode));
             // Cleanup — remove nested tree (best effort; system() returns 0 on success).
             (void)std::system("rm -rf /tmp/foxml_phase6_test");
+        }
+    }
+
+    //==================================================================================================
+    // v5.15.5.C.3 Phase 7.A — LatencyHistogram primitive + cfg.oms_bench_enabled flag
+    //==================================================================================================
+    {
+        using namespace tt;
+
+        // Test 1: latency_bucket_index correctness for known cycle counts.
+        {
+            // Bucket layout: cycles==0 → 0; cycles==1 → 1; cycles==2 → 2;
+            // cycles==1024 → 11 (2^10 → bucket 11); cycles=2^63 → 63 (clamped at 63).
+            check("v5.15.5.C.3 Phase 7.A: latency_bucket_index(0) == 0",   latency_bucket_index(0) == 0);
+            check("v5.15.5.C.3 Phase 7.A: latency_bucket_index(1) == 1",   latency_bucket_index(1) == 1);
+            check("v5.15.5.C.3 Phase 7.A: latency_bucket_index(2) == 2",   latency_bucket_index(2) == 2);
+            check("v5.15.5.C.3 Phase 7.A: latency_bucket_index(3) == 2",   latency_bucket_index(3) == 2);
+            check("v5.15.5.C.3 Phase 7.A: latency_bucket_index(4) == 3",   latency_bucket_index(4) == 3);
+            check("v5.15.5.C.3 Phase 7.A: latency_bucket_index(1024) == 11", latency_bucket_index(1024) == 11);
+        }
+
+        // Test 2: LatencyHistogram_Reset zeroes all state.
+        {
+            LatencyHistogram h;
+            // Pre-populate with junk to ensure Reset actually zeroes.
+            for (int i = 0; i < 64; ++i) h.buckets[i] = 999;
+            h.total_count.store(12345, std::memory_order_relaxed);
+            h.min_observed = 50;
+            h.max_observed = 5000;
+            LatencyHistogram_Reset(&h);
+            bool all_zero = true;
+            for (int i = 0; i < 64; ++i) if (h.buckets[i] != 0) { all_zero = false; break; }
+            check("v5.15.5.C.3 Phase 7.A: LatencyHistogram_Reset zeroes buckets[]", all_zero);
+            check("v5.15.5.C.3 Phase 7.A: LatencyHistogram_Reset zeroes total_count",
+                  h.total_count.load(std::memory_order_relaxed) == 0);
+            check("v5.15.5.C.3 Phase 7.A: LatencyHistogram_Reset sets min_observed to UINT64_MAX",
+                  h.min_observed == UINT64_MAX);
+            check("v5.15.5.C.3 Phase 7.A: LatencyHistogram_Reset sets max_observed to 0",
+                  h.max_observed == 0);
+        }
+
+        // Test 3: LatencyHistogram_Accumulate bumps correct bucket + tracks min/max.
+        {
+            LatencyHistogram h;
+            LatencyHistogram_Reset(&h);
+            LatencyHistogram_Accumulate(&h, 100);     // bucket 7 (2^7=128 > 100; clz puts in bucket 7)
+            LatencyHistogram_Accumulate(&h, 200);     // bucket 8 (2^7 <= 200 < 2^8)
+            LatencyHistogram_Accumulate(&h, 1000000); // bucket 20
+            LatencyHistogram_Accumulate(&h, 50);      // bucket 6
+            check("v5.15.5.C.3 Phase 7.A: total_count == 4 after 4 accumulates",
+                  h.total_count.load(std::memory_order_relaxed) == 4);
+            check("v5.15.5.C.3 Phase 7.A: min_observed tracks smallest cycle count (50)",
+                  h.min_observed == 50);
+            check("v5.15.5.C.3 Phase 7.A: max_observed tracks largest cycle count (1000000)",
+                  h.max_observed == 1000000);
+            // Sum of buckets == total_count
+            uint64_t sum = 0;
+            for (int i = 0; i < 64; ++i) sum += h.buckets[i];
+            check("v5.15.5.C.3 Phase 7.A: sum of bucket counts equals total_count",
+                  sum == 4);
+        }
+
+        // Test 4: LatencyHistogram_Percentile returns expected boundary cycles.
+        {
+            LatencyHistogram h;
+            LatencyHistogram_Reset(&h);
+            // Empty histogram → all percentiles return 0.
+            check("v5.15.5.C.3 Phase 7.A: empty histogram percentile == 0",
+                  LatencyHistogram_Percentile(&h, 0.5) == 0);
+            // Accumulate samples in 3 buckets — bucket 5, 5, 10, 10, 10, 10.
+            for (int i = 0; i < 2; ++i)  LatencyHistogram_Accumulate(&h, 24);    // bucket 5 (16 <= 24 < 32)
+            for (int i = 0; i < 4; ++i)  LatencyHistogram_Accumulate(&h, 700);   // bucket 10 (512 <= 700 < 1024)
+            check("v5.15.5.C.3 Phase 7.A: total_count == 6 after 6 accumulates",
+                  h.total_count.load(std::memory_order_relaxed) == 6);
+            // p=0.0 returns min_observed (24).
+            check("v5.15.5.C.3 Phase 7.A: percentile(0.0) == min_observed",
+                  LatencyHistogram_Percentile(&h, 0.0) == 24);
+            // p=1.0 returns max_observed (700).
+            check("v5.15.5.C.3 Phase 7.A: percentile(1.0) == max_observed",
+                  LatencyHistogram_Percentile(&h, 1.0) == 700);
+            // p=0.5 (rank 3 of 6) — falls in bucket 10 (cumulative 2+4 at end of bucket 10),
+            // returns 2^(10-1) = 512.
+            check("v5.15.5.C.3 Phase 7.A: percentile(0.5) returns bucket 10 lower bound",
+                  LatencyHistogram_Percentile(&h, 0.5) == 512);
+        }
+
+        // Test 5: LatencyHistogram cache-line alignment + size.
+        {
+            check("v5.15.5.C.3 Phase 7.A: sizeof(LatencyHistogram) % 64 == 0",
+                  sizeof(LatencyHistogram) % 64 == 0);
+            check("v5.15.5.C.3 Phase 7.A: alignof(LatencyHistogram) >= 64",
+                  alignof(LatencyHistogram) >= 64);
+        }
+
+        // Test 6: cfg.oms_bench_enabled defaults to 0 (OFF) at ControllerConfig_Default.
+        {
+            ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+            check("v5.15.5.C.3 Phase 7.A: cfg.oms_bench_enabled defaults to 0 (production)",
+                  cfg.oms_bench_enabled == 0);
         }
     }
 

@@ -1069,6 +1069,24 @@ template <unsigned F> struct ControllerConfig {
   // green during the migration window.
   uint32_t oms_event_log_mode; // 0 = legacy (default), 1 = event log
 
+  // v5.15.5.C.3 Phase 7.A — Runtime bench gate substrate flag.
+  //
+  // 0 = production (default; ZERO bench instrumentation cost — compile-time
+  //     elision via template <bool BENCH=false> in Phase 7.B follow-up).
+  // 1 = bench mode (instrumented slow-path sites emit per-cycle rdtsc
+  //     measurements into LatencyHistogram clusters; surface via TUI
+  //     p50/p99/max readout per snapshot publish).
+  //
+  // Phase 7.A scope: cfg flag substrate + LatencyHistogram primitive +
+  // tests. Phase 7.B integration (template-dispatch wrappers + N
+  // instrumented sites + TUI surface) deferred to focused follow-up ship.
+  // See MemHeaders/LatencyHistogram.hpp + DESIGN_SPECS/runtime-toggleable-
+  // bench-gate-pattern.md for full design.
+  //
+  // Today (Phase 7.A only): flipping this flag has NO observable effect —
+  // bench gate dispatch is not yet wired. Reserved for the follow-up ship.
+  uint32_t oms_bench_enabled;  // 0 = production (default); 1 = bench mode (Phase 7.B integration pending)
+
   // v5.9.5h — XGBoost training hyperparams (cfg-tunable subset).
   // max_depth/learning_rate/n_estimators are operator-tunable via Train
   // Model GUI panel only (NOT cfg-bound — they're per-experiment, not
@@ -1717,6 +1735,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   // place for tests that explicitly want the legacy OnEvent path; new
   // production code paths default to 1.
   cfg.oms_event_log_mode = 1;
+
+  // v5.15.5.C.3 Phase 7.A — bench gate flag (default OFF / production).
+  cfg.oms_bench_enabled = 0;
+
   return cfg;
 }
 //======================================================================================================
@@ -2800,6 +2822,12 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.oms_event_log_mode = 1;
       else
         cfg.oms_event_log_mode = (uint32_t)atoi(val);
+      continue;
+    }
+    // v5.15.5.C.3 Phase 7.A — runtime bench gate substrate flag.
+    // Phase 7.B integration pending; flag has no observable effect today.
+    if (strcmp(key, "oms_bench_enabled") == 0) {
+      cfg.oms_bench_enabled = (uint32_t)atoi(val);
       continue;
     }
 
