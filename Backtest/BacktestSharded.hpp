@@ -191,14 +191,13 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // real per-fill maker/taker tagging from Binance executionReport).
     oms.fee_rate_maker = cfg.fee_rate_taker; // backtest = all-taker semantics
     oms.fee_rate_taker = cfg.fee_rate_taker;
-    // v4.7.15: mirror partials geometry to OMS for the post-fill drainer's
-    // slot→core_id mapping. Same as EngineSharded_Run sets it from cfg.
-    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
-    if (BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED)) {
-        BITMAP_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-    } else {
-        BITMAP_CLR(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-    }
+    // v5.15.5.C.3 (Finding A) — external BITMAP_SET/CLR(PARTIAL_EXIT_ENABLED)
+    // block dropped at backtest side too (same fix as EngineSharded.hpp).
+    // Bit is now set inside OMS_INIT_AUTOPOPULATE via the BIT-kind registry
+    // row for `partial_exit_enabled` (driven by the parameter passed to
+    // OrderManager_Init at line 183 above). Adding a new cfg-derived boot
+    // bit flag = ONE row in FOREACH_OMS_FIELD; no more external SET sites.
+    // Closes /dod-audit HIGH-1 (2026-05-13 Phase 3b audit).
     EventLoopState<BACKTEST_FP> state;
     EventLoopState_Init(&state, &oms);
 

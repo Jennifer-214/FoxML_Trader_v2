@@ -186,7 +186,8 @@ template <unsigned F>
 struct OrderManagerState {
     // ════════════════════════════════════════════════════════════════════
     // HOT CLUSTER — drainer reads every cycle
-    // (orders, rings, event_log_mode, event_log)
+    // (orders, rings, event_log). v5.15.5.C.3 (Finding A') — event_log_mode
+    // removed from HOT cluster; now a 2-bit slot in oms_state_flags (COLD).
     // ════════════════════════════════════════════════════════════════════
     Order<F> orders[MAX_INFLIGHT_ORDERS];
     uint16_t order_bitmap;       // 1 = slot in use, 0 = free. uint16_t caps at 16 slots.
@@ -726,11 +727,14 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms,
     // Paper mode + legacy (mode 0): count and return. Never touch the
     // table or the adapter. Mode 1 paper falls through to the slot
     // allocation path below so the fill handler runs in OMS_Tick.
-    // v5.15.5.C.3 — event_log_mode is now a 2-bit slot in oms_state_flags
-    // (see MemHeaders/OmsStateFlagRegistry.hpp). BITMAP_NONE returns true
-    // when the slot value == 0 (legacy mode).
+    // v5.15.5.C.3 — event_log_mode is a 2-bit slot in oms_state_flags
+    // (see MemHeaders/OmsStateFlagRegistry.hpp). Use MBS_EQ_U8 for K-state
+    // slot semantics (consistent with the 4 other read sites — drainer
+    // ProcessFillCommand uses MBS_EQ_U8(..., 1); this site checks ..., 0).
+    // /dod-audit MEDIUM-3 close (consistency over BITMAP_NONE for K-state).
     if (!BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING) &&
-        BITMAP_NONE(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE)) {
+        MBS_EQ_U8(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE,
+                  tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 0)) {
         oms->total_submitted.fetch_add(1, std::memory_order_relaxed);
         oms->total_filled.fetch_add(1, std::memory_order_relaxed);
         return id;
