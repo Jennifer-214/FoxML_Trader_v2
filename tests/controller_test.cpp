@@ -5489,6 +5489,13 @@ int main() {
             }
             r->oms.balance      = FPN_FromDouble<64>(9837.42);
             r->oms.realized_pnl = FPN_FromDouble<64>(-162.58);
+            // v5.15.5.C.2.1 (test-strength audit INFO close): exercise the
+            // OMS-level kill_switch_tripped bit through the persist round-trip.
+            // Pre-S3a-W this was a uint8_t int4 wire field; post-S3a-W the
+            // FOREACH_OMS_PERSIST_FIELD registry extracts the bit at save
+            // (BIT-kind) and sets the bit at load commit. Wire format
+            // byte-preserved.
+            BITMAP_SET(r->oms.oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
 
             int saved = tt::ShardedSnapshot_Save<64>(&r->state, test_path, 0);
             check("round-trip: save returns 1",
@@ -5503,6 +5510,27 @@ int main() {
                   fabs(FPN_ToDouble(r2->state.oms->balance) - 9837.42) < 1e-6);
             check("round-trip: oms.realized_pnl restored",
                   fabs(FPN_ToDouble(r2->state.oms->realized_pnl) - (-162.58)) < 1e-6);
+            // v5.15.5.C.2.1 (test-strength audit INFO close): verify the
+            // kill_switch_tripped bit round-tripped through FOREACH_OMS_
+            // PERSIST_FIELD's BIT-kind save (extract bit→int wire) +
+            // load commit (read int wire→set bit).
+            check("round-trip: oms kill_switch_tripped bit restored (set)",
+                  BITMAP_IS_SET(r2->state.oms->oms_state_flags,
+                                tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED));
+
+            // Round-trip the cleared case too — ensures BIT-kind load commit
+            // correctly clears the bit when wire value is 0.
+            BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
+            int saved2 = tt::ShardedSnapshot_Save<64>(&r->state, test_path, 0);
+            check("round-trip: save (kill cleared) returns 1", saved2 == 1);
+            auto* r3 = build_state(4, 10000.0);
+            // Pre-set the bit on r3 to verify the load CLEARS it.
+            BITMAP_SET(r3->oms.oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
+            int loaded2 = tt::ShardedSnapshot_Load<64>(&r3->state, test_path, 0);
+            check("round-trip: load (kill cleared) returns 1", loaded2 == 1);
+            check("round-trip: oms kill_switch_tripped bit restored (cleared)",
+                  !BITMAP_IS_SET(r3->state.oms->oms_state_flags,
+                                 tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED));
 
             for (int c = 0; c < 4; ++c) {
                 check("round-trip: entries_processed",
@@ -18645,24 +18673,29 @@ e3_skip_load:;
         // === Defaults post-Init: -1 sentinel ===
         int all_neg1 = 1;
         for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; ++i) {
-            if (oms.last_exit_predicted_arm[i] != -1)    { all_neg1 = 0; break; }
-            if (oms.last_exit_predicted_regime[i] != -1) { all_neg1 = 0; break; }
+            // v5.15.5.C.2.1 (LOW-2) — bit-packed in last_exit_predicted_meta.
+            // Post-Init: all bytes are 0 (valid=0; replaces -1 sentinel).
+            if (oms.last_exit_predicted_meta[i] != 0)    { all_neg1 = 0; break; }
         }
-        check("v5.13.4.A: last_exit_predicted_arm[] defaults all -1",
+        check("v5.13.4.A / v5.15.5.C.2.1 (LOW-2): last_exit_predicted_meta[] defaults all 0 (valid=0)",
               all_neg1);
-        check("v5.13.4.A: last_exit_predicted_regime[] defaults all -1",
+        check("v5.13.4.A / v5.15.5.C.2.1 (LOW-2): meta[] valid=0 by default (same loop)",
               all_neg1);
 
         // === Per-slot writes round-trip ===
-        oms.last_exit_predicted_arm[3]    = 2;  // arm 2
-        oms.last_exit_predicted_regime[3] = 1;  // TRENDING
-        check("v5.13.4.A: per-slot arm[3]=2 round-trip",
-              oms.last_exit_predicted_arm[3] == 2);
-        check("v5.13.4.A: per-slot regime[3]=1 round-trip",
-              oms.last_exit_predicted_regime[3] == 1);
-        check("v5.13.4.A: adjacent slots untouched (slot 2)",
-              oms.last_exit_predicted_arm[2] == -1 &&
-              oms.last_exit_predicted_regime[2] == -1);
+        // v5.15.5.C.2.1 (LOW-2) — OMS_META_PACK packs arm + regime + valid bit
+        // in a single byte. OMS_META_GET_ARM / GET_REGIME / IS_VALID decode
+        // (modern compilers fuse adjacent extracts via ILP).
+        oms.last_exit_predicted_meta[3] = OMS_META_PACK(2, 1);  // arm=2, regime=TRENDING
+        check("v5.15.5.C.2.1 (LOW-2): per-slot meta[3] arm round-trip = 2",
+              OMS_META_GET_ARM(oms.last_exit_predicted_meta[3]) == 2);
+        check("v5.15.5.C.2.1 (LOW-2): per-slot meta[3] regime round-trip = 1 (TRENDING)",
+              OMS_META_GET_REGIME(oms.last_exit_predicted_meta[3]) == 1);
+        check("v5.15.5.C.2.1 (LOW-2): per-slot meta[3] valid bit set after pack",
+              OMS_META_IS_VALID(oms.last_exit_predicted_meta[3]));
+        check("v5.15.5.C.2.1 (LOW-2): adjacent slot 2 untouched (valid bit 0)",
+              !OMS_META_IS_VALID(oms.last_exit_predicted_meta[2]) &&
+              oms.last_exit_predicted_meta[2] == 0);
 
         OrderManager_Shutdown(&oms);
     }

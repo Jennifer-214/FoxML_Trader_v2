@@ -77,7 +77,9 @@
 // wire-format byte-preservation). Adding new fields appends at the END
 // (preserves byte offsets of existing entries).
 //
-// Pre-S3a-W layout (v6 snapshot):
+// Wire layout (snapshot v7; v5.15.5.C.2.1 fixup corrected MEDIUM-1 comment
+// drift — pre-S3a-W block produced same wire as v7 since the v6→v7 bump
+// added per-core fields, not OMS-block fields):
 //   balance              FPN<F>     [sizeof(FPN<F>) bytes]
 //   realized_pnl         FPN<F>     [sizeof(FPN<F>) bytes]
 //   ks_peak_balance      FPN<F>     [sizeof(FPN<F>) bytes]
@@ -109,16 +111,19 @@
 #define OMS_PERSIST_SAVE_VAL_BIT(name, mask)     \
     (BITMAP_IS_SET(state->oms->oms_state_flags, tt::mask) ? 1 : 0)
 
-// Commit: assign tmp_<name> back to OMS.
-//   DIRECT(name, type, mask) → state->oms->name = tmp_<name>
-//   BIT(name, type, mask)    → set or clear the named bit in oms_state_flags
+// Commit: assign tmp_<name> back to OMS. Both kinds expand to a `{ }` block
+// (compound statement) matching the OMS_PERSIST_DO_SAVE shape — FOREACH
+// expansion produces a sequence of self-terminating compound statements,
+// no trailing `;` ambiguity (v5.15.5.C.2.1 LOW-1 close).
+//   DIRECT(name, type, mask) → { state->oms->name = tmp_<name>; }
+//   BIT(name, type, mask)    → { set or clear the named bit in oms_state_flags }
 #define OMS_PERSIST_COMMIT_DIRECT(name, type, mask) \
-    state->oms->name = tmp_##name;
+    { state->oms->name = tmp_##name; }
 #define OMS_PERSIST_COMMIT_BIT(name, type, mask)                                            \
-    do {                                                                                     \
+    {                                                                                        \
         if (tmp_##name) state->oms->oms_state_flags |= (uint8_t)(tt::mask);                  \
         else            state->oms->oms_state_flags &= (uint8_t)(~(uint8_t)(tt::mask));      \
-    } while (0);
+    }
 
 //======================================================================================================
 // [OMS_PERSIST_DO_* — call-site expansion macros]

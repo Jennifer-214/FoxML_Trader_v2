@@ -67,6 +67,7 @@
 #include "SPSCRing.hpp"
 #include "../DataStream/CalibLogColRegistry.hpp"   // v5.14.10.D — FOREACH_CALIB_LOG_COL registry (closes TECH_DEBT-010)
 #include "../MemHeaders/OmsStateFlagRegistry.hpp"  // v5.15.5.C.2 (S3a) — FOREACH_OMS_STATE_FLAG bitmap cohort
+#include "../MemHeaders/OmsExitPredictorMetaRegistry.hpp"  // v5.15.5.C.2.1 (LOW-2) — FOREACH_OMS_META_SLOT multi-bit cohort
 
 #include <atomic>
 #include <chrono>
@@ -348,17 +349,30 @@ struct OrderManagerState {
     // blended probability at submit time.
     double last_exit_predicted_p[MAX_PORTFOLIO_POSITIONS];
 
-    // v5.13.4 — per-slot arm capture. Slow-path body writes the dominant
-    // exit_predictor horizon idx at submit time; HandleFill reads at fill
-    // time for Bandit_Update on exit_bandits[regime]. Captured per-slot
-    // (not per-core) so partials legs A/B independently attributable +
-    // stable across subsequent slow-path cycles (subsequent predicts on
-    // the same core can't overwrite this slot's chosen arm because
-    // there's already a fill pending). Cleared in HandleFill post-update.
-    int8_t last_exit_predicted_arm[MAX_PORTFOLIO_POSITIONS];
-    int8_t last_exit_predicted_regime[MAX_PORTFOLIO_POSITIONS];
-    uint8_t _pad_lepa[(MAX_PORTFOLIO_POSITIONS * 2 % 8)
-                       ? (8 - (MAX_PORTFOLIO_POSITIONS * 2 % 8)) : 0];
+    // v5.13.4 / v5.15.5.C.2.1 (LOW-2) — per-slot exit-predictor arm + regime
+    // capture, bit-packed via FOREACH_OMS_META_SLOT (first application of
+    // DESIGN_SPECS/multi-bit-state-encoding-pattern.md).
+    //
+    // Slow-path body writes the dominant exit_predictor horizon idx + regime
+    // at submit time; HandleFill reads at fill time for Bandit_Update on
+    // exit_bandits[regime]. Captured per-slot (not per-core) so partials legs
+    // A/B independently attributable + stable across subsequent slow-path
+    // cycles (subsequent predicts on the same core can't overwrite this
+    // slot's chosen arm because there's already a fill pending). Cleared
+    // in HandleFill post-update (drainer; same thread as read).
+    //
+    // Per-slot byte layout (see OmsExitPredictorMetaRegistry.hpp):
+    //   bits 0..1 = regime (2 bits, 4 states)
+    //   bits 2..5 = arm (4 bits, 0..15)
+    //   bit 6     = valid flag (1 = populated; 0 = unset, replaces -1 sentinel)
+    //   bit 7     = reserved
+    //
+    // Pre-LOW-2: int8_t last_exit_predicted_arm[16] + int8_t last_exit_
+    // predicted_regime[16] = 32 bytes. Post-LOW-2: uint8_t[16] = 16 bytes.
+    // 16 bytes saved per OMS. Parallel decode of arm + regime via ILP at
+    // consumer sites (no data dependency between extracts).
+    uint8_t last_exit_predicted_meta[MAX_PORTFOLIO_POSITIONS];
+    // MAX_PORTFOLIO_POSITIONS=16 → 16 bytes; 16 % 8 == 0, so no padding required.
 
     // ════════════════════════════════════════════════════════════════════
     // COLD CLUSTER — boot-set + reconcile-only (drainer hot path doesn't read)
@@ -385,6 +399,13 @@ struct OrderManagerState {
     //           or OMS_STATE_FLAG_IS_SET(oms, <NAME>). See OmsStateFlagRegistry.hpp.
     // 5 bits headroom for future COLD-cluster booleans (static_assert catches overflow).
     uint8_t oms_state_flags;
+    // v5.15.5.C.2.1 (MEDIUM-2 close from /dod-audit on 852a6e3): explicit 7-byte
+    // pad locking the COLD-cluster alignment gap before FPN<F> ks_min_balance.
+    // FPN<F> needs 8-byte alignment (uint64 internally + CLAUDE.md item 27
+    // padding-determinism). The 7-byte gap is structurally inherent; explicit
+    // pad matches the prior _pad_pe[7] + _pad_ks[7] discipline pre-S3a.
+    // Offset-lock static_assert at the end of struct (line ~520).
+    uint8_t _pad_osf[7];
 
     // === KILL SWITCH THRESHOLDS (moved from EventLoopState in phase 03 chunk 1) ===
     // Configured by EventLoopState_ConfigureKillSwitch (which now writes
@@ -531,6 +552,16 @@ static_assert(offsetof(OrderManagerState<64>, flatten_pending) % 64 == 0,
               "alignas(64)-isolated. N slow-path threads CAS-contend; isolation prevents "
               "RFO storms on neighbor cold fields. "
               "See cross-thread-snapshot-publish-cluster-isolation.md (ND1).");
+// v5.15.5.C.2.1 (MEDIUM-2 close from /dod-audit) — explicit 8-byte alignment
+// lock for the COLD-cluster post-bitmap gap. FPN<F> ks_min_balance needs
+// 8-byte alignment per CLAUDE.md item 27 (struct padding determinism). The
+// _pad_osf[7] field is the explicit pad; this assert confirms the offset
+// remains 8-byte-aligned after future field additions to the COLD cluster.
+// Compile-time check; zero runtime cost (offsetof + % 8 fold to constant).
+static_assert(offsetof(OrderManagerState<64>, ks_min_balance) % 8 == 0,
+              "ks_min_balance (FPN<F>) MUST be 8-byte aligned. If this trips, "
+              "the COLD cluster gained a non-8-aligned field between oms_state_flags "
+              "and ks_min_balance. Re-check _pad_osf[7] explicit pad.");
 
 //======================================================================================================
 // [FILL RESULT CALLBACK — invoked by the adapter worker thread]
@@ -663,9 +694,11 @@ inline void OrderManager_Init(OrderManagerState<F>* oms,
         oms->last_fill[i].was_win             = 0;
         // v5.13.0.B — per-slot exit-predictor attribution + calibration
         oms->last_exit_predicted_p[i]         = 0.0;
-        // v5.13.4 — per-slot bandit arm + regime capture (-1 = unset)
-        oms->last_exit_predicted_arm[i]       = -1;
-        oms->last_exit_predicted_regime[i]    = -1;
+        // v5.13.4 / v5.15.5.C.2.1 (LOW-2) — per-slot bandit arm + regime
+        // capture, bit-packed in last_exit_predicted_meta[i]. OMS_META_CLEAR
+        // sets all slots (regime, arm, valid) to 0; valid=0 replaces the
+        // pre-LOW-2 int8_t = -1 sentinel.
+        OMS_META_CLEAR(oms->last_exit_predicted_meta[i]);
     }
     // v5.13.0.B — calibration log file lazy-opened by engine boot via
     // OrderManager_OpenCalibrationLog when cfg.calibration_log_path set.

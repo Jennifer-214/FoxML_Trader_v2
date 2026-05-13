@@ -2977,10 +2977,19 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                     captured_regime >= NUM_REGIMES) {
                                     captured_regime = -1;
                                 }
-                                oms.last_exit_predicted_arm[pidx] =
-                                    (int8_t)captured_arm;
-                                oms.last_exit_predicted_regime[pidx] =
-                                    (int8_t)captured_regime;
+                                // v5.15.5.C.2.1 (LOW-2) — bit-packed in
+                                // last_exit_predicted_meta. OMS_META_PACK
+                                // sets the validity bit (replaces pre-LOW-2
+                                // -1 sentinel). If EITHER arm or regime is
+                                // -1 (out-of-range above), clear the slot
+                                // so drainer's OMS_META_IS_VALID predicate
+                                // returns false (no bandit Update).
+                                if (captured_arm >= 0 && captured_regime >= 0) {
+                                    oms.last_exit_predicted_meta[pidx] =
+                                        OMS_META_PACK(captured_arm, captured_regime);
+                                } else {
+                                    OMS_META_CLEAR(oms.last_exit_predicted_meta[pidx]);
+                                }
                                 OMS_PushSubmit(&oms, (int16_t)pidx,
                                     ORDER_MARKET_SELL, qty,
                                     FPN_Zero<F>(), FPN_Zero<F>(),

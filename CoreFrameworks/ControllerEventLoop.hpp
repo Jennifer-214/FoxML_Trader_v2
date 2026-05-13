@@ -1556,12 +1556,17 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
             && oms->flatten_pending.load(std::memory_order_acquire) == 0
             && ctx.ensemble_handle) {
             auto* ezoo = static_cast<EnsembleModelZoo<F>*>(ctx.ensemble_handle);
-            int chosen_arm = (int)oms->last_exit_predicted_arm[slot];
-            int regime     = (int)oms->last_exit_predicted_regime[slot];
+            // v5.15.5.C.2.1 (LOW-2) — parallel decode of arm + regime from
+            // packed meta byte. Both extracts have no data dependency on
+            // each other; modern compilers fuse into ~1-2 cycles via ILP.
+            // OMS_META_IS_VALID replaces the prior `>= 0` -1-sentinel check.
+            uint8_t meta_byte = oms->last_exit_predicted_meta[slot];
+            int chosen_arm = (int)OMS_META_GET_ARM(meta_byte);
+            int regime     = (int)OMS_META_GET_REGIME(meta_byte);
             if (BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_EXIT_BANDITS_READY)
-                && chosen_arm >= 0
+                && OMS_META_IS_VALID(meta_byte)
                 && chosen_arm < ezoo->exit_predictor_count
-                && regime >= 0 && regime < NUM_REGIMES) {
+                && regime < NUM_REGIMES) {
                 // Original TP locked at entry — captures the trade's
                 // intended TP target without staleness from later
                 // ratchet writes (those modify take_profit_price not
@@ -1590,8 +1595,9 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
             // v5.15.5.C.2 (S3b) — bit-packed in last_exit_predicted_bitmap.
             BITMAP_CLR(oms->last_exit_predicted_bitmap, BITMAP_BIT_U16(slot));
             oms->last_exit_predicted_p[slot]      = 0.0;
-            oms->last_exit_predicted_arm[slot]    = -1;
-            oms->last_exit_predicted_regime[slot] = -1;
+            // v5.15.5.C.2.1 (LOW-2) — single byte-zero clears both arm +
+            // regime + valid bit (replaces two int8_t = -1 assignments).
+            OMS_META_CLEAR(oms->last_exit_predicted_meta[slot]);
         }
     }
     oms->last_closed_mask &= (uint16_t)~my_mask;  // clear only my bits
