@@ -791,6 +791,14 @@ struct alignas(64) EventLoopState {
 #include "../Strategies/StrategyLifecycle.hpp"
 namespace tt {
 
+}  // namespace tt
+// v5.15.5.B.7 — CoreCtx init/reset registry + AUTOPOPULATE macros.
+// Included AFTER CoreContext + EventLoopState + CoreContextDisplayMeta +
+// all helper-Init declarations are visible so the templated helpers in
+// the registry header can resolve every type + function they invoke.
+#include "../MemHeaders/CoreCtxInitRegistry.hpp"
+namespace tt {
+
 //======================================================================================================
 // [INIT]
 //======================================================================================================
@@ -819,149 +827,14 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->ws_telemetry.bucket_last_sec[i] = 0;
         state->ws_telemetry.bucket_count[i] = 0;
     }
+    // v5.15.5.B.7 — Per-slot init via CORE_CTX_INIT_AUTOPOPULATE companion
+    // macro. ~50 lines of per-field init / helper-Init calls / sp_telemetry
+    // atomic stores / slow_state arena allocation / display_meta sibling init
+    // are now covered by one macro call. Adding a new CoreContext field that
+    // needs boot-init = ONE row in FOREACH_CORE_CTX_INIT_FIELD; macro picks
+    // it up at next compile. See MemHeaders/CoreCtxInitRegistry.hpp.
     for (int i = 0; i < MAX_EXECUTION_CORES; i++) {
-        state->cores[i].core = nullptr;
-        state->cores[i].intended_tp = FPN_Zero<F>();
-        state->cores[i].intended_sl = FPN_Zero<F>();
-        state->cores[i].intended_qty = FPN_Zero<F>();
-        state->cores[i].allocated_balance = FPN_Zero<F>();
-        GateParameters_Init(&state->cores[i].pending_params);
-        state->cores[i].strategy_id = STRATEGY_NONE;  // pitfall P6.5: explicit init
-        // v5.15.5.B.3 — 5 boolean flags bit-packed in core_state_flags
-        // (DIRTY + KILL_TRIPPED + MODEL_LOAD_FAILED + CFG_DRIFT_STRICT_REFUSED
-        // + WARMUP_LOG_EMITTED). All clear at boot per pre-v5.15.5.B.3 semantics.
-        state->cores[i].core_state_flags = 0;
-        state->cores[i].model_handle = nullptr;
-        state->cores[i].ensemble_handle = nullptr;  // v5.10.0a.G.5 default
-        state->cores[i].entries_processed = 0;
-        state->cores[i].exits_processed = 0;
-        // Phase 6prep sharded: ConfidenceScorer with safe defaults. EngineSharded
-        // re-inits with cfg values for STRATEGY_ML cores after this; non-ML cores
-        // keep these defaults (the scorer never gets fed, so it stays inert).
-        ConfidenceScorer_Init(&state->cores[i].confidence,
-                              CONFIDENCE_IC_WINDOW_DEFAULT,
-                              CONFIDENCE_FRESHNESS_TAU_DEFAULT);
-        // v5.14.1.B.1 (PARITY-003) — at this site cfg may be unavailable
-        // (state init runs before EngineSharded re-inits with cfg values).
-        // Boot sequence guarantees EngineSharded.hpp:1244 re-runs Init +
-        // BindCompositeCfg with cfg AFTER this site for STRATEGY_ML cores.
-        // Non-ML cores keep the safe defaults from Init alone (their scorer
-        // is never fed via ConfidenceScorer_UpdateAndMark, so composite is
-        // moot). No BindCompositeCfg here — defer to EngineSharded.
-        // v5.10.0e — drift history starts empty; samples land post-fill.
-        DriftHistory_Init(&state->cores[i].drift_history);
-        // v5.14.1.G — turnover with safe defaults (window=100, topk=3).
-        // Engine boot will re-init via EngineSharded.hpp with cfg values
-        // for STRATEGY_ML cores; non-ML cores keep these defaults
-        // (turnover never gets fed; stays at last_turnover=0).
-        RollingTurnover_Init(&state->cores[i].turnover, 100, 3);
-        state->cores[i].staged_prediction = 0.0;
-        state->cores[i].active_prediction = 0.0;
-        state->cores[i].last_confidence = 0.0;
-        state->cores[i].last_entry_price = FPN_Zero<F>();
-        state->cores[i].last_entry_tick  = 0;
-        state->cores[i].last_entry_wall_us = 0;
-        state->cores[i].sl_cooldown_remaining = 0;
-        state->cores[i].halt_reason = HALT_OK;
-        state->cores[i].strategy_halt_reason = SHALT_OK;
-        // v5.15.5.B.2 — prev_gate_log_state moved to display_meta;
-        // initialized below via CoreContextDisplayMeta_Init (sentinel 0xFFFF
-        // encoded in FOREACH_DISPLAY_META_FIELD registry default).
-        // v5.14.5.B.0.A — regime state initialized for ALL cores (not just
-        // AUTO; universalization closes the architectural limitation that
-        // prevented ML strategies from reading hysteresed current_regime).
-        //
-        // Hysteresis threshold here uses safe default (5); EngineSharded boot
-        // re-inits with cfg.regime_hysteresis (operator-tunable; same default).
-        // Was hardcoded 3 pre-v5.14.5.B.0 → 5 default now matches cfg docs.
-        // Operators wanting pre-v5.14.5.B.0 behavior set
-        // regime_hysteresis=3 in engine.cfg (CHANGELOG + cfg.example documented).
-        // EventLoopState_Init signature unchanged (no cfg param) per
-        // boundary-stable refactor; EngineSharded does the cfg override.
-        Regime_Init(&state->cores[i].regime_state, 5);
-        // v4.0.3 D10: P&L feeder per core for adaptive filter shifts.
-        state->cores[i].pnl_feeder = RegressionFeederX_Init<F>();
-        state->cores[i].resolved_strategy_id = STRATEGY_NONE;  // v4.0.4
-        // v4.0.4: per-core P&L counters
-        state->cores[i].core_realized = FPN_Zero<F>();
-        state->cores[i].core_fees = FPN_Zero<F>();
-        state->cores[i].core_wins = 0;
-        state->cores[i].core_losses = 0;
-        // v4.7.21: pending-partner pairing state (per-trade W/L under partials)
-        state->cores[i].partner_pending_pnl = FPN_Zero<F>();
-        // partner_pending_active migrated to EventLoopState.partner_pending_bitmap (v5.14.9.G)
-        // v4.7.25: gross win/loss accumulators
-        state->cores[i].core_gross_wins   = FPN_Zero<F>();
-        state->cores[i].core_gross_losses = FPN_Zero<F>();
-        // v5.15.5.B.2 — slow_path_latency + slow_path_breakdown[] moved to
-        // display_meta; init via CoreContextDisplayMeta_Init below (covers
-        // all registry-driven fields + the latency stats).
-        // v5.0.3 (Engine Topology advanced): observability fields.
-        // v5.15.5.B.2 — wrapped in SlowPathTelemetry alignas(64) cluster.
-        state->cores[i].sp_telemetry.last_tick_us.store(0, std::memory_order_relaxed);
-        state->cores[i].sp_telemetry.cycles_total.store(0, std::memory_order_relaxed);
-        state->cores[i].sp_telemetry.yield_count.store(0, std::memory_order_relaxed);
-        state->cores[i].sp_telemetry.state.store(0, std::memory_order_relaxed);
-        // v5.1.0 (per-core data plane): per-engine slow_state allocation.
-        // ~3MB per engine × 16 cores would overflow default stack if inline.
-        //
-        // v5.11.6.A — InitArena-backed allocation (replaces `new`). The arena
-        // bumps from a single mmap'd region (MAP_POPULATE pre-faulted at
-        // engine boot). Engine sets InitArena_Global() before this Init;
-        // tests leave it nullptr and get the `new` fallback.
-        if (auto* arena = tt::InitArena_Global()) {
-            void* mem = tt::InitArena_Alloc(arena, sizeof(CoreSlowState<F>),
-                                             alignof(CoreSlowState<F>));
-            if (mem) {
-                state->cores[i].slow_state = new (mem) CoreSlowState<F>();
-            } else {
-                state->cores[i].slow_state = new CoreSlowState<F>();
-            }
-        } else {
-            state->cores[i].slow_state = new CoreSlowState<F>();
-        }
-        CoreSlowState_Init(state->cores[i].slow_state);
-        // v5.4.0 Phase 1.1: per-strategy state. Allocated by
-        // Strategy_InitPerCore at engine boot AFTER cfg is read so the
-        // dispatcher knows which kind to allocate. Init here just to
-        // nullptr/0xFF — caller is responsible for calling
-        // Strategy_InitPerCore. _Free handles the cleanup symmetrically.
-        state->cores[i].strategy_state      = nullptr;
-        state->cores[i].strategy_state_kind = 0xFF;  // 0xFF = uninitialized sentinel
-        // Phase 2.1: per-core open notional (sum of entry_price × qty)
-        state->cores[i].core_open_notional = FPN_Zero<F>();
-        // Phase 3: per-core kill switch state. peak starts at zero; the
-        // first slow-path rebuild bumps it to (allocated + 0 + 0) which
-        // then becomes the high-water mark.
-        state->cores[i].core_peak_balance     = FPN_Zero<F>();
-        state->cores[i].core_dd_pct           = FPN_Zero<F>();
-        // v5.15.5.B.3 — core_kill_tripped moved to core_state_flags bitmap
-        // (cleared above as part of `core_state_flags = 0`).
-        state->cores[i].core_ks_trips_total   = 0;
-        // v4.2.1: idle-cycle counter for death-spiral detection
-        state->cores[i].idle_cycles = 0;
-        // v5.15.5.B.2 — ML observability fields (model_load_failed,
-        // cfg_drift_*, last_ml_*, nan_*_events_total, barrier_shadow_event_count,
-        // warmup_log_emitted) all moved to display_meta; init via
-        // CoreContextDisplayMeta_Init below (registry-driven defaults from
-        // FOREACH_DISPLAY_META_FIELD entries).
-        // v5.13.0.B — sell-side ML prediction state. Reset to 0 each cycle
-        // by RebuildOneCore via mctx wiring; init here for first-cycle
-        // safety (slow-path post-rebuild check reads this before any
-        // RebuildOneCore writes can have happened on cold boot).
-        state->cores[i].last_exit_prediction           = 0.0;
-        state->cores[i].last_exit_dominant_horizon     = -1;
-        // v5.15.5.A.6 — buy-side per-horizon barrier observability init
-        // (these fields stay on CoreContext HOT cluster — read by ML
-        // decision code per cycle, NOT extracted to display_meta).
-        state->cores[i].last_buy_dominant_horizon      = -1;
-        state->cores[i].last_barrier_mode_used         = 0;  // MODE_BARRIER_BLEND_LEGACY
-        // v5.15.5.B.2 — Initialize this core's display_meta sibling.
-        // Registry-driven; covers all 12 gate-diag pairs + 12 heterogeneous
-        // fields (counters, edge-triggers, cfg-drift, boot booleans) +
-        // slow_path_latency + slow_path_breakdown[SP_SECTION_COUNT].
-        // Future field additions auto-init via FOREACH expansion.
-        CoreContextDisplayMeta_Init(&state->display_meta[i]);
+        CORE_CTX_INIT_AUTOPOPULATE(state, i);
     }
 }
 

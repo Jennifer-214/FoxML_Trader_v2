@@ -2234,49 +2234,16 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     state.total_entries = 0;
                     state.total_exits   = 0;
                     state.total_events_processed = 0;
+                    // v5.15.5.B.7 — Per-slot paper-reset via CORE_CTX_RESET_AUTOPOPULATE
+                    // companion macro. Closes the per-session-counter mirror class
+                    // structurally: ~16 explicit field resets pre-.B.7 (anchored by
+                    // Phase 2.1 P&L leak, Phase 3 kill switch, v4.7.26 partner pairing
+                    // + gross accumulator leak, v5.4.3 SL-cooldown / idle-cycle leak)
+                    // collapse to ONE registry-driven walk. Adding a new "per-session
+                    // counter" in the future = ONE row in FOREACH_CORE_CTX_RESET_FIELD;
+                    // every paper-reset site auto-flows. See MemHeaders/CoreCtxInitRegistry.hpp.
                     for (int c = 0; c < num_cores; ++c) {
-                        state.cores[c].entries_processed = 0;
-                        state.cores[c].exits_processed   = 0;
-                        // Phase 2.1: reset per-core counters too. Without
-                        // this, a paper reset would leak realized P&L /
-                        // budget state from the previous "session" into
-                        // the new one — wrong reading on every panel.
-                        state.cores[c].core_realized      = FPN_Zero<F>();
-                        state.cores[c].core_fees          = FPN_Zero<F>();
-                        state.cores[c].core_wins          = 0;
-                        state.cores[c].core_losses        = 0;
-                        state.cores[c].core_open_notional = FPN_Zero<F>();
-                        // Phase 3: reset per-core kill switch state too.
-                        // Trip flags + peak + dd all clear so cores can
-                        // trade fresh after a paper reset.
-                        state.cores[c].core_peak_balance   = FPN_Zero<F>();
-                        state.cores[c].core_dd_pct         = FPN_Zero<F>();
-                        CORE_STATE_FLAG_CLR(state.cores[c], KILL_TRIPPED);
-                        state.cores[c].core_ks_trips_total = 0;
-                        // v4.7.26: clear v4.7.21 pairing state. Without this,
-                        // leg A closed pre-reset stays stashed in
-                        // partner_pending_pnl; leg B closes post-reset and
-                        // pairs against the stale stash → ghost loss bumps
-                        // core_losses without a corresponding fill, leaving
-                        // the panel showing W:0 L:N with 0-fills counter.
-                        state.cores[c].partner_pending_pnl    = FPN_Zero<F>();
-                        BITMAP_CLR(state.partner_pending_bitmap, BITMAP_BIT_U16(c));
-                        // v4.7.26: clear v4.7.25 gross accumulators. Without
-                        // this, post-reset avg W/L can read stale gross
-                        // values divided by the freshly-zero W/L counters
-                        // → divide-by-zero hides the issue, but a single
-                        // post-reset trade then produces a misleading mean.
-                        state.cores[c].core_gross_wins   = FPN_Zero<F>();
-                        state.cores[c].core_gross_losses = FPN_Zero<F>();
-                        // v5.4.3 (recurring-bugs Class 5): also clear
-                        // sl_cooldown_remaining + idle_cycles. Without
-                        // these, a pre-reset SL exit leaves the core
-                        // zero-gated post-reset (halt_reason=6) for N
-                        // ticks user thinks fresh. idle_cycles same
-                        // pattern — death-spiral counter shouldn't
-                        // carry pre-reset state.
-                        state.cores[c].sl_cooldown_remaining = 0;
-                        state.cores[c].idle_cycles           = 0;
+                        CORE_CTX_RESET_AUTOPOPULATE(state, c);
                     }
                     // v4.7.18: rotate the trade history CSV to a timestamped
                     // backup so the GUI's Trade History panel goes blank
