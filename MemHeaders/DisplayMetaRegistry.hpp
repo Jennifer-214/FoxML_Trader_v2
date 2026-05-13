@@ -107,12 +107,12 @@ namespace tt {
     X(double,    last_ml_effective_threshold, 0.0,  "v5.9.0b post-confidence-damping threshold actually used")                     \
     X(uint32_t,  nan_feature_events_total,    0,    "v5.9.0b Features_PackAll -1 sentinel count on this core")                     \
     X(uint32_t,  nan_prediction_events_total, 0,    "v5.9.0b Model_Predict NaN/Inf events on this core")                           \
-    /* Boot + cfg-drift state */                                                                   \
-    X(int,       model_load_failed,           0,    "v5.9.0b ML model attempted but refused/missing (.B.3 → core_state_flags bit)") \
+    /* Cfg-drift counter state (booleans moved to core_state_flags bitmap in v5.15.5.B.3) */       \
     X(uint8_t,   cfg_drift_tier1_count,       0,    "v5.9.5i cfg drift Tier 1 count")                                              \
-    X(uint8_t,   cfg_drift_tier2_count,       0,    "v5.9.5i cfg drift Tier 2 count")                                              \
-    X(uint8_t,   cfg_drift_strict_refused,    0,    "v5.9.5i strict-mode refusal flag (.B.3 → core_state_flags bit)")              \
-    X(uint8_t,   warmup_log_emitted,          0,    "v5.9.1 per-core warmup-complete log edge-trigger (.B.3 → core_state_flags bit)")
+    X(uint8_t,   cfg_drift_tier2_count,       0,    "v5.9.5i cfg drift Tier 2 count")
+    /* v5.15.5.B.3: model_load_failed, cfg_drift_strict_refused, warmup_log_emitted */                                             \
+    /* migrated to core_state_flags bitmap on CoreContext (CoreStateFlagRegistry.hpp).             */                              \
+    /* Final home — closes the Class 18 mirror they represented. */
 
 // Count of entries — useful for static_asserts + iteration helpers
 #define FOREACH_GATE_DIAG_PAIR_X_COUNT(...) 1+
@@ -126,9 +126,9 @@ static_assert(GATE_DIAG_PAIR_COUNT == 6,
 #define FOREACH_DISPLAY_META_FIELD_X_COUNT(...) 1+
 constexpr int DISPLAY_META_FIELD_COUNT = FOREACH_DISPLAY_META_FIELD(FOREACH_DISPLAY_META_FIELD_X_COUNT) 0;
 #undef FOREACH_DISPLAY_META_FIELD_X_COUNT
-static_assert(DISPLAY_META_FIELD_COUNT == 12,
-              "FOREACH_DISPLAY_META_FIELD is expected to have exactly 12 "
-              "entries at v5.15.5.B.2 ship; adjust when entries are added/"
-              "removed (e.g., .B.3 migrates 3 booleans → core_state_flags).");
+static_assert(DISPLAY_META_FIELD_COUNT == 9,
+              "FOREACH_DISPLAY_META_FIELD is expected to have exactly 9 entries "
+              "at v5.15.5.B.3 ship (was 12 at .B.2; 3 booleans migrated to "
+              "core_state_flags bitmap on CoreContext in .B.3).");
 
 }  // namespace tt

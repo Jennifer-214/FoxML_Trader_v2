@@ -196,7 +196,15 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
         // Kill switch
         if (fwrite(&ctx.core_peak_balance,   sizeof(FPN<F>), 1, f) != 1) goto fail;
         if (fwrite(&ctx.core_dd_pct,         sizeof(FPN<F>), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.core_kill_tripped,   1, 1, f) != 1) goto fail;
+        // v5.15.5.B.3 — core_kill_tripped migrated to core_state_flags bitmap
+        // bit. Format preservation: write as 1-byte 0/1 the same way pre-.B.3
+        // saved the uint8_t field. Bytewise-identical wire format (no
+        // SHARDED_SNAPSHOT_VERSION bump needed).
+        {
+            uint8_t kill_byte =
+                CORE_STATE_FLAG_IS_SET(ctx, KILL_TRIPPED) ? (uint8_t)1 : (uint8_t)0;
+            if (fwrite(&kill_byte, 1, 1, f) != 1) goto fail;
+        }
         {
             uint8_t pad8[3] = {0,0,0};
             if (fwrite(pad8, 3, 1, f) != 1) goto fail;
@@ -545,7 +553,13 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         ctx.sl_cooldown_remaining= s.sl_cooldown_remaining;
         ctx.core_peak_balance    = s.core_peak_balance;
         ctx.core_dd_pct          = s.core_dd_pct;
-        ctx.core_kill_tripped    = s.core_kill_tripped;
+        // v5.15.5.B.3 — kill bit packed in core_state_flags; load 1 byte
+        // into a temp + set/clear bit accordingly.
+        if (s.core_kill_tripped) {
+            CORE_STATE_FLAG_SET(ctx, KILL_TRIPPED);
+        } else {
+            CORE_STATE_FLAG_CLR(ctx, KILL_TRIPPED);
+        }
         ctx.core_ks_trips_total  = s.core_ks_trips_total;
         ctx.regime_state.current_regime       = s.rs_current;
         ctx.regime_state.proposed_regime      = s.rs_proposed;

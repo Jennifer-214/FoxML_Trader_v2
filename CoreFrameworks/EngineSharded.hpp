@@ -1106,7 +1106,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             if (!zoo_ptr) {
                 fprintf(stderr, "[sharded] core %d: aligned_alloc(CoreModelZoo) "
                                 "failed; ML core cannot init\n", i);
-                state.display_meta[i].model_load_failed = 1;
+                CORE_STATE_FLAG_SET(state.cores[i], MODEL_LOAD_FAILED);
                 continue;
             }
             CoreModelZoo_Init(zoo_ptr);
@@ -1119,7 +1119,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                 "failed; ML core cannot init\n", i);
                 CoreModelZoo_Free(zoo_ptr);
                 free(zoo_ptr);
-                state.display_meta[i].model_load_failed = 1;
+                CORE_STATE_FLAG_SET(state.cores[i], MODEL_LOAD_FAILED);
                 continue;
             }
             EnsembleModelZoo_Init(ezoo_ptr);
@@ -1181,7 +1181,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         CoreModelZoo_Free(zoo_ptr);
                         state.cores[i].model_handle = NULL;
                         // v5.9.0b: surface load failure to operator via TUI/health log
-                        state.display_meta[i].model_load_failed = 1;
+                        CORE_STATE_FLAG_SET(state.cores[i], MODEL_LOAD_FAILED);
                     }
                 }
             }
@@ -1247,7 +1247,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // Distinct from "no model configured" (which is operator
                 // intent — leave flag at 0). Here: strategy=ML + load
                 // attempted + failed → surface to operator.
-                state.display_meta[i].model_load_failed = 1;
+                CORE_STATE_FLAG_SET(state.cores[i], MODEL_LOAD_FAILED);
             }
 
             // v5.10.2.A — POST-LOAD VALIDATOR (extracted; closes parity-check
@@ -1264,7 +1264,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     cfg.held_out_gate_strict,
                     (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
                     (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
-                    &state.display_meta[i]);
+                    &state.display_meta[i], &state.cores[i]);
                 // Note: validator returns -1 on REFUSE in strict mode but the
                 // existing v5.9.5i semantics here were "log loudly + leave
                 // handle loaded" (TODO v5.10: free handle + return-from-boot
@@ -1929,7 +1929,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 for (int c = 0; c < num_cores; ++c) {
                     if (g_shared.kill_reset_per_core[c]) {
                         g_shared.kill_reset_per_core[c] = 0;
-                        state.cores[c].core_kill_tripped = 0;
+                        CORE_STATE_FLAG_CLR(state.cores[c], KILL_TRIPPED);
                         state.cores[c].core_peak_balance = FPN_Zero<F>();
                         state.cores[c].core_dd_pct = FPN_Zero<F>();
                         fprintf(stderr, "[sharded] core %d kill switch RESET\n", c);
@@ -2251,7 +2251,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         // trade fresh after a paper reset.
                         state.cores[c].core_peak_balance   = FPN_Zero<F>();
                         state.cores[c].core_dd_pct         = FPN_Zero<F>();
-                        state.cores[c].core_kill_tripped   = 0;
+                        CORE_STATE_FLAG_CLR(state.cores[c], KILL_TRIPPED);
                         state.cores[c].core_ks_trips_total = 0;
                         // v4.7.26: clear v4.7.21 pairing state. Without this,
                         // leg A closed pre-reset stays stashed in
@@ -2945,7 +2945,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 "FAILED (rc=%d); pre-swap state preserved\n",
                                                 c, rc);
                                         } else {
-                                            state.display_meta[c].model_load_failed = 0;
+                                            CORE_STATE_FLAG_CLR(state.cores[c], MODEL_LOAD_FAILED);
                                             // Re-fetch ezoo after swap to run post-load
                                             // validators on the NEW ezoo. v5.14.2.E.1
                                             // closes PARITY-009.F: ValidateAgainstCfg +
@@ -2960,9 +2960,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 cfg.held_out_gate_strict,
                                                 (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
                                                 (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
-                                                &state.display_meta[c]);
+                                                &state.display_meta[c], &state.cores[c]);
                                             if (validate_rc < 0) {
-                                                state.display_meta[c].model_load_failed = 1;
+                                                CORE_STATE_FLAG_SET(state.cores[c], MODEL_LOAD_FAILED);
                                                 fprintf(stderr,
                                                     "[hot_swap] ensemble core %d "
                                                     "REFUSED post-load validation "
@@ -2975,7 +2975,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 /*zoo=*/nullptr, swap_ezoo,
                                                 /*core_id=*/c, cfg.held_out_gate_strict);
                                             if (overlay_rc < 0) {
-                                                state.display_meta[c].model_load_failed = 1;
+                                                CORE_STATE_FLAG_SET(state.cores[c], MODEL_LOAD_FAILED);
                                             }
                                         }
                                         __atomic_store_n(
@@ -3004,7 +3004,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 "FAILED (rc=%d); pre-swap state preserved\n",
                                                 c, rc);
                                         } else {
-                                            state.display_meta[c].model_load_failed = 0;
+                                            CORE_STATE_FLAG_CLR(state.cores[c], MODEL_LOAD_FAILED);
                                             // Re-fetch zoo after swap to run post-load
                                             // validators on the NEW zoo (parity-check
                                             // Finding #3 closure preserved).
@@ -3017,9 +3017,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 cfg.held_out_gate_strict,
                                                 (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
                                                 (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
-                                                &state.display_meta[c]);
+                                                &state.display_meta[c], &state.cores[c]);
                                             if (validate_rc < 0) {
-                                                state.display_meta[c].model_load_failed = 1;
+                                                CORE_STATE_FLAG_SET(state.cores[c], MODEL_LOAD_FAILED);
                                                 fprintf(stderr,
                                                     "[hot_swap] core %d REFUSED post-load "
                                                     "validation in strict mode; new model "
@@ -3030,7 +3030,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                                 new_swap_zoo, /*ezoo=*/nullptr,
                                                 /*core_id=*/c, cfg.held_out_gate_strict);
                                             if (overlay_rc < 0) {
-                                                state.display_meta[c].model_load_failed = 1;
+                                                CORE_STATE_FLAG_SET(state.cores[c], MODEL_LOAD_FAILED);
                                             }
                                         }
                                         __atomic_store_n(
@@ -3125,7 +3125,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // PushParameters wrapper; inline for per-core path).
                     // v5.12.1.B.2 — pass publish_tick = ticks_produced load
                     // so hot-path staleness gate sees fresh tick stamp.
-                    if (state.cores[c].dirty) {
+                    if (CORE_STATE_FLAG_IS_SET(state.cores[c], DIRTY)) {
                         ExecutionCore<F>* core = state.cores[c].core;
                         if (core) {
                             uint64_t pp_now_tick = ticks_produced.load(
@@ -3134,7 +3134,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                 state.cores[c].pending_params,
                                 pp_now_tick);
                         }
-                        state.cores[c].dirty = 0;
+                        CORE_STATE_FLAG_CLR(state.cores[c], DIRTY);
                     }
 
                     // v5.1.1: bracket PUSH_PARAMS section.

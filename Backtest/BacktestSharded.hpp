@@ -380,7 +380,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
                         cfg.held_out_gate_strict,
                         (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_INFERENCE_CFG_DRIFT),
                         (int)BITMAP_IS_SET(cfg.ops_cfg_flags, MASK_OPS_CFG_ACKNOWLEDGE_CROSS_BINARY_DRIFT),
-                        &state.display_meta[i]);
+                        &state.display_meta[i], &state.cores[i]);
                     // Note: validator returns -1 on REFUSE in strict mode but
                     // backtest semantics match boot's "log loudly + leave loaded"
                     // (counters written, FATAL log fires, replay continues).

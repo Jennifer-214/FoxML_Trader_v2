@@ -121,7 +121,12 @@ struct MLBuildContext {
     // v5.9.0b — ML observability pass-through. ML_BuildParameters writes
     // these for the entry log + ML Status panel to read. nullptr-safe
     // (legacy/test callers can omit).
-    int*                model_load_failed;            // read-only: set by CoreModelZoo, observed here
+    // v5.15.5.B.3 — `model_load_failed` migrated from `int*` to plain
+    // `int`-by-value. The bitmap bit on CoreContext (core_state_flags bit
+    // MASK_CORE_STATE_MODEL_LOAD_FAILED) is not addressable, so the call
+    // site copies-in the current bit state. Read-only field from ML body's
+    // perspective; semantics preserved (0 = no failure; non-zero = failure).
+    int                 model_load_failed;            // read-only: BIT state at call time (0 = ok, 1 = load failed)
     uint64_t*           last_ml_critical_log_us;      // rate-limit gate for fall-through log
     double*             out_threshold;                // ml_buy_threshold at decision time
     double*             out_effective_threshold;      // post-damping threshold used
@@ -713,7 +718,9 @@ inline void ML_BuildParameters(
         // ML→SimpleDip fall-through (V5_9_AUDIT-#2). Pre-v5.9.0b this
         // was silent; now visible in health log.
         if (mctx && mctx->last_ml_critical_log_us) {
-            int load_failed = mctx->model_load_failed && *mctx->model_load_failed;
+            // v5.15.5.B.3 — model_load_failed is now a plain `int` value
+            // (was `int*` pre-.B.3; bitmap bit is not addressable).
+            int load_failed = mctx->model_load_failed;
             tt::Health_LogCriticalRateLimited(
                 mctx->last_ml_critical_log_us,
                 /*gate_us=*/60000000ULL,  // 60s per-core gate

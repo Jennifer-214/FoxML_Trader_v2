@@ -280,7 +280,7 @@ inline bool Strategy_WriteRatchetSL(EventLoopState<F>* state, int slot,
     auto& ctx = state->cores[slot];
     if (FPN_GreaterThan(capped, ctx.pending_params.ratchet_sl)) {
         ctx.pending_params.ratchet_sl = capped;
-        ctx.dirty = 1;
+        CORE_STATE_FLAG_SET(ctx, DIRTY);
         return true;
     }
     return false;
@@ -306,7 +306,7 @@ inline bool Strategy_WriteRatchetTP(EventLoopState<F>* state, int slot,
     auto& ctx = state->cores[slot];
     if (FPN_GreaterThan(proposed_tp, ctx.pending_params.ratchet_tp)) {
         ctx.pending_params.ratchet_tp = proposed_tp;
-        ctx.dirty = 1;
+        CORE_STATE_FLAG_SET(ctx, DIRTY);
         return true;
     }
     return false;

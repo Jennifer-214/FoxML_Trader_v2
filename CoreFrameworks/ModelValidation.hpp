@@ -141,7 +141,8 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
     int strict_mode,                                  // cfg.held_out_gate_strict
     int acknowledge_inference_cfg_drift,              // ops_cfg_flags bit; suppresses INFERENCE_CFG category
     int acknowledge_cross_binary_version_drift,       // ops_cfg_flags bit; suppresses CROSS_BINARY category
-    CoreContextDisplayMeta<F>* meta,                  // for cfg_drift_* counter writeback (v5.15.5.B.2: extracted from CoreContext)
+    CoreContextDisplayMeta<F>* meta,                  // for cfg_drift_tier*_count writeback (v5.15.5.B.2: extracted from CoreContext)
+    CoreContext<F>* ctx,                              // for cfg_drift_strict_refused bitmap bit (v5.15.5.B.3: bit-packed in core_state_flags)
     LogFn log_fn = LogFn{}                            // v5.15.5.A.7: injected logger (default = stderr)
 ) {
     int strict = (strict_mode == 1);
@@ -233,13 +234,22 @@ static inline int CoreModelZoo_ValidateAgainstCfg(
             check_handle(&ezoo->exit_predictor[h], "exit", h);
     }
 
-    // Writeback drift counters to per-core display_meta (closes parity-check
+    // Writeback drift counters + strict-refused flag (closes parity-check
     // Finding #10 — now updated on hot-swap too via shared helper).
-    // v5.15.5.B.2 — moved from CoreContext to CoreContextDisplayMeta sibling.
+    // v5.15.5.B.2 — counters moved from CoreContext to CoreContextDisplayMeta.
+    // v5.15.5.B.3 — cfg_drift_strict_refused migrated from DisplayMeta back
+    // to CoreContext as a core_state_flags bitmap bit. Final home — closes
+    // the byte-per-flag pattern that recurred through .B.2.
     if (meta) {
-        meta->cfg_drift_tier1_count    = (uint8_t)(tier1_count > 255 ? 255 : tier1_count);
-        meta->cfg_drift_tier2_count    = (uint8_t)(tier2_count > 255 ? 255 : tier2_count);
-        meta->cfg_drift_strict_refused = (tier1_refused_count > 0) ? 1 : 0;
+        meta->cfg_drift_tier1_count = (uint8_t)(tier1_count > 255 ? 255 : tier1_count);
+        meta->cfg_drift_tier2_count = (uint8_t)(tier2_count > 255 ? 255 : tier2_count);
+    }
+    if (ctx) {
+        if (tier1_refused_count > 0) {
+            CORE_STATE_FLAG_SET(*ctx, CFG_DRIFT_STRICT_REFUSED);
+        } else {
+            CORE_STATE_FLAG_CLR(*ctx, CFG_DRIFT_STRICT_REFUSED);
+        }
     }
 
     if (tier1_refused_count > 0 && strict) {

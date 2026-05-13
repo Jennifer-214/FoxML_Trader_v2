@@ -452,10 +452,12 @@ static inline void TUI_CopySnapshotSharded(
             snap->per_core[i].warmup_progress_pct = (uint8_t)pct;
         }
         // v5.9.5i — cfg drift summary mirror
-        // v5.15.5.B.2 — fields extracted to CoreContextDisplayMeta sibling.
+        // v5.15.5.B.2 — tier counters extracted to CoreContextDisplayMeta.
+        // v5.15.5.B.3 — strict_refused flag migrated to core_state_flags bitmap.
         snap->per_core[i].cfg_drift_tier1_count    = state->display_meta[i].cfg_drift_tier1_count;
         snap->per_core[i].cfg_drift_tier2_count    = state->display_meta[i].cfg_drift_tier2_count;
-        snap->per_core[i].cfg_drift_strict_refused = state->display_meta[i].cfg_drift_strict_refused;
+        snap->per_core[i].cfg_drift_strict_refused =
+            CORE_STATE_FLAG_IS_SET(state->cores[i], CFG_DRIFT_STRICT_REFUSED) ? 1 : 0;
         // Per-core gate direction. Use RESOLVED strategy for AUTO so direction
         // tracks the active regime's strategy. MOMENTUM buys above; everything
         // else buys below.
@@ -512,7 +514,7 @@ static inline void TUI_CopySnapshotSharded(
         // drift_kill_tripped migrated to state_flags bitmap. ExecutionCore
         // side (state->cores[i].core_kill_tripped + drift_history.*) keeps
         // its bool/struct storage — only the snapshot side moves to bitmap.
-        if (state->cores[i].core_kill_tripped) {
+        if (CORE_STATE_FLAG_IS_SET(state->cores[i], KILL_TRIPPED)) {
             STATE_FLAG_SET(snap->per_core[i], CORE_KILL_TRIPPED);
         }
         // v5.10.3.B — runtime IC drift observability (parity-check Finding #9).
@@ -620,7 +622,7 @@ static inline void TUI_CopySnapshotSharded(
             // v5.15.5.B.2 — model_load_failed + ML threshold/nan_* counters
             // moved to display_meta (.B.3 will bit-pack model_load_failed back
             // onto CoreContext as a core_state_flags bit).
-            if (state->display_meta[i].model_load_failed) {
+            if (CORE_STATE_FLAG_IS_SET(state->cores[i], MODEL_LOAD_FAILED)) {
                 FAILURE_SET(snap->per_core[i], ml_model_load_failed);
             }
             snap->per_core[i].ml_last_threshold          = state->display_meta[i].last_ml_threshold;

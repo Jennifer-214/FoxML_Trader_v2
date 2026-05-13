@@ -60,6 +60,7 @@
 // EventLoopState, and ControllerEventLoop.hpp defines them at line ~404.
 #include "CoreLatencyStats.hpp"  // v4.7.42 — slow_path_latency on CoreContext
 #include "../MemHeaders/DisplayMetaRegistry.hpp"  // v5.15.5.B.2 — FOREACH_GATE_DIAG_PAIR + FOREACH_DISPLAY_META_FIELD
+#include "../MemHeaders/CoreStateFlagRegistry.hpp"  // v5.15.5.B.3 — FOREACH_CORE_STATE_FLAG bitmap for 5 booleans
 #include "ExecutionCore.hpp"
 #include "Notify.hpp"
 #include "OrderManager.hpp"
@@ -290,7 +291,13 @@ struct alignas(64) CoreContext {
     void*    strategy_state;
     uint8_t  strategy_id;               // STRATEGY_* constant; STRATEGY_NONE means "do not trade"
     uint8_t  resolved_strategy_id;      // v4.0.4 — after AUTO regime resolution; equals strategy_id for non-AUTO cores
-    uint8_t  dirty;                     // 1 = pending_params should be pushed to the core (.B.3 → core_state_flags bit)
+    // v5.15.5.B.3 — 5 boolean flags bit-packed into uint8_t core_state_flags.
+    // Replaces: dirty, core_kill_tripped, model_load_failed (was in DisplayMeta
+    // v5.15.5.B.2), cfg_drift_strict_refused (same), warmup_log_emitted (same).
+    // Per CLAUDE.md item 20 (BITMAP_* universalization) + item 1 (Portfolio
+    // bitmap precedent). Single-writer per core; readers via CORE_STATE_FLAG_
+    // IS_SET / BITMAP_ANY for branchless multi-flag check.
+    uint8_t  core_state_flags;
     uint8_t  strategy_state_kind;       // matches strategy_id at allocation; 0xFF = uninitialized
 
     // v4.0.3 B: per-core regime state for STRATEGY_AUTO. Tracks current
@@ -458,8 +465,10 @@ struct alignas(64) CoreContext {
     // remains as backstop for whole-account drawdown.
     FPN<F>   core_peak_balance;         // peak of current_value over core's lifetime
     FPN<F>   core_dd_pct;               // current drawdown % (display field, recomputed each rebuild)
-    uint8_t  core_kill_tripped;         // 1 = killed; entries zero-gated with HALT_CORE_KILL (.B.3 → bitmap bit)
-    uint8_t  _pad_kill[3];              // alignment (.B.3 may collapse after bit-pack)
+    // v5.15.5.B.3 — core_kill_tripped migrated to core_state_flags bitmap on
+    // CoreContext HOT cluster (see core_state_flags above). _pad_kill[3]
+    // eliminated as natural pad-collapse consequence — the kill trip is now
+    // 1 bit in the bitmap word, not a byte with 3-byte alignment padding.
     uint32_t core_ks_trips_total;       // lifetime trip count (for forensics)
 
     // v4.0.3 D10: per-core P&L regression feeder for adaptive feedback.
@@ -821,7 +830,10 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         state->cores[i].allocated_balance = FPN_Zero<F>();
         GateParameters_Init(&state->cores[i].pending_params);
         state->cores[i].strategy_id = STRATEGY_NONE;  // pitfall P6.5: explicit init
-        state->cores[i].dirty = 0;
+        // v5.15.5.B.3 — 5 boolean flags bit-packed in core_state_flags
+        // (DIRTY + KILL_TRIPPED + MODEL_LOAD_FAILED + CFG_DRIFT_STRICT_REFUSED
+        // + WARMUP_LOG_EMITTED). All clear at boot per pre-v5.15.5.B.3 semantics.
+        state->cores[i].core_state_flags = 0;
         state->cores[i].model_handle = nullptr;
         state->cores[i].ensemble_handle = nullptr;  // v5.10.0a.G.5 default
         state->cores[i].entries_processed = 0;
@@ -926,7 +938,8 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
         // then becomes the high-water mark.
         state->cores[i].core_peak_balance     = FPN_Zero<F>();
         state->cores[i].core_dd_pct           = FPN_Zero<F>();
-        state->cores[i].core_kill_tripped     = 0;
+        // v5.15.5.B.3 — core_kill_tripped moved to core_state_flags bitmap
+        // (cleared above as part of `core_state_flags = 0`).
         state->cores[i].core_ks_trips_total   = 0;
         // v4.2.1: idle-cycle counter for death-spiral detection
         state->cores[i].idle_cycles = 0;
@@ -1601,7 +1614,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                             avg_ic, drift_floor,
                             (unsigned)drift_window_seconds, n_samples);
                         if (drift_auto_kill && !ctx.drift_history.kill_tripped) {
-                            state->cores[core_id].core_kill_tripped = 1;
+                            CORE_STATE_FLAG_SET(state->cores[core_id], KILL_TRIPPED);
                             state->cores[core_id].core_ks_trips_total++;
                             ctx.drift_history.kill_tripped = 1;
                             static uint64_t s_drift_kill_log_us[16] = {0};
@@ -1961,7 +1974,7 @@ inline void EventLoop_QueueParameters(EventLoopState<F>* state, int slot,
                                        const GateParameters<F>& new_params) {
     if (slot < 0 || slot >= state->registered_count) return;
     state->cores[slot].pending_params = new_params;
-    state->cores[slot].dirty = 1;
+    CORE_STATE_FLAG_SET(state->cores[slot], DIRTY);
 }
 
 //======================================================================================================
@@ -2265,7 +2278,7 @@ inline void EventLoop_RebuildOneCore(
                 // staleness gate stays satisfied). pending_params payload
                 // is unchanged from the last full rebuild — the republish
                 // is purely for tick freshness.
-                state->cores[slot].dirty = 1;
+                CORE_STATE_FLAG_SET(state->cores[slot], DIRTY);
                 return;
             }
         }
@@ -2319,7 +2332,7 @@ inline void EventLoop_RebuildOneCore(
         // global startup gate that releases all cores from CONTROLLER_WARMUP
         // simultaneously — operator wants per-core readiness because in
         // per_core_slow arch each core's slow path runs at its own cadence.
-        if (!state->display_meta[slot].warmup_log_emitted) {
+        if (!CORE_STATE_FLAG_IS_SET(state->cores[slot], WARMUP_LOG_EMITTED)) {
             int wmin = (int)config->min_warmup_samples;
             if (wmin <= 0) wmin = 64;  // engine default (matches ShardedSnapshot fallback)
             if (rolling->count >= wmin) {
@@ -2332,7 +2345,7 @@ inline void EventLoop_RebuildOneCore(
                                   ? STRATEGY_SHORT_NAMES[sid] : "unknown";
                 fprintf(stderr, "[core %d] warmup complete (%d/%d samples) — %s active\n",
                         slot, rolling->count, wmin, sname);
-                state->display_meta[slot].warmup_log_emitted = 1;
+                CORE_STATE_FLAG_SET(state->cores[slot], WARMUP_LOG_EMITTED);
             }
         }
         if (config->idle_reset_cycles > 0 &&
@@ -2553,7 +2566,10 @@ inline void EventLoop_RebuildOneCore(
             // Caller-owned per-core storage; ML_BuildParameters reads/writes
             // through these pointers + the entry log emitter reads them at
             // fill time.
-            ml_ctx.model_load_failed           = &state->display_meta[slot].model_load_failed;
+            // v5.15.5.B.3 — model_load_failed migrated from CoreContext int (was display_meta after .B.2)
+            // to a core_state_flags bitmap bit. mctx field changed from int* to int-by-value;
+            // copy current bit state into the int.
+            ml_ctx.model_load_failed           = CORE_STATE_FLAG_IS_SET(state->cores[slot], MODEL_LOAD_FAILED) ? 1 : 0;
             ml_ctx.last_ml_critical_log_us     = &state->display_meta[slot].last_ml_critical_log_us;
             ml_ctx.out_threshold               = &state->display_meta[slot].last_ml_threshold;
             ml_ctx.out_effective_threshold     = &state->display_meta[slot].last_ml_effective_threshold;
@@ -2853,13 +2869,13 @@ inline void EventLoop_RebuildOneCore(
             // Trip evaluation. Threshold: per-core override if set, else
             // global max_drawdown_pct. Trip ALSO requires drop > min_kill_loss
             // so a tiny allocation doesn't trip on rounding noise.
-            if (state->cores[slot].core_kill_tripped == 0) {
+            if (!CORE_STATE_FLAG_IS_SET(state->cores[slot], KILL_TRIPPED)) {
                 FPN<F> threshold = !FPN_IsZero(config->core_max_drawdown_pct[slot])
                     ? config->core_max_drawdown_pct[slot]
                     : config->max_drawdown_pct;
                 if (FPN_GreaterThan(state->cores[slot].core_dd_pct, threshold) &&
                     FPN_GreaterThan(drop, config->min_kill_loss)) {
-                    state->cores[slot].core_kill_tripped   = 1;
+                    CORE_STATE_FLAG_SET(state->cores[slot], KILL_TRIPPED);
                     state->cores[slot].core_ks_trips_total++;
                     double dd_pct_d  = FPN_ToDouble(state->cores[slot].core_dd_pct) * 100.0;
                     double drop_d    = FPN_ToDouble(drop);
@@ -2884,7 +2900,7 @@ inline void EventLoop_RebuildOneCore(
                     }
                 }
             }
-            if (state->cores[slot].core_kill_tripped) {
+            if (CORE_STATE_FLAG_IS_SET(state->cores[slot], KILL_TRIPPED)) {
                 zero_gate(HALT_CORE_KILL);
             }
         }
@@ -3016,7 +3032,7 @@ inline void EventLoop_RebuildOneCore(
         state->cores[slot].intended_tp  = state->cores[slot].pending_params.sg_take_profit_price;
         state->cores[slot].intended_sl  = state->cores[slot].pending_params.sg_stop_loss_price;
         state->cores[slot].intended_qty = state->cores[slot].pending_params.trade_size;
-        state->cores[slot].dirty = 1;
+        CORE_STATE_FLAG_SET(state->cores[slot], DIRTY);
 
         // v5.6.6: gate-state edge-trigger health log emit. Pack the four
         // hot-path-relevant fields into a single uint16_t and compare
@@ -3091,15 +3107,15 @@ inline int EventLoop_PushParameters(EventLoopState<F>* state,
     // back-compat for legacy + test callers (warmup sentinel; gate inert).
     int pushed = 0;
     for (int slot = 0; slot < state->registered_count; ++slot) {
-        if (state->cores[slot].dirty == 0) continue;
+        if (!CORE_STATE_FLAG_IS_SET(state->cores[slot], DIRTY)) continue;
         ExecutionCore<F>* core = state->cores[slot].core;
         if (core == nullptr) {
-            state->cores[slot].dirty = 0;
+            CORE_STATE_FLAG_CLR(state->cores[slot], DIRTY);
             continue;
         }
         ExecutionCore_SetParameters(core, state->cores[slot].pending_params,
                                      publish_tick);
-        state->cores[slot].dirty = 0;
+        CORE_STATE_FLAG_CLR(state->cores[slot], DIRTY);
         ++pushed;
     }
     return pushed;
@@ -3578,7 +3594,7 @@ inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
         FPN<F> existing    = state->cores[core_id].pending_params.ratchet_sl;
         if (FPN_GreaterThan(new_ratchet, existing)) {
             state->cores[core_id].pending_params.ratchet_sl = new_ratchet;
-            state->cores[core_id].dirty = 1;  // force push next cycle
+            CORE_STATE_FLAG_SET(state->cores[core_id], DIRTY);  // force push next cycle
         }
     }
 }
@@ -3651,7 +3667,7 @@ inline void EventLoop_BreakevenOnProfitOneCore(EventLoopState<F>* state,
         FPN<F> existing     = state->cores[core_id].pending_params.ratchet_sl;
         if (FPN_GreaterThan(breakeven_sl, existing)) {
             state->cores[core_id].pending_params.ratchet_sl = breakeven_sl;
-            state->cores[core_id].dirty = 1;
+            CORE_STATE_FLAG_SET(state->cores[core_id], DIRTY);
         }
     }
 }

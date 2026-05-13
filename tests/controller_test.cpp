@@ -5278,7 +5278,7 @@ int main() {
             check("init: peak == allocated_balance after first rebuild",
                   fabs(FPN_ToDouble(r->state.cores[0].core_peak_balance) - 1000.0) < 1e-6);
             check("init: kill not tripped",
-                  r->state.cores[0].core_kill_tripped == 0);
+                  !CORE_STATE_FLAG_IS_SET(r->state.cores[0], KILL_TRIPPED));
             check("init: dd == 0",
                   FPN_IsZero(r->state.cores[0].core_dd_pct));
         }
@@ -5293,7 +5293,7 @@ int main() {
             r->state.cores[0].core_realized = FPN_FromDouble<64>(-50.0);
             tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
             check("loss within threshold (5%, $50): no trip",
-                  r->state.cores[0].core_kill_tripped == 0);
+                  !CORE_STATE_FLAG_IS_SET(r->state.cores[0], KILL_TRIPPED));
             // dd should compute as roughly 5%
             double dd = FPN_ToDouble(r->state.cores[0].core_dd_pct);
             check("loss within threshold: dd ~= 5%",
@@ -5310,7 +5310,7 @@ int main() {
             r->state.cores[0].core_realized = FPN_FromDouble<64>(-150.0);
             tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
             check("loss exceeds threshold (15%): kill tripped",
-                  r->state.cores[0].core_kill_tripped == 1);
+                  CORE_STATE_FLAG_IS_SET(r->state.cores[0], KILL_TRIPPED));
             check("trip: ks_trips_total bumped",
                   r->state.cores[0].core_ks_trips_total == 1);
             check("trip: halt_reason == HALT_CORE_KILL",
@@ -5334,7 +5334,7 @@ int main() {
             r->state.cores[0].core_realized = FPN_FromDouble<64>(-4.0);
             tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
             check("dd over threshold but drop under floor ($4 < $5): NO trip",
-                  r->state.cores[0].core_kill_tripped == 0);
+                  !CORE_STATE_FLAG_IS_SET(r->state.cores[0], KILL_TRIPPED));
         }
 
         // ---- Test 5: MTM unrealized loss trips (no realized exit yet) ----
@@ -5356,7 +5356,7 @@ int main() {
             FPN<64> mtm = FPN_FromDouble<64>(40000.0);
             tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg, (const RollingStats<64, 512>*)nullptr, nullptr, nullptr, &mtm);
             check("MTM: -$200 unrealized trips kill (no realized)",
-                  r->state.cores[0].core_kill_tripped == 1);
+                  CORE_STATE_FLAG_IS_SET(r->state.cores[0], KILL_TRIPPED));
         }
 
         // ---- Test 6: MTM disabled → realized-only behavior ----
@@ -5373,7 +5373,7 @@ int main() {
             FPN<64> mtm = FPN_FromDouble<64>(30000.0);  // -$300 unrealized
             tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg, (const RollingStats<64, 512>*)nullptr, nullptr, nullptr, &mtm);
             check("MTM disabled: unrealized loss alone doesn't trip",
-                  r->state.cores[0].core_kill_tripped == 0);
+                  !CORE_STATE_FLAG_IS_SET(r->state.cores[0], KILL_TRIPPED));
         }
 
         // ---- Test 7: per-core override beats global threshold ----
@@ -5387,7 +5387,7 @@ int main() {
             r->state.cores[0].core_realized = FPN_FromDouble<64>(-80.0);
             tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
             check("per-core override (5%) trips at 8% even when global (10%) wouldn't",
-                  r->state.cores[0].core_kill_tripped == 1);
+                  CORE_STATE_FLAG_IS_SET(r->state.cores[0], KILL_TRIPPED));
         }
 
         // ---- Test 8: post-trip halt prevents further entries ----
@@ -5395,7 +5395,7 @@ int main() {
             auto* r = fresh_state();
             ControllerConfig<64> cfg = stub_cfg();
             // Set a small allocated balance to ensure peak doesn't override
-            r->state.cores[0].core_kill_tripped = 1;  // pre-tripped
+            CORE_STATE_FLAG_SET(r->state.cores[0], KILL_TRIPPED);  // pre-tripped
             tt::EventLoop_RebuildAllParameters(&r->state, &rolling, &cfg);
             check("pre-tripped: halt_reason == HALT_CORE_KILL immediately",
                   r->state.cores[0].halt_reason == HALT_CORE_KILL);
@@ -5464,7 +5464,8 @@ int main() {
                 r->state.cores[c].core_open_notional = FPN_FromDouble<64>(100.0 + 50.0 * c);
                 r->state.cores[c].core_peak_balance  = FPN_FromDouble<64>(2600.0 + 100.0 * c);
                 r->state.cores[c].core_dd_pct        = FPN_FromDouble<64>(0.03 * c);
-                r->state.cores[c].core_kill_tripped  = (c == 2) ? 1 : 0;
+                if (c == 2) CORE_STATE_FLAG_SET(r->state.cores[c], KILL_TRIPPED);
+                else        CORE_STATE_FLAG_CLR(r->state.cores[c], KILL_TRIPPED);
                 r->state.cores[c].core_ks_trips_total = c;
                 r->state.cores[c].regime_state.current_regime = c % 4;
                 r->state.cores[c].regime_state.hysteresis_count = 5 + c;
@@ -5509,7 +5510,7 @@ int main() {
                 check("round-trip: core_realized",
                       fabs(FPN_ToDouble(r2->state.cores[c].core_realized) - (50.0 - 10.0 * c)) < 1e-6);
                 check("round-trip: core_kill_tripped",
-                      r2->state.cores[c].core_kill_tripped == (c == 2 ? 1 : 0));
+                      CORE_STATE_FLAG_IS_SET(r2->state.cores[c], KILL_TRIPPED) == (c == 2));
                 check("round-trip: regime current",
                       r2->state.cores[c].regime_state.current_regime == (c % 4));
                 check("round-trip: pnl_feeder count",
@@ -7992,7 +7993,7 @@ e3_skip_load:;
                 FPN_ToDouble(a.core_fees) != FPN_ToDouble(b.core_fees)) {
                 notional_match = false;
             }
-            if (a.dirty != b.dirty) {
+            if (CORE_STATE_FLAG_IS_SET(a, DIRTY) != CORE_STATE_FLAG_IS_SET(b, DIRTY)) {
                 dirty_match = false;
             }
         }
@@ -9436,18 +9437,18 @@ e3_skip_load:;
         check("v5.4.0p2.2: WriteRatchetSL accepts above-floor proposal and caps",
               wrote && stored_d > 49849.0 && stored_d < 49851.0);
         check("v5.4.0p2.2: WriteRatchetSL sets dirty=1 on advance",
-              state.cores[0].dirty == 1);
+              CORE_STATE_FLAG_IS_SET(state.cores[0], DIRTY));
 
         // Lower proposal (well below current cap) is a no-op since
         // ratchet_sl is now the cap value (~49850).
         FPN<FP> lower_proposal = FPN_FromDouble<FP>(49000.0);
-        state.cores[0].dirty = 0;
+        CORE_STATE_FLAG_CLR(state.cores[0], DIRTY);
         FPN<FP> ratchet_before = state.cores[0].pending_params.ratchet_sl;
         bool wrote2 = tt::Strategy_WriteRatchetSL(&state, 0, lower_proposal, entry, &cfg);
         check("v5.4.0p2.2: WriteRatchetSL is max-only (lower proposal ignored)",
               !wrote2 && FPN_Equal(state.cores[0].pending_params.ratchet_sl, ratchet_before));
         check("v5.4.0p2.2: WriteRatchetSL leaves dirty unchanged when no advance",
-              state.cores[0].dirty == 0);
+              !CORE_STATE_FLAG_IS_SET(state.cores[0], DIRTY));
 
         tt::EventLoopState_Free(&state);
     }
@@ -9464,7 +9465,7 @@ e3_skip_load:;
                                         FPN_FromDouble<FP>(50000.0), &rolling, &cfg);
         check("v5.4.0p2.2: ExitAdjustPerCore is no-op when state is null",
               state.cores[0].strategy_state == nullptr &&
-              state.cores[0].dirty == 0);
+              !CORE_STATE_FLAG_IS_SET(state.cores[0], DIRTY));
         tt::EventLoopState_Free(&state);
     }
 
@@ -9654,12 +9655,12 @@ e3_skip_load:;
               state.cores[0].strategy_state != nullptr);
 
         // Adapt should not crash + not write the dirty bit.
-        state.cores[0].dirty = 0;
+        CORE_STATE_FLAG_CLR(state.cores[0], DIRTY);
         tt::Strategy_AdaptPerCore(&state, 0, STRATEGY_ML,
                                    FPN_FromDouble<FP>(50000.0),
                                    FPN_Zero<FP>(), 0, &cfg);
         check("v5.4.0p2.5: ML Adapt is a clean no-op (no dirty bit set)",
-              state.cores[0].dirty == 0);
+              !CORE_STATE_FLAG_IS_SET(state.cores[0], DIRTY));
         tt::Strategy_FreePerCore(&state, 0);
         tt::EventLoopState_Free(&state);
     }
@@ -9724,7 +9725,7 @@ e3_skip_load:;
         check("v5.4.0p2.5: ML ExitAdjust ratchets via fee-floor cap when R² ≥ 0.5",
               stored > 49849.0 && stored < 49851.0);
         check("v5.4.0p2.5: ML ExitAdjust sets dirty=1 on advance",
-              state.cores[0].dirty == 1);
+              CORE_STATE_FLAG_IS_SET(state.cores[0], DIRTY));
 
         tt::Strategy_FreePerCore(&state, 0);
         state.oms->portfolio.active_bitmap = 0;
@@ -9779,15 +9780,15 @@ e3_skip_load:;
         check("v5.4.0p3.3: WriteRatchetTP advance from 0 returns true",
               wrote1 && FPN_Equal(state.cores[0].pending_params.ratchet_tp,
                                    FPN_FromDouble<FP>(51000.0)) &&
-              state.cores[0].dirty == 1);
+              CORE_STATE_FLAG_IS_SET(state.cores[0], DIRTY));
 
-        state.cores[0].dirty = 0;
+        CORE_STATE_FLAG_CLR(state.cores[0], DIRTY);
         bool wrote2 = tt::Strategy_WriteRatchetTP(&state, 0,
                                                     FPN_FromDouble<FP>(50500.0));
         check("v5.4.0p3.3: WriteRatchetTP lower proposal is no-op",
               !wrote2 && FPN_Equal(state.cores[0].pending_params.ratchet_tp,
                                     FPN_FromDouble<FP>(51000.0)) &&
-              state.cores[0].dirty == 0);
+              !CORE_STATE_FLAG_IS_SET(state.cores[0], DIRTY));
 
         bool wrote3 = tt::Strategy_WriteRatchetTP(&state, 0,
                                                     FPN_FromDouble<FP>(52000.0));
@@ -11050,18 +11051,20 @@ e3_skip_load:;
             check("v5.9.0b: rate-limited critical does NOT update last_emit_us when suppressed", 0);
         }
 
-        // v5.15.5.B.2 — these fields moved from CoreContext to
-        // CoreContextDisplayMeta sibling struct. Compile-time check via direct
-        // DisplayMeta access; named-pattern test labels updated to match.
+        // v5.15.5.B.2 — extracted from CoreContext to CoreContextDisplayMeta.
+        // v5.15.5.B.3 — model_load_failed migrated to core_state_flags bitmap
+        // bit on CoreContext (final home). The remaining ML-threshold + NaN
+        // counters stay on DisplayMeta.
+        tt::CoreContext<64> ctx{};
+        CORE_STATE_FLAG_SET(ctx, MODEL_LOAD_FAILED);
         tt::CoreContextDisplayMeta<64> meta{};
-        meta.model_load_failed = 1;
         meta.last_ml_threshold = 0.5;
         meta.last_ml_effective_threshold = 0.55;
         meta.nan_feature_events_total = 7;
         meta.nan_prediction_events_total = 3;
         meta.last_ml_critical_log_us = 12345;
-        check("v5.9.0b+v5.15.5.B.2: DisplayMeta.model_load_failed assignable",
-              meta.model_load_failed == 1);
+        check("v5.9.0b+v5.15.5.B.3: model_load_failed bit settable on CoreContext bitmap",
+              CORE_STATE_FLAG_IS_SET(ctx, MODEL_LOAD_FAILED));
         check("v5.9.0b+v5.15.5.B.2: DisplayMeta.last_ml_threshold assignable",
               meta.last_ml_threshold == 0.5);
         check("v5.9.0b+v5.15.5.B.2: DisplayMeta.nan_feature_events_total counter assignable",
@@ -11069,22 +11072,25 @@ e3_skip_load:;
         check("v5.9.0b+v5.15.5.B.2: DisplayMeta.nan_prediction_events_total counter assignable",
               meta.nan_prediction_events_total == 3);
 
-        // MLBuildContext pass-through pointer fields exist.
+        // MLBuildContext pass-through fields. v5.15.5.B.3 — model_load_failed
+        // is now an int-by-value (bitmap bit on CoreContext isn't addressable);
+        // other fields remain pointer-based for the writeable counters.
         tt::MLBuildContext mctx{};
-        int load_failed = 1;
         uint64_t last_log = 0;
         double thr = 0.0;
         double eff_thr = 0.0;
         uint32_t nan_feat = 0;
         uint32_t nan_pred = 0;
-        mctx.model_load_failed = &load_failed;
+        mctx.model_load_failed = 1;  // int-by-value (post-.B.3)
         mctx.last_ml_critical_log_us = &last_log;
         mctx.out_threshold = &thr;
         mctx.out_effective_threshold = &eff_thr;
         mctx.nan_feature_events_total = &nan_feat;
         mctx.nan_prediction_events_total = &nan_pred;
-        check("v5.9.0b: MLBuildContext pass-through pointers compile + assign",
-              mctx.model_load_failed != nullptr);
+        check("v5.9.0b+v5.15.5.B.3: MLBuildContext pointer fields compile + assign",
+              mctx.last_ml_critical_log_us != nullptr);
+        check("v5.15.5.B.3: model_load_failed is now int-by-value (was int*)",
+              mctx.model_load_failed == 1);
     }
 
     printf("\n--- EXTENSIBILITY: v5.9.0c cfg explicit-set tracking + cfg-source visibility ---\n");
