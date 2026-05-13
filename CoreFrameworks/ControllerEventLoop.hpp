@@ -48,6 +48,7 @@
 #include "SlowPathGateRegistry.hpp"  // v5.14.9.B.0 — FOREACH_SLOW_PATH_GATE + AUTOPOPULATE
 #include "../ML_Headers/LinearRegression3X.hpp"  // v4.0.3 D10 RegressionFeederX
 #include "../ML_Headers/RollingStats.hpp"
+#include "../ML_Headers/RollingWindowRegistry.hpp"  // v5.15.5.B.6 — FOREACH_ROLLING_WINDOW(name, W) cohort
 #include "../ML_Headers/RollingTurnover.hpp"  // v5.14.1.G — portfolio turnover
 #include "../ML_Headers/ROR_regressor.hpp"        // v5.1.0 — RORRegressor on CoreContext::slow_state
 #include "../ML_Headers/FlowFeatures.hpp"         // v5.1.0 — FlowState etc on CoreContext::slow_state
@@ -137,10 +138,11 @@ struct CoreSlowState {
     //
     // Per-cadence rolling stats (RegimeDetector inputs). alignas(64) on
     // RollingStats::head propagates the discipline to all W instantiations.
-    RollingStats<F, 128>    rolling_short;
-    RollingStats<F, 512>    rolling_long;
-    RollingStats<F, 256>    rolling_medium;
-    RollingStats<F, 1024>   rolling_baseline;
+    // v5.15.5.B.6 — registry-driven field declarations via FOREACH_ROLLING_WINDOW.
+    // Adding a 5th window = ONE row in ML_Headers/RollingWindowRegistry.hpp.
+#define X(name, W) RollingStats<F, W> rolling_##name;
+    FOREACH_ROLLING_WINDOW(X)
+#undef X
 
     // Per-cadence regime / flow state.
     RORRegressor<F>         regime_ror;
@@ -164,10 +166,10 @@ static_assert(offsetof(CoreSlowState<64>, ema_price) == 0,
 
 template <unsigned F>
 inline void CoreSlowState_Init(CoreSlowState<F>* s) {
-    s->rolling_short    = RollingStats_Init<F, 128>();
-    s->rolling_long     = RollingStats_Init<F, 512>();
-    s->rolling_medium   = RollingStats_Init<F, 256>();
-    s->rolling_baseline = RollingStats_Init<F, 1024>();
+    // v5.15.5.B.6 — registry-driven init via FOREACH_ROLLING_WINDOW.
+#define X(name, W) s->rolling_##name = RollingStats_Init<F, W>();
+    FOREACH_ROLLING_WINDOW(X)
+#undef X
     s->regime_ror       = RORRegressor_Init<F>();
     CumDelta_Init(&s->cumdelta_state);
     TickRate_Init(&s->tick_rate_state);
