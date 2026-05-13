@@ -209,14 +209,14 @@ inline uint64_t _oms_now_us() {
 // per /merge-scan MEDIUM-1).
 //======================================================================================================
 #define FOREACH_OMS_PER_SLOT_FIELD(X)                                                          \
-    X(last_realized_return,             double,    0.0,            0.0)                        \
+    X(last_realized_return[_i],         double,    0.0,            0.0)                        \
     X(last_fill[_i].entry_notional,     FPN<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
     X(last_fill[_i].entry_fee,          FPN<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
     X(last_fill[_i].exit_net_pnl,       FPN<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
     X(last_fill[_i].exit_entry_notional,FPN<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
     X(last_fill[_i].exit_total_fees,    FPN<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
     X(last_fill[_i].was_win,            int8_t,    0,              0)                          \
-    X(last_exit_predicted_p,            double,    0.0,            0.0)
+    X(last_exit_predicted_p[_i],        double,    0.0,            0.0)
 
 //======================================================================================================
 // [COMPILE-TIME COUNT SENTINELS]
@@ -371,5 +371,124 @@ static_assert(FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 8,
 //
 // These are 1:1 replacements; SKIP_PERSIST fields emit nothing (correct
 // behavior — observability counters aren't in the wire format).
+
+// ---- PER-SLOT views ----
+// Walked inside a for(_i=0..MAX_PORTFOLIO_POSITIONS) loop. Accessor includes
+// [_i] so expansion produces `_oms->last_fill[_i].field = ...` etc.
+#define OMS_PROJECT_PER_SLOT_INIT(accessor, type, init, reset) \
+    _oms->accessor = (type)(init);
+#define OMS_PROJECT_PER_SLOT_RESET(accessor, type, init, reset) \
+    _oms->accessor = (type)(reset);
+
+//======================================================================================================
+// [AUTOPOPULATE COMPANION MACROS — multi-target dispatch]
+//======================================================================================================
+// OMS_INIT_AUTOPOPULATE(_oms_ptr, _adapter, _live_trading, _starting_balance,
+//                        _fee_rate, _event_log_mode, _event_log_path)
+//   Boot-time full init of an OrderManagerState. Covers:
+//     Layer 1 — registry-driven value-init via FOREACH_OMS_FIELD walk
+//     Layer 2 — special-case scalars (adapter struct copy, oms_state_flags
+//                conditional LIVE_TRADING set, event_log_mode arg copy)
+//     Layer 3 — alignas(64)-cluster atomic stores (flatten_pending,
+//                recovery_until_us, total_submitted/filled/rejected)
+//     Layer 4 — helper-Init (Portfolio_Init)
+//     Layer 5 — per-slot init loops:
+//                 - Order_Init across MAX_INFLIGHT_ORDERS
+//                 - FOREACH_OMS_PER_SLOT_FIELD across MAX_PORTFOLIO_POSITIONS
+//                 - OMS_META_CLEAR for last_exit_predicted_meta[]
+//     Layer 6 — SPSC ring inits (result/ws_result/reconcile + 16 submit queues)
+//     Layer 7 — conditional OrderEventLog init + LoadFromDisk + replay
+//                 MUST RUN BEFORE Layer 8 (StartAsyncWriter depends on Init'd log)
+//     Layer 8 — OrderEventLog_StartAsyncWriter (MUST RUN LAST)
+//
+// OMS_RESET_AUTOPOPULATE(_oms_ptr, _starting_balance)
+//   Paper-reset of an OrderManagerState. Covers:
+//     Layer 1 — registry-driven reset-subset value-init via FOREACH_OMS_FIELD
+//                walk + OMS_PROJECT_RESET dispatch (SKIP_RESET fields emit no-op)
+//     Layer 2 — atomic store reset for observability counters (Class 5 close)
+//     Layer 3 — Portfolio_Init (clears all positions)
+//
+// Both macros expect the OMS pointer + supporting locals (starting_balance,
+// fee_rate, etc.) as args; registry expansions reference these locally-
+// shadowed variables.
+//======================================================================================================
+
+#define OMS_INIT_AUTOPOPULATE(_oms_ptr, _adapter, _live_trading, _starting_balance, _fee_rate, _event_log_mode, _event_log_path) \
+    do {                                                                                              \
+        auto* _oms = (_oms_ptr);                                                                       \
+        FPN<F>      starting_balance = (_starting_balance);  /* macro-scoped for registry refs */     \
+        FPN<F>      fee_rate         = (_fee_rate);          /* macro-scoped for registry refs */     \
+        /* Layer 1 — registry value-init */                                                            \
+        FOREACH_OMS_FIELD(OMS_PROJECT_INIT)                                                            \
+        /* Layer 2 — special-case scalars */                                                           \
+        _oms->adapter = (_adapter);                                                                    \
+        _oms->oms_state_flags = 0;                                                                     \
+        if (_live_trading) _oms->oms_state_flags |= (uint8_t)tt::MASK_OMS_STATE_LIVE_TRADING;          \
+        _oms->event_log_mode = (_event_log_mode);                                                      \
+        /* Layer 3 — atomic stores (alignas(64) clusters) */                                           \
+        _oms->flatten_pending.store(0, std::memory_order_relaxed);                                     \
+        _oms->recovery_until_us.store(0, std::memory_order_relaxed);                                   \
+        _oms->total_submitted.store(0, std::memory_order_relaxed);                                     \
+        _oms->total_filled.store(0, std::memory_order_relaxed);                                        \
+        _oms->total_rejected.store(0, std::memory_order_relaxed);                                      \
+        /* Layer 4 — helper-Init */                                                                    \
+        Portfolio_Init(&_oms->portfolio);                                                              \
+        /* Layer 5a — Order_Init across MAX_INFLIGHT_ORDERS (different scope from per-slot) */         \
+        for (int _i = 0; _i < MAX_INFLIGHT_ORDERS; ++_i) {                                             \
+            Order_Init(&_oms->orders[_i], 0, -1, ORDER_MARKET_BUY);                                    \
+            _oms->orders[_i].state = ORDER_FILLED;                                                     \
+        }                                                                                              \
+        /* Layer 5b — FOREACH_OMS_PER_SLOT_FIELD + meta clear across MAX_PORTFOLIO_POSITIONS */        \
+        for (int _i = 0; _i < MAX_PORTFOLIO_POSITIONS; ++_i) {                                         \
+            FOREACH_OMS_PER_SLOT_FIELD(OMS_PROJECT_PER_SLOT_INIT)                                      \
+            OMS_META_CLEAR(_oms->last_exit_predicted_meta[_i]);                                        \
+        }                                                                                              \
+        /* Layer 6 — SPSC ring inits */                                                                \
+        SPSCRing_Init(&_oms->result_queue);                                                            \
+        SPSCRing_Init(&_oms->ws_result_queue);                                                         \
+        SPSCRing_Init(&_oms->reconcile_queue);                                                         \
+        for (int _i = 0; _i < MAX_EXECUTION_CORES; ++_i) {                                             \
+            SPSCRing_Init(&_oms->submit_queues[_i]);                                                   \
+        }                                                                                              \
+        /* Layer 7 — OrderEventLog conditional init + replay (MUST RUN BEFORE Layer 8) */              \
+        {                                                                                              \
+            const char* _evt_path = (_event_log_path);                                                  \
+            int _has_disk_path = (_evt_path && _evt_path[0]);                                          \
+            if ((_event_log_mode) == 1 && _has_disk_path) {                                            \
+                OrderEventLog_Init(&_oms->event_log);                                                   \
+                int _loaded = OrderEventLog_LoadFromDisk(&_oms->event_log, _evt_path);                 \
+                if (_loaded > 0) {                                                                      \
+                    FoldResult<F> _fold = Portfolio_FromEventLog(&_oms->event_log,                      \
+                                                                  starting_balance, fee_rate);          \
+                    _oms->portfolio    = _fold.portfolio;                                               \
+                    _oms->balance      = _fold.balance;                                                 \
+                    _oms->realized_pnl = _fold.realized_pnl;                                            \
+                    if (FPN_GreaterThan(_oms->balance, _oms->ks_peak_balance))                          \
+                        _oms->ks_peak_balance = _oms->balance;                                          \
+                    std::fprintf(stderr, "[OMS] replayed %d events from disk, balance=$%.2f\n",         \
+                                 _loaded, FPN_ToDouble(_oms->balance));                                 \
+                }                                                                                       \
+                OrderEventLog_InitWithFile(&_oms->event_log, _evt_path);                                \
+            } else {                                                                                    \
+                OrderEventLog_Init(&_oms->event_log);                                                   \
+            }                                                                                          \
+        }                                                                                              \
+        /* Layer 8 — MUST RUN LAST */                                                                  \
+        OrderEventLog_StartAsyncWriter(&_oms->event_log);                                              \
+    } while (0)
+
+#define OMS_RESET_AUTOPOPULATE(_oms_ptr, _starting_balance)                                            \
+    do {                                                                                               \
+        auto* _oms = (_oms_ptr);                                                                       \
+        FPN<F> starting_balance = (_starting_balance);  /* macro-scoped for registry refs */          \
+        /* Layer 1 — registry RESET walk; SKIP_RESET fields emit no-op */                              \
+        FOREACH_OMS_FIELD(OMS_PROJECT_RESET)                                                           \
+        /* Layer 2 — atomic stores for observability counters (Class 5 recurring-bug close) */         \
+        _oms->total_submitted.store(0, std::memory_order_relaxed);                                     \
+        _oms->total_filled.store(0, std::memory_order_relaxed);                                        \
+        _oms->total_rejected.store(0, std::memory_order_relaxed);                                      \
+        /* Layer 3 — Portfolio reset (clears all positions) */                                          \
+        Portfolio_Init(&_oms->portfolio);                                                              \
+    } while (0)
 
 #endif  // OMS_FIELD_REGISTRY_HPP
