@@ -282,34 +282,9 @@ static inline void TUI_CopySnapshotSharded(
     // v5.6.1 / v5.7.7-fix: bitmap consistency post-pass.
     // Compares the hot-path's any_active mask
     // (core->active | core->active_b) against the GUI's view from the
-    // portfolio bitmap. The per-position loop above populated
-    // snap->positions[].idx; now read core->active directly so we don't
-    // depend on per-core-loop ordering (the v5.6.1 ship had a bug here
-    // where the tentative byte was read BEFORE the per-core loop wrote
-    // it, causing false DRIFT positives on cores 1/2/3 when permission
-    // was off on core 0 — observed 2026-04-30 paper run).
-    //
-    // Under partials, core c owns slots {2c, 2c+1}. Without partials,
-    // core c owns slot c. If masks disagree → Class 2c display↔execution
-    // divergence; GUI surfaces as "DRIFT(bitmap)".
-    //
-    // Final value: 1 = consistent, 0 = drift detected.
-    for (int c = 0; c < state->registered_count && c < 16; ++c) {
-        tt::ExecutionCore<F>* xc = state->cores[c].core;
-        bool hot_any_active = xc &&
-            ((xc->active | xc->active_b) & 1) != 0;
-        int slot_a = partial_on ? (c * 2)     : c;
-        int slot_b = partial_on ? (c * 2 + 1) : -1;
-        bool gui_any_pos = (slot_a >= 0 && slot_a < 16 && snap->positions[slot_a].idx >= 0)
-                       || (slot_b >= 0 && slot_b < 16 && snap->positions[slot_b].idx >= 0);
-        // v5.14.9.B.2 — bitmap_consistency migrated to state_flags BIT_FLAG.
-        // Reset state_flags for this core BEFORE first per-core bit set
-        // (other writers later in this fn set their bits independently).
-        snap->per_core[c].state_flags = 0;
-        if (hot_any_active == gui_any_pos) {
-            STATE_FLAG_SET(snap->per_core[c], BITMAP_CONSISTENT);
-        }
-    }
+    // portfolio bitmap. v5.15.5.B.8 — loop body merged into the unified
+    // per-core loop below; state_flags reset + BITMAP_CONSISTENT bit set
+    // at the top of the merged body before any other STATE_FLAG_SET.
 
     // counters
     snap->total_buys        = (uint32_t)agg.total_entries;
@@ -319,66 +294,35 @@ static inline void TUI_CopySnapshotSharded(
     // here so non-engine callers (tests) don't trip on uninit.
     snap->paper_reset_seq   = 0;
 
-    // Bug fix (2026-04-27): aggregate per-core core_wins / core_losses
-    // into snap->wins / snap->losses so the global Stats panel
-    // (GUI_Panel_Stats reads s->wins + s->losses for total_exits) sees
-    // real numbers in sharded mode. Pre-fix, snap->wins / losses stayed
-    // at zero (only per_core[i].core_wins was populated downstream),
-    // so the Stats panel showed buys=N exits=0 W=0 L=0 even when cores
-    // had visibly racked up wins/losses in their per-core W/L column.
+    // v5.15.5.B.8 — Per-core aggregates + headline_regime/regime_set flag +
+    // ML headline state declared here so they're in scope for the unified
+    // per-core loop below + the post-loop publishing block. Originally
+    // declared between Loops 2/3/4; hoisted to make the loop-consolidation
+    // boundary cleaner. Same defaults (zero / REGIME_RANGING / -1 / false)
+    // as the pre-.B.8 declarations.
     //
-    // With partial exits, each LEG exit counts as a separate win/loss
-    // (HandleFill increments per-leg via OnEvent's mode-0 path).
-    // A paired trade where leg A hits TP1 (win) and leg B hits SL (loss)
-    // shows as 1 win + 1 loss = 50% win-rate. UX semantics for "trades
-    // vs leg events" is a separate display question.
+    // wins/losses + gross accumulators (Bug fix 2026-04-27 + v4.7.25):
+    //   aggregate per-core wins/losses + gross win/loss buckets into
+    //   snap->wins / snap->losses / snap->avg_win / snap->avg_loss /
+    //   snap->profit_factor / snap->expectancy. Per-trade pairing semantics
+    //   (v4.7.21/26 partner pending + gross accumulators) carry through
+    //   inside DrainPostFill — this loop just sums the per-core results.
+    // headline_regime (v4.0.4):
+    //   first AUTO core's regime_state.current_regime; falls back to
+    //   REGIME_RANGING if no AUTO cores. Used by Market panel display.
+    // ML headline state (Phase 6prep sharded c16):
+    //   tracks highest-confidence ML core to populate snap->ml.* headline
+    //   fields read by GUI_Panel_MLIntelligence.
     uint32_t total_wins   = 0;
     uint32_t total_losses = 0;
-    // v4.7.25: aggregate gross_wins / gross_losses across cores so the
-    // sharded Stats panel can compute avg_win / avg_loss / profit_factor /
-    // expectancy. Pre-v4.7.25 these fields stayed at zero in sharded mode
-    // (only the legacy single_core path populated them) — visible in the
-    // GUI as "avg W: $0.00 L: $0.00 E[trade]: $+0.00" even after dozens
-    // of trades. Per-trade pairing semantics (v4.7.21) carry through:
-    // a TP1+SL paired exit's NET is summed once and routed into the
-    // matching gross bucket inside DrainPostFill.
-    FPN<F> gross_wins   = FPN_Zero<F>();
-    FPN<F> gross_losses = FPN_Zero<F>();
-    for (int i = 0; i < state->registered_count && i < 16; ++i) {
-        total_wins   += state->cores[i].core_wins;
-        total_losses += state->cores[i].core_losses;
-        gross_wins   = FPN_Add(gross_wins,   state->cores[i].core_gross_wins);
-        gross_losses = FPN_Add(gross_losses, state->cores[i].core_gross_losses);
-    }
-    snap->wins   = total_wins;
-    snap->losses = total_losses;
-    if (total_wins + total_losses > 0) {
-        snap->win_rate = (double)total_wins / (double)(total_wins + total_losses) * 100.0;
-    } else {
-        snap->win_rate = 0.0;
-    }
-    // v4.7.25: populate avg_win / avg_loss / profit_factor / expectancy
-    // from the per-core gross accumulators. Mirrors TUI_CopySnapshot's
-    // legacy formulas (line ~1233) so the Stats panel renders correctly
-    // in BOTH modes.
-    double g_wins_d   = FPN_ToDouble(gross_wins);
-    double g_losses_d = FPN_ToDouble(gross_losses);
-    snap->avg_win  = (total_wins   > 0) ? g_wins_d   / (double)total_wins   : 0.0;
-    snap->avg_loss = (total_losses > 0) ? g_losses_d / (double)total_losses : 0.0;
-    // v5.8.4c: routed through canonical Compute_* helpers (single source
-    // of truth across backtest + live + sharded paths). The legacy -1.0
-    // "all-wins sentinel" was packed into profit_factor itself and
-    // disagreed with BacktestEngine's 0.0-for-no-losses convention; this
-    // caused OPT_METRIC_PF in walk-forward optimization to read
-    // path-dependent values for the same trade set. Now: profit_factor is
-    // numerically 0.0 when losses=0 (matches BacktestEngine), and the
-    // separate snap->all_wins_run flag tells the GUI/TUI render path to
-    // display "—" / "∞" distinctly. Math + display cleanly separated.
-    snap->profit_factor = Compute_ProfitFactor(g_wins_d, g_losses_d);
-    snap->all_wins_run  = Compute_AllWinsRun(g_wins_d, g_losses_d);
-    snap->expectancy = Compute_Expectancy((uint32_t)(total_wins + total_losses),
-                                           (uint32_t)total_wins,
-                                           snap->avg_win, snap->avg_loss);
+    FPN<F>   gross_wins   = FPN_Zero<F>();
+    FPN<F>   gross_losses = FPN_Zero<F>();
+    int      headline_regime     = REGIME_RANGING;
+    bool     headline_regime_set = false;
+    int      headline_ml_core    = -1;
+    double   headline_conf       = -1.0;
+    int      any_ml_active       = 0;
+    int      any_model_loaded    = 0;
 
     // config display
     snap->cfg_tp  = FPN_ToDouble(cfg->take_profit_pct) * 100.0;
@@ -402,31 +346,59 @@ static inline void TUI_CopySnapshotSharded(
                                 ? state->cores[0].resolved_strategy_id
                                 : state->cores[0].strategy_id;
         snap->strategy_id = headline_sid;
-        // v4.0.4: regime headline. Pick the regime from the first AUTO
-        // core if any exist (its hysteresis state IS the regime). Otherwise
-        // compute fresh from rolling stats so the panel isn't stuck on
-        // RANGING. Each AUTO core has its own state — they may differ
-        // briefly under hysteresis, but core 0 (or first AUTO) is the
-        // "headline" for display purposes.
-        int headline_regime = REGIME_RANGING;  // default
-        for (int i = 0; i < state->registered_count && i < 16; ++i) {
-            if (state->cores[i].strategy_id == STRATEGY_AUTO) {
-                headline_regime = state->cores[i].regime_state.current_regime;
-                break;
+        // v5.15.5.B.8 — headline_regime AUTO-finder loop merged into the
+        // unified per-core loop below. snap->current_regime assignment moved
+        // to the post-loop publishing block (still guarded by registered_count > 0).
+    }
+
+    // ============================================================================
+    // v5.15.5.B.8 — UNIFIED PER-CORE LOOP (T1 audit win)
+    // ============================================================================
+    // Consolidates 4 previously-separate walks over state->cores[]:
+    //   (1) bitmap consistency  — state_flags reset + BITMAP_CONSISTENT bit
+    //   (2) wins/losses + gross — total_wins/losses + gross_wins/losses accum
+    //   (3) headline_regime     — first AUTO match wins (flag-driven, no break)
+    //   (4) per_core publisher  — strategy_id_display / halt_reason / diag_* /
+    //                              ML telemetry / drift / kill / etc.
+    // Single walk over state->cores[i] per snapshot publish. Saves ~3 walks
+    // × ~7 KB per CoreContext × 16 cores × 60 Hz = ~20 MB/s memory bandwidth
+    // (audit synthesis line 96-101). PerCoreSnap output bytewise-identical
+    // post-consolidation (verified via 3027-test regression).
+    // ============================================================================
+    for (int i = 0; i < state->registered_count && i < 16; ++i) {
+        // ---- (was Loop 1) bitmap consistency — state_flags reset + bit ----
+        // State_flags reset MUST happen here BEFORE any STATE_FLAG_SET below.
+        // v5.6.1 / v5.7.7-fix invariant: hot any_active mask (core->active |
+        // active_b) compared against snap->positions[] GUI view; mismatch →
+        // DRIFT(bitmap). Under partials, core c owns slots {2c, 2c+1};
+        // without partials, core c owns slot c.
+        {
+            tt::ExecutionCore<F>* xc = state->cores[i].core;
+            bool hot_any_active = xc &&
+                ((xc->active | xc->active_b) & 1) != 0;
+            int slot_a = partial_on ? (i * 2)     : i;
+            int slot_b = partial_on ? (i * 2 + 1) : -1;
+            bool gui_any_pos = (slot_a >= 0 && slot_a < 16 && snap->positions[slot_a].idx >= 0)
+                           || (slot_b >= 0 && slot_b < 16 && snap->positions[slot_b].idx >= 0);
+            snap->per_core[i].state_flags = 0;
+            if (hot_any_active == gui_any_pos) {
+                STATE_FLAG_SET(snap->per_core[i], BITMAP_CONSISTENT);
             }
         }
-        snap->current_regime = headline_regime;
-    }
-    // Phase 6prep sharded c16: ML aggregation across per-core scorers. We
-    // pick the highest-confidence ML core to populate the headline `s->ml.*`
-    // fields (which the existing GUI_Panel_MLIntelligence already reads).
-    // Per-core detail goes into per_core[i].ml_* for the per-core panel.
-    int    headline_ml_core = -1;
-    double headline_conf    = -1.0;
-    int    any_ml_active    = 0;
-    int    any_model_loaded = 0;
-
-    for (int i = 0; i < state->registered_count && i < 16; ++i) {
+        // ---- (was Loop 2) wins/losses + gross accumulator aggregation ----
+        total_wins   += state->cores[i].core_wins;
+        total_losses += state->cores[i].core_losses;
+        gross_wins   = FPN_Add(gross_wins,   state->cores[i].core_gross_wins);
+        gross_losses = FPN_Add(gross_losses, state->cores[i].core_gross_losses);
+        // ---- (was Loop 3) headline regime — first AUTO match wins ----
+        // Flag-driven; preserves the pre-.B.8 break-on-first-AUTO semantic
+        // without an explicit break (which would prevent further loop work
+        // for THIS i + skip subsequent cores' per-core publishing).
+        if (!headline_regime_set && state->cores[i].strategy_id == STRATEGY_AUTO) {
+            headline_regime = state->cores[i].regime_state.current_regime;
+            headline_regime_set = true;
+        }
+        // ---- (was Loop 4) per_core publisher body (continues below) ----
         snap->per_core[i].strategy_id_display = state->cores[i].strategy_id;
         // v4.0.4: resolved strategy after AUTO regime classification. For
         // non-AUTO cores this equals strategy_id_display.
@@ -788,6 +760,44 @@ static inline void TUI_CopySnapshotSharded(
             snap->per_core[i].ensemble_active = 0;
             snap->per_core[i].ensemble_n_horizons = 0;
         }
+    }
+
+    // ============================================================================
+    // v5.15.5.B.8 — POST-LOOP AGGREGATE PUBLISHING (was inlined between Loop 2
+    // and Loop 4 pre-.B.8; moved here so the unified per-core loop above can
+    // compute all aggregates before they're consumed.)
+    // ============================================================================
+    //
+    // wins/losses + win_rate + avg_win/avg_loss + profit_factor + expectancy
+    // (Bug fix 2026-04-27 + v4.7.25 + v5.8.4c canonical Compute_* helpers).
+    snap->wins   = total_wins;
+    snap->losses = total_losses;
+    if (total_wins + total_losses > 0) {
+        snap->win_rate = (double)total_wins / (double)(total_wins + total_losses) * 100.0;
+    } else {
+        snap->win_rate = 0.0;
+    }
+    {
+        double g_wins_d   = FPN_ToDouble(gross_wins);
+        double g_losses_d = FPN_ToDouble(gross_losses);
+        snap->avg_win  = (total_wins   > 0) ? g_wins_d   / (double)total_wins   : 0.0;
+        snap->avg_loss = (total_losses > 0) ? g_losses_d / (double)total_losses : 0.0;
+        // v5.8.4c — routed through canonical Compute_* helpers (single source
+        // of truth across backtest + live + sharded paths). profit_factor is
+        // 0.0 when losses=0 (matches BacktestEngine); all_wins_run flag tells
+        // the GUI render path to display "—" / "∞" distinctly.
+        snap->profit_factor = Compute_ProfitFactor(g_wins_d, g_losses_d);
+        snap->all_wins_run  = Compute_AllWinsRun(g_wins_d, g_losses_d);
+        snap->expectancy    = Compute_Expectancy((uint32_t)(total_wins + total_losses),
+                                                  (uint32_t)total_wins,
+                                                  snap->avg_win, snap->avg_loss);
+    }
+
+    // headline regime (v4.0.4) — first AUTO core's regime_state.current_regime
+    // captured during the unified loop above; assigned here under the same
+    // registered_count > 0 guard the pre-.B.8 code used.
+    if (state->registered_count > 0) {
+        snap->current_regime = headline_regime;
     }
 
     // Phase 6prep sharded c16: populate s->ml.* from the headline ML core.
