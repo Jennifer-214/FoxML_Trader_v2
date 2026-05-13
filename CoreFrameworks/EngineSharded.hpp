@@ -58,6 +58,7 @@
 #include "ShardedSnapshotPersist.hpp"  // Phase 4: persistent state across restarts
 #include "PaperResetArchive.hpp"        // v5.15.5.C.3 Phase 6 — paper-reset archive helpers (Summary_WriteJson + dirname/mkdir)
 #include "../MemHeaders/LatencyHistogram.hpp"  // v5.15.5.C.3 Phase 7.B — drainer-cycle bench gate histogram
+#include "../MemHeaders/DrainerConstants.hpp"  // v5.15.5.C.4 Phase T1 — drainer-thread-stable POD struct (fee_rate_taker_d, drain_count, partial_on)
 #include "ControllerEventLoop.hpp"
 #include "CoreLatencyStats.hpp"
 #include "ControllerConfig.hpp"
@@ -2310,6 +2311,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // Submit parameters or event types.
     auto drain_with_submit = [&state, &oms, &ticks_produced, &cfg]() -> int {
         int total_drained = 0;
+        // v5.15.5.C.4 Phase T1 — hoist partial_on out of inner event loop.
+        // Drainer-thread-stable predicate; one read per drain_with_submit call
+        // vs N events × 1 read. Saves ~16-32 cycles/cycle at typical burst.
+        const int partial_on = BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
         for (int slot = 0; slot < state.registered_count; ++slot) {
             ExecutionCore<F>* core = state.cores[slot].core;
             if (core == nullptr) continue;
@@ -2324,7 +2329,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // partial_exit_enabled=0, slot == core_id (1:1 mapping
                 // preserves pre-P.3 behavior). When enabled, slot = 2*c+leg.
                 // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
-                int partial_on = BITMAP_IS_SET(state.oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
+                // v5.15.5.C.4 Phase T1: partial_on hoisted to lambda-scope above.
                 int portfolio_slot = Sharded_LegSlot(slot, (int)event.leg, partial_on);
                 if (portfolio_slot < 0) {
                     // Defensive: malformed event (e.g. leg=1 without partials
@@ -2353,10 +2358,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // v4.7.32: read partial_exit_pct from per-core override
                     // when set (0 = inherit). Pre-fix it always read global,
                     // making the per-core override a silent no-op.
+                    // v5.15.5.C.4 Phase T1: hoisted core_overrides[slot] ref —
+                    // single deref shared with the tp2_mult read at line ~2386
+                    // below (was two separate `const auto&` declarations).
                     double full_qty = FPN_ToDouble(state.cores[slot].intended_qty);
-                    const auto& ov = cfg.core_overrides[slot];
-                    FPN<F> partial_pct = !FPN_IsZero(ov.partial_exit_pct)
-                        ? ov.partial_exit_pct : cfg.partial_exit_pct;
+                    const auto& ov_slot = cfg.core_overrides[slot];
+                    FPN<F> partial_pct = !FPN_IsZero(ov_slot.partial_exit_pct)
+                        ? ov_slot.partial_exit_pct : cfg.partial_exit_pct;
                     if (partial_on && event.leg == PARTIAL_LEG_A) {
                         order_qty_d = full_qty * FPN_ToDouble(partial_pct);
                     } else if (partial_on && event.leg == PARTIAL_LEG_B) {
@@ -2381,8 +2389,18 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // with TP1 instead of TP2.
                     FPN<F> leg_tp = state.cores[slot].intended_tp;
                     if (is_entry && partial_on && event.leg == PARTIAL_LEG_B) {
-                        FPN<F> tp_dist_a = FPN_Sub(state.cores[slot].intended_tp, event.price);
+                        // v5.15.5.C.4 Phase T1: use leg_tp local (already
+                        // captured at line above) instead of re-reading
+                        // state.cores[slot].intended_tp; saves 1 indexed read.
+                        FPN<F> tp_dist_a = FPN_Sub(leg_tp, event.price);
                         // v4.7.32: per-core tp2_mult override (0 = inherit).
+                        // v5.15.5.C.4 Phase T1: NOTE — `ov_slot` from earlier
+                        // entry branch is NOT in scope here; the entry-qty
+                        // branch + this entry-tp branch are sibling blocks.
+                        // Re-declare `ov_tp2` local for tp2_mult access.
+                        // Future structural fix: hoist `ov_slot` to top of
+                        // iteration (above is_exit/is_entry split) if more
+                        // sites need it.
                         const auto& ov_tp2 = cfg.core_overrides[slot];
                         FPN<F> tp2_mult_eff = !FPN_IsZero(ov_tp2.tp2_mult)
                             ? ov_tp2.tp2_mult : cfg.tp2_mult;
@@ -2445,6 +2463,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // OrderManager_Tick produces. Extracted to a standalone function so
     // it's directly unit-testable without standing up a producer thread.
     auto drain_post_fill = [&state, &oms, &cfg]() {
+        // v5.15.5.C.4 Phase T1 — hoist FPN_ToDouble(cfg.fee_rate_taker)
+        // outside the per-cycle FPN conversion. cfg.fee_rate_taker is
+        // boot-set immutable (per agent investigation 2026-05-13); static
+        // const guarantees one-time evaluation across all cycles.
+        static const double fee_rate_taker_d = FPN_ToDouble(cfg.fee_rate_taker);
         EventLoop_DrainPostFill(&state, &oms, cfg.sl_cooldown_cycles,
                                  cfg.ensemble_trade_reward_mult,
                                  cfg.confidence_ic_floor,
@@ -2452,7 +2475,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                  cfg.auto_kill_on_drift,
                                  // v5.13.4 — sell-side bandit attribution
                                  BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED),
-                                 FPN_ToDouble(cfg.fee_rate_taker));
+                                 fee_rate_taker_d);
     };
 
     // v4.7.8: manual force-close requests from the GUI. User clicks a
@@ -2469,6 +2492,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 #ifdef USE_IMGUI_GUI
     TUISharedState* shared_ptr = &g_shared;
     auto drain_manual_closes = [&state, &oms, &cfg, &last_price, shared_ptr]() {
+        // v5.15.5.C.4 Phase T1 — hoist partial_on out of slot loop.
+        // Drainer-thread-stable predicate; one read per drain_manual_closes
+        // call vs N slots × 1 read.
+        const int partial_on = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
         for (int slot = 0; slot < MAX_PORTFOLIO_POSITIONS; ++slot) {
             if (!shared_ptr->manual_close_requested[slot]) continue;
             shared_ptr->manual_close_requested[slot] = 0;
@@ -2483,7 +2510,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             if (FPN_IsZero(qty)) continue;
             // Map slot → core_id for strategy_id + leg lookup
             // v5.15.5.C.2 (S3a + S4): canonical mirror via bit-packed oms_state_flags.
-            int partial_on = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
+            // v5.15.5.C.4 Phase T1: partial_on hoisted to lambda-scope above.
             int core_id = partial_on ? (slot >> 1) : slot;
             int leg     = partial_on ? (slot & 1)  : 0;
             if (core_id < 0 || core_id >= state.registered_count) continue;
@@ -2533,7 +2560,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
 #endif
 
     std::thread drainer([&state, &oms, &producer_done, &drain_with_submit,
-                         &drain_post_fill, &drain_manual_closes] {
+                         &drain_post_fill, &drain_manual_closes, &cfg] {
+        // v5.15.5.C.4 Phase T1: &cfg added to capture list for DrainerConstants_Init
         EngineSharded_PinThread(state.registered_count + 1);
         while (!g_engine_sharded_shutdown) {
             // v5.15.5.C.3 Phase 7.B — bench gate per-cycle rdtsc bracket.
@@ -2555,18 +2583,17 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             //      / reconcile_queue, calls HandleFill on completed orders.
             //   4. drain_post_fill — applies per-core CoreContext updates
             //      from FillRecords.
+            //
+            // v5.15.5.C.4 Phase T1 — DrainerConstants cache (drainer-thread-
+            // stable cfg + state predicates). One init per cycle; consumers
+            // read fields directly. Replaces prior 6× scattered
+            // BITMAP_IS_SET(oms_state_flags, PARTIAL_EXIT_ENABLED) reads.
+            const tt::DrainerConstants dc =
+                tt::DrainerConstants_Init(state.registered_count, cfg, oms);
+
             int total_drained = drain_with_submit();
             drain_manual_closes();
-            // v5.4.1 Bug B2: under partials, ExecutionCore producers push
-            // SubmitCommands keyed by portfolio_slot (0..2N-1, where N =
-            // num_execution_cores). DrainSubmit must walk all queues that
-            // may have been written, not just queues 0..N-1. Pre-fix,
-            // cores beyond num_cores under partials had their submits
-            // stuck in undrained queues forever — silent zero-trade state.
-            // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
-            int drain_count = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED)
-                ? state.registered_count * 2 : state.registered_count;
-            OMS_DrainSubmit(&oms, drain_count);  // v4.7.37
+            OMS_DrainSubmit(&oms, dc.drain_count);  // v4.7.37; v5.15.5.C.4 T1 uses cached dc.drain_count
             OrderManager_Tick(&oms);
             drain_post_fill();
 
@@ -2581,11 +2608,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     drain_with_submit();
                     drain_manual_closes();
                     // v5.4.1 Bug B2: same partials-aware drain count as the
-                    // main loop above.
-                    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
-                    int dc = BITMAP_IS_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED)
-                        ? state.registered_count * 2 : state.registered_count;
-                    OMS_DrainSubmit(&oms, dc);  // v4.7.37
+                    // main loop above. v5.15.5.C.4 Phase T1: per-iter dc
+                    // recompute (state may have shifted across k iterations).
+                    const tt::DrainerConstants dc_shutdown =
+                        tt::DrainerConstants_Init(state.registered_count, cfg, oms);
+                    OMS_DrainSubmit(&oms, dc_shutdown.drain_count);  // v4.7.37
                     OrderManager_Tick(&oms);
                     drain_post_fill();
                 }
