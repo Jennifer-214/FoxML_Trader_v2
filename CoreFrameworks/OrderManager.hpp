@@ -317,20 +317,17 @@ struct OrderManagerState {
     //   (existing). Drainer uses these for core_realized accumulation,
     //   core_open_notional decrement, core_fees, core_wins/core_losses.
     // v5.15.5.C.4 Phase H — entry-side fields (entry_notional, entry_fee)
-    // REMOVED. Derived at DrainPostFill open-mask iter from Position state
-    // (Portfolio_OpenSlot writes entry_price + quantity + entry_fee at
-    // HandleFill BUY; preserved through Phase F's open-side consumer pass).
-    // FillRecord is now EMPTY — pending Phase K which deletes the struct +
-    // its array entirely. Kept as zero-size placeholder so dependent code
-    // (FOREACH_OMS_PER_SLOT_FIELD walks; sizeof(FillRecord)) compiles
-    // unchanged until Phase K removes all references.
-    struct FillRecord {
-        // All fields derived from Position state at DrainPostFill time.
-        // Empty struct (1-byte minimum; pad to 8B for array alignment).
-        uint8_t _placeholder;
-        uint8_t _pad[7];
-    };
-    FillRecord last_fill[MAX_PORTFOLIO_POSITIONS];
+    // v5.15.5.C.4 Phase K — FillRecord struct + last_fill[] array DELETED
+    // entirely. All 6 prior FillRecord fields are now Position-derived at
+    // DrainPostFill time (Phase G derives exit_net_pnl + exit_entry_notional
+    // + exit_total_fees from Position state in CLOSE form; Phase H derives
+    // entry_notional + entry_fee from Position state in OPEN form; Phase J
+    // moved was_win to OMS-level last_was_win_bitmap). FillRecord-as-snapshot
+    // class permanently EXTINCT. Future per-slot scratch state goes through:
+    //   - Position struct (FOREACH_POSITION_FIELD; PERSIST or SKIP_PERSIST)
+    //   - OMS sibling SoA arrays (FOREACH_OMS_SLOT_SCALAR_ARRAY)
+    //   - OMS cross-slot bitmaps (FOREACH_OMS_BITMAP)
+    // Per DESIGN_SPECS/slot-state-foreach-registry-with-storage-routing.md.
 
     // v5.13.0.B / v5.15.5.C.2 (S3b) — per-slot bit set by MLStrategy when
     // exit_predictor fires the exit on this specific slot. Consumed by

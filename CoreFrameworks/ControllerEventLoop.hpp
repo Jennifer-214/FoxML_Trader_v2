@@ -1385,7 +1385,9 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // partials disabled. Per-trade signals (W/L, ConfidenceScorer,
         // pnl_feeder, cooldown) fire only on leg A.
         bool is_leg_a = !partial_on || ((slot & 1) == 0);
-        const auto& rec = oms->last_fill[slot];
+        // v5.15.5.C.4 Phase K — `const auto& rec = oms->last_fill[slot]`
+        // declaration REMOVED. FillRecord struct is now extinct; all reads
+        // (entry-side + exit-side) derive from Position state at this iter.
 
         // v5.15.5.C.4 Phase G — derive exit-side fields from Position state.
         // Phase F's invariant guarantees Position is in CLOSE form here
