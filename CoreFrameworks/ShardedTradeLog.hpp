@@ -36,6 +36,7 @@
 #pragma once
 
 #include "../FixedPoint/FixedPointN.hpp"
+#include "../Limits.hpp"             // v5.15.5.C.3 Phase 5.B — MAX_EXECUTION_CORES for per_core_files[]
 #include "TradeEvent.hpp"
 #include "TradeLogColRegistry.hpp"  // v5.14.10.F — FOREACH_TRADE_LOG_COL registry (closes /merge-scan N2 for trade log)
 #include "../Strategies/StrategyInterface.hpp"  // v5.15.5.C.3 Phase 5.A — REGIME_INFO[] lookup for regime_name CSV column
@@ -55,14 +56,80 @@ namespace tt {
 // behavior.
 //======================================================================================================
 struct ShardedTradeLog {
-    FILE*    file;
+    FILE*    file;                                       // aggregate: logging/SYMBOL_order_history.csv (GUI/TradeReader reads this)
     uint64_t row_count;          // total rows written this session
     uint64_t writes_truncated;   // snprintf truncations (should always be 0)
     // v4.7.18: cache the symbol from Init so Rotate() can rebuild the
     // filename without forcing callers to thread bcfg through every
     // call site. Empty string before first Init.
     char     symbol[32];
+    // v5.15.5.C.3 Phase 5.B — hybrid per-core trade-log mirror. Each fill is
+    // written to BOTH the aggregate `file` (above; preserves GUI / TradeReader
+    // backward compat) AND `per_core_files[event.core_id]` (per-core CSV;
+    // enables per-core archive flow + future external consumers without
+    // breaking the aggregate-reader contract).
+    //
+    // Filename pattern: logging/SYMBOL_core_<N>_order_history.csv (N = 0..MAX_EXECUTION_CORES-1)
+    //
+    // Per-fill cost: 2× fwrite (aggregate + per_core); cost negligible
+    // (trades are rare events at strategy fire rate). The per-core file count
+    // is bounded at MAX_EXECUTION_CORES (16) — well under any FILE* limit.
+    //
+    // Phase 5.B is the HYBRID approach (keeps aggregate for GUI compat;
+    // adds per-core for archive). The FULL per-core-split + TradeReader
+    // merge (per bundled-plan Reader/UI Impact section) is a deferred
+    // follow-up if/when TradeReader needs to surface per-core tabs.
+    FILE*    per_core_files[MAX_EXECUTION_CORES];
 };
+
+//======================================================================================================
+// [PER-CORE FILENAME HELPER]  (v5.15.5.C.3 Phase 5.B — structural fix)
+//======================================================================================================
+// Single source of truth for the per-core mirror filename pattern. Used by
+// _Init (open), _Rotate (rename source), and EngineSharded_Run paper-reset
+// archive copy. Returns 1 on success, 0 on snprintf truncation.
+//
+// Class-18 mirror close: prior to this helper, the format string
+//   "logging/%s_core_%d_order_history.csv"
+// appeared at 3 sites — changing the pattern required updating all 3, or
+// the next consumer would silently drift. Helper makes drift impossible.
+//======================================================================================================
+inline int ShardedTradeLog_FormatPerCoreFilename(char* buf, size_t bufsz,
+                                                  const char* symbol, int core_id) {
+    int n = snprintf(buf, bufsz,
+                     "logging/%s_core_%d_order_history.csv", symbol, core_id);
+    return (n >= 0 && (size_t)n < bufsz) ? 1 : 0;
+}
+
+//======================================================================================================
+// [WRITE ROW]  (v5.15.5.C.3 Phase 5.B — structural fix)
+//======================================================================================================
+// Single chokepoint for "write one already-formatted row to aggregate file
+// + mirror to per-core file + bump row_count". Called by RecordEntry,
+// RecordExit, and any future RecordX added later — eliminates the
+// "next consumer forgets per-core mirror" class structurally (closes
+// Class-18 mirror at the dual-write level).
+//
+// Caller is responsible for the row buffer + length (already formatted via
+// TRADE_LOG_EMIT_ROW_TO_BUFFER + length-checked for truncation). Caller also
+// gates on `log->file != nullptr` before invoking — helper trusts the gate
+// since the aggregate-write would AV on nullptr (slow-path; defensive null
+// recheck would be redundant cost).
+//
+// Branchless bounds-check on `core_id` via (unsigned) cast: single
+// comparison handles negative + overflow simultaneously (canonical idiom).
+// Per-core mirror write short-circuits on either bound or nullptr; failure
+// non-fatal — aggregate file already has the row.
+//======================================================================================================
+inline void ShardedTradeLog_WriteRow(ShardedTradeLog* log, int core_id,
+                                      const char* row, size_t n) {
+    fwrite(row, 1, n, log->file);
+    if ((unsigned)core_id < (unsigned)MAX_EXECUTION_CORES &&
+        log->per_core_files[core_id]) {
+        fwrite(row, 1, n, log->per_core_files[core_id]);
+    }
+    log->row_count++;
+}
 
 //======================================================================================================
 // [INIT]
@@ -79,6 +146,10 @@ inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol) {
     log->file = nullptr;
     log->row_count = 0;
     log->writes_truncated = 0;
+    // v5.15.5.C.3 Phase 5.B — pre-zero per-core file array. Init walks 0..N-1
+    // below; failure on any one is non-fatal (we log + continue without
+    // that core's per-core mirror; aggregate file still serves the trade log).
+    for (int c = 0; c < MAX_EXECUTION_CORES; ++c) log->per_core_files[c] = nullptr;
     // v4.7.18: cache symbol for Rotate() (must precede the early-return paths
     // below so even a failed Init records what was attempted)
     std::strncpy(log->symbol, symbol, sizeof(log->symbol) - 1);
@@ -122,6 +193,33 @@ inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol) {
         TradeLog_EmitHeader(log->file);
         fflush(log->file);
     }
+    // v5.15.5.C.3 Phase 5.B — open per-core mirror files. Each
+    // logging/SYMBOL_core_<N>_order_history.csv. Same line-buffering +
+    // header-on-first-open behavior as the aggregate. Failure on any
+    // individual core's open is non-fatal: that core's per_core_files[c]
+    // stays nullptr; RecordEntry/Exit guards against null at the write site.
+    for (int c = 0; c < MAX_EXECUTION_CORES; ++c) {
+        char per_core_filename[256];
+        if (!ShardedTradeLog_FormatPerCoreFilename(
+                per_core_filename, sizeof(per_core_filename), symbol, c)) continue;
+        int has_content_pc = 0;
+        FILE* probe_pc = fopen(per_core_filename, "r");
+        if (probe_pc) {
+            has_content_pc = (fgetc(probe_pc) != EOF);
+            fclose(probe_pc);
+        }
+        log->per_core_files[c] = fopen(per_core_filename, "a");
+        if (!log->per_core_files[c]) continue;
+        setvbuf(log->per_core_files[c], nullptr, _IOLBF, 0);
+        if (!has_content_pc) {
+            fprintf(log->per_core_files[c],
+                "# v3 sharded engine (per-core mirror; core=%d) — rows in arrival order; "
+                "same column shape as aggregate logging/%s_order_history.csv\n",
+                c, symbol);
+            TradeLog_EmitHeader(log->per_core_files[c]);
+            fflush(log->per_core_files[c]);
+        }
+    }
     return 1;
 }
 
@@ -134,6 +232,10 @@ inline int ShardedTradeLog_Init(ShardedTradeLog* log, const char* symbol) {
 //======================================================================================================
 inline void ShardedTradeLog_Flush(ShardedTradeLog* log) {
     if (log->file) fflush(log->file);
+    // v5.15.5.C.3 Phase 5.B — flush per-core mirror files too.
+    for (int c = 0; c < MAX_EXECUTION_CORES; ++c) {
+        if (log->per_core_files[c]) fflush(log->per_core_files[c]);
+    }
 }
 
 //======================================================================================================
@@ -152,6 +254,16 @@ inline int ShardedTradeLog_Rotate(ShardedTradeLog* log) {
     if (!log->file || log->symbol[0] == '\0') return 0;
     fclose(log->file);
     log->file = nullptr;
+
+    // v5.15.5.C.3 Phase 5.B — close all per-core mirror files BEFORE
+    // computing the rename target (so the rename below sees a stable
+    // filesystem snapshot for both aggregate + per-core files).
+    for (int c = 0; c < MAX_EXECUTION_CORES; ++c) {
+        if (log->per_core_files[c]) {
+            fclose(log->per_core_files[c]);
+            log->per_core_files[c] = nullptr;
+        }
+    }
 
     char src[256], dst[256];
     int sn = snprintf(src, sizeof(src),
@@ -173,8 +285,29 @@ inline int ShardedTradeLog_Rotate(ShardedTradeLog* log) {
         log->file = fopen(src, "a");
         return 0;
     }
+
+    // v5.15.5.C.3 Phase 5.B — rotate per-core mirror files too.
+    // Same timestamp suffix used for the aggregate rename above (`tm` reused).
+    // Each rename failure is non-fatal: per-core files might not exist yet
+    // (first-run case) or the rename might fail for other reasons; _Init
+    // below reopens fresh files regardless.
+    for (int c = 0; c < MAX_EXECUTION_CORES; ++c) {
+        char src_pc[256], dst_pc[256];
+        if (!ShardedTradeLog_FormatPerCoreFilename(
+                src_pc, sizeof(src_pc), log->symbol, c)) continue;
+        int dn_pc = snprintf(dst_pc, sizeof(dst_pc),
+                              "logging/%s_core_%d_order_history.%04d%02d%02d-%02d%02d%02d.csv",
+                              log->symbol, c,
+                              tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+                              tm->tm_hour, tm->tm_min, tm->tm_sec);
+        if (dn_pc < 0 || (size_t)dn_pc >= sizeof(dst_pc)) continue;
+        // Best-effort rename; ignore failure (file may not exist if Init failed for this core).
+        rename(src_pc, dst_pc);
+    }
+
     log->row_count = 0;
-    // Reopen fresh — Init writes the header again since file is now empty
+    // Reopen fresh — Init writes the header again since file is now empty.
+    // _Init also reopens the per-core mirror files.
     return ShardedTradeLog_Init(log, log->symbol);
 }
 
@@ -183,6 +316,14 @@ inline void ShardedTradeLog_Close(ShardedTradeLog* log) {
         fflush(log->file);
         fclose(log->file);
         log->file = nullptr;
+    }
+    // v5.15.5.C.3 Phase 5.B — close per-core mirror files at shutdown.
+    for (int c = 0; c < MAX_EXECUTION_CORES; ++c) {
+        if (log->per_core_files[c]) {
+            fflush(log->per_core_files[c]);
+            fclose(log->per_core_files[c]);
+            log->per_core_files[c] = nullptr;
+        }
     }
 }
 
@@ -237,8 +378,10 @@ inline void ShardedTradeLog_RecordEntry(ShardedTradeLog* log,
         log->writes_truncated++;
         return;
     }
-    fwrite(row, 1, (size_t)n, log->file);
-    log->row_count++;
+    // v5.15.5.C.3 Phase 5.B — single chokepoint: aggregate write + per-core
+    // mirror + row_count bump. See ShardedTradeLog_WriteRow comment for
+    // Class-18 mirror close rationale.
+    ShardedTradeLog_WriteRow(log, (int)core_id, row, (size_t)n);
 }
 
 //======================================================================================================
@@ -285,8 +428,10 @@ inline void ShardedTradeLog_RecordExit(ShardedTradeLog* log,
         log->writes_truncated++;
         return;
     }
-    fwrite(row, 1, (size_t)n, log->file);
-    log->row_count++;
+    // v5.15.5.C.3 Phase 5.B — single chokepoint: aggregate write + per-core
+    // mirror + row_count bump. See ShardedTradeLog_WriteRow comment for
+    // Class-18 mirror close rationale.
+    ShardedTradeLog_WriteRow(log, (int)core_id, row, (size_t)n);
 }
 
 }  // namespace tt

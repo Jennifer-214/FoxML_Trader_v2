@@ -2072,30 +2072,69 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                               tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED) ? 1 : 0;
                             ShardedSnapshot_Save(&state, snapshot_path, partial_on);
 
-                            // 2) trades.csv — copy of logging/<SYMBOL>_order_history.csv
+                            // 2) trades.csv — copy of logging/<SYMBOL>_order_history.csv (aggregate)
                             //    Flush + copy via fread/fwrite loop (no live file pointer disturbance;
                             //    ShardedTradeLog_Rotate below handles the rotation of the live file).
+                            //
+                            //    v5.15.5.C.3 Phase 5.B — ALSO copies per-core mirror files to
+                            //    `<dirname>/trades/core_<N>.csv` (1 + N files per archive). The
+                            //    aggregate file preserves GUI/TradeReader backward compat; the
+                            //    per-core files enable per-core archive analysis (regime
+                            //    aggregation, per-core PnL post-mortem, etc.) without parsing
+                            //    the aggregate. mkdir of `<dirname>/trades/` is best-effort.
                             if (state.oms->trade_log) {
                                 if (state.oms->trade_log->file) {
                                     std::fflush(state.oms->trade_log->file);
                                 }
+                                // Flush per-core files before copy (mirror writes are line-buffered
+                                // but explicit flush ensures the on-disk snapshot is consistent).
+                                tt::ShardedTradeLog_Flush(state.oms->trade_log);
+
+                                // v5.15.5.C.3 Phase 5.B — local file-copy helper. Used by
+                                // aggregate + per-core archive copies below; deduplicates the
+                                // fread/fwrite loop + close-on-all-paths handling. Failure is
+                                // best-effort silent (matches pre-helper behavior).
+                                auto copy_file = [](const char* src, const char* dst) {
+                                    FILE* sf = std::fopen(src, "r");
+                                    FILE* df = std::fopen(dst, "w");
+                                    if (sf && df) {
+                                        char buf[4096];
+                                        size_t n;
+                                        while ((n = std::fread(buf, 1, sizeof(buf), sf)) > 0) {
+                                            std::fwrite(buf, 1, n, df);
+                                        }
+                                    }
+                                    if (sf) std::fclose(sf);
+                                    if (df) std::fclose(df);
+                                };
+
+                                // Aggregate copy: <dirname>/trades.csv
                                 char trade_src[256], trade_dst[512];
                                 std::snprintf(trade_src, sizeof(trade_src),
                                               "logging/%s_order_history.csv",
                                               state.oms->trade_log->symbol);
                                 std::snprintf(trade_dst, sizeof(trade_dst),
                                               "%s/trades.csv", dirname);
-                                FILE* sf = std::fopen(trade_src, "r");
-                                FILE* df = std::fopen(trade_dst, "w");
-                                if (sf && df) {
-                                    char buf[4096];
-                                    size_t n;
-                                    while ((n = std::fread(buf, 1, sizeof(buf), sf)) > 0) {
-                                        std::fwrite(buf, 1, n, df);
+                                copy_file(trade_src, trade_dst);
+
+                                // Per-core copies: <dirname>/trades/core_<N>.csv (N = 0..MAX_EXECUTION_CORES-1).
+                                // Per-core source filename built via the single source of truth
+                                // (ShardedTradeLog_FormatPerCoreFilename — also used by _Init + _Rotate).
+                                char trades_subdir[384];
+                                std::snprintf(trades_subdir, sizeof(trades_subdir),
+                                              "%s/trades", dirname);
+                                if (tt::PaperResetArchive_CreateDirectories(trades_subdir)) {
+                                    for (int c = 0; c < MAX_EXECUTION_CORES; ++c) {
+                                        if (!state.oms->trade_log->per_core_files[c]) continue;
+                                        char per_src[256], per_dst[512];
+                                        if (!tt::ShardedTradeLog_FormatPerCoreFilename(
+                                                per_src, sizeof(per_src),
+                                                state.oms->trade_log->symbol, c)) continue;
+                                        std::snprintf(per_dst, sizeof(per_dst),
+                                                      "%s/core_%d.csv", trades_subdir, c);
+                                        copy_file(per_src, per_dst);
                                     }
                                 }
-                                if (sf) std::fclose(sf);
-                                if (df) std::fclose(df);
                             }
 
                             // 3) summary.json — session + global + per_core + per_strategy + per_regime

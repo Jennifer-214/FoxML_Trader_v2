@@ -25011,6 +25011,98 @@ e3_skip_load:;
     }
 
     //==================================================================================================
+    // v5.15.5.C.3 Phase 5.B — ShardedTradeLog per-core mirror files
+    //==================================================================================================
+    // Hybrid approach: aggregate file (GUI/TradeReader backward compat) +
+    // per-core mirror files (logging/SYMBOL_core_<N>_order_history.csv).
+    // Test verifies that Init opens MAX_EXECUTION_CORES per-core files
+    // alongside the aggregate; that RecordEntry mirrors the row into
+    // per_core_files[event.core_id]; that the aggregate file still
+    // contains all rows.
+    {
+        using namespace tt;
+        // Use a unique symbol so test artifacts don't collide with real engine logs.
+        const char* test_symbol = "PHASE5BTEST";
+        // Best-effort pre-cleanup (in case prior test run left files).
+        std::system("rm -f logging/PHASE5BTEST_*.csv 2>/dev/null");
+        std::system("mkdir -p logging 2>/dev/null");
+
+        ShardedTradeLog log{};
+        int init_rc = ShardedTradeLog_Init(&log, test_symbol);
+        check("v5.15.5.C.3 Phase 5.B: ShardedTradeLog_Init succeeds", init_rc == 1);
+        check("v5.15.5.C.3 Phase 5.B: aggregate FILE* opened", log.file != nullptr);
+        // All MAX_EXECUTION_CORES per-core mirror files should be open.
+        int pc_open_count = 0;
+        for (int c = 0; c < MAX_EXECUTION_CORES; ++c) {
+            if (log.per_core_files[c]) pc_open_count++;
+        }
+        check("v5.15.5.C.3 Phase 5.B: all MAX_EXECUTION_CORES per-core mirror files opened",
+              pc_open_count == MAX_EXECUTION_CORES);
+
+        // Write entries for 2 distinct core_ids; verify aggregate AND per-core get the row.
+        TradeEvent<64> evt0{};
+        evt0.timestamp = 1700000000ULL * 1000000ULL;
+        evt0.core_id = 0;
+        evt0.type = TRADE_EVENT_ENTRY;
+        evt0.price = FPN_FromDouble<64>(50000.0);
+        ShardedTradeLog_RecordEntry(&log, evt0, /*strategy_id=*/1,
+                                     FPN_FromDouble<64>(50000.0),  // entry_price
+                                     FPN_FromDouble<64>(0.001),    // trade_size
+                                     FPN_FromDouble<64>(5.0),      // entry_fee
+                                     FPN_FromDouble<64>(9995.0));  // balance_after
+
+        TradeEvent<64> evt5{};
+        evt5.timestamp = 1700000001ULL * 1000000ULL;
+        evt5.core_id = 5;
+        evt5.type = TRADE_EVENT_ENTRY;
+        evt5.price = FPN_FromDouble<64>(50100.0);
+        ShardedTradeLog_RecordEntry(&log, evt5, /*strategy_id=*/2,
+                                     FPN_FromDouble<64>(50100.0),
+                                     FPN_FromDouble<64>(0.002),
+                                     FPN_FromDouble<64>(10.0),
+                                     FPN_FromDouble<64>(9985.0));
+
+        // Flush + close to ensure rows are written to disk.
+        ShardedTradeLog_Close(&log);
+
+        // Verify aggregate has BOTH rows (2 fwrites; 2 row_count bumps).
+        check("v5.15.5.C.3 Phase 5.B: aggregate row_count == 2 after 2 RecordEntry calls",
+              log.row_count == 2);
+
+        // Verify per-core file 0 contains row with core_id=0 (string match on aggregate
+        // file structure — both files share the same row format).
+        auto file_contains = [](const char* path, const char* needle) -> bool {
+            FILE* f = std::fopen(path, "r");
+            if (!f) return false;
+            char buf[8192];
+            size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+            buf[n] = '\0';
+            std::fclose(f);
+            return std::strstr(buf, needle) != nullptr;
+        };
+        char path[256];
+        std::snprintf(path, sizeof(path), "logging/%s_core_0_order_history.csv", test_symbol);
+        check("v5.15.5.C.3 Phase 5.B: per-core file 0 contains the core_id=0 row",
+              file_contains(path, ",0,1,E,50000"));
+        std::snprintf(path, sizeof(path), "logging/%s_core_5_order_history.csv", test_symbol);
+        check("v5.15.5.C.3 Phase 5.B: per-core file 5 contains the core_id=5 row",
+              file_contains(path, ",5,2,E,50100"));
+        // Per-core file 0 should NOT contain the core_id=5 row (isolation check).
+        std::snprintf(path, sizeof(path), "logging/%s_core_0_order_history.csv", test_symbol);
+        check("v5.15.5.C.3 Phase 5.B: per-core file 0 isolated — does NOT contain core_id=5 row",
+              !file_contains(path, ",5,2,E,50100"));
+        // Aggregate file contains BOTH rows.
+        std::snprintf(path, sizeof(path), "logging/%s_order_history.csv", test_symbol);
+        bool has_0 = file_contains(path, ",0,1,E,50000");
+        bool has_5 = file_contains(path, ",5,2,E,50100");
+        check("v5.15.5.C.3 Phase 5.B: aggregate file contains BOTH core_id=0 AND core_id=5 rows",
+              has_0 && has_5);
+
+        // Cleanup test artifacts (~17 files).
+        std::system("rm -f logging/PHASE5BTEST_*.csv 2>/dev/null");
+    }
+
+    //==================================================================================================
     // v5.15.5.C.3 Phase 10 (/test-strength-audit INFO-2 close):
     // AUTOPOPULATE BIT-init + MULTI_BIT-init direct test
     //==================================================================================================
