@@ -18,7 +18,9 @@
 // CALLER SCOPE CONTRACT (both RecordEntry + RecordExit):
 //   uint64_t timestamp_us, uint32_t core_id, uint32_t strategy_id,
 //   char event_type, double price_v, double entry_price_v, double exit_price_v,
-//   double pnl_v, double fees_v, double balance_after_v, double trade_size_v
+//   double pnl_v, double fees_v, double balance_after_v, double trade_size_v,
+//   int regime_v (v5.15.5.C.3 Phase 5.A; -1 = unknown for non-strategy-aware callers),
+//   const char* regime_name_v (v5.15.5.C.3 Phase 5.A; "UNKNOWN" for regime_v < 0)
 //
 // HEADER + ROW EMIT:
 //   - TradeLog_EmitHeader(f) — comma-separated col_name list + trailing \n
@@ -70,7 +72,15 @@ namespace tt {
     X(pnl,             "%.8f", pnl_v)                                                         \
     X(fees,            "%.8f", fees_v)                                                        \
     X(balance_after,   "%.8f", balance_after_v)                                               \
-    X(trade_size,      "%.8f", trade_size_v)
+    X(trade_size,      "%.8f", trade_size_v)                                                  \
+    /* v5.15.5.C.3 Phase 5.A — regime capture at trade emit time. -1 = unknown   */           \
+    /* (non-strategy-aware caller, e.g. OMS HandleFill); valid regimes are 0..N-1 */          \
+    /* per FOREACH_REGIME (Strategies/StrategyInterface.hpp:181). regime_name is   */          \
+    /* the full_name string from REGIME_INFO[].full_name lookup or "UNKNOWN" for  */          \
+    /* regime_v < 0. Append-only addition; existing 11-col operator parsers see   */          \
+    /* the extra columns as trailing CSV; no breakage.                             */          \
+    X(regime,          "%d",   regime_v)                                                       \
+    X(regime_name,     "%s",   regime_name_v)
 
 //======================================================================================================
 // [AUTO-GENERATED COUNT]

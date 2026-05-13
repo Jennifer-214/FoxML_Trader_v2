@@ -1745,7 +1745,8 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
                                         event.price,
                                         ctx->intended_qty,
                                         entry_fee,
-                                        state->oms->balance);
+                                        state->oms->balance,
+                                        /*regime=*/(int)ctx->regime_state.current_regime);
         }
         return;
     }
@@ -1803,7 +1804,8 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
                                        qty_snap,
                                        net,
                                        total_fee,
-                                       state->oms->balance);
+                                       state->oms->balance,
+                                       /*regime=*/(int)ctx->regime_state.current_regime);
         }
         return;
     }

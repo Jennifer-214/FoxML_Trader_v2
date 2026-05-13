@@ -23318,13 +23318,15 @@ e3_skip_load:;
     // ===========================================================================
     printf("\n--- v5.14.10.F: ShardedTradeLog FOREACH_TRADE_LOG_COL refactor (byte preservation) ---\n");
 
-    // ─── Test F.1: FOREACH_TRADE_LOG_COL_COUNT == 11 ───
+    // ─── Test F.1: FOREACH_TRADE_LOG_COL_COUNT == 13 (v5.15.5.C.3 Phase 5.A) ───
+    // Pre-Phase-5.A: 11 columns (v5.14.10.F v3 format).
+    // Post-Phase-5.A: 13 columns (regime + regime_name appended at end).
     {
-        check("v5.14.10.F: FOREACH_TRADE_LOG_COL_COUNT == 11 (preserves v3 sharded format)",
-              FOREACH_TRADE_LOG_COL_COUNT == 11);
+        check("v5.15.5.C.3 Phase 5.A: FOREACH_TRADE_LOG_COL_COUNT == 13 (regime + regime_name appended)",
+              FOREACH_TRADE_LOG_COL_COUNT == 13);
     }
 
-    // ─── Test F.2: TradeLog_EmitHeader byte-identical to pre-refactor ───
+    // ─── Test F.2: TradeLog_EmitHeader byte-identical to expected post-Phase-5.A ───
     {
         char tmp_path[] = "/tmp/foxml_v5_14_10_f_trade_hdr_XXXXXX";
         int fd = mkstemp(tmp_path);
@@ -23339,10 +23341,10 @@ e3_skip_load:;
             fread(buf, 1, sizeof(buf) - 1, rf);
             fclose(rf);
 
-            // Pre-refactor literal at ShardedTradeLog.hpp:118-119 BEFORE v5.14.10.F
+            // v5.15.5.C.3 Phase 5.A — regime + regime_name appended.
             const char* EXPECTED =
-                "timestamp_us,core_id,strategy_id,event_type,price,entry_price,exit_price,pnl,fees,balance_after,trade_size\n";
-            check("v5.14.10.F: TradeLog_EmitHeader byte-identical to pre-refactor literal",
+                "timestamp_us,core_id,strategy_id,event_type,price,entry_price,exit_price,pnl,fees,balance_after,trade_size,regime,regime_name\n";
+            check("v5.15.5.C.3 Phase 5.A: TradeLog_EmitHeader includes regime + regime_name columns",
                   strcmp(buf, EXPECTED) == 0);
             unlink(tmp_path);
         }
@@ -23362,6 +23364,9 @@ e3_skip_load:;
         double   fees_v        = 5.00000123;     // entry_fee
         double   balance_after_v = 9990.00000000;
         double   trade_size_v    = 0.01000000;
+        // v5.15.5.C.3 Phase 5.A — regime + regime_name caller-scope additions.
+        int         regime_v       = -1;             // -1 = unknown
+        const char* regime_name_v  = "UNKNOWN";
 
         char buf[1024] = {0};
         int n = 0;
@@ -23384,11 +23389,11 @@ e3_skip_load:;
         // Test asserts the NEW format (uniform %.8f) is what registry produces.
         char expected[256];
         snprintf(expected, sizeof(expected),
-            "%lu,%u,%u,E,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f\n",
+            "%lu,%u,%u,E,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%d,%s\n",
             (unsigned long)timestamp_us, (unsigned)core_id, (unsigned)strategy_id,
             price_v, entry_price_v, exit_price_v, pnl_v, fees_v,
-            balance_after_v, trade_size_v);
-        check("v5.14.10.F: TRADE_LOG_EMIT_ROW (Entry) byte-uniform .8f format (column count + delimiters preserved)",
+            balance_after_v, trade_size_v, regime_v, regime_name_v);
+        check("v5.15.5.C.3 Phase 5.A: TRADE_LOG_EMIT_ROW (Entry) includes regime=-1, regime_name=UNKNOWN by default",
               strcmp(buf, expected) == 0);
         check("v5.14.10.F: TRADE_LOG_EMIT_ROW returns correct byte count via out_n",
               n == (int)strlen(expected));
@@ -23407,6 +23412,9 @@ e3_skip_load:;
         double   fees_v        = 10.50000000;
         double   balance_after_v = 10039.56420000;
         double   trade_size_v    = 0.01000000;
+        // v5.15.5.C.3 Phase 5.A — regime captured (VOLATILE = 2 per FOREACH_REGIME).
+        int         regime_v       = 2;
+        const char* regime_name_v  = "VOLATILE";
 
         char buf[1024] = {0};
         int n = 0;
@@ -23414,11 +23422,11 @@ e3_skip_load:;
 
         char expected[256];
         snprintf(expected, sizeof(expected),
-            "%lu,%u,%u,X,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f\n",
+            "%lu,%u,%u,X,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%d,%s\n",
             (unsigned long)timestamp_us, (unsigned)core_id, (unsigned)strategy_id,
             price_v, entry_price_v, exit_price_v, pnl_v, fees_v,
-            balance_after_v, trade_size_v);
-        check("v5.14.10.F: TRADE_LOG_EMIT_ROW (Exit) byte-identical to pre-refactor snprintf",
+            balance_after_v, trade_size_v, regime_v, regime_name_v);
+        check("v5.15.5.C.3 Phase 5.A: TRADE_LOG_EMIT_ROW (Exit) emits regime=2, regime_name=VOLATILE",
               strcmp(buf, expected) == 0);
     }
 
