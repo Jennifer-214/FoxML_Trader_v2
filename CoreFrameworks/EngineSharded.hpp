@@ -57,6 +57,7 @@
 #include "ShardedSnapshot.hpp"
 #include "ShardedSnapshotPersist.hpp"  // Phase 4: persistent state across restarts
 #include "PaperResetArchive.hpp"        // v5.15.5.C.3 Phase 6 — paper-reset archive helpers (Summary_WriteJson + dirname/mkdir)
+#include "../MemHeaders/LatencyHistogram.hpp"  // v5.15.5.C.3 Phase 7.B — drainer-cycle bench gate histogram
 #include "ControllerEventLoop.hpp"
 #include "CoreLatencyStats.hpp"
 #include "ControllerConfig.hpp"
@@ -350,13 +351,44 @@ static inline void EngineSharded_DumpLatency(const ExecutionCore<F>* cores,
 // once at the top of this file (above namespace tt opening); the call
 // site is in EngineSharded_Run below.
 
-template <unsigned F>
+//======================================================================================================
+// [Phase 7.B — drainer-cycle bench gate histogram]
+//======================================================================================================
+// Single binary-global LatencyHistogram instrument; written by the drainer
+// thread when BENCH=true, read by the snapshot publisher (cross-thread per
+// CLAUDE.md item 25 — LatencyHistogram has alignas(64) cluster isolation
+// for its hot bucket array + observability sub-cluster).
+//
+// `inline` (C++17) ensures one definition across all translation units.
+// `alignas(64)` is already on the type itself (from LatencyHistogram.hpp);
+// the variable declaration inherits it.
+//
+// Reset at engine boot via LatencyHistogram_Reset before any drainer
+// thread spawns. When BENCH=false (default; production), the if-constexpr
+// blocks that touch this global are compile-time elided — the variable
+// is allocated but never written/read (linker may DCE it if all
+// translation units instantiate BENCH=false, but the inline keyword
+// keeps the symbol valid even if untouched).
+//======================================================================================================
+inline LatencyHistogram g_engine_drainer_cycle_hist{};
+
+template <unsigned F, bool BENCH = false>
 static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                       const BinanceConfig& bcfg) {
     // Install our own SIGINT/SIGTERM handler so threads can shut down cleanly.
     // Save the previous handlers so we can restore them on exit (in case the
     // legacy engine path runs after us in some test setup).
     g_engine_sharded_shutdown = 0;
+    // v5.15.5.C.3 Phase 7.B — reset drainer-cycle bench histogram at boot.
+    // Zero-cost when BENCH=false (compile-time elided); at BENCH=true the
+    // reset ensures no stale stats from a prior run leak into this session.
+    if constexpr (BENCH) {
+        LatencyHistogram_Reset(&g_engine_drainer_cycle_hist);
+        std::fprintf(stderr,
+            "[OMS_BENCH] bench gate ENABLED — drainer cycle latencies will "
+            "be recorded into g_engine_drainer_cycle_hist; summary line "
+            "emitted at engine shutdown.\n");
+    }
     auto prev_int  = std::signal(SIGINT,  EngineSharded_SignalHandler);
     auto prev_term = std::signal(SIGTERM, EngineSharded_SignalHandler);
     // Wire the Binance reconnect helper to our shutdown flag so its delay
@@ -2463,6 +2495,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                          &drain_post_fill, &drain_manual_closes] {
         EngineSharded_PinThread(state.registered_count + 1);
         while (!g_engine_sharded_shutdown) {
+            // v5.15.5.C.3 Phase 7.B — bench gate per-cycle rdtsc bracket.
+            // Wraps the 4-step drainer cycle below. Compile-time elided when
+            // BENCH=false (production); zero instructions emitted into the
+            // drainer body. When BENCH=true, ~10-15 cycle overhead per
+            // cycle (rdtsc + histogram bucket bump + min/max compare).
+            uint64_t _bench_t0 = 0;
+            if constexpr (BENCH) {
+                _bench_t0 = (uint64_t)__rdtsc();
+            }
             // Sequence per cycle:
             //   1. drain_with_submit / drain_manual_closes — these push
             //      SubmitCommands into oms.submit_queues (v4.7.37; was direct
@@ -2487,6 +2528,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             OMS_DrainSubmit(&oms, drain_count);  // v4.7.37
             OrderManager_Tick(&oms);
             drain_post_fill();
+
+            if constexpr (BENCH) {
+                uint64_t _bench_dt = (uint64_t)__rdtsc() - _bench_t0;
+                LatencyHistogram_Accumulate(&g_engine_drainer_cycle_hist, _bench_dt);
+            }
 
             if (total_drained == 0) std::this_thread::yield();
             if (producer_done.load(std::memory_order_acquire)) {
@@ -3601,6 +3647,23 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             g_init_arena.capacity);
     tt::InitArena_Global() = nullptr;
     tt::InitArena_Destroy(&g_init_arena);
+
+    // v5.15.5.C.3 Phase 7.B — emit drainer-cycle bench histogram summary at
+    // engine shutdown. Compile-time elided when BENCH=false (production);
+    // no output. When BENCH=true, single stderr line with p50/p99/max +
+    // total samples — operator sees the slow-path drainer latency profile
+    // for this run.
+    if constexpr (BENCH) {
+        const uint64_t p50 = LatencyHistogram_Percentile(&g_engine_drainer_cycle_hist, 0.50);
+        const uint64_t p99 = LatencyHistogram_Percentile(&g_engine_drainer_cycle_hist, 0.99);
+        const uint64_t max = g_engine_drainer_cycle_hist.max_observed;
+        const uint64_t total = g_engine_drainer_cycle_hist.total_count.load(std::memory_order_relaxed);
+        std::fprintf(stderr,
+            "[OMS_BENCH] drainer cycle: p50=%llu cy, p99=%llu cy, max=%llu cy "
+            "(samples=%llu)\n",
+            (unsigned long long)p50, (unsigned long long)p99, (unsigned long long)max,
+            (unsigned long long)total);
+    }
 
     // Restore previous signal handlers so subsequent code paths see the
     // original behavior (legacy engine doesn't install one, so this resets

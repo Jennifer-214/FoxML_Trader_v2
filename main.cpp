@@ -221,7 +221,17 @@ int main(int argc, char *argv[]) {
     //   - CoreFrameworks/OrderManager (OMS HandleFill — fee math + counters)
     //==================================================================================================
     if (ccfg.engine_mode == ENGINE_MODE_SHARDED) {
-        tt::EngineSharded_Run(ccfg, bcfg);
+        // v5.15.5.C.3 Phase 7.B — runtime bench gate boot dispatch.
+        // Two template instantiations of EngineSharded_Run exist in the
+        // binary: <64, false> (production; zero bench cost) and <64, true>
+        // (bench mode; emits drainer cycle latency histogram + stderr
+        // summary at shutdown). Operator flips cfg.oms_bench_enabled=1 in
+        // engine.cfg to opt in; default 0 keeps production behavior.
+        if (ccfg.oms_bench_enabled) {
+            tt::EngineSharded_Run<64, /*BENCH=*/true>(ccfg, bcfg);
+        } else {
+            tt::EngineSharded_Run<64, /*BENCH=*/false>(ccfg, bcfg);
+        }
         return 0;
     }
 
