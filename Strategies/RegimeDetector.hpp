@@ -389,7 +389,10 @@ inline void Regime_ComputeSignals(RegimeSignals<F> *sig,
         const BookImbalanceHistory<F, 1024> *h =
             (const BookImbalanceHistory<F, 1024> *)book_imb_history;
         if (h->count >= 2) {
-            sig->book_imb_mean_short = BookImbHistory_MeanShort(h, 64);
+            // v5.15.5.D.B — MeanShortFast (O(1) running short_sum read) replaces
+            // MeanShort(h, 64) (O(64) walk; ~24 cache lines / cycle). Bytewise-
+            // identical for the K=64 canonical case; verified in controller_test.cpp.
+            sig->book_imb_mean_short = BookImbHistory_MeanShortFast(h);
             sig->book_imb_mean_long  = BookImbHistory_MeanLong(h);
             FPN<F> last = BookImbHistory_Last(h);
             sig->book_imb_drift = FPN_Sub(last, sig->book_imb_mean_long);

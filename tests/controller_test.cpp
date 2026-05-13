@@ -6703,6 +6703,52 @@ e3_skip_load:;
               fabs(FPN_ToDouble(BookImbHistory_Last(&h)) - 0.9) < 1e-9);
     }
 
+    // v5.15.5.D.B — Bytewise parity: BookImbHistory_MeanShortFast (O(1) read
+    // of running short_sum) must produce bit-identical output to
+    // BookImbHistory_MeanShort(64) (O(K) walk) across warm-up (count < K)
+    // and steady-state (count > K) phases. FPN_Add associativity for
+    // book imbalance magnitudes (|x| ≤ 1; sum ≤ 64 ≪ FPN<64>'s ±2^63 range)
+    // verified analytically; this test locks the contract. Pattern:
+    // sliding-window-online-statistics-pattern.md Multi-window variant.
+    printf("\n--- v5.15.5.D.B: BookImbHistory MeanShortFast bytewise parity ---\n");
+    {
+        BookImbalanceHistory<64, 1024> h;
+        BookImbHistory_Init(&h);
+        static_assert(BookImbalanceHistory<64, 1024>::SHORT_K == 64,
+            "Parity test assumes SHORT_K == 64 (canonical production value)");
+
+        int parity_pass = 0;
+        int parity_fail = 0;
+
+        // Deterministic sequence: 200 pushes covering positive, negative,
+        // zero, and varied-magnitude samples in [-1, 1]. Crosses SHORT_K=64
+        // boundary from warm-up (count <= K, no eviction; both sums equal)
+        // to steady-state (count > K, short_sum eviction active).
+        for (int i = 0; i < 200; ++i) {
+            double sign  = (i % 3 == 0) ? -1.0 : ((i % 3 == 1) ? 1.0 : 0.0);
+            double mag   = (double)((i * 17 + 13) % 100) / 100.0;
+            FPN<64> samp = FPN_FromDouble<64>(sign * mag);
+
+            BookImbHistory_Push(&h, samp);
+
+            FPN<64> walked = BookImbHistory_MeanShort(&h, 64);
+            FPN<64> fast   = BookImbHistory_MeanShortFast(&h);
+
+            bool eq = (walked.w[0] == fast.w[0])
+                   && (walked.w[1] == fast.w[1])
+                   && (walked.sign == fast.sign)
+                   && (walked._padding == fast._padding);
+            if (eq) parity_pass++;
+            else    parity_fail++;
+        }
+
+        char msg[160];
+        snprintf(msg, sizeof(msg),
+                 "v5.15.5.D.B parity: 200/200 byte-identical (passes=%d, fails=%d)",
+                 parity_pass, parity_fail);
+        check(msg, parity_pass == 200 && parity_fail == 0);
+    }
+
     printf("\n--- Wave 1 D.2: FlowState EWMA decay + accumulation ---\n");
     {
         FlowState f;

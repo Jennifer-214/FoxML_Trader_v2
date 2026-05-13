@@ -55,31 +55,44 @@
 // Maintains a running sum so MeanLong is O(1). MeanShort iterates the
 // last K samples (K << W) — O(K) per call, called once per slow path.
 //======================================================================================================
-// v5.15.5.D.A — alignas(64) + HOT-first reorg per cache-layout-discipline-
-// for-hot-side-structs.md Rule 4. HOT cluster (sum + count + head) sits at
-// offset 0..31 = 1 cache line; COLD samples[W] follows at offset 32. The
-// 32 B trailing pad from alignas(64) is structural minimum (24,608 natural;
-// mod 64 = 32; next multiple = 24,640). v5.15.5.D.B inserts `short_sum`
-// between sum and count (HOT cluster grows 32 → 56 B; trailing pad shrinks
-// 32 → 8 B; sizeof unchanged).
+// v5.15.5.D.A/B — alignas(64) + HOT-first reorg per cache-layout-discipline-
+// for-hot-side-structs.md Rule 4. HOT cluster (sum + short_sum + count + head)
+// at offset 0..55 = 1 cache line minus 8 B; COLD samples[W] at offset 56. The
+// 8 B trailing pad from alignas(64) is structural minimum (24,632 natural;
+// mod 64 = 24; next multiple = 24,640).
+//
+// v5.15.5.D.B — `short_sum` maintains a running sum over the SHORT_K most
+// recent samples. The pre-.D.B BookImbHistory_MeanShort(k=64) did an O(K)
+// sequential walk every slow-path cycle (~24 cache lines / read in
+// RegimeDetector). With short_sum, MeanShortFast reads it in O(1). Pattern:
+// DESIGN_SPECS/sliding-window-online-statistics-pattern.md Approach 3
+// (sliding-window incremental) Multi-window variant; 2nd canonical
+// application after v5.14.11.A RidgeBlender correlation matrix.
 template <unsigned F, unsigned W = 1024>
 struct alignas(64) BookImbalanceHistory {
+    // v5.15.5.D.B — Compile-time-fixed short-window size. Production caller
+    // is RegimeDetector @ Strategies/RegimeDetector.hpp:392 (uses MeanShortFast
+    // = short_sum / effective_k, equivalent to MeanShort(64) bytewise).
+    // Tests still call MeanShort(s, k) with k=2 — that path keeps the O(K)
+    // walk for non-canonical k.
+    static constexpr int SHORT_K = 64;
+
     // HOT cluster (offset 0; touched every slow-path cycle by Push + read fns)
-    FPN<F> sum;          // running sum over all valid samples
+    FPN<F> sum;          // running sum over all valid samples (window W)
+    FPN<F> short_sum;    // v5.15.5.D.B — running sum over last SHORT_K samples
     int    count;        // number of valid samples in [0, W]
     int    head;         // next write position
-    // COLD cluster (offset 32; samples[head] touched 1× per Push; MeanShort
-    // walks K=64 sequential elements once per read in .D.A — converted to
-    // O(1) via short_sum running aggregate in .D.B)
+    // COLD cluster (offset 56; samples[head] touched 1× per Push;
+    // samples[head - SHORT_K] touched 1× per Push for short-window eviction
+    // — typically L1-warm since K=64 cycles ago was visited recently)
     FPN<F> samples[W];
 };
 
-// v5.15.5.D.A — Layout lock for the canonical production instantiation.
-// 32 B HOT scalars + 24,576 B COLD samples + 32 B alignas(64) trailing pad
-// = 24,640 B = 385 cache lines exact. The 32 B trailing pad is structural
-// minimum given alignas(64) requirement; reducing requires changing W
-// (sub-optimal per layout-puzzle analysis) or filling pad with a useful
-// field (no current consumer per CLAUDE.md item 16 reuse-audit).
+// v5.15.5.D.A/B — Layout lock for the canonical production instantiation.
+// 56 B HOT scalars + 24,576 B COLD samples + 8 B alignas(64) trailing pad
+// = 24,640 B = 385 cache lines exact. The 8 B trailing pad is structural
+// minimum given alignas(64) requirement; rigorously verified — see plan
+// 2026-05-13-v5.15.5.D-flowfeatures-cache-layout-sweep.md padding analysis.
 // Typedef wraps the template instantiation so the comma in <64, 1024> isn't
 // parsed as a macro-arg separator inside offsetof().
 using BookImbHistDefaultT = BookImbalanceHistory<64, 1024>;
@@ -87,31 +100,52 @@ static_assert(sizeof(BookImbHistDefaultT) == 24640,
     "BookImbalanceHistory<64,1024> sizeof MUST be 24,640 B (385 cache lines).");
 static_assert(offsetof(BookImbHistDefaultT, sum) == 0,
     "BookImbalanceHistory HOT scalar `sum` MUST sit at offset 0.");
-static_assert(offsetof(BookImbHistDefaultT, samples) == 32,
-    "BookImbalanceHistory COLD `samples` MUST sit at offset 32 (after HOT cluster).");
+static_assert(offsetof(BookImbHistDefaultT, short_sum) == 24,
+    "BookImbalanceHistory HOT scalar `short_sum` MUST sit at offset 24 "
+    "(immediately after sum in HOT cluster). Pattern: sliding-window-online-"
+    "statistics-pattern.md Multi-window variant.");
+static_assert(offsetof(BookImbHistDefaultT, samples) == 56,
+    "BookImbalanceHistory COLD `samples` MUST sit at offset 56 (after HOT cluster).");
 static_assert(alignof(BookImbHistDefaultT) == 64,
     "BookImbalanceHistory MUST be cache-line aligned.");
 
 template <unsigned F, unsigned W = 1024>
 static inline void BookImbHistory_Init(BookImbalanceHistory<F, W> *s) {
     memset(s, 0, sizeof(*s));
-    s->sum   = FPN_Zero<F>();
-    s->count = 0;
-    s->head  = 0;
+    s->sum       = FPN_Zero<F>();
+    s->short_sum = FPN_Zero<F>();   // v5.15.5.D.B — running short-window sum
+    s->count     = 0;
+    s->head      = 0;
     for (unsigned i = 0; i < W; i++) s->samples[i] = FPN_Zero<F>();
 }
 
 template <unsigned F, unsigned W = 1024>
 static inline void BookImbHistory_Push(BookImbalanceHistory<F, W> *s, FPN<F> sample) {
-    // Evict oldest if buffer full
+    // Long-window maintenance: evict samples[head] (W-cycles-old) if buffer full
     if (s->count >= (int)W) {
         s->sum = FPN_Sub(s->sum, s->samples[s->head]);
     } else {
         s->count++;
     }
+
+    // v5.15.5.D.B — Short-window maintenance: evict samples[head - SHORT_K] when
+    // current count exceeds SHORT_K (warm-up phase count <= K → no eviction, both
+    // sums accumulate identically until count == K + 1). Eviction must happen
+    // BEFORE the new sample overwrites samples[head]. samples[head - K] is
+    // typically L1-warm (visited K=64 cycles ago; small enough to retain).
+    // FPN_Add associativity holds for book-imbalance magnitudes (|x| ≤ 1; sum
+    // ≤ 64 ≪ FPN<64>'s ±2^63 range; no saturation → exact integer arithmetic
+    // → bytewise associative). Bytewise parity vs walked MeanShort(64) locked
+    // by tests/controller_test.cpp v5.15.5.D.B parity loop.
+    if (s->count > BookImbalanceHistory<F, W>::SHORT_K) {
+        int evict_short = (s->head + (int)W - BookImbalanceHistory<F, W>::SHORT_K) % (int)W;
+        s->short_sum = FPN_Sub(s->short_sum, s->samples[evict_short]);
+    }
+
     s->samples[s->head] = sample;
-    s->sum = FPN_Add(s->sum, sample);
-    s->head = (s->head + 1) % W;
+    s->sum       = FPN_Add(s->sum, sample);
+    s->short_sum = FPN_Add(s->short_sum, sample);   // v5.15.5.D.B
+    s->head      = (s->head + 1) % W;
 }
 
 // Mean over all valid samples — O(1).
@@ -119,6 +153,26 @@ template <unsigned F, unsigned W = 1024>
 static inline FPN<F> BookImbHistory_MeanLong(const BookImbalanceHistory<F, W> *s) {
     if (s->count <= 0) return FPN_Zero<F>();
     return FPN_DivNoAssert(s->sum, FPN_FromDouble<F>((double)s->count));
+}
+
+// v5.15.5.D.B — O(1) fast-path accessor for the canonical k=SHORT_K case.
+// Replaces RegimeDetector's MeanShort(h, 64) call — eliminates the ~24
+// cache-line sequential walk per slow-path cycle. The general MeanShort(s, k)
+// below stays unchanged for tests (k=2) and any future flexible-k consumer.
+//
+// Bytewise-identical to MeanShort(s, SHORT_K) for matching state (FPN_Add
+// associativity holds for bounded inputs). Verified by parity test in
+// tests/controller_test.cpp ("v5.15.5.D.B bytewise parity" section).
+//
+// Pattern: DESIGN_SPECS/sliding-window-online-statistics-pattern.md Multi-
+// window variant; 2nd canonical application of the sliding-window pattern.
+template <unsigned F, unsigned W = 1024>
+static inline FPN<F> BookImbHistory_MeanShortFast(const BookImbalanceHistory<F, W> *s) {
+    if (s->count <= 0) return FPN_Zero<F>();
+    int effective_k = (s->count < BookImbalanceHistory<F, W>::SHORT_K)
+                          ? s->count
+                          : BookImbalanceHistory<F, W>::SHORT_K;
+    return FPN_DivNoAssert(s->short_sum, FPN_FromDouble<F>((double)effective_k));
 }
 
 // Most recent pushed sample. Zero when buffer is empty.
