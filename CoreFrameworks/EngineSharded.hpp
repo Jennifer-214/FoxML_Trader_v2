@@ -626,7 +626,15 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
         exchange_adapter = BinanceAdapter_Get<F>(&g_sharded_binance_adapter);
     }
     OrderManagerState<F> oms;
+    // v5.15.5.C.3 (Finding A) — partial_exit_enabled passed via OrderManager_Init.
+    // Pre-Finding A: engine called BITMAP_SET(MASK_OMS_STATE_PARTIAL_EXIT_ENABLED)
+    // externally after Init returned (Class-18 mirror at the external SET site).
+    // Post-Finding A: passed as parameter; the registry walk inside
+    // OMS_INIT_AUTOPOPULATE sets the bit via the BIT-kind row.
+    int partial_exit_enabled =
+        BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
     OrderManager_Init(&oms, exchange_adapter, live_trading ? 1 : 0,
+                      partial_exit_enabled,
                       live_starting_balance, cfg.fee_rate,
                       (int)cfg.oms_event_log_mode);
     // v5.13.0.B — open calibration log if cfg.calibration_log_path set.
@@ -659,15 +667,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // slippage_pct). Live mode reads exchange fill prices directly so this
     // value is ignored (EventLoop_OnEvent gates on live_trading).
     oms.slippage_pct = cfg.slippage_pct;
-    // Partials geometry mirrored to OMS for the post-fill drainer's
-    // slot→core_id mapping. Set once at init — toggle requires snapshot v3
-    // reload anyway (see Snapshot Re-Activation Invariant).
-    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
-    if (BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED)) {
-        BITMAP_SET(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-    } else {
-        BITMAP_CLR(oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-    }
+    // v5.15.5.C.3 (Finding A) — external PARTIAL_EXIT_ENABLED SET call dropped.
+    // Bit is now set inside OMS_INIT_AUTOPOPULATE via the BIT-kind registry row
+    // for `partial_exit_enabled` (driven by the parameter passed to OrderManager_Init
+    // above). Adding a new cfg-derived boot bit flag = ONE row in
+    // FOREACH_OMS_FIELD; no more external SET sites needed.
 
     // Trade log CSV — same pattern as legacy engine in main.cpp
     static ShardedTradeLog g_sharded_trade_log;
@@ -2001,19 +2005,17 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // proceed concurrently, slow-path's next read sees fresh
                     // values (eventually consistent acceptable for slow-path).
                     std::this_thread::yield();
-                    state.oms->balance      = cfg.starting_balance;
-                    state.oms->realized_pnl = FPN_Zero<F>();
-                    state.oms->ks_peak_balance = cfg.starting_balance;
-                    // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
-                    BITMAP_CLR(state.oms->oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED);
-                    // v5.5.6: OMS counters reset alongside balance + realized_pnl
-                    // (Class 5 recurring bug — see DOCS/RECURRING_BUG_PATTERNS.md).
-                    state.oms->total_fees          = FPN_Zero<F>();
-                    state.oms->total_maker_fees    = FPN_Zero<F>();
-                    state.oms->total_taker_fees    = FPN_Zero<F>();
-                    state.oms->maker_fills_count   = 0;
-                    state.oms->taker_fills_count   = 0;
-                    Portfolio_Init(&state.oms->portfolio);
+                    // v5.15.5.C.3 Phase 3b — full OMS reset via canonical registry.
+                    // Replaces 10 explicit field assignments (balance, realized_pnl,
+                    // ks_peak_balance, kill_switch_tripped bit clear, total_fees,
+                    // total_maker_fees, total_taker_fees, maker_fills_count,
+                    // taker_fills_count, Portfolio_Init) with single AUTOPOPULATE call.
+                    // Adds DO_RESET coverage for atomics (total_submitted/filled/
+                    // rejected — v5.5.6 Class-5 recurring-bug close completion) +
+                    // paper_session_start_us refresh (Phase 2 archive anchor). See
+                    // FOREACH_OMS_FIELD in MemHeaders/OmsFieldRegistry.hpp; RESET_KIND
+                    // column selects which fields participate.
+                    OMS_RESET_AUTOPOPULATE(state.oms, cfg.starting_balance);
                     state.total_entries = 0;
                     state.total_exits   = 0;
                     state.total_events_processed = 0;

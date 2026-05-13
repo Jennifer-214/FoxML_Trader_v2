@@ -175,7 +175,13 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // polluted trade history). Feature/label pipeline unaffected (it
     // doesn't read OMS), but Past Runs P&L now reflects only the
     // current backtest run.
-    OrderManager_Init(&oms, empty_adapter, 0, cfg.starting_balance, cfg.fee_rate,
+    // v5.15.5.C.3 (Finding A) — partial_exit_enabled now a required param.
+    // Backtest mirrors live cfg's partials geometry so per-core sharding stays
+    // consistent across train-serve.
+    int bt_partial_exit_enabled =
+        BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
+    OrderManager_Init(&oms, empty_adapter, 0, bt_partial_exit_enabled,
+                      cfg.starting_balance, cfg.fee_rate,
                       /*event_log_mode=*/1,
                       /*event_log_path=*/"");
     // Phase 8: backtest is all-taker. Set OMS rates explicitly so HandleFill's

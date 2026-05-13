@@ -82,7 +82,9 @@ static int DrainEventsWithOMS(EventLoopState<F>* state, OrderManagerState<F>* om
             ++total_drained;
 
             // Mode 1: route through OMS so the fill handler runs
-            if (oms->event_log_mode == 1 && (is_entry || is_exit)) {
+            // v5.15.5.C.3 — event_log_mode is a 2-bit slot in oms_state_flags.
+            if (MBS_EQ_U8(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE,
+                          tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1) && (is_entry || is_exit)) {
                 if (!FPN_IsZero(order_qty)) {
                     OrderManager_Submit(oms,
                         (int16_t)slot,
@@ -155,7 +157,7 @@ static void run_mode(int event_log_mode, const std::vector<Tick<64>>& ticks,
                      EventLoopState<64>* state_out) {
     // 1. Construct OMS with the specified event_log_mode
     ExchangeAdapter<64> empty{};
-    OrderManager_Init(oms_out, empty, /*live_trading=*/0,
+    OrderManager_Init(oms_out, empty, /*live_trading=*/0, /*partial_exit_enabled=*/0,
                       cfg.starting_balance, cfg.fee_rate, event_log_mode);
 
     // 2. Construct EventLoopState

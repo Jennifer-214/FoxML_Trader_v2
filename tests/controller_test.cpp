@@ -6065,6 +6065,7 @@ int main() {
         OrderManagerState<64> oms;
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
+                          /*partial_exit_enabled=*/0,
                           FPN_FromDouble<64>(10000.0),
                           FPN_FromDouble<64>(0.001));
 
@@ -6135,6 +6136,7 @@ int main() {
         OrderManagerState<64> oms;
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
+                          /*partial_exit_enabled=*/0,
                           FPN_FromDouble<64>(10000.0),
                           FPN_FromDouble<64>(0.001));
         EventLoopState<64> state;
@@ -6235,6 +6237,7 @@ int main() {
         OrderManagerState<64> oms;
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
+                          /*partial_exit_enabled=*/0,
                           FPN_FromDouble<64>(10000.0),
                           FPN_FromDouble<64>(0.001));
         EventLoopState<64> state;
@@ -6308,6 +6311,7 @@ int main() {
         OrderManagerState<64> oms;
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
+                          /*partial_exit_enabled=*/0,
                           FPN_FromDouble<64>(10000.0),
                           FPN_FromDouble<64>(0.001));
         EventLoopState<64> state;
@@ -6540,6 +6544,7 @@ e3_skip_load:;
         OrderManagerState<64> oms;
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
+                          /*partial_exit_enabled=*/0,
                           FPN_FromDouble<64>(10000.0),
                           FPN_FromDouble<64>(0.001));
         EventLoopState<64> state;
@@ -7150,7 +7155,7 @@ e3_skip_load:;
             FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
         // Mode 1 — OMS owns portfolio mutation + per-core accounting via
         // the FillRecord machinery this commit added.
-        r->oms.event_log_mode      = 1;
+        MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);
         BITMAP_SET(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);  // paired-leg geometry
         r->oms.fee_rate_taker      = FPN_FromDouble<64>(0.001);  // 10bps taker
         r->oms.fee_rate_maker      = FPN_FromDouble<64>(0.001);
@@ -7297,7 +7302,7 @@ e3_skip_load:;
         R* r = new R();
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
             FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
-        r->oms.event_log_mode       = 1;
+        MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);
         BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);  // single-leg
         r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
         r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
@@ -7367,7 +7372,7 @@ e3_skip_load:;
         r->cfg.sl_cooldown_cycles = 0;
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
             FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
-        r->oms.event_log_mode       = 1;       // mirror live default
+        MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);       // mirror live default
         BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
         r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
         r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
@@ -7495,7 +7500,7 @@ e3_skip_load:;
         r->cfg.sl_cooldown_cycles = 0;
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
             FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
-        r->oms.event_log_mode       = 1;
+        MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);
         BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
         r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
         r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
@@ -7574,7 +7579,7 @@ e3_skip_load:;
         R* r = new R();
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
             FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
-        r->oms.event_log_mode       = 1;
+        MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);
         BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
         r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
         r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
@@ -7716,7 +7721,7 @@ e3_skip_load:;
             tt::EventLoopState_InitLegacy(&r->state, &r->oms,
                 FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
             BITMAP_SET(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-            r->oms.event_log_mode = 1;
+            MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);
             tt::SPSCRing_Init(&r->tick_ring);
             tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
             tt::EventLoopState_RegisterCore(&r->state, &r->core,
@@ -7748,7 +7753,7 @@ e3_skip_load:;
             tt::EventLoopState_InitLegacy(&r->state, &r->oms,
                 FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
             BITMAP_SET(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-            r->oms.event_log_mode = 1;
+            MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);
             tt::SPSCRing_Init(&r->tick_ring);
             tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
             tt::EventLoopState_RegisterCore(&r->state, &r->core,
@@ -7778,7 +7783,7 @@ e3_skip_load:;
             tt::EventLoopState_InitLegacy(&r->state, &r->oms,
                 FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
             BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-            r->oms.event_log_mode = 1;
+            MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);
             tt::SPSCRing_Init(&r->tick_ring);
             tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
             tt::EventLoopState_RegisterCore(&r->state, &r->core,
@@ -7840,7 +7845,7 @@ e3_skip_load:;
         BITMAP_SET(r->cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
             FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
-        r->oms.event_log_mode       = 1;
+        MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);
         BITMAP_SET(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);       // mirror cfg
         r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.0);  // zero fees: clean P&L signal
         r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.0);
@@ -7904,9 +7909,9 @@ e3_skip_load:;
         };
         R* r = new R();
         tt::ExchangeAdapter<64> empty{};
-        tt::OrderManager_Init(&r->oms, empty, /*live=*/0,
+        tt::OrderManager_Init(&r->oms, empty, /*live=*/0, /*partial_exit_enabled=*/0,
             FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
-        r->oms.event_log_mode       = 1;       // mirror live default
+        MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);       // mirror live default
         r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
         r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
 
@@ -8122,7 +8127,7 @@ e3_skip_load:;
         struct R { tt::OrderManagerState<64> oms; };
         R* r = new R();
         tt::ExchangeAdapter<64> empty{};
-        tt::OrderManager_Init(&r->oms, empty, 0,
+        tt::OrderManager_Init(&r->oms, empty, 0, /*partial_exit_enabled=*/0,
             FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
 
         int pushed_ok = 0;
@@ -9888,6 +9893,7 @@ e3_skip_load:;
         tt::ExchangeAdapter<64> adapter{};
         tt::OrderManager_Init(&rig->oms, adapter,
                                /*live_trading=*/0,
+                               /*partial_exit_enabled=*/0,
                                FPN_FromDouble<64>(10000.0),
                                FPN_FromDouble<64>(0.001),
                                /*event_log_mode=*/0);  // mode 0 keeps
@@ -15252,6 +15258,7 @@ e3_skip_load:;
         // path (mode 0 shortcuts past the table for legacy compat). We need
         // the table populated to test the slot encoding.
         OrderManager_Init(&oms, empty_adapter, /*live=*/0,
+                          /*partial_exit_enabled=*/0,
                           FPN_FromDouble<64>(10000.0),
                           FPN_FromDouble<64>(0.001),
                           /*event_log_mode=*/1, /*event_log_path=*/nullptr);
@@ -18132,6 +18139,7 @@ e3_skip_load:;
         tt::OrderManagerState<64> oms;
         tt::ExchangeAdapter<64> empty_adapter{};
         tt::OrderManager_Init(&oms, empty_adapter, /*live=*/0,
+                              /*partial_exit_enabled=*/0,
                               FPN_FromDouble<64>(10000.0),
                               FPN_FromDouble<64>(0.001));
         tt::EventLoopState<64> state;
@@ -18228,6 +18236,7 @@ e3_skip_load:;
         tt::OrderManagerState<64> oms;
         tt::ExchangeAdapter<64> empty_adapter{};
         tt::OrderManager_Init(&oms, empty_adapter, /*live=*/0,
+                              /*partial_exit_enabled=*/0,
                               FPN_FromDouble<64>(10000.0),
                               FPN_FromDouble<64>(0.001));
         tt::EventLoopState<64> state;
@@ -18352,6 +18361,7 @@ e3_skip_load:;
         tt::OrderManagerState<64> oms;
         tt::ExchangeAdapter<64> empty_adapter{};
         tt::OrderManager_Init(&oms, empty_adapter, /*live=*/0,
+                              /*partial_exit_enabled=*/0,
                               FPN_FromDouble<64>(10000.0),
                               FPN_FromDouble<64>(0.001));
         tt::EventLoopState<64> state;
@@ -18419,6 +18429,7 @@ e3_skip_load:;
         OrderManagerState<64> oms;
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, /*live_trading=*/0,
+                          /*partial_exit_enabled=*/0,
                           FPN_FromDouble<64>(10000.0),
                           FPN_FromDouble<64>(0.001));
 
@@ -18460,6 +18471,7 @@ e3_skip_load:;
         OrderManagerState<64> oms;
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
+                          /*partial_exit_enabled=*/0,
                           FPN_FromDouble<64>(10000.0),
                           FPN_FromDouble<64>(0.001));
 
@@ -18509,6 +18521,7 @@ e3_skip_load:;
         OrderManagerState<64> oms;
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
+                          /*partial_exit_enabled=*/0,
                           FPN_FromDouble<64>(10000.0),
                           FPN_FromDouble<64>(0.001));
         EventLoopState_Init(&state, &oms);
@@ -18668,6 +18681,7 @@ e3_skip_load:;
         OrderManagerState<64> oms;
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
+                          /*partial_exit_enabled=*/0,
                           FPN_FromDouble<64>(10000.0),
                           FPN_FromDouble<64>(0.001));
         // === Defaults post-Init: -1 sentinel ===

@@ -181,4 +181,109 @@
 #define BITMAP_FIRST_U32(field) ((unsigned)__builtin_ctz((unsigned)(field)))
 #define BITMAP_FIRST_U64(field) ((unsigned)__builtin_ctzll((unsigned long long)(field)))
 
+//------------------------------------------------------------------------------------------------------
+// [MULTI-BIT STATE (MBS_*) ACCESSORS — N-bit packed slots within bitmap fields]
+//------------------------------------------------------------------------------------------------------
+// Per DESIGN_SPECS/multi-bit-state-encoding-pattern.md. Generalizes the
+// single-bit BITMAP_* primitives above to K-state fields (K=2..16) packed
+// into N-bit slots (N=ceil(log2(K))) within a shared bitmap word.
+//
+// First codebase application of generic MBS_* primitives (v5.15.5.C.3 Phase 3b).
+// Pre-existing per-registry multi-bit accessors (OmsExitPredictorMetaRegistry's
+// OMS_META_GET_REGIME / GET_ARM / IS_VALID / PACK / CLEAR — v5.15.5.C.2.1) were
+// the FIRST APPLICATION pattern; this header now codifies the primitives so
+// future K-state fields don't reinvent. Reference: oms_state_flags hybrid
+// (3 single-bit flags + EVENT_LOG_MODE 2-bit slot) in v5.15.5.C.3.
+//
+// Slot identified by (mask, shift). Width is derivable from mask via
+// __builtin_popcount(mask) when needed. Shift can also derive from mask
+// via __builtin_ctz(mask) — but explicit shift at call sites is clearer
+// (operator sees the slot position without mental masking).
+//
+// USAGE:
+//   uint8_t flags = 0;
+//   static constexpr uint8_t MASK_MODE  = 0x0C;  // bits 2-3 (2-bit slot, K=4 states)
+//   static constexpr int     SHIFT_MODE = 2;
+//
+//   MBS_SET_U8(flags, MASK_MODE, SHIFT_MODE, 2);            // sets slot to value 2
+//   uint8_t mode = MBS_GET_U8(flags, MASK_MODE, SHIFT_MODE); // reads slot value (0..3)
+//   if (MBS_EQ_U8(flags, MASK_MODE, SHIFT_MODE, 1)) { ... }  // branchless equality
+//   if (BITMAP_ANY(flags, MASK_MODE)) { ... }                // slot non-zero (any 1-bit set in slot)
+//
+// LATENCY (single-thread):
+//   MBS_GET = 1 AND + 1 SHR (often fused into BMI BEXTR by compiler)
+//   MBS_SET = 1 AND-NOT + 1 SHL + 1 OR + 1 store
+//   MBS_EQ  = 1 AND + 1 compare-to-immediate (single-cycle when val is compile-time const)
+// No branches; ILP-friendly (parallel decode of multiple slots in same field).
+//
+// THREAD SAFETY: MBS_SET is read-modify-write (3 ops). NOT atomic. Use MBS_ATOMIC_GET
+// for cross-thread read (snapshot consistent with __ATOMIC_RELAXED ordering); use
+// CAS loop if cross-thread MUTATION of multi-bit slots is required (no single-
+// instruction atomic for partial-word updates).
+
+// ---- Extract slot value (1 cycle: AND + SHR) ----
+#define MBS_GET_U8(field, mask, shift) \
+    ((uint8_t)(((field) & (mask)) >> (shift)))
+#define MBS_GET_U16(field, mask, shift) \
+    ((uint16_t)(((field) & (mask)) >> (shift)))
+#define MBS_GET_U32(field, mask, shift) \
+    ((uint32_t)(((field) & (mask)) >> (shift)))
+#define MBS_GET_U64(field, mask, shift) \
+    ((uint64_t)(((field) & (mask)) >> (shift)))
+
+// ---- Insert value into slot (clears slot, then writes shifted value) ----
+// VALUE masked to slot width to prevent overflow into adjacent slots.
+#define MBS_SET_U8(field, mask, shift, value) do {                                   \
+    (field) = (uint8_t)(((field) & (uint8_t)~(mask)) |                                \
+                        (((uint8_t)(value) << (shift)) & (mask)));                    \
+} while (0)
+#define MBS_SET_U16(field, mask, shift, value) do {                                  \
+    (field) = (uint16_t)(((field) & (uint16_t)~(mask)) |                              \
+                         (((uint16_t)(value) << (shift)) & (mask)));                  \
+} while (0)
+#define MBS_SET_U32(field, mask, shift, value) do {                                  \
+    (field) = (uint32_t)(((field) & ~(mask)) |                                        \
+                         (((uint32_t)(value) << (shift)) & (mask)));                  \
+} while (0)
+#define MBS_SET_U64(field, mask, shift, value) do {                                  \
+    (field) = (uint64_t)(((field) & ~(mask)) |                                        \
+                         (((uint64_t)(value) << (shift)) & (mask)));                  \
+} while (0)
+
+// ---- Branchless equality (1 cycle when val is compile-time const) ----
+// Compiles to AND + compare-to-immediate. No shift needed at runtime — the
+// compiler pre-computes (val << shift & mask) at the call site.
+// Returns: bool (consistent with BITMAP_IS_SET — avoids int-truncation hazard).
+#define MBS_EQ_U8(field, mask, shift, val) \
+    (((field) & (mask)) == (uint8_t)(((uint8_t)(val) << (shift)) & (mask)))
+#define MBS_EQ_U16(field, mask, shift, val) \
+    (((field) & (mask)) == (uint16_t)(((uint16_t)(val) << (shift)) & (mask)))
+#define MBS_EQ_U32(field, mask, shift, val) \
+    (((field) & (mask)) == (uint32_t)(((uint32_t)(val) << (shift)) & (mask)))
+#define MBS_EQ_U64(field, mask, shift, val) \
+    (((field) & (mask)) == (uint64_t)(((uint64_t)(val) << (shift)) & (mask)))
+
+// ---- Atomic GET (cross-thread read with __ATOMIC_RELAXED snapshot) ----
+// No MBS_ATOMIC_SET — multi-bit slot mutation needs CAS loop (not single-
+// instruction atomic). If cross-thread multi-bit MUTATION is required,
+// implement explicit __atomic_compare_exchange_n loop at call site.
+#define MBS_ATOMIC_GET_U8(field, mask, shift) \
+    ((uint8_t)((__atomic_load_n(&(field), __ATOMIC_RELAXED) & (mask)) >> (shift)))
+#define MBS_ATOMIC_GET_U16(field, mask, shift) \
+    ((uint16_t)((__atomic_load_n(&(field), __ATOMIC_RELAXED) & (mask)) >> (shift)))
+#define MBS_ATOMIC_GET_U32(field, mask, shift) \
+    ((uint32_t)((__atomic_load_n(&(field), __ATOMIC_RELAXED) & (mask)) >> (shift)))
+#define MBS_ATOMIC_GET_U64(field, mask, shift) \
+    ((uint64_t)((__atomic_load_n(&(field), __ATOMIC_RELAXED) & (mask)) >> (shift)))
+
+// ---- Slot-width helper (compile-time popcount of mask) ----
+// Useful for static_asserts validating slot capacity. Example:
+//   static_assert(EVENT_LOG_MODE_COUNT <= (1u << MBS_SLOT_WIDTH(MASK_EVENT_LOG_MODE)),
+//                 "EVENT_LOG_MODE values exceed multi-bit slot capacity");
+#define MBS_SLOT_WIDTH(mask) (__builtin_popcount((unsigned)(mask)))
+
+// ---- Slot-max-value helper (max representable value in a slot) ----
+// For a 2-bit slot (mask=0x0C), max value = 3 (binary 11).
+#define MBS_SLOT_MAX(mask) (((unsigned)(mask) >> __builtin_ctz((unsigned)(mask))))
+
 #endif // BITMAP_MACROS_HPP

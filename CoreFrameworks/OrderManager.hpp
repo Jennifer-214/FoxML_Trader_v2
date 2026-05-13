@@ -232,7 +232,14 @@ struct OrderManagerState {
     //     portfolio slots, updates balance, appends to the event log.
     //     OnEvent just bumps counters.
     // v5.15.5.C.1 — relocated to HOT cluster (read per drainer fill-process).
-    int event_log_mode;
+    // v5.15.5.C.3 (Finding A') — int field removed; event_log_mode is now a
+    // 2-bit slot in oms_state_flags (FOREACH_OMS_STATE_MULTI_BIT registry
+    // in MemHeaders/OmsStateFlagRegistry.hpp). Saves 4 bytes from HOT cluster
+    // + closes the byte-per-low-cardinality-int pattern at OMS struct level
+    // (per multi-bit-state-encoding-pattern.md; promotes pattern to CLAUDE.md
+    // item candidate alongside item 20 bitmap-flag-api per CLAUDE.local.md
+    // "codify" rule 2026-05-13). Accessor: MBS_EQ_U8(oms->oms_state_flags,
+    // tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, N).
 
     // === ORDER EVENT LOG (phase 03 chunk 3) ===
     // append-only log of order lifecycle events. populated in mode 1 by
@@ -626,6 +633,18 @@ static void OrderManager_FillResultCallback(void* user_ctx,
 //   1 = event log mode. OMS_Tick runs a fill handler that opens/closes
 //       portfolio slots, updates balance, and appends to the event log.
 //       EventLoop_OnEvent just bumps counters.
+//   2-3 = reserved for future modes. Stored as 2-bit slot in oms_state_flags
+//         (v5.15.5.C.3 MULTI_BIT slot — see FOREACH_OMS_STATE_MULTI_BIT).
+//
+// partial_exit_enabled parameter (v5.15.5.C.3 Finding A):
+//   0 = single-leg geometry; slot index == core_id (1:1 mapping).
+//   1 = paired-leg geometry; slot index = 2*core_id + leg (legs A+B per core).
+//   Set as BIT in oms_state_flags (MASK_OMS_STATE_PARTIAL_EXIT_ENABLED).
+//   Pre-Finding A: engine boot called OMS_STATE_FLAG_SET(PARTIAL_EXIT_ENABLED)
+//   externally after OrderManager_Init returned (Class-18 mirror at the
+//   external SET site). Post-Finding A: passed as OrderManager_Init parameter;
+//   the registry walk inside OMS_INIT_AUTOPOPULATE sets the bit via the
+//   BIT-kind row for `partial_exit_enabled`.
 //======================================================================================================
 // v5.9.5e — `event_log_path` lets callers separate the in-memory event log
 // infrastructure (single-writer mode=1 used by both live + backtest for
@@ -638,151 +657,26 @@ static void OrderManager_FillResultCallback(void* user_ctx,
 // feature/label collection pipeline doesn't read OMS, so ML training
 // output was unaffected — but Past Runs P&L + trade history started
 // from the contaminated balance.
+//
+// v5.15.5.C.3 Phase 3b — body migration from ~140 LOC manual init to a
+// single OMS_INIT_AUTOPOPULATE invocation. All scalar/BIT/MULTI_BIT/ATOMIC
+// field init lives in FOREACH_OMS_FIELD (MemHeaders/OmsFieldRegistry.hpp);
+// sub-struct inits (Portfolio, Order per-slot loop, FillRecord per-slot,
+// SPSC rings, OrderEventLog conditional + StartAsyncWriter) live in the
+// AUTOPOPULATE macro body. Adding a new OMS-level field is now ONE row in
+// the canonical registry; INIT/RESET/PERSIST views auto-flow.
+//======================================================================================================
 template <unsigned F>
 inline void OrderManager_Init(OrderManagerState<F>* oms,
                               const ExchangeAdapter<F>& adapter,
                               int live_trading,
+                              int partial_exit_enabled,
                               FPN<F> starting_balance,
                               FPN<F> fee_rate,
                               int event_log_mode = 0,
                               const char* event_log_path = "logging/order_events.bin") {
-    for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
-        Order_Init(&oms->orders[i], 0, -1, ORDER_MARKET_BUY);
-        oms->orders[i].state = ORDER_FILLED;  // mark as inactive (terminal)
-    }
-    oms->order_bitmap   = 0;
-    oms->next_order_id  = 1;
-    oms->adapter        = adapter;
-    // v5.15.5.C.2 (S3a) — COLD-cluster boolean cohort bit-pack. All 3 flags
-    // start cleared; live_trading bit set conditionally below. Engine init
-    // sets PARTIAL_EXIT_ENABLED per cfg after Init (line ~665 in EngineSharded.hpp).
-    oms->oms_state_flags = 0;
-    if (live_trading) {
-        OMS_STATE_FLAG_SET(*oms, LIVE_TRADING);
-    }
-    oms->last_seen_trade_id = 0;  // v5.14.4.0 — high-watermark for replay-safe boot reconcile
-
-    SPSCRing_Init(&oms->result_queue);
-    SPSCRing_Init(&oms->ws_result_queue);
-    SPSCRing_Init(&oms->reconcile_queue);
-    // v4.7.37: per-core submit queues.
-    for (int i = 0; i < MAX_EXECUTION_CORES; ++i) {
-        SPSCRing_Init(&oms->submit_queues[i]);
-    }
-
-    // Bank state owned by OMS.
-    Portfolio_Init(&oms->portfolio);
-    oms->balance             = starting_balance;
-    oms->realized_pnl        = FPN_Zero<F>();
-    oms->fee_rate            = fee_rate;
-    oms->fee_rate_maker      = fee_rate; // Phase 8: legacy default = same rate
-    oms->fee_rate_taker      = fee_rate; // engine sets per-cfg after Init
-    oms->slippage_pct        = FPN_Zero<F>(); // v4.2.1: engine sets per-cfg after Init
-    // Maker/taker fee counter init.
-    oms->maker_fills_count   = 0;
-    oms->taker_fills_count   = 0;
-    oms->total_maker_fees    = FPN_Zero<F>();
-    oms->total_taker_fees    = FPN_Zero<F>();
-    oms->total_fees          = FPN_Zero<F>();
-    // Exit-fill feedback channel.
-    oms->last_closed_mask    = 0;
-    for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; ++i) {
-        oms->last_realized_return[i] = 0.0;
-    }
-    // Mode 1 per-fill bookkeeping
-    oms->last_opened_mask    = 0;
-    // v5.15.5.C.2 (S3a) — partial_exit_enabled bit cleared in oms_state_flags above.
-    // v5.15.5.C.2 (S3b) — bitmap clear replaces per-slot byte writes.
-    oms->last_exit_predicted_bitmap = 0;
-    for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; ++i) {
-        oms->last_fill[i].entry_notional      = FPN_Zero<F>();
-        oms->last_fill[i].entry_fee           = FPN_Zero<F>();
-        oms->last_fill[i].exit_net_pnl        = FPN_Zero<F>();
-        oms->last_fill[i].exit_entry_notional = FPN_Zero<F>();
-        oms->last_fill[i].exit_total_fees     = FPN_Zero<F>();
-        oms->last_fill[i].was_win             = 0;
-        // v5.13.0.B — per-slot exit-predictor attribution + calibration
-        oms->last_exit_predicted_p[i]         = 0.0;
-        // v5.13.4 / v5.15.5.C.2.1 (LOW-2) — per-slot bandit arm + regime
-        // capture, bit-packed in last_exit_predicted_meta[i]. OMS_META_CLEAR
-        // sets all slots (regime, arm, valid) to 0; valid=0 replaces the
-        // pre-LOW-2 int8_t = -1 sentinel.
-        OMS_META_CLEAR(oms->last_exit_predicted_meta[i]);
-    }
-    // v5.13.0.B — calibration log file lazy-opened by engine boot via
-    // OrderManager_OpenCalibrationLog when cfg.calibration_log_path set.
-    oms->calibration_log_file = nullptr;
-    oms->ks_min_balance      = FPN_Zero<F>();
-    oms->ks_max_drawdown_pct = FPN_Zero<F>();
-    oms->ks_peak_balance     = starting_balance;  // initial peak = start
-    // v5.15.5.C.2 (S3a) — kill_switch_tripped bit cleared in oms_state_flags above.
-    oms->ks_trips_total      = 0;
-    // v5.15.5.C.3 (Phase 2) — paper-session start anchor. Used by paper-reset
-    // archive flow to format `{start_iso}_to_{end_iso}.paper` directory name.
-    oms->paper_session_start_us = (uint64_t)
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-    oms->trade_log           = nullptr;
-    // v5.12.1.A.2 — emergency-flatten flag init.
-    oms->flatten_pending.store(0, std::memory_order_relaxed);
-    // v5.12.1.A.3 — recovery deadline init (0 = inactive).
-    oms->recovery_until_us.store(0, std::memory_order_relaxed);
-
-    oms->total_submitted.store(0, std::memory_order_relaxed);
-    oms->total_filled.store(0, std::memory_order_relaxed);
-    oms->total_rejected.store(0, std::memory_order_relaxed);
-
-    // Event log mode + log allocation.
-    oms->event_log_mode = event_log_mode;
-    // Disk persistence (mode 1 + non-empty path): load previous events from
-    // disk (reconstructs next_event_id), then open the file for append so
-    // new events write through. First run: load returns 0 (no file);
-    // InitWithFile creates a fresh one with a header.
-    // v5.9.5e — disk persistence only when caller passes a non-empty
-    // event_log_path. Backtest passes nullptr/"" → mode=1 in-memory-only:
-    // fill+drain pipeline still active (parity with live), but no load-
-    // from-disk + no append-to-disk. Live engine still gets full restart-
-    // recovery via the default "logging/order_events.bin".
-    int has_disk_path = (event_log_path && event_log_path[0]);
-    if (event_log_mode == 1 && has_disk_path) {
-        // MUST RUN BEFORE: line 735 OrderEventLog_LoadFromDisk + line 738
-        // Portfolio_FromEventLog replay block — both depend on event_log
-        // being initialized. Registry refactor in v5.15.5.C.3 Phase 3 must
-        // preserve this ordering (do NOT move OrderEventLog_Init into the
-        // registry-driven init block; keep it as an explicit dependency-
-        // ordered step in the AUTOPOPULATE Layer 2 helper-init cluster).
-        OrderEventLog_Init(&oms->event_log);  // allocate buffer first
-        int loaded = OrderEventLog_LoadFromDisk(&oms->event_log, event_log_path);
-        if (loaded > 0) {
-            // replay the loaded events to reconstruct portfolio + balance
-            FoldResult<F> fold = Portfolio_FromEventLog(&oms->event_log,
-                                                         starting_balance, fee_rate);
-            oms->portfolio    = fold.portfolio;
-            oms->balance      = fold.balance;
-            oms->realized_pnl = fold.realized_pnl;
-            if (FPN_GreaterThan(oms->balance, oms->ks_peak_balance))
-                oms->ks_peak_balance = oms->balance;
-            std::fprintf(stderr, "[OMS] replayed %d events from disk, "
-                         "balance=$%.2f\n", loaded, FPN_ToDouble(oms->balance));
-        }
-        // open for append (writes new events through to disk)
-        OrderEventLog_InitWithFile(&oms->event_log, event_log_path);
-    } else {
-        // mode=0 OR mode=1+no-path → in-memory only.
-        OrderEventLog_Init(&oms->event_log);
-    }
-    // v5.11.3.C — start the async writer thread. From here on, the drainer's
-    // OrderEventLog_Append calls enqueue + return; the writer thread does
-    // realloc + fwrite + fflush off the drainer's tail-latency path. If
-    // pthread_create fails (rare), Append falls back to inline sync apply
-    // — same correctness guarantees, just no isolation. Tests that don't
-    // want the thread can call OrderEventLog_StopAsyncWriter immediately.
-    //
-    // MUST RUN LAST in OrderManager_Init: depends on event_log being either
-    // _Init-only or _InitWithFile'd (both branches above). Registry refactor
-    // in v5.15.5.C.3 Phase 3 must place this AFTER the AUTOPOPULATE expansion
-    // (Layer 5 / post-registry) — never inside the FOREACH walk.
-    OrderEventLog_StartAsyncWriter(&oms->event_log);
+    OMS_INIT_AUTOPOPULATE(oms, adapter, live_trading, partial_exit_enabled,
+                          starting_balance, fee_rate, event_log_mode, event_log_path);
 }
 
 //======================================================================================================
@@ -832,7 +726,11 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms,
     // Paper mode + legacy (mode 0): count and return. Never touch the
     // table or the adapter. Mode 1 paper falls through to the slot
     // allocation path below so the fill handler runs in OMS_Tick.
-    if (!BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING) && oms->event_log_mode == 0) {
+    // v5.15.5.C.3 — event_log_mode is now a 2-bit slot in oms_state_flags
+    // (see MemHeaders/OmsStateFlagRegistry.hpp). BITMAP_NONE returns true
+    // when the slot value == 0 (legacy mode).
+    if (!BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING) &&
+        BITMAP_NONE(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE)) {
         oms->total_submitted.fetch_add(1, std::memory_order_relaxed);
         oms->total_filled.fetch_add(1, std::memory_order_relaxed);
         return id;
@@ -1343,7 +1241,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
         }
 
         // Mode 1 fill handler: portfolio mutation + event log.
-        if (oms->event_log_mode == 1) {
+        if (MBS_EQ_U8(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1)) {
             FPN<F> fill_price = o->avg_fill_price;
             FPN<F> fill_qty   = o->filled_qty;
             OrderManager_HandleFill(oms, o, fill_price, fill_qty);
@@ -1359,7 +1257,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
         oms->total_rejected.fetch_add(1, std::memory_order_relaxed);
 
         // Mode 1: append rejection to event log for the audit trail.
-        if (oms->event_log_mode == 1) {
+        if (MBS_EQ_U8(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1)) {
             OrderEventLog_Append(&oms->event_log,
                 OrderEvent_MakeRejection<F>(
                     o->id, o->submitted_at_us,
@@ -1390,7 +1288,7 @@ inline void OrderManager_ProcessReconcile(OrderManagerState<F>* oms, const Comma
         oms->ks_peak_balance = oms->balance;
     }
 
-    if (oms->event_log_mode == 1) {
+    if (MBS_EQ_U8(oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1)) {
         OrderEvent<F> recon_event;
         std::memset(&recon_event, 0, sizeof(recon_event));
         recon_event.type       = OEVT_RECONCILED;

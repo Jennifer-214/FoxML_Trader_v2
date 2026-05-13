@@ -231,7 +231,9 @@ inline void ShardedBacktest_RunTick(ShardedBacktestDriver<F, W, WL>* drv,
     //     line 1594). Mirror the same call here so backtest CoreContexts
     //     match live for identical inputs. Safe to call when masks are
     //     zero (no fills this tick) — the function early-exits per slot.
-    if (drv->oms && drv->oms->event_log_mode != 0 && drv->config) {
+    if (drv->oms &&
+        BITMAP_ANY(drv->oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE) &&
+        drv->config) {
         EventLoop_DrainPostFill(drv->state, drv->oms,
                                  drv->config->sl_cooldown_cycles,
                                  drv->config->ensemble_trade_reward_mult);
@@ -427,7 +429,9 @@ inline void ShardedBacktest_Run(ShardedBacktestDriver<F, W, WL>* drv,
     // v4.7.15: drain post-fill in mode 1 to match live's final-flush loop
     // (EngineSharded line 1597-1604). Without this, the last tick's
     // FillRecords sit in the OMS buffers and never apply to CoreContexts.
-    if (drv->oms && drv->oms->event_log_mode != 0 && drv->config) {
+    if (drv->oms &&
+        BITMAP_ANY(drv->oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE) &&
+        drv->config) {
         EventLoop_DrainPostFill(drv->state, drv->oms,
                                  drv->config->sl_cooldown_cycles,
                                  drv->config->ensemble_trade_reward_mult);

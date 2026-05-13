@@ -851,7 +851,10 @@ inline void EventLoopState_InitLegacy(EventLoopState<F>* state,
                                        FPN<F> starting_balance,
                                        FPN<F> fee_rate) {
     ExchangeAdapter<F> empty{};
-    OrderManager_Init(oms, empty, 0, starting_balance, fee_rate);
+    // v5.15.5.C.3 — partial_exit_enabled is now a required param (Finding A).
+    // Legacy InitLegacy path defaults to 0 (no partials) — callers that need
+    // partials set the bit externally OR use the full OrderManager_Init signature.
+    OrderManager_Init(oms, empty, 0, /*partial_exit_enabled=*/0, starting_balance, fee_rate);
     EventLoopState_Init(state, oms);
 }
 
@@ -1692,7 +1695,9 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
     // In mode 1 the fill handler inside OMS_Tick opens/closes portfolio
     // slots and updates balance. OnEvent just bumps counters so the
     // statistics stay correct for the TUI and the drainer loop.
-    if (state->oms->event_log_mode == 1) {
+    // v5.15.5.C.3 — event_log_mode is a 2-bit slot in oms_state_flags.
+    if (MBS_EQ_U8(state->oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE,
+                  tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1)) {
         // v4.7.19: do NOT bump heartbeat counters here. OnEvent fires for
         // every TradeEvent the drainer pops — but the actual fill (and
         // CSV write) happens later in OMS_Tick → HandleFill. Bumping here

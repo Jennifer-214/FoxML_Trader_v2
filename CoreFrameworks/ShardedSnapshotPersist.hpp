@@ -37,7 +37,10 @@
 #include "OrderManager.hpp"
 #include "Portfolio.hpp"
 #include "../FixedPoint/FixedPointN.hpp"
-#include "../MemHeaders/OmsPersistFieldRegistry.hpp"  // v5.15.5.C.2 (S3a-W) — FOREACH_OMS_PERSIST_FIELD
+// v5.15.5.C.3 Phase 3b — canonical FOREACH_OMS_FIELD + OMS_PROJECT_PERSIST_*
+// dispatch is included transitively via OrderManager.hpp:71. The legacy
+// OmsPersistFieldRegistry.hpp was deleted in this phase; consumers now walk
+// the canonical 8-tuple registry via the PERSIST projection macros.
 
 namespace tt {
 
@@ -141,12 +144,14 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
     }
 
     // ---- GLOBAL OMS BLOCK ----
-    // v5.15.5.C.2 (S3a-W) — registry-driven save. Class 18 mirror close
-    // (CLAUDE.md item 19); adding a new persisted OMS field = 1 row in
-    // FOREACH_OMS_PERSIST_FIELD. Wire format byte-preserved (CLAUDE.md
-    // item 15). v6 OMS counters covered automatically by registry order.
-    // kill_switch_tripped bit-extracted from oms_state_flags (S3a) at save.
-    FOREACH_OMS_PERSIST_FIELD(OMS_PERSIST_DO_SAVE)
+    // v5.15.5.C.3 Phase 3b — canonical FOREACH_OMS_FIELD via PERSIST projection.
+    // Replaces FOREACH_OMS_PERSIST_FIELD(OMS_PERSIST_DO_SAVE) — same wire bytes,
+    // single canonical source of truth. PERSIST view filters by PERSIST_KIND
+    // column (SKIP_PERSIST rows emit no-op); STORAGE_KIND dispatch handles
+    // DIRECT (fwrite field) vs BIT (extract bit from oms_state_flags →
+    // fwrite as type bytes). Adding a new persisted OMS field = 1 row in
+    // FOREACH_OMS_FIELD. Wire format byte-preserved (CLAUDE.md item 15).
+    FOREACH_OMS_FIELD(OMS_PROJECT_PERSIST_SAVE)
 
     // Portfolio bitmap + 16 positions (full Portfolio struct snapshot).
     if (fwrite(&state->oms->portfolio.active_bitmap, 2, 1, f) != 1) goto fail;
@@ -370,8 +375,9 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
     // v5.15.5.C.2 (S3a-W) — registry-driven load. tmp_<name> declared +
     // populated via FOREACH expansion; commit happens in the post-read
     // commit block below.
-    FOREACH_OMS_PERSIST_FIELD(OMS_PERSIST_DECLARE_TMP)
-    FOREACH_OMS_PERSIST_FIELD(OMS_PERSIST_DO_READ)
+    // v5.15.5.C.3 Phase 3b — canonical PERSIST projection (DECLARE_TMP + READ).
+    FOREACH_OMS_FIELD(OMS_PROJECT_PERSIST_DECLARE)
+    FOREACH_OMS_FIELD(OMS_PROJECT_PERSIST_READ)
     // v6 OMS counters: read into tmps, apply at commit point below.
     // v5.15.5.C.2 (S3a-W) — v6 OMS counters (total_fees, total_maker_fees,
     // total_taker_fees, maker_fills_count, taker_fills_count) are now
@@ -482,7 +488,8 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
     // ---- COMMIT (after all reads validated) ----
     // v5.15.5.C.2 (S3a-W) — registry-driven commit. tmp_<name> → state->oms->name
     // for DIRECT-kind fields; bit set/clear for BIT-kind kill_switch_tripped.
-    FOREACH_OMS_PERSIST_FIELD(OMS_PERSIST_DO_COMMIT)
+    // v5.15.5.C.3 Phase 3b — canonical PERSIST projection (COMMIT).
+    FOREACH_OMS_FIELD(OMS_PROJECT_PERSIST_COMMIT)
     state->oms->portfolio.active_bitmap = bitmap;
     memcpy(state->oms->portfolio.positions, positions, sizeof(positions));
 
