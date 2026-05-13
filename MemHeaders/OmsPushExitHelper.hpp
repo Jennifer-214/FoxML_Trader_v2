@@ -1,0 +1,82 @@
+// Copyright (c) 2026 Jennifer Lewis. All rights reserved.
+// Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+// See LICENSE file in the project root for full license text.
+
+//======================================================================================================
+// [OMS PUSH EXIT HELPER]  (v5.15.5.C.4 Phase D5 — Class-18 mirror close)
+//======================================================================================================
+//
+// 4-site Class-18 helper extraction per CLAUDE.md item 19 (structural fix
+// preferred when bug class can recur) +
+// `DESIGN_SPECS/structural-fix-preferred-decision-framework.md`.
+//
+// PROBLEM: 4 callers issued the same 8-arg `OMS_PushSubmit` call with
+// degenerate TP/SL (FPN_Zero) and ORDER_MARKET_SELL baked in — a recurring
+// Class-18 mirror. Future signature changes to OMS_PushSubmit would require
+// 4 site updates, and a future RecordX consumer would inevitably duplicate
+// the 8-arg shape.
+//
+// FIX: extract a 6-arg helper that wraps OMS_PushSubmit with the
+// market-sell + degenerate-TP/SL pattern baked in. Caller passes only the
+// 6 args that actually vary across sites: slot/qty/strategy_id/event_price
+// (and optional leg).
+//
+// 4 production callers (post-extraction):
+//   1. `CoreFrameworks/EngineSharded.hpp:~2501` — drain_manual_closes
+//      (GUI-driven force-close; with explicit leg arg under partials)
+//   2. `CoreFrameworks/EngineSharded.hpp:~3151` — ML exit-predictor submit
+//      (slow-path strategy thread when exit_predictor fires)
+//   3. `CoreFrameworks/ControllerEventLoop.hpp:~3216` — TimeExitOneCore
+//      (max_hold_ticks expired)
+//   4. `CoreFrameworks/ControllerEventLoop.hpp:~3296` — FlattenAll
+//      (WS staleness / kill-switch flatten-all)
+//
+// Site mismatched out (excluded from helper) at
+// `CoreFrameworks/EngineSharded.hpp:~2395` — drain_with_submit's mixed
+// entry+exit branch uses pre-computed leg_tp + explicit intended_sl;
+// structurally different (not a market-sell-with-zero-TP/SL shape).
+//
+// DISCIPLINE (per `function-struct-alignment-for-single-mov-access.md`):
+//   - Helper is `inline` in header → compile-time-resolved offset folding
+//   - Pass OMS by pointer (matches OMS_PushSubmit signature; single
+//     mov-via-register for OMS access)
+//   - FPN<F> + integer args pass via SysV registers; no stack churn
+//   - Templated on <F> for compile-time inlining
+//   - Forwards return bool from OMS_PushSubmit (caller can check)
+//
+// LATENCY (per CLAUDE.md item 17): ZERO net change. Helper compiles to
+// the SAME instructions as the prior inline call (inline keyword + same
+// arg shape). Verified at code review; bench gate at v5.15.5.C.3 Phase 7.B
+// captures drainer p99 for spot-check post-ship.
+//======================================================================================================
+
+#pragma once
+
+#include "../CoreFrameworks/OrderManager.hpp"  // OrderManagerState<F>, OMS_PushSubmit, OrderType
+#include "../FixedPoint/FixedPointN.hpp"        // FPN<F>, FPN_Zero<F>()
+
+namespace tt {
+
+//======================================================================================================
+// Push a market-sell exit submit for `slot` with degenerate TP/SL.
+// Wraps OMS_PushSubmit(ORDER_MARKET_SELL, qty, FPN_Zero, FPN_Zero, ...).
+// Caller passes only slot / qty / strategy_id / event_price / [leg].
+//
+// Returns: true on successful push to OMS submit_queue; false on
+// invalid slot OR queue full. Callers should treat false as a soft
+// error (existing inline-call sites mostly ignored the return value;
+// helper preserves the same contract).
+//======================================================================================================
+template <unsigned F>
+inline bool OMS_PushExitForSlot(OrderManagerState<F>* oms,
+                                 int16_t slot,
+                                 FPN<F> qty,
+                                 uint8_t strategy_id,
+                                 FPN<F> event_price,
+                                 uint8_t leg = 0) {
+    return OMS_PushSubmit(oms, slot, ORDER_MARKET_SELL, qty,
+                          FPN_Zero<F>(), FPN_Zero<F>(),
+                          strategy_id, event_price, leg);
+}
+
+}  // namespace tt

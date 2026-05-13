@@ -65,6 +65,7 @@
 #include "ExecutionCore.hpp"
 #include "GateParameters.hpp"
 #include "OrderManager.hpp"
+#include "../MemHeaders/OmsPushExitHelper.hpp"  // v5.15.5.C.4 Phase D5 — OMS_PushExitForSlot helper (Class-18 close)
 #include "ShardedOrderLatency.hpp"
 #include "SPSCRing.hpp"
 #include "Tick.hpp"
@@ -2498,10 +2499,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             // the drainer thread serializes Submit calls. Manual close is a
             // GUI-driven event; without funneling, this site races with
             // other producer-thread Submits when Phase C spawns multiple.
-            OMS_PushSubmit(&oms,
-                (int16_t)slot, ORDER_MARKET_SELL,
+            // v5.15.5.C.4 Phase D5: routed via OMS_PushExitForSlot helper —
+            // 8-arg market-sell-with-degenerate-TP/SL → 6-arg helper call.
+            tt::OMS_PushExitForSlot(&oms,
+                (int16_t)slot,
                 qty,
-                FPN_Zero<F>(), FPN_Zero<F>(),
                 strategy_id,
                 fill_px,
                 (uint8_t)leg);
@@ -3148,10 +3150,9 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                 } else {
                                     OMS_META_CLEAR(oms.last_exit_predicted_meta[pidx]);
                                 }
-                                OMS_PushSubmit(&oms, (int16_t)pidx,
-                                    ORDER_MARKET_SELL, qty,
-                                    FPN_Zero<F>(), FPN_Zero<F>(),
-                                    state.cores[c].strategy_id, price_fpn);
+                                // v5.15.5.C.4 Phase D5 — Class-18 helper
+                                tt::OMS_PushExitForSlot(&oms, (int16_t)pidx,
+                                    qty, state.cores[c].strategy_id, price_fpn);
                             }
                             state.cores[c].strategy_halt_reason =
                                 SHALT_EXIT_PREDICTED;

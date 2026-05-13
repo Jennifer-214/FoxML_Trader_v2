@@ -66,6 +66,7 @@
 #include "ExecutionCore.hpp"
 #include "Notify.hpp"
 #include "OrderManager.hpp"
+#include "../MemHeaders/OmsPushExitHelper.hpp"  // v5.15.5.C.4 Phase D5 — OMS_PushExitForSlot helper (Class-18 close)
 #include "Portfolio.hpp"
 #include "ShardedTradeLog.hpp"
 #include "TradeEvent.hpp"
@@ -3211,11 +3212,11 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
         if (gain_pct >= min_gain) continue;  // still profitable enough; keep it
 
         // Force-close via OMS_PushSubmit (drainer is sole Submit caller).
+        // v5.15.5.C.4 Phase D5 — routed through OMS_PushExitForSlot helper.
         FPN<F> qty       = oms->portfolio.positions[slot].quantity;
         FPN<F> price_fpn = FPN_FromDouble<F>(current_price);
-        OMS_PushSubmit(oms, (int16_t)slot, ORDER_MARKET_SELL,
-                        qty, FPN_Zero<F>(), FPN_Zero<F>(),
-                        state->cores[core_id].strategy_id, price_fpn);
+        tt::OMS_PushExitForSlot(oms, (int16_t)slot,
+                                qty, state->cores[core_id].strategy_id, price_fpn);
 
         fprintf(stderr,
             "[time-exit] core %d slot %d: held %lu ticks, gain %.3f%%\n",
@@ -3293,9 +3294,8 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
         int logical_core = partial_on ? (slot >> 1) : slot;
         FPN<F> qty = oms->portfolio.positions[slot].quantity;
         uint8_t sid = state->cores[logical_core].strategy_id;
-        OMS_PushSubmit(oms, (int16_t)slot, ORDER_MARKET_SELL,
-                        qty, FPN_Zero<F>(), FPN_Zero<F>(),
-                        sid, price_fpn);
+        // v5.15.5.C.4 Phase D5 — routed through OMS_PushExitForSlot helper.
+        tt::OMS_PushExitForSlot(oms, (int16_t)slot, qty, sid, price_fpn);
         submitted++;
     }
     if (submitted > 0) {
