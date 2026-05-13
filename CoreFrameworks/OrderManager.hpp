@@ -317,16 +317,15 @@ struct OrderManagerState {
     //   (existing). Drainer uses these for core_realized accumulation,
     //   core_open_notional decrement, core_fees, core_wins/core_losses.
     struct FillRecord {
-        FPN<F>  entry_notional;       // entry: fill_price × fill_qty
-        FPN<F>  entry_fee;            // entry fee (maker or taker)
-        FPN<F>  exit_net_pnl;         // exit: gross − total_fees (signed)
-        FPN<F>  exit_entry_notional;  // exit: entry_price_snap × qty_snap
-        FPN<F>  exit_total_fees;      // exit: entry_fee + exit_fee booked at close
-        // v5.15.5.C.4 Phase J — was_win extracted to OMS-level
-        // `last_was_win_bitmap` (cross-slot bitmap; per Technique 3 of
-        // aggressive-memory-reduction-techniques.md + CLAUDE.md item 20).
-        // Pad keeps FillRecord at 128B for unchanged sizeof.
-        int8_t  _pad[8];
+        FPN<F>  entry_notional;       // entry: fill_price × fill_qty (Phase H derive target)
+        FPN<F>  entry_fee;            // entry fee (maker or taker; Phase H derive target)
+        // v5.15.5.C.4 Phase G — exit-side fields (exit_net_pnl, exit_entry_notional,
+        // exit_total_fees) REMOVED. Derived at DrainPostFill from
+        // Position.{entry_price, quantity, entry_fee, exit_fill_price, is_maker} +
+        // oms->fee_rate_maker/taker. Saves 72B per record × 16 = 1152B per OMS.
+        // FillRecord shrinks to 48B; pad to 64B (single cache line per record).
+        // v5.15.5.C.4 Phase J — was_win moved to OMS-level last_was_win_bitmap.
+        int8_t  _pad[16];
     };
     FillRecord last_fill[MAX_PORTFOLIO_POSITIONS];
 
@@ -1076,14 +1075,17 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         if (FPN_GreaterThan(oms->balance, oms->ks_peak_balance)) {
             oms->ks_peak_balance = oms->balance;
         }
-        // Mode 1 per-core bookkeeping: stash exit data for the drainer to
-        // apply to CoreContext (core_realized += net, core_open_notional
-        // -= entry_notional_snap, core_fees += total_fee, core_wins/losses).
-        // entry_notional uses the SAME entry_price × qty snapshot the
-        // mode-0 path subtracts — symmetric round-trip leaves no residue.
-        oms->last_fill[pslot].exit_net_pnl        = net;
-        oms->last_fill[pslot].exit_entry_notional = FPN_Mul(entry_price_snap, qty_snap);
-        oms->last_fill[pslot].exit_total_fees     = total_fee;
+        // v5.15.5.C.4 Phase G — capture exit-side scratch on Position struct
+        // (SKIP_PERSIST fields added in POS.2). DrainPostFill derives
+        // exit_net_pnl / exit_entry_notional / exit_total_fees from
+        // Position state + sibling capture; FillRecord no longer stores
+        // those 3 fields. Captures happen here BEFORE the phase-invariant
+        // boundary (Phase F drainer guarantees DrainPostFill runs with
+        // Position in CLOSE form; entry_price / quantity / entry_fee are
+        // preserved through Portfolio_CloseSlot — only the active_bitmap
+        // bit is cleared).
+        oms->portfolio.positions[pslot].exit_fill_price = fill_price;
+        oms->portfolio.positions[pslot].is_maker        = (uint8_t)(o->is_maker ? 1 : 0);
         // v5.15.5.C.4 Phase J — was_win moved to cross-slot bitmap.
         if (FPN_GreaterThan(net, FPN_Zero<F>())) {
             BITMAP_SET(oms->last_was_win_bitmap, BITMAP_BIT_U16(pslot));

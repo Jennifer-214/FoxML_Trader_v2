@@ -7734,18 +7734,28 @@ e3_skip_load:;
         };
 
         auto seed_paired_exit = [](R* r, double pnl_a, double pnl_b) {
-            // Mark slots 0 and 1 as having FillRecords ready to drain.
-            // last_closed_mask bits 0+1 = leg A + leg B for core 0.
-            r->oms.last_fill[0].exit_net_pnl       = FPN_FromDouble<64>(pnl_a);
-            r->oms.last_fill[0].exit_entry_notional= FPN_Zero<64>();
-            r->oms.last_fill[0].exit_total_fees    = FPN_Zero<64>();
+            // v5.15.5.C.4 Phase G — seed Position state for derive cascade.
+            // Derive formula: exit_net_pnl = (exit_fill_price - entry_price) × qty - total_fees
+            // With entry_price=0, entry_fee=0, fee_rate=0, qty=1:
+            //   exit_net_pnl = exit_fill_price; exit_entry_notional=0; exit_total_fees=0
+            r->oms.fee_rate_maker = FPN_Zero<64>();
+            r->oms.fee_rate_taker = FPN_Zero<64>();
+            auto& pos_a = r->oms.portfolio.positions[0];
+            pos_a.entry_price     = FPN_Zero<64>();
+            pos_a.quantity        = FPN_FromDouble<64>(1.0);
+            pos_a.entry_fee       = FPN_Zero<64>();
+            pos_a.exit_fill_price = FPN_FromDouble<64>(pnl_a);
+            pos_a.is_maker        = 0;
             if (pnl_a > 0.0) BITMAP_SET(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(0));
-            else             BITMAP_CLR(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(0));  // v5.15.5.C.4 Phase J
-            r->oms.last_fill[1].exit_net_pnl       = FPN_FromDouble<64>(pnl_b);
-            r->oms.last_fill[1].exit_entry_notional= FPN_Zero<64>();
-            r->oms.last_fill[1].exit_total_fees    = FPN_Zero<64>();
+            else             BITMAP_CLR(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(0));
+            auto& pos_b = r->oms.portfolio.positions[1];
+            pos_b.entry_price     = FPN_Zero<64>();
+            pos_b.quantity        = FPN_FromDouble<64>(1.0);
+            pos_b.entry_fee       = FPN_Zero<64>();
+            pos_b.exit_fill_price = FPN_FromDouble<64>(pnl_b);
+            pos_b.is_maker        = 0;
             if (pnl_b > 0.0) BITMAP_SET(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(1));
-            else             BITMAP_CLR(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(1));  // v5.15.5.C.4 Phase J
+            else             BITMAP_CLR(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(1));
             r->oms.last_closed_mask = (uint16_t)0x3;  // bits 0,1
         };
 
@@ -7826,11 +7836,17 @@ e3_skip_load:;
             tt::EventLoopState_SetCoreStrategy(&r->state, 0,
                 STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(1500.0));
 
-            // Single-leg: just slot 0, no slot 1.
-            r->oms.last_fill[0].exit_net_pnl       = FPN_FromDouble<64>(+7.0);
-            r->oms.last_fill[0].exit_entry_notional= FPN_Zero<64>();
-            r->oms.last_fill[0].exit_total_fees    = FPN_Zero<64>();
-            BITMAP_SET(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(0));  // v5.15.5.C.4 Phase J
+            // v5.15.5.C.4 Phase G — seed Position state for derive cascade.
+            // Single-leg: just slot 0. exit_net_pnl = exit_fill_price × 1 = +7.0.
+            r->oms.fee_rate_maker = FPN_Zero<64>();
+            r->oms.fee_rate_taker = FPN_Zero<64>();
+            auto& pos_single = r->oms.portfolio.positions[0];
+            pos_single.entry_price     = FPN_Zero<64>();
+            pos_single.quantity        = FPN_FromDouble<64>(1.0);
+            pos_single.entry_fee       = FPN_Zero<64>();
+            pos_single.exit_fill_price = FPN_FromDouble<64>(+7.0);
+            pos_single.is_maker        = 0;
+            BITMAP_SET(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(0));
             r->oms.last_closed_mask = (uint16_t)0x1;
             tt::EventLoop_DrainPostFill(&r->state, &r->oms, 0);
 
@@ -7896,16 +7912,24 @@ e3_skip_load:;
                                          &r->cfg, /*slow_path_interval=*/8,
                                          &r->rolling_long, &r->oms);
 
-        // Stage two paired exit fills directly into OMS state — leg A (slot 0)
-        // wins +3.0, leg B (slot 1) loses -8.0. Net = -5.0 → 1 loss when paired.
-        r->oms.last_fill[0].exit_net_pnl        = FPN_FromDouble<64>(+3.0);
-        r->oms.last_fill[0].exit_entry_notional = FPN_Zero<64>();
-        r->oms.last_fill[0].exit_total_fees     = FPN_Zero<64>();
-        BITMAP_SET(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(0));  // v5.15.5.C.4 Phase J
-        r->oms.last_fill[1].exit_net_pnl        = FPN_FromDouble<64>(-8.0);
-        r->oms.last_fill[1].exit_entry_notional = FPN_Zero<64>();
-        r->oms.last_fill[1].exit_total_fees     = FPN_Zero<64>();
-        BITMAP_CLR(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(1));  // v5.15.5.C.4 Phase J
+        // v5.15.5.C.4 Phase G — seed Position state for derive cascade.
+        // Leg A (slot 0) wins +3.0, leg B (slot 1) loses -8.0. Net = -5.0 → 1 loss when paired.
+        r->oms.fee_rate_maker = FPN_Zero<64>();
+        r->oms.fee_rate_taker = FPN_Zero<64>();
+        auto& pos_pair_a = r->oms.portfolio.positions[0];
+        pos_pair_a.entry_price     = FPN_Zero<64>();
+        pos_pair_a.quantity        = FPN_FromDouble<64>(1.0);
+        pos_pair_a.entry_fee       = FPN_Zero<64>();
+        pos_pair_a.exit_fill_price = FPN_FromDouble<64>(+3.0);
+        pos_pair_a.is_maker        = 0;
+        BITMAP_SET(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(0));
+        auto& pos_pair_b = r->oms.portfolio.positions[1];
+        pos_pair_b.entry_price     = FPN_Zero<64>();
+        pos_pair_b.quantity        = FPN_FromDouble<64>(1.0);
+        pos_pair_b.entry_fee       = FPN_Zero<64>();
+        pos_pair_b.exit_fill_price = FPN_FromDouble<64>(-8.0);
+        pos_pair_b.is_maker        = 0;
+        BITMAP_CLR(r->oms.last_was_win_bitmap, BITMAP_BIT_U16(1));
         r->oms.last_closed_mask = (uint16_t)0x3;
 
         // Drive a no-op tick through the backtest driver — DrainPostFill

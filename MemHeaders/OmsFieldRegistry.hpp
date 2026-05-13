@@ -319,12 +319,10 @@ struct OmsResetCtx {
     X(last_realized_return[_i],         double,    0.0,            0.0)                        \
     X(last_fill[_i].entry_notional,     FPN<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
     X(last_fill[_i].entry_fee,          FPN<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
-    X(last_fill[_i].exit_net_pnl,       FPN<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
-    X(last_fill[_i].exit_entry_notional,FPN<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
-    X(last_fill[_i].exit_total_fees,    FPN<F>,    FPN_Zero<F>(),  FPN_Zero<F>())              \
-    /* v5.15.5.C.4 Phase J — was_win moved to OMS-level last_was_win_bitmap                  \
-     * (cross-slot uint16_t bitmap; not per-slot scalar). No longer in per-slot              \
-     * AUTOPOPULATE walk; cleared in DrainPostFill via OMS-level field reset.                */ \
+    /* v5.15.5.C.4 Phase G — exit_net_pnl + exit_entry_notional + exit_total_fees             \
+     * REMOVED. Derived at DrainPostFill from Position state per                              \
+     * DESIGN_SPECS/phase-separated-drainer-for-safe-cross-temporal-derives.md.               \
+     * v5.15.5.C.4 Phase J — was_win moved to OMS-level last_was_win_bitmap.                  */ \
     X(last_exit_predicted_p[_i],        double,    0.0,            0.0)
 
 //======================================================================================================
@@ -369,13 +367,14 @@ static_assert(FOREACH_OMS_FIELD_PERSIST_COUNT == 10,
               "SHARDED_SNAPSHOT_VERSION bump + loader migration. See "
               "DESIGN_SPECS/wire-format-byte-preservation-discipline.md.");
 
-// v5.15.5.C.4 Phase J — was_win extracted from FillRecord to OMS-level
-// cross-slot bitmap (last_was_win_bitmap). Per-slot scalar count decreases
-// by 1 (8 → 7).
-static_assert(FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 7,
-              "FOREACH_OMS_PER_SLOT_FIELD must keep the 7 per-slot scalar entries "
-              "(last_realized_return + 5 FillRecord fields + last_exit_predicted_p; "
-              "was_win moved to OMS-level last_was_win_bitmap in v5.15.5.C.4 Phase J).");
+// v5.15.5.C.4 Phase G — exit-side FillRecord fields (exit_net_pnl,
+// exit_entry_notional, exit_total_fees) DERIVED from Position state at
+// DrainPostFill. Per-slot scalar count drops 7 → 4.
+static_assert(FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 4,
+              "FOREACH_OMS_PER_SLOT_FIELD must keep the 4 per-slot scalar entries "
+              "(last_realized_return + 2 FillRecord entry-side fields + last_exit_predicted_p; "
+              "exit-side fields moved to Position-derived computations in v5.15.5.C.4 Phase G; "
+              "was_win moved to OMS-level last_was_win_bitmap in Phase J).");
 
 }  // namespace tt
 

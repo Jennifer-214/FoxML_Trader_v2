@@ -1381,10 +1381,26 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         bool is_leg_a = !partial_on || ((slot & 1) == 0);
         const auto& rec = oms->last_fill[slot];
 
+        // v5.15.5.C.4 Phase G — derive exit-side fields from Position state.
+        // Phase F's invariant guarantees Position is in CLOSE form here
+        // (DrainPostFill runs between Phase A SELL processing and Phase B BUY
+        // processing within each drainer cycle; Portfolio_CloseSlot only clears
+        // the active_bitmap bit, NOT the values; Portfolio_OpenSlot's overwrite
+        // is gated to Phase B). See
+        // DESIGN_SPECS/phase-separated-drainer-for-safe-cross-temporal-derives.md.
+        const auto& pos = oms->portfolio.positions[slot];
+        const FPN<F> exit_entry_notional = FPN_Mul(pos.entry_price, pos.quantity);
+        const FPN<F> exit_notional       = FPN_Mul(pos.exit_fill_price, pos.quantity);
+        const FPN<F> exit_fee_rate       = pos.is_maker ? oms->fee_rate_maker : oms->fee_rate_taker;
+        const FPN<F> exit_fee            = FPN_Mul(exit_notional, exit_fee_rate);
+        const FPN<F> exit_total_fees     = FPN_Add(pos.entry_fee, exit_fee);
+        const FPN<F> gross               = FPN_Sub(exit_notional, exit_entry_notional);
+        const FPN<F> exit_net_pnl        = FPN_Sub(gross, exit_total_fees);
+
         // Per-leg accounting: every exit fill contributes.
-        ctx.core_realized      = FPN_Add(ctx.core_realized, rec.exit_net_pnl);
-        ctx.core_open_notional = FPN_SubSat(ctx.core_open_notional, rec.exit_entry_notional);
-        ctx.core_fees          = FPN_AddSat(ctx.core_fees, rec.exit_total_fees);
+        ctx.core_realized      = FPN_Add(ctx.core_realized, exit_net_pnl);
+        ctx.core_open_notional = FPN_SubSat(ctx.core_open_notional, exit_entry_notional);
+        ctx.core_fees          = FPN_AddSat(ctx.core_fees, exit_total_fees);
         ctx.exits_processed++;
         state->total_exits++;
         state->total_events_processed++;
@@ -1407,9 +1423,9 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 slot, (unsigned)ctx.strategy_id,
                 (unsigned)ctx.resolved_strategy_id,
                 (int)slot_was_win, realized,
-                FPN_ToDouble(rec.exit_net_pnl),
-                FPN_ToDouble(rec.exit_entry_notional),
-                FPN_ToDouble(rec.exit_total_fees),
+                FPN_ToDouble(exit_net_pnl),         // v5.15.5.C.4 Phase G — derived
+                FPN_ToDouble(exit_entry_notional),  // v5.15.5.C.4 Phase G — derived
+                FPN_ToDouble(exit_total_fees),       // v5.15.5.C.4 Phase G — derived
                 is_leg_a ? 1 : 0);
         }
 
@@ -1417,7 +1433,8 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         // v5.14.9.G — partner_pending_active is now BITMAP_IS_SET(state->partner_pending_bitmap, bit)
         if (partial_on) {
             if (BITMAP_IS_SET(state->partner_pending_bitmap, BITMAP_BIT_U16(core_id))) {
-                FPN<F> total_net = FPN_Add(ctx.partner_pending_pnl, rec.exit_net_pnl);
+                // v5.15.5.C.4 Phase G — exit_net_pnl is derived (see top of slot iter).
+                FPN<F> total_net = FPN_Add(ctx.partner_pending_pnl, exit_net_pnl);
                 if (FPN_GreaterThan(total_net, FPN_Zero<F>())) {
                     ctx.core_wins++;
                     ctx.core_gross_wins = FPN_Add(ctx.core_gross_wins, total_net);
@@ -1429,7 +1446,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 ctx.partner_pending_pnl = FPN_Zero<F>();
                 BITMAP_CLR(state->partner_pending_bitmap, BITMAP_BIT_U16(core_id));
             } else {
-                ctx.partner_pending_pnl = rec.exit_net_pnl;
+                ctx.partner_pending_pnl = exit_net_pnl;  // v5.15.5.C.4 Phase G — derived
                 BITMAP_SET(state->partner_pending_bitmap, BITMAP_BIT_U16(core_id));
             }
         }
@@ -1441,10 +1458,10 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 ctx.core_wins   += (slot_was_win ? 1u : 0u);
                 ctx.core_losses += (slot_was_win ? 0u : 1u);
                 if (slot_was_win) {
-                    ctx.core_gross_wins = FPN_Add(ctx.core_gross_wins, rec.exit_net_pnl);
+                    ctx.core_gross_wins = FPN_Add(ctx.core_gross_wins, exit_net_pnl);  // v5.15.5.C.4 Phase G — derived
                 } else {
                     ctx.core_gross_losses = FPN_Add(ctx.core_gross_losses,
-                                                    FPN_Sub(FPN_Zero<F>(), rec.exit_net_pnl));
+                                                    FPN_Sub(FPN_Zero<F>(), exit_net_pnl));
                 }
             }
             double realized = oms->last_realized_return[slot];
@@ -1530,7 +1547,7 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                 if (BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) {
                     double bal_d = FPN_ToDouble(oms->balance);
                     if (bal_d > 0.0) {
-                        double pnl_d = FPN_ToDouble(rec.exit_net_pnl);
+                        double pnl_d = FPN_ToDouble(exit_net_pnl);  // v5.15.5.C.4 Phase G — derived
                         double pnl_bps = (pnl_d / bal_d) * 10000.0;
                         EnsembleModelZoo_TradeCloseReward(ezoo, pnl_bps,
                                                             ensemble_trade_reward_mult);
@@ -1587,9 +1604,9 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                     double tp_pct = (orig_tp_d - entry_d) / entry_d;
                     double hypothetical_pnl_bps =
                         (tp_pct - 2.0 * fee_rate_taker_for_cf) * 10000.0;
-                    double notional_d = FPN_ToDouble(rec.exit_entry_notional);
+                    double notional_d = FPN_ToDouble(exit_entry_notional);  // v5.15.5.C.4 Phase G — derived
                     double actual_pnl_bps = (notional_d > 0.0)
-                        ? FPN_ToDouble(rec.exit_net_pnl) / notional_d * 10000.0
+                        ? FPN_ToDouble(exit_net_pnl) / notional_d * 10000.0  // v5.15.5.C.4 Phase G — derived
                         : 0.0;
                     double reward_bps = actual_pnl_bps - hypothetical_pnl_bps;
                     Bandit_Update(&ezoo->exit_bandits[regime],
