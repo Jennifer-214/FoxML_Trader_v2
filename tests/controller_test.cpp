@@ -38,6 +38,7 @@
 #include "../Backtest/PhaseTimers.hpp"                    // v5.10.0 Item A — phase timer tests
 #include "../MemHeaders/BuddyAllocator.hpp"                // v5.11.13 — typo fix + O(1) order lookup tests
 #include "../MemHeaders/InitArena.hpp"                     // v5.11.22 — MAP_HUGETLB opt-in tests
+#include "../MemHeaders/CoreCtxSummaryFieldRegistry.hpp"  // v5.15.5.C.3 Phase 4 — FOREACH_CORE_CTX_SUMMARY_FIELD + JSON emit
 #include <sys/mman.h>                                       // v5.11.22 — MAP_HUGETLB constant
 #include "../DataStream/DepthReplayState.hpp"            // Track E.3 tests
 #include "../ML_Headers/FlowFeatures.hpp"                // v4.5 Wave 1 tests
@@ -24669,6 +24670,154 @@ e3_skip_load:;
             }
             CoreModelZoo_Free(pre_swap);
             free(pre_swap);
+        }
+    }
+
+    //==================================================================================================
+    // v5.15.5.C.3 Phase 4 — CoreCtxSummaryFieldRegistry + JSON emit
+    //==================================================================================================
+    {
+        using namespace tt;
+        // Build 4 synthetic CoreContexts: 2 cores running strategy 1, 2 running strategy 3.
+        // Each core has distinct realized P&L / fees / wins / losses so per_strategy
+        // aggregation produces verifiable sums.
+        CoreContext<64> ctx[4] = {};
+        ctx[0].strategy_id = 1;
+        ctx[0].resolved_strategy_id = 1;
+        ctx[0].entries_processed = 10;
+        ctx[0].exits_processed   = 9;
+        ctx[0].core_realized = FPN_FromDouble<64>(100.0);
+        ctx[0].core_fees     = FPN_FromDouble<64>(2.0);
+        ctx[0].core_wins     = 6;
+        ctx[0].core_losses   = 3;
+        ctx[0].core_open_notional = FPN_FromDouble<64>(500.0);
+
+        ctx[1].strategy_id = 1;
+        ctx[1].resolved_strategy_id = 1;
+        ctx[1].entries_processed = 20;
+        ctx[1].exits_processed   = 18;
+        ctx[1].core_realized = FPN_FromDouble<64>(50.0);
+        ctx[1].core_fees     = FPN_FromDouble<64>(3.0);
+        ctx[1].core_wins     = 10;
+        ctx[1].core_losses   = 8;
+        ctx[1].core_open_notional = FPN_FromDouble<64>(750.0);
+
+        ctx[2].strategy_id = 3;
+        ctx[2].resolved_strategy_id = 3;
+        ctx[2].entries_processed = 5;
+        ctx[2].exits_processed   = 5;
+        ctx[2].core_realized = FPN_FromDouble<64>(-25.0);
+        ctx[2].core_fees     = FPN_FromDouble<64>(1.0);
+        ctx[2].core_wins     = 2;
+        ctx[2].core_losses   = 3;
+        ctx[2].core_open_notional = FPN_FromDouble<64>(0.0);
+
+        ctx[3].strategy_id = 3;
+        ctx[3].resolved_strategy_id = 3;
+        ctx[3].entries_processed = 7;
+        ctx[3].exits_processed   = 7;
+        ctx[3].core_realized = FPN_FromDouble<64>(35.0);
+        ctx[3].core_fees     = FPN_FromDouble<64>(1.5);
+        ctx[3].core_wins     = 4;
+        ctx[3].core_losses   = 3;
+        ctx[3].core_open_notional = FPN_FromDouble<64>(200.0);
+
+        // Test 1: registry count sentinel — guard against accidental field-set shrinkage.
+        check("v5.15.5.C.3 Phase 4: FOREACH_CORE_CTX_SUMMARY_FIELD_COUNT >= 18",
+              FOREACH_CORE_CTX_SUMMARY_FIELD_COUNT >= 18);
+
+        // Test 2: per-core JSON emit produces well-formed object with expected keys.
+        // fmemopen is POSIX glibc; available on Linux build target.
+        {
+            char buf[4096] = {};
+            FILE* f = fmemopen(buf, sizeof(buf) - 1, "w");
+            check("v5.15.5.C.3 Phase 4: fmemopen succeeds", f != nullptr);
+            if (f) {
+                Summary_EmitPerCoreEntry(f, ctx[0], /*core_id=*/0);
+                std::fflush(f);
+                std::fclose(f);
+                // Spot-check key fields appear in the emitted JSON.
+                bool has_core_id   = (std::strstr(buf, "\"core_id\":0") != nullptr);
+                bool has_strat     = (std::strstr(buf, "\"strategy_id\":1") != nullptr);
+                bool has_entries   = (std::strstr(buf, "\"entries\":10") != nullptr);
+                bool has_exits     = (std::strstr(buf, "\"exits\":9") != nullptr);
+                bool has_realized  = (std::strstr(buf, "\"realized\":100.000000") != nullptr);
+                bool has_open_brace  = (buf[0] == '{');
+                check("v5.15.5.C.3 Phase 4: per-core JSON opens with {",          has_open_brace);
+                check("v5.15.5.C.3 Phase 4: per-core JSON has core_id field",     has_core_id);
+                check("v5.15.5.C.3 Phase 4: per-core JSON has strategy_id field", has_strat);
+                check("v5.15.5.C.3 Phase 4: per-core JSON has entries counter",   has_entries);
+                check("v5.15.5.C.3 Phase 4: per-core JSON has exits counter",     has_exits);
+                check("v5.15.5.C.3 Phase 4: per-core JSON has realized FPN value", has_realized);
+            }
+        }
+
+        // Test 3: per_strategy aggregation — sum SUMMABLE fields across cores sharing strategy_id.
+        {
+            char buf[8192] = {};
+            FILE* f = fmemopen(buf, sizeof(buf) - 1, "w");
+            check("v5.15.5.C.3 Phase 4: fmemopen succeeds (per_strategy)", f != nullptr);
+            if (f) {
+                Summary_EmitPerStrategy<64>(f, ctx, /*num_cores=*/4);
+                std::fflush(f);
+                std::fclose(f);
+
+                // Strategy 1: entries = 10 + 20 = 30; realized = 100 + 50 = 150; wins = 6 + 10 = 16
+                bool s1_present     = (std::strstr(buf, "\"strategy_id\":1") != nullptr);
+                bool s1_entries     = (std::strstr(buf, "\"entries\":30") != nullptr);
+                bool s1_realized    = (std::strstr(buf, "\"realized\":150.000000") != nullptr);
+                bool s1_wins        = (std::strstr(buf, "\"wins\":16") != nullptr);
+                check("v5.15.5.C.3 Phase 4: per_strategy strategy_id=1 present",      s1_present);
+                check("v5.15.5.C.3 Phase 4: per_strategy strategy=1 entries summed", s1_entries);
+                check("v5.15.5.C.3 Phase 4: per_strategy strategy=1 realized summed", s1_realized);
+                check("v5.15.5.C.3 Phase 4: per_strategy strategy=1 wins summed",     s1_wins);
+
+                // Strategy 3: entries = 5 + 7 = 12; realized = -25 + 35 = 10; wins = 2 + 4 = 6
+                bool s3_present     = (std::strstr(buf, "\"strategy_id\":3") != nullptr);
+                bool s3_entries     = (std::strstr(buf, "\"entries\":12") != nullptr);
+                bool s3_realized    = (std::strstr(buf, "\"realized\":10.000000") != nullptr);
+                bool s3_wins        = (std::strstr(buf, "\"wins\":6") != nullptr);
+                check("v5.15.5.C.3 Phase 4: per_strategy strategy_id=3 present",      s3_present);
+                check("v5.15.5.C.3 Phase 4: per_strategy strategy=3 entries summed", s3_entries);
+                check("v5.15.5.C.3 Phase 4: per_strategy strategy=3 realized summed", s3_realized);
+                check("v5.15.5.C.3 Phase 4: per_strategy strategy=3 wins summed",     s3_wins);
+
+                // JSON-array brackets present.
+                bool has_arr_open  = (buf[0] == '[');
+                check("v5.15.5.C.3 Phase 4: per_strategy emits JSON array", has_arr_open);
+            }
+        }
+
+        // Test 4: empty cores array → empty JSON array.
+        {
+            char buf[256] = {};
+            FILE* f = fmemopen(buf, sizeof(buf) - 1, "w");
+            if (f) {
+                Summary_EmitPerStrategy<64>(f, ctx, /*num_cores=*/0);
+                std::fflush(f);
+                std::fclose(f);
+                bool is_empty_arr = (std::strcmp(buf, "[]") == 0);
+                check("v5.15.5.C.3 Phase 4: per_strategy empty array for 0 cores", is_empty_arr);
+            }
+        }
+
+        // Test 5: STRATEGY_NONE (0xFF) cores skipped from per_strategy aggregation.
+        {
+            CoreContext<64> ctx_none[2] = {};
+            ctx_none[0].strategy_id = 0xFF;  // NONE
+            ctx_none[0].entries_processed = 99;
+            ctx_none[1].strategy_id = 0xFF;
+            ctx_none[1].entries_processed = 88;
+            char buf[256] = {};
+            FILE* f = fmemopen(buf, sizeof(buf) - 1, "w");
+            if (f) {
+                Summary_EmitPerStrategy<64>(f, ctx_none, /*num_cores=*/2);
+                std::fflush(f);
+                std::fclose(f);
+                bool is_empty_arr = (std::strcmp(buf, "[]") == 0);
+                check("v5.15.5.C.3 Phase 4: per_strategy skips STRATEGY_NONE (0xFF) cores",
+                      is_empty_arr);
+            }
         }
     }
 
