@@ -21,6 +21,7 @@
 #include "../ML_Headers/BarrierBlendModeRegistry.hpp" // v5.15.5.A.5 — BarrierBlendMode_FromString + MODE_BARRIER_BLEND_COUNT for cfg.barrier_blend_mode parser
 #include "RiskCfgFlagRegistry.hpp"             // v5.14.9.F.3 — FOREACH_RISK_CFG_FLAG + MASK_RISK_CFG_*
 #include "OpsCfgFlagRegistry.hpp"              // v5.14.9.F.3 — FOREACH_OPS_CFG_FLAG + MASK_OPS_CFG_*
+#include "SessionPhaseRegistry.hpp"            // v5.15.5.B.5 — FOREACH_SESSION_PHASE + SESSION_BY_HOUR[24] (closes TECH_DEBT-040)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -489,14 +490,14 @@ template <unsigned F> struct ControllerConfig {
                                // allow 0.1% loss)
   // slippage simulation
   FPN<F> slippage_pct; // simulated slippage on entry/exit (e.g. 0.0005 = 0.05%)
-  // session awareness
-  // session_filter_enabled migrated to ops_cfg_flags (v5.14.9.F.3)
-                              // multipliers
-  FPN<F> session_asian_mult; // gate multiplier during Asian session (00-07 UTC)
-  FPN<F> session_european_mult; // gate multiplier during European session
-                                // (07-13 UTC)
-  FPN<F> session_us_mult;       // gate multiplier during US session (13-20 UTC)
-  FPN<F> session_overnight_mult; // gate multiplier during overnight (20-00 UTC)
+  // session awareness — session_filter_enabled migrated to ops_cfg_flags
+  // (v5.14.9.F.3). The 4 per-session gate multipliers are registry-driven
+  // as of v5.15.5.B.5; see FOREACH_SESSION_PHASE in SessionPhaseRegistry.hpp.
+  // Adding a 5th session = ONE row in the registry; field decl + parser +
+  // default + consumer lookup auto-flow via X-macro expansion.
+#define X(NAME_U, name_l, START, END, MULT, DOC) FPN<F> session_##name_l##_mult;
+  FOREACH_SESSION_PHASE(X)
+#undef X
   // order book (L2 depth) — depth_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
   FPN<F> min_book_imbalance; // require bid bias to buy (0 = disabled, 0.10 =
                              // 10% bid excess)
@@ -1428,12 +1429,12 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
       FPN_FromDouble<F>(0.0005);    // +0.05% above entry (lock in tiny profit)
   cfg.slippage_pct = FPN_Zero<F>(); // 0 = disabled (backward compat)
   // session_filter_enabled migrated to ops_cfg_flags (default 0)
-  cfg.session_asian_mult =
-      FPN_FromDouble<F>(1.5); // wider gates in low-vol Asian session
-  cfg.session_european_mult = FPN_FromDouble<F>(1.0); // normal during European
-  cfg.session_us_mult = FPN_FromDouble<F>(0.8); // tighter gates, best liquidity
-  cfg.session_overnight_mult =
-      FPN_FromDouble<F>(1.3);             // wider gates, declining volume
+  // v5.15.5.B.5 — session multipliers default-init via FOREACH_SESSION_PHASE.
+  // Per-session default is the MULT column of the registry tuple.
+#define X(NAME_U, name_l, START, END, MULT, DOC) \
+  cfg.session_##name_l##_mult = FPN_FromDouble<F>(MULT);
+  FOREACH_SESSION_PHASE(X)
+#undef X
   // depth_enabled migrated to gate_cfg_flags (default 0; set above via AUTOPOPULATE)
   cfg.min_book_imbalance = FPN_Zero<F>(); // 0 = disabled
   // EMA gate — gate_ema_enabled migrated to gate_cfg_flags (default 0)
@@ -1930,10 +1931,10 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(emacross_trail_mult)
     CFG_PARSE_FPN(spike_threshold)
     CFG_PARSE_FPN(spike_spacing_reduction)
-    CFG_PARSE_FPN(session_asian_mult)
-    CFG_PARSE_FPN(session_european_mult)
-    CFG_PARSE_FPN(session_us_mult)
-    CFG_PARSE_FPN(session_overnight_mult)
+    // v5.15.5.B.5 — session_*_mult parser entries auto-flowed via FOREACH_SESSION_PHASE.
+#define X(NAME_U, name_l, START, END, MULT, DOC) CFG_PARSE_FPN(session_##name_l##_mult)
+    FOREACH_SESSION_PHASE(X)
+#undef X
 
     //--- FPN percentage (config says 15.0, stored as 0.15) ---
     CFG_PARSE_PCT(take_profit_pct)

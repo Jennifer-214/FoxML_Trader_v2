@@ -1500,11 +1500,20 @@ inline void PortfolioController_Tick(PortfolioController<F> *ctrl,
   if (BITMAP_IS_SET(ctrl->config.ops_cfg_flags, MASK_OPS_CFG_SESSION_FILTER_ENABLED)) {
     time_t st = (time_t)ctrl->last_slow_time;
     struct tm *utc = gmtime(&st);
+    // v5.15.5.B.5 — branchless SESSION_BY_HOUR[24] table lookup
+    // (FOREACH_SESSION_PHASE registry). Replaces legacy 4-way if/else
+    // for the deprecated single_core path (kept for backtest parity).
+    const FPN<F> session_mult_lookup[tt::SESSION_PHASE_COUNT] = {
+#define X(NAME_U, name_l, START, END, MULT, DOC) ctrl->config.session_##name_l##_mult,
+        FOREACH_SESSION_PHASE(X)
+#undef X
+    };
     int h = utc->tm_hour;
-    if (h < 7)       { ctrl->current_session = 0; ctrl->session_mult = ctrl->config.session_asian_mult; }
-    else if (h < 13)  { ctrl->current_session = 1; ctrl->session_mult = ctrl->config.session_european_mult; }
-    else if (h < 20)  { ctrl->current_session = 2; ctrl->session_mult = ctrl->config.session_us_mult; }
-    else              { ctrl->current_session = 3; ctrl->session_mult = ctrl->config.session_overnight_mult; }
+    if (h < 0) h = 0;
+    if (h > 23) h = 23;
+    uint8_t phase = tt::SESSION_BY_HOUR[h];
+    ctrl->current_session = (int)phase;
+    ctrl->session_mult    = session_mult_lookup[phase];
   }
 
   // drain exit buffer — books P&L, updates balance, logs trades

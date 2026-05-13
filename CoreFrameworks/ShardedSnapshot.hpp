@@ -172,20 +172,20 @@ static inline void TUI_CopySnapshotSharded(
         time_t now = time(nullptr);
         struct tm utc;
         gmtime_r(&now, &utc);
+        // v5.15.5.B.5 — branchless SESSION_BY_HOUR[24] table lookup
+        // (FOREACH_SESSION_PHASE registry). Replaces 4-way if/else; one
+        // memory load + one indirection vs ~4 branches pre-.B.5.
+        const double session_mult_lookup[tt::SESSION_PHASE_COUNT] = {
+#define X(NAME_U, name_l, START, END, MULT, DOC) FPN_ToDouble(cfg->session_##name_l##_mult),
+            FOREACH_SESSION_PHASE(X)
+#undef X
+        };
         int h = utc.tm_hour;
-        if (h < 7) {
-            snap->current_session = 0;  // ASIA
-            snap->session_mult    = FPN_ToDouble(cfg->session_asian_mult);
-        } else if (h < 13) {
-            snap->current_session = 1;  // EU
-            snap->session_mult    = FPN_ToDouble(cfg->session_european_mult);
-        } else if (h < 20) {
-            snap->current_session = 2;  // US
-            snap->session_mult    = FPN_ToDouble(cfg->session_us_mult);
-        } else {
-            snap->current_session = 3;  // OVERNIGHT
-            snap->session_mult    = FPN_ToDouble(cfg->session_overnight_mult);
-        }
+        if (h < 0) h = 0;
+        if (h > 23) h = 23;
+        uint8_t phase = tt::SESSION_BY_HOUR[h];
+        snap->current_session = (int)phase;
+        snap->session_mult    = session_mult_lookup[phase];
     }
 
     // per-position details

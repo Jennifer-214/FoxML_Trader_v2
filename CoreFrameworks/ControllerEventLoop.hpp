@@ -61,6 +61,7 @@
 #include "CoreLatencyStats.hpp"  // v4.7.42 — slow_path_latency on CoreContext
 #include "../MemHeaders/DisplayMetaRegistry.hpp"  // v5.15.5.B.2 — FOREACH_GATE_DIAG_PAIR + FOREACH_DISPLAY_META_FIELD
 #include "../MemHeaders/CoreStateFlagRegistry.hpp"  // v5.15.5.B.3 — FOREACH_CORE_STATE_FLAG bitmap for 5 booleans
+#include "SpSectionRegistry.hpp"  // v5.15.5.B.5 — FOREACH_SP_SECTION enum + SP_SECTION_NAME/DOC helpers
 #include "ExecutionCore.hpp"
 #include "Notify.hpp"
 #include "OrderManager.hpp"
@@ -514,17 +515,11 @@ struct alignas(64) CoreContext {
     //
     // Sum-of-sections ≈ slow_path_latency total (within rdtsc bracket noise).
     // ~10ns _Sample × 5 = ~50ns/cycle overhead, < 0.1% of typical cycle.
-    static constexpr int SP_SECTION_ROLLING     = 0;
-    static constexpr int SP_SECTION_REBUILD     = 1;
-    static constexpr int SP_SECTION_PUSH        = 2;
-    static constexpr int SP_SECTION_TIME_EXIT   = 3;
-    static constexpr int SP_SECTION_TRAIL_SL    = 4;
-    static constexpr int SP_SECTION_COUNT       = 5;
-    // Back-compat aliases — earlier names kept so external callers don't
-    // break. New code should use the names above. (.B.5 — FOREACH_SP_SECTION
-    // close removes these aliases.)
-    static constexpr int SP_SECTION_OTHER       = SP_SECTION_ROLLING;
-    static constexpr int SP_SECTION_PUSH_PARAMS = SP_SECTION_PUSH;
+    // v5.15.5.B.5 — SP_SECTION_* constants migrated to FOREACH_SP_SECTION
+    // registry (CoreFrameworks/SpSectionRegistry.hpp). Use tt::SP_SECTION_<NAME>
+    // directly at consumer sites. Back-compat aliases SP_SECTION_OTHER and
+    // SP_SECTION_PUSH_PARAMS removed — callers now use the canonical names.
+    // SP_SECTION_COUNT is now the registry-derived sentinel.
 
     // v5.0.3 (Engine Topology) live thread observability — wrapped in alignas(64)
     // SlowPathTelemetry struct (defined above) per cross-thread-snapshot-publish-
@@ -685,7 +680,7 @@ struct CoreContextDisplayMeta {
     // v5.1.1 + v5.1.3 — per-section breakdown. Sections defined by
     // CoreContext<F>::SP_SECTION_* constants. (.B.5 — FOREACH_SP_SECTION
     // close removes the back-compat alias indirection.)
-    CoreLatencyStats slow_path_breakdown[CoreContext<F>::SP_SECTION_COUNT];
+    CoreLatencyStats slow_path_breakdown[tt::SP_SECTION_COUNT];
 };
 
 // Init helper — zero-init all registry fields + Init the latency stats.
@@ -708,7 +703,7 @@ inline void CoreContextDisplayMeta_Init(CoreContextDisplayMeta<F>* m) {
 #undef X
     // Latency profiling — init zeros + disabled until engine explicitly enables.
     CoreLatencyStats_Init(&m->slow_path_latency);
-    for (int s = 0; s < CoreContext<F>::SP_SECTION_COUNT; ++s) {
+    for (int s = 0; s < tt::SP_SECTION_COUNT; ++s) {
         CoreLatencyStats_Init(&m->slow_path_breakdown[s]);
     }
 }
@@ -2307,11 +2302,20 @@ inline void EventLoop_RebuildOneCore(
         struct tm tm_utc;
         gmtime_r(&now, &tm_utc);
         FPN<F> session_mult = FPN_FromDouble<F>(1.0);
+        // v5.15.5.B.5 — branchless hour-of-day dispatch via SESSION_BY_HOUR[24]
+        // lookup table (FOREACH_SESSION_PHASE registry). Replaces 4-way data-
+        // dependent if/else cascade (~25% mispredict at session transitions
+        // pre-.B.5) with single load + index. Per CLAUDE.md item 28
+        // (latency-vs-cache framework) + closes TECH_DEBT-040.
+        const FPN<F> session_mult_lookup[tt::SESSION_PHASE_COUNT] = {
+#define X(NAME_U, name_l, START, END, MULT, DOC) resolved_cfg.session_##name_l##_mult,
+            FOREACH_SESSION_PHASE(X)
+#undef X
+        };
         int hour = tm_utc.tm_hour;
-        if (hour >= 0 && hour < 7)         session_mult = resolved_cfg.session_asian_mult;
-        else if (hour >= 7 && hour < 13)   session_mult = resolved_cfg.session_european_mult;
-        else if (hour >= 13 && hour < 20)  session_mult = resolved_cfg.session_us_mult;
-        else                                session_mult = resolved_cfg.session_overnight_mult;
+        if (hour < 0) hour = 0;
+        if (hour > 23) hour = 23;
+        session_mult = session_mult_lookup[tt::SESSION_BY_HOUR[hour]];
         if (!FPN_IsZero(session_mult)) {
             resolved_cfg.volume_multiplier =
                 FPN_Mul(resolved_cfg.volume_multiplier, session_mult);

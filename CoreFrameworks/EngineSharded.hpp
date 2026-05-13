@@ -2778,7 +2778,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 // PushParameters + TimeExitOneCore + TrailingSL + permission).
                 CoreLatencyStats_Enable(&state.display_meta[c].slow_path_latency);
                 // v5.1.1: enable per-section breakdown stats.
-                for (int s = 0; s < CoreContext<F>::SP_SECTION_COUNT; ++s) {
+                for (int s = 0; s < tt::SP_SECTION_COUNT; ++s) {
                     CoreLatencyStats_Enable(&state.display_meta[c].slow_path_breakdown[s]);
                 }
                 uint64_t last_seen_tick = 0;
@@ -3093,7 +3093,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // + per-cadence pushes setup).
                     uint64_t _sec_t_rebuild_start = __rdtsc();
                     CoreLatencyStats_Sample(
-                        &state.display_meta[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_OTHER],
+                        &state.display_meta[c].slow_path_breakdown[tt::SP_SECTION_ROLLING],
                         _sec_t_rebuild_start - _sec_t_other_start, _sec_t_rebuild_start);
 
                     // === Strategy dispatch + gate parameter rebuild ===
@@ -3118,7 +3118,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // v5.1.1: bracket REBUILD section.
                     uint64_t _sec_t_push_start = __rdtsc();
                     CoreLatencyStats_Sample(
-                        &state.display_meta[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_REBUILD],
+                        &state.display_meta[c].slow_path_breakdown[tt::SP_SECTION_REBUILD],
                         _sec_t_push_start - _sec_t_rebuild_start, _sec_t_push_start);
 
                     // === Push pending_params via seqlock (was inside
@@ -3140,7 +3140,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // v5.1.1: bracket PUSH_PARAMS section.
                     uint64_t _sec_t_te_start = __rdtsc();
                     CoreLatencyStats_Sample(
-                        &state.display_meta[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_PUSH_PARAMS],
+                        &state.display_meta[c].slow_path_breakdown[tt::SP_SECTION_PUSH],
                         _sec_t_te_start - _sec_t_push_start, _sec_t_te_start);
 
                     // === v5.13.0.B — sell-side ML exit-prediction submit ===
@@ -3234,7 +3234,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // v5.1.1: bracket TIME_EXIT section.
                     uint64_t _sec_t_tsl_start = __rdtsc();
                     CoreLatencyStats_Sample(
-                        &state.display_meta[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_TIME_EXIT],
+                        &state.display_meta[c].slow_path_breakdown[tt::SP_SECTION_TIME_EXIT],
                         _sec_t_tsl_start - _sec_t_te_start, _sec_t_tsl_start);
 
                     if (!FPN_IsZero(cfg.sl_trail_mult) &&
@@ -3250,7 +3250,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // negligible (<100ns) so we don't add another bracket.
                     uint64_t _sec_t_tail = __rdtsc();
                     CoreLatencyStats_Sample(
-                        &state.display_meta[c].slow_path_breakdown[CoreContext<F>::SP_SECTION_TRAIL_SL],
+                        &state.display_meta[c].slow_path_breakdown[tt::SP_SECTION_TRAIL_SL],
                         _sec_t_tail - _sec_t_tsl_start, _sec_t_tail);
 
                     // === Warmup permission grant (per-core check) ===
