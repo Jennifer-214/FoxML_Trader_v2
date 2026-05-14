@@ -1077,6 +1077,25 @@ static_assert(sizeof(EnsembleModelZoo<64>) % 64 == 0,
 static_assert(alignof(EnsembleModelZoo<64>) == 64,
               "v5.15.4: EnsembleModelZoo<64> must be cache-line aligned");
 
+// v5.15.5.F.3 — registry-bitmap SET discipline accessor for per_arm_barriers.
+// Per DESIGN_SPECS/registry-bitmap-set-discipline.md Fix 3 (accessor wrapper).
+// Couples the data write (per_arm_barriers[idx].tp/sl) with the mark bit
+// (arms_with_barriers_mask bit-idx). Direct field-write sites become
+// detectable via /dod-audit Signature 1 ("data write without bit set").
+//
+// Pre-.F.3 BUG: LoadFromCfg copied per_arm_barriers but forgot to SET the
+// mask → downstream reader at StrategyParameters.hpp gated barrier blending
+// on the all-zero mask → ALL arms appeared barrierless → ensemble barrier
+// blending SILENTLY DISABLED. Operator saw no errors but features didn't
+// work as configured.
+template <unsigned F>
+inline void ezoo_set_per_arm_barrier(EnsembleModelZoo<F>* ezoo, int arm_idx,
+                                       float tp, float sl) {
+    ezoo->per_arm_barriers[arm_idx].tp = tp;
+    ezoo->per_arm_barriers[arm_idx].sl = sl;
+    BITMAP_SET(ezoo->arms_with_barriers_mask, BITMAP_BIT_U8(arm_idx));
+}
+
 template <unsigned F>
 inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     for (int i = 0; i < ENSEMBLE_HORIZON_MAX; ++i) {
@@ -1672,14 +1691,24 @@ inline int EnsembleModelZoo_LoadFromCfg(EnsembleModelZoo<F> *ezoo,
             // Legacy stamps without label_params stay at zero (already
             // zero-init'd in EnsembleModelZoo_Init); the .A.2.b mask
             // gates them out at dispatch time.
+            //
+            // v5.15.5.F.3 — apply registry-bitmap-SET-discipline.md Fix 3
+            // (accessor wrapper). Pre-.F.3 BUG: code wrote per_arm_barriers
+            // but NEVER called BITMAP_SET(arms_with_barriers_mask, ...) →
+            // downstream reader at StrategyParameters.hpp gated barrier
+            // blending on the mask → mask all-zero → ALL arms appeared
+            // barrierless → ensemble barrier blending SILENTLY DISABLED
+            // even with valid stamp-bound barriers. Shape A of
+            // DESIGN_SPECS/registry-bitmap-set-discipline.md (data write
+            // without companion bit set).
+            //
+            // Fix: ezoo_set_per_arm_barrier inline accessor below; the
+            // copy + mark happen together → forgetting becomes impossible.
             int arm_idx = ezoo->buy_signal_count;
             if (STAMP_HAS(ezoo->buy_signal[arm_idx], label_params)) {
-                // handle->label_tp_pct is stored as double (not FPN<F>);
-                // direct cast to float for the tight-pack array.
-                ezoo->per_arm_barriers[arm_idx].tp =
-                    (float)ezoo->buy_signal[arm_idx].label_tp_pct;
-                ezoo->per_arm_barriers[arm_idx].sl =
-                    (float)ezoo->buy_signal[arm_idx].label_sl_pct;
+                ezoo_set_per_arm_barrier(ezoo, arm_idx,
+                    (float)ezoo->buy_signal[arm_idx].label_tp_pct,
+                    (float)ezoo->buy_signal[arm_idx].label_sl_pct);
             }
             ezoo->buy_signal_count++;
             total_loaded++;

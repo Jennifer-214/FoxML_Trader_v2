@@ -648,6 +648,18 @@ static inline void TUI_CopySnapshotSharded(
             // Operator sees "drift on this core" if ANY role has drift.
             // training_timestamp_us captured from buy_signal as the
             // representative role (single-zoo typical case).
+            //
+            // v5.15.5.F.3 — Shape B fix per DESIGN_SPECS/registry-bitmap-
+            // set-discipline.md. PRE-FIX BUG: the aggregation walked ONLY
+            // the single-zoo `zoo->{buy_signal,barrier,regime,exit}` handles.
+            // Multi-horizon ENSEMBLE handles live in `ezoo->buy_signal[h]`,
+            // `ezoo->barrier[h]`, etc. (N handles per role); their drift
+            // bits never aggregated → for ensemble-using cores, GUI Model
+            // Health showed "clean" even when engine log emitted held-out-
+            // gate WARNs for actual stamp drift. Operator (Caramel) nearly
+            // traded against stale ensemble models on first paper-test
+            // session post-v5.12. Fix: walk ezoo's handle arrays too;
+            // chokepoint now sees BOTH load paths (single-zoo + ensemble).
             if (zoo) {
                 snap->per_core[i].failure_flags |= zoo->buy_signal.drift_flags_at_load;
                 snap->per_core[i].failure_flags |= zoo->barrier.drift_flags_at_load;
@@ -657,6 +669,41 @@ static inline void TUI_CopySnapshotSharded(
                     zoo->buy_signal.training_timestamp_us;
             } else {
                 snap->per_core[i].handle_training_timestamp_us = 0;
+            }
+            // v5.15.5.F.3 — ensemble-path drift aggregation. Walk ezoo's
+            // per-horizon handle arrays for ALL 4 roles + OR drift bits.
+            // Representative training_timestamp_us: take from primary buy_signal
+            // handle (arm 0) if zoo's value wasn't set above. Per registry-
+            // bitmap-set-discipline.md Fix 2 (chokepoint extension covers
+            // both load paths).
+            {
+                auto* ezoo_drift = static_cast<EnsembleModelZoo<F>*>(
+                    state->cores[i].ensemble_handle);
+                if (ezoo_drift && BITMAP_IS_SET(ezoo_drift->init_flags, MASK_EZOO_ACTIVE)) {
+                    for (int h = 0; h < ezoo_drift->buy_signal_count; ++h) {
+                        snap->per_core[i].failure_flags |=
+                            ezoo_drift->buy_signal[h].drift_flags_at_load;
+                    }
+                    for (int h = 0; h < ezoo_drift->barrier_count; ++h) {
+                        snap->per_core[i].failure_flags |=
+                            ezoo_drift->barrier[h].drift_flags_at_load;
+                    }
+                    for (int h = 0; h < ezoo_drift->regime_count; ++h) {
+                        snap->per_core[i].failure_flags |=
+                            ezoo_drift->regime[h].drift_flags_at_load;
+                    }
+                    for (int h = 0; h < ezoo_drift->exit_predictor_count; ++h) {
+                        snap->per_core[i].failure_flags |=
+                            ezoo_drift->exit_predictor[h].drift_flags_at_load;
+                    }
+                    // Adopt representative training_timestamp_us from arm 0
+                    // (buy_signal) if zoo didn't set one above.
+                    if (snap->per_core[i].handle_training_timestamp_us == 0 &&
+                        ezoo_drift->buy_signal_count > 0) {
+                        snap->per_core[i].handle_training_timestamp_us =
+                            ezoo_drift->buy_signal[0].training_timestamp_us;
+                    }
+                }
             }
             // v5.10.0a.G.10 — populate ensemble snapshot from ezoo (when active).
             // The cast through void* matches the dispatcher; ml_zoo_ensemble's
