@@ -304,7 +304,8 @@ template <unsigned F>
 inline void Portfolio_OpenSlot(Portfolio<F> *portfolio, int slot,
                                 FPN<F> entry_price, FPN<F> quantity,
                                 FPN<F> take_profit_price, FPN<F> stop_loss_price,
-                                FPN<F> entry_fee = FPN_Zero<F>()) {
+                                FPN<F> entry_fee = FPN_Zero<F>(),
+                                uint64_t override_entry_timestamp_us = 0) {
     portfolio->positions[slot].entry_price       = entry_price;
     portfolio->positions[slot].quantity          = quantity;
     portfolio->positions[slot].entry_fee         = entry_fee;
@@ -316,7 +317,18 @@ inline void Portfolio_OpenSlot(Portfolio<F> *portfolio, int slot,
     // v5.11.65 — wall-clock entry timestamp for cross-restart hold tracking
     // and future ML-training optimal-exit features. CLOCK_REALTIME (not
     // _MONOTONIC) so the value survives engine restart and reboots.
-    {
+    //
+    // v5.15.5.F.1 — `override_entry_timestamp_us` arg added (default 0 = use
+    // clock_gettime(REALTIME) per live-entry semantics; non-zero = preserve
+    // the passed value). The replay path Portfolio_FromEventLog passes the
+    // original OrderEvent.timestamp_us so hold-time computation survives
+    // engine restart + OrderEventLog replay (was broken when snapshot is
+    // refused — engine reconstructs portfolio from OrderEventLog, which
+    // would otherwise reset entry_timestamp_us to NOW and zero out
+    // hold-minutes display).
+    if (override_entry_timestamp_us != 0) {
+        portfolio->positions[slot].entry_timestamp_us = override_entry_timestamp_us;
+    } else {
         struct timespec ts;
         if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
             portfolio->positions[slot].entry_timestamp_us =

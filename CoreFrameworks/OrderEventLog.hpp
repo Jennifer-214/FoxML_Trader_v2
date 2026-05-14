@@ -647,11 +647,15 @@ inline FoldResult<F> Portfolio_FromEventLog(const OrderEventLog<F>* log,
         if (slot < 0 || slot >= MAX_PORTFOLIO_POSITIONS) continue;
 
         if (e.order_type == ORDER_MARKET_BUY) {
-            // Entry fill: open the slot.
+            // Entry fill: open the slot. v5.15.5.F.1 — pass the original
+            // event timestamp so hold-time display survives engine restart +
+            // replay (was being reset to NOW; broke Hold column showing
+            // "5m T" uniformly across days-old positions).
             FPN<F> notional  = FPN_Mul(e.price, e.qty);
             FPN<F> entry_fee = FPN_Mul(notional, fee_rate);
             Portfolio_OpenSlot(&result.portfolio, slot,
-                               e.price, e.qty, e.tp, e.sl, entry_fee);
+                               e.price, e.qty, e.tp, e.sl, entry_fee,
+                               e.timestamp_us);
         } else if (e.order_type == ORDER_MARKET_SELL) {
             // Exit fill: close the slot, compute net P&L, update balance.
             // Same math as EventLoop_OnEvent in ControllerEventLoop.hpp.
