@@ -37,6 +37,7 @@
 #include <stdint.h>
 #include <stdlib.h>  // v5.14.9 — atoi for DegradationCurve_FromString numeric parse
 
+#include <cstddef>   // v5.15.5.E.A — offsetof for layout-lock static_asserts
 #include <math.h>
 #include <string.h>
 #include <strings.h>  // v5.14.9 — strcasecmp for DegradationCurve_FromString
@@ -57,13 +58,40 @@
 
 #define ROLLING_IC_MAX_WINDOW 64
 
-struct RollingIC {
-    double predictions[ROLLING_IC_MAX_WINDOW];
-    double actuals[ROLLING_IC_MAX_WINDOW];
+// v5.15.5.E.A — alignas(64) + HOT-first reorg per cache-layout-discipline-
+// for-hot-side-structs.md Rule 4. HOT cluster (count + head + window) at
+// offset 0..11 — touched per Push + per Compute. COLD arrays (predictions +
+// actuals) follow at offset 16 (4B alignment pad after window).
+//
+// Now unblocked by .E.0 wire-format decoupling: runtime layout free to
+// evolve without breaking snapshot back-compat. Pre-.E.A field order
+// preserved by ConfidenceScorerLegacyV1 (frozen wire format) for shadow-
+// load migration.
+//
+// Field names unchanged → FOREACH_CONFIDENCE_PERSIST_FIELD registry paths
+// (ic.predictions, ic.actuals, ic.count, ic.head) work as before.
+struct alignas(64) RollingIC {
+    // HOT cluster (offset 0)
     int count;          // total items inserted (may exceed window)
     int head;           // ring buffer head
     int window;         // max window size
+    // 4B alignment pad → predictions starts at offset 16 (8-aligned for double)
+    // COLD cluster (offset 16)
+    double predictions[ROLLING_IC_MAX_WINDOW];
+    double actuals[ROLLING_IC_MAX_WINDOW];
 };
+
+// v5.15.5.E.A — Layout lock for RollingIC. Captured via static_assert(==0)
+// probe trick then replaced with actual value. 12B HOT + 4B pad + 1024B
+// arrays = 1040 natural; alignas(64) pads to next 64-multiple = 1088.
+static_assert(sizeof(RollingIC) == 1088,
+    "RollingIC sizeof MUST be 1088 B (17 cache lines with 48B trailing pad).");
+static_assert(offsetof(RollingIC, count) == 0,
+    "RollingIC HOT scalar `count` MUST sit at offset 0.");
+static_assert(offsetof(RollingIC, predictions) == 16,
+    "RollingIC COLD `predictions` MUST sit at offset 16 (after HOT cluster + 4B align pad).");
+static_assert(alignof(RollingIC) == 64,
+    "RollingIC MUST be cache-line aligned.");
 
 static inline void RollingIC_Init(RollingIC *ric, int window) {
     memset(ric, 0, sizeof(*ric));
@@ -147,12 +175,31 @@ static inline double RollingIC_Compute(const RollingIC *ric) {
 //======================================================================================================
 // [ROLLING RMSE — prediction calibration stability]
 //======================================================================================================
-struct RollingRMSE {
-    double squared_errors[ROLLING_IC_MAX_WINDOW];
+// v5.15.5.E.A — alignas(64) + HOT-first reorg per cache-layout-discipline-
+// for-hot-side-structs.md Rule 4. Identical shape to RollingIC; Class-18
+// mirror identified for .E.C (RollingWindow<T, N> template extraction).
+// Pre-.E.A field order preserved by RollingRMSE_LegacyV1 for shadow-load.
+struct alignas(64) RollingRMSE {
+    // HOT cluster (offset 0)
     int count;
     int head;
     int window;
+    // 4B alignment pad → squared_errors at offset 16 (8-aligned)
+    // COLD cluster (offset 16)
+    double squared_errors[ROLLING_IC_MAX_WINDOW];
 };
+
+// v5.15.5.E.A — Layout lock for RollingRMSE. Same shape as RollingIC but
+// half the array count (only squared_errors, not predictions + actuals).
+// 12B HOT + 4B pad + 512B array = 528 natural; alignas(64) → 576 (+48B pad).
+static_assert(sizeof(RollingRMSE) == 576,
+    "RollingRMSE sizeof MUST be 576 B (9 cache lines with 48B trailing pad).");
+static_assert(offsetof(RollingRMSE, count) == 0,
+    "RollingRMSE HOT scalar `count` MUST sit at offset 0.");
+static_assert(offsetof(RollingRMSE, squared_errors) == 16,
+    "RollingRMSE COLD `squared_errors` MUST sit at offset 16.");
+static_assert(alignof(RollingRMSE) == 64,
+    "RollingRMSE MUST be cache-line aligned.");
 
 static inline void RollingRMSE_Init(RollingRMSE *r, int window) {
     memset(r, 0, sizeof(*r));
@@ -305,19 +352,64 @@ static inline double RollingCapacity_Compute(const RollingCapacity *c) {
 // since v5.x.x. cfg.confidence_ic_variant=0 (default) selects this Spearman
 // implementation via the FOREACH_IC_VARIANT registry; future variants
 // (Pearson, Kendall, etc.) slot in without disturbing this field's wiring.
-struct ConfidenceScorer {
-    RollingIC ic;
-    RollingRMSE rmse;
-    double freshness_tau;
-    double last_confidence;
-    RollingFreshness freshness;   // v5.14.1.A
-    RollingCapacity capacity;     // v5.14.1.A
+// v5.15.5.E.A — alignas(64) + HOT-first reorg + decision-first cluster
+// ordering per cache-layout-discipline-for-hot-side-structs.md Rule 4 +
+// decision-first-cluster-layout-pattern.md (ND3). HOT scalars
+// (last_confidence + freshness_tau) at offset 0..15 in line 0; WARM rings
+// (ic + rmse) follow at cache-line boundaries; COLD composite-mode-only
+// fields at end.
+//
+// Wire format decoupled from runtime layout per .E.0 (FOREACH_CONFIDENCE_
+// PERSIST_FIELD registry handles serialization independent of field offsets).
+// Pre-.E.A frozen layout preserved in ConfidenceScorerLegacyV1 for shadow-
+// load migration of v11 snapshots.
+//
+// Pre-.E.A design note about active variant + sizeof freeze is RESOLVED:
+// runtime layout can now evolve (snapshot v12 = field-by-field). Future
+// fields can be added via FOREACH_CONFIDENCE_PERSIST_FIELD registry.
+struct alignas(64) ConfidenceScorer {
+    // ════ HOT cluster (offset 0; touched every slow-path Compute call) ════
+    double last_confidence;       // cached result; written per Compute, read per snapshot
+    double freshness_tau;         // read per Compute
+    // 48B alignment pad → ic starts at offset 64 (alignas(64) on RollingIC)
+
+    // ════ WARM cluster (offsets 64+; ring buffers updated per Push 10-100Hz) ════
+    RollingIC ic;                 // 1088B = 17 cache lines
+    RollingRMSE rmse;             // 576B = 9 cache lines
+
+    // ════ COLD cluster (composite-mode-only; touched once at boot + per Compute when enabled) ════
+    RollingFreshness freshness;   // v5.14.1.A — 16B
+    RollingCapacity capacity;     // v5.14.1.A — 24B
     double rmse_baseline;         // v5.14.1.A — bound to training-time RMSE; default 1.0
 };
-// v5.14.1.F design note: NO struct field for active variant (would change
-// sizeof(ConfidenceScorer) and break snapshot load at PortfolioController.hpp:2094+2210
-// per Class 4 — snapshot save/load asymmetry). Variant is passed explicitly
-// to ConfidenceScorer_ComputeICVariant; caller reads from cfg at call site.
+
+// v5.15.5.E.A — Layout lock for ConfidenceScorer. last_confidence at offset 0
+// (HOT scalar; per-Compute read + snapshot read; decision-first ordering).
+// freshness_tau at offset 8 (HOT scalar; per-Compute read). Then 48B align
+// pad to bring ic to next 64-aligned boundary. ic + rmse cache-line-aligned.
+//
+// Field offsets:
+//   last_confidence @ 0
+//   freshness_tau   @ 8
+//   ic              @ 64 (after 48B pad)
+//   rmse            @ 64 + 1088 = 1152
+//   freshness       @ 1152 + 576 = 1728
+//   capacity        @ 1728 + 16  = 1744
+//   rmse_baseline   @ 1744 + 24  = 1768
+//   end at 1776; alignas(64) outer → sizeof = 1792 (+16B trailing pad)
+static_assert(sizeof(ConfidenceScorer) == 1792,
+    "ConfidenceScorer sizeof MUST be 1792 B (28 cache lines exact).");
+static_assert(offsetof(ConfidenceScorer, last_confidence) == 0,
+    "ConfidenceScorer HOT scalar `last_confidence` MUST sit at offset 0 "
+    "(decision-first ordering per ND3).");
+static_assert(offsetof(ConfidenceScorer, freshness_tau) == 8,
+    "ConfidenceScorer HOT scalar `freshness_tau` MUST sit at offset 8.");
+static_assert(offsetof(ConfidenceScorer, ic) == 64,
+    "ConfidenceScorer WARM cluster `ic` MUST sit at offset 64 (cache-line aligned).");
+static_assert(offsetof(ConfidenceScorer, rmse) == 1152,
+    "ConfidenceScorer WARM cluster `rmse` MUST sit at offset 1152 (after ic).");
+static_assert(alignof(ConfidenceScorer) == 64,
+    "ConfidenceScorer MUST be cache-line aligned.");
 
 static inline void ConfidenceScorer_Init(ConfidenceScorer *cs, int window, double tau) {
     RollingIC_Init(&cs->ic, (window > 0) ? window : CONFIDENCE_IC_WINDOW_DEFAULT);
