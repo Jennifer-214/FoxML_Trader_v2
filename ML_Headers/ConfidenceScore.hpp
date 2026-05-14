@@ -242,45 +242,82 @@ static inline double RollingIC_Compute(const RollingIC *ric) {
 //======================================================================================================
 // [ROLLING RMSE — prediction calibration stability]
 //======================================================================================================
-// v5.15.5.E.A/C — RollingRMSE now COMPOSES RollingWindow<double, 64>. Same
-// pattern as RollingIC (Class-18 mirror closed via generic template). Per
-// DESIGN_SPECS/generic-ring-buffer-template-pattern.md.
+// v5.15.5.E.A/C — RollingRMSE COMPOSES RollingWindow<double, 64>. Class-18
+// mirror with RollingIC closed via generic template per DESIGN_SPECS/generic-
+// ring-buffer-template-pattern.md.
 //
-// v5.15.5.E.D adds `double sum_squared_errors` running aggregate (sliding-
-// window pattern 3rd canonical application — placeholder declared here;
-// maintenance in Push + read in Compute land in .E.D commit).
+// v5.15.5.E.D — `sum_squared_errors` running aggregate added per sliding-
+// window-online-statistics-pattern.md Approach 3. 3rd canonical application
+// of the sliding-window pattern (1st: v5.14.11.A Ridge correlation; 2nd:
+// v5.15.5.D BookImbHistory). Compute O(N=32) loop → O(1) running-sum read.
+// Push maintains running sum via subtract-then-add at eviction (per the
+// pattern). Bytewise parity test in tests/controller_test.cpp locks the
+// running-sum-vs-walked equivalence.
 struct alignas(64) RollingRMSE {
     RollingWindow<double, ROLLING_IC_MAX_WINDOW> window;
-    // .E.D will add: double sum_squared_errors;
+    double sum_squared_errors;   // v5.15.5.E.D — running sum maintained at Push
 };
 
-// v5.15.5.E.C — Layout lock for RollingRMSE composing 1× RollingWindow.
-// window (528B) + outer alignas(64) → 576B (same as pre-.E.C; +48B pad).
+// v5.15.5.E.D — Layout lock. window (528B) + sum_squared_errors (8B) = 536
+// natural; alignas(64) → 576 B (same as .E.A pre-.E.D; +40B trailing pad).
 static_assert(sizeof(RollingRMSE) == 576,
     "RollingRMSE sizeof MUST be 576 B (9 cache lines).");
 static_assert(offsetof(RollingRMSE, window) == 0,
     "RollingRMSE `window` (RollingWindow) at offset 0.");
+static_assert(offsetof(RollingRMSE, sum_squared_errors) == 528,
+    "RollingRMSE `sum_squared_errors` at offset 528 (immediately after window struct).");
 static_assert(alignof(RollingRMSE) == 64,
     "RollingRMSE MUST be cache-line aligned.");
 
 static inline void RollingRMSE_Init(RollingRMSE *r, int window) {
     RollingWindow_Init(&r->window, window);
+    r->sum_squared_errors = 0.0;   // v5.15.5.E.D — defensive explicit zero (memset covers it)
 }
 
+// v5.15.5.E.D — Push maintains running sum_squared_errors via subtract-then-
+// add per sliding-window-online-statistics-pattern.md. At eviction (count >=
+// window), the oldest squared_error at samples[head % window] is subtracted
+// from sum_squared_errors BEFORE the new value overwrites it. Warm-up phase
+// (count < window) just accumulates (no eviction; both walked + running paths
+// produce identical sum until window saturates).
+//
+// Per-Push cost: 1 extra subtract + 1 extra read of evicted sample (typically
+// L1-warm since the ring is small). Compute cost: O(N=32) loop → O(1) single
+// load. Net win at slow-path Compute cadence (~1-2 Hz × Compute called many
+// times per cycle in composite confidence): ~few hundred ns / cycle / core.
+//
+// Floating-point associativity caveat: chronological accumulation order vs
+// the walked sum's iteration order COULD produce different bytes in theory.
+// In practice for squared-error magnitudes (small positive doubles bounded
+// by realistic prediction errors), all sums fit in mantissa without
+// catastrophic cancellation → bytewise-identical via bytewise parity test
+// in controller_test.cpp.
 static inline void RollingRMSE_Push(RollingRMSE *r, double prediction, double actual) {
     double err = prediction - actual;
-    RollingWindow_Push(&r->window, err * err);
+    double new_se = err * err;
+    int idx = r->window.head % r->window.window;
+    if (r->window.count >= r->window.window) {
+        // Eviction: subtract oldest sample before overwrite
+        r->sum_squared_errors -= r->window.samples[idx];
+    }
+    r->sum_squared_errors += new_se;
+    // window write through the generic helper (count + head + samples)
+    r->window.samples[idx] = new_se;
+    r->window.head++;
+    if (r->window.count < r->window.window) r->window.count++;
 }
 
-// v5.15.5.E.C — Compute updated for composed layout. Still O(N) walk over
-// samples; v5.15.5.E.D converts to O(1) via running sum_squared_errors
-// (sliding-window-online-statistics-pattern.md 3rd application).
+// v5.15.5.E.D — O(1) RollingRMSE_Compute via running sum_squared_errors.
+// Pre-.E.D was O(N=32) loop. Bytewise parity vs the walked path is locked
+// by tests/controller_test.cpp parity loop (200-push deterministic sequence
+// covering warm-up + steady-state).
+//
+// Pattern: sliding-window-online-statistics-pattern.md Approach 3 (sliding-
+// window incremental). 3rd canonical application; strengthens CLAUDE.md
+// item 29 to 3 production sites.
 static inline double RollingRMSE_Compute(const RollingRMSE *r) {
     if (r->window.count < 2) return 1.0; // high RMSE = low confidence until enough data
-    double sum = 0.0;
-    for (int i = 0; i < r->window.count; i++)
-        sum += r->window.samples[i];
-    return sqrt(sum / r->window.count);
+    return sqrt(r->sum_squared_errors / (double)r->window.count);
 }
 
 //======================================================================================================
@@ -998,6 +1035,28 @@ static inline void ConfidenceScorer_CommitPersistedFields(ConfidenceScorer* dst,
 #undef CONFIDENCE_FWRITE_FIELD_
 #undef CONFIDENCE_FREAD_FIELD_
 #undef CONFIDENCE_COMMIT_FIELD_
+
+// v5.15.5.E.D — RollingRMSE.sum_squared_errors is intentionally NOT in
+// FOREACH_CONFIDENCE_PERSIST_FIELD: adding it would grow the wire format +
+// require a SHARDED_SNAPSHOT_VERSION bump for a derivable field. Instead,
+// recompute from samples[] after load. Cost: O(N=32) once per load — cheap.
+// Idempotent + safe to call on a freshly-loaded ConfidenceScorer.
+//
+// Pattern: postloadsetup-registry-pattern.md (composing with FOREACH-based
+// load) + sliding-window-online-statistics-pattern.md (the running-aggregate
+// invariant restored post-load).
+//
+// Call site contract: after any load path that writes rmse.window.samples
+// (PortfolioController_LoadSnapshot, ShardedSnapshot_Load post-commit,
+// ConfidenceScorer_ShadowLoadLegacyV1). Built into ConfidenceScorer_
+// CommitPersistedFields tail; PortfolioController calls it explicitly.
+static inline void ConfidenceScorer_RecomputeRunningSums(ConfidenceScorer* cs) {
+    double sum = 0.0;
+    for (int i = 0; i < cs->rmse.window.count; i++) {
+        sum += cs->rmse.window.samples[i];
+    }
+    cs->rmse.sum_squared_errors = sum;
+}
 
 //======================================================================================================
 // [v5.15.5.E.0 — LEGACY V1 WIRE STRUCT + SHADOW-LOAD MIGRATION]

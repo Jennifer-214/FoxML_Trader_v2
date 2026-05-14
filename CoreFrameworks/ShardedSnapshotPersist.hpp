@@ -576,6 +576,9 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         // (current cfg), so the runtime composite-mode + window stay valid
         // even when restoring from an older config's snapshot.
         ConfidenceScorer_CommitPersistedFields(&ctx.confidence, &s.staging_confidence);
+        // v5.15.5.E.D — Recompute running sum_squared_errors after commit
+        // (not in wire format; cheap O(N=32) recompute keeps wire minimal).
+        ConfidenceScorer_RecomputeRunningSums(&ctx.confidence);
     }
 
     // Bug fix (2026-04-27): re-activate ExecutionCore<F> hot-path state from

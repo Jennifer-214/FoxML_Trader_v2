@@ -3646,6 +3646,61 @@ int main() {
               fabs(cs.capacity.kappa - 0.2) < 1e-9);
     }
 
+    // v5.15.5.E.D — RollingRMSE running-sum vs walked-sum parity test.
+    // O(N=32) walked Compute → O(1) running-sum Compute per
+    // sliding-window-online-statistics-pattern.md Approach 3. 3rd canonical
+    // application of the pattern (1st: v5.14.11.A Ridge correlation; 2nd:
+    // v5.15.5.D BookImbHistory). FP non-associativity → tolerance comparison
+    // (not bitwise) per the pattern's "bytewise parity discipline" trade-off
+    // for double-precision running sums.
+    printf("\n--- v5.15.5.E.D: RollingRMSE running-sum vs walked-sum parity ---\n");
+    {
+        RollingRMSE r;
+        RollingRMSE_Init(&r, ROLLING_IC_MAX_WINDOW);  // window=64
+
+        // Deterministic sequence: 200 pushes covering warm-up (count < 64)
+        // and steady-state (count == 64; eviction active). Magnitudes
+        // bounded to typical squared-error range (small positive doubles).
+        int parity_pass = 0;
+        int parity_fail = 0;
+        double max_abs_err = 0.0;
+
+        for (int i = 0; i < 200; ++i) {
+            // Deterministic prediction + actual generating small squared errors
+            double pred   = 0.5 + ((i * 7) % 100) / 1000.0;   // ~[0.5, 0.6]
+            double actual = 0.5 + ((i * 13) % 100) / 1000.0;  // ~[0.5, 0.6]
+            RollingRMSE_Push(&r, pred, actual);
+
+            // Walked reference: recompute from samples (the pre-.E.D path)
+            double walked_sum = 0.0;
+            for (int j = 0; j < r.window.count; j++) {
+                walked_sum += r.window.samples[j];
+            }
+            double walked_rmse = (r.window.count >= 2)
+                                 ? sqrt(walked_sum / (double)r.window.count)
+                                 : 1.0;
+
+            // Running-sum: O(1) via the new code path
+            double running_rmse = RollingRMSE_Compute(&r);
+
+            double abs_err = fabs(walked_rmse - running_rmse);
+            if (abs_err > max_abs_err) max_abs_err = abs_err;
+
+            // FP non-associativity tolerance: 1e-12 absolute is very generous
+            // given typical squared-error magnitudes ~1e-4 and window=64.
+            // Realistic error is closer to machine_eps × max_sum ≈ 2.2e-16 × 64 × max_se.
+            if (abs_err < 1e-12) parity_pass++;
+            else                  parity_fail++;
+        }
+
+        char msg[200];
+        snprintf(msg, sizeof(msg),
+                 "v5.15.5.E.D parity: 200/200 within 1e-12 tolerance "
+                 "(passes=%d, fails=%d, max_abs_err=%.3e)",
+                 parity_pass, parity_fail, max_abs_err);
+        check(msg, parity_pass == 200 && parity_fail == 0);
+    }
+
     // ----- v5.14.1.B.3.E: FOREACH_STAMP_BOUND_CFG X-macro registry tests --------------------------
     // PARITY-004 + PARITY-005 closure verification.
     //

@@ -2266,6 +2266,9 @@ inline int PortfolioController_LoadSnapshot(PortfolioController<F> *ctrl,
           fclose(f); return 0;
         }
       }
+      // v5.15.5.E.D — Recompute running sum_squared_errors from loaded
+      // samples (intentionally not in wire format; cheap O(N) recompute).
+      ConfidenceScorer_RecomputeRunningSums(&ctrl->confidence);
       fprintf(stderr, "[SNAPSHOT] restored bandit state (%d steps) + confidence scorer\n",
               ctrl->bandit.total_steps);
     }
