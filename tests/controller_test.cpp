@@ -5480,14 +5480,17 @@ int main() {
                 }
                 r->state.cores[c].last_confidence = 0.5 + 0.1 * c;
                 // Phase 4.1: populate IC/RMSE buffers with distinguishable values
-                r->state.cores[c].confidence.ic.head  = 5 + c;
-                r->state.cores[c].confidence.ic.count = 10 + c;
-                r->state.cores[c].confidence.rmse.head  = 7 + c;
-                r->state.cores[c].confidence.rmse.count = 12 + c;
+                // v5.15.5.E.C — paths updated for RollingWindow composition.
+                r->state.cores[c].confidence.ic.predictions.head  = 5 + c;
+                r->state.cores[c].confidence.ic.predictions.count = 10 + c;
+                r->state.cores[c].confidence.ic.actuals.head      = 5 + c;  // mirror predictions
+                r->state.cores[c].confidence.ic.actuals.count     = 10 + c;
+                r->state.cores[c].confidence.rmse.window.head  = 7 + c;
+                r->state.cores[c].confidence.rmse.window.count = 12 + c;
                 for (int j = 0; j < 4; ++j) {
-                    r->state.cores[c].confidence.ic.predictions[j] = 0.1 * c + 0.01 * j;
-                    r->state.cores[c].confidence.ic.actuals[j]     = -0.05 + 0.02 * j + 0.01 * c;
-                    r->state.cores[c].confidence.rmse.squared_errors[j] = 0.001 * (c + 1) + 0.0001 * j;
+                    r->state.cores[c].confidence.ic.predictions.samples[j] = 0.1 * c + 0.01 * j;
+                    r->state.cores[c].confidence.ic.actuals.samples[j]     = -0.05 + 0.02 * j + 0.01 * c;
+                    r->state.cores[c].confidence.rmse.window.samples[j]    = 0.001 * (c + 1) + 0.0001 * j;
                 }
             }
             r->oms.balance      = FPN_FromDouble<64>(9837.42);
@@ -5578,18 +5581,19 @@ int main() {
                 check("round-trip: pnl_feeder sample[0]",
                       fabs(FPN_ToDouble(r2->state.cores[c].pnl_feeder.price_samples[0]) - (100.0 * (c + 1))) < 1e-6);
                 // Phase 4.1: IC/RMSE buffers
+                // v5.15.5.E.C — paths updated for RollingWindow composition.
                 check("round-trip: IC head/count restored",
-                      r2->state.cores[c].confidence.ic.head == (5 + c) &&
-                      r2->state.cores[c].confidence.ic.count == (10 + c));
+                      r2->state.cores[c].confidence.ic.predictions.head == (5 + c) &&
+                      r2->state.cores[c].confidence.ic.predictions.count == (10 + c));
                 check("round-trip: IC predictions[0] restored",
-                      fabs(r2->state.cores[c].confidence.ic.predictions[0] - 0.1 * c) < 1e-9);
+                      fabs(r2->state.cores[c].confidence.ic.predictions.samples[0] - 0.1 * c) < 1e-9);
                 check("round-trip: IC actuals[1] restored",
-                      fabs(r2->state.cores[c].confidence.ic.actuals[1] - (-0.05 + 0.02 + 0.01 * c)) < 1e-9);
+                      fabs(r2->state.cores[c].confidence.ic.actuals.samples[1] - (-0.05 + 0.02 + 0.01 * c)) < 1e-9);
                 check("round-trip: RMSE head/count restored",
-                      r2->state.cores[c].confidence.rmse.head == (7 + c) &&
-                      r2->state.cores[c].confidence.rmse.count == (12 + c));
+                      r2->state.cores[c].confidence.rmse.window.head == (7 + c) &&
+                      r2->state.cores[c].confidence.rmse.window.count == (12 + c));
                 check("round-trip: RMSE squared_errors[2] restored",
-                      fabs(r2->state.cores[c].confidence.rmse.squared_errors[2] - (0.001 * (c + 1) + 0.0002)) < 1e-9);
+                      fabs(r2->state.cores[c].confidence.rmse.window.samples[2] - (0.001 * (c + 1) + 0.0002)) < 1e-9);
             }
         }
 

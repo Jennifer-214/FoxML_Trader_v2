@@ -59,54 +59,114 @@
 
 #define ROLLING_IC_MAX_WINDOW 64
 
-// v5.15.5.E.A — alignas(64) + HOT-first reorg per cache-layout-discipline-
-// for-hot-side-structs.md Rule 4. HOT cluster (count + head + window) at
-// offset 0..11 — touched per Push + per Compute. COLD arrays (predictions +
-// actuals) follow at offset 16 (4B alignment pad after window).
+// v5.15.5.E.C — Generic ring-buffer template. Variants compose this for
+// type-specific math. Closes Class-18 mirror between RollingIC + RollingRMSE
+// (both had identical count/head/window + samples ring-buffer skeleton).
+// Pattern: DESIGN_SPECS/generic-ring-buffer-template-pattern.md.
 //
-// Now unblocked by .E.0 wire-format decoupling: runtime layout free to
-// evolve without breaking snapshot back-compat. Pre-.E.A field order
-// preserved by ConfidenceScorerLegacyV1 (frozen wire format) for shadow-
-// load migration.
+// Design: BARE template (no internal alignas) so the embedding consumer
+// owns alignment policy. RollingIC + RollingRMSE apply alignas(64) on
+// THEIR struct definition; embedded RollingWindow<T, N> instances pack
+// naturally inside.
 //
-// Field names unchanged → FOREACH_CONFIDENCE_PERSIST_FIELD registry paths
-// (ic.predictions, ic.actuals, ic.count, ic.head) work as before.
-struct alignas(64) RollingIC {
+// HOT-first: count + head + window at offset 0 (consumer's HOT cluster);
+// samples[] follows after 4B alignment pad for double.
+//
+// Layout: 12B HOT + 4B pad + N×sizeof(T) samples; natural sizeof handles
+// trailing alignment based on T's alignment.
+template <typename T, unsigned N>
+struct RollingWindow {
+    static constexpr unsigned CAPACITY = N;
+
     // HOT cluster (offset 0)
-    int count;          // total items inserted (may exceed window)
-    int head;           // ring buffer head
-    int window;         // max window size
-    // 4B alignment pad → predictions starts at offset 16 (8-aligned for double)
-    // COLD cluster (offset 16)
-    double predictions[ROLLING_IC_MAX_WINDOW];
-    double actuals[ROLLING_IC_MAX_WINDOW];
+    int count;     // total items inserted (saturates at window)
+    int head;      // ring buffer head
+    int window;    // active window size [2, N]
+
+    // 4B align pad (for T=double; 8-byte alignment) — samples at offset 16
+    // COLD cluster
+    T   samples[N];
 };
 
-// v5.15.5.E.A — Layout lock for RollingIC. Captured via static_assert(==0)
-// probe trick then replaced with actual value. 12B HOT + 4B pad + 1024B
-// arrays = 1040 natural; alignas(64) pads to next 64-multiple = 1088.
+// Generic Init: zero state, validate window range.
+template <typename T, unsigned N>
+static inline void RollingWindow_Init(RollingWindow<T, N>* w, int window) {
+    memset(w, 0, sizeof(*w));
+    if (window < 2)        window = 2;
+    if (window > (int)N)   window = (int)N;
+    w->window = window;
+}
+
+// Generic Push: write to head slot, advance, saturate count at window.
+template <typename T, unsigned N>
+static inline void RollingWindow_Push(RollingWindow<T, N>* w, T sample) {
+    int idx = w->head % w->window;
+    w->samples[idx] = sample;
+    w->head++;
+    if (w->count < w->window) w->count++;
+}
+
+// v5.15.5.E.C — Layout lock for the canonical RollingWindow<double, 64>
+// instantiation. 12B HOT + 4B pad + 512B samples = 528 natural. NOT alignas
+// (consumer owns alignment) → sizeof = 528.
+using RollingWindowDoubleICT = RollingWindow<double, ROLLING_IC_MAX_WINDOW>;
+static_assert(sizeof(RollingWindowDoubleICT) == 528,
+    "RollingWindow<double, 64> sizeof MUST be 528 B (12B HOT + 4B pad + 512B samples).");
+static_assert(offsetof(RollingWindowDoubleICT, count) == 0,
+    "RollingWindow HOT scalar `count` MUST sit at offset 0.");
+static_assert(offsetof(RollingWindowDoubleICT, samples) == 16,
+    "RollingWindow COLD `samples` MUST sit at offset 16 (after HOT cluster + 4B pad).");
+static_assert(alignof(RollingWindowDoubleICT) == 8,
+    "RollingWindow<double, ...> bare alignof = 8 (consumer applies alignas(64)).");
+
+// v5.15.5.E.A/C — RollingIC now COMPOSES 2× RollingWindow<double, 64>
+// (predictions + actuals) via the generic template. Class-18 mirror between
+// RollingIC + RollingRMSE CLOSED structurally. Spearman rank correlation
+// math (in RollingIC_Compute) accesses .predictions.samples / .actuals.samples
+// via the template's field paths.
+//
+// Outer alignas(64): cache-line aligned + each RollingWindow sub-struct
+// starts at offset 0 / 528 respectively. 528 mod 64 = 16 → actuals starts
+// in line 8 (offset 528 = 64*8 + 16). HOT scalars of actuals are NOT at a
+// cache line boundary, but they're accessed together with predictions's
+// HOT scalars (same cycle) so prefetching keeps them warm.
+//
+// Wire format byte-identical to pre-.E.C: predictions array @ offset 0
+// stays at offset 0 of `ic`; actuals @ offset 528 = offset 16 + 512;
+// matches the prior pre-.E.A `ic.actuals[0]` at offset 512 (within the
+// pre-.E.C struct). The FOREACH_CONFIDENCE_PERSIST_FIELD paths change
+// from `ic.predictions` to `ic.predictions.samples` etc.; wire bytes
+// remain identical (same data values + offsets).
+struct alignas(64) RollingIC {
+    RollingWindow<double, ROLLING_IC_MAX_WINDOW> predictions;
+    RollingWindow<double, ROLLING_IC_MAX_WINDOW> actuals;
+};
+
+// v5.15.5.E.A/C — Layout lock for RollingIC composing 2× RollingWindow.
+// predictions @ 0 (528B) + actuals @ 528 (528B) = 1056 natural; alignas(64)
+// → 1088 (same as pre-.E.C). +32B trailing pad.
 static_assert(sizeof(RollingIC) == 1088,
-    "RollingIC sizeof MUST be 1088 B (17 cache lines with 48B trailing pad).");
-static_assert(offsetof(RollingIC, count) == 0,
-    "RollingIC HOT scalar `count` MUST sit at offset 0.");
-static_assert(offsetof(RollingIC, predictions) == 16,
-    "RollingIC COLD `predictions` MUST sit at offset 16 (after HOT cluster + 4B align pad).");
+    "RollingIC sizeof MUST be 1088 B (17 cache lines with 32B trailing pad).");
+static_assert(offsetof(RollingIC, predictions) == 0,
+    "RollingIC `predictions` (RollingWindow) at offset 0.");
+static_assert(offsetof(RollingIC, actuals) == 528,
+    "RollingIC `actuals` (RollingWindow) at offset 528 (after predictions).");
 static_assert(alignof(RollingIC) == 64,
     "RollingIC MUST be cache-line aligned.");
 
+// v5.15.5.E.C — Init via generic RollingWindow_Init on both rings.
 static inline void RollingIC_Init(RollingIC *ric, int window) {
-    memset(ric, 0, sizeof(*ric));
-    if (window < 2) window = 2;
-    if (window > ROLLING_IC_MAX_WINDOW) window = ROLLING_IC_MAX_WINDOW;
-    ric->window = window;
+    RollingWindow_Init(&ric->predictions, window);
+    RollingWindow_Init(&ric->actuals,     window);
 }
 
+// v5.15.5.E.C — Push via generic RollingWindow_Push on both rings. The two
+// rings advance in lockstep (same count + head + window after every Push).
+// Generic Push handles the count/head/window mechanics; this wrapper coordinates
+// the parallel-array push semantics for the (prediction, actual) pair shape.
 static inline void RollingIC_Push(RollingIC *ric, double prediction, double actual) {
-    int idx = ric->head % ric->window;
-    ric->predictions[idx] = prediction;
-    ric->actuals[idx] = actual;
-    ric->head++;
-    if (ric->count < ric->window) ric->count++;
+    RollingWindow_Push(&ric->predictions, prediction);
+    RollingWindow_Push(&ric->actuals,     actual);
 }
 
 // compute ranks for an array (1-based, average ties)
@@ -127,20 +187,26 @@ static inline void confidence_rank(const double *values, double *ranks, int n) {
 
 // compute Spearman rank correlation from ring buffer
 // returns IC in [-1, 1], or 0.0 if insufficient data
+//
+// v5.15.5.E.C — Updated for composed RollingWindow layout. predictions +
+// actuals rings have IDENTICAL count + head + window (kept in sync by
+// RollingIC_Push). Read either; using predictions's metadata canonically.
 static inline double RollingIC_Compute(const RollingIC *ric) {
-    if (ric->count < CONFIDENCE_MIN_SAMPLES) return 0.0;
+    if (ric->predictions.count < CONFIDENCE_MIN_SAMPLES) return 0.0;
 
-    int n = ric->count;
+    int n      = ric->predictions.count;
+    int head   = ric->predictions.head;
+    int window = ric->predictions.window;
     double preds[ROLLING_IC_MAX_WINDOW], acts[ROLLING_IC_MAX_WINDOW];
     double pred_ranks[ROLLING_IC_MAX_WINDOW], act_ranks[ROLLING_IC_MAX_WINDOW];
 
     // copy ring buffer to contiguous arrays
     for (int i = 0; i < n; i++) {
-        int idx = (ric->head - n + i);
-        if (idx < 0) idx += ric->window;
-        else idx = idx % ric->window;
-        preds[i] = ric->predictions[idx];
-        acts[i] = ric->actuals[idx];
+        int idx = (head - n + i);
+        if (idx < 0) idx += window;
+        else idx = idx % window;
+        preds[i] = ric->predictions.samples[idx];
+        acts[i]  = ric->actuals.samples[idx];
     }
 
     // rank both arrays
@@ -176,53 +242,45 @@ static inline double RollingIC_Compute(const RollingIC *ric) {
 //======================================================================================================
 // [ROLLING RMSE — prediction calibration stability]
 //======================================================================================================
-// v5.15.5.E.A — alignas(64) + HOT-first reorg per cache-layout-discipline-
-// for-hot-side-structs.md Rule 4. Identical shape to RollingIC; Class-18
-// mirror identified for .E.C (RollingWindow<T, N> template extraction).
-// Pre-.E.A field order preserved by RollingRMSE_LegacyV1 for shadow-load.
+// v5.15.5.E.A/C — RollingRMSE now COMPOSES RollingWindow<double, 64>. Same
+// pattern as RollingIC (Class-18 mirror closed via generic template). Per
+// DESIGN_SPECS/generic-ring-buffer-template-pattern.md.
+//
+// v5.15.5.E.D adds `double sum_squared_errors` running aggregate (sliding-
+// window pattern 3rd canonical application — placeholder declared here;
+// maintenance in Push + read in Compute land in .E.D commit).
 struct alignas(64) RollingRMSE {
-    // HOT cluster (offset 0)
-    int count;
-    int head;
-    int window;
-    // 4B alignment pad → squared_errors at offset 16 (8-aligned)
-    // COLD cluster (offset 16)
-    double squared_errors[ROLLING_IC_MAX_WINDOW];
+    RollingWindow<double, ROLLING_IC_MAX_WINDOW> window;
+    // .E.D will add: double sum_squared_errors;
 };
 
-// v5.15.5.E.A — Layout lock for RollingRMSE. Same shape as RollingIC but
-// half the array count (only squared_errors, not predictions + actuals).
-// 12B HOT + 4B pad + 512B array = 528 natural; alignas(64) → 576 (+48B pad).
+// v5.15.5.E.C — Layout lock for RollingRMSE composing 1× RollingWindow.
+// window (528B) + outer alignas(64) → 576B (same as pre-.E.C; +48B pad).
 static_assert(sizeof(RollingRMSE) == 576,
-    "RollingRMSE sizeof MUST be 576 B (9 cache lines with 48B trailing pad).");
-static_assert(offsetof(RollingRMSE, count) == 0,
-    "RollingRMSE HOT scalar `count` MUST sit at offset 0.");
-static_assert(offsetof(RollingRMSE, squared_errors) == 16,
-    "RollingRMSE COLD `squared_errors` MUST sit at offset 16.");
+    "RollingRMSE sizeof MUST be 576 B (9 cache lines).");
+static_assert(offsetof(RollingRMSE, window) == 0,
+    "RollingRMSE `window` (RollingWindow) at offset 0.");
 static_assert(alignof(RollingRMSE) == 64,
     "RollingRMSE MUST be cache-line aligned.");
 
 static inline void RollingRMSE_Init(RollingRMSE *r, int window) {
-    memset(r, 0, sizeof(*r));
-    if (window < 2) window = 2;
-    if (window > ROLLING_IC_MAX_WINDOW) window = ROLLING_IC_MAX_WINDOW;
-    r->window = window;
+    RollingWindow_Init(&r->window, window);
 }
 
 static inline void RollingRMSE_Push(RollingRMSE *r, double prediction, double actual) {
     double err = prediction - actual;
-    int idx = r->head % r->window;
-    r->squared_errors[idx] = err * err;
-    r->head++;
-    if (r->count < r->window) r->count++;
+    RollingWindow_Push(&r->window, err * err);
 }
 
+// v5.15.5.E.C — Compute updated for composed layout. Still O(N) walk over
+// samples; v5.15.5.E.D converts to O(1) via running sum_squared_errors
+// (sliding-window-online-statistics-pattern.md 3rd application).
 static inline double RollingRMSE_Compute(const RollingRMSE *r) {
-    if (r->count < 2) return 1.0; // high RMSE = low confidence until enough data
+    if (r->window.count < 2) return 1.0; // high RMSE = low confidence until enough data
     double sum = 0.0;
-    for (int i = 0; i < r->count; i++)
-        sum += r->squared_errors[i];
-    return sqrt(sum / r->count);
+    for (int i = 0; i < r->window.count; i++)
+        sum += r->window.samples[i];
+    return sqrt(sum / r->window.count);
 }
 
 //======================================================================================================
@@ -882,14 +940,27 @@ static inline int DriftHistory_CheckBreach(const DriftHistory *dh, uint64_t now_
 // Pattern: DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md +
 // DESIGN_SPECS/autopopulate-pattern-for-production-caller-class.md.
 //======================================================================================================
-#define FOREACH_CONFIDENCE_PERSIST_FIELD(X)              \
-    X(ic.predictions,       double, ROLLING_IC_MAX_WINDOW) \
-    X(ic.actuals,           double, ROLLING_IC_MAX_WINDOW) \
-    X(ic.count,             int,    1)                     \
-    X(ic.head,              int,    1)                     \
-    X(rmse.squared_errors,  double, ROLLING_IC_MAX_WINDOW) \
-    X(rmse.count,           int,    1)                     \
-    X(rmse.head,            int,    1)
+// v5.15.5.E.C — Field paths updated for RollingWindow<T,N> composition:
+//   ic.predictions → ic.predictions.samples (the array within RollingWindow)
+//   ic.actuals     → ic.actuals.samples
+//   ic.count       → ic.predictions.count (predictions + actuals stay in lockstep
+//                    via RollingIC_Push; canonically read from predictions)
+//   ic.head        → ic.predictions.head
+//   rmse.squared_errors → rmse.window.samples
+//   rmse.count     → rmse.window.count
+//   rmse.head      → rmse.window.head
+//
+// Wire bytes IDENTICAL to pre-.E.C: data values + byte offsets within
+// `ic` / `rmse` unchanged. predictions.samples starts at offset 16 of
+// RollingWindow (matches predictions array offset 16 of pre-.E.C RollingIC).
+#define FOREACH_CONFIDENCE_PERSIST_FIELD(X)                      \
+    X(ic.predictions.samples,    double, ROLLING_IC_MAX_WINDOW)  \
+    X(ic.actuals.samples,        double, ROLLING_IC_MAX_WINDOW)  \
+    X(ic.predictions.count,      int,    1)                      \
+    X(ic.predictions.head,       int,    1)                      \
+    X(rmse.window.samples,       double, ROLLING_IC_MAX_WINDOW)  \
+    X(rmse.window.count,         int,    1)                      \
+    X(rmse.window.head,          int,    1)
 
 // AUTOPOPULATE fwrite — field-by-field write. Returns -1 on any fwrite failure.
 // Wire byte sequence: exactly the same as pre-.E sharded path (lines 247-256
@@ -1000,15 +1071,22 @@ static inline int ConfidenceScorer_ShadowLoadLegacyV1(ConfidenceScorer* cs, FILE
     double restore_tau = wire.freshness_tau;
     ConfidenceScorer_Init(cs, restore_window, restore_tau);
 
-    // Copy persisted IC + RMSE history from wire to runtime.
-    memcpy(cs->ic.predictions, wire.ic.predictions, sizeof(wire.ic.predictions));
-    memcpy(cs->ic.actuals,     wire.ic.actuals,     sizeof(wire.ic.actuals));
-    cs->ic.count = wire.ic.count;
-    cs->ic.head  = wire.ic.head;
-    memcpy(cs->rmse.squared_errors, wire.rmse.squared_errors,
+    // Copy persisted IC + RMSE history from wire to runtime. v5.15.5.E.C
+    // updated for RollingWindow composition (paths gained .samples / .count
+    // / .head intermediate via the embedded RollingWindow). Wire format
+    // bytes unchanged (frozen LegacyV1 still uses flat arrays + scalars).
+    memcpy(cs->ic.predictions.samples, wire.ic.predictions,
+           sizeof(wire.ic.predictions));
+    memcpy(cs->ic.actuals.samples,     wire.ic.actuals,
+           sizeof(wire.ic.actuals));
+    cs->ic.predictions.count = wire.ic.count;
+    cs->ic.predictions.head  = wire.ic.head;
+    cs->ic.actuals.count     = wire.ic.count;   // keep parallel ring in sync
+    cs->ic.actuals.head      = wire.ic.head;
+    memcpy(cs->rmse.window.samples, wire.rmse.squared_errors,
            sizeof(wire.rmse.squared_errors));
-    cs->rmse.count = wire.rmse.count;
-    cs->rmse.head  = wire.rmse.head;
+    cs->rmse.window.count = wire.rmse.count;
+    cs->rmse.window.head  = wire.rmse.head;
 
     // Restore last_confidence cache (next Compute will overwrite anyway).
     cs->last_confidence = wire.last_confidence;
