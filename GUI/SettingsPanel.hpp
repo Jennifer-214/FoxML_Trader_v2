@@ -173,6 +173,37 @@ struct CfgRenderTable {
     #undef X_GEN_RENDER_PTR
 };
 
+// Forward decl — cfg_write_field is defined later in this file (line ~640).
+// Template instantiation of cfg_render_and_persist<T> below happens at call sites
+// (the bitmap walker), at which point cfg_write_field is already in scope.
+static inline void cfg_write_field(const char *path, const char *key, const char *value);
+
+//==========================================================================
+// [cfg_render_and_persist<T> — per-edit persistence helper — v5.15.5.F.4c]
+//==========================================================================
+// Wraps the canonical "render-changed → file-written" flow:
+//   1. tt::cfg_render_field<T> dispatches to ImGui widget; returns true if value changed
+//   2. tt::cfg_save_field<T> formats current value to text buffer (locale-pinned)
+//   3. cfg_write_field writes the single key=value pair to the cfg file
+//
+// Preserves the current per-edit persistence behavior (parallel-array system
+// writes immediately on change). Used by the bitmap-dispatch walker as the
+// per-row action: change-detection + format + persist in one call.
+//
+// Returns true if the value changed this frame (caller may track for global
+// dirty state or visual "modified" indicators).
+//==========================================================================
+template <typename T>
+inline bool cfg_render_and_persist(T& field, const CfgFieldDescriptor& desc, const char* cfg_path) {
+    const bool changed = tt::cfg_render_field(field, desc);
+    if (changed) {
+        char buf[512];  // matches path_vals[] capacity (handles longest STRING field comfortably)
+        tt::cfg_save_field(field, desc, buf, sizeof(buf));
+        cfg_write_field(cfg_path, desc.cfg_field_name, buf);
+    }
+    return changed;
+}
+
 //==========================================================================
 // FIELD DESCRIPTOR — one entry per editable config field
 //==========================================================================
@@ -586,6 +617,18 @@ static constexpr int MAX_GUI_CORES = 16;
 // SETTINGS STATE — auto-generated from field_defs (no manual struct)
 //==========================================================================
 struct SettingsState {
+    // v5.15.5.F.4c — GUI's typed mirror of engine.cfg (Option 2 GUI refactor: direct
+    // ControllerConfig<F> access for scalar Kinds replaces parallel-array indirection).
+    // GUI thread owns this instance; engine HP/SP threads own their own; thread isolation
+    // per CLAUDE.local.md going-forward rule "GUI ↔ HP/SP thread isolation" + DESIGN_SPECS/
+    // universal-registry-bitmap-dispatcher-pattern.md § "GUI ↔ engine thread isolation".
+    // File is the canonical channel: GUI edits gui_engine_cfg + persists via cfg_write_field;
+    // engine reloads from file on reload_flag signal. NEVER pointer-share across threads.
+    // F=64 matches the canonical engine precision; the engine binary uses one F at compile time.
+    ControllerConfig<64> gui_engine_cfg{};
+
+    // v5.15.5.F.4c — parallel-array layer (legacy; scalar-Kind entries delete as cohort migration
+    // progresses; KIND_STRING/_FILE_PATH path_vals[] survives until .F.4e per TECH_DEBT-063).
     float float_vals[NUM_FIELDS];  // storage for float/int fields
     int   bool_vals[NUM_FIELDS];   // storage for bool fields
     char  path_vals[NUM_FIELDS][512]; // storage for path fields (Phase 8b: 256→512 to fit notify_command templates)
@@ -773,6 +816,13 @@ static inline void Settings_Load(SettingsState *s) {
         s->per_core_model_path[c][0] = '\0';
         s->per_core_model_dir[c][0]  = '\0';
     }
+
+    // v5.15.5.F.4c — populate gui_engine_cfg via ControllerConfig_Load (same path as engine
+    // boot uses). GUI's typed mirror; engine has its own. File is canonical channel.
+    // Note: ControllerConfig_Load reads from the same file as the parallel-array walk below
+    // — slight redundancy during transition (~5-10ms cost; once per GUI session); cleaned
+    // up at item 8 (Delete old paths) once all scalar Kinds migrate.
+    s->gui_engine_cfg = ControllerConfig_Load<64>(s->cfg_path);
 
     FILE *f = fopen(s->cfg_path, "r");
     if (!f) return;

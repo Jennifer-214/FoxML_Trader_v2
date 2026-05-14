@@ -370,6 +370,50 @@ inline constexpr CfgMaskArray cfg_compute_mask() {
 FOREACH_METADATA_BIT(X_GEN_MASK_CONSTEXPR)
 #undef X_GEN_MASK_CONSTEXPR
 
+//------------------------------------------------------------------------------
+// [PER-LivesInStruct-VALUE BITMAP MASKS — v5.15.5.F.4c]
+//------------------------------------------------------------------------------
+// Forward-compat for `.F.4j` BACKTEST cohort + future training/secrets cohorts.
+// Pattern is the metadata-bit-mask analogue but for an enum VALUE (equality
+// check) rather than a bit (bitwise AND). Each row contributes to exactly ONE
+// mask (its lives_in_struct value).
+//
+// Consumer: GUI subsystems each render their own struct's fields via a per-
+// struct walker (see DESIGN_SPECS/universal-registry-bitmap-dispatcher-pattern.md
+// § "ML-side (separate registries; same pattern)" — same pattern extends to
+// any registry needing per-enum-value filtering).
+//------------------------------------------------------------------------------
+
+// FOREACH_LIVES_IN_STRUCT(X) — tuple: X(lowercase_name, UPPERCASE_VALUE_NAME).
+// Mirrors the LivesInStruct enum at lines 77-83 of this file.
+#define FOREACH_LIVES_IN_STRUCT(X)                                          \
+    X(struct_cfg,            STRUCT_CFG)                                    \
+    X(struct_backtest_cfg,   STRUCT_BACKTEST_CFG)                           \
+    X(struct_controller_cfg, STRUCT_CONTROLLER_CFG)                         \
+    X(struct_secrets_cfg,    STRUCT_SECRETS_CFG)                            \
+    X(struct_training_cfg,   STRUCT_TRAINING_CFG)
+
+// Compile-time per-LivesInStruct-value mask computation.
+// NOTE: dispatch via EQUALITY (lives_in_struct == Value) not bitwise AND;
+// each row contributes to exactly one mask.
+template <uint8_t Value>
+inline constexpr CfgMaskArray cfg_compute_lives_in_struct_mask() {
+    CfgMaskArray result = {};
+    for (size_t i = 0; i < FIELD_IDX_END; i++) {
+        if (g_cfg_field_descriptors[i].lives_in_struct == Value) {
+            result.words[i / 64] |= (1ULL << (i % 64));
+        }
+    }
+    return result;
+}
+
+// Per-value mask declarations — X-macro-generated.
+#define X_GEN_LIVES_IN_STRUCT_MASK(lname, VALUE) \
+    inline constexpr CfgMaskArray g_cfg_##lname##_mask = \
+        cfg_compute_lives_in_struct_mask<CfgFieldDescriptor::VALUE>();
+FOREACH_LIVES_IN_STRUCT(X_GEN_LIVES_IN_STRUCT_MASK)
+#undef X_GEN_LIVES_IN_STRUCT_MASK
+
 // Bitmap iteration macro — invokes `body` per set bit in `mask`.
 // `idx_var` is bound to FIELD_IDX_* value of each set bit. Branchless inner loop
 // via __builtin_ctzll (single TZCNT on Haswell+) + `word &= word - 1` next-bit-clear.
