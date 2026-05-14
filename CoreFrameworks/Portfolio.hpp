@@ -300,34 +300,59 @@ template <unsigned F> inline void Portfolio_RemovePosition(Portfolio<F> *portfol
 //   does NOT touch balance or fees — controller's OnEvent does that, this
 //   function just snapshots the gross.
 //======================================================================================================
+// v5.15.5.F.2 — Position entry args struct. Bundles ALL fields that
+// Portfolio_OpenSlot writes to a Position so live-entry path + replay path
+// populate from the same shape. Closes the Class-18 mirror between:
+//   - Live entry: drainer's HandleFill builds args from a TradeEvent
+//   - Replay:     Portfolio_FromEventLog builds args from an OrderEvent
+//
+// Adding a NEW Position field that needs preservation across replay =
+// ONE line in this struct + populate at both sites. Eliminates the
+// recurring "I forgot to preserve X across replay" bug class — see
+// CLAUDE.md item 19 + DESIGN_SPECS/structural-fix-preferred-decision-
+// framework.md.
+//
+// Field semantics:
+//   - entry_price/quantity/take_profit_price/stop_loss_price/entry_fee:
+//     always populated; no defaults safe (would compute wrong).
+//   - entry_timestamp_us = 0 → Portfolio_OpenSlot calls clock_gettime(
+//     CLOCK_REALTIME) (live-entry semantics). Non-zero → preserve as-is
+//     (replay path: passes OrderEvent.timestamp_us so hold-time survives
+//     engine restart).
+//   - pair_index = -1 → no pairing (single-position mode or unpaired leg).
+//     Non-negative → paired leg index for partial-exit semantics (.F.1.B
+//     audit candidate when partial-exit replay needs leg-A/leg-B pairing
+//     preservation).
 template <unsigned F>
-inline void Portfolio_OpenSlot(Portfolio<F> *portfolio, int slot,
-                                FPN<F> entry_price, FPN<F> quantity,
-                                FPN<F> take_profit_price, FPN<F> stop_loss_price,
-                                FPN<F> entry_fee = FPN_Zero<F>(),
-                                uint64_t override_entry_timestamp_us = 0) {
-    portfolio->positions[slot].entry_price       = entry_price;
-    portfolio->positions[slot].quantity          = quantity;
-    portfolio->positions[slot].entry_fee         = entry_fee;
-    portfolio->positions[slot].take_profit_price = take_profit_price;
-    portfolio->positions[slot].stop_loss_price   = stop_loss_price;
-    portfolio->positions[slot].original_tp       = take_profit_price;
-    portfolio->positions[slot].original_sl       = stop_loss_price;
-    portfolio->positions[slot].pair_index        = -1;
-    // v5.11.65 — wall-clock entry timestamp for cross-restart hold tracking
-    // and future ML-training optimal-exit features. CLOCK_REALTIME (not
-    // _MONOTONIC) so the value survives engine restart and reboots.
-    //
-    // v5.15.5.F.1 — `override_entry_timestamp_us` arg added (default 0 = use
-    // clock_gettime(REALTIME) per live-entry semantics; non-zero = preserve
-    // the passed value). The replay path Portfolio_FromEventLog passes the
-    // original OrderEvent.timestamp_us so hold-time computation survives
-    // engine restart + OrderEventLog replay (was broken when snapshot is
-    // refused — engine reconstructs portfolio from OrderEventLog, which
-    // would otherwise reset entry_timestamp_us to NOW and zero out
-    // hold-minutes display).
-    if (override_entry_timestamp_us != 0) {
-        portfolio->positions[slot].entry_timestamp_us = override_entry_timestamp_us;
+struct PositionEntryArgs {
+    FPN<F>   entry_price;
+    FPN<F>   quantity;
+    FPN<F>   take_profit_price;
+    FPN<F>   stop_loss_price;
+    FPN<F>   entry_fee          = FPN_Zero<F>();
+    uint64_t entry_timestamp_us = 0;   // 0 = use clock_gettime(REALTIME); non-zero = preserve
+    int      pair_index         = -1;  // -1 = unpaired; >=0 = paired-leg slot index (partial-exit)
+};
+
+// v5.15.5.F.2 — Portfolio_OpenSlot now takes a const-ref PositionEntryArgs.
+// Live-entry path + replay path populate identically (struct-shape parity).
+// Old multi-arg signature shim (next overload) preserves backward compat
+// for existing call sites; deprecated but functional.
+template <unsigned F>
+inline void Portfolio_OpenSlot(Portfolio<F>* portfolio, int slot,
+                                const PositionEntryArgs<F>& args) {
+    portfolio->positions[slot].entry_price       = args.entry_price;
+    portfolio->positions[slot].quantity          = args.quantity;
+    portfolio->positions[slot].entry_fee         = args.entry_fee;
+    portfolio->positions[slot].take_profit_price = args.take_profit_price;
+    portfolio->positions[slot].stop_loss_price   = args.stop_loss_price;
+    portfolio->positions[slot].original_tp       = args.take_profit_price;
+    portfolio->positions[slot].original_sl       = args.stop_loss_price;
+    portfolio->positions[slot].pair_index        = args.pair_index;
+    // v5.11.65 — wall-clock entry timestamp for cross-restart hold tracking.
+    // CLOCK_REALTIME (not _MONOTONIC) so the value survives engine restart.
+    if (args.entry_timestamp_us != 0) {
+        portfolio->positions[slot].entry_timestamp_us = args.entry_timestamp_us;
     } else {
         struct timespec ts;
         if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
@@ -339,6 +364,24 @@ inline void Portfolio_OpenSlot(Portfolio<F> *portfolio, int slot,
         }
     }
     portfolio->active_bitmap |= (uint16_t)(1 << slot);
+}
+
+// v5.15.5.F.2 — Back-compat shim for existing call sites that pass individual
+// args. New code should construct a PositionEntryArgs + call the primary
+// overload directly. Deprecation path: convert all callers, then delete this.
+template <unsigned F>
+inline void Portfolio_OpenSlot(Portfolio<F>* portfolio, int slot,
+                                FPN<F> entry_price, FPN<F> quantity,
+                                FPN<F> take_profit_price, FPN<F> stop_loss_price,
+                                FPN<F> entry_fee = FPN_Zero<F>()) {
+    PositionEntryArgs<F> args;
+    args.entry_price        = entry_price;
+    args.quantity           = quantity;
+    args.take_profit_price  = take_profit_price;
+    args.stop_loss_price    = stop_loss_price;
+    args.entry_fee          = entry_fee;
+    // entry_timestamp_us + pair_index = struct defaults (0 / -1; live-entry semantics)
+    Portfolio_OpenSlot(portfolio, slot, args);
 }
 
 template <unsigned F>

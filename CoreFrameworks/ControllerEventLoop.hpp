@@ -801,6 +801,92 @@ namespace tt {
 namespace tt {
 
 //======================================================================================================
+// [v5.15.5.F.2 — RECONSTRUCT PER-CORE STATE FROM ORDER EVENT LOG]
+//======================================================================================================
+// Walks state->oms->event_log + reconstructs per-core attribution state
+// (entries_processed, exits_processed, core_realized, core_fees, core_open_
+// notional, core_wins, core_losses). Idempotent + safe to call multiple
+// times on the same log content; expects per-core fields to be zero-init'd
+// before call (CORE_CTX_INIT_AUTOPOPULATE handles that).
+//
+// Closes the Class-18 mirror between:
+//   - ShardedSnapshot_Load (restores per-core fields field-by-field)
+//   - Portfolio_FromEventLog (restores ONLY OMS-level state; per-core fields
+//     left at Init defaults — caused .F.2 Budget -100% display bug + drainer
+//     risk gate misbehavior).
+//
+// Per CLAUDE.md item 19 (structural fix preferred when bug class can recur)
+// + DESIGN_SPECS/structural-fix-preferred-decision-framework.md.
+//
+// Algorithm:
+//   1. Walk events in order; track per-slot "outstanding entry" record.
+//   2. BUY event → record (price, qty, entry_fee) for slot + bump entries_-
+//      processed + add notional to core_open_notional.
+//   3. SELL event → match against slot's outstanding entry → compute gross +
+//      net + fees → bump exits_processed + accumulate core_realized + fees +
+//      wins/losses + subtract entry_notional from core_open_notional.
+//
+// fee_rate is taken from state->oms->fee_rate_taker (matches live HandleFill
+// fee semantics: TP/SL market exits are always taker).
+template <unsigned F>
+inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* state) {
+    if (!state || !state->oms) return;
+    const tt::OrderEventLog<F>& log = state->oms->event_log;
+    if (log.count == 0) return;  // no events → nothing to reconstruct (first boot)
+
+    // Per-slot outstanding-entry tracker; transient (replay walk only).
+    struct SlotEntry { FPN<F> entry_price; FPN<F> qty; FPN<F> entry_fee; int valid; };
+    SlotEntry slot_entries[MAX_PORTFOLIO_POSITIONS] = {};
+
+    for (size_t i = 0; i < log.count; ++i) {
+        const tt::OrderEvent<F>& e = log.entries[i];
+        if (e.type != tt::OEVT_FULL_FILL) continue;
+        int slot = (int)e.core_id;
+        if (slot < 0 || slot >= MAX_PORTFOLIO_POSITIONS) continue;
+        // Partial-exit slot layout: leg-A @ slot 2c, leg-B @ slot 2c+1 → core c.
+        // Single-position mode: slot c → core c. Both work via slot>>1 = slot/2
+        // when partial_exit_enabled (legs paired); shifts harmlessly otherwise.
+        int core_id = slot >> 1;
+        if (core_id < 0 || core_id >= MAX_EXECUTION_CORES) continue;
+
+        if (e.order_type == tt::ORDER_MARKET_BUY) {
+            FPN<F> notional  = FPN_Mul(e.price, e.qty);
+            FPN<F> entry_fee = FPN_Mul(notional, state->oms->fee_rate_taker);
+            slot_entries[slot].entry_price = e.price;
+            slot_entries[slot].qty         = e.qty;
+            slot_entries[slot].entry_fee   = entry_fee;
+            slot_entries[slot].valid       = 1;
+            state->cores[core_id].entries_processed++;
+            state->cores[core_id].core_open_notional =
+                FPN_Add(state->cores[core_id].core_open_notional, notional);
+        } else if (e.order_type == tt::ORDER_MARKET_SELL) {
+            if (!slot_entries[slot].valid) continue;  // unmatched SELL — skip
+            FPN<F> entry_price  = slot_entries[slot].entry_price;
+            FPN<F> qty          = slot_entries[slot].qty;
+            FPN<F> entry_fee    = slot_entries[slot].entry_fee;
+            FPN<F> exit_notional= FPN_Mul(e.price, qty);
+            FPN<F> exit_fee     = FPN_Mul(exit_notional, state->oms->fee_rate_taker);
+            FPN<F> total_fee    = FPN_Add(entry_fee, exit_fee);
+            FPN<F> diff         = FPN_Sub(e.price, entry_price);
+            FPN<F> gross        = FPN_Mul(diff, qty);
+            FPN<F> net          = FPN_Sub(gross, total_fee);
+            state->cores[core_id].exits_processed++;
+            state->cores[core_id].core_realized =
+                FPN_Add(state->cores[core_id].core_realized, net);
+            state->cores[core_id].core_fees     =
+                FPN_Add(state->cores[core_id].core_fees, total_fee);
+            FPN<F> entry_notional = FPN_Mul(entry_price, qty);
+            state->cores[core_id].core_open_notional =
+                FPN_SubSat(state->cores[core_id].core_open_notional, entry_notional);
+            uint32_t is_win = (uint32_t)FPN_GreaterThan(net, FPN_Zero<F>());
+            state->cores[core_id].core_wins   += is_win;
+            state->cores[core_id].core_losses += (1u - is_win);
+            slot_entries[slot].valid = 0;  // slot freed for next match
+        }
+    }
+}
+
+//======================================================================================================
 // [INIT]
 //======================================================================================================
 // zero the dispatcher state, install the OMS back-pointer. all financial
@@ -837,6 +923,23 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
     for (int i = 0; i < MAX_EXECUTION_CORES; i++) {
         CORE_CTX_INIT_AUTOPOPULATE(state, i);
     }
+
+    // v5.15.5.F.2 — reconstruct per-core attribution from any events that were
+    // replayed during OMS AUTOPOPULATE. Closes the Class-18 mirror between
+    // snapshot-restore (ShardedSnapshot restores per-core fields directly) and
+    // OrderEventLog-replay (which previously only restored OMS-level state +
+    // Portfolio, leaving per-core fields at Init defaults). Without this:
+    //   - core_open_notional starts at 0 after replay
+    //   - First live exit's FPN_SubSat(0, entry_notional) yields NEGATIVE
+    //     (FPN_SubSat is magnitude-saturating, NOT zero-floored; comment at
+    //      ControllerEventLoop.hpp:1825 was incorrect about zero-saturation)
+    //   - Display shows "Budget -100%" + drainer risk gates (Phase 2.2 when
+    //     enforced) misbehave on stale per-core notional state.
+    //   - entries_processed/exits_processed unbalanced → core_open_positions
+    //     wraparound (uint64 underflow → huge uint32_t).
+    // Per CLAUDE.md item 19 (structural fix preferred when bug class can
+    // recur) + DESIGN_SPECS/structural-fix-preferred-decision-framework.md.
+    EventLoopState_ReconstructPerCoreFromEventLog(state);
 }
 
 //======================================================================================================

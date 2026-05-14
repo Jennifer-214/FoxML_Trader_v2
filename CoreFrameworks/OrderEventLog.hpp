@@ -647,15 +647,24 @@ inline FoldResult<F> Portfolio_FromEventLog(const OrderEventLog<F>* log,
         if (slot < 0 || slot >= MAX_PORTFOLIO_POSITIONS) continue;
 
         if (e.order_type == ORDER_MARKET_BUY) {
-            // Entry fill: open the slot. v5.15.5.F.1 — pass the original
-            // event timestamp so hold-time display survives engine restart +
-            // replay (was being reset to NOW; broke Hold column showing
-            // "5m T" uniformly across days-old positions).
+            // Entry fill: open the slot. v5.15.5.F.2 — build a
+            // PositionEntryArgs struct that preserves the original event
+            // timestamp so hold-time display survives engine restart +
+            // replay. Closes the Class-18 mirror between live-entry +
+            // replay paths per CLAUDE.md item 19.
             FPN<F> notional  = FPN_Mul(e.price, e.qty);
             FPN<F> entry_fee = FPN_Mul(notional, fee_rate);
-            Portfolio_OpenSlot(&result.portfolio, slot,
-                               e.price, e.qty, e.tp, e.sl, entry_fee,
-                               e.timestamp_us);
+            PositionEntryArgs<F> args;
+            args.entry_price        = e.price;
+            args.quantity           = e.qty;
+            args.take_profit_price  = e.tp;
+            args.stop_loss_price    = e.sl;
+            args.entry_fee          = entry_fee;
+            args.entry_timestamp_us = e.timestamp_us;  // preserve original
+            // pair_index left at default -1; partial-exit pairing across
+            // replay is a future enhancement tracked under .F.1.B (would
+            // require OrderEvent to carry pair_index too).
+            Portfolio_OpenSlot(&result.portfolio, slot, args);
         } else if (e.order_type == ORDER_MARKET_SELL) {
             // Exit fill: close the slot, compute net P&L, update balance.
             // Same math as EventLoop_OnEvent in ControllerEventLoop.hpp.
