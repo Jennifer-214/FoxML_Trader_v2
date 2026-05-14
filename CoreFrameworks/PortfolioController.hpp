@@ -2048,7 +2048,20 @@ inline void PortfolioController_HotReload(PortfolioController<F> *ctrl,
 // v5 adds: entry_ticks, entry_strategy, strategy_id, regime, momentum state
 // backward compatible: v4/v5/v6 load gracefully (missing fields get defaults)
 //======================================================================================================
-#define CONTROLLER_SNAPSHOT_VERSION 11
+// v5.15.5.E.0 — bumped from 11 → 12. v12 changes ConfidenceScorer wire
+// format from raw struct fwrite to field-by-field via FOREACH_CONFIDENCE_
+// PERSIST_FIELD registry (ML_Headers/ConfidenceScore.hpp). This decouples
+// ConfidenceScorer runtime layout from wire format, unblocking the .E.A
+// cache-layout discipline + closing the Class-18 mirror between this
+// snapshot path and the sharded path (ShardedSnapshotPersist.hpp). Legacy
+// v11 snapshots are loaded via ConfidenceScorer_ShadowLoadLegacyV1 (no
+// operator data loss — composite-mode fields re-init from cfg, which is
+// correct since wall-clock + EWMA state is stale on reload).
+//
+// LEGACY_CONFIDENCE_VERSION marks the last version using raw struct fwrite.
+// Used by LoadSnapshot to dispatch on shadow-load vs fieldwise read.
+#define CONTROLLER_SNAPSHOT_VERSION       12
+#define LEGACY_CONFIDENCE_VERSION         11
 
 template <unsigned F>
 inline void PortfolioController_SaveSnapshot(const PortfolioController<F> *ctrl,
@@ -2112,9 +2125,14 @@ inline void PortfolioController_SaveSnapshot(const PortfolioController<F> *ctrl,
     fwrite(&ctrl->strategy_stats[i].total_trades, sizeof(uint32_t), 1, f);
   }
 
-  // v11: FoxML learned state (BanditState + ConfidenceScorer survive restarts)
+  // v11: FoxML learned state (BanditState + ConfidenceScorer survive restarts).
+  // v5.15.5.E.0 (v12): ConfidenceScorer wire format is now field-by-field via
+  // shared helper. Closes Class-18 mirror with ShardedSnapshotPersist.
   fwrite(&ctrl->bandit, sizeof(BanditState), 1, f);
-  fwrite(&ctrl->confidence, sizeof(ConfidenceScorer), 1, f);
+  if (ConfidenceScorer_FieldwiseWrite(&ctrl->confidence, f) != 0) {
+    fprintf(stderr, "[SNAPSHOT] ConfidenceScorer fieldwise write failed at %s\n", filepath);
+    fclose(f); return;
+  }
 
   fflush(f);
   fclose(f);
@@ -2227,10 +2245,27 @@ inline int PortfolioController_LoadSnapshot(PortfolioController<F> *ctrl,
                 ctrl->kill_reason);
     }
 
-    // v11: FoxML learned state (BanditState + ConfidenceScorer)
+    // v11: FoxML learned state (BanditState + ConfidenceScorer).
+    // v5.15.5.E.0 (v12): ConfidenceScorer migrated to field-by-field wire
+    // format. v11 → ShadowLoadLegacyV1 (preserves operator data; composite-
+    // mode fields re-init from cfg). v12+ → FieldwiseRead.
     if (version >= 11) {
       if (fread(&ctrl->bandit, sizeof(BanditState), 1, f) != 1) { fclose(f); return 0; }
-      if (fread(&ctrl->confidence, sizeof(ConfidenceScorer), 1, f) != 1) { fclose(f); return 0; }
+      if (version == LEGACY_CONFIDENCE_VERSION) {
+        // v11: legacy raw fwrite format → shadow-load migration
+        if (ConfidenceScorer_ShadowLoadLegacyV1(&ctrl->confidence, f) != 0) {
+          fprintf(stderr, "[SNAPSHOT] legacy v11 ConfidenceScorer migration failed in %s\n",
+                  filepath);
+          fclose(f); return 0;
+        }
+        fprintf(stderr, "[SNAPSHOT] migrated legacy v11 ConfidenceScorer "
+                        "(composite-mode fields re-init from cfg; ic + rmse history preserved)\n");
+      } else {
+        // v12+: fieldwise wire format
+        if (ConfidenceScorer_FieldwiseRead(&ctrl->confidence, f) != 0) {
+          fclose(f); return 0;
+        }
+      }
       fprintf(stderr, "[SNAPSHOT] restored bandit state (%d steps) + confidence scorer\n",
               ctrl->bandit.total_steps);
     }

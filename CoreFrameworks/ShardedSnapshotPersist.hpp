@@ -238,22 +238,19 @@ inline int ShardedSnapshot_Save(const EventLoopState<F>* state,
         if (fwrite(&ctx.active_prediction, 8, 1, f) != 1) goto fail;
         if (fwrite(&ctx.last_confidence,   8, 1, f) != 1) goto fail;
 
-        // v2 (Phase 4.1) — RollingIC + RollingRMSE buffer contents. The
-        // `window` field is intentionally NOT saved: it comes from cfg at
-        // Init, so persisting it would carry stale config across restarts
-        // if the user changed confidence_window. predictions/actuals/
-        // squared_errors are the actual learning signal we don't want to
-        // lose on restart.
-        if (fwrite(ctx.confidence.ic.predictions,
-                   sizeof(double), ROLLING_IC_MAX_WINDOW, f) != ROLLING_IC_MAX_WINDOW) goto fail;
-        if (fwrite(ctx.confidence.ic.actuals,
-                   sizeof(double), ROLLING_IC_MAX_WINDOW, f) != ROLLING_IC_MAX_WINDOW) goto fail;
-        if (fwrite(&ctx.confidence.ic.count, sizeof(int), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.confidence.ic.head,  sizeof(int), 1, f) != 1) goto fail;
-        if (fwrite(ctx.confidence.rmse.squared_errors,
-                   sizeof(double), ROLLING_IC_MAX_WINDOW, f) != ROLLING_IC_MAX_WINDOW) goto fail;
-        if (fwrite(&ctx.confidence.rmse.count, sizeof(int), 1, f) != 1) goto fail;
-        if (fwrite(&ctx.confidence.rmse.head,  sizeof(int), 1, f) != 1) goto fail;
+        // v5.15.5.E.0 — ConfidenceScorer fieldwise persistence via shared
+        // FOREACH_CONFIDENCE_PERSIST_FIELD registry. Byte-identical to pre-.E
+        // sharded wire format (predictions + actuals + count + head + rmse
+        // arrays + count + head). Closes Class-18 mirror with
+        // PortfolioController.hpp:2117 — both persistence sites now call the
+        // same helper. Adding a new persisted field = 1 row in the registry.
+        // Pattern: DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md +
+        // DESIGN_SPECS/autopopulate-pattern-for-production-caller-class.md.
+        //
+        // `window` field intentionally NOT in the registry: comes from cfg at
+        // Init; persisting would carry stale config across restarts if the
+        // user changed confidence_window between sessions.
+        if (ConfidenceScorer_FieldwiseWrite(&ctx.confidence, f) != 0) goto fail;
     }
     // v3 NOTE: ExecutionCore leg-B mirrors (active_b, entry_price_b,
     // live_tp_b, live_sl_b) are NOT persisted as separate fields —
@@ -418,12 +415,14 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         int      feeder_head, feeder_count;
         // confidence (v1)
         double   staged, active, last_confidence;
-        // v2: rolling buffer contents
-        double   ic_predictions[ROLLING_IC_MAX_WINDOW];
-        double   ic_actuals[ROLLING_IC_MAX_WINDOW];
-        int      ic_count, ic_head;
-        double   rmse_squared_errors[ROLLING_IC_MAX_WINDOW];
-        int      rmse_count, rmse_head;
+        // v5.15.5.E.0 — staging ConfidenceScorer instance replaces the prior
+        // flat staging fields (ic_predictions / ic_actuals / ic_count / etc).
+        // FieldwiseRead populates only the persisted subset (ic + rmse
+        // history); composite-mode fields default-init via this struct's
+        // default-initialization (they're re-init from cfg via
+        // ConfidenceScorer_BindCompositeCfg at boot, NOT restored from snapshot).
+        // Pattern: DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md.
+        ConfidenceScorer staging_confidence;
     };
     CoreSnap snaps[MAX_EXECUTION_CORES];
 
@@ -474,14 +473,11 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         if (fread(&s.staged,         8, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.active,         8, 1, f) != 1) { fclose(f); return 0; }
         if (fread(&s.last_confidence,8, 1, f) != 1) { fclose(f); return 0; }
-        // v2 — RollingIC + RollingRMSE buffers
-        if (fread(s.ic_predictions, sizeof(double), ROLLING_IC_MAX_WINDOW, f) != ROLLING_IC_MAX_WINDOW) { fclose(f); return 0; }
-        if (fread(s.ic_actuals,     sizeof(double), ROLLING_IC_MAX_WINDOW, f) != ROLLING_IC_MAX_WINDOW) { fclose(f); return 0; }
-        if (fread(&s.ic_count, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.ic_head,  sizeof(int), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(s.rmse_squared_errors, sizeof(double), ROLLING_IC_MAX_WINDOW, f) != ROLLING_IC_MAX_WINDOW) { fclose(f); return 0; }
-        if (fread(&s.rmse_count, sizeof(int), 1, f) != 1) { fclose(f); return 0; }
-        if (fread(&s.rmse_head,  sizeof(int), 1, f) != 1) { fclose(f); return 0; }
+        // v5.15.5.E.0 — ConfidenceScorer fieldwise read into staging instance.
+        // FOREACH_CONFIDENCE_PERSIST_FIELD drives the read; same wire format
+        // as ShardedSnapshotPersist save. Atomicity preserved by reading into
+        // staging (commit happens later after all per-core reads validate).
+        if (ConfidenceScorer_FieldwiseRead(&s.staging_confidence, f) != 0) { fclose(f); return 0; }
     }
     fclose(f);
 
@@ -572,17 +568,14 @@ inline int ShardedSnapshot_Load(EventLoopState<F>* state, const char* filepath,
         ctx.staged_prediction = s.staged;
         ctx.active_prediction = s.active;
         ctx.last_confidence   = s.last_confidence;
-        // v2 — restore rolling IC + RMSE buffer contents. Don't overwrite
-        // the `window` field on either struct: it was set from current
-        // cfg at ConfidenceScorer_Init and persisting it would carry
-        // stale config across restarts.
-        memcpy(ctx.confidence.ic.predictions, s.ic_predictions, sizeof(s.ic_predictions));
-        memcpy(ctx.confidence.ic.actuals,     s.ic_actuals,     sizeof(s.ic_actuals));
-        ctx.confidence.ic.count = s.ic_count;
-        ctx.confidence.ic.head  = s.ic_head;
-        memcpy(ctx.confidence.rmse.squared_errors, s.rmse_squared_errors, sizeof(s.rmse_squared_errors));
-        ctx.confidence.rmse.count = s.rmse_count;
-        ctx.confidence.rmse.head  = s.rmse_head;
+        // v5.15.5.E.0 — Commit ConfidenceScorer persisted subset via shared
+        // helper. FOREACH_CONFIDENCE_PERSIST_FIELD drives both the read into
+        // staging AND this commit copy → adding a new persisted field is ONE
+        // registry row; both paths auto-update. The `window` field is NOT in
+        // the registry: it stays at the value set by ConfidenceScorer_Init
+        // (current cfg), so the runtime composite-mode + window stay valid
+        // even when restoring from an older config's snapshot.
+        ConfidenceScorer_CommitPersistedFields(&ctx.confidence, &s.staging_confidence);
     }
 
     // Bug fix (2026-04-27): re-activate ExecutionCore<F> hot-path state from

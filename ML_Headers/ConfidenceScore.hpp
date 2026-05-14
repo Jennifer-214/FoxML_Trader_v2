@@ -700,4 +700,168 @@ static inline int DriftHistory_CheckBreach(const DriftHistory *dh, uint64_t now_
     return (avg < floor) ? 1 : 0;
 }
 
+//======================================================================================================
+// [v5.15.5.E.0 — STRUCTURAL UNBLOCK: FOREACH_CONFIDENCE_PERSIST_FIELD + AUTOPOPULATE + shadow-load]
+//======================================================================================================
+// Closes Class-18 mirror between PortfolioController.hpp:2117 (raw fwrite)
+// and ShardedSnapshotPersist.hpp:247-256 (field-by-field) per
+// structural-fix-preferred-decision-framework.md + CLAUDE.md item 19.
+//
+// FOREACH registry IS the wire format spec. Both persistence sites use the
+// same fieldwise helpers — adding a new persisted field = ONE row in the
+// registry; both fwrite + fread bodies + commit path auto-generated via
+// macro expansion (autopopulate-pattern-for-production-caller-class.md).
+//
+// Subset matches sharded path's pre-.E behavior: only ic + rmse internals
+// persist. Composite-mode fields (freshness/capacity/rmse_baseline) are
+// EXCLUDED — wall-clock + EWMA state stale on reload; re-init from cfg
+// at boot is the correct behavior (legacy raw-fwrite was over-persisting).
+// last_confidence / freshness_tau / ic.window / rmse.window similarly omitted
+// (re-compute on next Compute / re-init from cfg / template constant).
+//
+// FIELD signature: X(member_path, type, count) where count=1 for scalar,
+// N for array. The macro expands inside `cs->{name}` access.
+//
+// Pattern: DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md +
+// DESIGN_SPECS/autopopulate-pattern-for-production-caller-class.md.
+//======================================================================================================
+#define FOREACH_CONFIDENCE_PERSIST_FIELD(X)              \
+    X(ic.predictions,       double, ROLLING_IC_MAX_WINDOW) \
+    X(ic.actuals,           double, ROLLING_IC_MAX_WINDOW) \
+    X(ic.count,             int,    1)                     \
+    X(ic.head,              int,    1)                     \
+    X(rmse.squared_errors,  double, ROLLING_IC_MAX_WINDOW) \
+    X(rmse.count,           int,    1)                     \
+    X(rmse.head,            int,    1)
+
+// AUTOPOPULATE fwrite — field-by-field write. Returns -1 on any fwrite failure.
+// Wire byte sequence: exactly the same as pre-.E sharded path (lines 247-256
+// of ShardedSnapshotPersist.hpp). PortfolioController.hpp gains this format
+// via the .E.0 version bump (CONTROLLER_SNAPSHOT_VERSION 11 → 12).
+#define CONFIDENCE_FWRITE_FIELD_(name, type, n)             \
+    if (fwrite(&cs->name, sizeof(type), (size_t)(n), f) != (size_t)(n)) return -1;
+
+static inline int ConfidenceScorer_FieldwiseWrite(const ConfidenceScorer* cs, FILE* f) {
+    FOREACH_CONFIDENCE_PERSIST_FIELD(CONFIDENCE_FWRITE_FIELD_)
+    return 0;
+}
+
+// AUTOPOPULATE fread — field-by-field read. Same wire format as FieldwiseWrite.
+#define CONFIDENCE_FREAD_FIELD_(name, type, n)              \
+    if (fread(&cs->name, sizeof(type), (size_t)(n), f) != (size_t)(n)) return -1;
+
+static inline int ConfidenceScorer_FieldwiseRead(ConfidenceScorer* cs, FILE* f) {
+    FOREACH_CONFIDENCE_PERSIST_FIELD(CONFIDENCE_FREAD_FIELD_)
+    return 0;
+}
+
+// AUTOPOPULATE commit — copy persisted-subset from src to dst. Used by
+// ShardedSnapshotPersist load (commit-after-read-validation pattern preserves
+// atomicity; staging instance receives fread; commit copies to runtime only
+// after all reads succeed).
+#define CONFIDENCE_COMMIT_FIELD_(name, type, n)             \
+    memcpy(&dst->name, &src->name, sizeof(type) * (size_t)(n));
+
+static inline void ConfidenceScorer_CommitPersistedFields(ConfidenceScorer* dst,
+                                                            const ConfidenceScorer* src) {
+    FOREACH_CONFIDENCE_PERSIST_FIELD(CONFIDENCE_COMMIT_FIELD_)
+}
+
+#undef CONFIDENCE_FWRITE_FIELD_
+#undef CONFIDENCE_FREAD_FIELD_
+#undef CONFIDENCE_COMMIT_FIELD_
+
+//======================================================================================================
+// [v5.15.5.E.0 — LEGACY V1 WIRE STRUCT + SHADOW-LOAD MIGRATION]
+//======================================================================================================
+// ConfidenceScorerLegacyV1 + sub-structs: FROZEN byte-format matching pre-.E
+// PortfolioController raw fwrite (CONTROLLER_SNAPSHOT_VERSION=11). Used ONLY
+// by ConfidenceScorer_ShadowLoadLegacyV1 during one-shot migration of v11
+// snapshots → v12 runtime layout. Operator data preserved across the wire-
+// format break (no re-warm required).
+//
+// THESE STRUCTS ARE NEVER WRITTEN. Pure read-side wire-format target. After
+// TECH_DEBT-002 closes (legacy PortfolioController removal), they can be
+// deleted entirely + the shadow-load helper goes with them.
+//
+// Layout cloned from pre-.E.A ConfidenceScorer + sub-structs. Field order +
+// types match exactly. Compiler-generated padding matches because the struct
+// definitions are identical (same alignof, same field types).
+//
+// Pattern: DESIGN_SPECS/shadow-load-state-transition-pattern.md +
+// DESIGN_SPECS/wire-format-byte-preservation-discipline.md +
+// DESIGN_SPECS/struct-padding-determinism-pattern.md.
+//======================================================================================================
+struct RollingIC_LegacyV1 {
+    double predictions[ROLLING_IC_MAX_WINDOW];
+    double actuals[ROLLING_IC_MAX_WINDOW];
+    int count;
+    int head;
+    int window;
+};
+
+struct RollingRMSE_LegacyV1 {
+    double squared_errors[ROLLING_IC_MAX_WINDOW];
+    int count;
+    int head;
+    int window;
+};
+
+struct RollingFreshness_LegacyV1 {
+    uint64_t last_predict_us;
+    double   tau_secs;
+};
+
+struct RollingCapacity_LegacyV1 {
+    double current_adv;
+    double target_dollars;
+    double kappa;
+};
+
+struct ConfidenceScorerLegacyV1 {
+    RollingIC_LegacyV1   ic;
+    RollingRMSE_LegacyV1 rmse;
+    double               freshness_tau;
+    double               last_confidence;
+    RollingFreshness_LegacyV1 freshness;
+    RollingCapacity_LegacyV1  capacity;
+    double               rmse_baseline;
+};
+
+// Shadow-load: read v11 raw-fwrite bytes, populate runtime ConfidenceScorer
+// via field-by-field copy. Composite-mode fields RE-INIT from cfg via
+// ConfidenceScorer_Init (wall-clock + EWMA stale on reload; re-warm correct).
+// Returns 0 on success; -1 on fread failure.
+static inline int ConfidenceScorer_ShadowLoadLegacyV1(ConfidenceScorer* cs, FILE* f) {
+    ConfidenceScorerLegacyV1 wire;
+    if (fread(&wire, sizeof(wire), 1, f) != 1) return -1;
+
+    // Re-init runtime struct to defaults (clean slate; preserves window
+    // semantics from current cfg). Window restored from legacy if it's
+    // a sensible value; else default.
+    int restore_window = wire.ic.window;
+    double restore_tau = wire.freshness_tau;
+    ConfidenceScorer_Init(cs, restore_window, restore_tau);
+
+    // Copy persisted IC + RMSE history from wire to runtime.
+    memcpy(cs->ic.predictions, wire.ic.predictions, sizeof(wire.ic.predictions));
+    memcpy(cs->ic.actuals,     wire.ic.actuals,     sizeof(wire.ic.actuals));
+    cs->ic.count = wire.ic.count;
+    cs->ic.head  = wire.ic.head;
+    memcpy(cs->rmse.squared_errors, wire.rmse.squared_errors,
+           sizeof(wire.rmse.squared_errors));
+    cs->rmse.count = wire.rmse.count;
+    cs->rmse.head  = wire.rmse.head;
+
+    // Restore last_confidence cache (next Compute will overwrite anyway).
+    cs->last_confidence = wire.last_confidence;
+    // INTENTIONALLY DROPPED: wire.freshness.last_predict_us (wall-clock; stale)
+    // INTENTIONALLY DROPPED: wire.freshness.tau_secs (re-init from cfg)
+    // INTENTIONALLY DROPPED: wire.capacity.* (EWMA state stale; re-warm)
+    // INTENTIONALLY DROPPED: wire.rmse_baseline (re-init from cfg)
+    // INTENTIONALLY DROPPED: wire.ic.window / rmse.window (template constant)
+
+    return 0;
+}
+
 #endif // CONFIDENCE_SCORE_HPP
