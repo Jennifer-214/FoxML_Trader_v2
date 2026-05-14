@@ -1283,7 +1283,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
         if (ImGui::BeginTabItem(class_label)) {
             if (n_class == 0) {
                 ImGui::TextDisabled("No classification runs saved yet.");
-            } else if (ImGui::BeginTable("past_runs_class", 15, flags)) {  // v5.11.51: +Date +Delete columns
+            } else if (ImGui::BeginTable("past_runs_class", 16, flags)) {  // v5.11.51: +Date +Delete cols; v5.15.5.E.bugfix: 15→16 (Samples col added but BeginTable count missed; ImGui asserted on 16th TableSetupColumn)
                 ImGui::TableSetupColumn("Run",        ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 220);
                 ImGui::TableSetupColumn("Date",       ImGuiTableColumnFlags_WidthFixed, 100);  // v5.11.51
                 ImGui::TableSetupColumn("Role",       ImGuiTableColumnFlags_WidthFixed, 80);
@@ -1451,7 +1451,7 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
         if (ImGui::BeginTabItem(regr_label)) {
             if (n_regr == 0) {
                 ImGui::TextDisabled("No regression runs saved yet.");
-            } else if (ImGui::BeginTable("past_runs_regr", 14, flags)) {  // v5.11.55: +Date +Delete columns
+            } else if (ImGui::BeginTable("past_runs_regr", 15, flags)) {  // v5.11.55: +Date +Delete cols; v5.15.5.E.bugfix: 14→15 (Samples col added but BeginTable count missed; same off-by-one as past_runs_class)
                 ImGui::TableSetupColumn("Run",        ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 220);
                 ImGui::TableSetupColumn("Date",       ImGuiTableColumnFlags_WidthFixed, 100);  // v5.11.55
                 ImGui::TableSetupColumn("Role",       ImGuiTableColumnFlags_WidthFixed, 80);
