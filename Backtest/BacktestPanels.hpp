@@ -1433,7 +1433,14 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                     ImGui::PushID(i);
                     if (ImGui::SmallButton("X")) {
                         s->pending_delete_idx = i;
-                        ImGui::OpenPopup("##DeleteConfirmModal");
+                        // v5.15.5.F.6 — OpenPopup MOVED outside table scope (see
+                        // below at "Hoisted OpenPopup" comment). Calling OpenPopup
+                        // inside PushID(i) + BeginTable scope made the popup ID
+                        // hash with the row's pushed ID + table context; the
+                        // matching BeginPopupModal at parent-window scope computed
+                        // a DIFFERENT hash → popup never appeared. Click handler
+                        // now only sets pending state; the outer-scope hoist
+                        // fires OpenPopup once when state becomes non-negative.
                     }
                     ImGui::SetItemTooltip("Delete this run (recursive)");
                     ImGui::PopID();
@@ -1577,7 +1584,14 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
                     ImGui::PushID(i);
                     if (ImGui::SmallButton("X")) {
                         s->pending_delete_idx = i;
-                        ImGui::OpenPopup("##DeleteConfirmModal");
+                        // v5.15.5.F.6 — OpenPopup MOVED outside table scope (see
+                        // below at "Hoisted OpenPopup" comment). Calling OpenPopup
+                        // inside PushID(i) + BeginTable scope made the popup ID
+                        // hash with the row's pushed ID + table context; the
+                        // matching BeginPopupModal at parent-window scope computed
+                        // a DIFFERENT hash → popup never appeared. Click handler
+                        // now only sets pending state; the outer-scope hoist
+                        // fires OpenPopup once when state becomes non-negative.
                     }
                     ImGui::SetItemTooltip("Delete this run (recursive)");
                     ImGui::PopID();
@@ -1593,6 +1607,20 @@ static inline void GUI_Panel_PastRuns(PastRunsState *s,
     // Sits at parent window scope so it isn't scoped to a table cell's
     // transient context (which caused the v5.11.51/v5.11.55 "peach flash,
     // no popup" bug).
+    //
+    // v5.15.5.F.6 — Hoisted OpenPopup too. The v5.11.51 fix only hoisted the
+    // popup BODY; the OpenPopup call stayed inside PushID(i) + BeginTable
+    // scope where it hashed with a DIFFERENT ID context than the
+    // BeginPopupModal at this outer window scope. Net: click "X", state
+    // updates, popup never opens. Hoisting OpenPopup here (same scope as
+    // BeginPopupModal) makes the IDs match.
+    //
+    // Idempotent: ImGui::OpenPopup is a no-op when the popup is already open
+    // (IsPopupOpen guard not strictly needed, but explicit guards make the
+    // single-shot semantic obvious).
+    if (s->pending_delete_idx >= 0 && !ImGui::IsPopupOpen("##DeleteConfirmModal")) {
+        ImGui::OpenPopup("##DeleteConfirmModal");
+    }
     if (ImGui::BeginPopupModal("##DeleteConfirmModal", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
         if (s->pending_delete_idx >= 0 && s->pending_delete_idx < s->count) {
