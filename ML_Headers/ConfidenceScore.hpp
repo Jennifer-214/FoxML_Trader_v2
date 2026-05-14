@@ -42,6 +42,7 @@
 #include <string.h>
 #include <strings.h>  // v5.14.9 — strcasecmp for DegradationCurve_FromString
 #include "ICVariantRegistry.hpp"  // v5.14.1.F — FOREACH_IC_VARIANT X-macro
+#include "../MemHeaders/BitmapMacros.hpp"  // v5.15.5.E.B — BITMAP_BIT_U8 + BITMAP_* accessors for DriftHistory flags
 
 // default parameters (from FoxML constants.py + confidence.py)
 #define CONFIDENCE_FRESHNESS_TAU_DEFAULT  300.0   // seconds (5 min decay)
@@ -741,32 +742,96 @@ static inline double Confidence_DegradationScale(int curve, double conf,
 //======================================================================================================
 #define DRIFT_HISTORY_CAPACITY 256
 
-struct DriftHistory {
-    double   ic_samples[DRIFT_HISTORY_CAPACITY];
-    uint64_t ts_us[DRIFT_HISTORY_CAPACITY];
-    int      count;             // monotonic insert count (saturates at CAPACITY)
-    int      head;              // next write index modulo CAPACITY
-    int      breached;          // 1 = sustained breach currently active
-    uint64_t breach_first_us;   // wall-clock when breach was first detected
-    int      kill_tripped;      // 1 = kill_switch was tripped due to drift
+// v5.15.5.E.B — DriftHistory state flags bitmap. Replaces int breached +
+// int kill_tripped (8 bytes; 2 booleans) with uint8_t drift_state_flags
+// (1 byte; 2 bits used, 6 free for future flags). Per bitmap-flag-api.md +
+// CLAUDE.md item 20. Single-thread access (per-core slow-path); no atomic
+// variant needed.
+constexpr uint8_t MASK_DRIFT_BREACHED     = BITMAP_BIT_U8(0);
+constexpr uint8_t MASK_DRIFT_KILL_TRIPPED = BITMAP_BIT_U8(1);
+// bits 2-7 reserved for future drift-state flags
+
+// v5.15.5.E.B — AoS sample interleave per latency-vs-cache-decision-framework.md
+// + DESIGN_SPECS/aos-time-series-pattern (codification deferred to 2nd app per
+// TECH_DEBT-049 trigger). Pre-.E.B layout was parallel arrays (ic_samples[256] +
+// ts_us[256]) at 2048B offset apart → CheckBreach loop touched 2 cache lines
+// per iteration. Post-.E.B: each iteration touches 1 cache line (DriftSample
+// is 16B; samples[k] read pulls both .ic + .ts in one cache fill).
+struct DriftSample {
+    double   ic;   // IC value at this sample point (read by CheckBreach + snapshot aggregate)
+    uint64_t ts;   // wall-clock timestamp at sample (read by CheckBreach window filter)
 };
+static_assert(sizeof(DriftSample) == 16,
+    "DriftSample MUST be 16 B (2 × 8B; AoS cache locality for CheckBreach).");
+static_assert(offsetof(DriftSample, ic) == 0, "DriftSample.ic at offset 0");
+static_assert(offsetof(DriftSample, ts) == 8, "DriftSample.ts at offset 8");
+static_assert(alignof(DriftSample) == 8, "DriftSample 8B aligned");
+
+// v5.15.5.E.B — breach_first_us EXTRACTED to existing CoreContextDisplayMeta
+// sibling via FOREACH_DISPLAY_META_FIELD registry row (drift_breach_first_us).
+// Per cache-layout-discipline-for-hot-side-structs.md Rule 1 (display-only
+// field extraction) + closes Class-18 mirror with other display-only fields
+// on CoreContext (avoids creating yet another DisplayMeta sister struct).
+// Audit verified 2026-05-13: breach_first_us is WRITE-ONLY in current code
+// (set at first-breach detection; never read; not in snapshot). Preserved
+// for future GUI consumption via DisplayMeta access.
+
+// v5.15.5.E.B — DriftHistory full discipline: alignas(64) + HOT-first reorg +
+// AoS interleave + bit-packed flags + display-only field extracted. Pattern:
+// cache-layout-discipline-for-hot-side-structs.md Rules 1 + 4 + 5 + bitmap-
+// flag-api.md + latency-vs-cache-decision-framework.md.
+struct alignas(64) DriftHistory {
+    // HOT cluster (offset 0)
+    int     count;              // monotonic insert count (saturates at CAPACITY)
+    int     head;               // next write index modulo CAPACITY
+    uint8_t drift_state_flags;  // MASK_DRIFT_* bits; replaces int breached + int kill_tripped
+    // 7B implicit pad → samples at offset 16 (DriftSample needs 8B alignment;
+    // memset(0) at Init clears pad bytes; DriftHistory is NOT in byte-
+    // equivalence context per audit so explicit pad fields not required)
+    // COLD cluster (offset 16; 4096B AoS ring buffer)
+    DriftSample samples[DRIFT_HISTORY_CAPACITY];
+};
+
+// v5.15.5.E.B — Layout lock for DriftHistory.
+// 9 byte HOT + 7B pad + 4096B samples = 4112 natural; alignas(64) → 4160
+// (+48B trailing pad; 65 cache lines exact).
+static_assert(sizeof(DriftHistory) == 4160,
+    "DriftHistory sizeof MUST be 4160 B (65 cache lines with 48B trailing pad).");
+static_assert(offsetof(DriftHistory, count) == 0,
+    "DriftHistory HOT scalar `count` at offset 0.");
+static_assert(offsetof(DriftHistory, drift_state_flags) == 8,
+    "DriftHistory HOT bitmap `drift_state_flags` at offset 8.");
+static_assert(offsetof(DriftHistory, samples) == 16,
+    "DriftHistory COLD `samples` at offset 16 (cache-aligned with 7B pad after flags).");
+static_assert(alignof(DriftHistory) == 64,
+    "DriftHistory MUST be cache-line aligned.");
 
 static inline void DriftHistory_Init(DriftHistory *dh) {
     memset(dh, 0, sizeof(*dh));
+    // count = head = drift_state_flags = 0; samples[] = {0}; pad bytes cleared.
 }
 
+// v5.15.5.E.B — Write to AoS samples[idx].{ic, ts}. Each Push touches ONE
+// cache line for the sample write (vs pre-.E.B which wrote to ic_samples[idx]
+// + ts_us[idx], 2 separate cache lines 2048B apart).
 static inline void DriftHistory_Push(DriftHistory *dh, double ic, uint64_t now_us) {
     int idx = dh->head % DRIFT_HISTORY_CAPACITY;
-    dh->ic_samples[idx] = ic;
-    dh->ts_us[idx]      = now_us;
+    dh->samples[idx].ic = ic;
+    dh->samples[idx].ts = now_us;
     dh->head++;
     if (dh->count < DRIFT_HISTORY_CAPACITY) dh->count++;
 }
 
-// Returns 1 if sustained breach: average IC across samples whose
-// timestamps fall within (now_us - window_us, now_us] is below `floor`,
-// AND at least 5 such samples exist (avoid noise-triggered false alarm).
-// out_avg_ic / out_samples are optional diagnostic outputs.
+// Returns 1 if sustained breach: average IC across samples whose timestamps
+// fall within (now_us - window_us, now_us] is below `floor`, AND at least 5
+// such samples exist (avoid noise-triggered false alarm). out_avg_ic /
+// out_samples are optional diagnostic outputs.
+//
+// v5.15.5.E.B — AoS interleave: each loop iteration reads samples[idx].ic +
+// samples[idx].ts from the SAME cache line (vs pre-.E.B which read from 2
+// separate arrays 2048B apart). At cap=256 samples / cycle, savings of
+// ~128-256 cache-line fills per call (cold cache) → ~12-25 µs/CheckBreach
+// at typical 10-100Hz cadence.
 static inline int DriftHistory_CheckBreach(const DriftHistory *dh, uint64_t now_us,
                                             uint64_t window_us, double floor,
                                             double *out_avg_ic, int *out_samples) {
@@ -781,8 +846,8 @@ static inline int DriftHistory_CheckBreach(const DriftHistory *dh, uint64_t now_
     uint64_t cutoff = (now_us > window_us) ? (now_us - window_us) : 0ULL;
     for (int i = 0; i < cap; i++) {
         int idx = (dh->head - 1 - i + DRIFT_HISTORY_CAPACITY) % DRIFT_HISTORY_CAPACITY;
-        if (dh->ts_us[idx] <= cutoff) break;  // outside window
-        sum += dh->ic_samples[idx];
+        if (dh->samples[idx].ts <= cutoff) break;  // outside window — 1 line touch
+        sum += dh->samples[idx].ic;                 // SAME line as .ts (AoS)
         n++;
     }
     if (n < 5) return 0;

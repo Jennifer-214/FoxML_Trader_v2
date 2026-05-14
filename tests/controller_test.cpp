@@ -14427,9 +14427,11 @@ e3_skip_load:;
 
         DriftHistory dh;
         DriftHistory_Init(&dh);
-        check("v5.10.0e: DriftHistory_Init zeroes count + head + breached",
-              dh.count == 0 && dh.head == 0 && dh.breached == 0 &&
-              dh.kill_tripped == 0);
+        // v5.15.5.E.B — breached + kill_tripped migrated to drift_state_flags bitmap
+        check("v5.10.0e: DriftHistory_Init zeroes count + head + state flags",
+              dh.count == 0 && dh.head == 0 &&
+              !BITMAP_IS_SET(dh.drift_state_flags, MASK_DRIFT_BREACHED) &&
+              !BITMAP_IS_SET(dh.drift_state_flags, MASK_DRIFT_KILL_TRIPPED));
 
         // Push 3 samples below floor (insufficient — < 5 samples returns 0)
         DriftHistory_Push(&dh, 0.005, 1000ULL);

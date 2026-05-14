@@ -1509,12 +1509,17 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                         &ctx.drift_history, now_us,
                         (uint64_t)drift_window_seconds * 1000000ULL,
                         drift_floor, &avg_ic, &n_samples);
-                    if (breach && !ctx.drift_history.breached) {
+                    // v5.15.5.E.B — breached + kill_tripped migrated to
+                    // drift_state_flags bitmap (uint8_t; 2 bits used, 6 free).
+                    // breach_first_us extracted to display_meta (write-only;
+                    // preserved for future GUI). Per bitmap-flag-api.md +
+                    // cache-layout-discipline Rule 1.
+                    if (breach && !BITMAP_IS_SET(ctx.drift_history.drift_state_flags, MASK_DRIFT_BREACHED)) {
                         // First breach — log CRITICAL + record onset.
                         // Rate-limit at 60s per core to avoid log spam if
                         // breach toggles around the threshold.
-                        ctx.drift_history.breached = 1;
-                        ctx.drift_history.breach_first_us = now_us;
+                        BITMAP_SET(ctx.drift_history.drift_state_flags, MASK_DRIFT_BREACHED);
+                        state->display_meta[core_id].drift_breach_first_us = now_us;
                         static uint64_t s_drift_log_us[16] = {0};
                         Health_LogCriticalRateLimited(
                             &s_drift_log_us[core_id & 15], 60000000ULL,
@@ -1522,10 +1527,10 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                             "IC=%.4f below floor=%.4f over %us window (%d samples)",
                             avg_ic, drift_floor,
                             (unsigned)drift_window_seconds, n_samples);
-                        if (drift_auto_kill && !ctx.drift_history.kill_tripped) {
+                        if (drift_auto_kill && !BITMAP_IS_SET(ctx.drift_history.drift_state_flags, MASK_DRIFT_KILL_TRIPPED)) {
                             CORE_STATE_FLAG_SET(state->cores[core_id], KILL_TRIPPED);
                             state->cores[core_id].core_ks_trips_total++;
-                            ctx.drift_history.kill_tripped = 1;
+                            BITMAP_SET(ctx.drift_history.drift_state_flags, MASK_DRIFT_KILL_TRIPPED);
                             static uint64_t s_drift_kill_log_us[16] = {0};
                             Health_LogCriticalRateLimited(
                                 &s_drift_kill_log_us[core_id & 15], 60000000ULL,
@@ -1533,9 +1538,9 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                                 "AUTO-KILL: per-core kill_switch tripped due to "
                                 "sustained IC drift");
                         }
-                    } else if (!breach && ctx.drift_history.breached) {
+                    } else if (!breach && BITMAP_IS_SET(ctx.drift_history.drift_state_flags, MASK_DRIFT_BREACHED)) {
                         // Recovery — clear breach state, log info
-                        ctx.drift_history.breached = 0;
+                        BITMAP_CLR(ctx.drift_history.drift_state_flags, MASK_DRIFT_BREACHED);
                         fprintf(stderr,
                             "[drift] core %d RECOVERED: IC=%.4f above floor=%.4f\n",
                             core_id, avg_ic, drift_floor);

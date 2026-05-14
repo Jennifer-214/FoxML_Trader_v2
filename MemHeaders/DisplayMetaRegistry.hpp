@@ -109,7 +109,12 @@ namespace tt {
     X(uint32_t,  nan_prediction_events_total, 0,    "v5.9.0b Model_Predict NaN/Inf events on this core")                           \
     /* Cfg-drift counter state (booleans moved to core_state_flags bitmap in v5.15.5.B.3) */       \
     X(uint8_t,   cfg_drift_tier1_count,       0,    "v5.9.5i cfg drift Tier 1 count")                                              \
-    X(uint8_t,   cfg_drift_tier2_count,       0,    "v5.9.5i cfg drift Tier 2 count")
+    X(uint8_t,   cfg_drift_tier2_count,       0,    "v5.9.5i cfg drift Tier 2 count")                                              \
+    /* v5.15.5.E.B: drift_history.breach_first_us EXTRACTED here per cache-layout-discipline Rule 1. */                            \
+    /* Write-only currently (set at first-breach detection in ControllerEventLoop; never read).      */                            \
+    /* Preserved for future GUI panel display + observability. Closes Class-18 mirror — would be     */                            \
+    /* a 3rd DisplayMeta sibling-struct creation if not unified here.                                */                            \
+    X(uint64_t,  drift_breach_first_us,       0,    "v5.15.5.E.B wall-clock at first drift breach detection on this core")
     /* v5.15.5.B.3: model_load_failed, cfg_drift_strict_refused, warmup_log_emitted */                                             \
     /* migrated to core_state_flags bitmap on CoreContext (CoreStateFlagRegistry.hpp).             */                              \
     /* Final home — closes the Class 18 mirror they represented. */
@@ -126,9 +131,9 @@ static_assert(GATE_DIAG_PAIR_COUNT == 6,
 #define FOREACH_DISPLAY_META_FIELD_X_COUNT(...) 1+
 constexpr int DISPLAY_META_FIELD_COUNT = FOREACH_DISPLAY_META_FIELD(FOREACH_DISPLAY_META_FIELD_X_COUNT) 0;
 #undef FOREACH_DISPLAY_META_FIELD_X_COUNT
-static_assert(DISPLAY_META_FIELD_COUNT == 9,
-              "FOREACH_DISPLAY_META_FIELD is expected to have exactly 9 entries "
-              "at v5.15.5.B.3 ship (was 12 at .B.2; 3 booleans migrated to "
-              "core_state_flags bitmap on CoreContext in .B.3).");
+static_assert(DISPLAY_META_FIELD_COUNT == 10,
+              "FOREACH_DISPLAY_META_FIELD is expected to have exactly 10 entries "
+              "at v5.15.5.E.B ship (was 9 at .B.3; +1 drift_breach_first_us "
+              "extracted from DriftHistory per Rule 1 display-only extraction).");
 
 }  // namespace tt

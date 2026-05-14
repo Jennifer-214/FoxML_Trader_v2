@@ -490,17 +490,23 @@ static inline void TUI_CopySnapshotSharded(
             STATE_FLAG_SET(snap->per_core[i], CORE_KILL_TRIPPED);
         }
         // v5.10.3.B — runtime IC drift observability (parity-check Finding #9).
-        if (state->cores[i].drift_history.breached) {
+        // v5.15.5.E.B — breached + kill_tripped now packed in drift_state_flags
+        // bitmap (uint8_t); ic_samples + ts_us merged into AoS samples[].ic.
+        // Per bitmap-flag-api.md + latency-vs-cache-decision-framework.md.
+        if (BITMAP_IS_SET(state->cores[i].drift_history.drift_state_flags, MASK_DRIFT_BREACHED)) {
             STATE_FLAG_SET(snap->per_core[i], DRIFT_BREACHED);
         }
-        if (state->cores[i].drift_history.kill_tripped) {
+        if (BITMAP_IS_SET(state->cores[i].drift_history.drift_state_flags, MASK_DRIFT_KILL_TRIPPED)) {
             STATE_FLAG_SET(snap->per_core[i], DRIFT_KILL_TRIPPED);
         }
         snap->per_core[i].drift_n_samples    = (uint16_t)state->cores[i].drift_history.count;
         {
             double sum = 0.0;
             int cnt = state->cores[i].drift_history.count;
-            for (int k = 0; k < cnt; ++k) sum += state->cores[i].drift_history.ic_samples[k];
+            // v5.15.5.E.B — AoS interleave: read samples[k].ic (vs prior parallel-
+            // array ic_samples[k]). Each iteration touches 1 cache line containing
+            // both .ic + .ts (vs prior 2 cache lines from arrays 2048B apart).
+            for (int k = 0; k < cnt; ++k) sum += state->cores[i].drift_history.samples[k].ic;
             snap->per_core[i].drift_avg_ic = (cnt > 0) ? (sum / (double)cnt) : 0.0;
         }
         tt::ExecutionCore<F>* core = state->cores[i].core;
