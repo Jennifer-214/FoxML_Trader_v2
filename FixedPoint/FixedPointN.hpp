@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <assert.h>
 #include <math.h>
+#include <type_traits>  // v5.15.5.F.4b — std::false_type / std::true_type for is_FPN<T> type trait
 
 //======================================================================================================
 // [FIXED-POINT NUMBER REPRESENTATION]
@@ -32,6 +33,11 @@ template <unsigned FRAC_BITS> struct FPN {
     static_assert(FRAC_BITS >= 64, "minimum 64 fractional bits, use FixedPoint16/32 for smaller");
     static_assert((FRAC_BITS & (FRAC_BITS - 1)) == 0, "FRAC_BITS must be a power of 2");
 
+    // v5.15.5.F.4b — expose template parameter as member for T::F access in
+    // templated dispatchers. tt::cfg_parse_field<T> needs FPN_FromDouble<T::F>(v)
+    // to instantiate the correct FPN<F> specialization given a deduced T = FPN<F>.
+    // Mirrors the existing TOTAL_BITS/N/FRAC_WORDS exposure pattern below.
+    static constexpr unsigned F          = FRAC_BITS;
     static constexpr unsigned TOTAL_BITS = FRAC_BITS * 2;
     static constexpr unsigned N          = TOTAL_BITS / 64; // number of uint64_t words
     static constexpr unsigned FRAC_WORDS = FRAC_BITS / 64;  // words that are fractional
@@ -47,6 +53,30 @@ template <unsigned FRAC_BITS> struct FPN {
                            // FracDiff bytewise-identity regression (exposed by
                            // v5.14.11.B stack-layout shift) eliminated by this fix.
 };
+
+// v5.15.5.F.4b — type trait for FPN<F> detection in templated dispatchers.
+// Used by tt::cfg_parse_field<T> / tt::cfg_save_field<T> / tt::cfg_render_field<T>
+// (and any future templated typed-field dispatcher) to dispatch to FPN-specific
+// branches (FPN_FromDouble + clamp + percent scaling) vs. raw double / int / array.
+//
+// Critical for closing DOCS/RECURRING_BUG_PATTERNS.md Class 23 (type-erased
+// reinterpret_cast through char*+offset dispatch). Without this trait, registry-
+// driven cfg dispatch can't safely distinguish FPN<F> fields from raw double
+// fields, leading to silent mantissa corruption when 8-byte double is punned
+// through a 24-byte FPN<F> address.
+//
+// 3-barrier structural fix per DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md:
+//   Barrier 1: API surface (no void*+offset entry; tt:: takes T& destination)
+//   Barrier 2: X-macro extractor passes field by reference (T deduced)
+//   Barrier 3: type-family static_assert in tt:: dispatch helpers (this trait
+//              is one of the recognized family members; failure to extend the
+//              family for a new type fails the build with actionable message)
+//
+// Pattern: parallel to std::is_floating_point_v / std::is_array_v / std::is_unsigned_v
+// from <type_traits>. Codebase-specific traits live next to the type they describe.
+template <typename T>           struct is_FPN                : std::false_type {};
+template <unsigned F_ARG>       struct is_FPN<FPN<F_ARG>>    : std::true_type  {};
+template <typename T> inline constexpr bool is_FPN_v = is_FPN<T>::value;
 
 //======================================================================================================
 // [N-WORD HELPERS]

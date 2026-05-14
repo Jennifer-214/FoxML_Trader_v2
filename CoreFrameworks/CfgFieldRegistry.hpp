@@ -1,0 +1,289 @@
+// Copyright (c) 2026 Jennifer Lewis. All rights reserved.
+// Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+//======================================================================================================
+// [UNIVERSAL CFG FIELD REGISTRY]
+//======================================================================================================
+// v5.15.5.F.4b — single source of truth for cfg field declarations across consumers
+// (parser, save, GUI render, per-core override emission, drift check, cfg.example doc).
+//
+// Architecture: 12-col Option D X-macro tuple per
+//   DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md.
+// Type-trait dispatch via tt:: namespace per CLAUDE.md item 23 +
+//   DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md.
+// Categorical applicability columns per
+//   DESIGN_SPECS/categorical-tag-applicability-pattern.md.
+// 3-barrier structural fix for Class 23 (DOCS/RECURRING_BUG_PATTERNS.md) —
+// Kind enum is METADATA-ONLY; type dispatch happens via tt::cfg_*_field<T>
+// with T deduced from the cfg field reference (NEVER via reinterpret_cast).
+//
+// .F.4b SCOPE: KIND_DOUBLE + KIND_DOUBLE_PCT only (~40 cfg fields).
+// .F.4c   adds: KIND_INT + KIND_INT_ENUM + KIND_BOOL + STAMP_BOUND derived filter cutover.
+// .F.4d   adds: KIND_STRING + KIND_FILE_PATH + cfg.example auto-gen + reverse-drift CI script.
+// .F.4e+  adds: ResolvedCoreCfg + per-core override + categorical audit + cross-cfg-file rows.
+//
+// DESCRIPTOR SCHEMA LOCKS AT .F.4b — subsequent sub-ships ADD ROWS only;
+// no schema changes. (Per "design upfront + ship in waves" decision 2026-05-14.)
+//======================================================================================================
+#pragma once
+#include <cstdint>
+#include <cstddef>      // size_t
+#include "../Strategies/StrategyCategories.hpp"   // STRAT_CAT_*
+#include "../Strategies/OpModeCategories.hpp"     // OP_MODE_CAT_*
+
+// Forward declarations for category masks not yet populated at .F.4b
+// (defaulted to _CAT_ALL until v5.16+ specializes regime/risk dimensions).
+enum RegimeCategoryDefault : uint16_t { REGIME_CAT_ALL = 0xFFFFu };
+enum RiskCategoryDefault   : uint16_t { RISK_CAT_ALL   = 0xFFFFu };
+
+//======================================================================================================
+// [CFG FIELD DESCRIPTOR]
+//======================================================================================================
+struct CfgFieldDescriptor {
+    //---- Kind enum (uint8_t) — METADATA-ONLY ----
+    // Drives GUI presentation (slider vs textbox, format string, % suffix, clamp coercion).
+    // Does NOT drive type dispatch — that happens via tt::cfg_*_field<T> with T deduced
+    // from the destination field. See DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md
+    // + DOCS/RECURRING_BUG_PATTERNS.md Class 23.
+    enum Kind : uint8_t {
+        KIND_DOUBLE       = 0,   // raw double or FPN<F>; clamp_min/max in payload.as_double
+        KIND_DOUBLE_PCT   = 1,   // double formatted as percent in GUI (×100 + "%" suffix); stored as fraction
+        KIND_INT          = 2,   // signed/unsigned int (.F.4c)
+        KIND_INT_ENUM     = 3,   // int with enum labels (radio/dropdown) (.F.4c)
+        KIND_BOOL         = 4,   // 0/1; scalar or bitmap bit (.F.4c)
+        KIND_STRING       = 5,   // char[N] / std::string (.F.4d)
+        KIND_FILE_PATH    = 6,   // string + file picker hint (.F.4d)
+        // RESERVED for future:
+        // KIND_RANGE_INT    = 7,   // hyperparameter sweep (v5.15.6.C)
+        // KIND_RANGE_DOUBLE = 8,   // hyperparameter sweep (v5.15.6.C)
+    };
+
+    //---- MetadataFlag enum (uint16_t) — 10 bits used; 6 bits headroom ----
+    enum MetadataFlag : uint16_t {
+        PER_CORE_OK           = 1u << 0,   // emit per-core override (.F.4g consumer)
+        RESTART_REQUIRED      = 1u << 1,   // GUI badge: "restart needed" (.F.4d render)
+        SAFETY_CRITICAL       = 1u << 2,   // GUI warning + confirmation prompt (.F.4d)
+        DEPRECATED            = 1u << 3,   // GUI: strikethrough + tooltip (.F.4d)
+        STAMP_BOUND           = 1u << 4,   // include in stamp drift check + FOREACH_STAMP_BOUND_CFG_DERIVED filter (.F.4c)
+        HIDDEN_BY_DEFAULT     = 1u << 5,   // GUI: collapsed section (.F.4d)
+        IS_SECRET             = 1u << 6,   // password-masking in GUI; never logged (v5.15.6.B)
+        IS_BOOT_ONLY          = 1u << 7,   // changes after boot are ignored — restart required (.F.4d)
+        AFFECTS_STAMP_PARITY  = 1u << 8,   // training-time concern; bound to model stamp (.F.4c)
+        LOG_VALUE_FORBIDDEN   = 1u << 9,   // value never appears in logs (privacy/security; v5.15.6.B)
+        // ... ~6 bits headroom for future ...
+    };
+
+    //---- LivesInStruct enum (uint8_t) — cross-cfg-file routing ----
+    // .F.4b only populates STRUCT_CFG; full enum declared for v5.15.6 forward-compat.
+    enum LivesInStruct : uint8_t {
+        STRUCT_CFG             = 0,  // engine.cfg → ControllerConfig<F>
+        STRUCT_BACKTEST_CFG    = 1,  // backtest.cfg → BacktestCfg (.F.4i)
+        STRUCT_CONTROLLER_CFG  = 2,  // controller.cfg → ControllerCfg (v5.15.6.A)
+        STRUCT_SECRETS_CFG     = 3,  // secrets.cfg → SecretsCfg (v5.15.6.B)
+        STRUCT_TRAINING_CFG    = 4,  // training cfg → TrainingCfg (v5.15.6.C)
+    };
+
+    //---- Header (8 bytes) ----
+    Kind          kind;             // 1 byte
+    uint8_t       lives_in_struct;  // 1 byte (LivesInStruct enum value)
+    uint16_t      metadata_flags;   // 2 bytes
+    uint16_t      _reserved = 0;    // 2 bytes — future use; default-init 0 per CLAUDE.md item 27
+    uint16_t      field_idx;        // 2 bytes (FIELD_IDX_<name>; for sidecar-table lookup)
+
+    //---- String pointers (32 bytes) ----
+    const char*   cfg_field_name;   // matches Cfg::<name>; used by parser strcmp + save key lookup
+    const char*   label;            // GUI label (e.g. "TP %%")
+    const char*   section;          // GUI section heading (e.g. "Trading")
+    const char*   tooltip;          // GUI tooltip + cfg.example comment (multi-line via R"(...)" allowed)
+
+    //---- Categorical applicability masks (10 bytes — see categorical-tag-applicability-pattern.md) ----
+    uint32_t      applies_to_strategy_cat;   // STRAT_CAT_* bitmap (32 max categories)
+    uint16_t      applies_to_op_mode_cat;    // OP_MODE_CAT_* bitmap (16 max)
+    uint16_t      applies_to_regime_cat;     // REGIME_CAT_* bitmap (default = REGIME_CAT_ALL until v5.16)
+    uint16_t      applies_to_risk_cat;       // RISK_CAT_* bitmap (default = RISK_CAT_ALL until v5.16)
+
+    //---- Runtime cfg gating (8 bytes) ----
+    const char*   requires_cfg;     // gating expression ("bandit_algorithm == THOMPSON"); null if always applicable
+
+    //---- Payload union (32 bytes — clamp_min/max inline; no sparse-table indirection) ----
+    union {
+        struct { double  default_val; double  clamp_min; double  clamp_max; }                                              as_double;   // KIND_DOUBLE, KIND_DOUBLE_PCT
+        struct { int64_t default_val; int64_t clamp_min; int64_t clamp_max; }                                              as_int;      // KIND_INT
+        struct { int default_val; const char* const* labels; uint8_t count; uint8_t _pad[3]; uint64_t _pad2[2]; }          as_int_enum; // KIND_INT_ENUM (.F.4c)
+        struct { uint8_t default_val; uint8_t _pad[7]; uint64_t _pad2[3]; }                                                as_bool;     // KIND_BOOL (.F.4c)
+        struct { const char* default_val; size_t buf_len; uint64_t _pad[2]; }                                              as_string;   // KIND_STRING (.F.4d)
+    } payload;
+};
+
+// Cache-line budget per latency-vs-cache-decision-framework.md:
+// 128B (2 cache lines) accepts inline clamp_min/max; cfg metadata is read at boot
+// (parser) + 60 Hz (GUI render) — cache-warm; not latency-critical.
+static_assert(sizeof(CfgFieldDescriptor) <= 128,
+              "CfgFieldDescriptor must fit two cache lines (128B). "
+              "Cache impact is hygiene-level (GUI render is 60 Hz, cache-warm). "
+              "See DESIGN_SPECS/latency-vs-cache-decision-framework.md.");
+
+// Bitmap overflow guards per DESIGN_SPECS/bitmap-overflow-protection-discipline.md.
+// CLAUDE.local.md going-forward rule "Bitmap overflow static_assert is mandatory" (2026-05-14).
+static_assert(CfgFieldDescriptor::LOG_VALUE_FORBIDDEN < (1u << 16),
+              "CfgFieldDescriptor::MetadataFlag bitmap overflowed uint16_t — upgrade to uint32_t");
+
+//======================================================================================================
+// [FOREACH_CFG_FIELD — 12-col Option D tuple]
+//======================================================================================================
+// Tuple (12 args):
+//   X(KIND_TOKEN, name, label, section, meta, payload, tooltip,
+//     applies_to_strategy_cat, applies_to_op_mode_cat,
+//     applies_to_regime_cat, applies_to_risk_cat, lives_in_struct)
+//
+// payload macro: DBL(default, min, max) for KIND_DOUBLE / KIND_DOUBLE_PCT
+//                (other Kind payload macros land at .F.4c/.F.4d)
+//
+// .F.4b INITIAL POPULATION (~40 KIND_DOUBLE/_PCT fields).
+// All initial rows: lives_in_struct = STRUCT_CFG, op_mode = OP_MODE_CAT_ALL,
+// regime/risk = _CAT_ALL. applies_to_strategy_cat refined per cohort at .F.4h.
+// Tooltips initial-populated; HIGH-6 byte-identity preservation refined at T12 (T7.4).
+//======================================================================================================
+
+// Payload helper macros (one per Kind family):
+#define DBL(default_val, clamp_min, clamp_max) { .as_double = { (default_val), (clamp_min), (clamp_max) } }
+
+// NOTE: tooltips for fields PRE-EXISTING in GUI/SettingsPanel.hpp:46-289 field_defs[]
+// preserved BYTE-IDENTICAL via raw strings. Fields NEW to GUI (no pre-existing entry)
+// have author-supplied tooltips. HIGH-6 tooltip-preservation discipline per
+// plan + DESIGN_SPECS/registry-tuple-as-single-source-of-truth.md.
+
+#define FOREACH_CFG_FIELD(X)                                                                                                                                                                                       \
+    /* === Trading (PCT cohort) === */                                                                                                                                                                              \
+    X(KIND_DOUBLE_PCT, take_profit_pct,             "TP %%",                "Trading",         0,                                  DBL(3.0, 0.0, 100.0),    nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE_PCT, stop_loss_pct,               "SL %%",                "Trading",         0,                                  DBL(1.5, 0.0, 100.0),    nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE_PCT, fee_rate,                    "Fee %%",               "Trading",         0,                                  DBL(0.1, 0.0, 5.0),                                                                                                              \
+        "Legacy fee rate (% per trade) — used for pre-trade quantity computations\n"                                                                                                                                                                              \
+        "(no-trade band, fee floor for TP, kill switch estimate, spread display)\n"                                                                                                                                                                               \
+        "and as the default for fee_rate_maker / fee_rate_taker if those aren't set.",                                                                                                                                                                            \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE_PCT, slippage_pct,                "Slippage %%",          "Trading",         0,                                  DBL(0.05, 0.0, 5.0),     nullptr,                                                                                         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE_PCT, risk_pct,                    "Risk/Pos %%",          "Trading",         0,                                  DBL(2.0, 0.0, 100.0),    nullptr,                                                                                         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     fee_floor_mult,              "Fee Floor",            "Trading",         0,                                  DBL(3.0, 1.0, 20.0),                                                                                                             \
+        "TP floor = entry * fee_rate * this\n3.0 = TP must clear round-trip fees + margin",                                                                                                                                                                       \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === Entry Filters === */                                                                                                                                                                                     \
+    X(KIND_DOUBLE_PCT, entry_offset_pct,            "Offset %%",            "Entry Filters",   CfgFieldDescriptor::PER_CORE_OK,    DBL(0.15, 0.0, 5.0),                                                                                                            \
+        "Buy gate offset below avg/EMA price\nhigher = deeper dip required to enter",                                                                                                                                                                             \
+        STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE_PCT, offset_min,                  "Offset Min %%",        "Entry Filters",   CfgFieldDescriptor::PER_CORE_OK,    DBL(0.05, 0.0, 5.0),     "Adaptation lower bound for offset_pct",                                                          STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE_PCT, offset_max,                  "Offset Max %%",        "Entry Filters",   CfgFieldDescriptor::PER_CORE_OK,    DBL(0.50, 0.0, 5.0),     "Adaptation upper bound for offset_pct",                                                          STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     volume_multiplier,           "Vol Mult",             "Entry Filters",   0,                                  DBL(2.5, 0.0, 100.0),                                                                                                            \
+        "Volume gate: require avg_volume * this\nhigher = only buy on high volume",                                                                                                                                                                               \
+        STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     spacing_multiplier,          "Spacing",              "Entry Filters",   0,                                  DBL(2.0, 0.0, 20.0),                                                                                                             \
+        "Min distance between entries (in stddev)\nprevents clustering entries at similar prices",                                                                                                                                                                \
+        STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     min_long_slope,              "Min Long Slope",       "Entry Filters",   0,                                  DBL(0.0, -1.0, 1.0),                                                                                                             \
+        "Block MR buys when 512-tick slope below this\nnegative = allow mild dips, 0 = disabled",                                                                                                                                                                 \
+        STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     min_buy_delta,               "Min Buy Delta",        "Entry Filters",   0,                                  DBL(-0.3, -1.0, 1.0),                                                                                                            \
+        "Min volume delta for MR buys\n-0.3 = allow mild selling, block heavy dumps",                                                                                                                                                                             \
+        STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     vwap_offset,                 "VWAP Offset",          "Entry Filters",   0,                                  DBL(0.0, 0.0, 0.1),      nullptr,                                                                                          STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     min_stddev_pct,              "Min Stddev %%",        "Entry Filters",   0,                                  DBL(0.0, 0.0, 0.1),                                                                                                              \
+        "Skip trades when stddev/price below this\nprevents entries in dead-flat markets",                                                                                                                                                                        \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === Time-Based Exit === */                                                                                                                                                                                   \
+    X(KIND_DOUBLE,     tp_hold_score,               "TP Hold Score",        "Time-Based Exit", CfgFieldDescriptor::PER_CORE_OK,    DBL(0.0, 0.0, 10.0),     "Min SNR*R² to hold past TP (0 = disabled, fixed TP)",                                            STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     tp_trail_mult,               "TP Trail Mult",        "Time-Based Exit", CfgFieldDescriptor::PER_CORE_OK,    DBL(1.0, 0.0, 10.0),     "Trailing distance: stddev * this (e.g. 1.0)",                                                    STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     sl_trail_mult,               "SL Trail Mult",        "Time-Based Exit", CfgFieldDescriptor::PER_CORE_OK,    DBL(2.0, 0.0, 10.0),     "Trailing SL distance: stddev * this (e.g. 2.0)",                                                 STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === Risk Management === */                                                                                                                                                                                   \
+    X(KIND_DOUBLE_PCT, max_drawdown_pct,            "Max DD %%",            "Risk Management", 0,                                  DBL(20.0, 0.0, 100.0),                                                                                                           \
+        "Circuit breaker: halt trading if total P&L\ndrops below this %% of starting balance",                                                                                                                                                                    \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE_PCT, max_exposure_pct,            "Max Exp %%",           "Risk Management", 0,                                  DBL(50.0, 0.0, 100.0),   nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === Kill Switch === */                                                                                                                                                                                       \
+    X(KIND_DOUBLE_PCT, kill_switch_daily_loss_pct,  "Daily Loss %%",        "Kill Switch",     CfgFieldDescriptor::SAFETY_CRITICAL,DBL(3.0, 0.0, 100.0),                                                                                                           \
+        "Max session loss before kill switch triggers\n3.0 = halt if equity drops 3%% from session start",                                                                                                                                                        \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE_PCT, kill_switch_drawdown_pct,    "Drawdown %%",          "Kill Switch",     CfgFieldDescriptor::SAFETY_CRITICAL,DBL(5.0, 0.0, 100.0),                                                                                                           \
+        "Max drawdown from session peak before kill\n5.0 = halt if 5%% below intra-session high",                                                                                                                                                                 \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === Momentum (Strategies/Momentum.hpp) === */                                                                                                                                                                \
+    X(KIND_DOUBLE,     momentum_min_tp_margin_pct,  "Mom Min TP Margin",    "Strategies",      CfgFieldDescriptor::PER_CORE_OK,    DBL(0.0, 0.0, 0.05),     "Block momentum entry if TP too tight (0 = disabled; rec: 0.0040 = 0.40%)",                       STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     momentum_min_buy_delta_recent, "Mom Min Buy Delta", "Strategies",       CfgFieldDescriptor::PER_CORE_OK,    DBL(0.0, 0.0, 1.0),      "Min recent volume delta for momentum entry (rec: 0.05)",                                          STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     momentum_min_r2,             "Mom Min R²",           "Strategies",      CfgFieldDescriptor::PER_CORE_OK,    DBL(0.0, 0.0, 1.0),      "Min short_r2 for momentum entry (0 = disabled; rec: 0.30)",                                       STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     momentum_tp_mult,            "Mom TP Mult",          "Strategies",      0,                                  DBL(3.0, 0.0, 10.0),     "TP multiplier for momentum (e.g. 3.0 stddevs)",                                                  STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     momentum_sl_mult,            "Mom SL Mult",          "Strategies",      0,                                  DBL(1.0, 0.0, 10.0),     "SL multiplier for momentum (e.g. 1.0 stddevs)",                                                  STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     momentum_breakout_mult,      "Mom Breakout Mult",    "Strategies",      0,                                  DBL(0.5, 0.0, 10.0),     "Momentum breakout floor in stddevs",                                                              STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === EMA Cross (Strategies/EmaCross.hpp) === */                                                                                                                                                               \
+    X(KIND_DOUBLE,     emacross_dip_mult,           "EMACross Dip Mult",    "Strategies",      0,                                  DBL(0.5, 0.0, 10.0),     "Buy this many stddevs below EMA",                                                                STRAT_CAT_STATIC_RULES,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     emacross_crossover_min,      "EMACross Crossover",   "Strategies",      0,                                  DBL(0.0, 0.0, 1.0),      "Min EMA-SMA spread for uptrend confirmation",                                                    STRAT_CAT_STATIC_RULES,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     emacross_trail_mult,         "EMACross Trail Mult",  "Strategies",      0,                                  DBL(1.0, 0.0, 10.0),     "Trailing TP factor when EMA rising",                                                              STRAT_CAT_STATIC_RULES,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === Regime Detection (matches existing GUI section) === */                                                                                                                                                   \
+    X(KIND_DOUBLE,     regime_slope_threshold,      "Regime Slope Thresh",  "Regime Detection",0,                                  DBL(0.0, 0.0, 1.0),      "Relative slope magnitude for TRENDING classification",                                            STRAT_CAT_REGIME_AWARE,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     regime_crossover_threshold,  "Mild Trend",           "Regime Detection",0,                                  DBL(0.0005, 0.0, 1.0),                                                                                                           \
+        "EMA/SMA spread for MILD_TREND (EMA Cross)\n0.0005 = 0.05%% gap (~$35 at BTC $68k)\nbelow = RANGING, above = mild uptrend",                                                                                                                               \
+        STRAT_CAT_REGIME_AWARE,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     regime_strong_crossover,     "Strong Trend",         "Regime Detection",0,                                  DBL(0.0015, 0.0, 1.0),                                                                                                           \
+        "EMA/SMA spread for strong TRENDING (Momentum)\n0.0015 = 0.15%% gap (~$102 at BTC $68k)\nabove = Momentum, below = EMA Cross",                                                                                                                            \
+        STRAT_CAT_REGIME_AWARE,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE_PCT, regime_r2_threshold,         "R² Threshold",         "Regime Detection",0,                                  DBL(70.0, 0.0, 100.0),                                                                                                           \
+        "Min R-squared consistency for TRENDING\n70 = 70%% of price variance explained by trend",                                                                                                                                                                 \
+        STRAT_CAT_REGIME_AWARE,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === ML / Bandit / Confidence === */                                                                                                                                                                          \
+    X(KIND_DOUBLE,     ml_buy_threshold,            "ML Buy Thresh",        "ML",              0,                                  DBL(0.5, 0.0, 1.0),      "Buy threshold for ML strategy (predictions above this enter)",                                    STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE_PCT, ml_tp_pct,                   "ML TP %%",             "ML",              0,                                  DBL(2.0, 0.0, 100.0),    "ML strategy take profit (overrides take_profit_pct)",                                            STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE_PCT, ml_sl_pct,                   "ML SL %%",             "ML",              0,                                  DBL(1.0, 0.0, 100.0),    "ML strategy stop loss (overrides stop_loss_pct)",                                                STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     bandit_blend_ratio,          "Bandit Blend",         "ML",              CfgFieldDescriptor::PER_CORE_OK,    DBL(0.5, 0.0, 1.0),      "Mix of bandit picks vs base model",                                                              STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     confidence_threshold_scale,  "Conf Thresh Scale",    "ML",              CfgFieldDescriptor::PER_CORE_OK,    DBL(1.0, 0.0, 5.0),      "Confidence-weighted entry threshold scaling",                                                    STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === Partial exits / Misc === */                                                                                                                                                                              \
+    X(KIND_DOUBLE,     partial_exit_pct,            "Partial Exit %%",      "Partial Exits",   0,                                  DBL(0.5, 0.0, 1.0),      "Fraction of position to close at TP1 (0.5 = 50%)",                                               STRAT_CAT_ALL,                                                   OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE,     tp2_mult,                    "TP2 Mult",             "Partial Exits",   0,                                  DBL(2.0, 0.0, 10.0),     "TP2 distance = TP1_distance * this (2.0 = double TP)",                                           STRAT_CAT_ALL,                                                   OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_DOUBLE_PCT, breakeven_buffer_pct,        "Breakeven Buf %%",     "Partial Exits",   0,                                  DBL(0.0, 0.0, 5.0),      "SL offset from entry once breakeven ratchet fires",                                              STRAT_CAT_ALL,                                                   OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
+
+//======================================================================================================
+// [FIELD_IDX — auto-generated index enum]
+//======================================================================================================
+// Drives g_cfg_field_descriptors[FIELD_IDX_<name>] direct access at compile time.
+#define X_GEN_FIELD_IDX(KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
+    FIELD_IDX_##name,
+
+enum CfgFieldIdx : uint16_t {
+    FOREACH_CFG_FIELD(X_GEN_FIELD_IDX)
+    FIELD_IDX_END  // sentinel; equals registry entry count
+};
+#undef X_GEN_FIELD_IDX
+
+//======================================================================================================
+// [g_cfg_field_descriptors — auto-generated array]
+//======================================================================================================
+// Single source of truth for descriptor data; consumers index via FIELD_IDX_<name>.
+#define X_GEN_DESCRIPTOR(KIND_TOKEN, name, label, section, meta, payload_init, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
+    CfgFieldDescriptor{                                                                                  \
+        /* kind            */ CfgFieldDescriptor::KIND_TOKEN,                                            \
+        /* lives_in_struct */ static_cast<uint8_t>(lives_in_struct),                                     \
+        /* metadata_flags  */ static_cast<uint16_t>(meta),                                               \
+        /* _reserved       */ 0,                                                                         \
+        /* field_idx       */ FIELD_IDX_##name,                                                          \
+        /* cfg_field_name  */ #name,                                                                     \
+        /* label           */ label,                                                                     \
+        /* section         */ section,                                                                   \
+        /* tooltip         */ tooltip,                                                                   \
+        /* applies_strat   */ static_cast<uint32_t>(applies_to_strategy_cat),                            \
+        /* applies_op_mode */ static_cast<uint16_t>(applies_to_op_mode_cat),                             \
+        /* applies_regime  */ static_cast<uint16_t>(applies_to_regime_cat),                              \
+        /* applies_risk    */ static_cast<uint16_t>(applies_to_risk_cat),                               \
+        /* requires_cfg    */ nullptr,                                                                   \
+        /* payload         */ payload_init,                                                              \
+    },
+
+inline const CfgFieldDescriptor g_cfg_field_descriptors[] = {
+    FOREACH_CFG_FIELD(X_GEN_DESCRIPTOR)
+};
+#undef X_GEN_DESCRIPTOR
+
+// Verify array size matches sentinel.
+static_assert(sizeof(g_cfg_field_descriptors) / sizeof(g_cfg_field_descriptors[0]) == FIELD_IDX_END,
+              "g_cfg_field_descriptors size must equal FIELD_IDX_END");
+
+// Note: orthogonality with FOREACH_CFG_DERIVED_INFERENCE_CFG (v5.15.5.A.7,
+// MemHeaders/CfgDerivedInferenceCfgRegistry.hpp). That registry reads SAME cfg
+// fields but writes to inf.inference_cfg_* for stamp emit (different consumer).
+// FOREACH_CFG_FIELD here is the cfg I/O surface; the two are orthogonal by
+// design. Verified at .F.4d via reverse-drift CI script.

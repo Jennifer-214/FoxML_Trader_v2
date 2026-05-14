@@ -59,6 +59,8 @@
 #include "../ML_Headers/StampBoundModelConstRegistry.hpp"  // v5.14.8.A.0.b — registry tests + presence column dispatch
 #include "../ML_Headers/StampHelper.hpp"                   // v5.15.3.A — StampArgs<F> + Stamp_AssembleAndEmit
 #include "../CoreFrameworks/HotSwap.hpp"                   // v5.15.4 — HotSwap_ShadowLoad_{Ensemble,SingleZoo}
+#include "../CoreFrameworks/CfgFieldRegistry.hpp"          // v5.15.5.F.4b — universal cfg field registry
+#include "../CoreFrameworks/CfgFieldDispatch.hpp"          // v5.15.5.F.4b — tt:: type-trait dispatch (3-barrier Class 23 fix)
 #include <type_traits>                                   // v5.14.8.A.0.b — std::is_array_v / std::extent_v for char-array dispatch
 #include "../Strategies/StrategyLifecycle.hpp"           // v5.4.0 Phase 1.2 — Strategy_InitPerCore / FreePerCore
 
@@ -81,6 +83,39 @@ static void check(const char *name, int condition) {
 }
 
 constexpr unsigned FP = 64;
+
+//======================================================================================================
+// [v5.15.5.F.4b] TYPE-TRAIT COMPILE-TIME ASSERTIONS
+//======================================================================================================
+// Verifies is_FPN_v + FPN<F>::F member exposure work correctly. Compile-time
+// assertions; if any fail the build fails (rather than runtime test failure).
+// Required for tt::cfg_parse_field<T> + tt::cfg_save_field<T> dispatch in
+// CoreFrameworks/CfgFieldDispatch.hpp (3-barrier structural fix for Class 23).
+//
+// See DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md +
+// DOCS/RECURRING_BUG_PATTERNS.md Class 23.
+//======================================================================================================
+static_assert(is_FPN_v<FPN<64>>,                "v5.15.5.F.4b: is_FPN_v should detect FPN<64>");
+static_assert(is_FPN_v<FPN<128>>,               "v5.15.5.F.4b: is_FPN_v should detect FPN<128>");
+static_assert(!is_FPN_v<double>,                "v5.15.5.F.4b: is_FPN_v should reject double");
+static_assert(!is_FPN_v<int>,                   "v5.15.5.F.4b: is_FPN_v should reject int");
+static_assert(!is_FPN_v<uint64_t>,              "v5.15.5.F.4b: is_FPN_v should reject uint64_t");
+static_assert(FPN<64>::F == 64,                 "v5.15.5.F.4b: FPN<64>::F should expose template param value (64)");
+static_assert(FPN<128>::F == 128,               "v5.15.5.F.4b: FPN<128>::F should expose template param value (128)");
+
+// CfgFieldRegistry sanity asserts (v5.15.5.F.4b T7.2)
+static_assert(sizeof(CfgFieldDescriptor) <= 128,
+              "v5.15.5.F.4b: CfgFieldDescriptor must fit two cache lines");
+static_assert(FIELD_IDX_END > 0,
+              "v5.15.5.F.4b: FOREACH_CFG_FIELD must have at least one entry");
+static_assert(FIELD_IDX_END == sizeof(g_cfg_field_descriptors) / sizeof(g_cfg_field_descriptors[0]),
+              "v5.15.5.F.4b: g_cfg_field_descriptors size must match FIELD_IDX_END");
+static_assert(STRAT_CAT_USES_FLOW_DATA < (1ull << 32),
+              "v5.15.5.F.4b: StrategyCategory bitmap overflow guard");
+static_assert(OP_MODE_CAT_OFFLINE < (1u << 16),
+              "v5.15.5.F.4b: OpModeCategory bitmap overflow guard");
+static_assert(CfgFieldDescriptor::LOG_VALUE_FORBIDDEN < (1u << 16),
+              "v5.15.5.F.4b: MetadataFlag bitmap overflow guard");
 
 // helper: run warmup to completion, auto-computes tick count from config
 // handles both warmup_ticks and min_warmup_samples gates
@@ -1502,6 +1537,98 @@ inline void print_layout_fingerprint() {
 }
 
 //======================================================================================================
+//======================================================================================================
+// [TEST: v5.15.5.F.4b — CfgFieldRegistry + tt:: type-trait dispatch (Class 23 3-barrier)]
+//======================================================================================================
+// Verifies the structural fix for Class 23 (DOCS/RECURRING_BUG_PATTERNS.md).
+// Compile-time barriers (Barriers 1 + 3) caught at compile time via static_asserts;
+// runtime tests verify Barrier 2 (X-macro extractor + tt:: dispatch path) plus
+// categorical-tag CI Test 2 + tooltip preservation regression.
+//======================================================================================================
+static void test_v5_15_5_F4b_cfg_field_dispatch() {
+    printf("\n[v5.15.5.F.4b CfgFieldRegistry + tt:: dispatch]\n");
+
+    // === T1: FPN<F> dispatch — KIND_DOUBLE_PCT roundtrip ===
+    // Parse "3.0" via tt::cfg_parse_field<FPN<64>> for take_profit_pct (KIND_DOUBLE_PCT).
+    // Operator types "3.0" → stored as 0.03 (PCT scaling /100).
+    {
+        FPN<64> dst = FPN_FromDouble<64>(0.0);
+        tt::cfg_parse_field(dst, g_cfg_field_descriptors[FIELD_IDX_take_profit_pct], "3.0");
+        double parsed = FPN_ToDouble(dst);
+        check("v5.15.5.F.4b: KIND_DOUBLE_PCT parse '3.0' → 0.03 (PCT /100 scaling)",
+              fabs(parsed - 0.03) < 1e-9);
+    }
+
+    // === T2: tt::cfg_save_field roundtrip — produces locale-independent output ===
+    {
+        FPN<64> src = FPN_FromDouble<64>(0.0234);
+        char buf[64] = {0};
+        int n = tt::cfg_save_field(src, g_cfg_field_descriptors[FIELD_IDX_take_profit_pct], buf, sizeof(buf));
+        check("v5.15.5.F.4b: KIND_DOUBLE_PCT save returns positive char count", n > 0);
+        // "%.2f" on 2.34 (= 0.0234 * 100) produces "2.34"
+        check("v5.15.5.F.4b: KIND_DOUBLE_PCT save '0.0234' → '2.34' (PCT *100 + locale-pinned)",
+              strcmp(buf, "2.34") == 0);
+    }
+
+    // === T3: tt::cfg_save_field — locale-immunity (Layer 2 pinning) ===
+    // Set LC_NUMERIC to a comma-decimal locale; verify save still produces "2.34" not "2,34".
+    {
+        const char* prev_locale = setlocale(LC_NUMERIC, NULL);
+        setlocale(LC_NUMERIC, "de_DE.UTF-8");  // German locale uses ',' decimal
+        FPN<64> src = FPN_FromDouble<64>(0.0234);
+        char buf[64] = {0};
+        tt::cfg_save_field(src, g_cfg_field_descriptors[FIELD_IDX_take_profit_pct], buf, sizeof(buf));
+        check("v5.15.5.F.4b: tt::cfg_save_field is locale-immune (de_DE → '2.34' not '2,34')",
+              strcmp(buf, "2.34") == 0);
+        setlocale(LC_NUMERIC, prev_locale);  // restore
+    }
+
+    // === T4: CI Test 2 — every cfg row has applies_to_strategy_cat != 0 ===
+    // Per DESIGN_SPECS/categorical-tag-applicability-pattern.md: cfg fields without
+    // strategy applicability are operator-confusion bait. Sentinel STRAT_CAT_ALL covers
+    // universal applicability; never zero.
+    {
+        bool all_have_strategy_applicability = true;
+        size_t orphan_idx = 0;
+        for (size_t i = 0; i < FIELD_IDX_END; i++) {
+            if (g_cfg_field_descriptors[i].applies_to_strategy_cat == 0) {
+                all_have_strategy_applicability = false;
+                orphan_idx = i;
+                break;
+            }
+        }
+        check("v5.15.5.F.4b: CI Test 2 — every cfg row has applies_to_strategy_cat != 0",
+              all_have_strategy_applicability);
+        if (!all_have_strategy_applicability) {
+            printf("    [DEBUG] orphan field idx %zu: %s\n", orphan_idx,
+                   g_cfg_field_descriptors[orphan_idx].cfg_field_name);
+        }
+    }
+
+    // === T5: Tooltip preservation spot-check (HIGH-6 discipline) ===
+    // Sample fields with operator-tuned tooltips that MUST be preserved byte-identical
+    // from pre-migration GUI/SettingsPanel.hpp field_defs[].
+    {
+        const CfgFieldDescriptor& desc_fee = g_cfg_field_descriptors[FIELD_IDX_fee_rate];
+        check("v5.15.5.F.4b: fee_rate tooltip preserved (non-null)", desc_fee.tooltip != nullptr);
+        check("v5.15.5.F.4b: fee_rate tooltip mentions 'pre-trade quantity computations'",
+              desc_fee.tooltip && strstr(desc_fee.tooltip, "pre-trade quantity computations") != nullptr);
+
+        const CfgFieldDescriptor& desc_regime = g_cfg_field_descriptors[FIELD_IDX_regime_strong_crossover];
+        check("v5.15.5.F.4b: regime_strong_crossover tooltip preserved (non-null)",
+              desc_regime.tooltip != nullptr);
+        check("v5.15.5.F.4b: regime_strong_crossover tooltip mentions 'BTC $68k' (operator prose)",
+              desc_regime.tooltip && strstr(desc_regime.tooltip, "BTC $68k") != nullptr);
+    }
+
+    // === T6: Registry size sanity ===
+    {
+        check("v5.15.5.F.4b: g_cfg_field_descriptors has at least 30 entries (KIND_DOUBLE/_PCT cohort)",
+              FIELD_IDX_END >= 30);
+    }
+}
+
+//======================================================================================================
 // [MAIN]
 //======================================================================================================
 int main() {
@@ -1522,6 +1649,7 @@ int main() {
     // fingerprint that diffs cleanly across versions.
     print_layout_fingerprint();
 
+    test_v5_15_5_F4b_cfg_field_dispatch();  // v5.15.5.F.4b — CfgFieldRegistry + tt:: dispatch
     test_config_parser();
     test_portfolio_bitmap();
     test_portfolio_pnl();

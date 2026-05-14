@@ -20,6 +20,8 @@
 #include "../ML_Headers/MlCfgFlagRegistry.hpp"
 #include "../CoreFrameworks/RiskCfgFlagRegistry.hpp"
 #include "../CoreFrameworks/OpsCfgFlagRegistry.hpp"
+// v5.15.5.F.4b — universal cfg field registry (KIND_DOUBLE/_PCT cohort auto-extend)
+#include "../CoreFrameworks/CfgFieldRegistry.hpp"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -45,12 +47,9 @@ struct CfgFieldDef {
 // adding a field: add ONE line here. loading + rendering + saving are automatic.
 static const CfgFieldDef field_defs[] = {
     // Trading
-    {"take_profit_pct",       "TP %%",        "Trading",         CFG_FLOAT, "%.2f", NULL},
-    {"stop_loss_pct",         "SL %%",        "Trading",         CFG_FLOAT, "%.2f", NULL},
-    {"fee_rate",              "Fee %%",       "Trading",         CFG_FLOAT, "%.2f",
-        "Legacy fee rate (% per trade) — used for pre-trade quantity computations\n"
-        "(no-trade band, fee floor for TP, kill switch estimate, spread display)\n"
-        "and as the default for fee_rate_maker / fee_rate_taker if those aren't set."},
+    // v5.15.5.F.4b — take_profit_pct, stop_loss_pct, fee_rate migrated to
+    // FOREACH_CFG_FIELD (auto-extended below). fee_rate_maker / fee_rate_taker
+    // stay manual (parser has explicit_set side effect).
     {"fee_rate_maker",        "Maker %%",     "Trading",         CFG_FLOAT, "%.3f",
         "Maker fee rate (% per fill) — applied when order->is_maker=1 (POST_ONLY\n"
         "limit fill). Default 0.075 (Binance tier 0 BNB-discount). If not set,\n"
@@ -61,28 +60,17 @@ static const CfgFieldDef field_defs[] = {
         "fill, default for synchronous orders, or POST_ONLY limit that crossed\n"
         "the spread). Default 0.100 (Binance tier 0 BNB-discount). Backtest\n"
         "uses this rate exclusively (all-taker simulation)."},
-    {"slippage_pct",          "Slippage %%",  "Trading",         CFG_FLOAT, "%.2f", NULL},
-    {"risk_pct",              "Risk/Pos %%",  "Trading",         CFG_FLOAT, "%.1f", NULL},
-    {"fee_floor_mult",        "Fee Floor",    "Trading",         CFG_FLOAT, "%.1f",
-        "TP floor = entry * fee_rate * this\n3.0 = TP must clear round-trip fees + margin"},
+    // v5.15.5.F.4b — slippage_pct, risk_pct, fee_floor_mult migrated to
+    // FOREACH_CFG_FIELD (auto-extended below).
     // Entry Filters
-    {"entry_offset_pct",      "Offset %%",    "Entry Filters",   CFG_FLOAT, "%.3f",
-        "Buy gate offset below avg/EMA price\nhigher = deeper dip required to enter"},
-    {"volume_multiplier",     "Vol Mult",     "Entry Filters",   CFG_FLOAT, "%.2f",
-        "Volume gate: require avg_volume * this\nhigher = only buy on high volume"},
-    {"spacing_multiplier",    "Spacing",      "Entry Filters",   CFG_FLOAT, "%.2f",
-        "Min distance between entries (in stddev)\nprevents clustering entries at similar prices"},
+    // v5.15.5.F.4b — entry_offset_pct, volume_multiplier, spacing_multiplier,
+    // min_stddev_pct, min_long_slope, min_buy_delta, vwap_offset migrated to
+    // FOREACH_CFG_FIELD (auto-extended below). offset_stddev_* stay manual
+    // (not in .F.4b registry cohort).
     {"offset_stddev_mult",    "Stddev Mult",  "Entry Filters",   CFG_FLOAT, "%.2f",
         "Multiplies stddev for offset calculation\nhigher = wider offset from avg (fewer entries)"},
     {"offset_stddev_min",     "Stddev Min",   "Entry Filters",   CFG_FLOAT, "%.2f", NULL},
     {"offset_stddev_max",     "Stddev Max",   "Entry Filters",   CFG_FLOAT, "%.2f", NULL},
-    {"min_stddev_pct",        "Min Stddev %%","Entry Filters",   CFG_FLOAT, "%.5f",
-        "Skip trades when stddev/price below this\nprevents entries in dead-flat markets"},
-    {"min_long_slope",        "Min Long Slope","Entry Filters",  CFG_FLOAT, "%.6f",
-        "Block MR buys when 512-tick slope below this\nnegative = allow mild dips, 0 = disabled"},
-    {"min_buy_delta",         "Min Buy Delta","Entry Filters",   CFG_FLOAT, "%.2f",
-        "Min volume delta for MR buys\n-0.3 = allow mild selling, block heavy dumps"},
-    {"vwap_offset",           "VWAP Offset",  "Entry Filters",   CFG_FLOAT, "%.4f", NULL},
     // v4.7.29: Adaptation, Trailing TP/SL, Time-Based Exit moved to per-core
     // tabs. These were exit/feedback policies that varied by strategy
     // (DIP wants short holds, EMA Cross wants long; Momentum wants tighter
@@ -95,16 +83,13 @@ static const CfgFieldDef field_defs[] = {
         "0 = disabled, 75000 ≈ 4-5 hours.\n"
         "Per-core min-gain floor lives in each core's Time Exit override."},
     // Risk Management
-    {"max_drawdown_pct",      "Max DD %%",    "Risk Management", CFG_FLOAT, "%.1f",
-        "Circuit breaker: halt trading if total P&L\ndrops below this %% of starting balance"},
-    {"max_exposure_pct",      "Max Exp %%",   "Risk Management", CFG_FLOAT, "%.0f", NULL},
+    // v5.15.5.F.4b — max_drawdown_pct, max_exposure_pct migrated to
+    // FOREACH_CFG_FIELD (auto-extended below). max_positions stays manual (CFG_INT).
     {"max_positions",         "Max Pos",      "Risk Management", CFG_INT,   "%d",   NULL},
     // Kill Switch
     // kill_switch_enabled migrated to FOREACH_RISK_CFG_FLAG (v5.14.9.F.5; auto-extended below)
-    {"kill_switch_daily_loss_pct","Daily Loss %%","Kill Switch",  CFG_FLOAT, "%.2f",
-        "Max session loss before kill switch triggers\n3.0 = halt if equity drops 3%% from session start"},
-    {"kill_switch_drawdown_pct","Drawdown %%", "Kill Switch",     CFG_FLOAT, "%.2f",
-        "Max drawdown from session peak before kill\n5.0 = halt if 5%% below intra-session high"},
+    // v5.15.5.F.4b — kill_switch_daily_loss_pct, kill_switch_drawdown_pct migrated
+    // to FOREACH_CFG_FIELD (auto-extended below).
     {"kill_recovery_warmup",  "Recovery",     "Kill Switch",      CFG_INT,   "%d",
         "Slow-path cycles to observe after kill reset\nbefore trading resumes (prevents immediate re-entry)"},
     // v4.7.29: Vol Sizing + No-Trade Band scale curves moved to per-core
@@ -112,12 +97,8 @@ static const CfgFieldDef field_defs[] = {
     // vol_sizing_enabled + no_trade_band_enabled migrated to FOREACH_<DOMAIN>_CFG_FLAG
     // (v5.14.9.F.5 RISK + GATE; auto-extended below)
     // Regime Detection
-    {"regime_crossover_threshold","Mild Trend","Regime Detection",CFG_FLOAT,"%.5f",
-        "EMA/SMA spread for MILD_TREND (EMA Cross)\n0.0005 = 0.05%% gap (~$35 at BTC $68k)\nbelow = RANGING, above = mild uptrend"},
-    {"regime_strong_crossover","Strong Trend","Regime Detection",CFG_FLOAT,"%.5f",
-        "EMA/SMA spread for strong TRENDING (Momentum)\n0.0015 = 0.15%% gap (~$102 at BTC $68k)\nabove = Momentum, below = EMA Cross"},
-    {"regime_r2_threshold",   "R² Threshold", "Regime Detection", CFG_FLOAT, "%.1f",
-        "Min R-squared consistency for TRENDING\n70 = 70%% of price variance explained by trend"},
+    // v5.15.5.F.4b — regime_crossover_threshold, regime_strong_crossover,
+    // regime_r2_threshold migrated to FOREACH_CFG_FIELD (auto-extended below).
     {"regime_vol_spike_ratio","Vol Spike",    "Regime Detection", CFG_FLOAT, "%.1f",
         "Short/long variance ratio for VOLATILE\n2.0 = short-window variance is 2x long-window"},
     {"regime_hysteresis",     "Hysteresis",   "Regime Detection", CFG_INT,   "%d",
@@ -302,6 +283,30 @@ static const CfgFieldDef field_defs[] = {
     FOREACH_RISK_CFG_FLAG(X)
     FOREACH_OPS_CFG_FLAG(X)
     #undef X
+
+    //==========================================================================
+    // v5.15.5.F.4b — AUTO-EXTENDED FROM FOREACH_CFG_FIELD (universal cfg field registry)
+    //==========================================================================
+    // Single source of truth for ~40 KIND_DOUBLE/_PCT cfg fields. Adding a new
+    // KIND_DOUBLE/_PCT field = 1 row in FOREACH_CFG_FIELD; field_defs[] auto-
+    // extends; widget appears with correct label / section / tooltip / format.
+    // Tooltip column preserves operator prose byte-identical to pre-migration.
+    // See CoreFrameworks/CfgFieldRegistry.hpp + DOCS/RECURRING_BUG_PATTERNS.md
+    // Class 23 (3-barrier structural fix).
+    //
+    // Format string derived from Kind: KIND_DOUBLE_PCT → "%.2f" (matches
+    // pre-migration default for percentage fields); KIND_DOUBLE → "%.4f"
+    // (slightly higher precision than the most common pre-migration "%.2f"
+    // — minor UX shift; richer decimal display for raw doubles).
+    //==========================================================================
+    #define EMIT_CFG_FIELD_DEF_FROM_REGISTRY(KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+                                              applies_to_strategy, applies_to_op_mode, \
+                                              applies_to_regime, applies_to_risk, lives_in_struct) \
+        { #name, label, section, CFG_FLOAT, \
+          (CfgFieldDescriptor::KIND_TOKEN == CfgFieldDescriptor::KIND_DOUBLE_PCT) ? "%.2f" : "%.4f", \
+          tooltip },
+    FOREACH_CFG_FIELD(EMIT_CFG_FIELD_DEF_FROM_REGISTRY)
+    #undef EMIT_CFG_FIELD_DEF_FROM_REGISTRY
 };
 static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 

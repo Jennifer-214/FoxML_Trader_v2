@@ -22,6 +22,8 @@
 #include "RiskCfgFlagRegistry.hpp"             // v5.14.9.F.3 — FOREACH_RISK_CFG_FLAG + MASK_RISK_CFG_*
 #include "OpsCfgFlagRegistry.hpp"              // v5.14.9.F.3 — FOREACH_OPS_CFG_FLAG + MASK_OPS_CFG_*
 #include "SessionPhaseRegistry.hpp"            // v5.15.5.B.5 — FOREACH_SESSION_PHASE + SESSION_BY_HOUR[24] (closes TECH_DEBT-040)
+#include "CfgFieldRegistry.hpp"                // v5.15.5.F.4b — universal cfg field registry (FOREACH_CFG_FIELD + CfgFieldDescriptor)
+#include "CfgFieldDispatch.hpp"                // v5.15.5.F.4b — tt:: type-trait dispatch (3-barrier Class 23 fix)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1871,6 +1873,35 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         // also strip leading whitespace (less common but cheap)
         while (*val == ' ' || *val == '\t') ++val;
     }
+
+    //==================================================================================================
+    // [v5.15.5.F.4b] REGISTRY-DRIVEN DISPATCH — runs FIRST; manual CFG_PARSE_* below are fallback
+    //==================================================================================================
+    // For each FOREACH_CFG_FIELD entry: if `key` matches the row's name, call
+    // tt::cfg_parse_field<T>(cfg.name, descriptor, val) — T is deduced from
+    // cfg.name's actual type (FPN<F> or scalar). 3-barrier structural fix per
+    // DOCS/RECURRING_BUG_PATTERNS.md Class 23 +
+    // DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md.
+    //
+    // Manual CFG_PARSE_FPN/PCT/U32/INT/FPN_POS macros below stay in place for
+    // fields NOT yet in FOREACH_CFG_FIELD (KIND_INT/_BOOL/_STRING migrate at
+    // .F.4c/.F.4d). For fields IN the registry, the walk's `continue;` makes
+    // the manual lines unreachable — cleanup deletion happens after build/test
+    // verifies the migration works.
+    //
+    // Locale-immunity bonus: tt::cfg_parse_field uses parse_double_fast
+    // (locale-independent) instead of manual macros' atof (LC_NUMERIC-honoring).
+    // Closes pre-existing locale-dependence bug for migrated fields.
+    //==================================================================================================
+    #define EMIT_CFG_PARSER_CASE(KIND_TOKEN, name, label, section, meta, payload_init, tooltip, \
+                                  applies_to_strategy, applies_to_op_mode, \
+                                  applies_to_regime, applies_to_risk, lives_in_struct) \
+        if (strcmp(key, #name) == 0) { \
+            tt::cfg_parse_field(cfg.name, g_cfg_field_descriptors[FIELD_IDX_##name], val); \
+            continue; \
+        }
+    FOREACH_CFG_FIELD(EMIT_CFG_PARSER_CASE)
+    #undef EMIT_CFG_PARSER_CASE
 
 // table-driven parser: FPN fields parsed as atof(val) directly
 // adding a new field = add ONE line to the matching table below
