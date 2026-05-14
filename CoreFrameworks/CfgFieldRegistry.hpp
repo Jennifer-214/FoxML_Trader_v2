@@ -57,7 +57,7 @@ struct CfgFieldDescriptor {
         // KIND_RANGE_DOUBLE = 8,   // hyperparameter sweep (v5.15.6.C)
     };
 
-    //---- MetadataFlag enum (uint16_t) — 10 bits used; 6 bits headroom ----
+    //---- MetadataFlag enum (uint16_t) — 12 bits used; 4 bits headroom ----
     enum MetadataFlag : uint16_t {
         PER_CORE_OK           = 1u << 0,   // emit per-core override (.F.4g consumer)
         RESTART_REQUIRED      = 1u << 1,   // GUI badge: "restart needed" (.F.4d render)
@@ -69,7 +69,9 @@ struct CfgFieldDescriptor {
         IS_BOOT_ONLY          = 1u << 7,   // changes after boot are ignored — restart required (.F.4d)
         AFFECTS_STAMP_PARITY  = 1u << 8,   // training-time concern; bound to model stamp (.F.4c)
         LOG_VALUE_FORBIDDEN   = 1u << 9,   // value never appears in logs (privacy/security; v5.15.6.B)
-        // ... ~6 bits headroom for future ...
+        HAS_SIDE_EFFECT       = 1u << 10,  // parser-time side effect prevents registry walker handling — manual parser block keeps logic (.F.4c)
+        WARN_ON_CLAMP         = 1u << 11,  // emit "[cfg] WARN: <key>='<val>' out of range; clamping to <clamped>" when parse clamps value (.F.4c)
+        // ... ~4 bits headroom for future ...
     };
 
     //---- LivesInStruct enum (uint8_t) — cross-cfg-file routing ----
@@ -124,7 +126,7 @@ static_assert(sizeof(CfgFieldDescriptor) <= 128,
 
 // Bitmap overflow guards per DESIGN_SPECS/bitmap-overflow-protection-discipline.md.
 // CLAUDE.local.md going-forward rule "Bitmap overflow static_assert is mandatory" (2026-05-14).
-static_assert(CfgFieldDescriptor::LOG_VALUE_FORBIDDEN < (1u << 16),
+static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
               "CfgFieldDescriptor::MetadataFlag bitmap overflowed uint16_t — upgrade to uint32_t");
 
 //======================================================================================================
@@ -273,7 +275,10 @@ enum CfgFieldIdx : uint16_t {
         /* payload         */ payload_init,                                                              \
     },
 
-inline const CfgFieldDescriptor g_cfg_field_descriptors[] = {
+// v5.15.5.F.4c — constexpr enables compile-time mask computation in the bitmap
+// dispatcher framework below. All descriptor members are trivially constexpr-init
+// (string literals + integer constants + union aggregate init).
+inline constexpr CfgFieldDescriptor g_cfg_field_descriptors[] = {
     FOREACH_CFG_FIELD(X_GEN_DESCRIPTOR)
 };
 #undef X_GEN_DESCRIPTOR
@@ -287,3 +292,178 @@ static_assert(sizeof(g_cfg_field_descriptors) / sizeof(g_cfg_field_descriptors[0
 // fields but writes to inf.inference_cfg_* for stamp emit (different consumer).
 // FOREACH_CFG_FIELD here is the cfg I/O surface; the two are orthogonal by
 // design. Verified at .F.4d via reverse-drift CI script.
+
+//======================================================================================================
+// [BITMAP DISPATCHER FRAMEWORK — v5.15.5.F.4c]
+//======================================================================================================
+// Precomputed per-metadata-bit bitmap masks over the cfg field set + iteration
+// helpers + composed-filter primitives. Enables:
+//   - O(1) per-bit-category popcount stats: `cfg_field_count(g_cfg_deprecated_mask)`
+//     returns "how many cfg fields are flagged DEPRECATED" without iterating.
+//   - Composed filter views via bitwise ops: `render_mask = ~(boot_only | hidden_by_default)`.
+//   - Branchless next-set-bit iteration via __builtin_ctzll for walker consumers.
+//   - Foundation for .F.4d FOREACH_DERIVED_FILTER meta-registry (this layer is the
+//     storage primitive; .F.4d adds the declarative roster + sidecar override pattern).
+//
+// Per H6: these arrays are populated ONCE at static-init time (single-threaded;
+// before any thread spawns) then read-only forever. No cross-thread WRITE → no
+// alignas(64) discipline needed. Sizes are modest (~24 bytes per array; ~288 bytes
+// total) so cache pressure is negligible at 60Hz GUI consumer rate.
+//
+// Per H7: bitmap iteration is branchless within the inner loop (__builtin_ctzll +
+// `word &= word - 1` for next-bit-clear). Outer `while (word)` is loop control,
+// not data-dependent dispatch.
+//
+// Per CLAUDE.md framework discipline (item 31): adding a new metadata bit = 1 row
+// in FOREACH_METADATA_BIT below; mask array + init code auto-generate via X-macro.
+//======================================================================================================
+
+// Mask array sizing — 1 uint64_t word per 64 fields, rounded up.
+static constexpr size_t CFG_MASK_WORDS = (FIELD_IDX_END + 63) / 64;
+
+// FOREACH_METADATA_BIT(X) — tuple: X(lowercase_name, UPPERCASE_BIT_NAME).
+// Each row adds a per-bit precomputed mask array + init logic. Order matches the
+// MetadataFlag enum at lines 61-73 of this file.
+#define FOREACH_METADATA_BIT(X)                                            \
+    X(per_core_ok,          PER_CORE_OK)                                   \
+    X(restart_required,     RESTART_REQUIRED)                              \
+    X(safety_critical,      SAFETY_CRITICAL)                               \
+    X(deprecated,           DEPRECATED)                                    \
+    X(stamp_bound,          STAMP_BOUND)                                   \
+    X(hidden_by_default,    HIDDEN_BY_DEFAULT)                             \
+    X(is_secret,            IS_SECRET)                                     \
+    X(is_boot_only,         IS_BOOT_ONLY)                                  \
+    X(affects_stamp_parity, AFFECTS_STAMP_PARITY)                          \
+    X(log_value_forbidden,  LOG_VALUE_FORBIDDEN)                           \
+    X(has_side_effect,      HAS_SIDE_EFFECT)                               \
+    X(warn_on_clamp,        WARN_ON_CLAMP)
+
+// Wrapper struct holding a fixed-size mask array. Used because raw C-array
+// return types are awkward in C++ constexpr functions; the wrapper makes the
+// type explicit + operator[] gives natural array-like access at consumer sites.
+struct CfgMaskArray {
+    uint64_t words[CFG_MASK_WORDS];
+
+    constexpr uint64_t operator[](size_t i) const { return words[i]; }
+    constexpr uint64_t& operator[](size_t i)      { return words[i]; }
+};
+
+// Compile-time mask computation — single template-parameterized constexpr function.
+// Walks g_cfg_field_descriptors[] at compile time; produces the per-bit mask
+// directly into .rodata. Zero runtime init cost. Compiler may fold the resulting
+// constants into immediates at consumer sites.
+template <uint16_t Bit>
+inline constexpr CfgMaskArray cfg_compute_mask() {
+    CfgMaskArray result = {};
+    for (size_t i = 0; i < FIELD_IDX_END; i++) {
+        if (g_cfg_field_descriptors[i].metadata_flags & Bit) {
+            result.words[i / 64] |= (1ULL << (i % 64));
+        }
+    }
+    return result;
+}
+
+// Per-bit precomputed mask arrays — X-macro-generated constexpr declarations.
+// Each is compile-time computed from the descriptor array; lands in .rodata.
+#define X_GEN_MASK_CONSTEXPR(lname, BITNAME) \
+    inline constexpr CfgMaskArray g_cfg_##lname##_mask = cfg_compute_mask<CfgFieldDescriptor::BITNAME>();
+FOREACH_METADATA_BIT(X_GEN_MASK_CONSTEXPR)
+#undef X_GEN_MASK_CONSTEXPR
+
+// Bitmap iteration macro — invokes `body` per set bit in `mask`.
+// `idx_var` is bound to FIELD_IDX_* value of each set bit. Branchless inner loop
+// via __builtin_ctzll (single TZCNT on Haswell+) + `word &= word - 1` next-bit-clear.
+//
+// Accepts either CfgMaskArray (via operator[]) or raw uint64_t[CFG_MASK_WORDS].
+//
+// Usage:
+//   CFG_FIELD_FOR_EACH_SET_BIT(g_cfg_deprecated_mask, idx, {
+//       fprintf(stderr, "deprecated: %s\n", g_cfg_field_descriptors[idx].cfg_field_name);
+//   });
+#define CFG_FIELD_FOR_EACH_SET_BIT(mask, idx_var, body)                    \
+    for (size_t _w = 0; _w < CFG_MASK_WORDS; _w++) {                       \
+        uint64_t _word = (mask)[_w];                                       \
+        while (_word) {                                                    \
+            const size_t _bit = static_cast<size_t>(__builtin_ctzll(_word));\
+            const size_t idx_var = _w * 64 + _bit;                         \
+            do { body; } while (0);                                        \
+            _word &= _word - 1;                                            \
+        }                                                                  \
+    }
+
+// Popcount over a mask array — operator-clarity stat helper. constexpr so call
+// sites with literal mask arrays fold to a single immediate at compile time.
+// Example: `cfg_field_count(g_cfg_deprecated_mask)` → "how many cfg fields are
+// flagged DEPRECATED in this build" (one-shot; no iteration needed at runtime).
+inline constexpr size_t cfg_field_count(const CfgMaskArray& mask) {
+    size_t n = 0;
+    for (size_t i = 0; i < CFG_MASK_WORDS; i++) {
+        n += static_cast<size_t>(__builtin_popcountll(mask.words[i]));
+    }
+    return n;
+}
+
+// Composed-filter helper — returns `~(boot_only | hidden_by_default)`, the canonical
+// "show in GUI" filter. Used by the SettingsPanel render walker. constexpr so the
+// composed mask is itself a compile-time constant. Other consumers compose their
+// own masks via bitwise ops (e.g., CLI list-changed: changed_from_default_mask &
+// ~hidden_by_default_mask).
+inline constexpr CfgMaskArray cfg_compose_render_mask() {
+    CfgMaskArray out = {};
+    for (size_t i = 0; i < CFG_MASK_WORDS; i++) {
+        out.words[i] = ~(g_cfg_is_boot_only_mask.words[i] | g_cfg_hidden_by_default_mask.words[i]);
+    }
+    // Mask off bits beyond FIELD_IDX_END in the last word (~0 sets all bits;
+    // any set bit beyond FIELD_IDX_END would cause an out-of-bounds descriptor read
+    // in iteration consumers).
+    if constexpr ((FIELD_IDX_END % 64) != 0) {
+        constexpr uint64_t last_word_valid = (1ULL << (FIELD_IDX_END % 64)) - 1ULL;
+        out.words[CFG_MASK_WORDS - 1] &= last_word_valid;
+    }
+    return out;
+}
+
+// Pre-computed composed render mask — compile-time constant in .rodata.
+inline constexpr CfgMaskArray g_cfg_render_mask = cfg_compose_render_mask();
+
+// Additional composed views for future consumers — each lands in .rodata at compile time.
+
+// Save path filter — all rows EXCEPT HAS_SIDE_EFFECT (manual save logic owns those).
+inline constexpr CfgMaskArray cfg_compose_save_mask() {
+    CfgMaskArray out = {};
+    for (size_t i = 0; i < CFG_MASK_WORDS; i++) {
+        out.words[i] = ~g_cfg_has_side_effect_mask.words[i];
+    }
+    if constexpr ((FIELD_IDX_END % 64) != 0) {
+        constexpr uint64_t last_word_valid = (1ULL << (FIELD_IDX_END % 64)) - 1ULL;
+        out.words[CFG_MASK_WORDS - 1] &= last_word_valid;
+    }
+    return out;
+}
+inline constexpr CfgMaskArray g_cfg_save_mask = cfg_compose_save_mask();
+
+// Stamp emit filter — STAMP_BOUND rows only. Consumed by .F.4d stamp emit migration
+// (replaces FOREACH_STAMP_BOUND_CFG manual walker; per derived filter framework).
+inline constexpr CfgMaskArray g_cfg_stamp_emit_mask = g_cfg_stamp_bound_mask;
+
+// CLI explain filter — all rows (including BOOT_ONLY / HIDDEN_BY_DEFAULT — operator wants
+// full visibility via `engine --explain-cfg` even if GUI hides them). Future .F.4e consumer
+// per TECH_DEBT-066.
+inline constexpr CfgMaskArray cfg_compose_cli_explain_mask() {
+    CfgMaskArray out = {};
+    // All valid bits set; mask off bits beyond FIELD_IDX_END.
+    for (size_t i = 0; i < CFG_MASK_WORDS - 1; i++) {
+        out.words[i] = ~0ULL;
+    }
+    if constexpr ((FIELD_IDX_END % 64) == 0) {
+        out.words[CFG_MASK_WORDS - 1] = ~0ULL;
+    } else {
+        out.words[CFG_MASK_WORDS - 1] = (1ULL << (FIELD_IDX_END % 64)) - 1ULL;
+    }
+    return out;
+}
+inline constexpr CfgMaskArray g_cfg_cli_explain_mask = cfg_compose_cli_explain_mask();
+
+// Per-core override emit filter — PER_CORE_OK rows only. Consumed by .F.4g per-core
+// override path (currently in PerCoreOverrides parallel structure).
+inline constexpr CfgMaskArray g_cfg_per_core_override_mask = g_cfg_per_core_ok_mask;

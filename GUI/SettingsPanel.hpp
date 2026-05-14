@@ -22,12 +22,156 @@
 #include "../CoreFrameworks/OpsCfgFlagRegistry.hpp"
 // v5.15.5.F.4b — universal cfg field registry (KIND_DOUBLE/_PCT cohort auto-extend)
 #include "../CoreFrameworks/CfgFieldRegistry.hpp"
+// v5.15.5.F.4c — per-field render function pointer table needs ControllerConfig<F> in scope
+#include "../CoreFrameworks/ControllerConfig.hpp"
+// v5.15.5.F.4c — tt::cfg_parse/save/assign/diff_field for use in render table
+#include "../CoreFrameworks/CfgFieldDispatch.hpp"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <csignal>
 #include <dirent.h>     // v5.9.5f — opendir for model directory scan
 #include <sys/stat.h>   // v5.9.5f — stat for role-file detection
+// v5.15.5.F.4c — tt::cfg_render_field<T> dispatch trio completion
+#include "../FixedPoint/FixedPointN.hpp"   // is_FPN_v, FPN_FromDouble, FPN_ToDouble
+#include <type_traits>                     // is_floating_point_v, is_integral_v, is_array_v, is_unsigned_v
+
+//==========================================================================
+// [tt::cfg_render_field<T> — third sister of cfg_parse_field / cfg_save_field]
+//==========================================================================
+// v5.15.5.F.4c — completes the tt:: dispatch trio. Lives here (not in
+// CoreFrameworks/CfgFieldDispatch.hpp) to keep ImGui dependency out of the
+// parser path per CfgFieldDispatch.hpp:143-145 design note.
+//
+// 3-barrier discipline per DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md:
+//   B1 — destination-by-reference; NO void*+offset overload
+//   B2 — X-macro extractor passes cfg.name by reference; never &((char*)cfg)[offset]
+//   B3 — compile-time type-family static_assert
+//
+// Per H13 (CLAUDE.md item 23) + H14: storage width comes from T via type-trait
+// dispatch. desc.kind is read ONLY for GUI presentation discrimination
+// (INT_ENUM dropdown vs BOOL checkbox vs INT slider) inside the integral
+// branch — NEVER to determine storage width.
+//==========================================================================
+namespace tt {
+
+    // Returns true if the field value changed this frame.
+    template <typename T>
+    inline bool cfg_render_field(T& field, const CfgFieldDescriptor& desc) {
+        static_assert(is_FPN_v<T>
+                   || std::is_floating_point_v<T>
+                   || std::is_integral_v<T>
+                   || std::is_array_v<T>,
+                      "cfg field type not in recognized family — "
+                      "extend tt::cfg_render_field<T> with a new branch. See "
+                      "DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md.");
+
+        bool changed = false;
+
+        if constexpr (is_FPN_v<T>) {
+            double v = FPN_ToDouble(field);
+            if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) v *= 100.0;
+            float vf = static_cast<float>(v);
+            float lo = static_cast<float>(desc.payload.as_double.clamp_min);
+            float hi = static_cast<float>(desc.payload.as_double.clamp_max);
+            const char* fmt = (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) ? "%.2f%%" : "%.4f";
+            changed = ImGui::SliderFloat(desc.label, &vf, lo, hi, fmt);
+            if (changed) {
+                if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) vf /= 100.0f;
+                field = FPN_FromDouble<T::F>(static_cast<double>(vf));
+            }
+        } else if constexpr (std::is_floating_point_v<T>) {
+            double v = static_cast<double>(field);
+            if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) v *= 100.0;
+            float vf = static_cast<float>(v);
+            float lo = static_cast<float>(desc.payload.as_double.clamp_min);
+            float hi = static_cast<float>(desc.payload.as_double.clamp_max);
+            const char* fmt = (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) ? "%.2f%%" : "%.4f";
+            changed = ImGui::SliderFloat(desc.label, &vf, lo, hi, fmt);
+            if (changed) {
+                if (desc.kind == CfgFieldDescriptor::KIND_DOUBLE_PCT) vf /= 100.0f;
+                field = static_cast<T>(static_cast<double>(vf));
+            }
+        } else if constexpr (std::is_array_v<T>) {
+            // char[N] — InputText. KIND_STRING / KIND_FILE_PATH migrate at .F.4e.
+            changed = ImGui::InputText(desc.label, field, std::extent_v<T>);
+        } else if constexpr (std::is_integral_v<T>) {
+            // Sub-dispatch on desc.kind for GUI presentation. Storage width comes
+            // from T at compile time per H13 (Kind NEVER drives storage).
+            if (desc.kind == CfgFieldDescriptor::KIND_INT_ENUM) {
+                int v = static_cast<int>(field);
+                changed = ImGui::Combo(desc.label, &v,
+                                       desc.payload.as_int_enum.labels,
+                                       desc.payload.as_int_enum.count);
+                if (changed) field = static_cast<T>(v);
+            } else if (desc.kind == CfgFieldDescriptor::KIND_BOOL) {
+                bool b = (field != 0);
+                changed = ImGui::Checkbox(desc.label, &b);
+                if (changed) field = static_cast<T>(b ? 1 : 0);
+            } else {
+                // KIND_INT (any width). Per-row static_assert at registry expansion
+                // site (H14 / CLAUDE.md item 20) verifies clamp ∈ numeric_limits<T>.
+                // For a future uint64 field needing clamp_max > INT_MAX, extend with
+                // an InputScalar(ImGuiDataType_U64) branch (none in .F.4c scope).
+                int v = static_cast<int>(field);
+                int lo = static_cast<int>(desc.payload.as_int.clamp_min);
+                int hi = static_cast<int>(desc.payload.as_int.clamp_max);
+                changed = ImGui::SliderInt(desc.label, &v, lo, hi);
+                if (changed) field = static_cast<T>(v);
+            }
+        }
+
+        if (desc.tooltip && ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", desc.tooltip);
+        }
+        return changed;
+    }
+
+}  // namespace tt
+
+//==========================================================================
+// [PER-FIELD RENDER FUNCTION POINTER TABLE — v5.15.5.F.4c]
+//==========================================================================
+// Implements the type-erased dispatch layer of the bitmap dispatcher framework
+// (see CoreFrameworks/CfgFieldRegistry.hpp + DESIGN_SPECS/universal-registry-
+// bitmap-dispatcher-pattern.md). X-macro generates one static render_<name>()
+// function per cfg field; each calls tt::cfg_render_field<T> with T deduced
+// from the actual ControllerConfig<F>::<name> field type (Barrier 2 per Class
+// 23 prevention discipline).
+//
+// Templated on F so per-precision instantiations share the table; F=64 is the
+// canonical engine precision. Static-storage-duration constexpr array → .rodata.
+//
+// Consumer (the bitmap walker in SettingsTab below):
+//   CFG_FIELD_FOR_EACH_SET_BIT(g_cfg_render_mask, idx, {
+//       CfgRenderTable<64>::fns[idx](cfg, g_cfg_field_descriptors[idx]);
+//   });
+//==========================================================================
+template <unsigned F>
+struct CfgRenderTable {
+    using RenderFn = bool (*)(ControllerConfig<F>&, const CfgFieldDescriptor&);
+
+    // X-macro generates one per-field static render function. Each instantiates
+    // tt::cfg_render_field<T> with T = decltype(cfg.<name>) — handled by the
+    // template's type-trait dispatch (FPN / float / array / integral branches).
+    #define X_GEN_RENDER_FN(KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+                              applies_to_strategy, applies_to_op_mode, \
+                              applies_to_regime, applies_to_risk, lives_in_struct) \
+        static bool render_##name(ControllerConfig<F>& cfg, const CfgFieldDescriptor& desc) { \
+            return tt::cfg_render_field(cfg.name, desc); \
+        }
+    FOREACH_CFG_FIELD(X_GEN_RENDER_FN)
+    #undef X_GEN_RENDER_FN
+
+    // Function pointer table — constexpr → .rodata. Index by FIELD_IDX_<name>
+    // or by bitmap iteration result.
+    #define X_GEN_RENDER_PTR(KIND_TOKEN, name, label, section, meta, payload, tooltip, ...) \
+        &CfgRenderTable<F>::render_##name,
+    static constexpr RenderFn fns[FIELD_IDX_END] = {
+        FOREACH_CFG_FIELD(X_GEN_RENDER_PTR)
+    };
+    #undef X_GEN_RENDER_PTR
+};
 
 //==========================================================================
 // FIELD DESCRIPTOR — one entry per editable config field

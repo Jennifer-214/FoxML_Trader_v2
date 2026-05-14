@@ -1893,10 +1893,16 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // (locale-independent) instead of manual macros' atof (LC_NUMERIC-honoring).
     // Closes pre-existing locale-dependence bug for migrated fields.
     //==================================================================================================
+    // v5.15.5.F.4c — HAS_SIDE_EFFECT bit: registry walker skips parse; manual parser block
+    // below handles the side-effect logic (e.g., fee_rate_maker/_taker explicit_set tracking,
+    // risk_scale_by_confidence DEPRECATED shim translation, crypto-init pairs). Forward-compat
+    // infrastructure: no .F.4c rows use HAS_SIDE_EFFECT yet (side-effect fields stay outside
+    // FOREACH_CFG_FIELD entirely at .F.4c); bit + check land here so future ships can add such
+    // rows with declarative side-effect documentation without restructuring the walker.
     #define EMIT_CFG_PARSER_CASE(KIND_TOKEN, name, label, section, meta, payload_init, tooltip, \
                                   applies_to_strategy, applies_to_op_mode, \
                                   applies_to_regime, applies_to_risk, lives_in_struct) \
-        if (strcmp(key, #name) == 0) { \
+        if (strcmp(key, #name) == 0 && !((meta) & CfgFieldDescriptor::HAS_SIDE_EFFECT)) { \
             tt::cfg_parse_field(cfg.name, g_cfg_field_descriptors[FIELD_IDX_##name], val); \
             continue; \
         }

@@ -32,6 +32,7 @@
 #include <type_traits> // std::is_floating_point_v, std::is_integral_v, std::is_array_v, std::is_unsigned_v
 #include <algorithm>   // std::clamp
 #include <locale.h>    // newlocale, uselocale, freelocale (Layer 2 locale pinning)
+#include <strings.h>   // v5.15.5.F.4c — strcasecmp for KIND_INT_ENUM string-token parsing
 
 namespace tt {
 
@@ -76,14 +77,65 @@ namespace tt {
         } else if constexpr (std::is_array_v<T>) {
             strncpy(dst, val, std::extent_v<T> - 1);
             dst[std::extent_v<T> - 1] = '\0';
-        } else if constexpr (std::is_unsigned_v<T>) {
-            // Decimal default; .F.4c may extend with hex base detection if needed.
-            int64_t v = static_cast<int64_t>(strtoull(val, nullptr, 10));
-            v = std::clamp(v, desc.payload.as_int.clamp_min, desc.payload.as_int.clamp_max);
-            dst = static_cast<T>(v);
-        } else { // signed integral
-            int64_t v = atoi(val);
-            v = std::clamp(v, desc.payload.as_int.clamp_min, desc.payload.as_int.clamp_max);
+        } else if constexpr (std::is_integral_v<T>) {
+            // v5.15.5.F.4c — INT_ENUM-aware integer branch. Sub-dispatch on
+            // desc.kind handles KIND_INT_ENUM (label[] reverse-lookup + clamp to
+            // [0, count) → default_val on OOR) and KIND_INT/KIND_BOOL (clamp to
+            // as_int.clamp_min/max). Storage width comes from T via is_unsigned_v
+            // + sizeof at compile time per H13/H14 (Kind NEVER drives storage).
+            int64_t v;
+            if (desc.kind == CfgFieldDescriptor::KIND_INT_ENUM) {
+                // Operator-friendly string-token parsing — labels[] case-insensitive
+                // lookup matches legacy BanditAlgorithm/BarrierBlendMode/
+                // DegradationCurve_FromString strcasecmp convention. Numeric
+                // fallback preserves `bandit_algorithm=2` UX. Out-of-range →
+                // default_val (audit HIGH-1: reads as_int_enum union member).
+                v = -1;
+                for (uint8_t i = 0; i < desc.payload.as_int_enum.count; i++) {
+                    if (strcasecmp(val, desc.payload.as_int_enum.labels[i]) == 0) {
+                        v = i;
+                        break;
+                    }
+                }
+                if (v < 0) {
+                    v = atoi(val);
+                }
+                if (v < 0 || v >= desc.payload.as_int_enum.count) {
+                    // .F.4c — preserve legacy operator-UX warning emission per BanditAlgorithm/
+                    // BarrierBlendMode/DegradationCurve_FromString convention. Walks labels[]
+                    // to enumerate valid tokens. Warns unconditionally (no metadata bit gate)
+                    // because legacy behavior was unconditional warn-then-default.
+                    fprintf(stderr, "[cfg] WARN: %s='%s' invalid; expected one of ",
+                            desc.cfg_field_name, val);
+                    for (uint8_t i = 0; i < desc.payload.as_int_enum.count; i++) {
+                        fprintf(stderr, "%s%s", i > 0 ? "/" : "",
+                                desc.payload.as_int_enum.labels[i]);
+                    }
+                    fprintf(stderr, " or 0-%u. Using default=%d.\n",
+                            desc.payload.as_int_enum.count - 1u,
+                            desc.payload.as_int_enum.default_val);
+                    v = desc.payload.as_int_enum.default_val;
+                }
+            } else {
+                // KIND_INT / KIND_BOOL — decimal parse + clamp to descriptor range.
+                if constexpr (std::is_unsigned_v<T>) {
+                    v = static_cast<int64_t>(strtoull(val, nullptr, 10));
+                } else {
+                    v = atoi(val);
+                }
+                const int64_t v_before = v;
+                v = std::clamp(v, desc.payload.as_int.clamp_min, desc.payload.as_int.clamp_max);
+                // .F.4c — WARN_ON_CLAMP metadata bit: emit operator-clarity warning when
+                // parse clamps the value. Per-bit gated (not all KIND_INT rows want this;
+                // some clamps are defensive boundaries operator never trips).
+                if (v != v_before && (desc.metadata_flags & CfgFieldDescriptor::WARN_ON_CLAMP)) {
+                    fprintf(stderr, "[cfg] WARN: %s='%s' out of range [%lld, %lld]; clamping to %lld.\n",
+                            desc.cfg_field_name, val,
+                            (long long)desc.payload.as_int.clamp_min,
+                            (long long)desc.payload.as_int.clamp_max,
+                            (long long)v);
+                }
+            }
             dst = static_cast<T>(v);
         }
     }
@@ -140,8 +192,96 @@ namespace tt {
         return n;
     }
 
-    // Note: cfg_render_field<T> is implemented inline in GUI/SettingsPanel.hpp at T12,
-    // since rendering depends on ImGui which isn't included by this header (used by
-    // non-GUI code — the parser includes this header but doesn't link ImGui).
+    //==================================================================================================
+    // [ASSIGN: descriptor default → typed cfg field]
+    //==================================================================================================
+    // v5.15.5.F.4c — third sister of cfg_parse_field / cfg_save_field. Sets cfg.name
+    // to its declared default value from the descriptor payload. Used by reset-to-
+    // defaults GUI button + boot default-fill consumers. Same 3-barrier discipline.
+    template <typename T>
+    inline void cfg_assign_field(T& dst, const CfgFieldDescriptor& desc) {
+        static_assert(is_FPN_v<T>
+                   || std::is_floating_point_v<T>
+                   || std::is_integral_v<T>
+                   || std::is_array_v<T>,
+                      "cfg field type not in recognized family — "
+                      "extend tt::cfg_assign_field<T> with a new branch.");
+
+        if constexpr (is_FPN_v<T>) {
+            // Default is stored as fraction (NOT percent); no PCT scaling needed.
+            dst = FPN_FromDouble<T::F>(desc.payload.as_double.default_val);
+        } else if constexpr (std::is_floating_point_v<T>) {
+            dst = static_cast<T>(desc.payload.as_double.default_val);
+        } else if constexpr (std::is_array_v<T>) {
+            // KIND_STRING / KIND_FILE_PATH — default is const char*; copy into array.
+            if (desc.payload.as_string.default_val) {
+                strncpy(dst, desc.payload.as_string.default_val, std::extent_v<T> - 1);
+                dst[std::extent_v<T> - 1] = '\0';
+            } else {
+                dst[0] = '\0';
+            }
+        } else if constexpr (std::is_integral_v<T>) {
+            // Sub-dispatch on Kind for INT_ENUM (as_int_enum) vs INT/BOOL (as_int / as_bool).
+            int64_t v;
+            if (desc.kind == CfgFieldDescriptor::KIND_INT_ENUM) {
+                v = desc.payload.as_int_enum.default_val;
+            } else if (desc.kind == CfgFieldDescriptor::KIND_BOOL) {
+                v = desc.payload.as_bool.default_val;
+            } else {
+                v = desc.payload.as_int.default_val;
+            }
+            dst = static_cast<T>(v);
+        }
+    }
+
+    //==================================================================================================
+    // [DIFF: typed cfg field vs descriptor default]
+    //==================================================================================================
+    // v5.15.5.F.4c — fourth sister. Returns true if current value differs from declared
+    // default. Used by GUI "modified" badge + CLI --list-cfg --changed-only consumer.
+    template <typename T>
+    inline bool cfg_diff_field(const T& current, const CfgFieldDescriptor& desc) {
+        static_assert(is_FPN_v<T>
+                   || std::is_floating_point_v<T>
+                   || std::is_integral_v<T>
+                   || std::is_array_v<T>,
+                      "cfg field type not in recognized family — "
+                      "extend tt::cfg_diff_field<T> with a new branch.");
+
+        if constexpr (is_FPN_v<T>) {
+            // FPN equality via integer comparison (after FromDouble conversion).
+            const T default_fpn = FPN_FromDouble<T::F>(desc.payload.as_double.default_val);
+            return !(current == default_fpn);
+        } else if constexpr (std::is_floating_point_v<T>) {
+            return current != static_cast<T>(desc.payload.as_double.default_val);
+        } else if constexpr (std::is_array_v<T>) {
+            if (!desc.payload.as_string.default_val) {
+                return current[0] != '\0';
+            }
+            return strncmp(current, desc.payload.as_string.default_val, std::extent_v<T>) != 0;
+        } else if constexpr (std::is_integral_v<T>) {
+            int64_t default_v;
+            if (desc.kind == CfgFieldDescriptor::KIND_INT_ENUM) {
+                default_v = desc.payload.as_int_enum.default_val;
+            } else if (desc.kind == CfgFieldDescriptor::KIND_BOOL) {
+                default_v = desc.payload.as_bool.default_val;
+            } else {
+                default_v = desc.payload.as_int.default_val;
+            }
+            return static_cast<int64_t>(current) != default_v;
+        }
+        return false;
+    }
+
+    // Note: cfg_render_field<T> is implemented inline in GUI/SettingsPanel.hpp (Step 0.5
+    // landed at .F.4c), since rendering depends on ImGui which isn't included by this header
+    // (used by non-GUI code — the parser includes this header but doesn't link ImGui).
+    //
+    // The tt:: dispatch quartet for cfg fields at .F.4c:
+    //   tt::cfg_parse_field<T>  (text → typed; here)
+    //   tt::cfg_save_field<T>   (typed → text; here)
+    //   tt::cfg_assign_field<T> (default → typed; here)
+    //   tt::cfg_diff_field<T>   (typed vs default → bool; here)
+    //   tt::cfg_render_field<T> (typed → ImGui widget; GUI/SettingsPanel.hpp)
 
 }  // namespace tt
