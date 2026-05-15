@@ -1873,6 +1873,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.calibration_log_path[0] = '\0';
   for (int i = 0; i < 16; ++i) cfg.core_model_path[i][0] = '\0';    // empty = shared
   for (int i = 0; i < 16; ++i) cfg.core_model_dir[i][0] = '\0';     // empty = use model_path or shared
+  // WIP2d-1.A — per-core symbol forward-compat. Empty = no override; BinanceConfig.symbol
+  // (loaded from binance.cfg) drives. Non-empty = operator-set per-core symbol; main.cpp
+  // syncs to BinanceConfig.symbol pre-EngineSharded_Run with uniformity check.
+  for (int i = 0; i < 16; ++i) cfg.core_symbol[i][0] = '\0';
   // v4.0 per-core overrides — zero in every field = "inherit global".
   // v4.7.24: zeroing auto-derives from PER_CORE_OVERRIDE_FIELDS macro.
   for (int i = 0; i < 16; ++i) {
@@ -2795,6 +2799,19 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         strncpy(cfg.core_model_path[core_idx], val,
                 sizeof(cfg.core_model_path[core_idx]) - 1);
         cfg.core_model_path[core_idx][sizeof(cfg.core_model_path[core_idx]) - 1] = '\0';
+      }
+      continue;
+    }
+    // WIP2d-1.A — Per-core symbol: core_0_symbol=BTCUSDT
+    // Forward-compat for multi-symbol DataStream. Uniformity-checked at boot (main.cpp);
+    // bridges to BinanceConfig.symbol if operator set a non-empty value.
+    // strstr "_symbol" comes BEFORE _strategy block (avoid match-substring shadowing).
+    if (strncmp(key, "core_", 5) == 0 && strstr(key, "_symbol")) {
+      int core_idx = atoi(key + 5);
+      if (core_idx >= 0 && core_idx < 16) {
+        strncpy(cfg.core_symbol[core_idx], val,
+                sizeof(cfg.core_symbol[core_idx]) - 1);
+        cfg.core_symbol[core_idx][sizeof(cfg.core_symbol[core_idx]) - 1] = '\0';
       }
       continue;
     }

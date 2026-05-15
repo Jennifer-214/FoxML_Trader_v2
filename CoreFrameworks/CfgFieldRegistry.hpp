@@ -647,6 +647,8 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     X(char,                 core_horizon_list,         [128],   "KIND_STRING cohort at .F.4e")                            \
     X(char,                 core_ensemble_blend_mode,  [16],    "KIND_STRING (or KIND_INT_ENUM) cohort at .F.4e")         \
     X(char,                 core_disabled_horizons,    [128],   "KIND_STRING cohort at .F.4e")                            \
+    /* === Per-core symbol (WIP2d-1.A — partial advance of .F.4c.3.A; operator-facing forward-compat for multi-symbol DataStream) === */ \
+    X(char,                 core_symbol,               [32],    "KIND_STRING cohort at .F.4e — partial advance of .F.4c.3.A symbol axis migration") \
     /* === Hex64 bitmap awaiting KIND_HEX64 at .F.4e === */                                                                \
     X(uint64_t,             core_feature_mask,         ,        "KIND_HEX64 needed at .F.4e")                             \
     /* === TRANSITIONAL parallel arrays — delete at WIP2g (cores[c] authoritative) === */                                  \

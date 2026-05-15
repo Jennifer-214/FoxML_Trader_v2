@@ -220,6 +220,38 @@ int main(int argc, char *argv[]) {
     //   - CoreFrameworks/EventLoopState (cross-core dispatch)
     //   - CoreFrameworks/OrderManager (OMS HandleFill — fee math + counters)
     //==================================================================================================
+    // WIP2d-1.A — per-core symbol axis (partial advance of .F.4c.3.A; uniformity check
+    // + bridge to BinanceConfig.symbol). Operator can set core_<N>_symbol=BTCUSDT in
+    // engine.cfg; this overrides binance.cfg's symbol field if uniformity holds. Multi-
+    // symbol DataStream not yet supported — boot fails with clear error if cores have
+    // mismatched non-empty symbols. Empty = no override (binance.cfg's symbol drives).
+    {
+        const char* primary_symbol = ccfg.core_symbol[0];
+        bool any_set = (primary_symbol[0] != '\0');
+        for (uint16_t c = 1; c < ccfg.num_execution_cores && c < 16; ++c) {
+            const char* sc = ccfg.core_symbol[c];
+            if (sc[0] != '\0') {
+                any_set = true;
+                if (primary_symbol[0] == '\0') {
+                    primary_symbol = sc;  // first non-empty wins as primary
+                } else if (strcmp(sc, primary_symbol) != 0) {
+                    fprintf(stderr,
+                        "[boot] FATAL: per-core symbols differ (core %d='%s' vs primary='%s'); "
+                        "multi-symbol DataStream not yet supported. Set all core_<N>_symbol= "
+                        "identical OR leave all empty (binance.cfg's symbol drives).\n",
+                        (int)c, sc, primary_symbol);
+                    return 1;
+                }
+            }
+        }
+        if (any_set) {
+            strncpy(bcfg.symbol, primary_symbol, sizeof(bcfg.symbol) - 1);
+            bcfg.symbol[sizeof(bcfg.symbol) - 1] = '\0';
+            fprintf(stderr, "[boot] per-core symbol override: BinanceConfig.symbol='%s' "
+                            "(from engine.cfg core_<N>_symbol=)\n", bcfg.symbol);
+        }
+    }
+
     if (ccfg.engine_mode == ENGINE_MODE_SHARDED) {
         // v5.15.5.C.3 Phase 7.B — runtime bench gate boot dispatch.
         // Two template instantiations of EngineSharded_Run exist in the
