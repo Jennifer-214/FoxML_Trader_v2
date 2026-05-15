@@ -69,7 +69,7 @@ static void test_simpledip_basic() {
     config.stop_loss_pct     = FPN_FromDouble<64>(0.0025);  // 0.25% SL
 
     GateParameters<64> out;
-    SimpleDip_BuildParameters(&rolling, &config, FPN_FromDouble<64>(1000.0), &out);
+    SimpleDip_BuildParameters(&rolling, &config.cores[0], FPN_FromDouble<64>(1000.0), &out);
 
     double recent_high = FPN_ToDouble(rolling.price_max);
     double expected_entry = recent_high * (1.0 - 0.001);
@@ -106,11 +106,11 @@ static void test_dispatcher_routing() {
 
     GateParameters<64> dip, mr, mom, ema, none;
 
-    Strategy_BuildParameters(STRATEGY_SIMPLE_DIP,    &rolling, &config, bal, &dip);
-    Strategy_BuildParameters(STRATEGY_MEAN_REVERSION, &rolling, &config, bal, &mr);
-    Strategy_BuildParameters(STRATEGY_MOMENTUM,       &rolling, &config, bal, &mom);
-    Strategy_BuildParameters(STRATEGY_EMA_CROSS,      &rolling, &config, bal, &ema);
-    Strategy_BuildParameters(STRATEGY_NONE,           &rolling, &config, bal, &none);
+    Strategy_BuildParameters(STRATEGY_SIMPLE_DIP,    &rolling, &config.cores[0], bal, &dip);
+    Strategy_BuildParameters(STRATEGY_MEAN_REVERSION, &rolling, &config.cores[0], bal, &mr);
+    Strategy_BuildParameters(STRATEGY_MOMENTUM,       &rolling, &config.cores[0], bal, &mom);
+    Strategy_BuildParameters(STRATEGY_EMA_CROSS,      &rolling, &config.cores[0], bal, &ema);
+    Strategy_BuildParameters(STRATEGY_NONE,           &rolling, &config.cores[0], bal, &none);
 
     EXPECT(dip.strategy_id == STRATEGY_SIMPLE_DIP,    "dispatcher → SimpleDip");
     EXPECT(mr.strategy_id  == STRATEGY_MEAN_REVERSION, "dispatcher → MeanReversion");
@@ -134,7 +134,7 @@ static void test_strategy_none() {
     ControllerConfig<64> config = ControllerConfig_Default<64>();
 
     GateParameters<64> out;
-    Strategy_BuildParameters(STRATEGY_NONE, &rolling, &config, FPN_FromDouble<64>(1000.0), &out);
+    Strategy_BuildParameters(STRATEGY_NONE, &rolling, &config.cores[0], FPN_FromDouble<64>(1000.0), &out);
 
     EXPECT(out.strategy_id == STRATEGY_NONE, "strategy_id is NONE");
     EXPECT(FPN_IsZero(out.bg_price_threshold), "BG threshold is zero");
@@ -280,7 +280,7 @@ static void test_unknown_strategy_id() {
     ControllerConfig<64> config = ControllerConfig_Default<64>();
 
     GateParameters<64> out;
-    Strategy_BuildParameters((uint8_t)99, &rolling, &config, FPN_FromDouble<64>(100.0), &out);
+    Strategy_BuildParameters((uint8_t)99, &rolling, &config.cores[0], FPN_FromDouble<64>(100.0), &out);
 
     EXPECT(out.strategy_id == STRATEGY_NONE, "unknown id → NONE pack");
     EXPECT(FPN_IsZero(out.bg_price_threshold), "no gates set");

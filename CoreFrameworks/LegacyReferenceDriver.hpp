@@ -185,10 +185,18 @@ inline void LegacyReference_SlowPath(LegacyReferenceState<F>* state,
                                       const ControllerConfig<F>* config) {
     for (int i = 0; i < state->num_slots; ++i) {
         if (state->slots[i].strategy_id == STRATEGY_NONE) continue;
+        // v5.15.5.F.4c.3 WIP2c.2 — per-core single-param sig; legacy single-core
+        // path uses cores[0]. poll_interval pre-resolved from global cfg.
         Strategy_BuildParameters(state->slots[i].strategy_id,
-                                  rolling, config,
+                                  rolling, &config->cores[0],
                                   state->allocated_balance_per_slot,
-                                  &state->slots[i].params);
+                                  &state->slots[i].params,
+                                  /*rolling_long*/ nullptr,
+                                  /*model_ctx*/ nullptr,
+                                  /*strategy_state*/ nullptr,
+                                  /*strategy_halt_reason*/ nullptr,
+                                  /*now_us*/ 0,
+                                  /*poll_interval_ticks*/ (int)config->poll_interval);
     }
 }
 

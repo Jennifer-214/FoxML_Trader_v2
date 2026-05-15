@@ -2688,10 +2688,14 @@ inline void EventLoop_RebuildOneCore(
             (const FPN<F>*)ema_price    // v5.4.0 Phase 2.4 — for EmaCross
         );
 
+        // v5.15.5.F.4c.3 WIP2c.2 — per-core single-param sig (Class 25 closure).
+        // resolved_cfg already merged per-core overrides via ResolveForCore at
+        // slow-path entry; its .cores[slot] reflects the post-resolve view.
+        // poll_interval pre-resolved from global cfg as scalar arg.
         Strategy_BuildParameters(
             effective_strategy_id,
             rolling,
-            &resolved_cfg,
+            &resolved_cfg.cores[slot],
             state->cores[slot].allocated_balance,
             &state->cores[slot].pending_params,
             rolling_long,
@@ -2700,10 +2704,12 @@ inline void EventLoop_RebuildOneCore(
             &state->cores[slot].strategy_halt_reason,  // v5.6.2 — dispatcher writes
                                                        // SHALT_* codes for fee-floor /
                                                        // cost-gate / no-signal paths.
-            now_us  // v5.14.1.B.2 (PARITY-001) — threaded through to ML_BuildParameters
-                    // for composite confidence freshness. Already plumbed to this fn
-                    // (param :1951) since v5.12.1.B clock hoist; live = clock_gettime
-                    // at slow-path entry, backtest = tick.timestamp (deterministic).
+            now_us,  // v5.14.1.B.2 (PARITY-001) — threaded through to ML_BuildParameters
+                     // for composite confidence freshness. Already plumbed to this fn
+                     // (param :1951) since v5.12.1.B clock hoist; live = clock_gettime
+                     // at slow-path entry, backtest = tick.timestamp (deterministic).
+            (int)config->poll_interval   // WIP2c.2 — caller-resolved global; per-core consumer
+                                          // reads tick→time conversion via this scalar arg.
         );
 
         // v4.0.3 D9: clear ratchet_sl when no position active on this core,
@@ -2986,7 +2992,7 @@ inline void EventLoop_RebuildOneCore(
         }
         if (!Strategy_SpacingOk(state->cores[slot].pending_params.bg_price_threshold,
                                  state->cores[slot].last_entry_price,
-                                 rolling, &spacing_cfg)) {
+                                 rolling, &spacing_cfg.cores[slot])) {
             zero_gate(HALT_SPACING);
         }
         // VWAP gate: forces entries below VWAP — buy retracements, not pumps.
@@ -3061,7 +3067,7 @@ inline void EventLoop_RebuildOneCore(
             // (means strategy set TP below entry — leave alone, it's strategy's bug).
             if (FPN_GreaterThan(current_tp, entry)) {
                 FPN<F> tp_amount = FPN_Sub(current_tp, entry);
-                FPN<F> floored = Strategy_TpFloor(entry, tp_amount, &resolved_cfg);
+                FPN<F> floored = Strategy_TpFloor(entry, tp_amount, &resolved_cfg.cores[slot]);
                 if (FPN_GreaterThan(floored, tp_amount)) {
                     state->cores[slot].pending_params.sg_take_profit_price =
                         FPN_Add(entry, floored);

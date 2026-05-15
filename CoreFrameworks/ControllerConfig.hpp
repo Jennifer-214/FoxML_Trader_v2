@@ -419,6 +419,11 @@ struct alignas(64) PerCoreCfg {
     double ensemble_min_agreement_pct;   // double preserved from flat (ML voting threshold; not accounting math)
     int    barrier_blend_mode;           // KIND_INT_ENUM (LEGACY=0 / BLEND=1 / DOMINANT=2)
 
+    // --- Maker/Taker fees + VolScaler (3 — FPN<F>) — WIP2c.2 inclusion ---
+    FPN<F> fee_rate_maker;
+    FPN<F> fee_rate_taker;
+    FPN<F> foxml_vol_scaling_z_max;
+
     // --- 5 cfg-domain bitmap STORAGE fields (cohort move; A2 flat KIND_BOOL rows ship at WIP2e) ---
     // Per cohort discipline: all 5 domain bitmaps move per-core together. A2 expansion (WIP2e)
     // adds flat KIND_BOOL rows in FOREACH_PER_CORE_CFG_FIELD that source-of-truth the bits; slow-

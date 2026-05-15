@@ -7566,7 +7566,7 @@ e3_skip_load:;
         // ---- partial_exit_enabled=0 → no GATE_FLAG_PAIR_ACTIVE ----
         BITMAP_CLR(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);
         Strategy_BuildParameters(STRATEGY_SIMPLE_DIP,
-            &rolling, &cfg, FPN_FromDouble<64>(1000.0),
+            &rolling, &cfg.cores[0], FPN_FromDouble<64>(1000.0),
             &params, &rolling_long);
         check("P.4 disabled: GATE_FLAG_PAIR_ACTIVE NOT set",
               (params.flags & GATE_FLAG_PAIR_ACTIVE) == 0);
@@ -7576,7 +7576,7 @@ e3_skip_load:;
         // ---- partial_exit_enabled=1 → flag set, tp_pct_b = tp_pct * 2.0 ----
         BITMAP_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);
         Strategy_BuildParameters(STRATEGY_SIMPLE_DIP,
-            &rolling, &cfg, FPN_FromDouble<64>(1000.0),
+            &rolling, &cfg.cores[0], FPN_FromDouble<64>(1000.0),
             &params, &rolling_long);
         check("P.4 enabled: GATE_FLAG_PAIR_ACTIVE set",
               (params.flags & GATE_FLAG_PAIR_ACTIVE) != 0);
@@ -7591,7 +7591,7 @@ e3_skip_load:;
         // ---- Defensive: tp2_mult=0 → tp_pct_b falls back to tp_pct ----
         cfg.tp2_mult = FPN_Zero<64>();
         Strategy_BuildParameters(STRATEGY_SIMPLE_DIP,
-            &rolling, &cfg, FPN_FromDouble<64>(1000.0),
+            &rolling, &cfg.cores[0], FPN_FromDouble<64>(1000.0),
             &params, &rolling_long);
         if (!FPN_IsZero(params.tp_pct)) {
             check("P.4 defensive: tp2_mult=0 → tp_pct_b == tp_pct (fallback)",
@@ -8748,7 +8748,7 @@ e3_skip_load:;
             BITMAP_CLR(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);  // simpler path
             tt::GateParameters<64> out;
             tt::GateParameters_Init(&out);
-            tt::Strategy_BuildParameters<64>(STRATEGY_MEAN_REVERSION, &rs, &cfg,
+            tt::Strategy_BuildParameters<64>(STRATEGY_MEAN_REVERSION, &rs, &cfg.cores[0],
                 FPN_FromDouble<64>(1000.0), &out);
             check("v5.1.10: TP=1.0% > floor 0.3% → BUY_BLOCKED clear",
                   (out.flags & tt::GATE_FLAG_BUY_BLOCKED) == 0);
@@ -8761,7 +8761,7 @@ e3_skip_load:;
             cfg.take_profit_pct = FPN_FromDouble<64>(0.003);  // 0.3% TP, == floor
             tt::GateParameters<64> out;
             tt::GateParameters_Init(&out);
-            tt::Strategy_BuildParameters<64>(STRATEGY_MEAN_REVERSION, &rs, &cfg,
+            tt::Strategy_BuildParameters<64>(STRATEGY_MEAN_REVERSION, &rs, &cfg.cores[0],
                 FPN_FromDouble<64>(1000.0), &out);
             check("v5.1.10: TP exactly at floor → BUY_BLOCKED clear (LessThan, not LE)",
                   (out.flags & tt::GATE_FLAG_BUY_BLOCKED) == 0);
@@ -8772,7 +8772,7 @@ e3_skip_load:;
             cfg.take_profit_pct = FPN_FromDouble<64>(0.001);  // 0.1% TP, below floor
             tt::GateParameters<64> out;
             tt::GateParameters_Init(&out);
-            tt::Strategy_BuildParameters<64>(STRATEGY_MEAN_REVERSION, &rs, &cfg,
+            tt::Strategy_BuildParameters<64>(STRATEGY_MEAN_REVERSION, &rs, &cfg.cores[0],
                 FPN_FromDouble<64>(1000.0), &out);
             check("v5.1.10: TP=0.1% < floor 0.3% → BUY_BLOCKED set",
                   (out.flags & tt::GATE_FLAG_BUY_BLOCKED) != 0);
@@ -8785,7 +8785,7 @@ e3_skip_load:;
             cfg.take_profit_pct = FPN_FromDouble<64>(0.005);   // 0.5% TP, > 3 × 0.002 = 0.6%? no, 0.005 < 0.006
             tt::GateParameters<64> out;
             tt::GateParameters_Init(&out);
-            tt::Strategy_BuildParameters<64>(STRATEGY_MEAN_REVERSION, &rs, &cfg,
+            tt::Strategy_BuildParameters<64>(STRATEGY_MEAN_REVERSION, &rs, &cfg.cores[0],
                 FPN_FromDouble<64>(1000.0), &out);
             check("v5.1.10: fee_rate_taker=0 falls back to fee_rate; TP 0.5% < 3×0.2%=0.6% → BUY_BLOCKED set",
                   (out.flags & tt::GATE_FLAG_BUY_BLOCKED) != 0);
@@ -8798,7 +8798,7 @@ e3_skip_load:;
             cfg.take_profit_pct = FPN_FromDouble<64>(0.01);
             tt::GateParameters<64> out;
             tt::GateParameters_Init(&out);
-            tt::Strategy_BuildParameters<64>(STRATEGY_NONE, &rs, &cfg,
+            tt::Strategy_BuildParameters<64>(STRATEGY_NONE, &rs, &cfg.cores[0],
                 FPN_FromDouble<64>(1000.0), &out);
             check("v5.1.10: STRATEGY_NONE → tp_pct=0 → BUY_BLOCKED NOT set (skip-on-zero guard)",
                   (out.flags & tt::GATE_FLAG_BUY_BLOCKED) == 0);
@@ -9793,7 +9793,7 @@ e3_skip_load:;
 
         SimpleDipState<FP> sdip{};
         tt::GateParameters<FP> out_with_state{};
-        SimpleDip_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+        SimpleDip_BuildParameters(&rolling, &cfg.cores[0], FPN_FromDouble<FP>(1000.0),
                                    &out_with_state, (RollingStats<FP, 512>*)nullptr,
                                    &sdip);
         check("v5.4.0p2.1: state-aware Build populates state->recent_high",
@@ -9804,7 +9804,7 @@ e3_skip_load:;
         // Same call with nullptr state — must produce identical gate output
         // (state is a write-only side-channel, doesn't affect numerics).
         tt::GateParameters<FP> out_no_state{};
-        SimpleDip_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+        SimpleDip_BuildParameters(&rolling, &cfg.cores[0], FPN_FromDouble<FP>(1000.0),
                                    &out_no_state, (RollingStats<FP, 512>*)nullptr,
                                    (SimpleDipState<FP>*)nullptr);
         check("v5.4.0p2.1: nullptr-state path produces identical bg threshold",
@@ -9829,7 +9829,7 @@ e3_skip_load:;
 
         SimpleDipState<FP> sdip{};
         tt::GateParameters<FP> out{};
-        tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg,
+        tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg.cores[0],
                                       FPN_FromDouble<FP>(500.0), &out,
                                       (RollingStats<FP, 512>*)nullptr,
                                       nullptr, &sdip);
@@ -9905,7 +9905,7 @@ e3_skip_load:;
 
         // nullptr-state path (legacy)
         tt::GateParameters<FP> out_legacy{};
-        tt::MeanReversion_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+        tt::MeanReversion_BuildParameters(&rolling, &cfg.cores[0], FPN_FromDouble<FP>(1000.0),
                                            &out_legacy);
 
         // State-aware path with deliberately DIFFERENT live values
@@ -9914,7 +9914,7 @@ e3_skip_load:;
         mr.live_vol_mult    = FPN_FromDouble<FP>(3.0);
         mr.live_stddev_mult = FPN_Zero<FP>();
         tt::GateParameters<FP> out_state{};
-        tt::MeanReversion_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+        tt::MeanReversion_BuildParameters(&rolling, &cfg.cores[0], FPN_FromDouble<FP>(1000.0),
                                            &out_state, &mr);
         check("v5.4.0p2.2: state-aware MR produces lower bg threshold (bigger dip)",
               FPN_LessThan(out_state.bg_price_threshold, out_legacy.bg_price_threshold));
@@ -9938,7 +9938,7 @@ e3_skip_load:;
         mr.live_stddev_mult = FPN_Zero<FP>();
 
         tt::GateParameters<FP> out{};
-        tt::Strategy_BuildParameters(STRATEGY_MEAN_REVERSION, &rolling, &cfg,
+        tt::Strategy_BuildParameters(STRATEGY_MEAN_REVERSION, &rolling, &cfg.cores[0],
                                       FPN_FromDouble<FP>(500.0), &out,
                                       (RollingStats<FP, 512>*)nullptr,
                                       nullptr, &mr);
@@ -10035,7 +10035,7 @@ e3_skip_load:;
 
         // Legacy path (no state): uses entry_offset_pct
         tt::GateParameters<FP> out_legacy{};
-        tt::Momentum_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+        tt::Momentum_BuildParameters(&rolling, &cfg.cores[0], FPN_FromDouble<FP>(1000.0),
                                       &out_legacy);
 
         // State-aware: large breakout_mult should push entry far above avg
@@ -10043,7 +10043,7 @@ e3_skip_load:;
         mom.live_breakout_mult = FPN_FromDouble<FP>(3.0);  // 3σ breakout
         mom.live_vol_mult      = FPN_FromDouble<FP>(1.0);
         tt::GateParameters<FP> out_state{};
-        tt::Momentum_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+        tt::Momentum_BuildParameters(&rolling, &cfg.cores[0], FPN_FromDouble<FP>(1000.0),
                                       &out_state, &mom);
         check("v5.4.0p2.3: state-aware Momentum produces higher bg threshold "
               "(stddev path > pct path)",
@@ -10064,7 +10064,7 @@ e3_skip_load:;
         mom.live_vol_mult      = FPN_FromDouble<FP>(1.0);
 
         tt::GateParameters<FP> out{};
-        tt::Strategy_BuildParameters(STRATEGY_MOMENTUM, &rolling, &cfg,
+        tt::Strategy_BuildParameters(STRATEGY_MOMENTUM, &rolling, &cfg.cores[0],
                                       FPN_FromDouble<FP>(500.0), &out,
                                       (RollingStats<FP, 512>*)nullptr,
                                       nullptr, &mom);
@@ -10099,7 +10099,7 @@ e3_skip_load:;
                                   FPN_Mul(rolling.price_stddev, FPN_FromDouble<FP>(1.0)));
         es_up.last_ema_slope = FPN_FromDouble<FP>(0.5);  // rising
         tt::GateParameters<FP> out_up{};
-        tt::EmaCross_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+        tt::EmaCross_BuildParameters(&rolling, &cfg.cores[0], FPN_FromDouble<FP>(1000.0),
                                       &out_up, &es_up);
         check("v5.4.0p2.4: EmaCross uptrend → bg threshold is non-zero",
               !FPN_IsZero(out_up.bg_price_threshold));
@@ -10112,7 +10112,7 @@ e3_skip_load:;
         // Sign on negation
         es_down.last_ema_slope.sign = 1;
         tt::GateParameters<FP> out_down{};
-        tt::EmaCross_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+        tt::EmaCross_BuildParameters(&rolling, &cfg.cores[0], FPN_FromDouble<FP>(1000.0),
                                       &out_down, &es_down);
         check("v5.4.0p2.4: EmaCross no-uptrend → bg threshold zeroed",
               FPN_IsZero(out_down.bg_price_threshold));
@@ -10161,7 +10161,7 @@ e3_skip_load:;
         ControllerConfig<FP> cfg = ControllerConfig_Default<FP>();
 
         tt::GateParameters<FP> out{};
-        tt::EmaCross_BuildParameters(&rolling, &cfg, FPN_FromDouble<FP>(1000.0),
+        tt::EmaCross_BuildParameters(&rolling, &cfg.cores[0], FPN_FromDouble<FP>(1000.0),
                                       &out, (EmaCrossState<FP>*)nullptr);
         check("v5.4.0p2.4: nullptr-state path produces non-zero threshold (SimpleDip fallback)",
               !FPN_IsZero(out.bg_price_threshold));
@@ -10346,7 +10346,7 @@ e3_skip_load:;
         BITMAP_CLR(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED);
         BITMAP_CLR(cfg.ml_cfg_flags, MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED);
         tt::GateParameters<FP> baseline{};
-        tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg,
+        tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg.cores[0],
                                       FPN_FromDouble<FP>(1000.0), &baseline);
         check("v5.5.0p8: defaults off — bg threshold non-zero",
               !FPN_IsZero(baseline.bg_price_threshold));
@@ -10358,7 +10358,7 @@ e3_skip_load:;
         BITMAP_SET(cfg.ml_cfg_flags, MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED);
         cfg.foxml_vol_scaling_z_max = FPN_FromDouble<FP>(3.0);
         tt::GateParameters<FP> with_vol{};
-        tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg,
+        tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg.cores[0],
                                       FPN_FromDouble<FP>(1000.0), &with_vol);
         check("v5.5.0p8: VolScaler enabled — trade_size <= baseline (scale-down only)",
               FPN_LessThanOrEqual(with_vol.trade_size, baseline_size));
@@ -10367,7 +10367,7 @@ e3_skip_load:;
         BITMAP_CLR(cfg.ml_cfg_flags, MASK_ML_CFG_FOXML_VOL_SCALING_ENABLED);
         BITMAP_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED);
         tt::GateParameters<FP> with_cost{};
-        tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg,
+        tt::Strategy_BuildParameters(STRATEGY_SIMPLE_DIP, &rolling, &cfg.cores[0],
                                       FPN_FromDouble<FP>(1000.0), &with_cost);
         check("v5.5.0p8: CostModel enabled — flags computed without crash",
               with_cost.strategy_id == STRATEGY_SIMPLE_DIP);
@@ -10550,7 +10550,7 @@ e3_skip_load:;
         GateParameters<64> out;
         GateParameters_Init(&out);
         uint8_t shalt = SHALT_OK;
-        Strategy_BuildParameters(STRATEGY_NONE, &rolling, &cfg,
+        Strategy_BuildParameters(STRATEGY_NONE, &rolling, &cfg.cores[0],
                                   FPN_FromDouble<64>(1500.0), &out,
                                   (const RollingStats<64, 512>*)nullptr,
                                   nullptr, nullptr, &shalt);
@@ -12347,7 +12347,7 @@ e3_skip_load:;
 
             GateParameters<64> out = {};
             SimpleDip_BuildParameters<64, 128>(
-                &rolling, &cfg, FPN_FromDouble<64>(1000.0), &out);
+                &rolling, &cfg.cores[0], FPN_FromDouble<64>(1000.0), &out);
 
             // SimpleDip threshold = recent_high * (1 - entry_offset_pct).
             // With price_max=60100 + default offset=0.0015 → threshold ≈ 60009.85
