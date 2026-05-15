@@ -116,8 +116,22 @@ namespace tt {
                             desc.payload.as_int_enum.default_val);
                     v = desc.payload.as_int_enum.default_val;
                 }
+            } else if (desc.kind == CfgFieldDescriptor::KIND_BOOL) {
+                // KIND_BOOL — truthy-int normalization (any non-zero → 1; zero → 0).
+                // Payload union holds as_bool (NOT as_int); reading as_int would
+                // be UB. Bool range is fixed [0, 1] — no descriptor clamp needed.
+                const int64_t parsed = atoi(val);
+                v = (parsed != 0) ? 1 : 0;
+                // WARN_ON_CLAMP: emit when operator wrote something other than 0/1
+                // (e.g., `record_ticks=42`); normalization is silent unless tagged.
+                if (parsed != 0 && parsed != 1 &&
+                    (desc.metadata_flags & CfgFieldDescriptor::WARN_ON_CLAMP)) {
+                    fprintf(stderr, "[cfg] WARN: %s='%s' (parsed=%lld) not in {0,1}; "
+                            "normalizing to 1.\n",
+                            desc.cfg_field_name, val, (long long)parsed);
+                }
             } else {
-                // KIND_INT / KIND_BOOL — decimal parse + clamp to descriptor range.
+                // KIND_INT — decimal parse + clamp to descriptor range.
                 if constexpr (std::is_unsigned_v<T>) {
                     v = static_cast<int64_t>(strtoull(val, nullptr, 10));
                 } else {
@@ -179,10 +193,17 @@ namespace tt {
             n = snprintf(buf, cap, fmt, v);
         } else if constexpr (std::is_array_v<T>) {
             n = snprintf(buf, cap, "%s", src);
-        } else if constexpr (std::is_unsigned_v<T>) {
-            n = snprintf(buf, cap, "%llu", static_cast<unsigned long long>(src));
-        } else { // signed integral
-            n = snprintf(buf, cap, "%lld", static_cast<long long>(src));
+        } else if constexpr (std::is_integral_v<T>) {
+            // v5.15.5.F.4c — KIND_BOOL sub-dispatch: emit "0" or "1" (normalized) so the
+            // saved value round-trips through cfg_parse_field cleanly. Non-bool integral
+            // types emit decimal as before.
+            if (desc.kind == CfgFieldDescriptor::KIND_BOOL) {
+                n = snprintf(buf, cap, "%d", (src != 0) ? 1 : 0);
+            } else if constexpr (std::is_unsigned_v<T>) {
+                n = snprintf(buf, cap, "%llu", static_cast<unsigned long long>(src));
+            } else {
+                n = snprintf(buf, cap, "%lld", static_cast<long long>(src));
+            }
         }
 
         if (pinned) {

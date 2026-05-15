@@ -149,16 +149,20 @@ namespace tt {
 //==========================================================================
 template <unsigned F>
 struct CfgRenderTable {
-    using RenderFn = bool (*)(ControllerConfig<F>&, const CfgFieldDescriptor&);
+    // v5.15.5.F.4c — render-and-persist fn signature: each call dispatches via
+    // cfg_render_and_persist<T> wrapper (render + save + per-edit file write).
+    // Walker call site is one line: `CfgRenderTable<F>::fns[idx](cfg, desc, cfg_path)`.
+    using RenderFn = bool (*)(ControllerConfig<F>&, const CfgFieldDescriptor&, const char*);
 
     // X-macro generates one per-field static render function. Each instantiates
-    // tt::cfg_render_field<T> with T = decltype(cfg.<name>) — handled by the
+    // cfg_render_and_persist<T> with T = decltype(cfg.<name>) — handled by the
     // template's type-trait dispatch (FPN / float / array / integral branches).
+    // Per-edit persistence: render-changed → tt::cfg_save_field → cfg_write_field.
     #define X_GEN_RENDER_FN(KIND_TOKEN, name, label, section, meta, payload, tooltip, \
                               applies_to_strategy, applies_to_op_mode, \
                               applies_to_regime, applies_to_risk, lives_in_struct) \
-        static bool render_##name(ControllerConfig<F>& cfg, const CfgFieldDescriptor& desc) { \
-            return tt::cfg_render_field(cfg.name, desc); \
+        static bool render_##name(ControllerConfig<F>& cfg, const CfgFieldDescriptor& desc, const char* cfg_path) { \
+            return cfg_render_and_persist(cfg.name, desc, cfg_path); \
         }
     FOREACH_CFG_FIELD(X_GEN_RENDER_FN)
     #undef X_GEN_RENDER_FN
@@ -460,28 +464,20 @@ static const CfgFieldDef field_defs[] = {
     #undef X
 
     //==========================================================================
-    // v5.15.5.F.4b — AUTO-EXTENDED FROM FOREACH_CFG_FIELD (universal cfg field registry)
+    // v5.15.5.F.4c — EMIT_CFG_FIELD_DEF_FROM_REGISTRY auto-extension REMOVED.
     //==========================================================================
-    // Single source of truth for ~40 KIND_DOUBLE/_PCT cfg fields. Adding a new
-    // KIND_DOUBLE/_PCT field = 1 row in FOREACH_CFG_FIELD; field_defs[] auto-
-    // extends; widget appears with correct label / section / tooltip / format.
-    // Tooltip column preserves operator prose byte-identical to pre-migration.
-    // See CoreFrameworks/CfgFieldRegistry.hpp + DOCS/RECURRING_BUG_PATTERNS.md
-    // Class 23 (3-barrier structural fix).
+    // FOREACH_CFG_FIELD rows now render via the bitmap-dispatch walker in
+    // Settings_RenderGlobalTab (calls CfgRenderTable<64>::fns[idx] which
+    // dispatches via cfg_render_and_persist → tt::cfg_render_field<T> +
+    // tt::cfg_save_field<T> + cfg_write_field). Single source of truth (the
+    // typed `gui_engine_cfg` instance) replaces the parallel-array indirection.
+    // See DESIGN_SPECS/universal-registry-bitmap-dispatcher-pattern.md.
     //
-    // Format string derived from Kind: KIND_DOUBLE_PCT → "%.2f" (matches
-    // pre-migration default for percentage fields); KIND_DOUBLE → "%.4f"
-    // (slightly higher precision than the most common pre-migration "%.2f"
-    // — minor UX shift; richer decimal display for raw doubles).
+    // field_defs[] retains: hardcoded entries (manual fields not in FOREACH_CFG_FIELD)
+    // + 5 FOREACH_*_CFG_FLAG bitmap-flag X-macro entries. STRING/FILE_PATH fields
+    // (notify_command, model paths, etc.) stay in hardcoded field_defs[] entries
+    // until .F.4e migrates KIND_STRING/_FILE_PATH to FOREACH_CFG_FIELD.
     //==========================================================================
-    #define EMIT_CFG_FIELD_DEF_FROM_REGISTRY(KIND_TOKEN, name, label, section, meta, payload, tooltip, \
-                                              applies_to_strategy, applies_to_op_mode, \
-                                              applies_to_regime, applies_to_risk, lives_in_struct) \
-        { #name, label, section, CFG_FLOAT, \
-          (CfgFieldDescriptor::KIND_TOKEN == CfgFieldDescriptor::KIND_DOUBLE_PCT) ? "%.2f" : "%.4f", \
-          tooltip },
-    FOREACH_CFG_FIELD(EMIT_CFG_FIELD_DEF_FROM_REGISTRY)
-    #undef EMIT_CFG_FIELD_DEF_FROM_REGISTRY
 };
 static constexpr int NUM_FIELDS = sizeof(field_defs) / sizeof(field_defs[0]);
 
@@ -1035,6 +1031,68 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
         if (fd->tooltip)
             ImGui::SetItemTooltip("%s", fd->tooltip);
     }
+
+    //==========================================================================
+    // v5.15.5.F.4c — Bitmap-dispatch walker for FOREACH_CFG_FIELD rows
+    //==========================================================================
+    // Replaces the prior EMIT_CFG_FIELD_DEF_FROM_REGISTRY field_defs[] auto-
+    // extension (removed at .F.4c). Iterates precomputed g_cfg_render_mask
+    // (composed at compile time: ~boot_only AND ~hidden_by_default) via branchless
+    // bitmap iteration; per-row dispatch through CfgRenderTable<64>::fns calls
+    // cfg_render_and_persist<T> which handles render + format + per-edit file write.
+    //
+    // Section-grouping mirrors the field_defs[] loop above (CollapsingHeader per
+    // section transition; strategy filter via global_section_strategy +
+    // any_core_uses_strategy; default_open whitelist for Trading / Entry Filters /
+    // EMA Gate). FOREACH_CFG_FIELD rows are declared section-grouped, so iteration
+    // in FIELD_IDX_* order = section-grouped order.
+    //
+    // Note: hardcoded field_defs[] entries above may have Trading / Entry Filters
+    // section headers; FOREACH_CFG_FIELD rows then emit those same section headers
+    // again here. Section appearing twice is a known visual quirk from the .F.4b
+    // migration; addressed at a future unified-walker refactor (not .F.4c scope).
+    //==========================================================================
+    {
+        const char *cfg_walker_section = NULL;
+        bool cfg_walker_skip_section = false;
+
+        CFG_FIELD_FOR_EACH_SET_BIT(g_cfg_render_mask.words, idx, {
+            const CfgFieldDescriptor &desc = g_cfg_field_descriptors[idx];
+
+            // Section header transition logic (mirrors lines 964-987 of field_defs[] loop)
+            if (!cfg_walker_section || strcmp(cfg_walker_section, desc.section) != 0) {
+                cfg_walker_section = desc.section;
+                cfg_walker_skip_section = false;
+
+                // Strategy-specific section hiding (e.g., MeanReversion Tuning hidden
+                // when no core uses STRATEGY_MEAN_REVERSION).
+                int sec_strat = global_section_strategy(cfg_walker_section);
+                if (sec_strat >= 0 && !any_core_uses_strategy(s, sec_strat)) {
+                    cfg_walker_skip_section = true;
+                    continue;
+                }
+
+                // Emit CollapsingHeader; default_open whitelist matches field_defs[] loop.
+                bool default_open = (strcmp(desc.section, "Trading") == 0 ||
+                                      strcmp(desc.section, "Entry Filters") == 0 ||
+                                      strcmp(desc.section, "EMA Gate") == 0);
+                if (!ImGui::CollapsingHeader(desc.section,
+                        default_open ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
+                    cfg_walker_skip_section = true;
+                    continue;
+                }
+            }
+            if (cfg_walker_skip_section) continue;
+
+            // Per-row render + per-edit persist via the typed dispatch table.
+            // cfg_render_and_persist returns true if the field value changed this frame.
+            ImGui::SetNextItemWidth(80);
+            if (CfgRenderTable<64>::fns[idx](s->gui_engine_cfg, desc, s->cfg_path)) {
+                changed = true;
+            }
+        });
+    }
+
     return changed;
 }
 

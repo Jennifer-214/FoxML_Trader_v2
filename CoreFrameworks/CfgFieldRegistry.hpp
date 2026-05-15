@@ -148,6 +148,16 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
 
 // Payload helper macros (one per Kind family):
 #define DBL(default_val, clamp_min, clamp_max) { .as_double = { (default_val), (clamp_min), (clamp_max) } }
+// v5.15.5.F.4c — KIND_INT / KIND_BOOL / KIND_INT_ENUM payload macros.
+// INT: signed/unsigned widths (int8/16/32/64) all unified under KIND_INT per
+// H13/H14 (Kind = GUI metadata; T deduced via X-macro extractor handles width).
+// Storage-width safety: per-row static_assert that clamp fits destination type's
+// numeric_limits is enforced at the FOREACH_CFG_FIELD walker site.
+#define INT(default_val, clamp_min, clamp_max) \
+    { .as_int = { (int64_t)(default_val), (int64_t)(clamp_min), (int64_t)(clamp_max) } }
+#define BOOL(default_val) { .as_bool = { (uint8_t)(default_val) } }
+#define INT_ENUM(default_val, labels_array, count) \
+    { .as_int_enum = { (int)(default_val), (labels_array), (uint8_t)(count) } }
 
 // NOTE: tooltips for fields PRE-EXISTING in GUI/SettingsPanel.hpp:46-289 field_defs[]
 // preserved BYTE-IDENTICAL via raw strings. Fields NEW to GUI (no pre-existing entry)
