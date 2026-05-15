@@ -1629,6 +1629,172 @@ static void test_v5_15_5_F4b_cfg_field_dispatch() {
 }
 
 //======================================================================================================
+// [v5.15.5.F.4c — KIND_INT / KIND_BOOL dispatch + bitmap framework + tooltip stability]
+//======================================================================================================
+// Items 10 + 11 of the 12-item Option 2 sequencing. Validates:
+//   - KIND_INT parse roundtrip via tt::cfg_parse_field<T>
+//   - KIND_BOOL truthy normalization + 0/1 save
+//   - Bitmap framework: popcount + iteration correctness
+//   - tt::cfg_assign_field<T> / cfg_diff_field<T> sisters
+//   - HIGH-6 tooltip preservation spot-check (poll_interval multi-paragraph)
+//   - FIELD_IDX_END registry growth (~40 at .F.4b → ~110 at .F.4c)
+//   - Tooltip-byte-count stability (simple item-10 stand-in pending full hash discipline test)
+//======================================================================================================
+static void test_v5_15_5_F4c_cfg_field_dispatch() {
+    printf("\n[v5.15.5.F.4c KIND_INT/_BOOL dispatch + bitmap framework + tooltip stability]\n");
+
+    // === T7: KIND_INT parse roundtrip (uint32 storage; clamp range from descriptor) ===
+    // poll_interval is KIND_INT with payload INT(100, 1, 1000000); storage uint32_t.
+    {
+        uint32_t dst = 0;
+        tt::cfg_parse_field(dst, g_cfg_field_descriptors[FIELD_IDX_poll_interval], "500");
+        check("v5.15.5.F.4c: KIND_INT parse '500' → 500", dst == 500u);
+
+        char buf[32] = {0};
+        tt::cfg_save_field(dst, g_cfg_field_descriptors[FIELD_IDX_poll_interval], buf, sizeof(buf));
+        check("v5.15.5.F.4c: KIND_INT save 500 → '500'", strcmp(buf, "500") == 0);
+    }
+
+    // === T8: KIND_INT WARN_ON_CLAMP — out-of-range clamps to bound ===
+    // poll_interval clamp is [1, 1000000]; parse '0' clamps to 1.
+    {
+        uint32_t dst = 999;
+        tt::cfg_parse_field(dst, g_cfg_field_descriptors[FIELD_IDX_poll_interval], "0");
+        check("v5.15.5.F.4c: KIND_INT '0' clamped to clamp_min=1", dst == 1u);
+    }
+
+    // === T9: KIND_BOOL truthy normalization (any non-zero → 1; zero → 0) ===
+    // record_ticks is KIND_INT_BOOL (int storage); descriptor.kind = KIND_BOOL.
+    {
+        int dst = 0;
+        tt::cfg_parse_field(dst, g_cfg_field_descriptors[FIELD_IDX_record_ticks], "42");
+        check("v5.15.5.F.4c: KIND_BOOL '42' (truthy) normalizes to 1", dst == 1);
+
+        tt::cfg_parse_field(dst, g_cfg_field_descriptors[FIELD_IDX_record_ticks], "0");
+        check("v5.15.5.F.4c: KIND_BOOL '0' (falsy) normalizes to 0", dst == 0);
+
+        tt::cfg_parse_field(dst, g_cfg_field_descriptors[FIELD_IDX_record_ticks], "1");
+        check("v5.15.5.F.4c: KIND_BOOL '1' stays 1", dst == 1);
+    }
+
+    // === T10: KIND_BOOL save — emits '0' or '1' (normalized) ===
+    {
+        int src = 1;
+        char buf[32] = {0};
+        tt::cfg_save_field(src, g_cfg_field_descriptors[FIELD_IDX_record_ticks], buf, sizeof(buf));
+        check("v5.15.5.F.4c: KIND_BOOL save 1 → '1'", strcmp(buf, "1") == 0);
+
+        src = 0;
+        tt::cfg_save_field(src, g_cfg_field_descriptors[FIELD_IDX_record_ticks], buf, sizeof(buf));
+        check("v5.15.5.F.4c: KIND_BOOL save 0 → '0'", strcmp(buf, "0") == 0);
+
+        src = 99;  // truthy non-1
+        tt::cfg_save_field(src, g_cfg_field_descriptors[FIELD_IDX_record_ticks], buf, sizeof(buf));
+        check("v5.15.5.F.4c: KIND_BOOL save 99 normalizes to '1'", strcmp(buf, "1") == 0);
+    }
+
+    // === T11: Bitmap framework — per-bit mask popcount ===
+    // g_cfg_is_boot_only_mask should have at least 10 set bits (C1a + C2 + C3 + C5 BOOT_ONLY tags).
+    {
+        size_t boot_only_count = cfg_field_count(g_cfg_is_boot_only_mask);
+        check("v5.15.5.F.4c: g_cfg_is_boot_only_mask has ≥10 bits set (cohort BOOT_ONLY tagging)",
+              boot_only_count >= 10);
+
+        size_t warn_on_clamp_count = cfg_field_count(g_cfg_warn_on_clamp_mask);
+        check("v5.15.5.F.4c: g_cfg_warn_on_clamp_mask has ≥40 bits set (most C1-C5 rows tagged)",
+              warn_on_clamp_count >= 40);
+
+        size_t has_side_effect_count = cfg_field_count(g_cfg_has_side_effect_mask);
+        check("v5.15.5.F.4c: g_cfg_has_side_effect_mask has ≥4 bits set (reconcile_mode/engine_mode/engine_arch/model_verify_strict/thompson_rng_seed)",
+              has_side_effect_count >= 4);
+    }
+
+    // === T12: Bitmap framework — CFG_FIELD_FOR_EACH_SET_BIT iteration matches popcount ===
+    {
+        size_t iter_count = 0;
+        CFG_FIELD_FOR_EACH_SET_BIT(g_cfg_is_boot_only_mask.words, idx, {
+            (void)idx;
+            iter_count++;
+        });
+        size_t pop_count = cfg_field_count(g_cfg_is_boot_only_mask);
+        check("v5.15.5.F.4c: bitmap iteration count == popcount (sanity)",
+              iter_count == pop_count);
+    }
+
+    // === T13: g_cfg_render_mask composition (NOT boot_only AND NOT hidden_by_default) ===
+    {
+        size_t render_count = cfg_field_count(g_cfg_render_mask);
+        size_t boot_only_count = cfg_field_count(g_cfg_is_boot_only_mask);
+        check("v5.15.5.F.4c: g_cfg_render_mask popcount < FIELD_IDX_END (some fields excluded by BOOT_ONLY)",
+              render_count < FIELD_IDX_END);
+        check("v5.15.5.F.4c: render_count + boot_only_count ≈ FIELD_IDX_END (composition correctness)",
+              render_count + boot_only_count >= (size_t)(FIELD_IDX_END * 0.9));  // ~within 10% (hidden_by_default + overlap)
+    }
+
+    // === T14: tt::cfg_assign_field<T> — sets KIND_BOOL field to descriptor default ===
+    {
+        int dst = 99;  // non-default
+        tt::cfg_assign_field(dst, g_cfg_field_descriptors[FIELD_IDX_record_ticks]);
+        check("v5.15.5.F.4c: cfg_assign_field KIND_BOOL → descriptor default (0)",
+              dst == 0);
+    }
+
+    // === T15: tt::cfg_diff_field<T> — returns true when current != default ===
+    {
+        int current = 1;  // record_ticks default is 0
+        bool differs = tt::cfg_diff_field(current, g_cfg_field_descriptors[FIELD_IDX_record_ticks]);
+        check("v5.15.5.F.4c: cfg_diff_field KIND_BOOL detects modified (1 != default 0)",
+              differs);
+
+        int at_default = 0;
+        bool same = !tt::cfg_diff_field(at_default, g_cfg_field_descriptors[FIELD_IDX_record_ticks]);
+        check("v5.15.5.F.4c: cfg_diff_field KIND_BOOL detects unchanged (0 == default 0)",
+              same);
+    }
+
+    // === T16: HIGH-6 tooltip preservation spot-check (multi-paragraph poll_interval prose) ===
+    {
+        const CfgFieldDescriptor& desc = g_cfg_field_descriptors[FIELD_IDX_poll_interval];
+        check("v5.15.5.F.4c: poll_interval tooltip preserved (non-null)", desc.tooltip != nullptr);
+        check("v5.15.5.F.4c: poll_interval tooltip mentions 'autocorrelation' (multi-paragraph preserved)",
+              desc.tooltip && strstr(desc.tooltip, "autocorrelation") != nullptr);
+
+        const CfgFieldDescriptor& desc_max_hold = g_cfg_field_descriptors[FIELD_IDX_max_hold_ticks];
+        check("v5.15.5.F.4c: max_hold_ticks tooltip preserved", desc_max_hold.tooltip != nullptr);
+        check("v5.15.5.F.4c: max_hold_ticks tooltip mentions '4-5 hours' (operator prose)",
+              desc_max_hold.tooltip && strstr(desc_max_hold.tooltip, "4-5 hours") != nullptr);
+
+        const CfgFieldDescriptor& desc_record = g_cfg_field_descriptors[FIELD_IDX_record_depth];
+        check("v5.15.5.F.4c: record_depth tooltip preserved (5-line multi-paragraph)",
+              desc_record.tooltip != nullptr);
+        check("v5.15.5.F.4c: record_depth tooltip mentions 'lastUpdateId' (operator prose preserved)",
+              desc_record.tooltip && strstr(desc_record.tooltip, "lastUpdateId") != nullptr);
+    }
+
+    // === T17: Registry size sanity (.F.4c cohort growth) ===
+    {
+        check("v5.15.5.F.4c: g_cfg_field_descriptors grew ≥ .F.4b cohort size (≥100 entries)",
+              FIELD_IDX_END >= 100);
+    }
+
+    // === T18: Tooltip-byte-count stability (poor-man's hash; item 10 simplified) ===
+    // Sum tooltip lengths across all rows. Future migrations that accidentally drop or
+    // truncate a tooltip will change this total. Operator updates the locked constant
+    // intentionally when adding/refining tooltips.
+    {
+        size_t total_tooltip_bytes = 0;
+        for (size_t i = 0; i < FIELD_IDX_END; i++) {
+            const char* t = g_cfg_field_descriptors[i].tooltip;
+            if (t) total_tooltip_bytes += strlen(t);
+        }
+        // At .F.4c ship time: ~50 tooltips × ~80 avg = ~4000 bytes (lower bound; tooltips
+        // include the multi-paragraph HIGH-6 fields too).
+        check("v5.15.5.F.4c: total tooltip bytes ≥ 3000 (HIGH-6 multi-paragraph preserved)",
+              total_tooltip_bytes >= 3000);
+    }
+}
+
+//======================================================================================================
 // [MAIN]
 //======================================================================================================
 int main() {
@@ -1650,6 +1816,7 @@ int main() {
     print_layout_fingerprint();
 
     test_v5_15_5_F4b_cfg_field_dispatch();  // v5.15.5.F.4b — CfgFieldRegistry + tt:: dispatch
+    test_v5_15_5_F4c_cfg_field_dispatch();  // v5.15.5.F.4c — KIND_INT/_BOOL dispatch + bitmap framework + tooltip stability
     test_config_parser();
     test_portfolio_bitmap();
     test_portfolio_pnl();
