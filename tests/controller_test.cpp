@@ -7565,6 +7565,7 @@ e3_skip_load:;
 
         // ---- partial_exit_enabled=0 → no GATE_FLAG_PAIR_ACTIVE ----
         BITMAP_CLR(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);
+        ControllerConfig_PopulateCoresFromFlat(&cfg);  // v5.15.5.F.4c.3 WIP2c.2 — sync flat→cores[0] for shadow window
         Strategy_BuildParameters(STRATEGY_SIMPLE_DIP,
             &rolling, &cfg.cores[0], FPN_FromDouble<64>(1000.0),
             &params, &rolling_long);
@@ -7575,6 +7576,7 @@ e3_skip_load:;
 
         // ---- partial_exit_enabled=1 → flag set, tp_pct_b = tp_pct * 2.0 ----
         BITMAP_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);
+        ControllerConfig_PopulateCoresFromFlat(&cfg);  // v5.15.5.F.4c.3 WIP2c.2 — sync flat→cores[0]
         Strategy_BuildParameters(STRATEGY_SIMPLE_DIP,
             &rolling, &cfg.cores[0], FPN_FromDouble<64>(1000.0),
             &params, &rolling_long);
@@ -7590,6 +7592,7 @@ e3_skip_load:;
 
         // ---- Defensive: tp2_mult=0 → tp_pct_b falls back to tp_pct ----
         cfg.tp2_mult = FPN_Zero<64>();
+        ControllerConfig_PopulateCoresFromFlat(&cfg);  // v5.15.5.F.4c.3 WIP2c.2 — sync flat→cores[0]
         Strategy_BuildParameters(STRATEGY_SIMPLE_DIP,
             &rolling, &cfg.cores[0], FPN_FromDouble<64>(1000.0),
             &params, &rolling_long);
@@ -8770,6 +8773,7 @@ e3_skip_load:;
         // Test 3: TP below floor — gate FIRES
         {
             cfg.take_profit_pct = FPN_FromDouble<64>(0.001);  // 0.1% TP, below floor
+            ControllerConfig_PopulateCoresFromFlat(&cfg);  // v5.15.5.F.4c.3 WIP2c.2 — sync flat→cores[0]
             tt::GateParameters<64> out;
             tt::GateParameters_Init(&out);
             tt::Strategy_BuildParameters<64>(STRATEGY_MEAN_REVERSION, &rs, &cfg.cores[0],
@@ -8783,6 +8787,7 @@ e3_skip_load:;
             cfg.fee_rate_taker  = FPN_Zero<64>();              // unset
             cfg.fee_rate        = FPN_FromDouble<64>(0.002);   // 0.2% legacy
             cfg.take_profit_pct = FPN_FromDouble<64>(0.005);   // 0.5% TP, > 3 × 0.002 = 0.6%? no, 0.005 < 0.006
+            ControllerConfig_PopulateCoresFromFlat(&cfg);  // v5.15.5.F.4c.3 WIP2c.2 — sync flat→cores[0]
             tt::GateParameters<64> out;
             tt::GateParameters_Init(&out);
             tt::Strategy_BuildParameters<64>(STRATEGY_MEAN_REVERSION, &rs, &cfg.cores[0],
@@ -9902,6 +9907,7 @@ e3_skip_load:;
         cfg.entry_offset_pct = FPN_FromDouble<FP>(0.001);
         cfg.offset_stddev_mult = FPN_Zero<FP>();
         cfg.volume_multiplier = FPN_FromDouble<FP>(1.0);
+        ControllerConfig_PopulateCoresFromFlat(&cfg);  // v5.15.5.F.4c.3 WIP2c.2 — sync flat→cores[0]
 
         // nullptr-state path (legacy)
         tt::GateParameters<FP> out_legacy{};
@@ -12344,6 +12350,7 @@ e3_skip_load:;
             ControllerConfig<64> cfg = ControllerConfig_Default<64>();
             cfg.take_profit_pct = FPN_FromDouble<64>(0.005);
             cfg.stop_loss_pct   = FPN_FromDouble<64>(0.0025);
+            ControllerConfig_PopulateCoresFromFlat(&cfg);  // v5.15.5.F.4c.3 WIP2c.2 — sync flat→cores[0]
 
             GateParameters<64> out = {};
             SimpleDip_BuildParameters<64, 128>(
