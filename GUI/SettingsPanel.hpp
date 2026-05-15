@@ -66,6 +66,18 @@ namespace tt {
                       "extend tt::cfg_render_field<T> with a new branch. See "
                       "DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md.");
 
+        // v5.15.5.F.4c.1 — ImGui widget-ID independence from display label.
+        // Without PushID(cfg_field_name), two descriptors that happen to share
+        // desc.label collide at ImGui's hash table → "name is already taken"
+        // runtime error + one of the controls becomes non-functional. With
+        // PushID(cfg_field_name), uniqueness comes from the X-macro-guaranteed
+        // unique cfg_field_name; display label can repeat safely across
+        // sections/per-core tabs. Closes the Class 24-shape regression caught
+        // at paper-test 2026-05-14. PushID composes with outer PushID(core_id)
+        // at per-core tab sites — full uniqueness tuple becomes
+        // (core_id, cfg_field_name, label).
+        ImGui::PushID(desc.cfg_field_name);
+
         bool changed = false;
 
         if constexpr (is_FPN_v<T>) {
@@ -124,6 +136,15 @@ namespace tt {
         if (desc.tooltip && ImGui::IsItemHovered()) {
             ImGui::SetTooltip("%s", desc.tooltip);
         }
+        // v5.15.5.F.4c.1 — Reset/Modified UI deferred to follow-up.
+        // tt::cfg_assign_field<T> + tt::cfg_diff_field<T> primitives shipped
+        // at .F.4c are READY for consumer wiring. Inline Modified-badge at
+        // this site requires resolving an FPN<F> operator== ambiguity vs
+        // ImGui's ImTextureRef in engine_gui's main.cpp compile unit (see
+        // build error from .F.4c.1 attempt). Resolution + per-section Reset
+        // button placement need operator UX input post paper-test of the
+        // 18-row cohort + ImGui PushID fix.
+        ImGui::PopID();
         return changed;
     }
 
@@ -960,6 +981,13 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
             }
         }
 
+        // v5.15.5.F.4c.1 — ImGui widget-ID uniqueness via fd->key for legacy
+        // field_defs[] path (sister fix to tt::cfg_render_field<T>'s PushID
+        // wrapper above). Closes label-collision class for the residual
+        // hardcoded field_defs[] rows that have not yet migrated to
+        // FOREACH_CFG_FIELD (KIND_STRING / KIND_FILE_PATH cohort — .F.4e scope).
+        ImGui::PushID(fd->key);
+
         if (fd->type == CFG_FLOAT) {
             ImGui::SetNextItemWidth(80);
             ImGui::InputFloat(fd->label, &s->float_vals[i], 0, 0, fd->fmt);
@@ -1008,6 +1036,7 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
         // hover tooltip from field_defs — inline, no separate lookup chain
         if (fd->tooltip)
             ImGui::SetItemTooltip("%s", fd->tooltip);
+        ImGui::PopID();
     }
 
     //==========================================================================
