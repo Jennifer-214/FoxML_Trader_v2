@@ -379,363 +379,249 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
 //======================================================================================================
 #define FOREACH_PER_CORE_CFG_FIELD(X)                                                                                                                                                                                \
     /* === Trading (6) === */                                                                                                                                                                                         \
-    X(KIND_DOUBLE_PCT, take_profit_pct,             "TP %%",                "Trading",         0,                                  DBL(3.0, 0.0, 100.0),    nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, stop_loss_pct,               "SL %%",                "Trading",         0,                                  DBL(1.5, 0.0, 100.0),    nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, fee_rate,                    "Fee %%",               "Trading",         0,                                  DBL(0.1, 0.0, 5.0),                                                                                                              \
+    X(FPN<F>                , KIND_DOUBLE_PCT, take_profit_pct,             "TP %%",                "Trading",         0,                                  DBL(3.0, 0.0, 100.0),    nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE_PCT, stop_loss_pct,               "SL %%",                "Trading",         0,                                  DBL(1.5, 0.0, 100.0),    nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE_PCT, fee_rate,                    "Fee %%",               "Trading",         0,                                  DBL(0.1, 0.0, 5.0),                                                                                                              \
         "Legacy fee rate (% per trade) — used for pre-trade quantity computations\n"                                                                                                                                                                              \
         "(no-trade band, fee floor for TP, kill switch estimate, spread display)\n"                                                                                                                                                                               \
         "and as the default for fee_rate_maker / fee_rate_taker if those aren't set.",                                                                                                                                                                            \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, slippage_pct,                "Slippage %%",          "Trading",         0,                                  DBL(0.05, 0.0, 5.0),     nullptr,                                                                                         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, risk_pct,                    "Risk/Pos %%",          "Trading",         0,                                  DBL(2.0, 0.0, 100.0),    nullptr,                                                                                         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     fee_floor_mult,              "Fee Floor",            "Trading",         0,                                  DBL(3.0, 1.0, 20.0),                                                                                                             \
+    X(FPN<F>                , KIND_DOUBLE_PCT, slippage_pct,                "Slippage %%",          "Trading",         0,                                  DBL(0.05, 0.0, 5.0),     nullptr,                                                                                         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE_PCT, risk_pct,                    "Risk/Pos %%",          "Trading",         0,                                  DBL(2.0, 0.0, 100.0),    nullptr,                                                                                         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, fee_floor_mult,              "Fee Floor",            "Trading",         0,                                  DBL(3.0, 1.0, 20.0),                                                                                                             \
         "TP floor = entry * fee_rate * this\n3.0 = TP must clear round-trip fees + margin",                                                                                                                                                                       \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Entry Filters (9) === */                                                                                                                                                                                   \
-    X(KIND_DOUBLE_PCT, entry_offset_pct,            "Offset %%",            "Entry Filters",   0,                                  DBL(0.15, 0.0, 5.0),                                                                                                            \
+    X(FPN<F>                , KIND_DOUBLE_PCT, entry_offset_pct,            "Offset %%",            "Entry Filters",   0,                                  DBL(0.15, 0.0, 5.0),                                                                                                            \
         "Buy gate offset below avg/EMA price\nhigher = deeper dip required to enter",                                                                                                                                                                             \
         STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, offset_min,                  "Offset Min %%",        "Entry Filters",   0,                                  DBL(0.05, 0.0, 5.0),     "Adaptation lower bound for offset_pct",                                                          STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, offset_max,                  "Offset Max %%",        "Entry Filters",   0,                                  DBL(0.50, 0.0, 5.0),     "Adaptation upper bound for offset_pct",                                                          STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     volume_multiplier,           "Vol Mult",             "Entry Filters",   0,                                  DBL(2.5, 0.0, 100.0),                                                                                                            \
+    X(FPN<F>                , KIND_DOUBLE_PCT, offset_min,                  "Offset Min %%",        "Entry Filters",   0,                                  DBL(0.05, 0.0, 5.0),     "Adaptation lower bound for offset_pct",                                                          STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE_PCT, offset_max,                  "Offset Max %%",        "Entry Filters",   0,                                  DBL(0.50, 0.0, 5.0),     "Adaptation upper bound for offset_pct",                                                          STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, volume_multiplier,           "Vol Mult",             "Entry Filters",   0,                                  DBL(2.5, 0.0, 100.0),                                                                                                            \
         "Volume gate: require avg_volume * this\nhigher = only buy on high volume",                                                                                                                                                                               \
         STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     spacing_multiplier,          "Spacing",              "Entry Filters",   0,                                  DBL(2.0, 0.0, 20.0),                                                                                                             \
+    X(FPN<F>                , KIND_DOUBLE, spacing_multiplier,          "Spacing",              "Entry Filters",   0,                                  DBL(2.0, 0.0, 20.0),                                                                                                             \
         "Min distance between entries (in stddev)\nprevents clustering entries at similar prices",                                                                                                                                                                \
         STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     min_long_slope,              "Min Long Slope",       "Entry Filters",   0,                                  DBL(0.0, -1.0, 1.0),                                                                                                             \
+    X(FPN<F>                , KIND_DOUBLE, min_long_slope,              "Min Long Slope",       "Entry Filters",   0,                                  DBL(0.0, -1.0, 1.0),                                                                                                             \
         "Block MR buys when 512-tick slope below this\nnegative = allow mild dips, 0 = disabled",                                                                                                                                                                 \
         STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     min_buy_delta,               "Min Buy Delta",        "Entry Filters",   0,                                  DBL(-0.3, -1.0, 1.0),                                                                                                            \
+    X(FPN<F>                , KIND_DOUBLE, min_buy_delta,               "Min Buy Delta",        "Entry Filters",   0,                                  DBL(-0.3, -1.0, 1.0),                                                                                                            \
         "Min volume delta for MR buys\n-0.3 = allow mild selling, block heavy dumps",                                                                                                                                                                             \
         STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     vwap_offset,                 "VWAP Offset",          "Entry Filters",   0,                                  DBL(0.0, 0.0, 0.1),      nullptr,                                                                                          STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     min_stddev_pct,              "Min Stddev %%",        "Entry Filters",   0,                                  DBL(0.0, 0.0, 0.1),                                                                                                              \
+    X(FPN<F>                , KIND_DOUBLE, vwap_offset,                 "VWAP Offset",          "Entry Filters",   0,                                  DBL(0.0, 0.0, 0.1),      nullptr,                                                                                          STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, min_stddev_pct,              "Min Stddev %%",        "Entry Filters",   0,                                  DBL(0.0, 0.0, 0.1),                                                                                                              \
         "Skip trades when stddev/price below this\nprevents entries in dead-flat markets",                                                                                                                                                                        \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Time-Based Exit (4) === */                                                                                                                                                                                 \
-    X(KIND_DOUBLE,     tp_hold_score,               "TP Hold Score",        "Time-Based Exit", 0,                                  DBL(0.0, 0.0, 10.0),     "Min SNR*R² to hold past TP (0 = disabled, fixed TP)",                                            STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     tp_trail_mult,               "TP Trail Mult",        "Time-Based Exit", 0,                                  DBL(1.0, 0.0, 10.0),     "Trailing distance: stddev * this (e.g. 1.0)",                                                    STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     sl_trail_mult,               "SL Trail Mult",        "Time-Based Exit", 0,                                  DBL(2.0, 0.0, 10.0),     "Trailing SL distance: stddev * this (e.g. 2.0)",                                                 STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        max_hold_ticks,              "Max Hold",             "Time-Based Exit", CfgFieldDescriptor::WARN_ON_CLAMP, INT(75000, 0, 100000000),                                                          \
+    X(FPN<F>                , KIND_DOUBLE, tp_hold_score,               "TP Hold Score",        "Time-Based Exit", 0,                                  DBL(0.0, 0.0, 10.0),     "Min SNR*R² to hold past TP (0 = disabled, fixed TP)",                                            STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, tp_trail_mult,               "TP Trail Mult",        "Time-Based Exit", 0,                                  DBL(1.0, 0.0, 10.0),     "Trailing distance: stddev * this (e.g. 1.0)",                                                    STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, sl_trail_mult,               "SL Trail Mult",        "Time-Based Exit", 0,                                  DBL(2.0, 0.0, 10.0),     "Trailing SL distance: stddev * this (e.g. 2.0)",                                                 STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(uint32_t              , KIND_INT, max_hold_ticks,              "Max Hold",             "Time-Based Exit", CfgFieldDescriptor::WARN_ON_CLAMP, INT(75000, 0, 100000000),                                                          \
         "Close position after this many ticks (engine-wide).\n0 = disabled, 75000 ≈ 4-5 hours.\nPer-core min-gain floor lives in each core's Time Exit override.",                                                  \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Risk per-core — kill switches + max-drawdown (6) === */                                                                                                                                                    \
-    X(KIND_DOUBLE_PCT, max_drawdown_pct,            "Max DD %%",            "Risk Management", 0,                                  DBL(20.0, 0.0, 100.0),                                                                                                           \
+    X(FPN<F>                , KIND_DOUBLE_PCT, max_drawdown_pct,            "Max DD %%",            "Risk Management", 0,                                  DBL(20.0, 0.0, 100.0),                                                                                                           \
         "Circuit breaker: halt trading if total P&L\ndrops below this %% of starting balance",                                                                                                                                                                    \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, max_exposure_pct,            "Max Exp %%",           "Risk Management", 0,                                  DBL(50.0, 0.0, 100.0),   nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, kill_switch_daily_loss_pct,  "Daily Loss %%",        "Kill Switch",     CfgFieldDescriptor::SAFETY_CRITICAL,DBL(3.0, 0.0, 100.0),                                                                                                           \
+    X(FPN<F>                , KIND_DOUBLE_PCT, max_exposure_pct,            "Max Exp %%",           "Risk Management", 0,                                  DBL(50.0, 0.0, 100.0),   nullptr,                                                                                          STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE_PCT, kill_switch_daily_loss_pct,  "Daily Loss %%",        "Kill Switch",     CfgFieldDescriptor::SAFETY_CRITICAL,DBL(3.0, 0.0, 100.0),                                                                                                           \
         "Max session loss before kill switch triggers\n3.0 = halt if equity drops 3%% from session start",                                                                                                                                                        \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, kill_switch_drawdown_pct,    "Drawdown %%",          "Kill Switch",     CfgFieldDescriptor::SAFETY_CRITICAL,DBL(5.0, 0.0, 100.0),                                                                                                           \
+    X(FPN<F>                , KIND_DOUBLE_PCT, kill_switch_drawdown_pct,    "Drawdown %%",          "Kill Switch",     CfgFieldDescriptor::SAFETY_CRITICAL,DBL(5.0, 0.0, 100.0),                                                                                                           \
         "Max drawdown from session peak before kill\n5.0 = halt if 5%% below intra-session high",                                                                                                                                                                 \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_BOOL,       enable_mtm_kill_switch,      "MTM Kill Switch",      "Kill Switch",     CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                                                          \
+    X(uint32_t              , KIND_BOOL, enable_mtm_kill_switch,      "MTM Kill Switch",      "Kill Switch",     CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                                                          \
         "Mark-to-market kill switch — halt new entries when realized + unrealized P&L crosses kill_switch_threshold_pct. Separate from balance-based kill switch (always armed).",                                  \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        kill_recovery_warmup,        "Recovery",             "Kill Switch",     CfgFieldDescriptor::WARN_ON_CLAMP, INT(100, 0, 1000000),                                                              \
+    X(uint32_t              , KIND_INT, kill_recovery_warmup,        "Recovery",             "Kill Switch",     CfgFieldDescriptor::WARN_ON_CLAMP, INT(100, 0, 1000000),                                                              \
         "Slow-path cycles to observe after kill reset\nbefore trading resumes (prevents immediate re-entry)",                                                                                                       \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Gate Recovery (5) === */                                                                                                                                                                                   \
-    X(KIND_BOOL,       sl_cooldown_adaptive,        "Adaptive CD",          "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                                                          \
+    X(int                   , KIND_BOOL, sl_cooldown_adaptive,        "Adaptive CD",          "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                                                          \
         "Post-stop-loss cooldown mode: 0 = fixed cycles (sl_cooldown_cycles), 1 = scale by trend confidence (longer cooldown when trend weakens; shorter when trend resumes).",                                     \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        sl_cooldown_base,            "SL Cooldown Base",     "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 1000000),                                                                \
+    X(uint32_t              , KIND_INT, sl_cooldown_base,            "SL Cooldown Base",     "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 1000000),                                                                \
         "Base cycles to cooldown after stop loss (adaptive mode adds extra per loss; non-adaptive uses sl_cooldown_cycles alone).",                                                                                 \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        sl_cooldown_extra,           "SL Cooldown Extra",    "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 1000000),                                                                \
+    X(uint32_t              , KIND_INT, sl_cooldown_extra,           "SL Cooldown Extra",    "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 1000000),                                                                \
         "Extra cooldown cycles per consecutive stop loss (adaptive mode only).",                                                                                                                                    \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        sl_cooldown_cycles,          "SL Cooldown",          "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(30, 0, 1000000),                                                               \
+    X(uint32_t              , KIND_INT, sl_cooldown_cycles,          "SL Cooldown",          "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(30, 0, 1000000),                                                               \
         "Slow-path cycles to pause after stop loss\nlets market settle before re-entry",                                                                                                                            \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        idle_reset_cycles,           "Idle Reset",           "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(100, 0, 1000000),                                                              \
+    X(uint32_t              , KIND_INT, idle_reset_cycles,           "Idle Reset",           "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(100, 0, 1000000),                                                              \
         "Cycles with no fill before gate decay\nprevents permanent lockout after losses",                                                                                                                           \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Momentum strategy (7) === */                                                                                                                                                                               \
-    X(KIND_DOUBLE,     momentum_min_tp_margin_pct,  "Mom Min TP Margin",    "Strategies",      0,                                  DBL(0.0, 0.0, 0.05),     "Block momentum entry if TP too tight (0 = disabled; rec: 0.0040 = 0.40%)",                       STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     momentum_min_buy_delta_recent, "Mom Min Buy Delta", "Strategies",       0,                                  DBL(0.0, 0.0, 1.0),      "Min recent volume delta for momentum entry (rec: 0.05)",                                          STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     momentum_min_r2,             "Mom Min R²",           "Strategies",      0,                                  DBL(0.0, 0.0, 1.0),      "Min short_r2 for momentum entry (0 = disabled; rec: 0.30)",                                       STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     momentum_tp_mult,            "Mom TP Mult",          "Strategies",      0,                                  DBL(3.0, 0.0, 10.0),     "TP multiplier for momentum (e.g. 3.0 stddevs)",                                                  STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     momentum_sl_mult,            "Mom SL Mult",          "Strategies",      0,                                  DBL(1.0, 0.0, 10.0),     "SL multiplier for momentum (e.g. 1.0 stddevs)",                                                  STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     momentum_breakout_mult,      "Mom Breakout Mult",    "Strategies",      0,                                  DBL(0.5, 0.0, 10.0),     "Momentum breakout floor in stddevs",                                                              STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_BOOL,       momentum_require_last_win,   "Require Last Win",     "Momentum Tuning", CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                                                          \
+    X(FPN<F>                , KIND_DOUBLE, momentum_min_tp_margin_pct,  "Mom Min TP Margin",    "Strategies",      0,                                  DBL(0.0, 0.0, 0.05),     "Block momentum entry if TP too tight (0 = disabled; rec: 0.0040 = 0.40%)",                       STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, momentum_min_buy_delta_recent, "Mom Min Buy Delta", "Strategies",       0,                                  DBL(0.0, 0.0, 1.0),      "Min recent volume delta for momentum entry (rec: 0.05)",                                          STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, momentum_min_r2,             "Mom Min R²",           "Strategies",      0,                                  DBL(0.0, 0.0, 1.0),      "Min short_r2 for momentum entry (0 = disabled; rec: 0.30)",                                       STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, momentum_tp_mult,            "Mom TP Mult",          "Strategies",      0,                                  DBL(3.0, 0.0, 10.0),     "TP multiplier for momentum (e.g. 3.0 stddevs)",                                                  STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, momentum_sl_mult,            "Mom SL Mult",          "Strategies",      0,                                  DBL(1.0, 0.0, 10.0),     "SL multiplier for momentum (e.g. 1.0 stddevs)",                                                  STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, momentum_breakout_mult,      "Mom Breakout Mult",    "Strategies",      0,                                  DBL(0.5, 0.0, 10.0),     "Momentum breakout floor in stddevs",                                                              STRAT_CAT_REGRESSION_DRIVEN,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(int                   , KIND_BOOL, momentum_require_last_win,   "Require Last Win",     "Momentum Tuning", CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(0),                                                                          \
         "SHALT_MOM_LAST_LOST gate — block Momentum re-entry until previous trade was a TP win. 0 = off (default; recommended). 1 = enable; favors winning streaks at cost of slower recovery.",                     \
         STRAT_CAT_REGRESSION_DRIVEN,                         OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === EMA Cross strategy (3) === */                                                                                                                                                                              \
-    X(KIND_DOUBLE,     emacross_dip_mult,           "EMACross Dip Mult",    "Strategies",      0,                                  DBL(0.5, 0.0, 10.0),     "Buy this many stddevs below EMA",                                                                STRAT_CAT_STATIC_RULES,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     emacross_crossover_min,      "EMACross Crossover",   "Strategies",      0,                                  DBL(0.0, 0.0, 1.0),      "Min EMA-SMA spread for uptrend confirmation",                                                    STRAT_CAT_STATIC_RULES,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     emacross_trail_mult,         "EMACross Trail Mult",  "Strategies",      0,                                  DBL(1.0, 0.0, 10.0),     "Trailing TP factor when EMA rising",                                                              STRAT_CAT_STATIC_RULES,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, emacross_dip_mult,           "EMACross Dip Mult",    "Strategies",      0,                                  DBL(0.5, 0.0, 10.0),     "Buy this many stddevs below EMA",                                                                STRAT_CAT_STATIC_RULES,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, emacross_crossover_min,      "EMACross Crossover",   "Strategies",      0,                                  DBL(0.0, 0.0, 1.0),      "Min EMA-SMA spread for uptrend confirmation",                                                    STRAT_CAT_STATIC_RULES,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, emacross_trail_mult,         "EMACross Trail Mult",  "Strategies",      0,                                  DBL(1.0, 0.0, 10.0),     "Trailing TP factor when EMA rising",                                                              STRAT_CAT_STATIC_RULES,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Regime Detection (5) === */                                                                                                                                                                                \
-    X(KIND_DOUBLE,     regime_slope_threshold,      "Regime Slope Thresh",  "Regime Detection",0,                                  DBL(0.0, 0.0, 1.0),      "Relative slope magnitude for TRENDING classification",                                            STRAT_CAT_REGIME_AWARE,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     regime_crossover_threshold,  "Mild Trend",           "Regime Detection",0,                                  DBL(0.0005, 0.0, 1.0),                                                                                                           \
+    X(FPN<F>                , KIND_DOUBLE, regime_slope_threshold,      "Regime Slope Thresh",  "Regime Detection",0,                                  DBL(0.0, 0.0, 1.0),      "Relative slope magnitude for TRENDING classification",                                            STRAT_CAT_REGIME_AWARE,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, regime_crossover_threshold,  "Mild Trend",           "Regime Detection",0,                                  DBL(0.0005, 0.0, 1.0),                                                                                                           \
         "EMA/SMA spread for MILD_TREND (EMA Cross)\n0.0005 = 0.05%% gap (~$35 at BTC $68k)\nbelow = RANGING, above = mild uptrend",                                                                                                                               \
         STRAT_CAT_REGIME_AWARE,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     regime_strong_crossover,     "Strong Trend",         "Regime Detection",0,                                  DBL(0.0015, 0.0, 1.0),                                                                                                           \
+    X(FPN<F>                , KIND_DOUBLE, regime_strong_crossover,     "Strong Trend",         "Regime Detection",0,                                  DBL(0.0015, 0.0, 1.0),                                                                                                           \
         "EMA/SMA spread for strong TRENDING (Momentum)\n0.0015 = 0.15%% gap (~$102 at BTC $68k)\nabove = Momentum, below = EMA Cross",                                                                                                                            \
         STRAT_CAT_REGIME_AWARE,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, regime_r2_threshold,         "R² Threshold",         "Regime Detection",0,                                  DBL(70.0, 0.0, 100.0),                                                                                                           \
+    X(FPN<F>                , KIND_DOUBLE_PCT, regime_r2_threshold,         "R² Threshold",         "Regime Detection",0,                                  DBL(70.0, 0.0, 100.0),                                                                                                           \
         "Min R-squared consistency for TRENDING\n70 = 70%% of price variance explained by trend",                                                                                                                                                                 \
         STRAT_CAT_REGIME_AWARE,                                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        regime_hysteresis,           "Hysteresis",           "Regime Detection",CfgFieldDescriptor::WARN_ON_CLAMP, INT(3, 1, 100),                                                                    \
+    X(uint32_t              , KIND_INT, regime_hysteresis,           "Hysteresis",           "Regime Detection",CfgFieldDescriptor::WARN_ON_CLAMP, INT(3, 1, 100),                                                                    \
         "Slow-path cycles before regime switch\nprevents rapid flipping between strategies",                                                                                                                        \
         STRAT_CAT_REGIME_AWARE,                              OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === ML — entry threshold + TP/SL (3) === */                                                                                                                                                                    \
-    X(KIND_DOUBLE,     ml_buy_threshold,            "ML Buy Thresh",        "ML",              0,                                  DBL(0.5, 0.0, 1.0),      "Buy threshold for ML strategy (predictions above this enter)",                                    STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, ml_tp_pct,                   "ML TP %%",             "ML",              0,                                  DBL(2.0, 0.0, 100.0),    "ML strategy take profit (overrides take_profit_pct)",                                            STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, ml_sl_pct,                   "ML SL %%",             "ML",              0,                                  DBL(1.0, 0.0, 100.0),    "ML strategy stop loss (overrides stop_loss_pct)",                                                STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, ml_buy_threshold,            "ML Buy Thresh",        "ML",              0,                                  DBL(0.5, 0.0, 1.0),      "Buy threshold for ML strategy (predictions above this enter)",                                    STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE_PCT, ml_tp_pct,                   "ML TP %%",             "ML",              0,                                  DBL(2.0, 0.0, 100.0),    "ML strategy take profit (overrides take_profit_pct)",                                            STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE_PCT, ml_sl_pct,                   "ML SL %%",             "ML",              0,                                  DBL(1.0, 0.0, 100.0),    "ML strategy stop loss (overrides stop_loss_pct)",                                                STRAT_CAT_ML,                                                  OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === ML — Bandit/Confidence/Ensemble (per-core authoritative) (11) === */                                                                                                                                       \
-    X(KIND_DOUBLE,     bandit_blend_ratio,          "Bandit Blend",         "ML",              0,                                  DBL(0.5, 0.0, 1.0),      "Mix of bandit picks vs base model",                                                              STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     confidence_threshold_scale,  "Conf Thresh Scale",    "ML",              0,                                  DBL(1.0, 0.0, 5.0),      "Confidence-weighted entry threshold scaling",                                                    STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        confidence_window,           "Conf Window",          "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(64, 1, 64),                                                                    \
+    X(FPN<F>                , KIND_DOUBLE, bandit_blend_ratio,          "Bandit Blend",         "ML",              0,                                  DBL(0.5, 0.0, 1.0),      "Mix of bandit picks vs base model",                                                              STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, confidence_threshold_scale,  "Conf Thresh Scale",    "ML",              0,                                  DBL(1.0, 0.0, 5.0),      "Confidence-weighted entry threshold scaling",                                                    STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(uint32_t              , KIND_INT, confidence_window,           "Conf Window",          "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(64, 1, 64),                                                                    \
         "RollingIC + RollingRMSE window size (engine-wide; cap 64).\nSame window per ML core today; INT support for X-macro deferred.",                                                                              \
         STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        confidence_turnover_window,  "Conf Turnover Window", "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(1000, 1, 100000),                                                              \
+    X(int                   , KIND_INT, confidence_turnover_window,  "Conf Turnover Window", "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(1000, 1, 100000),                                                              \
         "Turnover sample window for ML confidence (predictions over recent N ticks).",                                                                                                                              \
         STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        confidence_turnover_topk,    "Conf Turnover TopK",   "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(10, 1, 1000),                                                                  \
+    X(int                   , KIND_INT, confidence_turnover_topk,    "Conf Turnover TopK",   "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(10, 1, 1000),                                                                  \
         "Top-K predictions kept for confidence turnover analysis.",                                                                                                                                                 \
         STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        confidence_ic_floor_window,  "Conf IC Floor Window", "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(1000, 1, 100000),                                                              \
+    X(uint32_t              , KIND_INT, confidence_ic_floor_window,  "Conf IC Floor Window", "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(1000, 1, 100000),                                                              \
         "Rolling window for ML IC floor enforcement.",                                                                                                                                                              \
         STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        confidence_ic_variant,       "Conf IC Variant",      "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4),                                                                      \
+    X(int                   , KIND_INT, confidence_ic_variant,       "Conf IC Variant",      "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4),                                                                      \
         "IC variant: 0=Spearman (default), 1+=future. Ships as KIND_INT pending TECH_DEBT-068 ML enum registry; promote to KIND_INT_ENUM after.",                                                                  \
         STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        ensemble_min_warmup_predictions,"Ens Min Warmup Preds","Ensemble",      CfgFieldDescriptor::WARN_ON_CLAMP, INT(100, 0, 1000000),                                                              \
+    X(int                   , KIND_INT, ensemble_min_warmup_predictions,"Ens Min Warmup Preds","Ensemble",      CfgFieldDescriptor::WARN_ON_CLAMP, INT(100, 0, 1000000),                                                              \
         "Min predictions before ensemble bandit becomes load-bearing.",                                                                                                                                             \
         STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        ensemble_bandit_save_interval,"Ens Bandit Save Interval","Ensemble",    CfgFieldDescriptor::WARN_ON_CLAMP, INT(5000, 1, 1000000),                                                              \
+    X(int                   , KIND_INT, ensemble_bandit_save_interval,"Ens Bandit Save Interval","Ensemble",    CfgFieldDescriptor::WARN_ON_CLAMP, INT(5000, 1, 1000000),                                                              \
         "Predictions between ensemble bandit state save-to-disk events. Default 5000.",                                                                                                                             \
         STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        thompson_rng_seed,           "Thompson RNG Seed",    "FoxML",           CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::HAS_SIDE_EFFECT, INT(42, 0, 9223372036854775807),                \
+    X(uint64_t              , KIND_INT, thompson_rng_seed,           "Thompson RNG Seed",    "FoxML",           CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::HAS_SIDE_EFFECT, INT(42, 0, 9223372036854775807),                \
         "splitmix64 seed for Thompson sampling bandit. Default 42. 0 = use ThompsonBandit.hpp's THOMPSON_RNG_SEED_DEFAULT. Boot-only; required for replay-determinism. HAS_SIDE_EFFECT — manual parser supports hex (0x...) base-auto-detect; registry walker skips.",                                                                                                                                                                                                                                                          \
         STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        model_max_age_hours,         "Model Max Age Hours",  "Lifecycle",       CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 87600),                                                                  \
+    X(uint32_t              , KIND_INT, model_max_age_hours,         "Model Max Age Hours",  "Lifecycle",       CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 87600),                                                                  \
         "Refuse model load if file mtime older than N hours. 0 = disabled (legacy default; v5.14.8.E).",                                                                                                             \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === STAMP_BOUND scalar cohort — Ridge + Winsor + Confidence + Thompson (12 DOUBLE) === */ \
     /*       Ridge risk-parity blending (v5.14.0) */ \
-    X(KIND_DOUBLE,     ridge_lambda,                "Ridge Lambda",         "ML/Ridge",        CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.15, 0.0, 10.0), \
+    X(FPN<F>                , KIND_DOUBLE, ridge_lambda,                "Ridge Lambda",         "ML/Ridge",        CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.15, 0.0, 10.0), \
         "Ridge regularization strength. Higher = more aggressive blending toward equal weights; lower = trusts per-arm IC signal more. Default 0.15. Stamp-bound (parity-critical).", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     ridge_cost_penalty,          "Ridge Cost Penalty",   "ML/Ridge",        CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.5, 0.0, 100.0), \
+    X(FPN<F>                , KIND_DOUBLE, ridge_cost_penalty,          "Ridge Cost Penalty",   "ML/Ridge",        CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.5, 0.0, 100.0), \
         "Cost penalty in net_IC = IC - penalty*cost (basis for ridge_min_ic_floor gate). Higher = penalizes arms with worse cost-IC tradeoff. Default 0.5. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     ridge_min_ic_floor,          "Ridge Min IC Floor",   "ML/Ridge",        CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.001, 0.0, 1.0), \
+    X(FPN<F>                , KIND_DOUBLE, ridge_min_ic_floor,          "Ridge Min IC Floor",   "ML/Ridge",        CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.001, 0.0, 1.0), \
         "Minimum net_IC floor — arms below this floor get zero weight (prevents zero-sum starvation when all arms have weak signal). Default 0.001. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /*       Winsorization (label clipping for training-time outlier handling) */ \
-    X(KIND_DOUBLE,     winsor_pct_low,              "Winsor Low",           "ML/Winsor",       CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.005, 0.0, 0.5), \
+    X(FPN<F>                , KIND_DOUBLE, winsor_pct_low,              "Winsor Low",           "ML/Winsor",       CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.005, 0.0, 0.5), \
         "Lower winsor clip percentile (ratio, NOT percent). Default 0.005 = clip bottom 0.5%% of labels. Stamp-bound (training-serve parity).", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     winsor_pct_high,             "Winsor High",          "ML/Winsor",       CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.995, 0.5, 1.0), \
+    X(FPN<F>                , KIND_DOUBLE, winsor_pct_high,             "Winsor High",          "ML/Winsor",       CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.995, 0.5, 1.0), \
         "Upper winsor clip percentile (ratio). Default 0.995 = clip top 0.5%% of labels. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /*       Composite confidence (v5.14.1) */ \
-    X(KIND_DOUBLE,     confidence_freshness_tau_secs, "Conf Freshness Tau", "ML/Confidence",   CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(3600.0, 0.0, 86400.0), \
+    X(FPN<F>                , KIND_DOUBLE, confidence_freshness_tau_secs, "Conf Freshness Tau", "ML/Confidence",   CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(3600.0, 0.0, 86400.0), \
         "Time-decay tau (seconds) for confidence-freshness term. Higher = slower decay of model trust as time-since-train grows. Default 3600s (1h). Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     confidence_capacity_target_dollars, "Conf Capacity Target $", "ML/Confidence", CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.0, 0.0, 1000000.0), \
+    X(FPN<F>                , KIND_DOUBLE, confidence_capacity_target_dollars, "Conf Capacity Target $", "ML/Confidence", CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.0, 0.0, 1000000.0), \
         "Target trade capacity (dollars) for confidence-capacity term. 0 = disabled. Higher = larger trades trusted at full confidence. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     confidence_capacity_kappa,   "Conf Capacity Kappa",  "ML/Confidence",   CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.1, 0.0, 10.0), \
+    X(FPN<F>                , KIND_DOUBLE, confidence_capacity_kappa,   "Conf Capacity Kappa",  "ML/Confidence",   CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.1, 0.0, 10.0), \
         "Capacity-curve shape parameter (kappa). Controls steepness of confidence falloff as trade size exceeds capacity. Default 0.1. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     confidence_rmse_baseline,    "Conf RMSE Baseline",   "ML/Confidence",   CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(1.0, 0.0, 100.0), \
+    X(FPN<F>                , KIND_DOUBLE, confidence_rmse_baseline,    "Conf RMSE Baseline",   "ML/Confidence",   CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(1.0, 0.0, 100.0), \
         "RMSE baseline for confidence-error term. Predictions with RMSE above this baseline get reduced confidence. Default 1.0. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /*       Bayesian Thompson sampling (v5.14.10.B) */ \
-    X(KIND_DOUBLE,     thompson_mu_prior,           "Thompson Mu Prior",    "ML/Thompson",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.0, -1000.0, 1000.0), \
+    X(FPN<F>                , KIND_DOUBLE, thompson_mu_prior,           "Thompson Mu Prior",    "ML/Thompson",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.0, -1000.0, 1000.0), \
         "Posterior mean prior (mu_0) for Bayesian Thompson sampling. Default 0.0 = neutral prior. Stamp-bound (parity-critical when bandit_algorithm == THOMPSON).", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     thompson_precision_prior,    "Thompson Tau Prior",   "ML/Thompson",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(1.0, 0.0001, 1000.0), \
+    X(FPN<F>                , KIND_DOUBLE, thompson_precision_prior,    "Thompson Tau Prior",   "ML/Thompson",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(1.0, 0.0001, 1000.0), \
         "Posterior precision prior (tau_0 = 1/variance) for Bayesian Thompson sampling. Default 1.0 = unit variance prior. Higher = tighter prior. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     thompson_precision_obs,      "Thompson Tau Obs",     "ML/Thompson",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(1.0, 0.0001, 1000.0), \
+    X(FPN<F>                , KIND_DOUBLE, thompson_precision_obs,      "Thompson Tau Obs",     "ML/Thompson",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(1.0, 0.0001, 1000.0), \
         "Observation precision (tau_obs = 1/sigma^2) for each reward update. Higher = each reward trusted more (faster posterior shift). Default 1.0. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /*       Bandit algorithm selector — INT enum (3-state today; .F.4c.2 expands to 5 ghost-training states) */ \
-    X(KIND_INT,        bandit_algorithm,            "Bandit Algorithm",     "ML/Bandit",       CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 2), \
+    X(int                   , KIND_INT, bandit_algorithm,            "Bandit Algorithm",     "ML/Bandit",       CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 2), \
         "Bandit selector: 0=EXP3 (default; legacy), 1=THOMPSON (Bayesian; non-stationary-friendly), 2=BOTH (parallel A/B telemetry). Accepts string ('exp3'/'thompson'/'both') or int. HAS_SIDE_EFFECT — manual parser handles string form. v5.15.5.F.4c.2 will expand to 5 ghost-training states. Stamp-bound (parity-critical).", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Per-core risk thresholds — STAMP_BOUND (4) === */ \
     /*       Risk degradation (v5.14.9 soft-risk) */ \
-    X(KIND_INT,        risk_degradation_curve,      "Risk Degradation Curve","Risk Management",CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 2), \
+    X(int                   , KIND_INT, risk_degradation_curve,      "Risk Degradation Curve","Risk Management",CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 2), \
         "Risk degradation curve shape: 0=CURVE_OFF (no degradation), 1=LINEAR, 2=EXP. Accepts string ('off'/'linear'/'exp') or int. HAS_SIDE_EFFECT — manual parser handles string form + legacy risk_scale_by_confidence alias. Stamp-bound.", \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     risk_full_size_threshold,    "Risk Full-Size Thresh","Risk Management", CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.15, 0.0, 1.0), \
+    X(FPN<F>                , KIND_DOUBLE, risk_full_size_threshold,    "Risk Full-Size Thresh","Risk Management", CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.15, 0.0, 1.0), \
         "Confidence threshold above which trades get full size. Default 0.15. Stamp-bound.", \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     risk_min_size_threshold,     "Risk Min-Size Thresh", "Risk Management", CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.05, 0.0, 1.0), \
+    X(FPN<F>                , KIND_DOUBLE, risk_min_size_threshold,     "Risk Min-Size Thresh", "Risk Management", CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.05, 0.0, 1.0), \
         "Confidence threshold below which trades get blocked (no-trade band). Default 0.05. Stamp-bound.", \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     risk_min_size_pct,           "Risk Min-Size Floor",  "Risk Management", CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.10, 0.0, 1.0), \
+    X(FPN<F>                , KIND_DOUBLE, risk_min_size_pct,           "Risk Min-Size Floor",  "Risk Management", CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.10, 0.0, 1.0), \
         "Floor on degraded position size (ratio of full size, e.g. 0.10 = 10%% of normal). Default 0.10. Stamp-bound.", \
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Partial exits / Breakeven (3) === */                                                                                                                                                                       \
-    X(KIND_DOUBLE,     partial_exit_pct,            "Partial Exit %%",      "Partial Exits",   0,                                  DBL(0.5, 0.0, 1.0),      "Fraction of position to close at TP1 (0.5 = 50%)",                                               STRAT_CAT_ALL,                                                   OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     tp2_mult,                    "TP2 Mult",             "Partial Exits",   0,                                  DBL(2.0, 0.0, 10.0),     "TP2 distance = TP1_distance * this (2.0 = double TP)",                                           STRAT_CAT_ALL,                                                   OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, breakeven_buffer_pct,        "Breakeven Buf %%",     "Partial Exits",   0,                                  DBL(0.0, 0.0, 5.0),      "SL offset from entry once breakeven ratchet fires",                                              STRAT_CAT_ALL,                                                   OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, partial_exit_pct,            "Partial Exit %%",      "Partial Exits",   0,                                  DBL(0.5, 0.0, 1.0),      "Fraction of position to close at TP1 (0.5 = 50%)",                                               STRAT_CAT_ALL,                                                   OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, tp2_mult,                    "TP2 Mult",             "Partial Exits",   0,                                  DBL(2.0, 0.0, 10.0),     "TP2 distance = TP1_distance * this (2.0 = double TP)",                                           STRAT_CAT_ALL,                                                   OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE_PCT, breakeven_buffer_pct,        "Breakeven Buf %%",     "Partial Exits",   0,                                  DBL(0.0, 0.0, 5.0),      "SL offset from entry once breakeven ratchet fires",                                              STRAT_CAT_ALL,                                                   OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Strategy-specific TP/SL overrides (6 — FPN<F>) — v5.15.5.F.4c.3 WIP2c.1 classify-first === */                                                                                                              \
     /* 0 = fall back to global take_profit_pct / stop_loss_pct (strategy parameter dispatcher applies). Per-core authoritative when set. */                                                                           \
-    X(KIND_DOUBLE_PCT, simpledip_tp_pct,            "SimpleDip TP %%",      "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "SimpleDip TP override (%, stored as decimal; 0 = fall back to take_profit_pct)",                STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, simpledip_sl_pct,            "SimpleDip SL %%",      "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "SimpleDip SL override (%, stored as decimal; 0 = fall back to stop_loss_pct)",                  STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, mr_tp_pct,                   "MR TP %%",             "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "MeanReversion TP override (%, stored as decimal; 0 = fall back to take_profit_pct)",            STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, mr_sl_pct,                   "MR SL %%",             "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "MeanReversion SL override (%, stored as decimal; 0 = fall back to stop_loss_pct)",              STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, emacross_tp_pct,             "EMACross TP %%",       "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "EMA Cross TP override (%, stored as decimal; 0 = fall back to take_profit_pct)",                STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, emacross_sl_pct,             "EMACross SL %%",       "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "EMA Cross SL override (%, stored as decimal; 0 = fall back to stop_loss_pct)",                  STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE_PCT, simpledip_tp_pct,            "SimpleDip TP %%",      "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "SimpleDip TP override (%, stored as decimal; 0 = fall back to take_profit_pct)",                STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE_PCT, simpledip_sl_pct,            "SimpleDip SL %%",      "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "SimpleDip SL override (%, stored as decimal; 0 = fall back to stop_loss_pct)",                  STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE_PCT, mr_tp_pct,                   "MR TP %%",             "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "MeanReversion TP override (%, stored as decimal; 0 = fall back to take_profit_pct)",            STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE_PCT, mr_sl_pct,                   "MR SL %%",             "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "MeanReversion SL override (%, stored as decimal; 0 = fall back to stop_loss_pct)",              STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE_PCT, emacross_tp_pct,             "EMACross TP %%",       "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "EMA Cross TP override (%, stored as decimal; 0 = fall back to take_profit_pct)",                STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE_PCT, emacross_sl_pct,             "EMACross SL %%",       "Strategies",      0,                                  DBL(0.0, 0.0, 100.0),    "EMA Cross SL override (%, stored as decimal; 0 = fall back to stop_loss_pct)",                  STRAT_CAT_STATIC_RULES,                                          OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Entry stddev mode (1 — FPN<F>) — v5.15.5.F.4c.3 WIP2c.1 classify-first === */                                                                                                                              \
-    X(KIND_DOUBLE,     offset_stddev_mult,          "Offset Stddev Mult",   "Entry Filters",   0,                                  DBL(0.0, 0.0, 10.0),     "stddev-scaled offset multiplier (0 = use offset_pct mode; non-zero = stddev-adaptive mode)",    STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN,            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, offset_stddev_mult,          "Offset Stddev Mult",   "Entry Filters",   0,                                  DBL(0.0, 0.0, 10.0),     "stddev-scaled offset multiplier (0 = use offset_pct mode; non-zero = stddev-adaptive mode)",    STRAT_CAT_STATIC_RULES | STRAT_CAT_REGRESSION_DRIVEN,            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === ML hard-block + ensemble + barrier (3 — 1 FPN<F> + 1 double + 1 INT_ENUM) — v5.15.5.F.4c.3 WIP2c.1 classify-first === */                                                                                   \
-    X(KIND_DOUBLE,     confidence_hard_block_threshold, "Conf Hard Block",  "ML",              CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.0, 0.0, 1.0),      "Confidence floor — predictions with confidence below this hard-block (no entry). 0 = disabled.", STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     ensemble_min_agreement_pct,  "Ens Min Agreement %%", "Ensemble",        CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.0, 0.0, 1.0),      "Min fraction of non-disabled horizons that must agree on direction for entry (0 = disabled).",   STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_INT,        barrier_blend_mode,          "Barrier Blend Mode",   "ML",              CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 3),                                  \
+    X(FPN<F>                , KIND_DOUBLE, confidence_hard_block_threshold, "Conf Hard Block",  "ML",              CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.0, 0.0, 1.0),      "Confidence floor — predictions with confidence below this hard-block (no entry). 0 = disabled.", STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(double                , KIND_DOUBLE, ensemble_min_agreement_pct,  "Ens Min Agreement %%", "Ensemble",        CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.0, 0.0, 1.0),      "Min fraction of non-disabled horizons that must agree on direction for entry (0 = disabled).",   STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(int                   , KIND_INT, barrier_blend_mode,          "Barrier Blend Mode",   "ML",              CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 3),                                  \
         "Per-horizon TP/SL serving mode: 0=LEGACY (cfg-direct fallback), 1=BLEND (weighted across horizons), 2=DOMINANT (highest-weight horizon). HAS_SIDE_EFFECT — manual parser handles string form ('legacy'/'blend'/'dominant').", \
         STRAT_CAT_ML,                                                   OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Maker/Taker fees + VolScaler (3) — WIP2c.2 inclusion (Strategy_BuildParameters reads these) === */                                                                                                          \
-    X(KIND_DOUBLE_PCT, fee_rate_maker,               "Fee Maker %%",         "Trading",         CfgFieldDescriptor::HAS_SIDE_EFFECT,                                  DBL(0.075, 0.0, 5.0),    "Maker fill fee rate (% per trade; e.g. 0.075 = 0.075% Binance tier 0). Cohort sibling of fee_rate (legacy) + fee_rate_taker.", STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE_PCT, fee_rate_taker,               "Fee Taker %%",         "Trading",         CfgFieldDescriptor::HAS_SIDE_EFFECT,                                  DBL(0.100, 0.0, 5.0),    "Taker fill fee rate (% per trade; e.g. 0.100 = 0.100% Binance tier 0). Cohort sibling of fee_rate (legacy) + fee_rate_maker.", STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    X(KIND_DOUBLE,     foxml_vol_scaling_z_max,      "Vol Scale Z-Max",      "ML",              CfgFieldDescriptor::WARN_ON_CLAMP, DBL(3.0, 0.0, 100.0),    "Z-score clipping threshold for FoxML VolScaler (limits how much volatility scaling can compress trade size). Default 3.0 = clip at 3 sigma.", STRAT_CAT_ML, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
+    X(FPN<F>                , KIND_DOUBLE_PCT, fee_rate_maker,               "Fee Maker %%",         "Trading",         CfgFieldDescriptor::HAS_SIDE_EFFECT,                                  DBL(0.075, 0.0, 5.0),    "Maker fill fee rate (% per trade; e.g. 0.075 = 0.075% Binance tier 0). Cohort sibling of fee_rate (legacy) + fee_rate_taker.", STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE_PCT, fee_rate_taker,               "Fee Taker %%",         "Trading",         CfgFieldDescriptor::HAS_SIDE_EFFECT,                                  DBL(0.100, 0.0, 5.0),    "Taker fill fee rate (% per trade; e.g. 0.100 = 0.100% Binance tier 0). Cohort sibling of fee_rate (legacy) + fee_rate_maker.", STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(FPN<F>                , KIND_DOUBLE, foxml_vol_scaling_z_max,      "Vol Scale Z-Max",      "ML",              CfgFieldDescriptor::WARN_ON_CLAMP, DBL(3.0, 0.0, 100.0),    "Z-score clipping threshold for FoxML VolScaler (limits how much volatility scaling can compress trade size). Default 3.0 = clip at 3 sigma.", STRAT_CAT_ML, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
 
 //======================================================================================================
-// [FOREACH_PER_CORE_FIELD_TYPE — auxiliary X-macro for X-macro struct generation (WIP2d-0)]
+// [EMIT_PER_CORE_CFG_STRUCT_FIELD — payload macro for X-macro struct generation (WIP2d-0.B)]
 //======================================================================================================
-// PURPOSE: maps each per-core cfg field name → C++ storage type. Consumed by
-// EMIT_PER_CORE_CFG_STRUCT_FIELD payload macro to GENERATE the PerCoreCfg<F>
-// struct body via X-macro expansion. Single source of truth for per-core struct
-// field declarations — no manual cfg-surface field declarations permitted in
-// PerCoreCfg<F> body (CI build-fails via tools/check_per_core_registry_integrity.py).
+// Consumed by PerCoreCfg<F> in ControllerConfig.hpp via:
+//   FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_STRUCT_FIELD)
 //
-// DISCIPLINE per H17 (STRONG at .F.4c.3 per-core surface; HARD at .F.4d global):
-// - Every entry here MUST have a matching FOREACH_PER_CORE_CFG_FIELD row (CI checks)
-// - Every FOREACH_PER_CORE_CFG_FIELD row MUST have a matching entry here (CI checks)
-// - PerCoreCfg<F> body uses FOREACH_PER_CORE_FIELD_TYPE(EMIT_PER_CORE_CFG_STRUCT_FIELD)
-//   for all 92 cfg-surface fields; the 5 bitmap-cluster fields are documented manual
-//   exemptions per DOCS/MANUAL_FIELDS_INVENTORY.md § "PerCoreCfg<F> runtime bitmap cluster"
+// WIP2d-0.B (.F.4c.3) — TYPE consolidation: FOREACH_PER_CORE_CFG_FIELD now carries STORAGE_T
+// as its first column. The auxiliary FOREACH_PER_CORE_FIELD_TYPE registry is RETIRED — single
+// source of truth per H17 STRONG codification. Future per-core cfg field addition: 1 row in
+// 1 registry; struct field auto-generates from row's STORAGE_T column.
 //
-// TYPE conventions (per DOD discipline + bytewise-equivalence with pre-WIP2d-0 manual struct):
-// - FPN<F> for accounting math (H4 invariant); per-core math fields
-// - uint32_t / uint64_t for unsigned counter/tick/seed fields
-// - int for signed enum / signed counter fields
-// - double for ML voting threshold (ensemble_min_agreement_pct; not accounting math)
+// Discipline per H17 (STRONG at .F.4c.3 per-core surface; HARD at .F.4d global surface):
+// - PerCoreCfg<F> body uses ONLY FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_STRUCT_FIELD)
+//   for the 92 cfg-surface fields + FOREACH_PER_CORE_DOMAIN_BITMAP(EMIT_DOMAIN_BITMAP_FIELD)
+//   for the 5 runtime bitmap fields. NO manual fields anywhere.
 //
 // SEE DESIGN_SPECS/manual-fields-inventory-pattern.md for the full pattern doc.
 //======================================================================================================
-#define FOREACH_PER_CORE_FIELD_TYPE(X)                          \
-    /* === Trading (6 — FPN<F>) === */                          \
-    X(take_profit_pct,                       FPN<F>)            \
-    X(stop_loss_pct,                         FPN<F>)            \
-    X(fee_rate,                              FPN<F>)            \
-    X(slippage_pct,                          FPN<F>)            \
-    X(risk_pct,                              FPN<F>)            \
-    X(fee_floor_mult,                        FPN<F>)            \
-    /* === Entry Filters (9 — FPN<F>) === */                    \
-    X(entry_offset_pct,                      FPN<F>)            \
-    X(offset_min,                            FPN<F>)            \
-    X(offset_max,                            FPN<F>)            \
-    X(volume_multiplier,                     FPN<F>)            \
-    X(spacing_multiplier,                    FPN<F>)            \
-    X(min_long_slope,                        FPN<F>)            \
-    X(min_buy_delta,                         FPN<F>)            \
-    X(vwap_offset,                           FPN<F>)            \
-    X(min_stddev_pct,                        FPN<F>)            \
-    /* === Time-Based Exit (4 — 3 FPN<F> + 1 uint32_t) === */   \
-    X(tp_hold_score,                         FPN<F>)            \
-    X(tp_trail_mult,                         FPN<F>)            \
-    X(sl_trail_mult,                         FPN<F>)            \
-    X(max_hold_ticks,                        uint32_t)          \
-    /* === Risk / Kill switches (6 — 4 FPN<F> + 2 uint32_t) === */ \
-    X(max_drawdown_pct,                      FPN<F>)            \
-    X(max_exposure_pct,                      FPN<F>)            \
-    X(kill_switch_daily_loss_pct,            FPN<F>)            \
-    X(kill_switch_drawdown_pct,              FPN<F>)            \
-    X(enable_mtm_kill_switch,                uint32_t)          \
-    X(kill_recovery_warmup,                  uint32_t)          \
-    /* === Gate Recovery (5 — 1 int + 4 uint32_t) === */        \
-    X(sl_cooldown_adaptive,                  int)               \
-    X(sl_cooldown_base,                      uint32_t)          \
-    X(sl_cooldown_extra,                     uint32_t)          \
-    X(sl_cooldown_cycles,                    uint32_t)          \
-    X(idle_reset_cycles,                     uint32_t)          \
-    /* === Momentum strategy (7 — 6 FPN<F> + 1 int) === */      \
-    X(momentum_min_tp_margin_pct,            FPN<F>)            \
-    X(momentum_min_buy_delta_recent,         FPN<F>)            \
-    X(momentum_min_r2,                       FPN<F>)            \
-    X(momentum_tp_mult,                      FPN<F>)            \
-    X(momentum_sl_mult,                      FPN<F>)            \
-    X(momentum_breakout_mult,                FPN<F>)            \
-    X(momentum_require_last_win,             int)               \
-    /* === EMA Cross strategy (3 — FPN<F>) === */               \
-    X(emacross_dip_mult,                     FPN<F>)            \
-    X(emacross_crossover_min,                FPN<F>)            \
-    X(emacross_trail_mult,                   FPN<F>)            \
-    /* === Regime Detection (5 — 4 FPN<F> + 1 uint32_t) === */  \
-    X(regime_slope_threshold,                FPN<F>)            \
-    X(regime_crossover_threshold,            FPN<F>)            \
-    X(regime_strong_crossover,               FPN<F>)            \
-    X(regime_r2_threshold,                   FPN<F>)            \
-    X(regime_hysteresis,                     uint32_t)          \
-    /* === ML — entry+TP/SL (3 — FPN<F>) === */                 \
-    X(ml_buy_threshold,                      FPN<F>)            \
-    X(ml_tp_pct,                             FPN<F>)            \
-    X(ml_sl_pct,                             FPN<F>)            \
-    /* === ML — Bandit/Confidence/Ensemble (11) === */          \
-    X(bandit_blend_ratio,                    FPN<F>)            \
-    X(confidence_threshold_scale,            FPN<F>)            \
-    X(confidence_window,                     uint32_t)          \
-    X(confidence_turnover_window,            int)               \
-    X(confidence_turnover_topk,              int)               \
-    X(confidence_ic_floor_window,            uint32_t)          \
-    X(confidence_ic_variant,                 int)               \
-    X(ensemble_min_warmup_predictions,       int)               \
-    X(ensemble_bandit_save_interval,         int)               \
-    X(thompson_rng_seed,                     uint64_t)          \
-    X(model_max_age_hours,                   uint32_t)          \
-    /* === STAMP_BOUND scalar cohort (13 — 12 FPN<F> + 1 int) === */ \
-    X(ridge_lambda,                          FPN<F>)            \
-    X(ridge_cost_penalty,                    FPN<F>)            \
-    X(ridge_min_ic_floor,                    FPN<F>)            \
-    X(winsor_pct_low,                        FPN<F>)            \
-    X(winsor_pct_high,                       FPN<F>)            \
-    X(confidence_freshness_tau_secs,         FPN<F>)            \
-    X(confidence_capacity_target_dollars,    FPN<F>)            \
-    X(confidence_capacity_kappa,             FPN<F>)            \
-    X(confidence_rmse_baseline,              FPN<F>)            \
-    X(thompson_mu_prior,                     FPN<F>)            \
-    X(thompson_precision_prior,              FPN<F>)            \
-    X(thompson_precision_obs,                FPN<F>)            \
-    X(bandit_algorithm,                      int)               \
-    /* === Per-core risk thresholds — STAMP_BOUND (4) === */    \
-    X(risk_degradation_curve,                int)               \
-    X(risk_full_size_threshold,              FPN<F>)            \
-    X(risk_min_size_threshold,               FPN<F>)            \
-    X(risk_min_size_pct,                     FPN<F>)            \
-    /* === Partial exits / Breakeven (3 — FPN<F>) === */        \
-    X(partial_exit_pct,                      FPN<F>)            \
-    X(tp2_mult,                              FPN<F>)            \
-    X(breakeven_buffer_pct,                  FPN<F>)            \
-    /* === Strategy-specific TP/SL overrides (6 — FPN<F>) — WIP2c.1 === */ \
-    X(simpledip_tp_pct,                      FPN<F>)            \
-    X(simpledip_sl_pct,                      FPN<F>)            \
-    X(mr_tp_pct,                             FPN<F>)            \
-    X(mr_sl_pct,                             FPN<F>)            \
-    X(emacross_tp_pct,                       FPN<F>)            \
-    X(emacross_sl_pct,                       FPN<F>)            \
-    /* === Entry stddev mode (1 — FPN<F>) — WIP2c.1 === */      \
-    X(offset_stddev_mult,                    FPN<F>)            \
-    /* === ML hard-block + ensemble + barrier (3) — WIP2c.1 === */ \
-    X(confidence_hard_block_threshold,       FPN<F>)            \
-    X(ensemble_min_agreement_pct,            double)            \
-    X(barrier_blend_mode,                    int)               \
-    /* === Maker/Taker fees + VolScaler (3 — FPN<F>) — WIP2c.2 === */ \
-    X(fee_rate_maker,                        FPN<F>)            \
-    X(fee_rate_taker,                        FPN<F>)            \
-    X(foxml_vol_scaling_z_max,               FPN<F>)
-
-// Payload macro: emit `type name;` per row. Used by PerCoreCfg<F> struct generation.
-#define EMIT_PER_CORE_CFG_STRUCT_FIELD(name, type) type name;
+// Payload: emit `<STORAGE_T> <name>;` per row.
+#define EMIT_PER_CORE_CFG_STRUCT_FIELD(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+                                         applies_to_strategy_cat, applies_to_op_mode_cat, \
+                                         applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
+    STORAGE_T name;
 
 //======================================================================================================
 // [FOREACH_MANUAL_PER_CORE_FIELD — exempted parallel arrays on ControllerConfig<F> (WIP2d-0)]
@@ -777,12 +663,73 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     type name[MAX_EXECUTION_CORES] suffix;
 
 //======================================================================================================
+// [FOREACH_PER_CORE_DOMAIN_BITMAP — meta-registry for cfg-domain bitmap fields (WIP2d-0.B)]
+//======================================================================================================
+// PURPOSE: meta-registry binding each FOREACH_<DOMAIN>_CFG_FLAG child registry to its
+// per-core bitmap storage field. SINGLE source of truth for the 5 bitmap fields on
+// PerCoreCfg<F>; adding a new domain registry = 1 row here + 1 row in MANUAL_FIELDS_INVENTORY.md.
+//
+// DRIVES (auto-flows):
+//   1. Struct field declarations in PerCoreCfg<F> via FOREACH_PER_CORE_DOMAIN_BITMAP(EMIT_DOMAIN_BITMAP_FIELD)
+//   2. Bitmap-overflow static_asserts per domain (defense in depth alongside per-registry asserts)
+//      via FOREACH_PER_CORE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT) per
+//      bitmap-overflow-protection-discipline.md
+//   3. WIP2e bitmap-rebuild walker: iterates this meta-registry; for each domain walks
+//      `child_registry` to rebuild bitmap from flat KIND_BOOL rows at slow-path cadence
+//   4. CI cross-check: every domain registered ↔ MANUAL_FIELDS_INVENTORY.md Section B row;
+//      added domain registry without bitmap field = BUILD ERROR (closes domain-bitmap-drift class)
+//
+// FIRST CANONICAL APPLICATION of meta-registry-pattern-for-codebase-registry-discipline.md
+// (Stage 3 ACTIVE at .F.4c.3 WIP2d-0.B; one ship before .F.4d FOREACH_REGISTRY codebase-wide
+// meta-registry + H15 codification). The pattern composes upward — at .F.4d this meta-registry
+// gets a row in FOREACH_REGISTRY top-level meta-registry.
+//
+// Row shape: X(align_n, DOMAIN_TOKEN, field_name, storage_type, child_registry_token)
+//   - align_n:    8 = alignas(8) cluster boundary; 0 = natural alignment
+//   - DOMAIN_TOKEN: pastes with _CFG_COUNT for static_assert (e.g., LIFECYCLE → LIFECYCLE_CFG_COUNT)
+//   - storage_type: bitmap storage type (uint8_t / uint16_t per FOREACH_X_CFG_FLAG bit count)
+//   - child_registry_token: FOREACH_<DOMAIN>_CFG_FLAG (used by WIP2e rebuild walker)
+//======================================================================================================
+#define FOREACH_PER_CORE_DOMAIN_BITMAP(X)                                                              \
+    /* align, domain,    field,                  storage,  child registry token */                    \
+    X(8,      LIFECYCLE, lifecycle_cfg_flags,    uint8_t,  FOREACH_LIFECYCLE_CFG_FLAG)                 \
+    X(0,      GATE,      gate_cfg_flags,         uint8_t,  FOREACH_GATE_CFG_FLAG)                     \
+    X(0,      ML,        ml_cfg_flags,           uint16_t, FOREACH_ML_CFG_FLAG)                       \
+    X(0,      RISK,      risk_cfg_flags,         uint8_t,  FOREACH_RISK_CFG_FLAG)                     \
+    X(0,      OPS,       ops_cfg_flags,          uint8_t,  FOREACH_OPS_CFG_FLAG)
+
+// alignas-conditional helper (token-paste pattern; 0 = no qualifier).
+#define EMIT_ALIGNAS_0    /* natural alignment */
+#define EMIT_ALIGNAS_8    alignas(8)
+
+// Payload macro: emit `[alignas(N)] <storage> <field>;` per row.
+// Used by PerCoreCfg<F> for runtime bitmap field declarations.
+#define EMIT_DOMAIN_BITMAP_FIELD(align_n, domain, field, storage, child) \
+    EMIT_ALIGNAS_##align_n storage field;
+
+// Payload macro: emit bitmap-overflow static_assert per domain.
+// Defense in depth — each child registry header has its own static_assert too;
+// this meta-level assert catches the case where a domain's COUNT grows beyond storage capacity
+// from the meta-registry's perspective (e.g., upgrading uint8_t → uint16_t storage requires
+// also updating the row here AND the child registry's own assert).
+#define EMIT_DOMAIN_OVERFLOW_ASSERT(align_n, domain, field, storage, child)                            \
+    static_assert(domain##_CFG_COUNT <= sizeof(storage) * 8,                                           \
+                  "Bitmap overflow: " #domain "_CFG_COUNT exceeds " #storage " bits; "                  \
+                  "upgrade storage type in FOREACH_PER_CORE_DOMAIN_BITMAP row for " #domain);
+
+// Invoke bitmap-overflow asserts at file scope (compile-time check).
+// Requires that <DOMAIN>_CFG_COUNT constants are in scope — ControllerConfig.hpp includes
+// the 5 FOREACH_<DOMAIN>_CFG_FLAG headers BEFORE including CfgFieldRegistry.hpp, so this
+// resolves correctly.
+FOREACH_PER_CORE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
+
+//======================================================================================================
 // [FIELD_IDX enums — per-registry auto-generated]
 //======================================================================================================
 // Drives g_*_cfg_field_descriptors[FIELD_IDX_*_<name>] direct access at compile time.
 #define X_GEN_GLOBAL_FIELD_IDX(KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     FIELD_IDX_GLOBAL_##name,
-#define X_GEN_PER_CORE_FIELD_IDX(KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
+#define X_GEN_PER_CORE_FIELD_IDX(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     FIELD_IDX_PER_CORE_##name,
 
 enum CfgGlobalFieldIdx : uint16_t {
@@ -822,7 +769,7 @@ enum CfgPerCoreFieldIdx : uint16_t {
         /* payload         */ payload_init,                                                              \
     },
 
-#define X_GEN_DESCRIPTOR_PER_CORE(KIND_TOKEN, name, label, section, meta, payload_init, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
+#define X_GEN_DESCRIPTOR_PER_CORE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload_init, tooltip, applies_to_strategy_cat, applies_to_op_mode_cat, applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
     CfgFieldDescriptor{                                                                                  \
         /* kind            */ CfgFieldDescriptor::KIND_TOKEN,                                            \
         /* lives_in_struct */ static_cast<uint8_t>(lives_in_struct),                                     \

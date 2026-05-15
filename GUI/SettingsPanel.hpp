@@ -206,7 +206,7 @@ struct PerCoreCfgRenderTable {
     // (fields haven't moved yet); Step 2 restructures to PerCoreCfg<F>& cores[c].
     using RenderFn = bool (*)(ControllerConfig<F>&, const CfgFieldDescriptor&, const char*);
 
-    #define X_GEN_PER_CORE_RENDER_FN(KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+    #define X_GEN_PER_CORE_RENDER_FN(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
                                        applies_to_strategy, applies_to_op_mode, \
                                        applies_to_regime, applies_to_risk, lives_in_struct) \
         static bool render_##name(ControllerConfig<F>& cfg, const CfgFieldDescriptor& desc, const char* cfg_path) { \
@@ -215,7 +215,7 @@ struct PerCoreCfgRenderTable {
     FOREACH_PER_CORE_CFG_FIELD(X_GEN_PER_CORE_RENDER_FN)
     #undef X_GEN_PER_CORE_RENDER_FN
 
-    #define X_GEN_PER_CORE_RENDER_PTR(KIND_TOKEN, name, label, section, meta, payload, tooltip, ...) \
+    #define X_GEN_PER_CORE_RENDER_PTR(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, ...) \
         &PerCoreCfgRenderTable<F>::render_##name,
     static constexpr RenderFn fns[FIELD_IDX_PER_CORE_END] = {
         FOREACH_PER_CORE_CFG_FIELD(X_GEN_PER_CORE_RENDER_PTR)

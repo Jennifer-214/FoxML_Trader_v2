@@ -92,24 +92,21 @@ def extract_macro_body(text: str, macro_name: str) -> str:
     return m.group(1)
 
 
-def parse_foreach_per_core_cfg_field(body: str) -> set:
-    """Parse FOREACH_PER_CORE_CFG_FIELD rows. Returns set of field names."""
-    # Rows look like: X(KIND_TOKEN, name, "label", "section", meta, payload, "tooltip", ...)
-    # Extract the 2nd column (name) after the X( opening
-    pattern = re.compile(r'^\s+X\(KIND_[A-Z_]+,\s+(\w+),', re.MULTILINE)
-    names = set(pattern.findall(body))
-    return names
+def parse_foreach_per_core_cfg_field(body: str) -> dict:
+    """Parse FOREACH_PER_CORE_CFG_FIELD rows. Returns dict {name: type}.
 
+    Post-WIP2d-0.B: TYPE is the FIRST column. Row shape:
+        X(<storage_type>, KIND_TOKEN, <name>, "label", "section", meta, payload, "tooltip", ...)
 
-def parse_foreach_per_core_field_type(body: str) -> dict:
-    """Parse FOREACH_PER_CORE_FIELD_TYPE rows. Returns dict {name: type}."""
-    # Rows look like: X(name,  type)
-    # type can contain template brackets: FPN<F>, uint32_t, int, double, uint64_t
+    Type can contain template brackets (FPN<F>) so we use a non-greedy match through commas.
+    """
     result = {}
-    pattern = re.compile(r'^\s+X\((\w+),\s+([^)]+)\)', re.MULTILINE)
+    # Match: X(<type>, KIND_<TOKEN>, <name>,
+    # Type can have <F> template parameter — match anything up to ", KIND_"
+    pattern = re.compile(r'^\s+X\(\s*([^,]+?(?:<[^>]+>)?)\s*,\s+(KIND_[A-Z_]+),\s+(\w+),', re.MULTILINE)
     for m in pattern.finditer(body):
-        name = m.group(1).strip()
-        typ = m.group(2).strip()
+        typ = m.group(1).strip()
+        name = m.group(3).strip()
         result[name] = typ
     return result
 
@@ -153,10 +150,16 @@ def parse_per_core_cfg_body(text: str) -> dict:
     body = m.group(1)
     body_start_line = text[:m.start()].count('\n') + 2  # approximate; +2 for template + struct lines
 
-    # Detect if FOREACH_PER_CORE_FIELD_TYPE is invoked (expected; covers 92 fields)
-    has_x_macro = bool(re.search(r'FOREACH_PER_CORE_FIELD_TYPE\s*\(\s*EMIT_PER_CORE_CFG_STRUCT_FIELD\s*\)', body))
-    if not has_x_macro:
-        fail("PerCoreCfg<F> body missing FOREACH_PER_CORE_FIELD_TYPE(EMIT_PER_CORE_CFG_STRUCT_FIELD) invocation")
+    # Detect if FOREACH_PER_CORE_CFG_FIELD is invoked (expected post-WIP2d-0.B; covers 92 fields)
+    has_cfg_macro = bool(re.search(r'FOREACH_PER_CORE_CFG_FIELD\s*\(\s*EMIT_PER_CORE_CFG_STRUCT_FIELD\s*\)', body))
+    if not has_cfg_macro:
+        fail("PerCoreCfg<F> body missing FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_STRUCT_FIELD) invocation")
+        sys.exit(1)
+
+    # Detect if FOREACH_PER_CORE_DOMAIN_BITMAP is invoked (expected post-WIP2d-0.B; covers 5 bitmap fields)
+    has_bitmap_macro = bool(re.search(r'FOREACH_PER_CORE_DOMAIN_BITMAP\s*\(\s*EMIT_DOMAIN_BITMAP_FIELD\s*\)', body))
+    if not has_bitmap_macro:
+        fail("PerCoreCfg<F> body missing FOREACH_PER_CORE_DOMAIN_BITMAP(EMIT_DOMAIN_BITMAP_FIELD) invocation")
         sys.exit(1)
 
     # Find manual field declarations (after stripping comments + the X-macro line)
@@ -173,8 +176,9 @@ def parse_per_core_cfg_body(text: str) -> dict:
         line = line.strip()
         if not line or line.startswith('/*') or line.startswith('*'):
             continue
-        # Skip block-comment lines + X-macro expansion
-        if 'FOREACH_PER_CORE_FIELD_TYPE' in line or 'EMIT_PER_CORE_CFG_STRUCT_FIELD' in line:
+        # Skip block-comment lines + X-macro expansions
+        if ('FOREACH_PER_CORE_CFG_FIELD' in line or 'EMIT_PER_CORE_CFG_STRUCT_FIELD' in line
+                or 'FOREACH_PER_CORE_DOMAIN_BITMAP' in line or 'EMIT_DOMAIN_BITMAP_FIELD' in line):
             continue
         # Skip preprocessor + closing braces
         if line.startswith('#') or line == '};' or line == '{':
@@ -240,16 +244,44 @@ def parse_inventory_section_b(text: str) -> set:
     return names
 
 
+def strip_macro_definitions(text: str) -> str:
+    """Remove all #define ... blocks (single-line + multi-line via \\ continuation).
+
+    Used to scan for anti-pattern 1 in PRODUCTION code only, not in X-macro callback bodies
+    (which legitimately use `cfg.core_overrides[c].name` + `cfg.name` as positional meta-vars).
+    """
+    out = []
+    in_macro = False
+    for line in text.split('\n'):
+        if in_macro:
+            if not line.rstrip().endswith('\\'):
+                in_macro = False
+            continue  # Skip macro body lines
+        # Strip single-line #define (no continuation)
+        stripped = line.strip()
+        if stripped.startswith('#define '):
+            if line.rstrip().endswith('\\'):
+                in_macro = True
+            continue
+        out.append(line)
+    return '\n'.join(out)
+
+
 def scan_anti_pattern_1(text: str) -> list:
-    """Scan for anti-pattern 1 consumer shape: cfg.X + cfg.core_overrides[c].X same X."""
+    """Scan for anti-pattern 1 consumer shape: cfg.X + cfg.core_overrides[c].X same X.
+
+    Strips #define macro bodies first — X-macro callbacks use `name` as a meta-var
+    that pastes the field name; matching that as a field-name produces false positives.
+    """
     findings = []
-    # Find each `cfg.core_overrides[c].FIELD` pattern; check if the same file/scope has `cfg.FIELD`
-    # Heuristic — co-occurrence in same file, same field name
+    # Strip macro definitions to avoid false-positives on X-macro callback meta-vars
+    code = strip_macro_definitions(text)
+    # Find each `cfg.core_overrides[c].FIELD` pattern; check if the same scope has `cfg.FIELD`
     pattern_override = re.compile(r'cfg\.core_overrides\[\w+\]\.(\w+)')
-    overridden_fields = set(pattern_override.findall(text))
+    overridden_fields = set(pattern_override.findall(code))
     for field in overridden_fields:
         # Check if cfg.<field> appears in same text (informational)
-        if re.search(rf'\bcfg\.{re.escape(field)}\b(?!\s*\[)', text):
+        if re.search(rf'\bcfg\.{re.escape(field)}\b(?!\s*\[)', code):
             findings.append(field)
     return findings
 
@@ -264,69 +296,66 @@ def main() -> int:
 
     failures = 0
 
-    # --- Check 1: FOREACH_PER_CORE_CFG_FIELD ↔ FOREACH_PER_CORE_FIELD_TYPE bidirectional sync ---
+    # --- Check 1: FOREACH_PER_CORE_CFG_FIELD ↔ PerCoreCfg<F> struct field type sync ---
+    # Post-WIP2d-0.B: single registry. TYPE is the FIRST column of each row.
+    # Verify every row's TYPE matches the struct field type generated via X-macro.
+    # (Auxiliary FOREACH_PER_CORE_FIELD_TYPE retired at WIP2d-0.B.)
     cfg_field_body = extract_macro_body(cfg_reg_text, "FOREACH_PER_CORE_CFG_FIELD")
-    type_aux_body = extract_macro_body(cfg_reg_text, "FOREACH_PER_CORE_FIELD_TYPE")
+    cfg_field_map = parse_foreach_per_core_cfg_field(cfg_field_body)
+    cfg_field_names = set(cfg_field_map.keys())
 
-    cfg_field_names = parse_foreach_per_core_cfg_field(cfg_field_body)
-    type_aux_map = parse_foreach_per_core_field_type(type_aux_body)
-    type_aux_names = set(type_aux_map.keys())
-
-    only_in_cfg_field = cfg_field_names - type_aux_names
-    only_in_type_aux = type_aux_names - cfg_field_names
-
-    if only_in_cfg_field:
-        fail(f"Check 1 FAIL: in FOREACH_PER_CORE_CFG_FIELD but missing from FOREACH_PER_CORE_FIELD_TYPE: {sorted(only_in_cfg_field)}")
-        fail("  → add matching X(<name>, <type>) entry to FOREACH_PER_CORE_FIELD_TYPE in CfgFieldRegistry.hpp")
+    if len(cfg_field_map) == 0:
+        fail("Check 1 FAIL: FOREACH_PER_CORE_CFG_FIELD parsed 0 rows — row regex may be broken")
         failures += 1
-    if only_in_type_aux:
-        fail(f"Check 1 FAIL: in FOREACH_PER_CORE_FIELD_TYPE but missing from FOREACH_PER_CORE_CFG_FIELD: {sorted(only_in_type_aux)}")
-        fail("  → add matching cfg-registry row to FOREACH_PER_CORE_CFG_FIELD in CfgFieldRegistry.hpp")
+    elif len(cfg_field_map) < 80:
+        fail(f"Check 1 FAIL: only {len(cfg_field_map)} per-core rows parsed (expected ~92) — registry might be incomplete or parser regex broken")
         failures += 1
-    if not only_in_cfg_field and not only_in_type_aux:
-        info(f"Check 1 PASS: {len(cfg_field_names)} per-core cfg fields in sync between registry + type auxiliary")
+    else:
+        info(f"Check 1 PASS: {len(cfg_field_map)} per-core cfg fields parsed with TYPE column (single registry; auxiliary retired)")
 
-    # --- Check 2: PerCoreCfg<F> body contains ONLY X-macro + 5 permitted runtime fields ---
+    # --- Check 2: PerCoreCfg<F> body contains ONLY 2 X-macro invocations + nothing else ---
+    # Post-WIP2d-0.B: both cfg-surface fields (92) AND runtime bitmap fields (5) come from X-macros.
+    # No manual fields permitted anywhere in PerCoreCfg<F> body.
     per_core_manual = parse_per_core_cfg_body(ctrl_cfg_text)
     per_core_manual_names = set(per_core_manual.keys())
 
-    not_permitted = per_core_manual_names - PERMITTED_RUNTIME_FIELDS
-    missing_permitted = PERMITTED_RUNTIME_FIELDS - per_core_manual_names
-
-    if not_permitted:
-        fail(f"Check 2 FAIL: PerCoreCfg<F> body contains FORBIDDEN manual fields outside X-macro expansion: {sorted(not_permitted)}")
-        for name in sorted(not_permitted):
+    if per_core_manual_names:
+        fail(f"Check 2 FAIL: PerCoreCfg<F> body contains FORBIDDEN manual fields outside X-macro expansions: {sorted(per_core_manual_names)}")
+        for name in sorted(per_core_manual_names):
             typ, line = per_core_manual[name]
-            fail(f"  → ControllerConfig.hpp:{line}: '{typ} {name}' — add to FOREACH_PER_CORE_FIELD_TYPE registry OR document in MANUAL_FIELDS_INVENTORY.md § Section B")
+            fail(f"  → ControllerConfig.hpp:{line}: '{typ} {name}' — add to FOREACH_PER_CORE_CFG_FIELD (cfg surface) OR FOREACH_PER_CORE_DOMAIN_BITMAP (runtime bitmap); no manual fields permitted")
         failures += 1
-    if missing_permitted:
-        fail(f"Check 2 FAIL: PerCoreCfg<F> body MISSING expected runtime bitmap fields: {sorted(missing_permitted)}")
-        failures += 1
-    if not not_permitted and not missing_permitted:
-        info(f"Check 2 PASS: PerCoreCfg<F> body contains X-macro + 5 permitted runtime bitmap fields")
+    else:
+        info(f"Check 2 PASS: PerCoreCfg<F> body contains ONLY FOREACH_PER_CORE_CFG_FIELD + FOREACH_PER_CORE_DOMAIN_BITMAP invocations (no manual fields)")
 
-    # --- Check 3: ControllerConfig parallel arrays ↔ FOREACH_MANUAL_PER_CORE_FIELD bidirectional sync ---
+    # --- Check 3: ControllerConfig uses FOREACH_MANUAL_PER_CORE_FIELD X-macro for parallel arrays ---
+    # Post-WIP2d-0.B: parallel arrays come from X-macro expansion in ControllerConfig.hpp.
+    # No literal `<type> core_<name>[16];` declarations should exist outside the X-macro invocation.
     manual_body = extract_macro_body(cfg_reg_text, "FOREACH_MANUAL_PER_CORE_FIELD")
     manual_xmacro = parse_foreach_manual_per_core_field(manual_body)
     manual_xmacro_names = set(manual_xmacro.keys())
 
+    # Verify the X-macro invocation is present in ControllerConfig.hpp
+    has_manual_xmacro_invocation = bool(re.search(
+        r'FOREACH_MANUAL_PER_CORE_FIELD\s*\(\s*EMIT_MANUAL_PER_CORE_DECL\s*\)',
+        ctrl_cfg_text,
+    ))
+    if not has_manual_xmacro_invocation:
+        fail("Check 3 FAIL: ControllerConfig.hpp missing FOREACH_MANUAL_PER_CORE_FIELD(EMIT_MANUAL_PER_CORE_DECL) invocation")
+        failures += 1
+
+    # Verify NO literal `<type> core_<name>[16];` declarations exist anymore (all X-macro generated)
     parallel_arrays = parse_controller_config_parallel_arrays(ctrl_cfg_text)
-    parallel_names = set(parallel_arrays.keys())
-
-    in_struct_not_xmacro = parallel_names - manual_xmacro_names
-    in_xmacro_not_struct = manual_xmacro_names - parallel_names
-
-    if in_struct_not_xmacro:
-        fail(f"Check 3 FAIL: parallel arrays in ControllerConfig.hpp missing from FOREACH_MANUAL_PER_CORE_FIELD: {sorted(in_struct_not_xmacro)}")
-        for name in sorted(in_struct_not_xmacro):
+    stray_decls = set(parallel_arrays.keys())
+    if stray_decls:
+        fail(f"Check 3 FAIL: stray manual parallel array declarations in ControllerConfig.hpp (must come from X-macro expansion only): {sorted(stray_decls)}")
+        for name in sorted(stray_decls):
             typ, suffix, line = parallel_arrays[name]
-            fail(f"  → ControllerConfig.hpp:{line}: '{typ} {name}[16]{suffix}' — add to FOREACH_MANUAL_PER_CORE_FIELD in CfgFieldRegistry.hpp + MANUAL_FIELDS_INVENTORY.md Section A")
+            fail(f"  → ControllerConfig.hpp:{line}: '{typ} {name}[16]{suffix}' — delete; add to FOREACH_MANUAL_PER_CORE_FIELD instead")
         failures += 1
-    if in_xmacro_not_struct:
-        fail(f"Check 3 FAIL: in FOREACH_MANUAL_PER_CORE_FIELD but no matching parallel array in ControllerConfig.hpp: {sorted(in_xmacro_not_struct)}")
-        failures += 1
-    if not in_struct_not_xmacro and not in_xmacro_not_struct:
-        info(f"Check 3 PASS: {len(manual_xmacro_names)} parallel arrays in sync between ControllerConfig + FOREACH_MANUAL_PER_CORE_FIELD")
+
+    if has_manual_xmacro_invocation and not stray_decls:
+        info(f"Check 3 PASS: {len(manual_xmacro_names)} parallel arrays declared exclusively via FOREACH_MANUAL_PER_CORE_FIELD X-macro")
 
     # --- Check 4: FOREACH_MANUAL_PER_CORE_FIELD ↔ MANUAL_FIELDS_INVENTORY.md bidirectional sync ---
     inv_section_a = parse_inventory_section_a(inventory_text)

@@ -321,20 +321,23 @@ struct alignas(64) PerCoreCfg {
     // determinism + alignment static_asserts continuity.
     //
     // SEE DESIGN_SPECS/manual-fields-inventory-pattern.md for the full pattern doc.
-    FOREACH_PER_CORE_FIELD_TYPE(EMIT_PER_CORE_CFG_STRUCT_FIELD)
+    FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_STRUCT_FIELD)
 
-    // === Runtime bitmap cluster (5 fields; documented manual exemption) ===
-    // RUNTIME representations of FOREACH_*_CFG_FLAG bits, rebuilt from flat KIND_BOOL
-    // rows at slow-path rebuild (WIP2e adds the rebuild walker). Manual declaration
-    // justified by alignas(8) cluster boundary for atomic multi-byte bitmap reads.
-    // Documented at DOCS/MANUAL_FIELDS_INVENTORY.md § "PerCoreCfg<F> runtime bitmap
-    // cluster". CI script (check_per_core_registry_integrity.py) permits these 5
-    // specific names; other manual fields fail build.
-    alignas(8) uint8_t  lifecycle_cfg_flags;   // alignas(8) preserves the cluster alignment from ControllerConfig<F>:620
-    uint8_t  gate_cfg_flags;
-    uint16_t ml_cfg_flags;
-    uint8_t  risk_cfg_flags;
-    uint8_t  ops_cfg_flags;
+    // === Runtime bitmap cluster (5 fields — auto-generated via FOREACH_PER_CORE_DOMAIN_BITMAP meta-registry) ===
+    // WIP2d-0.B (.F.4c.3) — meta-registry pattern applied per CLAUDE.md item 31 framework
+    // discipline. The 5 bitmap fields are RUNTIME representations of FOREACH_*_CFG_FLAG bits,
+    // rebuilt from flat KIND_BOOL rows at slow-path rebuild (WIP2e adds the rebuild walker).
+    //
+    // SINGLE SOURCE OF TRUTH: FOREACH_PER_CORE_DOMAIN_BITMAP (in CfgFieldRegistry.hpp). Adding
+    // a new domain registry = 1 row in the meta-registry; struct field + bitmap-overflow
+    // static_assert + future WIP2e rebuild walker entry all auto-flow.
+    //
+    // alignas(8) on the FIRST field (lifecycle_cfg_flags) preserves cluster boundary alignment
+    // for atomic multi-byte bitmap reads (driven by the meta-registry's `align_n` column).
+    //
+    // SEE DESIGN_SPECS/meta-registry-pattern-for-codebase-registry-discipline.md for the
+    // pattern doc + DOCS/MANUAL_FIELDS_INVENTORY.md § Section B for the documented exemption.
+    FOREACH_PER_CORE_DOMAIN_BITMAP(EMIT_DOMAIN_BITMAP_FIELD)
 };
 
 // alignment / size discipline per DESIGN_SPECS/per-snapshot-cluster-layout-pattern.md.
@@ -444,7 +447,7 @@ template <unsigned F> struct ControllerConfig {
   // experiments where AUTO-mode core wants longer holds than DIP core,
   // or where strategy comparison wants different time horizons per core.
   // Cfg parser pattern: core_<N>_time_exit_ticks=<int>
-  uint32_t core_time_exit_ticks[16];           // MAX_EXECUTION_CORES
+  // core_time_exit_ticks: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   FPN<F>
       min_hold_gain_pct; // only time-exit if gain < this % (e.g. 0.001 = 0.1%)
   // regime detection
@@ -1040,7 +1043,7 @@ template <unsigned F> struct ControllerConfig {
   // STRATEGY_* constant for execution core i. Default: all STRATEGY_SIMPLE_DIP.
   // Config syntax: core_0_strategy=simple_dip, core_1_strategy=ema_cross, etc.
   // Accepted names: mr, momentum, simple_dip, ml, ema_cross, none.
-  uint8_t core_strategies[16]; // MAX_EXECUTION_CORES
+  // core_strategies: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   // v5.9.0c — explicit-set bitmap for core_strategies. Bit i set = `core_i_strategy=`
   // appeared in the cfg file (operator deliberate choice). Bit i clear = field
   // absent in cfg, default applied. Surfaces "default vs deliberate" tri-state
@@ -1058,12 +1061,12 @@ template <unsigned F> struct ControllerConfig {
   // balance this core can risk on a single trade. Default 0 = use the
   // shared risk_pct / num_cores. Non-zero = use this specific percentage.
   // Config syntax: core_0_risk_pct=20.0 (stored as 0.20).
-  FPN<F> core_risk_pct[16];    // MAX_EXECUTION_CORES
+  // core_risk_pct: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   // Phase 3: per-core kill switch overrides + global tunables.
   // core_max_drawdown_pct[i] overrides the shared max_drawdown_pct for
   // this specific core. Default 0 = use shared. Config syntax:
   // core_0_max_drawdown_pct=15.0 (stored as 0.15).
-  FPN<F> core_max_drawdown_pct[16];
+  // core_max_drawdown_pct: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   // min_kill_loss: absolute USDT floor for the per-core kill switch. The
   // trip fires only when BOTH dd_pct exceeds threshold AND drop exceeds
   // this floor. Without it, a tiny allocation ($10) loses $0.50, dd=5%,
@@ -1077,7 +1080,7 @@ template <unsigned F> struct ControllerConfig {
   // Per-core ML model path. Each core running STRATEGY_ML can load its
   // own model. Default empty = use shared ml_model_path. Config syntax:
   // core_0_model_path=models/aggressive.xgb
-  char core_model_path[16][256];
+  // core_model_path: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   // Per-core ML model directory. When set, the engine auto-discovers
   // role-specific models in this directory (barrier.json/.xgb,
   // buy_signal.json/.xgb, regime.json/.xgb, exit.json/.xgb) and loads
@@ -1085,7 +1088,7 @@ template <unsigned F> struct ControllerConfig {
   // When BOTH model_dir and model_path are set, model_dir wins (zoo
   // supersedes legacy single-model). Config syntax:
   // core_0_model_dir=models/aggressive/
-  char core_model_dir[16][256];
+  // core_model_dir: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   // v5.10.0a.G.6 — per-core multi-horizon ensemble cfg (string-typed, can't
   // fit X-macro pattern). Default empty = inherit from global cfg.horizon_list /
   // cfg.ensemble_blend_mode. Auto-detect (G.5) takes priority over both;
@@ -1096,9 +1099,9 @@ template <unsigned F> struct ControllerConfig {
   //   core_0_ensemble_blend_mode=weighted     # selection | weighted (default)
   //   core_0_disabled_horizons=100            # CSV; kill-switch per horizon
   //                                           # (skips predict; bandit weight frozen)
-  char core_horizon_list[16][128];
-  char core_ensemble_blend_mode[16][16];
-  char core_disabled_horizons[16][128];
+  // core_horizon_list: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
+  // core_ensemble_blend_mode: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
+  // core_disabled_horizons: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   // v5.11.18a — per-core feature mask. Bit i set = feature index i is
   // computed + packed for this core; bit i clear = packed as 0.0f
   // (NOT skipped; sparse-zero array contract per parity-check finding).
@@ -1117,13 +1120,13 @@ template <unsigned F> struct ControllerConfig {
   // change (Features_PackAll respecting the mask) lands in v5.11.18.
   // Default-on bitmap means any cfg without `feature_mask_<N>=` lines
   // produces identical features to pre-v5.11.18a builds.
-  uint64_t core_feature_mask[16];
+  // core_feature_mask: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   // Per-core full-tunable overrides (v4.0). One slot per execution core
   // (16 max). Each PerCoreOverrides field shadows a same-named field on
   // ControllerConfig — non-zero overrides global; zero inherits.
   // Resolved on every slow-path rebuild via
   // ControllerConfig_ResolveForCore. See PerCoreOverrides comment block.
-  PerCoreOverrides<F> core_overrides[16];
+  // core_overrides: declared via FOREACH_MANUAL_PER_CORE_FIELD X-macro (see ControllerConfig<F> struct end + DOCS/MANUAL_FIELDS_INVENTORY.md Section A)
   // Per-strategy TP/SL overrides. Default 0 = fall back to the shared
   // take_profit_pct / stop_loss_pct. Non-zero = use this instead.
   // Momentum already has momentum_tp_mult / momentum_sl_mult (stddev mults).
@@ -1326,6 +1329,24 @@ template <unsigned F> struct ControllerConfig {
   // lines without cross-core false sharing (H6 discipline).
   //==================================================================================================
   PerCoreCfg<F> cores[MAX_EXECUTION_CORES];
+
+  // === Per-core legacy parallel arrays (documented exemptions; auto-generated via X-macro) ===
+  // WIP2d-0.B (.F.4c.3) — 11 parallel arrays consolidated into FOREACH_MANUAL_PER_CORE_FIELD
+  // X-macro expansion per CLAUDE.md item 31 framework discipline + H17 STRONG codification.
+  // ONE source of truth; CI cross-checks bidirectional sync with DOCS/MANUAL_FIELDS_INVENTORY.md.
+  //
+  // SECTIONS:
+  //   • 5 string arrays (core_model_path/_dir/_horizon_list/_ensemble_blend_mode/_disabled_horizons)
+  //     → migrate to KIND_FILE_PATH/KIND_STRING cohort at .F.4e
+  //   • 1 hex64 bitmap (core_feature_mask) → migrate to KIND_HEX64 cohort at .F.4e
+  //   • 4 TRANSITIONAL override arrays (core_risk_pct / core_strategies / core_time_exit_ticks /
+  //     core_max_drawdown_pct) → delete at WIP2g when cores[c] becomes authoritative
+  //   • 1 TRANSITIONAL legacy override struct (core_overrides) → delete at WIP2f with
+  //     PerCoreOverrides<F> retirement (cfg-scope-discipline.md § Anti-pattern 1)
+  //
+  // CI script: tools/check_per_core_registry_integrity.py verifies every entry has a
+  // FOREACH_MANUAL_PER_CORE_FIELD row + a MANUAL_FIELDS_INVENTORY.md row + correct type.
+  FOREACH_MANUAL_PER_CORE_FIELD(EMIT_MANUAL_PER_CORE_DECL)
 };
 
 //======================================================================================================
@@ -1426,7 +1447,7 @@ inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
         ControllerConfig<F> resolved = ControllerConfig_ResolveForCore(*cfg, c);
         // Per-core registry rows — X-macro auto-walker over FOREACH_PER_CORE_CFG_FIELD.
         // Future per-core row additions auto-flow here; no edits needed.
-        #define EMIT_PER_CORE_COPY(KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+        #define EMIT_PER_CORE_COPY(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
                                     applies_to_strategy, applies_to_op_mode, \
                                     applies_to_regime, applies_to_risk, lives_in_struct) \
             cfg->cores[c].name = resolved.name;
@@ -2061,7 +2082,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_PARSER_CASE)
     #undef EMIT_GLOBAL_CFG_PARSER_CASE
 
-    #define EMIT_PER_CORE_CFG_PARSER_CASE(KIND_TOKEN, name, label, section, meta, payload_init, tooltip, \
+    #define EMIT_PER_CORE_CFG_PARSER_CASE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload_init, tooltip, \
                                            applies_to_strategy, applies_to_op_mode, \
                                            applies_to_regime, applies_to_risk, lives_in_struct) \
         if (strcmp(key, #name) == 0 && !((meta) & CfgFieldDescriptor::HAS_SIDE_EFFECT)) { \
