@@ -1463,6 +1463,43 @@ inline ControllerConfig<F> ControllerConfig_ResolveForCore(
 }
 
 //======================================================================================================
+// [PER-CORE SHADOW POPULATE — v5.15.5.F.4c.3 Step 2]
+//======================================================================================================
+// Copies the resolved per-core view (flat fields + legacy PerCoreOverrides
+// merged via ControllerConfig_ResolveForCore) into cfg->cores[c] for each
+// execution core. This is the Step 2 SHADOW transition: cores[c] is populated
+// from the flat path so consumers migrating to read cfg.cores[c].<field> see
+// identical values to consumers still reading cfg.<field> + ResolveForCore.
+//
+// The X-macro walker iterates FOREACH_PER_CORE_CFG_FIELD; each row emits one
+// field assignment `cfg->cores[c].name = resolved.name`. Adding a new per-core
+// row to the registry automatically adds a populate line — no changes needed
+// here.
+//
+// Called at end of ControllerConfig_Default + ControllerConfig_Load. After
+// Step 3 lands the `[core N]` section parser, the parser will write cores[c]
+// directly + this shadow function becomes a no-op / gets deleted.
+//
+// Runtime note: GUI cfg edits mutate the flat fields directly via
+// tt::cfg_render_field<T>; cores[c] becomes stale until next reload. Step 2
+// consumers tolerate this (no migrated reader runs on the GUI-mutated path
+// without a reload signal yet). Step 6 wires GUI edits to also update
+// cores[c] via reload-from-file or direct-sync hook.
+//======================================================================================================
+template <unsigned F>
+inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
+    for (int c = 0; c < MAX_EXECUTION_CORES; ++c) {
+        ControllerConfig<F> resolved = ControllerConfig_ResolveForCore(*cfg, c);
+        #define EMIT_PER_CORE_COPY(KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+                                    applies_to_strategy, applies_to_op_mode, \
+                                    applies_to_regime, applies_to_risk, lives_in_struct) \
+            cfg->cores[c].name = resolved.name;
+        FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_COPY)
+        #undef EMIT_PER_CORE_COPY
+    }
+}
+
+//======================================================================================================
 template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   ControllerConfig<F> cfg;
   cfg.poll_interval = 100;
@@ -1902,6 +1939,10 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
 
   // v5.15.5.C.3 Phase 7.A — bench gate flag (default OFF / production).
   cfg.oms_bench_enabled = 0;
+
+  // v5.15.5.F.4c.3 Step 2 — populate per-core authoritative view from flat fields.
+  // Step 3 will replace this with [core N] section parser writing cores[c] directly.
+  ControllerConfig_PopulateCoresFromFlat(&cfg);
 
   return cfg;
 }
@@ -3094,6 +3135,13 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
             cfg.min_warmup_samples, ROLLING_WINDOW_SHORT, ROLLING_WINDOW_SHORT);
     cfg.min_warmup_samples = ROLLING_WINDOW_SHORT;
   }
+
+  // v5.15.5.F.4c.3 Step 2 — populate per-core authoritative view from flat fields.
+  // Runs AFTER all parser passes (registry walker + manual blocks + per-core overrides
+  // + NormalizeForMode). Ensures cfg.cores[c] reflects the fully-resolved per-core
+  // view (flat + PerCoreOverrides<F> merged via ControllerConfig_ResolveForCore).
+  // Step 3 will replace this with [core N] section parser writing cores[c] directly.
+  ControllerConfig_PopulateCoresFromFlat(&cfg);
 
   return cfg;
 }
