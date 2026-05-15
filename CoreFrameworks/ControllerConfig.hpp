@@ -401,6 +401,34 @@ struct alignas(64) PerCoreCfg {
     FPN<F> partial_exit_pct;
     FPN<F> tp2_mult;
     FPN<F> breakeven_buffer_pct;
+
+    // --- Strategy-specific TP/SL overrides (6 — FPN<F>) — WIP2c.1 classify-first ---
+    // 0 = fall back to global take_profit_pct / stop_loss_pct (strategy dispatcher applies).
+    FPN<F> simpledip_tp_pct;
+    FPN<F> simpledip_sl_pct;
+    FPN<F> mr_tp_pct;
+    FPN<F> mr_sl_pct;
+    FPN<F> emacross_tp_pct;
+    FPN<F> emacross_sl_pct;
+
+    // --- Entry stddev mode (1 — FPN<F>) — WIP2c.1 ---
+    FPN<F> offset_stddev_mult;
+
+    // --- ML hard-block + ensemble + barrier (3) — WIP2c.1 ---
+    FPN<F> confidence_hard_block_threshold;
+    double ensemble_min_agreement_pct;   // double preserved from flat (ML voting threshold; not accounting math)
+    int    barrier_blend_mode;           // KIND_INT_ENUM (LEGACY=0 / BLEND=1 / DOMINANT=2)
+
+    // --- 5 cfg-domain bitmap STORAGE fields (cohort move; A2 flat KIND_BOOL rows ship at WIP2e) ---
+    // Per cohort discipline: all 5 domain bitmaps move per-core together. A2 expansion (WIP2e)
+    // adds flat KIND_BOOL rows in FOREACH_PER_CORE_CFG_FIELD that source-of-truth the bits; slow-
+    // path rebuild walker reconstructs these bitmap fields from rows. For WIP2c.1, the bitmap
+    // storage is added per-core + populated via PopulateCoresFromFlat (copies from flat fields).
+    alignas(8) uint8_t  lifecycle_cfg_flags;   // alignas(8) preserves the cluster alignment from ControllerConfig<F>:620
+    uint8_t  gate_cfg_flags;
+    uint16_t ml_cfg_flags;
+    uint8_t  risk_cfg_flags;
+    uint8_t  ops_cfg_flags;
 };
 
 // alignment / size discipline per DESIGN_SPECS/per-snapshot-cluster-layout-pattern.md.
@@ -1490,12 +1518,24 @@ template <unsigned F>
 inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
     for (int c = 0; c < MAX_EXECUTION_CORES; ++c) {
         ControllerConfig<F> resolved = ControllerConfig_ResolveForCore(*cfg, c);
+        // Per-core registry rows — X-macro auto-walker over FOREACH_PER_CORE_CFG_FIELD.
+        // Future per-core row additions auto-flow here; no edits needed.
         #define EMIT_PER_CORE_COPY(KIND_TOKEN, name, label, section, meta, payload, tooltip, \
                                     applies_to_strategy, applies_to_op_mode, \
                                     applies_to_regime, applies_to_risk, lives_in_struct) \
             cfg->cores[c].name = resolved.name;
         FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_COPY)
         #undef EMIT_PER_CORE_COPY
+
+        // 5 cfg-domain bitmap STORAGE fields — manual copies (not in registry; A2 flat KIND_BOOL
+        // rows ship at WIP2e and rebuild these bitmaps from rows at slow-path rebuild). The
+        // resolved view already merges per-core bitmap overrides via the legacy
+        // PerCoreOverrides<F> bitmap path in ControllerConfig_ResolveForCore.
+        cfg->cores[c].lifecycle_cfg_flags = resolved.lifecycle_cfg_flags;
+        cfg->cores[c].gate_cfg_flags      = resolved.gate_cfg_flags;
+        cfg->cores[c].ml_cfg_flags        = resolved.ml_cfg_flags;
+        cfg->cores[c].risk_cfg_flags      = resolved.risk_cfg_flags;
+        cfg->cores[c].ops_cfg_flags       = resolved.ops_cfg_flags;
     }
 }
 
