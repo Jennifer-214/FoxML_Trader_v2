@@ -291,7 +291,7 @@ static const CfgFieldDef field_defs[] = {
         "Cycles with no fill before gate decay\nprevents permanent lockout after losses"},
     {"sl_cooldown_cycles",    "SL Cooldown",  "Gate Recovery",   CFG_INT,   "%d",
         "Slow-path cycles to pause after stop loss\nlets market settle before re-entry"},
-    {"sl_cooldown_adaptive",  "Adaptive CD",  "Gate Recovery",   CFG_BOOL,  NULL,   NULL},
+    // v5.15.5.F.4c — sl_cooldown_adaptive migrated to FOREACH_CFG_FIELD (KIND_BOOL).
     // Session Filters
     {"session_asian_mult",    "Asian",        "Session Filters",  CFG_FLOAT, "%.2f",
         "Volume gate multiplier 00-07 UTC\nhigher = more selective (fewer entries)"},
@@ -307,20 +307,14 @@ static const CfgFieldDef field_defs[] = {
     {"gate_ema_alpha",        "Alpha",        "EMA Gate",        CFG_FLOAT, "%.4f",
         "EMA smoothing factor\n0.99 = fast (responsive)\n0.997 = default\n0.999 = slow (stable)"},
     // Danger Gradient
-    {"danger_enabled",        "Enabled",      "Danger Gradient",  CFG_BOOL,  NULL,   NULL},
+    // v5.15.5.F.4c — danger_enabled migrated to FOREACH_CFG_FIELD (KIND_BOOL).
     {"danger_warn_stddevs",   "Warn σ",       "Danger Gradient",  CFG_FLOAT, "%.1f",
         "Danger gradient starts at this many σ below avg\n3.0 = gate begins tightening at 3σ drop"},
     {"danger_crash_stddevs",  "Crash σ",      "Danger Gradient",  CFG_FLOAT, "%.1f",
         "Full gate kill at this many σ below avg\n6.0 = gate zeroed at 6σ drop (crash protection)"},
     // Tick Recording
-    {"record_ticks",          "Record Ticks", "Tick Recording",  CFG_BOOL,  NULL,
-        "Record raw ticks to CSV for backtesting/ML training\nOutput: data/{SYMBOL}/YYYY-MM-DD.csv\n~30-70MB/day for BTCUSDT"},
-    {"record_depth",          "Record Depth", "Tick Recording",  CFG_BOOL,  NULL,
-        "Record @depth5@100ms snapshots to CSV (top-of-book + lastUpdateId)\n"
-        "Output: data/{SYMBOL}/depth/YYYY-MM-DD.csv\n"
-        "Requires depth_enabled=1. Daily rotation, auto-pruned by record_max_days.\n"
-        "Gap markers (# GAP) on backward last_update_id, wallclock >2s, or disconnect.\n"
-        "~50 MB/day for BTCUSDT. Required for future backtest replay of book state."},
+    // v5.15.5.F.4c — record_ticks + record_depth migrated to FOREACH_CFG_FIELD (KIND_BOOL;
+    // HIGH-6 tooltip byte-identity preserved via single-string-literal concatenation).
     {"record_max_days",       "Max Days",     "Tick Recording",  CFG_FLOAT, "%.0f",
         "Auto-delete tick + depth CSVs older than this many days\n30 = ~1-2GB cap on disk usage (more if depth recording is on)"},
     // Operational Monitoring (Phase 8b) — alerts on kill switch, orphans, disconnects

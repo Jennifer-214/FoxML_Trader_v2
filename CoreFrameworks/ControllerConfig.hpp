@@ -1982,7 +1982,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(momentum_min_tp_margin_pct)     // v5.7.5
     CFG_PARSE_FPN(momentum_min_buy_delta_recent)  // v5.7.5
     CFG_PARSE_FPN(momentum_min_r2)                // v5.7.5
-    CFG_PARSE_INT(momentum_require_last_win)      // v5.7.5
+    // v5.15.5.F.4c — momentum_require_last_win migrated to FOREACH_CFG_FIELD (KIND_BOOL).
     CFG_PARSE_FPN(momentum_tp_mult)
     CFG_PARSE_FPN(momentum_sl_mult)
     CFG_PARSE_FPN(emacross_dip_mult)
@@ -2019,7 +2019,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_PCT(max_drawdown_pct)
     // Phase 3: kill switch tunables
     CFG_PARSE_FPN_POS(min_kill_loss)
-    CFG_PARSE_U32(enable_mtm_kill_switch)
+    // v5.15.5.F.4c — enable_mtm_kill_switch migrated to FOREACH_CFG_FIELD (KIND_BOOL; uint32 storage).
     // v5.12.1.A — WS dead-time emergency-flatten (live-only safety net)
     // ws_dead_time_flatten_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
     CFG_PARSE_INT(ws_dead_time_flatten_threshold_secs)
@@ -2142,7 +2142,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       continue;
     }
     // v5.12.2.D — Treelite AOT backend opt-in (infrastructure-only)
-    CFG_PARSE_INT(use_aot_inference)
+    // v5.15.5.F.4c — use_aot_inference migrated to FOREACH_CFG_FIELD (KIND_BOOL; IS_BOOT_ONLY).
     // v5.13.0 — sell-side ML opt-in (Path 3 architecture)
     // use_exit_model migrated to ml_cfg_flags (v5.14.9.F.2)
     if (strcmp(key, "exit_threshold") == 0) {
@@ -2188,7 +2188,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
 
     //--- uint32_t ---
     CFG_PARSE_U32(poll_interval)
-    CFG_PARSE_U32(pay_fees_in_bnb)  // v4.3.2 Track C.1 — Binance BNB 25% fee discount
+    // v5.15.5.F.4c — pay_fees_in_bnb migrated to FOREACH_CFG_FIELD (KIND_BOOL; uint32 storage).
+    // Was: CFG_PARSE_U32 // v4.3.2 Track C.1 — Binance BNB 25% fee discount
     CFG_PARSE_U32(warmup_ticks)
     CFG_PARSE_U32(slow_path_max_secs)
     CFG_PARSE_U32(max_hold_ticks)
@@ -2212,7 +2213,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
 
     //--- int ---
-    CFG_PARSE_INT(sl_cooldown_adaptive)
+    // v5.15.5.F.4c — sl_cooldown_adaptive migrated to FOREACH_CFG_FIELD (KIND_BOOL).
     // v5.14.9.F.4 — Parser auto-flow via FOREACH walks. Replaces 21 inline if-strcmp
     // branches (~130 lines) with 5 FOREACH walks (~40 lines). Adding a new bool flag
     // to ANY of the 5 domain registries = 1 row in the FOREACH macro; parser auto-flows
@@ -2281,9 +2282,9 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_PCT(breakeven_buffer_pct)
     // depth_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
     CFG_PARSE_INT(use_real_money)
-    CFG_PARSE_INT(acknowledge_hardcoded_strategy_in_live)  // v5.7.2
-    CFG_PARSE_INT(require_mlockall)  // v5.11.3
-    CFG_PARSE_INT(init_arena_use_hugepages)  // v5.11.22
+    // v5.15.5.F.4c — acknowledge_hardcoded_strategy_in_live + require_mlockall +
+    // init_arena_use_hugepages migrated to FOREACH_CFG_FIELD (KIND_BOOL; IS_BOOT_ONLY).
+    // Registry walker at line 1896+ handles parse; manual CFG_PARSE_INT removed.
     // session_filter_enabled migrated to ops_cfg_flags (v5.14.9.F.3)
     // gate_ema_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
     CFG_PARSE_INT(default_strategy)
@@ -2302,13 +2303,14 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN(no_trade_band_mult)
     CFG_PARSE_FPN(ml_buy_threshold)
     CFG_PARSE_FPN(regime_model_weight)
-    CFG_PARSE_INT(danger_enabled)
+    // v5.15.5.F.4c — danger_enabled migrated to FOREACH_CFG_FIELD (KIND_BOOL).
+    // Registry walker handles parse; manual CFG_PARSE_INT removed.
     CFG_PARSE_FPN(danger_warn_stddevs)
     CFG_PARSE_FPN(danger_crash_stddevs)
 
     //--- tick recording ---
-    CFG_PARSE_INT(record_ticks)
-    CFG_PARSE_INT(record_depth)
+    // v5.15.5.F.4c — record_ticks + record_depth migrated to FOREACH_CFG_FIELD (KIND_BOOL;
+    // HIGH-6 tooltip byte-identity preserved). Registry walker handles parse.
     CFG_PARSE_U32(record_max_days)
 
     //--- operational alerts (Phase 8b) ---
@@ -2348,7 +2350,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     CFG_PARSE_FPN_POS(confidence_hard_block_threshold)
     CFG_PARSE_FPN(held_out_fraction)
     CFG_PARSE_FPN(gap_acceptable_threshold)
-    CFG_PARSE_INT(allow_cross_major_engine)
+    // v5.15.5.F.4c — allow_cross_major_engine migrated to FOREACH_CFG_FIELD (KIND_BOOL; IS_BOOT_ONLY).
+    // Registry walker handles parse; manual CFG_PARSE_INT removed.
     // v5.9.5h — XGBoost hyperparam parsers
     CFG_PARSE_FPN_POS(xgb_subsample)
     CFG_PARSE_FPN_POS(xgb_colsample_bytree)
@@ -2505,11 +2508,10 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         size_t vn = strnlen(val, sizeof(cfg.auto_stamp_secret) - 1);
         memcpy(cfg.auto_stamp_secret, val, vn);
         cfg.auto_stamp_secret[vn] = '\0';
-    }
-    else if (strcmp(key, "auto_stamp_on_held_out") == 0) {
-        cfg.auto_stamp_on_held_out = atoi(val);
         continue;
     }
+    // v5.15.5.F.4c — auto_stamp_on_held_out migrated to FOREACH_CFG_FIELD (KIND_BOOL).
+    // Was: `else if (strcmp(key, "auto_stamp_on_held_out") == 0)` — registry walker handles parse.
     if (strcmp(key, "health_log_path") == 0) {
         size_t n = strlen(val);
         if (n >= sizeof(cfg.health_log_path)) n = sizeof(cfg.health_log_path) - 1;
@@ -2533,7 +2535,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // v5.15.5.A.7 — acknowledge_cross_binary_version_drift + acknowledge_inference_cfg_drift
     // CFG_PARSE_INT removed; legacy cfg keys auto-route via FOREACH_OPS_CFG_FLAG walker
     // (legacy_field column matches keys at the ops_cfg_flags parser block line ~2220).
-    CFG_PARSE_INT(acknowledge_hot_swap_with_open_positions)  // v5.10.0c
+    // v5.15.5.F.4c — acknowledge_hot_swap_with_open_positions migrated to FOREACH_CFG_FIELD (KIND_BOOL).
+    // Registry walker handles parse; manual CFG_PARSE_INT removed.
     if (strcmp(key, "confidence_ic_floor") == 0) {
         cfg.confidence_ic_floor = atof(val);
         continue;
@@ -2635,10 +2638,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
       cfg.num_execution_cores = (uint16_t)v;
       continue;
     }
-    if (strcmp(key, "sharded_force_synthetic") == 0) {
-      cfg.sharded_force_synthetic = (uint8_t)(atoi(val) != 0 ? 1 : 0);
-      continue;
-    }
+    // v5.15.5.F.4c — sharded_force_synthetic migrated to FOREACH_CFG_FIELD (KIND_BOOL; uint8_t storage).
+    // Registry walker's KIND_BOOL branch handles truthy-int normalization.
     // v5.12.3.C — per-core time-exit override: core_0_time_exit_ticks=5000
     // means core 0 forces exit after 5000 ticks held (overrides global
     // cfg.max_hold_ticks for this core). Match BEFORE generic _exit_*
