@@ -126,6 +126,12 @@ struct SubmitCommand {
     FPN<F>   intended_tp;
     FPN<F>   intended_sl;
     FPN<F>   event_price;   // for the trade log + fill price
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg pointer for Order_BindPreResolved at submit.
+    // Slow-path producer sets to &cfg.cores[core_id]; drainer (OrderManager_Submit) reads
+    // and calls Order_BindPreResolved to populate Order::pre_resolved.fee_rate / slippage_pct
+    // before any fill arrives. nullptr-tolerant for test paths that skip fee accounting.
+    // Per DESIGN_SPECS/decision-time-data-binding-pattern.md sub-struct refinement.
+    const ::PerCoreCfg<F>* core_cfg;
 };
 
 constexpr size_t OMS_SUBMIT_QUEUE_SIZE = 32;  // power of 2
@@ -739,7 +745,8 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms,
                                     FPN<F> intended_sl = FPN_Zero<F>(),
                                     uint8_t strategy_id = 0xFF,
                                     FPN<F> event_price = FPN_Zero<F>(),
-                                    uint8_t leg = 0) {  // P.3: 0 = leg A / single, 1 = leg B
+                                    uint8_t leg = 0,                                    // P.3: 0 = leg A / single, 1 = leg B
+                                    const ::PerCoreCfg<F>* core_cfg = nullptr) {        // v5.15.5.F.4c.3 WIP2d-1.B.1: bind pre_resolved values at submit (nullptr-tolerant for tests)
     uint64_t id = oms->next_order_id++;
 
     // Paper mode + legacy (mode 0): count and return. Never touch the
@@ -793,8 +800,19 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms,
     oms->orders[slot].intended_sl   = intended_sl;
     oms->orders[slot].strategy_id   = strategy_id;
     oms->orders[slot].event_price   = event_price;
-    oms->orders[slot].leg           = leg;  // P.3: 0/1 for partial exits
-    oms->orders[slot].state         = ORDER_SUBMITTED;
+    Order_SetLeg(&oms->orders[slot], leg);  // P.3: 0/1 for partial exits
+    Order_SetState(&oms->orders[slot], ORDER_SUBMITTED);
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — decision-time data binding: pre-resolve fee_rate /
+    // slippage_pct from per-core cfg onto Order before any fill can arrive. is_maker
+    // defaults to false at Order_Init (set later by adapter executionReport for LIMIT
+    // orders; MARKET orders are always taker — current engine is MARKET-only).
+    // Per DESIGN_SPECS/decision-time-data-binding-pattern.md + branchless-dispatch-
+    // discipline.md (branchless via cmov-to-stub; always-call Order_BindPreResolved
+    // regardless of whether caller passed cfg). nullptr → zero-init stub → pre_resolved
+    // values stay FPN_Zero (same effective behavior as skip-when-null, but no branch).
+    static const ::PerCoreCfg<F> NULL_PER_CORE_CFG_STUB{};
+    const ::PerCoreCfg<F>* effective_cfg = core_cfg ? core_cfg : &NULL_PER_CORE_CFG_STUB;
+    Order_BindPreResolved(&oms->orders[slot], *effective_cfg);
     oms->total_submitted.fetch_add(1, std::memory_order_relaxed);
 
     // Paper mode + event log (mode 1): push a synthetic fill result so
@@ -824,7 +842,7 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms,
         std::fprintf(stderr,
                      "[OMS] live mode but adapter is not wired, rejecting order %llu\n",
                      (unsigned long long)id);
-        oms->orders[slot].state = ORDER_REJECTED;
+        Order_SetState(&oms->orders[slot], ORDER_REJECTED);
         oms->total_rejected.fetch_add(1, std::memory_order_relaxed);
         oms->order_bitmap &= (uint16_t)~(1u << slot);
         return 0;
@@ -844,7 +862,7 @@ inline uint64_t OrderManager_Submit(OrderManagerState<F>* oms,
         std::fprintf(stderr,
                      "[OMS] adapter rejected enqueue for order %llu, freeing slot\n",
                      (unsigned long long)id);
-        oms->orders[slot].state = ORDER_REJECTED;
+        Order_SetState(&oms->orders[slot], ORDER_REJECTED);
         oms->total_rejected.fetch_add(1, std::memory_order_relaxed);
         oms->order_bitmap &= (uint16_t)~(1u << slot);
         return 0;
@@ -878,7 +896,8 @@ inline bool OMS_PushSubmit(OrderManagerState<F>* oms,
                             FPN<F> intended_sl = FPN_Zero<F>(),
                             uint8_t strategy_id = 0xFF,
                             FPN<F> event_price = FPN_Zero<F>(),
-                            uint8_t leg = 0) {
+                            uint8_t leg = 0,
+                            const ::PerCoreCfg<F>* core_cfg = nullptr) {  // v5.15.5.F.4c.3 WIP2d-1.B.1: per-core cfg for pre-resolution at drainer Submit
     if (core_id < 0 || core_id >= MAX_EXECUTION_CORES) {
         std::fprintf(stderr,
                      "[OMS] PushSubmit: invalid core_id=%d (max=%d)\n",
@@ -894,6 +913,7 @@ inline bool OMS_PushSubmit(OrderManagerState<F>* oms,
     cmd.intended_tp  = intended_tp;
     cmd.intended_sl  = intended_sl;
     cmd.event_price  = event_price;
+    cmd.core_cfg     = core_cfg;
     bool pushed = SPSCRing_TryPush(&oms->submit_queues[core_id], cmd);
     if (!pushed) {
         std::fprintf(stderr,
@@ -929,7 +949,8 @@ inline int OMS_DrainSubmit(OrderManagerState<F>* oms, int num_cores) {
                                 cmd.intended_sl,
                                 cmd.strategy_id,
                                 cmd.event_price,
-                                cmd.leg);
+                                cmd.leg,
+                                cmd.core_cfg);  // v5.15.5.F.4c.3 WIP2d-1.B.1: forward per-core cfg for pre-resolution
             drained++;
         }
     }
@@ -994,21 +1015,21 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
     OrderEventLog_Append(&oms->event_log,
         OrderEvent_MakeFill<F>(
             o->id, o->submitted_at_us,
-            (OrderType)o->type, o->core_id,
+            Order_GetType(o), o->core_id,
             fill_price, fill_qty,
             o->intended_tp, o->intended_sl));
 
-    if (o->type == (uint8_t)ORDER_MARKET_BUY) {
+    if (Order_GetType(o) == ORDER_MARKET_BUY) {
         // Entry fill: open portfolio slot.
         FPN<F> notional  = FPN_Mul(fill_price, fill_qty);
         // Phase 8: maker/taker fee on entry. o->is_maker comes from Binance
         // executionReport "m" field (parsed in c3, written by the OMS dispatch).
         // For legacy / backtest paths, fee_rate_maker == fee_rate_taker → same rate.
-        FPN<F> entry_rate = o->is_maker ? oms->fee_rate_maker : oms->fee_rate_taker;
+        FPN<F> entry_rate = o->pre_resolved.fee_rate;
         FPN<F> entry_fee  = FPN_Mul(notional, entry_rate);
         // Phase 8 (post-coding c10) — accounting counters; v5.15.5.C.2 (S5)
         // extracted to OrderManager_AccountMakerTakerFee helper.
-        OrderManager_AccountMakerTakerFee(oms, (int)o->is_maker, entry_fee);
+        OrderManager_AccountMakerTakerFee(oms, (int)Order_GetIsMaker(o), entry_fee);
         Portfolio_OpenSlot(&oms->portfolio, (int)o->core_id,
                            fill_price, fill_qty,
                            o->intended_tp, o->intended_sl, entry_fee);
@@ -1030,7 +1051,7 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
                                         fill_price, fill_qty,
                                         entry_fee, oms->balance);
         }
-    } else if (o->type == (uint8_t)ORDER_MARKET_SELL) {
+    } else if (Order_GetType(o) == ORDER_MARKET_SELL) {
         // Exit fill: close portfolio slot, compute P&L, update balance.
         int pslot = (int)o->core_id;
         // v4.7.19: guard against double-close. Portfolio_CloseSlot doesn't
@@ -1073,11 +1094,11 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         // Phase 8: maker/taker fee on exit. ORDER_MARKET_SELL is taker by
         // exchange definition, but read o->is_maker for forward-compat with
         // hybrid execution (Phase 9 POST_ONLY limit sells = potential maker).
-        FPN<F> exit_rate = o->is_maker ? oms->fee_rate_maker : oms->fee_rate_taker;
+        FPN<F> exit_rate = o->pre_resolved.fee_rate;
         FPN<F> exit_fee  = FPN_Mul(exit_notional, exit_rate);
         // Phase 8 (post-coding c10) — accounting counters on exit; v5.15.5.C.2
         // (S5) extracted to OrderManager_AccountMakerTakerFee helper.
-        OrderManager_AccountMakerTakerFee(oms, (int)o->is_maker, exit_fee);
+        OrderManager_AccountMakerTakerFee(oms, (int)Order_GetIsMaker(o), exit_fee);
         FPN<F> total_fee     = FPN_Add(entry_fee, exit_fee);
         FPN<F> net           = FPN_Sub(gross, total_fee);
         oms->balance      = FPN_Add(oms->balance, net);
@@ -1094,8 +1115,12 @@ inline void OrderManager_HandleFill(OrderManagerState<F>* oms, Order<F>* o,
         // (entry_price / quantity / entry_fee preserved through CloseSlot;
         // only active_bitmap bit cleared).
         oms->last_exit_fill_price[pslot] = fill_price;
-        if (o->is_maker) BITMAP_SET(oms->last_is_maker_bitmap, BITMAP_BIT_U16(pslot));
-        else             BITMAP_CLR(oms->last_is_maker_bitmap, BITMAP_BIT_U16(pslot));
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless mask-select (replaces branchy SET/CLR).
+        // Per H7 (hot/slow path branchless for data-dependent dispatch). Ternary → cmov;
+        // 1 cmov + 3 ALU ops vs branch + conditional store.
+        uint16_t maker_bit  = BITMAP_BIT_U16(pslot);
+        uint16_t maker_mask = Order_GetIsMaker(o) ? maker_bit : (uint16_t)0;
+        oms->last_is_maker_bitmap = (uint16_t)((oms->last_is_maker_bitmap & ~maker_bit) | maker_mask);
         // v5.15.5.C.4 Phase J — was_win moved to cross-slot bitmap.
         if (FPN_GreaterThan(net, FPN_Zero<F>())) {
             BITMAP_SET(oms->last_was_win_bitmap, BITMAP_BIT_U16(pslot));
@@ -1237,7 +1262,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
     Order<F>* o = &oms->orders[slot];
 
     // Dedup: if order is already FILLED (another source beat us), skip.
-    if (o->state == ORDER_FILLED) return 0;
+    if (Order_GetState(o) == ORDER_FILLED) return 0;
 
     if (cmd.result.success) {
         std::strncpy(o->exchange_id, cmd.result.exchange_id,
@@ -1247,7 +1272,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
         // ACK-only results (from REST when WS is active): fill_qty == 0.
         // Transition to ACKNOWLEDGED, keep the slot open for the WS fill.
         if (cmd.result.fill_qty == 0.0 && cmd.result.avg_fill_price == 0.0) {
-            o->state = ORDER_ACKNOWLEDGED;
+            Order_SetState(o, ORDER_ACKNOWLEDGED);
             return 1;  // slot stays open — don't free
         }
 
@@ -1257,7 +1282,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
         // Fee_Compute reads this for entry-fee math when the controller books
         // the fill. is_maker stays at Order_Init's 0 (taker) for synchronous
         // REST fills (Phase 02 path) — Binance market orders are taker by def.
-        o->is_maker = cmd.result.is_maker;
+        Order_SetIsMaker(o, (bool)cmd.result.is_maker);
         // Phase 8: pick FILLED vs PARTIAL based on Binance "X" field (parsed
         // in c3 as order_complete). For ACK-only paths above we already
         // returned with ORDER_ACKNOWLEDGED, so reaching here means an actual
@@ -1265,8 +1290,8 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
         // Defensive: if order_complete is missing from the event (parser sets
         // 0 in that case), we err toward PARTIAL — keeps the order alive in
         // the OMS, won't lose track. Subsequent fill events resolve to FILLED.
-        o->state = cmd.result.order_complete ? ORDER_FILLED : ORDER_PARTIAL;
-        if (o->state == ORDER_FILLED) {
+        Order_SetState(o, cmd.result.order_complete ? ORDER_FILLED : ORDER_PARTIAL);
+        if (Order_GetState(o) == ORDER_FILLED) {
             oms->total_filled.fetch_add(1, std::memory_order_relaxed);
         }
 
@@ -1283,7 +1308,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
                      (int)o->core_id,
                      cmd.result.error_code,
                      cmd.result.error_message);
-        o->state = ORDER_REJECTED;
+        Order_SetState(o, ORDER_REJECTED);
         oms->total_rejected.fetch_add(1, std::memory_order_relaxed);
 
         // Mode 1: append rejection to event log for the audit trail.
@@ -1291,7 +1316,7 @@ inline int OrderManager_ProcessFillCommand(OrderManagerState<F>* oms, const Comm
             OrderEventLog_Append(&oms->event_log,
                 OrderEvent_MakeRejection<F>(
                     o->id, o->submitted_at_us,
-                    (OrderType)o->type, o->core_id,
+                    Order_GetType(o), o->core_id,
                     cmd.result.error_message));
         }
     }

@@ -5214,15 +5214,15 @@ int main() {
 
         // Default state after Init
         check("Order_Init: default state = ORDER_PENDING, is_maker=0",
-              o.state == tt::ORDER_PENDING && o.is_maker == 0);
+              tt::Order_GetState(&o) == tt::ORDER_PENDING && tt::Order_GetIsMaker(&o) == false);
 
         // ORDER_PARTIAL is non-terminal — order stays alive in OMS
-        o.state = tt::ORDER_PARTIAL;
+        tt::Order_SetState(&o, tt::ORDER_PARTIAL);
         check("Order_IsTerminal returns false for ORDER_PARTIAL",
               tt::Order_IsTerminal(&o) == false);
 
         // ORDER_FILLED is terminal — slot can be freed
-        o.state = tt::ORDER_FILLED;
+        tt::Order_SetState(&o, tt::ORDER_FILLED);
         check("Order_IsTerminal returns true for ORDER_FILLED",
               tt::Order_IsTerminal(&o) == true);
     }
@@ -7657,10 +7657,10 @@ e3_skip_load:;
             for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
                 if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
                 tt::Order<64>* o = &r->oms.orders[i];
-                if (o->core_id == portfolio_slot && o->state != tt::ORDER_FILLED) {
+                if (o->core_id == portfolio_slot && tt::Order_GetState(o) != tt::ORDER_FILLED) {
                     tt::OrderManager_HandleFill(&r->oms, o,
                         FPN_FromDouble<64>(price), FPN_FromDouble<64>(qty));
-                    o->state = tt::ORDER_FILLED;
+                    tt::Order_SetState(o, tt::ORDER_FILLED);
                     r->oms.order_bitmap &= ~(uint16_t)(1u << i);
                     break;
                 }
@@ -7709,10 +7709,10 @@ e3_skip_load:;
             for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
                 if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
                 tt::Order<64>* o = &r->oms.orders[i];
-                if (o->core_id == portfolio_slot && o->state != tt::ORDER_FILLED) {
+                if (o->core_id == portfolio_slot && tt::Order_GetState(o) != tt::ORDER_FILLED) {
                     tt::OrderManager_HandleFill(&r->oms, o,
                         FPN_FromDouble<64>(price), FPN_FromDouble<64>(qty));
-                    o->state = tt::ORDER_FILLED;
+                    tt::Order_SetState(o, tt::ORDER_FILLED);
                     r->oms.order_bitmap &= ~(uint16_t)(1u << i);
                     break;
                 }
@@ -7791,10 +7791,10 @@ e3_skip_load:;
         for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
             if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
             tt::Order<64>* o = &r->oms.orders[i];
-            if (o->state != tt::ORDER_FILLED) {
+            if (tt::Order_GetState(o) != tt::ORDER_FILLED) {
                 tt::OrderManager_HandleFill(&r->oms, o,
                     FPN_FromDouble<64>(60000.0), FPN_FromDouble<64>(0.02));
-                o->state = tt::ORDER_FILLED;
+                tt::Order_SetState(o, tt::ORDER_FILLED);
                 r->oms.order_bitmap &= ~(uint16_t)(1u << i);
                 break;
             }
@@ -7869,10 +7869,10 @@ e3_skip_load:;
         for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
             if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
             tt::Order<64>* o = &r->oms.orders[i];
-            if (o->state != tt::ORDER_FILLED) {
+            if (tt::Order_GetState(o) != tt::ORDER_FILLED) {
                 tt::OrderManager_HandleFill(&r->oms, o,
                     FPN_FromDouble<64>(60000.0), FPN_FromDouble<64>(0.02));
-                o->state = tt::ORDER_FILLED;
+                tt::Order_SetState(o, tt::ORDER_FILLED);
                 r->oms.order_bitmap &= ~(uint16_t)(1u << i);
                 break;
             }
@@ -7916,10 +7916,10 @@ e3_skip_load:;
         for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
             if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
             tt::Order<64>* o = &r->oms.orders[i];
-            if (o->state != tt::ORDER_FILLED) {
+            if (tt::Order_GetState(o) != tt::ORDER_FILLED) {
                 tt::OrderManager_HandleFill(&r->oms, o,
                     FPN_FromDouble<64>(60600.0), FPN_FromDouble<64>(0.02));
-                o->state = tt::ORDER_FILLED;
+                tt::Order_SetState(o, tt::ORDER_FILLED);
                 r->oms.order_bitmap &= ~(uint16_t)(1u << i);
                 break;
             }
@@ -7996,10 +7996,10 @@ e3_skip_load:;
         for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
             if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
             tt::Order<64>* o = &r->oms.orders[i];
-            if (o->state != tt::ORDER_FILLED) {
+            if (tt::Order_GetState(o) != tt::ORDER_FILLED) {
                 tt::OrderManager_HandleFill(&r->oms, o,
                     FPN_FromDouble<64>(60000.0), FPN_FromDouble<64>(0.02));
-                o->state = tt::ORDER_FILLED;
+                tt::Order_SetState(o, tt::ORDER_FILLED);
                 r->oms.order_bitmap &= ~(uint16_t)(1u << i);
                 break;
             }
@@ -8069,10 +8069,10 @@ e3_skip_load:;
         for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
             if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
             tt::Order<64>* o = &r->oms.orders[i];
-            if (o->state != tt::ORDER_FILLED) {
+            if (tt::Order_GetState(o) != tt::ORDER_FILLED) {
                 tt::OrderManager_HandleFill(&r->oms, o,
                     FPN_FromDouble<64>(60000.0), FPN_FromDouble<64>(0.02));
-                o->state = tt::ORDER_FILLED;
+                tt::Order_SetState(o, tt::ORDER_FILLED);
                 r->oms.order_bitmap &= ~(uint16_t)(1u << i);
                 break;
             }
@@ -8093,10 +8093,10 @@ e3_skip_load:;
         for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
             if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
             tt::Order<64>* o = &r->oms.orders[i];
-            if (o->state != tt::ORDER_FILLED) {
+            if (tt::Order_GetState(o) != tt::ORDER_FILLED) {
                 tt::OrderManager_HandleFill(&r->oms, o,
                     FPN_FromDouble<64>(60600.0), FPN_FromDouble<64>(0.02));
-                o->state = tt::ORDER_FILLED;
+                tt::Order_SetState(o, tt::ORDER_FILLED);
                 r->oms.order_bitmap &= ~(uint16_t)(1u << i);
                 break;
             }
@@ -8121,9 +8121,9 @@ e3_skip_load:;
         tt::Order<64> dup_sell{};
         dup_sell.id            = 9999;
         dup_sell.core_id       = 0;
-        dup_sell.type          = (uint8_t)tt::ORDER_MARKET_SELL;
         dup_sell.strategy_id   = STRATEGY_SIMPLE_DIP;
-        dup_sell.is_maker      = 0;
+        tt::Order_SetType(&dup_sell, tt::ORDER_MARKET_SELL);
+        tt::Order_SetIsMaker(&dup_sell, false);
         dup_sell.requested_qty = FPN_FromDouble<64>(0.02);
         dup_sell.intended_tp   = FPN_Zero<64>();
         dup_sell.intended_sl   = FPN_Zero<64>();
@@ -15814,7 +15814,7 @@ e3_skip_load:;
                      sizeof(cmd.result.exchange_id) - 1);
         int processed = OrderManager_ProcessFillCommand(&oms, cmd);
         check("v5.11.5.B: ProcessFillCommand routes via decoded slot to slot 0",
-              processed == 1 && oms.orders[0].state == ORDER_FILLED);
+              processed == 1 && tt::Order_GetState(&oms.orders[0]) == tt::ORDER_FILLED);
 
         // Stale-callback safety: a cmd with a stale encoded id (slot now
         // freed or reused for a different order) must NOT match. Free slot 0

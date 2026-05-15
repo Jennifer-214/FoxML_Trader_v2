@@ -675,32 +675,30 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // No-op when path is empty (default). Failure is non-fatal (logs to
     // stderr; calibration logging disabled this session).
     OrderManager_OpenCalibrationLog(&oms, cfg.calibration_log_path);
-    // Phase 8 (post-coding c9) — explicit maker/taker rates so HandleFill's
-    // per-fill rate selection actually works. Init defaults both = fee_rate
-    // (legacy compat); engine layer sets the real values from cfg here.
-    // For live mode, this picks up the cfg-loaded maker/taker rates. For
-    // backtest sharded, these are also set explicitly there (BacktestSharded.hpp).
-    oms.fee_rate_maker = cfg.fee_rate_maker;
-    oms.fee_rate_taker = cfg.fee_rate_taker;
-    // v4.3.2 (Track C.1) — Binance BNB-pay 25% fee discount. Apply at
-    // boot so all fee math sites (sizing's no-trade-band, Fee_Compute,
-    // OnEvent's exit fee, kill-switch margin estimation) see the
-    // discounted rates uniformly. User must also enable BNB fee payment
-    // in Binance UI for this to actually apply on live fills.
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — Class 27 closure: OMS no longer holds scalar fee_rate /
+    // fee_rate_maker / fee_rate_taker / slippage_pct fields. Order pre-resolves these
+    // per-core via Order_BindPreResolved at submit time. See:
+    //   - DESIGN_SPECS/decision-time-data-binding-pattern.md (the principle)
+    //   - DOCS/RECURRING_BUG_PATTERNS.md Class 27 (the anti-pattern this closes)
+    //   - CoreFrameworks/Order.hpp Order_BindPreResolved (the binding helper)
+    //
+    // v4.3.2 (Track C.1) — Binance BNB-pay 25% fee discount, applied per-core at boot
+    // so cfg.cores[c].fee_rate_* reflect post-discount values uniformly. Order_BindPreResolved
+    // reads cfg.cores[c].fee_rate_* (already discounted) → o->pre_resolved.fee_rate. User
+    // must also enable BNB fee payment in Binance UI for this to actually apply on live fills.
     if (cfg.pay_fees_in_bnb) {
         FPN<F> bnb_factor = FPN_FromDouble<F>(0.75);
-        oms.fee_rate_maker = FPN_Mul(oms.fee_rate_maker, bnb_factor);
-        oms.fee_rate_taker = FPN_Mul(oms.fee_rate_taker, bnb_factor);
+        for (int c = 0; c < MAX_EXECUTION_CORES; ++c) {
+            cfg.cores[c].fee_rate_maker = FPN_Mul(cfg.cores[c].fee_rate_maker, bnb_factor);
+            cfg.cores[c].fee_rate_taker = FPN_Mul(cfg.cores[c].fee_rate_taker, bnb_factor);
+        }
         fprintf(stderr,
-            "[sharded] BNB fee discount ENABLED — maker=%.4f%% taker=%.4f%% "
-            "(verify Binance UI 'pay fees in BNB' is also on)\n",
-            FPN_ToDouble(oms.fee_rate_maker) * 100.0,
-            FPN_ToDouble(oms.fee_rate_taker) * 100.0);
+            "[sharded] BNB fee discount ENABLED — applied per-core to cfg.cores[c].fee_rate_*"
+            " (verify Binance UI 'pay fees in BNB' is also on)\n");
     }
-    // v4.2.1 — paper-mode slippage simulation. Cfg-driven (engine.cfg
-    // slippage_pct). Live mode reads exchange fill prices directly so this
-    // value is ignored (EventLoop_OnEvent gates on live_trading).
-    oms.slippage_pct = cfg.slippage_pct;
+    // v4.2.1 paper-mode slippage simulation — also per-core via cfg.cores[c].slippage_pct,
+    // pre-resolved onto Order at submit via Order_BindPreResolved. Live mode reads exchange
+    // fill prices directly (EventLoop_OnEvent gates on live_trading); slippage value ignored.
     // v5.15.5.C.3 (Finding A) — external PARTIAL_EXIT_ENABLED SET call dropped.
     // Bit is now set inside OMS_INIT_AUTOPOPULATE via the BIT-kind registry row
     // for `partial_exit_enabled` (driven by the parameter passed to OrderManager_Init
@@ -1433,21 +1431,21 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // trip the runtime guard inside Strategy_BuildParameters even if cfg
     // looks fine here — boot warning catches static-cfg cases only.
     //----------------------------------------------------------------------
-    {
-        double fee_taker = FPN_ToDouble(cfg.fee_rate_taker);
-        if (fee_taker <= 0.0) fee_taker = FPN_ToDouble(cfg.fee_rate);  // fallback
-        double tp_floor = 3.0 * fee_taker;
-        for (int i = 0; i < num_cores; ++i) {
-            ControllerConfig<F> rc = ControllerConfig_ResolveForCore(cfg, i);
-            double tp_pct = FPN_ToDouble(rc.take_profit_pct);
-            if (tp_pct > 0.0 && tp_pct < tp_floor) {
-                fprintf(stderr,
-                    "[sharded] WARN: core %d take_profit_pct=%.4f%% is below "
-                    "the fee floor (3 × taker=%.4f%% = %.4f%%). Winning trades "
-                    "will be net-negative after fees. Recommend tp_pct >= %.4f%%.\n",
-                    i, tp_pct * 100.0, fee_taker * 100.0,
-                    tp_floor * 100.0, tp_floor * 100.0);
-            }
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — boot validation now reads per-core fee_rate_taker
+    // (Pattern 2 — per-core in-scope; cfg.cores[i] in loop scope). Each core's tp floor
+    // is computed against its own fee_rate_taker since per-core fee rates can differ.
+    for (int i = 0; i < num_cores; ++i) {
+        double fee_taker_i = FPN_ToDouble(cfg.cores[i].fee_rate_taker);
+        if (fee_taker_i <= 0.0) fee_taker_i = FPN_ToDouble(cfg.cores[i].fee_rate);  // fallback
+        double tp_floor_i = 3.0 * fee_taker_i;
+        double tp_pct = FPN_ToDouble(cfg.cores[i].take_profit_pct);
+        if (tp_pct > 0.0 && tp_pct < tp_floor_i) {
+            fprintf(stderr,
+                "[sharded] WARN: core %d take_profit_pct=%.4f%% is below "
+                "the fee floor (3 × taker=%.4f%% = %.4f%%). Winning trades "
+                "will be net-negative after fees. Recommend tp_pct >= %.4f%%.\n",
+                i, tp_pct * 100.0, fee_taker_i * 100.0,
+                tp_floor_i * 100.0, tp_floor_i * 100.0);
         }
     }
     int  topo_producer_cpu = 0;
@@ -2462,19 +2460,19 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // OrderManager_Tick produces. Extracted to a standalone function so
     // it's directly unit-testable without standing up a producer thread.
     auto drain_post_fill = [&state, &oms, &cfg]() {
-        // v5.15.5.C.4 Phase T1 — hoist FPN_ToDouble(cfg.fee_rate_taker)
-        // outside the per-cycle FPN conversion. cfg.fee_rate_taker is
-        // boot-set immutable (per agent investigation 2026-05-13); static
-        // const guarantees one-time evaluation across all cycles.
-        static const double fee_rate_taker_d = FPN_ToDouble(cfg.fee_rate_taker);
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — static const fee_rate_taker_d cache DELETED (Class 27
+        // fn-local variant; froze first-cfg-value globally). fee_rate_taker_for_cf scalar
+        // param chain DELETED from EventLoop_DrainPostFill / DrainPostFillOneCore signatures —
+        // OneCore reads per-core fee from o->pre_resolved.fee_rate (Order carries pre-resolved
+        // value via Order_BindPreResolved at submit time). See decision-time-data-binding-
+        // pattern.md + RECURRING_BUG_PATTERNS Class 27.
         EventLoop_DrainPostFill(&state, &oms, cfg.sl_cooldown_cycles,
                                  cfg.ensemble_trade_reward_mult,
                                  cfg.confidence_ic_floor,
                                  cfg.confidence_ic_floor_window,
                                  cfg.auto_kill_on_drift,
                                  // v5.13.4 — sell-side bandit attribution
-                                 BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED),
-                                 fee_rate_taker_d);
+                                 BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_EXIT_BANDIT_ENABLED));
     };
 
     // v4.7.8: manual force-close requests from the GUI. User clicks a

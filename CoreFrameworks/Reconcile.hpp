@@ -215,7 +215,15 @@ inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
         Order<F> synth;
         OrderType otype = t.is_buyer ? ORDER_MARKET_BUY : ORDER_MARKET_SELL;
         Order_Init(&synth, (uint64_t)t.order_id, /*core_id=*/0, otype);
-        synth.is_maker = (uint8_t)t.is_maker;
+        Order_SetIsMaker(&synth, (bool)t.is_maker);
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 TECH_DEBT: synth.pre_resolved.fee_rate stays at
+        // FPN_Zero (Order_Init default). Reconciled fills are recorded with zero fee in
+        // OMS accounting. Pre-B.1 behavior used oms->fee_rate_maker/taker (boot-time global
+        // cache; also wrong since it didn't reflect the exchange's actual fee at trade time).
+        // Proper fix: Reconcile_ApplyMissedFills sig change to accept per-core cfg + call
+        // Order_BindPreResolved; OR ReconcileTrade carries actual exchange-reported fee.
+        // Tracked as TECH_DEBT for B.1.b follow-up — reconcile is a recovery path, not the
+        // primary accounting path; fix at next reconcile-touching ship.
         synth.requested_qty = FPN_FromDouble<F>(t.qty);
         synth.event_price   = FPN_FromDouble<F>(t.price);
 

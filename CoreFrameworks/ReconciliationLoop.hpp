@@ -112,8 +112,9 @@ static inline int ReconciliationLoop_Pass(ReconciliationLoopState<F>* s) {
     for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
         if (((bm >> i) & 1) == 0) continue;
         const Order<F>& o = s->oms->orders[i];
-        if (o.state == ORDER_SUBMITTED || o.state == ORDER_ACKNOWLEDGED) {
-            if (o.type == (uint8_t)ORDER_MARKET_BUY) {
+        OrderState ostate = Order_GetState(&o);
+        if (ostate == ORDER_SUBMITTED || ostate == ORDER_ACKNOWLEDGED) {
+            if (Order_GetType(&o) == ORDER_MARKET_BUY) {
                 // estimate notional from event_price * requested_qty
                 double price = FPN_ToDouble(o.event_price);
                 double qty   = FPN_ToDouble(o.requested_qty);

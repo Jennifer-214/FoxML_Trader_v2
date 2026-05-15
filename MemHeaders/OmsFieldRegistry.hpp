@@ -688,7 +688,7 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
         Portfolio_Init(&(_oms_target)->portfolio);                                                   \
         for (int _i = 0; _i < MAX_INFLIGHT_ORDERS; ++_i) {                                           \
             Order_Init(&(_oms_target)->orders[_i], 0, -1, ORDER_MARKET_BUY);                         \
-            (_oms_target)->orders[_i].state = ORDER_FILLED;                                          \
+            Order_SetState(&(_oms_target)->orders[_i], ORDER_FILLED);                                \
         }                                                                                            \
         {                                                                                            \
             /* Declare literal-_oms local so OMS_PROJECT_PER_SLOT_INIT (hardcoded `_oms->accessor`) */ \

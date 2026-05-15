@@ -123,44 +123,123 @@ inline bool OrderType_IsClose(uint8_t order_type) {
 // bound check anyway (assert in debug; silently drop in release — same as
 // prior `OrderManager_Tick`).
 //======================================================================================================
+//======================================================================================================
+// [DRAIN CMD HANDLERS] (v5.15.5.F.4c.3 WIP2d-1.B.1 — per H20 + branchless-dispatch-discipline.md)
+//======================================================================================================
+// Per-queue fn pointer dispatch tables replace if/switch type-filter branches. Each cmd
+// flows through table indexed by `cmd.type & 0xF` → handler. Wrong-type cmds (queue
+// contract violation) land in handle_drain_noop_cmd. Pattern 1 (fn pointer table for
+// single-enum dispatch) per branchless-dispatch-discipline.md.
+//
+// Cost: ~3-5ns indirect call per cmd vs ~0ns steady-state branch. Per H20: branchless
+// preferred even when slower (mispredicts can't be optimized; mask code can be). Insurance
+// against future queue-contract drift causing silent mispredicts.
+//======================================================================================================
+template <unsigned F>
+using DrainCmdHandler = void (*)(const Command&, OrderManagerState<F>*, OmsDrainBuckets*);
+
+// Bucket-dispatch handler (FILL_RESULT + WS_FILL share this body via dispatch table).
+// Branchless mask-select for BUY/SELL bucket; dummy-redirect for bound check.
+template <unsigned F>
+inline void handle_drain_bucket_cmd(const Command& cmd,
+                                     OrderManagerState<F>* oms,
+                                     OmsDrainBuckets* b) {
+    int slot = (int)((cmd.order_id >> 60) & 0xFu);
+    uint8_t otype = (uint8_t)tt::Order_GetType(&oms->orders[slot]);
+    const bool is_close   = OrderType_IsClose(otype);
+    Command*   bucket_arr = is_close ? b->close_bucket : b->open_bucket;
+    int*       n_ptr      = is_close ? &b->close_n     : &b->open_n;
+    const int  n          = *n_ptr;
+    const bool in_bounds  = (n < OMS_RESULT_QUEUE_SIZE);
+    // Dummy-redirect: out-of-bounds writes land in a function-local static slot
+    // (single-drainer-thread guarantee — no race on DUMMY).
+    static Command DUMMY;
+    Command*   target     = in_bounds ? &bucket_arr[n] : &DUMMY;
+    *target               = cmd;
+    *n_ptr                = n + (in_bounds ? 1 : 0);
+    if (__builtin_expect(!in_bounds, 0)) {
+        std::fprintf(stderr,
+            "[OMS] drain bucket overflow (size=%d): dropped cmd type=%u order_id=%llu\n",
+            OMS_RESULT_QUEUE_SIZE, (unsigned)cmd.type,
+            (unsigned long long)cmd.order_id);
+    }
+}
+
+// Reconcile-bucket handler.
+template <unsigned F>
+inline void handle_drain_reconcile_cmd(const Command& cmd,
+                                         OrderManagerState<F>* oms,
+                                         OmsDrainBuckets* b) {
+    (void)oms;
+    const int  n         = b->reconcile_n;
+    const bool in_bounds = (n < 64);
+    static Command DUMMY;
+    Command*   target    = in_bounds ? &b->reconcile_bucket[n] : &DUMMY;
+    *target              = cmd;
+    b->reconcile_n       = n + (in_bounds ? 1 : 0);
+    if (__builtin_expect(!in_bounds, 0)) {
+        std::fprintf(stderr,
+            "[OMS] drain reconcile bucket overflow (size=64): dropped cmd order_id=%llu\n",
+            (unsigned long long)cmd.order_id);
+    }
+}
+
+// Noop handler — wrong-type cmds land here per queue contract.
+template <unsigned F>
+inline void handle_drain_noop_cmd(const Command& cmd,
+                                    OrderManagerState<F>* oms,
+                                    OmsDrainBuckets* b) {
+    (void)cmd; (void)oms; (void)b;
+}
+
+// Per-queue dispatch tables — 16 entries (cmd.type & 0xF mask) for future enum-drift safety.
+// CommandType: 0=CMD_FILL_RESULT, 1=CMD_WS_FILL, 2=CMD_RECONCILE.
+template <unsigned F>
+inline const DrainCmdHandler<F> g_rest_queue_dispatch[16] = {
+    handle_drain_bucket_cmd<F>,    // 0 CMD_FILL_RESULT
+    handle_drain_noop_cmd<F>,      // 1
+    handle_drain_noop_cmd<F>,      // 2
+    handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>,
+    handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>,
+};
+
+template <unsigned F>
+inline const DrainCmdHandler<F> g_ws_queue_dispatch[16] = {
+    handle_drain_noop_cmd<F>,      // 0
+    handle_drain_bucket_cmd<F>,    // 1 CMD_WS_FILL
+    handle_drain_noop_cmd<F>,      // 2
+    handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>,
+    handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>,
+};
+
+template <unsigned F>
+inline const DrainCmdHandler<F> g_reconcile_queue_dispatch[16] = {
+    handle_drain_noop_cmd<F>,      // 0
+    handle_drain_noop_cmd<F>,      // 1
+    handle_drain_reconcile_cmd<F>, // 2 CMD_RECONCILE
+    handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>,
+    handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>, handle_drain_noop_cmd<F>,
+};
+
 template <unsigned F>
 inline void OrderManager_DrainIntoBuckets(OrderManagerState<F>* oms,
                                            OmsDrainBuckets* b) {
     OmsDrainBuckets_Reset(b);
     Command cmd;
 
-    // 1. REST result_queue (adapter worker thread)
+    // 1. REST result_queue (adapter worker thread) — branchless dispatch via fn pointer table.
     while (SPSCRing_TryPop(&oms->result_queue, &cmd)) {
-        if (cmd.type == (uint8_t)CMD_FILL_RESULT) {
-            // Extract slot from cmd.order_id: high nibble (bits 60-63) encodes slot.
-            int slot = (int)((cmd.order_id >> 60) & 0xFu);
-            uint8_t otype = oms->orders[slot].type;
-            if (OrderType_IsClose(otype)) {
-                if (b->close_n < OMS_RESULT_QUEUE_SIZE) b->close_bucket[b->close_n++] = cmd;
-            } else {
-                if (b->open_n < OMS_RESULT_QUEUE_SIZE) b->open_bucket[b->open_n++] = cmd;
-            }
-        }
+        g_rest_queue_dispatch<F>[cmd.type & 0xF](cmd, oms, b);
     }
 
-    // 2. WS user-data result_queue
+    // 2. WS user-data result_queue — branchless dispatch via fn pointer table.
     while (SPSCRing_TryPop(&oms->ws_result_queue, &cmd)) {
-        if (cmd.type == (uint8_t)CMD_WS_FILL) {
-            int slot = (int)((cmd.order_id >> 60) & 0xFu);
-            uint8_t otype = oms->orders[slot].type;
-            if (OrderType_IsClose(otype)) {
-                if (b->close_n < OMS_RESULT_QUEUE_SIZE) b->close_bucket[b->close_n++] = cmd;
-            } else {
-                if (b->open_n < OMS_RESULT_QUEUE_SIZE) b->open_bucket[b->open_n++] = cmd;
-            }
-        }
+        g_ws_queue_dispatch<F>[cmd.type & 0xF](cmd, oms, b);
     }
 
-    // 3. Reconcile_queue (reconciler thread)
+    // 3. Reconcile_queue (reconciler thread) — branchless dispatch via fn pointer table.
     while (SPSCRing_TryPop(&oms->reconcile_queue, &cmd)) {
-        if (cmd.type == (uint8_t)CMD_RECONCILE) {
-            if (b->reconcile_n < 64) b->reconcile_bucket[b->reconcile_n++] = cmd;
-        }
+        g_reconcile_queue_dispatch<F>[cmd.type & 0xF](cmd, oms, b);
     }
 }
 
