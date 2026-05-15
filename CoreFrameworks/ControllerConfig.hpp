@@ -351,6 +351,22 @@ static_assert(sizeof(PerCoreCfg<64>) % 64 == 0,
               "via alignas(64); if this fires, the struct definition broke the alignment "
               "invariant.");
 
+// WIP2d-1.B.0 — compile-time size-bound discipline (closes Shortsighted #3 to ~99.9%).
+// The X-macro knows expected payload bytes (sum of STORAGE_T sizeof from FOREACH_PER_CORE_CFG_FIELD
+// + FOREACH_PER_CORE_DOMAIN_BITMAP). Adding a manual field to PerCoreCfg<F> body OUTSIDE the X-macros
+// pushes sizeof past the upper bound → BUILD ERROR. See CfgFieldRegistry.hpp § "PerCoreCfg<F>
+// expected-payload computation" for rationale + leeway math. Defense-in-depth via the CI script's
+// gcc -E parser (tools/check_per_core_registry_integrity.py) catches any remaining ~0.1% adversarial gap.
+static_assert(sizeof(PerCoreCfg<64>) >= kPerCoreCfgExpectedPayloadBytes64,
+              "PerCoreCfg<64> sizeof less than X-macro payload sum — field removed from registry "
+              "without updating struct, OR struct manual content shrunk. Check FOREACH_PER_CORE_CFG_FIELD "
+              "+ FOREACH_PER_CORE_DOMAIN_BITMAP row count vs struct body.");
+static_assert(sizeof(PerCoreCfg<64>) <= kPerCoreCfgExpectedPayloadBytes64 + kPerCoreCfgMaxPaddingBytes,
+              "PerCoreCfg<64> sizeof EXCEEDS X-macro payload + max alignment padding leeway — "
+              "MANUAL FIELD ADDED to struct body outside FOREACH_PER_CORE_CFG_FIELD / "
+              "FOREACH_PER_CORE_DOMAIN_BITMAP. Per H17 discipline: add field via X-macro row, "
+              "or document exemption in MANUAL_FIELDS_INVENTORY.md.");
+
 //======================================================================================================
 // [CONFIG]
 //======================================================================================================
@@ -1447,28 +1463,30 @@ inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
         ControllerConfig<F> resolved = ControllerConfig_ResolveForCore(*cfg, c);
         // Per-core registry rows — X-macro auto-walker over FOREACH_PER_CORE_CFG_FIELD.
         // Future per-core row additions auto-flow here; no edits needed.
-        // WIP2d-1 Phase 1 — HAS_SIDE_EFFECT uniform skip discipline (type-trait-dispatch-via-tt-namespace.md
-        // 2nd canonical application). Rows tagged HAS_SIDE_EFFECT skip auto-flow uniformly across walker
-        // triplet (parser/copy/render); manual handling at designated sites. The if-constexpr inside the
-        // templated ControllerConfig_PopulateCoresFromFlat<F> discards the cfg-access branch at instantiation,
-        // making the row's body syntactically free of references to non-existent ControllerConfig members
-        // (e.g., per-core-only fields like `strategy` whose flat counterpart lives in core_strategies[16]).
+        // WIP2d-1.B.0 — copy walker filters by NO_FLAT_FIELD (was HAS_SIDE_EFFECT, which was
+        // overloaded). Rows with NO_FLAT_FIELD have no scalar on ControllerConfig (resolved.name
+        // doesn't exist; e.g., `strategy` lives only on cores[c] + legacy core_strategies[16]).
+        // The if-constexpr inside templated PopulateCoresFromFlat<F> discards the cfg-access branch
+        // at instantiation, making row body syntactically valid for ALL rows. Rows with MANUAL_PARSER
+        // (but NOT NO_FLAT_FIELD) DO have flat scalars — copy walker should populate cores[c].X from
+        // resolved.X. Pre-WIP2d-1.B.0 the walker SKIPPED these rows (latent regression from Phase 1
+        // HAS_SIDE_EFFECT overload); the bit split restores the correct copy semantic.
         #define EMIT_PER_CORE_COPY(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
                                     applies_to_strategy, applies_to_op_mode, \
                                     applies_to_regime, applies_to_risk, lives_in_struct) \
-            if constexpr (!((meta) & CfgFieldDescriptor::HAS_SIDE_EFFECT)) { \
+            if constexpr (!((meta) & CfgFieldDescriptor::NO_FLAT_FIELD)) { \
                 cfg->cores[c].name = resolved.name; \
             }
         FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_COPY)
         #undef EMIT_PER_CORE_COPY
 
-        // WIP2d-1 Finding 1 closure — manual sync for HAS_SIDE_EFFECT rows.
-        // The auto-walker above skips HAS_SIDE_EFFECT rows via if-constexpr (no flat field
-        // on resolved view to copy from). `strategy` migrates from legacy core_strategies[c]
-        // parallel array — TRANSITIONAL exemption per MANUAL_FIELDS_INVENTORY.md Section A;
-        // legacy parser path `core_<N>_strategy=` writes core_strategies[c]; this sync line
-        // bridges to cores[c].strategy (registry-driven authoritative).
-        cfg->cores[c].strategy = cfg->core_strategies[c];
+        // WIP2d-1.B.0 — AUTOPOPULATE NO_FLAT_FIELD sync (replaces WIP2d-1 Phase 1 ad-hoc manual line).
+        // Per autopopulate-pattern-for-production-caller-class.md: registry-driven sync of NO_FLAT_FIELD
+        // rows from their legacy parallel-array sources. Future per-core-only fields = 1 row in
+        // FOREACH_PER_CORE_NO_FLAT_FIELD_SYNC (target ← source) + 1 row in FOREACH_PER_CORE_CFG_FIELD
+        // with NO_FLAT_FIELD bit. The auto-flow then generates sync line + skips copy walker
+        // mechanically. Closes Shortsighted #4 (manual sync line ad-hoc).
+        FOREACH_PER_CORE_NO_FLAT_FIELD_SYNC(EMIT_NO_FLAT_FIELD_SYNC)
 
         // 5 cfg-domain bitmap STORAGE fields — manual copies (not in registry; A2 flat KIND_BOOL
         // rows ship at WIP2e and rebuild these bitmaps from rows at slow-path rebuild). The
@@ -2102,14 +2120,17 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_PARSER_CASE)
     #undef EMIT_GLOBAL_CFG_PARSER_CASE
 
-    // WIP2d-1 Phase 1 — HAS_SIDE_EFFECT uniform skip discipline (type-trait-dispatch-via-tt-namespace.md).
-    // ControllerConfig_Load<F> is templated; if-constexpr discards the cfg-access branch at instantiation
-    // for HAS_SIDE_EFFECT rows. Replaces the prior runtime `if (... && !HAS_SIDE_EFFECT)` shape (which still
-    // required the body `cfg.name` to be syntactically valid for ALL rows).
+    // WIP2d-1.B.0 — parser walker filters by MANUAL_PARSER (was HAS_SIDE_EFFECT alias). Rows with
+    // MANUAL_PARSER have custom string-form parsing (e.g., bandit_algorithm "thompson"/"exp3";
+    // fee_rate_maker explicit_set flag). Rows with NO_FLAT_FIELD (which lack cfg.name access) ALSO
+    // get implicit skip via the same bit because per design, NO_FLAT_FIELD rows ALWAYS have
+    // manual parsers (no auto-parse possible to a non-existent flat scalar). Strategy carries both
+    // bits; this walker skip avoids cfg.strategy reference at instantiation.
     #define EMIT_PER_CORE_CFG_PARSER_CASE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload_init, tooltip, \
                                            applies_to_strategy, applies_to_op_mode, \
                                            applies_to_regime, applies_to_risk, lives_in_struct) \
-        if constexpr (!((meta) & CfgFieldDescriptor::HAS_SIDE_EFFECT)) { \
+        if constexpr (!((meta) & CfgFieldDescriptor::MANUAL_PARSER) && \
+                      !((meta) & CfgFieldDescriptor::NO_FLAT_FIELD)) { \
             if (strcmp(key, #name) == 0) { \
                 tt::cfg_parse_field(cfg.name, g_per_core_cfg_field_descriptors[FIELD_IDX_PER_CORE_##name], val); \
                 continue; \

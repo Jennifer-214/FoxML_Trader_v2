@@ -70,6 +70,18 @@
 #include "../Strategies/StrategyCategories.hpp"   // STRAT_CAT_*
 #include "../Strategies/OpModeCategories.hpp"     // OP_MODE_CAT_*
 
+// WIP2d-1.B.0 (Shortsighted #5 close) — explicit includes for the 5 cfg-domain flag registries.
+// Pre-WIP2d-1.B.0: this file relied on ControllerConfig.hpp's transitive include order
+// (which included the 5 domain headers before including this file). The bitmap-overflow
+// static_asserts at file scope below use <DOMAIN>_CFG_COUNT constants — if ControllerConfig
+// changed include order, build would fail with cryptic "undeclared identifier" errors.
+// Post-WIP2d-1.B.0: explicit includes here make this file self-contained.
+#include "LifecycleCfgFlagRegistry.hpp"            // LIFECYCLE_CFG_COUNT
+#include "GateCfgFlagRegistry.hpp"                 // GATE_CFG_COUNT
+#include "../ML_Headers/MlCfgFlagRegistry.hpp"     // ML_CFG_COUNT
+#include "RiskCfgFlagRegistry.hpp"                 // RISK_CFG_COUNT
+#include "OpsCfgFlagRegistry.hpp"                  // OPS_CFG_COUNT
+
 // Forward declarations for category masks not yet populated at .F.4b
 // (defaulted to _CAT_ALL until v5.16+ specializes regime/risk dimensions).
 enum RegimeCategoryDefault : uint16_t { REGIME_CAT_ALL = 0xFFFFu };
@@ -97,10 +109,23 @@ struct CfgFieldDescriptor {
         // KIND_RANGE_DOUBLE = 8,   // hyperparameter sweep (v5.15.6.C)
     };
 
-    //---- MetadataFlag enum (uint16_t) — 11 bits used; 5 bits headroom ----
+    //---- MetadataFlag enum (uint16_t) — 12 bits used; 4 bits headroom ----
     // .F.4c.3: PER_CORE_OK (1u << 0) REMOVED. Every per-core row IS per-core by
     // construction (registry membership IS the scope assertion). Bit 0 RESERVED
     // for future use; do not reassign without documenting the schema change.
+    //
+    // .F.4c.3 WIP2d-1.B.0 (Shortsighted #1 close + Phase 1 latent regression fix):
+    // HAS_SIDE_EFFECT bit was overloaded with TWO semantic meanings (manual parser
+    // for string-form fields + manual sync from legacy parallel array for per-core-
+    // only fields). Split into MANUAL_PARSER (1u << 10) + NO_FLAT_FIELD (1u << 12)
+    // for explicit semantic separation per cfg-scope-discipline.md § "Metadata bit
+    // semantic separation". Walker triplet (parser/copy/render) consumes the
+    // SPECIFIC bit relevant to each walker's concern; no overload risk.
+    //   - MANUAL_PARSER: skip registry parser walker (manual string-form parser handles)
+    //   - NO_FLAT_FIELD: skip copy/render walkers (field exists only on cores[c], not on ControllerConfig flat scalar)
+    // A row may carry one, both, or neither bit. `strategy` carries both (custom
+    // string parser + no flat scalar). bandit_algorithm/risk_degradation_curve/
+    // barrier_blend_mode/fee_rate_maker/fee_rate_taker carry MANUAL_PARSER only.
     enum MetadataFlag : uint16_t {
         // 1u << 0 RESERVED (was PER_CORE_OK, removed at v5.15.5.F.4c.3)
         RESTART_REQUIRED      = 1u << 1,   // GUI badge: "restart needed" (.F.4d render)
@@ -112,9 +137,16 @@ struct CfgFieldDescriptor {
         IS_BOOT_ONLY          = 1u << 7,   // changes after boot are ignored — restart required (.F.4d)
         AFFECTS_STAMP_PARITY  = 1u << 8,   // training-time concern; bound to model stamp (.F.4c)
         LOG_VALUE_FORBIDDEN   = 1u << 9,   // value never appears in logs (privacy/security; v5.15.6.B)
-        HAS_SIDE_EFFECT       = 1u << 10,  // parser-time side effect prevents registry walker handling — manual parser block keeps logic (.F.4c)
+        MANUAL_PARSER         = 1u << 10,  // skip registry parser walker — manual string-form / side-effect parser handles (WIP2d-1.B.0; was HAS_SIDE_EFFECT pre-split)
         WARN_ON_CLAMP         = 1u << 11,  // emit "[cfg] WARN: <key>='<val>' out of range; clamping to <clamped>" when parse clamps value (.F.4c)
-        // ... 5 bits headroom for future ...
+        NO_FLAT_FIELD         = 1u << 12,  // field exists only on cores[c] (no ControllerConfig flat scalar) — skip copy/render walkers (WIP2d-1.B.0)
+        // ... 3 bits headroom for future ...
+
+        // Legacy alias — HAS_SIDE_EFFECT was overloaded; new code uses MANUAL_PARSER.
+        // The 6 rows that used HAS_SIDE_EFFECT pre-WIP2d-1.B.0 migrate to MANUAL_PARSER
+        // (or MANUAL_PARSER | NO_FLAT_FIELD for strategy). Alias retained for 1 ship
+        // transition; remove at v5.15.5.F.4d codification.
+        HAS_SIDE_EFFECT       = MANUAL_PARSER,
     };
 
     //---- LivesInStruct enum (uint8_t) — cross-cfg-file routing ----
@@ -603,8 +635,8 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     /* Manual handling: parser at legacy `core_<N>_strategy=` block (string-form: mr/momentum/simple_dip/ml/ema_cross/none); */                                                                                          \
     /* copy via explicit `cores[c].strategy = core_strategies[c]` line after FOREACH walker; render via Step 6 per-core tabs. */                                                                                       \
     /* Default 2 = STRATEGY_SIMPLE_DIP per ControllerConfig_Default core_strategies[i]=2 legacy init. */                                                                                                                \
-    X(uint8_t               , KIND_INT,    strategy,                     "Strategy",             "Strategies",      CfgFieldDescriptor::HAS_SIDE_EFFECT, INT(2, 0, 5),                                                                                                                                                              \
-        "Per-core strategy selector. Values: 0=MR, 1=MOMENTUM, 2=SIMPLE_DIP, 3=ML, 4=EMA_CROSS, 5=AUTO (regime-driven). Legacy parser `core_<N>_strategy=` accepts string forms; registry walker skips via HAS_SIDE_EFFECT. cores[c].strategy auto-syncs from core_strategies[c] via PopulateCoresFromFlat manual sync line.", \
+    X(uint8_t               , KIND_INT,    strategy,                     "Strategy",             "Strategies",      (CfgFieldDescriptor::MANUAL_PARSER | CfgFieldDescriptor::NO_FLAT_FIELD), INT(2, 0, 5),                                                                                              \
+        "Per-core strategy selector. Values: 0=MR, 1=MOMENTUM, 2=SIMPLE_DIP, 3=ML, 4=EMA_CROSS, 5=AUTO (regime-driven). MANUAL_PARSER: legacy parser `core_<N>_strategy=` handles string forms (registry walker skips parse). NO_FLAT_FIELD: no scalar on ControllerConfig; cores[c].strategy auto-syncs from core_strategies[c] via FOREACH_PER_CORE_NO_FLAT_FIELD_SYNC AUTOPOPULATE in PopulateCoresFromFlat.", \
         STRAT_CAT_ALL, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
 
 //======================================================================================================
@@ -728,10 +760,100 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
                   "upgrade storage type in FOREACH_PER_CORE_DOMAIN_BITMAP row for " #domain);
 
 // Invoke bitmap-overflow asserts at file scope (compile-time check).
-// Requires that <DOMAIN>_CFG_COUNT constants are in scope — ControllerConfig.hpp includes
-// the 5 FOREACH_<DOMAIN>_CFG_FLAG headers BEFORE including CfgFieldRegistry.hpp, so this
-// resolves correctly.
+// WIP2d-1.B.0 (Shortsighted #5 close) — CfgFieldRegistry.hpp now self-contained: the 5 domain
+// registry headers are included at the top of this file, so <DOMAIN>_CFG_COUNT constants are
+// in scope here independent of any other file's include order.
 FOREACH_PER_CORE_DOMAIN_BITMAP(EMIT_DOMAIN_OVERFLOW_ASSERT)
+
+//======================================================================================================
+// [FOREACH_PER_CORE_NO_FLAT_FIELD_SYNC — AUTOPOPULATE manual sync sources (WIP2d-1.B.0)]
+//======================================================================================================
+// PURPOSE: auxiliary registry for FOREACH_PER_CORE_CFG_FIELD rows tagged NO_FLAT_FIELD.
+// These rows lack a ControllerConfig flat scalar; the auto-flow copy walker skips them via
+// the NO_FLAT_FIELD bit. THIS registry provides the manual sync source mapping (legacy
+// parallel array → registry-driven cores[c] slice). The AUTOPOPULATE companion macro
+// generates the sync lines in PopulateCoresFromFlat per autopopulate-pattern-for-production-
+// caller-class.md.
+//
+// Applied at N=1 (one entry currently: strategy ← core_strategies) per
+// feedback_overengineering_boundary_when_future_easier.md (future-easy multiplier wins).
+// Future per-core-only fields with legacy parallel-array source: 1 row in this X-macro +
+// 1 row in FOREACH_PER_CORE_CFG_FIELD with NO_FLAT_FIELD bit. Mechanical.
+//
+// Row shape: X(target_field, source_array_field)
+//   - target_field:        the NO_FLAT_FIELD-tagged field name in FOREACH_PER_CORE_CFG_FIELD
+//   - source_array_field:  the legacy parallel array on ControllerConfig (must be in
+//                          FOREACH_MANUAL_PER_CORE_FIELD as TRANSITIONAL exemption)
+//
+// CI check (tools/check_per_core_registry_integrity.py — added WIP2d-1.B.0 Check 7):
+// every row here must have BOTH a FOREACH_PER_CORE_CFG_FIELD row with NO_FLAT_FIELD bit
+// AND a FOREACH_MANUAL_PER_CORE_FIELD row matching the source. Closes Shortsighted #4.
+//======================================================================================================
+#define FOREACH_PER_CORE_NO_FLAT_FIELD_SYNC(X)                                                           \
+    /* target_field,  source_array_field */                                                              \
+    X(strategy,       core_strategies)
+
+// Payload macro: emit per-core sync line. Used by PopulateCoresFromFlat (templated;
+// `cfg` + `c` in scope from caller's per-core loop).
+#define EMIT_NO_FLAT_FIELD_SYNC(target, source) \
+    cfg->cores[c].target = cfg->source[c];
+
+//======================================================================================================
+// [PerCoreCfg<F> expected-payload computation — compile-time size-bound discipline (WIP2d-1.B.0)]
+//======================================================================================================
+// PURPOSE: closes Shortsighted #3 (CI regex heuristic) to ~99.9% structural strength via
+// COMPILE-TIME static_assert. The X-macro KNOWS the expected struct payload (sum of STORAGE_T
+// sizes from FOREACH_PER_CORE_CFG_FIELD + FOREACH_PER_CORE_DOMAIN_BITMAP). If anyone adds a
+// manual field to PerCoreCfg<F> body outside the X-macros, sizeof exceeds the bound and BUILD
+// FAILS with operator-readable error. The CI script (gcc -E + audit) is defense-in-depth.
+//
+// LOWER BOUND: sizeof(PerCoreCfg<F>) >= sum of all field sizes (always; can't be less than sum).
+//              Fires on field removal or X-macro misconfiguration.
+//
+// UPPER BOUND: sizeof <= sum + (N_fields × max_alignof - 1) + alignas(64) tail pad.
+//              For PerCoreCfg<F=64>: max alignof = 8 (FPN<F=64>). N_fields ~98 (93 cfg + 5 bitmap).
+//              Max padding ~98×7 + 64 = ~750 bytes leeway. Tight enough that a manual field of
+//              any reasonable size (FPN<F=64> = 24 bytes, even uint32_t = 4 bytes) pushes sizeof
+//              over the upper bound. The static_assert at the struct definition site fires with
+//              clear "MANUAL FIELD ADDED" diagnostic.
+//
+// The static_asserts live in ControllerConfig.hpp post-PerCoreCfg<F> struct definition.
+//======================================================================================================
+template <unsigned F>
+constexpr size_t calc_per_core_cfg_expected_payload_bytes() {
+    size_t total = 0;
+#define EMIT_FIELD_SIZEOF(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+                          applies_to_strategy_cat, applies_to_op_mode_cat, \
+                          applies_to_regime_cat, applies_to_risk_cat, lives_in_struct) \
+    total += sizeof(STORAGE_T);
+    FOREACH_PER_CORE_CFG_FIELD(EMIT_FIELD_SIZEOF)
+#undef EMIT_FIELD_SIZEOF
+#define EMIT_BITMAP_SIZEOF(align_n, domain, field, storage, child) total += sizeof(storage);
+    FOREACH_PER_CORE_DOMAIN_BITMAP(EMIT_BITMAP_SIZEOF)
+#undef EMIT_BITMAP_SIZEOF
+    return total;
+}
+
+// Field count for upper-bound leeway estimation (per-field max padding = alignof-1).
+template <unsigned F>
+constexpr size_t calc_per_core_cfg_field_count() {
+    size_t count = 0;
+#define EMIT_FIELD_COUNT(STORAGE_T, KIND_TOKEN, name, ...) count += 1;
+    FOREACH_PER_CORE_CFG_FIELD(EMIT_FIELD_COUNT)
+#undef EMIT_FIELD_COUNT
+#define EMIT_BITMAP_COUNT(align_n, domain, field, storage, child) count += 1;
+    FOREACH_PER_CORE_DOMAIN_BITMAP(EMIT_BITMAP_COUNT)
+#undef EMIT_BITMAP_COUNT
+    return count;
+}
+
+inline constexpr size_t kPerCoreCfgExpectedPayloadBytes64 = calc_per_core_cfg_expected_payload_bytes<64>();
+inline constexpr size_t kPerCoreCfgFieldCount             = calc_per_core_cfg_field_count<64>();
+// Max padding leeway: each field can have at most (alignof-1) padding bytes before it.
+// FPN<F=64> alignof = 8 (8-byte alignment for uint64_t members). uint16_t = 2. uint8_t = 1.
+// Conservative upper bound: assume worst-case 8-byte alignment for all fields → 7 bytes padding each.
+// Plus alignas(64) tail-pad up to 63 bytes.
+inline constexpr size_t kPerCoreCfgMaxPaddingBytes        = kPerCoreCfgFieldCount * 7 + 63;
 
 //======================================================================================================
 // [FIELD_IDX enums — per-registry auto-generated]
