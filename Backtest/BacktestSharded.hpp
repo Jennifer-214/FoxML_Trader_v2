@@ -212,7 +212,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // hysteresed current_regime sequence as live for any given tick
     // stream, enabling regime-context ML features (v5.14.5.B class_onehot).
     for (int i = 0; i < MAX_EXECUTION_CORES; ++i) {
-        Regime_Init(&state.cores[i].regime_state, (int)cfg.regime_hysteresis);
+        Regime_Init(&state.cores[i].regime_state, (int)cfg.cores[i].regime_hysteresis);
     }
 
     // Configure kill switch from the existing config fields. The drawdown
@@ -410,7 +410,7 @@ static inline void BacktestSharded_Run(BacktestResults *results,
             // v5.14.9.D — TECH_DEBT-004 close: confidence_freshness_tau
             // cfg field + per-core override deleted; tau hardcoded.
             ConfidenceScorer_Init(&state.cores[i].confidence,
-                                   (int)cfg.confidence_window,
+                                   (int)cfg.cores[i].confidence_window,
                                    CONFIDENCE_FRESHNESS_TAU_DEFAULT);
         }
 

@@ -206,11 +206,22 @@ struct PerCoreCfgRenderTable {
     // (fields haven't moved yet); Step 2 restructures to PerCoreCfg<F>& cores[c].
     using RenderFn = bool (*)(ControllerConfig<F>&, const CfgFieldDescriptor&, const char*);
 
+    // WIP2d-1 Phase 1 — HAS_SIDE_EFFECT uniform skip discipline (type-trait-dispatch-via-tt-namespace.md).
+    // PerCoreCfgRenderTable<F> is a class template; member fns instantiate with F. If-constexpr discards
+    // the cfg-access branch for HAS_SIDE_EFFECT rows at instantiation — the false branch's `cfg.name`
+    // reference is NOT syntax-checked when name maps to a per-core-only field (e.g., `strategy` which
+    // doesn't exist on ControllerConfig<F> directly; only on cores[c]). HAS_SIDE_EFFECT rows render a
+    // STUB returning false (manual handling at designated site; per-core Settings tabs at Step 6).
     #define X_GEN_PER_CORE_RENDER_FN(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
                                        applies_to_strategy, applies_to_op_mode, \
                                        applies_to_regime, applies_to_risk, lives_in_struct) \
         static bool render_##name(ControllerConfig<F>& cfg, const CfgFieldDescriptor& desc, const char* cfg_path) { \
-            return cfg_render_and_persist(cfg.name, desc, cfg_path); \
+            if constexpr (!((meta) & CfgFieldDescriptor::HAS_SIDE_EFFECT)) { \
+                return cfg_render_and_persist(cfg.name, desc, cfg_path); \
+            } else { \
+                (void)cfg; (void)desc; (void)cfg_path; \
+                return false; \
+            } \
         }
     FOREACH_PER_CORE_CFG_FIELD(X_GEN_PER_CORE_RENDER_FN)
     #undef X_GEN_PER_CORE_RENDER_FN

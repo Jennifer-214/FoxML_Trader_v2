@@ -3348,7 +3348,7 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
         // Branchless mask-select would obscure intent; slow-path branch is
         // negligible (~1ns per cycle).
         uint32_t max_hold = cfg.core_time_exit_ticks[core_id];
-        if (max_hold == 0) max_hold = cfg.max_hold_ticks;
+        if (max_hold == 0) max_hold = cfg.cores[core_id].max_hold_ticks;
         if (elapsed < max_hold) continue;
 
         double entry_d = FPN_ToDouble(oms->portfolio.positions[slot].entry_price);
@@ -3378,7 +3378,7 @@ inline void EventLoop_TimeExit(EventLoopState<F>* state,
                                 const ControllerConfig<F>& cfg,
                                 uint64_t now_tick,
                                 double current_price) {
-    if (cfg.max_hold_ticks == 0)  return;
+    if (cfg.max_hold_ticks == 0)  return;  // WIP2d-1 Phase 3 — wrapper-level early-exit; needs per-core check
     if (current_price <= 0.01)    return;
 
     for (int c = 0; c < state->registered_count; ++c) {
@@ -3602,8 +3602,8 @@ inline void EventLoop_TrailingSLRatchetOneCore(EventLoopState<F>* state,
                                                  double current_price,
                                                  int core_id) {
     double stddev_d     = FPN_ToDouble(rolling.price_stddev);
-    double trail_dist_d = stddev_d * FPN_ToDouble(cfg.sl_trail_mult);
-    double hold_thresh  = FPN_ToDouble(cfg.tp_hold_score);
+    double trail_dist_d = stddev_d * FPN_ToDouble(cfg.cores[core_id].sl_trail_mult);
+    double hold_thresh  = FPN_ToDouble(cfg.cores[core_id].tp_hold_score);
 
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
     int partial_on = BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
@@ -3658,8 +3658,8 @@ inline void EventLoop_TrailingSLRatchet(EventLoopState<F>* state,
                                          const ControllerConfig<F>& cfg,
                                          const RollingStats<F, W>& rolling,
                                          double current_price) {
-    if (FPN_IsZero(cfg.sl_trail_mult))   return;
-    if (FPN_IsZero(cfg.tp_hold_score))   return;
+    if (FPN_IsZero(cfg.sl_trail_mult))   return;  // WIP2d-1 Phase 3 — wrapper-level early-exit
+    if (FPN_IsZero(cfg.tp_hold_score))   return;  // WIP2d-1 Phase 3 — wrapper-level early-exit
     if (FPN_IsZero(rolling.price_stddev)) return;
     if (current_price <= 0.01)            return;
 

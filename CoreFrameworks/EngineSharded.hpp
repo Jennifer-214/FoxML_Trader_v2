@@ -743,7 +743,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // Single source of truth = cfg; backtest's matching cfg-driven init
     // guarantees train-serve parity.
     for (int i = 0; i < MAX_EXECUTION_CORES; ++i) {
-        Regime_Init(&state.cores[i].regime_state, (int)cfg.regime_hysteresis);
+        Regime_Init(&state.cores[i].regime_state, (int)cfg.cores[i].regime_hysteresis);
     }
 
     // Phase 04: start the user data websocket for real-time fills.
@@ -1112,21 +1112,21 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             // in production (data_age=0). Composite confidence (v5.14.1)
             // owns its own freshness via confidence_freshness_tau_secs.
             ConfidenceScorer_Init(&state.cores[i].confidence,
-                                  (int)cfg.confidence_window,
+                                  (int)cfg.cores[i].confidence_window,
                                   CONFIDENCE_FRESHNESS_TAU_DEFAULT);
             // v5.14.1.B.1 (PARITY-003) — push composite cfg into scorer.
             // No-op when BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED)=0 (legacy path).
             ConfidenceScorer_BindCompositeCfg(&state.cores[i].confidence,
                 BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED),
-                FPN_ToDouble(cfg.confidence_freshness_tau_secs),
-                FPN_ToDouble(cfg.confidence_capacity_target_dollars),
-                FPN_ToDouble(cfg.confidence_capacity_kappa),
-                FPN_ToDouble(cfg.confidence_rmse_baseline));
+                FPN_ToDouble(cfg.cores[i].confidence_freshness_tau_secs),
+                FPN_ToDouble(cfg.cores[i].confidence_capacity_target_dollars),
+                FPN_ToDouble(cfg.cores[i].confidence_capacity_kappa),
+                FPN_ToDouble(cfg.cores[i].confidence_rmse_baseline));
             // v5.14.1.G — re-init turnover with cfg-tunable window/topk
             // (overrides EventLoopState_Init defaults of 100/3).
             RollingTurnover_Init(&state.cores[i].turnover,
-                                  cfg.confidence_turnover_window,
-                                  cfg.confidence_turnover_topk);
+                                  cfg.cores[i].confidence_turnover_window,
+                                  cfg.cores[i].confidence_turnover_topk);
         }
 
         // v5.4.0 Phase 1.3 — wire Strategy_InitPerCore. Allocates the
@@ -2363,7 +2363,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     double full_qty = FPN_ToDouble(state.cores[slot].intended_qty);
                     const auto& ov_slot = cfg.core_overrides[slot];
                     FPN<F> partial_pct = !FPN_IsZero(ov_slot.partial_exit_pct)
-                        ? ov_slot.partial_exit_pct : cfg.partial_exit_pct;
+                        ? ov_slot.partial_exit_pct : cfg.cores[i].partial_exit_pct;
                     if (partial_on && event.leg == PARTIAL_LEG_A) {
                         order_qty_d = full_qty * FPN_ToDouble(partial_pct);
                     } else if (partial_on && event.leg == PARTIAL_LEG_B) {
@@ -2402,7 +2402,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         // sites need it.
                         const auto& ov_tp2 = cfg.core_overrides[slot];
                         FPN<F> tp2_mult_eff = !FPN_IsZero(ov_tp2.tp2_mult)
-                            ? ov_tp2.tp2_mult : cfg.tp2_mult;
+                            ? ov_tp2.tp2_mult : cfg.cores[i].tp2_mult;
                         FPN<F> tp_dist_b = FPN_Mul(tp_dist_a, tp2_mult_eff);
                         leg_tp = FPN_Add(event.price, tp_dist_b);
                     }
@@ -3207,7 +3207,7 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     }
 
                     // === Time exit + trailing SL ratchet (per-core) ===
-                    if (cfg.max_hold_ticks > 0 && price_d > 0.01) {
+                    if (cfg.cores[c].max_hold_ticks > 0 && price_d > 0.01) {
                         EventLoop_TimeExitOneCore(&state, &oms, cfg,
                             now_tick, price_d, c);
                     }
@@ -3217,8 +3217,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                         &state.display_meta[c].slow_path_breakdown[tt::SP_SECTION_TIME_EXIT],
                         _sec_t_tsl_start - _sec_t_te_start, _sec_t_tsl_start);
 
-                    if (!FPN_IsZero(cfg.sl_trail_mult) &&
-                        !FPN_IsZero(cfg.tp_hold_score) &&
+                    if (!FPN_IsZero(cfg.cores[c].sl_trail_mult) &&
+                        !FPN_IsZero(cfg.cores[c].tp_hold_score) &&
                         !FPN_IsZero(sst->rolling_short.price_stddev) &&
                         price_d > 0.01) {
                         EventLoop_TrailingSLRatchetOneCore(&state, cfg,

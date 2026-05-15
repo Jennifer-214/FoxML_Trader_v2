@@ -1447,12 +1447,28 @@ inline void ControllerConfig_PopulateCoresFromFlat(ControllerConfig<F>* cfg) {
         ControllerConfig<F> resolved = ControllerConfig_ResolveForCore(*cfg, c);
         // Per-core registry rows — X-macro auto-walker over FOREACH_PER_CORE_CFG_FIELD.
         // Future per-core row additions auto-flow here; no edits needed.
+        // WIP2d-1 Phase 1 — HAS_SIDE_EFFECT uniform skip discipline (type-trait-dispatch-via-tt-namespace.md
+        // 2nd canonical application). Rows tagged HAS_SIDE_EFFECT skip auto-flow uniformly across walker
+        // triplet (parser/copy/render); manual handling at designated sites. The if-constexpr inside the
+        // templated ControllerConfig_PopulateCoresFromFlat<F> discards the cfg-access branch at instantiation,
+        // making the row's body syntactically free of references to non-existent ControllerConfig members
+        // (e.g., per-core-only fields like `strategy` whose flat counterpart lives in core_strategies[16]).
         #define EMIT_PER_CORE_COPY(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, \
                                     applies_to_strategy, applies_to_op_mode, \
                                     applies_to_regime, applies_to_risk, lives_in_struct) \
-            cfg->cores[c].name = resolved.name;
+            if constexpr (!((meta) & CfgFieldDescriptor::HAS_SIDE_EFFECT)) { \
+                cfg->cores[c].name = resolved.name; \
+            }
         FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_COPY)
         #undef EMIT_PER_CORE_COPY
+
+        // WIP2d-1 Finding 1 closure — manual sync for HAS_SIDE_EFFECT rows.
+        // The auto-walker above skips HAS_SIDE_EFFECT rows via if-constexpr (no flat field
+        // on resolved view to copy from). `strategy` migrates from legacy core_strategies[c]
+        // parallel array — TRANSITIONAL exemption per MANUAL_FIELDS_INVENTORY.md Section A;
+        // legacy parser path `core_<N>_strategy=` writes core_strategies[c]; this sync line
+        // bridges to cores[c].strategy (registry-driven authoritative).
+        cfg->cores[c].strategy = cfg->core_strategies[c];
 
         // 5 cfg-domain bitmap STORAGE fields — manual copies (not in registry; A2 flat KIND_BOOL
         // rows ship at WIP2e and rebuild these bitmaps from rows at slow-path rebuild). The
@@ -2086,12 +2102,18 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_PARSER_CASE)
     #undef EMIT_GLOBAL_CFG_PARSER_CASE
 
+    // WIP2d-1 Phase 1 — HAS_SIDE_EFFECT uniform skip discipline (type-trait-dispatch-via-tt-namespace.md).
+    // ControllerConfig_Load<F> is templated; if-constexpr discards the cfg-access branch at instantiation
+    // for HAS_SIDE_EFFECT rows. Replaces the prior runtime `if (... && !HAS_SIDE_EFFECT)` shape (which still
+    // required the body `cfg.name` to be syntactically valid for ALL rows).
     #define EMIT_PER_CORE_CFG_PARSER_CASE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload_init, tooltip, \
                                            applies_to_strategy, applies_to_op_mode, \
                                            applies_to_regime, applies_to_risk, lives_in_struct) \
-        if (strcmp(key, #name) == 0 && !((meta) & CfgFieldDescriptor::HAS_SIDE_EFFECT)) { \
-            tt::cfg_parse_field(cfg.name, g_per_core_cfg_field_descriptors[FIELD_IDX_PER_CORE_##name], val); \
-            continue; \
+        if constexpr (!((meta) & CfgFieldDescriptor::HAS_SIDE_EFFECT)) { \
+            if (strcmp(key, #name) == 0) { \
+                tt::cfg_parse_field(cfg.name, g_per_core_cfg_field_descriptors[FIELD_IDX_PER_CORE_##name], val); \
+                continue; \
+            } \
         }
     FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_PARSER_CASE)
     #undef EMIT_PER_CORE_CFG_PARSER_CASE
