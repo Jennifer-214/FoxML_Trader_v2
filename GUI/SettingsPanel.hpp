@@ -257,20 +257,15 @@ static const CfgFieldDef field_defs[] = {
     // max_hold_ticks (uint32) stays global — INT support for X-macro is a
     // future extension; min_hold_gain_pct moved to per-core handles the
     // common case (different strategies want different hold-gain floors).
-    {"max_hold_ticks",        "Max Hold",     "Time-Based Exit", CFG_INT,   "%d",
-        "Close position after this many ticks (engine-wide).\n"
-        "0 = disabled, 75000 ≈ 4-5 hours.\n"
-        "Per-core min-gain floor lives in each core's Time Exit override."},
+    // v5.15.5.F.4c — max_hold_ticks migrated to FOREACH_CFG_FIELD (KIND_INT;
+    // HIGH-6 tooltip byte-identity preserved).
     // Risk Management
-    // v5.15.5.F.4b — max_drawdown_pct, max_exposure_pct migrated to
-    // FOREACH_CFG_FIELD (auto-extended below). max_positions stays manual (CFG_INT).
-    {"max_positions",         "Max Pos",      "Risk Management", CFG_INT,   "%d",   NULL},
+    // v5.15.5.F.4b — max_drawdown_pct, max_exposure_pct migrated to FOREACH_CFG_FIELD.
+    // v5.15.5.F.4c — max_positions migrated to FOREACH_CFG_FIELD (KIND_INT; clamp [1,16]).
     // Kill Switch
     // kill_switch_enabled migrated to FOREACH_RISK_CFG_FLAG (v5.14.9.F.5; auto-extended below)
-    // v5.15.5.F.4b — kill_switch_daily_loss_pct, kill_switch_drawdown_pct migrated
-    // to FOREACH_CFG_FIELD (auto-extended below).
-    {"kill_recovery_warmup",  "Recovery",     "Kill Switch",      CFG_INT,   "%d",
-        "Slow-path cycles to observe after kill reset\nbefore trading resumes (prevents immediate re-entry)"},
+    // v5.15.5.F.4b — kill_switch_daily_loss_pct, kill_switch_drawdown_pct migrated to FOREACH_CFG_FIELD.
+    // v5.15.5.F.4c — kill_recovery_warmup migrated to FOREACH_CFG_FIELD (KIND_INT; HIGH-6 tooltip preserved).
     // v4.7.29: Vol Sizing + No-Trade Band scale curves moved to per-core
     // tabs. Toggles stay global (engine-architectural enable/disable).
     // vol_sizing_enabled + no_trade_band_enabled migrated to FOREACH_<DOMAIN>_CFG_FLAG
@@ -280,17 +275,13 @@ static const CfgFieldDef field_defs[] = {
     // regime_r2_threshold migrated to FOREACH_CFG_FIELD (auto-extended below).
     {"regime_vol_spike_ratio","Vol Spike",    "Regime Detection", CFG_FLOAT, "%.1f",
         "Short/long variance ratio for VOLATILE\n2.0 = short-window variance is 2x long-window"},
-    {"regime_hysteresis",     "Hysteresis",   "Regime Detection", CFG_INT,   "%d",
-        "Slow-path cycles before regime switch\nprevents rapid flipping between strategies"},
+    // v5.15.5.F.4c — regime_hysteresis migrated to FOREACH_CFG_FIELD (KIND_INT; HIGH-6 tooltip preserved).
     // (Momentum + EMA Cross strategy tuning consolidated into "Momentum
     //  Tuning" / "EMA Cross Tuning" sections below — v4.7.22 dedup pass.)
     // v4.7.29: Partial Exits geometry (split %, TP2 mult) moved to per-core.
     // breakeven_on_partial migrated to FOREACH_LIFECYCLE_CFG_FLAG (v5.14.9.F.5; auto-extended below)
     // Gate Recovery
-    {"idle_reset_cycles",     "Idle Reset",   "Gate Recovery",   CFG_INT,   "%d",
-        "Cycles with no fill before gate decay\nprevents permanent lockout after losses"},
-    {"sl_cooldown_cycles",    "SL Cooldown",  "Gate Recovery",   CFG_INT,   "%d",
-        "Slow-path cycles to pause after stop loss\nlets market settle before re-entry"},
+    // v5.15.5.F.4c — idle_reset_cycles + sl_cooldown_cycles migrated to FOREACH_CFG_FIELD (KIND_INT; HIGH-6 tooltips preserved).
     // v5.15.5.F.4c — sl_cooldown_adaptive migrated to FOREACH_CFG_FIELD (KIND_BOOL).
     // Session Filters
     {"session_asian_mult",    "Asian",        "Session Filters",  CFG_FLOAT, "%.2f",
@@ -406,18 +397,8 @@ static const CfgFieldDef field_defs[] = {
     // Engine Timing — knobs that control sample cadence + warmup
     // (added 2026-04-25 — these matter for ML training experiments and were
     // previously cfg-only edits)
-    {"poll_interval",            "Poll Interval",     "Engine Timing",   CFG_INT,   "%d",
-        "Ticks between slow-path runs (regression, adaptation, sample collection)\n"
-        "default 100. ML training note: with poll_interval << forward_ticks,\n"
-        "consecutive samples have heavily-overlapping forward windows → label\n"
-        "autocorrelation. For independent samples set poll_interval = forward_ticks."},
-    {"warmup_ticks",             "Warmup Ticks",      "Engine Timing",   CFG_INT,   "%d",
-        "Minimum raw ticks before trading starts. Counts every tick.\n"
-        "Use this when you want a longer total-tick warmup. No upper bound."},
-    {"min_warmup_samples",       "Min Rolling Samples","Engine Timing",  CFG_INT,   "%d",
-        "Min rolling-stats samples before trading. CAPS at 128 (rolling window\n"
-        "size). Values >128 are clamped at config load with a warning. Use\n"
-        "warmup_ticks for longer raw-tick warmup."},
+    // v5.15.5.F.4c — poll_interval + warmup_ticks + min_warmup_samples migrated to FOREACH_CFG_FIELD
+    // (KIND_INT; HIGH-6 tooltip byte-identity preserved; warmup_ticks + min_warmup_samples tagged IS_BOOT_ONLY).
     // v5.9.5h — XGBoost training hyperparams (cfg-tunable subset).
     // Live engine doesn't TRAIN; these fields participate in load-time WARN
     // when stamp's recorded value differs from cfg's. Set them to MATCH the

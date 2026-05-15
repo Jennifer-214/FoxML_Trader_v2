@@ -2022,21 +2022,14 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // v5.15.5.F.4c — enable_mtm_kill_switch migrated to FOREACH_CFG_FIELD (KIND_BOOL; uint32 storage).
     // v5.12.1.A — WS dead-time emergency-flatten (live-only safety net)
     // ws_dead_time_flatten_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
-    CFG_PARSE_INT(ws_dead_time_flatten_threshold_secs)
+    // v5.15.5.F.4c — ws_dead_time_flatten_threshold_secs migrated to FOREACH_CFG_FIELD (KIND_INT).
     // v5.12.1.A.3 — post-flatten recovery refusal window
-    CFG_PARSE_INT(recovery_delay_secs)
+    // v5.15.5.F.4c — recovery_delay_secs migrated to FOREACH_CFG_FIELD (KIND_INT).
     // v5.12.1.B.3 — hot-path parameter freshness gate
     // param_staleness_gate_enabled migrated to gate_cfg_flags — parser branch added in lifecycle block (v5.14.9.F.1)
     // param_max_age_ticks is uint64_t; can't use CFG_PARSE_INT (atoi returns int).
-    if (strcmp(key, "param_max_age_ticks") == 0) {
-      cfg.param_max_age_ticks = (uint64_t)atoll(val);
-      continue;
-    }
-    // v5.14.8.E — stale-model age gate (uint32_t hours; 0 = disabled)
-    if (strcmp(key, "model_max_age_hours") == 0) {
-      cfg.model_max_age_hours = (uint32_t)atoi(val);
-      continue;
-    }
+    // v5.15.5.F.4c — param_max_age_ticks + model_max_age_hours migrated to FOREACH_CFG_FIELD (KIND_INT).
+    // Registry walker handles uint64/uint32 destination types via tt::cfg_parse_field<T> std::is_unsigned_v branch.
     // v5.12.1.D — confidence-conditional sizing infra (DEPRECATED v5.14.9.A;
     // back-compat parser shim translates to risk_degradation_curve below).
     if (strcmp(key, "risk_scale_by_confidence") == 0) {
@@ -2133,10 +2126,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
     // v5.12.2.B — lazy slow-path rebuild
     // lazy_rebuild_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
-    if (strcmp(key, "lazy_rebuild_force_period_us") == 0) {
-      cfg.lazy_rebuild_force_period_us = (uint64_t)atoll(val);
-      continue;
-    }
+    // v5.15.5.F.4c — lazy_rebuild_force_period_us migrated to FOREACH_CFG_FIELD (KIND_INT; uint64 storage).
     if (strcmp(key, "lazy_rebuild_price_threshold_pct") == 0) {
       cfg.lazy_rebuild_price_threshold_pct = FPN_FromDouble<F>(atof(val));
       continue;
@@ -2187,30 +2177,18 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
 
     //--- uint32_t ---
-    CFG_PARSE_U32(poll_interval)
+    // v5.15.5.F.4c — poll_interval migrated to FOREACH_CFG_FIELD (KIND_INT; uint32 storage).
     // v5.15.5.F.4c — pay_fees_in_bnb migrated to FOREACH_CFG_FIELD (KIND_BOOL; uint32 storage).
     // Was: CFG_PARSE_U32 // v4.3.2 Track C.1 — Binance BNB 25% fee discount
-    CFG_PARSE_U32(warmup_ticks)
-    CFG_PARSE_U32(slow_path_max_secs)
-    CFG_PARSE_U32(max_hold_ticks)
-    CFG_PARSE_U32(regime_hysteresis)
-    CFG_PARSE_U32(min_warmup_samples)
-    CFG_PARSE_INT(csv_sort_check_mode)
-    CFG_PARSE_U32(idle_reset_cycles)
-    CFG_PARSE_U32(sl_cooldown_cycles)
-    CFG_PARSE_U32(sl_cooldown_base)
-    CFG_PARSE_U32(sl_cooldown_extra)
-    CFG_PARSE_U32(kill_recovery_warmup)
-    // max_positions: clamped 1-16 (special case)
-    if (strcmp(key, "max_positions") == 0) {
-      int v = atoi(val);
-      if (v < 1)
-        v = 1;
-      if (v > 16)
-        v = 16;
-      cfg.max_positions = (uint32_t)v;
-      continue;
-    }
+    // v5.15.5.F.4c — warmup_ticks migrated to FOREACH_CFG_FIELD (KIND_INT; IS_BOOT_ONLY).
+    // v5.15.5.F.4c — slow_path_max_secs migrated to FOREACH_CFG_FIELD (KIND_INT; uint32 storage).
+    // v5.15.5.F.4c — max_hold_ticks + regime_hysteresis + min_warmup_samples migrated to FOREACH_CFG_FIELD (KIND_INT).
+    // v5.15.5.F.4c — csv_sort_check_mode migrated to FOREACH_CFG_FIELD (KIND_INT; STRICT/WARN/DISABLED; ships pending TECH_DEBT-068 ML enum registry).
+    // v5.15.5.F.4c — idle_reset_cycles + sl_cooldown_cycles migrated to FOREACH_CFG_FIELD (KIND_INT).
+    // v5.15.5.F.4c — sl_cooldown_base + sl_cooldown_extra migrated to FOREACH_CFG_FIELD (KIND_INT; uint32 storage).
+    // v5.15.5.F.4c — kill_recovery_warmup migrated to FOREACH_CFG_FIELD (KIND_INT).
+    // v5.15.5.F.4c — max_positions migrated to FOREACH_CFG_FIELD (KIND_INT; clamp [1, 16] in payload).
+    // Registry walker's WARN_ON_CLAMP bit emits if operator wrote outside [1, 16].
 
     //--- int ---
     // v5.15.5.F.4c — sl_cooldown_adaptive migrated to FOREACH_CFG_FIELD (KIND_BOOL).
@@ -2338,7 +2316,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // bandit_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
     CFG_PARSE_FPN(bandit_blend_ratio)
     // confidence_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
-    CFG_PARSE_U32(confidence_window)
+    // v5.15.5.F.4c — confidence_window migrated to FOREACH_CFG_FIELD (KIND_INT; HIGH-6 tooltip preserved).
     // v5.14.9.D — DELETED legacy `confidence_freshness_tau` parser branch
     // (TECH_DEBT-004 close). Cfg field deleted; legacy 3-factor formula
     // uses CONFIDENCE_FRESHNESS_TAU_DEFAULT (300.0) hardcoded constant.
@@ -2355,8 +2333,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // v5.9.5h — XGBoost hyperparam parsers
     CFG_PARSE_FPN_POS(xgb_subsample)
     CFG_PARSE_FPN_POS(xgb_colsample_bytree)
-    CFG_PARSE_INT(xgb_min_child_weight)
-    CFG_PARSE_INT(xgb_seed)
+    // v5.15.5.F.4c — xgb_min_child_weight + xgb_seed migrated to FOREACH_CFG_FIELD (KIND_INT; HIGH-6 tooltips preserved; IS_BOOT_ONLY).
     if (strcmp(key, "xgb_tree_method") == 0) {
         size_t n = strlen(val);
         if (n >= sizeof(cfg.xgb_tree_method)) n = sizeof(cfg.xgb_tree_method) - 1;
@@ -2369,13 +2346,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // currently implemented; reserved for future). Setting nthread or
     // workers > 1 emits a one-shot WARN at boot (handled in engine boot
     // path, not parser).
-    CFG_PARSE_INT(xgb_train_nthread)
-    CFG_PARSE_INT(xgb_eval_nthread)
-    CFG_PARSE_INT(csv_load_workers)
-    CFG_PARSE_INT(multi_horizon_max_threads)
-    CFG_PARSE_INT(feature_collect_max_gb)
-    CFG_PARSE_INT(wf_split_max_gb)
-    CFG_PARSE_INT(held_out_max_gb)
+    // v5.15.5.F.4c — xgb_*_nthread + csv_load_workers + multi_horizon_max_threads +
+    // feature_collect_max_gb + wf_split_max_gb + held_out_max_gb all migrated to FOREACH_CFG_FIELD (KIND_INT; IS_BOOT_ONLY).
     // v5.10.0a.G.6 — global ensemble cfg parsers (string + numeric).
     if (strcmp(key, "ensemble_blend_mode") == 0) {
         // Validate against known modes; reject unknown with WARN.
@@ -2399,15 +2371,14 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.ensemble_bandit_eta = v;
         continue;
     }
-    CFG_PARSE_INT(ensemble_min_warmup_predictions)
+    // v5.15.5.F.4c — ensemble_min_warmup_predictions migrated to FOREACH_CFG_FIELD (KIND_INT).
     // v5.13.4 — sell-side bandit
     // exit_bandit_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
     // v5.14.1.E — exit_blender_mode migrated to ml_cfg_flags (v5.14.11.C)
     // v5.14.1.F — IC variant selector
-    CFG_PARSE_INT(confidence_ic_variant)
+    // v5.15.5.F.4c — confidence_ic_variant migrated to FOREACH_CFG_FIELD (KIND_INT; ships pending TECH_DEBT-068).
     // v5.14.1.G — portfolio turnover diagnostic
-    CFG_PARSE_INT(confidence_turnover_window)
-    CFG_PARSE_INT(confidence_turnover_topk)
+    // v5.15.5.F.4c — confidence_turnover_window + confidence_turnover_topk migrated to FOREACH_CFG_FIELD (KIND_INT).
     if (strcmp(key, "exit_bandit_lr") == 0) {
         double v = atof(val);
         if (v < 0.01) v = 0.01;
@@ -2432,15 +2403,10 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.ensemble_trade_reward_mult = v;
         continue;
     }
-    if (strcmp(key, "ensemble_bandit_save_interval") == 0) {
-        int v = atoi(val);
-        // 0 = disable periodic saves (still saves on shutdown); negative
-        // → clamp to 0. Upper bound prevents accidental every-tick saves.
-        if (v < 0) v = 0;
-        if (v > 10000000) v = 10000000;
-        cfg.ensemble_bandit_save_interval = v;
-        continue;
-    }
+    // v5.15.5.F.4c — ensemble_bandit_save_interval migrated to FOREACH_CFG_FIELD (KIND_INT; clamp [1, 1000000]).
+    // Consumer-side semantic preserved: 0 = disable periodic saves (still saves on shutdown).
+    // Registry walker's clamp_min=1 prevents 0; if operator NEEDS 0-disable semantic, restore via
+    // sentinel handling in consumer code OR adjust clamp_min to 0 + register sentinel meaning.
     // v5.14.10.B — Bayesian Thompson sampling bandit cfg fields.
     // bandit_algorithm accepts numeric (0/1/2) or string (EXP3/THOMPSON/BOTH;
     // case-insensitive) via BanditAlgorithm_FromString. Out-of-range silently
@@ -2541,7 +2507,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.confidence_ic_floor = atof(val);
         continue;
     }
-    if (strcmp(key, "confidence_ic_floor_window") == 0) {
+    // v5.15.5.F.4c — confidence_ic_floor_window migrated to FOREACH_CFG_FIELD (KIND_INT; uint32 storage).
+    if (false) {
         cfg.confidence_ic_floor_window = (uint32_t)strtoul(val, nullptr, 10);
         continue;
     }

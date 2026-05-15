@@ -297,7 +297,115 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
         STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(KIND_BOOL,       auto_stamp_on_held_out,      "Auto-Stamp on Held-Out","ML",             CfgFieldDescriptor::WARN_ON_CLAMP, BOOL(1),                                                                          \
         "v5.8.10 — suite Run Full Validation auto-signs each generated stamp on held-out pass. Default 1 (auto-stamp); set 0 only for manual tools/stamp_model.sh workflow.",                                        \
-        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
+        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === C2a: Lifecycle / persistence / cooldown ints (parser-only; v5.15.5.F.4c) === */                                                                                                                            \
+    X(KIND_INT,        slow_path_max_secs,          "Slow-Path Max Secs",   "Engine Timing",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(60, 1, 3600),                                                                  \
+        "Maximum wall-clock seconds per slow-path cycle. If exceeded, slow path emits warning + caps cycle. Default 60s; clamp [1, 3600].",                                                                          \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        sl_cooldown_base,            "SL Cooldown Base",     "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 1000000),                                                                \
+        "Base cycles to cooldown after stop loss (adaptive mode adds extra per loss; non-adaptive uses sl_cooldown_cycles alone).",                                                                                 \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        sl_cooldown_extra,           "SL Cooldown Extra",    "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 1000000),                                                                \
+        "Extra cooldown cycles per consecutive stop loss (adaptive mode only).",                                                                                                                                    \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        recovery_delay_secs,         "Recovery Delay",       "Risk Management", CfgFieldDescriptor::WARN_ON_CLAMP, INT(60, 0, 86400),                                                                 \
+        "Wait this many seconds after flatten event before resuming trades. Prevents tilted re-entry on dead WS recovery.",                                                                                          \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        param_max_age_ticks,         "Param Max Age Ticks",  "Lifecycle",       CfgFieldDescriptor::WARN_ON_CLAMP, INT(100000, 0, 1000000000),                                                        \
+        "Hot-path parameter staleness gate — refuse trades if engine.cfg parameters last touched > N ticks ago. 0 = disabled.",                                                                                     \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        model_max_age_hours,         "Model Max Age Hours",  "Lifecycle",       CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 87600),                                                                  \
+        "Refuse model load if file mtime older than N hours. 0 = disabled (legacy default; v5.14.8.E).",                                                                                                             \
+        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        lazy_rebuild_force_period_us,"Lazy Rebuild Force Period (us)","Performance",CfgFieldDescriptor::WARN_ON_CLAMP, INT(1000000, 0, 600000000),                                                    \
+        "Force slow-path rebuild every N microseconds even if no parameter inputs changed. Defensive against stale state. Default 1s (1M us).",                                                                     \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        ws_dead_time_flatten_threshold_secs,"WS Dead-Time Flatten Threshold","Risk Management",CfgFieldDescriptor::WARN_ON_CLAMP, INT(60, 1, 3600),                                                   \
+        "OMS_FlattenAll triggers if WS dead for >N seconds (paired with ws_dead_time_flatten_enabled bitmap flag).",                                                                                                 \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === C2b: Engine timing / persistence / risk ints — HIGH-6 tooltip byte-identity preserved (v5.15.5.F.4c) === */                                                                                                \
+    X(KIND_INT,        poll_interval,               "Poll Interval",        "Engine Timing",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(100, 1, 1000000),                                                              \
+        "Ticks between slow-path runs (regression, adaptation, sample collection)\ndefault 100. ML training note: with poll_interval << forward_ticks,\nconsecutive samples have heavily-overlapping forward windows → label\nautocorrelation. For independent samples set poll_interval = forward_ticks.",                                                                                                                                                                                                                       \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        warmup_ticks,                "Warmup Ticks",         "Engine Timing",   CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 100000000),                          \
+        "Minimum raw ticks before trading starts. Counts every tick.\nUse this when you want a longer total-tick warmup. No upper bound.",                                                                          \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        min_warmup_samples,          "Min Rolling Samples",  "Engine Timing",   CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(64, 0, 128),                                \
+        "Min rolling-stats samples before trading. CAPS at 128 (rolling window\nsize). Values >128 are clamped at config load with a warning. Use\nwarmup_ticks for longer raw-tick warmup.",                       \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        max_hold_ticks,              "Max Hold",             "Time-Based Exit", CfgFieldDescriptor::PER_CORE_OK | CfgFieldDescriptor::WARN_ON_CLAMP, INT(75000, 0, 100000000),                       \
+        "Close position after this many ticks (engine-wide).\n0 = disabled, 75000 ≈ 4-5 hours.\nPer-core min-gain floor lives in each core's Time Exit override.",                                                  \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        max_positions,               "Max Pos",              "Risk Management", CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 1, 16),                                                                    \
+        nullptr,                                                                                                                                                                                                    \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        kill_recovery_warmup,        "Recovery",             "Kill Switch",     CfgFieldDescriptor::WARN_ON_CLAMP, INT(100, 0, 1000000),                                                              \
+        "Slow-path cycles to observe after kill reset\nbefore trading resumes (prevents immediate re-entry)",                                                                                                       \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        regime_hysteresis,           "Hysteresis",           "Regime Detection",CfgFieldDescriptor::WARN_ON_CLAMP, INT(3, 1, 100),                                                                    \
+        "Slow-path cycles before regime switch\nprevents rapid flipping between strategies",                                                                                                                        \
+        STRAT_CAT_REGIME_AWARE,                              OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        idle_reset_cycles,           "Idle Reset",           "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(100, 0, 1000000),                                                              \
+        "Cycles with no fill before gate decay\nprevents permanent lockout after losses",                                                                                                                           \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        sl_cooldown_cycles,          "SL Cooldown",          "Gate Recovery",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(30, 0, 1000000),                                                               \
+        "Slow-path cycles to pause after stop loss\nlets market settle before re-entry",                                                                                                                            \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === C3: ML / training int migrations — mostly BOOT_ONLY (training params) (v5.15.5.F.4c) === */                                                                                                                \
+    X(KIND_INT,        xgb_min_child_weight,        "Min Child Weight",     "ML Hyperparams",  CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(5, 1, 50),                                  \
+        "Min sum-of-weights per leaf (1-50). Higher = more regularization.\nDefault 5. Match deployed model's training value or expect WARN.",                                                                      \
+        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        xgb_seed,                    "Seed",                 "ML Hyperparams",  CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(42, 0, 2147483647),                         \
+        "RNG seed for reproducible runs. Default 42. Match deployed model's\ntraining seed or expect WARN.",                                                                                                        \
+        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        xgb_train_nthread,           "Train Threads",        "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
+        "XGBoost training thread count (OpenMP). Default 4; clamp [1, 256].",                                                                                                                                       \
+        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        xgb_eval_nthread,            "Eval Threads",         "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
+        "XGBoost evaluation thread count (OpenMP). Default 4; clamp [1, 256].",                                                                                                                                     \
+        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        csv_load_workers,            "CSV Load Workers",     "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
+        "Worker thread count for parallel CSV tick load during training. Default 4.",                                                                                                                               \
+        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        multi_horizon_max_threads,   "Multi-Horizon Threads","Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(4, 1, 256),                                 \
+        "Max parallel threads for multi-horizon training. Default 4.",                                                                                                                                              \
+        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        feature_collect_max_gb,      "Feature Collect Max GB","Training",       CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(8, 1, 1024),                                \
+        "Max GB of RAM for feature collection during training. OOM-kill protection. Default 8.",                                                                                                                    \
+        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        wf_split_max_gb,             "Walk-Fwd Split Max GB","Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(8, 1, 1024),                                \
+        "Max GB of RAM for walk-forward split during training. Default 8.",                                                                                                                                         \
+        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        held_out_max_gb,             "Held-Out Max GB",      "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(8, 1, 1024),                                \
+        "Max GB of RAM for held-out validation set load. Default 8.",                                                                                                                                               \
+        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        confidence_window,           "Conf Window",          "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(64, 1, 64),                                                                    \
+        "RollingIC + RollingRMSE window size (engine-wide; cap 64).\nSame window per ML core today; INT support for X-macro deferred.",                                                                              \
+        STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        confidence_turnover_window,  "Conf Turnover Window", "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(1000, 1, 100000),                                                              \
+        "Turnover sample window for ML confidence (predictions over recent N ticks).",                                                                                                                              \
+        STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        confidence_turnover_topk,    "Conf Turnover TopK",   "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(10, 1, 1000),                                                                  \
+        "Top-K predictions kept for confidence turnover analysis.",                                                                                                                                                 \
+        STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        confidence_ic_floor_window,  "Conf IC Floor Window", "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(1000, 1, 100000),                                                              \
+        "Rolling window for ML IC floor enforcement.",                                                                                                                                                              \
+        STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        confidence_ic_variant,       "Conf IC Variant",      "FoxML",           CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4),                                                                      \
+        "IC variant: 0=Spearman (default), 1+=future. Ships as KIND_INT pending TECH_DEBT-068 ML enum registry; promote to KIND_INT_ENUM after.",                                                                  \
+        STRAT_CAT_ML | STRAT_CAT_USES_CONFIDENCE,            OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        ensemble_min_warmup_predictions,"Ens Min Warmup Preds","Ensemble",      CfgFieldDescriptor::WARN_ON_CLAMP, INT(100, 0, 1000000),                                                              \
+        "Min predictions before ensemble bandit becomes load-bearing.",                                                                                                                                             \
+        STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        ensemble_bandit_save_interval,"Ens Bandit Save Interval","Ensemble",    CfgFieldDescriptor::WARN_ON_CLAMP, INT(5000, 1, 1000000),                                                              \
+        "Predictions between ensemble bandit state save-to-disk events. Default 5000.",                                                                                                                             \
+        STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        csv_sort_check_mode,         "CSV Sort Check Mode",  "Training",        CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 0, 2),                                   \
+        "CSV tick-sort validation: 0=STRICT (refuse load on unsort), 1=WARN (log + proceed; default), 2=DISABLED. Ships as KIND_INT pending TECH_DEBT-068.",                                                         \
+        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        thompson_rng_seed,           "Thompson RNG Seed",    "FoxML",           CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::HAS_SIDE_EFFECT, INT(42, 0, 9223372036854775807),                \
+        "splitmix64 seed for Thompson sampling bandit. Default 42. 0 = use ThompsonBandit.hpp's THOMPSON_RNG_SEED_DEFAULT. Boot-only; required for replay-determinism. HAS_SIDE_EFFECT — manual parser supports hex (0x...) base-auto-detect; registry walker skips.",                                                                                                                                                                                                                                                          \
+        STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
 
 //======================================================================================================
 // [FIELD_IDX — auto-generated index enum]
