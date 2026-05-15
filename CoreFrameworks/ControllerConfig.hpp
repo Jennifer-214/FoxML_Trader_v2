@@ -11,6 +11,7 @@
 #ifndef CONTROLLER_CONFIG_HPP
 #define CONTROLLER_CONFIG_HPP
 
+#include "../Limits.hpp"                       // MAX_EXECUTION_CORES (per-core sharding cap; PerCoreCfg<F> cores[] sizing)
 #include "../FixedPoint/FixedPointN.hpp"
 #include "../ML_Headers/LinearRegression3X.hpp"
 #include "../ML_Headers/ConfidenceScore.hpp"  // v5.14.9.A — DegradationCurve enum + ToString/FromString helpers
@@ -275,6 +276,143 @@ template <unsigned F> struct PerCoreOverrides {
 #define CSV_SORT_WARN   0   // default — log violations, proceed
 #define CSV_SORT_STRICT 1   // refuse load on any violation
 #define CSV_SORT_AUTO   2   // sort in-place + INFO log of violation count
+
+//======================================================================================================
+// [PER-CORE CONFIG — v5.15.5.F.4c.3 first canonical application of per-instance registry pattern]
+//======================================================================================================
+// 79 per-core scalar fields. Types preserved exactly from the existing flat
+// ControllerConfig<F> declarations. .F.4c.3 Step 2 shadow window: BOTH the
+// flat ControllerConfig<F>::<field> AND the per-core cfg.cores[c].<field>
+// exist. Parser populates cores[0] from flat after parse (Step 3 will add
+// [core N] section parser). Consumers migrate to cfg.cores[c].<field> one at
+// a time; flat fields delete after the last consumer migrates.
+//
+// DESIGN_SPECS/per-instance-registry-pattern.md — this struct is the first
+// canonical application; future axes (per-symbol, per-strategy, per-horizon,
+// per-regime) instantiate sister PerXxxCfg<F> structs from sister registries.
+//
+// Layout: alignas(64) — fits AVX-512 boundary; per-core instances at
+// cores[c] address cleanly to cache lines without cross-core false sharing.
+// Compiler auto-pads sizeof to a multiple of 64 for cores[] array alignment.
+//======================================================================================================
+template <unsigned F>
+struct alignas(64) PerCoreCfg {
+    // --- Trading (6 — FPN<F>) ---
+    FPN<F> take_profit_pct;
+    FPN<F> stop_loss_pct;
+    FPN<F> fee_rate;
+    FPN<F> slippage_pct;
+    FPN<F> risk_pct;
+    FPN<F> fee_floor_mult;
+
+    // --- Entry Filters (9 — FPN<F>) ---
+    FPN<F> entry_offset_pct;
+    FPN<F> offset_min;
+    FPN<F> offset_max;
+    FPN<F> volume_multiplier;
+    FPN<F> spacing_multiplier;
+    FPN<F> min_long_slope;
+    FPN<F> min_buy_delta;
+    FPN<F> vwap_offset;
+    FPN<F> min_stddev_pct;
+
+    // --- Time-Based Exit (4 — 3 FPN<F> + 1 uint32_t) ---
+    FPN<F>   tp_hold_score;
+    FPN<F>   tp_trail_mult;
+    FPN<F>   sl_trail_mult;
+    uint32_t max_hold_ticks;
+
+    // --- Risk per-core / Kill switches (6 — 4 FPN<F> + 2 uint32_t) ---
+    FPN<F>   max_drawdown_pct;
+    FPN<F>   max_exposure_pct;
+    FPN<F>   kill_switch_daily_loss_pct;
+    FPN<F>   kill_switch_drawdown_pct;
+    uint32_t enable_mtm_kill_switch;
+    uint32_t kill_recovery_warmup;
+
+    // --- Gate Recovery (5 — 1 int + 4 uint32_t) ---
+    int      sl_cooldown_adaptive;
+    uint32_t sl_cooldown_base;
+    uint32_t sl_cooldown_extra;
+    uint32_t sl_cooldown_cycles;
+    uint32_t idle_reset_cycles;
+
+    // --- Momentum strategy (7 — 6 FPN<F> + 1 int) ---
+    FPN<F> momentum_min_tp_margin_pct;
+    FPN<F> momentum_min_buy_delta_recent;
+    FPN<F> momentum_min_r2;
+    FPN<F> momentum_tp_mult;
+    FPN<F> momentum_sl_mult;
+    FPN<F> momentum_breakout_mult;
+    int    momentum_require_last_win;
+
+    // --- EMA Cross strategy (3 — FPN<F>) ---
+    FPN<F> emacross_dip_mult;
+    FPN<F> emacross_crossover_min;
+    FPN<F> emacross_trail_mult;
+
+    // --- Regime Detection (5 — 4 FPN<F> + 1 uint32_t) ---
+    FPN<F>   regime_slope_threshold;
+    FPN<F>   regime_crossover_threshold;
+    FPN<F>   regime_strong_crossover;
+    FPN<F>   regime_r2_threshold;
+    uint32_t regime_hysteresis;
+
+    // --- ML — entry threshold + TP/SL (3 — FPN<F>) ---
+    FPN<F> ml_buy_threshold;
+    FPN<F> ml_tp_pct;
+    FPN<F> ml_sl_pct;
+
+    // --- ML — Bandit/Confidence/Ensemble (11 — 2 FPN<F> + 2 uint32_t + 5 int + 1 uint64_t + 1 uint32_t) ---
+    FPN<F>   bandit_blend_ratio;
+    FPN<F>   confidence_threshold_scale;
+    uint32_t confidence_window;
+    int      confidence_turnover_window;
+    int      confidence_turnover_topk;
+    uint32_t confidence_ic_floor_window;
+    int      confidence_ic_variant;
+    int      ensemble_min_warmup_predictions;
+    int      ensemble_bandit_save_interval;
+    uint64_t thompson_rng_seed;
+    uint32_t model_max_age_hours;
+
+    // --- STAMP_BOUND scalar cohort (13 — 12 FPN<F> + 1 int) ---
+    FPN<F>   ridge_lambda;
+    FPN<F>   ridge_cost_penalty;
+    FPN<F>   ridge_min_ic_floor;
+    FPN<F>   winsor_pct_low;
+    FPN<F>   winsor_pct_high;
+    FPN<F>   confidence_freshness_tau_secs;
+    FPN<F>   confidence_capacity_target_dollars;
+    FPN<F>   confidence_capacity_kappa;
+    FPN<F>   confidence_rmse_baseline;
+    FPN<F>   thompson_mu_prior;
+    FPN<F>   thompson_precision_prior;
+    FPN<F>   thompson_precision_obs;
+    int      bandit_algorithm;
+
+    // --- Per-core risk thresholds — STAMP_BOUND (4 — 1 int + 3 FPN<F>) ---
+    int    risk_degradation_curve;
+    FPN<F> risk_full_size_threshold;
+    FPN<F> risk_min_size_threshold;
+    FPN<F> risk_min_size_pct;
+
+    // --- Partial exits / Breakeven (3 — FPN<F>) ---
+    FPN<F> partial_exit_pct;
+    FPN<F> tp2_mult;
+    FPN<F> breakeven_buffer_pct;
+};
+
+// alignment / size discipline per DESIGN_SPECS/per-snapshot-cluster-layout-pattern.md.
+// alignof must be 64 (alignas(64) decorator above); sizeof must be a multiple of 64
+// (compiler auto-tail-pads for array alignment).
+static_assert(alignof(PerCoreCfg<64>) == 64,
+              "PerCoreCfg<F> must be 64-byte aligned for cache-line discipline + per-core "
+              "cores[] array alignment");
+static_assert(sizeof(PerCoreCfg<64>) % 64 == 0,
+              "sizeof(PerCoreCfg<F>) must be a multiple of 64 — compiler should auto-pad "
+              "via alignas(64); if this fires, the struct definition broke the alignment "
+              "invariant.");
 
 //======================================================================================================
 // [CONFIG]
@@ -1230,6 +1368,30 @@ template <unsigned F> struct ControllerConfig {
   FPN<F>   thompson_precision_prior;  // posterior precision prior (= 1/variance); default 1.0
   FPN<F>   thompson_precision_obs;    // observation precision; default 1.0
   uint64_t thompson_rng_seed;         // splitmix64 seed; default 42
+
+  //==================================================================================================
+  // [v5.15.5.F.4c.3 — PER-CORE AUTHORITATIVE CONFIG]
+  //==================================================================================================
+  // One PerCoreCfg<F> instance per execution core. Step 2 shadow window: each
+  // per-core field exists in BOTH the flat fields above (legacy path) AND in
+  // cores[c].<field> (per-core authoritative path). Parser populates cores[c]
+  // from flat after parse via ControllerConfig_PopulateCoresFromFlat (Step 3
+  // adds [core N] section parser that writes cores[c] directly).
+  //
+  // Consumer migration: _BuildParameters takes const PerCoreCfg<F>* per the
+  // HIGH-1 Option A boundary-stable sig change (4 fn sigs + 11 call sites).
+  // Production read sites (~32) migrate cfg.X → cfg.cores[c].X one cohort at
+  // a time. After last consumer migrates, flat fields delete.
+  //
+  // DESIGN_SPECS/per-instance-registry-pattern.md — first canonical
+  // application; sister axes (per-symbol, per-strategy, per-horizon,
+  // per-regime) instantiate analogous PerXxxCfg<F> arrays.
+  //
+  // alignas(64) on PerCoreCfg<F> ensures cores[0..N-1] addresses are all
+  // cache-line aligned — per-core slow-path reads land in distinct cache
+  // lines without cross-core false sharing (H6 discipline).
+  //==================================================================================================
+  PerCoreCfg<F> cores[MAX_EXECUTION_CORES];
 };
 
 //======================================================================================================
