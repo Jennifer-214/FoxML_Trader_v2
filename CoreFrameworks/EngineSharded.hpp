@@ -409,50 +409,48 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
             (unsigned)cfg.num_execution_cores, cfg.health_log_level);
     }
 
-    // v5.14.9.B — composite-required-for-ladder boot REFUSE (extended .B.1
-    // to consider per-core overrides). Ladder thresholds are tuned for
-    // composite confidence's practical scale [0.001, 0.3]; legacy 3-factor
-    // IC scale [0.05, 0.5] would behave wrong with the same thresholds.
-    // Operator who enables the ladder (globally OR via per-core override)
-    // MUST also enable composite confidence engine-wide — otherwise refuse
-    // boot with a clear error message rather than silently misbehave.
+    // v5.14.9.B — composite-required-for-ladder boot REFUSE.
+    // WIP2d-0 (.F.4c.3) — REFACTORED per cfg-scope-discipline.md § Anti-pattern 1
+    // (global default + per-instance override FORBIDDEN). Pre-refactor used the
+    // legacy global-default-with-override pattern (cfg.risk_degradation_curve flat
+    // + cfg.core_overrides[c].risk_degradation_curve). Post-WIP2d-0 walks
+    // cfg.cores[c].risk_degradation_curve exclusively over active cores —
+    // per-core authoritative per Class 25 + Anti-pattern 1 discipline. The
+    // resolution gap (override=0 means inherit-from-global) no longer exists;
+    // each core's own value is THE value.
     //
-    // Resolver: per-core override of 0 = inherit global; non-zero = override.
-    // Effective curve per core = (override.risk_degradation_curve != 0)
-    //                              ? override : global. Match standard
-    //                              per-core resolution pattern.
+    // Safety semantics preserved: refuse boot if ANY active core has ladder
+    // enabled AND confidence_composite_enabled=0 engine-wide. Ladder thresholds
+    // are tuned for composite confidence scale [0.001, 0.3]; legacy 3-factor IC
+    // scale [0.05, 0.5] would silently misbehave.
     {
-        bool any_ladder_active = (cfg.risk_degradation_curve != CURVE_OFF);
-        int  active_core_id    = -1;  // -1 = global; >=0 = per-core override
-        int  active_curve      = (int)cfg.risk_degradation_curve;
-        for (int c = 0; c < 16 && !any_ladder_active; ++c) {
-            const auto& ov = cfg.core_overrides[c];
-            if (ov.risk_degradation_curve != 0
-                && ov.risk_degradation_curve != (uint32_t)CURVE_OFF) {
+        bool any_ladder_active = false;
+        int  active_core_id    = -1;
+        int  active_curve      = (int)CURVE_OFF;
+        for (uint16_t c = 0; c < cfg.num_execution_cores && c < MAX_EXECUTION_CORES; ++c) {
+            int curve = cfg.cores[c].risk_degradation_curve;
+            if (curve != (int)CURVE_OFF) {
                 any_ladder_active = true;
-                active_core_id    = c;
-                active_curve      = (int)ov.risk_degradation_curve;
+                active_core_id    = (int)c;
+                active_curve      = curve;
                 break;
             }
         }
         if (any_ladder_active && BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_CONFIDENCE_COMPOSITE_ENABLED) == 0) {
-            const char* origin = (active_core_id < 0) ? "global cfg"
-                                                       : "per-core override";
             fprintf(stderr,
-                "[boot] FATAL: risk_degradation_curve=%s (%s%s%d) requires "
+                "[boot] FATAL: core %d risk_degradation_curve=%s requires "
                 "confidence_composite_enabled=1.\n"
                 "  Ladder thresholds are tuned for composite confidence scale; "
                 "legacy 3-factor IC scale would silently misbehave.\n"
                 "  Set confidence_composite_enabled=1 OR set "
-                "risk_degradation_curve=OFF (and remove core_N_ override if any).\n",
+                "core_%d_risk_degradation_curve=OFF.\n",
+                active_core_id,
                 DegradationCurve_ToString(active_curve),
-                origin,
-                (active_core_id < 0) ? "" : " on core ",
-                (active_core_id < 0) ? 0 : active_core_id);
+                active_core_id);
             if (cfg.health_log_path[0]) {
                 tt::Health_Log(tt::HEALTH_CRITICAL, "boot", active_core_id,
-                    "REFUSE: ladder requires composite (curve=%s, composite=0, %s)",
-                    DegradationCurve_ToString(active_curve), origin);
+                    "REFUSE: ladder requires composite (core=%d, curve=%s, composite=0)",
+                    active_core_id, DegradationCurve_ToString(active_curve));
             }
             return;  // refuse boot; engine doesn't start
         }

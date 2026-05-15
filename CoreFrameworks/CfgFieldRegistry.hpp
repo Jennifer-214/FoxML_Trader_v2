@@ -600,6 +600,183 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     X(KIND_DOUBLE,     foxml_vol_scaling_z_max,      "Vol Scale Z-Max",      "ML",              CfgFieldDescriptor::WARN_ON_CLAMP, DBL(3.0, 0.0, 100.0),    "Z-score clipping threshold for FoxML VolScaler (limits how much volatility scaling can compress trade size). Default 3.0 = clip at 3 sigma.", STRAT_CAT_ML, OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
 
 //======================================================================================================
+// [FOREACH_PER_CORE_FIELD_TYPE — auxiliary X-macro for X-macro struct generation (WIP2d-0)]
+//======================================================================================================
+// PURPOSE: maps each per-core cfg field name → C++ storage type. Consumed by
+// EMIT_PER_CORE_CFG_STRUCT_FIELD payload macro to GENERATE the PerCoreCfg<F>
+// struct body via X-macro expansion. Single source of truth for per-core struct
+// field declarations — no manual cfg-surface field declarations permitted in
+// PerCoreCfg<F> body (CI build-fails via tools/check_per_core_registry_integrity.py).
+//
+// DISCIPLINE per H17 (STRONG at .F.4c.3 per-core surface; HARD at .F.4d global):
+// - Every entry here MUST have a matching FOREACH_PER_CORE_CFG_FIELD row (CI checks)
+// - Every FOREACH_PER_CORE_CFG_FIELD row MUST have a matching entry here (CI checks)
+// - PerCoreCfg<F> body uses FOREACH_PER_CORE_FIELD_TYPE(EMIT_PER_CORE_CFG_STRUCT_FIELD)
+//   for all 92 cfg-surface fields; the 5 bitmap-cluster fields are documented manual
+//   exemptions per DOCS/MANUAL_FIELDS_INVENTORY.md § "PerCoreCfg<F> runtime bitmap cluster"
+//
+// TYPE conventions (per DOD discipline + bytewise-equivalence with pre-WIP2d-0 manual struct):
+// - FPN<F> for accounting math (H4 invariant); per-core math fields
+// - uint32_t / uint64_t for unsigned counter/tick/seed fields
+// - int for signed enum / signed counter fields
+// - double for ML voting threshold (ensemble_min_agreement_pct; not accounting math)
+//
+// SEE DESIGN_SPECS/manual-fields-inventory-pattern.md for the full pattern doc.
+//======================================================================================================
+#define FOREACH_PER_CORE_FIELD_TYPE(X)                          \
+    /* === Trading (6 — FPN<F>) === */                          \
+    X(take_profit_pct,                       FPN<F>)            \
+    X(stop_loss_pct,                         FPN<F>)            \
+    X(fee_rate,                              FPN<F>)            \
+    X(slippage_pct,                          FPN<F>)            \
+    X(risk_pct,                              FPN<F>)            \
+    X(fee_floor_mult,                        FPN<F>)            \
+    /* === Entry Filters (9 — FPN<F>) === */                    \
+    X(entry_offset_pct,                      FPN<F>)            \
+    X(offset_min,                            FPN<F>)            \
+    X(offset_max,                            FPN<F>)            \
+    X(volume_multiplier,                     FPN<F>)            \
+    X(spacing_multiplier,                    FPN<F>)            \
+    X(min_long_slope,                        FPN<F>)            \
+    X(min_buy_delta,                         FPN<F>)            \
+    X(vwap_offset,                           FPN<F>)            \
+    X(min_stddev_pct,                        FPN<F>)            \
+    /* === Time-Based Exit (4 — 3 FPN<F> + 1 uint32_t) === */   \
+    X(tp_hold_score,                         FPN<F>)            \
+    X(tp_trail_mult,                         FPN<F>)            \
+    X(sl_trail_mult,                         FPN<F>)            \
+    X(max_hold_ticks,                        uint32_t)          \
+    /* === Risk / Kill switches (6 — 4 FPN<F> + 2 uint32_t) === */ \
+    X(max_drawdown_pct,                      FPN<F>)            \
+    X(max_exposure_pct,                      FPN<F>)            \
+    X(kill_switch_daily_loss_pct,            FPN<F>)            \
+    X(kill_switch_drawdown_pct,              FPN<F>)            \
+    X(enable_mtm_kill_switch,                uint32_t)          \
+    X(kill_recovery_warmup,                  uint32_t)          \
+    /* === Gate Recovery (5 — 1 int + 4 uint32_t) === */        \
+    X(sl_cooldown_adaptive,                  int)               \
+    X(sl_cooldown_base,                      uint32_t)          \
+    X(sl_cooldown_extra,                     uint32_t)          \
+    X(sl_cooldown_cycles,                    uint32_t)          \
+    X(idle_reset_cycles,                     uint32_t)          \
+    /* === Momentum strategy (7 — 6 FPN<F> + 1 int) === */      \
+    X(momentum_min_tp_margin_pct,            FPN<F>)            \
+    X(momentum_min_buy_delta_recent,         FPN<F>)            \
+    X(momentum_min_r2,                       FPN<F>)            \
+    X(momentum_tp_mult,                      FPN<F>)            \
+    X(momentum_sl_mult,                      FPN<F>)            \
+    X(momentum_breakout_mult,                FPN<F>)            \
+    X(momentum_require_last_win,             int)               \
+    /* === EMA Cross strategy (3 — FPN<F>) === */               \
+    X(emacross_dip_mult,                     FPN<F>)            \
+    X(emacross_crossover_min,                FPN<F>)            \
+    X(emacross_trail_mult,                   FPN<F>)            \
+    /* === Regime Detection (5 — 4 FPN<F> + 1 uint32_t) === */  \
+    X(regime_slope_threshold,                FPN<F>)            \
+    X(regime_crossover_threshold,            FPN<F>)            \
+    X(regime_strong_crossover,               FPN<F>)            \
+    X(regime_r2_threshold,                   FPN<F>)            \
+    X(regime_hysteresis,                     uint32_t)          \
+    /* === ML — entry+TP/SL (3 — FPN<F>) === */                 \
+    X(ml_buy_threshold,                      FPN<F>)            \
+    X(ml_tp_pct,                             FPN<F>)            \
+    X(ml_sl_pct,                             FPN<F>)            \
+    /* === ML — Bandit/Confidence/Ensemble (11) === */          \
+    X(bandit_blend_ratio,                    FPN<F>)            \
+    X(confidence_threshold_scale,            FPN<F>)            \
+    X(confidence_window,                     uint32_t)          \
+    X(confidence_turnover_window,            int)               \
+    X(confidence_turnover_topk,              int)               \
+    X(confidence_ic_floor_window,            uint32_t)          \
+    X(confidence_ic_variant,                 int)               \
+    X(ensemble_min_warmup_predictions,       int)               \
+    X(ensemble_bandit_save_interval,         int)               \
+    X(thompson_rng_seed,                     uint64_t)          \
+    X(model_max_age_hours,                   uint32_t)          \
+    /* === STAMP_BOUND scalar cohort (13 — 12 FPN<F> + 1 int) === */ \
+    X(ridge_lambda,                          FPN<F>)            \
+    X(ridge_cost_penalty,                    FPN<F>)            \
+    X(ridge_min_ic_floor,                    FPN<F>)            \
+    X(winsor_pct_low,                        FPN<F>)            \
+    X(winsor_pct_high,                       FPN<F>)            \
+    X(confidence_freshness_tau_secs,         FPN<F>)            \
+    X(confidence_capacity_target_dollars,    FPN<F>)            \
+    X(confidence_capacity_kappa,             FPN<F>)            \
+    X(confidence_rmse_baseline,              FPN<F>)            \
+    X(thompson_mu_prior,                     FPN<F>)            \
+    X(thompson_precision_prior,              FPN<F>)            \
+    X(thompson_precision_obs,                FPN<F>)            \
+    X(bandit_algorithm,                      int)               \
+    /* === Per-core risk thresholds — STAMP_BOUND (4) === */    \
+    X(risk_degradation_curve,                int)               \
+    X(risk_full_size_threshold,              FPN<F>)            \
+    X(risk_min_size_threshold,               FPN<F>)            \
+    X(risk_min_size_pct,                     FPN<F>)            \
+    /* === Partial exits / Breakeven (3 — FPN<F>) === */        \
+    X(partial_exit_pct,                      FPN<F>)            \
+    X(tp2_mult,                              FPN<F>)            \
+    X(breakeven_buffer_pct,                  FPN<F>)            \
+    /* === Strategy-specific TP/SL overrides (6 — FPN<F>) — WIP2c.1 === */ \
+    X(simpledip_tp_pct,                      FPN<F>)            \
+    X(simpledip_sl_pct,                      FPN<F>)            \
+    X(mr_tp_pct,                             FPN<F>)            \
+    X(mr_sl_pct,                             FPN<F>)            \
+    X(emacross_tp_pct,                       FPN<F>)            \
+    X(emacross_sl_pct,                       FPN<F>)            \
+    /* === Entry stddev mode (1 — FPN<F>) — WIP2c.1 === */      \
+    X(offset_stddev_mult,                    FPN<F>)            \
+    /* === ML hard-block + ensemble + barrier (3) — WIP2c.1 === */ \
+    X(confidence_hard_block_threshold,       FPN<F>)            \
+    X(ensemble_min_agreement_pct,            double)            \
+    X(barrier_blend_mode,                    int)               \
+    /* === Maker/Taker fees + VolScaler (3 — FPN<F>) — WIP2c.2 === */ \
+    X(fee_rate_maker,                        FPN<F>)            \
+    X(fee_rate_taker,                        FPN<F>)            \
+    X(foxml_vol_scaling_z_max,               FPN<F>)
+
+// Payload macro: emit `type name;` per row. Used by PerCoreCfg<F> struct generation.
+#define EMIT_PER_CORE_CFG_STRUCT_FIELD(name, type) type name;
+
+//======================================================================================================
+// [FOREACH_MANUAL_PER_CORE_FIELD — exempted parallel arrays on ControllerConfig<F> (WIP2d-0)]
+//======================================================================================================
+// PURPOSE: documented exemptions for per-core fields that can't fit
+// FOREACH_PER_CORE_CFG_FIELD yet (awaiting KIND_STRING / KIND_FILE_PATH /
+// KIND_HEX64 at .F.4e) OR are TRANSITIONAL during shadow-window migration.
+//
+// Every entry MUST have a row in DOCS/MANUAL_FIELDS_INVENTORY.md with full
+// rationale + migration trigger. CI cross-checks bidirectionally via
+// tools/check_per_core_registry_integrity.py — drift = BUILD ERROR.
+//
+// ControllerConfig<F> declares these arrays via EMIT_MANUAL_PER_CORE_DECL
+// X-macro expansion ONLY; no manual `core_X[16]` declarations allowed outside.
+//
+// SEE DESIGN_SPECS/manual-fields-inventory-pattern.md for the full pattern doc.
+//======================================================================================================
+#define FOREACH_MANUAL_PER_CORE_FIELD(X)                                                                                  \
+    /* type,                name,                      suffix,  rationale (matches MANUAL_FIELDS_INVENTORY.md) */         \
+    /* === String arrays awaiting KIND_STRING / KIND_FILE_PATH at .F.4e === */                                            \
+    X(char,                 core_model_path,           [256],   "KIND_FILE_PATH cohort at .F.4e")                         \
+    X(char,                 core_model_dir,            [256],   "KIND_FILE_PATH cohort at .F.4e")                         \
+    X(char,                 core_horizon_list,         [128],   "KIND_STRING cohort at .F.4e")                            \
+    X(char,                 core_ensemble_blend_mode,  [16],    "KIND_STRING (or KIND_INT_ENUM) cohort at .F.4e")         \
+    X(char,                 core_disabled_horizons,    [128],   "KIND_STRING cohort at .F.4e")                            \
+    /* === Hex64 bitmap awaiting KIND_HEX64 at .F.4e === */                                                                \
+    X(uint64_t,             core_feature_mask,         ,        "KIND_HEX64 needed at .F.4e")                             \
+    /* === TRANSITIONAL parallel arrays — delete at WIP2g (cores[c] authoritative) === */                                  \
+    X(FPN<F>,               core_risk_pct,             ,        "TRANSITIONAL: cores[c].risk_pct authoritative; delete at WIP2g") \
+    X(uint8_t,              core_strategies,           ,        "TRANSITIONAL: cores[c].strategy authoritative (WIP2d-0); delete at WIP2g") \
+    X(uint32_t,             core_time_exit_ticks,      ,        "TRANSITIONAL: cores[c].max_hold_ticks authoritative; legacy override array; delete at WIP2g") \
+    X(FPN<F>,               core_max_drawdown_pct,     ,        "TRANSITIONAL: cores[c].max_drawdown_pct authoritative; legacy override array; delete at WIP2g") \
+    /* === TRANSITIONAL legacy override struct — delete at WIP2f (PerCoreOverrides<F> retired) === */                      \
+    X(PerCoreOverrides<F>,  core_overrides,            ,        "TRANSITIONAL: legacy global-default-with-override anti-pattern; entire mechanism retires at WIP2f when ControllerConfig_ResolveForCore deletes")
+
+// Payload macro: emit `type name[MAX_EXECUTION_CORES] suffix;` per row.
+// Used by ControllerConfig<F> for parallel array declarations.
+#define EMIT_MANUAL_PER_CORE_DECL(type, name, suffix, rationale) \
+    type name[MAX_EXECUTION_CORES] suffix;
+
+//======================================================================================================
 // [FIELD_IDX enums — per-registry auto-generated]
 //======================================================================================================
 // Drives g_*_cfg_field_descriptors[FIELD_IDX_*_<name>] direct access at compile time.

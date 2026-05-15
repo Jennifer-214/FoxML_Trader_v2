@@ -297,138 +297,39 @@ template <unsigned F> struct PerCoreOverrides {
 //======================================================================================================
 template <unsigned F>
 struct alignas(64) PerCoreCfg {
-    // --- Trading (6 — FPN<F>) ---
-    FPN<F> take_profit_pct;
-    FPN<F> stop_loss_pct;
-    FPN<F> fee_rate;
-    FPN<F> slippage_pct;
-    FPN<F> risk_pct;
-    FPN<F> fee_floor_mult;
+    // === Cfg surface (92 fields) — auto-generated from FOREACH_PER_CORE_FIELD_TYPE ===
+    // WIP2d-0 structural fix per CLAUDE.md item 31 + DESIGN_PHILOSOPHY § 1.5
+    // (framework discipline) + H17 STRONG codification:
+    //
+    // Single-path field declaration via X-macro; manual cfg-surface field
+    // declarations FORBIDDEN here. CI cross-check (tools/check_per_core_registry_integrity.py
+    // invoked from build.sh) enforces:
+    //   - Every FOREACH_PER_CORE_FIELD_TYPE entry has a FOREACH_PER_CORE_CFG_FIELD row
+    //   - Every FOREACH_PER_CORE_CFG_FIELD row has a FOREACH_PER_CORE_FIELD_TYPE entry
+    //   - PerCoreCfg<F> body has NO manual cfg-surface fields outside the X-macro
+    //     (only the 5-field runtime bitmap cluster below is documented exempt)
+    //
+    // Field types follow DOD discipline per DESIGN_PHILOSOPHY § 3:
+    //   - FPN<F>: accounting math (H4 invariant — 69 fields)
+    //   - uint32_t / uint64_t: counters, ticks, seeds (12 + 1 fields)
+    //   - int: signed enums, signed counters (10 fields)
+    //   - double: ML voting threshold exemption (ensemble_min_agreement_pct only)
+    //
+    // Field ORDER matches FOREACH_PER_CORE_FIELD_TYPE row order — sections grouped
+    // (Trading → Entry → TimeExit → Risk → Gate → Strategy → Regime → ML → ...).
+    // Order preserved bytewise-identical to pre-WIP2d-0 manual struct for layout
+    // determinism + alignment static_asserts continuity.
+    //
+    // SEE DESIGN_SPECS/manual-fields-inventory-pattern.md for the full pattern doc.
+    FOREACH_PER_CORE_FIELD_TYPE(EMIT_PER_CORE_CFG_STRUCT_FIELD)
 
-    // --- Entry Filters (9 — FPN<F>) ---
-    FPN<F> entry_offset_pct;
-    FPN<F> offset_min;
-    FPN<F> offset_max;
-    FPN<F> volume_multiplier;
-    FPN<F> spacing_multiplier;
-    FPN<F> min_long_slope;
-    FPN<F> min_buy_delta;
-    FPN<F> vwap_offset;
-    FPN<F> min_stddev_pct;
-
-    // --- Time-Based Exit (4 — 3 FPN<F> + 1 uint32_t) ---
-    FPN<F>   tp_hold_score;
-    FPN<F>   tp_trail_mult;
-    FPN<F>   sl_trail_mult;
-    uint32_t max_hold_ticks;
-
-    // --- Risk per-core / Kill switches (6 — 4 FPN<F> + 2 uint32_t) ---
-    FPN<F>   max_drawdown_pct;
-    FPN<F>   max_exposure_pct;
-    FPN<F>   kill_switch_daily_loss_pct;
-    FPN<F>   kill_switch_drawdown_pct;
-    uint32_t enable_mtm_kill_switch;
-    uint32_t kill_recovery_warmup;
-
-    // --- Gate Recovery (5 — 1 int + 4 uint32_t) ---
-    int      sl_cooldown_adaptive;
-    uint32_t sl_cooldown_base;
-    uint32_t sl_cooldown_extra;
-    uint32_t sl_cooldown_cycles;
-    uint32_t idle_reset_cycles;
-
-    // --- Momentum strategy (7 — 6 FPN<F> + 1 int) ---
-    FPN<F> momentum_min_tp_margin_pct;
-    FPN<F> momentum_min_buy_delta_recent;
-    FPN<F> momentum_min_r2;
-    FPN<F> momentum_tp_mult;
-    FPN<F> momentum_sl_mult;
-    FPN<F> momentum_breakout_mult;
-    int    momentum_require_last_win;
-
-    // --- EMA Cross strategy (3 — FPN<F>) ---
-    FPN<F> emacross_dip_mult;
-    FPN<F> emacross_crossover_min;
-    FPN<F> emacross_trail_mult;
-
-    // --- Regime Detection (5 — 4 FPN<F> + 1 uint32_t) ---
-    FPN<F>   regime_slope_threshold;
-    FPN<F>   regime_crossover_threshold;
-    FPN<F>   regime_strong_crossover;
-    FPN<F>   regime_r2_threshold;
-    uint32_t regime_hysteresis;
-
-    // --- ML — entry threshold + TP/SL (3 — FPN<F>) ---
-    FPN<F> ml_buy_threshold;
-    FPN<F> ml_tp_pct;
-    FPN<F> ml_sl_pct;
-
-    // --- ML — Bandit/Confidence/Ensemble (11 — 2 FPN<F> + 2 uint32_t + 5 int + 1 uint64_t + 1 uint32_t) ---
-    FPN<F>   bandit_blend_ratio;
-    FPN<F>   confidence_threshold_scale;
-    uint32_t confidence_window;
-    int      confidence_turnover_window;
-    int      confidence_turnover_topk;
-    uint32_t confidence_ic_floor_window;
-    int      confidence_ic_variant;
-    int      ensemble_min_warmup_predictions;
-    int      ensemble_bandit_save_interval;
-    uint64_t thompson_rng_seed;
-    uint32_t model_max_age_hours;
-
-    // --- STAMP_BOUND scalar cohort (13 — 12 FPN<F> + 1 int) ---
-    FPN<F>   ridge_lambda;
-    FPN<F>   ridge_cost_penalty;
-    FPN<F>   ridge_min_ic_floor;
-    FPN<F>   winsor_pct_low;
-    FPN<F>   winsor_pct_high;
-    FPN<F>   confidence_freshness_tau_secs;
-    FPN<F>   confidence_capacity_target_dollars;
-    FPN<F>   confidence_capacity_kappa;
-    FPN<F>   confidence_rmse_baseline;
-    FPN<F>   thompson_mu_prior;
-    FPN<F>   thompson_precision_prior;
-    FPN<F>   thompson_precision_obs;
-    int      bandit_algorithm;
-
-    // --- Per-core risk thresholds — STAMP_BOUND (4 — 1 int + 3 FPN<F>) ---
-    int    risk_degradation_curve;
-    FPN<F> risk_full_size_threshold;
-    FPN<F> risk_min_size_threshold;
-    FPN<F> risk_min_size_pct;
-
-    // --- Partial exits / Breakeven (3 — FPN<F>) ---
-    FPN<F> partial_exit_pct;
-    FPN<F> tp2_mult;
-    FPN<F> breakeven_buffer_pct;
-
-    // --- Strategy-specific TP/SL overrides (6 — FPN<F>) — WIP2c.1 classify-first ---
-    // 0 = fall back to global take_profit_pct / stop_loss_pct (strategy dispatcher applies).
-    FPN<F> simpledip_tp_pct;
-    FPN<F> simpledip_sl_pct;
-    FPN<F> mr_tp_pct;
-    FPN<F> mr_sl_pct;
-    FPN<F> emacross_tp_pct;
-    FPN<F> emacross_sl_pct;
-
-    // --- Entry stddev mode (1 — FPN<F>) — WIP2c.1 ---
-    FPN<F> offset_stddev_mult;
-
-    // --- ML hard-block + ensemble + barrier (3) — WIP2c.1 ---
-    FPN<F> confidence_hard_block_threshold;
-    double ensemble_min_agreement_pct;   // double preserved from flat (ML voting threshold; not accounting math)
-    int    barrier_blend_mode;           // KIND_INT_ENUM (LEGACY=0 / BLEND=1 / DOMINANT=2)
-
-    // --- Maker/Taker fees + VolScaler (3 — FPN<F>) — WIP2c.2 inclusion ---
-    FPN<F> fee_rate_maker;
-    FPN<F> fee_rate_taker;
-    FPN<F> foxml_vol_scaling_z_max;
-
-    // --- 5 cfg-domain bitmap STORAGE fields (cohort move; A2 flat KIND_BOOL rows ship at WIP2e) ---
-    // Per cohort discipline: all 5 domain bitmaps move per-core together. A2 expansion (WIP2e)
-    // adds flat KIND_BOOL rows in FOREACH_PER_CORE_CFG_FIELD that source-of-truth the bits; slow-
-    // path rebuild walker reconstructs these bitmap fields from rows. For WIP2c.1, the bitmap
-    // storage is added per-core + populated via PopulateCoresFromFlat (copies from flat fields).
+    // === Runtime bitmap cluster (5 fields; documented manual exemption) ===
+    // RUNTIME representations of FOREACH_*_CFG_FLAG bits, rebuilt from flat KIND_BOOL
+    // rows at slow-path rebuild (WIP2e adds the rebuild walker). Manual declaration
+    // justified by alignas(8) cluster boundary for atomic multi-byte bitmap reads.
+    // Documented at DOCS/MANUAL_FIELDS_INVENTORY.md § "PerCoreCfg<F> runtime bitmap
+    // cluster". CI script (check_per_core_registry_integrity.py) permits these 5
+    // specific names; other manual fields fail build.
     alignas(8) uint8_t  lifecycle_cfg_flags;   // alignas(8) preserves the cluster alignment from ControllerConfig<F>:620
     uint8_t  gate_cfg_flags;
     uint16_t ml_cfg_flags;
