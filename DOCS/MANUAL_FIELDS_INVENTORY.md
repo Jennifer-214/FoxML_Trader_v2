@@ -71,15 +71,51 @@ This is the FIRST canonical application of `meta-registry-pattern-for-codebase-r
 - **Section B permanent:** 5 (runtime bitmap cluster; structural fixture)
 - **Inventory size projected at `.F.4e` close:** Section A = 0 entries (all migrate to KIND_STRING/_FILE_PATH/_HEX64); Section B unchanged at 5
 
+## Section C — Subsystem-state cfg-mirror exemptions (Class 27 exemption registry; established v5.15.5.F.4c.3 WIP2d-1.B.0c)
+
+Per `DESIGN_SPECS/decision-time-data-binding-pattern.md` + `RECURRING_BUG_PATTERNS.md` Class 27, scalar cfg-mirror fields on subsystem state types are FORBIDDEN by default. Subsystems must either:
+- (a) Pre-resolve cfg values onto in-flight objects (Order, Position, Event, TradeEvent) at decision time (PREFERRED), OR
+- (b) Use `FOREACH_<SUBSYS>_CFG_CACHE` registry-driven per-instance cache (fallback for genuinely no-in-flight-object cases)
+
+CI Check 7 (`tools/check_per_core_registry_integrity.py`) scans designated subsystem state types for scalar fields whose names match cfg field names; build-fails on unregistered matches. Exemptions to the check live here in Section C.
+
+| Subsystem | Field | Rationale category | Detail | Migration trigger |
+|---|---|---|---|---|
+| `OrderManagerState` | `fee_rate` | TRANSITIONAL | Legacy scalar cfg-mirror of `cfg.cores[c].fee_rate` (deprecated single-rate field; pre-maker/taker era); Class 27 anti-pattern. Used as fallback when maker/taker zero. DELETED at WIP2d-1.B.1 alongside maker/taker; legacy callers migrate to `oms->per_core_fee_rate_taker` fallback OR Order `effective_fee_rate`. | `WIP2d-1.B.1` (this ship) — delete OMS scalar field; remove this exemption in same commit |
+| `OrderManagerState` | `fee_rate_maker` | TRANSITIONAL | Scalar cfg-mirror of `cfg.cores[c].fee_rate_maker`; Class 27 anti-pattern. Migration to Order `effective_fee_rate` pre-resolved at submit; OMS scalar field DELETED at WIP2d-1.B.1. | `WIP2d-1.B.1` (this ship) — delete OMS scalar field; remove this exemption in same commit |
+| `OrderManagerState` | `fee_rate_taker` | TRANSITIONAL | Scalar cfg-mirror of `cfg.cores[c].fee_rate_taker`; Class 27 anti-pattern. Same migration as fee_rate_maker. | `WIP2d-1.B.1` (this ship) — delete OMS scalar field; remove this exemption in same commit |
+| `OrderManagerState` | `slippage_pct` | TRANSITIONAL | Scalar cfg-mirror of `cfg.cores[c].slippage_pct`; Class 27 anti-pattern. Migration to Order `effective_slippage_pct` pre-resolved at submit; OMS scalar field DELETED at WIP2d-1.B.1.b cohort sweep. | `WIP2d-1.B.1.b` (this ship) — cohort-sweep delete; remove this exemption in same commit |
+
+**Section C total: 4 entries (all TRANSITIONAL).** Inventory zeros out at WIP2d-1.B.1 + WIP2d-1.B.1.b ship.
+
+**Rationale categories** (one required per exemption):
+- `pre-resolve-impossible` — no in-flight object exists at the decision point (rare; document why genuinely impossible)
+- `subsystem-internal-aggregate` — value is not a cfg mirror; computed/aggregated from runtime state (false-positive on name match)
+- `uniform-by-design` — cfg value is engine-wide by design (global cfg field); shouldn't be on subsystem state either but legacy
+- `TRANSITIONAL` — migration in flight; specify ship that completes the closure
+
+Adding an exemption:
+1. Add row to this table with full justification
+2. Commit message explicitly cites the rationale category
+3. If TRANSITIONAL: link the migration plan + target ship
+4. CI Check 7 picks up the exemption automatically (parses Section C)
+
+Removing an exemption:
+1. Confirm migration to first-line or second-line landed
+2. Delete row
+3. CI re-runs; build verifies no stray subsystem-state cfg-mirror remains
+
 ## Cross-references
 
 - `tick-trader-percore-workspace/DESIGN_SPECS/manual-fields-inventory-pattern.md` — the pattern doc (Stage 2 DRAFT at this ship; Stage 3 ACTIVE at `.F.4c.3` close)
-- `tick-trader-percore-workspace/DESIGN_SPECS/cfg-scope-discipline.md` § Anti-pattern 2 — discipline closure
-- `tick-trader-percore-workspace/DESIGN_SPECS/per-instance-registry-pattern.md` — the framework this primitive enforces
+- `tick-trader-percore-workspace/DESIGN_SPECS/cfg-scope-discipline.md` § Anti-pattern 2 — discipline closure (Section A + B)
+- `tick-trader-percore-workspace/DESIGN_SPECS/decision-time-data-binding-pattern.md` — Section C principle (Class 27 closure)
+- `tick-trader-percore-workspace/DESIGN_SPECS/per-instance-registry-pattern.md` — the framework Section A + B primitive enforces
 - `tick-trader-percore-workspace/DOCS/DESIGN_PHILOSOPHY.md` § 2 H17 — STRONG at `.F.4c.3` (per-core surface); HARD at `.F.4d` (full cfg surface)
+- `tick-trader-percore-workspace/DOCS/RECURRING_BUG_PATTERNS.md` Class 27 — Section C closure target
 - `CoreFrameworks/CfgFieldRegistry.hpp` — `FOREACH_PER_CORE_FIELD_TYPE` + `FOREACH_MANUAL_PER_CORE_FIELD` X-macros
-- `tools/check_per_core_registry_integrity.py` — CI cross-check enforcement
+- `tools/check_per_core_registry_integrity.py` — CI cross-check enforcement (Section A + B = Checks 1-6; Section C = Check 7)
 
 ---
 
-**Maintained at every per-core cfg field addition. CI build-fails on drift between this file + FOREACH_MANUAL_PER_CORE_FIELD X-macro + FOREACH_PER_CORE_FIELD_TYPE X-macro + PerCoreCfg<F> body.**
+**Maintained at every per-core cfg field addition + every subsystem-state-cfg-mirror exemption. CI build-fails on drift between this file + FOREACH_MANUAL_PER_CORE_FIELD X-macro + FOREACH_PER_CORE_FIELD_TYPE X-macro + PerCoreCfg<F> body + designated subsystem state types.**

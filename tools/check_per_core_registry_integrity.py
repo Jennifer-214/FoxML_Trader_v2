@@ -52,6 +52,15 @@ PERMITTED_RUNTIME_FIELDS = {
     "ops_cfg_flags",
 }
 
+# Check 7 — subsystem state types to scan for Class 27 (scalar cfg-mirror) violations.
+# Each entry maps a struct type name to its source file (relative to REPO_ROOT).
+# Add new subsystems here as they're audited for Class 27 cleanliness.
+# Per DESIGN_SPECS/decision-time-data-binding-pattern.md + RECURRING_BUG_PATTERNS Class 27.
+SUBSYSTEM_STATE_TYPES_FOR_CLASS_27_SCAN = {
+    "OrderManagerState": "CoreFrameworks/OrderManager.hpp",
+    # Future additions (post-WIP2d-1.B.1.b sweep): ConfidenceScorerState, etc.
+}
+
 
 def fail(msg: str) -> None:
     """Emit error to stderr in operator-readable format."""
@@ -267,6 +276,109 @@ def strip_macro_definitions(text: str) -> str:
     return '\n'.join(out)
 
 
+def parse_subsystem_state_struct_fields(text: str, struct_name: str) -> dict:
+    """Parse scalar field declarations inside `struct <struct_name> { ... };` or
+    `struct alignas(N) <struct_name> { ... };` or `template<...> struct <struct_name> { ... };`.
+
+    Returns dict {field_name: (type, line_no)}. Excludes:
+    - Array fields (e.g., per_core_X[16])      — already per-instance by construction
+    - Sub-struct fields (composite types)       — recursed-into separately if needed
+    - Nested struct/union declarations
+    - Comment-only lines
+    - X-macro invocations
+
+    Used by Check 7 to scan for Class 27 anti-pattern (scalar cfg-mirror on subsystem state).
+    """
+    # Match the struct definition (supports `struct alignas(N) NAME`, `template<...>\nstruct NAME`,
+    # or `struct NAME` patterns)
+    patterns = [
+        rf'template\s*<[^>]+>\s*\nstruct\s+(?:alignas\(\d+\)\s+)?{re.escape(struct_name)}\s*\{{(.*?)^\}};',
+        rf'struct\s+(?:alignas\(\d+\)\s+)?{re.escape(struct_name)}\s*\{{(.*?)^\}};',
+    ]
+    body = None
+    body_start_line = 0
+    for pattern in patterns:
+        m = re.search(pattern, text, re.MULTILINE | re.DOTALL)
+        if m:
+            body = m.group(1)
+            body_start_line = text[:m.start()].count('\n') + 2
+            break
+    if body is None:
+        return {}  # Struct not found; caller decides whether to fail or skip
+
+    scalar_fields = {}
+    nesting_depth = 0  # Track nested {} so we skip inner sub-structs
+    line_no = body_start_line
+    for line in body.split('\n'):
+        line_no += 1
+        # Track brace nesting to skip inner sub-structs / nested unions / etc.
+        nesting_depth += line.count('{') - line.count('}')
+        if nesting_depth > 0:
+            continue
+        # Strip inline comments
+        comment_pos = line.find('//')
+        if comment_pos >= 0:
+            line = line[:comment_pos]
+        line = line.strip()
+        if not line or line.startswith('/*') or line.startswith('*') or line.startswith('*/'):
+            continue
+        # Skip preprocessor + X-macro invocations + composite-struct declarations
+        if line.startswith('#') or 'FOREACH_' in line or 'EMIT_' in line:
+            continue
+        # Skip struct/class/union/enum keyword lines (sub-types within this struct)
+        if re.match(r'^(?:struct|class|union|enum)\b', line):
+            continue
+        # Match SCALAR field declaration:
+        #   optional 'alignas(N) ' prefix
+        #   then 'type name;' or 'type name = init;'
+        # Type can be: uint8_t, FPN<F>, double, etc.
+        # EXPLICITLY EXCLUDE: arrays (name[N]), pointers (type* name)
+        m = re.match(
+            r'^(?:alignas\(\d+\)\s+)?([a-zA-Z_][a-zA-Z_0-9]*(?:\s*<\s*[^>]+\s*>)?)\s+(\w+)\s*(?:=\s*[^;]+)?\s*;',
+            line,
+        )
+        if m:
+            typ = m.group(1).strip()
+            name = m.group(2).strip()
+            # Skip if it's actually an array decl that matched (defensive; should be excluded by regex)
+            if '[' in name:
+                continue
+            scalar_fields[name] = (typ, line_no)
+    return scalar_fields
+
+
+def parse_inventory_section_c(text: str) -> set:
+    """Parse Section C entries from MANUAL_FIELDS_INVENTORY.md. Returns set of (subsystem, field) tuples.
+
+    Section C rows look like: | subsystem | field | rationale_category | detail | trigger |
+    Empty Section C (zero exemptions) is the expected initial state at WIP2d-1.B.0c.
+    """
+    m = re.search(r'## Section C.*?(?=\n##\s|\Z)', text, re.DOTALL)
+    if not m:
+        # Section C is OPTIONAL (introduced at WIP2d-1.B.0c); missing = no exemptions
+        return set()
+    section_c = m.group(0)
+    # Parse rows: | <subsystem> | <field> | ... |
+    # Skip header row + separator row
+    exemptions = set()
+    for line in section_c.split('\n'):
+        line = line.strip()
+        if not line.startswith('|') or '---' in line:
+            continue
+        # Split on | + strip
+        parts = [p.strip() for p in line.split('|')[1:-1]]  # drop leading/trailing empty
+        if len(parts) < 2:
+            continue
+        # Header row sanity: if first col is 'Subsystem' (template header), skip
+        if parts[0].lower().startswith('subsystem'):
+            continue
+        subsystem = parts[0].strip('` ')
+        field = parts[1].strip('` ')
+        if subsystem and field and subsystem != '---' and field != '---':
+            exemptions.add((subsystem, field))
+    return exemptions
+
+
 def scan_anti_pattern_1(text: str) -> list:
     """Scan for anti-pattern 1 consumer shape: cfg.X + cfg.core_overrides[c].X same X.
 
@@ -394,11 +506,45 @@ def main() -> int:
         warn("  → cfg-scope-discipline.md § Anti-pattern 1 (global-default-with-override) FORBIDDEN")
         warn("  → WIP2f deletion of core_overrides[16] makes the shape UNEXPRESSIBLE; refactor before WIP2g for safety-critical sites")
 
+    # --- Check 7: Subsystem-state cfg-mirror scan (Class 27 prevention) ---
+    # Per DESIGN_SPECS/decision-time-data-binding-pattern.md + RECURRING_BUG_PATTERNS Class 27:
+    # scalar fields on subsystem state types that mirror cfg field names = anti-pattern.
+    # Required mitigation: pre-resolve onto in-flight object (Order/Position/Event) OR
+    # register fallback cache via FOREACH_<SUBSYS>_CFG_CACHE. Exemptions in Section C.
+    section_c_exemptions = parse_inventory_section_c(inventory_text)
+    cfg_field_name_set = set(cfg_field_map.keys())  # FOREACH_PER_CORE_CFG_FIELD names
+    check_7_violations = []
+    for subsys_name, subsys_path in SUBSYSTEM_STATE_TYPES_FOR_CLASS_27_SCAN.items():
+        full_path = REPO_ROOT / subsys_path
+        if not full_path.exists():
+            warn(f"Check 7 WARN: subsystem source not found: {subsys_path} — skipping {subsys_name}")
+            continue
+        subsys_text = read_file(full_path)
+        struct_fields = parse_subsystem_state_struct_fields(subsys_text, subsys_name)
+        if not struct_fields:
+            warn(f"Check 7 WARN: struct {subsys_name} not found or empty in {subsys_path}")
+            continue
+        # Check each scalar field against cfg field names
+        for field_name, (typ, line) in struct_fields.items():
+            if field_name in cfg_field_name_set and (subsys_name, field_name) not in section_c_exemptions:
+                check_7_violations.append((subsys_name, field_name, typ, subsys_path, line))
+    if check_7_violations:
+        fail(f"Check 7 FAIL: {len(check_7_violations)} Class 27 violation(s) — scalar cfg-mirror field(s) on subsystem state without Section C exemption:")
+        for subsys_name, field_name, typ, subsys_path, line in check_7_violations:
+            fail(f"  → {subsys_path}:{line}: '{typ} {field_name}' on {subsys_name}")
+            fail(f"     Class 27 anti-pattern — see DESIGN_SPECS/decision-time-data-binding-pattern.md")
+            fail(f"     Fix options: (a) pre-resolve onto in-flight object, OR")
+            fail(f"                  (b) FOREACH_{subsys_name.upper()}_CFG_CACHE registry, OR")
+            fail(f"                  (c) add exemption to MANUAL_FIELDS_INVENTORY.md Section C")
+        failures += 1
+    else:
+        info(f"Check 7 PASS: {len(SUBSYSTEM_STATE_TYPES_FOR_CLASS_27_SCAN)} subsystem state type(s) scanned; no Class 27 violations ({len(section_c_exemptions)} Section C exemption(s) on file)")
+
     # --- Final verdict ---
     if failures > 0:
         fail(f"per-core cfg integrity check FAILED with {failures} violations — see errors above")
         return 1
-    info(f"all 5 structural checks PASS — per-core cfg discipline intact")
+    info(f"all 6 structural checks PASS — per-core cfg discipline intact (Check 6 informational; Check 7 Class 27 prevention)")
     return 0
 
 
