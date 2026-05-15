@@ -164,38 +164,63 @@ namespace tt {
 // canonical engine precision. Static-storage-duration constexpr array → .rodata.
 //
 // Consumer (the bitmap walker in SettingsTab below):
-//   CFG_FIELD_FOR_EACH_SET_BIT(g_cfg_render_mask, idx, {
-//       CfgRenderTable<64>::fns[idx](cfg, g_cfg_field_descriptors[idx]);
+//   CFG_FIELD_FOR_EACH_SET_BIT(g_global_cfg_render_mask.words, idx, {
+//       GlobalCfgRenderTable<64>::fns[idx](cfg, g_global_cfg_field_descriptors[idx], cfg_path);
 //   });
+//   CFG_FIELD_FOR_EACH_SET_BIT(g_per_core_cfg_render_mask.words, idx, {
+//       PerCoreCfgRenderTable<64>::fns[idx](cfg, g_per_core_cfg_field_descriptors[idx], cfg_path);
+//   });
+//
+// .F.4c.3 — split into GlobalCfgRenderTable + PerCoreCfgRenderTable per the
+// two-registry architecture. Each table's `fns[]` sized to its registry's
+// FIELD_IDX_*_END sentinel. Today both render against `gui_engine_cfg` (the
+// flat ControllerConfig<F> instance — fields haven't moved yet). Step 2 will
+// restructure to PerCoreCfgRenderTable receiving cfg.cores[c] reference.
 //==========================================================================
 template <unsigned F>
-struct CfgRenderTable {
+struct GlobalCfgRenderTable {
     // v5.15.5.F.4c — render-and-persist fn signature: each call dispatches via
     // cfg_render_and_persist<T> wrapper (render + save + per-edit file write).
-    // Walker call site is one line: `CfgRenderTable<F>::fns[idx](cfg, desc, cfg_path)`.
     using RenderFn = bool (*)(ControllerConfig<F>&, const CfgFieldDescriptor&, const char*);
 
-    // X-macro generates one per-field static render function. Each instantiates
-    // cfg_render_and_persist<T> with T = decltype(cfg.<name>) — handled by the
-    // template's type-trait dispatch (FPN / float / array / integral branches).
-    // Per-edit persistence: render-changed → tt::cfg_save_field → cfg_write_field.
-    #define X_GEN_RENDER_FN(KIND_TOKEN, name, label, section, meta, payload, tooltip, \
-                              applies_to_strategy, applies_to_op_mode, \
-                              applies_to_regime, applies_to_risk, lives_in_struct) \
+    #define X_GEN_GLOBAL_RENDER_FN(KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+                                     applies_to_strategy, applies_to_op_mode, \
+                                     applies_to_regime, applies_to_risk, lives_in_struct) \
         static bool render_##name(ControllerConfig<F>& cfg, const CfgFieldDescriptor& desc, const char* cfg_path) { \
             return cfg_render_and_persist(cfg.name, desc, cfg_path); \
         }
-    FOREACH_CFG_FIELD(X_GEN_RENDER_FN)
-    #undef X_GEN_RENDER_FN
+    FOREACH_GLOBAL_CFG_FIELD(X_GEN_GLOBAL_RENDER_FN)
+    #undef X_GEN_GLOBAL_RENDER_FN
 
-    // Function pointer table — constexpr → .rodata. Index by FIELD_IDX_<name>
-    // or by bitmap iteration result.
-    #define X_GEN_RENDER_PTR(KIND_TOKEN, name, label, section, meta, payload, tooltip, ...) \
-        &CfgRenderTable<F>::render_##name,
-    static constexpr RenderFn fns[FIELD_IDX_END] = {
-        FOREACH_CFG_FIELD(X_GEN_RENDER_PTR)
+    #define X_GEN_GLOBAL_RENDER_PTR(KIND_TOKEN, name, label, section, meta, payload, tooltip, ...) \
+        &GlobalCfgRenderTable<F>::render_##name,
+    static constexpr RenderFn fns[FIELD_IDX_GLOBAL_END] = {
+        FOREACH_GLOBAL_CFG_FIELD(X_GEN_GLOBAL_RENDER_PTR)
     };
-    #undef X_GEN_RENDER_PTR
+    #undef X_GEN_GLOBAL_RENDER_PTR
+};
+
+template <unsigned F>
+struct PerCoreCfgRenderTable {
+    // Per-core render table. .F.4c.3 — still consumes ControllerConfig<F>&
+    // (fields haven't moved yet); Step 2 restructures to PerCoreCfg<F>& cores[c].
+    using RenderFn = bool (*)(ControllerConfig<F>&, const CfgFieldDescriptor&, const char*);
+
+    #define X_GEN_PER_CORE_RENDER_FN(KIND_TOKEN, name, label, section, meta, payload, tooltip, \
+                                       applies_to_strategy, applies_to_op_mode, \
+                                       applies_to_regime, applies_to_risk, lives_in_struct) \
+        static bool render_##name(ControllerConfig<F>& cfg, const CfgFieldDescriptor& desc, const char* cfg_path) { \
+            return cfg_render_and_persist(cfg.name, desc, cfg_path); \
+        }
+    FOREACH_PER_CORE_CFG_FIELD(X_GEN_PER_CORE_RENDER_FN)
+    #undef X_GEN_PER_CORE_RENDER_FN
+
+    #define X_GEN_PER_CORE_RENDER_PTR(KIND_TOKEN, name, label, section, meta, payload, tooltip, ...) \
+        &PerCoreCfgRenderTable<F>::render_##name,
+    static constexpr RenderFn fns[FIELD_IDX_PER_CORE_END] = {
+        FOREACH_PER_CORE_CFG_FIELD(X_GEN_PER_CORE_RENDER_PTR)
+    };
+    #undef X_GEN_PER_CORE_RENDER_PTR
 };
 
 // Forward decl — cfg_write_field is defined later in this file (line ~640).
@@ -1040,46 +1065,37 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
     }
 
     //==========================================================================
-    // v5.15.5.F.4c — Bitmap-dispatch walker for FOREACH_CFG_FIELD rows
+    // v5.15.5.F.4c.3 — Bitmap-dispatch walker for two-registry architecture
     //==========================================================================
-    // Replaces the prior EMIT_CFG_FIELD_DEF_FROM_REGISTRY field_defs[] auto-
-    // extension (removed at .F.4c). Iterates precomputed g_cfg_render_mask
-    // (composed at compile time: ~boot_only AND ~hidden_by_default) via branchless
-    // bitmap iteration; per-row dispatch through CfgRenderTable<64>::fns calls
-    // cfg_render_and_persist<T> which handles render + format + per-edit file write.
+    // Two walks: first FOREACH_GLOBAL_CFG_FIELD rows, then FOREACH_PER_CORE_CFG_FIELD.
+    // Today both render into `gui_engine_cfg` (flat ControllerConfig<F> instance);
+    // Step 2 of .F.4c.3 will restructure per-core rows to render against
+    // cfg.cores[c] in dedicated per-core tabs.
     //
-    // Section-grouping mirrors the field_defs[] loop above (CollapsingHeader per
-    // section transition; strategy filter via global_section_strategy +
+    // Section-grouping mirrors the field_defs[] loop above; per-section
+    // CollapsingHeader; strategy filter via global_section_strategy +
     // any_core_uses_strategy; default_open whitelist for Trading / Entry Filters /
-    // EMA Gate). FOREACH_CFG_FIELD rows are declared section-grouped, so iteration
-    // in FIELD_IDX_* order = section-grouped order.
-    //
-    // Note: hardcoded field_defs[] entries above may have Trading / Entry Filters
-    // section headers; FOREACH_CFG_FIELD rows then emit those same section headers
-    // again here. Section appearing twice is a known visual quirk from the .F.4b
-    // migration; addressed at a future unified-walker refactor (not .F.4c scope).
+    // EMA Gate. Rows are declared section-grouped within each registry, so
+    // iteration in FIELD_IDX_* order = section-grouped order.
     //==========================================================================
     {
         const char *cfg_walker_section = NULL;
         bool cfg_walker_skip_section = false;
 
-        CFG_FIELD_FOR_EACH_SET_BIT(g_cfg_render_mask.words, idx, {
-            const CfgFieldDescriptor &desc = g_cfg_field_descriptors[idx];
+        // === Global registry walk ===
+        CFG_FIELD_FOR_EACH_SET_BIT(g_global_cfg_render_mask.words, idx, {
+            const CfgFieldDescriptor &desc = g_global_cfg_field_descriptors[idx];
 
-            // Section header transition logic (mirrors lines 964-987 of field_defs[] loop)
             if (!cfg_walker_section || strcmp(cfg_walker_section, desc.section) != 0) {
                 cfg_walker_section = desc.section;
                 cfg_walker_skip_section = false;
 
-                // Strategy-specific section hiding (e.g., MeanReversion Tuning hidden
-                // when no core uses STRATEGY_MEAN_REVERSION).
                 int sec_strat = global_section_strategy(cfg_walker_section);
                 if (sec_strat >= 0 && !any_core_uses_strategy(s, sec_strat)) {
                     cfg_walker_skip_section = true;
                     continue;
                 }
 
-                // Emit CollapsingHeader; default_open whitelist matches field_defs[] loop.
                 bool default_open = (strcmp(desc.section, "Trading") == 0 ||
                                       strcmp(desc.section, "Entry Filters") == 0 ||
                                       strcmp(desc.section, "EMA Gate") == 0);
@@ -1091,10 +1107,44 @@ static inline bool Settings_RenderGlobalTab(SettingsState *s) {
             }
             if (cfg_walker_skip_section) continue;
 
-            // Per-row render + per-edit persist via the typed dispatch table.
-            // cfg_render_and_persist returns true if the field value changed this frame.
             ImGui::SetNextItemWidth(80);
-            if (CfgRenderTable<64>::fns[idx](s->gui_engine_cfg, desc, s->cfg_path)) {
+            if (GlobalCfgRenderTable<64>::fns[idx](s->gui_engine_cfg, desc, s->cfg_path)) {
+                changed = true;
+            }
+        });
+
+        // === Per-core registry walk ===
+        // .F.4c.3 Step 1: per-core rows still render against `gui_engine_cfg`
+        // flat fields. Step 2 will move these into per-core tabs against
+        // `gui_engine_cfg.cores[c]`.
+        cfg_walker_section = NULL;
+        cfg_walker_skip_section = false;
+        CFG_FIELD_FOR_EACH_SET_BIT(g_per_core_cfg_render_mask.words, idx, {
+            const CfgFieldDescriptor &desc = g_per_core_cfg_field_descriptors[idx];
+
+            if (!cfg_walker_section || strcmp(cfg_walker_section, desc.section) != 0) {
+                cfg_walker_section = desc.section;
+                cfg_walker_skip_section = false;
+
+                int sec_strat = global_section_strategy(cfg_walker_section);
+                if (sec_strat >= 0 && !any_core_uses_strategy(s, sec_strat)) {
+                    cfg_walker_skip_section = true;
+                    continue;
+                }
+
+                bool default_open = (strcmp(desc.section, "Trading") == 0 ||
+                                      strcmp(desc.section, "Entry Filters") == 0 ||
+                                      strcmp(desc.section, "EMA Gate") == 0);
+                if (!ImGui::CollapsingHeader(desc.section,
+                        default_open ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
+                    cfg_walker_skip_section = true;
+                    continue;
+                }
+            }
+            if (cfg_walker_skip_section) continue;
+
+            ImGui::SetNextItemWidth(80);
+            if (PerCoreCfgRenderTable<64>::fns[idx](s->gui_engine_cfg, desc, s->cfg_path)) {
                 changed = true;
             }
         });

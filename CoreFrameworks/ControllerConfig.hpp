@@ -1875,17 +1875,23 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     }
 
     //==================================================================================================
-    // [v5.15.5.F.4b] REGISTRY-DRIVEN DISPATCH — runs FIRST; manual CFG_PARSE_* below are fallback
+    // [v5.15.5.F.4c.3] REGISTRY-DRIVEN DISPATCH — runs FIRST; manual CFG_PARSE_* below are fallback
     //==================================================================================================
-    // For each FOREACH_CFG_FIELD entry: if `key` matches the row's name, call
-    // tt::cfg_parse_field<T>(cfg.name, descriptor, val) — T is deduced from
-    // cfg.name's actual type (FPN<F> or scalar). 3-barrier structural fix per
-    // DOCS/RECURRING_BUG_PATTERNS.md Class 23 +
+    // For each FOREACH_GLOBAL_CFG_FIELD + FOREACH_PER_CORE_CFG_FIELD entry: if
+    // `key` matches the row's name, call tt::cfg_parse_field<T>(cfg.name, descriptor, val)
+    // — T is deduced from cfg.name's actual type (FPN<F> or scalar). 3-barrier
+    // structural fix per DOCS/RECURRING_BUG_PATTERNS.md Class 23 +
     // DESIGN_SPECS/type-trait-dispatch-via-tt-namespace.md.
     //
+    // .F.4c.3 — registry split into two scope-disjoint registries (global vs
+    // per-core). Parser walks BOTH; consumer field references remain at
+    // cfg.<name> until Step 2 restructures ControllerConfig.hpp with
+    // PerCoreCfg<F> cores[16]. Future ship .F.4c.3 Step 3 introduces [core N]
+    // section parser; this walker fires only in the GLOBAL section.
+    //
     // Manual CFG_PARSE_FPN/PCT/U32/INT/FPN_POS macros below stay in place for
-    // fields NOT yet in FOREACH_CFG_FIELD (KIND_INT/_BOOL/_STRING migrate at
-    // .F.4c/.F.4d). For fields IN the registry, the walk's `continue;` makes
+    // fields NOT yet in either registry (KIND_STRING/_FILE_PATH migrate at
+    // .F.4e). For fields IN the registries, the walk's `continue;` makes
     // the manual lines unreachable — cleanup deletion happens after build/test
     // verifies the migration works.
     //
@@ -1895,19 +1901,26 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     //==================================================================================================
     // v5.15.5.F.4c — HAS_SIDE_EFFECT bit: registry walker skips parse; manual parser block
     // below handles the side-effect logic (e.g., fee_rate_maker/_taker explicit_set tracking,
-    // risk_scale_by_confidence DEPRECATED shim translation, crypto-init pairs). Forward-compat
-    // infrastructure: no .F.4c rows use HAS_SIDE_EFFECT yet (side-effect fields stay outside
-    // FOREACH_CFG_FIELD entirely at .F.4c); bit + check land here so future ships can add such
-    // rows with declarative side-effect documentation without restructuring the walker.
-    #define EMIT_CFG_PARSER_CASE(KIND_TOKEN, name, label, section, meta, payload_init, tooltip, \
-                                  applies_to_strategy, applies_to_op_mode, \
-                                  applies_to_regime, applies_to_risk, lives_in_struct) \
+    // risk_scale_by_confidence DEPRECATED shim translation, crypto-init pairs).
+    #define EMIT_GLOBAL_CFG_PARSER_CASE(KIND_TOKEN, name, label, section, meta, payload_init, tooltip, \
+                                         applies_to_strategy, applies_to_op_mode, \
+                                         applies_to_regime, applies_to_risk, lives_in_struct) \
         if (strcmp(key, #name) == 0 && !((meta) & CfgFieldDescriptor::HAS_SIDE_EFFECT)) { \
-            tt::cfg_parse_field(cfg.name, g_cfg_field_descriptors[FIELD_IDX_##name], val); \
+            tt::cfg_parse_field(cfg.name, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_##name], val); \
             continue; \
         }
-    FOREACH_CFG_FIELD(EMIT_CFG_PARSER_CASE)
-    #undef EMIT_CFG_PARSER_CASE
+    FOREACH_GLOBAL_CFG_FIELD(EMIT_GLOBAL_CFG_PARSER_CASE)
+    #undef EMIT_GLOBAL_CFG_PARSER_CASE
+
+    #define EMIT_PER_CORE_CFG_PARSER_CASE(KIND_TOKEN, name, label, section, meta, payload_init, tooltip, \
+                                           applies_to_strategy, applies_to_op_mode, \
+                                           applies_to_regime, applies_to_risk, lives_in_struct) \
+        if (strcmp(key, #name) == 0 && !((meta) & CfgFieldDescriptor::HAS_SIDE_EFFECT)) { \
+            tt::cfg_parse_field(cfg.name, g_per_core_cfg_field_descriptors[FIELD_IDX_PER_CORE_##name], val); \
+            continue; \
+        }
+    FOREACH_PER_CORE_CFG_FIELD(EMIT_PER_CORE_CFG_PARSER_CASE)
+    #undef EMIT_PER_CORE_CFG_PARSER_CASE
 
 // table-driven parser: FPN fields parsed as atof(val) directly
 // adding a new field = add ONE line to the matching table below

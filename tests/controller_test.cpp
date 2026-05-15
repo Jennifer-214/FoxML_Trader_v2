@@ -103,13 +103,17 @@ static_assert(!is_FPN_v<uint64_t>,              "v5.15.5.F.4b: is_FPN_v should r
 static_assert(FPN<64>::F == 64,                 "v5.15.5.F.4b: FPN<64>::F should expose template param value (64)");
 static_assert(FPN<128>::F == 128,               "v5.15.5.F.4b: FPN<128>::F should expose template param value (128)");
 
-// CfgFieldRegistry sanity asserts (v5.15.5.F.4b T7.2)
+// CfgFieldRegistry sanity asserts (v5.15.5.F.4c.3 — two-registry architecture)
 static_assert(sizeof(CfgFieldDescriptor) <= 128,
               "v5.15.5.F.4b: CfgFieldDescriptor must fit two cache lines");
-static_assert(FIELD_IDX_END > 0,
-              "v5.15.5.F.4b: FOREACH_CFG_FIELD must have at least one entry");
-static_assert(FIELD_IDX_END == sizeof(g_cfg_field_descriptors) / sizeof(g_cfg_field_descriptors[0]),
-              "v5.15.5.F.4b: g_cfg_field_descriptors size must match FIELD_IDX_END");
+static_assert(FIELD_IDX_GLOBAL_END > 0,
+              "v5.15.5.F.4c.3: FOREACH_GLOBAL_CFG_FIELD must have at least one entry");
+static_assert(FIELD_IDX_PER_CORE_END > 0,
+              "v5.15.5.F.4c.3: FOREACH_PER_CORE_CFG_FIELD must have at least one entry");
+static_assert(FIELD_IDX_GLOBAL_END == sizeof(g_global_cfg_field_descriptors) / sizeof(g_global_cfg_field_descriptors[0]),
+              "v5.15.5.F.4c.3: g_global_cfg_field_descriptors size must match FIELD_IDX_GLOBAL_END");
+static_assert(FIELD_IDX_PER_CORE_END == sizeof(g_per_core_cfg_field_descriptors) / sizeof(g_per_core_cfg_field_descriptors[0]),
+              "v5.15.5.F.4c.3: g_per_core_cfg_field_descriptors size must match FIELD_IDX_PER_CORE_END");
 static_assert(STRAT_CAT_USES_FLOW_DATA < (1ull << 32),
               "v5.15.5.F.4b: StrategyCategory bitmap overflow guard");
 static_assert(OP_MODE_CAT_OFFLINE < (1u << 16),
@@ -1549,11 +1553,10 @@ static void test_v5_15_5_F4b_cfg_field_dispatch() {
     printf("\n[v5.15.5.F.4b CfgFieldRegistry + tt:: dispatch]\n");
 
     // === T1: FPN<F> dispatch — KIND_DOUBLE_PCT roundtrip ===
-    // Parse "3.0" via tt::cfg_parse_field<FPN<64>> for take_profit_pct (KIND_DOUBLE_PCT).
-    // Operator types "3.0" → stored as 0.03 (PCT scaling /100).
+    // .F.4c.3 — take_profit_pct now lives in FOREACH_PER_CORE_CFG_FIELD.
     {
         FPN<64> dst = FPN_FromDouble<64>(0.0);
-        tt::cfg_parse_field(dst, g_cfg_field_descriptors[FIELD_IDX_take_profit_pct], "3.0");
+        tt::cfg_parse_field(dst, g_per_core_cfg_field_descriptors[FIELD_IDX_PER_CORE_take_profit_pct], "3.0");
         double parsed = FPN_ToDouble(dst);
         check("v5.15.5.F.4b: KIND_DOUBLE_PCT parse '3.0' → 0.03 (PCT /100 scaling)",
               fabs(parsed - 0.03) < 1e-9);
@@ -1563,7 +1566,7 @@ static void test_v5_15_5_F4b_cfg_field_dispatch() {
     {
         FPN<64> src = FPN_FromDouble<64>(0.0234);
         char buf[64] = {0};
-        int n = tt::cfg_save_field(src, g_cfg_field_descriptors[FIELD_IDX_take_profit_pct], buf, sizeof(buf));
+        int n = tt::cfg_save_field(src, g_per_core_cfg_field_descriptors[FIELD_IDX_PER_CORE_take_profit_pct], buf, sizeof(buf));
         check("v5.15.5.F.4b: KIND_DOUBLE_PCT save returns positive char count", n > 0);
         // "%.2f" on 2.34 (= 0.0234 * 100) produces "2.34"
         check("v5.15.5.F.4b: KIND_DOUBLE_PCT save '0.0234' → '2.34' (PCT *100 + locale-pinned)",
@@ -1577,44 +1580,53 @@ static void test_v5_15_5_F4b_cfg_field_dispatch() {
         setlocale(LC_NUMERIC, "de_DE.UTF-8");  // German locale uses ',' decimal
         FPN<64> src = FPN_FromDouble<64>(0.0234);
         char buf[64] = {0};
-        tt::cfg_save_field(src, g_cfg_field_descriptors[FIELD_IDX_take_profit_pct], buf, sizeof(buf));
+        tt::cfg_save_field(src, g_per_core_cfg_field_descriptors[FIELD_IDX_PER_CORE_take_profit_pct], buf, sizeof(buf));
         check("v5.15.5.F.4b: tt::cfg_save_field is locale-immune (de_DE → '2.34' not '2,34')",
               strcmp(buf, "2.34") == 0);
         setlocale(LC_NUMERIC, prev_locale);  // restore
     }
 
     // === T4: CI Test 2 — every cfg row has applies_to_strategy_cat != 0 ===
-    // Per DESIGN_SPECS/categorical-tag-applicability-pattern.md: cfg fields without
-    // strategy applicability are operator-confusion bait. Sentinel STRAT_CAT_ALL covers
-    // universal applicability; never zero.
+    // .F.4c.3 — check BOTH registries (global + per-core).
     {
         bool all_have_strategy_applicability = true;
         size_t orphan_idx = 0;
-        for (size_t i = 0; i < FIELD_IDX_END; i++) {
-            if (g_cfg_field_descriptors[i].applies_to_strategy_cat == 0) {
+        const CfgFieldDescriptor* orphan_arr = nullptr;
+        for (size_t i = 0; i < FIELD_IDX_GLOBAL_END; ++i) {
+            if (g_global_cfg_field_descriptors[i].applies_to_strategy_cat == 0) {
                 all_have_strategy_applicability = false;
                 orphan_idx = i;
+                orphan_arr = g_global_cfg_field_descriptors;
                 break;
+            }
+        }
+        if (all_have_strategy_applicability) {
+            for (size_t i = 0; i < FIELD_IDX_PER_CORE_END; ++i) {
+                if (g_per_core_cfg_field_descriptors[i].applies_to_strategy_cat == 0) {
+                    all_have_strategy_applicability = false;
+                    orphan_idx = i;
+                    orphan_arr = g_per_core_cfg_field_descriptors;
+                    break;
+                }
             }
         }
         check("v5.15.5.F.4b: CI Test 2 — every cfg row has applies_to_strategy_cat != 0",
               all_have_strategy_applicability);
-        if (!all_have_strategy_applicability) {
+        if (!all_have_strategy_applicability && orphan_arr) {
             printf("    [DEBUG] orphan field idx %zu: %s\n", orphan_idx,
-                   g_cfg_field_descriptors[orphan_idx].cfg_field_name);
+                   orphan_arr[orphan_idx].cfg_field_name);
         }
     }
 
     // === T5: Tooltip preservation spot-check (HIGH-6 discipline) ===
-    // Sample fields with operator-tuned tooltips that MUST be preserved byte-identical
-    // from pre-migration GUI/SettingsPanel.hpp field_defs[].
+    // .F.4c.3 — fee_rate + regime_strong_crossover both in PER_CORE registry.
     {
-        const CfgFieldDescriptor& desc_fee = g_cfg_field_descriptors[FIELD_IDX_fee_rate];
+        const CfgFieldDescriptor& desc_fee = g_per_core_cfg_field_descriptors[FIELD_IDX_PER_CORE_fee_rate];
         check("v5.15.5.F.4b: fee_rate tooltip preserved (non-null)", desc_fee.tooltip != nullptr);
         check("v5.15.5.F.4b: fee_rate tooltip mentions 'pre-trade quantity computations'",
               desc_fee.tooltip && strstr(desc_fee.tooltip, "pre-trade quantity computations") != nullptr);
 
-        const CfgFieldDescriptor& desc_regime = g_cfg_field_descriptors[FIELD_IDX_regime_strong_crossover];
+        const CfgFieldDescriptor& desc_regime = g_per_core_cfg_field_descriptors[FIELD_IDX_PER_CORE_regime_strong_crossover];
         check("v5.15.5.F.4b: regime_strong_crossover tooltip preserved (non-null)",
               desc_regime.tooltip != nullptr);
         check("v5.15.5.F.4b: regime_strong_crossover tooltip mentions 'BTC $68k' (operator prose)",
@@ -1622,9 +1634,14 @@ static void test_v5_15_5_F4b_cfg_field_dispatch() {
     }
 
     // === T6: Registry size sanity ===
+    // .F.4c.3 — combined ≥ 30 (per-core alone is 79; global is 47).
     {
-        check("v5.15.5.F.4b: g_cfg_field_descriptors has at least 30 entries (KIND_DOUBLE/_PCT cohort)",
-              FIELD_IDX_END >= 30);
+        check("v5.15.5.F.4c.3: both registries combined have at least 30 entries (KIND_DOUBLE/_PCT cohort)",
+              (FIELD_IDX_GLOBAL_END + FIELD_IDX_PER_CORE_END) >= 30);
+        check("v5.15.5.F.4c.3: PER_CORE registry has at least 50 entries (trading + strategy + ML cohort)",
+              FIELD_IDX_PER_CORE_END >= 50);
+        check("v5.15.5.F.4c.3: GLOBAL registry has at least 30 entries (system + training + ops cohort)",
+              FIELD_IDX_GLOBAL_END >= 30);
     }
 }
 
@@ -1644,36 +1661,35 @@ static void test_v5_15_5_F4c_cfg_field_dispatch() {
     printf("\n[v5.15.5.F.4c KIND_INT/_BOOL dispatch + bitmap framework + tooltip stability]\n");
 
     // === T7: KIND_INT parse roundtrip (uint32 storage; clamp range from descriptor) ===
-    // poll_interval is KIND_INT with payload INT(100, 1, 1000000); storage uint32_t.
+    // .F.4c.3 — poll_interval now lives in FOREACH_GLOBAL_CFG_FIELD.
     {
         uint32_t dst = 0;
-        tt::cfg_parse_field(dst, g_cfg_field_descriptors[FIELD_IDX_poll_interval], "500");
+        tt::cfg_parse_field(dst, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_poll_interval], "500");
         check("v5.15.5.F.4c: KIND_INT parse '500' → 500", dst == 500u);
 
         char buf[32] = {0};
-        tt::cfg_save_field(dst, g_cfg_field_descriptors[FIELD_IDX_poll_interval], buf, sizeof(buf));
+        tt::cfg_save_field(dst, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_poll_interval], buf, sizeof(buf));
         check("v5.15.5.F.4c: KIND_INT save 500 → '500'", strcmp(buf, "500") == 0);
     }
 
     // === T8: KIND_INT WARN_ON_CLAMP — out-of-range clamps to bound ===
-    // poll_interval clamp is [1, 1000000]; parse '0' clamps to 1.
     {
         uint32_t dst = 999;
-        tt::cfg_parse_field(dst, g_cfg_field_descriptors[FIELD_IDX_poll_interval], "0");
+        tt::cfg_parse_field(dst, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_poll_interval], "0");
         check("v5.15.5.F.4c: KIND_INT '0' clamped to clamp_min=1", dst == 1u);
     }
 
     // === T9: KIND_BOOL truthy normalization (any non-zero → 1; zero → 0) ===
-    // record_ticks is KIND_INT_BOOL (int storage); descriptor.kind = KIND_BOOL.
+    // .F.4c.3 — record_ticks now lives in FOREACH_GLOBAL_CFG_FIELD.
     {
         int dst = 0;
-        tt::cfg_parse_field(dst, g_cfg_field_descriptors[FIELD_IDX_record_ticks], "42");
+        tt::cfg_parse_field(dst, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_record_ticks], "42");
         check("v5.15.5.F.4c: KIND_BOOL '42' (truthy) normalizes to 1", dst == 1);
 
-        tt::cfg_parse_field(dst, g_cfg_field_descriptors[FIELD_IDX_record_ticks], "0");
+        tt::cfg_parse_field(dst, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_record_ticks], "0");
         check("v5.15.5.F.4c: KIND_BOOL '0' (falsy) normalizes to 0", dst == 0);
 
-        tt::cfg_parse_field(dst, g_cfg_field_descriptors[FIELD_IDX_record_ticks], "1");
+        tt::cfg_parse_field(dst, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_record_ticks], "1");
         check("v5.15.5.F.4c: KIND_BOOL '1' stays 1", dst == 1);
     }
 
@@ -1681,60 +1697,76 @@ static void test_v5_15_5_F4c_cfg_field_dispatch() {
     {
         int src = 1;
         char buf[32] = {0};
-        tt::cfg_save_field(src, g_cfg_field_descriptors[FIELD_IDX_record_ticks], buf, sizeof(buf));
+        tt::cfg_save_field(src, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_record_ticks], buf, sizeof(buf));
         check("v5.15.5.F.4c: KIND_BOOL save 1 → '1'", strcmp(buf, "1") == 0);
 
         src = 0;
-        tt::cfg_save_field(src, g_cfg_field_descriptors[FIELD_IDX_record_ticks], buf, sizeof(buf));
+        tt::cfg_save_field(src, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_record_ticks], buf, sizeof(buf));
         check("v5.15.5.F.4c: KIND_BOOL save 0 → '0'", strcmp(buf, "0") == 0);
 
         src = 99;  // truthy non-1
-        tt::cfg_save_field(src, g_cfg_field_descriptors[FIELD_IDX_record_ticks], buf, sizeof(buf));
+        tt::cfg_save_field(src, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_record_ticks], buf, sizeof(buf));
         check("v5.15.5.F.4c: KIND_BOOL save 99 normalizes to '1'", strcmp(buf, "1") == 0);
     }
 
-    // === T11: Bitmap framework — per-bit mask popcount ===
-    // g_cfg_is_boot_only_mask should have at least 10 set bits (C1a + C2 + C3 + C5 BOOT_ONLY tags).
+    // === T11: Bitmap framework — per-bit mask popcount (per-registry counts) ===
+    // .F.4c.3 — mask sums across BOTH registries should still meet aggregate thresholds.
     {
-        size_t boot_only_count = cfg_field_count(g_cfg_is_boot_only_mask);
-        check("v5.15.5.F.4c: g_cfg_is_boot_only_mask has ≥10 bits set (cohort BOOT_ONLY tagging)",
+        size_t boot_only_count = cfg_field_count(g_global_cfg_is_boot_only_mask)
+                              + cfg_field_count(g_per_core_cfg_is_boot_only_mask);
+        check("v5.15.5.F.4c.3: BOOT_ONLY mask aggregate ≥10 bits (cohort tagging across registries)",
               boot_only_count >= 10);
 
-        size_t warn_on_clamp_count = cfg_field_count(g_cfg_warn_on_clamp_mask);
-        check("v5.15.5.F.4c: g_cfg_warn_on_clamp_mask has ≥40 bits set (most C1-C5 rows tagged)",
+        size_t warn_on_clamp_count = cfg_field_count(g_global_cfg_warn_on_clamp_mask)
+                                  + cfg_field_count(g_per_core_cfg_warn_on_clamp_mask);
+        check("v5.15.5.F.4c.3: WARN_ON_CLAMP mask aggregate ≥40 bits (most C1-C5 rows tagged)",
               warn_on_clamp_count >= 40);
 
-        size_t has_side_effect_count = cfg_field_count(g_cfg_has_side_effect_mask);
-        check("v5.15.5.F.4c: g_cfg_has_side_effect_mask has ≥4 bits set (reconcile_mode/engine_mode/engine_arch/model_verify_strict/thompson_rng_seed)",
+        size_t has_side_effect_count = cfg_field_count(g_global_cfg_has_side_effect_mask)
+                                    + cfg_field_count(g_per_core_cfg_has_side_effect_mask);
+        check("v5.15.5.F.4c.3: HAS_SIDE_EFFECT mask aggregate ≥4 bits (reconcile_mode/engine_mode/engine_arch/model_verify_strict/thompson_rng_seed/bandit_algorithm/risk_degradation_curve/trading_mode)",
               has_side_effect_count >= 4);
     }
 
     // === T12: Bitmap framework — CFG_FIELD_FOR_EACH_SET_BIT iteration matches popcount ===
     {
         size_t iter_count = 0;
-        CFG_FIELD_FOR_EACH_SET_BIT(g_cfg_is_boot_only_mask.words, idx, {
+        CFG_FIELD_FOR_EACH_SET_BIT(g_global_cfg_is_boot_only_mask.words, idx, {
             (void)idx;
             iter_count++;
         });
-        size_t pop_count = cfg_field_count(g_cfg_is_boot_only_mask);
-        check("v5.15.5.F.4c: bitmap iteration count == popcount (sanity)",
+        size_t pop_count = cfg_field_count(g_global_cfg_is_boot_only_mask);
+        check("v5.15.5.F.4c.3: global bitmap iteration count == popcount (sanity)",
+              iter_count == pop_count);
+
+        iter_count = 0;
+        CFG_FIELD_FOR_EACH_SET_BIT(g_per_core_cfg_is_boot_only_mask.words, idx, {
+            (void)idx;
+            iter_count++;
+        });
+        pop_count = cfg_field_count(g_per_core_cfg_is_boot_only_mask);
+        check("v5.15.5.F.4c.3: per-core bitmap iteration count == popcount (sanity)",
               iter_count == pop_count);
     }
 
-    // === T13: g_cfg_render_mask composition (NOT boot_only AND NOT hidden_by_default) ===
+    // === T13: Per-registry render_mask composition (NOT boot_only AND NOT hidden_by_default) ===
     {
-        size_t render_count = cfg_field_count(g_cfg_render_mask);
-        size_t boot_only_count = cfg_field_count(g_cfg_is_boot_only_mask);
-        check("v5.15.5.F.4c: g_cfg_render_mask popcount < FIELD_IDX_END (some fields excluded by BOOT_ONLY)",
-              render_count < FIELD_IDX_END);
-        check("v5.15.5.F.4c: render_count + boot_only_count ≈ FIELD_IDX_END (composition correctness)",
-              render_count + boot_only_count >= (size_t)(FIELD_IDX_END * 0.9));  // ~within 10% (hidden_by_default + overlap)
+        size_t global_render = cfg_field_count(g_global_cfg_render_mask);
+        size_t global_boot = cfg_field_count(g_global_cfg_is_boot_only_mask);
+        check("v5.15.5.F.4c.3: g_global_cfg_render_mask popcount < FIELD_IDX_GLOBAL_END",
+              global_render < (size_t)FIELD_IDX_GLOBAL_END);
+        check("v5.15.5.F.4c.3: global render + boot_only ≈ FIELD_IDX_GLOBAL_END",
+              global_render + global_boot >= (size_t)(FIELD_IDX_GLOBAL_END * 0.9));
+
+        size_t per_core_render = cfg_field_count(g_per_core_cfg_render_mask);
+        check("v5.15.5.F.4c.3: g_per_core_cfg_render_mask popcount ≤ FIELD_IDX_PER_CORE_END",
+              per_core_render <= (size_t)FIELD_IDX_PER_CORE_END);
     }
 
     // === T14: tt::cfg_assign_field<T> — sets KIND_BOOL field to descriptor default ===
     {
         int dst = 99;  // non-default
-        tt::cfg_assign_field(dst, g_cfg_field_descriptors[FIELD_IDX_record_ticks]);
+        tt::cfg_assign_field(dst, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_record_ticks]);
         check("v5.15.5.F.4c: cfg_assign_field KIND_BOOL → descriptor default (0)",
               dst == 0);
     }
@@ -1742,54 +1774,55 @@ static void test_v5_15_5_F4c_cfg_field_dispatch() {
     // === T15: tt::cfg_diff_field<T> — returns true when current != default ===
     {
         int current = 1;  // record_ticks default is 0
-        bool differs = tt::cfg_diff_field(current, g_cfg_field_descriptors[FIELD_IDX_record_ticks]);
+        bool differs = tt::cfg_diff_field(current, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_record_ticks]);
         check("v5.15.5.F.4c: cfg_diff_field KIND_BOOL detects modified (1 != default 0)",
               differs);
 
         int at_default = 0;
-        bool same = !tt::cfg_diff_field(at_default, g_cfg_field_descriptors[FIELD_IDX_record_ticks]);
+        bool same = !tt::cfg_diff_field(at_default, g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_record_ticks]);
         check("v5.15.5.F.4c: cfg_diff_field KIND_BOOL detects unchanged (0 == default 0)",
               same);
     }
 
     // === T16: HIGH-6 tooltip preservation spot-check (multi-paragraph poll_interval prose) ===
+    // .F.4c.3 — poll_interval + record_depth are GLOBAL; max_hold_ticks is PER_CORE.
     {
-        const CfgFieldDescriptor& desc = g_cfg_field_descriptors[FIELD_IDX_poll_interval];
+        const CfgFieldDescriptor& desc = g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_poll_interval];
         check("v5.15.5.F.4c: poll_interval tooltip preserved (non-null)", desc.tooltip != nullptr);
         check("v5.15.5.F.4c: poll_interval tooltip mentions 'autocorrelation' (multi-paragraph preserved)",
               desc.tooltip && strstr(desc.tooltip, "autocorrelation") != nullptr);
 
-        const CfgFieldDescriptor& desc_max_hold = g_cfg_field_descriptors[FIELD_IDX_max_hold_ticks];
+        const CfgFieldDescriptor& desc_max_hold = g_per_core_cfg_field_descriptors[FIELD_IDX_PER_CORE_max_hold_ticks];
         check("v5.15.5.F.4c: max_hold_ticks tooltip preserved", desc_max_hold.tooltip != nullptr);
         check("v5.15.5.F.4c: max_hold_ticks tooltip mentions '4-5 hours' (operator prose)",
               desc_max_hold.tooltip && strstr(desc_max_hold.tooltip, "4-5 hours") != nullptr);
 
-        const CfgFieldDescriptor& desc_record = g_cfg_field_descriptors[FIELD_IDX_record_depth];
+        const CfgFieldDescriptor& desc_record = g_global_cfg_field_descriptors[FIELD_IDX_GLOBAL_record_depth];
         check("v5.15.5.F.4c: record_depth tooltip preserved (5-line multi-paragraph)",
               desc_record.tooltip != nullptr);
         check("v5.15.5.F.4c: record_depth tooltip mentions 'lastUpdateId' (operator prose preserved)",
               desc_record.tooltip && strstr(desc_record.tooltip, "lastUpdateId") != nullptr);
     }
 
-    // === T17: Registry size sanity (.F.4c cohort growth) ===
+    // === T17: Registry size sanity — combined ≥ 100 (per-core ~79 + global ~47 = ~126) ===
     {
-        check("v5.15.5.F.4c: g_cfg_field_descriptors grew ≥ .F.4b cohort size (≥100 entries)",
-              FIELD_IDX_END >= 100);
+        check("v5.15.5.F.4c.3: combined registry size ≥ 100 entries (.F.4c cohort growth)",
+              (FIELD_IDX_GLOBAL_END + FIELD_IDX_PER_CORE_END) >= 100);
     }
 
     // === T18: Tooltip-byte-count stability (poor-man's hash; item 10 simplified) ===
-    // Sum tooltip lengths across all rows. Future migrations that accidentally drop or
-    // truncate a tooltip will change this total. Operator updates the locked constant
-    // intentionally when adding/refining tooltips.
+    // .F.4c.3 — sum across BOTH registries.
     {
         size_t total_tooltip_bytes = 0;
-        for (size_t i = 0; i < FIELD_IDX_END; i++) {
-            const char* t = g_cfg_field_descriptors[i].tooltip;
+        for (size_t i = 0; i < FIELD_IDX_GLOBAL_END; ++i) {
+            const char* t = g_global_cfg_field_descriptors[i].tooltip;
             if (t) total_tooltip_bytes += strlen(t);
         }
-        // At .F.4c ship time: ~50 tooltips × ~80 avg = ~4000 bytes (lower bound; tooltips
-        // include the multi-paragraph HIGH-6 fields too).
-        check("v5.15.5.F.4c: total tooltip bytes ≥ 3000 (HIGH-6 multi-paragraph preserved)",
+        for (size_t i = 0; i < FIELD_IDX_PER_CORE_END; ++i) {
+            const char* t = g_per_core_cfg_field_descriptors[i].tooltip;
+            if (t) total_tooltip_bytes += strlen(t);
+        }
+        check("v5.15.5.F.4c.3: total tooltip bytes ≥ 3000 across both registries (HIGH-6 multi-paragraph preserved)",
               total_tooltip_bytes >= 3000);
     }
 }
