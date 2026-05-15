@@ -374,7 +374,10 @@ static const CfgFieldDef field_defs[] = {
     // from the GUI — sharded is the only path users should see. Cfg parser
     // still accepts engine_mode= for backwards compat with old cfg files;
     // users who really want legacy can hand-edit. No UI surface = no foot-gun.
-    {"num_execution_cores",      "Cores",             "Per-Core", CFG_INT,  "%d",
+    // v5.15.5.F.4c — num_execution_cores migrated to FOREACH_CFG_FIELD (KIND_INT; clamp [1, 16]).
+    // The field_defs[] entry is DELETED at .F.4c; live_core_count sync + per-core tab count
+    // now read/write s->gui_engine_cfg.num_execution_cores directly.
+    {"num_execution_cores_PLACEHOLDER","Cores",       "Per-Core", CFG_INT,  "%d",
         "Number of execution cores in sharded mode (1-16).\n"
         "Each core handles one position at a time (or two with partial exits).\n"
         "Recommended: physical core count - 2 (one for controller, one for OS).\n"
@@ -878,11 +881,11 @@ static inline void Settings_Load(SettingsState *s) {
     // the default. Only patch num_execution_cores here — engine_mode is
     // boolean and we can't distinguish "missing from cfg" from "explicitly
     // 0", so flipping it would override user intent.
-    for (int i = 0; i < NUM_FIELDS; ++i) {
-        if (strcmp(field_defs[i].key, "num_execution_cores") == 0 &&
-            s->float_vals[i] < 1.0f) {
-            s->float_vals[i] = 4.0f;  // matches ControllerConfig_Default
-        }
+    // v5.15.5.F.4c — num_execution_cores moved to gui_engine_cfg (FOREACH_CFG_FIELD).
+    // Apply default-fallback when cfg-file omitted the key (Settings_Load left it at 0
+    // since ControllerConfig_Load itself defaults to 4; this is the GUI-side safety net).
+    if (s->gui_engine_cfg.num_execution_cores < 1) {
+        s->gui_engine_cfg.num_execution_cores = 4;  // matches ControllerConfig_Default
     }
 }
 
@@ -1571,12 +1574,8 @@ static inline void GUI_Panel_Settings(SettingsState *s,
     // num_execution_cores widget to that value so it doesn't read stale-
     // 0 or a stale cfg value while the live count is authoritative.
     if (live_core_count > 0 && live_core_count <= MAX_GUI_CORES) {
-        for (int i = 0; i < NUM_FIELDS; ++i) {
-            if (strcmp(field_defs[i].key, "num_execution_cores") == 0) {
-                s->float_vals[i] = (float)live_core_count;
-                break;
-            }
-        }
+        // v5.15.5.F.4c — sync live_core_count into gui_engine_cfg (was: float_vals[i]).
+        s->gui_engine_cfg.num_execution_cores = (uint16_t)live_core_count;
     }
 
     ImGui::TextColored(FoxmlColors::primary, "ENGINE SETTINGS");
@@ -1627,12 +1626,8 @@ static inline void GUI_Panel_Settings(SettingsState *s,
     if (live_core_count > 0 && live_core_count <= MAX_GUI_CORES) {
         num_cores = live_core_count;
     } else {
-        for (int i = 0; i < NUM_FIELDS; ++i) {
-            if (strcmp(field_defs[i].key, "num_execution_cores") == 0) {
-                num_cores = (int)s->float_vals[i];
-                break;
-            }
-        }
+        // v5.15.5.F.4c — read num_cores from gui_engine_cfg (was: field_defs[]+float_vals[]).
+        num_cores = (int)s->gui_engine_cfg.num_execution_cores;
         if (num_cores < 1) num_cores = 4;  // safe default = engine's default
         if (num_cores > MAX_GUI_CORES) num_cores = MAX_GUI_CORES;
     }

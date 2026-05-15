@@ -2265,12 +2265,11 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // Registry walker at line 1896+ handles parse; manual CFG_PARSE_INT removed.
     // session_filter_enabled migrated to ops_cfg_flags (v5.14.9.F.3)
     // gate_ema_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
-    CFG_PARSE_INT(default_strategy)
+    // v5.15.5.F.4c — default_strategy migrated to FOREACH_CFG_FIELD (KIND_INT; IS_BOOT_ONLY; pending TECH_DEBT-068).
     // kill_switch_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
     // vol_sizing_enabled migrated to risk_cfg_flags (v5.14.9.F.3)
     // no_trade_band_enabled migrated to gate_cfg_flags (v5.14.9.F.1)
-    CFG_PARSE_INT(ml_backend)
-    CFG_PARSE_INT(regime_model_backend)
+    // v5.15.5.F.4c — ml_backend + regime_model_backend migrated to FOREACH_CFG_FIELD (KIND_INT; IS_BOOT_ONLY; pending TECH_DEBT-068).
 
     //--- partial exit + depth + EMA FPN ---
     CFG_PARSE_FPN(partial_exit_pct)
@@ -2289,12 +2288,11 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     //--- tick recording ---
     // v5.15.5.F.4c — record_ticks + record_depth migrated to FOREACH_CFG_FIELD (KIND_BOOL;
     // HIGH-6 tooltip byte-identity preserved). Registry walker handles parse.
-    CFG_PARSE_U32(record_max_days)
+    // v5.15.5.F.4c — record_max_days migrated to FOREACH_CFG_FIELD (KIND_INT; uint32 storage).
 
     //--- operational alerts (Phase 8b) ---
     // notify_enabled migrated to ops_cfg_flags (v5.14.9.F.3)
-    CFG_PARSE_INT(notify_backend)
-    CFG_PARSE_U32(notify_cooldown_secs)
+    // v5.15.5.F.4c — notify_backend + notify_cooldown_secs migrated to FOREACH_CFG_FIELD (KIND_INT; notify_backend pending TECH_DEBT-068).
     // notify_command is a string — no macro for that, inline parse below
     if (strcmp(key, "notify_command") == 0) {
         strncpy(cfg.notify_command, val, sizeof(cfg.notify_command) - 1);
@@ -2459,10 +2457,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         }
         continue;
     }
-    if (strcmp(key, "held_out_gate_strict") == 0) {
-        cfg.held_out_gate_strict = atoi(val);
-        continue;
-    }
+    // v5.15.5.F.4c — held_out_gate_strict migrated to FOREACH_CFG_FIELD (KIND_INT; tri-state clamp [-1, 1]).
     if (strcmp(key, "held_out_stamp_secret") == 0) {
         size_t n = strlen(val);
         if (n >= sizeof(cfg.held_out_stamp_secret)) n = sizeof(cfg.held_out_stamp_secret) - 1;
@@ -2485,19 +2480,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.health_log_path[n] = '\0';
         continue;
     }
-    if (strcmp(key, "health_log_level") == 0) {
-        cfg.health_log_level = atoi(val);
-        continue;
-    }
-    if (strcmp(key, "health_log_max_bytes") == 0) {
-        cfg.health_log_max_bytes = (uint64_t)strtoull(val, nullptr, 10);
-        continue;
-    }
-    if (strcmp(key, "health_log_keep_count") == 0) {
-        cfg.health_log_keep_count = atoi(val);
-        if (cfg.health_log_keep_count < 0) cfg.health_log_keep_count = 0;
-        continue;
-    }
+    // v5.15.5.F.4c — health_log_level + health_log_max_bytes + health_log_keep_count migrated to FOREACH_CFG_FIELD (KIND_INT).
+    // Registry walker's clamp_min=1 for keep_count replaces the manual `< 0 → 0` clamp (slight semantic change: 0 input now warns + clamps to 1; previously silently to 0).
     // v5.15.5.A.7 — acknowledge_cross_binary_version_drift + acknowledge_inference_cfg_drift
     // CFG_PARSE_INT removed; legacy cfg keys auto-route via FOREACH_OPS_CFG_FLAG walker
     // (legacy_field column matches keys at the ops_cfg_flags parser block line ~2220).
@@ -2513,10 +2497,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         continue;
     }
     CFG_PARSE_INT(auto_kill_on_drift)  // v5.10.0e
-    if (strcmp(key, "reconcile_interval_sec") == 0) {
-        cfg.reconcile_interval_sec = atoi(val);
-        continue;
-    }
+    // v5.15.5.F.4c — reconcile_interval_sec migrated to FOREACH_CFG_FIELD (KIND_INT).
     if (strcmp(key, "reconcile_dry_run") == 0) {
         // v5.14.4 back-compat: legacy operator cfgs may have this field.
         // Translate to reconcile_mode (1 → WARN; 0 → STRICT). Also keep
@@ -2590,21 +2571,8 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
         cfg.engine_arch = ENGINE_ARCH_CENTRALIZED;
       continue;
     }
-    // v5.0.2: slow_path_pin_offset — int. <0 disables, 0 auto, >0 explicit.
-    if (strcmp(key, "slow_path_pin_offset") == 0) {
-      cfg.slow_path_pin_offset = atoi(val);
-      continue;
-    }
-    // num_execution_cores: clamped to [1, 16] (special case to enforce the cap)
-    if (strcmp(key, "num_execution_cores") == 0) {
-      int v = atoi(val);
-      if (v < 1)
-        v = 1;
-      if (v > 16)
-        v = 16;
-      cfg.num_execution_cores = (uint16_t)v;
-      continue;
-    }
+    // v5.15.5.F.4c — slow_path_pin_offset + num_execution_cores migrated to FOREACH_CFG_FIELD (KIND_INT).
+    // num_execution_cores clamp [1, 16] preserved in INT(1, 1, 16) payload.
     // v5.15.5.F.4c — sharded_force_synthetic migrated to FOREACH_CFG_FIELD (KIND_BOOL; uint8_t storage).
     // Registry walker's KIND_BOOL branch handles truthy-int normalization.
     // v5.12.3.C — per-core time-exit override: core_0_time_exit_ticks=5000

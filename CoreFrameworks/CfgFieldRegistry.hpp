@@ -405,7 +405,60 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     X(KIND_INT,        thompson_rng_seed,           "Thompson RNG Seed",    "FoxML",           CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::HAS_SIDE_EFFECT, INT(42, 0, 9223372036854775807),                \
         "splitmix64 seed for Thompson sampling bandit. Default 42. 0 = use ThompsonBandit.hpp's THOMPSON_RNG_SEED_DEFAULT. Boot-only; required for replay-determinism. HAS_SIDE_EFFECT — manual parser supports hex (0x...) base-auto-detect; registry walker skips.",                                                                                                                                                                                                                                                          \
-        STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
+        STRAT_CAT_ML | STRAT_CAT_USES_BANDIT,                OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === C4 + C5: Notify / health / reconcile / operational + INT_ENUM candidates (v5.15.5.F.4c) === */                                                                                                              \
+    X(KIND_INT,        default_strategy,            "Default Strategy",     "Strategies",      CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 8),                                   \
+        "Legacy single_core default strategy ID (STRATEGY_*). Per-core strategy override at core_<N>_strategy is the canonical surface. Ships as KIND_INT pending TECH_DEBT-068.",                                  \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        ml_backend,                  "ML Backend",           "ML",              CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4),                                   \
+        "ML inference backend selection. Ships as KIND_INT pending TECH_DEBT-068 ML enum registry; promote to KIND_INT_ENUM with XGBOOST/ONNX/AOT labels after.",                                                    \
+        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        regime_model_backend,        "Regime Model Backend", "ML",              CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4),                                   \
+        "Regime detection model backend. Ships as KIND_INT pending TECH_DEBT-068.",                                                                                                                                 \
+        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        record_max_days,             "Record Max Days",      "Tick Recording",  CfgFieldDescriptor::WARN_ON_CLAMP, INT(30, 1, 365),                                                                   \
+        "Auto-delete tick + depth CSVs older than this many days. 30 = ~1-2GB cap on disk usage.",                                                                                                                  \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        notify_backend,              "Notify Backend",       "Notifications",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4),                                                                      \
+        "Notification backend: 0=Discord, 1=Telegram, 2=Slack (per notify_command template). Ships as KIND_INT pending TECH_DEBT-068.",                                                                              \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        notify_cooldown_secs,        "Notify Cooldown Secs", "Notifications",   CfgFieldDescriptor::WARN_ON_CLAMP, INT(60, 0, 86400),                                                                 \
+        "Min seconds between notifications (debounce). 0 = no cooldown.",                                                                                                                                           \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        health_log_level,            "Health Log Level",     "Health Logging",  CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 0, 4),                                                                      \
+        "Health log severity: 0=DEBUG, 1=INFO (default), 2=WARN, 3=ERROR. Ships as KIND_INT pending TECH_DEBT-068.",                                                                                                 \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        health_log_max_bytes,        "Health Log Max Bytes", "Health Logging",  CfgFieldDescriptor::WARN_ON_CLAMP, INT(1048576, 1024, 1073741824),                                                    \
+        "Health log file size limit (rotates at this size). Default 1MB; clamp [1KB, 1GB].",                                                                                                                        \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        health_log_keep_count,       "Health Log Keep Count","Health Logging",  CfgFieldDescriptor::WARN_ON_CLAMP, INT(5, 1, 1000),                                                                   \
+        "Number of rotated health log files to keep before deletion.",                                                                                                                                              \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        reconcile_interval_sec,      "Reconcile Interval",   "Reconcile",       CfgFieldDescriptor::WARN_ON_CLAMP, INT(60, 1, 86400),                                                                 \
+        "Seconds between reconciliation passes (paper-position vs broker-position drift check).",                                                                                                                   \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        slow_path_pin_offset,        "Slow-Path Pin Offset", "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(-1, -1, 256),                               \
+        "Slow-path CPU pin offset. -1 = disabled, 0 = auto, >0 = explicit CPU offset.",                                                                                                                             \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        num_execution_cores,         "Execution Cores",      "Operational",     CfgFieldDescriptor::IS_BOOT_ONLY | CfgFieldDescriptor::WARN_ON_CLAMP, INT(1, 1, 16),                                  \
+        "Number of per-core execution shards (per-core engine_arch). Clamp [1, 16].",                                                                                                                               \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        held_out_gate_strict,        "Held-Out Gate Strict", "Drift Acknowledgments",CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, -1, 1),                                                                \
+        "Held-out validation gate: -1=skip, 0=warn-only (default), 1=refuse load. Tri-state KIND_INT pending categorical applicability INT_ENUM upgrade.",                                                          \
+        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /* === C5 HAS_SIDE_EFFECT registry rows — documented in registry, walker skips parse, manual block preserved (v5.15.5.F.4c) === */                                                                                \
+    X(KIND_INT,        reconcile_mode,              "Reconcile Mode",       "Reconcile",       CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 2),                                \
+        "Reconcile mode: 0=STRICT, 1=WARN (default), 2=AUTO_SYNC. Accepts string ('strict'/'warn'/'auto_sync') or int. HAS_SIDE_EFFECT — manual parser handles string + sets cfg_keys_explicit + mirrors reconcile_dry_run.",                                                                                                                                                                                                                                                                                                  \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        engine_mode,                 "Engine Mode",          "Operational",     CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::IS_BOOT_ONLY, INT(1, 0, 2),                                 \
+        "Engine mode: 0=SINGLE_CORE (legacy), 1=SHARDED (default v5.0+). Accepts string ('sharded'/'single_core') or int. HAS_SIDE_EFFECT — manual parser handles string form; registry walker skips.",            \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        engine_arch,                 "Engine Arch",          "Operational",     CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::IS_BOOT_ONLY, INT(1, 0, 1),                                 \
+        "Slow-path threading model: 0=CENTRALIZED, 1=PER_CORE_SLOW (default). Accepts string ('per_core_slow'/'centralized') or int. HAS_SIDE_EFFECT — manual parser handles string form.",                       \
+        STRAT_CAT_ALL,                                       OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    X(KIND_INT,        model_verify_strict,         "Model Verify Strict",  "Drift Acknowledgments",CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(-1, -1, 1),                         \
+        "Model verification strictness: -1=auto (strict in live, lenient in paper; default), 0=lenient, 1=strict. Tri-state. HAS_SIDE_EFFECT — manual parser sets cfg_keys_explicit bit for NormalizeForMode flip rule.",                                                                                                                                                                                                                                                                                                       \
+        STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG)
 
 //======================================================================================================
 // [FIELD_IDX — auto-generated index enum]
