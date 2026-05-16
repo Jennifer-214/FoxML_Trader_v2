@@ -12,6 +12,7 @@
 #ifndef REWARD_TRACKER_HPP
 #define REWARD_TRACKER_HPP
 
+#include <cstdint>  // v5.15.5.F.4d TECH_DEBT-083 close — explicit IWYU for uintN_t (was transitively pulled)
 #include <stdio.h>
 #include <time.h>
 

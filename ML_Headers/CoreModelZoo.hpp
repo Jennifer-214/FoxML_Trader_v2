@@ -33,6 +33,7 @@
 #ifndef CORE_MODEL_ZOO_HPP
 #define CORE_MODEL_ZOO_HPP
 
+#include <cstdint>  // v5.15.5.F.4d TECH_DEBT-083 close — explicit IWYU for uintN_t (was transitively pulled)
 #include "ModelInference.hpp"
 #include "FeatureRegistry.hpp"  // v5.8.6: FEATURE_REGISTRY_HASH() drift catch
 #include "../Backtest/LabelFunctions.hpp"  // v5.10.1.A: LABEL_REGISTRY_HASH() drift catch

@@ -12,6 +12,7 @@
 #ifndef WELFORD_STATS_HPP
 #define WELFORD_STATS_HPP
 
+#include <cstdint>  // v5.15.5.F.4d TECH_DEBT-083 close — explicit IWYU for uintN_t (was transitively pulled)
 #include "../FixedPoint/FixedPointN.hpp"
 
 template <unsigned F>
