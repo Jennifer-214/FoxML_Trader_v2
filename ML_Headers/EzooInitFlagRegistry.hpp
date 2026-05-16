@@ -41,7 +41,7 @@
 //   // Branchless multi-flag check ("all bandit subsystems wired?"):
 //   constexpr uint8_t ALL_BANDITS = MASK_EZOO_BANDITS_READY |
 //                                    MASK_EZOO_EXIT_BANDITS_READY |
-//                                    MASK_EZOO_THOMPSON_READY;
+//                                    MASK_EZOO_BUY_THOMPSON_READY;
 //   if (BITMAP_ALL(ezoo->init_flags, ALL_BANDITS)) { ... }
 //
 // Pattern documented in DESIGN_SPECS/cache-layout-discipline-for-hot-side-structs.md
@@ -80,7 +80,8 @@
     X(ACTIVE,                  "Ensemble path active (1 = use ensemble, 0 = single-zoo fallback)") \
     X(BANDITS_READY,           "Exp3 buy-side bandits wired (post-LoadFromCfg + _InitBandits)") \
     X(EXIT_BANDITS_READY,      "Exit-side bandits wired (post-exit_predictor load + _InitExitBandits)") \
-    X(THOMPSON_READY,          "Thompson posterior bandits wired (buy-side; post-LoadFromCfg + _InitThompsonBandits)") \
+    /* v5.15.5.F.4d TECH_DEBT-084 — renamed THOMPSON_READY → BUY_THOMPSON_READY for symmetric naming with EXIT_THOMPSON_READY (FOREACH_BANDIT_SIDE first canonical) */ \
+    X(BUY_THOMPSON_READY,      "Thompson posterior bandits wired (buy-side; post-LoadFromCfg + _InitBuyThompsonBandits)") \
     /* v5.15.5.F.4d — exit-side Thompson mirror per FOREACH_BANDIT_SIDE auto-mirror (§ G of merged plan body) */ \
     X(EXIT_THOMPSON_READY,     "Exit-side Thompson posterior bandits wired (post-LoadFromCfg + _InitExitThompsonBandits)")
 
@@ -104,7 +105,7 @@ enum {
 // MASK_EZOO_ACTIVE              = BITMAP_BIT_U8(0) = 0x01
 // MASK_EZOO_BANDITS_READY       = BITMAP_BIT_U8(1) = 0x02
 // MASK_EZOO_EXIT_BANDITS_READY  = BITMAP_BIT_U8(2) = 0x04
-// MASK_EZOO_THOMPSON_READY      = BITMAP_BIT_U8(3) = 0x08
+// MASK_EZOO_BUY_THOMPSON_READY      = BITMAP_BIT_U8(3) = 0x08
 // 4 bits used; 4 bits free for future init flags (RIDGE_INITIALIZED,
 // CALIB_LOG_READY, SHADOW_RING_INITIALIZED, etc.).
 #define X(id, doc) constexpr uint8_t MASK_EZOO_##id = BITMAP_BIT_U8(EZOO_INIT_FLAG_##id);

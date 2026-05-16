@@ -48,7 +48,7 @@
 //   - EXP3_OP_THOMPSON_GHOST:     weights = Exp3 probs (drives blending); chosen = Exp3's argmax
 //                                  (chosen flipped from Thompson's pick at .F.4d to fix Class 24 sister
 //                                  attribution bug; Thompson Sample side-effected for telemetry —
-//                                  populates last_predicted_thompson_arm via caller-side capture).
+//                                  populates last_predicted_buy_thompson_arm via caller-side capture).
 //   - THOMPSON_OP_EXP3_GHOST:     chosen = Thompson_Sample; weights = one-hot at chosen.
 //                                  Exp3 GetProbabilities called for telemetry only (logged via calib).
 //   - BLENDED:                    weights = (1-α) × Exp3_probs + α × Thompson_softmax(mu_post);
@@ -347,7 +347,7 @@ inline void BanditAlgo_Thompson_Apply(BanditState* exp3, ThompsonBanditState* th
 // wire bytes unchanged per Option C). Class 24 sister attribution fix at .F.4d: chosen_arm
 // now reflects Exp3's argmax (NOT Thompson's pick) so reward attribution lands on the arm
 // that ACTUALLY drove the decision. Thompson_Sample still called for telemetry side effect
-// (RNG advances; caller captures last_predicted_thompson_arm separately per § A.0 plan body).
+// (RNG advances; caller captures last_predicted_buy_thompson_arm separately per § A.0 plan body).
 // Per-arm reward observability (CoreModelZoo.hpp:881-882) — both bandits learn from same
 // per-arm signal regardless of which one chose; Thompson posterior NOW updates from rewards
 // (Class 24 fix — pre-.F.4d Thompson never updated despite mode being settable).
@@ -365,7 +365,7 @@ inline void BanditAlgo_Exp3_Drives_Thompson_Ghost_Apply(BanditState* exp3, Thomp
     }
     // Exp3 drives — its weights flow to ensemble blender
     Bandit_GetProbabilities(exp3, weights_out);
-    // Thompson sample for telemetry side effect (RNG advances; populates last_predicted_thompson_arm
+    // Thompson sample for telemetry side effect (RNG advances; populates last_predicted_buy_thompson_arm
     // via caller-side capture — see ML_BuildParameters scope per § A.0 of .F.4d merged plan body)
     if (thompson) {
         (void)Thompson_Sample(thompson);   // discard return; telemetry captured separately

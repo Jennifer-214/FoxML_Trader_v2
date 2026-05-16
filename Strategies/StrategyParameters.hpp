@@ -969,8 +969,8 @@ inline void ML_BuildParameters(
                     // mirror (alpha varies per-core; each core's BLENDED dispatch reads its own value).
                     BanditAlgorithm_Apply(core_cfg->bandit_algorithm,
                                           &ezoo->bandits[regime_id],
-                                          BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_THOMPSON_READY)
-                                              ? &ezoo->thompson_bandits[regime_id] : nullptr,
+                                          BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BUY_THOMPSON_READY)
+                                              ? &ezoo->buy_thompson_bandits[regime_id] : nullptr,
                                           ezoo->primary_count,
                                           /*blend_alpha=*/FPN_ToDouble(core_cfg->thompson_exp3_blend_alpha),
                                           weights_buf,
@@ -978,7 +978,7 @@ inline void ML_BuildParameters(
                     // Capture Thompson's chosen_arm for cfg=2 telemetry. .D's
                     // FOREACH_CALIB_LOG_COL writer reads this per fill.
                     if (chosen_arm >= 0) {
-                        ezoo->last_predicted_thompson_arm = chosen_arm;
+                        ezoo->last_predicted_buy_thompson_arm = chosen_arm;
                     }
                     if (ezoo->regime_transition_cycles_remaining > 0) {
                         ezoo->regime_transition_cycles_remaining--;

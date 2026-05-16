@@ -708,7 +708,7 @@ inline void real_on_exit_calibration(OrderManagerState<F>* oms, Order<F>* o,
     auto* core_cfg = static_cast<const PerCoreCfg<F>*>(oms->core_cfg_refs[pslot]);
 
     // Telemetry — null-coalesced.
-    const int    thompson_telemetry_arm    = ezoo     ? ezoo->last_predicted_thompson_arm               : 0;
+    const int    thompson_telemetry_arm    = ezoo     ? ezoo->last_predicted_buy_thompson_arm               : 0;
     const double thompson_exp3_blend_alpha = core_cfg ? FPN_ToDouble(core_cfg->thompson_exp3_blend_alpha) : 0.0;
 
     // Per-arm Exp3 probabilities (telemetry). bandit_regime bounds-clamped defensively

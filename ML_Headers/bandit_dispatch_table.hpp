@@ -20,7 +20,7 @@
 //     replaces the legacy switch-on-bandit-algorithm in caller sites.
 //
 //   - sink-fn-pointer-for-optional-side-effect-pattern.md (Pattern 5):
-//     `ezoo->thompson_update_fn` / `ezoo->exit_thompson_update_fn` resolve to
+//     `ezoo->buy_thompson_update_fn` / `ezoo->exit_thompson_update_fn` resolve to
 //     `noop_thompson_update` when subsystem not enabled, `real_thompson_update`
 //     when enabled (boot-wired). Dispatch tables call through the sink-fn-pointer
 //     unconditionally; per-arm-update sites have no `if (thompson_active)` branch.
@@ -29,7 +29,7 @@
 //   1. EnsembleModelZoo<F> + Thompson_Update + Bandit_Update defined BEFORE this header
 //   2. FOREACH_BANDIT_ALGORITHM (7-arg shape post-.F.4d Step 2.B) defined BEFORE this header
 //   3. This header included by callers AFTER step (2)
-//   4. Boot wiring (`ezoo->thompson_update_fn = &real_thompson_update`) happens AT BOOT
+//   4. Boot wiring (`ezoo->buy_thompson_update_fn = &real_thompson_update`) happens AT BOOT
 //      AFTER ezoo is initialized
 //
 // CURRENT STATUS at file creation (v5.15.5.F.4d Step 1.C):
@@ -37,7 +37,7 @@
 //   - Bit-width static_asserts for Order::flags_packed bandit context bits: DEFINED (this Step)
 //   - g_buy_reward_dispatch / g_exit_reward_dispatch tables: DEFERRED to Step 1.B
 //     (depends on Step 2.B's 7-arg FOREACH_BANDIT_ALGORITHM expansion +
-//     Step 1.D's ezoo->thompson_update_fn field)
+//     Step 1.D's ezoo->buy_thompson_update_fn field)
 //
 //======================================================================================================
 #ifndef BANDIT_DISPATCH_TABLE_HPP
@@ -115,15 +115,15 @@ static_assert((unsigned)ENSEMBLE_HORIZON_MAX <= ((unsigned)::tt::MASK_ORDER_BAND
 // for the reward-attribution dispatch family.
 //
 // PER-SIDE FIELD ACCESS:
-//   - Buy:  ezoo->bandits[regime]              + ezoo->thompson_bandits[regime]
-//   - Exit: ezoo->exit_bandits[regime]         + ezoo->thompson_exit_bandits[regime]
+//   - Buy:  ezoo->bandits[regime]              + ezoo->buy_thompson_bandits[regime]
+//   - Exit: ezoo->exit_bandits[regime]         + ezoo->exit_thompson_bandits[regime]
 //
 // Side selection via `BanditSide` enum tag + if-constexpr in leaf reward fns. Compile-time-resolved
 // (zero runtime branch). Hand-mirror today; true symmetric rename + macro-name-concat auto-gen
 // tracked at TECH_DEBT-084 for `.F.4f` cleanup ship.
 //
 // THOMPSON UPDATE THROUGH PATTERN 5 SINK:
-//   thompson_only_reward + both_reward call `ezoo->thompson_update_fn(...)` (buy) or
+//   thompson_only_reward + both_reward call `ezoo->buy_thompson_update_fn(...)` (buy) or
 //   `ezoo->exit_thompson_update_fn(...)` (exit) — Pattern 5 sink-fn-pointer dispatch. Per
 //   ML_Headers/ThompsonBandit.hpp. Default = &noop_thompson_update; boot-wired to
 //   &real_thompson_update at _InitThompsonBandits / _InitExitThompsonBandits when subsystem
@@ -166,9 +166,9 @@ inline void thompson_only_reward(EnsembleModelZoo<F>* ezoo, int regime, int arm,
     // enables. Consumer never branches on cfg/init state — uniform indirect call (H20 / Class 24
     // + Class 28 closure for reward dispatch family).
     if constexpr (Side == BanditSide::Buy) {
-        ezoo->thompson_update_fn(&ezoo->thompson_bandits[regime], arm, r);
+        ezoo->buy_thompson_update_fn(&ezoo->buy_thompson_bandits[regime], arm, r);
     } else {
-        ezoo->exit_thompson_update_fn(&ezoo->thompson_exit_bandits[regime], arm, r);
+        ezoo->exit_thompson_update_fn(&ezoo->exit_thompson_bandits[regime], arm, r);
     }
 }
 
@@ -180,10 +180,10 @@ inline void both_reward(EnsembleModelZoo<F>* ezoo, int regime, int arm, double r
     // from the same per-arm reward signal regardless of which one's CHOICE drove the trading decision.
     if constexpr (Side == BanditSide::Buy) {
         Bandit_Update(&ezoo->bandits[regime], arm, r);
-        ezoo->thompson_update_fn(&ezoo->thompson_bandits[regime], arm, r);
+        ezoo->buy_thompson_update_fn(&ezoo->buy_thompson_bandits[regime], arm, r);
     } else {
         Bandit_Update(&ezoo->exit_bandits[regime], arm, r);
-        ezoo->exit_thompson_update_fn(&ezoo->thompson_exit_bandits[regime], arm, r);
+        ezoo->exit_thompson_update_fn(&ezoo->exit_thompson_bandits[regime], arm, r);
     }
 }
 

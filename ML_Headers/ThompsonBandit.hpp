@@ -200,7 +200,7 @@ static inline void Thompson_Update(ThompsonBanditState* tb, int arm, double rewa
 //
 // PROBLEM these wrappers solve: pre-.F.4d reward-attribution dispatch sites had a per-call branch
 //   if (cfg.bandit_algorithm == THOMPSON || cfg.bandit_algorithm == BOTH) {
-//       Thompson_Update(&ezoo->thompson_bandits[r], arm, reward);
+//       Thompson_Update(&ezoo->buy_thompson_bandits[r], arm, reward);
 //   }
 // That branch is DATA-DEPENDENT (cfg-stable but predictor-warm-up cost on cfg-flip + violates H20
 // + leaves callsite-by-callsite drift risk when adding new bandit modes — each new mode needs every
@@ -208,13 +208,13 @@ static inline void Thompson_Update(ThompsonBanditState* tb, int arm, double rewa
 //
 // SOLUTION via Pattern 5:
 //   1. Define a NO-OP sink (compile-time-known empty body) + a REAL sink (delegates to Thompson_Update).
-//   2. EnsembleModelZoo<F> carries a fn-pointer field `thompson_update_fn` (sister: `exit_thompson_update_fn`
+//   2. EnsembleModelZoo<F> carries a fn-pointer field `buy_thompson_update_fn` (sister: `exit_thompson_update_fn`
 //      for the exit side per FOREACH_BANDIT_SIDE auto-mirror).
 //   3. Default value at struct init: `&noop_thompson_update`. Boot wiring at
-//      EnsembleModelZoo_InitThompsonBandits (or _InitExitThompsonBandits for exit side) sets it to
+//      EnsembleModelZoo_InitBuyThompsonBandits (or _InitExitThompsonBandits for exit side) sets it to
 //      `&real_thompson_update` when the Thompson subsystem actually initializes.
 //   4. All reward-attribution dispatch sites call UNCONDITIONALLY through the fn pointer:
-//          ezoo->thompson_update_fn(&ezoo->thompson_bandits[regime], arm, reward);
+//          ezoo->buy_thompson_update_fn(&ezoo->buy_thompson_bandits[regime], arm, reward);
 //      Branchless. ~1-2 ns indirect call. No per-call cfg read. No predictor-warmup cost on cfg-flip
 //      (predictor sees same fn-pointer target every call until boot reconfigures; that's a 1-time event,
 //      not a per-call event).
@@ -232,8 +232,8 @@ static inline void Thompson_Update(ThompsonBanditState* tb, int arm, double rewa
 //   Total slow-path cost: <15 ns per call. Slow-path budget 100µs → 0.015% utilization. Negligible.
 //======================================================================================================
 inline void noop_thompson_update(ThompsonBanditState* /*tb*/, int /*arm*/, double /*reward*/) {
-    // Compile-time-known empty body. ezoo->thompson_update_fn resolves here from struct construction
-    // until EnsembleModelZoo_InitThompsonBandits boot-wires to real_thompson_update. Acts as the
+    // Compile-time-known empty body. ezoo->buy_thompson_update_fn resolves here from struct construction
+    // until EnsembleModelZoo_InitBuyThompsonBandits boot-wires to real_thompson_update. Acts as the
     // "Thompson subsystem not active on this ezoo" branch — but BRANCHLESS at the consumer site
     // (uniform indirect call; no per-call cfg read).
 }
@@ -242,7 +242,7 @@ inline void real_thompson_update(ThompsonBanditState* tb, int arm, double reward
     Thompson_Update(tb, arm, reward);
 }
 
-// Pattern 5 sink fn-pointer typedef — both `thompson_update_fn` + `exit_thompson_update_fn` fields
+// Pattern 5 sink fn-pointer typedef — both `buy_thompson_update_fn` + `exit_thompson_update_fn` fields
 // on EnsembleModelZoo<F> share this signature. FOREACH_BANDIT_SIDE auto-mirror generates the two
 // field declarations + boot-wiring per side from this single typedef.
 using ThompsonUpdateFn = void (*)(ThompsonBanditState*, int /*arm*/, double /*reward*/);

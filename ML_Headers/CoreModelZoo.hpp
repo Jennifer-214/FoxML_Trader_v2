@@ -982,21 +982,21 @@ struct alignas(64) EnsembleModelZoo {
     int last_predicted_regime_id;      // regime AT predict-time (G.8 attribution)
     int last_predicted_horizon_idx;    // dominant horizon idx (display + G.8 reward)
     int last_predicted_exit_horizon_idx; // dominant exit_predictor arm at predict time
-    int last_predicted_thompson_arm;   // Thompson's argmax-of-posterior (buy-side; cfg=2 telemetry)
+    int last_predicted_buy_thompson_arm;   // Thompson's argmax-of-posterior (buy-side; cfg=2 telemetry)
     // v5.15.5.F.4d — exit-side Thompson mirror per FOREACH_BANDIT_SIDE auto-mirror (§ G.2 of merged plan body)
     int last_predicted_exit_thompson_arm;  // Thompson's argmax-of-posterior (exit-side; cfg=2/3 telemetry)
     int32_t _padding_exit_thompson = 0;    // explicit padding for byte-determinism (sister to OrderPreResolved._padding pattern)
 
     // v5.15.5.F.4d — Pattern 5 sink-fn-pointers per sink-fn-pointer-for-optional-side-effect-pattern.md.
     // Default = &noop_thompson_update (compile-time no-op; resolves here at struct construction in _Init);
-    // boot-wired to &real_thompson_update by EnsembleModelZoo_InitThompsonBandits (buy) +
+    // boot-wired to &real_thompson_update by EnsembleModelZoo_InitBuyThompsonBandits (buy) +
     // EnsembleModelZoo_InitExitThompsonBandits (exit) when the respective subsystem initializes.
     // Consumer dispatch sites call UNCONDITIONALLY → branchless; eliminates `if (thompson_active)` per-call
     // branches throughout reward attribution paths (Class 24 + Class 28 sister structural closures).
     // Per FOREACH_BANDIT_SIDE auto-mirror (§ G of .F.4d merged plan body — 2 sides; meta-X-macro at
     // ML_Headers/bandit_dispatch_table.hpp). Future per-symbol side = 1 row in FOREACH_BANDIT_SIDE.
-    ThompsonUpdateFn thompson_update_fn;       // buy-side; ezoo->thompson_bandits[r] consumer
-    ThompsonUpdateFn exit_thompson_update_fn;  // exit-side; ezoo->thompson_exit_bandits[r] consumer
+    ThompsonUpdateFn buy_thompson_update_fn;       // buy-side; ezoo->buy_thompson_bandits[r] consumer
+    ThompsonUpdateFn exit_thompson_update_fn;  // exit-side; ezoo->exit_thompson_bandits[r] consumer
 
     // v5.11.62 — primary-role indirection (per-cycle read; pointer + small scalars).
     ModelHandle<F> *primary_handles;   // points into one of {buy_signal, barrier, regime}
@@ -1024,7 +1024,7 @@ struct alignas(64) EnsembleModelZoo {
     // cfg.bandit_algorithm in {1, 2, 3, 4} per FOREACH_BANDIT_ALGORITHM thompson_up metadata bit.
     // Cfg=0 (EXP3) → never read but init'd anyway so cfg-flip mid-run doesn't see uninitialized state.
     // ~1000B per ezoo at NUM_REGIMES=5 (5 × 200B). Persistence: thompson_state.json.
-    alignas(64) ThompsonBanditState thompson_bandits[NUM_REGIMES];
+    alignas(64) ThompsonBanditState buy_thompson_bandits[NUM_REGIMES];
 
     // v5.15.5.F.4d — Bayesian Thompson sampling bandits (EXIT-side). Exit-side Thompson mirror per
     // FOREACH_BANDIT_SIDE auto-mirror (§ G.2 of merged plan body). Closes pre-.F.4d asymmetry where
@@ -1032,8 +1032,8 @@ struct alignas(64) EnsembleModelZoo {
     // {1, 2, 3, 4} via exit_thompson_update_fn sink-fn-pointer dispatch (same metadata bits drive
     // both sides; per-side init flag MASK_EZOO_EXIT_THOMPSON_READY gates init wiring).
     // Persistence: thompson_exit_state.json (parallel to thompson_state.json buy-side file).
-    // Size: ~1000B per ezoo at NUM_REGIMES=5 (5 × 200B sister to thompson_bandits[]).
-    alignas(64) ThompsonBanditState thompson_exit_bandits[NUM_REGIMES];
+    // Size: ~1000B per ezoo at NUM_REGIMES=5 (5 × 200B sister to buy_thompson_bandits[]).
+    alignas(64) ThompsonBanditState exit_thompson_bandits[NUM_REGIMES];
 
     // ============================================================================
     // WARM CLUSTER — touched per regime-transition or sparse attribution paths
@@ -1165,18 +1165,18 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     ezoo->last_predicted_exit_horizon_idx = -1;
     // v5.14.10.B — Thompson bandits zero-init (full init in _InitThompsonBandits
     // AFTER LoadFromCfg populates buy_signal_count). cfg.bandit_algorithm=0
-    // path never reads thompson_bandits; safe to leave at zero in that mode.
-    memset(ezoo->thompson_bandits, 0, sizeof(ezoo->thompson_bandits));
-    ezoo->last_predicted_thompson_arm  = -1;
+    // path never reads buy_thompson_bandits; safe to leave at zero in that mode.
+    memset(ezoo->buy_thompson_bandits, 0, sizeof(ezoo->buy_thompson_bandits));
+    ezoo->last_predicted_buy_thompson_arm  = -1;
     // v5.15.5.F.4d — exit-side Thompson zero-init (parallel to buy-side; full init in
     // _InitExitThompsonBandits AFTER LoadFromCfg populates exit_predictor_count).
-    memset(ezoo->thompson_exit_bandits, 0, sizeof(ezoo->thompson_exit_bandits));
+    memset(ezoo->exit_thompson_bandits, 0, sizeof(ezoo->exit_thompson_bandits));
     ezoo->last_predicted_exit_thompson_arm = -1;
     // v5.15.5.F.4d — Pattern 5 sink-fn-pointer default wiring. Both default to noop at construction;
     // _InitThompsonBandits / _InitExitThompsonBandits boot-wire to real_thompson_update if Thompson
     // subsystem actually enabled (n_arms >= 2 on the respective side). Consumer dispatch is uniform
     // indirect-call (branchless; H20 / Class 28 closure for dispatch family).
-    ezoo->thompson_update_fn       = &noop_thompson_update;
+    ezoo->buy_thompson_update_fn       = &noop_thompson_update;
     ezoo->exit_thompson_update_fn  = &noop_thompson_update;
     // v5.14.0 — Ridge state zero-init. Identity Σ + zero μ/L/y/w/output
     // weights. Cholesky succeeds out-of-box on identity Σ regularized
@@ -1398,7 +1398,7 @@ inline void EnsembleModelZoo_TickRewardsFromLookback(EnsembleModelZoo<F>* ezoo,
             // v5.15.5.F.4d — branchless metadata-driven dispatch via g_buy_reward_dispatch
             // (Step 1.B of merged plan body). For algo=EXP3 (cfg=0) → calls Bandit_Update only
             // (bytewise identical to pre-.F.4d). For algo=THOMPSON / ghost modes / BLENDED →
-            // also calls Thompson_Update via Pattern 5 sink (ezoo->thompson_update_fn; noop if
+            // also calls Thompson_Update via Pattern 5 sink (ezoo->buy_thompson_update_fn; noop if
             // subsystem not initialized). Closes Class 24 sister at attribution surface.
             g_buy_reward_dispatch<F>[algo](ezoo, regime, a, reward_bps);
             updates_this_record++;
@@ -1599,7 +1599,7 @@ inline void EnsembleModelZoo_InitExitBandits(EnsembleModelZoo<F>* ezoo,
 // This preserves runtime cfg-flip semantics (operator can set cfg=1 mid-run via
 // /reload-cfg without re-init).
 template <unsigned F>
-inline void EnsembleModelZoo_InitThompsonBandits(EnsembleModelZoo<F>* ezoo,
+inline void EnsembleModelZoo_InitBuyThompsonBandits(EnsembleModelZoo<F>* ezoo,
                                                   double mu_prior,
                                                   double precision_prior,
                                                   double precision_obs,
@@ -1607,15 +1607,15 @@ inline void EnsembleModelZoo_InitThompsonBandits(EnsembleModelZoo<F>* ezoo,
     if (!ezoo) return;
     int n_arms = ezoo->primary_count;
     if (n_arms < 1) {
-        // No primary models loaded — graceful skip. thompson_bandits stay
+        // No primary models loaded — graceful skip. buy_thompson_bandits stay
         // zero-init; dispatch's nullptr check fallbacks to uniform weights.
-        BITMAP_CLR(ezoo->init_flags, MASK_EZOO_THOMPSON_READY);
+        BITMAP_CLR(ezoo->init_flags, MASK_EZOO_BUY_THOMPSON_READY);
         return;
     }
     if (n_arms < 2) {
         // Single-arm: Thompson degrades to "always pick arm 0"; mark
         // initialized so dispatch fires without crashing.
-        BITMAP_SET(ezoo->init_flags, MASK_EZOO_THOMPSON_READY);
+        BITMAP_SET(ezoo->init_flags, MASK_EZOO_BUY_THOMPSON_READY);
         return;
     }
     // Per-regime init. Each regime gets its own RNG state derived from the
@@ -1623,21 +1623,21 @@ inline void EnsembleModelZoo_InitThompsonBandits(EnsembleModelZoo<F>* ezoo,
     // independent (same seed across regimes would correlate posterior draws).
     for (int r = 0; r < NUM_REGIMES; ++r) {
         uint64_t per_regime_seed = rng_seed ^ ((uint64_t)(r + 1) * 0x9E3779B97F4A7C15ULL);
-        Thompson_Init(&ezoo->thompson_bandits[r], n_arms,
+        Thompson_Init(&ezoo->buy_thompson_bandits[r], n_arms,
                       mu_prior, precision_prior, precision_obs, per_regime_seed);
     }
-    BITMAP_SET(ezoo->init_flags, MASK_EZOO_THOMPSON_READY);
+    BITMAP_SET(ezoo->init_flags, MASK_EZOO_BUY_THOMPSON_READY);
     // v5.15.5.F.4d — Pattern 5 sink-fn-pointer wire to real on successful init.
-    // Consumer dispatch at reward attribution sites: `ezoo->thompson_update_fn(...)` now resolves
+    // Consumer dispatch at reward attribution sites: `ezoo->buy_thompson_update_fn(...)` now resolves
     // to real_thompson_update → Thompson_Update fires. Replaces per-call cfg branch (Class 24 close).
-    ezoo->thompson_update_fn = &real_thompson_update;
+    ezoo->buy_thompson_update_fn = &real_thompson_update;
 }
 
 //======================================================================================================
 // [v5.15.5.F.4d — EXIT-SIDE THOMPSON BANDIT INIT — hand-mirror of _InitThompsonBandits per FOREACH_BANDIT_SIDE]
 //======================================================================================================
-// Sister to EnsembleModelZoo_InitThompsonBandits above. Initializes one ThompsonBanditState per
-// regime over `thompson_exit_bandits[]` with arms = ezoo->exit_predictor_count (parallel to existing
+// Sister to EnsembleModelZoo_InitBuyThompsonBandits above. Initializes one ThompsonBanditState per
+// regime over `exit_thompson_bandits[]` with arms = ezoo->exit_predictor_count (parallel to existing
 // _InitExitBandits Exp3 init at line ~1471 which uses the same arm count source). Closes pre-.F.4d
 // asymmetry where buy-side had Thompson but exit-side was Exp3-only.
 //
@@ -1646,8 +1646,8 @@ inline void EnsembleModelZoo_InitThompsonBandits(EnsembleModelZoo<F>* ezoo,
 // fires Thompson_Update unconditionally + branchlessly (H20 / Class 24 + Class 28 sister closure).
 //
 // HAND-MIRROR (vs full FOREACH_BANDIT_SIDE auto-gen): keeping buy-side fn body asymmetric in name
-// (`thompson_bandits` vs `thompson_exit_bandits` field; `_InitThompsonBandits` vs `_InitExitThompsonBandits`
-// fn name) avoids a cascade rename of existing `thompson_bandits` field across ~50 call sites.
+// (`buy_thompson_bandits` vs `exit_thompson_bandits` field; `_InitThompsonBandits` vs `_InitExitThompsonBandits`
+// fn name) avoids a cascade rename of existing `buy_thompson_bandits` field across ~50 call sites.
 // TECH_DEBT-084 tracks the future symmetric rename + true X-macro auto-gen across all 6 per-side
 // symbol families (sequenced for `.F.4f` cleanup ship OR later).
 template <unsigned F>
@@ -1659,7 +1659,7 @@ inline void EnsembleModelZoo_InitExitThompsonBandits(EnsembleModelZoo<F>* ezoo,
     if (!ezoo) return;
     int n_arms = ezoo->exit_predictor_count;
     if (n_arms < 1) {
-        // No exit_predictor models loaded — graceful skip. thompson_exit_bandits stay zero-init;
+        // No exit_predictor models loaded — graceful skip. exit_thompson_bandits stay zero-init;
         // dispatch's nullptr check fallbacks to uniform weights. Sink-fn stays at noop.
         BITMAP_CLR(ezoo->init_flags, MASK_EZOO_EXIT_THOMPSON_READY);
         return;
@@ -1678,7 +1678,7 @@ inline void EnsembleModelZoo_InitExitThompsonBandits(EnsembleModelZoo<F>* ezoo,
     for (int r = 0; r < NUM_REGIMES; ++r) {
         uint64_t per_regime_seed = (rng_seed ^ EXIT_SIDE_RNG_DISCRIMINATOR)
                                  ^ ((uint64_t)(r + 1) * 0x9E3779B97F4A7C15ULL);
-        Thompson_Init(&ezoo->thompson_exit_bandits[r], n_arms,
+        Thompson_Init(&ezoo->exit_thompson_bandits[r], n_arms,
                       mu_prior, precision_prior, precision_obs, per_regime_seed);
     }
     BITMAP_SET(ezoo->init_flags, MASK_EZOO_EXIT_THOMPSON_READY);
@@ -2368,16 +2368,19 @@ inline int EnsembleModelZoo_LoadExitBanditState(
 // Skipped silently when initialized_thompson_bandits=0 (cfg=0 default = no Thompson activity to persist).
 //======================================================================================================
 
-// Save thompson state to <base_dir>/thompson_state.json. Returns 1 on success.
+// Save buy-side thompson state to <base_dir>/buy_thompson_state.json (v5.15.5.F.4d TECH_DEBT-084
+// rename from thompson_state.json for symmetric naming with exit_thompson_state.json). Load-side
+// back-compat alias falls back to legacy thompson_state.json — see EnsembleModelZoo_LoadThompsonState.
+// Returns 1 on success.
 template <unsigned F>
 inline int EnsembleModelZoo_SaveThompsonState(
     const EnsembleModelZoo<F>* ezoo, const char* base_dir,
     const char* const* regime_names) {
-    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_THOMPSON_READY)) return 0;
+    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BUY_THOMPSON_READY)) return 0;
     if (ezoo->primary_count < 2) return 0;  // single-arm: nothing to save
     if (!base_dir || base_dir[0] == '\0') return 0;
     char path[512];
-    snprintf(path, sizeof(path), "%s/thompson_state.json", base_dir);
+    snprintf(path, sizeof(path), "%s/buy_thompson_state.json", base_dir);
     char tmp_path[520];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
     FILE* f = fopen(tmp_path, "w");
@@ -2398,7 +2401,7 @@ inline int EnsembleModelZoo_SaveThompsonState(
     fprintf(f, "  \"model_bundle_sha256\": \"%s\",\n", bundle_id);
     fprintf(f, "  \"regimes\": [\n");
     for (int r = 0; r < NUM_REGIMES; ++r) {
-        const ThompsonBanditState* tb = &ezoo->thompson_bandits[r];
+        const ThompsonBanditState* tb = &ezoo->buy_thompson_bandits[r];
         const char* rname = (regime_names && regime_names[r]) ? regime_names[r] : "?";
         fprintf(f, "    {\n");
         fprintf(f, "      \"regime_id\": %d,\n", r);
@@ -2450,10 +2453,10 @@ inline int EnsembleModelZoo_SaveThompsonState(
 // Per § G of v5.15.5.F.4d merged plan body. Filename scheme mirrors buy-side: persistence to
 // `thompson_exit_state.json` (parallel to `thompson_state.json` buy-side file). Same wire format
 // (format_version=1; same JSON shape) — just different filename + different ThompsonBanditState array
-// (exit_thompson_bandits[] vs thompson_bandits[]) + different init-flag gate.
+// (exit_thompson_bandits[] vs buy_thompson_bandits[]) + different init-flag gate.
 //
 // HAND-MIRROR per TECH_DEBT-084 deferred-rename decision: full FOREACH_BANDIT_SIDE auto-gen would
-// require renaming thompson_bandits → buy_thompson_bandits across ~50 call sites; current hand-mirror
+// require renaming buy_thompson_bandits → buy_thompson_bandits across ~50 call sites; current hand-mirror
 // scoped to `.F.4d` as cost/benefit trade-off. Future cleanup ship collapses this into a single
 // X-macro consumer expansion when the rename lands.
 //======================================================================================================
@@ -2466,7 +2469,9 @@ inline int EnsembleModelZoo_SaveExitThompsonState(
     if (ezoo->exit_predictor_count < 2) return 0;  // single-arm: nothing to save
     if (!base_dir || base_dir[0] == '\0') return 0;
     char path[512];
-    snprintf(path, sizeof(path), "%s/thompson_exit_state.json", base_dir);
+    // v5.15.5.F.4d TECH_DEBT-084 — rename thompson_exit_state.json → exit_thompson_state.json
+    // for symmetric naming with buy_thompson_state.json. Load-side back-compat alias falls back.
+    snprintf(path, sizeof(path), "%s/exit_thompson_state.json", base_dir);
     char tmp_path[520];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
     FILE* f = fopen(tmp_path, "w");
@@ -2487,7 +2492,7 @@ inline int EnsembleModelZoo_SaveExitThompsonState(
     fprintf(f, "  \"model_bundle_sha256\": \"%s\",\n", bundle_id);
     fprintf(f, "  \"regimes\": [\n");
     for (int r = 0; r < NUM_REGIMES; ++r) {
-        const ThompsonBanditState* tb = &ezoo->thompson_exit_bandits[r];
+        const ThompsonBanditState* tb = &ezoo->exit_thompson_bandits[r];
         const char* rname = (regime_names && regime_names[r]) ? regime_names[r] : "?";
         fprintf(f, "    {\n");
         fprintf(f, "      \"regime_id\": %d,\n", r);
@@ -2537,18 +2542,23 @@ inline int EnsembleModelZoo_SaveExitThompsonState(
 // success (overlays mu_post/precision_post/total_pulls/rng_state onto pre-
 // initialized states), 0 on missing/corrupt/mismatched file.
 //
-// Caller must call EnsembleModelZoo_InitThompsonBandits FIRST to set up
+// Caller must call EnsembleModelZoo_InitBuyThompsonBandits FIRST to set up
 // uniform priors + arm count + base RNG seed. This function only overlays.
 template <unsigned F>
 inline int EnsembleModelZoo_LoadThompsonState(
     EnsembleModelZoo<F>* ezoo, const char* base_dir) {
-    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_THOMPSON_READY)) return 0;
+    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BUY_THOMPSON_READY)) return 0;
     if (ezoo->primary_count < 2) return 0;
     if (!base_dir || base_dir[0] == '\0') return 0;
     char path[512];
-    snprintf(path, sizeof(path), "%s/thompson_state.json", base_dir);
-
+    // v5.15.5.F.4d TECH_DEBT-084 — try new symmetric name first; fall back to legacy name for
+    // existing on-disk model bundles. Save-side writes new name; Load-side accepts either.
+    snprintf(path, sizeof(path), "%s/buy_thompson_state.json", base_dir);
     FILE* f = fopen(path, "r");
+    if (!f) {
+        snprintf(path, sizeof(path), "%s/thompson_state.json", base_dir);
+        f = fopen(path, "r");
+    }
     if (!f) return 0;
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
@@ -2604,7 +2614,7 @@ inline int EnsembleModelZoo_LoadThompsonState(
     p = tt::json_io::find_key(buf, "regimes");
     if (!p) return 0;
     for (int r = 0; r < NUM_REGIMES; ++r) {
-        ThompsonBanditState* tb = &ezoo->thompson_bandits[r];
+        ThompsonBanditState* tb = &ezoo->buy_thompson_bandits[r];
         const char* rid_p = tt::json_io::find_key(p, "regime_id");
         if (!rid_p) break;   // forward-compat: shorter files OK
 
@@ -2675,9 +2685,14 @@ inline int EnsembleModelZoo_LoadExitThompsonState(
     if (ezoo->exit_predictor_count < 2) return 0;
     if (!base_dir || base_dir[0] == '\0') return 0;
     char path[512];
-    snprintf(path, sizeof(path), "%s/thompson_exit_state.json", base_dir);
-
+    // v5.15.5.F.4d TECH_DEBT-084 — try new symmetric name first; fall back to legacy name for
+    // existing on-disk model bundles. Save-side writes new name; Load-side accepts either.
+    snprintf(path, sizeof(path), "%s/exit_thompson_state.json", base_dir);
     FILE* f = fopen(path, "r");
+    if (!f) {
+        snprintf(path, sizeof(path), "%s/thompson_exit_state.json", base_dir);
+        f = fopen(path, "r");
+    }
     if (!f) return 0;
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
@@ -2731,7 +2746,7 @@ inline int EnsembleModelZoo_LoadExitThompsonState(
     p = tt::json_io::find_key(buf, "regimes");
     if (!p) return 0;
     for (int r = 0; r < NUM_REGIMES; ++r) {
-        ThompsonBanditState* tb = &ezoo->thompson_exit_bandits[r];
+        ThompsonBanditState* tb = &ezoo->exit_thompson_bandits[r];
         const char* rid_p = tt::json_io::find_key(p, "regime_id");
         if (!rid_p) break;
 
@@ -2924,7 +2939,7 @@ inline void ensemble_post_load_apply_blend_mode(EnsembleModelZoo<F>* ezoo,
     /* v5.14.10.C — Thompson sampling bandit init + load (parallel to bandits[] init/load above). */ \
     /* Class 18 mirror prevention via PostLoadSetup registry (per /trace-deps BLOCKING amendment). */ \
     /* Init unconditional (so cfg-flip mid-run sees pre-initialized state); Load idempotent overlay. */ \
-    X(init_thompson_bandits, EnsembleModelZoo_InitThompsonBandits(ezoo,           \
+    X(init_thompson_bandits, EnsembleModelZoo_InitBuyThompsonBandits(ezoo,           \
                                FPN_ToDouble(cfg.thompson_mu_prior),                \
                                FPN_ToDouble(cfg.thompson_precision_prior),         \
                                FPN_ToDouble(cfg.thompson_precision_obs),           \
@@ -2989,7 +3004,7 @@ inline int EnsembleModelZoo_IsReadyForInference(const EnsembleModelZoo<F>* ezoo)
     // - LoadThompsonState (v5.14.10.C): no boolean to check; idempotent overlay (skipped silently when initialized=0)
     if (ezoo->primary_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return 0;
     if (ezoo->exit_predictor_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_EXIT_BANDITS_READY)) return 0;
-    if (ezoo->primary_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_THOMPSON_READY)) return 0;
+    if (ezoo->primary_count >= 2 && !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BUY_THOMPSON_READY)) return 0;
     if (ezoo->blend_mode[0] == '\0') return 0;
     return 1;
 }

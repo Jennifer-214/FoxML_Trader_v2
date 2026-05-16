@@ -65,7 +65,7 @@
 // legacy 9. Decoded from Order::flags_packed bits 17-25 via MBS_* accessors (singletons) + per-slot
 // FOREACH_OMS_PER_SLOT_FIELD bandit_reward_bps[pslot] + per-arm Exp3 probabilities (via
 // Bandit_GetProbabilities into local exp3_probs[BANDIT_MAX_ARMS]) + per-arm Thompson posterior
-// state (ezoo->thompson_bandits[regime_clamped].{mu_post,precision_post,total_pulls}[arm]). All
+// state (ezoo->buy_thompson_bandits[regime_clamped].{mu_post,precision_post,total_pulls}[arm]). All
 // ezoo-touching cols null-coalesce to 0/0.0 when ezoo_ref is nullptr (test fixtures + non-ML cores
 // with calibration_log_path set). Per-arm hand-written (8 arms × 4 families = 32 rows; sidecar M.2
 // chose hand-write over preprocessor token-paste indirection for robustness + auditability).
@@ -92,37 +92,37 @@
     X(thompson_exp3_blend_alpha,  "%.6f", thompson_exp3_blend_alpha)                                                                                   \
     /* v5.15.5.F.4d Step 8 § M — 32 per-arm cols (8 arms × {exp3_w, thompson_mu, thompson_prec, thompson_pulls}); arm-major layout */                  \
     X(exp3_w_arm0,         "%.6f", exp3_probs[0])                                                                                                      \
-    X(thompson_mu_arm0,    "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].mu_post[0]                  : 0.0))                                  \
-    X(thompson_prec_arm0,  "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].precision_post[0]           : 0.0))                                  \
-    X(thompson_pulls_arm0, "%u",   (ezoo ? (unsigned)ezoo->thompson_bandits[regime_clamped].total_pulls[0]    : 0u))                                   \
+    X(thompson_mu_arm0,    "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[0]                  : 0.0))                                  \
+    X(thompson_prec_arm0,  "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[0]           : 0.0))                                  \
+    X(thompson_pulls_arm0, "%u",   (ezoo ? (unsigned)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[0]    : 0u))                                   \
     X(exp3_w_arm1,         "%.6f", exp3_probs[1])                                                                                                      \
-    X(thompson_mu_arm1,    "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].mu_post[1]                  : 0.0))                                  \
-    X(thompson_prec_arm1,  "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].precision_post[1]           : 0.0))                                  \
-    X(thompson_pulls_arm1, "%u",   (ezoo ? (unsigned)ezoo->thompson_bandits[regime_clamped].total_pulls[1]    : 0u))                                   \
+    X(thompson_mu_arm1,    "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[1]                  : 0.0))                                  \
+    X(thompson_prec_arm1,  "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[1]           : 0.0))                                  \
+    X(thompson_pulls_arm1, "%u",   (ezoo ? (unsigned)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[1]    : 0u))                                   \
     X(exp3_w_arm2,         "%.6f", exp3_probs[2])                                                                                                      \
-    X(thompson_mu_arm2,    "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].mu_post[2]                  : 0.0))                                  \
-    X(thompson_prec_arm2,  "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].precision_post[2]           : 0.0))                                  \
-    X(thompson_pulls_arm2, "%u",   (ezoo ? (unsigned)ezoo->thompson_bandits[regime_clamped].total_pulls[2]    : 0u))                                   \
+    X(thompson_mu_arm2,    "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[2]                  : 0.0))                                  \
+    X(thompson_prec_arm2,  "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[2]           : 0.0))                                  \
+    X(thompson_pulls_arm2, "%u",   (ezoo ? (unsigned)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[2]    : 0u))                                   \
     X(exp3_w_arm3,         "%.6f", exp3_probs[3])                                                                                                      \
-    X(thompson_mu_arm3,    "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].mu_post[3]                  : 0.0))                                  \
-    X(thompson_prec_arm3,  "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].precision_post[3]           : 0.0))                                  \
-    X(thompson_pulls_arm3, "%u",   (ezoo ? (unsigned)ezoo->thompson_bandits[regime_clamped].total_pulls[3]    : 0u))                                   \
+    X(thompson_mu_arm3,    "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[3]                  : 0.0))                                  \
+    X(thompson_prec_arm3,  "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[3]           : 0.0))                                  \
+    X(thompson_pulls_arm3, "%u",   (ezoo ? (unsigned)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[3]    : 0u))                                   \
     X(exp3_w_arm4,         "%.6f", exp3_probs[4])                                                                                                      \
-    X(thompson_mu_arm4,    "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].mu_post[4]                  : 0.0))                                  \
-    X(thompson_prec_arm4,  "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].precision_post[4]           : 0.0))                                  \
-    X(thompson_pulls_arm4, "%u",   (ezoo ? (unsigned)ezoo->thompson_bandits[regime_clamped].total_pulls[4]    : 0u))                                   \
+    X(thompson_mu_arm4,    "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[4]                  : 0.0))                                  \
+    X(thompson_prec_arm4,  "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[4]           : 0.0))                                  \
+    X(thompson_pulls_arm4, "%u",   (ezoo ? (unsigned)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[4]    : 0u))                                   \
     X(exp3_w_arm5,         "%.6f", exp3_probs[5])                                                                                                      \
-    X(thompson_mu_arm5,    "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].mu_post[5]                  : 0.0))                                  \
-    X(thompson_prec_arm5,  "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].precision_post[5]           : 0.0))                                  \
-    X(thompson_pulls_arm5, "%u",   (ezoo ? (unsigned)ezoo->thompson_bandits[regime_clamped].total_pulls[5]    : 0u))                                   \
+    X(thompson_mu_arm5,    "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[5]                  : 0.0))                                  \
+    X(thompson_prec_arm5,  "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[5]           : 0.0))                                  \
+    X(thompson_pulls_arm5, "%u",   (ezoo ? (unsigned)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[5]    : 0u))                                   \
     X(exp3_w_arm6,         "%.6f", exp3_probs[6])                                                                                                      \
-    X(thompson_mu_arm6,    "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].mu_post[6]                  : 0.0))                                  \
-    X(thompson_prec_arm6,  "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].precision_post[6]           : 0.0))                                  \
-    X(thompson_pulls_arm6, "%u",   (ezoo ? (unsigned)ezoo->thompson_bandits[regime_clamped].total_pulls[6]    : 0u))                                   \
+    X(thompson_mu_arm6,    "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[6]                  : 0.0))                                  \
+    X(thompson_prec_arm6,  "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[6]           : 0.0))                                  \
+    X(thompson_pulls_arm6, "%u",   (ezoo ? (unsigned)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[6]    : 0u))                                   \
     X(exp3_w_arm7,         "%.6f", exp3_probs[7])                                                                                                      \
-    X(thompson_mu_arm7,    "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].mu_post[7]                  : 0.0))                                  \
-    X(thompson_prec_arm7,  "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].precision_post[7]           : 0.0))                                  \
-    X(thompson_pulls_arm7, "%u",   (ezoo ? (unsigned)ezoo->thompson_bandits[regime_clamped].total_pulls[7]    : 0u))
+    X(thompson_mu_arm7,    "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].mu_post[7]                  : 0.0))                                  \
+    X(thompson_prec_arm7,  "%.6f", (ezoo ? ezoo->buy_thompson_bandits[regime_clamped].precision_post[7]           : 0.0))                                  \
+    X(thompson_pulls_arm7, "%u",   (ezoo ? (unsigned)ezoo->buy_thompson_bandits[regime_clamped].total_pulls[7]    : 0u))
 
 // v5.15.5.F.4d Step 8 § M — hand-written 8-arm coverage invariant.
 // If BANDIT_MAX_ARMS grows, append 4 more rows (exp3_w_armN + thompson_mu_armN + thompson_prec_armN

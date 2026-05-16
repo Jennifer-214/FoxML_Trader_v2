@@ -20951,7 +20951,7 @@ e3_skip_load:;
         // primary_count >= 2 (FOREACH_ENSEMBLE_POST_LOAD extension landed in .C
         // adds init_thompson_bandits as canonical step 8). Test-mock both flags
         // since this test bypasses PostLoadSetup helper.
-        BITMAP_SET(ezoo.init_flags, MASK_EZOO_THOMPSON_READY);
+        BITMAP_SET(ezoo.init_flags, MASK_EZOO_BUY_THOMPSON_READY);
         check("v5.14.2.E.1 contract: after InitBandits + InitThompsonBandits flags set → ready",
               EnsembleModelZoo_IsReadyForInference(&ezoo) == 1);
     }
@@ -23485,27 +23485,27 @@ e3_skip_load:;
         }
     }
 
-    // ─── Test B.5: EnsembleModelZoo_InitThompsonBandits initializes per-regime states ───
+    // ─── Test B.5: EnsembleModelZoo_InitBuyThompsonBandits initializes per-regime states ───
     {
         EnsembleModelZoo<64> ezoo;
         EnsembleModelZoo_Init(&ezoo);
         // Simulate post-LoadFromCfg state: primary_count = 4 (4 arms)
         ezoo.primary_count = 4;
         // Pre-init: state should be zero
-        check("v5.14.10.B: pre-Init thompson_bandits initialized=0",
-              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_THOMPSON_READY) == 0);
-        EnsembleModelZoo_InitThompsonBandits(&ezoo,
+        check("v5.14.10.B: pre-Init buy_thompson_bandits initialized=0",
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_BUY_THOMPSON_READY) == 0);
+        EnsembleModelZoo_InitBuyThompsonBandits(&ezoo,
             /*mu_prior=*/0.0, /*precision_prior=*/1.0, /*precision_obs=*/1.0,
             /*rng_seed=*/42ULL);
-        check("v5.14.10.B: post-Init thompson_bandits initialized=1 (primary_count=4)",
-              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_THOMPSON_READY) == 1);
+        check("v5.14.10.B: post-Init buy_thompson_bandits initialized=1 (primary_count=4)",
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_BUY_THOMPSON_READY) == 1);
         // Each regime's state should have prior applied to all arms
         bool all_priored = true;
         for (int r = 0; r < NUM_REGIMES; ++r) {
-            if (ezoo.thompson_bandits[r].n_arms != 4) { all_priored = false; break; }
+            if (ezoo.buy_thompson_bandits[r].n_arms != 4) { all_priored = false; break; }
             for (int a = 0; a < 4; ++a) {
-                if (ezoo.thompson_bandits[r].mu_post[a] != 0.0 ||
-                    ezoo.thompson_bandits[r].precision_post[a] != 1.0) {
+                if (ezoo.buy_thompson_bandits[r].mu_post[a] != 0.0 ||
+                    ezoo.buy_thompson_bandits[r].precision_post[a] != 1.0) {
                     all_priored = false;
                 }
             }
@@ -23515,7 +23515,7 @@ e3_skip_load:;
         // Per-regime RNG seeds should differ (rng_seed XOR'd with regime index)
         bool rng_states_differ = true;
         for (int r = 1; r < NUM_REGIMES; ++r) {
-            if (ezoo.thompson_bandits[r].rng_state == ezoo.thompson_bandits[0].rng_state) {
+            if (ezoo.buy_thompson_bandits[r].rng_state == ezoo.buy_thompson_bandits[0].rng_state) {
                 rng_states_differ = false; break;
             }
         }
@@ -23523,18 +23523,18 @@ e3_skip_load:;
               rng_states_differ);
     }
 
-    // ─── Test B.6: EnsembleModelZoo_InitThompsonBandits handles primary_count<2 gracefully ───
+    // ─── Test B.6: EnsembleModelZoo_InitBuyThompsonBandits handles primary_count<2 gracefully ───
     {
         EnsembleModelZoo<64> ezoo;
         EnsembleModelZoo_Init(&ezoo);
         ezoo.primary_count = 0;
-        EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+        EnsembleModelZoo_InitBuyThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
         check("v5.14.10.B: InitThompsonBandits with primary_count=0 → initialized=0 (graceful skip)",
-              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_THOMPSON_READY) == 0);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_BUY_THOMPSON_READY) == 0);
         ezoo.primary_count = 1;
-        EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+        EnsembleModelZoo_InitBuyThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
         check("v5.14.10.B: InitThompsonBandits with primary_count=1 → initialized=1 (single-arm degenerate but safe)",
-              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_THOMPSON_READY) == 1);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_BUY_THOMPSON_READY) == 1);
     }
 
     // ─── Test B.7: SLOW_PATH_GATE predicates fire correctly ───
@@ -23658,15 +23658,15 @@ e3_skip_load:;
         EnsembleModelZoo<64> ezoo;
         EnsembleModelZoo_Init(&ezoo);
         ezoo.primary_count = 4;
-        EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+        EnsembleModelZoo_InitBuyThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
 
         // Mutate state — apply some Updates to differentiate from prior
-        Thompson_Update(&ezoo.thompson_bandits[0], 0, 5.0);
-        Thompson_Update(&ezoo.thompson_bandits[0], 0, 5.0);
-        Thompson_Update(&ezoo.thompson_bandits[0], 1, -3.0);
-        Thompson_Update(&ezoo.thompson_bandits[2], 2, 2.5);
+        Thompson_Update(&ezoo.buy_thompson_bandits[0], 0, 5.0);
+        Thompson_Update(&ezoo.buy_thompson_bandits[0], 0, 5.0);
+        Thompson_Update(&ezoo.buy_thompson_bandits[0], 1, -3.0);
+        Thompson_Update(&ezoo.buy_thompson_bandits[2], 2, 2.5);
         // Advance RNG
-        Thompson_Sample(&ezoo.thompson_bandits[1]);
+        Thompson_Sample(&ezoo.buy_thompson_bandits[1]);
 
         // Capture pre-save state for comparison
         double pre_mu[NUM_REGIMES][BANDIT_MAX_ARMS];
@@ -23675,11 +23675,11 @@ e3_skip_load:;
         uint64_t pre_rng[NUM_REGIMES];
         for (int r = 0; r < NUM_REGIMES; ++r) {
             for (int a = 0; a < BANDIT_MAX_ARMS; ++a) {
-                pre_mu[r][a]    = ezoo.thompson_bandits[r].mu_post[a];
-                pre_prec[r][a]  = ezoo.thompson_bandits[r].precision_post[a];
-                pre_pulls[r][a] = ezoo.thompson_bandits[r].total_pulls[a];
+                pre_mu[r][a]    = ezoo.buy_thompson_bandits[r].mu_post[a];
+                pre_prec[r][a]  = ezoo.buy_thompson_bandits[r].precision_post[a];
+                pre_pulls[r][a] = ezoo.buy_thompson_bandits[r].total_pulls[a];
             }
-            pre_rng[r] = ezoo.thompson_bandits[r].rng_state;
+            pre_rng[r] = ezoo.buy_thompson_bandits[r].rng_state;
         }
 
         // Save
@@ -23694,11 +23694,11 @@ e3_skip_load:;
             // Now zero out the in-memory state + reload
             for (int r = 0; r < NUM_REGIMES; ++r) {
                 for (int a = 0; a < BANDIT_MAX_ARMS; ++a) {
-                    ezoo.thompson_bandits[r].mu_post[a]       = 999.0;  // sentinel
-                    ezoo.thompson_bandits[r].precision_post[a] = 999.0;
-                    ezoo.thompson_bandits[r].total_pulls[a]    = 999;
+                    ezoo.buy_thompson_bandits[r].mu_post[a]       = 999.0;  // sentinel
+                    ezoo.buy_thompson_bandits[r].precision_post[a] = 999.0;
+                    ezoo.buy_thompson_bandits[r].total_pulls[a]    = 999;
                 }
-                ezoo.thompson_bandits[r].rng_state = 0xDEADBEEFULL;
+                ezoo.buy_thompson_bandits[r].rng_state = 0xDEADBEEFULL;
             }
             int loaded = EnsembleModelZoo_LoadThompsonState(&ezoo, dir);
             check("v5.14.10.C: LoadThompsonState returns 1 (success)", loaded == 1);
@@ -23708,13 +23708,13 @@ e3_skip_load:;
             // intentionally retain their sentinel value (no need to round-trip unused slots).
             bool mu_match = true, prec_match = true, pulls_match = true, rng_match = true;
             for (int r = 0; r < NUM_REGIMES; ++r) {
-                int active = ezoo.thompson_bandits[r].n_arms;  // = primary_count = 4
+                int active = ezoo.buy_thompson_bandits[r].n_arms;  // = primary_count = 4
                 for (int a = 0; a < active; ++a) {
-                    if (ezoo.thompson_bandits[r].mu_post[a] != pre_mu[r][a])    mu_match = false;
-                    if (ezoo.thompson_bandits[r].precision_post[a] != pre_prec[r][a]) prec_match = false;
-                    if (ezoo.thompson_bandits[r].total_pulls[a] != pre_pulls[r][a]) pulls_match = false;
+                    if (ezoo.buy_thompson_bandits[r].mu_post[a] != pre_mu[r][a])    mu_match = false;
+                    if (ezoo.buy_thompson_bandits[r].precision_post[a] != pre_prec[r][a]) prec_match = false;
+                    if (ezoo.buy_thompson_bandits[r].total_pulls[a] != pre_pulls[r][a]) pulls_match = false;
                 }
-                if (ezoo.thompson_bandits[r].rng_state != pre_rng[r]) rng_match = false;
+                if (ezoo.buy_thompson_bandits[r].rng_state != pre_rng[r]) rng_match = false;
             }
             check("v5.14.10.C: round-trip preserves mu_post (.17g lossless; active arms)", mu_match);
             check("v5.14.10.C: round-trip preserves precision_post (.17g lossless; active arms)", prec_match);
@@ -23734,14 +23734,14 @@ e3_skip_load:;
         EnsembleModelZoo<64> ezoo;
         EnsembleModelZoo_Init(&ezoo);
         ezoo.primary_count = 4;
-        EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+        EnsembleModelZoo_InitBuyThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
         int loaded = EnsembleModelZoo_LoadThompsonState(&ezoo, "/tmp/nonexistent_dir_v5_14_10_c");
         check("v5.14.10.C: Load missing file returns 0 (forward-compat-by-absence)",
               loaded == 0);
         // State should still be at prior (uniform; from InitThompsonBandits)
         check("v5.14.10.C: state unchanged after failed load (priors preserved)",
-              fabs(ezoo.thompson_bandits[0].mu_post[0] - 0.0) < 1e-9 &&
-              fabs(ezoo.thompson_bandits[0].precision_post[0] - 1.0) < 1e-9);
+              fabs(ezoo.buy_thompson_bandits[0].mu_post[0] - 0.0) < 1e-9 &&
+              fabs(ezoo.buy_thompson_bandits[0].precision_post[0] - 1.0) < 1e-9);
     }
 
     // ─── Test C.5: FOREACH_ENSEMBLE_POST_LOAD_COUNT == 11 (v5.15.5.F.4d: +2 for exit-side Thompson init+load) ───
@@ -23762,11 +23762,11 @@ e3_skip_load:;
         strncpy(cfg.ensemble_blend_mode, "weighted", sizeof(cfg.ensemble_blend_mode) - 1);
         // Pre-PostLoadSetup: thompson init flag should be 0
         check("v5.14.10.C: pre-PostLoadSetup initialized_thompson_bandits == 0",
-              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_THOMPSON_READY) == 0);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_BUY_THOMPSON_READY) == 0);
         EnsembleModelZoo_PostLoadSetup<64>(&ezoo, cfg, /*core_id=*/0,
                                             "/tmp/v5_14_10_c_post_load_test_dir");
         check("v5.14.10.C: post-PostLoadSetup initialized_thompson_bandits == 1 (init step ran)",
-              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_THOMPSON_READY) == 1);
+              BITMAP_IS_SET(ezoo.init_flags, MASK_EZOO_BUY_THOMPSON_READY) == 1);
     }
 
     // ===========================================================================
@@ -24009,13 +24009,13 @@ e3_skip_load:;
         EnsembleModelZoo_Init(&ezoo);
         ezoo.primary_count = 4;
         EnsembleModelZoo_InitBandits(&ezoo, /*eta=*/0.05, /*min_warmup=*/0);
-        EnsembleModelZoo_InitThompsonBandits(&ezoo,
+        EnsembleModelZoo_InitBuyThompsonBandits(&ezoo,
             /*mu_prior=*/0.0, /*precision_prior=*/1.0, /*precision_obs=*/1.0,
             /*rng_seed=*/42ULL);
-        const double mu_pre = ezoo.thompson_bandits[0].mu_post[0];
+        const double mu_pre = ezoo.buy_thompson_bandits[0].mu_post[0];
         // Dispatch via cfg=1 (THOMPSON): should update Thompson, NOT Bandit
         g_buy_reward_dispatch<64>[BANDIT_ALGO_THOMPSON](&ezoo, /*regime=*/0, /*arm=*/0, /*reward_bps=*/50.0);
-        const double mu_post = ezoo.thompson_bandits[0].mu_post[0];
+        const double mu_post = ezoo.buy_thompson_bandits[0].mu_post[0];
         check("v5.15.5.F.4d Step 9.7: Class 24 closure — cfg=1 dispatch updates Thompson mu_post (was silent pre-.F.4d)",
               mu_post != mu_pre);
     }
@@ -24027,7 +24027,7 @@ e3_skip_load:;
         EnsembleModelZoo_Init(&ezoo);
         ezoo.primary_count = 4;
         EnsembleModelZoo_InitBandits(&ezoo, /*eta=*/0.05, /*min_warmup=*/0);
-        EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+        EnsembleModelZoo_InitBuyThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
         const double w_pre = ezoo.bandits[0].weights[0];
         g_buy_reward_dispatch<64>[BANDIT_ALGO_THOMPSON](&ezoo, 0, 0, 50.0);
         const double w_post = ezoo.bandits[0].weights[0];
@@ -24042,10 +24042,10 @@ e3_skip_load:;
         EnsembleModelZoo_Init(&ezoo);
         ezoo.primary_count = 4;
         EnsembleModelZoo_InitBandits(&ezoo, /*eta=*/0.05, /*min_warmup=*/0);
-        EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
-        const double mu_pre = ezoo.thompson_bandits[0].mu_post[0];
+        EnsembleModelZoo_InitBuyThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+        const double mu_pre = ezoo.buy_thompson_bandits[0].mu_post[0];
         g_buy_reward_dispatch<64>[BANDIT_ALGO_EXP3](&ezoo, 0, 0, 50.0);
-        const double mu_post = ezoo.thompson_bandits[0].mu_post[0];
+        const double mu_post = ezoo.buy_thompson_bandits[0].mu_post[0];
         check("v5.15.5.F.4d Step 9.9: cfg=0 (EXP3) does NOT update Thompson posterior (legacy byte-equivalence)",
               mu_pre == mu_post);
     }
@@ -24064,12 +24064,12 @@ e3_skip_load:;
             EnsembleModelZoo_Init(&ezoo);
             ezoo.primary_count = 4;
             EnsembleModelZoo_InitBandits(&ezoo, /*eta=*/0.05, /*min_warmup=*/0);
-            EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+            EnsembleModelZoo_InitBuyThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
             const double w_pre  = ezoo.bandits[0].weights[0];
-            const double mu_pre = ezoo.thompson_bandits[0].mu_post[0];
+            const double mu_pre = ezoo.buy_thompson_bandits[0].mu_post[0];
             g_buy_reward_dispatch<64>[algo](&ezoo, 0, 0, 50.0);
             const double w_post  = ezoo.bandits[0].weights[0];
-            const double mu_post = ezoo.thompson_bandits[0].mu_post[0];
+            const double mu_post = ezoo.buy_thompson_bandits[0].mu_post[0];
             char msg[256];
             snprintf(msg, sizeof(msg),
                 "v5.15.5.F.4d Step 9.10: cfg=%d updates BOTH Exp3 weights AND Thompson mu_post (both_reward dispatch)", algo);
@@ -24077,7 +24077,7 @@ e3_skip_load:;
         }
     }
 
-    // ─── Test S9.11: g_exit_reward_dispatch updates exit_bandits / thompson_exit_bandits (exit-side mirror) ───
+    // ─── Test S9.11: g_exit_reward_dispatch updates exit_bandits / exit_thompson_bandits (exit-side mirror) ───
     // Symmetric to buy-side: exit-side reward attribution targets the EXIT bandit arrays, not buy.
     {
         EnsembleModelZoo<64> ezoo;
@@ -24086,22 +24086,22 @@ e3_skip_load:;
         ezoo.exit_predictor_count = 4;   // EnsembleModelZoo_InitExitBandits uses exit_predictor_count for n_arms
         EnsembleModelZoo_InitBandits(&ezoo, /*eta=*/0.05, /*min_warmup=*/0);
         EnsembleModelZoo_InitExitBandits(&ezoo, /*eta=*/0.05, /*min_warmup=*/0);
-        EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+        EnsembleModelZoo_InitBuyThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
         EnsembleModelZoo_InitExitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
         const double exit_w_pre  = ezoo.exit_bandits[0].weights[0];
-        const double exit_mu_pre = ezoo.thompson_exit_bandits[0].mu_post[0];
+        const double exit_mu_pre = ezoo.exit_thompson_bandits[0].mu_post[0];
         const double buy_w_pre   = ezoo.bandits[0].weights[0];
-        const double buy_mu_pre  = ezoo.thompson_bandits[0].mu_post[0];
-        // cfg=2 (BOTH) on EXIT side: should update exit_bandits + thompson_exit_bandits, NOT buy.
+        const double buy_mu_pre  = ezoo.buy_thompson_bandits[0].mu_post[0];
+        // cfg=2 (BOTH) on EXIT side: should update exit_bandits + exit_thompson_bandits, NOT buy.
         g_exit_reward_dispatch<64>[BANDIT_ALGO_EXP3_OP_THOMPSON_GHOST](&ezoo, 0, 0, 50.0);
         check("v5.15.5.F.4d Step 9.11: g_exit_reward_dispatch updates exit_bandits[].weights (exit-side Exp3)",
               ezoo.exit_bandits[0].weights[0] != exit_w_pre);
-        check("v5.15.5.F.4d Step 9.11: g_exit_reward_dispatch updates thompson_exit_bandits[].mu_post (exit-side Thompson)",
-              ezoo.thompson_exit_bandits[0].mu_post[0] != exit_mu_pre);
+        check("v5.15.5.F.4d Step 9.11: g_exit_reward_dispatch updates exit_thompson_bandits[].mu_post (exit-side Thompson)",
+              ezoo.exit_thompson_bandits[0].mu_post[0] != exit_mu_pre);
         check("v5.15.5.F.4d Step 9.11: g_exit_reward_dispatch does NOT touch buy-side bandits[].weights",
               ezoo.bandits[0].weights[0] == buy_w_pre);
-        check("v5.15.5.F.4d Step 9.11: g_exit_reward_dispatch does NOT touch buy-side thompson_bandits[].mu_post",
-              ezoo.thompson_bandits[0].mu_post[0] == buy_mu_pre);
+        check("v5.15.5.F.4d Step 9.11: g_exit_reward_dispatch does NOT touch buy-side buy_thompson_bandits[].mu_post",
+              ezoo.buy_thompson_bandits[0].mu_post[0] == buy_mu_pre);
     }
 
     // ─── Test S9.12: Bandit_Update branchless argmax cmov regression (Class 28 closure) ───

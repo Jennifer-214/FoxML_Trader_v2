@@ -761,10 +761,10 @@ static inline void TUI_CopySnapshotSharded(
                 // the cluster zeroed → ML Status panel skips Thompson render branch.
                 // For cfg=1 / cfg=2: copy current regime's posterior to display arrays;
                 // pack thompson_state byte (active flag + chosen_arm).
-                if (cfg->bandit_algorithm != 0 && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_THOMPSON_READY)) {
+                if (cfg->bandit_algorithm != 0 && BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BUY_THOMPSON_READY)) {
                     int regime_id = ezoo->last_predicted_regime_id;
                     if (regime_id < 0 || regime_id >= 5) regime_id = 0;
-                    const ThompsonBanditState* tb = &ezoo->thompson_bandits[regime_id];
+                    const ThompsonBanditState* tb = &ezoo->buy_thompson_bandits[regime_id];
                     int n_arms = tb->n_arms;
                     if (n_arms > 8) n_arms = 8;
                     // Float-cast at copy time (display precision; saves 32B/array vs double)
@@ -779,8 +779,8 @@ static inline void TUI_CopySnapshotSharded(
                         es.thompson_total_pulls[a]    = 0;
                     }
                     // Pack state byte: bit 0 = active; bits 1-3 = chosen_arm
-                    uint8_t arm_bits = (uint8_t)(ezoo->last_predicted_thompson_arm >= 0
-                        ? (ezoo->last_predicted_thompson_arm & 0x07) : 0);
+                    uint8_t arm_bits = (uint8_t)(ezoo->last_predicted_buy_thompson_arm >= 0
+                        ? (ezoo->last_predicted_buy_thompson_arm & 0x07) : 0);
                     es.thompson_state = (uint8_t)(
                         (uint8_t)TUISnapshot::PerCoreSnap::MASK_THOMPSON_BANDIT_ACTIVE |
                         (arm_bits << TUISnapshot::PerCoreSnap::SHIFT_THOMPSON_CHOSEN_ARM));
