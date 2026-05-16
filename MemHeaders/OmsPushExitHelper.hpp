@@ -60,7 +60,12 @@ namespace tt {
 //======================================================================================================
 // Push a market-sell exit submit for `slot` with degenerate TP/SL.
 // Wraps OMS_PushSubmit(ORDER_MARKET_SELL, qty, FPN_Zero, FPN_Zero, ...).
-// Caller passes only slot / qty / strategy_id / event_price / [leg].
+// Caller passes slot / qty / strategy_id / event_price / leg / core_cfg.
+//
+// v5.15.5.F.4c.3 WIP2d-1.B.1: `core_cfg` REQUIRED (no default). Closes silent-zero-fee
+// class structurally — every helper caller must thread per-core cfg through. Helper
+// forwards to OMS_PushSubmit; SubmitCommand carries core_cfg to drainer; drainer calls
+// Order_BindPreResolved at OrderManager_Submit time → pre_resolved.fee_rate set.
 //
 // Returns: true on successful push to OMS submit_queue; false on
 // invalid slot OR queue full. Callers should treat false as a soft
@@ -73,10 +78,15 @@ inline bool OMS_PushExitForSlot(OrderManagerState<F>* oms,
                                  FPN<F> qty,
                                  uint8_t strategy_id,
                                  FPN<F> event_price,
-                                 uint8_t leg = 0) {
-    return OMS_PushSubmit(oms, slot, ORDER_MARKET_SELL, qty,
-                          FPN_Zero<F>(), FPN_Zero<F>(),
-                          strategy_id, event_price, leg);
+                                 uint8_t leg,
+                                 const ::PerCoreCfg<F>* core_cfg) {
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — option (A refined): required-field ctor + optional assignments.
+    // Helper bakes in ORDER_MARKET_SELL; caller varies the rest. intended_tp/intended_sl/_pad
+    // take SubmitCommand default (FPN_Zero).
+    SubmitCommand<F> cmd(slot, ORDER_MARKET_SELL, qty, leg, core_cfg);
+    cmd.strategy_id = strategy_id;
+    cmd.event_price = event_price;
+    return OMS_PushSubmit(oms, cmd);
 }
 
 }  // namespace tt

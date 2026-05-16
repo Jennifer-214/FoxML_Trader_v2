@@ -826,11 +826,21 @@ namespace tt {
 //      net + fees → bump exits_processed + accumulate core_realized + fees +
 //      wins/losses + subtract entry_notional from core_open_notional.
 //
-// fee_rate is taken from state->oms->fee_rate_taker (matches live HandleFill
-// fee semantics: TP/SL market exits are always taker).
+// v5.15.5.F.4c.3 WIP2d-1.B.1 — `cores` param added (nullptr-tolerant) for per-core fee_rate
+// during replay. Per cfg-scope-discipline § "consumer over per-core array"; caller passes
+// `cfg.cores`. Recovery-path nullable semantic per Decision 2 — nullptr → FPN_Zero fees in
+// reconstructed accounting (acceptable for legacy replay; primary recovery is HandleFill).
+//
+// Branchless nullptr handling per H20 + branchless-dispatch-discipline.md Pattern 3:
+// hoist a SINGLE cmov at fn entry to select effective_cores; loop body reads
+// effective_cores[idx].field with zero per-iteration branches.
 template <unsigned F>
-inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* state) {
+inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* state,
+                                                          const PerCoreCfg<F>* cores = nullptr) {
     if (!state || !state->oms) return;
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless cores-select: ONE cmov at entry; loop reads pure ALU.
+    static const PerCoreCfg<F> NULL_PER_CORE_CFG_STUB_ARRAY[MAX_EXECUTION_CORES] = {};
+    const PerCoreCfg<F>* effective_cores = cores ? cores : NULL_PER_CORE_CFG_STUB_ARRAY;
     const tt::OrderEventLog<F>& log = state->oms->event_log;
     if (log.count == 0) return;  // no events → nothing to reconstruct (first boot)
 
@@ -849,9 +859,11 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
         int core_id = slot >> 1;
         if (core_id < 0 || core_id >= MAX_EXECUTION_CORES) continue;
 
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_cores (hoisted above loop).
+        const FPN<F> fee_rate_taker_for_core = effective_cores[core_id].fee_rate_taker;
         if (e.order_type == tt::ORDER_MARKET_BUY) {
             FPN<F> notional  = FPN_Mul(e.price, e.qty);
-            FPN<F> entry_fee = FPN_Mul(notional, state->oms->fee_rate_taker);
+            FPN<F> entry_fee = FPN_Mul(notional, fee_rate_taker_for_core);
             slot_entries[slot].entry_price = e.price;
             slot_entries[slot].qty         = e.qty;
             slot_entries[slot].entry_fee   = entry_fee;
@@ -865,7 +877,7 @@ inline void EventLoopState_ReconstructPerCoreFromEventLog(EventLoopState<F>* sta
             FPN<F> qty          = slot_entries[slot].qty;
             FPN<F> entry_fee    = slot_entries[slot].entry_fee;
             FPN<F> exit_notional= FPN_Mul(e.price, qty);
-            FPN<F> exit_fee     = FPN_Mul(exit_notional, state->oms->fee_rate_taker);
+            FPN<F> exit_fee     = FPN_Mul(exit_notional, fee_rate_taker_for_core);  // per-core via cores param
             FPN<F> total_fee    = FPN_Add(entry_fee, exit_fee);
             FPN<F> diff         = FPN_Sub(e.price, entry_price);
             FPN<F> gross        = FPN_Mul(diff, qty);
@@ -939,6 +951,8 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
     //     wraparound (uint64 underflow → huge uint32_t).
     // Per CLAUDE.md item 19 (structural fix preferred when bug class can
     // recur) + DESIGN_SPECS/structural-fix-preferred-decision-framework.md.
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — no cfg available at boot Init context; pass nullptr.
+    // Replayed fees default to zero; caller can re-run with cores via the public sig if needed.
     EventLoopState_ReconstructPerCoreFromEventLog(state);
 }
 
@@ -952,13 +966,12 @@ inline void EventLoopState_Init(EventLoopState<F>* state,
 template <unsigned F>
 inline void EventLoopState_InitLegacy(EventLoopState<F>* state,
                                        OrderManagerState<F>* oms,
-                                       FPN<F> starting_balance,
-                                       FPN<F> fee_rate) {
+                                       FPN<F> starting_balance) {
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — `fee_rate` param DELETED. OMS no longer holds scalar fee_rate;
+    // per-Order pre_resolved.fee_rate set at submit via Order_BindPreResolved with cfg.cores[c].
+    // Test fixtures that need non-zero fee accounting must populate cfg.cores[c].fee_rate_*.
     ExchangeAdapter<F> empty{};
-    // v5.15.5.C.3 — partial_exit_enabled is now a required param (Finding A).
-    // Legacy InitLegacy path defaults to 0 (no partials) — callers that need
-    // partials set the bit externally OR use the full OrderManager_Init signature.
-    OrderManager_Init(oms, empty, 0, /*partial_exit_enabled=*/0, starting_balance, fee_rate);
+    OrderManager_Init(oms, empty, 0, /*partial_exit_enabled=*/0, starting_balance);
     EventLoopState_Init(state, oms);
 }
 
@@ -1199,6 +1212,9 @@ template <unsigned F>
 inline void EventLoopState_AttachTradeLog(EventLoopState<F>* state,
                                           ShardedTradeLog* log) {
     state->oms->trade_log = log;
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer wire-to-real.
+    state->oms->on_entry_fill_emit = &tt::real_on_entry_fill_emit<F>;
+    state->oms->on_exit_fill_emit  = &tt::real_on_exit_fill_emit<F>;
 }
 
 //======================================================================================================
@@ -1237,10 +1253,11 @@ inline FPN<F> EventLoopState_RealizedPnl(const EventLoopState<F>* state) {
     return state->oms->realized_pnl;
 }
 
-template <unsigned F>
-inline FPN<F> EventLoopState_FeeRate(const EventLoopState<F>* state) {
-    return state->oms->fee_rate;
-}
+// v5.15.5.F.4c.3 WIP2d-1.B.1 — EventLoopState_FeeRate getter DELETED.
+// Was a proxy for state->oms->fee_rate which is also being deleted at r-5. Zero production
+// callers (verified via codebase grep at r-2 audit). Per-core fee rates now live on
+// cfg.cores[c].fee_rate_taker / fee_rate_maker; HandleFill reads Order::pre_resolved.fee_rate
+// (pre-resolved at submit via Order_BindPreResolved). No getter needed at this scope.
 
 template <unsigned F>
 inline const Portfolio<F>* EventLoopState_Portfolio(const EventLoopState<F>* state) {
@@ -1373,7 +1390,11 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                                              // (preserves pre-v5.13.4 behavior; legacy
                                              // test callers using 3-arg form unaffected).
                                              int      exit_bandit_enabled      = 0,
-                                             double   fee_rate_taker_for_cf    = 0.001) {
+                                             double   fee_rate_taker_for_cf    = 0.001,
+                                             // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg slice (nullptr fallback).
+                                             // Per cfg-scope-discipline § "consumer function signatures over per-core slices"
+                                             // — single-slice form (this fn is single-core-scoped via the `core_id` param).
+                                             const PerCoreCfg<F>* core_cfg     = nullptr) {
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
     const int partial_on = BITMAP_IS_SET(oms->oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
     uint16_t my_mask = partial_on
@@ -1505,8 +1526,11 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
         const bool slot_is_maker = BITMAP_IS_SET(oms->last_is_maker_bitmap, BITMAP_BIT_U16(slot));
         const FPN<F> exit_entry_notional = FPN_Mul(pos.entry_price, pos.quantity);
         const FPN<F> exit_notional       = FPN_Mul(oms->last_exit_fill_price[slot], pos.quantity);
-        const FPN<F> exit_fee_rate       = slot_is_maker ? oms->fee_rate_maker : oms->fee_rate_taker;
-        const FPN<F> exit_fee            = FPN_Mul(exit_notional, exit_fee_rate);
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — read authoritative exit_fee from OMS sibling array (set by HandleFill
+        // SELL from o->pre_resolved.fee_rate). Replaces the prior cfg-recompute which lost the Order's
+        // captured fee_rate. Per decision-time-data-binding-pattern.md: Order pre_resolved is canonical;
+        // DrainPostFill is a CONSUMER, not a re-deriver. Eliminates the core_cfg param dependency at this site.
+        const FPN<F> exit_fee            = oms->last_exit_fee[slot];
         const FPN<F> exit_total_fees     = FPN_Add(pos.entry_fee, exit_fee);
         const FPN<F> gross               = FPN_Sub(exit_notional, exit_entry_notional);
         const FPN<F> exit_net_pnl        = FPN_Sub(gross, exit_total_fees);
@@ -1804,7 +1828,16 @@ inline void EventLoop_DrainPostFill(EventLoopState<F>* state,
 // them, but defensive logic in case of replay or fuzz testing.
 //======================================================================================================
 template <unsigned F>
-inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& event_in) {
+inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& event_in,
+                              // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg array (nullptr fallback).
+                              // OnEvent reads event.core_id then indexes cores[event.core_id] for
+                              // per-core fee_rate / slippage_pct. Mode-1 path returns early (sharded
+                              // production); mode-0 legacy body uses these. Per cfg-scope-discipline
+                              // § "consumer over per-core array."
+                              const PerCoreCfg<F>* cores = nullptr) {
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless cores-select: ONE cmov at entry; subsequent reads pure ALU.
+    static const PerCoreCfg<F> NULL_PER_CORE_CFG_STUB_ARRAY[MAX_EXECUTION_CORES] = {};
+    const PerCoreCfg<F>* effective_cores = cores ? cores : NULL_PER_CORE_CFG_STUB_ARRAY;
     // v4.2.1 — paper-mode slippage simulation. In live, event.price comes
     // from the WS executionReport (already includes real exchange slippage).
     // In paper, event.price is the tick that triggered the gate; adjust to
@@ -1815,56 +1848,61 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
     // Mutate a local copy so the caller's event is untouched.
     TradeEvent<F> event = event_in;
     // v5.15.5.C.2 (S3a) — bit-packed in oms_state_flags.
-    if (!BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING) && !FPN_IsZero(state->oms->slippage_pct)) {
-        FPN<F> slip = FPN_Mul(event.price, state->oms->slippage_pct);
-        if (event.type & TRADE_EVENT_ENTRY) {
-            event.price = FPN_Add(event.price, slip);
-        } else if (event.type & TRADE_EVENT_EXIT) {
-            event.price = FPN_Sub(event.price, slip);
-        }
-    }
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core slippage via effective_cores (branchless; bounds-clamped).
+    // event.core_id is uint16_t (always >= 0); clamp upper bound via `& (MAX-1)` mask-style. With
+    // MAX_EXECUTION_CORES = 16 (power of 2), `& 0xF` is exact. Pure ALU; no branch.
+    const int slip_idx = (int)(event.core_id & (uint16_t)(MAX_EXECUTION_CORES - 1));
+    const FPN<F> slip_pct_for_event = effective_cores[slip_idx].slippage_pct;
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — fully branchless slippage application per H20 + Pattern 3 mask-select.
+    // Old branchy form: `if (!live && !zero_slip) { mul + if-entry-add-else-if-exit-sub; }` — three
+    // data-dependent branches (live gate + entry/exit dispatch + zero-slip gate). Real-world cost: up to
+    // 3 mispredicts per event = 90-300ns variance (Class 28). Branchless: always compute slip_magnitude
+    // with cmov-selected effective_pct (zero in live mode → multiplying by zero is harmless), then
+    // branchless sign-select via ternary chain → cmov. Slow path budget ~100μs; ~30-50 unused cycles
+    // when live mode is 0.05% of budget; determinism wins.
+    const bool not_live    = !BITMAP_IS_SET(state->oms->oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING);
+    const FPN<F> effective_slip_pct = not_live ? slip_pct_for_event : FPN_Zero<F>();
+    const FPN<F> slip_magnitude = FPN_Mul(event.price, effective_slip_pct);
+    const bool is_entry_evt = (event.type & TRADE_EVENT_ENTRY) != 0;
+    const bool is_exit_evt  = (event.type & TRADE_EVENT_EXIT)  != 0;
+    const FPN<F> slip_signed = is_entry_evt
+        ? slip_magnitude
+        : (is_exit_evt ? FPN_Negate(slip_magnitude) : FPN_Zero<F>());
+    event.price = FPN_Add(event.price, slip_signed);
     int slot = (int)event.core_id;
-    if (slot < 0 || slot >= state->registered_count) return;
-
-    CoreContext<F>* ctx = &state->cores[slot];
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 option C — combined-mask collapse: 3 separate predicate branches
+    // (bounds + mutex + mode-1 fast-path) collapsed into 1 combined-mask + single guard branch.
+    // Reduces predictor entries 3 → 1; bounds variance to a single source. Per Caramel's
+    // determinism principle: even bounded predictor variance is variance worth eliminating.
+    //
+    // Branchless mask compute (pure ALU; ~5ns):
     bool is_entry = (event.type & TRADE_EVENT_ENTRY) != 0;
     bool is_exit  = (event.type & TRADE_EVENT_EXIT)  != 0;
+    const bool valid_slot   = slot < state->registered_count;     // uint16_t event.core_id → slot >= 0 always
+    const bool valid_mutex  = !(is_entry && is_exit);              // same-tick entry+exit impossible by ExecutionCore_Tick construction
+    const bool mode_0_body  = !MBS_EQ_U8(state->oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE,
+                                          tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);  // mode-1 (production sharded) → false → skip body
+    const bool should_apply = valid_slot && valid_mutex && mode_0_body;
+    // Single guard branch — predicted-taken in production (mode-1 means !should_apply).
+    // TECH_DEBT option B: full branchless via Portfolio_OpenSlot/CloseSlot + TradeLog_RecordEntry
+    // mask-param refactor scheduled for future ship (per ship-close TECH_DEBT entry).
+    if (!should_apply) return;
 
-    // same-tick entry+exit is impossible by ExecutionCore_Tick construction
-    // (mutually exclusive masks), but assert against it explicitly so a fuzz
-    // test or future bug can't sneak through.
-    if (is_entry && is_exit) return;
-
-    // === EVENT LOG MODE 1: OMS owns portfolio mutation ===
-    // In mode 1 the fill handler inside OMS_Tick opens/closes portfolio
-    // slots and updates balance. OnEvent just bumps counters so the
-    // statistics stay correct for the TUI and the drainer loop.
-    // v5.15.5.C.3 — event_log_mode is a 2-bit slot in oms_state_flags.
-    if (MBS_EQ_U8(state->oms->oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE,
-                  tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1)) {
-        // v4.7.19: do NOT bump heartbeat counters here. OnEvent fires for
-        // every TradeEvent the drainer pops — but the actual fill (and
-        // CSV write) happens later in OMS_Tick → HandleFill. Bumping here
-        // over-counts when Submit fails, when the result_queue is full,
-        // or when the slot was already closed by a racing manual-close.
-        // The counters are now bumped atomically with the CSV write in
-        // EventLoop_DrainPostFill (which walks last_opened_mask /
-        // last_closed_mask that HandleFill populates per actual fill).
-        // OnEvent's mode-1 path is now a pure no-op return.
-        (void)ctx;
-        (void)is_entry;
-        (void)is_exit;
-        return;
-    }
-
-    // === MODE 0: legacy OnEvent path (unchanged) ===
+    // === MODE 0: legacy OnEvent path (reached only when should_apply mask is true) ===
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — mode-1 body deleted (was pure-noop return). Combined-mask
+    // above filters out mode-1 + invalid input in single branch; mode-0 body only runs when
+    // valid + mode-0. Per v4.7.19 doctrine: production counter bumps happen via DrainPostFill,
+    // not here. Mode-0 path is legacy / test-only (sharded production is mode-1).
+    CoreContext<F>* ctx = &state->cores[slot];
     if (is_entry) {
         // Compute entry fee = entry_price * qty * fee_rate
         // Phase 8: synchronous market BUY = taker by exchange definition.
         // OMS HandleFill (mode 1) will book the actual maker/taker fee from
         // the WS executionReport. This sync accounting is optimistic.
         FPN<F> notional = FPN_Mul(event.price, ctx->intended_qty);
-        FPN<F> entry_fee = FPN_Mul(notional, state->oms->fee_rate_taker);
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_cores (slot already validated above).
+        const FPN<F> entry_fee_rate = effective_cores[slot].fee_rate_taker;
+        FPN<F> entry_fee = FPN_Mul(notional, entry_fee_rate);
         Portfolio_OpenSlot(&state->oms->portfolio, slot,
                            event.price,
                            ctx->intended_qty,
@@ -1906,7 +1944,9 @@ inline void EventLoop_OnEvent(EventLoopState<F>* state, const TradeEvent<F>& eve
         FPN<F> gross = Portfolio_CloseSlot(&state->oms->portfolio, slot, event.price);
         FPN<F> exit_notional = FPN_Mul(event.price, qty_snap);
         // Phase 8: TP/SL exit = market sell = always taker by exchange def.
-        FPN<F> exit_fee = FPN_Mul(exit_notional, state->oms->fee_rate_taker);
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless read via effective_cores (slot already validated above).
+        const FPN<F> exit_fee_rate = effective_cores[slot].fee_rate_taker;
+        FPN<F> exit_fee = FPN_Mul(exit_notional, exit_fee_rate);
         FPN<F> total_fee = FPN_Add(entry_fee, exit_fee);
         FPN<F> net = FPN_Sub(gross, total_fee);
         state->oms->balance = FPN_Add(state->oms->balance, net);
@@ -3359,10 +3399,12 @@ inline void EventLoop_TimeExitOneCore(EventLoopState<F>* state,
 
         // Force-close via OMS_PushSubmit (drainer is sole Submit caller).
         // v5.15.5.C.4 Phase D5 — routed through OMS_PushExitForSlot helper.
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg required for Order_BindPreResolved at submit.
         FPN<F> qty       = oms->portfolio.positions[slot].quantity;
         FPN<F> price_fpn = FPN_FromDouble<F>(current_price);
         tt::OMS_PushExitForSlot(oms, (int16_t)slot,
-                                qty, state->cores[core_id].strategy_id, price_fpn);
+                                qty, state->cores[core_id].strategy_id, price_fpn,
+                                /*leg*/(uint8_t)0, &cfg.cores[core_id]);
 
         fprintf(stderr,
             "[time-exit] core %d slot %d: held %lu ticks, gain %.3f%%\n",
@@ -3419,8 +3461,11 @@ inline void EventLoop_TimeExit(EventLoopState<F>* state,
 template <unsigned F>
 inline int EventLoop_FlattenAll(EventLoopState<F>* state,
                                  OrderManagerState<F>* oms,
+                                 const PerCoreCfg<F>* cores,
                                  double current_price,
                                  int reason_code) {
+    // v5.15.5.F.4c.3 WIP2d-1.B.1: `cores` REQUIRED — per-core array pointer (caller passes
+    // `cfg.cores`). Multi-slot dispatch fn; per cfg-scope-discipline § "consumer over per-core array."
     int submitted = 0;
     uint16_t bm = oms->portfolio.active_bitmap;
     // event_price is for log/audit (the actual market fill happens at
@@ -3434,14 +3479,17 @@ inline int EventLoop_FlattenAll(EventLoopState<F>* state,
     while (bm) {
         int slot = __builtin_ctz(bm);
         bm &= (uint16_t)(bm - 1);
-        // logical_core: with partials, slots 2c+0/+1 → core c (shift-1).
-        // No partials, slot == core. Branchless via partial_on multiplier
-        // would obscure intent; 100us slow-path budget makes branch fine.
-        int logical_core = partial_on ? (slot >> 1) : slot;
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless via pure ALU shift (H20 + branchless-dispatch-discipline.md
+        // Pattern 3). With partials: slot >> 1 = core. Without: slot >> 0 = slot. `partial_on` is BITMAP_IS_SET
+        // result (0 or 1) — exactly the right shift count. Replaces the prior ternary (cmov-able) with a single
+        // shift instruction; no cmov, no conditional move at all. Same semantic, tighter ALU.
+        int logical_core = slot >> (uint32_t)partial_on;
         FPN<F> qty = oms->portfolio.positions[slot].quantity;
         uint8_t sid = state->cores[logical_core].strategy_id;
         // v5.15.5.C.4 Phase D5 — routed through OMS_PushExitForSlot helper.
-        tt::OMS_PushExitForSlot(oms, (int16_t)slot, qty, sid, price_fpn);
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg for Order_BindPreResolved at submit.
+        tt::OMS_PushExitForSlot(oms, (int16_t)slot, qty, sid, price_fpn,
+                                /*leg*/(uint8_t)0, &cores[logical_core]);
         submitted++;
     }
     if (submitted > 0) {
@@ -3533,7 +3581,7 @@ inline int EventLoop_CheckWsStaleness(EventLoopState<F>* state,
         (double)gap_us / 1.0e6,
         cfg.ws_dead_time_flatten_threshold_secs,
         cfg.recovery_delay_secs);
-    return EventLoop_FlattenAll(state, state->oms, current_price,
+    return EventLoop_FlattenAll(state, state->oms, cfg.cores, current_price,
                                  /*reason*/1);
 }
 

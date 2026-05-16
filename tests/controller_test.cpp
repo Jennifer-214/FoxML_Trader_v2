@@ -5397,7 +5397,7 @@ int main() {
         tt::OrderManagerState<64> oms;
         tt::EventLoopState<64> state;
         tt::EventLoopState_InitLegacy(&state, &oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
 
         tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
         tt::SPSCRing_Init(&tick_ring);
@@ -5491,7 +5491,7 @@ int main() {
         tt::OrderManagerState<64> oms;
         tt::EventLoopState<64> state;
         tt::EventLoopState_InitLegacy(&state, &oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
 
         tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
         tt::SPSCRing_Init(&tick_ring);
@@ -5616,7 +5616,7 @@ int main() {
             // short-lived and small — the leak is acceptable.
             R* r = new R();
             tt::EventLoopState_InitLegacy(&r->state, &r->oms,
-                FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+                FPN_FromDouble<64>(10000.0));
             tt::SPSCRing_Init(&r->tick_ring);
             tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
             int slot = tt::EventLoopState_RegisterCore(&r->state, &r->core,
@@ -5813,7 +5813,7 @@ int main() {
             };
             R* r = new R();
             tt::EventLoopState_InitLegacy(&r->state, &r->oms,
-                FPN_FromDouble<64>(balance), FPN_FromDouble<64>(0.001));
+                FPN_FromDouble<64>(balance));
             for (int i = 0; i < num_cores && i < 8; ++i) {
                 tt::SPSCRing_Init(&r->tick_rings[i]);
                 tt::ExecutionCore_Init(&r->cores[i], 0, &r->tick_rings[i]);
@@ -6167,11 +6167,16 @@ int main() {
                 tt::EventLoopState<64> state;
                 tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
                 tt::ExecutionCore<64> core;
+                ControllerConfig<64> cfg;  // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg holder for OnEvent
             };
             R* r = new R();
             tt::EventLoopState_InitLegacy(&r->state, &r->oms,
-                FPN_FromDouble<64>(balance), FPN_FromDouble<64>(0.001));
-            r->oms.slippage_pct = FPN_FromDouble<64>(slippage);
+                FPN_FromDouble<64>(balance));
+            // v5.15.5.F.4c.3 WIP2d-1.B.1 — slippage_pct moved from OMS scalar to per-core cfg.
+            // OnEvent reads effective_cores[event.core_id].slippage_pct via the cores param.
+            r->cfg.cores[0].slippage_pct = FPN_FromDouble<64>(slippage);
+            r->cfg.cores[0].fee_rate_taker = FPN_FromDouble<64>(0.001);  // mode-0 body reads this too
+            r->cfg.cores[0].fee_rate_maker = FPN_FromDouble<64>(0.001);
             tt::SPSCRing_Init(&r->tick_ring);
             tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
             tt::EventLoopState_RegisterCore(&r->state, &r->core,
@@ -6197,7 +6202,8 @@ int main() {
             BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING);  // paper
             // Entry at $60000 → expect stored entry_price = $60000 × 1.001 = $60060
             tt::EventLoop_OnEvent(&r->state,
-                make_event(0, tt::TRADE_EVENT_ENTRY, 60000.0));
+                make_event(0, tt::TRADE_EVENT_ENTRY, 60000.0),
+                r->cfg.cores);  // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg array for slippage/fee_rate
             double entry_price = FPN_ToDouble(r->oms.portfolio.positions[0].entry_price);
             check("paper slippage on entry: stored price = base × 1.001",
                   fabs(entry_price - 60060.0) < 1e-3);
@@ -6206,7 +6212,8 @@ int main() {
             // Net gross = (60939 - 60060) × 0.01 = $8.79 (vs $10 without slippage)
             double pre_balance = FPN_ToDouble(r->oms.balance);
             tt::EventLoop_OnEvent(&r->state,
-                make_event(0, tt::TRADE_EVENT_EXIT, 61000.0));
+                make_event(0, tt::TRADE_EVENT_EXIT, 61000.0),
+                r->cfg.cores);
             double post_balance = FPN_ToDouble(r->oms.balance);
             // Some math here: gross is (60939 - 60060) × 0.01 = $8.79.
             // Fees: entry_fee at fill time used taker rate × notional ≈ ~$0.6.
@@ -6250,7 +6257,7 @@ int main() {
         tt::OrderManagerState<64> oms;
         tt::EventLoopState<64> state;
         tt::EventLoopState_InitLegacy(&state, &oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
         tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE> tick_ring;
         tt::SPSCRing_Init(&tick_ring);
         tt::ExecutionCore<64> core;
@@ -6485,8 +6492,7 @@ int main() {
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
                           /*partial_exit_enabled=*/0,
-                          FPN_FromDouble<64>(10000.0),
-                          FPN_FromDouble<64>(0.001));
+                          FPN_FromDouble<64>(10000.0));
 
         EventLoopState<64> state;
         EventLoopState_Init(&state, &oms);
@@ -6556,8 +6562,7 @@ int main() {
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
                           /*partial_exit_enabled=*/0,
-                          FPN_FromDouble<64>(10000.0),
-                          FPN_FromDouble<64>(0.001));
+                          FPN_FromDouble<64>(10000.0));
         EventLoopState<64> state;
         EventLoopState_Init(&state, &oms);
 
@@ -6657,8 +6662,7 @@ int main() {
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
                           /*partial_exit_enabled=*/0,
-                          FPN_FromDouble<64>(10000.0),
-                          FPN_FromDouble<64>(0.001));
+                          FPN_FromDouble<64>(10000.0));
         EventLoopState<64> state;
         EventLoopState_Init(&state, &oms);
 
@@ -6731,8 +6735,7 @@ int main() {
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
                           /*partial_exit_enabled=*/0,
-                          FPN_FromDouble<64>(10000.0),
-                          FPN_FromDouble<64>(0.001));
+                          FPN_FromDouble<64>(10000.0));
         EventLoopState<64> state;
         EventLoopState_Init(&state, &oms);
 
@@ -6964,8 +6967,7 @@ e3_skip_load:;
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
                           /*partial_exit_enabled=*/0,
-                          FPN_FromDouble<64>(10000.0),
-                          FPN_FromDouble<64>(0.001));
+                          FPN_FromDouble<64>(10000.0));
         EventLoopState<64> state;
         EventLoopState_Init(&state, &oms);
 
@@ -7617,16 +7619,18 @@ e3_skip_load:;
             tt::EventLoopState<64> state;
             tt::SPSCRing<tt::Tick<64>, tt::EXECUTION_CORE_TICK_RING_SIZE> tick_rings[4];
             tt::ExecutionCore<64> cores[4];
+            ControllerConfig<64> cfg;  // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg for SubmitCommand.core_cfg
         };
         R* r = new R();
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
         // Mode 1 — OMS owns portfolio mutation + per-core accounting via
         // the FillRecord machinery this commit added.
         MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);
         BITMAP_SET(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);  // paired-leg geometry
-        r->oms.fee_rate_taker      = FPN_FromDouble<64>(0.001);  // 10bps taker
-        r->oms.fee_rate_maker      = FPN_FromDouble<64>(0.001);
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg drives fee accounting via Order_BindPreResolved.
+        r->cfg.cores[0].fee_rate_taker = FPN_FromDouble<64>(0.001);
+        r->cfg.cores[0].fee_rate_maker = FPN_FromDouble<64>(0.001);
 
         // Two cores → 4 portfolio slots in pair mode (slot 2c is leg A,
         // 2c+1 is leg B for core c).
@@ -7647,11 +7651,15 @@ e3_skip_load:;
         // the bug we fixed).
         auto submit_and_fill_entry = [&](int portfolio_slot, double qty, double price) {
             tt::ExchangeAdapter<64> empty{};
-            uint64_t oid = tt::OrderManager_Submit(&r->oms,
-                (int16_t)portfolio_slot, tt::ORDER_MARKET_BUY,
-                FPN_FromDouble<64>(qty),
-                FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
-                STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(price), 0);
+            // v5.15.5.F.4c.3 WIP2d-1.B.1 — pass per-core cfg so Order_BindPreResolved gets fee_rate.
+            tt::SubmitCommand<64> cmd((int16_t)portfolio_slot, tt::ORDER_MARKET_BUY,
+                                       FPN_FromDouble<64>(qty),
+                                       /*leg*/(uint8_t)0, /*core_cfg*/&r->cfg.cores[0]);
+            cmd.intended_tp = FPN_FromDouble<64>(60500.0);
+            cmd.intended_sl = FPN_FromDouble<64>(59500.0);
+            cmd.strategy_id = (uint8_t)STRATEGY_SIMPLE_DIP;
+            cmd.event_price = FPN_FromDouble<64>(price);
+            uint64_t oid = tt::OrderManager_Submit(&r->oms, cmd);
             (void)oid;
             // Find the order we just submitted and fill it.
             for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
@@ -7700,11 +7708,13 @@ e3_skip_load:;
 
         // Synthesize paired exit at $61200 (= +2% gross).
         auto submit_and_fill_exit = [&](int portfolio_slot, double qty, double price) {
-            uint64_t oid = tt::OrderManager_Submit(&r->oms,
-                (int16_t)portfolio_slot, tt::ORDER_MARKET_SELL,
-                FPN_FromDouble<64>(qty),
-                FPN_Zero<64>(), FPN_Zero<64>(),
-                STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(price), 0);
+            // v5.15.5.F.4c.3 WIP2d-1.B.1 — pass per-core cfg so Order_BindPreResolved gets fee_rate.
+            tt::SubmitCommand<64> cmd((int16_t)portfolio_slot, tt::ORDER_MARKET_SELL,
+                                       FPN_FromDouble<64>(qty),
+                                       /*leg*/(uint8_t)0, /*core_cfg*/&r->cfg.cores[0]);
+            cmd.strategy_id = (uint8_t)STRATEGY_SIMPLE_DIP;
+            cmd.event_price = FPN_FromDouble<64>(price);
+            uint64_t oid = tt::OrderManager_Submit(&r->oms, cmd);
             (void)oid;
             for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
                 if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
@@ -7769,11 +7779,9 @@ e3_skip_load:;
         };
         R* r = new R();
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
         MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);
         BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);  // single-leg
-        r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
-        r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
         tt::SPSCRing_Init(&r->tick_ring);
         tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
         tt::EventLoopState_RegisterCore(&r->state, &r->core,
@@ -7783,10 +7791,14 @@ e3_skip_load:;
             STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(1500.0));
 
         // Synthesize a single full-qty entry fill on slot 0.
-        uint64_t oid = tt::OrderManager_Submit(&r->oms,
-            0, tt::ORDER_MARKET_BUY, FPN_FromDouble<64>(0.02),
-            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
-            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+        tt::SubmitCommand<64> cmd(0, tt::ORDER_MARKET_BUY,
+                                   FPN_FromDouble<64>(0.02),
+                                   /*leg*/(uint8_t)0, /*core_cfg*/nullptr);
+        cmd.intended_tp = FPN_FromDouble<64>(60500.0);
+        cmd.intended_sl = FPN_FromDouble<64>(59500.0);
+        cmd.strategy_id = (uint8_t)STRATEGY_SIMPLE_DIP;
+        cmd.event_price = FPN_FromDouble<64>(60000.0);
+        uint64_t oid = tt::OrderManager_Submit(&r->oms, cmd);
         (void)oid;
         for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
             if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
@@ -7838,12 +7850,13 @@ e3_skip_load:;
         R* r = new R();
         r->cfg = ControllerConfig_Default<64>();
         r->cfg.sl_cooldown_cycles = 0;
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg drives fee accounting via Order_BindPreResolved.
+        r->cfg.cores[0].fee_rate_taker = FPN_FromDouble<64>(0.001);
+        r->cfg.cores[0].fee_rate_maker = FPN_FromDouble<64>(0.001);
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
         MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);       // mirror live default
         BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-        r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
-        r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
         tt::SPSCRing_Init(&r->tick_ring);
         tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
         tt::EventLoopState_RegisterCore(&r->state, &r->core,
@@ -7861,10 +7874,15 @@ e3_skip_load:;
         // into oms->last_fill[slot] + last_opened_mask but does NOT update
         // CoreContext until DrainPostFill consumes the masks.
         tt::ExchangeAdapter<64> empty{};
-        uint64_t oid = tt::OrderManager_Submit(&r->oms,
-            0, tt::ORDER_MARKET_BUY, FPN_FromDouble<64>(0.02),
-            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
-            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — pass per-core cfg so Order_BindPreResolved gets fee_rate.
+        tt::SubmitCommand<64> cmd(0, tt::ORDER_MARKET_BUY,
+                                   FPN_FromDouble<64>(0.02),
+                                   /*leg*/(uint8_t)0, /*core_cfg*/&r->cfg.cores[0]);
+        cmd.intended_tp = FPN_FromDouble<64>(60500.0);
+        cmd.intended_sl = FPN_FromDouble<64>(59500.0);
+        cmd.strategy_id = (uint8_t)STRATEGY_SIMPLE_DIP;
+        cmd.event_price = FPN_FromDouble<64>(60000.0);
+        uint64_t oid = tt::OrderManager_Submit(&r->oms, cmd);
         (void)oid;
         for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
             if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
@@ -7908,10 +7926,13 @@ e3_skip_load:;
 
         // Synthesize an exit at +1% — RunTick should now drain the close mask
         // too, incrementing wins. Confirms exit-path parity.
-        uint64_t exit_oid = tt::OrderManager_Submit(&r->oms,
-            0, tt::ORDER_MARKET_SELL, FPN_FromDouble<64>(0.02),
-            FPN_Zero<64>(), FPN_Zero<64>(),
-            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60600.0), 0);
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — pass per-core cfg so Order_BindPreResolved gets fee_rate.
+        tt::SubmitCommand<64> exit_cmd(0, tt::ORDER_MARKET_SELL,
+                                        FPN_FromDouble<64>(0.02),
+                                        /*leg*/(uint8_t)0, /*core_cfg*/&r->cfg.cores[0]);
+        exit_cmd.strategy_id = (uint8_t)STRATEGY_SIMPLE_DIP;
+        exit_cmd.event_price = FPN_FromDouble<64>(60600.0);
+        uint64_t exit_oid = tt::OrderManager_Submit(&r->oms, exit_cmd);
         (void)exit_oid;
         for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
             if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
@@ -7967,11 +7988,9 @@ e3_skip_load:;
         r->cfg = ControllerConfig_Default<64>();
         r->cfg.sl_cooldown_cycles = 0;
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
         MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);
         BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-        r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
-        r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
         tt::SPSCRing_Init(&r->tick_ring);
         tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
         tt::EventLoopState_RegisterCore(&r->state, &r->core,
@@ -7988,10 +8007,14 @@ e3_skip_load:;
         // Pre-stage a fill BEFORE entering ShardedBacktest_Run. The wrapper
         // will fan ticks to cores then do the final flush. We assert the
         // mask gets consumed even though no tick fired during the run.
-        uint64_t oid = tt::OrderManager_Submit(&r->oms,
-            0, tt::ORDER_MARKET_BUY, FPN_FromDouble<64>(0.02),
-            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
-            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+        tt::SubmitCommand<64> cmd(0, tt::ORDER_MARKET_BUY,
+                                   FPN_FromDouble<64>(0.02),
+                                   /*leg*/(uint8_t)0, /*core_cfg*/nullptr);
+        cmd.intended_tp = FPN_FromDouble<64>(60500.0);
+        cmd.intended_sl = FPN_FromDouble<64>(59500.0);
+        cmd.strategy_id = (uint8_t)STRATEGY_SIMPLE_DIP;
+        cmd.event_price = FPN_FromDouble<64>(60000.0);
+        uint64_t oid = tt::OrderManager_Submit(&r->oms, cmd);
         (void)oid;
         for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
             if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
@@ -8046,11 +8069,9 @@ e3_skip_load:;
         };
         R* r = new R();
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
         MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);
         BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
-        r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
-        r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
         tt::SPSCRing_Init(&r->tick_ring);
         tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
         tt::EventLoopState_RegisterCore(&r->state, &r->core,
@@ -8061,10 +8082,14 @@ e3_skip_load:;
 
         // ---- Open + close slot 0 normally ----
         tt::ExchangeAdapter<64> empty{};
-        uint64_t buy_id = tt::OrderManager_Submit(&r->oms,
-            0, tt::ORDER_MARKET_BUY, FPN_FromDouble<64>(0.02),
-            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
-            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+        tt::SubmitCommand<64> buy_cmd(0, tt::ORDER_MARKET_BUY,
+                                       FPN_FromDouble<64>(0.02),
+                                       /*leg*/(uint8_t)0, /*core_cfg*/nullptr);
+        buy_cmd.intended_tp = FPN_FromDouble<64>(60500.0);
+        buy_cmd.intended_sl = FPN_FromDouble<64>(59500.0);
+        buy_cmd.strategy_id = (uint8_t)STRATEGY_SIMPLE_DIP;
+        buy_cmd.event_price = FPN_FromDouble<64>(60000.0);
+        uint64_t buy_id = tt::OrderManager_Submit(&r->oms, buy_cmd);
         (void)buy_id;
         for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
             if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
@@ -8085,10 +8110,12 @@ e3_skip_load:;
               r->state.cores[0].entries_processed == 1);
 
         // Now close it.
-        uint64_t sell_id = tt::OrderManager_Submit(&r->oms,
-            0, tt::ORDER_MARKET_SELL, FPN_FromDouble<64>(0.02),
-            FPN_Zero<64>(), FPN_Zero<64>(),
-            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60600.0), 0);
+        tt::SubmitCommand<64> sell_cmd(0, tt::ORDER_MARKET_SELL,
+                                        FPN_FromDouble<64>(0.02),
+                                        /*leg*/(uint8_t)0, /*core_cfg*/nullptr);
+        sell_cmd.strategy_id = (uint8_t)STRATEGY_SIMPLE_DIP;
+        sell_cmd.event_price = FPN_FromDouble<64>(60600.0);
+        uint64_t sell_id = tt::OrderManager_Submit(&r->oms, sell_cmd);
         (void)sell_id;
         for (int i = 0; i < MAX_INFLIGHT_ORDERS; ++i) {
             if ((r->oms.order_bitmap & (uint16_t)(1u << i)) == 0) continue;
@@ -8174,8 +8201,6 @@ e3_skip_load:;
             // Derive formula: exit_net_pnl = (exit_fill_price - entry_price) × qty - total_fees
             // With entry_price=0, entry_fee=0, fee_rate=0, qty=1:
             //   exit_net_pnl = exit_fill_price; exit_entry_notional=0; exit_total_fees=0
-            r->oms.fee_rate_maker = FPN_Zero<64>();
-            r->oms.fee_rate_taker = FPN_Zero<64>();
             auto& pos_a = r->oms.portfolio.positions[0];
             pos_a.entry_price     = FPN_Zero<64>();
             pos_a.quantity        = FPN_FromDouble<64>(1.0);
@@ -8201,7 +8226,7 @@ e3_skip_load:;
         {
             R* r = new R();
             tt::EventLoopState_InitLegacy(&r->state, &r->oms,
-                FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+                FPN_FromDouble<64>(10000.0));
             BITMAP_SET(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
             MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);
             tt::SPSCRing_Init(&r->tick_ring);
@@ -8233,7 +8258,7 @@ e3_skip_load:;
         {
             R* r = new R();
             tt::EventLoopState_InitLegacy(&r->state, &r->oms,
-                FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+                FPN_FromDouble<64>(10000.0));
             BITMAP_SET(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
             MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);
             tt::SPSCRing_Init(&r->tick_ring);
@@ -8263,7 +8288,7 @@ e3_skip_load:;
         {
             R* r = new R();
             tt::EventLoopState_InitLegacy(&r->state, &r->oms,
-                FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+                FPN_FromDouble<64>(10000.0));
             BITMAP_CLR(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);
             MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);
             tt::SPSCRing_Init(&r->tick_ring);
@@ -8276,8 +8301,6 @@ e3_skip_load:;
 
             // v5.15.5.C.4 Phase G — seed Position state for derive cascade.
             // Single-leg: just slot 0. exit_net_pnl = exit_fill_price × 1 = +7.0.
-            r->oms.fee_rate_maker = FPN_Zero<64>();
-            r->oms.fee_rate_taker = FPN_Zero<64>();
             auto& pos_single = r->oms.portfolio.positions[0];
             pos_single.entry_price     = FPN_Zero<64>();
             pos_single.quantity        = FPN_FromDouble<64>(1.0);
@@ -8333,11 +8356,9 @@ e3_skip_load:;
         r->cfg.sl_cooldown_cycles = 0;
         BITMAP_SET(r->cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED);
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
         MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);
         BITMAP_SET(r->oms.oms_state_flags, tt::MASK_OMS_STATE_PARTIAL_EXIT_ENABLED);       // mirror cfg
-        r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.0);  // zero fees: clean P&L signal
-        r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.0);
         tt::SPSCRing_Init(&r->tick_ring);
         tt::ExecutionCore_Init(&r->core, 0, &r->tick_ring);
         tt::EventLoopState_RegisterCore(&r->state, &r->core,
@@ -8353,8 +8374,6 @@ e3_skip_load:;
 
         // v5.15.5.C.4 Phase G — seed Position state for derive cascade.
         // Leg A (slot 0) wins +3.0, leg B (slot 1) loses -8.0. Net = -5.0 → 1 loss when paired.
-        r->oms.fee_rate_maker = FPN_Zero<64>();
-        r->oms.fee_rate_taker = FPN_Zero<64>();
         auto& pos_pair_a = r->oms.portfolio.positions[0];
         pos_pair_a.entry_price     = FPN_Zero<64>();
         pos_pair_a.quantity        = FPN_FromDouble<64>(1.0);
@@ -8409,24 +8428,30 @@ e3_skip_load:;
         R* r = new R();
         tt::ExchangeAdapter<64> empty{};
         tt::OrderManager_Init(&r->oms, empty, /*live=*/0, /*partial_exit_enabled=*/0,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
         MBS_SET_U8(r->oms.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE, tt::SHIFT_OMS_STATE_EVENT_LOG_MODE, 1);       // mirror live default
-        r->oms.fee_rate_taker       = FPN_FromDouble<64>(0.001);
-        r->oms.fee_rate_maker       = FPN_FromDouble<64>(0.001);
 
         // Push 3 SubmitCommands across different core_ids
-        bool p0 = tt::OMS_PushSubmit(&r->oms, 0, tt::ORDER_MARKET_BUY,
-            FPN_FromDouble<64>(0.02),
-            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
-            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
-        bool p1 = tt::OMS_PushSubmit(&r->oms, 1, tt::ORDER_MARKET_BUY,
-            FPN_FromDouble<64>(0.03),
-            FPN_FromDouble<64>(60800.0), FPN_FromDouble<64>(59800.0),
-            STRATEGY_MEAN_REVERSION, FPN_FromDouble<64>(60100.0), 0);
-        bool p2 = tt::OMS_PushSubmit(&r->oms, 2, tt::ORDER_MARKET_BUY,
-            FPN_FromDouble<64>(0.04),
-            FPN_FromDouble<64>(60900.0), FPN_FromDouble<64>(59900.0),
-            STRATEGY_EMA_CROSS, FPN_FromDouble<64>(60200.0), 0);
+        tt::SubmitCommand<64> push0(0, tt::ORDER_MARKET_BUY, FPN_FromDouble<64>(0.02), 0, nullptr);
+        push0.intended_tp = FPN_FromDouble<64>(60500.0);
+        push0.intended_sl = FPN_FromDouble<64>(59500.0);
+        push0.strategy_id = (uint8_t)STRATEGY_SIMPLE_DIP;
+        push0.event_price = FPN_FromDouble<64>(60000.0);
+        bool p0 = tt::OMS_PushSubmit(&r->oms, push0);
+
+        tt::SubmitCommand<64> push1(1, tt::ORDER_MARKET_BUY, FPN_FromDouble<64>(0.03), 0, nullptr);
+        push1.intended_tp = FPN_FromDouble<64>(60800.0);
+        push1.intended_sl = FPN_FromDouble<64>(59800.0);
+        push1.strategy_id = (uint8_t)STRATEGY_MEAN_REVERSION;
+        push1.event_price = FPN_FromDouble<64>(60100.0);
+        bool p1 = tt::OMS_PushSubmit(&r->oms, push1);
+
+        tt::SubmitCommand<64> push2(2, tt::ORDER_MARKET_BUY, FPN_FromDouble<64>(0.04), 0, nullptr);
+        push2.intended_tp = FPN_FromDouble<64>(60900.0);
+        push2.intended_sl = FPN_FromDouble<64>(59900.0);
+        push2.strategy_id = (uint8_t)STRATEGY_EMA_CROSS;
+        push2.event_price = FPN_FromDouble<64>(60200.0);
+        bool p2 = tt::OMS_PushSubmit(&r->oms, push2);
 
         check("v4.7.37: PushSubmit core 0 succeeded", p0);
         check("v4.7.37: PushSubmit core 1 succeeded", p1);
@@ -8443,10 +8468,10 @@ e3_skip_load:;
               __builtin_popcount(r->oms.order_bitmap) == 3);
 
         // Push another and drain only that one — verify the queues stay clean
-        bool p3 = tt::OMS_PushSubmit(&r->oms, 0, tt::ORDER_MARKET_SELL,
-            FPN_FromDouble<64>(0.02),
-            FPN_Zero<64>(), FPN_Zero<64>(),
-            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60500.0), 0);
+        tt::SubmitCommand<64> push3(0, tt::ORDER_MARKET_SELL, FPN_FromDouble<64>(0.02), 0, nullptr);
+        push3.strategy_id = (uint8_t)STRATEGY_SIMPLE_DIP;
+        push3.event_price = FPN_FromDouble<64>(60500.0);
+        bool p3 = tt::OMS_PushSubmit(&r->oms, push3);
         check("v4.7.37: subsequent PushSubmit succeeds (queue not full)", p3);
         int drained2 = tt::OMS_DrainSubmit(&r->oms, 3);
         check("v4.7.37: second drain returns 1", drained2 == 1);
@@ -8455,11 +8480,14 @@ e3_skip_load:;
               drained3 == 0);
 
         // Invalid core_id rejected
-        bool bad = tt::OMS_PushSubmit(&r->oms, /*invalid*/-1, tt::ORDER_MARKET_BUY,
-            FPN_FromDouble<64>(0.01));
+        tt::SubmitCommand<64> bad_invalid(/*invalid*/-1, tt::ORDER_MARKET_BUY,
+                                           FPN_FromDouble<64>(0.01), 0, nullptr);
+        bool bad = tt::OMS_PushSubmit(&r->oms, bad_invalid);
         check("v4.7.37: PushSubmit rejects invalid core_id=-1", !bad);
-        bad = tt::OMS_PushSubmit(&r->oms, /*too high*/MAX_EXECUTION_CORES,
-            tt::ORDER_MARKET_BUY, FPN_FromDouble<64>(0.01));
+        tt::SubmitCommand<64> bad_too_high(/*too high*/MAX_EXECUTION_CORES,
+                                            tt::ORDER_MARKET_BUY,
+                                            FPN_FromDouble<64>(0.01), 0, nullptr);
+        bad = tt::OMS_PushSubmit(&r->oms, bad_too_high);
         check("v4.7.37: PushSubmit rejects core_id >= MAX_EXECUTION_CORES",
               !bad);
 
@@ -8487,7 +8515,7 @@ e3_skip_load:;
         R* r2 = new R();
         for (R* rp : {r1, r2}) {
             tt::EventLoopState_InitLegacy(&rp->state, &rp->oms,
-                FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+                FPN_FromDouble<64>(10000.0));
             tt::SPSCRing_Init(&rp->tick_ring);
             for (int c = 0; c < 4; ++c) {
                 tt::ExecutionCore_Init(&rp->cores_ec[c], (uint16_t)c, &rp->tick_ring);
@@ -8574,7 +8602,7 @@ e3_skip_load:;
         };
         R* r = new R();
         tt::EventLoopState_InitLegacy(&r->state, &r->oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
         tt::SPSCRing_Init(&r->tick_ring);
         for (int c = 0; c < 4; ++c) {
             tt::ExecutionCore_Init(&r->cores_ec[c], (uint16_t)c, &r->tick_ring);
@@ -8627,14 +8655,17 @@ e3_skip_load:;
         R* r = new R();
         tt::ExchangeAdapter<64> empty{};
         tt::OrderManager_Init(&r->oms, empty, 0, /*partial_exit_enabled=*/0,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
 
         int pushed_ok = 0;
         for (int i = 0; i < 33; ++i) {
-            bool ok = tt::OMS_PushSubmit(&r->oms, 0, tt::ORDER_MARKET_BUY,
-                FPN_FromDouble<64>(0.01),
-                FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
-                STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+            tt::SubmitCommand<64> push_cmd(0, tt::ORDER_MARKET_BUY,
+                                            FPN_FromDouble<64>(0.01), 0, nullptr);
+            push_cmd.intended_tp = FPN_FromDouble<64>(60500.0);
+            push_cmd.intended_sl = FPN_FromDouble<64>(59500.0);
+            push_cmd.strategy_id = (uint8_t)STRATEGY_SIMPLE_DIP;
+            push_cmd.event_price = FPN_FromDouble<64>(60000.0);
+            bool ok = tt::OMS_PushSubmit(&r->oms, push_cmd);
             if (ok) pushed_ok++;
         }
         // Capacity reached at SOME point; we accept either 31 or 32 depending
@@ -8654,10 +8685,13 @@ e3_skip_load:;
         check("v5.0.4: drain empty queue returns 0", drained2 == 0);
 
         // Push another after drain — must succeed (queue empty)
-        bool ok = tt::OMS_PushSubmit(&r->oms, 0, tt::ORDER_MARKET_BUY,
-            FPN_FromDouble<64>(0.01),
-            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
-            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+        tt::SubmitCommand<64> after_drain(0, tt::ORDER_MARKET_BUY,
+                                           FPN_FromDouble<64>(0.01), 0, nullptr);
+        after_drain.intended_tp = FPN_FromDouble<64>(60500.0);
+        after_drain.intended_sl = FPN_FromDouble<64>(59500.0);
+        after_drain.strategy_id = (uint8_t)STRATEGY_SIMPLE_DIP;
+        after_drain.event_price = FPN_FromDouble<64>(60000.0);
+        bool ok = tt::OMS_PushSubmit(&r->oms, after_drain);
         check("v5.0.4: push after full drain succeeds", ok);
         delete r;
     }
@@ -10397,7 +10431,7 @@ e3_skip_load:;
                                /*live_trading=*/0,
                                /*partial_exit_enabled=*/0,
                                FPN_FromDouble<64>(10000.0),
-                               FPN_FromDouble<64>(0.001),
+                               
                                /*event_log_mode=*/0);  // mode 0 keeps
                                                         // Submit a no-op
                                                         // for paper
@@ -10410,11 +10444,11 @@ e3_skip_load:;
         int pushed = 0;
         for (int slot = 0; slot < 8; ++slot) {
             uint8_t leg = (uint8_t)(slot & 1);
-            bool ok = tt::OMS_PushSubmit(&rig->oms,
-                (int16_t)slot, tt::ORDER_MARKET_BUY,
-                FPN_FromDouble<64>(0.01),
-                FPN_Zero<64>(), FPN_Zero<64>(),
-                STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(50000.0), leg);
+            tt::SubmitCommand<64> rig_cmd((int16_t)slot, tt::ORDER_MARKET_BUY,
+                                           FPN_FromDouble<64>(0.01), leg, nullptr);
+            rig_cmd.strategy_id = (uint8_t)STRATEGY_SIMPLE_DIP;
+            rig_cmd.event_price = FPN_FromDouble<64>(50000.0);
+            bool ok = tt::OMS_PushSubmit(&rig->oms, rig_cmd);
             if (ok) pushed++;
         }
         check("v5.4.1.B2: 8 PushSubmit calls accepted (all queues had room)",
@@ -10442,10 +10476,12 @@ e3_skip_load:;
         // calling drain with the OLD num_cores=N. Expect only 4 drained;
         // the other 4 stay stuck in queues 4..7.
         for (int slot = 0; slot < 8; ++slot) {
-            tt::OMS_PushSubmit(&rig->oms, (int16_t)slot, tt::ORDER_MARKET_BUY,
-                FPN_FromDouble<64>(0.01), FPN_Zero<64>(), FPN_Zero<64>(),
-                STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(50000.0),
-                (uint8_t)(slot & 1));
+            tt::SubmitCommand<64> rig_cmd((int16_t)slot, tt::ORDER_MARKET_BUY,
+                                           FPN_FromDouble<64>(0.01),
+                                           (uint8_t)(slot & 1), nullptr);
+            rig_cmd.strategy_id = (uint8_t)STRATEGY_SIMPLE_DIP;
+            rig_cmd.event_price = FPN_FromDouble<64>(50000.0);
+            tt::OMS_PushSubmit(&rig->oms, rig_cmd);
         }
         int pre_fix_drained = tt::OMS_DrainSubmit(&rig->oms, /*num_cores=*/4);
         check("v5.4.1.B2: pre-fix drain (num_cores=N=4) only walks 4 queues",
@@ -15765,16 +15801,18 @@ e3_skip_load:;
         OrderManager_Init(&oms, empty_adapter, /*live=*/0,
                           /*partial_exit_enabled=*/0,
                           FPN_FromDouble<64>(10000.0),
-                          FPN_FromDouble<64>(0.001),
+                          
                           /*event_log_mode=*/1, /*event_log_path=*/nullptr);
 
         // First submit — paper mode (mode=1), fills synthetically. The returned
         // order id should have slot in the upper 4 bits.
-        uint64_t oid1 = OrderManager_Submit(&oms,
-            /*core_id=*/0, ORDER_MARKET_BUY,
-            FPN_FromDouble<64>(0.001),
-            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
-            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+        SubmitCommand<64> sub1(/*core_id=*/0, ORDER_MARKET_BUY,
+                                FPN_FromDouble<64>(0.001), 0, nullptr);
+        sub1.intended_tp = FPN_FromDouble<64>(60500.0);
+        sub1.intended_sl = FPN_FromDouble<64>(59500.0);
+        sub1.strategy_id = (uint8_t)STRATEGY_SIMPLE_DIP;
+        sub1.event_price = FPN_FromDouble<64>(60000.0);
+        uint64_t oid1 = OrderManager_Submit(&oms, sub1);
 
         int decoded_slot1 = (int)((oid1 >> 60) & 0xFu);
         check("v5.11.5.B: first submit's id encodes slot 0 in bits 63..60",
@@ -15788,11 +15826,13 @@ e3_skip_load:;
 
         // Submit a second order. Slot 0 still holds order 1; slot 1 should be
         // allocated.
-        uint64_t oid2 = OrderManager_Submit(&oms,
-            /*core_id=*/0, ORDER_MARKET_BUY,
-            FPN_FromDouble<64>(0.002),
-            FPN_FromDouble<64>(60500.0), FPN_FromDouble<64>(59500.0),
-            STRATEGY_SIMPLE_DIP, FPN_FromDouble<64>(60000.0), 0);
+        SubmitCommand<64> sub2(/*core_id=*/0, ORDER_MARKET_BUY,
+                                FPN_FromDouble<64>(0.002), 0, nullptr);
+        sub2.intended_tp = FPN_FromDouble<64>(60500.0);
+        sub2.intended_sl = FPN_FromDouble<64>(59500.0);
+        sub2.strategy_id = (uint8_t)STRATEGY_SIMPLE_DIP;
+        sub2.event_price = FPN_FromDouble<64>(60000.0);
+        uint64_t oid2 = OrderManager_Submit(&oms, sub2);
         int decoded_slot2 = (int)((oid2 >> 60) & 0xFu);
         check("v5.11.5.B: second submit's id encodes slot 1",
               decoded_slot2 == 1);
@@ -18645,8 +18685,7 @@ e3_skip_load:;
         tt::ExchangeAdapter<64> empty_adapter{};
         tt::OrderManager_Init(&oms, empty_adapter, /*live=*/0,
                               /*partial_exit_enabled=*/0,
-                              FPN_FromDouble<64>(10000.0),
-                              FPN_FromDouble<64>(0.001));
+                              FPN_FromDouble<64>(10000.0));
         tt::EventLoopState<64> state;
         tt::EventLoopState_Init(&state, &oms);
         ControllerConfig<64> cfg = ControllerConfig_Default<64>();
@@ -18742,8 +18781,7 @@ e3_skip_load:;
         tt::ExchangeAdapter<64> empty_adapter{};
         tt::OrderManager_Init(&oms, empty_adapter, /*live=*/0,
                               /*partial_exit_enabled=*/0,
-                              FPN_FromDouble<64>(10000.0),
-                              FPN_FromDouble<64>(0.001));
+                              FPN_FromDouble<64>(10000.0));
         tt::EventLoopState<64> state;
         tt::EventLoopState_Init(&state, &oms);
 
@@ -18825,7 +18863,7 @@ e3_skip_load:;
 
         // === Test 6: FlattenAll on empty portfolio returns 0 ===
         {
-            int n = tt::EventLoop_FlattenAll(&state, &oms, /*price*/100.0,
+            int n = tt::EventLoop_FlattenAll(&state, &oms, cfg.cores, /*price*/100.0,
                                               /*reason*/9);
             check("v5.12.1.A.2: FlattenAll on empty bitmap returns 0",
                   n == 0);
@@ -18842,7 +18880,7 @@ e3_skip_load:;
             oms.portfolio.positions[0].entry_price = FPN_FromDouble<64>(50000.0);
             // Pre-condition: submit queue 0 should be empty (drainer
             // hasn't run). Capture head before; verify head increased.
-            int submitted = tt::EventLoop_FlattenAll(&state, &oms, 50000.0,
+            int submitted = tt::EventLoop_FlattenAll(&state, &oms, cfg.cores, 50000.0,
                                                       /*reason*/2);
             check("v5.12.1.A.2: FlattenAll on 1-position portfolio "
                   "submits 1 exit",
@@ -18867,8 +18905,7 @@ e3_skip_load:;
         tt::ExchangeAdapter<64> empty_adapter{};
         tt::OrderManager_Init(&oms, empty_adapter, /*live=*/0,
                               /*partial_exit_enabled=*/0,
-                              FPN_FromDouble<64>(10000.0),
-                              FPN_FromDouble<64>(0.001));
+                              FPN_FromDouble<64>(10000.0));
         tt::EventLoopState<64> state;
         tt::EventLoopState_Init(&state, &oms);
 
@@ -18935,8 +18972,7 @@ e3_skip_load:;
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, /*live_trading=*/0,
                           /*partial_exit_enabled=*/0,
-                          FPN_FromDouble<64>(10000.0),
-                          FPN_FromDouble<64>(0.001));
+                          FPN_FromDouble<64>(10000.0));
 
         // === Init defaults ===
         // v5.15.5.C.2 (S3b) — last_exit_was_predicted[16] → uint16_t last_exit_predicted_bitmap.
@@ -18977,8 +19013,7 @@ e3_skip_load:;
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
                           /*partial_exit_enabled=*/0,
-                          FPN_FromDouble<64>(10000.0),
-                          FPN_FromDouble<64>(0.001));
+                          FPN_FromDouble<64>(10000.0));
 
         // === Empty path → no-op success ===
         int rv_empty = OrderManager_OpenCalibrationLog(&oms, "");
@@ -19027,8 +19062,7 @@ e3_skip_load:;
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
                           /*partial_exit_enabled=*/0,
-                          FPN_FromDouble<64>(10000.0),
-                          FPN_FromDouble<64>(0.001));
+                          FPN_FromDouble<64>(10000.0));
         EventLoopState_Init(&state, &oms);
 
         // === Init defaults ===
@@ -19187,8 +19221,7 @@ e3_skip_load:;
         ExchangeAdapter<64> empty_adapter{};
         OrderManager_Init(&oms, empty_adapter, 0,
                           /*partial_exit_enabled=*/0,
-                          FPN_FromDouble<64>(10000.0),
-                          FPN_FromDouble<64>(0.001));
+                          FPN_FromDouble<64>(10000.0));
         // === Defaults post-Init: -1 sentinel ===
         int all_neg1 = 1;
         for (int i = 0; i < MAX_PORTFOLIO_POSITIONS; ++i) {
@@ -19787,7 +19820,7 @@ e3_skip_load:;
         tt::OrderManagerState<64> oms;
         tt::EventLoopState<64> state;
         tt::EventLoopState_InitLegacy(&state, &oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
         // EventLoopState_Init initializes regime_state[i] for ALL i with safe
         // default 5 (EngineSharded_Run overrides with cfg.regime_hysteresis
         // post-init; tests use the safe default).
@@ -20299,7 +20332,7 @@ e3_skip_load:;
         tt::OrderManagerState<64> oms;
         tt::EventLoopState<64> state;
         tt::EventLoopState_InitLegacy(&state, &oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
         check("v5.14.4.B.1: ApplyMissedFills null trades → 0",
               tt::Reconcile_ApplyMissedFills(&oms, (tt::ReconcileTrade*)nullptr, 5) == 0);
         check("v5.14.4.B.1: ApplyMissedFills n_trades=0 → 0",
@@ -20310,7 +20343,7 @@ e3_skip_load:;
         tt::OrderManagerState<64> oms;
         tt::EventLoopState<64> state;
         tt::EventLoopState_InitLegacy(&state, &oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
         oms.last_seen_trade_id = 100;
 
         tt::ReconcileTrade trades[3];
@@ -20329,7 +20362,7 @@ e3_skip_load:;
         tt::OrderManagerState<64> oms;
         tt::EventLoopState<64> state;
         tt::EventLoopState_InitLegacy(&state, &oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
         oms.last_seen_trade_id = 50;
 
         tt::ReconcileTrade trades[3];
@@ -20348,7 +20381,7 @@ e3_skip_load:;
         tt::OrderManagerState<64> oms;
         tt::EventLoopState<64> state;
         tt::EventLoopState_InitLegacy(&state, &oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
         oms.last_seen_trade_id = 100;
 
         tt::ReconcileTrade trades[4];
@@ -20368,7 +20401,7 @@ e3_skip_load:;
         tt::OrderManagerState<64> oms;
         tt::EventLoopState<64> state;
         tt::EventLoopState_InitLegacy(&state, &oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
 
         tt::ReconcileTrade trades[2];
         trades[0] = {.trade_id = 100, .order_id = 1, .price = 50000.0, .qty = 0.001, .commission = 0, .time_ms = 0, .is_buyer = 1, .is_maker = 0};
@@ -20496,7 +20529,7 @@ e3_skip_load:;
         tt::OrderManagerState<64> oms;
         tt::EventLoopState<64> state;
         tt::EventLoopState_InitLegacy(&state, &oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
         check("v5.14.4.0: OrderManager_Init zero-inits last_seen_trade_id",
               oms.last_seen_trade_id == 0);
     }
@@ -20506,7 +20539,7 @@ e3_skip_load:;
         tt::OrderManagerState<64> oms;
         tt::EventLoopState<64> state;
         tt::EventLoopState_InitLegacy(&state, &oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
         oms.last_seen_trade_id = 42;
         check("v5.14.4.0: last_seen_trade_id mutable (= 42 after write)",
               oms.last_seen_trade_id == 42);
@@ -24762,7 +24795,7 @@ e3_skip_load:;
         tt::OrderManagerState<64> oms;
         tt::EventLoopState<64> state;
         tt::EventLoopState_InitLegacy(&state, &oms,
-            FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+            FPN_FromDouble<64>(10000.0));
 
         // check_secret_nonempty — default cfg has empty secret → returns false
         check("v5.15.2.B.2: check_secret_nonempty false when held_out_stamp_secret empty",
@@ -25595,7 +25628,7 @@ e3_skip_load:;
             ExchangeAdapter<64> empty{};
             OrderManager_Init(&oms_a, empty,
                               /*live_trading=*/1, /*partial_exit_enabled=*/1,
-                              FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+                              FPN_FromDouble<64>(10000.0));
             check("v5.15.5.C.3 Phase 10: AUTOPOPULATE BIT init — LIVE_TRADING bit set when arg=1",
                   BITMAP_IS_SET(oms_a.oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING));
             check("v5.15.5.C.3 Phase 10: AUTOPOPULATE BIT init — PARTIAL_EXIT_ENABLED bit set when arg=1",
@@ -25612,7 +25645,7 @@ e3_skip_load:;
             ExchangeAdapter<64> empty{};
             OrderManager_Init(&oms_b, empty,
                               /*live_trading=*/0, /*partial_exit_enabled=*/0,
-                              FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001));
+                              FPN_FromDouble<64>(10000.0));
             check("v5.15.5.C.3 Phase 10: AUTOPOPULATE BIT init — LIVE_TRADING bit cleared when arg=0",
                   !BITMAP_IS_SET(oms_b.oms_state_flags, tt::MASK_OMS_STATE_LIVE_TRADING));
             check("v5.15.5.C.3 Phase 10: AUTOPOPULATE BIT init — PARTIAL_EXIT_ENABLED bit cleared when arg=0",
@@ -25624,7 +25657,7 @@ e3_skip_load:;
             ExchangeAdapter<64> empty{};
             OrderManager_Init(&oms_c, empty,
                               /*live_trading=*/0, /*partial_exit_enabled=*/0,
-                              FPN_FromDouble<64>(10000.0), FPN_FromDouble<64>(0.001),
+                              FPN_FromDouble<64>(10000.0), 
                               /*event_log_mode=*/1);
             check("v5.15.5.C.3 Phase 10: AUTOPOPULATE MULTI_BIT init — EVENT_LOG_MODE slot = 1 when arg=1",
                   MBS_EQ_U8(oms_c.oms_state_flags, tt::MASK_OMS_STATE_EVENT_LOG_MODE,

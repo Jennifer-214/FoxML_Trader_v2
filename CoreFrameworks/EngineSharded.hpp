@@ -667,9 +667,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     // OMS_INIT_AUTOPOPULATE sets the bit via the BIT-kind row.
     int partial_exit_enabled =
         BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — `fee_rate` arg DELETED. Per-core fee_rate flows via Order pre_resolve.
     OrderManager_Init(&oms, exchange_adapter, live_trading ? 1 : 0,
                       partial_exit_enabled,
-                      live_starting_balance, cfg.fee_rate,
+                      live_starting_balance,
                       (int)cfg.oms_event_log_mode);
     // v5.13.0.B — open calibration log if cfg.calibration_log_path set.
     // No-op when path is empty (default). Failure is non-fatal (logs to
@@ -709,6 +710,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
     static ShardedTradeLog g_sharded_trade_log;
     ShardedTradeLog_Init(&g_sharded_trade_log, bcfg.symbol);
     oms.trade_log = &g_sharded_trade_log;
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 r-6 phase 2 — Pattern 5 sink-fn-pointer wire-to-real.
+    // Per DESIGN_SPECS/sink-fn-pointer-for-optional-side-effect-pattern.md. Default = noop;
+    // set-to-real when trade_log enables → handle_buy_fill / handle_sell_fill dispatch to log emit.
+    oms.on_entry_fill_emit = &tt::real_on_entry_fill_emit<F>;
+    oms.on_exit_fill_emit  = &tt::real_on_exit_fill_emit<F>;
 
     // v5.11.6.A — InitArena: single mmap'd region for all init-time
     // allocations (PortfolioController rolling stats × 3 + cumdelta_state +
@@ -1282,8 +1288,11 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // .B.2: Reconcile_AutoCancelStale (real exchange cancels
                     //       via lambda-injected BinanceOrderAPI_CancelOrder
                     //       per Option E template-deferred dep injection)
+                    // v5.15.5.F.4c.3 WIP2d-1.B.1 — pass cfg.cores so reconciled fills bind
+                    // originating-core fee_rate via Order_BindPreResolved (Class 27 cross-core
+                    // accuracy closure for in-flight Orders; cores[0] fallback for released).
                     int replayed = tt::Reconcile_ApplyMissedFills(
-                        &oms, trades, n_trades);
+                        &oms, trades, n_trades, cfg.cores);
                     fprintf(stderr,
                         "[reconcile] AUTO_SYNC replay: %d missed fill(s) "
                         "applied (last_seen_trade_id=%llu)\n",
@@ -2408,15 +2417,18 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     // instead of calling Submit directly. Drainer drains the
                     // queue + calls Submit serially — preserves OMS single-
                     // caller contract for when Phase C spawns N producers.
-                    OMS_PushSubmit(&oms,
-                        (int16_t)portfolio_slot,  // P.3: actual slot, not core_id
-                        is_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
-                        FPN_FromDouble<F>(order_qty_d),
-                        leg_tp,
-                        state.cores[slot].intended_sl,
-                        state.cores[slot].strategy_id,
-                        event.price,
-                        event.leg);  // P.3: leg propagated to Order
+                    // v5.15.5.F.4c.3 WIP2d-1.B.1 option (A refined) — required-field ctor + optional .field = X.
+                    // ctor: (core_id, type, qty, leg, core_cfg); optional intended_tp/intended_sl/strategy_id/event_price.
+                    SubmitCommand<F> cmd((int16_t)portfolio_slot,                                       // P.3: actual slot, not core_id
+                                          is_entry ? ORDER_MARKET_BUY : ORDER_MARKET_SELL,
+                                          FPN_FromDouble<F>(order_qty_d),
+                                          event.leg,                                                    // P.3: leg propagated to Order
+                                          &cfg.cores[slot]);                                            // per-core cfg (sharded: core_id == slot)
+                    cmd.intended_tp = leg_tp;
+                    cmd.intended_sl = state.cores[slot].intended_sl;
+                    cmd.strategy_id = state.cores[slot].strategy_id;
+                    cmd.event_price = event.price;
+                    OMS_PushSubmit(&oms, cmd);
                     // Phase 6prep sharded c13: snapshot the staged prediction
                     // into active_prediction at entry submit. Persists across
                     // the entry→exit window so the IC update at exit pairs the
@@ -2530,7 +2542,8 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                 qty,
                 strategy_id,
                 fill_px,
-                (uint8_t)leg);
+                (uint8_t)leg,
+                &cfg.cores[core_id]);  // v5.15.5.F.4c.3 WIP2d-1.B.1: per-core cfg for pre-resolve at submit
             // v4.7.19: counter bumps moved to EventLoop_DrainPostFill —
             // see the doctrine note there. Pre-v4.7.19 we bumped here
             // BEFORE Submit could fail (queue full, slot already closed,
@@ -3196,8 +3209,10 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                                     OMS_META_CLEAR(oms.last_exit_predicted_meta[pidx]);
                                 }
                                 // v5.15.5.C.4 Phase D5 — Class-18 helper
+                                // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg required for Order_BindPreResolved at submit
                                 tt::OMS_PushExitForSlot(&oms, (int16_t)pidx,
-                                    qty, state.cores[c].strategy_id, price_fpn);
+                                    qty, state.cores[c].strategy_id, price_fpn,
+                                    /*leg*/(uint8_t)0, &cfg.cores[c]);
                             }
                             state.cores[c].strategy_halt_reason =
                                 SHALT_EXIT_PREDICTED;

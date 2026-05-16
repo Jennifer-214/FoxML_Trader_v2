@@ -180,17 +180,13 @@ static inline void BacktestSharded_Run(BacktestResults *results,
     // consistent across train-serve.
     int bt_partial_exit_enabled =
         BITMAP_IS_SET(cfg.lifecycle_cfg_flags, MASK_LIFECYCLE_CFG_PARTIAL_EXIT_ENABLED) ? 1 : 0;
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — `fee_rate` arg DELETED from OrderManager_Init; OMS fee_rate
+    // scalar fields deleted. Per-core fee_rate now flows via cfg.cores[c].fee_rate_maker/_taker
+    // → Order_BindPreResolved at submit → o->pre_resolved.fee_rate → HandleFill.
     OrderManager_Init(&oms, empty_adapter, 0, bt_partial_exit_enabled,
-                      cfg.starting_balance, cfg.fee_rate,
+                      cfg.starting_balance,
                       /*event_log_mode=*/1,
                       /*event_log_path=*/"");
-    // Phase 8: backtest is all-taker. Set OMS rates explicitly so HandleFill's
-    // is_maker branch picks the right rate. Both = fee_rate_taker → backtest
-    // numerics unchanged from pre-Phase-8 (cfg legacy mirroring already set
-    // fee_rate_taker = fee_rate). Documented divergence from live (which has
-    // real per-fill maker/taker tagging from Binance executionReport).
-    oms.fee_rate_maker = cfg.fee_rate_taker; // backtest = all-taker semantics
-    oms.fee_rate_taker = cfg.fee_rate_taker;
     // v5.15.5.C.3 (Finding A) — external BITMAP_SET/CLR(PARTIAL_EXIT_ENABLED)
     // block dropped at backtest side too (same fix as EngineSharded.hpp).
     // Bit is now set inside OMS_INIT_AUTOPOPULATE via the BIT-kind registry

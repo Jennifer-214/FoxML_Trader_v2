@@ -195,11 +195,24 @@ inline int ReconcileMode_FromString(const char* str, ReconcileMode* out_mode) {
 // boot dispatch composes it alongside existing helpers.
 //
 // Returns: count of fills replayed.
+// v5.15.5.F.4c.3 WIP2d-1.B.1 — `cores` param added (nullptr-tolerant) for per-core fee_rate
+// pre-resolution on reconciled-fill synth Orders. Per cfg-scope-discipline § "consumer over
+// per-core array" + Decision 2 recovery-path nullable pointer pattern. Branchless static stub
+// fallback if cores is null. Origin core_id resolved via Pattern 3 sub-variant bitmap-search
+// over OMS in-flight slots (closes Reconcile cross-core fee accuracy structurally for the
+// common case; fully-released Orders fall back to cores[0] — see DESIGN_NOTE below).
 template <unsigned F>
 inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
                                         const ReconcileTrade* trades,
-                                        int n_trades) {
+                                        int n_trades,
+                                        const PerCoreCfg<F>* cores = nullptr) {
     if (!oms || !trades || n_trades <= 0) return 0;
+
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless cores-select: ONE cmov at entry; loop body uses
+    // pure ALU. Stub array supports nullptr-tolerant callers (test fixtures, post-crash recovery
+    // paths without cfg available). Per branchless-dispatch-discipline.md Pattern 3.
+    static const PerCoreCfg<F> NULL_PER_CORE_CFG_STUB_ARRAY[MAX_EXECUTION_CORES] = {};
+    const PerCoreCfg<F>* effective_cores = cores ? cores : NULL_PER_CORE_CFG_STUB_ARRAY;
 
     int replayed = 0;
     uint64_t max_trade_id = oms->last_seen_trade_id;
@@ -210,20 +223,38 @@ inline int Reconcile_ApplyMissedFills(OrderManagerState<F>* oms,
             continue;  // already seen; skip (idempotent re-run safety)
         }
 
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — branchless bitmap-search for originating Order's core_id.
+        // Pattern 3 sub-variant (bitmap-search via match-mask + tzcnt). Build match-mask via
+        // fixed-cost order_id compare per slot (16 iterations); AND with order_bitmap; __builtin_ctz
+        // picks first match. Cost ~120ns deterministic (16 × ALU + tzcnt + indirect cmov).
+        // DESIGN_NOTE: when the originating Order is still in an OMS slot (PARTIAL or recently-FILLED),
+        // its core_id is recovered and cfg.cores[origin_core_id] supplies the per-core fee_rate.
+        // For fully-released Orders (FILLED + slot reclaimed before Reconcile fires; rare, bounded
+        // by slot churn dynamics), the bitmap search misses → origin_core_id stays -1 → fallback
+        // to cores[0] (canonical recovery-core). The corner case is documented as TECH_DEBT at
+        // r-8 ship close (carry actual exchange-reported fee in ReconcileTrade — out of B.1 scope).
+        uint16_t match_mask = 0;
+        for (int s = 0; s < MAX_INFLIGHT_ORDERS; ++s) {
+            // Numeric compare on Order.id (encoded with slot in upper 4 bits). Branchless cmov.
+            const int eq = (oms->orders[s].id == (uint64_t)t.order_id) ? 1 : 0;
+            match_mask = (uint16_t)(match_mask | ((uint16_t)eq << s));
+        }
+        const uint16_t valid_match = (uint16_t)(match_mask & oms->order_bitmap);
+        const int origin_core_id = valid_match
+            ? (int)oms->orders[__builtin_ctz(valid_match)].core_id
+            : 0;  // fallback to cores[0] for released Orders
+        // Bounds-clamp via mask (branchless): origin_core_id is in [0, MAX_EXECUTION_CORES).
+        const int safe_core_id = origin_core_id & (MAX_EXECUTION_CORES - 1);
+
         // Synthesize an Order from the trade record. Defaults explained
         // in the function header comment.
         Order<F> synth;
         OrderType otype = t.is_buyer ? ORDER_MARKET_BUY : ORDER_MARKET_SELL;
-        Order_Init(&synth, (uint64_t)t.order_id, /*core_id=*/0, otype);
+        Order_Init(&synth, (uint64_t)t.order_id, (int16_t)safe_core_id, otype);
         Order_SetIsMaker(&synth, (bool)t.is_maker);
-        // v5.15.5.F.4c.3 WIP2d-1.B.1 TECH_DEBT: synth.pre_resolved.fee_rate stays at
-        // FPN_Zero (Order_Init default). Reconciled fills are recorded with zero fee in
-        // OMS accounting. Pre-B.1 behavior used oms->fee_rate_maker/taker (boot-time global
-        // cache; also wrong since it didn't reflect the exchange's actual fee at trade time).
-        // Proper fix: Reconcile_ApplyMissedFills sig change to accept per-core cfg + call
-        // Order_BindPreResolved; OR ReconcileTrade carries actual exchange-reported fee.
-        // Tracked as TECH_DEBT for B.1.b follow-up — reconcile is a recovery path, not the
-        // primary accounting path; fix at next reconcile-touching ship.
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — Order_BindPreResolved with originating core's cfg.
+        // Closes Class 27 cross-core fee accuracy gap for the common (in-flight) case.
+        Order_BindPreResolved(&synth, effective_cores[safe_core_id]);
         synth.requested_qty = FPN_FromDouble<F>(t.qty);
         synth.event_price   = FPN_FromDouble<F>(t.price);
 

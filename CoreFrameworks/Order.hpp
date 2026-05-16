@@ -44,6 +44,7 @@
 
 #include "../FixedPoint/FixedPointN.hpp"
 #include <cstdint>
+#include <cstdio>  // std::fprintf for Order_WarnIfNotPreResolved (WIP2d-1.B.1)
 
 // Forward decl for Order_BindPreResolved (defined in CoreFrameworks/ControllerConfig.hpp).
 // Callers of Order_BindPreResolved MUST include ControllerConfig.hpp; the forward decl
@@ -79,16 +80,23 @@ enum OrderState : uint8_t {
 // flags_packed bit-twiddling at consumer sites. Per multi-bit-state-encoding-pattern.md
 // (multi-field extension — flags packed are independent fields sharing a register-sized word).
 //======================================================================================================
-static constexpr uint16_t MASK_ORDER_TYPE         = 0x0003;  // bits 0-1
-static constexpr uint16_t SHIFT_ORDER_TYPE        = 0;
-static constexpr uint16_t MASK_ORDER_STATE        = 0x003C;  // bits 2-5
-static constexpr uint16_t SHIFT_ORDER_STATE       = 2;
-static constexpr uint16_t MASK_ORDER_IS_MAKER     = 0x0040;  // bit 6
-static constexpr uint16_t SHIFT_ORDER_IS_MAKER    = 6;
-static constexpr uint16_t MASK_ORDER_LEG          = 0x0080;  // bit 7
-static constexpr uint16_t SHIFT_ORDER_LEG         = 7;
-static constexpr uint16_t MASK_ORDER_RETRY_COUNT  = 0xFF00;  // bits 8-15
-static constexpr uint16_t SHIFT_ORDER_RETRY_COUNT = 8;
+static constexpr uint32_t MASK_ORDER_TYPE          = 0x00000003u;  // bits 0-1
+static constexpr uint32_t SHIFT_ORDER_TYPE         = 0;
+static constexpr uint32_t MASK_ORDER_STATE         = 0x0000003Cu;  // bits 2-5
+static constexpr uint32_t SHIFT_ORDER_STATE        = 2;
+static constexpr uint32_t MASK_ORDER_IS_MAKER      = 0x00000040u;  // bit 6
+static constexpr uint32_t SHIFT_ORDER_IS_MAKER     = 6;
+static constexpr uint32_t MASK_ORDER_LEG           = 0x00000080u;  // bit 7
+static constexpr uint32_t SHIFT_ORDER_LEG          = 7;
+static constexpr uint32_t MASK_ORDER_RETRY_COUNT   = 0x0000FF00u;  // bits 8-15
+static constexpr uint32_t SHIFT_ORDER_RETRY_COUNT  = 8;
+// v5.15.5.F.4c.3 WIP2d-1.B.1 — pre-resolved bind discipline bit (Class 27 + silent-zero-fee closure).
+// Set by Order_BindPreResolved; checked at HandleFill via Order_WarnIfNotPreResolved.
+// Production: OrderManager_Submit sig requires core_cfg → BindPreResolved always called → bit always set.
+// Test fixtures constructing Order directly must call Order_BindPreResolved explicitly OR set
+// pre_resolved.* fields directly + Order_MarkPreResolvedBound. Bits 17-31 reserved for future flags.
+static constexpr uint32_t MASK_ORDER_PRE_RESOLVED  = 0x00010000u;  // bit 16
+static constexpr uint32_t SHIFT_ORDER_PRE_RESOLVED = 16;
 
 //======================================================================================================
 // [PRE-RESOLVED SUB-STRUCT] (v5.15.5.F.4c.3 WIP2d-1.B.1)
@@ -130,12 +138,14 @@ struct Order {
     // ────────── HOT cluster — exactly 4 cache lines (256 B) ──────────
     uint64_t              id;             // 8 B  @ 0    local monotonic id, assigned by OMS
     uint64_t              client_id;      // 8 B  @ 8    idempotency key (== id for first attempt; phase 06 may decouple)
-    // Bit-packed flags: type[2] + state[4] + is_maker[1] + leg[1] + retry_count[8].
+    // Bit-packed flags: type[2] + state[4] + is_maker[1] + leg[1] + retry_count[8] + pre_resolved_bound[1] @bit16.
     // Access via Order_GetType / Order_SetType / etc. inline fns; NEVER direct bit-twiddle.
-    uint16_t              flags_packed;   // 2 B  @ 16
-    int16_t               core_id;        // 2 B  @ 18   which executor core, -1 for non-core orders
-    uint8_t               strategy_id;    // 1 B  @ 20   STRATEGY_* constant, for trade log CSV
-    uint8_t               _pad_hot1[3];   // 3 B  @ 21   pad to FPN alignment (FPN<64> alignof = 8)
+    // v5.15.5.F.4c.3 WIP2d-1.B.1: widened uint16_t → uint32_t for pre_resolved_bound bit; padding _pad_hot1
+    // absorbs the 2 B widening (3 B → 1 B). Cache-neutral: Order @ 320 B unchanged, FPN field offsets unchanged.
+    uint32_t              flags_packed;   // 4 B  @ 16
+    int16_t               core_id;        // 2 B  @ 20   which executor core, -1 for non-core orders
+    uint8_t               strategy_id;    // 1 B  @ 22   STRATEGY_* constant, for trade log CSV
+    uint8_t               _pad_hot1[1];   // 1 B  @ 23   pad to FPN alignment (FPN<64> alignof = 8); shrunk 3→1 by flags_packed widening
     FPN<F>                requested_qty;            // 24 B @ 24
     FPN<F>                requested_price;          // 24 B @ 48  limit only, ignored for MARKET (phase 08 forward-compat)
     FPN<F>                filled_qty;               // 24 B @ 72  running total across partials
@@ -174,8 +184,8 @@ inline OrderType Order_GetType(const Order<F>* o) {
 }
 template <unsigned F>
 inline void Order_SetType(Order<F>* o, OrderType t) {
-    o->flags_packed = (uint16_t)((o->flags_packed & ~MASK_ORDER_TYPE)
-                                 | (((uint16_t)t << SHIFT_ORDER_TYPE) & MASK_ORDER_TYPE));
+    o->flags_packed = (uint32_t)((o->flags_packed & ~MASK_ORDER_TYPE)
+                                 | (((uint32_t)t << SHIFT_ORDER_TYPE) & MASK_ORDER_TYPE));
 }
 
 template <unsigned F>
@@ -184,8 +194,8 @@ inline OrderState Order_GetState(const Order<F>* o) {
 }
 template <unsigned F>
 inline void Order_SetState(Order<F>* o, OrderState s) {
-    o->flags_packed = (uint16_t)((o->flags_packed & ~MASK_ORDER_STATE)
-                                 | (((uint16_t)s << SHIFT_ORDER_STATE) & MASK_ORDER_STATE));
+    o->flags_packed = (uint32_t)((o->flags_packed & ~MASK_ORDER_STATE)
+                                 | (((uint32_t)s << SHIFT_ORDER_STATE) & MASK_ORDER_STATE));
 }
 
 template <unsigned F>
@@ -194,8 +204,8 @@ inline bool Order_GetIsMaker(const Order<F>* o) {
 }
 template <unsigned F>
 inline void Order_SetIsMaker(Order<F>* o, bool is_maker) {
-    o->flags_packed = (uint16_t)((o->flags_packed & ~MASK_ORDER_IS_MAKER)
-                                 | (is_maker ? MASK_ORDER_IS_MAKER : (uint16_t)0));
+    o->flags_packed = (uint32_t)((o->flags_packed & ~MASK_ORDER_IS_MAKER)
+                                 | (is_maker ? MASK_ORDER_IS_MAKER : (uint32_t)0));
 }
 
 template <unsigned F>
@@ -204,8 +214,8 @@ inline uint8_t Order_GetLeg(const Order<F>* o) {
 }
 template <unsigned F>
 inline void Order_SetLeg(Order<F>* o, uint8_t leg) {
-    o->flags_packed = (uint16_t)((o->flags_packed & ~MASK_ORDER_LEG)
-                                 | (((uint16_t)leg << SHIFT_ORDER_LEG) & MASK_ORDER_LEG));
+    o->flags_packed = (uint32_t)((o->flags_packed & ~MASK_ORDER_LEG)
+                                 | (((uint32_t)leg << SHIFT_ORDER_LEG) & MASK_ORDER_LEG));
 }
 
 template <unsigned F>
@@ -214,8 +224,20 @@ inline uint8_t Order_GetRetryCount(const Order<F>* o) {
 }
 template <unsigned F>
 inline void Order_SetRetryCount(Order<F>* o, uint8_t retry) {
-    o->flags_packed = (uint16_t)((o->flags_packed & ~MASK_ORDER_RETRY_COUNT)
-                                 | (((uint16_t)retry << SHIFT_ORDER_RETRY_COUNT) & MASK_ORDER_RETRY_COUNT));
+    o->flags_packed = (uint32_t)((o->flags_packed & ~MASK_ORDER_RETRY_COUNT)
+                                 | (((uint32_t)retry << SHIFT_ORDER_RETRY_COUNT) & MASK_ORDER_RETRY_COUNT));
+}
+
+// v5.15.5.F.4c.3 WIP2d-1.B.1 — pre-resolved bind discipline accessors.
+// `Order_BindPreResolved` sets the bit; `Order_MarkPreResolvedBound` is the explicit-set path
+// for test fixtures that manually wire `pre_resolved.*` fields (bypassing the cfg-driven bind).
+template <unsigned F>
+inline bool Order_GetPreResolvedBound(const Order<F>* o) {
+    return (o->flags_packed & MASK_ORDER_PRE_RESOLVED) != 0;
+}
+template <unsigned F>
+inline void Order_MarkPreResolvedBound(Order<F>* o) {
+    o->flags_packed = (uint32_t)(o->flags_packed | MASK_ORDER_PRE_RESOLVED);
 }
 
 // Initialize an order to PENDING state with the given identifying fields.
@@ -274,6 +296,36 @@ inline void Order_BindPreResolved(Order<F>* o, const ::PerCoreCfg<F>& core_cfg) 
         ? core_cfg.fee_rate_maker
         : core_cfg.fee_rate_taker;
     o->pre_resolved.slippage_pct = core_cfg.slippage_pct;
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — mark bit to satisfy Order_WarnIfNotPreResolved at HandleFill.
+    Order_MarkPreResolvedBound(o);
+}
+
+//======================================================================================================
+// [PRE-RESOLVED BIND DISCIPLINE GUARD] (v5.15.5.F.4c.3 WIP2d-1.B.1)
+//======================================================================================================
+// Called at HandleFill entry. Always-on runtime check; cost = 1 bit-test + predicted-not-taken branch
+// (~0 cycles amortized in production). Production: bit always set because OrderManager_Submit sig
+// requires core_cfg → BindPreResolved always called inside Submit. Test fixtures constructing Order
+// directly via Order_Init + HandleFill bypass: bit not set → stderr warn. Tests asserting on fee
+// accumulation will fail (visible canary); tests that don't care about fees get the warning but
+// continue (cosmetic only).
+//
+// Why warn-not-abort: drainer thread; aborting kills the engine on the rare misuse. Production
+// invariant catches this at compile time via sig; runtime check is a test-build belt-and-suspenders.
+//
+// Closes silent-zero-fee-rate class structurally (Class 27 sister).
+//======================================================================================================
+template <unsigned F>
+inline void Order_WarnIfNotPreResolved(const Order<F>* o, const char* site) {
+    if (__builtin_expect(!Order_GetPreResolvedBound(o), 0)) {
+        std::fprintf(stderr,
+            "[OMS] WARN: %s called on Order id=%llu core=%d without Order_BindPreResolved; "
+            "pre_resolved.fee_rate=%f (expected explicit bind via core_cfg OR explicit "
+            "Order_MarkPreResolvedBound after manual set). Production paths require core_cfg "
+            "at OrderManager_Submit (sig-enforced); this Order bypassed Submit (test fixture path).\n",
+            site, (unsigned long long)o->id, (int)o->core_id,
+            FPN_ToDouble(o->pre_resolved.fee_rate));
+    }
 }
 
 // Anti-drift guard: pin Order<F> size to catch silent ABI breakage from future field

@@ -147,8 +147,12 @@ static inline int EngineSharded_ForceCloseOnShutdown(
     OrderManagerState<F>* oms,
     BinanceAdapterState* adapter,
     NotifyState* notify,
+    const PerCoreCfg<F>* cores,
     int timeout_secs = 30)
 {
+    // v5.15.5.F.4c.3 WIP2d-1.B.1: `cores` REQUIRED — per-core array pointer (caller passes
+    // `cfg.cores`). Multi-slot dispatch fn; per cfg-scope-discipline § "consumer over per-core
+    // array." First canonical of the "consumer over per-core array" sig shape.
     if (!oms) return 0;
     uint16_t bitmap = oms->portfolio.active_bitmap;
     if (bitmap == 0) return 0;  // nothing to do — clean shutdown
@@ -185,9 +189,16 @@ static inline int EngineSharded_ForceCloseOnShutdown(
     // through the user-data WS → OMS result queue → drainer → OnEvent path
     // and clear the bitmap bit naturally. core_id == slot under sharded's
     // single-position-per-core invariant.
+    //
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — bitmap iteration via __builtin_ctz (H20 + branchless-dispatch-discipline.md
+    // Pattern 3 sub-variant). Replaces prior `for (slot=0..16) if (!(bitmap & ...)) continue;` per-slot
+    // data-dependent gate with branchless bit scan: one tzcnt + one clear-lowest-bit per active slot. Inactive
+    // slots cost ZERO cycles (not iterated). Same pattern FlattenAll uses; canonical bitmap iteration.
     BinanceOrderAPI* api = &adapter->workers_api[0];  // for filter access only
-    for (int slot = 0; slot < 16; ++slot) {
-        if (!(bitmap & (1u << slot))) continue;
+    uint16_t bm = bitmap;
+    while (bm) {
+        int slot = __builtin_ctz(bm);
+        bm &= (uint16_t)(bm - 1);
         FPN<F> qty = oms->portfolio.positions[slot].quantity;
         double qty_d = FPN_ToDouble(qty);
         qty_d = binance_round_qty(qty_d, api->filters.lot_step_size);
@@ -197,8 +208,16 @@ static inline int EngineSharded_ForceCloseOnShutdown(
             continue;
         }
         FPN<F> qty_rounded = FPN_FromDouble<F>(qty_d);
+        // v5.15.5.F.4c.3 WIP2d-1.B.1 — per-core cfg for Order_BindPreResolved at submit.
+        // Under sharded single-position-per-core invariant, slot == core_id; cores[slot] is the
+        // originating core's cfg.
         uint64_t order_id = OrderManager_Submit<F>(oms, (int16_t)slot, ORDER_MARKET_SELL,
-                                                    qty_rounded);
+                                                    qty_rounded,
+                                                    FPN_Zero<F>(), FPN_Zero<F>(),
+                                                    /*strategy_id*/(uint8_t)0xFF,
+                                                    FPN_Zero<F>(),
+                                                    /*leg*/(uint8_t)0,
+                                                    &cores[slot]);
         if (order_id == 0) {
             fprintf(stderr, "[sharded-safety] FORCE-CLOSE slot %d: OMS rejected submission\n", slot);
         } else {

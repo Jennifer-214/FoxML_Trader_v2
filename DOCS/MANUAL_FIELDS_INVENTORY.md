@@ -81,12 +81,9 @@ CI Check 7 (`tools/check_per_core_registry_integrity.py`) scans designated subsy
 
 | Subsystem | Field | Rationale category | Detail | Migration trigger |
 |---|---|---|---|---|
-| `OrderManagerState` | `fee_rate` | TRANSITIONAL | Legacy scalar cfg-mirror of `cfg.cores[c].fee_rate` (deprecated single-rate field; pre-maker/taker era); Class 27 anti-pattern. Used as fallback when maker/taker zero. DELETED at WIP2d-1.B.1 alongside maker/taker; legacy callers migrate to `oms->per_core_fee_rate_taker` fallback OR Order `effective_fee_rate`. | `WIP2d-1.B.1` (this ship) — delete OMS scalar field; remove this exemption in same commit |
-| `OrderManagerState` | `fee_rate_maker` | TRANSITIONAL | Scalar cfg-mirror of `cfg.cores[c].fee_rate_maker`; Class 27 anti-pattern. Migration to Order `effective_fee_rate` pre-resolved at submit; OMS scalar field DELETED at WIP2d-1.B.1. | `WIP2d-1.B.1` (this ship) — delete OMS scalar field; remove this exemption in same commit |
-| `OrderManagerState` | `fee_rate_taker` | TRANSITIONAL | Scalar cfg-mirror of `cfg.cores[c].fee_rate_taker`; Class 27 anti-pattern. Same migration as fee_rate_maker. | `WIP2d-1.B.1` (this ship) — delete OMS scalar field; remove this exemption in same commit |
-| `OrderManagerState` | `slippage_pct` | TRANSITIONAL | Scalar cfg-mirror of `cfg.cores[c].slippage_pct`; Class 27 anti-pattern. Migration to `Order::pre_resolved.slippage_pct` (OrderPreResolved sub-struct) pre-resolved at submit via Order_BindPreResolved; OMS scalar field DELETED at WIP2d-1.B.1 (folded into B.1 cohort per 2026-05-15 design decision — sub-struct closes entire OMS Class 27 cluster in one commit). | `WIP2d-1.B.1` (this ship) — delete OMS scalar field alongside fee_rate cluster; remove this exemption in same commit |
+| _(empty)_ | | | All 4 OMS TRANSITIONAL entries (fee_rate, fee_rate_maker, fee_rate_taker, slippage_pct) DELETED at WIP2d-1.B.1 r-5 (2026-05-15). Order::pre_resolved.fee_rate / pre_resolved.slippage_pct are now authoritative. CI Check 7 PASSES with 0 Section C exemptions. | (closed) |
 
-**Section C total: 4 entries (all TRANSITIONAL).** Inventory zeros out at WIP2d-1.B.1 (all 4 OMS entries close in one commit via OrderPreResolved sub-struct; B.1.b cohort sweep continues with ConfidenceScorer / PortfolioController / other subsystem instances).
+**Section C total: 0 entries.** ALL 4 OMS Class 27 exemptions closed at WIP2d-1.B.1 r-5 via Order pre_resolved sub-struct + OMS scalar field deletion. The Class 27 anti-pattern is now structurally unexpressible for the OMS surface (CI Check 7 enforces). B.1.b cohort sweep (ConfidenceScorer / PortfolioController / other subsystem instances) tracked as future work.
 
 **Rationale categories** (one required per exemption):
 - `pre-resolve-impossible` — no in-flight object exists at the decision point (rare; document why genuinely impossible)

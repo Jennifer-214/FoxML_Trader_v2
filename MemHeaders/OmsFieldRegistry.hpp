@@ -159,7 +159,8 @@ struct OmsInitCtx {
     int                       partial_exit_enabled;  // 0/1 — boolean (NEW v5.15.5.C.3 Finding A)
     int                       event_log_mode;        // 0..3 — K-state (NEW MULTI_BIT slot v5.15.5.C.3 Finding A')
     FPN<F>                    starting_balance;
-    FPN<F>                    fee_rate;
+    // v5.15.5.F.4c.3 WIP2d-1.B.1 — fee_rate DELETED. Per-core fee_rate now lives on
+    // cfg.cores[c].fee_rate_maker/_taker; flows through Order pre_resolved at submit.
     const char*               event_log_path;
 };
 
@@ -259,10 +260,10 @@ struct OmsResetCtx {
     /* ============================================================================================ */                                                  \
     /* [5] SKIP_PERSIST cfg-derived rows (fee rates, kill switch limits)                              */                                                  \
     /* ============================================================================================ */                                                  \
-    X(fee_rate,               FPN<F>,             ctx.fee_rate,                 ctx.fee_rate,                 SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
-    X(fee_rate_maker,         FPN<F>,             ctx.fee_rate,                 ctx.fee_rate,                 SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
-    X(fee_rate_taker,         FPN<F>,             ctx.fee_rate,                 ctx.fee_rate,                 SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
-    X(slippage_pct,           FPN<F>,             FPN_Zero<F>(),                FPN_Zero<F>(),                SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
+    /* v5.15.5.F.4c.3 WIP2d-1.B.1 — fee_rate / fee_rate_maker / fee_rate_taker / slippage_pct rows DELETED. */ \
+    /* Per Class 27 closure: scalar cfg-mirror caches eliminated. Per-core values live on cfg.cores[c]; */ \
+    /* per-Order via pre_resolved (Order_BindPreResolved at submit). last_exit_fee[pslot] sibling array */ \
+    /* stores the authoritative per-fill exit_fee (set by HandleFill SELL; consumed by DrainPostFill). */ \
     X(ks_min_balance,         FPN<F>,             FPN_Zero<F>(),                FPN_Zero<F>(),                SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
     X(ks_max_drawdown_pct,    FPN<F>,             FPN_Zero<F>(),                FPN_Zero<F>(),                SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
     X(ks_trips_total,         uint64_t,           0,                            0,                            SKIP_RESET, DIRECT,    SKIP_PERSIST, 0)    \
@@ -669,8 +670,13 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
 //   the templated helpers above — their function parameter is named `_oms`
 //   so the OMS_PROJECT_INIT_*/RESET_* macros find it directly.
 
+// v5.15.5.F.4c.3 WIP2d-1.B.1 — _fee_rate param DELETED from macro sig. Per-Order fee_rate
+// lives on Order::pre_resolved (set at submit via Order_BindPreResolved); OMS-level scalar
+// fee_rate fields deleted. Portfolio_FromEventLog passes FPN_Zero for event-log replay
+// (replay can't reconstruct per-trade fees from price+qty alone; treated as recovery-path
+// best-effort accounting, sister to Reconcile fallback semantic).
 #define OMS_INIT_AUTOPOPULATE(_oms_target, _adapter, _live_trading, _partial_exit_enabled,          \
-                              _starting_balance, _fee_rate, _event_log_mode, _event_log_path)       \
+                              _starting_balance, _event_log_mode, _event_log_path)                   \
     do {                                                                                            \
         /* Build context struct from caller args; ctx is referenced by registry INIT expressions */ \
         tt::OmsInitCtx<F> _oms_init_ctx{                                                            \
@@ -679,7 +685,6 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
             (_partial_exit_enabled),                                                                 \
             (_event_log_mode),                                                                       \
             (_starting_balance),                                                                     \
-            (_fee_rate),                                                                             \
             (_event_log_path)                                                                        \
         };                                                                                           \
         /* Layer 1 — registry-driven scalar/bit/multi-bit/atomic init via templated helper */       \
@@ -714,9 +719,13 @@ inline void _oms_reset_value_fields(OrderManagerState<F>* _oms, const OmsResetCt
                 OrderEventLog_Init(&(_oms_target)->event_log);                                       \
                 int _loaded = OrderEventLog_LoadFromDisk(&(_oms_target)->event_log, _evt_path);      \
                 if (_loaded > 0) {                                                                    \
+                    /* v5.15.5.F.4c.3 WIP2d-1.B.1 — _fee_rate deleted; event-log replay can't */     \
+                    /* reconstruct per-trade fees from price+qty (decision-time-data-binding-pattern.md */ \
+                    /* recovery-path nullable semantic). Pass FPN_Zero — replayed balance reflects */     \
+                    /* gross-of-fee P&L (acceptable for boot recovery; live HandleFill is authoritative). */ \
                     tt::FoldResult<F> _fold = Portfolio_FromEventLog(&(_oms_target)->event_log,      \
                                                                       (_starting_balance),           \
-                                                                      (_fee_rate));                  \
+                                                                      FPN_Zero<F>());                \
                     (_oms_target)->portfolio    = _fold.portfolio;                                   \
                     (_oms_target)->balance      = _fold.balance;                                     \
                     (_oms_target)->realized_pnl = _fold.realized_pnl;                                \
