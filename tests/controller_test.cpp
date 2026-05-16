@@ -23928,6 +23928,245 @@ e3_skip_load:;
     }
 
     // ===========================================================================
+    // === v5.15.5.F.4d Step 9 — Bandit 5-state + Thompson_Update wire + Class ==
+    // === 24/28/30 closures + PARITY-026 + Pattern 4 sub-struct expansion =====
+    // ===========================================================================
+    printf("\n--- v5.15.5.F.4d Step 9: Bandit 5-state + dispatch tables + Class 24 closure + Pattern 4 ---\n");
+
+    // ─── Test S9.1: BANDIT_EXP3_UPDATE_MASK / BANDIT_THOMPSON_UPDATE_MASK auto-derived ───
+    // Metadata-driven reduction over FOREACH_BANDIT_ALGORITHM produces the correct masks.
+    // EXP3=0, EXP3_OP_THOMPSON_GHOST=2, THOMPSON_OP_EXP3_GHOST=3, BLENDED=4 → exp3-up bits 0,2,3,4 = 0x1D.
+    // THOMPSON=1, EXP3_OP_THOMPSON_GHOST=2, THOMPSON_OP_EXP3_GHOST=3, BLENDED=4 → thompson-up bits 1,2,3,4 = 0x1E.
+    {
+        check("v5.15.5.F.4d Step 9.1: BANDIT_EXP3_UPDATE_MASK == 0x1D (bits 0,2,3,4 — EXP3 + 3 ghost/blended states)",
+              BANDIT_EXP3_UPDATE_MASK == 0x1Du);
+        check("v5.15.5.F.4d Step 9.1: BANDIT_THOMPSON_UPDATE_MASK == 0x1E (bits 1,2,3,4 — THOMPSON + 3 ghost/blended states)",
+              BANDIT_THOMPSON_UPDATE_MASK == 0x1Eu);
+        check("v5.15.5.F.4d Step 9.1: mask intersection 0x1C (states updating BOTH: cfg=2/3/4)",
+              (BANDIT_EXP3_UPDATE_MASK & BANDIT_THOMPSON_UPDATE_MASK) == 0x1Cu);
+    }
+
+    // ─── Test S9.2: g_buy_reward_dispatch table populates all 5 algo slots non-null ───
+    // Dispatch table generated via FOREACH_BANDIT_ALGORITHM metadata reduction; every algo gets
+    // an explicit fn pointer (no sentinel nullptr → indirect-call crash).
+    {
+        using namespace tt;
+        bool all_non_null = true;
+        for (int a = 0; a < FOREACH_BANDIT_ALGORITHM_COUNT; ++a) {
+            if (g_buy_reward_dispatch<64>[a] == nullptr) { all_non_null = false; break; }
+        }
+        check("v5.15.5.F.4d Step 9.2: g_buy_reward_dispatch<64> all 5 algo slots non-null (no indirect-call crash on dispatch)",
+              all_non_null);
+    }
+
+    // ─── Test S9.3: g_exit_reward_dispatch table populates all 5 algo slots non-null ───
+    {
+        using namespace tt;
+        bool all_non_null = true;
+        for (int a = 0; a < FOREACH_BANDIT_ALGORITHM_COUNT; ++a) {
+            if (g_exit_reward_dispatch<64>[a] == nullptr) { all_non_null = false; break; }
+        }
+        check("v5.15.5.F.4d Step 9.3: g_exit_reward_dispatch<64> all 5 algo slots non-null (exit-side symmetric)",
+              all_non_null);
+    }
+
+    // ─── Test S9.4: PARITY-026 drift-check rows added (FOREACH_CFG_DRIFT_CHECK_COUNT == 23) ───
+    // Pre-.F.4d: 18 rows. Post-.F.4d: 18 + 5 = 23 (bandit_algorithm + 3 thompson_* + thompson_exp3_blend_alpha).
+    {
+        check("v5.15.5.F.4d Step 9.4: FOREACH_CFG_DRIFT_CHECK_COUNT == 23 (PARITY-026 close: 4 STAMP_BOUND bandit/thompson + 1 BLENDED blend_alpha)",
+              FOREACH_CFG_DRIFT_CHECK_COUNT == 23);
+    }
+
+    // ─── Test S9.5: FOREACH_OMS_PER_SLOT_FIELD count == 5 (Class 30 latent drift closure) ───
+    // Pre-.F.4c.3: 3 per-slot fields. Post-.F.4d Step 7 § N.2: 5 (last_exit_fee + last_exit_predicted_p
+    // + last_exit_predicted_bitmap + last_was_win_bitmap + bandit_reward_bps).
+    {
+        check("v5.15.5.F.4d Step 9.5: FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 5 (Class 30 close: last_exit_fee + bandit_reward_bps enrolled)",
+              tt::FOREACH_OMS_PER_SLOT_FIELD_COUNT >= 5);
+    }
+
+    // ─── Test S9.6: Order::flags_packed bandit context MBS_* round-trip ───
+    // Pattern 4 decision-time data binding — bandit_active_state + regime + chosen_arm packed into
+    // bits 17-25 of Order::flags_packed; encode at submit time, decode at calib emit time.
+    {
+        tt::Order<64> o;
+        o.flags_packed = 0;
+        tt::MBS_OrderSetBanditContext(&o, /*state=*/2, /*regime=*/3, /*arm=*/5);
+        check("v5.15.5.F.4d Step 9.6: MBS_OrderBanditActiveState round-trip (encoded=2)",
+              tt::MBS_OrderBanditActiveState(o) == 2);
+        check("v5.15.5.F.4d Step 9.6: MBS_OrderBanditRegime round-trip (encoded=3)",
+              tt::MBS_OrderBanditRegime(o) == 3);
+        check("v5.15.5.F.4d Step 9.6: MBS_OrderBanditChosenArm round-trip (encoded=5)",
+              tt::MBS_OrderBanditChosenArm(o) == 5);
+    }
+
+    // ─── Test S9.7: Thompson_Update fires via g_buy_reward_dispatch for cfg=1 (THOMPSON) — Class 24 close ───
+    // Pre-.F.4d: Thompson_Update was a defined fn but NEVER CALLED from reward attribution path
+    // (Class 24 silent capability-cfg surface mismatch). Post-.F.4d: g_buy_reward_dispatch[THOMPSON]
+    // routes to thompson_only_reward which calls Thompson_Update → mu_post shifts.
+    {
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        ezoo.primary_count = 4;
+        EnsembleModelZoo_InitBandits(&ezoo, /*eta=*/0.05, /*min_warmup=*/0);
+        EnsembleModelZoo_InitThompsonBandits(&ezoo,
+            /*mu_prior=*/0.0, /*precision_prior=*/1.0, /*precision_obs=*/1.0,
+            /*rng_seed=*/42ULL);
+        const double mu_pre = ezoo.thompson_bandits[0].mu_post[0];
+        // Dispatch via cfg=1 (THOMPSON): should update Thompson, NOT Bandit
+        g_buy_reward_dispatch<64>[BANDIT_ALGO_THOMPSON](&ezoo, /*regime=*/0, /*arm=*/0, /*reward_bps=*/50.0);
+        const double mu_post = ezoo.thompson_bandits[0].mu_post[0];
+        check("v5.15.5.F.4d Step 9.7: Class 24 closure — cfg=1 dispatch updates Thompson mu_post (was silent pre-.F.4d)",
+              mu_post != mu_pre);
+    }
+
+    // ─── Test S9.8: Bandit_Update does NOT fire via dispatch for cfg=1 (THOMPSON only) ───
+    // Pure-THOMPSON path skips Exp3 (Class 24 cohort: cfg-1 byte-equivalent for Exp3 weights).
+    {
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        ezoo.primary_count = 4;
+        EnsembleModelZoo_InitBandits(&ezoo, /*eta=*/0.05, /*min_warmup=*/0);
+        EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+        const double w_pre = ezoo.bandits[0].weights[0];
+        g_buy_reward_dispatch<64>[BANDIT_ALGO_THOMPSON](&ezoo, 0, 0, 50.0);
+        const double w_post = ezoo.bandits[0].weights[0];
+        check("v5.15.5.F.4d Step 9.8: cfg=1 (THOMPSON) does NOT update Exp3 weights (only Thompson)",
+              w_pre == w_post);
+    }
+
+    // ─── Test S9.9: Thompson_Update does NOT fire via dispatch for cfg=0 (EXP3 only) — wire-byte preservation ───
+    // Pure-EXP3 path skips Thompson (legacy cfg=0 byte-equivalent guard).
+    {
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        ezoo.primary_count = 4;
+        EnsembleModelZoo_InitBandits(&ezoo, /*eta=*/0.05, /*min_warmup=*/0);
+        EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+        const double mu_pre = ezoo.thompson_bandits[0].mu_post[0];
+        g_buy_reward_dispatch<64>[BANDIT_ALGO_EXP3](&ezoo, 0, 0, 50.0);
+        const double mu_post = ezoo.thompson_bandits[0].mu_post[0];
+        check("v5.15.5.F.4d Step 9.9: cfg=0 (EXP3) does NOT update Thompson posterior (legacy byte-equivalence)",
+              mu_pre == mu_post);
+    }
+
+    // ─── Test S9.10: BOTH paths update for cfg=2/3/4 (multi-state ghost training + blended) ───
+    // EXP3_OP_THOMPSON_GHOST (2), THOMPSON_OP_EXP3_GHOST (3), BLENDED (4) all have exp3_up=1 AND thompson_up=1
+    // → both_reward dispatch → both Bandit_Update AND Thompson_Update fire.
+    {
+        const int both_algos[3] = {
+            (int)BANDIT_ALGO_EXP3_OP_THOMPSON_GHOST,
+            (int)BANDIT_ALGO_THOMPSON_OP_EXP3_GHOST,
+            (int)BANDIT_ALGO_BLENDED,
+        };
+        for (int algo : both_algos) {
+            EnsembleModelZoo<64> ezoo;
+            EnsembleModelZoo_Init(&ezoo);
+            ezoo.primary_count = 4;
+            EnsembleModelZoo_InitBandits(&ezoo, /*eta=*/0.05, /*min_warmup=*/0);
+            EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+            const double w_pre  = ezoo.bandits[0].weights[0];
+            const double mu_pre = ezoo.thompson_bandits[0].mu_post[0];
+            g_buy_reward_dispatch<64>[algo](&ezoo, 0, 0, 50.0);
+            const double w_post  = ezoo.bandits[0].weights[0];
+            const double mu_post = ezoo.thompson_bandits[0].mu_post[0];
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                "v5.15.5.F.4d Step 9.10: cfg=%d updates BOTH Exp3 weights AND Thompson mu_post (both_reward dispatch)", algo);
+            check(msg, (w_post != w_pre) && (mu_post != mu_pre));
+        }
+    }
+
+    // ─── Test S9.11: g_exit_reward_dispatch updates exit_bandits / thompson_exit_bandits (exit-side mirror) ───
+    // Symmetric to buy-side: exit-side reward attribution targets the EXIT bandit arrays, not buy.
+    {
+        EnsembleModelZoo<64> ezoo;
+        EnsembleModelZoo_Init(&ezoo);
+        ezoo.primary_count = 4;
+        ezoo.exit_predictor_count = 4;   // EnsembleModelZoo_InitExitBandits uses exit_predictor_count for n_arms
+        EnsembleModelZoo_InitBandits(&ezoo, /*eta=*/0.05, /*min_warmup=*/0);
+        EnsembleModelZoo_InitExitBandits(&ezoo, /*eta=*/0.05, /*min_warmup=*/0);
+        EnsembleModelZoo_InitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+        EnsembleModelZoo_InitExitThompsonBandits(&ezoo, 0.0, 1.0, 1.0, 42ULL);
+        const double exit_w_pre  = ezoo.exit_bandits[0].weights[0];
+        const double exit_mu_pre = ezoo.thompson_exit_bandits[0].mu_post[0];
+        const double buy_w_pre   = ezoo.bandits[0].weights[0];
+        const double buy_mu_pre  = ezoo.thompson_bandits[0].mu_post[0];
+        // cfg=2 (BOTH) on EXIT side: should update exit_bandits + thompson_exit_bandits, NOT buy.
+        g_exit_reward_dispatch<64>[BANDIT_ALGO_EXP3_OP_THOMPSON_GHOST](&ezoo, 0, 0, 50.0);
+        check("v5.15.5.F.4d Step 9.11: g_exit_reward_dispatch updates exit_bandits[].weights (exit-side Exp3)",
+              ezoo.exit_bandits[0].weights[0] != exit_w_pre);
+        check("v5.15.5.F.4d Step 9.11: g_exit_reward_dispatch updates thompson_exit_bandits[].mu_post (exit-side Thompson)",
+              ezoo.thompson_exit_bandits[0].mu_post[0] != exit_mu_pre);
+        check("v5.15.5.F.4d Step 9.11: g_exit_reward_dispatch does NOT touch buy-side bandits[].weights",
+              ezoo.bandits[0].weights[0] == buy_w_pre);
+        check("v5.15.5.F.4d Step 9.11: g_exit_reward_dispatch does NOT touch buy-side thompson_bandits[].mu_post",
+              ezoo.thompson_bandits[0].mu_post[0] == buy_mu_pre);
+    }
+
+    // ─── Test S9.12: Bandit_Update branchless argmax cmov regression (Class 28 closure) ───
+    // Pre-.F.4d Step 6 § L: branch-based max-find. Post-fix: cmov-equivalent (bytewise-identical).
+    // Deterministic input → deterministic argmax via cmov pattern.
+    {
+        BanditState bs;
+        Bandit_Init(&bs, /*n_arms=*/4, /*gamma=*/0.1, /*eta_max=*/0.05,
+                    /*blend_ratio=*/0.5, /*min_samples=*/0, /*ramp_up=*/0);
+        // Construct weights with clear max at arm 2
+        bs.weights[0] = 1.0; bs.weights[1] = 2.0; bs.weights[2] = 5.0; bs.weights[3] = 3.0;
+        // Bandit_Update with reward to arm 2 — verify max-find finds arm 2 internally
+        Bandit_Update(&bs, /*arm=*/2, /*reward_bps=*/100.0);
+        // Post-update arm 2 should remain the max (its weight grew)
+        bool arm2_is_max = (bs.weights[2] >= bs.weights[0]) &&
+                           (bs.weights[2] >= bs.weights[1]) &&
+                           (bs.weights[2] >= bs.weights[3]);
+        check("v5.15.5.F.4d Step 9.12: Bandit_Update max-loop branchless cmov produces correct argmax (arm 2 wins)",
+              arm2_is_max);
+    }
+
+    // ─── Test S9.13: Thompson_Sample branchless argmax cmov regression (Class 28 closure) ───
+    // Sister to S9.12 — Thompson_Sample's per-arm argmax should be cmov-deterministic given seed.
+    {
+        ThompsonBanditState tb;
+        Thompson_Init(&tb, /*n_arms=*/4, /*mu_prior=*/0.0, /*precision_prior=*/1.0,
+                      /*precision_obs=*/1.0, /*rng_seed=*/42ULL);
+        // Bias mu_post toward arm 1 by simulating many updates
+        for (int i = 0; i < 50; ++i) Thompson_Update(&tb, 1, 100.0);
+        // Re-init RNG for deterministic sample
+        tb.rng_state = 0xDEADBEEFULL;
+        int argmax = Thompson_Sample(&tb);
+        check("v5.15.5.F.4d Step 9.13: Thompson_Sample branchless cmov argmax is deterministic + arm-1-biased after 50 updates",
+              argmax == 1);
+    }
+
+    // ─── Test S9.14: Thompson_GetSoftmaxWeights numerical stability + sum=1 ───
+    // Softmax for BLENDED state combination. Max-subtract stability + L1 normalization.
+    {
+        ThompsonBanditState tb;
+        Thompson_Init(&tb, /*n_arms=*/4, /*mu_prior=*/0.0, /*precision_prior=*/1.0,
+                      /*precision_obs=*/1.0, /*rng_seed=*/42ULL);
+        tb.mu_post[0] = 1.0; tb.mu_post[1] = 2.0; tb.mu_post[2] = 1.5; tb.mu_post[3] = 0.5;
+        double weights[BANDIT_MAX_ARMS] = {0};
+        Thompson_GetSoftmaxWeights(&tb, weights);
+        double sum = 0.0;
+        for (int a = 0; a < 4; ++a) sum += weights[a];
+        check("v5.15.5.F.4d Step 9.14: Thompson_GetSoftmaxWeights L1-normalized (sum ≈ 1.0)",
+              std::abs(sum - 1.0) < 1e-9);
+        check("v5.15.5.F.4d Step 9.14: Thompson_GetSoftmaxWeights all weights positive (no NaN from max-subtract underflow)",
+              weights[0] > 0 && weights[1] > 0 && weights[2] > 0 && weights[3] > 0);
+    }
+
+    // ─── Test S9.15: thompson_exp3_blend_alpha cfg field default + STAMP_BOUND ───
+    // .F.4d new cfg field for BLENDED state weight ratio. Default 0.5 (50/50 blend); STAMP_BOUND.
+    {
+        ControllerConfig<64> cfg = ControllerConfig_Default<64>();
+        check("v5.15.5.F.4d Step 9.15: thompson_exp3_blend_alpha default = 0.5 (50/50 blend; cfg=4 BLENDED state)",
+              FPN_ToDouble(cfg.thompson_exp3_blend_alpha) == 0.5);
+        // Also verify the PerCoreCfg slice carries it (auto-generated via FOREACH_PER_CORE_CFG_FIELD)
+        check("v5.15.5.F.4d Step 9.15: PerCoreCfg<F>::thompson_exp3_blend_alpha per-core slice default = 0.5",
+              FPN_ToDouble(cfg.cores[0].thompson_exp3_blend_alpha) == 0.5);
+    }
+
+    // ===========================================================================
     // === v5.14.10.F — FOREACH_TRADE_LOG_COL registry generalization ===========
     // ===========================================================================
     printf("\n--- v5.14.10.F: ShardedTradeLog FOREACH_TRADE_LOG_COL refactor (byte preservation) ---\n");
