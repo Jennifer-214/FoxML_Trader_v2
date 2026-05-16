@@ -23267,10 +23267,12 @@ e3_skip_load:;
               tb.rng_state == pre_rng);
     }
 
-    // ─── Test 9: FOREACH_BANDIT_ALGORITHM_COUNT == 3 ───
+    // ─── Test 9: FOREACH_BANDIT_ALGORITHM_COUNT == 5 (v5.15.5.F.4d 5-state expansion) ───
     {
-        check("v5.14.10.A: FOREACH_BANDIT_ALGORITHM_COUNT == 3 (EXP3 + THOMPSON + BOTH)",
-              FOREACH_BANDIT_ALGORITHM_COUNT == 3);
+        // v5.15.5.F.4d: 3→5 state expansion per Option C wire-byte-preserving (cfg=0/1/2 unchanged;
+        // cfg=3 THOMPSON_OP_EXP3_GHOST + cfg=4 BLENDED NEW). cfg=2 reassigned BOTH→EXP3_OP_THOMPSON_GHOST.
+        check("v5.15.5.F.4d: FOREACH_BANDIT_ALGORITHM_COUNT == 5 (EXP3 + THOMPSON + EXP3_OP_THOMPSON_GHOST + THOMPSON_OP_EXP3_GHOST + BLENDED)",
+              FOREACH_BANDIT_ALGORITHM_COUNT == 5);
     }
 
     // ─── Test 10: BanditAlgorithm_ToString round-trip ───
@@ -23279,8 +23281,10 @@ e3_skip_load:;
               strcmp(BanditAlgorithm_ToString(0), "EXP3") == 0);
         check("v5.14.10.A: BanditAlgorithm_ToString(1) == \"THOMPSON\"",
               strcmp(BanditAlgorithm_ToString(1), "THOMPSON") == 0);
-        check("v5.14.10.A: BanditAlgorithm_ToString(2) == \"BOTH\"",
-              strcmp(BanditAlgorithm_ToString(2), "BOTH") == 0);
+        // v5.15.5.F.4d Option C rename: canonical name for cfg=2 is now EXP3_OP_THOMPSON_GHOST
+        // (was "BOTH" pre-.F.4d; wire bytes preserved; ToString returns canonical new name).
+        check("v5.15.5.F.4d: BanditAlgorithm_ToString(2) == \"EXP3_OP_THOMPSON_GHOST\" (was BOTH pre-.F.4d; Option C wire-preserving rename)",
+              strcmp(BanditAlgorithm_ToString(2), "EXP3_OP_THOMPSON_GHOST") == 0);
         check("v5.14.10.A: BanditAlgorithm_ToString(99) == \"INVALID\"",
               strcmp(BanditAlgorithm_ToString(99), "INVALID") == 0);
     }
@@ -23295,7 +23299,9 @@ e3_skip_load:;
               BanditAlgorithm_FromString("THOMPSON") == 1);
         check("v5.14.10.A: BanditAlgorithm_FromString string lowercase (\"thompson\" → 1)",
               BanditAlgorithm_FromString("thompson") == 1);
-        check("v5.14.10.A: BanditAlgorithm_FromString string mixed case (\"Both\" → 2)",
+        // v5.15.5.F.4d: legacy alias preserved for operator cfg backward compat (Option C).
+        // "Both" / "BOTH" / "both" still parse to 2 (now EXP3_OP_THOMPSON_GHOST canonical).
+        check("v5.15.5.F.4d: BanditAlgorithm_FromString legacy alias (\"Both\" → 2 = EXP3_OP_THOMPSON_GHOST)",
               BanditAlgorithm_FromString("Both") == 2);
         check("v5.14.10.A: BanditAlgorithm_FromString invalid string (\"UCB1\" → -1)",
               BanditAlgorithm_FromString("UCB1") == -1);
@@ -23316,7 +23322,7 @@ e3_skip_load:;
         Bandit_GetProbabilities(&exp3, direct_probs);
         double via_dispatch[BANDIT_MAX_ARMS];
         int chosen = -1;
-        BanditAlgorithm_Apply(BANDIT_ALGO_EXP3, &exp3, nullptr, 4, via_dispatch, &chosen);
+        BanditAlgorithm_Apply(BANDIT_ALGO_EXP3, &exp3, nullptr, 4, /*blend_alpha=*/0.0, via_dispatch, &chosen);
         bool match = true;
         for (int i = 0; i < 4; i++) {
             if (fabs(direct_probs[i] - via_dispatch[i]) > 1e-12) { match = false; break; }
@@ -23333,7 +23339,7 @@ e3_skip_load:;
         Thompson_InitDefault(&tb, 4);
         double weights[BANDIT_MAX_ARMS];
         int chosen = -1;
-        BanditAlgorithm_Apply(BANDIT_ALGO_THOMPSON, nullptr, &tb, 4, weights, &chosen);
+        BanditAlgorithm_Apply(BANDIT_ALGO_THOMPSON, nullptr, &tb, 4, /*blend_alpha=*/0.0, weights, &chosen);
         bool one_hot = (chosen >= 0 && chosen < 4);
         if (one_hot) {
             for (int i = 0; i < 4; i++) {
@@ -23345,7 +23351,13 @@ e3_skip_load:;
               one_hot);
     }
 
-    // ─── Test 14: BanditAlgorithm_Apply BOTH — Exp3 weights + Thompson choice ───
+    // ─── Test 14: BanditAlgorithm_Apply cfg=2 EXP3_OP_THOMPSON_GHOST (was BOTH pre-.F.4d) ───
+    // v5.15.5.F.4d Option C rename + Class 24 sister attribution fix:
+    //   - cfg=2 wire bytes UNCHANGED (legacy stamps load fine)
+    //   - SEMANTIC CHANGE: chosen_arm now reflects Exp3's argmax (was Thompson's sample pre-.F.4d).
+    //     Reason: per-arm reward attribution lands on the arm that DROVE the decision (Exp3); Thompson
+    //     gets shadow-trained from the same per-arm signal but its sample is telemetry-only.
+    //   - Class 24 fix: Thompson posterior now updates from rewards (was silently never updating pre-.F.4d).
     {
         BanditState exp3;
         Bandit_InitDefault(&exp3, 4);
@@ -23357,17 +23369,19 @@ e3_skip_load:;
         Bandit_GetProbabilities(&exp3, exp3_probs_direct);
         double via_dispatch[BANDIT_MAX_ARMS];
         int chosen = -1;
-        BanditAlgorithm_Apply(BANDIT_ALGO_BOTH, &exp3, &tb, 4, via_dispatch, &chosen);
+        BanditAlgorithm_Apply(BANDIT_ALGO_EXP3_OP_THOMPSON_GHOST, &exp3, &tb, 4, /*blend_alpha=*/0.0, via_dispatch, &chosen);
         bool exp3_weights_match = true;
         for (int i = 0; i < 4; i++) {
             if (fabs(exp3_probs_direct[i] - via_dispatch[i]) > 1e-12) {
                 exp3_weights_match = false; break;
             }
         }
-        check("v5.14.10.A: BanditAlgorithm_Apply BOTH — weights = Exp3 (drives action)",
+        check("v5.15.5.F.4d: BanditAlgorithm_Apply EXP3_OP_THOMPSON_GHOST — weights = Exp3 probs (drives action; same as pre-.F.4d BOTH)",
               exp3_weights_match);
-        check("v5.14.10.A: BanditAlgorithm_Apply BOTH — chosen_arm = Thompson sample (telemetry)",
-              chosen >= 0 && chosen < 4);
+        // .F.4d Class 24 sister fix: chosen_arm is now Exp3's argmax (was Thompson's sample pre-.F.4d).
+        // With exp3.weights[0] = 4.0 being the heaviest, Exp3 argmax → arm 0 deterministically.
+        check("v5.15.5.F.4d: BanditAlgorithm_Apply EXP3_OP_THOMPSON_GHOST — chosen_arm = Exp3 argmax = 0 (Class 24 fix; was Thompson sample pre-.F.4d)",
+              chosen == 0);
     }
 
     // ─── Test 15: BanditAlgorithm_Apply out-of-range degrades to EXP3 ───
@@ -23380,7 +23394,7 @@ e3_skip_load:;
         Bandit_GetProbabilities(&exp3, exp3_uniform);
         double via_dispatch[BANDIT_MAX_ARMS];
         int chosen = -1;
-        BanditAlgorithm_Apply(/*algo=*/99, &exp3, nullptr, 4, via_dispatch, &chosen);
+        BanditAlgorithm_Apply(/*algo=*/99, &exp3, nullptr, 4, /*blend_alpha=*/0.0, via_dispatch, &chosen);
         bool match = true;
         for (int i = 0; i < 4; i++) {
             if (fabs(exp3_uniform[i] - via_dispatch[i]) > 1e-12) { match = false; break; }
@@ -23538,24 +23552,30 @@ e3_skip_load:;
         uint16_t flags_thompson = 0;
         uint16_t flags_both     = 0;
 
-        // THOMPSON_ACTIVE: cfg.bandit_algorithm != 0
-        flags_exp3     |= ((cfg_exp3.bandit_algorithm     != 0) ? MASK_THOMPSON_ACTIVE : (uint16_t)0);
-        flags_thompson |= ((cfg_thompson.bandit_algorithm != 0) ? MASK_THOMPSON_ACTIVE : (uint16_t)0);
-        flags_both     |= ((cfg_both.bandit_algorithm     != 0) ? MASK_THOMPSON_ACTIVE : (uint16_t)0);
-        // BANDIT_BOTH_ACTIVE: cfg.bandit_algorithm == 2
-        flags_exp3     |= ((cfg_exp3.bandit_algorithm     == 2) ? MASK_BANDIT_BOTH_ACTIVE : (uint16_t)0);
-        flags_thompson |= ((cfg_thompson.bandit_algorithm == 2) ? MASK_BANDIT_BOTH_ACTIVE : (uint16_t)0);
-        flags_both     |= ((cfg_both.bandit_algorithm     == 2) ? MASK_BANDIT_BOTH_ACTIVE : (uint16_t)0);
+        // v5.15.5.F.4d: metadata-derived predicates (mirror § I rebind in SlowPathGateRegistry.hpp).
+        // Bytewise-equivalent to OLD predicates for cfg=0/1/2 because OLD enum 0/1/2 maps cleanly to
+        // (exp3_up, thompson_up) = (1,0), (0,1), (1,1). OLD `bandit_algorithm != 0` matched THOMPSON_ACTIVE
+        // for cfg=1/2 (correct: both update Thompson). OLD `bandit_algorithm == 2` matched BOTH_ACTIVE
+        // for cfg=2 only (correct: cfg=2 has both update bits). Post-.F.4d the metadata-derived form
+        // generalizes to cfg=3/4 without any test fixture change.
+        // THOMPSON_ACTIVE: ((BANDIT_THOMPSON_UPDATE_MASK >> bandit_algorithm) & 1u)
+        flags_exp3     |= ((((uint8_t)BANDIT_THOMPSON_UPDATE_MASK >> cfg_exp3.bandit_algorithm)     & 1u) ? MASK_THOMPSON_ACTIVE : (uint16_t)0);
+        flags_thompson |= ((((uint8_t)BANDIT_THOMPSON_UPDATE_MASK >> cfg_thompson.bandit_algorithm) & 1u) ? MASK_THOMPSON_ACTIVE : (uint16_t)0);
+        flags_both     |= ((((uint8_t)BANDIT_THOMPSON_UPDATE_MASK >> cfg_both.bandit_algorithm)     & 1u) ? MASK_THOMPSON_ACTIVE : (uint16_t)0);
+        // BANDIT_SHADOW_LEARNING (was BANDIT_BOTH_ACTIVE): ((EXP3_MASK & THOMPSON_MASK) >> bandit_algorithm) & 1u
+        flags_exp3     |= (((((uint8_t)BANDIT_EXP3_UPDATE_MASK & (uint8_t)BANDIT_THOMPSON_UPDATE_MASK) >> cfg_exp3.bandit_algorithm)     & 1u) ? MASK_BANDIT_SHADOW_LEARNING : (uint16_t)0);
+        flags_thompson |= (((((uint8_t)BANDIT_EXP3_UPDATE_MASK & (uint8_t)BANDIT_THOMPSON_UPDATE_MASK) >> cfg_thompson.bandit_algorithm) & 1u) ? MASK_BANDIT_SHADOW_LEARNING : (uint16_t)0);
+        flags_both     |= (((((uint8_t)BANDIT_EXP3_UPDATE_MASK & (uint8_t)BANDIT_THOMPSON_UPDATE_MASK) >> cfg_both.bandit_algorithm)     & 1u) ? MASK_BANDIT_SHADOW_LEARNING : (uint16_t)0);
 
         check("v5.14.10.B SLOW_PATH_GATE: cfg=0 (EXP3) → THOMPSON_ACTIVE OFF, BOTH_ACTIVE OFF",
               !BITMAP_IS_SET(flags_exp3, MASK_THOMPSON_ACTIVE) &&
-              !BITMAP_IS_SET(flags_exp3, MASK_BANDIT_BOTH_ACTIVE));
+              !BITMAP_IS_SET(flags_exp3, MASK_BANDIT_SHADOW_LEARNING));
         check("v5.14.10.B SLOW_PATH_GATE: cfg=1 (THOMPSON) → THOMPSON_ACTIVE ON, BOTH_ACTIVE OFF",
               BITMAP_IS_SET(flags_thompson, MASK_THOMPSON_ACTIVE) &&
-              !BITMAP_IS_SET(flags_thompson, MASK_BANDIT_BOTH_ACTIVE));
+              !BITMAP_IS_SET(flags_thompson, MASK_BANDIT_SHADOW_LEARNING));
         check("v5.14.10.B SLOW_PATH_GATE: cfg=2 (BOTH) → THOMPSON_ACTIVE ON, BOTH_ACTIVE ON",
               BITMAP_IS_SET(flags_both, MASK_THOMPSON_ACTIVE) &&
-              BITMAP_IS_SET(flags_both, MASK_BANDIT_BOTH_ACTIVE));
+              BITMAP_IS_SET(flags_both, MASK_BANDIT_SHADOW_LEARNING));
     }
 
     // ─── Test B.8: FOREACH_STAMP_BOUND_CFG includes new entries (FOREACH walk count) ───
@@ -23724,10 +23744,13 @@ e3_skip_load:;
               fabs(ezoo.thompson_bandits[0].precision_post[0] - 1.0) < 1e-9);
     }
 
-    // ─── Test C.5: FOREACH_ENSEMBLE_POST_LOAD_COUNT == 9 (extended from 7) ───
+    // ─── Test C.5: FOREACH_ENSEMBLE_POST_LOAD_COUNT == 11 (v5.15.5.F.4d: +2 for exit-side Thompson init+load) ───
     {
-        check("v5.14.10.C: FOREACH_ENSEMBLE_POST_LOAD_COUNT == 9 (was 7; +2 for Thompson init+load)",
-              FOREACH_ENSEMBLE_POST_LOAD_COUNT == 9);
+        // v5.15.5.F.4d added init_exit_thompson_bandits + load_exit_thompson_state rows per
+        // FOREACH_BANDIT_SIDE auto-mirror (§ G of merged plan body). Closes pre-.F.4d asymmetry
+        // where buy-side had Thompson init/load + exit-side was Exp3-only.
+        check("v5.15.5.F.4d: FOREACH_ENSEMBLE_POST_LOAD_COUNT == 11 (was 9; +2 for exit-side Thompson init+load)",
+              FOREACH_ENSEMBLE_POST_LOAD_COUNT == 11);
     }
 
     // ─── Test C.6: PostLoadSetup runs InitThompsonBandits (initialized_thompson_bandits set) ───
@@ -24650,10 +24673,14 @@ e3_skip_load:;
     //==================================================================
     {
         // --- A.7.1: Registry count assertions (catches accidental row deletion) ---
-        check("v5.15.5.A.7: FOREACH_CFG_DRIFT_CHECK_COUNT == 18 (8 cross-binary + 6 inference_cfg + 4 per-horizon)",
-              FOREACH_CFG_DRIFT_CHECK_COUNT == 18);
-        check("v5.15.5.A.7: FOREACH_CFG_DERIVED_INFERENCE_CFG_COUNT == 11 (7 migrated + 4 new per-horizon cohort)",
-              FOREACH_CFG_DERIVED_INFERENCE_CFG_COUNT == 11);
+        // v5.15.5.F.4d: drift-check count 18 → 23 (+5 PARITY-026 close: bandit_algorithm + 3 thompson_*
+        // were STAMP_BOUND since v5.14.10.B but missing drift rows; + 1 new thompson_exp3_blend_alpha
+        // for BLENDED state-4 per § C.3 of merged plan body).
+        check("v5.15.5.F.4d: FOREACH_CFG_DRIFT_CHECK_COUNT == 23 (was 18; +5 PARITY-026 bandit/thompson + BLENDED at .F.4d)",
+              FOREACH_CFG_DRIFT_CHECK_COUNT == 23);
+        // v5.15.5.F.4d: cfg→inf wiring count 11 → 16 (+5 PARITY-026 cfg→inf wiring rows per § C.4 of plan body).
+        check("v5.15.5.F.4d: FOREACH_CFG_DERIVED_INFERENCE_CFG_COUNT == 16 (was 11; +5 PARITY-026 cfg→inf wiring at .F.4d)",
+              FOREACH_CFG_DERIVED_INFERENCE_CFG_COUNT == 16);
         check("v5.15.5.A.7: FOREACH_OPS_CFG_FLAG_COUNT == 4 (post-ACK migration; was 2)",
               (int)OPS_CFG_COUNT == 4);
         check("v5.15.5.A.7: OPS_CFG count fits uint8_t (≤8)",

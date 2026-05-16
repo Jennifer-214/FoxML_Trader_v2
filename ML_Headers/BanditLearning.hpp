@@ -45,6 +45,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <cstdint>      // uint32_t / uint64_t (parse_uint32_array etc.); explicit per IWYU discipline
 #include "../CoreFrameworks/ParseFast.hpp"  // v5.11.4.C — std::from_chars wrapper for locale-immune parsing
 #include <unistd.h>     // unlink, write
 #include <locale.h>     // v5.14.10.C — uselocale/newlocale for LC_NUMERIC=C pinning at JSON emit (TECH_DEBT-027 close)
@@ -308,9 +309,12 @@ static inline void Bandit_Update(BanditState *b, int arm, double reward_bps) {
     b->weights[arm] *= exp(eta * r_hat);
 
     // numerical stability: prevent explosion or vanishing
+    // v5.15.5.F.4d Step 6 (§ L) — Class 28 cmov branchless max-find (H20 / determinism over throughput).
     double max_w = 0.0;
-    for (int i = 0; i < b->n_arms; i++)
-        if (b->weights[i] > max_w) max_w = b->weights[i];
+    for (int i = 0; i < b->n_arms; i++) {
+        int win = b->weights[i] > max_w;
+        max_w   = win ? b->weights[i] : max_w;
+    }
     if (max_w > 1e6) {
         for (int i = 0; i < b->n_arms; i++)
             b->weights[i] /= max_w;

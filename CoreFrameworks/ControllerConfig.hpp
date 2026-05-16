@@ -1321,6 +1321,7 @@ template <unsigned F> struct ControllerConfig {
   FPN<F>   thompson_precision_prior;  // posterior precision prior (= 1/variance); default 1.0
   FPN<F>   thompson_precision_obs;    // observation precision; default 1.0
   uint64_t thompson_rng_seed;         // splitmix64 seed; default 42
+  FPN<F>   thompson_exp3_blend_alpha; // v5.15.5.F.4d — BLENDED state-4 blend ratio; default 0.5 (only consumed when bandit_algorithm=4)
 
   //==================================================================================================
   // [v5.15.5.F.4c.3 — PER-CORE AUTHORITATIVE CONFIG]
@@ -1804,6 +1805,7 @@ template <unsigned F> inline ControllerConfig<F> ControllerConfig_Default() {
   cfg.thompson_precision_prior= FPN_FromDouble<F>(1.0);
   cfg.thompson_precision_obs  = FPN_FromDouble<F>(1.0);
   cfg.thompson_rng_seed       = 42ULL;                          // operator-tunable; 0 = use ThompsonBandit.hpp's THOMPSON_RNG_SEED_DEFAULT
+  cfg.thompson_exp3_blend_alpha = FPN_FromDouble<F>(0.5);       // v5.15.5.F.4d — BLENDED state-4 default; 50/50 blend (only consumed when bandit_algorithm=4)
   // v5.10.0a.G.6 — per-core ensemble cfg defaults (empty = inherit global)
   // v5.11.18a — per-core feature_mask defaults (all-bits-on = no masking)
   for (int i = 0; i < 16; ++i) {

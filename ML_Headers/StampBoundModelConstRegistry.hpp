@@ -58,6 +58,7 @@
 
 #include <stdlib.h>   // atoi, strncpy, strtoull
 #include <string.h>   // strncpy, strncmp
+#include <cstdint>    // v5.15.5.F.4d — uint64_t used in expansion of FOREACH_STAMP_BOUND_MODEL_CONST_POST_CFG bandit/thompson rows; explicit per IWYU discipline (sister to TECH_DEBT-083 IWYU sweep)
 #include <type_traits>  // v5.14.8.A.merged.4 — std::is_array_v / extent_v / is_floating_point_v / is_unsigned_v for tt::stamp_parse_field<T>
 #include "../MemHeaders/BitmapMacros.hpp"  // BITMAP_* primitives (v5.14.8.A.0.b.1) backing STAMP_HAS / SET / CLR aliases
 
@@ -461,7 +462,25 @@ namespace tt {
       "training-time cfg.barrier_blend_mode enum (LEGACY/BLEND/DOMINANT/BOTH_*; dispatch shape; drift Tier 1)") \
     X(inference_cfg_per_horizon_barrier_blend,  inference_cfg, INCLUDE, int, "%d", 0,                \
       inf->inference_cfg_per_horizon_barrier_blend, inf->has_inference_cfg,                          \
-      "training-time per_horizon_barrier_blend feature master gate (0/1 from ml_cfg_flags bitmap; drift Tier 1)")
+      "training-time per_horizon_barrier_blend feature master gate (0/1 from ml_cfg_flags bitmap; drift Tier 1)") \
+    /* === v5.15.5.F.4d PARITY-026 close — 4 STAMP_BOUND bandit/thompson fields since v5.14.10.B were missing POST_CFG entries + 1 NEW field for BLENDED state === */ \
+    /* Per § C.3 of merged plan body. APPEND-at-end preserves HMAC chain byte equivalence for legacy stamps (Surface G forward-compat). */ \
+    /* All 5 fields share existing `inference_cfg` STAMP_BIT group (established at .A.7); no new bit allocation. */ \
+    X(inference_cfg_bandit_algorithm,           inference_cfg, INCLUDE, int,    "%d",    0,          \
+      inf->inference_cfg_bandit_algorithm,           inf->has_inference_cfg,                         \
+      "training-time cfg.bandit_algorithm snapshot (drift Tier 2 WARN to avoid false-positive on legacy cfg=2 stamps post-.F.4d Option C semantic flip; semantic for cfg=2 changed from BOTH → EXP3_OP_THOMPSON_GHOST with Class 24 sister attribution fix)") \
+    X(inference_cfg_thompson_mu_prior,          inference_cfg, INCLUDE, double, "%.17g", 0.0,        \
+      inf->inference_cfg_thompson_mu_prior,          inf->has_inference_cfg,                        \
+      "training-time cfg.thompson_mu_prior snapshot (drift Tier 1; Thompson posterior mean prior; parity-critical)") \
+    X(inference_cfg_thompson_precision_prior,   inference_cfg, INCLUDE, double, "%.17g", 1.0,        \
+      inf->inference_cfg_thompson_precision_prior,   inf->has_inference_cfg,                        \
+      "training-time cfg.thompson_precision_prior snapshot (drift Tier 1; Thompson posterior precision prior)") \
+    X(inference_cfg_thompson_precision_obs,     inference_cfg, INCLUDE, double, "%.17g", 1.0,        \
+      inf->inference_cfg_thompson_precision_obs,     inf->has_inference_cfg,                        \
+      "training-time cfg.thompson_precision_obs snapshot (drift Tier 1; Thompson observation precision)") \
+    X(inference_cfg_thompson_exp3_blend_alpha,  inference_cfg, INCLUDE, double, "%.17g", 0.5,        \
+      inf->inference_cfg_thompson_exp3_blend_alpha,  inf->has_inference_cfg,                        \
+      "training-time cfg.thompson_exp3_blend_alpha snapshot (drift Tier 1; only meaningful when bandit_algorithm == 4 BLENDED; reproducibility requires α lock)")
 
 // Union: walks both PRE_CFG and POST_CFG. Used by struct generation +
 // AUTOPOPULATE + entry counting (everything that doesn't care about

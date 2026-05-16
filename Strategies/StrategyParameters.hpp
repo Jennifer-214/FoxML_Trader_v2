@@ -960,11 +960,19 @@ inline void ML_BuildParameters(
                     // Hysteresis SKIPPED (see comment above). Hysteresis counter
                     // decremented anyway so a future cfg-flip back to EXP3 sees clean state.
                     int chosen_arm = -1;
+                    // v5.15.5.F.4d Step 4 complete (§ C of merged plan body) — blend_alpha now sourced
+                    // from per-core resolved cfg field `thompson_exp3_blend_alpha` (cfg field added at
+                    // CfgFieldRegistry.hpp + STAMP_BOUND for replay determinism + drift-check row in
+                    // CfgDriftCheckRegistry.hpp gated to BLENDED state). For non-BLENDED algos (cfg=0/1/2/3),
+                    // BanditAlgorithm_Apply ignores blend_alpha entirely; only BLENDED state-4
+                    // (`BanditAlgo_Blended_Apply`) reads it. Per-core resolution avoids Class 27 scalar
+                    // mirror (alpha varies per-core; each core's BLENDED dispatch reads its own value).
                     BanditAlgorithm_Apply(core_cfg->bandit_algorithm,
                                           &ezoo->bandits[regime_id],
                                           BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_THOMPSON_READY)
                                               ? &ezoo->thompson_bandits[regime_id] : nullptr,
                                           ezoo->primary_count,
+                                          /*blend_alpha=*/FPN_ToDouble(core_cfg->thompson_exp3_blend_alpha),
                                           weights_buf,
                                           &chosen_arm);
                     // Capture Thompson's chosen_arm for cfg=2 telemetry. .D's
@@ -1145,12 +1153,17 @@ inline void ML_BuildParameters(
                 // specific lookback walking ezoo->barrier_horizons[].
                 // ic_floor 0.02 keeps drift watchdog safely inert at low
                 // sample counts; v5.10.0e will pull it from cfg.
+                // v5.15.5.F.4d — pass core_cfg for per-core bandit_algorithm dispatch (Step 3 +
+                // § H Class 25 sweep). Replaces former per-call cfg branches at attribution sites
+                // with metadata-driven g_buy_reward_dispatch[algo] inside the fn body. Class 24
+                // sister + Class 25 + Class 28 closure at this attribution surface.
                 EnsembleModelZoo_TickRewardsFromLookback(
                     ezoo,
                     current_price,
                     /*forward_ticks=*/1000,
                     poll_interval_ticks,   // v5.15.5.F.4c.3 WIP2c.2 — caller-resolved scalar
-                    /*ic_floor=*/0.02);
+                    /*ic_floor=*/0.02,
+                    core_cfg);             // v5.15.5.F.4d — per-core bandit_algorithm source
             }
         } else {
             // Single-zoo path (existing; bytewise unchanged from pre-G.5)

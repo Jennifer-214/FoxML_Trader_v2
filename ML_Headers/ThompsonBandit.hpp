@@ -181,7 +181,9 @@ static inline void Thompson_InitDefault(ThompsonBanditState* tb, int n_arms) {
 // Pure deterministic math; no PRNG used (only Sample uses PRNG).
 // No-op for invalid arm (defensive).
 static inline void Thompson_Update(ThompsonBanditState* tb, int arm, double reward) {
-    if (arm < 0 || arm >= tb->n_arms) return;
+    // v5.15.5.F.4d Step 6 (§ K) — __builtin_expect-rare on bounds guard (H20 Exception #2; defensive;
+    // production never hits this by construction since callers pass valid arms from dispatch tables).
+    if (__builtin_expect(arm < 0 || arm >= tb->n_arms, 0)) return;
     double prec_old = tb->precision_post[arm];
     double mu_old = tb->mu_post[arm];
     double prec_new = prec_old + tb->precision_obs;
@@ -189,6 +191,61 @@ static inline void Thompson_Update(ThompsonBanditState* tb, int arm, double rewa
     tb->precision_post[arm] = prec_new;
     tb->total_pulls[arm]++;
 }
+
+//======================================================================================================
+// [PATTERN 5 SINK-FN-POINTER WRAPPERS — Thompson_Update branchless dispatch] (v5.15.5.F.4d)
+//======================================================================================================
+// Per DESIGN_SPECS/sink-fn-pointer-for-optional-side-effect-pattern.md (Pattern 5 of
+// branchless-dispatch-discipline.md).
+//
+// PROBLEM these wrappers solve: pre-.F.4d reward-attribution dispatch sites had a per-call branch
+//   if (cfg.bandit_algorithm == THOMPSON || cfg.bandit_algorithm == BOTH) {
+//       Thompson_Update(&ezoo->thompson_bandits[r], arm, reward);
+//   }
+// That branch is DATA-DEPENDENT (cfg-stable but predictor-warm-up cost on cfg-flip + violates H20
+// + leaves callsite-by-callsite drift risk when adding new bandit modes — each new mode needs every
+// dispatch site updated). It's the Class 24 sister structural risk + a Class 28 instance.
+//
+// SOLUTION via Pattern 5:
+//   1. Define a NO-OP sink (compile-time-known empty body) + a REAL sink (delegates to Thompson_Update).
+//   2. EnsembleModelZoo<F> carries a fn-pointer field `thompson_update_fn` (sister: `exit_thompson_update_fn`
+//      for the exit side per FOREACH_BANDIT_SIDE auto-mirror).
+//   3. Default value at struct init: `&noop_thompson_update`. Boot wiring at
+//      EnsembleModelZoo_InitThompsonBandits (or _InitExitThompsonBandits for exit side) sets it to
+//      `&real_thompson_update` when the Thompson subsystem actually initializes.
+//   4. All reward-attribution dispatch sites call UNCONDITIONALLY through the fn pointer:
+//          ezoo->thompson_update_fn(&ezoo->thompson_bandits[regime], arm, reward);
+//      Branchless. ~1-2 ns indirect call. No per-call cfg read. No predictor-warmup cost on cfg-flip
+//      (predictor sees same fn-pointer target every call until boot reconfigures; that's a 1-time event,
+//      not a per-call event).
+//
+// Future bandit-mode additions: add 1 row to FOREACH_BANDIT_ALGORITHM with appropriate
+// (exp3_up, thompson_up) metadata bits. The reward dispatch table in bandit_dispatch_table.hpp auto-
+// selects the correct leaf-reward-fn per row. NO per-callsite update needed across consumer sites.
+// This is the structural Class-28 closure for the dispatch family + Class-24 closure (Thompson posterior
+// now reliably updates at every reward event when the subsystem is wired, regardless of which dispatch
+// site fires the reward).
+//
+// Branchless cost analysis (per H20 + cycles/cache cost framework):
+//   - noop call: predicted indirect call → ~1-2 ns; body is empty (compiler may inline-elide entirely)
+//   - real call: predicted indirect call → ~1-2 ns + Thompson_Update body (~10 ns; closed-form math)
+//   Total slow-path cost: <15 ns per call. Slow-path budget 100µs → 0.015% utilization. Negligible.
+//======================================================================================================
+inline void noop_thompson_update(ThompsonBanditState* /*tb*/, int /*arm*/, double /*reward*/) {
+    // Compile-time-known empty body. ezoo->thompson_update_fn resolves here from struct construction
+    // until EnsembleModelZoo_InitThompsonBandits boot-wires to real_thompson_update. Acts as the
+    // "Thompson subsystem not active on this ezoo" branch — but BRANCHLESS at the consumer site
+    // (uniform indirect call; no per-call cfg read).
+}
+
+inline void real_thompson_update(ThompsonBanditState* tb, int arm, double reward) {
+    Thompson_Update(tb, arm, reward);
+}
+
+// Pattern 5 sink fn-pointer typedef — both `thompson_update_fn` + `exit_thompson_update_fn` fields
+// on EnsembleModelZoo<F> share this signature. FOREACH_BANDIT_SIDE auto-mirror generates the two
+// field declarations + boot-wiring per side from this single typedef.
+using ThompsonUpdateFn = void (*)(ThompsonBanditState*, int /*arm*/, double /*reward*/);
 
 //======================================================================================================
 // [SAMPLE — draw one posterior sample per arm; return argmax]
@@ -224,14 +281,14 @@ static inline int Thompson_Sample(ThompsonBanditState* tb) {
             i++;
         }
     }
-    // Argmax (left-to-right tie-break favors lower index — deterministic).
+    // v5.15.5.F.4d Step 6 (§ K + § L) — Class 28 cmov branchless argmax (H20).
+    // Argmax with left-to-right tie-break favors lower index (deterministic; replay-safe).
     int best = 0;
     double best_val = samples[0];
     for (int j = 1; j < tb->n_arms; j++) {
-        if (samples[j] > best_val) {
-            best_val = samples[j];
-            best = j;
-        }
+        int win  = samples[j] > best_val;
+        best     = win ? j          : best;
+        best_val = win ? samples[j] : best_val;
     }
     return best;
 }
@@ -265,6 +322,66 @@ static inline void Thompson_GetProbabilities(const ThompsonBanditState* tb, doub
     double inv_n = 1.0 / (double)N_DRAWS;
     for (int i = 0; i < tb->n_arms; i++) {
         probs_out[i] = (double)counts[i] * inv_n;
+    }
+}
+
+//======================================================================================================
+// [GET SOFTMAX WEIGHTS — posterior-derived weight vector for BLENDED dispatch]
+//======================================================================================================
+// Maps each arm's posterior mean mu_post[i] to a normalized softmax weight:
+//   weights[i] = exp(mu_post[i] - max(mu_post)) / Σ_j exp(mu_post[j] - max(mu_post))
+//
+// Max-subtract is for numerical stability (prevents exp() overflow on large mu_post
+// and underflow on negative-large values; the shifted argument always has its largest
+// element equal to 0 so exp() returns ≥1 for the max-arm and (0,1] for others).
+//
+// Used by BanditAlgo_Blended_Apply (state 4; v5.15.5.F.4d) to derive the Thompson
+// contribution to the blended Exp3+Thompson weight vector. Distinct from
+// Thompson_GetProbabilities (which is Monte-Carlo P(arm-i-is-argmax) for telemetry).
+// Softmax-of-means is the closed-form mapping; Monte-Carlo would be over-precision-
+// adjusted samples. BLENDED uses softmax-of-means as the cheaper deterministic input
+// to the blend.
+//
+// Branchless inner loops (H20 — determinism-preferred dispatch on SP/HP). Max-find
+// loop uses cmov pattern; normalize loop is straight-line; defensive cmov on sum=0
+// avoids div-by-zero on degenerate state (shouldn't happen post-max-subtract since
+// exp(0)=1 guarantees sum ≥ 1, but defensive for safety).
+//
+// Cost: ~1µs at 8 arms (one exp() per arm dominates; ~125ns per exp on x86_64 with
+// glibc libm). Slow-path only; called rarely (once per BLENDED dispatch — every
+// bandit-update cycle on the path that selects via blended weighting).
+//
+// Replay-determinism: pure deterministic math (no PRNG); identical mu_post[] inputs
+// produce bytewise-identical weights_out across runs and binaries (subject to libm
+// exp() implementation determinism — glibc exp is deterministic across versions
+// per IEEE-754 correctly-rounded semantics).
+//
+// weights_out must be sized BANDIT_MAX_ARMS doubles. Unused entries (i ≥ n_arms)
+// are zeroed. Defensive on nullptr / degenerate n_arms < 2.
+static inline void Thompson_GetSoftmaxWeights(const ThompsonBanditState* tb, double* weights_out) {
+    if (!weights_out) return;
+    for (int i = 0; i < BANDIT_MAX_ARMS; i++) weights_out[i] = 0.0;
+    if (!tb || tb->n_arms < 2) {
+        if (tb && tb->n_arms == 1) weights_out[0] = 1.0;
+        return;
+    }
+    // Branchless max-find via cmov (H20). Compiler lowers ternary to cmov on x86_64.
+    double max_mu = tb->mu_post[0];
+    for (int i = 1; i < tb->n_arms; i++) {
+        int gt = tb->mu_post[i] > max_mu;
+        max_mu = gt ? tb->mu_post[i] : max_mu;
+    }
+    // Compute exp(mu - max) per arm + accumulate sum.
+    double sum = 0.0;
+    for (int i = 0; i < tb->n_arms; i++) {
+        double e = exp(tb->mu_post[i] - max_mu);
+        weights_out[i] = e;
+        sum += e;
+    }
+    // Normalize. Defensive cmov on sum=0 (degenerate; uniform fallback).
+    double inv_sum = (sum > 0.0) ? (1.0 / sum) : (1.0 / (double)tb->n_arms);
+    for (int i = 0; i < tb->n_arms; i++) {
+        weights_out[i] *= inv_sum;
     }
 }
 

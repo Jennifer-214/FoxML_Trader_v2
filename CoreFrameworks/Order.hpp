@@ -94,9 +94,34 @@ static constexpr uint32_t SHIFT_ORDER_RETRY_COUNT  = 8;
 // Set by Order_BindPreResolved; checked at HandleFill via Order_WarnIfNotPreResolved.
 // Production: OrderManager_Submit sig requires core_cfg → BindPreResolved always called → bit always set.
 // Test fixtures constructing Order directly must call Order_BindPreResolved explicitly OR set
-// pre_resolved.* fields directly + Order_MarkPreResolvedBound. Bits 17-31 reserved for future flags.
+// pre_resolved.* fields directly + Order_MarkPreResolvedBound.
 static constexpr uint32_t MASK_ORDER_PRE_RESOLVED  = 0x00010000u;  // bit 16
 static constexpr uint32_t SHIFT_ORDER_PRE_RESOLVED = 16;
+
+// v5.15.5.F.4d — bandit-emit context bits for at-decision-time binding.
+// Sister to MASK_ORDER_PRE_RESOLVED at the same field — same bind site
+// (Order_BindPreResolved). Per § N.1 of the .F.4d merged plan body +
+// multi-bit-state-encoding-pattern.md INVARIANT (5th canonical application
+// on Order::flags_packed alongside MASK_ORDER_PRE_RESOLVED at bit 16).
+//
+// Bit allocation post-.F.4d:
+//   Bits 17-19: bandit_active_state (3 bits for ≤ 8 states; 5 currently per FOREACH_BANDIT_ALGORITHM)
+//   Bits 20-22: bandit_regime       (3 bits for ≤ 8 regimes; 5 currently per FOREACH_REGIME)
+//   Bits 23-25: bandit_chosen_arm   (3 bits for ≤ 8 arms; ENSEMBLE_HORIZON_MAX)
+//   Bits 26-31: 6 bits free headroom for future Order metadata
+//
+// Bit-width invariants (FOREACH_BANDIT_ALGORITHM_COUNT ≤ 8 / NUM_REGIMES ≤ 8 /
+// ENSEMBLE_HORIZON_MAX ≤ 8) static_asserted in ML_Headers/bandit_dispatch_table.hpp
+// where those ML-side symbols are visible. Order.hpp deliberately stays include-light;
+// keeping ML-side deps out of OMS headers preserves dep direction OMS → ML.
+//
+// Set at Order_BindPreResolved (sister to fee_rate/slippage_pct binding) via
+// MBS_OrderSetBanditContext below — bandit context flows with Order through trade lifecycle.
+// Read at calib emit / reward attribution via MBS_OrderBandit* accessors below.
+static constexpr uint32_t SHIFT_ORDER_BANDIT_ACTIVE_STATE = 17;
+static constexpr uint32_t SHIFT_ORDER_BANDIT_REGIME       = 20;
+static constexpr uint32_t SHIFT_ORDER_BANDIT_CHOSEN_ARM   = 23;
+static constexpr uint32_t MASK_ORDER_BANDIT_3BIT          = 0x7u;
 
 //======================================================================================================
 // [PRE-RESOLVED SUB-STRUCT] (v5.15.5.F.4c.3 WIP2d-1.B.1)
@@ -238,6 +263,44 @@ inline bool Order_GetPreResolvedBound(const Order<F>* o) {
 template <unsigned F>
 inline void Order_MarkPreResolvedBound(Order<F>* o) {
     o->flags_packed = (uint32_t)(o->flags_packed | MASK_ORDER_PRE_RESOLVED);
+}
+
+//======================================================================================================
+// [BANDIT CONTEXT MULTI-BIT ACCESSORS] (v5.15.5.F.4d)
+//======================================================================================================
+// MBS_* (multi-bit-state) branchless accessors for bandit context bits 17-25 on flags_packed.
+// Naming per multi-bit-state-encoding-pattern.md (5th canonical INVARIANT application).
+// Sister to Order_Get/SetPreResolvedBound above — same field, same bind site, same lifecycle
+// (set at Order_BindPreResolved; flows with Order through trade lifecycle; read at calib emit
+// + reward attribution sites). Per § N.1 of the .F.4d merged plan body.
+//
+// Branchless — pure shift + mask + bitwise-OR/AND; no data-dependent dispatch. H20 compliant.
+//======================================================================================================
+template <unsigned F>
+inline int MBS_OrderBanditActiveState(const Order<F>& o) {
+    return (int)((o.flags_packed >> SHIFT_ORDER_BANDIT_ACTIVE_STATE) & MASK_ORDER_BANDIT_3BIT);
+}
+template <unsigned F>
+inline int MBS_OrderBanditRegime(const Order<F>& o) {
+    return (int)((o.flags_packed >> SHIFT_ORDER_BANDIT_REGIME) & MASK_ORDER_BANDIT_3BIT);
+}
+template <unsigned F>
+inline int MBS_OrderBanditChosenArm(const Order<F>& o) {
+    return (int)((o.flags_packed >> SHIFT_ORDER_BANDIT_CHOSEN_ARM) & MASK_ORDER_BANDIT_3BIT);
+}
+template <unsigned F>
+inline void MBS_OrderSetBanditContext(Order<F>* o, int state, int regime, int arm) {
+    // Clear existing bandit bits then OR in new values. Sister to BITMAP_SET shape but
+    // for a 3-slot multi-bit-state word; clear-and-set keeps the bit positions tidy when
+    // called multiple times on the same Order (e.g., re-bind via Order_BindPreResolved).
+    constexpr uint32_t BANDIT_CLEAR_MASK = ~(
+        (MASK_ORDER_BANDIT_3BIT << SHIFT_ORDER_BANDIT_ACTIVE_STATE) |
+        (MASK_ORDER_BANDIT_3BIT << SHIFT_ORDER_BANDIT_REGIME) |
+        (MASK_ORDER_BANDIT_3BIT << SHIFT_ORDER_BANDIT_CHOSEN_ARM));
+    o->flags_packed = (o->flags_packed & BANDIT_CLEAR_MASK)
+        | (((uint32_t)state  & MASK_ORDER_BANDIT_3BIT) << SHIFT_ORDER_BANDIT_ACTIVE_STATE)
+        | (((uint32_t)regime & MASK_ORDER_BANDIT_3BIT) << SHIFT_ORDER_BANDIT_REGIME)
+        | (((uint32_t)arm    & MASK_ORDER_BANDIT_3BIT) << SHIFT_ORDER_BANDIT_CHOSEN_ARM);
 }
 
 // Initialize an order to PENDING state with the given identifying fields.

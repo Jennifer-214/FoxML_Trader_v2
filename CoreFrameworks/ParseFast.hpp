@@ -33,6 +33,7 @@
 
 #include <charconv>
 #include <cstring>
+#include <cstdint>      // uint64_t (parse_uint64_fast at line ~64); explicit per IWYU discipline
 #include <system_error>
 
 namespace tt {

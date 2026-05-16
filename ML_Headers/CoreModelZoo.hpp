@@ -981,7 +981,21 @@ struct alignas(64) EnsembleModelZoo {
     int last_predicted_regime_id;      // regime AT predict-time (G.8 attribution)
     int last_predicted_horizon_idx;    // dominant horizon idx (display + G.8 reward)
     int last_predicted_exit_horizon_idx; // dominant exit_predictor arm at predict time
-    int last_predicted_thompson_arm;   // Thompson's argmax-of-posterior (cfg=2 telemetry)
+    int last_predicted_thompson_arm;   // Thompson's argmax-of-posterior (buy-side; cfg=2 telemetry)
+    // v5.15.5.F.4d — exit-side Thompson mirror per FOREACH_BANDIT_SIDE auto-mirror (§ G.2 of merged plan body)
+    int last_predicted_exit_thompson_arm;  // Thompson's argmax-of-posterior (exit-side; cfg=2/3 telemetry)
+    int32_t _padding_exit_thompson = 0;    // explicit padding for byte-determinism (sister to OrderPreResolved._padding pattern)
+
+    // v5.15.5.F.4d — Pattern 5 sink-fn-pointers per sink-fn-pointer-for-optional-side-effect-pattern.md.
+    // Default = &noop_thompson_update (compile-time no-op; resolves here at struct construction in _Init);
+    // boot-wired to &real_thompson_update by EnsembleModelZoo_InitThompsonBandits (buy) +
+    // EnsembleModelZoo_InitExitThompsonBandits (exit) when the respective subsystem initializes.
+    // Consumer dispatch sites call UNCONDITIONALLY → branchless; eliminates `if (thompson_active)` per-call
+    // branches throughout reward attribution paths (Class 24 + Class 28 sister structural closures).
+    // Per FOREACH_BANDIT_SIDE auto-mirror (§ G of .F.4d merged plan body — 2 sides; meta-X-macro at
+    // ML_Headers/bandit_dispatch_table.hpp). Future per-symbol side = 1 row in FOREACH_BANDIT_SIDE.
+    ThompsonUpdateFn thompson_update_fn;       // buy-side; ezoo->thompson_bandits[r] consumer
+    ThompsonUpdateFn exit_thompson_update_fn;  // exit-side; ezoo->thompson_exit_bandits[r] consumer
 
     // v5.11.62 — primary-role indirection (per-cycle read; pointer + small scalars).
     ModelHandle<F> *primary_handles;   // points into one of {buy_signal, barrier, regime}
@@ -1005,11 +1019,20 @@ struct alignas(64) EnsembleModelZoo {
     // v5.13.4 — sell-side bandit (parallel to buy-side); arms count = exit_predictor_count.
     alignas(64) BanditState exit_bandits[NUM_REGIMES];
 
-    // v5.14.10.B — Bayesian Thompson sampling bandits. Activated when
-    // cfg.bandit_algorithm == 1/2. Cfg=0 (EXP3) → never read but init'd anyway
-    // so cfg-flip mid-run doesn't see uninitialized state. ~560B per ezoo.
-    // Persistence: thompson_state.json (parallel to bandit_state.json).
+    // v5.14.10.B — Bayesian Thompson sampling bandits (BUY-side). Activated when
+    // cfg.bandit_algorithm in {1, 2, 3, 4} per FOREACH_BANDIT_ALGORITHM thompson_up metadata bit.
+    // Cfg=0 (EXP3) → never read but init'd anyway so cfg-flip mid-run doesn't see uninitialized state.
+    // ~1000B per ezoo at NUM_REGIMES=5 (5 × 200B). Persistence: thompson_state.json.
     alignas(64) ThompsonBanditState thompson_bandits[NUM_REGIMES];
+
+    // v5.15.5.F.4d — Bayesian Thompson sampling bandits (EXIT-side). Exit-side Thompson mirror per
+    // FOREACH_BANDIT_SIDE auto-mirror (§ G.2 of merged plan body). Closes pre-.F.4d asymmetry where
+    // buy-side had Thompson but exit-side was Exp3-only. Activated when cfg.bandit_algorithm in
+    // {1, 2, 3, 4} via exit_thompson_update_fn sink-fn-pointer dispatch (same metadata bits drive
+    // both sides; per-side init flag MASK_EZOO_EXIT_THOMPSON_READY gates init wiring).
+    // Persistence: thompson_exit_state.json (parallel to thompson_state.json buy-side file).
+    // Size: ~1000B per ezoo at NUM_REGIMES=5 (5 × 200B sister to thompson_bandits[]).
+    alignas(64) ThompsonBanditState thompson_exit_bandits[NUM_REGIMES];
 
     // ============================================================================
     // WARM CLUSTER — touched per regime-transition or sparse attribution paths
@@ -1077,6 +1100,17 @@ static_assert(sizeof(EnsembleModelZoo<64>) % 64 == 0,
 static_assert(alignof(EnsembleModelZoo<64>) == 64,
               "v5.15.4: EnsembleModelZoo<64> must be cache-line aligned");
 
+// v5.15.5.F.4d — bandit dispatch table consumer header (Step 1.B + Step 3 of merged plan body).
+// Included AFTER EnsembleModelZoo<F> struct + size/alignment static_asserts so the dispatch table's
+// templates can reference the struct. Include guard makes the re-include of CoreModelZoo.hpp from
+// inside bandit_dispatch_table.hpp a no-op; all needed symbols (EnsembleModelZoo<F>, NUM_REGIMES,
+// ENSEMBLE_HORIZON_MAX, MASK_ORDER_BANDIT_3BIT, ThompsonUpdateFn) are visible at this point.
+//
+// Reward attribution consumer sites below (EnsembleModelZoo_TickRewardsFromLookback +
+// _TradeCloseReward) use g_buy_reward_dispatch<F>[algo](...) for branchless metadata-driven dispatch.
+// Exit-side analog (g_exit_reward_dispatch) consumed at ControllerEventLoop reward attribution sites.
+#include "bandit_dispatch_table.hpp"
+
 // v5.15.5.F.3 — registry-bitmap SET discipline accessor for per_arm_barriers.
 // Per DESIGN_SPECS/registry-bitmap-set-discipline.md Fix 3 (accessor wrapper).
 // Couples the data write (per_arm_barriers[idx].tp/sl) with the mark bit
@@ -1133,6 +1167,16 @@ inline void EnsembleModelZoo_Init(EnsembleModelZoo<F> *ezoo) {
     // path never reads thompson_bandits; safe to leave at zero in that mode.
     memset(ezoo->thompson_bandits, 0, sizeof(ezoo->thompson_bandits));
     ezoo->last_predicted_thompson_arm  = -1;
+    // v5.15.5.F.4d — exit-side Thompson zero-init (parallel to buy-side; full init in
+    // _InitExitThompsonBandits AFTER LoadFromCfg populates exit_predictor_count).
+    memset(ezoo->thompson_exit_bandits, 0, sizeof(ezoo->thompson_exit_bandits));
+    ezoo->last_predicted_exit_thompson_arm = -1;
+    // v5.15.5.F.4d — Pattern 5 sink-fn-pointer default wiring. Both default to noop at construction;
+    // _InitThompsonBandits / _InitExitThompsonBandits boot-wire to real_thompson_update if Thompson
+    // subsystem actually enabled (n_arms >= 2 on the respective side). Consumer dispatch is uniform
+    // indirect-call (branchless; H20 / Class 28 closure for dispatch family).
+    ezoo->thompson_update_fn       = &noop_thompson_update;
+    ezoo->exit_thompson_update_fn  = &noop_thompson_update;
     // v5.14.0 — Ridge state zero-init. Identity Σ + zero μ/L/y/w/output
     // weights. Cholesky succeeds out-of-box on identity Σ regularized
     // by ridge λ; no per-core wiring needed beyond cfg flag check at
@@ -1296,12 +1340,19 @@ inline void EnsembleModelZoo_UpdateDrift(EnsembleModelZoo<F>* ezoo,
 // prediction direction matched the price move (current_price vs
 // record.sample_price). Calls Bandit_Update on the matching regime's
 // bandit. Marks records as rewarded to avoid double-rewarding.
+// v5.15.5.F.4d — sig gained `core_cfg` param for per-core bandit_algorithm dispatch (Step 3 +
+// § H Class 25 sweep of merged plan body). Default nullptr preserves backward compat: nullptr →
+// algo=0 (EXP3) → leaf reward fn = exp3_only_reward → Bandit_Update call → bytewise identical to
+// pre-.F.4d behavior. Production callers pass core_cfg to enable Thompson + ghost-mode + BLENDED
+// reward attribution per FOREACH_BANDIT_ALGORITHM metadata. Closes Class 24 sister + Class 25 + Class 28
+// at the buy-side attribution surface.
 template <unsigned F>
 inline void EnsembleModelZoo_TickRewardsFromLookback(EnsembleModelZoo<F>* ezoo,
                                                        float current_price,
                                                        int forward_ticks,
                                                        int poll_interval,
-                                                       double ic_floor) {
+                                                       double ic_floor,
+                                                       const PerCoreCfg<F>* core_cfg = nullptr) {
     if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return;
     if (poll_interval <= 0) poll_interval = 100;
     if (forward_ticks <= 0) forward_ticks = 1000;
@@ -1312,6 +1363,12 @@ inline void EnsembleModelZoo_TickRewardsFromLookback(EnsembleModelZoo<F>* ezoo,
     // v5.11.62 — n_arms = primary_count (matches ezoo->primary_handles)
     EnsembleModelZoo_EnsurePrimary(ezoo);
     int n_arms = ezoo->primary_count;
+
+    // v5.15.5.F.4d — resolve per-core bandit algorithm + bounds-clamp defensively
+    // (cfg parser clamps to [0,4] per CfgFieldRegistry.hpp; this guard is belt-and-suspenders).
+    // Sister to BanditAlgorithm_Apply's bounds-check at BanditAlgorithmRegistry.hpp.
+    int algo = core_cfg ? core_cfg->bandit_algorithm : (int)BANDIT_ALGO_EXP3;
+    if (algo < 0 || algo >= FOREACH_BANDIT_ALGORITHM_COUNT) algo = (int)BANDIT_ALGO_EXP3;
 
     // Walk all populated records; reward ones that are old enough + not
     // yet rewarded.
@@ -1335,10 +1392,14 @@ inline void EnsembleModelZoo_TickRewardsFromLookback(EnsembleModelZoo<F>* ezoo,
             if (ezoo->disabled_horizon_mask & (1u << a)) continue;
             float p = rec.predictions[a];
             int correct = ((p > 0.5f) == (price_delta > 0.0)) ? 1 : 0;
-            // Reward signal in bps. Treat correct as +50bps, wrong as -50bps;
-            // Bandit_Update accumulates these.
+            // Reward signal in bps. Treat correct as +50bps, wrong as -50bps.
             double reward_bps = correct ? 50.0 : -50.0;
-            Bandit_Update(&ezoo->bandits[regime], a, reward_bps);
+            // v5.15.5.F.4d — branchless metadata-driven dispatch via g_buy_reward_dispatch
+            // (Step 1.B of merged plan body). For algo=EXP3 (cfg=0) → calls Bandit_Update only
+            // (bytewise identical to pre-.F.4d). For algo=THOMPSON / ghost modes / BLENDED →
+            // also calls Thompson_Update via Pattern 5 sink (ezoo->thompson_update_fn; noop if
+            // subsystem not initialized). Closes Class 24 sister at attribution surface.
+            g_buy_reward_dispatch<F>[algo](ezoo, regime, a, reward_bps);
             updates_this_record++;
             // Drift watchdog updates per-arm IC tracker
             EnsembleModelZoo_UpdateDrift(ezoo, a, correct, ic_floor);
@@ -1364,10 +1425,16 @@ inline void EnsembleModelZoo_TickRewardsFromLookback(EnsembleModelZoo<F>* ezoo,
 // reward_mult: cfg.ensemble_trade_reward_mult (default 4.0). Scales
 // |reward_bps| × mult; correct predictions → positive bps, wrong →
 // negative.
+// v5.15.5.F.4d — sig gained `core_cfg` param for per-core bandit_algorithm dispatch (Step 3 +
+// § H Class 25 sweep). Same backward-compat scheme as _TickRewardsFromLookback above: nullptr →
+// algo=0 (EXP3) → exp3_only_reward → Bandit_Update only → bytewise identical to pre-.F.4d behavior.
+// Production callers pass core_cfg to enable Thompson + ghost + BLENDED reward attribution. Closes
+// Class 24 sister + Class 25 + Class 28 at the buy-side trade-close attribution surface.
 template <unsigned F>
 inline void EnsembleModelZoo_TradeCloseReward(EnsembleModelZoo<F>* ezoo,
                                                 double realized_pnl_bps,
-                                                double reward_mult) {
+                                                double reward_mult,
+                                                const PerCoreCfg<F>* core_cfg = nullptr) {
     if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_ACTIVE) || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_BANDITS_READY)) return;
     if (ezoo->predict_call_count == 0) return;  // no predictions yet
 
@@ -1392,6 +1459,11 @@ inline void EnsembleModelZoo_TradeCloseReward(EnsembleModelZoo<F>* ezoo,
     if (regime < 0 || regime >= NUM_REGIMES) regime = 0;
     int pnl_positive = (realized_pnl_bps > 0.0) ? 1 : 0;
 
+    // v5.15.5.F.4d — resolve per-core bandit algorithm + bounds-clamp defensively (cfg parser
+    // clamps to [0,4]; defensive belt-and-suspenders sister to BanditAlgorithm_Apply).
+    int algo = core_cfg ? core_cfg->bandit_algorithm : (int)BANDIT_ALGO_EXP3;
+    if (algo < 0 || algo >= FOREACH_BANDIT_ALGORITHM_COUNT) algo = (int)BANDIT_ALGO_EXP3;
+
     int trade_updates = 0;
     for (int a = 0; a < n_arms; ++a) {
         if (ezoo->disabled_horizon_mask & (1u << a)) continue;
@@ -1399,7 +1471,10 @@ inline void EnsembleModelZoo_TradeCloseReward(EnsembleModelZoo<F>* ezoo,
         int correct = ((p > 0.5f) == (pnl_positive == 1)) ? 1 : 0;
         // Trade-close reward weighted higher than slow-path lookback
         double reward_bps = (correct ? 50.0 : -50.0) * reward_mult;
-        Bandit_Update(&ezoo->bandits[regime], a, reward_bps);
+        // v5.15.5.F.4d — branchless metadata-driven dispatch via g_buy_reward_dispatch.
+        // For algo=EXP3 (cfg=0) → bytewise identical to pre-.F.4d (only Bandit_Update). For
+        // algo=THOMPSON / ghost / BLENDED → also Thompson_Update via Pattern 5 sink.
+        g_buy_reward_dispatch<F>[algo](ezoo, regime, a, reward_bps);
         trade_updates++;
     }
     rec.rewarded_trade = 1;
@@ -1551,6 +1626,63 @@ inline void EnsembleModelZoo_InitThompsonBandits(EnsembleModelZoo<F>* ezoo,
                       mu_prior, precision_prior, precision_obs, per_regime_seed);
     }
     BITMAP_SET(ezoo->init_flags, MASK_EZOO_THOMPSON_READY);
+    // v5.15.5.F.4d — Pattern 5 sink-fn-pointer wire to real on successful init.
+    // Consumer dispatch at reward attribution sites: `ezoo->thompson_update_fn(...)` now resolves
+    // to real_thompson_update → Thompson_Update fires. Replaces per-call cfg branch (Class 24 close).
+    ezoo->thompson_update_fn = &real_thompson_update;
+}
+
+//======================================================================================================
+// [v5.15.5.F.4d — EXIT-SIDE THOMPSON BANDIT INIT — hand-mirror of _InitThompsonBandits per FOREACH_BANDIT_SIDE]
+//======================================================================================================
+// Sister to EnsembleModelZoo_InitThompsonBandits above. Initializes one ThompsonBanditState per
+// regime over `thompson_exit_bandits[]` with arms = ezoo->exit_predictor_count (parallel to existing
+// _InitExitBandits Exp3 init at line ~1471 which uses the same arm count source). Closes pre-.F.4d
+// asymmetry where buy-side had Thompson but exit-side was Exp3-only.
+//
+// Per § G.2 of v5.15.5.F.4d merged plan body. Pattern 5 sink-fn-pointer wiring at end sets
+// exit_thompson_update_fn → &real_thompson_update so reward attribution at exit-side dispatch sites
+// fires Thompson_Update unconditionally + branchlessly (H20 / Class 24 + Class 28 sister closure).
+//
+// HAND-MIRROR (vs full FOREACH_BANDIT_SIDE auto-gen): keeping buy-side fn body asymmetric in name
+// (`thompson_bandits` vs `thompson_exit_bandits` field; `_InitThompsonBandits` vs `_InitExitThompsonBandits`
+// fn name) avoids a cascade rename of existing `thompson_bandits` field across ~50 call sites.
+// TECH_DEBT-084 tracks the future symmetric rename + true X-macro auto-gen across all 6 per-side
+// symbol families (sequenced for `.F.4f` cleanup ship OR later).
+template <unsigned F>
+inline void EnsembleModelZoo_InitExitThompsonBandits(EnsembleModelZoo<F>* ezoo,
+                                                      double mu_prior,
+                                                      double precision_prior,
+                                                      double precision_obs,
+                                                      uint64_t rng_seed) {
+    if (!ezoo) return;
+    int n_arms = ezoo->exit_predictor_count;
+    if (n_arms < 1) {
+        // No exit_predictor models loaded — graceful skip. thompson_exit_bandits stay zero-init;
+        // dispatch's nullptr check fallbacks to uniform weights. Sink-fn stays at noop.
+        BITMAP_CLR(ezoo->init_flags, MASK_EZOO_EXIT_THOMPSON_READY);
+        return;
+    }
+    if (n_arms < 2) {
+        // Single-arm: Thompson degrades to "always pick arm 0"; mark initialized so dispatch fires
+        // without crashing. Sink-fn stays at noop (no posterior to update for single-arm).
+        BITMAP_SET(ezoo->init_flags, MASK_EZOO_EXIT_THOMPSON_READY);
+        return;
+    }
+    // Per-regime init. Mirror buy-side scheme: each regime gets a unique seed via XOR with regime
+    // index. Additionally XOR with a side discriminator (0x5A55E55E55E55E55ULL) so buy-side + exit-side
+    // RNG streams are decorrelated even if operator sets the same rng_seed cfg (avoids correlated
+    // posterior draws across sides on the same regime).
+    constexpr uint64_t EXIT_SIDE_RNG_DISCRIMINATOR = 0x5A55E55E55E55E55ULL;
+    for (int r = 0; r < NUM_REGIMES; ++r) {
+        uint64_t per_regime_seed = (rng_seed ^ EXIT_SIDE_RNG_DISCRIMINATOR)
+                                 ^ ((uint64_t)(r + 1) * 0x9E3779B97F4A7C15ULL);
+        Thompson_Init(&ezoo->thompson_exit_bandits[r], n_arms,
+                      mu_prior, precision_prior, precision_obs, per_regime_seed);
+    }
+    BITMAP_SET(ezoo->init_flags, MASK_EZOO_EXIT_THOMPSON_READY);
+    // Pattern 5 sink-fn-pointer wire to real on successful init.
+    ezoo->exit_thompson_update_fn = &real_thompson_update;
 }
 
 //======================================================================================================
@@ -2311,6 +2443,95 @@ inline int EnsembleModelZoo_SaveThompsonState(
     return 1;
 }
 
+//======================================================================================================
+// [v5.15.5.F.4d — EXIT-SIDE THOMPSON SAVE/LOAD — hand-mirror of buy-side per FOREACH_BANDIT_SIDE]
+//======================================================================================================
+// Per § G of v5.15.5.F.4d merged plan body. Filename scheme mirrors buy-side: persistence to
+// `thompson_exit_state.json` (parallel to `thompson_state.json` buy-side file). Same wire format
+// (format_version=1; same JSON shape) — just different filename + different ThompsonBanditState array
+// (exit_thompson_bandits[] vs thompson_bandits[]) + different init-flag gate.
+//
+// HAND-MIRROR per TECH_DEBT-084 deferred-rename decision: full FOREACH_BANDIT_SIDE auto-gen would
+// require renaming thompson_bandits → buy_thompson_bandits across ~50 call sites; current hand-mirror
+// scoped to `.F.4d` as cost/benefit trade-off. Future cleanup ship collapses this into a single
+// X-macro consumer expansion when the rename lands.
+//======================================================================================================
+
+template <unsigned F>
+inline int EnsembleModelZoo_SaveExitThompsonState(
+    const EnsembleModelZoo<F>* ezoo, const char* base_dir,
+    const char* const* regime_names) {
+    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_EXIT_THOMPSON_READY)) return 0;
+    if (ezoo->exit_predictor_count < 2) return 0;  // single-arm: nothing to save
+    if (!base_dir || base_dir[0] == '\0') return 0;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/thompson_exit_state.json", base_dir);
+    char tmp_path[520];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+    FILE* f = fopen(tmp_path, "w");
+    if (!f) return 0;
+
+    // Locale pin per wire-format-byte-preservation-discipline.md Layer 2.
+    locale_t pinned_locale = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+    locale_t prev_locale = (locale_t)0;
+    if (pinned_locale) prev_locale = uselocale(pinned_locale);
+
+    char bundle_id[65];
+    EnsembleModelZoo_ComputeBundleId(ezoo, bundle_id, sizeof(bundle_id));
+
+    fprintf(f, "{\n");
+    fprintf(f, "  \"format_version\": 1,\n");
+    fprintf(f, "  \"n_arms\": %d,\n", ezoo->exit_predictor_count);
+    fprintf(f, "  \"n_regimes\": %d,\n", NUM_REGIMES);
+    fprintf(f, "  \"model_bundle_sha256\": \"%s\",\n", bundle_id);
+    fprintf(f, "  \"regimes\": [\n");
+    for (int r = 0; r < NUM_REGIMES; ++r) {
+        const ThompsonBanditState* tb = &ezoo->thompson_exit_bandits[r];
+        const char* rname = (regime_names && regime_names[r]) ? regime_names[r] : "?";
+        fprintf(f, "    {\n");
+        fprintf(f, "      \"regime_id\": %d,\n", r);
+        fprintf(f, "      \"regime_name\": \"%s\",\n", rname);
+        fprintf(f, "      \"n_arms\": %d,\n", tb->n_arms);
+        fprintf(f, "      \"mu_prior\": %.17g,\n", tb->mu_prior);
+        fprintf(f, "      \"precision_prior\": %.17g,\n", tb->precision_prior);
+        fprintf(f, "      \"precision_obs\": %.17g,\n", tb->precision_obs);
+        fprintf(f, "      \"rng_state\": \"0x%016lx\",\n", (unsigned long)tb->rng_state);
+        fprintf(f, "      \"mu_post\": [");
+        for (int a = 0; a < tb->n_arms; ++a) {
+            fprintf(f, "%s%.17g", (a > 0 ? ", " : ""), tb->mu_post[a]);
+        }
+        fprintf(f, "],\n");
+        fprintf(f, "      \"precision_post\": [");
+        for (int a = 0; a < tb->n_arms; ++a) {
+            fprintf(f, "%s%.17g", (a > 0 ? ", " : ""), tb->precision_post[a]);
+        }
+        fprintf(f, "],\n");
+        fprintf(f, "      \"total_pulls\": [");
+        for (int a = 0; a < tb->n_arms; ++a) {
+            fprintf(f, "%s%u", (a > 0 ? ", " : ""), tb->total_pulls[a]);
+        }
+        fprintf(f, "]\n");
+        fprintf(f, "    }%s\n", (r < NUM_REGIMES - 1) ? "," : "");
+    }
+    fprintf(f, "  ]\n");
+    fprintf(f, "}\n");
+
+    if (pinned_locale) {
+        uselocale(prev_locale);
+        freelocale(pinned_locale);
+    }
+
+    if (fclose(f) != 0) {
+        unlink(tmp_path);
+        return 0;
+    }
+    if (rename(tmp_path, path) != 0) {
+        unlink(tmp_path);
+        return 0;
+    }
+    return 1;
+}
+
 // Load thompson state from <base_dir>/thompson_state.json. Returns 1 on
 // success (overlays mu_post/precision_post/total_pulls/rng_state onto pre-
 // initialized states), 0 on missing/corrupt/mismatched file.
@@ -2432,6 +2653,128 @@ inline int EnsembleModelZoo_LoadThompsonState(
     }
 
     fprintf(stderr, "[ensemble] loaded thompson state from %s\n", path);
+    return 1;
+}
+
+//======================================================================================================
+// [v5.15.5.F.4d — EXIT-SIDE THOMPSON LOAD — hand-mirror of buy-side per FOREACH_BANDIT_SIDE]
+//======================================================================================================
+// Mirror of EnsembleModelZoo_LoadThompsonState above. Loads from `thompson_exit_state.json`
+// (parallel filename to buy-side `thompson_state.json`). Same forward-compat-by-absence semantics:
+// missing file → uniform priors stay (no-op return 0); per-regime overlay with field-by-field
+// idempotency; format_version=1 enforcement.
+//
+// Caller must call EnsembleModelZoo_InitExitThompsonBandits FIRST to set up uniform priors + arm
+// count + base RNG seed. This function only overlays.
+//======================================================================================================
+template <unsigned F>
+inline int EnsembleModelZoo_LoadExitThompsonState(
+    EnsembleModelZoo<F>* ezoo, const char* base_dir) {
+    if (!ezoo || !BITMAP_IS_SET(ezoo->init_flags, MASK_EZOO_EXIT_THOMPSON_READY)) return 0;
+    if (ezoo->exit_predictor_count < 2) return 0;
+    if (!base_dir || base_dir[0] == '\0') return 0;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/thompson_exit_state.json", base_dir);
+
+    FILE* f = fopen(path, "r");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    constexpr size_t BUF_CAP = 256 * 1024;
+    if (fsize <= 0 || (size_t)fsize >= BUF_CAP) {
+        fclose(f);
+        return 0;
+    }
+    static thread_local char buf_storage[BUF_CAP];
+    char* buf = buf_storage;
+    size_t read_n = fread(buf, 1, (size_t)fsize, f);
+    fclose(f);
+    buf[read_n] = '\0';
+
+    // format_version check (only v=1 supported today)
+    const char* p = tt::json_io::find_key(buf, "format_version");
+    if (!p) return 0;
+    int fmt = (int)strtol(p, nullptr, 10);
+    if (fmt != 1) {
+        fprintf(stderr, "[ensemble] thompson_exit_state.json format_version=%d unsupported (expected 1); rejecting\n", fmt);
+        return 0;
+    }
+
+    // n_arms check (must match current ezoo)
+    p = tt::json_io::find_key(buf, "n_arms");
+    if (!p) return 0;
+    int saved_n_arms = (int)strtol(p, nullptr, 10);
+    if (saved_n_arms != ezoo->exit_predictor_count) {
+        fprintf(stderr, "[ensemble] thompson_exit_state.json n_arms=%d mismatch (expected %d); rejecting\n",
+                saved_n_arms, ezoo->exit_predictor_count);
+        return 0;
+    }
+
+    // bundle_id check (best-effort; mismatch rejects; empty saved → skip check)
+    char expected_id[65];
+    EnsembleModelZoo_ComputeBundleId(ezoo, expected_id, sizeof(expected_id));
+    const char* sha_p = tt::json_io::find_key(buf, "model_bundle_sha256");
+    if (sha_p && expected_id[0] != '\0') {
+        while (*sha_p == ' ' || *sha_p == '\t') ++sha_p;
+        if (*sha_p == '"') ++sha_p;
+        char saved_id[65] = {0};
+        for (int i = 0; i < 64 && *sha_p && *sha_p != '"'; ++i) saved_id[i] = *sha_p++;
+        if (saved_id[0] != '\0' && strcmp(saved_id, expected_id) != 0) {
+            fprintf(stderr, "[ensemble] thompson_exit_state.json bundle_id mismatch; rejecting\n");
+            return 0;
+        }
+    }
+
+    // Walk regimes array. forward-compat-by-absence: shorter files leave later regimes at prior.
+    p = tt::json_io::find_key(buf, "regimes");
+    if (!p) return 0;
+    for (int r = 0; r < NUM_REGIMES; ++r) {
+        ThompsonBanditState* tb = &ezoo->thompson_exit_bandits[r];
+        const char* rid_p = tt::json_io::find_key(p, "regime_id");
+        if (!rid_p) break;
+
+        const char* mp_p = tt::json_io::find_key(rid_p, "mu_prior");
+        if (mp_p) tb->mu_prior = tt::parse_double_fast(mp_p);
+        const char* pp_p = tt::json_io::find_key(rid_p, "precision_prior");
+        if (pp_p) tb->precision_prior = tt::parse_double_fast(pp_p);
+        const char* po_p = tt::json_io::find_key(rid_p, "precision_obs");
+        if (po_p) tb->precision_obs = tt::parse_double_fast(po_p);
+
+        const char* rng_p = tt::json_io::find_key(rid_p, "rng_state");
+        if (rng_p) {
+            while (*rng_p == ' ' || *rng_p == '\t') ++rng_p;
+            if (*rng_p == '"') ++rng_p;
+            if (rng_p[0] == '0' && (rng_p[1] == 'x' || rng_p[1] == 'X')) {
+                tb->rng_state = strtoull(rng_p + 2, nullptr, 16);
+            } else {
+                tb->rng_state = strtoull(rng_p, nullptr, 10);
+            }
+        }
+
+        const char* mu_p = tt::json_io::find_key(rid_p, "mu_post");
+        if (mu_p) {
+            double tmp[BANDIT_MAX_ARMS];
+            int got = tt::json_io::parse_double_array(mu_p, tmp, BANDIT_MAX_ARMS);
+            for (int a = 0; a < got && a < tb->n_arms; ++a) tb->mu_post[a] = tmp[a];
+        }
+        const char* pr_p = tt::json_io::find_key(rid_p, "precision_post");
+        if (pr_p) {
+            double tmp[BANDIT_MAX_ARMS];
+            int got = tt::json_io::parse_double_array(pr_p, tmp, BANDIT_MAX_ARMS);
+            for (int a = 0; a < got && a < tb->n_arms; ++a) tb->precision_post[a] = tmp[a];
+        }
+        const char* tp_p = tt::json_io::find_key(rid_p, "total_pulls");
+        if (tp_p) {
+            uint32_t tmp[BANDIT_MAX_ARMS];
+            int got = tt::json_io::parse_uint32_array(tp_p, tmp, BANDIT_MAX_ARMS);
+            for (int a = 0; a < got && a < tb->n_arms; ++a) tb->total_pulls[a] = tmp[a];
+        }
+
+        p = rid_p + 1;
+    }
+
+    fprintf(stderr, "[ensemble] loaded thompson exit state from %s\n", path);
     return 1;
 }
 
@@ -2586,10 +2929,22 @@ inline void ensemble_post_load_apply_blend_mode(EnsembleModelZoo<F>* ezoo,
                                FPN_ToDouble(cfg.thompson_precision_obs),           \
                                cfg.thompson_rng_seed))                             \
     X(load_thompson_state,   EnsembleModelZoo_LoadThompsonState(ezoo,             \
+                               base_run_path))                                     \
+    /* v5.15.5.F.4d — exit-side Thompson mirror per FOREACH_BANDIT_SIDE (§ G of merged plan body). */ \
+    /* Init unconditional (parallel to buy-side; cfg-flip mid-run sees pre-initialized state); */     \
+    /* Load idempotent overlay (missing file → uniform priors stay). Closes pre-.F.4d asymmetry */    \
+    /* where buy-side had Thompson init/load + exit-side was Exp3-only. */                            \
+    X(init_exit_thompson_bandits, EnsembleModelZoo_InitExitThompsonBandits(ezoo,                      \
+                               FPN_ToDouble(cfg.thompson_mu_prior),                                   \
+                               FPN_ToDouble(cfg.thompson_precision_prior),                            \
+                               FPN_ToDouble(cfg.thompson_precision_obs),                              \
+                               cfg.thompson_rng_seed))                                                \
+    X(load_exit_thompson_state, EnsembleModelZoo_LoadExitThompsonState(ezoo,                          \
                                base_run_path))
 
 // Compile-time count for tests. Update when adding entries.
-#define FOREACH_ENSEMBLE_POST_LOAD_COUNT 9
+// v5.15.5.F.4d: 9 → 11 (added init_exit_thompson_bandits + load_exit_thompson_state for exit-side mirror).
+#define FOREACH_ENSEMBLE_POST_LOAD_COUNT 11
 
 // Canonical post-load setup for ensemble. All 7 setup steps in one place.
 // Boot, backtest, hot-swap call this; never inline the steps directly.

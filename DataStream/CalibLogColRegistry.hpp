@@ -53,6 +53,16 @@
 //======================================================================================================
 // Order MATTERS — operator parsers depend on column ordering.
 // DO NOT reorder existing columns; APPEND new columns at the end.
+//
+// v5.15.5.F.4d Step 8 (§ M) DEFERRED: 4 bandit-context singleton cols (bandit_algorithm + regime
+// + chosen_arm + reward_bps_attributed) decoded from Order::flags_packed via MBS_* accessors
+// + oms->bandit_reward_bps[pslot]. ATTEMPTED in .F.4d coding session but test fixture (uses
+// MockOms struct without Order<F> in scope) failed to compile — MBS_* requires typed Order<F>&
+// which mocks can't satisfy. Resolution: bundle Step 8 § M with Step 7 § F (Pattern 5 path
+// consolidation + ezoo_ref / core_cfg_ref architectural decision) next session — test fixtures
+// promoted from mocks to real Order<F> + OrderManagerState<F> at that time. Per-arm
+// matrix-reduce (~32 add'l cols via FOREACH_PERARM_CALIB_COL × FOREACH_BANDIT_ARM) + telemetry
+// + blend_alpha singletons also defer to same session (all need ezoo_ref / core_cfg_ref).
 #define FOREACH_CALIB_LOG_COL(X)                                                                          \
     X(timestamp_us,        "%llu",  (unsigned long long)ts_us)                                            \
     X(slot,                "%d",    (int)pslot)                                                           \

@@ -168,6 +168,9 @@
         (cfg.bandit_algorithm != 0), DIRECT_FIELD)                                                                                                           \
     X(thompson_precision_obs,              double, "%.17g",  1.0, FPN_ToDouble(cfg.thompson_precision_obs),                                                  \
         (cfg.bandit_algorithm != 0), DIRECT_FIELD)                                                                                                            \
+    /* v5.15.5.F.4d — BLENDED state-4 blend ratio (only emitted when bandit_algorithm==4; preserves HMAC byte equivalence for legacy stamps which never used BLENDED). */ \
+    X(thompson_exp3_blend_alpha,           double, "%.17g",  0.5, FPN_ToDouble(cfg.thompson_exp3_blend_alpha),                                                \
+        (cfg.bandit_algorithm == 4), DIRECT_FIELD)                                                                                                            \
     /* v5.15.2 — trading_mode (paper / live / shadow) stamp-bound. Every model carries its */                                                                \
     /* training-time mode for audit trail. emit_when=1 (always emit). Legacy stamps lack    */                                                                \
     /* this row → has_trading_mode=0 → effective PAPER (legacy default); Surface G          */                                                                \

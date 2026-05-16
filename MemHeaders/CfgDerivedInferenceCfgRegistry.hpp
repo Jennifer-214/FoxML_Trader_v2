@@ -106,6 +106,13 @@
     X(held_out_fraction,                   FPN_ToDouble(cfg.held_out_fraction),                                                     1)                                                  \
     /* === bandit (1 field; gated by bandit_enabled) === */                                                                                                                            \
     X(bandit_blend_ratio,                  FPN_ToDouble(cfg.bandit_blend_ratio),                                                    BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) \
+    /* === v5.15.5.F.4d PARITY-026 close — 4 pre-existing STAMP_BOUND bandit/thompson fields' cfg→inf wiring + 1 NEW field for BLENDED state === */ \
+    /* Per § C.4 of merged plan body. Without these rows, the POST_CFG drift-check entries in § C.3 would have inf->* fields stamped with default 0 instead of cfg-derived values. */ \
+    X(bandit_algorithm,                    cfg.bandit_algorithm,                                                                   BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) \
+    X(thompson_mu_prior,                   FPN_ToDouble(cfg.thompson_mu_prior),                                                    BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) \
+    X(thompson_precision_prior,            FPN_ToDouble(cfg.thompson_precision_prior),                                             BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) \
+    X(thompson_precision_obs,              FPN_ToDouble(cfg.thompson_precision_obs),                                               BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) \
+    X(thompson_exp3_blend_alpha,           FPN_ToDouble(cfg.thompson_exp3_blend_alpha),                                            BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_BANDIT_ENABLED)) \
     /* === fees (2 fields; gated by cost_gate_enabled) === */                                                                                                                          \
     X(fee_rate_maker,                      FPN_ToDouble(cfg.fee_rate_maker),                                                        BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED)) \
     X(fee_rate_taker,                      FPN_ToDouble(cfg.fee_rate_taker),                                                        BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_COST_GATE_ENABLED)) \

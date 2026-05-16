@@ -588,10 +588,14 @@ static_assert(CfgFieldDescriptor::WARN_ON_CLAMP < (1u << 16),
     X(FPN<F>                , KIND_DOUBLE, thompson_precision_obs,      "Thompson Tau Obs",     "ML/Thompson",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(1.0, 0.0001, 1000.0), \
         "Observation precision (tau_obs = 1/sigma^2) for each reward update. Higher = each reward trusted more (faster posterior shift). Default 1.0. Stamp-bound.", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
-    /*       Bandit algorithm selector — INT enum (3-state today; .F.4c.2 expands to 5 ghost-training states) */ \
-    X(int                   , KIND_INT, bandit_algorithm,            "Bandit Algorithm",     "ML/Bandit",       CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 2), \
-        "Bandit selector: 0=EXP3 (default; legacy), 1=THOMPSON (Bayesian; non-stationary-friendly), 2=BOTH (parallel A/B telemetry). Accepts string ('exp3'/'thompson'/'both') or int. HAS_SIDE_EFFECT — manual parser handles string form. v5.15.5.F.4c.2 will expand to 5 ghost-training states. Stamp-bound (parity-critical).", \
+    /*       Bandit algorithm selector — INT enum (5-state post-v5.15.5.F.4d; Option C wire-byte preservation for cfg=0/1/2) */ \
+    X(int                   , KIND_INT, bandit_algorithm,            "Bandit Algorithm",     "ML/Bandit",       CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 4), \
+        "Bandit selector: 0=EXP3 (default; legacy), 1=THOMPSON (Bayesian; Class 24 fix — posterior now updates from rewards), 2=EXP3_OP_THOMPSON_GHOST (Exp3 drives + Thompson shadow-learns; was 'BOTH' pre-.F.4d; legacy 'Both'/'BOTH' string aliases preserved), 3=THOMPSON_OP_EXP3_GHOST (NEW .F.4d; Thompson drives + Exp3 shadow-learns), 4=BLENDED (NEW .F.4d EXPERIMENTAL; weighted blend via thompson_exp3_blend_alpha). Accepts string (canonical or legacy alias) or int. HAS_SIDE_EFFECT — manual parser handles string form. Stamp-bound (parity-critical).", \
         STRAT_CAT_ML,                                        OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
+    /*       thompson_exp3_blend_alpha — BLENDED state-4 weight ratio (v5.15.5.F.4d NEW per § C.1 of merged plan body) */ \
+    X(FPN<F>                , KIND_DOUBLE, thompson_exp3_blend_alpha,   "Blend α (Exp3↔Thompson)", "ML/Bandit",     CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::WARN_ON_CLAMP, DBL(0.5, 0.0, 1.0), \
+        "Operator-weighted blend ratio for cfg.bandit_algorithm=4 BLENDED state. weights = (1-α)×Exp3_probs + α×Thompson_softmax(mu_post). Only meaningful when bandit_algorithm=4; GUI should grey-out when bandit_algorithm != 4. Default 0.5 = 50/50 blend. Stamp-bound (parity-critical; reproducibility requires α to be locked to training-time value).", \
+        STRAT_CAT_USES_BANDIT,                               OP_MODE_CAT_ALL, REGIME_CAT_ALL, RISK_CAT_ALL, CfgFieldDescriptor::STRUCT_CFG) \
     /* === Per-core risk thresholds — STAMP_BOUND (4) === */ \
     /*       Risk degradation (v5.14.9 soft-risk) */ \
     X(int                   , KIND_INT, risk_degradation_curve,      "Risk Degradation Curve","Risk Management",CfgFieldDescriptor::STAMP_BOUND | CfgFieldDescriptor::HAS_SIDE_EFFECT | CfgFieldDescriptor::WARN_ON_CLAMP, INT(0, 0, 2), \

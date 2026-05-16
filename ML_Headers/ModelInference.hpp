@@ -812,11 +812,11 @@ inline float Model_Predict_Ensemble(ModelHandle<F> *models,
         // value = more-confident model.
         float conf = (p > 1.0f || p < -1.0f) ? std::fabs(p)
                                               : std::fabs(p - 0.5f);
-        if (conf > best_conf) {
-            best_conf = conf;
-            best_pred = p;
-            best_idx  = i;
-        }
+        // v5.15.5.F.4d Step 6 (§ L) — Class 28 cmov branchless argmax (H20).
+        int win   = conf > best_conf;
+        best_conf = win ? conf : best_conf;
+        best_pred = win ? p    : best_pred;
+        best_idx  = win ? i    : best_idx;
     }
     if (best_conf < 0.0f) {
         // No member produced a valid prediction; fall back to model[0]
@@ -938,10 +938,10 @@ inline float Model_Predict_Ensemble_Weighted(
         sum_wp += w * (double)predictions[i];
         // Track dominant arm: largest weight × |p - 0.5| contribution
         double contrib = w * std::fabs((double)predictions[i] - 0.5);
-        if (contrib > best_contrib) {
-            best_contrib = contrib;
-            best_idx = i;
-        }
+        // v5.15.5.F.4d Step 6 (§ L) — Class 28 cmov branchless argmax (H20).
+        int win      = contrib > best_contrib;
+        best_contrib = win ? contrib : best_contrib;
+        best_idx     = win ? i       : best_idx;
     }
     if (sum_w <= 0.0 || n_active == 0) {
         // All-NaN or all-disabled: no signal. Fall back to first-loaded

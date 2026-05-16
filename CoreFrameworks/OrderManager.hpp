@@ -408,7 +408,17 @@ struct OrderManagerState {
     // (DrainPostFill's recompute lost the authoritative pre_resolved.fee_rate that HandleFill captured).
     // Per decision-time-data-binding-pattern.md: the Order's pre_resolved.fee_rate is the canonical
     // value; subsequent consumers READ it, never recompute from cfg. 384B (24 × 16); not persisted.
+    // v5.15.5.F.4d Step 7 (§ N.2): enrolled in FOREACH_OMS_PER_SLOT_FIELD registry — closes Class 30
+    // latent drift (existed since .F.4c.3 r-4 but wasn't in registry; init/reset hand-maintained).
     FPN<F> last_exit_fee[MAX_PORTFOLIO_POSITIONS];
+
+    // v5.15.5.F.4d Step 7 (§ N.2) — NEW per-slot bandit reward attribution. Written at HandleFill SELL
+    // (computed reward_bps per the dispatch's chosen leaf reward fn — for exit-side dispatch via
+    // g_exit_reward_dispatch[algo]). Read at DrainPostFill body OR calib emit body for downstream
+    // metric capture. Sibling-array carrier mechanism per decision-time-data-binding-pattern.md
+    // Stage 3 amendment v1.2 — bandit reward stays bound to slot through trade lifecycle without
+    // requiring re-resolution from cfg (no Class 27 cache-mirror). 128B (8 × 16); not persisted.
+    double bandit_reward_bps[MAX_PORTFOLIO_POSITIONS];
 
     // v5.13.0.B — calibration logging. Populated by slow-path body when
     // the exit-model fires (mirrors last_exit_predicted_bitmap). HandleFill

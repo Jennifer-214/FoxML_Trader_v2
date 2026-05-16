@@ -82,7 +82,12 @@ static inline uint8_t topk_mask_from_weights(const double* weights, int n,
         double best_val = -1e300;
         for (int i = 0; i < n_capped; i++) {
             if (picked[i]) continue;
-            if (weights[i] > best_val) { best_val = weights[i]; best_idx = i; }
+            // v5.15.5.F.4d Step 6 (§ L) — Class 28 cmov branchless argmax (H20).
+            // `picked[i] continue` above stays as branch (state-dependent; per-iter result varies but
+            // predicts well per call; not the data-dependent dispatch H20 targets).
+            int win  = weights[i] > best_val;
+            best_val = win ? weights[i] : best_val;
+            best_idx = win ? i          : best_idx;
         }
         if (best_idx >= 0) {
             picked[best_idx] = 1;

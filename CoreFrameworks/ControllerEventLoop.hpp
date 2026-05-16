@@ -1692,8 +1692,13 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                     if (bal_d > 0.0) {
                         double pnl_d = FPN_ToDouble(exit_net_pnl);  // v5.15.5.C.4 Phase G — derived
                         double pnl_bps = (pnl_d / bal_d) * 10000.0;
+                        // v5.15.5.F.4d — pass core_cfg for per-core bandit_algorithm dispatch
+                        // (Step 3 + § H Class 25 sweep). Inside _TradeCloseReward, reward attribution
+                        // routes through g_buy_reward_dispatch[algo] — for THOMPSON / ghost / BLENDED
+                        // modes, Thompson_Update fires too (was silently never called pre-.F.4d).
                         EnsembleModelZoo_TradeCloseReward(ezoo, pnl_bps,
-                                                            ensemble_trade_reward_mult);
+                                                            ensemble_trade_reward_mult,
+                                                            core_cfg);
                     }
                 }
             }
@@ -1752,8 +1757,20 @@ inline void EventLoop_DrainPostFillOneCore(EventLoopState<F>* state,
                         ? FPN_ToDouble(exit_net_pnl) / notional_d * 10000.0  // v5.15.5.C.4 Phase G — derived
                         : 0.0;
                     double reward_bps = actual_pnl_bps - hypothetical_pnl_bps;
-                    Bandit_Update(&ezoo->exit_bandits[regime],
-                                  chosen_arm, reward_bps);
+                    // v5.15.5.F.4d — exit-side bandit reward attribution via g_exit_reward_dispatch
+                    // (Step 3 + § A.2 + § H of merged plan body). Pre-.F.4d this was direct Bandit_Update
+                    // on exit_bandits only — Thompson posterior on exit-side was NEVER updated
+                    // (Class 24 sister bug at exit attribution surface). Now: dispatch table auto-selects
+                    // exp3_only_reward / thompson_only_reward / both_reward per algo metadata. For
+                    // algo=EXP3 (cfg=0) → bytewise identical to pre-.F.4d (only Bandit_Update on
+                    // exit_bandits[]). For THOMPSON / ghost / BLENDED → also exit_thompson_update_fn
+                    // sink (noop_thompson_update if exit-side Thompson subsystem not initialized,
+                    // real_thompson_update if _InitExitThompsonBandits boot-wired). Closes exit-side
+                    // Class 24 sister attribution gap structurally + closes asymmetry where buy-side
+                    // had Thompson reward but exit-side was Exp3-only.
+                    int exit_algo = core_cfg ? core_cfg->bandit_algorithm : (int)BANDIT_ALGO_EXP3;
+                    if (exit_algo < 0 || exit_algo >= FOREACH_BANDIT_ALGORITHM_COUNT) exit_algo = (int)BANDIT_ALGO_EXP3;
+                    g_exit_reward_dispatch<F>[exit_algo](ezoo, regime, chosen_arm, reward_bps);
                 }
             }
         }

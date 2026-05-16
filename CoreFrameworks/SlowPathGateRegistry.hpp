@@ -92,14 +92,20 @@ namespace tt {
     X(PER_CORE,    RIDGE_ONLINE_CORR_ACTIVE,                                                         \
       BITMAP_IS_SET((_gate_cfg).ml_cfg_flags, MASK_ML_CFG_RIDGE_ONLINE_CORR),                        \
       "use sliding-window incremental correlation matrix in Ridge (vs full recompute)")             \
-    /* v5.14.10.B — Thompson sampling active (cfg.bandit_algorithm in {1, 2}) */                    \
+    /* v5.15.5.F.4d — metadata-derived predicates per § I of merged plan body. Replaces former */ \
+    /* cfg.bandit_algorithm == X if-chain with branchless mask-bit shift over auto-derived       */ \
+    /* BANDIT_THOMPSON_UPDATE_MASK / BANDIT_EXP3_UPDATE_MASK (from FOREACH_BANDIT_ALGORITHM       */ \
+    /* metadata column reductions in BanditAlgorithmRegistry.hpp). Adding a 6th bandit algorithm */ \
+    /* with appropriate thompson_up/exp3_up bits → these predicates auto-extend correctness; no  */ \
+    /* per-site rebind needed. Class 18 + Class 28 closure at slow-path gate surface.            */ \
     X(PER_CORE,    THOMPSON_ACTIVE,                                                                  \
-      (_gate_cfg).bandit_algorithm != 0,                                                             \
-      "Thompson sampling bandit dispatched (cfg=1 THOMPSON or cfg=2 BOTH)")                         \
-    /* v5.14.10.B — cfg=2 dual-mode (parallel-training A/B telemetry) */                            \
-    X(PER_CORE,    BANDIT_BOTH_ACTIVE,                                                               \
-      (_gate_cfg).bandit_algorithm == 2,                                                             \
-      "Both Exp3 + Thompson run per cycle (cfg=2 calib log telemetry)")                             \
+      (((uint8_t)BANDIT_THOMPSON_UPDATE_MASK >> (_gate_cfg).bandit_algorithm) & 1u),                 \
+      "Thompson posterior is being updated for the current bandit_algorithm (any state with thompson_up=1)") \
+    /* v5.15.5.F.4d — RENAMED from BANDIT_BOTH_ACTIVE. Semantic: BOTH algos learning from rewards.  */ \
+    /* True for any state where exp3_up=1 AND thompson_up=1 (cfg=2/3/4 post-.F.4d expansion).        */ \
+    X(PER_CORE,    BANDIT_SHADOW_LEARNING,                                                           \
+      ((((uint8_t)BANDIT_EXP3_UPDATE_MASK & (uint8_t)BANDIT_THOMPSON_UPDATE_MASK) >> (_gate_cfg).bandit_algorithm) & 1u), \
+      "Both Exp3 + Thompson learning from rewards this cycle (any algo with exp3_up=1 AND thompson_up=1)") \
     /* === ENGINE_WIDE — checked in engine-wide outer / function-entry; uses global cfg === */     \
     /* v5.12.2.B — lazy slow-path rebuild predicate (function-entry of EventLoop_RebuildOneCore) */ \
     X(ENGINE_WIDE, LAZY_REBUILD_ACTIVE,                                                              \

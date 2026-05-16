@@ -77,10 +77,12 @@
 // LEGACY POSITIONAL STABILITY: ACTIVE is the first entry (bit 0) — matches
 // the conceptual "is the ensemble active at all" semantic that's most-tested.
 #define FOREACH_EZOO_INIT_FLAG(X) \
-    X(ACTIVE,             "Ensemble path active (1 = use ensemble, 0 = single-zoo fallback)") \
-    X(BANDITS_READY,      "Exp3 buy-side bandits wired (post-LoadFromCfg + _InitBandits)") \
-    X(EXIT_BANDITS_READY, "Exit-side bandits wired (post-exit_predictor load + _InitExitBandits)") \
-    X(THOMPSON_READY,     "Thompson posterior bandits wired (post-LoadFromCfg + _InitThompsonBandits)")
+    X(ACTIVE,                  "Ensemble path active (1 = use ensemble, 0 = single-zoo fallback)") \
+    X(BANDITS_READY,           "Exp3 buy-side bandits wired (post-LoadFromCfg + _InitBandits)") \
+    X(EXIT_BANDITS_READY,      "Exit-side bandits wired (post-exit_predictor load + _InitExitBandits)") \
+    X(THOMPSON_READY,          "Thompson posterior bandits wired (buy-side; post-LoadFromCfg + _InitThompsonBandits)") \
+    /* v5.15.5.F.4d — exit-side Thompson mirror per FOREACH_BANDIT_SIDE auto-mirror (§ G of merged plan body) */ \
+    X(EXIT_THOMPSON_READY,     "Exit-side Thompson posterior bandits wired (post-LoadFromCfg + _InitExitThompsonBandits)")
 
 //======================================================================================================
 // [AUTO-GENERATED ENUM]
