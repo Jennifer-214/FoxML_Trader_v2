@@ -2359,18 +2359,12 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // v5.12.2.B — lazy slow-path rebuild
     // lazy_rebuild_enabled migrated to ml_cfg_flags (v5.14.9.F.2)
     // v5.15.5.F.4c — lazy_rebuild_force_period_us migrated to FOREACH_CFG_FIELD (KIND_INT; uint64 storage).
-    if (strcmp(key, "lazy_rebuild_price_threshold_pct") == 0) {
-      cfg.lazy_rebuild_price_threshold_pct = FPN_FromDouble<F>(atof(val));
-      continue;
-    }
+    // v5.15.5.F.4d TECH_DEBT-082 — lazy_rebuild_price_threshold_pct migrated to FOREACH_PER_CORE_CFG_FIELD (KIND_DOUBLE_PCT; FPN<F>; auto-flow parser via tt::cfg_*_field<T>). Class 23 manual-parser anti-pattern closure at this site.
     // v5.12.2.D — Treelite AOT backend opt-in (infrastructure-only)
     // v5.15.5.F.4c — use_aot_inference migrated to FOREACH_CFG_FIELD (KIND_BOOL; IS_BOOT_ONLY).
     // v5.13.0 — sell-side ML opt-in (Path 3 architecture)
     // use_exit_model migrated to ml_cfg_flags (v5.14.9.F.2)
-    if (strcmp(key, "exit_threshold") == 0) {
-      cfg.exit_threshold = FPN_FromDouble<F>(atof(val));
-      continue;
-    }
+    // v5.15.5.F.4d TECH_DEBT-082 — exit_threshold migrated to FOREACH_PER_CORE_CFG_FIELD (KIND_DOUBLE; FPN<F>; auto-flow parser via tt::cfg_*_field<T>). Class 23 manual-parser anti-pattern closure at this site.
     if (strcmp(key, "exit_signal_model_dir") == 0) {
       strncpy(cfg.exit_signal_model_dir, val,
               sizeof(cfg.exit_signal_model_dir) - 1);
@@ -2719,10 +2713,7 @@ inline ControllerConfig<F> ControllerConfig_Load(const char *filepath) {
     // (legacy_field column matches keys at the ops_cfg_flags parser block line ~2220).
     // v5.15.5.F.4c — acknowledge_hot_swap_with_open_positions migrated to FOREACH_CFG_FIELD (KIND_BOOL).
     // Registry walker handles parse; manual CFG_PARSE_INT removed.
-    if (strcmp(key, "confidence_ic_floor") == 0) {
-        cfg.confidence_ic_floor = atof(val);
-        continue;
-    }
+    // v5.15.5.F.4d TECH_DEBT-082 — confidence_ic_floor migrated to FOREACH_PER_CORE_CFG_FIELD (KIND_DOUBLE; double; auto-flow parser via tt::cfg_*_field<T>). Class 23 manual-parser anti-pattern closure at this site.
     // v5.15.5.F.4c — confidence_ic_floor_window migrated to FOREACH_CFG_FIELD (KIND_INT; uint32 storage).
     if (false) {
         cfg.confidence_ic_floor_window = (uint32_t)strtoul(val, nullptr, 10);
