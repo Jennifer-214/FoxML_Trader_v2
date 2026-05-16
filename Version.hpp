@@ -5,7 +5,118 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4c.3"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d"
+// .F.4d (v5.15.5.F.4d) MERGED — Thread B (bandit/thompson cohort) + Thread A foundation + 3
+// substantial TECH_DEBT fold-ins (2026-05-16). Ship close.
+//
+// Thread B (FULL — bandit/thompson 5-state + dispatch tables + Class 24/28/29/30 closures):
+//   1. Pattern 5 Thompson_Update branchless dispatch + sink fns (noop_thompson_update +
+//      real_thompson_update; ezoo->buy_thompson_update_fn + exit_thompson_update_fn fields).
+//   2. FOREACH_BANDIT_SIDE meta-X-macro (NEW header ML_Headers/bandit_dispatch_table.hpp) +
+//      g_buy_reward_dispatch + g_exit_reward_dispatch tables auto-derived via ?: chain over
+//      FOREACH_BANDIT_ALGORITHM metadata (exp3_up, thompson_up); 3 leaf reward fns
+//      (exp3_only / thompson_only / both) templated on BanditSide for if-constexpr field
+//      selection (no runtime branch on side). First canonical of FOREACH_BANDIT_SIDE pattern.
+//   3. FOREACH_BANDIT_ALGORITHM 7-arg metadata 3→5 states (EXP3 / THOMPSON /
+//      EXP3_OP_THOMPSON_GHOST / THOMPSON_OP_EXP3_GHOST / BLENDED). Auto-derived
+//      BANDIT_EXP3_UPDATE_MASK (0x1D) + BANDIT_THOMPSON_UPDATE_MASK (0x1E) constants via
+//      X-macro reduction over metadata bits. Option C wire-byte preservation: cfg=0/1/2
+//      unchanged from pre-.F.4d encoding.
+//   4. Class 24 closure at attribution surface — Thompson_Update wired via
+//      g_buy_reward_dispatch / g_exit_reward_dispatch dispatch tables; pre-fix Thompson posterior
+//      was silently frozen despite cfg.bandit_algorithm setting (capability-cfg surface mismatch).
+//      Reward attribution callers at StrategyParameters.hpp:1154 (TickRewardsFromLookback) +
+//      ControllerEventLoop.hpp:1695 (TradeCloseReward) + :1755 (exit-side) route via dispatch.
+//   5. Order::flags_packed bandit context bits 17-25 (Pattern 4 decision-time-data-binding;
+//      sister to MASK_ORDER_PRE_RESOLVED at bit 16). MBS_OrderBanditActiveState /
+//      MBS_OrderBanditRegime / MBS_OrderBanditChosenArm accessors. Set at submit time
+//      via MBS_OrderSetBanditContext; read at calib log emit time. 5th canonical of
+//      multi-bit-state-encoding INVARIANT.
+//   6. FOREACH_OMS_PER_SLOT_FIELD 3→5 rows (Class 30 latent drift closure) — last_exit_fee
+//      enrolled (previously sibling-array unregistered drift risk from `.F.4c.3` r-4) +
+//      bandit_reward_bps[MAX_PORTFOLIO_POSITIONS] NEW per-slot reward signal.
+//   7. § F Pattern 5 path consolidation — OmsState ezoo_refs[MAX_EXECUTION_CORES] +
+//      core_cfg_refs[MAX_EXECUTION_CORES] per-core arrays (engine-wide single OmsState;
+//      per-core lookup indexed by Order::core_id at calib log emit time).
+//      EngineSharded boot wires oms.ezoo_refs[i] + core_cfg_refs[i] alongside per-core
+//      state.cores[i].ensemble_handle. real_on_exit_calibration body extended with
+//      bandit context decode + per-slot reward attribution + per-core ezoo/cfg cast +
+//      Bandit_GetProbabilities for exp3_probs + null-coalesced Thompson posterior telemetry.
+//   8. § M Calib log columns 9→47 — 6 bandit-context singletons (bandit_algorithm +
+//      regime_id_at_emit + chosen_arm + reward_bps_attributed + thompson_telemetry_arm +
+//      thompson_exp3_blend_alpha) + 32 per-arm cols (8 arms × {exp3_w, thompson_mu,
+//      thompson_prec, thompson_pulls}; arm-major layout; hand-written per sidecar M.2
+//      preprocessor token-paste robustness fallback).
+//   9. Class 28 cmov sweep (6 sites) — Bandit_Update max-find + Thompson_Sample argmax +
+//      ModelInference PredictBest argmax + WeightedBlend argmax + RollingTurnover argmax;
+//      __builtin_expect rare on Thompson_Update bounds guard.
+//  10. Class 25 consumer sweep at reward attribution surface — TickRewardsFromLookback +
+//      TradeCloseReward + ControllerEventLoop exit-side. PerCoreCfg<F>* threaded through.
+//  11. thompson_exp3_blend_alpha NEW per-core cfg field (FOREACH_PER_CORE_CFG_FIELD row) +
+//      5 drift rows (PARITY-026 close) + 5 POST_CFG entries + 5 cfg→inf wiring rows +
+//      stamp emit row (only emits when bandit_algorithm==4 — preserves HMAC byte
+//      equivalence for legacy stamps).
+//  12. thompson_exit_bandits hand-mirror (renamed to exit_thompson_bandits per
+//      TECH_DEBT-084) + new MASK_EZOO_EXIT_THOMPSON_READY init flag.
+//  13. 15 Step 9 tests (26 assertions) — Class 24 closure regression + dispatch table
+//      verification + cmov regression + 5-state byte-equivalence guards + boundary tests
+//      (BLENDED α=0 reduces to EXP3; α=1 reduces to Thompson softmax) + exit-side mirror.
+//
+// Thread A foundation (FULL CLOSURE deferred to TECH_DEBT-085 .F.4d.1 dedicated ship):
+//   - H15-H20 codified in CLAUDE.md hard invariants table (H15 every X-macro registry
+//     enrolled in FOREACH_REGISTRY; H16 every metadata bit has derived filter or exemption;
+//     H17 cfg struct fields generated from FOREACH_CFG_FIELD; H18 sidecar override pattern;
+//     H19 LEVEL > 0 registries declare PARENT; H20 branchless preferred for SP/HP dispatch).
+//   - 4 Thread A DESIGN_SPECs exist + Stage 3 ACTIVE: metadata-bit-driven-derived-filter-
+//     framework + meta-registry-pattern-for-codebase-registry-discipline + sidecar-override-
+//     pattern-for-registry-auto-flows + framework-composition-overview.
+//   - FOREACH_BANDIT_SIDE enrolled in FOREACH_REGISTRY meta-registry (H15 first canonical).
+//   - STAMP_BOUND_CFG_DERIVED metadata bit reserved (bit 13 on CfgFieldDescriptor::MetadataFlag)
+//     for future DERIVED_FILTER framework consumer (no migration this ship).
+//   - CLAUDE.md item 31 (framework-driven extensibility meta-principle) codified.
+//   - 5 new multi-bit-state-encoding canonicals tracked: Order::pre_resolved sub-struct (canonical #4
+//     at .F.4c.3) + Order::flags_packed bandit context bits 17-25 (canonical #5 this ship);
+//     canonicals 6/7/8 (DriftOverride / RegistryRosterEntry / ManualFieldInventoryEntry) defer
+//     to TECH_DEBT-085 along with FOREACH_DRIFT_OVERRIDE sidecar.
+//
+// 3 substantial TECH_DEBT fold-ins (closed this ship):
+//   - TECH_DEBT-082 — 3 .F.5 residual fields (lazy_rebuild_price_threshold_pct + exit_threshold +
+//     confidence_ic_floor) migrate from flat ControllerConfig + manual strcmp/atof parser cases
+//     to FOREACH_PER_CORE_CFG_FIELD X-macro registry rows (auto-flow parser via tt::cfg_*_field<T>
+//     dispatch). Class 23 manual-parser anti-pattern closure at 3 sites. Closes .F.5 charter
+//     residual completely.
+//   - TECH_DEBT-083 — IWYU sweep: 7 headers add explicit <cstdint> (CoreModelZoo + ModelInference +
+//     RewardTracker + WelfordStats + MeanReversion + Momentum + RegimeDetector). 8th header
+//     (StampBoundModelConstRegistry) already fixed inline during session. Closes latent class
+//     structurally (any future include-order change won't expose new chain-breakers).
+//   - TECH_DEBT-084 — FOREACH_BANDIT_SIDE cascade rename (6 patterns in collision-safe order
+//     across 14 files; word-boundary sed; 200+ refs): thompson_exit_bandits → exit_thompson_bandits +
+//     last_predicted_thompson_arm → last_predicted_buy_thompson_arm + MASK_EZOO_THOMPSON_READY →
+//     MASK_EZOO_BUY_THOMPSON_READY + EnsembleModelZoo_InitThompsonBandits →
+//     EnsembleModelZoo_InitBuyThompsonBandits + thompson_bandits → buy_thompson_bandits +
+//     thompson_update_fn → buy_thompson_update_fn. Plus persistence file path rename
+//     (thompson_state.json → buy_thompson_state.json + thompson_exit_state.json →
+//     exit_thompson_state.json) with Load-side back-compat alias for existing on-disk model bundles.
+//     Closes naming asymmetry; future 3rd-side axis addition becomes mechanical.
+//
+// Bug classes closed this ship: Class 24 (sister at reward attribution) + Class 25 (consumer
+// sweep) + Class 28 (6 cmov sites) + Class 30 (sibling-array enrollment drift). Class 27 +
+// Class 29 preserved via decision-time-data-binding discipline. PARITY-026 closed (4
+// STAMP_BOUND bandit/thompson fields gained drift-check rows; plus 1 NEW blend_alpha).
+//
+// Tests: 3174 controller_test (3148 baseline + 26 Step 9 assertions) + 17 depth_recorder_test;
+// all 5 binaries (test, gui, suite, tsan, asan) build clean; check_per_core_registry_integrity.py
+// 6 checks PASS (Check 7 Class 27 prevention: 0 Section C exemptions); check_meta_registry.py
+// 3 checks PASS (63 macros / 63 enrolled). Hot path UNTOUCHED.
+//
+// Residual logged as TECH_DEBT-085 (full Thread A consolidation; ~15-25h focused; dedicated
+// .F.4d.1 ship after .F.4d): DerivedFilterFramework.hpp 3 macro variants + StampBoundDerivedFilter.hpp
+// first canonical + Layer 5b hash lock + 24-row FOREACH_STAMP_BOUND_CFG migration with always-emit
+// semantic shift + legacy registry empty-out + FOREACH_ML_CFG_FLAG 5→6 arg sig migration (12 rows
+// gain metadata_flags column) + FOREACH_DRIFT_OVERRIDE sparse sidecar + bit-packed DriftOverride +
+// RegistryRosterEntry + ManualFieldInventoryEntry (canonicals 6/7/8) + CI Checks 9-12 + v5.14 stamp
+// fixture regression test + 12+ consumer migration sites + CFG_DRIFT_AUTOPOPULATE companion macro.
+//
 // .F.4c.3 (v5.15.5.F.4c.3) — Architectural cfg split + Class 27/28 structural closure +
 // comprehensively branchless OrderManager (2026-05-15). B.1 final ship close.
 //
