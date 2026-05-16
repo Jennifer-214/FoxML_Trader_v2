@@ -140,7 +140,14 @@ struct CfgFieldDescriptor {
         MANUAL_PARSER         = 1u << 10,  // skip registry parser walker — manual string-form / side-effect parser handles (WIP2d-1.B.0; was HAS_SIDE_EFFECT pre-split)
         WARN_ON_CLAMP         = 1u << 11,  // emit "[cfg] WARN: <key>='<val>' out of range; clamping to <clamped>" when parse clamps value (.F.4c)
         NO_FLAT_FIELD         = 1u << 12,  // field exists only on cores[c] (no ControllerConfig flat scalar) — skip copy/render walkers (WIP2d-1.B.0)
-        // ... 3 bits headroom for future ...
+        // v5.15.5.F.4d Charter 8 — STAMP_BOUND_CFG_DERIVED drives DERIVED_FILTER framework
+        // (auto-generates POST_CFG mirror + CfgDerivedInferenceCfgRegistry + CfgDriftCheckRegistry
+        // rows from single flagged source row). Per metadata-bit-driven-derived-filter-framework.md
+        // Variant 3 (WIRE_FORMAT_TWO_SOURCE) Stage 3 ACTIVE. Subset of STAMP_BOUND (stamp-bound
+        // INFERENCE-time cfg fields specifically; training-time AFFECTS_STAMP_PARITY uses different
+        // derived filter). Closes Class 21 at derived-filter surface per H16 invariant.
+        STAMP_BOUND_CFG_DERIVED = 1u << 13,
+        // ... 2 bits headroom for future ...
 
         // Legacy alias — HAS_SIDE_EFFECT was overloaded; new code uses MANUAL_PARSER.
         // The 6 rows that used HAS_SIDE_EFFECT pre-WIP2d-1.B.0 migrate to MANUAL_PARSER
