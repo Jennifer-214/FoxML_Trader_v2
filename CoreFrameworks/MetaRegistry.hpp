@@ -55,6 +55,7 @@
     /* === Strategy + ML registries === */                                                                                                                \
     X(FOREACH_STRATEGY,                     1,      FOREACH_REGISTRY,                  "Strategy dispatch table (MR/MOM/DIP/ML/EMA + AUTO sentinel; CLAUDE.md item 13 X-macro).") \
     X(FOREACH_BANDIT_ALGORITHM,             1,      FOREACH_REGISTRY,                  "Bandit algorithm dispatch (Exp3-IX / Thompson; STAMP_BOUND).") \
+    X(FOREACH_BANDIT_SIDE,                  1,      FOREACH_REGISTRY,                  "Bandit side meta-X-macro (buy/exit symmetric; v5.15.5.F.4d TECH_DEBT-084 first canonical for FOREACH_BANDIT_SIDE auto-mirror).") \
     X(FOREACH_FAILURE_MODE,                 1,      FOREACH_REGISTRY,                  "Failure mode bit-flag storage registry (FailureModeRegistry.hpp).") \
     /* === OMS state registries === */                                                                                                                    \
     X(FOREACH_OMS_FIELD,                    1,      FOREACH_REGISTRY,                  "OMS state field registry (AUTOPOPULATE / drift check / etc.).") \
