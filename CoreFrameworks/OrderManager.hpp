@@ -69,6 +69,7 @@
 #include "../MemHeaders/OmsStateFlagRegistry.hpp"  // v5.15.5.C.2 (S3a) — FOREACH_OMS_STATE_FLAG bitmap cohort
 #include "../MemHeaders/OmsExitPredictorMetaRegistry.hpp"  // v5.15.5.C.2.1 (LOW-2) — FOREACH_OMS_META_SLOT multi-bit cohort
 #include "../MemHeaders/OmsFieldRegistry.hpp"              // v5.15.5.C.3 (Phase 3) — canonical FOREACH_OMS_FIELD + projections
+#include "../ML_Headers/CoreModelZoo.hpp"                  // v5.15.5.F.4d Step 7 § F — EnsembleModelZoo<F>* for real_on_exit_calibration ezoo_ref cast (transitively pulls PerCoreCfg<F> + BANDIT_MAX_ARMS + NUM_REGIMES + Bandit_GetProbabilities)
 
 #include <atomic>
 #include <chrono>
@@ -613,6 +614,16 @@ struct OrderManagerState {
     void (*on_exit_fill_emit)(OrderManagerState<F>*, Order<F>*, FPN<F>, FPN<F>, FPN<F>)  = &noop_fill_emit<F>;
     void (*on_exit_calibration)(OrderManagerState<F>*, Order<F>*, FPN<F>, FPN<F>, FPN<F>) = &noop_fill_emit<F>;
 
+    // v5.15.5.F.4d Step 7 § F — per-core ezoo + core_cfg lookup for calib log consumer.
+    // Per-core ARRAYS indexed by Order::core_id at consumer (sister to per-slot last_exit_fee[]
+    // + bandit_reward_bps[] sibling-array pattern; OmsState is engine-wide single instance, NOT
+    // per-core). void* keeps OmsState ML-agnostic (sister to ctx.ensemble_handle on CoreContext);
+    // cast to EnsembleModelZoo<F>* / const PerCoreCfg<F>* in real_on_exit_calibration via
+    // oms->ezoo_refs[o->core_id]. Default nullptr (test fixtures + pre-boot state + non-ML cores);
+    // wired at EngineSharded per-core init alongside state.cores[i].ensemble_handle.
+    void*       ezoo_refs[MAX_EXECUTION_CORES]     = {nullptr};   // EnsembleModelZoo<F>* per-core (lazy-cast)
+    const void* core_cfg_refs[MAX_EXECUTION_CORES] = {nullptr};   // const PerCoreCfg<F>* per-core (lazy-cast)
+
     ~OrderManagerState() {
         OrderManager_Shutdown(this);
     }
@@ -677,6 +688,35 @@ inline void real_on_exit_calibration(OrderManagerState<F>* oms, Order<F>* o,
     const uint8_t pred_flag    = (uint8_t)BITMAP_IS_SET(oms->last_exit_predicted_bitmap, BITMAP_BIT_U16(pslot));
     const double pred_p        = oms->last_exit_predicted_p[pslot];
     (void)total_fee;
+
+    // v5.15.5.F.4d Step 7 § F — decode bandit context from Order::flags_packed bits 17-25
+    // (Pattern 4 decision-time-bound; sister to MASK_ORDER_PRE_RESOLVED at bit 16).
+    const int bandit_active_state = MBS_OrderBanditActiveState(*o);
+    const int bandit_regime       = MBS_OrderBanditRegime(*o);
+    const int bandit_chosen_arm   = MBS_OrderBanditChosenArm(*o);
+
+    // v5.15.5.F.4d Step 7 § F — per-slot bandit reward from FOREACH_OMS_PER_SLOT_FIELD sibling
+    // array (added Step 7 § N.2; written at HandleFill SELL).
+    const double reward_bps_attributed = oms->bandit_reward_bps[pslot];
+
+    // v5.15.5.F.4d Step 7 § F — cast per-core ezoo_refs[core_id] / core_cfg_refs[core_id] to
+    // typed pointers for ML-side access. OmsState is engine-wide single instance (line 662 of
+    // EngineSharded boot); per-core ezoo + cfg slice lookup indexed by Order::core_id (== pslot
+    // since each core owns 1 portfolio position). Nullptr-defensive: test fixtures + non-ML cores
+    // have wiring pointers nullptr; telemetry coalesces to 0/0.0 placeholders.
+    auto* ezoo     = static_cast<EnsembleModelZoo<F>*>(oms->ezoo_refs[pslot]);
+    auto* core_cfg = static_cast<const PerCoreCfg<F>*>(oms->core_cfg_refs[pslot]);
+
+    // Telemetry — null-coalesced.
+    const int    thompson_telemetry_arm    = ezoo     ? ezoo->last_predicted_thompson_arm               : 0;
+    const double thompson_exp3_blend_alpha = core_cfg ? FPN_ToDouble(core_cfg->thompson_exp3_blend_alpha) : 0.0;
+
+    // Per-arm Exp3 probabilities (telemetry). bandit_regime bounds-clamped defensively
+    // (cfg parser clamps but belt-and-suspenders for replay-from-old-stamp scenarios).
+    const int regime_clamped = (bandit_regime >= 0 && bandit_regime < NUM_REGIMES) ? bandit_regime : 0;
+    double exp3_probs[BANDIT_MAX_ARMS] = {0};
+    if (ezoo) Bandit_GetProbabilities(&ezoo->bandits[regime_clamped], exp3_probs);
+
     CALIB_LOG_EMIT_ROW(oms->calibration_log_file);
 }
 

@@ -1059,6 +1059,13 @@ static inline void EngineSharded_Run(ControllerConfig<F>& cfg,
                     EnsembleModelZoo_PostLoadSetup<F>(ezoo_ptr, cfg, i,
                                                        cfg.core_model_dir[i]);
                     state.cores[i].ensemble_handle = ezoo_ptr;
+                    // v5.15.5.F.4d Step 7 § F — wire engine-wide oms->ezoo_refs[i] + core_cfg_refs[i]
+                    // alongside per-core ctx.ensemble_handle. OmsState is engine-wide single instance
+                    // (line 662); per-core arrays indexed by Order::core_id at calib log emit time
+                    // (real_on_exit_calibration). void* cast to EnsembleModelZoo<F>* /
+                    // const PerCoreCfg<F>* at consumer.
+                    oms.ezoo_refs[i]     = (void*)ezoo_ptr;
+                    oms.core_cfg_refs[i] = (const void*)&cfg.cores[i];
                     ensemble_loaded = 1;
                 } else {
                     state.cores[i].ensemble_handle = nullptr;

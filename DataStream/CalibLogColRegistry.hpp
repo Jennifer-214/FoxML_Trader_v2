@@ -17,11 +17,17 @@
 //                 caller scope (HandleFill body for the entry-fill writer)
 //
 // CALLER SCOPE CONTRACT:
-//   Row-write expansion expects these variables in scope (matches OrderManager_HandleFill
-//   calibration log body at OrderManager.hpp:991-1019 BEFORE this refactor):
+//   Row-write expansion expects these variables in scope (matches real_on_exit_calibration
+//   body at OrderManager.hpp post-v5.15.5.F.4d Step 7 § F):
 //     uint64_t ts_us, int pslot, uint8_t pred_flag, double pred_p,
 //     double entry_d_calib, double exit_d_calib, double gain_pct, double pnl_bps,
-//     OrderManagerState<F>* oms
+//     OrderManagerState<F>* oms,
+//     // v5.15.5.F.4d Step 7 § F + Step 8 § M:
+//     int bandit_active_state, int bandit_regime, int bandit_chosen_arm,
+//     double reward_bps_attributed, int thompson_telemetry_arm,
+//     double thompson_exp3_blend_alpha, int regime_clamped,
+//     double exp3_probs[BANDIT_MAX_ARMS],
+//     EnsembleModelZoo<F>* ezoo (nullable; null-coalesce per-arm Thompson telemetry to 0.0/0u)
 //
 // HEADER + ROW EMIT:
 //   - CalibLog_EmitHeader(f) — comma-separated col_name list + trailing \n
@@ -47,6 +53,7 @@
 #define CALIB_LOG_COL_REGISTRY_HPP
 
 #include <cstdio>
+#include "../ML_Headers/BanditLearning.hpp"  // v5.15.5.F.4d Step 8 § M — BANDIT_MAX_ARMS for hand-written-8-arm static_assert; registry inherently references per-arm bandit state
 
 //======================================================================================================
 // [REGISTRY TUPLE]
@@ -54,25 +61,74 @@
 // Order MATTERS — operator parsers depend on column ordering.
 // DO NOT reorder existing columns; APPEND new columns at the end.
 //
-// v5.15.5.F.4d Step 8 (§ M) DEFERRED: 4 bandit-context singleton cols (bandit_algorithm + regime
-// + chosen_arm + reward_bps_attributed) decoded from Order::flags_packed via MBS_* accessors
-// + oms->bandit_reward_bps[pslot]. ATTEMPTED in .F.4d coding session but test fixture (uses
-// MockOms struct without Order<F> in scope) failed to compile — MBS_* requires typed Order<F>&
-// which mocks can't satisfy. Resolution: bundle Step 8 § M with Step 7 § F (Pattern 5 path
-// consolidation + ezoo_ref / core_cfg_ref architectural decision) next session — test fixtures
-// promoted from mocks to real Order<F> + OrderManagerState<F> at that time. Per-arm
-// matrix-reduce (~32 add'l cols via FOREACH_PERARM_CALIB_COL × FOREACH_BANDIT_ARM) + telemetry
-// + blend_alpha singletons also defer to same session (all need ezoo_ref / core_cfg_ref).
-#define FOREACH_CALIB_LOG_COL(X)                                                                          \
-    X(timestamp_us,        "%llu",  (unsigned long long)ts_us)                                            \
-    X(slot,                "%d",    (int)pslot)                                                           \
-    X(exit_predicted_flag, "%u",    (unsigned)pred_flag)                                                  \
-    X(predicted_p,         "%.6f",  pred_p)                                                               \
-    X(entry_price,         "%.4f",  entry_d_calib)                                                        \
-    X(exit_price,          "%.4f",  exit_d_calib)                                                         \
-    X(gain_pct,            "%.6f",  gain_pct)                                                             \
-    X(realized_pnl_bps,    "%.4f",  pnl_bps)                                                              \
-    X(was_win,             "%d",    (BITMAP_IS_SET(oms->last_was_win_bitmap, BITMAP_BIT_U16(pslot)) ? 1 : 0))
+// v5.15.5.F.4d Step 8 § M ACTIVE — 6 singleton + 32 per-arm bandit-telemetry cols appended after
+// legacy 9. Decoded from Order::flags_packed bits 17-25 via MBS_* accessors (singletons) + per-slot
+// FOREACH_OMS_PER_SLOT_FIELD bandit_reward_bps[pslot] + per-arm Exp3 probabilities (via
+// Bandit_GetProbabilities into local exp3_probs[BANDIT_MAX_ARMS]) + per-arm Thompson posterior
+// state (ezoo->thompson_bandits[regime_clamped].{mu_post,precision_post,total_pulls}[arm]). All
+// ezoo-touching cols null-coalesce to 0/0.0 when ezoo_ref is nullptr (test fixtures + non-ML cores
+// with calibration_log_path set). Per-arm hand-written (8 arms × 4 families = 32 rows; sidecar M.2
+// chose hand-write over preprocessor token-paste indirection for robustness + auditability).
+// Per-arm layout is ARM-MAJOR (exp3_w_arm0, thompson_mu_arm0, thompson_prec_arm0, thompson_pulls_arm0,
+// then arm1, ..., arm7) so per-arm clusters stay grouped for CSV scrubbing.
+// Adding a 9th arm later: append 4 more rows + bump BANDIT_MAX_ARMS at BanditLearning.hpp:62.
+#define FOREACH_CALIB_LOG_COL(X)                                                                                                                       \
+    /* legacy 9 cols — UNCHANGED (operator parsers depend on byte order) */                                                                            \
+    X(timestamp_us,        "%llu",  (unsigned long long)ts_us)                                                                                         \
+    X(slot,                "%d",    (int)pslot)                                                                                                        \
+    X(exit_predicted_flag, "%u",    (unsigned)pred_flag)                                                                                               \
+    X(predicted_p,         "%.6f",  pred_p)                                                                                                            \
+    X(entry_price,         "%.4f",  entry_d_calib)                                                                                                     \
+    X(exit_price,          "%.4f",  exit_d_calib)                                                                                                      \
+    X(gain_pct,            "%.6f",  gain_pct)                                                                                                          \
+    X(realized_pnl_bps,    "%.4f",  pnl_bps)                                                                                                           \
+    X(was_win,             "%d",    (BITMAP_IS_SET(oms->last_was_win_bitmap, BITMAP_BIT_U16(pslot)) ? 1 : 0))                                          \
+    /* v5.15.5.F.4d Step 8 § M — 6 bandit-context singletons (decoded from Order::flags_packed bits 17-25 + per-core cfg + per-slot reward) */         \
+    X(bandit_algorithm,           "%d",   bandit_active_state)                                                                                         \
+    X(regime_id_at_emit,          "%d",   bandit_regime)                                                                                               \
+    X(chosen_arm,                 "%d",   bandit_chosen_arm)                                                                                           \
+    X(reward_bps_attributed,      "%.6f", reward_bps_attributed)                                                                                       \
+    X(thompson_telemetry_arm,     "%d",   thompson_telemetry_arm)                                                                                      \
+    X(thompson_exp3_blend_alpha,  "%.6f", thompson_exp3_blend_alpha)                                                                                   \
+    /* v5.15.5.F.4d Step 8 § M — 32 per-arm cols (8 arms × {exp3_w, thompson_mu, thompson_prec, thompson_pulls}); arm-major layout */                  \
+    X(exp3_w_arm0,         "%.6f", exp3_probs[0])                                                                                                      \
+    X(thompson_mu_arm0,    "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].mu_post[0]                  : 0.0))                                  \
+    X(thompson_prec_arm0,  "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].precision_post[0]           : 0.0))                                  \
+    X(thompson_pulls_arm0, "%u",   (ezoo ? (unsigned)ezoo->thompson_bandits[regime_clamped].total_pulls[0]    : 0u))                                   \
+    X(exp3_w_arm1,         "%.6f", exp3_probs[1])                                                                                                      \
+    X(thompson_mu_arm1,    "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].mu_post[1]                  : 0.0))                                  \
+    X(thompson_prec_arm1,  "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].precision_post[1]           : 0.0))                                  \
+    X(thompson_pulls_arm1, "%u",   (ezoo ? (unsigned)ezoo->thompson_bandits[regime_clamped].total_pulls[1]    : 0u))                                   \
+    X(exp3_w_arm2,         "%.6f", exp3_probs[2])                                                                                                      \
+    X(thompson_mu_arm2,    "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].mu_post[2]                  : 0.0))                                  \
+    X(thompson_prec_arm2,  "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].precision_post[2]           : 0.0))                                  \
+    X(thompson_pulls_arm2, "%u",   (ezoo ? (unsigned)ezoo->thompson_bandits[regime_clamped].total_pulls[2]    : 0u))                                   \
+    X(exp3_w_arm3,         "%.6f", exp3_probs[3])                                                                                                      \
+    X(thompson_mu_arm3,    "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].mu_post[3]                  : 0.0))                                  \
+    X(thompson_prec_arm3,  "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].precision_post[3]           : 0.0))                                  \
+    X(thompson_pulls_arm3, "%u",   (ezoo ? (unsigned)ezoo->thompson_bandits[regime_clamped].total_pulls[3]    : 0u))                                   \
+    X(exp3_w_arm4,         "%.6f", exp3_probs[4])                                                                                                      \
+    X(thompson_mu_arm4,    "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].mu_post[4]                  : 0.0))                                  \
+    X(thompson_prec_arm4,  "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].precision_post[4]           : 0.0))                                  \
+    X(thompson_pulls_arm4, "%u",   (ezoo ? (unsigned)ezoo->thompson_bandits[regime_clamped].total_pulls[4]    : 0u))                                   \
+    X(exp3_w_arm5,         "%.6f", exp3_probs[5])                                                                                                      \
+    X(thompson_mu_arm5,    "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].mu_post[5]                  : 0.0))                                  \
+    X(thompson_prec_arm5,  "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].precision_post[5]           : 0.0))                                  \
+    X(thompson_pulls_arm5, "%u",   (ezoo ? (unsigned)ezoo->thompson_bandits[regime_clamped].total_pulls[5]    : 0u))                                   \
+    X(exp3_w_arm6,         "%.6f", exp3_probs[6])                                                                                                      \
+    X(thompson_mu_arm6,    "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].mu_post[6]                  : 0.0))                                  \
+    X(thompson_prec_arm6,  "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].precision_post[6]           : 0.0))                                  \
+    X(thompson_pulls_arm6, "%u",   (ezoo ? (unsigned)ezoo->thompson_bandits[regime_clamped].total_pulls[6]    : 0u))                                   \
+    X(exp3_w_arm7,         "%.6f", exp3_probs[7])                                                                                                      \
+    X(thompson_mu_arm7,    "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].mu_post[7]                  : 0.0))                                  \
+    X(thompson_prec_arm7,  "%.6f", (ezoo ? ezoo->thompson_bandits[regime_clamped].precision_post[7]           : 0.0))                                  \
+    X(thompson_pulls_arm7, "%u",   (ezoo ? (unsigned)ezoo->thompson_bandits[regime_clamped].total_pulls[7]    : 0u))
+
+// v5.15.5.F.4d Step 8 § M — hand-written 8-arm coverage invariant.
+// If BANDIT_MAX_ARMS grows, append 4 more rows (exp3_w_armN + thompson_mu_armN + thompson_prec_armN
+// + thompson_pulls_armN) to FOREACH_CALIB_LOG_COL above + bump this assert.
+static_assert(BANDIT_MAX_ARMS == 8,
+              "FOREACH_CALIB_LOG_COL hand-written for 8 arms; bump arm rows + BANDIT_MAX_ARMS together");
 
 //======================================================================================================
 // [AUTO-GENERATED COUNT]

@@ -23789,10 +23789,12 @@ e3_skip_load:;
               active == true && chosen == 5);
     }
 
-    // ─── Test D.2: FOREACH_CALIB_LOG_COL_COUNT == 9 (existing columns preserved) ───
+    // ─── Test D.2: FOREACH_CALIB_LOG_COL_COUNT == 47 (post-v5.15.5.F.4d Step 8 § M extension) ───
+    // Pre-§M: 9 cols (timestamp_us → was_win).
+    // Post-§M: 9 legacy + 6 bandit singletons + 32 per-arm (8 arms × 4 families) = 47.
     {
-        check("v5.14.10.D: FOREACH_CALIB_LOG_COL_COUNT == 9 (preserves pre-refactor column shape)",
-              FOREACH_CALIB_LOG_COL_COUNT == 9);
+        check("v5.15.5.F.4d Step 8 § M: FOREACH_CALIB_LOG_COL_COUNT == 47 (9 legacy + 6 bandit singletons + 32 per-arm)",
+              FOREACH_CALIB_LOG_COL_COUNT == 47);
     }
 
     // ─── Test D.3: CalibLog_EmitHeader produces byte-identical pre-refactor header ───
@@ -23807,28 +23809,42 @@ e3_skip_load:;
             fclose(f);
 
             FILE* rf = fopen(tmp_path, "r");
-            char buf[512] = {0};
+            char buf[2048] = {0};  // v5.15.5.F.4d Step 8 § M — bumped from 512 to fit 47-col ~768-byte header
             fread(buf, 1, sizeof(buf) - 1, rf);
             fclose(rf);
 
-            // Pre-refactor header literal (from OrderManager.hpp:1293-1295 BEFORE v5.14.10.D)
+            // v5.15.5.F.4d Step 8 § M — header extends 9 legacy + 6 bandit singletons + 32 per-arm
+            // (8 arms × {exp3_w, thompson_mu, thompson_prec, thompson_pulls}) = 47 cols.
+            // Legacy 9-col prefix UNCHANGED (operator parsers depend on byte order for first 9 fields).
             const char* EXPECTED =
                 "timestamp_us,slot,exit_predicted_flag,predicted_p,"
-                "entry_price,exit_price,gain_pct,realized_pnl_bps,was_win\n";
-            check("v5.14.10.D: CalibLog_EmitHeader byte-identical to pre-refactor literal (TECH_DEBT-010 close)",
+                "entry_price,exit_price,gain_pct,realized_pnl_bps,was_win,"
+                "bandit_algorithm,regime_id_at_emit,chosen_arm,reward_bps_attributed,"
+                "thompson_telemetry_arm,thompson_exp3_blend_alpha,"
+                "exp3_w_arm0,thompson_mu_arm0,thompson_prec_arm0,thompson_pulls_arm0,"
+                "exp3_w_arm1,thompson_mu_arm1,thompson_prec_arm1,thompson_pulls_arm1,"
+                "exp3_w_arm2,thompson_mu_arm2,thompson_prec_arm2,thompson_pulls_arm2,"
+                "exp3_w_arm3,thompson_mu_arm3,thompson_prec_arm3,thompson_pulls_arm3,"
+                "exp3_w_arm4,thompson_mu_arm4,thompson_prec_arm4,thompson_pulls_arm4,"
+                "exp3_w_arm5,thompson_mu_arm5,thompson_prec_arm5,thompson_pulls_arm5,"
+                "exp3_w_arm6,thompson_mu_arm6,thompson_prec_arm6,thompson_pulls_arm6,"
+                "exp3_w_arm7,thompson_mu_arm7,thompson_prec_arm7,thompson_pulls_arm7\n";
+            check("v5.15.5.F.4d Step 8 § M: CalibLog_EmitHeader 47-col format (9 legacy + 6 singleton + 32 per-arm)",
                   strcmp(buf, EXPECTED) == 0);
             unlink(tmp_path);
         }
     }
 
-    // ─── Test D.4: CALIB_LOG_EMIT_ROW byte-identical to pre-refactor fprintf ───
+    // ─── Test D.4: CALIB_LOG_EMIT_ROW post-§M 47-col format (legacy 9 + 6 singletons + 32 per-arm) ───
+    // v5.15.5.F.4d Step 8 § M — null-ezoo path: all per-arm Thompson cols + thompson_telemetry +
+    // blend_alpha emit 0.0/0u placeholders (test fixtures + non-ML cores; row format byte-stable).
     {
-        char tmp_path[] = "/tmp/foxml_v5_14_10_d_calib_row_XXXXXX";
+        char tmp_path[] = "/tmp/foxml_v5_15_5_F4d_calib_row_XXXXXX";
         int fd = mkstemp(tmp_path);
         if (fd >= 0) {
             FILE* f = fdopen(fd, "w");
 
-            // Set up the exact caller-scope variables CALIB_LOG_EMIT_ROW expects
+            // Set up caller-scope variables CALIB_LOG_EMIT_ROW expects (legacy 9-col contract)
             uint64_t ts_us = 1234567890123ULL;
             int pslot = 3;
             uint8_t pred_flag = 1;
@@ -23838,37 +23854,74 @@ e3_skip_load:;
             double gain_pct = 1.000891;
             double pnl_bps = 99.7531;
 
+            // v5.15.5.F.4d Step 7 § F + Step 8 § M — new caller-scope variables.
+            // bandit_active_state / bandit_regime / bandit_chosen_arm: decoded from
+            // Order::flags_packed bits 17-25 (here: literal test values).
+            // reward_bps_attributed: per-slot bandit reward from oms->bandit_reward_bps[pslot].
+            // regime_clamped: bounds-clamped bandit_regime per real_on_exit_calibration body.
+            // exp3_probs: per-arm probabilities (here: all zero since ezoo=null).
+            // ezoo / thompson_telemetry_arm / thompson_exp3_blend_alpha: null-ezoo path → 0/0.0.
+            int bandit_active_state         = 2;        // EXP3_OP_THOMPSON_GHOST
+            int bandit_regime               = 3;        // TRENDING-ish (within [0,NUM_REGIMES))
+            int bandit_chosen_arm           = 5;
+            double reward_bps_attributed    = 42.500000;
+            int thompson_telemetry_arm      = 0;        // null ezoo
+            double thompson_exp3_blend_alpha = 0.0;     // null core_cfg
+            int regime_clamped              = bandit_regime;
+            double exp3_probs[BANDIT_MAX_ARMS] = {0};
+            EnsembleModelZoo<64>* ezoo = nullptr;
+
             // v5.15.5.C.4 Phase J — was_win moved to cross-slot bitmap on OMS state.
-            // Mock OMS struct needs last_was_win_bitmap (uint16_t); FillRecord no
-            // longer carries was_win. CALIB_LOG_EMIT_ROW reads
-            // BITMAP_IS_SET(oms->last_was_win_bitmap, BITMAP_BIT_U16(pslot)).
+            // Mock OMS struct provides last_was_win_bitmap (uint16_t); macro expansion
+            // reads BITMAP_IS_SET(oms->last_was_win_bitmap, BITMAP_BIT_U16(pslot)).
             struct MockOms {
                 uint16_t last_was_win_bitmap;
             };
             MockOms mock_oms{};
             BITMAP_SET(mock_oms.last_was_win_bitmap, BITMAP_BIT_U16(pslot));
-            auto* oms = &mock_oms;   // CALIB_LOG_EMIT_ROW reads oms->last_was_win_bitmap
+            auto* oms = &mock_oms;
 
             CALIB_LOG_EMIT_ROW(f);
             fflush(f);
             fclose(f);
 
             FILE* rf = fopen(tmp_path, "r");
-            char buf[512] = {0};
+            char buf[2048] = {0};
             fread(buf, 1, sizeof(buf) - 1, rf);
             fclose(rf);
 
-            // Pre-refactor row format (from OrderManager.hpp:1008-1013 BEFORE v5.14.10.D):
-            //   "%llu,%d,%u,%.6f,%.4f,%.4f,%.6f,%.4f,%d\n"
-            char expected[256];
+            // Expected 47-col format: 9 legacy cols ("%llu,%d,%u,%.6f,%.4f,%.4f,%.6f,%.4f,%d") +
+            // 6 singletons ("%d,%d,%d,%.6f,%d,%.6f") + 32 per-arm ("%.6f,%.6f,%.6f,%u" × 8).
+            // Null-ezoo path: per-arm Thompson cols all 0.0 / 0u; exp3_probs[N]=0.0 for all N.
+            char expected[2048];
             snprintf(expected, sizeof(expected),
-                "%llu,%d,%u,%.6f,%.4f,%.4f,%.6f,%.4f,%d\n",
+                "%llu,%d,%u,%.6f,%.4f,%.4f,%.6f,%.4f,%d,"
+                "%d,%d,%d,%.6f,%d,%.6f,"
+                "%.6f,%.6f,%.6f,%u,"
+                "%.6f,%.6f,%.6f,%u,"
+                "%.6f,%.6f,%.6f,%u,"
+                "%.6f,%.6f,%.6f,%u,"
+                "%.6f,%.6f,%.6f,%u,"
+                "%.6f,%.6f,%.6f,%u,"
+                "%.6f,%.6f,%.6f,%u,"
+                "%.6f,%.6f,%.6f,%u\n",
                 (unsigned long long)ts_us, (int)pslot,
                 (unsigned)pred_flag, pred_p,
                 entry_d_calib, exit_d_calib, gain_pct, pnl_bps,
-                BITMAP_IS_SET(mock_oms.last_was_win_bitmap, BITMAP_BIT_U16(pslot)) ? 1 : 0);  // v5.15.5.C.4 Phase J
+                BITMAP_IS_SET(mock_oms.last_was_win_bitmap, BITMAP_BIT_U16(pslot)) ? 1 : 0,
+                bandit_active_state, bandit_regime, bandit_chosen_arm,
+                reward_bps_attributed, thompson_telemetry_arm, thompson_exp3_blend_alpha,
+                exp3_probs[0], 0.0, 0.0, 0u,
+                exp3_probs[1], 0.0, 0.0, 0u,
+                exp3_probs[2], 0.0, 0.0, 0u,
+                exp3_probs[3], 0.0, 0.0, 0u,
+                exp3_probs[4], 0.0, 0.0, 0u,
+                exp3_probs[5], 0.0, 0.0, 0u,
+                exp3_probs[6], 0.0, 0.0, 0u,
+                exp3_probs[7], 0.0, 0.0, 0u);
 
-            check("v5.14.10.D: CALIB_LOG_EMIT_ROW byte-identical to pre-refactor fprintf (TECH_DEBT-010 close)",
+            check("v5.15.5.F.4d Step 8 § M: CALIB_LOG_EMIT_ROW 47-col format (null-ezoo path; "
+                  "legacy 9 + 6 singletons + 32 per-arm w/ 0.0/0u placeholders)",
                   strcmp(buf, expected) == 0);
             unlink(tmp_path);
         }
