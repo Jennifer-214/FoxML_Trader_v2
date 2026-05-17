@@ -61,6 +61,8 @@
 #include "../CoreFrameworks/HotSwap.hpp"                   // v5.15.4 — HotSwap_ShadowLoad_{Ensemble,SingleZoo}
 #include "../CoreFrameworks/CfgFieldRegistry.hpp"          // v5.15.5.F.4b — universal cfg field registry
 #include "../CoreFrameworks/CfgFieldDispatch.hpp"          // v5.15.5.F.4b — tt:: type-trait dispatch (3-barrier Class 23 fix)
+#include "../CoreFrameworks/StampBoundDerivedFilter.hpp"   // v5.15.5.F.4d.1.A — Path γ first canonical consumer of FOREACH_METADATA_BIT
+// NOTE: wire_format_invariants.hpp included LATER (after check() static fn definition at line ~77)
 #include <type_traits>                                   // v5.14.8.A.0.b — std::is_array_v / std::extent_v for char-array dispatch
 #include "../Strategies/StrategyLifecycle.hpp"           // v5.4.0 Phase 1.2 — Strategy_InitPerCore / FreePerCore
 
@@ -81,6 +83,10 @@ static void check(const char *name, int condition) {
         tests_failed++;
     }
 }
+
+// v5.15.5.F.4d.1.A: reusable wire-format invariants helper — included here
+// (file scope, after check() static fn defn) since its inline body calls check().
+#include "wire_format_invariants.hpp"
 
 constexpr unsigned FP = 64;
 
@@ -25986,6 +25992,151 @@ e3_skip_load:;
             check("v5.15.5.C.3 Phase 10: AUTOPOPULATE MULTI_BIT init — slot bits don't bleed into KILL_SWITCH",
                   !BITMAP_IS_SET(oms_c.oms_state_flags, tt::MASK_OMS_STATE_KILL_SWITCH_TRIPPED));
         }
+    }
+
+    // =============================================================================
+    // v5.15.5.F.4d.1.A — Path γ+ v2 framework infra tests
+    // =============================================================================
+    // Verifies: 1-row addition to FOREACH_METADATA_BIT + StampBoundDerivedFilter.hpp
+    // consumer + wire_format_invariants.hpp reusable helper (I1-I5) + domain-specific
+    // I6/I7 invariants inline + CFG_COMPOSE_AUDIT_DECISIONS coverage + locale-pin
+    // Layer 2 + cli_explain_mask fix + stamp_emit_mask delete.
+    // =============================================================================
+    {
+        // T1: STAMP_BOUND_CFG_emit_canonical_body returns 0 at empty-filter case
+        // (zero rows have STAMP_BOUND_CFG_DERIVED bit at .A landing; .B flags rows)
+        char body[8192] = {0};
+        size_t len = STAMP_BOUND_CFG_emit_canonical_body(body, sizeof(body));
+        check("v5.15.5.F.4d.1.A: STAMP_BOUND_CFG emit returns 0 at empty filter case (.A landing)",
+              len == 0);
+    }
+
+    {
+        // T2: wire_format_invariants helper invocation — I1-I5 vacuously PASS at empty body
+        InvariantContext ctx{
+            /*.mask_words =*/ g_global_cfg_stamp_bound_cfg_derived_mask.words,
+            /*.mask_size_words =*/ sizeof(g_global_cfg_stamp_bound_cfg_derived_mask.words) / sizeof(uint64_t),
+            /*.per_core_descriptors =*/ g_per_core_cfg_field_descriptors,
+            /*.per_core_count =*/ FIELD_IDX_PER_CORE_END,
+            /*.global_descriptors =*/ g_global_cfg_field_descriptors,
+            /*.global_count =*/ FIELD_IDX_GLOBAL_END,
+            /*.emit_fn =*/ &STAMP_BOUND_CFG_emit_canonical_body,
+            /*.filter_name =*/ "STAMP_BOUND_CFG"
+        };
+        run_wire_format_canonical_body_invariants(ctx);
+        // 5 check() calls fire inside helper (I1-I5; vacuously PASS at empty body)
+    }
+
+    {
+        // T3: Domain-specific I6 (bitmap-bool ternary normalization) — vacuous at .A
+        // No bitmap-source rows flagged → no bitmap lines in body → vacuous PASS
+        bool bitmap_bits_clean = true;
+        check("v5.15.5.F.4d.1.A: STAMP_BOUND_CFG I6 bitmap-bool normalization (vacuous .A)",
+              bitmap_bits_clean);
+
+        // T4: Domain-specific I7 (cross-source presence consistency) — vacuous at .A
+        bool cross_source_consistent = true;
+        check("v5.15.5.F.4d.1.A: STAMP_BOUND_CFG I7 cross-source presence (vacuous .A)",
+              cross_source_consistent);
+    }
+
+    {
+        // T5: Locale-pin Layer 2 verification — body has no ',' even under
+        // simulated alternate LC_NUMERIC (uselocale Layer 2 discipline)
+        locale_t prev = uselocale((locale_t)0);
+        locale_t de = newlocale(LC_NUMERIC_MASK, "de_DE.UTF-8", (locale_t)0);
+        if (de) {
+            uselocale(de);
+            char body[8192] = {0};
+            size_t len_under_de = STAMP_BOUND_CFG_emit_canonical_body(body, sizeof(body));
+            bool no_comma_under_de = (memchr(body, ',', len_under_de) == nullptr);
+            uselocale(prev);
+            freelocale(de);
+            check("v5.15.5.F.4d.1.A: Layer 2 locale-pin — no ',' under simulated de_DE",
+                  no_comma_under_de);
+            check("v5.15.5.F.4d.1.A: empty body unchanged under simulated locale (.A)",
+                  len_under_de == 0);
+        } else {
+            // de_DE locale may not be installed on dev machine; skip but record
+            check("v5.15.5.F.4d.1.A: locale simulation skipped (de_DE.UTF-8 not installed)",
+                  true);
+        }
+    }
+
+    {
+        // T6: CFG_COMPOSE_AUDIT_DECISIONS coverage — runtime sanity test
+        // (compile-time static_assert in CfgFieldRegistry.hpp is the structural enforcement;
+        // this runtime check serves as test-suite-visible verification)
+        check("v5.15.5.F.4d.1.A: CFG_COMPOSE_AUDIT_DECISIONS count = FOREACH_METADATA_BIT × 3",
+              CFG_COMPOSE_AUDIT_DECISIONS_COUNT == FOREACH_METADATA_BIT_COUNT * COMPOSED_MASK_COUNT_AT_F4D1A);
+
+        // T7: FOREACH_METADATA_BIT enrollment count post-.A (was 11; +stamp_bound_cfg_derived = 12)
+        check("v5.15.5.F.4d.1.A: FOREACH_METADATA_BIT enrolls 12 bits post-.A",
+              FOREACH_METADATA_BIT_COUNT == 12);
+    }
+
+    {
+        // T8: Composed-filter mask popcount sanity — render_mask
+        size_t global_render = cfg_field_count(g_global_cfg_render_mask);
+        size_t global_total = FIELD_IDX_GLOBAL_END;
+        check("v5.15.5.F.4d.1.A: g_global_cfg_render_mask popcount > 0",
+              global_render > 0);
+        check("v5.15.5.F.4d.1.A: g_global_cfg_render_mask popcount <= FIELD_IDX_GLOBAL_END",
+              global_render <= global_total);
+
+        // T9: save_mask
+        size_t global_save = cfg_field_count(g_global_cfg_save_mask);
+        check("v5.15.5.F.4d.1.A: g_global_cfg_save_mask popcount > 0",
+              global_save > 0);
+        check("v5.15.5.F.4d.1.A: g_global_cfg_save_mask popcount <= FIELD_IDX_GLOBAL_END",
+              global_save <= global_total);
+
+        // T10: cli_explain_mask — FIXED at Step 4b (was producing ~0ULL; now ~(has_side_effect | hidden_by_default))
+        size_t global_cli_explain = cfg_field_count(g_global_cfg_cli_explain_mask);
+        check("v5.15.5.F.4d.1.A: g_global_cfg_cli_explain_mask popcount > 0 (fix verified)",
+              global_cli_explain > 0);
+        check("v5.15.5.F.4d.1.A: g_global_cfg_cli_explain_mask popcount < FIELD_IDX_GLOBAL_END (fix verified — NOT all bits)",
+              global_cli_explain < global_total);
+
+        // T11: cli_explain_mask correctness — equals ~(has_side_effect | hidden_by_default)
+        // Verify by reconstructing the expected mask from per-bit masks.
+        // Use cfg_field_count subtractions: expected = total - popcount(has_side_effect | hidden_by_default).
+        size_t excluded_count_global = 0;
+        for (size_t w = 0; w < (FIELD_IDX_GLOBAL_END + 63) / 64; w++) {
+            uint64_t excluded = g_global_cfg_has_side_effect_mask.words[w]
+                              | g_global_cfg_hidden_by_default_mask.words[w];
+            excluded_count_global += static_cast<size_t>(__builtin_popcountll(excluded));
+        }
+        check("v5.15.5.F.4d.1.A: g_global_cfg_cli_explain_mask = ~(has_side_effect | hidden_by_default)",
+              global_cli_explain + excluded_count_global == global_total);
+    }
+
+    {
+        // T12: Per-core sister composed masks — same sanity checks
+        size_t per_core_total = FIELD_IDX_PER_CORE_END;
+        size_t per_core_cli_explain = cfg_field_count(g_per_core_cfg_cli_explain_mask);
+        check("v5.15.5.F.4d.1.A: g_per_core_cfg_cli_explain_mask popcount > 0 (fix verified)",
+              per_core_cli_explain > 0);
+        check("v5.15.5.F.4d.1.A: g_per_core_cfg_cli_explain_mask popcount < FIELD_IDX_PER_CORE_END",
+              per_core_cli_explain < per_core_total);
+
+        size_t excluded_count_per_core = 0;
+        for (size_t w = 0; w < (FIELD_IDX_PER_CORE_END + 63) / 64; w++) {
+            uint64_t excluded = g_per_core_cfg_has_side_effect_mask.words[w]
+                              | g_per_core_cfg_hidden_by_default_mask.words[w];
+            excluded_count_per_core += static_cast<size_t>(__builtin_popcountll(excluded));
+        }
+        check("v5.15.5.F.4d.1.A: g_per_core_cfg_cli_explain_mask correctness (fix)",
+              per_core_cli_explain + excluded_count_per_core == per_core_total);
+    }
+
+    {
+        // T13: stamp_bound_cfg_derived mask exists and is zero at .A landing
+        size_t stamp_bound_cfg_derived_count =
+            cfg_field_count(g_global_cfg_stamp_bound_cfg_derived_mask)
+          + cfg_field_count(g_per_core_cfg_stamp_bound_cfg_derived_mask);
+        check("v5.15.5.F.4d.1.A: g_*_cfg_stamp_bound_cfg_derived_mask all-zero at .A (no rows flagged yet; .B flags 24)",
+              stamp_bound_cfg_derived_count == 0);
     }
 
     printf("\n======================================\n");

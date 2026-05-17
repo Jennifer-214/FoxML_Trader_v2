@@ -1062,17 +1062,18 @@ constexpr size_t cfg_field_count(const CfgMaskArray<N_WORDS>& mask) {
 // .F.4c.3 — PER_CORE_OK removed (redundant under per-core authoritative registry).
 // Each remaining row adds a per-bit precomputed mask array per registry.
 #define FOREACH_METADATA_BIT(X)                                            \
-    X(restart_required,     RESTART_REQUIRED)                              \
-    X(safety_critical,      SAFETY_CRITICAL)                               \
-    X(deprecated,           DEPRECATED)                                    \
-    X(stamp_bound,          STAMP_BOUND)                                   \
-    X(hidden_by_default,    HIDDEN_BY_DEFAULT)                             \
-    X(is_secret,            IS_SECRET)                                     \
-    X(is_boot_only,         IS_BOOT_ONLY)                                  \
-    X(affects_stamp_parity, AFFECTS_STAMP_PARITY)                          \
-    X(log_value_forbidden,  LOG_VALUE_FORBIDDEN)                           \
-    X(has_side_effect,      HAS_SIDE_EFFECT)                               \
-    X(warn_on_clamp,        WARN_ON_CLAMP)
+    X(restart_required,         RESTART_REQUIRED)                          \
+    X(safety_critical,          SAFETY_CRITICAL)                           \
+    X(deprecated,               DEPRECATED)                                \
+    X(stamp_bound,              STAMP_BOUND)                               \
+    X(hidden_by_default,        HIDDEN_BY_DEFAULT)                         \
+    X(is_secret,                IS_SECRET)                                 \
+    X(is_boot_only,             IS_BOOT_ONLY)                              \
+    X(affects_stamp_parity,     AFFECTS_STAMP_PARITY)                      \
+    X(log_value_forbidden,      LOG_VALUE_FORBIDDEN)                       \
+    X(has_side_effect,          HAS_SIDE_EFFECT)                           \
+    X(warn_on_clamp,            WARN_ON_CLAMP)                              \
+    X(stamp_bound_cfg_derived,  STAMP_BOUND_CFG_DERIVED)  /* v5.15.5.F.4d.1.A — Path γ first canonical consumer */
 
 // Per-registry per-bit precomputed mask arrays — X-macro generated.
 // Each lands in .rodata as a compile-time constant.
@@ -1087,6 +1088,143 @@ FOREACH_METADATA_BIT(X_GEN_GLOBAL_MASK)
         cfg_compute_mask<CfgFieldDescriptor::BITNAME>(g_per_core_cfg_field_descriptors);
 FOREACH_METADATA_BIT(X_GEN_PER_CORE_MASK)
 #undef X_GEN_PER_CORE_MASK
+
+//------------------------------------------------------------------------------
+// [H16 COMPILE-TIME ENFORCEMENT — Path γ correction (v5.15.5.F.4d.1.A)]
+//------------------------------------------------------------------------------
+// Per DESIGN_SPECS/metadata-bit-driven-derived-filter-framework.md v1.2 Path γ
+// correction (2026-05-17). Every metadata bit MUST be either enrolled in
+// FOREACH_METADATA_BIT (auto-generates mask infrastructure for consumers) OR
+// in EXEMPT_FROM_FOREACH_METADATA_BIT list with rationale. Sister to existing
+// bitmap-overflow guard via static_assert(WARN_ON_CLAMP < (1u << 16)) below.
+//
+// Compile-time mechanism preferred over runtime Python CI per
+// DESIGN_SPECS/registry-coverage-ci-check-pattern.md § "Mechanism choice:
+// compile-time vs runtime" (when source data is X-macro-driven).
+//------------------------------------------------------------------------------
+
+// Gather enrolled bits via X-macro reduction over FOREACH_METADATA_BIT:
+#define X_GATHER_METADATA_BITS(lname, BITNAME) \
+    | static_cast<uint16_t>(CfgFieldDescriptor::BITNAME)
+inline constexpr uint16_t ENROLLED_METADATA_BITS =
+    (0u FOREACH_METADATA_BIT(X_GATHER_METADATA_BITS));
+#undef X_GATHER_METADATA_BITS
+
+// Consumer-side-only bits — no mask infrastructure needed:
+//   NO_FLAT_FIELD: struct-gen metadata only; no iteration consumer (per WIP2d-1.B.0)
+// MANUAL_PARSER bit IS enrolled (as has_side_effect alias mapping to same bit 10
+//   per legacy alias at line ~156 — alias makes HAS_SIDE_EFFECT name still work).
+inline constexpr uint16_t EXEMPT_FROM_FOREACH_METADATA_BIT =
+      CfgFieldDescriptor::NO_FLAT_FIELD;
+
+// All metadata bits in use (update when new bit added to MetadataFlag enum):
+inline constexpr uint16_t ALL_METADATA_BITS_IN_USE =
+      CfgFieldDescriptor::RESTART_REQUIRED
+    | CfgFieldDescriptor::SAFETY_CRITICAL
+    | CfgFieldDescriptor::DEPRECATED
+    | CfgFieldDescriptor::STAMP_BOUND
+    | CfgFieldDescriptor::HIDDEN_BY_DEFAULT
+    | CfgFieldDescriptor::IS_SECRET
+    | CfgFieldDescriptor::IS_BOOT_ONLY
+    | CfgFieldDescriptor::AFFECTS_STAMP_PARITY
+    | CfgFieldDescriptor::LOG_VALUE_FORBIDDEN
+    | CfgFieldDescriptor::MANUAL_PARSER       // bit 10; HAS_SIDE_EFFECT alias same bit
+    | CfgFieldDescriptor::WARN_ON_CLAMP
+    | CfgFieldDescriptor::NO_FLAT_FIELD
+    | CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED;  // bit 13 (v5.15.5.F.4d reserved; enrolled at .F.4d.1.A)
+
+static_assert(
+    (ALL_METADATA_BITS_IN_USE & ~(ENROLLED_METADATA_BITS | EXEMPT_FROM_FOREACH_METADATA_BIT)) == 0u,
+    "H16 violated: a CfgFieldDescriptor::MetadataFlag bit is in use but not "
+    "enrolled in FOREACH_METADATA_BIT AND not in EXEMPT_FROM_FOREACH_METADATA_BIT. "
+    "Add row to FOREACH_METADATA_BIT (preferred; auto-generates mask infrastructure) "
+    "OR add to EXEMPT_FROM_FOREACH_METADATA_BIT with rationale comment."
+);
+
+//------------------------------------------------------------------------------
+// [CFG_COMPOSE_AUDIT_DECISIONS — composition audit checklist (Gap 1 mitigation)]
+//------------------------------------------------------------------------------
+// Per DESIGN_SPECS/composed-filter-mask-pattern.md Stage 2 DRAFT § "Step 3
+// composition audit checklist". Adding a new metadata bit to FOREACH_METADATA_BIT
+// FORCES explicit decision per existing composed mask (Gap 1 pre-emptive
+// closure: composition discipline blindspot).
+//
+// Tuple: X(composed_mask_name, metadata_bit_lname, DECISION)
+//   COMPOSE_INCLUDE: mask INCLUDES rows where bit is set
+//   COMPOSE_EXCLUDE: mask EXCLUDES rows where bit is set
+//   COMPOSE_NA:      bit is irrelevant to this composed mask
+//
+// Composed masks at HEAD (post-`.F.4d.1.A` Path γ+ v2):
+//   render_mask      = ~(is_boot_only | hidden_by_default)
+//   save_mask        = ~has_side_effect (bit 10 / MANUAL_PARSER)
+//   cli_explain_mask = ~(has_side_effect | hidden_by_default)  [fixed at .A Step 4b]
+//
+// 12 enrolled bits × 3 composed masks = 36 cells.
+//------------------------------------------------------------------------------
+
+#define CFG_COMPOSE_AUDIT_DECISIONS(X)                                              \
+    /* render_mask = ~(is_boot_only | hidden_by_default) */                         \
+    X(render_mask, restart_required,         COMPOSE_NA)                            \
+    X(render_mask, safety_critical,          COMPOSE_NA)                            \
+    X(render_mask, deprecated,               COMPOSE_NA)                            \
+    X(render_mask, stamp_bound,              COMPOSE_NA)                            \
+    X(render_mask, hidden_by_default,        COMPOSE_EXCLUDE)                       \
+    X(render_mask, is_secret,                COMPOSE_NA)                            \
+    X(render_mask, is_boot_only,             COMPOSE_EXCLUDE)                       \
+    X(render_mask, affects_stamp_parity,     COMPOSE_NA)                            \
+    X(render_mask, log_value_forbidden,      COMPOSE_NA)                            \
+    X(render_mask, has_side_effect,          COMPOSE_NA)                            \
+    X(render_mask, warn_on_clamp,            COMPOSE_NA)                            \
+    X(render_mask, stamp_bound_cfg_derived,  COMPOSE_NA)                            \
+    /* save_mask = ~has_side_effect */                                              \
+    X(save_mask, restart_required,           COMPOSE_NA)                            \
+    X(save_mask, safety_critical,            COMPOSE_NA)                            \
+    X(save_mask, deprecated,                 COMPOSE_NA)                            \
+    X(save_mask, stamp_bound,                COMPOSE_NA)                            \
+    X(save_mask, hidden_by_default,          COMPOSE_NA)                            \
+    X(save_mask, is_secret,                  COMPOSE_NA)                            \
+    X(save_mask, is_boot_only,               COMPOSE_NA)                            \
+    X(save_mask, affects_stamp_parity,       COMPOSE_NA)                            \
+    X(save_mask, log_value_forbidden,        COMPOSE_NA)                            \
+    X(save_mask, has_side_effect,            COMPOSE_EXCLUDE)                       \
+    X(save_mask, warn_on_clamp,              COMPOSE_NA)                            \
+    X(save_mask, stamp_bound_cfg_derived,    COMPOSE_NA)                            \
+    /* cli_explain_mask = ~(has_side_effect | hidden_by_default) [fixed .A Step 4b] */ \
+    X(cli_explain_mask, restart_required,         COMPOSE_NA)                       \
+    X(cli_explain_mask, safety_critical,          COMPOSE_NA)                       \
+    X(cli_explain_mask, deprecated,               COMPOSE_NA)                       \
+    X(cli_explain_mask, stamp_bound,              COMPOSE_NA)                       \
+    X(cli_explain_mask, hidden_by_default,        COMPOSE_EXCLUDE)                  \
+    X(cli_explain_mask, is_secret,                COMPOSE_NA)                       \
+    X(cli_explain_mask, is_boot_only,             COMPOSE_NA)                       \
+    X(cli_explain_mask, affects_stamp_parity,     COMPOSE_NA)                       \
+    X(cli_explain_mask, log_value_forbidden,      COMPOSE_NA)                       \
+    X(cli_explain_mask, has_side_effect,          COMPOSE_EXCLUDE)                  \
+    X(cli_explain_mask, warn_on_clamp,            COMPOSE_NA)                       \
+    X(cli_explain_mask, stamp_bound_cfg_derived,  COMPOSE_NA)
+
+// Compile-time count verification:
+#define X_COUNT_METADATA_BIT(lname, BITNAME) +1
+inline constexpr size_t FOREACH_METADATA_BIT_COUNT =
+    (0 FOREACH_METADATA_BIT(X_COUNT_METADATA_BIT));
+#undef X_COUNT_METADATA_BIT
+
+#define X_COUNT_COMPOSE_DECISION(mask, bit, decision) +1
+inline constexpr size_t CFG_COMPOSE_AUDIT_DECISIONS_COUNT =
+    (0 CFG_COMPOSE_AUDIT_DECISIONS(X_COUNT_COMPOSE_DECISION));
+#undef X_COUNT_COMPOSE_DECISION
+
+inline constexpr size_t COMPOSED_MASK_COUNT_AT_F4D1A = 3;  // render + save + cli_explain
+
+static_assert(
+    CFG_COMPOSE_AUDIT_DECISIONS_COUNT == FOREACH_METADATA_BIT_COUNT * COMPOSED_MASK_COUNT_AT_F4D1A,
+    "CFG_COMPOSE_AUDIT_DECISIONS row count mismatch. Each metadata bit MUST "
+    "have exactly one decision row per composed mask. When adding new bit to "
+    "FOREACH_METADATA_BIT, add 3 rows to CFG_COMPOSE_AUDIT_DECISIONS (one per "
+    "composed mask: render / save / cli_explain) explicitly choosing INCLUDE / "
+    "EXCLUDE / NA. When adding new composed mask, update "
+    "COMPOSED_MASK_COUNT_AT_F4D1A + add row per existing metadata bit."
+);
 
 //------------------------------------------------------------------------------
 // [PER-LivesInStruct-VALUE BITMAP MASKS — per-registry application]
@@ -1192,18 +1330,22 @@ constexpr CfgMaskArray<(FIELD_IDX_GLOBAL_END + 63) / 64> cfg_compose_global_save
 }
 inline constexpr auto g_global_cfg_save_mask = cfg_compose_global_save_mask();
 
-inline constexpr auto g_global_cfg_stamp_emit_mask = g_global_cfg_stamp_bound_mask;
+// v5.15.5.F.4d.1.A Step 4c — g_global_cfg_stamp_emit_mask alias DELETED (was pure
+// alias of g_global_cfg_stamp_bound_mask; zero consumers verified via rg).
 
+// v5.15.5.F.4d.1.A Step 4b — cli_explain_mask composition FIXED. Was producing
+// ~0ULL (all bits set) instead of documented ~(has_side_effect | hidden_by_default).
+// Bug existed pre-Path γ; no production impact today (zero consumers); fix
+// pre-emptive so .F.4e CLI --explain consumer reads correct mask.
 constexpr CfgMaskArray<(FIELD_IDX_GLOBAL_END + 63) / 64> cfg_compose_global_cli_explain_mask() {
     constexpr size_t WORDS = (FIELD_IDX_GLOBAL_END + 63) / 64;
     CfgMaskArray<WORDS> out = {};
-    for (size_t i = 0; i < WORDS - 1; ++i) {
-        out.words[i] = ~0ULL;
+    for (size_t i = 0; i < WORDS; ++i) {
+        out.words[i] = ~(g_global_cfg_has_side_effect_mask.words[i] | g_global_cfg_hidden_by_default_mask.words[i]);
     }
-    if constexpr ((FIELD_IDX_GLOBAL_END % 64) == 0) {
-        out.words[WORDS - 1] = ~0ULL;
-    } else {
-        out.words[WORDS - 1] = (1ULL << (FIELD_IDX_GLOBAL_END % 64)) - 1ULL;
+    if constexpr ((FIELD_IDX_GLOBAL_END % 64) != 0) {
+        constexpr uint64_t last_word_valid = (1ULL << (FIELD_IDX_GLOBAL_END % 64)) - 1ULL;
+        out.words[WORDS - 1] &= last_word_valid;
     }
     return out;
 }
@@ -1239,18 +1381,20 @@ constexpr CfgMaskArray<(FIELD_IDX_PER_CORE_END + 63) / 64> cfg_compose_per_core_
 }
 inline constexpr auto g_per_core_cfg_save_mask = cfg_compose_per_core_save_mask();
 
-inline constexpr auto g_per_core_cfg_stamp_emit_mask = g_per_core_cfg_stamp_bound_mask;
+// v5.15.5.F.4d.1.A Step 4c — g_per_core_cfg_stamp_emit_mask alias DELETED (was
+// pure alias of g_per_core_cfg_stamp_bound_mask; zero consumers verified).
 
+// v5.15.5.F.4d.1.A Step 4b — cli_explain_mask composition FIXED per-core sister
+// to global fix. Was producing ~0ULL; corrected to documented composition.
 constexpr CfgMaskArray<(FIELD_IDX_PER_CORE_END + 63) / 64> cfg_compose_per_core_cli_explain_mask() {
     constexpr size_t WORDS = (FIELD_IDX_PER_CORE_END + 63) / 64;
     CfgMaskArray<WORDS> out = {};
-    for (size_t i = 0; i < WORDS - 1; ++i) {
-        out.words[i] = ~0ULL;
+    for (size_t i = 0; i < WORDS; ++i) {
+        out.words[i] = ~(g_per_core_cfg_has_side_effect_mask.words[i] | g_per_core_cfg_hidden_by_default_mask.words[i]);
     }
-    if constexpr ((FIELD_IDX_PER_CORE_END % 64) == 0) {
-        out.words[WORDS - 1] = ~0ULL;
-    } else {
-        out.words[WORDS - 1] = (1ULL << (FIELD_IDX_PER_CORE_END % 64)) - 1ULL;
+    if constexpr ((FIELD_IDX_PER_CORE_END % 64) != 0) {
+        constexpr uint64_t last_word_valid = (1ULL << (FIELD_IDX_PER_CORE_END % 64)) - 1ULL;
+        out.words[WORDS - 1] &= last_word_valid;
     }
     return out;
 }

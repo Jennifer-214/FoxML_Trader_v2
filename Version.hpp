@@ -5,9 +5,33 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d"
-// .F.4d (v5.15.5.F.4d) MERGED — Thread B (bandit/thompson cohort) + Thread A foundation + 3
-// substantial TECH_DEBT fold-ins (2026-05-16). Ship close.
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.A"
+// .F.4d.1.A (v5.15.5.F.4d.1.A) — Path γ+ v2 framework infra ship (2026-05-17).
+// First sub-ship of v5.15.5.F.4d.1 umbrella (TECH_DEBT-085 Thread A FULL framework
+// consolidation). Path γ correction landed at pre-coding audit gate: `.A` v1.2
+// originally proposed building DerivedFilterFramework.hpp parallel walker macros +
+// DerivedFilterRoster.hpp Level-1 meta-registry. /merge-scan caught the structural
+// critique: proposed runtime walker duplicates existing compile-time infrastructure
+// at CfgFieldRegistry.hpp:1020-1159 (FOREACH_METADATA_BIT + cfg_compute_mask +
+// CFG_FIELD_FOR_EACH_SET_BIT auto-gen masks + branchless TZCNT; since .F.4c.3).
+// Path γ pivots: 1-row addition to FOREACH_METADATA_BIT + ~50 LOC consumer over
+// existing infra + reusable wire_format invariants helper + composition audit registry
+// + H16 compile-time static_assert + cli_explain_mask bug fix + stamp_emit_mask alias
+// delete + 3 DRIFT-MAJOR DESIGN_SPECs status amendments + 2 NEW DESIGN_SPECs Stage 3
+// first reference (composed-filter-mask-pattern + wire-format-canonical-body-invariants-
+// helper) + 6 TECH_DEBT entries opened (-087/-088/-089/-090/-091/-092). Per Caramel
+// triage 2026-05-17 + auto-pick-future-oriented principle + per-sub-ship cycle locked.
+//
+// Tests: 3196 controller_test passed (3174 + 22 new) + 17 depth_recorder_test GREEN.
+// 5 binaries (test/gui/suite/tsan/asan) clean. Hot path UNTOUCHED (calls_graph_diff
+// empty). CI: check_meta_registry.py 3 checks PASS (63/63 enrolled);
+// check_per_core_registry_integrity.py 6 structural checks PASS (0 Class 27 exemptions).
+//
+// Closes Class 11/14/18/21/22 structurally at framework layer; strengthens Class 28
+// (branchless TZCNT); pre-emptive Gap 1 closure (composition discipline blindspot).
+// .F.4d MERGED predecessor (engine 545b087 + GPG-signed tag).
+// .F.4d.1.B successor (migration + consumer cycle).
+// Sub-master: plans/v5.15-live-readiness/subplans/2026-05-16-v5.15.5.F.4d.1-thread-a-framework-full.md
 //
 // Thread B (FULL — bandit/thompson 5-state + dispatch tables + Class 24/28/29/30 closures):
 //   1. Pattern 5 Thompson_Update branchless dispatch + sink fns (noop_thompson_update +
