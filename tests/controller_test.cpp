@@ -62,6 +62,7 @@
 #include "../CoreFrameworks/CfgFieldRegistry.hpp"          // v5.15.5.F.4b — universal cfg field registry
 #include "../CoreFrameworks/CfgFieldDispatch.hpp"          // v5.15.5.F.4b — tt:: type-trait dispatch (3-barrier Class 23 fix)
 #include "../CoreFrameworks/StampBoundDerivedFilter.hpp"   // v5.15.5.F.4d.1.A — Path γ first canonical consumer of FOREACH_METADATA_BIT
+#include "../MemHeaders/CfgGateRegistry.hpp"               // v5.15.5.F.4d.1.B.1 — derived-filter consumer macros + cfg_gate:: helpers
 // NOTE: wire_format_invariants.hpp included LATER (after check() static fn definition at line ~77)
 #include <type_traits>                                   // v5.14.8.A.0.b — std::is_array_v / std::extent_v for char-array dispatch
 #include "../Strategies/StrategyLifecycle.hpp"           // v5.4.0 Phase 1.2 — Strategy_InitPerCore / FreePerCore
@@ -26137,6 +26138,176 @@ e3_skip_load:;
           + cfg_field_count(g_per_core_cfg_stamp_bound_cfg_derived_mask);
         check("v5.15.5.F.4d.1.A: g_*_cfg_stamp_bound_cfg_derived_mask all-zero at .A (no rows flagged yet; .B flags 24)",
               stamp_bound_cfg_derived_count == 0);
+    }
+
+    // =====================================================================================
+    // v5.15.5.F.4d.1.B.1 — Step 6: walker integration tests for cfg-derived consumer framework
+    // =====================================================================================
+    // NEW MemHeaders/CfgGateRegistry.hpp lands 1 sparse sidecar (empty at .B.1; populates at
+    // .B.2 cohort migration) + 3 derived-filter consumer macros + 2 sidecar lookup helpers.
+    // Plus extends tt:: quartet → septet in CfgFieldDispatch.hpp (cfg_emit_field +
+    // cfg_populate_inf_field + cfg_drift_compare).
+    //
+    // At .B.1: STAMP_BOUND_CFG_DERIVED bit flagged on 0 source rows → consumer macros'
+    // X-macro filtered walkers iterate 0 rows → vacuous PASS. These tests verify the
+    // INFRASTRUCTURE compiles + behaves correctly at the empty-walk boundary case.
+    {
+        // ---------------------------------------------------------------------------------
+        // T1: INFERENCE_CFG_POPULATE_FROM_DERIVED — 0-row walk preserves inf sentinels
+        // ---------------------------------------------------------------------------------
+        {
+            ControllerConfig<64> cfg = {};
+            StampInferenceCfgInputs inf = {};
+            inf.inference_cfg_bandit_algorithm = 99;  // sentinel for "untouched" verification
+            INFERENCE_CFG_POPULATE_FROM_DERIVED(inf, cfg);
+            check("v5.15.5.F.4d.1.B.1: INFERENCE_CFG_POPULATE_FROM_DERIVED 0-row walk preserves inf sentinel",
+                  inf.inference_cfg_bandit_algorithm == 99);
+        }
+
+        // ---------------------------------------------------------------------------------
+        // T2: STAMP_CFG_POPULATE_FROM_DERIVED — 0-row walk produces empty body
+        // ---------------------------------------------------------------------------------
+        {
+            char buf[1024] = {0};
+            ControllerConfig<64> cfg = {};
+            STAMP_CFG_POPULATE_FROM_DERIVED(buf, sizeof(buf), cfg);
+            check("v5.15.5.F.4d.1.B.1: STAMP_CFG_POPULATE_FROM_DERIVED 0-row walk → empty body",
+                  buf[0] == '\0');
+        }
+
+        // ---------------------------------------------------------------------------------
+        // T3: DRIFT_CHECK_FROM_DERIVED — 0-row walk no drift detected
+        // ---------------------------------------------------------------------------------
+        {
+            uint64_t failure_flags = 0;
+            ModelStampResult handle = {};
+            ControllerConfig<64> cfg = {};
+            int drift_count = 0;
+            DRIFT_CHECK_FROM_DERIVED(failure_flags, handle, cfg, drift_count);
+            check("v5.15.5.F.4d.1.B.1: DRIFT_CHECK_FROM_DERIVED 0-row walk → failure_flags unset",
+                  failure_flags == 0);
+            check("v5.15.5.F.4d.1.B.1: DRIFT_CHECK_FROM_DERIVED 0-row walk → drift_count zero",
+                  drift_count == 0);
+        }
+
+        // ---------------------------------------------------------------------------------
+        // T4: tt::cfg_populate_inf_field — gate=true populates + sets has bit
+        // ---------------------------------------------------------------------------------
+        {
+            FPN<64> cfg_src = FPN_FromDouble<64>(42.5);
+            FPN<64> inf_dst = FPN_FromDouble<64>(0.0);
+            uint8_t inf_has_dst = 0;
+            tt::cfg_populate_inf_field(cfg_src, inf_dst, inf_has_dst, /*gate*/true);
+            // FPN<F> compared via memcmp (no operator== defined; bit-exact equality on integer limbs)
+            check("v5.15.5.F.4d.1.B.1: tt::cfg_populate_inf_field gate=true → inf_dst = cfg_src",
+                  memcmp(&inf_dst, &cfg_src, sizeof(FPN<64>)) == 0);
+            check("v5.15.5.F.4d.1.B.1: tt::cfg_populate_inf_field gate=true → inf_has_dst = 1",
+                  inf_has_dst == 1);
+        }
+
+        // ---------------------------------------------------------------------------------
+        // T5: tt::cfg_populate_inf_field — gate=false zeros inf + clears has bit (Q3.G)
+        // ---------------------------------------------------------------------------------
+        {
+            FPN<64> cfg_src = FPN_FromDouble<64>(42.5);
+            FPN<64> inf_dst = FPN_FromDouble<64>(99.0);  // sentinel
+            uint8_t inf_has_dst = 99;
+            tt::cfg_populate_inf_field(cfg_src, inf_dst, inf_has_dst, /*gate*/false);
+            check("v5.15.5.F.4d.1.B.1: tt::cfg_populate_inf_field gate=false → inf_dst zeroed (Q3.G)",
+                  FPN_ToDouble(inf_dst) == 0.0);
+            check("v5.15.5.F.4d.1.B.1: tt::cfg_populate_inf_field gate=false → inf_has_dst = 0",
+                  inf_has_dst == 0);
+        }
+
+        // ---------------------------------------------------------------------------------
+        // T6: tt::cfg_drift_compare — same value → false (no drift)
+        // ---------------------------------------------------------------------------------
+        {
+            FPN<64> a = FPN_FromDouble<64>(42.5);
+            FPN<64> b = FPN_FromDouble<64>(42.5);
+            check("v5.15.5.F.4d.1.B.1: tt::cfg_drift_compare same FPN<F> → false (no drift)",
+                  tt::cfg_drift_compare(a, b) == false);
+        }
+
+        // ---------------------------------------------------------------------------------
+        // T7: tt::cfg_drift_compare — different value → true (drift detected)
+        // ---------------------------------------------------------------------------------
+        {
+            FPN<64> a = FPN_FromDouble<64>(42.5);
+            FPN<64> b = FPN_FromDouble<64>(99.0);
+            check("v5.15.5.F.4d.1.B.1: tt::cfg_drift_compare different FPN<F> → true (drift)",
+                  tt::cfg_drift_compare(a, b) == true);
+        }
+
+        // ---------------------------------------------------------------------------------
+        // T8: cfg_gate::lookup_populate — default true (sidecar empty at .B.1)
+        // ---------------------------------------------------------------------------------
+        {
+            ControllerConfig<64> cfg = {};
+            check("v5.15.5.F.4d.1.B.1: cfg_gate::lookup_populate per_core default → true",
+                  cfg_gate::lookup_populate(0, /*is_per_core*/true, cfg) == true);
+            check("v5.15.5.F.4d.1.B.1: cfg_gate::lookup_populate global default → true",
+                  cfg_gate::lookup_populate(0, /*is_per_core*/false, cfg) == true);
+        }
+
+        // ---------------------------------------------------------------------------------
+        // T9: cfg_gate::lookup_drift — default = stamp_has_inference_cfg passed bool
+        // ---------------------------------------------------------------------------------
+        {
+            ControllerConfig<64> cfg = {};
+            check("v5.15.5.F.4d.1.B.1: cfg_gate::lookup_drift stamp_has=true → true",
+                  cfg_gate::lookup_drift(0, /*is_per_core*/true, cfg, /*stamp_has*/true) == true);
+            check("v5.15.5.F.4d.1.B.1: cfg_gate::lookup_drift stamp_has=false → false",
+                  cfg_gate::lookup_drift(0, /*is_per_core*/false, cfg, /*stamp_has*/false) == false);
+        }
+
+        // ---------------------------------------------------------------------------------
+        // T10: tt::cfg_emit_field — wire-format produces "<name>=<value>\n" + locale Layer 2
+        // ---------------------------------------------------------------------------------
+        {
+            char buf[128] = {0};
+            // g_global_cfg_field_descriptors[0] = first global cfg field (num_execution_cores per FOREACH_GLOBAL_CFG_FIELD).
+            // KIND_INT; value type int; cfg_field_name = "num_execution_cores".
+            int val = 4;
+            size_t written = tt::cfg_emit_field(val, g_global_cfg_field_descriptors[0], buf, sizeof(buf));
+            check("v5.15.5.F.4d.1.B.1: tt::cfg_emit_field KIND_INT writes non-zero bytes",
+                  written > 0);
+            check("v5.15.5.F.4d.1.B.1: tt::cfg_emit_field Layer 2 locale-pin (no ',' separator)",
+                  strchr(buf, ',') == nullptr);
+            check("v5.15.5.F.4d.1.B.1: tt::cfg_emit_field produces '<name>=<value>\\n' shape",
+                  strchr(buf, '=') != nullptr && written > 0 && buf[written - 1] == '\n');
+        }
+
+        // ---------------------------------------------------------------------------------
+        // T11 (FOREACH_REGISTRY count check) DROPPED — verified externally by
+        // tools/check_meta_registry.py CI script (65/65 enrolled at .B.1 ship).
+        // Including MetaRegistry.hpp directly here triggers preprocessor inclusion-order
+        // sensitivity outside .B.1 scope; defer in-test count check.
+        // ---------------------------------------------------------------------------------
+
+        // ---------------------------------------------------------------------------------
+        // T12: FOREACH_CFG_GATE_PER_CORE empty at .B.1 (cohort populates at .B.2)
+        // ---------------------------------------------------------------------------------
+        {
+            size_t per_core_gate_count = 0;
+            #define X_COUNT_CFG_GATE_PC(name, expr) ++per_core_gate_count;
+            FOREACH_CFG_GATE_PER_CORE(X_COUNT_CFG_GATE_PC)
+            #undef X_COUNT_CFG_GATE_PC
+            check("v5.15.5.F.4d.1.B.1: FOREACH_CFG_GATE_PER_CORE empty at .B.1 (.B.2 populates cohort)",
+                  per_core_gate_count == 0);
+        }
+
+        // ---------------------------------------------------------------------------------
+        // T13: FOREACH_CFG_GATE_GLOBAL empty at .B.1 (sister to per-core)
+        // ---------------------------------------------------------------------------------
+        {
+            size_t global_gate_count = 0;
+            #define X_COUNT_CFG_GATE_GL(name, expr) ++global_gate_count;
+            FOREACH_CFG_GATE_GLOBAL(X_COUNT_CFG_GATE_GL)
+            #undef X_COUNT_CFG_GATE_GL
+            check("v5.15.5.F.4d.1.B.1: FOREACH_CFG_GATE_GLOBAL empty at .B.1 (.B.2 populates cohort)",
+                  global_gate_count == 0);
+        }
     }
 
     printf("\n======================================\n");

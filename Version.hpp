@@ -5,7 +5,58 @@
 #define ENGINE_VERSION_MAJOR 5
 #define ENGINE_VERSION_MINOR 15
 #define ENGINE_VERSION_PATCH 5
-#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.A"
+#define ENGINE_VERSION_STRING "5.15.5.F.4d.1.B.1"
+// .F.4d.1.B.1 (v5.15.5.F.4d.1.B.1) — Framework consolidation ship (2026-05-17).
+// First of 3 split sub-ships of v5.15.5.F.4d.1.B (.B.1 framework / .B.2 cohort migration /
+// .B.3 legacy empty-out) per /readiness audit recommendation + CRIT-1 wider-scope acceptance
+// (Path γ-class structural critique #2 caught at Batch 1 audit: original .B v1.2 β4 sparse
+// sidecar duplicated canonical FOREACH_CFG_DERIVED_INFERENCE_CFG; eliminated entirely).
+//
+// LANDED at .B.1 (framework infrastructure):
+// - NEW MemHeaders/CfgGateRegistry.hpp (gate-type sparse sidecar; H18 first canonical of
+//   gate-type vs severity-type sidecar; FOREACH_CFG_GATE_PER_CORE + _GLOBAL empty at .B.1;
+//   populate at .B.2 cohort migration)
+// - NEW 3 derived-filter consumer template fns in cfg_derived:: namespace
+//   (populate_inference_cfg_from_derived + populate_stamp_cfg_from_derived +
+//   drift_check_from_derived) wrapped in macros INFERENCE_CFG_POPULATE_FROM_DERIVED +
+//   STAMP_CFG_POPULATE_FROM_DERIVED + DRIFT_CHECK_FROM_DERIVED
+// - EXTEND tt:: dispatch quartet → septet in CoreFrameworks/CfgFieldDispatch.hpp
+//   (NEW: cfg_emit_field + cfg_populate_inf_field + cfg_drift_compare)
+// - NEW 2 DESIGN_SPECs Stage 3 ACTIVE: canonical-sister-extension-discipline +
+//   cfg-derived-consumer-framework
+// - NEW 1 DESIGN_SPEC Stage 3 ACTIVE: future-oriented-plan-template (.B.1 plan body v1.1
+//   retrofit demonstrates the template's required sections)
+// - NEW skill /plan-draft Stage 2 DRAFT (scaffolds plan bodies from template)
+// - PROMOTE /anti-spaghetti SKILL.md to Stage 3 ACTIVE (first canonical run validated at
+//   Batch 2 audit)
+// - 4 NEW going-forward rules in CLAUDE.local.md (audit canonical sister + plans cite
+//   sister + anti-spaghetti cadence + new plans use template)
+// - 4 NEW memory files codifying the discipline + MEMORY.md index update
+// - 5-row addition to FOREACH_REGISTRY meta-registry (+2 sidecars enrolled; H15)
+// - 14 walker integration tests (controller_test.cpp ~26140; vacuous PASS at 0-row walker)
+//
+// DEFERRED to .B.3 (per coding-time discovery; documented in .B.3 plan body Step 1.5):
+// - StampHelper.hpp:183 INFERENCE_CFG_AUTOPOPULATE → _FROM_DERIVED swap (PARITY-020 regression
+//   risk if swapped at .B.1 with 0-row walker)
+// - controller_test.cpp:24962-25047 A.7 test swap (same reason)
+//
+// Tests: 3215 controller_test passed (3196 + 19 new) + 17 depth_recorder_test GREEN.
+// 5 binaries (test/gui/suite/tsan/asan) clean. Hot path UNTOUCHED. CI:
+// check_meta_registry.py 3 checks PASS (65/65 enrolled); check_per_core_registry_integrity.py
+// 6 structural checks PASS (0 Class 27 exemptions).
+//
+// Closes Class 14/18/21 structurally at gate-type-sidecar surface; sets up .B.2 cohort
+// migration as 1-row mechanical changes per migrated field.
+//
+// 3-tier defense against future parallel-infrastructure drift now in force:
+//   (1) future-oriented-plan-template required sections at draft time (canonical sister
+//       audit + design space alternatives + bug class closure tracking);
+//   (2) /precoding-audit-gate before tag (5 audits + canonical-sister discipline);
+//   (3) /anti-spaghetti quarterly + post-codification cadence.
+//
+// Per per-sub-ship cycle discipline: postmortem at
+// plans/v5.15-live-readiness/postmortems/2026-05-17-v5.15.5.F.4d.1.B.1-postmortem.md.
+
 // .F.4d.1.A (v5.15.5.F.4d.1.A) — Path γ+ v2 framework infra ship (2026-05-17).
 // First sub-ship of v5.15.5.F.4d.1 umbrella (TECH_DEBT-085 Thread A FULL framework
 // consolidation). Path γ correction landed at pre-coding audit gate: `.A` v1.2

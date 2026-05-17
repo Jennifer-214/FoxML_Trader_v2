@@ -96,8 +96,10 @@
     X(FOREACH_CALIB_LOG_COL                     , 1,      FOREACH_REGISTRY                 , "Calibration log CSV columns.") \
     X(FOREACH_TRADE_LOG_COL                     , 1,      FOREACH_REGISTRY                 , "Trade log CSV columns.") \
     X(FOREACH_CONFIDENCE_PERSIST_FIELD          , 1,      FOREACH_REGISTRY                 , "Confidence persistence fields.") \
-    X(FOREACH_CFG_DERIVED_INFERENCE_CFG         , 1,      FOREACH_REGISTRY                 , "Cfg-derived inference cfg fields.") \
-    X(FOREACH_CFG_DRIFT_CHECK                   , 1,      FOREACH_REGISTRY                 , "Stamp body drift check fields.") \
+    X(FOREACH_CFG_DERIVED_INFERENCE_CFG         , 1,      FOREACH_REGISTRY                 , "Cfg-derived inference cfg fields (legacy; deletion deferred to .B.3 after .B.2 cohort migration validates new framework).") \
+    X(FOREACH_CFG_DRIFT_CHECK                   , 1,      FOREACH_REGISTRY                 , "Stamp body drift check fields (legacy; folds into framework at .B.3).") \
+    X(FOREACH_CFG_GATE_PER_CORE                 , 1,      FOREACH_REGISTRY                 , "Per-row gate_when override sidecar for STAMP_BOUND_CFG_DERIVED-flagged per-core cfg fields (.B.1+; H18 first canonical of gate-type sidecar; empty at .B.1; populates at .B.2 cohort migration).") \
+    X(FOREACH_CFG_GATE_GLOBAL                   , 1,      FOREACH_REGISTRY                 , "Per-row gate_when override sidecar for STAMP_BOUND_CFG_DERIVED-flagged global cfg fields (.B.1+; sister to FOREACH_CFG_GATE_PER_CORE).") \
     X(FOREACH_ARCH_FIELD_DRIFT                  , 1,      FOREACH_REGISTRY                 , "Architectural field drift check.") \
     X(FOREACH_SLOW_PATH_GATE                    , 1,      FOREACH_REGISTRY                 , "Slow-path gate registry (cfg-flag eligibility canon).") \
     X(FOREACH_SP_SECTION                        , 1,      FOREACH_REGISTRY                 , "Slow-path section enum (regime/rebuild/etc.).") \

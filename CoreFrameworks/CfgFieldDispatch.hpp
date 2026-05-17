@@ -294,15 +294,167 @@ namespace tt {
         return false;
     }
 
+    //==================================================================================================
+    // [EMIT: typed cfg field → HMAC wire-format kv text]
+    //==================================================================================================
+    // v5.15.5.F.4d.1.B.1 — fifth in-file sister of the tt:: cfg dispatch family.
+    //
+    // Writes "<name>=<value>\n" to buf. Used by derived-filter consumer macros
+    // (STAMP_CFG_POPULATE_FROM_DERIVED at .B.1+) to emit canonical body bytes for HMAC chain.
+    //
+    // Distinct from cfg_save_field:
+    //   cfg_save_field — operator-readable cfg file save format (%.4f / %.2f for PCT)
+    //   cfg_emit_field — HMAC wire-format kv per-line (%.17g lossless; "name=value\n")
+    //
+    // LAYER 2 LOCALE PINNING per DESIGN_SPECS/wire-format-byte-preservation-discipline.md.
+    // MUST honor LC_NUMERIC=C per-thread to prevent "0,55" vs "0.55" drift; I3 invariant
+    // in tests/wire_format_invariants.hpp catches violations at test time.
+    //
+    // FORMAT (per kind):
+    //   FPN<F>:        %.17g (lossless double round-trip; sister to MemHeaders/RunHistory.hpp:87-89)
+    //   integers:      %lld / %llu (signed/unsigned via is_unsigned_v)
+    //   bool:          ternary normalized to {0, 1} (H9 byte-equivalence; see cfg_save_field above)
+    //   array<T, N>:   %s (string-style; KIND_FILE_PATH / KIND_STRING)
+    //
+    // Returns chars written (snprintf semantics; 0 on encoding error).
+    template <typename T>
+    inline size_t cfg_emit_field(const T& src, const CfgFieldDescriptor& desc, char* buf, size_t cap) {
+        static_assert(is_FPN_v<T>
+                   || std::is_floating_point_v<T>
+                   || std::is_integral_v<T>
+                   || std::is_array_v<T>,
+                      "cfg field type not in recognized family — "
+                      "extend tt::cfg_emit_field<T> with a new branch.");
+
+        // Locale pinning (Layer 2 per wire-format-byte-preservation-discipline.md;
+        // per-thread; safe in lock-free + GUI contexts). Sister to cfg_save_field
+        // locale-pin precedent.
+        locale_t pinned = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+        locale_t prev = (locale_t)0;
+        if (pinned) prev = uselocale(pinned);
+
+        int n = 0;
+        if constexpr (is_FPN_v<T>) {
+            // %.17g — lossless double round-trip.
+            n = snprintf(buf, cap, "%s=%.17g\n", desc.cfg_field_name, FPN_ToDouble(src));
+        } else if constexpr (std::is_floating_point_v<T>) {
+            n = snprintf(buf, cap, "%s=%.17g\n", desc.cfg_field_name, static_cast<double>(src));
+        } else if constexpr (std::is_array_v<T>) {
+            n = snprintf(buf, cap, "%s=%s\n", desc.cfg_field_name, src);
+        } else if constexpr (std::is_integral_v<T>) {
+            // KIND_BOOL — ternary-normalized {0, 1} per H9 byte-equivalence (sister to cfg_save_field).
+            if (desc.kind == CfgFieldDescriptor::KIND_BOOL) {
+                n = snprintf(buf, cap, "%s=%d\n", desc.cfg_field_name, (src != 0) ? 1 : 0);
+            } else if constexpr (std::is_unsigned_v<T>) {
+                n = snprintf(buf, cap, "%s=%llu\n", desc.cfg_field_name,
+                             static_cast<unsigned long long>(src));
+            } else {
+                n = snprintf(buf, cap, "%s=%lld\n", desc.cfg_field_name,
+                             static_cast<long long>(src));
+            }
+        }
+
+        if (pinned) {
+            uselocale(prev);
+            freelocale(pinned);
+        }
+        return (n < 0) ? 0u : static_cast<size_t>(n);
+    }
+
+    //==================================================================================================
+    // [POPULATE_INF: typed cfg value → inf.<field> + inf.has_<field>]
+    //==================================================================================================
+    // v5.15.5.F.4d.1.B.1 — sixth in-file sister. Used by INFERENCE_CFG_POPULATE_FROM_DERIVED
+    // consumer macro to populate stamp inference cfg inputs from runtime cfg, gate-aware.
+    //
+    // Distinct from cfg_assign_field (which sets to descriptor default).
+    //   cfg_assign_field — descriptor.default → typed dst
+    //   cfg_populate_inf_field — runtime cfg src → inf.field + inf.has_field (gate-conditional)
+    //
+    // Semantics (always-emit canonical Q3.G):
+    //   gate true  → inf_dst = cfg_src; inf_has_dst = 1   (cohort field active)
+    //   gate false → inf_dst = T{};     inf_has_dst = 0   (cohort gate-off; zero per Q3.G)
+    //
+    // Branchless for scalar T (cmov compiles `gate ? cfg_src : T{}` to conditional move
+    // on x86-64). Array T uses conditional copy (no portable branchless string copy at
+    // template level; fallback is acceptable since populate is slow-path/stamp-emit cadence).
+    //
+    template <typename T>
+    inline void cfg_populate_inf_field(const T& cfg_src, T& inf_dst, uint8_t& inf_has_dst, bool gate) {
+        static_assert(is_FPN_v<T>
+                   || std::is_floating_point_v<T>
+                   || std::is_integral_v<T>
+                   || std::is_array_v<T>,
+                      "cfg field type not in recognized family — "
+                      "extend tt::cfg_populate_inf_field<T> with a new branch.");
+
+        if constexpr (std::is_array_v<T>) {
+            // String/array: branched copy + has bit. Slow-path cadence — acceptable.
+            if (gate) {
+                strncpy(inf_dst, cfg_src, std::extent_v<T> - 1);
+                inf_dst[std::extent_v<T> - 1] = '\0';
+                inf_has_dst = 1u;
+            } else {
+                inf_dst[0] = '\0';
+                inf_has_dst = 0u;
+            }
+        } else {
+            // Scalar (FPN<F> / integral / floating): branchless via conditional move.
+            // GCC/clang -O2 emit cmov for `gate ? cfg_src : T{}`.
+            inf_dst = gate ? cfg_src : T{};
+            inf_has_dst = gate ? 1u : 0u;
+        }
+    }
+
+    //==================================================================================================
+    // [DRIFT_COMPARE: stamp.<field> vs cfg.<field> → bool]
+    //==================================================================================================
+    // v5.15.5.F.4d.1.B.1 — seventh in-file sister. Used by DRIFT_CHECK_FROM_DERIVED to detect
+    // cfg drift between train-time stamp value and serve-time runtime cfg value.
+    //
+    // Distinct from cfg_diff_field (which compares vs descriptor default).
+    //   cfg_diff_field — compare current vs default → bool (used for GUI "modified" badge)
+    //   cfg_drift_compare — compare stamp vs runtime cfg → bool (used for drift detection)
+    //
+    // Returns true if values differ (drift detected). Per H4 — FPN<F> compared via integer
+    // equality (NEVER float math on accounting types).
+    //
+    template <typename T>
+    inline bool cfg_drift_compare(const T& stamp_val, const T& cfg_val) {
+        static_assert(is_FPN_v<T>
+                   || std::is_floating_point_v<T>
+                   || std::is_integral_v<T>
+                   || std::is_array_v<T>,
+                      "cfg field type not in recognized family — "
+                      "extend tt::cfg_drift_compare<T> with a new branch.");
+
+        if constexpr (is_FPN_v<T>) {
+            // FPN equality via byte comparison (H4 — never float math on accounting types).
+            // memcmp on POD struct compares the underlying integer limb array bit-exactly;
+            // FPN<F> doesn't define operator== directly so we go through the byte layer.
+            return memcmp(&stamp_val, &cfg_val, sizeof(T)) != 0;
+        } else if constexpr (std::is_floating_point_v<T>) {
+            return stamp_val != cfg_val;
+        } else if constexpr (std::is_array_v<T>) {
+            return strncmp(stamp_val, cfg_val, std::extent_v<T>) != 0;
+        } else if constexpr (std::is_integral_v<T>) {
+            return static_cast<int64_t>(stamp_val) != static_cast<int64_t>(cfg_val);
+        }
+        return false;
+    }
+
     // Note: cfg_render_field<T> is implemented inline in GUI/SettingsPanel.hpp (Step 0.5
     // landed at .F.4c), since rendering depends on ImGui which isn't included by this header
     // (used by non-GUI code — the parser includes this header but doesn't link ImGui).
     //
-    // The tt:: dispatch quartet for cfg fields at .F.4c:
-    //   tt::cfg_parse_field<T>  (text → typed; here)
-    //   tt::cfg_save_field<T>   (typed → text; here)
-    //   tt::cfg_assign_field<T> (default → typed; here)
-    //   tt::cfg_diff_field<T>   (typed vs default → bool; here)
-    //   tt::cfg_render_field<T> (typed → ImGui widget; GUI/SettingsPanel.hpp)
+    // The tt:: dispatch septet for cfg fields at .F.4d.1.B.1 (in-file 7 + GUI 1 = 8 codebase-wide):
+    //   tt::cfg_parse_field<T>          (text → typed; here)
+    //   tt::cfg_save_field<T>           (typed → text [operator-readable %.4f]; here)
+    //   tt::cfg_assign_field<T>         (default → typed; here)
+    //   tt::cfg_diff_field<T>           (typed vs default → bool; here)
+    //   tt::cfg_emit_field<T>           (typed → HMAC wire-format kv [%.17g lossless]; here; .B.1+)
+    //   tt::cfg_populate_inf_field<T>   (cfg → inf.field + inf.has_field; gate-aware; here; .B.1+)
+    //   tt::cfg_drift_compare<T>        (stamp vs cfg → bool; here; .B.1+)
+    //   tt::cfg_render_field<T>         (typed → ImGui widget; GUI/SettingsPanel.hpp)
 
 }  // namespace tt
