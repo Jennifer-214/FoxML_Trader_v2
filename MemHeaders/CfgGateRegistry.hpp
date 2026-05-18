@@ -44,7 +44,13 @@
 
 #include "../CoreFrameworks/CfgFieldRegistry.hpp"      // CfgFieldDescriptor + FIELD_IDX_<NAME>
 #include "../CoreFrameworks/ControllerConfig.hpp"      // ControllerConfig<F>
+#include "../ML_Headers/MlCfgFlagRegistry.hpp"         // FOREACH_ML_CFG_FLAG + MASK_ML_CFG_* (v5.15.5.F.4d.1.B.3 Step 1.6.5b — self-contained header per WIP2d-1.B.0 Shortsighted #5 close)
+#include "../CoreFrameworks/GateCfgFlagRegistry.hpp"   // FOREACH_GATE_CFG_FLAG + MASK_GATE_CFG_* (v5.15.5.F.4d.1.B.3 Step 1.6.5b)
+#include "BitmapMacros.hpp"                            // BITMAP_IS_SET (Step 1.6.5b — used inside consumer X-macros for bitmap-bit cohort registries)
 #include <cstddef>                                      // size_t
+#include <cstdio>                                       // snprintf (canonical body emit)
+#include <cstring>                                      // strcmp (parser dispatch)
+#include <cstdlib>                                      // atoi (parser dispatch)
 
 //======================================================================================================
 // [FOREACH_CFG_GATE — sparse sidecar registries]
@@ -176,6 +182,55 @@ namespace cfg_gate {
 }  // namespace cfg_gate
 
 //======================================================================================================
+// [FOREACH_STAMP_BOUND_DERIVED_COHORT — action-parameterized meta-walker (v5.15.5.F.4d.1.B.3 Step 1.6.5b)]
+//======================================================================================================
+//
+// Single source of truth for cohort coverage. Dispatches to all 4 cfg-domain registries that participate
+// in the STAMP_BOUND_CFG_DERIVED cohort. Consumer passes BASE_X token; meta-walker expands to 4
+// `FOREACH_<REGISTRY>(BASE_X##_<SCOPE>)` invocations with token-pasted X-macro names per scope.
+//
+// Closes Class 21 instance at cfg-derived consumer template fn surface (sister-consumer asymmetric
+// registry-coverage drift). Caught at Session E 2026-05-18 after 3 consumer template fns at HEAD
+// drifted across .B.1/.B.2/.B.3 incremental extension:
+//   - populate_inference_cfg_from_derived walked 2 of 4 (per_core + global only)
+//   - drift_check_from_derived walked 3 of 4 (missing gate_cfg_flag per Step 0.5d.d DEFERRED)
+//   - populate_stamp_cfg_from_derived walked all 4 (complete)
+//   - parse_stamp_cfg_to_derived walked all 4 (complete; Step 1.6.3 Approach A option (e))
+//
+// Drift impossibility by construction:
+//   - Consumer CANNOT silently skip a registry — meta-walker expands all 4 FOREACH invocations
+//     unconditionally
+//   - Per-consumer X-macros MUST exist by `X_<base>_<SCOPE>` naming convention for token-paste
+//     `BASE_X##_<SCOPE>` to resolve; missing X-macro = compile error at FOREACH expansion site
+//     (preprocessor fails on undefined identifier in macro body)
+//   - X-macros themselves CAN be no-op for legitimate skip-cases — but skip is EXPLICITLY VISIBLE
+//     at function scope
+//
+// Pattern shape per DESIGN_SPECS/cfg-derived-consumer-framework.md v1.2 § "Action-parameterized
+// meta-walker for cohort consumer template fns".
+// Sister memory: feedback_prefer_action_parameterized_walker_over_per_consumer_walker_bodies.md
+// Class 18/21 closure precedent: v5.14.2.E.1 EnsembleModelZoo_PostLoadSetup + CoreModelZoo_PostLoadSetup
+//   + FOREACH_ENSEMBLE_POST_LOAD / FOREACH_SINGLE_ZOO_POST_LOAD (single source of truth + many
+//   consumer views with compile-time enforced inclusion at all sites).
+//
+// Used by 5 sites:
+//   - populate_inference_cfg_from_derived (cfg_derived namespace; filtered by STAMP_BOUND_CFG_DERIVED bit)
+//   - populate_stamp_cfg_from_derived    (cfg_derived namespace; filtered by STAMP_BOUND_CFG_DERIVED bit)
+//   - drift_check_from_derived           (cfg_derived namespace; filtered by STAMP_BOUND_CFG_DERIVED bit)
+//   - parse_stamp_cfg_to_derived         (cfg_derived namespace; filtered by STAMP_BOUND_CFG_DERIVED bit)
+//   - STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN (file-scope; UNCONDITIONAL struct-field decl; no filter)
+//
+// Enrolled in FOREACH_REGISTRY at CoreFrameworks/MetaRegistry.hpp per H15 + H19 (Level 1 meta-walker
+// over cfg-derived cohort; sister to FOREACH_PER_CORE_DOMAIN_BITMAP shape but for consumer cohort
+// rather than storage cohort).
+
+#define FOREACH_STAMP_BOUND_DERIVED_COHORT(BASE_X)                                                  \
+    FOREACH_PER_CORE_CFG_FIELD(BASE_X##_PER_CORE)                                                   \
+    FOREACH_GLOBAL_CFG_FIELD(BASE_X##_GLOBAL)                                                       \
+    FOREACH_ML_CFG_FLAG(BASE_X##_ML_CFG_FLAG)                                                       \
+    FOREACH_GATE_CFG_FLAG(BASE_X##_GATE_CFG_FLAG)
+
+//======================================================================================================
 // [Consumer macros — Step 2 of .B.1 framework consolidation]
 //======================================================================================================
 //
@@ -225,40 +280,68 @@ namespace cfg_derived {
     //==============================================================================================
     // [populate_inference_cfg_from_derived — sister to legacy INFERENCE_CFG_AUTOPOPULATE]
     //==============================================================================================
+    // v5.15.5.F.4d.1.B.3 Step 1.6.5b — refactored to use FOREACH_STAMP_BOUND_DERIVED_COHORT
+    // meta-walker (single source of truth for cohort coverage). NEW walkers for ml_cfg_flag +
+    // gate_cfg_flag cohort registries added (closes Class 21 instance + absorbs Step 0.5d.d
+    // for populate_inf side; was MISSING at HEAD pre-refactor).
     template <unsigned F, typename InfT>
     inline void populate_inference_cfg_from_derived(InfT& inf, const ControllerConfig<F>& cfg) {
-        (void)inf; (void)cfg;  // 0-row walk at .B.1 → both unused
+        (void)inf; (void)cfg;
 
         #define X_INFERENCE_CFG_POPULATE_PER_CORE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
                 constexpr size_t _idx = FIELD_IDX_PER_CORE_##name; \
                 const bool _gate = cfg_gate::lookup_populate(_idx, /*is_per_core*/true, cfg); \
-                tt::cfg_populate_inf_field(cfg.name, \
-                                            inf.name, \
-                                            inf.has_##name, _gate); \
+                tt::cfg_populate_inf_field(cfg.name, inf.name, inf.has_##name, _gate); \
             }
-        FOREACH_PER_CORE_CFG_FIELD(X_INFERENCE_CFG_POPULATE_PER_CORE)
-        #undef X_INFERENCE_CFG_POPULATE_PER_CORE
 
         #define X_INFERENCE_CFG_POPULATE_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
                 constexpr size_t _idx = FIELD_IDX_GLOBAL_##name; \
                 const bool _gate = cfg_gate::lookup_populate(_idx, /*is_per_core*/false, cfg); \
-                tt::cfg_populate_inf_field(cfg.name, \
-                                            inf.name, \
-                                            inf.has_##name, _gate); \
+                tt::cfg_populate_inf_field(cfg.name, inf.name, inf.has_##name, _gate); \
             }
-        FOREACH_GLOBAL_CFG_FIELD(X_INFERENCE_CFG_POPULATE_GLOBAL)
+
+        // NEW v5.15.5.F.4d.1.B.3 Step 1.6.5b — ml_cfg_flag cohort walker (was MISSING at HEAD).
+        // Bitmap-bit semantic: cfg.ml_cfg_flags bit set → inf.<legacy_field> = 1; cleared → 0.
+        // No gate lookup (the bit IS the value; absence = 0). Sets has_<legacy_field>
+        // unconditionally so populate-time presence is recorded for stamp emission.
+        #define X_INFERENCE_CFG_POPULATE_ML_CFG_FLAG(NAME, legacy_field, display_label, section, metadata_flags, doc) \
+            if constexpr (((metadata_flags) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
+                const int _bit_val = BITMAP_IS_SET(cfg.ml_cfg_flags, MASK_ML_CFG_##NAME) ? 1 : 0; \
+                inf.has_##legacy_field = 1; \
+                inf.legacy_field = _bit_val; \
+            }
+
+        // NEW v5.15.5.F.4d.1.B.3 Step 1.6.5b — gate_cfg_flag cohort walker (was MISSING at HEAD;
+        // sister to ml_cfg_flag walker above; absorbs Step 0.5d.d populate_inf side).
+        #define X_INFERENCE_CFG_POPULATE_GATE_CFG_FLAG(NAME, legacy_field, display_label, section, metadata_flags, doc) \
+            if constexpr (((metadata_flags) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
+                const int _bit_val = BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_##NAME) ? 1 : 0; \
+                inf.has_##legacy_field = 1; \
+                inf.legacy_field = _bit_val; \
+            }
+
+        FOREACH_STAMP_BOUND_DERIVED_COHORT(X_INFERENCE_CFG_POPULATE)
+
+        #undef X_INFERENCE_CFG_POPULATE_PER_CORE
         #undef X_INFERENCE_CFG_POPULATE_GLOBAL
+        #undef X_INFERENCE_CFG_POPULATE_ML_CFG_FLAG
+        #undef X_INFERENCE_CFG_POPULATE_GATE_CFG_FLAG
     }
 
     //==============================================================================================
     // [populate_stamp_cfg_from_derived — emit canonical body bytes for HMAC chain]
     //==============================================================================================
+    // v5.15.5.F.4d.1.B.3 Step 1.6.5b — refactored to use FOREACH_STAMP_BOUND_DERIVED_COHORT
+    // meta-walker. X-macro BODIES VERBATIM from pre-refactor (wire-format byte preservation —
+    // emit order preserved by FOREACH walker semantics + Layer 5b invariants tolerate the
+    // structural reshape). Only structural change: 4 individual FOREACH invocations folded into
+    // 1 meta-walker invocation; per-scope X-macros remain in function scope with same bodies.
     template <unsigned F>
     inline size_t populate_stamp_cfg_from_derived(char* buf, size_t cap, const ControllerConfig<F>& cfg) {
         size_t written = 0u;
-        (void)buf; (void)cap; (void)cfg; (void)written;  // 0-row walk at .B.1
+        (void)buf; (void)cap; (void)cfg; (void)written;
 
         #define X_STAMP_CFG_POPULATE_PER_CORE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
@@ -272,8 +355,6 @@ namespace cfg_derived {
                         (cap > written) ? (cap - written) : 0u); \
                 } \
             }
-        FOREACH_PER_CORE_CFG_FIELD(X_STAMP_CFG_POPULATE_PER_CORE)
-        #undef X_STAMP_CFG_POPULATE_PER_CORE
 
         #define X_STAMP_CFG_POPULATE_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
@@ -287,8 +368,6 @@ namespace cfg_derived {
                         (cap > written) ? (cap - written) : 0u); \
                 } \
             }
-        FOREACH_GLOBAL_CFG_FIELD(X_STAMP_CFG_POPULATE_GLOBAL)
-        #undef X_STAMP_CFG_POPULATE_GLOBAL
 
         // v5.15.5.F.4d.1.B.2 Step 0.5b — emit BITMAP_BIT rows from FOREACH_ML_CFG_FLAG.
         // Inline snprintf (no CfgFieldDescriptor since ML_CFG_FLAG rows are in a separate
@@ -301,8 +380,6 @@ namespace cfg_derived {
                 int _n_written = snprintf(buf + written, _remain, "%s=%d\n", #legacy_field, _bit_val); \
                 if (_n_written > 0) written += static_cast<size_t>(_n_written); \
             }
-        FOREACH_ML_CFG_FLAG(X_STAMP_CFG_POPULATE_ML_CFG_FLAG)
-        #undef X_STAMP_CFG_POPULATE_ML_CFG_FLAG
 
         // v5.15.5.F.4d.1.B.3 Step 0.5d.a — sister walker for FOREACH_GATE_CFG_FLAG bitmap-bool
         // rows flagged STAMP_BOUND_CFG_DERIVED. Sister-extension to X_STAMP_CFG_POPULATE_ML_CFG_FLAG
@@ -317,7 +394,12 @@ namespace cfg_derived {
                 int _n_written = snprintf(buf + written, _remain, "%s=%d\n", #legacy_field, _bit_val); \
                 if (_n_written > 0) written += static_cast<size_t>(_n_written); \
             }
-        FOREACH_GATE_CFG_FLAG(X_STAMP_CFG_POPULATE_GATE_CFG_FLAG)
+
+        FOREACH_STAMP_BOUND_DERIVED_COHORT(X_STAMP_CFG_POPULATE)
+
+        #undef X_STAMP_CFG_POPULATE_PER_CORE
+        #undef X_STAMP_CFG_POPULATE_GLOBAL
+        #undef X_STAMP_CFG_POPULATE_ML_CFG_FLAG
         #undef X_STAMP_CFG_POPULATE_GATE_CFG_FLAG
 
         return written;
@@ -328,6 +410,13 @@ namespace cfg_derived {
     //==============================================================================================
     // Caller passes pre-extracted bools (stamp_has_inference_cfg + failure_mask) to avoid
     // cross-include of ML_Headers from MemHeaders/CfgGateRegistry.hpp.
+    //
+    // v5.15.5.F.4d.1.B.3 Step 1.6.5b — refactored to use FOREACH_STAMP_BOUND_DERIVED_COHORT
+    // meta-walker. NEW X_DRIFT_CHECK_GATE_CFG_FLAG walker added (closes Step 0.5d.d drift_check
+    // side; requires handle.<legacy_field> discrete fields which Step 1.6.3 Decision C Approach A
+    // unconditional struct-gen provides via STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN). PER_CORE +
+    // GLOBAL + ML_CFG_FLAG X-macros VERBATIM from pre-refactor (drift-comparison semantics
+    // preserved).
     template <unsigned F, typename HandleT>
     inline void drift_check_from_derived(uint64_t& failure_flags,
                                           bool stamp_has_inference_cfg,
@@ -338,7 +427,7 @@ namespace cfg_derived {
                                           char* reason_buf,
                                           size_t reason_cap) {
         (void)failure_flags; (void)stamp_has_inference_cfg; (void)failure_mask;
-        (void)handle; (void)cfg; (void)drift_count;  // 0-row walk at .B.1
+        (void)handle; (void)cfg; (void)drift_count;
         (void)reason_buf; (void)reason_cap;          // first-failure-wins; nullable opt-in
 
         // v5.15.5.F.4d.1.B.3 Step 0.5a — first-failure-wins attribution per
@@ -358,8 +447,6 @@ namespace cfg_derived {
                     tt::cfg_drift_format_reason(reason_buf, reason_cap, #name, handle.name, cfg.name); \
                 } \
             }
-        FOREACH_PER_CORE_CFG_FIELD(X_DRIFT_CHECK_PER_CORE)
-        #undef X_DRIFT_CHECK_PER_CORE
 
         #define X_DRIFT_CHECK_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
@@ -373,8 +460,6 @@ namespace cfg_derived {
                     tt::cfg_drift_format_reason(reason_buf, reason_cap, #name, handle.name, cfg.name); \
                 } \
             }
-        FOREACH_GLOBAL_CFG_FIELD(X_DRIFT_CHECK_GLOBAL)
-        #undef X_DRIFT_CHECK_GLOBAL
 
         // v5.15.5.F.4d.1.B.2 Step 0.5b — drift check BITMAP_BIT rows from FOREACH_ML_CFG_FLAG.
         // handle.<legacy_field> stores recorded stamp value (int 0 or 1 per legacy emit);
@@ -391,14 +476,33 @@ namespace cfg_derived {
                     tt::cfg_drift_format_reason(reason_buf, reason_cap, #legacy_field, handle.legacy_field, _bit_val); \
                 } \
             }
-        FOREACH_ML_CFG_FLAG(X_DRIFT_CHECK_ML_CFG_FLAG)
-        #undef X_DRIFT_CHECK_ML_CFG_FLAG
 
-        // v5.15.5.F.4d.1.B.3 Step 0.5d.d DEFERRED — sister drift walker for FOREACH_GATE_CFG_FLAG
-        // requires `handle.barrier_gate_enabled` discrete field on ModelStampResult, which
-        // Step 1.6.3 (Decision C Approach A unconditional struct-gen) provides. Walker emit
-        // (Step 0.5d.a above at populate_stamp_cfg_from_derived) landed; drift check rejoins
-        // after Step 1.6.3 lands ModelStampResult auto-gen extension.
+        // NEW v5.15.5.F.4d.1.B.3 Step 1.6.5b — sister drift walker for FOREACH_GATE_CFG_FLAG
+        // bitmap-bool rows flagged STAMP_BOUND_CFG_DERIVED. Closes Step 0.5d.d DEFERRED
+        // (drift_check side); requires handle.<legacy_field> discrete fields which Step 1.6.3
+        // Decision C Approach A unconditional struct-gen provides via STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN
+        // (_STAMP_RESULT_GATE_CFG_FLAG X-macro auto-gens `uint8_t has_<legacy_field>; int legacy_field;`).
+        // Semantic mirrors X_DRIFT_CHECK_ML_CFG_FLAG: reads cfg.gate_cfg_flags bitmap; compares
+        // against handle.<legacy_field> recorded stamp value; branchless trigger + first-failure
+        // attribution.
+        #define X_DRIFT_CHECK_GATE_CFG_FLAG(NAME, legacy_field, display_label, section, metadata_flags, doc) \
+            if constexpr (((metadata_flags) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
+                const int _bit_val = BITMAP_IS_SET(cfg.gate_cfg_flags, MASK_GATE_CFG_##NAME) ? 1 : 0; \
+                const bool _drifted = (handle.legacy_field != _bit_val); \
+                const bool _trigger = stamp_has_inference_cfg & _drifted; \
+                failure_flags |= ((uint64_t)_trigger * failure_mask); \
+                drift_count += (int)_trigger; \
+                if (_trigger && reason_buf && reason_buf[0] == '\0') { \
+                    tt::cfg_drift_format_reason(reason_buf, reason_cap, #legacy_field, handle.legacy_field, _bit_val); \
+                } \
+            }
+
+        FOREACH_STAMP_BOUND_DERIVED_COHORT(X_DRIFT_CHECK)
+
+        #undef X_DRIFT_CHECK_PER_CORE
+        #undef X_DRIFT_CHECK_GLOBAL
+        #undef X_DRIFT_CHECK_ML_CFG_FLAG
+        #undef X_DRIFT_CHECK_GATE_CFG_FLAG
     }
 
     //==============================================================================================
@@ -417,6 +521,10 @@ namespace cfg_derived {
     //
     // Branchless: if-constexpr meta-bit filter compiles to ONLY flagged rows' strcmp branches; runtime
     // cost = up to 27 strcmp comparisons (boot/load-time; not hot path; acceptable per H8).
+    // v5.15.5.F.4d.1.B.3 Step 1.6.5b — refactored to use FOREACH_STAMP_BOUND_DERIVED_COHORT
+    // meta-walker. parse fn already walked all 4 registries pre-refactor (Step 1.6.3 Approach A
+    // option (e) landed at WIP-checkpoint 3); refactor preserves behavior + makes drift impossible
+    // for future cohort registry additions (consumer template fn auto-extends with cohort).
     template <unsigned F, typename ResultT>
     inline bool parse_stamp_cfg_to_derived(ResultT& r, const char* key, const char* val) {
         #define X_PARSE_PER_CORE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
@@ -428,8 +536,6 @@ namespace cfg_derived {
                     return true; \
                 } \
             }
-        FOREACH_PER_CORE_CFG_FIELD(X_PARSE_PER_CORE)
-        #undef X_PARSE_PER_CORE
 
         #define X_PARSE_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
             if constexpr (((meta) & CfgFieldDescriptor::STAMP_BOUND_CFG_DERIVED) != 0) { \
@@ -440,8 +546,6 @@ namespace cfg_derived {
                     return true; \
                 } \
             }
-        FOREACH_GLOBAL_CFG_FIELD(X_PARSE_GLOBAL)
-        #undef X_PARSE_GLOBAL
 
         // ML cfg flag bitmap-bool entries: wire key = #legacy_field; storage = int (per legacy emit pattern).
         // Parser matches lowercase legacy_field key; sets r.legacy_field = atoi(val); sets r.has_<legacy_field>.
@@ -453,8 +557,6 @@ namespace cfg_derived {
                     return true; \
                 } \
             }
-        FOREACH_ML_CFG_FLAG(X_PARSE_ML_CFG_FLAG)
-        #undef X_PARSE_ML_CFG_FLAG
 
         // Gate cfg flag bitmap-bool entries: same shape as ML.
         #define X_PARSE_GATE_CFG_FLAG(NAME, legacy_field, display_label, section, metadata_flags, doc) \
@@ -465,7 +567,12 @@ namespace cfg_derived {
                     return true; \
                 } \
             }
-        FOREACH_GATE_CFG_FLAG(X_PARSE_GATE_CFG_FLAG)
+
+        FOREACH_STAMP_BOUND_DERIVED_COHORT(X_PARSE)
+
+        #undef X_PARSE_PER_CORE
+        #undef X_PARSE_GLOBAL
+        #undef X_PARSE_ML_CFG_FLAG
         #undef X_PARSE_GATE_CFG_FLAG
 
         return false;
@@ -514,21 +621,27 @@ namespace cfg_derived {
     X(xgb_seed)             \
     X(xgb_train_nthread)
 
-// X-macro field helpers (private framework internals; underscore prefix):
-#define _STAMP_RESULT_PER_CORE_FIELD(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
+// X-macro field helpers (private framework internals; underscore prefix). Names follow
+// `_STAMP_RESULT_<SCOPE>` naming convention required by FOREACH_STAMP_BOUND_DERIVED_COHORT
+// meta-walker token-paste (`BASE_X##_<SCOPE>` where BASE_X=`_STAMP_RESULT`).
+// v5.15.5.F.4d.1.B.3 Step 1.6.5b — renamed from `_STAMP_RESULT_<SCOPE>_FIELD` (4 sites) to
+// match meta-walker naming convention. Bodies VERBATIM.
+#define _STAMP_RESULT_PER_CORE(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
     uint8_t has_##name; STORAGE_T name;
-#define _STAMP_RESULT_GLOBAL_FIELD(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
+#define _STAMP_RESULT_GLOBAL(STORAGE_T, KIND_TOKEN, name, label, section, meta, payload, tooltip, applies_strat, applies_op, applies_regime, applies_risk, lives_in_struct) \
     uint8_t has_##name; STORAGE_T name;
-#define _STAMP_RESULT_ML_CFG_FIELD(NAME, legacy_field, display_label, section, metadata_flags, doc) \
+#define _STAMP_RESULT_ML_CFG_FLAG(NAME, legacy_field, display_label, section, metadata_flags, doc) \
     uint8_t has_##legacy_field; int legacy_field;
-#define _STAMP_RESULT_GATE_CFG_FIELD(NAME, legacy_field, display_label, section, metadata_flags, doc) \
+#define _STAMP_RESULT_GATE_CFG_FLAG(NAME, legacy_field, display_label, section, metadata_flags, doc) \
     uint8_t has_##legacy_field; int legacy_field;
 
+// v5.15.5.F.4d.1.B.3 Step 1.6.5b — refactored to use FOREACH_STAMP_BOUND_DERIVED_COHORT
+// meta-walker (single source of truth for cohort coverage). Sister to the 4 cfg-derived
+// consumer template fns; struct-gen variant is UNCONDITIONAL (no metadata-bit filter at
+// X-macro body — emits has + value field for ALL rows; consumer-side walkers filter at use
+// site via if-constexpr).
 #define STAMP_RESULT_DERIVED_FIELDS_AUTO_GEN() \
-    FOREACH_PER_CORE_CFG_FIELD(_STAMP_RESULT_PER_CORE_FIELD) \
-    FOREACH_GLOBAL_CFG_FIELD(_STAMP_RESULT_GLOBAL_FIELD) \
-    FOREACH_ML_CFG_FLAG(_STAMP_RESULT_ML_CFG_FIELD) \
-    FOREACH_GATE_CFG_FLAG(_STAMP_RESULT_GATE_CFG_FIELD)
+    FOREACH_STAMP_BOUND_DERIVED_COHORT(_STAMP_RESULT)
 
 // PARSE_STAMP_CFG_TO_DERIVED: caller-facing macro wrapper. Returns true on match.
 // F hardcoded to 64 (production FPN<F> precision) — ResultT must have matching FPN<64> fields
